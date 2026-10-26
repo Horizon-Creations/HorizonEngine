@@ -2388,90 +2388,94 @@ std::vector<he::shaderc::HlslPin> kSSRHlslPins()
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrRoughMix(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 3;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kSSRRoughMixFS, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },     // HeSSRBlur UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 },     // narrow → texture/sampler 0
-              { Stage::Fragment, 0, 20, 1 },     // wide   → texture/sampler 1
-              { Stage::Fragment, 0, 21, 2 } })); // attr   → texture/sampler 2
-    else if (backend == Backend::HLSL)
-        // Pinned even though no D3D backend draws this stage today (the forward
-        // path has no wide blur — see the GL and Vulkan checkpoints): the moment
-        // one does, it must land on the same numbers as the trace.
-        out = toCompiled(compileHlslPinned(kSSRRoughMixFS, Stage::Fragment, kSSRHlslPins()));
-    else
-        out = toCompiled(compile(kSSRRoughMixFS, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4 + 3, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kSSRRoughMixFS, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },     // HeSSRBlur UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 },     // narrow → texture/sampler 0
+                  { Stage::Fragment, 0, 20, 1 },     // wide   → texture/sampler 1
+                  { Stage::Fragment, 0, 21, 2 } })); // attr   → texture/sampler 2
+        else if (backend == Backend::HLSL)
+            // Pinned even though no D3D backend draws this stage today (the forward
+            // path has no wide blur — see the GL and Vulkan checkpoints): the moment
+            // one does, it must land on the same numbers as the trace.
+            out = toCompiled(compileHlslPinned(kSSRRoughMixFS, Stage::Fragment, kSSRHlslPins()));
+        else
+            out = toCompiled(compile(kSSRRoughMixFS, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrTrace(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kSSRTraceFS, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeSSRTrace UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 },    // scene colour → texture/sampler 0
-              { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
-              { Stage::Fragment, 0, 22, 2 },    // depth → 2
-              { Stage::Fragment, 0, 24, 3 },    // history radiance (prev) → 3
-              { Stage::Fragment, 0, 25, 4 } }));// history receiver pos (prev) → 4
-    else if (backend == Backend::HLSL)
-        // The variant D3D11 actually draws with, moved into its bindable
-        // register range (see kSSRHlslPins).
-        out = toCompiled(compileHlslPinned(kSSRTraceFS, Stage::Fragment, kSSRHlslPins()));
-    else
-        out = toCompiled(compile(kSSRTraceFS, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kSSRTraceFS, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeSSRTrace UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 },    // scene colour → texture/sampler 0
+                  { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
+                  { Stage::Fragment, 0, 22, 2 },    // depth → 2
+                  { Stage::Fragment, 0, 24, 3 },    // history radiance (prev) → 3
+                  { Stage::Fragment, 0, 25, 4 } }));// history receiver pos (prev) → 4
+        else if (backend == Backend::HLSL)
+            // The variant D3D11 actually draws with, moved into its bindable
+            // register range (see kSSRHlslPins).
+            out = toCompiled(compileHlslPinned(kSSRTraceFS, Stage::Fragment, kSSRHlslPins()));
+        else
+            out = toCompiled(compile(kSSRTraceFS, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 1;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    const std::string injected = injectPreamble(kSSRCompositeFS);
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(injected, Stage::Fragment,
-            { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
-              { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
-              { Stage::Fragment, 0, 19, 0 },    // GB0 → 0
-              { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
-              { Stage::Fragment, 0, 21, 2 },    // GB2 → 2
-              { Stage::Fragment, 0, 22, 3 },    // depth → 3
-              { Stage::Fragment, 0, 27, 4 },    // SSR result (near-sharp) → 4
-              { Stage::Fragment, 0, 28, 5 },    // SSR result (wide blur) → 5
-              { Stage::Fragment, 0, 29, 6 },    // ray-traced GI reflections → 6
-              { Stage::Fragment, 0, 30, 7 },    // GI reflections (wide blur) → 7
-              { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
-              { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
-    else
-        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4 + 1, [&]
+    {
+        using namespace he::shaderc;
+        const std::string injected = injectPreamble(kSSRCompositeFS);
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(injected, Stage::Fragment,
+                { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
+                  { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
+                  { Stage::Fragment, 0, 19, 0 },    // GB0 → 0
+                  { Stage::Fragment, 0, 20, 1 },    // GB1 → 1
+                  { Stage::Fragment, 0, 21, 2 },    // GB2 → 2
+                  { Stage::Fragment, 0, 22, 3 },    // depth → 3
+                  { Stage::Fragment, 0, 27, 4 },    // SSR result (near-sharp) → 4
+                  { Stage::Fragment, 0, 28, 5 },    // SSR result (wide blur) → 5
+                  { Stage::Fragment, 0, 29, 6 },    // ray-traced GI reflections → 6
+                  { Stage::Fragment, 0, 30, 7 },    // GI reflections (wide blur) → 7
+                  { Stage::Fragment, 0, 15, 14 },   // sky env cubemap (scene-pass slot)
+                  { Stage::Fragment, 0, 16, 15 } }));// screen-space AO (scene-pass slot)
+        else
+            out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrBlur(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 4 + 2;
-    if (auto it = m_ssrCache.find(key); it != m_ssrCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        out = toCompiled(compileMslPinned(kSSRBlurFS, Stage::Fragment,
-            { { Stage::Fragment, 0, 23, 0 },    // HeSSRBlur UBO → fragment buffer 0
-              { Stage::Fragment, 0, 19, 0 } }));// trace result → texture/sampler 0
-    else if (backend == Backend::HLSL)
-        out = toCompiled(compileHlslPinned(kSSRBlurFS, Stage::Fragment, kSSRHlslPins()));
-    else
-        out = toCompiled(compile(kSSRBlurFS, Stage::Fragment, toTarget(backend)));
-    return m_ssrCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4 + 2, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            out = toCompiled(compileMslPinned(kSSRBlurFS, Stage::Fragment,
+                { { Stage::Fragment, 0, 23, 0 },    // HeSSRBlur UBO → fragment buffer 0
+                  { Stage::Fragment, 0, 19, 0 } }));// trace result → texture/sampler 0
+        else if (backend == Backend::HLSL)
+            out = toCompiled(compileHlslPinned(kSSRBlurFS, Stage::Fragment, kSSRHlslPins()));
+        else
+            out = toCompiled(compile(kSSRBlurFS, Stage::Fragment, toTarget(backend)));
+        return out;
+    });
 }
 
 namespace
