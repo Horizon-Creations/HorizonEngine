@@ -10489,10 +10489,10 @@ void OpenGLRenderer::DrawDebugLines(const glm::mat4& viewProj)
 	verts.reserve(m_debugLines.size() * 12); // 2 verts * 6 floats
 	for (const DebugLine& l : m_debugLines)
 	{
-		verts.insert(verts.end(), { l.start.x, l.start.y, l.start.z,
-		                            l.color.r,  l.color.g,  l.color.b });
-		verts.insert(verts.end(), { l.end.x,   l.end.y,   l.end.z,
-		                            l.color.r,  l.color.g,  l.color.b });
+		verts.push_back(l.start.x); verts.push_back(l.start.y); verts.push_back(l.start.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
+		verts.push_back(l.end.x);   verts.push_back(l.end.y);   verts.push_back(l.end.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
 	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, m_debugLineVBO);
