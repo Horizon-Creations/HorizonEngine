@@ -368,6 +368,14 @@ const MatNodeDesc* matNodeDescByName(const std::string& name)
     return it != kByName.end() ? it->second : nullptr;
 }
 
+// The graph's Output node: the first one in node order (a well-formed graph has one).
+static const MatGraphNode* firstOutputNode(const MaterialGraph& g)
+{
+    for (const MatGraphNode& n : g.nodes)
+        if (n.type == MatNodeType::Output) return &n;
+    return nullptr;
+}
+
 void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex)
 {
     const auto& reg = matNodeDesc(MatNodeType::Output).inputs;
@@ -2061,9 +2069,7 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
 MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
                               const std::map<std::string, bool>* switchOverrides)
 {
-    const MatGraphNode* out = nullptr;
-    for (const auto& n : graph.nodes)
-        if (n.type == MatNodeType::Output) { out = &n; break; }
+    const MatGraphNode* out = firstOutputNode(graph);
 
     const std::string headerCommon =
         "#version 450\n"
