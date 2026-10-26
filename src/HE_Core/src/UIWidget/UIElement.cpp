@@ -2344,14 +2344,15 @@ size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY,
     // Walk the boundaries and take the one whose midpoint the click passed —
     // clicking the left half of a character puts the caret before it.
     size_t best = lo;
+    float a = 0.0f;   // the width of nothing: runWidth of the empty run at lo
     for (size_t i = lo; i < hi; )
     {
         const size_t next = uiUtf8Next(text, i);
-        const float a = runWidth(text.substr(lo, i - lo));
         const float b = runWidth(text.substr(lo, next - lo));
         if (localX < (a + b) * 0.5f) return i;
         best = next;
         i = next;
+        a = b;   // this boundary is the next step's left one
     }
     return best;
 }
