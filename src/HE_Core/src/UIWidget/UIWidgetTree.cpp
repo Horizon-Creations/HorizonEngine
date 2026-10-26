@@ -1632,6 +1632,21 @@ int uiApplyTheme(UIWidgetTree& tree, const UITheme& theme, UIThemeMode mode)
     return written;
 }
 
+namespace
+{
+// Slot `i` of a per-frame label cache, set to `name` (or `fallback` when the
+// name is empty). The string already standing there is reused, so a frame in
+// which no name changed allocates nothing; the caller trims the cache to the
+// child count afterwards.
+void setCachedLabel(std::vector<std::string>& labels, std::size_t i,
+                    const std::string& name, const char* fallback)
+{
+    if (i == labels.size()) labels.emplace_back();
+    if (name.empty()) labels[i].assign(fallback);
+    else              labels[i].assign(name);
+}
+}
+
 void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fontScale)
 {
     // What each Tab Box's strip will SAY, refreshed before anything draws. The
@@ -1645,13 +1660,14 @@ void uiApplyAutoSize(UIWidgetTree& tree, const UIWidgetCanvas* canvas, float fon
     {
         auto* tabs = dynamic_cast<UITabBox*>(e.get());
         if (!tabs) continue;
-        tabs->tabLabels.clear();
+        std::size_t pages = 0;
         forEachChild(tree, tabs->id, [&](const UIElement& c)
         {
             // An unnamed page still needs something on its tab, or the strip
             // grows a gap nobody can click with any confidence.
-            tabs->tabLabels.push_back(c.name.empty() ? std::string("Page") : c.name);
+            setCachedLabel(tabs->tabLabels, pages++, c.name, "Page");
         });
+        tabs->tabLabels.resize(pages);
     }
 
     // The measured extent, held between the element's floor and its ceiling. The
@@ -1977,16 +1993,16 @@ void uiUpdateScrollExtents(UIWidgetTree& tree)
         // right height, and before any rect is asked for.
         if (auto* acc = dynamic_cast<UIAccordion*>(bp.get()))
         {
-            acc->sectionLabels.clear();
             acc->sectionBodies.clear();
+            std::size_t sections = 0;
             forEachChild(tree, acc->id, [&](const UIElement& cp)
             {
                 // An unnamed section still needs something on its heading, or
                 // the stack grows a band nobody can aim at with any confidence.
-                acc->sectionLabels.push_back(cp.name.empty() ? std::string("Section")
-                                                             : cp.name);
+                setCachedLabel(acc->sectionLabels, sections++, cp.name, "Section");
                 acc->sectionBodies.push_back(cp.sizeY);
             });
+            acc->sectionLabels.resize(sections);
             const int n = static_cast<int>(acc->sectionBodies.size());
             if (n > UIAccordion::kMaxSections && !acc->warnedOverflow)
             {

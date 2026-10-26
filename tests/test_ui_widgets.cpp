@@ -18484,3 +18484,68 @@ TEST_CASE("WrapBox: a repeated id takes the first entry's place and the asking c
     CHECK(r.y == doctest::Approx(50.0f));           // 90-tall line, 40 high, bottom
     CHECK(r.h == doctest::Approx(40.0f));
 }
+
+TEST_CASE("AutoSize: tab and section label caches follow the children frame by frame")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int tabs = t.add(HE::UIWidgetType::TabBox);
+    const int acc  = t.add(HE::UIWidgetType::Accordion);
+    std::vector<int> pages, sections;
+    for (int i = 0; i < 3; ++i)
+    {
+        pages.push_back(t.add(HE::UIWidgetType::Panel));
+        t.find(pages.back())->parentId = tabs;
+        sections.push_back(t.add(HE::UIWidgetType::Panel));
+        t.find(sections.back())->parentId = acc;
+    }
+    t.find(pages[0])->name = "A page whose name is far longer than any small-string buffer";
+    t.find(pages[1])->name = "";
+    t.find(pages[2])->name = "Third";
+    t.find(sections[0])->name = "";
+    t.find(sections[1])->name = "A section whose name is far longer than any small-string buffer";
+    t.find(sections[2])->name = "Third";
+    const auto* tb = dynamic_cast<const HE::UITabBox*>(t.find(tabs));
+    const auto* ac = dynamic_cast<const HE::UIAccordion*>(t.find(acc));
+    REQUIRE(tb);
+    REQUIRE(ac);
+
+    // Twice: a frame that changes nothing leaves the same answer.
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        HE::uiApplyAutoSize(t, nullptr);
+        HE::uiUpdateScrollExtents(t);
+        REQUIRE(tb->tabLabels.size() == 3);
+        CHECK(tb->tabLabels[0] == t.find(pages[0])->name);
+        CHECK(tb->tabLabels[1] == "Page");
+        CHECK(tb->tabLabels[2] == "Third");
+        REQUIRE(ac->sectionLabels.size() == 3);
+        CHECK(ac->sectionLabels[0] == "Section");
+        CHECK(ac->sectionLabels[1] == t.find(sections[1])->name);
+        CHECK(ac->sectionLabels[2] == "Third");
+        CHECK(ac->sectionBodies.size() == 3);
+    }
+
+    // A rename and a shorter child list both show on the next frame.
+    t.find(pages[2])->name = "";
+    t.find(sections[1])->name = "Short";
+    t.removeSubtree(pages[0]);
+    t.removeSubtree(sections[0]);
+    HE::uiApplyAutoSize(t, nullptr);
+    HE::uiUpdateScrollExtents(t);
+    REQUIRE(tb->tabLabels.size() == 2);
+    CHECK(tb->tabLabels[0] == "Page");
+    CHECK(tb->tabLabels[1] == "Page");
+    REQUIRE(ac->sectionLabels.size() == 2);
+    CHECK(ac->sectionLabels[0] == "Short");
+    CHECK(ac->sectionLabels[1] == "Third");
+    CHECK(ac->sectionBodies.size() == 2);
+
+    // A longer list grows them again.
+    const int extra = t.add(HE::UIWidgetType::Panel);
+    t.find(extra)->parentId = tabs;
+    t.find(extra)->name = "Extra";
+    HE::uiApplyAutoSize(t, nullptr);
+    REQUIRE(tb->tabLabels.size() == 3);
+    CHECK(tb->tabLabels[2] == "Extra");
+}
