@@ -8,6 +8,7 @@ add_executable(he_tests
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
+    test_material_branching.cpp
     test_material_tessellation.cpp
     test_auto_landscape_variants.cpp
     test_engine_materials.cpp

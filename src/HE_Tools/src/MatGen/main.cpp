@@ -476,7 +476,7 @@ constexpr float kBodyShallow = 0.85f, kBodyDeep = 0.50f, kBodyMute = 0.12f;
 struct Grad { Pin x, z; };
 
 Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin driftZ,
-                 Pin amp, float col, float row)
+                 Pin amp, Pin fade, float col, float row)
 {
     // The slope of one fbm layer, from the FBM Noise Gradient node: its value and its exact
     // gradient in one call. This used to be a finite difference of three fbm calls (0.04
@@ -489,9 +489,17 @@ Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin dr
     const int uv0 = m.op(T::CombineRGBA, ox, oz, col + 2, row);
     const int inv = m.k(1.0f / size, col + 2, row + 1);
     const int hg  = m.op(T::FbmGrad, uv0, inv, col + 4, row);
+    const int gx  = m.op(T::Multiply, Pin{ hg, 1 }, amp, col + 6, row + 2);
+    const int gz  = m.op(T::Multiply, Pin{ hg, 2 }, amp, col + 6, row + 3);
+    // Past its fade the layer is zero: the If is a real branch (the codegen moves the
+    // noise into it), so a pixel beyond the fade skips the fbm instead of scaling it by 0.
+    const int on  = m.op(T::Greater, fade, m.k(0.0f, col + 6, row + 4), col + 7, row + 4);
+    const int xz  = m.op3(T::Combine3, gx, gz, m.k(0.0f, col + 7, row + 3), col + 7, row + 2);
+    const int sel = m.op3(T::If, on, xz, m.k(0.0f, col + 7, row + 5), col + 8, row + 2);
+    const int sp  = m.un(T::SplitRGBA, sel, col + 9, row + 2);
     Grad g;
-    g.x = m.op(T::Multiply, Pin{ hg, 1 }, amp, col + 6, row + 2);
-    g.z = m.op(T::Multiply, Pin{ hg, 2 }, amp, col + 6, row + 3);
+    g.x = Pin{ sp, 0 };
+    g.z = Pin{ sp, 1 };
     return g;
 }
 
@@ -811,10 +819,10 @@ Mb waterMaterial()
     };
     const auto d1 = drift(b, 0.55f, 24, 29), d2 = drift(c, 0.9f, 24, 36);
     const auto d3 = drift(b, -0.8f, 24, 43), d4 = drift(c, -1.3f, 24, 50);
-    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,  d1.first, d1.second, amp1, 24, 31);
-    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,  d2.first, d2.second, amp2, 24, 38);
-    const Grad r3 = rippleLayer(m, px, pz, time, 0.4f,  d3.first, d3.second, amp3, 24, 45);
-    const Grad r4 = rippleLayer(m, px, pz, time, 0.17f, d4.first, d4.second, amp4, 24, 52);
+    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,  d1.first, d1.second, amp1, fR, 24, 31);
+    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,  d2.first, d2.second, amp2, fR, 24, 38);
+    const Grad r3 = rippleLayer(m, px, pz, time, 0.4f,  d3.first, d3.second, amp3, fF, 24, 45);
+    const Grad r4 = rippleLayer(m, px, pz, time, 0.17f, d4.first, d4.second, amp4, fG, 24, 52);
     m.comment("Chop (noise slope, finite differences)", 24, 29, 8, 14);
 
     const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x, r3.x, r4.x };
