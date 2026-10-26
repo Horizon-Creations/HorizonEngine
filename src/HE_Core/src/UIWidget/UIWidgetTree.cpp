@@ -2775,7 +2775,7 @@ bool widgetTreeFromText(const std::string& json, UIWidgetTree& out,
         label->name     = "Label";
         // Centred and stretched across the button, which is exactly where the
         // built-in caption used to be drawn.
-        uiSetAnchorPreset(*label, 15);
+        uiSetAnchorPreset(*label, kUIAnchorFill);
         label->posX = label->posY = 0.0f;
         label->sizeX = label->sizeY = 0.0f;
         // A caption must never swallow the click meant for the button under it.
