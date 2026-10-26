@@ -3228,6 +3228,16 @@ void UISplitter::readJson(const nlohmann::json& j)
 
 // ── Accordion ────────────────────────────────────────────────────────────────
 
+namespace
+{
+    // Past the last mask bit there is nothing to read, so the section is closed.
+    bool isSectionOpen(uint32_t mask, std::size_t section)
+    {
+        return section < static_cast<std::size_t>(UIAccordion::kMaxSections) &&
+               (mask & (1u << static_cast<unsigned>(section))) != 0u;
+    }
+}
+
 uint32_t UIAccordion::normalizedMask(uint32_t mask, int sections, bool allowMultiple)
 {
     const int n = std::clamp(sections, 0, kMaxSections);
@@ -3267,11 +3277,9 @@ void UIAccordion::sectionLayout(float top, float headerH, float gap,
         s.headerY = y;
         y += h;
         s.bodyY = y;
-        // Past the 32nd there is no bit to read, so the section is closed —
-        // which is also what hidesChild answers for the same child.
-        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
-                          (mask & (1u << static_cast<unsigned>(i))) != 0u;
-        s.bodyH = open ? std::max(0.0f, bodyHeights[i]) : 0.0f;
+        // Closed past the 32nd, which is also what hidesChild answers for the
+        // same child.
+        s.bodyH = isSectionOpen(mask, i) ? std::max(0.0f, bodyHeights[i]) : 0.0f;
         y += s.bodyH;
         if (i + 1 < bodyHeights.size()) y += std::max(0.0f, gap);
         out.push_back(s);
@@ -3303,9 +3311,8 @@ bool UIAccordion::hidesChild(const UIWidgetTree& tree, const UIElement& child) c
 {
     const int idx = uiChildIndexOf(tree, id, child.id);
     if (idx < 0) return false;                 // not one of my children
-    if (idx >= kMaxSections) return true;      // no bit to read: always folded
-    const uint32_t m = effectiveMask(uiChildCountOf(tree, id));
-    return (m & (1u << static_cast<unsigned>(idx))) == 0u;
+    return !isSectionOpen(effectiveMask(uiChildCountOf(tree, id)),
+                          static_cast<std::size_t>(idx));
 }
 
 const UIPropTable& UIAccordion::propTable() const
@@ -3369,8 +3376,7 @@ void UIAccordion::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const uint32_t m = effectiveMask(static_cast<int>(bodies.size()));
     for (std::size_t i = 0; i < slots.size(); ++i)
     {
-        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
-                          (m & (1u << static_cast<unsigned>(i))) != 0u;
+        const bool open = isSectionOpen(m, i);
         band(slots[i].bodyY, slots[i].bodyH, bodyColor, false);
         band(slots[i].headerY, headPx, open ? openHeaderColor : headerColor, true);
         // The label only where the band is actually on screen: a glyph run is
