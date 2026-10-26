@@ -1694,8 +1694,12 @@ std::string explicitLodClusterSamples(std::string src)
         { "texture(heGILocal, uv)", "textureLod(heGILocal, uv, 0.0)" },
     };
     for (const auto& [from, to] : swaps)
-        for (size_t p = src.find(from); p != std::string::npos; p = src.find(from, p + std::strlen(to)))
-            src.replace(p, std::strlen(from), to);
+    {
+        const size_t fromLen = std::strlen(from);
+        const size_t toLen = std::strlen(to);
+        for (size_t p = src.find(from); p != std::string::npos; p = src.find(from, p + toLen))
+            src.replace(p, fromLen, to);
+    }
     return src;
 }
 
