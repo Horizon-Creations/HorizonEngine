@@ -8046,47 +8046,15 @@ void MetalRenderer::RefineObjectBounds()
 	// A mesh that could not be resolved when the loop ran
 	// keeps the bound the walk gave it for the rest of the walk, invalid at worst, and an object
 	// with an invalid bound is never culled: the conservative side, the draw loops resolve the
-	// mesh on their own.
-	const uint64_t      walk    = m_extractor.fullExtractCount();
-	const RenderObject* objects = m_renderWorld.objects.data();
-	const size_t        count   = m_renderWorld.objects.size();
-	if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
-	HE::AABB sceneBox;
+	// mesh on their own. The loop is FrameCull's (each mesh asked once, the products wide).
+	const uint64_t walk = m_extractor.fullExtractCount();
+	if (m_frameCull.holds(m_renderWorld, walk)) return;
+	HE_PROFILE_SCOPE_N("Metal::RefineBounds");
+	m_frameCull.refine(m_renderWorld, walk, [this](const RenderObject& obj) -> const HE::AABB*
 	{
-		HE_PROFILE_SCOPE_N("Metal::RefineBounds");
-		m_refinedBounds.resize(count);
-		size_t i = 0;
-		for (RenderObject& obj : m_renderWorld.objects)
-		{
-			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-				obj.refineWorldBounds(mesh->localBounds);
-			sceneBox.expand(obj.worldBounds);
-			m_refinedBounds[i++] = obj.worldBounds;
-		}
-	}
-	m_refinedWalk     = walk;
-	m_refinedObjects  = objects;
-	m_refinedCount    = count;
-	m_refinedSceneBox = sceneBox;
-}
-
-void MetalRenderer::CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible)
-{
-	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
-	    && m_refinedCount == m_renderWorld.objects.size())
-		m_culler.cull(m_refinedBounds, viewProj, outVisible);
-	else
-		m_culler.cull(m_renderWorld, viewProj, outVisible);
-}
-
-HE::AABB MetalRenderer::FrameSceneBox() const
-{
-	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
-	    && m_refinedCount == m_renderWorld.objects.size())
-		return m_refinedSceneBox;
-	HE::AABB sceneBox;
-	for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
-	return sceneBox;
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		return mesh ? &mesh->localBounds : nullptr;
+	});
 }
 
 void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
@@ -8132,40 +8100,38 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		// HE_MTL_PARALLEL_SHADOW=0 prepares the views one after the other: the A/B switch.
 		const int nViews = totalViews;
 		if (m_shadowViews.size() < static_cast<size_t>(nViews)) m_shadowViews.resize(static_cast<size_t>(nViews));
+		if (m_shadowViewsCpu.size() < static_cast<size_t>(nViews)) m_shadowViewsCpu.resize(static_cast<size_t>(nViews));
 		for (int v = 0; v < nViews; ++v)
 		{
-			ShadowView& sv = m_shadowViews[static_cast<size_t>(v)];
+			ShadowView&    sv  = m_shadowViews[static_cast<size_t>(v)];
+			ShadowViewCpu& cpu = m_shadowViewsCpu[static_cast<size_t>(v)];
 			const bool csm = v < cascades;
 			const int  l   = csm ? v : v - cascades;
-			sv.target   = csm ? m_shadowDepthTex : m_localShadowTex;
-			sv.layer    = l;
-			sv.size     = csm ? m_shadowSize : m_localShadowSize;
-			sv.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
-			sv.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
-			sv.batches.useSpans = RenderSorter::instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
+			sv.target    = csm ? m_shadowDepthTex : m_localShadowTex;
+			sv.layer     = l;
+			sv.size      = csm ? m_shadowSize : m_localShadowSize;
+			cpu.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
+			cpu.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
 		}
-		auto prepareView = [this](size_t v)
-		{
-			ShadowView& sv = m_shadowViews[v];
-			CullObjects(sv.viewProj, sv.visible);
-			sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
-			RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
-		};
 		const bool parallelViews = RenderSorter::parallelShadowViewsEnabled();
 		{
 			HE_PROFILE_SCOPE_N("Metal::ShadowPrepare");
-			// The camera's cull + sort rides along: SSAO and the scene take it from
-			// m_cameraCull instead of doing it after the shadow pass, on this thread. Not
-			// with occlusion culling on: that refine reads the ContentManager, this thread's alone.
-			const bool   warmCamera = parallelViews && !m_occlusionCuller.settings().enabled;
-			const size_t tasks      = static_cast<size_t>(nViews) + (warmCamera ? 1u : 0u);
-			auto task = [&](size_t t)
-			{
-				if (t < static_cast<size_t>(nViews)) prepareView(t);
-				else CullCameraObjects();
+			// Step (1) is FrameCull::prepareShadowViews (runs in place or copied as
+			// RenderSorter::instanceSpansEnabled() says, see MakeMetalGeometryPass). The camera's
+			// cull + sort rides along beside it: SSAO and the scene take it from m_frameCull's answer
+			// instead of doing it after the shadow pass, on this thread. Only the frustum reads of
+			// m_frameCull run beside the camera's, so the two do not race. Not with occlusion culling
+			// on: that refine reads the ContentManager, this thread's alone.
+			const uint64_t walk       = m_extractor.fullExtractCount();
+			const bool     warmCamera = parallelViews && !m_occlusionCuller.settings().enabled;
+			auto prepareViews = [&] {
+				m_frameCull.prepareShadowViews(m_culler, m_renderWorld, walk, m_shadowViewsCpu.data(),
+				                               static_cast<size_t>(nViews), "ShadowViews");
 			};
-			if (parallelViews && tasks > 1) parallel_for(tasks, task, "ShadowViews", 1);
-			else for (size_t t = 0; t < tasks; ++t) task(t);
+			if (warmCamera)
+				parallel_for(2, [&](size_t t) { if (t == 0) prepareViews(); else CullCameraObjects(); }, "ShadowViewsCamera", 1);
+			else
+				prepareViews();
 		}
 		const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
 		struct Fill { const RenderSorter::DepthBatchList* list; const RenderSorter::DepthBatch* b;
@@ -8173,10 +8139,11 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		std::vector<Fill> fills;
 		for (int v = 0; v < nViews; ++v)
 		{
-			ShadowView& sv = m_shadowViews[static_cast<size_t>(v)];
-			sv.lightClip = HE::kMetalClipFix * sv.viewProj;
+			ShadowView&          sv  = m_shadowViews[static_cast<size_t>(v)];
+			const ShadowViewCpu& cpu = m_shadowViewsCpu[static_cast<size_t>(v)];
+			sv.lightClip = HE::kMetalClipFix * cpu.viewProj;
 			sv.draws.clear();
-			for (const RenderSorter::DepthBatch& b : sv.batches.batches)
+			for (const RenderSorter::DepthBatch& b : cpu.batches.batches)
 			{
 				ShadowView::Draw d;
 				d.mesh = ResolveMesh(b.meshAssetId);
@@ -8186,7 +8153,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 					// A slice of the frame's upload ring (UploadTransient), released when this
 					// frame's command buffer completes; filled in step 3.
 					d.mvp = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), d.instBuf, d.instOff));
-					if (d.mvp) fills.push_back({ &sv.batches, &b, d.mvp, sv.lightClip });
+					if (d.mvp) fills.push_back({ &cpu.batches, &b, d.mvp, sv.lightClip });
 					else d.mesh = nullptr;
 				}
 				sv.draws.push_back(d);
@@ -8213,7 +8180,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		// local light itself sits on. Without it a light authored onto a mesh entity
 		// renders that mesh at z≈0 into its own depth map and shadows itself out
 		// completely. kNoOwnerEntity (every cascade) skips nothing.
-		auto encodeDepthLayer = [&](const ShadowView& sv)
+		auto encodeDepthLayer = [&](const ShadowView& sv, const ShadowViewCpu& cpu)
 		{
 			void* const     target    = sv.target;
 			const int       layer     = sv.layer;
@@ -8239,9 +8206,9 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			// plain pipeline. HE_MTL_INSTANCING=0 is the same A/B switch as the
 			// scene pass: it sends every run back through the per-caster loop.
 			void* boundPipeline = m_shadowPipeline;
-			for (size_t i = 0; i < sv.batches.batches.size(); ++i)
+			for (size_t i = 0; i < cpu.batches.batches.size(); ++i)
 			{
-				const RenderSorter::DepthBatch& b = sv.batches.batches[i];
+				const RenderSorter::DepthBatch& b = cpu.batches.batches[i];
 				const ShadowView::Draw&         d = sv.draws[i];
 				if (!d.mesh) continue;
 				id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)d.mesh->vertexBuf;
@@ -8281,7 +8248,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 					[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadowPipeline];
 					boundPipeline = m_shadowPipeline;
 				}
-				forBatchInstances(sv.batches, b, [&](size_t, const glm::mat4& m)
+				forBatchInstances(cpu.batches, b, [&](size_t, const glm::mat4& m)
 				{
 					UnlitUniforms u;
 					u.mvp = lightClip * m;
@@ -8297,7 +8264,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		};
 
 		for (int v = 0; v < nViews; ++v)
-			encodeDepthLayer(m_shadowViews[static_cast<size_t>(v)]);
+			encodeDepthLayer(m_shadowViews[static_cast<size_t>(v)], m_shadowViewsCpu[static_cast<size_t>(v)]);
 	}
 }
 // ─── Global Illumination (ray-traced DDGI) — acceleration structures ──────────
@@ -12098,7 +12065,7 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	// streaming in and out of the scene bounds cannot make the region — and
 	// with it the map's edge fade — breathe.
 	{
-		const HE::AABB sceneBox = FrameSceneBox();
+		const HE::AABB sceneBox = m_frameCull.sceneBox(m_renderWorld, m_extractor.fullExtractCount());
 		const float groundY = sceneBox.isValid() ? sceneBox.min.y : 0.0f;
 		if (std::isnan(m_cloudShadowGroundY)) m_cloudShadowGroundY = groundY;
 		const float dead = cloudH * 0.35f;
@@ -18259,34 +18226,22 @@ void MetalRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& 
 
 void MetalRenderer::CullCameraObjects()
 {
-	const uint64_t  walk      = m_extractor.fullExtractCount();
-	const glm::mat4 vp        = m_renderWorld.camera.projection * m_renderWorld.camera.view;
-	const bool      occlusion = m_occlusionCuller.settings().enabled;
-	CameraCullCache& c = m_cameraCull;
-	const bool refined = m_refinedWalk == walk && m_refinedObjects == m_renderWorld.objects.data()
-	                  && m_refinedCount == m_renderWorld.objects.size();
-	if (refined && c.stamp == m_frameStamp && c.walk == walk && c.objects == m_renderWorld.objects.data()
-	    && c.count == m_renderWorld.objects.size() && c.viewProj == vp
-	    && c.camPos == m_renderWorld.camera.position && c.occlusion == occlusion)
+	// Frustum only (the default): the frame's shared answer, see m_frameCull. With occlusion on the
+	// sort has to follow the occlusion refine, which FrameCull::cullCamera cannot do; the refine
+	// keeps its own per-frame cache there and the sort runs again per pass.
+	if (!m_occlusionCuller.settings().enabled)
 	{
-		HE_PROFILE_SCOPE_N("Metal::CullCameraObjects::reuse");
-		m_visible       = c.visible;
-		m_sortedIndices = c.sorted;
-		if (occlusion) m_counters.occlusionCulled = c.occlusionCulled;
+		m_frameCull.cullCamera(m_culler, m_sorter, m_renderWorld, m_extractor.fullExtractCount(), m_frameStamp,
+		                       /*variant=*/0, m_visible, m_sortedIndices);
 		return;
 	}
 	CullCameraObjectsFresh();
-	if (!refined) { c.stamp = ~0ull; return; }   // bounds may still change this walk: keep nothing
-	c.stamp = m_frameStamp; c.walk = walk; c.objects = m_renderWorld.objects.data();
-	c.count = m_renderWorld.objects.size(); c.viewProj = vp; c.camPos = m_renderWorld.camera.position;
-	c.occlusion = occlusion; c.occlusionCulled = m_counters.occlusionCulled;
-	c.visible = m_visible;
-	c.sorted  = m_sortedIndices;
 }
 
 void MetalRenderer::CullCameraObjectsFresh()
 {
-	CullObjects(m_renderWorld.camera.projection * m_renderWorld.camera.view, m_visible);
+	m_frameCull.cull(m_culler, m_renderWorld, m_extractor.fullExtractCount(),
+	                 m_renderWorld.camera.projection * m_renderWorld.camera.view, m_visible);
 	if (m_occlusionCuller.settings().enabled)
 	{
 		const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;

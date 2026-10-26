@@ -6,6 +6,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrustumCuller.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
@@ -593,7 +594,7 @@ private:
 	// ANDed onto the fresh frustum result, never copied over it. The shadow
 	// pass culls into its own list against the light and stays out of this.
 	void  CullCameraObjects();
-	void  CullCameraObjectsFresh();   // the cull itself, without the frame's cache (m_cameraCull)
+	void  CullCameraObjectsFresh();   // with occlusion on: frustum, occlusion refine, sort
 	OcclusionCuller       m_occlusionCuller;
 	std::vector<uint8_t>  m_occlusionCacheVisible;
 	uint64_t              m_occlusionCacheStamp = ~0ull;
@@ -601,25 +602,13 @@ private:
 	glm::mat4             m_occlusionCacheViewProj = glm::mat4(1.0f);
 	uint32_t              m_occlusionCacheCulled = 0;
 	uint64_t              m_frameStamp = 0;      // bumped once per primary EncodeFrame
-	// The whole answer (visible flags and draw order) of the last cull, for the next pass of the
-	// same frame that asks with the same walk, the same refined bounds and the same camera: the
-	// SSAO pre-pass and the scene pass cull and sort the same 50k objects with the same view
-	// (4.8 ms a frame for the two, docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 4).
-	// Bounds change only in RefineObjectBounds, once per walk, which every pass runs before this;
-	// a pass at another aspect (SSAO at half size, RENDERSCALE) has another projection and misses.
-	struct CameraCullCache
-	{
-		uint64_t              stamp   = ~0ull;
-		uint64_t              walk    = ~0ull;
-		const RenderObject*   objects = nullptr;
-		size_t                count   = 0;
-		glm::mat4             viewProj{ 1.0f };
-		glm::vec3             camPos{ 0.0f };
-		bool                  occlusion = false;
-		uint32_t              occlusionCulled = 0;
-		std::vector<uint8_t>  visible;
-		std::vector<uint32_t> sorted;
-	} m_cameraCull;
+	// The walk's refined bounds, every frustum cull over them, the frame's camera answer
+	// (visible flags and draw order, kept for the next pass of the same frame that asks with the
+	// same walk and camera: SSAO and the scene cull and sort the same objects with the same view,
+	// frame-parallelism audit lever 4) and the scene box: the same FrameCull GL, D3D11, D3D12 and
+	// Vulkan use. Bounds change only in RefineObjectBounds, once per walk, which every pass runs
+	// before it culls; a pass at another aspect (SSAO at half size, RENDERSCALE) misses the answer.
+	FrameCull             m_frameCull;
 
 	// Unlit pipeline. All id<MTL…>, retained.
 	void* m_scenePipeline        = nullptr; // id<MTLRenderPipelineState>
@@ -654,23 +643,20 @@ private:
 	// buffer 5). Optional — null sends every same-mesh run through the loop.
 	void* m_shadowInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
 	// One depth layer of the shadow pass (a cascade or a local light's view), prepared
-	// before any layer is encoded (EncodeShadowMap): its own cull, sort and runs, so the
-	// layers prepare side by side, then per run the mesh and the ring slice its products
-	// went into (mvp null = the per-caster loop, mesh null = skipped).
+	// before any layer is encoded (EncodeShadowMap). Its cull, sort and runs are the shared
+	// ShadowViewCpu (m_shadowViewsCpu[i], FrameCull::prepareShadowViews: the layers side by
+	// side); this half holds what only Metal needs: the target and, per run, the mesh and the
+	// ring slice its products went into (mvp null = the per-caster loop, mesh null = skipped).
 	struct ShadowView
 	{
 		void*      target = nullptr;
 		int        layer = 0, size = 0;
-		glm::mat4  viewProj{ 1.0f }, lightClip{ 1.0f };
-		uint32_t   skip = 0;
-		std::vector<uint8_t>         visible;
-		std::vector<uint32_t>        sorted;
-		RenderSorter                 sorter;
-		RenderSorter::DepthBatchList batches;
+		glm::mat4  lightClip{ 1.0f };
 		struct Draw { const GpuMesh* mesh = nullptr; glm::mat4* mvp = nullptr; void* instBuf = nullptr; size_t instOff = 0; };
 		std::vector<Draw>            draws;
 	};
-	std::vector<ShadowView> m_shadowViews;
+	std::vector<ShadowView>    m_shadowViews;
+	std::vector<ShadowViewCpu> m_shadowViewsCpu;   // same index as m_shadowViews
 	int   m_shadowSize     = HE::kShadowMapResolution;
 	// The project's directional-shadow settings (SetShadowSettings). Distance /
 	// count / lambda go to m_extractor as they arrive; a resolution change
@@ -695,27 +681,12 @@ private:
 	// are two chances to drift apart. tests/test_culling.cpp pins that the pass goes through it.
 	void  ExtractFrame(float aspect);
 	// Every object's world bound replaced by the real bound of its resolved mesh
-	// (RenderObject::refineWorldBounds; ResolveMesh also uploads a mesh seen for the first time),
-	// once per walk of the extractor: the walk lives in m_renderWorld for the whole frame, so
-	// EncodeFrame does the loop right after the walk, and every pass calls this again as its
-	// guarantee that the bounds are real and finds it done. A new walk or a different object
-	// array starts over (Thema 162, step 4).
+	// (RenderObject::refineWorldBounds through m_frameCull; ResolveMesh also uploads a mesh seen for
+	// the first time), once per walk of the extractor: the walk lives in m_renderWorld for the whole
+	// frame, so EncodeFrame refines right after the walk, and every pass calls this again as its
+	// guarantee that the bounds are real and finds it done. A new walk or a different object array
+	// starts over (Thema 162, step 4).
 	void  RefineObjectBounds();
-	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
-	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
-	size_t              m_refinedCount   = 0;
-	// The union of every object's refined bound, gathered in the same loop: EncodeCloudShadow
-	// needs it for its ground height and used to walk all objects again for it (1.9 ms at 50k).
-	HE::AABB            m_refinedSceneBox{};
-	// Every object's refined bound, in object order, from the same loop: what the frustum
-	// culls read (FrustumCuller's compact overload) instead of the ~280-byte RenderObjects.
-	std::vector<HE::AABB> m_refinedBounds;
-	// The frustum cull of every pass (cascades, local layers, the camera): over m_refinedBounds
-	// when they belong to the walk in m_renderWorld, otherwise over the objects themselves.
-	void  CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible);
-	// The scene box of the walk m_renderWorld holds: the one RefineObjectBounds gathered when it
-	// ran for this walk, otherwise a loop of its own (a frame whose passes never refined).
-	HE::AABB FrameSceneBox() const;
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
