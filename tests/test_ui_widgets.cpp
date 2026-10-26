@@ -18929,3 +18929,47 @@ TEST_CASE("Tick: a Tick handler that creates a widget does not derail the walk")
     CHECK(rig.created == 1);
     CHECK(rig.wm.count() == 2);
 }
+
+TEST_CASE("Add Child themes the row it grafts and leaves the rest of the page alone")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree row;
+    row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+    const int rowPanel = row.add(HE::UIWidgetType::Panel);
+    row.find(rowPanel)->setThemeRole("Color", "Surface");
+    registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 600.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int chrome = page.add(HE::UIWidgetType::Panel);
+    page.find(chrome)->setThemeRole("Color", "Surface");
+    const int box = page.add(HE::UIWidgetType::VerticalBox);
+    page.find(box)->name = "List";
+    registerWidget(cm, page, nullptr, "mem://page.hasset");
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    const glm::vec4 surface = wm.tree(id)->find(chrome)->getProp("Color").col;
+
+    // A script (or an animation) repaints a themed element of the page. Adding
+    // a row is no reason to put the theme's colour back on it.
+    const glm::vec4 red{ 1.0f, 0.0f, 0.0f, 1.0f };
+    REQUIRE(red != surface);
+    const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(chrome)->setProp("Color", HE::UIPropValue::ofColor(red));
+
+    const HorizonCode::InstanceId child = wm.addChild(cm, id, "List", "mem://row.hasset");
+    REQUIRE(child != 0);
+    CHECK(wm.tree(id)->find(chrome)->getProp("Color").col == red);
+
+    // …while the row that came in wears the theme like one that was always there.
+    int themedRows = 0;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->id != chrome && ep->type() == HE::UIWidgetType::Panel &&
+            ep->getProp("Color").col == surface)
+            ++themedRows;
+    CHECK(themedRows == 1);
+}

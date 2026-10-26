@@ -873,14 +873,28 @@ HorizonCode::InstanceId WidgetManager::graftChildRef(Instance& w, ContentManager
 	// The theme, then materials and fonts, for what just arrived — a row grafted
 	// in at run time is themed like one that was there from the start, and by
 	// the HOST widget's theme: what is grafted in becomes part of this instance,
-	// so it wears what the instance wears.
-	HE::uiApplyTheme(w.tree, themeFor(w), themeMode());
+	// so it wears what the instance wears. Only what arrived: the ref and the ids
+	// the graft renumbered into this tree (see embedWidgetRefs). The rest of the
+	// page was dressed already, and dressing it again per row would be quadratic
+	// in rows and would undo what a script has set since.
+	int lo = w.embeds[embedsBefore].idOffset, hi = w.embeds[embedsBefore].idMax;
+	for (std::size_t i = embedsBefore + 1; i < w.embeds.size(); ++i)
+	{
+		lo = std::min(lo, w.embeds[i].idOffset);
+		hi = std::max(hi, w.embeds[i].idMax);
+	}
+	const auto arrived = [&](const HE::UIElement& e)
+	{ return e.id == refId || (e.id > lo && e.id <= hi); };
+	const HE::UITheme& theme = themeFor(w);
+	for (const auto& e : w.tree.elements)
+		if (e && arrived(*e)) HE::uiApplyTheme(*e, theme, themeMode());
 	// …and it speaks the language the instance speaks, for the same reason: a
 	// row grafted in after a language switch must not come up in the one it was
 	// authored in.
-	HE::uiApplyTextCatalog(w.tree, m_catalog, m_language);
 	for (const auto& e : w.tree.elements)
-		if (e && e->id > 0) refreshElementAssets(w, *e);
+		if (e && arrived(*e)) HE::uiApplyTextCatalog(*e, m_catalog, m_language);
+	for (const auto& e : w.tree.elements)
+		if (e && e->id > 0 && arrived(*e)) refreshElementAssets(w, *e);
 
 	// PreConstruct, then Construct, last, like createWidget does: the row is
 	// fully in the tree before its own logic can look at it. The ids are copied
