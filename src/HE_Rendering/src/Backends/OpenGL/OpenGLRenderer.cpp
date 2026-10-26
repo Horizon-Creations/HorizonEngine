@@ -10290,8 +10290,12 @@ void OpenGLRenderer::DrawParticlePreviewGeometry(const HE::UUID& materialId,
 		std::vector<float> inst;
 		inst.reserve(particles.size() * 8);
 		for (const auto& p : particles)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
-			                          p.color.r, p.color.g, p.color.b, p.alpha });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.color.r); inst.push_back(p.color.g); inst.push_back(p.color.b);
+			inst.push_back(p.alpha);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particlePreviewInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
