@@ -653,7 +653,24 @@ private:
 	// Instanced twin (vertexShadowInstanced: one lightVP*model per instance at
 	// buffer 5). Optional — null sends every same-mesh run through the loop.
 	void* m_shadowInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
-	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh caster runs per depth layer
+	// One depth layer of the shadow pass (a cascade or a local light's view), prepared
+	// before any layer is encoded (EncodeShadowMap): its own cull, sort and runs, so the
+	// layers prepare side by side, then per run the mesh and the ring slice its products
+	// went into (mvp null = the per-caster loop, mesh null = skipped).
+	struct ShadowView
+	{
+		void*      target = nullptr;
+		int        layer = 0, size = 0;
+		glm::mat4  viewProj{ 1.0f }, lightClip{ 1.0f };
+		uint32_t   skip = 0;
+		std::vector<uint8_t>         visible;
+		std::vector<uint32_t>        sorted;
+		RenderSorter                 sorter;
+		RenderSorter::DepthBatchList batches;
+		struct Draw { const GpuMesh* mesh = nullptr; glm::mat4* mvp = nullptr; void* instBuf = nullptr; size_t instOff = 0; };
+		std::vector<Draw>            draws;
+	};
+	std::vector<ShadowView> m_shadowViews;
 	int   m_shadowSize     = HE::kShadowMapResolution;
 	// The project's directional-shadow settings (SetShadowSettings). Distance /
 	// count / lambda go to m_extractor as they arrive; a resolution change

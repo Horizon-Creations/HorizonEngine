@@ -8129,18 +8129,106 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		const uint32_t shBase = ftBeginMulti("Shadow");
 		int viewIdx = 0;
 
+		// The views (cascades, then local layers) are prepared before any is encoded, in
+		// four steps: (1) cull, sort and form the runs of every view at once, each view on
+		// its own scratch (the culler keeps no state, every view has its own sorter); (2) on
+		// this thread, resolve the meshes (a resolve can load) and reserve the ring slices;
+		// (3) every instanced run's products, all views together, on the workers; (4) encode.
+		// The views used to run one after the other, cull to draw, on this thread (the
+		// frame-parallelism audit's lever 2). Same products, same draw order, same bits.
+		// HE_MTL_PARALLEL_SHADOW=0 prepares the views one after the other: the A/B switch.
+		const int nViews = totalViews;
+		if (m_shadowViews.size() < static_cast<size_t>(nViews)) m_shadowViews.resize(static_cast<size_t>(nViews));
+		for (int v = 0; v < nViews; ++v)
+		{
+			ShadowView& sv = m_shadowViews[static_cast<size_t>(v)];
+			const bool csm = v < cascades;
+			const int  l   = csm ? v : v - cascades;
+			sv.target   = csm ? m_shadowDepthTex : m_localShadowTex;
+			sv.layer    = l;
+			sv.size     = csm ? m_shadowSize : m_localShadowSize;
+			sv.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
+			sv.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
+			sv.batches.useSpans = instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
+		}
+		auto prepareView = [this](size_t v)
+		{
+			ShadowView& sv = m_shadowViews[v];
+			CullObjects(sv.viewProj, sv.visible);
+			sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
+			RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
+		};
+		static const bool parallelViews = [] {
+			const char* e = std::getenv("HE_MTL_PARALLEL_SHADOW");
+			return !(e && *e && std::atoi(e) == 0);
+		}();
+		{
+			HE_PROFILE_SCOPE_N("Metal::ShadowPrepare");
+			// The camera's cull + sort rides along: SSAO and the scene take it from
+			// m_cameraCull instead of doing it after the shadow pass, on this thread. Not
+			// with occlusion culling on: that refine reads the ContentManager, this thread's alone.
+			const bool   warmCamera = parallelViews && !m_occlusionCuller.settings().enabled;
+			const size_t tasks      = static_cast<size_t>(nViews) + (warmCamera ? 1u : 0u);
+			auto task = [&](size_t t)
+			{
+				if (t < static_cast<size_t>(nViews)) prepareView(t);
+				else CullCameraObjects();
+			};
+			if (parallelViews && tasks > 1) parallel_for(tasks, task, "ShadowViews", 1);
+			else for (size_t t = 0; t < tasks; ++t) task(t);
+		}
+		const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
+		struct Fill { const RenderSorter::DepthBatchList* list; const RenderSorter::DepthBatch* b;
+		              glm::mat4* mvp; glm::mat4 lightClip; };
+		std::vector<Fill> fills;
+		for (int v = 0; v < nViews; ++v)
+		{
+			ShadowView& sv = m_shadowViews[static_cast<size_t>(v)];
+			sv.lightClip = HE::kMetalClipFix * sv.viewProj;
+			sv.draws.clear();
+			for (const RenderSorter::DepthBatch& b : sv.batches.batches)
+			{
+				ShadowView::Draw d;
+				d.mesh = ResolveMesh(b.meshAssetId);
+				if (!d.mesh) d.mesh = ResolveMesh(HE::kDefaultCubeMeshId);
+				if (d.mesh && b.count > 1 && canInstance && b.count <= k_maxInstances)
+				{
+					// A slice of the frame's upload ring (UploadTransient), released when this
+					// frame's command buffer completes; filled in step 3.
+					d.mvp = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), d.instBuf, d.instOff));
+					if (d.mvp) fills.push_back({ &sv.batches, &b, d.mvp, sv.lightClip });
+					else d.mesh = nullptr;
+				}
+				sv.draws.push_back(d);
+			}
+		}
+		{
+			HE_PROFILE_SCOPE_N("Metal::ShadowInstanceMvp");
+			auto fillOne = [&fills](size_t f)
+			{
+				const Fill& x = fills[f];
+				glm::mat4* mvp = x.mvp;
+				const glm::mat4 lightClip = x.lightClip;
+				forBatchInstances(*x.list, *x.b,
+					[mvp, lightClip](size_t k, const glm::mat4& m) { mvp[k] = lightClip * m; },
+					"ShadowInstanceMvp");
+			};
+			if (parallelViews && fills.size() > 1) parallel_for(fills.size(), fillOne, "ShadowFills", 1);
+			else for (size_t f = 0; f < fills.size(); ++f) fillOne(f);
+		}
+
 		// Depth-only render of every shadow caster into one layer of `target`,
 		// shared by the CSM cascades and the local (point/spot) shadow views.
 		// `skipEntity` keeps ONE entity's geometry out of this layer: the entity the
 		// local light itself sits on. Without it a light authored onto a mesh entity
 		// renders that mesh at z≈0 into its own depth map and shadows itself out
 		// completely. kNoOwnerEntity (every cascade) skips nothing.
-		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj,
-		                            uint32_t skipEntity)
+		auto encodeDepthLayer = [&](const ShadowView& sv)
 		{
-			CullObjects(viewProj, m_visible);
-			m_sorter.sortByMesh(m_renderWorld, m_visible, m_sortedIndices);
-			const glm::mat4 lightClip = HE::kMetalClipFix * viewProj;
+			void* const     target    = sv.target;
+			const int       layer     = sv.layer;
+			const int       size      = sv.size;
+			const glm::mat4 lightClip = sv.lightClip;
 
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
 			sp.depthAttachment.texture       = (__bridge id<MTLTexture>)target;
@@ -8160,22 +8248,18 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			// Same-mesh runs → one instanced draw each; a run of one stays on the
 			// plain pipeline. HE_MTL_INSTANCING=0 is the same A/B switch as the
 			// scene pass: it sends every run back through the per-caster loop.
-			m_shadowBatches.useSpans = instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
-			RenderSorter::batchDepthCasters(m_renderWorld, m_sortedIndices, skipEntity,
-			                                m_shadowBatches);
-			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
 			void* boundPipeline = m_shadowPipeline;
-			for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
+			for (size_t i = 0; i < sv.batches.batches.size(); ++i)
 			{
-				const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
-				if (!drawMesh) drawMesh = ResolveMesh(HE::kDefaultCubeMeshId);
-				if (!drawMesh) continue;
-				id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
-				id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
-				NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
+				const RenderSorter::DepthBatch& b = sv.batches.batches[i];
+				const ShadowView::Draw&         d = sv.draws[i];
+				if (!d.mesh) continue;
+				id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)d.mesh->vertexBuf;
+				id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)d.mesh->indexBuf;
+				NSUInteger    ic   = (NSUInteger)d.mesh->indexCount;
 				[enc setVertexBuffer:vbuf offset:0 atIndex:0];
 
-				if (b.count > 1 && canInstance && b.count <= k_maxInstances)
+				if (d.mvp)
 				{
 					if (boundPipeline != m_shadowInstancedPipeline)
 					{
@@ -8192,19 +8276,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 						HE_LOG_INFO(RHI, "MetalRenderer: shadow pass instanced (first run: %u casters)",
 						            static_cast<unsigned>(b.count));
 					}
-					// A slice of the frame's upload ring (UploadTransient), released
-					// when this frame's command buffer completes. The products go straight
-					// into it, a foliage-sized run on the job system's workers: per cascade
-					// this was a list built on the main thread and then copied into the ring
-					// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1).
-					void*  instBuf = nullptr;
-					size_t instOff = 0;
-					auto* mvp = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), instBuf, instOff));
-					if (!mvp) continue;
-					forBatchInstances(m_shadowBatches, b,
-						[mvp, &lightClip](size_t k, const glm::mat4& m) { mvp[k] = lightClip * m; },
-						"ShadowInstanceMvp");
-					[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[enc setVertexBuffer:(__bridge id<MTLBuffer>)d.instBuf offset:d.instOff atIndex:5];
 					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 					                indexCount:ic
 					                 indexType:MTLIndexTypeUInt32
@@ -8219,7 +8291,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 					[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadowPipeline];
 					boundPipeline = m_shadowPipeline;
 				}
-				forBatchInstances(m_shadowBatches, b, [&](size_t, const glm::mat4& m)
+				forBatchInstances(sv.batches, b, [&](size_t, const glm::mat4& m)
 				{
 					UnlitUniforms u;
 					u.mvp = lightClip * m;
@@ -8234,13 +8306,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			[enc endEncoding];
 		};
 
-		for (int c = 0; c < cascades; ++c)
-			encodeDepthLayer(m_shadowDepthTex, c, m_shadowSize,
-			                 m_renderWorld.shadow.cascadeViewProj[c], kNoOwnerEntity);
-		for (int v = 0; v < localLayers; ++v)
-			encodeDepthLayer(m_localShadowTex, v, m_localShadowSize,
-			                 m_renderWorld.shadow.localViewProj[v],
-			                 m_renderWorld.shadow.localOwnerEntity[v]);
+		for (int v = 0; v < nViews; ++v)
+			encodeDepthLayer(m_shadowViews[static_cast<size_t>(v)]);
 	}
 }
 // ─── Global Illumination (ray-traced DDGI) — acceleration structures ──────────
