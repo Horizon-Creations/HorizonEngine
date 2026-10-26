@@ -269,7 +269,7 @@ Median der Scope-p50 in ms). Alt = release + PR 198, PR 199 = gemeinsamer Code, 
 
 - **Done / verified:** §6 und §6b: Spans, parallele Schatten-Ansichten, Zeit pro Pass, die CPU-Hotspots des Frames. Komplette `he_tests`-Suite grün (5895 Fälle),
   Pixel-A/B der 28 Zeugen je Backend (25 md5-gleich; `dn_0/25/75` rauschen alt gegen alt um bis zu 46/255), Perf-A/B und Skalierung (§6/§6b).
-- **Not verified:** Metal und macOS (Build, 42 Zeugen, Perf; siehe `metal-macos-handover-2026-10-26.md`), Foliage 300k sauber (die GPU schwankte), reale Szenen mit vielen
+- **Not verified:** Metal und macOS (Build, 42 Zeugen, Perf; siehe `metal-macos-handover-2026-10-26.md`; **inzwischen erledigt, siehe Abschnitt „Mac“ und „Handoff Mac“ oben**), Foliage 300k sauber (die GPU schwankte), reale Szenen mit vielen
   Meshes, Materialien, Skinned-Meshes und Gameplay-Systemen (die Referenzwelt hat zwei Meshes), Hebel 1b, Vulkans SSR-Vorpass gegen Kopie.
 - **Next steps:** 1. Mac: bauen, `he_tests`, `frame_pixel_ab.sh all`, Perf-A/B, Metal auf `FrameCull` umstellen (Handover-Doc). 2. Eine reale Szene (Catania) messen, bevor
   weiter optimiert wird: `extract` (2,3 ms bei 50k) bleibt der größte Posten; der Plan in `extract-incremental-plan-2026-10-26.md` (Variante B) greift erst, wenn er nach dieser Runde
