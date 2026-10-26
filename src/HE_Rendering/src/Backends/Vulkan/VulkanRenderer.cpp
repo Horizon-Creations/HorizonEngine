@@ -1568,6 +1568,7 @@ void VulkanRenderer::createDevice()
     dci.ppEnabledExtensionNames = devExts.data();
     vkCheck(vkCreateDevice(m_physDevice, &dci, nullptr, &m_device), "vkCreateDevice");
     vkGetDeviceQueue(m_device, m_graphicsFamily, 0, &m_graphicsQueue);
+    vkGetPhysicalDeviceMemoryProperties(m_physDevice, &m_memoryProperties);
 
     if (wantHwRt)
     {
@@ -1711,10 +1712,8 @@ void VulkanRenderer::destroyDepthResources()
 
 uint32_t VulkanRenderer::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const
 {
-    VkPhysicalDeviceMemoryProperties mp{};
-    vkGetPhysicalDeviceMemoryProperties(m_physDevice, &mp);
-    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
-        if ((typeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & props) == props)
+    for (uint32_t i = 0; i < m_memoryProperties.memoryTypeCount; ++i)
+        if ((typeBits & (1u << i)) && (m_memoryProperties.memoryTypes[i].propertyFlags & props) == props)
             return i;
     throw std::runtime_error("Vulkan: no suitable memory type");
 }

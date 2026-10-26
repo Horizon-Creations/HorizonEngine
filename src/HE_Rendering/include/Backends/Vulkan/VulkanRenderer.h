@@ -342,6 +342,7 @@ private:
 	PFN_vkSetDebugUtilsObjectNameEXT m_setObjectName = nullptr;
 	void nameImage(VkImage img, const char* name) const;
 	VkPhysicalDevice         m_physDevice     = VK_NULL_HANDLE;
+	VkPhysicalDeviceMemoryProperties m_memoryProperties{}; // cached once in createDevice(); static for the device's lifetime
 	VkDevice                 m_device         = VK_NULL_HANDLE;
 	VkQueue                  m_graphicsQueue  = VK_NULL_HANDLE;
 	uint32_t                 m_graphicsFamily = 0;
