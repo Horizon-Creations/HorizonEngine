@@ -49,6 +49,7 @@
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D12/Vulkan)
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
+#include <Renderer/GpuPassTimeline.h>         // per-pass GPU timing: GpuPassScope
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
@@ -2148,9 +2149,15 @@ struct D3D11RendererImpl
     // path otherwise, mirroring the GL backend). The ring DEPTH is shared with
     // GL/Vulkan; the payload below is D3D11-specific (a DISJOINT query per slot,
     // which nobody else has — see gpuTimerReap's disjoint-frame rejection).
+    //
+    // Per-pass timing: between tsStart and tsEnd the frame's passes write timestamp
+    // marks (GpuPassScope, GpuPassTimeline), one query each, created on first use
+    // and kept per slot; the reap turns the marks into FrameGpuStats::passes.
     struct GpuTimerSlot
     {
         ComPtr<ID3D11Query> disjoint, tsStart, tsEnd;
+        std::vector<ComPtr<ID3D11Query>> marks;
+        GpuPassTimeline timeline;
         bool pending = false; // issued, result not consumed yet
     };
     GpuTimerSlot gpuSlots[HE::kGpuTimerRing];
@@ -2192,9 +2199,54 @@ struct D3D11RendererImpl
         if (dj.Disjoint || dj.Frequency == 0 || t1 < t0) return;
         lastGpuStats.gpuFrameMs    = static_cast<double>(t1 - t0) * 1000.0
                                    / static_cast<double>(dj.Frequency);
-        lastGpuStats.passes.clear(); // whole-frame timing: no per-pass breakdown
+        lastGpuStats.passes.clear();
         lastGpuStats.gpuTimingMode = "whole-frame";
+        // The passes' marks, all or nothing: one that is not ready leaves the frame
+        // at whole-frame timing rather than a breakdown with a hole in it.
+        const uint32_t n = slot.timeline.used();
+        if (n > 1 && n <= slot.marks.size())
+        {
+            uint64_t ticks[GpuPassTimeline::kMaxTimestamps];
+            bool all = true;
+            for (uint32_t i = 0; i < n && all; ++i)
+                all = fetch(slot.marks[i].Get(), &ticks[i], sizeof(uint64_t));
+            if (all)
+            {
+                slot.timeline.toPasses(ticks, static_cast<double>(dj.Frequency), lastGpuStats.passes);
+                lastGpuStats.gpuTimingMode = "d3d11-ts";
+            }
+        }
     }
+
+    // The mark query behind timeline index `i` of the current slot, written now.
+    bool gpuMark(uint32_t i)
+    {
+        GpuTimerSlot& slot = gpuSlots[gpuCurSlot];
+        while (slot.marks.size() <= i)
+        {
+            const D3D11_QUERY_DESC tq{ D3D11_QUERY_TIMESTAMP, 0 };
+            ComPtr<ID3D11Query> q;
+            if (FAILED(device->CreateQuery(&tq, &q))) return false;
+            slot.marks.push_back(std::move(q));
+        }
+        context->End(slot.marks[i].Get());
+        return true;
+    }
+    // GpuPassScope's two calls (GpuPassScopeT): the scope times its pass when the profiler
+    // is capturing, else both are no-ops.
+    bool gpuPassBegin(const char* name)
+    {
+        if (!gpuTimingActive || gpuCurSlot < 0) return false;
+        uint32_t i = 0;
+        if (!gpuSlots[gpuCurSlot].timeline.push(name, i)) return false;
+        return gpuMark(i);
+    }
+    void gpuPassEnd()
+    {
+        uint32_t i = 0;
+        if (gpuCurSlot >= 0 && gpuSlots[gpuCurSlot].timeline.pop(i)) gpuMark(i);
+    }
+    using GpuPassScope = GpuPassScopeT<D3D11RendererImpl>;
 
     void gpuTimerBeginFrame()
     {
@@ -2243,14 +2295,17 @@ struct D3D11RendererImpl
         GpuTimerSlot& slot = gpuSlots[idx];
         gpuTimerReap(slot, /*block=*/false); // issued HE::kGpuTimerRing frames ago
         gpuCurSlot = idx;
+        slot.timeline.reset();
         context->Begin(slot.disjoint.Get());
         context->End(slot.tsStart.Get()); // timestamps have no Begin, only End
+        gpuMark(slot.timeline.start());
     }
 
     void gpuTimerEndFrame()
     {
         if (!gpuTimingActive || gpuCurSlot < 0) { ++gpuFrameIdx; return; }
         GpuTimerSlot& slot = gpuSlots[gpuCurSlot];
+        gpuMark(slot.timeline.finish());
         context->End(slot.tsEnd.Get());
         context->End(slot.disjoint.Get());
         slot.pending = true;
@@ -2553,6 +2608,7 @@ struct D3D11RendererImpl
                                       ID3D11RasterizerState* rasterSt,
                                       bool reflMrt = false, bool aoWanted = true)
     {
+        GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
         // GL and Vulkan grew). SSR needs pass 1 on frames where SSAO is off or
         // the GI probes replaced it, and it needs it with three attachments
@@ -3738,6 +3794,7 @@ struct D3D11RendererImpl
                                           ID3D11RasterizerState* rasterSt,
                                           bool maskPasses = true)
     {
+        GpuPassScope _passTimer(this, "GIShadow");
         createGiPipelines();
         if (!giGBufVS || !giShadowCS || !giTemporalPS || !giAtrousPS) return nullptr;
         ensureGiShadowTargets(w, h);
@@ -3946,6 +4003,7 @@ struct D3D11RendererImpl
 
     void dispatchGiProbeUpdate(ID3D11DeviceContext* ctx, const RenderWorld& rw)
     {
+        GpuPassScope _passTimer(this, "GIProbes");
         if (!giProbeCS || giInstanceCount == 0) return;
         ensureGiProbeGrid(rw);
         if (!giProbeGridBuilt) return;
@@ -4132,6 +4190,7 @@ struct D3D11RendererImpl
     ID3D11ShaderResourceView* runGiReflections(ID3D11DeviceContext* ctx, const RenderWorld& rw,
                                                bool probesValid)
     {
+        GpuPassScope _passTimer(this, "GIRefl");
         createGiReflPipelines();
         if (!giReflCS || !giReflBlurPS || !giReflMixPS || !giReflCB || !giReflBlurCB || !giReflMixCB)
             return nullptr;
@@ -4423,6 +4482,7 @@ struct D3D11RendererImpl
     // (bloomTex[0]) or dummyTexture if bloom resources are missing.
     ID3D11ShaderResourceView* runBloom(uint32_t bw, uint32_t bh)
     {
+        GpuPassScope _passTimer(this, "Bloom");
         if (!bloomBrightPS || !bloomBlurPS || !bloomTex[0]) return dummyTexture.Get();
         auto* ctx = context.Get();
 
@@ -5572,6 +5632,7 @@ struct D3D11RendererImpl
     void EncodeDecals(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
                       int width, int height, ContentManager* cm, bool intoGBuffer = false)
     {
+        GpuPassScope _passTimer(this, "Decals");
 #if !defined(HE_HAVE_SHADERC)
         (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm; (void)intoGBuffer;
 #else
@@ -6532,6 +6593,7 @@ struct D3D11RendererImpl
 
     void renderUIPass(ID3D11DeviceContext* ctx, int width, int height, ContentManager* cm)
     {
+        GpuPassScope _passTimer(this, "UI");
         if (!uiVS || m_renderWorld.uiObjects.empty()) return;
 
         ctx->VSSetShader(uiVS.Get(), nullptr, 0);
@@ -6980,15 +7042,21 @@ void D3D11Renderer::DrawScene(int width, int height)
     if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
-    p.m_frameCull.refine(p.m_renderWorld, walk, [&](const RenderObject& obj) -> const HE::AABB*
     {
-        const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
-        return mesh ? &mesh->localBounds : nullptr;
-    });
+        HE_PROFILE_SCOPE_N("RefineBounds");
+        p.m_frameCull.refine(p.m_renderWorld, walk, [&](const RenderObject& obj) -> const HE::AABB*
+        {
+            const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
+            return mesh ? &mesh->localBounds : nullptr;
+        });
+    }
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
-    HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);
+    {
+        HE_PROFILE_SCOPE_N("MaterialScalars");
+        HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);
+    }
 
     // GI acceleration structures: refresh the BLAS cache + per-frame instance
     // array right after extraction (UNCULLED — off-screen casters still occlude),
@@ -6996,7 +7064,10 @@ void D3D11Renderer::DrawScene(int width, int height)
     p.updateGiAccel(m_contentManager, p.m_renderWorld);
 
     p.m_frameCull.cull(p.m_culler, p.m_renderWorld, walk, p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view, p.m_visible);
-    p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    {
+        HE_PROFILE_SCOPE_N("SortObjects");
+        p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    }
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
     if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
@@ -7358,6 +7429,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         // Mirrors GL's renderDepthLayer / Metal's encodeDepthLayer.
         if (io.output.id == kShadowMapTarget)
         {
+            D3D11RendererImpl::GpuPassScope _shadowTimer(&p, "Shadow");
             // CSM needs a directional light; the local (point/spot) atlas is
             // independent of it — night scenes with only shadow-casting point
             // lights still render their atlas (mirrors Metal/GL).
@@ -7466,6 +7538,9 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
 
         if (io.output.id != kBackbufferTarget) return;
+        // The scene body: the passes inside it (SSAO, GI, decals) interrupt this scope, so its
+        // row is what is left, the opaque and blended draws and the sky.
+        D3D11RendererImpl::GpuPassScope _sceneTimer(&p, "Scene");
 
         // ── SSAO prepass (position -> AO -> blur) ────────────────────────────
         // Collect opaque/transparent DCs early (needed for position prepass AND main scene).
@@ -8685,7 +8760,8 @@ void D3D11Renderer::DrawViewportFrame()
         p.context->PSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
 
         // Tonemap: (hdrSRV, bloomSRV) → ldrRTV.
-        { const float cb[4] = { p.exposure,
+        { D3D11RendererImpl::GpuPassScope _tonemapTimer(&p, "Tonemap");
+          const float cb[4] = { p.exposure,
                                 p.bloomEnabled ? p.bloomStrength : 0.0f, 0, 0 };
           p.updatePostFxCB(cb);
           p.context->OMSetRenderTargets(1, p.ldrRTV.GetAddressOf(), nullptr);
@@ -8704,6 +8780,7 @@ void D3D11Renderer::DrawViewportFrame()
                         && p.taaW == p.viewportW && p.taaH == p.viewportH;
         if (aaTaa)
         {
+            D3D11RendererImpl::GpuPassScope _taaTimer(&p, "TAA");
             const int cur  = p.taaHistoryCur;
             const int prev = 1 - cur;
             const float cb[4] = { 1.0f / float(p.viewportW), 1.0f / float(p.viewportH),
@@ -8734,7 +8811,8 @@ void D3D11Renderer::DrawViewportFrame()
         // AA resolve: ldrSRV (or the TAA result) → viewportRTV (final output
         // sampled by ImGui). Always drawn — the method only picks the pixel
         // shader; TAA's slot is the sharpen the temporal blur asks for.
-        { const float cb[4] = { 1.0f / float(p.viewportW),
+        { D3D11RendererImpl::GpuPassScope _aaTimer(&p, aaTaa ? "TAA Sharpen" : "AA");
+          const float cb[4] = { 1.0f / float(p.viewportW),
                                 1.0f / float(p.viewportH), aaTaa ? p.aaSharpness : 0.0f, 0 };
           p.updatePostFxCB(cb);
           p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
@@ -8870,7 +8948,10 @@ void D3D11Renderer::Render()
     if (m_overlayCallback) m_overlayCallback(nullptr);
     instanceWorldCacheNextFrame();   // frees the unfolded foliage blocks nothing read for a while
     p.gpuTimerEndFrame();
-    p.swapchain->Present(p.vsync ? 1 : 0, 0);
+    {
+        HE_PROFILE_SCOPE_N("Present");   // the driver turns the frame's recorded draws into work here
+        p.swapchain->Present(p.vsync ? 1 : 0, 0);
+    }
     s_startupClock.endFirstFrame("D3D11");
 }
 

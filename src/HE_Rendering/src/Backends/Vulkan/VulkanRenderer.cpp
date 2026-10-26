@@ -591,11 +591,18 @@ void VulkanRenderer::Render()
 
     const uint32_t fi = m_currentFrame;
 
-    vkWaitForFences(m_device, 1, &m_frameFence[fi], VK_TRUE, UINT64_MAX);
+    {
+        HE_PROFILE_SCOPE_N("WaitFrame");   // the CPU idles here when the GPU is the slower side
+        vkWaitForFences(m_device, 1, &m_frameFence[fi], VK_TRUE, UINT64_MAX);
+    }
 
     uint32_t imageIndex = 0;
-    VkResult acq = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
-                                         m_imageReady[fi], VK_NULL_HANDLE, &imageIndex);
+    VkResult acq;
+    {
+        HE_PROFILE_SCOPE_N("AcquireImage");
+        acq = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
+                                    m_imageReady[fi], VK_NULL_HANDLE, &imageIndex);
+    }
     if (acq == VK_ERROR_OUT_OF_DATE_KHR)
     {
         recreateSwapchain();
@@ -723,7 +730,10 @@ void VulkanRenderer::Render()
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &m_renderDone[imageIndex];   // per-image present semaphore
     m_frameSerial[fi] = ++m_submitSerial;
-    submitGraphics(si, m_frameFence[fi]);
+    {
+        HE_PROFILE_SCOPE_N("Submit");
+        submitGraphics(si, m_frameFence[fi]);
+    }
 
     VkPresentInfoKHR pi{};
     pi.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -732,7 +742,11 @@ void VulkanRenderer::Render()
     pi.swapchainCount     = 1;
     pi.pSwapchains        = &m_swapchain;
     pi.pImageIndices      = &imageIndex;
-    VkResult pres = vkQueuePresentKHR(m_graphicsQueue, &pi);
+    VkResult pres;
+    {
+        HE_PROFILE_SCOPE_N("Present");
+        pres = vkQueuePresentKHR(m_graphicsQueue, &pi);
+    }
     // OUT_OF_DATE/SUBOPTIMAL after present: the image was still shown, but the
     // swapchain no longer matches the surface — rebuild for the next frame.
     if (pres == VK_ERROR_OUT_OF_DATE_KHR || pres == VK_SUBOPTIMAL_KHR)
@@ -756,6 +770,7 @@ void VulkanRenderer::Render()
 // already made sure the viewport resources exist at that size.
 void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 {
+    GpuPassScope _frame(this, "Scene");   // the passes inside it (shadow-free: SSAO, GI, SSR, decals) interrupt it
     // The shadow, GI and SSAO depth passes and the geometry pass below all take
     // instance-buffer slots from this frame's arena (beginInstanceFrame). Reset here too, not
     // only in Render(): RenderSceneImage records this frame on its own. Same for
@@ -1011,6 +1026,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
         }
 
+        _frame.next("Bloom");
         // Transition HDR → SHADER_READ_ONLY for bloom bright pass.
         runPostFXBarrier(cmd, m_hdrImage,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1078,6 +1094,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             m_bloomLayout[0] = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
 
+        _frame.next("Tonemap");
         // ── Tonemap: hdr+bloom[0] → ldrFB ─────────────────────────────
         { const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
           blitPass(m_postFxBlitF8, m_ldrFB, m_viewportW, m_viewportH, m_tonemapPipe, m_postFxDS[3], p); }
@@ -1097,6 +1114,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
         m_viewportLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+        _frame.next("TAA");
         // ── TAA resolve (A3): (ldr, history[prev], velocity) → history[cur] ─
         // On the tonemapped image, so a single bright HDR sample cannot poison
         // the next dozen frames. The AA slot below then sharpens history[cur]
@@ -1139,6 +1157,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             m_taaHistoryValid = true;
         }
 
+        _frame.next(aaTaa ? "TAA Sharpen" : "AA");
         // ── AA resolve: ldrSRV → viewportFB ───────────────────────────
         // Always runs — it is what writes m_viewportImage. The AA method
         // only decides which pipeline does it (FXAA vs. passthrough); TAA's
@@ -1153,6 +1172,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
           blitPass(m_postFxFinalRP, m_fxaaFB, m_viewportW, m_viewportH, aaPipe, aaSet, p); }
         m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
+        _frame.next("UI");
         // ── UI canvas: composite onto viewport image (editor path) ──────
         if (m_uiViewportPipeline && !m_renderWorld.uiObjects.empty() && m_uiViewportFB)
         {
@@ -4081,7 +4101,7 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     // resolve here (Translucent clamp included) a material-driven glass pane
     // would count as opaque in this pre-pass and transparent in the scene pass
     // — depth where the scene writes none, and the decal lands on the glass.
-    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
+    { HE_PROFILE_SCOPE_N("MaterialScalars"); HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager); }
     cullCameraObjects();
     if (m_sortedIndices.empty()) return;
 
@@ -4166,6 +4186,7 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
 void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, VkImageView depthView,
                                   uint32_t width, uint32_t height, bool hdr, bool intoGBuffer)
 {
+    GpuPassScope _passTimer(this, "Decals");
 #if !defined(HE_HAVE_SHADERC)
     (void)cmd; (void)depthView; (void)width; (void)height; (void)hdr; (void)intoGBuffer;
 #else
@@ -5838,6 +5859,7 @@ glm::mat4 VulkanRenderer::taaJittered(const glm::mat4& clipViewProj) const
 // their depth. Leaves the velocity image in SHADER_READ_ONLY for the resolve.
 void VulkanRenderer::encodeTaaVelocity(VkCommandBuffer cmd)
 {
+    GpuPassScope _passTimer(this, "Velocity");
     VkClearValue clears[2]{};
     clears[0].color = { { 0.0f, 0.0f, 0.0f, 0.0f } };   // zero = "did not move"
     VkRenderPassBeginInfo bi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
@@ -7208,6 +7230,7 @@ void VulkanRenderer::cullCameraObjects()
 
 void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
 {
+    GpuPassScope _passTimer(this, "Shadow");
     m_shadowRenderedThisFrame = false;
     m_localShadowLayerCount   = 0;
     if (m_shadowPipeline == VK_NULL_HANDLE || m_shadowImage == VK_NULL_HANDLE) return;
@@ -8639,7 +8662,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
-    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
+    { HE_PROFILE_SCOPE_N("MaterialScalars"); HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager); }
 
     cullCameraObjects();
     m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
@@ -12340,6 +12363,7 @@ void VulkanRenderer::destroyGiProbeAtlas()
 // camera as the scene pass, dominant light, tight temporal tolerance) baked in.
 void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
 {
+    GpuPassScope _passTimer(this, "GI");
     // Reflections trace the same BVH and read the G-buffer prepass this
     // function also builds, so a reflections-only session (diffuse GI off)
     // still needs it to run — same gate as updateGiAccel(). Step 7 below runs
@@ -12365,7 +12389,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     // instance bounced white: a red and a grey floor gave the same probe field,
     // colour bleed exactly 0 (Thema 154). D3D11/D3D12 resolve right before
     // their updateGiAccel as well.
-    HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
+    { HE_PROFILE_SCOPE_N("MaterialScalars"); HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager); }
 
     updateGiAccel();
     if (m_giInstanceCount == 0) return;
@@ -14058,6 +14082,7 @@ void VulkanRenderer::destroySSAOTargets()
 void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
                              bool reflMrt, bool aoWanted)
 {
+    GpuPassScope _passTimer(this, "SSAO");
     if (!m_ssaoReady) return;
     // The two consumers are independent: the reflection MRT pre-pass has its own
     // pipeline and its own attachments, so a missing one must not take the
@@ -15029,6 +15054,7 @@ void VulkanRenderer::CaptureSSRColorHistory(VkCommandBuffer cmd, uint32_t w, uin
 
 VkImageView VulkanRenderer::RenderForwardSSR(VkCommandBuffer cmd, uint32_t w, uint32_t h)
 {
+    GpuPassScope _passTimer(this, "SSR");
 #if !defined(HE_HAVE_SHADERC)
     (void)cmd; (void)w; (void)h;
     return VK_NULL_HANDLE;
@@ -16118,7 +16144,7 @@ void VulkanRenderer::gpuTimerInit()
 
     VkQueryPoolCreateInfo qpci{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
     qpci.queryType  = VK_QUERY_TYPE_TIMESTAMP;
-    qpci.queryCount = kGpuTimerRing * 2;   // begin/end per ring slot
+    qpci.queryCount = kGpuTimerRing * GpuPassTimeline::kMaxTimestamps;   // the marks of every ring slot
     if (vkCreateQueryPool(m_device, &qpci, nullptr, &m_tsQueryPool) != VK_SUCCESS)
     {
         m_tsQueryPool = VK_NULL_HANDLE;
@@ -16135,35 +16161,71 @@ void VulkanRenderer::gpuTimerBegin(VkCommandBuffer cmd)
     // This slot was written kGpuTimerRing frames ago; with only
     // k_maxFramesInFlight frames in flight its submit has been fence-waited, so
     // the availability check succeeds without ever using VK_QUERY_RESULT_WAIT.
+    GpuPassTimeline& tl = m_tsTimeline[slot];
     if (m_tsPending[slot])
     {
-        uint64_t r[4] = {};   // {value, availability} × {begin, end}
-        const VkResult res = vkGetQueryPoolResults(m_device, m_tsQueryPool, slot * 2, 2,
-            sizeof(r), r, 2 * sizeof(uint64_t),
+        const uint32_t n = tl.used();
+        uint64_t r[GpuPassTimeline::kMaxTimestamps * 2] = {};   // {value, availability} per mark
+        const VkResult res = vkGetQueryPoolResults(m_device, m_tsQueryPool,
+            slot * GpuPassTimeline::kMaxTimestamps, n, sizeof(r), r, 2 * sizeof(uint64_t),
             VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-        if (res == VK_SUCCESS && r[1] && r[3])
+        bool all = res == VK_SUCCESS && n >= 2;
+        uint64_t ticks[GpuPassTimeline::kMaxTimestamps];
+        for (uint32_t i = 0; all && i < n; ++i)
         {
-            const uint64_t t0 = r[0] & m_tsValidMask;
-            const uint64_t t1 = r[2] & m_tsValidMask;
+            all = r[2 * i + 1] != 0;
+            ticks[i] = r[2 * i] & m_tsValidMask;
+        }
+        if (all)
+        {
+            const uint64_t t0 = ticks[0], t1 = ticks[n - 1];
             FrameGpuStats fs;
             fs.gpuFrameMs = (t1 > t0)
                 ? static_cast<double>(t1 - t0) * static_cast<double>(m_tsPeriodNs) * 1e-6
                 : 0.0;
-            fs.gpuTimingMode = "whole-frame";   // no per-pass breakdown on Vulkan yet
+            tl.toPasses(ticks, 1e9 / static_cast<double>(m_tsPeriodNs), fs.passes);
+            fs.gpuTimingMode = fs.passes.empty() ? "whole-frame" : "vk-ts";
             m_lastGpuStats = fs;                // CPU counters merged by GetFrameGpuStats
         }
         m_tsPending[slot] = false;   // reset below invalidates the old results either way
     }
 
-    vkCmdResetQueryPool(cmd, m_tsQueryPool, slot * 2, 2);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_tsQueryPool, slot * 2);
+    vkCmdResetQueryPool(cmd, m_tsQueryPool, slot * GpuPassTimeline::kMaxTimestamps,
+                        GpuPassTimeline::kMaxTimestamps);
+    tl.reset();
+    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_tsQueryPool,
+                        slot * GpuPassTimeline::kMaxTimestamps + tl.start());
+    m_tsCmd = cmd;
+}
+
+void VulkanRenderer::gpuMark(uint32_t i)
+{
+    const uint32_t slot = static_cast<uint32_t>(m_tsFrameIdx % kGpuTimerRing);
+    vkCmdWriteTimestamp(m_tsCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_tsQueryPool,
+                        slot * GpuPassTimeline::kMaxTimestamps + i);
+}
+
+bool VulkanRenderer::gpuPassBegin(const char* name)
+{
+    if (!m_tsSupported || m_tsCmd == VK_NULL_HANDLE) return false;
+    uint32_t i = 0;
+    if (!m_tsTimeline[m_tsFrameIdx % kGpuTimerRing].push(name, i)) return false;
+    gpuMark(i);
+    return true;
+}
+
+void VulkanRenderer::gpuPassEnd()
+{
+    uint32_t i = 0;
+    if (m_tsCmd != VK_NULL_HANDLE && m_tsTimeline[m_tsFrameIdx % kGpuTimerRing].pop(i)) gpuMark(i);
 }
 
 void VulkanRenderer::gpuTimerEnd(VkCommandBuffer cmd)
 {
     if (!m_tsSupported) return;
     const uint32_t slot = static_cast<uint32_t>(m_tsFrameIdx % kGpuTimerRing);
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_tsQueryPool, slot * 2 + 1);
+    gpuMark(m_tsTimeline[slot].finish());
+    m_tsCmd = VK_NULL_HANDLE;
     m_tsPending[slot] = true;
     ++m_tsFrameIdx;
 }
