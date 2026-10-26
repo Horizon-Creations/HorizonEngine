@@ -6,9 +6,11 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -340,16 +342,30 @@ const std::vector<MatNodeDesc>& matNodeRegistry() { return registry(); }
 
 const MatNodeDesc& matNodeDesc(MatNodeType type)
 {
-    for (const auto& d : registry())
-        if (d.type == type) return d;
-    return registry().front();
+    // Indexed once from the registry (a function-local static, so it never changes).
+    // The FIRST entry of a type wins, exactly as the old front-to-back scan did.
+    static const std::array<const MatNodeDesc*, 256> kByType = [] {
+        std::array<const MatNodeDesc*, 256> t{};
+        for (const auto& d : registry())
+            if (!t[static_cast<uint8_t>(d.type)]) t[static_cast<uint8_t>(d.type)] = &d;
+        return t;
+    }();
+    const MatNodeDesc* d = kByType[static_cast<uint8_t>(type)];
+    return d ? *d : registry().front();
 }
 
 const MatNodeDesc* matNodeDescByName(const std::string& name)
 {
-    for (const auto& d : registry())
-        if (name == d.name) return &d;
-    return nullptr;
+    // The names are string literals, so the views stay valid. First entry wins, as
+    // in the registry order (emplace keeps the existing key).
+    static const std::unordered_map<std::string_view, const MatNodeDesc*> kByName = [] {
+        std::unordered_map<std::string_view, const MatNodeDesc*> m;
+        m.reserve(registry().size());
+        for (const auto& d : registry()) m.emplace(d.name, &d);
+        return m;
+    }();
+    const auto it = kByName.find(name);
+    return it != kByName.end() ? it->second : nullptr;
 }
 
 void matOutputPins(int blendMode, std::vector<MatPinDesc>& pins, std::vector<int>& regIndex)
