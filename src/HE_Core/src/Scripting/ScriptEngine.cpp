@@ -104,20 +104,8 @@ bool ScriptEngine::loadScript(const std::string& name, const std::string& source
     if (m_scripts.count(name))
         unloadScript(name);
 
-    // Compile the chunk
-    if (!loadChunk(name, source))
+    if (!runModuleChunk(name, source))
         return false;
-
-    // Execute the chunk; it should return a table
-    if (!pcall(0, 1))
-        return false;
-
-    if (!lua_istable(m_L, -1))
-    {
-        m_lastError = "Script '" + name + "' must return a table";
-        lua_pop(m_L, 1);
-        return false;
-    }
 
     int ref = luaL_ref(m_L, LUA_REGISTRYINDEX);
     m_scripts[name] = { ref };
@@ -471,6 +459,22 @@ bool ScriptEngine::pcall(int nargs, int nresults)
     return true;
 }
 
+bool ScriptEngine::runModuleChunk(const std::string& name, const std::string& source)
+{
+    if (!loadChunk(name, source)) return false;
+    if (!pcall(0, 1)) return false;          // execute chunk → module table on stack
+    if (!lua_istable(m_L, -1))
+    {
+        // Said, not just refused: pcall just cleared m_lastError, and the caller
+        // (ScriptContext::hotReloadScript) reports whatever is in it — which was
+        // an empty reason for this one failure.
+        m_lastError = "Script '" + name + "' must return a table";
+        lua_pop(m_L, 1);
+        return false;
+    }
+    return true;
+}
+
 void ScriptEngine::setInstanceField(InstanceId id, const std::string& key, double value)
 {
     auto it = m_instances.find(id);
@@ -579,18 +583,8 @@ bool ScriptEngine::hotReloadScript(const std::string& name, const std::string& s
     auto it = m_scripts.find(name);
     if (it == m_scripts.end()) return false;
 
-    // Compile the new source into a module table
-    if (!loadChunk(name, source)) return false;
-    if (!pcall(0, 1)) return false;          // execute chunk → module table on stack
-    if (!lua_istable(m_L, -1))
-    {
-        // Said, not just refused: pcall just cleared m_lastError, and the caller
-        // (ScriptContext::hotReloadScript) reports whatever is in it — which was
-        // an empty reason for this one failure.
-        m_lastError = "Script '" + name + "' must return a table";
-        lua_pop(m_L, 1);
-        return false;
-    }
+    // Compile and run the new source: its module table lands on the stack
+    if (!runModuleChunk(name, source)) return false;
 
     // Replace old module reference with new one
     luaL_unref(m_L, LUA_REGISTRYINDEX, it->second.luaRef);

@@ -167,6 +167,10 @@ private:
     bool loadChunk(const std::string& name, const std::string& source);
     // Returns false and sets m_lastError on Lua error.
     bool pcall(int nargs, int nresults);
+    // loadChunk + run it: on success the table the chunk returned is on top of
+    // the stack. False (stack unchanged, m_lastError set) on a compile error, a
+    // runtime error or a chunk that returns something else than a table.
+    bool runModuleChunk(const std::string& name, const std::string& source);
 
     // Shared body of the three notify handlers above: they differ only in the
     // Lua method name they look for.
