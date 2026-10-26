@@ -1756,7 +1756,9 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         // them live (heAO's s0 is dead: texelFetch), all in s0..s15.
         if (tile) return {}; // framebuffer fetch is Apple-only
         using MSL = MaterialShaderLibrary;
-        std::vector<HlslPin> pins = {
+        std::vector<HlslPin> pins;
+        pins.reserve(20); // 17 fixed below + up to 3 clustered raw buffers
+        pins.insert(pins.end(), {
             //        stage           set bind reg  sampler
             { Stage::Fragment, 0,  0,  0 },     // HeLighting      → b0
             { Stage::Fragment, 0, 10, 10 },     // heGIShadow      → t10/s10
@@ -1775,7 +1777,7 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
             { Stage::Fragment, 0, 21, MSL::kHlslResolveGB2Reg,   MSL::kHlslResolveGB2Sampler },
             { Stage::Fragment, 0, 22, MSL::kHlslResolveDepthReg, MSL::kHlslResolveDepthSampler },
             { Stage::Fragment, 0, 23, MSL::kHlslResolveUboReg },  // HeResolve → b4
-        };
+        });
         if (clustered)
         {
             // Raw ByteAddressBuffers, no sampler — the forward clustered
