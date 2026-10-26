@@ -284,6 +284,95 @@ TEST_CASE("TypeRegistry: makeDefaultValue guards a struct array that holds its o
     CHECK(v.items[0].items[0].items.empty());
 }
 
+// ── Wrong-typed JSON fields ──────────────────────────────────────────────────
+// The text parses (it is valid JSON) but a present field has the wrong JSON
+// type. That is a refused document (false, `out` untouched), never an exception.
+
+TEST_CASE("TypeRegistry: enumFromJson refuses a wrong-typed field without throwing")
+{
+    EnumDef keep;
+    keep.entries = { { "Keep", 3 } };
+
+    EnumDef out = keep;
+    CHECK_NOTHROW(CHECK(!TypeRegistry::enumFromJson(R"({"entries":[{"name":5,"value":1}]})", out)));
+    CHECK_NOTHROW(CHECK(!TypeRegistry::enumFromJson(R"({"entries":[{"name":null}]})", out)));
+    CHECK_NOTHROW(CHECK(!TypeRegistry::enumFromJson(R"({"entries":[{"name":"A","value":"x"}]})", out)));
+    CHECK_NOTHROW(CHECK(!TypeRegistry::enumFromJson(R"({"entries":[{"name":"A","value":[1]}]})", out)));
+    // A good entry before the bad one does not leak into `out` either.
+    CHECK_NOTHROW(CHECK(!TypeRegistry::enumFromJson(
+        R"({"entries":[{"name":"Good","value":1},{"name":"A","value":"x"}]})", out)));
+    REQUIRE(out.entries.size() == 1);
+    CHECK(out.entries[0].name == "Keep");
+    CHECK(out.entries[0].value == 3);
+
+    // Absent fields keep their defaults, as before.
+    REQUIRE(TypeRegistry::enumFromJson(R"({"entries":[{"name":"A"}]})", out));
+    REQUIRE(out.entries.size() == 1);
+    CHECK(out.entries[0].name == "A");
+    CHECK(out.entries[0].value == 0);
+}
+
+TEST_CASE("TypeRegistry: structFromJson refuses a wrong-typed field without throwing")
+{
+    StructDef keep;
+    keep.fields.push_back({ "keep", PinType::Float });
+
+    const char* bad[] = {
+        R"({"fields":[{"name":5}]})",
+        R"({"fields":[{"name":"f","type":"Float"}]})",
+        R"({"fields":[{"name":"f","isArray":1}]})",
+        R"({"fields":[{"name":"f","typeName":7}]})",
+        R"({"fields":[{"name":"f","container":"Map"}]})",
+        R"({"fields":[{"name":"f","keyType":null}]})",
+        R"({"fields":[{"name":"f","keyTypeName":false}]})",
+        // A good field before the bad one does not leak into `out`.
+        R"({"fields":[{"name":"ok"},{"name":"f","isArray":"yes"}]})",
+    };
+    for (const char* text : bad)
+    {
+        CAPTURE(text);
+        StructDef out = keep;
+        CHECK_NOTHROW(CHECK(!TypeRegistry::structFromJson(text, out)));
+        REQUIRE(out.fields.size() == 1);
+        CHECK(out.fields[0].name == "keep");
+    }
+
+    // Absent fields keep their defaults, as before.
+    StructDef out = keep;
+    REQUIRE(TypeRegistry::structFromJson(R"({"fields":[{"name":"f"}]})", out));
+    REQUIRE(out.fields.size() == 1);
+    CHECK(out.fields[0].name == "f");
+    CHECK(out.fields[0].type == PinType::Float);      // the documented fallback type
+    CHECK(!out.fields[0].isArray);
+}
+
+TEST_CASE("TypeRegistry: structFromJson skips a default whose numbers are not numbers")
+{
+    // Same rule as a scalar default of the wrong kind: the payload is ignored
+    // and the field keeps its zero value; nothing throws.
+    StructDef out;
+    CHECK_NOTHROW(CHECK(TypeRegistry::structFromJson(R"({"fields":[
+        {"name":"a","type":)" + std::to_string(static_cast<int>(PinType::Vec2))  + R"(,"default":[1,"x"]},
+        {"name":"b","type":)" + std::to_string(static_cast<int>(PinType::Vec3))  + R"(,"default":[1,2,null]},
+        {"name":"c","type":)" + std::to_string(static_cast<int>(PinType::Vec4))  + R"(,"default":[1,2,3,[]]},
+        {"name":"d","type":)" + std::to_string(static_cast<int>(PinType::Color)) + R"(,"default":["r",0,0,1]},
+        {"name":"e","type":)" + std::to_string(static_cast<int>(PinType::Transform))
+            + R"(,"default":{"pos":[0,"y",0],"scl":[2,2,2]}},
+        {"name":"f","type":)" + std::to_string(static_cast<int>(PinType::Vec3))
+            + R"(,"isArray":true,"default":[[1,2,3],[1,"x",3]]}
+    ]})", out)));
+    REQUIRE(out.fields.size() == 6);
+    CHECK(out.fields[0].defaultValue.v2 == glm::vec2(0.0f));
+    CHECK(out.fields[1].defaultValue.v3 == glm::vec3(0.0f));
+    CHECK(out.fields[2].defaultValue.v4 == glm::vec4(0.0f));
+    CHECK(out.fields[3].defaultValue.col == glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));   // Value's own default
+    CHECK(out.fields[4].defaultValue.tpos == glm::vec3(0.0f));   // bad pos: default
+    CHECK(out.fields[4].defaultValue.tscl == glm::vec3(2.0f));   // good scl still read
+    REQUIRE(out.fields[5].defaultValue.items.size() == 2);
+    CHECK(out.fields[5].defaultValue.items[0].v3 == glm::vec3(1.0f, 2.0f, 3.0f));
+    CHECK(out.fields[5].defaultValue.items[1].v3 == glm::vec3(0.0f));
+}
+
 // ── Renames: formerNames ─────────────────────────────────────────────────────
 // Fields and entries have no ids; a rename books the old name as an alias so
 // data persisted under it (saves, graph defaults) still finds its field.
