@@ -2613,37 +2613,40 @@ void main() {
 
 std::string reflPrepassVS(bool ssbo)
 {
-    return std::string(ssbo ? kReflPrepassVSSsbo : kReflPrepassVSAttr)
-         + kReflPrepassVSTail
-         + (ssbo ? kReflPrepassVSBodySsbo : kReflPrepassVSBodyAttr)
-         + kReflPrepassVSEnd;
+    std::string src = ssbo ? kReflPrepassVSSsbo : kReflPrepassVSAttr;
+    src += kReflPrepassVSTail;
+    src += ssbo ? kReflPrepassVSBodySsbo : kReflPrepassVSBodyAttr;
+    src += kReflPrepassVSEnd;
+    return src;
 }
 std::string reflPrepassInstVS(bool ssbo)
 {
-    return std::string(ssbo ? kReflPrepassInstVSSsbo : kReflPrepassInstVSAttr)
-         + kReflPrepassInstVSTail
-         + (ssbo ? kReflPrepassInstVSBodySsbo : kReflPrepassInstVSBodyAttr)
-         + kReflPrepassInstVSEnd;
+    std::string src = ssbo ? kReflPrepassInstVSSsbo : kReflPrepassInstVSAttr;
+    src += kReflPrepassInstVSTail;
+    src += ssbo ? kReflPrepassInstVSBodySsbo : kReflPrepassInstVSBodyAttr;
+    src += kReflPrepassInstVSEnd;
+    return src;
 }
 } // namespace
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassVertexInstanced(Backend backend)
 {
     // Own key range: the plain vertex/fragment pair occupies backend*2 + 0/1.
-    const int key = 0x100 + static_cast<int>(backend);
-    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Same pins as the plain variant plus the instance array at vertex
-        // buffer 5 — the slot MetalRenderer binds for every instanced draw.
-        out = toCompiled(compileMslPinned(reflPrepassInstVS(/*ssbo=*/true), Stage::Vertex,
-            { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
-              { Stage::Vertex, 0, 1, 1 },      // UI camera pair → vertex buffer 1
-              { Stage::Vertex, 0, 2, 5 } }));  // Inst model array → vertex buffer 5
-    else
-        out = toCompiled(compile(reflPrepassInstVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
-    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_reflPrepassCache, 0x100 + static_cast<int>(backend), [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Same pins as the plain variant plus the instance array at vertex
+            // buffer 5 — the slot MetalRenderer binds for every instanced draw.
+            out = toCompiled(compileMslPinned(reflPrepassInstVS(/*ssbo=*/true), Stage::Vertex,
+                { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
+                  { Stage::Vertex, 0, 1, 1 },      // UI camera pair → vertex buffer 1
+                  { Stage::Vertex, 0, 2, 5 } }));  // Inst model array → vertex buffer 5
+        else
+            out = toCompiled(compile(reflPrepassInstVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const std::string& MaterialShaderLibrary::reflPrepassFragmentGlsl()
