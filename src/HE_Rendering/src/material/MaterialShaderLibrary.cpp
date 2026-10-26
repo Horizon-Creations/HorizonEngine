@@ -1802,7 +1802,9 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         if (tile || clustered) return {};
         return toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
     }
-    std::vector<MslPin> pins = {
+    std::vector<MslPin> pins;
+    pins.reserve(20); // 13 fixed below + up to 4 G-buffer pins (!tile) + 3 clustered buffers
+    pins.insert(pins.end(), {
         { Stage::Fragment, 0, 0, static_cast<uint32_t>(MaterialShaderLibrary::kMetalLightingBufferIndex) },
         { Stage::Fragment, 0, 23, 3 },    // HeResolve UBO → fragment buffer 3
         // GI screen-space masks on 5/8 and the forward reflection results on
@@ -1825,7 +1827,7 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
         { Stage::Fragment, 0, 17, 6 },    // DDGI irradiance atlas
         { Stage::Fragment, 0, 18, 7 },    // DDGI visibility atlas
         { Stage::Fragment, 0, 33, 16 },   // cloud-shadow map → texture 16 (constexpr sampler)
-    };
+    });
     if (!tile)
     {
         pins.push_back({ Stage::Fragment, 0, 19, 0 }); // heGB0 → texture/sampler 0
