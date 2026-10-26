@@ -9347,17 +9347,31 @@ struct D3D12RendererImpl
             built.reserve(vertexCount * 8);
             for (size_t i = 0; i < vertexCount; ++i)
             {
-                built.insert(built.end(),
-                    { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
+                built.push_back(asset->vertices[i*3+0]);
+                built.push_back(asset->vertices[i*3+1]);
+                built.push_back(asset->vertices[i*3+2]);
                 if (i * 3 + 2 < asset->normals.size())
-                    built.insert(built.end(),
-                        { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
+                {
+                    built.push_back(asset->normals[i*3+0]);
+                    built.push_back(asset->normals[i*3+1]);
+                    built.push_back(asset->normals[i*3+2]);
+                }
                 else
-                    built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+                {
+                    built.push_back(0.0f);
+                    built.push_back(0.0f);
+                    built.push_back(0.0f);
+                }
                 if (i * 2 + 1 < asset->uvs.size())
-                    built.insert(built.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
+                {
+                    built.push_back(asset->uvs[i*2+0]);
+                    built.push_back(asset->uvs[i*2+1]);
+                }
                 else
-                    built.insert(built.end(), { 0.0f, 0.0f });
+                {
+                    built.push_back(0.0f);
+                    built.push_back(0.0f);
+                }
             }
             vtx = &built;
             mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
@@ -9593,17 +9607,31 @@ struct D3D12RendererImpl
         interleaved.reserve(vertexCount * 8);
         for (size_t i = 0; i < vertexCount; ++i)
         {
-            interleaved.insert(interleaved.end(),
-                { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
+            interleaved.push_back(asset->vertices[i*3+0]);
+            interleaved.push_back(asset->vertices[i*3+1]);
+            interleaved.push_back(asset->vertices[i*3+2]);
             if (i * 3 + 2 < asset->normals.size())
-                interleaved.insert(interleaved.end(),
-                    { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
+            {
+                interleaved.push_back(asset->normals[i*3+0]);
+                interleaved.push_back(asset->normals[i*3+1]);
+                interleaved.push_back(asset->normals[i*3+2]);
+            }
             else
-                interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+            {
+                interleaved.push_back(0.0f);
+                interleaved.push_back(0.0f);
+                interleaved.push_back(0.0f);
+            }
             if (i * 2 + 1 < asset->uvs.size())
-                interleaved.insert(interleaved.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
+            {
+                interleaved.push_back(asset->uvs[i*2+0]);
+                interleaved.push_back(asset->uvs[i*2+1]);
+            }
             else
-                interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+            {
+                interleaved.push_back(0.0f);
+                interleaved.push_back(0.0f);
+            }
         }
 
         GpuSkeletalMesh12 skm;
