@@ -1763,15 +1763,18 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 	if (it != m_columnInfo.end()) return &it->second;
 
 	ColumnInfo info;
+	// Every way out stores what it has, even "no columns": the next call for the
+	// path then answers from the cache instead of reading the asset again.
+	auto remember = [&] { return &(m_columnInfo[path] = std::move(info)); };
 	const HE::UUID id = content.loadAsset(path);
 	const UIWidgetAsset* asset = id == HE::UUID{} ? nullptr : content.getWidget(id);
-	if (!asset) return &(m_columnInfo[path] = info);
+	if (!asset) return remember();
 	// A COPY of the JSON before anything else touches the content manager: its
 	// getters point into a dense vector, and the next load moves what they show.
 	const std::string treeJson = asset->treeJson;
 
 	HE::UIWidgetTree sub;
-	if (!HE::uiWidgetTreeFromJson(treeJson, sub)) return &(m_columnInfo[path] = info);
+	if (!HE::uiWidgetTreeFromJson(treeJson, sub)) return remember();
 	info.canvasW = sub.canvasWidth;
 
 	// The root: the one element with no parent. More than one and there is no
@@ -1785,7 +1788,7 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 		HE_LOG_WARN(Widget, "Table row '%s': its root has to be a single Horizontal Box "
 		                    "for the header to name columns — showing none",
 		            path.c_str());
-		return &(m_columnInfo[path] = info);
+		return remember();
 	}
 	if (const auto* box = dynamic_cast<const HE::UIBoxBase*>(root))
 	{
@@ -1816,12 +1819,12 @@ const WidgetManager::ColumnInfo* WidgetManager::columnInfoFor(ContentManager& co
 			                    "table writes — showing no columns",
 			            path.c_str(), ep->name.c_str());
 			info.titles.clear();
-			return &(m_columnInfo[path] = info);
+			return remember();
 		}
 		info.titles.push_back(ep->name);
 	}
 
-	return &(m_columnInfo[path] = info);
+	return remember();
 }
 
 void WidgetManager::syncLists(Instance& w)
