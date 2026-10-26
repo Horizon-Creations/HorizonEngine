@@ -31,6 +31,12 @@ namespace
         out = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         return true;
     }
+
+    void setRoleColor(UITheme& t, UIThemeRole r, const glm::vec4& light, const glm::vec4& dark)
+    {
+        t.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Light)] = light;
+        t.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Dark)]  = dark;
+    }
 }
 
 const char* uiThemeRoleName(UIThemeRole r)
@@ -149,23 +155,18 @@ const UITheme& uiDefaultTheme()
     {
         UITheme d;
         d.name = "Default";
-        auto set = [&](UIThemeRole r, glm::vec4 light, glm::vec4 dark)
-        {
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Light)] = light;
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Dark)]  = dark;
-        };
-        set(UIThemeRole::Background, { 0.96f, 0.96f, 0.97f, 1.0f }, { 0.09f, 0.09f, 0.11f, 1.0f });
-        set(UIThemeRole::Surface,    { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.15f, 0.15f, 0.18f, 1.0f });
-        set(UIThemeRole::Border,     { 0.80f, 0.80f, 0.83f, 1.0f }, { 0.28f, 0.28f, 0.33f, 1.0f });
-        set(UIThemeRole::Text,       { 0.10f, 0.10f, 0.12f, 1.0f }, { 0.93f, 0.93f, 0.95f, 1.0f });
+        setRoleColor(d, UIThemeRole::Background, { 0.96f, 0.96f, 0.97f, 1.0f }, { 0.09f, 0.09f, 0.11f, 1.0f });
+        setRoleColor(d, UIThemeRole::Surface,    { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.15f, 0.15f, 0.18f, 1.0f });
+        setRoleColor(d, UIThemeRole::Border,     { 0.80f, 0.80f, 0.83f, 1.0f }, { 0.28f, 0.28f, 0.33f, 1.0f });
+        setRoleColor(d, UIThemeRole::Text,       { 0.10f, 0.10f, 0.12f, 1.0f }, { 0.93f, 0.93f, 0.95f, 1.0f });
         // Light muted text was 0.45 and did not reach WCAG's 4.5:1 on the
         // BACKGROUND role — 4.30, which is the ratio uiCheckContrast reported
         // for five of the shipped components at once (a hint under a form row,
         // a list's subtitle). It clears 4.5 on Surface (white) either way; the
         // page it usually sits on is the darker of the two, and that is the one
         // that decides. 0.43 is the smallest step that passes both.
-        set(UIThemeRole::MutedText,  { 0.43f, 0.43f, 0.48f, 1.0f }, { 0.60f, 0.60f, 0.66f, 1.0f });
-        set(UIThemeRole::Accent,     { 0.16f, 0.44f, 0.85f, 1.0f }, { 0.36f, 0.60f, 0.96f, 1.0f });
+        setRoleColor(d, UIThemeRole::MutedText,  { 0.43f, 0.43f, 0.48f, 1.0f }, { 0.60f, 0.60f, 0.66f, 1.0f });
+        setRoleColor(d, UIThemeRole::Accent,     { 0.16f, 0.44f, 0.85f, 1.0f }, { 0.36f, 0.60f, 0.96f, 1.0f });
         // The colour to write ON that accent, and the one pair in this palette
         // that goes the OTHER way round from every other: white in light mode,
         // near-black in dark. That is not a slip — it follows from the accent
@@ -177,10 +178,10 @@ const UITheme& uiDefaultTheme()
         //
         // The dark value is the light theme's Text on purpose: the colour to
         // write on a pale blue IS the colour to write on a pale page.
-        set(UIThemeRole::AccentText, { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.10f, 0.10f, 0.12f, 1.0f });
-        set(UIThemeRole::Warning,    { 0.85f, 0.60f, 0.10f, 1.0f }, { 0.95f, 0.72f, 0.24f, 1.0f });
-        set(UIThemeRole::Error,      { 0.80f, 0.22f, 0.20f, 1.0f }, { 0.93f, 0.40f, 0.36f, 1.0f });
-        set(UIThemeRole::Success,    { 0.16f, 0.60f, 0.32f, 1.0f }, { 0.34f, 0.78f, 0.48f, 1.0f });
+        setRoleColor(d, UIThemeRole::AccentText, { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.10f, 0.10f, 0.12f, 1.0f });
+        setRoleColor(d, UIThemeRole::Warning,    { 0.85f, 0.60f, 0.10f, 1.0f }, { 0.95f, 0.72f, 0.24f, 1.0f });
+        setRoleColor(d, UIThemeRole::Error,      { 0.80f, 0.22f, 0.20f, 1.0f }, { 0.93f, 0.40f, 0.36f, 1.0f });
+        setRoleColor(d, UIThemeRole::Success,    { 0.16f, 0.60f, 0.32f, 1.0f }, { 0.34f, 0.78f, 0.48f, 1.0f });
         // A shadow on a light page is a soft grey; on a dark one it is nearly
         // nothing, which is why elevation there is carried by the surface being
         // lighter rather than by the shadow being darker.
@@ -200,23 +201,18 @@ const UITheme& uiAmberTheme()
     {
         UITheme d = uiDefaultTheme();
         d.name = "Amber";
-        auto set = [&](UIThemeRole r, glm::vec4 light, glm::vec4 dark)
-        {
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Light)] = light;
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Dark)]  = dark;
-        };
-        set(UIThemeRole::Background, { 0.95f, 0.93f, 0.89f, 1.0f }, { 0.08f, 0.07f, 0.06f, 1.0f });
-        set(UIThemeRole::Surface,    { 1.00f, 0.99f, 0.96f, 1.0f }, { 0.14f, 0.13f, 0.11f, 1.0f });
-        set(UIThemeRole::Border,     { 0.78f, 0.73f, 0.64f, 1.0f }, { 0.30f, 0.27f, 0.22f, 1.0f });
-        set(UIThemeRole::Text,       { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.94f, 0.92f, 0.88f, 1.0f });
-        set(UIThemeRole::MutedText,  { 0.47f, 0.44f, 0.38f, 1.0f }, { 0.62f, 0.59f, 0.52f, 1.0f });
-        set(UIThemeRole::Accent,     { 0.85f, 0.55f, 0.12f, 1.0f }, { 1.00f, 0.67f, 0.16f, 1.0f });
+        setRoleColor(d, UIThemeRole::Background, { 0.95f, 0.93f, 0.89f, 1.0f }, { 0.08f, 0.07f, 0.06f, 1.0f });
+        setRoleColor(d, UIThemeRole::Surface,    { 1.00f, 0.99f, 0.96f, 1.0f }, { 0.14f, 0.13f, 0.11f, 1.0f });
+        setRoleColor(d, UIThemeRole::Border,     { 0.78f, 0.73f, 0.64f, 1.0f }, { 0.30f, 0.27f, 0.22f, 1.0f });
+        setRoleColor(d, UIThemeRole::Text,       { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.94f, 0.92f, 0.88f, 1.0f });
+        setRoleColor(d, UIThemeRole::MutedText,  { 0.47f, 0.44f, 0.38f, 1.0f }, { 0.62f, 0.59f, 0.52f, 1.0f });
+        setRoleColor(d, UIThemeRole::Accent,     { 0.85f, 0.55f, 0.12f, 1.0f }, { 1.00f, 0.67f, 0.16f, 1.0f });
         // Amber is a bright colour in BOTH modes, so what you write on it is
         // dark in both: white on this orange is 2.7:1 in light and 1.9:1 in
         // dark, which is not text, it is a suggestion of text. Nearly the same
         // value twice, and that is the palette being honest rather than a role
         // that was half filled in.
-        set(UIThemeRole::AccentText, { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.10f, 0.09f, 0.07f, 1.0f });
+        setRoleColor(d, UIThemeRole::AccentText, { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.10f, 0.09f, 0.07f, 1.0f });
 
         // ── …and what each KIND of element looks like in it ──────────────────
         // The roles above are the palette; these are the answers. A theme that
@@ -244,6 +240,8 @@ const UITheme& uiAmberTheme()
         const glm::vec4 accentL { 0.85f, 0.55f, 0.12f, 1.0f }, accentD { 1.00f, 0.67f, 0.16f, 1.0f };
         const glm::vec4 borderL { 0.78f, 0.73f, 0.64f, 1.0f }, borderD { 0.30f, 0.27f, 0.22f, 1.0f };
         const glm::vec4 fieldL  { 0.97f, 0.96f, 0.93f, 1.0f }, fieldD  { 0.10f, 0.09f, 0.08f, 1.0f };
+        const UIThemeStyleValue rowHover    = col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f });
+        const UIThemeStyleValue rowSelected = col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f });
 
         UIThemeStyle& button = d.styleMut("Button");
         button.set("Normal Color",  col({ 0.91f, 0.88f, 0.83f, 1.0f }, { 0.22f, 0.20f, 0.17f, 1.0f }));
@@ -327,16 +325,16 @@ const UITheme& uiAmberTheme()
 
         UIThemeStyle& list = d.styleMut("ListView");
         list.set("Back Color",          col(surfaceL, surfaceD));
-        list.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
-        list.set("Row Selected Color",  col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f }));
+        list.set("Row Hover Color",     rowHover);
+        list.set("Row Selected Color",  rowSelected);
 
         // A tree's rows are the list's rows: same surface, same two highlights.
         UIThemeStyle& tree = d.styleMut("TreeView");
         tree.set("Back Color",          col(surfaceL, surfaceD));
         tree.set("Text Color",          col(textL, textD));
         tree.set("Arrow Color",         col(mutedL, mutedD));
-        tree.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
-        tree.set("Row Selected Color",  col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f }));
+        tree.set("Row Hover Color",     rowHover);
+        tree.set("Row Selected Color",  rowSelected);
         tree.set("Bar Color",           col(borderL, borderD));
 
         d.styleMut("ScrollBox").set("Bar Color", col(borderL, borderD));
