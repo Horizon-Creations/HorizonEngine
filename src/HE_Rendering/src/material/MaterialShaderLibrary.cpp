@@ -2657,31 +2657,32 @@ const std::string& MaterialShaderLibrary::reflPrepassFragmentGlsl()
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassVertex(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2 + 0;
-    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
-    using namespace he::shaderc;
-    Compiled out;
-    if (backend == Backend::Metal)
-        // Pinned to the bind points the MRT pre-pass encoder already issues per
-        // draw: the mesh vertex buffer at 0, the per-object matrices at 1.
-        out = toCompiled(compileMslPinned(reflPrepassVS(/*ssbo=*/true), Stage::Vertex,
-            { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
-              { Stage::Vertex, 0, 1, 1 } }));  // U matrices → vertex buffer 1
-    else
-        out = toCompiled(compile(reflPrepassVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
-    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_reflPrepassCache, static_cast<int>(backend) * 2 + 0, [&]
+    {
+        using namespace he::shaderc;
+        Compiled out;
+        if (backend == Backend::Metal)
+            // Pinned to the bind points the MRT pre-pass encoder already issues per
+            // draw: the mesh vertex buffer at 0, the per-object matrices at 1.
+            out = toCompiled(compileMslPinned(reflPrepassVS(/*ssbo=*/true), Stage::Vertex,
+                { { Stage::Vertex, 0, 0, 0 },      // Verts SSBO → vertex buffer 0
+                  { Stage::Vertex, 0, 1, 1 } }));  // U matrices → vertex buffer 1
+        else
+            out = toCompiled(compile(reflPrepassVS(/*ssbo=*/false), Stage::Vertex, toTarget(backend)));
+        return out;
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::reflPrepassFragment(Backend backend)
 {
-    const int key = static_cast<int>(backend) * 2 + 1;
-    if (auto it = m_reflPrepassCache.find(key); it != m_reflPrepassCache.end()) return it->second;
-    using namespace he::shaderc;
-    // No resources at all — three attachments and two varyings, nothing to pin.
-    Compiled out = toCompiled(backend == Backend::Metal
-        ? compileMslPinned(kReflPrepassFS, Stage::Fragment, {})
-        : compile(kReflPrepassFS, Stage::Fragment, toTarget(backend)));
-    return m_reflPrepassCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_reflPrepassCache, static_cast<int>(backend) * 2 + 1, [&]
+    {
+        using namespace he::shaderc;
+        // No resources at all — three attachments and two varyings, nothing to pin.
+        return toCompiled(backend == Backend::Metal
+            ? compileMslPinned(kReflPrepassFS, Stage::Fragment, {})
+            : compile(kReflPrepassFS, Stage::Fragment, toTarget(backend)));
+    });
 }
 
 namespace
