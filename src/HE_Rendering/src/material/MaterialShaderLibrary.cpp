@@ -1031,6 +1031,7 @@ std::string tessEdgeFunction(const MatTessSettings& t)
 std::string assembleTessControl(const MatTessSettings& t)
 {
     std::string src = "#version 450\nlayout(vertices = 3) out;\n";
+    src.reserve(4608); // measured final size ~4.3 KB across the fixture materials
     src += tessLightingBlock();
     src += "layout(location = 0) in vec3 vNormal[];\n"
            "layout(location = 1) in vec3 vColor[];\n"
