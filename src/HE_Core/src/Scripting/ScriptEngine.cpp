@@ -100,12 +100,14 @@ ScriptEngine::~ScriptEngine()
 
 bool ScriptEngine::loadScript(const std::string& name, const std::string& source)
 {
+    // The new source runs first: an edit with a syntax error must not take the
+    // working script and all of its live instances with it.
+    if (!runModuleChunk(name, source))
+        return false;
+
     // Unload any previous version
     if (m_scripts.count(name))
         unloadScript(name);
-
-    if (!runModuleChunk(name, source))
-        return false;
 
     int ref = luaL_ref(m_L, LUA_REGISTRYINDEX);
     m_scripts[name] = { ref };

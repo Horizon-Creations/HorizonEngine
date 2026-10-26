@@ -191,6 +191,33 @@ TEST_CASE("ScriptEngine: loading script twice replaces it")
     CHECK(engine.isScriptLoaded("s"));
 }
 
+TEST_CASE("ScriptEngine: a failed reload keeps the old script and its instances")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("s", kCounterScript));
+    const auto id = engine.createInstance("s");
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(engine.callOnStart(id));
+    REQUIRE(engine.callOnUpdate(id, 0.016f));
+
+    // A syntax error, a runtime error in the chunk and a non-table result all
+    // fail the load without touching what was there.
+    CHECK_FALSE(engine.loadScript("s", "local M = {}\nlocal x = ??? end\nreturn M\n"));
+    CHECK_FALSE(engine.lastError().empty());
+    CHECK_FALSE(engine.loadScript("s", "error('boom')"));
+    CHECK_FALSE(engine.loadScript("s", "return 42"));
+    CHECK(engine.lastError() == "Script 's' must return a table");
+
+    CHECK(engine.isScriptLoaded("s"));
+    CHECK(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.createInstance("s") != ScriptEngine::kInvalidInstance);
+
+    // A good reload still replaces the script and drops the old instances.
+    REQUIRE(engine.loadScript("s", kAccumScript));
+    CHECK_FALSE(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.lastError() == "Invalid instance id");
+}
+
 TEST_CASE("ScriptEngine: unload removes script")
 {
     ScriptEngine engine;
