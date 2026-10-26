@@ -4189,8 +4189,8 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
-		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-		if (ok)
+		GLint linkStatus = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linkStatus);
+		if (linkStatus)
 		{
 			// Same block bindings + sampler units as the mesh material path (GL 4.1
 			// has no layout(binding), so wire them by name post-link).
