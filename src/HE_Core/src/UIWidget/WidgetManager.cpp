@@ -3517,6 +3517,13 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 		}
 	}
 
+	// The two widgets the loop below has to recognise, as ids: everything from
+	// here on can run graph code, and a handler that creates or destroys a
+	// widget moves m_instances, which makes the pointers above compare equal to
+	// nothing.
+	const int topWId   = topW ? topW->id : 0;
+	const int thumbWId = thumbW ? thumbW->id : 0;
+
 	// ── A press on nothing closes a popup ────────────────────────────────────
 	// That IS the difference between a popup and a modal: one is dismissed by
 	// looking somewhere else, the other has to be answered. `topW` can only be
@@ -3610,9 +3617,18 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 		setDragOver(te != 0 ? tw : nullptr, te);
 	}
 
-	for (auto& w : m_instances)
+	// By id, found again for each: a handler (OnClicked, OnHovered...) may create
+	// or destroy widgets, which moves m_instances under a held reference or
+	// iterator. A widget made during the pass is first seen by the next event.
+	std::vector<int> widgetIds;
+	widgetIds.reserve(m_instances.size());
+	for (const Instance& inst : m_instances) widgetIds.push_back(inst.id);
+	for (const int widgetId : widgetIds)
 	{
-		const bool isTop = topW == &w;
+		Instance* current = find(widgetId);
+		if (!current) continue;   // destroyed by an earlier widget's handler
+		Instance& w = *current;
+		const bool isTop = topWId == widgetId;
 		const int  hot   = isTop ? topElem : 0;
 		// Hover, press and focus are DRAWN states (a button lights up, a field
 		// takes the ring), so a change in any of them is a reason to redraw —
@@ -3622,14 +3638,16 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 		          wasFocused = w.focusedElem;
 		struct DirtyOnStateChange
 		{
-			WidgetManager& m; const Instance& w;
+			// By id: the handlers this widget's block runs may have moved it.
+			WidgetManager& m; int widgetId;
 			int h, p, f;
 			~DirtyOnStateChange()
 			{
-				if (w.hoveredElem != h || w.pressedElem != p || w.focusedElem != f)
-					m.m_visualDirty = true;
+				if (const Instance* w = m.find(widgetId))
+					if (w->hoveredElem != h || w->pressedElem != p || w->focusedElem != f)
+						m.m_visualDirty = true;
 			}
-		} dirtyGuard{ *this, w, wasHovered, wasPressed, wasFocused };
+		} dirtyGuard{ *this, widgetId, wasHovered, wasPressed, wasFocused };
 		// Typed entry points: the compiled side takes a method, the interpreted
 		// one the same named path as before, and both still reach everyone bound
 		// to this widget's script.
@@ -3722,7 +3740,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			// the box's content, so a press that lands on it is a press on it —
 			// and letting the element underneath have the same press would
 			// select a row while dragging the thumb past it.
-			const int thumb = thumbW == &w ? thumbElem : 0;
+			const int thumb = thumbWId == widgetId ? thumbElem : 0;
 			if (thumb != 0)
 			{
 				w.draggingScroll = thumb;
@@ -4255,17 +4273,23 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			// the one thing a drag must not do.
 			if (w.pressedElem != 0 && w.pressedElem == hot && !m_dragAteClick)
 				activateElement(w, hot);
-			w.pressedElem    = 0;
-			w.draggingSlider = 0;
-			w.draggingText   = 0;
-			w.draggingSplit  = 0;
-			w.draggingColor  = 0;
-			w.draggingColumn = 0;
-			w.columnSeam     = -1;
+			// Found again: OnClicked is graph code, and opening a dialog from it
+			// is the commonest thing it does — that moves m_instances, so `w`
+			// may no longer be this widget. If a handler destroyed it, there is
+			// nothing left to release.
+			Instance* released = find(widgetId);
+			if (!released) continue;
+			released->pressedElem    = 0;
+			released->draggingSlider = 0;
+			released->draggingText   = 0;
+			released->draggingSplit  = 0;
+			released->draggingColor  = 0;
+			released->draggingColumn = 0;
+			released->columnSeam     = -1;
 			// Let go of the bar and it STAYS: a thumb has been put exactly
 			// where it was wanted, and throwing it on afterwards would undo the
 			// aim the drag just took.
-			w.draggingScroll = 0;
+			released->draggingScroll = 0;
 		}
 	}
 

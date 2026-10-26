@@ -18973,3 +18973,62 @@ TEST_CASE("Add Child themes the row it grafts and leaves the rest of the page al
             ++themedRows;
     CHECK(themedRows == 1);
 }
+
+TEST_CASE("Click: an OnClicked that creates a widget leaves the clicked one released")
+{
+    // OnClicked is graph code, and "open a dialog" is the commonest thing it
+    // does. Creating a widget reallocates m_instances while the pointer walk
+    // still holds the clicked widget; the release that follows the handler used
+    // to write through that reference. Crashes under guard malloc
+    // (DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib) or ASan before the fix.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree filler;
+    filler.canvasWidth = 100.0f; filler.canvasHeight = 100.0f;
+    registerWidget(cm, filler, nullptr, "mem://filler.hasset");
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(btn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 400.0f;
+    }
+    HorizonCode::Graph g;
+    {
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+        const int evId = g.addNode(ev);
+        HorizonCode::Node cw; cw.type = NodeType::CreateWidget; cw.s = "mem://filler.hasset";
+        const int cwId = g.addNode(cw);
+        REQUIRE(g.connect(evId, 0, cwId, 0));
+    }
+    registerWidget(cm, t, &g);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    int created = 0;
+    {
+        HorizonCode::Runtime::Services svc;
+        svc.createWidget = [&](const std::string& p, const HorizonCode::SpawnValues&)
+        {
+            ++created;
+            return wm.createWidget(cm, p);
+        };
+        rt.setServices(std::move(svc));
+    }
+    const int page = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(page != 0);
+
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, true, true);
+    REQUIRE(wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, false, true));
+    CHECK(created == 1);
+    CHECK(wm.count() == 2);
+
+    // …and the manager is still sound afterwards: a second click lands too.
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, false, true);
+    CHECK(created == 2);
+}
