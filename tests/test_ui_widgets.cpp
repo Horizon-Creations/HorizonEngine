@@ -18585,3 +18585,32 @@ TEST_CASE("Tree: a parent chain that is a cycle ends the rect and visibility wal
     t.find(root)->visible = false;
     CHECK_FALSE(HE::uiElementEffectiveVisible(t, *t.find(child)));
 }
+
+TEST_CASE("Serialise: a corner radius is written only when it differs from the type's own")
+{
+    // Button starts at 6, Panel at 0: the same number means a key on one and
+    // nothing on the other. Twice, so the second pass is the cached default.
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        auto button = HE::makeUIElement(HE::UIWidgetType::Button);
+        auto panel  = HE::makeUIElement(HE::UIWidgetType::Panel);
+        auto json = [](const HE::UIElement& e) { return nlohmann::json::parse(HE::uiElementToJson(e)); };
+
+        CHECK_FALSE(json(*button).contains("cornerRadius"));
+        CHECK_FALSE(json(*button).contains("cornerRadii"));
+        CHECK_FALSE(json(*panel).contains("cornerRadius"));
+
+        button->cornerRadius = glm::vec4(0.0f);
+        REQUIRE(json(*button).contains("cornerRadius"));
+        CHECK(json(*button)["cornerRadius"].get<float>() == 0.0f);
+
+        panel->cornerRadius = glm::vec4(6.0f);
+        REQUIRE(json(*panel).contains("cornerRadius"));
+        CHECK(json(*panel)["cornerRadius"].get<float>() == 6.0f);
+
+        panel->cornerRadius = glm::vec4(1.0f, 2.0f, 3.0f, 4.0f);
+        CHECK_FALSE(json(*panel).contains("cornerRadius"));
+        REQUIRE(json(*panel).contains("cornerRadii"));
+        CHECK(json(*panel)["cornerRadii"].size() == 4);
+    }
+}

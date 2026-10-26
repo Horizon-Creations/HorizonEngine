@@ -7,6 +7,7 @@
 #include <UIWidget/UIElements.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <unordered_map>
 
@@ -2229,6 +2230,25 @@ bool uiElementEffectiveEnabledWalk(const UIWidgetTree& tree, const UIElement& e)
 
 namespace
 {
+// The corner radius a freshly made element of `type` starts with; false when
+// there is no element of that type. Built once per type and thread, not once
+// per element saved: collaboration sends every edited element through here.
+bool defaultCornerRadius(UIWidgetType type, glm::vec4& out)
+{
+    struct Slot { bool known = false, exists = false; glm::vec4 radius{ 0.0f }; };
+    thread_local std::array<Slot, 256> cache;
+    Slot& slot = cache[static_cast<std::size_t>(type)];
+    if (!slot.known)
+    {
+        const std::unique_ptr<UIElement> proto = makeUIElement(type);
+        slot.known  = true;
+        slot.exists = proto != nullptr;
+        if (proto) slot.radius = proto->cornerRadius;
+    }
+    out = slot.radius;
+    return slot.exists;
+}
+
 nlohmann::json uiElementToJsonObj(const UIElement& e)
 {
     nlohmann::json o = {
@@ -2310,8 +2330,8 @@ nlohmann::json uiElementToJsonObj(const UIElement& e)
     // one number for all four corners keeps the ORIGINAL scalar key (so a widget
     // that only ever had one rounding still saves and loads exactly as it did),
     // and only genuinely different corners cost the four-element array.
-    if (const std::unique_ptr<UIElement> proto = makeUIElement(e.type());
-        !proto || e.cornerRadius != proto->cornerRadius)
+    glm::vec4 defaultRadius{};
+    if (!defaultCornerRadius(e.type(), defaultRadius) || e.cornerRadius != defaultRadius)
     {
         if (e.uniformCornerRadius()) o["cornerRadius"] = e.cornerRadius.x;
         else o["cornerRadii"] = { e.cornerRadius.x, e.cornerRadius.y,
