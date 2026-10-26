@@ -884,3 +884,23 @@ TEST_CASE("Theme: a widget authored before styles keeps the colours somebody typ
     CHECK(again.find(1)->themeStyled);
     CHECK(again.find(1)->themeStyle == "Card");
 }
+
+namespace
+{
+    // FNV-1a over the serialised theme: every colour, radius and style row of a
+    // shipped palette goes into the digest, so a refactor of how the palette is
+    // written down cannot change a value without this test saying so.
+    uint64_t themeDigest(const HE::UITheme& t)
+    {
+        uint64_t h = 1469598103934665603ull;
+        for (const unsigned char c : HE::uiThemeToJson(t))
+            h = (h ^ c) * 1099511628211ull;
+        return h;
+    }
+}
+
+TEST_CASE("Theme: the shipped palettes keep every value they were written with")
+{
+    CHECK(themeDigest(HE::uiDefaultTheme()) == 16988942397448614828ull);
+    CHECK(themeDigest(HE::uiAmberTheme())   == 12478593750194806795ull);
+}
