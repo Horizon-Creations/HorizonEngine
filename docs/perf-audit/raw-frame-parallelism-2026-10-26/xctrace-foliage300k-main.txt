@@ -1,0 +1,83 @@
+samples: 10119 (1 ms each while on-CPU)
+per thread (samples, P/E core):
+    9727  P     0  E  9719  Main Thread
+     392  P     0  E   392  HorizonEditor
+
+== Main Thread: 9727 samples; inclusive by function
+    9727 100.0%  main
+    9727 100.0%  HE::Application::Run(int, char**)
+    9727 100.0%  start
+    9423  96.9%  MetalRenderer::EncodeFrame(SDL_Window*, MetalRenderer::WindowTarget&, bool)
+    3537  36.4%  MetalRenderer::EncodeShadowMap(void*, float)
+    3536  36.4%  MetalRenderer::EncodeShadowMap(void*, float)::$_0::operator()(void*, int, int, glm::mat<4, 4, float, (glm::qualifier)0> const&, unsigned int) const
+    2862  29.4%  MetalRenderer::EncodeScene(void*, int, int, MetalDeferredFrame*)
+    2782  28.6%  RenderGraph::execute(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, std::__1::function<void (RenderPass const&, RenderPassI
+    2633  27.1%  MetalRenderer::EncodeFrame(SDL_Window*, MetalRenderer::WindowTarget&, bool)::$_3::operator()() const
+    2631  27.0%  MetalRenderer::EncodeSSAO(void*, int, int)
+    2474  25.4%  _platform_memmove
+    2026  20.8%  RenderSorter::batchDepthRuns(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, RenderSorter::DepthFilter, unsigned int, Render
+    2014  20.7%  RenderWorld::appendInstances(RenderObject const&, std::__1::vector<glm::mat<4, 4, float, (glm::qualifier)0>, std::__1::allocator<glm::mat<4, 4, float, (glm::qualifier)0>>
+    1555  16.0%  std::__1::__function::__func<MetalRenderer::EncodeScene(void*, int, int, MetalDeferredFrame*)::$_0, void (RenderPass const&, RenderPassIO const&, CommandBuffer const&)>::
+    1513  15.6%  glm::mat<4, 4, float, (glm::qualifier)0> glm::operator*<float, (glm::qualifier)0>(glm::mat<4, 4, float, (glm::qualifier)0> const&, glm::mat<4, 4, float, (glm::qualifier)0
+    1226  12.6%  GeometryPass::execute(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, CommandBuffer&)
+     292   3.0%  DrawCall::DrawCall(DrawCall const&)
+     292   3.0%  CommandBuffer::recordDraw(DrawCall const&)
+     263   2.7%  EditorApplication::OnRender(float)
+     240   2.5%  __bzero
+     188   1.9%  EditorUI::render(AppContext&, float)
+     186   1.9%  std::__1::vector<glm::mat<4, 4, float, (glm::qualifier)0>, std::__1::allocator<glm::mat<4, 4, float, (glm::qualifier)0>>>::resize(unsigned long)
+     166   1.7%  -[AGXG17GFamilyCommandBuffer renderCommandEncoderWithDescriptor:]
+     160   1.6%  RenderExtractor::extract(HorizonWorld&, RenderWorld&, float, EditorCameraOverride const*)
+     153   1.6%  EditorUI::renderEditor(AppContext&, float)
+     135   1.4%  -[AGXG17GFamilyRenderContext initWithCommandBuffer:descriptor:subEncoderIndex:framebuffer:]
+     123   1.3%  FrustumCuller::cull(RenderWorld const&, glm::mat<4, 4, float, (glm::qualifier)0> const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>>&)
+     120   1.2%  AGX::RenderContext<AGX::HAL300::Encoders, AGX::HAL300::Classes, AGX::HAL300::ObjClasses, AGX::HAL300::CommandEncoding>::encodeAndEmitRenderState(AGX::HAL300::VertexProgra
+     115   1.2%  parallel_for_run_chunks(ParallelForJob&)
+     110   1.1%  void parallel_for<FrustumCuller::cull(RenderWorld const&, glm::mat<4, 4, float, (glm::qualifier)0> const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned ch
+     106   1.1%  -[AGXG17GFamilyRenderContext drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:]
+     105   1.1%  Frustum::intersects(HE::AABB const&) const
+      76   0.8%  MetalRenderer::EncodeBloom(void*, void*, int, int)::$_0::operator()(id<MTLTexture>, id<MTLRenderPipelineState>, objc_object<MTLTexture>, void const*, unsigned long, unsig
+      76   0.8%  MetalRenderer::EncodeBloom(void*, void*, int, int)
+      72   0.7%  MetalRenderer::CullCameraObjects()
+      68   0.7%  MetalRenderer::EncodeScene(void*, int, int, MetalDeferredFrame*)::$_0::operator()(RenderPass const&, RenderPassIO const&, CommandBuffer const&) const::'lambda'(glm::mat<4
+      54   0.6%  FrustumCuller::cull(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>>&)
+      47   0.5%  MetalRenderer::EncodeCloudShadow(void*)
+      43   0.4%  OutlinerPanel::render(AppContext&)
+      41   0.4%  RenderSorter::sort(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>> const&, std::__1::vector<unsigned int, std::__1::allocator<unsi
+      38   0.4%  SceneSystems::tickWorld(HorizonWorld&, ContentManager&, IRenderer*, glm::vec<3, float, (glm::qualifier)0> const&, float, PhysicsWorld const*, bool)
+      36   0.4%  AGX::RenderContext<AGX::HAL300::Encoders, AGX::HAL300::Classes, AGX::HAL300::ObjClasses, AGX::HAL300::CommandEncoding>::setVertexProgramBuffer(AGXG17GFamilyBuffer*, unsig
+      33   0.3%  AGX::FramebufferGen3_3<AGX::HAL300::Encoders, AGX::HAL300::Classes, AGX::HAL300::ObjClasses>::FramebufferGen3_3(AGXG17GFamilyDevice*, AGX::HAL300::CommandBuffer*, AGX::HA
+      31   0.3%  AGX::Framebuffer<AGX::HAL300::Encoders, AGX::HAL300::Classes, AGX::HAL300::ObjClasses>::Framebuffer(AGXG17GFamilyDevice*, AGX::HAL300::CommandBuffer*, AGX::HAL300::Frameb
+      31   0.3%  MTLResourceListAddResource
+      31   0.3%  _ioGPUResourceListAddResourceEntry
+      30   0.3%  AGX::RenderContext<AGX::HAL300::Encoders, AGX::HAL300::Classes, AGX::HAL300::ObjClasses, AGX::HAL300::CommandEncoding>::beginRenderPass()
+      28   0.3%  objc_msgSend
+      28   0.3%  operator new(unsigned long)
+      27   0.3%  <deduplicated_symbol>
+
+== leaf (self) functions
+    2474  25.4%  _platform_memmove
+    1828  18.8%  RenderWorld::appendInstances(RenderObject const&, std::__1::vector<glm::mat<4, 4, float, (glm::qualifier)0>, std::__1::allocator<glm::mat<4, 4, float, (glm::qualifier)0>>
+    1513  15.6%  glm::mat<4, 4, float, (glm::qualifier)0> glm::operator*<float, (glm::qualifier)0>(glm::mat<4, 4, float, (glm::qualifier)0> const&, glm::mat<4, 4, float, (glm::qualifier)0
+    1144  11.8%  MetalRenderer::EncodeShadowMap(void*, float)::$_0::operator()(void*, int, int, glm::mat<4, 4, float, (glm::qualifier)0> const&, unsigned int) const
+     523   5.4%  GeometryPass::execute(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, CommandBuffer&)
+     387   4.0%  std::__1::__function::__func<MetalRenderer::EncodeScene(void*, int, int, MetalDeferredFrame*)::$_0, void (RenderPass const&, RenderPassIO const&, CommandBuffer const&)>::
+     380   3.9%  MetalRenderer::EncodeSSAO(void*, int, int)
+     240   2.5%  __bzero
+     105   1.1%  Frustum::intersects(HE::AABB const&) const
+      43   0.4%  AGX::RenderContext<AGX::HAL300::Encoders, AGX::HAL300::Classes, AGX::HAL300::ObjClasses, AGX::HAL300::CommandEncoding>::encodeAndEmitRenderState(AGX::HAL300::VertexProgra
+      36   0.4%  RenderExtractor::extract(HorizonWorld&, RenderWorld&, float, EditorCameraOverride const*)
+      30   0.3%  MTLResourceListAddResource
+      28   0.3%  objc_msgSend
+      27   0.3%  _xzm_xzone_malloc_tiny
+      26   0.3%  MetalRenderer::EncodeCloudShadow(void*)
+      22   0.2%  <deduplicated_symbol>
+      22   0.2%  _ioGPUResourceListAddResourceEntry
+      21   0.2%  void std::__1::__introsort<std::__1::_ClassicAlgPolicy, RenderSorter::sort(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>> const&,
+      20   0.2%  RenderSorter::sort(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>> const&, std::__1::vector<unsigned int, std::__1::allocator<unsi
+      19   0.2%  MetalRenderer::EncodeScene(void*, int, int, MetalDeferredFrame*)::$_0::operator()(RenderPass const&, RenderPassIO const&, CommandBuffer const&) const::'lambda'(glm::mat<4
+      17   0.2%  AGX::RenderUSCStateLoader<AGX::HAL300::Encoders, AGX::HAL300::Classes>::extractProgramVariantArgumentDirtyBits(AGX::HAL300::VertexProgramVariant const*, AGX::HAL300::Frag
+      15   0.2%  _xzm_free_main
+      14   0.1%  AGX::ResourceGroupUsage<AGX::HAL300::Encoders, AGX::HAL300::Classes, AGX::HAL300::ObjClasses>::setResource(IOGPUMetalResource const*, ResourceGroupBindingType, unsigned i
+      14   0.1%  RenderWorld::clear()
+      13   0.1%  TerrainSystem::stitchSeams(HorizonWorld&, ContentManager&, IRenderer*)

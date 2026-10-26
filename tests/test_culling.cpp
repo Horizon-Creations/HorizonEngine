@@ -16,6 +16,7 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonRendering/GiLandscape.h>
+#include <HorizonRendering/GiInstanceSurface.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -2055,6 +2056,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "gi_shadow.comp",     sh / "gi_shadow.comp" },
 			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp" },
 			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl" },
+			{ "gi_refl.comp",       sh / "gi_refl.comp" }, // Vulkan reflection kernel, its own giHash2/giPcg3d copy
 			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h" },
 			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp" },
 			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm" },
@@ -2251,19 +2253,46 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			return stripLineComments(gl.substr(from, to - from));
 		};
 
+		// The D3D12/D3D11 reflection kernel (kGiReflCSHLSL, HlslSources.h) is the
+		// fifth copy: a hit shaded from the same probe field in HLSL. Sliced by its
+		// literal name, like the GL ones.
+		const std::string hlslAll = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                     "Backends" / "D3D_Shared" / "HlslSources.h");
+		const std::string hlslDecl = "inline constexpr const char* kGiReflCSHLSL = R\"HLSL(";
+		const size_t hlslAt = hlslAll.find(hlslDecl);
+		REQUIRE(hlslAt != std::string::npos); // literal renamed/moved
+		const size_t hlslFrom = hlslAt + hlslDecl.size();
+		const size_t hlslTo   = hlslAll.find(")HLSL\";", hlslFrom);
+		REQUIRE(hlslTo != std::string::npos);
+
+		// gi_refl.comp (Vulkan, Thema 191 step 6) is the sixth copy: a whole
+		// file, like scene.frag above (not sliced by literal name — there is
+		// only one GLSL reflection kernel per file on this backend).
 		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag",
-		                                         "kUnlitFS (GL)", "kGiReflCS (GL)" };
+		                                         "kUnlitFS (GL)", "kGiReflCS (GL)",
+		                                         "kGiReflCSHLSL (D3D)", "gi_refl.comp (Vulkan)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib.substr(open + 3, close - open - 3)),
 			stripLineComments(readFile(sh / "scene.frag")),
 			glslLiteral("kUnlitFS"),
 			glslLiteral("kGiReflCS"),
+			stripLineComments(hlslAll.substr(hlslFrom, hlslTo - hlslFrom)),
+			stripLineComments(readFile(sh / "gi_refl.comp")),
 		};
 		checkGroup(names, src, {
-			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
+			// HLSL spells the parameter `float3 n`, and the regex runs before
+			// canonicalise() rewrites the dialect, so the D3D copy has its own.
+			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(float3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
 			{ "octahedral tile size",   { R"(const float kOct = ([0-9.]+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
 			                              R"(const int kOctSize = (\d+);)" } },
 			{ "probe distance floor",   { R"(max\(length\(toProbe\), ([0-9.e+-]+)\))" } },
 			{ "trilinear weight cutoff",{ R"(weight <= ([0-9.e+-]+)\) continue)" } },
@@ -3925,6 +3954,37 @@ bool near3(const glm::vec3& a, const glm::vec3& b, float eps = 1e-4f)
 	return glm::all(glm::lessThan(glm::abs(a - b), glm::vec3(eps)));
 }
 } // namespace
+
+TEST_CASE("GI auto landscape: a backend without the per-hit kernel gets the ground colour, not white")
+{
+	// D3D11, D3D12 and Vulkan shade a landscape chunk from one flat colour (HE::giInstanceSurface). The CPU fold
+	// cannot fold the auto material's texture-array BaseColor, so that colour was plain white.
+	HE::GiLandscape L = autoLandFixture();
+	std::vector<HE::GiLandscape> lands{ L };
+	RenderObject chunk;
+	chunk.landscapeIndex = 0;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	// Without the scene's landscapes it stays what it was: the object's own colour.
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr).albedo, { 1, 1, 1 }));
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, nullptr).albedo, { 1, 1, 1 }));
+	// With them: grass on flat ground, whatever the snow line (a flat colour cannot know the height).
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 0, 0 }));
+	// Dirt Amount mixes dirt into the ground.
+	lands[0].autoSlope.z = 0.5f;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.5f, 0.5f, 0 }));
+	// The instance tint still multiplies.
+	chunk.instanceTint = glm::vec4(0.5f, 1.0f, 1.0f, 1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.25f, 0.5f, 0 }));
+	// A chunk of no landscape, a bad index and a painted landscape keep their own colour.
+	RenderObject plain;
+	CHECK(near3(HE::giInstanceSurface(plain, nullptr, &lands).albedo, { 1, 1, 1 }));
+	chunk.landscapeIndex = 3;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+	lands[0].layerCount = 2;
+	chunk.landscapeIndex = 0;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+}
 
 TEST_CASE("GI auto landscape: the hit colour follows the material's slope and height masks")
 {

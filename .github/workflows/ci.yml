@@ -276,9 +276,46 @@ jobs:
           HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
 
+      # windows-latest's image carries several CPython versions side by side
+      # (one per hostedtoolcache entry, there for actions/setup-python to pick
+      # from) and GitHub rotates which one find_package(Python3) — unhinted,
+      # root CMakeLists.txt around line 502 — treats as newest, without
+      # notice: run 39465915278 (green) built HorizonPython.dll against
+      # 3.14.8, run 39476774032 (red, same commit) against 3.15.0, and only
+      # the second failed "Run tests" with "could not load the HorizonPython
+      # plugin" (test_python_scripting.cpp:59, he_tests/DynLib.cpp logs the
+      # LoadLibrary GetLastError beneath that, into HorizonEngine.log — not
+      # captured in the ctest output above). Neither hostedtoolcache
+      # directory ever showed up on PATH in either run's logs, so whatever
+      # made 3.14.8's DLL resolvable at runtime isn't something this pin
+      # relies on knowing: actions/setup-python fetches one fixed version and
+      # prepends its directory to PATH for every later step in this job,
+      # so Configure below and "Run tests" are guaranteed to agree on the same
+      # pythonXY.dll regardless of what the image does for unpinned versions.
+      # Pinned to 3.14 — the version the last known-good Windows run actually
+      # used (and the one cmake/BundlePython.cmake's and
+      # src/HE_Core/ProjectExporter.cpp's own comments already name as the
+      # example, "python314.dll") — rather than jumping to some other minor,
+      # to keep this a pure CI fix with no other behaviour change.
+      # NN-WS03 is a persistent box with one Python that does not rotate on
+      # its own — left alone, matching the brief ("Windows CI only").
+      - name: Pin Python (Windows, github-hosted)
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       # Windows: build a self-contained editor package — bundle cmake, deploy into the
       # workspace for the packaging step, and use static mbedTLS so there's no external
       # OpenSSL DLL dependency (a clean PC then needs only the C++ toolchain at build time).
+      #
+      # Python3_ROOT_DIR, when set (github-hosted only — pythonLocation comes
+      # from the setup-python step above), is FindPython3's highest-priority
+      # hint and pins find_package(Python3) to that exact interpreter.
+      # Python3_FIND_REGISTRY=NEVER alongside it so a Development.Embed
+      # component FindPython3 can't find under that root doesn't fall back to
+      # the registry and silently reintroduce the version drift. Both empty
+      # on NN-WS03, where find_package keeps its old unconstrained search.
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         env:
@@ -288,7 +325,13 @@ jobs:
           HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
           HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
           HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
+        run: |
+          $pyArgs = @()
+          if ($env:pythonLocation) {
+            $pyArgs += "-DPython3_ROOT_DIR=$env:pythonLocation"
+            $pyArgs += "-DPython3_FIND_REGISTRY=NEVER"
+          }
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package" @pyArgs
 
       # Configure has fetched everything; nothing is compiled yet.
       - name: Save FetchContent dependencies

@@ -58,9 +58,11 @@ using namespace HE;
 // Well-known UUID base for the built-in materials. `hi` stays far below the
 // version-4 bit pattern UUID::generate() enforces and clear of the DefaultAssets
 // sentinels, mesh_gen's 0x100, widget_gen's 0x200 and matfn_gen's 0x300 block.
-constexpr uint64_t kMatBaseHi = 0x0000000000000400ULL;
+// Not 0x400: landscape_tex_gen owns 0x400..0x41F, and one UUID names ONE asset in
+// the ContentManager (Water used to be {0x400, 1} next to T_Landscape_Grass_Albedo).
+constexpr uint64_t kMatBaseHi = 0x0000000000000600ULL;
 static_assert(kEngineWaterMaterialId.hi == kMatBaseHi + 0 && kEngineWaterMaterialId.lo == 1,
-              "Water is entry 0 of the 0x400 block — DefaultAssets.h must agree");
+              "Water is entry 0 of the 0x600 block — DefaultAssets.h must agree");
 
 constexpr float kColStep = 230.0f;
 constexpr float kRowStep = 110.0f;
@@ -1060,6 +1062,73 @@ const std::set<std::string> kWaterParams = {
     "Caustics", "Variation",
 };
 
+// ── Displacement demo (Thema 207) ────────────────────────────────────────────
+// The example for the Output node's Displacement pin: a quilted surface whose
+// cushions GPU tessellation pushes out along the normal (D3D11, D3D12, Vulkan,
+// OpenGL; Metal and Software draw it flat, the pattern still in the colour).
+//
+//     height = |sin(pi N u) · sin(pi N v)| · Height,   N = kDemoCells
+//
+// Plain sine maths and no noise on purpose: value noise hashes a lattice point
+// differently on two GPU compilers (docs/material-graph-tessellation-backends-
+// 2026-10-18.md, the D3D12/Vulkan band), and as a height that is a crack. The
+// height is ZERO on every cell border, and the borders include u, v = 0 and 1,
+// where a mesh's UVs jump: the duplicated vertices of a UV sphere's seam and
+// poles and of a cube's face edges all stay where they are, so nothing tears.
+// N is a baked constant and not a knob for the same reason: a fractional cell
+// count would put a cushion's flank on the seam.
+//
+// The colour reads the same cushion value, so the grooves are dark where the
+// surface stays down and the shape shows on a backend that cannot move it.
+constexpr float kDemoCells = 4.0f;
+
+Mb displacementDemoMaterial()
+{
+    Mb m;
+    const int height = m.param(T::ParamFloat, "Height", { 0.15f }, "Displacement",
+                               "How far a cushion's top rises along the surface normal, in metres. "
+                               "0.5 is the Output node's Max Displacement: more is clamped.", 0,
+                               0.0f, 0.5f);
+    const int top    = m.param(T::ParamColor, "TopColor", { 0.78f, 0.60f, 0.42f }, "Surface",
+                               "Colour of the cushion tops.", 1);
+    const int groove = m.param(T::ParamColor, "GrooveColor", { 0.16f, 0.10f, 0.07f }, "Surface",
+                               "Colour of the grooves between the cushions.", 2);
+
+    const int uv    = m.node(T::UV, 1, 4);
+    const int split = m.un(T::SplitRGBA, uv, 2, 4);
+    const int cells = m.k(kPi * kDemoCells, 2, 5.5f);
+    const int su    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 0 }, cells, 3, 4), 4, 4);
+    const int sv    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 1 }, cells, 3, 5), 4, 5);
+    const int quilt = m.un(T::Absolute, m.op(T::Multiply, su, sv, 5, 4.5f), 6, 4.5f);
+    m.comment("Cushions: zero on every cell border", 1, 4, 6, 2.5f);
+
+    const int disp  = m.op(T::Multiply, quilt, height, 7, 3);
+    const int base  = m.op3(T::Lerp, groove, top, quilt, 7, 1);
+    // Two constants made in one argument list would take their ids in the order the
+    // compiler happens to evaluate it (Clang first-first, MSVC and GCC last-first), so
+    // the .hasset would differ per platform: name them in order.
+    const int roughB  = m.k(0.5f, 6, 7);
+    const int roughA  = m.k(0.85f, 6, 6);
+    const int rough = m.op3(T::Lerp, roughA, roughB, quilt, 7, 6);
+
+    const int out = m.node(T::Output, 9, 3);
+    MatGraphNode& o = *m.g.findNode(out);
+    o.p[0] = 1.0f;                                                  // lit
+    o.p[1] = static_cast<float>(MatBlendMode::Opaque);
+    o.p[3] = static_cast<float>(MatDomain::Surface);
+    // Full factor up to 8 m, none from 40 m on; the clamp is the Height slider's top.
+    o.tess.maxFactor       = 16.0f;
+    o.tess.fadeNear        = 8.0f;
+    o.tess.fadeFar         = 40.0f;
+    o.tess.maxDisplacement = 0.5f;
+    m.link(base,  out, kMatOutputBaseColorPin);
+    m.link(rough, out, kMatOutputRoughnessPin);
+    m.link(disp,  out, kMatOutputDisplacementPin);
+    return m;
+}
+
+const std::set<std::string> kDisplacementDemoParams = { "Height", "TopColor", "GrooveColor" };
+
 // A cap on the longest wire chain, well inside what the editor's own stack
 // holds on every platform (CMakeLists.txt "MSVC main-thread stack"). A graph
 // that creeps past it fails here, not in a Debug test on another OS.
@@ -1080,9 +1149,10 @@ int main(int argc, char** argv)
 
     // ORDER IS IDENTITY: the index picks the UUID, and a scene that already uses
     // one of these stores that UUID. Append, never reorder.
-    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; };
+    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; bool doubleSided; };
     std::vector<Entry> entries;
-    entries.push_back({ "Water", waterMaterial(), &kWaterParams });
+    entries.push_back({ "Water", waterMaterial(), &kWaterParams, true });
+    entries.push_back({ "DisplacementDemo", displacementDemoMaterial(), &kDisplacementDemoParams, false });
 
     int ok = 0, index = 0;
     for (Entry& e : entries)
@@ -1118,7 +1188,7 @@ int main(int argc, char** argv)
         a.nodeGraphJson = materialGraphToJson(e.mb.g);
         // Not read by any backend today (every draw is two-sided), but it is
         // the truth about a water plane seen from below.
-        a.doubleSided   = true;
+        a.doubleSided   = e.doubleSided;
 
         // Pass 1 writes the graph; pass 2 writes what the editor's load path
         // makes of it (see the header: the packer ships the baked fields).

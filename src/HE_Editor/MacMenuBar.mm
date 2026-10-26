@@ -435,7 +435,7 @@ void install()
 		heAddToggle(window, @"Audio Mixer",           C::ToggleAudioMixer,    false);
 		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);
 		heAddToggle(window, @"Watch",                 C::ToggleWatch,         false);
-		heAddToggle(window, @"Task Board",            C::ToggleTaskBoard,     false);
+		heAddItem(window, @"Task Board",              C::OpenTaskBoard,       nil, 0, true);
 		// The secondary scene viewports, ticked while open like the panels above.
 		{
 			[window addItem:[NSMenuItem separatorItem]];
@@ -453,6 +453,8 @@ void install()
 		// The Game Instance stays: it is the one script an application really does
 		// own — the thing whose OnInit builds its interface.
 		heAddItem(window, @"Game Instance",  C::OpenGameInstance, nil, 0, true);
+		// Project planning: databases and pages, a whole editor tab.
+		heAddItem(window, @"Planner",        C::OpenPlanner,      nil, 0, true);
 		[window addItem:[NSMenuItem separatorItem]];
 		s_gameOnlyItems.push_back(heAddToggle(window, @"Landscape Tools", C::ToggleLandscapeTools, true));
 		[window addItem:[NSMenuItem separatorItem]];

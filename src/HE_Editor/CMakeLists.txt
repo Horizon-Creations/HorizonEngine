@@ -220,6 +220,9 @@ add_executable(HorizonEditor WIN32
 	# The task board as tools: list, create, update, assign (team only) and the
 	# team's notices, all through the Task Board panel's one writer.
 	McpToolsTaskBoard.cpp
+	# The Planner as tools (planner_*): databases, rows and pages, through the tab's one workspace.
+	McpToolsPlanner.cpp
+	PlannerMarkdown.cpp
 	# The clients' cameras in the viewport: a frustum with the connection number
 	# (debug lines) and a tag over the frame (ImGui), the presence marker's split.
 	McpCameraGizmos.cpp
@@ -278,6 +281,17 @@ add_executable(HorizonEditor WIN32
 	NotificationStore.cpp
 	NotificationBar.cpp
 	NotificationPopups.cpp
+	# The Planner's databases and pages (Config/Planner/*): data and files only, no
+	# ImGui; it shares TaskBoard's JSON helpers (TaskBoardJson.h).
+	Planner.cpp
+	PlannerImport.cpp
+	PlannerTasks.cpp
+	PlannerWorkspace.cpp
+	PlannerBoard.cpp
+	# ...and the editor tab on top of them (Window > Planner).
+	PlannerBoardView.cpp
+	PlannerFontText.cpp
+	PlannerPanel.cpp
 	# The project's to-do list (Config/TaskBoard.json): data and file only, no ImGui.
 	TaskBoard.cpp
 	# ...its team half: assignees and notices through a team link, no ImGui, no sockets.

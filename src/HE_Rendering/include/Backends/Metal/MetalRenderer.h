@@ -345,12 +345,8 @@ private:
 	// by both composites — see kSSRRoughMixFS.
 	float m_giReflBlurFloor    = 0.0f;
 	bool  m_giReflBlurEnabled  = true;  // IRenderer::GIReflectionSettings::blur
-	// How far, in SCREEN pixels, the widest allowed lobe (roughness =
-	// GIReflMaxRoughness) scatters when ONE ray samples it. Divided by the tier's
-	// ray count at use: the filter only stands in for the part of the lobe the
-	// rays missed. Absent entirely, every higher tier was noisier than the one
-	// below; held constant across tiers, every higher tier was blurrier.
-	static constexpr float kGIReflLobeScreenPx = 24.0f;
+	// Tier rays / resolution / blur floor and the lobe reach (kGIReflLobeScreenPx)
+	// come from HorizonRendering/GIReflectionTier.h, shared with every backend.
 	// Forward-path glossy mix (quality High): bakes the narrow/wide roughness
 	// lerp the DEFERRED composite does per pixel into the half-res texture the
 	// forward scene shader samples — it only gets one. Optional; null just means
