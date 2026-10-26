@@ -1739,6 +1739,32 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
 
 // ── CheckBox ─────────────────────────────────────────────────────────────────
 
+namespace
+{
+    // The size of a row made of a control and its label, shared by the checkbox
+    // and the radio button (the radio's row IS the checkbox's with a circle in
+    // it). Both axes are always computed; the caller writes the ones auto-size
+    // owns.
+    glm::vec2 labelledRowSize(const UICheckBox::BoxMetrics& m, const std::string& label,
+                              uint32_t fontAtlasKey, float fs)
+    {
+        HE::UITextLayout opts;
+        const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+        const glm::vec2 lm = label.empty()
+            ? glm::vec2(0.0f)
+            : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
+                 : HE::measureUIText(label, fs, 0.0f, opts));
+        // The same slack a label gets, and for the same reason: a run measured to
+        // the last pixel of its last glyph has no room for the one that overhangs.
+        const float width = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
+        // The row is as tall as the taller of the two things in it. The box is
+        // 1.15 of the font and the line is a touch over one, so in practice the box
+        // wins — but a font whose line box is taller than that must not be clipped
+        // by a row sized for a square nobody looks at.
+        return { width, std::max(m.box, lm.y + fs * 0.35f) };
+    }
+}
+
 void UICheckBox::applyAutoSize(float resolvedWidth, float fontScale)
 {
     (void)resolvedWidth;   // nothing here wraps, so the laid-out width says nothing
@@ -1751,23 +1777,10 @@ void UICheckBox::applyAutoSize(float resolvedWidth, float fontScale)
     // No height cap while measuring: the height is what is being computed here,
     // and capping the box against the size the element happens to carry would
     // measure the row against yesterday's answer.
-    const BoxMetrics m = metricsFor(fs, 0.0f, switchStyle);
-    HE::UITextLayout opts;
-    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    const glm::vec2 lm = label.empty()
-        ? glm::vec2(0.0f)
-        : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
-             : HE::measureUIText(label, fs, 0.0f, opts));
-    // The same slack a label gets, and for the same reason: a run measured to
-    // the last pixel of its last glyph has no room for the one that overhangs.
-    if (axes & kAxisX)
-        sizeX = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
-    // The row is as tall as the taller of the two things in it. The box is
-    // 1.15 of the font and the line is a touch over one, so in practice the box
-    // wins — but a font whose line box is taller than that must not be clipped
-    // by a row sized for a square nobody looks at.
-    if (axes & kAxisY)
-        sizeY = std::max(m.box, lm.y + fs * 0.35f);
+    const glm::vec2 size = labelledRowSize(metricsFor(fs, 0.0f, switchStyle), label,
+                                           fontAtlasKey, fs);
+    if (axes & kAxisX) sizeX = size.x;
+    if (axes & kAxisY) sizeY = size.y;
 }
 
 void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
@@ -3977,20 +3990,12 @@ void UIRadioButton::applyAutoSize(float resolvedWidth, float fontScale)
     (void)resolvedWidth;
     const int axes = autoSizedAxes();
     if (axes == 0) return;
-    // Word for word the checkbox's sum, because the row IS the checkbox's row
-    // with a circle in it — see UICheckBox::applyAutoSize for why each term.
+    // The checkbox's sum, because the row IS the checkbox's row with a circle
+    // in it (labelledRowSize).
     const float fs = fontSize * fontScale;
-    const UICheckBox::BoxMetrics m = metricsFor(fs, 0.0f);
-    HE::UITextLayout opts;
-    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    const glm::vec2 lm = label.empty()
-        ? glm::vec2(0.0f)
-        : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
-             : HE::measureUIText(label, fs, 0.0f, opts));
-    if (axes & kAxisX)
-        sizeX = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
-    if (axes & kAxisY)
-        sizeY = std::max(m.box, lm.y + fs * 0.35f);
+    const glm::vec2 size = labelledRowSize(metricsFor(fs, 0.0f), label, fontAtlasKey, fs);
+    if (axes & kAxisX) sizeX = size.x;
+    if (axes & kAxisY) sizeY = size.y;
 }
 
 void UIRadioButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
