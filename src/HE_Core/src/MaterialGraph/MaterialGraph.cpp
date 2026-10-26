@@ -274,6 +274,11 @@ const std::vector<MatNodeDesc>& registry()
         // ── v17: the sun, read from the lighting block ──
         { MatNodeType::Sun, "Sun", "Input",
           {}, { { "Direction", F::Vec3, 0 }, { "Color", F::Vec3, 0 } }, 0 },
+
+        // ── v18: FBM and its gradient in one evaluation ──
+        { MatNodeType::FbmGrad, "FBM Noise Gradient", "Procedural",
+          { { "UV", F::Vec2, 0 }, { "Scale", F::Float, 8 } },
+          { { "Value", F::Float, 0 }, { "dX", F::Float, 0 }, { "dY", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -537,6 +542,7 @@ struct EmitCtx
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
     bool usesNoiseI  = false;                            // 2D fbm on the integer hash (Fbm p[0] = 1)
+    bool usesNoiseIGrad = false;                         // the same fbm with its gradient (FbmGrad)
     bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
     // Texture bombing: the heBombGrid helper, and the grids already emitted —
     // key = scope + uv expression + grid params, value = the grid's variable
@@ -1340,9 +1346,16 @@ HE_MG_NOINLINE bool emitLogicNode(EmitCtx& c, const Scope& sc, const MatGraphNod
 HE_MG_NOINLINE bool emitPatternNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
                                     std::string& decl, std::vector<std::string>& pinExpr)
 {
-    (void)pinExpr;
     switch (n.type)
     {
+        case MatNodeType::FbmGrad:
+        {
+            c.usesNoiseI = c.usesNoiseIGrad = true;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "vec3 " + v + " = heFbmIGrad(" + uv + " * " + freq + ");";
+            pinExpr = { v + ".x", v + ".y", v + ".z" };
+            break;
+        }
         case MatNodeType::Panner:
         {
             const std::string sy = inputExpr(c, sc, n, 2, F::Float), sx = inputExpr(c, sc, n, 1, F::Float),
@@ -1845,6 +1858,24 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             " return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y); }\n"
             "float heFbmI(vec2 p) { float v = 0.0; float a = 0.5;"
             " for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p); p *= 2.0; a *= 0.5; }"
+            " return v; }\n";
+    if (c.usesNoiseIGrad)
+        // heFbmI and its gradient from the same corner hashes: the value noise is
+        // mix(mix(a,b,u.x), mix(c,d,u.x), u.y) with u = f²(3 − 2f), so its derivative
+        // needs only u' = 6f(1 − f); each octave doubles p, so its gradient counts twice
+        // as much as its value. Value is bit-for-bit heFbmI's (same operations in the
+        // same order); dX/dY are the exact derivative the engine water used to take by
+        // finite differences with two more fbm calls.
+        src +=
+            "vec3 heValueNoiseIGrad(vec2 p) { vec2 fl = floor(p); ivec2 i = ivec2(fl); vec2 f = p - fl;"
+            " vec2 u = f * f * (3.0 - 2.0 * f); vec2 du = 6.0 * f * (1.0 - f);"
+            " float a = heHashI2(i); float b = heHashI2(i + ivec2(1, 0));"
+            " float cc = heHashI2(i + ivec2(0, 1)); float d = heHashI2(i + ivec2(1, 1));"
+            " float val = mix(mix(a, b, u.x), mix(cc, d, u.x), u.y);"
+            " return vec3(val, du.x * ((b - a) + (a - b - cc + d) * u.y), du.y * ((cc - a) + (a - b - cc + d) * u.x)); }\n"
+            "vec3 heFbmIGrad(vec2 p) { vec3 v = vec3(0.0); float a = 0.5; float s = 1.0;"
+            " for (int k = 0; k < 4; k++) { vec3 n = heValueNoiseIGrad(p);"
+            " v += vec3(a * n.x, a * s * n.y, a * s * n.z); p *= 2.0; a *= 0.5; s *= 2.0; }"
             " return v; }\n";
     if (c.usesNormalPerturb && !domainStage)
         // The cotangent frame (Schüler) comes out multiplied by the SIGN of the
@@ -2648,6 +2679,9 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
     case MatNodeType::NoiseTexture:
         out[0] = out[1] = out[2] = out[3] = kApproxFbmMean;
         return true;
+    // No splat fits all three pins (a value and two slopes of mean 0): not folded.
+    case MatNodeType::FbmGrad:
+        return false;
     case MatNodeType::Checker:
         out[0] = out[1] = out[2] = out[3] = kApproxCheckerMean;
         return true;
