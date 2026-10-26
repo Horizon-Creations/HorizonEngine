@@ -21,6 +21,7 @@
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/EntityActive.h>
 #include "TestFsUtil.h"
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -45,6 +46,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
@@ -406,6 +408,101 @@ TEST_CASE("FrameCull::refine: every object gets the bound the serial walk gives 
 		CHECK(same);
 		CHECK(fc.holds(a, 5));
 	}
+}
+
+TEST_CASE("RenderExtractor: the wide mesh walk gives every object the fields the entity's components say, in view order")
+{
+	// 6000 entities = three blocks of the wide walk. Mixed on purpose: single-section meshes (bounds
+	// memo), a two-slot mesh (the serial fix-up), whole-mesh and slot overrides, param overrides, an
+	// unregistered mesh (no bounds), hidden and switched-off entities, and ones with no mesh at all.
+	ContentManager cm;
+	std::vector<HE::UUID> plain;
+	for (int k = 0; k < 5; ++k)
+	{
+		StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "plain" + std::to_string(k);
+		mesh.indices = { 0, 1, 2 };
+		mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = -1.0f - float(k);
+		mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] =  1.0f + float(k);
+		plain.push_back(cm.registerStaticMesh(mesh));
+	}
+	MaterialAsset ma; ma.type = HE::AssetType::Material; ma.name = "m";
+	ma.graphParamNames = { "Tint" }; ma.shaderParamData = std::vector<float>(64, 0.5f);
+	const HE::UUID matA = cm.registerMaterial(ma);
+	ma.name = "ov"; const HE::UUID matOv = cm.registerMaterial(ma);
+	StaticMeshAsset two; two.type = HE::AssetType::StaticMesh; two.name = "two";
+	two.indices = { 0, 1, 2, 3, 4, 5 };
+	MeshSection s0; s0.indexCount = 3; s0.materialId = matA;
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3; s1.materialId = matOv;
+	two.sections = { s0, s1 };
+	two.boundsMin[0] = two.boundsMin[1] = two.boundsMin[2] = -2.0f;
+	two.boundsMax[0] = two.boundsMax[1] = two.boundsMax[2] =  2.0f;
+	const HE::UUID twoId = cm.registerStaticMesh(two);
+	const HE::UUID missing{ 0xDEADBEEFull, 0x1234ull };
+
+	HorizonWorld world;
+	auto& reg = world.registry();
+	for (uint32_t i = 0; i < 6000; ++i)
+	{
+		auto e = world.createEntity("e" + std::to_string(i));
+		TransformComponent t; t.position = glm::vec3(float(i % 97), float(i % 13), -float(i % 31));
+		reg.emplace<TransformComponent>(e, t);
+		if (i % 37 == 0) continue;                                 // no mesh at all
+		MeshComponent mc;
+		mc.meshAssetId = i % 11 == 0 ? twoId : i % 29 == 0 ? missing : plain[i % 5];
+		mc.visible = i % 17 != 0;
+		mc.castsShadow = i % 3 != 0;
+		mc.receivesShadow = i % 7 != 0;
+		reg.emplace<MeshComponent>(e, mc);
+		if (i % 5 == 1)
+		{
+			MaterialComponent mat; mat.materialAssetId = matA;
+			if (i % 10 == 1) { MaterialParamOverride ov; ov.name = "Tint"; ov.value[0] = 2.0f; mat.paramOverrides.push_back(ov); }
+			if (i % 15 == 1) mat.slotOverrides = { matOv };
+			reg.emplace<MaterialComponent>(e, mat);
+		}
+		if (i % 23 == 0) HE::setEntityActive(reg, e, false);
+	}
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+
+	size_t k = 0;
+	std::unordered_map<HE::UUID, HE::AABB> local;   // the meshes' bounds, as the test sees them
+	for (int j = 0; j < 5; ++j)
+		local[plain[j]] = HE::AABB{ glm::vec3(-1.0f - float(j)), glm::vec3(1.0f + float(j)) };
+	local[twoId] = HE::AABB{ glm::vec3(-2.0f), glm::vec3(2.0f) };
+	const HE::ActiveFilter active(reg);
+	bool allOk = true;
+	for (auto [e, t, mesh] : reg.view<TransformComponent, MeshComponent>().each())
+	{
+		if (!mesh.visible || active.off(e)) continue;
+		REQUIRE(k < rw.objects.size());
+		const RenderObject& o = rw.objects[k++];
+		bool ok = o.entityId == static_cast<uint32_t>(e) && o.meshAssetId == mesh.meshAssetId
+		       && o.transform == t.worldMatrix && o.castsShadow == mesh.castsShadow
+		       && o.receivesShadow == mesh.receivesShadow;
+		const MaterialComponent* mc = reg.try_get<MaterialComponent>(e);
+		const bool multi = mesh.meshAssetId == twoId;
+		HE::UUID wantMat = mc ? mc->materialAssetId : HE::UUID{};
+		if (!multi && mc && mesh.meshAssetId != missing && mc->slotOverride(0) != HE::UUID{}) wantMat = mc->slotOverride(0);
+		ok = ok && o.materialAssetId == wantMat;
+		const auto it = local.find(mesh.meshAssetId);
+		if (it == local.end()) ok = ok && !o.worldBounds.isValid();
+		else
+		{
+			const HE::AABB want = it->second.transformed(t.worldMatrix);
+			ok = ok && o.worldBounds.min == want.min && o.worldBounds.max == want.max;
+		}
+		ok = ok && (multi ? o.sections.size() == 2 || o.sections.empty() : o.sections.empty());
+		const bool wantParam = mc && !mc->paramOverrides.empty() && wantMat == mc->materialAssetId;
+		ok = ok && (o.paramOverride.empty() != wantParam);
+		allOk = allOk && ok;
+		if (!ok) { INFO("entity ", uint32_t(e)); CHECK(ok); break; }
+	}
+	CHECK(allOk);
+	CHECK(k == rw.objects.size());
+	CHECK(k > 4000);   // the mix draws most of them
 }
 
 TEST_CASE("AABB build and ray intersection")

@@ -271,21 +271,6 @@ namespace
 	void extractMeshes(entt::registry& reg, RenderWorld& out, ContentManager* contentManager,
 	                   std::unordered_set<std::string>& sectionMaterialMissing)
 	{
-		struct EntityData {
-			glm::mat4 world;
-			HE::UUID  meshId;
-			HE::UUID  matId;
-			uint32_t  entId;
-			int       lod;
-			bool      castsShadow;
-			bool      receivesShadow;
-			HE::AABB  localBounds; // real mesh AABB; invalid → world bounds stay invalid (never culled)
-			std::vector<RenderSection> sections; // multi-section mesh only, else empty (see RenderObject)
-			std::vector<float> paramOverride; // merged HeParams block, or empty
-			HE::UUID  weightmapId;            // landscape layer weights (chunks only)
-			glm::vec4 avgLayerWeights{ 1.0f, 0.0f, 0.0f, 0.0f }; // their terrain-wide mean
-			int32_t   landscapeIndex = -1;    // → RenderWorld::landscapes
-		};
 
 		// ── Landscape table (GI reflection paint sampling) ───────────────────
 		// One entry per terrain, built BEFORE the mesh loop so every chunk can
@@ -362,164 +347,181 @@ namespace
 		}
 
 		auto meshView = reg.view<TransformComponent, MeshComponent>();
-		std::vector<EntityData> items;
-		items.reserve(meshView.size_hint());
+		// The entities in the order the view hands them out, which is the order of out.objects.
+		std::vector<entt::entity> ents;
+		ents.reserve(meshView.size_hint());
+		for (const entt::entity e : meshView) ents.push_back(e);
 		// Switched off (the Details panel's Active box, or an ancestor's) is a
 		// second reason not to draw, beside the per-component visible flag;
 		// the filter decides once per extract whether anything is off at all.
 		const HE::ActiveFilter active(reg);
-		// The three component pools the loop asks about, fetched once: reg.try_get<T> finds its
-		// pool by type on every call, and a pool that is empty (TerrainChunk, in most scenes)
-		// answers no without looking at the entity at all.
-		const entt::registry& creg      = reg;
-		const auto*           matPool   = creg.storage<MaterialComponent>();
-		const auto*           chunkPool = creg.storage<TerrainChunkComponent>();
-		const auto*           lodPool   = creg.storage<LODComponent>();
-		const bool            anyChunk  = chunkPool && !chunkPool->empty();
-		// What one walk learned about a one-section mesh: its validated bounds. 50k entities
-		// stand on a few hundred meshes, and each lookup in the content manager is two hash
-		// probes; a direct-mapped memo answers the repeats from cache. Misses and multi-section
-		// meshes take the full path below, as before.
-		struct MeshMemo { HE::UUID id; HE::AABB bounds; bool valid = false; };
-		std::vector<MeshMemo> memo(256);
-		for (auto [e, t, mesh] : meshView.each())
+		// The component pools the walk asks about, fetched once and CONST: reg.try_get<T> finds its
+		// pool by type on every call and, on a non-const registry, creates it when it is missing, which
+		// two workers must not do at once. A pool that is empty (TerrainChunk, in most scenes) answers
+		// no without looking at the entity at all.
+		const entt::registry& creg        = reg;
+		const auto*           matPool     = creg.storage<MaterialComponent>();
+		const auto*           chunkPool   = creg.storage<TerrainChunkComponent>();
+		const auto*           terrainPool = creg.storage<TerrainComponent>();
+		const auto*           lodPool     = creg.storage<LODComponent>();
+		const bool            anyChunk    = chunkPool && !chunkPool->empty();
+
+		// The walk runs wide in three phases over blocks of kBlock entities: (1) which entities draw,
+		// (2) every drawing entity built straight into its slot of out.objects (the slots are the
+		// prefix sums of phase 1, so the order is the serial walk's), (3) the multi-section meshes
+		// serially, because resolving their slots may load an asset and writes the missing-material
+		// set. Phases 1 and 2 only READ the registry and the ContentManager: its typed getters are
+		// two hash probes and a slot read, and the maps are written by the thread that pumps the
+		// loaders, which is this one and is waiting in parallel_for. A load in phase 3 can make a mesh
+		// resident that phase 2 saw as missing: its objects then carry invalid bounds, which the
+		// backend's refine fills in (the same fail-safe a mesh that streams in later has).
+		constexpr size_t kBlock = 2048;
+		const size_t     nBlocks = (ents.size() + kBlock - 1) / kBlock;
+		struct Block
 		{
-			if (!mesh.visible) continue; // hidden (e.g. a preloaded zone)
-			if (active.off(e)) continue;
-			items.emplace_back();   // filled in place: the struct is big, a push_back of a moved copy was a third of the loop
-			EntityData& d = items.back();
-			d.world  = t.worldMatrix;
-			d.meshId = mesh.meshAssetId;
-			d.matId  = {};
-			const MaterialComponent* matComp = (matPool && matPool->contains(e)) ? &matPool->get(e) : nullptr;
-			if (matComp)
+			std::vector<uint32_t> keep;          // indices into `ents` of the entities that draw
+			std::vector<uint32_t> needSections;  // out.objects slots of the multi-section / foreign-LOD0 ones
+			size_t                first = 0;     // slot of keep[0]
+		};
+		std::vector<Block> blocks(nBlocks);
+		parallel_for(nBlocks, [&](size_t bi) {
+			Block& blk = blocks[bi];
+			const size_t from = bi * kBlock, to = std::min(ents.size(), from + kBlock);
+			blk.keep.reserve(to - from);
+			for (size_t i = from; i < to; ++i)
 			{
-				d.matId = matComp->materialAssetId;
-				// Per-entity param overrides → merge into a full HeParams block now (serial,
-				// ContentManager-safe). Empty when the entity has no overrides / no material.
-				if (!matComp->paramOverrides.empty() && contentManager)
-					if (const MaterialAsset* ma = contentManager->getMaterial(d.matId))
-					{
-						std::vector<float> block(64, 0.0f); // 16 vec4 slots
-						const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
-						std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
-						for (const auto& ov : matComp->paramOverrides)
-							for (size_t s = 0; s < ma->graphParamNames.size() && s < 16; ++s)
-								if (ma->graphParamNames[s] == ov.name)
-								{
-									for (int k = 0; k < 4; ++k) block[s * 4 + k] = ov.value[k];
-									break;
-								}
-						d.paramOverride = std::move(block);
-					}
+				const entt::entity e = ents[i];
+				if (!meshView.get<MeshComponent>(e).visible) continue; // hidden (e.g. a preloaded zone)
+				if (active.off(e)) continue;
+				blk.keep.push_back(static_cast<uint32_t>(i));
 			}
-			// Terrain chunk → its parent landscape's painted layer weightmap, so a
-			// Landscape Layer Blend material samples the right terrain's paint. Read
-			// from the PARENT: the weights belong to the landscape, the chunks are
-			// just the pieces it renders as.
-			if (const auto* chunk = (anyChunk && chunkPool->contains(e)) ? &chunkPool->get(e) : nullptr)
-				if (reg.valid(chunk->terrain))
-					if (const auto* pt = reg.try_get<TerrainComponent>(chunk->terrain))
+		}, "ExtractFilter", 1);
+		size_t total = 0;
+		for (Block& blk : blocks) { blk.first = total; total += blk.keep.size(); }
+		out.objects.resize(total);
+
+		// What one block learned about a one-section mesh: its validated bounds. 50k entities stand
+		// on a few hundred meshes, and each lookup in the content manager is two hash probes; a
+		// direct-mapped memo answers the repeats from cache. Misses and multi-section meshes take the
+		// full path, as before.
+		struct MeshMemo { HE::UUID id; HE::AABB bounds; bool valid = false; };
+		parallel_for(nBlocks, [&](size_t bi) {
+			Block& blk = blocks[bi];
+			MeshMemo memo[256];
+			for (size_t j = 0; j < blk.keep.size(); ++j)
+			{
+				const entt::entity e    = ents[blk.keep[j]];
+				const size_t       slot = blk.first + j;
+				RenderObject&      obj  = out.objects[slot];
+				auto [t, mesh] = meshView.get<TransformComponent, MeshComponent>(e);
+				obj.meshAssetId    = mesh.meshAssetId;
+				obj.transform      = t.worldMatrix;
+				obj.entityId       = static_cast<uint32_t>(e);
+				obj.lod            = static_cast<uint8_t>(mesh.lodBias);
+				obj.castsShadow    = mesh.castsShadow;
+				obj.receivesShadow = mesh.receivesShadow;
+				HE::UUID matId{};
+				const MaterialComponent* matComp = (matPool && matPool->contains(e)) ? &matPool->get(e) : nullptr;
+				if (matComp)
+				{
+					matId = matComp->materialAssetId;
+					// Per-entity param overrides → merge into a full HeParams block now. Empty when
+					// the entity has no overrides / no material.
+					if (!matComp->paramOverrides.empty() && contentManager)
+						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
+						{
+							std::vector<float> block(64, 0.0f); // 16 vec4 slots
+							const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+							std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
+							for (const auto& ov : matComp->paramOverrides)
+								for (size_t k = 0; k < ma->graphParamNames.size() && k < 16; ++k)
+									if (ma->graphParamNames[k] == ov.name)
+									{
+										for (int c = 0; c < 4; ++c) block[k * 4 + c] = ov.value[c];
+										break;
+									}
+							obj.paramOverride = std::move(block);
+						}
+				}
+				// Terrain chunk → its parent landscape's painted layer weightmap, so a
+				// Landscape Layer Blend material samples the right terrain's paint. Read
+				// from the PARENT: the weights belong to the landscape, the chunks are
+				// just the pieces it renders as.
+				if (const auto* chunk = (anyChunk && chunkPool->contains(e)) ? &chunkPool->get(e) : nullptr)
+					if (creg.valid(chunk->terrain) && terrainPool && terrainPool->contains(chunk->terrain))
 					{
-						d.weightmapId = pt->weightmapTextureId;
+						const TerrainComponent& pt = terrainPool->get(chunk->terrain);
+						obj.weightmapTextureId = pt.weightmapTextureId;
 						// Same source, for the consumers that cannot sample a texel
 						// (the DDGI probe bounce) — see RenderObject.
-						d.avgLayerWeights = { pt->avgLayerWeights[0], pt->avgLayerWeights[1],
-						                      pt->avgLayerWeights[2], pt->avgLayerWeights[3] };
-						if (auto it = landscapeOf.find(static_cast<uint32_t>(chunk->terrain));
-						    it != landscapeOf.end())
-							d.landscapeIndex = it->second;
+						obj.landscapeLayerWeights = { pt.avgLayerWeights[0], pt.avgLayerWeights[1],
+						                              pt.avgLayerWeights[2], pt.avgLayerWeights[3] };
+						if (auto it = landscapeOf.find(static_cast<uint32_t>(chunk->terrain)); it != landscapeOf.end())
+							obj.landscapeIndex = it->second;
 					}
-			d.entId  = static_cast<uint32_t>(e);
-			d.lod    = mesh.lodBias;
-			d.castsShadow    = mesh.castsShadow;
-			d.receivesShadow = mesh.receivesShadow;
-			// Look up the real object-space bounds here (sequential — the
-			// ContentManager read must not race the parallel_for below).
-			const LODComponent* lodComp = (lodPool && lodPool->contains(e)) ? &lodPool->get(e) : nullptr;
-			const bool  ownLod0 = !lodComp || lodComp->levels.empty()
-			                   || lodComp->levels[0].meshId == HE::UUID{}
-			                   || lodComp->levels[0].meshId == d.meshId;
-			MeshMemo& memoSlot = memo[std::hash<HE::UUID>{}(d.meshId) & 255u];
-			const bool memoHit = contentManager && memoSlot.valid && memoSlot.id == d.meshId;
-			if (memoHit && ownLod0)
-			{
-				// A one-section mesh already seen this walk: its bounds, and the whole-draw material.
-				d.localBounds = memoSlot.bounds;
-				const HE::UUID ov = matComp ? matComp->slotOverride(0) : HE::UUID{};
-				if (ov != HE::UUID{}) d.matId = ov;
-				if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
-				continue;
-			}
-			if (contentManager)
-				if (const StaticMeshAsset* m = contentManager->getStaticMesh(d.meshId))
+				const LODComponent* lodComp = (lodPool && lodPool->contains(e)) ? &lodPool->get(e) : nullptr;
+				const bool ownLod0 = !lodComp || lodComp->levels.empty()
+				                  || lodComp->levels[0].meshId == HE::UUID{}
+				                  || lodComp->levels[0].meshId == mesh.meshAssetId;
+				// Look up the real object-space bounds (a read; the culler fills them in at the end).
+				HE::AABB local;   // invalid -> world bounds stay invalid (never culled)
+				enum class Kind { Unresolved, OneSection, Sections } kind = Kind::Unresolved;
+				MeshMemo& memoSlot = memo[std::hash<HE::UUID>{}(mesh.meshAssetId) & 255u];
+				if (contentManager && memoSlot.valid && memoSlot.id == mesh.meshAssetId && ownLod0)
 				{
-					HE::AABB b;
-					b.min = { m->boundsMin[0], m->boundsMin[1], m->boundsMin[2] };
-					b.max = { m->boundsMax[0], m->boundsMax[1], m->boundsMax[2] };
-					// Require a real, non-degenerate box. A mesh registered without a computed
-					// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
-					// and culling against it drops the object the moment its pivot exits the view.
-					if (b.isValid() && b.max != b.min) d.localBounds = b;
-					// The common case without a copy of the table: a one-section mesh with no
-					// other LOD0 to map its slot through. resolveEntitySlots answers it with an
-					// empty list and the whole draw's material (its one-section branch, with
-					// identity slots and no LOD0 table); copying the table and the LOD0 table per
-					// entity per frame was a quarter of the serial walk at 50k entities
-					// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 3).
-					if (m->sections.size() <= 1)
-					{
-						memoSlot.id = d.meshId; memoSlot.bounds = d.localBounds; memoSlot.valid = true;
-						if (ownLod0)
-						{
-							const HE::UUID ov = matComp ? matComp->slotOverride(0) : HE::UUID{};
-							if (ov != HE::UUID{}) d.matId = ov;
-							if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
-							continue;
-						}
-					}
-					// Material slots, after the entity's overrides (see
-					// resolveEntitySlots for the precedence and for when the list
-					// stays empty = the unchanged whole-mesh draw). `m` is dead
-					// after this (resolving may load), which is why the bounds were
-					// read first and the table is copied out.
-					std::vector<MeshSection> table = m->sections;
-					d.sections = resolveEntitySlots(std::move(table),
-					                                lod0SectionsOf(reg, e, d.meshId, *contentManager),
-					                                matComp, *contentManager,
-					                                sectionMaterialMissing, d.matId);
-					// The param block was merged for the whole-mesh material; a
-					// whole draw that a slot override redirected elsewhere draws
-					// that material plain.
-					if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
+					local = memoSlot.bounds;   // a one-section mesh already seen by this block
+					kind  = Kind::OneSection;
 				}
-		}
+				else if (contentManager)
+					if (const StaticMeshAsset* m = contentManager->getStaticMesh(mesh.meshAssetId))
+					{
+						HE::AABB b;
+						b.min = { m->boundsMin[0], m->boundsMin[1], m->boundsMin[2] };
+						b.max = { m->boundsMax[0], m->boundsMax[1], m->boundsMax[2] };
+						// Require a real, non-degenerate box. A mesh registered without a computed
+						// AABB leaves boundsMin==boundsMax=={0,0,0} — "valid" but a zero-volume point,
+						// and culling against it drops the object the moment its pivot exits the view.
+						if (b.isValid() && b.max != b.min) local = b;
+						if (m->sections.size() <= 1) { memoSlot.id = mesh.meshAssetId; memoSlot.bounds = local; memoSlot.valid = true; }
+						// A one-section mesh with no other LOD0 to map its slot through needs no table:
+						// resolveEntitySlots answers it with an empty list and the whole draw's material
+						// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 3). Everything
+						// else resolves its slots serially below.
+						kind = (m->sections.size() <= 1 && ownLod0) ? Kind::OneSection : Kind::Sections;
+					}
+				if (kind == Kind::OneSection)
+				{
+					const HE::UUID ov = matComp ? matComp->slotOverride(0) : HE::UUID{};
+					if (ov != HE::UUID{}) matId = ov;
+					if (matComp && matId != matComp->materialAssetId) obj.paramOverride.clear();
+				}
+				else if (kind == Kind::Sections) blk.needSections.push_back(static_cast<uint32_t>(slot));
+				obj.materialAssetId = matId;
+				obj.worldBounds     = local.isValid() ? local.transformed(t.worldMatrix) : HE::AABB{};
+			}
+		}, "ExtractMeshes", 1);
 
-		out.objects.resize(items.size());
-		parallel_for(items.size(), [&](size_t i) {
-			EntityData&   d   = items[i];   // each item is this job's alone: its vectors move out
-			RenderObject& obj = out.objects[i];
-			obj.meshAssetId     = d.meshId;
-			obj.materialAssetId = d.matId;
-			obj.transform       = d.world;
-			// Cull only against KNOWN bounds. A mesh whose real AABB isn't available yet (not
-			// resident — common while streaming or on an LOD swap, worse in packaged builds)
-			// must NOT be culled against a tiny unit-cube proxy: that box is far smaller than a
-			// large mesh, so the object vanishes while plainly in view. Leaving the bounds
-			// invalid makes the conservative culler keep it visible until the backend resolves
-			// the mesh and fills in the real bounds (the GPU still clips it if it is genuinely
-			// off-screen, so there is no visible cost).
-			obj.worldBounds     = d.localBounds.isValid() ? d.localBounds.transformed(d.world) : HE::AABB{};
-			obj.entityId        = d.entId;
-			obj.lod             = d.lod;
-			obj.castsShadow     = d.castsShadow;
-			obj.receivesShadow  = d.receivesShadow;
-			obj.paramOverride   = std::move(d.paramOverride); // per-entity HeParams block (empty = none)
-			obj.sections        = std::move(d.sections);      // material slots (multi-section mesh only)
-			obj.weightmapTextureId = d.weightmapId; // landscape layer weights (chunks only)
-			obj.landscapeLayerWeights = d.avgLayerWeights; // their terrain-wide mean
-			obj.landscapeIndex     = d.landscapeIndex;     // → RenderWorld::landscapes
-		}, "ExtractMeshes");
+		// Phase 3: material slots of the multi-section meshes, serial and in slot order. After the
+		// entity's overrides (see resolveEntitySlots for the precedence and for when the list stays
+		// empty = the unchanged whole-mesh draw). `m` is dead after this (resolving may load), which is
+		// why the table is copied out.
+		for (const Block& blk : blocks)
+			for (const uint32_t slot : blk.needSections)
+			{
+				RenderObject& obj = out.objects[slot];
+				const entt::entity e = static_cast<entt::entity>(obj.entityId);
+				const StaticMeshAsset* m = contentManager ? contentManager->getStaticMesh(obj.meshAssetId) : nullptr;
+				if (!m) continue;
+				const MaterialComponent* matComp = (matPool && matPool->contains(e)) ? &matPool->get(e) : nullptr;
+				std::vector<MeshSection> table = m->sections;
+				obj.sections = resolveEntitySlots(std::move(table),
+				                                  lod0SectionsOf(reg, e, obj.meshAssetId, *contentManager),
+				                                  matComp, *contentManager,
+				                                  sectionMaterialMissing, obj.materialAssetId);
+				// The param block was merged for the whole-mesh material; a whole draw that a slot
+				// override redirected elsewhere draws that material plain.
+				if (matComp && obj.materialAssetId != matComp->materialAssetId) obj.paramOverride.clear();
+			}
 	}
 
 	// ── ParticleGraph particles ────────────────────────────────────────────────
