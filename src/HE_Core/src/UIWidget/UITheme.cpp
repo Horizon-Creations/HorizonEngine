@@ -3,8 +3,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <array>
-
 namespace HE
 {
 namespace
