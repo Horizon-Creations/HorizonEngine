@@ -944,7 +944,7 @@ namespace
     // apart as well.
     //
     // Stateless like the box's walk, and for the same reason: no cached line
-    // table to invalidate, and the lists are short. `outLines` is an optional
+    // table to invalidate, and the lists are short. `outContentHeight` is an optional
     // by-product for the caller that wants the total height (size-to-content)
     // rather than one child's rect.
     UIWidgetRect wrapSlotRect(const UIWidgetTree& tree, const UIWrapBox& box,
