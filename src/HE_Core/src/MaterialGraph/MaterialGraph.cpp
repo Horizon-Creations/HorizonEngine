@@ -1177,6 +1177,11 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // result equals the plain fetch; only the shape between them changes. The
             // coordinate is clamped to the page's texel centres, which is what the
             // clamp sampler did to the plain uv anyway.
+            // One declaration line, in dependency order: the size probe and page test
+            // first, then the smoothed coordinate, then BOTH page fetches (so the
+            // implicit-derivative one stays outside any branch), then the sum. The
+            // statements are not reordered or split for readability: the emitted text
+            // is baked into the shipped .hasset files and keys the pipeline caches.
             decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
                  + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
                  + " vec2 " + wsz + " = vec2(" + v + "_p2 ? " + ts + ".x * 0.5 : " + ts + ".x, " + ts + ".y);"
