@@ -38,6 +38,7 @@
 
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
+#include <nlohmann/json.hpp>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -59,6 +60,8 @@
 
 namespace ExportDialogPanel
 {
+
+using json = nlohmann::json;
 
 // Build > Export Project modal state. Editable fields mirror the selected
 // ExportProfile (persisted in the .heproj); the export itself runs on a worker

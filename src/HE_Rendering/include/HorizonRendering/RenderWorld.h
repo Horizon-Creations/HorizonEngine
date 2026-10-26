@@ -356,6 +356,15 @@ public:
         return b ? b->count : 1u;
     }
 
+    // Instance i of obj as a world matrix: its own transform for an ordinary object (i is 0), the
+    // block's i-th plant (parent applied) for a cluster. A pure function of (obj, i), so a draw can
+    // read its matrices straight from here, on any thread, instead of unfolding into a list first.
+    glm::mat4 instanceMatrix(const RenderObject& obj, uint32_t i) const
+    {
+        const InstanceBlock* b = blockOf(obj);
+        return b ? b->world(i) : obj.transform;
+    }
+
     // Append the WORLD matrices of obj's instances to `out`: its own transform for an
     // ordinary object, the whole block (parent applied) for a cluster. The one place
     // that unfolds a cluster; GeometryPass and RenderSorter::batchDepthRuns call it.

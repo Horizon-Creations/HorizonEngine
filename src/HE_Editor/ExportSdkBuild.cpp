@@ -190,6 +190,11 @@ HE::hccg::DylibBuildSpec makeBuildSpec(const GameSdk& sdk, const fs::path& workD
     spec.logFile       = workDir / "build.log";
     spec.artifactNames = { "HorizonGame", "HorizonGame.exe" };
     spec.what          = "game executable";
+    // The dev lib set is the editor's own engine build: when that links the debug
+    // CRT (a Debug editor tree on MSVC), the game beside it must too.
+#if defined(_MSC_VER) && defined(_DEBUG)
+    if (sdk.profile == "dev") spec.configuration = "Debug";
+#endif
     spec.defines       = {
         "HorizonEngine_DIR=" + sdk.packageDir.generic_string(),
         "HE_BUILD_PROFILE=" + sdk.profile,
@@ -291,6 +296,7 @@ std::string buildCacheKey(const GameSdk& sdk, const HE::hccg::DylibBuildSpec& sp
     line("headers", trimmed(readText(sdk.packageDir / ("HorizonEngineHeaders-" + sdk.profile + ".txt"))));
     line("libs", libSetDigest(sdk));
     line("profile", sdk.profile);
+    line("configuration", spec.configuration);
     line("toolchain", toolchain.empty() ? std::string("unknown") : toolchain);
     for (const std::string& d : spec.defines) line("define", d);
     return key;

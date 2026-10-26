@@ -2,8 +2,9 @@
 #include "../HE_RENDERING_API.h"
 #include "CommandBuffer.h"
 #include "RenderWorld.h"
-#include <vector>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 
 class HE_RENDERING_API RenderSorter {
 public:
@@ -147,6 +148,26 @@ public:
     // per-object loop — the A/B for a hardware smoke test, the same role
     // HE_MTL_INSTANCING plays on Metal. Read once per process.
     static bool depthInstancingEnabled();
+
+    // Write `count` instance records of two matrices each ({mvp, model} on D3D11, D3D12 and Vulkan;
+    // fill(k, pair) sets pair[0] and pair[1]) to `dst`, the one loop behind every instanced depth draw
+    // of those backends. A big batch (a foliage cluster's thousands of plants) goes wide on the job
+    // system's workers like RenderWorld::writeInstancePieces does, a small one stays on the caller;
+    // the records are the same either way, so `fill` must be a pure function of k.
+    template <class Fill>
+    static void fillInstancePairs(uint8_t* dst, uint32_t count, Fill&& fill)
+    {
+        auto one = [dst, &fill](size_t k)
+        {
+            glm::mat4 pair[2];
+            fill(static_cast<uint32_t>(k), pair);
+            std::memcpy(dst + k * sizeof(pair), pair, sizeof(pair));
+        };
+        if (count >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled())
+            parallel_for(count, one, "FillInstancePairs", RenderWorld::kInstancePieceMax);
+        else
+            for (uint32_t k = 0; k < count; ++k) one(k);
+    }
 
     // HE_GRAPH_INSTANCING=0 sends a batch of a node-graph material back to the
     // per-instance loop with the material's plain program, instead of one draw

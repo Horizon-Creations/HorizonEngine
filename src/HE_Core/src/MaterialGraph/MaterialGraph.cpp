@@ -1051,6 +1051,7 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             // its own variant of it from its cell's hash, so a seam between two variants is
             // the grid's soft hex blend and no texture read is added.
             const bool variants = isArr && hasInput(sc, n, 3);
+            std::string sliceDecl; // the three variant slices; only the V > 1 branch below runs them
             if (variants)
             {
                 decl += "int " + v + "_V = " + variantCount(sampler, inputExpr(c, sc, n, 3, F::Float)) + "; ";
@@ -1063,24 +1064,38 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                 for (int k = 0; k < 3; ++k)
                 {
                     const std::string i = std::to_string(k);
-                    decl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + int(((" + g
-                          + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u), 0, textureSize(" + sampler
-                          + ", 0).z - 1); ";
+                    sliceDecl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + int(((" + g
+                              + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u), 0, textureSize(" + sampler
+                              + ", 0).z - 1); ";
                 }
             }
-            // One hex's read: its bombed uv, the unbombed gradients turned with it.
-            auto tap = [&](int k) {
+            // One hex's read: its bombed uv, the unbombed gradients turned with it. `variant` reads
+            // the slice the hash picked, otherwise the layer itself.
+            auto tap = [&](int k, bool variant) {
                 const std::string i = std::to_string(k);
                 const std::string coord = !isArr ? g + "t" + i
-                    : variants ? "vec3(" + g + "t" + i + ", float(" + v + "_s" + i + "))"
-                               : "vec3(" + g + "t" + i + ", " + v + "_l)";
+                    : variant ? "vec3(" + g + "t" + i + ", float(" + v + "_s" + i + "))"
+                              : "vec3(" + g + "t" + i + ", " + v + "_l)";
                 return "textureGrad(" + sampler + ", " + coord + ", " + g + "r" + i + " * " + g
                      + "dx, " + g + "r" + i + " * " + g + "dy)";
             };
+            // V = 1 (the 5-slice cache arrays: one variant per layer) can only ever pick variant 0, i.e.
+            // slice = layer. That is a branch on a value that is the same for the whole draw, taken
+            // around the reads, so the plain taps run exactly as they did before the Groups pin.
+            // Folding it into the slice maths instead does not help: the slice then depends on the hash
+            // and costs about 1.4 ms of GPU time on Metal (5.2 MP) even though it always selects
+            // slice = layer (docs/landscape-performance-regression-bombgridv-fix-2026-10-22.md).
             if (!normal)
             {
-                decl += "vec4 " + v + " = " + g + "w.x * " + tap(0) + " + " + g + "w.y * " + tap(1)
-                      + " + " + g + "w.z * " + tap(2) + ";";
+                auto blend = [&](bool variant) {
+                    return g + "w.x * " + tap(0, variant) + " + " + g + "w.y * " + tap(1, variant) + " + " + g
+                         + "w.z * " + tap(2, variant) + ";";
+                };
+                if (variants)
+                    decl += "vec4 " + v + "; if (" + v + "_V == 1) { " + v + " = " + blend(false) + " } else { "
+                          + sliceDecl + v + " = " + blend(true) + " }";
+                else
+                    decl += "vec4 " + v + " = " + blend(false);
                 pinExpr = { v + ".xyz", v + ".w" };
             }
             else
@@ -1090,12 +1105,21 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                 // the left in every hex; then the Normal Map node's frame.
                 c.usesNormalPerturb = true;
                 const float strength = n.p[3] > 0.0f ? n.p[3] : 1.0f;
-                for (int k = 0; k < 3; ++k)
-                {
-                    const std::string t = v + "_" + std::to_string(k);
-                    decl += "vec3 " + t + " = " + tap(k) + ".xyz * 2.0 - 1.0; " + t + ".xy = transpose("
-                          + g + "r" + std::to_string(k) + ") * " + t + ".xy; ";
-                }
+                auto reads = [&](bool variant) {
+                    std::string r;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const std::string t = v + "_" + std::to_string(k);
+                        r += (variants ? "" : "vec3 ") + t + " = " + tap(k, variant) + ".xyz * 2.0 - 1.0; " + t
+                           + ".xy = transpose(" + g + "r" + std::to_string(k) + ") * " + t + ".xy; ";
+                    }
+                    return r;
+                };
+                if (variants)
+                    decl += "vec3 " + v + "_0, " + v + "_1, " + v + "_2; if (" + v + "_V == 1) { " + reads(false)
+                          + "} else { " + sliceDecl + reads(true) + "} ";
+                else
+                    decl += reads(false);
                 decl += "vec3 " + v + "_t = " + g + "w.x * " + v + "_0 + " + g + "w.y * " + v + "_1 + "
                       + g + "w.z * " + v + "_2; " + v + "_t.xy *= " + fmtF(strength) + ";"
                       + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v

@@ -4,6 +4,7 @@
 #include "OpenGLShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -286,10 +287,8 @@ private:
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
-	// DrawScene's refine loop: every object's refined bound (what the frustum culls read) and
-	// their union (the cloud-shadow map's ground height), see the audit levers 5 and 7.
-	std::vector<HE::AABB> m_refinedBounds;
-	HE::AABB              m_frameSceneBox{};
+	FrameCull             m_frameCull;     // DrawScene's refined bounds, the culls over them and the scene box
+	void RefineObjectBounds();   // the real mesh bound of every object of the walk, once per walk (m_frameCull)
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh
@@ -704,11 +703,6 @@ private:
 	unsigned int m_depthInstancedProgram = 0;
 	int          m_uDepthInstVP          = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
-	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
-	// shadow pass never clobbers the camera cull the geometry pass relies on).
-	std::vector<uint8_t>  m_shadowVisible;
-	std::vector<uint32_t> m_shadowSorted;
-	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
 	// One depth layer (a cascade or a local light's view), culled, sorted and batched
 	// before any layer is drawn, the layers side by side (DrawScene's shadow branch).
 	struct ShadowView

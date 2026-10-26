@@ -4232,8 +4232,8 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
-		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-		if (ok)
+		GLint linkStatus = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linkStatus);
+		if (linkStatus)
 		{
 			// Same block bindings + sampler units as the mesh material path (GL 4.1
 			// has no layout(binding), so wire them by name post-link).
@@ -4273,9 +4273,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		}
 		else
 		{
-			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			char linkLog[2048]; glGetProgramInfoLog(prog, sizeof(linkLog), nullptr, linkLog);
 			HE_LOG_ERROR(RHI, "%s",
-				(std::string("OpenGLRenderer: UI material program link failed: ") + log).c_str());
+				(std::string("OpenGLRenderer: UI material program link failed: ") + linkLog).c_str());
 			glDeleteProgram(prog);
 		}
 	}
@@ -5210,13 +5210,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	// shadows land. Off the camera, lightly hysteresised against streaming
 	// jitter in the scene bounds.
 	{
-		// DrawScene gathered the union in its refine loop, just before this call.
-		HE::AABB sceneBox = m_frameSceneBox;
-		if (m_refinedBounds.size() != m_renderWorld.objects.size())
-		{
-			sceneBox = HE::AABB{};
-			for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
-		}
+		const HE::AABB sceneBox = m_frameCull.sceneBox(m_renderWorld, m_extractor.fullExtractCount());
 		const float g = sceneBox.isValid() ? sceneBox.min.y : 0.0f;
 		if (std::isnan(m_cloudShadowGroundY)) m_cloudShadowGroundY = g;
 		const float dead = cloudH * 0.35f;
@@ -6614,6 +6608,15 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	m_giReflHistValid = false;
 }
 
+void OpenGLRenderer::RefineObjectBounds()
+{
+	m_frameCull.refine(m_renderWorld, m_extractor.fullExtractCount(), [this](const RenderObject& obj) -> const HE::AABB*
+	{
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		return mesh ? &mesh->localBounds : nullptr;
+	});
+}
+
 // Probe-grid fit over the scene AABB (GIProbeGrid.h: spacing grows so the
 // whole scene — a 100 m terrain included — fits the probe budget). Metal
 // lesson: refresh worldBounds from the real mesh bounds first — the extractor
@@ -6626,9 +6629,7 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	RefineObjectBounds();
 	int unresolved = 0;
 	const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!sceneBox.isValid()) return;
@@ -8946,17 +8947,31 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		built.reserve(vertexCount * 8);
 		for (size_t v = 0; v < vertexCount; ++v)
 		{
-			built.insert(built.end(),
-				{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+			built.push_back(asset->vertices[v*3+0]);
+			built.push_back(asset->vertices[v*3+1]);
+			built.push_back(asset->vertices[v*3+2]);
 			if (v * 3 + 2 < asset->normals.size())
-				built.insert(built.end(),
-					{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+			{
+				built.push_back(asset->normals[v*3+0]);
+				built.push_back(asset->normals[v*3+1]);
+				built.push_back(asset->normals[v*3+2]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 			if (v * 2 + 1 < asset->uvs.size())
-				built.insert(built.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+			{
+				built.push_back(asset->uvs[v*2+0]);
+				built.push_back(asset->uvs[v*2+1]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 		}
 		vtx = &built;
 		mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
@@ -9041,17 +9056,31 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 	interleaved.reserve(vertexCount * 8);
 	for (size_t v = 0; v < vertexCount; ++v)
 	{
-		interleaved.insert(interleaved.end(),
-			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		interleaved.push_back(asset->vertices[v*3+0]);
+		interleaved.push_back(asset->vertices[v*3+1]);
+		interleaved.push_back(asset->vertices[v*3+2]);
 		if (v * 3 + 2 < asset->normals.size())
-			interleaved.insert(interleaved.end(),
-				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		{
+			interleaved.push_back(asset->normals[v*3+0]);
+			interleaved.push_back(asset->normals[v*3+1]);
+			interleaved.push_back(asset->normals[v*3+2]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 		if (v * 2 + 1 < asset->uvs.size())
-			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		{
+			interleaved.push_back(asset->uvs[v*2+0]);
+			interleaved.push_back(asset->uvs[v*2+1]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 	}
 
 	// Bone IDs per vertex  (4 × uint32, attrib loc 3) — zero-padded if missing
@@ -9892,7 +9921,8 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 			std::vector<float> lineVerts; // pos3 + color3 per vertex
 			const glm::vec3 jointColor(1.0f, 0.85f, 0.15f), boneColor(0.2f, 0.9f, 1.0f);
 			auto pushVert = [&](const glm::vec3& p, const glm::vec3& c) {
-				lineVerts.insert(lineVerts.end(), { p.x, p.y, p.z, c.x, c.y, c.z });
+				lineVerts.push_back(p.x); lineVerts.push_back(p.y); lineVerts.push_back(p.z);
+				lineVerts.push_back(c.x); lineVerts.push_back(c.y); lineVerts.push_back(c.z);
 			};
 			const float markerSize = std::max(extent * 0.015f, 0.005f);
 			for (size_t i = 0; i < asset->skeleton.size(); ++i)
@@ -10305,8 +10335,12 @@ void OpenGLRenderer::DrawParticlePreviewGeometry(const HE::UUID& materialId,
 		std::vector<float> inst;
 		inst.reserve(particles.size() * 8);
 		for (const auto& p : particles)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
-			                          p.color.r, p.color.g, p.color.b, p.alpha });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.color.r); inst.push_back(p.color.g); inst.push_back(p.color.b);
+			inst.push_back(p.alpha);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particlePreviewInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
@@ -10500,10 +10534,10 @@ void OpenGLRenderer::DrawDebugLines(const glm::mat4& viewProj)
 	verts.reserve(m_debugLines.size() * 12); // 2 verts * 6 floats
 	for (const DebugLine& l : m_debugLines)
 	{
-		verts.insert(verts.end(), { l.start.x, l.start.y, l.start.z,
-		                            l.color.r,  l.color.g,  l.color.b });
-		verts.insert(verts.end(), { l.end.x,   l.end.y,   l.end.z,
-		                            l.color.r,  l.color.g,  l.color.b });
+		verts.push_back(l.start.x); verts.push_back(l.start.y); verts.push_back(l.start.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
+		verts.push_back(l.end.x);   verts.push_back(l.end.y);   verts.push_back(l.end.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
 	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, m_debugLineVBO);
@@ -11266,26 +11300,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	const glm::vec3 sunDir = m_renderWorld.sunDirection;
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
-	// The same loop keeps a compact copy of every bound for the frustum culls of this frame
-	// (camera and cascades) and their union for the cloud-shadow map, as Metal does
-	// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, levers 5 and 7).
-	m_refinedBounds.resize(m_renderWorld.objects.size());
-	m_frameSceneBox = HE::AABB{};
-	for (size_t i = 0; i < m_renderWorld.objects.size(); ++i)
-	{
-		RenderObject& obj = m_renderWorld.objects[i];
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
-		m_refinedBounds[i] = obj.worldBounds;
-		m_frameSceneBox.expand(obj.worldBounds);
-	}
+	// Also keeps a compact copy of every bound for this frame's frustum culls (camera and cascades)
+	// and, on demand, their union for the cloud-shadow map (FrameCull; audit levers 5 and 7).
+	RefineObjectBounds();
+	const uint64_t walk = m_extractor.fullExtractCount();
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
-	m_culler.cull(m_refinedBounds, viewProjClean, m_visible);
+	m_frameCull.cull(m_culler, m_renderWorld, walk, viewProjClean, m_visible);
 	// Occlusion (off by default): drops what the frustum kept but a nearer
 	// opaque surface hides — the same m_visible the sort and every camera pass
 	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
-	// The shadow pass below culls into its own m_shadowVisible and is untouched.
+	// The shadow pass below culls into its own per-view scratch (m_shadowViews) and is untouched.
 	m_counters.occlusionCulled =
 		m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
@@ -11408,10 +11433,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					const char* e = std::getenv("HE_MTL_PARALLEL_SHADOW");
 					return !(e && *e && std::atoi(e) == 0);
 				}();
-				auto prepare = [this](size_t v)
+				auto prepare = [this, walk](size_t v)
 				{
 					ShadowView& sv = m_shadowViews[v];
-					m_culler.cull(m_refinedBounds, sv.viewProj, sv.visible);
+					m_frameCull.cull(m_culler, m_renderWorld, walk, sv.viewProj, sv.visible);   // const: safe side by side
 					sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
 					RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
 				};
@@ -13689,7 +13714,11 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		inst.clear();
 		inst.reserve(batch.instances.size() * 5);
 		for (const ParticleInstance& p : batch.instances)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.t01);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particleInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),

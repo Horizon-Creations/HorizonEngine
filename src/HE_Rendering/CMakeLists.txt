@@ -303,6 +303,7 @@ add_library(HorizonRendering SHARED
     src/FoliageExtract.cpp
     src/RenderWorld.cpp
     src/FrustumCuller.cpp
+    src/FrameCull.cpp
     src/OcclusionCuller.cpp
     src/RenderSorter.cpp
     src/ScenePick.cpp
