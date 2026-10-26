@@ -351,6 +351,18 @@ Result run(const Options& o)
 		if (job) ::TerminateJobObject(job, 1);
 		else     ::TerminateProcess(pi.hProcess, 1);
 		::WaitForSingleObject(pi.hProcess, 5000);
+		if (!job)
+		{
+			// A grandchild that inherited the pipes survives TerminateProcess and keeps
+			// them open, so the readers never see EOF. Abort their blocking ReadFile
+			// instead; retried because a reader between two reads has none to abort.
+			for (std::thread* reader : { &outThread, &errThread })
+			{
+				const HANDLE h = reader->native_handle();
+				do { ::CancelSynchronousIo(h); }
+				while (::WaitForSingleObject(h, 50) == WAIT_TIMEOUT);
+			}
+		}
 	}
 
 	outThread.join();
