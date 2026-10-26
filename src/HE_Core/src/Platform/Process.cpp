@@ -644,6 +644,9 @@ std::optional<std::filesystem::path> which(std::string_view exe)
 		return std::nullopt;
 	}
 
+	// dir / "" is the directory itself, and a searchable directory passes access(X_OK).
+	if (name.empty()) return std::nullopt;
+
 	const char* path = ::getenv("PATH");
 	if (!path) return std::nullopt;
 
