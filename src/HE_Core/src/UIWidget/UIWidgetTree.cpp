@@ -2851,7 +2851,7 @@ std::vector<std::string> UITextCatalog::languageNames() const
 {
     std::vector<std::string> out;
     out.reserve(languages.size());
-    for (const auto& [name, entries] : languages) { (void)entries; out.push_back(name); }
+    for (const auto& lang : languages) out.push_back(lang.first);
     return out;
 }
 
