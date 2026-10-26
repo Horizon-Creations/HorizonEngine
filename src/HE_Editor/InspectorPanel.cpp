@@ -865,6 +865,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	// the whole call, so an early return out of any section still unwinds it and
 	// no later panel inherits "Rigid Body" as its tooltip scope.
 	HE::Ed::Help::Scope helpScope("");
+	// The Details panel's layout: names in a column on the left, controls in
+	// the column to its right (Row::InlineLabels), and a tighter row pitch than
+	// the editor-wide theme — this panel is the longest list in the editor, and
+	// at the theme's padding a property cost 40 px. Popups opened from here
+	// (the component menu, the asset picker) are separate windows but share the
+	// style stack, so they are compact as well, which suits them.
+	EditorWidgets::Row::InlineLabels labelColumn;
+	// Not in the silent modes: listComponents promises to emit no ImGui calls.
+	if (!quiet)
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8.0f, 4.0f));
+	}
+	struct PopStyle
+	{
+		bool on;
+		~PopStyle() { if (on) ImGui::PopStyleVar(2); }
+	} popStyle{ !quiet };
 	// The same slot for the undo history: every entry a component section
 	// pushes is labelled with that component ("Light", "Rigid Body") — set by
 	// componentHeader alongside the help scope — and unwound here so no later
@@ -911,7 +929,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		// own `if (removed) registry.remove<T>(entity)` does the rest.
 		removeLabel = std::string("Remove ") + label;
 		if (removeMatching) { removed = removable; structuralChange = removable; return false; }
+		// The one look every component header has: a taller bar than the rows
+		// under it, the heading colour, and a gap above so the sections read
+		// as blocks rather than one long list.
+		ImGui::Spacing();
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar();
 		// What the component IS, on the header itself — the question that comes
 		// before any of its properties.
 		{
@@ -1653,7 +1679,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				auto& l = alc->layers[i];
 				ImGui::PushID(static_cast<int>(i));
-				ImGui::Separator();
+				EditorWidgets::subHeading(("Layer " + std::to_string(i + 1)).c_str());
 
 				// The name is what the scripting API addresses, so it comes
 				// first. Edited in place like every other InputText row here
@@ -1755,7 +1781,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				auto& f = ik->feet[i];
 				ImGui::PushID(static_cast<int>(i));
-				ImGui::Separator();
+				EditorWidgets::subHeading(("Foot " + std::to_string(i + 1)).c_str());
 
 				// The three names invalidate the resolution cache, so they set the
 				// dirty flag rather than relying on it being noticed next frame.
@@ -1805,7 +1831,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				trackEdit();
 			}
 
-			ImGui::Separator();
+			EditorWidgets::subHeading("Look At");
 			auto& la = ik->lookAt;
 			EditorWidgets::checkbox("Look At", &la.enabled); trackEdit();
 			if (la.enabled)
@@ -2080,7 +2106,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 				if (slots.size() > 1)
 				{
-					ImGui::SeparatorText("Slot Overrides");
+					EditorWidgets::subHeading("Slot Overrides");
 					for (size_t i = 0; i < slots.size(); ++i)
 					{
 						// What the slot draws when left empty: its own material,
@@ -2131,7 +2157,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 				// Surface (PBR scalars) — applied live (the renderer reads them
 				// from the shared MaterialAsset each frame); "Save Material" persists.
-				ImGui::SeparatorText("Surface");
+				EditorWidgets::subHeading("Surface");
 				Row::colorEdit3("Base Color", mat->baseColor);
 				Row::sliderFloat("Metallic",  &mat->metallic,  0.0f, 1.0f, "%.2f");
 				Row::sliderFloat("Roughness", &mat->roughness, 0.0f, 1.0f, "%.2f");
@@ -2183,7 +2209,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				// extractor merges them onto the material's defaults each frame.
 				if (!mat->graphParamNames.empty())
 				{
-					ImGui::SeparatorText("Material Parameters (this entity)");
+					EditorWidgets::subHeading("Material Parameters (this entity)");
 					// Index of the override for `nm`, or -1. Index-based (never a pointer
 					// into the vector) so a push_back/erase this frame can't dangle.
 					auto overrideIndex = [&](const std::string& nm) -> int {
@@ -2543,7 +2569,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// ── Lag ──────────────────────────────────────────────────────────
 			// Only the KNOBS live here. The smoothed pose behind them is play
 			// state, is not saved, and has nothing an author could set.
-			ImGui::SeparatorText("Lag");
+			EditorWidgets::subHeading("Lag");
 			EditorWidgets::checkbox("Camera Lag", &rig->lag.enabled); trackEdit();
 			if (rig->lag.enabled)
 			{
@@ -3353,7 +3379,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Tessellation: a level finer than LOD0 for the chunks near the
 			// camera, smooth between the height samples, plus a detail map's
 			// displacement. Any change rebuilds the chunks (changed → dirty).
-			ImGui::SeparatorText("Tessellation");
+			EditorWidgets::subHeading("Tessellation");
 			{
 				static const char* const kFactors[] = { "Off", "2x", "4x" };
 				int f = t->tessellationFactor >= 4 ? 2 : (t->tessellationFactor >= 2 ? 1 : 0);
@@ -3382,7 +3408,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// end against the ground. The water's own settings, so they go through
 			// setShoreClip and stay out of `changed` — which would regenerate every
 			// chunk of the landscape for a flag that only the water reads.
-			ImGui::SeparatorText("Water");
+			EditorWidgets::subHeading("Water");
 			{
 				bool clip = t->water.clipToGround;
 				if (EditorWidgets::checkbox("Clip To Ground##tcw", &clip))
@@ -3400,7 +3426,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
 			// (shown for reference) and can no longer change the terrain.
-			ImGui::SeparatorText("Noise (set at creation)");
+			EditorWidgets::subHeading("Noise (set at creation)");
 			ImGui::BeginDisabled();
 			Row::inputInt("Seed##tc",       &t->seed);
 			int oct = t->octaves;
@@ -3623,8 +3649,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			// Where the layer may grow (FoliageLayer::slopeMin ..): all of it decides
 			// the scatter, so every edit re-scatters this layer when it is let go.
-			ImGui::Separator();
-			ImGui::TextUnformatted("Placement");
+			EditorWidgets::subHeading("Placement");
 			EditorWidgets::helpForKey("Foliage/Placement");
 			Row::dragFloat("Slope Min##fol", &fol->slopeMin, 0.005f, 0.0f, 1.0f, "%.2f");
 			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
@@ -3651,8 +3676,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Farther detail levels (FoliageLayer::lods): a simpler mesh, a thinner
 			// layer, the engine's cross card at the far end. The mesh above is the
 			// level the camera stands in; none of this re-scatters.
-			ImGui::Separator();
-			ImGui::TextUnformatted("Detail Levels");
+			EditorWidgets::subHeading("Detail Levels");
 			EditorWidgets::helpForKey("Foliage/Detail Levels");
 			int  removeLod = -1;
 			bool sortLods  = false;

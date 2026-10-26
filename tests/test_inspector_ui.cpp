@@ -329,13 +329,15 @@ TEST_CASE("inspector ui: a spline's Details section closes the line, adds and re
 		he_ui::writeBmp(img, std::string(dir) + "/inspector-spline.bmp");
 
 	const float leftX = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+	// A switch sits in the control column now, right of its name.
+	const float closedX = 10.0f + ImGui::GetStyle().WindowPadding.x + 180.0f;
 	REQUIRE(p.splineClosed != 0);
-	const float closedY = yOf(p, p.splineClosed, leftX);
+	const float closedY = yOf(p, p.splineClosed, closedX);
 	REQUIRE_MESSAGE(closedY > 0.0f, "an entity with a SplineComponent has no Closed switch on the panel");
 
 	REQUIRE_FALSE(reg.get<SplineComponent>(line).closed);
 	REQUIRE_FALSE(undo.canUndo());
-	clickAt(p, leftX, closedY);
+	clickAt(p, closedX, closedY);
 	CHECK(reg.get<SplineComponent>(line).closed);
 	CHECK(undo.canUndo());
 	CHECK(reg.get<SplineComponent>(line).controlPoints.size() == 2);   // nothing else moved
@@ -581,7 +583,7 @@ TEST_CASE("inspector ui: Replicates is one click on any entity, and switching it
 	                "an entity without a NetworkComponent has no Replication header");
 
 	// One click on the box, down the left edge like the Active test.
-	const float leftX = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+	const float leftX = 10.0f + ImGui::GetStyle().WindowPadding.x + 180.0f;   // control column: the name is on the left
 	REQUIRE(p.replicatesBox != 0);
 	const float boxY = yOf(p, p.replicatesBox, leftX);
 	REQUIRE_MESSAGE(boxY > 0.0f, "the Replicates box is not under the pointer anywhere");
@@ -985,14 +987,16 @@ TEST_CASE("inspector ui: the engine water material shows all fourteen parameters
 		he_ui::writeBmp(img, std::string(dir) + "/inspector-water.bmp");
 
 	// Down the panel at the first field's x, item by item.
-	const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 40.0f;
+	const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 210.0f;
 	struct Item { ImGuiID id; float y; };
 	std::vector<Item> items;
 	{
 		ImGuiID last = 0;
 		for (float y = 12.0f; y < float(TH) - 12.0f; y += 2.0f)
 		{
-			const ImGuiID id = idAtT(x, y);
+			ImGuiID id = idAtT(x, y);
+			// The two buttons sit at the panel's left edge, under the control column.
+			if (id == 0) id = idAtT(x - 170.0f, y);
 			if (id != 0 && id != last) items.push_back({ id, y + 3.0f });
 			last = id;
 		}
@@ -1112,7 +1116,7 @@ TEST_CASE("inspector ui: each weather sound slot says what it plays and explains
 	// Down the panel at a point inside the slot buttons (past the label), until every
 	// slot's button has been under the pointer. A slot the panel does not draw, or
 	// draws under another text, stays at y = -1.
-	const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 100.0f;
+	const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 210.0f;
 	for (float y = 12.0f; y < float(TH) - 12.0f; y += 2.0f)
 	{
 		const ImGuiID hit = idAt(x, y);
@@ -1201,7 +1205,7 @@ TEST_CASE("inspector ui: the Terrain section's Water rows switch shore clipping,
     ImGui::GetIO().AddMousePosEvent(float(TW) - 2.0f, float(TH) - 2.0f);
     for (int i = 0; i < 4; ++i) tallFrame(false);
     REQUIRE(clipBox != 0);
-    const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+    const float x = 10.0f + ImGui::GetStyle().WindowPadding.x + 180.0f;
     float y = -1.0f;
     for (float yy = 12.0f; yy < float(TH) - 12.0f && y < 0.0f; yy += 2.0f)
         if (idAtT(x, yy) == clipBox) y = yy + 3.0f;
@@ -1278,7 +1282,7 @@ TEST_CASE("inspector ui: the Rigid Body section's water rows opt a body out and 
     for (int i = 0; i < 4; ++i) frame(false);
     REQUIRE(afloatBox != 0);
     REQUIRE(densityDrag != 0);
-    const float xLeft = 10.0f + ImGui::GetStyle().WindowPadding.x + 6.0f;
+    const float xLeft = 10.0f + ImGui::GetStyle().WindowPadding.x + 180.0f;
     const float xMid  = float(TW) * 0.5f;
     auto locate = [&](ImGuiID want, float x, float& yOut) -> bool {
         for (float yy = 12.0f; yy < float(TH) - 12.0f; yy += 2.0f)

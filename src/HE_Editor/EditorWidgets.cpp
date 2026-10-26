@@ -110,10 +110,25 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 	else if (!ctx.contentManager || !resolveAsset(*ctx.contentManager, target, want, &shown))
 		shown = "(not loaded)";
 
+	// In the Details panel's label column the name sits left and the slot fills
+	// the control column (less the Clear button), like the rows around it.
+	bool  inlineSlot = false;
+	float slotWidth  = 0.0f;
 	if (label)
 	{
-		ImGui::TextUnformatted(label);
-		ImGui::SameLine();
+		inlineSlot = Row::labelCell(label);
+		if (!inlineSlot)
+		{
+			ImGui::TextUnformatted(label);
+			ImGui::SameLine();
+		}
+		else
+		{
+			slotWidth = ImGui::GetContentRegionAvail().x;
+			if (showClear && target != HE::UUID{})
+				slotWidth -= ImGui::CalcTextSize("Clear").x + ImGui::GetStyle().FramePadding.x * 2.0f
+				           + ImGui::GetStyle().ItemSpacing.x;
+		}
 	}
 
 	SlotAction action = SlotAction::None;
@@ -124,7 +139,8 @@ SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
 	// drag from — which the asset tabs (the HorizonCode class Viewport, the
 	// widget designer) do not have next to them, since they fill the whole tab
 	// area. In those panels an empty Mesh slot was simply unfillable.
-	if (ImGui::Button((shown + "##" + idSuffix).c_str()))
+	if (ImGui::Button((shown + "##" + idSuffix).c_str(),
+	                  inlineSlot ? ImVec2(std::max(slotWidth, 40.0f), 0.0f) : ImVec2(0.0f, 0.0f)))
 	{
 		// Scanned once, when the popup opens: the walk sniffs every .hasset
 		// header under both content roots, which is fine once and wasteful

@@ -224,6 +224,28 @@ std::string fieldKey(const char* text)
 	return out;
 }
 
+// The Details panel's label column (see the header). Depth > 0 = on; the
+// suppress flag is StackedLabels, which must beat any enclosing scope.
+int s_inlineDepth = 0;
+
+constexpr float kInlineMinWidth = 270.0f;   // narrower than this: stacked rows
+constexpr float kInlineMinLabel = 92.0f;
+constexpr float kInlineMaxLabel = 190.0f;
+constexpr float kInlineShare    = 0.40f;
+
+// Width of the label cell including the gap to the control, or 0 = stacked.
+// Taken from the window's WORK rect, not from the space left of the cursor, so
+// an indented row (a tree node, a list item) keeps its control on the same
+// vertical line as its neighbours.
+float inlineLabelWidth()
+{
+	if (s_inlineDepth <= 0) return 0.0f;
+	ImGuiWindow* window = ImGui::GetCurrentWindow();
+	const float width = window->WorkRect.GetWidth();
+	if (width < kInlineMinWidth) return 0.0f;
+	return ImClamp(ImTrunc(width * kInlineShare), kInlineMinLabel, kInlineMaxLabel);
+}
+
 // Every row is the same three steps: scope the ids under the FULL label (so the
 // control itself can be spelled "##v" everywhere and "Speed##an" still differs
 // from "Speed##ab"), print only the part before "##", stretch the control to the
@@ -233,16 +255,22 @@ template <typename F>
 bool row(const char* label, F&& body)
 {
 	ImGui::PushID(label);
-	if (const char* hash = std::strstr(label, "##"))
-		ImGui::TextUnformatted(label, hash);
-	else
-		ImGui::TextUnformatted(label);
+	const bool inlineLabel = labelCell(label);
+	if (!inlineLabel)
+	{
+		if (const char* hash = std::strstr(label, "##"))
+			ImGui::TextUnformatted(label, hash);
+		else
+			ImGui::TextUnformatted(label);
+	}
 	// The label counts as part of the control for help: it is the wider target,
 	// and it is what the eye is on when the question "what IS this?" arises.
 	const bool labelHelp = helpForLabel(label);
 	// The selection disagrees on this field: said beside the label, for every
 	// kind of control — the colour and text rows have no other way to say it.
-	if (mixedMask(label) != 0)
+	// In the label column the label itself is tinted instead (labelCell): there
+	// is no room beside a clipped name for a word.
+	if (!inlineLabel && mixedMask(label) != 0)
 	{
 		ImGui::SameLine();
 		ImGui::TextDisabled("(mixed)");
@@ -420,6 +448,7 @@ bool inputTextMultiline(const char* label, std::string* s, float height)
 	// The width is what `row` already stretched; only the height is ours. A
 	// multi-line box that took its width from the caller would be the one row on
 	// the panel that reaches past the edge.
+	StackedLabels stacked;   // a tall box reads better with its name above it
 	return row(label, [&]{
 		return ImGui::InputTextMultiline("##v", s, ImVec2(-FLT_MIN, height));
 	});
@@ -431,6 +460,38 @@ void labelText(const char* label, const char* fmt, ...)
 	va_start(args, fmt);
 	row(label, [&]{ ImGui::TextV(fmt, args); return false; });
 	va_end(args);
+}
+
+InlineLabels::InlineLabels()  { ++s_inlineDepth; }
+InlineLabels::~InlineLabels() { --s_inlineDepth; }
+
+StackedLabels::StackedLabels() : m_saved(s_inlineDepth) { s_inlineDepth = 0; }
+StackedLabels::~StackedLabels() { s_inlineDepth = m_saved; }
+
+bool inlineActive() { return inlineLabelWidth() > 0.0f; }
+
+bool labelCell(const char* label)
+{
+	const float cell = inlineLabelWidth();
+	if (cell <= 0.0f) return false;
+
+	const char*  end   = std::strstr(label, "##");
+	const float  x0    = ImGui::GetCursorPosX();
+	const ImVec2 pos   = ImGui::GetCursorScreenPos();
+	const float  clipW = cell - ImGui::GetStyle().ItemSpacing.x;
+	const bool   mixed = mixedMask(label) != 0;
+
+	// Baseline-aligned with the frame-height control that follows on this line.
+	ImGui::AlignTextToFramePadding();
+	// A name longer than the column is cut at its edge rather than running under
+	// the control; the full name is the row's help tooltip.
+	ImGui::PushClipRect(pos, ImVec2(pos.x + clipW, pos.y + ImGui::GetFrameHeight()), true);
+	if (mixed) ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::AccentBright);
+	ImGui::TextUnformatted(label, end);
+	if (mixed) ImGui::PopStyleColor();
+	ImGui::PopClipRect();
+	ImGui::SameLine(x0 + cell);
+	return true;
 }
 
 MixedScope::MixedScope(const std::unordered_map<std::string, unsigned>& fields)
@@ -469,8 +530,15 @@ void hint(const char* fmt, ...)
 
 void subHeading(const char* text)
 {
+	// The one way a component groups its rows ("Surface", "Layer 2", "Placement"):
+	// a rule with the name on it, dimmer than the component header above, with
+	// room above and none wasted below.
 	ImGui::Spacing();
+	ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextDim);
+	ImGui::PushStyleVar(ImGuiStyleVar_SeparatorTextPadding, ImVec2(12.0f, 3.0f));
 	ImGui::SeparatorText(text);
+	ImGui::PopStyleVar();
+	ImGui::PopStyleColor();
 }
 
 // ── Help tooltips (see the header for why they are drawn late) ───────────────
@@ -542,9 +610,17 @@ bool checkbox(const char* label, bool* v)
 	// ImGui's own mixed state: a dash in the box instead of a tick or nothing.
 	// A click still toggles the active entity's value, which then goes to all.
 	const bool mixed = Row::mixedMask(label) != 0;
+	// In the Details panel's label column the name goes LEFT, like every other
+	// row, and the box sits in the control column. The checkbox keeps its own
+	// label (so its ImGui id and hit area are unchanged) but is drawn with
+	// transparent text. A box sharing a line with another item (SameLine) is
+	// left as it is: it is part of a row of switches, not a row of its own.
+	const bool inlineRow = !ImGui::GetCurrentWindow()->DC.IsSameLine && Row::labelCell(label);
+	if (inlineRow) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 	if (mixed) ImGui::PushItemFlag(ImGuiItemFlags_MixedValue, true);
 	const bool changed = ImGui::Checkbox(label, v);
 	if (mixed) ImGui::PopItemFlag();
+	if (inlineRow) ImGui::PopStyleColor();
 	helpForLabel(label);
 	return changed;
 }
