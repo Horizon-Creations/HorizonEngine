@@ -698,8 +698,13 @@ std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const s
     const long  seedI = std::lround(std::clamp(n.p[2], -2.0e9f, 2.0e9f));
     const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
     (variants ? c.usesBombGridV : c.usesBombGrid) = true;
-    const std::string key = sc.key + "|" + uv + "|" + cell + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed
-                          + (variants ? "|V" : "");
+    std::string key = sc.key;
+    key += '|'; key += uv;
+    key += '|'; key += cell;
+    key += '|'; key += fmtF(rot);
+    key += '|'; key += fmtF(sharp);
+    key += '|'; key += seed;
+    if (variants) key += "|V";
     if (auto it = c.bombGrids.find(key); it != c.bombGrids.end()) return it->second;
     const std::string g = "n" + std::to_string(++c.varCounter) + "_g";
     decl += "vec2 " + g + "t0, " + g + "t1, " + g + "t2; mat2 " + g + "r0, " + g + "r1, " + g
