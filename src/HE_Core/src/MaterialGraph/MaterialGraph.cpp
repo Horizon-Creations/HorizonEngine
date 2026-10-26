@@ -2531,6 +2531,9 @@ constexpr float kApproxNoiseMean   = 0.5f;
 constexpr float kApproxFbmMean     = 0.46875f;
 constexpr float kApproxCheckerMean = 0.5f;
 
+// a / b; a divisor too close to zero folds to 0 instead of Inf/NaN.
+float approxSafeDivide(float a, float b) { return std::abs(b) > 1e-8f ? a / b : 0.0f; }
+
 // Fold one INPUT pin: linked → fold the source node, unconnected → the pin's
 // registry default (splat — the same coercion codegen applies to scalars).
 bool approxFoldInput(const MaterialGraph& g, const MatGraphNode& node, int pin,
@@ -2648,7 +2651,7 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
             out[k] = n->type == MatNodeType::Add      ? a[k] + b[k]
                    : n->type == MatNodeType::Subtract ? a[k] - b[k]
                    : n->type == MatNodeType::Multiply ? a[k] * b[k]
-                   : (std::abs(b[k]) > 1e-8f ? a[k] / b[k] : 0.0f);
+                   : approxSafeDivide(a[k], b[k]);
         return true;
     case MatNodeType::Lerp:
         if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
