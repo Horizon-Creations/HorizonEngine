@@ -1,7 +1,6 @@
 #include <UIWidget/UIWidgetAnim.h>
 
 #include <algorithm>
-#include <cstring>
 
 namespace HE
 {
