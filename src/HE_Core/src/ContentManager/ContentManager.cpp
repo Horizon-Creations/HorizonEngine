@@ -170,6 +170,9 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
                                                 const std::string& fullPath,
                                                 HAsset::Reader&    reader)
 {
+	// The main-thread half of every async load (pollAsyncResults) and of every loose load:
+	// name it, so the timeline shows what a finished read still costs the frame.
+	HE_PROFILE_SCOPE_N("ParseAndRegisterAsset");
 	const HE::AssetType type = static_cast<HE::AssetType>(reader.assetType());
 
 	const auto* metaChunk = reader.findChunk(HAsset::CHUNK_META);
