@@ -18,6 +18,7 @@ The driver prints the md5 of the editor binary and of the water asset per run in
 The scenes come from scripts/perf/gen_water_scene.py (generated here when missing).
 """
 import argparse
+import os
 import hashlib
 import json
 import shutil
@@ -34,10 +35,12 @@ CAPTURE = REPO / "scripts" / "he_perf_capture.py"
 GEN = REPO / "scripts" / "perf" / "gen_water_scene.py"
 EDITOR = REPO / "out" / "deploy" / "Editor" / "HorizonEditor"
 WATER = EDITOR.parent / "EngineContent" / "Materials" / "Water.hasset"
-PROJ = "/tmp/he235/proj/Test/Test.heproj"
-SCENES = Path("/tmp/he235/scenes")
-VARIANTS = Path("/tmp/he235/variants")
-WATER_ORIG = Path("/tmp/he235/Water.hasset.orig")   # the shipped asset, copied before the first run
+# HE235_ROOT moves the work directory, HE235_PROJ names the project (the Test project of step 1 is gone).
+ROOT = Path(os.environ.get("HE235_ROOT") or "/tmp/he235")
+PROJ = os.environ.get("HE235_PROJ") or str(ROOT / "proj" / "Test" / "Test.heproj")
+SCENES = ROOT / "scenes"
+VARIANTS = ROOT / "variants"
+WATER_ORIG = ROOT / "Water.hasset.orig"   # the shipped asset, copied before the first run
 
 # x,y,z,yaw,pitch; yaw 0 looks along -Z (EditorCamera::forward), so yaw pi looks across the lake along +Z; the lake is a basin of radius 120 m around the origin, level 0.
 CAMS = {
@@ -86,6 +89,10 @@ CELLS["variants"].update({v: dict(scene="lake", cam="near3", variant=v)
 CELLS["variants2"] = {"nowater": dict(scene="lake_nowater", cam="near3"), "shipped": dict(scene="lake", cam="near3")}
 CELLS["variants2"].update({v: dict(scene="lake", cam="near3", variant=v)
                            for v in ("nowaves", "waves-only", "lean", "unlit", "trivial", "nochop")})
+# A fix against the shipped asset, same binary, ABAB (Thema 235 step 2): "fix" is <root>/variants/fix.hasset,
+# what mat_gen writes with the change; "shipped" the asset the deploy had before the first run.
+CELLS["fix"] = {f"{cam}-{v}": dict(scene="lake", cam=cam, variant=None if v == "shipped" else "fix")
+                for cam in ("down3", "near3", "under", "mid") for v in ("shipped", "fix")}
 CELLS["settings"] = {   # one knob at a time, near3 with water (the control is base-near3-water)
     "deferred":   dict(scene="lake", cam="near3", sets=["RenderPath=1"]),
     "gi":         dict(scene="lake", cam="near3", sets=["GlobalIlluminationEnabled=true"]),
@@ -154,7 +161,7 @@ def one_run(label, cell, out, detailed, warmup, frames, scale, caffeinate=False,
                     shutil.move(str(src), str(bad / f"{label}-try{attempt + 1}.{ext}"))
             continue
         if profile.exists():
-            keep = Path("/tmp/he235/profiles")
+            keep = ROOT / "profiles"
             keep.mkdir(exist_ok=True)
             shutil.move(str(profile), str(keep / profile.name))
         return r.returncode == 0
@@ -165,7 +172,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("group", choices=sorted(CELLS))
     ap.add_argument("--reps", type=int, default=3)
-    ap.add_argument("--out", default="/tmp/he235/raw")
+    ap.add_argument("--out", default=str(ROOT / "raw"))
     ap.add_argument("--warmup", type=int, default=200)
     ap.add_argument("--frames", type=int, default=400)
     ap.add_argument("--detailed", action="store_true", help="counters on: exclusive GPU time per pass")
