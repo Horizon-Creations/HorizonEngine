@@ -9,7 +9,9 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <cstdlib>
+#include <functional>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -568,6 +570,7 @@ struct EmitCtx
     bool usesNoiseI  = false;                            // 2D fbm on the integer hash (Fbm p[0] = 1)
     bool usesNoiseIGrad = false;                         // the same fbm with its gradient (FbmGrad)
     bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
+    bool usesNormalPerturbD = false;                     // the same frame from gradients taken ahead of a branch
     // Texture bombing: the heBombGrid helper, and the grids already emitted —
     // key = scope + uv expression + grid params, value = the grid's variable
     // prefix. One layer's Albedo/Normal/Mask reads reuse ONE grid this way.
@@ -595,6 +598,19 @@ struct EmitCtx
     std::vector<bool>         textureIsArray;            // parallel: slot is a sampler2DArray
     const MatFunctionLoader*  loader = nullptr;
     std::vector<std::string>  fnStack;                   // inline stack (recursion guard)
+    // Real branching for If (fragment, root scope only; see computeBranchGuards). A
+    // node needed only under one side of an If's condition runs inside
+    // `if (cond >= 0.5) {...} else {...}` instead of always: mix() used to compute
+    // both sides for every pixel. guardOf maps a node id to "<cond src>:<pin>+" or
+    // "...-" (absent = always needed). Guarded variables are declared ahead of
+    // their block, so a later block under the same condition can still read them.
+    struct GuardBlock { std::string cond, hoist, yes, no; };
+    std::unordered_map<int, std::string>       guardOf;
+    std::unordered_set<std::string>            branchConds;   // cond keys some node is guarded by
+    std::vector<std::string>                   blockOrder;
+    std::unordered_map<std::string, GuardBlock> blocks;       // pending, by cond key
+    std::unordered_map<std::string, std::string> condExprs;   // cond key → its expression, once emitted
+    std::unordered_set<std::string>            pendingVars;   // If results assigned in a pending block
 };
 
 // One inline instance of a graph. The root scope is the material graph; each
@@ -614,6 +630,252 @@ struct Scope
 // nodes that need one read mip 0 or hand back a neutral value instead of failing
 // to compile (the same courtesy Water Ripple extends to the WPO scope "vs").
 bool dsStage(const Scope& sc) { return sc.key == "ds" || sc.key.rfind("ds/", 0) == 0; }
+
+// ── Real branching for If ────────────────────────────────────────────────────
+// A node may move into an If's branch only when its text is plain arithmetic:
+// no texture read and no screen derivative (implicit-LOD sampling, dFdx, the
+// normal-perturb helper), which are undefined in non-uniform control flow, and no
+// node whose emitted text other nodes share by name (bomb grids, functions).
+bool branchPure(MatNodeType t)
+{
+    switch (t)
+    {
+        case MatNodeType::ConstFloat: case MatNodeType::ConstColor: case MatNodeType::ConstVec2:
+        case MatNodeType::ConstVec4: case MatNodeType::ConstBool: case MatNodeType::VertexColor:
+        case MatNodeType::NormalWS: case MatNodeType::UV: case MatNodeType::Time: case MatNodeType::Fresnel:
+        case MatNodeType::WorldPos: case MatNodeType::ViewDir: case MatNodeType::CameraPos:
+        case MatNodeType::CameraDistance: case MatNodeType::ParamFloat: case MatNodeType::ParamColor:
+        case MatNodeType::ParamVec2: case MatNodeType::ParamVec4: case MatNodeType::ParamBool:
+        case MatNodeType::Sun: case MatNodeType::Weather: case MatNodeType::Wind:
+        case MatNodeType::Add: case MatNodeType::Multiply: case MatNodeType::Lerp: case MatNodeType::OneMinus:
+        case MatNodeType::Power: case MatNodeType::Saturate: case MatNodeType::DotProduct: case MatNodeType::Sine:
+        case MatNodeType::Combine3: case MatNodeType::Subtract: case MatNodeType::Divide: case MatNodeType::Absolute:
+        case MatNodeType::Fract: case MatNodeType::Smoothstep: case MatNodeType::Step: case MatNodeType::Normalize3:
+        case MatNodeType::SplitRGBA: case MatNodeType::CombineRGBA: case MatNodeType::If:
+        case MatNodeType::Greater: case MatNodeType::Less: case MatNodeType::GreaterEqual:
+        case MatNodeType::LessEqual: case MatNodeType::Equal: case MatNodeType::NotEqual:
+        case MatNodeType::And: case MatNodeType::Or: case MatNodeType::Not:
+        case MatNodeType::FbmGrad: case MatNodeType::Panner: case MatNodeType::ValueNoise: case MatNodeType::Fbm:
+        case MatNodeType::Checker: case MatNodeType::StaticSwitch: case MatNodeType::Reroute:
+            return true;
+        // The bombed reads sample with textureGrad from gradients taken ahead of the
+        // branch (the grid's dx/dy, and dFdx(vWorldPos) for the normal frame), so only
+        // their taps move into it; see emitBombNode.
+        case MatNodeType::TextureBombSample: case MatNodeType::TextureArrayBombSample:
+        case MatNodeType::NormalMapBombSample: case MatNodeType::NormalMapArrayBombSample:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isBombRead(MatNodeType t)
+{
+    return t == MatNodeType::TextureBombSample || t == MatNodeType::TextureArrayBombSample
+        || t == MatNodeType::NormalMapBombSample || t == MatNodeType::NormalMapArrayBombSample;
+}
+
+// Which nodes of the root graph are needed under one side of an If only. A node's
+// guard is the one every consumer agrees on: an unguarded If hands its yes pin
+// "<cond>+" and its no pin "<cond>-", any other consumer hands on its own guard,
+// and the Output node, an impure node or a disagreement means "always". An If
+// that is itself guarded stays a mix() (one level of branching).
+void computeBranchGuards(EmitCtx& c, const MaterialGraph& g)
+{
+    // Only consumers on a path to the Output count: a node left over in the graph (an
+    // editor stray, a builder's discarded split) is never emitted and must not pin its
+    // inputs outside every branch.
+    std::unordered_set<int> live;
+    {
+        std::vector<int> todo;
+        for (const MatGraphNode& n : g.nodes)
+            if (n.type == MatNodeType::Output) todo.push_back(n.id);
+        while (!todo.empty())
+        {
+            const int id = todo.back();
+            todo.pop_back();
+            if (!live.insert(id).second) continue;
+            for (const MatGraphLink& l : g.links)
+                if (l.dstNode == id) todo.push_back(l.srcNode);
+        }
+    }
+    std::unordered_map<int, std::vector<const MatGraphLink*>> consumers;
+    for (const MatGraphLink& l : g.links)
+        if (live.count(l.dstNode)) consumers[l.srcNode].push_back(&l);
+    auto condKeyOf = [&](int ifNode) -> std::string {
+        for (const MatGraphLink& l : g.links)
+            if (l.dstNode == ifNode && l.dstPin == 0)
+                return std::to_string(l.srcNode) + ":" + std::to_string(l.srcPin);
+        return {};
+    };
+    std::unordered_map<int, std::string> memo;
+    std::unordered_set<int> visiting;
+    std::function<std::string(int)> guardOf = [&](int id) -> std::string {
+        if (auto it = memo.find(id); it != memo.end()) return it->second;
+        const MatGraphNode* n = g.findNode(id);
+        if (!n || !branchPure(n->type) || visiting.count(id)) return {};
+        // A node that reads an impure node (an implicit-LOD texture read, a function)
+        // stays out too: were its only use inside a branch, the driver may sink that read
+        // into the branch with it (measured on macOS OpenGL: the plain-read permutation
+        // of the auto landscape moved up to 31/255 on branch-edge pixels).
+        // A Static Switch reads only its taken input (resolved as emitFlowNode does).
+        int onlyPin = -1;
+        if (n->type == MatNodeType::StaticSwitch)
+        {
+            bool on = n->p[0] > 0.5f;
+            const std::string swName = n->s.empty() ? ("switch_" + std::to_string(n->id)) : n->s;
+            if (c.switchOv)
+                if (auto it = c.switchOv->find(swName); it != c.switchOv->end()) on = it->second;
+            onlyPin = on ? 0 : 1;
+        }
+        for (const MatGraphLink& l : g.links)
+            if (l.dstNode == id && (onlyPin < 0 || l.dstPin == onlyPin))
+                if (const MatGraphNode* src = g.findNode(l.srcNode); src && !branchPure(src->type))
+                    return memo[id] = std::string{};
+        visiting.insert(id);
+        std::string common;
+        bool first = true;
+        if (auto it = consumers.find(id); it != consumers.end())
+            for (const MatGraphLink* l : it->second)
+            {
+                const MatGraphNode* m = g.findNode(l->dstNode);
+                std::string e;
+                if (m && !isBombRead(m->type))   // a bombed read's inputs feed its prelude: always
+                {
+                    const std::string gm = guardOf(m->id);
+                    if (gm.empty() && m->type == MatNodeType::If && (l->dstPin == 1 || l->dstPin == 2))
+                    {
+                        const std::string ck = condKeyOf(m->id);
+                        if (!ck.empty()) e = ck + (l->dstPin == 1 ? "+" : "-");
+                    }
+                    else
+                        e = gm;
+                }
+                if (first) { common = e; first = false; }
+                else if (common != e) common.clear();
+                if (common.empty()) break;
+            }
+        visiting.erase(id);
+        memo[id] = common;
+        return common;
+    };
+    // A constant, parameter or input is no reason to branch (its text is a literal
+    // or a uniform read); it may still move along with the work that is.
+    auto isLeaf = [](MatNodeType t) {
+        return matNodeDesc(t).inputs.empty();
+    };
+    for (const MatGraphNode& n : g.nodes)
+    {
+        const std::string s = guardOf(n.id);
+        if (s.empty()) continue;
+        c.guardOf[n.id] = s;
+        if (!isLeaf(n.type)) c.branchConds.insert(s.substr(0, s.size() - 1));
+    }
+}
+
+// True if `text` names a variable whose value a pending block has not assigned yet.
+bool refsPending(const EmitCtx& c, const std::string& text)
+{
+    if (c.pendingVars.empty()) return false;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] != 'n' || (i > 0 && (std::isalnum(static_cast<unsigned char>(text[i - 1])) || text[i - 1] == '_')))
+            continue;
+        size_t j = i + 1;
+        while (j < text.size() && std::isdigit(static_cast<unsigned char>(text[j]))) ++j;
+        if (j > i + 1 && (j == text.size() || !(std::isalnum(static_cast<unsigned char>(text[j])) || text[j] == '_'))
+            && c.pendingVars.count(text.substr(i, j - i)))
+            return true;
+    }
+    return false;
+}
+
+void flushGuards(EmitCtx& c)
+{
+    for (const std::string& key : c.blockOrder)
+    {
+        const EmitCtx::GuardBlock& b = c.blocks[key];
+        c.body += b.hoist;
+        c.body += "    if (" + b.cond + " >= 0.5) {\n" + b.yes + "    } else {\n" + b.no + "    }\n";
+    }
+    c.blockOrder.clear();
+    c.blocks.clear();
+    c.pendingVars.clear();
+}
+
+EmitCtx::GuardBlock& guardBlock(EmitCtx& c, const std::string& condKey, const std::string& condExpr)
+{
+    auto it = c.blocks.find(condKey);
+    if (it != c.blocks.end()) return it->second;
+    c.blockOrder.push_back(condKey);
+    EmitCtx::GuardBlock& b = c.blocks[condKey];
+    b.cond = condExpr;
+    return b;
+}
+
+// The cond key an If branches on, or empty when it stays a mix(): outside the
+// fragment's root scope, guarded itself, unwired condition, or nothing to move.
+std::string branchCondKey(const EmitCtx& c, const Scope& sc, const MatGraphNode& n)
+{
+    if (!sc.key.empty() || c.guardOf.count(n.id)) return {};
+    for (const MatGraphLink& l : sc.g->links)
+        if (l.dstNode == n.id && l.dstPin == 0)
+        {
+            std::string k = std::to_string(l.srcNode) + ":" + std::to_string(l.srcPin);
+            return c.branchConds.count(k) ? k : std::string{};
+        }
+    return {};
+}
+
+// Separates the part of a declaration that must run ahead of any branch (a bombed
+// read's grid, slices and screen gradients) from the part that may move into one (its
+// taps). Only emitBombNode writes it, and only for a guarded node.
+constexpr char kBranchSplit = '\x01';
+
+// Write one node's declaration: into the body, or, for a guarded node, declared
+// ahead of its block (zero-initialised: FXC warns on a maybe-unset variable) and
+// assigned inside it.
+void placeDecl(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v, const std::string& decl)
+{
+    if (c.guardOf.empty())
+    {
+        c.body += "    " + decl + "\n";
+        return;
+    }
+    std::string pre, post = decl;
+    if (const size_t cut = decl.find(kBranchSplit); cut != std::string::npos)
+    {
+        pre  = decl.substr(0, cut);
+        post = decl.substr(cut + 1);
+    }
+    if (refsPending(c, decl)) flushGuards(c);   // also a function body reading an If's result
+    if (!pre.empty()) c.body += "    " + pre + "\n";
+    const auto g = sc.key.empty() ? c.guardOf.find(n.id) : c.guardOf.end();
+    // The statement that declares the node's own variable: "<type> v = ...;". Everything
+    // else in `post` is a temporary of the block.
+    const std::string own = " " + v + " = ";
+    const size_t at = post.find(own);
+    size_t typeAt = at == std::string::npos ? std::string::npos : post.rfind(' ', at - 1);
+    typeAt = typeAt == std::string::npos ? 0 : typeAt + 1;
+    const bool single = post.find(';') == post.size() - 1;
+    if (g == c.guardOf.end() || at == std::string::npos || post.back() != ';' || (pre.empty() && !single))
+    {
+        c.body += "    " + post + "\n";
+        return;
+    }
+    const std::string type = post.substr(typeAt, at - typeAt);
+    const std::string& key = g->second;
+    const std::string condKey = key.substr(0, key.size() - 1);
+    const auto ce = c.condExprs.find(condKey);
+    if (ce == c.condExprs.end())   // reached before its If (another path): stay plain
+    {
+        c.body += "    " + post + "\n";
+        return;
+    }
+    EmitCtx::GuardBlock& b = guardBlock(c, condKey, ce->second);
+    b.hoist += "    " + type + " " + v + " = " + type + "(0.0);\n";
+    (key.back() == '+' ? b.yes : b.no) += "        " + post.substr(0, typeAt) + v + post.substr(at + v.size() + 1) + "\n";
+}
 
 std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
                       int pinIdx, MatPinType wantType);
@@ -1069,6 +1331,16 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                               + ", 0).z - 1); ";
                 }
             }
+            // Guarded (inside an If's branch, see computeBranchGuards): everything so far
+            // runs ahead of the branch, only the taps below move into it. The normal frame's
+            // position gradients are taken here too, in uniform control flow.
+            const bool guarded = sc.key.empty() && c.guardOf.count(n.id);
+            if (guarded)
+            {
+                if (normal)
+                    decl += "vec3 " + v + "_dp1 = dFdx(vWorldPos); vec3 " + v + "_dp2 = dFdy(vWorldPos); ";
+                decl += kBranchSplit;
+            }
             // One hex's read: its bombed uv, the unbombed gradients turned with it. `variant` reads
             // the slice the hash picked, otherwise the layer itself.
             auto tap = [&](int k, bool variant) {
@@ -1121,9 +1393,16 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                 else
                     decl += reads(false);
                 decl += "vec3 " + v + "_t = " + g + "w.x * " + v + "_0 + " + g + "w.y * " + v + "_1 + "
-                      + g + "w.z * " + v + "_2; " + v + "_t.xy *= " + fmtF(strength) + ";"
-                      + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
-                      + "_t), vWorldPos, " + uv + ");";
+                      + g + "w.z * " + v + "_2; " + v + "_t.xy *= " + fmtF(strength) + ";";
+                if (guarded)
+                {
+                    c.usesNormalPerturbD = true;
+                    decl += " vec3 " + v + " = hePerturbNormalD(normalize(vNormal), normalize(" + v + "_t), "
+                          + v + "_dp1, " + v + "_dp2, " + g + "dx, " + g + "dy);";
+                }
+                else
+                    decl += " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
+                          + "_t), vWorldPos, " + uv + ");";
             }
             break;
         }
@@ -1361,8 +1640,23 @@ HE_MG_NOINLINE bool emitLogicNode(EmitCtx& c, const Scope& sc, const MatGraphNod
         case MatNodeType::If:
         {
             // The text names pin 2, 1, 0 in that order, so last-first is pin 0, 1, 2.
-            const std::string cond = inputExpr(c, sc, n, 0, F::Float), yes = inputExpr(c, sc, n, 1, F::Vec3),
-                              no = inputExpr(c, sc, n, 2, F::Vec3);
+            const std::string cond = inputExpr(c, sc, n, 0, F::Float);
+            // Branching: the condition is known before either side is emitted, so the
+            // sides' guarded nodes land in its block (placeDecl).
+            if (const std::string ck = branchCondKey(c, sc, n); !ck.empty())
+            {
+                if (refsPending(c, cond)) flushGuards(c);
+                c.condExprs.emplace(ck, cond);
+                const std::string yes = inputExpr(c, sc, n, 1, F::Vec3), no = inputExpr(c, sc, n, 2, F::Vec3);
+                if (refsPending(c, yes) || refsPending(c, no)) flushGuards(c);
+                EmitCtx::GuardBlock& b = guardBlock(c, ck, c.condExprs[ck]);
+                b.hoist += "    vec3 " + v + " = vec3(0.0);\n";
+                b.yes   += "        " + v + " = " + yes + ";\n";
+                b.no    += "        " + v + " = " + no + ";\n";
+                c.pendingVars.insert(v);
+                break;
+            }
+            const std::string yes = inputExpr(c, sc, n, 1, F::Vec3), no = inputExpr(c, sc, n, 2, F::Vec3);
             decl = "vec3 " + v + " = mix(" + no + ", " + yes + ", step(0.5, " + cond + "));"; break;
         }
         case MatNodeType::Greater:
@@ -1699,7 +1993,7 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         || emitWaterNode(c, sc, n, v, decl, pinExpr));
 
     if (!decl.empty())
-        c.body += "    " + decl + "\n";
+        placeDecl(c, sc, n, v, decl);
     c.emitting.erase(cycleKey);
 
     // Register per-pin expressions (default: the single var for every output pin).
@@ -1977,6 +2271,17 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
             "    invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;\n"
             "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
+    if (c.usesNormalPerturbD && !domainStage)
+        // The same frame from gradients the caller took in uniform control flow, for a
+        // bombed normal read inside an If's branch (screen derivatives are undefined there).
+        src +=
+            "vec3 hePerturbNormalD(vec3 N, vec3 mapN, vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2) {\n"
+            "    vec3 dp2perp = cross(dp2, N); vec3 dp1perp = cross(N, dp1);\n"
+            "    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;\n"
+            "    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;\n"
+            "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
+            "    invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;\n"
+            "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
     if (c.usesBombGrid || c.usesBombGridV || c.usesBombCells)
         // The hash both bombing helpers draw their numbers from. A graph that uses
         // only the texture nodes gets exactly the text it always had.
@@ -2162,6 +2467,9 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     c.switchOv = switchOverrides;
     Scope root;
     root.g = &graph;
+    // An If whose sides are plain arithmetic computes only the side it takes (the
+    // water's underside and top differ in most of their nodes).
+    computeBranchGuards(c, graph);
     // Read the domain HERE and not with its siblings below: emitting a node is
     // what needs it (Backdrop), and that happens in the inputExpr calls that
     // follow. Same expression as `uiDomain` further down, which stays the one
@@ -2200,6 +2508,9 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     const std::string normalExpr = hasInput(root, *out, kMatOutputNormalPin)
         ? "normalize(" + inputExpr(c, root, *out, kMatOutputNormalPin, F::Vec3) + ")"
         : "normalize(vNormal)";
+
+    // Every guarded node has been reached by now; its blocks go in ahead of the tail.
+    flushGuards(c);
 
     // ── World Position Offset (pin 6) → a VERTEX-stage body, emitted into a separate
     // scope ("vs") so its statements never share variables with the fragment body. The

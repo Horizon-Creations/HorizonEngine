@@ -93,6 +93,9 @@ CELLS["variants2"].update({v: dict(scene="lake", cam="near3", variant=v)
 # what mat_gen writes with the change; "shipped" the asset the deploy had before the first run.
 CELLS["fix"] = {f"{cam}-{v}": dict(scene="lake", cam=cam, variant=None if v == "shipped" else "fix")
                 for cam in ("down3", "near3", "under", "mid") for v in ("shipped", "fix")}
+# The chop layers behind a real branch past their fade (Thema 235 step 2): "chop" is <root>/variants/chop.hasset.
+CELLS["chop"] = {f"{cam}-{v}": dict(scene="lake", cam=cam, variant=None if v == "shipped" else "chop")
+                 for cam in ("down3", "near3", "mid", "far") for v in ("shipped", "chop")}
 CELLS["settings"] = {   # one knob at a time, near3 with water (the control is base-near3-water)
     "deferred":   dict(scene="lake", cam="near3", sets=["RenderPath=1"]),
     "gi":         dict(scene="lake", cam="near3", sets=["GlobalIlluminationEnabled=true"]),
@@ -116,13 +119,16 @@ def ensure_scene(name):
     return path
 
 
-def one_run(label, cell, out, detailed, warmup, frames, scale, caffeinate=False, retries=2):
+def one_run(label, cell, out, detailed, warmup, frames, scale, caffeinate=False, retries=2, under_load=False):
     cond = out / f"{label}.conditions.txt"
     variant = cell.get("variant")
     for attempt in range(retries + 1):
-        if not am.wait_quiet():
+        if not under_load and not am.wait_quiet():
             print(f"  [{label}] machine never went quiet, running anyway (flagged)", flush=True)
-        if variant == "noasset":                     # the asset is gone: the water can only draw as the fallback
+        editor = Path(cell.get("editor", EDITOR))
+        if "editor" in cell:                         # binary A/B: each deploy draws its own asset
+            pass
+        elif variant == "noasset":                   # the asset is gone: the water can only draw as the fallback
             WATER.unlink(missing_ok=True)
         else:
             shutil.copyfile(VARIANTS / f"{variant}.hasset" if variant else WATER_ORIG, WATER)
@@ -130,7 +136,7 @@ def one_run(label, cell, out, detailed, warmup, frames, scale, caffeinate=False,
         cmd = [sys.executable, "-I", str(CAPTURE), "--project", PROJ, "--label", label, "--out", str(out),
                "--scene", str(ensure_scene(cell["scene"])), "--warmup", str(warmup), "--frames", str(frames),
                "--cam", CAMS[cell["cam"]], "--set", "ViewportGroundGrid=false", "--timeout", "400",
-               "--editor", str(EDITOR), "--detailed" if detailed else "--no-counters"]
+               "--editor", str(editor), "--detailed" if detailed else "--no-counters"]
         if scale != 1.0:
             cmd += ["--set", f"RenderScale={scale}"]
         for kv in cell.get("sets", []):
@@ -144,7 +150,8 @@ def one_run(label, cell, out, detailed, warmup, frames, scale, caffeinate=False,
         line = (r.stdout.strip().splitlines() or [r.stderr.strip()])[-1]
         loaded = before["foreign"] != "none" or after["foreign"] != "none"
         cond.write_text(f"== {label}  {time.strftime('%Y-%m-%d %H:%M:%S')}  attempt {attempt + 1}\n"
-                        f"editor md5 {md5(EDITOR)}  water md5 {md5(WATER)}  variant {variant}\n"
+                        f"editor {editor} md5 {md5(editor)}  water md5 "
+                        f"{md5(editor.parent / 'EngineContent' / 'Materials' / 'Water.hasset')}  variant {variant}\n"
                         f"before:\n{am.fmt(before)}after (rc={r.returncode}):\n{am.fmt(after)}")
         print(f"  {line}{'   LOADED' if loaded else ''}", flush=True)
         if r.returncode != 0:
@@ -152,7 +159,7 @@ def one_run(label, cell, out, detailed, warmup, frames, scale, caffeinate=False,
         profile = out / f"{label}.profile.json"
         if r.returncode == 0 and profile.exists():
             am.scope_sidecar(profile, out / f"{label}.scopes.json")
-        if loaded and r.returncode == 0:
+        if loaded and r.returncode == 0 and not under_load:
             bad = out / "discarded-under-load"
             bad.mkdir(exist_ok=True)
             for ext in ("summary.json", "scopes.json", "conditions.txt", "log", "profile.json"):
@@ -183,6 +190,11 @@ def main():
     ap.add_argument("--plain", action="store_true", help="scenes without the Auto Landscape material (plain_lake / plain_nowater)")
     ap.add_argument("--caffeinate", action="store_true", help="run under caffeinate -d -u (display awake)")
     ap.add_argument("--tag", default="", help="label prefix suffix, e.g. a variant family")
+    ap.add_argument("--under-load", action="store_true",
+                    help="do not wait for a quiet machine and keep runs that overlapped a compile (flagged LOADED); "
+                         "only for an ABAB comparison of GPU pass times, never for CPU numbers")
+    ap.add_argument("--editors", help="binary A/B: name=path,name=path (each cell runs once per editor deploy, "
+                                      "alternating; the deploys keep their own Water.hasset)")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -190,6 +202,9 @@ def main():
     if a.only:
         keep = set(a.only.split(","))
         cells = [c for c in cells if c[0] in keep]
+    if a.editors:
+        pairs = [kv.split("=", 1) for kv in a.editors.split(",")]
+        cells = [(f"{name}-{tag}", dict(cell, editor=path)) for name, cell in cells for tag, path in pairs]
     if a.plain:
         for _, cell in cells:
             cell["scene"] = "plain_nowater" if cell["scene"].endswith("nowater") else "plain_lake"
@@ -206,7 +221,8 @@ def main():
                 if (out / f"{label}.summary.json").exists():
                     continue
                 print(f"[{time.strftime('%H:%M:%S')}] {label}", flush=True)
-                one_run(label, cell, out, a.detailed, a.warmup, a.frames, a.scale, a.caffeinate)
+                one_run(label, cell, out, a.detailed, a.warmup, a.frames, a.scale, a.caffeinate,
+                        under_load=a.under_load)
     finally:
         shutil.copyfile(WATER_ORIG, WATER)
 
