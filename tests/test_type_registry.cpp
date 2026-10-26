@@ -255,6 +255,35 @@ TEST_CASE("TypeRegistry: makeDefaultValue seeds nested defaults and guards cycle
     CHECK(unknown.items.empty());
 }
 
+TEST_CASE("TypeRegistry: makeDefaultValue guards a struct array that holds its own type")
+{
+    RegistryCleanup cleanup;
+    cleanup.paths = { "Content/Tree.hasset" };
+    auto& reg = TypeRegistry::instance();
+
+    // Struct arrays persist no slot payload, so a slot only exists when the
+    // definition is built in memory (or hand-edited into the JSON).
+    StructDef tree; tree.name = "Tree"; tree.assetPath = "Content/Tree.hasset";
+    {
+        StructField kids; kids.name = "kids"; kids.type = PinType::Struct; kids.isArray = true;
+        kids.typeName = "Content/Tree.hasset";
+        kids.defaultValue.isArray = true; kids.defaultValue.type = PinType::Struct;
+        kids.defaultValue.items.resize(1);
+        tree.fields = { kids };
+    }
+    reg.registerStruct(tree);
+
+    // The element is the struct itself: it must stop at the cycle edge and
+    // come out as an empty nested value, not recurse until the stack is gone.
+    const Value v = reg.makeDefaultValue(tree.assetPath);
+    REQUIRE(v.items.size() == 1);
+    REQUIRE(v.items[0].isArray);
+    REQUIRE(v.items[0].items.size() == 1);
+    CHECK(v.items[0].items[0].type == PinType::Struct);
+    CHECK(v.items[0].items[0].typeName == "Content/Tree.hasset");
+    CHECK(v.items[0].items[0].items.empty());
+}
+
 // ── Renames: formerNames ─────────────────────────────────────────────────────
 // Fields and entries have no ids; a rename books the old name as an alias so
 // data persisted under it (saves, graph defaults) still finds its field.
