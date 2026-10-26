@@ -28,6 +28,8 @@ namespace
     bool readColor(const nlohmann::json& j, glm::vec4& out)
     {
         if (!j.is_array() || j.size() != 4) return false;
+        for (const auto& c : j)
+            if (!c.is_number()) return false;
         out = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         return true;
     }
@@ -436,7 +438,7 @@ bool uiThemeFromJson(const std::string& json, UITheme& out)
     // is simply the default's — black everywhere would be a broken application
     // for a missing key.
     UITheme t = uiDefaultTheme();
-    t.name = j.value("name", t.name);
+    if (const auto n = j.find("name"); n != j.end() && n->is_string()) t.name = n->get<std::string>();
 
     if (const auto colors = j.find("colors"); colors != j.end() && colors->is_object())
         for (int r = 0; r < kRoles; ++r)
@@ -467,9 +469,11 @@ bool uiThemeFromJson(const std::string& json, UITheme& out)
             const auto s = o->find(kElevationNames[e]);
             if (s == o->end() || !s->is_object()) continue;
             if (const auto c = s->find("color"); c != s->end()) readColor(*c, t.shadow[e].color);
-            t.shadow[e].blur = s->value("blur", t.shadow[e].blur);
+            if (const auto b = s->find("blur"); b != s->end() && b->is_number())
+                t.shadow[e].blur = b->get<float>();
             if (const auto off = s->find("offset");
-                off != s->end() && off->is_array() && off->size() == 2)
+                off != s->end() && off->is_array() && off->size() == 2 &&
+                (*off)[0].is_number() && (*off)[1].is_number())
             {
                 t.shadow[e].offsetX = (*off)[0].get<float>();
                 t.shadow[e].offsetY = (*off)[1].get<float>();
@@ -485,14 +489,18 @@ bool uiThemeFromJson(const std::string& json, UITheme& out)
         for (const auto& s : *styles)
         {
             if (!s.is_object()) continue;
-            const std::string key = s.value("for", std::string());
+            const auto forKey = s.find("for");
+            if (forKey == s.end() || !forKey->is_string()) continue;
+            const std::string key = forKey->get<std::string>();
             if (key.empty()) continue;
             UIThemeStyle style;
             if (const auto vals = s.find("values"); vals != s.end() && vals->is_array())
                 for (const auto& e : *vals)
                 {
                     if (!e.is_object()) continue;
-                    const std::string prop = e.value("prop", std::string());
+                    const auto propName = e.find("prop");
+                    if (propName == e.end() || !propName->is_string()) continue;
+                    const std::string prop = propName->get<std::string>();
                     if (prop.empty()) continue;
                     UIThemeStyleValue v;
                     if (const auto n = e.find("number"); n != e.end() && n->is_number())

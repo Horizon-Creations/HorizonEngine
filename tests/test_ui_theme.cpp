@@ -904,3 +904,68 @@ TEST_CASE("Theme: the shipped palettes keep every value they were written with")
     CHECK(themeDigest(HE::uiDefaultTheme()) == 16988942397448614828ull);
     CHECK(themeDigest(HE::uiAmberTheme())   == 12478593750194806795ull);
 }
+
+TEST_CASE("Theme: a field of the wrong JSON type is skipped, not thrown on")
+{
+    // A hand-edited file is the realistic source: "blur": "soft", a colour
+    // written as ["1","0","0","1"]. None of the callers wraps the load in a try,
+    // so a type_error here would take the editor or the game down with it.
+    const HE::UITheme& base = HE::uiDefaultTheme();
+    const int raised = static_cast<int>(HE::UIThemeElevation::Raised);
+    const int overlay = static_cast<int>(HE::UIThemeElevation::Overlay);
+
+    HE::UITheme t;
+    bool loaded = false;
+    CHECK_NOTHROW(loaded = HE::uiThemeFromJson(R"({
+        "name": 5,
+        "colors": {
+            "Accent":  { "Light": ["1","0","0","1"], "Dark": [0,1,0,1] },
+            "Surface": { "Light": [true,0,0,1],      "Dark": [null,0,0,1] }
+        },
+        "shadows": {
+            "Raised":  { "color": ["a",0,0,1], "blur": "soft", "offset": ["x", 4] },
+            "Overlay": { "blur": 40, "offset": [3, "y"] }
+        },
+        "styles": [
+            { "for": 7, "values": [ { "prop": "Normal Color" } ] },
+            { "for": "Button", "values": [
+                { "prop": 3, "number": 1 },
+                { "prop": "Corner Radius", "number": 9 },
+                { "prop": "Normal Color", "Light": ["x",0,0,1], "Dark": [0,0,1,1] } ] }
+        ]})", t));
+    REQUIRE(loaded);
+
+    CHECK(t.name == base.name);
+    // The malformed element leaves the default; its sibling mode still loads.
+    CHECK(t.colorFor(HE::UIThemeRole::Accent, HE::UIThemeMode::Light) ==
+          base.colorFor(HE::UIThemeRole::Accent, HE::UIThemeMode::Light));
+    CHECK(t.colorFor(HE::UIThemeRole::Accent, HE::UIThemeMode::Dark) == glm::vec4(0, 1, 0, 1));
+    CHECK(t.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Light) ==
+          base.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Light));
+    CHECK(t.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Dark) ==
+          base.colorFor(HE::UIThemeRole::Surface, HE::UIThemeMode::Dark));
+
+    CHECK(t.shadow[raised].color == base.shadow[raised].color);
+    CHECK(t.shadow[raised].blur == base.shadow[raised].blur);
+    CHECK(t.shadow[raised].offsetX == base.shadow[raised].offsetX);
+    CHECK(t.shadow[raised].offsetY == base.shadow[raised].offsetY);
+    // A good blur beside a bad offset still loads, and the offset is written
+    // whole or not at all (no half-applied X).
+    CHECK(t.shadow[overlay].blur == doctest::Approx(40.0f));
+    CHECK(t.shadow[overlay].offsetX == base.shadow[overlay].offsetX);
+    CHECK(t.shadow[overlay].offsetY == base.shadow[overlay].offsetY);
+
+    // The entry without a string "for" and the value without a string "prop"
+    // are dropped; what is well-formed around them survives.
+    REQUIRE(t.styles.size() == 1);
+    CHECK(t.styles[0].first == "Button");
+    const HE::UIThemeStyle* button = t.styleFor("Button");
+    REQUIRE(button);
+    CHECK(button->values.size() == 2);
+    const HE::UIThemeStyleValue* radius = button->find("Corner Radius");
+    REQUIRE(radius);
+    CHECK(radius->number == doctest::Approx(9.0f));
+    const HE::UIThemeStyleValue* normal = button->find("Normal Color");
+    REQUIRE(normal);
+    CHECK(normal->color[static_cast<int>(HE::UIThemeMode::Dark)] == glm::vec4(0, 0, 1, 1));
+}
