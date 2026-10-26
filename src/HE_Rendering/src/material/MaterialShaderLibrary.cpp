@@ -1491,6 +1491,7 @@ namespace
 std::string buildDeferredResolveSource(bool tile, bool clustered)
 {
     std::string src = "#version 450\n";
+    src.reserve(8192); // measured final size up to ~8 KB for the clustered variant
     // Output: attachment 0 (own pass) or attachment 4 (single pass, behind the
     // four G-buffer attachments).
     src += tile ? "layout(location = 4) out vec4 oColor;\n"
