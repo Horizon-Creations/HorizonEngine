@@ -602,7 +602,8 @@ float4 main(In i) : SV_Target
     float cap   = min(lerp(10.0, 2.0, tD), capAA);             // only the core above kCore lights up (GL twin)
     float J     = 1.0 / max(abs(det), 1.0 / cap);
 
-    float3 n = normalize(cross(dPx, dPy));
+    float3 nUn = cross(dPx, dPy);
+    float3 n   = dot(nUn, nUn) > 1e-12 ? normalize(nUn) : float3(0.0, 1.0, 0.0); // flat depth: no curvature to light from
     if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
     float w = uCaustics.x * saturate(dot(n, Lr)) * fade * smoothstep(1.0, 2.0, capAA);
     float4 net = float4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
@@ -1599,7 +1600,7 @@ void GiReflCS(uint3 gid3 : SV_DispatchThreadID)
     float  rough = nm.a;
     if (rough > uReflParams.y) { uOut[px] = float4(0.0, 0.0, 0.0, 0.0); return; }
 
-    float3 N = normalize(nm.xyz);
+    float3 N = nm.xyz; // already normalized by kGiGBufPS before it writes uGNorm
     float3 V = normalize(uCamPos.xyz - pv.xyz);
     float3 R = reflect(-V, N);
     // Near-mirrors keep ONE deterministic ray (a cone narrower than a pixel would

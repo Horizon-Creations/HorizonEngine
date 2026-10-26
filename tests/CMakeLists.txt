@@ -218,6 +218,8 @@ add_executable(he_tests
     # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
     # hysteresis per view, the cross-card file.
     test_foliage_lod.cpp
+    # Straddler buckets on the pool give the single-threaded result (Thema 238 S2).
+    test_foliage_parallel.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp
@@ -289,6 +291,7 @@ add_executable(he_tests
     test_root_motion.cpp
     test_animation_notify.cpp
     test_animation_layers.cpp
+    test_animation_bench.cpp
     test_blend_space.cpp
     test_sequencer_timeline.cpp
     test_sequence.cpp
@@ -496,6 +499,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiInstanceSurface.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrameCull.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
@@ -1502,6 +1506,17 @@ if(WIN32)
     # under src/Backends/D3D_Shared, driven through timedD3DCompile.
     target_sources(he_tests PRIVATE test_d3d_shader_cache.cpp)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src)
+endif()
+
+# The Vulkan shader manager (review 4, findings 385/386): compiled straight into
+# the test exe, same reasoning as the D3D managers above — load() needs no
+# VkDevice to exercise its id allocation and file-to-SPIR-V-bytes path, so this
+# runs without a Vulkan driver, CI included.
+if(HE_VULKAN_ENABLED)
+    target_sources(he_tests PRIVATE
+        test_vulkan_shader_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Vulkan/VulkanShaderManager.cpp)
+    target_link_libraries(he_tests PRIVATE Vulkan::Vulkan)
 endif()
 
 # One ctest entry per test SOURCE FILE, not one for the whole binary.

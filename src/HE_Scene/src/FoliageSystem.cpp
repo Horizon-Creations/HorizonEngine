@@ -7,10 +7,13 @@
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include <Diagnostics/Log.h>
+#include <Diagnostics/Profiler.h>
+#include <JobSystem/JobSystem.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace
 {
@@ -309,6 +312,14 @@ void FoliageSystem::update(HorizonWorld& world)
 {
     auto& registry = world.registry();
 
+    // A scatter is a sequential random stream of up to hundreds of thousands of draws, so one
+    // layer cannot be split without changing the layout of every saved scene (seed contract).
+    // Layers, though, never touch each other: each reads the terrain and writes its own
+    // cachedInstances and store. So the dirty layers are collected here, in the order the serial
+    // walk met them, and scattered as pool jobs; the wall time is the biggest layer's, not the sum.
+    struct Job { entt::entity entity; size_t li; FoliageLayer* layer; const TerrainComponent* terrain; };
+    std::vector<Job> jobs;
+
     auto view = registry.view<FoliageComponent, TerrainComponent>();
     for (auto [entity, foliage, terrain] : view.each())
     {
@@ -337,7 +348,13 @@ void FoliageSystem::update(HorizonWorld& world)
             layer.cachedInstances.clear();
             layer.store.reset();
             ++foliage.revision;
-            scatterLayer(registry, entity, li, layer, terrain);
+            jobs.push_back({ entity, li, &layer, &terrain });
         }
     }
+
+    // One layer is a job of its own: a scatter that large has no use for a grain.
+    parallel_for(jobs.size(), [&](size_t j) {
+        HE_PROFILE_SCOPE_N("FoliageScatterLayer");
+        scatterLayer(registry, jobs[j].entity, jobs[j].li, *jobs[j].layer, *jobs[j].terrain);
+    }, "FoliageScatter", 1);
 }

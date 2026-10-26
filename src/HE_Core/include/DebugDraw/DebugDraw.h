@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <cmath>
+#include <numbers>
 
 struct DebugLine
 {
@@ -47,7 +48,8 @@ public:
                 const glm::vec3& color = glm::vec3(1.0f, 1.0f, 0.0f),
                 int segments = 16)
     {
-        const float step = 2.0f * 3.14159265f / float(segments);
+        const float pi   = std::numbers::pi_v<float>;
+        const float step = 2.0f * pi / float(segments);
         for (int i = 0; i < segments; ++i)
         {
             const float a0 = step * i, a1 = step * (i + 1);
@@ -71,7 +73,7 @@ public:
                  const glm::vec3& color = glm::vec3(1.0f, 1.0f, 0.0f),
                  int segments = 12)
     {
-        const float pi    = 3.14159265f;
+        const float pi    = std::numbers::pi_v<float>;
         const float halfH = std::max(0.0f, totalHeight * 0.5f - radius);
         const float step  = 2.0f * pi / float(segments);
         const int   hsegs = std::max(2, segments / 2);

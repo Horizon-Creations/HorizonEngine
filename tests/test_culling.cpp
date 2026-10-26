@@ -3,6 +3,7 @@
 #include <HorizonScene/Components/HierarchyComponent.h>
 
 #include <Math/AABB.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -138,6 +139,139 @@ TEST_CASE("FrustumCuller over a compact bounds array answers exactly as over the
 	const size_t kept = static_cast<size_t>(std::count(fromBounds.begin(), fromBounds.end(), uint8_t(1)));
 	CHECK(kept > 50u);
 	CHECK(kept < 4950u);   // both answers occur, the comparison means something
+}
+
+TEST_CASE("FrameCull refines once per walk and every cull over it matches the objects")
+{
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0, 2, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 80.0f);
+	for (int i = 0; i < 3000; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId = HE::UUID{ uint64_t(1 + i % 7), 1 };
+		o.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(float((i * 37) % 200) - 100.0f, float((i * 11) % 40) - 20.0f, -float((i * 53) % 150)));
+		const glm::vec3 c(o.transform[3]);
+		o.worldBounds.expand(c - glm::vec3(50.0f));   // the walk's coarse bound, bigger than the mesh
+		o.worldBounds.expand(c + glm::vec3(50.0f));
+		rw.objects.push_back(o);
+	}
+	const HE::AABB local{ glm::vec3(-0.5f), glm::vec3(0.5f) };
+	int resolved = 0;
+	auto localBounds = [&](const RenderObject& o) -> const HE::AABB*
+	{
+		++resolved;
+		return o.meshAssetId.hi == 3 ? nullptr : &local;   // one mesh is not resolved yet
+	};
+	FrustumCuller culler;
+	RenderSorter  sorter;
+	FrameCull     fc;
+	const glm::mat4 vp = rw.camera.projection * rw.camera.view;
+
+	std::vector<uint8_t> coarse;
+	fc.cull(culler, rw, /*walk=*/1, vp, coarse);   // nothing refined: the objects themselves
+	CHECK(!fc.holds(rw, 1));
+
+	fc.refine(rw, 1, localBounds);
+	CHECK(resolved == 3000);
+	CHECK(fc.holds(rw, 1));
+	fc.refine(rw, 1, localBounds);                  // same walk: nothing to do
+	CHECK(resolved == 3000);
+	CHECK(!fc.holds(rw, 2));                        // another walk does not read the copy
+
+	std::vector<uint8_t> viaCopy, viaObjects;
+	fc.cull(culler, rw, 1, vp, viaCopy);
+	culler.cull(rw, vp, viaObjects);
+	CHECK(viaCopy == viaObjects);
+	const size_t kept = static_cast<size_t>(std::count(viaCopy.begin(), viaCopy.end(), uint8_t(1)));
+	const size_t keptCoarse = static_cast<size_t>(std::count(coarse.begin(), coarse.end(), uint8_t(1)));
+	CHECK(kept < keptCoarse);                       // the refined bounds cull more than the walk's coarse ones
+
+	HE::AABB box;
+	for (const RenderObject& o : rw.objects) box.expand(o.worldBounds);
+	const HE::AABB got = fc.sceneBox(rw, 1);
+	CHECK(got.min == box.min);
+	CHECK(got.max == box.max);
+
+	fc.refine(rw, 2, localBounds);                  // a new walk starts over
+	CHECK(resolved == 6000);
+	CHECK(fc.holds(rw, 2));
+}
+
+TEST_CASE("FrameCull keeps the camera cull for the frame, camera and variant that asked")
+{
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0, 2, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 80.0f);
+	rw.camera.position   = glm::vec3(0, 2, 5);
+	for (int i = 0; i < 500; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId = HE::UUID{ uint64_t(1 + i % 5), 1 };
+		o.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(float((i * 37) % 60) - 30.0f, 0.0f, -float((i * 53) % 90)));
+		o.worldBounds.expand(glm::vec3(o.transform[3]) - glm::vec3(0.5f));
+		o.worldBounds.expand(glm::vec3(o.transform[3]) + glm::vec3(0.5f));
+		rw.objects.push_back(o);
+	}
+	const HE::AABB local{ glm::vec3(-0.5f), glm::vec3(0.5f) };
+	auto localBounds = [&](const RenderObject&) -> const HE::AABB* { return &local; };
+	FrustumCuller culler;
+	RenderSorter  sorter;
+	FrameCull     fc;
+	std::vector<uint8_t>  vis, vis2;
+	std::vector<uint32_t> sorted, sorted2;
+
+	// Before the walk is refined nothing is kept: the bounds may still change.
+	fc.cullCamera(culler, sorter, rw, 1, /*frame=*/10, 0, vis, sorted);
+	fc.refine(rw, 1, localBounds);
+	fc.cullCamera(culler, sorter, rw, 1, 10, 0, vis, sorted);
+	REQUIRE(!sorted.empty());
+
+	// A hit gives the same answer even when an object moved (the cache is the frame's, not the data's).
+	const uint32_t k = sorted.front();   // a visible object, the nearest of its mesh
+	rw.objects[k].transform = glm::translate(glm::mat4(1.0f), glm::vec3(1000.0f));
+	fc.cullCamera(culler, sorter, rw, 1, 10, 0, vis2, sorted2);
+	CHECK(vis2 == vis);
+	CHECK(sorted2 == sorted);
+
+	// Another frame recomputes: the moved object now sorts last of its mesh, the walk's bounds keep it visible.
+	std::vector<uint8_t> v3; std::vector<uint32_t> s3;
+	fc.cullCamera(culler, sorter, rw, 1, 11, 0, v3, s3);
+	CHECK(v3 == vis);
+	CHECK(s3 != sorted);
+	// ...and so does another variant of the same frame (occlusion on / off).
+	std::vector<uint32_t> s4;
+	rw.objects[k].transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.0f, 4.0f));   // next to the camera
+	fc.cullCamera(culler, sorter, rw, 1, 11, 0, v3, s4);
+	CHECK(s4 == s3);                                   // same frame and variant: the kept answer
+	fc.cullCamera(culler, sorter, rw, 1, 11, /*variant=*/1, v3, s4);
+	CHECK(s4 != s3);
+
+	rw.camera.view = glm::lookAt(glm::vec3(5, 2, 0), glm::vec3(0, 0, -20), glm::vec3(0, 1, 0));
+	std::vector<uint8_t> v5; std::vector<uint32_t> s5;
+	fc.cullCamera(culler, sorter, rw, 1, 11, 1, v5, s5);
+	CHECK(v5 != v3);               // another camera misses
+}
+
+TEST_CASE("RenderSorter::fillInstancePairs writes the same records wide and serial")
+{
+	for (uint32_t count : { 3u, 100u, 10000u })
+	{
+		std::vector<uint8_t> a(size_t(count) * 128), b(size_t(count) * 128);
+		auto fill = [](uint32_t k, glm::mat4* pair)
+		{
+			pair[1] = glm::translate(glm::mat4(1.0f), glm::vec3(float(k), float(k % 7), -float(k % 13)));
+			pair[0] = glm::scale(glm::mat4(1.0f), glm::vec3(2.0f)) * pair[1];
+		};
+		RenderSorter::fillInstancePairs(a.data(), count, fill);
+		for (uint32_t k = 0; k < count; ++k)
+		{
+			glm::mat4 pair[2];
+			fill(k, pair);
+			std::memcpy(b.data() + size_t(k) * 128, pair, sizeof(pair));
+		}
+		CHECK(a == b);
+	}
 }
 
 TEST_CASE("AABB build and ray intersection")
@@ -2823,7 +2957,7 @@ TEST_CASE("UI image quads have a texture path on D3D11 and D3D12 (Thema 157)")
 	// D3D11: own cache, dropped on a re-import.
 	CHECK(d3d11.find("resolveUITexture(obj.textureAssetId, cm)") != std::string::npos);
 	CHECK(d3d11.find("resolveGraphTexture(obj.textureAssetId") == std::string::npos);
-	CHECK(d3d11.find("uiTexCache.erase(graphTexKey(id, {}))") != std::string::npos);
+	CHECK(d3d11.find("uiTexCache.erase(key)") != std::string::npos);
 	// D3D12: the UI pass binds only m_uiAtlasHeap, so the images need their own
 	// region there (not the 16 font slots); uploads are recorded before the draws.
 	CHECK(d3d12.find("hd.NumDescriptors = k_maxUIFontAtlases + k_maxUIImages;") != std::string::npos);

@@ -4,6 +4,7 @@
 #include "OpenGLShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -286,10 +287,8 @@ private:
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
-	// DrawScene's refine loop: every object's refined bound (what the frustum culls read) and
-	// their union (the cloud-shadow map's ground height), see the audit levers 5 and 7.
-	std::vector<HE::AABB> m_refinedBounds;
-	HE::AABB              m_frameSceneBox{};
+	FrameCull             m_frameCull;     // DrawScene's refined bounds, the culls over them and the scene box
+	void RefineObjectBounds();   // the real mesh bound of every object of the walk, once per walk (m_frameCull)
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh
@@ -552,20 +551,20 @@ private:
 	int          m_uSkinnedHasTex   = -1;
 	int          m_uSkinnedTex      = -1;
 	int          m_uSkinnedMetallic = -1;
-	int          m_uSkinnedRoughness= -1;
+	int          m_uSkinnedRoughness = -1;
 	int          m_uSkinnedOpacity  = -1;
 	int          m_uSkinnedNoShadow = -1;
-	int          m_uSkinnedLightCount= -1;
+	int          m_uSkinnedLightCount = -1;
 	int          m_uSkinnedLightPos  = -1;
 	int          m_uSkinnedLightDir  = -1;
 	int          m_uSkinnedLightColor= -1;
-	int          m_uSkinnedLightParams=-1;
+	int          m_uSkinnedLightParams = -1;
 	int          m_uSkinnedCameraPos = -1;
 	int          m_uSkinnedAmbient   = -1;
 	int          m_uSkinnedSunDir    = -1;
 	int          m_uSkinnedSkyEnv    = -1;
 	int          m_uSkinnedFogDensity      = -1;
-	int          m_uSkinnedFogHeightFalloff= -1;
+	int          m_uSkinnedFogHeightFalloff = -1;
 	int          m_uSkinnedShadowEnabled   = -1;
 	int          m_uSkinnedCascadeVP       = -1;
 	int          m_uSkinnedCascadeSplits   = -1;

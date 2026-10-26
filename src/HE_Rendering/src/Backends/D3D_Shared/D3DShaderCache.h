@@ -161,7 +161,9 @@ inline void fillHeader(FileHeader& h, const Request& r, uint64_t codeSize, uint6
     h.key = r.key; h.srcHash = r.srcHash; h.srcSize = r.srcSize;
     h.flags1 = r.flags1; h.flags2 = r.flags2; h.codeSize = codeSize; h.codeHash = codeHash;
     std::strncpy(h.entry,  r.entry,  sizeof(h.entry)  - 1);
+    h.entry[sizeof(h.entry) - 1] = '\0';
     std::strncpy(h.target, r.target, sizeof(h.target) - 1);
+    h.target[sizeof(h.target) - 1] = '\0';
 }
 
 // The blob for r, or nullptr on any mismatch.

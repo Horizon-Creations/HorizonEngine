@@ -6,6 +6,7 @@
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/MaterialScalars.h>
@@ -3641,12 +3642,7 @@ struct D3D12RendererImpl
         if (!instPSO || count < 2 || !RenderSorter::depthInstancingEnabled()
             || !allocInstances(fi, count, sl))
             return false;
-        for (UINT k = 0; k < count; ++k)
-        {
-            glm::mat4 pair[2];
-            fill(k, pair);
-            std::memcpy(sl.cpu + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
-        }
+        RenderSorter::fillInstancePairs(sl.cpu, count, fill);
         cl->SetPipelineState(instPSO);
         cl->SetGraphicsRootShaderResourceView(t3Param, sl.gpu);
         cl->DrawIndexedInstanced(indexCount, count, startIndex, 0, 0);
@@ -4091,6 +4087,7 @@ struct D3D12RendererImpl
     RenderGraph     m_renderGraph;
     CommandBuffer   m_cmds;
     std::vector<uint8_t>  m_visible;
+    FrameCull             m_frameCull;   // refined bounds of the frame's walk, shared by every cull below
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
@@ -9347,17 +9344,31 @@ struct D3D12RendererImpl
             built.reserve(vertexCount * 8);
             for (size_t i = 0; i < vertexCount; ++i)
             {
-                built.insert(built.end(),
-                    { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
+                built.push_back(asset->vertices[i*3+0]);
+                built.push_back(asset->vertices[i*3+1]);
+                built.push_back(asset->vertices[i*3+2]);
                 if (i * 3 + 2 < asset->normals.size())
-                    built.insert(built.end(),
-                        { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
+                {
+                    built.push_back(asset->normals[i*3+0]);
+                    built.push_back(asset->normals[i*3+1]);
+                    built.push_back(asset->normals[i*3+2]);
+                }
                 else
-                    built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+                {
+                    built.push_back(0.0f);
+                    built.push_back(0.0f);
+                    built.push_back(0.0f);
+                }
                 if (i * 2 + 1 < asset->uvs.size())
-                    built.insert(built.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
+                {
+                    built.push_back(asset->uvs[i*2+0]);
+                    built.push_back(asset->uvs[i*2+1]);
+                }
                 else
-                    built.insert(built.end(), { 0.0f, 0.0f });
+                {
+                    built.push_back(0.0f);
+                    built.push_back(0.0f);
+                }
             }
             vtx = &built;
             mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
@@ -9593,17 +9604,31 @@ struct D3D12RendererImpl
         interleaved.reserve(vertexCount * 8);
         for (size_t i = 0; i < vertexCount; ++i)
         {
-            interleaved.insert(interleaved.end(),
-                { asset->vertices[i*3+0], asset->vertices[i*3+1], asset->vertices[i*3+2] });
+            interleaved.push_back(asset->vertices[i*3+0]);
+            interleaved.push_back(asset->vertices[i*3+1]);
+            interleaved.push_back(asset->vertices[i*3+2]);
             if (i * 3 + 2 < asset->normals.size())
-                interleaved.insert(interleaved.end(),
-                    { asset->normals[i*3+0], asset->normals[i*3+1], asset->normals[i*3+2] });
+            {
+                interleaved.push_back(asset->normals[i*3+0]);
+                interleaved.push_back(asset->normals[i*3+1]);
+                interleaved.push_back(asset->normals[i*3+2]);
+            }
             else
-                interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+            {
+                interleaved.push_back(0.0f);
+                interleaved.push_back(0.0f);
+                interleaved.push_back(0.0f);
+            }
             if (i * 2 + 1 < asset->uvs.size())
-                interleaved.insert(interleaved.end(), { asset->uvs[i*2+0], asset->uvs[i*2+1] });
+            {
+                interleaved.push_back(asset->uvs[i*2+0]);
+                interleaved.push_back(asset->uvs[i*2+1]);
+            }
             else
-                interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+            {
+                interleaved.push_back(0.0f);
+                interleaved.push_back(0.0f);
+            }
         }
 
         GpuSkeletalMesh12 skm;
@@ -11254,11 +11279,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // that has nothing BUT a trail still has something to draw past here.
     if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
-    for (RenderObject& obj : p.m_renderWorld.objects)
+    const uint64_t walk = p.m_extractor.fullExtractCount();
+    p.m_frameCull.refine(p.m_renderWorld, walk, [&](const RenderObject& obj) -> const HE::AABB*
     {
-        if (const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager))
-            obj.refineWorldBounds(mesh->localBounds);
-    }
+        const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
+        return mesh ? &mesh->localBounds : nullptr;
+    });
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
@@ -11270,7 +11296,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // No-op when GI is off.
     p.updateGiAccel(m_contentManager, p.m_renderWorld, p.frameIndex);
 
-    p.m_culler.cull(p.m_renderWorld, p.m_visible);
+    p.m_frameCull.cull(p.m_culler, p.m_renderWorld, walk, p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view, p.m_visible);
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
@@ -11677,8 +11703,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->RSSetScissorRects(1, &ssc);
                 cl->OMSetRenderTargets(0, nullptr, FALSE, &sdsv);
                 cl->ClearDepthStencilView(sdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-                p.m_culler.cull(p.m_renderWorld, viewProj, p.shadowVisible);
-                p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
+                p.m_frameCull.cull(p.m_culler, p.m_renderWorld, p.m_extractor.fullExtractCount(), viewProj, p.shadowVisible);
+                p.m_sorter.sortByMesh(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
                 RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
                                                 p.shadowBatches);
                 for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
@@ -12961,6 +12987,24 @@ void D3D12Renderer::DrawViewportFrame()
     }
 }
 
+// Retires a (value, countdown) vector in place: decrements every countdown,
+// erasing the entry once it reaches zero (after invoking onExpire with the value).
+template <typename T, typename OnExpire>
+static void reapExpired(std::vector<std::pair<T, int>>& items, OnExpire onExpire)
+{
+    for (auto it = items.begin(); it != items.end(); )
+    {
+        if (--it->second <= 0) { onExpire(it->first); it = items.erase(it); }
+        else                    ++it;
+    }
+}
+
+template <typename T>
+static void reapExpired(std::vector<std::pair<T, int>>& items)
+{
+    reapExpired(items, [](T&) {});
+}
+
 void D3D12Renderer::Render()
 {
     auto& p = *m_impl;
@@ -12968,35 +13012,15 @@ void D3D12Renderer::Render()
 
     // Free retired viewport RTs once enough frames have passed that the GPU is done
     // with them (countdown set when the RT was retired on resize).
-    for (auto it = p.retiredViewportRTs.begin(); it != p.retiredViewportRTs.end(); )
-    {
-        if (--it->second <= 0) it = p.retiredViewportRTs.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.retiredViewportRTs);
     // Same for font-atlas staging buffers recorded into an earlier frame's list.
-    for (auto it = p.m_uiAtlasUploads.begin(); it != p.m_uiAtlasUploads.end(); )
-    {
-        if (--it->second <= 0) it = p.m_uiAtlasUploads.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.m_uiAtlasUploads);
     // Same for per-mesh base-color texture staging buffers.
-    for (auto it = p.meshTexUploads.begin(); it != p.meshTexUploads.end(); )
-    {
-        if (--it->second <= 0) it = p.meshTexUploads.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.meshTexUploads);
     // GPU resources retired by material/mesh hot-reload — free once past frames in flight.
-    for (auto it = p.m_retiredTextures.begin(); it != p.m_retiredTextures.end(); )
-    {
-        if (--it->second <= 0) it = p.m_retiredTextures.erase(it);
-        else                   ++it;
-    }
+    reapExpired(p.m_retiredTextures);
     // Heap slots freed by invalidation become reusable once past frames in flight.
-    for (auto it = p.m_freeSlotPending.begin(); it != p.m_freeSlotPending.end(); )
-    {
-        if (--it->second <= 0) { p.m_freeSlots.push_back(it->first); it = p.m_freeSlotPending.erase(it); }
-        else                   ++it;
-    }
+    reapExpired(p.m_freeSlotPending, [&p](UINT slot) { p.m_freeSlots.push_back(slot); });
 
     // Swapchain to the window's client size (flushes the GPU only when it changed).
     p.resizeSwapchainIfNeeded();
