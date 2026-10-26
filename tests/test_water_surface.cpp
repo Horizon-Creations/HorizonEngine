@@ -1512,8 +1512,10 @@ namespace
 
     // The triangles that cover something. The triangulator's ears (and so the pieces a
     // split cuts them into) can be slivers of no area at all, a corner on the line of
-    // the other two; they draw nothing and a float cannot say which way they face.
-    std::vector<uint32_t> solidIndices(const StaticMeshAsset& m, double minArea = 1e-5)
+    // the other two; they draw nothing and a float cannot say which way they face. A run of contour
+    // points that is straight to within a float (a bank that is a plane) leaves them a little over
+    // 1e-5 m² (a corner 10 to 20 µm off the chord of a 3 m edge): a square centimetre is nothing to see.
+    std::vector<uint32_t> solidIndices(const StaticMeshAsset& m, double minArea = 1e-4)
     {
         std::vector<uint32_t> out;
         for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
@@ -1627,8 +1629,11 @@ TEST_CASE("Water soft shore: on a plane bank the depth is carried linearly, the 
     }
 
     // e = 1 at the waterline, 0 beyond kShoreFadeDepth of water; in between it is
-    // 1 − depth, depth being 0.3 − 0.04 x over the drawn sheet: e = 0.7 + 0.04 x.
-    auto expected = [](double x) { return std::clamp(0.7 + 0.04 * x, 0.0, 1.0); };
+    // 1 − depth / kShoreFadeDepth, depth being 0.3 − 0.04 x over the drawn sheet.
+    auto expected = [](double x)
+    {
+        return std::clamp(1.0 - (0.3 - 0.04 * x) / double(water::kShoreFadeDepth), 0.0, 1.0);
+    };
     float seenOne = 0.0f;
     for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
     {
@@ -1646,9 +1651,11 @@ TEST_CASE("Water soft shore: on a plane bank the depth is carried linearly, the 
         const float e = (proximityOf(m, a) + proximityOf(m, b) + proximityOf(m, c)) / 3.0f;
         CHECK(e == doctest::Approx(expected(x)).epsilon(0.05));
     }
-    // Deep open water far from the bank has no shore in it at all.
+    // The far end of this lake is 1.1 m deep, which the depth range now covers (the test below
+    // has a bank steep enough to leave it): the channel still follows the real depth there.
     for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
-        if (m.vertices[i * 3] + soft.s.center.x < -19.0f) CHECK(proximityOf(m, i) == 0.0f);
+        if (m.vertices[i * 3] + soft.s.center.x < -19.0f)
+            CHECK(proximityOf(m, i) == doctest::Approx(expected(-20.0)).epsilon(0.04));
 
     // The same field always gives the same mesh.
     const Built again = build(tc, id, softShore());
@@ -1656,6 +1663,69 @@ TEST_CASE("Water soft shore: on a plane bank the depth is carried linearly, the 
     CHECK(again.s.mesh.vertices == soft.s.mesh.vertices);
     CHECK(again.s.mesh.normals == soft.s.mesh.normals);
     CHECK(again.s.mesh.indices == soft.s.mesh.indices);
+}
+
+// Thema 320: the material has no scene depth, so the depth the mesh carries is all it knows of the
+// shore. With a range of one metre the water went from clear to its deep colour inside a single
+// contour, which is the hard line where the water meets the landscape; kShoreFadeDepth is wider now,
+// and what the mesh carries has to follow the real depth over the whole range, with no step and no
+// plateau on the way, so the fade the material builds from it has nothing to jump over.
+TEST_CASE("Water soft shore: the depth runs on to kShoreFadeDepth with no plateau on the way (Thema 320)")
+{
+    CHECK(water::kShoreFadeDepth > 1.5f);                                 // deeper than the old one metre
+
+    TerrainComponent tc = makeTerrain();                                  // 64 m, a metre per cell
+    shapeGround(tc, 65, [](float x, float) { return 0.1f * x; });        // 10 cm per metre, rising east
+    const uint16_t id = addLake(tc, rect(-30, -20, 20, 20), 0.3f);        // 0.3 over the origin: waterline at x = 3
+    const Built soft = build(tc, id, softShore());
+    REQUIRE_FALSE(soft.s.empty());
+    const StaticMeshAsset& m = soft.s.mesh;
+
+    // depth(x) = 0.3 - 0.1 x on the drawn sheet, e = 1 - depth / kShoreFadeDepth, clamped.
+    auto expected = [](double x)
+    {
+        return std::clamp(1.0 - (0.3 - 0.1 * x) / double(water::kShoreFadeDepth), 0.0, 1.0);
+    };
+
+    // Every vertex follows the real depth, also where it is deeper than the old range.
+    uint32_t beyondOldRange = 0;
+    float lowestInRange = 1.0f;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        const double x = m.vertices[i * 3] + soft.s.center.x;
+        const float e = proximityOf(m, i);
+        CHECK(e == doctest::Approx(expected(x)).epsilon(0.04));
+        const double depth = 0.3 - 0.1 * x;
+        if (depth > 1.2 && depth < water::kShoreFadeDepth - 0.2)
+        {
+            ++beyondOldRange;
+            CHECK(e > 0.05f);                                             // one metre ago this read 0: open water
+            lowestInRange = std::min(lowestInRange, e);
+        }
+    }
+    CHECK(beyondOldRange > 0);
+    CHECK(lowestInRange < 0.6f);                                          // and it keeps falling out there
+
+    // Between the vertices too: the centre of a triangle carries the mean of its corners (what the
+    // rasteriser interpolates to there) and it follows the real depth, so the ramp has no kink in it.
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+    {
+        const uint32_t a = m.indices[t], b = m.indices[t + 1], c = m.indices[t + 2];
+        const double x = (m.vertices[a * 3] + m.vertices[b * 3] + m.vertices[c * 3]) / 3.0 + soft.s.center.x;
+        const float e = (proximityOf(m, a) + proximityOf(m, b) + proximityOf(m, c)) / 3.0f;
+        CHECK(e == doctest::Approx(expected(x)).epsilon(0.05));
+    }
+
+    // Deeper than the range there is no shore in it: open water, exactly 0.
+    const double openX = 0.3 / 0.1 - water::kShoreFadeDepth / 0.1;        // where depth = kShoreFadeDepth
+    uint32_t openVertices = 0;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+        if (m.vertices[i * 3] + soft.s.center.x < openX - 1.0)
+        {
+            CHECK(proximityOf(m, i) == 0.0f);
+            ++openVertices;
+        }
+    CHECK(openVertices > 0);
 }
 
 TEST_CASE("Water soft shore: the shore-proximity readback survives a landscape's own Y-rotation (Thema 206 Schritt 8)")

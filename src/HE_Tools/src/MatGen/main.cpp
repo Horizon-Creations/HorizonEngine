@@ -451,10 +451,16 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
 constexpr float kChopBase = 0.3f, kChopMid = 0.9f, kChopFine = 0.8f, kChopFiner = 0.55f;
 
 // Shallow water (Thema 206 step 4), defaults of the ShallowWater parameter (step 6).
-// The tint depth follows the real shore depth for e above 0 (water shallower than one metre)
-// and has fully taken over at e = kShallowTintE (half a metre); the Opacity floor falls to
-// kShallowOpacity of itself at no depth and is whole again from kShallowClearDepth metres.
-constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDepth = 0.8f;
+// The tint depth follows the real shore depth for e above 0 (water shallower than kShoreFadeDepth,
+// three metres since Thema 320; it was one) and has fully taken over at e = kShallowTintE (a metre
+// and a half); the Opacity floor falls to kShallowOpacity of itself at no depth and is whole again
+// from kShallowClearDepth metres.
+constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDepth = 1.5f;
+
+// The water's own colour from above (Thema 320): the lit body colour times a gain that runs from
+// kBodyShallow where the light reaches the floor (trans = 1) to kBodyDeep in deep water, after
+// kBodyMute of its saturation is taken out. 1 / 1 / 0 is the old, fully lit teal.
+constexpr float kBodyShallow = 0.85f, kBodyDeep = 0.50f, kBodyMute = 0.12f;
 
 // ── Fine ripples ─────────────────────────────────────────────────────────────
 // The slope of a drifting FBM height field, by finite differences — the plan's
@@ -647,12 +653,12 @@ Mb waterMaterial()
         "Water colour where the view ray through the water is short (looking straight down).", 0);
     const int deep = m.param(T::ParamColor, "DeepColor", { 0.004f, 0.028f, 0.052f }, "Color",
         "Water colour where the view ray through the water is long (toward the horizon).", 1);
-    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.35f, 0.7f }, "Color",
+    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.6f, 0.7f }, "Color",
         "x = absorption per metre (higher = murkier, the deep colour arrives sooner). "
-        "y = water depth in metres the tint assumes (no scene depth is read yet; in the last metre "
+        "y = water depth in metres the tint assumes (no scene depth is read yet; in the last three metres "
         "before a landscape's shore the real depth takes over, so shallows are clear). "
         "z = shore width: the water fades in over this many metres of depth at the water's "
-        "edge (0 = a hard edge, up to 0.7). w = shore foam: the lace along the water's edge "
+        "edge (0 = a hard edge, up to 1). w = shore foam: the lace along the water's edge "
         "(0 = none, 1 = strong). Needs the water mesh of a landscape; a plane has no shore.", 2);
     // The three knobs start from the trains in Physics/WaterWaves.h, the same ones
     // the water physics follows (WaterQuery), so retuning the water here retunes
@@ -681,13 +687,13 @@ Mb waterMaterial()
         "w = dielectric specular (0..1): 0.5 = F0 0.04, multiplied by reflection, ~0.3 gives "
         "water's F0 0.02.", 6);
     // Shallow water (Thema 206 step 4): the tint and the Opacity floor follow the real shore
-    // depth in the last metre before a landscape's shore. Defaults reproduce the step 4 constants.
+    // depth in the last kShoreFadeDepth metres before a landscape's shore (Thema 320: three, was one).
     const int shallowW = m.param(T::ParamVec4, "ShallowWater", { kShallowClearDepth, kShallowTintE, kShallowOpacity, 0.0f }, "Surface",
         "Shore shallows (need the water mesh of a landscape; a plane has no shore, no effect). "
-        "x = clear depth (m, 0..1): from this much water on the opacity floor is whole, "
+        "x = clear depth (m, 0..3): from this much water on the opacity floor is whole, "
         "shallower water lets the ground show through more. "
-        "y = tint start (0..1, shore closeness: 0 = a metre of water or more, 1 = none): "
-        "where the depth tint has fully taken over the real depth, 0.5 = half a metre; "
+        "y = tint start (0..1, shore closeness: 0 = three metres of water or more, 1 = none): "
+        "where the depth tint has fully taken over the real depth, 0.5 = a metre and a half; "
         "further out it blends to the assumed depth (Turbidity.y). "
         "z = opacity floor (0..1): the share of Opacity left at no depth at all. "
         "w = reserved, no effect yet.", 7);
@@ -697,7 +703,7 @@ Mb waterMaterial()
     const Pin clearDepth{ shs, 0 }, tintStart{ shs, 1 }, opacFloor{ shs, 2 };
     const int opac = m.param(T::ParamFloat, "Opacity", { 0.5f }, "Surface",
         "Opacity looking straight down into clear water. Depth tint, Fresnel and foam raise it. "
-        "In the last metre before a landscape's shore it falls toward a quarter of itself as the "
+        "In the last metres before a landscape's shore it falls toward a quarter of itself as the "
         "water gets shallower, so the ground shows through.",
         10, 0.0f, 1.0f);
     const int refr = m.param(T::ParamFloat, "Refraction", { 0.3f }, "Surface",
@@ -882,10 +888,11 @@ Mb waterMaterial()
     const int refrN = m.un(T::Normalize3, m.op3(T::Lerp, geoN, waveN, refr, 21, 5), 22, 5);
     const int ndvR  = m.un(T::Saturate, m.op(T::DotProduct, refrN, view, 23, 5), 24, 5);
     // The depth the tint assumes is Turbidity.y (a guess, no scene depth is read), until the
-    // mesh knows better: in the last half metre of water before the shore the real depth
+    // mesh knows better: in the last metre and a half of water before the shore the real depth
     // takes over, so shallow water is as clear as it is shallow (the ground and the shallow
-    // colour come through) and thickens to the assumed depth over the metre before. The blend
-    // is a smoothstep of e, which is 0 at one metre: no step where the shore range begins,
+    // colour come through) and thickens to the assumed depth over the metre and a half before.
+    // The blend is a smoothstep of e, which is 0 at kShoreFadeDepth: no step where the shore range
+    // begins,
     // and in open water (e = 0) this is Turbidity.y itself.
     // tintStart is a user knob (0..1, see ShallowWater param above): a branchless
     // max(tintStart, eps) before it feeds Smoothstep as the non-zero edge — equal
@@ -1003,11 +1010,29 @@ Mb waterMaterial()
     const int farRough = m.op(T::Multiply, m.op3(T::Smoothstep, m.k(10.0f, 41, 1), m.k(160.0f, 41, 1.5f), dist, 42, 1),
                               m.k(0.25f, 42, 1.5f), 43, 1);
     const int foamTint = m.op(T::Multiply, foamCol, m.op(T::Add, m.k(0.55f, 42, 8), m.op(T::Multiply, lace, m.k(0.7f, 42, 9), 43, 8), 44, 8), 45, 8);
-    const int base   = m.op3(T::Lerp, lit, foamTint, foamAll, 46, 7);
+    // The water's own (diffuse) colour is a faint scatter, not a paint: the colour of water is
+    // mostly what it reflects and lets through, so the body colour goes in dim and a little
+    // grey (kBodyMute toward its luma: no saturated light blue), lighter where the light still
+    // gets through to the floor (trans -> 1: the shallows) and darker where it does not
+    // (trans -> 0: deep water). Emissive stays 0, so at night it is dark like the rest of the
+    // scene. Foam keeps its own colour (foamTint), and the underside branch below is untouched.
+    const int lumaW   = m.node(T::ConstColor, 44, 6);
+    const int onesC   = m.node(T::ConstColor, 44, 7);
+    {
+        MatGraphNode& lw = *m.g.findNode(lumaW);
+        lw.p[0] = 0.299f; lw.p[1] = 0.587f; lw.p[2] = 0.114f;
+        MatGraphNode& on = *m.g.findNode(onesC);
+        on.p[0] = on.p[1] = on.p[2] = 1.0f;
+    }
+    const int litGray = m.op(T::Multiply, onesC, m.op(T::DotProduct, lit, lumaW, 45, 6), 46, 6);
+    const int litMute = m.op3(T::Lerp, lit, litGray, m.k(kBodyMute, 45, 7), 47, 6);
+    const int bodyGain = m.op3(T::Lerp, m.k(kBodyDeep, 45, 8), m.k(kBodyShallow, 45, 9), trans, 47, 8);
+    const int bodyDim = m.op(T::Multiply, litMute, bodyGain, 48, 6);
+    const int base   = m.op3(T::Lerp, bodyDim, foamTint, foamAll, 49, 7);
     // Opacity is what clear water still covers looking straight down. Water that is only
     // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
     // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0
-    // where shoreD is a metre, so neutral outside the shore range).
+    // where shoreD is kShoreFadeDepth, so neutral outside the shore range).
     // clearDepth is a user knob too: same branchless max(., eps) clamp as tintStart above.
     const int epsClear = m.k(0.001f, 36, 1.5f);
     const int clearOk  = m.op(T::Greater, clearDepth, epsClear, 36, 2);
