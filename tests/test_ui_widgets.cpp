@@ -18466,3 +18466,21 @@ TEST_CASE("NamedSlot: a component with no slot keeps the default content and the
             fallbackShown = HE::uiElementEffectiveVisible(*wm.tree(id), *ep);
     CHECK(fallbackShown);
 }
+
+TEST_CASE("WrapBox: a repeated id takes the first entry's place and the asking child's alignment")
+{
+    // A hand-edited file can repeat an id. The slot comes from the first placed
+    // entry with that id, but the vertical alignment is the ASKING child's.
+    WrapCase c = makeWrap(320.0f, 400.0f, 4, 100.0f, 40.0f);
+    c.t.find(c.kids[1])->sizeY = 90.0f;             // line 0 is 90 tall
+    HE::UIElement& first = *c.t.find(c.kids[0]);
+    HE::UIElement& dup   = *c.t.find(c.kids[3]);    // line 1, a different place
+    dup.id = first.id;
+    first.slotVAlign = HE::UISlotVAlign::Fill;
+    dup.slotVAlign   = HE::UISlotVAlign::Bottom;
+
+    const HE::UIWidgetRect r = HE::uiElementRect(c.t, dup);
+    CHECK(r.x == doctest::Approx(0.0f));            // the first entry's column
+    CHECK(r.y == doctest::Approx(50.0f));           // 90-tall line, 40 high, bottom
+    CHECK(r.h == doctest::Approx(40.0f));
+}

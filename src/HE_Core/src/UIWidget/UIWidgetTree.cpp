@@ -1003,12 +1003,12 @@ namespace
         // thing on this line": a row of chips with one tall entry must not grow
         // every chip beside it. Top/Center/Bottom pin the child's own height
         // within the line.
-        const auto slotOf = [&](const Placed& p)
+        const auto slotOf = [&](const Placed& p, const UIElement& aligned)
         {
             UIWidgetRect slot{ p.x, p.y, p.w, p.h };
-            if (p.e->slotVAlign != UISlotVAlign::Fill)
+            if (aligned.slotVAlign != UISlotVAlign::Fill)
                 slot.h = lineHeights[static_cast<std::size_t>(p.line)];
-            return alignInSlot(*p.e, slot, us, vs);
+            return alignInSlot(aligned, slot, us, vs);
         };
         // With values memoized every child's slot is written now, as the box
         // does: the lines were broken for all of them anyway.
@@ -1016,19 +1016,14 @@ namespace
             for (const Placed& p : placed)
                 if (LayoutMemo* m = memoFor(tree, *p.e, canvas, true))
                 {
-                    m->unbounded = slotOf(p);
+                    m->unbounded = slotOf(p, *p.e);
                     m->have |= LayoutMemo::kUnbounded;
                 }
         for (const Placed& p : placed)
             if (p.e->id == child->id)
-            {
                 // The CHILD asked, not the placed entry with its id: the same
                 // element unless a hand-edited file repeats an id.
-                UIWidgetRect slot{ p.x, p.y, p.w, p.h };
-                if (child->slotVAlign != UISlotVAlign::Fill)
-                    slot.h = lineHeights[static_cast<std::size_t>(p.line)];
-                return alignInSlot(*child, slot, us, vs);
-            }
+                return slotOf(p, *child);
         return found;                            // not a child of this box
     }
 
