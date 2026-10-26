@@ -2,11 +2,8 @@
 #include <Diagnostics/Logger.h>
 #include <d3dcompiler.h>
 #include <algorithm>
-#include <filesystem>
 #include <fstream>
 #include <sstream>
-
-namespace fs = std::filesystem;
 
 namespace
 {
