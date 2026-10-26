@@ -237,6 +237,15 @@ enum class MatNodeType : uint8_t
     //            times intensity)
     // A zero-filled block (UI pass) gives zeros; both stages declare the prefix.
     Sun,
+
+    // ── v18: FBM with its gradient (Thema 235) ──
+    // The integer-hash FBM (FBM Noise with p[0] = 1) and its analytic gradient, from the
+    // same four hashes per octave: one evaluation where a slope by finite differences took
+    // three (the engine water's chop, twelve FBMs a pixel).
+    //   inputs : UV, Scale
+    //   outputs: Value (as FBM Noise), dX and dY (the derivative of Value along UV·Scale,
+    //            what (FBM(q + h·x) − FBM(q)) / h tends to as h shrinks)
+    FbmGrad,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
