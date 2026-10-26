@@ -47,6 +47,15 @@ namespace
 		return nullptr;
 	}
 
+	// A rect in a canvas's units, in the pixels of the render target: the four
+	// products the hit tests and the draw all need, written once so they cannot
+	// drift apart.
+	HE::UIWidgetRect toPixelRect(const HE::UIWidgetRect& r, const HE::UIWidgetCanvas& canvas)
+	{
+		return { r.x * canvas.scaleX, r.y * canvas.scaleY,
+		         r.w * canvas.scaleX, r.h * canvas.scaleY };
+	}
+
 	// How many parents `e` has: how far down the tree it sits.
 	int ancestorDepth(const HE::UIWidgetTree& tree, const HE::UIElement& e)
 	{
@@ -2905,8 +2914,7 @@ namespace
 	{
 		if (canvas.scaleX <= 0.0f || canvas.scaleY <= 0.0f) return false;
 		const HE::UIWidgetRect r = HE::uiElementRect(tree, lv, &canvas);
-		out = { r.x * canvas.scaleX, r.y * canvas.scaleY,
-		        r.w * canvas.scaleX, r.h * canvas.scaleY };
+		out = toPixelRect(r, canvas);
 		return true;
 	}
 
@@ -3662,8 +3670,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 			{
 				const HE::UIWidgetCanvas canvas = resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
-				const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-				                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+				const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 				dp->hoverCell = HE::UIDatePicker::cellAt(pxr, mouseX, mouseY);
 			}
 			if (dp->hoverCell != was) m_visualDirty = true;
@@ -3718,8 +3725,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetCanvas canvas =
 						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *ti, &canvas);
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					auto inside = [&](const HE::UIWidgetRect& q)
 					{
 						return mouseX >= q.x && mouseX <= q.x + q.w &&
@@ -3777,8 +3783,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetCanvas canvas =
 						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					const int dir = HE::UIDatePicker::arrowAt(pxr, mouseX, mouseY);
 					if (dir != 0)
 						if (auto* live = dynamic_cast<HE::UIDatePicker*>(w.tree.find(hot)))
@@ -3800,8 +3805,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
 					float us = 1.0f, vs = 1.0f;
 					HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					const auto parts = HE::UIColorPicker::partsIn(
 						pxr, cp->barWidth * canvas.scaleY * vs,
 						cp->gap * canvas.scaleY * vs, cp->showAlpha);
@@ -3832,8 +3836,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 							labels.push_back(cp->name.empty() ? std::string("Page") : cp->name);
 					// In the element's own pixel space, like everything the
 					// shared layout answers in.
-					const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 					// The three numbers render() lays the strip out with, and
 					// they have to be the SAME three. Two things were wrong
 					// here: the canvas scale was missing (`pxr` is in canvas
@@ -4147,8 +4150,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 				const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *cp, &canvas);
 				float us = 1.0f, vs = 1.0f;
 				HE::uiElementUnitScale(w.tree, *cp, us, vs, &canvas);
-				const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-				                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+				const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 				const auto parts = HE::UIColorPicker::partsIn(
 					pxr, cp->barWidth * canvas.scaleY * vs,
 					cp->gap * canvas.scaleY * vs, cp->showAlpha);
@@ -4185,8 +4187,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					const HE::UIWidgetCanvas canvas =
 						resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
 					const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *e, &canvas);
-					const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-					                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+					const HE::UIWidgetRect px = toPixelRect(r, canvas);
 					// The pointer minus where on the thumb it took hold IS the
 					// thumb's top, and the offset that puts it there is the
 					// drawing sum read backwards.
@@ -4629,8 +4630,7 @@ bool WidgetManager::focusedFieldRect(float vpWidth, float vpHeight, HE::UIWidget
 	if (!e) return false;
 	const HE::UIWidgetCanvas canvas = resolveCanvas(w->tree, w->windowId,vpWidth, vpHeight);
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *e, &canvas);
-	out.x = r.x * canvas.scaleX; out.y = r.y * canvas.scaleY;
-	out.w = r.w * canvas.scaleX; out.h = r.h * canvas.scaleY;
+	out = toPixelRect(r, canvas);
 	return true;
 }
 
@@ -4945,8 +4945,7 @@ bool WidgetManager::labelCaretAtPointer(float vpWidth, float vpHeight,
 	const HE::UIWidgetRect r = HE::uiElementRect(w->tree, *lb, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w->tree, *lb, us, vs, &canvas);
-	const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-	                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+	const HE::UIWidgetRect px = toPixelRect(r, canvas);
 	outOffset = lb->caretAtPoint(px, canvas.scaleY * vs, mouseX, mouseY, m_fontScale);
 	return true;
 }
@@ -5428,8 +5427,7 @@ void WidgetManager::activateElement(Instance& w, int elemId)
 			const HE::UIWidgetCanvas canvas =
 				resolveCanvas(w.tree, w.windowId,m_lastViewportW, m_lastViewportH);
 			const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *dp, &canvas);
-			const HE::UIWidgetRect pxr{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-			                            r.w * canvas.scaleX, r.h * canvas.scaleY };
+			const HE::UIWidgetRect pxr = toPixelRect(r, canvas);
 			const int cell = HE::UIDatePicker::cellAt(pxr, m_pointerX, m_pointerY);
 			if (cell >= 0)
 			{
@@ -5475,8 +5473,7 @@ std::string WidgetManager::linkAtPoint(Instance& w, int elemId, float x, float y
 	const HE::UIWidgetRect r = HE::uiElementRect(w.tree, *t, &canvas);
 	float us = 1.0f, vs = 1.0f;
 	HE::uiElementUnitScale(w.tree, *t, us, vs, &canvas);
-	const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-	                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+	const HE::UIWidgetRect px = toPixelRect(r, canvas);
 	return t->linkAt(px, canvas.scaleY * vs, x, y, m_fontScale);
 }
 
@@ -6051,8 +6048,7 @@ int WidgetManager::scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeig
 		if (!HE::uiElementEffectiveVisible(w.tree, e)) continue;
 		if (!HE::uiElementEffectiveEnabled(w.tree, e)) continue;
 		const HE::UIWidgetRect r = HE::uiElementRect(w.tree, e, &canvas);
-		const HE::UIWidgetRect px{ r.x * canvas.scaleX, r.y * canvas.scaleY,
-		                           r.w * canvas.scaleX, r.h * canvas.scaleY };
+		const HE::UIWidgetRect px = toPixelRect(r, canvas);
 		HE::UIWidgetRect th;
 		if (!HE::uiScrollThumbRect(e, px, th)) continue;
 		if (mouseX < th.x || mouseX > th.x + th.w ||
