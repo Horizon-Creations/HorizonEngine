@@ -453,6 +453,7 @@ void VulkanRenderer::Render()
     RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
 
     m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+    ++m_frameStamp;
     m_ssaoRanThisFrame = false;  // cleared each frame; set true only inside runSSAO()
     m_giRanThisFrame   = false;  // cleared each frame; set true only inside runGi()
     m_ssrRanThisFrame  = false;  // cleared each frame; set true only by RenderForwardSSR()
@@ -4080,8 +4081,7 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     // would count as opaque in this pre-pass and transparent in the scene pass
     // — depth where the scene writes none, and the decal lands on the glass.
     HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    cullCameraObjects();
     if (m_sortedIndices.empty()) return;
 
     if (d.fb == VK_NULL_HANDLE)
@@ -7202,12 +7202,52 @@ void VulkanRenderer::refineObjectBounds()
     const RenderObject* objects = m_renderWorld.objects.data();
     const size_t        count   = m_renderWorld.objects.size();
     if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
-    for (RenderObject& obj : m_renderWorld.objects)
+    m_refinedBounds.resize(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        RenderObject& obj = m_renderWorld.objects[i];
         if (const GpuMesh* mesh = resolveMesh(obj.meshAssetId))
             obj.refineWorldBounds(mesh->localBounds);
+        m_refinedBounds[i] = obj.worldBounds;
+    }
     m_refinedWalk    = walk;
     m_refinedObjects = objects;
     m_refinedCount   = count;
+}
+
+void VulkanRenderer::cullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible)
+{
+    if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
+        && m_refinedCount == m_renderWorld.objects.size())
+        m_culler.cull(m_refinedBounds, viewProj, outVisible);
+    else
+        m_culler.cull(m_renderWorld, viewProj, outVisible);
+}
+
+void VulkanRenderer::cullCameraObjects()
+{
+    const uint64_t  walk = m_extractor.fullExtractCount();
+    const glm::mat4 vp   = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+    CameraCullCache& c   = m_cameraCull;
+    // Bounds change only in refineObjectBounds, once per walk, which every pass runs before this;
+    // a pass at another aspect has another projection and misses.
+    const bool refined = m_refinedWalk == walk && m_refinedObjects == m_renderWorld.objects.data()
+                      && m_refinedCount == m_renderWorld.objects.size();
+    if (refined && c.stamp == m_frameStamp && c.walk == walk && c.objects == m_renderWorld.objects.data()
+        && c.count == m_renderWorld.objects.size() && c.viewProj == vp
+        && c.camPos == m_renderWorld.camera.position)
+    {
+        m_visible       = c.visible;
+        m_sortedIndices = c.sorted;
+        return;
+    }
+    cullObjects(vp, m_visible);
+    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    if (!refined) { c.stamp = ~0ull; return; }   // bounds may still change this walk: keep nothing
+    c.stamp = m_frameStamp; c.walk = walk; c.objects = m_renderWorld.objects.data();
+    c.count = m_renderWorld.objects.size(); c.viewProj = vp; c.camPos = m_renderWorld.camera.position;
+    c.visible = m_visible;
+    c.sorted  = m_sortedIndices;
 }
 
 void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
@@ -7320,8 +7360,8 @@ void VulkanRenderer::EncodeShadowMap(VkCommandBuffer cmd, float aspect)
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &sc);
         vkCmdSetDepthBias(cmd, kShadowBiasConstant, 0.0f, kShadowBiasSlope);
-        m_culler.cull(m_renderWorld, viewProj, m_shadowVisible);
-        m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
+        cullObjects(viewProj, m_shadowVisible);
+        m_sorter.sortByMesh(m_renderWorld, m_shadowVisible, m_shadowSorted);
         RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity, m_shadowBatches);
         for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
         {
@@ -8635,8 +8675,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
     HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager);
 
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    cullCameraObjects();
     m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
     m_statVisible = static_cast<uint32_t>(m_sortedIndices.size());
     if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) return;
@@ -12373,8 +12412,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     ensureGiProbeGrid();
     if (m_giProbeGridBuilt) ensureGiProbeAtlas();
 
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    cullCameraObjects();
     if (m_sortedIndices.empty()) return;
 
     const glm::mat4 vp = HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view;
@@ -14069,8 +14107,7 @@ void VulkanRenderer::runSSAO(VkCommandBuffer cmd, uint32_t w, uint32_t h,
 
     refineObjectBounds();
 
-    m_culler.cull(m_renderWorld, m_visible);
-    m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+    cullCameraObjects();
     if (m_sortedIndices.empty()) return;
 
     const glm::mat4 view     = m_renderWorld.camera.view;

@@ -4091,6 +4091,18 @@ struct D3D12RendererImpl
     RenderGraph     m_renderGraph;
     CommandBuffer   m_cmds;
     std::vector<uint8_t>  m_visible;
+    // The refine loop's compact copy of every object's bound: the frustum culls of the frame
+    // (camera and cascades) read it instead of a cache line per RenderObject, see the audit lever 7.
+    std::vector<HE::AABB> m_refinedBounds;
+    // The frame's frustum cull: over the compact bounds when the refine loop filled them for
+    // exactly these objects, over the objects themselves otherwise.
+    void cullObjects(const glm::mat4& vp, std::vector<uint8_t>& outVisible)
+    {
+        if (m_refinedBounds.size() == m_renderWorld.objects.size())
+            m_culler.cull(m_refinedBounds, vp, outVisible);
+        else
+            m_culler.cull(m_renderWorld, vp, outVisible);
+    }
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
@@ -11254,10 +11266,13 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // that has nothing BUT a trail still has something to draw past here.
     if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
-    for (RenderObject& obj : p.m_renderWorld.objects)
+    p.m_refinedBounds.resize(p.m_renderWorld.objects.size());
+    for (size_t i = 0; i < p.m_renderWorld.objects.size(); ++i)
     {
+        RenderObject& obj = p.m_renderWorld.objects[i];
         if (const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager))
             obj.refineWorldBounds(mesh->localBounds);
+        p.m_refinedBounds[i] = obj.worldBounds;
     }
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
@@ -11270,7 +11285,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     // No-op when GI is off.
     p.updateGiAccel(m_contentManager, p.m_renderWorld, p.frameIndex);
 
-    p.m_culler.cull(p.m_renderWorld, p.m_visible);
+    p.cullObjects(p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view, p.m_visible);
     p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
@@ -11677,8 +11692,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->RSSetScissorRects(1, &ssc);
                 cl->OMSetRenderTargets(0, nullptr, FALSE, &sdsv);
                 cl->ClearDepthStencilView(sdsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-                p.m_culler.cull(p.m_renderWorld, viewProj, p.shadowVisible);
-                p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
+                p.cullObjects(viewProj, p.shadowVisible);
+                p.m_sorter.sortByMesh(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
                 RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
                                                 p.shadowBatches);
                 for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
