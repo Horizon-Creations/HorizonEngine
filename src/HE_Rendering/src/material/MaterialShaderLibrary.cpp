@@ -1321,17 +1321,20 @@ const MaterialShaderVariant* MaterialShaderLibrary::precompiledFor(const Materia
 {
     if (!ma) return nullptr;
     const uint8_t want = static_cast<uint8_t>(backend);
-    // Exact tag first, so a pak that carries both D3D variants hands each backend
-    // its own; the sibling only steps in when the exact one is missing.
-    for (const MaterialShaderVariant& var : ma->precompiledShaders)
-        if (var.backend == want) return &var;
     uint8_t sibling = want;
     if (backend == RendererBackend::D3D11) sibling = static_cast<uint8_t>(RendererBackend::D3D12);
     if (backend == RendererBackend::D3D12) sibling = static_cast<uint8_t>(RendererBackend::D3D11);
-    if (sibling != want)
-        for (const MaterialShaderVariant& var : ma->precompiledShaders)
-            if (var.backend == sibling) return &var;
-    return nullptr;
+    // Exact tag first, so a pak that carries both D3D variants hands each backend
+    // its own; the sibling only steps in when the exact one is missing — one pass,
+    // the first sibling seen is kept as the fallback while the scan keeps looking
+    // for an exact match.
+    const MaterialShaderVariant* siblingMatch = nullptr;
+    for (const MaterialShaderVariant& var : ma->precompiledShaders)
+    {
+        if (var.backend == want) return &var;
+        if (!siblingMatch && sibling != want && var.backend == sibling) siblingMatch = &var;
+    }
+    return siblingMatch;
 }
 
 bool MaterialShaderLibrary::spirvFromBytes(const std::string& bytes, std::vector<uint32_t>& out)
