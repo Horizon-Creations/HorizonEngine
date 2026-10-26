@@ -9745,6 +9745,52 @@ TEST_CASE("UIImage 9-slice: the margins round-trip, an unsliced image writes non
     CHECK(back->textureW == 0);
 }
 
+namespace
+{
+    // A two-element document: a Panel, and an Image under it. The extra keys
+    // land on the Image; the colour is the Panel's.
+    std::string panelAndImageDoc(const std::string& panelColor, const std::string& imageExtra)
+    {
+        return std::string(R"J({"canvasWidth":1280.0,"canvasHeight":720.0,"nextId":3,"elements":[)J")
+            + R"J({"id":1,"parent":0,"type":"Panel","name":"P","pos":[0.0,0.0],"size":[40.0,30.0],)J"
+            + R"J("pivot":[0.0,0.0],"anchor":0,"layer":0,"visible":true,"color":)J" + panelColor + "},"
+            + R"J({"id":2,"parent":1,"type":"Image","name":"I","pos":[0.0,0.0],"size":[40.0,30.0],)J"
+            + R"J("pivot":[0.0,0.0],"anchor":0,"layer":0,"visible":true)J" + imageExtra + "}]}";
+    }
+}
+
+TEST_CASE("A colour that is not four numbers loads as the default instead of throwing")
+{
+    // The loader reports failure by its return value, so a type_error out of an
+    // element's readJson would be an exception in the caller's lap instead.
+    const HE::UIPanel defPanel;
+    const HE::UIImage defImage;
+
+    SUBCASE("a string among the colour channels")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc(R"(["a",0,0,1])", ""), t));
+        auto* p = dynamic_cast<HE::UIPanel*>(t.find(1));
+        REQUIRE(p != nullptr);
+        CHECK(p->color == defPanel.color);
+    }
+    SUBCASE("a boolean and a null among the colour channels")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,true,0,1]", R"(,"tint":[1,0,null,1])"), t));
+        CHECK(dynamic_cast<HE::UIPanel*>(t.find(1))->color == defPanel.color);
+        CHECK(dynamic_cast<HE::UIImage*>(t.find(2))->tint == defImage.tint);
+    }
+    SUBCASE("four numbers still load")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[0.25,0.5,0.75,1]", ""), t));
+        const glm::vec4 c = dynamic_cast<HE::UIPanel*>(t.find(1))->color;
+        CHECK(c.x == doctest::Approx(0.25f));
+        CHECK(c.z == doctest::Approx(0.75f));
+    }
+}
+
 // ═══ Clipping ════════════════════════════════════════════════════════════════
 // "Clip children" cuts a subtree off at the clipping element's own rect. It is
 // what a list longer than its box, a text wider than its field and eventually a

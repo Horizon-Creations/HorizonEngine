@@ -2423,9 +2423,19 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
 namespace
 {
     nlohmann::json colJson(const glm::vec4& c) { return { c.x, c.y, c.z, c.w }; }
+    // What a colour or a slice has to be before get<float>() is safe on it: a
+    // thrown type_error would leave uiWidgetTreeFromJson, which reports failure
+    // by its return value and not by an exception.
+    bool startsWithFourNumbers(const nlohmann::json& j)
+    {
+        if (!j.is_array() || j.size() < 4) return false;
+        for (int i = 0; i < 4; ++i)
+            if (!j[i].is_number()) return false;
+        return true;
+    }
     glm::vec4 colFrom(const nlohmann::json& j, const glm::vec4& def)
     {
-        if (!j.is_array() || j.size() < 4) return def;
+        if (!startsWithFourNumbers(j)) return def;
         return { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
     }
 }
