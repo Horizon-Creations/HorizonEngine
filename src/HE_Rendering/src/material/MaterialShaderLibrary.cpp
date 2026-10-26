@@ -891,8 +891,9 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
 // clustered-lighting variant (fragmentClustered).
 std::string injectPreamble(const std::string& src, bool clustered = false)
 {
-    const std::string pre = clustered ? std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble
-                                      : std::string(kLightingPreamble);
+    static const std::string kPre(kLightingPreamble);
+    static const std::string kPreClustered = std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble;
+    const std::string& pre = clustered ? kPreClustered : kPre;
     const size_t vpos = src.find("#version");
     if (vpos == std::string::npos)
         return std::string("#version 450\n") + pre + src;
