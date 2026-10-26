@@ -2091,6 +2091,16 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     };
     auto widthTo = [&](size_t byteEnd)
     { return runWidth(shownFor(text.substr(0, std::min(byteEnd, text.size())))); };
+    // Where the IME's own caret sits inside its unfinished text, as an offset
+    // from the field's caret.
+    auto compositionCaretOffset = [&]()
+    {
+        // -1 = the IME did not say; the end of its own text is the sane place.
+        const size_t upTo = compositionCursor < 0
+            ? composition.size()
+            : std::min(static_cast<size_t>(compositionCursor), composition.size());
+        return runWidth(composition.substr(0, upTo));
+    };
 
     // ── More than one line ───────────────────────────────────────────────────
     // Its own path rather than a handful of conditionals in the one below: a
@@ -2190,13 +2200,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         if (st.editing)
         {
             float cx = caretX;
-            if (!composition.empty())
-            {
-                const size_t upTo = compositionCursor < 0
-                    ? composition.size()
-                    : std::min(static_cast<size_t>(compositionCursor), composition.size());
-                cx += runWidth(composition.substr(0, upTo));
-            }
+            if (!composition.empty()) cx += compositionCaretOffset();
             quad(out, x0 + cx, caretY, std::max(1.0f, sizePx * 0.08f), sizePx, textColor);
         }
         return;
@@ -2264,19 +2268,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     {
         const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
         float caretX = widthTo(caret);
-        if (!composition.empty())
-        {
-            // -1 = the IME did not say; the end of its own text is the sane place.
-            const size_t upTo = compositionCursor < 0
-                ? composition.size()
-                : std::min(static_cast<size_t>(compositionCursor), composition.size());
-            HE::UITextLayout copts;
-            const std::string run = composition.substr(0, upTo);
-            const float inner = run.empty() ? 0.0f
-                : (f ? HE::measureUIText(*f, run, sizePx, 0.0f, copts)
-                     : HE::measureUIText(run, sizePx, 0.0f, copts)).x;
-            caretX += inner;
-        }
+        if (!composition.empty()) caretX += compositionCaretOffset();
         quad(out, sp.x + caretX, px.y + (px.h - h) * 0.5f,
              std::max(1.0f, sizePx * 0.08f), h, textColor);
     }
