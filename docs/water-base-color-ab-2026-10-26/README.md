@@ -87,7 +87,7 @@ reach further.
 three cameras of the A/B set on the dig scene (day 0.5, dusk 0.3, night 0.0); `beach` and `shallow` are the
 gentle sloped beaches of `scripts/water_baseline_shots.py`, `shore` is the bowl lake. `top_west_end_zoom_*` is the
 west end of the dig pool at 4x, day: the crisp edge of the left half is the line the human saw.
-"Before" was shot with the editor and `Water.hasset` of `b128c97b`, "after" with this branch's editor and hasset.
+"Before" was shot with the editor and `Water.hasset` of `b128c97b`, "after" with this branch's editor and hasset (release/0.7.0 at `c37158eb` merged in: the FBM-gradient chop of #189 is in the after frames, the numbers below did not move with it).
 
 | view | | day | dusk | night |
 |---|---|---|---|---|
