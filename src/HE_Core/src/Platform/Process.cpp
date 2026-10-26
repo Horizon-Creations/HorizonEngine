@@ -478,6 +478,12 @@ Result run(const Options& o)
 	{
 #if defined(__APPLE__) || (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200809L)
 		::posix_spawn_file_actions_addchdir_np(&actions, o.cwd.c_str());
+#else
+		// No way to chdir the child: running it in the wrong directory would be worse.
+		// The Fd members close the pipes; attr is not initialised yet.
+		::posix_spawn_file_actions_destroy(&actions);
+		r.launchFailed = true;
+		return r;
 #endif
 	}
 
