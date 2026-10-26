@@ -218,6 +218,36 @@ TEST_CASE("ScriptEngine: a failed reload keeps the old script and its instances"
     CHECK(engine.lastError() == "Invalid instance id");
 }
 
+TEST_CASE("ScriptEngine: every handler on an unknown instance fails with the same text")
+{
+    ScriptEngine engine;
+    const ScriptEngine::InstanceId bad = 4242;
+    const auto expectInvalid = [&](bool ok) {
+        CHECK_FALSE(ok);
+        CHECK(engine.lastError() == "Invalid instance id");
+        engine.exec("x = 1");   // a successful call clears the error
+        CHECK(engine.lastError().empty());
+    };
+    expectInvalid(engine.callOnStart(bad));
+    expectInvalid(engine.callOnUpdate(bad, 0.016f));
+    expectInvalid(engine.callOnCollisionEnter(bad, 1));
+    expectInvalid(engine.callOnCollisionExit(bad, 1));
+    expectInvalid(engine.callOnBeginOverlap(bad, 1));
+    expectInvalid(engine.callOnEndOverlap(bad, 1));
+    expectInvalid(engine.callOnAnimationNotify(bad, "n"));
+    expectInvalid(engine.callOnInputPressed(bad, "a"));
+    expectInvalid(engine.callOnInputAxis(bad, "a", 1.0f));
+    expectInvalid(engine.callOnInputAxis2D(bad, "a", 1.0f, 2.0f));
+    expectInvalid(engine.callOnTimer(bad, 3));
+    expectInvalid(engine.callOnCheatDetected(bad, 3));
+    expectInvalid(engine.callOnNetEvent(bad, NetScriptEvent::Connected, 0));
+    expectInvalid(engine.callOnUIEvent(bad, UIScriptEvent::Click));
+    expectInvalid(engine.callInstanceMethod(bad, "f", nullptr));
+    // hasInstanceMethod is a question: false, error untouched.
+    CHECK_FALSE(engine.hasInstanceMethod(bad, "f"));
+    CHECK(engine.lastError().empty());
+}
+
 TEST_CASE("ScriptEngine: unload removes script")
 {
     ScriptEngine engine;

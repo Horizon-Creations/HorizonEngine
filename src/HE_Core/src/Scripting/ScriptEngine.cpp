@@ -192,6 +192,17 @@ void ScriptEngine::destroyInstance(InstanceId id)
     m_instances.erase(it);
 }
 
+// The instance behind `id`, or nullptr with m_lastError set: the shared first
+// line of every callOnX below (hasInstanceMethod is only a question and leaves
+// the error alone).
+ScriptEngine::InstanceRef* ScriptEngine::requireInstance(InstanceId id)
+{
+    auto it = m_instances.find(id);
+    if (it != m_instances.end()) return &it->second;
+    m_lastError = "Invalid instance id";
+    return nullptr;
+}
+
 // Shared prologue of every callOnX below: push instance.<method> and the `self`
 // argument, leaving the stack as [function, self] ready for pcall(1 + extra args).
 // Returns false with a CLEAN stack when the method is not defined — an undefined
@@ -213,59 +224,59 @@ static bool pushInstanceMethod(lua_State* L, int instanceRef, const char* method
 
 bool ScriptEngine::callOnStart(InstanceId id)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onStart")) return true; // not defined
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onStart")) return true; // not defined
     return pcall(1, 0);
 }
 
 bool ScriptEngine::callOnUpdate(InstanceId id, float dt)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onUpdate")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onUpdate")) return true;
     lua_pushnumber(m_L, static_cast<lua_Number>(dt));
     return pcall(2, 0);
 }
 
 bool ScriptEngine::callOnCollisionEnter(InstanceId id, uint32_t otherEntityId)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onCollisionEnter")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onCollisionEnter")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
     return pcall(2, 0);
 }
 
 bool ScriptEngine::callOnCollisionExit(InstanceId id, uint32_t otherEntityId)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onCollisionExit")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onCollisionExit")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
     return pcall(2, 0);
 }
 
 bool ScriptEngine::callOnBeginOverlap(InstanceId id, uint32_t otherEntityId)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onBeginOverlap")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onBeginOverlap")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
     return pcall(2, 0);
 }
 
 bool ScriptEngine::callOnEndOverlap(InstanceId id, uint32_t otherEntityId)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onEndOverlap")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onEndOverlap")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
     return pcall(2, 0);
 }
@@ -275,10 +286,10 @@ bool ScriptEngine::callOnEndOverlap(InstanceId id, uint32_t otherEntityId)
 // name that would fail by simply never being called.
 bool ScriptEngine::callNotifyMethod(InstanceId id, const char* method, const std::string& name)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, method)) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, method)) return true;
     lua_pushlstring(m_L, name.c_str(), name.size());
     return pcall(2, 0);
 }
@@ -302,10 +313,10 @@ bool ScriptEngine::callOnInputReleased(InstanceId id, const std::string& action)
 
 bool ScriptEngine::callOnInputAxis(InstanceId id, const std::string& action, float value)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onInputAxis")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onInputAxis")) return true;
     lua_pushlstring(m_L, action.c_str(), action.size());
     lua_pushnumber(m_L, static_cast<lua_Number>(value));
     return pcall(3, 0);
@@ -313,10 +324,10 @@ bool ScriptEngine::callOnInputAxis(InstanceId id, const std::string& action, flo
 
 bool ScriptEngine::callOnInputAxis2D(InstanceId id, const std::string& action, float x, float y)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onInputAxis2D")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onInputAxis2D")) return true;
     lua_pushlstring(m_L, action.c_str(), action.size());
     lua_pushnumber(m_L, static_cast<lua_Number>(x));
     lua_pushnumber(m_L, static_cast<lua_Number>(y));
@@ -325,28 +336,28 @@ bool ScriptEngine::callOnInputAxis2D(InstanceId id, const std::string& action, f
 
 bool ScriptEngine::callOnTimer(InstanceId id, int handle)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onTimer")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onTimer")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(handle));
     return pcall(2, 0);
 }
 
 bool ScriptEngine::callOnCheatDetected(InstanceId id, int reportId)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, "onCheatDetected")) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, "onCheatDetected")) return true;
     lua_pushinteger(m_L, static_cast<lua_Integer>(reportId));
     return pcall(2, 0);
 }
 
 bool ScriptEngine::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
     // The name is the whole difference between the six (ScriptTypes.h).
     const char* fn = nullptr;
@@ -362,7 +373,7 @@ bool ScriptEngine::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
     }
     if (!fn) return true;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, fn)) return true;
     if (!carriesArg) return pcall(1, 0);
     lua_pushinteger(m_L, static_cast<lua_Integer>(arg));
     return pcall(2, 0);
@@ -370,11 +381,11 @@ bool ScriptEngine::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
 
 bool ScriptEngine::callInstanceMethod(InstanceId id, const char* fn, const ArgPusher& pushArgs)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
     if (!fn) return true;
 
-    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, fn)) return true;
     // `self` is already on the stack, so the argument count is one more than
     // whatever the caller pushed.
     const int pushed = pushArgs ? pushArgs(m_L) : 0;
@@ -394,12 +405,12 @@ bool ScriptEngine::hasInstanceMethod(InstanceId id, const char* fn)
 
 bool ScriptEngine::callOnUIEvent(InstanceId id, UIScriptEvent ev)
 {
-    auto it = m_instances.find(id);
-    if (it == m_instances.end()) { m_lastError = "Invalid instance id"; return false; }
+    InstanceRef* inst = requireInstance(id);
+    if (!inst) return false;
 
     const char* fn = ev == UIScriptEvent::Click      ? "onClick" :
                      ev == UIScriptEvent::HoverEnter ? "onHoverEnter" : "onHoverExit";
-    if (!pushInstanceMethod(m_L, it->second.luaRef, fn)) return true;
+    if (!pushInstanceMethod(m_L, inst->luaRef, fn)) return true;
     return pcall(1, 0);
 }
 

@@ -179,6 +179,10 @@ private:
     struct ScriptRef  { int luaRef = -1; };   // LUA_NOREF sentinel
     struct InstanceRef { int luaRef = -1; std::string scriptName; };
 
+    // The instance behind `id`; nullptr and m_lastError = "Invalid instance id"
+    // when there is none.
+    InstanceRef* requireInstance(InstanceId id);
+
     lua_State*  m_L = nullptr;
     std::unordered_map<std::string, ScriptRef>   m_scripts;
     std::unordered_map<InstanceId, InstanceRef>  m_instances;
