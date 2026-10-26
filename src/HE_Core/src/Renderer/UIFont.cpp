@@ -749,6 +749,25 @@ namespace
         const BakedUIFont* f = UIFontCache::find(k);
         return (f && f->ok) ? ResolvedFace{ f, k } : ResolvedFace{ &base, baseKey };
     }
+
+    // One glyph's quad, for the plain and the rich emit alike. `penX` is the pen
+    // position INCLUDING the line's left edge: the plain path hands in `x + penX`,
+    // so the sum is formed before the glyph's offset is added, as it always was.
+    void pushGlyphQuad(std::vector<UIRenderObject>& out, const BakedGlyph& g,
+                       float penX, float baseline, float scale, float invW, float invH,
+                       const glm::vec4& color, int layer, std::uint32_t atlasKey)
+    {
+        UIRenderObject ro;
+        ro.position = { penX + g.xoff * scale, baseline + g.yoff * scale };
+        ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
+        ro.uvMin    = { g.x0 * invW, g.y0 * invH };
+        ro.uvMax    = { g.x1 * invW, g.y1 * invH };
+        ro.color    = color;
+        ro.type     = 2;
+        ro.layer    = layer;
+        ro.fontAtlasKey = atlasKey;
+        out.push_back(std::move(ro));
+    }
 } // namespace
 
 UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
@@ -950,16 +969,7 @@ void uiEmitRichText(const BakedUIFont& font, std::uint32_t atlasKey,
             const BakedGlyph* gp = rf.font->glyph(uiUtf8Decode(rt.text, b));
             if (!gp) continue;
             const BakedGlyph& g = *gp;
-            UIRenderObject ro;
-            ro.position = { penX + g.xoff * scale, pc.baseline + g.yoff * scale };
-            ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
-            ro.uvMin    = { g.x0 * invW, g.y0 * invH };
-            ro.uvMax    = { g.x1 * invW, g.y1 * invH };
-            ro.color    = colour;
-            ro.type     = 2;
-            ro.layer    = layer;
-            ro.fontAtlasKey = rf.key;
-            out.push_back(std::move(ro));
+            pushGlyphQuad(out, g, penX, pc.baseline, scale, invW, invH, colour, layer, rf.key);
             penX += g.xadvance * scale;
         }
     }
@@ -1173,16 +1183,7 @@ void emitUITextGlyphs(const BakedUIFont& font, std::uint32_t atlasKey,
             const BakedGlyph* gp = font.glyph(uiUtf8Decode(line, b));
             if (!gp) continue;
             const BakedGlyph& g = *gp;
-            UIRenderObject ro;
-            ro.position = { x + penX + g.xoff * scale, baseline + g.yoff * scale };
-            ro.size     = { (g.x1 - g.x0) * scale, (g.y1 - g.y0) * scale };
-            ro.uvMin    = { g.x0 * invW, g.y0 * invH };
-            ro.uvMax    = { g.x1 * invW, g.y1 * invH };
-            ro.color    = color;
-            ro.type     = 2;
-            ro.layer    = layer;
-            ro.fontAtlasKey = atlasKey;
-            out.push_back(std::move(ro));
+            pushGlyphQuad(out, g, x + penX, baseline, scale, invW, invH, color, layer, atlasKey);
             penX += g.xadvance * scale;
         }
     }
