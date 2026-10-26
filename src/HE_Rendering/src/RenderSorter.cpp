@@ -114,8 +114,12 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 	// then the matrices into one array sized once, on the job system's workers. With foliage the
 	// list used to grow through every doubling while each cluster unfolded on the main thread,
 	// half of the 300k frame (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1).
+	// An ordinary object's one matrix is copied right here; only clusters become pieces.
+	size_t upper = 0;
+	for (uint32_t idx : sortedIndices)
+		if (idx < world.objects.size()) upper += world.instanceCountOf(world.objects[idx]);
+	out.transforms.resize(upper);
 	std::vector<RenderWorld::InstancePiece> pieces;
-	pieces.reserve(sortedIndices.size());
 	size_t total = 0;
 	for (uint32_t idx : sortedIndices)
 	{
@@ -131,7 +135,8 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 		// the run exactly as that many ordinary objects of the same mesh would.
 		uint32_t left = world.instanceCountOf(obj);
 		size_t   pos  = total;
-		world.addInstancePiece(pieces, obj, 0, left, pos);
+		if (obj.isCluster()) world.addInstancePiece(pieces, obj, 0, left, pos);
+		else                 out.transforms[pos] = obj.transform;
 		total += left;
 
 		// Extend the current run when the mesh matches; the sorter grouped by
@@ -155,7 +160,7 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 			left -= take;
 		}
 	}
-	out.transforms.resize(total);
+	out.transforms.resize(total);   // the filters dropped what the upper bound counted
 	world.writeInstancePieces(pieces, out.transforms.data());
 }
 

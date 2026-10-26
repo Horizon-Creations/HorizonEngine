@@ -20,7 +20,8 @@ namespace
 			const RenderObject& o   = world.objects[sortedIndices[k]];
 			const uint32_t      cnt = world.instanceCountOf(o);
 			const uint32_t take = static_cast<uint32_t>(std::min<size_t>(cnt - inObj, n - pos));
-			world.addInstancePiece(pieces, o, inObj, take, pos);
+			if (o.isCluster()) world.addInstancePiece(pieces, o, inObj, take, pos);
+			else               dst[pos] = o.transform;   // one matrix: copied here, no piece
 			pos   += take;
 			inObj += take;
 			if (inObj == cnt) { ++k; inObj = 0; }

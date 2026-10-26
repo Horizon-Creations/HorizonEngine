@@ -407,9 +407,11 @@ public:
             if (!b) { dst[x.pos] = x.obj->transform; return; }
             for (uint32_t i = 0; i < x.n; ++i) dst[x.pos + i] = b->world(x.from + i);
         };
-        size_t total = 0;
-        for (const InstancePiece& x : pieces) total += x.n;
-        if (pieces.size() > 1 && total >= kParallelUnfoldMin && parallelUnfoldEnabled())
+        // Only cluster instances count toward going wide: an ordinary object is one matrix
+        // copy, and 16k of them (the 50k reference world) were faster on the caller than shared out.
+        size_t clustered = 0;
+        for (const InstancePiece& x : pieces) if (x.obj->isCluster()) clustered += x.n;
+        if (pieces.size() > 1 && clustered >= kParallelUnfoldMin && parallelUnfoldEnabled())
             parallel_for(pieces.size(), one, "UnfoldInstances", 1);
         else
             for (size_t p = 0; p < pieces.size(); ++p) one(p);
