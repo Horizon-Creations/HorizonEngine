@@ -194,6 +194,7 @@ private:
     // profile that asked for it - and it sits after m_widgets so it is destroyed
     // before it. Costs nothing while hidden. A release build has neither.
     HE::DevStatsTile m_devStats;
+    bool             m_devStatsEnvChecked = false;   // HE_GAME_STATS read once, on the first frame
     bool             m_devHotkeys = false;   // V and F10; set in OnInit
 #endif
 

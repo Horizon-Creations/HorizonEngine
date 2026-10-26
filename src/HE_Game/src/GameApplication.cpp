@@ -2998,6 +2998,17 @@ void GameApplication::OnRender(float deltaTime)
 	// The stats card (F10): a bool test while hidden. Before the frame's UI is
 	// extracted, so the text it shows is the one drawn this frame.
 #if HE_FEATURE_DEV_HOTKEYS
+	// HE_GAME_STATS=1: the card is up from the first frame, for a run nobody presses F10 in
+	// (a remote reproduction, a scripted capture); HE_GAME_STATS_LOG adds its text to the log.
+	if (m_devHotkeys && !m_devStatsEnvChecked)
+	{
+		m_devStatsEnvChecked = true;
+		if (const char* v = std::getenv("HE_GAME_STATS"); v && *v && std::atoi(v) != 0 && !m_devStats.visible())
+		{
+			const bool on = m_devStats.toggle(m_widgets, contentManager());
+			HE_LOG_INFO(Core, "GameApplication: stats card %s by HE_GAME_STATS", on ? "ON" : "could not be created");
+		}
+	}
 	if (m_devHotkeys && m_devStats.visible())
 	{
 		static const char* const kBackendNames[] = { "OpenGL", "Vulkan", "D3D11", "D3D12", "Metal", "Software" };
