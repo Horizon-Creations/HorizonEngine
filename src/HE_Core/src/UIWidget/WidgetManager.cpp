@@ -2964,7 +2964,7 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
                                                     float x, float y)
 {
 	PointerHit hit;
-	long topKey = 0;
+	long long topKey = 0;
 	for (auto& w : m_instances)
 	{
 		if (!w.visible) continue;
@@ -3022,7 +3022,7 @@ WidgetManager::PointerHit WidgetManager::topmostHit(float vpWidth, float vpHeigh
 			const float x1 = (r.x + r.w) * sx, y1 = (r.y + r.h) * sy;
 			if (testX < x0 || testX > x1 || testY < y0 || testY > y1)
 				continue;
-			const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
+			const long long key = (long long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
 			if (!hit.widget || key >= topKey)
 			{
 				hit.widget = &w; hit.elem = e.id;
@@ -3104,7 +3104,7 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 	// one scan would never see it, and making it hit-testable to be draggable
 	// would swallow the clicks of everything inside it.
 	bool drag = false;
-	long topKey = 0;
+	long long topKey = 0;
 	for (auto& w : m_instances)
 	{
 		if (!w.visible || !takesInput(w.id) || w.windowId != m_pointerWindow) continue;
@@ -3137,7 +3137,7 @@ HE::UIWindowHit WidgetManager::windowHitAt(float vpWidth, float vpHeight,
 				continue;
 			// Topmost wins, the same key the draw and the hit test rank by: a
 			// dialog laid over the title bar is not a handle for the window.
-			const long key = (long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
+			const long long key = (long long)w.zOrder * 1000000 + elementSortKey(w.tree, e);
 			if (!drag || key >= topKey) { drag = true; topKey = key; }
 		}
 	}

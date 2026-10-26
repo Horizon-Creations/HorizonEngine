@@ -18688,3 +18688,26 @@ TEST_CASE("Text catalog: loading keeps first-write order and lets a repeated key
     REQUIRE(c.languages[1].second.size() == 1);
     CHECK(*c.find("de", "x") == "X");
 }
+
+TEST_CASE("Stacking: the widget with the higher zOrder takes the click above 2148")
+{
+    // zOrder * 1000000 no longer fits a 32-bit long past 2147: the key a
+    // Windows build compared wrapped negative and the lower widget won.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int lowLabel = 0, highLabel = 0;
+    buildClickPage(cm, "mem://low.hasset", lowLabel);
+    buildClickPage(cm, "mem://high.hasset", highLabel);
+
+    WidgetManager wm;
+    const int low  = createShown(wm, cm, "mem://low.hasset");
+    const int high = createShown(wm, cm, "mem://high.hasset");
+    REQUIRE(low != 0);
+    REQUIRE(high != 0);
+    wm.setZOrder(low, 3000);
+    wm.setZOrder(high, 3001);
+
+    clickAt(wm, 200.0f, 200.0f);
+    CHECK(wm.tree(high)->find(highLabel)->getProp("Text").s == "HIT");
+    CHECK(wm.tree(low)->find(lowLabel)->getProp("Text").s.empty());
+}
