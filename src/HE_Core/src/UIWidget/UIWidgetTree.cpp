@@ -2644,8 +2644,10 @@ int uiApplyWidgetParams(UIWidgetTree& tree,
     return written;
 }
 
-bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
-                          UIWidgetParamRead paramRead)
+namespace
+{
+bool widgetTreeFromText(const std::string& json, UIWidgetTree& out,
+                        UIWidgetParamRead paramRead)
 {
     nlohmann::json j;
     if (!HE::graph::parseGraphObject(json, j)) return false;
@@ -2735,6 +2737,7 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
 
     for (const auto& o : j.value("elements", nlohmann::json::array()))
     {
+        if (!o.is_object()) continue;
         std::unique_ptr<UIElement> e = uiElementFromJsonObj(o);
         HE::graph::bumpNextId(t.nextId, e->id);
         // ── Migration: a negative parent means the canvas ────────────────────
@@ -2794,6 +2797,23 @@ bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
 
     out = std::move(t);
     return true;
+}
+}
+
+bool uiWidgetTreeFromJson(const std::string& json, UIWidgetTree& out,
+                          UIWidgetParamRead paramRead)
+{
+    // json::value() throws when a key holds the wrong type ("canvasWidth":
+    // "wide"). A hand-edited file is not a reason to take the frame path down
+    // with it; the document is refused whole and `out` stays as it was.
+    try
+    {
+        return widgetTreeFromText(json, out, paramRead);
+    }
+    catch (const nlohmann::json::exception&)
+    {
+        return false;
+    }
 }
 
 // ── The text catalog ─────────────────────────────────────────────────────────

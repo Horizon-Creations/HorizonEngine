@@ -18614,3 +18614,42 @@ TEST_CASE("Serialise: a corner radius is written only when it differs from the t
         CHECK(json(*panel)["cornerRadii"].size() == 4);
     }
 }
+
+TEST_CASE("uiWidgetTreeFromJson: a mistyped field or a non-object element refuses without throwing")
+{
+    HE::UIWidgetTree keep;
+    keep.canvasWidth = 123.0f;
+    const int kept = keep.add(HE::UIWidgetType::Panel);
+
+    // A string where a number belongs: refused whole, `out` untouched.
+    {
+        HE::UIWidgetTree out = HE::UIWidgetTree();
+        out.canvasWidth = 123.0f;
+        out.add(HE::UIWidgetType::Panel);
+        bool ok = true;
+        CHECK_NOTHROW(ok = HE::uiWidgetTreeFromJson(R"({"canvasWidth":"wide","elements":[]})", out));
+        CHECK_FALSE(ok);
+        CHECK(out.canvasWidth == doctest::Approx(123.0f));
+        CHECK(out.elements.size() == 1);
+        CHECK(out.elements[0]->id == kept);
+    }
+    // An element entry that is not an object is skipped; the others load.
+    {
+        HE::UIWidgetTree out;
+        bool ok = false;
+        CHECK_NOTHROW(ok = HE::uiWidgetTreeFromJson(
+            R"({"elements":[7,"x",null,[1],{"id":4,"type":"Panel"}]})", out));
+        CHECK(ok);
+        REQUIRE(out.elements.size() == 1);
+        CHECK(out.elements[0]->id == 4);
+    }
+    // A mistyped field inside an element refuses the document too.
+    {
+        HE::UIWidgetTree out;
+        bool ok = true;
+        CHECK_NOTHROW(ok = HE::uiWidgetTreeFromJson(
+            R"({"elements":[{"id":"four","type":"Panel"}]})", out));
+        CHECK_FALSE(ok);
+        CHECK(out.elements.empty());
+    }
+}
