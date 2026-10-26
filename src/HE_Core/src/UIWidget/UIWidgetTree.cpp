@@ -833,13 +833,12 @@ namespace
     // and an auto-sized element inside it has a width to measure against. What
     // makes it invisible is hidesChild, and that is the only thing that does.
     UIWidgetRect tabSlotRect(const UIWidgetTree& tree, const UITabBox& tabs,
-                             const UIElement& child, const UIWidgetCanvas* canvas)
+                             const UIWidgetCanvas* canvas)
     {
         const UIWidgetRect b = uiElementRect(tree, tabs, canvas);
         float bus = 1.0f, bvs = 1.0f;
         uiElementUnitScale(tree, tabs, bus, bvs, canvas);
         const float strip = std::min(b.h, tabs.tabHeight * bvs);
-        (void)child;
         return { b.x, b.y + strip, b.w, std::max(0.0f, b.h - strip) };
     }
 
@@ -1438,7 +1437,7 @@ UIWidgetRect rectUnboundedWalk(const UIWidgetTree& tree, const UIElement& e,
             if (const auto* gr = dynamic_cast<const UIGrid*>(p))
                 return gridSlotRect(tree, *gr, e, canvas);
             if (const auto* tb = dynamic_cast<const UITabBox*>(p))
-                return tabSlotRect(tree, *tb, e, canvas);
+                return tabSlotRect(tree, *tb, canvas);
             if (const auto* sp = dynamic_cast<const UISplitter*>(p))
                 return splitSlotRect(tree, *sp, e, canvas);
             if (const auto* ac = dynamic_cast<const UIAccordion*>(p))
