@@ -8,14 +8,15 @@
 //
 // The test plays that sequence with a stand-in cmake: probe with nothing on PATH,
 // "install" a cmake into a directory that is already on PATH, probe again the way
-// Recheck does. POSIX only; the Windows install path (winget + a PATH the running
-// process never sees) cannot be driven from a unit test.
+// Recheck does. The Windows case below plays the same sequence through the
+// known-install-dir fallback instead (winget/the cmake.org MSI, not PATH).
 #include "doctest.h"
 #include <HorizonScene/HcCodegen.h>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #if !defined(_WIN32)
 #include <sys/stat.h>
@@ -74,6 +75,100 @@ TEST_CASE("Toolchain Recheck: a cmake installed after a 'not found' probe is see
     const HE::hccg::ToolchainProbe after = HE::hccg::probeToolchain();
     CHECK(after.cmakeFound);
     CHECK(after.cmakeVersion == "9.9.9");
+
+    fs::remove_all(root, ec);
+}
+#endif
+
+#if defined(_WIN32)
+#include <windows.h>
+
+namespace {
+
+// Finds the real cmake.exe this machine already has on PATH, before the test
+// clears PATH to force resolveCmake() past the "cmake" bare-word lookup and into
+// cmakeInKnownWindowsDir(). Using the real binary (not a stub) means the fallback
+// is exercised exactly as winget/the cmake.org MSI leave it.
+std::string findSystemCmakeExe()
+{
+    char buf[MAX_PATH];
+    const DWORD n = SearchPathA(nullptr, "cmake.exe", nullptr, MAX_PATH, buf, nullptr);
+    if (n == 0 || n > MAX_PATH) return {};
+    return std::string(buf, n);
+}
+
+// Sets/deletes a batch of environment variables for the scope of one test, then
+// restores exactly what was there before — PATH included, so a later test does
+// not inherit the empty PATH or the stand-in ProgramFiles this test sets up.
+struct ScopedEnvWin
+{
+    struct Saved { std::string name; bool had = false; std::string value; };
+    std::vector<Saved> saved;
+
+    void set(const char* name, const std::string& value)
+    {
+        Saved s; s.name = name;
+        char*  buf = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&buf, &len, name) == 0 && buf) { s.had = true; s.value = buf; }
+        if (buf) free(buf);
+        saved.push_back(s);
+        _putenv_s(name, value.c_str()); // an empty value_string deletes the variable (MSVC _putenv_s)
+    }
+
+    ~ScopedEnvWin()
+    {
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+            _putenv_s(it->name.c_str(), it->had ? it->value.c_str() : "");
+        // Do not leave the known-dir cmake or the cleared PATH in resolveCmake()'s
+        // cache for later tests.
+        HE::hccg::probeToolchain();
+    }
+};
+
+} // namespace
+
+TEST_CASE("Toolchain Recheck (Windows): cmake installed into a known install dir is seen without a restart")
+{
+    namespace fs = std::filesystem;
+
+    const std::string systemCmake = findSystemCmakeExe();
+    REQUIRE_FALSE(systemCmake.empty()); // this machine needs a real cmake for the stand-in
+
+    const fs::path root = fs::temp_directory_path() / "he_toolchain_recheck_win";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "pf" / "CMake" / "bin", ec);
+
+    ScopedEnvWin env;
+    env.set("PATH", "");                           // "cmake" on PATH must not answer
+    env.set("ProgramFiles", (root / "pf").string());
+    env.set("ProgramW6432", "");
+    env.set("ProgramFiles(x86)", "");
+    env.set("LOCALAPPDATA", "");
+
+    // A bundle directory that never exists: the bundled-cmake check always misses,
+    // same as a fresh install with no bundled cmake next to the editor.
+    HE::hccg::setBundledCmakeDir(root / "nobundle");
+    const HE::hccg::ToolchainProbe before = HE::hccg::probeToolchain();
+    REQUIRE_FALSE(before.cmakeFound);
+
+    // "Install": winget (Kitware.CMake) / the cmake.org MSI drop cmake.exe at
+    // %ProgramFiles%\CMake\bin\cmake.exe — a path this already-running process's
+    // PATH never sees, which is exactly the bug (Thema 231).
+    fs::copy_file(systemCmake, root / "pf" / "CMake" / "bin" / "cmake.exe",
+                  fs::copy_options::overwrite_existing, ec);
+    REQUIRE_FALSE(ec);
+
+    // What Recheck does: re-set the same bundle directory, then probe.
+    HE::hccg::setBundledCmakeDir(root / "nobundle");
+    const HE::hccg::ToolchainProbe after = HE::hccg::probeToolchain();
+    CHECK(after.cmakeFound);
+    CHECK_FALSE(after.cmakeVersion.empty());
+    // buildDylib()/toolchainAvailable() read the cache resolveCmake() just refreshed,
+    // not a fresh probe — this is what lets a GameLogic build right after Recheck
+    // use the newly-found cmake instead of the stale "not found".
+    CHECK(HE::hccg::toolchainAvailable());
 
     fs::remove_all(root, ec);
 }
