@@ -241,45 +241,29 @@ bool ScriptEngine::callOnUpdate(InstanceId id, float dt)
     return pcall(2, 0);
 }
 
-bool ScriptEngine::callOnCollisionEnter(InstanceId id, uint32_t otherEntityId)
+// The handlers that take one integer differ only in the method name, so they
+// share one body.
+bool ScriptEngine::callIntegerMethod(InstanceId id, const char* method, long long arg)
 {
     InstanceRef* inst = requireInstance(id);
     if (!inst) return false;
 
-    if (!pushInstanceMethod(m_L, inst->luaRef, "onCollisionEnter")) return true;
-    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
+    if (!pushInstanceMethod(m_L, inst->luaRef, method)) return true;
+    lua_pushinteger(m_L, static_cast<lua_Integer>(arg));
     return pcall(2, 0);
 }
+
+bool ScriptEngine::callOnCollisionEnter(InstanceId id, uint32_t otherEntityId)
+{ return callIntegerMethod(id, "onCollisionEnter", otherEntityId); }
 
 bool ScriptEngine::callOnCollisionExit(InstanceId id, uint32_t otherEntityId)
-{
-    InstanceRef* inst = requireInstance(id);
-    if (!inst) return false;
-
-    if (!pushInstanceMethod(m_L, inst->luaRef, "onCollisionExit")) return true;
-    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
-    return pcall(2, 0);
-}
+{ return callIntegerMethod(id, "onCollisionExit", otherEntityId); }
 
 bool ScriptEngine::callOnBeginOverlap(InstanceId id, uint32_t otherEntityId)
-{
-    InstanceRef* inst = requireInstance(id);
-    if (!inst) return false;
-
-    if (!pushInstanceMethod(m_L, inst->luaRef, "onBeginOverlap")) return true;
-    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
-    return pcall(2, 0);
-}
+{ return callIntegerMethod(id, "onBeginOverlap", otherEntityId); }
 
 bool ScriptEngine::callOnEndOverlap(InstanceId id, uint32_t otherEntityId)
-{
-    InstanceRef* inst = requireInstance(id);
-    if (!inst) return false;
-
-    if (!pushInstanceMethod(m_L, inst->luaRef, "onEndOverlap")) return true;
-    lua_pushinteger(m_L, static_cast<lua_Integer>(otherEntityId));
-    return pcall(2, 0);
-}
+{ return callIntegerMethod(id, "onEndOverlap", otherEntityId); }
 
 // The three notify handlers differ only in the method name, so they share one
 // body — three copies of five lines is three places for a typo in a Lua method
@@ -335,24 +319,10 @@ bool ScriptEngine::callOnInputAxis2D(InstanceId id, const std::string& action, f
 }
 
 bool ScriptEngine::callOnTimer(InstanceId id, int handle)
-{
-    InstanceRef* inst = requireInstance(id);
-    if (!inst) return false;
-
-    if (!pushInstanceMethod(m_L, inst->luaRef, "onTimer")) return true;
-    lua_pushinteger(m_L, static_cast<lua_Integer>(handle));
-    return pcall(2, 0);
-}
+{ return callIntegerMethod(id, "onTimer", handle); }
 
 bool ScriptEngine::callOnCheatDetected(InstanceId id, int reportId)
-{
-    InstanceRef* inst = requireInstance(id);
-    if (!inst) return false;
-
-    if (!pushInstanceMethod(m_L, inst->luaRef, "onCheatDetected")) return true;
-    lua_pushinteger(m_L, static_cast<lua_Integer>(reportId));
-    return pcall(2, 0);
-}
+{ return callIntegerMethod(id, "onCheatDetected", reportId); }
 
 bool ScriptEngine::callOnNetEvent(InstanceId id, NetScriptEvent ev, int arg)
 {

@@ -175,6 +175,10 @@ private:
     // Shared body of the three notify handlers above: they differ only in the
     // Lua method name they look for.
     bool callNotifyMethod(InstanceId id, const char* method, const std::string& name);
+    // Shared body of the handlers whose only argument is one integer (the four
+    // collision / overlap callbacks, onTimer, onCheatDetected); pushed as a
+    // lua_Integer, which is a long long.
+    bool callIntegerMethod(InstanceId id, const char* method, long long arg);
 
     struct ScriptRef  { int luaRef = -1; };   // LUA_NOREF sentinel
     struct InstanceRef { int luaRef = -1; std::string scriptName; };

@@ -248,6 +248,47 @@ TEST_CASE("ScriptEngine: every handler on an unknown instance fails with the sam
     CHECK(engine.lastError().empty());
 }
 
+TEST_CASE("ScriptEngine: the one-integer handlers push their argument as an integer")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("ints",
+        "local M = {}\n"
+        "local function rec(name) return function(self, v) _G[name] = v; _G[name .. 'T'] = math.type(v) end end\n"
+        "M.onCollisionEnter = rec('ce')\n"
+        "M.onCollisionExit  = rec('cx')\n"
+        "M.onBeginOverlap   = rec('bo')\n"
+        "M.onEndOverlap     = rec('eo')\n"
+        "M.onTimer          = rec('tm')\n"
+        "M.onCheatDetected  = rec('ch')\n"
+        "return M\n"));
+    const auto id = engine.createInstance("ints");
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+
+    // A uint32 above INT_MAX must not turn negative on its way in.
+    CHECK(engine.callOnCollisionEnter(id, 4000000000u));
+    CHECK(engine.callOnCollisionExit(id, 11u));
+    CHECK(engine.callOnBeginOverlap(id, 12u));
+    CHECK(engine.callOnEndOverlap(id, 13u));
+    // An int handle keeps its sign.
+    CHECK(engine.callOnTimer(id, -5));
+    CHECK(engine.callOnCheatDetected(id, 7));
+    CHECK(engine.getGlobalNumber("ce") == 4000000000.0);
+    CHECK(engine.getGlobalNumber("cx") == 11.0);
+    CHECK(engine.getGlobalNumber("bo") == 12.0);
+    CHECK(engine.getGlobalNumber("eo") == 13.0);
+    CHECK(engine.getGlobalNumber("tm") == -5.0);
+    CHECK(engine.getGlobalNumber("ch") == 7.0);
+    for (const char* t : { "ceT", "cxT", "boT", "eoT", "tmT", "chT" })
+        CHECK(engine.getGlobalString(t) == "integer");
+
+    // A script that defines none of them is a silent no-op for each.
+    REQUIRE(engine.loadScript("none", "return {}"));
+    const auto bare = engine.createInstance("none");
+    CHECK(engine.callOnCollisionEnter(bare, 1));
+    CHECK(engine.callOnTimer(bare, 1));
+    CHECK(engine.callOnCheatDetected(bare, 1));
+}
+
 TEST_CASE("ScriptEngine: unload removes script")
 {
     ScriptEngine engine;
