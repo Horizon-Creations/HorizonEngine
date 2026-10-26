@@ -244,7 +244,10 @@ void EngineProfiler::beginFrame(double deltaMs)
 		// (waitUntilCompleted per pass), which makes the captured frame much slower.
 		// Respect the user's "Detailed GPU pass timing" checkbox instead: fast by
 		// default (CPU scopes + counters + whole-frame GPU), exclusive per-pass only
-		// when the user opts in. (m_forceDetailed stays false.)
+		// when the user opts in, or when the caller asked for this one frame
+		// (requestSingleFrameCapture(true), the game's stats card).
+		m_forceDetailed = m_pendingSingleDetailed;
+		m_pendingSingleDetailed = false;
 		doStart();
 	}
 

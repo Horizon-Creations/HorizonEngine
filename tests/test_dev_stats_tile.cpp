@@ -110,6 +110,34 @@ TEST_CASE("Dev stats: the extended card says where the GPU's time goes, most exp
 	CHECK(has(lines, "1.90 ms"));
 }
 
+TEST_CASE("Dev stats: the frame-time spread and the captured frame's costliest CPU scopes come before the GPU passes")
+{
+	HE::DevStatsInput in = typicalFrame();
+	in.haveCapture = true;
+	in.captureCpuMs = 9.0;
+	in.frameP50 = 16.6; in.frameP99 = 41.2; in.frameMax = 88.0;
+	in.captureScopes = { { "OnRender", 1.2 }, { "Render", 7.5 }, { "Metal::EncodeScene", 3.25 },
+	                     { "SceneSystemsTick", 0.4 } };
+	in.capturePasses = { { "Scene", 2.0, false } };
+	const std::vector<std::string> lines = HE::formatDevStats(in, true, 8, /*maxScopes*/ 3);
+	CHECK(has(lines, "Frame p50 16.6  p99 41.2  max 88.0"));
+	auto at = [&](const char* name) {
+		for (std::size_t i = 0; i < lines.size(); ++i)
+			if (lines[i].find(name) != std::string::npos) return static_cast<int>(i);
+		return -1;
+	};
+	REQUIRE(at("CPU scopes") > 0);
+	CHECK(at("Render ") < at("Metal::EncodeScene"));         // by cost
+	CHECK(at("Metal::EncodeScene") < at("OnRender"));
+	CHECK(at("SceneSystemsTick") == -1);                       // capped at three
+	CHECK(at("OnRender") < at("GPU passes"));
+	CHECK(has(lines, "3.25 ms"));
+	// Without the numbers the lines are left out, not shown as -1 or 0.
+	HE::DevStatsInput bare = typicalFrame();
+	CHECK_FALSE(has(HE::formatDevStats(bare, true), "Frame p50"));
+	CHECK_FALSE(has(HE::formatDevStats(bare, true), "CPU scopes"));
+}
+
 TEST_CASE("Dev stats: the pass list is capped and says how many it left out")
 {
 	HE::DevStatsInput in = typicalFrame();
