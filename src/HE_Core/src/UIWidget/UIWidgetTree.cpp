@@ -1379,6 +1379,20 @@ namespace
     }
 }
 
+namespace
+{
+    // How many rect solves are nested on this thread. A rect asks its parent's
+    // rect (parentRectOf, and every slot walk), so the nesting is the parent
+    // chain; a hand-edited file that makes the chain a cycle would otherwise
+    // recurse until the stack is gone.
+    thread_local std::size_t t_rectNesting = 0;
+    struct RectNesting
+    {
+        RectNesting()  { ++t_rectNesting; }
+        ~RectNesting() { --t_rectNesting; }
+    };
+}
+
 UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
                            const UIWidgetCanvas* canvas)
 {
@@ -1386,6 +1400,12 @@ UIWidgetRect uiElementRect(const UIWidgetTree& tree, const UIElement& e,
     // chain every child walks up is then one lookup per step, not a solve.
     LayoutMemo* m = memoFor(tree, e, canvas, true);
     if (m && (m->have & LayoutMemo::kRect)) return m->rect;
+    // Deeper than there are elements means the chain loops: the canvas, which
+    // is what an element with no parent gets.
+    if (t_rectNesting > tree.elements.size() + 1)
+        return { 0.0f, 0.0f, canvas ? canvas->width  : tree.canvasWidth,
+                             canvas ? canvas->height : tree.canvasHeight };
+    const RectNesting nesting;
     UIWidgetRect r = uiElementRectUnbounded(tree, e, canvas);
     applySizeBounds(tree, e, canvas, r);
     if (m) { m->rect = r; m->have |= LayoutMemo::kRect; }
@@ -1948,21 +1968,33 @@ int uiChildCountOf(const UIWidgetTree& tree, int parentId)
     return n;
 }
 
-bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
+namespace
+{
+// `ancestorsLeft` bounds the climb: a parent chain longer than the tree has
+// elements is a cycle from a hand-edited file, and ends the walk as "shown".
+bool effectiveVisibleWalk(const UIWidgetTree& tree, const UIElement& e,
+                          std::size_t ancestorsLeft)
 {
     if (!e.visible) return false;
     if (e.parentId == 0) return true;
     LayoutMemo* m = memoFor(tree, e, nullptr, false);
     if (m && (m->have & LayoutMemo::kVisible)) return m->visible;
     const UIElement* p = tree.find(e.parentId);
-    if (!p) return true;
+    if (!p || ancestorsLeft == 0) return true;
     // …and whether the PARENT is showing it. A Tab Box hides every page but
     // one, and this is the single place that has to know, because everything
     // that asks "is this on screen" — the extract, the hit test, the designer —
     // already comes through here.
-    const bool shown = !p->hidesChild(tree, e) && uiElementEffectiveVisible(tree, *p);
+    const bool shown = !p->hidesChild(tree, e) &&
+                       effectiveVisibleWalk(tree, *p, ancestorsLeft - 1);
     if (m) { m->visible = shown; m->have |= LayoutMemo::kVisible; }
     return shown;
+}
+}
+
+bool uiElementEffectiveVisible(const UIWidgetTree& tree, const UIElement& e)
+{
+    return effectiveVisibleWalk(tree, e, tree.elements.size() + 1);
 }
 
 void uiUpdateScrollExtents(UIWidgetTree& tree)

@@ -18549,3 +18549,39 @@ TEST_CASE("AutoSize: tab and section label caches follow the children frame by f
     REQUIRE(tb->tabLabels.size() == 3);
     CHECK(tb->tabLabels[2] == "Extra");
 }
+
+TEST_CASE("Tree: a parent chain that is a cycle ends the rect and visibility walks")
+{
+    // A hand-edited file can name an element as its own parent, or two as each
+    // other's. Nothing may recurse until the stack is gone.
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int self = t.add(HE::UIWidgetType::Panel);
+    const int a    = t.add(HE::UIWidgetType::Panel);
+    const int b    = t.add(HE::UIWidgetType::Panel);
+    const int boxA = t.add(HE::UIWidgetType::VerticalBox);
+    const int boxB = t.add(HE::UIWidgetType::VerticalBox);
+    t.find(self)->parentId = self;
+    t.find(a)->parentId    = b;
+    t.find(b)->parentId    = a;
+    t.find(boxA)->parentId = boxB;
+    t.find(boxB)->parentId = boxA;
+
+    for (const int id : { self, a, b, boxA, boxB })
+    {
+        const HE::UIElement& e = *t.find(id);
+        const HE::UIWidgetRect r = HE::uiElementRect(t, e);
+        CHECK(std::isfinite(r.x));
+        CHECK(std::isfinite(r.w));
+        CHECK(HE::uiElementEffectiveVisible(t, e));       // visible, ends the walk
+    }
+
+    // A chain that is not a cycle is unaffected.
+    const int child = t.add(HE::UIWidgetType::Panel);
+    const int root  = t.add(HE::UIWidgetType::Panel);
+    t.find(child)->parentId = root;
+    t.find(root)->sizeX = 300.0f; t.find(root)->sizeY = 200.0f;
+    t.find(child)->visible = true;
+    t.find(root)->visible = false;
+    CHECK_FALSE(HE::uiElementEffectiveVisible(t, *t.find(child)));
+}
