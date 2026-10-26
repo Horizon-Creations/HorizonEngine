@@ -56,6 +56,29 @@ namespace
 		         r.w * canvas.scaleX, r.h * canvas.scaleY };
 	}
 
+	struct AnyWidget
+	{
+		template <class T> bool operator()(const T&) const { return true; }
+	};
+
+	// The visible widgets of one window, ordered by zOrder, ties in creation
+	// order (stable): topmost first for the pointer and the keyboard, bottom
+	// first for the draw. `keep` narrows it further. A template because Instance
+	// is private to WidgetManager.
+	template <class Vec, class Keep = AnyWidget>
+	auto widgetsByZ(Vec& all, uint32_t windowId, bool topFirst, Keep keep = Keep{})
+	{
+		using Ptr = decltype(&all.front());
+		std::vector<Ptr> sorted;
+		sorted.reserve(all.size());
+		for (auto& w : all)
+			if (w.visible && w.windowId == windowId && keep(w)) sorted.push_back(&w);
+		std::stable_sort(sorted.begin(), sorted.end(),
+			[topFirst](Ptr a, Ptr b)
+			{ return topFirst ? a->zOrder > b->zOrder : a->zOrder < b->zOrder; });
+		return sorted;
+	}
+
 	// How many parents `e` has: how far down the tree it sits.
 	int ancestorDepth(const HE::UIWidgetTree& tree, const HE::UIElement& e)
 	{
@@ -3464,12 +3487,8 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	float     thumbGrab = 0.0f;
 	if (pressEdge)
 	{
-		std::vector<Instance*> byZ;
-		for (auto& w : m_instances)
-			if (w.visible && takesInput(w.id) && w.windowId == m_pointerWindow)
-				byZ.push_back(&w);
-		std::stable_sort(byZ.begin(), byZ.end(),
-			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+		const auto byZ = widgetsByZ(m_instances, m_pointerWindow, /*topFirst=*/true,
+			[this](const Instance& w) { return takesInput(w.id); });
 		for (Instance* wp : byZ)
 		{
 			float g = 0.0f;
@@ -5680,13 +5699,9 @@ bool WidgetManager::activateAtPointer(float vpWidth, float vpHeight,
                                       float mouseX, float mouseY)
 {
 	syncLists();
-	std::vector<Instance*> sorted;
 	// Only the window the pointer is in — this is a gesture aimed at a place,
 	// and a place is in exactly one window.
-	for (auto& w : m_instances)
-		if (w.visible && w.windowId == m_pointerWindow) sorted.push_back(&w);
-	std::stable_sort(sorted.begin(), sorted.end(),
-		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+	const auto sorted = widgetsByZ(m_instances, m_pointerWindow, /*topFirst=*/true);
 
 	for (Instance* wp : sorted)
 	{
@@ -5768,11 +5783,7 @@ bool WidgetManager::navigate(NavDir dir, float vpWidth, float vpHeight)
 		if (const Grab* g = topGrabOf(kwin)) { w = find(g->widget); if (!w) return false; }
 		else
 		{
-			std::vector<Instance*> sorted;
-			for (auto& inst : m_instances)
-				if (inst.visible && inst.windowId == kwin) sorted.push_back(&inst);
-			std::stable_sort(sorted.begin(), sorted.end(),
-				[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+			const auto sorted = widgetsByZ(m_instances, kwin, /*topFirst=*/true);
 			w = sorted.empty() ? nullptr : sorted.front();
 			if (!w) return false;
 		}
@@ -5957,12 +5968,8 @@ bool WidgetManager::focusNext(bool backwards, float vpWidth, float vpHeight)
 	if (!w) w = find(m_focusWidget);
 	if (!w || !w->visible || !takesInput(w->id))
 	{
-		std::vector<Instance*> sorted;
-		for (auto& inst : m_instances)
-			if (inst.visible && inst.windowId == kwin && takesInput(inst.id))
-				sorted.push_back(&inst);
-		std::stable_sort(sorted.begin(), sorted.end(),
-			[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+		const auto sorted = widgetsByZ(m_instances, kwin, /*topFirst=*/true,
+			[this](const Instance& inst) { return takesInput(inst.id); });
 		w = sorted.empty() ? nullptr : sorted.front();
 	}
 	if (!w) return false;
@@ -6073,13 +6080,9 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 
 	// Topmost widget first, and within it the DEEPEST scroll box under the
 	// cursor: a list inside a list scrolls the one the pointer is in.
-	std::vector<Instance*> sorted;
 	// Only the window the pointer is in — this is a gesture aimed at a place,
 	// and a place is in exactly one window.
-	for (auto& w : m_instances)
-		if (w.visible && w.windowId == m_pointerWindow) sorted.push_back(&w);
-	std::stable_sort(sorted.begin(), sorted.end(),
-		[](const Instance* a, const Instance* b){ return a->zOrder > b->zOrder; });
+	const auto sorted = widgetsByZ(m_instances, m_pointerWindow, /*topFirst=*/true);
 
 	for (Instance* wp : sorted)
 	{
@@ -6144,12 +6147,7 @@ void WidgetManager::extract(uint32_t windowId, float vpWidth, float vpHeight,
 	syncLists();
 
 	// Widgets sorted by zOrder (stable: creation order breaks ties).
-	std::vector<Instance*> sorted;
-	sorted.reserve(m_instances.size());
-	for (auto& w : m_instances)
-		if (w.visible && w.windowId == windowId) sorted.push_back(&w);
-	std::stable_sort(sorted.begin(), sorted.end(),
-		[](const Instance* a, const Instance* b){ return a->zOrder < b->zOrder; });
+	const auto sorted = widgetsByZ(m_instances, windowId, /*topFirst=*/false);
 
 	// Which widget the scrim goes under: the LOWEST modal, so a dialog over a
 	// dialog dims the world once rather than twice as dark. It is emitted by
