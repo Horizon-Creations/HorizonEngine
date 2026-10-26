@@ -2067,25 +2067,31 @@ void WidgetManager::syncLists(Instance& w)
 			const float availT = std::max(0.0f, lv->columnCanvasW
 			                                    - 2.0f * lv->columnPadding
 			                                    - (cols - 1) * lv->columnSpacing);
-			for (HE::UIWidgetRef* r : rows)
+			// The row's root box, then its cells. Both walks are over the host
+			// tree: a grafted row lives in it like anything else. One pass over
+			// the tree for each level, not two scans per row: with a few hundred
+			// rows in a tree of thousands of elements that was a million
+			// comparisons on every sync.
+			std::unordered_map<int, const HE::UIElement*> rowRootOf;   // ref id -> its first child
+			for (HE::UIWidgetRef* r : rows) rowRootOf.emplace(r->id, nullptr);
+			for (const auto& ep : w.tree.elements)
+				if (ep)
+					if (const auto root = rowRootOf.find(ep->parentId);
+					    root != rowRootOf.end() && !root->second)
+						root->second = ep.get();
+			std::unordered_map<int, int> cellsWritten;   // row root id -> cells so far
+			for (const auto& [refId, rowRoot] : rowRootOf)
+				if (rowRoot) cellsWritten.emplace(rowRoot->id, 0);
+			for (const auto& ep : w.tree.elements)
 			{
-				// The row's root box, then its cells. Both walks are over the
-				// host tree: a grafted row lives in it like anything else.
-				const HE::UIElement* rowRoot = nullptr;
-				for (const auto& ep : w.tree.elements)
-					if (ep && ep->parentId == r->id) { rowRoot = ep.get(); break; }
-				if (!rowRoot) continue;
-				int c = 0;
-				for (const auto& ep : w.tree.elements)
+				if (!ep) continue;
+				const auto written = cellsWritten.find(ep->parentId);
+				if (written == cellsWritten.end() || written->second >= cols) continue;
+				const float want = availT * fr[static_cast<std::size_t>(written->second++)];
+				if (std::abs(ep->sizeX - want) > 0.01f)
 				{
-					if (!ep || ep->parentId != rowRoot->id) continue;
-					if (c >= cols) break;
-					const float want = availT * fr[static_cast<std::size_t>(c++)];
-					if (std::abs(ep->sizeX - want) > 0.01f)
-					{
-						ep->sizeX = want;
-						m_visualDirty = true;
-					}
+					ep->sizeX = want;
+					m_visualDirty = true;
 				}
 			}
 		}
