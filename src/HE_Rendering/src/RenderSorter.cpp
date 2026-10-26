@@ -41,6 +41,34 @@ void RenderSorter::sort(const RenderWorld&          world,
 		outSortedIndices.push_back(k.index);
 }
 
+void RenderSorter::sortByMesh(const RenderWorld&          world,
+                              const std::vector<uint8_t>& visible,
+                              std::vector<uint32_t>&       outSortedIndices)
+{
+	m_keys.clear();
+	m_keys.reserve(world.objects.size());
+	for (uint32_t i = 0; i < world.objects.size(); ++i)
+	{
+		if (i < visible.size() && !visible[i])
+			continue;
+		const RenderObject& o = world.objects[i];
+		m_keys.push_back(SortKey{ o.meshAssetId.hi, o.meshAssetId.lo, 0.0f, i });
+	}
+
+	std::sort(m_keys.begin(), m_keys.end(),
+		[](const SortKey& a, const SortKey& b)
+		{
+			if (a.meshHi != b.meshHi) return a.meshHi < b.meshHi;
+			if (a.meshLo != b.meshLo) return a.meshLo < b.meshLo;
+			return a.index < b.index;
+		});
+
+	outSortedIndices.clear();
+	outSortedIndices.reserve(m_keys.size());
+	for (const SortKey& k : m_keys)
+		outSortedIndices.push_back(k.index);
+}
+
 void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
                                       std::vector<const DrawCall*>& outOpaque,
                                       std::vector<const DrawCall*>& outTransparent,

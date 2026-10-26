@@ -108,6 +108,38 @@ TEST_CASE("FrustumCuller keeps objects with unknown (invalid) bounds visible")
 	CHECK(vis[1] == 1u);   // unknown/invalid bounds → kept visible
 }
 
+TEST_CASE("FrustumCuller over a compact bounds array answers exactly as over the objects")
+{
+	// The Metal passes cull a per-walk copy of the refined bounds (audit lever 7): same test,
+	// 24 bytes per object instead of a RenderObject each. Boxes inside, outside, across the
+	// planes and invalid ones, enough to go through the parallel chunks.
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0, 2, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 80.0f);
+	std::vector<HE::AABB> bounds;
+	for (int i = 0; i < 5000; ++i)
+	{
+		RenderObject o;
+		if (i % 97 != 0)   // every 97th stays invalid
+		{
+			const glm::vec3 c(float((i * 37) % 200) - 100.0f, float((i * 11) % 40) - 20.0f, -float((i * 53) % 150));
+			o.worldBounds.expand(c);
+			o.worldBounds.expand(c + glm::vec3(0.5f + float(i % 5)));
+		}
+		rw.objects.push_back(o);
+		bounds.push_back(o.worldBounds);
+	}
+	FrustumCuller culler;
+	const glm::mat4 vp = rw.camera.projection * rw.camera.view;
+	std::vector<uint8_t> fromObjects, fromBounds;
+	culler.cull(rw, vp, fromObjects);
+	culler.cull(bounds, vp, fromBounds);
+	CHECK(fromObjects == fromBounds);
+	const size_t kept = static_cast<size_t>(std::count(fromBounds.begin(), fromBounds.end(), uint8_t(1)));
+	CHECK(kept > 50u);
+	CHECK(kept < 4950u);   // both answers occur, the comparison means something
+}
+
 TEST_CASE("AABB build and ray intersection")
 {
 	const float verts[] = { -1,-1,-1,  1,1,1,  0,0,0 };

@@ -690,6 +690,12 @@ private:
 	// The union of every object's refined bound, gathered in the same loop: EncodeCloudShadow
 	// needs it for its ground height and used to walk all objects again for it (1.9 ms at 50k).
 	HE::AABB            m_refinedSceneBox{};
+	// Every object's refined bound, in object order, from the same loop: what the frustum
+	// culls read (FrustumCuller's compact overload) instead of the ~280-byte RenderObjects.
+	std::vector<HE::AABB> m_refinedBounds;
+	// The frustum cull of every pass (cascades, local layers, the camera): over m_refinedBounds
+	// when they belong to the walk in m_renderWorld, otherwise over the objects themselves.
+	void  CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible);
 	// The scene box of the walk m_renderWorld holds: the one RefineObjectBounds gathered when it
 	// ran for this walk, otherwise a loop of its own (a frame whose passes never refined).
 	HE::AABB FrameSceneBox() const;

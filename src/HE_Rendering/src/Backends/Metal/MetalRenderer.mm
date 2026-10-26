@@ -7139,7 +7139,7 @@ bool MetalRenderer::UploadMvpModel(const std::vector<glm::mat4>& models, const g
 		dst[2 * k]     = viewProj * src[k]; // mvp
 		dst[2 * k + 1] = src[k];            // model
 	};
-	if (n >= RenderWorld::kParallelUnfoldMin) parallel_for(n, fill, "SceneInstanceMvp", 1024);
+	if (n >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled()) parallel_for(n, fill, "SceneInstanceMvp", 1024);
 	else for (size_t k = 0; k < n; ++k) fill(k);
 	return true;
 }
@@ -7974,17 +7974,29 @@ void MetalRenderer::RefineObjectBounds()
 	HE::AABB sceneBox;
 	{
 		HE_PROFILE_SCOPE_N("Metal::RefineBounds");
+		m_refinedBounds.resize(count);
+		size_t i = 0;
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
 			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
 				obj.refineWorldBounds(mesh->localBounds);
 			sceneBox.expand(obj.worldBounds);
+			m_refinedBounds[i++] = obj.worldBounds;
 		}
 	}
 	m_refinedWalk     = walk;
 	m_refinedObjects  = objects;
 	m_refinedCount    = count;
 	m_refinedSceneBox = sceneBox;
+}
+
+void MetalRenderer::CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible)
+{
+	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
+	    && m_refinedCount == m_renderWorld.objects.size())
+		m_culler.cull(m_refinedBounds, viewProj, outVisible);
+	else
+		m_culler.cull(m_renderWorld, viewProj, outVisible);
 }
 
 HE::AABB MetalRenderer::FrameSceneBox() const
@@ -8039,8 +8051,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj,
 		                            uint32_t skipEntity)
 		{
-			m_culler.cull(m_renderWorld, viewProj, m_visible);
-			m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
+			CullObjects(viewProj, m_visible);
+			m_sorter.sortByMesh(m_renderWorld, m_visible, m_sortedIndices);
 			const glm::mat4 lightClip = HE::kMetalClipFix * viewProj;
 
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -8102,7 +8114,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 					size_t instOff = 0;
 					auto* mvp = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), instBuf, instOff));
 					if (!mvp) continue;
-					if (b.count >= RenderWorld::kParallelUnfoldMin)
+					if (b.count >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled())
 						parallel_for(b.count, [mvp, xf, &lightClip](size_t k) { mvp[k] = lightClip * xf[k]; },
 						             "ShadowInstanceMvp", 1024);
 					else
@@ -12613,7 +12625,7 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 						dst[2 * k]     = viewProj * models[k]; // mvp
 						dst[2 * k + 1] = view * models[k];     // modelView
 					};
-					if (b.count >= RenderWorld::kParallelUnfoldMin) parallel_for(b.count, fill, "PrepassInstanceMvp", 1024);
+					if (b.count >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled()) parallel_for(b.count, fill, "PrepassInstanceMvp", 1024);
 					else for (uint32_t k = 0; k < b.count; ++k) fill(k);
 				}
 				[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
@@ -18132,7 +18144,7 @@ void MetalRenderer::CullCameraObjects()
 
 void MetalRenderer::CullCameraObjectsFresh()
 {
-	m_culler.cull(m_renderWorld, m_visible);
+	CullObjects(m_renderWorld.camera.projection * m_renderWorld.camera.view, m_visible);
 	if (m_occlusionCuller.settings().enabled)
 	{
 		const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;

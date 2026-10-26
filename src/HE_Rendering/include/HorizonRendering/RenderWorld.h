@@ -6,6 +6,7 @@
 #include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
 #include <JobSystem/JobSystem.h>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -376,6 +377,16 @@ public:
     };
     static constexpr uint32_t kInstancePieceMax  = 2048;
     static constexpr size_t   kParallelUnfoldMin = 4096;   // fewer instances stay on the caller
+    // HE_PARALLEL_UNFOLD=0 keeps every unfolding on the calling thread: the A/B switch, like
+    // HE_DEPTH_INSTANCING (same bits either way).
+    static bool parallelUnfoldEnabled()
+    {
+        static const bool on = [] {
+            const char* v = std::getenv("HE_PARALLEL_UNFOLD");
+            return !(v && *v && std::atoi(v) == 0);
+        }();
+        return on;
+    }
     void addInstancePiece(std::vector<InstancePiece>& pieces, const RenderObject& obj,
                           uint32_t from, uint32_t n, size_t pos) const
     {
@@ -398,7 +409,7 @@ public:
         };
         size_t total = 0;
         for (const InstancePiece& x : pieces) total += x.n;
-        if (pieces.size() > 1 && total >= kParallelUnfoldMin)
+        if (pieces.size() > 1 && total >= kParallelUnfoldMin && parallelUnfoldEnabled())
             parallel_for(pieces.size(), one, "UnfoldInstances", 1);
         else
             for (size_t p = 0; p < pieces.size(); ++p) one(p);
