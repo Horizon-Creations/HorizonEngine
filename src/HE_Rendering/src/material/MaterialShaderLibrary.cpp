@@ -1847,44 +1847,60 @@ MaterialShaderLibrary::Compiled compileResolveVariant(
 }
 } // namespace
 
+namespace
+{
+// Shared cache-or-build step every deferredResolve*/ssr*/reflPrepass*/decal* variant
+// follows: look the key up first, build only on a miss, and let the cache own the
+// result. A free template, not a class member, so it needs no header change — `cache`
+// is one of the class's private unordered_map<int, Compiled> members, passed by the
+// caller, and `build` is invoked at most once, only on the miss path.
+template <typename Build>
+const MaterialShaderLibrary::Compiled& cachedCompile(std::unordered_map<int, MaterialShaderLibrary::Compiled>& cache,
+                                                      int key, Build&& build)
+{
+    if (auto it = cache.find(key); it != cache.end()) return it->second;
+    return cache.emplace(key, build()).first->second;
+}
+} // namespace
+
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolve(Backend backend)
 {
-    const int key = static_cast<int>(backend);
-    if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
-    Compiled out = compileResolveVariant(
-        injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/false)),
-        backend, false, false);
-    return m_resolveCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveCache, static_cast<int>(backend), [&]
+    {
+        return compileResolveVariant(
+            injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/false)),
+            backend, false, false);
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveClustered(Backend backend)
 {
-    const int key = static_cast<int>(backend) + 64;
-    if (auto it = m_resolveCache.find(key); it != m_resolveCache.end()) return it->second;
-    std::string src = buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true);
-    if (backend != Backend::Metal) src = explicitLodClusterSamples(std::move(src));
-    Compiled out = compileResolveVariant(injectPreamble(src), backend, false, true);
-    return m_resolveCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveCache, static_cast<int>(backend) + 64, [&]
+    {
+        std::string src = buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true);
+        if (backend != Backend::Metal) src = explicitLodClusterSamples(std::move(src));
+        return compileResolveVariant(injectPreamble(src), backend, false, true);
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTile(Backend backend)
 {
-    const int key = static_cast<int>(backend);
-    if (auto it = m_resolveTileCache.find(key); it != m_resolveTileCache.end()) return it->second;
-    Compiled out = compileResolveVariant(
-        injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/false)),
-        backend, true, false);
-    return m_resolveTileCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveTileCache, static_cast<int>(backend), [&]
+    {
+        return compileResolveVariant(
+            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/false)),
+            backend, true, false);
+    });
 }
 
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTileClustered(Backend backend)
 {
-    const int key = static_cast<int>(backend) + 64;
-    if (auto it = m_resolveTileCache.find(key); it != m_resolveTileCache.end()) return it->second;
-    Compiled out = compileResolveVariant(
-        injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true)),
-        backend, true, true);
-    return m_resolveTileCache.emplace(key, std::move(out)).first->second;
+    return cachedCompile(m_resolveTileCache, static_cast<int>(backend) + 64, [&]
+    {
+        return compileResolveVariant(
+            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true)),
+            backend, true, true);
+    });
 }
 
 namespace
