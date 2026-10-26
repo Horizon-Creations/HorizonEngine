@@ -2840,8 +2840,9 @@ namespace
 		float us = 1.0f, vs = 1.0f;
 		HE::uiElementUnitScale(tree, sp, us, vs, &canvas);
 		const float len = sp.vertical ? r.h : r.w;
-		const float div = std::min(sp.dividerSize * (sp.vertical ? vs : us), len);
-		const float first = sp.clampedRatio(len) * std::max(0.0f, len - div);
+		const float divScale = sp.vertical ? vs : us;
+		const float div = std::min(sp.dividerSize * divScale, len);
+		const float first = sp.clampedRatio(len, divScale) * std::max(0.0f, len - div);
 		const float p  = sp.vertical ? canvasY : canvasX;
 		const float lo = (sp.vertical ? r.y : r.x) + first;
 		return p >= lo && p <= lo + div;
@@ -4043,7 +4044,8 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 				float us = 1.0f, vs = 1.0f;
 				HE::uiElementUnitScale(w.tree, *sp, us, vs, &canvas);
 				const float len = sp->vertical ? r.h : r.w;
-				const float div = std::min(sp->dividerSize * (sp->vertical ? vs : us), len);
+				const float divScale = sp->vertical ? vs : us;
+				const float div = std::min(sp->dividerSize * divScale, len);
 				const float usable = std::max(1.0f, len - div);
 				const float p = (sp->vertical ? mouseY / canvas.scaleY - r.y
 				                              : mouseX / canvas.scaleX - r.x) - div * 0.5f;
@@ -4057,7 +4059,7 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					sp->ratio = nv;
 					m_visualDirty = true;
 					const ScriptTarget t2 = scriptTargetFor(w, w.draggingSplit);
-					rt().fireOnValueChanged(t2.scriptId, t2.elem, sp->clampedRatio(len));
+					rt().fireOnValueChanged(t2.scriptId, t2.elem, sp->clampedRatio(len, divScale));
 				}
 			}
 		}

@@ -13006,6 +13006,58 @@ TEST_CASE("Splitter: two panes, the divider between them, and the minimums bite"
     CHECK(rc.w == doctest::Approx(0.0f));
 }
 
+TEST_CASE("Splitter: the minimums bite on the length left after the SCALED divider")
+{
+    HE::UISplitter s;
+    s.dividerSize = 8.0f; s.ratio = 1.0f; s.minFirst = 0.0f; s.minSecond = 100.0f;
+    // Unscaled: 400 - 8 = 392 usable, the first pane runs to 292.
+    CHECK(s.clampedRatio(400.0f, 1.0f) * (400.0f - 8.0f) == doctest::Approx(292.0f));
+    // At scale 2 the divider is 16 wide, 384 usable, so the second pane keeps
+    // its 100 only if the first pane stops at 284. Measured against the
+    // unscaled divider it came out at 98.
+    const float first = s.clampedRatio(400.0f, 2.0f) * (400.0f - 16.0f);
+    CHECK(first == doctest::Approx(284.0f));
+    CHECK((400.0f - 16.0f) - first == doctest::Approx(100.0f));
+    // The minimum on the other side, the same way.
+    s.ratio = 0.0f; s.minFirst = 100.0f; s.minSecond = 0.0f;
+    CHECK(s.clampedRatio(400.0f, 2.0f) * (400.0f - 16.0f) == doctest::Approx(100.0f));
+}
+
+TEST_CASE("Splitter: inside a scaled widget the second pane keeps its minimum")
+{
+    // A page that embeds a 400-unit-wide widget in 800 host units: one unit of
+    // the embedded splitter is worth two host units, its divider included.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 800.0f; page.canvasHeight = 200.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int refId = page.add(HE::UIWidgetType::WidgetRef);
+    auto* ref = dynamic_cast<HE::UIWidgetRef*>(page.find(refId));
+    REQUIRE(ref != nullptr);
+    HE::uiSetAnchorPreset(*ref, 0); ref->pivotX = ref->pivotY = 0.0f;
+    ref->posX = ref->posY = 0.0f; ref->sizeX = 800.0f; ref->sizeY = 200.0f;
+    ref->contentW = 400.0f; ref->contentH = 200.0f;
+    ref->contentMode = HE::UICanvasScaleMode::Stretch;
+
+    const int sp = page.add(HE::UIWidgetType::Splitter);
+    page.find(sp)->parentId = refId;
+    { HE::UIElement& e = *page.find(sp);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 100.0f; }
+    { auto* s = dynamic_cast<HE::UISplitter*>(page.find(sp));
+      s->dividerSize = 8.0f; s->ratio = 1.0f; s->minFirst = 0.0f; s->minSecond = 100.0f; }
+    const int a = page.add(HE::UIWidgetType::Panel); page.find(a)->parentId = sp;
+    const int b = page.add(HE::UIWidgetType::Panel); page.find(b)->parentId = sp;
+
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(page, 800.0f, 200.0f, 1.0f);
+    const HE::UIWidgetRect whole = HE::uiElementRect(page, *page.find(sp), &canvas);
+    const HE::UIWidgetRect rb    = HE::uiElementRect(page, *page.find(b), &canvas);
+    REQUIRE(whole.w == doctest::Approx(400.0f));
+    CHECK(rb.w == doctest::Approx(100.0f));
+    // The divider is the 16 host units between the panes.
+    const HE::UIWidgetRect ra = HE::uiElementRect(page, *page.find(a), &canvas);
+    CHECK(ra.w + 16.0f + rb.w == doctest::Approx(400.0f));
+}
+
 TEST_CASE("Splitter: one inside another is the three-pane layout, and it nests")
 {
     HE::UIWidgetTree t;
@@ -13153,10 +13205,10 @@ TEST_CASE("Splitter: dragging the divider moves it, and only the divider does")
     // Dragging PAST a minimum stops at it, in the layout — the ratio itself may
     // run to the edge, but the panes never do.
     wm.processPointer(400.0f, 200.0f,
-                      live->clampedRatio(400.0f) * 390.0f + 4.0f, 100.0f, true, true);
+                      live->clampedRatio(400.0f, 1.0f) * 390.0f + 4.0f, 100.0f, true, true);
     wm.processPointer(400.0f, 200.0f, 399.0f, 100.0f, true, true);
     wm.processPointer(400.0f, 200.0f, 399.0f, 100.0f, false, true);
-    CHECK(live->clampedRatio(400.0f) * 390.0f == doctest::Approx(350.0f));   // 390 - 40
+    CHECK(live->clampedRatio(400.0f, 1.0f) * 390.0f == doctest::Approx(350.0f));   // 390 - 40
 
     // A press that is NOT on the divider must not start a drag: the panes have
     // to stay clickable, and grabbing the whole container would end that.

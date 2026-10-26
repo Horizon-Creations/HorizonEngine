@@ -3159,10 +3159,10 @@ bool UISplitter::hidesChild(const UIWidgetTree& tree, const UIElement& child) co
     return uiChildIndexOf(tree, id, child.id) >= 2;
 }
 
-float UISplitter::clampedRatio(float lengthPx) const
+float UISplitter::clampedRatio(float lengthPx, float dividerScale) const
 {
     if (lengthPx <= 0.0f) return 0.5f;
-    const float div = std::min(dividerSize, lengthPx);
+    const float div = std::min(dividerSize * dividerScale, lengthPx);
     const float usable = std::max(0.0f, lengthPx - div);
     if (usable <= 0.0f) return 0.5f;
     float first = ratio * usable;
@@ -3196,7 +3196,7 @@ void UISplitter::render(const UIWidgetRect& px, const UIElementRenderState& st,
 {
     const float len = vertical ? px.h : px.w;
     const float div = std::min(dividerSize * pxScaleY, len);
-    const float first = clampedRatio(len) * std::max(0.0f, len - div);
+    const float first = clampedRatio(len, pxScaleY) * std::max(0.0f, len - div);
     // A little brighter while the pointer is on it, so a divider you can grab
     // says so before you try.
     const glm::vec4 c = st.hovered

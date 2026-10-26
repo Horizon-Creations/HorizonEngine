@@ -886,11 +886,12 @@ namespace
         uiElementUnitScale(tree, sp, bus, bvs, canvas);
 
         const float len = sp.vertical ? b.h : b.w;
-        const float div = std::min(sp.dividerSize * (sp.vertical ? bvs : bus), len);
+        const float divScale = sp.vertical ? bvs : bus;
+        const float div = std::min(sp.dividerSize * divScale, len);
         // The SAME clamp the drag and the divider's own drawing use, in the same
         // units — a ratio the layout honoured but the divider drew elsewhere is
         // a splitter you cannot grab where you see it.
-        const float first = sp.clampedRatio(len) * std::max(0.0f, len - div);
+        const float first = sp.clampedRatio(len, divScale) * std::max(0.0f, len - div);
 
         const int idx = uiChildIndexOf(tree, sp.id, child.id);
         if (idx == 0)
