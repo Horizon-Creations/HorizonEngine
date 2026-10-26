@@ -2996,7 +2996,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // SceneUniforms occupies fragment buffer 0 in the scene pass), and the material
         // texture (set 0, binding 2 in canonical GLSL) to texture/sampler 0 — the slot the
         // geometry loop already binds per draw (material/mesh texture + linear sampler).
-        std::vector<MslPin> pins =
+        std::vector<MslPin> pins;
+        pins.reserve(24); // 21 fixed below + up to 3 clustered buffers
+        pins.insert(pins.end(),
             { { Stage::Fragment, 0, 0, static_cast<uint32_t>(kMetalLightingBufferIndex) },
               { Stage::Fragment, 0, 2, 0 },     // legacy/mesh texture → texture/sampler 0
               { Stage::Fragment, 0, 3, 2 },     // HeParams UBO → fragment buffer 2
@@ -3059,7 +3061,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
               // uses an inline constexpr sampler (kMaterialMslOptions below), so
               // the sampler budget stays untouched. Per-frame bind shared with
               // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
-              { Stage::Fragment, 0, 33, 16 } };
+              { Stage::Fragment, 0, 33, 16 } });
         // Clustered variant: the three light lists are BUFFERS, so the sampler
         // budget above is untouched. Fragment buffers 4/5/6 — free in the scene
         // pass (fragmentMain reads 0 and 3), and the slots the clustered
