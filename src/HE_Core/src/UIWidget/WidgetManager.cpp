@@ -1073,24 +1073,41 @@ void WidgetManager::popGrabAt(std::size_t index, bool notify)
 	if (notify && w) rt().fireOnDismissed(w->scriptId);
 }
 
+namespace
+{
+	// Templates on the instance and grab types because both are private to
+	// WidgetManager; the callers name them, these only deduce them.
+	template <class G, class K, class Inst>
+	void fillGrab(G& g, K kind, int widgetId, int focusWidget, const Inst* focused, int zOrder)
+	{
+		g.kind = kind;
+		g.widget = widgetId;
+		g.prevFocusWidget = focusWidget;
+		if (focused) g.prevFocusElem = focused->focusedElem;
+		g.prevZOrder = zOrder;
+	}
+
+	template <class Inst>
+	void raiseAboveAll(const std::vector<Inst>& all, Inst& w)
+	{
+		int top = w.zOrder;
+		for (const Inst& other : all) top = std::max(top, other.zOrder);
+		w.zOrder = top + 1;
+	}
+}
+
 void WidgetManager::showModal(int widgetId)
 {
 	Instance* w = find(widgetId);
 	if (!w) { HE_LOG_WARN(Widget, "showModal: no widget with id %d", widgetId); return; }
 
 	Grab g;
-	g.kind = Grab::Kind::Modal;
-	g.widget = widgetId;
-	g.prevFocusWidget = m_focusWidget;
-	if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
-	g.prevZOrder = w->zOrder;
+	fillGrab(g, Grab::Kind::Modal, widgetId, m_focusWidget, find(m_focusWidget), w->zOrder);
 
 	// On TOP, always. A dialog that blocks the input while drawing behind
 	// something is the worst of both, and it is exactly what happens when an
 	// author sets a z-order once and forgets about it.
-	int top = w->zOrder;
-	for (const Instance& other : m_instances) top = std::max(top, other.zOrder);
-	w->zOrder = top + 1;
+	raiseAboveAll(m_instances, *w);
 	w->visible = true;
 	// The focus belongs to the dialog from here on — the trap is that
 	// takesInput() refuses everything else, and this is the other half: the
@@ -1107,11 +1124,7 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 	if (!w) { HE_LOG_WARN(Widget, "openPopup: no widget with id %d", widgetId); return; }
 
 	Grab g;
-	g.kind = Grab::Kind::Popup;
-	g.widget = widgetId;
-	g.prevFocusWidget = m_focusWidget;
-	if (const Instance* pf = find(m_focusWidget)) g.prevFocusElem = pf->focusedElem;
-	g.prevZOrder = w->zOrder;
+	fillGrab(g, Grab::Kind::Popup, widgetId, m_focusWidget, find(m_focusWidget), w->zOrder);
 
 	// Where it goes is decided HERE, not by how the asset was authored. A
 	// convention ("anchor your root top-left") is a convention the first user
@@ -1142,9 +1155,7 @@ void WidgetManager::openPopupAt(int widgetId, float x, float y)
 		e.posY = std::clamp(y / sy, 0.0f, maxY);
 	}
 
-	int top = w->zOrder;
-	for (const Instance& other : m_instances) top = std::max(top, other.zOrder);
-	w->zOrder = top + 1;
+	raiseAboveAll(m_instances, *w);
 	w->visible = true;
 	m_focusWidget = widgetId;
 	w->focusedElem = 0;
