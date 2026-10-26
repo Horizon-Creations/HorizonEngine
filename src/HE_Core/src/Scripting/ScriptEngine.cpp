@@ -462,7 +462,8 @@ bool ScriptEngine::pcall(int nargs, int nresults)
 {
     if (lua_pcall(m_L, nargs, nresults, 0) != LUA_OK)
     {
-        m_lastError = lua_tostring(m_L, -1);
+        // error() may carry any value; lua_tostring is NULL for a table or nil.
+        m_lastError = lua_isstring(m_L, -1) ? lua_tostring(m_L, -1) : "non-string error";
         lua_pop(m_L, 1);
         return false;
     }

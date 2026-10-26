@@ -156,6 +156,31 @@ TEST_CASE("parseScriptErrorLocation: a line number that does not fit an int is r
     CHECK(loc.line == 2147483647);
 }
 
+TEST_CASE("ScriptEngine: an error() value that is not a string gets a fixed text")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("thrower",
+        "local M = {}\n"
+        "function M.onUpdate(self, dt)\n"
+        "  if self.mode == 1 then error({}) end\n"
+        "  error()\n"
+        "end\n"
+        "return M\n"));
+    const auto id = engine.createInstance("thrower");
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    CHECK_FALSE(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.lastError() == "non-string error");
+    engine.setInstanceField(id, "mode", 1.0);
+    CHECK_FALSE(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.lastError() == "non-string error");
+    // A number is a string to Lua and keeps its text.
+    CHECK_FALSE(engine.exec("error(42)"));
+    CHECK(engine.lastError() == "42");
+    // A chunk that throws a table at load time fails the load the same way.
+    CHECK_FALSE(engine.loadScript("tbl", "error({})"));
+    CHECK(engine.lastError() == "non-string error");
+}
+
 TEST_CASE("ScriptEngine: loading script twice replaces it")
 {
     ScriptEngine engine;
