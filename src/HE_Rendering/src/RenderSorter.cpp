@@ -49,6 +49,7 @@ void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
 	outOpaque.clear();
 	outTransparent.clear();
 	outOpaque.reserve(drawCalls.size());
+	outTransparent.reserve(drawCalls.size());
 	for (const DrawCall& dc : drawCalls)
 	{
 		// GL and Metal classify inline and honour DrawCall::indexOffset/
