@@ -84,6 +84,7 @@ std::string assembleVertex(VertexInput input, const WpoBody* wpo, bool instanced
     const char* wpPad = wpo ? "   " : (ssbo ? "  " : " ");
 
     std::string src = "#version 450\n";
+    src.reserve(2048);
     if (ssbo)
         src += "layout(std430, set = 0, binding = 0) readonly buffer Verts { float d[]; };\n";
     else
