@@ -13639,7 +13639,11 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		inst.clear();
 		inst.reserve(batch.instances.size() * 5);
 		for (const ParticleInstance& p : batch.instances)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.t01);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particleInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
