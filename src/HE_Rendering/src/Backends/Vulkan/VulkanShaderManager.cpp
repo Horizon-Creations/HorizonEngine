@@ -28,9 +28,14 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
     }
 
     size_t fileSize = static_cast<size_t>(file.tellg());
-    std::vector<char> buffer(fileSize);
+    // Read straight into a uint32_t-backed buffer: Vulkan wants the SPIR-V
+    // words as uint32_t*, and a vector<char>'s data() has no alignment
+    // guarantee for that — reinterpret_cast-ing it was undefined behaviour.
+    // Round up so a file whose size isn't a multiple of 4 still gets a whole
+    // last word (zero-padded) instead of a partial one.
+    std::vector<uint32_t> buffer((fileSize + sizeof(uint32_t) - 1) / sizeof(uint32_t), 0u);
     file.seekg(0);
-    file.read(buffer.data(), fileSize);
+    file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(fileSize));
     file.close();
 
     ShaderHandle handle;
@@ -43,8 +48,8 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
     // Create Vulkan shader module
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = buffer.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(buffer.data());
+    createInfo.codeSize = fileSize;
+    createInfo.pCode = buffer.data();
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     if (m_device != VK_NULL_HANDLE)
