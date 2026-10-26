@@ -685,6 +685,9 @@ namespace
 	void drawRow(const Line& line, const Hooks& hooks, const RowLayout& lay, const ImGuiStyle& style,
 	             ImDrawList* dl, std::string& row, bool& clearRequested)
 	{
+		// The caller already has this scope open; naming it here keeps the help audit's
+		// top-down scan attributing the context menu's items to "Console".
+		HE::Ed::Help::Scope helpScope("Console");
 		const auto& [availW, lineH, rowH, pitch, xTime, xCat, xMsg, textCol, dimCol, linkCol, linkHot, surface] = lay;
 		row.clear();
 		appendRow(line, row);
