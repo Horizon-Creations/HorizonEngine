@@ -1462,6 +1462,7 @@ struct D3D12RendererImpl
     UINT64                  tsFrequency   = 0;        // ticks/s; 0 → timing unavailable
     bool                    tsPending[k_frameCount]{};
     GpuPassTimeline         tsTimeline[k_frameCount]; // the marks of the list recorded in that slot
+    bool                    tsPassOn = false;         // per-pass marks this frame: a capture or the overlay is on
     double                  lastGpuFrameMs = -1.0;    // newest reaped whole-frame time
     std::vector<IRenderer::GpuPassTime> lastGpuPasses; // ... and its per-pass rows
     // CPU counters (draws/tris this frame, cull results) merged by GetFrameGpuStats.
@@ -1519,7 +1520,7 @@ struct D3D12RendererImpl
     bool gpuPassBegin(const char* name)
     {
         uint32_t i = 0;
-        if (!tsQueryHeap || !tsTimeline[frameIndex].push(name, i)) return false;
+        if (!tsQueryHeap || !tsPassOn || !tsTimeline[frameIndex].push(name, i)) return false;
         gpuMark(i);
         return true;
     }
@@ -12913,6 +12914,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 // RenderSceneImage() follows it with a readback instead.
 void D3D12Renderer::DrawViewportFrame()
 {
+    HE_PROFILE_SCOPE_N("DrawViewportFrame");
     auto& p = *m_impl;
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
@@ -13140,6 +13142,9 @@ void D3D12Renderer::Render()
     {
         p.tsTimeline[p.frameIndex].reset();
         p.gpuMark(p.tsTimeline[p.frameIndex].start());
+        // Per-pass marks only for a frame somebody reads them from: they make the GPU drain at every pass boundary.
+        const EngineProfiler& prof = EngineProfiler::instance();
+        p.tsPassOn = (prof.isRecording() || prof.liveEnabled()) && GpuPassTimeline::envEnabled();
     }
 
     // CPU counters restart each frame; DrawScene fills them back in.
@@ -13223,7 +13228,11 @@ void D3D12Renderer::Render()
     }
 
     // Overlay (ImGui) records into this command list and binds its own SRV heap.
-    if (m_overlayCallback) m_overlayCallback(p.cmdList.Get());
+    if (m_overlayCallback)
+    {
+        HE_PROFILE_SCOPE_N("Overlay");   // the editor's ImGui draw lists
+        m_overlayCallback(p.cmdList.Get());
+    }
 
     swapBarrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     swapBarrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;

@@ -1,8 +1,10 @@
 #include "HorizonRendering/FrameCull.h"
+#include <Diagnostics/Profiler.h>
 
 void FrameCull::prepareShadowViews(FrustumCuller& culler, const RenderWorld& world, uint64_t walk,
                                    ShadowViewCpu* views, size_t n, const char* label) const
 {
+	HE_PROFILE_SCOPE_N("ShadowPrepare");   // the views side by side: the main thread waits for the slowest
 	const bool spans = RenderSorter::instanceSpansEnabled();
 	for (size_t v = 0; v < n; ++v) views[v].batches.useSpans = spans;
 	auto prepare = [&](size_t v)

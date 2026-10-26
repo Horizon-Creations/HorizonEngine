@@ -1811,6 +1811,7 @@ private:
 	uint64_t    m_tsFrameIdx  = 0;
 	GpuPassTimeline m_tsTimeline[kGpuTimerRing];    // the marks of the frame recorded in that slot
 	VkCommandBuffer m_tsCmd = VK_NULL_HANDLE;       // the frame's command buffer while it is timed
+	bool            m_tsPassOn = false;             // per-pass marks this frame: a capture or the overlay is on
 	// GpuPassScope's two calls (GpuPassScopeT): a mark in the frame's command buffer, a no-op
 	// anywhere else (a still, a preview) and when timestamps are unsupported.
 	bool gpuPassBegin(const char* name);

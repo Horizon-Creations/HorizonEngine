@@ -2176,6 +2176,7 @@ struct D3D11RendererImpl
     void gpuTimerReap(GpuTimerSlot& slot, bool block)
     {
         if (!slot.pending) return;
+        HE_PROFILE_SCOPE_N("GpuTimerReap");   // blocking in a detailed capture: the CPU waits for the GPU here
         if (block) context->Flush(); // make sure the queries can complete
         auto fetch = [&](ID3D11Query* q, void* out, UINT size) -> bool
         {
@@ -2236,7 +2237,7 @@ struct D3D11RendererImpl
     // is capturing, else both are no-ops.
     bool gpuPassBegin(const char* name)
     {
-        if (!gpuTimingActive || gpuCurSlot < 0) return false;
+        if (!gpuTimingActive || gpuCurSlot < 0 || !GpuPassTimeline::envEnabled()) return false;
         uint32_t i = 0;
         if (!gpuSlots[gpuCurSlot].timeline.push(name, i)) return false;
         return gpuMark(i);
@@ -6977,6 +6978,7 @@ void D3D11Renderer::Shutdown()
 void D3D11Renderer::DrawScene(int width, int height)
 {
     if (!m_world || !m_impl->vs || width <= 0 || height <= 0) return;
+    HE_PROFILE_SCOPE_N("DrawScene");
     auto& p = *m_impl;
 
     // Drop caches for materials/meshes edited since last frame; they re-resolve this frame.
@@ -8581,6 +8583,7 @@ void D3D11Renderer::DrawScene(int width, int height)
 // RenderSceneImage() follows it with a readback instead.
 void D3D11Renderer::DrawViewportFrame()
 {
+    HE_PROFILE_SCOPE_N("DrawViewportFrame");
     auto& p = *m_impl;
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
@@ -8945,7 +8948,11 @@ void D3D11Renderer::Render()
         p.renderUIPass(p.context.Get(), p.width, p.height, m_contentManager);
     }
 
-    if (m_overlayCallback) m_overlayCallback(nullptr);
+    if (m_overlayCallback)
+    {
+        HE_PROFILE_SCOPE_N("Overlay");   // the editor's ImGui draw lists
+        m_overlayCallback(nullptr);
+    }
     instanceWorldCacheNextFrame();   // frees the unfolded foliage blocks nothing read for a while
     p.gpuTimerEndFrame();
     {

@@ -231,4 +231,9 @@ private:
         uint32_t index;
     };
     std::vector<SortKey> m_keys;
+    // sortByMesh's scratch: the visible objects, their mesh as a dense id, the open-addressing
+    // table that hands the ids out, and the counting sort's buckets.
+    struct MeshSlot { uint64_t hi, lo; uint32_t dense; bool used; };
+    std::vector<uint32_t> m_visible, m_denseOf, m_rankOfDense, m_bucket;
+    std::vector<MeshSlot> m_meshTable;
 };

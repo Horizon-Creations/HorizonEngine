@@ -173,10 +173,10 @@ TEST_CASE("FrameCull refines once per walk and every cull over it matches the ob
 	CHECK(!fc.holds(rw, 1));
 
 	fc.refine(rw, 1, localBounds);
-	CHECK(resolved == 3000);
+	CHECK(resolved == 7);   // each of the 7 meshes asked once, not each of the 3000 objects
 	CHECK(fc.holds(rw, 1));
 	fc.refine(rw, 1, localBounds);                  // same walk: nothing to do
-	CHECK(resolved == 3000);
+	CHECK(resolved == 7);   // each of the 7 meshes asked once, not each of the 3000 objects
 	CHECK(!fc.holds(rw, 2));                        // another walk does not read the copy
 
 	std::vector<uint8_t> viaCopy, viaObjects;
@@ -194,7 +194,7 @@ TEST_CASE("FrameCull refines once per walk and every cull over it matches the ob
 	CHECK(got.max == box.max);
 
 	fc.refine(rw, 2, localBounds);                  // a new walk starts over
-	CHECK(resolved == 6000);
+	CHECK(resolved == 14);
 	CHECK(fc.holds(rw, 2));
 }
 
@@ -322,6 +322,90 @@ TEST_CASE("InstanceRun: spans and the copied list give the same pairs and the sa
 	std::vector<uint8_t> d(size_t(total) * 128);
 	RenderSorter::fillInstancePairs(d.data(), list.run(b0), fill);
 	CHECK(d == a);
+}
+
+TEST_CASE("RenderSorter::sortByMesh: the counting sort gives the comparison sort's order")
+{
+	// Mesh (hi, lo) ascending, then object index ascending: what the std::sort it replaced did.
+	// 700 distinct meshes force the id table to grow (1024 slots, half full at 512).
+	for (uint32_t distinctMeshes : { 1u, 7u, 700u })
+	{
+		RenderWorld world;
+		std::vector<uint8_t> visible;
+		uint64_t seed = 0x9E3779B97F4A7C15ull + distinctMeshes;
+		auto next = [&seed] { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return seed >> 33; };
+		const uint32_t n = 20000;
+		world.objects.resize(n);
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			const uint64_t m = next() % distinctMeshes;
+			world.objects[i].meshAssetId.hi = (m * 0x100000001B3ull) ^ 0xABCDull;   // not in index order
+			world.objects[i].meshAssetId.lo = m * 7u + 1u;
+			visible.push_back(next() % 5 != 0);
+		}
+		RenderSorter sorter;
+		std::vector<uint32_t> got;
+		sorter.sortByMesh(world, visible, got);
+
+		std::vector<uint32_t> want;
+		for (uint32_t i = 0; i < n; ++i) if (visible[i]) want.push_back(i);
+		std::sort(want.begin(), want.end(), [&](uint32_t a, uint32_t b)
+		{
+			const HE::UUID& x = world.objects[a].meshAssetId; const HE::UUID& y = world.objects[b].meshAssetId;
+			if (x.hi != y.hi) return x.hi < y.hi;
+			if (x.lo != y.lo) return x.lo < y.lo;
+			return a < b;
+		});
+		CHECK(got == want);
+		// A second call on the same sorter (its scratch is reused) and an empty frame.
+		sorter.sortByMesh(world, visible, got);
+		CHECK(got == want);
+		std::vector<uint8_t> none(n, 0);
+		sorter.sortByMesh(world, none, got);
+		CHECK(got.empty());
+	}
+}
+
+TEST_CASE("FrameCull::refine: every object gets the bound the serial walk gives it, wide or not")
+{
+	for (uint32_t count : { 50u, 9000u })   // under and over the wide threshold
+	{
+		RenderWorld a, b;
+		a.objects.resize(count);
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			RenderObject& o = a.objects[i];
+			o.meshAssetId.hi = 1; o.meshAssetId.lo = 1 + i % 13;
+			o.transform = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), float(i % 7), 0.0f));
+			o.worldBounds = HE::AABB{};   // invalid: the walk gave none
+		}
+		b.objects = a.objects;
+		// Mesh lo == 13 is "not resolved": it keeps what the walk gave it.
+		auto local = [](const RenderObject& o) -> const HE::AABB*
+		{
+			static HE::AABB boxes[14];
+			if (o.meshAssetId.lo == 13) return nullptr;
+			HE::AABB& bx = boxes[o.meshAssetId.lo];
+			bx = HE::AABB{};
+			bx.expand(glm::vec3(-1.0f, -1.0f, -1.0f) * float(o.meshAssetId.lo));
+			bx.expand(glm::vec3( 1.0f,  2.0f,  1.0f) * float(o.meshAssetId.lo));
+			return &bx;
+		};
+		FrameCull fc;
+		fc.refine(a, 5, local);
+		for (RenderObject& o : b.objects)   // the old serial loop
+			if (const HE::AABB* l = local(o)) o.refineWorldBounds(*l);
+		bool same = true;
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			same = same && a.objects[i].worldBounds.isValid() == b.objects[i].worldBounds.isValid();
+			if (a.objects[i].worldBounds.isValid())
+				same = same && a.objects[i].worldBounds.min == b.objects[i].worldBounds.min
+				            && a.objects[i].worldBounds.max == b.objects[i].worldBounds.max;
+		}
+		CHECK(same);
+		CHECK(fc.holds(a, 5));
+	}
 }
 
 TEST_CASE("AABB build and ray intersection")

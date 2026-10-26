@@ -368,15 +368,30 @@ namespace
 		// second reason not to draw, beside the per-component visible flag;
 		// the filter decides once per extract whether anything is off at all.
 		const HE::ActiveFilter active(reg);
+		// The three component pools the loop asks about, fetched once: reg.try_get<T> finds its
+		// pool by type on every call, and a pool that is empty (TerrainChunk, in most scenes)
+		// answers no without looking at the entity at all.
+		const entt::registry& creg      = reg;
+		const auto*           matPool   = creg.storage<MaterialComponent>();
+		const auto*           chunkPool = creg.storage<TerrainChunkComponent>();
+		const auto*           lodPool   = creg.storage<LODComponent>();
+		const bool            anyChunk  = chunkPool && !chunkPool->empty();
+		// What one walk learned about a one-section mesh: its validated bounds. 50k entities
+		// stand on a few hundred meshes, and each lookup in the content manager is two hash
+		// probes; a direct-mapped memo answers the repeats from cache. Misses and multi-section
+		// meshes take the full path below, as before.
+		struct MeshMemo { HE::UUID id; HE::AABB bounds; bool valid = false; };
+		std::vector<MeshMemo> memo(256);
 		for (auto [e, t, mesh] : meshView.each())
 		{
 			if (!mesh.visible) continue; // hidden (e.g. a preloaded zone)
 			if (active.off(e)) continue;
-			EntityData d;
+			items.emplace_back();   // filled in place: the struct is big, a push_back of a moved copy was a third of the loop
+			EntityData& d = items.back();
 			d.world  = t.worldMatrix;
 			d.meshId = mesh.meshAssetId;
 			d.matId  = {};
-			const auto* matComp = reg.try_get<MaterialComponent>(e);
+			const MaterialComponent* matComp = (matPool && matPool->contains(e)) ? &matPool->get(e) : nullptr;
 			if (matComp)
 			{
 				d.matId = matComp->materialAssetId;
@@ -402,7 +417,7 @@ namespace
 			// Landscape Layer Blend material samples the right terrain's paint. Read
 			// from the PARENT: the weights belong to the landscape, the chunks are
 			// just the pieces it renders as.
-			if (const auto* chunk = reg.try_get<TerrainChunkComponent>(e))
+			if (const auto* chunk = (anyChunk && chunkPool->contains(e)) ? &chunkPool->get(e) : nullptr)
 				if (reg.valid(chunk->terrain))
 					if (const auto* pt = reg.try_get<TerrainComponent>(chunk->terrain))
 					{
@@ -421,6 +436,21 @@ namespace
 			d.receivesShadow = mesh.receivesShadow;
 			// Look up the real object-space bounds here (sequential — the
 			// ContentManager read must not race the parallel_for below).
+			const LODComponent* lodComp = (lodPool && lodPool->contains(e)) ? &lodPool->get(e) : nullptr;
+			const bool  ownLod0 = !lodComp || lodComp->levels.empty()
+			                   || lodComp->levels[0].meshId == HE::UUID{}
+			                   || lodComp->levels[0].meshId == d.meshId;
+			MeshMemo& memoSlot = memo[std::hash<HE::UUID>{}(d.meshId) & 255u];
+			const bool memoHit = contentManager && memoSlot.valid && memoSlot.id == d.meshId;
+			if (memoHit && ownLod0)
+			{
+				// A one-section mesh already seen this walk: its bounds, and the whole-draw material.
+				d.localBounds = memoSlot.bounds;
+				const HE::UUID ov = matComp ? matComp->slotOverride(0) : HE::UUID{};
+				if (ov != HE::UUID{}) d.matId = ov;
+				if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
+				continue;
+			}
 			if (contentManager)
 				if (const StaticMeshAsset* m = contentManager->getStaticMesh(d.meshId))
 				{
@@ -437,17 +467,16 @@ namespace
 					// identity slots and no LOD0 table); copying the table and the LOD0 table per
 					// entity per frame was a quarter of the serial walk at 50k entities
 					// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 3).
-					const auto* lodComp = reg.try_get<LODComponent>(e);
-					const bool  ownLod0 = !lodComp || lodComp->levels.empty()
-					                   || lodComp->levels[0].meshId == HE::UUID{}
-					                   || lodComp->levels[0].meshId == d.meshId;
-					if (m->sections.size() <= 1 && ownLod0)
+					if (m->sections.size() <= 1)
 					{
-						const HE::UUID ov = matComp ? matComp->slotOverride(0) : HE::UUID{};
-						if (ov != HE::UUID{}) d.matId = ov;
-						if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
-						items.push_back(std::move(d));
-						continue;
+						memoSlot.id = d.meshId; memoSlot.bounds = d.localBounds; memoSlot.valid = true;
+						if (ownLod0)
+						{
+							const HE::UUID ov = matComp ? matComp->slotOverride(0) : HE::UUID{};
+							if (ov != HE::UUID{}) d.matId = ov;
+							if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
+							continue;
+						}
 					}
 					// Material slots, after the entity's overrides (see
 					// resolveEntitySlots for the precedence and for when the list
@@ -464,7 +493,6 @@ namespace
 					// that material plain.
 					if (matComp && d.matId != matComp->materialAssetId) d.paramOverride.clear();
 				}
-			items.push_back(std::move(d));
 		}
 
 		out.objects.resize(items.size());
@@ -1431,16 +1459,16 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	m_frameShadowBoxKnown = false;
 	out.clear();
 
-	extractTransforms(world, reg);
+	{ HE_PROFILE_SCOPE_N("Extract::transforms"); extractTransforms(world, reg); }
 	extractCamera(reg, out, aspectRatio, editorCam);
 	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position);
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
-	extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
+	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing); }
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();
-	HE::extractFoliage(reg, out, m_contentManager, m_foliageLod.get());
+	{ HE_PROFILE_SCOPE_N("Extract::foliage"); HE::extractFoliage(reg, out, m_contentManager, m_foliageLod.get()); }
 	extractSkinnedMeshes(reg, out, m_contentManager, m_sectionMaterialMissing);
 	extractDecals(reg, out);
 	// Ropes are ordinary mesh objects and must land in out.objects before the
@@ -1452,13 +1480,14 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// they need the resolved camera and go into out.objects for the picker.
 	extractEditorIcons(reg, out, editorCam);
 	// Lights, then the day-night pass that overrides the sun/moon among them.
-	extractLights(reg, out);
-	applyDayNight(out);
-	orderLightWindow(out);
+	{ HE_PROFILE_SCOPE_N("Extract::lights"); extractLights(reg, out); applyDayNight(out); orderLightWindow(out); }
 	// Shadows last: both phases read the finished object + light sets.
-	fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes,
-	                     m_frameShadowBox, m_frameShadowBoxKnown);
-	assignLocalShadowLayers(out);
+	{
+		HE_PROFILE_SCOPE_N("Extract::shadowFit");
+		fitDirectionalShadow(out, m_shadowDistance, m_cascadeCount, m_splitLambda, m_shadowMapRes,
+		                     m_frameShadowBox, m_frameShadowBoxKnown);
+		assignLocalShadowLayers(out);
+	}
 
 	if (m_frameArmed)
 	{

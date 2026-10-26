@@ -24,6 +24,7 @@
 #endif
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -32,6 +33,15 @@ class GpuPassTimeline
 public:
 	static constexpr uint32_t kMaxTimestamps = 128;
 	static constexpr uint32_t kMaxDepth      = 4;
+
+	// HE_GPU_PASS_TIMING=0 turns the per-pass marks off (the whole-frame time stays): a timestamp
+	// between two passes makes the GPU drain to it, which can cost a frame whose GPU side is the
+	// slow one, so the A/B of a CPU change measures without them. Read once.
+	static bool envEnabled()
+	{
+		static const bool on = [] { const char* v = std::getenv("HE_GPU_PASS_TIMING"); return !(v && v[0] == '0'); }();
+		return on;
+	}
 
 	// A new frame. The first mark (index 0) is the frame's start: write a timestamp
 	// at the index start() hands out.

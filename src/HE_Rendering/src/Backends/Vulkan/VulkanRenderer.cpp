@@ -714,7 +714,11 @@ void VulkanRenderer::Render()
             runUIPass(cmd, int(m_swapExtent.width), int(m_swapExtent.height));
         }
     }
-    if (m_overlayCallback) m_overlayCallback(cmd);
+    if (m_overlayCallback)
+    {
+        HE_PROFILE_SCOPE_N("Overlay");   // the editor's ImGui draw lists
+        m_overlayCallback(cmd);
+    }
     vkCmdEndRenderPass(cmd);
     gpuTimerEnd(cmd);   // frame-end timestamp (after all GPU work this frame)
     vkEndCommandBuffer(cmd);
@@ -16196,6 +16200,9 @@ void VulkanRenderer::gpuTimerBegin(VkCommandBuffer cmd)
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_tsQueryPool,
                         slot * GpuPassTimeline::kMaxTimestamps + tl.start());
     m_tsCmd = cmd;
+    // Per-pass marks only for a frame somebody reads them from: they make the GPU drain at every pass boundary.
+    const EngineProfiler& prof = EngineProfiler::instance();
+    m_tsPassOn = (prof.isRecording() || prof.liveEnabled()) && GpuPassTimeline::envEnabled();
 }
 
 void VulkanRenderer::gpuMark(uint32_t i)
@@ -16207,7 +16214,7 @@ void VulkanRenderer::gpuMark(uint32_t i)
 
 bool VulkanRenderer::gpuPassBegin(const char* name)
 {
-    if (!m_tsSupported || m_tsCmd == VK_NULL_HANDLE) return false;
+    if (!m_tsSupported || m_tsCmd == VK_NULL_HANDLE || !m_tsPassOn) return false;
     uint32_t i = 0;
     if (!m_tsTimeline[m_tsFrameIdx % kGpuTimerRing].push(name, i)) return false;
     gpuMark(i);
