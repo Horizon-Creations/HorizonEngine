@@ -455,6 +455,23 @@ namespace
             if (const BakedGlyph* g = font.glyph(uiUtf8Decode(s, i))) w += g->xadvance * scale;
         return w;
     }
+
+    // lineWidth, continued: adds the advances of `s` to a running sum `w`, one
+    // character after the other, so the result is the very float lineWidth gives
+    // for the text before `s` followed by `s`. `ink` is that sum as of the last
+    // character that is not a space — the width of the text with its trailing
+    // spaces cut off — and stays as it was when `s` has none.
+    float advanceFrom(const BakedUIFont& font, const std::string& s, float scale,
+                      float w, float& ink)
+    {
+        for (std::size_t i = 0; i < s.size(); )
+        {
+            const std::uint32_t cp = uiUtf8Decode(s, i);
+            if (const BakedGlyph* g = font.glyph(cp)) w += g->xadvance * scale;
+            if (cp != ' ') ink = w;
+        }
+        return w;
+    }
 } // namespace
 
 std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::string& text,
@@ -500,6 +517,10 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
     {
         if (lineWidth(font, line, scale) <= wrapWidth) { wrapped.push_back(line); continue; }
         std::string acc;
+        // What `acc` measures, kept as it grows instead of measured again per word:
+        // its whole width, and its width without trailing spaces. Both are 0 while
+        // `acc` is empty.
+        float accW = 0.0f, accInk = 0.0f;
         size_t i = 0;
         while (i < line.size())
         {
@@ -510,33 +531,46 @@ std::vector<std::string> layoutUITextLines(const BakedUIFont& font, const std::s
             std::string word = line.substr(i, e - i);
             i = e;
 
+            // `acc + word` as `acc` is now, and its width without trailing spaces.
+            float nextInk = accInk;
+            float nextW   = advanceFrom(font, word, scale, accW, nextInk);
+
             // Doesn't fit after what's already on this line → flush the line.
-            if (!acc.empty() && lineWidth(font, trimmed(acc + word), scale) > wrapWidth)
+            if (!acc.empty() && nextInk > wrapWidth)
             {
                 wrapped.push_back(trimmed(acc));
                 acc.clear();
+                accW = accInk = nextInk = 0.0f;
+                nextW = advanceFrom(font, word, scale, 0.0f, nextInk);
             }
             // Even alone the word overflows → hard-break it, longest prefix first.
             // The prefix always takes at least one character, so this terminates.
-            while (acc.empty() && word.size() > 1 &&
-                   lineWidth(font, trimmed(word), scale) > wrapWidth)
+            while (acc.empty() && word.size() > 1 && nextInk > wrapWidth)
             {
                 // Character by character, not byte by byte: a break inside a
                 // two-byte umlaut would leave half a character on each line, and
                 // neither half is anything.
-                std::string head;
-                for (std::size_t k = 0; k < word.size(); )
+                std::size_t headEnd = 0;
+                float headW = 0.0f;
+                while (headEnd < word.size())
                 {
-                    const std::size_t next = uiUtf8Next(word, k);
-                    const std::string ch = word.substr(k, next - k);
-                    if (!head.empty() && lineWidth(font, head + ch, scale) > wrapWidth) break;
-                    head += ch;
-                    k = next;
+                    const std::size_t next = uiUtf8Next(word, headEnd);
+                    float withCh = headW;
+                    for (std::size_t n = headEnd; n < next; )
+                        if (const BakedGlyph* g = font.glyph(uiUtf8Decode(word, n)))
+                            withCh += g->xadvance * scale;
+                    if (headEnd > 0 && withCh > wrapWidth) break;
+                    headW   = withCh;
+                    headEnd = next;
                 }
-                wrapped.push_back(head);
-                word.erase(0, head.size());
+                wrapped.push_back(word.substr(0, headEnd));
+                word.erase(0, headEnd);
+                nextInk = 0.0f;
+                nextW   = advanceFrom(font, word, scale, 0.0f, nextInk);
             }
             acc += word;
+            accW   = nextW;
+            accInk = nextInk;
         }
         wrapped.push_back(trimmed(acc));
     }
