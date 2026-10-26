@@ -28,6 +28,32 @@ namespace
 		}
 		return HE::uiSortKey(e.layer, depth);
 	}
+
+	// The first element on the way up from `elemId` (itself included) for which
+	// `pred` holds, or nullptr. Bounded by the element count + 1 rather than a
+	// fixed depth, so a parent cycle in a hand-edited file ends the walk and a
+	// deep but honest chain is not cut short.
+	template <class Pred>
+	const HE::UIElement* firstAncestorWhere(const HE::UIWidgetTree& tree, int elemId, Pred pred)
+	{
+		int guard = 0;
+		for (const HE::UIElement* e = tree.find(elemId);
+		     e && guard++ < static_cast<int>(tree.elements.size()) + 1;
+		     e = tree.find(e->parentId))
+		{
+			if (pred(*e)) return e;
+			if (e->parentId == 0) break;
+		}
+		return nullptr;
+	}
+
+	// How many parents `e` has: how far down the tree it sits.
+	int ancestorDepth(const HE::UIWidgetTree& tree, const HE::UIElement& e)
+	{
+		int depth = 0;
+		firstAncestorWhere(tree, e.parentId, [&depth](const HE::UIElement&) { ++depth; return false; });
+		return depth;
+	}
 }
 
 WidgetManager::Instance* WidgetManager::find(int id)
@@ -2965,15 +2991,8 @@ namespace
 	// rows.
 	bool isSelfOrDescendant(const HE::UIWidgetTree& tree, int ancestorId, int elemId)
 	{
-		int guard = 0;
-		for (const HE::UIElement* e = tree.find(elemId);
-		     e && guard++ < static_cast<int>(tree.elements.size()) + 1;
-		     e = tree.find(e->parentId))
-		{
-			if (e->id == ancestorId) return true;
-			if (e->parentId == 0) break;
-		}
-		return false;
+		return firstAncestorWhere(tree, elemId,
+			[ancestorId](const HE::UIElement& e) { return e.id == ancestorId; }) != nullptr;
 	}
 }
 
@@ -3387,20 +3406,15 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	{
 		const HE::UIElement* hit = topW->tree.find(topElem);
 		topElem = 0;
-		for (int guard = 0; hit && hit->parentId != 0 && guard < 256; ++guard)
-		{
-			const HE::UIElement* p = topW->tree.find(hit->parentId);
-			if (!p) break;
-			if (isInteractive(*topW, *p))
+		if (hit)
+			if (const HE::UIElement* p = firstAncestorWhere(topW->tree, hit->parentId,
+			        [&](const HE::UIElement& c) { return isInteractive(*topW, c); }))
 			{
 				topElem = p->id;
 				// The cursor comes with the element that took the pointer,
 				// unless the thing under it named one of its own.
 				if (topCursor == HE::UICursor::Default) topCursor = p->hoverCursor;
-				break;
 			}
-			hit = p;
-		}
 	}
 	m_hoverCursor = topCursor; // app maps this to a system cursor
 
@@ -3413,14 +3427,9 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 		int tipW = 0, tipE = 0;
 		if (topW && topHit != 0)
 		{
-			int guard = 0;
-			for (const HE::UIElement* e = topW->tree.find(topHit);
-			     e && guard++ < static_cast<int>(topW->tree.elements.size()) + 1; )
-			{
-				if (!e->tooltip.empty()) { tipW = topW->id; tipE = e->id; break; }
-				if (e->parentId == 0) break;
-				e = topW->tree.find(e->parentId);
-			}
+			if (const HE::UIElement* e = firstAncestorWhere(topW->tree, topHit,
+			        [](const HE::UIElement& c) { return !c.tooltip.empty(); }))
+			{ tipW = topW->id; tipE = e->id; }
 		}
 		if (tipW != m_tooltipWidget || tipE != m_tooltipElem)
 		{
@@ -3483,19 +3492,16 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 	// not a flag on OnClicked: a right-click opens things, it never presses one.
 	if (secondEdge && topW && topHit != 0)
 	{
-		int guard = 0;
-		for (const HE::UIElement* e = topW->tree.find(topHit);
-		     e && guard++ < static_cast<int>(topW->tree.elements.size()) + 1; )
-		{
-			const ScriptTarget t = scriptTargetFor(*topW, e->id);
-			bool listens = false;
-			for (const auto& b : rt().eventBindingsOf(t.scriptId))
-				if (b.name == "OnRightClicked" && (b.elem == 0 || b.elem == t.elem))
-				{ listens = true; break; }
-			if (listens) { rt().fireOnRightClicked(t.scriptId, t.elem); break; }
-			if (e->parentId == 0) break;
-			e = topW->tree.find(e->parentId);
-		}
+		ScriptTarget listener;
+		if (firstAncestorWhere(topW->tree, topHit, [&](const HE::UIElement& e)
+		    {
+			    const ScriptTarget t = scriptTargetFor(*topW, e.id);
+			    for (const auto& b : rt().eventBindingsOf(t.scriptId))
+				    if (b.name == "OnRightClicked" && (b.elem == 0 || b.elem == t.elem))
+				    { listener = t; return true; }
+			    return false;
+		    }))
+			rt().fireOnRightClicked(listener.scriptId, listener.elem);
 	}
 
 	// ── An armed press that has travelled far enough is a drag ───────────────
@@ -3990,50 +3996,39 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 					// list one you cannot select in — which is precisely the case
 					// B2 and B7 meet in. The hover highlight already walks from
 					// the raw hit for the same reason.
+					const HE::UIElement* onList = firstAncestorWhere(w.tree, isTop ? topHit : 0,
+						[](const HE::UIElement& c) { return dynamic_cast<const HE::UIListView*>(&c) != nullptr; });
+					if (auto* lv = onList ? dynamic_cast<HE::UIListView*>(w.tree.find(onList->id)) : nullptr)
 					{
-						int guard = 0;
-						for (const HE::UIElement* le = w.tree.find(isTop ? topHit : 0);
-						     le && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
+						setFocus(w.id, lv->id);
+						// The HEADER first, and instead of the rows. A
+						// press in the band is never a row: rowAt says
+						// -1 up there, and letting that through would
+						// clear the selection every time somebody
+						// reached for a column title.
+						const HE::UIWidgetCanvas canvas =
+							resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
+						HE::UIWidgetRect pxr{};
+						HE::UIListView::HeaderHit hh;
+						if (listPixelRect(w.tree, *lv, canvas, pxr))
+							hh = lv->headerAtPoint(pxr, mouseX, mouseY);
+						if (!hh.inBand)
+							selectListRow(w, *lv,
+								listRowAtPointer(w.tree, *lv, canvas, mouseY));
+						else if (hh.divider && lv->resizableColumns)
 						{
-							if (auto* lv = dynamic_cast<HE::UIListView*>(w.tree.find(le->id)))
-							{
-								setFocus(w.id, lv->id);
-								// The HEADER first, and instead of the rows. A
-								// press in the band is never a row: rowAt says
-								// -1 up there, and letting that through would
-								// clear the selection every time somebody
-								// reached for a column title.
-								const HE::UIWidgetCanvas canvas =
-									resolveCanvas(w.tree, w.windowId,vpWidth, vpHeight);
-								HE::UIWidgetRect pxr{};
-								HE::UIListView::HeaderHit hh;
-								if (listPixelRect(w.tree, *lv, canvas, pxr))
-									hh = lv->headerAtPoint(pxr, mouseX, mouseY);
-								if (hh.inBand)
-								{
-									if (hh.divider && lv->resizableColumns)
-									{
-										w.draggingColumn = lv->id;
-										w.columnSeam     = hh.column;
-									}
-									// A seam that cannot be dragged is not a dead
-									// strip: it is part of the title it sits on,
-									// or a table with fixed columns has an
-									// eight-pixel hole beside every one of them.
-									else if (hh.column >= 0)
-									{
-										const ScriptTarget th = scriptTargetFor(w, lv->id);
-										rt().fireOnHeaderClicked(th.scriptId, th.elem,
-										                        hh.column);
-									}
-									break;
-								}
-								selectListRow(w, *lv,
-									listRowAtPointer(w.tree, *lv, canvas, mouseY));
-								break;
-							}
-							if (le->parentId == 0) break;
-							le = w.tree.find(le->parentId);
+							w.draggingColumn = lv->id;
+							w.columnSeam     = hh.column;
+						}
+						// A seam that cannot be dragged is not a dead
+						// strip: it is part of the title it sits on,
+						// or a table with fixed columns has an
+						// eight-pixel hole beside every one of them.
+						else if (hh.column >= 0)
+						{
+							const ScriptTarget th = scriptTargetFor(w, lv->id);
+							rt().fireOnHeaderClicked(th.scriptId, th.elem,
+							                        hh.column);
 						}
 					}
 				}
@@ -4273,15 +4268,9 @@ bool WidgetManager::processPointer(uint32_t windowId, float vpWidth, float vpHei
 // which is what makes the flag mean something.
 int WidgetManager::dropTargetAt(Instance& w, int hitElem) const
 {
-	int guard = 0;
-	for (const HE::UIElement* e = w.tree.find(hitElem);
-	     e && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
-	{
-		if (e->acceptsDrop) return e->id;
-		if (e->parentId == 0) break;
-		e = w.tree.find(e->parentId);
-	}
-	return 0;
+	const HE::UIElement* e = firstAncestorWhere(w.tree, hitElem,
+		[](const HE::UIElement& c) { return c.acceptsDrop; });
+	return e ? e->id : 0;
 }
 
 // The same walk for the other half of the gesture. Written out rather than
@@ -4289,15 +4278,9 @@ int WidgetManager::dropTargetAt(Instance& w, int hitElem) const
 // questions, and an element is often the answer to one and not the other.
 int WidgetManager::draggableAt(Instance& w, int hitElem) const
 {
-	int guard = 0;
-	for (const HE::UIElement* e = w.tree.find(hitElem);
-	     e && guard++ < static_cast<int>(w.tree.elements.size()) + 1; )
-	{
-		if (e->draggable) return e->id;
-		if (e->parentId == 0) break;
-		e = w.tree.find(e->parentId);
-	}
-	return 0;
+	const HE::UIElement* e = firstAncestorWhere(w.tree, hitElem,
+		[](const HE::UIElement& c) { return c.draggable; });
+	return e ? e->id : 0;
 }
 
 void WidgetManager::setDropMark(int widgetId, int elemId)
@@ -6076,14 +6059,7 @@ int WidgetManager::scrollThumbAtPointer(Instance& w, float vpWidth, float vpHeig
 		    mouseY < th.y || mouseY > th.y + th.h) continue;
 		// Deepest wins, the same rule the wheel follows: a list inside a list
 		// hands its bar to the one the pointer is actually in.
-		int depth = 0, guard = 0;
-		for (const HE::UIElement* c = &e;
-		     c->parentId != 0 && guard++ < static_cast<int>(w.tree.elements.size()) + 1;)
-		{
-			const HE::UIElement* p = w.tree.find(c->parentId);
-			if (!p) break;
-			++depth; c = p;
-		}
+		const int depth = ancestorDepth(w.tree, e);
 		if (depth > bestDepth) { bestDepth = depth; best = e.id; grabDy = mouseY - th.y; }
 	}
 	return best;
@@ -6133,14 +6109,7 @@ bool WidgetManager::processWheel(float vpWidth, float vpHeight,
 			const float x1 = (r.x + r.w) * canvas.scaleX, y1 = (r.y + r.h) * canvas.scaleY;
 			if (mouseX < x0 || mouseX > x1 || mouseY < y0 || mouseY > y1) continue;
 			// Depth = how far down the tree, so the innermost box wins.
-			int depth = 0, guard = 0;
-			for (const HE::UIElement* c = &e;
-			     c->parentId != 0 && guard++ < static_cast<int>(w.tree.elements.size()) + 1;)
-			{
-				const HE::UIElement* p = w.tree.find(c->parentId);
-				if (!p) break;
-				++depth; c = p;
-			}
+			const int depth = ancestorDepth(w.tree, e);
 			if (depth > bestDepth) { bestDepth = depth; best = e.id; }
 		}
 		if (best != 0 && HE::uiScrollBy(w.tree, best, -wheel * kUnitsPerNotch))
