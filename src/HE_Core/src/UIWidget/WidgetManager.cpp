@@ -4349,10 +4349,6 @@ int WidgetManager::dragTargetUnder(float vpWidth, float vpHeight, float x, float
 	return t;
 }
 
-// ── The end of a carry ───────────────────────────────────────────────────────
-// One place for both endings. Letting go over a target and giving up are the
-// same event with a different answer, and writing them apart is how the two
-// drift until only one of them tells the source it is over.
 // ── What the carry says about itself ─────────────────────────────────────────
 // Its payload, or its name when nobody set one. The fallback is not a nicety —
 // it is what lets a drag between two named panels work without a line of
@@ -4397,6 +4393,10 @@ void WidgetManager::setDragOver(Instance* w, int elem)
 	}
 }
 
+// ── The end of a carry ───────────────────────────────────────────────────────
+// One place for both endings. Letting go over a target and giving up are the
+// same event with a different answer, and writing them apart is how the two
+// drift until only one of them tells the source it is over.
 void WidgetManager::finishDrag(bool accepted, Instance* targetW, int targetElem)
 {
 	// Everything the three events need is resolved HERE, before the first of
