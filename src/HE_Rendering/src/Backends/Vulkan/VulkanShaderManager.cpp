@@ -1,5 +1,6 @@
 #include "Backends/Vulkan/VulkanShaderManager.h"
 #include <Diagnostics/Logger.h>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -34,9 +35,10 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
 
     ShaderHandle handle;
     handle.type = type;
-    // Generate a unique ID (simple incrementing counter)
-    static unsigned int nextId = 1;
-    handle.id = nextId++;
+    // Generate a unique ID (simple incrementing counter). Atomic: load() can
+    // be called for several managers from different threads at once.
+    static std::atomic<unsigned int> nextId{ 1 };
+    handle.id = nextId.fetch_add(1, std::memory_order_relaxed);
 
     // Create Vulkan shader module
     VkShaderModuleCreateInfo createInfo{};
@@ -93,8 +95,8 @@ ShaderProgramHandle VulkanShaderManager::createProgram(const std::vector<ShaderH
     // Shader stages are bound directly in the pipeline.
     // We'll just store the shader handles for reference.
     ShaderProgramHandle program;
-    static unsigned int nextProgramId = 1;
-    program.id = nextProgramId++;
+    static std::atomic<unsigned int> nextProgramId{ 1 };
+    program.id = nextProgramId.fetch_add(1, std::memory_order_relaxed);
     program.shaders = shaders;
     program.ready = true;
 
