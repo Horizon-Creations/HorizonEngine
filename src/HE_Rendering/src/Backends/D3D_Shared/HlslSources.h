@@ -1600,7 +1600,7 @@ void GiReflCS(uint3 gid3 : SV_DispatchThreadID)
     float  rough = nm.a;
     if (rough > uReflParams.y) { uOut[px] = float4(0.0, 0.0, 0.0, 0.0); return; }
 
-    float3 N = normalize(nm.xyz);
+    float3 N = nm.xyz; // already normalized by kGiGBufPS before it writes uGNorm
     float3 V = normalize(uCamPos.xyz - pv.xyz);
     float3 R = reflect(-V, N);
     // Near-mirrors keep ONE deterministic ray (a cone narrower than a pixel would
