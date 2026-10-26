@@ -977,8 +977,20 @@ namespace
 		if (!sceneBoxKnown)
 		{
 			sceneBox = HE::AABB{};
-			for (const RenderObject& o : out.objects)
-				if ((o.castsShadow || o.contributesAO) && !o.isCluster()) sceneBox.expand(o.worldBounds);
+			// A min/max union, so blocks on the workers joined at the end give the serial result.
+			constexpr size_t kBlock = 4096;
+			const size_t     n = out.objects.size();
+			const size_t     nBlocks = (n + kBlock - 1) / kBlock;
+			std::vector<HE::AABB> parts(nBlocks);
+			parallel_for(nBlocks, [&](size_t b) {
+				const size_t from = b * kBlock, to = std::min(n, from + kBlock);
+				for (size_t i = from; i < to; ++i)
+				{
+					const RenderObject& o = out.objects[i];
+					if ((o.castsShadow || o.contributesAO) && !o.isCluster()) parts[b].expand(o.worldBounds);
+				}
+			}, "ShadowSceneBox", 1);
+			for (const HE::AABB& p : parts) if (p.isValid()) sceneBox.expand(p);
 			sceneBoxKnown = true;
 		}
 		glm::vec3 center = sceneBox.isValid() ? sceneBox.center() : glm::vec3(0.0f);
