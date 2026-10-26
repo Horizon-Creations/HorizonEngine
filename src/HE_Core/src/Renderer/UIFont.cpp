@@ -856,13 +856,12 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
     std::vector<float> lineSize(lines.size(), sizePx), lineWidthPx(lines.size(), 0.0f);
     for (std::size_t li = 0; li < lines.size(); ++li)
     {
-        float mx = 0.0f, w = 0.0f;
+        float mx = 0.0f;
         std::size_t lastInk = lines[li].begin;
         for (std::size_t b = lines[li].begin; b < lines[li].end; )
         {
             const std::size_t next = uiUtf8Next(rt.text, b);
             mx = std::max(mx, sizeAt(b));
-            w += advanceAt(b);
             if (rt.text[b] != ' ') lastInk = next;
             b = next;
         }
@@ -872,7 +871,6 @@ UIRichLayout uiLayoutRichText(const BakedUIFont& font, const UIRichText& rt,
             trimmed += advanceAt(b);
         lineSize[li]    = mx > 0.0f ? mx : sizePx;
         lineWidthPx[li] = lines[li].end > lines[li].begin ? trimmed : 0.0f;
-        (void)w;
     }
     float blockHeight = lineSize.empty() ? 0.0f : lineSize.back();
     for (std::size_t li = 0; li + 1 < lines.size(); ++li)
