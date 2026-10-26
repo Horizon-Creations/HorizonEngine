@@ -2409,14 +2409,28 @@ std::string materialGraphToJson(const MaterialGraph& graph)
     nlohmann::json j;
     j["version"] = kMatGraphVersion;
     j["nextId"]  = graph.nextId;
-    for (const auto& n : graph.nodes)
-        j["nodes"].push_back(matNodeToJsonObj(n));
-    for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
-        j["links"].push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
+    // Each key is looked up once, and only when there is something to put in it: an
+    // empty list leaves its key out of the document (it is not written as []).
+    if (!graph.nodes.empty())
+    {
+        nlohmann::json& jnodes = j["nodes"];
+        for (const auto& n : graph.nodes)
+            jnodes.push_back(matNodeToJsonObj(n));
+    }
+    if (!graph.links.empty())
+    {
+        nlohmann::json& jlinks = j["links"];
+        for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
+            jlinks.push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
+    }
     // Editor-only comment boxes. Older parsers ignore the extra key (forward-compatible);
     // absent key → no comments (backward-compatible).
-    for (const auto& cm : graph.comments)
-        j["comments"].push_back(matCommentToJsonObj(cm));
+    if (!graph.comments.empty())
+    {
+        nlohmann::json& jcomments = j["comments"];
+        for (const auto& cm : graph.comments)
+            jcomments.push_back(matCommentToJsonObj(cm));
+    }
     return j.dump();
 }
 
