@@ -4230,9 +4230,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		}
 		else
 		{
-			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			char linkLog[2048]; glGetProgramInfoLog(prog, sizeof(linkLog), nullptr, linkLog);
 			HE_LOG_ERROR(RHI, "%s",
-				(std::string("OpenGLRenderer: UI material program link failed: ") + log).c_str());
+				(std::string("OpenGLRenderer: UI material program link failed: ") + linkLog).c_str());
 			glDeleteProgram(prog);
 		}
 	}
