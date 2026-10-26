@@ -78,7 +78,7 @@ float uiScrollOffsetForThumbTop(const UIElement& e, const UIWidgetRect& px, floa
     const float travel = t.len - t.thumb;
     // A thumb that fills its track cannot say anything about where it is, so a
     // drag on one means "stay" rather than "jump to the top".
-    if (travel <= 0.0f) return std::clamp(0.0f, 0.0f, t.maxOff);
+    if (travel <= 0.0f) return 0.0f;
     const float f = std::clamp((thumbTopPx - t.top) / travel, 0.0f, 1.0f);
     return f * t.maxOff;
 }
