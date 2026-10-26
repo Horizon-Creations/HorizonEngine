@@ -53,6 +53,27 @@ namespace InspectorPanel
 namespace Row = EditorWidgets::Row;
 using EditorWidgets::hint;
 
+// A collapsible group INSIDE a component (the Sky's "Sun & Moon", "Clouds" …).
+// A bare tree node looked like one more row, so the groups did not read as
+// groups. This is a framed bar like the component header but one step down:
+// neutral instead of amber, a shorter bar, and its rows indented under it.
+// Pair with ImGui::TreePop() when it returns true.
+bool subSection(const char* label, bool defaultOpen)
+{
+	using namespace HE::Ed::Theme;
+	ImGui::Spacing();
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+	ImGui::PushStyleColor(ImGuiCol_Header,        warm(0.21f, 0.95f));
+	ImGui::PushStyleColor(ImGuiCol_HeaderHovered, warm(0.27f, 0.95f));
+	ImGui::PushStyleColor(ImGuiCol_HeaderActive,  warm(0.31f, 0.95f));
+	const bool open = ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_Framed |
+	                                           ImGuiTreeNodeFlags_SpanAvailWidth |
+	                                           (defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0));
+	ImGui::PopStyleColor(3);
+	ImGui::PopStyleVar();
+	return open;
+}
+
 // A scene is meant to hold at most one Sky and one Weather entity; everything in
 // the engine reads the FIRST one it finds. A duplicate is therefore completely
 // inert, and silently so — its sliders move and nothing in the viewport changes.
@@ -1122,7 +1143,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (!env->autoAdvance)
 				hint("Takes effect once Auto-Advance is on.");
 
-			if (ImGui::TreeNodeEx("Sun & Moon", ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (subSection("Sun & Moon", true)) {
 			Row::colorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::sliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f); trackEdit();
 			Row::colorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -1151,7 +1172,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			// These are always editable. A Weather preset (below) sets a whole set of
 			// these values when applied / transitioning; otherwise they're yours to move.
-			if (ImGui::TreeNodeEx("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (subSection("Clouds", true)) {
 			Row::sliderFloat("Coverage", &env->cloudCoverage, 0.0f, 1.0f); trackEdit();
 			hint("Full overcast dims the sun & fills with ambient light.");
 			// Cloud render mode (OpenGL backend): sky-dome (cheap, infinite — no parallax)
@@ -1214,7 +1235,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Clouds
 
-			if (ImGui::TreeNodeEx("Contrails & Cirrus")) {
+			if (subSection("Contrails & Cirrus", false)) {
 			Row::sliderFloat("Contrails", &env->contrailAmount, 0.0f, 1.0f); trackEdit();
 			hint("Scattered vapour-trail lines to fill a clear daytime sky; fade as clouds build.");
 			Row::sliderFloat("Cirrus", &env->cirrusAmount, 0.0f, 1.0f); trackEdit();
@@ -1225,7 +1246,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Contrails & Cirrus
 
-			if (ImGui::TreeNodeEx("Sun Effects")) {
+			if (subSection("Sun Effects", false)) {
 			Row::sliderFloat("God Rays", &env->godRays, 0.0f, 1.0f); trackEdit();
 			hint("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. "
 			     "Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
@@ -1236,7 +1257,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Sun Effects
 
-			if (ImGui::TreeNodeEx("Atmospheric Fog")) {
+			if (subSection("Atmospheric Fog", false)) {
 			Row::sliderFloat("Density##fog", &env->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
 			ImGui::BeginDisabled(env->fogDensity <= 0.0f);
 			Row::sliderFloat("Ground Hugging", &env->fogHeightFalloff, 0.0f, 1.0f); trackEdit();
@@ -1245,7 +1266,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Atmospheric Fog
 
-			if (ImGui::TreeNodeEx("Precipitation & Ground")) {
+			if (subSection("Precipitation & Ground", false)) {
 			Row::sliderFloat("Rain", &env->rainAmount, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Snow", &env->snowAmount, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Wetness", &env->wetness, 0.0f, 1.0f); trackEdit();
@@ -1253,7 +1274,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Precipitation & Ground
 
-			if (ImGui::TreeNodeEx("Stars & Milky Way")) {
+			if (subSection("Stars & Milky Way", false)) {
 			Row::sliderFloat("Star Brightness", &env->starBrightness, 0.0f, 3.0f); trackEdit();
 			Row::colorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::sliderFloat("Star Amount", &env->starDensity, 0.0f, 1.0f); trackEdit();
@@ -1268,7 +1289,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Stars & Milky Way
 
-			if (ImGui::TreeNodeEx("Nebula")) {
+			if (subSection("Nebula", false)) {
 			// "##neb" the way "Density##fog" already does it: the tree node keeps
 			// the ImGui ids apart on its own, but the help lookup is by label
 			// within the COMPONENT, and this component has three Intensities and
@@ -1291,7 +1312,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Nebula
 
-			if (ImGui::TreeNodeEx("Aurora")) {
+			if (subSection("Aurora", false)) {
 			Row::sliderFloat("Intensity##aur", &env->auroraIntensity, 0.0f, 1.0f); trackEdit();
 			Row::colorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::colorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();

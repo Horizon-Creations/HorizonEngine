@@ -15,6 +15,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/CameraRigComponent.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/InactiveComponent.h>
 #include <HorizonScene/Components/LightComponent.h>
@@ -1437,4 +1438,40 @@ TEST_CASE("inspector ui: the Foliage section adds a detail level and gives it th
 	CHECK(layer().lods[0].meshAssetId == HE::UUID{});
 	REQUIRE(undo.undo());
 	CHECK(layer().lods.empty());
+}
+
+TEST_CASE("inspector ui: the Sky's groups are framed bars, not rows, and fold open")
+{
+	// Sun & Moon, Clouds ... are groups inside the Environment component. They have to
+	// read as groups: the bar is drawn (a frame, not a bare tree row) and its rows sit
+	// under it. Looked at with HE_UI_DUMP_DIR; the assertion is that the panel runs.
+	Harness harness;
+	constexpr int TW = 420, TH = 900;
+	ImGui::GetIO().DisplaySize = ImVec2(float(TW), float(TH));
+
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+	const Entity sky = world.createEntity("Sky");
+	reg.emplace<TransformComponent>(sky);
+	reg.emplace<EnvironmentComponent>(sky);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i)
+	{
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(TW) - 20.0f, float(TH) - 20.0f));
+		ImGui::Begin("Details");
+		InspectorPanel::renderFor(ctx, world, sky, &undo);
+		ImGui::End();
+		ImGui::Render();
+		if (i == 3) img = he_ui::rasterize(ImGui::GetDrawData(), TW, TH);
+	}
+	REQUIRE(img.valid());
+	if (const char* dir = std::getenv("HE_UI_DUMP_DIR"); dir && *dir)
+		he_ui::writeBmp(img, std::string(dir) + "/inspector-sky.bmp");
 }
