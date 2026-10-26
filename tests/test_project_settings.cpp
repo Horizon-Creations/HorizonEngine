@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <type_traits>
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
@@ -951,4 +952,71 @@ TEST_CASE("ProjectSettings: operator== and isDefault see every field")
 	other.antiCheat.rules[0] = rule;
 	other.antiCheat.rules[0].maxPerSecond += 1.0f;
 	CHECK(withRule != other);
+}
+
+// ── clamp() on a non-finite float ────────────────────────────────────────────
+// readNumber refuses NaN and Inf, so only a struct set directly (the panel's
+// typed edit, a script) can bring one to clamp(). Each float lands on its own
+// fallback: its default for most, 0 for the origin radius and a rule's range.
+
+TEST_CASE("ProjectSettings::clamp: a NaN or infinite float falls back, field by field")
+{
+	const HE::ProjectSettings def;
+	for (const float bad : { std::nanf(""), INFINITY, -INFINITY })
+	{
+		CAPTURE(bad);
+		HE::ProjectSettings s;
+		s.physics.budgetMs            = bad;
+		s.physics.floatingOriginRadius = bad;
+		s.physics.gravity             = glm::vec3(bad);
+		s.input.stickDeadzone         = bad;
+		s.input.triggerDeadzone       = bad;
+		s.antiCheat.tolerance         = bad;
+		s.antiCheat.windowSec         = bad;
+		s.antiCheat.scoreHalfLifeSec  = bad;
+		s.antiCheat.scoreSuspect      = bad;
+		s.antiCheat.scoreConfirmed    = bad;
+		s.antiCheat.rules.push_back({});
+		s.antiCheat.rules[0].min          = bad;
+		s.antiCheat.rules[0].max          = bad;
+		s.antiCheat.rules[0].maxPerSecond = bad;
+		s.multiplayer.timeoutSec            = bad;
+		s.multiplayer.tickHz                = bad;
+		s.multiplayer.worldExtent           = bad;
+		s.multiplayer.interpolationDelaySec = bad;
+		s.multiplayer.reconcileSnapDistance = bad;
+		s.multiplayer.reconcileSmoothing    = bad;
+#define HE_X(T, name, def_, editorName, lo, hi) \
+		if constexpr (std::is_same_v<T, float>) s.graphics.name = bad;
+		HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+		s.clamp();
+
+		CHECK(s.physics.budgetMs == def.physics.budgetMs);
+		CHECK(s.physics.floatingOriginRadius == 0.0f);
+		CHECK(s.physics.gravity == glm::vec3(0.0f));
+		CHECK(s.input.stickDeadzone == def.input.stickDeadzone);
+		CHECK(s.input.triggerDeadzone == def.input.triggerDeadzone);
+		CHECK(s.antiCheat.tolerance == def.antiCheat.tolerance);
+		CHECK(s.antiCheat.windowSec == def.antiCheat.windowSec);
+		CHECK(s.antiCheat.scoreHalfLifeSec == def.antiCheat.scoreHalfLifeSec);
+		CHECK(s.antiCheat.scoreSuspect == def.antiCheat.scoreSuspect);
+		CHECK(s.antiCheat.scoreConfirmed == def.antiCheat.scoreConfirmed);
+		CHECK(s.antiCheat.rules[0].min == 0.0f);
+		CHECK(s.antiCheat.rules[0].max == 0.0f);
+		CHECK(s.antiCheat.rules[0].maxPerSecond == 0.0f);
+		CHECK(s.multiplayer.timeoutSec == def.multiplayer.timeoutSec);
+		CHECK(s.multiplayer.tickHz == def.multiplayer.tickHz);
+		CHECK(s.multiplayer.worldExtent == def.multiplayer.worldExtent);
+		CHECK(s.multiplayer.interpolationDelaySec == def.multiplayer.interpolationDelaySec);
+		CHECK(s.multiplayer.reconcileSnapDistance == def.multiplayer.reconcileSnapDistance);
+		CHECK(s.multiplayer.reconcileSmoothing == def.multiplayer.reconcileSmoothing);
+		// Every graphics float is back on its default (equality is nearlyEqual,
+		// so the exact bits are pinned on two of them as well).
+		HE::ProjectSettings graphicsOnly;
+		graphicsOnly.graphics = s.graphics;
+		CHECK(graphicsOnly.isDefault());
+		CHECK(s.graphics.aaSharpness == def.graphics.aaSharpness);
+		CHECK(s.graphics.dofAperture == def.graphics.dofAperture);
+	}
 }
