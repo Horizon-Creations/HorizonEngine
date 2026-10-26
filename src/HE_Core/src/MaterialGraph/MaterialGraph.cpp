@@ -2746,9 +2746,7 @@ MatApproxSurface matGraphApproxSurface(const MaterialGraph& g,
                                        const std::map<std::string, bool>* switchOverrides)
 {
     MatApproxSurface out;
-    const MatGraphNode* output = nullptr;
-    for (const MatGraphNode& n : g.nodes)
-        if (n.type == MatNodeType::Output) { output = &n; break; }
+    const MatGraphNode* output = firstOutputNode(g);
     if (!output) return out;
 
     auto foldPin = [&](int pin, float rgb[3], std::string& param)
