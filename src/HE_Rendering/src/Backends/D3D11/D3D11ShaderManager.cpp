@@ -14,8 +14,8 @@ const char* profileFor(HE::ShaderType type)
         case HE::ShaderType::Vertex:   return "vs_5_0";
         case HE::ShaderType::Fragment: return "ps_5_0";
         case HE::ShaderType::Compute:  return "cs_5_0";
+        default:                       return "vs_5_0";
     }
-    return "vs_5_0";
 }
 } // namespace
 
