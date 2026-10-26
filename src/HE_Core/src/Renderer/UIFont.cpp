@@ -645,15 +645,19 @@ UIRichText uiParseRichText(const std::string& markup)
     // The run being built. Flushed whenever the attributes change, so the run
     // list covers the plain text exactly once with no empty runs in it.
     UITextRun cur;
-    auto attrs = [&]() -> RichScope { return stack.empty() ? RichScope{} : stack.back(); };
+    const RichScope noScope;
+    auto attrs = [&]() -> const RichScope& { return stack.empty() ? noScope : stack.back(); };
+    // A fresh run at the end of the text so far, carrying the scope's attributes.
+    auto startRun = [&](const RichScope& a) {
+        cur = UITextRun{};
+        cur.begin = out.text.size();
+        cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
+        cur.face  = a.face;
+    };
     auto flush = [&]() {
         cur.end = out.text.size();
         if (cur.end > cur.begin) out.runs.push_back(cur);
-        cur = UITextRun{};
-        cur.begin = out.text.size();
-        const RichScope a = attrs();
-        cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
-        cur.face  = a.face;
+        startRun(attrs());
     };
 
     for (std::size_t i = 0; i < markup.size(); )
@@ -673,9 +677,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 if (stack.empty()) { out.text += "</>"; i = end; continue; }
                 flush();
                 stack.pop_back();
-                const RichScope a = attrs();
-                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
-                cur.face  = a.face;
+                startRun(attrs());
             }
             else if (name == "icon")
             {
@@ -685,7 +687,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 // icon in a coloured run is that colour — because the alternative
                 // is explaining which attributes reach it and which do not.
                 flush();
-                const RichScope a = attrs();
+                const RichScope& a = attrs();
                 UITextRun ic;
                 ic.begin = out.text.size();
                 appendUtf8(out.text, uiIconCodepoint(value));
@@ -695,12 +697,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 ic.link      = a.link;
                 ic.face      = UIFontFace::Icon;
                 out.runs.push_back(ic);
-                cur = UITextRun{};
-                cur.begin     = out.text.size();
-                cur.color     = a.color;
-                cur.sizeScale = a.sizeScale;
-                cur.link      = a.link;
-                cur.face      = a.face;
+                startRun(a);
                 i = end;
                 continue;
             }
@@ -713,8 +710,7 @@ UIRichText uiParseRichText(const std::string& markup)
                 else if (name == "link") { a.link = value; out.hasLinks = true; }
                 else if (name == "b") a.face = UIFontFace::Bold;
                 stack.push_back(a);
-                cur.color = a.color; cur.sizeScale = a.sizeScale; cur.link = a.link;
-                cur.face  = a.face;
+                startRun(a);
             }
             i = end;
             continue;
