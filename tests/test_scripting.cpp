@@ -140,6 +140,22 @@ TEST_CASE("parseScriptErrorLocation: a clock, a bare colon and no digits are not
     CHECK(loc.line == 4);
 }
 
+TEST_CASE("parseScriptErrorLocation: a line number that does not fit an int is refused")
+{
+    HE::ScriptErrorLocation loc;
+    loc.script = "kept";
+    loc.line   = 7;
+    // error() can put any text into a message; atoi on this was undefined behaviour.
+    CHECK_FALSE(HE::parseScriptErrorLocation("x:99999999999:", loc));
+    CHECK_FALSE(HE::parseScriptErrorLocation("x:99999999999999999999999999:", loc));
+    CHECK(loc.script == "kept");
+    CHECK(loc.line == 7);
+    // The largest int still reads.
+    REQUIRE(HE::parseScriptErrorLocation("x:2147483647: y", loc));
+    CHECK(loc.script == "x");
+    CHECK(loc.line == 2147483647);
+}
+
 TEST_CASE("ScriptEngine: loading script twice replaces it")
 {
     ScriptEngine engine;

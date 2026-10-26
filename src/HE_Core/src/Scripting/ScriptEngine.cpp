@@ -1,4 +1,5 @@
 #include "Scripting/ScriptEngine.h"
+#include <charconv>
 #include <cstdint>
 #include <cstdlib>
 
@@ -67,8 +68,14 @@ bool parseScriptErrorLocation(const std::string& message, ScriptErrorLocation& o
 			allDigits = message[i] >= '0' && message[i] <= '9';
 		if (allDigits) continue;
 
+		// A digit run longer than an int is no line of any script: refuse it before
+		// `out` is touched (atoi would be undefined behaviour on it).
+		int line = 0;
+		const char* digits = message.data() + colon + 1;
+		if (std::from_chars(digits, message.data() + p, line).ec != std::errc()) return false;
+
 		out.script = message.substr(start, colon - start);
-		out.line   = std::atoi(message.c_str() + colon + 1);
+		out.line   = line;
 		return out.line > 0;
 	}
 	return false;
