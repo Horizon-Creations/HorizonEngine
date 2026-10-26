@@ -17434,9 +17434,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					                    static_cast<float>(sceneW) / static_cast<float>(std::max(1, sceneH)),
 					                    &m_editorCamera);
 					m_prepassViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+					// The sky's clock, HE_SKY_TIME included (EncodeScene's drawSky): on the wall
+					// clock alone the pinned A/B captures drew the low-res clouds at another
+					// moment of their drift than the sky they are composited into.
+					float cloudClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+					if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) cloudClock = static_cast<float>(std::atof(ov));
 					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj),
-						m_renderWorld.sunDirection,
-						static_cast<float>(SDL_GetTicks()) / 1000.0f,
+						m_renderWorld.sunDirection, cloudClock,
 						std::max(1, sceneW / 2), std::max(1, sceneH / 2));
 				}
 				else if (m_cloudColor) DestroyCloudTarget(); // freed when toggled off

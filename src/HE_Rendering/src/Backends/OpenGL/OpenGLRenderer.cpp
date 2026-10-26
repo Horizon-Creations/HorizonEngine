@@ -11300,7 +11300,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// Occlusion (off by default): drops what the frustum kept but a nearer
 	// opaque surface hides — the same m_visible the sort and every camera pass
 	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
-	// The shadow pass below culls into its own m_shadowVisible and is untouched.
+	// The shadow pass below culls into its own per-view scratch (m_shadowViews) and is untouched.
 	m_counters.occlusionCulled =
 		m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);

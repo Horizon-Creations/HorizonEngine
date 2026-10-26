@@ -703,11 +703,6 @@ private:
 	unsigned int m_depthInstancedProgram = 0;
 	int          m_uDepthInstVP          = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
-	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
-	// shadow pass never clobbers the camera cull the geometry pass relies on).
-	std::vector<uint8_t>  m_shadowVisible;
-	std::vector<uint32_t> m_shadowSorted;
-	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
 	// One depth layer (a cascade or a local light's view), culled, sorted and batched
 	// before any layer is drawn, the layers side by side (DrawScene's shadow branch).
 	std::vector<ShadowViewCpu> m_shadowViews;
