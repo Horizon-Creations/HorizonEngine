@@ -407,11 +407,12 @@ std::uint32_t uiEngineFaceKey(UIFontFace face)
         // visible no-op in a project whose base weight IS bold, instead of a
         // second atlas that draws the same glyphs.
         if (g_weightBold) return 0;
-        static const std::uint32_t s_key = UIFontCache::keyFor(
-            0x8B01D0FACEull,
-            std::vector<uint8_t>(Roboto_data, Roboto_data + Roboto_size),
-            BakedUIFont::kBakePx);
-        return s_key;
+        // Asked for on every call, not remembered: keyFor folds the scripts in,
+        // and they may still change until the shared font bakes. A key kept from
+        // the first `<b>` would leave bold on the old scripts while the base
+        // face moved to the new ones. Past the first call it is a hash and a find.
+        static const std::vector<uint8_t> s_ttf(Roboto_data, Roboto_data + Roboto_size);
+        return UIFontCache::keyFor(0x8B01D0FACEull, s_ttf, BakedUIFont::kBakePx);
     }
     case UIFontFace::Icon:
     {
