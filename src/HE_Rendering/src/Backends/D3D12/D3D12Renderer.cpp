@@ -11321,7 +11321,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
 
     if (p.m_renderGraph.empty())
     {
-        p.m_renderGraph.addPass(std::make_unique<ShadowPass>());
+        auto shadow = std::make_unique<ShadowPass>();
+        shadow->setRecordDraws(false);   // the depth views are built by prepareShadowViews; the recorded set is not read
+        p.m_renderGraph.addPass(std::move(shadow));
         auto geometry = std::make_unique<GeometryPass>();
         geometry->setInstanceSpans(RenderSorter::instanceSpansEnabled());   // read in place, see InstanceRun
         p.m_renderGraph.addPass(std::move(geometry));

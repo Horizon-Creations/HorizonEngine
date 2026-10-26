@@ -297,7 +297,7 @@ void ShadowPass::execute(const RenderWorld&           world,
                          const std::vector<uint32_t>& /*sortedIndices*/,
                          CommandBuffer&               outCmds)
 {
-	if (!world.shadow.enabled) return;
+	if (!world.shadow.enabled || !m_recordDraws) return;
 	const Frustum lightFrustum = Frustum::fromViewProj(world.shadow.viewProj);
 	for (size_t idx = 0; idx < world.objects.size(); ++idx)
 	{

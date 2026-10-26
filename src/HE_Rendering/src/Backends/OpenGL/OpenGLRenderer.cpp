@@ -11325,7 +11325,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// tonemaps that into the backbuffer/viewport.
 	if (m_renderGraph.empty())
 	{
-		m_renderGraph.addPass(std::make_unique<ShadowPass>());
+		{
+			auto shadow = std::make_unique<ShadowPass>();
+			shadow->setRecordDraws(false);   // the depth views are built by prepareShadowViews; the recorded set is not read
+			m_renderGraph.addPass(std::move(shadow));
+		}
 		{
 			auto geometry = std::make_unique<GeometryPass>();
 			geometry->setInstanceSpans(RenderSorter::instanceSpansEnabled());   // read in place, see BufferInstances
