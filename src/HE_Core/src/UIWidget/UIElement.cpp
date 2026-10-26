@@ -1611,12 +1611,15 @@ size_t UIText::byteAtRowX(const HE::UITextVisualLine& row, float x) const
     // The same midpoint rule the pointer follows, so an arrow key and a click
     // land on the same character when they are aimed at the same column.
     size_t best = row.begin;
+    float left = 0.0f;   // caretXInRow at row.begin
     for (size_t i = row.begin; i < row.end; )
     {
         const size_t nx = HE::uiUtf8Next(text, i);
-        if (x < (caretXInRow(row, i) + caretXInRow(row, nx)) * 0.5f) return i;
+        const float right = caretXInRow(row, nx);
+        if (x < (left + right) * 0.5f) return i;
         best = nx;
         i = nx;
+        left = right;   // this boundary is the next step's left one
     }
     return best;
 }
