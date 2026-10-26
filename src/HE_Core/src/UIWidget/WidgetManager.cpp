@@ -2150,17 +2150,29 @@ void WidgetManager::hideWidget(int id)
 // what they leave behind.
 void WidgetManager::releaseGrabsOf(int widgetId)
 {
-	bool any = false;
-	for (const Grab& g : m_grabs) if (g.widget == widgetId) { any = true; break; }
-	if (!any) return;
-	// Top down, so a popup opened FROM this dialog goes before the dialog does.
-	for (int guard = 0; guard < 64 && !m_grabs.empty(); ++guard)
+	const Instance* self = find(widgetId);
+	const uint32_t window = self ? self->windowId : 0u;
+	auto windowOf = [this](const Grab& g)
 	{
-		const bool mine = m_grabs.back().widget == widgetId;
-		popGrab(/*notify=*/mine);
-		bool more = false;
-		for (const Grab& g : m_grabs) if (g.widget == widgetId) { more = true; break; }
-		if (!more) break;
+		const Instance* gw = g.widget != 0 ? find(g.widget) : nullptr;
+		return gw ? gw->windowId : 0u;
+	};
+	// Each pass pops one grab, so the stack's size bounds the loop; a handler
+	// that opens the widget again from OnDismissed adds a grab per pop and must
+	// not keep it going forever.
+	for (std::size_t budget = m_grabs.size(); budget > 0; --budget)
+	{
+		std::size_t lowest = m_grabs.size();
+		for (std::size_t i = 0; i < m_grabs.size(); ++i)
+			if (m_grabs[i].widget == widgetId) { lowest = i; break; }
+		if (lowest == m_grabs.size()) return;
+		// Top down, so a popup opened FROM this dialog goes before the dialog does.
+		// Only this window's: a popup in another window is not the dialog's to
+		// close, and hiding it here would drop it without a word.
+		std::size_t at = m_grabs.size();
+		while (--at > lowest)
+			if (m_grabs[at].widget == widgetId || windowOf(m_grabs[at]) == window) break;
+		popGrabAt(at, /*notify=*/m_grabs[at].widget == widgetId);
 	}
 }
 void WidgetManager::setZOrder(int id, int z) { if (Instance* w = find(id)) { w->zOrder = z; m_visualDirty = true; } }

@@ -18711,3 +18711,70 @@ TEST_CASE("Stacking: the widget with the higher zOrder takes the click above 214
     CHECK(wm.tree(high)->find(highLabel)->getProp("Text").s == "HIT");
     CHECK(wm.tree(low)->find(lowLabel)->getProp("Text").s.empty());
 }
+
+TEST_CASE("Hiding a dialog closes its own layers and not another window's popup")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int dlgLabel = 0, popLabel = 0;
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+    buildClickPage(cm, "mem://popup.hasset", popLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int dlg = wm.createWidget(cm, "mem://dialog.hasset");
+    const int pop = wm.createWidget(cm, "mem://popup.hasset");
+    REQUIRE(dlg != 0);
+    REQUIRE(pop != 0);
+    wm.setWidgetWindow(pop, 1);
+
+    wm.showModal(dlg);
+    wm.openPopupAt(pop, 10.0f, 10.0f);
+    REQUIRE(wm.isVisible(pop));
+
+    wm.hideWidget(dlg);
+    CHECK_FALSE(wm.isVisible(dlg));
+    // The popup lives in another window; the dialog never owned it.
+    CHECK(wm.isVisible(pop));
+    CHECK_FALSE(wm.hasModal());
+}
+
+TEST_CASE("Hiding a dialog closes a popup opened above it in the same window")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int dlgLabel = 0, popLabel = 0;
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+    buildClickPage(cm, "mem://popup.hasset", popLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int dlg = wm.createWidget(cm, "mem://dialog.hasset");
+    const int pop = wm.createWidget(cm, "mem://popup.hasset");
+    REQUIRE(dlg != 0);
+    REQUIRE(pop != 0);
+
+    wm.showModal(dlg);
+    wm.openPopupAt(pop, 10.0f, 10.0f);
+    REQUIRE(wm.isVisible(pop));
+
+    wm.hideWidget(dlg);
+    CHECK_FALSE(wm.isVisible(dlg));
+    CHECK_FALSE(wm.isVisible(pop));
+    CHECK_FALSE(wm.hasModal());
+}
+
+TEST_CASE("Hiding a dialog releases every grab it holds, however many are stacked")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int dlgLabel = 0;
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int dlg = wm.createWidget(cm, "mem://dialog.hasset");
+    REQUIRE(dlg != 0);
+    for (int i = 0; i < 70; ++i) wm.showModal(dlg);
+    REQUIRE(wm.hasModal());
+
+    wm.hideWidget(dlg);
+    CHECK_FALSE(wm.hasModal());
+}
