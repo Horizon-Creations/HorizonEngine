@@ -2114,6 +2114,11 @@ float uiElementEffectiveOpacityWalk(const UIWidgetTree& tree, const UIElement& e
 }
 }
 
+namespace
+{
+constexpr float kPi = 3.14159265358979323846f;
+}
+
 bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
                        UIRotation& out, const UIWidgetCanvas* canvas)
 {
@@ -2168,7 +2173,7 @@ bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
             const UIWidgetRect pr = uiElementRect(tree, *p, canvas);
             const float ax = pr.x + p->pivotX * pr.w;
             const float ay = pr.y + p->pivotY * pr.h;
-            const float a  = p->rotation * 3.14159265358979323846f / 180.0f;
+            const float a  = p->rotation * kPi / 180.0f;
             const float c = std::cos(a), s = std::sin(a);
             const float dx = px - ax, dy = py - ay;
             px = ax + dx * c - dy * s;
@@ -2183,7 +2188,7 @@ bool uiElementRotation(const UIWidgetTree& tree, const UIElement& e,
 
 void uiUnrotatePoint(const UIRotation& r, float x, float y, float& outX, float& outY)
 {
-    const float a = -r.degrees * 3.14159265358979323846f / 180.0f;
+    const float a = -r.degrees * kPi / 180.0f;
     const float c = std::cos(a), s = std::sin(a);
     const float dx = x - r.dstX, dy = y - r.dstY;
     outX = r.srcX + dx * c - dy * s;
