@@ -28,6 +28,7 @@
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
+#include <ContentManager/DefaultAssets.h>   // kLegacyEngineWaterMaterialId
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
@@ -154,6 +155,15 @@ namespace
 		return id;
 	}
 
+	// A MATERIAL reference. The engine water material used to be {0x400, 1}, the
+	// UUID of T_Landscape_Grass_Albedo; scenes saved then still name it so, and
+	// nothing but the water material can be meant in a material slot.
+	HE::UUID jsonToMaterialUuid(const json& j)
+	{
+		const HE::UUID id = jsonToUuid(j);
+		return id == HE::kLegacyEngineWaterMaterialId ? HE::kEngineWaterMaterialId : id;
+	}
+
 	// ── Foliage layers ───────────────────────────────────────────────────────
 	// One layer's fields. A component with ONE layer writes them flat into the
 	// "foliage" object, exactly the keys a scene had before layers existed, so an
@@ -213,7 +223,7 @@ namespace
 		l.name            = c.value("name",           l.name);
 		l.visible         = c.value(visibleKey,       l.visible);
 		l.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
-		l.materialAssetId = jsonToUuid(c.value("material", json()));
+		l.materialAssetId = jsonToMaterialUuid(c.value("material", json()));
 		l.density         = c.value("density",        l.density);
 		l.seed            = c.value("seed",           l.seed);
 		l.minScale        = c.value("minScale",       l.minScale);
@@ -239,7 +249,7 @@ namespace
 				if (!d.is_object() || l.lods.size() >= FoliageLayer::kMaxLods) continue;
 				FoliageLod lod;
 				lod.meshAssetId     = jsonToUuid(d.value("mesh",     json()));
-				lod.materialAssetId = jsonToUuid(d.value("material", json()));
+				lod.materialAssetId = jsonToMaterialUuid(d.value("material", json()));
 				lod.distance        = std::max(0.0f, d.value("distance", lod.distance));
 				lod.density         = std::clamp(d.value("density", lod.density), 0.0f, 1.0f);
 				l.lods.push_back(lod);
@@ -1316,7 +1326,7 @@ namespace
 		if (comps.contains("material"))
 		{
 			MaterialComponent m;
-			m.materialAssetId = jsonToUuid(comps["material"].value("asset", json()));
+			m.materialAssetId = jsonToMaterialUuid(comps["material"].value("asset", json()));
 			if (auto it = comps["material"].find("paramOverrides");
 			    it != comps["material"].end() && it->is_array())
 				for (const auto& jo : *it)
@@ -1330,7 +1340,7 @@ namespace
 			if (auto it = comps["material"].find("slotOverrides");
 			    it != comps["material"].end() && it->is_array())
 				for (const auto& js : *it)
-					m.slotOverrides.push_back(jsonToUuid(js));
+					m.slotOverrides.push_back(jsonToMaterialUuid(js));
 			registry.emplace_or_replace<MaterialComponent>(entity, m);
 		}
 		if (comps.contains("camera"))
@@ -1452,7 +1462,7 @@ namespace
 			rope.uvTileLength     = c.value("uvTileLength",   rope.uvTileLength);
 			rope.twoSidedGeometry = c.value("twoSided",       rope.twoSidedGeometry);
 			rope.castsShadow      = c.value("castsShadow",    rope.castsShadow);
-			rope.materialAssetId  = jsonToUuid(c.value("material", json()));
+			rope.materialAssetId  = jsonToMaterialUuid(c.value("material", json()));
 			registry.emplace_or_replace<RopeComponent>(entity, rope);
 		}
 		if (comps.contains("spline"))
@@ -1478,7 +1488,7 @@ namespace
 			tr.endWidth          = c.value("endWidth",          tr.endWidth);
 			tr.alignment         = static_cast<TrailAlignment>(
 			                           c.value("alignment", static_cast<uint8_t>(tr.alignment)));
-			tr.materialAssetId   = jsonToUuid(c.value("material", json()));
+			tr.materialAssetId   = jsonToMaterialUuid(c.value("material", json()));
 			registry.emplace_or_replace<TrailComponent>(entity, tr);
 		}
 		if (comps.contains("rigidbody"))
@@ -1965,7 +1975,7 @@ namespace
 				auto& lg = ps.legacy;
 				lg.hasData         = true;
 				lg.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
-				lg.materialAssetId = jsonToUuid(c.value("material", json()));
+				lg.materialAssetId = jsonToMaterialUuid(c.value("material", json()));
 				lg.emitRate        = c.value("emitRate",        lg.emitRate);
 				lg.lifetimeMin     = c.value("lifetimeMin",     lg.lifetimeMin);
 				lg.lifetimeMax     = c.value("lifetimeMax",     lg.lifetimeMax);
@@ -2347,7 +2357,7 @@ namespace
 		{
 			const json& c = comps["uiimage"];
 			UIImageComponent img;
-			img.materialAssetId = jsonToUuid(c.value("material", json()));
+			img.materialAssetId = jsonToMaterialUuid(c.value("material", json()));
 			img.tint            = jsonToVec4(c.value("tint", json()), img.tint);
 			registry.emplace_or_replace<UIImageComponent>(entity, img);
 		}

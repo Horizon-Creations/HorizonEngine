@@ -13,7 +13,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <filesystem>
 #include <string>
 
 namespace EngineContentSyncBar
@@ -40,7 +39,9 @@ namespace
 
 	std::string currentLabel(const HE::Cs::DownloadQueueStatus& st)
 	{
-		std::string name = std::filesystem::path(st.currentRelativePath).filename().string();
+		// The path is the SFTP-side relative path, always '/'-separated.
+		const std::string& path = st.currentRelativePath;
+		std::string name = path.substr(path.rfind('/') + 1);   // npos + 1 == 0: whole string
 		if (static_cast<int>(name.size()) > kMaxLabelChars)
 			name = name.substr(0, kMaxLabelChars - 1) + "\xE2\x80\xA6"; // U+2026 HORIZONTAL ELLIPSIS
 		return name;

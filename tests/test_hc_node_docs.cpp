@@ -139,6 +139,29 @@ TEST_CASE("node reference: the manual has an entry per callable thing")
 	CHECK(reachesTheEntry);
 }
 
+TEST_CASE("node docs: env.get / env.set prefix boundary")
+{
+	REQUIRE(NodeDocs::envFieldCount() > 0);
+	const std::string name(NodeDocs::envFieldName(0));
+
+	// A field name after the prefix is the whole signal.
+	CHECK(NodeDocs::engineCall("env.get" + name).rfind("Reads ", 0) == 0);
+	CHECK(NodeDocs::engineCall("env.set" + name).rfind("Sets ", 0) == 0);
+
+	// The bare prefix has no field, a near-miss prefix is not the prefix, and an
+	// unknown field or an unrelated id describes nothing.
+	CHECK(NodeDocs::engineCall("env.get").empty());
+	CHECK(NodeDocs::engineCall("env.set").empty());
+	CHECK(NodeDocs::engineCall("env.gettier").empty());
+	CHECK(NodeDocs::engineCall("env.sett").empty());
+	CHECK(NodeDocs::engineCall("env.ge" + name).empty());
+	CHECK(NodeDocs::engineCall("env.get" + name + "X").empty());
+	CHECK(NodeDocs::engineCall("env.").empty());
+	CHECK(NodeDocs::engineCall("").empty());
+	CHECK_FALSE(NodeDocs::hasEngineCall("env.get"));
+	CHECK_FALSE(NodeDocs::hasEngineCall("env.set"));
+}
+
 TEST_CASE("node docs: the generated sky rows are covered by the field list")
 {
 	// Every env.get…/env.set… pair is built from one sentence keyed by the field

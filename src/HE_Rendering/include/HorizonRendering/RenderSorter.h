@@ -11,6 +11,13 @@ public:
               const std::vector<uint8_t>& visible,
               std::vector<uint32_t>&      outSortedIndices);
 
+    // Grouped by mesh only, in object order within a mesh: for a depth-only pass (a shadow
+    // cascade), where the draw order cannot change the depth written and front-to-back buys
+    // nothing worth reading every object's transform for (audit lever 4).
+    void sortByMesh(const RenderWorld&          world,
+                    const std::vector<uint8_t>& visible,
+                    std::vector<uint32_t>&      outSortedIndices);
+
     // ── Transparency (shared by every backend's draw loop) ───────────────────
     // A draw counts as opaque only at (effectively) full opacity. The epsilon
     // keeps 1.0f-rounding noise out of the blended pass, which costs a depth

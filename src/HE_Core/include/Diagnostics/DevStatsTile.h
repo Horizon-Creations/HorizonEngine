@@ -43,14 +43,21 @@ struct DevStatsInput
 	double captureCpuMs = -1.0;
 	std::vector<IRenderer::GpuPassTime> capturePasses;
 	const char* captureMode = "";
+	// Frame time over the tile's last frames (DevStatsTile::kHistoryFrames): a hitch shows in
+	// p99 and max where the FPS average hides it. -1 = too few frames yet.
+	double frameP50 = -1.0, frameP99 = -1.0, frameMax = -1.0;
+	// The captured frame's CPU scopes (top level and one below), summed by name: where the
+	// CPU's time goes, the counterpart of the GPU passes (Hive topic 236).
+	std::vector<std::pair<std::string, double>> captureScopes;
 };
 
 // The lines of the card, top to bottom. A line the backend cannot fill is left out
 // rather than shown as 0 or -1, which would read as a measurement. `extended` adds
 // the detailed block (CPU time of the captured frame, backend and resolution, and
-// the GPU passes sorted by cost, at most `maxPasses`).
+// the GPU passes sorted by cost, at most `maxPasses`), and before it the frame-time
+// spread and the captured frame's costliest CPU scopes, at most `maxScopes`.
 HE_API std::vector<std::string> formatDevStats(const DevStatsInput& in, bool extended,
-                                               std::size_t maxPasses = 8);
+                                               std::size_t maxPasses = 8, std::size_t maxScopes = 6);
 
 class HE_API DevStatsTile
 {
@@ -77,6 +84,8 @@ public:
 	// a test does not have to wait a second of wall time.
 	static constexpr float kRefreshSeconds = 0.25f;
 	static constexpr float kCaptureSeconds = 1.0f;
+	// How many recent frame times the p50/p99/max line is taken over (~4 s at 60 FPS).
+	static constexpr std::size_t kHistoryFrames = 240;
 
 private:
 	void setVisible(WidgetManager& widgets, bool on);
@@ -94,6 +103,18 @@ private:
 	float m_elapsed = 0.0f;
 	bool  m_primed  = false;   // the first frame after showing refreshes at once
 	bool  m_loggedFirst = false;   // the first refresh of this showing has been logged
+	std::vector<float> m_history;   // recent frame times in ms, a ring of kHistoryFrames
+	std::size_t        m_historyNext = 0;
+	float              m_sinceLog = 0.0f;   // HE_GAME_STATS_LOG: seconds since the text was last logged
+	// The captures, in turn plain and detailed (update()), and what each last brought.
+	bool                                        m_requested    = false;
+	int                                         m_skipHistory  = 0;   // frames left out of the spread
+	bool                                        m_passesThisRequest = false;   // m_passes is from the current detailed request
+	bool                                        m_lastDetailed = false;
+	double                                      m_cpuMs        = -1.0;
+	std::vector<std::pair<std::string, double>> m_scopes;
+	std::vector<IRenderer::GpuPassTime>         m_passes;
+	const char*                                 m_passMode     = "";
 };
 
 } // namespace HE

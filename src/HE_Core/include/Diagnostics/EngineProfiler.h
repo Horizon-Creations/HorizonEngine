@@ -31,6 +31,7 @@
 #include "Types/Defines.h"
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -207,15 +208,20 @@ public:
 	void setLiveEnabled(bool on) { m_liveEnabled = on; }
 	bool liveEnabled() const     { return m_liveEnabled; }
 	void pushLive(const ProfLiveFrame& f);
-	// Valid until the next pushLive (same thread); copy it to keep it longer.
-	const std::vector<ProfLiveFrame>& liveSnapshot() const { return m_live; }
+	std::vector<ProfLiveFrame> liveSnapshot() const { return { m_live.begin(), m_live.end() }; }
 	double lastCpuFrameMs() const { return m_lastCpuFrameMs; }
 
 	// ── Single-frame capture ────────────────────────────────────────────────
 	// Capture exactly ONE frame in full detail (CPU scopes + detailed per-pass GPU,
 	// forced on so the breakdown is exclusive) into an in-memory record for the UI —
 	// no dump. Applied on the next beginFrame; the result is available right after.
-	void requestSingleFrameCapture()       { m_pendingSingle = true; }
+	// `detailed` forces the exclusive per-pass GPU timing for that one frame (a serialized,
+	// slower frame) whatever the checkbox says: the game's stats card asks for it, since its
+	// pass list is empty without it on Metal.
+	void requestSingleFrameCapture(bool detailed = false) { m_pendingSingle = true; m_pendingSingleDetailed = detailed; }
+	// Withdraws a request not applied yet (the stats card going away): left pending, it
+	// would start a capture at the next frame for nobody.
+	void cancelSingleFrameCapture() { m_pendingSingle = false; m_pendingSingleDetailed = false; }
 	const ProfFrameRecord* singleFrame() const { return m_haveSingleFrame ? &m_singleFrame : nullptr; }
 
 	// True for exactly one frame after a dump was written; lets the app log the
@@ -294,12 +300,13 @@ private:
 	// slept through three captures cannot leak stale spans into the fourth.
 	std::atomic<uint64_t> m_generation{ 0 };
 	bool              m_forceDetailed = false; // detailed forced for a single-frame capture (main thread)
+	bool              m_pendingSingleDetailed = false;   // what the pending single-frame request asked
 	std::thread::id   m_captureThread{};
 	Pending         m_pending     = Pending::None;
 
 	// Live overview (always-on when enabled; no scopes).
 	bool                       m_liveEnabled   = false;
-	std::vector<ProfLiveFrame> m_live;
+	std::deque<ProfLiveFrame>  m_live;
 	size_t                     m_liveCap       = 240;
 	double                     m_lastCpuFrameMs = 0.0;
 

@@ -156,7 +156,11 @@ namespace
                 // Thema 174 Schritt 14's "not a flat list" ask. Parenting alone
                 // has nothing to misalign; a second reparent just moves the
                 // still-bare spline again, same as any other preset.
-                for (auto te : world.registry().view<TerrainComponent>()) { world.reparentEntity(e, te); break; }
+                for (auto te : world.registry().view<TerrainComponent>())
+                {
+                    world.reparentEntity(e, te);
+                    break;
+                }
                 break;
             }
             default: break;

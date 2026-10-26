@@ -310,14 +310,25 @@ std::string dateText(const Database& db, const UUID& row, const UUID& prop)
 // "2026-10-14" (or a full ISO time) to milliseconds.
 bool parseDay(const std::string& text, std::int64_t& ms)
 {
-	if (text.size() == 10) return taskTimeFromIso(text + "T00:00:00.000Z", ms);
+	constexpr std::string_view kMidnight = "T00:00:00.000Z";
+	if (text.size() == 10)
+	{
+		char full[10 + kMidnight.size()];
+		std::memcpy(full, text.data(), 10);
+		std::memcpy(full + 10, kMidnight.data(), kMidnight.size());
+		return taskTimeFromIso(std::string_view(full, sizeof full), ms);
+	}
 	return taskTimeFromIso(text, ms);
 }
 
 std::string joinNames(const std::vector<std::string>& names)
 {
 	std::string out;
-	for (const std::string& n : names) out += (out.empty() ? "" : ", ") + n;
+	for (const std::string& n : names)
+	{
+		if (!out.empty()) out += ", ";
+		out += n;
+	}
 	return out;
 }
 
@@ -325,6 +336,7 @@ std::vector<std::string> splitNames(const std::string& text)
 {
 	std::vector<std::string> out;
 	std::string cur;
+	cur.reserve(text.size());
 	auto flush = [&] {
 		const auto b = cur.find_first_not_of(' ');
 		const auto e = cur.find_last_not_of(' ');
@@ -470,11 +482,14 @@ void assigneesCell(const Database& db, const Row& row, const Property& p)
 	const bool open = ImGui::BeginCombo("##assignedTo", preview.c_str());
 	note("assignees:" + row.title);
 	if (!open) return;
+	std::string label;   // one buffer for every member row
 	for (const HE::TaskTeamMember& m : team->members())
 	{
 		const bool on = std::any_of(have.begin(), have.end(),
 		                            [&](const std::string& a) { return HE::sameTaskMember(a, m.name); });
-		const std::string label = m.name + (m.online ? "" : "  (offline)") + "##member";
+		label.assign(m.name);
+		if (!m.online) label += "  (offline)";
+		label += "##member";
 		ImGui::PushID(m.name.c_str());
 		// Stays open: assigning two people is two ticks, not two trips.
 		const bool picked = ImGui::Selectable(label.c_str(), on, ImGuiSelectableFlags_NoAutoClosePopups);
@@ -723,6 +738,27 @@ void editView(const UUID& dbId, const UUID& viewId, std::function<bool(View&)> f
 			return v && fn(*v);
 		});
 	});
+}
+
+// A labelled combo in a view's settings popup that picks the Date property a timeline or calendar
+// runs from (isEnd: until, with a "(none)" entry).
+void dateCombo(const Database& db, const UUID& dbId, const UUID& viewId, const char* label, const char* id,
+               const char* none, const UUID& current, bool isEnd)
+{
+	ImGui::TextUnformatted(label);
+	ImGui::SameLine(90);
+	ImGui::SetNextItemWidth(160);
+	const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
+	if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
+	if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
+		editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
+	for (const Property& p : db.properties)
+		if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
+		{
+			const UUID pid = p.id;
+			editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
+		}
+	ImGui::EndCombo();
 }
 
 // ── Tables, timelines, boards and calendars are the things you make; the data behind them is shared ──
@@ -1112,12 +1148,13 @@ void drawTable(const Database& db, const View& view, const std::vector<std::size
 		ImGui::TableSetColumnIndex(c);
 		ImGui::PushID(c);
 		const bool isTitle = c == 0;
-		const UUID prop = isTitle ? UUID{} : cols[static_cast<std::size_t>(c - 1)]->id;
-		const std::string& name = isTitle ? std::string("Title") : cols[static_cast<std::size_t>(c - 1)]->name;
+		const Property* col = isTitle ? nullptr : cols[static_cast<std::size_t>(c - 1)];
+		const UUID prop = col ? col->id : UUID{};
+		const char* name = col ? col->name.c_str() : "Title";
 		const bool sorted = !view.sorts.empty() && view.sorts[0].property == prop;
-		if (ImGui::Selectable(isTitle ? "Title" : name.c_str(), false, 0, ImVec2(0, 0)))
+		if (ImGui::Selectable(name, false, 0, ImVec2(0, 0)))
 			cycleSort(db.id, view.id, prop);
-		if (isTitle) note("header:Title"); else note("header:" + name);
+		if (isTitle) note("header:Title"); else note("header:" + col->name);
 		if (sorted)
 		{
 			const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
@@ -1186,7 +1223,12 @@ std::string summary(const Database& db, const Row& row, const Property& p)
 	{
 		std::string out;
 		for (const UUID& id : db.multiSelect(row.id, p.id))
-			if (const SelectOption* o = p.findOption(id)) out += (out.empty() ? "" : ", ") + o->name;
+		{
+			const SelectOption* o = p.findOption(id);
+			if (!o) continue;
+			if (!out.empty()) out += ", ";
+			out += o->name;
+		}
 		return out;
 	}
 	default:
@@ -1812,17 +1854,19 @@ void drawTimeline(const Database& db, const View& view, const std::vector<std::s
 				dl->AddLine(ImVec2(x, lanesTop - 12.0f), ImVec2(x, lanesTop), tickCol);
 				dl->AddLine(ImVec2(x, lanesTop), ImVec2(x, corner.y), gridCol);
 				static const char* const kWd[] = { "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun" };
-				std::string label = iso.substr(8, 2);
-				if (ppd >= 56.0f) label = std::string(kWd[weekdayOf(d)]) + " " + label;
-				dl->AddText(ImVec2(x + 3.0f, lanesTop - 28.0f), Theme::u32(d == today ? Theme::Warn : Theme::TextDim), label.c_str());
+				char label[16];
+				if (ppd >= 56.0f) std::snprintf(label, sizeof label, "%s %.2s", kWd[weekdayOf(d)], iso.c_str() + 8);
+				else              std::snprintf(label, sizeof label, "%.2s", iso.c_str() + 8);
+				dl->AddText(ImVec2(x + 3.0f, lanesTop - 28.0f), Theme::u32(d == today ? Theme::Warn : Theme::TextDim), label);
 			}
 			if (iso.compare(8, 2, "01") == 0 || d == d0)
 			{
 				dl->AddLine(ImVec2(x, origin.y), ImVec2(x, lanesTop), tickCol);
 				if (iso.compare(8, 2, "01") == 0) dl->AddLine(ImVec2(x, lanesTop), ImVec2(x, corner.y), Theme::u32(Theme::warm(0.24f)));
 				const int mon = std::clamp(std::atoi(iso.substr(5, 2).c_str()), 1, 12);
-				dl->AddText(ImVec2(std::max(x, origin.x) + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading),
-				            (std::string(kMonthsShort[mon - 1]) + " " + iso.substr(0, 4)).c_str());
+				char monthLabel[16];
+				std::snprintf(monthLabel, sizeof monthLabel, "%s %.4s", kMonthsShort[mon - 1], iso.c_str());
+				dl->AddText(ImVec2(std::max(x, origin.x) + 4.0f, origin.y + 3.0f), Theme::u32(Theme::TextHeading), monthLabel);
 			}
 		}
 	}
@@ -3184,25 +3228,9 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		note("timeline:settings");
 		if (ImGui::BeginPopup("##tlsettings"))
 		{
-			auto dateCombo = [&](const char* label, const char* id, const char* none, const UUID& current, bool isEnd) {
-				ImGui::TextUnformatted(label);
-				ImGui::SameLine(90);
-				ImGui::SetNextItemWidth(160);
-				const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
-				if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
-				if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
-					editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
-				for (const Property& p : db.properties)
-					if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
-					{
-						const UUID pid = p.id;
-						editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
-					}
-				ImGui::EndCombo();
-			};
-			dateCombo("Starts at", "##tlstart", "Start", view->dateProperty, false);
+			dateCombo(db, dbId, viewId, "Starts at", "##tlstart", "Start", view->dateProperty, false);
 			note("timeline:start");
-			dateCombo("Ends at", "##tlend", "End", view->endProperty, true);
+			dateCombo(db, dbId, viewId, "Ends at", "##tlend", "End", view->endProperty, true);
 			ImGui::TextUnformatted("Colour by");
 			ImGui::SameLine(90);
 			ImGui::SetNextItemWidth(160);
@@ -3254,25 +3282,9 @@ void drawDatabase(AppContext& ctx, const Database& db)
 		note("timeline:settings");
 		if (ImGui::BeginPopup("##calsettings"))
 		{
-			auto dateCombo = [&](const char* label, const char* id, const char* none, const UUID& current, bool isEnd) {
-				ImGui::TextUnformatted(label);
-				ImGui::SameLine(90);
-				ImGui::SetNextItemWidth(160);
-				const Property* cur = current == UUID{} ? nullptr : db.findProperty(current);
-				if (!ImGui::BeginCombo(id, cur ? cur->name.c_str() : none)) return;
-				if (isEnd && ImGui::Selectable("(none)", cur == nullptr))
-					editView(dbId, viewId, [](View& v) { v.endProperty = UUID{}; return true; });
-				for (const Property& p : db.properties)
-					if (p.type == PropertyType::Date && ImGui::Selectable(p.name.c_str(), cur == &p))
-					{
-						const UUID pid = p.id;
-						editView(dbId, viewId, [pid, isEnd](View& v) { (isEnd ? v.endProperty : v.dateProperty) = pid; return true; });
-					}
-				ImGui::EndCombo();
-			};
-			dateCombo("Day from", "##tlstart", "Date", view->dateProperty, false);
+			dateCombo(db, dbId, viewId, "Day from", "##tlstart", "Date", view->dateProperty, false);
 			note("timeline:start");
-			dateCombo("Until", "##tlend", "End", view->endProperty, true);
+			dateCombo(db, dbId, viewId, "Until", "##tlend", "End", view->endProperty, true);
 			ImGui::TextUnformatted("Colour by");
 			ImGui::SameLine(90);
 			ImGui::SetNextItemWidth(160);

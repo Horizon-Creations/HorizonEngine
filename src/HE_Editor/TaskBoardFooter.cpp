@@ -68,7 +68,9 @@ std::vector<HE::UUID> rankedOpen(const TaskBoard& board, std::string_view me)
 		const bool blockedA = a->status == TaskStatus::Blocked;
 		const bool blockedB = b->status == TaskStatus::Blocked;
 		if (blockedA != blockedB) return blockedB;
-		if (priorityRank(*a) != priorityRank(*b)) return priorityRank(*a) < priorityRank(*b);
+		const int priorityA = priorityRank(*a);
+		const int priorityB = priorityRank(*b);
+		if (priorityA != priorityB) return priorityA < priorityB;
 		return statusRank(*a) < statusRank(*b);
 	});
 

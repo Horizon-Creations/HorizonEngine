@@ -1386,11 +1386,9 @@ void startExport(AppContext& ctx)
                 std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
                 std::vector<HE::hccg::ClassSource> hcSources;   // codegen inputs (hcCompile)
                 {
-                    const std::filesystem::path projectRoot2 =
-                        std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
                     std::error_code ec2;
                     std::filesystem::recursive_directory_iterator sit(
-                        projectRoot2, std::filesystem::directory_options::skip_permission_denied, ec2);
+                        projectRoot, std::filesystem::directory_options::skip_permission_denied, ec2);
                     const std::filesystem::recursive_directory_iterator send;
                     while (!ec2 && sit != send)
                     {
@@ -1401,7 +1399,7 @@ void startExport(AppContext& ctx)
                             SceneSerializer ser2;
                             std::vector<uint8_t> bytes;
                             const std::string rel =
-                                sit->path().lexically_relative(projectRoot2).generic_string();
+                                sit->path().lexically_relative(projectRoot).generic_string();
                             const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
                             if (loaded) syncPrefabsForExport(w2, rel);
                             if (loaded && ser2.saveToMemory(w2, bytes))

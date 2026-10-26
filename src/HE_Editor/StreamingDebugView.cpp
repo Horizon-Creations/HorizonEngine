@@ -59,6 +59,22 @@ std::vector<HE::CellAnchor>& previewPins()
 	return s_pins;
 }
 
+namespace
+{
+// The camera first, then the pins; `eyeAbs` is already in absolute positions.
+std::vector<HE::CellAnchor> anchorsAround(const glm::dvec3& eyeAbs,
+                                          const std::vector<HE::CellAnchor>& pins)
+{
+	std::vector<HE::CellAnchor> anchors;
+	anchors.reserve(1 + pins.size());
+	HE::CellAnchor cam;
+	cam.position = eyeAbs;
+	anchors.push_back(cam);
+	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	return anchors;
+}
+} // namespace
+
 // ── The cells in the Scene window ────────────────────────────────────────────
 void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawBuffer& out)
 {
@@ -80,12 +96,7 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
 	const double range = std::max(static_cast<double>(m->unloadRadius) * 1.5, size * 2.0);
 	// The camera is an anchor like the pins: the nearest of them decides a cell's colour.
 	// A viewpoint has no velocity, so the lookahead does not enter.
-	std::vector<HE::CellAnchor> anchors;
-	anchors.reserve(1 + pins.size());
-	HE::CellAnchor cam;
-	cam.position = eyeAbs;
-	anchors.push_back(cam);
-	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	const std::vector<HE::CellAnchor> anchors = anchorsAround(eyeAbs, pins);
 	const std::vector<HE::CellManifest::View> cells = m->around(anchors, range);
 
 	const glm::vec3 kLoad(0.25f, 0.85f, 0.35f);   // the game builds it from here
@@ -117,10 +128,11 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
 	const auto ring = [&](float cx, float cz, float radius, const glm::vec3& col)
 	{
 		constexpr int kSegments = 96;
+		constexpr float kTwoPi = 6.2831853f;
 		for (int i = 0; i < kSegments; ++i)
 		{
-			const float a0 = 6.2831853f * static_cast<float>(i) / kSegments;
-			const float a1 = 6.2831853f * static_cast<float>(i + 1) / kSegments;
+			const float a0 = kTwoPi * static_cast<float>(i) / kSegments;
+			const float a1 = kTwoPi * static_cast<float>(i + 1) / kSegments;
 			out.line({ cx + radius * std::cos(a0), y, cz + radius * std::sin(a0) },
 			         { cx + radius * std::cos(a1), y, cz + radius * std::sin(a1) }, col);
 		}
@@ -336,6 +348,8 @@ void drawJobs()
 	                    "for the frame. The Timeline tab names every job on the worker lanes.");
 }
 
+constexpr double kBytesPerMB = 1048576.0;
+
 void drawAssets(ContentManager& cm)
 {
 	ImGui::SeparatorText("Asset streaming");
@@ -355,7 +369,7 @@ void drawAssets(ContentManager& cm)
 		{
 			char overlay[64];
 			std::snprintf(overlay, sizeof(overlay), "%.1f / %.1f MB",
-			              static_cast<double>(read) / 1048576.0, static_cast<double>(total) / 1048576.0);
+			              static_cast<double>(read) / kBytesPerMB, static_cast<double>(total) / kBytesPerMB);
 			ImGui::ProgressBar(static_cast<float>(static_cast<double>(read) / static_cast<double>(total)),
 			                   ImVec2(160.0f, 0.0f), overlay);
 			ImGui::SameLine();
@@ -393,7 +407,7 @@ void drawScene(AppContext& ctx)
 static void postStreamingMessage(std::string& message)
 {
 	if (message.empty()) return;
-	const bool refused = message.rfind("Not ", 0) == 0;
+	const bool refused = message.starts_with("Not ");
 	HE::Ed::notify(refused ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
 	               "Streaming cells", message);
 	message.clear();
@@ -479,13 +493,7 @@ void drawCells(AppContext& ctx)
 	if (!pins.empty())
 		ImGui::Text("%zu preview anchor(s) besides the camera.", pins.size());
 
-	std::vector<HE::CellAnchor> anchors;
-	anchors.reserve(1 + pins.size());
-	HE::CellAnchor cam;
-	cam.position = eye;
-	anchors.push_back(cam);
-	anchors.insert(anchors.end(), pins.begin(), pins.end());
-	const std::vector<HE::CellManifest::View> nearby = m->around(anchors, m->unloadRadius);
+	const std::vector<HE::CellManifest::View> nearby = m->around(anchorsAround(eye, pins), m->unloadRadius);
 	size_t   loadCells = 0, keepCells = 0;
 	uint64_t loadEnts = 0, keepEnts = 0;
 	uint32_t mostSlices = 0;

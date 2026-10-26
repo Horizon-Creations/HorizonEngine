@@ -101,6 +101,9 @@ std::string s_labelBuf;
 constexpr double kMinZoom = 0.1, kMaxZoom = 4.0;
 constexpr float  kHandle = 8.0f, kDotRadius = 5.0f;
 
+// A card that stands for something in the editor rather than holding its own text.
+inline bool isLinkNode(NodeType t) { return t == NodeType::Row || t == NodeType::Page || t == NodeType::Object; }
+
 // ── Colours ──────────────────────────────────────────────────────────────────
 struct Swatch { const char* word; ImVec4 colour; };
 const Swatch kSwatches[] = {
@@ -215,7 +218,7 @@ void deleteSelection(const UUID& boardId)
 	change(boardId, [=](Board& b) {
 		bool any = false;
 		for (const UUID& id : nodes) any |= b.removeNode(id, taskNowMs());
-		if (!(edge == UUID{})) any |= b.removeEdge(edge, taskNowMs());
+		if (edge != UUID{}) any |= b.removeEdge(edge, taskNowMs());
 		return any;
 	}, [] { s_sel.clear(); s_selEdge = UUID{}; });
 }
@@ -279,7 +282,7 @@ Pic pictureOf(const Node& n)
 	Pic p;
 	if (s_exportTex)
 	{
-		if (n.media.empty() || !(n.asset == UUID{}) || !S) return p;
+		if (n.media.empty() || n.asset != UUID{} || !S) return p;
 		MediaTex& m = (*s_exportTex)[n.media];
 		if (!m.tried)
 		{
@@ -297,7 +300,7 @@ Pic pictureOf(const Node& n)
 		}
 		return { m.id, m.w, m.h };
 	}
-	if (!(n.asset == UUID{}))
+	if (n.asset != UUID{})
 	{
 		if (!S || !S->ctx || !S->ctx->contentManager) return p;
 		const std::string rel = S->ctx->contentManager->pathForId(n.asset);
@@ -561,7 +564,7 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 	else
 	{
 		// A link keeps a neutral card: a colour recolours its accent (bar, glyph, name), not the background.
-		const bool isLink = n.type == NodeType::Row || n.type == NodeType::Page || n.type == NodeType::Object;
+		const bool isLink = isLinkNode(n.type);
 		const ImVec4 fill = coloured && !isLink ? tint : Theme::warm(0.20f);
 		dl->AddRectFilled(ImVec2(a.x + 2 * z, a.y + 3 * z), ImVec2(b.x + 2 * z, b.y + 3 * z), IM_COL32(0, 0, 0, 60), round);
 		dl->AddRectFilled(a, b, Theme::u32(fill), round);
@@ -595,7 +598,7 @@ void drawNode(ImDrawList* dl, const Xf& xf, Workspace& ws, const Node& n, const 
 
 	// A card that stands for something in the editor is a link: a coloured bar and glyph, the name in the link
 	// colour (underlined under the mouse), what it is under it, and an arrow out.
-	if (n.type == NodeType::Row || n.type == NodeType::Page || n.type == NodeType::Object)
+	if (isLinkNode(n.type))
 	{
 		const bool missing = linkMissing(ws, n);
 		const ImVec4 linkCol = missing ? Theme::Bad : coloured ? tint : ImVec4(0.50f, 0.74f, 1.0f, 1.0f);
@@ -856,33 +859,67 @@ namespace
 ImVec2 s_canvasSize(800, 500);   // the canvas of the last frame: where "the middle" is for a new card
 }
 
-void draw(const Services& services, const UUID& boardId)
+namespace
 {
-	S = &services;
-	Workspace& ws = *services.ws;
-	Board* board = ws.findBoard(boardId);
-	if (!board)
-	{
-		ImGui::TextDisabled("This board is gone.");
-		return;
-	}
-	if (!(s_boardOfSelection == boardId))
-	{
-		// Another board: what was selected or half-done there means nothing here.
-		s_boardOfSelection = boardId;
-		s_sel.clear();
-		s_selEdge = s_editNode = s_connectFrom = UUID{};
-		s_drag = Drag::None;
-	}
-	// A selection that a pull or an undo made stale.
-	s_sel.erase(std::remove_if(s_sel.begin(), s_sel.end(), [&](const UUID& id) { return !board->findNode(id); }), s_sel.end());
-	if (!(s_selEdge == UUID{}) && !board->findEdge(s_selEdge)) s_selEdge = UUID{};
-	if (!(s_editNode == UUID{}) && !board->findNode(s_editNode)) s_editNode = UUID{};
+// What the sections of one frame of the canvas share: where it is on screen, the view it is drawn
+// through, and what the mouse says. `mouseDelta` is measured once more after a press, so the parts
+// drawn before that see the old value and the ones after it the new.
+struct Canvas
+{
+	const Services& services;
+	Workspace&      ws;
+	const UUID&     boardId;
+	Board*          board;
+	const ImGuiIO&  io;
+	ImDrawList*     dl;
+	ImVec2          origin;
+	ImVec2          size;
+	ViewState&      view;
+	bool            hovered;
+	bool            editing;
+	Xf              xf;
+	double          mx = 0, my = 0;
+	ImVec2          mouseDelta;
+	bool            movingNow;
 
-	ViewState view = viewOf(boardId);
-	const ImGuiIO& io = ImGui::GetIO();
+	Canvas(const Services& services_, Workspace& ws_, const UUID& boardId_, Board* board_, const ImGuiIO& io_, ImDrawList* dl_,
+		ImVec2 origin_, ImVec2 size_, ViewState& view_, bool hovered_, bool editing_)
+		: services(services_), ws(ws_), boardId(boardId_), board(board_), io(io_), dl(dl_), origin(origin_), size(size_),
+		view(view_), hovered(hovered_), editing(editing_), xf{ origin_, view_ }
+	{
+		xf.toWorld(io.MousePos, mx, my);
+
+		// What is shown where: a card being moved or resized is drawn at its new place.
+		mouseDelta = ImVec2(io.MousePos.x - s_dragStart.x, io.MousePos.y - s_dragStart.y);
+		movingNow = s_drag == Drag::Move && s_dragMoved;
+	}
+
+	// With Snap the card in hand lands on the grid and the others keep their distance to it.
+	ImVec2 draggedBy() const
+	{
+		double dx = mouseDelta.x / view.zoom, dy = mouseDelta.y / view.zoom;
+		if (s_snap && !s_dragNodes.empty())
+			if (const Node* lead = board->findNode(has(s_dragNodes, s_dragHit) ? s_dragHit : s_dragNodes.front()))
+			{
+				dx = std::round((lead->x + dx) / kGrid) * kGrid - lead->x;
+				dy = std::round((lead->y + dy) / kGrid) * kGrid - lead->y;
+			}
+		return ImVec2(static_cast<float>(dx), static_cast<float>(dy));
+	}
+	Rect2 shownRect(const Node& n) const
+	{
+		Rect2 r = n.rect();
+		if (movingNow && has(s_dragNodes, n.id)) { const ImVec2 d = draggedBy(); r.x += d.x; r.y += d.y; }
+		if (s_drag == Drag::Resize && n.id == s_resizeNode) r = s_resizeTo;
+		return r;
+	}
+};
+
+struct ToolbarResult { bool fit, actual, zoomIn, zoomOut; };
+
+ToolbarResult drawToolbar(const Services& services, const UUID& boardId, Board* board, const ViewState& view)
+{
 	Workspace* wsp = services.ws;
-
 	// ── Toolbar ──
 	if (!(s_titleFor == boardId) || !ImGui::IsAnyItemActive()) { s_titleFor = boardId; s_titleBuf = board->title; }
 	ImGui::SetNextItemWidth(240);
@@ -901,7 +938,6 @@ void draw(const Services& services, const UUID& boardId)
 	}
 	services.note("board:title");
 
-	const double centreX = view.x + s_canvasSize.x * 0.5 / view.zoom, centreY = view.y + s_canvasSize.y * 0.5 / view.zoom;
 
 	// The view's controls at the right of the title: history, zoom, overview, picture.
 	bool fit = false, actual = false, zoomIn = false, zoomOut = false;
@@ -982,54 +1018,37 @@ void draw(const Services& services, const UUID& boardId)
 		}
 	}
 
-	// ── The canvas ──
-	ImGui::BeginChild("##boardcanvas", ImVec2(0, 0), ImGuiChildFlags_Borders,
-	                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-	const ImVec2 origin = ImGui::GetCursorScreenPos();
-	const ImVec2 size = ImGui::GetContentRegionAvail();
-	s_canvasSize = size;
-	ImGui::SetNextItemAllowOverlap();   // a card being typed in sits on top of it
-	ImGui::InvisibleButton("##canvas", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
-	// The minimap sits in the bottom right corner and takes the mouse there.
-	const ImVec2 mapSize(180, 120);
-	const ImVec2 mapMin(origin.x + size.x - mapSize.x - 10, origin.y + size.y - mapSize.y - 10);
-	const ImVec2 mapMax(mapMin.x + mapSize.x, mapMin.y + mapSize.y);
-	const bool mapOn = s_minimap && !board->nodes.empty() && size.x > mapSize.x * 2 && size.y > mapSize.y * 2;
-	const bool overMap = mapOn && io.MousePos.x >= mapMin.x && io.MousePos.x <= mapMax.x && io.MousePos.y >= mapMin.y && io.MousePos.y <= mapMax.y;
-	const bool hovered = ImGui::IsItemHovered() && !overMap && !s_mapDrag;
-	services.noteRect("canvas", origin, ImVec2(origin.x + size.x, origin.y + size.y));
-	s_canvasMin = origin;
-	s_canvasMax = ImVec2(origin.x + size.x, origin.y + size.y);
-	s_canvasFrame = ImGui::GetFrameCount();
+	return { fit, actual, zoomIn, zoomOut };
+}
 
+void acceptDrops(const Services& services, const UUID& boardId, ImVec2 origin, const ViewState& view)
+{
 	// What is dropped on the canvas: assets, scenes and entities from the editor's panels (right
 	// after the item they are dropped on), and files from the system that arrived since last frame.
+	const ImGuiIO& dio = ImGui::GetIO();
+	const Xf dropXf{ origin, view };
+	if (services.ctx)
 	{
-		const ImGuiIO& dio = ImGui::GetIO();
-		const Xf dropXf{ origin, view };
-		if (services.ctx)
-		{
-			const std::vector<TaskLink> links = TaskBoardPanel::acceptDroppedLinks(*services.ctx);
-			double dx, dy;
-			dropXf.toWorld(dio.MousePos, dx, dy);
-			double step = 0;
-			for (const TaskLink& l : links) { placeLink(boardId, l, dx + step, dy + step); step += 28.0 / view.zoom; }
-		}
-		std::vector<DroppedFile> files;
-		files.swap(s_dropped);
+		const std::vector<TaskLink> links = TaskBoardPanel::acceptDroppedLinks(*services.ctx);
+		double dx, dy;
+		dropXf.toWorld(dio.MousePos, dx, dy);
 		double step = 0;
-		for (const DroppedFile& f : files)
-		{
-			if (!isPictureFile(f.path)) continue;
-			double fx, fy;
-			dropXf.toWorld(f.at, fx, fy);
-			if (importPictureFile(boardId, f.path, fx + step, fy + step)) step += 28.0 / view.zoom;
-		}
+		for (const TaskLink& l : links) { placeLink(boardId, l, dx + step, dy + step); step += 28.0 / view.zoom; }
 	}
-	const bool editing = !(s_editNode == UUID{});
-	ImDrawList* dl = ImGui::GetWindowDrawList();
-	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
+	std::vector<DroppedFile> files;
+	files.swap(s_dropped);
+	double step = 0;
+	for (const DroppedFile& f : files)
+	{
+		if (!isPictureFile(f.path)) continue;
+		double fx, fy;
+		dropXf.toWorld(f.at, fx, fy);
+		if (importPictureFile(boardId, f.path, fx + step, fy + step)) step += 28.0 / view.zoom;
+	}
+}
 
+void applyViewButtons(ViewState& view, ImVec2 size, Board* board, bool zoomIn, bool zoomOut, bool fit, bool actual)
+{
 	if (zoomIn || zoomOut)
 	{
 		const double cx = view.x + size.x * 0.5 / view.zoom, cy = view.y + size.y * 0.5 / view.zoom;
@@ -1056,7 +1075,10 @@ void draw(const Services& services, const UUID& boardId)
 		view.x = cx - size.x * 0.5;
 		view.y = cy - size.y * 0.5;
 	}
+}
 
+void zoomAndPan(const ImGuiIO& io, ImVec2 origin, ViewState& view, bool hovered, bool editing, bool space)
+{
 	// The trackpad's pinch zooms at the cursor (EditorInput.h: on macOS the native magnify event).
 	if (hovered && !editing)
 		if (const float pinch = EditorInput::pinchDelta(); pinch != 0.0f)
@@ -1087,7 +1109,6 @@ void draw(const Services& services, const UUID& boardId)
 	}
 	// Panning with the middle button, or Space and the left one.
 	static ViewState panFrom;
-	const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
 	if (hovered && s_drag == Drag::None &&
 	    (ImGui::IsMouseClicked(ImGuiMouseButton_Middle) || ImGui::IsMouseClicked(ImGuiMouseButton_Right) ||
 	     (space && ImGui::IsMouseClicked(ImGuiMouseButton_Left))))
@@ -1102,44 +1123,34 @@ void draw(const Services& services, const UUID& boardId)
 		view.y = panFrom.y - (io.MousePos.y - s_dragStart.y) / view.zoom;
 		if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle) && !ImGui::IsMouseDown(ImGuiMouseButton_Right) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_drag = Drag::None;
 	}
+}
 
-	const Xf xf{ origin, view };
-	double mx, my;
-	xf.toWorld(io.MousePos, mx, my);
-
-	// What is shown where: a card being moved or resized is drawn at its new place.
-	ImVec2 mouseDelta(io.MousePos.x - s_dragStart.x, io.MousePos.y - s_dragStart.y);
-	const bool movingNow = s_drag == Drag::Move && s_dragMoved;
-	// With Snap the card in hand lands on the grid and the others keep their distance to it.
-	auto draggedBy = [&]() {
-		double dx = mouseDelta.x / view.zoom, dy = mouseDelta.y / view.zoom;
-		if (s_snap && !s_dragNodes.empty())
-			if (const Node* lead = board->findNode(has(s_dragNodes, s_dragHit) ? s_dragHit : s_dragNodes.front()))
-			{
-				dx = std::round((lead->x + dx) / kGrid) * kGrid - lead->x;
-				dy = std::round((lead->y + dy) / kGrid) * kGrid - lead->y;
-			}
-		return ImVec2(static_cast<float>(dx), static_cast<float>(dy));
-	};
-	auto shownRect = [&](const Node& n) {
-		Rect2 r = n.rect();
-		if (movingNow && has(s_dragNodes, n.id)) { const ImVec2 d = draggedBy(); r.x += d.x; r.y += d.y; }
-		if (s_drag == Drag::Resize && n.id == s_resizeNode) r = s_resizeTo;
-		return r;
-	};
+void drawGrid(const Canvas& c)
+{
+	ImDrawList* dl = c.dl;
+	const ImVec2 origin = c.origin;
+	const ImVec2 size = c.size;
+	ViewState& view = c.view;
 
 	// ── The grid ──
+	const float step = static_cast<float>(40.0 * view.zoom);
+	if (step >= 10.0f)
 	{
-		const float step = static_cast<float>(40.0 * view.zoom);
-		if (step >= 10.0f)
-		{
-			const float x0 = origin.x + std::fmod(std::fmod(static_cast<float>(-view.x * view.zoom), step) + step, step);
-			const float y0 = origin.y + std::fmod(std::fmod(static_cast<float>(-view.y * view.zoom), step) + step, step);
-			for (float x = x0; x < origin.x + size.x; x += step)
-				for (float y = y0; y < origin.y + size.y; y += step)
-					dl->AddCircleFilled(ImVec2(x, y), 1.2f, Theme::u32(Theme::warm(0.26f)));
-		}
+		const float x0 = origin.x + std::fmod(std::fmod(static_cast<float>(-view.x * view.zoom), step) + step, step);
+		const float y0 = origin.y + std::fmod(std::fmod(static_cast<float>(-view.y * view.zoom), step) + step, step);
+		for (float x = x0; x < origin.x + size.x; x += step)
+			for (float y = y0; y < origin.y + size.y; y += step)
+				dl->AddCircleFilled(ImVec2(x, y), 1.2f, Theme::u32(Theme::warm(0.26f)));
 	}
+}
+
+void drawArrows(const Canvas& c)
+{
+	Board* board = c.board;
+	ImDrawList* dl = c.dl;
+	const Xf& xf = c.xf;
+	ViewState& view = c.view;
+	const Services& services = c.services;
 
 	// ── Arrows ──
 	for (const Edge& e : board->edges)
@@ -1149,7 +1160,7 @@ void draw(const Services& services, const UUID& boardId)
 		if (!from || !to) continue;
 		Node fromShown = *from, toShown = *to;
 		{
-			const Rect2 a = shownRect(*from), b = shownRect(*to);
+			const Rect2 a = c.shownRect(*from), b = c.shownRect(*to);
 			fromShown.x = a.x; fromShown.y = a.y; fromShown.w = a.w; fromShown.h = a.h;
 			toShown.x = b.x; toShown.y = b.y; toShown.w = b.w; toShown.h = b.h;
 		}
@@ -1173,18 +1184,38 @@ void draw(const Services& services, const UUID& boardId)
 		}
 		services.noteRect("edge:" + e.label, ImVec2(mid.x - 3, mid.y - 3), ImVec2(mid.x + 3, mid.y + 3));
 	}
+}
+
+void updateHoverNode(const Canvas& c)
+{
+	Board* board = c.board;
+	const bool hovered = c.hovered;
+	const bool editing = c.editing;
+	const double mx = c.mx;
+	const double my = c.my;
 
 	// The card under the mouse: a link underlines and the cursor says it opens.
 	s_hoverNode = hovered && s_drag == Drag::None && !editing ? board->hitTest(mx, my) : UUID{};
 	if (const Node* hot = s_hoverNode == UUID{} ? nullptr : board->findNode(s_hoverNode))
-		if (hot->type == NodeType::Row || hot->type == NodeType::Page || hot->type == NodeType::Object) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+		if (isLinkNode(hot->type)) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+}
+
+void drawCards(const Canvas& c)
+{
+	Board* board = c.board;
+	ImDrawList* dl = c.dl;
+	const Xf& xf = c.xf;
+	ViewState& view = c.view;
+	const ImVec2 size = c.size;
+	Workspace& ws = c.ws;
+	const Services& services = c.services;
 
 	// ── Cards (only those on screen) ──
 	const Rect2 visible{ view.x, view.y, size.x / view.zoom, size.y / view.zoom };
 	s_stats = { static_cast<int>(board->nodes.size()), 0 };
 	for (const Node& n : board->nodes)
 	{
-		const Rect2 shown = shownRect(n);
+		const Rect2 shown = c.shownRect(n);
 		if (!shown.intersects(visible)) continue;
 		++s_stats.drawn;
 		drawNode(dl, xf, ws, n, shown, has(s_sel, n.id), n.id == s_editNode);
@@ -1192,6 +1223,28 @@ void draw(const Services& services, const UUID& boardId)
 		xf.rectToScreen(shown, a, b);
 		services.noteRect("node:" + labelOfNode(ws, n), a, b);
 	}
+}
+
+// The dots and handles of the card in hand, for the mouse press that follows.
+struct Handles
+{
+	const Node* inHand = nullptr;
+	bool        shown = false;   // the four corner handles (a single selected card) as well as the dots
+	ImVec2      dotAt[4];        // N, E, S, W
+	ImVec2      cornerAt[4];     // nw, ne, se, sw
+};
+
+Handles drawHandles(const Canvas& c)
+{
+	Board* board = c.board;
+	ImDrawList* dl = c.dl;
+	const ImGuiIO& io = c.io;
+	const Xf& xf = c.xf;
+	const Services& services = c.services;
+	const bool hovered = c.hovered;
+	const bool editing = c.editing;
+	const double mx = c.mx;
+	const double my = c.my;
 
 	// ── Handles and dots for the card in hand ──
 	UUID dotNode;
@@ -1202,39 +1255,49 @@ void draw(const Services& services, const UUID& boardId)
 		if (s_drag == Drag::Connect) dotNode = s_connectFrom;
 	}
 	const Node* inHand = dotNode == UUID{} ? nullptr : board->findNode(dotNode);
-	bool handlesShown = false;
-	ImVec2 dotAt[4];   // N, E, S, W
-	ImVec2 cornerAt[4];   // nw, ne, se, sw
+	Handles h;
+	h.inHand = inHand;
 	if (inHand && !editing)
 	{
-		const Rect2 r = shownRect(*inHand);
+		const Rect2 r = c.shownRect(*inHand);
 		ImVec2 a, b;
 		xf.rectToScreen(r, a, b);
-		dotAt[0] = ImVec2((a.x + b.x) * 0.5f, a.y);
-		dotAt[1] = ImVec2(b.x, (a.y + b.y) * 0.5f);
-		dotAt[2] = ImVec2((a.x + b.x) * 0.5f, b.y);
-		dotAt[3] = ImVec2(a.x, (a.y + b.y) * 0.5f);
-		cornerAt[0] = a; cornerAt[1] = ImVec2(b.x, a.y); cornerAt[2] = b; cornerAt[3] = ImVec2(a.x, b.y);
+		h.dotAt[0] = ImVec2((a.x + b.x) * 0.5f, a.y);
+		h.dotAt[1] = ImVec2(b.x, (a.y + b.y) * 0.5f);
+		h.dotAt[2] = ImVec2((a.x + b.x) * 0.5f, b.y);
+		h.dotAt[3] = ImVec2(a.x, (a.y + b.y) * 0.5f);
+		h.cornerAt[0] = a; h.cornerAt[1] = ImVec2(b.x, a.y); h.cornerAt[2] = b; h.cornerAt[3] = ImVec2(a.x, b.y);
 		static const char* const dotNames[] = { "dot:N", "dot:E", "dot:S", "dot:W" };
 		static const char* const cornerNames[] = { "handle:nw", "handle:ne", "handle:se", "handle:sw" };
 		for (int i = 0; i < 4; ++i)
 		{
-			const bool near = hovered && std::abs(io.MousePos.x - dotAt[i].x) < 9 && std::abs(io.MousePos.y - dotAt[i].y) < 9;
-			dl->AddCircleFilled(dotAt[i], near ? kDotRadius + 2 : kDotRadius, Theme::u32(Theme::AccentHi));
-			dl->AddCircle(dotAt[i], near ? kDotRadius + 2 : kDotRadius, IM_COL32(0, 0, 0, 120));
-			services.noteRect(dotNames[i], ImVec2(dotAt[i].x - 5, dotAt[i].y - 5), ImVec2(dotAt[i].x + 5, dotAt[i].y + 5));
+			const bool near = hovered && std::abs(io.MousePos.x - h.dotAt[i].x) < 9 && std::abs(io.MousePos.y - h.dotAt[i].y) < 9;
+			dl->AddCircleFilled(h.dotAt[i], near ? kDotRadius + 2 : kDotRadius, Theme::u32(Theme::AccentHi));
+			dl->AddCircle(h.dotAt[i], near ? kDotRadius + 2 : kDotRadius, IM_COL32(0, 0, 0, 120));
+			services.noteRect(dotNames[i], ImVec2(h.dotAt[i].x - 5, h.dotAt[i].y - 5), ImVec2(h.dotAt[i].x + 5, h.dotAt[i].y + 5));
 		}
 		if (s_sel.size() == 1 && s_selEdge == UUID{})
 		{
-			handlesShown = true;
+			h.shown = true;
 			for (int i = 0; i < 4; ++i)
 			{
-				dl->AddRectFilled(ImVec2(cornerAt[i].x - kHandle * 0.5f, cornerAt[i].y - kHandle * 0.5f),
-				                  ImVec2(cornerAt[i].x + kHandle * 0.5f, cornerAt[i].y + kHandle * 0.5f), Theme::u32(Theme::AccentBright), 2.0f);
-				services.noteRect(cornerNames[i], ImVec2(cornerAt[i].x - 4, cornerAt[i].y - 4), ImVec2(cornerAt[i].x + 4, cornerAt[i].y + 4));
+				dl->AddRectFilled(ImVec2(h.cornerAt[i].x - kHandle * 0.5f, h.cornerAt[i].y - kHandle * 0.5f),
+				                  ImVec2(h.cornerAt[i].x + kHandle * 0.5f, h.cornerAt[i].y + kHandle * 0.5f), Theme::u32(Theme::AccentBright), 2.0f);
+				services.noteRect(cornerNames[i], ImVec2(h.cornerAt[i].x - 4, h.cornerAt[i].y - 4), ImVec2(h.cornerAt[i].x + 4, h.cornerAt[i].y + 4));
 			}
 		}
 	}
+
+	return h;
+}
+
+void drawNodeEditor(const Canvas& c)
+{
+	Board* board = c.board;
+	const Xf& xf = c.xf;
+	const Services& services = c.services;
+	const UUID& boardId = c.boardId;
+	const bool editing = c.editing;
 
 	// ── A card being typed in ──
 	if (editing)
@@ -1242,7 +1305,7 @@ void draw(const Services& services, const UUID& boardId)
 		if (const Node* n = board->findNode(s_editNode))
 		{
 			ImVec2 a, b;
-			xf.rectToScreen(shownRect(*n), a, b);
+			xf.rectToScreen(c.shownRect(*n), a, b);
 			ImGui::SetCursorScreenPos(a);
 			ImGui::PushStyleColor(ImGuiCol_FrameBg, Theme::warm(0.13f));
 			if (s_editFocus) { ImGui::SetKeyboardFocusHere(); s_editFocus = false; }
@@ -1261,33 +1324,42 @@ void draw(const Services& services, const UUID& boardId)
 			}
 		}
 	}
+}
+
+void pressMouse(const Canvas& c, const Handles& h, bool insideEdit, bool space)
+{
+	Board* board = c.board;
+	const ImGuiIO& io = c.io;
+	const Xf& xf = c.xf;
+	const bool hovered = c.hovered;
+	const double mx = c.mx;
+	const double my = c.my;
 
 	// ── Mouse: press ──
 	const bool shift = io.KeyShift;
-	const bool insideEdit = editing && ImGui::IsItemHovered();
 	if (hovered && !insideEdit && !space && s_drag == Drag::None && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 	{
 		int corner = -1, dot = -1;
-		if (handlesShown)
+		if (h.shown)
 			for (int i = 0; i < 4 && corner < 0; ++i)
-				if (std::abs(io.MousePos.x - cornerAt[i].x) <= kHandle && std::abs(io.MousePos.y - cornerAt[i].y) <= kHandle) corner = i;
-		if (corner < 0 && inHand)
+				if (std::abs(io.MousePos.x - h.cornerAt[i].x) <= kHandle && std::abs(io.MousePos.y - h.cornerAt[i].y) <= kHandle) corner = i;
+		if (corner < 0 && h.inHand)
 			for (int i = 0; i < 4 && dot < 0; ++i)
-				if (std::abs(io.MousePos.x - dotAt[i].x) <= 9 && std::abs(io.MousePos.y - dotAt[i].y) <= 9) dot = i;
+				if (std::abs(io.MousePos.x - h.dotAt[i].x) <= 9 && std::abs(io.MousePos.y - h.dotAt[i].y) <= 9) dot = i;
 		const UUID hit = board->hitTest(mx, my);
 		if (corner >= 0)
 		{
 			s_drag = Drag::Resize;
-			s_resizeNode = inHand->id;
+			s_resizeNode = h.inHand->id;
 			s_resizeCorner = corner;
-			s_resizeFrom = s_resizeTo = inHand->rect();
+			s_resizeFrom = s_resizeTo = h.inHand->rect();
 		}
 		else if (dot >= 0)
 		{
 			s_drag = Drag::Connect;
-			s_connectFrom = inHand->id;
+			s_connectFrom = h.inHand->id;
 		}
-		else if (!(hit == UUID{}))
+		else if (hit != UUID{})
 		{
 			s_dragHit = hit;
 			s_dragShift = shift;
@@ -1325,7 +1397,7 @@ void draw(const Services& services, const UUID& boardId)
 				anchorOf(*to, from->x + from->w * 0.5, from->y + from->h * 0.5, bx, by);
 				if (distanceToSegment(io.MousePos, xf.toScreen(ax, ay), xf.toScreen(bx, by)) <= 6.0f) { edgeHit = e.id; break; }
 			}
-			if (!(edgeHit == UUID{}))
+			if (edgeHit != UUID{})
 			{
 				s_selEdge = edgeHit;
 				s_sel.clear();
@@ -1338,9 +1410,16 @@ void draw(const Services& services, const UUID& boardId)
 			}
 		}
 	}
+}
 
-	// A drag that began this frame measures from where it began, not from the last one.
-	mouseDelta = ImVec2(io.MousePos.x - s_dragStart.x, io.MousePos.y - s_dragStart.y);
+void doubleClick(const Canvas& c, bool insideEdit)
+{
+	Board* board = c.board;
+	const Services& services = c.services;
+	const UUID& boardId = c.boardId;
+	const bool hovered = c.hovered;
+	const double mx = c.mx;
+	const double my = c.my;
 
 	// ── Mouse: double-click ──
 	if (hovered && !insideEdit && s_drag != Drag::Pan && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
@@ -1374,6 +1453,19 @@ void draw(const Services& services, const UUID& boardId)
 		}
 		s_drag = Drag::None;
 	}
+}
+
+void dragAndRelease(const Canvas& c)
+{
+	Board* board = c.board;
+	ImDrawList* dl = c.dl;
+	const ImGuiIO& io = c.io;
+	const Xf& xf = c.xf;
+	ViewState& view = c.view;
+	const UUID& boardId = c.boardId;
+	const double mx = c.mx;
+	const double my = c.my;
+	const ImVec2& mouseDelta = c.mouseDelta;
 
 	// ── Mouse: drag and release ──
 	if (s_drag == Drag::Move && ImGui::IsMouseDown(ImGuiMouseButton_Left))
@@ -1409,7 +1501,7 @@ void draw(const Services& services, const UUID& boardId)
 			const UUID over = board->hitTest(mx, my);
 			dl->AddLine(pa, io.MousePos, Theme::u32(Theme::AccentBright), 2.0f);
 			drawArrowHead(dl, io.MousePos, pa, 10.0f, Theme::u32(Theme::AccentBright));
-			if (!(over == UUID{}) && !(over == s_connectFrom))
+			if (over != UUID{} && !(over == s_connectFrom))
 				if (const Node* target = board->findNode(over))
 				{
 					ImVec2 a, b;
@@ -1426,11 +1518,11 @@ void draw(const Services& services, const UUID& boardId)
 			if (s_dragMoved)
 			{
 				const std::vector<UUID> ids = s_dragNodes;
-				const ImVec2 d = draggedBy();
+				const ImVec2 d = c.draggedBy();
 				const double dx = d.x, dy = d.y;
 				change(boardId, [=](Board& b) { return b.moveNodesBy(ids, dx, dy, taskNowMs()) > 0; });
 			}
-			else if (!s_dragShift && s_sel.size() > 1 && !(s_dragHit == UUID{}))
+			else if (!s_dragShift && s_sel.size() > 1 && s_dragHit != UUID{})
 				s_sel = { s_dragHit };   // a click on one of several selected cards keeps that one
 			break;
 		case Drag::Resize:
@@ -1459,7 +1551,7 @@ void draw(const Services& services, const UUID& boardId)
 		{
 			const UUID from = s_connectFrom;
 			const UUID to = board->hitTest(mx, my);
-			if (!(to == UUID{}) && !(to == from))
+			if (to != UUID{} && !(to == from))
 				change(boardId, [=](Board& b) { return b.addEdge(from, to, "", taskNowMs()) != nullptr; });
 			break;
 		}
@@ -1468,188 +1560,223 @@ void draw(const Services& services, const UUID& boardId)
 		if (s_drag != Drag::Pan) s_drag = Drag::None;
 		s_dragNodes.clear();
 	}
+}
+
+void drawMinimap(const Canvas& c, ImVec2 mapSize, ImVec2 mapMin, ImVec2 mapMax, bool overMap)
+{
+	Board* board = c.board;
+	ImDrawList* dl = c.dl;
+	const ImGuiIO& io = c.io;
+	const Services& services = c.services;
+	ViewState& view = c.view;
+	const ImVec2 size = c.size;
 
 	// ── The minimap ──
-	if (mapOn)
+	Rect2 world{ view.x, view.y, size.x / view.zoom, size.y / view.zoom };   // everything and what is on screen
+	Rect2 bb;
+	if (board->bounds(bb))
 	{
-		Rect2 world{ view.x, view.y, size.x / view.zoom, size.y / view.zoom };   // everything and what is on screen
-		Rect2 bb;
-		if (board->bounds(bb))
-		{
-			const double x0 = std::min(world.x, bb.x), y0 = std::min(world.y, bb.y);
-			const double x1 = std::max(world.x + world.w, bb.x + bb.w), y1 = std::max(world.y + world.h, bb.y + bb.h);
-			world = { x0, y0, x1 - x0, y1 - y0 };
-		}
-		const double pad = std::max(world.w, world.h) * 0.04;
-		world = { world.x - pad, world.y - pad, world.w + 2 * pad, world.h + 2 * pad };
-		const double k = std::min(mapSize.x / world.w, mapSize.y / world.h);
-		const ImVec2 inner(static_cast<float>(world.w * k), static_cast<float>(world.h * k));
-		const ImVec2 o(mapMin.x + (mapSize.x - inner.x) * 0.5f, mapMin.y + (mapSize.y - inner.y) * 0.5f);
-		auto toMap = [&](double wx, double wy) { return ImVec2(o.x + static_cast<float>((wx - world.x) * k), o.y + static_cast<float>((wy - world.y) * k)); };
+		const double x0 = std::min(world.x, bb.x), y0 = std::min(world.y, bb.y);
+		const double x1 = std::max(world.x + world.w, bb.x + bb.w), y1 = std::max(world.y + world.h, bb.y + bb.h);
+		world = { x0, y0, x1 - x0, y1 - y0 };
+	}
+	const double pad = std::max(world.w, world.h) * 0.04;
+	world = { world.x - pad, world.y - pad, world.w + 2 * pad, world.h + 2 * pad };
+	const double k = std::min(mapSize.x / world.w, mapSize.y / world.h);
+	const ImVec2 inner(static_cast<float>(world.w * k), static_cast<float>(world.h * k));
+	const ImVec2 o(mapMin.x + (mapSize.x - inner.x) * 0.5f, mapMin.y + (mapSize.y - inner.y) * 0.5f);
+	auto toMap = [&](double wx, double wy) { return ImVec2(o.x + static_cast<float>((wx - world.x) * k), o.y + static_cast<float>((wy - world.y) * k)); };
 
-		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && overMap) s_mapDrag = true;
-		if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_mapDrag = false;
-		if (s_mapDrag)
-		{
-			// The press puts the middle of the screen where it is.
-			const double wx = world.x + (io.MousePos.x - o.x) / k, wy = world.y + (io.MousePos.y - o.y) / k;
-			view.x = wx - size.x * 0.5 / view.zoom;
-			view.y = wy - size.y * 0.5 / view.zoom;
-		}
-
-		dl->AddRectFilled(mapMin, mapMax, Theme::u32(Theme::alpha(Theme::warm(0.08f), 0.92f)), 6.0f);
-		dl->AddRect(mapMin, mapMax, Theme::u32(Theme::warm(0.32f)), 6.0f);
-		dl->PushClipRect(mapMin, mapMax, true);
-		for (const Node& n : board->nodes)
-		{
-			ImVec4 tint{};
-			const bool coloured = colourOf(n.color, tint);
-			const ImVec2 a = toMap(n.x, n.y), b = toMap(n.x + n.w, n.y + n.h);
-			if (n.type == NodeType::Frame) dl->AddRect(a, b, Theme::u32(coloured ? tint : Theme::warm(0.4f)));
-			else dl->AddRectFilled(a, b, Theme::u32(coloured ? tint : Theme::warm(0.45f)));
-		}
-		dl->AddRect(toMap(view.x, view.y), toMap(view.x + size.x / view.zoom, view.y + size.y / view.zoom), Theme::u32(Theme::AccentBright), 0, 0, 1.5f);
-		dl->PopClipRect();
-		services.noteRect("map", mapMin, mapMax);
+	if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && overMap) s_mapDrag = true;
+	if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) s_mapDrag = false;
+	if (s_mapDrag)
+	{
+		// The press puts the middle of the screen where it is.
+		const double wx = world.x + (io.MousePos.x - o.x) / k, wy = world.y + (io.MousePos.y - o.y) / k;
+		view.x = wx - size.x * 0.5 / view.zoom;
+		view.y = wy - size.y * 0.5 / view.zoom;
 	}
 
-	// ── The floating tools ──
+	dl->AddRectFilled(mapMin, mapMax, Theme::u32(Theme::alpha(Theme::warm(0.08f), 0.92f)), 6.0f);
+	dl->AddRect(mapMin, mapMax, Theme::u32(Theme::warm(0.32f)), 6.0f);
+	dl->PushClipRect(mapMin, mapMax, true);
+	for (const Node& n : board->nodes)
 	{
-		// Left: what makes cards.
-		if (beginPlate("##palette", ImVec2(origin.x + 12, origin.y + 12), ImVec2(40, 4 * 28 + 3 * 4 + 10 + 12)))
+		ImVec4 tint{};
+		const bool coloured = colourOf(n.color, tint);
+		const ImVec2 a = toMap(n.x, n.y), b = toMap(n.x + n.w, n.y + n.h);
+		if (n.type == NodeType::Frame) dl->AddRect(a, b, Theme::u32(coloured ? tint : Theme::warm(0.4f)));
+		else dl->AddRectFilled(a, b, Theme::u32(coloured ? tint : Theme::warm(0.45f)));
+	}
+	dl->AddRect(toMap(view.x, view.y), toMap(view.x + size.x / view.zoom, view.y + size.y / view.zoom), Theme::u32(Theme::AccentBright), 0, 0, 1.5f);
+	dl->PopClipRect();
+	services.noteRect("map", mapMin, mapMax);
+}
+
+void drawPalette(const Canvas& c, double centreX, double centreY)
+{
+	const ImVec2 origin = c.origin;
+	const UUID& boardId = c.boardId;
+	const Services& services = c.services;
+	Workspace* wsp = c.services.ws;
+
+	// Left: what makes cards.
+	if (beginPlate("##palette", ImVec2(origin.x + 12, origin.y + 12), ImVec2(40, 4 * 28 + 3 * 4 + 10 + 12)))
+	{
+		if (iconButton("New Card", Icon::Note, false, true, "Planner/New Card")) createNode(boardId, NodeType::Text, centreX, centreY);
+		services.note("New Card");
+		if (iconButton("New Frame", Icon::Frame, false, true, "Planner/New Frame")) createNode(boardId, NodeType::Frame, centreX, centreY);
+		services.note("New Frame");
+		if (iconButton("Add", Icon::AddCard, false, true, "Planner/Add")) ImGui::OpenPopup("##addcard");
+		services.note("Add");
+		if (ImGui::BeginPopup("##addcard"))
 		{
-			if (iconButton("New Card", Icon::Note, false, true, "Planner/New Card")) createNode(boardId, NodeType::Text, centreX, centreY);
-			services.note("New Card");
-			if (iconButton("New Frame", Icon::Frame, false, true, "Planner/New Frame")) createNode(boardId, NodeType::Frame, centreX, centreY);
-			services.note("New Frame");
-			if (iconButton("Add", Icon::AddCard, false, true, "Planner/Add")) ImGui::OpenPopup("##addcard");
-			services.note("Add");
-			if (ImGui::BeginPopup("##addcard"))
+			ImGui::TextDisabled("Page");
+			int shown = 0;
+			for (Page* p : wsp->pages())
 			{
-				ImGui::TextDisabled("Page");
-				int shown = 0;
-				for (Page* p : wsp->pages())
+				if (++shown > 40) { ImGui::TextDisabled("..."); break; }
+				ImGui::PushID(p);
+				if (ImGui::Selectable(p->title.empty() ? "Untitled" : p->title.c_str())) addPageCard(boardId, p->id, centreX, centreY);
+				services.note("add:" + p->title);
+				ImGui::PopID();
+			}
+			for (Database* db : wsp->databases())
+			{
+				if (!ImGui::BeginMenu(db->name.empty() ? "Untitled" : db->name.c_str())) continue;
+				int rows = 0;
+				for (const Row& r : db->rows)
 				{
-					if (++shown > 40) { ImGui::TextDisabled("..."); break; }
-					ImGui::PushID(p);
-					if (ImGui::Selectable(p->title.empty() ? "Untitled" : p->title.c_str())) addPageCard(boardId, p->id, centreX, centreY);
-					services.note("add:" + p->title);
+					if (++rows > 60) { ImGui::TextDisabled("..."); break; }
+					ImGui::PushID(&r);
+					if (ImGui::Selectable(r.title.empty() ? "Untitled" : r.title.c_str())) addRowCard(boardId, db->id, r.id, centreX, centreY);
+					services.note("add:" + db->name + ":" + r.title);
 					ImGui::PopID();
 				}
-				for (Database* db : wsp->databases())
-				{
-					if (!ImGui::BeginMenu(db->name.empty() ? "Untitled" : db->name.c_str())) continue;
-					int rows = 0;
-					for (const Row& r : db->rows)
-					{
-						if (++rows > 60) { ImGui::TextDisabled("..."); break; }
-						ImGui::PushID(&r);
-						if (ImGui::Selectable(r.title.empty() ? "Untitled" : r.title.c_str())) addRowCard(boardId, db->id, r.id, centreX, centreY);
-						services.note("add:" + db->name + ":" + r.title);
-						ImGui::PopID();
-					}
-					ImGui::EndMenu();
-				}
-				ImGui::EndPopup();
+				ImGui::EndMenu();
 			}
-			if (iconButton("Snap", Icon::Snap, s_snap, true, "Planner/Snap")) s_snap = !s_snap;
-			services.note("Snap");
+			ImGui::EndPopup();
 		}
-		endPlate();
+		if (iconButton("Snap", Icon::Snap, s_snap, true, "Planner/Snap")) s_snap = !s_snap;
+		services.note("Snap");
+	}
+	endPlate();
+}
 
-		// Over the selection: what can be done to it.
-		const bool anyCards = !s_sel.empty(), anyEdge = !(s_selEdge == UUID{});
-		if ((anyCards || anyEdge) && s_drag == Drag::None && !editing)
+void drawSelectionBar(const Canvas& c)
+{
+	Board* board = c.board;
+	const Xf& xf = c.xf;
+	const ImVec2 origin = c.origin;
+	const ImVec2 size = c.size;
+	const UUID& boardId = c.boardId;
+	const Services& services = c.services;
+	const bool editing = c.editing;
+
+	// Over the selection: what can be done to it.
+	const bool anyCards = !s_sel.empty(), anyEdge = s_selEdge != UUID{};
+	if ((anyCards || anyEdge) && s_drag == Drag::None && !editing)
+	{
+		const int buttons = anyCards ? (s_sel.size() >= 2 ? 4 : 3) : 1;
+		const ImVec2 barSize(buttons * 28.0f + (buttons - 1) * 2.0f + 10.0f + (anyCards ? 16.0f : 0.0f), 38.0f);
+		ImVec2 at(origin.x + size.x * 0.5f - barSize.x * 0.5f, origin.y + 12);
+		if (anyCards)
 		{
-			const int buttons = anyCards ? (s_sel.size() >= 2 ? 4 : 3) : 1;
-			const ImVec2 barSize(buttons * 28.0f + (buttons - 1) * 2.0f + 10.0f + (anyCards ? 16.0f : 0.0f), 38.0f);
-			ImVec2 at(origin.x + size.x * 0.5f - barSize.x * 0.5f, origin.y + 12);
+			float x0 = FLT_MAX, y0 = FLT_MAX, x1 = -FLT_MAX, y1 = -FLT_MAX;
+			for (const Node& n : board->nodes)
+				if (has(s_sel, n.id))
+				{
+					ImVec2 a, b;
+					xf.rectToScreen(c.shownRect(n), a, b);
+					x0 = std::min(x0, a.x); y0 = std::min(y0, a.y); x1 = std::max(x1, b.x); y1 = std::max(y1, b.y);
+				}
+			at = ImVec2((x0 + x1) * 0.5f - barSize.x * 0.5f, y0 - barSize.y - 8.0f);
+			if (at.y < origin.y + 8) at.y = std::min(y1 + 8.0f, origin.y + size.y - barSize.y - 8.0f);
+		}
+		at.x = std::clamp(at.x, origin.x + 60.0f, std::max(origin.x + 60.0f, origin.x + size.x - barSize.x - 8.0f));
+		at.y = std::clamp(at.y, origin.y + 8.0f, std::max(origin.y + 8.0f, origin.y + size.y - barSize.y - 8.0f));
+		if (beginPlate("##selbar", at, barSize))
+		{
 			if (anyCards)
 			{
-				float x0 = FLT_MAX, y0 = FLT_MAX, x1 = -FLT_MAX, y1 = -FLT_MAX;
-				for (const Node& n : board->nodes)
-					if (has(s_sel, n.id))
-					{
-						ImVec2 a, b;
-						xf.rectToScreen(shownRect(n), a, b);
-						x0 = std::min(x0, a.x); y0 = std::min(y0, a.y); x1 = std::max(x1, b.x); y1 = std::max(y1, b.y);
-					}
-				at = ImVec2((x0 + x1) * 0.5f - barSize.x * 0.5f, y0 - barSize.y - 8.0f);
-				if (at.y < origin.y + 8) at.y = std::min(y1 + 8.0f, origin.y + size.y - barSize.y - 8.0f);
-			}
-			at.x = std::clamp(at.x, origin.x + 60.0f, std::max(origin.x + 60.0f, origin.x + size.x - barSize.x - 8.0f));
-			at.y = std::clamp(at.y, origin.y + 8.0f, std::max(origin.y + 8.0f, origin.y + size.y - barSize.y - 8.0f));
-			if (beginPlate("##selbar", at, barSize))
-			{
-				if (anyCards)
+				ImU32 fill = 0;
+				if (const Node* first = board->findNode(s_sel[0]))
 				{
-					ImU32 fill = 0;
-					if (const Node* first = board->findNode(s_sel[0]))
+					ImVec4 tint{};
+					if (colourOf(first->color, tint)) fill = Theme::u32(tint);
+				}
+				if (iconButton("Color", Icon::Colour, false, true, "Planner/Card color", false, fill)) ImGui::OpenPopup("##colours");
+				services.note("Color");
+				if (ImGui::BeginPopup("##colours"))
+				{
+					for (int i = -1; i < static_cast<int>(std::size(kSwatches)); ++i)
 					{
-						ImVec4 tint{};
-						if (colourOf(first->color, tint)) fill = Theme::u32(tint);
-					}
-					if (iconButton("Color", Icon::Colour, false, true, "Planner/Card color", false, fill)) ImGui::OpenPopup("##colours");
-					services.note("Color");
-					if (ImGui::BeginPopup("##colours"))
-					{
-						for (int i = -1; i < static_cast<int>(std::size(kSwatches)); ++i)
+						const std::string word = i < 0 ? std::string{} : kSwatches[i].word;
+						if (i >= 0) ImGui::SameLine(0, 4.0f);
+						ImGui::PushID(i);
+						if (ImGui::ColorButton("##swatch", i < 0 ? Theme::warm(0.20f) : kSwatches[i].colour,
+						                       ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoDragDrop,
+						                       ImVec2(22, 22)))
 						{
-							const std::string word = i < 0 ? std::string{} : kSwatches[i].word;
-							if (i >= 0) ImGui::SameLine(0, 4.0f);
-							ImGui::PushID(i);
-							if (ImGui::ColorButton("##swatch", i < 0 ? Theme::warm(0.20f) : kSwatches[i].colour,
-							                       ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_NoDragDrop,
-							                       ImVec2(22, 22)))
-							{
-								setColour(boardId, word);
-								ImGui::CloseCurrentPopup();
-							}
-							EditorWidgets::helpForKey("Planner/Card color");
-							services.note("swatch:" + (word.empty() ? std::string("none") : word));
-							ImGui::PopID();
+							setColour(boardId, word);
+							ImGui::CloseCurrentPopup();
 						}
+						EditorWidgets::helpForKey("Planner/Card color");
+						services.note("swatch:" + (word.empty() ? std::string("none") : word));
+						ImGui::PopID();
+					}
+					ImGui::EndPopup();
+				}
+				ImGui::SameLine();
+				if (iconButton("Duplicate", Icon::Duplicate, false, true, "Planner/Duplicate")) duplicateSelection(boardId);
+				services.note("Duplicate");
+				if (s_sel.size() >= 2)
+				{
+					ImGui::SameLine();
+					if (iconButton("Align", Icon::Align, false, true, "Planner/Align")) ImGui::OpenPopup("##align");
+					services.note("Align");
+					if (ImGui::BeginPopup("##align"))
+					{
+						if (EditorWidgets::selectable("Align Left"))       alignSelection(boardId, Board::Align::Left);
+						services.note("Align Left");
+						if (EditorWidgets::selectable("Align Center"))     alignSelection(boardId, Board::Align::CentreH);
+						services.note("Align Center");
+						if (EditorWidgets::selectable("Align Right"))      alignSelection(boardId, Board::Align::Right);
+						services.note("Align Right");
+						if (EditorWidgets::selectable("Align Top"))        alignSelection(boardId, Board::Align::Top);
+						services.note("Align Top");
+						if (EditorWidgets::selectable("Align Middle"))     alignSelection(boardId, Board::Align::CentreV);
+						services.note("Align Middle");
+						if (EditorWidgets::selectable("Align Bottom"))     alignSelection(boardId, Board::Align::Bottom);
+						services.note("Align Bottom");
+						ImGui::BeginDisabled(s_sel.size() < 3);
+						if (EditorWidgets::selectable("Distribute Horizontally")) distributeSelection(boardId, true);
+						services.note("Distribute Horizontally");
+						if (EditorWidgets::selectable("Distribute Vertically"))   distributeSelection(boardId, false);
+						services.note("Distribute Vertically");
+						ImGui::EndDisabled();
 						ImGui::EndPopup();
 					}
-					ImGui::SameLine();
-					if (iconButton("Duplicate", Icon::Duplicate, false, true, "Planner/Duplicate")) duplicateSelection(boardId);
-					services.note("Duplicate");
-					if (s_sel.size() >= 2)
-					{
-						ImGui::SameLine();
-						if (iconButton("Align", Icon::Align, false, true, "Planner/Align")) ImGui::OpenPopup("##align");
-						services.note("Align");
-						if (ImGui::BeginPopup("##align"))
-						{
-							if (EditorWidgets::selectable("Align Left"))       alignSelection(boardId, Board::Align::Left);
-							services.note("Align Left");
-							if (EditorWidgets::selectable("Align Center"))     alignSelection(boardId, Board::Align::CentreH);
-							services.note("Align Center");
-							if (EditorWidgets::selectable("Align Right"))      alignSelection(boardId, Board::Align::Right);
-							services.note("Align Right");
-							if (EditorWidgets::selectable("Align Top"))        alignSelection(boardId, Board::Align::Top);
-							services.note("Align Top");
-							if (EditorWidgets::selectable("Align Middle"))     alignSelection(boardId, Board::Align::CentreV);
-							services.note("Align Middle");
-							if (EditorWidgets::selectable("Align Bottom"))     alignSelection(boardId, Board::Align::Bottom);
-							services.note("Align Bottom");
-							ImGui::BeginDisabled(s_sel.size() < 3);
-							if (EditorWidgets::selectable("Distribute Horizontally")) distributeSelection(boardId, true);
-							services.note("Distribute Horizontally");
-							if (EditorWidgets::selectable("Distribute Vertically"))   distributeSelection(boardId, false);
-							services.note("Distribute Vertically");
-							ImGui::EndDisabled();
-							ImGui::EndPopup();
-						}
-					}
-					iconSeparator();
 				}
-				if (iconButton("Delete", Icon::Trash, false, true, "Planner/Delete", true)) deleteSelection(boardId);
-				services.note("Delete");
+				iconSeparator();
 			}
-			endPlate();
+			if (iconButton("Delete", Icon::Trash, false, true, "Planner/Delete", true)) deleteSelection(boardId);
+			services.note("Delete");
 		}
+		endPlate();
 	}
+}
+
+void handleKeys(const Canvas& c)
+{
+	Board* board = c.board;
+	const ImGuiIO& io = c.io;
+	ViewState& view = c.view;
+	const ImVec2 origin = c.origin;
+	const ImVec2 size = c.size;
+	const UUID& boardId = c.boardId;
+	const bool hovered = c.hovered;
+	const bool editing = c.editing;
 
 	// ── Keys ──
 	if ((hovered || ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) && !io.WantTextInput && !editing)
@@ -1676,6 +1803,90 @@ void draw(const Services& services, const UUID& boardId)
 			paste(boardId, px, py);
 		}
 	}
+}
+
+} // namespace
+
+void draw(const Services& services, const UUID& boardId)
+{
+	S = &services;
+	Workspace& ws = *services.ws;
+	Board* board = ws.findBoard(boardId);
+	if (!board)
+	{
+		ImGui::TextDisabled("This board is gone.");
+		return;
+	}
+	if (!(s_boardOfSelection == boardId))
+	{
+		// Another board: what was selected or half-done there means nothing here.
+		s_boardOfSelection = boardId;
+		s_sel.clear();
+		s_selEdge = s_editNode = s_connectFrom = UUID{};
+		s_drag = Drag::None;
+	}
+	// A selection that a pull or an undo made stale.
+	s_sel.erase(std::remove_if(s_sel.begin(), s_sel.end(), [&](const UUID& id) { return !board->findNode(id); }), s_sel.end());
+	if (s_selEdge != UUID{} && !board->findEdge(s_selEdge)) s_selEdge = UUID{};
+	if (s_editNode != UUID{} && !board->findNode(s_editNode)) s_editNode = UUID{};
+
+	ViewState view = viewOf(boardId);
+	const ImGuiIO& io = ImGui::GetIO();
+
+	const ToolbarResult toolbar = drawToolbar(services, boardId, board, view);
+	const double centreX = view.x + s_canvasSize.x * 0.5 / view.zoom, centreY = view.y + s_canvasSize.y * 0.5 / view.zoom;
+
+	// ── The canvas ──
+	ImGui::BeginChild("##boardcanvas", ImVec2(0, 0), ImGuiChildFlags_Borders,
+	                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	const ImVec2 size = ImGui::GetContentRegionAvail();
+	s_canvasSize = size;
+	ImGui::SetNextItemAllowOverlap();   // a card being typed in sits on top of it
+	ImGui::InvisibleButton("##canvas", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle | ImGuiButtonFlags_MouseButtonRight);
+	// The minimap sits in the bottom right corner and takes the mouse there.
+	const ImVec2 mapSize(180, 120);
+	const ImVec2 mapMin(origin.x + size.x - mapSize.x - 10, origin.y + size.y - mapSize.y - 10);
+	const ImVec2 mapMax(mapMin.x + mapSize.x, mapMin.y + mapSize.y);
+	const bool mapOn = s_minimap && !board->nodes.empty() && size.x > mapSize.x * 2 && size.y > mapSize.y * 2;
+	const bool overMap = mapOn && io.MousePos.x >= mapMin.x && io.MousePos.x <= mapMax.x && io.MousePos.y >= mapMin.y && io.MousePos.y <= mapMax.y;
+	const bool hovered = ImGui::IsItemHovered() && !overMap && !s_mapDrag;
+	services.noteRect("canvas", origin, ImVec2(origin.x + size.x, origin.y + size.y));
+	s_canvasMin = origin;
+	s_canvasMax = ImVec2(origin.x + size.x, origin.y + size.y);
+	s_canvasFrame = ImGui::GetFrameCount();
+
+	acceptDrops(services, boardId, origin, view);
+	const bool editing = s_editNode != UUID{};
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->PushClipRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), true);
+
+	applyViewButtons(view, size, board, toolbar.zoomIn, toolbar.zoomOut, toolbar.fit, toolbar.actual);
+	// Panning with the middle button, or Space and the left one (the press below asks for it as well).
+	const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
+	zoomAndPan(io, origin, view, hovered, editing, space);
+
+	Canvas c(services, ws, boardId, board, io, dl, origin, size, view, hovered, editing);
+	drawGrid(c);
+	drawArrows(c);
+	updateHoverNode(c);
+	drawCards(c);
+	const Handles handles = drawHandles(c);
+	drawNodeEditor(c);
+
+	// The edit box is the last item: nothing may be submitted between it and this.
+	const bool insideEdit = editing && ImGui::IsItemHovered();
+	pressMouse(c, handles, insideEdit, space);
+
+	// A drag that began this frame measures from where it began, not from the last one.
+	c.mouseDelta = ImVec2(io.MousePos.x - s_dragStart.x, io.MousePos.y - s_dragStart.y);
+
+	doubleClick(c, insideEdit);
+	dragAndRelease(c);
+	if (mapOn) drawMinimap(c, mapSize, mapMin, mapMax, overMap);
+	drawPalette(c, centreX, centreY);
+	drawSelectionBar(c);
+	handleKeys(c);
 
 	dl->PopClipRect();
 	ImGui::EndChild();

@@ -175,9 +175,8 @@ namespace
 		if (!s_content) return {};
 		const HE::MaterialGraph* fnGraph = loadFunctionGraph(relPath);
 		if (!fnGraph) return {};
-		bool hasOutput = false;
-		for (const auto& n : fnGraph->nodes)
-			if (n.type == HE::MatNodeType::FnOutput) { hasOutput = true; break; }
+		const bool hasOutput = std::any_of(fnGraph->nodes.begin(), fnGraph->nodes.end(),
+			[](const auto& n) { return n.type == HE::MatNodeType::FnOutput; });
 		if (!hasOutput) return {};
 
 		if (s_fnScratchMaterial == HE::UUID{})

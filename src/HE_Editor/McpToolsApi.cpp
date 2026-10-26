@@ -271,12 +271,13 @@ bool scalarFromJson(const json& j, const HE::api::ApiParam& p, const McpApiHooks
 		const auto tn = j.find("__type");
 		if (tn == j.end() || !tn->is_string())
 			return wrong("an object naming its definition in '__type'");
-		Value r = HE::TypeRegistry::instance().makeDefaultValue(tn->get<std::string>());
+		const std::string typeName = tn->get<std::string>();
+		Value r = HE::TypeRegistry::instance().makeDefaultValue(typeName);
 		HE::StructDef def;
-		if (!HE::TypeRegistry::instance().getStruct(tn->get<std::string>(), def))
+		if (!HE::TypeRegistry::instance().getStruct(typeName, def))
 		{
 			outCode  = "not_found";
-			outError = "'" + tn->get<std::string>() + "' is not a struct this project "
+			outError = "'" + typeName + "' is not a struct this project "
 			           "defines (parameter '" + name + "').";
 			return false;
 		}

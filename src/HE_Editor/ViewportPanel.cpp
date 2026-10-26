@@ -769,9 +769,15 @@ EntityActionState entityActionState(AppContext& ctx)
 		if (reg.valid(e) && !ctx.world->isBuiltin(e)) { st.groupable = true; break; }
 	st.groupable  = editable && st.groupable;
 	st.canUngroup = editable && ViewportActions::canUngroup(*ctx.world, ctx.selection);
-	st.primaryLocked = primary != entt::null && reg.valid(primary)
-	                && reg.all_of<EditorLockComponent>(primary);
+	st.primaryLocked = primaryLocked(ctx);
 	return st;
+}
+bool primaryLocked(AppContext& ctx)
+{
+	if (!ctx.world) return false;
+	auto& reg = ctx.world->registry();
+	const Entity primary = ctx.selection.primary();
+	return primary != entt::null && reg.valid(primary) && reg.all_of<EditorLockComponent>(primary);
 }
 // (Hide / Isolate / Show All / Group / Ungroup are the functions above.)
 void focusSelected(AppContext& ctx)          { focusSelected(ctx, sceneSnapshot(ctx)); }

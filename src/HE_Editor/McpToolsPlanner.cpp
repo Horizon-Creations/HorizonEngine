@@ -306,9 +306,9 @@ bool applyValue(Workspace& ws, Database& db, const UUID& rowId, const Property& 
 	case PropertyType::MultiSelect:
 	{
 		std::vector<UUID> ids;
+		const Property* cur = db.findProperty(pid);
 		for (const std::string& name : stringList(v))
 		{
-			const Property* cur = db.findProperty(pid);
 			const SelectOption* o = cur ? cur->findOptionByName(name) : nullptr;
 			if (!o && createOptions) o = db.addOption(pid, name);
 			if (!o) { err = "no option '" + name + "' (pass createOptions: true to add it)"; return false; }
@@ -685,18 +685,15 @@ void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks)
 			if (!errors.empty()) return ToolResult::fail("invalid_payload", errors.dump());
 
 			UUID rowId;
-			bool changed = false;
 			const bool saved = ws->edit(dbId, [&](Database& d) {
 				Row* r = d.addRow(title, author, taskNowMs());
 				rowId = r->id;
 				json again = json::array();
 				applyValues(*ws, d, rowId, values, create, again);
-				changed = true;
 				return true;
 			});
 			if (!saved)
 				return ToolResult::fail("save_failed", "the row was not written: " + ws->lastError());
-			(void)changed;
 			const Database* now = ws->find(dbId);
 			const Row* row = now ? now->findRow(rowId) : nullptr;
 			if (!row)
@@ -1128,7 +1125,8 @@ void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks)
 			Board* b0 = boardFrom(*ws, args, fail);
 			if (!b0) return fail;
 			const UUID boardId = b0->id;
-			const std::string typeWord = lower(strArg(args, "type").empty() ? "text" : strArg(args, "type"));
+			const std::string typeArg = strArg(args, "type");
+			const std::string typeWord = lower(typeArg.empty() ? "text" : typeArg);
 			NodeType type;
 			if (!nodeTypeFromName(typeWord, type) || (type != NodeType::Text && type != NodeType::Frame && type != NodeType::Page && type != NodeType::Row))
 				return invalid("type must be text, frame, page or row");

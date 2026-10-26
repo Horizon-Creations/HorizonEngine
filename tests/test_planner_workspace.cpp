@@ -65,6 +65,17 @@ TaskBoard sampleBoard()
 
 } // namespace
 
+TEST_CASE("planner import: derived ids keep their stored values")
+{
+	// The ids are persisted in saved databases: FNV-1a over "kind\nname", high half "planner\0".
+	CHECK(derivedId("property", "Status").hi == 0x706c616e6e657200ULL);
+	CHECK(derivedId("property", "Status").lo == 0x63c28b435e9e0242ULL);
+	CHECK(derivedId("database", "Tasks").lo == 0xea0334f346401e26ULL);
+	CHECK(derivedId("option:Status", "Open").lo == 0x9a3916263cb0bad4ULL);
+	CHECK(derivedId("", "").lo == 0x44bd31d473cd01cbULL);
+	CHECK(derivedId("view", "caf\xC3\xA9").lo == 0x4df67f8bf068590aULL);
+}
+
 TEST_CASE("planner import: derived ids are the same everywhere")
 {
 	CHECK(derivedId("property", "Status") == derivedId("property", "Status"));
@@ -637,4 +648,44 @@ TEST_CASE("planner workspace pages: poll takes in new, changed and removed files
 	CHECK(ws.unreadablePages().empty());
 	REQUIRE(ws.findPage(bad));
 	CHECK(ws.findPage(bad)->title == "Fixed");
+}
+
+TEST_CASE("planner workspace: pages() and boards() sort titles case-insensitively, ties by id")
+{
+	TempProject tp;
+	Workspace ws;
+	ws.setProject(tp.root);
+
+	// Mixed case, a prefix pair ("beta" < "betas"), and three titles that only differ in case.
+	const char* titles[] = {"betas", "Same", "beta", "SAME", "Alpha", "same", "zeta", "Beta2"};
+	for (const char* t : titles) { ws.createPage(t); ws.createBoard(t); }
+
+	auto lower = [](std::string s) {
+		for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return s;
+	};
+	auto check = [&](const auto& sorted) {
+		REQUIRE(sorted.size() == 8);
+		for (size_t i = 1; i < sorted.size(); ++i)
+		{
+			const auto* a = sorted[i - 1];
+			const auto* b = sorted[i];
+			const std::string x = lower(a->title), y = lower(b->title);
+			CHECK(x <= y);
+			if (x == y)
+			{
+				const bool idAscending = a->id.hi != b->id.hi ? a->id.hi < b->id.hi : a->id.lo < b->id.lo;
+				CHECK(idAscending);
+			}
+		}
+		CHECK(lower(sorted[0]->title) == "alpha");
+		CHECK(lower(sorted[1]->title) == "beta");
+		CHECK(lower(sorted[2]->title) == "beta2");
+		CHECK(lower(sorted[3]->title) == "betas");
+		CHECK(lower(sorted[4]->title) == "same");
+		CHECK(lower(sorted[6]->title) == "same");
+		CHECK(lower(sorted[7]->title) == "zeta");
+	};
+	check(ws.pages());
+	check(ws.boards());
 }

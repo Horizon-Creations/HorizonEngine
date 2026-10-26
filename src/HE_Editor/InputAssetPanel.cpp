@@ -313,16 +313,19 @@ bool mouseButtonComboCell(const char* id, std::string& value, const char* noneLa
 	return changed;
 }
 
-// Case-insensitive substring match for the Add Binding search field.
-bool matchesFilter(const std::string& label, const std::string& filter)
+std::string lowerCopy(std::string s)
 {
-	if (filter.empty()) return true;
-	auto lower = [](std::string s){
-		std::transform(s.begin(), s.end(), s.begin(),
-		               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-		return s;
-	};
-	return lower(label).find(lower(filter)) != std::string::npos;
+	std::transform(s.begin(), s.end(), s.begin(),
+	               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+	return s;
+}
+
+// Case-insensitive substring match for the Add Binding search field;
+// `loweredFilter` is the search text already run through lowerCopy once per frame.
+bool matchesFilter(const std::string& label, const std::string& loweredFilter)
+{
+	if (loweredFilter.empty()) return true;
+	return lowerCopy(label).find(loweredFilter) != std::string::npos;
 }
 
 // Every named keyboard key, built once. ~240 entries — small enough to filter
@@ -1098,6 +1101,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			// opens, so typing filters immediately.
 			if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
 			ImGui::InputTextWithHint("##search", "Search bindings\xE2\x80\xA6", &s_addFilter);
+			const std::string loweredFilter = lowerCopy(s_addFilter);
 
 			bool chose = false;
 			ImGui::BeginChild("##addlist", ImVec2(280.0f, 320.0f));
@@ -1107,7 +1111,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			auto axisItem = [&](const char* label, AxisSource src, bool padPair,
 			                    std::vector<AxisRow>& into, const char* idSuffix)
 			{
-				if (!matchesFilter(label, s_addFilter)) return;
+				if (!matchesFilter(label, loweredFilter)) return;
 				if (ImGui::Selectable((std::string(label) + idSuffix).c_str()))
 				{
 					AxisRow r;
@@ -1140,7 +1144,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			                     AxisSource sy, const char* py, const char* ny, bool padY,
 			                     float scaleY)
 			{
-				if (!matchesFilter(label, s_addFilter)) return;
+				if (!matchesFilter(label, loweredFilter)) return;
 				if (ImGui::Selectable((std::string(label) + "##comp").c_str()))
 				{
 					AxisRow x; x.source = sx; x.uiPadRow = padX;
@@ -1165,7 +1169,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					if (!stored || !stored[0]) continue;
 					const std::string label =
 						HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b));
-					if (!matchesFilter(label, s_addFilter)) continue;
+					if (!matchesFilter(label, loweredFilter)) continue;
 					if (ImGui::Selectable((label + "##gp").c_str()))
 					{ e.gamepadButtons.emplace_back(stored); st.dirty = true; chose = true; }
 				}
@@ -1173,14 +1177,14 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				for (int b = 0; b < kMouseButtonCount; ++b)
 				{
 					const std::string label = HE::mouseButtonDisplayName(b);
-					if (!matchesFilter(label, s_addFilter)) continue;
+					if (!matchesFilter(label, loweredFilter)) continue;
 					if (ImGui::Selectable((label + "##ms").c_str()))
 					{ e.mouseButtons.push_back(HE::mouseButtonName(b)); st.dirty = true; chose = true; }
 				}
 				ImGui::SeparatorText("Keyboard");
 				for (const std::string& keyName : allKeyNames())
 				{
-					if (!matchesFilter(keyName, s_addFilter)) continue;
+					if (!matchesFilter(keyName, loweredFilter)) continue;
 					if (ImGui::Selectable((keyName + "##kb").c_str()))
 					{ e.keys.push_back(keyName); st.dirty = true; chose = true; }
 				}

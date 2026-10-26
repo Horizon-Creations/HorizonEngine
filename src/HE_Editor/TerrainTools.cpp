@@ -27,6 +27,7 @@
 #include <cstdarg>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
@@ -125,6 +126,7 @@ namespace
 	ImU32 layerColour(const std::string& name)
 	{
 		std::string n;
+		n.reserve(name.size());
 		for (char c : name) n += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 		auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
 		if (has("auto"))                                 return IM_COL32(120, 150, 110, 255);
@@ -153,6 +155,7 @@ namespace
 	std::string upperCase(const char* s)
 	{
 		std::string out;
+		out.reserve(std::strlen(s));
 		for (; *s; ++s) out += static_cast<char>(std::toupper(static_cast<unsigned char>(*s)));
 		return out;
 	}

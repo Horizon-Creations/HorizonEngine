@@ -168,7 +168,7 @@ Block parseLine(const std::string& s, const MarkdownContext& ctx)
 	if (s.size() >= 4 && startsWith(s, "[[") && s.compare(s.size() - 2, 2, "]]") == 0 && ctx.page)
 	{
 		const UUID target = ctx.page(s.substr(2, s.size() - 4));
-		if (!(target == UUID{}))
+		if (target != UUID{})
 		{
 			Block b = make(BlockType::PageLink, {});
 			b.page = target;
@@ -181,7 +181,7 @@ Block parseLine(const std::string& s, const MarkdownContext& ctx)
 		const auto b0 = name.find_first_not_of(' ');
 		name = b0 == std::string::npos ? std::string{} : name.substr(b0);
 		const UUID target = ctx.database(name);
-		if (!(target == UUID{}))
+		if (target != UUID{})
 		{
 			Block b = make(BlockType::DatabaseView, {});
 			b.database = target;

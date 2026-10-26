@@ -29,7 +29,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -134,7 +137,7 @@ constexpr float kNodeW = 172.0f;
 
 ImU32 categoryColor(const char* cat)
 {
-	const std::string c = cat;
+	const std::string_view c = cat;
 	if (c == "Material") return IM_COL32(140,  60,  60, 255);
 	if (c == "Input")    return IM_COL32( 60, 100, 140, 255);
 	if (c == "Constant") return IM_COL32( 60, 120, 130, 255);
@@ -365,9 +368,10 @@ std::string serializeSelection(const State& st)
 			    n->type != MatNodeType::FnInput)
 				tmp.nodes.push_back(*n);
 	if (tmp.nodes.empty()) return {};
-	auto inSel = [&](int id){ for (auto& n : tmp.nodes) if (n.id == id) return true; return false; };
+	std::unordered_set<int> selIds;
+	for (const auto& n : tmp.nodes) selIds.insert(n.id);
 	for (const auto& l : st.graph.links)
-		if (inSel(l.srcNode) && inSel(l.dstNode)) tmp.links.push_back(l);
+		if (selIds.count(l.srcNode) && selIds.count(l.dstNode)) tmp.links.push_back(l);
 	return HE::materialGraphToJson(tmp);
 }
 
@@ -931,8 +935,9 @@ bool drawParamConstPanel(MaterialGraph& graph)
 		// Group by the params' metadata group (first-seen order; "" first as ungrouped).
 		std::vector<std::string> groupOrder;
 		auto groupOf = [](const MatGraphNode* n){ return n->group; };
+		std::set<std::string> seenGroups;
 		for (MatGraphNode* n : params)
-			if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(n)) == groupOrder.end())
+			if (seenGroups.insert(groupOf(n)).second)
 				groupOrder.push_back(groupOf(n));
 		std::stable_sort(groupOrder.begin(), groupOrder.end(),
 			[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
@@ -2121,8 +2126,9 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 	std::vector<std::string> groupOrder;
 	auto groupOf = [&](size_t i) -> std::string
 	{ return i < inst.graphParamGroups.size() ? inst.graphParamGroups[i] : std::string(); };
+	std::set<std::string> seenGroups;
 	for (size_t i = 0; i < inst.graphParamNames.size(); ++i)
-		if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(i)) == groupOrder.end())
+		if (seenGroups.insert(groupOf(i)).second)
 			groupOrder.push_back(groupOf(i));
 	std::stable_sort(groupOrder.begin(), groupOrder.end(),
 		[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
@@ -2139,12 +2145,13 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 			const auto kind = i < inst.graphParamTypes.size()
 				? static_cast<HE::MatParamKind>(inst.graphParamTypes[i]) : HE::MatParamKind::Float;
 			ImGui::PushID((int)i);
-			bool ov = ovIndex(nm) >= 0;
+			const int ovIdx = ovIndex(nm);
+			bool ov = ovIdx >= 0;
 			if (ImGui::Checkbox("##ov", &ov))
 			{
 				if (ov) inst.instanceOverriddenParams.push_back(nm);
 				else    inst.instanceOverriddenParams.erase(
-					        inst.instanceOverriddenParams.begin() + ovIndex(nm));
+					        inst.instanceOverriddenParams.begin() + ovIdx);
 				structureEdit = true; // un-override → value falls back to the parent (sync)
 			}
 			ImGui::SameLine();

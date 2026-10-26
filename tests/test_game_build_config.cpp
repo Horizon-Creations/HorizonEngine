@@ -14,6 +14,7 @@
 #include <Hpak/Aes256Gcm.h>
 #include <Project/ProjectSettings.h>
 #include <nlohmann/json.hpp>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -188,6 +189,34 @@ TEST_CASE("GameBuildConfig: the pak key is not in the header in plain text")
         CHECK(std::memcmp(key, cfg.encKey, 32) == 0);
     }
 }
+
+#if defined(HE_HAVE_OPENSSL)   // the mbedTLS build has no such cap and would try to allocate 2 GB
+TEST_CASE("Aes256Gcm: a length above INT_MAX is refused before OpenSSL sees it")
+{
+    if (!Hpak::cryptoAvailable()) return;
+    // The guard returns before anything reads the buffers, so a one-byte stand-in
+    // is enough; a real 2 GB buffer would only test the allocator.
+    const size_t tooBig = static_cast<size_t>(INT_MAX) + 1;
+    uint8_t key[32] = {}, nonce[12] = {}, dummy[1] = {};
+    std::vector<uint8_t> out(7, 0xAB);
+
+    CHECK_FALSE(Hpak::aesGcmEncrypt(key, nonce, dummy, tooBig, out));
+    CHECK(out.size() == 7);   // untouched: no resize(len + tag) before the guard
+    CHECK_FALSE(Hpak::aesGcmDecrypt(key, nonce, dummy, tooBig + 16, out));
+    CHECK(out.size() == 7);
+    CHECK_FALSE(Hpak::randomBytes(dummy, tooBig));
+
+    SUBCASE("a small buffer still round-trips")
+    {
+        const uint8_t msg[5] = {1, 2, 3, 4, 5};
+        std::vector<uint8_t> sealed, opened;
+        REQUIRE(Hpak::aesGcmEncrypt(key, nonce, msg, sizeof msg, sealed));
+        CHECK(sealed.size() == sizeof msg + 16);
+        REQUIRE(Hpak::aesGcmDecrypt(key, nonce, sealed.data(), sealed.size(), opened));
+        CHECK(opened == std::vector<uint8_t>(msg, msg + sizeof msg));
+    }
+}
+#endif
 
 TEST_CASE("GameBuildConfig: the compiled fixture reads back as the config it was generated from")
 {

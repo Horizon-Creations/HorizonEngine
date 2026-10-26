@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <type_traits>
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
@@ -818,4 +819,204 @@ TEST_CASE("ProjectGraphics: wrong types and out-of-range numbers are corrected, 
 	s.graphics.renderScale = std::nanf("");
 	s.clamp();
 	CHECK(s.graphics.renderScale == doctest::Approx(1.0f));
+}
+
+// ── operator== sees every field ──────────────────────────────────────────────
+// operator== is a hand-kept field list, and it drives isDefault() and with it
+// the "never grew a file" promise. A member added to a struct and forgotten
+// there would be saved nowhere and compared as equal, with no error: this case
+// flips each member of a default ProjectSettings on its own and wants the
+// comparison to notice. A new member needs a row here as well.
+
+namespace
+{
+
+// Far enough from any default that nearlyEqual (relative 1e-6) cannot hide it.
+void bump(bool& v)         { v = !v; }
+void bump(int& v)          { v += 1; }
+void bump(float& v)        { v += 1.0f; }
+void bump(std::string& v)  { v += "x"; }
+
+template <class Mutate>
+void expectFieldSeen(const char* field, Mutate mutate)
+{
+	INFO("field: " << field);
+	const HE::ProjectSettings base;
+	HE::ProjectSettings changed;
+	mutate(changed);
+	CHECK_FALSE(base == changed);
+	CHECK(base != changed);
+	CHECK_FALSE(changed.isDefault());
+}
+
+} // namespace
+
+TEST_CASE("ProjectSettings: operator== and isDefault see every field")
+{
+	using S = HE::ProjectSettings;
+#define HE_FIELD(path) expectFieldSeen(#path, [](S& s) { bump(s.path); })
+
+	HE_FIELD(game.title);
+	HE_FIELD(game.splashEnabled);
+	HE_FIELD(game.splashImage);
+	HE_FIELD(game.splashSubtitle);
+
+	HE_FIELD(shadows.distance);
+	HE_FIELD(shadows.cascadeCount);
+	HE_FIELD(shadows.resolution);
+	HE_FIELD(shadows.splitLambda);
+	HE_FIELD(shadows.slopeBias);
+	HE_FIELD(shadows.minBias);
+
+	HE_FIELD(physics.fixedHz);
+	HE_FIELD(physics.threads);
+	HE_FIELD(physics.budgetMs);
+	HE_FIELD(physics.eventsPerPoll);
+	HE_FIELD(physics.gravity.x);
+	HE_FIELD(physics.gravity.y);
+	HE_FIELD(physics.gravity.z);
+	HE_FIELD(physics.floatingOriginRadius);
+
+	HE_FIELD(renderDefaults.useEditorSettings);
+	HE_FIELD(renderDefaults.windowWidth);
+	HE_FIELD(renderDefaults.windowHeight);
+	HE_FIELD(renderDefaults.windowMode);
+	HE_FIELD(renderDefaults.vsync);
+	HE_FIELD(renderDefaults.backend);
+
+	HE_FIELD(graphics.enabled);
+#define HE_X(T, name, def, editorName, lo, hi) HE_FIELD(graphics.name);
+	HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+
+	HE_FIELD(input.enabled);
+	HE_FIELD(input.stickDeadzone);
+	HE_FIELD(input.triggerDeadzone);
+
+	HE_FIELD(antiCheat.enabled);
+	HE_FIELD(antiCheat.integrityCheck);
+	HE_FIELD(antiCheat.tolerance);
+	HE_FIELD(antiCheat.windowSec);
+	HE_FIELD(antiCheat.maxInputsPerSecond);
+	HE_FIELD(antiCheat.scoreHalfLifeSec);
+	HE_FIELD(antiCheat.scoreSuspect);
+	HE_FIELD(antiCheat.scoreConfirmed);
+	HE_FIELD(antiCheat.telemetryUrl);
+
+	HE_FIELD(multiplayer.defaultPort);
+	HE_FIELD(multiplayer.maxPlayers);
+	HE_FIELD(multiplayer.timeoutSec);
+	HE_FIELD(multiplayer.tickHz);
+	HE_FIELD(multiplayer.worldExtent);
+	HE_FIELD(multiplayer.interpolationDelaySec);
+	HE_FIELD(multiplayer.reconcileSnapDistance);
+	HE_FIELD(multiplayer.reconcileSmoothing);
+	HE_FIELD(multiplayer.maxPendingInputs);
+	HE_FIELD(multiplayer.discoverLan);
+	HE_FIELD(multiplayer.discoverDirectory);
+	HE_FIELD(multiplayer.portMapping);
+	HE_FIELD(multiplayer.relayAddress);
+	HE_FIELD(multiplayer.rpcPerSecond);
+
+	HE_FIELD(sourceControl.team);
+	HE_FIELD(sourceControl.project);
+#undef HE_FIELD
+
+	// The members a plain bump() does not fit.
+	expectFieldSeen("antiCheat.policySuspect",   [](S& s) { s.antiCheat.policySuspect   ^= HE::ProjectAntiCheatSettings::Flag; });
+	expectFieldSeen("antiCheat.policyConfirmed", [](S& s) { s.antiCheat.policyConfirmed ^= HE::ProjectAntiCheatSettings::Flag; });
+	expectFieldSeen("antiCheat.policyHard",      [](S& s) { s.antiCheat.policyHard      ^= HE::ProjectAntiCheatSettings::Flag; });
+	expectFieldSeen("sourceControl.mode", [](S& s) { s.sourceControl.mode = HE::ProjectSourceControlSettings::Mode::TeamServer; });
+
+	// A rule is part of equality: its presence, and each of its members.
+	expectFieldSeen("antiCheat.rules (added)", [](S& s) { s.antiCheat.rules.push_back({}); });
+	// Each member of a rule is compared against the same rule, not against a
+	// default ProjectSettings, which has no rule to differ from.
+	HE::ProjectSettings withRule, other;
+	HE::ProjectAntiCheatRule rule;
+	rule.name = "speed";
+	withRule.antiCheat.rules.push_back(rule);
+	other.antiCheat.rules.push_back(rule);
+	CHECK(withRule == other);
+	other.antiCheat.rules[0].name = "speedy";
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].level = "hard";
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].min += 1.0f;
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].max += 1.0f;
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].maxPerSecond += 1.0f;
+	CHECK(withRule != other);
+}
+
+// ── clamp() on a non-finite float ────────────────────────────────────────────
+// readNumber refuses NaN and Inf, so only a struct set directly (the panel's
+// typed edit, a script) can bring one to clamp(). Each float lands on its own
+// fallback: its default for most, 0 for the origin radius and a rule's range.
+
+TEST_CASE("ProjectSettings::clamp: a NaN or infinite float falls back, field by field")
+{
+	const HE::ProjectSettings def;
+	for (const float bad : { std::nanf(""), INFINITY, -INFINITY })
+	{
+		CAPTURE(bad);
+		HE::ProjectSettings s;
+		s.physics.budgetMs            = bad;
+		s.physics.floatingOriginRadius = bad;
+		s.physics.gravity             = glm::vec3(bad);
+		s.input.stickDeadzone         = bad;
+		s.input.triggerDeadzone       = bad;
+		s.antiCheat.tolerance         = bad;
+		s.antiCheat.windowSec         = bad;
+		s.antiCheat.scoreHalfLifeSec  = bad;
+		s.antiCheat.scoreSuspect      = bad;
+		s.antiCheat.scoreConfirmed    = bad;
+		s.antiCheat.rules.push_back({});
+		s.antiCheat.rules[0].min          = bad;
+		s.antiCheat.rules[0].max          = bad;
+		s.antiCheat.rules[0].maxPerSecond = bad;
+		s.multiplayer.timeoutSec            = bad;
+		s.multiplayer.tickHz                = bad;
+		s.multiplayer.worldExtent           = bad;
+		s.multiplayer.interpolationDelaySec = bad;
+		s.multiplayer.reconcileSnapDistance = bad;
+		s.multiplayer.reconcileSmoothing    = bad;
+#define HE_X(T, name, def_, editorName, lo, hi) \
+		if constexpr (std::is_same_v<T, float>) s.graphics.name = bad;
+		HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+		s.clamp();
+
+		CHECK(s.physics.budgetMs == def.physics.budgetMs);
+		CHECK(s.physics.floatingOriginRadius == 0.0f);
+		CHECK(s.physics.gravity == glm::vec3(0.0f));
+		CHECK(s.input.stickDeadzone == def.input.stickDeadzone);
+		CHECK(s.input.triggerDeadzone == def.input.triggerDeadzone);
+		CHECK(s.antiCheat.tolerance == def.antiCheat.tolerance);
+		CHECK(s.antiCheat.windowSec == def.antiCheat.windowSec);
+		CHECK(s.antiCheat.scoreHalfLifeSec == def.antiCheat.scoreHalfLifeSec);
+		CHECK(s.antiCheat.scoreSuspect == def.antiCheat.scoreSuspect);
+		CHECK(s.antiCheat.scoreConfirmed == def.antiCheat.scoreConfirmed);
+		CHECK(s.antiCheat.rules[0].min == 0.0f);
+		CHECK(s.antiCheat.rules[0].max == 0.0f);
+		CHECK(s.antiCheat.rules[0].maxPerSecond == 0.0f);
+		CHECK(s.multiplayer.timeoutSec == def.multiplayer.timeoutSec);
+		CHECK(s.multiplayer.tickHz == def.multiplayer.tickHz);
+		CHECK(s.multiplayer.worldExtent == def.multiplayer.worldExtent);
+		CHECK(s.multiplayer.interpolationDelaySec == def.multiplayer.interpolationDelaySec);
+		CHECK(s.multiplayer.reconcileSnapDistance == def.multiplayer.reconcileSnapDistance);
+		CHECK(s.multiplayer.reconcileSmoothing == def.multiplayer.reconcileSmoothing);
+		// Every graphics float is back on its default (equality is nearlyEqual,
+		// so the exact bits are pinned on two of them as well).
+		HE::ProjectSettings graphicsOnly;
+		graphicsOnly.graphics = s.graphics;
+		CHECK(graphicsOnly.isDefault());
+		CHECK(s.graphics.aaSharpness == def.graphics.aaSharpness);
+		CHECK(s.graphics.dofAperture == def.graphics.dofAperture);
+	}
 }
