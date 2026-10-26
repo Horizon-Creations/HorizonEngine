@@ -3165,7 +3165,9 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // ByteAddressBuffer, not StructuredBuffer — D3D11 must bind RAW views
         // (D3D11_BUFFEREX_SRV_FLAG_RAW); the built-in shader's structured
         // t18..t20 cannot be reused as they are. D3D12 root SRVs take either.
-        std::vector<he::shaderc::HlslPin> pins = kHlslMaterialPins;
+        std::vector<he::shaderc::HlslPin> pins;
+        pins.reserve(kHlslMaterialPins.size() + 3); // + the clustered variant's 3 SRVs below
+        pins.insert(pins.end(), kHlslMaterialPins.begin(), kHlslMaterialPins.end());
         if (clustered)
         {
             pins.push_back({ Stage::Fragment, 0, 24, 24 }); // HeClusterLights → t24
