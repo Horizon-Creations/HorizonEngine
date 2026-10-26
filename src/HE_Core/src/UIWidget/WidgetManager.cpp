@@ -1647,8 +1647,7 @@ void WidgetManager::selectListRow(Instance& w, HE::UIListView& lv, int item)
 
 void WidgetManager::selectTreeNode(Instance& w, HE::UITreeView& tv, int node)
 {
-	if (node >= tv.nodeCount()) node = -1;
-	if (node < 0) node = -1;
+	if (node < 0 || node >= tv.nodeCount()) node = -1;
 	if (node == tv.selected) return;
 	tv.selected = node;
 	m_visualDirty = true;
