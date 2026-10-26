@@ -64,7 +64,10 @@ namespace HE::water
     // (mat_gen) reads e back as normal.x / normal.y / kShoreNormalGain. A mesh without
     // the channel (the engine plane, any user mesh) has x = 0, which reads as e = 0:
     // open water, nothing near a shore. A power of two, so the divide is exact.
-    inline constexpr float kShoreFadeDepth  = 1.0f;          // metres of water over which e runs 1 -> 0
+    // Three metres since Thema 320: the material's colour and opacity follow the real depth over
+    // the whole range, and with one metre the water went from clear to its deep colour inside a
+    // single contour, which is the line the eye sees where the water meets the landscape.
+    inline constexpr float kShoreFadeDepth  = 3.0f;          // metres of water over which e runs 1 -> 0
     inline constexpr float kShoreNormalGain = 1.0f / 32.0f;  // a 1.8 degree tilt at the waterline
 
     // The trains the physics follows: the two that carry the height (C is 2 cm).

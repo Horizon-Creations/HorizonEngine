@@ -98,12 +98,12 @@ struct Knob { const char* name; MatParamKind kind; float v[4]; };
 const Knob kWaterKnobs[] = {
 	{ "ShallowColor", MatParamKind::Color, { 0.045f, 0.20f, 0.22f, 0.0f } },
 	{ "DeepColor",    MatParamKind::Color, { 0.004f, 0.028f, 0.052f, 0.0f } },
-	{ "Turbidity",    MatParamKind::Vec4,  { 0.45f, 4.0f, 0.35f, 0.7f } },
+	{ "Turbidity",    MatParamKind::Vec4,  { 0.45f, 4.0f, 0.6f, 0.7f } },
 	{ "WaveA",        MatParamKind::Vec4,  { 20.0f, 1.0f, 14.0f, 0.07f } },
 	{ "WaveB",        MatParamKind::Vec4,  { 335.0f, 0.8f, 5.0f, 0.10f } },
 	{ "WaveC",        MatParamKind::Vec4,  { 70.0f, 0.5f, 1.6f, 0.09f } },
 	{ "Surface",      MatParamKind::Vec4,  { 5.0f, 0.8f, 0.08f, 0.3f } },
-	{ "ShallowWater", MatParamKind::Vec4,  { 0.8f, 0.5f, 0.25f, 0.0f } },
+	{ "ShallowWater", MatParamKind::Vec4,  { 1.5f, 0.5f, 0.25f, 0.0f } },
 	{ "Opacity",      MatParamKind::Float, { 0.5f, 0.0f, 0.0f, 0.0f } },
 	{ "Refraction",   MatParamKind::Float, { 0.3f, 0.0f, 0.0f, 0.0f } },
 	{ "FoamColor",    MatParamKind::Color, { 0.82f, 0.88f, 0.90f, 0.0f } },
@@ -243,6 +243,43 @@ TEST_CASE("Engine water material: its wave knobs ARE the trains the water physic
 	REQUIRE(HE::water::kPhysicsWaveCount == 2);
 	CHECK(HE::water::kPhysicsWaves[0] == HE::water::kWaveA);
 	CHECK(HE::water::kPhysicsWaves[1] == HE::water::kWaveB);
+}
+
+TEST_CASE("Engine water material: the shore depth range it reads is the one the water mesh bakes")
+{
+	// Thema 320: the material has no scene depth; the only depth it knows is the one WaterMesh
+	// bakes into the vertex normal (e = 1 - depth / kShoreFadeDepth). The graph divides by the
+	// same numbers, so a retuned header and a stale Water.hasset would draw a shore of the wrong
+	// width (the tint and the opacity ramp read the depth wrong) without any error anywhere.
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
+	Scratch s("shorerange");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset(kWaterPath));
+	REQUIRE(m);
+	HE::MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(m->nodeGraphJson, g));
+	auto hasConst = [&](float v)
+	{
+		for (const HE::MatGraphNode& n : g.nodes)
+			if (n.type == HE::MatNodeType::ConstFloat && n.p[0] == v) return true;
+		return false;
+	};
+	CHECK(hasConst(HE::water::kShoreFadeDepth));        // shoreD = (1 - e) * range
+	CHECK(hasConst(HE::water::kShoreNormalGain));       // e = |n.xz| / n.y / gain
+	CHECK_FALSE(hasConst(HE::water::kShoreFadeDepth * 1.01f)); // the control: a range nobody baked
+
+	// Deeper than the range the shore must be neutral (open water: e = 0, shoreD = the range), so
+	// what is measured in metres has to end inside it: the opacity floor is whole from the clear
+	// depth, and the alpha ramp (plus the lace that wobbles it by up to 0.3 of its width) is done.
+	const int shallow = slotOf(*m, "ShallowWater"), turb = slotOf(*m, "Turbidity");
+	REQUIRE(shallow >= 0);
+	REQUIRE(turb >= 0);
+	CHECK(m->shaderParamData[shallow * 4 + 0] <= HE::water::kShoreFadeDepth);
+	CHECK(m->shaderParamData[turb * 4 + 2] * 1.3f <= HE::water::kShoreFadeDepth);
+	// And the knobs say so: the defaults reach well past a metre, which is what a one-metre
+	// range could not show (the water went from clear to deep inside a single contour).
+	CHECK(m->shaderParamData[shallow * 4 + 0] > 1.0f);
 }
 
 // The Material Editor redraws its preview every frame for a shader that reads the

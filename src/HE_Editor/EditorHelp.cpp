@@ -264,7 +264,7 @@ namespace
 	  "the transparent pass — so it no longer writes depth. On the engine water "
 	  "(already transparent) the parameter of that name is the opacity looking "
 	  "straight down into clear water; depth tint, Fresnel and foam raise it. "
-	  "In the last metre before a landscape's shore it falls toward a quarter "
+	  "In the last metres before a landscape's shore it falls toward a quarter "
 	  "of itself as the water gets shallower, so the ground shows through.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
@@ -295,10 +295,10 @@ namespace
 	{ "Material/Turbidity", "",
 	  "x = absorption per metre: higher is murkier, the deep colour arrives "
 	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
-	  "below the surface is not read yet (in the last metre before a landscape's "
-	  "shore the real depth takes over, so shallows are clear). z = shore width: at a landscape's "
+	  "below the surface is not read yet (in the last three metres before a "
+	  "landscape's shore the real depth takes over, so shallows are clear). z = shore width: at a landscape's "
 	  "waterline the water fades in over this many metres of depth instead of "
-	  "ending in a hard edge (0 = hard, up to 0.7). w = shore foam: the lace "
+	  "ending in a hard edge (0 = hard, up to 1). w = shore foam: the lace "
 	  "along the waterline (0 = none, 1 = strong).",
 	  "", "materials#water" },
 	{ "Material/WaveA", "",
@@ -334,13 +334,13 @@ namespace
 	  "multiplied by the reflection; about 0.3 gives water's real F0 of 0.02.",
 	  "", "materials#water" },
 	{ "Material/ShallowWater", "",
-	  "How water behaves in the last metre before a landscape's shore (a plane "
-	  "has no shore, so nothing changes there). x = clear depth in metres: "
+	  "How water behaves in the last three metres before a landscape's shore (a plane "
+	  "has no shore, so nothing changes there). x = clear depth in metres (0 to 3): "
 	  "from this much water on, Opacity is whole; shallower water lets the "
 	  "ground show through more. Raise it to see further into the shallows "
 	  "before the water turns opaque. y = tint start (0 to 1, shore closeness "
-	  "where 0 is a metre of water or more and 1 is none): where the depth tint "
-	  "has fully taken over the real depth, 0.5 is half a metre; further out it "
+	  "where 0 is three metres of water or more and 1 is none): where the depth tint "
+	  "has fully taken over the real depth, 0.5 is a metre and a half; further out it "
 	  "blends to the assumed depth in Turbidity. z = opacity floor (0 to 1): "
 	  "the share of Opacity left at no depth at all. w is reserved and does "
 	  "nothing yet.",
