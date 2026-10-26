@@ -5261,18 +5261,20 @@ WidgetManager::StateSnapshot WidgetManager::captureState() const
 int WidgetManager::restoreState(const StateSnapshot& snapshot)
 {
 	int landed = 0;
-	std::unordered_map<std::string, int> seen;
-	// Which live widget answers to which key. Built once rather than searched
-	// per row: a page with a list of a hundred rows is a hundred widgets, and
-	// the snapshot has an entry for each of them.
-	std::vector<std::pair<StateSnapshot::Key, Instance*>> byKey;
+	// Which live widget answers to which key: the copies of each asset in
+	// creation order, so a key (asset, copy) is one hash lookup and an index.
+	// Built once rather than searched per row: a page with a list of a hundred
+	// rows is a hundred widgets, and the snapshot has an entry for each of them.
+	std::unordered_map<std::string, std::vector<Instance*>> copiesOf;
 	for (Instance& w : m_instances)
-		byKey.push_back({ StateSnapshot::Key{ w.assetPath, seen[w.assetPath]++ }, &w });
+		copiesOf[w.assetPath].push_back(&w);
 
 	auto findWidget = [&](const StateSnapshot::Key& k) -> Instance*
 	{
-		for (auto& [key, w] : byKey) if (key == k) return w;
-		return nullptr;
+		const auto it = copiesOf.find(k.asset);
+		if (it == copiesOf.end() || k.copy < 0 ||
+		    static_cast<std::size_t>(k.copy) >= it->second.size()) return nullptr;
+		return it->second[static_cast<std::size_t>(k.copy)];
 	};
 
 	for (const StateSnapshot::Element& row : snapshot.elements)
