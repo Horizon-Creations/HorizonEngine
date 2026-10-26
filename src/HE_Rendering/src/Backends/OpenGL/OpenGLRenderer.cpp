@@ -9876,7 +9876,8 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 			std::vector<float> lineVerts; // pos3 + color3 per vertex
 			const glm::vec3 jointColor(1.0f, 0.85f, 0.15f), boneColor(0.2f, 0.9f, 1.0f);
 			auto pushVert = [&](const glm::vec3& p, const glm::vec3& c) {
-				lineVerts.insert(lineVerts.end(), { p.x, p.y, p.z, c.x, c.y, c.z });
+				lineVerts.push_back(p.x); lineVerts.push_back(p.y); lineVerts.push_back(p.z);
+				lineVerts.push_back(c.x); lineVerts.push_back(c.y); lineVerts.push_back(c.z);
 			};
 			const float markerSize = std::max(extent * 0.015f, 0.005f);
 			for (size_t i = 0; i < asset->skeleton.size(); ++i)
