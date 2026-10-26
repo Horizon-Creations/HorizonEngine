@@ -5210,13 +5210,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	// shadows land. Off the camera, lightly hysteresised against streaming
 	// jitter in the scene bounds.
 	{
-		// DrawScene gathered the union in its refine loop, just before this call.
-		HE::AABB sceneBox = m_frameSceneBox;
-		if (m_refinedBounds.size() != m_renderWorld.objects.size())
-		{
-			sceneBox = HE::AABB{};
-			for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
-		}
+		const HE::AABB sceneBox = m_frameCull.sceneBox(m_renderWorld, m_extractor.fullExtractCount());
 		const float g = sceneBox.isValid() ? sceneBox.min.y : 0.0f;
 		if (std::isnan(m_cloudShadowGroundY)) m_cloudShadowGroundY = g;
 		const float dead = cloudH * 0.35f;
@@ -6614,6 +6608,15 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	m_giReflHistValid = false;
 }
 
+void OpenGLRenderer::RefineObjectBounds()
+{
+	m_frameCull.refine(m_renderWorld, m_extractor.fullExtractCount(), [this](const RenderObject& obj) -> const HE::AABB*
+	{
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		return mesh ? &mesh->localBounds : nullptr;
+	});
+}
+
 // Probe-grid fit over the scene AABB (GIProbeGrid.h: spacing grows so the
 // whole scene — a 100 m terrain included — fits the probe budget). Metal
 // lesson: refresh worldBounds from the real mesh bounds first — the extractor
@@ -6626,9 +6629,7 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	RefineObjectBounds();
 	int unresolved = 0;
 	const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!sceneBox.isValid()) return;
@@ -11266,22 +11267,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	const glm::vec3 sunDir = m_renderWorld.sunDirection;
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
-	// The same loop keeps a compact copy of every bound for the frustum culls of this frame
-	// (camera and cascades) and their union for the cloud-shadow map, as Metal does
-	// (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, levers 5 and 7).
-	m_refinedBounds.resize(m_renderWorld.objects.size());
-	m_frameSceneBox = HE::AABB{};
-	for (size_t i = 0; i < m_renderWorld.objects.size(); ++i)
-	{
-		RenderObject& obj = m_renderWorld.objects[i];
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
-		m_refinedBounds[i] = obj.worldBounds;
-		m_frameSceneBox.expand(obj.worldBounds);
-	}
+	// Also keeps a compact copy of every bound for this frame's frustum culls (camera and cascades)
+	// and, on demand, their union for the cloud-shadow map (FrameCull; audit levers 5 and 7).
+	RefineObjectBounds();
+	const uint64_t walk = m_extractor.fullExtractCount();
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
-	m_culler.cull(m_refinedBounds, viewProjClean, m_visible);
+	m_frameCull.cull(m_culler, m_renderWorld, walk, viewProjClean, m_visible);
 	// Occlusion (off by default): drops what the frustum kept but a nearer
 	// opaque surface hides — the same m_visible the sort and every camera pass
 	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
@@ -11408,10 +11400,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					const char* e = std::getenv("HE_MTL_PARALLEL_SHADOW");
 					return !(e && *e && std::atoi(e) == 0);
 				}();
-				auto prepare = [this](size_t v)
+				auto prepare = [this, walk](size_t v)
 				{
 					ShadowView& sv = m_shadowViews[v];
-					m_culler.cull(m_refinedBounds, sv.viewProj, sv.visible);
+					m_frameCull.cull(m_culler, m_renderWorld, walk, sv.viewProj, sv.visible);
 					sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
 					RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
 				};

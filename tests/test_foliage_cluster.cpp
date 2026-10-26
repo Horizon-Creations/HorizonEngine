@@ -1243,7 +1243,8 @@ TEST_CASE("Every backend refreshes bounds through RenderObject::refineWorldBound
 	}
 	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
 	// Metal and Vulkan refine once per walk (Thema 162, step 4): one helper holds the loop and
-	// the five passes that need the bounds call it. The other three still loop in place.
+	// the five passes that need the bounds call it. GL, D3D11, D3D12 and Vulkan hand the loop to
+	// FrameCull::refine (the one place outside Metal that calls refineWorldBounds); Metal keeps its own.
 	struct RefineSite
 	{
 		const char* file;
@@ -1252,9 +1253,14 @@ TEST_CASE("Every backend refreshes bounds through RenderObject::refineWorldBound
 		size_t      helperCalls;
 	};
 	const RefineSite refineSites[] = {
-		{ "Metal/MetalRenderer.mm", 1, "RefineObjectBounds();", 5 }, { "OpenGL/OpenGLRenderer.cpp", 2, nullptr, 0 },
-		{ "D3D11/D3D11Renderer.cpp", 1, nullptr, 0 }, { "D3D12/D3D12Renderer.cpp", 1, nullptr, 0 },
-		{ "Vulkan/VulkanRenderer.cpp", 1, "refineObjectBounds();", 5 } };
+		{ "Metal/MetalRenderer.mm", 1, "RefineObjectBounds();", 5 }, { "OpenGL/OpenGLRenderer.cpp", 0, "RefineObjectBounds();", 2 },
+		{ "D3D11/D3D11Renderer.cpp", 0, "p.m_frameCull.refine(", 1 }, { "D3D12/D3D12Renderer.cpp", 0, "p.m_frameCull.refine(", 1 },
+		{ "Vulkan/VulkanRenderer.cpp", 0, "refineObjectBounds();", 5 } };
+	{
+		const std::string fc = readFile(root / "src" / "HE_Rendering" / "include" / "HorizonRendering" / "FrameCull.h");
+		REQUIRE(!fc.empty());
+		CHECK(countOf(fc, ".refineWorldBounds(") == 1);   // the loop GL, D3D11, D3D12 and Vulkan share
+	}
 	for (const auto& site : refineSites)
 	{
 		const char* rel     = site.file;
@@ -1367,7 +1373,8 @@ TEST_CASE("No backend skips a foliage cluster in a per-object pass: velocity, de
 	CHECK(countOf(d3d12, "if (velFull())") == 2); // the object loop and the plant loop
 	// Vulkan's decal depth and reflection pre-pass take the whole cluster.
 	const std::string vk = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
-	CHECK(countOf(vk, "m_renderWorld.appendInstances(obj, m_clusterScratch);") == 2);
+	CHECK(countOf(vk, "m_renderWorld.appendInstances(obj, m_clusterScratch);") == 1);   // the reflection pre-pass
+	CHECK(vk.find("m_renderWorld.instanceMatrix(obj, k)") != std::string::npos);        // decal depth reads the block
 	CHECK(vk.find("m_reflPrepassInstPipeline && n > 1 && allocInstances(n") != std::string::npos);
 }
 

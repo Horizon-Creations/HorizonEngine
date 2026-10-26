@@ -19,6 +19,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
@@ -125,10 +127,13 @@ TEST_CASE("Groups wired: a variant per hex, no extra texture read")
 	const HE::MatShaderGen plainBomb = HE::generateFragment(makeArrayGraph(false));
 	const HE::MatShaderGen grouped   = HE::generateFragment(makeGroupedGraph(false, 4.0f));
 
-	// Six taps (2 nodes x 3 hexes) either way: the variant is picked from numbers the hash
-	// already holds.
+	// Six taps (2 nodes x 3 hexes) per pixel either way: the variant is picked from numbers the hash
+	// already holds. The grouped text holds them twice, once per side of `if (<v>_V == 1)`: V = 1
+	// reads the layer with the plain taps, V > 1 reads the slices the hash picked (Thema 237).
 	CHECK(countOf(plainBomb.glsl, "textureGrad(heTexP") == 6u);
-	CHECK(countOf(grouped.glsl, "textureGrad(heTexP") == 6u);
+	CHECK(countOf(grouped.glsl, "textureGrad(heTexP") == 12u);
+	CHECK(countOf(grouped.glsl, "_V == 1) {") == 2u);
+	CHECK(countOf(grouped.glsl, "_s0))") == 2u); // the slice is read on the V > 1 side only
 	// One variant grid shared by the Albedo and the Normal read of the layer, no plain grid.
 	CHECK(countOf(grouped.glsl, "void heBombGridV(") == 1u);
 	CHECK(countOf(grouped.glsl, "heBombGridV(n") == 1u);
@@ -160,8 +165,11 @@ TEST_CASE("The auto landscape graph reads variants: 36 hex reads, one variant gr
 	const MaterialGraph g = HE::buildAutoLandscapeGraph().graph;
 	const HE::MatShaderGen lit = HE::generateFragment(g, HE::weatherFunctionLoader());
 	REQUIRE(lit.textures.size() == 3);
-	// 4 layers x (Albedo + Normal + Mask) x 3 hexes: the count the plan keeps at 36.
-	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 36u);
+	// 4 layers x (Albedo + Normal + Mask) x 3 hexes: the count the plan keeps at 36 reads per pixel;
+	// the text holds them once for V = 1 and once for V > 1 (see the grouped test above).
+	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 72u);
+	CHECK(countOf(lit.glsl, "_V == 1) {") == 12u);
+	CHECK(countOf(lit.glsl, "_s0))") == 12u);
 	CHECK(countOf(lit.glsl, "heBombGridV(") == 5u);    // the definition and one call per layer (four seeds)
 	CHECK(lit.glsl.find("heBombGrid(n") == std::string::npos);
 	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n", ", 53u, n" })
@@ -204,6 +212,21 @@ TEST_CASE("The variant helpers cross-compile for all five backends")
 		// Arrays still cost no slot beyond the three the material had.
 		REQUIRE(gen.textures.size() <= 4);
 	}
+}
+
+// Opt-in witness (Thema 237): HE_DUMP_AUTOLAND_SHADERS=<dir> writes the auto landscape fragment text
+// (lit + G-buffer GLSL, and the lit one cross-compiled to MSL / HLSL) so two builds can be diffed.
+TEST_CASE("Dump the auto landscape shaders" * doctest::skip(std::getenv("HE_DUMP_AUTOLAND_SHADERS") == nullptr))
+{
+	const std::string dir = std::getenv("HE_DUMP_AUTOLAND_SHADERS");
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const HE::MatShaderGen gen = HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader());
+	const uint64_t hash = std::hash<std::string>{}(gen.glsl);
+	std::ofstream(dir + "/lit.glsl") << gen.glsl;
+	std::ofstream(dir + "/gbuffer.glsl") << gen.glslGBuffer;
+	std::ofstream(dir + "/lit.msl") << lib.fragment(hash, gen.glsl, B::Metal).source;
+	std::ofstream(dir + "/lit.hlsl") << lib.fragment(hash, gen.glsl, B::HLSL).source;
 }
 
 TEST_CASE("The variant a hex draws is evenly distributed, per layer seed")
