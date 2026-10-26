@@ -267,6 +267,14 @@ def main(argv):
         if key in cache and cache[key][1]:
             typ, value = cache[key]
             configure.append(f"-D{key}:{typ if typ != 'UNINITIALIZED' else 'STRING'}={value}")
+    # The release set is a release build whatever the editor tree is: a Debug editor
+    # tree mirrored verbatim made a release lib set whose DLL links the debug CRT
+    # (VCRUNTIME140D), and the game an export compiles in Release against it crashed
+    # on start.
+    build_type = cache.get("CMAKE_BUILD_TYPE", ("", ""))[1]
+    if args.profile == "release" and build_type == "Debug":
+        build_type = "Release"
+        configure.append(f"-DCMAKE_BUILD_TYPE:STRING={build_type}")
     configure += [f"-D{d}" for d in args.define]
     configure += generator(cache) + shared_sources(editor_tree, cache)
     if args.stage != "install" or not os.path.isfile(os.path.join(build_dir, "CMakeCache.txt")):
@@ -279,7 +287,9 @@ def main(argv):
     # HorizonSDKLibs: the libraries only. HorizonSDK: those (built by now) and the install.
     target = "HorizonSDKLibs" if args.stage == "build" else "HorizonSDK"
     cmd = [args.cmake, "--build", build_dir, "--target", target]
-    config = args.config or cache.get("CMAKE_BUILD_TYPE", ("", ""))[1]
+    config = args.config or build_type
+    if args.profile == "release" and config == "Debug":
+        config = build_type
     if config:
         cmd += ["--config", config]
     if args.jobs:
