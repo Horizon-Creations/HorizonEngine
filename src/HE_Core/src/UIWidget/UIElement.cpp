@@ -1362,10 +1362,7 @@ void UIImage::renderUnflipped(const UIWidgetRect& px, const UIElementRenderState
 
 // ── Text ─────────────────────────────────────────────────────────────────────
 
-// Resize the element to its own content. Height always tracks the line count ×
-// font size; the width tracks the widest line unless WordWrap owns it (then the
-// authored width IS the wrap column). A small padding keeps descenders and the
-// last glyph's side bearing off the edge.
+// Parsed again only when the text changed since the last call.
 const HE::UIRichText& UIText::parsed() const
 {
     if (!m_parsedOnce || m_parsedFrom != text)
@@ -1403,6 +1400,10 @@ std::string UIText::linkAt(const UIWidgetRect& px, float pxScaleY, float x, floa
     return HE::uiRichLinkAt(parsed(), richLayoutOf(*this, px, pxScaleY, fontScale), x, y);
 }
 
+// Resize the element to its own content. Height always tracks the line count ×
+// font size; the width tracks the widest line unless WordWrap owns it (then the
+// authored width IS the wrap column). A small padding keeps descenders and the
+// last glyph's side bearing off the edge.
 void UIText::applyAutoSize(float resolvedWidth, float fontScale)
 {
     if (!autoSize) return;
