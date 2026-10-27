@@ -25,6 +25,9 @@
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <HorizonRendering/ClipSpace.h>
+#include <HorizonRendering/GiCasterRange.h>
+#include <HorizonRendering/GiHeightfield.h>
+#include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: quality tier + blur reach (shared, D3D/Vulkan)
 #include <HorizonRendering/GiInstanceSurface.h> // GI reflections: a hit's albedo/emissive (all backends)
@@ -423,6 +426,8 @@ void VulkanRenderer::Shutdown()
         if (r.mem)  vkFreeMemory       (m_device, r.mem,  nullptr);
     }
     m_retiredViewports.clear();
+    for (auto& r : m_retiredMeshes) destroyGpuMesh(r.mesh);   // flush pending retired meshes
+    m_retiredMeshes.clear();
     destroyShadowResources();
     destroyUploadResources(); // after every pooled mesh buffer is gone, before the device
     if (m_cmdPool)     vkDestroyCommandPool(m_device,   m_cmdPool,     nullptr);
@@ -477,6 +482,23 @@ void VulkanRenderer::Render()
     // frame's DrawScene then re-resolves them fresh from the ContentManager.
     processPendingInvalidations();
 
+    for (auto it = m_retiredHf.begin(); it != m_retiredHf.end(); )
+    {
+        if (--it->frames <= 0)
+        {
+            if (it->view) vkDestroyImageView(m_device, it->view, nullptr);
+            if (it->img)  vkDestroyImage(m_device, it->img, nullptr);
+            if (it->mem)  vkFreeMemory(m_device, it->mem, nullptr);
+            it = m_retiredHf.erase(it);
+        }
+        else ++it;
+    }
+    // Retired meshes (processPendingInvalidations) go the same way.
+    for (auto it = m_retiredMeshes.begin(); it != m_retiredMeshes.end(); )
+    {
+        if (--it->frames <= 0) { destroyGpuMesh(it->mesh); it = m_retiredMeshes.erase(it); }
+        else ++it;
+    }
     // Free retired viewport color images once enough frames have passed (GPU done).
     for (auto it = m_retiredViewports.begin(); it != m_retiredViewports.end(); )
     {
@@ -7987,6 +8009,8 @@ bool VulkanRenderer::createMeshBuffers(GpuMesh& mesh, const std::vector<float>& 
     const uint64_t t0 = uploadClockNs();
     const VkDeviceSize vsize = interleaved.size() * sizeof(float);
     const VkDeviceSize isize = indices.size() * sizeof(uint32_t);
+    meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+    meshStreamCounters().meshUploadBytes.fetch_add(vsize + isize, std::memory_order_relaxed);
     if (!createDeviceLocalBuffer(vsize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, interleaved.data(),
                                  mesh.vbuf, mesh.valloc))
         return false;
@@ -8339,6 +8363,103 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
     return true;
 }
 
+// Move the current height-field image to the retire list (frames in flight may still sample it).
+void VulkanRenderer::retireGiHeightfield()
+{
+    if (m_giHfImage || m_giHfView || m_giHfMem)
+        m_retiredHf.push_back({ m_giHfImage, m_giHfView, m_giHfMem, static_cast<int>(k_maxFramesInFlight) + 2 });
+    m_giHfImage = VK_NULL_HANDLE; m_giHfView = VK_NULL_HANDLE; m_giHfMem = VK_NULL_HANDLE;
+}
+
+// R32_SFLOAT image whose mips are the pyramid's levels (GiHeightfield.h), sampled with texelFetch by gi_shadow.comp.
+bool VulkanRenderer::uploadHeightPyramid(const HE::GiHeightPyramid& pyr, VkImage& image, VkDeviceMemory& memory, VkImageView& view)
+{
+    image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
+    if (pyr.levels.empty()) return false;
+    const uint32_t mips = static_cast<uint32_t>(pyr.levels.size());
+    const uint32_t dim0 = static_cast<uint32_t>(pyr.dims[0]);
+    std::vector<VkDeviceSize> offsets(mips);
+    VkDeviceSize total = 0;
+    for (uint32_t l = 0; l < mips; ++l) { offsets[l] = total; total += pyr.levels[l].size() * sizeof(float); }
+    std::vector<uint8_t> packed(static_cast<size_t>(total));
+    for (uint32_t l = 0; l < mips; ++l)
+        std::memcpy(packed.data() + offsets[l], pyr.levels[l].data(), pyr.levels[l].size() * sizeof(float));
+    const uint64_t t0 = uploadClockNs();
+
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D; ici.format = VK_FORMAT_R32_SFLOAT;
+    ici.extent = { dim0, dim0, 1 }; ici.mipLevels = mips; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT; ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &image) != VK_SUCCESS) { image = VK_NULL_HANDLE; return false; }
+    VkMemoryRequirements imr{}; vkGetImageMemoryRequirements(m_device, image, &imr);
+    VkMemoryAllocateInfo imal{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    imal.allocationSize  = imr.size;
+    imal.memoryTypeIndex = findMemoryType(imr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &imal, nullptr, &memory) != VK_SUCCESS)
+    { vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; return false; }
+    vkBindImageMemory(m_device, image, memory, 0);
+
+    VkImageViewCreateInfo ivci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image = image; ivci.viewType = VK_IMAGE_VIEW_TYPE_2D; ivci.format = VK_FORMAT_R32_SFLOAT;
+    ivci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+    VkBuffer stageBuf = VK_NULL_HANDLE; VkDeviceSize stageOff = 0;
+    if (vkCreateImageView(m_device, &ivci, nullptr, &view) != VK_SUCCESS || !stageUpload(packed.data(), total, stageBuf, stageOff))
+    {
+        if (view) vkDestroyImageView(m_device, view, nullptr);
+        view = VK_NULL_HANDLE;
+        vkDestroyImage(m_device, image, nullptr); image = VK_NULL_HANDLE;
+        vkFreeMemory(m_device, memory, nullptr);  memory = VK_NULL_HANDLE;
+        return false;
+    }
+    VkCommandBuffer oneCB = uploadCmd();
+    auto barrier = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags src, VkAccessFlags dst,
+                       VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+    {
+        VkImageMemoryBarrier bar{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        bar.oldLayout = from; bar.newLayout = to;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image = image; bar.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1 };
+        bar.srcAccessMask = src; bar.dstAccessMask = dst;
+        vkCmdPipelineBarrier(oneCB, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &bar);
+    };
+    barrier(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    std::vector<VkBufferImageCopy> regions(mips);
+    for (uint32_t l = 0; l < mips; ++l)
+    {
+        regions[l] = {};
+        regions[l].bufferOffset     = stageOff + offsets[l];   // 4-byte floats: every offset is a multiple of 4
+        regions[l].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1 };
+        regions[l].imageExtent      = { static_cast<uint32_t>(pyr.dims[l]), static_cast<uint32_t>(pyr.dims[l]), 1 };
+    }
+    vkCmdCopyBufferToImage(oneCB, stageBuf, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, mips, regions.data());
+    barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    noteUpload(false, total, t0);
+    return true;
+}
+
+// Upload the height field when it is new or rebuilt. False = unusable (the kernel keeps the chunk meshes).
+bool VulkanRenderer::ensureGiHeightfield(const GiHeightfield& hf)
+{
+    HE_PROFILE_SCOPE_N("Vulkan::GiHeightfield");
+    if (!hf.data || hf.res < 8 || hf.data->size() < size_t(hf.res) * hf.res) return false;
+    if (m_giHfView && m_giHfVersion == hf.version && m_giHfKey == hf.key) return true;
+    const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);
+    VkImage img; VkDeviceMemory mem; VkImageView view;
+    if (!uploadHeightPyramid(pyr, img, mem, view)) return false;
+    retireGiHeightfield();
+    m_giHfImage = img; m_giHfMem = mem; m_giHfView = view;
+    m_giHfVersion = hf.version; m_giHfKey = hf.key;
+    m_giHfTopLevel = static_cast<int>(pyr.levels.size()) - 1;
+    m_giHfMaxH = pyr.maxHeight;
+    HE_LOG_INFO(RHI, "VulkanRenderer: GI height field %dx%d, %zu mips, max height %.2f",
+                pyr.dims[0], pyr.dims[0], pyr.levels.size(), pyr.maxHeight);
+    return true;
+}
+
 bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const std::string& materialPath,
                                             VkImage& image, VkDeviceMemory& memory, VkImageView& view,
                                             VkDescriptorSet& set)
@@ -8408,6 +8529,16 @@ bool VulkanRenderer::resolveMaterialOverride(const HE::UUID& materialId, const M
     return true;
 }
 
+void VulkanRenderer::destroyGpuMesh(GpuMesh& m)
+{
+    destroyPooledBuffer(m.vbuf, m.valloc);
+    destroyPooledBuffer(m.ibuf, m.ialloc);
+    if (m.albedoSet)  vkFreeDescriptorSets(m_device, m_albedoPool, 1, &m.albedoSet);
+    if (m.albedoView) vkDestroyImageView(m_device, m.albedoView, nullptr);
+    if (m.albedoImage)vkDestroyImage(m_device, m.albedoImage, nullptr);
+    if (m.albedoMem)  vkFreeMemory(m_device, m.albedoMem, nullptr);
+}
+
 void VulkanRenderer::processPendingInvalidations()
 {
     if (m_pendingMatInval.empty() && m_pendingMeshInval.empty() && m_pendingTexInval.empty()) return;
@@ -8415,7 +8546,20 @@ void VulkanRenderer::processPendingInvalidations()
     // Editor-only path; a full device idle keeps the frees below trivially safe (no in-flight
     // frame references the dropped resources). The idle is a stall, but invalidation is rare
     // outside a terrain-sculpt drag — a documented follow-up (D3D12 uses a per-frame retire list).
-    deviceWaitIdle();
+    meshStreamCounters().meshInvalidations.fetch_add(
+        static_cast<uint32_t>(m_pendingMeshInval.size()), std::memory_order_relaxed);
+    // Static meshes alone (terrain LOD / stitch / sculpt, the per-frame case) retire their
+    // buffers instead of idling the device. Anything else in the queue — a material or
+    // texture, a skeletal mesh, a hardware BLAS the TLAS may still reference — keeps the
+    // idle, so those paths are untouched.
+    bool needIdle = !m_pendingMatInval.empty() || !m_pendingTexInval.empty();
+    for (const HE::UUID& id : m_pendingMeshInval)
+        if (m_skeletalMeshCache.count(id) || m_giHwBlasCache.count(id)) { needIdle = true; break; }
+    if (needIdle)
+    {
+        meshStreamCounters().gpuStalls.fetch_add(1, std::memory_order_relaxed);
+        deviceWaitIdle();
+    }
 
     for (const HE::UUID& id : m_pendingMatInval)
         if (auto it = m_materialTexCache.find(id); it != m_materialTexCache.end())
@@ -8436,13 +8580,8 @@ void VulkanRenderer::processPendingInvalidations()
     {
         if (auto it = m_meshCache.find(id); it != m_meshCache.end())
         {
-            GpuMesh& m = it->second;
-            destroyPooledBuffer(m.vbuf, m.valloc);
-            destroyPooledBuffer(m.ibuf, m.ialloc);
-            if (m.albedoSet)  vkFreeDescriptorSets(m_device, m_albedoPool, 1, &m.albedoSet);
-            if (m.albedoView) vkDestroyImageView(m_device, m.albedoView, nullptr);
-            if (m.albedoImage)vkDestroyImage(m_device, m.albedoImage, nullptr);
-            if (m.albedoMem)  vkFreeMemory(m_device, m.albedoMem, nullptr);
+            if (needIdle) destroyGpuMesh(it->second);
+            else          m_retiredMeshes.push_back({ std::move(it->second), static_cast<int>(k_maxFramesInFlight) + 2 });
             m_meshCache.erase(it);
         }
         // Just this mesh's SW BLAS: its range turns into dead space and it
@@ -10957,6 +11096,8 @@ HE::GiBvh VulkanRenderer::BuildGIBvh(const HE::UUID& meshId)
     if (!m_contentManager) return bvh;
     const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
     if (!asset || asset->indices.empty()) return bvh;
+    meshStreamCounters().blasBuilds.fetch_add(1, std::memory_order_relaxed);
+    meshStreamCounters().blasTris.fetch_add(asset->indices.size() / 3, std::memory_order_relaxed);
 
     // Same two layouts the mesh upload path consumes: cooked interleaved
     // 8-float (position at offset 0) or loose tightly-packed 3-float positions.
@@ -11104,10 +11245,15 @@ void VulkanRenderer::updateGiAccel()
     }();
     static int s_giLogCall = 0;
     const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
+    const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
+    static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+    const GiHeightfield* gHf = (s_hfOn && m_renderWorld.heightfields.size() == 1) ? &m_renderWorld.heightfields[0] : nullptr;
+    m_giHfActive = gHf && ensureGiHeightfield(*gHf);
+    std::vector<GIInstanceGpu> shadowInstances;   // without the terrain chunks while m_giHfActive (software shadow kernel)
     for (const RenderObject& obj : m_renderWorld.objects)
     {
         // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-        if (!obj.castsShadow || obj.isCluster()) continue;
+        if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
         // Default-cube fallback — an entity without a resolvable mesh asset
         // RENDERS as the default cube (draw-loop fallback), so it must occlude
         // as one too, or plain cube entities cast no GI shadow at all.
@@ -11121,6 +11267,7 @@ void VulkanRenderer::updateGiAccel()
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
         instances.push_back(inst);
+        if (!(m_giHfActive && obj.terrainChunk)) shadowInstances.push_back(inst);
         if (m_giReflEnabled)
         {
             // The shared per-instance surface (HE::giInstanceSurface): a graph
@@ -11211,7 +11358,17 @@ void VulkanRenderer::updateGiAccel()
     if (!uploadGiBuffer(m_giInstanceBuf[m_currentFrame], instances.data(),
                         instances.size() * sizeof(GIInstanceGpu)))
         return;
+    if (m_giHfActive)
+    {
+        const GIInstanceGpu dummy{};   // never size 0
+        m_giShadowInstanceCount = static_cast<int>(shadowInstances.size());
+        if (!uploadGiBuffer(m_giShadowInstanceBuf[m_currentFrame], shadowInstances.empty() ? &dummy : shadowInstances.data(),
+                            std::max<size_t>(shadowInstances.size(), 1) * sizeof(GIInstanceGpu)))
+            m_giHfActive = false;
+    }
     m_giInstanceCount = static_cast<int>(instances.size());
+    if (!m_giHfActive) m_giShadowInstanceCount = m_giInstanceCount;
+    meshStreamCounters().giInstances.store(static_cast<uint32_t>(m_giInstanceCount), std::memory_order_relaxed);
     // gi_refl.comp's own ring, same slot convention — only kept current while
     // reflections are enabled (runGiReflections doesn't run otherwise).
     if (m_giReflEnabled)
@@ -11252,6 +11409,16 @@ void VulkanRenderer::destroyGiAccel()
     destroy(m_giNodeBuf);
     destroy(m_giTriBuf);
     for (GiBuffer& b : m_giInstanceBuf) destroy(b);
+    for (GiBuffer& b : m_giShadowInstanceBuf) destroy(b);
+    retireGiHeightfield();
+    for (auto& r : m_retiredHf)   // destroyGiAccel runs with the device idle (shutdown / GI off)
+    {
+        if (r.view) vkDestroyImageView(m_device, r.view, nullptr);
+        if (r.img)  vkDestroyImage(m_device, r.img, nullptr);
+        if (r.mem)  vkFreeMemory(m_device, r.mem, nullptr);
+    }
+    m_retiredHf.clear();
+    m_giHfVersion = 0; m_giHfKey = ~0ull; m_giHfActive = false; m_giShadowInstanceCount = 0;
     for (GiBuffer& b : m_giReflInstanceBuf) destroy(b);
     for (GiBuffer& b : m_giLandBuf) destroy(b);
     m_giBlas.clear();
@@ -11556,8 +11723,11 @@ struct GiShadowUBOData
     glm::vec4 frame;            // x = jitter seed, y/z = tex size, w = instance count
     glm::vec4 localPosRange[4]; // xyz = local (point/spot) light position, w = range
     glm::vec4 localExtra;       // x = local light count, y = sun rays per pixel
+    glm::mat4 hfWorldToLocal;   // height field: landscape entity inverse world matrix
+    glm::vec4 hfParams;         // x = 1/sizeX, y = 1/sizeZ, z = res-1, w = enabled
+    glm::vec4 hfParams2;        // x = top mip level, y = max height, w = max march steps
 };
-static_assert(sizeof(GiShadowUBOData) == 7 * 16, "must match gi_shadow.comp's GiShadowUBO");
+static_assert(sizeof(GiShadowUBOData) == 13 * 16, "must match gi_shadow.comp's GiShadowUBO (the HW kernel declares only the first 7 rows)");
 struct GiTemporalUBOData { glm::mat4 prevViewProj; glm::mat4 curViewProj; glm::vec4 blend; };
 static_assert(sizeof(GiTemporalUBOData) == 2 * 64 + 16, "must match gi_temporal.frag's GiTemporalUBO");
 struct GiProbeUBOData
@@ -11631,6 +11801,7 @@ void VulkanRenderer::createGiPipelines()
         bindOf(5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(6, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          VK_SHADER_STAGE_COMPUTE_BIT),
+        bindOf(9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT, &m_giPointSampler),
     }, m_giShadowDSL);
     // gi_probe.comp: 0-2 SSBOs, 3-4 storage images, 5 UBO.
     ok = ok && makeDSL({
@@ -12422,7 +12593,17 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     m_giFrameSeed = HE::NextGIJitterSeed(m_giFrameSeed); // wraps: GIJitter.h
     GiShadowUBOData shadowUbo{};
     shadowUbo.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
-    shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh), float(m_giInstanceCount));
+    // The software kernel's own instance list (without the terrain chunks) while the height field stands in for them.
+    const bool hfOn = !useHw && m_giHfActive && m_giHfView && !m_renderWorld.heightfields.empty();
+    shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh),
+                                       float(hfOn ? m_giShadowInstanceCount : m_giInstanceCount));
+    {
+        const GiHeightfield* h0 = m_renderWorld.heightfields.empty() ? nullptr : &m_renderWorld.heightfields[0];
+        shadowUbo.hfWorldToLocal = h0 ? h0->worldToLocal : glm::mat4(1.0f);
+        shadowUbo.hfParams  = glm::vec4(h0 ? 1.0f / std::max(h0->size.x, 1e-4f) : 1.0f, h0 ? 1.0f / std::max(h0->size.y, 1e-4f) : 1.0f,
+                                        h0 ? float(h0->res - 1) : 1.0f, hfOn ? 1.0f : 0.0f);
+        shadowUbo.hfParams2 = glm::vec4(float(m_giHfTopLevel), m_giHfMaxH, 0.0f, 512.0f);
+    }
     // First 4 local (point/spot) lights of the same 8-light window the scene
     // shader iterates — scene.frag counts non-directional lights in the SAME
     // order to index the mask channels, which is exactly what the shared packing
@@ -12482,6 +12663,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         VkDescriptorBufferInfo nodesBI{ m_giNodeBuf.buf, 0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo trisBI { m_giTriBuf.buf,  0, VK_WHOLE_SIZE };
         VkDescriptorBufferInfo instBI { m_giInstanceBuf[fi].buf, 0, VK_WHOLE_SIZE };
+        VkDescriptorBufferInfo shadowInstBI { m_giShadowInstanceBuf[fi].buf, 0, VK_WHOLE_SIZE };
         VkDescriptorImageInfo  posBI  { VK_NULL_HANDLE, m_giGBufPos.view,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  normBI { VK_NULL_HANDLE, m_giGBufNorm.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo  rawSI  { VK_NULL_HANDLE, m_giRaw.view,      VK_IMAGE_LAYOUT_GENERAL };
@@ -12512,7 +12694,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         // Shadow kernel set (HW: + TLAS at binding 7).
         wBuf(shadowSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
         wBuf(shadowSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
-        wBuf(shadowSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &instBI);
+        wBuf(shadowSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, hfOn ? &shadowInstBI : &instBI);
         wImg(shadowSet, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
         wImg(shadowSet, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normBI);
         wImg(shadowSet, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &rawSI);
@@ -12520,6 +12702,9 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         if (useHw) wTlas(shadowSet, 7);
         VkDescriptorImageInfo localSI{ VK_NULL_HANDLE, m_giLocalMask.view, VK_IMAGE_LAYOUT_GENERAL };
         wImg(shadowSet, 8, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &localSI);
+        // Binding 9 exists on the software kernel's layout only; off, any valid float view fills it (never fetched).
+        VkDescriptorImageInfo hfSI{ VK_NULL_HANDLE, hfOn ? m_giHfView : m_giGBufPos.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        if (!useHw) wImg(shadowSet, 9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hfSI);
         // Temporal set: gPos, raw (GENERAL), history[prev], UBO.
         VkDescriptorImageInfo rawSamp{ VK_NULL_HANDLE, m_giRaw.view, VK_IMAGE_LAYOUT_GENERAL };
         VkDescriptorImageInfo histBI { VK_NULL_HANDLE, m_giHist[prevIdx].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };

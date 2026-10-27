@@ -12,6 +12,17 @@
 #include <vector>
 #include <cstdint>
 
+// The height field a landscape was built from, shared with the terrain component (no copy
+// per frame). `version` changes when it is rebuilt; the backends re-upload only then.
+struct GiHeightfield {
+    std::shared_ptr<const std::vector<float>> data;
+    uint32_t  res     = 0;                  // res x res samples
+    uint64_t  version = 0;
+    uint64_t  key     = 0;                  // the terrain entity
+    glm::mat4 worldToLocal{ 1.0f };         // terrain entity's inverse world matrix
+    glm::vec2 size{ 1.0f };                 // local extent in X / Z (sample (res-1) is at `size`)
+};
+
 struct CameraData {
     glm::mat4 view       = glm::mat4(1.0f);
     glm::mat4 projection = glm::mat4(1.0f);
@@ -492,6 +503,8 @@ public:
     // reflection kernels read these (to sample the paint per ray hit) — see
     // GiLandscape.h. Empty in scenes without a terrain.
     std::vector<HE::GiLandscape>     landscapes;
+    // A landscape's height field for the GI sun-shadow kernel (see GiHeightfield below).
+    std::vector<GiHeightfield>       heightfields;
     CameraData                camera;
     ShadowData                shadow;
     UnderwaterCameraData      underwaterCamera;

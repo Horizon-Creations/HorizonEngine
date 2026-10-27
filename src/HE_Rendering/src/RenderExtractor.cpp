@@ -343,6 +343,17 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		const bool windOn = sceneWind(reg, windDir, windSpd);
 		for (auto [te, ttf, tc] : reg.view<TransformComponent, TerrainComponent>().each())
 		{
+			// The height field for the GI sun-shadow kernel — independent of the paint table below,
+			// which several `continue`s skip.
+			if (tc.builtField && tc.builtFieldRes >= 2 && tc.builtField->size() >= size_t(tc.builtFieldRes) * tc.builtFieldRes)
+			{
+				GiHeightfield hf;
+				hf.data = tc.builtField; hf.res = tc.builtFieldRes; hf.version = tc.builtFieldVersion;
+				hf.key = static_cast<uint64_t>(static_cast<uint32_t>(te));
+				hf.worldToLocal = glm::inverse(ttf.worldMatrix);
+				hf.size = { tc.sizeX, tc.sizeZ };
+				out.heightfields.push_back(std::move(hf));
+			}
 			HE::GiLandscape ls;
 			ls.worldToLocal = glm::inverse(ttf.worldMatrix);
 			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
@@ -511,6 +522,8 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				// from the PARENT: the weights belong to the landscape, the chunks are
 				// just the pieces it renders as.
 				if (const auto* chunk = (anyChunk && chunkPool->contains(e)) ? &chunkPool->get(e) : nullptr)
+				{
+					obj.terrainChunk = true;
 					if (creg.valid(chunk->terrain) && terrainPool && terrainPool->contains(chunk->terrain))
 					{
 						const TerrainComponent& pt = terrainPool->get(chunk->terrain);
@@ -522,6 +535,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 						if (auto it = landscapeOf.find(static_cast<uint32_t>(chunk->terrain)); it != landscapeOf.end())
 							obj.landscapeIndex = it->second;
 					}
+				}
 				const LODComponent* lodComp = (lodPool && lodPool->contains(e)) ? &lodPool->get(e) : nullptr;
 				const bool ownLod0 = !lodComp || lodComp->levels.empty()
 				                  || lodComp->levels[0].meshId == HE::UUID{}

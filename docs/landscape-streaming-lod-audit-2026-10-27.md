@@ -177,6 +177,77 @@ Findings:
 
 Not measured: GI shadow cost on the GPU at 1440p (needs a visible window and detailed capture on a real run), Vulkan/D3D12/GL/Metal counters.
 
+### GI caster thinning by distance (27.10.2026)
+
+`HorizonRendering/GiCasterRange.h` (`HE::GiCasterFilter`), used in the GI instance loop of D3D11, D3D12, Vulkan, OpenGL and Metal: a shadow caster enters the
+GI acceleration structure only if its bounding sphere is within 500 m of the camera, or lies toward the sun from the camera within 500 m of the
+camera-to-sun line (the only far geometry that can shadow a receiver near the camera; sun rays are 10 km long). Off while GI reflections are on, never
+applied to objects with unresolved bounds, the probe-grid fit still sees every object. `HE_GI_CASTER_RANGE=<m>` overrides, `0` = old behaviour. The mesh of
+a far caster is already the coarse LOD LODSystem picked, so only the instance count needed a cut. Counters are now also wired in D3D12/Vulkan/GL/Metal
+(`gpuStalls` = one per Vulkan invalidation drain, which `deviceWaitIdle`s). Built and run on D3D11 only (D3D12/Vulkan/GL compile in `C:/hw238`; Metal edit is unbuilt).
+
+D3D11, user's HEProject, GI on, camera flying, `--detailed` (GPU pass timestamps), 600 frames:
+
+| range | GI instances | BLAS builds | GIProbes p50 | GIShadow p50 | GPU p50 / p95 | CPU p50 / p95 |
+|---|---|---|---|---|---|---|
+| off (0) | 257 | 60 | 0.51 ms | 1.33 ms | 2.25 / 6.93 ms | 2.9 / 8.1 ms |
+| 500 m (default) | 76 | 1 | 0.38 ms | 1.17 ms | 1.93 / 3.44 ms | 2.5 / 4.0 ms |
+| 250 m | 25 | 0 | 0.16 ms | 1.04 ms | 1.78 / 3.12 ms | 2.4 / 3.7 ms |
+
+The saving is largest in the tail (GPU p95 -50 %, CPU p95 -50 %) because far chunks that get re-stitched no longer rebuild their BLAS. GIShadow itself
+barely moves here (a strong GPU at 2000x1125 with a cheap scene); the user's 5.3 ms was at 2560x1440. Not checked visually: far mountain shadows beyond the
+sun-line strip and probe bounce from casters beyond the range will differ; eyeball a sunset scene before keeping 500 m as the default.
+
+### Step 5: the user's own GI settings (27.10.2026)
+
+Read-only look at `%APPDATA%/HorizonEngine/config.json` (backup in the session scratchpad): `GlobalIlluminationEnabled=true`, **`GIReflectionsEnabled=true`**
+(`GIReflBounces=4`, `GIReflQuality=0`), `GIShadowQuality=2`, SSAO on, AA 1, Bloom on. Consequences:
+* `GiCasterFilter::For` returns range 0 whenever reflections are on, so **the 500 m caster cut is inactive in the user's real setup**. It needs either a
+  separate (unthinned) reflection instance list or the heightfield path (step 1) to be effective for them.
+* Re-run with those keys (`--set`, `--detailed`, 600 frames, camera flying): GIShadow 1.24 ms, GIProbes 0.37 ms, GPU p50 2.0 / p95 3.7 ms on the RTX 4070
+  (NN-WS03). No `GIRefl` pass shows (as in the user's HUD). The user's HUD had GIShadow 5.3 ms at 2560x1440; the pixel ratio (1.64x) explains about 2 ms, the
+  rest is most likely a slower GPU than the 4070 and the real scene. `WindowW/WindowH` via `--set` did not change the hidden window (stays 2000x1125).
+* he_tests (`*terrain*,*render*,*gi*,*profil*,*lod*`, scratch APPDATA, `C:/hw238`): 874 / 874 passed.
+
+### Steps 1 and 3 implemented (27.10.2026, D3D11 + Vulkan, uncommitted)
+
+**LOD hysteresis (LODSystem.cpp):** going to the FINER level needs the camera 5 % inside the boundary; coarser stays exact. `test_lod.cpp` has the band test;
+`test_terrain_tessellation.cpp`'s jitter test now jitters +-2.5 m (a +-0.5 m jitter flips nothing any more, which is the point).
+
+**Vulkan retire list (VulkanRenderer.cpp `processPendingInvalidations`):** static-mesh-only drains (terrain stitch / LOD / sculpt) retire the GPU buffers for
+`k_maxFramesInFlight + 2` frames instead of `vkDeviceWaitIdle`; material/texture/skeletal/HW-BLAS invalidations keep the idle. Fly run on Vulkan: 44 invalidations,
+`gpuStalls` 0, no validation error during the run (the 7-8 errors at the very last frame are the shutdown noise the unchanged hw237 build also prints).
+
+**GI height-field shadow path (D3D11 only):** `TerrainSystem` keeps the field its chunks were built from in `TerrainComponent::builtField` (+ res, version; test
+`A built landscape keeps the height field...`). `RenderExtractor` hands it over as `RenderWorld::heightfields` and flags `RenderObject::terrainChunk`. The D3D11
+renderer uploads it as R32_FLOAT with a conservative 3x3-max mip pyramid (`ensureGiHeightfield`), builds a second instance list without the chunks for the shadow
+kernel, and `kGiHeightfieldHLSL` (HlslSources.h, prepended only by D3D11 via `GI_OCCLUDED`; D3D12 keeps the plain macro) marches the sun/local-light rays through the
+pyramid. Used when exactly one landscape is in the scene; `HE_GI_HEIGHTFIELD=0` switches it off. Probes and reflections still use the chunk meshes.
+* Pixel check, no window: `HE_DUMP_GIHFTEST=1` witness (hills, ridge, three crates) + `scripts/he_gi_hf_check.py` (ref = meshes, hf = height field, neg = far casters
+  dropped). cam1 (shadows in frame): hf vs ref mean |d| 0.09 / 0.24 % of pixels > 8, negative control 5.0 / 19.9 %: the hill-on-hill and crate shadows are
+  there, the only differences are 1-2 px lines at the terminator. cam0 shows no shadow (neg 0.02), so it proves nothing.
+* GPU, user's HEProject, camera flying, all 257 chunks as casters (`HE_GI_CASTER_RANGE=0`): GIShadow 1.47 -> 0.99 ms p50 (-33 %). With the 500 m cut already on (76 instances)
+  1.17 -> 1.03 ms. RTX 4070, 2000x1125; a slower GPU / 1440p gains more in absolute ms.
+* Not done: D3D12 (DXR kernel is a file, the shared HLSL is untouched on purpose), Vulkan/GL (`gi_shadow.comp` GLSL), Metal; probe and reflection kernels; more than one landscape.
+
+### Height field on Vulkan and OpenGL; far-ring HLOD not built (27.10.2026, uncommitted)
+
+* **Shared:** `HorizonRendering/GiHeightfield.h` builds the pyramid for all backends (level k = max of 4x4 children of level k-1, so a cell covers the vertices a half-cell
+  step can reach; the first 3x3 version missed level 1 and `test_gi_bvh.cpp` caught it). D3D11 uses it too. The drift guard `test_culling.cpp` accepts `GI_OCCLUDED(origin, dir, ...)` next to `giSceneAnyHit(...)`.
+* **Vulkan:** `gi_shadow.comp` (software kernel) got binding 9 (R32_SFLOAT image with the pyramid in its mips) and the params in the shadow UBO (13 rows; the ray-query kernel reads
+  only the first 7), binding 2 takes `m_giShadowInstanceBuf` while active. The ray-query path keeps the TLAS and ignores the height field, so on this RTX 4070 the default path
+  is untouched; `HE_GI_FORCE_SW=1` forces the software kernel. Replaced images go through a retire list.
+* **OpenGL:** `kGiHeightfieldGLSL` between the traversal and `kGiShadowCS` (same `GI_OCCLUDED` hook), R32F texture on unit 2, uniforms for the params, a second instance SSBO.
+* **Pixel check (witness `HE_DUMP_GIHFTEST`, lower half of the picture, reflections off):** D3D11 hf vs ref 0.16 mean |d| (neg 8.7); Vulkan software kernel (`HE_GI_FORCE_SW=1`) 0.13 (neg 8.7).
+  **OpenGL is NOT verified by pixels:** the dumped GL frame does not react to thinning the casters (neg 0.1-0.3) even with CSM off and either render path, so the witness cannot see the
+  GL RT mask; the kernel compiles, the field uploads, and the pass is faster (below), but "same picture" is unproven there.
+* **GPU, all 257 chunks as casters, camera flying, user's HEProject:** D3D11 GIShadow 1.47 -> 0.99 ms; Vulkan software kernel GI pass 3.65 -> 1.86 ms (GPU 5.2 -> 2.6 ms p50);
+  OpenGL GIShadow 3.15 -> 1.73 ms (GPU p95 12.1 -> 6.3 ms).
+* **Far-ring HLOD: not implemented, on purpose.** The chunk grid is capped at 16x16 (an 8000 m / res 4097 terrain still has 257 objects), draws stay at 40-70, culling + extraction
+  are < 0.5 ms and CPU is 4-5 ms; the per-chunk draw/instance cost that HLOD would remove is not where the time goes, and the GI side is covered by the height field. Revisit if the chunk cap is lifted or a
+  world has several landscapes (the height field path only takes exactly one).
+* he_tests (`*GI*,*kernel*,*pyramid*,*LOD*,*terrain*,*landscape*`, scratch APPDATA): 865 / 865.
+
 ## Handoff
 
 - **Topic / step:** Catania landscape performance, static audit (no number measured), step 1 of 2
@@ -204,3 +275,12 @@ Not measured: GI shadow cost on the GPU at 1440p (needs a visible window and det
 **Update 27.10.2026 (counters + measurement):** see the second measurement above. Next: wire `gpuStalls` (Vulkan `deviceWaitIdle` drain) and the upload/BLAS
 counters into D3D12/GL/Vulkan/Metal; run a visible-window GI-on detailed capture at 2560x1440 to attribute GIShadow; consider GI caster culling by
 distance (257 instances). Changes are uncommitted: EngineProfiler.h/.cpp, TerrainSystem.cpp, LODSystem.cpp, D3D11Renderer.cpp.
+
+**Update 27.10.2026 (later):** steps 1 (D3D11 sun shadow only) and 3 (LOD hysteresis, Vulkan retire list) are done and tested (he_tests subset 974/974, scratch APPDATA,
+`C:/hw238`). Still open, in order: height field for the other backends' shadow kernels and for probes/reflections (so the 500 m cut can go and reflections stop
+disabling it), far-ring HLOD (step 4), camera-centred probe cascades + half-res shadow (step 2), stitch cache (measured cost small, skipped). Nothing is committed:
+EngineProfiler.h/.cpp, TerrainSystem/LODSystem, TerrainComponent.h, RenderExtractor/RenderWorld/RenderObject, GiCasterRange.h, HlslSources.h, all five backends,
+EditorApplication.cpp (witness), `scripts/he_gi_hf_check.py`, tests.
+
+**Update 27.10.2026 (end):** height field now also in Vulkan (software kernel) and OpenGL; HLOD skipped on measurements (see above). Open: OpenGL pixel evidence (needs a witness where the
+GL RT mask shows), D3D12 DXR/Metal kernels, probes/reflections on the height field (then the 500 m cut can go), more than one landscape, camera-centred probe cascades (step 2).

@@ -5,6 +5,8 @@
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <Renderer/UIFont.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiCasterRange.h>
+#include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
@@ -4616,6 +4618,8 @@ struct D3D12RendererImpl
             }
         m_pendingTexInval.clear();
 
+        meshStreamCounters().meshInvalidations.fetch_add(
+            static_cast<uint32_t>(m_pendingMeshInval.size()), std::memory_order_relaxed);
         for (const HE::UUID& id : m_pendingMeshInval)
         {
             if (auto it = meshCache.find(id); it != meshCache.end())
@@ -7305,6 +7309,8 @@ struct D3D12RendererImpl
         if (!cm) return bvh;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
         if (!asset || asset->indices.empty()) return bvh;
+        meshStreamCounters().blasBuilds.fetch_add(1, std::memory_order_relaxed);
+        meshStreamCounters().blasTris.fetch_add(asset->indices.size() / 3, std::memory_order_relaxed);
 
         // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
         // (position at offset 0), loose = tightly packed 3-float positions.
@@ -7407,10 +7413,11 @@ struct D3D12RendererImpl
             return it->second;
         };
 #endif
+        const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(rw, giReflEnabled);   // GiCasterRange.h
         for (const RenderObject& obj : rw.objects)
         {
             // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-            if (!obj.castsShadow || obj.isCluster()) continue;
+            if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
             HE::UUID    effectiveId = obj.meshAssetId;
@@ -7478,6 +7485,7 @@ struct D3D12RendererImpl
 #endif
         }
         giInstanceCount = static_cast<int>(giInstancesCpu.size());
+        meshStreamCounters().giInstances.store(static_cast<uint32_t>(giInstanceCount), std::memory_order_relaxed);
         if (giInstanceCount == 0) return;
 
         // Nodes/tris only when a BLAS was appended (or a compaction moved them):
@@ -9326,6 +9334,8 @@ struct D3D12RendererImpl
     {
         const UINT vbytes = static_cast<UINT>(interleaved.size() * sizeof(float));
         const UINT ibytes = static_cast<UINT>(indices.size() * sizeof(uint32_t));
+        meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+        meshStreamCounters().meshUploadBytes.fetch_add(uint64_t(vbytes) + ibytes, std::memory_order_relaxed);
         mesh.vbuf = createUploadBuffer(vbytes, nullptr, interleaved.data());
         mesh.ibuf = createUploadBuffer(ibytes, nullptr, indices.data());
         mesh.vbv  = { mesh.vbuf->GetGPUVirtualAddress(), vbytes, 8u * sizeof(float) };

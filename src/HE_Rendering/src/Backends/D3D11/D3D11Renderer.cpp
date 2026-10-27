@@ -4,6 +4,8 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiCasterRange.h>
+#include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <Renderer/UIRenderObject.h>
 #include <Renderer/UIFont.h>
@@ -3225,6 +3227,19 @@ struct D3D11RendererImpl
     std::vector<GIInstanceGpu>     giInstancesCpu;
     std::vector<GIInstanceGpu>     giReflInstancesCpu;   // same order; graph-material colour folded in (reflections only)
     int  giInstanceCount = 0;
+    // The landscape's height field for the shadow kernel (kGiHeightfieldHLSL): with it, the shadow kernel's
+    // instance list leaves the terrain chunks out and the field answers for them. HE_GI_HEIGHTFIELD=0 = off.
+    ComPtr<ID3D11Texture2D>          giHfTex;
+    ComPtr<ID3D11ShaderResourceView> giHfSRV;
+    ComPtr<ID3D11Buffer>             giHfCB;
+    uint64_t giHfVersion = 0, giHfKey = ~0ull;
+    int      giHfTopLevel = 0;
+    float    giHfMaxH = 0.0f;
+    bool     giHfActive = false;
+    std::vector<GIInstanceGpu>       giShadowInstancesCpu;   // giInstancesCpu without the terrain chunks while giHfActive
+    int  giShadowInstanceCount = 0;
+    ComPtr<ID3D11Buffer>             giShadowInstanceSB;
+    ComPtr<ID3D11ShaderResourceView> giShadowInstanceSRV;
     ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB, giReflInstanceSB, giLandSB;
     ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV, giReflInstanceSRV, giLandSRV;
     ID3D11ShaderResourceView*        giLandWeightSRV[4] = {};   // the table's weightmaps (owned by graphTexCache), this frame
@@ -3335,6 +3350,47 @@ struct D3D11RendererImpl
             context->UpdateSubresource(buf.Get(), 0, &box, src.data() + from, 0, 0);
     }
 
+    // Upload the height field (R32_FLOAT, a conservative max pyramid in the mips) when it is new or rebuilt.
+    // Returns false when it cannot be used (the shadow kernel then keeps the chunk meshes).
+    bool ensureGiHeightfield(const GiHeightfield& hf)
+    {
+        HE_PROFILE_SCOPE_N("D3D11::GiHeightfield");
+        if (!hf.data || hf.res < 8 || hf.data->size() < size_t(hf.res) * hf.res) return false;
+        if (giHfTex && giHfVersion == hf.version && giHfKey == hf.key) return true;
+        const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);   // GiHeightfield.h
+        if (pyr.levels.empty()) return false;
+        const int res = static_cast<int>(hf.res);
+        const std::vector<std::vector<float>>& lv = pyr.levels;
+        const std::vector<int>& dim = pyr.dims;
+        const float maxH = pyr.maxHeight;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = static_cast<UINT>(res);
+        td.MipLevels = static_cast<UINT>(lv.size()); td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R32_FLOAT; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        std::vector<D3D11_SUBRESOURCE_DATA> init(lv.size());
+        for (size_t k = 0; k < lv.size(); ++k)
+        { init[k].pSysMem = lv[k].data(); init[k].SysMemPitch = static_cast<UINT>(dim[k] * sizeof(float)); }
+        ComPtr<ID3D11Texture2D> tex;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        if (FAILED(device->CreateTexture2D(&td, init.data(), &tex)) ||
+            FAILED(device->CreateShaderResourceView(tex.Get(), nullptr, &srv)))
+            return false;
+        giHfTex = tex; giHfSRV = srv;
+        giHfVersion = hf.version; giHfKey = hf.key;
+        giHfTopLevel = static_cast<int>(lv.size()) - 1;
+        giHfMaxH = maxH;
+        if (!giHfCB)
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 96; bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &giHfCB))) { giHfTex.Reset(); giHfSRV.Reset(); return false; }
+        }
+        HE_LOG_INFO(RHI, "D3D11Renderer: GI height field %dx%d, %zu mips, max height %.2f", res, res, lv.size(), maxH);
+        return true;
+    }
+
     void updateGiAccel(ContentManager* cm, const RenderWorld& rw)
     {
         HE_PROFILE_SCOPE_N("D3D11::GiUpdateAccel");
@@ -3349,7 +3405,7 @@ struct D3D11RendererImpl
             HE_LOG_INFO(RHI, "D3D11Renderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
                         giBlas.entries(), giBlas.tris().size());
 
-        // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
+        // Same caster filter as the shadow pass: castsShadow only, thinned by distance (GiCasterRange.h) —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
         giReflInstancesCpu.clear();
@@ -3395,10 +3451,15 @@ struct D3D11RendererImpl
         }();
         static int s_giLogCall = 0;
         const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
+        const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(rw, giReflEnabled);   // GiCasterRange.h
+        static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+        const GiHeightfield* gHf = (s_hfOn && rw.heightfields.size() == 1) ? &rw.heightfields[0] : nullptr;
+        giHfActive = gHf && ensureGiHeightfield(*gHf);
+        giShadowInstancesCpu.clear();
         for (const RenderObject& obj : rw.objects)
         {
             // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-            if (!obj.castsShadow || obj.isCluster()) continue;
+            if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
             GIBlasRange range = resolveRange(obj.meshAssetId);
@@ -3410,6 +3471,7 @@ struct D3D11RendererImpl
             inst.nodeOffset   = range.nodeOffset;
             inst.triOffset    = range.triOffset;
             giInstancesCpu.push_back(inst);
+            if (!(giHfActive && obj.terrainChunk)) giShadowInstancesCpu.push_back(inst);
             if (giReflEnabled)
             {
                 // The shared per-instance surface (HE::giInstanceSurface): a graph material's folded
@@ -3470,6 +3532,16 @@ struct D3D11RendererImpl
         }
         makeSB(giInstancesCpu.data(), static_cast<UINT>(giInstancesCpu.size()),
                sizeof(GIInstanceGpu), giInstanceSB, giInstanceSRV);
+        if (giHfActive)
+        {
+            // Never an empty buffer; the count says how many are real.
+            const GIInstanceGpu dummy{};
+            giShadowInstanceCount = static_cast<int>(giShadowInstancesCpu.size());
+            makeSB(giShadowInstancesCpu.empty() ? &dummy : giShadowInstancesCpu.data(),
+                   static_cast<UINT>(std::max<size_t>(giShadowInstancesCpu.size(), 1)),
+                   sizeof(GIInstanceGpu), giShadowInstanceSB, giShadowInstanceSRV);
+        }
+        else { giShadowInstanceCount = giInstanceCount; giShadowInstanceSB.Reset(); giShadowInstanceSRV.Reset(); }
         if (giReflEnabled)
             makeSB(giReflInstancesCpu.data(), static_cast<UINT>(giReflInstancesCpu.size()),
                    sizeof(GIInstanceGpu), giReflInstanceSB, giReflInstanceSRV);
@@ -3495,6 +3567,8 @@ struct D3D11RendererImpl
         giBlas.clear();
         giInstancesCpu.clear();
         giInstanceCount = 0;
+        giHfTex.Reset(); giHfSRV.Reset(); giHfVersion = 0; giHfKey = ~0ull; giHfActive = false;
+        giShadowInstancesCpu.clear(); giShadowInstanceSB.Reset(); giShadowInstanceSRV.Reset(); giShadowInstanceCount = 0;
     }
 
     // Builds the GI pipelines. Called eagerly from Initialize (so the compile cost
@@ -3545,7 +3619,7 @@ struct D3D11RendererImpl
         // every batch then loops through giGBufVS.
         if (ok && compile(kGiGBufHLSL, "GiGBufVSInstanced", "vs_5_0", b))
             device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giGBufVSInstanced);
-        if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", b)))
+        if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", b)))
             ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giShadowCS));
         if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", b)))
             ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giProbeCS));
@@ -3923,23 +3997,38 @@ struct D3D11RendererImpl
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (SUCCEEDED(ctx->Map(giShadowCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &scb, sizeof(scb)); ctx->Unmap(giShadowCB.Get(), 0); }
-            glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
+            // The kernel's instance list: without the terrain chunks while the height field stands in for them.
+            const bool hf = giHfActive && giShadowInstanceSRV && giHfSRV && giHfCB && !rw.heightfields.empty();
+            glm::ivec4 cnt(hf ? giShadowInstanceCount : giInstanceCount, 0, 0, 0);
             if (SUCCEEDED(ctx->Map(giCountCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &cnt, sizeof(cnt)); ctx->Unmap(giCountCB.Get(), 0); }
+            if (hf)
+            {
+                struct { glm::mat4 worldToLocal; glm::vec4 p, p2; } hcb{};
+                const GiHeightfield& h0 = rw.heightfields[0];
+                hcb.worldToLocal = h0.worldToLocal;
+                hcb.p  = glm::vec4(1.0f / std::max(h0.size.x, 1e-4f), 1.0f / std::max(h0.size.y, 1e-4f),
+                                   float(h0.res - 1), 1.0f);
+                hcb.p2 = glm::vec4(float(giHfTopLevel), giHfMaxH, 0.0f, 512.0f);
+                if (SUCCEEDED(ctx->Map(giHfCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+                { std::memcpy(mapped.pData, &hcb, sizeof(hcb)); ctx->Unmap(giHfCB.Get(), 0); }
+            }
 
             ctx->CSSetShader(giShadowCS.Get(), nullptr, 0);
-            ID3D11ShaderResourceView* srvs[5] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
-                                                  giNodeSRV.Get(), giTriSRV.Get(), giInstanceSRV.Get() };
-            ctx->CSSetShaderResources(0, 5, srvs);
-            ID3D11Buffer* cbs[2] = { giShadowCB.Get(), giCountCB.Get() };
-            ctx->CSSetConstantBuffers(0, 2, cbs);
+            ID3D11ShaderResourceView* srvs[6] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
+                                                  giNodeSRV.Get(), giTriSRV.Get(),
+                                                  hf ? giShadowInstanceSRV.Get() : giInstanceSRV.Get(),
+                                                  hf ? giHfSRV.Get() : nullptr };
+            ctx->CSSetShaderResources(0, 6, srvs);
+            ID3D11Buffer* cbs[3] = { giShadowCB.Get(), giCountCB.Get(), hf ? giHfCB.Get() : nullptr };
+            ctx->CSSetConstantBuffers(0, 3, cbs);
             ID3D11UnorderedAccessView* uavs[2] = { giRawUAV.Get(), giLocalMaskUAV.Get() };
             ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
             ctx->Dispatch((UINT)((giShadowW + 7) / 8), (UINT)((giShadowH + 7) / 8), 1);
             ID3D11UnorderedAccessView* nullUavs[2] = {};
             ctx->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
-            ID3D11ShaderResourceView* nullSrvs[5] = {};
-            ctx->CSSetShaderResources(0, 5, nullSrvs);
+            ID3D11ShaderResourceView* nullSrvs[6] = {};
+            ctx->CSSetShaderResources(0, 6, nullSrvs);
             ctx->CSSetShader(nullptr, nullptr, 0);
         }
 

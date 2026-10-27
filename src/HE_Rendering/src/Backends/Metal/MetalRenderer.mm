@@ -4,6 +4,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
+#include <HorizonRendering/GiCasterRange.h>   // HE::GiCasterFilter: which casters enter the GI accel
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
@@ -8523,10 +8524,11 @@ void MetalRenderer::EncodeGISwAccelBuild()
 			it = m_giSwBlasCache.emplace(id, BuildGISwBlas(id)).first;
 		return it->second;
 	};
+	const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
 	for (RenderObject& obj : m_renderWorld.objects)
 	{
 		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-		if (!obj.castsShadow || obj.isCluster()) continue;
+		if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
 		// Default-cube fallback — must match the draw loops (see the HW path).
 		GISwBlasRange range = resolveSwRange(obj.meshAssetId);
 		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
@@ -8544,6 +8546,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		instances.push_back(inst);
 	}
 	m_giSwInstanceCount = static_cast<int>(instances.size());
+	meshStreamCounters().giInstances.store(static_cast<uint32_t>(m_giSwInstanceCount), std::memory_order_relaxed);
 	if (m_giSwInstanceCount == 0) return;
 
 	@autoreleasepool
@@ -8714,10 +8717,11 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		instanceBaseColor.reserve(m_renderWorld.objects.size() * 2);
 		instanceLandIndex.reserve(m_renderWorld.objects.size());
 
+		const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
 			// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-			if (!obj.castsShadow || obj.isCluster()) continue;
+			if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
 			// Same fallback the shadow-caster/G-buffer DRAW loops use: an entity
 			// without a resolvable mesh asset renders as the default cube, so it
 			// must occlude as one too — skipping it here made such objects
@@ -9536,6 +9540,9 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 	const std::vector<float>& interleaved = *vtx;
 
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().meshUploadBytes.fetch_add(
+		interleaved.size() * sizeof(float) + asset->indices.size() * sizeof(uint32_t), std::memory_order_relaxed);
 	mesh.vertexBuf  = (void*)CFBridgingRetain(
 		[device newBufferWithBytes:interleaved.data()
 		                    length:interleaved.size() * sizeof(float)
@@ -16958,6 +16965,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// Release cached GPU buffers for any mesh invalidated since last frame
 			// (e.g. sculpted terrain). In-flight GPU work may reference them, so
 			// release via CFBridgingRelease (ARC autoreleasepool handles safety here).
+			meshStreamCounters().meshInvalidations.fetch_add(
+				static_cast<uint32_t>(m_pendingMeshInvalidations.size()), std::memory_order_relaxed);
 			for (const HE::UUID& id : m_pendingMeshInvalidations)
 			{
 				if (auto it = m_meshCache.find(id); it != m_meshCache.end())

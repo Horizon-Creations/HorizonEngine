@@ -592,6 +592,9 @@ namespace TerrainSystem
             const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
             const ChunkGrid g  = computeGrid(res);
             const std::vector<float> field = computeTerrainHeightField(tc);
+            tc.builtField        = std::make_shared<const std::vector<float>>(field);
+            tc.builtFieldRes     = res;
+            ++tc.builtFieldVersion;
 
             const bool gridChanged = (tc.builtRes != res || tc.builtChunksPerSide != g.chunksPerSide);
             const bool rebuildAll  = tc.dirty || gridChanged;

@@ -14,6 +14,7 @@ void RenderWorld::clear()
 	particleBatches.clear();
 	ribbonBatches.clear();
 	landscapes.clear();
+	heightfields.clear();
 	camera = CameraData{};
 	shadow = ShadowData{};
 	sunDirection = glm::vec3(0.45f, 0.80f, 0.55f);

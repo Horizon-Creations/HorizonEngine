@@ -6,6 +6,8 @@
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the context cannot sample them
 #include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
 #include <HorizonRendering/ParticleShaderTemplates.h>
+#include <HorizonRendering/GiCasterRange.h>
+#include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
@@ -2004,7 +2006,101 @@ vec3 giHitNormal(int inst, int tri, vec3 rayDir)
 // Shadow-ray kernel: 1 cone-jittered ray/pixel toward the dominant directional
 // light (giDominantDirectionalLight pick — Metal lesson 5e45643: NEVER the
 // sky-dome sun). Same hash/cone/bias constants as Metal's giShadowRay.
+// GI sun/local-light occlusion against a landscape's HEIGHT FIELD instead of its chunk meshes (shadow kernel only;
+// inserted between kGiTraversalGLSL and kGiShadowCS). Mirrors kGiHeightfieldHLSL (D3D_Shared/HlslSources.h): the field is
+// an R32F texture whose mips are a conservative max pyramid (GiHeightfield.h). uHfParams.w == 0 = off.
+static const char* kGiHeightfieldGLSL = R"GLSL(
+uniform mat4      uHfWorldToLocal;
+uniform vec4      uHfParams;    // x = 1/sizeX, y = 1/sizeZ, z = res-1, w = enabled
+uniform vec4      uHfParams2;   // x = top mip level, y = max height, w = max march steps
+uniform sampler2D uHf;
+
+float hfBilinear(vec2 tp)
+{
+	vec2  f  = clamp(tp, vec2(0.0), vec2(uHfParams.z));
+	ivec2 i0 = ivec2(floor(f));
+	ivec2 i1 = min(i0 + ivec2(1), ivec2(int(uHfParams.z)));
+	vec2  w  = f - vec2(i0);
+	float h00 = texelFetch(uHf, ivec2(i0.x, i0.y), 0).r;
+	float h10 = texelFetch(uHf, ivec2(i1.x, i0.y), 0).r;
+	float h01 = texelFetch(uHf, ivec2(i0.x, i1.y), 0).r;
+	float h11 = texelFetch(uHf, ivec2(i1.x, i1.y), 0).r;
+	return mix(mix(h00, h10, w.x), mix(h01, h11, w.x), w.y);
+}
+
+bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+	if (uHfParams.w < 0.5) return false;
+	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
+	vec3 dL = mat3(uHfWorldToLocal) * d;
+	vec2 texPerLocal = vec2(uHfParams.x, uHfParams.y) * uHfParams.z;      // local XZ -> texels
+	vec2 tp0 = (oL.xz * vec2(uHfParams.x, uHfParams.y) + 0.5) * uHfParams.z;
+	vec2 tpd = dL.xz * texPerLocal;                                          // texels per unit t
+	float texLen = max(length(tpd), 1e-6);
+
+	// t range inside the terrain's footprint and below its highest point.
+	float t0 = tMin, t1 = tMax;
+	vec2 inv = 1.0 / (abs(tpd) + 1e-9) * sign(tpd + 1e-12);
+	vec2 ta  = (vec2(0.0) - tp0) * inv, tb = (vec2(uHfParams.z) - tp0) * inv;
+	vec2 tlo = min(ta, tb), thi = max(ta, tb);
+	t0 = max(t0, max(tlo.x, tlo.y));
+	t1 = min(t1, min(thi.x, thi.y));
+	float maxH = uHfParams2.y;
+	if (abs(dL.y) > 1e-9)
+	{
+		float tH = (maxH - oL.y) / dL.y;
+		if (dL.y < 0.0) t0 = max(t0, tH); else t1 = min(t1, tH);
+	}
+	else if (oL.y > maxH) return false;
+	if (t0 >= t1) return false;
+
+	// The receiver sits on a (possibly coarser) LOD mesh that can lie a little under the exact field:
+	// lift the start so a point on the ground is not its own occluder.
+	vec2  tpS  = tp0 + tpd * t0;
+	float hS   = hfBilinear(tpS);
+	float yS   = oL.y + dL.y * t0;
+	float lift = max(0.0, hS + 0.15 - yS);
+
+	int   topLvl = int(uHfParams2.x);
+	int   lvl    = min(2, topLvl);
+	float t      = t0;
+	int   steps  = int(uHfParams2.w);
+	for (int it = 0; it < steps; ++it)
+	{
+		if (t >= t1) return false;
+		vec2  tp = tp0 + tpd * t;
+		float y  = oL.y + dL.y * t + lift;
+		ivec2 cell = ivec2(floor(tp)) >> lvl;
+		cell = min(cell, ivec2(max(1, (int(uHfParams.z) + 1) >> lvl) - 1));   // the last texel of this mip
+		float m  = texelFetch(uHf, cell, lvl).r;
+		float cellTex = float(1 << lvl);
+		float dt = 0.5 * cellTex / texLen;
+		float yEnd = y + dL.y * dt;
+		if (min(y, yEnd) > m + 0.02)
+		{
+			t += dt;
+			lvl = min(lvl + 1, topLvl);
+		}
+		else if (lvl > 0)
+		{
+			lvl -= 1;
+		}
+		else
+		{
+			if (y < hfBilinear(tp) - 0.02) return true;
+			t += 0.5 / texLen;
+		}
+	}
+	return false;
+}
+#undef GI_OCCLUDED
+#define GI_OCCLUDED(o, d, tmin, tmax) (giSceneAnyHit(o, d, tmin, tmax) || hfAnyHit(o, d, tmin, tmax))
+)GLSL";
+
 static const char* kGiShadowCS = R"GLSL(
+#ifndef GI_OCCLUDED
+#define GI_OCCLUDED(o, d, tmin, tmax) giSceneAnyHit(o, d, tmin, tmax)
+#endif
 uniform sampler2D uGPos;
 uniform sampler2D uGNorm;
 layout(r16f,    binding = 0) uniform writeonly image2D uOut;
@@ -2072,7 +2168,7 @@ void main()
 			vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
 			// Same self-intersection guards as Metal: normal-offset origin + min t.
 			vec3 origin = pv.xyz + N * 0.05;
-			sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+			sunVis += GI_OCCLUDED(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
 		}
 		sunVis /= float(spp);
 	}
@@ -2094,7 +2190,7 @@ void main()
 		if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
 		vec3 dirL = toL / distL;
 		if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
-		if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+		if (GI_OCCLUDED(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
 			localVis[i] = 0.0;
 	}
 	imageStore(uOutLocal, ivec2(gid), localVis);
@@ -6188,6 +6284,8 @@ HE::GiBvh OpenGLRenderer::BuildGIBvh(const HE::UUID& meshId)
 	if (!m_contentManager) return bvh;
 	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
 	if (!asset || asset->indices.empty()) return bvh;
+	meshStreamCounters().blasBuilds.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().blasTris.fetch_add(asset->indices.size() / 3, std::memory_order_relaxed);
 
 	// Same two layouts ResolveMesh uploads: cooked = interleaved 8-float
 	// (position at offset 0, matching Metal's BLAS vertex descriptor), loose =
@@ -6244,10 +6342,15 @@ void OpenGLRenderer::UpdateGIAccel()
 		if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
 		return m_giBlas.add(id, BuildGIBvh(id));
 	};
+	const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
+	static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+	const GiHeightfield* gHf = (s_hfOn && m_renderWorld.heightfields.size() == 1) ? &m_renderWorld.heightfields[0] : nullptr;
+	m_giHfActive = gHf && EnsureGiHeightfield(*gHf);
+	m_giShadowInstancesCpu.clear();
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
 		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-		if (!obj.castsShadow || obj.isCluster()) continue;
+		if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
 		// Default-cube fallback — an entity without a resolvable mesh asset
 		// RENDERS as the default cube (draw-loop fallback), so it must occlude
 		// as one too, or plain cube entities cast no GI shadow at all.
@@ -6266,8 +6369,10 @@ void OpenGLRenderer::UpdateGIAccel()
 		inst.triOffset    = range.triOffset;
 		inst.landIndex    = obj.landscapeIndex;   // paint sampling at the hit
 		m_giInstancesCpu.push_back(inst);
+		if (!(m_giHfActive && obj.terrainChunk)) m_giShadowInstancesCpu.push_back(inst);
 	}
 	m_giInstanceCount = static_cast<int>(m_giInstancesCpu.size());
+	meshStreamCounters().giInstances.store(static_cast<uint32_t>(m_giInstanceCount), std::memory_order_relaxed);
 	if (m_giInstanceCount == 0) return;
 
 	// ── Painted-landscape table ──────────────────────────────────────────────
@@ -6324,7 +6429,48 @@ void OpenGLRenderer::UpdateGIAccel()
 	glBufferData(GL_SHADER_STORAGE_BUFFER,
 	             static_cast<GLsizeiptr>(m_giInstancesCpu.size() * sizeof(GIInstanceGpu)),
 	             m_giInstancesCpu.data(), GL_DYNAMIC_DRAW);
+	if (m_giHfActive)
+	{
+		// The shadow kernel's own list, without the terrain chunks (the height field answers for them).
+		if (!m_giShadowInstanceSSBO) glGenBuffers(1, &m_giShadowInstanceSSBO);
+		m_giShadowInstanceCount = static_cast<int>(m_giShadowInstancesCpu.size());
+		const GIInstanceGpu dummy{};   // never size 0
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giShadowInstanceSSBO);
+		glBufferData(GL_SHADER_STORAGE_BUFFER,
+		             static_cast<GLsizeiptr>(std::max<size_t>(m_giShadowInstancesCpu.size(), 1) * sizeof(GIInstanceGpu)),
+		             m_giShadowInstancesCpu.empty() ? &dummy : m_giShadowInstancesCpu.data(), GL_DYNAMIC_DRAW);
+	}
+	else m_giShadowInstanceCount = m_giInstanceCount;
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+// Upload the height field (R32F, a conservative max pyramid in the mips) when it is new or rebuilt.
+bool OpenGLRenderer::EnsureGiHeightfield(const GiHeightfield& hf)
+{
+	HE_PROFILE_SCOPE_N("GL::GiHeightfield");
+	if (!hf.data || hf.res < 8 || hf.data->size() < size_t(hf.res) * hf.res) return false;
+	if (m_giHfTex && m_giHfVersion == hf.version && m_giHfKey == hf.key) return true;
+	const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);
+	if (pyr.levels.empty()) return false;
+	if (!m_giHfTex) glGenTextures(1, &m_giHfTex);
+	else            { glDeleteTextures(1, &m_giHfTex); glGenTextures(1, &m_giHfTex); }   // immutable storage: new size/levels need a new name
+	glBindTexture(GL_TEXTURE_2D, m_giHfTex);
+	glTexStorage2D(GL_TEXTURE_2D, static_cast<GLsizei>(pyr.levels.size()), GL_R32F, pyr.dims[0], pyr.dims[0]);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	for (size_t k = 0; k < pyr.levels.size(); ++k)
+		glTexSubImage2D(GL_TEXTURE_2D, static_cast<GLint>(k), 0, 0, pyr.dims[k], pyr.dims[k], GL_RED, GL_FLOAT, pyr.levels[k].data());
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(pyr.levels.size()) - 1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_giHfVersion  = hf.version;
+	m_giHfKey      = hf.key;
+	m_giHfTopLevel = static_cast<int>(pyr.levels.size()) - 1;
+	m_giHfMaxH     = pyr.maxHeight;
+	HE_LOG_INFO(RHI, "OpenGLRenderer: GI height field %dx%d, %zu mips, max height %.2f",
+	            pyr.dims[0], pyr.dims[0], pyr.levels.size(), pyr.maxHeight);
+	return true;
 }
 
 void OpenGLRenderer::DestroyGIAccel()
@@ -6339,6 +6485,10 @@ void OpenGLRenderer::DestroyGIAccel()
 	m_giBlas.clear();
 	m_giInstancesCpu.clear();
 	m_giInstanceCount = 0;
+	if (m_giShadowInstanceSSBO) { glDeleteBuffers(1, &m_giShadowInstanceSSBO); m_giShadowInstanceSSBO = 0; }
+	if (m_giHfTex) { glDeleteTextures(1, &m_giHfTex); m_giHfTex = 0; }
+	m_giHfVersion = 0; m_giHfKey = ~0ull; m_giHfActive = false;
+	m_giShadowInstancesCpu.clear(); m_giShadowInstanceCount = 0;
 }
 
 OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int program) const
@@ -6448,7 +6598,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		m_giReflMixProgram  = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                           CompileStage(GL_FRAGMENT_SHADER, kGiReflMixFS));
 		const std::string header = "#version 430 core\n";
-		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiShadowCS);
+		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiShadowCS);
 		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
 		m_giReflCSProgram   = linkCompute(header + kGiTraversalGLSL + kGiReflCS);
 		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
@@ -6843,7 +6993,9 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glUseProgram(m_giShadowCSProgram);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_giInstanceSSBO);
+	// Without the terrain chunks while the height field stands in for them (EnsureGiHeightfield).
+	const bool hfOn = m_giHfActive && m_giShadowInstanceSSBO && m_giHfTex && !m_renderWorld.heightfields.empty();
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, hfOn ? m_giShadowInstanceSSBO : m_giInstanceSSBO);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGPos"), 0);
@@ -6869,7 +7021,21 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
 		            static_cast<float>(masked.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 	}
-	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), hfOn ? m_giShadowInstanceCount : m_giInstanceCount);
+	{
+		const GiHeightfield* h0 = m_renderWorld.heightfields.empty() ? nullptr : &m_renderWorld.heightfields[0];
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, hfOn ? m_giHfTex : 0);
+		glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uHf"), 2);
+		glUniformMatrix4fv(glGetUniformLocation(m_giShadowCSProgram, "uHfWorldToLocal"), 1, GL_FALSE,
+		                   glm::value_ptr(h0 ? h0->worldToLocal : glm::mat4(1.0f)));
+		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uHfParams"),
+		            h0 ? 1.0f / std::max(h0->size.x, 1e-4f) : 1.0f, h0 ? 1.0f / std::max(h0->size.y, 1e-4f) : 1.0f,
+		            h0 ? float(h0->res - 1) : 1.0f, hfOn ? 1.0f : 0.0f);
+		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uHfParams2"),
+		            float(m_giHfTopLevel), m_giHfMaxH, 0.0f, 512.0f);
+		glActiveTexture(GL_TEXTURE0);
+	}
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	// The temporal pass SAMPLES the image-stored raw mask next.
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
@@ -9006,6 +9172,9 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 	const std::vector<float>& interleaved = *vtx;
 
 	glGenVertexArrays(1, &mesh.vao);
+	meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().meshUploadBytes.fetch_add(
+		interleaved.size() * sizeof(float) + asset->indices.size() * sizeof(uint32_t), std::memory_order_relaxed);
 	glGenBuffers(1, &mesh.vbo);
 	glGenBuffers(1, &mesh.ebo);
 
@@ -11213,6 +11382,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		}
 	m_pendingMaterialInvalidations.clear();
 
+	meshStreamCounters().meshInvalidations.fetch_add(
+		static_cast<uint32_t>(m_pendingMeshInvalidations.size()), std::memory_order_relaxed);
 	for (const HE::UUID& id : m_pendingMeshInvalidations)
 	{
 		if (auto it = m_meshCache.find(id); it != m_meshCache.end())

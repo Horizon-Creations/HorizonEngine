@@ -1036,12 +1036,41 @@ TEST_CASE("Every tick of a camera flight keeps every terrain seam closed")
     }
 }
 
+TEST_CASE("A built landscape keeps the height field its chunks were built from, versioned per rebuild")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    const SweepTerrain t = kSweepTerrains[0];
+    Entity te = makeSweepLandscape(world, t);
+    auto& reg = world.registry();
+    CHECK(reg.get<TerrainComponent>(te).builtField == nullptr);
+
+    tickFull(world, cm, glm::vec3(0.0f), false);
+    const auto& tc = reg.get<TerrainComponent>(te);
+    REQUIRE(tc.builtField != nullptr);
+    CHECK(tc.builtFieldRes == tc.resolution);
+    CHECK(tc.builtField->size() == static_cast<size_t>(tc.resolution) * tc.resolution);
+    const uint64_t v1 = tc.builtFieldVersion;
+    CHECK(v1 > 0);
+    const auto field1 = tc.builtField;
+
+    tickFull(world, cm, glm::vec3(0.0f), false);   // nothing dirty: the same field, the same version
+    CHECK(reg.get<TerrainComponent>(te).builtFieldVersion == v1);
+    CHECK(reg.get<TerrainComponent>(te).builtField == field1);
+
+    reg.get<TerrainComponent>(te).heightScale *= 2.0f;
+    reg.get<TerrainComponent>(te).dirty = true;
+    tickFull(world, cm, glm::vec3(0.0f), false);
+    CHECK(reg.get<TerrainComponent>(te).builtFieldVersion > v1);
+}
+
 TEST_CASE("A camera jittering across a LOD distance keeps the seams closed and reuses the stitched meshes")
 {
     // LOD0 ends at 30 m on these 50 m chunks (lodDistanceScale 0.1). The camera
-    // stands 30 m from chunk (1,1)'s centre and jitters by ±0.5 m across that
-    // line, so the chunk flips LOD0 ↔ LOD1 every tick and its neighbours' seams
-    // change from mixed to plain and back.
+    // stands 30 m from chunk (1,1)'s centre and jitters across that
+    // line. LODSystem holds a level for 5 % of its distance on the way to the finer
+    // one (1.5 m here), so the jitter is ±2.5 m: the chunk still flips LOD0 ↔ LOD1
+    // every tick and its neighbours' seams change from mixed to plain and back.
     HorizonWorld world;
     ContentManager cm(".");
     const SweepTerrain t = kSweepTerrains[0];
@@ -1066,7 +1095,7 @@ TEST_CASE("A camera jittering across a LOD distance keeps the seams closed and r
         std::vector<uint64_t> before;
         for (auto [e, cc] : reg.view<TerrainChunkComponent>().each()) before.push_back(cc.stitchKey);
         const uint8_t was = reg.get<LODComponent>(c11).current;
-        tickFull(world, cm, camAt(i % 2 ? 30.5f : 29.5f), true);
+        tickFull(world, cm, camAt(i % 2 ? 32.5f : 27.5f), true);
         if (reg.get<LODComponent>(c11).current != was) ++toggles;
         size_t k = 0;
         for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())

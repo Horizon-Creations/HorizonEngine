@@ -2429,7 +2429,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		for (const char* n : names) src.push_back(stripLineComments(readFile(sh / n)));
 		checkGroup(names, src, {
 			{ "surface origin bias",  { R"(\+ N \* ([0-9.]+))" } },
-			{ "sun ray tMin/tMax",    { R"(giSceneAnyHit\(origin, dir, ([0-9.]+), ([0-9.]+)\))" } },
+			{ "sun ray tMin/tMax",    { R"((?:giSceneAnyHit|GI_OCCLUDED)\(origin, dir, ([0-9.]+), ([0-9.]+)\))" } },
 			{ "local-light skip",     { R"(distL <= ([0-9.]+)\))" } },
 			{ "local ray tMin/slack", { R"(dirL, ([0-9.]+), max\(distL - ([0-9.]+), ([0-9.]+)\)\))" } },
 			{ "cone jitter hash",     { R"(v = v \* (\d+)u \+ (\d+)u;[\s\S]*?v \^= v >> (\d+)u;[\s\S]*?h\.xy >> (\d+)u\) \* \(1\.0 / ([0-9.]+)\))" } },

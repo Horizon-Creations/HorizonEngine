@@ -1343,6 +1343,17 @@ private:
 	size_t       m_giTriCap          = 0;
 	unsigned int m_giInstanceSSBO    = 0;
 	int          m_giInstanceCount   = 0;
+	// The landscape's height field for the shadow kernel (kGiHeightfieldGLSL): with it the shadow kernel's
+	// instance list leaves the terrain chunks out. HE_GI_HEIGHTFIELD=0 = off.
+	bool EnsureGiHeightfield(const GiHeightfield& hf);
+	unsigned int m_giHfTex = 0;
+	unsigned long long m_giHfVersion = 0, m_giHfKey = ~0ull;
+	int          m_giHfTopLevel = 0;
+	float        m_giHfMaxH = 0.0f;
+	bool         m_giHfActive = false;
+	std::vector<GIInstanceGpu> m_giShadowInstancesCpu;
+	unsigned int m_giShadowInstanceSSBO = 0;
+	int          m_giShadowInstanceCount = 0;
 	bool         m_giSupported       = false;         // GL >= 4.3, cached at Initialize
 	bool         m_giEnabled         = false;
 	float        m_giIndirectIntensity = 1.0f;

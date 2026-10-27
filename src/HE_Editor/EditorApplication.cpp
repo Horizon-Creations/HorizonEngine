@@ -7255,6 +7255,57 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			ltc.weightRes);
 	}
 
+	// ── GI height-field shadow witness (HE_DUMP_GIHFTEST=1) ─────────────────────
+	// A 300 m landscape with hills (a ridge, two rounded hills) and three crates standing on it, default
+	// material. With GI on, the sun shadows of the hills on the ground and on each other come from the RT
+	// mask; scripts/he_gi_hf_check.py dumps it with the landscape traced as meshes and as a height field
+	// (HE_GI_HEIGHTFIELD=0/1) and diffs the pictures. Use HE_DUMP_SKYTEST with a low TOD for long shadows.
+	if (const char* hw = std::getenv("HE_DUMP_GIHFTEST"); hw && *hw && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto land = m_editorWorld->createEntity("GiHfLandscape");
+		reg.emplace<TransformComponent>(land, TransformComponent{});
+		TerrainComponent ltc;
+		ltc.sizeX = ltc.sizeZ = 300.0f;
+		ltc.resolution  = 257;
+		ltc.heightScale = 0.0f;
+		ltc.seed        = 0;
+		ltc.dirty       = true;
+		ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
+		auto hillAt = [&](float x, float z) {
+			auto bump = [](float x, float z, float cx, float cz, float r, float h) {
+				const float d = std::sqrt((x - cx) * (x - cx) + (z - cz) * (z - cz)) / r;
+				return d >= 1.0f ? 0.0f : h * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+			};
+			float h = 1.5f * std::sin(x * 0.05f) * std::cos(z * 0.04f);
+			h += bump(x, z, -40.0f, -30.0f, 70.0f, 28.0f);
+			h += bump(x, z,  50.0f,  40.0f, 45.0f, 16.0f);
+			// a ridge along X at z = 60
+			h += 22.0f * std::exp(-((z - 60.0f) * (z - 60.0f)) / (2.0f * 8.0f * 8.0f)) * (0.5f + 0.5f * std::cos(x * 0.03f));
+			return h;
+		};
+		for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
+			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
+			{
+				const float x = -150.0f + 300.0f * float(xi) / float(ltc.resolution - 1);
+				const float z = -150.0f + 300.0f * float(zi) / float(ltc.resolution - 1);
+				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] = hillAt(x, z);
+			}
+		reg.emplace<TerrainComponent>(land, ltc);
+		const glm::vec2 crates[3] = { { -100.0f, 20.0f }, { 20.0f, -60.0f }, { 90.0f, 80.0f } };
+		for (const glm::vec2& c : crates)
+		{
+			auto e = m_editorWorld->createEntity("GiHfCrate");
+			TransformComponent tc;
+			tc.position = glm::vec3(c.x, hillAt(c.x, c.y) + 2.0f, c.y);
+			tc.scale    = glm::vec3(4.0f);
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+		}
+		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);   // the dump renders before the first tick
+		HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_GIHFTEST landscape with hills and three crates added");
+	}
+
 	// ── Texture-array witness (HE_DUMP_TEXARRAY=1, Thema 158 Schritt 3) ──────
 	// A flat 100 m landscape at y=300 with an UNLIT graph material that reads the
 	// three engine texture arrays (T_Landscape_{Albedo,Normal,Mask}_Array, five

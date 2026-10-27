@@ -6,6 +6,7 @@
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/InstanceArena.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
@@ -809,6 +810,12 @@ private:
 	};
 	GpuMesh                               m_cube;
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+	// A mesh the terrain/sculpt tools replaced: its buffers are freed once no frame in
+	// flight can still read them, instead of a vkDeviceWaitIdle per invalidation drain
+	// (the D3D12 retire-list pattern). `frames` counts down once per Render().
+	struct RetiredMesh { GpuMesh mesh; int frames; };
+	std::vector<RetiredMesh> m_retiredMeshes;
+	void destroyGpuMesh(GpuMesh& m);
 	bool createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
 	                       const std::vector<uint32_t>& indices);
 	// Upload tightly-packed RGBA8 pixels to a device-local sampled image + view: the
@@ -1552,6 +1559,22 @@ private:
 	// bones UBO ring.
 	GiBuffer m_giInstanceBuf[3]; // k_maxFramesInFlight (static_assert at use site)
 	int      m_giInstanceCount = 0;
+	// The landscape's height field for the software shadow kernel (gi_shadow.comp, binding 9): with it the kernel reads
+	// m_giShadowInstanceBuf (the instances without the terrain chunks) instead. HE_GI_HEIGHTFIELD=0 = off.
+	bool ensureGiHeightfield(const GiHeightfield& hf);
+	bool uploadHeightPyramid(const HE::GiHeightPyramid& pyr, VkImage& image, VkDeviceMemory& memory, VkImageView& view);
+	void retireGiHeightfield();
+	VkImage        m_giHfImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_giHfMem   = VK_NULL_HANDLE;
+	VkImageView    m_giHfView  = VK_NULL_HANDLE;
+	uint64_t       m_giHfVersion = 0, m_giHfKey = ~0ull;
+	int            m_giHfTopLevel = 0;
+	float          m_giHfMaxH = 0.0f;
+	bool           m_giHfActive = false;
+	GiBuffer       m_giShadowInstanceBuf[3];
+	int            m_giShadowInstanceCount = 0;
+	struct RetiredHf { VkImage img; VkImageView view; VkDeviceMemory mem; int frames; };
+	std::vector<RetiredHf> m_retiredHf;   // replaced height-field images, freed once no frame in flight reads them
 	// gi_refl.comp's own copy of the ring above: folded graph-material colour
 	// (HE::giInstanceSurface) instead of obj.baseColor, only built/uploaded
 	// while m_giReflEnabled. Kept separate from m_giInstanceBuf so enabling
