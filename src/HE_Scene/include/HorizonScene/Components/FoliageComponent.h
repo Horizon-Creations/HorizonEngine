@@ -2,6 +2,7 @@
 #include <Types/UUID.h>
 #include <Math/Math.h>
 #include <HorizonScene/FoliageStore.h>
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -175,8 +176,8 @@ struct FoliageComponent {
         l.name = "Layer " + std::to_string(layers.size() + 1);
         for (bool taken = true; taken;)
         {
-            taken = false;
-            for (const FoliageLayer& o : layers) taken = taken || o.seed == l.seed;
+            taken = std::any_of(layers.begin(), layers.end(),
+                                 [l](const FoliageLayer& o) { return o.seed == l.seed; });
             if (taken) l.seed += 7919;
         }
         layers.push_back(std::move(l));
