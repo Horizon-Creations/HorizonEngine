@@ -43,10 +43,14 @@ struct HcWatchEvents
         {
             if (hc::isScriptToken(token))
             {
+                if (!scripts || !instances)
+                {
+                    runtime.unwatch(owner, var, token);
+                    continue;
+                }
                 const uint32_t entity = hc::tokenEntity(token);
-                const auto it = (scripts && instances) ? instances->find(entity)
-                                                       : InstanceMap::const_iterator{};
-                if (!scripts || !instances || it == instances->end())
+                const auto it = instances->find(entity);
+                if (it == instances->end())
                 {
                     runtime.unwatch(owner, var, token);
                     continue;
