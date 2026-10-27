@@ -512,7 +512,8 @@ void applyScriptVars(Ctx& c, Entity e, const nlohmann::json& vars)
     {
         if (std::find(saved.begin(), saved.end(), it.key()) == saved.end())
         {
-            skipped += (skipped.empty() ? "" : ", ") + it.key();
+            if (!skipped.empty()) skipped += ", ";
+            skipped += it.key();
             continue;
         }
         const Value live = c.runtime->getVariable(inst, it.key());
