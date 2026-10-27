@@ -124,7 +124,7 @@ namespace
         if (!bodiesEq(a, b)) return false;
         for (size_t i = 0; i < a.size(); ++i)
             if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog ||
-                a[i].underwaterCaustics != b[i].underwaterCaustics || a[i].brushBed != b[i].brushBed ||
+                a[i].underwaterCaustics != b[i].underwaterCaustics || a[i].tessellation != b[i].tessellation || a[i].brushBed != b[i].brushBed ||
                 a[i].brushPatch.res != b[i].brushPatch.res || a[i].brushPatch.x0 != b[i].brushPatch.x0 ||
                 a[i].brushPatch.z0 != b[i].brushPatch.z0 || a[i].brushPatch.w != b[i].brushPatch.w ||
                 a[i].brushPatch.h != b[i].brushPatch.h || a[i].brushPatch.delta != b[i].brushPatch.delta)
@@ -386,6 +386,15 @@ UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams&
     return out;
 }
 
+TessellationParams clampTessellation(const TessellationParams& p)
+{
+    const TessellationParams d;
+    TessellationParams out;
+    out.height     = finite(p.height) ? std::clamp(p.height, 0.0f, kMaxTessHeight) : d.height;
+    out.shoreWidth = finite(p.shoreWidth) ? std::clamp(p.shoreWidth, kMinTessShore, kMaxTessShore) : d.shoreWidth;
+    return out;
+}
+
 BrushBedParams clampBrushBed(const BrushBedParams& p)
 {
     const BrushBedParams d;   // the defaults stand in for anything that is not a number
@@ -417,6 +426,17 @@ bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCa
     b->underwaterCaustics = next;
     // Same non-effect on the sheet as setUnderwaterFog: nothing here reads it.
     ++tc.water.revision;
+    return true;
+}
+
+bool setTessellation(TerrainComponent& tc, uint16_t id, const TessellationParams& t)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const TessellationParams next = clampTessellation(t);
+    if (b->tessellation == next) return true;
+    b->tessellation = next;
+    ++tc.water.revision;   // the surface's material numbers: nothing about the sheet's shape, but a change to save
     return true;
 }
 
@@ -984,6 +1004,7 @@ void sanitize(TerrainComponent& tc)
         nb.physics = clampPhysics(nb.physics);
         nb.underwaterFog = clampUnderwaterFog(nb.underwaterFog);
         nb.underwaterCaustics = clampUnderwaterCaustics(nb.underwaterCaustics);
+        nb.tessellation = clampTessellation(nb.tessellation);
         nb.brushBed = clampBrushBed(nb.brushBed);
         if (!nb.brushPatch.empty() && !patchFits(nb.brushPatch, tc.resolution)) nb.brushPatch = GroundPatch{};
     }

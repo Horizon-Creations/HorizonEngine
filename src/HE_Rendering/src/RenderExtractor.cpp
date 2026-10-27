@@ -5,6 +5,7 @@
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
 #include "FoliageExtract.h"                        // foliage → clusters (its own file, Thema 163)
 #include <Diagnostics/Profiler.h>
+#include <SDL3/SDL_timer.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EnvironmentPush.h>   // the ONE EnvironmentComponent → settings map
@@ -49,6 +50,14 @@
 // every renderable before the shadow fit, the lights before the day-night pass.
 namespace
 {
+// The seconds the water material's Time input runs on: what every backend uploads as the
+// engine clock (SDL ticks; HE_SKY_TIME pins it for deterministic captures).
+double renderWaveClock()
+{
+	static const char* s_timeOv = std::getenv("HE_SKY_TIME");
+	return s_timeOv && *s_timeOv ? std::atof(s_timeOv) : static_cast<double>(SDL_GetTicks()) / 1000.0;
+}
+
 // The Environment's wind, when the scene has an Environment (a scene without one keeps the
 // water material's own sea).
 bool sceneWind(entt::registry& reg, float& direction, float& speed)
@@ -1303,7 +1312,7 @@ bool isEditorIconMaterial(const UUID& materialId)
 	    || materialId == kEditorIconAudioSourceMaterialId;
 }
 
-UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3& cameraPos)
+UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3& cameraPos, double waveClock)
 {
 	UnderwaterCameraData out{};
 	if (!std::isfinite(cameraPos.x) || !std::isfinite(cameraPos.y) || !std::isfinite(cameraPos.z))
@@ -1317,7 +1326,21 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	if (!index.surfaceAt(cameraPos.x, cameraPos.z, 0.0, surf))
 		return out;   // dry at this XZ — WaterIndex already clips the shore itself
 
-	const float signedDepth = surf.level - cameraPos.y;
+	// The surface the camera meets: the flat level, or with tessellation the level plus the
+	// wave the geometry stands at under the camera (the same formula the material displaces by).
+	float surfaceLevel = surf.level;
+	if (waveClock >= 0.0)
+		if (const auto* tc = world.registry().try_get<TerrainComponent>(surf.terrain); tc && tc->water.tessellation)
+		{
+			float windDir = 0.0f, windSpd = 1.0f;
+			water::WaveTrain trains[3] = { water::kWaveA, water::kWaveB, water::kWaveC };
+			if (sceneWind(world.registry(), windDir, windSpd))
+				for (water::WaveTrain& t : trains) t = water::windTrain(t, windDir, windSpd);
+			surfaceLevel += water::tessellatedHeight(trains, cameraPos.x, cameraPos.z, waveClock, surf.depth,
+			                                         surf.tessellation.height, surf.tessellation.shoreWidth);
+		}
+
+	const float signedDepth = surfaceLevel - cameraPos.y;
 	if (signedDepth > surf.depth)
 		return out;   // under the water's own bed — not underwater, just underground
 
@@ -1328,7 +1351,7 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	// reads a continuous ~0, not a special case" (test_underwater_camera.cpp)
 	// pins: justOver (2.001, 1 mm above a level-2 surface) must still read a
 	// small NEGATIVE signedDepth, not 0 — only `wet` has a hard edge here.
-	out.surfaceY    = surf.level;
+	out.surfaceY    = surfaceLevel;
 	out.signedDepth = signedDepth;
 	// At or below the surface, not above it (flying, a dock, a boat on top of
 	// the body). The CI regression this fixed (Thema 185 Schritt 1, commit
@@ -1543,7 +1566,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 
 	{ HE_PROFILE_SCOPE_N("Extract::transforms"); extractTransforms(world, reg); }
 	extractCamera(reg, out, aspectRatio, editorCam);
-	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position);
+	out.underwaterCamera = HE::queryUnderwaterCamera(world, out.camera.position, renderWaveClock());
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing); }

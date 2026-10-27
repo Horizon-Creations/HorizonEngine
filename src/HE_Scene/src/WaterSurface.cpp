@@ -143,6 +143,34 @@ namespace
         return HE::kEngineWaterMaterialId;
     }
 
+    // The tessellated surface's numbers for a body, on the surface entity's material as the
+    // per-entity override of the material's "TessWaves" knob (the instance carries only the
+    // switch; the numbers are per body: a river and a sea on one landscape differ). Off or no
+    // body: the override is removed again, so the plain water carries nothing extra.
+    void applyTessParams(MaterialComponent& mat, const Field& f, uint16_t bodyId)
+    {
+        static const char* kKnob = "TessWaves";
+        const Body* body = f.tessellation ? f.findBody(bodyId) : nullptr;
+        auto it = std::find_if(mat.paramOverrides.begin(), mat.paramOverrides.end(),
+                               [](const MaterialParamOverride& o) { return o.name == kKnob; });
+        if (!body)
+        {
+            if (it != mat.paramOverrides.end()) { mat.paramOverrides.erase(it); mat.dirty = true; }
+            return;
+        }
+        const float v[4] = { body->tessellation.height, body->tessellation.shoreWidth, 0.0f, 0.0f };
+        if (it == mat.paramOverrides.end())
+        {
+            MaterialParamOverride o;
+            o.name = kKnob;
+            mat.paramOverrides.push_back(o);
+            it = mat.paramOverrides.end() - 1;
+        }
+        if (std::equal(v, v + 4, it->value)) return;
+        std::copy(v, v + 4, it->value);
+        mat.dirty = true;
+    }
+
     // Material first: with it not resident the renderer would draw the surface
     // with the plain fallback, which is a grey slab and looks like a bug in the
     // mesh. By UUID when the engine folder has been scanned (an editor session, a
@@ -199,6 +227,7 @@ namespace
                 world.reparentEntity(e, te);
                 MaterialComponent mat;
                 mat.materialAssetId = waterMaterialFor(cm, tessellation);
+                if (const Field* fld = &reg().get<TerrainComponent>(te).water) applyTessParams(mat, *fld, bodyId);
                 r.emplace_or_replace<MaterialComponent>(e, mat);
                 ++stats.created;
             }
@@ -290,12 +319,13 @@ namespace
                 {
                     auto* mat = reg().try_get<MaterialComponent>(kv.second);
                     if (!mat)
-                        reg().emplace<MaterialComponent>(kv.second).materialAssetId = wanted;
+                        mat = &reg().emplace<MaterialComponent>(kv.second), mat->materialAssetId = wanted;
                     else if (mat->materialAssetId != wanted)
                     {
                         mat->materialAssetId = wanted;
                         mat->dirty = true;
                     }
+                    applyTessParams(*mat, f, kv.first);
                 }
             }
 

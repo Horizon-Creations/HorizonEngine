@@ -1764,6 +1764,8 @@ void renderPanel(AppContext& ctx)
                         tc.water.tessellation = tess;
                     }
                     EditorWidgets::helpForLabel("Tessellation##water");
+                    ImGui::SameLine();
+                    dimText("(per-body height and coast fade: Tessellated Waves, below)");
                 }
 
                 ImGui::Spacing();
@@ -1977,6 +1979,45 @@ void renderPanel(AppContext& ctx)
 
                             if (fogEdited && fog != b.underwaterFog)
                                 WF::setUnderwaterFog(tc, b.id, fog);
+                            ImGui::TreePop();
+                        }
+
+                        // ── Tessellated waves of this body ───────────────────────────────
+                        // HE::water::TessellationParams: how high the real waves stand and how
+                        // far from the coast they grow in. A river wants a fraction of what a
+                        // sea does, so it is per body. Only acts while the landscape's
+                        // Tessellation switch (above) is on, so the rows grey out otherwise.
+                        const bool tessOpen = ImGui::TreeNodeEx("Tessellated Waves##wtess", physFlags);
+                        EditorWidgets::helpForLabel("Tessellated Waves##wtess");
+                        if (tessOpen)
+                        {
+                            WF::TessellationParams tp = b.tessellation;
+                            bool tpEdited = false;
+                            const auto trackTess = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Tessellated Waves");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+                            ImGui::BeginDisabled(!tc.water.tessellation);
+                            rowLabel("Wave Height");
+                            if (ImGui::DragFloat("##wtess_height", &tp.height, 0.01f, 0.0f, HE::water::kMaxTessHeight, "%.2f x"))
+                                tpEdited = true;
+                            trackTess();
+                            EditorWidgets::helpForLabel("Wave Height##wtess");
+                            rowLabel("Coast Fade");
+                            if (ImGui::DragFloat("##wtess_shore", &tp.shoreWidth, 0.02f, HE::water::kMinTessShore,
+                                                 HE::water::kMaxTessShore, "%.2f m"))
+                                tpEdited = true;
+                            trackTess();
+                            EditorWidgets::helpForLabel("Coast Fade##wtess");
+                            ImGui::EndDisabled();
+                            if (tpEdited && tp != b.tessellation)
+                                WF::setTessellation(tc, b.id, tp);
                             ImGui::TreePop();
                         }
 

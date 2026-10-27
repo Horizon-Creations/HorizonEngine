@@ -209,6 +209,7 @@ bool WaterIndex::entryAt(const Entry& e, float x, float z, double t, Surface& ou
     out.physics = body->physics;
     out.underwaterFog = body->underwaterFog;
     out.underwaterCaustics = body->underwaterCaustics;
+    out.tessellation       = body->tessellation;
     return true;
 }
 

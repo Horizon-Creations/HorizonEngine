@@ -27,3 +27,17 @@ storm (maxDisplacement clamp), terrain/shore interplay of a displaced sheet, the
 the packed-game fallback. **METAL draws the surface flat**: the engine has no Metal tessellation (see the
 displacement docs); the switch does nothing there. Next: Metal tessellation (its own task); GPU timing on
 Windows; maybe a per-body switch.
+
+## Update: calmer waves, flat coast, per-body numbers, the underwater effect follows the surface
+* Geometry is now the three knob trains as PLAIN sines (`HE::water::sampleWaves`' formula, no bombing/warp/gust),
+  times `height` (default 0.6, 0..2) times a shore factor `smoothstep(0,1,depth/shoreWidth)` (default 1.8 m, 0.1..3):
+  flat AT the waterline, full from `shoreWidth` of water on. Peak ~0.16 m at the default knobs (was ~0.55), x3.4 in a storm.
+* Per body: `water::TessellationParams {height, shoreWidth}` (`Body::tessellation`, `setTessellation`, scene key
+  `tessellation` per body, UI "Tessellated Waves" in the landscape water details). WaterSurface pushes them into the surface
+  entity's material as the override of the new knob `TessWaves` (exists only in the Tessellation permutation).
+* The underwater effect: `queryUnderwaterCamera(world, pos, waveClock)`; with a landscape's tessellation on, surfaceY /
+  signedDepth / wet / fog tint / caustics follow `level + water::tessellatedHeight(...)` under the camera (same formula,
+  same clock as the shader: SDL ticks, `HE_SKY_TIME` pins it). The post pass still treats the surface as a plane at that
+  local height; it does not follow the waves per pixel.
+Verified: he_tests water/underwater/engine materials; GL shots (open water gentle, beach flat). Not verified: the underwater
+effect by eye (clock sync between extract and draw is within a frame), other backends, per-body UI on screen.

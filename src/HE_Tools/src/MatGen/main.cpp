@@ -683,6 +683,15 @@ Mb waterMaterial()
     const int waveC = m.param(T::ParamVec4, "WaveC", { wc.directionDeg, wc.speed, wc.length, wc.steepness }, "Waves",
         "Fine ripples. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Also sets the strength of the chop on top.", 5);
+    // The tessellated surface's two numbers (a landscape's water body sets them; only read while the
+    // "Tessellation" Static Switch is on): the waves' height as a multiple of the trains' own
+    // amplitude, and the metres of water over which they grow in from the coast.
+    const int tessWaves = m.param(T::ParamVec4, "TessWaves",
+        { HE::water::kDefaultTessHeight, HE::water::kDefaultTessShore, 0.0f, 0.0f }, "Tessellation",
+        "Only with the Tessellation switch on. x = wave height as a multiple of the waves' own "
+        "amplitude (0 = flat, 0.6 = the default, a river wants less, an open sea more). "
+        "y = metres of water over which the waves grow in from the coast (0.1 .. 3): the surface "
+        "is flat at the waterline whatever the height is.", 14);
     // The four plain floats share one slot (Thema 206 step 6): each used only .x of a whole
     // Vec4 slot, and all sixteen were taken. Slider ranges of the old floats, for the tooltip:
     // FresnelPower 1..10, the other three 0..1.
@@ -1072,22 +1081,41 @@ Mb waterMaterial()
     const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
     m.comment("Top or underside", 76, 0, 2, 6);
 
-    // Tessellation, as a switch. The six wave trains again as GEOMETRY: the height of each
-    // (its amplitude steepness * length / 2 pi times the sine the slopes are built from, with
-    // the same gust and distance weights) pushed out along the mesh normal by the tessellation
-    // stages, so the swell is a real surface and not only a normal. The Static Switch
-    // "Tessellation" gates the Displacement pin: off (the default) the pin is as good as
-    // unconnected and the material draws as it always did; on, the water is tessellated
-    // (OpenGL, Vulkan, D3D11, D3D12: Metal draws it flat, see the tessellation notes). The chop
-    // layers stay a normal-only detail: under 2 m they are finer than the mesh would resolve.
-    const Pin invTau = m.k(1.0f / kTau, 80, 40);
-    auto heightOf = [&](const Wave& w, const Pin& weight, float row) {
-        return m.op(T::Multiply, m.op(T::Multiply, w.height, m.op(T::Multiply, w.length, invTau, 81, row), 82, row),
-                    weight, 83, row);
+    // Tessellation, as a switch. The three wave trains again as GEOMETRY: each knob's plain
+    // sine (amplitude steepness * length / 2 pi, HE::water::sampleWaves' formula and nothing
+    // else: no hex bombing, warp, gust or companions) pushed out along the mesh normal by the
+    // tessellation stages, scaled by kTessHeightScale and by the shore factor (the mesh's
+    // baked shore proximity: no displacement at the waterline). Because it is exactly the
+    // CPU's formula, the underwater post effect and the water physics can follow the very
+    // surface that is drawn (HE::water::tessellatedHeight). The Static Switch "Tessellation"
+    // gates the Displacement pin: off (the default) the pin is as good as unconnected and the
+    // material draws as it always did; on, the water is tessellated (OpenGL, Vulkan, D3D11,
+    // D3D12: Metal draws it flat). The chop layers stay a normal-only detail: finer than the mesh.
+    auto plainHeight = [&](int knob, float row) {
+        const int ks = m.un(T::SplitRGBA, knob, 81, row);
+        const Pin dirDeg{ ks, 0 }, spd{ ks, 1 }, len{ ks, 2 }, stp{ ks, 3 };
+        const int rad  = m.op(T::Multiply, dirDeg, m.k(kDegToRad, 82, row), 83, row);
+        const int dSin = m.un(T::Sine, rad, 84, row);
+        const int dCos = m.un(T::Sine, m.op(T::Add, rad, m.k(kHalfPi, 83, row + 1), 84, row + 1), 85, row + 1);
+        const int along = m.op(T::Add, m.op(T::Multiply, dCos, px, 86, row), m.op(T::Multiply, dSin, pz, 86, row + 1), 87, row);
+        const int kWv   = m.op(T::Divide, m.k(kTau, 82, row + 2), len, 83, row + 2);
+        const int ph    = m.op(T::Multiply, kWv, m.op(T::Subtract, along, m.op(T::Multiply, spd, time, 87, row + 1), 88, row), 89, row);
+        const int amp   = m.op(T::Divide, stp, kWv, 84, row + 2);          // steepness / k = steepness * length / 2 pi
+        return m.op(T::Multiply, amp, m.un(T::Sine, ph, 90, row), 91, row);
     };
-    const Pin dispSum = m.sum({ Pin{ heightOf(a, wA1, 40) },  Pin{ heightOf(a2, wA2, 41) },
-                                Pin{ heightOf(b, wB1, 42) },  Pin{ heightOf(b2, wB2, 43) },
-                                Pin{ heightOf(c, wC1, 44) },  Pin{ heightOf(c2, wC2, 45) } }, 84, 40);
+    const Pin rawSum = m.sum({ Pin{ plainHeight(waveA, 40) }, Pin{ plainHeight(waveB, 44) }, Pin{ plainHeight(waveC, 48) } }, 92, 40);
+    // The shore factor: smoothstep(0, 1, depth / shoreWidth), depth = (1 - shoreE) * 3 m, shoreWidth
+    // = the knob's y held to 0.1 .. 3 m (the range the mesh knows).
+    const int tessS = m.un(T::SplitRGBA, tessWaves, 92, 42);
+    const int tessShoreW = m.op(T::Add, m.k(HE::water::kMinTessShore, 92, 46),
+                            m.op(T::Multiply, m.un(T::Saturate, m.op(T::Divide, m.op(T::Subtract, Pin{ tessS, 1 }, m.k(HE::water::kMinTessShore, 92, 47), 93, 47),
+                                                                      m.k(HE::water::kMaxTessShore - HE::water::kMinTessShore, 93, 48), 94, 47), 95, 47),
+                                 m.k(HE::water::kMaxTessShore - HE::water::kMinTessShore, 94, 48), 96, 47), 97, 47);
+    const int tessDepth = m.op(T::Multiply, m.un(T::OneMinus, shoreE, 93, 44), m.k(HE::water::kShoreFadeDepth, 93, 45), 94, 44);
+    const int tessOpen = m.un(T::Saturate, m.op(T::Divide, tessDepth, tessShoreW, 95, 44), 96, 44);
+    const int tessSmooth = m.op(T::Multiply, m.op(T::Multiply, tessOpen, tessOpen, 97, 44),
+                                 m.op(T::Subtract, m.k(3.0f, 97, 45), m.op(T::Multiply, m.k(2.0f, 97, 46), tessOpen, 98, 46), 98, 45), 99, 44);
+    const Pin dispSum = m.op(T::Multiply, m.op(T::Multiply, rawSum, tessSmooth, 95, 40), Pin{ tessS, 0 }, 96, 40);
     const int tessSwitch = m.node(T::StaticSwitch, 85, 40);
     {
         MatGraphNode& sw = *m.g.findNode(tessSwitch);
@@ -1108,13 +1136,13 @@ Mb waterMaterial()
     m.link(emisO,   out, kMatOutputEmissivePin);
     m.link(alphaO,  out, kMatOutputOpacityPin);
     m.link(normO,   out, kMatOutputNormalPin);
-    // The swell and the wind sea reach about 0.45 m at the default knobs and 3.4x that in a
-    // storm (HE::water::windTrain); the clamp is the culling bounds' margin, so it sits above that.
+    // The displacement reaches about 0.16 m at the default knobs and 3.4x that in a storm
+    // (HE::water::windTrain); the clamp is the culling bounds' margin, so it sits above that.
     // Factor 8 at 40 m, none from 160 m: the mesh cells are about a metre, a wave at least 1.6 m.
     o.tess.maxFactor       = 8.0f;
     o.tess.fadeNear        = 40.0f;
     o.tess.fadeFar         = 160.0f;
-    o.tess.maxDisplacement = 2.5f;
+    o.tess.maxDisplacement = 1.2f;
     m.link(tessSwitch, out, kMatOutputDisplacementPin);
     return m;
 }
@@ -1125,7 +1153,7 @@ const std::set<std::string> kWaterParams = {
     "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "Surface",
     "ShallowWater", "Opacity", "Refraction", "FoamColor", "Foam",
     "Caustics", "Variation",
-};
+};   // (TessWaves exists only in the Tessellation permutation: nothing reaches it with the switch off)
 
 // ── Displacement demo (Thema 207) ────────────────────────────────────────────
 // The example for the Output node's Displacement pin: a quilted surface whose

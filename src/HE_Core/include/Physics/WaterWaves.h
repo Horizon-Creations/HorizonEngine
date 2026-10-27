@@ -167,4 +167,40 @@ namespace HE::water
         }
         return out;
     }
+
+    // ─── The tessellated surface ────────────────────────────────────────────────────
+    // With a landscape's water tessellation on, the surface is REAL geometry: the three trains
+    // of the material's knobs (under the wind, windTrain) summed as plain sines, no hex
+    // bombing, warp or gusts, so the CPU can name the height of the visible surface exactly
+    // (the underwater post effect follows it):
+    //     h(x, z, t) = height * shore(depth) * sum_i amp_i sin(k_i (d_i . p - speed_i t))
+    // Two per-body numbers (WaterField.h TessellationParams, the material's "TessWaves" knob):
+    //   height      multiplier of the trains' own amplitude: a river is a fraction of it, a
+    //               sea close to (or above) 1.
+    //   shoreWidth  metres of water over which the waves grow in from the coast. The mesh bakes
+    //               the shore proximity into its normal (kShoreFadeDepth = 3 m of range), so the
+    //               surface is flat AT the waterline however high the height is set.
+    inline constexpr float kDefaultTessHeight = 0.6f;
+    inline constexpr float kMaxTessHeight     = 2.0f;
+    inline constexpr float kDefaultTessShore  = 1.8f;
+    inline constexpr float kMinTessShore      = 0.1f;
+    inline constexpr float kMaxTessShore      = 3.0f;   // the shore range the mesh knows
+
+    // smoothstep(0, 1, depth / shoreWidth): 0 at the waterline, 1 from shoreWidth metres of water.
+    inline float tessShoreFactor(float waterDepth, float shoreWidth)
+    {
+        const float w = shoreWidth < kMinTessShore ? kMinTessShore : (shoreWidth > kMaxTessShore ? kMaxTessShore : shoreWidth);
+        float u = waterDepth / w;
+        u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+        return u * u * (3.0f - 2.0f * u);
+    }
+
+    // The height of the tessellated surface above its level at (x, z), time t, `waterDepth`
+    // metres of water there. `trains` are the three knob trains after windTrain.
+    inline float tessellatedHeight(const WaveTrain* trains, double x, double z, double t, float waterDepth,
+                                   float height, float shoreWidth)
+    {
+        const WaveSample s = sampleWaves(trains, 3, x, z, t);
+        return height * tessShoreFactor(waterDepth, shoreWidth) * s.height;
+    }
 }

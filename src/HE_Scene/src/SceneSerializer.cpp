@@ -828,6 +828,15 @@ namespace
 						if (b.underwaterCaustics.depth     != d.depth)     cj["depth"]     = b.underwaterCaustics.depth;
 						bj["underwaterCaustics"] = std::move(cj);
 					}
+					// How the tessellated surface behaves: only when it differs from the defaults.
+					if (b.tessellation != HE::water::TessellationParams{})
+					{
+						const HE::water::TessellationParams d;
+						json tj = json::object();
+						if (b.tessellation.height     != d.height)     tj["height"]     = b.tessellation.height;
+						if (b.tessellation.shoreWidth != d.shoreWidth) tj["shoreWidth"] = b.tessellation.shoreWidth;
+						bj["tessellation"] = std::move(tj);
+					}
 					// The brush's bed (Thema 206 Schritt 9): only for a body it dug.
 					if (b.brushBed != HE::water::BrushBedParams{} || !b.brushPatch.empty())
 					{
@@ -1882,6 +1891,16 @@ namespace
 							num("scale",     b.underwaterCaustics.scale);
 							num("speed",     b.underwaterCaustics.speed);
 							num("depth",     b.underwaterCaustics.depth);
+						}
+						if (bj.contains("tessellation") && bj["tessellation"].is_object())
+						{
+							const json& tj = bj["tessellation"];
+							const auto num = [&tj](const char* key, float& into)
+							{
+								if (tj.contains(key) && tj[key].is_number()) into = tj[key].get<float>();
+							};
+							num("height",     b.tessellation.height);
+							num("shoreWidth", b.tessellation.shoreWidth);
 						}
 						if (bj.contains("brushBed") && bj["brushBed"].is_object())
 						{

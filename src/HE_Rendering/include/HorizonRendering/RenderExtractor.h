@@ -107,8 +107,17 @@ HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 // UnderwaterFogParams (WaterField.h) — see UnderwaterCameraData's comment for the split
 // between what is resolved here (a per-frame scalar, the camera's own depth) and what
 // the pass still computes per pixel (the view-ray's segment length inside the body).
+//
+// WATER TESSELLATION. A landscape whose water has tessellation on (Field::tessellation)
+// draws the surface as real, moving geometry, so the flat level is no longer where the lens
+// meets it: with `waveClock` >= 0 (the render clock the material's Time node runs on, the
+// same seconds the shaders get) the surface under the camera is level + water::tessellatedHeight
+// there, and surfaceY / signedDepth / wet follow it. The caller's clock is what makes the
+// formula (shared with the material, HE_Core/Physics/WaterWaves.h) land on the drawn surface.
+// -1 (the default, and what every test that predates this passes) = the flat level.
 HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
-                                                             const glm::vec3& cameraPos);
+                                                             const glm::vec3& cameraPos,
+                                                             double waveClock = -1.0);
 
 // The caustic net's waterline fade-in (Thema 185 Schritt 3): the body's causticsIntensity
 // is multiplied by this smoothstep of the camera's depth below the surface — 0 on the

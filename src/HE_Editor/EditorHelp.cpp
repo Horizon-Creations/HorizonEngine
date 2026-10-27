@@ -309,6 +309,13 @@ namespace
 	  "single grid of crests. The waves bend the normal only, the mesh stays "
 	  "flat.",
 	  "", "materials#water" },
+	{ "Material/TessWaves", "",
+	  "Only in the Tessellation permutation of the water. x = how high the real waves "
+	  "stand, as a multiple of the waves' own amplitude (0.6 is the default; a river "
+	  "wants less, an open sea more). y = metres of water over which they grow in from "
+	  "the coast (0.1 to 3): the surface is flat at the waterline whatever x is. A "
+	  "landscape's water sets it per body in the landscape's Water details.",
+	  "", "materials#water" },
 	{ "Material/WaveB", "",
 	  "Second wave train, laid across the swell so the crests do not line up. "
 	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "
@@ -7866,6 +7873,22 @@ namespace
 	  "(OpenGL, Vulkan, D3D11, D3D12); on Metal the surface stays flat. It costs GPU "
 	  "time, so it is off by default. Saved with the scene; the water material's "
 	  "Static Switch of the same name is what this turns on.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Tessellated Waves##wtess", "Tessellated Waves",
+	  "How this water body looks when the landscape's Tessellation switch is on: how "
+	  "high the real waves stand and how far from the coast they grow in. They are "
+	  "per body because a river wants a fraction of what an open sea does.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Wave Height##wtess", "Wave Height",
+	  "The height of the real waves as a multiple of the waves' own amplitude. 0 is a "
+	  "flat surface, 0.6 the default, 1 the full swell; a river wants little, a sea "
+	  "more. It follows the wind like the shading does, so a storm raises it further. "
+	  "Saved with the body.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Coast Fade##wtess", "Coast Fade",
+	  "Metres of water over which the waves grow in from the coast: at the waterline "
+	  "the surface is flat, and from this depth on the waves stand at full height. "
+	  "A larger value keeps the shore calmer. Held to 0.1 to 3 m. Saved with the body.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Refracted Light##wcau", "Refracted Light",
 	  "The moving net of bright lines the waves throw onto whatever lies below the "

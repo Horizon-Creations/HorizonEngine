@@ -47,7 +47,8 @@ namespace HE::water
         glm::vec3    flow    { 0.0f };       // the current, m/s
         BodyPhysics  physics {};             // that body's settings (density, drags, …)
         UnderwaterFogParams underwaterFog{}; // that body's look from below (Thema 185 Schritt 2)
-        UnderwaterCausticsParams underwaterCaustics{};   // …and its refracted-light net (Schritt 3)
+        UnderwaterCausticsParams underwaterCaustics{};   // …and its refracted-light net
+        TessellationParams tessellation{};               // …and how its tessellated surface behaves (Schritt 3)
     };
 
     // A box in world space where there is water (for the physics' broad phase).
