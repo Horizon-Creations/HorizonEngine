@@ -8089,6 +8089,24 @@ HE::AABB MetalRenderer::FrameSceneBox() const
 	return sceneBox;
 }
 
+// The point/spot lights whose shadow comes from the GI ray mask instead of the local shadow
+// atlas: the first kMaxMaskedLocalLights non-directional lights of the first kMaxLightWindow
+// lights, the exact scan of HE::BuildMaskedLocalLights (that is the set the mask kernel
+// traces and the shaders index by channel). Indexed by position in rw.lights.
+static std::array<bool, HE::kMaxLightWindow> GiMaskedLocalSlots(const RenderWorld& rw)
+{
+	std::array<bool, HE::kMaxLightWindow> masked{};
+	int local = 0;
+	const int n = std::min(static_cast<int>(rw.lights.size()), HE::kMaxLightWindow);
+	for (int li = 0; li < n; ++li)
+	{
+		if (rw.lights[static_cast<size_t>(li)].type == 0) continue;
+		if (local < HE::kMaxMaskedLocalLights) masked[static_cast<size_t>(li)] = true;
+		++local;
+	}
+	return masked;
+}
+
 void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 {
 	if (!m_world || !m_shadowPipeline || !m_shadowDepthTex) return;
@@ -8119,7 +8137,29 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
 		? std::clamp(m_renderWorld.shadow.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers) : 0;
-	const int totalViews  = cascades + localLayers;
+	// Layers of lights the GI mask shadows need no map (their layer lane is zeroed where the
+	// shaders get it, see GiMaskedLocalSlots); a point light owns six consecutive layers.
+	std::array<bool, ShadowData::kMaxLocalShadowLayers> skipLocal{};
+	if (giOwnsSun)
+	{
+		const std::array<bool, HE::kMaxLightWindow> masked = GiMaskedLocalSlots(m_renderWorld);
+		for (size_t li = 0; li < masked.size() && li < m_renderWorld.lights.size(); ++li)
+		{
+			const LightData& ld = m_renderWorld.lights[li];
+			if (!masked[li] || ld.shadowLayer < 0) continue;
+			const int faces = ld.type == 1 ? 6 : 1;
+			for (int f = 0; f < faces && ld.shadowLayer + f < ShadowData::kMaxLocalShadowLayers; ++f)
+				skipLocal[static_cast<size_t>(ld.shadowLayer + f)] = true;
+		}
+	}
+	// (csm, layer) of every view that is rendered: the cascades, then the local layers.
+	std::vector<std::pair<bool, int>> viewSrc;
+	viewSrc.reserve(static_cast<size_t>(cascades + localLayers));
+	for (int c = 0; c < cascades; ++c) viewSrc.emplace_back(true, c);
+	for (int l = 0; l < localLayers; ++l)
+		if (!skipLocal[static_cast<size_t>(l)]) viewSrc.emplace_back(false, l);
+	const int totalViews  = static_cast<int>(viewSrc.size());
+	if (totalViews == 0) return;
 
 	@autoreleasepool
 	{
@@ -8142,8 +8182,8 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		for (int v = 0; v < nViews; ++v)
 		{
 			ShadowView& sv = m_shadowViews[static_cast<size_t>(v)];
-			const bool csm = v < cascades;
-			const int  l   = csm ? v : v - cascades;
+			const bool csm = viewSrc[static_cast<size_t>(v)].first;
+			const int  l   = viewSrc[static_cast<size_t>(v)].second;
 			sv.target   = csm ? m_shadowDepthTex : m_localShadowTex;
 			sv.layer    = l;
 			sv.size     = csm ? m_shadowSize : m_localShadowSize;
@@ -14417,7 +14457,11 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// so the order of the point/spot lights (GI local-mask channels) is untouched. If that
 	// leaves no light at all (overcast: the sun is at 0 too) the first one stays, because
 	// lightCount == 0 means "unlit scene" to the shader and switches to the headlight.
-	auto putLight = [&](const LightData& l)
+	// Lights the GI mask shadows get no atlas layer (-1) while the mask is live: the mask
+	// is the only shadow source for them, so the fragment shader skips the PCF taps.
+	const std::array<bool, HE::kMaxLightWindow> giMasked =
+		giActive ? GiMaskedLocalSlots(m_renderWorld) : std::array<bool, HE::kMaxLightWindow>{};
+	auto putLight = [&](const LightData& l, bool maskShadowed)
 	{
 		const int i = scene.lightCount++;
 		scene.lights[i].posType        = glm::vec4(l.position,  static_cast<float>(l.type));
@@ -14426,18 +14470,22 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// params.y = local shadow atlas base layer; force -1 (no shadow) when the
 		// atlas texture doesn't exist so the shader never samples an unbound layer.
 		scene.lights[i].params         = glm::vec4(l.range,
-		                                           m_localShadowTex ? static_cast<float>(l.shadowLayer) : -1.0f,
+		                                           (m_localShadowTex && !maskShadowed)
+		                                               ? static_cast<float>(l.shadowLayer) : -1.0f,
 		                                           0.0f, 0.0f);
 	};
 	scene.lightCount = 0;
-	for (const LightData& l : m_renderWorld.lights)
+	// Only the first kMaxLightWindow lights are ever admitted (the window the GI mask scan and
+	// the cluster builder use), so a dropped dark directional never lets a ninth light in.
+	const int lightWindow = std::min(static_cast<int>(m_renderWorld.lights.size()), HE::kMaxLightWindow);
+	for (int li = 0; li < lightWindow; ++li)
 	{
-		if (scene.lightCount >= 8) break;
+		const LightData& l = m_renderWorld.lights[static_cast<size_t>(li)];
 		if (l.type == 0 && l.intensity <= 0.0f) continue;
-		putLight(l);
+		putLight(l, giMasked[static_cast<size_t>(li)]);
 	}
 	if (scene.lightCount == 0 && !m_renderWorld.lights.empty())
-		putLight(m_renderWorld.lights.front());
+		putLight(m_renderWorld.lights.front(), false);
 	{
 		const ShadowData& sh = m_renderWorld.shadow;
 		const int nl = std::clamp(sh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
@@ -15149,6 +15197,13 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// texture is bound this frame.
 	HE::FillMaterialLightWindow(m_renderWorld, matLight,
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
+	// The lights the GI ray mask shadows take it as their only shadow source: no atlas layer.
+	if (giActive)
+	{
+		const std::array<bool, HE::kMaxLightWindow> masked = GiMaskedLocalSlots(m_renderWorld);
+		for (size_t li = 0; li < masked.size(); ++li)
+			if (masked[li]) matLight.lightParams[li][1] = 0.0f;
+	}
 	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
 	HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	HE::FillMaterialWater(GetWaterRipples(), matLight); // Water Ripple node: the rings the physics raised
@@ -15251,9 +15306,15 @@ HE::ClusterLightBuild MetalRenderer::BuildFrameClusterLights() const
 	// scan, but only while the mask is actually produced this frame.
 	const bool giMasksValid = m_giEnabled && m_giSupported && m_giShadowResult
 	                       && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	return HE::BuildClusterLights(m_renderWorld,
+	HE::ClusterLightBuild build = HE::BuildClusterLights(m_renderWorld,
 	                              /*localShadowsActive=*/m_localShadowTex != nullptr,
 	                              giMasksValid);
+	// A light with a mask channel is shadowed by the ray mask alone: zero its atlas layer lane
+	// (the 4th vec4 of each light is {range, layer + 1, channel + 1, 0}).
+	if (giMasksValid)
+		for (size_t k = 3; k < build.lights.size(); k += 4)
+			if (build.lights[k].z > 0.5f) build.lights[k].y = 0.0f;
+	return build;
 }
 
 void MetalRenderer::BindClusterBuffers(void* renderEncoder, const HE::ClusterLightBuild& build)
