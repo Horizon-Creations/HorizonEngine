@@ -707,6 +707,7 @@ void GameReplication::sendSnapshots()
 		const bool hasView = (viewIt != m_viewpoints.end());
 
 		std::vector<std::pair<std::uint32_t, Sample>> relevant;
+		relevant.reserve(m_byNetId.size());
 
 		for (const auto& [netId, entity] : m_byNetId)
 		{
