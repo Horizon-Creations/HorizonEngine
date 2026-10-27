@@ -1061,9 +1061,8 @@ void NetGameSession::update(float dt)
 		{
 			m_net->disconnect(conn);
 			if (m_replication) m_replication->dropConnection(conn);
+			// A connection id the transport reuses must inherit no rate history.
 			if (m_rpc) m_rpc->dropConnection(conn);
-	// A connection id the transport reuses must inherit no rate history.
-	if (m_rpc) m_rpc->dropConnection(conn);
 		}
 		m_rejected.clear();
 	}
