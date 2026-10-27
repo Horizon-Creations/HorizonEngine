@@ -3516,7 +3516,8 @@ private:
         // protected, not private: a derived class's generated code reads and
         // writes the inherited members directly — that is what keeps ONE C++
         // member per graph variable, matching the interpreter's one store.
-        h += "\nprotected:\n";
+        constexpr std::string_view kProtectedLabel = "\nprotected:\n";
+        h += kProtectedLabel;
         const size_t protectedStart = h.size();
         if (rsOn)
         {
@@ -3556,7 +3557,7 @@ private:
         // reset by reseedVariables, never part of the public surface.
         for (const int id : states)
             h += "    bool " + stateMember(id) + " = false;\n";
-        if (h.size() == protectedStart) h.resize(protectedStart - std::string("\nprotected:\n").size());
+        if (h.size() == protectedStart) h.resize(protectedStart - kProtectedLabel.size());
         else if (h.size() >= 2 && h.compare(h.size() - 2, 2, "\n\n") == 0) h.pop_back();
         h += "};\n\n} // namespace " + ns + "\n";
 
