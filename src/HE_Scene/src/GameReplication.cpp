@@ -954,6 +954,12 @@ void GameReplication::advanceInterpolation(float dt)
 		for (auto& entry : m_interp) entry.second.settled = false;
 	}
 
+	// Wraps the delta onto the shorter arc; see the rotation write below.
+	const auto shortestLerp = [](float a, float b, float f) {
+		float delta = std::fmod(b - a + 540.0f, 360.0f) - 180.0f;
+		return a + delta * f;
+	};
+
 	for (auto& [netId, st] : m_interp)
 	{
 		// The controlled entity is predicted; interpolating it too would fight
@@ -1001,10 +1007,6 @@ void GameReplication::advanceInterpolation(float dt)
 		// representation this engine actually stores is worth more here than a
 		// perfect interpolation path, and for single-axis turns — which is what
 		// characters do — the two are identical anyway.
-		const auto shortestLerp = [](float a, float b, float f) {
-			float delta = std::fmod(b - a + 540.0f, 360.0f) - 180.0f;
-			return a + delta * f;
-		};
 		tc->rotation = glm::vec3(
 			shortestLerp(st.previous.rotation.x, st.current.rotation.x, t),
 			shortestLerp(st.previous.rotation.y, st.current.rotation.y, t),
