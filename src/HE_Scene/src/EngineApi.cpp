@@ -5161,22 +5161,19 @@ int fieldIndex(const char* op, const std::string& name)
 {
     if (!active())
     {
-        HE_LOG_WARN(Script, "%s",
-            (std::string("save.") + op + ": no active save — call save.create/load first").c_str());
+        HE_LOG_WARN(Script, "save.%s: no active save — call save.create/load first", op);
         return -1;
     }
     for (size_t i = 0; i < active()->schema.fields.size(); ++i)
         if (active()->schema.fields[i].name == name) return (int)i;
-    HE_LOG_WARN(Script, "%s",
-        (std::string("save.") + op + ": template '" + active()->templatePath +
-         "' has no field '" + name + "'").c_str());
+    HE_LOG_WARN(Script, "save.%s: template '%s' has no field '%s'",
+        op, active()->templatePath.c_str(), name.c_str());
     return -1;
 }
 bool typeMismatch(const char* op, const HE::StructField& f, std::initializer_list<P> accepted)
 {
     for (P t : accepted) if (f.type == t && !f.isArray) return false;
-    HE_LOG_WARN(Script, "%s",
-        (std::string("save.") + op + ": field '" + f.name + "' has a different type").c_str());
+    HE_LOG_WARN(Script, "save.%s: field '%s' has a different type", op, f.name.c_str());
     return true;
 }
 
