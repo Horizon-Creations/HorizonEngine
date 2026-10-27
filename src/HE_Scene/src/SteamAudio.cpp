@@ -1,0 +1,376 @@
+#include "HorizonScene/SteamAudio.h"
+
+#include <Diagnostics/Log.h>
+
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
+#if defined(HE_HAVE_STEAM_AUDIO)
+#include <phonon.h>
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#else
+#  include <dlfcn.h>
+#endif
+#endif
+
+namespace HE {
+
+// ─── Math (always compiled) ──────────────────────────────────────────────────
+
+namespace {
+
+struct V3 { float x, y, z; };
+V3    sub(V3 a, V3 b)   { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
+float dot(V3 a, V3 b)   { return a.x * b.x + a.y * b.y + a.z * b.z; }
+V3    cross(V3 a, V3 b) { return { a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x }; }
+float len(V3 a)         { return std::sqrt(dot(a, a)); }
+V3    scaled(V3 a, float s) { return { a.x * s, a.y * s, a.z * s }; }
+
+} // namespace
+
+SpatialDirection listenerRelativeDirection(float dx, float dy, float dz,
+                                           float fx, float fy, float fz,
+                                           float ux, float uy, float uz)
+{
+    V3 ahead = { fx, fy, fz };
+    V3 up    = { ux, uy, uz };
+    if (len(ahead) < 1e-6f) ahead = { 0.0f, 0.0f, -1.0f };
+    ahead = scaled(ahead, 1.0f / len(ahead));
+    V3 right = cross(ahead, up);
+    if (len(right) < 1e-6f)
+    {
+        // Up is zero or parallel to ahead: the frame is undefined. The world
+        // axes are the least surprising answer and keep the maths finite.
+        up    = { 0.0f, 1.0f, 0.0f };
+        right = cross(ahead, up);
+        if (len(right) < 1e-6f) { ahead = { 0.0f, 0.0f, -1.0f }; right = { 1.0f, 0.0f, 0.0f }; }
+    }
+    right = scaled(right, 1.0f / len(right));
+    up    = cross(right, ahead);   // re-orthogonalised
+
+    const V3 d = { dx, dy, dz };
+    if (len(d) < 1e-6f) return { 0.0f, 0.0f, -1.0f };
+    return { dot(d, right), dot(d, up), -dot(d, ahead) };
+}
+
+#if defined(HE_HAVE_STEAM_AUDIO)
+
+// ─── Library loading ─────────────────────────────────────────────────────────
+
+namespace {
+
+#if defined(_WIN32)
+constexpr const char* kLibName = "phonon.dll";
+#elif defined(__APPLE__)
+constexpr const char* kLibName = "libphonon.dylib";
+#else
+constexpr const char* kLibName = "libphonon.so";
+#endif
+
+using LibHandle = void*;
+
+LibHandle openLibrary(const std::string& path)
+{
+#if defined(_WIN32)
+    return reinterpret_cast<LibHandle>(LoadLibraryA(path.c_str()));
+#else
+    return dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+#endif
+}
+
+void closeLibrary(LibHandle h)
+{
+    if (!h) return;
+#if defined(_WIN32)
+    FreeLibrary(reinterpret_cast<HMODULE>(h));
+#else
+    dlclose(h);
+#endif
+}
+
+void* findSymbol(LibHandle h, const char* name)
+{
+#if defined(_WIN32)
+    return reinterpret_cast<void*>(GetProcAddress(reinterpret_cast<HMODULE>(h), name));
+#else
+    return dlsym(h, name);
+#endif
+}
+
+// The directory the engine library (the one holding this code) lives in; the
+// game ships libphonon right beside it.
+std::string moduleDirectory()
+{
+    std::string path;
+#if defined(_WIN32)
+    HMODULE mod = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&moduleDirectory), &mod))
+    {
+        char buf[MAX_PATH * 4] = {};
+        const DWORD n = GetModuleFileNameA(mod, buf, static_cast<DWORD>(sizeof(buf)));
+        if (n > 0 && n < sizeof(buf)) path.assign(buf, n);
+    }
+    const size_t slash = path.find_last_of("\\/");
+#else
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&moduleDirectory), &info) && info.dli_fname)
+        path = info.dli_fname;
+    const size_t slash = path.find_last_of('/');
+#endif
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+// The SDK entry points this backend uses, resolved by name.
+struct Api
+{
+    decltype(&iplContextCreate)         contextCreate = nullptr;
+    decltype(&iplContextRelease)        contextRelease = nullptr;
+    decltype(&iplHRTFCreate)            hrtfCreate = nullptr;
+    decltype(&iplHRTFRelease)           hrtfRelease = nullptr;
+    decltype(&iplBinauralEffectCreate)  effectCreate = nullptr;
+    decltype(&iplBinauralEffectRelease) effectRelease = nullptr;
+    decltype(&iplBinauralEffectApply)   effectApply = nullptr;
+    decltype(&iplBinauralEffectReset)   effectReset = nullptr;
+
+    bool load(LibHandle h, std::string& error)
+    {
+        const struct { void** slot; const char* name; } table[] = {
+            { reinterpret_cast<void**>(&contextCreate),  "iplContextCreate" },
+            { reinterpret_cast<void**>(&contextRelease), "iplContextRelease" },
+            { reinterpret_cast<void**>(&hrtfCreate),     "iplHRTFCreate" },
+            { reinterpret_cast<void**>(&hrtfRelease),    "iplHRTFRelease" },
+            { reinterpret_cast<void**>(&effectCreate),   "iplBinauralEffectCreate" },
+            { reinterpret_cast<void**>(&effectRelease),  "iplBinauralEffectRelease" },
+            { reinterpret_cast<void**>(&effectApply),    "iplBinauralEffectApply" },
+            { reinterpret_cast<void**>(&effectReset),    "iplBinauralEffectReset" },
+        };
+        for (const auto& e : table)
+        {
+            *e.slot = findSymbol(h, e.name);
+            if (!*e.slot) { error = std::string("symbol ") + e.name + " not found in " + kLibName; return false; }
+        }
+        return true;
+    }
+};
+
+} // namespace
+
+// The loaded library, the context and the HRTF. Shared by SteamAudio and every
+// Binaural it made, so the library cannot be unloaded under a live effect: it
+// goes when the last of them does, whatever order they are destroyed in.
+struct SteamAudioCore
+{
+    LibHandle   lib = nullptr;
+    Api         api;
+    IPLContext  context = nullptr;
+    IPLHRTF     hrtf = nullptr;
+    IPLAudioSettings audio{};
+
+    ~SteamAudioCore()
+    {
+        if (hrtf)    api.hrtfRelease(&hrtf);
+        if (context) api.contextRelease(&context);
+        closeLibrary(lib);
+    }
+};
+
+struct SteamAudio::Impl
+{
+    std::shared_ptr<SteamAudioCore> core;
+    int         frameSize = 0;
+    std::string error;
+};
+
+struct SteamAudio::Binaural::Impl
+{
+    std::shared_ptr<SteamAudioCore> core;
+    IPLBinauralEffect effect = nullptr;
+    int               frameSize = 0;
+    std::vector<float> left, right;
+
+    ~Impl() { if (effect) core->api.effectRelease(&effect); }
+};
+
+bool SteamAudio::compiledIn() { return true; }
+
+const char* SteamAudio::version()
+{
+    static const std::string v = std::to_string(STEAMAUDIO_VERSION_MAJOR) + "." +
+                                 std::to_string(STEAMAUDIO_VERSION_MINOR) + "." +
+                                 std::to_string(STEAMAUDIO_VERSION_PATCH);
+    return v.c_str();
+}
+
+SteamAudio::SteamAudio() : m_impl(std::make_unique<Impl>()) {}
+SteamAudio::~SteamAudio() = default;
+
+bool SteamAudio::init(int sampleRate, int frameSize)
+{
+    if (m_impl->core) return true;
+    m_impl->error.clear();
+    if (sampleRate <= 0 || frameSize <= 0)
+    {
+        m_impl->error = "invalid mixer format for Steam Audio";
+        return false;
+    }
+
+    // Beside the engine library first (the shipped layout), then the current
+    // directory, then the SDK folder the build used (a dev tree), then the
+    // loader's own search.
+    std::vector<std::string> candidates;
+    const std::string dir = moduleDirectory();
+    if (!dir.empty()) candidates.push_back(dir + "/" + kLibName);
+    candidates.push_back(std::string("./") + kLibName);
+#if defined(HE_STEAM_AUDIO_LIB_DIR)
+    candidates.push_back(std::string(HE_STEAM_AUDIO_LIB_DIR) + "/" + kLibName);
+#endif
+    candidates.push_back(kLibName);
+
+    auto core = std::make_shared<SteamAudioCore>();
+    for (const std::string& c : candidates)
+        if ((core->lib = openLibrary(c))) break;
+    if (!core->lib)
+    {
+        m_impl->error = std::string("could not load ") + kLibName + " (searched beside the engine library)";
+        return false;
+    }
+    if (!core->api.load(core->lib, m_impl->error)) return false;
+
+    IPLContextSettings cs{};
+    cs.version = STEAMAUDIO_VERSION;
+    if (core->api.contextCreate(&cs, &core->context) != IPL_STATUS_SUCCESS)
+    {
+        core->context = nullptr;
+        m_impl->error = "iplContextCreate failed (library/header version mismatch?)";
+        return false;
+    }
+    core->audio.samplingRate = sampleRate;
+    core->audio.frameSize    = frameSize;
+    IPLHRTFSettings hs{};
+    hs.type     = IPL_HRTFTYPE_DEFAULT;
+    hs.volume   = 1.0f;
+    hs.normType = IPL_HRTFNORMTYPE_NONE;
+    if (core->api.hrtfCreate(core->context, &core->audio, &hs, &core->hrtf) != IPL_STATUS_SUCCESS)
+    {
+        core->hrtf = nullptr;
+        m_impl->error = "iplHRTFCreate failed";
+        return false;
+    }
+
+    m_impl->core      = std::move(core);
+    m_impl->frameSize = frameSize;
+    HE_LOG_INFO(Audio, "Steam Audio %s ready (%d Hz, %d-frame blocks)", version(), sampleRate, frameSize);
+    return true;
+}
+
+void SteamAudio::shutdown()
+{
+    m_impl->core.reset();   // the library stays loaded while a Binaural still holds it
+    m_impl->frameSize = 0;
+}
+
+bool SteamAudio::isReady() const { return m_impl->core != nullptr; }
+int  SteamAudio::frameSize() const { return m_impl->frameSize; }
+const std::string& SteamAudio::lastError() const { return m_impl->error; }
+
+SteamAudio::Binaural::Binaural() : m_impl(std::make_unique<Impl>()) {}
+SteamAudio::Binaural::~Binaural() = default;
+
+std::unique_ptr<SteamAudio::Binaural> SteamAudio::createBinaural()
+{
+    if (!m_impl->core) return nullptr;
+    std::unique_ptr<Binaural> b(new Binaural());
+    b->m_impl->core      = m_impl->core;
+    b->m_impl->frameSize = m_impl->frameSize;
+    b->m_impl->left.resize(static_cast<size_t>(m_impl->frameSize));
+    b->m_impl->right.resize(static_cast<size_t>(m_impl->frameSize));
+    IPLBinauralEffectSettings es{};
+    es.hrtf = m_impl->core->hrtf;
+    if (m_impl->core->api.effectCreate(m_impl->core->context, &m_impl->core->audio, &es,
+                                       &b->m_impl->effect) != IPL_STATUS_SUCCESS)
+    {
+        b->m_impl->effect = nullptr;
+        m_impl->error = "iplBinauralEffectCreate failed";
+        return nullptr;
+    }
+    return b;
+}
+
+bool SteamAudio::Binaural::process(const float* mono, float* stereoOut, int frames,
+                                   const SpatialDirection& direction)
+{
+    Impl& s = *m_impl;
+    if (!s.effect || !mono || !stereoOut || frames <= 0 || frames % s.frameSize != 0)
+        return false;
+
+    IPLBinauralEffectParams params{};
+    params.direction     = { direction.x, direction.y, direction.z };
+    params.interpolation = IPL_HRTFINTERPOLATION_BILINEAR;
+    params.spatialBlend  = 1.0f;
+    params.hrtf          = s.core->hrtf;
+    params.peakDelays    = nullptr;
+
+    for (int base = 0; base < frames; base += s.frameSize)
+    {
+        // The SDK reads the input through a table of channel pointers; the
+        // mono block is passed in place (it never writes to its input).
+        float* inPtr = const_cast<float*>(mono + base);
+        float* inCh[1]  = { inPtr };
+        float* outCh[2] = { s.left.data(), s.right.data() };
+        IPLAudioBuffer in { 1, s.frameSize, inCh };
+        IPLAudioBuffer out{ 2, s.frameSize, outCh };
+        s.core->api.effectApply(s.effect, &params, &in, &out);
+        for (int i = 0; i < s.frameSize; ++i)
+        {
+            stereoOut[(base + i) * 2]     = s.left[static_cast<size_t>(i)];
+            stereoOut[(base + i) * 2 + 1] = s.right[static_cast<size_t>(i)];
+        }
+    }
+    return true;
+}
+
+void SteamAudio::Binaural::reset()
+{
+    if (m_impl->effect) m_impl->core->api.effectReset(m_impl->effect);
+}
+
+#else // !HE_HAVE_STEAM_AUDIO ───────────────────────────────────────────────────
+
+// Built without the SDK (HE_ENABLE_STEAM_AUDIO=OFF, an app runtime flavour, or a
+// platform the SDK does not cover): the same interface, never ready.
+
+struct SteamAudio::Impl { std::string error; };
+struct SteamAudio::Binaural::Impl {};
+
+bool        SteamAudio::compiledIn() { return false; }
+const char* SteamAudio::version()    { return ""; }
+
+SteamAudio::SteamAudio() : m_impl(std::make_unique<Impl>()) {}
+SteamAudio::~SteamAudio() = default;
+
+bool SteamAudio::init(int, int)
+{
+    m_impl->error = "this build does not include Steam Audio (HE_ENABLE_STEAM_AUDIO=OFF)";
+    return false;
+}
+void SteamAudio::shutdown() {}
+bool SteamAudio::isReady() const { return false; }
+int  SteamAudio::frameSize() const { return 0; }
+const std::string& SteamAudio::lastError() const { return m_impl->error; }
+
+SteamAudio::Binaural::Binaural() = default;
+SteamAudio::Binaural::~Binaural() = default;
+bool SteamAudio::Binaural::process(const float*, float*, int, const SpatialDirection&) { return false; }
+void SteamAudio::Binaural::reset() {}
+std::unique_ptr<SteamAudio::Binaural> SteamAudio::createBinaural() { return nullptr; }
+
+#endif
+
+} // namespace HE

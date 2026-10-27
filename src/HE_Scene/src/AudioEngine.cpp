@@ -1,3 +1,4 @@
+// MP3 and FLAC use miniaudio's own embedded dr_mp3 / dr_flac (left enabled here).
 // Ogg Vorbis comes from the vendored stb_vorbis.c (public domain). miniaudio
 // only compiles its Vorbis backend when the stb_vorbis declarations are visible
 // BEFORE its implementation (it keys on STB_VORBIS_INCLUDE_STB_VORBIS_H); the
@@ -8,8 +9,6 @@
 #include <stb_vorbis.c>
 
 #define MA_IMPLEMENTATION
-#define MA_NO_FLAC
-#define MA_NO_MP3
 #define MA_NO_ENCODING
 #include <miniaudio.h>
 
@@ -30,6 +29,7 @@
 #include <cstdint>
 
 #include "HorizonScene/AudioEngine.h"
+#include "HorizonScene/SteamAudio.h"
 #include <Audio/AudioBusConfig.h>
 #include <Diagnostics/Log.h>
 #include <algorithm>
@@ -44,6 +44,29 @@
 // re-triggered every frame) leaks voices until the mixer chokes. Warn once the
 // count gets unreasonable rather than letting the audio quietly fall apart.
 static constexpr size_t kVoiceWarnThreshold = 128;
+
+// The decoder miniaudio must be told to use for a compressed clip: the bytes
+// carry no extension, and auto-detection would try every backend in turn.
+static ma_encoding_format encodingFormatOf(AudioEncoding e)
+{
+    switch (e)
+    {
+    case AudioEncoding::Mp3:  return ma_encoding_format_mp3;
+    case AudioEncoding::Flac: return ma_encoding_format_flac;
+    default:                  return ma_encoding_format_vorbis;
+    }
+}
+
+static const char* encodingName(AudioEncoding e)
+{
+    switch (e)
+    {
+    case AudioEncoding::Vorbis: return "Vorbis";
+    case AudioEncoding::Mp3:    return "MP3";
+    case AudioEncoding::Flac:   return "FLAC";
+    default:                    return "PCM";
+    }
+}
 
 // ─── Volume curve stage ──────────────────────────────────────────────────────
 // A clip's volume curve (AudioEdit::envelope) as a miniaudio data source in
@@ -414,7 +437,19 @@ struct AudioEngine::Impl
     // carries 0 while muted.
     float masterVolume = 1.0f;
     bool  masterMuted  = false;
+
+    // The optional Steam Audio spatialiser (SteamAudio.h). `spatialRequested` is
+    // what the project/UI asked for, `spatialActive` what is really running: they
+    // differ when the build lacks the SDK or the library did not load.
+    HE::SteamAudio          steam;
+    HE::AudioSpatialBackend spatialRequested = HE::AudioSpatialBackend::Miniaudio;
+    HE::AudioSpatialBackend spatialActive    = HE::AudioSpatialBackend::Miniaudio;
+    std::string             spatialStatus    = "miniaudio";
 };
+
+// Block size Steam Audio renders in. A power of two near the mixer's own period;
+// per-voice routing buffers to it.
+static constexpr int kSteamFrameSize = 256;
 
 // ─── AudioEngine ─────────────────────────────────────────────────────────────
 
@@ -452,6 +487,9 @@ bool AudioEngine::init(bool noDevice)
                 ma_engine_get_sample_rate(&m_impl->engine),
                 ma_engine_get_channels(&m_impl->engine),
                 noDevice ? " (no output device — headless)" : "");
+    // A request made before the engine existed (or kept across a shutdown).
+    if (m_impl->spatialRequested == HE::AudioSpatialBackend::SteamAudio)
+        setSpatialBackend(HE::AudioSpatialBackend::SteamAudio);
     return true;
 }
 
@@ -465,6 +503,11 @@ void AudioEngine::shutdown()
     for (auto& [name, bus] : m_impl->buses)
         bus->release();
     m_impl->buses.clear();
+    // Active falls back with the engine; the request stays, so the next init()
+    // (a project reload) can honour it again.
+    m_impl->steam.shutdown();
+    m_impl->spatialActive = HE::AudioSpatialBackend::Miniaudio;
+    m_impl->spatialStatus = "miniaudio";
     ma_engine_uninit(&m_impl->engine);
     m_impl->engineOk  = false;
     m_initialized     = false;
@@ -603,12 +646,60 @@ void AudioEngine::applyBusConfig(const HE::AudioBusConfig& config)
 {
     if (!m_initialized) return;
     setMasterVolume(config.masterVolume);
+    // Only on a change: a failed Steam Audio load must not be retried (and
+    // logged) on every project reload and every Play.
+    if (config.spatialBackend != m_impl->spatialRequested)
+        setSpatialBackend(config.spatialBackend);
     for (const HE::AudioBusDef& def : config.buses)
     {
         if (!createBus(def.name, def.volume)) continue;   // createBus logged it
         setBusVolume(def.name, def.volume);               // an existing bus: only the volume
         setBusEq(def.name, def.eq);                       // a compare when unchanged
     }
+}
+
+bool AudioEngine::steamAudioCompiledIn() { return HE::SteamAudio::compiledIn(); }
+
+HE::AudioSpatialBackend AudioEngine::spatialBackend() const          { return m_impl->spatialActive; }
+HE::AudioSpatialBackend AudioEngine::requestedSpatialBackend() const { return m_impl->spatialRequested; }
+std::string             AudioEngine::spatialBackendStatus() const    { return m_impl->spatialStatus; }
+
+bool AudioEngine::setSpatialBackend(HE::AudioSpatialBackend backend)
+{
+    Impl& s = *m_impl;
+    s.spatialRequested = backend;
+
+    if (backend == HE::AudioSpatialBackend::Miniaudio)
+    {
+        s.steam.shutdown();
+        s.spatialActive = HE::AudioSpatialBackend::Miniaudio;
+        s.spatialStatus = "miniaudio";
+        return true;
+    }
+
+    // Steam Audio.
+    s.spatialActive = HE::AudioSpatialBackend::Miniaudio;   // until proven otherwise
+    if (!HE::SteamAudio::compiledIn())
+    {
+        s.spatialStatus = "Steam Audio is not in this build (HE_ENABLE_STEAM_AUDIO=OFF); using miniaudio";
+        HE_LOG_WARN(Audio, "%s", s.spatialStatus.c_str());
+        return false;
+    }
+    if (!m_initialized)
+    {
+        // Remembered; applied by the next applyBusConfig/setSpatialBackend after init.
+        s.spatialStatus = "Steam Audio requested; waiting for the audio engine";
+        return false;
+    }
+    if (!s.steam.init(static_cast<int>(ma_engine_get_sample_rate(&s.engine)), kSteamFrameSize))
+    {
+        s.spatialStatus = "Steam Audio unavailable: " + s.steam.lastError() + "; using miniaudio";
+        HE_LOG_WARN(Audio, "%s", s.spatialStatus.c_str());
+        return false;
+    }
+    s.spatialActive = HE::AudioSpatialBackend::SteamAudio;
+    s.spatialStatus = std::string("Steam Audio ") + HE::SteamAudio::version() + " active";
+    return true;
 }
 
 bool AudioEngine::setBusEq(const std::string& name, const HE::AudioEq& eq)
@@ -723,7 +814,7 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
     snd->bytes = bytes;
     ma_uint64 frameCount = 0;   // for the trace line only; 0 = unknown (streamed)
 
-    if (encoding == AudioEncoding::Vorbis)
+    if (audioIsCompressed(encoding))
     {
         // The Ogg pages stay compressed in `bytes`; ma_decoder pulls and decodes
         // just the frames the mixer asks for, on the mixer thread. Output format
@@ -732,14 +823,14 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
         // would make cursor/length count engine frames and break the source-frame
         // contract in the header — the sound's own resampler handles the rate.
         ma_decoder_config dcfg = ma_decoder_config_init(ma_format_f32, 0, 0);
-        dcfg.encodingFormat = ma_encoding_format_vorbis;
+        dcfg.encodingFormat = encodingFormatOf(encoding);
         const ma_result rc = ma_decoder_init_memory(snd->bytes.data(), snd->bytes.size(),
                                                     &dcfg, &snd->decoder);
         if (rc != MA_SUCCESS)
         {
-            HE_LOG_ERROR(Audio, "Vorbis decoder init failed (%zu bytes, result %d) — "
-                                "the clip is not a playable Ogg Vorbis stream",
-                         snd->bytes.size(), static_cast<int>(rc));
+            HE_LOG_ERROR(Audio, "%s decoder init failed (%zu bytes, result %d) — "
+                                "the clip is not a playable stream of that format",
+                         encodingName(encoding), snd->bytes.size(), static_cast<int>(rc));
             return 0;
         }
         snd->decoderOk = true;
@@ -890,10 +981,10 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
     const bool snd_hasEq    = snd->eqActive;
     m_impl->sounds.emplace(handle, std::move(snd));
 
-    HE_LOG_TRACE(Audio, "Started %s %s sound #%llu: %llu frames%s, %d Hz, %d ch, vol %.2f, "
+    HE_LOG_TRACE(Audio, "Started %s %s%s sound #%llu: %llu frames%s, %d Hz, %d ch, vol %.2f, "
                         "pitch %.2f%s%s%s, bus '%s'",
                  spatial ? "spatial" : "2D",
-                 encoding == AudioEncoding::Vorbis ? "Vorbis (streamed)" : "PCM",
+                 encodingName(encoding), audioIsCompressed(encoding) ? " (streamed)" : "",
                  static_cast<unsigned long long>(handle),
                  static_cast<unsigned long long>(frameCount), trimmed ? " (trimmed)" : "",
                  sampleRate, channels,
@@ -1229,15 +1320,15 @@ bool AudioEngine::decodeToPcm16(const AudioAsset& clip, std::vector<uint8_t>& ou
 
     // Native rate/channels (0 = keep), s16 out: one allocation of the whole clip.
     ma_decoder_config cfg = ma_decoder_config_init(ma_format_s16, 0, 0);
-    cfg.encodingFormat = ma_encoding_format_vorbis;
+    cfg.encodingFormat = encodingFormatOf(clip.encoding);
     ma_uint64 frames = 0;
     void*     pcm    = nullptr;
     const ma_result rc = ma_decode_memory(clip.audioData.data(), clip.audioData.size(),
                                           &cfg, &frames, &pcm);
     if (rc != MA_SUCCESS || !pcm)
     {
-        HE_LOG_ERROR(Audio, "Vorbis decode of '%s' failed (%zu bytes, result %d)",
-                     clip.name.c_str(), clip.audioData.size(), static_cast<int>(rc));
+        HE_LOG_ERROR(Audio, "%s decode of '%s' failed (%zu bytes, result %d)",
+                     encodingName(clip.encoding), clip.name.c_str(), clip.audioData.size(), static_cast<int>(rc));
         if (pcm) ma_free(pcm, nullptr);
         return false;
     }

@@ -612,7 +612,7 @@ struct SourceFamilyRow
 constexpr SourceFamilyRow kSourceFamilies[] = {
 	{ "3D Models", kMeshPattern,               SourceKind::Mesh     },
 	{ "Textures",  "png;jpg;jpeg;tga;bmp;hdr", SourceKind::Texture  },
-	{ "Audio",     "wav;ogg",                  SourceKind::Audio    },
+	{ "Audio",     "wav;ogg;mp3;flac",          SourceKind::Audio    },
 	{ "Materials", "hmat",                     SourceKind::Material },
 	{ "Fonts",     "ttf;otf",                  SourceKind::Font     },
 };

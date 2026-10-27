@@ -233,6 +233,7 @@ add_executable(he_tests
     test_profiler_stats.cpp
     test_profiler_layout.cpp
     test_audio.cpp
+    test_audio_formats.cpp
     # Audio Editor edit model (Thema 168): trim, volume curve, bus, EQ biquads.
     test_audio_edit.cpp
     # …and what the engine does with its bus and EQ: routing, measured response.

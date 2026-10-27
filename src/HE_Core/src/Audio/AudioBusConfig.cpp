@@ -38,12 +38,14 @@ bool AudioBusConfig::remove(const std::string& name)
 
 bool AudioBusConfig::isDefault() const
 {
-    return buses.empty() && masterVolume == 1.0f;
+    return buses.empty() && masterVolume == 1.0f && spatialBackend == AudioSpatialBackend::Miniaudio;
 }
 
 void AudioBusConfig::toJson(nlohmann::json& out) const
 {
     out["master"] = masterVolume;
+    if (spatialBackend == AudioSpatialBackend::SteamAudio)
+        out["spatial"] = "steamaudio";
     nlohmann::json arr = nlohmann::json::array();
     for (const AudioBusDef& b : buses)
     {
@@ -63,6 +65,8 @@ void AudioBusConfig::fromJson(const nlohmann::json& in)
     if (!in.is_object()) return;
     if (in.contains("master") && in["master"].is_number())
         masterVolume = std::max(0.0f, in["master"].get<float>());
+    if (in.contains("spatial") && in["spatial"].is_string() && in["spatial"].get<std::string>() == "steamaudio")
+        spatialBackend = AudioSpatialBackend::SteamAudio;
     if (!in.contains("buses") || !in["buses"].is_array()) return;
     for (const nlohmann::json& b : in["buses"])
     {

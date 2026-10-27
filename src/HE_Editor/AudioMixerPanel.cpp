@@ -376,6 +376,29 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 		ImGui::TextDisabled("already exists");
 	}
 
+	// ── Spatial audio ────────────────────────────────────────────────────────
+	// Who spatialises 3D voices. A project setting like the faders (saved with
+	// the project, applied to the engine by applyBusConfig); greyed out in a
+	// build without the Steam Audio SDK, with the status line saying so. A
+	// request the engine could not honour (library missing) stays ticked and the
+	// status says why, instead of the box silently unticking itself.
+	{
+		bool steam = cfg.spatialBackend == HE::AudioSpatialBackend::SteamAudio;
+		ImGui::BeginDisabled(!AudioEngine::steamAudioCompiledIn());
+		if (EditorWidgets::checkbox("Steam Audio (HRTF)", &steam))
+		{
+			cfg.spatialBackend = steam ? HE::AudioSpatialBackend::SteamAudio
+			                           : HE::AudioSpatialBackend::Miniaudio;
+			commit = true;
+		}
+		ImGui::EndDisabled();
+		EditorWidgets::helpForKey("Audio Mixer/Steam Audio (HRTF)");
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", AudioEngine::steamAudioCompiledIn()
+			? audio.spatialBackendStatus().c_str()
+			: "not in this build");
+	}
+
 	if (!removeBus.empty())
 	{
 		// Engine first — it stops the voices on the bus — then the project.

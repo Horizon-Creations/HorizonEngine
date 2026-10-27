@@ -699,6 +699,91 @@ if(NOT HE_RUNTIME_FLAVOR STREQUAL "game")
 endif()
 message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}'")
 
+# ─── Steam Audio (optional: HRTF / binaural spatial audio) ───────────────────
+# miniaudio stays the mixer and the device; Steam Audio is the spatialiser the
+# project can switch on (AudioBusConfig::spatialBackend, the Audio Mixer's
+# "Spatial audio" combo, AudioEngine::setSpatialBackend). The SDK is Valve's
+# prebuilt binary release (Apache-2.0): only phonon.h is needed to compile, and
+# libphonon is loaded at RUN time (SteamAudio.cpp: dlopen / LoadLibrary), so no
+# link step, no rpath and a missing library just means "stay on miniaudio".
+#
+# This flag decides what a tree contains. ON: HorizonScene compiles the backend
+# (HE_HAVE_STEAM_AUDIO) and the library is copied next to the binaries. OFF: no
+# phonon code in HorizonScene, nothing downloaded, nothing shipped — the game
+# configures its own tree with -DHE_ENABLE_STEAM_AUDIO=OFF when it does not need
+# it. The app runtime flavours leave it out (they are about size).
+#
+# The SDK is downloaded at CONFIGURE time on every platform (file(DOWNLOAD) with
+# a pinned SHA-256; only the headers and the one platform's library are
+# extracted from the ~180 MB zip, into the build tree's _deps). A failed
+# download or an unpacked layout that differs is a warning and the backend is
+# left out — configure never fails on it. HE_STEAM_AUDIO_ROOT points at an
+# already unpacked SDK (the folder holding include/ and lib/) and skips the
+# download, for offline CI. The SDK ships Windows x64, Linux x86_64 and macOS.
+option(HE_ENABLE_STEAM_AUDIO "Compile the optional Steam Audio (HRTF) spatial backend and ship libphonon" ON)
+set(HE_STEAM_AUDIO_ROOT "" CACHE PATH "Unpacked Steam Audio SDK (folder with include/ and lib/); empty = download at configure")
+set(HE_STEAM_AUDIO_VERSION "4.8.1")
+set(HE_STEAM_AUDIO_SHA256 "4a0aa5ec1176f38f0b0993a37c2259d9e86f27e22d5e24f83ec4c3cb9a1d5449")
+set(HE_HAVE_STEAM_AUDIO FALSE)
+set(HE_STEAM_AUDIO_LIB "")
+set(HE_STEAM_AUDIO_INCLUDE_DIR "")
+if(HE_ENABLE_STEAM_AUDIO AND NOT HE_RUNTIME_FLAVOR STREQUAL "game")
+    message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}' — Steam Audio left out")
+elseif(HE_ENABLE_STEAM_AUDIO)
+    if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64|x64)")
+        set(_sa_libdir "windows-x64")
+        set(_sa_libname "phonon.dll")
+    elseif(APPLE)
+        set(_sa_libdir "osx")
+        set(_sa_libname "libphonon.dylib")
+    elseif(UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64)")
+        set(_sa_libdir "linux-x64")
+        set(_sa_libname "libphonon.so")
+    else()
+        set(_sa_libdir "")
+        message(STATUS "HorizonEngine: Steam Audio has no SDK build for ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR} — backend left out")
+    endif()
+    if(_sa_libdir)
+        set(_sa_root "${HE_STEAM_AUDIO_ROOT}")
+        if(NOT _sa_root)
+            set(_sa_dir "${CMAKE_BINARY_DIR}/_deps/steamaudio-${HE_STEAM_AUDIO_VERSION}")
+            set(_sa_root "${_sa_dir}/steamaudio")
+            if(NOT EXISTS "${_sa_root}/lib/${_sa_libdir}/${_sa_libname}")
+                set(_sa_zip "${_sa_dir}/steamaudio_${HE_STEAM_AUDIO_VERSION}.zip")
+                message(STATUS "HorizonEngine: downloading Steam Audio SDK ${HE_STEAM_AUDIO_VERSION} (~180 MB, once per build tree)")
+                file(DOWNLOAD
+                    "https://github.com/ValveSoftware/steam-audio/releases/download/v${HE_STEAM_AUDIO_VERSION}/steamaudio_${HE_STEAM_AUDIO_VERSION}.zip"
+                    "${_sa_zip}"
+                    EXPECTED_HASH SHA256=${HE_STEAM_AUDIO_SHA256}
+                    STATUS _sa_status SHOW_PROGRESS)
+                list(GET _sa_status 0 _sa_rc)
+                if(_sa_rc EQUAL 0)
+                    file(ARCHIVE_EXTRACT INPUT "${_sa_zip}" DESTINATION "${_sa_dir}"
+                        PATTERNS "steamaudio/include/*" "steamaudio/lib/${_sa_libdir}/*"
+                                 "steamaudio/THIRDPARTY.md")
+                    file(REMOVE "${_sa_zip}")   # 180 MB we do not need twice
+                else()
+                    list(GET _sa_status 1 _sa_msg)
+                    message(WARNING "HorizonEngine: Steam Audio download failed (${_sa_msg}) — backend left out. "
+                                    "Configure with -DHE_STEAM_AUDIO_ROOT=<unpacked SDK> or -DHE_ENABLE_STEAM_AUDIO=OFF.")
+                    file(REMOVE "${_sa_zip}")
+                endif()
+            endif()
+        endif()
+        if(EXISTS "${_sa_root}/include/phonon.h" AND EXISTS "${_sa_root}/lib/${_sa_libdir}/${_sa_libname}")
+            set(HE_HAVE_STEAM_AUDIO TRUE)
+            set(HE_STEAM_AUDIO_INCLUDE_DIR "${_sa_root}/include")
+            set(HE_STEAM_AUDIO_LIB "${_sa_root}/lib/${_sa_libdir}/${_sa_libname}")
+            message(STATUS "HorizonEngine: Steam Audio enabled (${HE_STEAM_AUDIO_LIB})")
+        elseif(NOT _sa_rc OR _sa_rc EQUAL 0)
+            message(WARNING "HorizonEngine: Steam Audio SDK not found under '${_sa_root}' "
+                             "(expected include/phonon.h and lib/${_sa_libdir}/${_sa_libname}) — backend left out")
+        endif()
+    endif()
+else()
+    message(STATUS "HorizonEngine: Steam Audio disabled (pass -DHE_ENABLE_STEAM_AUDIO=ON to compile the HRTF backend)")
+endif()
+
 # ─── Shader cross-compiler: glslang + SPIRV-Cross (Material-System M0) ──────────
 # Canonical GLSL → glslang → SPIR-V → SPIRV-Cross → MSL / HLSL / GLSL(-ES).
 # The backbone for the cross-backend material system (docs/material-system-design.md).

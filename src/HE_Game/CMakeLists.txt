@@ -158,6 +158,14 @@ add_custom_command(TARGET HorizonGame POST_BUILD
 	COMMENT "Deploying HorizonGame to ${DEPLOY_GAME} (engine in ${HE_ENGINE_BUNDLE_DIR_NAME}/)"
 	VERBATIM
 )
+if(HE_HAVE_STEAM_AUDIO)
+	# Beside the engine library, where SteamAudio.cpp looks first. A game tree
+	# configured with -DHE_ENABLE_STEAM_AUDIO=OFF skips this and ships no phonon.
+	add_custom_command(TARGET HorizonGame POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			"${HE_STEAM_AUDIO_LIB}" "${_he_game_engine_dir}"
+		VERBATIM)
+endif()
 if(WIN32)
 	# Whatever else HorizonEngine.dll imports from an imported target (a vcpkg
 	# lz4/zstd/OpenSSL), beside it.

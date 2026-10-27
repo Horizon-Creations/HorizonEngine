@@ -516,6 +516,10 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		// alone says unambiguously what the bytes are.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_OGGD))
 		{ a.audioData = c->data; a.encoding = AudioEncoding::Vorbis; }
+		else if (const auto* c = reader.findChunk(HAsset::CHUNK_MP3D))
+		{ a.audioData = c->data; a.encoding = AudioEncoding::Mp3; }
+		else if (const auto* c = reader.findChunk(HAsset::CHUNK_FLCD))
+		{ a.audioData = c->data; a.encoding = AudioEncoding::Flac; }
 		else if (const auto* c = reader.findChunk(HAsset::CHUNK_PCMD))
 		{ a.audioData = c->data; a.encoding = AudioEncoding::PCM16; }
 		// No chunk = never edited (or written before edits existed) = default.
@@ -2231,8 +2235,15 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 			HAsset::Writer::appendPOD(b, static_cast<int32_t>(a.encoding));
 			w.addChunk(HAsset::CHUNK_AUMI,b.data(),b.size());
 		}
-		w.addChunk(a.encoding == AudioEncoding::Vorbis ? HAsset::CHUNK_OGGD : HAsset::CHUNK_PCMD,
-		           a.audioData.data(), a.audioData.size());
+		uint32_t dataChunk = HAsset::CHUNK_PCMD;
+		switch (a.encoding)
+		{
+		case AudioEncoding::Vorbis: dataChunk = HAsset::CHUNK_OGGD; break;
+		case AudioEncoding::Mp3:    dataChunk = HAsset::CHUNK_MP3D; break;
+		case AudioEncoding::Flac:   dataChunk = HAsset::CHUNK_FLCD; break;
+		case AudioEncoding::PCM16:  break;
+		}
+		w.addChunk(dataChunk, a.audioData.data(), a.audioData.size());
 		// Only when something was edited: an untouched clip keeps the exact
 		// chunk list it had before edits existed.
 		if (!a.edit.isDefault())

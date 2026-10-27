@@ -3422,6 +3422,15 @@ namespace
 	  "Deletes the bus. Sources that still name it play on the master bus "
 	  "from now on, with a warning in the log.",
 	  "", "systems#audio" },
+	{ "Audio Mixer/Steam Audio (HRTF)", "",
+	  "Spatialises 3D sounds with Steam Audio's HRTF instead of the engine's own "
+	  "pan and distance volume. On headphones a source is heard in front, behind, "
+	  "above or beside you, not only left or right. Saved with the project. "
+	  "Greyed out when this build was made without Steam Audio "
+	  "(HE_ENABLE_STEAM_AUDIO=OFF); if it is ticked but its library cannot be "
+	  "loaded, the status beside it says why and the sound stays on the engine's "
+	  "own spatialiser.",
+	  "", "systems#audio" },
 	{ "Audio Mixer/Name", "",
 	  "The name of the bus to add. It is what a source's Bus field and a "
 	  "script's Set Bus Volume refer to, so keep it short and spell it the same "

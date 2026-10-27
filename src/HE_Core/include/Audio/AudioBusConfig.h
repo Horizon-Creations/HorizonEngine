@@ -2,6 +2,7 @@
 #include <Types/Defines.h>
 #include <Audio/AudioEdit.h>   // AudioEq — a bus carries the same EQ an asset does
 #include <nlohmann/json_fwd.hpp>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,14 @@ struct HE_API AudioBusDef
     AudioEq     eq;
 };
 
+// Who spatialises 3D voices. Miniaudio is the engine's own pan + distance gain
+// and the default of every project; SteamAudio is the HRTF (binaural) backend,
+// which only does anything in a build that includes it (HE_ENABLE_STEAM_AUDIO)
+// and only once its library loaded — AudioEngine::setSpatialBackend says. A
+// project may ask for it in a build without it: the setting is kept (it is the
+// project's, not the machine's) and the engine stays on miniaudio.
+enum class AudioSpatialBackend : uint8_t { Miniaudio = 0, SteamAudio = 1 };
+
 struct HE_API AudioBusConfig
 {
     // In authoring order — the order the mixer shows them in, and the order the
@@ -44,6 +53,10 @@ struct HE_API AudioBusConfig
     // The gain of everything at once, in front of every bus. 1 is what every
     // project written before this existed was getting.
     float masterVolume = 1.0f;
+
+    // The project's choice of spatialiser (JSON key "spatial": "steamaudio";
+    // absent = Miniaudio, so a project from before this reads and writes as it did).
+    AudioSpatialBackend spatialBackend = AudioSpatialBackend::Miniaudio;
 
     // A default-constructed config is EMPTY on purpose: a project written
     // before buses existed must load as "no buses", and a source that names one
@@ -64,7 +77,7 @@ struct HE_API AudioBusConfig
     bool isDefault() const;
 
     // The same JSON shape on both sides of the road (.heproj and .hcfg):
-    // { "master": 1.0, "buses": [ { "name": "Music", "volume": 0.8 }, … ] },
+    // { "master": 1.0, "spatial": "steamaudio" (only when not the default), "buses": [ { "name": "Music", "volume": 0.8 }, … ] },
     // a bus with an EQ also { …, "eq": { "enabled": true, "bands": [ … ] } }.
     void toJson(nlohmann::json& out) const;
     void fromJson(const nlohmann::json& in);
