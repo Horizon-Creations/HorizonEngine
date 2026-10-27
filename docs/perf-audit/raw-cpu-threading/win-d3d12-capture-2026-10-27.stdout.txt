@@ -45,8 +45,10 @@ scripts/perf/gen_reference_world.py --count 10000 --extent 400 (ref10k, no folia
 with a local copy of scripts/perf/make_land_game_dir.py (the checked-in script's "cp -cR" is
 macOS-only — copytree substituted, not committed).
 
-Frame CPU (cpuMs) already excludes WaitFrame: Render's per-frame p50 (1.296 / 2.186 ms) is close to
-the frame's own cpuMs p50 (1.32 / 2.21 ms) while WaitFrame alone is 0.798 / 0.805 ms — if WaitFrame
-were included in cpuMs the frame total would be ~1.3 ms higher than it is. This mirrors Step 1's
-Metal methodology (NextDrawable subtracted); D3D12's WaitFrame is the same kind of GPU-pacing block.
-"% of frame" in the main doc uses frame cpuMs p50 as the denominator (no further WaitFrame subtraction).
+WaitFrame is NESTED inside Render, not a sibling: Render (Application.cpp:867) wraps
+m_renderer->Render(), and WaitFrame (D3D12Renderer.cpp:13148) sits inside that call, inside
+DrawViewportFrame. So the frame's own cpuMs already INCLUDES WaitFrame's wait time (which is why
+Render's per-frame p50, 1.296 / 2.186 ms, is close to cpuMs p50, 1.32 / 2.21 ms, while GameLogicTick
+etc. add only a little beside it). "% of frame" in the main doc uses WORK = cpuMs p50 minus
+WaitFrame p50 (0.52 ms for s512_x4, 1.41 ms for ref10k) as the denominator, mirroring Step 1's Metal
+methodology (NextDrawable subtracted) with the subtraction actually applied.
