@@ -204,6 +204,7 @@ bool DevStatsTile::toggle(WidgetManager& widgets, ContentManager& content)
 			e.setProp("AutoSize", UIPropValue::ofBool(false));
 			e.setProp("WordWrap", UIPropValue::ofBool(false));
 			e.setProp("Align H", UIPropValue::ofInt(2));
+			e.setProp("Align V", UIPropValue::ofInt(0));   // top: the box is taller than the text, and a default of "middle" pushed the numbers down
 		}
 		page.find(values)->parentId = card;
 

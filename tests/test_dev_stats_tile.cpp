@@ -236,6 +236,7 @@ TEST_CASE("Dev stats tile: update writes the text at the refresh rate and sizes 
 		const auto* v = t ? dynamic_cast<const HE::UIText*>(t->find(tile.valueElementId())) : nullptr;
 		REQUIRE(v != nullptr);
 		CHECK(v->alignH == 2);
+		CHECK(v->alignV == 0);   // from the top, level with the labels
 		CHECK(v->text.find("Vulkan  1280x720") != std::string::npos);
 		CHECK(std::count(v->text.begin(), v->text.end(), '\n') == std::count(first.begin(), first.end(), '\n'));
 	}
