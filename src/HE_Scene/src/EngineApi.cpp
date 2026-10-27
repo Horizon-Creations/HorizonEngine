@@ -404,7 +404,12 @@ std::string entityUuidKey(Ctx& c, Entity e)
 {
     if (!c.world || !c.world->registry().valid((entt::entity)e)) return {};
     if (auto* idc = c.world->registry().try_get<EntityIdComponent>((entt::entity)e))
-        return std::to_string(idc->id.hi) + ":" + std::to_string(idc->id.lo);
+    {
+        std::string key = std::to_string(idc->id.hi);
+        key += ':';
+        key += std::to_string(idc->id.lo);
+        return key;
+    }
     return {};
 }
 // Shared precondition walk for saveState/applySavedState — every miss logs.
