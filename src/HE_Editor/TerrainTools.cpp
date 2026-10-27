@@ -1754,6 +1754,18 @@ void renderPanel(AppContext& ctx)
                 }
                 dimText("%.1f m per cell", tc.sizeX / static_cast<float>(std::max(1u, tc.water.res)));
 
+                // The water's waves as real geometry (GPU tessellation of the engine water material's
+                // Static Switch "Tessellation"): a landscape-wide switch, like the shore clipping.
+                {
+                    bool tess = tc.water.tessellation;
+                    if (EditorWidgets::checkbox("Tessellation##water", &tess))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow("Water Tessellation");
+                        tc.water.tessellation = tess;
+                    }
+                    EditorWidgets::helpForLabel("Tessellation##water");
+                }
+
                 ImGui::Spacing();
                 dimText("LMB drag in the viewport to paint water. Ctrl+drag does the opposite.");
                 if (tc.water.bodies.empty())

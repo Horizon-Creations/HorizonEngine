@@ -7859,6 +7859,14 @@ namespace
 	  "the shallow colour before darkening, below 1 it reaches the deep colour "
 	  "sooner. Does not touch the fog.",
 	  "", "systems#water-physics" },
+	{ "Landscape/Tessellation##water", "Tessellation",
+	  "Draws this landscape's water waves as real geometry instead of only a lit "
+	  "normal, so the surface rises and falls with the swell. It follows the wind "
+	  "like the shading does. Needs a graphics backend with GPU tessellation "
+	  "(OpenGL, Vulkan, D3D11, D3D12); on Metal the surface stays flat. It costs GPU "
+	  "time, so it is off by default. Saved with the scene; the water material's "
+	  "Static Switch of the same name is what this turns on.",
+	  "", "systems#water-physics" },
 	{ "Landscape/Refracted Light##wcau", "Refracted Light",
 	  "The moving net of bright lines the waves throw onto whatever lies below the "
 	  "surface while the camera is under water. It follows the same waves the "
