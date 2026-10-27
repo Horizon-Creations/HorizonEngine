@@ -8105,7 +8105,14 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	ExtractFrame(aspect);
 	// CSM needs a directional light; the local (point/spot) atlas is independent
 	// of it — night scenes with only shadow-casting point lights still render.
-	const bool wantCsm   = m_renderWorld.shadow.enabled;
+	// With GI active the ray-traced sun mask replaces the cascades in every shader that
+	// reads them (fragmentMain: gi.enabled; the material preamble: bound only when
+	// !giActive), so the three cascade passes would render a map nobody samples. This is
+	// the SAME condition the scene passes use for giActive; the GI textures are the ones
+	// the previous frame left, so the first GI frame (still null) renders the cascades.
+	const bool giOwnsSun = m_giEnabled && m_giSupported && m_giShadowResult
+	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
+	const bool wantCsm   = m_renderWorld.shadow.enabled && !giOwnsSun;
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
 	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
 	RefineObjectBounds();
@@ -14405,10 +14412,14 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// selection — must match the planar splits the cascades were fit with.
 	scene.cameraFwd  = glm::vec4(
 		-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2])), 0.0f);
-	scene.lightCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-	for (int i = 0; i < scene.lightCount; ++i)
+	// Directionals at intensity 0 (the day-night moon in daytime) are left out: they add
+	// nothing but still pay the cascade filter per pixel. Only directionals are skipped,
+	// so the order of the point/spot lights (GI local-mask channels) is untouched. If that
+	// leaves no light at all (overcast: the sun is at 0 too) the first one stays, because
+	// lightCount == 0 means "unlit scene" to the shader and switches to the headlight.
+	auto putLight = [&](const LightData& l)
 	{
-		const LightData& l = m_renderWorld.lights[i];
+		const int i = scene.lightCount++;
 		scene.lights[i].posType        = glm::vec4(l.position,  static_cast<float>(l.type));
 		scene.lights[i].dirSpot        = glm::vec4(l.direction, l.spotAngleCos);
 		scene.lights[i].colorIntensity = glm::vec4(l.color,     l.intensity);
@@ -14417,7 +14428,16 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		scene.lights[i].params         = glm::vec4(l.range,
 		                                           m_localShadowTex ? static_cast<float>(l.shadowLayer) : -1.0f,
 		                                           0.0f, 0.0f);
+	};
+	scene.lightCount = 0;
+	for (const LightData& l : m_renderWorld.lights)
+	{
+		if (scene.lightCount >= 8) break;
+		if (l.type == 0 && l.intensity <= 0.0f) continue;
+		putLight(l);
 	}
+	if (scene.lightCount == 0 && !m_renderWorld.lights.empty())
+		putLight(m_renderWorld.lights.front());
 	{
 		const ShadowData& sh = m_renderWorld.shadow;
 		const int nl = std::clamp(sh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
@@ -15279,7 +15299,9 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder, const HE::ClusterLigh
 	int nDir = 0;
 	for (const LightData& l : m_renderWorld.lights)
 	{
-		if (l.type != 0 || nDir >= 8) continue;
+		// A directional at intensity 0 (the day-night moon in daytime) adds nothing but
+		// still pays the cascade filter, the cloud-shadow lookup and the specular pow.
+		if (l.type != 0 || nDir >= 8 || l.intensity <= 0.0f) continue;
 		matLight.lightPos[nDir][0] = l.position.x;
 		matLight.lightPos[nDir][1] = l.position.y;
 		matLight.lightPos[nDir][2] = l.position.z;

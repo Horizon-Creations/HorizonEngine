@@ -733,7 +733,10 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     {
         vec3 Rrough = normalize(mix(reflect(-V, n), n, rough));
         vec3 Nup    = normalize(vec3(n.x, max(n.y, 0.1), n.z));
-        ambDiff = texture(heSkyEnv, Nup).rgb    * diffuseColor;
+        // The diffuse ambient is read only by the non-GI result below; with the
+        // probe field active it would be a wasted cube fetch per pixel.
+        if (heLight.giProbe.y <= 0.5)
+            ambDiff = texture(heSkyEnv, Nup).rgb * diffuseColor;
         envSpec = texture(heSkyEnv, Rrough).rgb;
     }
     // FORWARD reflection cascade (sky → ray-traced GI refl → SSR), the
