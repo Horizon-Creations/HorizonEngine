@@ -4456,9 +4456,9 @@ size_t SceneSerializer::recordPrefabOverrides(HorizonWorld& world, Entity root, 
         // only one side has counts as a difference too.
         for (const auto& [p, v] : block.items())
             if (!cur->contains(p) || (*cur)[p] != v) mark(k, p);
-        for (const auto& [p, v] : cur->items())
+        for (const auto& item : cur->items())
         {
-            (void)v;
+            const std::string& p = item.key();
             if (!block.contains(p)) mark(k, p);
         }
     }
