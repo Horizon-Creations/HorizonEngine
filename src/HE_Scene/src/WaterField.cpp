@@ -473,6 +473,17 @@ uint32_t pruneEmptyBodies(TerrainComponent& tc)
 
 // ── Circle ───────────────────────────────────────────────────────────────────
 
+namespace
+{
+    // cellCenter() for a caller that already has cellSize(tc), so a per-cell loop
+    // doesn't redo the division for every cell.
+    glm::vec2 cellCenterFor(const TerrainComponent& tc, const glm::vec2& s, int cx, int cz)
+    {
+        return { -tc.sizeX * 0.5f + (static_cast<float>(cx) + 0.5f) * s.x,
+                 -tc.sizeZ * 0.5f + (static_cast<float>(cz) + 0.5f) * s.y };
+    }
+}
+
 Result addCircle(TerrainComponent& tc, uint16_t body, float x, float z,
                  float radius, float falloff, float strength)
 {
@@ -486,6 +497,7 @@ Result addCircle(TerrainComponent& tc, uint16_t body, float x, float z,
 
     Field& f = tc.water;
     const int res = static_cast<int>(f.res);
+    const glm::vec2 cell = cellSize(tc);
     const CircleCells cc = circleCells(tc, x, z, outer);
     Touched t;
     if (cc.any)
@@ -493,7 +505,7 @@ Result addCircle(TerrainComponent& tc, uint16_t body, float x, float z,
         for (int cz = cc.z0; cz <= cc.z1; ++cz)
             for (int cx = cc.x0; cx <= cc.x1; ++cx)
             {
-                const glm::vec2 c = cellCenter(tc, cx, cz);
+                const glm::vec2 c = cellCenterFor(tc, cell, cx, cz);
                 const float dist = std::sqrt((c.x - x) * (c.x - x) + (c.y - z) * (c.y - z));
                 if (dist > outer) continue;
                 const float a = std::clamp(strength * circleWeight(dist, radius, falloff), 0.0f, 1.0f);
@@ -527,6 +539,7 @@ Result removeCircle(TerrainComponent& tc, float x, float z, float radius, float 
 
     Field& f = tc.water;
     const int res = static_cast<int>(f.res);
+    const glm::vec2 cell = cellSize(tc);
     const CircleCells cc = circleCells(tc, x, z, outer);
     Touched t;
     if (cc.any)
@@ -536,7 +549,7 @@ Result removeCircle(TerrainComponent& tc, float x, float z, float radius, float 
                 const size_t i = static_cast<size_t>(cz) * res + cx;
                 if (f.coverage[i] == 0) continue;
                 if (onlyBody != kNoBody && f.owner[i] != onlyBody) continue;
-                const glm::vec2 c = cellCenter(tc, cx, cz);
+                const glm::vec2 c = cellCenterFor(tc, cell, cx, cz);
                 const float dist = std::sqrt((c.x - x) * (c.x - x) + (c.y - z) * (c.y - z));
                 if (dist > outer) continue;
                 const float a = std::clamp(strength * circleWeight(dist, radius, falloff), 0.0f, 1.0f);
@@ -725,9 +738,7 @@ glm::vec2 cellSize(const TerrainComponent& tc)
 
 glm::vec2 cellCenter(const TerrainComponent& tc, int cx, int cz)
 {
-    const glm::vec2 s = cellSize(tc);
-    return { -tc.sizeX * 0.5f + (static_cast<float>(cx) + 0.5f) * s.x,
-             -tc.sizeZ * 0.5f + (static_cast<float>(cz) + 0.5f) * s.y };
+    return cellCenterFor(tc, cellSize(tc), cx, cz);
 }
 
 float coverageAt(const TerrainComponent& tc, float x, float z)
