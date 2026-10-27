@@ -1106,6 +1106,8 @@ private:
 	int          m_uUcSun       = -1;
 	int          m_uUcSunColor  = -1;
 	int          m_uUcParams    = -1;
+	int          m_uUcSurfWave  = -1;   // the tessellated surface for the underwater pass (UnderwaterSurfaceShared.h)
+	int          m_uUcSurfParams = -1;
 	int          m_uUcTint      = -1;
 	unsigned int m_ucFBO        = 0;
 	unsigned int m_ucColor      = 0;         // RGBA16F, full-res

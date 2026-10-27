@@ -10916,6 +10916,7 @@ void D3D12Renderer::Initialize(HE::Window* window)
     {   // Hull/domain shaders come with feature level 11_0, the floor above.
         const char* tessEnv = std::getenv("HE_TESSELLATION");
         m_impl->m_tessSupported = !(tessEnv && std::strcmp(tessEnv, "0") == 0);
+        HE::setWaterTessellationAvailable(m_impl->m_tessSupported);
         HE_LOG_INFO(RHI, "%s", m_impl->m_tessSupported
             ? "D3D12Renderer: tessellation available (material Displacement pin)"
             : "D3D12Renderer: HE_TESSELLATION=0, displacement materials draw untessellated");

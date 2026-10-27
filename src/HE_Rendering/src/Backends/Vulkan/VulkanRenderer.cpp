@@ -1578,6 +1578,7 @@ void VulkanRenderer::createDevice()
         const char* tessEnv = std::getenv("HE_TESSELLATION");
         m_tessSupported = have.tessellationShader == VK_TRUE && !(tessEnv && std::strcmp(tessEnv, "0") == 0);
         coreEnable.tessellationShader = m_tessSupported ? VK_TRUE : VK_FALSE;
+        HE::setWaterTessellationAvailable(m_tessSupported);
         HE_LOG_INFO(RHI, "%s", m_tessSupported
             ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
             : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "

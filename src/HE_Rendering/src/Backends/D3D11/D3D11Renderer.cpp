@@ -6849,6 +6849,7 @@ void D3D11Renderer::Initialize(HE::Window* window)
     {
         const char* tessEnv = std::getenv("HE_TESSELLATION");
         m_impl->m_tessSupported = fl >= D3D_FEATURE_LEVEL_11_0 && !(tessEnv && std::strcmp(tessEnv, "0") == 0);
+        HE::setWaterTessellationAvailable(m_impl->m_tessSupported);
         HE_LOG_INFO(RHI, "%s", m_impl->m_tessSupported
             ? "D3D11Renderer: tessellation available (material Displacement pin)"
             : "D3D11Renderer: no tessellation (feature level below 11_0 or HE_TESSELLATION=0), "

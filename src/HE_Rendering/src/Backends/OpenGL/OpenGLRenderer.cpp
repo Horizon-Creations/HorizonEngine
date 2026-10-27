@@ -17,6 +17,7 @@
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
+#include <HorizonRendering/UnderwaterSurfaceShared.h>  // the tessellated surface height for the post passes
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
@@ -3394,6 +3395,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	m_tessSupported = GLAD_GL_VERSION_4_0 != 0 && glPatchParameteri != nullptr;
 	if (const char* t = std::getenv("HE_TESSELLATION"); t && *t && std::atoi(t) == 0)
 		m_tessSupported = false;
+	HE::setWaterTessellationAvailable(m_tessSupported);
 	if (m_tessSupported)
 		glPatchParameteri(GL_PATCH_VERTICES, 3);
 	HE_LOG_INFO(RHI, "%s", m_tessSupported
@@ -5662,6 +5664,9 @@ uniform vec4 uSun;          // xyz = direction TOWARD the sun (unit)
 uniform vec4 uSunColor;     // rgb = sun radiance (0 at night)
 uniform vec4 uCaustics;     // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
 uniform vec4 uTintDensity;  // rgb = resolved fog tint, a = per-metre density (the fog stage, see main)
+uniform vec4 uSurfWave;     // the wind on the tessellated surface: turn (rad), length / speed / steepness factor
+uniform vec4 uSurfParams;   // height (0 = flat plane), shore width, wave clock (s), flat level
+@SURF@
 const float kTrains[12] = float[12](@TRAINS@);
 const float kTwoPi = 6.28318530718;
 const float kEta   = 1.33;
@@ -5686,7 +5691,8 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	vec3 L = uSun.xyz;
 	if (uCaustics.x <= 0.0 || L.y <= 0.02) return vec4(0.0);   // off, or no sun
 	P = hit ? P : uCamSurface.xyz;
-	float depth = uCamSurface.w - P.y;                      // metres below the flat surface
+	// Metres below the surface AT this pixel: the flat level, plus the tessellated wave there (0 when flat).
+	float depth = uSurfParams.w + heSurfaceH(P.xz, max(uSurfParams.w - P.y, 0.0), uSurfWave, uSurfParams) - P.y;
 	float fadeDepth = uCaustics.w;
 
 	// The sun's ray inside the water (Snell: the horizontal part shrinks by 1/eta),
@@ -5803,21 +5809,36 @@ void main()
 	// waterline soft. Applied AFTER the net so the fog swallows it with distance, exactly as
 	// on the D3D backends (caustics first, then the premultiplied tint*fog + dst*(1-fog) blend).
 	vec3  camPos   = uCamSurface.xyz;
-	float surfaceY = uCamSurface.w;
+	float surfaceY = uCamSurface.w;            // the surface under the camera
+	// The surface is a plane at uSurfParams.w plus, with tessellation, the wave AT each point (heSurfaceH):
+	// the camera, this pixel's point and the near-plane point each compare against their own height, so the
+	// waterline on the screen follows the waves instead of being one straight line.
+	float level   = uSurfParams.w;
+	float gDepth  = max(level - P.y, 0.0);
+	float sP      = level + heSurfaceH(P.xz, gDepth, uSurfWave, uSurfParams);
 	bool  camBelow = camPos.y < surfaceY;
-	bool  pBelow   = P.y < surfaceY;
+	bool  pBelow   = P.y < sP;
 	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
 	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
 	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
 	vec4 wn = uInvViewProj * vec4(vUV * 2.0 - 1.0, -1.0, 1.0);
-	bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+	vec3 nearPt = wn.xyz / max(wn.w, 1e-8);
+	bool nearBelow = nearPt.y < level + heSurfaceH(nearPt.xz, 1000.0, uSurfWave, uSurfParams);
 	float segment;
 	if (camBelow == pBelow)
 		segment = camBelow ? length(camPos - P) : 0.0;
 	else
 	{
-		float t = (surfaceY - camPos.y) / (P.y - camPos.y);
-		vec3 crossPt = camPos + t * (P - camPos);
+		// Where the ray meets the displaced surface: a few steps of "intersect the plane at the height
+		// the wave has where the last guess landed" (the surface is gently sloped, it settles at once).
+		float sY = camBelow ? surfaceY : sP;
+		vec3 crossPt = camPos;
+		for (int it = 0; it < 3; ++it)
+		{
+			float t = clamp((sY - camPos.y) / (P.y - camPos.y), 0.0, 1.0);
+			crossPt = camPos + t * (P - camPos);
+			sY = level + heSurfaceH(crossPt.xz, gDepth, uSurfWave, uSurfParams);
+		}
 		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
 	}
 	float fogAmount = 1.0 - exp(-uTintDensity.a * segment);
@@ -5833,6 +5854,7 @@ bool OpenGLRenderer::EnsureUnderwaterCausticsPipeline()
 	std::string fsSrc = kUnderwaterCausticsFS;
 	const std::string trains = HE::causticsWaveTrainsList();
 	fsSrc.replace(fsSrc.find("@TRAINS@"), 8, trains);
+	fsSrc.replace(fsSrc.find("@SURF@"), 6, HE::underwaterSurfaceFunctions(HE::SurfaceLang::GLSL));
 	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
 	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc.c_str());
 	GLuint prog = glCreateProgram();
@@ -5858,6 +5880,8 @@ bool OpenGLRenderer::EnsureUnderwaterCausticsPipeline()
 	m_uUcSunColor = glGetUniformLocation(prog, "uSunColor");
 	m_uUcParams   = glGetUniformLocation(prog, "uCaustics");
 	m_uUcTint     = glGetUniformLocation(prog, "uTintDensity");
+	m_uUcSurfWave   = glGetUniformLocation(prog, "uSurfWave");
+	m_uUcSurfParams = glGetUniformLocation(prog, "uSurfParams");
 	return true;
 }
 
@@ -5922,6 +5946,11 @@ unsigned int OpenGLRenderer::RenderUnderwaterCaustics(unsigned int sourceHdr, in
 	glUniform4f(m_uUcParams, uc.causticsIntensity, uc.causticsScale,
 	            engineSeconds * uc.causticsSpeed, uc.causticsDepth);
 	glUniform4f(m_uUcTint, uc.tintColor.r, uc.tintColor.g, uc.tintColor.b, uc.density);
+	// The surface as the post pass evaluates it per pixel: the flat level (the camera's surface when flat)
+	// and, with tessellation, the wind's factors and the body's height / coast fade / the wave clock.
+	glUniform4f(m_uUcSurfWave, uc.waveTurn, uc.waveLengthFactor, uc.waveSpeedFactor, uc.waveSteepFactor);
+	glUniform4f(m_uUcSurfParams, uc.surfaceHeight, uc.surfaceShoreWidth, engineSeconds,
+	            uc.surfaceHeight > 0.0f ? uc.surfaceLevel : uc.surfaceY);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 
 	// Units clean for the passes that follow (depth on unit 1 is what the scene pass renders into).

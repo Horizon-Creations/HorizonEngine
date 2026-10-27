@@ -1326,16 +1326,27 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	if (!index.surfaceAt(cameraPos.x, cameraPos.z, 0.0, surf))
 		return out;   // dry at this XZ — WaterIndex already clips the shore itself
 
-	// The surface the camera meets: the flat level, or with tessellation the level plus the
-	// wave the geometry stands at under the camera (the same formula the material displaces by).
+	// The surface the camera meets: the flat level, or with tessellation the level plus the wave the
+	// geometry stands at under the camera (the same formula the material displaces by). The passes get
+	// the whole description (surfaceHeight and friends) and evaluate the surface per pixel.
 	float surfaceLevel = surf.level;
-	if (waveClock >= 0.0)
+	out.surfaceLevel = surf.level;
+	if (waveClock >= 0.0 && waterTessellationAvailable())
 		if (const auto* tc = world.registry().try_get<TerrainComponent>(surf.terrain); tc && tc->water.tessellation)
 		{
 			float windDir = 0.0f, windSpd = 1.0f;
 			water::WaveTrain trains[3] = { water::kWaveA, water::kWaveB, water::kWaveC };
 			if (sceneWind(world.registry(), windDir, windSpd))
+			{
 				for (water::WaveTrain& t : trains) t = water::windTrain(t, windDir, windSpd);
+				const water::WindWaveFactors f = water::windWaveFactors(windSpd);
+				out.waveLengthFactor = f.length;
+				out.waveSpeedFactor  = f.speed;
+				out.waveSteepFactor  = f.steepness;
+				out.waveTurn         = glm::radians(water::windTurnDeg(windDir));
+			}
+			out.surfaceHeight     = surf.tessellation.height;
+			out.surfaceShoreWidth = surf.tessellation.shoreWidth;
 			surfaceLevel += water::tessellatedHeight(trains, cameraPos.x, cameraPos.z, waveClock, surf.depth,
 			                                         surf.tessellation.height, surf.tessellation.shoreWidth);
 		}
@@ -1404,6 +1415,10 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	out.causticsDepth     = cau.depth;
 	return out;
 }
+
+static bool s_waterTessellationAvailable = false;
+void setWaterTessellationAvailable(bool available) { s_waterTessellationAvailable = available; }
+bool waterTessellationAvailable() { return s_waterTessellationAvailable; }
 
 float causticsFadeIn(float signedDepth)
 {

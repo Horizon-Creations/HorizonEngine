@@ -119,6 +119,12 @@ HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
                                                              const glm::vec3& cameraPos,
                                                              double waveClock = -1.0);
 
+// Whether the running backend draws a landscape's water tessellated (IRenderer::SupportsTessellation):
+// the backends tell it once they know. Without it the underwater camera query keeps the surface a
+// flat plane, because that is what the screen shows. Default: no (Metal, Software).
+HE_RENDERING_API void setWaterTessellationAvailable(bool available);
+HE_RENDERING_API bool waterTessellationAvailable();
+
 // The caustic net's waterline fade-in (Thema 185 Schritt 3): the body's causticsIntensity
 // is multiplied by this smoothstep of the camera's depth below the surface — 0 on the
 // line (and above it), 1 from kCausticsFadeInDepth metres down, continuous in between,

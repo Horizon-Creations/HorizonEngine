@@ -58,6 +58,18 @@ struct UnderwaterCameraData {
     // radians (water::windTurnDeg). The pass turns the net's wave frame by it; the
     // wind's strength is already in causticsScale (coarser sea) and causticsSpeed.
     float causticsWindTurn  = 0.0f;
+
+    // The tessellated surface for the post passes (UnderwaterSurfaceShared.h: heSurfaceH):
+    // `surfaceHeight` 0 = the flat plane at surfaceY (a landscape without tessellation, a backend
+    // that cannot do it); > 0 = the surface stands up to that multiple of the waves' own amplitude
+    // above `surfaceLevel`, per pixel. surfaceY then is the surface under the CAMERA (level + wave).
+    float surfaceHeight     = 0.0f;
+    float surfaceShoreWidth = 1.8f;
+    float surfaceLevel      = 0.0f;   // the flat level of the body (surfaceY when flat)
+    float waveLengthFactor  = 1.0f;   // the wind's factors on the three trains (water::windWaveFactors)
+    float waveSpeedFactor   = 1.0f;
+    float waveSteepFactor   = 1.0f;
+    float waveTurn          = 0.0f;   // radians (water::windTurnDeg)
 };
 
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so

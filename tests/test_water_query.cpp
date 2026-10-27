@@ -14,6 +14,7 @@
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/UnderwaterSurfaceShared.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <Physics/WaterWaves.h>
@@ -1147,10 +1148,28 @@ TEST_CASE("Tessellated surface: the per-body numbers travel with the scene and t
     const float flat = HE::queryUnderwaterCamera(world, below, clockSeconds).surfaceY;
     CHECK(flat == doctest::Approx(2.0f));
     tc.water.tessellation = true;
+    // A backend that cannot tessellate (Metal) draws the flat plane, so the query says flat too.
+    HE::setWaterTessellationAvailable(false);
+    CHECK(HE::queryUnderwaterCamera(world, below, clockSeconds).surfaceY == doctest::Approx(2.0f));
+    CHECK(HE::queryUnderwaterCamera(world, below, clockSeconds).surfaceHeight == 0.0f);
+    HE::setWaterTessellationAvailable(true);
     CHECK(HE::queryUnderwaterCamera(world, below, -1.0).surfaceY == doctest::Approx(2.0f));   // no clock: flat
     const water::WaveTrain trains[3] = { water::kWaveA, water::kWaveB, water::kWaveC };
     water::Surface s;
     REQUIRE(water::WaterIndex::build(world).surfaceAt(0.0f, 0.0f, 0.0, s));
     const float expected = 2.0f + water::tessellatedHeight(trains, 0.0, 0.0, clockSeconds, s.depth, p.height, p.shoreWidth);
-    CHECK(HE::queryUnderwaterCamera(world, below, clockSeconds).surfaceY == doctest::Approx(expected));
+    const UnderwaterCameraData cam = HE::queryUnderwaterCamera(world, below, clockSeconds);
+    CHECK(cam.surfaceY == doctest::Approx(expected));
+    // The passes get the description to evaluate the surface per pixel.
+    CHECK(cam.surfaceHeight == doctest::Approx(p.height));
+    CHECK(cam.surfaceShoreWidth == doctest::Approx(p.shoreWidth));
+    CHECK(cam.surfaceLevel == doctest::Approx(2.0f));
+    HE::setWaterTessellationAvailable(false);
+
+    // The shared shader text: the three base trains are spliced in and no token is left.
+    const std::string glsl = HE::underwaterSurfaceFunctions(HE::SurfaceLang::GLSL);
+    CHECK(glsl.find('@') == std::string::npos);
+    CHECK(glsl.find("vec2 xz") != std::string::npos);
+    CHECK(HE::underwaterSurfaceFunctions(HE::SurfaceLang::HLSL).find("float2 xz") != std::string::npos);
+    CHECK(glsl.find("14.0") != std::string::npos);    // kWaveA's wavelength
 }

@@ -41,3 +41,14 @@ Windows; maybe a per-body switch.
   local height; it does not follow the waves per pixel.
 Verified: he_tests water/underwater/engine materials; GL shots (open water gentle, beach flat). Not verified: the underwater
 effect by eye (clock sync between extract and draw is within a frame), other backends, per-body UI on screen.
+
+## Update: the underwater pass evaluates the surface PER PIXEL (OpenGL)
+`HorizonRendering/UnderwaterSurfaceShared.h` (`heSurfaceH`, CPU twin `water::tessellatedHeight`) is spliced into the GL
+combined caustics+fog shader. Fog: camera, the pixel's point and the near-plane point each compare against the surface
+height AT their xz, the ray's crossing is refined in 3 steps; caustics: depth below the surface at the pixel. Uniforms
+`uSurfWave` / `uSurfParams` (from `UnderwaterCameraData::surface*`, `wave*`); height 0 = the old flat plane bit for bit.
+`setWaterTessellationAvailable()` (set by GL/Vulkan/D3D at init) keeps Metal on the flat plane, since Metal draws it flat.
+Shot: camera under water, tess on: the waterline at the horizon is ragged instead of one straight line.
+NOT done: D3D11/D3D12/Vulkan keep the camera-local plane (no blind edits there, see memory; HlslSources.h fog/caustics and
+`postfx_underwaterfog.frag` need the same two vec4 + `heSurfaceH`; the Vulkan caustics push constants are full, 128 B).
+Metal: nothing to do until it tessellates.
