@@ -341,7 +341,7 @@ namespace
 	const char* const kPanels[] = {
 		"Scene", "World Outliner", "Details", "Content Browser", "Quick Settings",
 		"Console", "Performance Profiler", "Environment", "Collaboration",
-		"Source Control", "Audio Mixer", "Undo History", "Watch", "Planner",
+		"Source Control", "Undo History", "Watch", "Planner",
 	};
 
 	std::string lower(std::string v)

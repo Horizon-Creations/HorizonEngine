@@ -79,7 +79,6 @@
 #include "EditorHelp.h"                  // one scope per menu; the rows look themselves up
 #include "EditorDockState.h"             // "is this panel docked into the layout?"
 #include "PlayReportPanel.h"             // post-PIE warning/error report
-#include "AudioMixerPanel.h"             // Window > Audio Mixer window
 #include "UndoHistoryPanel.h"            // Window > Undo History window
 #include "HcWatchPanel.h"                // Window > Watch window (a stopped HorizonCode run's values)
 #include "TaskBoardPanel.h"              // Window > Task Board (the project's to-do list) + its chip jumps
@@ -266,8 +265,6 @@ static void drawTeamWindow(AppContext& ctx, bool& open)
 static bool s_showSourceControl = false;
 // Toggled by Window > Console (and Ctrl/Cmd+`); drives the log window.
 static bool s_showConsole = false;
-// Toggled by Window > Audio Mixer; drives the bus fader window.
-static bool s_showAudioMixer = false;
 // Toggled by Window > Undo History; drives the scene undo stack as a list.
 static bool s_showUndoHistory = false;
 // Toggled by Window > Watch; drives the window that shows what a HorizonCode run
@@ -303,7 +300,6 @@ static bool docsPanelOpener(const char* window)
 		{ "Team",                 &s_showTeam          },
 		{ "Source Control",       &s_showSourceControl },
 		{ "Console",              &s_showConsole       },
-		{ "Audio Mixer",          &s_showAudioMixer    },
 		{ "Undo History",         &s_showUndoHistory   },
 		{ "Watch",                &s_showWatch         },
 		{ "Scene 2",              &SecondaryViewportPanel::open(0) },
@@ -356,7 +352,6 @@ static PanelVisibilityPref s_panelPrefs[] = {
 	{ "Team",                 "PanelOpenTeam",          &s_showTeam          },
 	{ "Source Control",       "PanelOpenSourceControl", &s_showSourceControl },
 	{ "Console",              "PanelOpenConsole",       &s_showConsole       },
-	{ "Audio Mixer",          "PanelOpenAudioMixer",    &s_showAudioMixer    },
 	{ "Undo History",         "PanelOpenUndoHistory",   &s_showUndoHistory   },
 	{ "Watch",                "PanelOpenWatch",         &s_showWatch         },
 	// The secondary scene viewports: a Top view docked beside the Scene window
@@ -2859,9 +2854,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		EditorSettingsPanel::requestOpenProjectPage(ProjectSettingsPanel::requestedPage());
 	if (EditorSettingsPanel::takeOpenRequest())
 		openVirtualTab("Preferences", EditorSettingsPanel::kTabPath);
-	// The Audio ▸ Buses page's "Open Audio Mixer" — the flag is this file's.
-	if (ProjectSettingsPanel::takeAudioMixerRequest() && !s_showAudioMixer)
-		togglePanelWindow(s_showAudioMixer, "Audio Mixer");
 	auto openExportDialog = [&]() { ExportDialogPanel::open(ctx); };
 	// ── Entity editing ───────────────────────────────────────────────────────
 	// One predicate behind the Edit menu AND the keyboard, so a greyed-out menu
@@ -2998,7 +2990,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 		MacMenuBar::setToggleState(MC::ToggleTeam,          s_showTeam);
 		MacMenuBar::setToggleState(MC::ToggleSourceControl, s_showSourceControl);
 		MacMenuBar::setToggleState(MC::ToggleConsole,       s_showConsole);
-		MacMenuBar::setToggleState(MC::ToggleAudioMixer,    s_showAudioMixer);
 		MacMenuBar::setToggleState(MC::ToggleUndoHistory,   s_showUndoHistory);
 		MacMenuBar::setToggleState(MC::ToggleWatch,         s_showWatch);
 		MacMenuBar::setToggleState(MC::ToggleScene2,        SecondaryViewportPanel::open(0));
@@ -3148,7 +3139,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
 			case MC::ToggleSourceControl:
 				togglePanelWindow(s_showSourceControl, "Source Control"); break;
 			case MC::ToggleConsole:   togglePanelWindow(s_showConsole, "Console");            break;
-			case MC::ToggleAudioMixer: togglePanelWindow(s_showAudioMixer, "Audio Mixer");     break;
 			case MC::ToggleUndoHistory: togglePanelWindow(s_showUndoHistory, "Undo History");  break;
 			case MC::ToggleWatch:     togglePanelWindow(s_showWatch, "Watch");                break;
 			case MC::OpenTaskBoard:   if (ctx.projectLoaded) openPlannerTasks(HE::UUID{});  break;
@@ -3518,8 +3508,6 @@ void EditorUI::renderEditor(AppContext& ctx, float dt)
             togglePanelWindow(s_showTeam, "Team");
         if (EditorWidgets::menuItem("Source Control", nullptr, s_showSourceControl))
             togglePanelWindow(s_showSourceControl, "Source Control");
-        if (EditorWidgets::menuItem("Audio Mixer", nullptr, s_showAudioMixer))
-            togglePanelWindow(s_showAudioMixer, "Audio Mixer");
         if (EditorWidgets::menuItem("Undo History", nullptr, s_showUndoHistory))
             togglePanelWindow(s_showUndoHistory, "Undo History");
         if (EditorWidgets::menuItem("Watch", nullptr, s_showWatch))
@@ -4475,9 +4463,6 @@ void EditorUI::renderOverlays(AppContext& ctx, float dt)
 	// FLOATING the console keeps working there — which is where renderEditor has
 	// already returned.
 	ConsolePanel::DrawConsoleWindow(ctx, s_showConsole);
-	// The mixer too: a fader is moved while a script tab is in front and the
-	// scene plays behind it.
-	AudioMixerPanel::DrawAudioMixerWindow(ctx, s_showAudioMixer);
 	// The undo history too: a row is clicked while a script tab is in front and
 	// the scene it rewinds is behind it.
 	UndoHistoryPanel::DrawUndoHistoryWindow(ctx, s_showUndoHistory);

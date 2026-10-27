@@ -240,7 +240,6 @@ TEST_CASE("editor help: the interface's own controls resolve under their panel")
 		{ "Console",         "Show all categories" },
 		{ "Console",         "Reset filters" },
 		{ "Console",         "Latest" },
-		{ "Window",          "Audio Mixer" },
 		// The mixer's strips are data-labelled (a bus name over each fader), so
 		// every control in it asks by key; these are those keys under the
 		// scope the window pushes.

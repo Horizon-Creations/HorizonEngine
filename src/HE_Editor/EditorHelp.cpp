@@ -2204,10 +2204,6 @@ namespace
 	  "Everything the engine logged this session. The first place to look when "
 	  "something did not happen.",
 	  "Ctrl+`", "advanced#diagnostics" },
-	{ "Window/Audio Mixer", "",
-	  "The project's audio buses as fader strips: master, music, sfx and "
-	  "whatever else you add, with mute and solo for listening.",
-	  "", "systems#audio" },
 	{ "Window/Undo History", "",
 	  "Every step Undo can still take back, as a list with the current state "
 	  "marked. Click a row to jump straight there — several steps in one go, "
@@ -5102,12 +5098,6 @@ namespace
 	  "Play keep absolute coordinates. 5 000–10 000 m is a good radius.",
 	  "", "systems#physics" },
 	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
-	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
-	  "Opens the mixer window, where the project's buses are made and their "
-	  "faders sit. Buses are a project setting like the rest of this tab — saved "
-	  "in the .heproj and shipped with the build — but a fader is something you "
-	  "move while a scene plays, which is why they have a window and not a page.",
-	  "", "systems#audio" },
 	// ── Physics ▸ Collision Layers ───────────────────────────────────────────
 	{ "Collision Layers/Name", "Layer name",
 	  "What this channel is called, everywhere it is offered. The NUMBER is what "
@@ -8421,7 +8411,7 @@ namespace
 	{ "Audio Editor/Bus", "Mixer Bus",
 	  "The Audio Mixer bus this clip plays through, wherever the game plays it: "
 	  "its fader, mute and solo apply to it. The list is the project's own, the "
-	  "one Window > Audio Mixer edits. An Audio Source whose Bus field names a "
+	  "one Project Settings > Audio Buses edits. An Audio Source whose Bus field names a "
 	  "bus still overrides this for that source. When the bus has since been "
 	  "removed or renamed in the mixer, it is shown as missing and the clip plays "
 	  "on Master; the name is kept, so the clip finds the bus again if it comes "
@@ -9767,11 +9757,6 @@ namespace
 	  "Everything the engine logged this session — warnings, errors, script "
 	  "output. The first place to look when something did not happen.",
 	  "Ctrl+`", "advanced#diagnostics" },
-	{ "panel.audio-mixer", "Audio Mixer",
-	  "The project's audio buses as fader strips, with mute and solo. The "
-	  "buses and their levels are saved with the project; a source's Bus field "
-	  "names one of them.",
-	  "", "systems#audio" },
 	{ "panel.profiler", "Performance Profiler",
 	  "Where the frame time goes: a live CPU and GPU readout, and captures that "
 	  "break a single frame down pass by pass.",

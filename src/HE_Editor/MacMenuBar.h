@@ -82,7 +82,7 @@ namespace MacMenuBar
 		SetViewPreset, ToggleOrthographic,
 		// ── Window: everything that opens a panel or a tab ──
 		ToggleConsole, ToggleProfiler, ToggleEnvironment, ToggleCollab, ToggleTeam,
-		ToggleSourceControl, ToggleAudioMixer, ToggleUndoHistory, ToggleWatch,
+		ToggleSourceControl, ToggleUndoHistory, ToggleWatch,
 		OpenTaskBoard,
 		// Window ▸ Scene 2 / 3 / 4, the secondary scene viewports. Game-only
 		// like the grid: an application has no level to look at from above.

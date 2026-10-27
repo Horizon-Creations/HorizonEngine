@@ -1080,7 +1080,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			else if (!buses)
 				ImGui::TextDisabled("Open a project to choose one of its mixer buses.");
 			else if (buses->buses.empty())
-				ImGui::TextDisabled("The project has no buses yet: add them in Window > Audio Mixer.");
+				ImGui::TextDisabled("The project has no buses yet: add them in Project Settings > Audio Buses.");
 			else
 				ImGui::TextDisabled("An Audio Source with a Bus of its own still overrides this.");
 		}

@@ -52,8 +52,8 @@ real geometry. For a stereo-speaker game with simple levels miniaudio is enough.
   * `AudioEngine::setSpatialBackend / spatialBackend / requestedSpatialBackend /
     spatialBackendStatus / steamAudioCompiledIn`. Project setting
     `AudioBusConfig::spatialBackend` (JSON `"spatial": "steamaudio"`, absent =
-    miniaudio), applied by `applyBusConfig`. Audio Mixer: checkbox "Steam Audio
-    (HRTF)", greyed out in a build without the SDK.
+    miniaudio), applied by `applyBusConfig`. Audio mixer (now Project Settings ▸ Audio Buses; the
+    Window ▸ Audio Mixer window is gone): checkbox "Steam Audio (HRTF)", greyed out in a build without the SDK.
 * Tests: `tests/test_audio_formats.cpp` (FLAC fixture `tests/fixtures/tone_flac.h`).
 
 ## Handoff
@@ -101,3 +101,8 @@ build lacks the SDK); default ON for editor trees, OFF/omitted by flavour for ap
 3. Windows/Linux: copy `libphonon` in `package_macos.sh`-style packaging scripts
    (macOS bundle: the dylib needs to sit beside `libHorizonEngine`; its install name is `@rpath/…`).
 4. Pip-free MP3 fixture with real signal, if an encoder becomes available.
+
+**Update**: the Audio Mixer moved from its own window into Project Settings ▸ Audio Buses
+(`AudioMixerPanel::DrawAudioMixer`, drawn by `drawAudioBusesPage`); the Window-menu entry, Mac menu
+item, panel-table row and help rows are removed. Built (HorizonEditor links), related tests green;
+the page was not looked at on screen.

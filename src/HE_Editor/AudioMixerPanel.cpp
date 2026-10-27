@@ -212,25 +212,19 @@ StripResult drawStrip(const char* id, const char* title, float* volume, bool* mu
 
 } // namespace
 
-void DrawAudioMixerWindow(AppContext& ctx, bool& open)
+void DrawAudioMixer(AppContext& ctx)
 {
 	// Every control here is looked up as "Audio Mixer/<its label>".
 	HE::Ed::Help::Scope helpScope("Audio Mixer");
-	if (!open) return;
-
-	ImGui::SetNextWindowSize(ImVec2(560.0f, 340.0f), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Audio Mixer", &open)) { ImGui::End(); return; }
 
 	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
 	{
 		ImGui::TextDisabled("No project is open.");
-		ImGui::End();
 		return;
 	}
 	if (!ctx.audioEngine || !ctx.audioEngine->isInitialized())
 	{
 		ImGui::TextDisabled("The audio device could not be opened — there is nothing to mix.");
-		ImGui::End();
 		return;
 	}
 	ProjectData&        p     = ctx.projectManager->currentProject();
@@ -422,12 +416,10 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's audio buses", p.path);
 	}
-
-	ImGui::End();
 }
 
 #else
-void DrawAudioMixerWindow(AppContext&, bool&) {}
+void DrawAudioMixer(AppContext&) {}
 #endif
 
 } // namespace AudioMixerPanel

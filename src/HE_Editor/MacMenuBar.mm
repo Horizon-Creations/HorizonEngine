@@ -432,7 +432,6 @@ void install()
 		heAddToggle(window, @"Collaboration",         C::ToggleCollab,        false);
 		heAddToggle(window, @"Team",                  C::ToggleTeam,          false);
 		heAddToggle(window, @"Source Control",        C::ToggleSourceControl, true);
-		heAddToggle(window, @"Audio Mixer",           C::ToggleAudioMixer,    false);
 		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);
 		heAddToggle(window, @"Watch",                 C::ToggleWatch,         false);
 		heAddItem(window, @"Task Board",              C::OpenTaskBoard,       nil, 0, true);
