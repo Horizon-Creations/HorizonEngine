@@ -23,10 +23,10 @@ namespace
 	// way in; below the top level a position is relative to the parent and
 	// passes as it is. The interpolation buffer keeps what came off the wire, so
 	// a shift between two samples does not bend the path between them.
-	glm::dvec3 wireOrigin(const HorizonWorld* world, entt::entity e)
+	glm::dvec3 wireOrigin(HorizonWorld* world, entt::entity e)
 	{
 		if (!world) return glm::dvec3(0.0);
-		const auto* h = const_cast<HorizonWorld*>(world)->registry().try_get<HierarchyComponent>(e);
+		const auto* h = world->registry().try_get<HierarchyComponent>(e);
 		return h && h->parent == world->rootEntity() ? world->origin() : glm::dvec3(0.0);
 	}
 	glm::vec3 toWire(const glm::vec3& local, const glm::dvec3& origin)
