@@ -1747,8 +1747,8 @@ constant float kTrains[12] = { @TRAINS@ };
 constant int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
 constant float kChopSteep  = 0.05;
 constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
-constant float kGain       = 0.12;   // line brightness per unit of squeeze above 1
-constant float kMaxLine    = 0.5;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
+constant float kGain       = 0.05;   // line brightness per unit of squeeze above 1
+constant float kMaxLine    = 0.2;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
 constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
 constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
