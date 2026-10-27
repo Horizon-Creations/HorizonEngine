@@ -213,6 +213,29 @@ TEST_CASE("Water ripples: a young ring of the same kind close by is refreshed, n
     REQUIRE(h.count() == 1);
     CHECK(h.at(0).strength == doctest::Approx(nowStrength));
 
+    // A newcomer that is itself part-faded (age > 0): the ring that is stronger NOW wins, and
+    // what is stored must read as that strength at the age the merge leaves (the newcomer's).
+    // Old: 0.5 faded 0.1 s = 0.5 * exp(-0.1/1.4) = 0.4656. Newcomer: 0.6 at age 0.5 = 0.6 * exp(-0.5/1.4)
+    // = 0.4198, so the old ring is stronger even though 0.6 > 0.4656 raw.
+    RippleField a;
+    a.add(ring(0.0f, 0.0f, 0.5f));
+    a.advance(0.1f);
+    const float oldNow = RippleField::effectiveStrength(a.at(0));
+    a.add(ring(0.1f, 0.0f, 0.6f, WaterRippleImpact, 0.5f, 0.5f));
+    REQUIRE(a.count() == 1);
+    CHECK(a.at(0).age == doctest::Approx(0.5f));
+    CHECK(RippleField::effectiveStrength(a.at(0)) == doctest::Approx(oldNow));
+
+    // And the other way round: the faded newcomer is the stronger one, and its own strength is kept.
+    // Old: 0.2 faded 0.1 s = 0.1862. Newcomer: 0.9 at age 0.2 = 0.9 * exp(-0.2/1.4) = 0.7802.
+    RippleField b;
+    b.add(ring(0.0f, 0.0f, 0.2f));
+    b.advance(0.1f);
+    b.add(ring(0.1f, 0.0f, 0.9f, WaterRippleImpact, 0.5f, 0.2f));
+    REQUIRE(b.count() == 1);
+    CHECK(b.at(0).strength == doctest::Approx(0.9f));
+    CHECK(RippleField::effectiveStrength(b.at(0)) == doctest::Approx(0.9f * std::exp(-0.2f / RippleField::kDecayTime)));
+
     // Each of these is a separate ring: another kind, too far, too old.
     RippleField s;
     s.add(ring(0.0f, 0.0f, 0.5f, WaterRippleImpact));
