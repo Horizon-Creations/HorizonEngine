@@ -6,6 +6,7 @@
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TransformHierarchy.h"   // worldPositionOf — see update()
+#include <Diagnostics/EngineProfiler.h>
 #include <glm/glm.hpp>
 
 void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
@@ -98,6 +99,7 @@ void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
 
         if (lod.current != chosen || mesh.meshAssetId != chosenId)
         {
+            meshStreamCounters().lodSwitches.fetch_add(1, std::memory_order_relaxed);
             lod.current        = chosen;
             mesh.meshAssetId   = chosenId;
             mesh.dirty         = true;

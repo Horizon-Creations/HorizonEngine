@@ -3285,6 +3285,8 @@ struct D3D11RendererImpl
         if (!cm) return bvh;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
         if (!asset || asset->indices.empty()) return bvh;
+        meshStreamCounters().blasBuilds.fetch_add(1, std::memory_order_relaxed);
+        meshStreamCounters().blasTris.fetch_add(asset->indices.size() / 3, std::memory_order_relaxed);
 
         // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
         // (position at offset 0), loose = tightly packed 3-float positions.
@@ -3433,6 +3435,7 @@ struct D3D11RendererImpl
                             inst.baseColor.r, inst.baseColor.g, inst.baseColor.b);
         }
         giInstanceCount = static_cast<int>(giInstancesCpu.size());
+        meshStreamCounters().giInstances.store(static_cast<uint32_t>(giInstanceCount), std::memory_order_relaxed);
         if (giInstanceCount == 0) return;
 
         auto makeSB = [&](const void* data, UINT count, UINT strideBytes,
@@ -4947,6 +4950,9 @@ struct D3D11RendererImpl
     void uploadBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
                        const std::vector<uint32_t>& indices)
     {
+        meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+        meshStreamCounters().meshUploadBytes.fetch_add(
+            interleaved.size() * sizeof(float) + indices.size() * sizeof(uint32_t), std::memory_order_relaxed);
         D3D11_BUFFER_DESC vbd{};
         vbd.ByteWidth = static_cast<UINT>(interleaved.size() * sizeof(float));
         vbd.Usage     = D3D11_USAGE_IMMUTABLE;
@@ -5916,6 +5922,8 @@ struct D3D11RendererImpl
             uiTexCache.erase(key);
         }
         pendingTexInval.clear();
+        meshStreamCounters().meshInvalidations.fetch_add(
+            static_cast<uint32_t>(pendingMeshInval.size()), std::memory_order_relaxed);
         for (const HE::UUID& id : pendingMeshInval)
         {
             meshCache.erase(id);

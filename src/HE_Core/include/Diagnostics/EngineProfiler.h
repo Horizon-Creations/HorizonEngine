@@ -105,6 +105,41 @@ struct ProfSceneCounters
 	uint32_t streamingInFlight = 0;   // async asset loads not yet drained
 };
 
+// Mesh-streaming counters: how often a landscape's meshes are rebuilt on the CPU and
+// re-created on the GPU. Producers sit in HE_Scene (TerrainSystem, LODSystem) and in
+// the renderer backends, so the live totals live behind one HE_API function (one
+// instance across the DLLs). Relaxed atomics: the producers are on the main thread
+// today, the atomics only keep a future worker thread honest.
+struct ProfMeshStream
+{
+	uint32_t chunkBuilds = 0, tessBuilds = 0, tessReleases = 0, stitchBuilds = 0;
+	uint32_t lodSwitches = 0;
+	uint64_t meshReplaceBytes = 0;     // CPU-side mesh data replaced by the terrain systems
+	uint32_t meshUploads = 0;          // GPU vertex/index buffer creations
+	uint64_t meshUploadBytes = 0;
+	uint32_t meshInvalidations = 0;    // GPU meshes dropped because their asset changed
+	uint32_t gpuStalls = 0;            // full-GPU waits caused by a drain (Vulkan deviceWaitIdle)
+	uint32_t blasBuilds = 0;           // CPU BVH / BLAS builds
+	uint64_t blasTris = 0;
+	uint32_t giInstances = 0;          // gauge: instances handed to the GI scene last frame
+};
+
+struct HE_API MeshStreamCounters
+{
+	std::atomic<uint32_t> chunkBuilds{0}, tessBuilds{0}, tessReleases{0}, stitchBuilds{0};
+	std::atomic<uint32_t> lodSwitches{0};
+	std::atomic<uint64_t> meshReplaceBytes{0};
+	std::atomic<uint32_t> meshUploads{0};
+	std::atomic<uint64_t> meshUploadBytes{0};
+	std::atomic<uint32_t> meshInvalidations{0}, gpuStalls{0}, blasBuilds{0};
+	std::atomic<uint64_t> blasTris{0};
+	std::atomic<uint32_t> giInstances{0};
+
+	// Read the totals since the last call and zero them (giInstances is a gauge: kept).
+	ProfMeshStream take();
+};
+HE_API MeshStreamCounters& meshStreamCounters();
+
 // Coarse per-frame counters. Cheap to gather; filled from the renderer + scene.
 struct ProfRenderStats
 {
@@ -119,6 +154,7 @@ struct ProfRenderStats
 	// in the frame and by a different producer — see setRenderStats on why the two
 	// are merged rather than assigned wholesale).
 	ProfSceneCounters scene;
+	ProfMeshStream meshStream;   // taken (and reset) by setRenderStats, not pushed
 };
 
 // Everything captured for a single rendered frame.

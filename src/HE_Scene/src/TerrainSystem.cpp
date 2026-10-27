@@ -16,6 +16,7 @@
 #include "HorizonScene/WaterLake.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
+#include <Diagnostics/EngineProfiler.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Renderer/IRenderer.h>
@@ -247,6 +248,15 @@ namespace
         return key != 0 && static_cast<uint8_t>(key & 0xFF) == LODComponent::kRefined;
     }
 
+    // Mesh-streaming counters (EngineProfiler.h): CPU-side mesh data handed to the
+    // content manager by the terrain systems.
+    void countMeshReplace(const StaticMeshAsset& m)
+    {
+        meshStreamCounters().meshReplaceBytes.fetch_add(
+            m.vertices.size() * sizeof(m.vertices[0]) + m.indices.size() * sizeof(m.indices[0]),
+            std::memory_order_relaxed);
+    }
+
     // Unhook the refined level from the chunk's LODComponent and empty its
     // mesh. The UUID stays registered and owned, so coming back is a replace.
     void emptyTessLevel(entt::registry& reg, ContentManager& cm, IRenderer* renderer,
@@ -275,6 +285,7 @@ namespace
         {
             StaticMeshAsset empty;
             empty.type = HE::AssetType::StaticMesh;
+            meshStreamCounters().tessReleases.fetch_add(1, std::memory_order_relaxed);
             cm.replaceStaticMesh(cc.tessMeshId, std::move(empty));
             if (renderer) renderer->InvalidateMesh(cc.tessMeshId);
         }
@@ -289,6 +300,8 @@ namespace
                        float maxDistance)
     {
         auto& reg = world.registry();
+        meshStreamCounters().tessBuilds.fetch_add(1, std::memory_order_relaxed);
+        countMeshReplace(mesh);
         if (cc.tessMeshId != HE::UUID{} && cm.getStaticMesh(cc.tessMeshId) != nullptr)
         {
             cm.replaceStaticMesh(cc.tessMeshId, std::move(mesh));
@@ -351,6 +364,8 @@ namespace TerrainSystem
             StaticMeshAsset m = generateTerrainChunkMeshLOD(field, res, tc.sizeX, tc.sizeZ,
                                                             u0, v0, u1, v1, verts, tc.uvTiling,
                                                             gridCache);
+            meshStreamCounters().chunkBuilds.fetch_add(1, std::memory_order_relaxed);
+            countMeshReplace(m);
             HE::UUID id;
             if (haveLevels && cm.getStaticMesh(lod->levels[k].meshId) != nullptr)
             {
@@ -1062,6 +1077,8 @@ namespace TerrainSystem
                             cc.stitchKey = 0;
                             if (!m.vertices.empty())
                             {
+                                meshStreamCounters().stitchBuilds.fetch_add(1, std::memory_order_relaxed);
+                                countMeshReplace(m);
                                 if (cc.stitchMeshId != HE::UUID{} &&
                                     cm.getStaticMesh(cc.stitchMeshId) != nullptr)
                                 {

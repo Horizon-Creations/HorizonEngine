@@ -205,6 +205,7 @@ void EngineProfiler::doStart()
 	// worker only reads it after the acquire load in beginScope. That edge is the
 	// whole happens-before argument; keep new plain state on this side of it.
 	m_generation.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().take();   // the capture's first frame starts from zero
 	m_recording.store(true, std::memory_order_release);
 	if (allocProbe().read)
 	{
@@ -441,9 +442,37 @@ size_t EngineProfiler::timelineDroppedSpans() const
 // earlier in this same frame by the world tick (a different producer at a different
 // point in the loop); assigning the whole struct here would zero them every frame,
 // which is precisely how entities/lights/particles stayed 0 in every dump until v3.
+MeshStreamCounters& meshStreamCounters()
+{
+	static MeshStreamCounters c;
+	return c;
+}
+
+ProfMeshStream MeshStreamCounters::take()
+{
+	ProfMeshStream o;
+	o.chunkBuilds = chunkBuilds.exchange(0, std::memory_order_relaxed);
+	o.tessBuilds = tessBuilds.exchange(0, std::memory_order_relaxed);
+	o.tessReleases = tessReleases.exchange(0, std::memory_order_relaxed);
+	o.stitchBuilds = stitchBuilds.exchange(0, std::memory_order_relaxed);
+	o.lodSwitches = lodSwitches.exchange(0, std::memory_order_relaxed);
+	o.meshReplaceBytes = meshReplaceBytes.exchange(0, std::memory_order_relaxed);
+	o.meshUploads = meshUploads.exchange(0, std::memory_order_relaxed);
+	o.meshUploadBytes = meshUploadBytes.exchange(0, std::memory_order_relaxed);
+	o.meshInvalidations = meshInvalidations.exchange(0, std::memory_order_relaxed);
+	o.gpuStalls = gpuStalls.exchange(0, std::memory_order_relaxed);
+	o.blasBuilds = blasBuilds.exchange(0, std::memory_order_relaxed);
+	o.blasTris = blasTris.exchange(0, std::memory_order_relaxed);
+	o.giInstances = giInstances.load(std::memory_order_relaxed);
+	return o;
+}
+
 void EngineProfiler::setRenderStats(const ProfRenderStats& s)
 {
+	// Taken every frame, recording or not, so a capture starts from a clean frame.
+	const ProfMeshStream ms = meshStreamCounters().take();
 	if (!m_recording) return;
+	m_current.stats.meshStream     = ms;
 	m_current.stats.drawCalls      = s.drawCalls;
 	m_current.stats.triangles      = s.triangles;
 	m_current.stats.visibleObjects = s.visibleObjects;
@@ -570,6 +599,13 @@ json buildFrameDetails(const std::vector<ProfFrameRecord>& recorded)
 			{"scripts", s.scene.scripts},
 			{"streamingInFlight", s.scene.streamingInFlight},
 			{"vramUsedMB", s.vramUsedMB}, {"vramBudgetMB", s.vramBudgetMB},
+			{"chunkBuilds", s.meshStream.chunkBuilds}, {"tessBuilds", s.meshStream.tessBuilds},
+			{"tessReleases", s.meshStream.tessReleases}, {"stitchBuilds", s.meshStream.stitchBuilds},
+			{"lodSwitches", s.meshStream.lodSwitches}, {"meshReplaceBytes", s.meshStream.meshReplaceBytes},
+			{"meshUploads", s.meshStream.meshUploads}, {"meshUploadBytes", s.meshStream.meshUploadBytes},
+			{"meshInvalidations", s.meshStream.meshInvalidations}, {"gpuStalls", s.meshStream.gpuStalls},
+			{"blasBuilds", s.meshStream.blasBuilds}, {"blasTris", s.meshStream.blasTris},
+			{"giInstances", s.meshStream.giInstances},
 		};
 		if (!s_allocByFrame.empty())
 		{
