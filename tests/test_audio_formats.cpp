@@ -254,6 +254,41 @@ TEST_CASE("AudioBusConfig: the spatial backend is a project setting that default
 	CHECK(odd.spatialBackend == HE::AudioSpatialBackend::Miniaudio);
 }
 
+TEST_CASE("AudioBusConfig: the Steam Audio options are written only when on and survive a round trip")
+{
+	HE::AudioBusConfig cfg;
+	nlohmann::json none;
+	cfg.toJson(none);
+	CHECK_FALSE(none.contains("steam"));
+
+	cfg.steam.occlusion = true;
+	cfg.steam.pathing   = true;
+	CHECK_FALSE(cfg.isDefault());
+	nlohmann::json j;
+	cfg.toJson(j);
+	REQUIRE(j.contains("steam"));
+	CHECK(j["steam"].contains("occlusion"));
+	CHECK_FALSE(j["steam"].contains("airAbsorption"));
+
+	HE::AudioBusConfig back;
+	back.fromJson(j);
+	CHECK(back.steam == cfg.steam);
+	CHECK_FALSE(back.steam.airAbsorption);
+	CHECK_FALSE(back.steam.reflections);
+
+	// Junk values read as off.
+	HE::AudioBusConfig odd;
+	odd.fromJson(nlohmann::json{ { "steam", { { "occlusion", "yes" }, { "reflections", 1 } } } });
+	CHECK_FALSE(odd.steam.any());
+
+	// The engine keeps the ask whatever the backend does.
+	AudioEngine engine;
+	REQUIRE(engine.init(true));
+	engine.applyBusConfig(cfg);
+	CHECK(engine.steamOptions() == cfg.steam);
+	engine.shutdown();
+}
+
 // ─── Steam Audio ─────────────────────────────────────────────────────────────
 
 TEST_CASE("listenerRelativeDirection puts a source in the listener's frame")
@@ -467,5 +502,71 @@ TEST_CASE("AudioEngine: with Steam Audio active a spatial voice is rendered thro
 		CHECK(engine.readMixedFrames(mix.data(), 4096) == 4096);
 		engine.stop(h);
 	}
+	engine.shutdown();
+}
+
+namespace
+{
+	// One second of a mono 16-bit sine at `hz`, looped by the caller.
+	std::vector<uint8_t> sinePcm(float hz)
+	{
+		std::vector<uint8_t> pcm(48000 * 2);
+		for (int i = 0; i < 48000; ++i)
+		{
+			const int16_t v = static_cast<int16_t>(12000.0f * std::sin(2.0f * 3.14159265f * hz * static_cast<float>(i) / 48000.0f));
+			std::memcpy(pcm.data() + static_cast<size_t>(i) * 2, &v, 2);
+		}
+		return pcm;
+	}
+
+	// Mixed energy (both ears) of a looped voice at (x,0,0), listener at the origin looking down -Z.
+	double voiceEnergy(AudioEngine& engine, const std::vector<uint8_t>& pcm, float x)
+	{
+		const uint64_t h = engine.playSpatial(pcm, 48000, 1, 1.0f, 1.0f, true, x, 0.0f, 0.0f, 1.0f, 1000.0f, "",
+		                                      AudioAttenuation::None, 1.0f);
+		REQUIRE(h != 0);
+		std::vector<float> mix(2 * 4096);
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);   // settle
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);
+		double e = 0.0;
+		for (float v : mix) e += static_cast<double>(v) * v;
+		engine.stop(h);
+		return e;
+	}
+}
+
+TEST_CASE("Steam Audio option: air absorption dulls a far voice's highs and leaves its lows")
+{
+	if (!HE::SteamAudio::compiledIn()) return;
+
+	AudioEngine engine;
+	REQUIRE(engine.init(true));
+	engine.setListenerTransform(0, 0, 0, 0, 0, -1, 0, 1, 0);
+	INFO(engine.spatialBackendStatus());
+	REQUIRE(engine.setSpatialBackend(HE::AudioSpatialBackend::SteamAudio));
+
+	const std::vector<uint8_t> low  = sinePcm(150.0f);
+	const std::vector<uint8_t> high = sinePcm(6000.0f);
+
+	// Off: distance changes nothing (attenuation None), so a far voice is as loud as a near one.
+	const double lowNear0 = voiceEnergy(engine, low, 2.0f),  lowFar0 = voiceEnergy(engine, low, 150.0f);
+	const double hiNear0  = voiceEnergy(engine, high, 2.0f), hiFar0  = voiceEnergy(engine, high, 150.0f);
+	CHECK(hiFar0 > 0.5 * hiNear0);
+	CHECK(lowFar0 > 0.5 * lowNear0);
+
+	// On: the far highs go, the far lows mostly stay.
+	HE::AudioSteamOptions opt;
+	opt.airAbsorption = true;
+	engine.setSteamOptions(opt);
+	const double lowNear = voiceEnergy(engine, low, 2.0f),  lowFar = voiceEnergy(engine, low, 150.0f);
+	const double hiNear  = voiceEnergy(engine, high, 2.0f), hiFar  = voiceEnergy(engine, high, 150.0f);
+	INFO("low near/far " << lowNear << " / " << lowFar << ", high near/far " << hiNear << " / " << hiFar);
+	CHECK(hiFar < 0.2 * hiNear);          // the highs lose most of their energy at 150 m
+	CHECK(lowFar > 0.5 * lowNear);        // the lows barely notice
+	CHECK(hiFar / hiNear < lowFar / lowNear);
+
+	// The option is read when a voice starts: turning it off again restores a new voice.
+	engine.setSteamOptions({});
+	CHECK(voiceEnergy(engine, high, 150.0f) > 0.5 * hiNear0);
 	engine.shutdown();
 }

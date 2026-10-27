@@ -44,6 +44,25 @@ struct HE_API AudioBusDef
 // project's, not the machine's) and the engine stays on miniaudio.
 enum class AudioSpatialBackend : uint8_t { Miniaudio = 0, SteamAudio = 1 };
 
+// What Steam Audio does on top of the HRTF, each its own switch. They only act while the
+// Steam Audio backend is active (and the build has it): without it they are stored and
+// ignored, the same rule as the backend choice itself. All off by default.
+struct HE_API AudioSteamOptions
+{
+    bool airAbsorption = false;   // high frequencies die with distance (a distant voice dulls)
+    bool occlusion     = false;   // geometry between source and listener dims and dulls the voice
+    bool reflections   = false;   // reverb from the scene's geometry
+    bool pathing       = false;   // sound finds its way around corners (needs baked probes)
+
+    bool any() const { return airAbsorption || occlusion || reflections || pathing; }
+    bool operator==(const AudioSteamOptions& o) const
+    {
+        return airAbsorption == o.airAbsorption && occlusion == o.occlusion &&
+               reflections == o.reflections && pathing == o.pathing;
+    }
+    bool operator!=(const AudioSteamOptions& o) const { return !(*this == o); }
+};
+
 struct HE_API AudioBusConfig
 {
     // In authoring order — the order the mixer shows them in, and the order the
@@ -57,6 +76,8 @@ struct HE_API AudioBusConfig
     // The project's choice of spatialiser (JSON key "spatial": "steamaudio";
     // absent = Miniaudio, so a project from before this reads and writes as it did).
     AudioSpatialBackend spatialBackend = AudioSpatialBackend::Miniaudio;
+    // The extra Steam Audio features (JSON key "steam", written only when one is on).
+    AudioSteamOptions   steam;
 
     // A default-constructed config is EMPTY on purpose: a project written
     // before buses existed must load as "no buses", and a source that names one
@@ -77,7 +98,7 @@ struct HE_API AudioBusConfig
     bool isDefault() const;
 
     // The same JSON shape on both sides of the road (.heproj and .hcfg):
-    // { "master": 1.0, "spatial": "steamaudio" (only when not the default), "buses": [ { "name": "Music", "volume": 0.8 }, … ] },
+    // { "master": 1.0, "spatial": "steamaudio" (only when not the default), "steam": { "airAbsorption": true, … } (only the ones that are on), "buses": [ { "name": "Music", "volume": 0.8 }, … ] },
     // a bus with an EQ also { …, "eq": { "enabled": true, "bands": [ … ] } }.
     void toJson(nlohmann::json& out) const;
     void fromJson(const nlohmann::json& in);

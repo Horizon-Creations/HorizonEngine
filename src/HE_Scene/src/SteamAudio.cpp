@@ -138,6 +138,11 @@ struct Api
     decltype(&iplBinauralEffectRelease) effectRelease = nullptr;
     decltype(&iplBinauralEffectApply)   effectApply = nullptr;
     decltype(&iplBinauralEffectReset)   effectReset = nullptr;
+    decltype(&iplDirectEffectCreate)    directCreate = nullptr;
+    decltype(&iplDirectEffectRelease)   directRelease = nullptr;
+    decltype(&iplDirectEffectApply)     directApply = nullptr;
+    decltype(&iplDirectEffectReset)     directReset = nullptr;
+    decltype(&iplAirAbsorptionCalculate) airCalc = nullptr;
 
     bool load(LibHandle h, std::string& error)
     {
@@ -150,6 +155,11 @@ struct Api
             { reinterpret_cast<void**>(&effectRelease),  "iplBinauralEffectRelease" },
             { reinterpret_cast<void**>(&effectApply),    "iplBinauralEffectApply" },
             { reinterpret_cast<void**>(&effectReset),    "iplBinauralEffectReset" },
+            { reinterpret_cast<void**>(&directCreate),   "iplDirectEffectCreate" },
+            { reinterpret_cast<void**>(&directRelease),  "iplDirectEffectRelease" },
+            { reinterpret_cast<void**>(&directApply),    "iplDirectEffectApply" },
+            { reinterpret_cast<void**>(&directReset),    "iplDirectEffectReset" },
+            { reinterpret_cast<void**>(&airCalc),        "iplAirAbsorptionCalculate" },
         };
         for (const auto& e : table)
         {
@@ -192,10 +202,15 @@ struct SteamAudio::Binaural::Impl
 {
     std::shared_ptr<SteamAudioCore> core;
     IPLBinauralEffect effect = nullptr;
+    IPLDirectEffect   direct = nullptr;   // optional: a voice without it just skips the stage
     int               frameSize = 0;
-    std::vector<float> left, right;
+    std::vector<float> left, right, directOut;
 
-    ~Impl() { if (effect) core->api.effectRelease(&effect); }
+    ~Impl()
+    {
+        if (direct) core->api.directRelease(&direct);
+        if (effect) core->api.effectRelease(&effect);
+    }
 };
 
 bool SteamAudio::compiledIn() { return true; }
@@ -291,6 +306,7 @@ std::unique_ptr<SteamAudio::Binaural> SteamAudio::createBinaural()
     b->m_impl->frameSize = m_impl->frameSize;
     b->m_impl->left.resize(static_cast<size_t>(m_impl->frameSize));
     b->m_impl->right.resize(static_cast<size_t>(m_impl->frameSize));
+    b->m_impl->directOut.resize(static_cast<size_t>(m_impl->frameSize));
     IPLBinauralEffectSettings es{};
     es.hrtf = m_impl->core->hrtf;
     if (m_impl->core->api.effectCreate(m_impl->core->context, &m_impl->core->audio, &es,
@@ -300,11 +316,26 @@ std::unique_ptr<SteamAudio::Binaural> SteamAudio::createBinaural()
         m_impl->error = "iplBinauralEffectCreate failed";
         return nullptr;
     }
+    IPLDirectEffectSettings ds{};
+    ds.numChannels = 1;
+    if (m_impl->core->api.directCreate(m_impl->core->context, &m_impl->core->audio, &ds,
+                                       &b->m_impl->direct) != IPL_STATUS_SUCCESS)
+        b->m_impl->direct = nullptr;   // the HRTF still works; direct-path options just do nothing
     return b;
 }
 
+void SteamAudio::Binaural::airAbsorption(float sx, float sy, float sz, float lx, float ly, float lz,
+                                         float out[3]) const
+{
+    out[0] = out[1] = out[2] = 1.0f;
+    if (!m_impl->core) return;
+    IPLAirAbsorptionModel model{};
+    model.type = IPL_AIRABSORPTIONTYPE_DEFAULT;
+    m_impl->core->api.airCalc(m_impl->core->context, { sx, sy, sz }, { lx, ly, lz }, &model, out);
+}
+
 bool SteamAudio::Binaural::process(const float* mono, float* stereoOut, int frames,
-                                   const SpatialDirection& direction)
+                                   const SpatialDirection& direction, const DirectParams* direct)
 {
     Impl& s = *m_impl;
     if (!s.effect || !mono || !stereoOut || frames <= 0 || frames % s.frameSize != 0)
@@ -322,6 +353,29 @@ bool SteamAudio::Binaural::process(const float* mono, float* stereoOut, int fram
         // The SDK reads the input through a table of channel pointers; the
         // mono block is passed in place (it never writes to its input).
         float* inPtr = const_cast<float*>(mono + base);
+        if (direct && s.direct && (direct->airAbsorption || direct->occlusion))
+        {
+            IPLDirectEffectParams dp{};
+            int flags = 0;
+            if (direct->airAbsorption) flags |= IPL_DIRECTEFFECTFLAGS_APPLYAIRABSORPTION;
+            if (direct->occlusion)     flags |= IPL_DIRECTEFFECTFLAGS_APPLYOCCLUSION | IPL_DIRECTEFFECTFLAGS_APPLYTRANSMISSION;
+            dp.flags               = static_cast<IPLDirectEffectFlags>(flags);
+            dp.transmissionType    = IPL_TRANSMISSIONTYPE_FREQDEPENDENT;
+            dp.distanceAttenuation = 1.0f;   // the voice node already applied the distance curve
+            dp.directivity         = 1.0f;
+            dp.occlusion           = direct->visibility;
+            for (int b = 0; b < 3; ++b)
+            {
+                dp.airAbsorption[b] = direct->airBands[b];
+                dp.transmission[b]  = direct->transmission[b];
+            }
+            float* dIn[1]  = { inPtr };
+            float* dOut[1] = { s.directOut.data() };
+            IPLAudioBuffer din { 1, s.frameSize, dIn };
+            IPLAudioBuffer dout{ 1, s.frameSize, dOut };
+            s.core->api.directApply(s.direct, &dp, &din, &dout);
+            inPtr = s.directOut.data();
+        }
         float* inCh[1]  = { inPtr };
         float* outCh[2] = { s.left.data(), s.right.data() };
         IPLAudioBuffer in { 1, s.frameSize, inCh };
@@ -339,6 +393,7 @@ bool SteamAudio::Binaural::process(const float* mono, float* stereoOut, int fram
 void SteamAudio::Binaural::reset()
 {
     if (m_impl->effect) m_impl->core->api.effectReset(m_impl->effect);
+    if (m_impl->direct) m_impl->core->api.directReset(m_impl->direct);
 }
 
 #else // !HE_HAVE_STEAM_AUDIO ───────────────────────────────────────────────────
@@ -367,7 +422,11 @@ const std::string& SteamAudio::lastError() const { return m_impl->error; }
 
 SteamAudio::Binaural::Binaural() = default;
 SteamAudio::Binaural::~Binaural() = default;
-bool SteamAudio::Binaural::process(const float*, float*, int, const SpatialDirection&) { return false; }
+bool SteamAudio::Binaural::process(const float*, float*, int, const SpatialDirection&, const DirectParams*) { return false; }
+void SteamAudio::Binaural::airAbsorption(float, float, float, float, float, float, float out[3]) const
+{
+    out[0] = out[1] = out[2] = 1.0f;
+}
 void SteamAudio::Binaural::reset() {}
 std::unique_ptr<SteamAudio::Binaural> SteamAudio::createBinaural() { return nullptr; }
 

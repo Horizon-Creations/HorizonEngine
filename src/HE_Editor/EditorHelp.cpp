@@ -3427,6 +3427,24 @@ namespace
 	  "loaded, the status beside it says why and the sound stays on the engine's "
 	  "own spatialiser.",
 	  "", "systems#audio" },
+	{ "Audio Mixer/Air absorption", "",
+	  "Distant 3D sounds lose their high frequencies, the way air swallows them: a far "
+	  "voice sounds duller, not only quieter. Needs Steam Audio (HRTF) switched on, and "
+	  "acts on 3D voices started while it is. Saved with the project.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Occlusion", "",
+	  "Geometry between a 3D voice and the listener dims and dulls it, like a wall "
+	  "does. Needs Steam Audio (HRTF) switched on. Saved with the project.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Reflections", "",
+	  "Adds reverb that follows the room the listener stands in. Needs Steam Audio "
+	  "(HRTF) switched on. Saved with the project.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Pathing", "",
+	  "Lets sound find its way around corners and through doors instead of being "
+	  "cut off by the wall. Needs Steam Audio (HRTF) switched on, and baked probe "
+	  "data in the scene. Saved with the project.",
+	  "", "systems#audio" },
 	{ "Audio Mixer/Name", "",
 	  "The name of the bus to add. It is what a source's Bus field and a "
 	  "script's Set Bus Volume refer to, so keep it short and spell it the same "

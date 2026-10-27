@@ -391,6 +391,25 @@ void DrawAudioMixer(AppContext& ctx)
 		ImGui::TextDisabled("%s", AudioEngine::steamAudioCompiledIn()
 			? audio.spatialBackendStatus().c_str()
 			: "not in this build");
+
+		// What Steam Audio adds on top of the HRTF. Only available while Steam Audio itself
+		// is: the build has it AND the project uses it (the boxes do nothing otherwise, so
+		// they are greyed rather than left to look as if they did).
+		const bool steamUsable = AudioEngine::steamAudioCompiledIn() &&
+		                         cfg.spatialBackend == HE::AudioSpatialBackend::SteamAudio;
+		ImGui::BeginDisabled(!steamUsable);
+		ImGui::Indent();
+		auto option = [&](const char* label, bool& value) {
+			bool v = value;
+			if (EditorWidgets::checkbox(label, &v)) { value = v; commit = true; }
+			EditorWidgets::helpForLabel(label);
+		};
+		option("Air absorption", cfg.steam.airAbsorption);
+		option("Occlusion", cfg.steam.occlusion);
+		option("Reflections", cfg.steam.reflections);
+		option("Pathing", cfg.steam.pathing);
+		ImGui::Unindent();
+		ImGui::EndDisabled();
 	}
 
 	if (!removeBus.empty())

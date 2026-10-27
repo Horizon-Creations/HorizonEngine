@@ -38,6 +38,19 @@ SpatialDirection listenerRelativeDirection(float dx, float dy, float dz,
                                            float fx, float fy, float fz,
                                            float ux, float uy, float uz);
 
+// What Steam Audio's direct effect does to a voice before it is spatialised: the
+// frequency-dependent part of the path from the source to the listener. Each switch is
+// one of the project's Steam Audio options; the numbers are the per-block result of
+// the simulation (air absorption from the distance, occlusion from the geometry).
+struct DirectParams
+{
+    bool  airAbsorption = false;
+    float airBands[3]   = { 1.0f, 1.0f, 1.0f };   // low / mid / high band gain, 0..1
+    bool  occlusion     = false;
+    float visibility    = 1.0f;                   // Steam Audio's "occlusion": 1 = clear path, 0 = fully blocked
+    float transmission[3] = { 1.0f, 1.0f, 1.0f }; // what gets through the blocker, per band
+};
+
 class SteamAudio
 {
 public:
@@ -74,9 +87,15 @@ public:
         // `frames` mono samples in, `frames` interleaved stereo frames out
         // (2 * frames floats). `frames` must be a non-zero multiple of the
         // SteamAudio frameSize — the effect works on whole blocks and a short
-        // one would shift its filter memory. False for anything else.
+        // one would shift its filter memory. False for anything else. `direct`
+        // (optional) runs the direct effect (air absorption, occlusion) on the
+        // voice first.
         bool process(const float* mono, float* stereoOut, int frames,
-                     const SpatialDirection& direction);
+                     const SpatialDirection& direction, const DirectParams* direct = nullptr);
+        // The air-absorption bands (low / mid / high, 0..1) for a source at
+        // (sx,sy,sz) and a listener at (lx,ly,lz), world metres, by Steam Audio's
+        // default model. All 1 (nothing absorbed) when it cannot say.
+        void airAbsorption(float sx, float sy, float sz, float lx, float ly, float lz, float out[3]) const;
         // Forget the filter memory (a voice restarting from the top).
         void reset();
 

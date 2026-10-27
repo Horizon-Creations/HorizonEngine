@@ -406,6 +406,8 @@ struct BinauralNode
     bool                                     nodeOk = false;
     std::unique_ptr<HE::SteamAudio::Binaural> fx;
     const SpatialListener*                   listener = nullptr;
+    // The project's Steam Audio options as they were when the voice started.
+    bool                                     airAbsorption = false;
 
     // Set by the game thread (setSoundPosition / setSoundAttenuation), read per block.
     std::atomic<float> src[3];
@@ -445,7 +447,16 @@ struct BinauralNode
             inBlock[i] *= gain + (g - gain) * (static_cast<float>(i + 1) / kSteamFrameSize);
         gain = g;
 
-        if (!fx || !fx->process(inBlock, outBlock, kSteamFrameSize, dir))
+        HE::DirectParams direct;
+        if (fx && airAbsorption)
+        {
+            direct.airAbsorption = true;
+            fx->airAbsorption(src[0].load(std::memory_order_relaxed), src[1].load(std::memory_order_relaxed),
+                              src[2].load(std::memory_order_relaxed),
+                              listener->pos[0].load(std::memory_order_relaxed), listener->pos[1].load(std::memory_order_relaxed),
+                              listener->pos[2].load(std::memory_order_relaxed), direct.airBands);
+        }
+        if (!fx || !fx->process(inBlock, outBlock, kSteamFrameSize, dir, &direct))
             for (int i = 0; i < kSteamFrameSize; ++i)   // never leave the voice silent on a failed block
                 outBlock[2 * i] = outBlock[2 * i + 1] = inBlock[i];
     }
@@ -577,6 +588,7 @@ struct AudioEngine::Impl
     HE::AudioSpatialBackend spatialRequested = HE::AudioSpatialBackend::Miniaudio;
     HE::AudioSpatialBackend spatialActive    = HE::AudioSpatialBackend::Miniaudio;
     std::string             spatialStatus    = "miniaudio";
+    HE::AudioSteamOptions   steamOptions;
 };
 
 // ─── AudioEngine ─────────────────────────────────────────────────────────────
@@ -778,6 +790,7 @@ void AudioEngine::applyBusConfig(const HE::AudioBusConfig& config)
     // logged) on every project reload and every Play.
     if (config.spatialBackend != m_impl->spatialRequested)
         setSpatialBackend(config.spatialBackend);
+    setSteamOptions(config.steam);
     for (const HE::AudioBusDef& def : config.buses)
     {
         if (!createBus(def.name, def.volume)) continue;   // createBus logged it
@@ -787,6 +800,9 @@ void AudioEngine::applyBusConfig(const HE::AudioBusConfig& config)
 }
 
 bool AudioEngine::steamAudioCompiledIn() { return HE::SteamAudio::compiledIn(); }
+
+void AudioEngine::setSteamOptions(const HE::AudioSteamOptions& options) { m_impl->steamOptions = options; }
+const HE::AudioSteamOptions& AudioEngine::steamOptions() const { return m_impl->steamOptions; }
 
 HE::AudioSpatialBackend AudioEngine::spatialBackend() const          { return m_impl->spatialActive; }
 HE::AudioSpatialBackend AudioEngine::requestedSpatialBackend() const { return m_impl->spatialRequested; }
@@ -1109,7 +1125,8 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
         else
         {
             bin->nodeOk   = true;
-            bin->listener = &m_impl->listener;
+            bin->listener      = &m_impl->listener;
+            bin->airAbsorption = m_impl->steamOptions.airAbsorption;
             bin->src[0] = spatial->x; bin->src[1] = spatial->y; bin->src[2] = spatial->z;
             snd->bin = std::move(bin);
         }

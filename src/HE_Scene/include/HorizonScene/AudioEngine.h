@@ -114,6 +114,11 @@ public:
     // One line for the UI/log: "Steam Audio 4.8.1 active", "Steam Audio not in
     // this build", "libphonon could not be loaded: …", or "miniaudio".
     std::string spatialBackendStatus() const;
+    // The extra Steam Audio features (air absorption, occlusion, reflections, pathing).
+    // Kept as asked even while the backend is off or missing; they act on voices started
+    // while the backend is active. applyBusConfig() passes the project's choice on.
+    void setSteamOptions(const HE::AudioSteamOptions& options);
+    const HE::AudioSteamOptions& steamOptions() const;
     // Whether this binary contains the Steam Audio backend at all.
     static bool steamAudioCompiledIn();
 
