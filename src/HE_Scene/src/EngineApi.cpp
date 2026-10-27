@@ -3151,7 +3151,7 @@ struct WatchEntry
 };
 
 std::vector<WatchEntry>&  watches()     { static std::vector<WatchEntry> w;  return w; }
-std::vector<std::string>& changeQueue() { static std::vector<std::string> q; return q; }
+std::deque<std::string>& changeQueue() { static std::deque<std::string> q; return q; }
 int&    nextWatchHandle() { static int h = 0;      return h; }
 double& watchAccum()      { static double a = 0.0; return a; }
 
@@ -3170,7 +3170,7 @@ void queueChange(std::string p)
     // One event per path per drain. A save that rewrites a file twice inside a
     // poll interval is one change to whoever asked, not two.
     for (const std::string& s : q) if (s == p) return;
-    if (q.size() >= 256) q.erase(q.begin());
+    if (q.size() >= 256) q.pop_front();
     q.push_back(std::move(p));
 }
 
@@ -3243,7 +3243,7 @@ bool takeChange(std::string& path)
     auto& q = changeQueue();
     if (q.empty()) return false;
     path = std::move(q.front());
-    q.erase(q.begin());
+    q.pop_front();
     return true;
 }
 
