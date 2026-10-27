@@ -3815,14 +3815,23 @@ std::string SceneSerializer::componentKeyOfText(const std::string& text)
 
 bool SceneSerializer::importComponentText(HorizonWorld& world, Entity entity, const std::string& text)
 {
-    const std::string key = componentKeyOfText(text);
-    if (key.empty()) return false;
+    // Inlined componentKeyOfText's validation so the envelope is parsed once,
+    // not once to find the key and once more to read its values.
+    if (text.size() < 2 || text.find(kComponentEnvelopeKey) == std::string::npos) return false;
+    const json envelope = json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (envelope.is_discarded() || !envelope.is_object()) return false;
+    const auto keyIt = envelope.find(kComponentEnvelopeKey);
+    const auto valIt = envelope.find(kComponentEnvelopeValues);
+    if (keyIt == envelope.end() || !keyIt->is_string()) return false;
+    if (valIt == envelope.end() || !valIt->is_object()) return false;
+    const std::string key = keyIt->get<std::string>();
+    if (!isClipboardComponentKey(key)) return false;
+
     auto& registry = world.registry();
     if (!registry.valid(entity)) return false;
-    const json envelope = json::parse(text, nullptr, /*allow_exceptions=*/false);
     // One block, restored the way a scene load restores it — so a pasted
     // component is exactly what a saved-and-reloaded one would be.
-    applyComponents(registry, entity, json{ { key, envelope[kComponentEnvelopeValues] } });
+    applyComponents(registry, entity, json{ { key, *valIt } });
     return true;
 }
 
