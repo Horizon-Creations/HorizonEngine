@@ -113,8 +113,13 @@ root motion actually moves those entities instead of only extracting-and-locking
 delta nobody applies), ticked 5 frames twice — once with `setParallelOverride(0)`,
 once with the pool — `boneMatrices` compared `memcmp`-equal, `TransformComponent`
 compared equal (with an explicit check that at least one root-motion entity actually
-moved, so the comparison cannot pass trivially at the default zero position), and the
-merged notify queues compared entry-for-entry (entity, name, kind) in order.
+moved, so the comparison cannot pass trivially at the default zero position — note
+the test calls `AnimationSystem::update` directly without `HE::rootMotionBeginFrame`,
+so `RootMotionComponent::appliedThisFrame` is never cleared between ticks and the
+move happens on frame 0 only, frames 1-4 take the "more than one animator produced
+root motion" guard and leave the position where frame 0 put it; the serial/parallel
+equality this test checks holds regardless), and the merged notify queues compared
+entry-for-entry (entity, name, kind) in order.
 
 ## 2. Verification
 
@@ -138,10 +143,15 @@ reported as if it were a small, nearly-complete suite. The correct invocation fo
 full run is **without** `--no-skip` (`he_tests.exe` alone), which lets doctest's own
 skip markers take effect and actually exercises all 5910 non-skipped cases. Re-run
 4 times that way: 3 were fully green (5910/5910); one showed 2 failures / 7 assertions
-that did not reproduce on any of the 3 retries — consistent with this machine's known
-pre-existing Windows flakes (clipboard/net/gamepad timing), not a regression from this
-step's changes, but not pinned down to a specific case either (the failing run's
-output was not captured to a file, only tailed).
+that did not reproduce (the failing run's output was not captured to a file that time,
+only tailed, so the specific case is unknown). Followed up with two targeted checks
+instead of guessing: `-tc="*setParallelOverride*"` (this step's own new
+serial-vs-pool test) run 20 times in a loop, all 20 green; `--source-file=*test_inspector_ui.cpp`
+(the known pre-existing clipboard flake per Schritt 3's baseline) run 5 times, all 5
+green. Neither isolates cleanly when run alone, which is consistent with either being
+a true flake (timing/focus-sensitive, as both known candidates are) but does not
+positively clear this step's animation change either — call the one failure
+**unattributed**, not "not a regression".
 
 DLL freshness checked by hash: `tests/HorizonScene.dll` beside `he_tests.exe` hashes
 identically to the just-built `src/HE_Scene/HorizonScene.dll` (lesson 107's stale-DLL
@@ -151,9 +161,14 @@ the post-build copy ran).
 **Backends:** `HorizonEditor`, `HorizonGame` and `he_tests` all built from the same
 CMake configure, which compiles D3D11/D3D12/Vulkan/OpenGL unconditionally on Windows
 (no Metal on this machine — see the warning posted to the topic, and §4). CI run
-[40530201379](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40530201379)
-covers the Mac/Metal and Linux compile + test legs; check its result separately (it
-was still running when this doc was written).
+[40538161931](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40538161931)
+(commit `6b75235f`, the corrected state of this branch) covers the Mac/Metal and
+Linux compile + test legs; check its result separately (it was still running when
+this doc was written — an earlier run, 40530201379 on `87be715c`, predates the test
+and comment corrections in §1/§2 below and is superseded). The macOS leg is also the
+only cross-compiler check of the terrain LOD bit-identity proof in §1 — Clang on
+Apple Silicon may fuse `a*b+c` into an FMA under default flags, which this MSVC run
+cannot rule out by itself.
 
 **Pixel A/B (foliage):** a real BEFORE deploy exists for this step (`out/deploy/Editor`
 copied to `C:/hb/before/deploy/Editor` before rebuilding) — the first time this topic
@@ -203,11 +218,20 @@ camera, median of 600, 3 repetitions each side):
 | BEFORE | 0.479 / 0.487 / 0.488 ms | 0.241 / 0.248 / 0.249 ms |
 | AFTER | 0.483 / 0.490 / 0.486 ms | 0.240 / 0.246 / 0.244 ms |
 
-**No measurable change** — within the run-to-run noise on both sides, as Schritt 5
-itself predicted ("small; allocator overhead only"). The straddler path this touches
-is cheap enough (1.9% of per-frame WORK when memoized, Schritt 5 §2 item 1) that one
-`vector` alloc/free per moving-camera bucket does not clear the noise floor at this
-instance count. Safe, no regression, correctly scoped as a low-priority item.
+**No measurable change — but checked why, not just reported it:** this bench's own
+`fol.layers` (`test_foliage_parallel.cpp:264-271`) carry no `.lods`, so every bucket
+is a "whole" (`FoliageExtract.cpp:470-477`) and `runStraddler`'s `if (!P.leveled)
+{...; return;}` early-out means **this bench never reaches `levelOf` at all** — the
+before/after numbers above are identical because the changed code path was not
+exercised, not because its cost is below the noise floor. The bench's `Landscape`
+fixture used by the *other* cases in this file (`test_foliage_parallel.cpp:57-73`)
+does give layers 1/2 `.lods` and does cross level boundaries with a moving camera —
+that is where `levelOf` actually runs, and "straddlers on the pool give the
+single-threaded result" (origin + rotated) is the correctness evidence for it,
+already green in the `*Foliage*` suite run above. No isolated BEFORE/AFTER timing
+exists for the leveled path specifically; Schritt 5's own estimate stands
+("small; allocator overhead only, not isolated in either run"). Safe, no regression,
+correctly scoped as the lowest-priority of the three algorithmic items.
 
 **#10 terrain LOD reuse** — `HorizonGame`, `s512_x4` scene, `HE_PROFILE_WARMUP=1
 HE_PROFILE_CAPTURE=5` (catches the one-time chunk build), `Terrain` scope, 2
@@ -224,8 +248,12 @@ consistent across both repetitions, slightly under Schritt 5's "~20-30%" estimat
 work — grid allocation, the skirt, triangle indices — that downsampling does not
 touch). Streaming/load-time only, not per-frame.
 
-**Animation parallelization** — `he_tests`, `HE_ANIM_BENCH=1`, same binary,
-`HE_ANIM_PARALLEL=0` (serial) vs the pool (default), p50 of 240 ticks:
+**Animation parallelization, clip-driven crowds** — `he_tests`, `HE_ANIM_BENCH=1`,
+same binary, `HE_ANIM_PARALLEL=0` (serial) vs the pool (default), p50 of 240 ticks.
+Scope note: only `AnimationSystem::update` (the plain `AnimatorComponent` clip
+driver, what Schritt 5 measured) was split this step —
+`AnimationStateMachineSystem` and `AnimationBlendSystem`, the usual drivers for a
+real character crowd (state machines, blends), are unchanged and still fully serial:
 
 | characters | serial (BEFORE path) | pool (AFTER) | speedup |
 |---|---|---|---|
@@ -235,12 +263,12 @@ touch). Streaming/load-time only, not per-frame.
 | 500 | 1.932 ms | 0.194 ms | **10.0×** |
 | 1000 | 3.860 ms | 0.331 ms | **11.7×** |
 
-At 1000 characters (a crowd scene) this is 3.53 ms of main-thread time per frame
-given back — far above either algorithmic item, and the one change in this step with
-headroom to actually move a frame budget. Small crowds (50) do not regress: the
-`parallel_for` call's `minGrain=32` keeps it on the calling thread until there is
-enough work to be worth dispatching, matching the existing `HE_FOLIAGE_PARALLEL`
-convention's own grain logic.
+At 1000 clip-driven characters this is 3.53 ms of main-thread time per frame given
+back — far above either algorithmic item, and the one change in this step with
+headroom to actually move a frame budget, **for crowds that use the plain clip
+driver**. Small crowds (50) do not regress: the `parallel_for` call's `minGrain=32`
+keeps it on the calling thread until there is enough work to be worth dispatching,
+matching the existing `HE_FOLIAGE_PARALLEL` convention's own grain logic.
 
 `s512_x4`/`ref10k` steady-state game captures show no animation signal (neither scene
 has an animated crowd) and no regression on the denominator (`frame cpuMs − WaitFrame`
@@ -276,16 +304,25 @@ Schritt 5 was specifically asked to produce a number for).
 
 ## 5. Next steps
 
-1. Watch CI run [40530201379](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40530201379)
-   for the Mac/Metal and Linux legs this step could not run locally.
-2. If #3 (FoliageSystem TRS tightening) is ever taken up: it would need to reproduce
+1. Watch CI run [40538161931](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40538161931)
+   (commit `6b75235f`) for the Mac/Metal and Linux legs this step could not run
+   locally, and as the cross-compiler check of the terrain LOD identity proof (§1/§2).
+2. **Animation parallelization only covers the plain clip driver
+   (`AnimationSystem::update`).** `AnimationStateMachineSystem` and
+   `AnimationBlendSystem` — the usual drivers for a real character crowd — are
+   unchanged and still fully serial. The same `HE::poseMayBeKept`-based split applies
+   to them in principle (same component-ownership argument), but each has its own
+   per-driver state (crossfade playheads, sync graphs, transitions) to check for the
+   same cross-entity/shared-state hazards this step ruled out for the clip driver —
+   worth a step of its own, not a drop-in copy of this one.
+3. If #3 (FoliageSystem TRS tightening) is ever taken up: it would need to reproduce
    glm's exact per-term arithmetic (not just an equivalent formula) to stay
    bit-identical, and the ceiling is low single digits of percent — probably not
    worth a step of its own unless bundled with other `scatterLayer` work.
-3. Schritt 5's still-open items (a `CellStreaming` number via `make_cell_game_dir.py`,
+4. Schritt 5's still-open items (a `CellStreaming` number via `make_cell_game_dir.py`,
    `make_land_game_dir.py`'s Windows `cp -cR` fix) remain open; this step did not
    touch them.
-4. The queen should check topic 238 against topics 321/322's concurrent HE_Scene
+5. The queen should check topic 238 against topics 321/322's concurrent HE_Scene
    changes before merging into `release/0.7.0` (see §4).
 
 ## Handoff
@@ -312,8 +349,12 @@ Schritt 5 was specifically asked to produce a number for).
   deploy, on a witness configured to actually exercise the leveled straddler path;
   terrain LOD bit-identity proven both mathematically (§1) and by `memcmp` test.
 - **Not verified:** Metal (no Mac on this machine) — relies on CI's macOS leg, compile
-  + `he_tests` only, no pixel A/B. The one full-suite flake was not pinned to a
-  specific case (output not captured that run).
+  + `he_tests` only, no pixel A/B; that leg is also the only cross-compiler check of
+  §1's terrain LOD bit-identity argument (Clang/Apple Silicon vs. this run's MSVC).
+  The one full-suite flake was not pinned to a specific case (output not captured
+  that run); 20 isolated reruns of this step's new animation test and 5 of the known
+  inspector_ui clipboard-flake test were both clean, so call it **unattributed**, not
+  cleared.
 - **Decisions taken:** implemented animation parallelization despite it not being in
   the Hive's written assignment, on the queen's explicit ruling (hive_request #151) —
   Schritt 5 had named it as this step's job, the written "do not parallelize further"
@@ -328,9 +369,13 @@ Schritt 5 was specifically asked to produce a number for).
   this to whoever picks it up, do not let them re-derive the ≈192-vs-≈60-multiply
   estimate from scratch (Schritt 5 already did that correction).
 - **Pending:** Schritt 5's still-open items (`CellStreaming` number, `make_land_game_dir.py`
-  Windows fix) — out of this step's scope, not touched. CI run
-  [40530201379](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40530201379)
-  was still running at handoff time; its result was not yet known.
+  Windows fix) — out of this step's scope, not touched. The animation parallelization
+  split (§4 next steps #2) does not yet cover `AnimationStateMachineSystem` /
+  `AnimationBlendSystem`. CI run
+  [40538161931](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40538161931)
+  (commit `6b75235f`) was still running at handoff time; its result was not yet known
+  — do not trust the earlier run 40530201379 (on `87be715c`, superseded by the
+  correction commit).
 - **Traps:**
   - `he_tests --no-skip` is **not** "run everything" — it force-runs
     `doctest::skip(...)`-marked diagnostic cases too, including
