@@ -88,6 +88,11 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
 
         const float t = blend.playbackTime;
 
+        // Each clip's span starts at the wrapped previous playhead; notifies and root
+        // motion below both walk it.
+        const float aPrev = clipA ? wrapTime(tPrev, clipA->duration) : 0.0f;
+        const float bPrev = clipB ? wrapTime(tPrev, clipB->duration) : 0.0f;
+
         // Notifies from ONE clip, on the same wrapped spans the deltas use. The
         // heavier side fires; the lighter side is still walked past, so it cannot
         // hoard its first frame and dump it when the weight tips over. Letting
@@ -101,13 +106,11 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
             const bool bWins = blend.blendAlpha >= HE::kNotifyDominanceAlpha;
             if (clipA)
             {
-                const float aPrev = wrapTime(tPrev, clipA->duration);
                 HE::notifyCollectClip(e, *clipA, aPrev, aPrev + step, /*looping=*/true,
                                       !bWins || !clipB, blend.notifiesPrimedA, notifies);
             }
             if (clipB)
             {
-                const float bPrev = wrapTime(tPrev, clipB->duration);
                 HE::notifyCollectClip(e, *clipB, bPrev, bPrev + step, /*looping=*/true,
                                       bWins || !clipA, blend.notifiesPrimedB, notifies);
             }
@@ -155,13 +158,11 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
             bool any = false;
             if (clipA)
             {
-                const float aPrev = wrapTime(tPrev, clipA->duration);
                 any |= HE::rootMotionSampleClip(e, *rm, *mesh, *clipA, aPrev, aPrev + step,
                                                 /*looping=*/true, trsA, dA);
             }
             if (clipB)
             {
-                const float bPrev = wrapTime(tPrev, clipB->duration);
                 any |= HE::rootMotionSampleClip(e, *rm, *mesh, *clipB, bPrev, bPrev + step,
                                                 /*looping=*/true, trsB, dB);
             }
