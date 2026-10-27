@@ -1,0 +1,15 @@
+== lake512_nowater-r1 00:02:41
+0:02  up 23 days,  3:23, 1 user, load averages: 3.34 7.73 9.65
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=24
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 3.34
+0:02  up 23 days,  3:24, 1 user, load averages: 3.58 7.58 9.56
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=84
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[lake512_nowater-r1] rc=0 wall=16s fps=50.953127141089396 cpu_p50=18.312959 gpu_p50=14.395666541531682 modes={'detailed': 400} size=2840x1528

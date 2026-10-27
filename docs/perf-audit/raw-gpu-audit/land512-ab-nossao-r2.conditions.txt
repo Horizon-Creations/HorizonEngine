@@ -1,0 +1,15 @@
+== land512-ab-nossao-r2 00:09:42
+0:09  up 23 days,  3:30, 1 user, load averages: 2.84 4.17 7.07
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=26
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 2.84
+0:09  up 23 days,  3:31, 1 user, load averages: 2.87 4.09 6.98
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=87
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[land512-ab-nossao-r2] rc=0 wall=16s fps=50.43196512955719 cpu_p50=18.988583 gpu_p50=15.50858304835856 modes={'detailed': 400} size=2840x1528

@@ -1,0 +1,15 @@
+== land512_foliage-r1 00:02:24
+0:02  up 23 days,  3:23, 1 user, load averages: 3.04 7.91 9.74
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=22
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 3.04
+0:02  up 23 days,  3:23, 1 user, load averages: 3.34 7.73 9.65
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=89
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[land512_foliage-r1] rc=0 wall=16s fps=49.84328798140616 cpu_p50=19.736375 gpu_p50=15.856917249038815 modes={'detailed': 400} size=2840x1528
