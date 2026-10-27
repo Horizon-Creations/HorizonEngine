@@ -127,6 +127,7 @@ def main():
         "ref": {"HE_GI_HEIGHTFIELD": "0", "HE_GI_CASTER_RANGE": "0"},
         "hf": {"HE_GI_HEIGHTFIELD": "1", "HE_GI_CASTER_RANGE": "0"},
         "neg": {"HE_GI_HEIGHTFIELD": "0", "HE_GI_CASTER_RANGE": "5"},
+        "mute": {"HE_GI_HEIGHTFIELD": "1", "HE_GI_CASTER_RANGE": "0", "HE_GI_HEIGHTFIELD_MUTE": "1"},   # OpenGL only: field uploaded, chunks out, field not marched
     }
     sets = ["GlobalIlluminationEnabled=true"] + a.set
     for ci, cam in enumerate(a.cam):
@@ -144,6 +145,8 @@ def main():
             print(f"cam{ci} {name}: {w}x{h}, height field uploaded: {engaged}")
         m1, p1, dimg = diff(px["hf"], px["ref"], 0.5, w)
         m2, p2, _ = diff(px["neg"], px["ref"], 0.5, w)
+        m3, p3, _ = diff(px["mute"], px["ref"], 0.5, w)
+        print(f"cam{ci}: muted field vs ref  mean|d| {m3:.3f}  >8: {p3:.3f} %  (OpenGL negative control: terrain shadows must vanish)")
         write_png(out / f"cam{ci}_diff_hf_ref_x8.png", w, len(dimg) // (w * 3), dimg)
         print(f"cam{ci}: hf vs ref (lower half) mean|d| {m1:.3f}  >8: {p1:.3f} %   |   neg vs ref  mean|d| {m2:.3f}  >8: {p2:.3f} %")
 

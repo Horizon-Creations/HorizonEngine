@@ -295,3 +295,10 @@ GL RT mask shows), D3D12 DXR/Metal kernels, probes/reflections on the height fie
 * Messung (hidden, GI+Reflexionen an, 400 Frames, `HE_GI_FORCE_SW=1`): OpenGL GIShadow 1.14 -> 1.07 ms, Vulkan GI gesamt 2.52 -> 2.49 ms.
   Mit aktivem Höhenfeld sind die Chunks schon draußen, der Gewinn ist klein; er zählt bei mehreren Landschaften / vielen fernen Props.
 * Tests: culling/gi_bvh/lod/terrain_tessellation 120/120. Nicht verifiziert: Pixelvergleich mit Reflexionen, D3D12/Metal unverändert.
+
+### OpenGL pixel evidence (27.10.2026, headless)
+
+`he_gi_hf_check.py --rhi OpenGL --cam -100,12,-10,0,-10` (hidden window): hf vs ref (lower half) mean |d| **0.295**, 0.18 % of pixels > 8. Negative control `HE_GI_HEIGHTFIELD_MUTE=1`
+(OpenGL only: field uploaded and chunks left out of the shadow list, but the field is not marched, so the terrain's shadows vanish): mean |d| **11.7**, 28.2 % > 8. The thinning
+control (`HE_GI_CASTER_RANGE=5`) stays useless on GL (0.07) because the sun-strip rule keeps the shadow-casting chunks. A second camera showed no shadow (0.000 everywhere) and proves nothing.
+So OpenGL is verified by pixels now; the open items above shrink to D3D12/Metal, probes/reflections, several landscapes.

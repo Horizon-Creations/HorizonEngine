@@ -6999,6 +6999,8 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
 	// Without the terrain chunks while the height field stands in for them (EnsureGiHeightfield).
 	const bool sepOn = m_giShadowSep && m_giShadowInstanceSSBO;
+	// Test hook (scripts/he_gi_hf_check.py negative control): chunks stay out of the list but the field is not marched.
+	static const bool s_hfMute = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD_MUTE"); return v && v[0] == '1'; }();
 	const bool hfOn  = sepOn && m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty();
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, sepOn ? m_giShadowInstanceSSBO : m_giInstanceSSBO);
 	glActiveTexture(GL_TEXTURE0);
@@ -7036,7 +7038,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		                   glm::value_ptr(h0 ? h0->worldToLocal : glm::mat4(1.0f)));
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uHfParams"),
 		            h0 ? 1.0f / std::max(h0->size.x, 1e-4f) : 1.0f, h0 ? 1.0f / std::max(h0->size.y, 1e-4f) : 1.0f,
-		            h0 ? float(h0->res - 1) : 1.0f, hfOn ? 1.0f : 0.0f);
+		            h0 ? float(h0->res - 1) : 1.0f, (hfOn && !s_hfMute) ? 1.0f : 0.0f);
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uHfParams2"),
 		            float(m_giHfTopLevel), m_giHfMaxH, 0.0f, 512.0f);
 		glActiveTexture(GL_TEXTURE0);
