@@ -4462,9 +4462,9 @@ size_t SceneSerializer::recordPrefabOverrides(HorizonWorld& world, Entity root, 
             if (!block.contains(p)) mark(k, p);
         }
     }
-    for (const auto& [k, block] : iComps.items())
+    for (const auto& item : iComps.items())
     {
-        (void)block;
+        const std::string& k = item.key();
         if (!isPropagatedKey(k, isRoot) || tComps.contains(k)) continue;
         mark(k);   // added here
     }
