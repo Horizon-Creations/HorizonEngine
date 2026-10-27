@@ -341,11 +341,16 @@ namespace TerrainSystem
 
         LODComponent newLod;
         const float chunkWorld = tc.sizeX / static_cast<float>(g.chunksPerSide);
+        // Levels run finest-first (65, 33, 17, 9, …): each coarser one is an exact stride-2
+        // subset of LOD0's grid, so `gridCache` lets generateTerrainChunkMeshLOD downsample the
+        // already-computed LOD0 heights/normals instead of resampling the field every level.
+        TerrainChunkLODCache gridCache;
         for (uint32_t k = 0; k < g.numLODs; ++k)
         {
             const uint32_t verts = (g.lod0Cells >> k) + 1u;   // 65, 33, 17, 9, …
-            StaticMeshAsset m = generateTerrainChunkMesh(field, res, tc.sizeX, tc.sizeZ,
-                                                         u0, v0, u1, v1, verts, tc.uvTiling);
+            StaticMeshAsset m = generateTerrainChunkMeshLOD(field, res, tc.sizeX, tc.sizeZ,
+                                                            u0, v0, u1, v1, verts, tc.uvTiling,
+                                                            gridCache);
             HE::UUID id;
             if (haveLevels && cm.getStaticMesh(lod->levels[k].meshId) != nullptr)
             {

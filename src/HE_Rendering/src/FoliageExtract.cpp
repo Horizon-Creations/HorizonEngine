@@ -28,6 +28,7 @@ struct StraddlerResult
     struct Cluster { int level; uint32_t from; uint32_t count; float nearSq; };
     std::vector<glm::mat4> mats;
     std::vector<Cluster>   clusters;
+    std::vector<uint8_t>   levelOf;   // runStraddler's per-plant scratch, kept between calls
     uint64_t thinned = 0, held = 0;
 };
 
@@ -526,7 +527,11 @@ namespace
         uint32_t keep[kLevels] = {};
         for (int k = 0; k < L.n; ++k) keep[k] = keptOf(L.lv[k].density, b.count);
         uint32_t perLevel[kLevels] = {};
-        std::vector<uint8_t> levelOf(b.count, kUnknown);   // per plant of the bucket; kUnknown = not drawn
+        // Per plant of the bucket; kUnknown = not drawn. Reused across calls (same `r` every frame,
+        // see StraddlerBuffers) instead of a fresh heap allocation per bucket per frame.
+        std::vector<uint8_t>& levelOf = r.levelOf;
+        if (levelOf.size() < b.count) levelOf.resize(b.count);
+        std::fill(levelOf.begin(), levelOf.begin() + b.count, kUnknown);
         for (uint32_t j = 0; j < b.count; ++j)
         {
             const glm::vec3 wp = layer.position(b.first + j);

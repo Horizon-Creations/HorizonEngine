@@ -54,6 +54,33 @@ StaticMeshAsset generateTerrainChunkMesh(
     float u0, float v0, float u1, float v1,
     uint32_t vertsPerSide, float uvTiling = 1.0f);
 
+// Caches one chunk's finest-seen LOD grid (heights + normals, n×n) across the calls of
+// generateTerrainChunkMeshLOD below, so a coarser call in the same chunk can downsample it
+// instead of resampling the field. n == 0 means empty (nothing cached yet).
+struct TerrainChunkLODCache
+{
+    uint32_t n = 0;
+    std::vector<float> heights;
+    std::vector<float> normals;
+};
+
+// Same contract and result as generateTerrainChunkMesh, but reuses `cache` across one chunk's
+// LOD levels: LOD(k+1)'s grid is an exact stride-2 subset of LOD k's (see
+// TerrainSystem::buildChunk, "verts = lod0Cells>>k + 1"), so once the finest level this chunk
+// has built is in `cache`, a coarser `vertsPerSide` is filled by downsampling it instead of
+// re-sampling the height field — bit-identical to the fully-resampled result, since every grid
+// vertex shares its continuous (u,v) exactly with the cached grid's vertex at the matching
+// stride, and the height/normal samplers are pure functions of (heights, srcRes, u, v). Calls
+// whose `vertsPerSide` is not an exact power-of-two stride subset of what is cached fall back to
+// resampling the field directly (and refresh `cache` with that grid for the next call). Call
+// order does not matter — any order converges, finest-first just avoids ever falling back.
+StaticMeshAsset generateTerrainChunkMeshLOD(
+    const std::vector<float>& heights, uint32_t srcRes,
+    float sizeX, float sizeZ,
+    float u0, float v0, float u1, float v1,
+    uint32_t vertsPerSide, float uvTiling,
+    TerrainChunkLODCache& cache);
+
 // ─── Tessellation / displacement ────────────────────────────────────────────
 // The refined level a chunk near the camera gets on top of LOD0 (see
 // TerrainComponent::tessellationFactor). CPU-side on purpose: the chunks are
