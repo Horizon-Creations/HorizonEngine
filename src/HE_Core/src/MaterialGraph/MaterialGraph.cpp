@@ -2067,6 +2067,29 @@ std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
 }
 
 // True if input pin `pinIdx` of `node` is wired to a source in this scope's graph.
+// Whether `pinIdx` of `node` ends at a real node once Static Switches are resolved the way
+// codegen resolves them (the instance's override beats the node default, only the TAKEN input
+// counts): a switch whose taken input is unconnected is the same as no link at all. The
+// Displacement pin asks this, so a material can offer tessellation as a switch — off, the
+// pin is as good as unconnected and nothing is tessellated, byte for byte.
+bool connectedThroughSwitches(const EmitCtx& c, const MaterialGraph& g, int nodeId, int pinIdx, int depth = 0)
+{
+    const MatGraphLink* link = nullptr;
+    for (const MatGraphLink& l : g.links)
+        if (l.dstNode == nodeId && l.dstPin == pinIdx) { link = &l; break; }
+    if (!link) return false;
+    const MatGraphNode* src = g.findNode(link->srcNode);
+    if (src && src->type == MatNodeType::StaticSwitch && depth < 16)
+    {
+        bool on = src->p[0] > 0.5f;
+        const std::string swName = src->s.empty() ? ("switch_" + std::to_string(src->id)) : src->s;
+        if (c.switchOv)
+            if (auto it = c.switchOv->find(swName); it != c.switchOv->end()) on = it->second;
+        return connectedThroughSwitches(c, g, src->id, on ? 0 : 1, depth + 1);
+    }
+    return true;
+}
+
 bool hasInput(const Scope& sc, const MatGraphNode& node, int pinIdx)
 {
     for (const MatGraphLink& l : sc.g->links)
@@ -2533,7 +2556,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // material ignores the pin, a widget quad is never tessellated. Unconnected,
     // nothing here touches `c`, so every other output stays byte-identical. ──
     std::string dispStatements;
-    if (!uiDomain && hasInput(root, *out, kMatOutputDisplacementPin))
+    if (!uiDomain && connectedThroughSwitches(c, graph, out->id, kMatOutputDisplacementPin))
     {
         Scope ds;
         ds.g   = &graph;

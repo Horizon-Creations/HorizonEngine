@@ -8016,6 +8016,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		}
 		if (const char* c = std::getenv("HE_DUMP_WATERCLIP"); c && *c)
 			ltc.water.clipToGround = std::atoi(c) != 0;
+		if (const char* t = std::getenv("HE_DUMP_WATERTESS"); t && *t)
+			ltc.water.tessellation = std::atoi(t) != 0;   // the water's swell as GPU-tessellated geometry
 		if (const char* o = std::getenv("HE_DUMP_WATEROVERSHOOT"); o && *o)
 			ltc.water.shoreOvershoot = std::clamp(static_cast<float>(std::atof(o)), 0.0f, water::kMaxShoreOvershoot);
 

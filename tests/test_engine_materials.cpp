@@ -1444,3 +1444,32 @@ TEST_CASE("Engine water material: an export bakes it for all five backends, clus
 }
 #endif // HE_TESTS_HAVE_SHADERC
 #endif // HE_EDITOR_DEPS_DIR
+
+TEST_CASE("Engine water material: Tessellation is a Static Switch, off by default, that turns the swell into displacement")
+{
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
+	Scratch s("water-tess");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset(kWaterPath));
+	REQUIRE(m);
+	HE::MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(m->nodeGraphJson, g));
+
+	// Off (the node's default): the Displacement pin is unconnected as far as the codegen is concerned,
+	// so there is no tessellation text at all and the fragment is what it always was.
+	const HE::MatShaderGen off = HE::generateFragment(g);
+	CHECK(off.displacementBody.empty());
+	CHECK(m->customShaderDispGlsl.empty());
+
+	// On: the switch is named "Tessellation", and the permutation carries the displacement.
+	const std::map<std::string, bool> on{ { "Tessellation", true } };
+	const HE::MatShaderGen with = HE::generateFragment(g, {}, &on);
+	REQUIRE_FALSE(with.displacementBody.empty());
+	HE::MatTessSettings tess;
+	std::string decls, stmts;
+	REQUIRE(HE::matSplitDisplacement(with.displacementBody, tess, decls, stmts));
+	CHECK(stmts.find("heDisp") != std::string::npos);
+	CHECK(tess.maxDisplacement > 0.5f);                 // room for a storm sea
+	CHECK(with.glsl == off.glsl);                       // the shading did not change, only the vertex geometry
+}

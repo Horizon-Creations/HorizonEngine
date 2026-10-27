@@ -1927,6 +1927,14 @@ namespace
 	  "reaching over the bank. Off draws the surface over the whole outline at "
 	  "its level.",
 	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Tessellation##lake", "Tessellation",
+	  "A landscape setting, shared by every lake and painted pond on it: the water's "
+	  "swell is drawn as real geometry instead of only a lit normal, so the surface "
+	  "rises and falls with the waves. Needs a graphics backend with GPU tessellation "
+	  "(OpenGL, Vulkan, D3D11, D3D12); on Metal the surface stays flat. It costs GPU "
+	  "time, so it is off by default. The material's own Static Switch is called "
+	  "Tessellation too.",
+	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Shore Overshoot##lake", "Shore Overshoot",
 	  "How far above the water the ground may stand and still count as under "
 	  "it, in metres, so the edge of the surface sits under the bank and not a "

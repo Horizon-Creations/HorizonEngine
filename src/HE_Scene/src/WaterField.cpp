@@ -208,7 +208,7 @@ uint32_t Field::wetCells(uint16_t id) const
 bool sameContent(const Field& a, const Field& b)
 {
     if (a.res != b.res || a.nextBodyId != b.nextBodyId || !bodiesFullEq(a.bodies, b.bodies)) return false;
-    if (a.clipToGround != b.clipToGround || a.shoreOvershoot != b.shoreOvershoot) return false;
+    if (a.clipToGround != b.clipToGround || a.shoreOvershoot != b.shoreOvershoot || a.tessellation != b.tessellation) return false;
     const size_t n = static_cast<size_t>(a.res) * a.res;
     if (a.allocated() && b.allocated()) return a.coverage == b.coverage && a.owner == b.owner;
     for (size_t i = 0; i < n; ++i)

@@ -277,7 +277,7 @@ int longestChain(const MaterialGraph& g)
 // amplitude is lower or higher than in a hex, depending on the two random phases.
 // The gain below (1/√Σw², from the hex-tiling paper) restores the MEAN power of
 // that, so a seam is not systematically calmer than a hex, only different.
-struct Wave { Pin slopeX, slopeZ, height, steep, dirX, dirZ, speed, warp; };
+struct Wave { Pin slopeX, slopeZ, height, steep, dirX, dirZ, speed, warp, length; };
 
 struct Train
 {
@@ -444,6 +444,7 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
     w.dirZ   = tr.warp ? Pin{ d0.sin } : Pin{};
     w.speed  = knobSpeed;
     w.warp   = warp >= 0 ? Pin{ warp } : Pin{};
+    w.length = length;
     return w;
 }
 
@@ -1071,6 +1072,31 @@ Mb waterMaterial()
     const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
     m.comment("Top or underside", 76, 0, 2, 6);
 
+    // Tessellation, as a switch. The six wave trains again as GEOMETRY: the height of each
+    // (its amplitude steepness * length / 2 pi times the sine the slopes are built from, with
+    // the same gust and distance weights) pushed out along the mesh normal by the tessellation
+    // stages, so the swell is a real surface and not only a normal. The Static Switch
+    // "Tessellation" gates the Displacement pin: off (the default) the pin is as good as
+    // unconnected and the material draws as it always did; on, the water is tessellated
+    // (OpenGL, Vulkan, D3D11, D3D12: Metal draws it flat, see the tessellation notes). The chop
+    // layers stay a normal-only detail: under 2 m they are finer than the mesh would resolve.
+    const Pin invTau = m.k(1.0f / kTau, 80, 40);
+    auto heightOf = [&](const Wave& w, const Pin& weight, float row) {
+        return m.op(T::Multiply, m.op(T::Multiply, w.height, m.op(T::Multiply, w.length, invTau, 81, row), 82, row),
+                    weight, 83, row);
+    };
+    const Pin dispSum = m.sum({ Pin{ heightOf(a, wA1, 40) },  Pin{ heightOf(a2, wA2, 41) },
+                                Pin{ heightOf(b, wB1, 42) },  Pin{ heightOf(b2, wB2, 43) },
+                                Pin{ heightOf(c, wC1, 44) },  Pin{ heightOf(c2, wC2, 45) } }, 84, 40);
+    const int tessSwitch = m.node(T::StaticSwitch, 85, 40);
+    {
+        MatGraphNode& sw = *m.g.findNode(tessSwitch);
+        sw.s    = "Tessellation";
+        sw.p[0] = 0.0f;   // off: the pin below is unconnected for the codegen
+    }
+    m.link(dispSum, tessSwitch, 0);
+    m.comment("Tessellation: real waves, off by default (Static Switch)", 80, 38, 7, 9);
+
     const int out = m.node(T::Output, 79, 2);
     MatGraphNode& o = *m.g.findNode(out);
     o.p[0] = 1.0f;                                                  // lit
@@ -1082,6 +1108,14 @@ Mb waterMaterial()
     m.link(emisO,   out, kMatOutputEmissivePin);
     m.link(alphaO,  out, kMatOutputOpacityPin);
     m.link(normO,   out, kMatOutputNormalPin);
+    // The swell and the wind sea reach about 0.45 m at the default knobs and 3.4x that in a
+    // storm (HE::water::windTrain); the clamp is the culling bounds' margin, so it sits above that.
+    // Factor 8 at 40 m, none from 160 m: the mesh cells are about a metre, a wave at least 1.6 m.
+    o.tess.maxFactor       = 8.0f;
+    o.tess.fadeNear        = 40.0f;
+    o.tess.fadeFar         = 160.0f;
+    o.tess.maxDisplacement = 2.5f;
+    m.link(tessSwitch, out, kMatOutputDisplacementPin);
     return m;
 }
 

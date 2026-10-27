@@ -40,6 +40,9 @@ VIEWS = {
     # A 400 m plane seen at a low angle: the chop's distance fades and the horizon (Thema 206 step 3).
     "far":     dict(WATERTEST="floor", WATERSIZE="400", CAMY="3", CAMZ="0", PITCH="-6"),
     "shore":   dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60"),
+    # The lake low over its surface, along the swell: the silhouette of waves that are geometry (HE_DUMP_WATERTESS=1).
+    "swell":   dict(WATERLAKE="bowl", CAMX="0", CAMY="302", CAMZ="30", PITCH="-6"),
+    "swell-hi": dict(WATERLAKE="bowl", CAMX="0", CAMY="310", CAMZ="40", PITCH="-18"),
     "shore33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33"),
     "shoresheet33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33",
                          WATERHIDEGROUND="1"),

@@ -353,6 +353,11 @@ namespace HE::water
         //                   level meets the ground.
         bool  clipToGround   = true;
         float shoreOvershoot = kDefaultShoreOvershoot;
+        // The water's waves as real geometry: the engine water material with its
+        // "Tessellation" switch on (GPU tessellation displaces the surface along its
+        // normal by the swell). A landscape-wide setting like the shore clipping; off by
+        // default (it costs GPU time, and Metal draws the surface flat either way).
+        bool  tessellation   = false;
 
         // ── Runtime, never serialised ────────────────────────────────────────
         // An edit that changed cells sets `dirty`, widens the terrain-local XZ
@@ -375,7 +380,7 @@ namespace HE::water
         bool pristine() const
         {
             return bodies.empty() && coverage.empty() && owner.empty() && res == kDefaultRes &&
-                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot;
+                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot && !tessellation;
         }
 
         const Body* findBody(uint16_t id) const;

@@ -273,6 +273,15 @@ namespace
 			HE::water::setShoreClip(*tc, tc->water.clipToGround, over);
 		EditorWidgets::helpForLabel("Shore Overshoot##lake");
 		ImGui::EndDisabled();
+
+		// The water's waves as real geometry (GPU tessellation), also a landscape-wide switch.
+		bool tess = tc->water.tessellation;
+		if (EditorWidgets::checkbox("Tessellation##lake", &tess))
+		{
+			if (ctx.undoSys) ctx.undoSys->snapshotNow("Water Tessellation");
+			tc->water.tessellation = tess;
+		}
+		EditorWidgets::helpForLabel("Tessellation##lake");
 	}
 
 	// The lake of a closed spline: made here, reshaped by moving its points,

@@ -849,6 +849,7 @@ namespace
 				// The shore clipping settings, only when they are not the default
 				// (a scene with water from before them reads back as clipped).
 				if (!w.clipToGround) tc["waterClip"] = false;
+				if (w.tessellation) tc["waterTess"] = true;
 				if (w.shoreOvershoot != HE::water::kDefaultShoreOvershoot) tc["waterShoreOvershoot"] = w.shoreOvershoot;
 				const std::vector<uint8_t> cells = HE::water::encodeCells(w);
 				if (!cells.empty())
@@ -1765,6 +1766,8 @@ namespace
 				w.nextBodyId = c.value("waterNextId", w.nextBodyId);
 				if (c.contains("waterClip") && c["waterClip"].is_boolean())
 					w.clipToGround = c["waterClip"].get<bool>();
+				if (c.contains("waterTess") && c["waterTess"].is_boolean())
+					w.tessellation = c["waterTess"].get<bool>();
 				if (c.contains("waterShoreOvershoot") && c["waterShoreOvershoot"].is_number())
 					w.shoreOvershoot = c["waterShoreOvershoot"].get<float>();   // sanitize() clamps it
 				if (c.contains("waterBodies") && c["waterBodies"].is_array())

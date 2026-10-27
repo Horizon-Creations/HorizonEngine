@@ -97,6 +97,11 @@ constexpr int kEditorIconTextureSize = 64;
 // Content path "Engine/Materials/Water.hasset". docs/water-shader-plan.md.
 constexpr UUID kEngineWaterMaterialId = { 0x0000000000000600ULL, 0x0000000000000001ULL };
 
+// The same water with its "Tessellation" Static Switch on: the swell as real geometry
+// (a runtime Material Instance WaterSurface registers under this id when a landscape's
+// water asks for tessellation; never a file, never saved).
+constexpr UUID kEngineWaterTessellatedMaterialId = { 0x0000000000000600ULL, 0x0000000000000002ULL };
+
 // What the water material was called before it moved out of the textures' block.
 // A scene saved up to then names it by this id; SceneSerializer maps it onto
 // kEngineWaterMaterialId when it reads a material reference. Only ever a material
