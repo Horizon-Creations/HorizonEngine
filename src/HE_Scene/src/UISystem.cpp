@@ -57,6 +57,15 @@ namespace
         }
         return entt::null;
     }
+
+    // The quad color a button shows for its current state.
+    glm::vec4 buttonStateColor(const UIButtonComponent* btn)
+    {
+        glm::vec4 col = btn->normalColor;
+        if (btn->state == UIButtonState::Hovered) col = btn->hoveredColor;
+        if (btn->state == UIButtonState::Pressed) col = btn->pressedColor;
+        return col;
+    }
 }
 
 namespace UISystem {
@@ -200,9 +209,7 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
                 glm::vec4 col = img->tint;
                 if (btn)
                 {
-                    col = btn->normalColor;
-                    if (btn->state == UIButtonState::Hovered)  col = btn->hoveredColor;
-                    if (btn->state == UIButtonState::Pressed)  col = btn->pressedColor;
+                    col = buttonStateColor(btn);
                     col *= img->tint;
                 }
                 UIRenderObject ro;
@@ -218,9 +225,7 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
             // Plain button quad (no image on the entity).
             if (btn && !img)
             {
-                glm::vec4 col = btn->normalColor;
-                if (btn->state == UIButtonState::Hovered)  col = btn->hoveredColor;
-                if (btn->state == UIButtonState::Pressed)  col = btn->pressedColor;
+                glm::vec4 col = buttonStateColor(btn);
 
                 UIRenderObject ro;
                 ro.position = screenPos;
