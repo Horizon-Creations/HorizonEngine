@@ -4572,7 +4572,7 @@ struct Entry
     bool   repeat    = false;
 };
 std::vector<Entry>& timers()    { static std::vector<Entry> t;  return t; }
-std::vector<int>&   firedQueue(){ static std::vector<int> q;    return q; }
+std::deque<int>&    firedQueue(){ static std::deque<int> q;     return q; }
 int& nextTimerHandle()          { static int h = 0;             return h; }
 
 // The one place a timer is made, so `after` and `every` cannot drift apart on
@@ -4641,7 +4641,7 @@ bool takeFired(int& handle)
     auto& q = firedQueue();
     if (q.empty()) return false;
     handle = q.front();
-    q.erase(q.begin());
+    q.pop_front();
     return true;
 }
 
