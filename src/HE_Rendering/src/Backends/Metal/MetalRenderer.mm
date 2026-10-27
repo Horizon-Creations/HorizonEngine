@@ -1747,7 +1747,8 @@ constant float kTrains[12] = { @TRAINS@ };
 constant int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
 constant float kChopSteep  = 0.05;
 constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
-constant float kGain       = 0.30;   // line brightness per unit of squeeze above 1 (was 0.45: far too bright underwater)
+constant float kGain       = 0.12;   // line brightness per unit of squeeze above 1
+constant float kMaxLine    = 0.5;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
 constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
 constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
@@ -1824,7 +1825,7 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float3 n = normalize(cross(dPx, dPy));
 	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
 	float w = u.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
-	float4 net = float4(u.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	float4 net = float4(u.sunColor.rgb * (kMaxLine * (1.0 - exp(-(w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)) / kMaxLine))),
 	                    kDark * min(w, 1.0) * max(1.0 - J, 0.0));
 	return hit ? net : float4(0.0);
 }

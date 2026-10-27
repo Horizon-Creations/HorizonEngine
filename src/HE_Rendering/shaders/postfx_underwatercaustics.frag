@@ -44,7 +44,8 @@ const float kEta   = 1.33;
 const int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
 const float kChopSteep  = 0.05;
 const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
-const float kGain       = 0.30;   // line brightness per unit of squeeze above 1 (was 0.45: far too bright underwater)
+const float kGain       = 0.12;   // line brightness per unit of squeeze above 1
+const float kMaxLine    = 0.5;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
 const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
 const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
@@ -144,7 +145,7 @@ void main()
     vec3 n = normalize(cross(dPx, dPy));
     if (dot(n, pc.camSurface.xyz - P) < 0.0) n = -n;
     float w = pc.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
-    vec4 net = vec4(pc.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+    vec4 net = vec4(pc.sunColor.rgb * (kMaxLine * (1.0 - exp(-(w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)) / kMaxLine))),
                     kDark * min(w, 1.0) * max(1.0 - J, 0.0));
     outColor = hit ? net : vec4(0.0);
 }
