@@ -54,6 +54,10 @@ struct UnderwaterCameraData {
     float causticsScale     = 1.0f;
     float causticsSpeed     = 1.0f;
     float causticsDepth     = 10.0f;   // depth where the net is gone (water::kDefaultCausticsDepth)
+    // How far the scene's wind has turned the sea from the material's own heading,
+    // radians (water::windTurnDeg). The pass turns the net's wave frame by it; the
+    // wind's strength is already in causticsScale (coarser sea) and causticsSpeed.
+    float causticsWindTurn  = 0.0f;
 };
 
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so

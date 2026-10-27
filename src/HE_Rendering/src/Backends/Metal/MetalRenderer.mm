@@ -1774,6 +1774,9 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
 	float3 Lr   = float3(hz.x, cosT, hz.y);
 	float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
+	// The scene's wind turned the sea from the material's own heading (sun.w, radians): evaluate the
+	// trains in the frame rotated back by it, so they travel that much further round.
+	{ float wc = cos(u.sun.w), ws = sin(u.sun.w); S = float2(wc * S.x + ws * S.y, -ws * S.x + wc * S.y); }
 	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * (u.caustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (u.caustics.z * kTimeScale)));
 
 	// Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).
@@ -12561,7 +12564,7 @@ void* MetalRenderer::EncodeUnderwaterCaustics(void* cmdBufPtr, void* sourceHdr, 
 	} u{};
 	std::memcpy(u.invViewProj, glm::value_ptr(invViewProj), sizeof(u.invViewProj));
 	u.camSurface[0] = cam.x; u.camSurface[1] = cam.y; u.camSurface[2] = cam.z; u.camSurface[3] = uc.surfaceY;
-	u.sun[0] = towardSun.x; u.sun[1] = towardSun.y; u.sun[2] = towardSun.z;
+	u.sun[0] = towardSun.x; u.sun[1] = towardSun.y; u.sun[2] = towardSun.z; u.sun[3] = uc.causticsWindTurn;
 	u.sunColor[0] = sunColor.r; u.sunColor[1] = sunColor.g; u.sunColor[2] = sunColor.b;
 	u.caustics[0] = uc.causticsIntensity;
 	u.caustics[1] = uc.causticsScale;

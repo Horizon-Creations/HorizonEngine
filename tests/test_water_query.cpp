@@ -11,6 +11,7 @@
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/PhysicsTuning.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <Physics/WaterWaves.h>
@@ -1017,4 +1018,68 @@ TEST_CASE("Underwater caustics settings: setUnderwaterCaustics touches the revis
     CHECK(undone.water.findBody(lake)->underwaterCaustics == c);
     REQUIRE(water::revertDelta(undone, d));
     CHECK(water::sameContent(undone.water, a.water));
+}
+
+TEST_CASE("Water waves follow the wind: heading from its direction, wavelength, speed and height from its strength")
+{
+    // Calm, blowing along the material's own heading (compass 110 = wave heading 20): the same sea.
+    CHECK(water::windTrain(water::kWaveA, 110.0f, 1.0f) == water::kWaveA);
+    CHECK(water::windTrain(water::kWaveB, 110.0f, 1.0f) == water::kWaveB);
+
+    // Compass 0 blows toward -Z (wave heading -90): A takes it, B and C keep their angle to A.
+    const water::WaveTrain a = water::windTrain(water::kWaveA, 0.0f, 1.0f);
+    const water::WaveTrain b = water::windTrain(water::kWaveB, 0.0f, 1.0f);
+    CHECK(a.directionDeg == doctest::Approx(-90.0f));
+    CHECK(b.directionDeg - a.directionDeg == doctest::Approx(water::kWaveB.directionDeg - water::kWaveA.directionDeg));
+
+    // The storm preset's wind (2.6): longer, faster, steeper, and (height ~ steepness * length) about 3-4x taller.
+    const water::WaveTrain storm = water::windTrain(water::kWaveA, 110.0f, 2.6f);
+    CHECK(storm.length == doctest::Approx(water::kWaveA.length * 2.6f));
+    CHECK(storm.speed == doctest::Approx(water::kWaveA.speed * std::sqrt(2.6f)));
+    CHECK(storm.steepness > water::kWaveA.steepness);
+    const float grow = water::waveAmplitude(storm) / water::waveAmplitude(water::kWaveA);
+    CHECK(grow > 3.0f);
+    CHECK(grow < 4.0f);
+    // A calmer-than-calm wind shrinks the sea, and an absurd one is capped.
+    CHECK(water::windTrain(water::kWaveA, 110.0f, 0.5f).length < water::kWaveA.length);
+    CHECK(water::windTrain(water::kWaveA, 110.0f, 100.0f).length == doctest::Approx(water::kWaveA.length * 4.0f));
+}
+
+TEST_CASE("Water query: the surface a body floats on takes the Environment's wind")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    addLake(terrainOf(world, e), rect(-10, -10, 10, 10), 2.0f);
+
+    // Largest wave height over a spread of points and times.
+    auto peak = [&](const water::WaterIndex& idx) {
+        float m = 0.0f;
+        for (double t : { 0.0, 2.0, 5.5, 9.0 })
+            for (float x = -9.0f; x <= 9.0f; x += 0.75f)
+            {
+                water::Surface s;
+                if (idx.surfaceAt(x, 1.5f, t, s)) m = std::max(m, std::abs(s.height - s.level));
+            }
+        return m;
+    };
+
+    const float noEnv = peak(water::WaterIndex::build(world));   // the material's own sea
+
+    EnvironmentComponent env;
+    env.windDirection = 110.0f;   // along the material's heading
+    env.windSpeed     = 1.0f;
+    const Entity sky = world.createEntity("Sky");
+    world.addComponent(sky, env);
+    CHECK(peak(water::WaterIndex::build(world)) == doctest::Approx(noEnv));   // calm + own heading: unchanged
+
+    world.registry().get<EnvironmentComponent>(sky).windSpeed = 2.6f;
+    const water::WaterIndex stormy = water::WaterIndex::build(world);
+    CHECK(peak(stormy) > 2.0f * noEnv);
+
+    // And it is exactly the wind's trains the index samples.
+    water::WaveTrain t[water::kPhysicsWaveCount];
+    for (int i = 0; i < water::kPhysicsWaveCount; ++i) t[i] = water::windTrain(water::kPhysicsWaves[i], 110.0f, 2.6f);
+    water::Surface s;
+    REQUIRE(stormy.surfaceAt(3.0f, 1.5f, 4.0, s));
+    CHECK(s.height == doctest::Approx(s.level + water::sampleWaves(t, water::kPhysicsWaveCount, 3.0, 1.5, 4.0).height));
 }

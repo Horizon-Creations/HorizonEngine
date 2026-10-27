@@ -553,6 +553,9 @@ float4 main(In i) : SV_Target
     float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
     float3 Lr   = float3(hz.x, cosT, hz.y);
     float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
+    // The scene's wind turned the sea from the material's own heading (sun.w, radians): evaluate the
+    // trains in the frame rotated back by it, so they travel that much further round.
+    { float wc = cos(uSun.w), ws = sin(uSun.w); S = float2(wc * S.x + ws * S.y, -ws * S.x + wc * S.y); }
     S += 1.6 * float2(sin(0.43 * S.y + 0.31 * (uCaustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (uCaustics.z * kTimeScale)));
 
     // Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).

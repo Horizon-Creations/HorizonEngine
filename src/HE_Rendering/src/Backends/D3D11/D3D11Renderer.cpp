@@ -8666,7 +8666,7 @@ void D3D11Renderer::DrawViewportFrame()
             ucb.camSurface[1] = p.m_renderWorld.camera.position.y;
             ucb.camSurface[2] = p.m_renderWorld.camera.position.z;
             ucb.camSurface[3] = uwCam.surfaceY;
-            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z;
+            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z; ucb.sun[3] = uwCam.causticsWindTurn;
             ucb.sunColor[0] = ucSunColor.r; ucb.sunColor[1] = ucSunColor.g; ucb.sunColor[2] = ucSunColor.b;
             ucb.caustics[0] = uwCam.causticsIntensity;
             ucb.caustics[1] = uwCam.causticsScale;

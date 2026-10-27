@@ -49,6 +49,52 @@
 // every renderable before the shadow fit, the lights before the day-night pass.
 namespace
 {
+// The Environment's wind, when the scene has an Environment (a scene without one keeps the
+// water material's own sea).
+bool sceneWind(entt::registry& reg, float& direction, float& speed)
+{
+	for (auto [e, env] : reg.view<EnvironmentComponent>().each())
+	{
+		direction = env.windDirection;
+		speed     = env.windSpeed;
+		return true;
+	}
+	return false;
+}
+
+// The engine water's wave knobs under the wind: WaveA/B/C of the material, each turned
+// and scaled by HE::water::windTrain. A knob the entity overrides itself is left as the
+// author set it. `block` is the merged HeParams block (empty = start from the material's).
+void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
+                            float windDirection, float windSpeed, std::vector<float>& block)
+{
+	if (block.empty())
+	{
+		block.assign(64, 0.0f);
+		const size_t n = std::min(ma.shaderParamData.size(), size_t(64));
+		std::copy(ma.shaderParamData.begin(), ma.shaderParamData.begin() + n, block.begin());
+	}
+	static const char* const kKnobs[3] = { "WaveA", "WaveB", "WaveC" };
+	for (const char* knob : kKnobs)
+		for (size_t k = 0; k < ma.graphParamNames.size() && k < 16; ++k)
+		{
+			if (ma.graphParamNames[k] != knob) continue;
+			bool authored = false;
+			if (mc)
+				for (const auto& ov : mc->paramOverrides)
+					if (ov.name == knob) { authored = true; break; }
+			if (!authored)
+			{
+				const HE::water::WaveTrain base{ block[k * 4], block[k * 4 + 1], block[k * 4 + 2], block[k * 4 + 3] };
+				const HE::water::WaveTrain t = HE::water::windTrain(base, windDirection, windSpeed);
+				block[k * 4] = t.directionDeg;  block[k * 4 + 1] = t.speed;
+				block[k * 4 + 2] = t.length;    block[k * 4 + 3] = t.steepness;
+			}
+			break;
+		}
+}
+
+
 	using HE::localMatrix;
 
 	const HE::AABB kUnitCube = []{
@@ -283,6 +329,9 @@ namespace
 		// component's own, so a scene with no Sky entity keeps the old puddle share).
 		float puddleScale = EnvironmentComponent{}.puddleAmount;
 		for (auto [ee, ec] : reg.view<EnvironmentComponent>().each()) { puddleScale = ec.puddleAmount; break; }
+		// The wind the engine water's wave knobs follow (windWaterParams).
+		float windDir = 0.0f, windSpd = 1.0f;
+		const bool windOn = sceneWind(reg, windDir, windSpd);
 		for (auto [te, ttf, tc] : reg.view<TransformComponent, TerrainComponent>().each())
 		{
 			HE::GiLandscape ls;
@@ -442,6 +491,11 @@ namespace
 									}
 							obj.paramOverride = std::move(block);
 						}
+					// The engine water: its waves take the scene's wind (an entity's own WaveA/B/C
+					// override is kept).
+					if (windOn && matId == HE::kEngineWaterMaterialId && contentManager)
+						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
+							windWaterParams(*ma, matComp, windDir, windSpd, obj.paramOverride);
 				}
 				// Terrain chunk → its parent landscape's painted layer weightmap, so a
 				// Landscape Layer Blend material samples the right terrain's paint. Read
@@ -1312,6 +1366,18 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	out.causticsIntensity = cau.intensity * causticsFadeIn(signedDepth);
 	out.causticsScale     = cau.scale;
 	out.causticsSpeed     = cau.speed;
+	// The sea under the scene's wind (water::windTrain): a stronger wind makes a coarser
+	// net (longer waves) that runs faster, and the whole net turns with the heading.
+	{
+		float windDir = 0.0f, windSpd = 1.0f;
+		if (sceneWind(world.registry(), windDir, windSpd))
+		{
+			const water::WindWaveFactors f = water::windWaveFactors(windSpd);
+			out.causticsScale /= f.length;
+			out.causticsSpeed *= f.speed;
+			out.causticsWindTurn = glm::radians(water::windTurnDeg(windDir));
+		}
+	}
 	out.causticsDepth     = cau.depth;
 	return out;
 }
@@ -1384,6 +1450,7 @@ RenderExtractor::FrameKey RenderExtractor::makeFrameKey(const HorizonWorld& worl
 	k.moonColor      = m_moonColor;
 	k.moonIntensity  = m_moonIntensity;
 	k.cloudCoverage  = m_cloudCoverage;
+	k.windOn         = sceneWind(const_cast<HorizonWorld&>(world).registry(), k.windDirection, k.windSpeed);
 	return k;
 }
 
@@ -1408,7 +1475,8 @@ bool RenderExtractor::sameFrameKey(const FrameKey& a, const FrameKey& b)
 	    && a.dayNight == b.dayNight && a.timeOfDay == b.timeOfDay
 	    && a.sunColor == b.sunColor && a.sunIntensity == b.sunIntensity
 	    && a.moonColor == b.moonColor && a.moonIntensity == b.moonIntensity
-	    && a.cloudCoverage == b.cloudCoverage;
+	    && a.cloudCoverage == b.cloudCoverage
+	    && a.windOn == b.windOn && a.windDirection == b.windDirection && a.windSpeed == b.windSpeed;
 }
 
 RenderExtractor::FrameShape RenderExtractor::frameShapeOf(const RenderWorld& w)

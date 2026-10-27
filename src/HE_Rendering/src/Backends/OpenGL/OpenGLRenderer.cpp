@@ -5695,6 +5695,9 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	float cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
 	vec3  Lr   = vec3(hz.x, cosT, hz.y);
 	vec2  S    = P.xz + hz / max(cosT, 0.1) * depth;
+	// The scene's wind turned the sea from the material's own heading (sun.w, radians): evaluate the
+	// trains in the frame rotated back by it, so they travel that much further round.
+	{ float wc = cos(uSun.w), ws = sin(uSun.w); S = vec2(wc * S.x + ws * S.y, -ws * S.x + wc * S.y); }
 	// The material bends its wave phase with a slow FBM field; a cheap two-sine stand-in
 	// does the same here, so the lattice of the plane trains does not read as a grid.
 	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * (uCaustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (uCaustics.z * kTimeScale)));
@@ -5914,7 +5917,7 @@ unsigned int OpenGLRenderer::RenderUnderwaterCaustics(unsigned int sourceHdr, in
 	glUniform1i(m_uUcDepth, 1);
 	glUniformMatrix4fv(m_uUcInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
 	glUniform4f(m_uUcCamSurf, cam.x, cam.y, cam.z, uc.surfaceY);
-	glUniform4f(m_uUcSun, towardSun.x, towardSun.y, towardSun.z, 0.0f);
+	glUniform4f(m_uUcSun, towardSun.x, towardSun.y, towardSun.z, uc.causticsWindTurn);
 	glUniform4f(m_uUcSunColor, sunColor.r, sunColor.g, sunColor.b, 0.0f);
 	glUniform4f(m_uUcParams, uc.causticsIntensity, uc.causticsScale,
 	            engineSeconds * uc.causticsSpeed, uc.causticsDepth);

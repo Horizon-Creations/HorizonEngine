@@ -117,5 +117,9 @@ namespace HE::water
         void ensureBounds(Entry& e);
 
         std::vector<Entry> m_entries;   // sorted by entity id
+        // The two trains the physics follows, under the scene's wind (refresh() reads
+        // the Environment; no Environment = the material's own, kPhysicsWaves). The
+        // surface a body floats on turns and grows with the same wind the water shows.
+        WaveTrain          m_waves[kPhysicsWaveCount] = { kPhysicsWaves[0], kPhysicsWaves[1] };
     };
 }

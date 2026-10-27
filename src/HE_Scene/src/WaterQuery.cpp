@@ -3,6 +3,7 @@
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/Components/TerrainComponent.h"
+#include "HorizonScene/Components/EnvironmentComponent.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,10 +15,10 @@ namespace HE::water
 namespace
 {
     // The most the physics waves lift the surface above its level, metres.
-    float maxWaveHeight()
+    float maxWaveHeight(const WaveTrain* trains)
     {
         float h = 0.0f;
-        for (int i = 0; i < kPhysicsWaveCount; ++i) h += std::abs(waveAmplitude(kPhysicsWaves[i]));
+        for (int i = 0; i < kPhysicsWaveCount; ++i) h += std::abs(waveAmplitude(trains[i]));
         return h;
     }
 
@@ -40,6 +41,14 @@ WaterIndex WaterIndex::build(HorizonWorld& world)
 void WaterIndex::refresh(HorizonWorld& world)
 {
     auto& reg = world.registry();
+    // The wind the sea follows (water::windTrain): the Environment's, if the scene has one.
+    for (int i = 0; i < kPhysicsWaveCount; ++i) m_waves[i] = kPhysicsWaves[i];
+    for (auto [ee, env] : reg.view<EnvironmentComponent>().each())
+    {
+        for (int i = 0; i < kPhysicsWaveCount; ++i)
+            m_waves[i] = windTrain(kPhysicsWaves[i], env.windDirection, env.windSpeed);
+        break;
+    }
     std::vector<Entry> next;
     for (auto [entity, tc] : reg.view<TerrainComponent>().each())
     {
@@ -134,7 +143,7 @@ void WaterIndex::ensureBounds(Entry& e)
 void WaterIndex::regions(std::vector<Region>& out)
 {
     out.clear();
-    const float lift = maxWaveHeight() + 1.0f;
+    const float lift = maxWaveHeight(m_waves) + 1.0f;
     for (Entry& e : m_entries)
     {
         ensureBounds(e);
@@ -191,7 +200,7 @@ bool WaterIndex::entryAt(const Entry& e, float x, float z, double t, Surface& ou
     out.terrain = e.entity;
     out.body    = id;
     out.level   = (e.localToWorld * glm::vec4(lx, body->level, lz, 1.0f)).y;
-    const WaveSample w = sampleWaves(kPhysicsWaves, kPhysicsWaveCount, x, z, t);
+    const WaveSample w = sampleWaves(m_waves, kPhysicsWaveCount, x, z, t);
     out.height  = out.level + w.height;
     out.normal  = glm::normalize(glm::vec3(-w.dhdx, 1.0f, -w.dhdz));
     const float groundY = (e.localToWorld * glm::vec4(lx, ground, lz, 1.0f)).y;

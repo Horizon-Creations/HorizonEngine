@@ -74,6 +74,62 @@ namespace HE::water
     inline constexpr int       kPhysicsWaveCount = 2;
     inline constexpr WaveTrain kPhysicsWaves[kPhysicsWaveCount] = { kWaveA, kWaveB };
 
+    // ─── Waves that follow the wind ─────────────────────────────────────────────────
+    // The Environment's wind (EnvironmentComponent::windDirection, windSpeed; the weather
+    // presets drive them) sets the sea the water shows and the physics floats on:
+    //   • DIRECTION: the compass heading the wind blows toward (0 = -Z, clockwise) becomes
+    //     the heading of the primary train (A); the other trains keep their angle to it,
+    //     so the sea stays a mix of directions around the wind's.
+    //   • STRENGTH: windSpeed is a multiplier, 1 = calm (the material's own numbers, so a
+    //     scene at 1 keeps the sea it had). Fully developed seas grow roughly with the
+    //     wind: the wavelength follows it, the speed follows sqrt(length) (deep-water
+    //     dispersion, c = sqrt(g L / 2 pi)), the steepness a little (a stronger wind
+    //     makes a longer AND steeper sea), so the height steepness * L / 2 pi grows with
+    //     the wind's square: calm 1x, the storm preset (2.6) about 3.4x.
+    // One definition: the renderer (material knobs at extract time), the physics
+    // (WaterQuery) and the caustics all call it, so the three never disagree.
+    inline constexpr float kWindCalm = 1.0f;
+
+    struct WindWaveFactors
+    {
+        float length;      // x the base wavelength
+        float speed;       // x the base speed
+        float steepness;   // x the base steepness
+    };
+
+    inline WindWaveFactors windWaveFactors(float windSpeed)
+    {
+        const float u = windSpeed < 0.25f ? 0.25f : (windSpeed > 4.0f ? 4.0f : windSpeed);
+        const float l = u;                         // wavelength grows with the wind
+        const float st = 1.0f + 0.3f * (u - 1.0f); // and so does the steepness, gently
+        return { l, std::sqrt(l), st < 0.4f ? 0.4f : st };
+    }
+
+    // Compass heading (0 = toward -Z, clockwise: 90 = +X) -> a wave direction in this
+    // header's frame (0 = +X, 90 = +Z).
+    inline float waveDirectionFromWind(float windCompassDeg) { return windCompassDeg - 90.0f; }
+
+    // How far the wind turns the sea from the material's own: the shift of the primary
+    // train's heading, degrees. Everything that rotates "the sea" uses this one number.
+    inline float windTurnDeg(float windCompassDeg)
+    {
+        return waveDirectionFromWind(windCompassDeg) - kWaveA.directionDeg;
+    }
+
+    // One train under a wind. `base` is the material's train, `windCompassDeg` and
+    // `windSpeed` the environment's. Calm wind from the material's own heading is the
+    // identity.
+    inline WaveTrain windTrain(const WaveTrain& base, float windCompassDeg, float windSpeed)
+    {
+        const WindWaveFactors f = windWaveFactors(windSpeed);
+        WaveTrain t = base;
+        t.directionDeg = base.directionDeg + windTurnDeg(windCompassDeg);
+        t.length       = base.length * f.length;
+        t.speed        = base.speed * f.speed;
+        t.steepness    = base.steepness * f.steepness;
+        return t;
+    }
+
     // Height of one train: steepness · length / 2π, the factor in front of the sine.
     inline float waveAmplitude(const WaveTrain& w)
     {

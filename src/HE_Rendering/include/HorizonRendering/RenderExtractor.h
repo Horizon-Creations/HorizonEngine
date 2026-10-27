@@ -367,6 +367,11 @@ private:
         glm::vec3            moonColor{ 0.0f };
         float                moonIntensity  = 0.0f;
         float                cloudCoverage  = 0.0f;
+        // The Environment's wind, which the water material's wave knobs follow
+        // (water::windTrain): a wind change re-walks the frame.
+        bool                 windOn         = false;
+        float                windDirection  = 0.0f;
+        float                windSpeed      = 0.0f;
     };
     // What the walk's RenderWorld looked like when the walk ended: its object
     // array and how many of everything it holds. A caller that cleared,

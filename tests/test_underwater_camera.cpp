@@ -12,6 +12,7 @@
 #include <HorizonScene/WaterQuery.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -518,4 +519,39 @@ TEST_CASE("Underwater caustics: the Vulkan shader's wave-train literal is HE::ca
                                   [](char c) { return std::isspace(static_cast<unsigned char>(c)) != 0; }),
                    expected.end());
     CHECK(literal == expected);
+}
+
+TEST_CASE("Underwater caustics: the scene's wind coarsens, speeds up and turns the net; no Environment leaves it alone")
+{
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    const uint16_t id = addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+    water::UnderwaterCausticsParams c;
+    c.intensity = 1.0f; c.scale = 2.0f; c.speed = 1.0f; c.depth = 9.0f;
+    REQUIRE(water::setUnderwaterCaustics(tc, id, c));
+    const glm::vec3 below(0.0f, 0.5f, 0.0f);
+
+    const UnderwaterCameraData none = HE::queryUnderwaterCamera(world, below);
+    CHECK(none.causticsScale == doctest::Approx(2.0f));
+    CHECK(none.causticsWindTurn == 0.0f);
+
+    // Calm wind blowing along the material's own heading (compass 110 = wave heading 20): identity.
+    EnvironmentComponent env;
+    env.windDirection = 110.0f;
+    env.windSpeed     = 1.0f;
+    const Entity sky = world.createEntity("Sky");
+    world.addComponent(sky, env);
+    const UnderwaterCameraData calm = HE::queryUnderwaterCamera(world, below);
+    CHECK(calm.causticsScale == doctest::Approx(2.0f));
+    CHECK(calm.causticsSpeed == doctest::Approx(1.0f));
+    CHECK(calm.causticsWindTurn == doctest::Approx(0.0f).epsilon(1e-5));
+
+    // A storm from the north (compass 0 -> wave heading -90): a coarser, faster net, turned by -110 degrees.
+    world.registry().get<EnvironmentComponent>(sky).windDirection = 0.0f;
+    world.registry().get<EnvironmentComponent>(sky).windSpeed     = 2.6f;
+    const UnderwaterCameraData storm = HE::queryUnderwaterCamera(world, below);
+    CHECK(storm.causticsScale < calm.causticsScale);
+    CHECK(storm.causticsScale == doctest::Approx(2.0f / 2.6f));
+    CHECK(storm.causticsSpeed == doctest::Approx(std::sqrt(2.6f)));
+    CHECK(storm.causticsWindTurn == doctest::Approx(-110.0f * 3.14159265f / 180.0f));
 }

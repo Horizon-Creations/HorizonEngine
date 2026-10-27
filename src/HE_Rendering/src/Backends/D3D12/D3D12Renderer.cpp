@@ -2533,7 +2533,7 @@ struct D3D12RendererImpl
             ucb.camSurface[1] = m_renderWorld.camera.position.y;
             ucb.camSurface[2] = m_renderWorld.camera.position.z;
             ucb.camSurface[3] = ucCam.surfaceY;
-            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z;
+            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z; ucb.sun[3] = ucCam.causticsWindTurn;
             ucb.sunColor[0] = ucSunColor.r; ucb.sunColor[1] = ucSunColor.g; ucb.sunColor[2] = ucSunColor.b;
             ucb.caustics[0] = ucCam.causticsIntensity;
             ucb.caustics[1] = ucCam.causticsScale;

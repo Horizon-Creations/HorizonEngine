@@ -1000,7 +1000,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
                 ucpc.camSurface[1] = m_renderWorld.camera.position.y;
                 ucpc.camSurface[2] = m_renderWorld.camera.position.z;
                 ucpc.camSurface[3] = uwCam.surfaceY;
-                ucpc.sun[0] = towardSun.x; ucpc.sun[1] = towardSun.y; ucpc.sun[2] = towardSun.z;
+                ucpc.sun[0] = towardSun.x; ucpc.sun[1] = towardSun.y; ucpc.sun[2] = towardSun.z; ucpc.sun[3] = uwCam.causticsWindTurn;
                 ucpc.sunColor[0] = ucSunColor.r; ucpc.sunColor[1] = ucSunColor.g; ucpc.sunColor[2] = ucSunColor.b;
                 ucpc.caustics[0] = uwCam.causticsIntensity;
                 ucpc.caustics[1] = uwCam.causticsScale;

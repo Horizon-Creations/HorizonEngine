@@ -33,7 +33,7 @@ layout(push_constant) uniform PC
 {
     mat4 invViewProj;  // inverse(kVulkanClipFix * projection * view)
     vec4 camSurface;   // xyz = camera world pos, w = surface Y
-    vec4 sun;          // xyz = direction TOWARD the sun (unit)
+    vec4 sun;          // xyz = direction TOWARD the sun (unit), w = the wind's turn of the sea, radians
     vec4 sunColor;     // rgb = sun radiance (0 at night)
     vec4 caustics;     // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
 } pc;
@@ -80,6 +80,9 @@ void main()
     float cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
     vec3  Lr   = vec3(hz.x, cosT, hz.y);
     vec2  S    = P.xz + hz / max(cosT, 0.1) * depth;
+    // The scene's wind turned the sea from the material's own heading (sun.w, radians): evaluate the
+    // trains in the frame rotated back by it, so they travel that much further round.
+    { float wc = cos(pc.sun.w), ws = sin(pc.sun.w); S = vec2(wc * S.x + ws * S.y, -ws * S.x + wc * S.y); }
     // The material bends its wave phase with a slow FBM field; a cheap two-sine stand-in
     // does the same here, so the lattice of the plane trains does not read as a grid.
     S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * (pc.caustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (pc.caustics.z * kTimeScale)));
