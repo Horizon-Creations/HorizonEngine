@@ -48,6 +48,19 @@
 #include <unordered_set>
 
 namespace {
+// Pool cap comes from the WeatherComponent budget if present, else a default.
+// The default is the same for rain and snow: this used to read
+// `isSnow ? 20000 : 20000`, i.e. a per-precipitation-type default was planned
+// but never implemented — 20000 is simply the editor's Max Rain/Max Snow slider
+// ceiling. Don't guess a smaller snow number here; it would silently change how
+// a scene *without* a WeatherComponent renders snow.
+constexpr int kDefaultPrecipCap = 20000;
+int getWeatherPrecipCap(const WeatherComponent* wc, bool isSnow)
+{
+    if (!wc) return kDefaultPrecipCap;
+    return isSnow ? wc->maxSnowParticles : wc->maxRainParticles;
+}
+
 // Build the GPU precipitation parameters from the EnvironmentComponent (the single
 // source of truth for rain/snow, whether set by a weather preset or by hand). Pushed
 // every frame so the renderer reliably idles when `active` is false — no leftover pool.
@@ -68,16 +81,9 @@ void pushGpuParticleParams(HorizonWorld& world, IRenderer* renderer,
         const float wr     = glm::radians(env->windDirection);
         const float fall   = isSnow ? 2.0f : 18.0f;
         const float boxTop = 24.0f;
-        // Pool cap comes from the WeatherComponent budget if present, else a default.
-        // The default is the same for rain and snow: this used to read
-        // `isSnow ? 20000 : 20000`, i.e. a per-precipitation-type default was planned
-        // but never implemented — 20000 is simply the editor's Max Rain/Max Snow slider
-        // ceiling. Don't guess a smaller snow number here; it would silently change how
-        // a scene *without* a WeatherComponent renders snow.
-        constexpr int kDefaultPrecipCap = 20000;
-        int cap = kDefaultPrecipCap;
-        for (auto [e, wc] : reg.view<WeatherComponent>().each())
-        { cap = isSnow ? wc.maxSnowParticles : wc.maxRainParticles; break; }
+        const WeatherComponent* wc = nullptr;
+        for (auto [e, w] : reg.view<WeatherComponent>().each()) { wc = &w; break; }
+        const int   cap    = getWeatherPrecipCap(wc, isSnow);
         gp.enabled     = true;
         gp.isSnow      = isSnow;
         gp.count       = cap;
@@ -193,10 +199,9 @@ void SceneSystems::pushProfilerSceneCounters(HorizonWorld& world, ContentManager
         if (env && amount > 0.001f)
         {
             const bool isSnow = env->snowAmount > env->rainAmount;
-            uint32_t   cap    = 20000;   // same default as pushGpuParticleParams
-            for (auto [e, wc] : reg.view<WeatherComponent>().each())
-            { cap = static_cast<uint32_t>(isSnow ? wc.maxSnowParticles : wc.maxRainParticles); break; }
-            c.gpuParticles = cap;
+            const WeatherComponent* wc = nullptr;
+            for (auto [e, w] : reg.view<WeatherComponent>().each()) { wc = &w; break; }
+            c.gpuParticles = static_cast<uint32_t>(getWeatherPrecipCap(wc, isSnow));
         }
     }
 
