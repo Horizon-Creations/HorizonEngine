@@ -3452,6 +3452,9 @@ struct D3D11RendererImpl
         static int s_giLogCall = 0;
         const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
         const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(rw, giReflEnabled);   // GiCasterRange.h
+        // The sun-shadow kernel has its own instance list, so it is thinned by distance even while reflections
+        // keep the far scene in the list the probes and mirrors walk.
+        const HE::GiCasterFilter shadowFilter = HE::GiCasterFilter::For(rw, false);
         static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
         const GiHeightfield* gHf = (s_hfOn && rw.heightfields.size() == 1) ? &rw.heightfields[0] : nullptr;
         giHfActive = gHf && ensureGiHeightfield(*gHf);
@@ -3459,7 +3462,7 @@ struct D3D11RendererImpl
         for (const RenderObject& obj : rw.objects)
         {
             // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-            if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
+            if (!obj.castsShadow || obj.isCluster() || !(casterFilter.keeps(obj) || shadowFilter.keeps(obj))) continue;
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
             GIBlasRange range = resolveRange(obj.meshAssetId);
@@ -3470,8 +3473,9 @@ struct D3D11RendererImpl
             inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
             inst.nodeOffset   = range.nodeOffset;
             inst.triOffset    = range.triOffset;
-            giInstancesCpu.push_back(inst);
-            if (!(giHfActive && obj.terrainChunk)) giShadowInstancesCpu.push_back(inst);
+            if (casterFilter.keeps(obj)) giInstancesCpu.push_back(inst);
+            if (shadowFilter.keeps(obj) && !(giHfActive && obj.terrainChunk)) giShadowInstancesCpu.push_back(inst);
+            if (!casterFilter.keeps(obj)) continue;
             if (giReflEnabled)
             {
                 // The shared per-instance surface (HE::giInstanceSurface): a graph material's folded
@@ -3532,7 +3536,7 @@ struct D3D11RendererImpl
         }
         makeSB(giInstancesCpu.data(), static_cast<UINT>(giInstancesCpu.size()),
                sizeof(GIInstanceGpu), giInstanceSB, giInstanceSRV);
-        if (giHfActive)
+        if (giShadowInstancesCpu.size() != giInstancesCpu.size())
         {
             // Never an empty buffer; the count says how many are real.
             const GIInstanceGpu dummy{};
@@ -3998,8 +4002,9 @@ struct D3D11RendererImpl
             if (SUCCEEDED(ctx->Map(giShadowCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &scb, sizeof(scb)); ctx->Unmap(giShadowCB.Get(), 0); }
             // The kernel's instance list: without the terrain chunks while the height field stands in for them.
-            const bool hf = giHfActive && giShadowInstanceSRV && giHfSRV && giHfCB && !rw.heightfields.empty();
-            glm::ivec4 cnt(hf ? giShadowInstanceCount : giInstanceCount, 0, 0, 0);
+            const bool sep = giShadowInstanceSRV != nullptr;
+            const bool hf  = giHfActive && sep && giHfSRV && giHfCB && !rw.heightfields.empty();
+            glm::ivec4 cnt(sep ? giShadowInstanceCount : giInstanceCount, 0, 0, 0);
             if (SUCCEEDED(ctx->Map(giCountCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &cnt, sizeof(cnt)); ctx->Unmap(giCountCB.Get(), 0); }
             if (hf)
@@ -4017,7 +4022,7 @@ struct D3D11RendererImpl
             ctx->CSSetShader(giShadowCS.Get(), nullptr, 0);
             ID3D11ShaderResourceView* srvs[6] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
                                                   giNodeSRV.Get(), giTriSRV.Get(),
-                                                  hf ? giShadowInstanceSRV.Get() : giInstanceSRV.Get(),
+                                                  sep ? giShadowInstanceSRV.Get() : giInstanceSRV.Get(),
                                                   hf ? giHfSRV.Get() : nullptr };
             ctx->CSSetShaderResources(0, 6, srvs);
             ID3D11Buffer* cbs[3] = { giShadowCB.Get(), giCountCB.Get(), hf ? giHfCB.Get() : nullptr };

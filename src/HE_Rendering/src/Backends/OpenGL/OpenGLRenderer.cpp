@@ -6343,6 +6343,9 @@ void OpenGLRenderer::UpdateGIAccel()
 		return m_giBlas.add(id, BuildGIBvh(id));
 	};
 	const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
+	// The shadow kernel has its own list, thinned by distance even while reflections keep the far scene in the
+	// list the probes and mirrors walk.
+	const HE::GiCasterFilter shadowFilter = HE::GiCasterFilter::For(m_renderWorld, false);
 	static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
 	const GiHeightfield* gHf = (s_hfOn && m_renderWorld.heightfields.size() == 1) ? &m_renderWorld.heightfields[0] : nullptr;
 	m_giHfActive = gHf && EnsureGiHeightfield(*gHf);
@@ -6350,7 +6353,7 @@ void OpenGLRenderer::UpdateGIAccel()
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
 		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-		if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
+		if (!obj.castsShadow || obj.isCluster() || !(casterFilter.keeps(obj) || shadowFilter.keeps(obj))) continue;
 		// Default-cube fallback — an entity without a resolvable mesh asset
 		// RENDERS as the default cube (draw-loop fallback), so it must occlude
 		// as one too, or plain cube entities cast no GI shadow at all.
@@ -6368,8 +6371,8 @@ void OpenGLRenderer::UpdateGIAccel()
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
 		inst.landIndex    = obj.landscapeIndex;   // paint sampling at the hit
-		m_giInstancesCpu.push_back(inst);
-		if (!(m_giHfActive && obj.terrainChunk)) m_giShadowInstancesCpu.push_back(inst);
+		if (shadowFilter.keeps(obj) && !(m_giHfActive && obj.terrainChunk)) m_giShadowInstancesCpu.push_back(inst);
+		if (casterFilter.keeps(obj)) m_giInstancesCpu.push_back(inst);
 	}
 	m_giInstanceCount = static_cast<int>(m_giInstancesCpu.size());
 	meshStreamCounters().giInstances.store(static_cast<uint32_t>(m_giInstanceCount), std::memory_order_relaxed);
@@ -6429,9 +6432,10 @@ void OpenGLRenderer::UpdateGIAccel()
 	glBufferData(GL_SHADER_STORAGE_BUFFER,
 	             static_cast<GLsizeiptr>(m_giInstancesCpu.size() * sizeof(GIInstanceGpu)),
 	             m_giInstancesCpu.data(), GL_DYNAMIC_DRAW);
-	if (m_giHfActive)
+	m_giShadowSep = m_giShadowInstancesCpu.size() != m_giInstancesCpu.size();
+	if (m_giShadowSep)
 	{
-		// The shadow kernel's own list, without the terrain chunks (the height field answers for them).
+		// The shadow kernel's own list: thinned by distance and without the terrain chunks the height field answers for.
 		if (!m_giShadowInstanceSSBO) glGenBuffers(1, &m_giShadowInstanceSSBO);
 		m_giShadowInstanceCount = static_cast<int>(m_giShadowInstancesCpu.size());
 		const GIInstanceGpu dummy{};   // never size 0
@@ -6487,7 +6491,7 @@ void OpenGLRenderer::DestroyGIAccel()
 	m_giInstanceCount = 0;
 	if (m_giShadowInstanceSSBO) { glDeleteBuffers(1, &m_giShadowInstanceSSBO); m_giShadowInstanceSSBO = 0; }
 	if (m_giHfTex) { glDeleteTextures(1, &m_giHfTex); m_giHfTex = 0; }
-	m_giHfVersion = 0; m_giHfKey = ~0ull; m_giHfActive = false;
+	m_giHfVersion = 0; m_giHfKey = ~0ull; m_giHfActive = false; m_giShadowSep = false;
 	m_giShadowInstancesCpu.clear(); m_giShadowInstanceCount = 0;
 }
 
@@ -6994,8 +6998,9 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
 	// Without the terrain chunks while the height field stands in for them (EnsureGiHeightfield).
-	const bool hfOn = m_giHfActive && m_giShadowInstanceSSBO && m_giHfTex && !m_renderWorld.heightfields.empty();
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, hfOn ? m_giShadowInstanceSSBO : m_giInstanceSSBO);
+	const bool sepOn = m_giShadowSep && m_giShadowInstanceSSBO;
+	const bool hfOn  = sepOn && m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty();
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, sepOn ? m_giShadowInstanceSSBO : m_giInstanceSSBO);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGPos"), 0);
@@ -7021,7 +7026,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
 		            static_cast<float>(masked.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 	}
-	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), hfOn ? m_giShadowInstanceCount : m_giInstanceCount);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), sepOn ? m_giShadowInstanceCount : m_giInstanceCount);
 	{
 		const GiHeightfield* h0 = m_renderWorld.heightfields.empty() ? nullptr : &m_renderWorld.heightfields[0];
 		glActiveTexture(GL_TEXTURE2);

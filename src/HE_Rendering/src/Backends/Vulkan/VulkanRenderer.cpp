@@ -11246,6 +11246,9 @@ void VulkanRenderer::updateGiAccel()
     static int s_giLogCall = 0;
     const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
     const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
+    // The software shadow kernel has its own list, thinned by distance even while reflections keep the far scene
+    // in the list the probes and mirrors walk.
+    const HE::GiCasterFilter shadowFilter = HE::GiCasterFilter::For(m_renderWorld, false);
     static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
     const GiHeightfield* gHf = (s_hfOn && m_renderWorld.heightfields.size() == 1) ? &m_renderWorld.heightfields[0] : nullptr;
     m_giHfActive = gHf && ensureGiHeightfield(*gHf);
@@ -11253,7 +11256,7 @@ void VulkanRenderer::updateGiAccel()
     for (const RenderObject& obj : m_renderWorld.objects)
     {
         // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-        if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
+        if (!obj.castsShadow || obj.isCluster() || !(casterFilter.keeps(obj) || shadowFilter.keeps(obj))) continue;
         // Default-cube fallback — an entity without a resolvable mesh asset
         // RENDERS as the default cube (draw-loop fallback), so it must occlude
         // as one too, or plain cube entities cast no GI shadow at all.
@@ -11266,8 +11269,9 @@ void VulkanRenderer::updateGiAccel()
         inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
         inst.nodeOffset   = range.nodeOffset;
         inst.triOffset    = range.triOffset;
+        if (shadowFilter.keeps(obj) && !(m_giHfActive && obj.terrainChunk)) shadowInstances.push_back(inst);
+        if (!casterFilter.keeps(obj)) continue;
         instances.push_back(inst);
-        if (!(m_giHfActive && obj.terrainChunk)) shadowInstances.push_back(inst);
         if (m_giReflEnabled)
         {
             // The shared per-instance surface (HE::giInstanceSurface): a graph
@@ -11358,16 +11362,17 @@ void VulkanRenderer::updateGiAccel()
     if (!uploadGiBuffer(m_giInstanceBuf[m_currentFrame], instances.data(),
                         instances.size() * sizeof(GIInstanceGpu)))
         return;
-    if (m_giHfActive)
+    m_giShadowSep = shadowInstances.size() != instances.size();
+    if (m_giShadowSep)
     {
         const GIInstanceGpu dummy{};   // never size 0
         m_giShadowInstanceCount = static_cast<int>(shadowInstances.size());
         if (!uploadGiBuffer(m_giShadowInstanceBuf[m_currentFrame], shadowInstances.empty() ? &dummy : shadowInstances.data(),
                             std::max<size_t>(shadowInstances.size(), 1) * sizeof(GIInstanceGpu)))
-            m_giHfActive = false;
+            { m_giShadowSep = false; m_giHfActive = false; }
     }
     m_giInstanceCount = static_cast<int>(instances.size());
-    if (!m_giHfActive) m_giShadowInstanceCount = m_giInstanceCount;
+    if (!m_giShadowSep) m_giShadowInstanceCount = m_giInstanceCount;
     meshStreamCounters().giInstances.store(static_cast<uint32_t>(m_giInstanceCount), std::memory_order_relaxed);
     // gi_refl.comp's own ring, same slot convention — only kept current while
     // reflections are enabled (runGiReflections doesn't run otherwise).
@@ -11418,7 +11423,7 @@ void VulkanRenderer::destroyGiAccel()
         if (r.mem)  vkFreeMemory(m_device, r.mem, nullptr);
     }
     m_retiredHf.clear();
-    m_giHfVersion = 0; m_giHfKey = ~0ull; m_giHfActive = false; m_giShadowInstanceCount = 0;
+    m_giHfVersion = 0; m_giHfKey = ~0ull; m_giHfActive = false; m_giShadowSep = false; m_giShadowInstanceCount = 0;
     for (GiBuffer& b : m_giReflInstanceBuf) destroy(b);
     for (GiBuffer& b : m_giLandBuf) destroy(b);
     m_giBlas.clear();
@@ -12594,9 +12599,10 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     GiShadowUBOData shadowUbo{};
     shadowUbo.sunDirRadius = glm::vec4(towardLight, glm::radians(m_giLightRadius));
     // The software kernel's own instance list (without the terrain chunks) while the height field stands in for them.
-    const bool hfOn = !useHw && m_giHfActive && m_giHfView && !m_renderWorld.heightfields.empty();
+    const bool sepOn = !useHw && m_giShadowSep;
+    const bool hfOn  = sepOn && m_giHfActive && m_giHfView && !m_renderWorld.heightfields.empty();
     shadowUbo.frame        = glm::vec4(m_giFrameSeed, float(gw), float(gh),
-                                       float(hfOn ? m_giShadowInstanceCount : m_giInstanceCount));
+                                       float(sepOn ? m_giShadowInstanceCount : m_giInstanceCount));
     {
         const GiHeightfield* h0 = m_renderWorld.heightfields.empty() ? nullptr : &m_renderWorld.heightfields[0];
         shadowUbo.hfWorldToLocal = h0 ? h0->worldToLocal : glm::mat4(1.0f);
@@ -12694,7 +12700,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
         // Shadow kernel set (HW: + TLAS at binding 7).
         wBuf(shadowSet, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &nodesBI);
         wBuf(shadowSet, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &trisBI);
-        wBuf(shadowSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, hfOn ? &shadowInstBI : &instBI);
+        wBuf(shadowSet, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sepOn ? &shadowInstBI : &instBI);
         wImg(shadowSet, 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &posBI);
         wImg(shadowSet, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &normBI);
         wImg(shadowSet, 5, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &rawSI);

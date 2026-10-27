@@ -1351,6 +1351,7 @@ private:
 	int          m_giHfTopLevel = 0;
 	float        m_giHfMaxH = 0.0f;
 	bool         m_giHfActive = false;
+	bool         m_giShadowSep = false;   // the shadow kernel walks m_giShadowInstanceSSBO (thinned / without chunks)
 	std::vector<GIInstanceGpu> m_giShadowInstancesCpu;
 	unsigned int m_giShadowInstanceSSBO = 0;
 	int          m_giShadowInstanceCount = 0;

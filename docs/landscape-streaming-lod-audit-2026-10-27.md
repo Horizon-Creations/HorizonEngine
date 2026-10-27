@@ -284,3 +284,14 @@ EditorApplication.cpp (witness), `scripts/he_gi_hf_check.py`, tests.
 
 **Update 27.10.2026 (end):** height field now also in Vulkan (software kernel) and OpenGL; HLOD skipped on measurements (see above). Open: OpenGL pixel evidence (needs a witness where the
 GL RT mask shows), D3D12 DXR/Metal kernels, probes/reflections on the height field (then the 500 m cut can go), more than one landscape, camera-centred probe cascades (step 2).
+
+## Follow-up 27.10.2026: Schatten-Kernel mit eigener, ausgedünnter Liste auch bei GI-Reflexionen
+
+* Befund: Das Höhenfeld kann Proben/Reflexionen **nicht** bedienen. Sie brauchen Closest-Hit samt Normale und Albedo (Landschaftsmaterial),
+  `giSceneClosestHit(Tri)` läuft weiter über die Chunk-Meshes. Die 500-m-Grenze fällt dort also nicht.
+* Stattdessen: D3D11/Vulkan/OpenGL filtern die **Schatten-Liste** immer mit `GiCasterFilter::For(rw, false)`, auch bei Reflexionen; Proben und
+  Spiegel behalten die volle Liste (`giInstances` bleibt 257). Flag `giShadowSep` / `m_giShadowSep` = "Schattenliste ist eine eigene".
+* D3D11 setzt GI-Reflexionen in den Capabilities ohnehin aus (`supportsGIReflections=false`): dort war der Schnitt nie abgeschaltet.
+* Messung (hidden, GI+Reflexionen an, 400 Frames, `HE_GI_FORCE_SW=1`): OpenGL GIShadow 1.14 -> 1.07 ms, Vulkan GI gesamt 2.52 -> 2.49 ms.
+  Mit aktivem Höhenfeld sind die Chunks schon draußen, der Gewinn ist klein; er zählt bei mehreren Landschaften / vielen fernen Props.
+* Tests: culling/gi_bvh/lod/terrain_tessellation 120/120. Nicht verifiziert: Pixelvergleich mit Reflexionen, D3D12/Metal unverändert.
