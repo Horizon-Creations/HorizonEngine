@@ -413,6 +413,9 @@ struct BinauralNode
     bool                                     airAbsorption = false;
     bool                                     occlusion     = false;
     bool                                     reflections   = false;
+    // Where to hear the voice from while it arrives by a detour (setSoundPath).
+    std::atomic<bool>                        pathActive{ false };
+    std::atomic<float>                       pathPos[3] = { { 0.0f }, { 0.0f }, { 0.0f } };
     // From the game thread (setSoundOcclusion), read per block.
     std::atomic<float>                       visibility{ 1.0f };
     std::atomic<float>                       transmission[3] = { { 1.0f }, { 1.0f }, { 1.0f } };
@@ -433,9 +436,10 @@ struct BinauralNode
 
     void renderBlock()
     {
-        const float sx = src[0].load(std::memory_order_relaxed) - listener->pos[0].load(std::memory_order_relaxed);
-        const float sy = src[1].load(std::memory_order_relaxed) - listener->pos[1].load(std::memory_order_relaxed);
-        const float sz = src[2].load(std::memory_order_relaxed) - listener->pos[2].load(std::memory_order_relaxed);
+        const std::atomic<float>* at = pathActive.load(std::memory_order_relaxed) ? pathPos : src;
+        const float sx = at[0].load(std::memory_order_relaxed) - listener->pos[0].load(std::memory_order_relaxed);
+        const float sy = at[1].load(std::memory_order_relaxed) - listener->pos[1].load(std::memory_order_relaxed);
+        const float sz = at[2].load(std::memory_order_relaxed) - listener->pos[2].load(std::memory_order_relaxed);
         const HE::SpatialDirection dir = HE::listenerRelativeDirection(
             sx, sy, sz,
             listener->fwd[0].load(std::memory_order_relaxed), listener->fwd[1].load(std::memory_order_relaxed),
@@ -459,8 +463,8 @@ struct BinauralNode
         if (fx && airAbsorption)
         {
             direct.airAbsorption = true;
-            fx->airAbsorption(src[0].load(std::memory_order_relaxed), src[1].load(std::memory_order_relaxed),
-                              src[2].load(std::memory_order_relaxed),
+            fx->airAbsorption(at[0].load(std::memory_order_relaxed), at[1].load(std::memory_order_relaxed),
+                              at[2].load(std::memory_order_relaxed),
                               listener->pos[0].load(std::memory_order_relaxed), listener->pos[1].load(std::memory_order_relaxed),
                               listener->pos[2].load(std::memory_order_relaxed), direct.airBands);
         }
@@ -829,6 +833,17 @@ void AudioEngine::setSoundOcclusion(uint64_t handle, float visibility, const flo
     n.visibility.store(std::min(std::max(visibility, 0.0f), 1.0f), std::memory_order_relaxed);
     for (int b = 0; b < 3; ++b)
         n.transmission[b].store(std::min(std::max(transmission[b], 0.0f), 1.0f), std::memory_order_relaxed);
+}
+
+void AudioEngine::setSoundPath(uint64_t handle, bool active, float x, float y, float z)
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->bin) return;
+    BinauralNode& n = *it->second->bin;
+    n.pathPos[0].store(x, std::memory_order_relaxed);
+    n.pathPos[1].store(y, std::memory_order_relaxed);
+    n.pathPos[2].store(z, std::memory_order_relaxed);
+    n.pathActive.store(active, std::memory_order_relaxed);
 }
 
 void AudioEngine::setRoomReverb(const float reverbTimes[3], float wet)

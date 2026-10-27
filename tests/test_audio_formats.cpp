@@ -10,6 +10,7 @@
 #include <HorizonScene/SteamAudio.h>
 #include <HorizonScene/AudioOcclusion.h>
 #include <HorizonScene/AudioRoom.h>
+#include <HorizonScene/AudioPath.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -739,5 +740,80 @@ TEST_CASE("Steam Audio option: reflections leave a reverb tail after the sound h
 	const float none[3] = { 0, 0, 0 };
 	engine.setRoomReverb(none, 0.0f);
 	CHECK(tail() < 1.0e-6);
+	engine.shutdown();
+}
+
+TEST_CASE("Path estimate: a door in the wall routes the sound through it; a solid wall and open air do not")
+{
+	using HE::estimatePath;
+	const glm::vec3 listener(0, 0, 0), source(10, 0, 0);
+
+	// A wall slab 0.4 m thick around x = 5 for z in [-20, 20], optionally with a door for z in [6, 10].
+	auto wall = [](bool door) {
+		return [door](const glm::vec3& from, const glm::vec3& dir, float maxDist) {
+			if (std::abs(dir.x) < 1.0e-5f) return false;
+			// Where the ray enters and leaves the slab's x range, then is the point in the wall's z extent?
+			float t0 = (4.8f - from.x) / dir.x, t1 = (5.2f - from.x) / dir.x;
+			if (t0 > t1) std::swap(t0, t1);
+			t0 = std::max(t0, 0.0f);
+			if (t0 > t1 || t0 >= maxDist) return false;
+			for (float t = t0; t <= std::min(t1, maxDist); t += 0.05f)
+			{
+				const float z = from.z + dir.z * t;
+				if (std::abs(z) < 20.0f && !(door && z >= 6.0f && z <= 10.0f)) return true;
+			}
+			return false;
+		};
+	};
+	const HE::PathResult p = estimatePath(listener, source, wall(true));
+	CHECK(p.routed);
+	CHECK(p.length > 10.0f);                           // longer than the blocked straight line
+	CHECK(p.length < 25.0f);
+	CHECK(p.position.z > 2.0f);                        // heard from the door's side
+	CHECK(glm::length(p.position - listener) == doctest::Approx(p.length));
+
+	// Solid wall, no door: nothing to route through.
+	CHECK_FALSE(estimatePath(listener, source, wall(false)).routed);
+
+	// Open air: the straight line is clear, so there is no detour to report.
+	CHECK_FALSE(estimatePath(listener, source, [](const glm::vec3&, const glm::vec3&, float) { return false; }).routed);
+}
+
+TEST_CASE("Steam Audio option: a routed voice is heard from the detour's direction and falls off with its length")
+{
+	if (!HE::SteamAudio::compiledIn()) return;
+
+	AudioEngine engine;
+	REQUIRE(engine.init(true));
+	engine.setListenerTransform(0, 0, 0, 0, 0, -1, 0, 1, 0);
+	REQUIRE(engine.setSpatialBackend(HE::AudioSpatialBackend::SteamAudio));
+	const std::vector<uint8_t> tone = sinePcm(500.0f);
+
+	auto ears = [&](bool routed, float px, float py, float pz, double& l, double& r) {
+		// The voice itself sits on the right (+x); the route, when there is one, comes from the left.
+		const uint64_t h = engine.playSpatial(tone, 48000, 1, 1.0f, 1.0f, true, 6.0f, 0.0f, 0.0f, 1.0f, 100.0f, "",
+		                                      AudioAttenuation::Linear, 1.0f);
+		REQUIRE(h != 0);
+		engine.setSoundPath(h, routed, px, py, pz);
+		std::vector<float> mix(2 * 4096);
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);
+		l = r = 0.0;
+		for (int i = 0; i < 4096; ++i)
+		{
+			l += static_cast<double>(mix[static_cast<size_t>(i) * 2])     * mix[static_cast<size_t>(i) * 2];
+			r += static_cast<double>(mix[static_cast<size_t>(i) * 2 + 1]) * mix[static_cast<size_t>(i) * 2 + 1];
+		}
+		engine.stop(h);
+	};
+
+	double l0 = 0, r0 = 0, l1 = 0, r1 = 0, l2 = 0, r2 = 0;
+	ears(false, 0, 0, 0, l0, r0);
+	CHECK(r0 > 2.0 * l0);                    // not routed: heard where it is, on the right
+	ears(true, -6, 0, 0, l1, r1);
+	CHECK(l1 > 2.0 * r1);                    // routed: heard from the left
+	CHECK((l1 + r1) == doctest::Approx(l0 + r0).epsilon(0.5));   // the same distance: about as loud
+	ears(true, -60, 0, 0, l2, r2);           // a much longer detour
+	CHECK((l2 + r2) < 0.5 * (l1 + r1));      // quieter
 	engine.shutdown();
 }

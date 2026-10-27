@@ -106,3 +106,30 @@ build lacks the SDK); default ON for editor trees, OFF/omitted by flavour for ap
 (`AudioMixerPanel::DrawAudioMixer`, drawn by `drawAudioBusesPage`); the Window-menu entry, Mac menu
 item, panel-table row and help rows are removed. Built (HorizonEditor links), related tests green;
 the page was not looked at on screen.
+
+## Update: the rest of Steam Audio (same day)
+
+Four project options (`AudioBusConfig::steam`, JSON `"steam": {...}`, Project Settings > Audio Buses),
+each greyed out unless the build has Steam Audio AND the project uses it:
+
+| Option | What it does | How | Witness |
+|---|---|---|---|
+| Air absorption | far voices lose treble | `iplDirectEffect` + `iplAirAbsorptionCalculate`, per block in `BinauralNode` | 150 m: 6 kHz < 20 %, 150 Hz > 50 % |
+| Occlusion | wall muffles and dims | `AudioOcclusion.h`: 5 rays through the PHYSICS colliders -> direct effect occlusion + transmission | wall: bass leaks, treble < 5 % |
+| Reflections | room reverb | `AudioRoom.h`: 26 rays -> Sabine RT60 + closedness -> `iplReflectionEffect` PARAMETRIC | tail after the clip ended |
+| Pathing | sound arrives through the door | `AudioPath.h`: waypoint search (3 x 8 candidates) -> voice heard from the detour's direction/length | door routes, solid wall does not |
+
+DECIDED: no `IPLScene`/simulator. The physics world is the one geometry the game has, so rays against it
+cannot drift from the level and need no mirroring or baking. Cost: this is an ESTIMATE of rooms and paths, not
+Steam Audio's simulation (no per-material absorption, no baked probe pathing, no IR convolution). Pathing is
+therefore NOT Steam's probe pathing and says so in its help text. Ambisonics is internal to Steam's
+reflection effect, so it has no switch; Doppler is a miniaudio parameter our Steam voices bypass: not built.
+The options are read when a voice starts; room/occlusion/path update from `AudioSystem::updateSpatial` (needs the
+physics world: Editor and Game pass theirs).
+
+Not verified by ear; only against the real `libphonon` with measured energy (he_tests, `test_audio_formats`).
+Not verified: occlusion/reflections/pathing in a running scene with real colliders (AudioSystem's ray lambdas
+compile in Editor and Game but were not exercised), performance with many voices (rays per source: 5 + up to
+48 when blocked, every frame; room: every 6th frame), Windows/Linux.
+Next: rate-limit/stagger the per-source rays if profiling shows them; a "Steam Audio" debug overlay; real
+Steam scene (IPLScene) only if per-material acoustics is wanted.

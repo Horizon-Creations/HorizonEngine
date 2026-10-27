@@ -3449,9 +3449,13 @@ namespace
 	  "while the game plays. Saved with the project.",
 	  "", "systems#audio" },
 	{ "Audio Mixer/Pathing", "",
-	  "Lets sound find its way around corners and through doors instead of being "
-	  "cut off by the wall. Needs Steam Audio (HRTF) switched on, and baked probe "
-	  "data in the scene. Saved with the project.",
+	  "Lets sound find its way round corners and through doors: when a wall blocks the "
+	  "straight line to a 3D voice, a few detours beside it are tried through the "
+	  "physics colliders, and if one is open the voice is heard from the doorway, "
+	  "farther away and a little duller, instead of through the wall. This is a live "
+	  "estimate; it does not use Steam Audio's baked probe pathing, so there is nothing "
+	  "to bake. Needs Steam Audio (HRTF) switched on, and acts while the game plays. "
+	  "Saved with the project.",
 	  "", "systems#audio" },
 	{ "Audio Mixer/Name", "",
 	  "The name of the bus to add. It is what a source's Bus field and a "

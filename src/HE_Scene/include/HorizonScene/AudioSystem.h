@@ -6,6 +6,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/AudioOcclusion.h>
 #include <HorizonScene/AudioRoom.h>
+#include <HorizonScene/AudioPath.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/EntityActive.h>   // the "Active" switch: no sound from what is off
@@ -115,6 +116,26 @@ struct AudioSystem
                         return !(c && c->isTrigger);
                     });
                 engine.setSoundOcclusion(src.handle, occ.visibility, occ.transmission);
+            }
+            if (physics && engine.steamOptions().pathing &&
+                engine.spatialBackend() == HE::AudioSpatialBackend::SteamAudio)
+            {
+                const uint32_t self = static_cast<uint32_t>(entity);
+                const HE::PathResult path = HE::estimatePath(
+                    listenerPos, t.position,
+                    [&](const glm::vec3& from, const glm::vec3& dir, float maxDist) {
+                        const PhysicsWorld::RaycastHit h = physics->raycast(from, dir, maxDist, listenerEntity);
+                        if (!h.hit || h.entityId == self) return false;
+                        const auto* c = reg.try_get<ColliderComponent>(static_cast<entt::entity>(h.entityId));
+                        return !(c && c->isTrigger);
+                    });
+                engine.setSoundPath(src.handle, path.routed, path.position.x, path.position.y, path.position.z);
+                // Arriving by the doorway instead of through the wall: not blocked any more, just a bit duller.
+                if (path.routed && engine.steamOptions().occlusion)
+                {
+                    const float through[3] = { 1.0f, 1.0f, 1.0f };
+                    engine.setSoundOcclusion(src.handle, HE::kPathVisibility, through);
+                }
             }
         }
     }

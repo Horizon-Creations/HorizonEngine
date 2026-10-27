@@ -122,6 +122,10 @@ public:
     // the three band gains (low / mid / high) of what a blocker passes. No effect on a voice
     // that was not started with the occlusion option on, or is not on the Steam Audio backend.
     void setSoundOcclusion(uint64_t handle, float visibility, const float transmission[3]);
+    // Where a Steam Audio voice is HEARD from while its sound arrives by a detour (round a
+    // corner, through a door: HorizonScene/AudioPath.h): the direction and distance the HRTF and
+    // the falloff use instead of the source's own position. `active` false = hear it where it is.
+    void setSoundPath(uint64_t handle, bool active, float x, float y, float z);
     // The reverb of the room the listener is in (HorizonScene/AudioRoom.h): RT60 seconds per band
     // (low / mid / high) and how much of it to mix in, 0..1. Heard on Steam Audio voices started
     // with the reflections option on.
