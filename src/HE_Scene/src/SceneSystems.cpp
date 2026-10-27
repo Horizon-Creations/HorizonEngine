@@ -64,8 +64,11 @@ int getWeatherPrecipCap(const WeatherComponent* wc, bool isSnow)
 // Build the GPU precipitation parameters from the EnvironmentComponent (the single
 // source of truth for rain/snow, whether set by a weather preset or by hand). Pushed
 // every frame so the renderer reliably idles when `active` is false — no leftover pool.
+// `weather` is the scene's WeatherComponent (tickWorld looks it up once for every
+// caller this frame), or nullptr if the scene has none.
 void pushGpuParticleParams(HorizonWorld& world, IRenderer* renderer,
-                           const glm::vec3& cameraPos, float dt, bool active, float time)
+                           const glm::vec3& cameraPos, float dt, bool active, float time,
+                           const WeatherComponent* weather)
 {
     IRenderer::GpuParticleParams gp;
     auto& reg = world.registry();
@@ -81,9 +84,7 @@ void pushGpuParticleParams(HorizonWorld& world, IRenderer* renderer,
         const float wr     = glm::radians(env->windDirection);
         const float fall   = isSnow ? 2.0f : 18.0f;
         const float boxTop = 24.0f;
-        const WeatherComponent* wc = nullptr;
-        for (auto [e, w] : reg.view<WeatherComponent>().each()) { wc = &w; break; }
-        const int   cap    = getWeatherPrecipCap(wc, isSnow);
+        const int   cap    = getWeatherPrecipCap(weather, isSnow);
         gp.enabled     = true;
         gp.isSnow      = isSnow;
         gp.count       = cap;
@@ -135,15 +136,19 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     { HE_PROFILE_SCOPE_N("Navigation");            NavigationSystem::update(world, dt,
         const_cast<PhysicsWorld*>(physics)); }
     { HE_PROFILE_SCOPE_N("Weather");               WeatherSystem::update(world, dt, cameraPos, physics, gpuParticles); } // env clouds/fog/wind + precip
+    // Searched once for the whole tick: pushGpuParticleParams below and
+    // pushProfilerSceneCounters at the end both need the scene's WeatherComponent
+    // (if any) and used to each run this same view().each() search themselves.
+    const WeatherComponent* weather = nullptr;
+    for (auto [e, wc] : world.registry().view<WeatherComponent>().each()) { weather = &wc; break; }
     if (renderer)
     {
         HE_PROFILE_SCOPE_N("GpuParticleParams");
         // Always push (active=gpuParticles) so the GPU pool reliably stops when the
         // toggle is off or precip hits zero. Clock for the respawn hash: weatherTime
         // when a WeatherComponent exists, else a steady fallback from the frame time.
-        float clock = 0.0f;
-        for (auto [e, wc] : world.registry().view<WeatherComponent>().each()) { clock = wc.weatherTime; break; }
-        pushGpuParticleParams(world, renderer, cameraPos, dt, gpuParticles, clock);
+        const float clock = weather ? weather->weatherTime : 0.0f;
+        pushGpuParticleParams(world, renderer, cameraPos, dt, gpuParticles, clock, weather);
     }
     { HE_PROFILE_SCOPE_N("ParticleSystem"); ParticleSystem::update(world, cm, dt, physics); } // entity-bound emitters only — precipitation is WeatherSystem's own pool
     { HE_PROFILE_SCOPE_N("Foliage");        FoliageSystem::update(world); }
@@ -159,7 +164,7 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // have picked theirs), so it is the one thing that runs after it.
     { HE_PROFILE_SCOPE_N("TerrainSeams");   TerrainSystem::stitchSeams(world, cm, renderer); }
 
-    pushProfilerSceneCounters(world, cm, gpuParticles);
+    pushProfilerSceneCounters(world, cm, gpuParticles, weather);
 }
 
 // Scene-side profiler counters. The renderer can answer draws/tris/visible, but
@@ -171,7 +176,7 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
 // of which there are a handful. Skipped entirely unless a capture is recording or
 // the editor's live HUD is open, so an unprofiled frame pays one bool check.
 void SceneSystems::pushProfilerSceneCounters(HorizonWorld& world, ContentManager& cm,
-                                             bool gpuParticles)
+                                             bool gpuParticles, const WeatherComponent* weather)
 {
     EngineProfiler& prof = EngineProfiler::instance();
     if (!prof.isRecording() && !prof.liveEnabled()) return;
@@ -199,9 +204,7 @@ void SceneSystems::pushProfilerSceneCounters(HorizonWorld& world, ContentManager
         if (env && amount > 0.001f)
         {
             const bool isSnow = env->snowAmount > env->rainAmount;
-            const WeatherComponent* wc = nullptr;
-            for (auto [e, w] : reg.view<WeatherComponent>().each()) { wc = &w; break; }
-            c.gpuParticles = static_cast<uint32_t>(getWeatherPrecipCap(wc, isSnow));
+            c.gpuParticles = static_cast<uint32_t>(getWeatherPrecipCap(weather, isSnow));
         }
     }
 
