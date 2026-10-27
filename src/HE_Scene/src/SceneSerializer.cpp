@@ -4306,9 +4306,9 @@ static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const jso
 
     // Nested instances created above: their bindings still name the
     // template's entities. Point them at what this pass made of those.
-    for (const auto& [key, e] : created)
+    for (const auto& entry : created)
     {
-        (void)key;
+        Entity e = entry.second;
         auto* nested = registry.try_get<PrefabInstanceComponent>(e);
         if (!nested) continue;
         for (auto& b : nested->bindings)
