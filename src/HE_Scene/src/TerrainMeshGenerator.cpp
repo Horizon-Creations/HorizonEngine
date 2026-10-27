@@ -441,10 +441,16 @@ namespace
         for (uint32_t j = 0; j < N; ++j)
             for (uint32_t i = 0; i < N; ++i)
             {
-                // (u, v) here is bit-identical to the base grid's (u, v) at (i*stride, j*stride):
-                // both reduce the same exact-integer ratio i/(N-1) == (i*stride)/(base.n-1) under
-                // IEEE-754 correctly-rounded division, so the base's already-computed height and
-                // normal at that index are exactly what resampling the field here would produce.
+                // (u, v) here is bit-identical to the base grid's (u, v) at (i*stride, j*stride),
+                // so the base's already-computed height and normal at that index are exactly what
+                // resampling the field here would produce. u evaluates as `((u1-u0)*i)/(N-1)`: the
+                // multiply rounds once, and multiplying an already-rounded float by `stride` (a
+                // power of two, guaranteed by strideOf below) is exact — a pure exponent shift, no
+                // further rounding — so `round((u1-u0)*i) * stride == round((u1-u0)*i*stride)`,
+                // which is exactly the base grid's numerator at index i*stride. This does NOT hold
+                // for a non-power-of-two stride (3, say): `round((u1-u0)*i)*3` need not equal
+                // `round((u1-u0)*i*3)`, which is why strideOf below rejects it rather than allowing
+                // a near-miss.
                 const uint32_t bi = i * stride, bj = j * stride;
                 const float u  = u0 + (u1 - u0) * static_cast<float>(i) / static_cast<float>(N - 1);
                 const float v  = v0 + (v1 - v0) * static_cast<float>(j) / static_cast<float>(N - 1);

@@ -4,6 +4,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/AnimationSystem.h>
+#include <HorizonScene/RootMotion.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
@@ -143,6 +144,10 @@ void populateMixed(Crowd& c, int count)
         {
             RootMotionComponent rm;
             rm.mode = RootMotionComponent::Mode::Transform;
+            // The clip's root channel only moves in Y (makeFullBodyClip) — extract that axis
+            // (off by default) so a real HE::RootMotionContext actually moves the entity below,
+            // instead of extracting-and-locking into a delta nobody applies.
+            rm.options.extractTranslationY = true;
             c.world.addComponent(e, rm);
         }
         c.entities.push_back(e);
@@ -162,17 +167,22 @@ TEST_CASE("AnimationSystem::setParallelOverride(0) and the pool agree bit for bi
     populateMixed(serial,   kCount);
     populateMixed(parallel, kCount);
 
+    // A real context (not nullptr) so root motion actually moves the Mode::Transform entities
+    // instead of only extracting-and-locking a delta nobody applies (RootMotionApply.h) — the
+    // Transform-mode write path never dereferences `physics`, so nullptr here is fine.
+    HE::RootMotionContext rmCtx;
     HE::NotifyQueue serialNotifies, parallelNotifies;
     for (int frame = 0; frame < 5; ++frame)
     {
         AnimationSystem::setParallelOverride(0);
-        AnimationSystem::update(serial.world, serial.cm, 1.0f / 60.0f, nullptr, &serialNotifies);
+        AnimationSystem::update(serial.world, serial.cm, 1.0f / 60.0f, &rmCtx, &serialNotifies);
         AnimationSystem::setParallelOverride(-1);
-        AnimationSystem::update(parallel.world, parallel.cm, 1.0f / 60.0f, nullptr, &parallelNotifies);
+        AnimationSystem::update(parallel.world, parallel.cm, 1.0f / 60.0f, &rmCtx, &parallelNotifies);
     }
     AnimationSystem::setParallelOverride(-1);   // restore the default for whatever runs after this case
 
     REQUIRE(serial.entities.size() == parallel.entities.size());
+    bool anyRootMotionMoved = false;
     for (size_t i = 0; i < serial.entities.size(); ++i)
     {
         const auto& sb = serial.world.registry().get<SkeletalMeshComponent>(serial.entities[i]).boneMatrices;
@@ -184,7 +194,11 @@ TEST_CASE("AnimationSystem::setParallelOverride(0) and the pool agree bit for bi
         const auto& pt = parallel.world.registry().get<TransformComponent>(parallel.entities[i]);
         CHECK(st.position == pt.position);
         CHECK(st.rotation == pt.rotation);
+        if (i % 3 == 0 && st.position.y != 0.0f) anyRootMotionMoved = true;
     }
+    // Otherwise the position/rotation checks above would pass trivially (both sides at the
+    // TransformComponent default) without exercising the serial/complex split at all.
+    CHECK(anyRootMotionMoved);
 
     REQUIRE(serialNotifies.size() == parallelNotifies.size());
     REQUIRE(!serialNotifies.empty());   // the clip's "Step" notify must have fired at least once

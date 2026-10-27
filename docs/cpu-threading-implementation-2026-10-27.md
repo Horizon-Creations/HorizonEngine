@@ -27,24 +27,32 @@ resampling the field — falling back to the old resampling path (and refreshing
 cache) whenever the requested level's `vertsPerSide` is not an exact power-of-two
 stride of what is cached.
 
-**Why this is bit-identical, not just "close enough":** a grid vertex `i` of a
-`N`-vertex level and the cached base's vertex `i·stride` (where `base.n - 1 =
-stride·(N-1)`) compute `u = u0 + (u1-u0)·float(i)/float(N-1)` from exact integer
-ratios that reduce to the *same real number* either way; IEEE-754 division is
-correctly rounded to the nearest representable value of that real number, so the two
-expressions produce the identical `float`, bit for bit — and `sampleField`/
-`sampleFieldNormal` are pure functions of `(heights, srcRes, u, v)`. The surface
-triangles and skirt (`finishChunkMesh`, factored out of `buildChunkMesh` unchanged)
-run on whichever grid was filled, so they do not care how it got there. The
-power-of-two check is load-bearing, not conservative: a stride of 3 (49→17 verts, for
-example) would **not** reduce to the same rounded value, so a non-power-of-two stride
-correctly falls back to resampling (covered by a dedicated test).
+**Why this is bit-identical, not just "close enough" — and why it needs the
+power-of-two guard, not just "a stride":** `u` evaluates as `u0 + ((u1-u0) * i) /
+(N-1)`. The multiply `(u1-u0) * i` rounds once to the nearest float; multiplying that
+*already-rounded* value by a power of two is exact (a pure exponent shift, no further
+rounding), so `round((u1-u0)*i) * 2^k == round((u1-u0)*i*2^k)` — which is exactly the
+cached base grid's numerator at index `i*stride`. An arbitrary stride has no such
+guarantee: `round((u1-u0)*i) * 3` is not in general equal to `round((u1-u0)*i*3)`, two
+independently-rounded products of different real values. That is why `strideOf`
+(TerrainMeshGenerator.cpp) rejects anything that is not an exact power-of-two stride
+rather than any exact integer stride — the guard is load-bearing, not a conservative
+extra one could safely relax. `sampleField`/`sampleFieldNormal` are pure functions of
+`(heights, srcRes, u, v)`, so matching `u`/`v` bit for bit is the whole proof; the
+surface triangles and skirt (`finishChunkMesh`, factored out of `buildChunkMesh`
+unchanged) run on whichever grid was filled and do not care how it got there.
 
 New tests in `tests/test_terrain.cpp`: `generateTerrainChunkMeshLOD`'s cached
 downsample `memcmp`-matches `generateTerrainChunkMesh`'s direct resample across all
-four LOD levels, two chunks (one at the `u1=v1=1` clamp edge), a non-flat/non-linear
-field; a second test seeds the cache with an off-sequence 49-vertex grid and confirms
-a 17-vertex request (stride 3) falls back correctly instead of misreading the cache.
+four LOD levels, three chunks (one at the `u1=v1=1` clamp edge, one with a
+non-power-of-two-fraction span `u0=1/3,u1=2/3` so `(u1-u0)*i` does not land on a round
+number for almost any stride), a non-flat/non-linear field — and `cache.n` is
+asserted to stay at the finest level's size after every call, so the test actually
+fails if the guard is relaxed and the downsample path is silently skipped. A second
+test seeds the cache with an off-sequence 49-vertex grid (span 0.1–0.7, same reason)
+and confirms a 17-vertex request (stride 3) falls back to resampling — and that the
+fallback really overwrote the cache (`cache.n == 17`), not that it happened to
+downsample a wrong-stride cache and get lucky.
 
 ### #3 — FoliageSystem TRS tightening: **not implemented**
 
@@ -68,19 +76,44 @@ FK+IBM-only path (`composeModelMatrices`/`applyInverseBind` into `thread_local`
 scratch and the entity's own `boneMatrices` — nothing shared, nothing belonging to
 another entity). Root motion (writes the entity's `TransformComponent` and, with a
 context, its physics body), a layer stack (per-component "already finalized this
-frame" flags) and IK (look-at can read *another* entity's transform) all keep
-running on the calling thread, in view order, exactly as before. Each entity writes
-its clip notifies into its own slot (`std::vector<HE::NotifyQueue>`, one per entity in
-view order); the slots are concatenated back into the caller's `notifies` queue in
-view order after both passes finish, so the result is the same sequence the fully
-serial loop would have produced regardless of which entities ran in which pass.
-`HE_ANIM_PARALLEL=0` / `AnimationSystem::setParallelOverride(0)` forces the old serial
-path (same convention as `HE_FOLIAGE_PARALLEL`).
+frame" flags) and IK keep running on the calling thread, in view order, exactly as
+before.
+
+**Look-at ordering, checked rather than assumed:** a complex entity's IK look-at can
+target another entity (`PoseFinalize.cpp:390-403`), which raised the question of
+whether splitting "simple" entities out of view order changes what a look-at sees.
+Read `applyIk`'s look-at path: it calls `HE::worldPositionOf(world, t)` on the
+target — only `TransformComponent`, never `SkeletalMeshComponent::boneMatrices`.
+Simple entities (by definition, no `RootMotionComponent`) never write
+`TransformComponent` anywhere in `AnimationSystem::update`, so a look-at targeting a
+simple entity sees exactly the position gameplay/physics already settled earlier in
+the frame, regardless of whether that entity ran before or after the complex pass.
+A look-at targeting *another* complex (root-motion) entity is unaffected too: complex
+entities still run serially among themselves in the exact same view order as before
+this change — only simple entities were pulled out, and they never produce a value a
+look-at reads. (The pre-existing order-dependency between two complex entities — "do I
+see this frame's root motion or last frame's" depending on view order — is unchanged,
+not introduced by this step.)
+
+Each entity writes its clip notifies into its own slot (`std::vector<HE::NotifyQueue>`,
+one per entity in view order); the slots are concatenated back into the caller's
+`notifies` queue in view order after both passes finish, so the result is the same
+sequence the fully serial loop would have produced regardless of which entities ran
+in which pass. `HE_LOG_THROTTLE` (now callable from worker threads for the first
+time) is already race-free by construction — its per-call-site throttle state is a
+`std::atomic<int64_t>` with `compare_exchange_strong`, and the log sink itself is
+mutex-guarded (`Log.cpp`) — so no new logging race. `HE_ANIM_PARALLEL=0` /
+`AnimationSystem::setParallelOverride(0)` forces the old serial path (same convention
+as `HE_FOLIAGE_PARALLEL`).
 
 New test in `tests/test_animation_bench.cpp`: a 400-character crowd, every third one
-carrying a `RootMotionComponent` (so the classification actually splits the crowd),
-ticked 5 frames twice — once with `setParallelOverride(0)`, once with the pool —
-`boneMatrices` compared `memcmp`-equal, `TransformComponent` compared equal, and the
+carrying a `RootMotionComponent` with `extractTranslationY` on (so the classification
+actually splits the crowd, and — with a real `HE::RootMotionContext`, not `nullptr` —
+root motion actually moves those entities instead of only extracting-and-locking a
+delta nobody applies), ticked 5 frames twice — once with `setParallelOverride(0)`,
+once with the pool — `boneMatrices` compared `memcmp`-equal, `TransformComponent`
+compared equal (with an explicit check that at least one root-motion entity actually
+moved, so the comparison cannot pass trivially at the default zero position), and the
 merged notify queues compared entry-for-entry (entity, name, kind) in order.
 
 ## 2. Verification
@@ -90,16 +123,25 @@ merged notify queues compared entry-for-entry (entity, name, kind) in order.
 | Suite | Result |
 |---|---|
 | `-tc="*foliage*" -tc="*Foliage*"` | 64/64 cases, 253201 assertions |
-| `-tc="*terrain*" -tc="*Terrain*"` | 98/98 cases, 132128 assertions (incl. the 2 new LOD-cache tests) |
-| `-tc="*animation*" -tc="*Animation*"` | 56/56 cases, 1968 assertions (incl. the new serial-vs-pool test) |
-| Full suite, `--no-skip` | 376/377 cases, 86030/86030 assertions passed |
+| `-tc="*terrain*" -tc="*Terrain*"` | 98/98 cases, 132157 assertions (incl. the 2 new LOD-cache tests) |
+| `-tc="*animation*" -tc="*Animation*"` | 56/56 cases, 1969 assertions (incl. the new serial-vs-pool test) |
+| Full suite, default (no `--no-skip`) | 5910/5910 cases, 3 of 4 repetitions; 1 repetition 5908/5910 |
 
-The one full-suite failure, `test_auto_landscape_variants.cpp` "Dump the auto
-landscape shaders" (SIGSEGV), is **pre-existing**: it crashes identically on the
-unmodified Schritt-5 binary preserved at `C:/hb/before/tests/he_tests.exe` (built
-before any of this step's commits). Not a regression; not diagnosed further here
-(out of scope, matches an existing lesson about this test's Windows-only diagnostic
-dump helper).
+**Trap, recorded as a lesson:** the first full-suite attempt used `--no-skip`, which
+force-runs `test_auto_landscape_variants.cpp`'s `doctest::skip(getenv(...) ==
+nullptr)`-marked "Dump the auto landscape shaders" case — a diagnostic dump helper
+that `SIGSEGV`s without `HE_DUMP_AUTOLAND_SHADERS` set. doctest's crash handler
+reports that one case and then **aborts the whole binary**, so the "377 cases, 1
+failed, 5552 skipped" result from that run never actually executed the ~5550 cases
+after it alphabetically — it was not a 376/377 pass rate, it was an early abort
+reported as if it were a small, nearly-complete suite. The correct invocation for a
+full run is **without** `--no-skip` (`he_tests.exe` alone), which lets doctest's own
+skip markers take effect and actually exercises all 5910 non-skipped cases. Re-run
+4 times that way: 3 were fully green (5910/5910); one showed 2 failures / 7 assertions
+that did not reproduce on any of the 3 retries — consistent with this machine's known
+pre-existing Windows flakes (clipboard/net/gamepad timing), not a regression from this
+step's changes, but not pinned down to a specific case either (the failing run's
+output was not captured to a file, only tailed).
 
 DLL freshness checked by hash: `tests/HorizonScene.dll` beside `he_tests.exe` hashes
 identically to the just-built `src/HE_Scene/HorizonScene.dll` (lesson 107's stale-DLL
@@ -115,10 +157,18 @@ was still running when this doc was written).
 
 **Pixel A/B (foliage):** a real BEFORE deploy exists for this step (`out/deploy/Editor`
 copied to `C:/hb/before/deploy/Editor` before rebuilding) — the first time this topic
-has had one (Schritt 3 had to fall back to a same-binary A/B). Compared the
-`HE_DUMP_FOLIAGETEST` witness (100k instances, straddling the draw distance — exactly
-the code path `#1`'s `levelOf` reuse touches) between the BEFORE and AFTER deploys on
-all four Windows-available backends:
+has had one (Schritt 3 had to fall back to a same-binary A/B). First attempt used
+`HE_DUMP_FOLIAGETEST` with no `HE_DUMP_FOLIAGELOD`/`HE_DUMP_FOLIAGEDIST` — checking
+`EditorApplication.cpp:7619-7653,7569`, that witness's layer then has `fl.lods.empty()`
+and an effectively unbounded draw distance, so every instance is a "whole" bucket
+(`FoliageExtract.cpp:470-477`) and `runStraddler`'s `if (!P.leveled) {...; return;}`
+early-out (`:501`) means `levelOf` is **never reached** — that first comparison was a
+general extract regression check, not evidence for `#1` specifically. Re-ran with
+`HE_DUMP_FOLIAGELOD=30:sphere,80:cube HE_DUMP_FOLIAGEDIST=150` (confirmed by the log:
+"HE_DUMP_FOLIAGELOD 2 level(s)" and "drawDistance 150") and case C's close-in camera,
+so instances near the draw distance or a LOD boundary land in straddler buckets and
+`runStraddler`'s leveled branch — the one that owns `levelOf` — actually runs, on all
+four Windows-available backends:
 
 | Backend | Result |
 |---|---|
@@ -127,6 +177,14 @@ all four Windows-available backends:
 | D3D12 | identical |
 | Vulkan | identical |
 | Metal | not available on this machine — see warning posted to the topic |
+
+The authoritative bit-identical proof for `#1` is still
+`tests/test_foliage_parallel.cpp`'s "straddlers on the pool give the single-threaded
+result" pair (origin + rotated landscape, a camera path that "crosses level boundaries
+and moves back over them" — exactly the leveled straddler path, compared pool vs.
+single-thread exactly, not just visually) — already in the `*Foliage*` test run above.
+The pixel A/B above adds real-GPU, real-editor-code-path confirmation on top of that,
+once actually aimed at the leveled path.
 
 Terrain's bit-identity is covered by the `memcmp` unit tests above, not a separate
 pixel A/B (no terrain is in the `FOLIAGETEST` witness scene).
@@ -229,3 +287,68 @@ Schritt 5 was specifically asked to produce a number for).
    touch them.
 4. The queen should check topic 238 against topics 321/322's concurrent HE_Scene
    changes before merging into `release/0.7.0` (see §4).
+
+## Handoff
+
+- **Topic / step:** Thema 238, Schritt 6 (global step id 1203).
+- **Branch / commit:** `claude/cpu-threading-audit-jobsystem-auslastung-daten-vorbereitung-`
+  (pushed; this doc's revision is the latest commit at write time).
+- **Done:** `#1` (`levelOf` reuse, `FoliageExtract.cpp`), `#10` (terrain LOD
+  downsample, `TerrainMeshGenerator.cpp`/`.h` + `TerrainSystem.cpp`) and animation
+  parallelization (`AnimationSystem.cpp`/`.h`) implemented, tested and measured; `#3`
+  (TRS tightening) deliberately not implemented (see §1).
+- **Files touched:** `src/HE_Rendering/src/FoliageExtract.cpp` (`StraddlerResult::levelOf`,
+  `runStraddler`); `src/HE_Scene/include/HorizonScene/TerrainMeshGenerator.h` +
+  `src/HE_Scene/src/TerrainMeshGenerator.cpp` (`TerrainChunkLODCache`,
+  `generateTerrainChunkMeshLOD`, `strideOf`, `buildChunkMeshFromGrid`,
+  `finishChunkMesh` extracted from `buildChunkMesh`); `src/HE_Scene/src/TerrainSystem.cpp`
+  (`buildChunk`'s LOD loop); `src/HE_Scene/include/HorizonScene/AnimationSystem.h` +
+  `src/HE_Scene/src/AnimationSystem.cpp` (`setParallelOverride`, the simple/complex
+  split); `tests/test_terrain.cpp` (2 new cases); `tests/test_animation_bench.cpp`
+  (1 new case, `populateMixed`, a notify on the bench clip).
+- **Verified:** see §2 in full. Summary: `he_tests` foliage/terrain/animation suites
+  green; full suite green on 3 of 4 default (non-`--no-skip`) runs, one unreproduced
+  flake; pixel A/B bit-identical on OpenGL/D3D11/D3D12/Vulkan against a real BEFORE
+  deploy, on a witness configured to actually exercise the leveled straddler path;
+  terrain LOD bit-identity proven both mathematically (§1) and by `memcmp` test.
+- **Not verified:** Metal (no Mac on this machine) — relies on CI's macOS leg, compile
+  + `he_tests` only, no pixel A/B. The one full-suite flake was not pinned to a
+  specific case (output not captured that run).
+- **Decisions taken:** implemented animation parallelization despite it not being in
+  the Hive's written assignment, on the queen's explicit ruling (hive_request #151) —
+  Schritt 5 had named it as this step's job, the written "do not parallelize further"
+  referred only to Schritt 4's already-rejected candidates. Did not implement `#3`
+  (demoted priority, highest bit-identical risk for the implementation effort left).
+  Scoped the animation parallel path to exactly `HE::poseMayBeKept`'s "simple" set
+  rather than attempting the full crowd, after reading `RootMotionApply.cpp` and
+  `PoseFinalize.cpp`'s IK/layer code and finding real cross-entity and physics-write
+  hazards in the complex set.
+- **Decisions suggested, not taken:** `#3` TRS tightening, if ever wanted, needs to
+  reproduce glm's exact term order to stay bit-identical (not just equivalent) — flag
+  this to whoever picks it up, do not let them re-derive the ≈192-vs-≈60-multiply
+  estimate from scratch (Schritt 5 already did that correction).
+- **Pending:** Schritt 5's still-open items (`CellStreaming` number, `make_land_game_dir.py`
+  Windows fix) — out of this step's scope, not touched. CI run
+  [40530201379](https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40530201379)
+  was still running at handoff time; its result was not yet known.
+- **Traps:**
+  - `he_tests --no-skip` is **not** "run everything" — it force-runs
+    `doctest::skip(...)`-marked diagnostic cases too, including
+    `test_auto_landscape_variants.cpp`'s `HE_DUMP_AUTOLAND_SHADERS` dump helper, which
+    `SIGSEGV`s without that env var and takes doctest's whole process down with it,
+    silently truncating the run to whatever ran before it alphabetically. For a real
+    full-suite check, run `he_tests.exe` with **no** `--no-skip`.
+  - `scripts/perf/foliage_pixel_ab.py` checks for a file literally named
+    `HorizonEditor` (no extension) in each deploy dir — a Mac convention that does not
+    exist on Windows (`HorizonEditor.exe`), so the script always reports "no
+    HorizonEditor" there. Not fixed here (shared script, out of this step's scope); a
+    local one-off script (pattern in `/c/hb/foliage_ab_before_after2.py`, not
+    committed) worked around it for this step.
+  - An `HE_DUMP_FOLIAGETEST` pixel witness with no `HE_DUMP_FOLIAGELOD`/`FOLIAGEDIST`
+    never reaches `runStraddler`'s leveled branch at all (`fl.lods` empty →
+    `P.leveled=false` → the early `if (!P.leveled) return;`) — set both env vars if a
+    future pixel A/B needs to touch that code path specifically.
+  - `C:/hb/cta5` is a shared build tree other bees reuse between steps; back up
+    `tests/`, the target's own build-dir DLLs and `out/deploy/*` **before** rebuilding
+    if a true BEFORE/AFTER comparison (not a same-binary one) will be needed.
+- **Next steps:** see the numbered list immediately above this section.

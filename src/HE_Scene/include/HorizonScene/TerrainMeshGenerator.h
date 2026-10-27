@@ -68,12 +68,18 @@ struct TerrainChunkLODCache
 // LOD levels: LOD(k+1)'s grid is an exact stride-2 subset of LOD k's (see
 // TerrainSystem::buildChunk, "verts = lod0Cells>>k + 1"), so once the finest level this chunk
 // has built is in `cache`, a coarser `vertsPerSide` is filled by downsampling it instead of
-// re-sampling the height field — bit-identical to the fully-resampled result, since every grid
-// vertex shares its continuous (u,v) exactly with the cached grid's vertex at the matching
-// stride, and the height/normal samplers are pure functions of (heights, srcRes, u, v). Calls
-// whose `vertsPerSide` is not an exact power-of-two stride subset of what is cached fall back to
-// resampling the field directly (and refresh `cache` with that grid for the next call). Call
-// order does not matter — any order converges, finest-first just avoids ever falling back.
+// re-sampling the height field — bit-identical to the fully-resampled result, but ONLY when the
+// stride is a power of two. The grid coordinate evaluates as `((u1-u0) * i) / (N-1)`: the
+// multiply rounds once, and multiplying an already-rounded float by a power of two is exact (a
+// pure exponent shift), so `round((u1-u0)*i) * 2^k == round((u1-u0)*i*2^k)` and the cached base's
+// vertex at `i*stride` lands on the identical rounded value the coarser level would have computed
+// directly. An arbitrary stride (3, say) has no such guarantee — `round((u1-u0)*i)*3` is not in
+// general `round((u1-u0)*i*3)` — so the power-of-two check in strideOf (TerrainMeshGenerator.cpp)
+// is load-bearing, not a conservative extra: relaxing it would silently stop being bit-identical
+// for non-power-of-two strides. Calls whose `vertsPerSide` is not an exact power-of-two stride
+// subset of what is cached fall back to resampling the field directly (and refresh `cache` with
+// that grid for the next call). Call order does not matter — any order converges, finest-first
+// just avoids ever falling back.
 StaticMeshAsset generateTerrainChunkMeshLOD(
     const std::vector<float>& heights, uint32_t srcRes,
     float sizeX, float sizeZ,
