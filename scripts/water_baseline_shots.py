@@ -42,6 +42,9 @@ VIEWS = {
     "shore":   dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60"),
     # The lake low over its surface, along the swell: the silhouette of waves that are geometry (HE_DUMP_WATERTESS=1).
     "swell":   dict(WATERLAKE="bowl", CAMX="0", CAMY="302", CAMZ="30", PITCH="-6"),
+    # Just above the water (the level of the bowl lake is about CAMY 303.x): a crest may stand over the camera.
+    "swell-low": dict(WATERLAKE="bowl", CAMX="0", CAMY="304", CAMZ="30", PITCH="-3"),
+    "swell-low2": dict(WATERLAKE="bowl", CAMX="0", CAMY="306", CAMZ="30", PITCH="-3"),
     "swell-hi": dict(WATERLAKE="bowl", CAMX="0", CAMY="310", CAMZ="40", PITCH="-18"),
     "shore33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33"),
     "shoresheet33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33",

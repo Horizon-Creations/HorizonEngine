@@ -535,15 +535,18 @@ struct Under
     Pin emissive;      // the whole underside colour, already divided by alpha
 };
 
-Under undersideTerms(Mb& m, Pin geoN, Pin view, Pin waveN, Pin pan1, Pin pan2, Pin invC, Pin nearFade, Pin causStrength,
-                     Pin shallow, Pin deep, float col, float row)
+Under undersideTerms(Mb& m, Pin geoN, Pin view, Pin belowDot, Pin waveN, Pin pan1, Pin pan2, Pin invC, Pin nearFade,
+                     Pin causStrength, Pin shallow, Pin deep, float col, float row)
 {
     constexpr float kEta = 1.333f;     // water → air
     const float c0 = col, r0 = row;
 
     // Which side: the MESH normal against the view, not the wave normal (a steep
-    // wave must not flip a pixel to the other look).
-    const int below = m.op(T::Less, m.op(T::DotProduct, geoN, view, c0, r0), m.k(0.0f, c0, r0 + 0.5f), c0 + 1, r0);
+    // wave must not flip a pixel to the other look). `belowDot` is that dot product (times the
+    // distance, plus the height the tessellation lifted this fragment by: a crest above the
+    // camera is still the TOP of the water, so the camera is compared with the surface's
+    // undisplaced plane, see waterMaterial).
+    const int below = m.op(T::Less, belowDot, m.k(0.0f, c0, r0 + 0.5f), c0 + 1, r0);
 
     // The view ray going up, and its cosine against the wave normal on the water side.
     const int up   = m.op(T::Multiply, view, m.k(-1.0f, c0, r0 + 1.5f), c0 + 1, r0 + 1);
@@ -1067,20 +1070,6 @@ Mb waterMaterial()
     const int specO  = m.op(T::Multiply, spec, refl, 41, 0);
     const int roughO = m.op3(T::Lerp, m.op(T::Add, rough, farRough, 44, 2), m.k(0.6f, 43, 2), foamAll, 45, 2);
 
-    const Under under = undersideTerms(m, geoN, view, waveN, pan1, pan2, invC, near, Pin{ cs, 0 }, shallow, deep, 66, 0);
-
-    // Every output picks the top or the underside. If is mix(top, under, 0 or 1),
-    // so from above it is the old expression exactly — as long as nothing on the
-    // underside can turn into NaN or Inf, which undersideTerms keeps to.
-    const int below  = under.below;
-    const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);
-    const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
-    const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
-    const int alphaO = m.op3(T::If, below, under.alpha, alpha, 77, 3);
-    const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
-    const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
-    m.comment("Top or underside", 76, 0, 2, 6);
-
     // Tessellation, as a switch. The three wave trains again as GEOMETRY: each knob's plain
     // sine (amplitude steepness * length / 2 pi, HE::water::sampleWaves' formula and nothing
     // else: no hex bombing, warp, gust or companions) pushed out along the mesh normal by the
@@ -1124,6 +1113,32 @@ Mb waterMaterial()
     }
     m.link(dispSum, tessSwitch, 0);
     m.comment("Tessellation: real waves, off by default (Static Switch)", 80, 38, 7, 9);
+
+    // What the tessellation lifted this fragment by (0 with the switch off): the side test below
+    // needs it, because a crest above the camera is the top of the water, not its underside.
+    const int liftSwitch = m.node(T::StaticSwitch, 85, 41);
+    {
+        MatGraphNode& ls = *m.g.findNode(liftSwitch);
+        ls.s    = "Tessellation";
+        ls.p[0] = 0.0f;
+    }
+    m.link(dispSum, liftSwitch, 0);
+    m.link(m.k(0.0f, 84, 41), liftSwitch, 1);
+    const int belowDot = m.op(T::Add, m.op(T::Multiply, m.op(T::DotProduct, geoN, view, 66, 60), dist, 67, 60),
+                              m.op(T::Multiply, Pin{ gs, 1 }, liftSwitch, 67, 61), 68, 60);
+    const Under under = undersideTerms(m, geoN, view, Pin{ belowDot }, waveN, pan1, pan2, invC, near, Pin{ cs, 0 }, shallow, deep, 66, 0);
+
+    // Every output picks the top or the underside. If is mix(top, under, 0 or 1),
+    // so from above it is the old expression exactly — as long as nothing on the
+    // underside can turn into NaN or Inf, which undersideTerms keeps to.
+    const int below  = under.below;
+    const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);
+    const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
+    const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
+    const int alphaO = m.op3(T::If, below, under.alpha, alpha, 77, 3);
+    const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
+    const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
+    m.comment("Top or underside", 76, 0, 2, 6);
 
     const int out = m.node(T::Output, 79, 2);
     MatGraphNode& o = *m.g.findNode(out);

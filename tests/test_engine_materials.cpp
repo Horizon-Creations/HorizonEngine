@@ -1471,5 +1471,8 @@ TEST_CASE("Engine water material: Tessellation is a Static Switch, off by defaul
 	REQUIRE(HE::matSplitDisplacement(with.displacementBody, tess, decls, stmts));
 	CHECK(stmts.find("heDisp") != std::string::npos);
 	CHECK(tess.maxDisplacement > 0.5f);                 // room for a storm sea
-	CHECK(with.glsl == off.glsl);                       // the shading did not change, only the vertex geometry
+	// With the switch on the fragment also knows the height the tessellation lifted it by (a crest above the
+	// camera is still the top of the water); with it off none of that is in the shader.
+	CHECK(off.glsl.find("heDisp") == std::string::npos);
+	CHECK(with.glsl != off.glsl);
 }
