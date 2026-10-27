@@ -61,14 +61,13 @@ void update(HorizonWorld& world, InputState& state,
     }
 
     // Hover transitions (at most one element is hovered — the topmost).
-    std::unordered_set<uint32_t> nowHovered;
-    if (top != 0) nowHovered.insert(top);
+    uint32_t nowHovered = 0;
+    if (top != 0) nowHovered = top;
     for (uint32_t e : state.hovered)
-        if (!nowHovered.count(e))
+        if (e != nowHovered)
             outEvents.push_back({ e, PointerEvent::Type::HoverExit });
-    for (uint32_t e : nowHovered)
-        if (!state.hovered.count(e))
-            outEvents.push_back({ e, PointerEvent::Type::HoverEnter });
+    if (nowHovered != 0 && !state.hovered.count(nowHovered))
+        outEvents.push_back({ nowHovered, PointerEvent::Type::HoverEnter });
 
     // Press / release / click.
     const bool pressEdge   = primaryDown && !state.wasDown;
@@ -86,11 +85,12 @@ void update(HorizonWorld& world, InputState& state,
     {
         const uint32_t id = static_cast<uint32_t>(e);
         if (id == state.pressed && primaryDown)      btn.state = UIButtonState::Pressed;
-        else if (nowHovered.count(id))               btn.state = UIButtonState::Hovered;
+        else if (id == nowHovered)                   btn.state = UIButtonState::Hovered;
         else                                         btn.state = UIButtonState::Normal;
     }
 
-    state.hovered = std::move(nowHovered);
+    state.hovered.clear();
+    if (nowHovered != 0) state.hovered.insert(nowHovered);
     state.wasDown = primaryDown;
 }
 
