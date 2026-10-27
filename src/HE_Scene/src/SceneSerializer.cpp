@@ -2839,9 +2839,9 @@ namespace
 		// records a child deleted from the placement, and the deletion is part of
 		// what was copied. Every record is checked, not just the root — a nested
 		// placement is an instance of its own.
-		for (const auto& [key, e] : idMap)
+		for (const auto& entry : idMap)
 		{
-			(void)key;
+			Entity e = entry.second;
 			auto* inst = registry.try_get<PrefabInstanceComponent>(e);
 			if (!inst) continue;
 			for (auto& b : inst->bindings)
