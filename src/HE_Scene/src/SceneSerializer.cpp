@@ -1164,6 +1164,8 @@ namespace
 		return comps;
 	}
 
+	bool isEngineGenerated(entt::registry& registry, Entity e);
+
 	// ── Scene → JSON ─────────────────────────────────────────────────────────
 	json buildSceneJson(HorizonWorld& world)
 	{
@@ -1180,8 +1182,7 @@ namespace
 			// for itself (terrain chunks, water surfaces) are never serialised — all
 			// are recreated on load (ensureEnvironmentLights / TerrainSystem from the
 			// TerrainComponent), so the scene file stays clean.
-			if (registry.all_of<EnvironmentLightComponent>(entity) ||
-			    HE::isTerrainGenerated(registry, entity))
+			if (isEngineGenerated(registry, entity))
 				continue;
 
 			json eJson;
