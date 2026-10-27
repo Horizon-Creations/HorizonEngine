@@ -5670,8 +5670,9 @@ const float kChopSteep  = 0.05;
 const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
 const float kGain       = 0.05;   // line brightness per unit of squeeze above 1
 const float kMaxLine    = 0.2;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
-const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
-const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (see the cap below)
+const float kFineScale  = 1.8;    // the whole net this much finer than the water's own wavelengths: real caustics are small filaments, not metre-wide cells
+const float kDark       = 0.3;    // how much of the cells' light the lines take at intensity >= 1
+const float kCore       = 0.45;    // share of the cap's squeeze a line must pass to light up (see the cap below)
 
 // The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
 // cells between them lose (vec4(0) where there is no net). The screen derivatives of P come
@@ -5729,7 +5730,7 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 		}
 		float rad = radians(deg);
 		vec2  dv  = vec2(cos(rad), sin(rad));
-		float k   = kTwoPi / len * uCaustics.y;
+		float k   = kTwoPi / len * (uCaustics.y * kFineScale);
 		float ph  = k * (dot(dv, S) - spd * uCaustics.z);
 		float c   = stp * k * sin(ph);
 		vec2  dc  = (stp * k * k * cos(ph)) * dv;
@@ -5764,7 +5765,7 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	vec2  dSx   = dFdx(S);
 	vec2  dSy   = dFdy(S);
 	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
-	                  10.0 * uCaustics.y * (length(dSx) + length(dSy)));
+	                  10.0 * (uCaustics.y * kFineScale) * (length(dSx) + length(dSy)));
 	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
 	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
 	float capAA = 2.0 / max(dDet, 1e-4);

@@ -1749,8 +1749,9 @@ constant float kChopSteep  = 0.05;
 constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
 constant float kGain       = 0.05;   // line brightness per unit of squeeze above 1
 constant float kMaxLine    = 0.2;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
-constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
-constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
+constant float kFineScale  = 1.8;    // the whole net this much finer than the water's own wavelengths: real caustics are small filaments, not metre-wide cells
+constant float kDark       = 0.3;    // how much of the cells' light the lines take at intensity >= 1
+constant float kCore       = 0.45;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
 // The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
 // cells between them lose (float4(0) where there is no net; Thema 205 Schritt 2, the GL twin
@@ -1799,7 +1800,7 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 		}
 		float  rad = deg * (3.14159265359 / 180.0);
 		float2 dv  = float2(cos(rad), sin(rad));
-		float  k   = kTwoPi / len * u.caustics.y;
+		float  k   = kTwoPi / len * (u.caustics.y * kFineScale);
 		float  ph  = k * (dot(dv, S) - spd * u.caustics.z);
 		float  c   = stp * k * sin(ph);
 		float2 dc  = (stp * k * k * cos(ph)) * dv;
@@ -1815,7 +1816,7 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float2 dSx  = dfdx(S);
 	float2 dSy  = dfdy(S);
 	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
-	                  10.0 * u.caustics.y * (length(dSx) + length(dSy)));
+	                  10.0 * (u.caustics.y * kFineScale) * (length(dSx) + length(dSy)));
 	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
 	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
 	float capAA = 2.0 / max(dDet, 1e-4);                      // fold lines >= 2 px, else fade (GL twin)
