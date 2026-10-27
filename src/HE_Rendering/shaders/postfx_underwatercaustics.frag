@@ -44,7 +44,7 @@ const float kEta   = 1.33;
 const int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
 const float kChopSteep  = 0.05;
 const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
-const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
+const float kGain       = 0.30;   // line brightness per unit of squeeze above 1 (was 0.45: far too bright underwater)
 const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
 const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
