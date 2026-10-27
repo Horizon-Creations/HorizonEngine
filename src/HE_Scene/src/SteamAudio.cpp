@@ -143,6 +143,10 @@ struct Api
     decltype(&iplDirectEffectApply)     directApply = nullptr;
     decltype(&iplDirectEffectReset)     directReset = nullptr;
     decltype(&iplAirAbsorptionCalculate) airCalc = nullptr;
+    decltype(&iplReflectionEffectCreate)  reflCreate = nullptr;
+    decltype(&iplReflectionEffectRelease) reflRelease = nullptr;
+    decltype(&iplReflectionEffectApply)   reflApply = nullptr;
+    decltype(&iplReflectionEffectReset)   reflReset = nullptr;
 
     bool load(LibHandle h, std::string& error)
     {
@@ -160,6 +164,10 @@ struct Api
             { reinterpret_cast<void**>(&directApply),    "iplDirectEffectApply" },
             { reinterpret_cast<void**>(&directReset),    "iplDirectEffectReset" },
             { reinterpret_cast<void**>(&airCalc),        "iplAirAbsorptionCalculate" },
+            { reinterpret_cast<void**>(&reflCreate),     "iplReflectionEffectCreate" },
+            { reinterpret_cast<void**>(&reflRelease),    "iplReflectionEffectRelease" },
+            { reinterpret_cast<void**>(&reflApply),      "iplReflectionEffectApply" },
+            { reinterpret_cast<void**>(&reflReset),      "iplReflectionEffectReset" },
         };
         for (const auto& e : table)
         {
@@ -203,11 +211,14 @@ struct SteamAudio::Binaural::Impl
     std::shared_ptr<SteamAudioCore> core;
     IPLBinauralEffect effect = nullptr;
     IPLDirectEffect   direct = nullptr;   // optional: a voice without it just skips the stage
+    IPLReflectionEffect reverb = nullptr; // optional, likewise (parametric reverb)
+    int               reverbIrSize = 0;
     int               frameSize = 0;
-    std::vector<float> left, right, directOut;
+    std::vector<float> left, right, directOut, reverbOut;
 
     ~Impl()
     {
+        if (reverb) core->api.reflRelease(&reverb);
         if (direct) core->api.directRelease(&direct);
         if (effect) core->api.effectRelease(&effect);
     }
@@ -307,6 +318,7 @@ std::unique_ptr<SteamAudio::Binaural> SteamAudio::createBinaural()
     b->m_impl->left.resize(static_cast<size_t>(m_impl->frameSize));
     b->m_impl->right.resize(static_cast<size_t>(m_impl->frameSize));
     b->m_impl->directOut.resize(static_cast<size_t>(m_impl->frameSize));
+    b->m_impl->reverbOut.resize(static_cast<size_t>(m_impl->frameSize));
     IPLBinauralEffectSettings es{};
     es.hrtf = m_impl->core->hrtf;
     if (m_impl->core->api.effectCreate(m_impl->core->context, &m_impl->core->audio, &es,
@@ -321,6 +333,15 @@ std::unique_ptr<SteamAudio::Binaural> SteamAudio::createBinaural()
     if (m_impl->core->api.directCreate(m_impl->core->context, &m_impl->core->audio, &ds,
                                        &b->m_impl->direct) != IPL_STATUS_SUCCESS)
         b->m_impl->direct = nullptr;   // the HRTF still works; direct-path options just do nothing
+    IPLReflectionEffectSettings rs{};
+    rs.type        = IPL_REFLECTIONEFFECTTYPE_PARAMETRIC;
+    rs.irSize      = 2 * static_cast<IPLint32>(m_impl->core->audio.samplingRate);   // up to a two second tail
+    rs.numChannels = 1;
+    if (m_impl->core->api.reflCreate(m_impl->core->context, &m_impl->core->audio, &rs,
+                                     &b->m_impl->reverb) == IPL_STATUS_SUCCESS)
+        b->m_impl->reverbIrSize = rs.irSize;
+    else
+        b->m_impl->reverb = nullptr;
     return b;
 }
 
@@ -381,10 +402,27 @@ bool SteamAudio::Binaural::process(const float* mono, float* stereoOut, int fram
         IPLAudioBuffer in { 1, s.frameSize, inCh };
         IPLAudioBuffer out{ 2, s.frameSize, outCh };
         s.core->api.effectApply(s.effect, &params, &in, &out);
+        // The room's reverb: the same (direct-processed) voice through the parametric
+        // reflection effect, mixed into both ears without a direction.
+        float wet = 0.0f;
+        if (direct && direct->reflections && s.reverb)
+        {
+            IPLReflectionEffectParams rp{};
+            rp.type        = IPL_REFLECTIONEFFECTTYPE_PARAMETRIC;
+            rp.numChannels = 1;
+            rp.irSize      = s.reverbIrSize;
+            for (int b = 0; b < 3; ++b) rp.reverbTimes[b] = direct->reverbTimes[b];
+            float* rOut[1] = { s.reverbOut.data() };
+            IPLAudioBuffer rin { 1, s.frameSize, inCh };
+            IPLAudioBuffer rout{ 1, s.frameSize, rOut };
+            s.core->api.reflApply(s.reverb, &rp, &rin, &rout, nullptr);
+            wet = direct->reverbWet;
+        }
         for (int i = 0; i < s.frameSize; ++i)
         {
-            stereoOut[(base + i) * 2]     = s.left[static_cast<size_t>(i)];
-            stereoOut[(base + i) * 2 + 1] = s.right[static_cast<size_t>(i)];
+            const float r = wet * s.reverbOut[static_cast<size_t>(i)];
+            stereoOut[(base + i) * 2]     = s.left[static_cast<size_t>(i)] + r;
+            stereoOut[(base + i) * 2 + 1] = s.right[static_cast<size_t>(i)] + r;
         }
     }
     return true;
@@ -394,6 +432,7 @@ void SteamAudio::Binaural::reset()
 {
     if (m_impl->effect) m_impl->core->api.effectReset(m_impl->effect);
     if (m_impl->direct) m_impl->core->api.directReset(m_impl->direct);
+    if (m_impl->reverb) m_impl->core->api.reflReset(m_impl->reverb);
 }
 
 #else // !HE_HAVE_STEAM_AUDIO ───────────────────────────────────────────────────

@@ -122,6 +122,10 @@ public:
     // the three band gains (low / mid / high) of what a blocker passes. No effect on a voice
     // that was not started with the occlusion option on, or is not on the Steam Audio backend.
     void setSoundOcclusion(uint64_t handle, float visibility, const float transmission[3]);
+    // The reverb of the room the listener is in (HorizonScene/AudioRoom.h): RT60 seconds per band
+    // (low / mid / high) and how much of it to mix in, 0..1. Heard on Steam Audio voices started
+    // with the reflections option on.
+    void setRoomReverb(const float reverbTimes[3], float wet);
     void setSteamOptions(const HE::AudioSteamOptions& options);
     const HE::AudioSteamOptions& steamOptions() const;
     // Whether this binary contains the Steam Audio backend at all.

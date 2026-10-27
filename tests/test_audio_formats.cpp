@@ -9,6 +9,7 @@
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/SteamAudio.h>
 #include <HorizonScene/AudioOcclusion.h>
+#include <HorizonScene/AudioRoom.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -647,5 +648,96 @@ TEST_CASE("Steam Audio option: occlusion dulls and dims a voice that the geometr
 	// Without the option the same call changes nothing.
 	engine.setSteamOptions({});
 	CHECK(energy(high, 0.0f) > 0.5 * hiOpen);
+	engine.shutdown();
+}
+
+TEST_CASE("Room estimate: a closed room rings, open ground and a single wall barely do")
+{
+	using HE::estimateRoom;
+	// Open ground: nothing in range.
+	const HE::RoomEstimate open = estimateRoom(glm::vec3(0), [](const glm::vec3&, const glm::vec3&, float) { return -1.0f; });
+	CHECK(open.wet == 0.0f);
+	CHECK(open.reverbTimes[1] == 0.0f);
+
+	// A cube room, 4 m to every wall along the ray's own axis (a ray to a corner is longer).
+	auto box = [](float half) {
+		return [half](const glm::vec3&, const glm::vec3& d, float maxDist) {
+			const float m = std::max({ std::abs(d.x), std::abs(d.y), std::abs(d.z) });
+			const float t = half / m;
+			return t < maxDist ? t : -1.0f;
+		};
+	};
+	const HE::RoomEstimate small = estimateRoom(glm::vec3(0), box(2.0f));
+	const HE::RoomEstimate big   = estimateRoom(glm::vec3(0), box(10.0f));
+	CHECK(small.closedFraction == doctest::Approx(1.0f));
+	CHECK(small.reverbTimes[1] > 0.1f);
+	CHECK(big.reverbTimes[1] > small.reverbTimes[1]);               // a bigger room rings longer
+	CHECK(small.reverbTimes[0] > small.reverbTimes[2]);             // the bass outlasts the treble
+	CHECK(small.wet > 0.2f);
+
+	// One wall only (a quarter of the rays hit): little reverb.
+	auto oneWall = [](const glm::vec3&, const glm::vec3& d, float maxDist) {
+		if (d.x <= 0.5f) return -1.0f;
+		const float t = 5.0f / d.x;
+		return t < maxDist ? t : -1.0f;
+	};
+	const HE::RoomEstimate wall = estimateRoom(glm::vec3(0), oneWall);
+	CHECK(wall.closedFraction < 0.5f);
+	CHECK(wall.reverbTimes[1] < 0.3f * big.reverbTimes[1]);
+	CHECK(wall.wet < small.wet);
+}
+
+TEST_CASE("Steam Audio option: reflections leave a reverb tail after the sound has ended")
+{
+	if (!HE::SteamAudio::compiledIn()) return;
+
+	AudioEngine engine;
+	REQUIRE(engine.init(true));
+	engine.setListenerTransform(0, 0, 0, 0, 0, -1, 0, 1, 0);
+	REQUIRE(engine.setSpatialBackend(HE::AudioSpatialBackend::SteamAudio));
+
+	// A 50 ms noise burst, then the clip is over.
+	std::vector<uint8_t> burst(2400 * 2);
+	uint32_t seed = 12345;
+	for (int i = 0; i < 2400; ++i)
+	{
+		seed = seed * 1664525u + 1013904223u;
+		const int16_t v = static_cast<int16_t>((static_cast<int>(seed >> 16) & 0x3FFF) - 0x2000);
+		std::memcpy(burst.data() + static_cast<size_t>(i) * 2, &v, 2);
+	}
+
+	// Energy of the mix 0.2 s..0.4 s after the start (the burst is long over by then).
+	auto tail = [&]() {
+		const uint64_t h = engine.playSpatial(burst, 48000, 1, 1.0f, 1.0f, false, 3.0f, 0.0f, 0.0f, 1.0f, 1000.0f, "",
+		                                      AudioAttenuation::None, 1.0f);
+		REQUIRE(h != 0);
+		std::vector<float> mix(2 * 4800);
+		REQUIRE(engine.readMixedFrames(mix.data(), 4800) == 4800);   // the burst
+		double e = 0.0;
+		for (int pass = 0; pass < 2; ++pass)
+		{
+			REQUIRE(engine.readMixedFrames(mix.data(), 4800) == 4800);
+			for (float v : mix) e += static_cast<double>(v) * v;
+		}
+		engine.stop(h);
+		return e;
+	};
+
+	const float times[3] = { 1.6f, 1.4f, 1.0f };
+	engine.setRoomReverb(times, 0.5f);
+
+	const double dry = tail();                  // option off: the clip is over, silence
+	HE::AudioSteamOptions opt;
+	opt.reflections = true;
+	engine.setSteamOptions(opt);
+	const double wet = tail();
+	INFO("tail energy off/on " << dry << " / " << wet);
+	CHECK(dry < 1.0e-6);
+	CHECK(wet > 1.0e-3);
+
+	// No room (an open field): the same option leaves no tail.
+	const float none[3] = { 0, 0, 0 };
+	engine.setRoomReverb(none, 0.0f);
+	CHECK(tail() < 1.0e-6);
 	engine.shutdown();
 }

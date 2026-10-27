@@ -5,6 +5,7 @@
 #include <HorizonScene/Components/AudioListenerComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/AudioOcclusion.h>
+#include <HorizonScene/AudioRoom.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/EntityActive.h>   // the "Active" switch: no sound from what is off
@@ -74,6 +75,24 @@ struct AudioSystem
             listenerPos    = t.position;
             listenerEntity = static_cast<uint32_t>(entity);
             break; // only first listener
+        }
+
+        // The room's reverb, a few times a second (26 rays; a room does not change faster).
+        if (physics && engine.steamOptions().reflections &&
+            engine.spatialBackend() == HE::AudioSpatialBackend::SteamAudio)
+        {
+            static uint32_t s_roomTick = 0;
+            if (s_roomTick++ % 6 == 0)
+            {
+                const HE::RoomEstimate room = HE::estimateRoom(listenerPos,
+                    [&](const glm::vec3& from, const glm::vec3& dir, float maxDist) {
+                        const PhysicsWorld::RaycastHit h = physics->raycast(from, dir, maxDist, listenerEntity);
+                        if (!h.hit) return -1.0f;
+                        const auto* c = reg.try_get<ColliderComponent>(static_cast<entt::entity>(h.entityId));
+                        return (c && c->isTrigger) ? -1.0f : h.distance;
+                    });
+                engine.setRoomReverb(room.reverbTimes, room.wet);
+            }
         }
 
         // Update spatial source positions

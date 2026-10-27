@@ -49,6 +49,12 @@ struct DirectParams
     bool  occlusion     = false;
     float visibility    = 1.0f;                   // Steam Audio's "occlusion": 1 = clear path, 0 = fully blocked
     float transmission[3] = { 1.0f, 1.0f, 1.0f }; // what gets through the blocker, per band
+    // Reverb of the room the listener is in (Steam Audio's parametric reflection effect): the
+    // voice is also fed through it and the tail is mixed in front, non-directional, scaled by
+    // `reverbWet`. `reverbTimes` are the RT60s (seconds) of the low / mid / high band.
+    bool  reflections   = false;
+    float reverbTimes[3] = { 0.5f, 0.4f, 0.3f };
+    float reverbWet     = 0.0f;
 };
 
 class SteamAudio

@@ -3441,8 +3441,12 @@ namespace
 	  "project.",
 	  "", "systems#audio" },
 	{ "Audio Mixer/Reflections", "",
-	  "Adds reverb that follows the room the listener stands in. Needs Steam Audio "
-	  "(HRTF) switched on. Saved with the project.",
+	  "Adds reverb that follows the room the listener stands in: a small tiled room "
+	  "rings briefly, a hall for much longer, open ground not at all. The room is "
+	  "measured with rays through the physics colliders (size, how closed it is) and "
+	  "drives Steam Audio's parametric reverb, so it is an estimate of the room, not "
+	  "a simulation of every reflection. Needs Steam Audio (HRTF) switched on, and acts "
+	  "while the game plays. Saved with the project.",
 	  "", "systems#audio" },
 	{ "Audio Mixer/Pathing", "",
 	  "Lets sound find its way around corners and through doors instead of being "

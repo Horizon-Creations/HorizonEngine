@@ -375,6 +375,9 @@ struct SpatialListener
     std::atomic<float> pos[3];
     std::atomic<float> fwd[3];
     std::atomic<float> up[3];
+    // The room's reverb (setRoomReverb), shared by every Steam Audio voice.
+    std::atomic<float> reverbTimes[3] = { { 0.0f }, { 0.0f }, { 0.0f } };
+    std::atomic<float> reverbWet{ 0.0f };
     SpatialListener()
     {
         const float p[3] = { 0.0f, 0.0f, 0.0f }, f[3] = { 0.0f, 0.0f, -1.0f }, u[3] = { 0.0f, 1.0f, 0.0f };
@@ -409,6 +412,7 @@ struct BinauralNode
     // The project's Steam Audio options as they were when the voice started.
     bool                                     airAbsorption = false;
     bool                                     occlusion     = false;
+    bool                                     reflections   = false;
     // From the game thread (setSoundOcclusion), read per block.
     std::atomic<float>                       visibility{ 1.0f };
     std::atomic<float>                       transmission[3] = { { 1.0f }, { 1.0f }, { 1.0f } };
@@ -465,6 +469,12 @@ struct BinauralNode
             direct.occlusion  = true;
             direct.visibility = visibility.load(std::memory_order_relaxed);
             for (int b = 0; b < 3; ++b) direct.transmission[b] = transmission[b].load(std::memory_order_relaxed);
+        }
+        if (fx && reflections)
+        {
+            direct.reflections = true;
+            for (int b = 0; b < 3; ++b) direct.reverbTimes[b] = listener->reverbTimes[b].load(std::memory_order_relaxed);
+            direct.reverbWet = listener->reverbWet.load(std::memory_order_relaxed);
         }
         if (!fx || !fx->process(inBlock, outBlock, kSteamFrameSize, dir, &direct))
             for (int i = 0; i < kSteamFrameSize; ++i)   // never leave the voice silent on a failed block
@@ -821,6 +831,14 @@ void AudioEngine::setSoundOcclusion(uint64_t handle, float visibility, const flo
         n.transmission[b].store(std::min(std::max(transmission[b], 0.0f), 1.0f), std::memory_order_relaxed);
 }
 
+void AudioEngine::setRoomReverb(const float reverbTimes[3], float wet)
+{
+    SpatialListener& l = m_impl->listener;
+    for (int b = 0; b < 3; ++b)
+        l.reverbTimes[b].store(std::min(std::max(reverbTimes[b], 0.0f), 4.0f), std::memory_order_relaxed);
+    l.reverbWet.store(std::min(std::max(wet, 0.0f), 1.0f), std::memory_order_relaxed);
+}
+
 void AudioEngine::setSteamOptions(const HE::AudioSteamOptions& options) { m_impl->steamOptions = options; }
 const HE::AudioSteamOptions& AudioEngine::steamOptions() const { return m_impl->steamOptions; }
 
@@ -1148,6 +1166,7 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
             bin->listener      = &m_impl->listener;
             bin->airAbsorption = m_impl->steamOptions.airAbsorption;
             bin->occlusion     = m_impl->steamOptions.occlusion;
+            bin->reflections   = m_impl->steamOptions.reflections;
             bin->src[0] = spatial->x; bin->src[1] = spatial->y; bin->src[2] = spatial->z;
             snd->bin = std::move(bin);
         }
