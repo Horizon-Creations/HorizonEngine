@@ -408,6 +408,10 @@ struct BinauralNode
     const SpatialListener*                   listener = nullptr;
     // The project's Steam Audio options as they were when the voice started.
     bool                                     airAbsorption = false;
+    bool                                     occlusion     = false;
+    // From the game thread (setSoundOcclusion), read per block.
+    std::atomic<float>                       visibility{ 1.0f };
+    std::atomic<float>                       transmission[3] = { { 1.0f }, { 1.0f }, { 1.0f } };
 
     // Set by the game thread (setSoundPosition / setSoundAttenuation), read per block.
     std::atomic<float> src[3];
@@ -455,6 +459,12 @@ struct BinauralNode
                               src[2].load(std::memory_order_relaxed),
                               listener->pos[0].load(std::memory_order_relaxed), listener->pos[1].load(std::memory_order_relaxed),
                               listener->pos[2].load(std::memory_order_relaxed), direct.airBands);
+        }
+        if (fx && occlusion)
+        {
+            direct.occlusion  = true;
+            direct.visibility = visibility.load(std::memory_order_relaxed);
+            for (int b = 0; b < 3; ++b) direct.transmission[b] = transmission[b].load(std::memory_order_relaxed);
         }
         if (!fx || !fx->process(inBlock, outBlock, kSteamFrameSize, dir, &direct))
             for (int i = 0; i < kSteamFrameSize; ++i)   // never leave the voice silent on a failed block
@@ -801,6 +811,16 @@ void AudioEngine::applyBusConfig(const HE::AudioBusConfig& config)
 
 bool AudioEngine::steamAudioCompiledIn() { return HE::SteamAudio::compiledIn(); }
 
+void AudioEngine::setSoundOcclusion(uint64_t handle, float visibility, const float transmission[3])
+{
+    auto it = m_impl->sounds.find(handle);
+    if (it == m_impl->sounds.end() || !it->second->bin) return;
+    BinauralNode& n = *it->second->bin;
+    n.visibility.store(std::min(std::max(visibility, 0.0f), 1.0f), std::memory_order_relaxed);
+    for (int b = 0; b < 3; ++b)
+        n.transmission[b].store(std::min(std::max(transmission[b], 0.0f), 1.0f), std::memory_order_relaxed);
+}
+
 void AudioEngine::setSteamOptions(const HE::AudioSteamOptions& options) { m_impl->steamOptions = options; }
 const HE::AudioSteamOptions& AudioEngine::steamOptions() const { return m_impl->steamOptions; }
 
@@ -1127,6 +1147,7 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
             bin->nodeOk   = true;
             bin->listener      = &m_impl->listener;
             bin->airAbsorption = m_impl->steamOptions.airAbsorption;
+            bin->occlusion     = m_impl->steamOptions.occlusion;
             bin->src[0] = spatial->x; bin->src[1] = spatial->y; bin->src[2] = spatial->z;
             snd->bin = std::move(bin);
         }

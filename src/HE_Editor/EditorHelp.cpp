@@ -3433,8 +3433,12 @@ namespace
 	  "acts on 3D voices started while it is. Saved with the project.",
 	  "", "systems#audio" },
 	{ "Audio Mixer/Occlusion", "",
-	  "Geometry between a 3D voice and the listener dims and dulls it, like a wall "
-	  "does. Needs Steam Audio (HRTF) switched on. Saved with the project.",
+	  "A wall between a 3D voice and the listener dims it and takes its treble, like a "
+	  "real wall: the bass still leaks through. Found by casting rays through the "
+	  "physics colliders (a trigger volume does not block), so whatever stops the "
+	  "player stops the sound; a source half behind a pillar is half muffled. Needs "
+	  "Steam Audio (HRTF) switched on, and acts while the game plays. Saved with the "
+	  "project.",
 	  "", "systems#audio" },
 	{ "Audio Mixer/Reflections", "",
 	  "Adds reverb that follows the room the listener stands in. Needs Steam Audio "

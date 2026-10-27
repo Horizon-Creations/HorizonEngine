@@ -117,6 +117,11 @@ public:
     // The extra Steam Audio features (air absorption, occlusion, reflections, pathing).
     // Kept as asked even while the backend is off or missing; they act on voices started
     // while the backend is active. applyBusConfig() passes the project's choice on.
+    // How much of a Steam Audio voice gets through the geometry between it and the listener
+    // (HorizonScene/AudioOcclusion.h): `visibility` 1 = clear, 0 = blocked; `transmission`
+    // the three band gains (low / mid / high) of what a blocker passes. No effect on a voice
+    // that was not started with the occlusion option on, or is not on the Steam Audio backend.
+    void setSoundOcclusion(uint64_t handle, float visibility, const float transmission[3]);
     void setSteamOptions(const HE::AudioSteamOptions& options);
     const HE::AudioSteamOptions& steamOptions() const;
     // Whether this binary contains the Steam Audio backend at all.

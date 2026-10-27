@@ -8,6 +8,7 @@
 #include <ContentManager/HAsset.h>
 #include <HorizonScene/AudioEngine.h>
 #include <HorizonScene/SteamAudio.h>
+#include <HorizonScene/AudioOcclusion.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -568,5 +569,83 @@ TEST_CASE("Steam Audio option: air absorption dulls a far voice's highs and leav
 	// The option is read when a voice starts: turning it off again restores a new voice.
 	engine.setSteamOptions({});
 	CHECK(voiceEnergy(engine, high, 150.0f) > 0.5 * hiNear0);
+	engine.shutdown();
+}
+
+TEST_CASE("Occlusion estimate: a wall between source and listener blocks the rays, a gap lets some through")
+{
+	using HE::estimateOcclusion;
+	const glm::vec3 listener(0, 1.6f, 0), source(10, 1.6f, 0);
+
+	// Open air.
+	CHECK(estimateOcclusion(listener, source, [](const glm::vec3&, const glm::vec3&, float) { return false; }).visibility == 1.0f);
+
+	// A wall across the whole line (x = 5): every ray is stopped.
+	auto wall = [](const glm::vec3& from, const glm::vec3& dir, float maxDist) {
+		if (std::abs(dir.x) < 1.0e-5f) return false;
+		const float t = (5.0f - from.x) / dir.x;
+		return t > 0.0f && t < maxDist;
+	};
+	const HE::OcclusionResult blocked = estimateOcclusion(listener, source, wall);
+	CHECK(blocked.visibility == 0.0f);
+	CHECK(blocked.transmission[0] > blocked.transmission[2]);   // bass passes better than treble
+
+	// A pillar that only covers the centre: some rays still get past.
+	auto pillar = [](const glm::vec3& from, const glm::vec3& dir, float maxDist) {
+		if (std::abs(dir.x) < 1.0e-5f) return false;
+		const float t = (5.0f - from.x) / dir.x;
+		if (!(t > 0.0f && t < maxDist)) return false;
+		const glm::vec3 p = from + dir * t;
+		return std::abs(p.z) < 0.1f && std::abs(p.y - 1.6f) < 0.1f;
+	};
+	const float partial = estimateOcclusion(listener, source, pillar).visibility;
+	CHECK(partial > 0.0f);
+	CHECK(partial < 1.0f);
+
+	// On top of the listener there is nothing between.
+	CHECK(estimateOcclusion(listener, listener + glm::vec3(0.2f, 0, 0), wall).visibility == 1.0f);
+}
+
+TEST_CASE("Steam Audio option: occlusion dulls and dims a voice that the geometry hides")
+{
+	if (!HE::SteamAudio::compiledIn()) return;
+
+	AudioEngine engine;
+	REQUIRE(engine.init(true));
+	engine.setListenerTransform(0, 0, 0, 0, 0, -1, 0, 1, 0);
+	REQUIRE(engine.setSpatialBackend(HE::AudioSpatialBackend::SteamAudio));
+	HE::AudioSteamOptions opt;
+	opt.occlusion = true;
+	engine.setSteamOptions(opt);
+
+	const std::vector<uint8_t> low  = sinePcm(150.0f);
+	const std::vector<uint8_t> high = sinePcm(6000.0f);
+	const float wall[3] = { HE::kOcclusionTransmission[0], HE::kOcclusionTransmission[1], HE::kOcclusionTransmission[2] };
+
+	auto energy = [&](const std::vector<uint8_t>& pcm, float visibility) {
+		const uint64_t h = engine.playSpatial(pcm, 48000, 1, 1.0f, 1.0f, true, 4.0f, 0.0f, 0.0f, 1.0f, 1000.0f, "",
+		                                      AudioAttenuation::None, 1.0f);
+		REQUIRE(h != 0);
+		engine.setSoundOcclusion(h, visibility, wall);
+		std::vector<float> mix(2 * 4096);
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);
+		double e = 0.0;
+		for (float v : mix) e += static_cast<double>(v) * v;
+		engine.stop(h);
+		return e;
+	};
+
+	const double lowOpen = energy(low, 1.0f),  lowWall = energy(low, 0.0f);
+	const double hiOpen  = energy(high, 1.0f), hiWall  = energy(high, 0.0f);
+	INFO("low open/wall " << lowOpen << " / " << lowWall << ", high open/wall " << hiOpen << " / " << hiWall);
+	CHECK(lowWall < 0.5 * lowOpen);          // dimmed
+	CHECK(lowWall > 0.01 * lowOpen);         // but bass still leaks through
+	CHECK(hiWall < 0.05 * hiOpen);           // the treble is mostly gone
+	CHECK(hiWall / hiOpen < lowWall / lowOpen);
+
+	// Without the option the same call changes nothing.
+	engine.setSteamOptions({});
+	CHECK(energy(high, 0.0f) > 0.5 * hiOpen);
 	engine.shutdown();
 }

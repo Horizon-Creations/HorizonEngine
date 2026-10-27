@@ -3298,7 +3298,7 @@ void GameApplication::OnRender(float deltaTime)
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
-		AudioSystem::updateSpatial(*m_world, m_audioEngine);
+		AudioSystem::updateSpatial(*m_world, m_audioEngine, m_physicsWorld.get());
 
 	// Live widgets: per-frame logic tick (EventTick). RAW dt on purpose — the
 	// pause menu is a widget, and a menu that stops ticking when the game pauses

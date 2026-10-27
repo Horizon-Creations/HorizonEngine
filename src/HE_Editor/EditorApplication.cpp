@@ -4072,7 +4072,7 @@ void EditorApplication::OnRender(float dt)
 		if (m_isPlaying && m_editorWorld)
 		{
 			HE_PROFILE_SCOPE_N("AudioSpatial");
-			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine);
+			AudioSystem::updateSpatial(*m_editorWorld, m_audioEngine, m_physicsWorld.get());
 		}
 
 		// The weather's sound: rain/wind/snow/storm beds that follow the live weather,
