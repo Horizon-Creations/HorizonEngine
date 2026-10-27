@@ -4287,9 +4287,9 @@ static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const jso
 
         // Components the asset no longer has, unless something in them was
         // authored here.
-        for (const auto& [k, block] : iComps.items())
+        for (const auto& item : iComps.items())
         {
-            (void)block;
+            const std::string& k = item.key();
             if (!isPropagatedKey(k, isRoot) || tComps.contains(k)) continue;
             if (anyOverrideOn(work, key, k)) { ++rep.overridesKept; continue; }
             // A component a nested record lacks here is the nested asset's to
