@@ -3,9 +3,13 @@
 #include <ContentManager/Assets.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/AnimationSystem.h>
+#include <HorizonScene/RootMotion.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/AnimatorComponent.h>
+#include <HorizonScene/Components/RootMotionComponent.h>
+#include <HorizonScene/AnimationNotify.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -14,6 +18,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -81,6 +86,8 @@ AnimationClipAsset makeFullBodyClip()
         root.values.insert(root.values.end(), { 0.0f, 0.05f * std::sin(12.566f * t), 0.0f });
     }
     clip.channels.push_back(std::move(root));
+    // A notify per lap, so a parallel-vs-serial comparison also has to agree on firing order.
+    clip.notifies.push_back({ "Step", 0.5f, 0.0f });
     return clip;
 }
 
@@ -115,7 +122,93 @@ bool benchEnabled()
     return v && *v && *v != '0';
 }
 
+// Every 3rd entity also gets a RootMotionComponent (Mode::Transform) — HE::poseMayBeKept
+// (PoseFinalize.cpp) excludes those from the pool, so a mixed crowd exercises both the
+// parallel-eligible and the calling-thread paths of AnimationSystem::update together, and the
+// notify merge across them (see AnimationSystem.cpp).
+void populateMixed(Crowd& c, int count)
+{
+    const HE::UUID meshId = HE::UUID::generate();
+    c.cm.registerSkeletalMesh(makeHumanoid(meshId));
+    const HE::UUID clipId = c.cm.registerAnimationClip(makeFullBodyClip());
+    for (int i = 0; i < count; ++i)
+    {
+        const entt::entity e = c.world.createEntity("Character");
+        c.world.addComponent(e, TransformComponent{});
+        SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+        c.world.addComponent(e, smc);
+        AnimatorComponent an; an.clipAssetId = clipId; an.looping = true;
+        an.playbackTime = 0.013f * static_cast<float>(i);   // characters out of phase
+        c.world.addComponent(e, an);
+        if (i % 3 == 0)
+        {
+            RootMotionComponent rm;
+            rm.mode = RootMotionComponent::Mode::Transform;
+            // The clip's root channel only moves in Y (makeFullBodyClip) — extract that axis
+            // (off by default) so a real HE::RootMotionContext actually moves the entity below,
+            // instead of extracting-and-locking into a delta nobody applies.
+            rm.options.extractTranslationY = true;
+            c.world.addComponent(e, rm);
+        }
+        c.entities.push_back(e);
+    }
+}
+
 } // namespace
+
+TEST_CASE("AnimationSystem::setParallelOverride(0) and the pool agree bit for bit on a mixed crowd")
+{
+    // Well above 2x parallel_for's minGrain (32, see AnimationSystem.cpp's "AnimationSimple"
+    // call) so the pool path actually dispatches to the pool instead of folding back onto the
+    // calling thread.
+    constexpr int kCount = 400;
+
+    Crowd serial, parallel;
+    populateMixed(serial,   kCount);
+    populateMixed(parallel, kCount);
+
+    // A real context (not nullptr) so root motion actually moves the Mode::Transform entities
+    // instead of only extracting-and-locking a delta nobody applies (RootMotionApply.h) — the
+    // Transform-mode write path never dereferences `physics`, so nullptr here is fine.
+    HE::RootMotionContext rmCtx;
+    HE::NotifyQueue serialNotifies, parallelNotifies;
+    for (int frame = 0; frame < 5; ++frame)
+    {
+        AnimationSystem::setParallelOverride(0);
+        AnimationSystem::update(serial.world, serial.cm, 1.0f / 60.0f, &rmCtx, &serialNotifies);
+        AnimationSystem::setParallelOverride(-1);
+        AnimationSystem::update(parallel.world, parallel.cm, 1.0f / 60.0f, &rmCtx, &parallelNotifies);
+    }
+    AnimationSystem::setParallelOverride(-1);   // restore the default for whatever runs after this case
+
+    REQUIRE(serial.entities.size() == parallel.entities.size());
+    bool anyRootMotionMoved = false;
+    for (size_t i = 0; i < serial.entities.size(); ++i)
+    {
+        const auto& sb = serial.world.registry().get<SkeletalMeshComponent>(serial.entities[i]).boneMatrices;
+        const auto& pb = parallel.world.registry().get<SkeletalMeshComponent>(parallel.entities[i]).boneMatrices;
+        REQUIRE(sb.size() == pb.size());
+        CHECK(std::memcmp(sb.data(), pb.data(), sb.size() * sizeof(glm::mat4)) == 0);
+
+        const auto& st = serial.world.registry().get<TransformComponent>(serial.entities[i]);
+        const auto& pt = parallel.world.registry().get<TransformComponent>(parallel.entities[i]);
+        CHECK(st.position == pt.position);
+        CHECK(st.rotation == pt.rotation);
+        if (i % 3 == 0 && st.position.y != 0.0f) anyRootMotionMoved = true;
+    }
+    // Otherwise the position/rotation checks above would pass trivially (both sides at the
+    // TransformComponent default) without exercising the serial/complex split at all.
+    CHECK(anyRootMotionMoved);
+
+    REQUIRE(serialNotifies.size() == parallelNotifies.size());
+    REQUIRE(!serialNotifies.empty());   // the clip's "Step" notify must have fired at least once
+    for (size_t i = 0; i < serialNotifies.size(); ++i)
+    {
+        CHECK(serialNotifies[i].entity == parallelNotifies[i].entity);
+        CHECK(serialNotifies[i].name   == parallelNotifies[i].name);
+        CHECK(serialNotifies[i].kind   == parallelNotifies[i].kind);
+    }
+}
 
 TEST_CASE("animation bench: a full-body clip moves every joint of every character")
 {

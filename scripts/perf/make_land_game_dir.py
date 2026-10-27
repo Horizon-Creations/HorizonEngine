@@ -2,7 +2,7 @@
 
   python3 scripts/perf/make_land_game_dir.py <scene.hescene> <runtime Game dir> <out dir>
 """
-import json, sys, shutil, subprocess, random
+import json, sys, shutil, random
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from make_cell_game_dir import write_hcfg
@@ -15,6 +15,6 @@ cam = {"children": [], "name": "Cam", "parent": world["uuid"], "uuid": [rng.getr
                       "transform": {"position": [0.0, 15.0, 0.0], "rotation": [-10.0, 0.0, 0.0], "scale": [1, 1, 1]}}}
 world["children"].append(cam["uuid"]); d["entities"].append(cam)
 if out.exists(): shutil.rmtree(out)
-subprocess.run(["cp", "-cR", str(runtime), str(out)], check=True)
+shutil.copytree(runtime, out)   # cp -cR is macOS-only (BSD clone flag); this works on every platform
 (out / "Bench.hescene").write_text(json.dumps(d)); write_hcfg(out, "Bench.hescene")
 print(out)
