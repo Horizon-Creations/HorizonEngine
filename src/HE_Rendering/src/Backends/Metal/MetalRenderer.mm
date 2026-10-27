@@ -1750,6 +1750,7 @@ constant float kFocal      = 6.0;    // m the bent light travels to the floor, w
 constant float kGain       = 0.05;   // line brightness per unit of squeeze above 1
 constant float kMaxLine    = 0.2;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
 constant float kFineScale  = 1.8;    // the whole net this much finer than the water's own wavelengths: real caustics are small filaments, not metre-wide cells
+constant float kTimeScale  = 0.75;   // the net's clock runs this much of the water's own: the lines slid too fast against the swell
 constant float kDark       = 0.3;    // how much of the cells' light the lines take at intensity >= 1
 constant float kCore       = 0.45;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
@@ -1773,7 +1774,7 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
 	float3 Lr   = float3(hz.x, cosT, hz.y);
 	float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
-	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * u.caustics.z), sin(0.37 * S.x - 0.27 * u.caustics.z));
+	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * (u.caustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (u.caustics.z * kTimeScale)));
 
 	// Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).
 	float  mxx = 0.0, mzz = 0.0, mxz = 0.0;
@@ -1801,7 +1802,7 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 		float  rad = deg * (3.14159265359 / 180.0);
 		float2 dv  = float2(cos(rad), sin(rad));
 		float  k   = kTwoPi / len * (u.caustics.y * kFineScale);
-		float  ph  = k * (dot(dv, S) - spd * u.caustics.z);
+		float  ph  = k * (dot(dv, S) - spd * (u.caustics.z * kTimeScale));
 		float  c   = stp * k * sin(ph);
 		float2 dc  = (stp * k * k * cos(ph)) * dv;
 		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;

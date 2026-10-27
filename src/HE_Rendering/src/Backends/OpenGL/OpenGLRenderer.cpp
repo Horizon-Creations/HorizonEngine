@@ -5671,6 +5671,7 @@ const float kFocal      = 6.0;    // m the bent light travels to the floor, what
 const float kGain       = 0.05;   // line brightness per unit of squeeze above 1
 const float kMaxLine    = 0.2;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
 const float kFineScale  = 1.8;    // the whole net this much finer than the water's own wavelengths: real caustics are small filaments, not metre-wide cells
+const float kTimeScale  = 0.75;   // the net's clock runs this much of the water's own: the lines slid too fast against the swell
 const float kDark       = 0.3;    // how much of the cells' light the lines take at intensity >= 1
 const float kCore       = 0.45;    // share of the cap's squeeze a line must pass to light up (see the cap below)
 
@@ -5696,7 +5697,7 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	vec2  S    = P.xz + hz / max(cosT, 0.1) * depth;
 	// The material bends its wave phase with a slow FBM field; a cheap two-sine stand-in
 	// does the same here, so the lattice of the plane trains does not read as a grid.
-	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * uCaustics.z), sin(0.37 * S.x - 0.27 * uCaustics.z));
+	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * (uCaustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (uCaustics.z * kTimeScale)));
 
 	// Curvature of the wave surface at S, summed over the trains.
 	// h = (steepness / k) sin(k (d.p - speed t)); H = -steepness k sin(.) d d^T.
@@ -5731,7 +5732,7 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 		float rad = radians(deg);
 		vec2  dv  = vec2(cos(rad), sin(rad));
 		float k   = kTwoPi / len * (uCaustics.y * kFineScale);
-		float ph  = k * (dot(dv, S) - spd * uCaustics.z);
+		float ph  = k * (dot(dv, S) - spd * (uCaustics.z * kTimeScale));
 		float c   = stp * k * sin(ph);
 		vec2  dc  = (stp * k * k * cos(ph)) * dv;
 		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
