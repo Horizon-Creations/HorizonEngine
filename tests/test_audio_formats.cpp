@@ -395,3 +395,77 @@ TEST_CASE("SteamAudio: the binaural renderer puts a source on the right into the
 	std::vector<float> again(static_cast<size_t>(256) * 2);
 	CHECK(fx->process(mono.data(), again.data(), 256, HE::SpatialDirection{}));
 }
+
+TEST_CASE("AudioEngine: with Steam Audio active a spatial voice is rendered through the HRTF")
+{
+	if (!HE::SteamAudio::compiledIn()) return;
+
+	AudioEngine engine;
+	REQUIRE(engine.init(true));
+	REQUIRE(engine.outputChannels() == 2);
+	INFO(engine.spatialBackendStatus());
+	REQUIRE(engine.setSpatialBackend(HE::AudioSpatialBackend::SteamAudio));
+	engine.setListenerTransform(0, 0, 0, 0, 0, -1, 0, 1, 0);
+
+	std::vector<uint8_t> pcm(48000 * 2);   // one second of 500 Hz, 16-bit mono, looped
+	for (int i = 0; i < 48000; ++i)
+	{
+		const int16_t v = static_cast<int16_t>(12000.0f * std::sin(2.0f * 3.14159265f * 500.0f * static_cast<float>(i) / 48000.0f));
+		std::memcpy(pcm.data() + static_cast<size_t>(i) * 2, &v, 2);
+	}
+
+	// Plays one voice at (x,y,z) for a while and reports (left, right) energy.
+	auto play = [&](float x, float y, float z, AudioAttenuation att, double& l, double& r) {
+		const uint64_t h = engine.playSpatial(pcm, 48000, 1, 1.0f, 1.0f, true, x, y, z, 1.0f, 100.0f, "", att, 1.0f);
+		REQUIRE(h != 0);
+		std::vector<float> mix(2 * 4096);
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);   // settle: one block of latency, filter warm-up
+		REQUIRE(engine.readMixedFrames(mix.data(), 4096) == 4096);
+		l = r = 0.0;
+		for (int i = 0; i < 4096; ++i)
+		{
+			l += static_cast<double>(mix[static_cast<size_t>(i) * 2])     * mix[static_cast<size_t>(i) * 2];
+			r += static_cast<double>(mix[static_cast<size_t>(i) * 2 + 1]) * mix[static_cast<size_t>(i) * 2 + 1];
+		}
+		engine.stop(h);
+	};
+
+	double l = 0, r = 0;
+	play(4, 0, 0, AudioAttenuation::None, l, r);
+	CHECK(l + r > 1.0);                 // it is audible at all
+	CHECK(r > 2.0 * l);                 // a source on the right is mostly in the right ear
+	const double rightTotal = l + r;
+
+	play(-4, 0, 0, AudioAttenuation::None, l, r);
+	CHECK(l > 2.0 * r);
+
+	// Distance falloff still applies (the node does it, miniaudio's spatializer is out).
+	play(40, 0, 0, AudioAttenuation::Linear, l, r);
+	CHECK(l + r < 0.5 * rightTotal);
+
+	// Moving the voice while it plays moves the sound.
+	{
+		const uint64_t h = engine.playSpatial(pcm, 48000, 1, 1.0f, 1.0f, true, 4, 0, 0, 1.0f, 100.0f, "",
+		                                      AudioAttenuation::None, 1.0f);
+		REQUIRE(h != 0);
+		std::vector<float> mix(2 * 4096);
+		engine.readMixedFrames(mix.data(), 4096);
+		engine.setSoundPosition(h, -4, 0, 0);
+		engine.readMixedFrames(mix.data(), 4096);   // the move reaches the next block
+		engine.readMixedFrames(mix.data(), 4096);
+		double ll = 0, rr = 0;
+		for (int i = 0; i < 4096; ++i)
+		{
+			ll += static_cast<double>(mix[static_cast<size_t>(i) * 2])     * mix[static_cast<size_t>(i) * 2];
+			rr += static_cast<double>(mix[static_cast<size_t>(i) * 2 + 1]) * mix[static_cast<size_t>(i) * 2 + 1];
+		}
+		CHECK(ll > 2.0 * rr);
+
+		// Switching the backend off with the voice still running must not pull the
+		// library from under it; the voice carries on, new ones use miniaudio.
+		CHECK(engine.setSpatialBackend(HE::AudioSpatialBackend::Miniaudio));
+		CHECK(engine.readMixedFrames(mix.data(), 4096) == 4096);
+		engine.stop(h);
+	}
+	engine.shutdown();
+}

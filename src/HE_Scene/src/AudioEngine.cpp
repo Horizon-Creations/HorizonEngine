@@ -353,6 +353,131 @@ static ma_data_source_vtable g_envelopeVtable = {
     0
 };
 
+// ─── Steam Audio voice node ─────────────────────────────────────────────────
+// With the Steam Audio backend a spatial voice does not use miniaudio's
+// spatializer (which only pans left/right): the sound is created without it and
+// its output goes through this node instead, between the sound and its bus:
+//   sound → BinauralNode → bus group (or endpoint)
+// The node downmixes the voice to mono, applies the distance falloff with the
+// same curves miniaudio would have used, and renders it through the HRTF for
+// the source's direction in the listener's frame. Steam Audio works on whole
+// blocks, so the node runs one block behind: it hands out the block it rendered
+// last time while it collects the next (kSteamFrameSize frames, ~5 ms at 48 kHz).
+
+// Block size Steam Audio renders in. A power of two near the mixer's own period.
+static constexpr int kSteamFrameSize = 256;
+
+// The listener as the mixer thread reads it. AudioEngine::setListenerTransform
+// (game thread) writes the fields one by one; a block that sees a half-updated
+// pose is wrong for 5 ms, which nobody hears.
+struct SpatialListener
+{
+    std::atomic<float> pos[3];
+    std::atomic<float> fwd[3];
+    std::atomic<float> up[3];
+    SpatialListener()
+    {
+        const float p[3] = { 0.0f, 0.0f, 0.0f }, f[3] = { 0.0f, 0.0f, -1.0f }, u[3] = { 0.0f, 1.0f, 0.0f };
+        for (int i = 0; i < 3; ++i) { pos[i] = p[i]; fwd[i] = f[i]; up[i] = u[i]; }
+    }
+};
+
+// miniaudio's distance models (ma_attenuation_model_*), for the voices that no
+// longer pass through miniaudio's spatializer.
+static float spatialDistanceGain(AudioAttenuation model, float d, float lo, float hi, float rolloff)
+{
+    if (model == AudioAttenuation::None) return 1.0f;
+    d = std::min(std::max(d, lo), hi);
+    switch (model)
+    {
+    case AudioAttenuation::Inverse:
+        return lo / (lo + rolloff * (d - lo));
+    case AudioAttenuation::Exponential:
+        return std::pow(d / lo, -rolloff);
+    case AudioAttenuation::Linear:
+    default:
+        return 1.0f - rolloff * (d - lo) / (hi - lo);
+    }
+}
+
+struct BinauralNode
+{
+    ma_node_base                             base;     // first: miniaudio hands &base back
+    bool                                     nodeOk = false;
+    std::unique_ptr<HE::SteamAudio::Binaural> fx;
+    const SpatialListener*                   listener = nullptr;
+
+    // Set by the game thread (setSoundPosition / setSoundAttenuation), read per block.
+    std::atomic<float> src[3];
+    std::atomic<float> minDist{ 1.0f }, maxDist{ 100.0f }, rolloff{ 1.0f };
+    std::atomic<int>   model{ 0 };
+
+    // Mixer thread only.
+    float inBlock[kSteamFrameSize]     = {};
+    float outBlock[2 * kSteamFrameSize] = {};
+    int   fill     = 0;
+    float gain     = 1.0f;
+    bool  gainInit = false;
+
+    BinauralNode() { for (auto& v : src) v = 0.0f; }
+
+    void renderBlock()
+    {
+        const float sx = src[0].load(std::memory_order_relaxed) - listener->pos[0].load(std::memory_order_relaxed);
+        const float sy = src[1].load(std::memory_order_relaxed) - listener->pos[1].load(std::memory_order_relaxed);
+        const float sz = src[2].load(std::memory_order_relaxed) - listener->pos[2].load(std::memory_order_relaxed);
+        const HE::SpatialDirection dir = HE::listenerRelativeDirection(
+            sx, sy, sz,
+            listener->fwd[0].load(std::memory_order_relaxed), listener->fwd[1].load(std::memory_order_relaxed),
+            listener->fwd[2].load(std::memory_order_relaxed),
+            listener->up[0].load(std::memory_order_relaxed), listener->up[1].load(std::memory_order_relaxed),
+            listener->up[2].load(std::memory_order_relaxed));
+
+        const float dist = std::sqrt(sx * sx + sy * sy + sz * sz);
+        const float lo   = minDist.load(std::memory_order_relaxed);
+        const float hi   = maxDist.load(std::memory_order_relaxed);
+        float g = spatialDistanceGain(static_cast<AudioAttenuation>(model.load(std::memory_order_relaxed)),
+                                      dist, lo, hi, rolloff.load(std::memory_order_relaxed));
+        g = std::min(std::max(g, 0.0f), 1.0f);
+        if (!gainInit) { gain = g; gainInit = true; }   // a new voice starts at its gain, no ramp up from 1
+        // Ramp across the block so a moving source does not step the level.
+        for (int i = 0; i < kSteamFrameSize; ++i)
+            inBlock[i] *= gain + (g - gain) * (static_cast<float>(i + 1) / kSteamFrameSize);
+        gain = g;
+
+        if (!fx || !fx->process(inBlock, outBlock, kSteamFrameSize, dir))
+            for (int i = 0; i < kSteamFrameSize; ++i)   // never leave the voice silent on a failed block
+                outBlock[2 * i] = outBlock[2 * i + 1] = inBlock[i];
+    }
+};
+
+static void binauralProcess(ma_node* node, const float** in, ma_uint32* /*inCount*/,
+                            float** out, ma_uint32* outCount)
+{
+    BinauralNode& n = *reinterpret_cast<BinauralNode*>(node);
+    const ma_uint32 frames = *outCount;   // one rate in and out, so also the input count
+    const float* src = in[0];
+    float*       dst = out[0];
+    for (ma_uint32 i = 0; i < frames; ++i)
+    {
+        dst[2 * i]     = n.outBlock[2 * n.fill];
+        dst[2 * i + 1] = n.outBlock[2 * n.fill + 1];
+        n.inBlock[n.fill] = 0.5f * (src[2 * i] + src[2 * i + 1]);
+        if (++n.fill == kSteamFrameSize)
+        {
+            n.renderBlock();
+            n.fill = 0;
+        }
+    }
+}
+
+static ma_node_vtable g_binauralVtable = {
+    binauralProcess,
+    nullptr,   // same rate in and out
+    1, 1,      // the sound in, the bus out
+    0
+};
+
 // ─── PIMPL ────────────────────────────────────────────────────────────────────
 
 struct ActiveSound
@@ -386,6 +511,10 @@ struct ActiveSound
     // set it — what hasSoundEq answers without touching the mixer's copy.
     bool                 eqActive    = false;
 
+    // The Steam Audio stage between the sound and its bus (BinauralNode), when
+    // the voice was started under that backend.
+    std::unique_ptr<BinauralNode> bin;
+
     ma_data_source* voiceSource() { return env ? &env->node.base : source; }
 
     // Order matters: the sound reads from the curve stage, the curve stage from
@@ -393,6 +522,8 @@ struct ActiveSound
     void release()
     {
         if (soundOk)   { ma_sound_stop(&sound); ma_sound_uninit(&sound); soundOk = false; }
+        // The node after the sound that feeds it, its effect before the node is gone.
+        if (bin)       { if (bin->nodeOk) ma_node_uninit(&bin->base, nullptr); bin->fx.reset(); bin.reset(); }
         env.reset();
         if (bufferOk)  { ma_audio_buffer_uninit(&buffer); bufferOk = false; }
         if (decoderOk) { ma_decoder_uninit(&decoder);     decoderOk = false; }
@@ -442,14 +573,11 @@ struct AudioEngine::Impl
     // what the project/UI asked for, `spatialActive` what is really running: they
     // differ when the build lacks the SDK or the library did not load.
     HE::SteamAudio          steam;
+    SpatialListener         listener;
     HE::AudioSpatialBackend spatialRequested = HE::AudioSpatialBackend::Miniaudio;
     HE::AudioSpatialBackend spatialActive    = HE::AudioSpatialBackend::Miniaudio;
     std::string             spatialStatus    = "miniaudio";
 };
-
-// Block size Steam Audio renders in. A power of two near the mixer's own period;
-// per-voice routing buffers to it.
-static constexpr int kSteamFrameSize = 256;
 
 // ─── AudioEngine ─────────────────────────────────────────────────────────────
 
@@ -671,7 +799,13 @@ bool AudioEngine::setSpatialBackend(HE::AudioSpatialBackend backend)
 
     if (backend == HE::AudioSpatialBackend::Miniaudio)
     {
-        s.steam.shutdown();
+        // Voices already running keep their Steam Audio stage until they end (a
+        // sound is not re-routed mid-flight); the library stays open for them and
+        // closes with the engine. New voices use miniaudio from now on.
+        bool inUse = false;
+        for (const auto& [handle, snd] : s.sounds)
+            if (snd->bin) { inUse = true; break; }
+        if (!inUse) s.steam.shutdown();
         s.spatialActive = HE::AudioSpatialBackend::Miniaudio;
         s.spatialStatus = "miniaudio";
         return true;
@@ -781,6 +915,13 @@ static void applyAttenuation(ActiveSound& snd, AudioAttenuation model,
     ma_sound_set_min_distance(&snd.sound, lo);
     ma_sound_set_max_distance(&snd.sound, hi);
     ma_sound_set_rolloff(&snd.sound, rolloff > 0.0f ? rolloff : 0.0f);
+    if (snd.bin)   // the Steam Audio stage applies the falloff itself
+    {
+        snd.bin->model.store(static_cast<int>(model), std::memory_order_relaxed);
+        snd.bin->minDist.store(lo, std::memory_order_relaxed);
+        snd.bin->maxDist.store(hi, std::memory_order_relaxed);
+        snd.bin->rolloff.store(rolloff > 0.0f ? rolloff : 0.0f, std::memory_order_relaxed);
+    }
 }
 
 // Everything the play variants have in common — the byte copy, the data source
@@ -945,11 +1086,40 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
                                "(bus volume/mute will not apply)", busName.c_str());
     }
 
-    // Spatial sounds pass no flag — positioning enabled.
-    ma_uint32 flags = spatial ? 0u : MA_SOUND_FLAG_NO_SPATIALIZATION;
+    // Spatial sounds pass no flag — positioning enabled — unless Steam Audio is
+    // the active backend and the mixer is stereo (the HRTF renders two channels):
+    // then the sound skips miniaudio's spatializer and attaches to a BinauralNode
+    // instead of the bus, which feeds the bus.
+    const bool viaSteam = spatial && m_impl->spatialActive == HE::AudioSpatialBackend::SteamAudio &&
+                          ma_engine_get_channels(&m_impl->engine) == 2;
+    if (viaSteam)
+    {
+        auto bin = std::make_unique<BinauralNode>();
+        bin->fx = m_impl->steam.createBinaural();
+        ma_uint32 stereo = 2;
+        ma_node_config ncfg = ma_node_config_init();
+        ncfg.vtable          = &g_binauralVtable;
+        ncfg.pInputChannels  = &stereo;
+        ncfg.pOutputChannels = &stereo;
+        if (!bin->fx)
+            HE_LOG_WARN(Audio, "Steam Audio could not create a voice effect — this voice uses miniaudio: %s",
+                        m_impl->steam.lastError().c_str());
+        else if (ma_node_init(ma_engine_get_node_graph(&m_impl->engine), &ncfg, nullptr, &bin->base) != MA_SUCCESS)
+            HE_LOG_WARN(Audio, "%s", "Could not add the Steam Audio stage to the mixer — this voice uses miniaudio");
+        else
+        {
+            bin->nodeOk   = true;
+            bin->listener = &m_impl->listener;
+            bin->src[0] = spatial->x; bin->src[1] = spatial->y; bin->src[2] = spatial->z;
+            snd->bin = std::move(bin);
+        }
+    }
+
+    ma_uint32 flags = spatial && !snd->bin ? 0u : MA_SOUND_FLAG_NO_SPATIALIZATION;
+    if (snd->bin) flags |= MA_SOUND_FLAG_NO_DEFAULT_ATTACHMENT;
     if (ma_sound_init_from_data_source(&m_impl->engine,
                                         snd->voiceSource(),
-                                        flags, busGroup,
+                                        flags, snd->bin ? nullptr : busGroup,
                                         &snd->sound) != MA_SUCCESS)
     {
         HE_LOG_ERROR(Audio, "%s", "Sound init from data source failed");
@@ -957,6 +1127,15 @@ uint64_t AudioEngine::startSound(const std::vector<uint8_t>& bytes, AudioEncodin
         return 0;
     }
     snd->soundOk = true;
+    if (snd->bin)
+    {
+        // Downstream first, as for the bus EQ: the node leads somewhere before
+        // anything feeds it.
+        ma_node* downstream = busGroup ? reinterpret_cast<ma_node*>(busGroup)
+                                       : ma_engine_get_endpoint(&m_impl->engine);
+        ma_node_attach_output_bus(&snd->bin->base, 0, downstream, 0);
+        ma_node_attach_output_bus(&snd->sound, 0, &snd->bin->base, 0);
+    }
 
     ma_sound_set_volume(&snd->sound, volume);
     ma_sound_set_pitch(&snd->sound, pitch);
@@ -1147,6 +1326,12 @@ void AudioEngine::setSoundPosition(uint64_t handle, float x, float y, float z)
     if (it == m_impl->sounds.end()) return;
     if (it->second->soundOk)
         ma_sound_set_position(&it->second->sound, x, y, z);
+    if (BinauralNode* bin = it->second->bin.get())
+    {
+        bin->src[0].store(x, std::memory_order_relaxed);
+        bin->src[1].store(y, std::memory_order_relaxed);
+        bin->src[2].store(z, std::memory_order_relaxed);
+    }
 }
 
 void AudioEngine::setSoundAttenuation(uint64_t handle, AudioAttenuation model,
@@ -1172,6 +1357,10 @@ void AudioEngine::setListenerTransform(float px, float py, float pz,
     ma_engine_listener_set_position(&m_impl->engine, 0, px, py, pz);
     ma_engine_listener_set_direction(&m_impl->engine, 0, fx, fy, fz);
     ma_engine_listener_set_world_up(&m_impl->engine, 0, ux, uy, uz);
+    SpatialListener& l = m_impl->listener;   // the Steam Audio stages read their own copy
+    l.pos[0] = px; l.pos[1] = py; l.pos[2] = pz;
+    l.fwd[0] = fx; l.fwd[1] = fy; l.fwd[2] = fz;
+    l.up[0]  = ux; l.up[1]  = uy; l.up[2]  = uz;
 }
 
 bool AudioEngine::isPlaying(uint64_t handle) const

@@ -87,13 +87,15 @@ build lacks the SDK); default ON for editor trees, OFF/omitted by flavour for ap
 **Only suggested**: a game tree that does not need HRTF sets `HE_ENABLE_STEAM_AUDIO=OFF`.
 
 **Next steps, in order**
-1. **Route spatial voices through `Binaural`** — the switch is in, but nothing is
-   audibly different yet. In `startSound` (spatial voices, backend == Steam): create
-   the `ma_sound` with `MA_SOUND_FLAG_NO_SPATIALIZATION`, 1 output channel, attach it
-   to a per-voice node (vtable like `busEqProcess`) that buffers to 256 frames, calls
-   `Binaural::process` with `listenerRelativeDirection(source - listener, …)` and applies
-   `attenuationGain`; that node outputs stereo into the bus group. The listener
-   transform is only stored inside miniaudio today — keep a copy in `Impl`.
+1. **DONE (voice routing)**: `BinauralNode` in `AudioEngine.cpp` (sound, created with
+   `NO_SPATIALIZATION|NO_DEFAULT_ATTACHMENT`, → node → bus group/endpoint). Mono downmix,
+   own distance curves (`spatialDistanceGain`, miniaudio's formulas), one 256-frame block
+   of latency, gain ramped per block. Listener pose copy in `Impl::listener`, source pos
+   and falloff via atomics. Only when the mixer is stereo; otherwise/on failure the voice
+   uses miniaudio. A voice keeps its backend for its lifetime: switching to miniaudio
+   keeps libphonon open while such voices live. Test: "…rendered through the HRTF"
+   (ear lean, falloff, moving source, switch-off with live voice) — 20 assertions green.
+   Not verified by ear, and the stage is not exercised with bus EQ in front of it.
 2. Occlusion/reflections: mirror scene geometry into an `IPLScene`
    (`iplSimulatorCreate`, needs the simulator thread) and feed direct-effect params.
 3. Windows/Linux: copy `libphonon` in `package_macos.sh`-style packaging scripts
