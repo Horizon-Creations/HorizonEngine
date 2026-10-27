@@ -412,27 +412,25 @@ const SaveStateComponent* saveStateGuard(const char* op, Ctx& c, Entity e, std::
 {
     if (!save::inPlayMode())
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
-            ": only available in play mode (the editor's SceneSerializer owns edit-mode state)").c_str());
+        HE_LOG_WARN(Script, "entity.%s: only available in play mode "
+            "(the editor's SceneSerializer owns edit-mode state)", op);
         return nullptr;
     }
     if (save::activeId().empty())
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
-            ": no active save — call save.create/load first").c_str());
+        HE_LOG_WARN(Script, "entity.%s: no active save — call save.create/load first", op);
         return nullptr;
     }
     uuid = entityUuidKey(c, e);
     if (uuid.empty())
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op + ": invalid entity").c_str());
+        HE_LOG_WARN(Script, "entity.%s: invalid entity", op);
         return nullptr;
     }
     auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
     if (!ss || !ss->enabled)
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
-            ": entity has no enabled SaveStateComponent").c_str());
+        HE_LOG_WARN(Script, "entity.%s: entity has no enabled SaveStateComponent", op);
         return nullptr;
     }
     return ss;
