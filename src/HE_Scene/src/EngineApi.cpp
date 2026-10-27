@@ -5187,7 +5187,7 @@ bool inPlayMode() { return playMode(); }
 bool create(const std::string& id, ::ContentManager* cm, const std::string& templatePath)
 {
     if (!validId(id))
-    { HE_LOG_WARN(Script, "%s", ("save.create: invalid id '" + id + "' (use A-Z a-z 0-9 _ -)").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.create: invalid id '%s' (use A-Z a-z 0-9 _ -)", id.c_str()); return false; }
     const std::string tpl = templatePath.empty() ? defaultTpl() : templatePath;
     HE::StructDef schema;
     if (!resolveTemplate(cm, tpl, schema)) return false;
@@ -5203,13 +5203,13 @@ bool create(const std::string& id, ::ContentManager* cm, const std::string& temp
 bool load(const std::string& id, ::ContentManager* cm)
 {
     if (!validId(id))
-    { HE_LOG_WARN(Script, "%s", ("save.load: invalid id '" + id + "'").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.load: invalid id '%s'", id.c_str()); return false; }
     const std::string text = fs::readText(savePath(id));
     if (text.empty())
-    { HE_LOG_WARN(Script, "%s", ("save.load: no save '" + id + "'").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.load: no save '%s'", id.c_str()); return false; }
     nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object())
-    { HE_LOG_WARN(Script, "%s", ("save.load: save '" + id + "' is corrupt").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.load: save '%s' is corrupt", id.c_str()); return false; }
 
     HE::StructDef schema;
     if (!resolveTemplate(cm, j.value("template", std::string{}), schema)) return false;
