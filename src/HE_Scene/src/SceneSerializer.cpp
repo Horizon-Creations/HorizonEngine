@@ -4278,7 +4278,7 @@ static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const jso
         if (!toApply.empty())
         {
             std::string keys;
-            for (const auto& [k, v] : toApply.items()) { (void)v; keys += (keys.empty() ? "" : ", ") + k; }
+            for (const auto& item : toApply.items()) { keys += (keys.empty() ? "" : ", ") + item.key(); }
             HE_LOG_INFO(Serialize, "Prefab sync: '%s' ← %s: %s", rootName.c_str(),
                         r->value("name", "Entity").c_str(), keys.c_str());
             applyComponents(registry, e, toApply);
