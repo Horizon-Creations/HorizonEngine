@@ -14,6 +14,7 @@
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonCode/HorizonCodeRuntime.h>
 
+#include <Diagnostics/Log.h>
 #include <Net/BitStream.h>
 #include <Net/ITransport.h>
 #include <Net/LossyTransport.h>
@@ -1050,4 +1051,31 @@ TEST_CASE("properties: the overlay's cost list names the expensive variable") {
     REQUIRE(costs.size() >= 1u);
     CHECK(costs[0].name == "chatter");
     CHECK(costs[0].bytes > 0u);
+}
+
+TEST_CASE("properties: an entity over the 255-variable limit is not replicated, and says so once") {
+    int warnings = 0;
+    const int sink = HE::Log::addSink([](const HE::Log::Record& r, void* user) {
+        if (std::string(r.message).find("exceeds the 255 limit") != std::string::npos)
+            ++*static_cast<int*>(user);
+    }, &warnings);
+
+    Rig rig;
+    const Entity big = authoredEntity(*rig.host.world, "Big");
+    startHost(rig);
+    Peer& client = addClient(rig, 13);
+    mirrorOf(*rig.host.world, big, *client.world);
+
+    for (int i = 0; i < 256; ++i)
+        REQUIRE(rig.host.session->properties()->declareVar(
+            big, "v" + std::to_string(i), Value::ofInt(i), false));
+
+    rig.step(30);   // update() asks for the table again every frame
+    REQUIRE(client.session->status() == NetGameSession::Status::Joined);
+
+    CHECK(rig.host.session->properties()->stats().tablesSent == 0u);
+    CHECK(client.session->properties()->stats().tablesReceived == 0u);
+    CHECK(client.session->properties()->stats().malformed == 0u);
+    HE::Log::removeSink(sink);
+    CHECK(warnings == 1);
 }

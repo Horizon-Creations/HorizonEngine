@@ -37,6 +37,17 @@ namespace
 		return false;
 	}
 
+	// An entity over kMaxProperties never gets a table, so update() asks for one
+	// again every frame and for every connection; the warning is said once per
+	// net id. Process-wide on purpose: the header stays as it is.
+	bool firstOversizedReport(std::uint32_t netId)
+	{
+		static std::vector<std::uint32_t> reported;
+		if (std::find(reported.begin(), reported.end(), netId) != reported.end()) return false;
+		reported.push_back(netId);
+		return true;
+	}
+
 	// update()'s per-frame question, "is the declaration still the table's?",
 	// answered against the table's names in place, without collect's copies of
 	// every name and value (SCN-401/501). Same order and same duplicate rule as
@@ -301,7 +312,14 @@ void PropertyReplicator::sendTableFor(std::uint32_t netId, ConnectionId conn)
 		t.notify.erase(t.notify.begin() + static_cast<long>(i));
 		t.values.erase(t.values.begin() + static_cast<long>(i));
 	}
-	if (t.names.size() > kMaxProperties) return;
+	if (t.names.size() > kMaxProperties)
+	{
+		if (firstOversizedReport(netId))
+			HE_LOG_WARN(Replication,
+			            "Entity with %zu replicated variables exceeds the %u limit — it is not replicated",
+			            t.names.size(), static_cast<unsigned>(kMaxProperties));
+		return;
+	}
 
 	// WHAT GETS RECORDED, and this distinction is the whole of a bug that only
 	// shows when somebody joins at the wrong moment. `m_tables` is the host's
