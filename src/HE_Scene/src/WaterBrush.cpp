@@ -205,13 +205,6 @@ namespace
         if (x0 > x1 || z0 > z1) return 0;
         const CellRect cells = cellRect(tc, x - span - reach, z - span - reach, x + span + reach, z + span + reach);
         if (!cells.valid()) return 0;
-        auto distance = [](const glm::dvec2& p, const ShoreSegment& s)
-        {
-            const glm::dvec2 ab = s.b - s.a;
-            const double len2 = glm::dot(ab, ab);
-            const double t = len2 > 0.0 ? std::clamp(glm::dot(p - s.a, ab) / len2, 0.0, 1.0) : 0.0;
-            return glm::length(p - (s.a + ab * t));
-        };
         const int w = x1 - x0 + 1;
         std::vector<float> was;
         was.reserve(static_cast<size_t>(w) * (z1 - z0 + 1));
@@ -247,7 +240,7 @@ namespace
             const glm::dvec2 centre(x, z);
             const double shoreReach = outer + 2.0 * std::max(lattice.cellW, lattice.cellH);
             shore.erase(std::remove_if(shore.begin(), shore.end(),
-                                       [&](const ShoreSegment& s) { return distance(centre, s) > shoreReach; }),
+                                       [&](const ShoreSegment& s) { return segmentDistance(centre, s) > shoreReach; }),
                         shore.end());
             if (shore.empty()) break;
 
