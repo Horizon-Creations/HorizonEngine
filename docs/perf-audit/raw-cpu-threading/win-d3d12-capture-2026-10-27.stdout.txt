@@ -1,0 +1,52 @@
+=== s512_x4, steady state (HE_PROFILE_WARMUP=120 HE_PROFILE_CAPTURE=250), dump profile_20261027_123830.json ===
+C:\hb\game_s512x4\dumps\profile_20261027_123830.json: 250 frames, cpu-threading-step5 s512_x4 D3D12 r1 | display 2560x1440 @59.950001 Hz, density 1.000000
+  frame CPU p50 1.32 ms  p90 4.53  max 16.63
+  RenderExtractor::extract: 250 calls, per call p50 0.020 ms p90 0.036 max 0.110 | per frame p50 0.020 ms p90 0.036 (mean 0.023)
+  Extract::meshes: 250 calls, per call p50 0.003 ms p90 0.006 max 0.017 | per frame p50 0.003 ms p90 0.006 (mean 0.004)
+  Extract::foliage: 250 calls, per call p50 0.010 ms p90 0.018 max 0.034 | per frame p50 0.010 ms p90 0.018 (mean 0.012)
+  ExtractFoliage: 250 calls, per call p50 0.010 ms p90 0.018 max 0.033 | per frame p50 0.010 ms p90 0.018 (mean 0.011)
+  FoliageStraddlers: not in the dump (static camera, memoized after frame 1 — no straddler buckets to test)
+  FoliageEmitClusters: not in the dump (same reason)
+  Terrain: 250 calls, per call p50 0.002 ms p90 0.002 max 0.007 | per frame p50 0.002 ms p90 0.002 (mean 0.002)
+  Foliage: 250 calls, per call p50 0.001 ms p90 0.001 max 0.002 | per frame p50 0.001 ms p90 0.001 (mean 0.001)
+  FoliageScatterLayer: not in the dump (one-time, before frame 120 — see the warmup=1 run below)
+  WaitFrame: 250 calls, per call p50 0.798 ms p90 3.683 max 4.081 | per frame p50 0.798 ms p90 3.683 (mean 1.248)
+  Render: 250 calls, per call p50 1.296 ms p90 4.497 max 16.445 | per frame p50 1.296 ms p90 4.497 (mean 1.949)
+
+=== s512_x4, frames 1-5 (HE_PROFILE_WARMUP=1 HE_PROFILE_CAPTURE=5), dump profile_20261027_123956.json — catches the one-time scatter/terrain-build ===
+C:\hb\game_s512x4\dumps\profile_20261027_123956.json: 5 frames, cpu-threading-step5 s512_x4 D3D12 scatter-capture | display 2560x1440 @59.950001 Hz, density 1.000000
+  frame CPU p50 1.58 ms  p90 59.14  max 59.14
+  FoliageScatterLayer: 1 calls, per call p50 23.660 ms p90 23.660 max 23.660 | per frame p50 0.000 ms p90 23.660 (mean 4.732)
+  Foliage: 5 calls, per call p50 0.002 ms p90 23.683 max 23.683 | per frame p50 0.002 ms p90 23.683 (mean 4.738)
+  Terrain: 5 calls, per call p50 0.004 ms p90 5.191 max 5.191 | per frame p50 0.004 ms p90 5.191 (mean 1.920)
+  Render: 5 calls, per call p50 1.537 ms p90 29.875 max 29.875 | per frame p50 1.537 ms p90 29.875 (mean 6.824)
+
+=== ref10k, steady state (HE_PROFILE_WARMUP=120 HE_PROFILE_CAPTURE=250), dump profile_20261027_123855.json ===
+C:\hb\game_ref10k\dumps\profile_20261027_123855.json: 250 frames, cpu-threading-step5 ref10k D3D12 r1 | display 2560x1440 @59.950001 Hz, density 1.000000
+  frame CPU p50 2.21 ms  p90 4.88  max 16.70
+  RenderExtractor::extract: 250 calls, per call p50 0.254 ms p90 0.393 max 0.685 | per frame p50 0.254 ms p90 0.393 (mean 0.282)
+  Extract::meshes: 250 calls, per call p50 0.191 ms p90 0.292 max 0.572 | per frame p50 0.191 ms p90 0.292 (mean 0.213)
+  Transforms::propagate: 250 calls, per call p50 0.025 ms p90 0.037 max 0.055 | per frame p50 0.025 ms p90 0.037 (mean 0.027)
+  Transforms::full: not in the dump (no structure change after load — dirty-tracking takes the subtree path, see TransformHierarchy.cpp:450)
+  WaitFrame: 250 calls, per call p50 0.805 ms p90 3.303 max 6.617 | per frame p50 0.805 ms p90 3.303 (mean 1.335)
+  Render: 250 calls, per call p50 2.186 ms p90 4.847 max 16.639 | per frame p50 2.186 ms p90 4.847 (mean 2.860)
+
+Commands:
+  config.json = {"RHI": 3, "CustomConfig": [{"Key": "GameBackend", "Value": "D3D12"}]}  (CWD of HorizonGame.exe; RHI alone does NOT select the game's backend — GameApplication reads the "GameBackend" string from CustomConfig, the editor's "RHI" int field is a different path)
+  HE_HIDDEN_WINDOW=1 HE_BACKGROUND_FPS=0 HE_PROFILE_COUNTERS=0 HE_NET_LOOPBACK_ONLY=1 APPDATA=<scratch>
+  HE_PROFILE_WARMUP=120 HE_PROFILE_CAPTURE=250   (steady state)
+  HE_PROFILE_WARMUP=1   HE_PROFILE_CAPTURE=5     (catches the one-time scatter/terrain-build cost)
+  python scripts/perf/dump_scope_p50.py <dump.json> <scope...>
+
+Machine: NN-WS03, AMD Ryzen 9 9950X (16C/32T), Windows, D3D12, HEAD d09e65ca. hive_devices showed
+1.4-1.5% CPU (sole bee) immediately before each run. Scenes: scripts/perf/gen_autoland_scene.py
+--extent 512 --density 4 (s512_x4: 257x257 terrain, 5 foliage layers, 524285 stored instances) and
+scripts/perf/gen_reference_world.py --count 10000 --extent 400 (ref10k, no foliage); game dirs made
+with a local copy of scripts/perf/make_land_game_dir.py (the checked-in script's "cp -cR" is
+macOS-only — copytree substituted, not committed).
+
+Frame CPU (cpuMs) already excludes WaitFrame: Render's per-frame p50 (1.296 / 2.186 ms) is close to
+the frame's own cpuMs p50 (1.32 / 2.21 ms) while WaitFrame alone is 0.798 / 0.805 ms — if WaitFrame
+were included in cpuMs the frame total would be ~1.3 ms higher than it is. This mirrors Step 1's
+Metal methodology (NextDrawable subtracted); D3D12's WaitFrame is the same kind of GPU-pacing block.
+"% of frame" in the main doc uses frame cpuMs p50 as the denominator (no further WaitFrame subtraction).
