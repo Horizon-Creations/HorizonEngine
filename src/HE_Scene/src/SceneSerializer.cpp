@@ -3145,9 +3145,9 @@ namespace
 				auto cur = iComps.find(k);
 				if (cur == iComps.end() || *cur != block) adopt(k);
 			}
-			for (const auto& [k, block] : iComps.items())
+			for (const auto& item : iComps.items())
 			{
-				(void)block;
+				const std::string& k = item.key();
 				if (!isPropagatedKey(k, isRoot)) continue;
 				if (!tComps.contains(k)) adopt(k);
 			}
