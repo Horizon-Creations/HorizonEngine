@@ -1386,7 +1386,8 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	const float ramp = 1.0f - std::exp(-fog.density * std::max(signedDepth, 0.0f));
 	const float depthT = std::pow(std::clamp(ramp, 0.0f, 1.0f), fog.falloff);
 	out.tintColor = glm::mix(fog.shallowColor, fog.deepColor, depthT);
-	out.density   = fog.density * fogWaterlineBand(signedDepth);
+	const float shallow = underwaterShallowFactor(surf.depth);
+	out.density   = fog.density * fogWaterlineBand(signedDepth) * shallow;
 	if (!out.wet)
 		return out;   // above the surface: no net (causticsFadeIn is 0 there anyway)
 
@@ -1397,7 +1398,7 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	// — no state, no hysteresis — and zero on both sides of the line, so crossing it
 	// can never pop the net on or off; the pass is simply not run at 0.
 	const water::UnderwaterCausticsParams& cau = surf.underwaterCaustics;
-	out.causticsIntensity = cau.intensity * causticsFadeIn(signedDepth);
+	out.causticsIntensity = cau.intensity * causticsFadeIn(signedDepth) * shallow;
 	out.causticsScale     = cau.scale;
 	out.causticsSpeed     = cau.speed;
 	// The sea under the scene's wind (water::windTrain): a stronger wind makes a coarser
@@ -1419,6 +1420,13 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 static bool s_waterTessellationAvailable = false;
 void setWaterTessellationAvailable(bool available) { s_waterTessellationAvailable = available; }
 bool waterTessellationAvailable() { return s_waterTessellationAvailable; }
+
+float underwaterShallowFactor(float waterDepthAtCamera)
+{
+	if (!std::isfinite(waterDepthAtCamera)) return 0.0f;
+	const float t = std::clamp(waterDepthAtCamera / kUnderwaterShallowFull, 0.0f, 1.0f);
+	return t * t * (3.0f - 2.0f * t);
+}
 
 float causticsFadeIn(float signedDepth)
 {

@@ -1135,7 +1135,13 @@ Mb waterMaterial()
     const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);
     const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
     const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
-    const int alphaO = m.op3(T::If, below, under.alpha, alpha, 77, 3);
+    // From below, the underside only shows once the camera is really under the surface: a camera a few
+    // centimetres under it (wading, a fly camera on the sand in a puddle) sees THROUGH the sheet instead of
+    // a teal ceiling over the whole sky. belowDot is the camera's height over this fragment's plane, so
+    // -belowDot is how deep the camera is; the underside fades in over the first metre.
+    const int camDepthU = m.op3(T::Smoothstep, m.k(0.0f, 75, 3), m.k(1.0f, 75, 3.5f),
+                                m.op(T::Multiply, belowDot, m.k(-1.0f, 75, 4), 76, 4), 76, 3);
+    const int alphaO = m.op3(T::If, below, m.op(T::Multiply, under.alpha, camDepthU, 76, 3.5f), alpha, 77, 3);
     const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
     const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
     m.comment("Top or underside", 76, 0, 2, 6);

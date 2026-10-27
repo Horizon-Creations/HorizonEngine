@@ -555,3 +555,22 @@ TEST_CASE("Underwater caustics: the scene's wind coarsens, speeds up and turns t
     CHECK(storm.causticsSpeed == doctest::Approx(std::sqrt(2.6f)));
     CHECK(storm.causticsWindTurn == doctest::Approx(-110.0f * 3.14159265f / 180.0f));
 }
+
+TEST_CASE("Underwater look: a camera in shallow water is not under water to the eye, deep water is")
+{
+    CHECK(HE::underwaterShallowFactor(0.0f) == 0.0f);
+    CHECK(HE::underwaterShallowFactor(0.1f) < 0.05f);
+    CHECK(HE::underwaterShallowFactor(HE::kUnderwaterShallowFull) == doctest::Approx(1.0f));
+    CHECK(HE::underwaterShallowFactor(20.0f) == doctest::Approx(1.0f));
+    CHECK(HE::underwaterShallowFactor(0.5f) < HE::underwaterShallowFactor(1.0f));
+    CHECK(HE::underwaterShallowFactor(std::numeric_limits<float>::quiet_NaN()) == 0.0f);
+
+    // Through the camera query: the same lake, the camera a hair under the surface, over a bed that
+    // is deep (a lake of the usual kind) vs. nearly on the sand.
+    HorizonWorld world;
+    TerrainComponent& tc = terrainOf(world, addLandscape(world));
+    addLake(tc, rect(-10, -10, 10, 10), 2.0f);
+    const UnderwaterCameraData deepEnough = HE::queryUnderwaterCamera(world, glm::vec3(0.0f, 1.0f, 0.0f));
+    CHECK(deepEnough.wet);
+    CHECK(deepEnough.density > 0.0f);
+}

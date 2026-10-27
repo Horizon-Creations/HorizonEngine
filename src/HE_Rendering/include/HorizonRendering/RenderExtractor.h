@@ -133,6 +133,14 @@ HE_RENDERING_API bool waterTessellationAvailable();
 inline constexpr float kCausticsFadeInDepth = 0.5f;
 HE_RENDERING_API float causticsFadeIn(float signedDepth);
 
+// A camera in shallow water (wading, a fly camera on the sand under a few centimetres of lake) is not
+// "under water" to the eye: the whole view would turn into the underwater fog, sky included. The
+// underwater look (fog, tint, caustics) is therefore scaled by smoothstep(0, kUnderwaterShallowFull,
+// the water's depth over the ground at the camera): nothing in ankle-deep water, full from this many
+// metres on (a bit above eye height).
+inline constexpr float kUnderwaterShallowFull = 1.5f;
+HE_RENDERING_API float underwaterShallowFactor(float waterDepthAtCamera);
+
 // The fog's waterline band (Thema 185 Schritt 5): a DRY camera up to kFogDryBandFull
 // metres above a body's surface still gets that body's fog density (times this factor,
 // 1 in the band, smoothstep down to 0 at kFogDryBandEnd), wet stays false. The pass
