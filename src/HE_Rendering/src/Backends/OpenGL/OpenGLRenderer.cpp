@@ -3439,12 +3439,15 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateParticlePipeline();
 
 	// Profiler GPU timing via GL timer queries. Reliable on desktop GL (Windows /
-	// Linux); left off on Apple GL, where GL_TIMESTAMP / GL_TIME_ELAPSED queries are
-	// unreliable — there GetFrameGpuStats keeps reporting gpuFrameMs = -1.
+	// Linux) when the driver exports them; left off on Apple GL, where GL_TIMESTAMP /
+	// GL_TIME_ELAPSED queries are missing or unreliable. Without them the profiler falls
+	// back to glFinish-bracketed passes (GpuTimerBeginFrame), serialised and so only
+	// while a detailed / single-frame capture runs.
 #ifdef __APPLE__
 	m_gpuTimerSupported = false;
 #else
-	m_gpuTimerSupported = true;
+	m_gpuTimerSupported = glQueryCounter && glGetQueryObjectui64v && glBeginQuery && glEndQuery
+	                   && glGenQueries && glDeleteQueries;
 #endif
 
 	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: initialized successfully");
@@ -13803,6 +13806,24 @@ void OpenGLRenderer::GpuTimerBeginFrame()
 	EngineProfiler& prof = EngineProfiler::instance();
 	const bool rec  = prof.isRecording();
 	const bool live = prof.liveEnabled();
+	if (!m_gpuTimerSupported)
+	{
+		// No timer queries (Apple GL): time the passes by draining the GPU around each one.
+		// That serialises the frame, so it runs only for a detailed / single-frame capture;
+		// the numbers are that frame's, marked approximate ("~" on the card).
+		m_gpuTimingActive = m_gpuPerPass = m_gpuDetailed = false;
+		m_gpuCurSlot = -1;
+		m_gpuActiveQuery = -1;
+		m_gpuFbInPass = false;
+		m_gpuFbActive = rec && (prof.detailedGpuCapture() || prof.isSingleFrameCapture());
+		if (m_gpuFbActive)
+		{
+			m_gpuFbPasses.clear();
+			glFinish();
+			m_gpuFbFrameStart = std::chrono::steady_clock::now();
+		}
+		return;
+	}
 	m_gpuTimingActive = m_gpuTimerSupported && (rec || live);
 	m_gpuPerPass      = m_gpuTimingActive && rec;
 	// Same-frame reap (glFinish) for the detailed-capture toggle AND for a one-shot
@@ -13852,6 +13873,20 @@ void OpenGLRenderer::GpuTimerBeginFrame()
 
 void OpenGLRenderer::GpuTimerEndFrame()
 {
+	if (m_gpuFbActive)
+	{
+		glFinish();
+		FrameGpuStats fs;
+		fs.gpuFrameMs    = std::chrono::duration<double, std::milli>(
+		                       std::chrono::steady_clock::now() - m_gpuFbFrameStart).count();
+		fs.gpuTimingMode = "detailed";   // serialised, like Metal's: the profiler words the caveat
+		fs.passes        = std::move(m_gpuFbPasses);
+		m_lastGpuStats   = std::move(fs);
+		m_gpuFbPasses.clear();
+		m_gpuFbActive = m_gpuFbInPass = false;
+		++m_gpuFrameIdx;
+		return;
+	}
 	if (!m_gpuTimingActive || m_gpuCurSlot < 0) { ++m_gpuFrameIdx; return; }
 	GpuTimerSlot& slot = m_gpuSlots[m_gpuCurSlot];
 	glQueryCounter(slot.tsEnd, GL_TIMESTAMP);
@@ -13873,6 +13908,15 @@ void OpenGLRenderer::GpuTimerEndFrame()
 
 bool OpenGLRenderer::GpuTimerBeginPass(const char* name)
 {
+	if (m_gpuFbActive)
+	{
+		if (m_gpuFbInPass) return false;   // sibling passes only, as with the queries
+		glFinish();
+		m_gpuFbName      = name;
+		m_gpuFbPassStart = std::chrono::steady_clock::now();
+		m_gpuFbInPass    = true;
+		return true;
+	}
 	if (!m_gpuPerPass || m_gpuCurSlot < 0) return false;
 	if (m_gpuActiveQuery >= 0) return false;   // GL_TIME_ELAPSED cannot nest
 	GpuTimerSlot& slot = m_gpuSlots[m_gpuCurSlot];
@@ -13892,6 +13936,15 @@ bool OpenGLRenderer::GpuTimerBeginPass(const char* name)
 
 void OpenGLRenderer::GpuTimerEndPass()
 {
+	if (m_gpuFbInPass)
+	{
+		glFinish();
+		m_gpuFbPasses.push_back({ m_gpuFbName,
+		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_gpuFbPassStart).count(),
+		    /*approx=*/true });
+		m_gpuFbInPass = false;
+		return;
+	}
 	if (m_gpuActiveQuery < 0) return;
 	glEndQuery(GL_TIME_ELAPSED);
 	m_gpuActiveQuery = -1;

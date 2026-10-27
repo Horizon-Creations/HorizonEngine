@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <Renderer/IRenderer.h>
 #include "OpenGLShaderManager.h"
@@ -127,7 +128,9 @@ private:
 	// capture does glFinish + same-frame reap so its numbers are that exact frame.
 	// Active only while the profiler is recording or its live HUD is open (zero cost
 	// otherwise). Disabled on Apple GL, where timestamp queries are unreliable
-	// (m_gpuTimerSupported = false → GetFrameGpuStats reports gpuFrameMs = -1).
+	// (m_gpuTimerSupported = false): there a detailed / single-frame capture times the
+	// passes with glFinish around each one instead (m_gpuFb*), and other frames report
+	// gpuFrameMs = -1.
 	struct GpuTimerPass { const char* name = ""; unsigned int query = 0; };
 	struct GpuTimerSlot
 	{
@@ -149,6 +152,12 @@ private:
 	bool          m_gpuDetailed         = false;  // glFinish + same-frame reap this frame
 	int           m_gpuActiveQuery      = -1;     // pool index of the open elapsed query (-1 none)
 	FrameGpuStats m_lastGpuStats;                 // newest reaped GPU times (merged w/ counters)
+	// glFinish fallback for a context without timer queries (see GpuTimerBeginFrame).
+	bool          m_gpuFbActive         = false;  // this frame's passes are timed by draining the GPU
+	bool          m_gpuFbInPass         = false;
+	const char*   m_gpuFbName           = "";
+	std::chrono::steady_clock::time_point m_gpuFbFrameStart, m_gpuFbPassStart;
+	std::vector<GpuPassTime> m_gpuFbPasses;
 
 	void GpuTimerBeginFrame();   // primary Render() only: latch flags, recycle+reap a slot, tsStart
 	void GpuTimerEndFrame();     // tsEnd, mark pending; detailed → glFinish + same-frame reap
