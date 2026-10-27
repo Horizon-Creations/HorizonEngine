@@ -263,15 +263,15 @@ Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
     // four quite different reasons it was.
     if (!c.createObject)
     {
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no Create Object service bound by the host — '" +
-            classPath + "' not spawned").c_str());
+        HE_LOG_ERROR(Script, "%s: no Create Object service bound by the host — '%s' not spawned",
+            who, classPath.c_str());
         return 0u;
     }
     const uint32_t ref = c.createObject(classPath, position, rotationEuler);
     if (ref == 0u)
     {
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": class '" + classPath +
-            "' could not be created (unknown or unreadable class asset)").c_str());
+        HE_LOG_ERROR(Script, "%s: class '%s' could not be created (unknown or unreadable class asset)",
+            who, classPath.c_str());
         return 0u;
     }
     if (!c.runtime)
@@ -281,9 +281,9 @@ Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
         // setOwnedEntity). Left alive rather than destroyed — it may well be
         // ticking correctly, and throwing away a working spawn to tidy up a
         // half-built Ctx would be the worse of the two failures.
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no HorizonCode runtime in the Ctx, so the "
-            "entity of '" + classPath + "' cannot be looked up — the object was created and is "
-            "still running").c_str());
+        HE_LOG_ERROR(Script, "%s: no HorizonCode runtime in the Ctx, so the "
+            "entity of '%s' cannot be looked up — the object was created and is "
+            "still running", who, classPath.c_str());
         return 0u;
     }
     const Entity e = c.runtime->ownedEntity(ref);
@@ -295,8 +295,8 @@ Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
         // it alive would strand an instance nothing can name, tick after tick.
         // Undo it, the way EntityHost::spawn undoes its entity when the logic
         // fails to bind.
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": '" + classPath + "' is not an Entity class, "
-            "so it has no entity — use the Create Object node for plain objects").c_str());
+        HE_LOG_ERROR(Script, "%s: '%s' is not an Entity class, "
+            "so it has no entity — use the Create Object node for plain objects", who, classPath.c_str());
         if (c.destroyObject) c.destroyObject(ref);
         return 0u;
     }
