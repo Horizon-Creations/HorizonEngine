@@ -23,10 +23,10 @@ namespace
 	// way in; below the top level a position is relative to the parent and
 	// passes as it is. The interpolation buffer keeps what came off the wire, so
 	// a shift between two samples does not bend the path between them.
-	glm::dvec3 wireOrigin(const HorizonWorld* world, entt::entity e)
+	glm::dvec3 wireOrigin(HorizonWorld* world, entt::entity e)
 	{
 		if (!world) return glm::dvec3(0.0);
-		const auto* h = const_cast<HorizonWorld*>(world)->registry().try_get<HierarchyComponent>(e);
+		const auto* h = world->registry().try_get<HierarchyComponent>(e);
 		return h && h->parent == world->rootEntity() ? world->origin() : glm::dvec3(0.0);
 	}
 	glm::vec3 toWire(const glm::vec3& local, const glm::dvec3& origin)
@@ -707,6 +707,7 @@ void GameReplication::sendSnapshots()
 		const bool hasView = (viewIt != m_viewpoints.end());
 
 		std::vector<std::pair<std::uint32_t, Sample>> relevant;
+		relevant.reserve(m_byNetId.size());
 
 		for (const auto& [netId, entity] : m_byNetId)
 		{
@@ -953,6 +954,12 @@ void GameReplication::advanceInterpolation(float dt)
 		for (auto& entry : m_interp) entry.second.settled = false;
 	}
 
+	// Wraps the delta onto the shorter arc; see the rotation write below.
+	const auto shortestLerp = [](float a, float b, float f) {
+		float delta = std::fmod(b - a + 540.0f, 360.0f) - 180.0f;
+		return a + delta * f;
+	};
+
 	for (auto& [netId, st] : m_interp)
 	{
 		// The controlled entity is predicted; interpolating it too would fight
@@ -1000,10 +1007,6 @@ void GameReplication::advanceInterpolation(float dt)
 		// representation this engine actually stores is worth more here than a
 		// perfect interpolation path, and for single-axis turns — which is what
 		// characters do — the two are identical anyway.
-		const auto shortestLerp = [](float a, float b, float f) {
-			float delta = std::fmod(b - a + 540.0f, 360.0f) - 180.0f;
-			return a + delta * f;
-		};
 		tc->rotation = glm::vec3(
 			shortestLerp(st.previous.rotation.x, st.current.rotation.x, t),
 			shortestLerp(st.previous.rotation.y, st.current.rotation.y, t),

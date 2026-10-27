@@ -149,11 +149,10 @@ namespace HE::AntiCheat
 			while (m_replication->takeAntiCheatNotice(n))
 			{
 				++m_stats.noticesTaken;
-				const int id = makeLocalReport(static_cast<Level>(std::clamp(n.level, 0, 3)),
-				                               n.reasonCode, n.rule);
+				const Level level = static_cast<Level>(std::clamp(n.level, 0, 3));
+				const int id = makeLocalReport(level, n.reasonCode, n.rule);
 				HE_LOG_WARN(AntiCheat, "notice from host: %s, rule '%s', reason %d (ticket #%d)",
-				            levelName(static_cast<Level>(std::clamp(n.level, 0, 3))),
-				            n.rule.c_str(), n.reasonCode, id);
+				            levelName(level), n.rule.c_str(), n.reasonCode, id);
 				if (const Report* r = findReport(id))
 				{
 					fire(id, *r, /*local=*/true);

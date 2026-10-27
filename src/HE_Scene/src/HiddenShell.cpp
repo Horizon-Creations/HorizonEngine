@@ -14,6 +14,7 @@
 #include <io.h>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace HE {
@@ -107,14 +108,12 @@ std::vector<TreeProc> collectTree(DWORD rootPid)
 		all.push_back(pe);
 	::CloseHandle(snap);
 	out.push_back({ rootPid, std::string() });
+	// Also the cycle guard: a reused pid can make the parent links loop.
+	std::unordered_set<DWORD> seen{ rootPid };
 	for (size_t i = 0; i < out.size(); ++i)
 		for (const PROCESSENTRY32& p : all)
-			if (p.th32ParentProcessID == out[i].pid && p.th32ProcessID != rootPid)
-			{
-				bool seen = false;
-				for (const TreeProc& t : out) seen = seen || t.pid == p.th32ProcessID;
-				if (!seen) out.push_back({ p.th32ProcessID, p.szExeFile });
-			}
+			if (p.th32ParentProcessID == out[i].pid && seen.insert(p.th32ProcessID).second)
+				out.push_back({ p.th32ProcessID, p.szExeFile });
 	return out;
 }
 

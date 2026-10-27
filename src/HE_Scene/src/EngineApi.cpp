@@ -263,15 +263,15 @@ Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
     // four quite different reasons it was.
     if (!c.createObject)
     {
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no Create Object service bound by the host — '" +
-            classPath + "' not spawned").c_str());
+        HE_LOG_ERROR(Script, "%s: no Create Object service bound by the host — '%s' not spawned",
+            who, classPath.c_str());
         return 0u;
     }
     const uint32_t ref = c.createObject(classPath, position, rotationEuler);
     if (ref == 0u)
     {
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": class '" + classPath +
-            "' could not be created (unknown or unreadable class asset)").c_str());
+        HE_LOG_ERROR(Script, "%s: class '%s' could not be created (unknown or unreadable class asset)",
+            who, classPath.c_str());
         return 0u;
     }
     if (!c.runtime)
@@ -281,9 +281,9 @@ Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
         // setOwnedEntity). Left alive rather than destroyed — it may well be
         // ticking correctly, and throwing away a working spawn to tidy up a
         // half-built Ctx would be the worse of the two failures.
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": no HorizonCode runtime in the Ctx, so the "
-            "entity of '" + classPath + "' cannot be looked up — the object was created and is "
-            "still running").c_str());
+        HE_LOG_ERROR(Script, "%s: no HorizonCode runtime in the Ctx, so the "
+            "entity of '%s' cannot be looked up — the object was created and is "
+            "still running", who, classPath.c_str());
         return 0u;
     }
     const Entity e = c.runtime->ownedEntity(ref);
@@ -295,8 +295,8 @@ Entity spawnClassImpl(const char* who, Ctx& c, const std::string& classPath,
         // it alive would strand an instance nothing can name, tick after tick.
         // Undo it, the way EntityHost::spawn undoes its entity when the logic
         // fails to bind.
-        HE_LOG_ERROR(Script, "%s", (std::string(who) + ": '" + classPath + "' is not an Entity class, "
-            "so it has no entity — use the Create Object node for plain objects").c_str());
+        HE_LOG_ERROR(Script, "%s: '%s' is not an Entity class, "
+            "so it has no entity — use the Create Object node for plain objects", who, classPath.c_str());
         if (c.destroyObject) c.destroyObject(ref);
         return 0u;
     }
@@ -404,7 +404,12 @@ std::string entityUuidKey(Ctx& c, Entity e)
 {
     if (!c.world || !c.world->registry().valid((entt::entity)e)) return {};
     if (auto* idc = c.world->registry().try_get<EntityIdComponent>((entt::entity)e))
-        return std::to_string(idc->id.hi) + ":" + std::to_string(idc->id.lo);
+    {
+        std::string key = std::to_string(idc->id.hi);
+        key += ':';
+        key += std::to_string(idc->id.lo);
+        return key;
+    }
     return {};
 }
 // Shared precondition walk for saveState/applySavedState — every miss logs.
@@ -412,27 +417,25 @@ const SaveStateComponent* saveStateGuard(const char* op, Ctx& c, Entity e, std::
 {
     if (!save::inPlayMode())
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
-            ": only available in play mode (the editor's SceneSerializer owns edit-mode state)").c_str());
+        HE_LOG_WARN(Script, "entity.%s: only available in play mode "
+            "(the editor's SceneSerializer owns edit-mode state)", op);
         return nullptr;
     }
     if (save::activeId().empty())
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
-            ": no active save — call save.create/load first").c_str());
+        HE_LOG_WARN(Script, "entity.%s: no active save — call save.create/load first", op);
         return nullptr;
     }
     uuid = entityUuidKey(c, e);
     if (uuid.empty())
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op + ": invalid entity").c_str());
+        HE_LOG_WARN(Script, "entity.%s: invalid entity", op);
         return nullptr;
     }
     auto* ss = c.world->registry().try_get<SaveStateComponent>((entt::entity)e);
     if (!ss || !ss->enabled)
     {
-        HE_LOG_WARN(Script, "%s", (std::string("entity.") + op +
-            ": entity has no enabled SaveStateComponent").c_str());
+        HE_LOG_WARN(Script, "entity.%s: entity has no enabled SaveStateComponent", op);
         return nullptr;
     }
     return ss;
@@ -509,7 +512,8 @@ void applyScriptVars(Ctx& c, Entity e, const nlohmann::json& vars)
     {
         if (std::find(saved.begin(), saved.end(), it.key()) == saved.end())
         {
-            skipped += (skipped.empty() ? "" : ", ") + it.key();
+            if (!skipped.empty()) skipped += ", ";
+            skipped += it.key();
             continue;
         }
         const Value live = c.runtime->getVariable(inst, it.key());
@@ -3147,7 +3151,7 @@ struct WatchEntry
 };
 
 std::vector<WatchEntry>&  watches()     { static std::vector<WatchEntry> w;  return w; }
-std::vector<std::string>& changeQueue() { static std::vector<std::string> q; return q; }
+std::deque<std::string>& changeQueue() { static std::deque<std::string> q; return q; }
 int&    nextWatchHandle() { static int h = 0;      return h; }
 double& watchAccum()      { static double a = 0.0; return a; }
 
@@ -3166,7 +3170,7 @@ void queueChange(std::string p)
     // One event per path per drain. A save that rewrites a file twice inside a
     // poll interval is one change to whoever asked, not two.
     for (const std::string& s : q) if (s == p) return;
-    if (q.size() >= 256) q.erase(q.begin());
+    if (q.size() >= 256) q.pop_front();
     q.push_back(std::move(p));
 }
 
@@ -3239,7 +3243,7 @@ bool takeChange(std::string& path)
     auto& q = changeQueue();
     if (q.empty()) return false;
     path = std::move(q.front());
-    q.erase(q.begin());
+    q.pop_front();
     return true;
 }
 
@@ -4568,7 +4572,7 @@ struct Entry
     bool   repeat    = false;
 };
 std::vector<Entry>& timers()    { static std::vector<Entry> t;  return t; }
-std::vector<int>&   firedQueue(){ static std::vector<int> q;    return q; }
+std::deque<int>&    firedQueue(){ static std::deque<int> q;     return q; }
 int& nextTimerHandle()          { static int h = 0;             return h; }
 
 // The one place a timer is made, so `after` and `every` cannot drift apart on
@@ -4637,7 +4641,7 @@ bool takeFired(int& handle)
     auto& q = firedQueue();
     if (q.empty()) return false;
     handle = q.front();
-    q.erase(q.begin());
+    q.pop_front();
     return true;
 }
 
@@ -5163,22 +5167,19 @@ int fieldIndex(const char* op, const std::string& name)
 {
     if (!active())
     {
-        HE_LOG_WARN(Script, "%s",
-            (std::string("save.") + op + ": no active save — call save.create/load first").c_str());
+        HE_LOG_WARN(Script, "save.%s: no active save — call save.create/load first", op);
         return -1;
     }
     for (size_t i = 0; i < active()->schema.fields.size(); ++i)
         if (active()->schema.fields[i].name == name) return (int)i;
-    HE_LOG_WARN(Script, "%s",
-        (std::string("save.") + op + ": template '" + active()->templatePath +
-         "' has no field '" + name + "'").c_str());
+    HE_LOG_WARN(Script, "save.%s: template '%s' has no field '%s'",
+        op, active()->templatePath.c_str(), name.c_str());
     return -1;
 }
 bool typeMismatch(const char* op, const HE::StructField& f, std::initializer_list<P> accepted)
 {
     for (P t : accepted) if (f.type == t && !f.isArray) return false;
-    HE_LOG_WARN(Script, "%s",
-        (std::string("save.") + op + ": field '" + f.name + "' has a different type").c_str());
+    HE_LOG_WARN(Script, "save.%s: field '%s' has a different type", op, f.name.c_str());
     return true;
 }
 
@@ -5192,7 +5193,7 @@ bool inPlayMode() { return playMode(); }
 bool create(const std::string& id, ::ContentManager* cm, const std::string& templatePath)
 {
     if (!validId(id))
-    { HE_LOG_WARN(Script, "%s", ("save.create: invalid id '" + id + "' (use A-Z a-z 0-9 _ -)").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.create: invalid id '%s' (use A-Z a-z 0-9 _ -)", id.c_str()); return false; }
     const std::string tpl = templatePath.empty() ? defaultTpl() : templatePath;
     HE::StructDef schema;
     if (!resolveTemplate(cm, tpl, schema)) return false;
@@ -5208,13 +5209,13 @@ bool create(const std::string& id, ::ContentManager* cm, const std::string& temp
 bool load(const std::string& id, ::ContentManager* cm)
 {
     if (!validId(id))
-    { HE_LOG_WARN(Script, "%s", ("save.load: invalid id '" + id + "'").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.load: invalid id '%s'", id.c_str()); return false; }
     const std::string text = fs::readText(savePath(id));
     if (text.empty())
-    { HE_LOG_WARN(Script, "%s", ("save.load: no save '" + id + "'").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.load: no save '%s'", id.c_str()); return false; }
     nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object())
-    { HE_LOG_WARN(Script, "%s", ("save.load: save '" + id + "' is corrupt").c_str()); return false; }
+    { HE_LOG_WARN(Script, "save.load: save '%s' is corrupt", id.c_str()); return false; }
 
     HE::StructDef schema;
     if (!resolveTemplate(cm, j.value("template", std::string{}), schema)) return false;
