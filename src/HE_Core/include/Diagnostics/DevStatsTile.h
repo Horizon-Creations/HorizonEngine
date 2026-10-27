@@ -51,7 +51,8 @@ struct DevStatsInput
 	std::vector<std::pair<std::string, double>> captureScopes;
 };
 
-// The lines of the card, top to bottom. A line the backend cannot fill is left out
+// The lines of the card, top to bottom. A row is "label<TAB>value" (a heading or
+// "+ 3 smaller passes" has no TAB, so no value). A line the backend cannot fill is left out
 // rather than shown as 0 or -1, which would read as a measurement. `extended` adds
 // the detailed block (CPU time of the captured frame, backend and resolution, and
 // the GPU passes sorted by cost, at most `maxPasses`), and before it the frame-time
@@ -77,7 +78,8 @@ public:
 
 	// For tests: the widget and the text element's ids (0 = not built).
 	int widgetId() const { return m_widget; }
-	int textElementId() const { return m_text; }
+	int textElementId() const { return m_text; }     // the labels
+	int valueElementId() const { return m_values; }  // the right-aligned values
 	int panelElementId() const { return m_panel; }
 
 	// How often the text is rewritten and the detailed capture is taken. Public so
@@ -94,6 +96,7 @@ private:
 	int   m_widget  = 0;
 	int   m_panel   = 0;
 	int   m_text    = 0;
+	int   m_values  = 0;
 
 	float m_sinceRefresh = 0.0f;
 	float m_sinceCapture = 0.0f;

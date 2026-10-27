@@ -40,44 +40,50 @@ std::vector<std::string> formatDevStats(const DevStatsInput& in, bool extended, 
 {
 	std::vector<std::string> lines;
 	char buf[128];
+	// A row is "label<TAB>value": the card draws the labels in one column and the values
+	// right-aligned in another, which a proportional font cannot do with padding spaces.
+	auto row = [&](const std::string& label, const std::string& value) {
+		lines.push_back(label + '\t' + value);
+	};
 
-	std::snprintf(buf, sizeof(buf), "%.0f FPS   %.2f ms", in.fps, in.frameMs);
-	lines.emplace_back(buf);
+	std::snprintf(buf, sizeof(buf), "%.0f FPS", in.fps);
+	const std::string fpsLabel = buf;
+	std::snprintf(buf, sizeof(buf), "%.2f ms", in.frameMs);
+	row(fpsLabel, buf);
 	if (in.gpu.gpuFrameMs >= 0.0)
 	{
-		std::snprintf(buf, sizeof(buf), "GPU        %.2f ms", in.gpu.gpuFrameMs);
-		lines.emplace_back(buf);
+		std::snprintf(buf, sizeof(buf), "%.2f ms", in.gpu.gpuFrameMs);
+		row("GPU", buf);
 	}
-	lines.push_back("Draws      " + thousands(in.gpu.drawCalls));
-	lines.push_back("Triangles  " + thousands(in.gpu.triangles));
-	lines.push_back("Objects    " + thousands(in.gpu.visibleObjects) + " / " + thousands(in.gpu.totalObjects));
+	row("Draws", thousands(in.gpu.drawCalls));
+	row("Triangles", thousands(in.gpu.triangles));
+	row("Objects", thousands(in.gpu.visibleObjects) + " / " + thousands(in.gpu.totalObjects));
 	if (in.gpu.occlusionCulled > 0)
-		lines.push_back("Occluded   " + thousands(in.gpu.occlusionCulled));
+		row("Occluded", thousands(in.gpu.occlusionCulled));
 	if (in.gpu.vramBudgetMB > 0.0)
 	{
-		std::snprintf(buf, sizeof(buf), "VRAM       %.0f / %.0f MB", in.gpu.vramUsedMB, in.gpu.vramBudgetMB);
-		lines.emplace_back(buf);
+		std::snprintf(buf, sizeof(buf), "%.0f / %.0f MB", in.gpu.vramUsedMB, in.gpu.vramBudgetMB);
+		row("VRAM", buf);
 	}
 	if (!extended) return lines;
 
 	// ── The extended block ────────────────────────────────────────────────────
 	if (!in.backend.empty() || (in.width > 0 && in.height > 0))
 	{
-		std::string row = "Renderer   ";
-		row += in.backend.empty() ? std::string("?") : in.backend;
+		std::string value = in.backend.empty() ? std::string("?") : in.backend;
 		if (in.width > 0 && in.height > 0)
-			row += "  " + std::to_string(in.width) + "x" + std::to_string(in.height);
-		lines.push_back(std::move(row));
+			value += "  " + std::to_string(in.width) + "x" + std::to_string(in.height);
+		row("Renderer", value);
 	}
 	if (in.haveCapture && in.captureCpuMs >= 0.0)
 	{
-		std::snprintf(buf, sizeof(buf), "CPU        %.2f ms", in.captureCpuMs);
-		lines.emplace_back(buf);
+		std::snprintf(buf, sizeof(buf), "%.2f ms", in.captureCpuMs);
+		row("CPU", buf);
 	}
 	if (in.frameP50 >= 0.0)
 	{
-		std::snprintf(buf, sizeof(buf), "Frame p50 %.1f  p99 %.1f  max %.1f", in.frameP50, in.frameP99, in.frameMax);
-		lines.emplace_back(buf);
+		std::snprintf(buf, sizeof(buf), "%.1f / %.1f / %.1f ms", in.frameP50, in.frameP99, in.frameMax);
+		row("Frame p50 / p99 / max", buf);
 	}
 
 	// Where the CPU's time goes in the captured frame: the scopes as recorded, a parent
@@ -92,8 +98,8 @@ std::vector<std::string> formatDevStats(const DevStatsInput& in, bool extended, 
 		const std::size_t shownScopes = std::min(scopes.size(), maxScopes);
 		for (std::size_t i = 0; i < shownScopes; ++i)
 		{
-			std::snprintf(buf, sizeof(buf), " %-21.21s %6.2f ms", scopes[i].first.c_str(), scopes[i].second);
-			lines.emplace_back(buf);
+			std::snprintf(buf, sizeof(buf), "%.2f ms", scopes[i].second);
+			row(" " + scopes[i].first.substr(0, 26), buf);
 		}
 	}
 
@@ -128,9 +134,8 @@ std::vector<std::string> formatDevStats(const DevStatsInput& in, bool extended, 
 	{
 		// "~" marks an approximate interval (a split inside one encoder), the same
 		// rule the profiler window follows: never read as an authoritative cost.
-		std::snprintf(buf, sizeof(buf), "%s%-14.14s %6.2f ms", sorted[i].approx ? "~" : " ",
-		              sorted[i].name ? sorted[i].name : "", sorted[i].ms);
-		lines.emplace_back(buf);
+		std::snprintf(buf, sizeof(buf), "%.2f ms", sorted[i].ms);
+		row(std::string(sorted[i].approx ? "~" : " ") + std::string(sorted[i].name ? sorted[i].name : "").substr(0, 26), buf);
 	}
 	if (sorted.size() > shown)
 		lines.push_back("  + " + std::to_string(sorted.size() - shown) + " smaller passes");
@@ -144,7 +149,7 @@ bool DevStatsTile::toggle(WidgetManager& widgets, ContentManager& content)
 	if (m_widget != 0 && !widgets.isAlive(m_widget))
 	{
 		HE_LOG_WARN(Core, "%s", "DevStatsTile: its widget is gone; building it again");
-		m_widget = m_panel = m_text = 0;
+		m_widget = m_panel = m_text = m_values = 0;
 		m_visible = false;
 	}
 	if (!m_visible && m_widget == 0)
@@ -181,7 +186,26 @@ bool DevStatsTile::toggle(WidgetManager& widgets, ContentManager& content)
 			e.setProp("FontSize", UIPropValue::ofFloat(kFontSize));
 			e.setProp("Color", UIPropValue::ofColor({ 0.88f, 0.92f, 0.98f, 1.0f }));
 		}
-		page.find(text)->parentId = card;   // the text lives on the card
+		page.find(text)->parentId = card;   // the labels live on the card
+		// The values: the same box, right-aligned, so the numbers line up at the card's
+		// right edge whatever the labels' widths.
+		const int values = page.add(UIWidgetType::Text);
+		{
+			UIElement& e = *page.find(values);
+			e.name = "StatsValues";
+			uiSetAnchorPreset(e, 0);
+			e.pivotX = 0.0f; e.pivotY = 0.0f;
+			e.posX = kPad; e.posY = kPad;
+			e.sizeX = kTileWidth - 2.0f * kPad; e.sizeY = 600.0f;
+			e.hitTestable = false;
+			e.setProp("Text", UIPropValue::ofString(""));
+			e.setProp("FontSize", UIPropValue::ofFloat(kFontSize));
+			e.setProp("Color", UIPropValue::ofColor({ 0.88f, 0.92f, 0.98f, 1.0f }));
+			e.setProp("AutoSize", UIPropValue::ofBool(false));
+			e.setProp("WordWrap", UIPropValue::ofBool(false));
+			e.setProp("Align H", UIPropValue::ofInt(2));
+		}
+		page.find(values)->parentId = card;
 
 		UIWidgetAsset asset;
 		asset.treeJson = uiWidgetTreeToJson(page);
@@ -191,6 +215,7 @@ bool DevStatsTile::toggle(WidgetManager& widgets, ContentManager& content)
 		m_widget = widgets.createWidget(content, kAssetPath);
 		m_panel  = card;
 		m_text   = text;
+		m_values = values;
 		if (m_widget == 0)
 		{
 			// createWidget logs why (asset not found / invalid tree) just before this.
@@ -327,11 +352,17 @@ void DevStatsTile::update(WidgetManager& widgets, IRenderer* renderer, float dt,
 	m_elapsed = 0.0f;
 
 	const std::vector<std::string> lines = formatDevStats(in, /*extended*/ true, /*maxPasses*/ 6, /*maxScopes*/ 4);
-	std::string text;
+	// Labels and values go to their own columns; the log keeps one line per row.
+	std::string text, valueText;
+	std::vector<std::string> flat;
 	for (std::size_t i = 0; i < lines.size(); ++i)
 	{
-		if (i > 0) text += '\n';
-		text += lines[i];
+		const std::size_t tab = lines[i].find('\t');
+		if (i > 0) { text += '\n'; valueText += '\n'; }
+		text += lines[i].substr(0, tab);
+		if (tab != std::string::npos) valueText += lines[i].substr(tab + 1);
+		flat.push_back(tab == std::string::npos ? lines[i]
+		                                         : lines[i].substr(0, tab) + "  " + lines[i].substr(tab + 1));
 	}
 	// HE_GAME_STATS_LOG=<seconds>: the card's text into the log as well, so a run on another
 	// machine brings its numbers back without a screenshot.
@@ -347,7 +378,7 @@ void DevStatsTile::update(WidgetManager& widgets, IRenderer* renderer, float dt,
 		std::string block;
 		int part = 0;
 		auto flush = [&] { if (!block.empty()) HE_LOG_INFO(Core, "DevStatsTile [%d]:\n%s", ++part, block.c_str()); block.clear(); };
-		for (const std::string& l : lines)
+		for (const std::string& l : flat)
 		{
 			if (block.size() + l.size() + 1 > 400) flush();
 			if (!block.empty()) block += '\n';
@@ -355,7 +386,8 @@ void DevStatsTile::update(WidgetManager& widgets, IRenderer* renderer, float dt,
 		}
 		flush();
 	}
-	const bool wroteText = widgets.setElementProp(m_widget, m_text, "Text", UIPropValue::ofString(std::move(text)));
+	const bool wroteText = widgets.setElementProp(m_widget, m_text, "Text", UIPropValue::ofString(std::move(text)))
+	                    && widgets.setElementProp(m_widget, m_values, "Text", UIPropValue::ofString(std::move(valueText)));
 	// The card follows the text: its height is the lines it holds.
 	const bool wroteSize = widgets.setElementProp(m_widget, m_panel, "Size",
 	                       UIPropValue::ofVec2({ kTileWidth, kPad * 2.0f + kLineH * static_cast<float>(lines.size()) }));
@@ -376,7 +408,7 @@ void DevStatsTile::update(WidgetManager& widgets, IRenderer* renderer, float dt,
 void DevStatsTile::shutdown(WidgetManager& widgets)
 {
 	if (m_widget != 0) widgets.destroyWidget(m_widget);
-	m_widget = m_panel = m_text = 0;
+	m_widget = m_panel = m_text = m_values = 0;
 	m_visible = false;
 	EngineProfiler::instance().setLiveEnabled(false);
 	EngineProfiler::instance().cancelSingleFrameCapture();
