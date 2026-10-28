@@ -1,0 +1,15 @@
+== land512_foliage-ab-deferredgi-r2 00:13:06
+0:13  up 23 days,  3:34, 1 user, load averages: 2.63 3.40 6.12
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=11
+locked: 1
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 2.63
+0:13  up 23 days,  3:34, 1 user, load averages: 3.50 3.54 6.11
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=85
+locked: 1
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[land512_foliage-ab-deferredgi-r2] rc=0 wall=18s fps=47.98207525361957 cpu_p50=20.448916999999998 gpu_p50=15.861707972362638 modes={'detailed': 400} size=2840x1528
