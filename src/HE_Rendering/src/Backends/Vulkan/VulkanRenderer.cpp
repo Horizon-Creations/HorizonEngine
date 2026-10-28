@@ -13618,7 +13618,14 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
     cb.ambient    = glm::vec4(m_renderWorld.ambient, 0.0f);
     cb.gridOrigin = glm::vec4(m_giGridOrigin, m_giProbeSpacing);
     cb.gridCounts = glm::vec4(glm::vec3(m_giGridCounts), static_cast<float>(m_giProbesPerRow));
-    cb.reflParams = glm::vec4(m_giReflMaxDistance, m_giReflMaxRoughness, m_giIndirectIntensity,
+    // The ray-query kernel pays next to nothing for a long ray (GIRefl 0.02 ms at 200, 1500 and 4000 m on the RTX 4070),
+    // and the 200 m the software kernels need to stay cheap cut a hill 300 m away in half in a lake's mirror and left
+    // the far shore and horizon out of every water reflection: what lies past the limit fell back to the sky cube,
+    // which has no terrain in it. So the HW kernel traces at least kGiHwReflMinDistance; the confidence fade
+    // (0.75..1 of the distance) then happens far out, over the sky.
+    constexpr float kGiHwReflMinDistance = 4000.0f;
+    const float reflDistance = hwRefl ? std::max(m_giReflMaxDistance, kGiHwReflMinDistance) : m_giReflMaxDistance;
+    cb.reflParams = glm::vec4(reflDistance, m_giReflMaxRoughness, m_giIndirectIntensity,
                               irrValid ? 1.0f : 0.0f);
     cb.frame      = glm::vec4(m_giReflFrameSeed, static_cast<float>(m_giReflW),
                               static_cast<float>(m_giReflH), tier.rays > 1 ? 1.0f : 0.0f);

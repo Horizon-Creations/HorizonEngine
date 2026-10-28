@@ -75,6 +75,15 @@ GIRefl 0,96 ms war der größte Einzelposten, danach Opaque 0,86, Sky 0,61 (Übe
   Wellenrauschen (HW-Lauf gegen HW-Lauf), 0,017 % der Pixel > 32; Reflexionen an gegen aus ändern dasselbe Bild um 10,4. Visuell kein Unterschied. Mit `HE_GPU_DEBUG=1`
   1500 Frames Flug ohne Validation-Fehler. Nicht verifiziert: D3D12 (DXR-Kernel hat noch kein Reflexions-Gegenstück), Reflexionen bei GI aus (SW-Pfad, unverändert).
 
+## Wasser-Reflexionen: Reichweite (Folgeschritt 4)
+Befund (Catania, See bei x~130..230, z~490..710, Hügel daneben): Mit GI-Reflexionen an spiegelte der See den Hügel nur bis 200 m (`GIReflectionsSettings::maxDistance`, nicht einstellbar)
+und schnitt ihn mitten ab; was hinter dem Limit liegt, fällt auf die Himmels-Cubemap zurück, und die enthält kein Gelände (Horizont/ferne Ufer fehlten im Wasser).
+Der Himmel selbst wird nicht getroffen: ein Strahl, der nichts trifft, liefert im Kernel nichts (`continue`, Konfidenz 0), und `heLitP` behält dann seinen Cubemap-Term
+(`MaterialShaderLibrary.cpp` Reflexions-Kaskade). Das bleibt so.
+* `runGiReflections`: der HW-Kernel traced mindestens `kGiHwReflMinDistance` = 4000 m (Ray Query: GIRefl 0,02 ms bei 200, 1500 und 4000 m); die SW-Kernel behalten die Einstellung.
+* Bild See-Pose: Hügel wird ganz gespiegelt (Abweichung zum 1500-m-Versuch 0,9, zum alten Stand 2,5). Nicht verifiziert: SW-Backends (D3D11/D3D12/GL) haben weiter 200 m, die
+  Kosten einer größeren Reichweite dort sind nicht gemessen; ob die Cubemap die Wolken enthält, ist nicht geprüft (die Himmelsspiegelung im Wasser ist schwach, das ist die Gewichtung im Wasser-Material).
+
 ## Zeiten, vorher und nachher (Vulkan, RTX 4070, HEProject/Catania, GI + Reflexionen an, 2000x1125 hidden)
 | Situation | Start (vor allem) | nach Material-/Validation-Fix | jetzt |
 |---|---|---|---|
