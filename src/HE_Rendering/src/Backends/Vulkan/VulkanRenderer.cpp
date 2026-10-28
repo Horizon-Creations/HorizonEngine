@@ -499,6 +499,17 @@ void VulkanRenderer::Render()
         if (--it->frames <= 0) { destroyGpuMesh(it->mesh); it = m_retiredMeshes.erase(it); }
         else ++it;
     }
+    // ... and so do replaced hardware BLAS and the input/scratch of builds the GPU has finished.
+    for (auto it = m_retiredHwBlas.begin(); it != m_retiredHwBlas.end(); )
+    {
+        if (--it->frames <= 0) { destroyGiHwBlas(it->blas); it = m_retiredHwBlas.erase(it); }
+        else ++it;
+    }
+    for (auto it = m_giHwBlasTemp.begin(); it != m_giHwBlasTemp.end(); )
+    {
+        if (--it->frames <= 0) { destroyGiHwBuffer(it->geo); destroyGiHwBuffer(it->scratch); it = m_giHwBlasTemp.erase(it); }
+        else ++it;
+    }
     // Free retired viewport color images once enough frames have passed (GPU done).
     for (auto it = m_retiredViewports.begin(); it != m_retiredViewports.end(); )
     {
@@ -1378,11 +1389,15 @@ void VulkanRenderer::createInstance()
     std::vector<const char*> exts(sdlExts, sdlExts + extCount);
     std::vector<const char*> layers;
 
-    // GPU debug instrumentation (validation layer). TEMPORARILY forced ON while the Vulkan
-    // backend is still broken (black screen) so the user gets a validation log with zero
-    // setup. Re-gate to `_DEBUG || std::getenv("HE_GPU_DEBUG")` once Vulkan renders.
+    // GPU debug instrumentation (validation layer): debug builds, or any build with HE_GPU_DEBUG
+    // set. It was forced ON for every build while Vulkan still rendered black; the layer then
+    // costs several times the CPU time of a descriptor-heavy frame (a 230-draw landscape took
+    // 15 ms of CPU per frame, perf capture 2026-10-28), so a release run must not pay for it.
+#ifdef _DEBUG
     const bool gpuDebug = true;
-    (void)0;
+#else
+    const bool gpuDebug = std::getenv("HE_GPU_DEBUG") != nullptr;
+#endif
     bool haveDebugUtils = false;
     if (gpuDebug)
     {
@@ -2943,7 +2958,8 @@ void VulkanRenderer::createMaterialResources()
         if (!m_matLandscapeWeights && HE::vkmat::kBindings[i].binding == HE::vkmat::kLandscapeWeightsBinding)
             continue;
         b[nb].binding         = HE::vkmat::kBindings[i].binding;
-        b[nb].descriptorType  = vkType(HE::vkmat::kBindings[i].kind);
+        b[nb].descriptorType  = HE::vkmat::kBindings[i].dynamic ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+                                                                 : vkType(HE::vkmat::kBindings[i].kind);
         b[nb].descriptorCount = 1;
         // The tessellation bits only where the device enabled the feature.
         b[nb].stageFlags      = HE::vkmat::kBindings[i].stages
@@ -2994,14 +3010,16 @@ void VulkanRenderer::createMaterialResources()
     {
         using HE::vkmat::DescKind;
         using HE::vkmat::countOf;
-        VkDescriptorPoolSize ps[3] = {
-            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         countOf(DescKind::UniformBuffer)        * k_matMaxDraws }, // b0,b1,b3,b8,b9
+        static_assert(HE::vkmat::dynamicCount() == HE::vkmat::kDynamicOffsetCount, "bindings 1, 3, 9");
+        VkDescriptorPoolSize ps[4] = {
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         (countOf(DescKind::UniformBuffer) - HE::vkmat::dynamicCount()) * k_matMaxDraws }, // b0,b8
+            { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, HE::vkmat::dynamicCount()                       * k_matMaxDraws }, // b1,b3,b9
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
-        dpci.poolSizeCount = 3;
+        dpci.poolSizeCount = 4;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
@@ -3040,6 +3058,7 @@ void VulkanRenderer::destroyMaterialResources()
         }
         if (m_matPool[f]) { vkDestroyDescriptorPool(m_device, m_matPool[f], nullptr); m_matPool[f] = VK_NULL_HANDLE; }
         m_matDrawCursor[f] = 0;
+        m_matSetCache[f].clear();
     }
     if (m_matPipelineLayout) { vkDestroyPipelineLayout(m_device, m_matPipelineLayout, nullptr); m_matPipelineLayout = VK_NULL_HANDLE; }
     if (m_matSetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_matSetLayout, nullptr); m_matSetLayout = VK_NULL_HANDLE; }
@@ -8549,12 +8568,14 @@ void VulkanRenderer::processPendingInvalidations()
     meshStreamCounters().meshInvalidations.fetch_add(
         static_cast<uint32_t>(m_pendingMeshInval.size()), std::memory_order_relaxed);
     // Static meshes alone (terrain LOD / stitch / sculpt, the per-frame case) retire their
-    // buffers instead of idling the device. Anything else in the queue — a material or
-    // texture, a skeletal mesh, a hardware BLAS the TLAS may still reference — keeps the
-    // idle, so those paths are untouched.
+    // buffers AND their hardware BLAS instead of idling the device: a frame in flight may
+    // still trace the old BLAS through its TLAS, so it waits in m_retiredHwBlas for as many
+    // frames as a mesh does. Anything else in the queue — a material or texture, a skeletal
+    // mesh — keeps the idle, so those paths are untouched. (The idle for a BLAS cost ~3 ms of
+    // CPU in one frame in five while flying over a landscape, perf capture 2026-10-28.)
     bool needIdle = !m_pendingMatInval.empty() || !m_pendingTexInval.empty();
     for (const HE::UUID& id : m_pendingMeshInval)
-        if (m_skeletalMeshCache.count(id) || m_giHwBlasCache.count(id)) { needIdle = true; break; }
+        if (m_skeletalMeshCache.count(id)) { needIdle = true; break; }
     if (needIdle)
     {
         meshStreamCounters().gpuStalls.fetch_add(1, std::memory_order_relaxed);
@@ -8589,10 +8610,11 @@ void VulkanRenderer::processPendingInvalidations()
         // scene per re-stitched terrain chunk (Thema 221, GiBlasStore.h).
         m_giBlas.erase(id);
         // HW BLAS is per-mesh (no concatenated arrays) — drop just this one;
-        // it rebuilds lazily on the next updateGiAccel. Device is idle here.
+        // it rebuilds lazily on the next updateGiAccel.
         if (auto it = m_giHwBlasCache.find(id); it != m_giHwBlasCache.end())
         {
-            destroyGiHwBlas(it->second);
+            if (needIdle) destroyGiHwBlas(it->second);   // device is idle
+            else          m_retiredHwBlas.push_back({ std::move(it->second), static_cast<int>(k_maxFramesInFlight) + 2 });
             m_giHwBlasCache.erase(it);
         }
         if (auto it = m_skeletalMeshCache.find(id); it != m_skeletalMeshCache.end())
@@ -8976,6 +8998,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     {
         vkResetDescriptorPool(m_device, m_matPool[m_currentFrame], 0);
         m_matDrawCursor[m_currentFrame] = 0;
+        m_matSetCache[m_currentFrame].clear();   // the sets it names went with the pool
 
         HE::MaterialShaderLibrary::Lighting lit{};
         // Dominant directional (NOT the sky-dome sun/raw env colour — the
@@ -9206,6 +9229,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         const bool deferred = m_deferredFrame && hdr;
         bool gbufferPass = false;
         std::vector<const DrawCall*> deferredForwardDCs;
+        // resolveShaders / resolveGBufferShaders COPY the material's whole GLSL and hash it, and
+        // foldDisplacement re-files the displacement body: ~27 us per draw, which a landscape of
+        // 230 chunks on ONE material paid 230 times a frame (6 ms of CPU, perf capture
+        // 2026-10-28). The material cannot change while this frame is recorded, so the first draw
+        // of a material resolves it and every later draw of the frame reuses the result.
+        struct MatResolved { bool ok = false; uint64_t hash = 0; std::string frag, vertBody; };
+        std::unordered_map<HE::UUID, MatResolved> matFwdMemo, matGbMemo;
         auto drawDCVk = [&](const DrawCall& dc) {
             // A trail carries no mesh asset — its geometry sits in this frame's
             // ribbon pool, looked up by the DrawCall that was synthesised for it.
@@ -9229,11 +9259,24 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // through unchanged when the material has no graph shader OR resources are down.
             if (m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
-                if (m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                  matHash, matFrag, matVertBody))
+                const MatResolved* matRes = nullptr;
                 {
-                    foldDisplacement(dc.materialAssetId, matHash);
+                    auto it = matFwdMemo.find(dc.materialAssetId);
+                    if (it == matFwdMemo.end())
+                    {
+                        MatResolved r;
+                        r.ok = m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
+                                                             r.hash, r.frag, r.vertBody);
+                        if (r.ok) foldDisplacement(dc.materialAssetId, r.hash);
+                        it = matFwdMemo.emplace(dc.materialAssetId, std::move(r)).first;
+                    }
+                    matRes = &it->second;
+                }
+                if (matRes->ok)
+                {
+                    const uint64_t     matHash     = matRes->hash;
+                    const std::string& matFrag     = matRes->frag;
+                    const std::string& matVertBody = matRes->vertBody;
                     // Transparent graph materials get a blend-on / depth-write-off
                     // pipeline variant. MUST use the same predicate the opaque/blended
                     // partition above used, or a draw lands in the blended pass with a
@@ -9259,11 +9302,21 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
                         // does not build → the lit forward replay after the resolve.
-                        uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
-                        if (m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
-                                                                 gbHash, gbFrag, gbVertBody))
+                        auto gbIt = matGbMemo.find(dc.materialAssetId);
+                        if (gbIt == matGbMemo.end())
                         {
-                            foldDisplacement(dc.materialAssetId, gbHash);
+                            MatResolved r;
+                            r.ok = m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
+                                                                        r.hash, r.frag, r.vertBody);
+                            if (r.ok) foldDisplacement(dc.materialAssetId, r.hash);
+                            gbIt = matGbMemo.emplace(dc.materialAssetId, std::move(r)).first;
+                        }
+                        const bool         gbOk       = gbIt->second.ok;
+                        const uint64_t     gbHash     = gbIt->second.hash;
+                        const std::string& gbFrag     = gbIt->second.frag;
+                        const std::string& gbVertBody = gbIt->second.vertBody;
+                        if (gbOk)
+                        {
                             matPipe = GetOrBuildMaterialPipeline(gbHash, gbFrag, gbVertBody, nullptr,
                                                                  true, false, /*gbuffer=*/true);
                         }
@@ -9392,19 +9445,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             std::memcpy(static_cast<uint8_t*>(m_matParBuf[m_currentFrame].mapped)
                                         + static_cast<size_t>(i) * k_matSlotStride, padded, sizeof(padded));
 
-                            // One descriptor set per draw from this frame's pool (reset each frame).
-                            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-                            dsai.descriptorPool     = m_matPool[m_currentFrame];
-                            dsai.descriptorSetCount = 1;
-                            dsai.pSetLayouts        = &m_matSetLayout;
+                            // The descriptor set is shared by every draw whose bindings are identical
+                            // (found by hashing the writes below); the ring slot reaches the shader as
+                            // the DYNAMIC offset of bindings 1, 3 and 9 instead of a per-draw buffer
+                            // range. A landscape of 230 chunks on one material needs one set, not 230.
                             VkDescriptorSet set = VK_NULL_HANDLE;
-                            if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return false;
 
                             const VkDeviceSize slot = static_cast<VkDeviceSize>(i) * k_matSlotStride;
                             VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0,
                                                             sizeof(HE::MaterialShaderLibrary::Lighting) };
-                            VkDescriptorBufferInfo objBI  { m_matObjBuf[m_currentFrame].buf, slot, 176 };
-                            VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, slot, 256 };
+                            VkDescriptorBufferInfo objBI  { m_matObjBuf[m_currentFrame].buf, 0, 176 };
+                            VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, 0, 256 };
                             // heTex0 = the material's base texture: an override material's texture
                             // wins (A2), else the mesh's baked texture (A1), else the white default —
                             // matching the built-in path's texture selection + matTextured flag.
@@ -9432,15 +9483,15 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 w[idx].pImageInfo      = ii;
                             };
                             wr(0, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr);
-                            wr(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &objBI,   nullptr);
+                            wr(1, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &objBI,   nullptr);
                             wr(2, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &tex0II);
-                            wr(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr);
+                            wr(3, 3, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &parBI,   nullptr);
                             wr(4, 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[0]);
                             wr(5, 5, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[1]);
                             wr(6, 6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[2]);
                             wr(7, 7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr,  &texPII[3]);
                             wr(8, 8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &lightBI, nullptr); // WPO VS
-                            wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         &parBI,   nullptr); // WPO VS
+                            wr(9, 9, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, &parBI,   nullptr); // WPO VS
                             // GI screen-space masks for heLitP(): sun mask + per-pixel
                             // local-light mask when GI ran this frame (white fallbacks
                             // otherwise; giParams.z gates sampling anyway). The local
@@ -9565,11 +9616,50 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, &clusterBI[c], nullptr);
                                 }
                             }
-                            vkUpdateDescriptorSets(m_device, nWrites, w, 0, nullptr);
+                            // Key = everything the writes name (FNV-1a over binding, type and the
+                            // handles/ranges), so a changed texture, AO/GI view or cluster buffer gets
+                            // its own set and nothing can be bound stale.
+                            uint64_t key = 0xcbf29ce484222325ULL;
+                            auto mix = [&](uint64_t v) { key = (key ^ v) * 0x100000001b3ULL; };
+                            for (uint32_t k = 0; k < nWrites; ++k)
+                            {
+                                mix(w[k].dstBinding);
+                                mix(static_cast<uint64_t>(w[k].descriptorType));
+                                if (w[k].pImageInfo)
+                                {
+                                    mix(reinterpret_cast<uint64_t>(w[k].pImageInfo->sampler));
+                                    mix(reinterpret_cast<uint64_t>(w[k].pImageInfo->imageView));
+                                    mix(static_cast<uint64_t>(w[k].pImageInfo->imageLayout));
+                                }
+                                if (w[k].pBufferInfo)
+                                {
+                                    mix(reinterpret_cast<uint64_t>(w[k].pBufferInfo->buffer));
+                                    mix(w[k].pBufferInfo->offset);
+                                    mix(w[k].pBufferInfo->range);
+                                }
+                            }
+                            auto& setCache = m_matSetCache[m_currentFrame];
+                            if (auto hit = setCache.find(key); hit != setCache.end())
+                                set = hit->second;
+                            else
+                            {
+                                VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+                                dsai.descriptorPool     = m_matPool[m_currentFrame];
+                                dsai.descriptorSetCount = 1;
+                                dsai.pSetLayouts        = &m_matSetLayout;
+                                if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) return false;
+                                for (uint32_t k = 0; k < nWrites; ++k) w[k].dstSet = set;
+                                vkUpdateDescriptorSets(m_device, nWrites, w, 0, nullptr);
+                                setCache.emplace(key, set);
+                            }
 
                             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                            // Dynamic offsets in ascending binding order: 1 (U), 3 (HeParams), 9 (HeParams, WPO VS).
+                            const uint32_t dynOffsets[HE::vkmat::kDynamicOffsetCount] = {
+                                static_cast<uint32_t>(slot), static_cast<uint32_t>(slot), static_cast<uint32_t>(slot) };
                             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                    m_matPipelineLayout, 0, 1, &set, 0, nullptr);
+                                                    m_matPipelineLayout, 0, 1, &set,
+                                                    HE::vkmat::kDynamicOffsetCount, dynOffsets);
                             return true;
                         };
                         auto drawMatInstance = [&](const glm::mat4& model) {
@@ -11433,6 +11523,12 @@ void VulkanRenderer::destroyGiAccel()
     // instance upload ring). Callers guarantee the GPU is idle (Shutdown waits).
     for (auto& [id, blas] : m_giHwBlasCache) destroyGiHwBlas(blas);
     m_giHwBlasCache.clear();
+    for (GiHwBlasPending& p : m_giHwBlasPending) { destroyGiHwBuffer(p.geo); destroyGiHwBuffer(p.scratch); }
+    m_giHwBlasPending.clear();
+    for (GiHwBlasTemp& t : m_giHwBlasTemp) { destroyGiHwBuffer(t.geo); destroyGiHwBuffer(t.scratch); }
+    m_giHwBlasTemp.clear();
+    for (RetiredHwBlas& r : m_retiredHwBlas) destroyGiHwBlas(r.blas);
+    m_retiredHwBlas.clear();
     for (GiHwTlas& t : m_giTlas)
     {
         if (t.as && m_pfnDestroyAS) { m_pfnDestroyAS(m_device, t.as, nullptr); t.as = VK_NULL_HANDLE; }
@@ -11492,10 +11588,10 @@ void VulkanRenderer::destroyGiHwBlas(GiHwBlas& b)
     b.valid   = false;
 }
 
-// One-shot BLAS build for a mesh: upload positions + indices into a device-
-// address input buffer, query build sizes, build on a one-time command buffer
-// (QueueWaitIdle — BLAS builds are rare: once per distinct mesh), then free
-// input + scratch (a built BLAS references neither). Geometry source is the
+// BLAS for a mesh: upload positions + indices into a device-address input buffer,
+// query build sizes, create the AS and queue its build (flushGiHwBlasBuilds records
+// it into the frame's command buffer ahead of the TLAS build; input + scratch live on
+// in m_giHwBlasTemp until the GPU is done with them). Geometry source is the
 // same data BuildGIBvh consumes: cooked interleaved 8-float (position at
 // offset 0 → stride 32 B feeds vertexStride directly, no repack) or loose
 // tight 3-float positions.
@@ -11589,37 +11685,28 @@ VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
     }
     if (ok)
     {
-        bgi.dstAccelerationStructure  = out.as;
-        bgi.scratchData.deviceAddress =
-            (scratch.addr + m_giAsScratchAlign - 1) & ~(VkDeviceAddress(m_giAsScratchAlign) - 1);
-        VkAccelerationStructureBuildRangeInfoKHR range{ primCount, 0, 0, 0 };
-        const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
-
-        VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-        cbai.commandPool = m_cmdPool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        cbai.commandBufferCount = 1;
-        VkCommandBuffer tmp = VK_NULL_HANDLE;
-        ok = vkAllocateCommandBuffers(m_device, &cbai, &tmp) == VK_SUCCESS;
-        if (ok)
-        {
-            VkCommandBufferBeginInfo cbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-            cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-            vkBeginCommandBuffer(tmp, &cbi);
-            m_pfnCmdBuildAS(tmp, 1, &bgi, &pRange);
-            vkEndCommandBuffer(tmp);
-            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-            si.commandBufferCount = 1; si.pCommandBuffers = &tmp;
-            ok = submitGraphics(si, VK_NULL_HANDLE) == VK_SUCCESS;
-            vkQueueWaitIdle(m_graphicsQueue);
-            vkFreeCommandBuffers(m_device, m_cmdPool, 1, &tmp);
-        }
+        // The build is recorded later (flushGiHwBlasBuilds); the AS and its address exist now.
+        GiHwBlasPending p;
+        p.as           = out.as;
+        p.geo          = geo;
+        p.scratch      = scratch;
+        p.vertexAddr   = geo.addr;
+        p.indexAddr    = geo.addr + iOfs;
+        p.scratchAddr  = (scratch.addr + m_giAsScratchAlign - 1) & ~(VkDeviceAddress(m_giAsScratchAlign) - 1);
+        p.vertexStride = vstride;
+        p.maxVertex    = vcount - 1;
+        p.primCount    = primCount;
+        m_giHwBlasPending.push_back(p);
     }
-    destroyGiHwBuffer(scratch);
-    destroyGiHwBuffer(geo);
+    else
+    {
+        destroyGiHwBuffer(scratch);
+        destroyGiHwBuffer(geo);
+    }
     if (!ok)
     {
         HE_LOG_WARN(RHI, "%s",
-                    "VulkanRenderer: HW BLAS build failed — SW GI kernels for affected frames");
+                    "VulkanRenderer: HW BLAS creation failed — SW GI kernels for affected frames");
         destroyGiHwBlas(out);
         return out;
     }
@@ -11630,6 +11717,50 @@ VulkanRenderer::GiHwBlas VulkanRenderer::buildGiHwBlas(const HE::UUID& meshId)
     out.valid   = out.address != 0;
     if (!out.valid) destroyGiHwBlas(out);
     return out;
+}
+
+// Records the queued BLAS builds into the frame's command buffer, then the barrier that lets the TLAS
+// build read them. Runs every frame that created a BLAS, also when the hardware kernels end up not
+// being used: a BLAS that was created but never built would be traced as garbage later.
+void VulkanRenderer::flushGiHwBlasBuilds(VkCommandBuffer cmd)
+{
+    if (m_giHwBlasPending.empty()) return;
+    HE_PROFILE_SCOPE_N("Vulkan::GiFlushBlas");
+    for (GiHwBlasPending& p : m_giHwBlasPending)
+    {
+        VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+        geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+        geom.flags        = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        auto& tri = geom.geometry.triangles;
+        tri.sType                    = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+        tri.vertexFormat             = VK_FORMAT_R32G32B32_SFLOAT;
+        tri.vertexData.deviceAddress = p.vertexAddr;
+        tri.vertexStride             = p.vertexStride;
+        tri.maxVertex                = p.maxVertex;
+        tri.indexType                = VK_INDEX_TYPE_UINT32;
+        tri.indexData.deviceAddress  = p.indexAddr;
+        VkAccelerationStructureBuildGeometryInfoKHR bgi{
+            VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+        bgi.type                      = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+        bgi.flags                     = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+        bgi.mode                      = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        bgi.geometryCount             = 1;
+        bgi.pGeometries               = &geom;
+        bgi.dstAccelerationStructure  = p.as;
+        bgi.scratchData.deviceAddress = p.scratchAddr;
+        VkAccelerationStructureBuildRangeInfoKHR range{ p.primCount, 0, 0, 0 };
+        const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+        m_pfnCmdBuildAS(cmd, 1, &bgi, &pRange);
+        m_giHwBlasTemp.push_back({ p.geo, p.scratch, static_cast<int>(k_maxFramesInFlight) + 1 });
+    }
+    m_giHwBlasPending.clear();
+    // BLAS writes -> the TLAS build that reads them (the TLAS -> compute barrier after it publishes both).
+    VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    mb.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    mb.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         0, 1, &mb, 0, nullptr, 0, nullptr);
 }
 
 // Records this frame's TLAS build (ring slot per in-flight frame — the slot's
@@ -12572,6 +12703,7 @@ void VulkanRenderer::runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h)
     { HE_PROFILE_SCOPE_N("MaterialScalars"); HE::resolveWorldMaterialScalars(m_renderWorld, m_contentManager); }
 
     updateGiAccel();
+    flushGiHwBlasBuilds(cmd);   // BLAS created above get built in this frame's command buffer
     if (m_giInstanceCount == 0) return;
 
     // HW ray tracing: record this frame's TLAS build (+ build→compute barrier)

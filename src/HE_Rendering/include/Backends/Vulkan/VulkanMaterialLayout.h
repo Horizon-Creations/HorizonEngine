@@ -58,6 +58,10 @@ struct Binding
 	uint32_t binding;
 	DescKind kind;
 	uint32_t stages;
+	// A UniformBuffer row bound as UNIFORM_BUFFER_DYNAMIC: the per-draw ring slot is the dynamic
+	// offset, so ONE descriptor set serves every draw that shares its textures instead of one set
+	// (and ~25 descriptor writes) per draw. The SPIR-V cannot tell the two apart.
+	bool     dynamic = false;
 };
 
 constexpr uint32_t kClusterLightsBinding = 24; // HeClusterLights { vec4 clLights[]; }
@@ -67,9 +71,9 @@ constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (Materia
 
 inline constexpr Binding kBindings[] = {
 	{  0, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeLighting
-	{  1, DescKind::UniformBuffer,        kStageVertex   | kStageTess }, // U (per object)
+	{  1, DescKind::UniformBuffer,        kStageVertex   | kStageTess, true }, // U (per object, dynamic offset)
 	{  2, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTex0
-	{  3, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeParams
+	{  3, DescKind::UniformBuffer,        kStageFragment | kStageTess, true }, // HeParams (dynamic offset)
 	{  4, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP0
 	{  5, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP1
 	{  6, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP2
@@ -78,7 +82,7 @@ inline constexpr Binding kBindings[] = {
 	// VERTEX stage at those slots (MaterialShaderLibrary.cpp wpoDeclarations).
 	// Harmless for the standard vertex, which references neither.
 	{  8, DescKind::UniformBuffer,        kStageVertex   }, // HeLighting (WPO VS)
-	{  9, DescKind::UniformBuffer,        kStageVertex   }, // HeParams   (WPO VS)
+	{  9, DescKind::UniformBuffer,        kStageVertex,                true }, // HeParams   (WPO VS, dynamic offset)
 	{ 10, DescKind::CombinedImageSampler, kStageFragment }, // heGIShadow (GI sun mask)
 	{ 11, DescKind::CombinedImageSampler, kStageFragment }, // heGILocal  (GI local mask)
 	{ 12, DescKind::CombinedImageSampler, kStageFragment }, // heCsm (CSM fallback, 2D array)
@@ -129,6 +133,17 @@ constexpr uint32_t countOf(DescKind kind, uint32_t bindingCount = kBindingCount)
 		if (kBindings[i].kind == kind) ++n;
 	return n;
 }
+
+// Rows bound as dynamic uniform buffers (bindings 1, 3, 9). vkCmdBindDescriptorSets takes their
+// offsets in ascending binding order.
+constexpr uint32_t dynamicCount(uint32_t bindingCount = kBindingCount)
+{
+	uint32_t n = 0;
+	for (uint32_t i = 0; i < bindingCount; ++i)
+		if (kBindings[i].dynamic) ++n;
+	return n;
+}
+constexpr uint32_t kDynamicOffsetCount = 3;
 
 // Combined image samplers the FRAGMENT stage sees — what the device's
 // per-stage sampler and sampled-image limits are held against (a combined

@@ -483,6 +483,9 @@ private:
 	MatFrameBuf m_matObjBuf[2];     // U ring      (k_matMaxDraws × 256 B, one slot per draw)
 	MatFrameBuf m_matParBuf[2];     // HeParams ring (k_matMaxDraws × 256 B, one slot per draw)
 	uint32_t    m_matDrawCursor[2]  = {};    // per-frame ring/descriptor-set cursor
+	// Per frame: hash of a graph-material draw's descriptor writes -> the set already written for it
+	// (shared across draws; cleared with the pool). The ring slot is a dynamic offset, not part of the key.
+	std::unordered_map<uint64_t, VkDescriptorSet> m_matSetCache[2];
 	bool        m_matReady          = false; // true once createMaterialResources() succeeded
 	// heLandscapeWeights (binding 14) is in m_matSetLayout — false only on a device whose
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
@@ -1641,7 +1644,24 @@ private:
 	                          VkMemoryPropertyFlags props);
 	void     destroyGiHwBuffer(GiHwBuffer& b);
 	void     destroyGiHwBlas(GiHwBlas& b);
-	GiHwBlas buildGiHwBlas(const HE::UUID& meshId);   // one-shot cmdbuf BLAS build
+	GiHwBlas buildGiHwBlas(const HE::UUID& meshId);   // creates the BLAS + queues its build (flushGiHwBlasBuilds records it)
+	// A BLAS whose build is queued: the AS exists (so its address is known) but is only filled when the frame's
+	// command buffer reaches flushGiHwBlasBuilds, ahead of the TLAS build that reads it. Building on a one-time
+	// command buffer with a vkQueueWaitIdle per BLAS stalled the CPU on the GPU for every re-stitched terrain chunk.
+	struct GiHwBlasPending
+	{
+		VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+		GiHwBuffer      geo, scratch;     // build input and scratch: kept until the build has finished on the GPU
+		VkDeviceAddress vertexAddr = 0, indexAddr = 0, scratchAddr = 0;
+		VkDeviceSize    vertexStride = 0;
+		uint32_t        maxVertex = 0, primCount = 0;
+	};
+	struct GiHwBlasTemp { GiHwBuffer geo, scratch; int frames = 0; };   // recorded builds' buffers, freed after the frames in flight
+	struct RetiredHwBlas { GiHwBlas blas; int frames = 0; };            // replaced BLAS a frame in flight may still trace
+	std::vector<GiHwBlasPending> m_giHwBlasPending;
+	std::vector<GiHwBlasTemp>    m_giHwBlasTemp;
+	std::vector<RetiredHwBlas>   m_retiredHwBlas;
+	void     flushGiHwBlasBuilds(VkCommandBuffer cmd);
 	void     createGiHwPipelines();                   // called by createGiPipelines
 	bool     buildGiTlas(VkCommandBuffer cmd);        // records this frame's TLAS build
 	std::unordered_map<HE::UUID, GiHwBlas> m_giHwBlasCache;
