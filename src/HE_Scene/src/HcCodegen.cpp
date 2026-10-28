@@ -4556,9 +4556,12 @@ void ensureToolPathAugmented()
 } // namespace
 
 namespace {
+// resolveCmake() runs on the editor's export worker and on the toolchain probe thread
+// while the UI thread re-sets the bundle directory, so the three globals share a lock.
+std::mutex            g_cmakeMutex;
 std::filesystem::path g_bundledCmakeDir; // set by the editor to <app>/cmake (SDL_GetBasePath)
-std::string g_resolvedCmake;             // resolveCmake()'s cache; setBundledCmakeDir drops it
-bool        g_cmakeResolved = false;
+std::string           g_resolvedCmake;   // resolveCmake()'s cache; setBundledCmakeDir drops it
+bool                  g_cmakeResolved = false;
 
 bool cmakeAnswers(const std::string& cmd)
 {
@@ -4569,14 +4572,39 @@ bool cmakeAnswers(const std::string& cmd)
 #endif
 }
 
+#if defined(_WIN32)
+// Where the installers Tool Setup runs (winget Kitware.CMake, the cmake.org MSI) put
+// cmake. A GUI process keeps the PATH it started with, so a cmake installed while the
+// editor runs is on the machine PATH but not on ours: ask these locations directly.
+std::string cmakeInKnownWindowsDir()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    for (const char* var : { "ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA" })
+    {
+        const char* root = std::getenv(var);
+        if (!root || !*root) continue;
+        const fs::path base = std::string(var) == "LOCALAPPDATA" ? fs::path(root) / "Programs" : fs::path(root);
+        const fs::path exe  = base / "CMake" / "bin" / "cmake.exe";
+        if (!fs::is_regular_file(exe, ec)) continue;
+        const std::string quoted = shq(exe);
+        if (cmakeAnswers(quoted)) return quoted;
+    }
+    return {};
+}
+#endif
+
 // Resolve the cmake command to use, preferring a cmake bundled next to the editor
 // (<app>/cmake/bin/cmake[.exe]) so a user only has to install a C++ compiler, then
 // falling back to a system cmake on PATH. Returns a shell-ready token (a quoted path,
 // or the bare word "cmake"), or empty when neither answers --version — the caller then
-// surfaces the Toolchain-Missing dialog. Resolved once and cached until the bundle
-// directory changes.
-const std::string& resolveCmake()
+// surfaces the Toolchain-Missing dialog. Cached (an empty answer too) until the bundle
+// directory changes or `fresh` asks for a new look: a "not found" taken before Tool
+// Setup installed cmake must not outlive the install.
+std::string resolveCmake(bool fresh = false)
 {
+    std::lock_guard<std::mutex> lock(g_cmakeMutex);
+    if (fresh) g_cmakeResolved = false;
     std::string& s_cmake = g_resolvedCmake;
     if (g_cmakeResolved) return s_cmake;
     g_cmakeResolved = true;
@@ -4597,7 +4625,10 @@ const std::string& resolveCmake()
             if (cmakeAnswers(quoted)) { s_cmake = quoted; return s_cmake; }
         }
     }
-    if (cmakeAnswers("cmake")) s_cmake = "cmake";
+    if (cmakeAnswers("cmake")) { s_cmake = "cmake"; return s_cmake; }
+#if defined(_WIN32)
+    s_cmake = cmakeInKnownWindowsDir();
+#endif
     return s_cmake; // empty ⇒ not found anywhere
 }
 } // namespace
@@ -4606,6 +4637,7 @@ void setBundledCmakeDir(const std::filesystem::path& dir)
 {
     // Only a CHANGED directory drops the cache: the editor re-sets the same one on
     // every Recheck, possibly while an export worker is inside resolveCmake().
+    std::lock_guard<std::mutex> lock(g_cmakeMutex);
     if (dir == g_bundledCmakeDir) return;
     g_bundledCmakeDir = dir;
     g_cmakeResolved   = false;
@@ -4954,7 +4986,9 @@ ToolchainProbe probeToolchain()
     namespace fs = std::filesystem;
     ToolchainProbe p;
 
-    const std::string cmake = resolveCmake();
+    // A probe is a fresh look (startup, Recheck, the re-probe after Tool Setup
+    // installed something), never the answer cached by an earlier one.
+    const std::string cmake = resolveCmake(/*fresh=*/true);
     if (cmake.empty())
         return p; // cmake missing entirely (bundled + PATH both absent) — nothing to probe
     std::string versionOut;
