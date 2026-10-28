@@ -21,6 +21,12 @@ enum class Stage
     Vertex,
     Fragment,
     Compute,
+    // Tessellation (Thema 207). glslang and the SPIR-V/GLSL/MSL targets take them;
+    // SPIRV-Cross has no HLSL for them (it throws "Unsupported execution model"),
+    // so an HLSL target fails with a log line instead — D3D hull/domain shaders are
+    // hand-written shells around a kernel from compileHlslKernel.
+    TessControl,
+    TessEval,
 };
 
 enum class Target
@@ -106,6 +112,15 @@ struct HlslPin
 // Compile canonical GLSL to HLSL SM 5.0 with explicit register assignments
 // (Target::HlslSm50).
 Result compileHlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<HlslPin>& pins);
+
+// A VERTEX-stage GLSL as a callable HLSL SM 5.0 kernel: the entry point is renamed to
+// `entryName` (SPIRV-Cross use_entry_point_name), so the body comes out as
+// `void <entryName>_inner()` working on static globals — one per GLSL in/out, named
+// as in the GLSL, plus `gl_Position`. A hand-written shader of another stage (the
+// D3D domain shell) sets the inputs, calls it and reads the outputs. The wrapper
+// entry `<entryName>(SPIRV_Cross_Input)` stays in the text, unused.
+Result compileHlslKernel(const std::string& glsl, const std::string& entryName,
                          const std::vector<HlslPin>& pins);
 
 // The GLSL 4.30 counterpart (Target::Glsl430). The GL backend binds uniform blocks

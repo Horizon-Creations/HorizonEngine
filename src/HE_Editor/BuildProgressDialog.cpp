@@ -115,8 +115,16 @@ std::optional<float> toolchainProgress(const std::string& line)
 namespace Build
 {
 
+static std::atomic<bool> s_cancel{false};
+static std::atomic<bool> s_cancelable{false};
+
+void setCancelable(bool cancelable) { s_cancelable.store(cancelable); }
+const std::atomic<bool>* cancelFlag() { return &s_cancel; }
+
 void begin(const std::vector<std::string>& stepNames, Kind kind)
 {
+	s_cancel.store(false);
+	s_cancelable.store(false);
 	{
 		std::lock_guard<std::mutex> lk(s_mutex);
 		s_kind = kind;
@@ -822,8 +830,17 @@ void render([[maybe_unused]] AppContext& ctx)
 
 	// Everything above the button row; the row itself is measured, not guessed,
 	// so the log box shrinks with the window instead of pushing the buttons out.
+	// The result line wraps (a long export message is several lines), so its
+	// height is measured with the same wrap width it is drawn with — one line
+	// reserved here pushed the button row out of the window.
+	const std::string& footerText = running ? activity : (finished ? message : std::string());
+	const float textH = footerText.empty() && running
+		? ImGui::GetTextLineHeightWithSpacing()
+		: std::max(ImGui::GetTextLineHeightWithSpacing(),
+		           ImGui::CalcTextSize(footerText.c_str(), nullptr, false, 690.0f).y
+		               + ImGui::GetStyle().ItemSpacing.y);
 	const float footerH = ImGui::GetFrameHeightWithSpacing()
-	                    + ImGui::GetTextLineHeightWithSpacing()
+	                    + textH
 	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;
 	ImGui::BeginChild("##build_step_log", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders,
 	                  ImGuiWindowFlags_HorizontalScrollbar);
@@ -933,6 +950,14 @@ void render([[maybe_unused]] AppContext& ctx)
 		{
 			s_hidden = true;
 			ImGui::CloseCurrentPopup();
+		}
+		if (Build::s_cancelable.load())
+		{
+			ImGui::SameLine();
+			ImGui::BeginDisabled(Build::s_cancel.load());
+			if (EditorWidgets::button("Cancel", ImVec2(90.0f, 0.0f)))
+				Build::s_cancel.store(true);
+			ImGui::EndDisabled();
 		}
 	}
 	else if (ImGui::Button("Close", ImVec2(90.0f, 0.0f)))

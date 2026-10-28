@@ -634,8 +634,6 @@ void viewModePopup(AppContext& ctx, HE::ViewMode& viewMode)
 void showRows(AppContext& ctx)                        { showPopup(ctx); }
 void viewModeRows(AppContext& ctx, HE::ViewMode& mode) { viewModePopup(ctx, mode); }
 
-float height() { return EditorToolbar::height(); }
-
 void render(AppContext& ctx, State& st)
 {
 	ImDrawList*  dl     = ImGui::GetWindowDrawList();

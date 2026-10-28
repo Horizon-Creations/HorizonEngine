@@ -97,7 +97,10 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 	if (!had) keys.push_back(key);              // add it (toggle on)
 	cfg.QuickSettingsFavorites.clear();
 	for (size_t i = 0; i < keys.size(); ++i)
-		cfg.QuickSettingsFavorites += (i ? "," : "") + keys[i];
+	{
+		if (i) cfg.QuickSettingsFavorites += ',';
+		cfg.QuickSettingsFavorites += keys[i];
+	}
 }
 
 // ─── Editor ▸ Panels ─────────────────────────────────────────────────────────
@@ -1106,6 +1109,26 @@ bool takeOpenRequest()
 	s_openRequested = false;
 	return r;
 }
+void requestOpenProjectPage(ProjectSettingsPanel::Page page)
+{
+	using P = ProjectSettingsPanel::Page;
+	Page target = Page::ProjectGeneral;
+	switch (page)
+	{
+	case P::General:         target = Page::ProjectGeneral;      break;
+	case P::Application:     target = Page::ProjectApplication;  break;
+	case P::RenderDefaults:  target = Page::ProjectWindow;       break;
+	case P::Fonts:           target = Page::ProjectFonts;        break;
+	case P::Permissions:     target = Page::ProjectPermissions;  break;
+	case P::Shadows:         target = Page::WorldShadows;        break;
+	case P::Simulation:      target = Page::WorldSimulation;     break;
+	case P::CollisionLayers: target = Page::WorldCollisionLayers; break;
+	case P::AudioBuses:      target = Page::WorldAudioBuses;     break;
+	case P::AntiCheat:       target = Page::OnlineAntiCheat;     break;
+	case P::Multiplayer:     target = Page::OnlineMultiplayer;   break;
+	}
+	requestOpen(target);
+}
 bool sourceControlPageActive() { return s_scPageFrame == ImGui::GetFrameCount(); }
 
 // ─── Source Control pages ────────────────────────────────────────────────────
@@ -1618,15 +1641,13 @@ void drawSourceControlPage(AppContext& ctx)
 	ImGui::SeparatorText("GitHub account");
 	GitHubSignIn::drawAccountRow(ctx, /*inlineFlow=*/false);
 
-	// The repository of the open PROJECT is on the Project Settings tab, next to
-	// the other things that belong to the project; say where, since this page
-	// used to hold it.
+	// The open project's repository: init, remote, auto-push, large files.
 	ImGui::Spacing();
 	ImGui::SeparatorText("Repository");
-	ImGui::TextDisabled("Init, remote, auto-push and large files belong to the project: "
-	                    "Edit \xe2\x96\xb8 Project Settings \xe2\x96\xb8 Source Control.");
-	if (EditorWidgets::button("Open Project Settings\xe2\x80\xa6", ImVec2(240.0f, 0.0f)))
-		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
+	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
+		ImGui::TextDisabled("No project is open.");
+	else
+		drawRepositorySection(ctx);
 }
 
 // ─── Status page (Tools) ─────────────────────────────────────────────────────
@@ -2162,20 +2183,18 @@ struct NavItem  { Page page; const char* label; };
 struct NavGroup { const char* label; const NavItem* items; int count; };
 
 constexpr NavItem kEditorItems[] = {
-	{ Page::Appearance,     "Appearance" },
-	{ Page::Viewport,       "Viewport" },
-	{ Page::ContentBrowser, "Content Browser" },
-	{ Page::Autosave,       "Autosave" },
-	{ Page::Panels,         "Panels" },
-	{ Page::Shortcuts,      "Shortcuts" },
-	{ Page::Feedback,       "Feedback" },
+	{ Page::Appearance,  "Appearance" },
+	{ Page::Viewport,    "Viewport" },
+	{ Page::Input,       "Input" },
+	{ Page::ProjectData, "Project Data" },
+	{ Page::Feedback,    "Feedback" },
 };
-// What the viewport is drawn with on THIS machine. The graphics a GAME ships with
-// are the project's (Project Settings ▸ Rendering); this is the editor's own
-// renderer and the user's own preview values.
+// What the viewport is drawn with on THIS machine: the editor's own renderer,
+// and the graphics values — the user's own, or the open project's when it sets
+// its own (one page, not one per owner).
 constexpr NavItem kPreviewItems[] = {
 	{ Page::EditorRenderer,  "Editor Renderer" },
-	{ Page::ViewportQuality, "Viewport Quality" },
+	{ Page::ViewportQuality, "Graphics" },
 };
 constexpr NavItem kConnectionItems[] = {
 	{ Page::SourceControl, "Source Control" },
@@ -2185,15 +2204,55 @@ constexpr NavItem kConnectionItems[] = {
 constexpr NavItem kToolItems[] = {
 	{ Page::Status, "Tool Status" },
 };
+// The open project's pages. Their labels come from ProjectSettingsPanel so the
+// rail and the page heading cannot drift apart.
+constexpr NavItem kProjectItems[] = {
+	{ Page::ProjectGeneral,     "General" },
+	{ Page::ProjectApplication, "Application" },
+	{ Page::ProjectWindow,      "Game Window" },
+	{ Page::ProjectFonts,       "Fonts" },
+	{ Page::ProjectPermissions, "Permissions" },
+};
+constexpr NavItem kWorldItems[] = {
+	{ Page::WorldShadows,        "Shadows" },
+	{ Page::WorldSimulation,     "Simulation" },
+	{ Page::WorldCollisionLayers, "Collision Layers" },
+	{ Page::WorldAudioBuses,     "Audio Buses" },
+};
+constexpr NavItem kOnlineItems[] = {
+	{ Page::OnlineAntiCheat,   "Anti-Cheat" },
+	{ Page::OnlineMultiplayer, "Multiplayer" },
+};
 constexpr NavGroup kNavGroups[] = {
 	{ "Editor",                  kEditorItems,     IM_ARRAYSIZE(kEditorItems) },
+	{ "Project",                 kProjectItems,    IM_ARRAYSIZE(kProjectItems) },
+	{ "World",                   kWorldItems,      IM_ARRAYSIZE(kWorldItems) },
+	{ "Online",                  kOnlineItems,     IM_ARRAYSIZE(kOnlineItems) },
 	{ "Preview",                 kPreviewItems,    IM_ARRAYSIZE(kPreviewItems) },
 	{ "Accounts & Connections",  kConnectionItems, IM_ARRAYSIZE(kConnectionItems) },
 	{ "Tools",                   kToolItems,       IM_ARRAYSIZE(kToolItems) },
-	// No "Project" group: everything on this tab follows the EDITOR from project
-	// to project. What travels with the project and into its exported build has a
-	// tab of its own — Edit ▸ Project Settings (ProjectSettingsPanel).
 };
+
+// The page of ProjectSettingsPanel a Preferences page draws, if it is one.
+bool projectPageOf(Page p, ProjectSettingsPanel::Page& out)
+{
+	using P = ProjectSettingsPanel::Page;
+	switch (p)
+	{
+	case Page::ProjectGeneral:      out = P::General;         return true;
+	case Page::ProjectApplication:  out = P::Application;     return true;
+	case Page::ProjectWindow:       out = P::RenderDefaults;  return true;
+	case Page::ProjectFonts:        out = P::Fonts;           return true;
+	case Page::ProjectPermissions:  out = P::Permissions;     return true;
+	case Page::WorldShadows:        out = P::Shadows;         return true;
+	case Page::WorldSimulation:     out = P::Simulation;      return true;
+	case Page::WorldCollisionLayers: out = P::CollisionLayers; return true;
+	case Page::WorldAudioBuses:     out = P::AudioBuses;      return true;
+	case Page::OnlineAntiCheat:     out = P::AntiCheat;       return true;
+	case Page::OnlineMultiplayer:   out = P::Multiplayer;     return true;
+	default:                        return false;
+	}
+}
 
 // Engine-settings pages map onto one catalog category each; the rest have
 // bespoke bodies. Null category = bespoke page.
@@ -2202,8 +2261,6 @@ const char* catalogCategory(Page p)
 	switch (p)
 	{
 	case Page::Appearance:         return "Appearance";
-	case Page::ContentBrowser:     return "Content Browser";
-	case Page::Autosave:           return "Autosave";
 	case Page::Feedback:           return "Feedback";
 	case Page::Team:               return "Team";
 	case Page::RemoteControl:      return "Remote Control";
@@ -2216,7 +2273,11 @@ const char* catalogCategory(Page p)
 // all, so they could only be reached through a Quick Settings pin — and the
 // weather sound; the two Preview pages split the old Display / Post-Processing /
 // Global Illumination / Effects pages by WHO the setting is for.
-constexpr const char* kViewportRows[]       = { "camspeed", "pointerinput", "gamepad", "weathersound" };
+constexpr const char* kViewportRows[]       = { "camspeed", "weathersound" };
+// Input: the pointer rows, then the gamepad (project-aware) and the keyboard below.
+constexpr const char* kInputRows[]          = { "pointerinput" };
+// Project Data: the content browser's cache and rescan, and the autosave.
+constexpr const char* kProjectDataRows[]    = { "cpucache", "cbrefresh", "autosave" };
 constexpr const char* kEditorRendererRows[] = { "backend", "vsync", "maxfps" };
 constexpr const char* kViewportQualityRows[] = {
 	"renderpath", "occlusion", "aa", "gpuparticles",
@@ -2229,6 +2290,8 @@ bool pageRows(Page p, DrawOptions& out)
 	switch (p)
 	{
 	case Page::Viewport:        out.rows = kViewportRows;        out.rowCount = IM_ARRAYSIZE(kViewportRows);        return true;
+	case Page::Input:           out.rows = kInputRows;           out.rowCount = IM_ARRAYSIZE(kInputRows);           return true;
+	case Page::ProjectData:     out.rows = kProjectDataRows;     out.rowCount = IM_ARRAYSIZE(kProjectDataRows);     return true;
 	case Page::EditorRenderer:  out.rows = kEditorRendererRows;  out.rowCount = IM_ARRAYSIZE(kEditorRendererRows);  return true;
 	case Page::ViewportQuality: out.rows = kViewportQualityRows; out.rowCount = IM_ARRAYSIZE(kViewportQualityRows); return true;
 	default:                    return false;
@@ -2243,60 +2306,7 @@ const char* pageTitle(Page p)
 	return "";
 }
 
-// ─── Preview ▸ Viewport Quality ──────────────────────────────────────────────
-// The top of the page. These rows are the USER's own graphics values; whether
-// they are what the viewport shows depends on the open project. A project that
-// sets its own graphics (Project Settings ▸ Rendering) makes the viewport follow
-// them by default — what you see is what ships — and this is where a machine
-// that cannot carry them says "use mine for the preview". It changes nothing an
-// export writes.
-void drawViewportQualityHeader(AppContext& ctx)
-{
-	HE::Ed::Help::Scope helpScope("Viewport Quality");
-	EditorConfig& cfg = ctx.editorConfig;
-	EditorWidgets::hint("Your own graphics values: what the viewport shows for a project that "
-	                    "sets none, and where a project's can start from. What a GAME ships "
-	                    "with is set per project, in Project Settings \xe2\x96\xb8 Rendering.");
-	ImGui::Spacing();
-
-	const bool projectOpen = ctx.projectManager && !ctx.projectManager->currentProject().path.empty();
-	if (!projectOpen || !ctx.projectManager->currentProject().settings.graphics.enabled)
-	{
-		if (projectOpen)
-			ImGui::TextDisabled("The open project does not set its own graphics, so the viewport "
-			                    "uses the values below.");
-		return;
-	}
-
-	ImGui::SeparatorText("Preview of this project");
-	int mode = std::clamp(cfg.PreviewQualityMode, 0, 1);
-	bool changed = false;
-	if (ImGui::RadioButton("Same as the project", mode == 0)) { mode = 0; changed = true; }
-	EditorWidgets::helpForLabel("Same as the project");
-	ImGui::SameLine();
-	if (ImGui::RadioButton("My own values", mode == 1)) { mode = 1; changed = true; }
-	EditorWidgets::helpForLabel("My own values");
-	if (changed) cfg.PreviewQualityMode = mode;
-	EditorWidgets::hint(mode == 0
-		? "The viewport shows what this project's build will: the values on the project's "
-		  "Rendering pages. The rows below are greyed out while that is so."
-		: "The viewport uses the values below, whatever the project says — for a machine "
-		  "that struggles with its bloom or GI. The exported build still gets the project's.");
-	ImGui::Spacing();
-	ImGui::SeparatorText("Your values");
-}
-
 } // namespace
-
-// The repository half, on the Project Settings tab's Source Control page. Marks
-// the page as a source-control page this frame so the Source Control window keeps
-// its fast status poll running while somebody looks at it, as it did for the
-// Preferences page this half used to be on.
-void DrawRepositorySection(AppContext& ctx)
-{
-	s_scPageFrame = ImGui::GetFrameCount();
-	drawRepositorySection(ctx);
-}
 
 // ─── The Preferences tab ─────────────────────────────────────────────────────
 
@@ -2360,15 +2370,20 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	ImGui::Separator();
 	ImGui::Spacing();
 
+	ProjectSettingsPanel::Page projectPage{};
+	const bool isProjectPage = projectPageOf(s_page, projectPage);
+
 	DrawOptions pageOptions;
-	const bool  pickedByRows = pageRows(s_page, pageOptions);
+	const bool  pickedByRows = !isProjectPage && pageRows(s_page, pageOptions);
 	if (!pickedByRows) pageOptions.category = catalogCategory(s_page);
-	const bool  settingsPage = pickedByRows || pageOptions.category != nullptr;
+	const bool  settingsPage = !isProjectPage && (pickedByRows || pageOptions.category != nullptr);
 
 	// Body scrolls on its own so the footer row below stays put.
 	const float footerH = ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
 	ImGui::BeginChild("##prefbody", ImVec2(0.0f, -footerH));
-	if (settingsPage)
+	if (isProjectPage)
+		ProjectSettingsPanel::drawPage(ctx, projectPage);
+	else if (settingsPage)
 	{
 		// The Team page leads with the team server and the sign-in, which are
 		// not catalog settings (nothing to pin, a password in a field); the
@@ -2384,16 +2399,34 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			ImGui::Spacing();
 			ImGui::SeparatorText("Sessions");
 		}
-		if (s_page == Page::ViewportQuality) drawViewportQualityHeader(ctx);
 		EditorWidgets::hint("Press the star (\xe2\x98\x86) next to a setting to keep it in the Quick Settings "
 		                    "panel next to the viewport.");
 		ImGui::Spacing();
-		DrawEngineSettings(ctx, SettingsMode::Preferences, pageOptions);
+		if (s_page == Page::ViewportQuality)
+		{
+			HE::Ed::Help::Scope helpScope("Viewport Quality");
+			ProjectSettingsPanel::drawGraphics(ctx, pageOptions.rows, pageOptions.rowCount);
+		}
+		else
+			DrawEngineSettings(ctx, SettingsMode::Preferences, pageOptions);
+		// The bespoke halves of two merged pages, below their rows.
+		if (s_page == Page::Appearance)
+		{
+			ImGui::Spacing();
+			drawPanelsPage();
+		}
+		else if (s_page == Page::Input)
+		{
+			ImGui::Spacing();
+			ImGui::SeparatorText("Gamepad");
+			ProjectSettingsPanel::drawGamepad(ctx);
+			ImGui::Spacing();
+			ImGui::SeparatorText("Keyboard shortcuts");
+			ShortcutsPage::draw();
+		}
 	}
 	else if (s_page == Page::SourceControl) drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
-	else if (s_page == Page::Panels)      drawPanelsPage();
-	else if (s_page == Page::Shortcuts)   ShortcutsPage::draw();
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────
@@ -2481,7 +2514,9 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 		}
 		ImGui::SameLine();
 	}
-	ImGui::TextDisabled("Preferences are saved when the editor exits.");
+	ImGui::TextDisabled(isProjectPage
+		? "Project settings are saved the moment an edit ends."
+		: "Preferences are saved when the editor exits.");
 
 	ImGui::EndChild();
 	ImGui::End();

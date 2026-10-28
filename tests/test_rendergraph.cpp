@@ -131,6 +131,27 @@ TEST_CASE("ShadowPass with shadow disabled records no draws")
 	CHECK_FALSE(cmds.hasPostProcess());
 }
 
+TEST_CASE("ShadowPass with recording off keeps its shadow target and records no draws")
+{
+	RenderWorld world;
+	world.shadow.enabled = true;
+	world.shadow.viewProj = glm::mat4(1.0f);
+	RenderObject o; o.castsShadow = true; o.worldBounds = HE::AABB{};   // invalid bounds: never culled
+	world.objects.push_back(o);
+	std::vector<uint32_t> sorted = {};
+
+	CommandBuffer on;
+	ShadowPass{}.execute(world, sorted, on);
+	CHECK(on.drawCalls().size() == 1);
+
+	ShadowPass off;
+	off.setRecordDraws(false);
+	CommandBuffer none;
+	off.execute(world, sorted, none);
+	CHECK(none.drawCalls().empty());
+	CHECK(off.describe().output.id == ShadowPass{}.describe().output.id);   // the backend's sink still runs its depth branch
+}
+
 TEST_CASE("PostProcessPass signals the post-process flag and records no draws")
 {
 	RenderWorld world;

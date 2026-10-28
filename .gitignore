@@ -102,3 +102,4 @@ EditorDeps/EngineContent/Textures/Landscape/*.hasset
 # was committed once (e68ff8ed) simply because nothing here caught it.
 __pycache__/
 *.pyc
+/CMakePresets.json

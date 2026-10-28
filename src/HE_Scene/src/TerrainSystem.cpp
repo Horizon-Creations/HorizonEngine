@@ -16,6 +16,7 @@
 #include "HorizonScene/WaterLake.h"
 #include "HorizonScene/PhysicsWorld.h"
 #include <Diagnostics/Log.h>
+#include <Diagnostics/EngineProfiler.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <Renderer/IRenderer.h>
@@ -72,6 +73,16 @@ namespace
     {
         for (float& w : tc.avgLayerWeights) w = 0.0f;
         tc.avgLayerWeights[0] = 1.0f;
+    }
+
+    // A foliage layer that grows by a paint layer's weight (FoliageLayer::weightLayer)
+    // was scattered over the paint as it stood; a stroke moves where it may grow.
+    // Only those layers re-scatter: the others do not look at the weights.
+    void markWeightGatedFoliage(entt::registry& reg, entt::entity te)
+    {
+        if (auto* fol = reg.try_get<FoliageComponent>(te))
+            for (FoliageLayer& l : fol->layers)
+                if (l.weightLayer >= 0) l.dirty = true;
     }
 
     // Mean painted weight per layer over the whole terrain, normalised to Σ = 1 —
@@ -237,6 +248,15 @@ namespace
         return key != 0 && static_cast<uint8_t>(key & 0xFF) == LODComponent::kRefined;
     }
 
+    // Mesh-streaming counters (EngineProfiler.h): CPU-side mesh data handed to the
+    // content manager by the terrain systems.
+    void countMeshReplace(const StaticMeshAsset& m)
+    {
+        meshStreamCounters().meshReplaceBytes.fetch_add(
+            m.vertices.size() * sizeof(m.vertices[0]) + m.indices.size() * sizeof(m.indices[0]),
+            std::memory_order_relaxed);
+    }
+
     // Unhook the refined level from the chunk's LODComponent and empty its
     // mesh. The UUID stays registered and owned, so coming back is a replace.
     void emptyTessLevel(entt::registry& reg, ContentManager& cm, IRenderer* renderer,
@@ -265,6 +285,7 @@ namespace
         {
             StaticMeshAsset empty;
             empty.type = HE::AssetType::StaticMesh;
+            meshStreamCounters().tessReleases.fetch_add(1, std::memory_order_relaxed);
             cm.replaceStaticMesh(cc.tessMeshId, std::move(empty));
             if (renderer) renderer->InvalidateMesh(cc.tessMeshId);
         }
@@ -279,6 +300,8 @@ namespace
                        float maxDistance)
     {
         auto& reg = world.registry();
+        meshStreamCounters().tessBuilds.fetch_add(1, std::memory_order_relaxed);
+        countMeshReplace(mesh);
         if (cc.tessMeshId != HE::UUID{} && cm.getStaticMesh(cc.tessMeshId) != nullptr)
         {
             cm.replaceStaticMesh(cc.tessMeshId, std::move(mesh));
@@ -331,11 +354,18 @@ namespace TerrainSystem
 
         LODComponent newLod;
         const float chunkWorld = tc.sizeX / static_cast<float>(g.chunksPerSide);
+        // Levels run finest-first (65, 33, 17, 9, …): each coarser one is an exact stride-2
+        // subset of LOD0's grid, so `gridCache` lets generateTerrainChunkMeshLOD downsample the
+        // already-computed LOD0 heights/normals instead of resampling the field every level.
+        TerrainChunkLODCache gridCache;
         for (uint32_t k = 0; k < g.numLODs; ++k)
         {
             const uint32_t verts = (g.lod0Cells >> k) + 1u;   // 65, 33, 17, 9, …
-            StaticMeshAsset m = generateTerrainChunkMesh(field, res, tc.sizeX, tc.sizeZ,
-                                                         u0, v0, u1, v1, verts, tc.uvTiling);
+            StaticMeshAsset m = generateTerrainChunkMeshLOD(field, res, tc.sizeX, tc.sizeZ,
+                                                            u0, v0, u1, v1, verts, tc.uvTiling,
+                                                            gridCache);
+            meshStreamCounters().chunkBuilds.fetch_add(1, std::memory_order_relaxed);
+            countMeshReplace(m);
             HE::UUID id;
             if (haveLevels && cm.getStaticMesh(lod->levels[k].meshId) != nullptr)
             {
@@ -418,6 +448,7 @@ namespace TerrainSystem
             if (tc.layerWeights.empty())
             {
                 tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
+                if (tc.weightsDirty) markWeightGatedFoliage(reg, te);   // painted -> cleared (undo, reset)
                 tc.weightsDirty = false;
                 setUnpaintedLayerAverage(tc);
                 continue;
@@ -435,6 +466,7 @@ namespace TerrainSystem
                            && cm.getTexture(tc.weightmapTextureId) != nullptr;
             if (have && !tc.weightsDirty) continue;
             computeAverageLayerWeights(tc);           // paint changed → refresh the mean
+            markWeightGatedFoliage(reg, te);
 
             uint32_t texW = 0, texH = 0;
             TextureAsset tex;
@@ -462,7 +494,14 @@ namespace TerrainSystem
         // recolouring the one it has — never reached the screen. Re-synced every
         // tick (NOT gated on tc.dirty: a material swap doesn't dirty the heightfield)
         // so the parent's material and its per-entity param overrides propagate
-        // without rebuilding the terrain.
+        // without rebuilding the terrain. No change marker can gate it: the
+        // Inspector, MCP and scripts write materialAssetId and the overrides
+        // straight into the component. What it does save is the work around the
+        // compare: one pass over the chunks for all landscapes (not one per
+        // landscape), and the parent's material read in place, not copied.
+        //
+        // The parents' default material first: that emplace is the one that can
+        // move the pool the pointers below point into.
         for (entt::entity te : terrains)
         {
             if (auto* have = reg.try_get<MaterialComponent>(te);
@@ -472,10 +511,13 @@ namespace TerrainSystem
                 MaterialComponent mat; mat.materialAssetId = HE::kDefaultTerrainMaterialId;
                 reg.emplace_or_replace<MaterialComponent>(te, mat);
             }
-            // Copied out by value: emplacing below can reallocate the pool, which
-            // would dangle a pointer into the parent's component.
-            const MaterialComponent src = reg.get<MaterialComponent>(te);
-            auto same = [&src](const MaterialComponent& d)
+        }
+        {
+            std::vector<std::pair<entt::entity, const MaterialComponent*>> sources;
+            sources.reserve(terrains.size());
+            for (entt::entity te : terrains)
+                sources.emplace_back(te, &reg.get<MaterialComponent>(te));
+            auto same = [](const MaterialComponent& d, const MaterialComponent& src)
             {
                 if (d.materialAssetId != src.materialAssetId) return false;
                 if (d.paramOverrides.size() != src.paramOverrides.size()) return false;
@@ -487,20 +529,31 @@ namespace TerrainSystem
                 }
                 return true;
             };
-            std::vector<entt::entity> needMat; // chunks with no MaterialComponent yet
+            // Chunks with no MaterialComponent yet, and their landscape.
+            std::vector<std::pair<entt::entity, entt::entity>> needMat;
             for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
             {
-                if (cc.terrain != te) continue;
+                const MaterialComponent* src = nullptr;
+                for (const auto& [te, m] : sources)
+                    if (te == cc.terrain) { src = m; break; }
+                if (!src) continue;   // its landscape is gone
+                // A chunk's own component, never a parent's: writing through it
+                // leaves the source pointers valid.
                 auto* dst = reg.try_get<MaterialComponent>(ce);
-                if (!dst) { needMat.push_back(ce); continue; }
-                if (same(*dst)) continue;
-                dst->materialAssetId = src.materialAssetId;
-                dst->paramOverrides  = src.paramOverrides;
+                if (!dst) { needMat.emplace_back(ce, cc.terrain); continue; }
+                if (same(*dst, *src)) continue;
+                dst->materialAssetId = src->materialAssetId;
+                dst->paramOverrides  = src->paramOverrides;
                 dst->dirty           = true;
             }
             // Deferred: emplace adds storage, which must not happen mid-view.
-            for (entt::entity ce : needMat)
+            // Each one can move the pool, so the parent's material is copied
+            // out fresh every time.
+            for (const auto& [ce, te] : needMat)
+            {
+                const MaterialComponent src = reg.get<MaterialComponent>(te);
                 reg.emplace_or_replace<MaterialComponent>(ce, src);
+            }
         }
 
         // ── The lakes follow their splines ───────────────────────────────────
@@ -539,6 +592,9 @@ namespace TerrainSystem
             const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
             const ChunkGrid g  = computeGrid(res);
             const std::vector<float> field = computeTerrainHeightField(tc);
+            tc.builtField        = std::make_shared<const std::vector<float>>(field);
+            tc.builtFieldRes     = res;
+            ++tc.builtFieldVersion;
 
             const bool gridChanged = (tc.builtRes != res || tc.builtChunksPerSide != g.chunksPerSide);
             const bool rebuildAll  = tc.dirty || gridChanged;
@@ -772,9 +828,30 @@ namespace TerrainSystem
             if (owned.empty()) g_tessMeshes.erase(w);
         }
 
-        // ── Chunks per terrain, with their camera distance ───────────────────
+        // ── What each landscape needs this tick ──────────────────────────────
+        // Off: its chunks only give their refined level back. Not built yet or
+        // rebuilding: updateTerrains owns this tick, its chunks are left alone.
+        // Only a landscape that refines gets its chunks' camera distances —
+        // that walk up the parent chain per chunk was the whole cost of a tick
+        // with tessellation off (the default). A few landscapes at most, so a
+        // linear lookup per chunk; the buckets keep their capacity across ticks.
+        enum class Tess : uint8_t { Off, Busy, Refine };
         struct Near { entt::entity e; float dist; };
-        std::unordered_map<uint32_t, std::vector<Near>> byTerrain;
+        struct Landscape { entt::entity te; Tess tess; std::vector<Near> chunks; };
+        thread_local std::vector<Landscape> landscapes;
+        size_t numLandscapes = 0;
+        for (auto [te, tc] : reg.view<TerrainComponent>().each())
+        {
+            if (numLandscapes == landscapes.size()) landscapes.emplace_back();
+            Landscape& l = landscapes[numLandscapes++];
+            l.te = te;
+            l.tess = (tessFactorOf(tc) <= 1u || !(tc.tessellationDistance > 0.0f)) ? Tess::Off
+                   : (tc.builtRes == 0 || tc.dirty || tc.regionDirty)               ? Tess::Busy
+                                                                                     : Tess::Refine;
+            l.chunks.clear();
+        }
+
+        // ── Chunks per terrain, with their camera distance ───────────────────
         const auto owned = g_tessMeshes.find(&world);
         for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
         {
@@ -796,30 +873,33 @@ namespace TerrainSystem
                     cc.tessActive = false;
                 }
             }
+            // A chunk of a landscape that is gone is left as it is.
+            Landscape* l = nullptr;
+            for (size_t i = 0; i < numLandscapes; ++i)
+                if (landscapes[i].te == cc.terrain) { l = &landscapes[i]; break; }
+            if (!l || l->tess == Tess::Busy) continue;
+            if (l->tess == Tess::Off)
+            {
+                // Touches this chunk's components and its own mesh only, no
+                // storage is added or removed: safe inside the view.
+                if (cc.tessActive) emptyTessLevel(reg, cm, renderer, ce, cc);
+                continue;
+            }
             // Same distance LODSystem measures: world position of the chunk
             // centre, composed from the parent chain (see LODSystem::update).
             const float d = glm::distance(cameraPos, HE::worldPositionOf(world, ce));
-            byTerrain[static_cast<uint32_t>(cc.terrain)].push_back({ ce, d });
+            l->chunks.push_back({ ce, d });
         }
 
+        // The shared build budget goes to the landscapes in view order.
         uint32_t budget = kTessBuildsPerTick;
-        for (auto& [terrainKey, chunks] : byTerrain)
+        for (size_t li = 0; li < numLandscapes; ++li)
         {
-            const entt::entity te = static_cast<entt::entity>(terrainKey);
-            const auto* tcp = reg.valid(te) ? reg.try_get<TerrainComponent>(te) : nullptr;
-            if (!tcp) continue;
-            const TerrainComponent& tc = *tcp;
+            Landscape& l = landscapes[li];
+            if (l.tess != Tess::Refine || l.chunks.empty()) continue;
+            const TerrainComponent& tc = reg.get<TerrainComponent>(l.te);
             const float D = tc.tessellationDistance;
-
-            if (tessFactorOf(tc) <= 1u || !(D > 0.0f))
-            {
-                for (const Near& n : chunks)
-                    if (auto& cc = reg.get<TerrainChunkComponent>(n.e); cc.tessActive)
-                        emptyTessLevel(reg, cm, renderer, n.e, cc);
-                continue;
-            }
-            // Not built yet (or rebuilding): updateTerrains owns this tick.
-            if (tc.builtRes == 0 || tc.dirty || tc.regionDirty) continue;
+            std::vector<Near>& chunks = l.chunks;
 
             std::sort(chunks.begin(), chunks.end(),
                       [](const Near& a, const Near& b) { return a.dist < b.dist; });
@@ -1000,6 +1080,8 @@ namespace TerrainSystem
                             cc.stitchKey = 0;
                             if (!m.vertices.empty())
                             {
+                                meshStreamCounters().stitchBuilds.fetch_add(1, std::memory_order_relaxed);
+                                countMeshReplace(m);
                                 if (cc.stitchMeshId != HE::UUID{} &&
                                     cm.getStaticMesh(cc.stitchMeshId) != nullptr)
                                 {

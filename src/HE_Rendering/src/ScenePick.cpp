@@ -124,6 +124,8 @@ VertexHit nearestVertex(const RenderWorld& snapshot, const MeshLookup& lookup,
 		if (!lookup(obj.meshAssetId, geo)) continue;
 		if (!geo.positions || geo.vertexCount == 0) continue;
 
+		const glm::mat4 toClip = viewProj * obj.transform;
+
 		// Cheap reject: the object's box, projected. If every corner is in
 		// front of the camera and the 2D rectangle they span stays clear of the
 		// cursor's radius, no vertex inside can be closer. A corner behind the
@@ -140,8 +142,7 @@ VertexHit nearestVertex(const RenderWorld& snapshot, const MeshLookup& lookup,
 				                       (i & 2) ? geo.bounds->max.y : geo.bounds->min.y,
 				                       (i & 4) ? geo.bounds->max.z : geo.bounds->min.z);
 				glm::vec2 s; float depth;
-				if (!project(viewProj, rectMin, rectSize,
-				             glm::vec3(obj.transform * glm::vec4(corner, 1.0f)), s, depth))
+				if (!project(toClip, rectMin, rectSize, corner, s, depth))
 					allInFront = false;
 				else { lo = glm::min(lo, s); hi = glm::max(hi, s); }
 			}
@@ -150,7 +151,6 @@ VertexHit nearestVertex(const RenderWorld& snapshot, const MeshLookup& lookup,
 				continue;
 		}
 
-		const glm::mat4 toClip = viewProj * obj.transform;
 		for (size_t i = 0; i < geo.vertexCount; ++i)
 		{
 			const float* p = geo.positions + i * geo.stride;

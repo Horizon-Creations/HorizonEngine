@@ -263,6 +263,20 @@ TEST_CASE("asset_list walks a folder, filters by type and can recurse")
 		f.call("asset_list", json{ { "recursive", true } });
 		CHECK(f.content.assetCount() == before);
 	}
+	SUBCASE("dotfiles are skipped, one level and recursive alike")
+	{
+		std::ofstream(f.root / "Materials" / ".DS_Store") << "junk";
+		std::ofstream(f.root / "Materials" / "UI" / ".DS_Store") << "junk";
+
+		const ToolResult flat = f.call("asset_list", json{ { "path", "Materials" } });
+		REQUIRE_FALSE(flat.isError);
+		CHECK(flat.content["entries"].size() == 3);   // unchanged: Rock, Wood, UI
+
+		const ToolResult deep = f.call("asset_list",
+			json{ { "path", "Materials" }, { "recursive", true } });
+		REQUIRE_FALSE(deep.isError);
+		CHECK(deep.content["entries"].size() == 4);   // unchanged: + Menu
+	}
 }
 
 // ─── The boundary ────────────────────────────────────────────────────────────

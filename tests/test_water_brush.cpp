@@ -291,9 +291,8 @@ TEST_CASE("Water brush: the pacing is the amount, painted cells start dry and cr
 
 // ── Digging ──────────────────────────────────────────────────────────────────
 
-TEST_CASE("Water brush dig: the ground under the brush goes down to the bed, the bank eases, a deeper pit stays "
-          "(Thema 174 Schritt 13: capped at the water's own level below half weight, see TerrainSculpt::lowerToFloor "
-          "wetLevel — a single dab's own paint does not turn its ground wet below half weight either)")
+TEST_CASE("Water brush dig: the ground under the water goes down to the bed, a deeper pit stays, nothing rises "
+          "(Thema 206 Schritt 9: the bed is a function of the shore, see digBed in WaterBrush.cpp)")
 {
     TerrainComponent tc = makeLand(10.0f);                    // flat at 10
     const size_t pitIdx = 32u * 65u + 33u;                    // (x = 1, z = 0), inside the radius
@@ -303,6 +302,7 @@ TEST_CASE("Water brush dig: the ground under the brush goes down to the bed, the
     brush::Params p = params();
     p.dig = true;
     p.digDepth = 2.0f;
+    p.bedSlope = water::kMaxBedSlope;                         // steep: the bed is at full depth a metre in
     brush::Stroke s;
     brush::begin(s, tc, 0.0f, 0.0f, p);
     REQUIRE(s.active);
@@ -315,28 +315,26 @@ TEST_CASE("Water brush dig: the ground under the brush goes down to the bed, the
     const float floorY = tc.water.bodies[0].level - 2.0f;     // the bed: 2 m under the stroke's level (10.3)
     CHECK(tc.water.bodies[0].level == doctest::Approx(10.3f));
     auto h = [&](int ix, int iz) { return tc.sculptHeights[static_cast<size_t>(32 + iz) * 65 + (32 + ix)]; };
-    CHECK(h(0, 0) == floorY);                                 // bit equal: assigned, not blended
-    CHECK(h(3, 0) == floorY);                                 // inside the radius of 4
+    CHECK(h(0, 0) == doctest::Approx(floorY).epsilon(1e-5));
+    CHECK(h(2, 0) == doctest::Approx(floorY).epsilon(1e-5));
     CHECK(h(1, 0) == 4.0f);                                   // the existing pit stays
-    // At 5 m (weight exactly 0.5, the circle's own coverage-wet boundary for a
-    // single dab) the target IS the water's level (10.3) — above the untouched
-    // ground (10) already, by the stroke's own levelOffset, so nothing is dug
-    // here at all: digging further would sink it BELOW the level without this
-    // one dab's own paint ever reaching it (the bug this schritt fixes).
-    CHECK(h(5, 0) == 10.0f);                                  // bit equal: untouched, not bit equal to `before`'s coincidence
     CHECK(h(7, 0) == 10.0f);                                  // beyond radius + falloff
     CHECK(h(0, 7) == 10.0f);
 
     // Never raises: every vertex is at or below where it was.
     for (size_t i = 0; i < before.size(); ++i) CHECK(tc.sculptHeights[i] <= before[i]);
 
-    // The terrain rebuilds only what moved: a rectangle around the brush, not
-    // everything. Only out to the radius (4 m) now, one grid step wider: the 5 m
-    // ring no longer moves at all (capped at the level, already there).
+    // The body keeps the settings it was dug with.
+    const water::BrushBedParams& bed = tc.water.bodies[0].brushBed;
+    CHECK(bed.enabled);
+    CHECK(bed.maxDepth == 2.0f);
+    CHECK(bed.slope == water::kMaxBedSlope);
+
+    // The terrain rebuilds only what moved: a rectangle around the water, not everything.
     CHECK(tc.regionDirty);
     CHECK_FALSE(tc.dirty);
-    CHECK(tc.dirtyMinX <= -5.0f);
-    CHECK(tc.dirtyMaxX >= 5.0f);
+    CHECK(tc.dirtyMinX <= -3.0f);
+    CHECK(tc.dirtyMaxX >= 3.0f);
     CHECK(tc.dirtyMaxX < 12.0f);
 }
 
@@ -504,6 +502,17 @@ namespace
             const float ax = v[ix[t] * 3], az = v[ix[t] * 3 + 2];
             const float bx = v[ix[t + 1] * 3], bz = v[ix[t + 1] * 3 + 2];
             const float cx = v[ix[t + 2] * 3], cz = v[ix[t + 2] * 3 + 2];
+            // The ear clipper leaves zero-area triangles and slivers in the mesh
+            // (water-shore-soft doc); the tolerance below is measured from the
+            // edges' infinite lines, so on a sliver it would "cover" every point on
+            // the line's extension. With a tolerance, anything thinner than a
+            // centimetre covers nothing; without one the plain test stands.
+            if (tol > 0.0f)
+            {
+                const float area2 = std::abs((bx - ax) * (cz - az) - (bz - az) * (cx - ax));
+                const float longest = std::max({ std::hypot(bx - ax, bz - az), std::hypot(cx - bx, cz - bz), std::hypot(ax - cx, az - cz) });
+                if (area2 < 0.01f * longest) continue;
+            }
             const float d1 = side(ax, az, bx, bz), d2 = side(bx, bz, cx, cz), d3 = side(cx, cz, ax, az);
             if ((d1 >= -tol && d2 >= -tol && d3 >= -tol) || (d1 <= tol && d2 <= tol && d3 <= tol)) return true;
         }
@@ -710,15 +719,17 @@ TEST_CASE("Water brush dig (Thema 188 Schritt 4): the bank is a function of the 
     {
         const brush::Dab d = brush::dab(s, tc, 20.0f, 0.0f, p);
         if (i == 0) bankAtFirst = d.bank;
-        if (i == 9) after10 = tc.sculptHeights;
+        if (i == 25) after10 = tc.sculptHeights;
     }
     after30 = tc.sculptHeights;
     const uint16_t body = s.body;
     brush::end(s, tc);
     CHECK(bankAtFirst > 50u);
 
-    // Off the water nothing moves after the dabs that shaped it: the bank does
-    // not creep outward or downward with every frame the button is held.
+    // Off the water nothing moves once the water has stopped growing (the cells at
+    // the brush's edge approach full coverage over ~24 dabs, and the shore with
+    // them): the bank does not creep outward or downward with every frame the
+    // button is held.
     const water::SurfaceMesh sheet = sheetOf(tc, body);
     const uint32_t res = tc.resolution;
     uint32_t movedOffWater = 0;
@@ -819,6 +830,7 @@ TEST_CASE("Water brush dig: a dab repeated at one spot converges on the bed inst
     brush::Params p = params();
     p.dig = true;
     p.digDepth = 1.5f;
+    p.bedSlope = water::kMaxBedSlope;                // full depth a metre in, so the middle reaches it
     p.amount = 0.4f;
     brush::Stroke s;
     brush::begin(s, tc, 0.0f, 0.0f, p);
@@ -1028,4 +1040,271 @@ TEST_CASE("Water brush: a painted landscape saves and loads with its water, and 
     brush::begin(s, lt, 0.0f, 1.0f, p);
     CHECK_FALSE(s.created);
     brush::end(s, lt);
+}
+
+// ── The bed follows the shore (Thema 206 Schritt 9) ──────────────────────────
+
+namespace
+{
+    // A round pond painted from its middle with the bed settings given: the
+    // landscape, the finished stroke and the height along +X from the middle.
+    struct Pond
+    {
+        TerrainComponent tc;
+        brush::Stroke    stroke;
+        float            level = 0.0f;
+        float            shoreX = 0.0f;   // where the cells' contour crosses +X (coverage 0.5)
+        float heightAt(int xi) const { return tc.sculptHeights[32u * 65u + static_cast<size_t>(32 + xi)]; }
+    };
+
+    Pond paintPond(float radius, float maxDepth, float slope, float roughness, int dabs = 8)
+    {
+        Pond pond;
+        pond.tc = makeLand(10.0f);
+        brush::Params p = params();
+        p.radius = radius; p.falloff = 2.0f;
+        p.dig = true; p.digDepth = maxDepth; p.bedSlope = slope; p.bedRoughness = roughness;
+        pond.stroke = drag(pond.tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, dabs);
+        pond.level = pond.stroke.level;
+        // The shore on the +X axis: the first metre where the coverage is below the contour.
+        float prev = water::coverageAt(pond.tc, 0.0f, 0.0f);
+        for (int xi = 1; xi < 31; ++xi)
+        {
+            const float c = water::coverageAt(pond.tc, static_cast<float>(xi), 0.0f);
+            if (c < 0.5f)
+            {
+                pond.shoreX = static_cast<float>(xi - 1) + (prev - 0.5f) / std::max(1e-6f, prev - c);
+                break;
+            }
+            prev = c;
+        }
+        return pond;
+    }
+}
+
+TEST_CASE("Water brush bed: depth grows by Slope per metre from the shore and stops at Max Depth")
+{
+    const float maxDepth = 2.0f, slope = 0.2f;                // full depth 10 m in
+    const Pond pond = paintPond(14.0f, maxDepth, slope, 0.0f);
+    REQUIRE(pond.shoreX > 10.0f);
+    // The bed is lowered, never raised: where the target is above the ground
+    // (the first metres, the ground stands 0.3 m under the level) the ground stays.
+    for (int xi = 0; xi <= static_cast<int>(pond.shoreX) - 1; ++xi)
+    {
+        const float d = pond.shoreX - static_cast<float>(xi);
+        const float want = std::min(10.0f, pond.level - std::min(maxDepth, slope * d));
+        CAPTURE(xi); CAPTURE(d);
+        CHECK(pond.heightAt(xi) == doctest::Approx(want).epsilon(0.0).scale(1.0).epsilon(0.3 / 10.0));
+        CHECK(pond.heightAt(xi) >= pond.level - maxDepth - 1e-3f);   // never deeper than Max Depth
+    }
+    // Deepest in the middle (≥ 10 m from the shore), and monotone towards it.
+    CHECK(pond.heightAt(0) == doctest::Approx(pond.level - maxDepth).epsilon(1e-3));
+    for (int xi = 1; xi < static_cast<int>(pond.shoreX) - 1; ++xi)
+        CHECK(pond.heightAt(xi - 1) <= pond.heightAt(xi) + 1e-4f);
+    // The same spot with a gentler slope is shallower, with a steeper one deeper.
+    const Pond gentle = paintPond(14.0f, maxDepth, 0.1f, 0.0f);
+    const Pond steep  = paintPond(14.0f, maxDepth, 0.4f, 0.0f);
+    const int probe = static_cast<int>(pond.shoreX) - 5;
+    CHECK(gentle.heightAt(probe) > pond.heightAt(probe));
+    CHECK(steep.heightAt(probe) < pond.heightAt(probe));
+}
+
+TEST_CASE("Water brush bed: moving the shore outward by painting on deepens the ground behind it, "
+          "up to Max Depth")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    brush::Params p = params();
+    p.radius = 4.0f; p.falloff = 2.0f;
+    p.dig = true; p.digDepth = 2.0f; p.bedSlope = 0.2f;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+    const float small = tc.sculptHeights[32u * 65u + 32u];
+    CHECK(small > 10.3f - 2.0f + 0.5f);                       // a small pond: still far from full depth in the middle
+
+    // A second stroke pressed on that water widens it to 14 m: the shore is now
+    // far from the middle, so the middle is dug on down to Max Depth.
+    p.radius = 14.0f;
+    const brush::Stroke s2 = drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+    CHECK_FALSE(s2.created);
+    CHECK(tc.water.bodies.size() == 1);
+    CHECK(tc.sculptHeights[32u * 65u + 32u] == doctest::Approx(10.3f - 2.0f).epsilon(1e-3));
+    CHECK(tc.sculptHeights[32u * 65u + 32u] < small);
+}
+
+TEST_CASE("Water brush bed: Bed Roughness varies the floor, deterministically, within its share of the depth")
+{
+    const Pond smooth = paintPond(14.0f, 2.0f, 0.4f, 0.0f);
+    const Pond rough  = paintPond(14.0f, 2.0f, 0.4f, 0.5f);
+    const Pond again  = paintPond(14.0f, 2.0f, 0.4f, 0.5f);
+    CHECK(sameBits(rough.tc.sculptHeights, again.tc.sculptHeights));          // no random state
+
+    // The floor of the smooth pond is flat at Max Depth; the rough one is not.
+    auto spread = [](const Pond& p)
+    {
+        float lo = 1e9f, hi = -1e9f;
+        for (int z = -3; z <= 3; ++z)
+            for (int x = -3; x <= 3; ++x)
+            {
+                const float h = p.tc.sculptHeights[static_cast<size_t>(32 + z) * 65 + static_cast<size_t>(32 + x)];
+                lo = std::min(lo, h); hi = std::max(hi, h);
+            }
+        return hi - lo;
+    };
+    CHECK(spread(smooth) < 1e-3f);
+    CHECK(spread(rough) > 0.1f);
+
+    // A share of the depth: no vertex is more than roughness · Max Depth off the
+    // smooth bed, the shore keeps its line, and nothing is raised above the ground.
+    float worst = 0.0f;
+    for (size_t i = 0; i < rough.tc.sculptHeights.size(); ++i)
+    {
+        worst = std::max(worst, std::abs(rough.tc.sculptHeights[i] - smooth.tc.sculptHeights[i]));
+        CHECK(rough.tc.sculptHeights[i] <= 10.0f);
+    }
+    CHECK(worst <= 0.5f * 2.0f + 1e-3f);
+    CHECK(worst > 0.1f);
+    CHECK(rough.tc.water.bodies[0].brushBed.roughness == 0.5f);
+}
+
+TEST_CASE("Water brush bed: the settings live on the body, save and load with the scene, an older scene has none")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(e);
+    world.registry().emplace<TerrainComponent>(e, makeLand(10.0f));
+    auto& tc = world.registry().get<TerrainComponent>(e);
+    brush::Params p = params();
+    p.dig = true; p.digDepth = 3.5f; p.bedSlope = 0.35f; p.bedRoughness = 0.25f;
+    drag(tc, { 0.0f, 0.0f }, { 6.0f, 0.0f }, p, 6);
+    const water::Field painted = tc.water;
+    const water::BrushBedParams bed = painted.bodies[0].brushBed;
+    CHECK(bed.enabled);
+    CHECK(bed.maxDepth == 3.5f);
+    CHECK(bed.slope == 0.35f);
+    CHECK(bed.roughness == 0.25f);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    auto view = loaded.registry().view<TerrainComponent>();
+    REQUIRE(view.size() == 1u);
+    const TerrainComponent& lt = loaded.registry().get<TerrainComponent>(*view.begin());
+    CHECK(lt.water.bodies[0].brushBed == bed);
+    CHECK(water::sameContent(lt.water, painted));
+
+    // The bed is part of the content a collaborator compares.
+    water::Field other = painted;
+    other.bodies[0].brushBed.slope = 0.5f;
+    CHECK_FALSE(water::sameContent(other, painted));
+
+    // A scene from before it (and a body with no dig) has no `brushBed` key and
+    // loads as the defaults; the file of an undug body is byte for byte as before.
+    TerrainComponent plain = makeLand(10.0f);
+    drag(plain, { 0.0f, 0.0f }, { 6.0f, 0.0f }, params(), 6);
+    CHECK(plain.water.bodies[0].brushBed == water::BrushBedParams{});
+    HorizonWorld oldWorld;
+    const Entity oe = oldWorld.createEntity("Landscape");
+    oldWorld.registry().emplace<TransformComponent>(oe);
+    oldWorld.registry().emplace<TerrainComponent>(oe, plain);
+    std::vector<uint8_t> oldBlob;
+    REQUIRE(ser.saveToMemory(oldWorld, oldBlob));
+    CHECK(std::search(oldBlob.begin(), oldBlob.end(), std::begin("brushBed"), std::end("brushBed") - 1) == oldBlob.end());
+    HorizonWorld oldLoaded;
+    REQUIRE(ser.loadFromMemory(oldLoaded, oldBlob));
+    auto ov = oldLoaded.registry().view<TerrainComponent>();
+    CHECK(oldLoaded.registry().get<TerrainComponent>(*ov.begin()).water.bodies[0].brushBed == water::BrushBedParams{});
+
+    // Out-of-bounds values are held to them.
+    water::BrushBedParams wild;
+    wild.maxDepth = std::nanf(""); wild.slope = 99.0f; wild.roughness = -3.0f;
+    const water::BrushBedParams held = water::clampBrushBed(wild);
+    CHECK(held.maxDepth == water::BrushBedParams{}.maxDepth);
+    CHECK(held.slope == water::kMaxBedSlope);
+    CHECK(held.roughness == 0.0f);
+}
+
+// ── Close Bed on Erase ───────────────────────────────────────────────────────
+
+namespace
+{
+    // A dug pond, then an erase stroke over all of it with closeBed as given.
+    TerrainComponent digThenErase(bool closeBed, std::vector<float>& original)
+    {
+        TerrainComponent tc = makeLand(10.0f);
+        original = tc.sculptHeights;
+        brush::Params p = params();
+        p.radius = 8.0f; p.falloff = 2.0f;
+        p.dig = true; p.digDepth = 2.0f; p.bedSlope = 0.5f;
+        drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+        brush::Params e = p;
+        e.erase = true; e.dig = false; e.closeBed = closeBed; e.radius = 14.0f; e.falloff = 4.0f;
+        drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 12);
+        return tc;
+    }
+}
+
+TEST_CASE("Water brush Close Bed: erasing the water closes the pit the brush dug, with the box off it stays open")
+{
+    std::vector<float> original;
+    const TerrainComponent opened = [&]
+    {
+        TerrainComponent tc = makeLand(10.0f);
+        brush::Params p = params();
+        p.radius = 8.0f; p.falloff = 2.0f; p.dig = true; p.digDepth = 2.0f; p.bedSlope = 0.5f;
+        drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+        return tc;
+    }();
+    REQUIRE(opened.water.bodies.size() == 1);
+    CHECK_FALSE(opened.water.bodies[0].brushPatch.empty());
+    CHECK(opened.sculptHeights[32u * 65u + 32u] < 8.5f);               // the bed is open
+
+    const TerrainComponent closed = digThenErase(true, original);
+    CHECK(closed.water.wetCells() == 0u);
+    float worst = 0.0f;
+    for (size_t i = 0; i < original.size(); ++i)
+    {
+        CHECK(closed.sculptHeights[i] <= original[i] + 1e-4f);         // closing never overshoots the old ground
+        worst = std::max(worst, original[i] - closed.sculptHeights[i]);
+    }
+    CHECK(worst < 0.05f);                                              // back to the old ground
+
+    std::vector<float> original2;
+    const TerrainComponent left = digThenErase(false, original2);
+    CHECK(left.water.wetCells() == 0u);
+    CHECK(left.sculptHeights[32u * 65u + 32u] < 8.5f);                 // still a hole, as before this option
+    CHECK(left.sculptHeights[32u * 65u + 32u] == opened.sculptHeights[32u * 65u + 32u]);
+}
+
+TEST_CASE("Water brush Close Bed: ground still under remaining water keeps its bed, and the patch saves and loads")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    brush::Params p = params();
+    p.radius = 8.0f; p.falloff = 2.0f; p.dig = true; p.digDepth = 2.0f; p.bedSlope = 0.5f;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 8);
+    const float middle = tc.sculptHeights[32u * 65u + 32u];
+    brush::Params e = p;
+    e.erase = true; e.dig = false; e.closeBed = true; e.radius = 3.0f; e.falloff = 1.0f;
+    drag(tc, { 20.0f, 0.0f }, { 20.0f, 0.0f }, e, 4);                  // far from the water: nothing happens
+    CHECK(tc.sculptHeights[32u * 65u + 32u] == middle);
+
+    HorizonWorld world;
+    const Entity en = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(en);
+    world.registry().emplace<TerrainComponent>(en, tc);
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    auto view = loaded.registry().view<TerrainComponent>();
+    REQUIRE(view.size() == 1u);
+    TerrainComponent& lt = loaded.registry().get<TerrainComponent>(*view.begin());
+    CHECK(water::sameContent(lt.water, tc.water));
+    CHECK(lt.water.bodies[0].brushPatch.delta == tc.water.bodies[0].brushPatch.delta);
+
+    // The loaded patch still closes the bed.
+    e.radius = 14.0f; e.falloff = 4.0f;
+    drag(lt, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 12);
+    CHECK(lt.sculptHeights[32u * 65u + 32u] > 9.9f);
 }

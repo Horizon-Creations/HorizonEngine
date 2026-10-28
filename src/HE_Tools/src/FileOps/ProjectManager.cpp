@@ -686,15 +686,20 @@ static ExportProfile profileFromJson(const json& j)
 	p.enableModSupport = jsonBool(j, "enableModSupport", false);
 	p.devTools         = jsonBool(j, "devTools", p.name == "Development");
 	p.startupScene     = jsonString(j, "startupScene");
-	p.outputDir        = jsonString(j, "outputDir");
+	// Not read: the output directory is derived (<root>/Export/<name>) on every
+	// machine; a stored absolute path would be foreign on another OS.
 	p.incremental      = jsonBool(j, "incremental", true);
-	p.targetPlatform   = jsonString(j, "targetPlatform", "Host");
-	if (p.targetPlatform.empty()) p.targetPlatform = "Host";
+	// Not read either: exports build for this machine (the field stays for the
+	// one-run copy project_build makes).
+	p.targetPlatform   = "Host";
 	p.appBundle        = jsonBool(j, "appBundle", false);
 	p.shaderBackends   = j.contains("shaderBackends") && j["shaderBackends"].is_number_unsigned()
 	                     ? j["shaderBackends"].get<uint32_t>() : ((1u << 4) | (1u << 0));
 	p.compileHorizonCode = jsonBool(j, "compileHorizonCode", false);
 	p.hcStopOnFailure    = jsonBool(j, "hcStopOnFailure", false);
+	// "compileGameFromSdk" (topic 211) is read by nobody any more: every export
+	// compiles its game from the engine SDK (topic 222 step 3). A project saved
+	// with it still loads; the key is dropped on the next save.
 	p.textureFormat      = jsonString(j, "textureFormat", "Auto");
 	if (p.textureFormat != "None") p.textureFormat = "Auto";   // one spelling, not a guess
 	p.textureQuality     = j.contains("textureQuality") && j["textureQuality"].is_number_integer()

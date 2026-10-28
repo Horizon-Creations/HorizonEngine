@@ -36,6 +36,8 @@ namespace
 	template <typename... C>
 	bool anyOf(const entt::registry& r, Entity e) { return r.any_of<C...>(e); }
 
+	char lower(char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
+
 	// Not in the list, on purpose: Transform, Name, Hierarchy, EntityId, Save
 	// State and Network are on nearly everything or on nothing the user placed,
 	// Material and LOD ride on a mesh and are found through it, and a Terrain
@@ -171,8 +173,6 @@ bool nameMatches(std::string_view name, std::string_view needle)
 {
 	if (needle.empty()) return true;
 	if (needle.size() > name.size()) return false;
-	const auto lower = [](char c)
-	{ return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
 	const auto it = std::search(name.begin(), name.end(), needle.begin(), needle.end(),
 	                            [&](char a, char b) { return lower(a) == lower(b); });
 	return it != name.end();
@@ -181,8 +181,6 @@ bool nameMatches(std::string_view name, std::string_view needle)
 Span matchSpan(std::string_view name, std::string_view needle)
 {
 	if (needle.empty() || needle.size() > name.size()) return {};
-	const auto lower = [](char c)
-	{ return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
 	const auto it = std::search(name.begin(), name.end(), needle.begin(), needle.end(),
 	                            [&](char a, char b) { return lower(a) == lower(b); });
 	if (it == name.end()) return {};

@@ -3,6 +3,7 @@
 #include <HorizonScene/Components/HierarchyComponent.h>
 
 #include <Math/AABB.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -16,9 +17,11 @@
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonRendering/GiLandscape.h>
+#include <HorizonRendering/GiInstanceSurface.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/EntityActive.h>
 #include "TestFsUtil.h"
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -43,6 +46,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 TEST_CASE("RenderExtractor: real mesh bounds when a ContentManager is set, invalid (kept visible) otherwise")
@@ -105,6 +109,400 @@ TEST_CASE("FrustumCuller keeps objects with unknown (invalid) bounds visible")
 	REQUIRE(vis.size() == 2);
 	CHECK(vis[0] == 0u);   // valid box outside the frustum → culled
 	CHECK(vis[1] == 1u);   // unknown/invalid bounds → kept visible
+}
+
+TEST_CASE("FrustumCuller over a compact bounds array answers exactly as over the objects")
+{
+	// The Metal passes cull a per-walk copy of the refined bounds (audit lever 7): same test,
+	// 24 bytes per object instead of a RenderObject each. Boxes inside, outside, across the
+	// planes and invalid ones, enough to go through the parallel chunks.
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0, 2, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 80.0f);
+	std::vector<HE::AABB> bounds;
+	for (int i = 0; i < 5000; ++i)
+	{
+		RenderObject o;
+		if (i % 97 != 0)   // every 97th stays invalid
+		{
+			const glm::vec3 c(float((i * 37) % 200) - 100.0f, float((i * 11) % 40) - 20.0f, -float((i * 53) % 150));
+			o.worldBounds.expand(c);
+			o.worldBounds.expand(c + glm::vec3(0.5f + float(i % 5)));
+		}
+		rw.objects.push_back(o);
+		bounds.push_back(o.worldBounds);
+	}
+	FrustumCuller culler;
+	const glm::mat4 vp = rw.camera.projection * rw.camera.view;
+	std::vector<uint8_t> fromObjects, fromBounds;
+	culler.cull(rw, vp, fromObjects);
+	culler.cull(bounds, vp, fromBounds);
+	CHECK(fromObjects == fromBounds);
+	const size_t kept = static_cast<size_t>(std::count(fromBounds.begin(), fromBounds.end(), uint8_t(1)));
+	CHECK(kept > 50u);
+	CHECK(kept < 4950u);   // both answers occur, the comparison means something
+}
+
+TEST_CASE("FrameCull refines once per walk and every cull over it matches the objects")
+{
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0, 2, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 80.0f);
+	for (int i = 0; i < 3000; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId = HE::UUID{ uint64_t(1 + i % 7), 1 };
+		o.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(float((i * 37) % 200) - 100.0f, float((i * 11) % 40) - 20.0f, -float((i * 53) % 150)));
+		const glm::vec3 c(o.transform[3]);
+		o.worldBounds.expand(c - glm::vec3(50.0f));   // the walk's coarse bound, bigger than the mesh
+		o.worldBounds.expand(c + glm::vec3(50.0f));
+		rw.objects.push_back(o);
+	}
+	const HE::AABB local{ glm::vec3(-0.5f), glm::vec3(0.5f) };
+	int resolved = 0;
+	auto localBounds = [&](const RenderObject& o) -> const HE::AABB*
+	{
+		++resolved;
+		return o.meshAssetId.hi == 3 ? nullptr : &local;   // one mesh is not resolved yet
+	};
+	FrustumCuller culler;
+	RenderSorter  sorter;
+	FrameCull     fc;
+	const glm::mat4 vp = rw.camera.projection * rw.camera.view;
+
+	std::vector<uint8_t> coarse;
+	fc.cull(culler, rw, /*walk=*/1, vp, coarse);   // nothing refined: the objects themselves
+	CHECK(!fc.holds(rw, 1));
+
+	fc.refine(rw, 1, localBounds);
+	CHECK(resolved == 7);   // each of the 7 meshes asked once, not each of the 3000 objects
+	CHECK(fc.holds(rw, 1));
+	fc.refine(rw, 1, localBounds);                  // same walk: nothing to do
+	CHECK(resolved == 7);   // each of the 7 meshes asked once, not each of the 3000 objects
+	CHECK(!fc.holds(rw, 2));                        // another walk does not read the copy
+
+	std::vector<uint8_t> viaCopy, viaObjects;
+	fc.cull(culler, rw, 1, vp, viaCopy);
+	culler.cull(rw, vp, viaObjects);
+	CHECK(viaCopy == viaObjects);
+	const size_t kept = static_cast<size_t>(std::count(viaCopy.begin(), viaCopy.end(), uint8_t(1)));
+	const size_t keptCoarse = static_cast<size_t>(std::count(coarse.begin(), coarse.end(), uint8_t(1)));
+	CHECK(kept < keptCoarse);                       // the refined bounds cull more than the walk's coarse ones
+
+	HE::AABB box;
+	for (const RenderObject& o : rw.objects) box.expand(o.worldBounds);
+	const HE::AABB got = fc.sceneBox(rw, 1);
+	CHECK(got.min == box.min);
+	CHECK(got.max == box.max);
+
+	fc.refine(rw, 2, localBounds);                  // a new walk starts over
+	CHECK(resolved == 14);
+	CHECK(fc.holds(rw, 2));
+}
+
+TEST_CASE("FrameCull keeps the camera cull for the frame, camera and variant that asked")
+{
+	RenderWorld rw;
+	rw.camera.view       = glm::lookAt(glm::vec3(0, 2, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+	rw.camera.projection = glm::perspective(glm::radians(60.0f), 1.6f, 0.1f, 80.0f);
+	rw.camera.position   = glm::vec3(0, 2, 5);
+	for (int i = 0; i < 500; ++i)
+	{
+		RenderObject o;
+		o.meshAssetId = HE::UUID{ uint64_t(1 + i % 5), 1 };
+		o.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(float((i * 37) % 60) - 30.0f, 0.0f, -float((i * 53) % 90)));
+		o.worldBounds.expand(glm::vec3(o.transform[3]) - glm::vec3(0.5f));
+		o.worldBounds.expand(glm::vec3(o.transform[3]) + glm::vec3(0.5f));
+		rw.objects.push_back(o);
+	}
+	const HE::AABB local{ glm::vec3(-0.5f), glm::vec3(0.5f) };
+	auto localBounds = [&](const RenderObject&) -> const HE::AABB* { return &local; };
+	FrustumCuller culler;
+	RenderSorter  sorter;
+	FrameCull     fc;
+	std::vector<uint8_t>  vis, vis2;
+	std::vector<uint32_t> sorted, sorted2;
+
+	// Before the walk is refined nothing is kept: the bounds may still change.
+	fc.cullCamera(culler, sorter, rw, 1, /*frame=*/10, 0, vis, sorted);
+	fc.refine(rw, 1, localBounds);
+	fc.cullCamera(culler, sorter, rw, 1, 10, 0, vis, sorted);
+	REQUIRE(!sorted.empty());
+
+	// A hit gives the same answer even when an object moved (the cache is the frame's, not the data's).
+	const uint32_t k = sorted.front();   // a visible object, the nearest of its mesh
+	rw.objects[k].transform = glm::translate(glm::mat4(1.0f), glm::vec3(1000.0f));
+	fc.cullCamera(culler, sorter, rw, 1, 10, 0, vis2, sorted2);
+	CHECK(vis2 == vis);
+	CHECK(sorted2 == sorted);
+
+	// Another frame recomputes: the moved object now sorts last of its mesh, the walk's bounds keep it visible.
+	std::vector<uint8_t> v3; std::vector<uint32_t> s3;
+	fc.cullCamera(culler, sorter, rw, 1, 11, 0, v3, s3);
+	CHECK(v3 == vis);
+	CHECK(s3 != sorted);
+	// ...and so does another variant of the same frame (occlusion on / off).
+	std::vector<uint32_t> s4;
+	rw.objects[k].transform = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.0f, 4.0f));   // next to the camera
+	fc.cullCamera(culler, sorter, rw, 1, 11, 0, v3, s4);
+	CHECK(s4 == s3);                                   // same frame and variant: the kept answer
+	fc.cullCamera(culler, sorter, rw, 1, 11, /*variant=*/1, v3, s4);
+	CHECK(s4 != s3);
+
+	rw.camera.view = glm::lookAt(glm::vec3(5, 2, 0), glm::vec3(0, 0, -20), glm::vec3(0, 1, 0));
+	std::vector<uint8_t> v5; std::vector<uint32_t> s5;
+	fc.cullCamera(culler, sorter, rw, 1, 11, 1, v5, s5);
+	CHECK(v5 != v3);               // another camera misses
+}
+
+TEST_CASE("RenderSorter::fillInstancePairs writes the same records wide and serial")
+{
+	for (uint32_t count : { 3u, 100u, 10000u })
+	{
+		std::vector<uint8_t> a(size_t(count) * 128), b(size_t(count) * 128);
+		auto fill = [](uint32_t k, glm::mat4* pair)
+		{
+			pair[1] = glm::translate(glm::mat4(1.0f), glm::vec3(float(k), float(k % 7), -float(k % 13)));
+			pair[0] = glm::scale(glm::mat4(1.0f), glm::vec3(2.0f)) * pair[1];
+		};
+		RenderSorter::fillInstancePairs(a.data(), count, fill);
+		for (uint32_t k = 0; k < count; ++k)
+		{
+			glm::mat4 pair[2];
+			fill(k, pair);
+			std::memcpy(b.data() + size_t(k) * 128, pair, sizeof(pair));
+		}
+		CHECK(a == b);
+	}
+}
+
+TEST_CASE("InstanceRun: spans and the copied list give the same pairs and the same ring bytes")
+{
+	// 9000 matrices cut into spans of 3, 5000 and 3997 (one span past the wide threshold), as
+	// pieces of a foliage block and a single object would be; the copied list is all of them.
+	const uint32_t total = 9000;
+	std::vector<glm::mat4> all(total);
+	for (uint32_t i = 0; i < total; ++i)
+		all[i] = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), float(i % 5), -float(i % 11)));
+	const std::vector<InstanceSpan> spans = { { all.data(), 3 }, { all.data() + 3, 5000 }, { all.data() + 5003, 3997 } };
+	const InstanceRun inPlace(spans.data(), spans.size(), nullptr, total);
+	const InstanceRun copied(nullptr, 0, all.data(), total);
+	CHECK(inPlace.size() == total);
+	CHECK(copied.size() == total);
+
+	const glm::mat4 vp = glm::scale(glm::mat4(1.0f), glm::vec3(0.5f));
+	auto fill = [&vp](const glm::mat4& model, glm::mat4* pair) { pair[0] = vp * model; pair[1] = model; };
+	std::vector<uint8_t> a(size_t(total) * 128), b(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(a.data(), inPlace, fill);
+	RenderSorter::fillInstancePairs(b.data(), copied, fill);
+	CHECK(a == b);
+
+	std::vector<glm::mat4> ringA(total), ringB(total);
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(ringA.data()), sizeof(glm::mat4), inPlace);
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(ringB.data()), sizeof(glm::mat4), copied);
+	CHECK(ringA == all);
+	CHECK(ringB == all);
+	// Records of two matrices with the model in the second half (the node-graph twin's layout).
+	std::vector<glm::mat4> rec(size_t(total) * 2, glm::mat4(0.0f));
+	RenderSorter::copyInstanceModels(reinterpret_cast<uint8_t*>(rec.data()) + sizeof(glm::mat4), 2 * sizeof(glm::mat4), inPlace);
+	bool recOk = true;
+	for (uint32_t i = 0; i < total; ++i) recOk = recOk && rec[2 * i + 1] == all[i] && rec[2 * i] == glm::mat4(0.0f);
+	CHECK(recOk);
+
+	// The two forms of one DepthBatchList batch read the same.
+	RenderSorter::DepthBatchList list;
+	list.transforms = all;
+	RenderSorter::DepthBatch b0{};
+	b0.first = 0; b0.count = total;
+	std::vector<uint8_t> c(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(c.data(), list.run(b0), fill);
+	CHECK(c == a);
+	list.useSpans = true;
+	list.spans = spans;
+	b0.spanFirst = 0; b0.spanCount = static_cast<uint32_t>(spans.size());
+	list.transforms.clear();
+	std::vector<uint8_t> d(size_t(total) * 128);
+	RenderSorter::fillInstancePairs(d.data(), list.run(b0), fill);
+	CHECK(d == a);
+}
+
+TEST_CASE("RenderSorter::sortByMesh: the counting sort gives the comparison sort's order")
+{
+	// Mesh (hi, lo) ascending, then object index ascending: what the std::sort it replaced did.
+	// 700 distinct meshes force the id table to grow (1024 slots, half full at 512).
+	for (uint32_t distinctMeshes : { 1u, 7u, 700u })
+	{
+		RenderWorld world;
+		std::vector<uint8_t> visible;
+		uint64_t seed = 0x9E3779B97F4A7C15ull + distinctMeshes;
+		auto next = [&seed] { seed = seed * 6364136223846793005ull + 1442695040888963407ull; return seed >> 33; };
+		const uint32_t n = 20000;
+		world.objects.resize(n);
+		for (uint32_t i = 0; i < n; ++i)
+		{
+			const uint64_t m = next() % distinctMeshes;
+			world.objects[i].meshAssetId.hi = (m * 0x100000001B3ull) ^ 0xABCDull;   // not in index order
+			world.objects[i].meshAssetId.lo = m * 7u + 1u;
+			visible.push_back(next() % 5 != 0);
+		}
+		RenderSorter sorter;
+		std::vector<uint32_t> got;
+		sorter.sortByMesh(world, visible, got);
+
+		std::vector<uint32_t> want;
+		for (uint32_t i = 0; i < n; ++i) if (visible[i]) want.push_back(i);
+		std::sort(want.begin(), want.end(), [&](uint32_t a, uint32_t b)
+		{
+			const HE::UUID& x = world.objects[a].meshAssetId; const HE::UUID& y = world.objects[b].meshAssetId;
+			if (x.hi != y.hi) return x.hi < y.hi;
+			if (x.lo != y.lo) return x.lo < y.lo;
+			return a < b;
+		});
+		CHECK(got == want);
+		// A second call on the same sorter (its scratch is reused) and an empty frame.
+		sorter.sortByMesh(world, visible, got);
+		CHECK(got == want);
+		std::vector<uint8_t> none(n, 0);
+		sorter.sortByMesh(world, none, got);
+		CHECK(got.empty());
+	}
+}
+
+TEST_CASE("FrameCull::refine: every object gets the bound the serial walk gives it, wide or not")
+{
+	for (uint32_t count : { 50u, 9000u })   // under and over the wide threshold
+	{
+		RenderWorld a, b;
+		a.objects.resize(count);
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			RenderObject& o = a.objects[i];
+			o.meshAssetId.hi = 1; o.meshAssetId.lo = 1 + i % 13;
+			o.transform = glm::translate(glm::mat4(1.0f), glm::vec3(float(i), float(i % 7), 0.0f));
+			o.worldBounds = HE::AABB{};   // invalid: the walk gave none
+		}
+		b.objects = a.objects;
+		// Mesh lo == 13 is "not resolved": it keeps what the walk gave it.
+		auto local = [](const RenderObject& o) -> const HE::AABB*
+		{
+			static HE::AABB boxes[14];
+			if (o.meshAssetId.lo == 13) return nullptr;
+			HE::AABB& bx = boxes[o.meshAssetId.lo];
+			bx = HE::AABB{};
+			bx.expand(glm::vec3(-1.0f, -1.0f, -1.0f) * float(o.meshAssetId.lo));
+			bx.expand(glm::vec3( 1.0f,  2.0f,  1.0f) * float(o.meshAssetId.lo));
+			return &bx;
+		};
+		FrameCull fc;
+		fc.refine(a, 5, local);
+		for (RenderObject& o : b.objects)   // the old serial loop
+			if (const HE::AABB* l = local(o)) o.refineWorldBounds(*l);
+		bool same = true;
+		for (uint32_t i = 0; i < count; ++i)
+		{
+			same = same && a.objects[i].worldBounds.isValid() == b.objects[i].worldBounds.isValid();
+			if (a.objects[i].worldBounds.isValid())
+				same = same && a.objects[i].worldBounds.min == b.objects[i].worldBounds.min
+				            && a.objects[i].worldBounds.max == b.objects[i].worldBounds.max;
+		}
+		CHECK(same);
+		CHECK(fc.holds(a, 5));
+	}
+}
+
+TEST_CASE("RenderExtractor: the wide mesh walk gives every object the fields the entity's components say, in view order")
+{
+	// 6000 entities = three blocks of the wide walk. Mixed on purpose: single-section meshes (bounds
+	// memo), a two-slot mesh (the serial fix-up), whole-mesh and slot overrides, param overrides, an
+	// unregistered mesh (no bounds), hidden and switched-off entities, and ones with no mesh at all.
+	ContentManager cm;
+	std::vector<HE::UUID> plain;
+	for (int k = 0; k < 5; ++k)
+	{
+		StaticMeshAsset mesh; mesh.type = HE::AssetType::StaticMesh; mesh.name = "plain" + std::to_string(k);
+		mesh.indices = { 0, 1, 2 };
+		mesh.boundsMin[0] = mesh.boundsMin[1] = mesh.boundsMin[2] = -1.0f - float(k);
+		mesh.boundsMax[0] = mesh.boundsMax[1] = mesh.boundsMax[2] =  1.0f + float(k);
+		plain.push_back(cm.registerStaticMesh(mesh));
+	}
+	MaterialAsset ma; ma.type = HE::AssetType::Material; ma.name = "m";
+	ma.graphParamNames = { "Tint" }; ma.shaderParamData = std::vector<float>(64, 0.5f);
+	const HE::UUID matA = cm.registerMaterial(ma);
+	ma.name = "ov"; const HE::UUID matOv = cm.registerMaterial(ma);
+	StaticMeshAsset two; two.type = HE::AssetType::StaticMesh; two.name = "two";
+	two.indices = { 0, 1, 2, 3, 4, 5 };
+	MeshSection s0; s0.indexCount = 3; s0.materialId = matA;
+	MeshSection s1; s1.indexOffset = 3; s1.indexCount = 3; s1.materialId = matOv;
+	two.sections = { s0, s1 };
+	two.boundsMin[0] = two.boundsMin[1] = two.boundsMin[2] = -2.0f;
+	two.boundsMax[0] = two.boundsMax[1] = two.boundsMax[2] =  2.0f;
+	const HE::UUID twoId = cm.registerStaticMesh(two);
+	const HE::UUID missing{ 0xDEADBEEFull, 0x1234ull };
+
+	HorizonWorld world;
+	auto& reg = world.registry();
+	for (uint32_t i = 0; i < 6000; ++i)
+	{
+		auto e = world.createEntity("e" + std::to_string(i));
+		TransformComponent t; t.position = glm::vec3(float(i % 97), float(i % 13), -float(i % 31));
+		reg.emplace<TransformComponent>(e, t);
+		if (i % 37 == 0) continue;                                 // no mesh at all
+		MeshComponent mc;
+		mc.meshAssetId = i % 11 == 0 ? twoId : i % 29 == 0 ? missing : plain[i % 5];
+		mc.visible = i % 17 != 0;
+		mc.castsShadow = i % 3 != 0;
+		mc.receivesShadow = i % 7 != 0;
+		reg.emplace<MeshComponent>(e, mc);
+		if (i % 5 == 1)
+		{
+			MaterialComponent mat; mat.materialAssetId = matA;
+			if (i % 10 == 1) { MaterialParamOverride ov; ov.name = "Tint"; ov.value[0] = 2.0f; mat.paramOverrides.push_back(ov); }
+			if (i % 15 == 1) mat.slotOverrides = { matOv };
+			reg.emplace<MaterialComponent>(e, mat);
+		}
+		if (i % 23 == 0) HE::setEntityActive(reg, e, false);
+	}
+
+	RenderExtractor ex; ex.setContentManager(&cm);
+	RenderWorld rw;
+	ex.extract(world, rw, 1.0f);
+
+	size_t k = 0;
+	std::unordered_map<HE::UUID, HE::AABB> local;   // the meshes' bounds, as the test sees them
+	for (int j = 0; j < 5; ++j)
+		local[plain[j]] = HE::AABB{ glm::vec3(-1.0f - float(j)), glm::vec3(1.0f + float(j)) };
+	local[twoId] = HE::AABB{ glm::vec3(-2.0f), glm::vec3(2.0f) };
+	const HE::ActiveFilter active(reg);
+	bool allOk = true;
+	for (auto [e, t, mesh] : reg.view<TransformComponent, MeshComponent>().each())
+	{
+		if (!mesh.visible || active.off(e)) continue;
+		REQUIRE(k < rw.objects.size());
+		const RenderObject& o = rw.objects[k++];
+		bool ok = o.entityId == static_cast<uint32_t>(e) && o.meshAssetId == mesh.meshAssetId
+		       && o.transform == t.worldMatrix && o.castsShadow == mesh.castsShadow
+		       && o.receivesShadow == mesh.receivesShadow;
+		const MaterialComponent* mc = reg.try_get<MaterialComponent>(e);
+		const bool multi = mesh.meshAssetId == twoId;
+		HE::UUID wantMat = mc ? mc->materialAssetId : HE::UUID{};
+		if (!multi && mc && mesh.meshAssetId != missing && mc->slotOverride(0) != HE::UUID{}) wantMat = mc->slotOverride(0);
+		ok = ok && o.materialAssetId == wantMat;
+		const auto it = local.find(mesh.meshAssetId);
+		if (it == local.end()) ok = ok && !o.worldBounds.isValid();
+		else
+		{
+			const HE::AABB want = it->second.transformed(t.worldMatrix);
+			ok = ok && o.worldBounds.min == want.min && o.worldBounds.max == want.max;
+		}
+		ok = ok && (multi ? o.sections.size() == 2 || o.sections.empty() : o.sections.empty());
+		const bool wantParam = mc && !mc->paramOverrides.empty() && wantMat == mc->materialAssetId;
+		ok = ok && (o.paramOverride.empty() != wantParam);
+		allOk = allOk && ok;
+		if (!ok) { INFO("entity ", uint32_t(e)); CHECK(ok); break; }
+	}
+	CHECK(allOk);
+	CHECK(k == rw.objects.size());
+	CHECK(k > 4000);   // the mix draws most of them
 }
 
 TEST_CASE("AABB build and ray intersection")
@@ -2031,7 +2429,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 		for (const char* n : names) src.push_back(stripLineComments(readFile(sh / n)));
 		checkGroup(names, src, {
 			{ "surface origin bias",  { R"(\+ N \* ([0-9.]+))" } },
-			{ "sun ray tMin/tMax",    { R"(giSceneAnyHit\(origin, dir, ([0-9.]+), ([0-9.]+)\))" } },
+			{ "sun ray tMin/tMax",    { R"((?:giSceneAnyHit|GI_OCCLUDED)\(origin, dir, ([0-9.]+), ([0-9.]+)\))" } },
 			{ "local-light skip",     { R"(distL <= ([0-9.]+)\))" } },
 			{ "local ray tMin/slack", { R"(dirL, ([0-9.]+), max\(distL - ([0-9.]+), ([0-9.]+)\)\))" } },
 			{ "cone jitter hash",     { R"(v = v \* (\d+)u \+ (\d+)u;[\s\S]*?v \^= v >> (\d+)u;[\s\S]*?h\.xy >> (\d+)u\) \* \(1\.0 / ([0-9.]+)\))" } },
@@ -2055,6 +2453,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "gi_shadow.comp",     sh / "gi_shadow.comp" },
 			{ "gi_shadow_hw.comp",  sh / "gi_shadow_hw.comp" },
 			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl" },
+			{ "gi_refl.comp",       sh / "gi_refl.comp" }, // Vulkan reflection kernel, its own giHash2/giPcg3d copy
 			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h" },
 			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp" },
 			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm" },
@@ -2251,19 +2650,46 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			return stripLineComments(gl.substr(from, to - from));
 		};
 
+		// The D3D12/D3D11 reflection kernel (kGiReflCSHLSL, HlslSources.h) is the
+		// fifth copy: a hit shaded from the same probe field in HLSL. Sliced by its
+		// literal name, like the GL ones.
+		const std::string hlslAll = readFile(root / "src" / "HE_Rendering" / "src" /
+		                                     "Backends" / "D3D_Shared" / "HlslSources.h");
+		const std::string hlslDecl = "inline constexpr const char* kGiReflCSHLSL = R\"HLSL(";
+		const size_t hlslAt = hlslAll.find(hlslDecl);
+		REQUIRE(hlslAt != std::string::npos); // literal renamed/moved
+		const size_t hlslFrom = hlslAt + hlslDecl.size();
+		const size_t hlslTo   = hlslAll.find(")HLSL\";", hlslFrom);
+		REQUIRE(hlslTo != std::string::npos);
+
+		// gi_refl.comp (Vulkan, Thema 191 step 6) is the sixth copy: a whole
+		// file, like scene.frag above (not sliced by literal name — there is
+		// only one GLSL reflection kernel per file on this backend).
 		const std::vector<const char*> names = { "kLightingPreamble", "scene.frag",
-		                                         "kUnlitFS (GL)", "kGiReflCS (GL)" };
+		                                         "kUnlitFS (GL)", "kGiReflCS (GL)",
+		                                         "kGiReflCSHLSL (D3D)", "gi_refl.comp (Vulkan)" };
 		const std::vector<std::string> src = {
 			stripLineComments(lib.substr(open + 3, close - open - 3)),
 			stripLineComments(readFile(sh / "scene.frag")),
 			glslLiteral("kUnlitFS"),
 			glslLiteral("kGiReflCS"),
+			stripLineComments(hlslAll.substr(hlslFrom, hlslTo - hlslFrom)),
+			stripLineComments(readFile(sh / "gi_refl.comp")),
 		};
 		checkGroup(names, src, {
-			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
+			// HLSL spells the parameter `float3 n`, and the regex runs before
+			// canonicalise() rewrites the dialect, so the D3D copy has its own.
+			{ "octEncode body",         { R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(float3 n\)\s*\{([^}]*)\})",
+			                              R"(OctEncode\(vec3 n\)\s*\{([^}]*)\})" } },
 			{ "octahedral tile size",   { R"(const float kOct = ([0-9.]+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
 			                              R"(const int GI_PROBE_OCT = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
+			                              R"(const int kOctSize = (\d+);)",
 			                              R"(const int kOctSize = (\d+);)" } },
 			{ "probe distance floor",   { R"(max\(length\(toProbe\), ([0-9.e+-]+)\))" } },
 			{ "trilinear weight cutoff",{ R"(weight <= ([0-9.e+-]+)\) continue)" } },
@@ -2762,7 +3188,7 @@ TEST_CASE("UI image quads have a texture path on D3D11 and D3D12 (Thema 157)")
 	// D3D11: own cache, dropped on a re-import.
 	CHECK(d3d11.find("resolveUITexture(obj.textureAssetId, cm)") != std::string::npos);
 	CHECK(d3d11.find("resolveGraphTexture(obj.textureAssetId") == std::string::npos);
-	CHECK(d3d11.find("uiTexCache.erase(graphTexKey(id, {}))") != std::string::npos);
+	CHECK(d3d11.find("uiTexCache.erase(key)") != std::string::npos);
 	// D3D12: the UI pass binds only m_uiAtlasHeap, so the images need their own
 	// region there (not the 16 font slots); uploads are recorded before the draws.
 	CHECK(d3d12.find("hd.NumDescriptors = k_maxUIFontAtlases + k_maxUIImages;") != std::string::npos);
@@ -3926,6 +4352,37 @@ bool near3(const glm::vec3& a, const glm::vec3& b, float eps = 1e-4f)
 }
 } // namespace
 
+TEST_CASE("GI auto landscape: a backend without the per-hit kernel gets the ground colour, not white")
+{
+	// D3D11, D3D12 and Vulkan shade a landscape chunk from one flat colour (HE::giInstanceSurface). The CPU fold
+	// cannot fold the auto material's texture-array BaseColor, so that colour was plain white.
+	HE::GiLandscape L = autoLandFixture();
+	std::vector<HE::GiLandscape> lands{ L };
+	RenderObject chunk;
+	chunk.landscapeIndex = 0;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	// Without the scene's landscapes it stays what it was: the object's own colour.
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr).albedo, { 1, 1, 1 }));
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, nullptr).albedo, { 1, 1, 1 }));
+	// With them: grass on flat ground, whatever the snow line (a flat colour cannot know the height).
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 0, 0 }));
+	// Dirt Amount mixes dirt into the ground.
+	lands[0].autoSlope.z = 0.5f;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.5f, 0.5f, 0 }));
+	// The instance tint still multiplies.
+	chunk.instanceTint = glm::vec4(0.5f, 1.0f, 1.0f, 1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 0.25f, 0.5f, 0 }));
+	// A chunk of no landscape, a bad index and a painted landscape keep their own colour.
+	RenderObject plain;
+	CHECK(near3(HE::giInstanceSurface(plain, nullptr, &lands).albedo, { 1, 1, 1 }));
+	chunk.landscapeIndex = 3;
+	chunk.instanceTint   = glm::vec4(1.0f);
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+	lands[0].layerCount = 2;
+	chunk.landscapeIndex = 0;
+	CHECK(near3(HE::giInstanceSurface(chunk, nullptr, &lands).albedo, { 1, 1, 1 }));
+}
+
 TEST_CASE("GI auto landscape: the hit colour follows the material's slope and height masks")
 {
 	HE::GiLandscape L = autoLandFixture();
@@ -4033,6 +4490,77 @@ TEST_CASE("GI auto landscape: recognised by its parameter names, slice means sRG
 	t.layers = 4;
 	t.data.resize(slice * 4);
 	CHECK_FALSE(HE::giAutoLandscapeSliceMeans(t, L));
+}
+
+TEST_CASE("GI auto landscape: slice means read each layer's first VARIANT, and a block array is decoded one level at a time (Thema 180 Schritt 6)")
+{
+	// 13 slices = 4 layers x 3 variants + WetGround (Thema 180 Schritt 3). The first variant of Grass,
+	// Dirt, Rock, Snow sits at 0, 3, 6, 9, WetGround at 12; every other slice is a black decoy, so a
+	// reader that takes slices 0..4 (the V = 1 layout) sees Grass, black, black, Dirt, black.
+	constexpr uint32_t kSize = 32, kMips = 6, kDepth = 13;
+	const uint8_t cols[5][3] = { { 255, 0, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 255, 255 }, { 255, 0, 255 } };
+	auto colourOf = [&](uint32_t slice, int out[3])
+	{
+		out[0] = out[1] = out[2] = 0;
+		for (int g = 0; g < 5; ++g)
+			if (slice == static_cast<uint32_t>(HE::autoLandscapeSliceOf(g, 0, kDepth)))
+				for (int c = 0; c < 3; ++c) out[c] = cols[g][c];
+	};
+	const auto expectMeans = [&](const HE::GiLandscape& L, const char* what)
+	{
+		CAPTURE(std::string(what));
+		for (int g = 0; g < 4; ++g)
+			CHECK(near3(glm::vec3(L.layerColor[g]), glm::vec3(cols[g][0], cols[g][1], cols[g][2]) / 255.0f));
+		CHECK(near3(glm::vec3(L.autoWet), glm::vec3(cols[4][0], cols[4][1], cols[4][2]) / 255.0f * 0.675f));
+	};
+
+	// RGBA8.
+	TextureAsset rgba;
+	rgba.width = rgba.height = kSize; rgba.channels = 4; rgba.mipLevels = kMips; rgba.layers = kDepth;
+	rgba.srgb = false;
+	const size_t rgbaSlice = HE::textureArraySliceBytes(kSize, kSize, kMips);
+	rgba.data.resize(rgbaSlice * kDepth);
+	for (uint32_t s = 0; s < kDepth; ++s)
+	{
+		int c[3]; colourOf(s, c);
+		for (size_t i = 0; i < rgbaSlice; i += 4)
+		{
+			uint8_t* p = rgba.data.data() + s * rgbaSlice + i;
+			p[0] = static_cast<uint8_t>(c[0]); p[1] = static_cast<uint8_t>(c[1]); p[2] = static_cast<uint8_t>(c[2]); p[3] = 255;
+		}
+	}
+	HE::GiLandscape L;
+	REQUIRE(HE::giAutoLandscapeSliceMeans(rgba, L));
+	expectMeans(L, "RGBA8, V = 3");
+
+	// BC1: every 4x4 block of every level is one solid colour (both endpoints equal, indices 0), so the
+	// decode is exact for these colours. The slice bytes are what the packer writes (textureArraySliceBytes).
+	TextureAsset bc1 = rgba;
+	bc1.format = ::TextureFormat::BC1;
+	const size_t bc1Slice = HE::textureArraySliceBytes(kSize, kSize, kMips, ::TextureFormat::BC1);
+	bc1.data.assign(bc1Slice * kDepth, 0);
+	for (uint32_t s = 0; s < kDepth; ++s)
+	{
+		int c[3]; colourOf(s, c);
+		const uint16_t c565 = static_cast<uint16_t>(((c[0] >> 3) << 11) | ((c[1] >> 2) << 5) | (c[2] >> 3));
+		uint8_t* at = bc1.data.data() + s * bc1Slice;
+		for (uint32_t l = 0, w = kSize, h = kSize; l < kMips; ++l, w = std::max(1u, w >> 1), h = std::max(1u, h >> 1))
+			for (uint32_t b = 0, n = ((w + 3) / 4) * ((h + 3) / 4); b < n; ++b, at += 8)
+			{
+				at[0] = at[2] = static_cast<uint8_t>(c565 & 255);
+				at[1] = at[3] = static_cast<uint8_t>(c565 >> 8);
+			}
+	}
+	REQUIRE(HE::textureArrayPayloadValid(bc1));
+	HE::GiLandscape Lb;
+	REQUIRE(HE::giAutoLandscapeSliceMeans(bc1, Lb));
+	expectMeans(Lb, "BC1, V = 3");
+
+	// BC7 / ASTC have no CPU decoder: the GI keeps its default colours.
+	TextureAsset bc7 = bc1;
+	bc7.format = ::TextureFormat::BC7;
+	bc7.data.assign(HE::textureArraySliceBytes(kSize, kSize, kMips, ::TextureFormat::BC7) * kDepth, 0);
+	CHECK_FALSE(HE::giAutoLandscapeSliceMeans(bc7, Lb));
 }
 
 TEST_CASE("GI auto landscape: the three kernel copies carry the reference's masks (Thema 173)")

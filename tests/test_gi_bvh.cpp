@@ -1,3 +1,4 @@
+#include <HorizonRendering/GiHeightfield.h>
 #include "doctest.h"
 #include <HorizonRendering/GiBvh.h>
 
@@ -202,4 +203,37 @@ TEST_CASE("GiBvh: degenerate inputs are safe")
 	const HE::GiBvh dup = HE::buildGiBvh(same.data(), 96, 3, sameIdx.data(), sameIdx.size());
 	REQUIRE(dup.valid());
 	CHECK(HE::giBvhIntersect(dup, glm::vec3(0.25f, 0.25f, 1.0f), glm::vec3(0, 0, -1), 0.001f, 10.0f, true, t, tri));
+}
+
+TEST_CASE("GI height-field pyramid: every cell's maximum covers the vertices it stands for")
+{
+    GiHeightfield hf;
+    hf.res = 65;
+    auto field = std::make_shared<std::vector<float>>(size_t(hf.res) * hf.res);
+    uint32_t s = 12345u;
+    for (float& h : *field) { s = s * 1664525u + 1013904223u; h = float(s >> 8) / float(1u << 24) * 40.0f - 5.0f; }
+    hf.data = field;
+    const HE::GiHeightPyramid p = HE::BuildGiHeightPyramid(hf);
+    REQUIRE(p.levels.size() >= 4);
+    CHECK(p.dims[0] == 65);
+    CHECK(p.levels[0] == *field);
+    CHECK(p.maxHeight == *std::max_element(field->begin(), field->end()));
+    for (size_t k = 1; k < p.levels.size(); ++k)
+    {
+        CHECK(p.dims[k] == std::max(1, p.dims[k - 1] >> 1));   // the mip rule the textures use
+        const int span = 1 << k;
+        for (int j = 0; j < p.dims[k]; ++j)
+            for (int i = 0; i < p.dims[k]; ++i)
+            {
+                float worst = -1e30f;
+                for (int z = j * span; z <= std::min((j + 1) * span + span / 2, 64); ++z)   // the cell plus the half-cell a step can reach
+                    for (int x = i * span; x <= std::min((i + 1) * span + span / 2, 64); ++x)
+                        worst = std::max(worst, (*field)[size_t(z) * 65 + x]);
+                // Conservative: never below any vertex of its range (it may be above, where the 4x4 blocks overlap).
+                if (!(p.levels[k][size_t(j) * p.dims[k] + i] >= worst)) { CHECK(p.levels[k][size_t(j) * p.dims[k] + i] >= worst); return; }
+            }
+    }
+    // A field too small to pyramid is refused rather than half-built.
+    GiHeightfield tiny; tiny.res = 4; tiny.data = std::make_shared<std::vector<float>>(16, 0.0f);
+    CHECK(HE::BuildGiHeightPyramid(tiny).levels.empty());
 }

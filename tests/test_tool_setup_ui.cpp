@@ -2,6 +2,7 @@
 #include "ImGuiSoftwareRaster.h"
 
 #include "ToolSetupDialog.h"
+#include "ExportSdkGateUi.h"     // the export dialog's game-compile line (topic 222)
 #include "EditorApplication.h"   // AppContext
 #include "EditorSelection.h"
 #include "EditorTheme.h"
@@ -411,6 +412,38 @@ TEST_CASE("Tool setup: a failed install says why and offers Retry")
 	CHECK(bits.toolchainInstalls.size() == 2);
 }
 
+// The row a banner sends the user to is marked for a moment after the dialog opens.
+// That mark once filled the row with the accent at 35 %, under an amber Warn line and
+// the dim detail lines: the frame a person reported as unreadable. Only the first
+// frames after requestShow show it, so it gets its own shots (topic 224).
+TEST_CASE("Tool setup: the row a banner points at is marked when the dialog opens")
+{
+	Harness h;
+	ContextBits bits;
+	bits.onLinux(true, false, true, true, true);   // only the compiler is missing
+	frame(bits, false);
+	ToolSetupDialog::requestShow(Tool::Compiler);
+	frame(bits, false);
+	CHECK(state(bits, Tool::Compiler) == RowState::Missing);
+	dump(bits, "tool-setup-flash-missing");
+
+	{
+		const auto buttons = actions(bits);
+		REQUIRE(buttons.size() == 1);
+		clickAt(bits, buttons[0].second);
+		REQUIRE(bits.toolchainInstalls.size() == 1);
+	}
+	bits.tcInstalling = false;
+	bits.tcDone = true;
+	bits.tcOk   = false;
+	bits.tcLog  = "$ pkexec ...\nThe administrator password dialog was cancelled, so nothing was installed.\n";
+	frame(bits, false);
+	ToolSetupDialog::requestShow(Tool::Compiler);
+	frame(bits, false);
+	CHECK(state(bits, Tool::Compiler) == RowState::Failed);
+	dump(bits, "tool-setup-flash-failed");
+}
+
 TEST_CASE("Tool setup: Install All Missing works through the installers one at a time")
 {
 	Harness h;
@@ -648,4 +681,128 @@ TEST_CASE("Tool setup: with everything installed the dialog says so and closes i
 	frame(bits, false, nullptr, &close);
 	CHECK(close);   // it had something missing while it was open
 	dump(bits, "tool-setup-done");
+}
+
+// ── The export's way in (topic 222 step 3) ───────────────────────────────────
+// Every export compiles its game from the engine SDK, so the export dialog's
+// line says what it will compile against, or carries this dialog's "Set Up…"
+// when the compiler is missing; an export that waits for it opens the dialog
+// with a sentence saying so and watches it close.
+namespace
+{
+	// The export dialog's line in a host window, plus the tool setup popup the
+	// way EditorUI draws it every frame. Returns the hovered item.
+	ImGuiID exportFrame(ContextBits& bits, bool mouseDown, he_ui::Image* shot = nullptr)
+	{
+		AppContext ctx = bits.make();
+		HE::ExportSdk::GameSdk sdk;
+		sdk.root       = "/Applications/HorizonEditor.app/Contents/Resources/EngineSDK";
+		sdk.packageDir = sdk.root / "lib" / "cmake" / "HorizonEngine";
+		sdk.profile    = "dev";
+		const auto gate = HE::ExportSdk::checkExportGate(sdk, "dev", true, ctx.toolchainProbe);
+		ImGui::GetIO().AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("##ExportHost", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+		                                      ImGuiWindowFlags_NoSavedSettings);
+		{
+			EditorWidgets::WrapText wrap(550.0f);
+			ExportSdkGateUi::drawGameCompileStatus(ctx, gate);
+		}
+		ImGui::End();
+		ToolSetupDialog::DrawToolSetupDialog(ctx);
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+		return hovered;
+	}
+
+	void exportDump(ContextBits& bits, const char* name)
+	{
+		ImGui::GetIO().AddMousePosEvent(-100.0f, -100.0f);
+		exportFrame(bits, false);
+		he_ui::Image img;
+		exportFrame(bits, false, &img);
+		if (const char* d = std::getenv("HE_UI_DUMP_DIR"); d && *d)
+			he_ui::writeBmp(img, std::string(d) + "/" + name + ".bmp");
+	}
+
+	// The first hoverable item in the line's band (its only button, if any).
+	ImVec2 firstItem(ContextBits& bits)
+	{
+		for (float y = 4.0f; y < 120.0f; y += 4.0f)
+			for (float x = 8.0f; x < 300.0f; x += 8.0f)
+			{
+				ImGui::GetIO().AddMousePosEvent(x, y);
+				exportFrame(bits, false);
+				if (exportFrame(bits, false) != 0) return ImVec2(x, y);
+			}
+		return ImVec2(-1.0f, -1.0f);
+	}
+}
+
+TEST_CASE("Export: the game-compile line with a toolchain and without a compiler")
+{
+	Harness h;
+	ContextBits bits;
+
+	// With the toolchain: what it compiles against, nothing to press.
+	bits.onLinux(true, true, true, true, true);
+	exportDump(bits, "export-sdk-toolchain-ok");
+	CHECK(firstItem(bits).x < 0.0f);
+
+	// Without a compiler (simulated: the probe says so): the line carries the
+	// way out, and pressing it opens Tool Setup.
+	bits.onLinux(true, false, true, true, true);
+	spendAutoOpen(bits);
+	exportDump(bits, "export-sdk-no-compiler");
+	const ImVec2 at = firstItem(bits);
+	REQUIRE(at.x >= 0.0f);
+	CHECK_FALSE(toolSetupOpen());
+	// Two frames over it first: the empty frame toolSetupOpen() just ran left the
+	// host window unhovered, and a press then lands on the window, not the button.
+	ImGui::GetIO().AddMousePosEvent(at.x, at.y);
+	exportFrame(bits, false);
+	exportFrame(bits, false);
+	exportFrame(bits, true);
+	exportFrame(bits, false);
+	exportFrame(bits, false);
+	CHECK(toolSetupOpen());
+	CHECK(ToolSetupDialog::isShowing());
+}
+
+TEST_CASE("Tool setup: opened for an export, it says what waits and closes once the compiler is there")
+{
+	Harness h;
+	ContextBits bits;
+	bits.onLinux(true, false, true, true, true);
+	spendAutoOpen(bits);
+	exportFrame(bits, false);   // isShowing() is about the last frame that drew the dialog
+	CHECK_FALSE(ToolSetupDialog::isShowing());
+
+	ToolSetupDialog::requestShowFor(Tool::Compiler, ExportSdkGateUi::kToolSetupPurpose);
+	exportFrame(bits, false);
+	exportFrame(bits, false);
+	CHECK(ToolSetupDialog::isShowing());
+	CHECK(std::string(ToolSetupDialog::purpose()) == ExportSdkGateUi::kToolSetupPurpose);
+	exportDump(bits, "export-tool-setup-waiting");
+
+	// The compiler arrives (installed, and the recheck found it): the dialog
+	// closes itself, the purpose goes with it — the parked export sees
+	// isShowing() false and the gate Ready, and starts.
+	bits.tc.compilerFound = true;
+	bits.tc.compilerId    = "GNU 13.2.0";
+	exportFrame(bits, false);
+	exportFrame(bits, false);
+	exportFrame(bits, false);
+	CHECK_FALSE(ToolSetupDialog::isShowing());
+	CHECK(std::string(ToolSetupDialog::purpose()).empty());
+
+	// A plain requestShow (the startup check, Preferences) carries no purpose.
+	bits.tc.compilerFound = false;
+	ToolSetupDialog::requestShow(Tool::Compiler);
+	exportFrame(bits, false);
+	CHECK(ToolSetupDialog::isShowing());
+	CHECK(std::string(ToolSetupDialog::purpose()).empty());
 }

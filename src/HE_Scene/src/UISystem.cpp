@@ -1,4 +1,8 @@
+// This library's own copy of the rasterizer: HorizonCore compiles one too
+// (UIFont.cpp). STATIC so the two do not collide where both libraries are
+// linked into one (the HorizonEngine bundle of an exported game).
 #define STB_TRUETYPE_IMPLEMENTATION
+#define STBTT_STATIC
 #include <stb_truetype.h>
 #include <cstdint>
 
@@ -16,6 +20,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <unordered_map>
 
 namespace
 {
@@ -51,6 +56,15 @@ namespace
             if (reg.all_of<UICanvasComponent>(e)) return e;
         }
         return entt::null;
+    }
+
+    // The quad color a button shows for its current state.
+    glm::vec4 buttonStateColor(const UIButtonComponent* btn)
+    {
+        glm::vec4 col = btn->normalColor;
+        if (btn->state == UIButtonState::Hovered) col = btn->hoveredColor;
+        if (btn->state == UIButtonState::Pressed) col = btn->pressedColor;
+        return col;
     }
 }
 
@@ -151,6 +165,13 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
         break;
     }
 
+    // owningCanvas() walks the hierarchy and does not depend on which canvas
+    // is currently being drawn, so calling it inside the canvas loop below
+    // repeated the same walk once per canvas. Resolved once per element here.
+    std::unordered_map<entt::entity, entt::entity> elementOwner;
+    for (auto [elemEnt, elem] : reg.view<UIElementComponent>().each())
+        elementOwner[elemEnt] = owningCanvas(reg, elemEnt);
+
     for (auto [canvasEnt, canvas] : reg.view<UICanvasComponent>().each())
     {
         if (!canvas.active || active.off(canvasEnt)) continue;
@@ -163,7 +184,7 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
             // Membership: the element's own canvas, or the fallback canvas when
             // it has none. An element under an INACTIVE canvas draws nowhere —
             // it must not fall back onto an active one.
-            const entt::entity owner = owningCanvas(reg, elemEnt);
+            const entt::entity owner = elementOwner[elemEnt];
             if (owner != canvasEnt &&
                 !(owner == entt::null && canvasEnt == fallbackCanvas))
                 continue;
@@ -188,9 +209,7 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
                 glm::vec4 col = img->tint;
                 if (btn)
                 {
-                    col = btn->normalColor;
-                    if (btn->state == UIButtonState::Hovered)  col = btn->hoveredColor;
-                    if (btn->state == UIButtonState::Pressed)  col = btn->pressedColor;
+                    col = buttonStateColor(btn);
                     col *= img->tint;
                 }
                 UIRenderObject ro;
@@ -206,9 +225,7 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
             // Plain button quad (no image on the entity).
             if (btn && !img)
             {
-                glm::vec4 col = btn->normalColor;
-                if (btn->state == UIButtonState::Hovered)  col = btn->hoveredColor;
-                if (btn->state == UIButtonState::Pressed)  col = btn->pressedColor;
+                glm::vec4 col = buttonStateColor(btn);
 
                 UIRenderObject ro;
                 ro.position = screenPos;

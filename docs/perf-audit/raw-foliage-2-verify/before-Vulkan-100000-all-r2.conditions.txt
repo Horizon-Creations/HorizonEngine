@@ -1,0 +1,7 @@
+== before-Vulkan-100000-all-r2
+before:
+  cpu 85%  procs: clx8
+  gpu (util, temp, sm clock): 4 %, 35, 975 MHz
+after (rc=0):
+  cpu 17%  procs: clx1
+  gpu (util, temp, sm clock): 44 %, 32, 210 MHz

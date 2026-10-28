@@ -19,7 +19,6 @@
 #include <Types/Enums.h>
 #include <imgui.h>
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>

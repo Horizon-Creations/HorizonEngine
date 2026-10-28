@@ -98,7 +98,7 @@ struct EnvironmentSettings
     float     cloudHeight = 200.0f;
     // Cloud raymarch quality (perf knob): 0 Low, 1 Medium, 2 High — scales step counts.
     int       cloudQuality = 1;
-    bool      lowResClouds = false; // quarter-res cloud pre-pass + upsample (perf; default off)
+    bool      lowResClouds = true;  // quarter-res cloud pre-pass + upsample (perf; default on)
     // Cloud shadows: the procedural cloud layer projected along the sun onto
     // the scene (one small transmittance-map pass per frame; Metal + OpenGL).
     // Darkens only the directional light; strength scales the darkening.

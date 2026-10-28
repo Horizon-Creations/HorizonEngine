@@ -499,6 +499,28 @@ TEST_CASE("docs search: a word is not matched inside another word")
 	CHECK(firstTitle(lib, lib.search("listing")) == "Listings");
 }
 
+TEST_CASE("docs search: bytes >= 0x80 pass through the query untouched")
+{
+	// Folding is ASCII-only (see lower() in DocsLibrary.cpp), so a UTF-8 word is
+	// matched byte for byte: "\u00dcber" finds the title that has it, and the
+	// lowercase spelling does not. Pins the query tokenizer to that policy.
+	Library lib;
+	REQUIRE(lib.loadFromJson(R"JSON({
+	  "version": 1, "generated": "2026-10-25", "baseUrl": "https://example.invalid/",
+	  "groups": [ { "title": "Manual", "pages": ["u"] } ],
+	  "pages": [ { "id": "u", "file": "u.html", "title": "U Page", "summary": "",
+	    "sections": [
+	      { "id": "uber", "title": "\u00dcber Shadows", "eyebrow": "",
+	        "text": "A section \u2014 with typographic dash.", "blocks": [] } ] } ]
+	})JSON"));
+
+	CHECK(lib.search("\xC3\x9C" "ber").size() == 1);
+	CHECK(lib.search("\xC3\x9C" "ber SHADOWS").size() == 1);
+	CHECK(lib.search("\xC3\xBC" "ber").empty());
+	CHECK(lib.search("\xE2\x80\x94").size() == 1);
+	CHECK(lib.search("dash \xE2\x80\x94").size() == 1);
+}
+
 TEST_CASE("docs search: the shipped manual answers the questions it exists for")
 {
 	Library lib = loadShipped();

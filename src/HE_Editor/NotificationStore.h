@@ -1,6 +1,10 @@
 #pragma once
 #include <Diagnostics/Log.h>   // the engine-wide error channel this can attach to
 
+#ifdef HE_IMGUI_ENABLED
+#include <imgui.h>   // ImVec4 for levelColor() below
+#endif
+
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -49,6 +53,21 @@ enum class NoteLevel : std::uint8_t
 	// teaches people to click it away unread.
 	Critical = 2,
 };
+
+#ifdef HE_IMGUI_ENABLED
+// The colour a level reads as everywhere it shows up — the bell, the centre
+// row and a toast all mean the same thing, so they share one definition
+// instead of three that could quietly drift apart.
+inline ImVec4 levelColor(NoteLevel level)
+{
+	switch (level)
+	{
+		case NoteLevel::Critical:  return ImVec4(0.95f, 0.36f, 0.33f, 1.0f);
+		case NoteLevel::Important: return ImVec4(1.00f, 0.72f, 0.35f, 1.0f);
+		default:                   return ImVec4(0.55f, 0.70f, 0.95f, 1.0f);
+	}
+}
+#endif
 
 // A button on a toast, a modal or a centre row.
 //

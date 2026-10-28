@@ -1,0 +1,17 @@
+== mesh2x-s512-x1-r2  2026-10-21 05:11:10  attempt 1
+before:
+  uptime:    load averages: 1.68 2.07 2.21
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.3% Python; 9.6% coreaudiod; 7.6% clion; 1.2% ps
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.05 2.11 2.22
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      98.4% mds; 81.9% mobileassetd; 68.1% deleted; 55.2% mds_stores
+  foreign:   none

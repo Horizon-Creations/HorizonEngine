@@ -5,6 +5,7 @@
 #include "Types/Enums.h"
 #include "ProjectManager.h"
 #include "EditorUndo.h"
+#include "EditorWindowPlacement.h"
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
@@ -376,6 +377,10 @@ struct AppContext
 	bool toolchainInstalling  = false; // an install is currently running
 	bool toolchainInstallDone = false; // the last install finished (success or failure)
 	bool toolchainInstallOk   = false; // finished, launched an installer, and it exited 0
+	// What the running install's process tree is doing, and the way to end it. Null /
+	// empty where the editor has no install to watch.
+	const HE::hccg::ToolchainInstallControl* toolchainInstallControl = nullptr;
+	std::function<void()> cancelToolchainInstall; // ends winget and the installers below it
 
 	// Build ▸ Build and Reload Game Logic: hot-swap the module that was just
 	// compiled into the RUNNING play session (onStop the old image, load the new
@@ -875,6 +880,13 @@ private:
 	// only to keep McpBridge.h out of this header; it stays in this slot for
 	// the destruction order above.
 	std::unique_ptr<HE::Ed::McpBridge> m_mcp;
+	// The context the Planner tools hand to PlannerPanel::workspace(): the Tasks database keeps
+	// a pointer to it (to reach the Task Board), so it has to outlive the tool call.
+	std::unique_ptr<AppContext> m_mcpPlannerCtx;
+	// The primary window's size/position/maximized, watched every frame and
+	// written to config.json by writeEditorConfig (EditorWindowPlacement.h).
+	HE::Ed::WindowPlacementTracker m_windowPlacement;
+	bool m_windowPlacementSeeded = false;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must
 	// not leave the bridge switched on for the next interactive one.
@@ -1361,6 +1373,7 @@ private:
 	std::atomic<bool> m_installAttempted{false};
 	std::mutex        m_installLogMutex;
 	std::string       m_installLog;
+	HE::hccg::ToolchainInstallControl m_installCtl;
 	void startToolchainInstall(bool needCmake, bool needCompiler);
 
 	// Hot-reload: disk-asset change detection

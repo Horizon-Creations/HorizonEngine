@@ -1,5 +1,8 @@
 #pragma once
 #include <HorizonCode/HorizonCode.h>
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -35,7 +38,7 @@ struct ClassSource
     //
     // It is also the INHERITANCE the generator emits: chain.front() must appear
     // in the same run as its own source, and the class comes out as
-    // `C_Goblin : public C_Enemy`. `graph` is therefore this class's OWN level
+    // `Goblin : public Enemy`. `graph` is therefore this class's OWN level
     // (ResolvedClass::levels.back()) — NOT the flattened chain. Handing in a
     // flattened graph together with a chain would compile every inherited member
     // twice: once in the base's class and once more here.
@@ -92,6 +95,14 @@ struct Result
 
 Result generate(const std::vector<ClassSource>& sources, const Options& opt);
 
+// Whether an Engine Call node on this registry row comes out as a direct C++
+// call (HE::api::animator::setParam(api, …), through HorizonEngine/
+// HorizonEngineApi.h) instead of the hc::callApi dispatch. False for a Thunk row
+// (its invoke does more than forward), a row with a Struct pin, and an unknown id.
+// The direct call never passes Services::callApi, so a host that records that
+// seam (the parity tests) sees only the dispatched rows.
+bool callsDirectly(const std::string& apiId);
+
 // The CMake project that builds the generated files into HorizonCodeGen.<dylib>
 // (export packaging, plan §8.2). cppFiles = the .cpp names from Result::files.
 std::string generateCMakeLists(const Options& opt, const std::vector<std::string>& cppFiles);
@@ -105,11 +116,24 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
 // <root>/include + <root>/lib, plus <root>/src/HE_Core/include when present —
 // the layout src/HE_Editor/CMakeLists.txt stages (engine headers in the
 // checkout's own place, third-party headers in include/).
+//
+// Generated code calls the engine directly (HorizonEngine/HorizonEngineApi.h),
+// so it links HorizonScene as well as HorizonCore: a staged SDK carries
+// <root>/src/HE_Scene/include and both libraries, a development build lists the
+// second library directory under "libDirs". An engine SDK as the HorizonSDK
+// target installs it (<root>/lib/cmake/HorizonEngine) is used through its CMake
+// package instead — `packageDir`, handed to the project as HorizonEngine_DIR.
+// `profile` (dev/release) picks the package's lib set, the one the game is built
+// against (Thema 211 step 13): the library then links the one HorizonEngine
+// library, carries that profile and builds in its own build-<profile> folder.
 struct SdkInfo
 {
     std::vector<std::filesystem::path> includeDirs;
     std::filesystem::path              libDir;
-    bool valid() const { return !includeDirs.empty() && !libDir.empty(); }
+    std::vector<std::filesystem::path> extraLibDirs;   // more library dirs (dev builds: HorizonScene's)
+    std::filesystem::path              packageDir;     // <root>/lib/cmake/HorizonEngine, when present
+    std::string                        profile;        // HE_BUILD_PROFILE for the package; empty = its default
+    bool valid() const { return !packageDir.empty() || (!includeDirs.empty() && !libDir.empty()); }
 };
 SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir);
 
@@ -194,8 +218,32 @@ struct ToolchainInstall
     int         exitCode  = 0;     // last installer's exit code (0 = success)
     std::string message;           // human summary / why nothing could run
 };
+
+// The UI's handle on a running installToolchain: it sets `cancel`, and reads what the
+// installer's process tree is doing. A package manager prints nothing for minutes while
+// an installer it started downloads, so the output cannot say whether it still runs.
+// Windows only watches and kills the tree (winget -> installer); elsewhere `cancel`
+// is honoured between output lines and the activity fields stay empty.
+struct ToolchainInstallControl
+{
+    std::atomic<bool>          cancel{false};
+    std::atomic<int>           processCount{0};  // processes below the shell, 0 = none right now
+    std::atomic<std::int64_t>  lastActivityMs{0}; // steady clock ms of the last change in the tree or its output; 0 = none yet
+    std::atomic<int>           percent{-1};      // last "NN %" / "x MB / y MB" the installer printed, -1 = none
+    mutable std::mutex         mx;               // guards processNames
+    std::string                processNames;
+
+    void reset()
+    {
+        cancel = false; processCount = 0; lastActivityMs = 0; percent = -1;
+        std::lock_guard<std::mutex> lk(mx);
+        processNames.clear();
+    }
+};
+// `control` may be null. Cancelling returns with exitCode -2 and message "Cancelled.".
 ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
-                                  const std::function<void(const std::string&)>& onLine);
+                                  const std::function<void(const std::string&)>& onLine,
+                                  ToolchainInstallControl* control = nullptr);
 
 struct BuildOutcome
 {
@@ -230,18 +278,28 @@ struct DylibBuildSpec
     // because a generated codegen project and a user's game project are told
     // about the engine in different ways.
     std::vector<std::string> defines;
+    // The configuration cmake builds (--config) and the artifact is looked for
+    // under. A game compiled against a Debug engine (the dev lib set of a Debug
+    // editor tree, which links the debug CRT) has to be Debug too: a Release exe
+    // beside it crashes on start inside VCRUNTIME140D.
+    std::string              configuration = "Release";
     // What the "nothing was produced" message calls the missing library.
     std::string              what = "HorizonCodeGen library";
+    // Set from another thread to stop the run: checked per output line, the
+    // pipe is closed (the toolchain dies on its next write) and the outcome is
+    // "cancelled". Null = not cancelable.
+    const std::atomic<bool>* cancel = nullptr;
 };
 BuildOutcome buildDylib(const DylibBuildSpec& spec,
                         const std::function<void(const std::string& line)>& onLine = {});
 
 // Where buildDylib would find an already-built artifact, without building one:
-// the same two directories (flat, then Release/) and the same name list. Empty
-// path when none of them is there. The editor needs this to load a module that
-// was built earlier in the session — or in a previous one.
+// the same two directories (flat, then <configuration>/) and the same name list.
+// Empty path when none of them is there. The editor needs this to load a module
+// that was built earlier in the session — or in a previous one.
 std::filesystem::path findBuiltArtifact(const std::filesystem::path& buildDir,
-                                        const std::vector<std::string>& artifactNames);
+                                        const std::vector<std::string>& artifactNames,
+                                        const std::string& configuration = "Release");
 
 // ── A C++ project's native GameLogic module ─────────────────────────────────
 // Where it is, what it is called and how it is built. It lives HERE rather than

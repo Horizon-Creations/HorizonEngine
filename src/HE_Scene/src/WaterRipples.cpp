@@ -39,7 +39,10 @@ namespace HE::water
             const glm::vec2 d = o.pos - r.pos;
             if (d.x * d.x + d.y * d.y > kMergeDistance * kMergeDistance)
                 continue;
-            o.strength = std::max(effectiveStrength(o), r.strength);
+            // Strength is stored unfaded and the merged ring takes r.age, so the old ring's
+            // strength now is carried back out to that age; the newcomer's own is already there.
+            const float oldNow = effectiveStrength(o);
+            o.strength = oldNow > effectiveStrength(r) ? oldNow * std::exp(r.age / kDecayTime) : r.strength;
             o.radius   = std::max(o.radius, r.radius);
             o.pos      = r.pos;
             o.drift    = r.drift;

@@ -122,6 +122,19 @@ namespace
 		return s.syncsLargeAssets;
 	}
 
+	// Participant lookup by id: the places that react to a specific
+	// participant (this colour notice, the asset-request avatars further
+	// down) all did this same linear scan themselves.
+	const HE::Net::Participant* findParticipantById(
+		HE::Net::ParticipantId id, const std::vector<HE::Net::Participant>& participants)
+	{
+		for (const HE::Net::Participant& p : participants)
+		{
+			if (p.id == id) return &p;
+		}
+		return nullptr;
+	}
+
 	// What was actually handed out — which is the interesting number the
 	// moment somebody else already had the colour you asked for.
 	void ColorTakenNotice(AppContext& ctx)
@@ -129,17 +142,14 @@ namespace
 		if (!ctx.collab || !ctx.collab->inSession()) return;
 		const HE::Net::ParticipantColor mine = CollabController::localIdentity().color;
 		const auto localId = ctx.collab->localParticipant();
-		for (const HE::Net::Participant& p : ctx.collab->participants())
+		const HE::Net::Participant* p = findParticipantById(localId, ctx.collab->participants());
+		if (!p || p->color.unset()) return;
+		const bool asWished = !mine.unset() && p->color.r == mine.r &&
+		                      p->color.g == mine.g && p->color.b == mine.b;
+		if (!asWished)
 		{
-			if (p.id != localId || p.color.unset()) continue;
-			const bool asWished = !mine.unset() && p.color.r == mine.r &&
-			                      p.color.g == mine.g && p.color.b == mine.b;
-			if (!asWished)
-			{
-				ImGui::TextDisabled("The colour you picked was taken — you were "
-				                    "given a free one for this session.");
-			}
-			break;
+			ImGui::TextDisabled("The colour you picked was taken — you were "
+			                    "given a free one for this session.");
 		}
 	}
 
@@ -684,7 +694,7 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 						// typed, because it is the only thing keeping strangers
 						// on this network out.
 						if (ImGui::Selectable(
-								(s.hostName.empty() ? std::string("Someone") : s.hostName).c_str(),
+								(s.hostName.empty() ? "Someone" : s.hostName.c_str()),
 								s_lanPicked == s.instance, 0, ImVec2(0, 0)))
 						{
 							s_lanPicked = s.instance;
@@ -1103,14 +1113,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				// list does rather than a second rendering of it.
 				for (const auto& rq : op.requesters)
 				{
-					for (const HE::Net::Participant& p : collab->participants())
+					if (const HE::Net::Participant* p = findParticipantById(rq.id, collab->participants()))
 					{
-						if (p.id != rq.id) continue;
-						CollabPresenceBar::DrawAvatar(ctx, p, 22.0f);
+						CollabPresenceBar::DrawAvatar(ctx, *p, 22.0f);
 						if (ImGui::IsItemHovered())
-							ImGui::SetTooltip("%s asked for this", p.name.c_str());
+							ImGui::SetTooltip("%s asked for this", p->name.c_str());
 						ImGui::SameLine();
-						break;
 					}
 				}
 				// The faces were all drawn with SameLine after them; close the row.
@@ -1181,14 +1189,12 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				// same person by construction (the batch id is theirs), so
 				// repeating the face on each file would be twenty copies of one
 				// fact.
-				for (const HE::Net::Participant& p : collab->participants())
+				if (const HE::Net::Participant* p = findParticipantById(op.batchOwner, collab->participants()))
 				{
-					if (p.id != op.batchOwner) continue;
 					ImGui::SameLine();
-					CollabPresenceBar::DrawAvatar(ctx, p, 22.0f);
+					CollabPresenceBar::DrawAvatar(ctx, *p, 22.0f);
 					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip("%s asked for all of these", p.name.c_str());
-					break;
+						ImGui::SetTooltip("%s asked for all of these", p->name.c_str());
 				}
 				// On the header's own line, not under it: an open node has
 				// already indented everything that follows, so buttons drawn
@@ -1255,21 +1261,18 @@ void DrawCollabWindow(AppContext& ctx, bool& open)
 				const auto& rq = reqs[i];
 				ImGui::PushID(static_cast<int>(1000 + i));
 
-				bool drewAsker = false;
-				for (const HE::Net::Participant& p : collab->participants())
+				const HE::Net::Participant* asker = findParticipantById(rq.id, collab->participants());
+				if (asker)
 				{
-					if (p.id != rq.id) continue;
-					CollabPresenceBar::DrawAvatar(ctx, p, 22.0f);
+					CollabPresenceBar::DrawAvatar(ctx, *asker, 22.0f);
 					ImGui::SameLine();
-					ImGui::TextUnformatted(p.name.c_str());
+					ImGui::TextUnformatted(asker->name.c_str());
 					ImGui::SameLine();
-					drewAsker = true;
-					break;
 				}
 				// Left the session between asking and now. The row stays: the
 				// request is still answerable, and an unlabelled one would read
 				// as a bug rather than as somebody who stepped away.
-				if (!drewAsker) { ImGui::TextDisabled("Someone"); ImGui::SameLine(); }
+				else { ImGui::TextDisabled("Someone"); ImGui::SameLine(); }
 				ImGui::TextDisabled("wants");
 				ImGui::SameLine();
 				ImGui::TextUnformatted(

@@ -2,6 +2,7 @@
 
 #include "HcFallbackReport.h"   // the interpreted-instead-of-compiled warning list
 
+#include <atomic>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -82,6 +83,12 @@ namespace BuildProgressDialog
 		                           const std::vector<HcFallbackReport::Notice>& classes);
 
 		bool running();
+
+		// Cancel: a step that can stop midway (a toolchain run) says so with
+		// setCancelable(true) and hands cancelFlag() to it; the window then shows
+		// Cancel, which sets the flag. begin() clears both.
+		void setCancelable(bool cancelable);
+		const std::atomic<bool>* cancelFlag();
 	}
 
 	// The C++ step's progress, read off the toolchain's own output: ninja prints

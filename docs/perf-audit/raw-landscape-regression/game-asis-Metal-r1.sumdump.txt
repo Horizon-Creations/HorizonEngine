@@ -1,0 +1,9 @@
+game-asis-Metal-r1.profile.json 2880 x 1806 Metal
+fps 40.2  delta p50 24.87  cpu p50 24.87  gpu p50 66.05074997060001
+modes {'whole-frame': 600} counters {'draws': 75, 'tris': 388096, 'visible': 74, 'total': 261, 'lights': 2, 'entities': 269}
+  CPU WaitForFrame                                 p50 18.40 p90 20.08
+  CPU Metal::NextDrawable                          p50 18.40 p90 20.07
+  CPU Render                                       p50 6.14 p90 6.41
+  CPU OcclusionCuller::refine                      p50 3.52 p90 3.64
+  CPU Metal::ExtractFrame                          p50 0.38 p90 0.41
+  CPU RenderExtractor::extract                     p50 0.35 p90 0.37

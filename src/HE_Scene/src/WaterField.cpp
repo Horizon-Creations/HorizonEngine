@@ -124,7 +124,10 @@ namespace
         if (!bodiesEq(a, b)) return false;
         for (size_t i = 0; i < a.size(); ++i)
             if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog ||
-                a[i].underwaterCaustics != b[i].underwaterCaustics)
+                a[i].underwaterCaustics != b[i].underwaterCaustics || a[i].tessellation != b[i].tessellation || a[i].brushBed != b[i].brushBed ||
+                a[i].brushPatch.res != b[i].brushPatch.res || a[i].brushPatch.x0 != b[i].brushPatch.x0 ||
+                a[i].brushPatch.z0 != b[i].brushPatch.z0 || a[i].brushPatch.w != b[i].brushPatch.w ||
+                a[i].brushPatch.h != b[i].brushPatch.h || a[i].brushPatch.delta != b[i].brushPatch.delta)
                 return false;
         return true;
     }
@@ -205,7 +208,7 @@ uint32_t Field::wetCells(uint16_t id) const
 bool sameContent(const Field& a, const Field& b)
 {
     if (a.res != b.res || a.nextBodyId != b.nextBodyId || !bodiesFullEq(a.bodies, b.bodies)) return false;
-    if (a.clipToGround != b.clipToGround || a.shoreOvershoot != b.shoreOvershoot) return false;
+    if (a.clipToGround != b.clipToGround || a.shoreOvershoot != b.shoreOvershoot || a.tessellation != b.tessellation) return false;
     const size_t n = static_cast<size_t>(a.res) * a.res;
     if (a.allocated() && b.allocated()) return a.coverage == b.coverage && a.owner == b.owner;
     for (size_t i = 0; i < n; ++i)
@@ -383,6 +386,37 @@ UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams&
     return out;
 }
 
+TessellationParams clampTessellation(const TessellationParams& p)
+{
+    const TessellationParams d;
+    TessellationParams out;
+    out.height     = finite(p.height) ? std::clamp(p.height, 0.0f, kMaxTessHeight) : d.height;
+    out.shoreWidth = finite(p.shoreWidth) ? std::clamp(p.shoreWidth, kMinTessShore, kMaxTessShore) : d.shoreWidth;
+    return out;
+}
+
+BrushBedParams clampBrushBed(const BrushBedParams& p)
+{
+    const BrushBedParams d;   // the defaults stand in for anything that is not a number
+    BrushBedParams out;
+    out.enabled   = p.enabled;
+    out.maxDepth  = finite(p.maxDepth) ? std::clamp(p.maxDepth, 0.0f, kMaxBedDepth) : d.maxDepth;
+    out.slope     = finite(p.slope) ? std::clamp(p.slope, kMinBedSlope, kMaxBedSlope) : d.slope;
+    out.roughness = finite(p.roughness) ? std::clamp(p.roughness, 0.0f, 1.0f) : d.roughness;
+    return out;
+}
+
+bool setBrushBed(TerrainComponent& tc, uint16_t id, const BrushBedParams& bed)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const BrushBedParams next = clampBrushBed(bed);
+    if (b->brushBed == next) return true;
+    b->brushBed = next;
+    ++tc.water.revision;
+    return true;
+}
+
 bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCausticsParams& c)
 {
     Body* b = tc.water.findBody(id);
@@ -392,6 +426,17 @@ bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCa
     b->underwaterCaustics = next;
     // Same non-effect on the sheet as setUnderwaterFog: nothing here reads it.
     ++tc.water.revision;
+    return true;
+}
+
+bool setTessellation(TerrainComponent& tc, uint16_t id, const TessellationParams& t)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const TessellationParams next = clampTessellation(t);
+    if (b->tessellation == next) return true;
+    b->tessellation = next;
+    ++tc.water.revision;   // the surface's material numbers: nothing about the sheet's shape, but a change to save
     return true;
 }
 
@@ -448,6 +493,17 @@ uint32_t pruneEmptyBodies(TerrainComponent& tc)
 
 // ── Circle ───────────────────────────────────────────────────────────────────
 
+namespace
+{
+    // cellCenter() for a caller that already has cellSize(tc), so a per-cell loop
+    // doesn't redo the division for every cell.
+    glm::vec2 cellCenterFor(const TerrainComponent& tc, const glm::vec2& s, int cx, int cz)
+    {
+        return { -tc.sizeX * 0.5f + (static_cast<float>(cx) + 0.5f) * s.x,
+                 -tc.sizeZ * 0.5f + (static_cast<float>(cz) + 0.5f) * s.y };
+    }
+}
+
 Result addCircle(TerrainComponent& tc, uint16_t body, float x, float z,
                  float radius, float falloff, float strength)
 {
@@ -461,6 +517,7 @@ Result addCircle(TerrainComponent& tc, uint16_t body, float x, float z,
 
     Field& f = tc.water;
     const int res = static_cast<int>(f.res);
+    const glm::vec2 cell = cellSize(tc);
     const CircleCells cc = circleCells(tc, x, z, outer);
     Touched t;
     if (cc.any)
@@ -468,7 +525,7 @@ Result addCircle(TerrainComponent& tc, uint16_t body, float x, float z,
         for (int cz = cc.z0; cz <= cc.z1; ++cz)
             for (int cx = cc.x0; cx <= cc.x1; ++cx)
             {
-                const glm::vec2 c = cellCenter(tc, cx, cz);
+                const glm::vec2 c = cellCenterFor(tc, cell, cx, cz);
                 const float dist = std::sqrt((c.x - x) * (c.x - x) + (c.y - z) * (c.y - z));
                 if (dist > outer) continue;
                 const float a = std::clamp(strength * circleWeight(dist, radius, falloff), 0.0f, 1.0f);
@@ -502,6 +559,7 @@ Result removeCircle(TerrainComponent& tc, float x, float z, float radius, float 
 
     Field& f = tc.water;
     const int res = static_cast<int>(f.res);
+    const glm::vec2 cell = cellSize(tc);
     const CircleCells cc = circleCells(tc, x, z, outer);
     Touched t;
     if (cc.any)
@@ -511,7 +569,7 @@ Result removeCircle(TerrainComponent& tc, float x, float z, float radius, float 
                 const size_t i = static_cast<size_t>(cz) * res + cx;
                 if (f.coverage[i] == 0) continue;
                 if (onlyBody != kNoBody && f.owner[i] != onlyBody) continue;
-                const glm::vec2 c = cellCenter(tc, cx, cz);
+                const glm::vec2 c = cellCenterFor(tc, cell, cx, cz);
                 const float dist = std::sqrt((c.x - x) * (c.x - x) + (c.y - z) * (c.y - z));
                 if (dist > outer) continue;
                 const float a = std::clamp(strength * circleWeight(dist, radius, falloff), 0.0f, 1.0f);
@@ -700,9 +758,7 @@ glm::vec2 cellSize(const TerrainComponent& tc)
 
 glm::vec2 cellCenter(const TerrainComponent& tc, int cx, int cz)
 {
-    const glm::vec2 s = cellSize(tc);
-    return { -tc.sizeX * 0.5f + (static_cast<float>(cx) + 0.5f) * s.x,
-             -tc.sizeZ * 0.5f + (static_cast<float>(cz) + 0.5f) * s.y };
+    return cellCenterFor(tc, cellSize(tc), cx, cz);
 }
 
 float coverageAt(const TerrainComponent& tc, float x, float z)
@@ -959,6 +1015,9 @@ void sanitize(TerrainComponent& tc)
         nb.physics = clampPhysics(nb.physics);
         nb.underwaterFog = clampUnderwaterFog(nb.underwaterFog);
         nb.underwaterCaustics = clampUnderwaterCaustics(nb.underwaterCaustics);
+        nb.tessellation = clampTessellation(nb.tessellation);
+        nb.brushBed = clampBrushBed(nb.brushBed);
+        if (!nb.brushPatch.empty() && !patchFits(nb.brushPatch, tc.resolution)) nb.brushPatch = GroundPatch{};
     }
     f.bodies = std::move(kept);
     uint32_t next = f.nextBodyId == 0 ? 1u : f.nextBodyId;

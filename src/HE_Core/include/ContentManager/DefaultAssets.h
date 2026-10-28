@@ -80,17 +80,57 @@ constexpr int kEditorIconTextureSize = 64;
 // ── Engine materials (FILES, not registered here) ───────────────────────────
 // Unlike everything above, these are NOT created by initDefaultAssets: they
 // live as .hasset files in EditorDeps/EngineContent/Materials, generated and
-// committed by mat_gen (UUID block hi = 0x400, entry index + 1 … append only).
+// committed by mat_gen (UUID block hi = 0x600, entry index + 1 … append only).
 // A file is what the Content Browser and the material picker list and what an
 // export ships; a mem:// default would be invisible to both. The constant is
 // here so code can find one by UUID once its file is loaded — registering the
 // same UUID in memory as well would collide with the file.
+//
+// The block is 0x600 and not 0x400 because 0x400..0x411 are landscape_tex_gen's
+// textures: the ContentManager keeps ONE entry per UUID whatever the asset type,
+// so a loaded T_Landscape_Grass_Albedo (0x400) left ensureResident(water) true
+// with no material behind it and the surface drew the white default (Thema 230).
 
 // Water: lit, translucent node-graph material with three animated wave trains,
 // depth tint, Fresnel, foam and caustics, 16 parameters for the Inspector (the
 // waves are bombed on a hex grid so a big surface does not tile).
 // Content path "Engine/Materials/Water.hasset". docs/water-shader-plan.md.
-constexpr UUID kEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
+constexpr UUID kEngineWaterMaterialId = { 0x0000000000000600ULL, 0x0000000000000001ULL };
+
+// The same water with its "Tessellation" Static Switch on: the swell as real geometry
+// (a runtime Material Instance WaterSurface registers under this id when a landscape's
+// water asks for tessellation; never a file, never saved).
+constexpr UUID kEngineWaterTessellatedMaterialId = { 0x0000000000000600ULL, 0x0000000000000002ULL };
+
+// What the water material was called before it moved out of the textures' block.
+// A scene saved up to then names it by this id; SceneSerializer maps it onto
+// kEngineWaterMaterialId when it reads a material reference. Only ever a material
+// slot: {0x400, 1} as a TEXTURE reference is T_Landscape_Grass_Albedo and stays.
+constexpr UUID kLegacyEngineWaterMaterialId = { 0x0000000000000400ULL, 0x0000000000000001ULL };
+
+// ── Engine meshes (FILES, not registered here) ──────────────────────────────
+// The primitives under EditorDeps/EngineContent/Meshes ("Engine/Meshes/<Name>.hasset"),
+// written by mesh_gen: UUID block hi = 0x100, entry index, append only. Only the
+// ones code refers to are named here; mesh_gen static_asserts against them.
+
+// Two upright 1x1 quads crossed at right angles, both faces of each, pivot at the
+// BASE (y 0..1, unlike the centred primitives), full 0..1 UVs on every face: the
+// far detail level of a foliage layer (FoliageLod), drawn with a material that
+// carries a picture of the plant. Content path "Engine/Meshes/CrossCard.hasset".
+constexpr UUID kEngineCrossCardMeshId = { 0x0000000000000108ULL, 0x0000000000000001ULL };
+
+// What a landscape layer scatters (FoliageLayer, Thema 180): a tuft of grass, a
+// pebble, three boulder shapes, a drift of snow. Each kind is a run of detail
+// levels, level 0 (nearest) first, the levels' ids consecutive: the id is that of
+// level 0 plus the level. Pivot at the ground, the foot a little below it. Content
+// path "Engine/Meshes/<Name>.hasset" with Name Tuft, TuftLod1, TuftLod2, Pebble,
+// PebbleLod1, RockA .. RockCLod2, SnowDrift, SnowDriftLod1; written by mesh_gen.
+constexpr UUID kEngineTuftMeshId      = { 0x0000000000000109ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEnginePebbleMeshId    = { 0x000000000000010CULL, 0x0000000000000001ULL };   // 2 levels
+constexpr UUID kEngineRockAMeshId     = { 0x000000000000010EULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineRockBMeshId     = { 0x0000000000000111ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineRockCMeshId     = { 0x0000000000000114ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineSnowDriftMeshId = { 0x0000000000000117ULL, 0x0000000000000001ULL };   // 2 levels
 
 // ── Engine weather sounds (FILES, not registered here) ──────────────────────
 // The sounds WeatherComponent plays when none of its sound slots is set, so a

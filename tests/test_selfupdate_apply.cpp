@@ -189,6 +189,15 @@ TEST_CASE("selfupdate apply: a malformed command line is rejected, not guessed")
 	CHECK_FALSE(ApplyPlan::fromArgs({ "apply", "--unknown-flag", "x" }, parsed, error));
 }
 
+TEST_CASE("selfupdate apply: a 19-digit number up to int64_t::max is accepted, 20 digits is not")
+{
+	ApplyPlan parsed;
+	std::string error;
+	CHECK(ApplyPlan::fromArgs({ "apply", "--wait-pid", "9223372036854775807" }, parsed, error));
+	CHECK(parsed.waitPid == 9223372036854775807LL);
+	CHECK_FALSE(ApplyPlan::fromArgs({ "apply", "--wait-pid", "92233720368547758070" }, parsed, error));
+}
+
 TEST_CASE("selfupdate apply: happy swap preserves config, relaunches with the new build's args")
 {
 	TempDir dir;

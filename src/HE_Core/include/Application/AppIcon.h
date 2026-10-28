@@ -77,6 +77,11 @@ HE_API bool heIcnsWrite(const std::filesystem::path& path,
 HE_API bool heIcoWrite(const std::filesystem::path& path,
                        const std::vector<AppIconImage>& images);
 
+// Windows: write an .ico into an executable's resources (RT_ICON + RT_GROUP_ICON),
+// so Explorer and the taskbar show it without a loose .ico beside the exe. The
+// exe is left untouched on failure; false elsewhere and when the file is bad.
+HE_API bool heEmbedExeIcon(const std::filesystem::path& exe, const std::filesystem::path& ico);
+
 // Read a PNG back and make it the window's icon. It lives here because the PNG
 // decoder lives in this library, and because the file it reads is the one the
 // export wrote above. False when the file is missing or unreadable — a missing

@@ -22,6 +22,8 @@ struct UnderwaterCameraData;
 namespace HE
 {
 
+struct FoliageLodMemory;   // FoliageExtract.h: the foliage level hysteresis of one view
+
 // ─── Cascaded-shadow-map fit (free functions so they are directly testable) ──
 // The maths the extractor's cascade loop is built from. Kept out of the
 // extractor itself because it is pure geometry: no ECS, no RenderWorld, no
@@ -105,8 +107,23 @@ HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 // UnderwaterFogParams (WaterField.h) — see UnderwaterCameraData's comment for the split
 // between what is resolved here (a per-frame scalar, the camera's own depth) and what
 // the pass still computes per pixel (the view-ray's segment length inside the body).
+//
+// WATER TESSELLATION. A landscape whose water has tessellation on (Field::tessellation)
+// draws the surface as real, moving geometry, so the flat level is no longer where the lens
+// meets it: with `waveClock` >= 0 (the render clock the material's Time node runs on, the
+// same seconds the shaders get) the surface under the camera is level + water::tessellatedHeight
+// there, and surfaceY / signedDepth / wet follow it. The caller's clock is what makes the
+// formula (shared with the material, HE_Core/Physics/WaterWaves.h) land on the drawn surface.
+// -1 (the default, and what every test that predates this passes) = the flat level.
 HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
-                                                             const glm::vec3& cameraPos);
+                                                             const glm::vec3& cameraPos,
+                                                             double waveClock = -1.0);
+
+// Whether the running backend draws a landscape's water tessellated (IRenderer::SupportsTessellation):
+// the backends tell it once they know. Without it the underwater camera query keeps the surface a
+// flat plane, because that is what the screen shows. Default: no (Metal, Software).
+HE_RENDERING_API void setWaterTessellationAvailable(bool available);
+HE_RENDERING_API bool waterTessellationAvailable();
 
 // The caustic net's waterline fade-in (Thema 185 Schritt 3): the body's causticsIntensity
 // is multiplied by this smoothstep of the camera's depth below the surface — 0 on the
@@ -115,6 +132,14 @@ HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
 // waterline. Pure function of the argument; no state.
 inline constexpr float kCausticsFadeInDepth = 0.5f;
 HE_RENDERING_API float causticsFadeIn(float signedDepth);
+
+// A camera in shallow water (wading, a fly camera on the sand under a few centimetres of lake) is not
+// "under water" to the eye: the whole view would turn into the underwater fog, sky included. The
+// underwater look (fog, tint, caustics) is therefore scaled by smoothstep(0, kUnderwaterShallowFull,
+// the water's depth over the ground at the camera): nothing in ankle-deep water, full from this many
+// metres on (a bit above eye height).
+inline constexpr float kUnderwaterShallowFull = 1.5f;
+HE_RENDERING_API float underwaterShallowFactor(float waterDepthAtCamera);
 
 // The fog's waterline band (Thema 185 Schritt 5): a DRY camera up to kFogDryBandFull
 // metres above a body's surface still gets that body's fog density (times this factor,
@@ -325,6 +350,9 @@ private:
     // UUIDs never come through.
     std::unordered_set<std::string> m_sectionMaterialMissing;
     uint64_t                        m_sectionMaterialEpoch = 0;
+    // Which detail level each foliage plant was drawn with last time: an extractor is
+    // one view (the scene view, a preview), and the hysteresis is the view's.
+    std::unique_ptr<HE::FoliageLodMemory> m_foliageLod;
     // setShadowSettings() state; defaults = the historical fit constants.
     float     m_shadowDistance = 250.0f;
     int       m_cascadeCount   = 3;
@@ -362,6 +390,11 @@ private:
         glm::vec3            moonColor{ 0.0f };
         float                moonIntensity  = 0.0f;
         float                cloudCoverage  = 0.0f;
+        // The Environment's wind, which the water material's wave knobs follow
+        // (water::windTrain): a wind change re-walks the frame.
+        bool                 windOn         = false;
+        float                windDirection  = 0.0f;
+        float                windSpeed      = 0.0f;
     };
     // What the walk's RenderWorld looked like when the walk ended: its object
     // array and how many of everything it holds. A caller that cleared,

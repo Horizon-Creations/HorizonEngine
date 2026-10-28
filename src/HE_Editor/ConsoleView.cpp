@@ -667,6 +667,188 @@ namespace
 		}
 		return t;
 	}
+
+	// What a row needs of the frame's layout. Measured once per frame in draw() and
+	// only read per row.
+	struct RowLayout
+	{
+		float  availW, lineH, rowH, pitch;
+		float  xTime, xCat, xMsg;
+		ImU32  textCol, dimCol, linkCol, linkHot;
+		ImVec4 surface;
+	};
+
+	constexpr float kPadL = 12.0f;
+
+	// One visible row: the Selectable with the content painted over it. The context
+	// menu's Clear only sets clearRequested, so draw() can clear after the loop.
+	void drawRow(const Line& line, const Hooks& hooks, const RowLayout& lay, const ImGuiStyle& style,
+	             ImDrawList* dl, std::string& row, bool& clearRequested)
+	{
+		// The caller already has this scope open; naming it here keeps the help audit's
+		// top-down scan attributing the context menu's items to "Console".
+		HE::Ed::Help::Scope helpScope("Console");
+		const auto& [availW, lineH, rowH, pitch, xTime, xCat, xMsg, textCol, dimCol, linkCol, linkHot, surface] = lay;
+		row.clear();
+		appendRow(line, row);
+
+		// A line a HorizonCode node wrote leads back to that node; a
+		// Lua/Python error that names its line leads to that line of
+		// the script. The node wins when a row has both (an Engine
+		// Call node that ran a script) — the node is where the user
+		// was. The asset behind a script is looked up on the click.
+		const bool fromNode = line.hcNode != 0 && hooks.goToNode;
+		const bool toLine   = !fromNode && line.scriptLine > 0 && hooks.goToLine;
+		const bool leads    = fromNode || toLine;
+		auto goTo = [&]()
+		{
+			if (fromNode)    hooks.goToNode(line.hcKey, line.hcNode);
+			else if (toLine) hooks.goToLine(line.scriptName, line.scriptLine, line.python);
+		};
+
+		// Where each part sits. The badge and the link follow the
+		// message rather than hugging the right edge: in a list that
+		// scrolls sideways, "the right edge" is wherever the longest
+		// line ends, not where the viewer is looking.
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		float       x  = p.x + xMsg + ImGui::CalcTextSize(line.msg.c_str()).x;
+		char        badge[16] = "";
+		float       badgeX = 0.0f, badgeW = 0.0f;
+		if (line.repeat > 1)
+		{
+			std::snprintf(badge, sizeof(badge), "x%d", line.repeat);
+			badgeW = ImGui::CalcTextSize(badge).x + 12.0f;
+			badgeX = x + 10.0f;
+			x      = badgeX + badgeW;
+		}
+		char  linkText[96] = "";
+		float linkX = 0.0f, linkW = 0.0f;
+		if (leads)
+		{
+			if (fromNode) std::snprintf(linkText, sizeof(linkText), "node %d", line.hcNode);
+			else          std::snprintf(linkText, sizeof(linkText), "%s:%d",
+			                            line.scriptName.c_str(), line.scriptLine);
+			linkW = ImGui::CalcTextSize(linkText).x + 16.0f;   // text, gap, chevron
+			linkX = x + 14.0f;
+			x     = linkX + linkW;
+		}
+		const float rowW = std::max(availW, x - p.x + kPadL);
+
+		// Under the Selectable, so its hover and selection wash lies over
+		// the tint and not the other way round. Spanning the pitch, as the
+		// Selectable's own highlight does, keeps neighbouring rows of one
+		// severity a single band.
+		const bool isCrit  = line.level == HE::LogLevel::Critical;
+		const bool isError = line.level >= HE::LogLevel::Error;
+		const bool isWarn  = line.level == HE::LogLevel::Warning;
+		// The row's text sits on its own severity's tint: red on red,
+		// which put an error at 3.9:1 and a critical one at 3.2:1. So the
+		// text is held to the theme's floor on that ground (the window's,
+		// the lighter one the console can sit on, under the tint).
+		ImVec4 ground = surface;
+		if (isError || isWarn)
+		{
+			const float up   = std::floor(style.ItemSpacing.y * 0.5f);
+			const ImVec2 lo(p.x, p.y - up), hi(p.x + rowW, p.y - up + pitch);
+			ImU32 tint = isWarn ? EditorToolbar::kWarnWell : EditorToolbar::kBadWell;
+			if (isCrit) tint = withAlpha(EditorToolbar::kBad, 76);
+			dl->AddRectFilled(lo, hi, tint);
+			ground = HE::Ed::Theme::over(ImGui::ColorConvertU32ToFloat4(tint), surface);
+			dl->AddRectFilled(lo, ImVec2(p.x + (isCrit ? 4.0f : 3.0f), hi.y),
+			                  isWarn ? EditorToolbar::kWarn : EditorToolbar::kBad);
+		}
+
+		// Identified by the line's own serial, which survives a trim, so
+		// the selection and an open menu stay on their row while the
+		// ring scrolls under them.
+		ImGui::PushID(static_cast<int>(line.id & 0x7fffffff));
+		if (ImGui::Selectable("##row", line.id == s_selectedId,
+		                      ImGuiSelectableFlags_AllowDoubleClick, ImVec2(rowW, rowH)))
+			s_selectedId = line.id;
+		const bool hovered    = ImGui::IsItemHovered();
+		// Asked now: the context menu below is a window of its own, and
+		// "the last item" is not the row any more once it has been drawn.
+		const bool tipWanted  = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
+		if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) s_selectedId = line.id;
+
+		// The context menu hangs off the row, so it is opened before
+		// anything else can become the last item.
+		if (ImGui::BeginPopupContextItem("##consoleLine"))
+		{
+			if (fromNode)
+			{
+				if (EditorWidgets::menuItem("Go to Node")) goTo();
+				ImGui::Separator();
+			}
+			if (toLine)
+			{
+				if (EditorWidgets::menuItem("Go to Line")) goTo();
+				ImGui::Separator();
+			}
+			if (EditorWidgets::menuItem("Copy Line")) ImGui::SetClipboardText(row.c_str());
+			if (EditorWidgets::menuItem("Copy All Shown")) copyVisible();
+			ImGui::Separator();
+			// Deferred: clearing here would drop the vector this loop
+			// is walking.
+			if (EditorWidgets::menuItem("Clear")) clearRequested = true;
+			ImGui::EndPopup();
+		}
+
+		bool linkHovered = false;
+		if (leads && hovered)
+		{
+			linkHovered = ImGui::IsMouseHoveringRect(ImVec2(linkX - 4.0f, p.y),
+			                                         ImVec2(linkX + linkW + 2.0f, p.y + rowH));
+			if (linkHovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+			// One click on the link, or a double-click anywhere on the row.
+			if ((linkHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
+			    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+				goTo();
+		}
+		if (tipWanted)
+		{
+			const std::string tip = tooltipFor(line, hooks, fromNode, toLine);
+			ImGui::SetTooltip("%s", tip.c_str());
+		}
+		ImGui::PopID();
+
+		// The content, over everything.
+		const float ty = p.y + (rowH - lineH) * 0.5f;
+		const bool  tinted = isError || isWarn;
+		const auto  onRow  = [&](ImU32 c, const ImVec4& under) {
+			return HE::Ed::Theme::u32(HE::Ed::Theme::readableOn(ImGui::ColorConvertU32ToFloat4(c), under));
+		};
+		if (!line.cont)
+		{
+			dl->AddText(ImVec2(p.x + xTime, ty), tinted ? onRow(dimCol, ground) : dimCol,
+			            line.time.c_str(), line.time.c_str() + kClockChars);
+			dl->AddText(ImVec2(p.x + xCat, ty), withAlpha(textCol, 170),
+			            HE::Log::categoryName(static_cast<HE::Log::Cat>(line.cat)));
+		}
+		const ImU32 levelCol = colourFor(line.level);
+		const ImU32 msgCol   = tinted ? onRow(levelCol, ground) : levelCol;
+		dl->AddText(ImVec2(p.x + xMsg, ty), msgCol, line.msg.c_str());
+		if (line.repeat > 1)
+		{
+			// The count's pill is the level's colour again, one layer
+			// deeper: 2.4:1 on a critical row before it was measured.
+			const ImVec2 lo(badgeX, p.y + 2.0f), hi(badgeX + badgeW, p.y + rowH - 1.0f);
+			const ImU32 pill = withAlpha(levelCol, 56);
+			dl->AddRectFilled(lo, hi, pill, (hi.y - lo.y) * 0.5f);
+			const ImVec4 pillGround = HE::Ed::Theme::over(ImGui::ColorConvertU32ToFloat4(pill), ground);
+			dl->AddText(ImVec2(badgeX + 6.0f, ty), onRow(levelCol, pillGround), badge);
+		}
+		if (leads)
+		{
+			const ImU32 col = tinted ? onRow(linkHovered ? linkHot : linkCol, ground)
+			                         : (linkHovered ? linkHot : linkCol);
+			dl->AddText(ImVec2(linkX, ty), col, linkText);
+			const float underline = ty + lineH;
+			if (linkHovered)
+				dl->AddLine(ImVec2(linkX, underline), ImVec2(linkX + linkW - 16.0f, underline), col);
+			drawChevron(dl, ImVec2(linkX + linkW - 5.0f, p.y + rowH * 0.5f), 3.5f, col);
+		}
+	}
 }
 #endif // HE_CONSOLEVIEW_IMGUI
 
@@ -804,7 +986,7 @@ void draw(const Hooks& hooks)
 				if (s_catSeen & (std::uint64_t(1) << c))
 					catW = std::max(catW, ImGui::CalcTextSize(
 						HE::Log::categoryName(static_cast<HE::Log::Cat>(c))).x);
-			constexpr float kPadL = 12.0f, kGap = 14.0f;
+			constexpr float kGap = 14.0f;
 			const float xTime = kPadL;
 			const float xCat  = xTime + timeW + kGap;
 			const float xMsg  = xCat + catW + kGap;
@@ -813,7 +995,10 @@ void draw(const Hooks& hooks)
 			const ImU32 dimCol  = HE::Ed::Theme::u32(HE::Ed::Theme::TextDim);
 			const ImU32 linkCol = HE::Ed::Theme::u32(HE::Ed::Theme::AccentHi);
 			const ImU32 linkHot = HE::Ed::Theme::u32(HE::Ed::Theme::AccentBright);
+			const ImVec4 surface = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
 			ImDrawList* dl      = ImGui::GetWindowDrawList();
+			const RowLayout lay{availW, lineH, rowH, pitch, xTime, xCat, xMsg,
+			                    textCol, dimCol, linkCol, linkHot, surface};
 
 			ImGuiListClipper clipper;
 			clipper.Begin(static_cast<int>(s_visible.size()), pitch);
@@ -821,150 +1006,8 @@ void draw(const Hooks& hooks)
 			{
 				for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
 				{
-					const Line& line = s_lines[static_cast<std::size_t>(s_visible[static_cast<std::size_t>(i)])];
-					row.clear();
-					appendRow(line, row);
-
-					// A line a HorizonCode node wrote leads back to that node; a
-					// Lua/Python error that names its line leads to that line of
-					// the script. The node wins when a row has both (an Engine
-					// Call node that ran a script) — the node is where the user
-					// was. The asset behind a script is looked up on the click.
-					const bool fromNode = line.hcNode != 0 && hooks.goToNode;
-					const bool toLine   = !fromNode && line.scriptLine > 0 && hooks.goToLine;
-					const bool leads    = fromNode || toLine;
-					auto goTo = [&]()
-					{
-						if (fromNode)    hooks.goToNode(line.hcKey, line.hcNode);
-						else if (toLine) hooks.goToLine(line.scriptName, line.scriptLine, line.python);
-					};
-
-					// Where each part sits. The badge and the link follow the
-					// message rather than hugging the right edge: in a list that
-					// scrolls sideways, "the right edge" is wherever the longest
-					// line ends, not where the viewer is looking.
-					const ImVec2 p = ImGui::GetCursorScreenPos();
-					float       x  = p.x + xMsg + ImGui::CalcTextSize(line.msg.c_str()).x;
-					char        badge[16] = "";
-					float       badgeX = 0.0f, badgeW = 0.0f;
-					if (line.repeat > 1)
-					{
-						std::snprintf(badge, sizeof(badge), "x%d", line.repeat);
-						badgeW = ImGui::CalcTextSize(badge).x + 12.0f;
-						badgeX = x + 10.0f;
-						x      = badgeX + badgeW;
-					}
-					char  linkText[96] = "";
-					float linkX = 0.0f, linkW = 0.0f;
-					if (leads)
-					{
-						if (fromNode) std::snprintf(linkText, sizeof(linkText), "node %d", line.hcNode);
-						else          std::snprintf(linkText, sizeof(linkText), "%s:%d",
-						                            line.scriptName.c_str(), line.scriptLine);
-						linkW = ImGui::CalcTextSize(linkText).x + 16.0f;   // text, gap, chevron
-						linkX = x + 14.0f;
-						x     = linkX + linkW;
-					}
-					const float rowW = std::max(availW, x - p.x + kPadL);
-
-					// Under the Selectable, so its hover and selection wash lies over
-					// the tint and not the other way round. Spanning the pitch, as the
-					// Selectable's own highlight does, keeps neighbouring rows of one
-					// severity a single band.
-					const bool isCrit  = line.level == HE::LogLevel::Critical;
-					const bool isError = line.level >= HE::LogLevel::Error;
-					const bool isWarn  = line.level == HE::LogLevel::Warning;
-					if (isError || isWarn)
-					{
-						const float up   = std::floor(style.ItemSpacing.y * 0.5f);
-						const ImVec2 lo(p.x, p.y - up), hi(p.x + rowW, p.y - up + pitch);
-						ImU32 tint = isWarn ? EditorToolbar::kWarnWell : EditorToolbar::kBadWell;
-						if (isCrit) tint = withAlpha(EditorToolbar::kBad, 76);
-						dl->AddRectFilled(lo, hi, tint);
-						dl->AddRectFilled(lo, ImVec2(p.x + (isCrit ? 4.0f : 3.0f), hi.y),
-						                  isWarn ? EditorToolbar::kWarn : EditorToolbar::kBad);
-					}
-
-					// Identified by the line's own serial, which survives a trim, so
-					// the selection and an open menu stay on their row while the
-					// ring scrolls under them.
-					ImGui::PushID(static_cast<int>(line.id & 0x7fffffff));
-					if (ImGui::Selectable("##row", line.id == s_selectedId,
-					                      ImGuiSelectableFlags_AllowDoubleClick, ImVec2(rowW, rowH)))
-						s_selectedId = line.id;
-					const bool hovered    = ImGui::IsItemHovered();
-					// Asked now: the context menu below is a window of its own, and
-					// "the last item" is not the row any more once it has been drawn.
-					const bool tipWanted  = ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip);
-					if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) s_selectedId = line.id;
-
-					// The context menu hangs off the row, so it is opened before
-					// anything else can become the last item.
-					if (ImGui::BeginPopupContextItem("##consoleLine"))
-					{
-						if (fromNode)
-						{
-							if (EditorWidgets::menuItem("Go to Node")) goTo();
-							ImGui::Separator();
-						}
-						if (toLine)
-						{
-							if (EditorWidgets::menuItem("Go to Line")) goTo();
-							ImGui::Separator();
-						}
-						if (EditorWidgets::menuItem("Copy Line")) ImGui::SetClipboardText(row.c_str());
-						if (EditorWidgets::menuItem("Copy All Shown")) copyVisible();
-						ImGui::Separator();
-						// Deferred: clearing here would drop the vector this loop
-						// is walking.
-						if (EditorWidgets::menuItem("Clear")) clearRequested = true;
-						ImGui::EndPopup();
-					}
-
-					bool linkHovered = false;
-					if (leads && hovered)
-					{
-						linkHovered = ImGui::IsMouseHoveringRect(ImVec2(linkX - 4.0f, p.y),
-						                                         ImVec2(linkX + linkW + 2.0f, p.y + rowH));
-						if (linkHovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-						// One click on the link, or a double-click anywhere on the row.
-						if ((linkHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
-						    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-							goTo();
-					}
-					if (tipWanted)
-					{
-						const std::string tip = tooltipFor(line, hooks, fromNode, toLine);
-						ImGui::SetTooltip("%s", tip.c_str());
-					}
-					ImGui::PopID();
-
-					// The content, over everything.
-					const float ty = p.y + (rowH - lineH) * 0.5f;
-					if (!line.cont)
-					{
-						dl->AddText(ImVec2(p.x + xTime, ty), dimCol,
-						            line.time.c_str(), line.time.c_str() + kClockChars);
-						dl->AddText(ImVec2(p.x + xCat, ty), withAlpha(textCol, 170),
-						            HE::Log::categoryName(static_cast<HE::Log::Cat>(line.cat)));
-					}
-					const ImU32 msgCol = colourFor(line.level);
-					dl->AddText(ImVec2(p.x + xMsg, ty), msgCol, line.msg.c_str());
-					if (line.repeat > 1)
-					{
-						const ImVec2 lo(badgeX, p.y + 2.0f), hi(badgeX + badgeW, p.y + rowH - 1.0f);
-						dl->AddRectFilled(lo, hi, withAlpha(msgCol, 56), (hi.y - lo.y) * 0.5f);
-						dl->AddText(ImVec2(badgeX + 6.0f, ty), msgCol, badge);
-					}
-					if (leads)
-					{
-						const ImU32 col = linkHovered ? linkHot : linkCol;
-						dl->AddText(ImVec2(linkX, ty), col, linkText);
-						const float underline = ty + lineH;
-						if (linkHovered)
-							dl->AddLine(ImVec2(linkX, underline), ImVec2(linkX + linkW - 16.0f, underline), col);
-						drawChevron(dl, ImVec2(linkX + linkW - 5.0f, p.y + rowH * 0.5f), 3.5f, col);
-					}
+						drawRow(s_lines[static_cast<std::size_t>(s_visible[static_cast<std::size_t>(i)])], hooks,
+						        lay, style, dl, row, clearRequested);
 				}
 			}
 			clipper.End();

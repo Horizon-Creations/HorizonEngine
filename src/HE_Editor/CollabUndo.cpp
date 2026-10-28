@@ -21,13 +21,7 @@ void CollabUndo::recordTransform(std::uint64_t subject,
 	std::memcpy(e.beforeTransform, before, sizeof(e.beforeTransform));
 	std::memcpy(e.afterTransform,  after,  sizeof(e.afterTransform));
 
-	m_undo.push_back(std::move(e));
-	// A new change invalidates the redo branch, exactly as in a single-user
-	// stack: those entries describe a future that no longer exists.
-	m_redo.clear();
-
-	if (m_undo.size() > kMaxEntries)
-		m_undo.erase(m_undo.begin());
+	push(std::move(e));
 }
 
 void CollabUndo::recordAsset(std::uint64_t subject, const std::string& path,
@@ -41,11 +35,7 @@ void CollabUndo::recordAsset(std::uint64_t subject, const std::string& path,
 	e.beforeBytes = std::move(before);
 	e.afterBytes  = std::move(after);
 
-	m_undo.push_back(std::move(e));
-	m_redo.clear();
-
-	if (m_undo.size() > kMaxEntries)
-		m_undo.erase(m_undo.begin());
+	push(std::move(e));
 }
 
 void CollabUndo::recordCreate(std::uint64_t subject, std::vector<std::uint8_t> subtree,
@@ -95,6 +85,8 @@ void CollabUndo::recordComponents(std::uint64_t subject, std::vector<std::uint8_
 void CollabUndo::push(Entry&& e)
 {
 	m_undo.push_back(std::move(e));
+	// A new change invalidates the redo branch, exactly as in a single-user
+	// stack: those entries describe a future that no longer exists.
 	m_redo.clear();
 	if (m_undo.size() > kMaxEntries)
 		m_undo.erase(m_undo.begin());

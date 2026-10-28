@@ -64,3 +64,17 @@ void FrustumCuller::cull(const RenderWorld& world, const glm::mat4& viewProj,
 			outVisible[i] = frustum.intersects(bounds) ? 1u : 0u;
 	}, "FrustumCull");
 }
+
+void FrustumCuller::cull(const std::vector<HE::AABB>& bounds, const glm::mat4& viewProj,
+                         std::vector<uint8_t>& outVisible)
+{
+	HE_PROFILE_SCOPE_N("FrustumCuller::cull");
+	const Frustum frustum = Frustum::fromViewProj(viewProj);
+	const size_t  count   = bounds.size();
+
+	outVisible.assign(count, 1u);
+	parallel_for(count, [&](size_t i) {
+		if (bounds[i].isValid())
+			outVisible[i] = frustum.intersects(bounds[i]) ? 1u : 0u;
+	}, "FrustumCull");
+}

@@ -1696,7 +1696,7 @@ bool CollabSession::sendAsset(const AssetUpdate& a) {
                 a.intent == AssetIntent::Create ? ", new" : "");
 
     if (m_role == NetRole::Host) {
-        for (const ConnectionId c : m_net->connections()) sendAssetChunks(c, m_localId, a);
+        sendAssetChunks(m_net->connections(), m_localId, a);
         return true;
     }
     if (m_net->connections().empty()) {
@@ -1704,12 +1704,17 @@ bool CollabSession::sendAsset(const AssetUpdate& a) {
         return false;
     }
     // Client → host: no participant id, the host stamps it.
-    sendAssetChunks(m_net->connections().front(), kInvalidParticipant, a);
+    sendAssetChunks({ m_net->connections().front() }, kInvalidParticipant, a);
     return true;
 }
 
-void CollabSession::sendAssetChunks(ConnectionId conn, ParticipantId from,
+void CollabSession::sendAssetChunks(const std::vector<ConnectionId>& to, ParticipantId from,
                                     const AssetUpdate& a) {
+    // Every frame is the same for every target (one `from` stamp), so each is
+    // serialized once and handed to all of them: per peer the order is still
+    // Begin → chunks → End, only the peers' streams interleave. Over a relay
+    // that is also what lets the fan-out send one frame instead of N.
+    if (to.empty()) return;
     const bool stamped = (from != kInvalidParticipant);
     const auto total    = static_cast<std::uint32_t>(a.bytes.size());
     const std::uint32_t chunkSize = std::max<std::uint32_t>(1, m_cfg.chunkBytes);
@@ -1727,21 +1732,22 @@ void CollabSession::sendAssetChunks(ConnectionId conn, ParticipantId from,
     begin.writeUInt32(a.revision);
     begin.writeUInt32(total);
     begin.writeUInt32(chunks);
-    m_net->send(conn, kMsgAssetBegin, begin);
+    m_net->sendTo(to, kMsgAssetBegin, begin);
 
     for (std::uint32_t i = 0; i < chunks; ++i) {
         const std::uint32_t offset = i * chunkSize;
         const std::uint32_t len    = std::min(chunkSize, total - offset);
         BitWriter chunk;
+        chunk.reserveBytes(8 + len);
         if (stamped) chunk.writeUInt32(from);
         chunk.writeUInt32(len);
         chunk.writeBytes(a.bytes.data() + offset, len);
-        m_net->send(conn, kMsgAssetChunk, chunk);
+        m_net->sendTo(to, kMsgAssetChunk, chunk);
     }
 
     BitWriter end;
     if (stamped) end.writeUInt32(from);
-    m_net->send(conn, kMsgAssetEnd, end);
+    m_net->sendTo(to, kMsgAssetEnd, end);
 }
 
 void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
@@ -2060,7 +2066,7 @@ bool CollabSession::sendAssetTo(ParticipantId to, const AssetUpdate& a) {
                     detail::logBytes(m_cfg.maxAssetBytes).c_str());
         return false;
     }
-    sendAssetChunks(conn, m_localId, a);
+    sendAssetChunks({ conn }, m_localId, a);
     return true;
 }
 
@@ -2394,9 +2400,12 @@ void CollabSession::installAssetChunkHandlers() {
 
                 // Host also fans it out to everyone else.
                 if (host) {
+                    std::vector<ConnectionId> others;
+                    others.reserve(m_net->connections().size());
                     for (const ConnectionId other : m_net->connections()) {
-                        if (other != conn) sendAssetChunks(other, a.sender, up);
+                        if (other != conn) others.push_back(other);
                     }
+                    sendAssetChunks(others, a.sender, up);
                     // …and tells the creator it went through, so their side can
                     // stop treating the asset as merely local.
                     if (up.intent == AssetIntent::Create) {

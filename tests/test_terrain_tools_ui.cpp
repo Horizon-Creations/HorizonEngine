@@ -308,11 +308,11 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	REQUIRE(reg.all_of<FoliageComponent>(terrain));
 	CHECK(undo.canUndo());
 	auto& fol = reg.get<FoliageComponent>(terrain);
-	fol.meshAssetId = HE::kDefaultCubeMeshId;
-	fol.density     = 0.2f;
+	fol.layers[0].meshAssetId = HE::kDefaultCubeMeshId;
+	fol.layers[0].density     = 0.2f;
 	fol.dirty       = true;
 	FoliageSystem::update(world);
-	const size_t uniformCount = fol.cachedInstances.size();
+	const size_t uniformCount = fol.layers[0].cachedInstances.size();
 	REQUIRE(uniformCount == 2000u);
 
 	// The brush controls are there now: Grow armed, Erase beside it.
@@ -329,7 +329,7 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	clickAt(ctx, ex, ey);
 	const RenderWorld snap = topDownSnapshot(120.0f);
 	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
-	CHECK(fol.densityMask.empty());
+	CHECK(fol.layers[0].densityMask.empty());
 	viewportFrame(ctx, snap, cx, cy, false);
 	viewportFrame(ctx, snap, cx, cy, false);
 	// Strength 5 at dt 1 is 0.8 per frame; a dozen frames drive the mask to
@@ -337,20 +337,20 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	for (int i = 0; i < 12; ++i) viewportFrame(ctx, snap, cx, cy, true);
 	viewportFrame(ctx, snap, cx, cy, false);
 
-	REQUIRE_FALSE(fol.densityMask.empty());
-	CHECK(fol.dirty);
+	REQUIRE_FALSE(fol.layers[0].densityMask.empty());
+	CHECK(fol.layers[0].dirty);
 	const auto& tcc = reg.get<TerrainComponent>(terrain);
-	CHECK(FoliagePaint::sample(fol, tcc, 0.0f, 0.0f) == doctest::Approx(0.0f));
+	CHECK(FoliagePaint::sample(fol.layers[0], tcc, 0.0f, 0.0f) == doctest::Approx(0.0f));
 	// The default brush is 10 m + 5 m falloff: 40 m out is untouched.
-	CHECK(FoliagePaint::sample(fol, tcc, 40.0f, 40.0f) == doctest::Approx(1.0f));
-	CHECK(FoliagePaint::coverage(fol) < 1.0f);
-	CHECK(FoliagePaint::coverage(fol) > 0.9f);
+	CHECK(FoliagePaint::sample(fol.layers[0], tcc, 40.0f, 40.0f) == doctest::Approx(1.0f));
+	CHECK(FoliagePaint::coverage(fol.layers[0]) < 1.0f);
+	CHECK(FoliagePaint::coverage(fol.layers[0]) > 0.9f);
 
 	// The stroke re-scatters: fewer instances, none inside the erased circle.
 	FoliageSystem::update(world);
-	CHECK(fol.cachedInstances.size() < uniformCount);
-	CHECK(!fol.cachedInstances.empty());
-	for (const auto& m : fol.cachedInstances)
+	CHECK(fol.layers[0].cachedInstances.size() < uniformCount);
+	CHECK(!fol.layers[0].cachedInstances.empty());
+	for (const auto& m : fol.layers[0].cachedInstances)
 		CHECK(m[3].x * m[3].x + m[3].z * m[3].z >= 9.0f * 9.0f);
 
 	// One undo step for the whole stroke, and it brings the instances back.
@@ -361,10 +361,10 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	REQUIRE((terrain2 != entt::null));
 	{
 		auto& after = reg.get<FoliageComponent>(terrain2);
-		CHECK(after.densityMask.empty());
+		CHECK(after.layers[0].densityMask.empty());
 		after.dirty = true;
 		FoliageSystem::update(world);
-		CHECK(after.cachedInstances.size() == uniformCount);
+		CHECK(after.layers[0].cachedInstances.size() == uniformCount);
 	}
 
 	// ── Grow: paint a meadow INTO bare ground ──
@@ -374,28 +374,54 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	{
 		auto& f2 = reg.get<FoliageComponent>(terrain2);
 		const auto& tc2 = reg.get<TerrainComponent>(terrain2);
-		FoliagePaint::fillMask(f2, 0.0f);
+		FoliagePaint::fillMask(f2.layers[0], 0.0f);
 		clickAt(ctx, gx, gy);
 		// After ONE frame the falloff is visible: 0.8 at the centre, about
 		// half that on the ring, nothing outside. Holding on converges the
 		// whole brush to the target, ring included — that is the lerp.
 		viewportFrame(ctx, snap, cx, cy, true);
-		CHECK(FoliagePaint::sample(f2, tc2, 0.0f, 0.0f) == doctest::Approx(0.8f).epsilon(0.02));
-		const float ring = FoliagePaint::sample(f2, tc2, 12.5f, 0.0f);
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 0.0f, 0.0f) == doctest::Approx(0.8f).epsilon(0.02));
+		const float ring = FoliagePaint::sample(f2.layers[0], tc2, 12.5f, 0.0f);
 		CHECK(ring > 0.2f);
 		CHECK(ring < 0.6f);
-		CHECK(FoliagePaint::sample(f2, tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
 		for (int i = 0; i < 11; ++i) viewportFrame(ctx, snap, cx, cy, true);
 		viewportFrame(ctx, snap, cx, cy, false);
-		CHECK(FoliagePaint::sample(f2, tc2, 0.0f, 0.0f) == doctest::Approx(1.0f));
-		CHECK(FoliagePaint::sample(f2, tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 0.0f, 0.0f) == doctest::Approx(1.0f));
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
 		FoliageSystem::update(world);
-		CHECK(!f2.cachedInstances.empty());
-		for (const auto& m : f2.cachedInstances)
+		CHECK(!f2.layers[0].cachedInstances.empty());
+		for (const auto& m : f2.layers[0].cachedInstances)
 			CHECK(m[3].x * m[3].x + m[3].z * m[3].z <= 16.0f * 16.0f);
 
 		// Sculpting never ran: a foliage stroke does not bake heights.
 		CHECK(tc2.sculptHeights.empty());
+	}
+
+	// ── A second layer: the panel adds it and selects it, the brush paints it alone ──
+	{
+		auto& f3 = reg.get<FoliageComponent>(terrain2);
+		const std::vector<uint8_t> firstMask = f3.layers[0].densityMask;
+		float lx = 0.0f, ly = 0.0f;
+		REQUIRE_MESSAGE(locate(ctx, panelId("Add Foliage Layer##more"), lx, ly),
+		                "Foliage mode with a layer shows no button for another one");
+		clickAt(ctx, lx, ly);
+		REQUIRE(f3.layers.size() == 2u);
+		CHECK(f3.activeIndex() == 1u);
+		CHECK(f3.layers[1].seed != f3.layers[0].seed);
+		CHECK(f3.layers[1].densityMask.empty());
+
+		// The list grew by a row, so the mode cells moved: look for Erase again.
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+		for (int i = 0; i < 2; ++i) panelFrame(ctx, false);
+		float e2x = 0.0f, e2y = 0.0f;
+		REQUIRE(locate(ctx, panelId("##folErase"), e2x, e2y));
+		clickAt(ctx, e2x, e2y);
+		for (int i = 0; i < 4; ++i) viewportFrame(ctx, snap, cx, cy, true);
+		viewportFrame(ctx, snap, cx, cy, false);
+		REQUIRE_FALSE(f3.layers[1].densityMask.empty());
+		CHECK(FoliagePaint::sample(f3.layers[1], reg.get<TerrainComponent>(terrain2), 0.0f, 0.0f) < 0.5f);
+		CHECK(f3.layers[0].densityMask == firstMask);   // the first layer did not see the stroke
 	}
 
 	// Back to Sculpt, so the file-static mode does not leak into another test.
@@ -729,6 +755,11 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl er
 		REQUIRE(img.valid());
 		dump(img, "landscape-water-panel");
 	}
+	// Dig Bed is on by default (a pond without a bed is all shore, see its help):
+	// off for the first strokes, which are about the water alone.
+	clickAt(ctx, digX, digY);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
 	const size_t depth0 = undo.undoDepth();
 	REQUIRE(land().water.bodies.empty());
 
@@ -839,8 +870,10 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl er
 		const TerrainComponent& t = land();
 		CHECK(undo.undoDepth() == depth2 + 1);
 		REQUIRE(t.sculptHeights.size() == 129u * 129u);
-		// Water 0.3 m up on flat ground, a bed 1 m (the default depth) under it.
-		CHECK(terrainHeightAt(t, gx, gz) == doctest::Approx(-0.7f).epsilon(0.02));
+		// Water 0.3 m up on flat ground; the bed under its middle has sunk below the
+		// ground, and no deeper than Max Depth (2 m by default) under the level.
+		CHECK(terrainHeightAt(t, gx, gz) < -0.2f);
+		CHECK(terrainHeightAt(t, gx, gz) >= 0.3f - 2.0f * 1.3f);   // roughness may add up to 20 %
 		CHECK(terrainHeightAt(t, -40.0f, -40.0f) == 0.0f);         // out of reach, untouched
 		CHECK(t.regionDirty);                                      // only the chunks under the brush rebuild
 		CHECK_FALSE(t.dirty);
@@ -851,9 +884,8 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl er
 	CHECK(land().sculptHeights.empty());
 	CHECK(water::bodyAt(land(), gx, gz) == water::kNoBody);
 
-	// Back to Sculpt, Dig Bed off again: the file-static mode must not leak into
-	// another test.
-	clickAt(ctx, digX, digY);
+	// Back to Sculpt, Dig Bed left on (its default): the file-static mode must not
+	// leak into another test.
 	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
 	clickAt(ctx, wx, wy);
 	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));

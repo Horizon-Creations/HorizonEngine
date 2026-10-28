@@ -33,6 +33,19 @@ namespace HE
         // front of the splash is precisely what the splash is there to avoid.
         // Application::Run shows it once OnInit returns.
         bool            startHidden = false;
+        // A remembered window rectangle (the editor's). width/height are then
+        // SDL window coordinates taken as they are — NOT DIPs, so the content
+        // scale and the usable-bounds clamp are skipped — and x/y place the
+        // window once it exists. startMaximized maximizes it before it is shown.
+        bool            restoreRect    = false;
+        bool            restorePosition = false;
+        int             x = 0, y = 0;
+        bool            startMaximized = false;
+        // Called by the primary window once SDL_Init has run (the displays are
+        // unknown before that) and before the window is created, so the owner
+        // can fill in the four fields above from a saved rectangle checked
+        // against the displays that exist now.
+        std::function<void(WindowProps&)> resolveRect;
     };
 
     // ── Hidden mode: a run nobody is watching ─────────────────────────────

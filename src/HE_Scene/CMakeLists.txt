@@ -76,10 +76,12 @@ add_library(HorizonScene SHARED
     src/ScriptContext.cpp
     src/ScriptApi.cpp
     src/EngineApi.cpp
+    src/EngineApiCpp.cpp
     src/PlayerSettings.cpp
     src/HcCodegen.cpp
     src/HiddenShell.cpp
     src/AudioEngine.cpp
+    src/SteamAudio.cpp
     src/PhysicsWorld.cpp
 )
 
@@ -103,6 +105,10 @@ target_compile_features(HorizonScene PUBLIC cxx_std_20)
 if(MSVC)
     target_compile_options(HorizonScene PRIVATE /bigobj)
 endif()
+
+# Build profile: the physics and transform env overrides are dev-only. Core
+# already passes it on; said here too so the target carries the property.
+he_target_build_profile(HorizonScene PUBLIC)
 
 target_link_libraries(HorizonScene
     PUBLIC  HorizonCore
@@ -138,4 +144,30 @@ set_target_properties(HorizonScene PROPERTIES
     WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
+# ── Steam Audio (root CMakeLists.txt, HE_ENABLE_STEAM_AUDIO) ───────────────────
+# PRIVATE on purpose: SteamAudio.h is the same with or without the SDK (the
+# answer is SteamAudio::compiledIn()), so no consumer's layout depends on the
+# flag. Only phonon.h is needed here; libphonon is opened at run time and sits
+# beside the engine library (the editor deploy and the tests' build dir below,
+# the game's HorizonEngine/ folder in src/HE_Game). ${CMAKE_DL_LIBS} is dlopen.
+target_link_libraries(HorizonScene PRIVATE ${CMAKE_DL_LIBS})
+if(HE_HAVE_STEAM_AUDIO)
+    get_filename_component(_he_sa_lib_dir "${HE_STEAM_AUDIO_LIB}" DIRECTORY)
+    target_compile_definitions(HorizonScene PRIVATE
+        HE_HAVE_STEAM_AUDIO
+        # Last-resort search directory: a dev tree whose library was not copied.
+        "HE_STEAM_AUDIO_LIB_DIR=\"${_he_sa_lib_dir}\"")
+    target_include_directories(HorizonScene PRIVATE "${HE_STEAM_AUDIO_INCLUDE_DIR}")
+    add_custom_command(TARGET HorizonScene POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${HE_STEAM_AUDIO_LIB}" "$<TARGET_FILE_DIR:HorizonScene>"
+        VERBATIM)
+endif()
+
 he_deploy_dll(HorizonScene)
+if(HE_HAVE_STEAM_AUDIO)
+    add_custom_command(TARGET HorizonScene POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${DEPLOY_EDITOR}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${HE_STEAM_AUDIO_LIB}" "${DEPLOY_EDITOR}"
+        VERBATIM)
+endif()
