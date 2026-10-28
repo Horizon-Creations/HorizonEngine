@@ -816,8 +816,7 @@ else()
 endif()
 set(DEPLOY_DIR "${_default_deploy_dir}" CACHE PATH "Where the editor/game POST_BUILD deploys")
 # One deploy root, one directory per runtime flavour (A3b): the exporter looks
-# for them by these names next to the editor, and scripts/runtime_size.py weighs
-# each of them separately.
+# for them by these names next to the editor.
 if(HE_RUNTIME_FLAVOR STREQUAL "app-advanced")
     set(HE_RUNTIME_DIR_NAME "AppAdvanced")
 elseif(HE_RUNTIME_FLAVOR STREQUAL "app-basic")
