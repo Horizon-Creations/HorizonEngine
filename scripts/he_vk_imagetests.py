@@ -391,8 +391,18 @@ CASES = {
     # 11.73; up window (0.45, 0.12) rgb (171, 190, 203) vs below the rim (0.50, 0.85)
     # (34, 99, 112). Vulkan draws this scene brighter (the floor nearly white, Thema 185
     # §8.1) and the net saturates there: 185's net measured 0.23 on Vulkan against 0.63
-    # on GL. 1.5 is a third of 11.73 scaled by that factor — it fails when the net is
-    # silently off (0), not when it is one shade weaker. Tighten after the first run.
+    # on GL. 1.5 was a third of 11.73 scaled by that factor — it failed when the net was
+    # silently off (0), not when it was one shade weaker.
+    #
+    # Commit ae454c76 (27.10.2026, "gain 0.12 and a soft ceiling so the lines stop
+    # clipping to white") deliberately dimmed the net — kGain 0.45->0.05/0.12, kMaxLine
+    # 0.2 caps every line's brightness, kDark 0.6->0.3 — to fix lines that blew out to
+    # white. That retuning lowered the real on/off delta on lavapipe to 0.8653, bit-for-bit
+    # identical across three independent CI runs on three different commits since
+    # (40591581239, 40559168721, 40534310520): this is the new deterministic baseline,
+    # not flake. 0.5 keeps the same margin the old threshold had (a fraction of the
+    # measured baseline) and still fails hard on a silently-disabled net (delta 0).
+    # Re-tighten if the net is retuned again.
     "underwater": {
         "base": {"WATERLAKE": "bowl", "SKYTEST": "1", "TOD": "0.45", "COVERAGE": "0.2",
                  "CLOUDMODE": "0", "AA": "0", "BLOOM": "0", "RENDERPATH": "1",
@@ -403,7 +413,7 @@ CASES = {
             "floor":     {"dump": {"CAMZ": "28", "PITCH": "-20"}, "env": {"HE_SKY_TIME": "5"}},
             "up":        {"dump": {"CAMZ": "20", "PITCH": "35"}, "env": {"HE_SKY_TIME": "5"}},
         },
-        "pairs": [("floor_off", "floor", 1.5)],
+        "pairs": [("floor_off", "floor", 0.5)],
         "require": {v: ["HE_DUMP_WATERLAKE witness landscape added"]
                     for v in ("floor_off", "floor", "up")},
         "samples": {"up": {"window": (0.45, 0.12), "below_rim": (0.50, 0.85)}},
