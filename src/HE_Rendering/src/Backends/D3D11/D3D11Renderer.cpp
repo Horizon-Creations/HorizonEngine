@@ -55,6 +55,7 @@
 #include <Renderer/GpuPassTimeline.h>         // per-pass GPU timing: GpuPassScope
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
+#include "Backends/D3D_Shared/DxgiAdapterLog.h"   // names the GPU in the log
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
 #include <SDL3/SDL.h>
 #include <d3d11.h>
@@ -6954,6 +6955,12 @@ void D3D11Renderer::Initialize(HE::Window* window)
     }
     if (FAILED(hr))
         throw std::runtime_error("D3D11Renderer: D3D11CreateDeviceAndSwapChain failed");
+    {
+        ComPtr<IDXGIDevice> dxgiDev;
+        ComPtr<IDXGIAdapter> adapter;
+        if (SUCCEEDED(m_impl->device.As(&dxgiDev))) dxgiDev->GetAdapter(&adapter);
+        HE::d3d::logAdapter("D3D11Renderer", adapter.Get());
+    }
     // Hull/domain shaders are a feature level 11_0 feature: the Displacement pin
     // (Thema 207) tessellates from there on; HE_TESSELLATION=0 is GL's A/B switch.
     {

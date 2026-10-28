@@ -294,6 +294,13 @@ public:
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
 
+    // Why GI reflections cannot run although Capabilities::supportsGIReflections says the
+    // backend has them: the pipelines are built on the first GI frame, so a driver that
+    // refuses them (or a package without their shaders) is only known afterwards. Empty
+    // while everything is fine or not yet tried. The settings panel shows it under the
+    // checkbox; before, the switch simply did nothing.
+    virtual std::string GIReflectionsInactiveReason() const { return {}; }
+
     // Blocks until the primary window can take another frame (Metal: acquires
     // the next drawable). Application::Run calls it at the top of the frame,
     // BEFORE input is polled — so the wait for a free swapchain image lands in

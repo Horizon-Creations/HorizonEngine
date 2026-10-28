@@ -556,6 +556,18 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 			ImGui::SetTooltip("Needs Metal (Render Path = Deferred) or an OpenGL 4.3 context.");
 		else if (supported)
 			hint("Real scene rays instead of the sky cubemap (hits lit by the GI probes).");
+		// The backend says "available" before it has tried to build the pipelines; when that
+		// fails the checkbox used to do nothing and nothing said why.
+		if (supported && cfg.GIReflectionsEnabled && ctx.renderer)
+		{
+			const std::string why = ctx.renderer->GIReflectionsInactiveReason();
+			if (!why.empty())
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::Warn);
+				hint("GI reflections are not active: %s", why.c_str());
+				ImGui::PopStyleColor();
+			}
+		}
 	});
 
 	row("gpuparticles", "Effects", [&]{

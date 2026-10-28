@@ -54,6 +54,7 @@
 #include <Renderer/GpuPassTimeline.h>         // per-pass GPU timing: GpuPassScope
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
+#include "Backends/D3D_Shared/DxgiAdapterLog.h"   // names the GPU in the log
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
@@ -11091,6 +11092,13 @@ void D3D12Renderer::Initialize(HE::Window* window)
     if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device))))
         throw std::runtime_error("D3D12Renderer: D3D12CreateDevice failed");
     laps.mark("D3D12CreateDevice");
+    {   // Which adapter the default device landed on (a laptop's iGPU vs its dGPU, WARP).
+        Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+        Microsoft::WRL::ComPtr<IDXGIAdapter>  adapter;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+            factory->EnumAdapterByLuid(m_impl->device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
+        HE::d3d::logAdapter("D3D12Renderer", adapter.Get());
+    }
     {   // Hull/domain shaders come with feature level 11_0, the floor above.
         const char* tessEnv = std::getenv("HE_TESSELLATION");
         m_impl->m_tessSupported = !(tessEnv && std::strcmp(tessEnv, "0") == 0);

@@ -326,6 +326,7 @@ void VulkanRenderer::Shutdown()
     for (auto& s : m_giReflSet) s = VK_NULL_HANDLE;
     m_giReflTabRaw = m_giReflTabPing = m_giReflTabBlur = m_giReflTabMix = VK_NULL_HANDLE;
     m_giReflPipesTried = false;
+    m_giReflWhyNot.clear();
     m_giReflReady      = false;
     if (m_giPointSampler) { vkDestroySampler(m_device, m_giPointSampler, nullptr);          m_giPointSampler = VK_NULL_HANDLE; }
     m_giPipelinesTried = false;
@@ -13429,6 +13430,7 @@ void VulkanRenderer::createGiReflPipelines()
     if (!reflCS || !fsVS || !blurFS || !mixFS)
     {
         HE_LOG_WARN(RHI, "%s", "VulkanRenderer: GI reflection shaders missing — reflections disabled");
+        m_giReflWhyNot = "The reflection shaders (gi_refl*.spv) are missing from the Shaders folder.";
         destroyModules();
         return;
     }
@@ -13760,7 +13762,14 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
 {
     createGiReflPipelines();
     m_giReflReady = false;
-    if (!m_giReflPipe || !m_giReflBlurPipe || !m_giReflMixPipe) return false;
+    if (!m_giReflPipe || !m_giReflBlurPipe || !m_giReflMixPipe)
+    {
+        // createGiReflPipelines already logged which step failed; the shader-missing case
+        // wrote its own text. Anything else gets the general one.
+        if (m_giReflWhyNot.empty())
+            m_giReflWhyNot = "The reflection pipelines could not be created on this GPU/driver (see HorizonEngine.log).";
+        return false;
+    }
     ensureGiReflTargets();
     if (!m_giReflRaw.img || !m_giNodeBuf.buf || !m_giTriBuf.buf || m_giInstanceCount == 0) return false;
 

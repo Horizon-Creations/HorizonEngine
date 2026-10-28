@@ -3484,6 +3484,10 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s", m_forwardClustered
 		? "OpenGLRenderer: graph materials use clustered lighting (SSBO 4/5/6)"
 		: "OpenGLRenderer: graph materials use the 8-light window (GL < 4.3 or HE_FORWARD_CLUSTER=0)");
+	{   // Name the GPU like the Vulkan backend does (vendor / renderer / driver version).
+		auto str = [](GLenum e) { const GLubyte* p = glGetString(e); return p ? reinterpret_cast<const char*>(p) : "?"; };
+		HE_LOG_INFO(RHI, "OpenGLRenderer: GPU %s %s (OpenGL %s)", str(GL_VENDOR), str(GL_RENDERER), str(GL_VERSION));
+	}
 	// Displacement tessellation (Thema 207): core since GL 4.0, so macOS (4.1)
 	// has it too. HE_TESSELLATION=0 turns it off for an A/B against the fallback,
 	// which draws exactly what an unconnected pin draws. Patches are always

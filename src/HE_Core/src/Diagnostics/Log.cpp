@@ -1,4 +1,5 @@
 #include "Diagnostics/Log.h"
+#include "HorizonVersion.h"   // HE_GIT_COMMIT for the banner's Build line
 
 #include <algorithm>
 #include <array>
@@ -946,8 +947,8 @@ void logStartupBanner(const char* appName, int argc, char** argv)
 	HE_LOG_INFO(Core, "==================== HorizonEngine ====================");
 	HE_LOG_INFO(Core, "Application : %s", appName ? appName : "(unknown)");
 	HE_LOG_INFO(Core, "Started     : %s", dateBuf);
-	HE_LOG_INFO(Core, "Build       : %s | %s | C++%ld | built %s %s",
-	            buildConfigName(), compilerName(), long(__cplusplus), __DATE__, __TIME__);
+	HE_LOG_INFO(Core, "Build       : %s | %s | C++%ld | built %s %s | commit %s",
+	            buildConfigName(), compilerName(), long(__cplusplus), __DATE__, __TIME__, HE_GIT_COMMIT);
 	HE_LOG_INFO(Core, "Platform    : %s — %s", platformName(), osVersionString().c_str());
 	HE_LOG_INFO(Core, "CPU         : %s (%u hardware threads)",
 	            cpuBrandString().c_str(), std::thread::hardware_concurrency());
