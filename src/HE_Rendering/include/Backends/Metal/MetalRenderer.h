@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #include <cstdint>
 #include <Renderer/IRenderer.h>
 #include <Renderer/GpuPassAccumulator.h>
@@ -217,6 +218,7 @@ private:
 	// sky, transparency, particles) is the SAME code as forward.
 	void EncodeScene(void* renderEncoder, int width, int height,
 	                 MetalDeferredFrame* deferred = nullptr);
+	bool EncodeWaterReflPrepass(void* cmdBuf, int width, int height, const std::vector<TPDraw>& draws);
 
 	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
 	// docs/deferred-renderer-plan.md. Active when SetRenderPath(Deferred) and the
@@ -370,6 +372,7 @@ private:
 	bool  m_giReflHistValid  = false;
 	glm::mat4 m_giReflPrevViewProj = glm::mat4(1.0f);
 	float m_giReflFrameSeed  = 0.0f;
+	bool  m_reflWaterPass    = false;  // the GI / SSR traces run over EncodeWaterReflPrepass' pair (deferred frame, translucent tail)
 	int   m_giReflW = 0, m_giReflH = 0;
 	// P4 (HW only): per-unique-BLAS vertex/index buffer GPU addresses (tier-2
 	// argument buffer, macOS 13+) + per-TLAS-instance BLAS index, rebuilt with

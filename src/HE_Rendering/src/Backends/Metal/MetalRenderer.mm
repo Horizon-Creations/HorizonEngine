@@ -6620,7 +6620,7 @@ struct GIReflParamsCPU
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
-	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube)
+	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube
 };
 static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
@@ -12668,6 +12668,84 @@ void MetalRenderer::DestroySSAOTargets()
 	m_ssaoW = m_ssaoH = 0;
 }
 
+// Deferred frames: the water (and every other translucent graph material) is not in the
+// G-buffer, so the reflection traces only know the opaque surface BEHIND it - a rough lake
+// bed whose roughness and normal say nothing about the water, or nothing at all where no
+// ground lies behind. This fills the forward path's pre-pass pair (oct normal + NDC depth)
+// with the opaque scene from the G-buffer and draws those surfaces over it, depth-tested
+// against the scene, so the traces can start from the water itself exactly as they do in a
+// forward frame. Returns false = nothing drawn.
+bool MetalRenderer::EncodeWaterReflPrepass(void* cmdBufPtr, int width, int height,
+                                           const std::vector<TPDraw>& draws)
+{
+	if (!m_reflPosPipeline || !m_skyDepthState || !m_hdrDepth) return false;
+	size_t graphDraws = 0;
+	for (const TPDraw& d : draws) graphDraws += d.pipeline ? 1 : 0;
+	if (graphDraws == 0) return false;
+	EnsureSSAOTargets(width, height);
+	if (!m_ssaoPosTex || !m_reflNormTex || !m_reflDepthTex) return false;
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		// Start from the opaque scene: the SSR march needs its depth to find what the water
+		// reflects (a pair with only the water in it hits nothing), and the water then
+		// replaces the pixels it covers, which is what a forward frame's pre-pass holds.
+		if (!m_gbColor1 || !m_gbDepthLin || m_gbW != width || m_gbH != height) return false;
+		{
+			id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+			const MTLSize  sz  = MTLSizeMake(width, height, 1);
+			const MTLOrigin org = MTLOriginMake(0, 0, 0);
+			[blit copyFromTexture:(__bridge id<MTLTexture>)m_gbColor1 sourceSlice:0 sourceLevel:0
+			         sourceOrigin:org sourceSize:sz
+			            toTexture:(__bridge id<MTLTexture>)m_reflNormTex destinationSlice:0 destinationLevel:0
+			    destinationOrigin:org];
+			[blit copyFromTexture:(__bridge id<MTLTexture>)m_gbDepthLin sourceSlice:0 sourceLevel:0
+			         sourceOrigin:org sourceSize:sz
+			            toTexture:(__bridge id<MTLTexture>)m_reflDepthTex destinationSlice:0 destinationLevel:0
+			    destinationOrigin:org];
+			[blit endEncoding];
+		}
+		const glm::mat4 view     = m_renderWorld.camera.view;
+		const glm::mat4 viewProj = m_renderWorld.camera.projection * view;
+		MTLRenderPassDescriptor* pp = [MTLRenderPassDescriptor renderPassDescriptor];
+		pp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoPosTex;
+		pp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+		pp.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+		pp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+		pp.colorAttachments[1].texture     = (__bridge id<MTLTexture>)m_reflNormTex;
+		pp.colorAttachments[1].loadAction  = MTLLoadActionLoad;
+		pp.colorAttachments[1].storeAction = MTLStoreActionStore;
+		pp.colorAttachments[2].texture     = (__bridge id<MTLTexture>)m_reflDepthTex;
+		pp.colorAttachments[2].loadAction  = MTLLoadActionLoad;
+		pp.colorAttachments[2].storeAction = MTLStoreActionStore;
+		// The scene's own depth, test only: a water surface behind a wall stays out.
+		pp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
+		pp.depthAttachment.loadAction  = MTLLoadActionLoad;
+		pp.depthAttachment.storeAction = MTLStoreActionDontCare;
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pp];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_reflPosPipeline];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
+		// Back-to-front like the tail itself: nothing writes depth here, so the surface
+		// drawn LAST (the nearest) is the one the traces see.
+		for (const TPDraw& d : draws)
+		{
+			if (!d.pipeline || !d.vbuf || !d.ibuf) continue;
+			SSAOPosUniforms u;
+			u.model     = d.u.model;
+			u.modelView = view * d.u.model;
+			u.mvp       = viewProj * d.u.model;
+			[enc setVertexBuffer:(__bridge id<MTLBuffer>)d.vbuf offset:0 atIndex:0];
+			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:d.indexCount
+			                 indexType:MTLIndexTypeUInt32
+			               indexBuffer:(__bridge id<MTLBuffer>)d.ibuf indexBufferOffset:d.indexOffset];
+		}
+		[enc endEncoding];
+		++m_counters.draws;
+	}
+	return true;
+}
+
 // View-space position pre-pass → occlusion → blur. Runs its own extract/cull/sort
 // (deterministic → matches EncodeScene's draw set) and its own render encoders.
 // Sets m_ssaoResult to the blurred AO texture (or null) for EncodeScene to bind.
@@ -15960,10 +16038,12 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 {
 	m_fwdReflSsrTex = nullptr;
-	if (!m_ssrFrameActive || m_deferredFrameActive) return;
+	if (!m_ssrFrameActive || (m_deferredFrameActive && !m_reflWaterPass)) return;
 	if (!m_ssrTracePipeline || !m_ssrBlurPipeline)  return;
 	if (!m_reflNormTex || !m_reflDepthTex)          return;
-	if (!m_ssrColorHist || !m_ssrColorHistValid)    return; // frame 1 seeds the copy first
+	// Water pass (deferred frame): this frame's resolved HDR is already there, no copy to seed.
+	if (!m_reflWaterPass && (!m_ssrColorHist || !m_ssrColorHistValid)) return; // frame 1 seeds the copy first
+	if (m_reflWaterPass && !m_hdrColor)             return;
 	@autoreleasepool
 	{
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
@@ -15980,7 +16060,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 		{
 			const bool temporal = m_ssrQuality >= 2;
 			float hist = 0.0f;
-			if (temporal && m_ssrHistValid)
+			if (temporal && m_ssrHistValid && !m_reflWaterPass) // water pass: no history of its own
 			{
 				float delta = 0.0f;
 				for (int c = 0; c < 4; ++c)
@@ -15998,7 +16078,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 			std::memcpy(tu.prevViewProj, &m_ssrPrevViewProj[0][0], 16 * sizeof(float));
 			tu.cfg2[0] = m_ssrFrameSeed;
 			tu.cfg2[1] = hist;
-			tu.cfg2[2] = 1.0f; // forward: colour from the previous frame's copy
+			tu.cfg2[2] = m_reflWaterPass ? 0.0f : 1.0f; // forward: colour from the previous frame's copy; water pass: this frame's HDR, as the deferred trace
 			tu.cfg2[3] = temporal ? 1.0f : 0.0f; // glossy cone jitter (High)
 			tu.camPos[0] = m_renderWorld.camera.position.x;
 			tu.camPos[1] = m_renderWorld.camera.position.y;
@@ -16027,7 +16107,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 			[enc setFragmentBytes:&tu length:sizeof(tu) atIndex:0];
 			id<MTLSamplerState> pointSmp = (__bridge id<MTLSamplerState>)
 				(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
-			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrColorHist atIndex:0];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_reflWaterPass ? m_hdrColor : m_ssrColorHist) atIndex:0];
 			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 			// Point-sampled for the same reason as the deferred variant: lerped
 			// oct normals decode to garbage at geometry edges.
@@ -16173,7 +16253,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 	// Input pair: the stored G-buffer in the deferred tile mode, the MRT
 	// pre-pass in the forward path — identical formats/conventions, so the
 	// kernels are byte-shared between both.
-	const bool deferredIn = m_deferredFrameActive;
+	// The water pass reads the pre-pass pair even in a deferred frame (EncodeWaterReflPrepass).
+	const bool deferredIn = m_deferredFrameActive && !m_reflWaterPass;
 	void* const attrTex  = deferredIn ? m_gbColor1   : m_reflNormTex;
 	void* const depthTex = deferredIn ? m_gbDepthLin : m_reflDepthTex;
 	if (deferredIn ? !m_gbStored : !(attrTex && depthTex)) return;
@@ -17430,6 +17511,32 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				{
 					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
 					EncodeSSRPasses((__bridge void*)cmdBuf, sceneW, sceneH);
+					// The forward tail (water and every other translucent graph material) is
+					// not in the G-buffer, so the composite above never touched it and slots
+					// 9/10 stayed empty: the water mirrored only the flat sky cube. Its
+					// surfaces get their own pre-pass, and the forward trace chain runs over
+					// it, as in a forward frame.
+					if (EncodeWaterReflPrepass((__bridge void*)cmdBuf, sceneW, sceneH, deferredFrame.transparent))
+					{
+						// The forward chain over the water pre-pass. The SSR trace keeps its
+						// history pair, flip and matrix for the opaque composite of the next
+						// frame: restore them, the water result has no history of its own.
+						const int      histIdx   = m_ssrHistIdx;
+						const bool     histValid = m_ssrHistValid;
+						const glm::mat4 prevVP   = m_ssrPrevViewProj;
+						m_reflWaterPass = true;
+						if (m_giReflFrameActive)
+						{
+							m_giReflGlossyTex = nullptr;
+							EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
+							m_fwdReflGiTex = m_giReflGlossyTex ? m_giReflGlossyTex : m_giReflTex;
+						}
+						EncodeForwardSSR((__bridge void*)cmdBuf, sceneW, sceneH);
+						m_reflWaterPass = false;
+						m_ssrHistIdx      = histIdx;
+						m_ssrHistValid    = histValid;
+						m_ssrPrevViewProj = prevVP;
+					}
 				}
 
 				if (!deferredTile)
