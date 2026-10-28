@@ -63,10 +63,32 @@ Flug 3000 Frames, `HE_PERF_CAM_FLY=1.5`: CPU p99 8,9 -> 7,6 ms, p99.9 17,8 -> 11
 * Die Frames um p95 (~7 ms) sind keine CPU-Arbeit mehr: `WaitFrame` ist dort ~1 ms länger und der Rest steckt in `Render` ohne Kind-Scope, die CPU wartet auf die GPU
   (GPU p50 3,3, p95 ~4 ms).
 
+## GPU-Seite (Folgeschritt 3, gleicher Tag)
+Neue GPU-Zeitmarken in Vulkan (`Sky`, `Opaque`, `GBuffer`/`Resolve`, `Transparent`, `GIShadow`/`GIFilter`/`GIProbes`/`GIRefl`, gleiche Namen wie D3D11). Befund (Forward-Pfad, p50):
+GIRefl 0,96 ms war der größte Einzelposten, danach Opaque 0,86, Sky 0,61 (Überblick) bzw. Transparent 0,47 (Wasser); die HW-GI selbst (Schatten, Filter, Proben) < 0,15 ms.
+* **`gi_refl_hw.comp`** (Ray Query): `gi_refl.comp` mit Closest-Hit und Schatten-Any-Hit über die TLAS statt über die 257 Instanzen im SW-BVH; TLAS-Binding 11,
+  eigenes Set/Pool/Pipeline (`createGiReflHwPipeline`). Läuft, wenn die diffuse GI an ist und die TLAS dieses Frame steht, sonst der SW-Kernel; `HE_GI_REFL_HW=0` erzwingt SW.
+* **HW-BLAS aus den SW-Dreiecken** (`buildGiHwBlas(id, range)`, nicht indiziert, Reihenfolge des SW-BVH): der Primitive-Index eines Treffers ist die Dreiecksnummer im Slice,
+  `giTris[instanz.triOffset + prim]` ist dasselbe Dreieck wie im SW-Kernel. Schatten-/Proben-Kernel lesen das nicht.
+* Hand-Kopie-Konvention: `gi_refl_hw.comp` ist in den Guards von `tests/test_culling.cpp` (Cone-Hash, DDGI-Sampling) neben `gi_refl.comp` aufgenommen; 105/105 in culling/gi_*.
+* Verifiziert: Bild HW gegen SW (`HE_GI_REFL_HW=0`, gleiches Binary, GI + Reflexionen an): Überblick identisch (Abweichung 0,000), Wasserpose mittlere Abweichung 1,78 gegen 0,93
+  Wellenrauschen (HW-Lauf gegen HW-Lauf), 0,017 % der Pixel > 32; Reflexionen an gegen aus ändern dasselbe Bild um 10,4. Visuell kein Unterschied. Mit `HE_GPU_DEBUG=1`
+  1500 Frames Flug ohne Validation-Fehler. Nicht verifiziert: D3D12 (DXR-Kernel hat noch kein Reflexions-Gegenstück), Reflexionen bei GI aus (SW-Pfad, unverändert).
+
+## Zeiten, vorher und nachher (Vulkan, RTX 4070, HEProject/Catania, GI + Reflexionen an, 2000x1125 hidden)
+| Situation | Start (vor allem) | nach Material-/Validation-Fix | jetzt |
+|---|---|---|---|
+| Überblick, fps | 65 | 280 | **356** |
+| Überblick, CPU / GPU p50 | 15,1 / 4,26 ms | 3,2 / 3,06 | **2,31 / 2,31** |
+| Wegschauen / Wasser, fps | 291 | 305 | **386** |
+| Wegschauen, CPU / GPU p50 | 3,19 / 3,25 ms | 3,03 / 3,02 | **2,28 / 2,26** |
+| Flug, fps | - | 223 | **374** (3000 Frames) |
+| Flug, CPU p99 / max | - | 19,4 / 56,6 ms | **5,6 / 18,2** |
+GPU-Zeilen Überblick, p50: GIRefl 0,96 -> **0,07**, Opaque 0,86 -> 1,04 (nicht untersucht; kann Messschwankung oder GPU-Takt sein, die Gesamtsumme sinkt trotzdem um 0,75 ms), Sky 0,61 -> 0,61, Shadow 0,11. Wasser: GIRefl 0,94 -> 0,02, Opaque 0,72, Transparent 0,47, Sky 0,24.
+
 ## Offen, in Reihenfolge
-1. GPU-Seite: p50 3,3 ms (Scene 1,7, GI 1,3), p95 ~4 ms. Die GI-Buffer (`m_giNodeBuf`/`m_giTriBuf`) liegen host-visible; für die SW-Kernel/Reflexionen device-local mit Staging
-   wäre zu messen. GPU-Spitzen sind nicht erklärt.
-2. Restliche CPU-Ausreißer (5 in 3000 Frames, <= 14 ms): Wachstum von `GiBlasStore` (Vektor-Realloc, bis 11 ms) und der Voll-Upload bei Kompaktierung (bis 7 ms).
-   Mit Reserve beim ersten `add()` und inkrementeller Kompaktierung zu beheben.
-3. GI-Backlog Punkt 1-4 nur nach neuer Messung: Hardwarepfad kostet 1,3 ms insgesamt, Höhenfeld dort wäre < 0,2 ms Gewinn.
+1. GPU-Rest (2,3 ms): Opaque 0,7-1,0 ms (Landschaftsmaterial, 577k Dreiecke, kein Z-Prepass), Sky 0,6 ms (Wolken-Raymarch, bei viel Himmel), Transparent 0,47 ms (Wasser).
+   Kandidaten: Wolken in halber Auflösung/zeitlich verteilt, Z-Prepass nur für die Landschaft, Wasser-Shader messen. Alles ändert das Bild oder braucht eine Qualitätsentscheidung.
+2. `gi_refl_hw` auch für D3D12 (DXR, `gi_refl_hw.hlsl`) und die SW-Kernel für OpenGL/D3D11 mit einer Top-Level-BVH statt der linearen Instanzliste (GIShadow 1,08 ms auf D3D11).
+3. Restliche CPU-Ausreißer: Wachstum von `GiBlasStore` (Vektor-Realloc) und der Voll-Upload bei Kompaktierung.
 4. Gleiches Memo/Set-Sharing für D3D11/D3D12/GL prüfen: `resolveShaders` wird von allen Backends pro Draw aufgerufen.

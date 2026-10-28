@@ -145,7 +145,7 @@ if(HE_VULKAN_ENABLED)
                       gi_gbuf.vert gi_gbuf_instanced.vert gi_gbuf.frag gi_temporal.frag gi_atrous.frag
                       gi_shadow.comp gi_probe.comp
                       gi_shadow_hw.comp gi_probe_hw.comp
-                      gi_refl.comp gi_refl_blur.frag gi_refl_mix.frag
+                      gi_refl.comp gi_refl_hw.comp gi_refl_blur.frag gi_refl_mix.frag
                       skinned.vert
                       ui.vert ui.frag
                       world_preview.vert world_preview_skinned.vert world_preview.frag)

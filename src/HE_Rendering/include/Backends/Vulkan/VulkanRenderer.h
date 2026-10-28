@@ -1484,7 +1484,8 @@ private:
 	// probe atlases hold valid data this frame (gates the indirect term and
 	// matches D3D12's `probesValid` parameter). Returns true iff m_giReflTex
 	// holds this frame's result.
-	bool runGiReflections(VkCommandBuffer cmd, bool diffuseActive);
+	bool runGiReflections(VkCommandBuffer cmd, bool diffuseActive, bool useHw);   // useHw: this frame's TLAS is up
+	void createGiReflHwPipeline();             // gi_refl_hw.comp (ray query); failure leaves reflections on the SW kernel
 
 	static constexpr int   kGIProbeOctSize     = 8;
 
@@ -1659,7 +1660,10 @@ private:
 	std::vector<GiHwBuffer> m_giHwBufPool;
 	VkDeviceSize            m_giHwBufPoolBytes = 0;
 	void     destroyGiHwBlas(GiHwBlas& b);
-	GiHwBlas buildGiHwBlas(const HE::UUID& meshId);   // creates the BLAS + queues its build (flushGiHwBlasBuilds records it)
+	// Creates the BLAS of one mesh from the SW BVH's triangles (`range` = its slice of m_giBlas, leaf order, non-indexed:
+	// a hit's primitive index IS the triangle's number inside the slice, which gi_refl_hw.comp relies on) and queues its
+	// build (flushGiHwBlasBuilds records it).
+	GiHwBlas buildGiHwBlas(const HE::UUID& meshId, const GIBlasRange& range);
 	// A BLAS whose build is queued: the AS exists (so its address is known) but is only filled when the frame's
 	// command buffer reaches flushGiHwBlasBuilds, ahead of the TLAS build that reads it. Building on a one-time
 	// command buffer with a vkQueueWaitIdle per BLAS stalled the CPU on the GPU for every re-stitched terrain chunk.
@@ -1667,7 +1671,7 @@ private:
 	{
 		VkAccelerationStructureKHR as = VK_NULL_HANDLE;
 		GiHwBuffer      geo, scratch;     // build input and scratch: kept until the build has finished on the GPU
-		VkDeviceAddress vertexAddr = 0, indexAddr = 0, scratchAddr = 0;
+		VkDeviceAddress vertexAddr = 0, indexAddr = 0, scratchAddr = 0;   // indexAddr 0 = non-indexed triangles
 		VkDeviceSize    vertexStride = 0;
 		uint32_t        maxVertex = 0, primCount = 0;
 	};
@@ -1742,6 +1746,12 @@ private:
 	int m_giReflW = 0, m_giReflH = 0;
 	VkDescriptorPool m_giReflDescPool = VK_NULL_HANDLE; // own pool (advisor: don't grow the shared GI one)
 	VkDescriptorSet  m_giReflSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE }; // compute, per in-flight frame
+	// The hardware variant: the SW layout + the TLAS at binding 11, its own pool (the SW one has no AS budget).
+	VkDescriptorSetLayout m_giReflHwDSL  = VK_NULL_HANDLE;
+	VkPipelineLayout      m_giReflHwPL   = VK_NULL_HANDLE;
+	VkPipeline            m_giReflHwPipe = VK_NULL_HANDLE;
+	VkDescriptorPool      m_giReflHwPool = VK_NULL_HANDLE;
+	VkDescriptorSet       m_giReflHwSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 	GiBuffer m_giReflUBO[3]; // GiReflUBOData, per in-flight frame
 	// Fullscreen "tables" for the blur/mix chain — FIXED, one set per texture
 	// role, rewritten only when ensureGiReflTargets rebuilds the images (not
