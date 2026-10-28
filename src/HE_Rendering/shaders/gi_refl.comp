@@ -45,6 +45,7 @@ layout(set = 0, binding = 6) uniform sampler2D uGIVis; // DDGI visibility atlas
 layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D uOut; // rgb radiance, a confidence
 layout(std430, set = 0, binding = 9) readonly buffer GiLands { GiLand giLands[]; };
 layout(set = 0, binding = 10) uniform sampler2D uLandWeights[4];   // one per landscape, in giLands order
+layout(set = 0, binding = 12) uniform samplerCube uSkyRefl;        // the real sky (clouds, weather) around the camera, for rays that miss; uRays.z = 1 when baked
 layout(set = 0, binding = 8) uniform GiReflUBO {
     vec4 uCamPos;      // xyz = camera world position
     vec4 uSunDir;      // xyz = direction TOWARD the sun, w = local light count
@@ -54,7 +55,7 @@ layout(set = 0, binding = 8) uniform GiReflUBO {
     vec4 uGridCounts;  // xyz = probes per axis, w = probes per atlas row
     vec4 uReflParams;  // x = max ray distance, y = max roughness, z = indirect intensity, w = probe atlases valid
     vec4 uFrame;       // x = jitter seed, y = width, z = height, w = 1 -> glossy cone jitter
-    vec4 uRays;        // x = rays per glossy pixel (tier), y = instance count
+    vec4 uRays;        // x = rays per glossy pixel (tier), y = instance count, z = 1 -> uSkyRefl holds this frame's sky
     vec4 uLightPosRange[8];  // xyz pos, w range
     vec4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
     vec4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
@@ -382,7 +383,17 @@ void main()
         float dist; int tri;
         int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
         if (hitInst < 0)
-            continue; // miss: nothing (no sky bake on Vulkan yet), the composite keeps the sky term
+        {
+            // Miss -> the sky. With the bake it is a full sample (the receiver's confidence, like a hit at close range)
+            // carrying the REAL sky, so a mirror shows clouds and a part-miss glossy lobe averages hit and sky; without
+            // it nothing is added and the composite keeps the cloudless analytic cube. Mirrors the GL and Metal kernels.
+            if (uRays.z > 0.5)
+            {
+                outRadiance += texture(uSkyRefl, Rs).rgb;
+                outConf     += 1.0;
+            }
+            continue;
+        }
 
         vec3 hitPos = origin + Rs * dist;
         vec3 hitN   = giHitNormal(hitInst, tri, Rs);

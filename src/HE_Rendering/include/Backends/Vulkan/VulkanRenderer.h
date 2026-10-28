@@ -1085,9 +1085,14 @@ private:
 	// `cameraPos` anchors the 3D clouds and the aurora, `time` drives their
 	// drift. drawSky passes the scene's; the world preview passes its own
 	// camera with the clock stopped.
+	struct SkyUBO;
 	void drawSkyFrom(VkCommandBuffer cmd, bool hdr, const glm::mat4& clipViewProj,
 	                 const glm::vec3& sunDir, const glm::vec3& cameraPos, float time,
-	                 const EnvironmentSettings& env);
+	                 const EnvironmentSettings& env,
+	                 // The sky-reflection cube's faces draw through their own UBO/descriptor set (the main sky's is
+	                 // rewritten by the CPU at record time, so six faces could not share it), their own pipeline
+	                 // (single colour attachment) and their own GPU timer row.
+	                 SkyUBO* ubo = nullptr, VkPipeline pipeOverride = VK_NULL_HANDLE, const char* timerName = "Sky");
 
 	// Per-frame sky UBO (mirrors FrameUBO pattern).
 	struct SkyUBO
@@ -1098,6 +1103,29 @@ private:
 		VkDescriptorSet set    = VK_NULL_HANDLE;
 	};
 	SkyUBO                m_skyUBO[2];
+	// GI-reflection sky cube (the Vulkan twin of OpenGL's RenderSkyReflCube / Metal's EncodeSkyReflCube, topic 173):
+	// the REAL sky - clouds, weather - drawn around the camera into six 128x128 faces every frame the reflections run.
+	// A reflection ray that hits nothing reads it, so a water surface mirrors the clouds; without it a miss returned
+	// nothing and the material fell back to the cloudless analytic heSkyEnv cube. HE_GIREFL_SKY=0 turns it off.
+	static constexpr int kSkyReflCubeSize = 128;
+	SkyUBO                m_skyReflUBO[2][6];
+	VkRenderPass          m_skyReflRP        = VK_NULL_HANDLE;
+	VkPipeline            m_skyReflPipe      = VK_NULL_HANDLE;
+	VkImage               m_skyReflImage     = VK_NULL_HANDLE;
+	VkDeviceMemory        m_skyReflMem       = VK_NULL_HANDLE;
+	VkImageView           m_skyReflCubeView  = VK_NULL_HANDLE;
+	VkImageView           m_skyReflFaceView[6] = {};
+	VkFramebuffer         m_skyReflFB[6]     = {};
+	VkSampler             m_skyReflSampler   = VK_NULL_HANDLE;
+	bool                  m_skyReflValid     = false;   // this frame's cube holds the sky (the kernels read it only then)
+	// The clouds drift slowly and the cube is camera-centred, so only kSkyReflFacesPerFrame of its six faces are redrawn
+	// each frame (all six cost 0.3 ms on the RTX 4070); the others keep their last picture. The first frame draws all six.
+	static constexpr uint32_t kSkyReflFacesPerFrame = 2;
+	bool                  m_skyReflBaked     = false;
+	uint32_t              m_skyReflPhase     = 0;
+	bool                  ensureSkyReflCube();
+	void                  renderSkyReflCube(VkCommandBuffer cmd);
+	void                  destroySkyReflCube();
 	VkDescriptorSetLayout m_skyDSLayout        = VK_NULL_HANDLE;
 	VkDescriptorPool      m_skyDSPool          = VK_NULL_HANDLE;
 	VkPipelineLayout      m_skyPipelineLayout  = VK_NULL_HANDLE;

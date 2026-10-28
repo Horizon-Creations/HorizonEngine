@@ -10257,11 +10257,11 @@ void VulkanRenderer::createSkyPipeline()
     // ── Descriptor pool (k_maxFramesInFlight UBOs + 2 samplers/set: moon + noise) ─
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    poolSizes[0].descriptorCount = k_maxFramesInFlight;
+    poolSizes[0].descriptorCount = k_maxFramesInFlight * 7;   // the main sky + six reflection-cube faces per frame
     poolSizes[1].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[1].descriptorCount = k_maxFramesInFlight * 2;   // moon (binding 1) + noise (binding 2)
+    poolSizes[1].descriptorCount = k_maxFramesInFlight * 7 * 2;   // moon (binding 1) + noise (binding 2)
     VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets       = k_maxFramesInFlight;
+    dpci.maxSets       = k_maxFramesInFlight * 7;
     dpci.poolSizeCount = 2;
     dpci.pPoolSizes    = poolSizes;
     vkCheck(vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_skyDSPool), "sky descriptor pool");
@@ -10400,34 +10400,34 @@ void VulkanRenderer::createSkyPipeline()
     }
 
     // ── Per-frame UBO buffers, descriptor sets ───────────────────────────────
-    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    auto makeSkyUboSet = [&](SkyUBO& u)
     {
         VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bci.size        = kSkyUBOBytes;
         bci.usage       = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &m_skyUBO[i].buf), "sky UBO buffer");
+        vkCheck(vkCreateBuffer(m_device, &bci, nullptr, &u.buf), "sky UBO buffer");
 
         VkMemoryRequirements mr;
-        vkGetBufferMemoryRequirements(m_device, m_skyUBO[i].buf, &mr);
+        vkGetBufferMemoryRequirements(m_device, u.buf, &mr);
         VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
         mai.allocationSize  = mr.size;
         mai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &m_skyUBO[i].mem), "sky UBO memory");
-        vkBindBufferMemory(m_device, m_skyUBO[i].buf, m_skyUBO[i].mem, 0);
-        vkMapMemory(m_device, m_skyUBO[i].mem, 0, kSkyUBOBytes, 0, &m_skyUBO[i].mapped);
+        vkCheck(vkAllocateMemory(m_device, &mai, nullptr, &u.mem), "sky UBO memory");
+        vkBindBufferMemory(m_device, u.buf, u.mem, 0);
+        vkMapMemory(m_device, u.mem, 0, kSkyUBOBytes, 0, &u.mapped);
 
         VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
         dsai.descriptorPool     = m_skyDSPool;
         dsai.descriptorSetCount = 1;
         dsai.pSetLayouts        = &m_skyDSLayout;
-        vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &m_skyUBO[i].set), "sky descriptor set");
+        vkCheck(vkAllocateDescriptorSets(m_device, &dsai, &u.set), "sky descriptor set");
 
-        VkDescriptorBufferInfo dbi{ m_skyUBO[i].buf, 0, kSkyUBOBytes };
+        VkDescriptorBufferInfo dbi{ u.buf, 0, kSkyUBOBytes };
         VkWriteDescriptorSet wr[3]{};
         wr[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wr[0].dstSet          = m_skyUBO[i].set;
+        wr[0].dstSet          = u.set;
         wr[0].dstBinding      = 0;
         wr[0].descriptorCount = 1;
         wr[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -10439,7 +10439,7 @@ void VulkanRenderer::createSkyPipeline()
         dii.imageView   = m_dummyView;
         dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         wr[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wr[1].dstSet          = m_skyUBO[i].set;
+        wr[1].dstSet          = u.set;
         wr[1].dstBinding      = 1;
         wr[1].descriptorCount = 1;
         wr[1].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -10450,12 +10450,17 @@ void VulkanRenderer::createSkyPipeline()
         niiNoise.imageView   = m_skyNoiseView;
         niiNoise.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         wr[2].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wr[2].dstSet          = m_skyUBO[i].set;
+        wr[2].dstSet          = u.set;
         wr[2].dstBinding      = 2;
         wr[2].descriptorCount = 1;
         wr[2].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         wr[2].pImageInfo      = &niiNoise;
         vkUpdateDescriptorSets(m_device, 3, wr, 0, nullptr);
+    };
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+    {
+        makeSkyUboSet(m_skyUBO[i]);
+        for (SkyUBO& face : m_skyReflUBO[i]) makeSkyUboSet(face);
     }
 
     // ── Dummy 1×1 white moon texture (used until SetMoonTexture is called) ───
@@ -10577,6 +10582,42 @@ void VulkanRenderer::createSkyPipeline()
     makeSkyPipeline(m_renderPass, m_skyPipeline);
     if (m_postFxSceneRP)
         makeSkyPipeline(m_postFxSceneRP, m_skyPipelineHDR);
+    // The reflection cube's faces: ONE RGBA16F colour attachment, cleared, left for the reflection kernels to sample.
+    {
+        VkAttachmentDescription att{};
+        att.format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+        att.samples        = VK_SAMPLE_COUNT_1_BIT;
+        att.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        att.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        att.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        att.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;     // every face is rewritten whole each frame
+        att.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkAttachmentReference ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sub{};
+        sub.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sub.colorAttachmentCount = 1;
+        sub.pColorAttachments    = &ref;
+        VkSubpassDependency deps[2]{};
+        deps[0].srcSubpass    = VK_SUBPASS_EXTERNAL; deps[0].dstSubpass = 0;
+        deps[0].srcStageMask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;   // last frame's reads
+        deps[0].dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].srcSubpass    = 0; deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        deps[1].srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        deps[1].dstStageMask  = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        deps[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        deps[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 1; rpci.pAttachments = &att;
+        rpci.subpassCount = 1;    rpci.pSubpasses = &sub;
+        rpci.dependencyCount = 2; rpci.pDependencies = deps;
+        if (vkCreateRenderPass(m_device, &rpci, nullptr, &m_skyReflRP) == VK_SUCCESS)
+            makeSkyPipeline(m_skyReflRP, m_skyReflPipe);
+        else
+            m_skyReflRP = VK_NULL_HANDLE;
+    }
 
     vkDestroyShaderModule(m_device, vs, nullptr);
     vkDestroyShaderModule(m_device, fs, nullptr);
@@ -10584,6 +10625,16 @@ void VulkanRenderer::createSkyPipeline()
 
 void VulkanRenderer::destroySkyPipeline()
 {
+    destroySkyReflCube();
+    if (m_skyReflPipe) { vkDestroyPipeline(m_device, m_skyReflPipe, nullptr);   m_skyReflPipe = VK_NULL_HANDLE; }
+    if (m_skyReflRP)   { vkDestroyRenderPass(m_device, m_skyReflRP, nullptr);    m_skyReflRP   = VK_NULL_HANDLE; }
+    for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
+        for (SkyUBO& face : m_skyReflUBO[i])
+        {
+            if (face.mapped) { vkUnmapMemory(m_device, face.mem); face.mapped = nullptr; }
+            if (face.buf)    { vkDestroyBuffer(m_device, face.buf, nullptr); face.buf = VK_NULL_HANDLE; }
+            if (face.mem)    { vkFreeMemory(m_device, face.mem, nullptr);    face.mem = VK_NULL_HANDLE; }
+        }
     for (uint32_t i = 0; i < k_maxFramesInFlight; ++i)
     {
         if (m_skyUBO[i].mapped) { vkUnmapMemory(m_device, m_skyUBO[i].mem); m_skyUBO[i].mapped = nullptr; }
@@ -10616,12 +10667,14 @@ void VulkanRenderer::drawSky(VkCommandBuffer cmd, uint32_t /*width*/, uint32_t /
 
 void VulkanRenderer::drawSkyFrom(VkCommandBuffer cmd, bool hdr, const glm::mat4& clipViewProj,
                                  const glm::vec3& sunDir, const glm::vec3& cameraPos, float time,
-                                 const EnvironmentSettings& env)
+                                 const EnvironmentSettings& env, SkyUBO* ubo, VkPipeline pipeOverride,
+                                 const char* timerName)
 {
-    VkPipeline pipe = hdr && m_skyPipelineHDR ? m_skyPipelineHDR : m_skyPipeline;
+    VkPipeline pipe = pipeOverride ? pipeOverride : (hdr && m_skyPipelineHDR ? m_skyPipelineHDR : m_skyPipeline);
     if (!pipe || !m_skyPipelineLayout) return;
     if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
-    GpuPassScope _skyTimer(this, "Sky");
+    GpuPassScope _skyTimer(this, timerName);
+    SkyUBO& skyUbo = ubo ? *ubo : m_skyUBO[m_currentFrame];
 
     // The one shared EnvironmentSettings → sky-constants translation. The GL sky
     // compiled at startup reads HE::SkyFrameParams as its UBO (one memcpy). The
@@ -10656,16 +10709,117 @@ void VulkanRenderer::drawSkyFrom(VkCommandBuffer cmd, bool hdr, const glm::mat4&
     sky.nebulaColor   = glm::vec3(p.nebulaColor);
     // sky._pad2 is left zeroed by the SkyUBOData{} value-initialisation above.
 
-    if (m_skyUBO[m_currentFrame].mapped)
+    if (skyUbo.mapped)
     {
-        if (m_skyFullModel) std::memcpy(m_skyUBO[m_currentFrame].mapped, &p, sizeof(p));
-        else                std::memcpy(m_skyUBO[m_currentFrame].mapped, &sky, sizeof(sky));
+        if (m_skyFullModel) std::memcpy(skyUbo.mapped, &p, sizeof(p));
+        else                std::memcpy(skyUbo.mapped, &sky, sizeof(sky));
     }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout,
-                            0, 1, &m_skyUBO[m_currentFrame].set, 0, nullptr);
+                            0, 1, &skyUbo.set, 0, nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0);  // full-screen triangle, no vertex buffer
+}
+
+// The cube's image, face views, framebuffers and sampler, created on the first frame the reflections run (it costs
+// 6 x 128 x 128 x 8 bytes). false = unusable; the kernels then get the dummy cube and a zero flag.
+bool VulkanRenderer::ensureSkyReflCube()
+{
+    if (m_skyReflCubeView) return true;
+    if (!m_skyReflRP || !m_skyReflPipe) return false;
+    constexpr uint32_t N = kSkyReflCubeSize;
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.flags         = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = VK_FORMAT_R16G16B16A16_SFLOAT;
+    ici.extent        = { N, N, 1 };
+    ici.mipLevels     = 1;
+    ici.arrayLayers   = 6;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    auto fail = [&]() { destroySkyReflCube(); return false; };
+    if (vkCreateImage(m_device, &ici, nullptr, &m_skyReflImage) != VK_SUCCESS) return fail();
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, m_skyReflImage, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    try { mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); }
+    catch (...) { return fail(); }
+    if (vkAllocateMemory(m_device, &mai, nullptr, &m_skyReflMem) != VK_SUCCESS) return fail();
+    vkBindImageMemory(m_device, m_skyReflImage, m_skyReflMem, 0);
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image    = m_skyReflImage;
+    vci.format   = ici.format;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+    if (vkCreateImageView(m_device, &vci, nullptr, &m_skyReflCubeView) != VK_SUCCESS) return fail();
+    for (uint32_t f = 0; f < 6; ++f)
+    {
+        vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, f, 1 };
+        if (vkCreateImageView(m_device, &vci, nullptr, &m_skyReflFaceView[f]) != VK_SUCCESS) return fail();
+        VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fci.renderPass = m_skyReflRP; fci.attachmentCount = 1; fci.pAttachments = &m_skyReflFaceView[f];
+        fci.width = N; fci.height = N; fci.layers = 1;
+        if (vkCreateFramebuffer(m_device, &fci, nullptr, &m_skyReflFB[f]) != VK_SUCCESS) return fail();
+    }
+    VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter = sci.minFilter = VK_FILTER_LINEAR;
+    sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(m_device, &sci, nullptr, &m_skyReflSampler) != VK_SUCCESS) return fail();
+    return true;
+}
+
+void VulkanRenderer::destroySkyReflCube()
+{
+    for (VkFramebuffer& fb : m_skyReflFB)  { if (fb) vkDestroyFramebuffer(m_device, fb, nullptr); fb = VK_NULL_HANDLE; }
+    for (VkImageView& v : m_skyReflFaceView) { if (v) vkDestroyImageView(m_device, v, nullptr); v = VK_NULL_HANDLE; }
+    if (m_skyReflCubeView) { vkDestroyImageView(m_device, m_skyReflCubeView, nullptr); m_skyReflCubeView = VK_NULL_HANDLE; }
+    if (m_skyReflImage)    { vkDestroyImage(m_device, m_skyReflImage, nullptr);        m_skyReflImage    = VK_NULL_HANDLE; }
+    if (m_skyReflMem)      { vkFreeMemory(m_device, m_skyReflMem, nullptr);            m_skyReflMem      = VK_NULL_HANDLE; }
+    if (m_skyReflSampler)  { vkDestroySampler(m_device, m_skyReflSampler, nullptr);    m_skyReflSampler  = VK_NULL_HANDLE; }
+    m_skyReflValid = false;
+    m_skyReflBaked = false;
+}
+
+// Six faces of the real sky around the camera, low-res and without the screen-space low-res cloud buffer (a face is
+// not a screen). Same matrices as OpenGL/Metal: SkyCubeFaceInvViewProj(face, camera, rowZeroAtTop = false) - NDC y = -1
+// lands in texel row 0 on Vulkan as on OpenGL, and the cube-face table is GL's (see updateSkyEnvCube). drawSkyFrom
+// takes the forward matrix and inverts it, hence the inverse of the face's inverse.
+void VulkanRenderer::renderSkyReflCube(VkCommandBuffer cmd)
+{
+    m_skyReflValid = false;
+    static const bool s_off = [] { const char* e = std::getenv("HE_GIREFL_SKY"); return e && e[0] == '0'; }();
+    if (s_off || !m_environment.skyEnabled || !ensureSkyReflCube()) return;
+    static_assert(k_maxFramesInFlight <= 2, "m_skyReflUBO holds two frames");
+    // The faces this frame redraws: all six the first time, then a rotating slice. A face NOT drawn keeps its last picture
+    // (its layout is SHADER_READ_ONLY from the pass that wrote it; layouts are per layer).
+    const uint32_t firstFace = m_skyReflBaked ? m_skyReflPhase * kSkyReflFacesPerFrame : 0u;
+    const uint32_t endFace   = m_skyReflBaked ? firstFace + kSkyReflFacesPerFrame : 6u;
+    const glm::vec3 camPos = m_renderWorld.camera.position;
+    constexpr uint32_t N = kSkyReflCubeSize;
+    VkClearValue clear{};
+    clear.color = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+    const VkViewport vp{ 0, 0, float(N), float(N), 0, 1 };
+    const VkRect2D   sc{ { 0, 0 }, { N, N } };
+    for (uint32_t f = firstFace; f < endFace; ++f)
+    {
+        VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        rpbi.renderPass = m_skyReflRP; rpbi.framebuffer = m_skyReflFB[f];
+        rpbi.renderArea = sc; rpbi.clearValueCount = 1; rpbi.pClearValues = &clear;
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdSetViewport(cmd, 0, 1, &vp);
+        vkCmdSetScissor(cmd, 0, 1, &sc);
+        drawSkyFrom(cmd, /*hdr=*/true, glm::inverse(HE::SkyCubeFaceInvViewProj(static_cast<int>(f), camPos, false)),
+                    m_renderWorld.sunDirection, camPos, m_wallTime, m_environment,
+                    &m_skyReflUBO[m_currentFrame][f], m_skyReflPipe, "SkyRefl");
+        vkCmdEndRenderPass(cmd);
+    }
+    m_skyReflValid = true;
+    m_skyReflPhase = m_skyReflBaked ? (m_skyReflPhase + 1) % (6 / kSkyReflFacesPerFrame) : 0u;
+    m_skyReflBaked = true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -11065,6 +11219,12 @@ void VulkanRenderer::SetMoonTexture(const void* rgba8Pixels, int width, int heig
         wr.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         wr.pImageInfo      = &dii;
         vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+        for (SkyUBO& face : m_skyReflUBO[i])   // the reflection cube's faces show the moon as well
+            if (face.set)
+            {
+                wr.dstSet = face.set;
+                vkUpdateDescriptorSets(m_device, 1, &wr, 0, nullptr);
+            }
     }
 }
 
@@ -13183,6 +13343,8 @@ void VulkanRenderer::createGiReflPipelines()
         bindOf(8, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),
         bindOf(9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         VK_SHADER_STAGE_COMPUTE_BIT),   // landscape table
         landWeights,                                                                          // 10: 4 weightmaps
+        // 11 stays free (the HW layout's TLAS); 12: the sky cube a missed ray reads (gi_refl*.comp, uRays.z gates it)
+        bindOf(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_COMPUTE_BIT),
     }, m_giReflDSL);
     // gi_refl_blur.frag / gi_refl_mix.frag: 3 samplers (blur uses only binding
     // 0; shared layout, unused bindings hold valid views — same convention as
@@ -13318,7 +13480,7 @@ void VulkanRenderer::createGiReflPipelines()
     // per frame; only the push-constant stride/floor changes between draws).
     VkDescriptorPoolSize ps[4] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         k_maxFramesInFlight * 4 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 8 + 4 * 3 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxFramesInFlight * 9 + 4 * 3 },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          k_maxFramesInFlight * 1 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         k_maxFramesInFlight * 1 },
     };
@@ -13401,6 +13563,7 @@ void VulkanRenderer::createGiReflHwPipeline()
         bindOf(9, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER),
         bindOf(10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4),
         bindOf(11, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR),
+        bindOf(12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),   // the sky cube
     };
     VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
     slci.bindingCount = static_cast<uint32_t>(binds.size());
@@ -13424,7 +13587,7 @@ void VulkanRenderer::createGiReflHwPipeline()
     if (!pipeOk) { fail("GI HW reflection pipeline creation failed"); return; }
     VkDescriptorPoolSize ps[5] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,             k_maxFramesInFlight * 4 },
-        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 8 },
+        { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     k_maxFramesInFlight * 9 },
         { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,              k_maxFramesInFlight * 1 },
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,             k_maxFramesInFlight * 1 },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, k_maxFramesInFlight * 1 },
@@ -13597,6 +13760,8 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
     // reflection instance list); otherwise the software kernel over the BVH SSBOs.
     const bool hwRefl = useHw && m_giReflHwPipe && m_giReflHwSet[fi] && m_giTlas[fi].as;
     const VkDescriptorSet reflSet = hwRefl ? m_giReflHwSet[fi] : m_giReflSet[fi];
+    // The real sky for rays that miss (clouds, weather): six small faces drawn before the trace reads them.
+    renderSkyReflCube(cmd);
 
     // ── Rewrite this frame slot's compute set (fence already waited) ────────
     GiReflUBOData cb{};
@@ -13629,7 +13794,8 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
                               irrValid ? 1.0f : 0.0f);
     cb.frame      = glm::vec4(m_giReflFrameSeed, static_cast<float>(m_giReflW),
                               static_cast<float>(m_giReflH), tier.rays > 1 ? 1.0f : 0.0f);
-    cb.rays       = glm::vec4(static_cast<float>(tier.rays), static_cast<float>(m_giInstanceCount), 0.0f, 0.0f);
+    cb.rays       = glm::vec4(static_cast<float>(tier.rays), static_cast<float>(m_giInstanceCount),
+                              m_skyReflValid ? 1.0f : 0.0f, 0.0f);
     if (!uploadGiBuffer(m_giReflUBO[fi], &cb, sizeof(cb), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return false;
 
     {
@@ -13656,7 +13822,7 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
         for (int k = 0; k < 4; ++k)
             landII[k] = { landSampler, m_giLandWeightView[k] ? m_giLandWeightView[k] : m_whiteAlbedoView,
                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet w[12]{};
+        VkWriteDescriptorSet w[13]{};
         auto wBuf = [&](int idx, uint32_t b, VkDescriptorType t, const VkDescriptorBufferInfo* bi)
         { w[idx] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w[idx].dstSet = reflSet;
           w[idx].dstBinding = b; w[idx].descriptorCount = 1; w[idx].descriptorType = t; w[idx].pBufferInfo = bi; };
@@ -13676,16 +13842,23 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
         w[10] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w[10].dstSet = reflSet;
         w[10].dstBinding = 10; w[10].descriptorCount = 4;
         w[10].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[10].pImageInfo = landII;
+        uint32_t nW = 11;
         VkWriteDescriptorSetAccelerationStructureKHR tlasW{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
         if (hwRefl)
         {
             tlasW.accelerationStructureCount = 1;
             tlasW.pAccelerationStructures    = &m_giTlas[fi].as;
-            w[11] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w[11].pNext = &tlasW; w[11].dstSet = reflSet;
-            w[11].dstBinding = 11; w[11].descriptorCount = 1;
-            w[11].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            w[nW] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w[nW].pNext = &tlasW; w[nW].dstSet = reflSet;
+            w[nW].dstBinding = 11; w[nW].descriptorCount = 1;
+            w[nW].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            ++nW;
         }
-        vkUpdateDescriptorSets(m_device, hwRefl ? 12 : 11, w, 0, nullptr);
+        // The sky cube (a valid one even while the bake is off: the dummy cube, with uRays.z = 0 keeping the kernel from reading it).
+        VkDescriptorImageInfo skyII{ m_skyReflValid ? m_skyReflSampler : m_albedoSampler,
+                                     m_skyReflValid ? m_skyReflCubeView : m_whiteCubeView,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        wImg(static_cast<int>(nW++), 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &skyII);
+        vkUpdateDescriptorSets(m_device, nW, w, 0, nullptr);
     }
 
     // ── 1. Trace ─────────────────────────────────────────────────────────────

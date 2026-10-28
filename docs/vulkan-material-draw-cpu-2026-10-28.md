@@ -84,6 +84,19 @@ Der Himmel selbst wird nicht getroffen: ein Strahl, der nichts trifft, liefert i
 * Bild See-Pose: Hügel wird ganz gespiegelt (Abweichung zum 1500-m-Versuch 0,9, zum alten Stand 2,5). Nicht verifiziert: SW-Backends (D3D11/D3D12/GL) haben weiter 200 m, die
   Kosten einer größeren Reichweite dort sind nicht gemessen; ob die Cubemap die Wolken enthält, ist nicht geprüft (die Himmelsspiegelung im Wasser ist schwach, das ist die Gewichtung im Wasser-Material).
 
+## Wolken im Wasserspiegel: Himmels-Cube fuer GI-Reflexionen (Folgeschritt 5)
+Ein Strahl ohne Treffer lieferte auf Vulkan nichts; das Material behielt die wolkenlose analytische `heSkyEnv`-Cube. OpenGL und Metal zeichnen dafuer den echten Himmel (Wolken, Wetter)
+in eine 128x128-Cube (`RenderSkyReflCube` / `EncodeSkyReflCube`, Thema 173); Vulkan hatte das nicht.
+* `renderSkyReflCube`: sechs Flaechen des echten Himmels um die Kamera in eine RGBA16F-Cube (`m_skyReflImage`), eigener Render Pass + Sky-Pipeline (`m_skyReflRP/Pipe`), eigene
+  Sky-UBOs/Sets je Frame und Flaeche (`m_skyReflUBO[2][6]`: das UBO des Haupt-Himmels wird beim Aufzeichnen von der CPU ueberschrieben, sechs Flaechen koennten es nicht teilen).
+  Matrizen wie GL/Metal (`SkyCubeFaceInvViewProj(face, cam, false)`; `drawSkyFrom` bekommt die Vorwaerts-Matrix und invertiert, daher das Inverse davon).
+  Pro Frame werden 2 der 6 Flaechen neu gezeichnet (erster Frame alle), die anderen behalten ihr Bild: 0,1 ms statt 0,35 ms.
+* `gi_refl.comp` / `gi_refl_hw.comp`: Binding 12 `samplerCube uSkyRefl`, `uRays.z` = Cube gueltig; ein Miss addiert `texture(uSkyRefl, Rs)` mit Konfidenz 1 (GL-Kernel-Semantik).
+  `HE_GIREFL_SKY=0` schaltet den Bake aus (A/B).
+* Zeiten (Wasserpose, p50): GPU 2,27 -> 2,37 ms, 393 -> 380 fps; keine Validation-Fehler (`HE_GPU_DEBUG=1`). Tests culling/gi_*/material_graph 225/225.
+* Bild: Wolken erscheinen im Wasser (weich, weil die Reflexion aus der Prepass-Normale kommt, nicht aus der Wellen-Normale, und durch den Blur). Nicht verifiziert: D3D11/D3D12 (kein Sky-Bake dort,
+  dokumentierte Luecke), die Lage der Wolken gegen den Himmel nur nach Augenmass geprueft.
+
 ## Zeiten, vorher und nachher (Vulkan, RTX 4070, HEProject/Catania, GI + Reflexionen an, 2000x1125 hidden)
 | Situation | Start (vor allem) | nach Material-/Validation-Fix | jetzt |
 |---|---|---|---|
