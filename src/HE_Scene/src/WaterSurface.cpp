@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -106,6 +107,70 @@ namespace
         giveBackMesh(cm, renderer, mesh);
     }
 
+    // The material a landscape's water draws with: the engine water, or — when its
+    // "tessellation" switch is on — the same water as a Material Instance with the
+    // material's Static Switch "Tessellation" set (the swell as real geometry). The instance
+    // is made here, in memory, on first use. A build that cannot make it (a packed game
+    // whose water has no graph to regenerate from, no shader compiler) falls back to the
+    // plain water, once and for good: a surface must never turn into the grey fallback.
+    HE::UUID waterMaterialFor(ContentManager& cm, bool tessellation)
+    {
+        if (!tessellation) return HE::kEngineWaterMaterialId;
+        static std::unordered_set<const ContentManager*> failed;
+        if (failed.count(&cm)) return HE::kEngineWaterMaterialId;
+        auto ready = [&] {
+            const MaterialAsset* m = cm.getMaterial(HE::kEngineWaterTessellatedMaterialId);
+            return m && !m->customShaderFragGlsl.empty();
+        };
+        if (ready()) return HE::kEngineWaterTessellatedMaterialId;
+        if (!cm.isLoaded(HE::kEngineWaterMaterialId)) return HE::kEngineWaterMaterialId;   // parent not here yet: retry next tick
+        if (!cm.getMaterial(HE::kEngineWaterTessellatedMaterialId))
+        {
+            MaterialAsset a;
+            a.id   = HE::kEngineWaterTessellatedMaterialId;
+            a.name = "WaterTessellated";
+            a.path = "mem://Engine/Materials/WaterTessellated.hasset";
+            a.parentMaterialPath   = WaterSurface::kMaterialPath;
+            a.instanceSwitchNames  = { "Tessellation" };
+            a.instanceSwitchValues = { 1 };
+            cm.registerMaterial(std::move(a));
+        }
+        cm.syncMaterialInstance(HE::kEngineWaterTessellatedMaterialId);
+        if (ready()) return HE::kEngineWaterTessellatedMaterialId;
+        failed.insert(&cm);
+        HE_LOG_WARN(Asset, "%s", "Water surface: tessellation needs the water material's graph and a shader "
+                                 "compiler; drawing without it");
+        return HE::kEngineWaterMaterialId;
+    }
+
+    // The tessellated surface's numbers for a body, on the surface entity's material as the
+    // per-entity override of the material's "TessWaves" knob (the instance carries only the
+    // switch; the numbers are per body: a river and a sea on one landscape differ). Off or no
+    // body: the override is removed again, so the plain water carries nothing extra.
+    void applyTessParams(MaterialComponent& mat, const Field& f, uint16_t bodyId)
+    {
+        static const char* kKnob = "TessWaves";
+        const Body* body = f.tessellation ? f.findBody(bodyId) : nullptr;
+        auto it = std::find_if(mat.paramOverrides.begin(), mat.paramOverrides.end(),
+                               [](const MaterialParamOverride& o) { return o.name == kKnob; });
+        if (!body)
+        {
+            if (it != mat.paramOverrides.end()) { mat.paramOverrides.erase(it); mat.dirty = true; }
+            return;
+        }
+        const float v[4] = { body->tessellation.height, body->tessellation.shoreWidth, 0.0f, 0.0f };
+        if (it == mat.paramOverrides.end())
+        {
+            MaterialParamOverride o;
+            o.name = kKnob;
+            mat.paramOverrides.push_back(o);
+            it = mat.paramOverrides.end() - 1;
+        }
+        if (std::equal(v, v + 4, it->value)) return;
+        std::copy(v, v + 4, it->value);
+        mat.dirty = true;
+    }
+
     // Material first: with it not resident the renderer would draw the surface
     // with the plain fallback, which is a grey slab and looks like a bug in the
     // mesh. By UUID when the engine folder has been scanned (an editor session, a
@@ -133,7 +198,7 @@ namespace
         entt::registry& reg() { return world.registry(); }
 
         void apply(entt::entity te, uint16_t bodyId, entt::entity existing,
-                   SurfaceMesh& s, uint64_t paramsKey, WaterSurface::Stats& stats)
+                   SurfaceMesh& s, uint64_t paramsKey, WaterSurface::Stats& stats, bool tessellation)
         {
             auto& r = reg();
             HE::UUID meshId{};
@@ -161,7 +226,8 @@ namespace
                 e = world.createEntity("WaterSurface");
                 world.reparentEntity(e, te);
                 MaterialComponent mat;
-                mat.materialAssetId = HE::kEngineWaterMaterialId;
+                mat.materialAssetId = waterMaterialFor(cm, tessellation);
+                if (const Field* fld = &reg().get<TerrainComponent>(te).water) applyTessParams(mat, *fld, bodyId);
                 r.emplace_or_replace<MaterialComponent>(e, mat);
                 ++stats.created;
             }
@@ -248,16 +314,18 @@ namespace
                         if (!cm.isLoaded(HE::kEngineWaterMaterialId)) f.materialWait = 60;
                     }
                 }
+                const HE::UUID wanted = waterMaterialFor(cm, f.tessellation);
                 for (auto& kv : byBody)
                 {
                     auto* mat = reg().try_get<MaterialComponent>(kv.second);
                     if (!mat)
-                        reg().emplace<MaterialComponent>(kv.second).materialAssetId = HE::kEngineWaterMaterialId;
-                    else if (mat->materialAssetId != HE::kEngineWaterMaterialId)
+                        mat = &reg().emplace<MaterialComponent>(kv.second), mat->materialAssetId = wanted;
+                    else if (mat->materialAssetId != wanted)
                     {
-                        mat->materialAssetId = HE::kEngineWaterMaterialId;
+                        mat->materialAssetId = wanted;
                         mat->dirty = true;
                     }
+                    applyTessParams(*mat, f, kv.first);
                 }
             }
 
@@ -336,7 +404,7 @@ namespace
                     if (existing != entt::null) { removeSurface(world, cm, renderer, existing); ++stats.removed; }
                     continue;
                 }
-                apply(te, body.id, existing, s, paramsKey, stats);
+                apply(te, body.id, existing, s, paramsKey, stats, f.tessellation);
             }
 
             // What is left in the map belongs to a body that no longer exists.

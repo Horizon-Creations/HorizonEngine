@@ -41,6 +41,74 @@ void RenderSorter::sort(const RenderWorld&          world,
 		outSortedIndices.push_back(k.index);
 }
 
+void RenderSorter::sortByMesh(const RenderWorld&          world,
+                              const std::vector<uint8_t>& visible,
+                              std::vector<uint32_t>&       outSortedIndices)
+{
+	// Mesh ascending, then object index ascending. A scene has a few hundred meshes under tens
+	// of thousands of objects, so this is a counting sort over the meshes' rank (sorting only
+	// the distinct ids), not a comparison sort of every object: the same order, in O(n).
+	const uint32_t total = static_cast<uint32_t>(world.objects.size());
+	m_visible.clear();
+	m_denseOf.clear();
+	m_visible.reserve(total);
+	m_denseOf.reserve(total);
+	size_t cap = 1024;   // power of two, kept under half full
+	m_meshTable.assign(cap, MeshSlot{ 0, 0, 0, false });
+	std::vector<std::pair<uint64_t, uint64_t>> distinct;   // (hi, lo) by dense id
+	for (uint32_t i = 0; i < total; ++i)
+	{
+		if (i < visible.size() && !visible[i])
+			continue;
+		const HE::UUID& id = world.objects[i].meshAssetId;
+		size_t at = static_cast<size_t>((id.hi * 0x9E3779B97F4A7C15ull) ^ (id.lo * 0xC2B2AE3D27D4EB4Full)) & (cap - 1);
+		while (m_meshTable[at].used && !(m_meshTable[at].hi == id.hi && m_meshTable[at].lo == id.lo))
+			at = (at + 1) & (cap - 1);
+		if (!m_meshTable[at].used)
+		{
+			m_meshTable[at] = MeshSlot{ id.hi, id.lo, static_cast<uint32_t>(distinct.size()), true };
+			distinct.emplace_back(id.hi, id.lo);
+			if (distinct.size() * 2 > cap)
+			{
+				// Grow and re-insert; `at` of the object in hand is looked up again below.
+				cap *= 2;
+				std::vector<MeshSlot> old;
+				old.swap(m_meshTable);
+				m_meshTable.assign(cap, MeshSlot{ 0, 0, 0, false });
+				for (const MeshSlot& s : old)
+					if (s.used)
+					{
+						size_t k = static_cast<size_t>((s.hi * 0x9E3779B97F4A7C15ull) ^ (s.lo * 0xC2B2AE3D27D4EB4Full)) & (cap - 1);
+						while (m_meshTable[k].used) k = (k + 1) & (cap - 1);
+						m_meshTable[k] = s;
+					}
+				at = static_cast<size_t>((id.hi * 0x9E3779B97F4A7C15ull) ^ (id.lo * 0xC2B2AE3D27D4EB4Full)) & (cap - 1);
+				while (!(m_meshTable[at].hi == id.hi && m_meshTable[at].lo == id.lo && m_meshTable[at].used))
+					at = (at + 1) & (cap - 1);
+			}
+		}
+		m_visible.push_back(i);
+		m_denseOf.push_back(m_meshTable[at].dense);
+	}
+
+	// Rank of each distinct mesh in (hi, lo) order.
+	const uint32_t nMesh = static_cast<uint32_t>(distinct.size());
+	std::vector<uint32_t> order(nMesh);
+	for (uint32_t d = 0; d < nMesh; ++d) order[d] = d;
+	std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return distinct[a] < distinct[b]; });
+	m_rankOfDense.assign(nMesh, 0);
+	for (uint32_t r = 0; r < nMesh; ++r) m_rankOfDense[order[r]] = r;
+
+	// Counting sort by rank; the scatter walks the objects in index order, so each mesh's
+	// objects stay in index order (the old comparator's tie-break).
+	m_bucket.assign(static_cast<size_t>(nMesh) + 1, 0);
+	for (uint32_t d : m_denseOf) ++m_bucket[m_rankOfDense[d] + 1];
+	for (uint32_t r = 0; r < nMesh; ++r) m_bucket[r + 1] += m_bucket[r];
+	outSortedIndices.resize(m_visible.size());
+	for (size_t k = 0; k < m_visible.size(); ++k)
+		outSortedIndices[m_bucket[m_rankOfDense[m_denseOf[k]]]++] = m_visible[k];
+}
+
 void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
                                       std::vector<const DrawCall*>& outOpaque,
                                       std::vector<const DrawCall*>& outTransparent,
@@ -49,6 +117,7 @@ void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
 	outOpaque.clear();
 	outTransparent.clear();
 	outOpaque.reserve(drawCalls.size());
+	outTransparent.reserve(drawCalls.size());
 	for (const DrawCall& dc : drawCalls)
 	{
 		// GL and Metal classify inline and honour DrawCall::indexOffset/
@@ -82,7 +151,48 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
                                   DepthBatchList&              out)
 {
 	out.clear();
-	out.transforms.reserve(sortedIndices.size());
+	if (out.useSpans)
+	{
+		// The same runs, the instances read in place (DepthBatchList::useSpans): a span per
+		// object, cut where a run reaches kMaxInstancesPerDraw.
+		for (uint32_t idx : sortedIndices)
+		{
+			if (idx >= world.objects.size()) continue;
+			const RenderObject& obj = world.objects[idx];
+			if (filter == DepthFilter::ShadowCasters  && !obj.castsShadow)   continue;
+			if (filter == DepthFilter::AoContributors && !obj.contributesAO) continue;
+			if (obj.entityId == skipEntity) continue;
+			const uint32_t total = world.instanceCountOf(obj);
+			uint32_t done = 0;
+			while (done < total)
+			{
+				const bool extend = !out.batches.empty() && out.batches.back().meshAssetId == obj.meshAssetId
+				                 && out.batches.back().count < HE::kMaxInstancesPerDraw;
+				if (!extend)
+					out.batches.push_back(DepthBatch{ obj.meshAssetId, 0, 0,
+					                                  static_cast<uint32_t>(out.spans.size()), 0 });
+				DepthBatch&    b    = out.batches.back();
+				const uint32_t room = HE::kMaxInstancesPerDraw - b.count;
+				const uint32_t take = std::min(total - done, room);
+				out.spans.push_back(world.instanceSpan(obj, done, take));
+				++b.spanCount;
+				b.count += take;
+				done    += take;
+			}
+		}
+		return;
+	}
+	// Two phases: the runs and where each object's instances go (serial, no matrix touched),
+	// then the matrices into one array sized once, on the job system's workers. With foliage the
+	// list used to grow through every doubling while each cluster unfolded on the main thread,
+	// half of the 300k frame (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1).
+	// An ordinary object's one matrix is copied right here; only clusters become pieces.
+	size_t upper = 0;
+	for (uint32_t idx : sortedIndices)
+		if (idx < world.objects.size()) upper += world.instanceCountOf(world.objects[idx]);
+	out.transforms.resize(upper);
+	std::vector<RenderWorld::InstancePiece> pieces;
+	size_t total = 0;
 	for (uint32_t idx : sortedIndices)
 	{
 		if (idx >= world.objects.size()) continue;
@@ -96,8 +206,10 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 		// its bucket. A depth-only pass has no per-instance state, so a cluster joins
 		// the run exactly as that many ordinary objects of the same mesh would.
 		uint32_t left = world.instanceCountOf(obj);
-		size_t   pos  = out.transforms.size();
-		world.appendInstances(obj, out.transforms);
+		size_t   pos  = total;
+		if (obj.isCluster()) world.addInstancePiece(pieces, obj, 0, left, pos);
+		else                 out.transforms[pos] = obj.transform;
+		total += left;
 
 		// Extend the current run when the mesh matches; the sorter grouped by
 		// mesh id, so a change here means a genuinely new mesh. A run holds at most
@@ -120,22 +232,36 @@ void RenderSorter::batchDepthRuns(const RenderWorld&           world,
 			left -= take;
 		}
 	}
+	out.transforms.resize(total);   // the filters dropped what the upper bound counted
+	world.writeInstancePieces(pieces, out.transforms.data());
+}
+
+static bool isFeatureEnabled(const char* envVarName)
+{
+	const char* v = std::getenv(envVarName);
+	return !(v && *v && std::atoi(v) == 0);
 }
 
 bool RenderSorter::depthInstancingEnabled()
 {
-	static const bool on = []{
-		const char* v = std::getenv("HE_DEPTH_INSTANCING");
-		return !(v && *v && std::atoi(v) == 0);
-	}();
+	static const bool on = isFeatureEnabled("HE_DEPTH_INSTANCING");
+	return on;
+}
+
+bool RenderSorter::instanceSpansEnabled()
+{
+	static const bool on = isFeatureEnabled("HE_INSTANCE_SPANS");
+	return on;
+}
+
+bool RenderSorter::parallelShadowViewsEnabled()
+{
+	static const bool on = isFeatureEnabled("HE_MTL_PARALLEL_SHADOW");
 	return on;
 }
 
 bool RenderSorter::graphInstancingEnabled()
 {
-	static const bool on = []{
-		const char* v = std::getenv("HE_GRAPH_INSTANCING");
-		return !(v && *v && std::atoi(v) == 0);
-	}();
+	static const bool on = isFeatureEnabled("HE_GRAPH_INSTANCING");
 	return on;
 }

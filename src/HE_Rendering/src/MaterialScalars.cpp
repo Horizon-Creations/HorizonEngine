@@ -2,6 +2,7 @@
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <JobSystem/JobSystem.h>
 
 #include <algorithm>
 
@@ -40,7 +41,40 @@ void resolveObject(const ContentManager* cm, RenderObject& obj)
 void resolveWorldMaterialScalars(RenderWorld& world, const ContentManager* cm)
 {
 	if (!cm) return;
-	for (RenderObject& obj : world.objects) resolveObject(cm, obj);
+	// The objects' materials are a few hundred under tens of thousands of objects: blocks of them
+	// on the workers (the content manager's getters only read, and nothing loads while the thread
+	// that pumps the loaders waits in parallel_for), each with a direct-mapped memo of the scalars
+	// of the materials it has seen. Same values as asking per object.
+	constexpr size_t kBlock = 2048;
+	const size_t     n = world.objects.size();
+	if (n >= 2 * kBlock)
+	{
+		struct Memo { HE::UUID id; glm::vec3 color; float metallic, roughness, opacity; bool known = false, valid = false; };
+		const size_t nBlocks = (n + kBlock - 1) / kBlock;
+		parallel_for(nBlocks, [&](size_t b) {
+			Memo memo[64];
+			const size_t from = b * kBlock, to = std::min(n, from + kBlock);
+			auto resolve = [&](auto& x)
+			{
+				if (x.materialAssetId == HE::UUID{}) return;
+				Memo& m = memo[std::hash<HE::UUID>{}(x.materialAssetId) & 63u];
+				if (!(m.valid && m.id == x.materialAssetId))
+				{
+					m.id = x.materialAssetId; m.valid = true;
+					m.known = resolveMaterialScalars(cm, x.materialAssetId, m.color, m.metallic, m.roughness, m.opacity);
+				}
+				if (m.known) { x.baseColor = m.color; x.metallic = m.metallic; x.roughness = m.roughness; x.opacity = m.opacity; }
+			};
+			for (size_t i = from; i < to; ++i)
+			{
+				RenderObject& obj = world.objects[i];
+				resolve(obj);
+				for (RenderSection& sec : obj.sections) resolve(sec);
+			}
+		}, "MaterialScalars", 1);
+	}
+	else
+		for (RenderObject& obj : world.objects) resolveObject(cm, obj);
 	for (SkinnedRenderObject& obj : world.skinnedObjects) resolveObject(cm, obj);
 }
 

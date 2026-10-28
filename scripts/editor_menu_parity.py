@@ -49,7 +49,7 @@ OLD_ROWS = [
     ("Edit", "Project Settings"), ("Edit", "Preferences"),
     ("View", "Toggle Fullscreen"), ("View", "Reset Layout"),
     ("View", "Performance Profiler"), ("View", "Environment"), ("View", "Collaboration"),
-    ("View", "Source Control"), ("View", "Console"), ("View", "Audio Mixer"),
+    ("View", "Source Control"), ("View", "Console"),
     ("View", "Undo History"), ("View", "Watch"), ("View", "Ground Grid"),
     ("View", "Scene 2"), ("View", "Scene 3"), ("View", "Scene 4"),
     ("View", "Level Script"), ("View", "Game Instance"),

@@ -6,6 +6,7 @@
 #include "NotificationStore.h"           // a settings write that fails has to say so
 #include "EditorSettingsPanel.h"      // the engine-settings rows the graphics pages reuse
 #include "EditorGraphics.h"           // project graphics <-> EditorConfig
+#include "AudioMixerPanel.h"            // Audio > Buses is the mixer
 #include "AppMetadataRows.h"             // icon file, icon preview, splash — shared with Export
 #include <Application/AppIcon.h>         // the generated app icon + its preview
 #include <Application/GameBackendRules.h> // the backend names a shipped build can name
@@ -32,7 +33,6 @@ namespace ProjectSettingsPanel
 
 static Page s_page          = Page::General;
 static bool s_openRequested = false;
-static bool s_audioMixerRequested = false;
 
 void requestOpen()          { s_openRequested = true; }
 void requestOpen(Page page) { s_openRequested = true; s_page = page; }
@@ -43,12 +43,6 @@ bool takeOpenRequest()
 	return r;
 }
 Page requestedPage() { return s_page; }
-bool takeAudioMixerRequest()
-{
-	const bool r = s_audioMixerRequested;
-	s_audioMixerRequested = false;
-	return r;
-}
 
 #ifdef HE_IMGUI_ENABLED
 
@@ -1276,31 +1270,13 @@ void drawMultiplayerPage(AppContext& ctx)
 }
 
 // ─── Audio ▸ Buses ───────────────────────────────────────────────────────────
-// The mixer is a window of its own (Window ▸ Audio Mixer): faders are something
-// you operate while a scene plays, not a page you fill in. This page says where
-// the buses are and what they are for, so the "Audio" heading on the rail is
-// not a dead end.
+// The mixer itself: bus faders, EQ and the spatial-audio backend. The buses and
+// the backend choice belong to the project (saved in its .heproj, carried into
+// the build you export), so this is where they live.
 void drawAudioBusesPage(AppContext& ctx)
 {
 	HE::Ed::Help::Scope helpScope("Audio Buses");
-	ProjectData* pp = openProject(ctx);
-	if (!pp) return;
-	const ProjectData& p = *pp;
-
-	hint("The mixer's buses belong to the PROJECT too: saved in its .heproj and carried "
-	     "into the build you export, so a source whose Bus field says \"Music\" finds "
-	     "that bus in the shipped game exactly as here.");
-	ImGui::Spacing();
-	const std::size_t count = p.audioBuses.buses.size();
-	if (count == 0)
-		ImGui::TextDisabled("No buses yet: every source plays straight into the master.");
-	else
-		ImGui::TextDisabled("%zu bus%s defined.", count, count == 1 ? "" : "es");
-	ImGui::Spacing();
-	// The mixer's open flag lives in EditorUI with the other tool windows;
-	// the request is consumed there, next to this tab's own.
-	if (EditorWidgets::button("Open Audio Mixer")) s_audioMixerRequested = true;
-	EditorWidgets::helpForLabel("Open Audio Mixer");
+	AudioMixerPanel::DrawAudioMixer(ctx);
 }
 
 } // namespace

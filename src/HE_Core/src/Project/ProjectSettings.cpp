@@ -56,6 +56,10 @@ bool nearlyEqual(float a, float b)
     return std::fabs(a - b) <= 1e-6f * std::max(1.0f, std::max(std::fabs(a), std::fabs(b)));
 }
 
+// A NaN or infinity cannot be clamped into anything useful, so it becomes the
+// field's own fallback; every clamp() step below then bounds the result.
+float finiteOr(float v, float fallback) { return std::isfinite(v) ? v : fallback; }
+
 // The graphics list's per-type work, picked by overload so one macro row does it
 // for a bool, an int and a float alike.
 bool fieldEqual(bool a, bool b)   { return a == b; }
@@ -71,7 +75,7 @@ void clampFieldFor(int& v, double lo, double hi, int)
 }
 void clampFieldFor(float& v, double lo, double hi, float fallback)
 {
-    v = std::isfinite(v) ? static_cast<float>(std::clamp(static_cast<double>(v), lo, hi)) : fallback;
+    v = static_cast<float>(std::clamp(static_cast<double>(finiteOr(v, fallback)), lo, hi));
 }
 
 // The three spellings the runtime accepts, and only those: anything else in
@@ -238,13 +242,11 @@ void ProjectSettings::clamp()
     auto& p = physics;
     p.fixedHz = std::clamp(p.fixedHz, ProjectPhysicsSettings::kMinHz, ProjectPhysicsSettings::kMaxHz);
     p.threads = std::clamp(p.threads, 0, ProjectPhysicsSettings::kMaxThreads);
-    p.budgetMs = std::isfinite(p.budgetMs)
-        ? std::clamp(p.budgetMs, 0.0f, ProjectPhysicsSettings::kMaxBudgetMs)
-        : ProjectPhysicsSettings{}.budgetMs;
+    p.budgetMs = std::clamp(finiteOr(p.budgetMs, ProjectPhysicsSettings{}.budgetMs),
+                            0.0f, ProjectPhysicsSettings::kMaxBudgetMs);
     p.eventsPerPoll = std::clamp(p.eventsPerPoll, 0, ProjectPhysicsSettings::kMaxEventsPerPoll);
-    p.floatingOriginRadius = std::isfinite(p.floatingOriginRadius)
-        ? std::clamp(p.floatingOriginRadius, 0.0f, ProjectPhysicsSettings::kMaxFloatingOriginRadius)
-        : 0.0f;
+    p.floatingOriginRadius = std::clamp(finiteOr(p.floatingOriginRadius, 0.0f),
+                                        0.0f, ProjectPhysicsSettings::kMaxFloatingOriginRadius);
     for (int i = 0; i < 3; ++i)
     {
         if (!std::isfinite(p.gravity[i])) p.gravity[i] = 0.0f;
@@ -266,15 +268,14 @@ void ProjectSettings::clamp()
 #define HE_X(T, name, def, editorName, lo, hi) clampFieldFor(g.name, lo, hi, defaults.name);
         HE_PROJECT_GRAPHICS_FIELDS(HE_X)
 #undef HE_X
-        auto dz = [](float v, float fallback)
-        { return std::isfinite(v) ? std::clamp(v, 0.0f, ProjectInputSettings::kMaxDeadzone) : fallback; };
-        input.stickDeadzone   = dz(input.stickDeadzone,   ProjectInputSettings{}.stickDeadzone);
-        input.triggerDeadzone = dz(input.triggerDeadzone, ProjectInputSettings{}.triggerDeadzone);
+        input.stickDeadzone   = std::clamp(finiteOr(input.stickDeadzone, ProjectInputSettings{}.stickDeadzone),
+                                           0.0f, ProjectInputSettings::kMaxDeadzone);
+        input.triggerDeadzone = std::clamp(finiteOr(input.triggerDeadzone, ProjectInputSettings{}.triggerDeadzone),
+                                           0.0f, ProjectInputSettings::kMaxDeadzone);
     }
 
     using AC = ProjectAntiCheatSettings;
     auto& a = antiCheat;
-    auto finiteOr = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
     a.tolerance          = std::clamp(finiteOr(a.tolerance, AC{}.tolerance), 0.0f, AC::kMaxTolerance);
     a.windowSec          = std::clamp(finiteOr(a.windowSec, AC{}.windowSec),
                                       AC::kMinWindowSec, AC::kMaxWindowSec);

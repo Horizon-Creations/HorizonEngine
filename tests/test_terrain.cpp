@@ -17,6 +17,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cmath>
 
 // ── Geometry correctness ───────────────────────────────────────────────────────
 
@@ -286,6 +287,99 @@ TEST_CASE("Adjacent chunks share boundary height + normal (no seam) at same LOD"
         CHECK(L.normals [li * 3 + 1] == doctest::Approx(R.normals [ri * 3 + 1])); // ny
         CHECK(L.normals [li * 3 + 2] == doctest::Approx(R.normals [ri * 3 + 2])); // nz
     }
+}
+
+TEST_CASE("generateTerrainChunkMeshLOD's cached downsample is bit-identical to resampling the field")
+{
+    // A non-flat, non-linear field (not a seeded fBm — just varied enough that a bilinear
+    // resample and a stride-2 downsample would disagree if the LOD cache's indexing were off
+    // by even one cell) so a false-positive match is unlikely.
+    const uint32_t res = 257;
+    std::vector<float> field(static_cast<size_t>(res) * res);
+    for (uint32_t z = 0; z < res; ++z)
+        for (uint32_t x = 0; x < res; ++x)
+        {
+            const float fx = static_cast<float>(x), fz = static_cast<float>(z);
+            field[static_cast<size_t>(z) * res + x] =
+                3.0f * std::sin(fx * 0.37f) + 2.0f * std::cos(fz * 0.21f) + 0.05f * fx * fz / res;
+        }
+
+    const uint32_t lod0Cells = 64;   // verts = lod0Cells>>k + 1 → 65, 33, 17, 9
+    const float sizeX = 200.0f, sizeZ = 150.0f;
+    struct Chunk { float u0, v0, u1, v1; };
+    // One interior chunk, one that hits the u1 = v1 = 1 clamp edge TerrainSystem::buildChunk's
+    // last chunk in each row/column always lands on, and one with a span that is NOT a power of
+    // two itself (1/3, 1/7 are not exactly representable in binary floating point) — a span of
+    // 0.25 or 1.0 would make `(u1-u0)*i` land on a round number for almost any stride, which
+    // would pass even if the power-of-two guard were accidentally relaxed to allow more strides.
+    const Chunk chunks[] = {
+        { 0.25f, 0.0f, 0.5f, 0.25f },
+        { 0.75f, 0.75f, 1.0f, 1.0f },
+        { 1.0f / 3.0f, 1.0f / 7.0f, 2.0f / 3.0f, 4.0f / 7.0f },
+    };
+
+    for (const Chunk& c : chunks)
+    {
+        TerrainChunkLODCache cache;
+        for (uint32_t k = 0; k < 4; ++k)
+        {
+            const uint32_t verts = (lod0Cells >> k) + 1u;
+            const StaticMeshAsset viaCache = generateTerrainChunkMeshLOD(
+                field, res, sizeX, sizeZ, c.u0, c.v0, c.u1, c.v1, verts, 1.0f, cache);
+            const StaticMeshAsset direct = generateTerrainChunkMesh(
+                field, res, sizeX, sizeZ, c.u0, c.v0, c.u1, c.v1, verts, 1.0f);
+
+            // Confirms the CACHED (downsample) path actually ran, not a silent fallback to the
+            // resample path that would make this test pass for the wrong reason: the cache
+            // stays at the finest level's size (65) across every coarser call, it is never
+            // replaced by a smaller grid (see generateTerrainChunkMeshLOD).
+            CHECK(cache.n == lod0Cells + 1);
+
+            CHECK(viaCache.vertices == direct.vertices);
+            CHECK(viaCache.normals  == direct.normals);
+            CHECK(viaCache.uvs      == direct.uvs);
+            CHECK(viaCache.indices  == direct.indices);
+        }
+    }
+}
+
+TEST_CASE("generateTerrainChunkMeshLOD falls back to resampling when the stride is not a power of two")
+{
+    const uint32_t res = 65;
+    std::vector<float> field(static_cast<size_t>(res) * res);
+    for (uint32_t z = 0; z < res; ++z)
+        for (uint32_t x = 0; x < res; ++x)
+            field[static_cast<size_t>(z) * res + x] =
+                static_cast<float>(x) * 0.3f - static_cast<float>(z) * 0.2f;
+
+    const float sizeX = 100.0f, sizeZ = 100.0f;
+    // A span that is not an exact binary fraction (0.1, 0.7), so `(u1-u0)*i` does not land on a
+    // round number for stride 3 either — a test with a span like 0.0..1.0 would not actually
+    // exercise the rounding mismatch the power-of-two guard exists for.
+    const float u0 = 0.1f, u1 = 0.7f, v0 = 0.1f, v1 = 0.7f;
+    TerrainChunkLODCache cache;
+    // Seed the cache with a 49-vertex grid — outside the usual 65/33/17/9 sequence.
+    const StaticMeshAsset base = generateTerrainChunkMeshLOD(
+        field, res, sizeX, sizeZ, u0, v0, u1, v1, 49, 1.0f, cache);
+    REQUIRE(cache.n == 49);
+
+    // (49-1)/(17-1) = 48/16 = 3 — an exact stride, but not a power of two, so this must fall
+    // back to resampling the field directly instead of downsampling the (wrong-stride) cache.
+    const StaticMeshAsset viaCache = generateTerrainChunkMeshLOD(
+        field, res, sizeX, sizeZ, u0, v0, u1, v1, 17, 1.0f, cache);
+    const StaticMeshAsset direct = generateTerrainChunkMesh(
+        field, res, sizeX, sizeZ, u0, v0, u1, v1, 17, 1.0f);
+
+    // Confirms the fallback actually ran (and refreshed the cache to the new, smaller grid) —
+    // without this, the test above would also pass if strideOf were broken and the call had
+    // silently (and in this case harmlessly, by luck) downsampled the 49-vertex cache instead.
+    CHECK(cache.n == 17);
+
+    CHECK(viaCache.vertices == direct.vertices);
+    CHECK(viaCache.normals  == direct.normals);
+    CHECK(viaCache.uvs      == direct.uvs);
+    CHECK(viaCache.indices  == direct.indices);
+    (void)base;
 }
 
 TEST_CASE("resampleHeightField preserves corners and linear fields")

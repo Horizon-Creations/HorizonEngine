@@ -296,6 +296,13 @@ struct MaterialAsset : public RuntimeAsset
 	// pipeline on fragment+vertex together.
 	std::string customShaderVertGlsl;
 
+	// Displacement for GPU tessellation (MatShaderGen::displacementBody: settings line,
+	// declarations, statements ending in `float heDisp`), generated when the graph's
+	// Displacement pin is connected. Empty → no tessellation. Regenerated at load like
+	// customShaderVertGlsl and serialized as the LAST MTRL tail field, which the packer
+	// passes on verbatim. Backends without tessellation ignore it (the fallback).
+	std::string customShaderDispGlsl;
+
 	// Deferred G-buffer fragment variant (MatShaderGen::glslGBuffer): the same graph
 	// evaluation with an MRT emit tail instead of heLitP. Regenerated from the graph
 	// at load and on every editor change like customShaderFragGlsl, AND serialized as
@@ -538,12 +545,17 @@ struct ScriptAsset : public RuntimeAsset
 // they were ~400 MB as PCM, in the pak and in RAM alike. Persisted as an int32
 // in CHUNK_AUMI (absent in old files → PCM16), the bytes in CHUNK_PCMD or
 // CHUNK_OGGD by encoding, so an engine that predates Vorbis sees no PCM chunk
-// and skips the clip instead of playing Ogg pages as samples.
-enum class AudioEncoding : uint8_t { PCM16 = 0, Vorbis = 1 };
+// and skips the clip instead of playing Ogg pages as samples. Mp3 and Flac are
+// the same shape (the source file's bytes verbatim, streamed by the mixer) with
+// their own chunks, CHUNK_MP3D / CHUNK_FLCD, for the same reason.
+enum class AudioEncoding : uint8_t { PCM16 = 0, Vorbis = 1, Mp3 = 2, Flac = 3 };
+
+// True for every encoding the mixer decodes while a voice plays (all but PCM16).
+inline bool audioIsCompressed(AudioEncoding e) { return e != AudioEncoding::PCM16; }
 
 struct AudioAsset : public RuntimeAsset
 {
-	// PCM16: interleaved int16 frames. Vorbis: a complete Ogg Vorbis stream.
+	// PCM16: interleaved int16 frames. Vorbis / Mp3 / Flac: the complete source stream.
 	std::vector<uint8_t> audioData;
 	int                  sampleRate = 0;
 	int                  channels   = 0;

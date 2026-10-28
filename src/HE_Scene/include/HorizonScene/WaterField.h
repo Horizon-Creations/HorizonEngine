@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/UUID.h>
 #include <Math/Math.h>
+#include <Physics/WaterWaves.h>   // the tessellated surface's defaults (TessellationParams)
 #include <cstdint>
 #include <vector>
 
@@ -245,6 +246,21 @@ namespace HE::water
     // default, each knob clamped to its kMin..kMax above (intensity and speed 0..max).
     UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams& p);
 
+    // How the tessellated surface of ONE body behaves (Physics/WaterWaves.h, the material's
+    // "TessWaves" knob): a river wants a fraction of the swell, an open sea the whole of it, and
+    // every body fades the waves out toward its coast. Only read while the landscape's
+    // Field::tessellation is on.
+    struct TessellationParams
+    {
+        float height     = kDefaultTessHeight;   // x the trains' own amplitude
+        float shoreWidth = kDefaultTessShore;    // metres of water over which the waves grow in from the shore
+
+        bool operator==(const TessellationParams& o) const { return height == o.height && shoreWidth == o.shoreWidth; }
+        bool operator!=(const TessellationParams& o) const { return !(*this == o); }
+    };
+    // Held to 0..kMaxTessHeight and kMinTessShore..kMaxTessShore; a non-finite value is the default.
+    TessellationParams clampTessellation(const TessellationParams& p);
+
     // The bed the water brush digs under a body (Thema 206 Schritt 9): its depth
     // follows the distance from the shore, not the brush. The bed sinks by `slope`
     // metres per metre walked in from the shoreline until it is `maxDepth` below
@@ -285,6 +301,8 @@ namespace HE::water
         UnderwaterFogParams underwaterFog{};
         // The refracted-light net from below (Thema 185 Schritt 3); same rule.
         UnderwaterCausticsParams underwaterCaustics{};
+        // The tessellated surface's strength and coast fade (only with Field::tessellation).
+        TessellationParams tessellation{};
         // The bed the water brush last dug under this body (see BrushBedParams).
         BrushBedParams brushBed{};
         // What the brush's digs moved, summed over every dab (height after minus
@@ -353,6 +371,11 @@ namespace HE::water
         //                   level meets the ground.
         bool  clipToGround   = true;
         float shoreOvershoot = kDefaultShoreOvershoot;
+        // The water's waves as real geometry: the engine water material with its
+        // "Tessellation" switch on (GPU tessellation displaces the surface along its
+        // normal by the swell). A landscape-wide setting like the shore clipping; off by
+        // default (it costs GPU time, and Metal draws the surface flat either way).
+        bool  tessellation   = false;
 
         // ── Runtime, never serialised ────────────────────────────────────────
         // An edit that changed cells sets `dirty`, widens the terrain-local XZ
@@ -375,7 +398,7 @@ namespace HE::water
         bool pristine() const
         {
             return bodies.empty() && coverage.empty() && owner.empty() && res == kDefaultRes &&
-                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot;
+                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot && !tessellation;
         }
 
         const Body* findBody(uint16_t id) const;
@@ -446,6 +469,8 @@ namespace HE::water
     // bounds (clampUnderwaterCaustics). Same non-effect on the sheet as
     // setUnderwaterFog. False for an unknown body.
     bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCausticsParams& c);
+    // The body's tessellation numbers (TessellationParams), held to their bounds. False for an unknown body.
+    bool setTessellation(TerrainComponent& tc, uint16_t id, const TessellationParams& t);
 
     // The brush's bed settings of a body, held to their bounds (clampBrushBed).
     // Moves no sheet (the ground is the brush's to dig, not this call's), so like the

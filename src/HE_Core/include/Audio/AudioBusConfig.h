@@ -2,6 +2,7 @@
 #include <Types/Defines.h>
 #include <Audio/AudioEdit.h>   // AudioEq — a bus carries the same EQ an asset does
 #include <nlohmann/json_fwd.hpp>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -35,6 +36,33 @@ struct HE_API AudioBusDef
     AudioEq     eq;
 };
 
+// Who spatialises 3D voices. Miniaudio is the engine's own pan + distance gain
+// and the default of every project; SteamAudio is the HRTF (binaural) backend,
+// which only does anything in a build that includes it (HE_ENABLE_STEAM_AUDIO)
+// and only once its library loaded — AudioEngine::setSpatialBackend says. A
+// project may ask for it in a build without it: the setting is kept (it is the
+// project's, not the machine's) and the engine stays on miniaudio.
+enum class AudioSpatialBackend : uint8_t { Miniaudio = 0, SteamAudio = 1 };
+
+// What Steam Audio does on top of the HRTF, each its own switch. They only act while the
+// Steam Audio backend is active (and the build has it): without it they are stored and
+// ignored, the same rule as the backend choice itself. All off by default.
+struct HE_API AudioSteamOptions
+{
+    bool airAbsorption = false;   // high frequencies die with distance (a distant voice dulls)
+    bool occlusion     = false;   // geometry between source and listener dims and dulls the voice
+    bool reflections   = false;   // reverb from the scene's geometry
+    bool pathing       = false;   // sound finds its way around corners (needs baked probes)
+
+    bool any() const { return airAbsorption || occlusion || reflections || pathing; }
+    bool operator==(const AudioSteamOptions& o) const
+    {
+        return airAbsorption == o.airAbsorption && occlusion == o.occlusion &&
+               reflections == o.reflections && pathing == o.pathing;
+    }
+    bool operator!=(const AudioSteamOptions& o) const { return !(*this == o); }
+};
+
 struct HE_API AudioBusConfig
 {
     // In authoring order — the order the mixer shows them in, and the order the
@@ -44,6 +72,12 @@ struct HE_API AudioBusConfig
     // The gain of everything at once, in front of every bus. 1 is what every
     // project written before this existed was getting.
     float masterVolume = 1.0f;
+
+    // The project's choice of spatialiser (JSON key "spatial": "steamaudio";
+    // absent = Miniaudio, so a project from before this reads and writes as it did).
+    AudioSpatialBackend spatialBackend = AudioSpatialBackend::Miniaudio;
+    // The extra Steam Audio features (JSON key "steam", written only when one is on).
+    AudioSteamOptions   steam;
 
     // A default-constructed config is EMPTY on purpose: a project written
     // before buses existed must load as "no buses", and a source that names one
@@ -64,7 +98,7 @@ struct HE_API AudioBusConfig
     bool isDefault() const;
 
     // The same JSON shape on both sides of the road (.heproj and .hcfg):
-    // { "master": 1.0, "buses": [ { "name": "Music", "volume": 0.8 }, … ] },
+    // { "master": 1.0, "spatial": "steamaudio" (only when not the default), "steam": { "airAbsorption": true, … } (only the ones that are on), "buses": [ { "name": "Music", "volume": 0.8 }, … ] },
     // a bus with an EQ also { …, "eq": { "enabled": true, "bands": [ … ] } }.
     void toJson(nlohmann::json& out) const;
     void fromJson(const nlohmann::json& in);

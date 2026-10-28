@@ -63,17 +63,22 @@ FoliageLayer* foliageLayerOf(entt::registry& reg, Entity e, std::uint8_t f)
 	return fol && i < fol->layers.size() ? &fol->layers[i] : nullptr;
 }
 
+// Change-detection hashes only (Mirror::settingsHash / diggingHash): never sent or stored.
+// The basis is the standard one minus its last digit; kept as is so the hashes do not change.
+constexpr std::uint64_t kFnv1aOffset = 1469598103934665603ull;
+constexpr std::uint64_t kFnv1aPrime  = 1099511628211ull;
+
 std::uint64_t fnv1a(const std::vector<std::uint8_t>& bytes)
 {
-	std::uint64_t h = 1469598103934665603ull;
-	for (const std::uint8_t b : bytes) { h ^= b; h *= 1099511628211ull; }
+	std::uint64_t h = kFnv1aOffset;
+	for (const std::uint8_t b : bytes) { h ^= b; h *= kFnv1aPrime; }
 	return h;
 }
 
 void fnv1aMix(std::uint64_t& h, const void* data, std::size_t n)
 {
 	const auto* b = static_cast<const std::uint8_t*>(data);
-	for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+	for (std::size_t i = 0; i < n; ++i) { h ^= b[i]; h *= kFnv1aPrime; }
 }
 
 // A digging lake's own bed, cheaply: just enough of Body (polygon, the dug
@@ -86,7 +91,7 @@ std::uint64_t diggingFingerprint(entt::registry& reg, Entity e)
 {
 	auto* t = reg.try_get<TerrainComponent>(e);
 	if (!t) return 0;
-	std::uint64_t h = 1469598103934665603ull;
+	std::uint64_t h = kFnv1aOffset;
 	for (const HE::water::Body& b : t->water.bodies)
 	{
 		if (!b.digsBed) continue;

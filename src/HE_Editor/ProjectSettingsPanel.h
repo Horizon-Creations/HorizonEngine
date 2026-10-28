@@ -56,9 +56,4 @@ namespace ProjectSettingsPanel
 	void requestOpen(Page page);
 	bool takeOpenRequest();
 	Page requestedPage();
-
-	// The Audio ▸ Buses page's "Open Audio Mixer": the mixer's open flag lives
-	// in EditorUI with the other tool windows, so the page raises a request and
-	// EditorUI consumes it once per frame.
-	bool takeAudioMixerRequest();
 }

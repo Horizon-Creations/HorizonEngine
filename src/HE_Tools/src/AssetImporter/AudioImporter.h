@@ -5,11 +5,11 @@
 #include "ContentManager/Assets.h"
 #include "ImporterCommon.h"   // Importer::OutputTargets
 
-// Imports WAV and Ogg Vorbis into an AudioAsset. A .wav is decoded to
-// interleaved int16 PCM (AudioEncoding::PCM16); an .ogg is validated by a full
-// decode pass but stored AS IS (AudioEncoding::Vorbis) — the AudioEngine decodes
-// it on the fly at playback, so the asset costs its compressed size in the pak
-// and in RAM. MP3 could follow the same shape via dr_mp3.
+// Imports WAV, Ogg Vorbis, MP3 and FLAC into an AudioAsset. A .wav is decoded to
+// interleaved int16 PCM (AudioEncoding::PCM16); an .ogg / .mp3 / .flac is
+// validated by a full decode pass but stored AS IS (Vorbis / Mp3 / Flac) — the
+// AudioEngine decodes it on the fly at playback, so the asset costs its
+// compressed size in the pak and in RAM.
 class AudioImporter {
 public:
 	// Optional conversion of the stored PCM. Both fields default to 0 = "keep
@@ -21,7 +21,7 @@ public:
 	// downmix halves a voice-over's footprint, one project-wide rate saves the
 	// mixer a resampler per voice — not a correctness one.
 	//
-	// Only PCM16 (.wav) is converted. An .ogg stays the compressed stream it
+	// Only PCM16 (.wav) is converted. An .ogg / .mp3 / .flac stays the compressed stream it
 	// was (there is no Vorbis encoder in the engine, and a re-encode would cost
 	// quality); a target set on an .ogg import is logged and ignored.
 	struct ImportSettings {
@@ -38,7 +38,7 @@ public:
 	// byte count). Public so the tests can check the numbers without a disk.
 	static bool convert(AudioAsset& asset, const ImportSettings& settings);
 
-	// True for the source extensions this importer accepts (.wav, .ogg; case-
+	// True for the source extensions this importer accepts (.wav, .ogg, .mp3, .flac; case-
 	// insensitive). The one place the list lives — classifySource and the
 	// asset_compiler ask here.
 	static bool isSupportedSource(const std::filesystem::path& sourcePath);

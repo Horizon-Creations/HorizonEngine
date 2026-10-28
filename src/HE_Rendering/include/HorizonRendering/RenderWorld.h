@@ -1,13 +1,27 @@
 #pragma once
 #include "../HE_RENDERING_API.h"
 #include "RenderObject.h"
+#include "CommandBuffer.h"
 #include "GiLandscape.h"
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
+#include <JobSystem/JobSystem.h>
+#include <cstdlib>
 #include <memory>
 #include <vector>
 #include <cstdint>
+
+// The height field a landscape was built from, shared with the terrain component (no copy
+// per frame). `version` changes when it is rebuilt; the backends re-upload only then.
+struct GiHeightfield {
+    std::shared_ptr<const std::vector<float>> data;
+    uint32_t  res     = 0;                  // res x res samples
+    uint64_t  version = 0;
+    uint64_t  key     = 0;                  // the terrain entity
+    glm::mat4 worldToLocal{ 1.0f };         // terrain entity's inverse world matrix
+    glm::vec2 size{ 1.0f };                 // local extent in X / Z (sample (res-1) is at `size`)
+};
 
 struct CameraData {
     glm::mat4 view       = glm::mat4(1.0f);
@@ -51,6 +65,22 @@ struct UnderwaterCameraData {
     float causticsScale     = 1.0f;
     float causticsSpeed     = 1.0f;
     float causticsDepth     = 10.0f;   // depth where the net is gone (water::kDefaultCausticsDepth)
+    // How far the scene's wind has turned the sea from the material's own heading,
+    // radians (water::windTurnDeg). The pass turns the net's wave frame by it; the
+    // wind's strength is already in causticsScale (coarser sea) and causticsSpeed.
+    float causticsWindTurn  = 0.0f;
+
+    // The tessellated surface for the post passes (UnderwaterSurfaceShared.h: heSurfaceH):
+    // `surfaceHeight` 0 = the flat plane at surfaceY (a landscape without tessellation, a backend
+    // that cannot do it); > 0 = the surface stands up to that multiple of the waves' own amplitude
+    // above `surfaceLevel`, per pixel. surfaceY then is the surface under the CAMERA (level + wave).
+    float surfaceHeight     = 0.0f;
+    float surfaceShoreWidth = 1.8f;
+    float surfaceLevel      = 0.0f;   // the flat level of the body (surfaceY when flat)
+    float waveLengthFactor  = 1.0f;   // the wind's factors on the three trains (water::windWaveFactors)
+    float waveSpeedFactor   = 1.0f;
+    float waveSteepFactor   = 1.0f;
+    float waveTurn          = 0.0f;   // radians (water::windTurnDeg)
 };
 
 // "no entity" for the owner ids below — 0 is a perfectly valid entt entity, so
@@ -285,6 +315,21 @@ struct InstanceBlock {
     }
 };
 
+// The world matrices of a block's `count` instances, world(0..count-1) bit for bit,
+// computed ONCE per block and kept across frames: foliage does not move, and every
+// pass of every frame used to multiply (or copy) each plant again, five times a frame
+// (three cascades, SSAO, scene; docs/perf-audit/frame-parallelism-audit-2026-10-26.md
+// lever 1). An Identity parent needs no copy: the pointer goes straight into the
+// block's storage. The cache holds a reference to that storage, so a re-scatter
+// that frees it can never alias a stale entry; instanceWorldCacheNextFrame() drops
+// what no frame has asked for in a while. Thread-safe.
+HE_RENDERING_API const glm::mat4* instanceWorldMatrices(const InstanceBlock& block);
+// Call once per frame before any pass reads spans (the Metal frame does): entries
+// not used for a few frames are released.
+HE_RENDERING_API void instanceWorldCacheNextFrame();
+// Entries and matrices held (tests, diagnostics).
+HE_RENDERING_API size_t instanceWorldCacheEntries();
+
 class RenderWorld {
 public:
     void clear();
@@ -338,16 +383,99 @@ public:
         return b ? b->count : 1u;
     }
 
+    // Instance i of obj as a world matrix: its own transform for an ordinary object (i is 0), the
+    // block's i-th plant (parent applied) for a cluster. A pure function of (obj, i), so a draw can
+    // read its matrices straight from here, on any thread, instead of unfolding into a list first.
+    // All of obj's instances as a run (see InstanceRun): no copy, no product.
+    InstanceRun instanceRun(const RenderObject& obj) const
+    {
+        const InstanceSpan s = instanceSpan(obj, 0, instanceCountOf(obj));
+        return InstanceRun(nullptr, 0, s.src, s.n);
+    }
+
     // Append the WORLD matrices of obj's instances to `out`: its own transform for an
     // ordinary object, the whole block (parent applied) for a cluster. The one place
     // that unfolds a cluster; GeometryPass and RenderSorter::batchDepthRuns call it.
     void appendInstances(const RenderObject& obj, std::vector<glm::mat4>& out) const
     {
-        const InstanceBlock* b = blockOf(obj);
-        if (!b) { out.push_back(obj.transform); return; }
+        appendInstanceRange(obj, 0, instanceCountOf(obj), out);
+    }
+
+    // Instances [from, from + n) of obj, for a caller that cuts one cluster across two
+    // draws (an ordinary object is instance 0 of one).
+    void appendInstanceRange(const RenderObject& obj, uint32_t from, uint32_t n,
+                             std::vector<glm::mat4>& out) const
+    {
+        if (n == 0) return;
         const size_t base = out.size();
-        out.resize(base + b->count);
-        for (uint32_t i = 0; i < b->count; ++i) out[base + i] = b->world(i);
+        out.resize(base + (blockOf(obj) ? n : 1u));
+        std::vector<InstancePiece> pieces;
+        addInstancePiece(pieces, obj, from, n, 0);
+        writeInstancePieces(pieces, out.data() + base);
+    }
+
+    // Unfolding on the job system's workers. A caller lays out where each object's instances go
+    // (addInstancePiece, serial and cheap), sizes its array once, and writeInstancePieces fills it.
+    // At 300k plants the five unfoldings a frame (three cascades, SSAO, scene) ran on the main
+    // thread with ten workers idle: the matrix products, and copies through every doubling of
+    // the lists (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1). A big block is
+    // cut into pieces so that one cluster spreads too, many small ones share out as they are.
+    // Every instance is still world(i), so the bits are the same on either path.
+    struct InstancePiece
+    {
+        const RenderObject* obj;
+        uint32_t            from;   // first instance of obj
+        uint32_t            n;
+        size_t              pos;    // where in the destination array
+    };
+    static constexpr uint32_t kInstancePieceMax  = 2048;
+    static constexpr size_t   kParallelUnfoldMin = 4096;   // fewer instances stay on the caller
+    // HE_PARALLEL_UNFOLD=0 keeps every unfolding on the calling thread: the A/B switch, like
+    // HE_DEPTH_INSTANCING (same bits either way).
+    static bool parallelUnfoldEnabled()
+    {
+        static const bool on = [] {
+            const char* v = std::getenv("HE_PARALLEL_UNFOLD");
+            return !(v && *v && std::atoi(v) == 0);
+        }();
+        return on;
+    }
+    void addInstancePiece(std::vector<InstancePiece>& pieces, const RenderObject& obj,
+                          uint32_t from, uint32_t n, size_t pos) const
+    {
+        if (!blockOf(obj)) { if (n > 0) pieces.push_back({ &obj, 0, 1, pos }); return; }
+        while (n > kInstancePieceMax)
+        {
+            pieces.push_back({ &obj, from, kInstancePieceMax, pos });
+            from += kInstancePieceMax; pos += kInstancePieceMax; n -= kInstancePieceMax;
+        }
+        if (n > 0) pieces.push_back({ &obj, from, n, pos });
+    }
+    void writeInstancePieces(const std::vector<InstancePiece>& pieces, glm::mat4* dst) const
+    {
+        auto one = [this, &pieces, dst](size_t p)
+        {
+            const InstancePiece& x = pieces[p];
+            const InstanceBlock* b = blockOf(*x.obj);
+            if (!b) { dst[x.pos] = x.obj->transform; return; }
+            for (uint32_t i = 0; i < x.n; ++i) dst[x.pos + i] = b->world(x.from + i);
+        };
+        // Only cluster instances count toward going wide: an ordinary object is one matrix
+        // copy, and 16k of them (the 50k reference world) were faster on the caller than shared out.
+        size_t clustered = 0;
+        for (const InstancePiece& x : pieces) if (x.obj->isCluster()) clustered += x.n;
+        if (pieces.size() > 1 && clustered >= kParallelUnfoldMin && parallelUnfoldEnabled())
+            parallel_for(pieces.size(), one, "UnfoldInstances", 1);
+        else
+            for (size_t p = 0; p < pieces.size(); ++p) one(p);
+    }
+
+    // Instances [from, from + n) of obj as one span (see InstanceSpan): no copy, no product.
+    InstanceSpan instanceSpan(const RenderObject& obj, uint32_t from, uint32_t n) const
+    {
+        const InstanceBlock* b = blockOf(obj);
+        if (!b) return { &obj.transform, 1u };
+        return { instanceWorldMatrices(*b) + from, n };
     }
 
     // The same walk without materialising a list: call fn(world matrix) per instance.
@@ -375,6 +503,8 @@ public:
     // reflection kernels read these (to sample the paint per ray hit) — see
     // GiLandscape.h. Empty in scenes without a terrain.
     std::vector<HE::GiLandscape>     landscapes;
+    // A landscape's height field for the GI sun-shadow kernel (see GiHeightfield below).
+    std::vector<GiHeightfield>       heightfields;
     CameraData                camera;
     ShadowData                shadow;
     UnderwaterCameraData      underwaterCamera;

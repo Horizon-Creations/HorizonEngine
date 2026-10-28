@@ -40,6 +40,28 @@ VIEWS = {
     # A 400 m plane seen at a low angle: the chop's distance fades and the horizon (Thema 206 step 3).
     "far":     dict(WATERTEST="floor", WATERSIZE="400", CAMY="3", CAMZ="0", PITCH="-6"),
     "shore":   dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60"),
+    # The lake low over its surface, along the swell: the silhouette of waves that are geometry (HE_DUMP_WATERTESS=1).
+    "swell":   dict(WATERLAKE="bowl", CAMX="0", CAMY="302", CAMZ="30", PITCH="-6"),
+    # Just above the water (the level of the bowl lake is about CAMY 303.x): a crest may stand over the camera.
+    "swell-low": dict(WATERLAKE="bowl", CAMX="0", CAMY="304", CAMZ="30", PITCH="-3"),
+    "swell-low2": dict(WATERLAKE="bowl", CAMX="0", CAMY="306", CAMZ="30", PITCH="-3"),
+    # Camera at the waterline (bowl level about 303.x): half the frame under water, the waterline on the screen.
+    "wl-a": dict(WATERLAKE="bowl", CAMX="0", CAMY="303.3", CAMZ="30", PITCH="0"),
+    "wl-b": dict(WATERLAKE="bowl", CAMX="0", CAMY="303.6", CAMZ="30", PITCH="0"),
+    "wl-c": dict(WATERLAKE="bowl", CAMX="0", CAMY="303.0", CAMZ="30", PITCH="0"),
+    "wl-d": dict(WATERLAKE="bowl", CAMX="0", CAMY="302.5", CAMZ="30", PITCH="0"),
+    # On the sand looking out over the water (the user's beach case): the camera stands on the slope.
+    "bch-a": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3", CAMX="16", CAMY="302.2", CAMZ="0", PITCH="0", YAW="90"),
+    "bch-b": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3", CAMX="16", CAMY="302.2", CAMZ="0", PITCH="0", YAW="270"),
+    "bch-c": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3", CAMX="7", CAMY="301.2", CAMZ="0", PITCH="0", YAW="270"),
+    "bch-d": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3", CAMX="6", CAMY="300.9", CAMZ="0", PITCH="0", YAW="270"),
+    "bch-e": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3", CAMX="8", CAMY="300.8", CAMZ="0", PITCH="0", YAW="270"),
+    "bch-f": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3", CAMX="6.5", CAMY="300.27", CAMZ="0", PITCH="0", YAW="270"),
+    "bch-g": dict(WATERLAKE="slope", WATERSLOPE="0.04", WATERLEVEL="0.3", CAMX="3", CAMY="300.3", CAMZ="0", PITCH="0", YAW="270"),
+    "wl-f": dict(WATERLAKE="bowl", CAMX="0", CAMY="302.2", CAMZ="30", PITCH="0"),
+    "wl-g": dict(WATERLAKE="bowl", CAMX="0", CAMY="302.35", CAMZ="30", PITCH="0"),
+    "wl-e": dict(WATERLAKE="bowl", CAMX="0", CAMY="302.75", CAMZ="30", PITCH="0"),
+    "swell-hi": dict(WATERLAKE="bowl", CAMX="0", CAMY="310", CAMZ="40", PITCH="-18"),
     "shore33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33"),
     "shoresheet33": dict(WATERLAKE="bowl", CAMY="375", CAMZ="48", PITCH="-60", WATERRES="33",
                          WATERHIDEGROUND="1"),

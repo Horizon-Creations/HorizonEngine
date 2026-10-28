@@ -953,11 +953,10 @@ TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
 // ─── Runtime flavours (docs/he-apps-plan.md A3b) ──────────────────────────────
 //
 // Three runtimes per platform, told apart by one word. That word is spelled in
-// four places — this enum, HE_RUNTIME_DIR_NAME in the root CMakeLists.txt,
-// FLAVOR_DIRS in scripts/build_runtimes.py and DIR_TO_FLAVOR in
-// scripts/runtime_size.py — so the first thing worth pinning is the spelling
-// itself: a rename in one place and not the others produces an exporter that
-// looks in a directory nobody writes, and nothing else notices.
+// three places — this enum, HE_RUNTIME_DIR_NAME in the root CMakeLists.txt and
+// FLAVOR_DIRS in scripts/build_runtimes.py — so the first thing worth pinning
+// is the spelling itself: a rename in one place and not the others produces an
+// exporter that looks in a directory nobody writes, and nothing else notices.
 
 TEST_CASE("runtimeFlavorName: the directory spelling is the enum's name")
 {

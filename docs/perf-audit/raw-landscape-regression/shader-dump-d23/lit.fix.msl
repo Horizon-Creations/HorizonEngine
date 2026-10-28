@@ -1,0 +1,1767 @@
+#pragma clang diagnostic ignored "-Wmissing-prototypes"
+
+#include <metal_stdlib>
+#include <simd/simd.h>
+
+using namespace metal;
+
+struct HeLighting
+{
+    float4 sunDir;
+    float4 sunColor;
+    float4 ambient;
+    float4 camPos;
+    float4 lightPos[8];
+    float4 lightDir[8];
+    float4 lightColor[8];
+    float4 lightParams[8];
+    float4 counts;
+    float4 giParams;
+    float4x4 csmVP[3];
+    float4 csmSplits;
+    float4 camFwd;
+    float4x4 localShadowVP[16];
+    float4 fog;
+    float4 giGridOrigin;
+    float4 giGridCounts;
+    float4 giProbe;
+    float4 weather;
+    float4 ssr;
+    float4 giRefl;
+    float4 cloudShadowA;
+    float4 cloudShadowB;
+    float4 specAA;
+    float4 shadowBias;
+    float4 viewMode;
+    float4 clusterParams;
+    float4 clusterCamFwd;
+    float4 weather2;
+    float4 waterRipples;
+    float4 waterRippleA[16];
+    float4 waterRippleB[16];
+};
+
+struct HeParams
+{
+    float4 v[16];
+};
+
+struct main0_out
+{
+    float4 oColor [[color(0)]];
+};
+
+struct main0_in
+{
+    float3 vNormal [[user(locn0)]];
+    float2 vUV [[user(locn2)]];
+    float3 vWorldPos [[user(locn3)]];
+};
+
+static inline __attribute__((always_inline))
+uint3 heBombHash(thread const int2& cell, thread const uint& seed)
+{
+    uint3 v = (uint3(uint2(cell), seed) * uint3(1664525u)) + uint3(1013904223u);
+    v.x += (v.y * v.z);
+    v.y += (v.z * v.x);
+    v.z += (v.x * v.y);
+    v ^= (v >> uint3(16u));
+    v.x += (v.y * v.z);
+    v.y += (v.z * v.x);
+    v.z += (v.x * v.y);
+    return v;
+}
+
+static inline __attribute__((always_inline))
+void heBombTapV(thread const float2& uv, thread const float& size, thread const int2& cell, thread const float& rot, thread const uint& seed, thread float2& t, thread float2x2& r, thread uint& sel)
+{
+    int2 param = cell;
+    uint param_1 = seed;
+    uint3 h = heBombHash(param, param_1);
+    float2 off = float2(h.xy >> uint2(8u)) * 5.9604644775390625e-08;
+    float a = (((float(h.z >> 8u) * 1.1920928955078125e-07) - 1.0) * 3.1415927410125732421875) * rot;
+    float cs = cos(a);
+    float sn = sin(a);
+    r = float2x2(float2(cs, sn), float2(-sn, cs));
+    float2 cen = float2(float(cell.x) + (0.5 * float(cell.y)), 0.866025388240814208984375 * float(cell.y)) * size;
+    t = ((r * (uv - cen)) + cen) + off;
+    sel = h.x & 255u;
+}
+
+static inline __attribute__((always_inline))
+void heBombGridV(thread const float2& uv, thread const float& cell, thread const float& rot, thread const float& sharp, thread const uint& seed, thread float2& t0, thread float2& t1, thread float2& t2, thread float2x2& r0, thread float2x2& r1, thread float2x2& r2, thread float3& w, thread uint3& sel)
+{
+    float size = fast::max(cell, 0.001000000047497451305389404296875);
+    float2 st = uv / float2(size);
+    float2 sk = float2(st.x - (0.57735025882720947265625 * st.y), 1.1547005176544189453125 * st.y);
+    float2 bf = floor(sk);
+    float2 f = sk - bf;
+    float fz = (1.0 - f.x) - f.y;
+    float s = step(0.0, -fz);
+    float s2 = (2.0 * s) - 1.0;
+    int2 b = int2(bf);
+    int si = int(s);
+    float2 param = uv;
+    float param_1 = size;
+    int2 param_2 = b + int2(si);
+    float param_3 = rot;
+    uint param_4 = seed;
+    float2 param_5;
+    float2x2 param_6;
+    uint param_7;
+    heBombTapV(param, param_1, param_2, param_3, param_4, param_5, param_6, param_7);
+    t0 = param_5;
+    r0 = param_6;
+    sel.x = param_7;
+    float2 param_8 = uv;
+    float param_9 = size;
+    int2 param_10 = b + int2(si, 1 - si);
+    float param_11 = rot;
+    uint param_12 = seed;
+    float2 param_13;
+    float2x2 param_14;
+    uint param_15;
+    heBombTapV(param_8, param_9, param_10, param_11, param_12, param_13, param_14, param_15);
+    t1 = param_13;
+    r1 = param_14;
+    sel.y = param_15;
+    float2 param_16 = uv;
+    float param_17 = size;
+    int2 param_18 = b + int2(1 - si, si);
+    float param_19 = rot;
+    uint param_20 = seed;
+    float2 param_21;
+    float2x2 param_22;
+    uint param_23;
+    heBombTapV(param_16, param_17, param_18, param_19, param_20, param_21, param_22, param_23);
+    t2 = param_21;
+    r2 = param_22;
+    sel.z = param_23;
+    w = powr(fast::max(float3((-fz) * s2, s - (f.y * s2), s - (f.x * s2)), float3(0.0)), float3(sharp));
+    w /= float3((w.x + w.y) + w.z);
+}
+
+static inline __attribute__((always_inline))
+float heHashI2(thread const int2& i)
+{
+    uint2 v = (uint2(i) * uint2(1664525u)) + uint2(1013904223u);
+    v.x += (v.y * 1664525u);
+    v.y += (v.x * 1664525u);
+    v ^= (v >> uint2(16u));
+    v.x += (v.y * 1664525u);
+    v.y += (v.x * 1664525u);
+    v ^= (v >> uint2(16u));
+    return float(v.x >> 8u) * 5.9604644775390625e-08;
+}
+
+static inline __attribute__((always_inline))
+float heValueNoiseI(thread const float2& p)
+{
+    float2 fl = floor(p);
+    int2 i = int2(fl);
+    float2 f = p - fl;
+    float2 u = (f * f) * (float2(3.0) - (f * 2.0));
+    int2 param = i;
+    float a = heHashI2(param);
+    int2 param_1 = i + int2(1, 0);
+    float b = heHashI2(param_1);
+    int2 param_2 = i + int2(0, 1);
+    float cc = heHashI2(param_2);
+    int2 param_3 = i + int2(1);
+    float d = heHashI2(param_3);
+    return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y);
+}
+
+static inline __attribute__((always_inline))
+float heFbmI(thread float2& p)
+{
+    float v = 0.0;
+    float a = 0.5;
+    for (int k = 0; k < 4; k++)
+    {
+        float2 param = p;
+        v += (a * heValueNoiseI(param));
+        p *= 2.0;
+        a *= 0.5;
+    }
+    return v;
+}
+
+static inline __attribute__((always_inline))
+float3 hePerturbNormal(thread const float3& N, thread const float3& mapN, thread const float3& pos, thread const float2& uv)
+{
+    float3 dp1 = dfdx(pos);
+    float3 dp2 = dfdy(pos);
+    float2 duv1 = dfdx(uv);
+    float2 duv2 = dfdy(uv);
+    float3 dp2perp = cross(dp2, N);
+    float3 dp1perp = cross(N, dp1);
+    float3 T = (dp2perp * duv1.x) + (dp1perp * duv2.x);
+    float3 B = (dp2perp * duv1.y) + (dp1perp * duv2.y);
+    float invmax = rsqrt(fast::max(dot(T, T), dot(B, B)));
+    invmax *= ((dot(cross(dp1, dp2), N) < 0.0) ? (-1.0) : 1.0);
+    return fast::normalize(float3x3(float3(T * invmax), float3(B * invmax), float3(N)) * mapN);
+}
+
+static inline __attribute__((always_inline))
+float heSpecAARoughness(thread const float3& N, thread const float& perceptualRough, constant HeLighting& heLight)
+{
+    bool _1105 = heLight.specAA.x <= 0.0;
+    bool _1112;
+    if (!_1105)
+    {
+        _1112 = heLight.specAA.y < 0.5;
+    }
+    else
+    {
+        _1112 = _1105;
+    }
+    if (_1112)
+    {
+        return perceptualRough;
+    }
+    float3 du = dfdx(N);
+    float3 dv = dfdy(N);
+    float variance = (0.1500000059604644775390625 * heLight.specAA.x) * (dot(du, du) + dot(dv, dv));
+    float kernelRough = fast::min(2.0 * variance, 0.25);
+    float alpha = perceptualRough * perceptualRough;
+    float widened = fast::clamp((alpha * alpha) + kernelRough, 0.0, 1.0);
+    return fast::max(perceptualRough, sqrt(sqrt(widened)));
+}
+
+static inline __attribute__((always_inline))
+float2 heOctEncode(thread const float3& n)
+{
+    float2 p = n.xy * (1.0 / ((abs(n.x) + abs(n.y)) + abs(n.z)));
+    float2 signP = float2((p.x >= 0.0) ? 1.0 : (-1.0), (p.y >= 0.0) ? 1.0 : (-1.0));
+    float2 _153;
+    if (n.z <= 0.0)
+    {
+        _153 = (float2(1.0) - abs(p.yx)) * signP;
+    }
+    else
+    {
+        _153 = p;
+    }
+    return _153;
+}
+
+static inline __attribute__((always_inline))
+float3 heGIIrradianceAt(thread const float3& P, thread const float3& N, constant HeLighting& heLight, texture2d<float> heGIVisibility, sampler heGIVisibilitySmplr, texture2d<float> heGIIrradiance, sampler heGIIrradianceSmplr)
+{
+    int gx = int(heLight.giGridCounts.x);
+    int gy = int(heLight.giGridCounts.y);
+    int gz = int(heLight.giGridCounts.z);
+    if (((gx <= 0) || (gy <= 0)) || (gz <= 0))
+    {
+        return float3(0.0);
+    }
+    int probesPerRow = max(1, int(heLight.giGridCounts.w));
+    int probeRows = int(ceil(float((gx * gy) * gz) / float(probesPerRow)));
+    float2 atlasSizeTexels = float2(float(probesPerRow), float(probeRows)) * 8.0;
+    float spacing = fast::max(heLight.giGridOrigin.w, 9.9999997473787516355514526367188e-05);
+    float3 gridSpace = (P - heLight.giGridOrigin.xyz) / float3(spacing);
+    float3 base = floor(gridSpace);
+    float3 frac = gridSpace - base;
+    float3 sumColor = float3(0.0);
+    float sumWeight = 0.0;
+    for (int i = 0; i < 8; i++)
+    {
+        float3 offs = float3(float(i & 1), float((i >> 1) & 1), float((i >> 2) & 1));
+        float3 cell = base + offs;
+        bool _292 = any(cell < float3(0.0));
+        bool _301;
+        if (!_292)
+        {
+            _301 = cell.x >= float(gx);
+        }
+        else
+        {
+            _301 = _292;
+        }
+        bool _310;
+        if (!_301)
+        {
+            _310 = cell.y >= float(gy);
+        }
+        else
+        {
+            _310 = _301;
+        }
+        bool _319;
+        if (!_310)
+        {
+            _319 = cell.z >= float(gz);
+        }
+        else
+        {
+            _319 = _310;
+        }
+        if (_319)
+        {
+            continue;
+        }
+        int probeIndex = (int(cell.x) + (int(cell.y) * gx)) + ((int(cell.z) * gx) * gy);
+        float3 trilinear = mix(float3(1.0) - frac, frac, offs);
+        float weight = (trilinear.x * trilinear.y) * trilinear.z;
+        if (weight <= 9.9999997473787516355514526367188e-06)
+        {
+            continue;
+        }
+        float3 probePos = heLight.giGridOrigin.xyz + (cell * spacing);
+        float3 toProbe = probePos - P;
+        float dist = fast::max(length(toProbe), 9.9999997473787516355514526367188e-05);
+        float3 dirToProbe = toProbe / float3(dist);
+        weight *= fast::max(0.0500000007450580596923828125, (dot(N, dirToProbe) * 0.5) + 0.5);
+        int tileX = probeIndex % probesPerRow;
+        int tileY = probeIndex / probesPerRow;
+        float2 tileOrigin = float2(float(tileX), float(tileY)) * 8.0;
+        float3 param = -dirToProbe;
+        float2 visUV = (tileOrigin + (((heOctEncode(param) * 0.5) + float2(0.5)) * 8.0)) / atlasSizeTexels;
+        float2 visSample = heGIVisibility.sample(heGIVisibilitySmplr, visUV).xy;
+        float mean = visSample.x;
+        float mean2 = visSample.y;
+        float variance = abs(mean2 - (mean * mean));
+        float chebyshev = 1.0;
+        if (dist > mean)
+        {
+            float d = dist - mean;
+            chebyshev = variance / (variance + (d * d));
+            chebyshev = (chebyshev * chebyshev) * chebyshev;
+        }
+        weight *= fast::max(chebyshev, 0.0500000007450580596923828125);
+        float3 param_1 = N;
+        float2 irrUV = (tileOrigin + (((heOctEncode(param_1) * 0.5) + float2(0.5)) * 8.0)) / atlasSizeTexels;
+        sumColor += (heGIIrradiance.sample(heGIIrradianceSmplr, irrUV).xyz * weight);
+        sumWeight += weight;
+    }
+    return sumColor / float3(fast::max(sumWeight, 9.9999997473787516355514526367188e-05));
+}
+
+static inline __attribute__((always_inline))
+float heCsmShadow(thread const float3& worldPos, thread const float3& n, thread const float3& L, constant HeLighting& heLight, texture2d_array<float> heCsm, sampler heCsmSmplr)
+{
+    int count = int(heLight.csmSplits.w);
+    if (count < 1)
+    {
+        return 1.0;
+    }
+    float viewDist = dot(worldPos - heLight.camPos.xyz, heLight.camFwd.xyz);
+    int c = count - 1;
+    bool _623 = count > 0;
+    bool _630;
+    if (_623)
+    {
+        _630 = viewDist < heLight.csmSplits.x;
+    }
+    else
+    {
+        _630 = _623;
+    }
+    if (_630)
+    {
+        c = 0;
+    }
+    else
+    {
+        bool _635 = count > 1;
+        bool _642;
+        if (_635)
+        {
+            _642 = viewDist < heLight.csmSplits.y;
+        }
+        else
+        {
+            _642 = _635;
+        }
+        if (_642)
+        {
+            c = 1;
+        }
+        else
+        {
+            bool _647 = count > 2;
+            bool _654;
+            if (_647)
+            {
+                _654 = viewDist < heLight.csmSplits.z;
+            }
+            else
+            {
+                _654 = _647;
+            }
+            if (_654)
+            {
+                c = 2;
+            }
+        }
+    }
+    c = clamp(c, 0, 2);
+    float4 lp = heLight.csmVP[c] * float4(worldPos + (n * (0.0599999986588954925537109375 * float(c + 1))), 1.0);
+    float3 p = lp.xyz / float3(lp.w);
+    float2 uv = (p.xy * 0.5) + float2(0.5);
+    float2 texel = float2(1.0) / float2(int3(heCsm.get_width(), heCsm.get_height(), heCsm.get_array_size()).xy);
+    bool _708 = p.z > 1.0;
+    bool _717;
+    if (!_708)
+    {
+        _717 = any(uv < texel);
+    }
+    else
+    {
+        _717 = _708;
+    }
+    bool _727;
+    if (!_717)
+    {
+        _727 = any(uv > (float2(1.0) - texel));
+    }
+    else
+    {
+        _727 = _717;
+    }
+    if (_727)
+    {
+        return 1.0;
+    }
+    float ndl = fast::clamp(dot(n, L), 0.0, 1.0);
+    float bias0 = fast::clamp(heLight.shadowBias.x * tan(acos(ndl)), heLight.shadowBias.y, 0.0199999995529651641845703125) * float(c + 1);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; y++)
+    {
+        for (int x = -1; x <= 1; x++)
+        {
+            float3 _785 = float3(uv + (float2(float(x), float(y)) * texel), float(c));
+            float cd = heCsm.sample(heCsmSmplr, _785.xy, uint(rint(_785.z))).x;
+            vis += (((p.z - bias0) > cd) ? 0.0 : 1.0);
+        }
+    }
+    return vis / 9.0;
+}
+
+static inline __attribute__((always_inline))
+float heCloudShadowFactor(thread const float3& worldPos, thread const float3& L, constant HeLighting& heLight, texture2d<float> heCloudShadow, sampler heCloudShadowSmplr)
+{
+    float s = heLight.cloudShadowB.x;
+    bool _1030 = s <= 0.0;
+    bool _1037;
+    if (!_1030)
+    {
+        _1037 = L.y <= 0.0500000007450580596923828125;
+    }
+    else
+    {
+        _1037 = _1030;
+    }
+    if (_1037)
+    {
+        return 1.0;
+    }
+    float t = (heLight.cloudShadowA.w - worldPos.y) / L.y;
+    if (t <= 0.0)
+    {
+        return 1.0;
+    }
+    float2 uv = ((worldPos.xz + (L.xz * t)) - heLight.cloudShadowA.xy) * heLight.cloudShadowA.z;
+    float2 e = fast::min(uv, float2(1.0) - uv);
+    float edge = smoothstep(0.0, 0.07999999821186065673828125, fast::min(e.x, e.y));
+    if (edge <= 0.0)
+    {
+        return 1.0;
+    }
+    float T = heCloudShadow.sample(heCloudShadowSmplr, uv).x;
+    return mix(1.0, T, s * edge);
+}
+
+static inline __attribute__((always_inline))
+float heLocalShadowFactor(thread const int& i, thread const float3& worldPos, thread const float3& n, constant HeLighting& heLight, texture2d_array<float> heLocalShadow, sampler heLocalShadowSmplr)
+{
+    int base = int(heLight.lightParams[i].y) - 1;
+    if (base < 0)
+    {
+        return 1.0;
+    }
+    int layer = base;
+    if (int(heLight.lightPos[i].w) == 1)
+    {
+        float3 d = worldPos - heLight.lightPos[i].xyz;
+        float3 a = abs(d);
+        bool _842 = a.x >= a.y;
+        bool _850;
+        if (_842)
+        {
+            _850 = a.x >= a.z;
+        }
+        else
+        {
+            _850 = _842;
+        }
+        int face;
+        if (_850)
+        {
+            face = (d.x > 0.0) ? 0 : 1;
+        }
+        else
+        {
+            if (a.y >= a.z)
+            {
+                face = (d.y > 0.0) ? 2 : 3;
+            }
+            else
+            {
+                face = (d.z > 0.0) ? 4 : 5;
+            }
+        }
+        layer = base + face;
+    }
+    float3 toL = fast::normalize(heLight.lightPos[i].xyz - worldPos);
+    float ndl = fast::clamp(dot(n, toL), 0.0, 1.0);
+    float4 lp = heLight.localShadowVP[layer] * float4(worldPos + (n * 0.0199999995529651641845703125), 1.0);
+    if (lp.w <= 0.0)
+    {
+        return 1.0;
+    }
+    float3 p = lp.xyz / float3(lp.w);
+    float2 uv = (p.xy * 0.5) + float2(0.5);
+    float2 texel = float2(1.0) / float2(int3(heLocalShadow.get_width(), heLocalShadow.get_height(), heLocalShadow.get_array_size()).xy);
+    bool _936 = p.z > 1.0;
+    bool _943;
+    if (!_936)
+    {
+        _943 = p.z < 0.0;
+    }
+    else
+    {
+        _943 = _936;
+    }
+    bool _951;
+    if (!_943)
+    {
+        _951 = any(uv < texel);
+    }
+    else
+    {
+        _951 = _943;
+    }
+    bool _960;
+    if (!_951)
+    {
+        _960 = any(uv > (float2(1.0) - texel));
+    }
+    else
+    {
+        _960 = _951;
+    }
+    if (_960)
+    {
+        return 1.0;
+    }
+    float bias0 = fast::clamp(0.00150000001303851604461669921875 * tan(acos(ndl)), 0.000600000028498470783233642578125, 0.00999999977648258209228515625);
+    float vis = 0.0;
+    for (int y = -1; y <= 1; y++)
+    {
+        for (int x = -1; x <= 1; x++)
+        {
+            float3 _1005 = float3(uv + (float2(float(x), float(y)) * texel), float(layer));
+            float cd = heLocalShadow.sample(heLocalShadowSmplr, _1005.xy, uint(rint(_1005.z))).x;
+            vis += (((p.z - bias0) > cd) ? 0.0 : 1.0);
+        }
+    }
+    return vis / 9.0;
+}
+
+static inline __attribute__((always_inline))
+float3 heLitP(thread float3& baseColor, thread const float3& N, thread const float& metallic, thread const float& roughness, thread const float3& worldPos, thread const float& specular, thread const float& ambientOcclusion, constant HeLighting& heLight, texture2d<float> heGIVisibility, sampler heGIVisibilitySmplr, texture2d<float> heGIIrradiance, sampler heGIIrradianceSmplr, texturecube<float> heSkyEnv, sampler heSkyEnvSmplr, texture2d_array<float> heCsm, sampler heCsmSmplr, texture2d_array<float> heLocalShadow, sampler heLocalShadowSmplr, texture2d<float> heCloudShadow, sampler heCloudShadowSmplr, texture2d<float> heGIReflFwd, sampler heGIReflFwdSmplr, thread float4& gl_FragCoord, texture2d<float> heSSRFwd, sampler heSSRFwdSmplr, texture2d<float> heAO, sampler heAOSmplr, texture2d<float> heGIShadow, sampler heGIShadowSmplr, texture2d<float> heGILocal, sampler heGILocalSmplr)
+{
+    if (heLight.viewMode.x > 0.5)
+    {
+        return baseColor;
+    }
+    float3 n = fast::normalize(N);
+    float3 V = fast::normalize(heLight.camPos.xyz - worldPos);
+    float snowMask = smoothstep(0.25, 0.75, fast::clamp(n.y, 0.0, 1.0)) * fast::clamp(heLight.weather.y, 0.0, 1.0);
+    float wet = fast::clamp(heLight.weather.x, 0.0, 1.0) * (1.0 - snowMask);
+    baseColor = mix(baseColor, float3(0.89999997615814208984375, 0.930000007152557373046875, 0.9700000286102294921875), float3(snowMask));
+    baseColor *= (1.0 - (0.300000011920928955078125 * wet));
+    float rough = fast::clamp(roughness, 0.0, 1.0);
+    rough = mix(rough, 0.07999999821186065673828125, wet);
+    rough = mix(rough, 0.85000002384185791015625, snowMask);
+    float3 param = n;
+    float param_1 = rough;
+    rough = heSpecAARoughness(param, param_1, heLight);
+    float metal = fast::clamp(metallic, 0.0, 1.0);
+    float f0 = 0.07999999821186065673828125 * fast::clamp(specular, 0.0, 1.0);
+    float3 diffuseColor = baseColor * (1.0 - metal);
+    float3 specColor = mix(float3(f0), baseColor, float3(metal));
+    specColor = mix(specColor, float3(0.07999999821186065673828125), float3(wet));
+    float shininess = mix(128.0, 8.0, rough);
+    float specScale = mix(0.5, 0.02999999932944774627685546875, rough) + (0.25 * wet);
+    float3 ambDiff = diffuseColor * heLight.ambient.xyz;
+    float3 ambSpec = float3(0.0);
+    float3 envSpec = float3(0.0);
+    if (heLight.fog.z > 0.5)
+    {
+        float3 Rrough = fast::normalize(mix(reflect(-V, n), n, float3(rough)));
+        float3 Nup = fast::normalize(float3(n.x, fast::max(n.y, 0.100000001490116119384765625), n.z));
+        ambDiff = heSkyEnv.sample(heSkyEnvSmplr, Nup).xyz * diffuseColor;
+        envSpec = heSkyEnv.sample(heSkyEnvSmplr, Rrough).xyz;
+    }
+    if (heLight.giRefl.z > 0.5)
+    {
+        float4 rr = heGIReflFwd.sample(heGIReflFwdSmplr, (gl_FragCoord.xy / fast::max(heLight.giParams.xy, float2(1.0))));
+        float fade = 1.0 - smoothstep(heLight.giRefl.y * 0.699999988079071044921875, heLight.giRefl.y, rough);
+        envSpec = mix(envSpec, rr.xyz, float3((rr.w * heLight.giRefl.x) * fade));
+    }
+    if (heLight.ssr.x > 0.5)
+    {
+        float4 r = heSSRFwd.sample(heSSRFwdSmplr, (gl_FragCoord.xy / fast::max(heLight.giParams.xy, float2(1.0))));
+        float fade_1 = 1.0 - smoothstep(heLight.ssr.z * 0.699999988079071044921875, heLight.ssr.z, rough);
+        envSpec = mix(envSpec, r.xyz, float3((r.w * heLight.ssr.y) * fade_1));
+    }
+    bool _1385 = heLight.fog.z > 0.5;
+    bool _1392;
+    if (!_1385)
+    {
+        _1392 = heLight.giRefl.z > 0.5;
+    }
+    else
+    {
+        _1392 = _1385;
+    }
+    bool _1399;
+    if (!_1392)
+    {
+        _1399 = heLight.ssr.x > 0.5;
+    }
+    else
+    {
+        _1399 = _1392;
+    }
+    if (_1399)
+    {
+        float NdV = fast::clamp(dot(n, V), 0.0, 1.0);
+        float3 fresnelSpec = specColor + ((fast::max(float3(1.0 - rough), specColor) - specColor) * powr(1.0 - NdV, 5.0));
+        ambSpec = (envSpec * fresnelSpec) * (1.0 - (0.60000002384185791015625 * rough));
+    }
+    if (heLight.ssr.w > 0.5)
+    {
+        ambSpec = float3(0.0);
+    }
+    float ssao = 1.0;
+    if (heLight.fog.w > 0.5)
+    {
+        int2 aoSz = int2(heAO.get_width(), heAO.get_height());
+        int2 aoPx = clamp(int2((gl_FragCoord.xy * float2(aoSz)) / fast::max(heLight.giParams.xy, float2(1.0))), int2(0), max((aoSz - int2(1)), int2(0)));
+        ssao = heAO.read(uint2(aoPx), 0).x;
+    }
+    float ao = fast::clamp(ambientOcclusion, 0.0, 1.0) * ssao;
+    float3 result;
+    if (heLight.giProbe.y > 0.5)
+    {
+        float3 param_2 = worldPos;
+        float3 param_3 = n;
+        result = (((heGIIrradianceAt(param_2, param_3, heLight, heGIVisibility, heGIVisibilitySmplr, heGIIrradiance, heGIIrradianceSmplr) * diffuseColor) * heLight.giProbe.x) + ambSpec) + (heLight.ambient.xyz * diffuseColor);
+    }
+    else
+    {
+        result = (((ambDiff * 0.3499999940395355224609375) + ambSpec) * ao) + (heLight.ambient.xyz * diffuseColor);
+    }
+    int count = int(heLight.counts.x);
+    int localIdx = 0;
+    float3 L;
+    for (int i = 0; i < count; i++)
+    {
+        int type = int(heLight.lightPos[i].w);
+        float atten = 1.0;
+        if (type == 0)
+        {
+            L = fast::normalize(-heLight.lightDir[i].xyz);
+        }
+        else
+        {
+            float3 d = heLight.lightPos[i].xyz - worldPos;
+            float dist = fast::max(length(d), 9.9999997473787516355514526367188e-05);
+            L = d / float3(dist);
+            float range = fast::max(heLight.lightParams[i].x, 9.9999997473787516355514526367188e-05);
+            atten = fast::clamp(1.0 - (dist / range), 0.0, 1.0);
+            atten *= atten;
+            if (type == 2)
+            {
+                float c = dot(-L, fast::normalize(heLight.lightDir[i].xyz));
+                float cosCone = heLight.lightDir[i].w;
+                atten *= smoothstep(cosCone, mix(cosCone, 1.0, 0.20000000298023223876953125), c);
+            }
+        }
+        float sh = 1.0;
+        if (heLight.giParams.z > 0.5)
+        {
+            float2 giUV = gl_FragCoord.xy / fast::max(heLight.giParams.xy, float2(1.0));
+            if (type == 0)
+            {
+                sh = heGIShadow.sample(heGIShadowSmplr, giUV).x;
+            }
+            else
+            {
+                if (localIdx < 4)
+                {
+                    float4 lm = heGILocal.sample(heGILocalSmplr, giUV);
+                    sh = lm[localIdx];
+                }
+            }
+        }
+        else
+        {
+            if (type == 0)
+            {
+                float3 param_4 = worldPos;
+                float3 param_5 = n;
+                float3 param_6 = L;
+                sh = heCsmShadow(param_4, param_5, param_6, heLight, heCsm, heCsmSmplr);
+            }
+        }
+        if (type == 0)
+        {
+            float3 param_7 = worldPos;
+            float3 param_8 = L;
+            sh *= heCloudShadowFactor(param_7, param_8, heLight, heCloudShadow, heCloudShadowSmplr);
+        }
+        if (type != 0)
+        {
+            int param_9 = i;
+            float3 param_10 = worldPos;
+            float3 param_11 = n;
+            sh = fast::min(sh, heLocalShadowFactor(param_9, param_10, param_11, heLight, heLocalShadow, heLocalShadowSmplr));
+            localIdx++;
+        }
+        float ndl = fast::max(dot(n, L), 0.0);
+        float3 H = fast::normalize(L + V);
+        float spec = powr(fast::max(dot(n, H), 0.0), shininess) * specScale;
+        float3 lc = heLight.lightColor[i].xyz * heLight.lightColor[i].w;
+        result += (((((diffuseColor * ndl) + (specColor * spec)) * lc) * atten) * sh);
+    }
+    return result;
+}
+
+static inline __attribute__((always_inline))
+float3 heApplyFog(thread const float3& color, thread const float3& worldPos, constant HeLighting& heLight, texturecube<float> heSkyEnv, sampler heSkyEnvSmplr)
+{
+    if (heLight.viewMode.x > 0.5)
+    {
+        return color;
+    }
+    bool _514 = heLight.fog.x <= 0.0;
+    bool _521;
+    if (!_514)
+    {
+        _521 = heLight.fog.z <= 0.5;
+    }
+    else
+    {
+        _521 = _514;
+    }
+    if (_521)
+    {
+        return color;
+    }
+    float3 ray = worldPos - heLight.camPos.xyz;
+    float dist = length(ray);
+    float k = heLight.fog.y * ray.y;
+    float _546;
+    if (abs(k) > 9.9999997473787516355514526367188e-05)
+    {
+        _546 = (1.0 - exp(-k)) / k;
+    }
+    else
+    {
+        _546 = 1.0;
+    }
+    float t = _546;
+    float optical = ((heLight.fog.x * dist) * exp((-heLight.fog.y) * heLight.camPos.y)) * t;
+    float f = 1.0 - exp(-optical);
+    float3 fogCol = heSkyEnv.sample(heSkyEnvSmplr, (ray / float3(fast::max(dist, 9.9999997473787516355514526367188e-05)))).xyz;
+    return mix(color, fogCol, float3(fast::clamp(f, 0.0, 1.0)));
+}
+
+fragment main0_out main0(main0_in in [[stage_in]], constant HeLighting& heLight [[buffer(1)]], constant HeParams& heParams [[buffer(2)]], texture2d_array<float> heTexP0 [[texture(1)]], texture2d_array<float> heTexP1 [[texture(2)]], texture2d_array<float> heTexP2 [[texture(3)]], texture2d<float> heGIShadow [[texture(5)]], texture2d<float> heGIIrradiance [[texture(6)]], texture2d<float> heGIVisibility [[texture(7)]], texture2d<float> heGILocal [[texture(8)]], texture2d<float> heSSRFwd [[texture(9)]], texture2d<float> heGIReflFwd [[texture(10)]], texture2d_array<float> heCsm [[texture(11)]], texture2d_array<float> heLocalShadow [[texture(12)]], texture2d<float> heLandscapeWeights [[texture(13)]], texturecube<float> heSkyEnv [[texture(14)]], texture2d<float> heAO [[texture(15)]], texture2d<float> heCloudShadow [[texture(16)]], sampler heTexP0Smplr [[sampler(1)]], sampler heTexP1Smplr [[sampler(2)]], sampler heTexP2Smplr [[sampler(3)]], sampler heGIShadowSmplr [[sampler(5)]], sampler heGIIrradianceSmplr [[sampler(6)]], sampler heGIVisibilitySmplr [[sampler(7)]], sampler heGILocalSmplr [[sampler(8)]], sampler heSSRFwdSmplr [[sampler(9)]], sampler heGIReflFwdSmplr [[sampler(10)]], sampler heCsmSmplr [[sampler(11)]], sampler heLocalShadowSmplr [[sampler(12)]], sampler heLandscapeWeightsSmplr [[sampler(13)]], sampler heSkyEnvSmplr [[sampler(14)]], sampler heAOSmplr [[sampler(15)]], float4 gl_FragCoord [[position]])
+{
+    constexpr sampler heCloudShadowSmplr(filter::linear);
+    main0_out out = {};
+    float3 n12 = in.vWorldPos;
+    float4 n11 = float4(n12, 1.0);
+    float n13 = 0.0;
+    float4 n10 = float4(n11.x, n11.z, n13, n13);
+    float n14 = heParams.v[0].x;
+    float3 n9 = n10.xyz / fast::max(float3(n14), float3(9.9999997473787516355514526367188e-06));
+    float n15 = 0.0;
+    float n16 = heParams.v[1].x;
+    float n17 = 4.0;
+    float n8_l = fast::clamp(floor(n15 + 0.5), 0.0, float(int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1));
+    int _2292;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _2292 = max((int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _2292 = 1;
+    }
+    int n8_V = _2292;
+    float2 param = n9.xy;
+    float param_1 = n16;
+    float param_2 = 1.0;
+    float param_3 = 7.0;
+    uint param_4 = 11u;
+    float2 param_5;
+    float2 param_6;
+    float2 param_7;
+    float2x2 param_8;
+    float2x2 param_9;
+    float2x2 param_10;
+    float3 param_11;
+    uint3 param_12;
+    heBombGridV(param, param_1, param_2, param_3, param_4, param_5, param_6, param_7, param_8, param_9, param_10, param_11, param_12);
+    float2 n18_gt0 = param_5;
+    float2 n18_gt1 = param_6;
+    float2 n18_gt2 = param_7;
+    float2x2 n18_gr0 = param_8;
+    float2x2 n18_gr1 = param_9;
+    float2x2 n18_gr2 = param_10;
+    float3 n18_gw = param_11;
+    uint3 n18_gs = param_12;
+    float2 n18_gdx = dfdx(n9.xy);
+    float2 n18_gdy = dfdy(n9.xy);
+    float4 n8;
+    if (n8_V == 1)
+    {
+        float3 _2362 = float3(n18_gt0, n8_l);
+        float3 _2378 = float3(n18_gt1, n8_l);
+        float3 _2395 = float3(n18_gt2, n8_l);
+        n8 = ((heTexP0.sample(heTexP0Smplr, _2362.xy, uint(rint(_2362.z)), gradient2d(n18_gr0 * n18_gdx, n18_gr0 * n18_gdy)) * n18_gw.x) + (heTexP0.sample(heTexP0Smplr, _2378.xy, uint(rint(_2378.z)), gradient2d(n18_gr1 * n18_gdx, n18_gr1 * n18_gdy)) * n18_gw.y)) + (heTexP0.sample(heTexP0Smplr, _2395.xy, uint(rint(_2395.z)), gradient2d(n18_gr2 * n18_gdx, n18_gr2 * n18_gdy)) * n18_gw.z);
+    }
+    else
+    {
+        int n8_s0 = clamp((int(n8_l) * n8_V) + int(((n18_gs.x & 255u) * uint(n8_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n8_s1 = clamp((int(n8_l) * n8_V) + int(((n18_gs.y & 255u) * uint(n8_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n8_s2 = clamp((int(n8_l) * n8_V) + int(((n18_gs.z & 255u) * uint(n8_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        float3 _2474 = float3(n18_gt0, float(n8_s0));
+        float3 _2491 = float3(n18_gt1, float(n8_s1));
+        float3 _2509 = float3(n18_gt2, float(n8_s2));
+        n8 = ((heTexP0.sample(heTexP0Smplr, _2474.xy, uint(rint(_2474.z)), gradient2d(n18_gr0 * n18_gdx, n18_gr0 * n18_gdy)) * n18_gw.x) + (heTexP0.sample(heTexP0Smplr, _2491.xy, uint(rint(_2491.z)), gradient2d(n18_gr1 * n18_gdx, n18_gr1 * n18_gdy)) * n18_gw.y)) + (heTexP0.sample(heTexP0Smplr, _2509.xy, uint(rint(_2509.z)), gradient2d(n18_gr2 * n18_gdx, n18_gr2 * n18_gdy)) * n18_gw.z);
+    }
+    float3 n7 = n8.xyz;
+    float n21 = 1.0;
+    float n20_l = fast::clamp(floor(n21 + 0.5), 0.0, float(int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1));
+    int _2540;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _2540 = max((int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _2540 = 1;
+    }
+    int n20_V = _2540;
+    float2 param_13 = n9.xy;
+    float param_14 = n16;
+    float param_15 = 1.0;
+    float param_16 = 7.0;
+    uint param_17 = 23u;
+    float2 param_18;
+    float2 param_19;
+    float2 param_20;
+    float2x2 param_21;
+    float2x2 param_22;
+    float2x2 param_23;
+    float3 param_24;
+    uint3 param_25;
+    heBombGridV(param_13, param_14, param_15, param_16, param_17, param_18, param_19, param_20, param_21, param_22, param_23, param_24, param_25);
+    float2 n22_gt0 = param_18;
+    float2 n22_gt1 = param_19;
+    float2 n22_gt2 = param_20;
+    float2x2 n22_gr0 = param_21;
+    float2x2 n22_gr1 = param_22;
+    float2x2 n22_gr2 = param_23;
+    float3 n22_gw = param_24;
+    uint3 n22_gs = param_25;
+    float2 n22_gdx = dfdx(n9.xy);
+    float2 n22_gdy = dfdy(n9.xy);
+    float4 n20;
+    if (n20_V == 1)
+    {
+        float3 _2609 = float3(n22_gt0, n20_l);
+        float3 _2625 = float3(n22_gt1, n20_l);
+        float3 _2642 = float3(n22_gt2, n20_l);
+        n20 = ((heTexP0.sample(heTexP0Smplr, _2609.xy, uint(rint(_2609.z)), gradient2d(n22_gr0 * n22_gdx, n22_gr0 * n22_gdy)) * n22_gw.x) + (heTexP0.sample(heTexP0Smplr, _2625.xy, uint(rint(_2625.z)), gradient2d(n22_gr1 * n22_gdx, n22_gr1 * n22_gdy)) * n22_gw.y)) + (heTexP0.sample(heTexP0Smplr, _2642.xy, uint(rint(_2642.z)), gradient2d(n22_gr2 * n22_gdx, n22_gr2 * n22_gdy)) * n22_gw.z);
+    }
+    else
+    {
+        int n20_s0 = clamp((int(n20_l) * n20_V) + int(((n22_gs.x & 255u) * uint(n20_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n20_s1 = clamp((int(n20_l) * n20_V) + int(((n22_gs.y & 255u) * uint(n20_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n20_s2 = clamp((int(n20_l) * n20_V) + int(((n22_gs.z & 255u) * uint(n20_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        float3 _2721 = float3(n22_gt0, float(n20_s0));
+        float3 _2738 = float3(n22_gt1, float(n20_s1));
+        float3 _2756 = float3(n22_gt2, float(n20_s2));
+        n20 = ((heTexP0.sample(heTexP0Smplr, _2721.xy, uint(rint(_2721.z)), gradient2d(n22_gr0 * n22_gdx, n22_gr0 * n22_gdy)) * n22_gw.x) + (heTexP0.sample(heTexP0Smplr, _2738.xy, uint(rint(_2738.z)), gradient2d(n22_gr1 * n22_gdx, n22_gr1 * n22_gdy)) * n22_gw.y)) + (heTexP0.sample(heTexP0Smplr, _2756.xy, uint(rint(_2756.z)), gradient2d(n22_gr2 * n22_gdx, n22_gr2 * n22_gdy)) * n22_gw.z);
+    }
+    float3 n19 = n20.xyz;
+    float n27 = 0.75;
+    float n29 = heParams.v[2].x;
+    float n30 = 0.5;
+    float3 n28 = float3(n29) * float3(n30);
+    float3 n26 = float3(n27) - n28;
+    float n32 = 0.0599999986588954925537109375;
+    float3 n31 = n26 + float3(n32);
+    float n36 = 1.0;
+    float n37 = heParams.v[3].x;
+    float3 n35 = float3(n36) / fast::max(float3(n37), float3(9.9999997473787516355514526367188e-06));
+    float2 param_26 = n10.xy * n35.x;
+    float _2809 = heFbmI(param_26);
+    float n34 = _2809;
+    float n43_l = fast::clamp(floor(n21 + 0.5), 0.0, float(int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1));
+    int _2828;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _2828 = max((int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _2828 = 1;
+    }
+    int n43_V = _2828;
+    float4 n43;
+    if (n43_V == 1)
+    {
+        float3 _2855 = float3(n22_gt0, n43_l);
+        float3 _2871 = float3(n22_gt1, n43_l);
+        float3 _2888 = float3(n22_gt2, n43_l);
+        n43 = ((heTexP1.sample(heTexP1Smplr, _2855.xy, uint(rint(_2855.z)), gradient2d(n22_gr0 * n22_gdx, n22_gr0 * n22_gdy)) * n22_gw.x) + (heTexP1.sample(heTexP1Smplr, _2871.xy, uint(rint(_2871.z)), gradient2d(n22_gr1 * n22_gdx, n22_gr1 * n22_gdy)) * n22_gw.y)) + (heTexP1.sample(heTexP1Smplr, _2888.xy, uint(rint(_2888.z)), gradient2d(n22_gr2 * n22_gdx, n22_gr2 * n22_gdy)) * n22_gw.z);
+    }
+    else
+    {
+        int n43_s0 = clamp((int(n43_l) * n43_V) + int(((n22_gs.x & 255u) * uint(n43_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n43_s1 = clamp((int(n43_l) * n43_V) + int(((n22_gs.y & 255u) * uint(n43_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n43_s2 = clamp((int(n43_l) * n43_V) + int(((n22_gs.z & 255u) * uint(n43_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        float3 _2967 = float3(n22_gt0, float(n43_s0));
+        float3 _2984 = float3(n22_gt1, float(n43_s1));
+        float3 _3002 = float3(n22_gt2, float(n43_s2));
+        n43 = ((heTexP1.sample(heTexP1Smplr, _2967.xy, uint(rint(_2967.z)), gradient2d(n22_gr0 * n22_gdx, n22_gr0 * n22_gdy)) * n22_gw.x) + (heTexP1.sample(heTexP1Smplr, _2984.xy, uint(rint(_2984.z)), gradient2d(n22_gr1 * n22_gdx, n22_gr1 * n22_gdy)) * n22_gw.y)) + (heTexP1.sample(heTexP1Smplr, _3002.xy, uint(rint(_3002.z)), gradient2d(n22_gr2 * n22_gdx, n22_gr2 * n22_gdy)) * n22_gw.z);
+    }
+    float3 n42 = n43.xyz;
+    float4 n41 = float4(n42, 1.0);
+    float n46_l = fast::clamp(floor(n15 + 0.5), 0.0, float(int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1));
+    int _3038;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _3038 = max((int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _3038 = 1;
+    }
+    int n46_V = _3038;
+    float4 n46;
+    if (n46_V == 1)
+    {
+        float3 _3065 = float3(n18_gt0, n46_l);
+        float3 _3081 = float3(n18_gt1, n46_l);
+        float3 _3098 = float3(n18_gt2, n46_l);
+        n46 = ((heTexP1.sample(heTexP1Smplr, _3065.xy, uint(rint(_3065.z)), gradient2d(n18_gr0 * n18_gdx, n18_gr0 * n18_gdy)) * n18_gw.x) + (heTexP1.sample(heTexP1Smplr, _3081.xy, uint(rint(_3081.z)), gradient2d(n18_gr1 * n18_gdx, n18_gr1 * n18_gdy)) * n18_gw.y)) + (heTexP1.sample(heTexP1Smplr, _3098.xy, uint(rint(_3098.z)), gradient2d(n18_gr2 * n18_gdx, n18_gr2 * n18_gdy)) * n18_gw.z);
+    }
+    else
+    {
+        int n46_s0 = clamp((int(n46_l) * n46_V) + int(((n18_gs.x & 255u) * uint(n46_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n46_s1 = clamp((int(n46_l) * n46_V) + int(((n18_gs.y & 255u) * uint(n46_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n46_s2 = clamp((int(n46_l) * n46_V) + int(((n18_gs.z & 255u) * uint(n46_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        float3 _3177 = float3(n18_gt0, float(n46_s0));
+        float3 _3194 = float3(n18_gt1, float(n46_s1));
+        float3 _3212 = float3(n18_gt2, float(n46_s2));
+        n46 = ((heTexP1.sample(heTexP1Smplr, _3177.xy, uint(rint(_3177.z)), gradient2d(n18_gr0 * n18_gdx, n18_gr0 * n18_gdy)) * n18_gw.x) + (heTexP1.sample(heTexP1Smplr, _3194.xy, uint(rint(_3194.z)), gradient2d(n18_gr1 * n18_gdx, n18_gr1 * n18_gdy)) * n18_gw.y)) + (heTexP1.sample(heTexP1Smplr, _3212.xy, uint(rint(_3212.z)), gradient2d(n18_gr2 * n18_gdx, n18_gr2 * n18_gdy)) * n18_gw.z);
+    }
+    float3 n45 = n46.xyz;
+    float4 n44 = float4(n45, 1.0);
+    float3 n40 = float3(n41.z) - float3(n44.z);
+    float n47 = heParams.v[4].x;
+    float3 n39 = n40 * float3(n47);
+    float n48 = 0.100000001490116119384765625;
+    float3 n38 = n39 * float3(n48);
+    float3 n33 = float3(n34) + n38;
+    float n25 = smoothstep(n26.x, n31.x, n33.x);
+    float n51 = heParams.v[5].x;
+    float n52 = heParams.v[6].x;
+    float3 n50 = float3(n51) - float3(n52);
+    float3 n53 = n50 + float3(n52);
+    float3 n56 = fast::normalize(in.vNormal);
+    float4 n55 = float4(n56, 1.0);
+    float3 n54 = float3(n36) - float3(n55.y);
+    float n49 = smoothstep(n50.x, n53.x, n54.x);
+    float3 n24 = float3(n25) + float3(n49);
+    float3 n23 = fast::clamp(n24, float3(0.0), float3(1.0));
+    float3 n6 = mix(n7, n19, float3(n23.x));
+    float n60 = heParams.v[7].x;
+    float3 n59 = n10.xyz / fast::max(float3(n60), float3(9.9999997473787516355514526367188e-06));
+    float n61 = 2.0;
+    float n58_l = fast::clamp(floor(n61 + 0.5), 0.0, float(int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1));
+    int _3354;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _3354 = max((int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _3354 = 1;
+    }
+    int n58_V = _3354;
+    float2 param_27 = n59.xy;
+    float param_28 = n16;
+    float param_29 = 1.0;
+    float param_30 = 7.0;
+    uint param_31 = 37u;
+    float2 param_32;
+    float2 param_33;
+    float2 param_34;
+    float2x2 param_35;
+    float2x2 param_36;
+    float2x2 param_37;
+    float3 param_38;
+    uint3 param_39;
+    heBombGridV(param_27, param_28, param_29, param_30, param_31, param_32, param_33, param_34, param_35, param_36, param_37, param_38, param_39);
+    float2 n62_gt0 = param_32;
+    float2 n62_gt1 = param_33;
+    float2 n62_gt2 = param_34;
+    float2x2 n62_gr0 = param_35;
+    float2x2 n62_gr1 = param_36;
+    float2x2 n62_gr2 = param_37;
+    float3 n62_gw = param_38;
+    uint3 n62_gs = param_39;
+    float2 n62_gdx = dfdx(n59.xy);
+    float2 n62_gdy = dfdy(n59.xy);
+    float4 n58;
+    if (n58_V == 1)
+    {
+        float3 _3423 = float3(n62_gt0, n58_l);
+        float3 _3439 = float3(n62_gt1, n58_l);
+        float3 _3456 = float3(n62_gt2, n58_l);
+        n58 = ((heTexP0.sample(heTexP0Smplr, _3423.xy, uint(rint(_3423.z)), gradient2d(n62_gr0 * n62_gdx, n62_gr0 * n62_gdy)) * n62_gw.x) + (heTexP0.sample(heTexP0Smplr, _3439.xy, uint(rint(_3439.z)), gradient2d(n62_gr1 * n62_gdx, n62_gr1 * n62_gdy)) * n62_gw.y)) + (heTexP0.sample(heTexP0Smplr, _3456.xy, uint(rint(_3456.z)), gradient2d(n62_gr2 * n62_gdx, n62_gr2 * n62_gdy)) * n62_gw.z);
+    }
+    else
+    {
+        int n58_s0 = clamp((int(n58_l) * n58_V) + int(((n62_gs.x & 255u) * uint(n58_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n58_s1 = clamp((int(n58_l) * n58_V) + int(((n62_gs.y & 255u) * uint(n58_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n58_s2 = clamp((int(n58_l) * n58_V) + int(((n62_gs.z & 255u) * uint(n58_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        float3 _3535 = float3(n62_gt0, float(n58_s0));
+        float3 _3552 = float3(n62_gt1, float(n58_s1));
+        float3 _3570 = float3(n62_gt2, float(n58_s2));
+        n58 = ((heTexP0.sample(heTexP0Smplr, _3535.xy, uint(rint(_3535.z)), gradient2d(n62_gr0 * n62_gdx, n62_gr0 * n62_gdy)) * n62_gw.x) + (heTexP0.sample(heTexP0Smplr, _3552.xy, uint(rint(_3552.z)), gradient2d(n62_gr1 * n62_gdx, n62_gr1 * n62_gdy)) * n62_gw.y)) + (heTexP0.sample(heTexP0Smplr, _3570.xy, uint(rint(_3570.z)), gradient2d(n62_gr2 * n62_gdx, n62_gr2 * n62_gdy)) * n62_gw.z);
+    }
+    float3 n57 = n58.xyz;
+    float3 n64 = float3(n51) + float3(n52);
+    float n71_l = fast::clamp(floor(n61 + 0.5), 0.0, float(int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1));
+    int _3606;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _3606 = max((int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _3606 = 1;
+    }
+    int n71_V = _3606;
+    float4 n71;
+    if (n71_V == 1)
+    {
+        float3 _3633 = float3(n62_gt0, n71_l);
+        float3 _3649 = float3(n62_gt1, n71_l);
+        float3 _3666 = float3(n62_gt2, n71_l);
+        n71 = ((heTexP1.sample(heTexP1Smplr, _3633.xy, uint(rint(_3633.z)), gradient2d(n62_gr0 * n62_gdx, n62_gr0 * n62_gdy)) * n62_gw.x) + (heTexP1.sample(heTexP1Smplr, _3649.xy, uint(rint(_3649.z)), gradient2d(n62_gr1 * n62_gdx, n62_gr1 * n62_gdy)) * n62_gw.y)) + (heTexP1.sample(heTexP1Smplr, _3666.xy, uint(rint(_3666.z)), gradient2d(n62_gr2 * n62_gdx, n62_gr2 * n62_gdy)) * n62_gw.z);
+    }
+    else
+    {
+        int n71_s0 = clamp((int(n71_l) * n71_V) + int(((n62_gs.x & 255u) * uint(n71_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n71_s1 = clamp((int(n71_l) * n71_V) + int(((n62_gs.y & 255u) * uint(n71_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n71_s2 = clamp((int(n71_l) * n71_V) + int(((n62_gs.z & 255u) * uint(n71_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        float3 _3745 = float3(n62_gt0, float(n71_s0));
+        float3 _3762 = float3(n62_gt1, float(n71_s1));
+        float3 _3780 = float3(n62_gt2, float(n71_s2));
+        n71 = ((heTexP1.sample(heTexP1Smplr, _3745.xy, uint(rint(_3745.z)), gradient2d(n62_gr0 * n62_gdx, n62_gr0 * n62_gdy)) * n62_gw.x) + (heTexP1.sample(heTexP1Smplr, _3762.xy, uint(rint(_3762.z)), gradient2d(n62_gr1 * n62_gdx, n62_gr1 * n62_gdy)) * n62_gw.y)) + (heTexP1.sample(heTexP1Smplr, _3780.xy, uint(rint(_3780.z)), gradient2d(n62_gr2 * n62_gdx, n62_gr2 * n62_gdy)) * n62_gw.z);
+    }
+    float3 n70 = n71.xyz;
+    float4 n69 = float4(n70, 1.0);
+    float3 n73 = mix(n45, n42, float3(n23.x));
+    float4 n72 = float4(n73, 1.0);
+    float3 n68 = float3(n69.z) - float3(n72.z);
+    float3 n67 = n68 * float3(n47);
+    float3 n66 = n67 * float3(n52);
+    float3 n65 = n54 + n66;
+    float n63 = smoothstep(n51, n64.x, n65.x);
+    float3 n5 = mix(n6, n57, float3(n63));
+    float n76 = 3.0;
+    float n75_l = fast::clamp(floor(n76 + 0.5), 0.0, float(int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1));
+    int _3865;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _3865 = max((int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _3865 = 1;
+    }
+    int n75_V = _3865;
+    float2 param_40 = n59.xy;
+    float param_41 = n16;
+    float param_42 = 1.0;
+    float param_43 = 7.0;
+    uint param_44 = 53u;
+    float2 param_45;
+    float2 param_46;
+    float2 param_47;
+    float2x2 param_48;
+    float2x2 param_49;
+    float2x2 param_50;
+    float3 param_51;
+    uint3 param_52;
+    heBombGridV(param_40, param_41, param_42, param_43, param_44, param_45, param_46, param_47, param_48, param_49, param_50, param_51, param_52);
+    float2 n77_gt0 = param_45;
+    float2 n77_gt1 = param_46;
+    float2 n77_gt2 = param_47;
+    float2x2 n77_gr0 = param_48;
+    float2x2 n77_gr1 = param_49;
+    float2x2 n77_gr2 = param_50;
+    float3 n77_gw = param_51;
+    uint3 n77_gs = param_52;
+    float2 n77_gdx = dfdx(n59.xy);
+    float2 n77_gdy = dfdy(n59.xy);
+    float4 n75;
+    if (n75_V == 1)
+    {
+        float3 _3934 = float3(n77_gt0, n75_l);
+        float3 _3950 = float3(n77_gt1, n75_l);
+        float3 _3967 = float3(n77_gt2, n75_l);
+        n75 = ((heTexP0.sample(heTexP0Smplr, _3934.xy, uint(rint(_3934.z)), gradient2d(n77_gr0 * n77_gdx, n77_gr0 * n77_gdy)) * n77_gw.x) + (heTexP0.sample(heTexP0Smplr, _3950.xy, uint(rint(_3950.z)), gradient2d(n77_gr1 * n77_gdx, n77_gr1 * n77_gdy)) * n77_gw.y)) + (heTexP0.sample(heTexP0Smplr, _3967.xy, uint(rint(_3967.z)), gradient2d(n77_gr2 * n77_gdx, n77_gr2 * n77_gdy)) * n77_gw.z);
+    }
+    else
+    {
+        int n75_s0 = clamp((int(n75_l) * n75_V) + int(((n77_gs.x & 255u) * uint(n75_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n75_s1 = clamp((int(n75_l) * n75_V) + int(((n77_gs.y & 255u) * uint(n75_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        int n75_s2 = clamp((int(n75_l) * n75_V) + int(((n77_gs.z & 255u) * uint(n75_V)) >> 8u), 0, int3(heTexP0.get_width(), heTexP0.get_height(), heTexP0.get_array_size()).z - 1);
+        float3 _4046 = float3(n77_gt0, float(n75_s0));
+        float3 _4063 = float3(n77_gt1, float(n75_s1));
+        float3 _4081 = float3(n77_gt2, float(n75_s2));
+        n75 = ((heTexP0.sample(heTexP0Smplr, _4046.xy, uint(rint(_4046.z)), gradient2d(n77_gr0 * n77_gdx, n77_gr0 * n77_gdy)) * n77_gw.x) + (heTexP0.sample(heTexP0Smplr, _4063.xy, uint(rint(_4063.z)), gradient2d(n77_gr1 * n77_gdx, n77_gr1 * n77_gdy)) * n77_gw.y)) + (heTexP0.sample(heTexP0Smplr, _4081.xy, uint(rint(_4081.z)), gradient2d(n77_gr2 * n77_gdx, n77_gr2 * n77_gdy)) * n77_gw.z);
+    }
+    float3 n74 = n75.xyz;
+    float n82 = heParams.v[8].x;
+    float n84 = heParams.v[9].x;
+    float3 n83 = float3(n82) + float3(n84);
+    float n91_l = fast::clamp(floor(n76 + 0.5), 0.0, float(int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1));
+    int _4123;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _4123 = max((int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _4123 = 1;
+    }
+    int n91_V = _4123;
+    float4 n91;
+    if (n91_V == 1)
+    {
+        float3 _4150 = float3(n77_gt0, n91_l);
+        float3 _4166 = float3(n77_gt1, n91_l);
+        float3 _4183 = float3(n77_gt2, n91_l);
+        n91 = ((heTexP1.sample(heTexP1Smplr, _4150.xy, uint(rint(_4150.z)), gradient2d(n77_gr0 * n77_gdx, n77_gr0 * n77_gdy)) * n77_gw.x) + (heTexP1.sample(heTexP1Smplr, _4166.xy, uint(rint(_4166.z)), gradient2d(n77_gr1 * n77_gdx, n77_gr1 * n77_gdy)) * n77_gw.y)) + (heTexP1.sample(heTexP1Smplr, _4183.xy, uint(rint(_4183.z)), gradient2d(n77_gr2 * n77_gdx, n77_gr2 * n77_gdy)) * n77_gw.z);
+    }
+    else
+    {
+        int n91_s0 = clamp((int(n91_l) * n91_V) + int(((n77_gs.x & 255u) * uint(n91_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n91_s1 = clamp((int(n91_l) * n91_V) + int(((n77_gs.y & 255u) * uint(n91_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        int n91_s2 = clamp((int(n91_l) * n91_V) + int(((n77_gs.z & 255u) * uint(n91_V)) >> 8u), 0, int3(heTexP1.get_width(), heTexP1.get_height(), heTexP1.get_array_size()).z - 1);
+        float3 _4262 = float3(n77_gt0, float(n91_s0));
+        float3 _4279 = float3(n77_gt1, float(n91_s1));
+        float3 _4297 = float3(n77_gt2, float(n91_s2));
+        n91 = ((heTexP1.sample(heTexP1Smplr, _4262.xy, uint(rint(_4262.z)), gradient2d(n77_gr0 * n77_gdx, n77_gr0 * n77_gdy)) * n77_gw.x) + (heTexP1.sample(heTexP1Smplr, _4279.xy, uint(rint(_4279.z)), gradient2d(n77_gr1 * n77_gdx, n77_gr1 * n77_gdy)) * n77_gw.y)) + (heTexP1.sample(heTexP1Smplr, _4297.xy, uint(rint(_4297.z)), gradient2d(n77_gr2 * n77_gdx, n77_gr2 * n77_gdy)) * n77_gw.z);
+    }
+    float3 n90 = n91.xyz;
+    float4 n89 = float4(n90, 1.0);
+    float3 n93 = mix(n73, n70, float3(n63));
+    float4 n92 = float4(n93, 1.0);
+    float3 n88 = float3(n89.z) - float3(n92.z);
+    float3 n87 = n88 * float3(n47);
+    float3 n86 = n87 * float3(n84);
+    float3 n85 = float3(n11.y) + n86;
+    float n81 = smoothstep(n82, n83.x, n85.x);
+    float n96 = heParams.v[10].x;
+    float n98 = 0.100000001490116119384765625;
+    float3 n97 = float3(n96) + float3(n98);
+    float n95 = smoothstep(n96, n97.x, n54.x);
+    float3 n94 = float3(1.0) - float3(n95);
+    float3 n80 = float3(n81) * n94;
+    float n103 = 0.0;
+    float n104 = 0.300000011920928955078125;
+    float4 n106 = fast::clamp(heLight.weather, float4(0.0), float4(1.0));
+    float n108 = 1.0;
+    float3 n112 = float3(n89.z) - float3(n92.z);
+    float3 n111 = n112 * float3(n47);
+    float3 n110 = n111 * float3(n36);
+    float n109 = n110.x;
+    float3 n107 = float3(n108) + float3(n109);
+    float3 n105 = float3(n106.w) * n107;
+    float n102 = smoothstep(n103, n104, n105.x);
+    float n115 = n96;
+    float n117 = 0.100000001490116119384765625;
+    float3 n116 = float3(n115) + float3(n117);
+    float n118 = n54.x;
+    float n114 = smoothstep(n115, n116.x, n118);
+    float3 n113 = float3(1.0) - float3(n114);
+    float3 n101 = float3(n102) * n113;
+    float n100 = n101.x;
+    float n119 = n106.w;
+    float3 n79 = n80 + float3(n100);
+    float3 n120 = n80 * float3(n100);
+    float3 n78 = n79 - n120;
+    float3 n4 = mix(n5, n74, float3(n78.x));
+    float2 n3_ts = float2(int2(heLandscapeWeights.get_width(), heLandscapeWeights.get_height()));
+    bool n3_p2 = n3_ts.x > (1.5 * n3_ts.y);
+    float _4505;
+    if (n3_p2)
+    {
+        _4505 = n3_ts.x * 0.5;
+    }
+    else
+    {
+        _4505 = n3_ts.x;
+    }
+    float2 n3_wsz = float2(_4505, n3_ts.y);
+    float2 n3_wt = (in.vUV * n3_wsz) - float2(0.5);
+    float2 n3_wi = floor(n3_wt);
+    float2 n3_wq = n3_wt - n3_wi;
+    float2 n3_wuv = fast::clamp(((n3_wi + float2(0.5)) + ((n3_wq * n3_wq) * (float2(3.0) - (n3_wq * 2.0)))) / n3_wsz, float2(0.5) / n3_wsz, float2(1.0) - (float2(0.5) / n3_wsz));
+    float n3_wu = fast::clamp(n3_wuv.x * 0.5, 0.5 / n3_ts.x, 0.5 - (0.5 / n3_ts.x));
+    float4 n3_wf = heLandscapeWeights.sample(heLandscapeWeightsSmplr, n3_wuv);
+    float4 n3_wl = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n3_wu, n3_wuv.y), level(0.0));
+    float4 n3_w = n3_p2 ? n3_wl : n3_wf;
+    float4 n3_wr = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n3_wu + 0.5, n3_wuv.y), level(0.0));
+    float4 n3_w2 = n3_p2 ? n3_wr : float4(0.0);
+    float n3_s = ((((n3_w.x + n3_w.y) + n3_w.z) + n3_w.w) + n3_w2.x) + n3_w2.y;
+    float3 _4619;
+    if (n3_s > 9.9999997473787516355514526367188e-05)
+    {
+        _4619 = ((((((n4 * n3_w.x) + (n7 * n3_w.y)) + (n19 * n3_w.z)) + (n57 * n3_w.w)) + (n74 * n3_w2.x)) + (n4 * n3_w2.y)) / float3(n3_s);
+    }
+    else
+    {
+        _4619 = n4;
+    }
+    float3 n3 = _4619;
+    float n122 = 0.60000002384185791015625;
+    float3 n121 = n3 * float3(n122);
+    float n129 = -0.0599999986588954925537109375;
+    float n131 = 0.0599999986588954925537109375;
+    float3 n130 = float3(n129) + float3(n131);
+    float4 n136 = fast::clamp(heLight.weather, float4(0.0), float4(1.0));
+    float n138 = heParams.v[11].x;
+    float n137 = n138;
+    float3 n135 = float3(n136.z) * float3(n137);
+    float n134 = n135.x;
+    float n139 = n136.z;
+    float n140 = n136.x;
+    float n141 = fast::max(heLight.weather2.x, 0.5);
+    float2 n144 = float2(173.100006103515625, 419.70001220703125);
+    float3 n143 = n10.xyz + float3(n144, 0.0);
+    float3 n145 = float3(n36) / fast::max(float3(n141), float3(9.9999997473787516355514526367188e-06));
+    float2 param_53 = n143.xy * n145.x;
+    float _4730 = heFbmI(param_53);
+    float n142 = _4730;
+    float3 n132 = float3(n134) - float3(n142);
+    float n128 = smoothstep(n129, n130.x, n132.x);
+    float n149 = heParams.v[12].x;
+    float n150 = 0.20000000298023223876953125;
+    float3 n148 = float3(n149) * float3(n150);
+    float n152 = 2.0;
+    float3 n151 = float3(n149) * float3(n152);
+    float n147 = smoothstep(n148.x, n151.x, n54.x);
+    float3 n146 = float3(1.0) - float3(n147);
+    float3 n127 = float3(n128) * n146;
+    float3 n153 = float3(1.0) - n80;
+    float3 n126 = n127 * n153;
+    float3 n162 = float3(0.0);
+    float3 n163 = float3(1.0, 0.0, 0.0);
+    float3 n164 = float3(0.0, 1.0, 0.0);
+    float3 n165 = float3(0.0, 0.0, 1.0);
+    float2 n161_ts = float2(int2(heLandscapeWeights.get_width(), heLandscapeWeights.get_height()));
+    bool n161_p2 = n161_ts.x > (1.5 * n161_ts.y);
+    float _4806;
+    if (n161_p2)
+    {
+        _4806 = n161_ts.x * 0.5;
+    }
+    else
+    {
+        _4806 = n161_ts.x;
+    }
+    float2 n161_wsz = float2(_4806, n161_ts.y);
+    float2 n161_wt = (in.vUV * n161_wsz) - float2(0.5);
+    float2 n161_wi = floor(n161_wt);
+    float2 n161_wq = n161_wt - n161_wi;
+    float2 n161_wuv = fast::clamp(((n161_wi + float2(0.5)) + ((n161_wq * n161_wq) * (float2(3.0) - (n161_wq * 2.0)))) / n161_wsz, float2(0.5) / n161_wsz, float2(1.0) - (float2(0.5) / n161_wsz));
+    float n161_wu = fast::clamp(n161_wuv.x * 0.5, 0.5 / n161_ts.x, 0.5 - (0.5 / n161_ts.x));
+    float4 n161_wf = heLandscapeWeights.sample(heLandscapeWeightsSmplr, n161_wuv);
+    float4 n161_wl = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n161_wu, n161_wuv.y), level(0.0));
+    float4 n161_w = n161_p2 ? n161_wl : n161_wf;
+    float4 n161_wr = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n161_wu + 0.5, n161_wuv.y), level(0.0));
+    float4 n161_w2 = n161_p2 ? n161_wr : float4(0.0);
+    float n161_s = ((((n161_w.x + n161_w.y) + n161_w.z) + n161_w.w) + n161_w2.x) + n161_w2.y;
+    float3 _4917;
+    if (n161_s > 9.9999997473787516355514526367188e-05)
+    {
+        _4917 = ((((((n162 * n161_w.x) + (n163 * n161_w.y)) + (n164 * n161_w.z)) + (n165 * n161_w.w)) + (n162 * n161_w2.x)) + (n162 * n161_w2.y)) / float3(n161_s);
+    }
+    else
+    {
+        _4917 = n162;
+    }
+    float3 n161 = _4917;
+    float4 n160 = float4(n161, 1.0);
+    float3 n159 = float3(n160.x) + float3(n160.y);
+    float2 n168_ts = float2(int2(heLandscapeWeights.get_width(), heLandscapeWeights.get_height()));
+    bool n168_p2 = n168_ts.x > (1.5 * n168_ts.y);
+    float _4983;
+    if (n168_p2)
+    {
+        _4983 = n168_ts.x * 0.5;
+    }
+    else
+    {
+        _4983 = n168_ts.x;
+    }
+    float2 n168_wsz = float2(_4983, n168_ts.y);
+    float2 n168_wt = (in.vUV * n168_wsz) - float2(0.5);
+    float2 n168_wi = floor(n168_wt);
+    float2 n168_wq = n168_wt - n168_wi;
+    float2 n168_wuv = fast::clamp(((n168_wi + float2(0.5)) + ((n168_wq * n168_wq) * (float2(3.0) - (n168_wq * 2.0)))) / n168_wsz, float2(0.5) / n168_wsz, float2(1.0) - (float2(0.5) / n168_wsz));
+    float n168_wu = fast::clamp(n168_wuv.x * 0.5, 0.5 / n168_ts.x, 0.5 - (0.5 / n168_ts.x));
+    float4 n168_wf = heLandscapeWeights.sample(heLandscapeWeightsSmplr, n168_wuv);
+    float4 n168_wl = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n168_wu, n168_wuv.y), level(0.0));
+    float4 n168_w = n168_p2 ? n168_wl : n168_wf;
+    float4 n168_wr = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n168_wu + 0.5, n168_wuv.y), level(0.0));
+    float4 n168_w2 = n168_p2 ? n168_wr : float4(0.0);
+    float n168_s = ((((n168_w.x + n168_w.y) + n168_w.z) + n168_w.w) + n168_w2.x) + n168_w2.y;
+    float3 _5094;
+    if (n168_s > 9.9999997473787516355514526367188e-05)
+    {
+        _5094 = ((((((n162 * n168_w.x) + (n162 * n168_w.y)) + (n162 * n168_w.z)) + (n162 * n168_w.w)) + (n163 * n168_w2.x)) + (n164 * n168_w2.y)) / float3(n168_s);
+    }
+    else
+    {
+        _5094 = n162;
+    }
+    float3 n168 = _5094;
+    float4 n167 = float4(n168, 1.0);
+    float3 n166 = float3(n160.z) + float3(n167.x);
+    float3 n158 = n159 + n166;
+    float n169 = 3.0;
+    float3 n157 = n158 * float3(n169);
+    float3 n156 = fast::clamp(n157, float3(0.0), float3(1.0));
+    float3 n155 = float3(1.0) - n156;
+    float3 n170 = float3(1.0) - float3(n100);
+    float3 n154 = n155 * n170;
+    float3 n125 = n126 * n154;
+    float3 n124 = n125 + float3(n167.y);
+    float3 n123 = fast::clamp(n124, float3(0.0), float3(1.0));
+    float3 n2 = mix(n3, n121, float3(n123.x));
+    float n172 = 0.3499999940395355224609375;
+    float3 n171 = n3 * float3(n172);
+    float n179 = 0.039999999105930328369140625;
+    float3 n178 = float3(n13) + float3(n179);
+    float n183 = smoothstep(n148.x, n149, n54.x);
+    float n185 = 0.20000000298023223876953125;
+    float3 n184 = float3(n134) + float3(n185);
+    float3 n182 = float3(n183) * n184;
+    float3 n181 = n132 - n182;
+    float3 n190 = mix(n93, n90, float3(n78.x));
+    float4 n189 = float4(n190, 1.0);
+    float n191 = 0.5;
+    float3 n188 = float3(n189.z) - float3(n191);
+    float3 n187 = n188 * float3(n47);
+    float3 n186 = n187 * float3(n179);
+    float3 n180 = n181 - n186;
+    float n177 = smoothstep(n13, n178.x, n180.x);
+    float3 n176 = float3(n177) * n153;
+    float3 n175 = n176 * n154;
+    float3 n174 = n175 + float3(n167.y);
+    float3 n173 = fast::clamp(n174, float3(0.0), float3(1.0));
+    float3 n1 = mix(n2, n171, float3(n173.x));
+    float n192 = 0.0;
+    float2 n196_ts = float2(int2(heLandscapeWeights.get_width(), heLandscapeWeights.get_height()));
+    bool n196_p2 = n196_ts.x > (1.5 * n196_ts.y);
+    float _5315;
+    if (n196_p2)
+    {
+        _5315 = n196_ts.x * 0.5;
+    }
+    else
+    {
+        _5315 = n196_ts.x;
+    }
+    float2 n196_wsz = float2(_5315, n196_ts.y);
+    float2 n196_wt = (in.vUV * n196_wsz) - float2(0.5);
+    float2 n196_wi = floor(n196_wt);
+    float2 n196_wq = n196_wt - n196_wi;
+    float2 n196_wuv = fast::clamp(((n196_wi + float2(0.5)) + ((n196_wq * n196_wq) * (float2(3.0) - (n196_wq * 2.0)))) / n196_wsz, float2(0.5) / n196_wsz, float2(1.0) - (float2(0.5) / n196_wsz));
+    float n196_wu = fast::clamp(n196_wuv.x * 0.5, 0.5 / n196_ts.x, 0.5 - (0.5 / n196_ts.x));
+    float4 n196_wf = heLandscapeWeights.sample(heLandscapeWeightsSmplr, n196_wuv);
+    float4 n196_wl = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n196_wu, n196_wuv.y), level(0.0));
+    float4 n196_w = n196_p2 ? n196_wl : n196_wf;
+    float4 n196_wr = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n196_wu + 0.5, n196_wuv.y), level(0.0));
+    float4 n196_w2 = n196_p2 ? n196_wr : float4(0.0);
+    float n196_s = ((((n196_w.x + n196_w.y) + n196_w.z) + n196_w.w) + n196_w2.x) + n196_w2.y;
+    float3 _5426;
+    if (n196_s > 9.9999997473787516355514526367188e-05)
+    {
+        _5426 = ((((((n190 * n196_w.x) + (n45 * n196_w.y)) + (n42 * n196_w.z)) + (n70 * n196_w.w)) + (n90 * n196_w2.x)) + (n190 * n196_w2.y)) / float3(n196_s);
+    }
+    else
+    {
+        _5426 = n190;
+    }
+    float3 n196 = _5426;
+    float4 n195 = float4(n196, 1.0);
+    float n198 = 0.5;
+    float3 n197 = float3(n195.y) * float3(n198);
+    float3 n194 = mix(float3(n195.y), n197, float3(n123.x));
+    float n199 = 0.0500000007450580596923828125;
+    float3 n193 = mix(n194, float3(n199), float3(n173.x));
+    float n207_l = fast::clamp(floor(n15 + 0.5), 0.0, float(int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1));
+    int _5514;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _5514 = max((int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _5514 = 1;
+    }
+    int n207_V = _5514;
+    float3 n207_0;
+    float3 n207_1;
+    float3 n207_2;
+    if (n207_V == 1)
+    {
+        float3 _5539 = float3(n18_gt0, n207_l);
+        n207_0 = (heTexP2.sample(heTexP2Smplr, _5539.xy, uint(rint(_5539.z)), gradient2d(n18_gr0 * n18_gdx, n18_gr0 * n18_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5553 = n207_0;
+        float2 _5555 = transpose(n18_gr0) * _5553.xy;
+        n207_0.x = _5555.x;
+        n207_0.y = _5555.y;
+        float3 _5566 = float3(n18_gt1, n207_l);
+        n207_1 = (heTexP2.sample(heTexP2Smplr, _5566.xy, uint(rint(_5566.z)), gradient2d(n18_gr1 * n18_gdx, n18_gr1 * n18_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5580 = n207_1;
+        float2 _5582 = transpose(n18_gr1) * _5580.xy;
+        n207_1.x = _5582.x;
+        n207_1.y = _5582.y;
+        float3 _5593 = float3(n18_gt2, n207_l);
+        n207_2 = (heTexP2.sample(heTexP2Smplr, _5593.xy, uint(rint(_5593.z)), gradient2d(n18_gr2 * n18_gdx, n18_gr2 * n18_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5607 = n207_2;
+        float2 _5609 = transpose(n18_gr2) * _5607.xy;
+        n207_2.x = _5609.x;
+        n207_2.y = _5609.y;
+    }
+    else
+    {
+        int n207_s0 = clamp((int(n207_l) * n207_V) + int(((n18_gs.x & 255u) * uint(n207_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n207_s1 = clamp((int(n207_l) * n207_V) + int(((n18_gs.y & 255u) * uint(n207_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n207_s2 = clamp((int(n207_l) * n207_V) + int(((n18_gs.z & 255u) * uint(n207_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        float3 _5681 = float3(n18_gt0, float(n207_s0));
+        n207_0 = (heTexP2.sample(heTexP2Smplr, _5681.xy, uint(rint(_5681.z)), gradient2d(n18_gr0 * n18_gdx, n18_gr0 * n18_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5695 = n207_0;
+        float2 _5697 = transpose(n18_gr0) * _5695.xy;
+        n207_0.x = _5697.x;
+        n207_0.y = _5697.y;
+        float3 _5708 = float3(n18_gt1, float(n207_s1));
+        n207_1 = (heTexP2.sample(heTexP2Smplr, _5708.xy, uint(rint(_5708.z)), gradient2d(n18_gr1 * n18_gdx, n18_gr1 * n18_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5722 = n207_1;
+        float2 _5724 = transpose(n18_gr1) * _5722.xy;
+        n207_1.x = _5724.x;
+        n207_1.y = _5724.y;
+        float3 _5735 = float3(n18_gt2, float(n207_s2));
+        n207_2 = (heTexP2.sample(heTexP2Smplr, _5735.xy, uint(rint(_5735.z)), gradient2d(n18_gr2 * n18_gdx, n18_gr2 * n18_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5749 = n207_2;
+        float2 _5751 = transpose(n18_gr2) * _5749.xy;
+        n207_2.x = _5751.x;
+        n207_2.y = _5751.y;
+    }
+    float3 n207_t = ((n207_0 * n18_gw.x) + (n207_1 * n18_gw.y)) + (n207_2 * n18_gw.z);
+    float3 _5771 = n207_t;
+    float2 _5773 = _5771.xy * 1.0;
+    n207_t.x = _5773.x;
+    n207_t.y = _5773.y;
+    float3 param_54 = fast::normalize(in.vNormal);
+    float3 param_55 = fast::normalize(n207_t);
+    float3 param_56 = in.vWorldPos;
+    float2 param_57 = n9.xy;
+    float3 n207 = hePerturbNormal(param_54, param_55, param_56, param_57);
+    float3 n206 = n207;
+    float n209_l = fast::clamp(floor(n21 + 0.5), 0.0, float(int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1));
+    int _5810;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _5810 = max((int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _5810 = 1;
+    }
+    int n209_V = _5810;
+    float3 n209_0;
+    float3 n209_1;
+    float3 n209_2;
+    if (n209_V == 1)
+    {
+        float3 _5835 = float3(n22_gt0, n209_l);
+        n209_0 = (heTexP2.sample(heTexP2Smplr, _5835.xy, uint(rint(_5835.z)), gradient2d(n22_gr0 * n22_gdx, n22_gr0 * n22_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5849 = n209_0;
+        float2 _5851 = transpose(n22_gr0) * _5849.xy;
+        n209_0.x = _5851.x;
+        n209_0.y = _5851.y;
+        float3 _5862 = float3(n22_gt1, n209_l);
+        n209_1 = (heTexP2.sample(heTexP2Smplr, _5862.xy, uint(rint(_5862.z)), gradient2d(n22_gr1 * n22_gdx, n22_gr1 * n22_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5876 = n209_1;
+        float2 _5878 = transpose(n22_gr1) * _5876.xy;
+        n209_1.x = _5878.x;
+        n209_1.y = _5878.y;
+        float3 _5889 = float3(n22_gt2, n209_l);
+        n209_2 = (heTexP2.sample(heTexP2Smplr, _5889.xy, uint(rint(_5889.z)), gradient2d(n22_gr2 * n22_gdx, n22_gr2 * n22_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5903 = n209_2;
+        float2 _5905 = transpose(n22_gr2) * _5903.xy;
+        n209_2.x = _5905.x;
+        n209_2.y = _5905.y;
+    }
+    else
+    {
+        int n209_s0 = clamp((int(n209_l) * n209_V) + int(((n22_gs.x & 255u) * uint(n209_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n209_s1 = clamp((int(n209_l) * n209_V) + int(((n22_gs.y & 255u) * uint(n209_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n209_s2 = clamp((int(n209_l) * n209_V) + int(((n22_gs.z & 255u) * uint(n209_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        float3 _5977 = float3(n22_gt0, float(n209_s0));
+        n209_0 = (heTexP2.sample(heTexP2Smplr, _5977.xy, uint(rint(_5977.z)), gradient2d(n22_gr0 * n22_gdx, n22_gr0 * n22_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _5991 = n209_0;
+        float2 _5993 = transpose(n22_gr0) * _5991.xy;
+        n209_0.x = _5993.x;
+        n209_0.y = _5993.y;
+        float3 _6004 = float3(n22_gt1, float(n209_s1));
+        n209_1 = (heTexP2.sample(heTexP2Smplr, _6004.xy, uint(rint(_6004.z)), gradient2d(n22_gr1 * n22_gdx, n22_gr1 * n22_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6018 = n209_1;
+        float2 _6020 = transpose(n22_gr1) * _6018.xy;
+        n209_1.x = _6020.x;
+        n209_1.y = _6020.y;
+        float3 _6031 = float3(n22_gt2, float(n209_s2));
+        n209_2 = (heTexP2.sample(heTexP2Smplr, _6031.xy, uint(rint(_6031.z)), gradient2d(n22_gr2 * n22_gdx, n22_gr2 * n22_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6045 = n209_2;
+        float2 _6047 = transpose(n22_gr2) * _6045.xy;
+        n209_2.x = _6047.x;
+        n209_2.y = _6047.y;
+    }
+    float3 n209_t = ((n209_0 * n22_gw.x) + (n209_1 * n22_gw.y)) + (n209_2 * n22_gw.z);
+    float3 _6067 = n209_t;
+    float2 _6069 = _6067.xy * 1.0;
+    n209_t.x = _6069.x;
+    n209_t.y = _6069.y;
+    float3 param_58 = fast::normalize(in.vNormal);
+    float3 param_59 = fast::normalize(n209_t);
+    float3 param_60 = in.vWorldPos;
+    float2 param_61 = n9.xy;
+    float3 n209 = hePerturbNormal(param_58, param_59, param_60, param_61);
+    float3 n208 = n209;
+    float3 n205 = mix(n206, n208, float3(n23.x));
+    float n211_l = fast::clamp(floor(n61 + 0.5), 0.0, float(int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1));
+    int _6113;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _6113 = max((int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _6113 = 1;
+    }
+    int n211_V = _6113;
+    float3 n211_0;
+    float3 n211_1;
+    float3 n211_2;
+    if (n211_V == 1)
+    {
+        float3 _6138 = float3(n62_gt0, n211_l);
+        n211_0 = (heTexP2.sample(heTexP2Smplr, _6138.xy, uint(rint(_6138.z)), gradient2d(n62_gr0 * n62_gdx, n62_gr0 * n62_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6152 = n211_0;
+        float2 _6154 = transpose(n62_gr0) * _6152.xy;
+        n211_0.x = _6154.x;
+        n211_0.y = _6154.y;
+        float3 _6165 = float3(n62_gt1, n211_l);
+        n211_1 = (heTexP2.sample(heTexP2Smplr, _6165.xy, uint(rint(_6165.z)), gradient2d(n62_gr1 * n62_gdx, n62_gr1 * n62_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6179 = n211_1;
+        float2 _6181 = transpose(n62_gr1) * _6179.xy;
+        n211_1.x = _6181.x;
+        n211_1.y = _6181.y;
+        float3 _6192 = float3(n62_gt2, n211_l);
+        n211_2 = (heTexP2.sample(heTexP2Smplr, _6192.xy, uint(rint(_6192.z)), gradient2d(n62_gr2 * n62_gdx, n62_gr2 * n62_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6206 = n211_2;
+        float2 _6208 = transpose(n62_gr2) * _6206.xy;
+        n211_2.x = _6208.x;
+        n211_2.y = _6208.y;
+    }
+    else
+    {
+        int n211_s0 = clamp((int(n211_l) * n211_V) + int(((n62_gs.x & 255u) * uint(n211_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n211_s1 = clamp((int(n211_l) * n211_V) + int(((n62_gs.y & 255u) * uint(n211_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n211_s2 = clamp((int(n211_l) * n211_V) + int(((n62_gs.z & 255u) * uint(n211_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        float3 _6280 = float3(n62_gt0, float(n211_s0));
+        n211_0 = (heTexP2.sample(heTexP2Smplr, _6280.xy, uint(rint(_6280.z)), gradient2d(n62_gr0 * n62_gdx, n62_gr0 * n62_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6294 = n211_0;
+        float2 _6296 = transpose(n62_gr0) * _6294.xy;
+        n211_0.x = _6296.x;
+        n211_0.y = _6296.y;
+        float3 _6307 = float3(n62_gt1, float(n211_s1));
+        n211_1 = (heTexP2.sample(heTexP2Smplr, _6307.xy, uint(rint(_6307.z)), gradient2d(n62_gr1 * n62_gdx, n62_gr1 * n62_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6321 = n211_1;
+        float2 _6323 = transpose(n62_gr1) * _6321.xy;
+        n211_1.x = _6323.x;
+        n211_1.y = _6323.y;
+        float3 _6334 = float3(n62_gt2, float(n211_s2));
+        n211_2 = (heTexP2.sample(heTexP2Smplr, _6334.xy, uint(rint(_6334.z)), gradient2d(n62_gr2 * n62_gdx, n62_gr2 * n62_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6348 = n211_2;
+        float2 _6350 = transpose(n62_gr2) * _6348.xy;
+        n211_2.x = _6350.x;
+        n211_2.y = _6350.y;
+    }
+    float3 n211_t = ((n211_0 * n62_gw.x) + (n211_1 * n62_gw.y)) + (n211_2 * n62_gw.z);
+    float3 _6370 = n211_t;
+    float2 _6372 = _6370.xy * 1.0;
+    n211_t.x = _6372.x;
+    n211_t.y = _6372.y;
+    float3 param_62 = fast::normalize(in.vNormal);
+    float3 param_63 = fast::normalize(n211_t);
+    float3 param_64 = in.vWorldPos;
+    float2 param_65 = n59.xy;
+    float3 n211 = hePerturbNormal(param_62, param_63, param_64, param_65);
+    float3 n210 = n211;
+    float3 n204 = mix(n205, n210, float3(n63));
+    float n213_l = fast::clamp(floor(n76 + 0.5), 0.0, float(int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1));
+    int _6415;
+    if (int(floor(n17 + 0.5)) > 0)
+    {
+        _6415 = max((int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z / int(floor(n17 + 0.5))), 1);
+    }
+    else
+    {
+        _6415 = 1;
+    }
+    int n213_V = _6415;
+    float3 n213_0;
+    float3 n213_1;
+    float3 n213_2;
+    if (n213_V == 1)
+    {
+        float3 _6440 = float3(n77_gt0, n213_l);
+        n213_0 = (heTexP2.sample(heTexP2Smplr, _6440.xy, uint(rint(_6440.z)), gradient2d(n77_gr0 * n77_gdx, n77_gr0 * n77_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6454 = n213_0;
+        float2 _6456 = transpose(n77_gr0) * _6454.xy;
+        n213_0.x = _6456.x;
+        n213_0.y = _6456.y;
+        float3 _6467 = float3(n77_gt1, n213_l);
+        n213_1 = (heTexP2.sample(heTexP2Smplr, _6467.xy, uint(rint(_6467.z)), gradient2d(n77_gr1 * n77_gdx, n77_gr1 * n77_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6481 = n213_1;
+        float2 _6483 = transpose(n77_gr1) * _6481.xy;
+        n213_1.x = _6483.x;
+        n213_1.y = _6483.y;
+        float3 _6494 = float3(n77_gt2, n213_l);
+        n213_2 = (heTexP2.sample(heTexP2Smplr, _6494.xy, uint(rint(_6494.z)), gradient2d(n77_gr2 * n77_gdx, n77_gr2 * n77_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6508 = n213_2;
+        float2 _6510 = transpose(n77_gr2) * _6508.xy;
+        n213_2.x = _6510.x;
+        n213_2.y = _6510.y;
+    }
+    else
+    {
+        int n213_s0 = clamp((int(n213_l) * n213_V) + int(((n77_gs.x & 255u) * uint(n213_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n213_s1 = clamp((int(n213_l) * n213_V) + int(((n77_gs.y & 255u) * uint(n213_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        int n213_s2 = clamp((int(n213_l) * n213_V) + int(((n77_gs.z & 255u) * uint(n213_V)) >> 8u), 0, int3(heTexP2.get_width(), heTexP2.get_height(), heTexP2.get_array_size()).z - 1);
+        float3 _6582 = float3(n77_gt0, float(n213_s0));
+        n213_0 = (heTexP2.sample(heTexP2Smplr, _6582.xy, uint(rint(_6582.z)), gradient2d(n77_gr0 * n77_gdx, n77_gr0 * n77_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6596 = n213_0;
+        float2 _6598 = transpose(n77_gr0) * _6596.xy;
+        n213_0.x = _6598.x;
+        n213_0.y = _6598.y;
+        float3 _6609 = float3(n77_gt1, float(n213_s1));
+        n213_1 = (heTexP2.sample(heTexP2Smplr, _6609.xy, uint(rint(_6609.z)), gradient2d(n77_gr1 * n77_gdx, n77_gr1 * n77_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6623 = n213_1;
+        float2 _6625 = transpose(n77_gr1) * _6623.xy;
+        n213_1.x = _6625.x;
+        n213_1.y = _6625.y;
+        float3 _6636 = float3(n77_gt2, float(n213_s2));
+        n213_2 = (heTexP2.sample(heTexP2Smplr, _6636.xy, uint(rint(_6636.z)), gradient2d(n77_gr2 * n77_gdx, n77_gr2 * n77_gdy)).xyz * 2.0) - float3(1.0);
+        float3 _6650 = n213_2;
+        float2 _6652 = transpose(n77_gr2) * _6650.xy;
+        n213_2.x = _6652.x;
+        n213_2.y = _6652.y;
+    }
+    float3 n213_t = ((n213_0 * n77_gw.x) + (n213_1 * n77_gw.y)) + (n213_2 * n77_gw.z);
+    float3 _6672 = n213_t;
+    float2 _6674 = _6672.xy * 1.0;
+    n213_t.x = _6674.x;
+    n213_t.y = _6674.y;
+    float3 param_66 = fast::normalize(in.vNormal);
+    float3 param_67 = fast::normalize(n213_t);
+    float3 param_68 = in.vWorldPos;
+    float2 param_69 = n59.xy;
+    float3 n213 = hePerturbNormal(param_66, param_67, param_68, param_69);
+    float3 n212 = n213;
+    float3 n203 = mix(n204, n212, float3(n78.x));
+    float2 n202_ts = float2(int2(heLandscapeWeights.get_width(), heLandscapeWeights.get_height()));
+    bool n202_p2 = n202_ts.x > (1.5 * n202_ts.y);
+    float _6715;
+    if (n202_p2)
+    {
+        _6715 = n202_ts.x * 0.5;
+    }
+    else
+    {
+        _6715 = n202_ts.x;
+    }
+    float2 n202_wsz = float2(_6715, n202_ts.y);
+    float2 n202_wt = (in.vUV * n202_wsz) - float2(0.5);
+    float2 n202_wi = floor(n202_wt);
+    float2 n202_wq = n202_wt - n202_wi;
+    float2 n202_wuv = fast::clamp(((n202_wi + float2(0.5)) + ((n202_wq * n202_wq) * (float2(3.0) - (n202_wq * 2.0)))) / n202_wsz, float2(0.5) / n202_wsz, float2(1.0) - (float2(0.5) / n202_wsz));
+    float n202_wu = fast::clamp(n202_wuv.x * 0.5, 0.5 / n202_ts.x, 0.5 - (0.5 / n202_ts.x));
+    float4 n202_wf = heLandscapeWeights.sample(heLandscapeWeightsSmplr, n202_wuv);
+    float4 n202_wl = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n202_wu, n202_wuv.y), level(0.0));
+    float4 n202_w = n202_p2 ? n202_wl : n202_wf;
+    float4 n202_wr = heLandscapeWeights.sample(heLandscapeWeightsSmplr, float2(n202_wu + 0.5, n202_wuv.y), level(0.0));
+    float4 n202_w2 = n202_p2 ? n202_wr : float4(0.0);
+    float n202_s = ((((n202_w.x + n202_w.y) + n202_w.z) + n202_w.w) + n202_w2.x) + n202_w2.y;
+    float3 _6826;
+    if (n202_s > 9.9999997473787516355514526367188e-05)
+    {
+        _6826 = ((((((n203 * n202_w.x) + (n206 * n202_w.y)) + (n208 * n202_w.z)) + (n210 * n202_w.w)) + (n212 * n202_w2.x)) + (n203 * n202_w2.y)) / float3(n202_s);
+    }
+    else
+    {
+        _6826 = n203;
+    }
+    float3 n202 = _6826;
+    float3 n214 = float3(0.0, 1.0, 0.0);
+    float3 n201 = mix(n202, n214, float3(n173.x));
+    float3 n200 = fast::normalize(n201);
+    float3 heN = fast::normalize(n200);
+    float3 param_70 = n1;
+    float3 param_71 = heN;
+    float param_72 = n192;
+    float param_73 = n193.x;
+    float3 param_74 = in.vWorldPos;
+    float param_75 = 0.5;
+    float param_76 = n195.x;
+    float3 _6895 = heLitP(param_70, param_71, param_72, param_73, param_74, param_75, param_76, heLight, heGIVisibility, heGIVisibilitySmplr, heGIIrradiance, heGIIrradianceSmplr, heSkyEnv, heSkyEnvSmplr, heCsm, heCsmSmplr, heLocalShadow, heLocalShadowSmplr, heCloudShadow, heCloudShadowSmplr, heGIReflFwd, heGIReflFwdSmplr, gl_FragCoord, heSSRFwd, heSSRFwdSmplr, heAO, heAOSmplr, heGIShadow, heGIShadowSmplr, heGILocal, heGILocalSmplr);
+    float3 param_77 = _6895 + float3(0.0);
+    float3 param_78 = in.vWorldPos;
+    out.oColor = float4(heApplyFog(param_77, param_78, heLight, heSkyEnv, heSkyEnvSmplr), 1.0);
+    return out;
+}
+

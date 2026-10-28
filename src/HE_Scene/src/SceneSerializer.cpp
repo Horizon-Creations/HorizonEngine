@@ -28,6 +28,7 @@
 #include "HorizonScene/Components/EnvironmentComponent.h"
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
+#include <ContentManager/DefaultAssets.h>   // kLegacyEngineWaterMaterialId
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
@@ -154,6 +155,15 @@ namespace
 		return id;
 	}
 
+	// A MATERIAL reference. The engine water material used to be {0x400, 1}, the
+	// UUID of T_Landscape_Grass_Albedo; scenes saved then still name it so, and
+	// nothing but the water material can be meant in a material slot.
+	HE::UUID jsonToMaterialUuid(const json& j)
+	{
+		const HE::UUID id = jsonToUuid(j);
+		return id == HE::kLegacyEngineWaterMaterialId ? HE::kEngineWaterMaterialId : id;
+	}
+
 	// ── Foliage layers ───────────────────────────────────────────────────────
 	// One layer's fields. A component with ONE layer writes them flat into the
 	// "foliage" object, exactly the keys a scene had before layers existed, so an
@@ -213,7 +223,7 @@ namespace
 		l.name            = c.value("name",           l.name);
 		l.visible         = c.value(visibleKey,       l.visible);
 		l.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
-		l.materialAssetId = jsonToUuid(c.value("material", json()));
+		l.materialAssetId = jsonToMaterialUuid(c.value("material", json()));
 		l.density         = c.value("density",        l.density);
 		l.seed            = c.value("seed",           l.seed);
 		l.minScale        = c.value("minScale",       l.minScale);
@@ -239,7 +249,7 @@ namespace
 				if (!d.is_object() || l.lods.size() >= FoliageLayer::kMaxLods) continue;
 				FoliageLod lod;
 				lod.meshAssetId     = jsonToUuid(d.value("mesh",     json()));
-				lod.materialAssetId = jsonToUuid(d.value("material", json()));
+				lod.materialAssetId = jsonToMaterialUuid(d.value("material", json()));
 				lod.distance        = std::max(0.0f, d.value("distance", lod.distance));
 				lod.density         = std::clamp(d.value("density", lod.density), 0.0f, 1.0f);
 				l.lods.push_back(lod);
@@ -818,6 +828,15 @@ namespace
 						if (b.underwaterCaustics.depth     != d.depth)     cj["depth"]     = b.underwaterCaustics.depth;
 						bj["underwaterCaustics"] = std::move(cj);
 					}
+					// How the tessellated surface behaves: only when it differs from the defaults.
+					if (b.tessellation != HE::water::TessellationParams{})
+					{
+						const HE::water::TessellationParams d;
+						json tj = json::object();
+						if (b.tessellation.height     != d.height)     tj["height"]     = b.tessellation.height;
+						if (b.tessellation.shoreWidth != d.shoreWidth) tj["shoreWidth"] = b.tessellation.shoreWidth;
+						bj["tessellation"] = std::move(tj);
+					}
 					// The brush's bed (Thema 206 Schritt 9): only for a body it dug.
 					if (b.brushBed != HE::water::BrushBedParams{} || !b.brushPatch.empty())
 					{
@@ -839,6 +858,7 @@ namespace
 				// The shore clipping settings, only when they are not the default
 				// (a scene with water from before them reads back as clipped).
 				if (!w.clipToGround) tc["waterClip"] = false;
+				if (w.tessellation) tc["waterTess"] = true;
 				if (w.shoreOvershoot != HE::water::kDefaultShoreOvershoot) tc["waterShoreOvershoot"] = w.shoreOvershoot;
 				const std::vector<uint8_t> cells = HE::water::encodeCells(w);
 				if (!cells.empty())
@@ -1154,6 +1174,8 @@ namespace
 		return comps;
 	}
 
+	bool isEngineGenerated(entt::registry& registry, Entity e);
+
 	// ── Scene → JSON ─────────────────────────────────────────────────────────
 	json buildSceneJson(HorizonWorld& world)
 	{
@@ -1170,8 +1192,7 @@ namespace
 			// for itself (terrain chunks, water surfaces) are never serialised — all
 			// are recreated on load (ensureEnvironmentLights / TerrainSystem from the
 			// TerrainComponent), so the scene file stays clean.
-			if (registry.all_of<EnvironmentLightComponent>(entity) ||
-			    HE::isTerrainGenerated(registry, entity))
+			if (isEngineGenerated(registry, entity))
 				continue;
 
 			json eJson;
@@ -1316,7 +1337,7 @@ namespace
 		if (comps.contains("material"))
 		{
 			MaterialComponent m;
-			m.materialAssetId = jsonToUuid(comps["material"].value("asset", json()));
+			m.materialAssetId = jsonToMaterialUuid(comps["material"].value("asset", json()));
 			if (auto it = comps["material"].find("paramOverrides");
 			    it != comps["material"].end() && it->is_array())
 				for (const auto& jo : *it)
@@ -1330,7 +1351,7 @@ namespace
 			if (auto it = comps["material"].find("slotOverrides");
 			    it != comps["material"].end() && it->is_array())
 				for (const auto& js : *it)
-					m.slotOverrides.push_back(jsonToUuid(js));
+					m.slotOverrides.push_back(jsonToMaterialUuid(js));
 			registry.emplace_or_replace<MaterialComponent>(entity, m);
 		}
 		if (comps.contains("camera"))
@@ -1452,7 +1473,7 @@ namespace
 			rope.uvTileLength     = c.value("uvTileLength",   rope.uvTileLength);
 			rope.twoSidedGeometry = c.value("twoSided",       rope.twoSidedGeometry);
 			rope.castsShadow      = c.value("castsShadow",    rope.castsShadow);
-			rope.materialAssetId  = jsonToUuid(c.value("material", json()));
+			rope.materialAssetId  = jsonToMaterialUuid(c.value("material", json()));
 			registry.emplace_or_replace<RopeComponent>(entity, rope);
 		}
 		if (comps.contains("spline"))
@@ -1478,7 +1499,7 @@ namespace
 			tr.endWidth          = c.value("endWidth",          tr.endWidth);
 			tr.alignment         = static_cast<TrailAlignment>(
 			                           c.value("alignment", static_cast<uint8_t>(tr.alignment)));
-			tr.materialAssetId   = jsonToUuid(c.value("material", json()));
+			tr.materialAssetId   = jsonToMaterialUuid(c.value("material", json()));
 			registry.emplace_or_replace<TrailComponent>(entity, tr);
 		}
 		if (comps.contains("rigidbody"))
@@ -1755,6 +1776,8 @@ namespace
 				w.nextBodyId = c.value("waterNextId", w.nextBodyId);
 				if (c.contains("waterClip") && c["waterClip"].is_boolean())
 					w.clipToGround = c["waterClip"].get<bool>();
+				if (c.contains("waterTess") && c["waterTess"].is_boolean())
+					w.tessellation = c["waterTess"].get<bool>();
 				if (c.contains("waterShoreOvershoot") && c["waterShoreOvershoot"].is_number())
 					w.shoreOvershoot = c["waterShoreOvershoot"].get<float>();   // sanitize() clamps it
 				if (c.contains("waterBodies") && c["waterBodies"].is_array())
@@ -1870,6 +1893,16 @@ namespace
 							num("speed",     b.underwaterCaustics.speed);
 							num("depth",     b.underwaterCaustics.depth);
 						}
+						if (bj.contains("tessellation") && bj["tessellation"].is_object())
+						{
+							const json& tj = bj["tessellation"];
+							const auto num = [&tj](const char* key, float& into)
+							{
+								if (tj.contains(key) && tj[key].is_number()) into = tj[key].get<float>();
+							};
+							num("height",     b.tessellation.height);
+							num("shoreWidth", b.tessellation.shoreWidth);
+						}
 						if (bj.contains("brushBed") && bj["brushBed"].is_object())
 						{
 							const json& dj = bj["brushBed"];
@@ -1965,7 +1998,7 @@ namespace
 				auto& lg = ps.legacy;
 				lg.hasData         = true;
 				lg.meshAssetId     = jsonToUuid(c.value("mesh",     json()));
-				lg.materialAssetId = jsonToUuid(c.value("material", json()));
+				lg.materialAssetId = jsonToMaterialUuid(c.value("material", json()));
 				lg.emitRate        = c.value("emitRate",        lg.emitRate);
 				lg.lifetimeMin     = c.value("lifetimeMin",     lg.lifetimeMin);
 				lg.lifetimeMax     = c.value("lifetimeMax",     lg.lifetimeMax);
@@ -2347,7 +2380,7 @@ namespace
 		{
 			const json& c = comps["uiimage"];
 			UIImageComponent img;
-			img.materialAssetId = jsonToUuid(c.value("material", json()));
+			img.materialAssetId = jsonToMaterialUuid(c.value("material", json()));
 			img.tint            = jsonToVec4(c.value("tint", json()), img.tint);
 			registry.emplace_or_replace<UIImageComponent>(entity, img);
 		}
@@ -2828,9 +2861,9 @@ namespace
 		// records a child deleted from the placement, and the deletion is part of
 		// what was copied. Every record is checked, not just the root — a nested
 		// placement is an instance of its own.
-		for (const auto& [key, e] : idMap)
+		for (const auto& entry : idMap)
 		{
-			(void)key;
+			Entity e = entry.second;
 			auto* inst = registry.try_get<PrefabInstanceComponent>(e);
 			if (!inst) continue;
 			for (auto& b : inst->bindings)
@@ -3134,9 +3167,9 @@ namespace
 				auto cur = iComps.find(k);
 				if (cur == iComps.end() || *cur != block) adopt(k);
 			}
-			for (const auto& [k, block] : iComps.items())
+			for (const auto& item : iComps.items())
 			{
-				(void)block;
+				const std::string& k = item.key();
 				if (!isPropagatedKey(k, isRoot)) continue;
 				if (!tComps.contains(k)) adopt(k);
 			}
@@ -3804,14 +3837,23 @@ std::string SceneSerializer::componentKeyOfText(const std::string& text)
 
 bool SceneSerializer::importComponentText(HorizonWorld& world, Entity entity, const std::string& text)
 {
-    const std::string key = componentKeyOfText(text);
-    if (key.empty()) return false;
+    // Inlined componentKeyOfText's validation so the envelope is parsed once,
+    // not once to find the key and once more to read its values.
+    if (text.size() < 2 || text.find(kComponentEnvelopeKey) == std::string::npos) return false;
+    const json envelope = json::parse(text, nullptr, /*allow_exceptions=*/false);
+    if (envelope.is_discarded() || !envelope.is_object()) return false;
+    const auto keyIt = envelope.find(kComponentEnvelopeKey);
+    const auto valIt = envelope.find(kComponentEnvelopeValues);
+    if (keyIt == envelope.end() || !keyIt->is_string()) return false;
+    if (valIt == envelope.end() || !valIt->is_object()) return false;
+    const std::string key = keyIt->get<std::string>();
+    if (!isClipboardComponentKey(key)) return false;
+
     auto& registry = world.registry();
     if (!registry.valid(entity)) return false;
-    const json envelope = json::parse(text, nullptr, /*allow_exceptions=*/false);
     // One block, restored the way a scene load restores it — so a pasted
     // component is exactly what a saved-and-reloaded one would be.
-    applyComponents(registry, entity, json{ { key, envelope[kComponentEnvelopeValues] } });
+    applyComponents(registry, entity, json{ { key, *valIt } });
     return true;
 }
 
@@ -4258,7 +4300,7 @@ static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const jso
         if (!toApply.empty())
         {
             std::string keys;
-            for (const auto& [k, v] : toApply.items()) { (void)v; keys += (keys.empty() ? "" : ", ") + k; }
+            for (const auto& item : toApply.items()) { keys += (keys.empty() ? "" : ", ") + item.key(); }
             HE_LOG_INFO(Serialize, "Prefab sync: '%s' ← %s: %s", rootName.c_str(),
                         r->value("name", "Entity").c_str(), keys.c_str());
             applyComponents(registry, e, toApply);
@@ -4267,9 +4309,9 @@ static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const jso
 
         // Components the asset no longer has, unless something in them was
         // authored here.
-        for (const auto& [k, block] : iComps.items())
+        for (const auto& item : iComps.items())
         {
-            (void)block;
+            const std::string& k = item.key();
             if (!isPropagatedKey(k, isRoot) || tComps.contains(k)) continue;
             if (anyOverrideOn(work, key, k)) { ++rep.overridesKept; continue; }
             // A component a nested record lacks here is the nested asset's to
@@ -4286,9 +4328,9 @@ static bool syncPrefabInstanceParsed(HorizonWorld& world, Entity root, const jso
 
     // Nested instances created above: their bindings still name the
     // template's entities. Point them at what this pass made of those.
-    for (const auto& [key, e] : created)
+    for (const auto& entry : created)
     {
-        (void)key;
+        Entity e = entry.second;
         auto* nested = registry.try_get<PrefabInstanceComponent>(e);
         if (!nested) continue;
         for (auto& b : nested->bindings)
@@ -4436,15 +4478,15 @@ size_t SceneSerializer::recordPrefabOverrides(HorizonWorld& world, Entity root, 
         // only one side has counts as a difference too.
         for (const auto& [p, v] : block.items())
             if (!cur->contains(p) || (*cur)[p] != v) mark(k, p);
-        for (const auto& [p, v] : cur->items())
+        for (const auto& item : cur->items())
         {
-            (void)v;
+            const std::string& p = item.key();
             if (!block.contains(p)) mark(k, p);
         }
     }
-    for (const auto& [k, block] : iComps.items())
+    for (const auto& item : iComps.items())
     {
-        (void)block;
+        const std::string& k = item.key();
         if (!isPropagatedKey(k, isRoot) || tComps.contains(k)) continue;
         mark(k);   // added here
     }

@@ -6,8 +6,11 @@
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the context cannot sample them
 #include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
 #include <HorizonRendering/ParticleShaderTemplates.h>
+#include <HorizonRendering/GiCasterRange.h>
+#include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/SsaoKernel.h>     // shared SSAO kernel + rotation noise
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
+#include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
 #include <HorizonRendering/SkyNoise3D.h>     // shared procedural sky/cloud noise volume
 #include <HorizonRendering/SkyFrameParams.h> // shared cloud wind vector
 #include <HorizonRendering/SkyShaderSource.h> // kSkyFS + kSkyFuncGLSL, shared with Vulkan/D3D
@@ -16,6 +19,7 @@
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
+#include <HorizonRendering/UnderwaterSurfaceShared.h>  // the tessellated surface height for the post passes
 #include <HorizonRendering/SkyEnvBake.h>     // shared CPU sky bake for the IBL ambient cubemap
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
@@ -2002,7 +2006,101 @@ vec3 giHitNormal(int inst, int tri, vec3 rayDir)
 // Shadow-ray kernel: 1 cone-jittered ray/pixel toward the dominant directional
 // light (giDominantDirectionalLight pick — Metal lesson 5e45643: NEVER the
 // sky-dome sun). Same hash/cone/bias constants as Metal's giShadowRay.
+// GI sun/local-light occlusion against a landscape's HEIGHT FIELD instead of its chunk meshes (shadow kernel only;
+// inserted between kGiTraversalGLSL and kGiShadowCS). Mirrors kGiHeightfieldHLSL (D3D_Shared/HlslSources.h): the field is
+// an R32F texture whose mips are a conservative max pyramid (GiHeightfield.h). uHfParams.w == 0 = off.
+static const char* kGiHeightfieldGLSL = R"GLSL(
+uniform mat4      uHfWorldToLocal;
+uniform vec4      uHfParams;    // x = 1/sizeX, y = 1/sizeZ, z = res-1, w = enabled
+uniform vec4      uHfParams2;   // x = top mip level, y = max height, w = max march steps
+uniform sampler2D uHf;
+
+float hfBilinear(vec2 tp)
+{
+	vec2  f  = clamp(tp, vec2(0.0), vec2(uHfParams.z));
+	ivec2 i0 = ivec2(floor(f));
+	ivec2 i1 = min(i0 + ivec2(1), ivec2(int(uHfParams.z)));
+	vec2  w  = f - vec2(i0);
+	float h00 = texelFetch(uHf, ivec2(i0.x, i0.y), 0).r;
+	float h10 = texelFetch(uHf, ivec2(i1.x, i0.y), 0).r;
+	float h01 = texelFetch(uHf, ivec2(i0.x, i1.y), 0).r;
+	float h11 = texelFetch(uHf, ivec2(i1.x, i1.y), 0).r;
+	return mix(mix(h00, h10, w.x), mix(h01, h11, w.x), w.y);
+}
+
+bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+	if (uHfParams.w < 0.5) return false;
+	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
+	vec3 dL = mat3(uHfWorldToLocal) * d;
+	vec2 texPerLocal = vec2(uHfParams.x, uHfParams.y) * uHfParams.z;      // local XZ -> texels
+	vec2 tp0 = (oL.xz * vec2(uHfParams.x, uHfParams.y) + 0.5) * uHfParams.z;
+	vec2 tpd = dL.xz * texPerLocal;                                          // texels per unit t
+	float texLen = max(length(tpd), 1e-6);
+
+	// t range inside the terrain's footprint and below its highest point.
+	float t0 = tMin, t1 = tMax;
+	vec2 inv = 1.0 / (abs(tpd) + 1e-9) * sign(tpd + 1e-12);
+	vec2 ta  = (vec2(0.0) - tp0) * inv, tb = (vec2(uHfParams.z) - tp0) * inv;
+	vec2 tlo = min(ta, tb), thi = max(ta, tb);
+	t0 = max(t0, max(tlo.x, tlo.y));
+	t1 = min(t1, min(thi.x, thi.y));
+	float maxH = uHfParams2.y;
+	if (abs(dL.y) > 1e-9)
+	{
+		float tH = (maxH - oL.y) / dL.y;
+		if (dL.y < 0.0) t0 = max(t0, tH); else t1 = min(t1, tH);
+	}
+	else if (oL.y > maxH) return false;
+	if (t0 >= t1) return false;
+
+	// The receiver sits on a (possibly coarser) LOD mesh that can lie a little under the exact field:
+	// lift the start so a point on the ground is not its own occluder.
+	vec2  tpS  = tp0 + tpd * t0;
+	float hS   = hfBilinear(tpS);
+	float yS   = oL.y + dL.y * t0;
+	float lift = max(0.0, hS + 0.15 - yS);
+
+	int   topLvl = int(uHfParams2.x);
+	int   lvl    = min(2, topLvl);
+	float t      = t0;
+	int   steps  = int(uHfParams2.w);
+	for (int it = 0; it < steps; ++it)
+	{
+		if (t >= t1) return false;
+		vec2  tp = tp0 + tpd * t;
+		float y  = oL.y + dL.y * t + lift;
+		ivec2 cell = ivec2(floor(tp)) >> lvl;
+		cell = min(cell, ivec2(max(1, (int(uHfParams.z) + 1) >> lvl) - 1));   // the last texel of this mip
+		float m  = texelFetch(uHf, cell, lvl).r;
+		float cellTex = float(1 << lvl);
+		float dt = 0.5 * cellTex / texLen;
+		float yEnd = y + dL.y * dt;
+		if (min(y, yEnd) > m + 0.02)
+		{
+			t += dt;
+			lvl = min(lvl + 1, topLvl);
+		}
+		else if (lvl > 0)
+		{
+			lvl -= 1;
+		}
+		else
+		{
+			if (y < hfBilinear(tp) - 0.02) return true;
+			t += 0.5 / texLen;
+		}
+	}
+	return false;
+}
+#undef GI_OCCLUDED
+#define GI_OCCLUDED(o, d, tmin, tmax) (giSceneAnyHit(o, d, tmin, tmax) || hfAnyHit(o, d, tmin, tmax))
+)GLSL";
+
 static const char* kGiShadowCS = R"GLSL(
+#ifndef GI_OCCLUDED
+#define GI_OCCLUDED(o, d, tmin, tmax) giSceneAnyHit(o, d, tmin, tmax)
+#endif
 uniform sampler2D uGPos;
 uniform sampler2D uGNorm;
 layout(r16f,    binding = 0) uniform writeonly image2D uOut;
@@ -2070,7 +2168,7 @@ void main()
 			vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
 			// Same self-intersection guards as Metal: normal-offset origin + min t.
 			vec3 origin = pv.xyz + N * 0.05;
-			sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+			sunVis += GI_OCCLUDED(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
 		}
 		sunVis /= float(spp);
 	}
@@ -2092,7 +2190,7 @@ void main()
 		if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius → contributes nothing, skip the ray
 		vec3 dirL = toL / distL;
 		if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
-		if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+		if (GI_OCCLUDED(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
 			localVis[i] = 0.0;
 	}
 	imageStore(uOutLocal, ivec2(gid), localVis);
@@ -3386,6 +3484,19 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	HE_LOG_INFO(RHI, "%s", m_forwardClustered
 		? "OpenGLRenderer: graph materials use clustered lighting (SSBO 4/5/6)"
 		: "OpenGLRenderer: graph materials use the 8-light window (GL < 4.3 or HE_FORWARD_CLUSTER=0)");
+	// Displacement tessellation (Thema 207): core since GL 4.0, so macOS (4.1)
+	// has it too. HE_TESSELLATION=0 turns it off for an A/B against the fallback,
+	// which draws exactly what an unconnected pin draws. Patches are always
+	// triangles; nothing else on GL draws patches, so the state is set once.
+	m_tessSupported = GLAD_GL_VERSION_4_0 != 0 && glPatchParameteri != nullptr;
+	if (const char* t = std::getenv("HE_TESSELLATION"); t && *t && std::atoi(t) == 0)
+		m_tessSupported = false;
+	HE::setWaterTessellationAvailable(m_tessSupported);
+	if (m_tessSupported)
+		glPatchParameteri(GL_PATCH_VERTICES, 3);
+	HE_LOG_INFO(RHI, "%s", m_tessSupported
+		? "OpenGLRenderer: displacement materials tessellate (GL 4.0+)"
+		: "OpenGLRenderer: no tessellation (GL < 4.0 or HE_TESSELLATION=0), displacement is ignored");
 
 	// Deferred-path debug/headless knobs (mirrors the Metal backend):
 	// HE_RENDER_PATH=1/deferred forces the path without touching config,
@@ -3426,12 +3537,15 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateParticlePipeline();
 
 	// Profiler GPU timing via GL timer queries. Reliable on desktop GL (Windows /
-	// Linux); left off on Apple GL, where GL_TIMESTAMP / GL_TIME_ELAPSED queries are
-	// unreliable — there GetFrameGpuStats keeps reporting gpuFrameMs = -1.
+	// Linux) when the driver exports them; left off on Apple GL, where GL_TIMESTAMP /
+	// GL_TIME_ELAPSED queries are missing or unreliable. Without them the profiler falls
+	// back to glFinish-bracketed passes (GpuTimerBeginFrame), serialised and so only
+	// while a detailed / single-frame capture runs.
 #ifdef __APPLE__
 	m_gpuTimerSupported = false;
 #else
-	m_gpuTimerSupported = true;
+	m_gpuTimerSupported = glQueryCounter && glGetQueryObjectui64v && glBeginQuery && glEndQuery
+	                   && glGenQueries && glDeleteQueries;
 #endif
 
 	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: initialized successfully");
@@ -3599,14 +3713,27 @@ bool OpenGLRenderer::resolveMaterialShader(const HE::UUID& materialId, uint64_t&
                                            std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_matShaderLib.resolveShaders(*m_contentManager, materialId, key, frag, vertBody)) return false;
+	foldDisplacement(materialId, key);
+	return true;
 }
 
 bool OpenGLRenderer::resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
                                              std::string& vertBody)
 {
 	if (!m_contentManager) return false;
-	return m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody);
+	if (!m_matShaderLib.resolveGBufferShaders(*m_contentManager, materialId, key, frag, vertBody)) return false;
+	foldDisplacement(materialId, key);
+	return true;
+}
+
+void OpenGLRenderer::foldDisplacement(const HE::UUID& materialId, uint64_t& key)
+{
+	if (!m_tessSupported) return; // the fallback: the unconnected pin's key and program
+	const MaterialAsset* ma = m_contentManager->getMaterial(materialId);
+	if (!ma || ma->customShaderDispGlsl.empty()) return;
+	key ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+	m_tessDispByKey.try_emplace(key, ma->customShaderDispGlsl);
 }
 
 // Build (or fetch) a GL program for a material's custom fragment. The shared library
@@ -3783,6 +3910,20 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
 	if (auto it = m_materialPrograms.find(progKey); it != m_materialPrograms.end()) return it->second;
+	// A displacement material gets no instanced twin (yet): DrawGraphBatchInstanced draws
+	// GL_TRIANGLES, which a program with tessellation stages rejects (GL_INVALID_OPERATION,
+	// the batch vanishes). The batch falls back to the per-instance loop, which draws the
+	// plain program as GL_PATCHES (MaterialPrimitive). Tessellated instancing would pass
+	// GL_PATCHES there and is a step of its own. The twin shares the plain program's
+	// displacement body (m_tessDispByKey is filed under `key`), so without this return it
+	// would link TCS/TES too.
+	if (instanced && m_tessSupported && m_tessDispByKey.count(key))
+	{
+		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: no instanced twin for a displacement material, "
+			"its batches draw per instance (tessellated)");
+		m_materialPrograms[progKey] = 0;
+		return 0;
+	}
 
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertSrc, fragSrc, log; bool ok = false;
@@ -3811,6 +3952,24 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
 		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
+	};
+	// Displacement (Thema 207): the two tessellation stages, at the GLSL version of
+	// the rest of the program. Cross-compiled even next to a PRECOMPILED pair (a pak
+	// carries no tessellation stages yet), so without shaderc the material simply
+	// draws untessellated — the fallback, never a missing draw.
+	const std::string* disp = nullptr;
+	if (m_tessSupported)
+		if (auto it = m_tessDispByKey.find(key); it != m_tessDispByKey.end()) disp = &it->second;
+	std::string tcSrc, teSrc;
+	auto tessStages = [&](Backend b) {
+		tcSrc.clear(); teSrc.clear();
+		if (!disp) return;
+		const uint64_t h = std::hash<std::string>{}(*disp);
+		const auto& tc = m_matShaderLib.tessControl(h, *disp, b);
+		const auto& te = m_matShaderLib.tessEval(h, *disp, b);
+		if (tc.ok && te.ok) { tcSrc = tc.source; teSrc = te.source; return; }
+		HE_LOG_WARN(RHI, "%s", (std::string("OpenGLRenderer: displacement stages failed to cross-compile, "
+			"drawing the material untessellated\n") + tc.log + te.log).c_str());
 	};
 	if (precompiled)
 		usePrecompiled(clustered);
@@ -3888,8 +4047,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// Fast path: a linked binary cached from a previous launch — skips the
 		// GLSL compile + link entirely. Only when the driver supports binaries.
 		const bool cacheable = glProgramBinarySupported();
+		// The tessellation stages are part of the program, so part of its cache
+		// key (a two-stage binary must never answer for a four-stage key).
+		const std::string vertKey = tcSrc.empty() ? vertSrc
+			: vertSrc + "\x1d" + tcSrc + "\x1d" + teSrc;
 		const std::filesystem::path cachePath =
-			cacheable ? glProgramCachePath(vertSrc, fragSrc) : std::filesystem::path{};
+			cacheable ? glProgramCachePath(vertKey, fragSrc) : std::filesystem::path{};
 		if (cacheable)
 			if (GLuint cached = glTryLoadCachedProgram(cachePath))
 			{
@@ -3899,14 +4062,33 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 				return cached;
 			}
 
+		// Tessellation stages first: a driver that rejects them leaves the material
+		// to the two-stage program (the caller retries without), not to an exception.
+		GLuint tcs = 0, tes = 0;
+		if (!tcSrc.empty())
+		{
+			try
+			{
+				tcs = CompileStage(GL_TESS_CONTROL_SHADER,    tcSrc.c_str());
+				tes = CompileStage(GL_TESS_EVALUATION_SHADER, teSrc.c_str());
+			}
+			catch (const std::exception& e)
+			{
+				if (tcs) glDeleteShader(tcs);
+				HE_LOG_ERROR(RHI, "%s", e.what());
+				return 0u;
+			}
+		}
 		GLuint vs = CompileStage(GL_VERTEX_SHADER,   vertSrc.c_str());
 		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
 		GLuint prog = glCreateProgram();
 		if (cacheable) glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
 		glAttachShader(prog, vs);
+		if (tcs) { glAttachShader(prog, tcs); glAttachShader(prog, tes); }
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
+		if (tcs) { glDeleteShader(tcs); glDeleteShader(tes); }
 		GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
 		if (!linked)
 		{
@@ -3928,7 +4110,21 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		return prog;
 	};
 
-	unsigned int program = ok ? linkSources() : 0;
+	// Link; a program the tessellation stages broke is linked again without them
+	// (displacement ignored, logged once — this program is cached either way).
+	auto linkWithTess = [&](Backend tessBackend) -> unsigned int {
+		tessStages(tessBackend);
+		unsigned int p = ok ? linkSources() : 0;
+		if (!p && ok && !tcSrc.empty())
+		{
+			HE_LOG_WARN(RHI, "%s", "OpenGLRenderer: material program with tessellation stages failed, "
+				"drawing it untessellated");
+			tcSrc.clear(); teSrc.clear();
+			p = linkSources();
+		}
+		return p;
+	};
+	unsigned int program = linkWithTess(clustered ? Backend::GLSL430 : Backend::GLSL410);
 	if (!program && clustered)
 	{
 		// The GLSL 4.30 pair (cross-compiled or baked) but the driver rejected
@@ -3938,8 +4134,10 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		clustered = false;
 		if (precompiled) usePrecompiled(false);
 		else             crossCompile(Backend::GLSL410, false);
-		program = ok ? linkSources() : 0;
+		program = linkWithTess(Backend::GLSL410);
 	}
+	if (program && !tcSrc.empty())
+		m_tessPrograms.insert(program); // drawn as GL_PATCHES (MaterialPrimitive)
 	if (!ok)
 		HE_LOG_ERROR(RHI, "%s",
 			(std::string("OpenGLRenderer: material shader cross-compile failed\n") + log).c_str());
@@ -3952,14 +4150,46 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	return program;
 }
 
-void OpenGLRenderer::DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms,
+// The instance matrices of a run into the bound GL_ARRAY_BUFFER (orphaned, GL_STREAM_DRAW):
+// the copied list in one call, spans each straight from where they live (instanceWorldMatrices,
+// RenderObject::transform; GeometryPass::setInstanceSpans, DepthBatchList::useSpans), so a
+// foliage block is never unfolded into a list per pass: the driver copies it from the cache.
+static void BufferInstanceSpans(const InstanceSpan* spans, size_t count, size_t total)
+{
+	if (count == 1)
+	{
+		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(total * sizeof(glm::mat4)), spans[0].src, GL_STREAM_DRAW);
+		return;
+	}
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(total * sizeof(glm::mat4)), nullptr, GL_STREAM_DRAW);
+	GLintptr at = 0;
+	for (size_t s = 0; s < count; ++s)
+	{
+		const GLsizeiptr len = static_cast<GLsizeiptr>(spans[s].n * sizeof(glm::mat4));
+		glBufferSubData(GL_ARRAY_BUFFER, at, len, spans[s].src);
+		at += len;
+	}
+}
+
+static void BufferInstances(const DrawCall& dc)
+{
+	if (!dc.instanceSpans.empty())
+	{
+		BufferInstanceSpans(dc.instanceSpans.data(), dc.instanceSpans.size(), dc.instanceTotal());
+		return;
+	}
+	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
+	             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+}
+
+void OpenGLRenderer::DrawGraphBatchInstanced(const DrawCall& dc,
                                              const glm::mat4& viewProj, const glm::vec3& baseColor,
                                              unsigned int tex, float metallic, float roughness,
                                              float opacity, int indexCount, const void* indexOffset)
 {
+	const size_t total = dc.instanceTotal();
 	glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-	glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(transforms.size() * sizeof(glm::mat4)),
-	             transforms.data(), GL_STREAM_DRAW);
+	BufferInstances(dc);
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	// Same block as the per-instance loops write, with the batch-constant half:
 	// the instanced vertex forms mvp = U.mvp * model itself.
@@ -3973,9 +4203,9 @@ void OpenGLRenderer::DrawGraphBatchInstanced(const std::vector<glm::mat4>& trans
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 	glBindBuffer(GL_UNIFORM_BUFFER, 0);
 	glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
-	                        static_cast<GLsizei>(transforms.size()));
+	                        static_cast<GLsizei>(total));
 	++m_counters.draws;
-	m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(transforms.size());
+	m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(total);
 }
 
 // Build (or fetch) the GL program that draws GPU-instanced ParticleGraph particles
@@ -4092,8 +4322,8 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		glAttachShader(prog, fs);
 		glLinkProgram(prog);
 		glDeleteShader(vs); glDeleteShader(fs);
-		GLint ok = 0; glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-		if (ok)
+		GLint linkStatus = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linkStatus);
+		if (linkStatus)
 		{
 			// Same block bindings + sampler units as the mesh material path (GL 4.1
 			// has no layout(binding), so wire them by name post-link).
@@ -4133,9 +4363,9 @@ unsigned int OpenGLRenderer::GetOrBuildUIMaterialProgram(const HE::UUID& materia
 		}
 		else
 		{
-			char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			char linkLog[2048]; glGetProgramInfoLog(prog, sizeof(linkLog), nullptr, linkLog);
 			HE_LOG_ERROR(RHI, "%s",
-				(std::string("OpenGLRenderer: UI material program link failed: ") + log).c_str());
+				(std::string("OpenGLRenderer: UI material program link failed: ") + linkLog).c_str());
 			glDeleteProgram(prog);
 		}
 	}
@@ -5070,8 +5300,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	// shadows land. Off the camera, lightly hysteresised against streaming
 	// jitter in the scene bounds.
 	{
-		HE::AABB sceneBox;
-		for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
+		const HE::AABB sceneBox = m_frameCull.sceneBox(m_renderWorld, m_extractor.fullExtractCount());
 		const float g = sceneBox.isValid() ? sceneBox.min.y : 0.0f;
 		if (std::isnan(m_cloudShadowGroundY)) m_cloudShadowGroundY = g;
 		const float dead = cloudH * 0.35f;
@@ -5531,15 +5760,21 @@ uniform vec4 uSun;          // xyz = direction TOWARD the sun (unit)
 uniform vec4 uSunColor;     // rgb = sun radiance (0 at night)
 uniform vec4 uCaustics;     // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
 uniform vec4 uTintDensity;  // rgb = resolved fog tint, a = per-metre density (the fog stage, see main)
+uniform vec4 uSurfWave;     // the wind on the tessellated surface: turn (rad), length / speed / steepness factor
+uniform vec4 uSurfParams;   // height (0 = flat plane), shore width, wave clock (s), flat level
+@SURF@
 const float kTrains[12] = float[12](@TRAINS@);
 const float kTwoPi = 6.28318530718;
 const float kEta   = 1.33;
 const int   kChopTrains = 10;     // short trains on top of the engine's six (lengths, directions: see the loop)
 const float kChopSteep  = 0.05;
 const float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
-const float kGain       = 0.45;   // line brightness per unit of squeeze above 1
-const float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
-const float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (see the cap below)
+const float kGain       = 0.05;   // line brightness per unit of squeeze above 1
+const float kMaxLine    = 0.2;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
+const float kFineScale  = 1.8;    // the whole net this much finer than the water's own wavelengths: real caustics are small filaments, not metre-wide cells
+const float kTimeScale  = 0.75;   // the net's clock runs this much of the water's own: the lines slid too fast against the swell
+const float kDark       = 0.3;    // how much of the cells' light the lines take at intensity >= 1
+const float kCore       = 0.45;    // share of the cap's squeeze a line must pass to light up (see the cap below)
 
 // The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
 // cells between them lose (vec4(0) where there is no net). The screen derivatives of P come
@@ -5552,7 +5787,8 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	vec3 L = uSun.xyz;
 	if (uCaustics.x <= 0.0 || L.y <= 0.02) return vec4(0.0);   // off, or no sun
 	P = hit ? P : uCamSurface.xyz;
-	float depth = uCamSurface.w - P.y;                      // metres below the flat surface
+	// Metres below the surface AT this pixel: the flat level, plus the tessellated wave there (0 when flat).
+	float depth = uSurfParams.w + heSurfaceH(P.xz, max(uSurfParams.w - P.y, 0.0), uSurfWave, uSurfParams) - P.y;
 	float fadeDepth = uCaustics.w;
 
 	// The sun's ray inside the water (Snell: the horizontal part shrinks by 1/eta),
@@ -5561,9 +5797,12 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	float cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
 	vec3  Lr   = vec3(hz.x, cosT, hz.y);
 	vec2  S    = P.xz + hz / max(cosT, 0.1) * depth;
+	// The scene's wind turned the sea from the material's own heading (sun.w, radians): evaluate the
+	// trains in the frame rotated back by it, so they travel that much further round.
+	{ float wc = cos(uSun.w), ws = sin(uSun.w); S = vec2(wc * S.x + ws * S.y, -ws * S.x + wc * S.y); }
 	// The material bends its wave phase with a slow FBM field; a cheap two-sine stand-in
 	// does the same here, so the lattice of the plane trains does not read as a grid.
-	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * uCaustics.z), sin(0.37 * S.x - 0.27 * uCaustics.z));
+	S += 1.6 * vec2(sin(0.43 * S.y + 0.31 * (uCaustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (uCaustics.z * kTimeScale)));
 
 	// Curvature of the wave surface at S, summed over the trains.
 	// h = (steepness / k) sin(k (d.p - speed t)); H = -steepness k sin(.) d d^T.
@@ -5597,8 +5836,8 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 		}
 		float rad = radians(deg);
 		vec2  dv  = vec2(cos(rad), sin(rad));
-		float k   = kTwoPi / len * uCaustics.y;
-		float ph  = k * (dot(dv, S) - spd * uCaustics.z);
+		float k   = kTwoPi / len * (uCaustics.y * kFineScale);
+		float ph  = k * (dot(dv, S) - spd * (uCaustics.z * kTimeScale));
 		float c   = stp * k * sin(ph);
 		vec2  dc  = (stp * k * k * cos(ph)) * dv;
 		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
@@ -5632,7 +5871,7 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	vec2  dSx   = dFdx(S);
 	vec2  dSy   = dFdy(S);
 	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
-	                  10.0 * uCaustics.y * (length(dSx) + length(dSy)));
+	                  10.0 * (uCaustics.y * kFineScale) * (length(dSx) + length(dSy)));
 	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
 	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
 	float capAA = 2.0 / max(dDet, 1e-4);
@@ -5643,7 +5882,7 @@ vec4 causticLight(vec3 P, vec3 dPx, vec3 dPy, bool hit)
 	vec3 n = normalize(cross(dPx, dPy));
 	if (dot(n, uCamSurface.xyz - P) < 0.0) n = -n;
 	float w = uCaustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
-	vec4 net = vec4(uSunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	vec4 net = vec4(uSunColor.rgb * (kMaxLine * (1.0 - exp(-(w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)) / kMaxLine))),
 	                kDark * min(w, 1.0) * max(1.0 - J, 0.0));
 	return hit ? net : vec4(0.0);
 }
@@ -5666,21 +5905,36 @@ void main()
 	// waterline soft. Applied AFTER the net so the fog swallows it with distance, exactly as
 	// on the D3D backends (caustics first, then the premultiplied tint*fog + dst*(1-fog) blend).
 	vec3  camPos   = uCamSurface.xyz;
-	float surfaceY = uCamSurface.w;
+	float surfaceY = uCamSurface.w;            // the surface under the camera
+	// The surface is a plane at uSurfParams.w plus, with tessellation, the wave AT each point (heSurfaceH):
+	// the camera, this pixel's point and the near-plane point each compare against their own height, so the
+	// waterline on the screen follows the waves instead of being one straight line.
+	float level   = uSurfParams.w;
+	float gDepth  = max(level - P.y, 0.0);
+	float sP      = level + heSurfaceH(P.xz, gDepth, uSurfWave, uSurfParams);
 	bool  camBelow = camPos.y < surfaceY;
-	bool  pBelow   = P.y < surfaceY;
+	bool  pBelow   = P.y < sP;
 	// This pixel's point on the near plane (d = 0 through the same mapping): a DRY camera (the
 	// waterline band, Thema 185 Schritt 5) fogs only where the near plane sliced the water sheet
 	// off, never what lies under the translucent surface (see kUnderwaterFogHLSL).
 	vec4 wn = uInvViewProj * vec4(vUV * 2.0 - 1.0, -1.0, 1.0);
-	bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+	vec3 nearPt = wn.xyz / max(wn.w, 1e-8);
+	bool nearBelow = nearPt.y < level + heSurfaceH(nearPt.xz, 1000.0, uSurfWave, uSurfParams);
 	float segment;
 	if (camBelow == pBelow)
 		segment = camBelow ? length(camPos - P) : 0.0;
 	else
 	{
-		float t = (surfaceY - camPos.y) / (P.y - camPos.y);
-		vec3 crossPt = camPos + t * (P - camPos);
+		// Where the ray meets the displaced surface: a few steps of "intersect the plane at the height
+		// the wave has where the last guess landed" (the surface is gently sloped, it settles at once).
+		float sY = camBelow ? surfaceY : sP;
+		vec3 crossPt = camPos;
+		for (int it = 0; it < 3; ++it)
+		{
+			float t = clamp((sY - camPos.y) / (P.y - camPos.y), 0.0, 1.0);
+			crossPt = camPos + t * (P - camPos);
+			sY = level + heSurfaceH(crossPt.xz, gDepth, uSurfWave, uSurfParams);
+		}
 		segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
 	}
 	float fogAmount = 1.0 - exp(-uTintDensity.a * segment);
@@ -5696,6 +5950,7 @@ bool OpenGLRenderer::EnsureUnderwaterCausticsPipeline()
 	std::string fsSrc = kUnderwaterCausticsFS;
 	const std::string trains = HE::causticsWaveTrainsList();
 	fsSrc.replace(fsSrc.find("@TRAINS@"), 8, trains);
+	fsSrc.replace(fsSrc.find("@SURF@"), 6, HE::underwaterSurfaceFunctions(HE::SurfaceLang::GLSL));
 	GLuint vs = CompileStage(GL_VERTEX_SHADER,   kTonemapVS);
 	GLuint fs = CompileStage(GL_FRAGMENT_SHADER, fsSrc.c_str());
 	GLuint prog = glCreateProgram();
@@ -5721,6 +5976,8 @@ bool OpenGLRenderer::EnsureUnderwaterCausticsPipeline()
 	m_uUcSunColor = glGetUniformLocation(prog, "uSunColor");
 	m_uUcParams   = glGetUniformLocation(prog, "uCaustics");
 	m_uUcTint     = glGetUniformLocation(prog, "uTintDensity");
+	m_uUcSurfWave   = glGetUniformLocation(prog, "uSurfWave");
+	m_uUcSurfParams = glGetUniformLocation(prog, "uSurfParams");
 	return true;
 }
 
@@ -5780,11 +6037,16 @@ unsigned int OpenGLRenderer::RenderUnderwaterCaustics(unsigned int sourceHdr, in
 	glUniform1i(m_uUcDepth, 1);
 	glUniformMatrix4fv(m_uUcInvVP, 1, GL_FALSE, glm::value_ptr(invViewProj));
 	glUniform4f(m_uUcCamSurf, cam.x, cam.y, cam.z, uc.surfaceY);
-	glUniform4f(m_uUcSun, towardSun.x, towardSun.y, towardSun.z, 0.0f);
+	glUniform4f(m_uUcSun, towardSun.x, towardSun.y, towardSun.z, uc.causticsWindTurn);
 	glUniform4f(m_uUcSunColor, sunColor.r, sunColor.g, sunColor.b, 0.0f);
 	glUniform4f(m_uUcParams, uc.causticsIntensity, uc.causticsScale,
 	            engineSeconds * uc.causticsSpeed, uc.causticsDepth);
 	glUniform4f(m_uUcTint, uc.tintColor.r, uc.tintColor.g, uc.tintColor.b, uc.density);
+	// The surface as the post pass evaluates it per pixel: the flat level (the camera's surface when flat)
+	// and, with tessellation, the wind's factors and the body's height / coast fade / the wave clock.
+	glUniform4f(m_uUcSurfWave, uc.waveTurn, uc.waveLengthFactor, uc.waveSpeedFactor, uc.waveSteepFactor);
+	glUniform4f(m_uUcSurfParams, uc.surfaceHeight, uc.surfaceShoreWidth, engineSeconds,
+	            uc.surfaceHeight > 0.0f ? uc.surfaceLevel : uc.surfaceY);
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 
 	// Units clean for the passes that follow (depth on unit 1 is what the scene pass renders into).
@@ -6022,6 +6284,8 @@ HE::GiBvh OpenGLRenderer::BuildGIBvh(const HE::UUID& meshId)
 	if (!m_contentManager) return bvh;
 	const StaticMeshAsset* asset = m_contentManager->getStaticMesh(meshId);
 	if (!asset || asset->indices.empty()) return bvh;
+	meshStreamCounters().blasBuilds.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().blasTris.fetch_add(asset->indices.size() / 3, std::memory_order_relaxed);
 
 	// Same two layouts ResolveMesh uploads: cooked = interleaved 8-float
 	// (position at offset 0, matching Metal's BLAS vertex descriptor), loose =
@@ -6078,10 +6342,18 @@ void OpenGLRenderer::UpdateGIAccel()
 		if (const GIBlasRange* r = m_giBlas.find(id)) return *r;
 		return m_giBlas.add(id, BuildGIBvh(id));
 	};
+	const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
+	// The shadow kernel has its own list, thinned by distance even while reflections keep the far scene in the
+	// list the probes and mirrors walk.
+	const HE::GiCasterFilter shadowFilter = HE::GiCasterFilter::For(m_renderWorld, false);
+	static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+	const GiHeightfield* gHf = (s_hfOn && m_renderWorld.heightfields.size() == 1) ? &m_renderWorld.heightfields[0] : nullptr;
+	m_giHfActive = gHf && EnsureGiHeightfield(*gHf);
+	m_giShadowInstancesCpu.clear();
 	for (const RenderObject& obj : m_renderWorld.objects)
 	{
 		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-		if (!obj.castsShadow || obj.isCluster()) continue;
+		if (!obj.castsShadow || obj.isCluster() || !(casterFilter.keeps(obj) || shadowFilter.keeps(obj))) continue;
 		// Default-cube fallback — an entity without a resolvable mesh asset
 		// RENDERS as the default cube (draw-loop fallback), so it must occlude
 		// as one too, or plain cube entities cast no GI shadow at all.
@@ -6099,9 +6371,11 @@ void OpenGLRenderer::UpdateGIAccel()
 		inst.nodeOffset   = range.nodeOffset;
 		inst.triOffset    = range.triOffset;
 		inst.landIndex    = obj.landscapeIndex;   // paint sampling at the hit
-		m_giInstancesCpu.push_back(inst);
+		if (shadowFilter.keeps(obj) && !(m_giHfActive && obj.terrainChunk)) m_giShadowInstancesCpu.push_back(inst);
+		if (casterFilter.keeps(obj)) m_giInstancesCpu.push_back(inst);
 	}
 	m_giInstanceCount = static_cast<int>(m_giInstancesCpu.size());
+	meshStreamCounters().giInstances.store(static_cast<uint32_t>(m_giInstanceCount), std::memory_order_relaxed);
 	if (m_giInstanceCount == 0) return;
 
 	// ── Painted-landscape table ──────────────────────────────────────────────
@@ -6158,7 +6432,49 @@ void OpenGLRenderer::UpdateGIAccel()
 	glBufferData(GL_SHADER_STORAGE_BUFFER,
 	             static_cast<GLsizeiptr>(m_giInstancesCpu.size() * sizeof(GIInstanceGpu)),
 	             m_giInstancesCpu.data(), GL_DYNAMIC_DRAW);
+	m_giShadowSep = m_giShadowInstancesCpu.size() != m_giInstancesCpu.size();
+	if (m_giShadowSep)
+	{
+		// The shadow kernel's own list: thinned by distance and without the terrain chunks the height field answers for.
+		if (!m_giShadowInstanceSSBO) glGenBuffers(1, &m_giShadowInstanceSSBO);
+		m_giShadowInstanceCount = static_cast<int>(m_giShadowInstancesCpu.size());
+		const GIInstanceGpu dummy{};   // never size 0
+		glBindBuffer(GL_SHADER_STORAGE_BUFFER, m_giShadowInstanceSSBO);
+		glBufferData(GL_SHADER_STORAGE_BUFFER,
+		             static_cast<GLsizeiptr>(std::max<size_t>(m_giShadowInstancesCpu.size(), 1) * sizeof(GIInstanceGpu)),
+		             m_giShadowInstancesCpu.empty() ? &dummy : m_giShadowInstancesCpu.data(), GL_DYNAMIC_DRAW);
+	}
+	else m_giShadowInstanceCount = m_giInstanceCount;
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
+}
+
+// Upload the height field (R32F, a conservative max pyramid in the mips) when it is new or rebuilt.
+bool OpenGLRenderer::EnsureGiHeightfield(const GiHeightfield& hf)
+{
+	HE_PROFILE_SCOPE_N("GL::GiHeightfield");
+	if (!hf.data || hf.res < 8 || hf.data->size() < size_t(hf.res) * hf.res) return false;
+	if (m_giHfTex && m_giHfVersion == hf.version && m_giHfKey == hf.key) return true;
+	const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);
+	if (pyr.levels.empty()) return false;
+	if (!m_giHfTex) glGenTextures(1, &m_giHfTex);
+	else            { glDeleteTextures(1, &m_giHfTex); glGenTextures(1, &m_giHfTex); }   // immutable storage: new size/levels need a new name
+	glBindTexture(GL_TEXTURE_2D, m_giHfTex);
+	glTexStorage2D(GL_TEXTURE_2D, static_cast<GLsizei>(pyr.levels.size()), GL_R32F, pyr.dims[0], pyr.dims[0]);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	for (size_t k = 0; k < pyr.levels.size(); ++k)
+		glTexSubImage2D(GL_TEXTURE_2D, static_cast<GLint>(k), 0, 0, pyr.dims[k], pyr.dims[k], GL_RED, GL_FLOAT, pyr.levels[k].data());
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(pyr.levels.size()) - 1);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	m_giHfVersion  = hf.version;
+	m_giHfKey      = hf.key;
+	m_giHfTopLevel = static_cast<int>(pyr.levels.size()) - 1;
+	m_giHfMaxH     = pyr.maxHeight;
+	HE_LOG_INFO(RHI, "OpenGLRenderer: GI height field %dx%d, %zu mips, max height %.2f",
+	            pyr.dims[0], pyr.dims[0], pyr.levels.size(), pyr.maxHeight);
+	return true;
 }
 
 void OpenGLRenderer::DestroyGIAccel()
@@ -6173,6 +6489,10 @@ void OpenGLRenderer::DestroyGIAccel()
 	m_giBlas.clear();
 	m_giInstancesCpu.clear();
 	m_giInstanceCount = 0;
+	if (m_giShadowInstanceSSBO) { glDeleteBuffers(1, &m_giShadowInstanceSSBO); m_giShadowInstanceSSBO = 0; }
+	if (m_giHfTex) { glDeleteTextures(1, &m_giHfTex); m_giHfTex = 0; }
+	m_giHfVersion = 0; m_giHfKey = ~0ull; m_giHfActive = false; m_giShadowSep = false;
+	m_giShadowInstancesCpu.clear(); m_giShadowInstanceCount = 0;
 }
 
 OpenGLRenderer::GISceneLocs OpenGLRenderer::FetchGISceneLocs(unsigned int program) const
@@ -6282,7 +6602,7 @@ void OpenGLRenderer::CreateGIPipelines()
 		m_giReflMixProgram  = link(CompileStage(GL_VERTEX_SHADER,   kTonemapVS),
 		                           CompileStage(GL_FRAGMENT_SHADER, kGiReflMixFS));
 		const std::string header = "#version 430 core\n";
-		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiShadowCS);
+		m_giShadowCSProgram = linkCompute(header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiShadowCS);
 		m_giProbeCSProgram  = linkCompute(header + kGiTraversalGLSL + kGiProbeCS);
 		m_giReflCSProgram   = linkCompute(header + kGiTraversalGLSL + kGiReflCS);
 		HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: GI pipelines built (compute ray tracing active)");
@@ -6469,6 +6789,15 @@ void OpenGLRenderer::DestroyGIShadowTargets()
 	m_giReflHistValid = false;
 }
 
+void OpenGLRenderer::RefineObjectBounds()
+{
+	m_frameCull.refine(m_renderWorld, m_extractor.fullExtractCount(), [this](const RenderObject& obj) -> const HE::AABB*
+	{
+		const GpuMesh* mesh = ResolveMesh(obj.meshAssetId);
+		return mesh ? &mesh->localBounds : nullptr;
+	});
+}
+
 // Probe-grid fit over the scene AABB (GIProbeGrid.h: spacing grows so the
 // whole scene — a 100 m terrain included — fits the probe budget). Metal
 // lesson: refresh worldBounds from the real mesh bounds first — the extractor
@@ -6481,9 +6810,7 @@ void OpenGLRenderer::EnsureGIProbeGrid()
 	const uint64_t sig = HE::GIProbeSceneSignature(m_renderWorld.objects);
 	if (m_giGridTrack.canSkip(m_giProbeGridBuilt, sig)) return;
 
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	RefineObjectBounds();
 	int unresolved = 0;
 	const HE::AABB sceneBox = HE::GIProbeSceneBounds(m_renderWorld.objects, &unresolved);
 	if (!sceneBox.isValid()) return;
@@ -6612,12 +6939,10 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 			// A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is one
 			// instanced draw: the transforms go through the scene pass's scratch
 			// VBO, which every mesh VAO reads at attribs 4–7 with divisor 1.
-			if (!dc.instanceTransforms.empty() && canInstance)
+			if (dc.instanceTotal() > 0 && canInstance)
 			{
 				glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-				glBufferData(GL_ARRAY_BUFFER,
-				             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-				             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+				BufferInstances(dc);   // spans straight from where they live, or the copied list
 				glBindBuffer(GL_ARRAY_BUFFER, 0);
 				if (boundProgram != m_giGBufInstancedProgram)
 				{
@@ -6627,13 +6952,13 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 				}
 				if (uInstRoughMetal >= 0) glUniform2f(uInstRoughMetal, dcRough, dcMetal);
 				glDrawElementsInstanced(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset,
-				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+				                        static_cast<GLsizei>(dc.instanceTotal()));
 				static bool loggedOnce = false; // once per session, like the shadow pass
 				if (!loggedOnce)
 				{
 					loggedOnce = true;
 					HE_LOG_INFO(RHI, "OpenGLRenderer: GI pre-pass instanced (first batch: %u instances)",
-					            static_cast<unsigned>(dc.instanceTransforms.size()));
+					            static_cast<unsigned>(dc.instanceTotal()));
 				}
 				continue;
 			}
@@ -6649,8 +6974,8 @@ bool OpenGLRenderer::RenderGIPrepass(const CommandBuffer& cmds, int width, int h
 				glUniformMatrix4fv(uModel, 1, GL_FALSE, glm::value_ptr(t));
 				glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
 			};
-			if (!dc.instanceTransforms.empty())
-				for (const glm::mat4& t : dc.instanceTransforms) drawOne(t);
+			if (dc.instanceTotal() > 0)
+				dc.forEachInstance([&](const glm::mat4& t) { drawOne(t); });
 			else
 				drawOne(dc.transform);
 		}
@@ -6672,7 +6997,12 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 	glUseProgram(m_giShadowCSProgram);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, m_giNodeSSBO);
 	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_giTriSSBO);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, m_giInstanceSSBO);
+	// Without the terrain chunks while the height field stands in for them (EnsureGiHeightfield).
+	const bool sepOn = m_giShadowSep && m_giShadowInstanceSSBO;
+	// Test hook (scripts/he_gi_hf_check.py negative control): chunks stay out of the list but the field is not marched.
+	static const bool s_hfMute = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD_MUTE"); return v && v[0] == '1'; }();
+	const bool hfOn  = sepOn && m_giHfActive && m_giHfTex && !m_renderWorld.heightfields.empty();
+	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 2, sepOn ? m_giShadowInstanceSSBO : m_giInstanceSSBO);
 	glActiveTexture(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, m_giGBufPosTex);
 	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGPos"), 0);
@@ -6698,7 +7028,21 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uLocalExtra"),
 		            static_cast<float>(masked.count), static_cast<float>(m_giShadowRays), 0.0f, 0.0f);
 	}
-	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), m_giInstanceCount);
+	glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uGiInstanceCount"), sepOn ? m_giShadowInstanceCount : m_giInstanceCount);
+	{
+		const GiHeightfield* h0 = m_renderWorld.heightfields.empty() ? nullptr : &m_renderWorld.heightfields[0];
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, hfOn ? m_giHfTex : 0);
+		glUniform1i(glGetUniformLocation(m_giShadowCSProgram, "uHf"), 2);
+		glUniformMatrix4fv(glGetUniformLocation(m_giShadowCSProgram, "uHfWorldToLocal"), 1, GL_FALSE,
+		                   glm::value_ptr(h0 ? h0->worldToLocal : glm::mat4(1.0f)));
+		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uHfParams"),
+		            h0 ? 1.0f / std::max(h0->size.x, 1e-4f) : 1.0f, h0 ? 1.0f / std::max(h0->size.y, 1e-4f) : 1.0f,
+		            h0 ? float(h0->res - 1) : 1.0f, (hfOn && !s_hfMute) ? 1.0f : 0.0f);
+		glUniform4f(glGetUniformLocation(m_giShadowCSProgram, "uHfParams2"),
+		            float(m_giHfTopLevel), m_giHfMaxH, 0.0f, 512.0f);
+		glActiveTexture(GL_TEXTURE0);
+	}
 	glDispatchCompute(static_cast<GLuint>((width + 7) / 8), static_cast<GLuint>((height + 7) / 8), 1);
 	// The temporal pass SAMPLES the image-stored raw mask next.
 	glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
@@ -6873,8 +7217,8 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 	// the cone and the kernel collapses rays to 1 with no cone — the ray ladder
 	// read 1/1/4 on GL and 1/2/4 on Metal for the same setting. Derive it from
 	// the ray count instead, exactly as Metal derives `jitter = rays > 1`.
-	const float giReflRays = m_giReflQuality >= 2 ? 4.0f
-	                       : (m_giReflQuality >= 1 ? 2.0f : 1.0f);
+	const float giReflRays = static_cast<float>(
+		HE::giReflTierFor(m_giReflQuality, m_giReflBlurEnabled).rays);
 	glUniform4f(loc("uFrame"), m_giReflFrameSeed, static_cast<float>(width),
 	            static_cast<float>(height), (giReflRays > 1.0f) ? 1.0f : 0.0f);
 	if (lights.count > 0)
@@ -6987,12 +7331,10 @@ unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
 		// for the part of the lobe the rays did not sample, so a tier that traces
 		// four of them needs a quarter of the filter. Holding it constant across
 		// tiers made the better tier measurably softer.
-		const float reach = std::clamp(
-			1.0f + (kGIReflLobeScreenPx * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f))
-			     / (resDiv * std::max(giReflRays, 1.0f)), 1.0f, 512.0f);
-		const int   levels = std::clamp(
-			static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
-		const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
+		const HE::GIReflBlurReach br = HE::giReflBlurReachFor(
+			m_giReflMaxRoughness, static_cast<int>(giReflRays), static_cast<int>(resDiv));
+		const int   levels = br.levels;
+		const float unit   = br.unit;
 		glUseProgram(m_giReflBlurProgram);
 		const GLint uSrc = glGetUniformLocation(m_giReflBlurProgram, "uSrc");
 		const GLint uDir = glGetUniformLocation(m_giReflBlurProgram, "uDir");
@@ -7429,12 +7771,10 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 		// instanced draw over the scene pass's scratch VBO — every mesh VAO
 		// reads it at attribs 4–7 with divisor 1. The batch-constant camera
 		// matrices are pushed once, on the first switch to the instanced program.
-		if (!dc.instanceTransforms.empty() && instProgram)
+		if (dc.instanceTotal() > 0 && instProgram)
 		{
 			glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-			glBufferData(GL_ARRAY_BUFFER,
-			             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-			             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+			BufferInstances(dc);   // spans straight from where they live, or the copied list
 			glBindBuffer(GL_ARRAY_BUFFER, 0);
 			if (boundProgram != instProgram)
 			{
@@ -7457,13 +7797,13 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 				}
 			}
 			glDrawElementsInstanced(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset,
-			                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+			                        static_cast<GLsizei>(dc.instanceTotal()));
 			static bool loggedOnce = false; // once per session, like the shadow pass
 			if (!loggedOnce)
 			{
 				loggedOnce = true;
 				HE_LOG_INFO(RHI, "OpenGLRenderer: SSAO pre-pass instanced (first batch: %u instances, %s)",
-				            static_cast<unsigned>(dc.instanceTransforms.size()),
+				            static_cast<unsigned>(dc.instanceTotal()),
 				            reflMrt ? "MRT" : "plain");
 			}
 			continue;
@@ -7476,13 +7816,13 @@ unsigned int OpenGLRenderer::RenderSSAO(const CommandBuffer& cmds, int pw, int p
 			// per-draw block before the loop writes into it again.
 			if (reflMrt) glBindBufferBase(GL_UNIFORM_BUFFER, 5, m_reflPrepassUBO);
 		}
-		if (!dc.instanceTransforms.empty())
+		if (dc.instanceTotal() > 0)
 		{
-			for (const glm::mat4& t : dc.instanceTransforms)
+			dc.forEachInstance([&](const glm::mat4& t)
 			{
 				pushDraw(t);
 				glDrawElements(GL_TRIANGLES, range.count, GL_UNSIGNED_INT, range.offset);
-			}
+			});
 		}
 		else
 		{
@@ -8807,17 +9147,31 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		built.reserve(vertexCount * 8);
 		for (size_t v = 0; v < vertexCount; ++v)
 		{
-			built.insert(built.end(),
-				{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+			built.push_back(asset->vertices[v*3+0]);
+			built.push_back(asset->vertices[v*3+1]);
+			built.push_back(asset->vertices[v*3+2]);
 			if (v * 3 + 2 < asset->normals.size())
-				built.insert(built.end(),
-					{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+			{
+				built.push_back(asset->normals[v*3+0]);
+				built.push_back(asset->normals[v*3+1]);
+				built.push_back(asset->normals[v*3+2]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 			if (v * 2 + 1 < asset->uvs.size())
-				built.insert(built.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+			{
+				built.push_back(asset->uvs[v*2+0]);
+				built.push_back(asset->uvs[v*2+1]);
+			}
 			else
-				built.insert(built.end(), { 0.0f, 0.0f });
+			{
+				built.push_back(0.0f);
+				built.push_back(0.0f);
+			}
 		}
 		vtx = &built;
 		mesh.localBounds = HE::AABB::fromPositions(asset->vertices.data(), vertexCount);
@@ -8825,6 +9179,9 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 	const std::vector<float>& interleaved = *vtx;
 
 	glGenVertexArrays(1, &mesh.vao);
+	meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().meshUploadBytes.fetch_add(
+		interleaved.size() * sizeof(float) + asset->indices.size() * sizeof(uint32_t), std::memory_order_relaxed);
 	glGenBuffers(1, &mesh.vbo);
 	glGenBuffers(1, &mesh.ebo);
 
@@ -8902,17 +9259,31 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 	interleaved.reserve(vertexCount * 8);
 	for (size_t v = 0; v < vertexCount; ++v)
 	{
-		interleaved.insert(interleaved.end(),
-			{ asset->vertices[v*3+0], asset->vertices[v*3+1], asset->vertices[v*3+2] });
+		interleaved.push_back(asset->vertices[v*3+0]);
+		interleaved.push_back(asset->vertices[v*3+1]);
+		interleaved.push_back(asset->vertices[v*3+2]);
 		if (v * 3 + 2 < asset->normals.size())
-			interleaved.insert(interleaved.end(),
-				{ asset->normals[v*3+0], asset->normals[v*3+1], asset->normals[v*3+2] });
+		{
+			interleaved.push_back(asset->normals[v*3+0]);
+			interleaved.push_back(asset->normals[v*3+1]);
+			interleaved.push_back(asset->normals[v*3+2]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 		if (v * 2 + 1 < asset->uvs.size())
-			interleaved.insert(interleaved.end(), { asset->uvs[v*2+0], asset->uvs[v*2+1] });
+		{
+			interleaved.push_back(asset->uvs[v*2+0]);
+			interleaved.push_back(asset->uvs[v*2+1]);
+		}
 		else
-			interleaved.insert(interleaved.end(), { 0.0f, 0.0f });
+		{
+			interleaved.push_back(0.0f);
+			interleaved.push_back(0.0f);
+		}
 	}
 
 	// Bone IDs per vertex  (4 × uint32, attrib loc 3) — zero-padded if missing
@@ -9300,7 +9671,7 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 	}
 
 	glBindVertexArray(drawVAO);
-	glDrawElements(GL_TRIANGLES, drawIdxCount, GL_UNSIGNED_INT, nullptr);
+	glDrawElements(MaterialPrimitive(prog), drawIdxCount, GL_UNSIGNED_INT, nullptr);
 	glBindVertexArray(0);
 	glActiveTexture(GL_TEXTURE0);
 	return true;
@@ -9753,7 +10124,8 @@ void* OpenGLRenderer::RenderSkeletalPreview(ContentManager& cm, const HE::UUID& 
 			std::vector<float> lineVerts; // pos3 + color3 per vertex
 			const glm::vec3 jointColor(1.0f, 0.85f, 0.15f), boneColor(0.2f, 0.9f, 1.0f);
 			auto pushVert = [&](const glm::vec3& p, const glm::vec3& c) {
-				lineVerts.insert(lineVerts.end(), { p.x, p.y, p.z, c.x, c.y, c.z });
+				lineVerts.push_back(p.x); lineVerts.push_back(p.y); lineVerts.push_back(p.z);
+				lineVerts.push_back(c.x); lineVerts.push_back(c.y); lineVerts.push_back(c.z);
 			};
 			const float markerSize = std::max(extent * 0.015f, 0.005f);
 			for (size_t i = 0; i < asset->skeleton.size(); ++i)
@@ -10166,8 +10538,12 @@ void OpenGLRenderer::DrawParticlePreviewGeometry(const HE::UUID& materialId,
 		std::vector<float> inst;
 		inst.reserve(particles.size() * 8);
 		for (const auto& p : particles)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size,
-			                          p.color.r, p.color.g, p.color.b, p.alpha });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.color.r); inst.push_back(p.color.g); inst.push_back(p.color.b);
+			inst.push_back(p.alpha);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particlePreviewInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
@@ -10361,10 +10737,10 @@ void OpenGLRenderer::DrawDebugLines(const glm::mat4& viewProj)
 	verts.reserve(m_debugLines.size() * 12); // 2 verts * 6 floats
 	for (const DebugLine& l : m_debugLines)
 	{
-		verts.insert(verts.end(), { l.start.x, l.start.y, l.start.z,
-		                            l.color.r,  l.color.g,  l.color.b });
-		verts.insert(verts.end(), { l.end.x,   l.end.y,   l.end.z,
-		                            l.color.r,  l.color.g,  l.color.b });
+		verts.push_back(l.start.x); verts.push_back(l.start.y); verts.push_back(l.start.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
+		verts.push_back(l.end.x);   verts.push_back(l.end.y);   verts.push_back(l.end.z);
+		verts.push_back(l.color.r); verts.push_back(l.color.g); verts.push_back(l.color.b);
 	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, m_debugLineVBO);
@@ -10511,6 +10887,8 @@ void OpenGLRenderer::Shutdown()
 	// variants), and a cleanup that skipped them there would simply leak.
 	for (auto& [k, prog] : m_materialPrograms) if (prog) glDeleteProgram(prog);
 	m_materialPrograms.clear();
+	m_tessPrograms.clear(); // ids are reused once deleted
+	m_tessDispByKey.clear();
 	for (auto& [k, prog] : m_uiMaterialPrograms) if (prog) glDeleteProgram(prog);
 	m_uiMaterialPrograms.clear();
 	if (m_matObjUBO)   { glDeleteBuffers(1, &m_matObjUBO);   m_matObjUBO = 0; }
@@ -10995,6 +11373,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// Reset the render counters before the early-return guards so a non-rendered
 	// frame (no world / zero-size) honestly reports zeros, not last frame's values.
 	// total/visible are filled after the cull below; draws/tris at the draw sites.
+	instanceWorldCacheNextFrame();   // frees the unfolded foliage blocks nothing read for a while
 	m_counters = FrameCounters{};
 	if (!m_world) return;
 	if (pw <= 0 || ph <= 0) return;
@@ -11010,6 +11389,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		}
 	m_pendingMaterialInvalidations.clear();
 
+	meshStreamCounters().meshInvalidations.fetch_add(
+		static_cast<uint32_t>(m_pendingMeshInvalidations.size()), std::memory_order_relaxed);
 	for (const HE::UUID& id : m_pendingMeshInvalidations)
 	{
 		if (auto it = m_meshCache.find(id); it != m_meshCache.end())
@@ -11125,16 +11506,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	const glm::vec3 sunDir = m_renderWorld.sunDirection;
 
 	// ── Refine bounds with real mesh AABBs (also uploads new meshes) ────────
-	for (RenderObject& obj : m_renderWorld.objects)
-		if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
-			obj.refineWorldBounds(mesh->localBounds);
+	// Also keeps a compact copy of every bound for this frame's frustum culls (camera and cascades)
+	// and, on demand, their union for the cloud-shadow map (FrameCull; audit levers 5 and 7).
+	RefineObjectBounds();
+	const uint64_t walk = m_extractor.fullExtractCount();
 
 	// ── Cull → sort → submit ────────────────────────────────────────────────
-	m_culler.cull(m_renderWorld, m_visible);
+	m_frameCull.cull(m_culler, m_renderWorld, walk, viewProjClean, m_visible);
 	// Occlusion (off by default): drops what the frustum kept but a nearer
 	// opaque surface hides — the same m_visible the sort and every camera pass
 	// consume, so the SSAO/GI pre-passes and the deferred G-buffer follow suit.
-	// The shadow pass below culls into its own m_shadowVisible and is untouched.
+	// The shadow pass below culls into its own per-view scratch (m_shadowViews) and is untouched.
 	m_counters.occlusionCulled =
 		m_occlusionCuller.refine(m_renderWorld, m_contentManager, m_visible);
 	m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
@@ -11192,8 +11574,16 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	// tonemaps that into the backbuffer/viewport.
 	if (m_renderGraph.empty())
 	{
-		m_renderGraph.addPass(std::make_unique<ShadowPass>());
-		m_renderGraph.addPass(std::make_unique<GeometryPass>());
+		{
+			auto shadow = std::make_unique<ShadowPass>();
+			shadow->setRecordDraws(false);   // the depth views are built by prepareShadowViews; the recorded set is not read
+			m_renderGraph.addPass(std::move(shadow));
+		}
+		{
+			auto geometry = std::make_unique<GeometryPass>();
+			geometry->setInstanceSpans(RenderSorter::instanceSpansEnabled());   // read in place, see BufferInstances
+			m_renderGraph.addPass(std::move(geometry));
+		}
 		m_renderGraph.addPass(std::make_unique<PostProcessPass>());
 	}
 
@@ -11230,34 +11620,49 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// entity renders that mesh at z≈0 into its own depth map and shadows
 			// itself out completely. kNoOwnerEntity (every cascade) skips nothing.
 			// Mirrors the Metal backend's encodeDepthLayer.
-			auto renderDepthLayer = [&](unsigned int target, int layer, const glm::mat4& vp,
-			                            uint32_t skipEntity)
+			// Every view (cascades, then local layers) is culled, sorted by mesh and cut into
+			// runs before the first is drawn, side by side on the workers, each on its own
+			// scratch (the culler keeps no state, each view has its own sorter); the GL calls
+			// stay on this thread. They ran one after the other, cull to draw. Mirrors the Metal
+			// backend's EncodeShadowMap. HE_MTL_PARALLEL_SHADOW=0 prepares them one by one.
+			const int    nCasc  = shadows ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades) : 0;
+			const int    nLoc   = localShadows ? nLocalLayers : 0;
+			const size_t nViews = static_cast<size_t>(nCasc + nLoc);
+			if (m_shadowViews.size() < nViews) m_shadowViews.resize(nViews);
+			for (size_t v = 0; v < nViews; ++v)
 			{
+				ShadowViewCpu& sv = m_shadowViews[v];
+				const bool csm = v < static_cast<size_t>(nCasc);
+				const int  l   = csm ? static_cast<int>(v) : static_cast<int>(v) - nCasc;
+				sv.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
+				sv.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
+			}
+			m_frameCull.prepareShadowViews(m_culler, m_renderWorld, walk, m_shadowViews.data(), nViews, "GLShadowViews");
+			auto renderDepthLayer = [&](unsigned int target, int layer, const ShadowViewCpu& sv)
+			{
+				const glm::mat4& vp = sv.viewProj;
 				glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, target, 0, layer);
 				glClear(GL_DEPTH_BUFFER_BIT);
-				m_culler.cull(m_renderWorld, vp, m_shadowVisible);
-				m_sorter.sort(m_renderWorld, m_shadowVisible, m_shadowSorted);
 				// Same-mesh runs → one instanced draw each. A run of one keeps the
 				// plain depth program (no instance upload for a single caster).
-				RenderSorter::batchDepthCasters(m_renderWorld, m_shadowSorted, skipEntity,
-				                                m_shadowBatches);
+				const RenderSorter::DepthBatchList& batches = sv.batches;
 				const bool canInstance = m_depthInstancedProgram && m_instanceVBO;
 				unsigned int boundProgram = m_depthProgram; // glUseProgram'd by the caller
-				for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
+				for (const RenderSorter::DepthBatch& b : batches.batches)
 				{
 					const GpuMesh* mesh = ResolveMesh(b.meshAssetId);
 					if (!mesh) mesh = ResolveMesh(HE::kDefaultCubeMeshId);
 					if (!mesh) continue;
-					const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
+					const InstanceSpan  whole{ batches.useSpans ? nullptr : batches.transforms.data() + b.first, b.count };
+					const InstanceSpan* spans = batches.useSpans ? batches.spans.data() + b.spanFirst : &whole;
+					const size_t        nSpan = batches.useSpans ? b.spanCount : 1;
 					glBindVertexArray(mesh->vao);
 					if (b.count > 1 && canInstance)
 					{
 						// Scene-pass convention: orphan the scratch VBO per batch.
 						// Every mesh VAO reads attribs 4–7 from it with divisor 1.
 						glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-						glBufferData(GL_ARRAY_BUFFER,
-						             static_cast<GLsizeiptr>(b.count * sizeof(glm::mat4)),
-						             xf, GL_STREAM_DRAW);
+						BufferInstanceSpans(spans, nSpan, b.count);
 						glBindBuffer(GL_ARRAY_BUFFER, 0);
 						if (boundProgram != m_depthInstancedProgram)
 						{
@@ -11281,11 +11686,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glUseProgram(m_depthProgram);
 						boundProgram = m_depthProgram;
 					}
-					for (uint32_t k = 0; k < b.count; ++k)
-					{
-						glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(vp * xf[k]));
-						glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
-					}
+					for (size_t sp = 0; sp < nSpan; ++sp)
+						for (uint32_t k = 0; k < spans[sp].n; ++k)
+						{
+							glUniformMatrix4fv(m_uDepthMVP, 1, GL_FALSE, glm::value_ptr(vp * spans[sp].src[k]));
+							glDrawElements(GL_TRIANGLES, mesh->indexCount, GL_UNSIGNED_INT, nullptr);
+						}
 				}
 				// Leave the plain depth program bound: the next layer's lambda
 				// entry assumes it, like the caller's glUseProgram above.
@@ -11296,15 +11702,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			{
 				const int cascades = std::clamp(m_renderWorld.shadow.cascadeCount, 1, kGLCsmCascades);
 				for (int c = 0; c < cascades; ++c)
-					renderDepthLayer(m_shadowDepthTex, c, m_renderWorld.shadow.cascadeViewProj[c],
-					                 kNoOwnerEntity);
+					renderDepthLayer(m_shadowDepthTex, c, m_shadowViews[static_cast<size_t>(c)]);
 			}
 			if (localShadows)
 			{
 				glViewport(0, 0, m_localShadowSize, m_localShadowSize);
 				for (int v = 0; v < nLocalLayers; ++v)
-					renderDepthLayer(m_localShadowDepthTex, v, m_renderWorld.shadow.localViewProj[v],
-					                 m_renderWorld.shadow.localOwnerEntity[v]);
+					renderDepthLayer(m_localShadowDepthTex, v, m_shadowViews[static_cast<size_t>(nCasc + v)]);
 			}
 			glDisable(GL_POLYGON_OFFSET_FILL);
 			glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
@@ -11982,7 +12386,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
 							// A batch draws once with the instanced twin (2e); only
 							// built for batches, and 0 sends it back to the loop.
-							if (gbProg && !dc.instanceTransforms.empty() && m_instanceVBO
+							if (gbProg && dc.instanceTotal() > 0 && m_instanceVBO
 							    && RenderSorter::graphInstancingEnabled())
 								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
 								                                       /*gbuffer=*/true, /*instanced=*/true);
@@ -12022,8 +12426,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.wmTex     = wm;
 						transparent.push_back(std::move(tp));
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { pushTP(t); });
 					else
 						pushTP(dc.transform);
 					continue;
@@ -12032,15 +12436,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// program would swap the look (no wind, no alpha discard, flat PBR),
 				// so those batches fall through to the per-instance loops below —
 				// the same rule Metal applies (cMaterialPipeline == nullptr).
-				if (!dc.instanceTransforms.empty() && !(gbProg || matProg)
+				if (dc.instanceTotal() > 0 && !(gbProg || matProg)
 				    && m_gbufferInstancedProgram && m_instanceVBO)
 				{
 					// Built-in PBR batches take the built-in instanced program —
 					// the same routing the forward loop uses.
 					glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-					glBufferData(GL_ARRAY_BUFFER,
-					             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-					             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+					BufferInstances(dc);   // spans straight from where they live, or the copied list
 					glBindBuffer(GL_ARRAY_BUFFER, 0);
 					glUseProgram(m_gbufferInstancedProgram);
 					glUniformMatrix4fv(m_uGBInstViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
@@ -12052,10 +12454,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glActiveTexture(GL_TEXTURE0);
 					glBindTexture(GL_TEXTURE_2D, tex);
 					glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
-					                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+					                        static_cast<GLsizei>(dc.instanceTotal()));
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
-					                   static_cast<uint32_t>(dc.instanceTransforms.size());
+					                   static_cast<uint32_t>(dc.instanceTotal());
 					glUseProgram(m_gbufferProgram);
 					continue;
 				}
@@ -12081,8 +12483,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						tp.wmTex     = wmTex;
 						deferredForward.push_back(std::move(tp));
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) pushForward(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { pushForward(t); });
 					else
 						pushForward(dc.transform);
 					continue;
@@ -12133,7 +12535,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						// above (blocks and units are per program state, applied
 						// at link), U.mvp = viewProj, the models at attribs 4-7.
 						glUseProgram(gbInstProg);
-						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						DrawGraphBatchInstanced(dc, viewProj, baseColor, tex,
 						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
 						glUseProgram(m_gbufferProgram);
 						continue;
@@ -12150,12 +12552,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);
-						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						glDrawElements(MaterialPrimitive(gbProg), indexCount, GL_UNSIGNED_INT, indexOffset);
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { drawGraphInstance(t); });
 					else
 						drawGraphInstance(dc.transform);
 					glUseProgram(m_gbufferProgram);
@@ -12278,8 +12680,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					tp.wmTex     = tpWm;
 					transparent.push_back(std::move(tp));
 				};
-				if (!dc.instanceTransforms.empty())
-					for (const glm::mat4& t : dc.instanceTransforms) pushTP(t);
+				if (dc.instanceTotal() > 0)
+					dc.forEachInstance([&](const glm::mat4& t) { pushTP(t); });
 				else
 					pushTP(dc.transform);
 				continue; // drawn in the transparency pass below
@@ -12306,7 +12708,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						for (const auto& var : ma->precompiledShaders)
 							if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 					matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-					if (matProg && !dc.instanceTransforms.empty() && m_instanceVBO
+					if (matProg && dc.instanceTotal() > 0 && m_instanceVBO
 					    && RenderSorter::graphInstancingEnabled())
 						matInstProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre,
 						                                        /*gbuffer=*/false, /*instanced=*/true);
@@ -12314,14 +12716,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			}
 #endif
 
-			if (!dc.instanceTransforms.empty() && !matProg && m_instancedProgram && m_instanceVBO)
+			if (dc.instanceTotal() > 0 && !matProg && m_instancedProgram && m_instanceVBO)
 			{
 				// GPU-instanced opaque draw: upload all transforms to the scratch VBO,
 				// then call glDrawElementsInstanced with the instanced program.
 				glBindBuffer(GL_ARRAY_BUFFER, m_instanceVBO);
-				glBufferData(GL_ARRAY_BUFFER,
-				             static_cast<GLsizeiptr>(dc.instanceTransforms.size() * sizeof(glm::mat4)),
-				             dc.instanceTransforms.data(), GL_STREAM_DRAW);
+				BufferInstances(dc);   // spans straight from where they live, or the copied list
 				glBindBuffer(GL_ARRAY_BUFFER, 0);
 
 				glUseProgram(m_instancedProgram);
@@ -12335,10 +12735,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glUniform1i(m_uInstHasTexture, tex != 0);
 				glBindTexture(GL_TEXTURE_2D, tex);
 				glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset,
-				                        static_cast<GLsizei>(dc.instanceTransforms.size()));
+				                        static_cast<GLsizei>(dc.instanceTotal()));
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3) *
-				                   static_cast<uint32_t>(dc.instanceTransforms.size());
+				                   static_cast<uint32_t>(dc.instanceTotal());
 				glUseProgram(m_unlitProgram); // restore for the next single-draw
 			}
 			else
@@ -12440,7 +12840,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						// The whole batch in one draw (the binds above are context
 						// state; blocks and units are set per program at link).
 						glUseProgram(matInstProg);
-						DrawGraphBatchInstanced(dc.instanceTransforms, viewProj, baseColor, tex,
+						DrawGraphBatchInstanced(dc, viewProj, baseColor, tex,
 						                        cMetallic, cRoughness, opacity, indexCount, indexOffset);
 						glUseProgram(m_unlitProgram); // restore for the next single-draw
 						continue;
@@ -12457,12 +12857,12 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 						glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
 						glBindBuffer(GL_UNIFORM_BUFFER, 0);
-						glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, indexOffset);
+						glDrawElements(MaterialPrimitive(matProg), indexCount, GL_UNSIGNED_INT, indexOffset);
 						++m_counters.draws;
 						m_counters.tris += static_cast<uint32_t>(indexCount / 3);
 					};
-					if (!dc.instanceTransforms.empty())
-						for (const glm::mat4& t : dc.instanceTransforms) drawGraphInstance(t);
+					if (dc.instanceTotal() > 0)
+						dc.forEachInstance([&](const glm::mat4& t) { drawGraphInstance(t); });
 					else
 						drawGraphInstance(dc.transform);
 					glUseProgram(m_unlitProgram); // restore for the next single-draw
@@ -12754,7 +13154,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, t.wmTex);
 					}
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
+					glDrawElements(MaterialPrimitive(t.matProg), t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 					continue;
@@ -13053,7 +13453,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glActiveTexture(GL_TEXTURE17);
 					glBindTexture(GL_TEXTURE_2D, giShadingActive ? m_giVisAtlas : m_whiteTex);
 					glActiveTexture(GL_TEXTURE0);
-					glDrawElements(GL_TRIANGLES, t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
+					glDrawElements(MaterialPrimitive(t.matProg), t.indexCount, GL_UNSIGNED_INT, t.indexOffset);
 					glUseProgram(m_unlitProgram); // restore the built-in blend program
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
@@ -13509,7 +13909,11 @@ void OpenGLRenderer::DrawParticleGraphBatches(const glm::mat4& viewProj, const g
 		inst.clear();
 		inst.reserve(batch.instances.size() * 5);
 		for (const ParticleInstance& p : batch.instances)
-			inst.insert(inst.end(), { p.position.x, p.position.y, p.position.z, p.size, p.t01 });
+		{
+			inst.push_back(p.position.x); inst.push_back(p.position.y); inst.push_back(p.position.z);
+			inst.push_back(p.size);
+			inst.push_back(p.t01);
+		}
 
 		glBindBuffer(GL_ARRAY_BUFFER, m_particleInstVBO);
 		glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(inst.size() * sizeof(float)),
@@ -13615,6 +14019,24 @@ void OpenGLRenderer::GpuTimerBeginFrame()
 	EngineProfiler& prof = EngineProfiler::instance();
 	const bool rec  = prof.isRecording();
 	const bool live = prof.liveEnabled();
+	if (!m_gpuTimerSupported)
+	{
+		// No timer queries (Apple GL): time the passes by draining the GPU around each one.
+		// That serialises the frame, so it runs only for a detailed / single-frame capture;
+		// the numbers are that frame's, marked approximate ("~" on the card).
+		m_gpuTimingActive = m_gpuPerPass = m_gpuDetailed = false;
+		m_gpuCurSlot = -1;
+		m_gpuActiveQuery = -1;
+		m_gpuFbInPass = false;
+		m_gpuFbActive = rec && (prof.detailedGpuCapture() || prof.isSingleFrameCapture());
+		if (m_gpuFbActive)
+		{
+			m_gpuFbPasses.clear();
+			glFinish();
+			m_gpuFbFrameStart = std::chrono::steady_clock::now();
+		}
+		return;
+	}
 	m_gpuTimingActive = m_gpuTimerSupported && (rec || live);
 	m_gpuPerPass      = m_gpuTimingActive && rec;
 	// Same-frame reap (glFinish) for the detailed-capture toggle AND for a one-shot
@@ -13664,6 +14086,20 @@ void OpenGLRenderer::GpuTimerBeginFrame()
 
 void OpenGLRenderer::GpuTimerEndFrame()
 {
+	if (m_gpuFbActive)
+	{
+		glFinish();
+		FrameGpuStats fs;
+		fs.gpuFrameMs    = std::chrono::duration<double, std::milli>(
+		                       std::chrono::steady_clock::now() - m_gpuFbFrameStart).count();
+		fs.gpuTimingMode = "detailed";   // serialised, like Metal's: the profiler words the caveat
+		fs.passes        = std::move(m_gpuFbPasses);
+		m_lastGpuStats   = std::move(fs);
+		m_gpuFbPasses.clear();
+		m_gpuFbActive = m_gpuFbInPass = false;
+		++m_gpuFrameIdx;
+		return;
+	}
 	if (!m_gpuTimingActive || m_gpuCurSlot < 0) { ++m_gpuFrameIdx; return; }
 	GpuTimerSlot& slot = m_gpuSlots[m_gpuCurSlot];
 	glQueryCounter(slot.tsEnd, GL_TIMESTAMP);
@@ -13685,6 +14121,15 @@ void OpenGLRenderer::GpuTimerEndFrame()
 
 bool OpenGLRenderer::GpuTimerBeginPass(const char* name)
 {
+	if (m_gpuFbActive)
+	{
+		if (m_gpuFbInPass) return false;   // sibling passes only, as with the queries
+		glFinish();
+		m_gpuFbName      = name;
+		m_gpuFbPassStart = std::chrono::steady_clock::now();
+		m_gpuFbInPass    = true;
+		return true;
+	}
 	if (!m_gpuPerPass || m_gpuCurSlot < 0) return false;
 	if (m_gpuActiveQuery >= 0) return false;   // GL_TIME_ELAPSED cannot nest
 	GpuTimerSlot& slot = m_gpuSlots[m_gpuCurSlot];
@@ -13704,6 +14149,15 @@ bool OpenGLRenderer::GpuTimerBeginPass(const char* name)
 
 void OpenGLRenderer::GpuTimerEndPass()
 {
+	if (m_gpuFbInPass)
+	{
+		glFinish();
+		m_gpuFbPasses.push_back({ m_gpuFbName,
+		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_gpuFbPassStart).count(),
+		    /*approx=*/true });
+		m_gpuFbInPass = false;
+		return;
+	}
 	if (m_gpuActiveQuery < 0) return;
 	glEndQuery(GL_TIME_ELAPSED);
 	m_gpuActiveQuery = -1;

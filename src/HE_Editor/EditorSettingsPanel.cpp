@@ -97,7 +97,10 @@ static void toggleFavorite(EditorConfig& cfg, const char* key)
 	if (!had) keys.push_back(key);              // add it (toggle on)
 	cfg.QuickSettingsFavorites.clear();
 	for (size_t i = 0; i < keys.size(); ++i)
-		cfg.QuickSettingsFavorites += (i ? "," : "") + keys[i];
+	{
+		if (i) cfg.QuickSettingsFavorites += ',';
+		cfg.QuickSettingsFavorites += keys[i];
+	}
 }
 
 // ─── Editor ▸ Panels ─────────────────────────────────────────────────────────

@@ -6,7 +6,11 @@
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TransformHierarchy.h"   // worldPositionOf — see update()
+#include <Diagnostics/EngineProfiler.h>
 #include <glm/glm.hpp>
+
+// Finer-level switch happens at this fraction of the level's maxDistance (see update()).
+static constexpr float kLodFinerHysteresis = 0.95f;
 
 void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
 {
@@ -93,11 +97,24 @@ void LODSystem::update(HorizonWorld& world, const glm::vec3& cameraPos)
                 }
             }
         }
+        // Hysteresis towards the FINER level: a camera hovering at a ring boundary
+        // flipped the chunk (and, through the seam stitcher, its four neighbours) back
+        // and forth, and every flip re-copies, re-uploads and re-builds a BVH. Going
+        // finer needs the camera a few percent inside the boundary; going coarser stays
+        // exact, so no level is ever kept past its own maxDistance by more than the
+        // band. Leaving the refined level and entering it are not touched.
+        if (chosen != LODComponent::kRefined && lod.current < lod.levels.size() && chosen < lod.current &&
+            lod.refinedMeshId == HE::UUID{} && dist > lod.levels[chosen].maxDistance * kLodFinerHysteresis)
+        {
+            chosen   = lod.current;
+            chosenId = lod.levels[chosen].meshId;
+        }
         if (lod.stitchedMeshId != HE::UUID{} && lod.stitchedLevel == chosen)
             chosenId = lod.stitchedMeshId;
 
         if (lod.current != chosen || mesh.meshAssetId != chosenId)
         {
+            meshStreamCounters().lodSwitches.fetch_add(1, std::memory_order_relaxed);
             lod.current        = chosen;
             mesh.meshAssetId   = chosenId;
             mesh.dirty         = true;

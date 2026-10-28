@@ -210,10 +210,16 @@ CASES = {
                     "sw": ["GI probe grid", "software GI path forced"]},
     },
     # GI reflections on the same scene: the green and the glowing red cube should
-    # appear in the mirror floor (docs/gi-reflections-plan.md). REPORT ONLY:
-    # Vulkan has no GI reflections yet (giRefl gate stays 0, GI doc §7.1) and the
-    # first lavapipe run measured off == on to the byte. The number is here so the
-    # day it moves is visible; make it a judged pair once Vulkan draws them.
+    # appear in the mirror floor (docs/gi-reflections-plan.md). Still REPORT
+    # ONLY as of Thema 191 step 6 (gi_refl.comp SW kernel + blur/mix landed):
+    # the mirror FLOOR itself is a plain MaterialAsset, so it renders through
+    # the built-in PBR shader and shows nothing (no giRefl cascade there on any
+    # backend yet) — only the graph-material cubes change. First real (non-
+    # byte-identical) measurement, RTX 4070 not lavapipe: off vs on mean |Δ|
+    # 0.19, max 49, 3.7% of pixels changed by >2 steps — no validation layer
+    # messages. No lavapipe number yet (CI's software ICD may differ from a
+    # real GPU's numbers); make it a judged pair (min_mean) once CI reports
+    # one, the same way "gi" above picked 0.3.
     "gi_refl": {
         "base": {"GIREFLTEST": "1", "GI": "1", "SKYTEST": "1", "CAMY": "3", "CAMZ": "0",
                  "PITCH": "-12", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
@@ -385,8 +391,18 @@ CASES = {
     # 11.73; up window (0.45, 0.12) rgb (171, 190, 203) vs below the rim (0.50, 0.85)
     # (34, 99, 112). Vulkan draws this scene brighter (the floor nearly white, Thema 185
     # §8.1) and the net saturates there: 185's net measured 0.23 on Vulkan against 0.63
-    # on GL. 1.5 is a third of 11.73 scaled by that factor — it fails when the net is
-    # silently off (0), not when it is one shade weaker. Tighten after the first run.
+    # on GL. 1.5 was a third of 11.73 scaled by that factor — it failed when the net was
+    # silently off (0), not when it was one shade weaker.
+    #
+    # Commit ae454c76 (27.10.2026, "gain 0.12 and a soft ceiling so the lines stop
+    # clipping to white") deliberately dimmed the net — kGain 0.45->0.05/0.12, kMaxLine
+    # 0.2 caps every line's brightness, kDark 0.6->0.3 — to fix lines that blew out to
+    # white. That retuning lowered the real on/off delta on lavapipe to 0.8653, bit-for-bit
+    # identical across three independent CI runs on three different commits since
+    # (40591581239, 40559168721, 40534310520): this is the new deterministic baseline,
+    # not flake. 0.5 keeps the same margin the old threshold had (a fraction of the
+    # measured baseline) and still fails hard on a silently-disabled net (delta 0).
+    # Re-tighten if the net is retuned again.
     "underwater": {
         "base": {"WATERLAKE": "bowl", "SKYTEST": "1", "TOD": "0.45", "COVERAGE": "0.2",
                  "CLOUDMODE": "0", "AA": "0", "BLOOM": "0", "RENDERPATH": "1",
@@ -397,7 +413,7 @@ CASES = {
             "floor":     {"dump": {"CAMZ": "28", "PITCH": "-20"}, "env": {"HE_SKY_TIME": "5"}},
             "up":        {"dump": {"CAMZ": "20", "PITCH": "35"}, "env": {"HE_SKY_TIME": "5"}},
         },
-        "pairs": [("floor_off", "floor", 1.5)],
+        "pairs": [("floor_off", "floor", 0.5)],
         "require": {v: ["HE_DUMP_WATERLAKE witness landscape added"]
                     for v in ("floor_off", "floor", "up")},
         "samples": {"up": {"window": (0.45, 0.12), "below_rim": (0.50, 0.85)}},

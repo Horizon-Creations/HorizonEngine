@@ -6,6 +6,7 @@
 namespace
 {
     constexpr float kEps = 1e-6f;
+    constexpr float kTwoPi = 6.28318530718f;
 
     // Squared length without glm::length's sqrt — used everywhere a comparison
     // against an epsilon is all that is wanted.
@@ -275,7 +276,7 @@ MeshData buildTube(const std::vector<Frame>& frames, const TubeParams& params)
 
         for (int j = 0; j <= seg; ++j)
         {
-            const float a  = (static_cast<float>(j) / static_cast<float>(seg)) * 6.28318530718f;
+            const float a  = (static_cast<float>(j) / static_cast<float>(seg)) * kTwoPi;
             const glm::vec3 dir = f.normal * std::cos(a) + f.binormal * std::sin(a);
             const glm::vec3 p   = f.position + dir * radius;
 

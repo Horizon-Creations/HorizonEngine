@@ -210,7 +210,7 @@ namespace
     void refineShore(const Lattice& L, float overshoot, std::vector<glm::dvec2>& P,
                      std::vector<float>& E, std::vector<uint32_t>& T)
     {
-        constexpr float  kTolerance   = 0.03f;      // of e, i.e. 3 cm of water depth
+        constexpr float  kTolerance   = 0.03f / HE::water::kShoreFadeDepth;   // of e, i.e. 3 cm of water depth
         constexpr int    kMaxPasses   = 24;
         constexpr size_t kMaxVertices = 400000;
         const double hmin  = 0.5 * std::min(L.cellW, L.cellH);

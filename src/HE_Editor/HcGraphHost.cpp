@@ -25,6 +25,7 @@
 #include <unordered_map>
 #include <filesystem>
 #include <functional>
+#include <string_view>
 
 namespace HcGraphHost
 {
@@ -54,6 +55,16 @@ GraphEditor::Container containerPin(HC::ContainerKind k)
 	return GraphEditor::Container::None;
 }
 
+// `lower(hay).find(needle) != npos` without the lowered copy of `hay`: search
+// menus test every candidate name on every frame. Folds like lower() (tolower
+// on unsigned char); the needle is compared as given, so pass it lowercased.
+bool containsFolded(std::string_view hay, std::string_view needle)
+{
+	if (needle.empty()) return true;
+	return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(),
+		[](char h, char n){ return (char)std::tolower((unsigned char)h) == n; }) != hay.end();
+}
+
 // Does the search query hit the words people actually TYPE for this node, as
 // opposed to what it is called? A node's display name is its serialisation key
 // (fromJson resolves the type by comparing against nodeDisplayName), so a node
@@ -63,7 +74,7 @@ bool aliasHit(NT t, const std::string& lowerQuery)
 {
 	if (lowerQuery.empty()) return false;   // an empty query already matches everything
 	const char* a = HC::nodeSearchAliases(t);
-	return a && *a && lower(a).find(lowerQuery) != std::string::npos;
+	return a && *a && containsFolded(a, lowerQuery);
 }
 
 // What kind of pin a wire is being dragged off: exec vs data, and for a data pin
@@ -1065,9 +1076,8 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 	HC::Graph& graph = *h.graph;
 	const ImVec2 drop = h.ge->addMenuGraphPos;
 	int created = 0;
-	auto matches = [&](const std::string& name, const std::string& cat)
-	{ return q.empty() || lower(name).find(q) != std::string::npos
-	      || lower(cat).find(q) != std::string::npos; };
+	auto matches = [&](std::string_view name, std::string_view cat)
+	{ return containsFolded(name, q) || containsFolded(cat, q); };
 
 	// Spawn the EngineCall node one registry pick stands for. Shared, because the
 	// rows now appear in two places: merged into a node category below, and in
@@ -1372,7 +1382,7 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 	const auto dragCtr   = dp.ctr;
 
 	const std::string q = HcEditorUtil::searchMenuBegin("##dragSearch", "Search…", 232.0f);
-	auto matches = [&](const std::string& name){ return q.empty() || lower(name).find(q) != std::string::npos; };
+	auto matches = [&](std::string_view name){ return containsFolded(name, q); };
 
 	// Node types the hand-written "Reference" section already offers. The
 	// generic registry walk below must skip them, or a Ref-output drag lists
@@ -2352,7 +2362,7 @@ void drawQuickPickPopup(const Host& h)
 			const HC::Variable& v = *vp;
 			// Locals belong to their own function only.
 			if (v.scope != 0 && v.scope != h.currentGraph) continue;
-			if (!q.empty() && lower(v.name).find(q) == std::string::npos) continue;
+			if (!containsFolded(v.name, q)) continue;
 			any = true;
 			if (HcEditorUtil::searchMenuItem(v.name + "  \xe2\x80\x94  " + variableTypeLabel(v)))
 			{

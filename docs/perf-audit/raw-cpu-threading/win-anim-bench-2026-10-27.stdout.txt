@@ -1,0 +1,15 @@
+[doctest] doctest version is "2.5.0"
+[doctest] run with "--help" for options
+anim-bench characters=1 joints=65 p50=0.004 ms p95=0.005 ms per-char=4.00 us
+anim-bench characters=50 joints=65 p50=0.195 ms p95=0.206 ms per-char=3.89 us
+anim-bench characters=200 joints=65 p50=0.779 ms p95=0.806 ms per-char=3.90 us
+anim-bench characters=500 joints=65 p50=1.930 ms p95=2.006 ms per-char=3.86 us
+anim-bench characters=1000 joints=65 p50=3.853 ms p95=3.934 ms per-char=3.85 us
+===============================================================================
+[doctest] test cases: 1 | 1 passed | 0 failed | 5925 skipped
+[doctest] assertions: 0 | 0 passed | 0 failed |
+[doctest] Status: SUCCESS!
+
+Command: HE_ANIM_BENCH=1 ./tests/he_tests.exe --no-skip -tc="*tickAnimation per frame over the crowd size*"
+Machine: NN-WS03, AMD Ryzen 9 9950X (16C/32T), Windows, Release build (CMAKE_BUILD_TYPE=Release, Ninja/MSVC), HEAD d09e65ca, build dir C:/hb/cta5 (short-path override of out/build/x64-release — MAX_PATH).
+Load: hive_devices reported 1.4% CPU on this host immediately before the run (sole bee on the machine, no other HorizonEditor/Game process).

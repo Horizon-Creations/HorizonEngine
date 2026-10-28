@@ -33,6 +33,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -51,6 +52,27 @@ namespace InspectorPanel
 // contact with it. Both live in EditorWidgets; these are the local spellings.
 namespace Row = EditorWidgets::Row;
 using EditorWidgets::hint;
+
+// A collapsible group INSIDE a component (the Sky's "Sun & Moon", "Clouds" …).
+// A bare tree node looked like one more row, so the groups did not read as
+// groups. This is a framed bar like the component header but one step down:
+// neutral instead of amber, a shorter bar, and its rows indented under it.
+// Pair with ImGui::TreePop() when it returns true.
+bool subSection(const char* label, bool defaultOpen)
+{
+	using namespace HE::Ed::Theme;
+	ImGui::Spacing();
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+	ImGui::PushStyleColor(ImGuiCol_Header,        warm(0.21f, 0.95f));
+	ImGui::PushStyleColor(ImGuiCol_HeaderHovered, warm(0.27f, 0.95f));
+	ImGui::PushStyleColor(ImGuiCol_HeaderActive,  warm(0.31f, 0.95f));
+	const bool open = ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_Framed |
+	                                           ImGuiTreeNodeFlags_SpanAvailWidth |
+	                                           (defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0));
+	ImGui::PopStyleColor(3);
+	ImGui::PopStyleVar();
+	return open;
+}
 
 // A scene is meant to hold at most one Sky and one Weather entity; everything in
 // the engine reads the FIRST one it finds. A duplicate is therefore completely
@@ -250,8 +272,8 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	    s_multi.revision != ctx.selection.revision() ||
 	    ImGui::GetFrameCount() - s_multi.frame >= period)
 		refreshMultiSelection(ctx, world, primary, members);
-	const std::vector<std::string> common  = s_multi.common;
-	const std::vector<std::string> partial = s_multi.partial;
+	const std::vector<std::string>& common  = s_multi.common;
+	const std::vector<std::string>& partial = s_multi.partial;
 
 	hint("Edits below apply to every selected entity that has the component; "
 	     "the active entity's values are shown, and a field the selection "
@@ -864,6 +886,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	// the whole call, so an early return out of any section still unwinds it and
 	// no later panel inherits "Rigid Body" as its tooltip scope.
 	HE::Ed::Help::Scope helpScope("");
+	// The Details panel's layout: names in a column on the left, controls in
+	// the column to its right (Row::InlineLabels), and a tighter row pitch than
+	// the editor-wide theme — this panel is the longest list in the editor, and
+	// at the theme's padding a property cost 40 px. Popups opened from here
+	// (the component menu, the asset picker) are separate windows but share the
+	// style stack, so they are compact as well, which suits them.
+	EditorWidgets::Row::InlineLabels labelColumn;
+	// Not in the silent modes: listComponents promises to emit no ImGui calls.
+	if (!quiet)
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8.0f, 4.0f));
+	}
+	struct PopStyle
+	{
+		bool on;
+		~PopStyle() { if (on) ImGui::PopStyleVar(2); }
+	} popStyle{ !quiet };
 	// The same slot for the undo history: every entry a component section
 	// pushes is labelled with that component ("Light", "Rigid Body") — set by
 	// componentHeader alongside the help scope — and unwound here so no later
@@ -910,7 +950,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		// own `if (removed) registry.remove<T>(entity)` does the rest.
 		removeLabel = std::string("Remove ") + label;
 		if (removeMatching) { removed = removable; structuralChange = removable; return false; }
+		// The one look every component header has: a taller bar than the rows
+		// under it, the heading colour, and a gap above so the sections read
+		// as blocks rather than one long list.
+		ImGui::Spacing();
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar();
 		// What the component IS, on the header itself — the question that comes
 		// before any of its properties.
 		{
@@ -978,7 +1026,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					if (ImGui::IsItemHovered())
 					{
 						std::string list;
-						for (const std::string& p : props) list += (list.empty() ? "" : ", ") + p;
+						for (const std::string& p : props)
+						{
+							if (!list.empty()) list += ", ";
+							list += p;
+						}
 						ImGui::SetTooltip("Changed on this placement: %s.\nThe prefab's value does "
 						                  "not reach these — revert them in the Prefab Instance "
 						                  "section above.", list.c_str());
@@ -1091,7 +1143,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (!env->autoAdvance)
 				hint("Takes effect once Auto-Advance is on.");
 
-			if (ImGui::TreeNodeEx("Sun & Moon", ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (subSection("Sun & Moon", true)) {
 			Row::colorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::sliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f); trackEdit();
 			Row::colorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -1120,7 +1172,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			// These are always editable. A Weather preset (below) sets a whole set of
 			// these values when applied / transitioning; otherwise they're yours to move.
-			if (ImGui::TreeNodeEx("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (subSection("Clouds", true)) {
 			Row::sliderFloat("Coverage", &env->cloudCoverage, 0.0f, 1.0f); trackEdit();
 			hint("Full overcast dims the sun & fills with ambient light.");
 			// Cloud render mode (OpenGL backend): sky-dome (cheap, infinite — no parallax)
@@ -1183,7 +1235,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Clouds
 
-			if (ImGui::TreeNodeEx("Contrails & Cirrus")) {
+			if (subSection("Contrails & Cirrus", false)) {
 			Row::sliderFloat("Contrails", &env->contrailAmount, 0.0f, 1.0f); trackEdit();
 			hint("Scattered vapour-trail lines to fill a clear daytime sky; fade as clouds build.");
 			Row::sliderFloat("Cirrus", &env->cirrusAmount, 0.0f, 1.0f); trackEdit();
@@ -1194,7 +1246,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Contrails & Cirrus
 
-			if (ImGui::TreeNodeEx("Sun Effects")) {
+			if (subSection("Sun Effects", false)) {
 			Row::sliderFloat("God Rays", &env->godRays, 0.0f, 1.0f); trackEdit();
 			hint("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. "
 			     "Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
@@ -1205,7 +1257,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Sun Effects
 
-			if (ImGui::TreeNodeEx("Atmospheric Fog")) {
+			if (subSection("Atmospheric Fog", false)) {
 			Row::sliderFloat("Density##fog", &env->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
 			ImGui::BeginDisabled(env->fogDensity <= 0.0f);
 			Row::sliderFloat("Ground Hugging", &env->fogHeightFalloff, 0.0f, 1.0f); trackEdit();
@@ -1214,7 +1266,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Atmospheric Fog
 
-			if (ImGui::TreeNodeEx("Precipitation & Ground")) {
+			if (subSection("Precipitation & Ground", false)) {
 			Row::sliderFloat("Rain", &env->rainAmount, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Snow", &env->snowAmount, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Wetness", &env->wetness, 0.0f, 1.0f); trackEdit();
@@ -1222,7 +1274,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Precipitation & Ground
 
-			if (ImGui::TreeNodeEx("Stars & Milky Way")) {
+			if (subSection("Stars & Milky Way", false)) {
 			Row::sliderFloat("Star Brightness", &env->starBrightness, 0.0f, 3.0f); trackEdit();
 			Row::colorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::sliderFloat("Star Amount", &env->starDensity, 0.0f, 1.0f); trackEdit();
@@ -1237,7 +1289,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Stars & Milky Way
 
-			if (ImGui::TreeNodeEx("Nebula")) {
+			if (subSection("Nebula", false)) {
 			// "##neb" the way "Density##fog" already does it: the tree node keeps
 			// the ImGui ids apart on its own, but the help lookup is by label
 			// within the COMPONENT, and this component has three Intensities and
@@ -1260,7 +1312,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Nebula
 
-			if (ImGui::TreeNodeEx("Aurora")) {
+			if (subSection("Aurora", false)) {
 			Row::sliderFloat("Intensity##aur", &env->auroraIntensity, 0.0f, 1.0f); trackEdit();
 			Row::colorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::colorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -1648,7 +1700,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				auto& l = alc->layers[i];
 				ImGui::PushID(static_cast<int>(i));
-				ImGui::Separator();
+				EditorWidgets::subHeading(("Layer " + std::to_string(i + 1)).c_str());
 
 				// The name is what the scripting API addresses, so it comes
 				// first. Edited in place like every other InputText row here
@@ -1750,7 +1802,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				auto& f = ik->feet[i];
 				ImGui::PushID(static_cast<int>(i));
-				ImGui::Separator();
+				EditorWidgets::subHeading(("Foot " + std::to_string(i + 1)).c_str());
 
 				// The three names invalidate the resolution cache, so they set the
 				// dirty flag rather than relying on it being noticed next frame.
@@ -1800,7 +1852,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				trackEdit();
 			}
 
-			ImGui::Separator();
+			EditorWidgets::subHeading("Look At");
 			auto& la = ik->lookAt;
 			EditorWidgets::checkbox("Look At", &la.enabled); trackEdit();
 			if (la.enabled)
@@ -2075,7 +2127,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 				if (slots.size() > 1)
 				{
-					ImGui::SeparatorText("Slot Overrides");
+					EditorWidgets::subHeading("Slot Overrides");
 					for (size_t i = 0; i < slots.size(); ++i)
 					{
 						// What the slot draws when left empty: its own material,
@@ -2126,7 +2178,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 				// Surface (PBR scalars) — applied live (the renderer reads them
 				// from the shared MaterialAsset each frame); "Save Material" persists.
-				ImGui::SeparatorText("Surface");
+				EditorWidgets::subHeading("Surface");
 				Row::colorEdit3("Base Color", mat->baseColor);
 				Row::sliderFloat("Metallic",  &mat->metallic,  0.0f, 1.0f, "%.2f");
 				Row::sliderFloat("Roughness", &mat->roughness, 0.0f, 1.0f, "%.2f");
@@ -2178,7 +2230,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				// extractor merges them onto the material's defaults each frame.
 				if (!mat->graphParamNames.empty())
 				{
-					ImGui::SeparatorText("Material Parameters (this entity)");
+					EditorWidgets::subHeading("Material Parameters (this entity)");
 					// Index of the override for `nm`, or -1. Index-based (never a pointer
 					// into the vector) so a push_back/erase this frame can't dangle.
 					auto overrideIndex = [&](const std::string& nm) -> int {
@@ -2538,7 +2590,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// ── Lag ──────────────────────────────────────────────────────────
 			// Only the KNOBS live here. The smoothed pose behind them is play
 			// state, is not saved, and has nothing an author could set.
-			ImGui::SeparatorText("Lag");
+			EditorWidgets::subHeading("Lag");
 			EditorWidgets::checkbox("Camera Lag", &rig->lag.enabled); trackEdit();
 			if (rig->lag.enabled)
 			{
@@ -2821,6 +2873,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TrailComponent>(entity); }
 	}
 
+	// The Rigid Body and Character Controller rows share one set of layer names;
+	// built at the first use, since most entities carry neither component.
+	std::optional<CollisionLayerNames> layerNames;
+	const auto collisionLayers = [&]() -> const CollisionLayerNames&
+	{
+		if (!layerNames) layerNames.emplace(ctx);
+		return *layerNames;
+	};
+
 	// ── Rigid Body ──────────────────────────────────────────────────────────
 	if (auto* r = registry.try_get<RigidBodyComponent>(entity))
 	{
@@ -2849,7 +2910,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Which channel this body sits in — what the project's collision
 			// matrix looks up when it decides whether a pair may touch.
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RigidBodyComponent>(entity); }
 	}
@@ -3138,7 +3199,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// because a character need not have one. It decides what BLOCKS the
 			// character as it walks.
 			collisionLayerRow("Collision Layer##character", &cc->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
@@ -3339,7 +3400,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Tessellation: a level finer than LOD0 for the chunks near the
 			// camera, smooth between the height samples, plus a detail map's
 			// displacement. Any change rebuilds the chunks (changed → dirty).
-			ImGui::SeparatorText("Tessellation");
+			EditorWidgets::subHeading("Tessellation");
 			{
 				static const char* const kFactors[] = { "Off", "2x", "4x" };
 				int f = t->tessellationFactor >= 4 ? 2 : (t->tessellationFactor >= 2 ? 1 : 0);
@@ -3368,7 +3429,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// end against the ground. The water's own settings, so they go through
 			// setShoreClip and stay out of `changed` — which would regenerate every
 			// chunk of the landscape for a flag that only the water reads.
-			ImGui::SeparatorText("Water");
+			EditorWidgets::subHeading("Water");
 			{
 				bool clip = t->water.clipToGround;
 				if (EditorWidgets::checkbox("Clip To Ground##tcw", &clip))
@@ -3386,7 +3447,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
 			// (shown for reference) and can no longer change the terrain.
-			ImGui::SeparatorText("Noise (set at creation)");
+			EditorWidgets::subHeading("Noise (set at creation)");
 			ImGui::BeginDisabled();
 			Row::inputInt("Seed##tc",       &t->seed);
 			int oct = t->octaves;
@@ -3609,8 +3670,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			// Where the layer may grow (FoliageLayer::slopeMin ..): all of it decides
 			// the scatter, so every edit re-scatters this layer when it is let go.
-			ImGui::Separator();
-			ImGui::TextUnformatted("Placement");
+			EditorWidgets::subHeading("Placement");
 			EditorWidgets::helpForKey("Foliage/Placement");
 			Row::dragFloat("Slope Min##fol", &fol->slopeMin, 0.005f, 0.0f, 1.0f, "%.2f");
 			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
@@ -3637,8 +3697,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Farther detail levels (FoliageLayer::lods): a simpler mesh, a thinner
 			// layer, the engine's cross card at the far end. The mesh above is the
 			// level the camera stands in; none of this re-scatters.
-			ImGui::Separator();
-			ImGui::TextUnformatted("Detail Levels");
+			EditorWidgets::subHeading("Detail Levels");
 			EditorWidgets::helpForKey("Foliage/Detail Levels");
 			int  removeLod = -1;
 			bool sortLods  = false;
@@ -4043,14 +4102,14 @@ constexpr AddGroup kAddGroups[] = {
 
 // Case-insensitive "needle somewhere in haystack" — the same test the Outliner
 // and Content Browser searches apply, so typing "mesh" finds Mesh, Skeletal
-// Mesh and Nav Mesh alike.
-bool labelMatches(const char* label, const std::string& needle)
+// Mesh and Nav Mesh alike. The needle comes already lowered: the caller tests
+// every row against the same one.
+bool labelMatches(const char* label, const std::string& loweredNeedle)
 {
-	if (needle.empty()) return true;
-	std::string hay(label), n(needle);
+	if (loweredNeedle.empty()) return true;
+	std::string hay(label);
 	std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return std::tolower(c); });
-	std::transform(n.begin(),   n.end(),   n.begin(),   [](unsigned char c) { return std::tolower(c); });
-	return hay.find(n) != std::string::npos;
+	return hay.find(loweredNeedle) != std::string::npos;
 }
 } // namespace
 #endif // HE_IMGUI_ENABLED
@@ -4200,11 +4259,14 @@ bool addComponentMenu(HorizonWorld& world, const std::vector<Entity>& entities, 
 		// ── Searching: the hits, flat, each with its group beside it ────────
 		int  hits  = 0;
 		bool first = true;
+		std::string loweredFilter = s_filter;
+		std::transform(loweredFilter.begin(), loweredFilter.end(), loweredFilter.begin(),
+		               [](unsigned char c) { return std::tolower(c); });
 		for (const AddGroup& g : kAddGroups)
 			for (int i = 0; i < g.count; ++i)
 			{
 				const AddRow& row = g.rows[i];
-				if (!anyLacks(row) || !labelMatches(row.label, s_filter)) continue;
+				if (!anyLacks(row) || !labelMatches(row.label, loweredFilter)) continue;
 				++hits;
 				// The group beside the hit: "Mesh" and "Nav Mesh" are told
 				// apart by where they live as much as by their names.

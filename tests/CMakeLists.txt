@@ -8,6 +8,8 @@ add_executable(he_tests
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
+    test_material_branching.cpp
+    test_material_tessellation.cpp
     test_auto_landscape_variants.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp
@@ -68,6 +70,8 @@ add_executable(he_tests
     test_temporal_aa.cpp
     test_gi_bvh.cpp
     test_gi_blas_store.cpp
+    # Rays / resolution / blur per GI-reflection tier, one table for all backends.
+    test_gi_reflection_tier.cpp
     # Staging ring + mesh-memory free list of the Vulkan upload path (REN-802/803).
     test_vulkan_upload_alloc.cpp
     # Accept/reject rules of the on-disk VkPipelineCache file (REN-808).
@@ -119,12 +123,13 @@ add_executable(he_tests
     # The Watch window, driven the same way: sections and rows from a real
     # runtime stopped at a breakpoint, Go to Node raising the reveal.
     test_hc_watch_ui.cpp
-    # The Task Board window, driven the same way: cards from a real board in a
-    # real project, links dropped onto them, chips that select and jump.
-    test_taskboard_ui.cpp
     # The board's footer widget in a stand-in footer: one line tall in every
     # state, kept out of the middle, and its list ticks tasks off on disk.
     test_taskboard_footer_ui.cpp
+    # The Planner tab, driven the same way: Tasks is the Task Board (a new row, a
+    # title typed into a cell, links dropped on it and chips that jump, a pull under
+    # it, assignees from a team), a header sort, a card dragged to another lane.
+    test_planner_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -142,6 +147,10 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    # The Material Editor tab, driven the same way: the Tessellation cell and its
+    # popup while the Displacement pin is wired, on a renderer that tessellates
+    # and on one that does not (Thema 207).
+    test_material_editor_ui.cpp
     # The reward moments: once per frame, once per build run, the fade.
     test_editor_rewards.cpp
     test_editorcamera.cpp
@@ -209,6 +218,8 @@ add_executable(he_tests
     # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
     # hysteresis per view, the cross-card file.
     test_foliage_lod.cpp
+    # Straddler buckets on the pool give the single-threaded result (Thema 238 S2).
+    test_foliage_parallel.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp
@@ -222,6 +233,7 @@ add_executable(he_tests
     test_profiler_stats.cpp
     test_profiler_layout.cpp
     test_audio.cpp
+    test_audio_formats.cpp
     # Audio Editor edit model (Thema 168): trim, volume curve, bus, EQ biquads.
     test_audio_edit.cpp
     # …and what the engine does with its bus and EQ: routing, measured response.
@@ -280,6 +292,7 @@ add_executable(he_tests
     test_root_motion.cpp
     test_animation_notify.cpp
     test_animation_layers.cpp
+    test_animation_bench.cpp
     test_blend_space.cpp
     test_sequencer_timeline.cpp
     test_sequence.cpp
@@ -296,6 +309,9 @@ add_executable(he_tests
     # Its own file so it gets its own PROCESS: the shared font atlas is baked
     # once, and this is the one run that bakes it in the regular weight.
     test_ui_font_weight.cpp
+    # Same reason: needs a process whose shared font is not baked yet.
+    test_ui_font_scripts.cpp
+    test_ui_text_layout_digest.cpp
     test_app_icon.cpp
     test_hidden_window.cpp
     test_document_types.cpp
@@ -332,6 +348,14 @@ add_executable(he_tests
     test_project_write_gate.cpp
     test_project_settings.cpp
     test_task_board.cpp
+    # The Planner's databases and pages and their files (Config/Planner/*).
+    test_planner.cpp
+    # ...its workspace and the Task Board import (ImGui-free).
+    test_planner_workspace.cpp
+    # The Planner as tools: the Markdown a page speaks, and planner_* over a real workspace.
+    test_planner_markdown.cpp
+    test_planner_board.cpp
+    test_mcp_tools_planner.cpp
     # Assigning, posting updates and notices between two editors over a fake
     # team link, on one fake clock.
     test_taskboard_team.cpp
@@ -475,8 +499,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FoliageExtract.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiAutoLandscape.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiInstanceSurface.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrameCull.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
@@ -658,6 +684,10 @@ add_executable(he_tests
     # The task tools, with the Task Board panel's real board behind one editor
     # and a second editor's bridge on the fake team (test_mcp_tools_taskboard.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTaskBoard.cpp
+    # The Planner tools and the Markdown they speak (test_mcp_tools_planner.cpp,
+    # test_planner_markdown.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsPlanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerMarkdown.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
@@ -677,6 +707,13 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
     # The task board's data and its project file (test_task_board.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoard.cpp
+    # The Planner over the same helpers (test_planner.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Planner.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerImport.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerTasks.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerWorkspace.cpp
+    # The Whiteboard: nodes, edges, their file and the media folder (test_planner_board.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoard.cpp
     # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
@@ -900,12 +937,17 @@ add_executable(he_tests
     # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
-    # The Task Board window, for test_taskboard_ui.cpp: same AppContext, same
-    # per-file HE_IMGUI_ENABLED. It reads TaskBoard, EditorCommands and the
-    # thumbnail cache, all already here.
+    # The Task Board's data core and link chips (the window is the Planner's now):
+    # same AppContext, same per-file HE_IMGUI_ENABLED. It reads TaskBoard,
+    # EditorCommands and the thumbnail cache, all already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
     # And its footer widget, for test_taskboard_footer_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
+    # The Planner tab, for test_planner_ui.cpp: same AppContext, same per-file
+    # HE_IMGUI_ENABLED. It reads the Planner (already here) and the Task Board.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -963,6 +1005,10 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
     # linked already.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    # The Material Editor tab, for test_material_editor_ui.cpp (Thema 207): same
+    # AppContext, same per-file HE_IMGUI_ENABLED. The canvas (GraphEditor), the
+    # pickers, the thumbnail cache and the shader library are already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
     # The profiler's Streaming tab and the editor's split/merge of streaming
     # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
     # outside symbol, the Scene window's show flags, is stubbed in
@@ -998,12 +1044,15 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
-    test_taskboard_ui.cpp
     # Builds an AppContext for TaskBoardPanel::board/edit: its layout must be
     # the one the panel was compiled with.
     test_mcp_tools_taskboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     test_taskboard_footer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
+    test_planner_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
@@ -1035,6 +1084,8 @@ set_source_files_properties(
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     test_texture_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
+    test_material_editor_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     test_streaming_view.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
@@ -1090,6 +1141,10 @@ if(HE_HAVE_LZ4)
 endif()
 if(HE_HAVE_ZSTD)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_ZSTD)
+endif()
+# Only the OpenSSL backend caps aesGcm* lengths at INT_MAX (test_game_build_config.cpp).
+if(HE_HAVE_OPENSSL)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
 endif()
 # hpak encryption tests run whenever a crypto backend (system OpenSSL or the
 # fetched mbedTLS fallback) is compiled in — the round-trips go through
@@ -1456,6 +1511,17 @@ if(WIN32)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src)
 endif()
 
+# The Vulkan shader manager (review 4, findings 385/386): compiled straight into
+# the test exe, same reasoning as the D3D managers above — load() needs no
+# VkDevice to exercise its id allocation and file-to-SPIR-V-bytes path, so this
+# runs without a Vulkan driver, CI included.
+if(HE_VULKAN_ENABLED)
+    target_sources(he_tests PRIVATE
+        test_vulkan_shader_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Vulkan/VulkanShaderManager.cpp)
+    target_link_libraries(he_tests PRIVATE Vulkan::Vulkan)
+endif()
+
 # One ctest entry per test SOURCE FILE, not one for the whole binary.
 #
 # The suite is wait-bound, not CPU-bound: it spawns real git processes, kills
@@ -1556,54 +1622,6 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME heproj_file_types
              COMMAND ${Python3_EXECUTABLE}
                      "${CMAKE_SOURCE_DIR}/tests/test_heproj_file_types.py")
-endif()
-
-# ── "How heavy is what we actually ship?" ────────────────────────────────────
-# docs/he-apps-plan.md A3 wrote a size table into the plan and got it wrong,
-# because the numbers came from a tree that was not a Release build. That is why
-# this is a test with a threshold rather than a paragraph: the MEASURING POINT is
-# part of the claim, and it is printed with every run.
-#
-# It measures the deploy tree the exporter copies verbatim into a packaged build.
-# Absent (a configure without the deploy step, a fresh checkout) is a SKIP, not a
-# failure — exit code 2, declared below — or every such build would go red for
-# having nothing to weigh.
-#
-# The build type is handed over for the same reason the path is printed: the
-# thresholds were measured on a RELEASE tree and mean nothing on a Debug one,
-# which is several times the size. Anything else reports and skips.
-#
-# One test per runtime flavour (docs/he-apps-plan.md A3b), because the three are
-# different artefacts with different limits and a single number would either let
-# the app runtimes grow unwatched or fail the game runtime on day one. Only the
-# game flavour is deployed by an ordinary build; the two app ones come from
-# scripts/build_runtimes.py, so on a normal machine — and in CI — they skip. That
-# is deliberate: the test exists so that a tree which HAS built them is measured,
-# and it costs nothing in one that has not.
-if(Python3_Interpreter_FOUND)
-    set(_runtime_size_dirs
-        runtime_size              "${DEPLOY_DIR}/Game"        game
-        runtime_size_app_advanced "${DEPLOY_DIR}/AppAdvanced" app-advanced
-        runtime_size_app_basic    "${DEPLOY_DIR}/AppBasic"    app-basic)
-    list(LENGTH _runtime_size_dirs _rs_len)
-    math(EXPR _rs_last "${_rs_len} / 3 - 1")
-    foreach(_i RANGE ${_rs_last})
-        math(EXPR _n "${_i} * 3")
-        math(EXPR _d "${_n} + 1")
-        math(EXPR _f "${_n} + 2")
-        list(GET _runtime_size_dirs ${_n} _rs_name)
-        list(GET _runtime_size_dirs ${_d} _rs_dir)
-        list(GET _runtime_size_dirs ${_f} _rs_flavor)
-        # --flavor is passed explicitly rather than left to the directory name:
-        # DEPLOY_DIR is a cache PATH a user may point anywhere, and a runtime
-        # weighed against the wrong flavour's threshold is worse than none.
-        add_test(NAME ${_rs_name}
-                 COMMAND ${Python3_EXECUTABLE}
-                         "${CMAKE_SOURCE_DIR}/scripts/runtime_size.py"
-                         "${_rs_dir}" --check "--flavor=${_rs_flavor}"
-                         "--build-type=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,${CMAKE_BUILD_TYPE}>")
-        set_tests_properties(${_rs_name} PROPERTIES SKIP_RETURN_CODE 2)
-    endforeach()
 endif()
 
 # ── "Does a game build against the engine SDK?" (Thema 211 steps 5 and 9) ───

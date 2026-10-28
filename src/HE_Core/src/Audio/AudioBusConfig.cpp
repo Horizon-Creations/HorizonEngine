@@ -38,12 +38,24 @@ bool AudioBusConfig::remove(const std::string& name)
 
 bool AudioBusConfig::isDefault() const
 {
-    return buses.empty() && masterVolume == 1.0f;
+    return buses.empty() && masterVolume == 1.0f && spatialBackend == AudioSpatialBackend::Miniaudio
+        && !steam.any();
 }
 
 void AudioBusConfig::toJson(nlohmann::json& out) const
 {
     out["master"] = masterVolume;
+    if (spatialBackend == AudioSpatialBackend::SteamAudio)
+        out["spatial"] = "steamaudio";
+    if (steam.any())
+    {
+        nlohmann::json js = nlohmann::json::object();
+        if (steam.airAbsorption) js["airAbsorption"] = true;
+        if (steam.occlusion)     js["occlusion"]     = true;
+        if (steam.reflections)   js["reflections"]   = true;
+        if (steam.pathing)       js["pathing"]       = true;
+        out["steam"] = std::move(js);
+    }
     nlohmann::json arr = nlohmann::json::array();
     for (const AudioBusDef& b : buses)
     {
@@ -63,6 +75,19 @@ void AudioBusConfig::fromJson(const nlohmann::json& in)
     if (!in.is_object()) return;
     if (in.contains("master") && in["master"].is_number())
         masterVolume = std::max(0.0f, in["master"].get<float>());
+    if (in.contains("spatial") && in["spatial"].is_string() && in["spatial"].get<std::string>() == "steamaudio")
+        spatialBackend = AudioSpatialBackend::SteamAudio;
+    if (in.contains("steam") && in["steam"].is_object())
+    {
+        auto flag = [&](const char* key) {
+            const nlohmann::json& s = in["steam"];
+            return s.contains(key) && s[key].is_boolean() && s[key].get<bool>();
+        };
+        steam.airAbsorption = flag("airAbsorption");
+        steam.occlusion     = flag("occlusion");
+        steam.reflections   = flag("reflections");
+        steam.pathing       = flag("pathing");
+    }
     if (!in.contains("buses") || !in["buses"].is_array()) return;
     for (const nlohmann::json& b : in["buses"])
     {

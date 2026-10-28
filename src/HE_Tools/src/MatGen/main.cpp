@@ -58,9 +58,11 @@ using namespace HE;
 // Well-known UUID base for the built-in materials. `hi` stays far below the
 // version-4 bit pattern UUID::generate() enforces and clear of the DefaultAssets
 // sentinels, mesh_gen's 0x100, widget_gen's 0x200 and matfn_gen's 0x300 block.
-constexpr uint64_t kMatBaseHi = 0x0000000000000400ULL;
+// Not 0x400: landscape_tex_gen owns 0x400..0x41F, and one UUID names ONE asset in
+// the ContentManager (Water used to be {0x400, 1} next to T_Landscape_Grass_Albedo).
+constexpr uint64_t kMatBaseHi = 0x0000000000000600ULL;
 static_assert(kEngineWaterMaterialId.hi == kMatBaseHi + 0 && kEngineWaterMaterialId.lo == 1,
-              "Water is entry 0 of the 0x400 block — DefaultAssets.h must agree");
+              "Water is entry 0 of the 0x600 block — DefaultAssets.h must agree");
 
 constexpr float kColStep = 230.0f;
 constexpr float kRowStep = 110.0f;
@@ -275,7 +277,7 @@ int longestChain(const MaterialGraph& g)
 // amplitude is lower or higher than in a hex, depending on the two random phases.
 // The gain below (1/√Σw², from the hex-tiling paper) restores the MEAN power of
 // that, so a seam is not systematically calmer than a hex, only different.
-struct Wave { Pin slopeX, slopeZ, height, steep, dirX, dirZ, speed, warp; };
+struct Wave { Pin slopeX, slopeZ, height, steep, dirX, dirZ, speed, warp, length; };
 
 struct Train
 {
@@ -442,6 +444,7 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
     w.dirZ   = tr.warp ? Pin{ d0.sin } : Pin{};
     w.speed  = knobSpeed;
     w.warp   = warp >= 0 ? Pin{ warp } : Pin{};
+    w.length = length;
     return w;
 }
 
@@ -449,10 +452,16 @@ Wave waveTrain(Mb& m, int param, Pin px, Pin pz, Pin time, const Train& tr, cons
 constexpr float kChopBase = 0.3f, kChopMid = 0.9f, kChopFine = 0.8f, kChopFiner = 0.55f;
 
 // Shallow water (Thema 206 step 4), defaults of the ShallowWater parameter (step 6).
-// The tint depth follows the real shore depth for e above 0 (water shallower than one metre)
-// and has fully taken over at e = kShallowTintE (half a metre); the Opacity floor falls to
-// kShallowOpacity of itself at no depth and is whole again from kShallowClearDepth metres.
-constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDepth = 0.8f;
+// The tint depth follows the real shore depth for e above 0 (water shallower than kShoreFadeDepth,
+// three metres since Thema 320; it was one) and has fully taken over at e = kShallowTintE (a metre
+// and a half); the Opacity floor falls to kShallowOpacity of itself at no depth and is whole again
+// from kShallowClearDepth metres.
+constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDepth = 1.5f;
+
+// The water's own colour from above (Thema 320): the lit body colour times a gain that runs from
+// kBodyShallow where the light reaches the floor (trans = 1) to kBodyDeep in deep water, after
+// kBodyMute of its saturation is taken out. 1 / 1 / 0 is the old, fully lit teal.
+constexpr float kBodyShallow = 0.85f, kBodyDeep = 0.50f, kBodyMute = 0.12f;
 
 // ── Fine ripples ─────────────────────────────────────────────────────────────
 // The slope of a drifting FBM height field, by finite differences — the plan's
@@ -468,24 +477,30 @@ constexpr float kShallowTintE = 0.5f, kShallowOpacity = 0.25f, kShallowClearDept
 struct Grad { Pin x, z; };
 
 Grad rippleLayer(Mb& m, Pin px, Pin pz, Pin time, float size, Pin driftX, Pin driftZ,
-                 Pin amp, float col, float row)
+                 Pin amp, Pin fade, float col, float row)
 {
-    constexpr float kStep = 0.04f;                            // finite-difference step, in noise cells
+    // The slope of one fbm layer, from the FBM Noise Gradient node: its value and its exact
+    // gradient in one call. This used to be a finite difference of three fbm calls (0.04
+    // cells apart), the largest cost of the water's near field at ~12 fbm calls a pixel
+    // (docs/perf-water-cost-2026-10-21.md, lever a); the gradient is that difference's
+    // limit, so the chop keeps its look. gain: a step of one noise cell is `size` metres,
+    // and the old (h(x + 0.04 size) - h(x)) * amp / 0.04 is amp times the noise-space slope.
     const int ox = m.op(T::Add, px, m.op(T::Multiply, driftX, time, col, row), col + 1, row);
     const int oz = m.op(T::Add, pz, m.op(T::Multiply, driftZ, time, col, row + 1), col + 1, row + 1);
-    const int exx = m.op(T::Add, ox, m.k(size * kStep, col + 1, row + 2), col + 2, row + 2);
-    const int ezz = m.op(T::Add, oz, m.k(size * kStep, col + 1, row + 3), col + 2, row + 3);
     const int uv0 = m.op(T::CombineRGBA, ox, oz, col + 2, row);
-    const int uvX = m.op(T::CombineRGBA, exx, oz, col + 3, row + 2);
-    const int uvZ = m.op(T::CombineRGBA, ox, ezz, col + 3, row + 3);
     const int inv = m.k(1.0f / size, col + 2, row + 1);
-    const int h0  = m.fbm(uv0, inv, col + 4, row);
-    const int hX  = m.fbm(uvX, inv, col + 4, row + 2);
-    const int hZ  = m.fbm(uvZ, inv, col + 4, row + 3);
-    const int gain = m.op(T::Multiply, amp, m.k(1.0f / kStep, col + 4, row + 1), col + 5, row + 1);
+    const int hg  = m.op(T::FbmGrad, uv0, inv, col + 4, row);
+    const int gx  = m.op(T::Multiply, Pin{ hg, 1 }, amp, col + 6, row + 2);
+    const int gz  = m.op(T::Multiply, Pin{ hg, 2 }, amp, col + 6, row + 3);
+    // Past its fade the layer is zero: the If is a real branch (the codegen moves the
+    // noise into it), so a pixel beyond the fade skips the fbm instead of scaling it by 0.
+    const int on  = m.op(T::Greater, fade, m.k(0.0f, col + 6, row + 4), col + 7, row + 4);
+    const int xz  = m.op3(T::Combine3, gx, gz, m.k(0.0f, col + 7, row + 3), col + 7, row + 2);
+    const int sel = m.op3(T::If, on, xz, m.k(0.0f, col + 7, row + 5), col + 8, row + 2);
+    const int sp  = m.un(T::SplitRGBA, sel, col + 9, row + 2);
     Grad g;
-    g.x = m.op(T::Multiply, m.op(T::Subtract, hX, h0, col + 5, row + 2), gain, col + 6, row + 2);
-    g.z = m.op(T::Multiply, m.op(T::Subtract, hZ, h0, col + 5, row + 3), gain, col + 6, row + 3);
+    g.x = Pin{ sp, 0 };
+    g.z = Pin{ sp, 1 };
     return g;
 }
 
@@ -520,15 +535,18 @@ struct Under
     Pin emissive;      // the whole underside colour, already divided by alpha
 };
 
-Under undersideTerms(Mb& m, Pin geoN, Pin view, Pin waveN, Pin pan1, Pin pan2, Pin invC, Pin nearFade, Pin causStrength,
-                     Pin shallow, Pin deep, float col, float row)
+Under undersideTerms(Mb& m, Pin geoN, Pin view, Pin belowDot, Pin waveN, Pin pan1, Pin pan2, Pin invC, Pin nearFade,
+                     Pin causStrength, Pin shallow, Pin deep, float col, float row)
 {
     constexpr float kEta = 1.333f;     // water → air
     const float c0 = col, r0 = row;
 
     // Which side: the MESH normal against the view, not the wave normal (a steep
-    // wave must not flip a pixel to the other look).
-    const int below = m.op(T::Less, m.op(T::DotProduct, geoN, view, c0, r0), m.k(0.0f, c0, r0 + 0.5f), c0 + 1, r0);
+    // wave must not flip a pixel to the other look). `belowDot` is that dot product (times the
+    // distance, plus the height the tessellation lifted this fragment by: a crest above the
+    // camera is still the TOP of the water, so the camera is compared with the surface's
+    // undisplaced plane, see waterMaterial).
+    const int below = m.op(T::Less, belowDot, m.k(0.0f, c0, r0 + 0.5f), c0 + 1, r0);
 
     // The view ray going up, and its cosine against the wave normal on the water side.
     const int up   = m.op(T::Multiply, view, m.k(-1.0f, c0, r0 + 1.5f), c0 + 1, r0 + 1);
@@ -647,12 +665,12 @@ Mb waterMaterial()
         "Water colour where the view ray through the water is short (looking straight down).", 0);
     const int deep = m.param(T::ParamColor, "DeepColor", { 0.004f, 0.028f, 0.052f }, "Color",
         "Water colour where the view ray through the water is long (toward the horizon).", 1);
-    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.35f, 0.7f }, "Color",
+    const int turb = m.param(T::ParamVec4, "Turbidity", { 0.45f, 4.0f, 0.6f, 0.7f }, "Color",
         "x = absorption per metre (higher = murkier, the deep colour arrives sooner). "
-        "y = water depth in metres the tint assumes (no scene depth is read yet; in the last metre "
+        "y = water depth in metres the tint assumes (no scene depth is read yet; in the last three metres "
         "before a landscape's shore the real depth takes over, so shallows are clear). "
         "z = shore width: the water fades in over this many metres of depth at the water's "
-        "edge (0 = a hard edge, up to 0.7). w = shore foam: the lace along the water's edge "
+        "edge (0 = a hard edge, up to 1). w = shore foam: the lace along the water's edge "
         "(0 = none, 1 = strong). Needs the water mesh of a landscape; a plane has no shore.", 2);
     // The three knobs start from the trains in Physics/WaterWaves.h, the same ones
     // the water physics follows (WaterQuery), so retuning the water here retunes
@@ -668,6 +686,15 @@ Mb waterMaterial()
     const int waveC = m.param(T::ParamVec4, "WaveC", { wc.directionDeg, wc.speed, wc.length, wc.steepness }, "Waves",
         "Fine ripples. x = direction (degrees), y = speed (m/s), "
         "z = wavelength (m), w = steepness. Also sets the strength of the chop on top.", 5);
+    // The tessellated surface's two numbers (a landscape's water body sets them; only read while the
+    // "Tessellation" Static Switch is on): the waves' height as a multiple of the trains' own
+    // amplitude, and the metres of water over which they grow in from the coast.
+    const int tessWaves = m.param(T::ParamVec4, "TessWaves",
+        { HE::water::kDefaultTessHeight, HE::water::kDefaultTessShore, 0.0f, 0.0f }, "Tessellation",
+        "Only with the Tessellation switch on. x = wave height as a multiple of the waves' own "
+        "amplitude (0 = flat, 0.6 = the default, a river wants less, an open sea more). "
+        "y = metres of water over which the waves grow in from the coast (0.1 .. 3): the surface "
+        "is flat at the waterline whatever the height is.", 14);
     // The four plain floats share one slot (Thema 206 step 6): each used only .x of a whole
     // Vec4 slot, and all sixteen were taken. Slider ranges of the old floats, for the tooltip:
     // FresnelPower 1..10, the other three 0..1.
@@ -681,13 +708,13 @@ Mb waterMaterial()
         "w = dielectric specular (0..1): 0.5 = F0 0.04, multiplied by reflection, ~0.3 gives "
         "water's F0 0.02.", 6);
     // Shallow water (Thema 206 step 4): the tint and the Opacity floor follow the real shore
-    // depth in the last metre before a landscape's shore. Defaults reproduce the step 4 constants.
+    // depth in the last kShoreFadeDepth metres before a landscape's shore (Thema 320: three, was one).
     const int shallowW = m.param(T::ParamVec4, "ShallowWater", { kShallowClearDepth, kShallowTintE, kShallowOpacity, 0.0f }, "Surface",
         "Shore shallows (need the water mesh of a landscape; a plane has no shore, no effect). "
-        "x = clear depth (m, 0..1): from this much water on the opacity floor is whole, "
+        "x = clear depth (m, 0..3): from this much water on the opacity floor is whole, "
         "shallower water lets the ground show through more. "
-        "y = tint start (0..1, shore closeness: 0 = a metre of water or more, 1 = none): "
-        "where the depth tint has fully taken over the real depth, 0.5 = half a metre; "
+        "y = tint start (0..1, shore closeness: 0 = three metres of water or more, 1 = none): "
+        "where the depth tint has fully taken over the real depth, 0.5 = a metre and a half; "
         "further out it blends to the assumed depth (Turbidity.y). "
         "z = opacity floor (0..1): the share of Opacity left at no depth at all. "
         "w = reserved, no effect yet.", 7);
@@ -697,7 +724,7 @@ Mb waterMaterial()
     const Pin clearDepth{ shs, 0 }, tintStart{ shs, 1 }, opacFloor{ shs, 2 };
     const int opac = m.param(T::ParamFloat, "Opacity", { 0.5f }, "Surface",
         "Opacity looking straight down into clear water. Depth tint, Fresnel and foam raise it. "
-        "In the last metre before a landscape's shore it falls toward a quarter of itself as the "
+        "In the last metres before a landscape's shore it falls toward a quarter of itself as the "
         "water gets shallower, so the ground shows through.",
         10, 0.0f, 1.0f);
     const int refr = m.param(T::ParamFloat, "Refraction", { 0.3f }, "Surface",
@@ -805,10 +832,10 @@ Mb waterMaterial()
     };
     const auto d1 = drift(b, 0.55f, 24, 29), d2 = drift(c, 0.9f, 24, 36);
     const auto d3 = drift(b, -0.8f, 24, 43), d4 = drift(c, -1.3f, 24, 50);
-    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,  d1.first, d1.second, amp1, 24, 31);
-    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,  d2.first, d2.second, amp2, 24, 38);
-    const Grad r3 = rippleLayer(m, px, pz, time, 0.4f,  d3.first, d3.second, amp3, 24, 45);
-    const Grad r4 = rippleLayer(m, px, pz, time, 0.17f, d4.first, d4.second, amp4, 24, 52);
+    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,  d1.first, d1.second, amp1, fR, 24, 31);
+    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,  d2.first, d2.second, amp2, fR, 24, 38);
+    const Grad r3 = rippleLayer(m, px, pz, time, 0.4f,  d3.first, d3.second, amp3, fF, 24, 45);
+    const Grad r4 = rippleLayer(m, px, pz, time, 0.17f, d4.first, d4.second, amp4, fG, 24, 52);
     m.comment("Chop (noise slope, finite differences)", 24, 29, 8, 14);
 
     const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x, r3.x, r4.x };
@@ -882,10 +909,11 @@ Mb waterMaterial()
     const int refrN = m.un(T::Normalize3, m.op3(T::Lerp, geoN, waveN, refr, 21, 5), 22, 5);
     const int ndvR  = m.un(T::Saturate, m.op(T::DotProduct, refrN, view, 23, 5), 24, 5);
     // The depth the tint assumes is Turbidity.y (a guess, no scene depth is read), until the
-    // mesh knows better: in the last half metre of water before the shore the real depth
+    // mesh knows better: in the last metre and a half of water before the shore the real depth
     // takes over, so shallow water is as clear as it is shallow (the ground and the shallow
-    // colour come through) and thickens to the assumed depth over the metre before. The blend
-    // is a smoothstep of e, which is 0 at one metre: no step where the shore range begins,
+    // colour come through) and thickens to the assumed depth over the metre and a half before.
+    // The blend is a smoothstep of e, which is 0 at kShoreFadeDepth: no step where the shore range
+    // begins,
     // and in open water (e = 0) this is Turbidity.y itself.
     // tintStart is a user knob (0..1, see ShallowWater param above): a branchless
     // max(tintStart, eps) before it feeds Smoothstep as the non-zero edge — equal
@@ -1003,11 +1031,29 @@ Mb waterMaterial()
     const int farRough = m.op(T::Multiply, m.op3(T::Smoothstep, m.k(10.0f, 41, 1), m.k(160.0f, 41, 1.5f), dist, 42, 1),
                               m.k(0.25f, 42, 1.5f), 43, 1);
     const int foamTint = m.op(T::Multiply, foamCol, m.op(T::Add, m.k(0.55f, 42, 8), m.op(T::Multiply, lace, m.k(0.7f, 42, 9), 43, 8), 44, 8), 45, 8);
-    const int base   = m.op3(T::Lerp, lit, foamTint, foamAll, 46, 7);
+    // The water's own (diffuse) colour is a faint scatter, not a paint: the colour of water is
+    // mostly what it reflects and lets through, so the body colour goes in dim and a little
+    // grey (kBodyMute toward its luma: no saturated light blue), lighter where the light still
+    // gets through to the floor (trans -> 1: the shallows) and darker where it does not
+    // (trans -> 0: deep water). Emissive stays 0, so at night it is dark like the rest of the
+    // scene. Foam keeps its own colour (foamTint), and the underside branch below is untouched.
+    const int lumaW   = m.node(T::ConstColor, 44, 6);
+    const int onesC   = m.node(T::ConstColor, 44, 7);
+    {
+        MatGraphNode& lw = *m.g.findNode(lumaW);
+        lw.p[0] = 0.299f; lw.p[1] = 0.587f; lw.p[2] = 0.114f;
+        MatGraphNode& on = *m.g.findNode(onesC);
+        on.p[0] = on.p[1] = on.p[2] = 1.0f;
+    }
+    const int litGray = m.op(T::Multiply, onesC, m.op(T::DotProduct, lit, lumaW, 45, 6), 46, 6);
+    const int litMute = m.op3(T::Lerp, lit, litGray, m.k(kBodyMute, 45, 7), 47, 6);
+    const int bodyGain = m.op3(T::Lerp, m.k(kBodyDeep, 45, 8), m.k(kBodyShallow, 45, 9), trans, 47, 8);
+    const int bodyDim = m.op(T::Multiply, litMute, bodyGain, 48, 6);
+    const int base   = m.op3(T::Lerp, bodyDim, foamTint, foamAll, 49, 7);
     // Opacity is what clear water still covers looking straight down. Water that is only
     // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
     // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0
-    // where shoreD is a metre, so neutral outside the shore range).
+    // where shoreD is kShoreFadeDepth, so neutral outside the shore range).
     // clearDepth is a user knob too: same branchless max(., eps) clamp as tintStart above.
     const int epsClear = m.k(0.001f, 36, 1.5f);
     const int clearOk  = m.op(T::Greater, clearDepth, epsClear, 36, 2);
@@ -1024,7 +1070,63 @@ Mb waterMaterial()
     const int specO  = m.op(T::Multiply, spec, refl, 41, 0);
     const int roughO = m.op3(T::Lerp, m.op(T::Add, rough, farRough, 44, 2), m.k(0.6f, 43, 2), foamAll, 45, 2);
 
-    const Under under = undersideTerms(m, geoN, view, waveN, pan1, pan2, invC, near, Pin{ cs, 0 }, shallow, deep, 66, 0);
+    // Tessellation, as a switch. The three wave trains again as GEOMETRY: each knob's plain
+    // sine (amplitude steepness * length / 2 pi, HE::water::sampleWaves' formula and nothing
+    // else: no hex bombing, warp, gust or companions) pushed out along the mesh normal by the
+    // tessellation stages, scaled by kTessHeightScale and by the shore factor (the mesh's
+    // baked shore proximity: no displacement at the waterline). Because it is exactly the
+    // CPU's formula, the underwater post effect and the water physics can follow the very
+    // surface that is drawn (HE::water::tessellatedHeight). The Static Switch "Tessellation"
+    // gates the Displacement pin: off (the default) the pin is as good as unconnected and the
+    // material draws as it always did; on, the water is tessellated (OpenGL, Vulkan, D3D11,
+    // D3D12: Metal draws it flat). The chop layers stay a normal-only detail: finer than the mesh.
+    auto plainHeight = [&](int knob, float row) {
+        const int ks = m.un(T::SplitRGBA, knob, 81, row);
+        const Pin dirDeg{ ks, 0 }, spd{ ks, 1 }, len{ ks, 2 }, stp{ ks, 3 };
+        const int rad  = m.op(T::Multiply, dirDeg, m.k(kDegToRad, 82, row), 83, row);
+        const int dSin = m.un(T::Sine, rad, 84, row);
+        const int dCos = m.un(T::Sine, m.op(T::Add, rad, m.k(kHalfPi, 83, row + 1), 84, row + 1), 85, row + 1);
+        const int along = m.op(T::Add, m.op(T::Multiply, dCos, px, 86, row), m.op(T::Multiply, dSin, pz, 86, row + 1), 87, row);
+        const int kWv   = m.op(T::Divide, m.k(kTau, 82, row + 2), len, 83, row + 2);
+        const int ph    = m.op(T::Multiply, kWv, m.op(T::Subtract, along, m.op(T::Multiply, spd, time, 87, row + 1), 88, row), 89, row);
+        const int amp   = m.op(T::Divide, stp, kWv, 84, row + 2);          // steepness / k = steepness * length / 2 pi
+        return m.op(T::Multiply, amp, m.un(T::Sine, ph, 90, row), 91, row);
+    };
+    const Pin rawSum = m.sum({ Pin{ plainHeight(waveA, 40) }, Pin{ plainHeight(waveB, 44) }, Pin{ plainHeight(waveC, 48) } }, 92, 40);
+    // The shore factor: smoothstep(0, 1, depth / shoreWidth), depth = (1 - shoreE) * 3 m, shoreWidth
+    // = the knob's y held to 0.1 .. 3 m (the range the mesh knows).
+    const int tessS = m.un(T::SplitRGBA, tessWaves, 92, 42);
+    const int tessShoreW = m.op(T::Add, m.k(HE::water::kMinTessShore, 92, 46),
+                            m.op(T::Multiply, m.un(T::Saturate, m.op(T::Divide, m.op(T::Subtract, Pin{ tessS, 1 }, m.k(HE::water::kMinTessShore, 92, 47), 93, 47),
+                                                                      m.k(HE::water::kMaxTessShore - HE::water::kMinTessShore, 93, 48), 94, 47), 95, 47),
+                                 m.k(HE::water::kMaxTessShore - HE::water::kMinTessShore, 94, 48), 96, 47), 97, 47);
+    const int tessDepth = m.op(T::Multiply, m.un(T::OneMinus, shoreE, 93, 44), m.k(HE::water::kShoreFadeDepth, 93, 45), 94, 44);
+    const int tessOpen = m.un(T::Saturate, m.op(T::Divide, tessDepth, tessShoreW, 95, 44), 96, 44);
+    const int tessSmooth = m.op(T::Multiply, m.op(T::Multiply, tessOpen, tessOpen, 97, 44),
+                                 m.op(T::Subtract, m.k(3.0f, 97, 45), m.op(T::Multiply, m.k(2.0f, 97, 46), tessOpen, 98, 46), 98, 45), 99, 44);
+    const Pin dispSum = m.op(T::Multiply, m.op(T::Multiply, rawSum, tessSmooth, 95, 40), Pin{ tessS, 0 }, 96, 40);
+    const int tessSwitch = m.node(T::StaticSwitch, 85, 40);
+    {
+        MatGraphNode& sw = *m.g.findNode(tessSwitch);
+        sw.s    = "Tessellation";
+        sw.p[0] = 0.0f;   // off: the pin below is unconnected for the codegen
+    }
+    m.link(dispSum, tessSwitch, 0);
+    m.comment("Tessellation: real waves, off by default (Static Switch)", 80, 38, 7, 9);
+
+    // What the tessellation lifted this fragment by (0 with the switch off): the side test below
+    // needs it, because a crest above the camera is the top of the water, not its underside.
+    const int liftSwitch = m.node(T::StaticSwitch, 85, 41);
+    {
+        MatGraphNode& ls = *m.g.findNode(liftSwitch);
+        ls.s    = "Tessellation";
+        ls.p[0] = 0.0f;
+    }
+    m.link(dispSum, liftSwitch, 0);
+    m.link(m.k(0.0f, 84, 41), liftSwitch, 1);
+    const int belowDot = m.op(T::Add, m.op(T::Multiply, m.op(T::DotProduct, geoN, view, 66, 60), dist, 67, 60),
+                              m.op(T::Multiply, Pin{ gs, 1 }, liftSwitch, 67, 61), 68, 60);
+    const Under under = undersideTerms(m, geoN, view, Pin{ belowDot }, waveN, pan1, pan2, invC, near, Pin{ cs, 0 }, shallow, deep, 66, 0);
 
     // Every output picks the top or the underside. If is mix(top, under, 0 or 1),
     // so from above it is the old expression exactly — as long as nothing on the
@@ -1033,7 +1135,13 @@ Mb waterMaterial()
     const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);
     const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
     const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
-    const int alphaO = m.op3(T::If, below, under.alpha, alpha, 77, 3);
+    // From below, the underside only shows once the camera is really under the surface: a camera a few
+    // centimetres under it (wading, a fly camera on the sand in a puddle) sees THROUGH the sheet instead of
+    // a teal ceiling over the whole sky. belowDot is the camera's height over this fragment's plane, so
+    // -belowDot is how deep the camera is; the underside fades in over the first metre.
+    const int camDepthU = m.op3(T::Smoothstep, m.k(0.0f, 75, 3), m.k(1.0f, 75, 3.5f),
+                                m.op(T::Multiply, belowDot, m.k(-1.0f, 75, 4), 76, 4), 76, 3);
+    const int alphaO = m.op3(T::If, below, m.op(T::Multiply, under.alpha, camDepthU, 76, 3.5f), alpha, 77, 3);
     const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
     const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
     m.comment("Top or underside", 76, 0, 2, 6);
@@ -1049,6 +1157,14 @@ Mb waterMaterial()
     m.link(emisO,   out, kMatOutputEmissivePin);
     m.link(alphaO,  out, kMatOutputOpacityPin);
     m.link(normO,   out, kMatOutputNormalPin);
+    // The displacement reaches about 0.16 m at the default knobs and 3.4x that in a storm
+    // (HE::water::windTrain); the clamp is the culling bounds' margin, so it sits above that.
+    // Factor 8 at 40 m, none from 160 m: the mesh cells are about a metre, a wave at least 1.6 m.
+    o.tess.maxFactor       = 8.0f;
+    o.tess.fadeNear        = 40.0f;
+    o.tess.fadeFar         = 160.0f;
+    o.tess.maxDisplacement = 1.2f;
+    m.link(tessSwitch, out, kMatOutputDisplacementPin);
     return m;
 }
 
@@ -1058,7 +1174,74 @@ const std::set<std::string> kWaterParams = {
     "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "Surface",
     "ShallowWater", "Opacity", "Refraction", "FoamColor", "Foam",
     "Caustics", "Variation",
-};
+};   // (TessWaves exists only in the Tessellation permutation: nothing reaches it with the switch off)
+
+// ── Displacement demo (Thema 207) ────────────────────────────────────────────
+// The example for the Output node's Displacement pin: a quilted surface whose
+// cushions GPU tessellation pushes out along the normal (D3D11, D3D12, Vulkan,
+// OpenGL; Metal and Software draw it flat, the pattern still in the colour).
+//
+//     height = |sin(pi N u) · sin(pi N v)| · Height,   N = kDemoCells
+//
+// Plain sine maths and no noise on purpose: value noise hashes a lattice point
+// differently on two GPU compilers (docs/material-graph-tessellation-backends-
+// 2026-10-18.md, the D3D12/Vulkan band), and as a height that is a crack. The
+// height is ZERO on every cell border, and the borders include u, v = 0 and 1,
+// where a mesh's UVs jump: the duplicated vertices of a UV sphere's seam and
+// poles and of a cube's face edges all stay where they are, so nothing tears.
+// N is a baked constant and not a knob for the same reason: a fractional cell
+// count would put a cushion's flank on the seam.
+//
+// The colour reads the same cushion value, so the grooves are dark where the
+// surface stays down and the shape shows on a backend that cannot move it.
+constexpr float kDemoCells = 4.0f;
+
+Mb displacementDemoMaterial()
+{
+    Mb m;
+    const int height = m.param(T::ParamFloat, "Height", { 0.15f }, "Displacement",
+                               "How far a cushion's top rises along the surface normal, in metres. "
+                               "0.5 is the Output node's Max Displacement: more is clamped.", 0,
+                               0.0f, 0.5f);
+    const int top    = m.param(T::ParamColor, "TopColor", { 0.78f, 0.60f, 0.42f }, "Surface",
+                               "Colour of the cushion tops.", 1);
+    const int groove = m.param(T::ParamColor, "GrooveColor", { 0.16f, 0.10f, 0.07f }, "Surface",
+                               "Colour of the grooves between the cushions.", 2);
+
+    const int uv    = m.node(T::UV, 1, 4);
+    const int split = m.un(T::SplitRGBA, uv, 2, 4);
+    const int cells = m.k(kPi * kDemoCells, 2, 5.5f);
+    const int su    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 0 }, cells, 3, 4), 4, 4);
+    const int sv    = m.un(T::Sine, m.op(T::Multiply, Pin{ split, 1 }, cells, 3, 5), 4, 5);
+    const int quilt = m.un(T::Absolute, m.op(T::Multiply, su, sv, 5, 4.5f), 6, 4.5f);
+    m.comment("Cushions: zero on every cell border", 1, 4, 6, 2.5f);
+
+    const int disp  = m.op(T::Multiply, quilt, height, 7, 3);
+    const int base  = m.op3(T::Lerp, groove, top, quilt, 7, 1);
+    // Two constants made in one argument list would take their ids in the order the
+    // compiler happens to evaluate it (Clang first-first, MSVC and GCC last-first), so
+    // the .hasset would differ per platform: name them in order.
+    const int roughB  = m.k(0.5f, 6, 7);
+    const int roughA  = m.k(0.85f, 6, 6);
+    const int rough = m.op3(T::Lerp, roughA, roughB, quilt, 7, 6);
+
+    const int out = m.node(T::Output, 9, 3);
+    MatGraphNode& o = *m.g.findNode(out);
+    o.p[0] = 1.0f;                                                  // lit
+    o.p[1] = static_cast<float>(MatBlendMode::Opaque);
+    o.p[3] = static_cast<float>(MatDomain::Surface);
+    // Full factor up to 8 m, none from 40 m on; the clamp is the Height slider's top.
+    o.tess.maxFactor       = 16.0f;
+    o.tess.fadeNear        = 8.0f;
+    o.tess.fadeFar         = 40.0f;
+    o.tess.maxDisplacement = 0.5f;
+    m.link(base,  out, kMatOutputBaseColorPin);
+    m.link(rough, out, kMatOutputRoughnessPin);
+    m.link(disp,  out, kMatOutputDisplacementPin);
+    return m;
+}
+
+const std::set<std::string> kDisplacementDemoParams = { "Height", "TopColor", "GrooveColor" };
 
 // A cap on the longest wire chain, well inside what the editor's own stack
 // holds on every platform (CMakeLists.txt "MSVC main-thread stack"). A graph
@@ -1080,9 +1263,10 @@ int main(int argc, char** argv)
 
     // ORDER IS IDENTITY: the index picks the UUID, and a scene that already uses
     // one of these stores that UUID. Append, never reorder.
-    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; };
+    struct Entry { const char* name; Mb mb; const std::set<std::string>* params; bool doubleSided; };
     std::vector<Entry> entries;
-    entries.push_back({ "Water", waterMaterial(), &kWaterParams });
+    entries.push_back({ "Water", waterMaterial(), &kWaterParams, true });
+    entries.push_back({ "DisplacementDemo", displacementDemoMaterial(), &kDisplacementDemoParams, false });
 
     int ok = 0, index = 0;
     for (Entry& e : entries)
@@ -1118,7 +1302,7 @@ int main(int argc, char** argv)
         a.nodeGraphJson = materialGraphToJson(e.mb.g);
         // Not read by any backend today (every draw is two-sided), but it is
         // the truth about a water plane seen from below.
-        a.doubleSided   = true;
+        a.doubleSided   = e.doubleSided;
 
         // Pass 1 writes the graph; pass 2 writes what the editor's load path
         // makes of it (see the header: the packer ships the baked fields).

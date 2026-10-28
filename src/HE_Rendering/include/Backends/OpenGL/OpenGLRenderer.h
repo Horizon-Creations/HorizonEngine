@@ -1,9 +1,11 @@
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <Renderer/IRenderer.h>
 #include "OpenGLShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/OcclusionCuller.h>
 #include <HorizonRendering/RenderSorter.h>
@@ -18,6 +20,7 @@
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 
 struct SDL_Window;
@@ -54,6 +57,7 @@ public:
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
 	                            float timeSeconds = -1.0f) override;
+	bool  SupportsTessellation() const override { return m_tessSupported; }
 	void* RenderSkeletalPreview(ContentManager& cm, const HE::UUID& meshId,
 	                            const std::vector<glm::mat4>& boneMatrices,
 	                            uint32_t width, uint32_t height,
@@ -124,7 +128,9 @@ private:
 	// capture does glFinish + same-frame reap so its numbers are that exact frame.
 	// Active only while the profiler is recording or its live HUD is open (zero cost
 	// otherwise). Disabled on Apple GL, where timestamp queries are unreliable
-	// (m_gpuTimerSupported = false → GetFrameGpuStats reports gpuFrameMs = -1).
+	// (m_gpuTimerSupported = false): there a detailed / single-frame capture times the
+	// passes with glFinish around each one instead (m_gpuFb*), and other frames report
+	// gpuFrameMs = -1.
 	struct GpuTimerPass { const char* name = ""; unsigned int query = 0; };
 	struct GpuTimerSlot
 	{
@@ -146,6 +152,12 @@ private:
 	bool          m_gpuDetailed         = false;  // glFinish + same-frame reap this frame
 	int           m_gpuActiveQuery      = -1;     // pool index of the open elapsed query (-1 none)
 	FrameGpuStats m_lastGpuStats;                 // newest reaped GPU times (merged w/ counters)
+	// glFinish fallback for a context without timer queries (see GpuTimerBeginFrame).
+	bool          m_gpuFbActive         = false;  // this frame's passes are timed by draining the GPU
+	bool          m_gpuFbInPass         = false;
+	const char*   m_gpuFbName           = "";
+	std::chrono::steady_clock::time_point m_gpuFbFrameStart, m_gpuFbPassStart;
+	std::vector<GpuPassTime> m_gpuFbPasses;
 
 	void GpuTimerBeginFrame();   // primary Render() only: latch flags, recycle+reap a slot, tsStart
 	void GpuTimerEndFrame();     // tsEnd, mark pending; detailed → glFinish + same-frame reap
@@ -284,6 +296,8 @@ private:
 	RenderGraph     m_renderGraph;   // pass pipeline (GeometryPass today)
 	CommandBuffer   m_cmds;          // draw calls produced this frame
 	std::vector<uint8_t>  m_visible;       // per-frame culling results
+	FrameCull             m_frameCull;     // DrawScene's refined bounds, the culls over them and the scene box
+	void RefineObjectBounds();   // the real mesh bound of every object of the walk, once per walk (m_frameCull)
 	std::vector<uint32_t> m_sortedIndices; // per-frame draw order
 
 	// Unlit pipeline + built-in cube (fallback for entities whose mesh
@@ -439,7 +453,7 @@ private:
 	// One glDrawElementsInstanced for a graph-material batch with the instanced
 	// program already in use and its textures/params bound: the models go to
 	// m_instanceVBO, the U block gets mvp = viewProj (model unused).
-	void DrawGraphBatchInstanced(const std::vector<glm::mat4>& transforms, const glm::mat4& viewProj,
+	void DrawGraphBatchInstanced(const DrawCall& dc, const glm::mat4& viewProj,
 	                             const glm::vec3& baseColor, unsigned int tex, float metallic,
 	                             float roughness, float opacity, int indexCount, const void* indexOffset);
 	// Clustered heLitP (Thema 117, GL 4.3+): the three cluster lists of
@@ -465,6 +479,18 @@ private:
 	// without ever colliding with the forward key space.
 	bool         resolveMaterialShaderGB(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                                     std::string& vertBody);
+	// Displacement pin (Thema 207): GL 4.0+ adds tessellation stages to a material
+	// whose customShaderDispGlsl is set. Both resolvers fold that body into the key
+	// (only here, where it can take effect: on a context without tessellation the
+	// key stays the unconnected pin's) and file it under the key, where
+	// GetOrBuildMaterialProgram picks it up on a cache miss. Programs that did link
+	// with the two stages land in m_tessPrograms and draw GL_PATCHES.
+	bool         m_tessSupported = false;
+	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+	std::unordered_set<unsigned int>          m_tessPrograms;
+	void         foldDisplacement(const HE::UUID& materialId, uint64_t& key);
+	unsigned int MaterialPrimitive(unsigned int program) const
+	{ return m_tessPrograms.count(program) ? 0x000Eu /*GL_PATCHES*/ : 0x0004u /*GL_TRIANGLES*/; }
 	// UI-quad material programs: same fragment hash, but linked against the
 	// screen-space uiVertex instead of the mesh vertex → own cache.
 	std::unordered_map<uint64_t, unsigned int> m_uiMaterialPrograms; // hash → program (0 = failed)
@@ -534,20 +560,20 @@ private:
 	int          m_uSkinnedHasTex   = -1;
 	int          m_uSkinnedTex      = -1;
 	int          m_uSkinnedMetallic = -1;
-	int          m_uSkinnedRoughness= -1;
+	int          m_uSkinnedRoughness = -1;
 	int          m_uSkinnedOpacity  = -1;
 	int          m_uSkinnedNoShadow = -1;
-	int          m_uSkinnedLightCount= -1;
+	int          m_uSkinnedLightCount = -1;
 	int          m_uSkinnedLightPos  = -1;
 	int          m_uSkinnedLightDir  = -1;
 	int          m_uSkinnedLightColor= -1;
-	int          m_uSkinnedLightParams=-1;
+	int          m_uSkinnedLightParams = -1;
 	int          m_uSkinnedCameraPos = -1;
 	int          m_uSkinnedAmbient   = -1;
 	int          m_uSkinnedSunDir    = -1;
 	int          m_uSkinnedSkyEnv    = -1;
 	int          m_uSkinnedFogDensity      = -1;
-	int          m_uSkinnedFogHeightFalloff= -1;
+	int          m_uSkinnedFogHeightFalloff = -1;
 	int          m_uSkinnedShadowEnabled   = -1;
 	int          m_uSkinnedCascadeVP       = -1;
 	int          m_uSkinnedCascadeSplits   = -1;
@@ -686,11 +712,9 @@ private:
 	unsigned int m_depthInstancedProgram = 0;
 	int          m_uDepthInstVP          = -1;
 	bool         m_debugShadowCascades = false; // tint fragments by cascade index (debug)
-	// Per-cascade caster culling scratch (kept off m_visible/m_sortedIndices so the
-	// shadow pass never clobbers the camera cull the geometry pass relies on).
-	std::vector<uint8_t>  m_shadowVisible;
-	std::vector<uint32_t> m_shadowSorted;
-	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh runs per depth layer
+	// One depth layer (a cascade or a local light's view), culled, sorted and batched
+	// before any layer is drawn, the layers side by side (DrawScene's shadow branch).
+	std::vector<ShadowViewCpu> m_shadowViews;
 	void CreateShadowResources();
 
 	// ── Procedural skybox (drawn into the HDR target behind the scene) ───────
@@ -1082,6 +1106,8 @@ private:
 	int          m_uUcSun       = -1;
 	int          m_uUcSunColor  = -1;
 	int          m_uUcParams    = -1;
+	int          m_uUcSurfWave  = -1;   // the tessellated surface for the underwater pass (UnderwaterSurfaceShared.h)
+	int          m_uUcSurfParams = -1;
 	int          m_uUcTint      = -1;
 	unsigned int m_ucFBO        = 0;
 	unsigned int m_ucColor      = 0;         // RGBA16F, full-res
@@ -1205,10 +1231,8 @@ private:
 		glm::vec4 autoSnow{0.0f};
 	};
 	static_assert(sizeof(GILandGpu) == 64 + 8 * 16, "must match the GLSL GiLand layout");
-	// How far, in SCREEN pixels, the widest allowed lobe scatters — the span the
-	// blur must cover for the rays not to show as noise. Same constant and same
-	// meaning as MetalRenderer::kGIReflLobeScreenPx; keep them together.
-	static constexpr float kGIReflLobeScreenPx = 24.0f;
+	// The blur's lobe reach (kGIReflLobeScreenPx) and the rays per tier come from
+	// HorizonRendering/GIReflectionTier.h, shared with every backend.
 	bool         m_giReflBlurEnabled = true; // IRenderer::GIReflectionSettings::blur
 	unsigned int m_giReflMixProgram = 0; // sharp/blurred roughness lerp (kGiReflMixFS)
 	unsigned int m_giLandSSBO = 0;
@@ -1319,6 +1343,18 @@ private:
 	size_t       m_giTriCap          = 0;
 	unsigned int m_giInstanceSSBO    = 0;
 	int          m_giInstanceCount   = 0;
+	// The landscape's height field for the shadow kernel (kGiHeightfieldGLSL): with it the shadow kernel's
+	// instance list leaves the terrain chunks out. HE_GI_HEIGHTFIELD=0 = off.
+	bool EnsureGiHeightfield(const GiHeightfield& hf);
+	unsigned int m_giHfTex = 0;
+	unsigned long long m_giHfVersion = 0, m_giHfKey = ~0ull;
+	int          m_giHfTopLevel = 0;
+	float        m_giHfMaxH = 0.0f;
+	bool         m_giHfActive = false;
+	bool         m_giShadowSep = false;   // the shadow kernel walks m_giShadowInstanceSSBO (thinned / without chunks)
+	std::vector<GIInstanceGpu> m_giShadowInstancesCpu;
+	unsigned int m_giShadowInstanceSSBO = 0;
+	int          m_giShadowInstanceCount = 0;
 	bool         m_giSupported       = false;         // GL >= 4.3, cached at Initialize
 	bool         m_giEnabled         = false;
 	float        m_giIndirectIntensity = 1.0f;

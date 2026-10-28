@@ -64,12 +64,71 @@ namespace HE::water
     // (mat_gen) reads e back as normal.x / normal.y / kShoreNormalGain. A mesh without
     // the channel (the engine plane, any user mesh) has x = 0, which reads as e = 0:
     // open water, nothing near a shore. A power of two, so the divide is exact.
-    inline constexpr float kShoreFadeDepth  = 1.0f;          // metres of water over which e runs 1 -> 0
+    // Three metres since Thema 320: the material's colour and opacity follow the real depth over
+    // the whole range, and with one metre the water went from clear to its deep colour inside a
+    // single contour, which is the line the eye sees where the water meets the landscape.
+    inline constexpr float kShoreFadeDepth  = 3.0f;          // metres of water over which e runs 1 -> 0
     inline constexpr float kShoreNormalGain = 1.0f / 32.0f;  // a 1.8 degree tilt at the waterline
 
     // The trains the physics follows: the two that carry the height (C is 2 cm).
     inline constexpr int       kPhysicsWaveCount = 2;
     inline constexpr WaveTrain kPhysicsWaves[kPhysicsWaveCount] = { kWaveA, kWaveB };
+
+    // ─── Waves that follow the wind ─────────────────────────────────────────────────
+    // The Environment's wind (EnvironmentComponent::windDirection, windSpeed; the weather
+    // presets drive them) sets the sea the water shows and the physics floats on:
+    //   • DIRECTION: the compass heading the wind blows toward (0 = -Z, clockwise) becomes
+    //     the heading of the primary train (A); the other trains keep their angle to it,
+    //     so the sea stays a mix of directions around the wind's.
+    //   • STRENGTH: windSpeed is a multiplier, 1 = calm (the material's own numbers, so a
+    //     scene at 1 keeps the sea it had). Fully developed seas grow roughly with the
+    //     wind: the wavelength follows it, the speed follows sqrt(length) (deep-water
+    //     dispersion, c = sqrt(g L / 2 pi)), the steepness a little (a stronger wind
+    //     makes a longer AND steeper sea), so the height steepness * L / 2 pi grows with
+    //     the wind's square: calm 1x, the storm preset (2.6) about 3.4x.
+    // One definition: the renderer (material knobs at extract time), the physics
+    // (WaterQuery) and the caustics all call it, so the three never disagree.
+    inline constexpr float kWindCalm = 1.0f;
+
+    struct WindWaveFactors
+    {
+        float length;      // x the base wavelength
+        float speed;       // x the base speed
+        float steepness;   // x the base steepness
+    };
+
+    inline WindWaveFactors windWaveFactors(float windSpeed)
+    {
+        const float u = windSpeed < 0.25f ? 0.25f : (windSpeed > 4.0f ? 4.0f : windSpeed);
+        const float l = u;                         // wavelength grows with the wind
+        const float st = 1.0f + 0.3f * (u - 1.0f); // and so does the steepness, gently
+        return { l, std::sqrt(l), st < 0.4f ? 0.4f : st };
+    }
+
+    // Compass heading (0 = toward -Z, clockwise: 90 = +X) -> a wave direction in this
+    // header's frame (0 = +X, 90 = +Z).
+    inline float waveDirectionFromWind(float windCompassDeg) { return windCompassDeg - 90.0f; }
+
+    // How far the wind turns the sea from the material's own: the shift of the primary
+    // train's heading, degrees. Everything that rotates "the sea" uses this one number.
+    inline float windTurnDeg(float windCompassDeg)
+    {
+        return waveDirectionFromWind(windCompassDeg) - kWaveA.directionDeg;
+    }
+
+    // One train under a wind. `base` is the material's train, `windCompassDeg` and
+    // `windSpeed` the environment's. Calm wind from the material's own heading is the
+    // identity.
+    inline WaveTrain windTrain(const WaveTrain& base, float windCompassDeg, float windSpeed)
+    {
+        const WindWaveFactors f = windWaveFactors(windSpeed);
+        WaveTrain t = base;
+        t.directionDeg = base.directionDeg + windTurnDeg(windCompassDeg);
+        t.length       = base.length * f.length;
+        t.speed        = base.speed * f.speed;
+        t.steepness    = base.steepness * f.steepness;
+        return t;
+    }
 
     // Height of one train: steepness · length / 2π, the factor in front of the sine.
     inline float waveAmplitude(const WaveTrain& w)
@@ -107,5 +166,41 @@ namespace HE::water
             out.dhdz += static_cast<float>(slope * dz);
         }
         return out;
+    }
+
+    // ─── The tessellated surface ────────────────────────────────────────────────────
+    // With a landscape's water tessellation on, the surface is REAL geometry: the three trains
+    // of the material's knobs (under the wind, windTrain) summed as plain sines, no hex
+    // bombing, warp or gusts, so the CPU can name the height of the visible surface exactly
+    // (the underwater post effect follows it):
+    //     h(x, z, t) = height * shore(depth) * sum_i amp_i sin(k_i (d_i . p - speed_i t))
+    // Two per-body numbers (WaterField.h TessellationParams, the material's "TessWaves" knob):
+    //   height      multiplier of the trains' own amplitude: a river is a fraction of it, a
+    //               sea close to (or above) 1.
+    //   shoreWidth  metres of water over which the waves grow in from the coast. The mesh bakes
+    //               the shore proximity into its normal (kShoreFadeDepth = 3 m of range), so the
+    //               surface is flat AT the waterline however high the height is set.
+    inline constexpr float kDefaultTessHeight = 0.6f;
+    inline constexpr float kMaxTessHeight     = 2.0f;
+    inline constexpr float kDefaultTessShore  = 1.8f;
+    inline constexpr float kMinTessShore      = 0.1f;
+    inline constexpr float kMaxTessShore      = 3.0f;   // the shore range the mesh knows
+
+    // smoothstep(0, 1, depth / shoreWidth): 0 at the waterline, 1 from shoreWidth metres of water.
+    inline float tessShoreFactor(float waterDepth, float shoreWidth)
+    {
+        const float w = shoreWidth < kMinTessShore ? kMinTessShore : (shoreWidth > kMaxTessShore ? kMaxTessShore : shoreWidth);
+        float u = waterDepth / w;
+        u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+        return u * u * (3.0f - 2.0f * u);
+    }
+
+    // The height of the tessellated surface above its level at (x, z), time t, `waterDepth`
+    // metres of water there. `trains` are the three knob trains after windTrain.
+    inline float tessellatedHeight(const WaveTrain* trains, double x, double z, double t, float waterDepth,
+                                   float height, float shoreWidth)
+    {
+        const WaveSample s = sampleWaves(trains, 3, x, z, t);
+        return height * tessShoreFactor(waterDepth, shoreWidth) * s.height;
     }
 }

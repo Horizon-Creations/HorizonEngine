@@ -251,7 +251,7 @@ TEST_CASE("GL and Metal draw a graph-material batch once, with the material's in
 	// G-buffer and forward pass: one instanced build each, both behind the switch.
 	CHECK(countOf(gl, "/*instanced=*/true)") == 2);
 	CHECK(countOf(gl, "RenderSorter::graphInstancingEnabled()") == 2);
-	CHECK(countOf(gl, "DrawGraphBatchInstanced(dc.instanceTransforms") == 2);
+	CHECK(countOf(gl, "DrawGraphBatchInstanced(dc,") == 2);
 	// No baked instanced vertex: a precompiled material must get 0 back, never its
 	// plain vertex under an instanced draw (that would stack every plant on u.model).
 	CHECK(gl.find("if (instanced && precompiled) return 0;") != std::string::npos);
@@ -266,7 +266,7 @@ TEST_CASE("GL and Metal draw a graph-material batch once, with the material's in
 	// The forward PSO may come from the pak (no twin); the G-buffer PSO never does.
 	CHECK(mtl.find("instCount <= k_maxInstances && !cShBaked") != std::string::npos);
 	// Both loops hand the batch to drawInstance, which binds buffer 5 and draws instanceCount.
-	CHECK(countOf(mtl, "drawInstance(dc.instanceTransforms.front(), cMaterialPipeline") == 2);
+	CHECK(countOf(mtl, "drawInstance(dc.firstInstance(), cMaterialPipeline") == 2);
 	CHECK(countOf(mtl, "instanceCount:instCount];") == 2);
 }
 
@@ -319,7 +319,9 @@ TEST_CASE("D3D11, D3D12 and Vulkan draw a graph-material batch once, with the ma
 		CHECK(src.find(s.lastInstElement) != std::string::npos);
 		CHECK(countOf(src, s.batchDraw) == 1);
 		// The per-instance material loop stays as the fallback.
-		CHECK(src.find("drawMatInstance(t)") != std::string::npos);
+		// (read in place or copied: forEachInstance serves both forms of the batch)
+		CHECK((src.find("drawMatInstance(t)") != std::string::npos
+		       || src.find("forEachInstance(drawMatInstance)") != std::string::npos));
 	}
 }
 

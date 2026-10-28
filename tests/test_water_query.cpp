@@ -11,6 +11,10 @@
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/PhysicsTuning.h>
 #include <HorizonScene/Components/TerrainComponent.h>
+#include <HorizonScene/Components/EnvironmentComponent.h>
+#include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/UnderwaterSurfaceShared.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <Physics/WaterWaves.h>
@@ -1017,4 +1021,155 @@ TEST_CASE("Underwater caustics settings: setUnderwaterCaustics touches the revis
     CHECK(undone.water.findBody(lake)->underwaterCaustics == c);
     REQUIRE(water::revertDelta(undone, d));
     CHECK(water::sameContent(undone.water, a.water));
+}
+
+TEST_CASE("Water waves follow the wind: heading from its direction, wavelength, speed and height from its strength")
+{
+    // Calm, blowing along the material's own heading (compass 110 = wave heading 20): the same sea.
+    CHECK(water::windTrain(water::kWaveA, 110.0f, 1.0f) == water::kWaveA);
+    CHECK(water::windTrain(water::kWaveB, 110.0f, 1.0f) == water::kWaveB);
+
+    // Compass 0 blows toward -Z (wave heading -90): A takes it, B and C keep their angle to A.
+    const water::WaveTrain a = water::windTrain(water::kWaveA, 0.0f, 1.0f);
+    const water::WaveTrain b = water::windTrain(water::kWaveB, 0.0f, 1.0f);
+    CHECK(a.directionDeg == doctest::Approx(-90.0f));
+    CHECK(b.directionDeg - a.directionDeg == doctest::Approx(water::kWaveB.directionDeg - water::kWaveA.directionDeg));
+
+    // The storm preset's wind (2.6): longer, faster, steeper, and (height ~ steepness * length) about 3-4x taller.
+    const water::WaveTrain storm = water::windTrain(water::kWaveA, 110.0f, 2.6f);
+    CHECK(storm.length == doctest::Approx(water::kWaveA.length * 2.6f));
+    CHECK(storm.speed == doctest::Approx(water::kWaveA.speed * std::sqrt(2.6f)));
+    CHECK(storm.steepness > water::kWaveA.steepness);
+    const float grow = water::waveAmplitude(storm) / water::waveAmplitude(water::kWaveA);
+    CHECK(grow > 3.0f);
+    CHECK(grow < 4.0f);
+    // A calmer-than-calm wind shrinks the sea, and an absurd one is capped.
+    CHECK(water::windTrain(water::kWaveA, 110.0f, 0.5f).length < water::kWaveA.length);
+    CHECK(water::windTrain(water::kWaveA, 110.0f, 100.0f).length == doctest::Approx(water::kWaveA.length * 4.0f));
+}
+
+TEST_CASE("Water query: the surface a body floats on takes the Environment's wind")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    addLake(terrainOf(world, e), rect(-10, -10, 10, 10), 2.0f);
+
+    // Largest wave height over a spread of points and times.
+    auto peak = [&](const water::WaterIndex& idx) {
+        float m = 0.0f;
+        for (double t : { 0.0, 2.0, 5.5, 9.0 })
+            for (float x = -9.0f; x <= 9.0f; x += 0.75f)
+            {
+                water::Surface s;
+                if (idx.surfaceAt(x, 1.5f, t, s)) m = std::max(m, std::abs(s.height - s.level));
+            }
+        return m;
+    };
+
+    const float noEnv = peak(water::WaterIndex::build(world));   // the material's own sea
+
+    EnvironmentComponent env;
+    env.windDirection = 110.0f;   // along the material's heading
+    env.windSpeed     = 1.0f;
+    const Entity sky = world.createEntity("Sky");
+    world.addComponent(sky, env);
+    CHECK(peak(water::WaterIndex::build(world)) == doctest::Approx(noEnv));   // calm + own heading: unchanged
+
+    world.registry().get<EnvironmentComponent>(sky).windSpeed = 2.6f;
+    const water::WaterIndex stormy = water::WaterIndex::build(world);
+    CHECK(peak(stormy) > 2.0f * noEnv);
+
+    // And it is exactly the wind's trains the index samples.
+    water::WaveTrain t[water::kPhysicsWaveCount];
+    for (int i = 0; i < water::kPhysicsWaveCount; ++i) t[i] = water::windTrain(water::kPhysicsWaves[i], 110.0f, 2.6f);
+    water::Surface s;
+    REQUIRE(stormy.surfaceAt(3.0f, 1.5f, 4.0, s));
+    CHECK(s.height == doctest::Approx(s.level + water::sampleWaves(t, water::kPhysicsWaveCount, 3.0, 1.5, 4.0).height));
+}
+
+TEST_CASE("Tessellated surface: flat at the waterline, full from the coast fade on, scaled by the body's height")
+{
+    const water::WaveTrain trains[3] = { water::kWaveA, water::kWaveB, water::kWaveC };
+    // No water over the ground: no displacement, however high the waves are set.
+    CHECK(water::tessShoreFactor(0.0f, 1.8f) == 0.0f);
+    CHECK(water::tessellatedHeight(trains, 3.0, 4.0, 5.0, 0.0f, 2.0f, 1.8f) == 0.0f);
+    // From the fade width on, full; in between, growing.
+    CHECK(water::tessShoreFactor(1.8f, 1.8f) == doctest::Approx(1.0f));
+    CHECK(water::tessShoreFactor(10.0f, 1.8f) == doctest::Approx(1.0f));
+    CHECK(water::tessShoreFactor(0.5f, 1.8f) < water::tessShoreFactor(1.0f, 1.8f));
+    // A wider coast fade keeps the same depth calmer.
+    CHECK(water::tessShoreFactor(1.0f, 3.0f) < water::tessShoreFactor(1.0f, 0.5f));
+
+    // The height is the body's multiple of the trains' own sum; a river (0.2) is a third of the default (0.6).
+    const double x = 11.0, z = -7.0, t = 3.3;
+    const float raw = water::sampleWaves(trains, 3, x, z, t).height;
+    REQUIRE(std::abs(raw) > 0.01f);
+    CHECK(water::tessellatedHeight(trains, x, z, t, 5.0f, 1.0f, 1.8f) == doctest::Approx(raw));
+    CHECK(water::tessellatedHeight(trains, x, z, t, 5.0f, 0.2f, 1.8f) ==
+          doctest::Approx(water::tessellatedHeight(trains, x, z, t, 5.0f, 0.6f, 1.8f) / 3.0f));
+
+    // The per-body numbers are held to their bounds and a non-number is the default.
+    water::TessellationParams bad;
+    bad.height = 99.0f;  bad.shoreWidth = -4.0f;
+    CHECK(water::clampTessellation(bad).height == water::kMaxTessHeight);
+    CHECK(water::clampTessellation(bad).shoreWidth == water::kMinTessShore);
+    bad.height = std::numeric_limits<float>::quiet_NaN();
+    CHECK(water::clampTessellation(bad).height == water::kDefaultTessHeight);
+}
+
+TEST_CASE("Tessellated surface: the per-body numbers travel with the scene and the underwater camera follows the drawn surface")
+{
+    HorizonWorld world;
+    const Entity e = addLandscape(world);
+    const uint16_t lake = addLake(terrainOf(world, e), rect(-10, -10, 10, 10), 2.0f);
+    TerrainComponent& tc = terrainOf(world, e);
+
+    water::TessellationParams p;
+    p.height = 1.5f;  p.shoreWidth = 0.7f;
+    REQUIRE(water::setTessellation(tc, lake, p));
+    REQUIRE(tc.water.findBody(lake) != nullptr);
+    CHECK(tc.water.findBody(lake)->tessellation == p);
+    CHECK_FALSE(water::setTessellation(tc, 999, p));
+
+    // Round trip through a scene.
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    bool found = false;
+    for (auto [en, ltc] : loaded.registry().view<TerrainComponent>().each())
+        if (const water::Body* lb = ltc.water.findBody(lake)) { found = true; CHECK(lb->tessellation == p); }
+    CHECK(found);
+
+    // The camera query: flat level with tessellation off or no clock; the wave on top with both.
+    const glm::vec3 below(0.0f, 1.5f, 0.0f);
+    const double clockSeconds = 3.3;
+    const float flat = HE::queryUnderwaterCamera(world, below, clockSeconds).surfaceY;
+    CHECK(flat == doctest::Approx(2.0f));
+    tc.water.tessellation = true;
+    // A backend that cannot tessellate (Metal) draws the flat plane, so the query says flat too.
+    HE::setWaterTessellationAvailable(false);
+    CHECK(HE::queryUnderwaterCamera(world, below, clockSeconds).surfaceY == doctest::Approx(2.0f));
+    CHECK(HE::queryUnderwaterCamera(world, below, clockSeconds).surfaceHeight == 0.0f);
+    HE::setWaterTessellationAvailable(true);
+    CHECK(HE::queryUnderwaterCamera(world, below, -1.0).surfaceY == doctest::Approx(2.0f));   // no clock: flat
+    const water::WaveTrain trains[3] = { water::kWaveA, water::kWaveB, water::kWaveC };
+    water::Surface s;
+    REQUIRE(water::WaterIndex::build(world).surfaceAt(0.0f, 0.0f, 0.0, s));
+    const float expected = 2.0f + water::tessellatedHeight(trains, 0.0, 0.0, clockSeconds, s.depth, p.height, p.shoreWidth);
+    const UnderwaterCameraData cam = HE::queryUnderwaterCamera(world, below, clockSeconds);
+    CHECK(cam.surfaceY == doctest::Approx(expected));
+    // The passes get the description to evaluate the surface per pixel.
+    CHECK(cam.surfaceHeight == doctest::Approx(p.height));
+    CHECK(cam.surfaceShoreWidth == doctest::Approx(p.shoreWidth));
+    CHECK(cam.surfaceLevel == doctest::Approx(2.0f));
+    HE::setWaterTessellationAvailable(false);
+
+    // The shared shader text: the three base trains are spliced in and no token is left.
+    const std::string glsl = HE::underwaterSurfaceFunctions(HE::SurfaceLang::GLSL);
+    CHECK(glsl.find('@') == std::string::npos);
+    CHECK(glsl.find("vec2 xz") != std::string::npos);
+    CHECK(HE::underwaterSurfaceFunctions(HE::SurfaceLang::HLSL).find("float2 xz") != std::string::npos);
+    CHECK(glsl.find("14.0") != std::string::npos);    // kWaveA's wavelength
 }

@@ -93,6 +93,32 @@ TEST_CASE("LODSystem switches to lower LOD at greater distance")
     CHECK(reg.get<LODComponent>(e).current == 2);
 }
 
+TEST_CASE("LODSystem needs a margin inside a boundary to go to the finer level, none to go coarser")
+{
+    HorizonWorld world;
+    auto& reg = world.registry();
+    auto e = world.createEntity("Mesh");
+    reg.emplace<TransformComponent>(e, TransformComponent{ .position = glm::vec3(0.f) });
+    reg.emplace<MeshComponent>(e, MeshComponent{});
+    LODComponent lod;
+    lod.levels = { { makeId(10,0), 10.f }, { makeId(20,0), 50.f }, { makeId(30,0), 1e9f } };
+    reg.emplace<LODComponent>(e, lod);
+    auto cur = [&] { return reg.get<LODComponent>(e).current; };
+
+    LODSystem::update(world, glm::vec3(30.f, 0.f, 0.f));
+    CHECK(cur() == 1);
+    LODSystem::update(world, glm::vec3(9.8f, 0.f, 0.f));    // inside 10 m, but inside the band: stays coarse
+    CHECK(cur() == 1);
+    CHECK(reg.get<MeshComponent>(e).meshAssetId == makeId(20,0));
+    LODSystem::update(world, glm::vec3(9.0f, 0.f, 0.f));    // past the band: finer
+    CHECK(cur() == 0);
+    LODSystem::update(world, glm::vec3(10.2f, 0.f, 0.f));   // over the boundary: coarser at once
+    CHECK(cur() == 1);
+    // A jump over several levels is not held back by the band of the first one it crosses.
+    LODSystem::update(world, glm::vec3(5.0f, 0.f, 0.f));
+    CHECK(cur() == 0);
+}
+
 TEST_CASE("LODSystem marks mesh dirty on LOD change")
 {
     HorizonWorld world;

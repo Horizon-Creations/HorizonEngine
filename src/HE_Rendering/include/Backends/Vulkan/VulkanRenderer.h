@@ -6,10 +6,13 @@
 #include <HorizonRendering/RenderConstants.h>
 #include <HorizonRendering/InstanceArena.h>
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/RenderGraph.h>
+#include <Renderer/GpuPassTimeline.h>   // per-pass GPU timing: GpuPassScope
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GiBlasStore.h>
@@ -60,6 +63,7 @@ public:
 	void SetBloomSettings(const BloomSettings& s) override;
 	void SetAntiAliasingSettings(const AntiAliasingSettings& s) override;
 	void SetGISettings(const GISettings& s) override;
+	void SetGIReflectionSettings(const GIReflectionSettings& s) override;
 	void SetSSRSettings(const SSRSettings& s) override;
 	// Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
 	// tint — the same contract GL, Metal, D3D11 and D3D12 honour.
@@ -74,6 +78,7 @@ public:
 	// the top of the next DrawScene: render thread, material resources up, and the pass
 	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
 	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	bool SupportsTessellation() const override { return m_tessSupported; }
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.
 	void InvalidateTexture(const HE::UUID& textureId) override;
@@ -197,9 +202,11 @@ private:
 	// after the walk, and every pass calls this again as its guarantee that the bounds are real
 	// and finds it done. A new walk or a different object array starts over (Thema 162, step 4).
 	void refineObjectBounds();
-	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
-	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
-	size_t              m_refinedCount   = 0;
+	FrameCull m_frameCull;   // the walk's refined bounds, the culls over them and the camera cull of the frame
+	uint64_t  m_frameStamp = 0;   // bumped once per Render()
+	// Camera cull + draw order of m_renderWorld into m_visible / m_sortedIndices, shared by the
+	// passes of one frame that ask with the same walk and camera.
+	void cullCameraObjects();
 	// Own render pass, before the scene. `aspect` is the camera aspect the
 	// cascades are fit against — the single map never cared, a cascade fit to
 	// a square frustum drops the screen edges of a wide viewport.
@@ -236,9 +243,7 @@ private:
 	bool           m_debugShadowCascades = false;
 	// Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
 	// those hold the camera cull DrawScene consumes).
-	std::vector<uint8_t>         m_shadowVisible;
-	std::vector<uint32_t>        m_shadowSorted;
-	RenderSorter::DepthBatchList m_shadowBatches;
+	std::vector<ShadowViewCpu>   m_shadowViews;
 	// The cascade constants DrawScene uploads into the Frame UBO; filled by
 	// EncodeShadowMap from the SAME extract the cascades were rendered with
 	// (DrawScene re-extracts, and a mid-frame world edit would otherwise let
@@ -340,6 +345,7 @@ private:
 	PFN_vkSetDebugUtilsObjectNameEXT m_setObjectName = nullptr;
 	void nameImage(VkImage img, const char* name) const;
 	VkPhysicalDevice         m_physDevice     = VK_NULL_HANDLE;
+	VkPhysicalDeviceMemoryProperties m_memoryProperties{}; // cached once in createDevice(); static for the device's lifetime
 	VkDevice                 m_device         = VK_NULL_HANDLE;
 	VkQueue                  m_graphicsQueue  = VK_NULL_HANDLE;
 	uint32_t                 m_graphicsFamily = 0;
@@ -415,9 +421,8 @@ private:
 	void destroyInstanceBuf(InstanceBuf& b);
 	void beginInstanceFrame();
 	bool allocInstances(uint32_t count, VkBuffer& buf, VkDeviceSize& offset, uint8_t*& cpu);
-	std::vector<glm::mat4> m_clusterScratch; // one cluster's world matrices (decal depth)
 	// Same-mesh runs of the camera-view depth pre-passes (SSAO position, GI
-	// G-buffer); the shadow layers keep m_shadowBatches.
+	// G-buffer); the shadow layers keep m_shadowViews.
 	RenderSorter::DepthBatchList m_preBatches;
 	// One instanced draw for a depth-only run (shadow caster run, SSAO or GI
 	// pre-pass run): `count` {A, B} matrix pairs from fill(k, pair) go into the
@@ -428,7 +433,7 @@ private:
 	// only translation unit that calls it.
 	template <class Fill>
 	bool drawDepthInstanced(VkCommandBuffer cmd, VkPipeline instPipe, VkPipeline restorePipe,
-	                        uint32_t indexCount, uint32_t count, Fill&& fill);
+	                        uint32_t indexCount, const InstanceRun& run, Fill&& fill);
 	VkDescriptorPool      m_descPool            = VK_NULL_HANDLE;
 	struct FrameUBO
 	{
@@ -478,11 +483,23 @@ private:
 	MatFrameBuf m_matObjBuf[2];     // U ring      (k_matMaxDraws × 256 B, one slot per draw)
 	MatFrameBuf m_matParBuf[2];     // HeParams ring (k_matMaxDraws × 256 B, one slot per draw)
 	uint32_t    m_matDrawCursor[2]  = {};    // per-frame ring/descriptor-set cursor
+	// Per frame: hash of a graph-material draw's descriptor writes -> the set already written for it
+	// (shared across draws; cleared with the pool). The ring slot is a dynamic offset, not part of the key.
+	std::unordered_map<uint64_t, VkDescriptorSet> m_matSetCache[2];
 	bool        m_matReady          = false; // true once createMaterialResources() succeeded
 	// heLandscapeWeights (binding 14) is in m_matSetLayout — false only on a device whose
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
+	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
+	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
+	// the material's displacement body into the shader hash right after resolveShaders
+	// and files it under the folded hash, where GetOrBuildMaterialPipeline picks it up
+	// and builds a four-stage PATCH_LIST pipeline. Off, or failed → the unconnected
+	// pin's key and pipeline (the fallback).
+	bool        m_tessSupported = false;
+	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+	void        foldDisplacement(const HE::UUID& materialId, uint64_t& hash);
 	static constexpr uint32_t k_matMaxDraws   = 1024;
 	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
 
@@ -796,6 +813,12 @@ private:
 	};
 	GpuMesh                               m_cube;
 	std::unordered_map<HE::UUID, GpuMesh> m_meshCache;
+	// A mesh the terrain/sculpt tools replaced: its buffers are freed once no frame in
+	// flight can still read them, instead of a vkDeviceWaitIdle per invalidation drain
+	// (the D3D12 retire-list pattern). `frames` counts down once per Render().
+	struct RetiredMesh { GpuMesh mesh; int frames; };
+	std::vector<RetiredMesh> m_retiredMeshes;
+	void destroyGpuMesh(GpuMesh& m);
 	bool createMeshBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
 	                       const std::vector<uint32_t>& indices);
 	// Upload tightly-packed RGBA8 pixels to a device-local sampled image + view: the
@@ -1405,12 +1428,23 @@ private:
 	// = false: flipping it on is the LAST step, once the full pipeline exists.
 	// Compute is core Vulkan, so no extension/feature gate is needed.
 	using GIBlasRange = HE::GiBlasRange;
-	struct GIInstanceGpu // must match gi_shadow.comp/gi_probe.comp's GiInst (std430, 96 bytes)
+	struct GIInstanceGpu // must match gi_shadow.comp/gi_probe.comp/gi_refl.comp's GiInst (std430, 96 bytes)
 	{
 		glm::mat4 invTransform{1.0f};
 		glm::vec4 baseColor{1.0f};
-		int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+		// emissiveRG / emissiveB hold the hit's emissive as packed halves (r,g
+		// and b,0) for gi_refl.comp's giHitEmissive — the former pad words, so
+		// the struct stays 96 bytes and the shadow/probe kernels (which only
+		// read nodeOffset/triOffset) keep reading it unchanged. Only meaningful
+		// in m_giReflInstanceBuf (updateGiAccel's reflection-only copy, with the
+		// graph material folded in via HE::giInstanceSurface) — m_giInstanceBuf,
+		// the one gi_shadow.comp/gi_probe.comp read, keeps obj.baseColor
+		// regardless of whether reflections are on (Thema 191 step 11: a shared
+		// buffer here made the diffuse-GI bounce colour change whenever
+		// reflections got toggled).
+		int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
 	};
+	static_assert(sizeof(GIInstanceGpu) == 96, "gi_*.comp's GiInst is 96 bytes (invTransform + baseColor + offsets)");
 	struct GiBuffer // host-visible, persistently mapped
 	{
 		VkBuffer       buf    = VK_NULL_HANDLE;
@@ -1433,6 +1467,23 @@ private:
 	void ensureGiProbeAtlas();
 	void destroyGiProbeAtlas();
 	void runGi(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+
+	// GI reflections (Thema 191 step 6): one specular ray per prepass pixel
+	// against the same SW BVH, shaded from the sun + local lights + the DDGI
+	// probe field, blurred and roughness-mixed. The GL/D3D model: the gate is
+	// Lighting::giRefl (heGIReflFwd, binding 32), consumed only by graph
+	// materials (forward + the deferred resolve) — the built-in scene.frag
+	// shader has no giRefl cascade on ANY backend yet (documented gap, not a
+	// Vulkan-only one). Own descriptor pool/layouts/pipelines, outside
+	// createGiPipelines' ok-chain: a failure here costs only the reflections.
+	void createGiReflPipelines();              // lazy, one attempt; failure → reflections off for the session
+	void ensureGiReflTargets();                // keyed on the prepass size (m_giW/m_giH)
+	void destroyGiReflTargets();
+	// Runs the trace + blur + mix chain. `diffuseActive` = the diffuse GI's
+	// probe atlases hold valid data this frame (gates the indirect term and
+	// matches D3D12's `probesValid` parameter). Returns true iff m_giReflTex
+	// holds this frame's result.
+	bool runGiReflections(VkCommandBuffer cmd, bool diffuseActive);
 
 	static constexpr int   kGIProbeOctSize     = 8;
 
@@ -1511,6 +1562,41 @@ private:
 	// bones UBO ring.
 	GiBuffer m_giInstanceBuf[3]; // k_maxFramesInFlight (static_assert at use site)
 	int      m_giInstanceCount = 0;
+	// The landscape's height field for the software shadow kernel (gi_shadow.comp, binding 9): with it the kernel reads
+	// m_giShadowInstanceBuf (the instances without the terrain chunks) instead. HE_GI_HEIGHTFIELD=0 = off.
+	bool ensureGiHeightfield(const GiHeightfield& hf);
+	bool uploadHeightPyramid(const HE::GiHeightPyramid& pyr, VkImage& image, VkDeviceMemory& memory, VkImageView& view);
+	void retireGiHeightfield();
+	VkImage        m_giHfImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_giHfMem   = VK_NULL_HANDLE;
+	VkImageView    m_giHfView  = VK_NULL_HANDLE;
+	uint64_t       m_giHfVersion = 0, m_giHfKey = ~0ull;
+	int            m_giHfTopLevel = 0;
+	float          m_giHfMaxH = 0.0f;
+	bool           m_giHfActive = false;
+	bool           m_giShadowSep = false;   // the software shadow kernel walks m_giShadowInstanceBuf (thinned / without chunks)
+	GiBuffer       m_giShadowInstanceBuf[3];
+	int            m_giShadowInstanceCount = 0;
+	struct RetiredHf { VkImage img; VkImageView view; VkDeviceMemory mem; int frames; };
+	std::vector<RetiredHf> m_retiredHf;   // replaced height-field images, freed once no frame in flight reads them
+	// gi_refl.comp's own copy of the ring above: folded graph-material colour
+	// (HE::giInstanceSurface) instead of obj.baseColor, only built/uploaded
+	// while m_giReflEnabled. Kept separate from m_giInstanceBuf so enabling
+	// reflections never changes what gi_probe.comp bounces (Thema 191 step 11).
+	GiBuffer m_giReflInstanceBuf[3];
+	// Painted / auto landscapes for gi_refl.comp (HE::GiLandscape, GiLandscape.h): one table entry each, capped at
+	// HE::kGiMaxLandscapes, with a weightmap view per entry (the white fallback for an auto entry or one not
+	// resident). Only kept current while m_giReflEnabled. Mirrors the kernel's GiLand — 192 bytes, std430.
+	struct GILandGpu
+	{
+		glm::mat4 worldToLocal{1.0f};
+		glm::vec4 cfg{0.0f};       // xy = 1/size, z = uvTiling, w = layer count (< 0 = auto)
+		glm::vec4 layer[4]{};
+		glm::vec4 autoWet{0.0f}, autoSlope{0.0f}, autoSnow{0.0f};
+	};
+	static_assert(sizeof(GILandGpu) == 192, "gi_refl.comp's GiLand is 192 bytes");
+	GiBuffer    m_giLandBuf[3];
+	VkImageView m_giLandWeightView[4] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 
 	// ── Hardware ray tracing (VK_KHR_ray_query in compute) ──────────────────
 	// When the device offers VK_KHR_acceleration_structure + VK_KHR_ray_query
@@ -1558,7 +1644,24 @@ private:
 	                          VkMemoryPropertyFlags props);
 	void     destroyGiHwBuffer(GiHwBuffer& b);
 	void     destroyGiHwBlas(GiHwBlas& b);
-	GiHwBlas buildGiHwBlas(const HE::UUID& meshId);   // one-shot cmdbuf BLAS build
+	GiHwBlas buildGiHwBlas(const HE::UUID& meshId);   // creates the BLAS + queues its build (flushGiHwBlasBuilds records it)
+	// A BLAS whose build is queued: the AS exists (so its address is known) but is only filled when the frame's
+	// command buffer reaches flushGiHwBlasBuilds, ahead of the TLAS build that reads it. Building on a one-time
+	// command buffer with a vkQueueWaitIdle per BLAS stalled the CPU on the GPU for every re-stitched terrain chunk.
+	struct GiHwBlasPending
+	{
+		VkAccelerationStructureKHR as = VK_NULL_HANDLE;
+		GiHwBuffer      geo, scratch;     // build input and scratch: kept until the build has finished on the GPU
+		VkDeviceAddress vertexAddr = 0, indexAddr = 0, scratchAddr = 0;
+		VkDeviceSize    vertexStride = 0;
+		uint32_t        maxVertex = 0, primCount = 0;
+	};
+	struct GiHwBlasTemp { GiHwBuffer geo, scratch; int frames = 0; };   // recorded builds' buffers, freed after the frames in flight
+	struct RetiredHwBlas { GiHwBlas blas; int frames = 0; };            // replaced BLAS a frame in flight may still trace
+	std::vector<GiHwBlasPending> m_giHwBlasPending;
+	std::vector<GiHwBlasTemp>    m_giHwBlasTemp;
+	std::vector<RetiredHwBlas>   m_retiredHwBlas;
+	void     flushGiHwBlasBuilds(VkCommandBuffer cmd);
 	void     createGiHwPipelines();                   // called by createGiPipelines
 	bool     buildGiTlas(VkCommandBuffer cmd);        // records this frame's TLAS build
 	std::unordered_map<HE::UUID, GiHwBlas> m_giHwBlasCache;
@@ -1584,6 +1687,55 @@ private:
 	int      m_giShadowRays          = 2;     // sun rays per pixel (GISettings::shadowRays)
 	float    m_giShadowHistoryWeight       = 0.9f;  // shadow-mask temporal history weight
 	bool     m_giShadowFilter        = true;  // edge-aware a-trous on the mask
+
+	// ── GI reflections (SetGIReflectionSettings) ─────────────────────────────
+	// The GL model: one specular ray per prepass pixel against the software
+	// BVH, shaded from the sun + local lights + the probe field, blurred, and
+	// handed to graph materials through heGIReflFwd (binding 32). Runs with or
+	// without the diffuse GI; without it the G-buffer prepass is the only GI
+	// pass that executes (updateGiAccel/runGi gate on m_giEnabled ||
+	// m_giReflEnabled).
+	bool  m_giReflEnabled        = false;
+	float m_giReflIntensity      = 1.0f;
+	float m_giReflMaxRoughness   = 0.6f;
+	float m_giReflMaxDistance    = 200.0f;
+	int   m_giReflQuality        = 1;
+	bool  m_giReflBlurEnabled    = true;
+	bool  m_giReflPipesTried     = false; // one compile attempt per session
+	bool  m_giReflReady          = false; // m_giReflTex holds this frame's result
+	float m_giReflFrameSeed      = 0.0f;
+	VkDescriptorSetLayout m_giReflDSL   = VK_NULL_HANDLE; // compute: 3 SSBOs + 4 samplers + storage image + UBO
+	VkDescriptorSetLayout m_giReflFsDSL = VK_NULL_HANDLE; // blur/mix: 3 samplers (unused bindings hold valid views)
+	VkPipelineLayout m_giReflPL   = VK_NULL_HANDLE; // compute
+	VkPipelineLayout m_giReflFsPL = VK_NULL_HANDLE; // blur + mix, vec4 fragment push constant
+	VkPipeline m_giReflPipe     = VK_NULL_HANDLE; // compute (gi_refl.comp)
+	VkPipeline m_giReflBlurPipe = VK_NULL_HANDLE; // gi_refl_blur.frag
+	VkPipeline m_giReflMixPipe  = VK_NULL_HANDLE; // gi_refl_mix.frag
+	VkRenderPass m_giReflFsRP = VK_NULL_HANDLE; // RGBA16F → SHADER_READ_ONLY, backs ping/blur/final
+	// raw = the trace (storage image, GENERAL); ping/blur = the separable
+	// chain's two targets; final = the roughness-mixed result the materials
+	// sample. All RGBA16F at the prepass' size (m_giW/m_giH — the GL/D3D gap:
+	// the trace runs at the shared GI prepass resolution, resDivUsed = 2).
+	GiImage m_giReflRaw, m_giReflPing, m_giReflBlur, m_giReflFinal;
+	// Raw ping-pongs every frame between GENERAL (the compute write) and
+	// SHADER_READ_ONLY_OPTIMAL (the blur/mix draws' read) — tracked so
+	// runGiReflections can transition FROM wherever it actually is, not just
+	// assume GENERAL (a missing transition here showed up on the RTX 4070 as
+	// vkQueueSubmit() "expects ... GENERAL -- instead ... SHADER_READ_ONLY").
+	VkImageLayout m_giReflRawLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkFramebuffer m_giReflPingFB = VK_NULL_HANDLE, m_giReflBlurFB = VK_NULL_HANDLE, m_giReflFinalFB = VK_NULL_HANDLE;
+	int m_giReflW = 0, m_giReflH = 0;
+	VkDescriptorPool m_giReflDescPool = VK_NULL_HANDLE; // own pool (advisor: don't grow the shared GI one)
+	VkDescriptorSet  m_giReflSet[3] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE }; // compute, per in-flight frame
+	GiBuffer m_giReflUBO[3]; // GiReflUBOData, per in-flight frame
+	// Fullscreen "tables" for the blur/mix chain — FIXED, one set per texture
+	// role, rewritten only when ensureGiReflTargets rebuilds the images (not
+	// per frame or per a-trous level: only the push-constant stride/floor
+	// changes between draws, same shape as D3D12's four SRV tables).
+	VkDescriptorSet m_giReflTabRaw = VK_NULL_HANDLE;  // binding0 = raw   (H-pass source, level 0)
+	VkDescriptorSet m_giReflTabPing = VK_NULL_HANDLE; // binding0 = ping  (V-pass source, every level)
+	VkDescriptorSet m_giReflTabBlur = VK_NULL_HANDLE; // binding0 = blur  (H-pass source, level >= 1)
+	VkDescriptorSet m_giReflTabMix = VK_NULL_HANDLE;  // binding0 = raw (sharp), 1 = blur (blurred), 2 = gNorm
 
 	// ── GPU skeletal-mesh skinning ───────────────────────────────────────────
 	// Each skeletal mesh uploaded to the GPU gets three vertex buffers:
@@ -1686,7 +1838,8 @@ private:
 	bool m_uiImagePoolWarned = false;
 
 	// ── GPU frame timing (VkQueryPool timestamps) ───────────────────────────
-	// Two timestamps (frame begin/end) per ring slot. The ring is deeper than
+	// GpuPassTimeline::kMaxTimestamps marks per ring slot: the frame's begin and end and one
+	// at every GpuPassScope boundary between them. The ring is deeper than
 	// k_maxFramesInFlight so the slot reused each frame finished at least one
 	// fence-wait ago — its readback (availability-checked, no RESULT_WAIT)
 	// never stalls. GetFrameGpuStats therefore reports 1–N frames late,
@@ -1701,6 +1854,16 @@ private:
 	uint64_t    m_tsValidMask = 0;                  // queue timestampValidBits mask
 	bool        m_tsPending[kGpuTimerRing] = {};    // slot has unread results
 	uint64_t    m_tsFrameIdx  = 0;
+	GpuPassTimeline m_tsTimeline[kGpuTimerRing];    // the marks of the frame recorded in that slot
+	VkCommandBuffer m_tsCmd = VK_NULL_HANDLE;       // the frame's command buffer while it is timed
+	bool            m_tsPassOn = false;             // per-pass marks this frame: a capture or the overlay is on
+	// GpuPassScope's two calls (GpuPassScopeT): a mark in the frame's command buffer, a no-op
+	// anywhere else (a still, a preview) and when timestamps are unsupported.
+	bool gpuPassBegin(const char* name);
+	void gpuPassEnd();
+	void gpuMark(uint32_t i);
+	friend class GpuPassScopeT<VulkanRenderer>;
+	using GpuPassScope = GpuPassScopeT<VulkanRenderer>;
 	FrameGpuStats m_lastGpuStats;                   // newest reaped GPU time
 	// CPU-side per-frame counters (reset in Render, merged by GetFrameGpuStats).
 	uint32_t m_statDraws = 0, m_statTris = 0, m_statVisible = 0, m_statTotal = 0;
