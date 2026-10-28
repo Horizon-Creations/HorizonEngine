@@ -499,6 +499,11 @@ void VulkanRenderer::Render()
         if (--it->frames <= 0) { destroyGpuMesh(it->mesh); it = m_retiredMeshes.erase(it); }
         else ++it;
     }
+    for (auto it = m_retiredGiBufs.begin(); it != m_retiredGiBufs.end(); )
+    {
+        if (--it->frames <= 0) { destroyGiBuffer(it->buf); it = m_retiredGiBufs.erase(it); }
+        else ++it;
+    }
     // ... and so do replaced hardware BLAS and the input/scratch of builds the GPU has finished.
     for (auto it = m_retiredHwBlas.begin(); it != m_retiredHwBlas.end(); )
     {
@@ -11192,24 +11197,31 @@ HE::GiBvh VulkanRenderer::BuildGIBvh(const HE::UUID& meshId)
     // Same two layouts the mesh upload path consumes: cooked interleaved
     // 8-float (position at offset 0) or loose tightly-packed 3-float positions.
     if (asset->cooked && !asset->interleaved.empty())
-        bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+        bvh = m_giBvhCache.build(meshId, asset->interleaved.data(), asset->vertexCount, 8,
                              asset->indices.data(), asset->indices.size());
     else if (!asset->vertices.empty())
-        bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+        bvh = m_giBvhCache.build(meshId, asset->vertices.data(), asset->vertices.size() / 3, 3,
                              asset->indices.data(), asset->indices.size());
     return bvh;
 }
 
+void VulkanRenderer::destroyGiBuffer(GiBuffer& b)
+{
+    if (b.mapped) { vkUnmapMemory(m_device, b.mem); b.mapped = nullptr; }
+    if (b.buf)    { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
+    if (b.mem)    { vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE; }
+    b.size = 0;
+}
+
 bool VulkanRenderer::uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
-                                    VkBufferUsageFlags usage, VkDeviceSize from, VkDeviceSize reserve)
+                                    VkBufferUsageFlags usage, VkDeviceSize from, VkDeviceSize reserve, bool fresh)
 {
     if (size == 0) return false;
-    if (b.size < size)
+    if (b.size < size || (fresh && b.buf && from == 0))
     {
-        if (b.mapped) { vkUnmapMemory(m_device, b.mem); b.mapped = nullptr; }
-        if (b.buf)    { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
-        if (b.mem)    { vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE; }
-        b.size = 0;
+        if (fresh && b.buf) m_retiredGiBufs.push_back({ b, static_cast<int>(k_maxFramesInFlight) + 2 });
+        else                destroyGiBuffer(b);
+        b = GiBuffer{};
         from   = 0;                      // a fresh buffer holds nothing yet
         const VkDeviceSize alloc = std::max(size, reserve);
 
@@ -11428,20 +11440,19 @@ void VulkanRenderer::updateGiAccel()
         // Between rewrites the store only appends: frames in flight read the
         // unchanged [0, from) while the new tail goes in behind it. A rewrite
         // (compaction moved every range) or a grown buffer would pull bytes out
-        // from under them, so those (rare) cases wait for the device first.
+        // from under them, so those (rare) cases go into a NEW buffer (`fresh`) and the
+        // old one is retired; nothing idles the device any more (that was 34-57 ms in
+        // the frame the buffer grew, perf capture 2026-10-28).
         const VkDeviceSize nodeBytes = m_giBlas.nodes().size() * sizeof(HE::GiBvhNode);
         const VkDeviceSize triBytes  = m_giBlas.tris().size()  * sizeof(HE::GiBvhTriangle);
         const VkDeviceSize nodeFrom  = m_giBlas.uploadFromNodes() * sizeof(HE::GiBvhNode);
         const VkDeviceSize triFrom   = m_giBlas.uploadFromTris()  * sizeof(HE::GiBvhTriangle);
-        if ((m_giNodeBuf.buf || m_giTriBuf.buf) &&
-            (nodeFrom == 0 || triFrom == 0 || nodeBytes > m_giNodeBuf.size || triBytes > m_giTriBuf.size))
-            deviceWaitIdle();
         const bool nodesOk = uploadGiBuffer(m_giNodeBuf, m_giBlas.nodes().data(), nodeBytes,
                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, nodeFrom,
-                                            nodeBytes + nodeBytes / 2);
+                                            nodeBytes + nodeBytes / 2, /*fresh=*/true);
         const bool trisOk  = uploadGiBuffer(m_giTriBuf, m_giBlas.tris().data(), triBytes,
                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, triFrom,
-                                            triBytes + triBytes / 2);
+                                            triBytes + triBytes / 2, /*fresh=*/true);
         if (!nodesOk || !trisOk) return;
         m_giBlas.markUploaded();
     }
@@ -11523,6 +11534,9 @@ void VulkanRenderer::destroyGiAccel()
     // instance upload ring). Callers guarantee the GPU is idle (Shutdown waits).
     for (auto& [id, blas] : m_giHwBlasCache) destroyGiHwBlas(blas);
     m_giHwBlasCache.clear();
+    for (RetiredGiBuf& r : m_retiredGiBufs) destroyGiBuffer(r.buf);
+    m_retiredGiBufs.clear();
+    struct PoolFlush { VulkanRenderer* r; ~PoolFlush() { r->releaseGiHwBufPool(); } } poolFlush{ this };   // after every GiHwBuffer below has been parked
     for (GiHwBlasPending& p : m_giHwBlasPending) { destroyGiHwBuffer(p.geo); destroyGiHwBuffer(p.scratch); }
     m_giHwBlasPending.clear();
     for (GiHwBlasTemp& t : m_giHwBlasTemp) { destroyGiHwBuffer(t.geo); destroyGiHwBuffer(t.scratch); }
@@ -11544,13 +11558,40 @@ void VulkanRenderer::destroyGiAccel()
 // GI hardware ray tracing (VK_KHR_ray_query) — acceleration-structure plumbing
 // ─────────────────────────────────────────────────────────────────────────────
 
+namespace
+{
+constexpr VkDeviceSize kGiHwBufPoolMax = VkDeviceSize(256) << 20;   // bytes parked in the pool
+// Size classes: powers of two from 64 KiB, so a buffer freed by one BLAS fits the next one of about its size.
+VkDeviceSize giHwBufClass(VkDeviceSize size)
+{
+    VkDeviceSize c = VkDeviceSize(64) << 10;
+    while (c < size) c <<= 1;
+    return c;
+}
+} // namespace
+
 bool VulkanRenderer::createGiHwBuffer(GiHwBuffer& b, VkDeviceSize size,
                                       VkBufferUsageFlags usage, VkMemoryPropertyFlags props)
 {
     destroyGiHwBuffer(b);
+    usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    const VkDeviceSize cls = giHwBufClass(size);
+    // A parked buffer of this kind and size class: no vkCreateBuffer / vkAllocateMemory at all.
+    for (size_t i = 0; i < m_giHwBufPool.size(); ++i)
+    {
+        const GiHwBuffer& p = m_giHwBufPool[i];
+        if (p.usage == usage && p.props == props && p.size == cls)
+        {
+            b = p;
+            m_giHwBufPoolBytes -= p.size;
+            m_giHwBufPool.erase(m_giHwBufPool.begin() + static_cast<std::ptrdiff_t>(i));
+            return true;
+        }
+    }
+    size = cls;
     VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     bci.size  = size;
-    bci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    bci.usage = usage;
     if (vkCreateBuffer(m_device, &bci, nullptr, &b.buf) != VK_SUCCESS) return false;
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(m_device, b.buf, &req);
@@ -11568,16 +11609,44 @@ bool VulkanRenderer::createGiHwBuffer(GiHwBuffer& b, VkDeviceSize size,
     bdai.buffer = b.buf;
     b.addr = m_pfnGetBufferAddress ? m_pfnGetBufferAddress(m_device, &bdai) : 0;
     if (!b.addr) { destroyGiHwBuffer(b); return false; }
-    b.size = size;
+    b.size  = size;
+    b.usage = bci.usage;
+    b.props = props;
     return true;
 }
 
 void VulkanRenderer::destroyGiHwBuffer(GiHwBuffer& b)
 {
+    // Park a complete buffer for reuse (the caller guarantees the GPU is done with it); a half-made one is freed.
+    if (b.buf && b.mem && b.addr && b.size && b.size <= kGiHwBufPoolMax)
+    {
+        while (!m_giHwBufPool.empty() && m_giHwBufPoolBytes + b.size > kGiHwBufPoolMax)
+        {
+            GiHwBuffer& old = m_giHwBufPool.front();
+            vkDestroyBuffer(m_device, old.buf, nullptr);
+            vkFreeMemory(m_device, old.mem, nullptr);
+            m_giHwBufPoolBytes -= old.size;
+            m_giHwBufPool.erase(m_giHwBufPool.begin());
+        }
+        m_giHwBufPool.push_back(b);
+        m_giHwBufPoolBytes += b.size;
+        b = GiHwBuffer{};
+        return;
+    }
     if (b.buf) { vkDestroyBuffer(m_device, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
     if (b.mem) { vkFreeMemory(m_device, b.mem, nullptr);    b.mem = VK_NULL_HANDLE; }
-    b.size = 0;
-    b.addr = 0;
+    b = GiHwBuffer{};
+}
+
+void VulkanRenderer::releaseGiHwBufPool()
+{
+    for (GiHwBuffer& p : m_giHwBufPool)
+    {
+        if (p.buf) vkDestroyBuffer(m_device, p.buf, nullptr);
+        if (p.mem) vkFreeMemory(m_device, p.mem, nullptr);
+    }
+    m_giHwBufPool.clear();
+    m_giHwBufPoolBytes = 0;
 }
 
 void VulkanRenderer::destroyGiHwBlas(GiHwBlas& b)

@@ -237,3 +237,140 @@ TEST_CASE("GI height-field pyramid: every cell's maximum covers the vertices it 
     GiHeightfield tiny; tiny.res = 4; tiny.data = std::make_shared<std::vector<float>>(16, 0.0f);
     CHECK(HE::BuildGiHeightPyramid(tiny).levels.empty());
 }
+
+// ── Refit: the same tree over moved vertices (re-stitched / sculpted terrain chunks) ──────────────
+namespace
+{
+// An (n+1)x(n+1) height-field grid with SHARED vertices, 3 floats per vertex: the topology of a terrain chunk.
+void makeGrid(int n, std::vector<float>& pos, std::vector<uint32_t>& idx)
+{
+	pos.clear(); idx.clear();
+	for (int z = 0; z <= n; ++z)
+		for (int x = 0; x <= n; ++x)
+			pos.insert(pos.end(), { float(x), 0.5f * std::sin(0.7f * x) * std::cos(0.5f * z), float(z) });
+	for (int z = 0; z < n; ++z)
+		for (int x = 0; x < n; ++x)
+		{
+			const uint32_t a = uint32_t(z * (n + 1) + x), b = a + 1, c = a + uint32_t(n + 1), d = c + 1;
+			idx.insert(idx.end(), { a, c, b, b, c, d });
+		}
+}
+// What stitching does to a chunk: the vertices on one edge change height, the indices do not.
+void moveEdge(std::vector<float>& pos, int n, float dy)
+{
+	for (int x = 0; x <= n; ++x) pos[size_t(x) * 3 + 1] += dy;   // the z = 0 row
+}
+std::vector<glm::vec3> expand(const std::vector<float>& pos, const std::vector<uint32_t>& idx)
+{
+	std::vector<glm::vec3> out;
+	for (uint32_t i : idx) out.emplace_back(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+	return out;
+}
+} // namespace
+
+TEST_CASE("GiBvh refit: moved vertices give the brute-force answer, unmoved ones give the build")
+{
+	const int n = 24;
+	std::vector<float> pos; std::vector<uint32_t> idx;
+	makeGrid(n, pos, idx);
+	std::vector<uint32_t> source;
+	const HE::GiBvh built = HE::buildGiBvh(pos.data(), pos.size() / 3, 3, idx.data(), idx.size(), 4, &source);
+	REQUIRE(built.valid());
+	REQUIRE(source.size() == idx.size() / 3);
+
+	// Unmoved vertices: the refit is the build, node for node.
+	HE::GiBvh same;
+	REQUIRE(HE::refitGiBvh(built.nodes, source, pos.data(), pos.size() / 3, 3, idx.data(), idx.size(), same));
+	REQUIRE(same.nodes.size() == built.nodes.size());
+	for (size_t i = 0; i < built.nodes.size(); ++i)
+	{
+		CHECK(same.nodes[i].boundsMin == built.nodes[i].boundsMin);
+		CHECK(same.nodes[i].boundsMax == built.nodes[i].boundsMax);
+		CHECK(same.nodes[i].leftFirst == built.nodes[i].leftFirst);
+		CHECK(same.nodes[i].triCount == built.nodes[i].triCount);
+	}
+
+	// Moved: an edge row lifted 1.5 m, then every ray's closest hit must equal the brute force over the NEW triangles.
+	std::vector<float> moved = pos;
+	moveEdge(moved, n, 1.5f);
+	HE::GiBvh fitted;
+	REQUIRE(HE::refitGiBvh(built.nodes, source, moved.data(), moved.size() / 3, 3, idx.data(), idx.size(), fitted));
+	const std::vector<glm::vec3> soup = expand(moved, idx);
+	std::mt19937 rng(7);
+	std::uniform_real_distribution<float> u(0.0f, float(n));
+	int hits = 0;
+	for (int i = 0; i < 400; ++i)
+	{
+		const glm::vec3 o(u(rng), 6.0f, u(rng));
+		const glm::vec3 d = glm::normalize(glm::vec3(0.2f * (u(rng) / n - 0.5f), -1.0f, 0.2f * (u(rng) / n - 0.5f)));
+		float tRef = 0.0f, tBvh = 0.0f; uint32_t tri = 0;
+		const bool ref = bruteForce(soup, o, d, 0.0f, 100.0f, tRef);
+		const bool got = HE::giBvhIntersect(fitted, o, d, 0.0f, 100.0f, false, tBvh, tri);
+		CHECK(ref == got);
+		if (ref && got) { CHECK(tBvh == doctest::Approx(tRef).epsilon(1e-4)); ++hits; }
+	}
+	CHECK(hits > 300);
+
+	// A fit that does not match the tree is refused, not half-written.
+	HE::GiBvh bad;
+	std::vector<uint32_t> badSource = source; badSource[3] = uint32_t(idx.size());   // past the index buffer
+	CHECK_FALSE(HE::refitGiBvh(built.nodes, badSource, pos.data(), pos.size() / 3, 3, idx.data(), idx.size(), bad));
+	CHECK_FALSE(bad.valid());
+}
+
+TEST_CASE("GiBvhRefitCache: first rebuild builds, later ones refit, a changed topology rebuilds")
+{
+	const int n = 16;
+	std::vector<float> pos; std::vector<uint32_t> idx;
+	makeGrid(n, pos, idx);
+	HE::GiBvhRefitCache cache;
+	const HE::UUID id = HE::UUID::generate();
+	const HE::UUID other = HE::UUID::generate();
+
+	cache.build(id, pos.data(), pos.size() / 3, 3, idx.data(), idx.size());          // first sight: build, remember nothing
+	CHECK(cache.refits() == 0);
+	cache.build(id, pos.data(), pos.size() / 3, 3, idx.data(), idx.size());          // second: build, now remembered
+	CHECK(cache.refits() == 0);
+	CHECK(cache.rebuilds() == 2);
+
+	moveEdge(pos, n, 1.0f);
+	const HE::GiBvh viaCache = cache.build(id, pos.data(), pos.size() / 3, 3, idx.data(), idx.size());
+	CHECK(cache.refits() == 1);
+	// And it is a usable tree for the moved geometry: straight down through the lifted edge.
+	float t = 0.0f; uint32_t tri = 0;
+	CHECK(HE::giBvhIntersect(viaCache, glm::vec3(0.5f, 9.0f, 0.2f), glm::vec3(0, -1, 0), 0.0f, 50.0f, false, t, tri));
+	CHECK(t < 8.5f);   // the edge now stands ~1 m up, it is hit before the old y ~ 0 surface
+
+	// Same id, other triangles (a different level): rebuild, and the new tree is what is remembered.
+	std::vector<float> pos2; std::vector<uint32_t> idx2;
+	makeGrid(8, pos2, idx2);
+	cache.build(id, pos2.data(), pos2.size() / 3, 3, idx2.data(), idx2.size());
+	CHECK(cache.refits() == 1);
+	moveEdge(pos2, 8, 0.5f);
+	cache.build(id, pos2.data(), pos2.size() / 3, 3, idx2.data(), idx2.size());
+	CHECK(cache.refits() == 2);
+
+	// An id that never repeats costs the cache nothing.
+	const size_t before = cache.rebuilds();
+	cache.build(other, pos.data(), pos.size() / 3, 3, idx.data(), idx.size());
+	CHECK(cache.rebuilds() == before + 1);
+	CHECK(cache.refits() == 2);
+}
+
+TEST_CASE("GiBvhRefitCache: a tree that was refitted many times is rebuilt")
+{
+	const int n = 12;
+	std::vector<float> pos; std::vector<uint32_t> idx;
+	makeGrid(n, pos, idx);
+	HE::GiBvhRefitCache cache;
+	const HE::UUID id = HE::UUID::generate();
+	cache.build(id, pos.data(), pos.size() / 3, 3, idx.data(), idx.size());
+	cache.build(id, pos.data(), pos.size() / 3, 3, idx.data(), idx.size());
+	for (int i = 0; i < 60; ++i)
+	{
+		moveEdge(pos, n, 0.01f);
+		cache.build(id, pos.data(), pos.size() / 3, 3, idx.data(), idx.size());
+	}
+	CHECK(cache.refits() >= 40);          // most of them refit ...
+	CHECK(cache.rebuilds() >= 4);         // ... but the tree is renewed every few dozen, 2 initial + at least 2 renewals
+}

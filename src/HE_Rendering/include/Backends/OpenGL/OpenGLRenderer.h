@@ -1239,6 +1239,7 @@ private:
 	int          m_giLandCount = 0;
 	std::vector<unsigned int> m_giLandWeightTex; // weightmap per landscape, same order
 	HE::GiBvh    BuildGIBvh(const HE::UUID& meshId);  // CPU build from ContentManager data
+	HE::GiBvhRefitCache m_giBvhCache;                 // a re-stitched / sculpted mesh refits its tree instead of rebuilding it
 	void         UpdateGIAccel();                     // lazy BLAS append + per-frame instance upload
 	void         DestroyGIAccel();
 

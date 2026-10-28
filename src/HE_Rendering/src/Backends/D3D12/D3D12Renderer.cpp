@@ -7302,6 +7302,7 @@ struct D3D12RendererImpl
         return h;
     }
 
+    HE::GiBvhRefitCache giBvhCache;   // a re-stitched / sculpted mesh refits its tree instead of rebuilding it
     HE::GiBvh BuildGIBvh(ContentManager* cm, const HE::UUID& meshId)
     {
         HE_PROFILE_SCOPE_N("D3D12::GiBuildBlas");
@@ -7315,10 +7316,10 @@ struct D3D12RendererImpl
         // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
         // (position at offset 0), loose = tightly packed 3-float positions.
         if (asset->cooked && !asset->interleaved.empty())
-            bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+            bvh = giBvhCache.build(meshId, asset->interleaved.data(), asset->vertexCount, 8,
                                  asset->indices.data(), asset->indices.size());
         else if (!asset->vertices.empty())
-            bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+            bvh = giBvhCache.build(meshId, asset->vertices.data(), asset->vertices.size() / 3, 3,
                                  asset->indices.data(), asset->indices.size());
         return bvh;
     }

@@ -6291,10 +6291,10 @@ HE::GiBvh OpenGLRenderer::BuildGIBvh(const HE::UUID& meshId)
 	// (position at offset 0, matching Metal's BLAS vertex descriptor), loose =
 	// tightly packed 3-float positions.
 	if (asset->cooked && !asset->interleaved.empty())
-		bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+		bvh = m_giBvhCache.build(meshId, asset->interleaved.data(), asset->vertexCount, 8,
 		                     asset->indices.data(), asset->indices.size());
 	else if (!asset->vertices.empty())
-		bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+		bvh = m_giBvhCache.build(meshId, asset->vertices.data(), asset->vertices.size() / 3, 3,
 		                     asset->indices.data(), asset->indices.size());
 	return bvh;
 }

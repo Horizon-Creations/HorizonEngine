@@ -43,10 +43,30 @@ sobald ein erneuertes Mesh ein HW-BLAS hatte (3,2 ms im Mittel), und `buildGiHwB
 * Bild GI an, Pose A: neue Läufe untereinander pixelgleich, gegen hw237 kein Pixel > 32 Abweichung. Pose B (nur Wasser) ist wegen animierter Wellen nicht vergleichbar.
 * Mit `HE_GPU_DEBUG=1` keine neuen Validation-Fehler (nur das Abbau-Rauschen). Nicht mit Synchronization-Validation geprüft.
 
+## Restliche Spitzen (Folgeschritt 2, gleicher Tag)
+Flug 3000 Frames, `HE_PERF_CAM_FLY=1.5`: CPU p99 8,9 -> 7,6 ms, p99.9 17,8 -> 11,8 ms, Maximum 39,4 -> 14,3 ms, Frames > 3x Median 14 -> 5.
+* **Kein Device-Idle beim Wachstum** (`uploadGiBuffer(..., fresh=true)`): Rewrite (Kompaktierung) und Wachstum von `m_giNodeBuf`/`m_giTriBuf` legen einen neuen
+  Buffer an, der alte wartet in `m_retiredGiBufs` (k_maxFramesInFlight+2 Frames). Vorher `deviceWaitIdle()` + Neuanlage: 34-57 ms in einem Frame.
+  Sicher, weil beide Leser (`runGi`, `runGiReflections`) ihre Descriptor-Sets pro Frame neu schreiben.
+* **BVH-Refit statt Neubau** (`GiBvhRefitCache`, `refitGiBvh` in `GiBvh.h/.cpp`, in D3D11, D3D12, OpenGL, Vulkan; Metal baut kein CPU-BVH): eine
+  Mesh-ID, die zum zweiten Mal gebaut wird, merkt sich Baum + Quell-Dreiecksnummern; gleicher Index-Hash -> Dreiecke neu lesen, Bounds von unten nach oben.
+  Nach 24 Refits Neubau, höchstens 192 Einträge. Nahtvarianten und Sculpting haben dieselbe Topologie. `HE_GI_BVH_REFIT=0` schaltet es ab.
+  `GiBuildBlas` Vulkan 0,6 -> 0,05 ms je Aufruf; OpenGL (kein 500-m-Schnitt) 70,2 -> 5,9 ms je 400 Frames bei gleicher Zahl Builds.
+  Die Nahtvernähung selbst bleibt (Thema 190: ohne sie schwarze Linien in GI), nur der BVH-Bau dafür ist billiger.
+* **Buffer-Pool für HW-BLAS** (`m_giHwBufPool`, Größenklassen ab 64 KiB, max. 256 MB): freigegebene BLAS-/Scratch-/Input-Buffer werden wiederverwendet statt
+  `vkAllocateMemory` (0,3-12 ms je BLAS). `GiBuildHwBlas` 0,51 -> 0,01 ms im Mittel, max 12,3 -> 0,4 ms.
+* Verifiziert: `test_gi_bvh` 9/9 (drei neue Fälle: Refit gleich Brute-Force auf verschobenen Vertices, Cache-Zählung, Erneuerung nach 24 Refits); relevante he_tests-Gruppen
+  807/808 (der eine Fehlschlag ist ein Pfadtrenner-Vergleich durch den Scratch-APPDATA mit `/`, `test_contentmanager.cpp:1928`, unabhängig). Bild GI an, Pose A, Vulkan/OpenGL
+  gleich wie vorher (OpenGL gegen hw237 exakt 0). Mit `HE_GPU_DEBUG=1` kein neuer Validation-Fehler (gleiches Abbau-Rauschen).
+* Nicht verifiziert: Ein Flug-Bildvergleich Refit an/aus ist nicht aussagekräftig, weil zwei Läufe mit gleichen Einstellungen schon bis ~6,7 mittlere Abweichung
+  haben (Streaming/LOD-Zeitpunkte); ein synchrones Paar (OpenGL) lag bei 0,05. D3D11/D3D12-Pfade sind nur per Rauchtest + Unit-Test belegt.
+* Die Frames um p95 (~7 ms) sind keine CPU-Arbeit mehr: `WaitFrame` ist dort ~1 ms länger und der Rest steckt in `Render` ohne Kind-Scope, die CPU wartet auf die GPU
+  (GPU p50 3,3, p95 ~4 ms).
+
 ## Offen, in Reihenfolge
-1. Restliche Spitzen (p99 ~12 ms, einzelne Frames bis 60 ms): `GiUploadBlas` mit `deviceWaitIdle()` bei Kompaktierung/Buffer-Wachstum
-   (57 ms in einem Frame), und Bursts in `GiBuildBlas` (CPU-BVH je Chunk-Naht, ~0,6 ms je Mesh) wenn viele Nähte zugleich wechseln. Kompaktierung in neuen
-   Buffer statt Idle; BVH-Bau in Jobs oder pro Frame budgetieren. Der Stitch-Cache (Backlog 8) vermeidet die Neubauten ganz.
-2. GPU-Spitzen (p95 3-4,4 ms gegen p50 3 ms) sind nicht erklärt.
+1. GPU-Seite: p50 3,3 ms (Scene 1,7, GI 1,3), p95 ~4 ms. Die GI-Buffer (`m_giNodeBuf`/`m_giTriBuf`) liegen host-visible; für die SW-Kernel/Reflexionen device-local mit Staging
+   wäre zu messen. GPU-Spitzen sind nicht erklärt.
+2. Restliche CPU-Ausreißer (5 in 3000 Frames, <= 14 ms): Wachstum von `GiBlasStore` (Vektor-Realloc, bis 11 ms) und der Voll-Upload bei Kompaktierung (bis 7 ms).
+   Mit Reserve beim ersten `add()` und inkrementeller Kompaktierung zu beheben.
 3. GI-Backlog Punkt 1-4 nur nach neuer Messung: Hardwarepfad kostet 1,3 ms insgesamt, Höhenfeld dort wäre < 0,2 ms Gewinn.
 4. Gleiches Memo/Set-Sharing für D3D11/D3D12/GL prüfen: `resolveShaders` wird von allen Backends pro Draw aufgerufen.

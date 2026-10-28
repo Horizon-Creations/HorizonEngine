@@ -1453,6 +1453,7 @@ private:
 		VkDeviceSize   size   = 0;
 	};
 	HE::GiBvh    BuildGIBvh(const HE::UUID& meshId);
+	HE::GiBvhRefitCache m_giBvhCache;   // a re-stitched / sculpted mesh refits its tree instead of rebuilding it
 	void         updateGiAccel();  // lazy BLAS append + per-frame instance upload
 	void         destroyGiAccel();
 
@@ -1551,9 +1552,15 @@ private:
 	// memcpys `data` into it. Grows by recreation (to `reserve` bytes when that
 	// is larger: headroom for an array that keeps growing); never shrinks.
 	// `from` > 0 copies only [from, size) — the rest is on the GPU already.
+	// `fresh`: frames in flight may still read `b`, so it is never overwritten or freed here. A rewrite (from == 0)
+	// or a growth puts a NEW buffer in its place and the old one waits in m_retiredGiBufs until those frames are
+	// done, instead of the caller idling the whole device first.
 	bool         uploadGiBuffer(GiBuffer& b, const void* data, VkDeviceSize size,
 	                            VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-	                            VkDeviceSize from = 0, VkDeviceSize reserve = 0);
+	                            VkDeviceSize from = 0, VkDeviceSize reserve = 0, bool fresh = false);
+	struct RetiredGiBuf { GiBuffer buf; int frames = 0; };
+	std::vector<RetiredGiBuf> m_retiredGiBufs;
+	void         destroyGiBuffer(GiBuffer& b);
 	HE::GiBlasStore m_giBlas;   // per-mesh BLASes, concatenated (GiBlasStore.h)
 	GiBuffer m_giNodeBuf;
 	GiBuffer m_giTriBuf;
@@ -1624,8 +1631,10 @@ private:
 	{
 		VkBuffer        buf  = VK_NULL_HANDLE;
 		VkDeviceMemory  mem  = VK_NULL_HANDLE;
-		VkDeviceSize    size = 0;
+		VkDeviceSize    size = 0;                 // capacity: >= what was asked for (size classes, see createGiHwBuffer)
 		VkDeviceAddress addr = 0;
+		VkBufferUsageFlags    usage = 0;          // what the buffer was created with, the pool's key
+		VkMemoryPropertyFlags props = 0;
 	};
 	struct GiHwBlas
 	{
@@ -1642,7 +1651,13 @@ private:
 	};
 	bool     createGiHwBuffer(GiHwBuffer& b, VkDeviceSize size, VkBufferUsageFlags usage,
 	                          VkMemoryPropertyFlags props);
-	void     destroyGiHwBuffer(GiHwBuffer& b);
+	void     destroyGiHwBuffer(GiHwBuffer& b);                // returns a healthy buffer to the pool (m_giHwBufPool)
+	void     releaseGiHwBufPool();                            // really frees the pool; the device must be idle
+	// Freed BLAS/scratch/input buffers wait here for the next BLAS instead of going back to the driver: a re-stitched
+	// landscape creates and frees a handful every few frames and a vkAllocateMemory took 0.3-12 ms (perf capture
+	// 2026-10-28). Bounded by kGiHwBufPoolMax bytes; the oldest entries are really freed first.
+	std::vector<GiHwBuffer> m_giHwBufPool;
+	VkDeviceSize            m_giHwBufPoolBytes = 0;
 	void     destroyGiHwBlas(GiHwBlas& b);
 	GiHwBlas buildGiHwBlas(const HE::UUID& meshId);   // creates the BLAS + queues its build (flushGiHwBlasBuilds records it)
 	// A BLAS whose build is queued: the AS exists (so its address is known) but is only filled when the frame's
