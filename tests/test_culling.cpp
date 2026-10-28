@@ -2455,6 +2455,7 @@ TEST_CASE("GI kernels: the constants the hand-kept copies must share")
 			{ "gi_shadow_hw.hlsl",  sh / "gi_shadow_hw.hlsl" },
 			{ "gi_refl.comp",       sh / "gi_refl.comp" }, // Vulkan reflection kernel, its own giHash2/giPcg3d copy
 			{ "gi_refl_hw.comp",    sh / "gi_refl_hw.comp" }, // its ray-query twin: the same hash, kept by hand
+			{ "gi_refl_hw.hlsl",    sh / "gi_refl_hw.hlsl" }, // the D3D12 DXR twin (generated from kGiReflCSHLSL)
 			{ "HlslSources.h",      be / "D3D_Shared" / "HlslSources.h" },
 			{ "OpenGLRenderer.cpp", be / "OpenGL" / "OpenGLRenderer.cpp" },
 			{ "MetalRenderer.mm",   be / "Metal" / "MetalRenderer.mm" },

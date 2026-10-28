@@ -97,6 +97,28 @@ in eine 128x128-Cube (`RenderSkyReflCube` / `EncodeSkyReflCube`, Thema 173); Vul
 * Bild: Wolken erscheinen im Wasser (weich, weil die Reflexion aus der Prepass-Normale kommt, nicht aus der Wellen-Normale, und durch den Blur). Nicht verifiziert: D3D11/D3D12 (kein Sky-Bake dort,
   dokumentierte Luecke), die Lage der Wolken gegen den Himmel nur nach Augenmass geprueft.
 
+## D3D12 auf den Stand von Vulkan/OpenGL (Folgeschritt 6)
+Ausgangslage (Catania, See neben dem Huegel): D3D12 spiegelte den Huegel als zerrissenes Mosaik, ohne Wolken, mit dunklen Zacken auf dem Huegel.
+* **Mosaik: Prepass ohne transparente Draws.** Der D3D12-GI-Prepass (`runGiShadow`) bekam nur `opaqueDCs`; das Wasser fehlte darin, die Reflexionsstrahlen
+  starteten von den Pixeln, Normalen und der Rauheit des Seebodens. Jetzt `giPrepassDCs` = opak + transparent (Filter `contributesAO` bleibt), wie Vulkan/OpenGL.
+* **Wolken: Sky-Cube** (`renderSkyReflCube`, `skyReflPso`, `k_giReflSky` = Slot 45, `t12 TextureCube uSkyRefl` im geteilten HLSL-Kernel, `uRays.z`). Sky-CB hat 7 Slots
+  (Haupt-Himmel + 6 Flaechen). Matrix `SkyCubeFaceInvViewProj(face, cam, rowZeroAtTop = true)` (D3D wie Metal), 2 von 6 Flaechen pro Frame.
+* **Reichweite: DXR-Reflexionskernel** `shaders/gi_refl_hw.hlsl` (aus `kGiReflCSHLSL` mit `scripts/gen_gi_refl_hw_hlsl.py` erzeugt, dxc cs_6_5 -> `gi_refl_hw.cso`),
+  TLAS als Root-SRV t13 (Root-Parameter 9; t7 ist die Landschaftstabelle), mindestens 4000 m, `HE_GI_REFL_HW=0` zurueck auf den SW-Kernel. Die HW-BLAS werden aus den
+  SW-Dreiecken gebaut (nicht indiziert, Primitive-Index = Dreiecksnummer im Slice) wie bei Vulkan.
+* **Dunkle Zacken/Streifen** (nur D3D11/D3D12, mit GI, wandern mit dem LOD): Defekt B aus Thema 204, `docs/gi-landscape-tile-seams-verify-2026-10-17.md`. Der GI-G-Buffer hatte
+  `D16_UNORM`-Tiefe, Chunk-Skirts gewannen den Tiefentest, der Sonnenstrahl startete unter dem Gelaende. Der Fix `520f1453` (D32) lag nur auf dem Branch
+  `claude/landscape-falsche-gi-schatten-an-steilen-kanten-zwischen-lan` und fehlte in `release/0.7.0`; per cherry-pick uebernommen (`283aae95`). Nach dem Fix auf D3D11 und D3D12 keine Zacken.
+* Zeiten (D3D12, See-Pose, p50): GPU 3,34 -> 3,00 ms, GIRefl 0,81 -> 0,16 ms (trotz Sky-Cube); 263 -> 292 fps.
+* Farbe der Spiegelung: nach dem Prepass-Fix ist der D3D12-Spiegel noch etwas dunkler/gruener als Vulkan (Mittelwert der gespiegelten Huegelflaeche RGB 111,115,109 gegen 130,128,127; OpenGL
+  110,116,123). Die Rauheit im Prepass ist es nicht (Test mit Rauheit 0: gleiche Zahlen). Ursache nicht gefunden.
+* Nicht verifiziert: Metal; ein selten auftretender Hang beim Beenden von D3D12-Laeufen direkt nach einem frischen Build (fiel 3 von ~10 Laeufen auf, 30 Folgelaeufe in neuem und altem Build ohne Hang).
+
+## D3D11: kann es das auch?
+Ja, der Versuch (Faehigkeit `supportsGIReflections = giSupported` kurz eingeschaltet, nicht committet): Kernel, CBs, Blur/Mix und das Lesen im Graph-Material (Wasser) sind da, die Spiegelung erscheint.
+Kosten im Versuch: GIRefl 0,6 ms, GPU gesamt 3,36 -> 4,17 ms (die +22 ms aus `D3D11Renderer.cpp` ~Z. 9089 stimmen so nicht mehr). Es fehlen: (1) der Prepass muss wie bei D3D12 transparente Draws
+einschliessen (sonst dasselbe Mosaik), (2) der Sky-Cube (Wolken), (3) das Einschalten der Faehigkeit samt UI. Der eingebaute D3D11-Scene-Shader hat weiter keine GI-Reflexion (nur Graph-Materialien).
+
 ## Zeiten, vorher und nachher (Vulkan, RTX 4070, HEProject/Catania, GI + Reflexionen an, 2000x1125 hidden)
 | Situation | Start (vor allem) | nach Material-/Validation-Fix | jetzt |
 |---|---|---|---|

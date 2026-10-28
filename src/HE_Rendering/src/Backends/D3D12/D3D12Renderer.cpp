@@ -3076,12 +3076,13 @@ struct D3D12RendererImpl
         for (UINT f = 0; f < k_frameCount; ++f)
         {
             // Sized for the larger of the two layouts, so either shader fits.
-            skyCBuf[f] = createUploadBuffer(alignUp(static_cast<UINT>(std::max(sizeof(HE::SkyFrameParams), sizeof(SkyCB))), k_cbSlot),
-                                            reinterpret_cast<void**>(&skyCBufPtr[f]));
+            // Seven slots: the main sky and the six faces of the GI-reflection sky cube (each draw needs its own constants,
+            // the CPU writes them at record time).
+            skyCBuf[f] = createUploadBuffer(7ull * skyCbStride(), reinterpret_cast<void**>(&skyCBufPtr[f]));
         }
 
         // Helper: make a sky PSO for a given RT format.
-        auto makeSkyPso = [&](DXGI_FORMAT fmt, ComPtr<ID3D12PipelineState>& out) {
+        auto makeSkyPso = [&](DXGI_FORMAT fmt, ComPtr<ID3D12PipelineState>& out, DXGI_FORMAT dsvFmt = DXGI_FORMAT_D32_FLOAT) {
             D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
             pd.pRootSignature = skyRootSig.Get();
             pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
@@ -3091,7 +3092,7 @@ struct D3D12RendererImpl
             pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
             pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
             pd.DepthStencilState.DepthEnable = FALSE;  // sky ignores depth
-            pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;       // must match bound DSV even when depth is off
+            pd.DSVFormat = dsvFmt;                      // must match bound DSV even when depth is off
             pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             pd.NumRenderTargets = 1; pd.RTVFormats[0] = fmt;
             pd.SampleDesc.Count = 1;
@@ -3113,6 +3114,8 @@ struct D3D12RendererImpl
         }
         if (!skyHdrPso) return false;
         makeSkyPso(DXGI_FORMAT_R8G8B8A8_UNORM, skyLdrPso);  // best-effort fallback
+        // The GI-reflection sky cube's faces: an RGBA16F target with NO depth buffer bound.
+        makeSkyPso(DXGI_FORMAT_R16G16B16A16_FLOAT, skyReflPso, DXGI_FORMAT_UNKNOWN);
 
         skyReady = skyRootSig && skyHdrPso && skyEnvHeap && skyCBuf[0];
         return skyReady;
@@ -3187,15 +3190,23 @@ struct D3D12RendererImpl
     // drift, `hdr` picks the PSO for the bound target. Parameters, not
     // m_renderWorld / m_wallTime / usingHDR, because the world preview draws
     // this sky from ITS camera, with the clock stopped, into its own HDR target.
+    // Constants of one sky draw: `cbSlot` 0 is the frame's sky, 1..6 the faces of the GI-reflection cube; `psoOverride`
+    // replaces the HDR/LDR pick (the cube's faces draw without a depth buffer).
+    UINT skyCbStride() const
+    {
+        return alignUp(static_cast<UINT>(std::max(sizeof(HE::SkyFrameParams), sizeof(SkyCB))), k_cbSlot);
+    }
     void drawSky(ID3D12GraphicsCommandList* cl, UINT fi,
                  const glm::mat4& invVP, const glm::vec3& sunDir,
                  const IRenderer::EnvironmentSettings& env,
-                 const glm::vec3& cameraPos, float time, bool hdr)
+                 const glm::vec3& cameraPos, float time, bool hdr,
+                 UINT cbSlot = 0, ID3D12PipelineState* psoOverride = nullptr)
     {
         if (!skyReady) return;
         if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
-        auto* pso12 = hdr ? skyHdrPso.Get() : (skyLdrPso ? skyLdrPso.Get() : nullptr);
+        auto* pso12 = psoOverride ? psoOverride : (hdr ? skyHdrPso.Get() : (skyLdrPso ? skyLdrPso.Get() : nullptr));
         if (!pso12) return;
+        const UINT64 cbOffset = static_cast<UINT64>(cbSlot) * skyCbStride();
         // Translate the environment through the SHARED sky-constants builder
         // instead of hand-assigning fields (which is how D3D12 previously ended up
         // with +cos where GL/Metal have -cos, drifting the clouds 180° the wrong
@@ -3222,15 +3233,15 @@ struct D3D12RendererImpl
         cb.nebula       = sp.nebulaColor.w;
         if (skyCBufPtr[fi])
         {
-            if (skyFullModel) std::memcpy(skyCBufPtr[fi], &sp, sizeof(sp));
-            else              std::memcpy(skyCBufPtr[fi], &cb, sizeof(cb));
+            if (skyFullModel) std::memcpy(skyCBufPtr[fi] + cbOffset, &sp, sizeof(sp));
+            else              std::memcpy(skyCBufPtr[fi] + cbOffset, &cb, sizeof(cb));
         }
 
         cl->SetGraphicsRootSignature(skyRootSig.Get());
         cl->SetPipelineState(pso12);
         ID3D12DescriptorHeap* heaps[] = { skyEnvHeap.Get() };
         cl->SetDescriptorHeaps(1, heaps);
-        cl->SetGraphicsRootConstantBufferView(0, skyCBuf[fi]->GetGPUVirtualAddress());
+        cl->SetGraphicsRootConstantBufferView(0, skyCBuf[fi]->GetGPUVirtualAddress() + cbOffset);
         cl->SetGraphicsRootDescriptorTable(1, skyEnvHeap->GetGPUDescriptorHandleForHeapStart());
         cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         cl->IASetVertexBuffers(0, 0, nullptr);
@@ -4012,6 +4023,7 @@ struct D3D12RendererImpl
     ComPtr<ID3D12RootSignature>  skyRootSig;
     ComPtr<ID3D12PipelineState>  skyHdrPso;        // RGBA16F target
     ComPtr<ID3D12PipelineState>  skyLdrPso;        // RGBA8 target
+    ComPtr<ID3D12PipelineState>  skyReflPso;       // RGBA16F target, no depth: the GI-reflection sky cube's faces
     ComPtr<ID3D12Resource>       skyCBuf[k_frameCount];
     uint8_t*                     skyCBufPtr[k_frameCount]{};
     ComPtr<ID3D12DescriptorHeap> skyEnvHeap;       // 2-slot SRV heap: moon (t0) + 3D noise (t1)
@@ -7226,6 +7238,7 @@ struct D3D12RendererImpl
     ComPtr<ID3D12Device5>              giDevice5;
     ComPtr<ID3D12GraphicsCommandList4> giCmdList4;    // the frame cmdList, DXR view
     ComPtr<ID3D12PipelineState>        giShadowHwPSO, giProbeHwPSO;
+    ComPtr<ID3D12PipelineState>        giReflHwPSO;   // gi_refl_hw.cso (optional: reflections stay on the SW kernel without it)
     // One-shot BLAS builds need their own allocator/list — the frame list is
     // mid-recording when a new mesh first shows up (Vulkan uses a one-time
     // command buffer + QueueWaitIdle for the same reason; builds are rare).
@@ -7276,8 +7289,10 @@ struct D3D12RendererImpl
     //  [35..37] blur V pass:                      ping, ping, gbufNorm
     //  [38..40] mix with blur:                    raw,  blur, gbufNorm
     //  [41..44] landscape weightmaps, the trace's table 2 (t8..t11; null views for an auto entry / none)
-    static constexpr UINT k_giSrvSlots   = 45;
+    //  [45] the GI-reflection sky cube (TextureCube, t12): the real sky a missed ray reads (renderSkyReflCube)
+    static constexpr UINT k_giSrvSlots   = 46;
     static constexpr UINT k_giReflLand   = 41;
+    static constexpr UINT k_giReflSky    = 45;
     static constexpr UINT k_giReflCompute = 23; // table base of the trace dispatch
     static constexpr UINT k_giReflUav     = 27;
     static constexpr UINT k_giReflTabRaw  = 29;
@@ -7411,12 +7426,12 @@ struct D3D12RendererImpl
         // built breaks that 1:1 mapping → SW kernels this frame.
         giHwInstOk = false;
         giHwInstancesCpu.clear();
-        bool hwAll = giHwPipesReady && giEnabled; // reflections trace the SW BVH only
-        auto resolveHwBlas = [&](const HE::UUID& id) -> const GiHwBlas&
+        bool hwAll = giHwPipesReady && giEnabled; // a reflections-only frame (GI off) builds no TLAS and traces the SW BVH
+        auto resolveHwBlas = [&](const HE::UUID& id, const GIBlasRange& range) -> const GiHwBlas&
         {
             auto it = giHwBlasCache.find(id);
             if (it == giHwBlasCache.end())
-                it = giHwBlasCache.emplace(id, buildGiHwBlas(cm, id)).first;
+                it = giHwBlasCache.emplace(id, buildGiHwBlas(cm, id, range)).first;
             return it->second;
         };
 #endif
@@ -7464,7 +7479,7 @@ struct D3D12RendererImpl
 #if HE_D3D12_DXR
             if (hwAll)
             {
-                const GiHwBlas& hb = resolveHwBlas(effectiveId);
+                const GiHwBlas& hb = resolveHwBlas(effectiveId, range);
                 if (!hb.valid)
                 {
                     hwAll = false; // incomplete TLAS would misalign InstanceID ↔ giInsts
@@ -7704,14 +7719,15 @@ struct D3D12RendererImpl
             uavRange.BaseShaderRegister                = 0;
             uavRange.OffsetInDescriptorsFromTableStart = 0;
 
-            // [8] SRV table t8..t11 = the four landscape weightmaps of the reflection trace (heap slots k_giReflLand..).
+            // [8] SRV table t8..t11 = the four landscape weightmaps of the reflection trace, t12 = its sky cube (heap slots
+            // k_giReflLand..k_giReflSky).
             D3D12_DESCRIPTOR_RANGE landRange{};
             landRange.RangeType                         = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-            landRange.NumDescriptors                    = 4;
+            landRange.NumDescriptors                    = 5;
             landRange.BaseShaderRegister                = 8;
             landRange.OffsetInDescriptorsFromTableStart = 0;
 
-            D3D12_ROOT_PARAMETER params[9]{};
+            D3D12_ROOT_PARAMETER params[10]{};
             params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
             params[0].Descriptor       = { 0, 0 };
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -7749,6 +7765,11 @@ struct D3D12RendererImpl
             params[8].DescriptorTable.NumDescriptorRanges = 1;
             params[8].DescriptorTable.pDescriptorRanges   = &landRange;
             params[8].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_ALL;
+            // [9] root SRV t13 = the TLAS of the HW reflection kernel (gi_refl_hw.hlsl). The shadow/probe HW kernels name it t7;
+            // the reflection trace needs t7 for its landscape table, so its TLAS lives here.
+            params[9].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_SRV;
+            params[9].Descriptor       = { 13, 0 };
+            params[9].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
             // s1 = linear + clamp, for the reflection kernel's probe-atlas taps (the
             // shading-side Chebyshev sampler is bilinear; a compute shader has no
@@ -7760,7 +7781,7 @@ struct D3D12RendererImpl
             linSamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
             linSamp.MaxLOD           = D3D12_FLOAT32_MAX;
             D3D12_ROOT_SIGNATURE_DESC rsd{};
-            rsd.NumParameters = 9; rsd.pParameters = params;
+            rsd.NumParameters = 10; rsd.pParameters = params;
             rsd.NumStaticSamplers = 1; rsd.pStaticSamplers = &linSamp;
             ComPtr<ID3DBlob> sig, e;
             ok = SUCCEEDED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &e))
@@ -7947,8 +7968,16 @@ struct D3D12RendererImpl
                 nullUav(5, DXGI_FORMAT_R16G16B16A16_FLOAT); // local-light mask (u1)
                 nullUav(6, DXGI_FORMAT_R16G16B16A16_FLOAT); // irr
                 nullUav(7, DXGI_FORMAT_R16G16_FLOAT);       // vis
-                for (UINT s = 8; s < k_giSrvSlots; ++s)
+                for (UINT s = 8; s < k_giReflSky; ++s)
                     nullSrv(s, DXGI_FORMAT_R16G16B16A16_FLOAT);
+                {
+                    D3D12_SHADER_RESOURCE_VIEW_DESC cv{};
+                    cv.Format                  = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                    cv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURECUBE;
+                    cv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                    cv.TextureCube.MipLevels   = 1;
+                    device->CreateShaderResourceView(nullptr, &cv, giSrvCpu(k_giReflSky));
+                }
                 nullUav(k_giReflUav,     DXGI_FORMAT_R16G16B16A16_FLOAT); // reflection trace (u0)
                 nullUav(k_giReflUav + 1, DXGI_FORMAT_R16G16B16A16_FLOAT); // filler (u1)
             }
@@ -8503,13 +8532,107 @@ struct D3D12RendererImpl
             srvIntoHeapSlot(giReflTex.Get(), f16, matSrvStagingCpu(HE::d3d12mat::kSlotGIReflFwd));
     }
 
+    // GI-reflection sky cube (the D3D12 twin of OpenGL's RenderSkyReflCube / Metal's EncodeSkyReflCube, topic 173): the REAL
+    // sky - clouds, weather - drawn around the camera into six 128x128 faces; a reflection ray that hits nothing reads it, so a
+    // mirror shows clouds instead of the cloudless analytic cube. Only kSkyReflFacesPerFrame of the six faces are redrawn per
+    // frame (the clouds drift slowly; all six cost 0.3 ms), the first frame draws all of them. HE_GIREFL_SKY=0 turns it off.
+    static constexpr UINT k_skyReflSize = 128;
+    static constexpr UINT k_skyReflFacesPerFrame = 2;
+    ComPtr<ID3D12Resource>       skyReflTex;       // Texture2DArray x6, RGBA16F
+    ComPtr<ID3D12DescriptorHeap> skyReflRtvHeap;   // 6 face RTVs
+    D3D12_RESOURCE_STATES        skyReflState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    bool                         skyReflBaked = false;
+    bool                         skyReflValid = false;   // this frame's cube holds the sky (uRays.z)
+    UINT                         skyReflPhase = 0;
+
+    bool ensureSkyReflCube()
+    {
+        if (skyReflTex) return true;
+        if (!skyReflPso || !giSrvHeap) return false;
+        waitForAllFrames();   // the slot below sits in the shader-visible heap that frames in flight read
+        D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        D3D12_RESOURCE_DESC td{};
+        td.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        td.Width            = k_skyReflSize;
+        td.Height           = k_skyReflSize;
+        td.DepthOrArraySize = 6;
+        td.MipLevels        = 1;
+        td.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        td.SampleDesc.Count = 1;
+        td.Flags            = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE cv{}; cv.Format = td.Format; cv.Color[3] = 1.0f;   // black, opaque: renderSkyReflCube clears to the same
+        if (FAILED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &td,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cv, IID_PPV_ARGS(&skyReflTex))))
+            return false;
+        D3D12_DESCRIPTOR_HEAP_DESC rd{};
+        rd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV; rd.NumDescriptors = 6;
+        if (FAILED(device->CreateDescriptorHeap(&rd, IID_PPV_ARGS(&skyReflRtvHeap))))
+        { skyReflTex.Reset(); return false; }
+        const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        for (UINT f = 0; f < 6; ++f)
+        {
+            D3D12_RENDER_TARGET_VIEW_DESC rv{};
+            rv.Format = td.Format;
+            rv.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+            rv.Texture2DArray.FirstArraySlice = f;
+            rv.Texture2DArray.ArraySize       = 1;
+            D3D12_CPU_DESCRIPTOR_HANDLE h = skyReflRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(f) * inc;
+            device->CreateRenderTargetView(skyReflTex.Get(), &rv, h);
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+        sv.Format                  = td.Format;
+        sv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        sv.TextureCube.MipLevels   = 1;
+        device->CreateShaderResourceView(skyReflTex.Get(), &sv, giSrvCpu(k_giReflSky));
+        skyReflState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        return true;
+    }
+
+    // Same matrices as OpenGL/Metal: SkyCubeFaceInvViewProj(face, camera, rowZeroAtTop). NDC y = +1 lands in texel row 0 on
+    // D3D as on Metal, hence true. Leaves the cube readable by the compute trace and every other state as it found it
+    // except the bound render targets / descriptor heaps / root signature, which the caller (runGiReflections) sets itself.
+    void renderSkyReflCube(ID3D12GraphicsCommandList* cl, UINT fi, const RenderWorld& rw,
+                           const IRenderer::EnvironmentSettings& env)
+    {
+        skyReflValid = false;
+        static const bool s_off = [] { const char* e = std::getenv("HE_GIREFL_SKY"); return e && e[0] == '0'; }();
+        if (s_off || !env.skyEnabled || !skyReady || !ensureSkyReflCube()) return;
+        const UINT first = skyReflBaked ? skyReflPhase * k_skyReflFacesPerFrame : 0u;
+        const UINT end   = skyReflBaked ? first + k_skyReflFacesPerFrame : 6u;
+        barrier12(cl, skyReflTex.Get(), skyReflState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const D3D12_VIEWPORT vp{ 0, 0, float(k_skyReflSize), float(k_skyReflSize), 0.0f, 1.0f };
+        const D3D12_RECT     sc{ 0, 0, static_cast<LONG>(k_skyReflSize), static_cast<LONG>(k_skyReflSize) };
+        const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        const glm::vec3 camPos = rw.camera.position;
+        for (UINT f = first; f < end; ++f)
+        {
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = skyReflRtvHeap->GetCPUDescriptorHandleForHeapStart();
+            rtv.ptr += static_cast<SIZE_T>(f) * inc;
+            const float black[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            cl->ClearRenderTargetView(rtv, black, 0, nullptr);
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sc);
+            drawSky(cl, fi, HE::SkyCubeFaceInvViewProj(static_cast<int>(f), camPos, /*rowZeroAtTop=*/true),
+                    rw.sunDirection, env, camPos, m_wallTime, /*hdr=*/true, 1 + f, skyReflPso.Get());
+        }
+        barrier12(cl, skyReflTex.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        skyReflState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        skyReflValid = true;
+        skyReflPhase = skyReflBaked ? (skyReflPhase + 1) % (6u / k_skyReflFacesPerFrame) : 0u;
+        skyReflBaked = true;
+    }
+
     // Trace + blur + roughness mix. Needs the prepass (pos/norm in PIXEL|NON_PIXEL
     // from runGiShadow) and the BVH buffers; the probe atlases only when
     // `probesValid` (the diffuse GI ran this frame, so they hold data). Leaves
     // giReflTex in PIXEL_SHADER_RESOURCE and giSrvHeap bound; the caller restores
     // the scene target. true = giReflTex is this frame's result.
     bool runGiReflections(ID3D12GraphicsCommandList* cl, UINT fi, const RenderWorld& rw,
-                          bool probesValid)
+                          bool probesValid, const IRenderer::EnvironmentSettings& env)
     {
         GpuPassScope _passTimer(this, "GIRefl");
         createGiReflPipelines();
@@ -8549,6 +8672,14 @@ struct D3D12RendererImpl
         }
 
         // ── 1. Trace ─────────────────────────────────────────────────────────
+        // The real sky for rays that miss (clouds, weather), drawn before the trace reads it.
+        renderSkyReflCube(cl, fi, rw, env);
+        // The ray-query kernel when this frame's TLAS is up (it holds the same instances in the same order as the reflection
+        // instance list); otherwise the software kernel over the BVH buffers.
+        bool hwRefl = false;
+#if HE_D3D12_DXR
+        hwRefl = giUseHwThisFrame && giReflHwPSO && giTlasBuf[fi];
+#endif
         {
             GiReflCBData cb{};
             glm::vec3 towardLight, lightColorIntensity;
@@ -8568,13 +8699,17 @@ struct D3D12RendererImpl
             cb.ambient    = glm::vec4(rw.ambient, 0.0f);
             cb.gridOrigin = glm::vec4(giGridOrigin, giProbeSpacing);
             cb.gridCounts = glm::vec4(glm::vec3(giGridCounts), static_cast<float>(giProbesPerRow));
-            cb.reflParams = glm::vec4(giReflMaxDistance, giReflMaxRoughness, giIndirectIntensity,
-                                      irr ? 1.0f : 0.0f);
+            // The ray query pays next to nothing for a long ray (Vulkan: GIRefl 0.02 ms at 200, 1500 and 4000 m), and the 200 m the
+            // software kernels need to stay cheap cut a hill 300 m away in half in a lake's mirror and left the far shore and
+            // the horizon out of every water reflection: what lies past the limit falls back to the sky, which has no terrain.
+            constexpr float kHwReflMinDistance = 4000.0f;
+            cb.reflParams = glm::vec4(hwRefl ? std::max(giReflMaxDistance, kHwReflMinDistance) : giReflMaxDistance,
+                                      giReflMaxRoughness, giIndirectIntensity, irr ? 1.0f : 0.0f);
             // frame.w gates the glossy cone: derived from the ray count, not from the
             // tier, exactly as the GL port does (a ladder that read 1/1/4 otherwise).
             cb.frame      = glm::vec4(giReflFrameSeed, static_cast<float>(giShadowW),
                                       static_cast<float>(giShadowH), tier.rays > 1 ? 1.0f : 0.0f);
-            cb.rays       = glm::vec4(static_cast<float>(tier.rays), 0.0f, 0.0f, 0.0f);
+            cb.rays       = glm::vec4(static_cast<float>(tier.rays), 0.0f, skyReflValid ? 1.0f : 0.0f, 0.0f);
             if (giReflCBPtr[fi]) std::memcpy(giReflCBPtr[fi], &cb, sizeof(cb));
             // The count CB is also written by the shadow/probe dispatches (same
             // value); a reflection-only frame has neither, so it is written here too.
@@ -8585,8 +8720,12 @@ struct D3D12RendererImpl
             ID3D12DescriptorHeap* heaps[] = { giSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, heaps);
             cl->SetComputeRootSignature(giComputeRS.Get());
-            cl->SetPipelineState(giReflPSO.Get());
+            cl->SetPipelineState(hwRefl ? giReflHwPSO.Get() : giReflPSO.Get());
             cl->SetComputeRootConstantBufferView(0, giReflCB[fi]->GetGPUVirtualAddress());
+#if HE_D3D12_DXR
+            if (hwRefl) // t13 = the TLAS, bound as a raw GPU VA (t7 is the landscape table)
+                cl->SetComputeRootShaderResourceView(9, giTlasBuf[fi]->GetGPUVirtualAddress());
+#endif
             cl->SetComputeRootConstantBufferView(1, giCountCB[fi]->GetGPUVirtualAddress());
             cl->SetComputeRootDescriptorTable(2, giSrvGpu(k_giReflCompute));
             cl->SetComputeRootShaderResourceView(3, giNodeSB->GetGPUVirtualAddress());
@@ -9164,6 +9303,22 @@ struct D3D12RendererImpl
         giHwPipesReady = true;
         HE_LOG_INFO(RHI, "%s",
                     "D3D12Renderer: GI hardware ray tracing available (DXR 1.1 inline RayQuery)");
+        // The reflection kernel is optional: a missing blob or a PSO failure only leaves the reflections on the SW kernel.
+        if (const char* off = std::getenv("HE_GI_REFL_HW"); !(off && off[0] == '0'))
+        {
+            const std::vector<uint8_t> reflBlob = loadGiShaderBlob("gi_refl_hw.cso");
+            if (!reflBlob.empty())
+            {
+                D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+                cd.pRootSignature = giComputeRS.Get();
+                cd.CS = { reflBlob.data(), reflBlob.size() };
+                if (SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&giReflHwPSO))))
+                    HE_LOG_INFO(RHI, "%s", "D3D12Renderer: GI HW reflection kernel built (DXR 1.1 inline RayQuery)");
+                else
+                    HE_LOG_WARN(RHI, "%s", "D3D12Renderer: GI HW reflection PSO failed - reflections stay on the software kernel");
+            }
+        }
+        else HE_LOG_INFO(RHI, "%s", "D3D12Renderer: HE_GI_REFL_HW=0 - GI reflections stay on the software kernel");
     }
 
     // One-shot BLAS build for a mesh, cached by asset id (parallel to the SW
@@ -9172,48 +9327,32 @@ struct D3D12RendererImpl
     // VertexBuffer.StrideInBytes directly, no repack) or loose tight 3-float
     // positions. Builds on the dedicated one-shot list + full GPU sync — rare
     // (once per distinct mesh), mirroring Vulkan's QueueWaitIdle approach.
-    GiHwBlas buildGiHwBlas(ContentManager* cm, const HE::UUID& meshId)
+    GiHwBlas buildGiHwBlas(ContentManager* cm, const HE::UUID& /*meshId*/, const GIBlasRange& range)
     {
         HE_PROFILE_SCOPE_N("D3D12::GiBuildHwBlas");
         GiHwBlas out;
-        if (!giHwPipesReady || !cm) return out;
-        const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
-        if (!asset || asset->indices.empty()) return out;
+        if (!giHwPipesReady || !cm || !range.valid || range.triCount <= 0) return out;
+        if (static_cast<size_t>(range.triOffset) + static_cast<size_t>(range.triCount) > giBlas.tris().size()) return out;
 
-        const float* vdata   = nullptr;
-        UINT         vcount  = 0;
-        UINT64       vstride = 0;
-        if (asset->cooked && !asset->interleaved.empty())
-        {
-            vdata   = asset->interleaved.data();
-            vcount  = static_cast<UINT>(asset->vertexCount);
-            vstride = 8 * sizeof(float);
-        }
-        else if (!asset->vertices.empty())
-        {
-            vdata   = asset->vertices.data();
-            vcount  = static_cast<UINT>(asset->vertices.size() / 3);
-            vstride = 3 * sizeof(float);
-        }
-        if (!vdata || vcount == 0) return out;
-        const UINT primCount = static_cast<UINT>(asset->indices.size() / 3);
-        if (primCount == 0) return out;
+        // The BLAS is built from the SW BVH's triangles (the mesh's slice, leaf order, three float4 per triangle = a
+        // non-indexed vertex array of stride 16): a hit's primitive index is then the triangle's number inside the slice,
+        // which gi_refl_hw.hlsl adds to the instance's triOffset to read the very triangle the SW kernels use.
+        const UINT primCount = static_cast<UINT>(range.triCount);
+        const UINT vcount    = primCount * 3u;
+        const UINT64 vstride = 16;
+        static_assert(sizeof(HE::GiBvhTriangle) == 3 * 16, "the BLAS input reads a GiBvhTriangle as three float4 vertices");
+        const void* vdata = giBlas.tris().data() + range.triOffset;
 
-        // Build-input buffer: vertices then (4-byte aligned) indices, upload heap
-        // (GENERIC_READ covers NON_PIXEL_SHADER_RESOURCE, valid AS build input).
+        // Build-input buffer: the vertices only, upload heap (GENERIC_READ covers NON_PIXEL_SHADER_RESOURCE, valid AS input).
         const UINT64 vBytes = vstride * vcount;
-        const UINT64 iOfs   = (vBytes + 3ull) & ~3ull;
-        const UINT64 iBytes = asset->indices.size() * sizeof(uint32_t);
         void* mapped = nullptr;
-        ComPtr<ID3D12Resource> geo = createUploadBuffer(iOfs + iBytes, &mapped);
+        ComPtr<ID3D12Resource> geo = createUploadBuffer(vBytes, &mapped);
         if (!geo || !mapped)
         {
             HE_LOG_WARN(RHI, "%s", "D3D12Renderer: DXR BLAS input buffer failed");
             return out;
         }
         std::memcpy(mapped, vdata, static_cast<size_t>(vBytes));
-        std::memcpy(static_cast<uint8_t*>(mapped) + iOfs, asset->indices.data(),
-                    static_cast<size_t>(iBytes));
 
         D3D12_RAYTRACING_GEOMETRY_DESC gd{};
         gd.Type  = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
@@ -9222,9 +9361,9 @@ struct D3D12RendererImpl
         gd.Triangles.VertexBuffer.StrideInBytes = vstride;
         gd.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
         gd.Triangles.VertexCount  = vcount;
-        gd.Triangles.IndexBuffer  = geo->GetGPUVirtualAddress() + iOfs;
-        gd.Triangles.IndexFormat  = DXGI_FORMAT_R32_UINT;
-        gd.Triangles.IndexCount   = static_cast<UINT>(asset->indices.size());
+        gd.Triangles.IndexBuffer  = 0;
+        gd.Triangles.IndexFormat  = DXGI_FORMAT_UNKNOWN;
+        gd.Triangles.IndexCount   = 0;
 
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
         inputs.Type           = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
@@ -11181,6 +11320,7 @@ void D3D12Renderer::Shutdown()
     }
     m_impl->giShadowHwPSO.Reset();
     m_impl->giProbeHwPSO.Reset();
+    m_impl->giReflHwPSO.Reset();
     m_impl->giBuildCmdList.Reset();
     m_impl->giBuildAllocator.Reset();
     m_impl->giCmdList4.Reset();
@@ -11899,7 +12039,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         const bool giReflWanted = p.giReflEnabled && p.giSupported;
         if ((p.giEnabled || giReflWanted) && p.giSupported && p.giInstanceCount > 0)
         {
-            const bool maskOk = p.runGiShadow(cl, p.frameIndex, opaqueDCs, viewProjClean,
+            // The prepass the mask and the reflection trace read draws EVERY surface that contributes (Vulkan and OpenGL
+            // do: `contributesAO`, transparent ones included), not just the opaque draws: a lake or a pane of glass is
+            // the surface the player sees, and with the water missing from the prepass the reflection rays started from
+            // the lake BED's pixels, bed normals and bed roughness, which tore the mirror into a mosaic.
+            std::vector<const DrawCall*> giPrepassDCs;
+            giPrepassDCs.reserve(opaqueDCs.size() + transparentDCs.size());
+            giPrepassDCs.insert(giPrepassDCs.end(), opaqueDCs.begin(), opaqueDCs.end());
+            giPrepassDCs.insert(giPrepassDCs.end(), transparentDCs.begin(), transparentDCs.end());
+            const bool maskOk = p.runGiShadow(cl, p.frameIndex, giPrepassDCs, viewProjClean,
                                               std::max(1, width / 2), std::max(1, height / 2),
                                               p.m_renderWorld, m_contentManager,
                                               /*maskPasses=*/p.giEnabled);
@@ -11909,7 +12057,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // After the probe update: the trace shades its hits from the atlases it
             // just refreshed.
             if (maskOk && giReflWanted)
-                p.runGiReflections(cl, p.frameIndex, p.m_renderWorld, giShadingActive);
+                p.runGiReflections(cl, p.frameIndex, p.m_renderWorld, giShadingActive, m_environment);
 
             // Restore the scene RTV + depth + viewport after the GI passes
             // changed them.

@@ -1471,7 +1471,7 @@ cbuffer GiReflCB : register(b0)
     float4 uGridCounts;  // xyz = probes per axis, w = probes per atlas row
     float4 uReflParams;  // x = max ray distance, y = max roughness, z = indirect intensity, w = probe atlases valid
     float4 uFrame;       // x = jitter seed, y = width, z = height, w = 1 -> glossy cone jitter
-    float4 uRays;        // x = rays per glossy pixel (tier)
+    float4 uRays;        // x = rays per glossy pixel (tier), z = 1 -> uSkyRefl holds this frame's sky
     float4 uLightPosRange[8];  // xyz pos, w range
     float4 uLightColorType[8]; // rgb colour*intensity, w type (1 point, 2 spot)
     float4 uLightDirCos[8];    // xyz spot travel dir, w cos(half angle)
@@ -1492,6 +1492,9 @@ Texture2D<float4> uLandW0 : register(t8);   // one weightmap per landscape, in g
 Texture2D<float4> uLandW1 : register(t9);
 Texture2D<float4> uLandW2 : register(t10);
 Texture2D<float4> uLandW3 : register(t11);
+// The real sky (clouds, weather) around the camera for rays that miss, baked each frame (D3D12Renderer::renderSkyReflCube).
+// uRays.z = 0: no bake, a miss returns nothing and the composite's cloudless cubemap shows instead.
+TextureCube<float4> uSkyRefl : register(t12);
 
 static const int kOctSize = 8; // must match the host's kGIProbeOctSize
 
@@ -1736,7 +1739,17 @@ void GiReflCS(uint3 gid3 : SV_DispatchThreadID)
         float dist; int tri;
         int hitInst = giSceneClosestHitTri(origin, Rs, 0.02, max(uReflParams.x, 1.0), dist, tri);
         if (hitInst < 0)
-            continue; // miss: nothing (no sky bake on D3D yet), the composite keeps the sky term
+        {
+            // Miss -> the sky. With the bake it is a full sample (the receiver's confidence, like a hit at close range)
+            // carrying the REAL sky, so a mirror shows clouds and a part-miss glossy lobe averages hit and sky; without it
+            // nothing is added and the composite keeps the cloudless analytic cube. Mirrors the GL, Metal and Vulkan kernels.
+            if (uRays.z > 0.5)
+            {
+                outRadiance += uSkyRefl.SampleLevel(uLinSamp, Rs, 0).rgb;
+                outConf     += 1.0;
+            }
+            continue;
+        }
 
         float3 hitPos = origin + Rs * dist;
         float3 hitN   = giHitNormal(hitInst, tri, Rs);

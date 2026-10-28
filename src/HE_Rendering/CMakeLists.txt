@@ -279,7 +279,7 @@ if(WIN32)
         set(HE_D3D12_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
         file(MAKE_DIRECTORY "${HE_D3D12_SHADER_OUT_DIR}")
         set(HE_D3D12_GI_CSO "")
-        foreach(kernel gi_shadow_hw gi_probe_hw)
+        foreach(kernel gi_shadow_hw gi_probe_hw gi_refl_hw)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${kernel}.hlsl")
             set(dst "${HE_D3D12_SHADER_OUT_DIR}/${kernel}.cso")
             add_custom_command(OUTPUT "${dst}"
