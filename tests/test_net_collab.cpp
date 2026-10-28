@@ -5,6 +5,7 @@
 #include <Net/LoopbackTransport.h>
 #include <Net/NetSession.h>
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -804,6 +805,39 @@ TEST_CASE("CollabSession: releasing frees the subject for someone else")
     CHECK(p->host->ownsLock(kSubject));
 }
 
+TEST_CASE("CollabSession: a client's release is final at once, not one round trip later")
+{
+    // Topic 198 step 11, found in the three-editor run: until the host's echo the
+    // client's table still said "mine", so a save in that window went out under a
+    // lock the host had already freed and was refused there without a word.
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+
+    constexpr std::uint64_t kSubject = 56;
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(4);
+    REQUIRE(p->client->ownsLock(kSubject));
+
+    int released = 0;
+    p->client->onLockChanged([&](const LockInfo& l, bool acquired) {
+        if (!acquired && l.subject == kSubject && l.owner == p->client->localId()) ++released;
+    });
+    p->client->releaseLock(kSubject);
+    CHECK_FALSE(p->client->ownsLock(kSubject));   // no pump: the window is closed
+    CHECK(p->client->lockFor(kSubject) == nullptr);
+    CHECK(released == 1);
+
+    // Asking again right away is a fresh claim the host answers after the release.
+    REQUIRE(p->client->requestLock(kSubject));
+    p->pump(6);
+    CHECK(p->client->ownsLock(kSubject));
+    const LockInfo* onHost = p->host->lockFor(kSubject);
+    REQUIRE(onHost != nullptr);
+    CHECK(onHost->owner == p->client->localId());
+    CHECK(released == 1);   // the host's echo of the release found nothing left to drop
+}
+
 TEST_CASE("CollabSession: a participant cannot release a lock it does not hold")
 {
     auto p = makePair();
@@ -1243,6 +1277,87 @@ TEST_CASE("CollabSession: the host's asset save reaches clients")
     REQUIRE(arrived);
     CHECK(got.path == "Content/Scripts/Player.hcode");
     CHECK(got.bytes == payload);
+}
+
+TEST_CASE("CollabSession: a host's asset is serialized once for all peers, not once per peer")
+{
+    // NET-103. Three peers on a transport that fans out (a relay): every frame
+    // of the transfer — Begin, each chunk, End — must be handed down exactly
+    // once, addressed to all three, instead of three per-peer copies.
+    struct Fan final : ITransport {
+        std::deque<NetEvent> ev{ { NetEventType::Connected, 1, {} },
+                                 { NetEventType::Connected, 2, {} },
+                                 { NetEventType::Connected, 3, {} } };
+        std::vector<std::vector<ConnectionId>> to;
+        std::vector<std::vector<std::uint8_t>> frames;
+        int plainSends = 0;
+        void update() override {}
+        void send(ConnectionId, const std::uint8_t*, std::size_t, SendMode) override {
+            ++plainSends;
+        }
+        bool poll(NetEvent& out) override {
+            if (ev.empty()) return false;
+            out = ev.front();
+            ev.pop_front();
+            return true;
+        }
+        void disconnect(ConnectionId) override {}
+        std::size_t connectionCount() const override { return 3; }
+        bool fansOut() const override { return true; }
+        void sendToMany(const ConnectionId* t, std::size_t n, const std::uint8_t* d,
+                        std::size_t len, SendMode) override {
+            to.emplace_back(t, t + n);
+            frames.emplace_back(d, d + len);
+        }
+    };
+
+    Fan t;
+    NetSession net(&t, NetRole::Host);
+    CollabSession::Config cfg;
+    cfg.chunkBytes = 1000;
+    CollabSession host(&net, NetRole::Host, cfg);
+    net.pump();
+    REQUIRE(net.connections().size() == 3);
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'0103ull;
+    REQUIRE(host.requestLock(kAsset));
+    t.to.clear();
+    t.frames.clear();
+    t.plainSends = 0;
+
+    const auto payload = makeBlob(4500);   // five chunks, the last one short
+    REQUIRE(host.sendAsset(kAsset, "Content/Data/Table.hdata", payload));
+
+    REQUIRE(t.frames.size() == 1 + 5 + 1);
+    CHECK(t.plainSends == 0);
+    for (const auto& who : t.to) CHECK(who == std::vector<ConnectionId>{ 1, 2, 3 });
+
+    auto idOf = [](const std::vector<std::uint8_t>& f) {
+        REQUIRE(f.size() >= 2);
+        return static_cast<MessageId>(f[0] | (f[1] << 8));
+    };
+    const MessageId begin = idOf(t.frames.front());
+    const MessageId chunk = idOf(t.frames[1]);
+    const MessageId end   = idOf(t.frames.back());
+    CHECK(begin != chunk);
+    CHECK(end != chunk);
+    CHECK(begin != end);
+
+    // The chunks, in order, are the asset.
+    std::vector<std::uint8_t> joined;
+    for (std::size_t i = 1; i + 1 < t.frames.size(); ++i) {
+        CHECK(idOf(t.frames[i]) == chunk);
+        const std::vector<std::uint8_t>& f = t.frames[i];
+        BitReader r(f.data() + 2, f.size() - 2);
+        std::uint32_t from = 0, len = 0;
+        REQUIRE(r.readUInt32(from));
+        REQUIRE(r.readUInt32(len));
+        CHECK(from == host.localId());
+        std::vector<std::uint8_t> part(len);
+        REQUIRE(r.readBytes(part.data(), len));
+        joined.insert(joined.end(), part.begin(), part.end());
+    }
+    CHECK(joined == payload);
 }
 
 // ─── Structural changes ──────────────────────────────────────────────────────
@@ -3427,4 +3542,97 @@ TEST_CASE("LanBeacon: the browser carries the flag through to the row the panel 
     // unauthenticated — anyone on the segment can write one.
     CHECK(b.sessions()[0].syncsLargeAssets);
     CHECK(b.sessions()[0].address == "192.168.1.61");
+}
+
+// ── Landscape patches ────────────────────────────────────────────────────────
+
+TEST_CASE("CollabSession: a landscape patch reaches the host, and comes back to its sender as its echo")
+{
+    auto p = makePair();
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    // No lock on this channel: a host holding the landscape does not stop it.
+    constexpr std::uint64_t kLandscape = 0xABCDull;
+    REQUIRE(p->host->requestLock(kLandscape));
+    p->pump(4);
+
+    std::vector<CollabSession::TerrainPatch> hostGot;
+    std::vector<std::pair<CollabSession::TerrainPatch, bool>> clientGot;
+    p->host->onTerrainPatch([&](ParticipantId, const CollabSession::TerrainPatch& t, bool own) {
+        CHECK_FALSE(own);   // the host never hears its own
+        hostGot.push_back(t);
+    });
+    p->client->onTerrainPatch([&](ParticipantId, const CollabSession::TerrainPatch& t, bool own) {
+        clientGot.push_back({ t, own });
+    });
+
+    CollabSession::TerrainPatch t;
+    t.netId = kLandscape;
+    t.seq   = 7;
+    t.field = 1 | 0x80;
+    t.res   = 65;
+    t.x0 = 3; t.z0 = 4; t.w = 5; t.h = 2;
+    t.bytes = makeBlob(5 * 2 * 4);
+    REQUIRE(p->client->sendTerrainPatch(t));
+    p->pump(4);
+
+    REQUIRE(hostGot.size() == 1);
+    CHECK(hostGot[0].netId == kLandscape);
+    CHECK(hostGot[0].field == t.field);
+    CHECK(hostGot[0].res == 65);
+    CHECK(hostGot[0].x0 == 3);
+    CHECK(hostGot[0].z0 == 4);
+    CHECK(hostGot[0].w == 5);
+    CHECK(hostGot[0].h == 2);
+    CHECK(hostGot[0].bytes == t.bytes);
+    REQUIRE(clientGot.size() == 1);
+    CHECK(clientGot[0].second);              // its own, back from the host
+    CHECK(clientGot[0].first.seq == 7);
+
+    // The host's own goes to the client as a peer's.
+    CollabSession::TerrainPatch h = t;
+    h.seq = 1;
+    REQUIRE(p->host->sendTerrainPatch(h));
+    p->pump(4);
+    REQUIRE(clientGot.size() == 2);
+    CHECK_FALSE(clientGot[1].second);
+    CHECK(clientGot[1].first.bytes == h.bytes);
+    CHECK(hostGot.size() == 1);
+}
+
+TEST_CASE("CollabSession: a cleared grid is a patch with no bytes, and an oversize one is not sent")
+{
+    CollabSession::Config small;
+    small.maxSnapshotBytes = 1024;
+    auto p = makePair("Anna", "Bob", small, small);
+    p->hostState.data = makeBlob(64);
+    p->pump();
+    REQUIRE(p->client->isJoined());
+
+    int arrived = 0;
+    bool emptyArrived = false;
+    p->host->onTerrainPatch([&](ParticipantId, const CollabSession::TerrainPatch& t, bool) {
+        ++arrived;
+        emptyArrived = emptyArrived || t.bytes.empty();
+    });
+
+    CollabSession::TerrainPatch clear;
+    clear.netId = 5;
+    clear.field = 1 | 0x80;   // res 0, no rectangle, no bytes
+    REQUIRE(p->client->sendTerrainPatch(clear));
+
+    CollabSession::TerrainPatch big;
+    big.netId = 5;
+    big.bytes = makeBlob(2048);
+    CHECK_FALSE(p->client->sendTerrainPatch(big));
+
+    CollabSession::TerrainPatch noId;
+    noId.bytes = makeBlob(16);
+    CHECK_FALSE(p->client->sendTerrainPatch(noId));
+
+    p->pump(4);
+    CHECK(arrived == 1);
+    CHECK(emptyArrived);
 }

@@ -394,33 +394,33 @@ static int lua_horizon_createWidget(lua_State* L)
 
 static int lua_horizon_destroyWidget(lua_State* L)
 {
-    ScriptApi::destroyWidget(*getWorld(L), (int)luaL_checkinteger(L, 1));
+    ScriptApi::destroyWidget(*getWorld(L), static_cast<int>(luaL_checkinteger(L, 1)));
     return 0;
 }
 
 static int lua_horizon_showWidget(lua_State* L)
 {
-    ScriptApi::showWidget(*getWorld(L), (int)luaL_checkinteger(L, 1));
+    ScriptApi::showWidget(*getWorld(L), static_cast<int>(luaL_checkinteger(L, 1)));
     return 0;
 }
 
 static int lua_horizon_hideWidget(lua_State* L)
 {
-    ScriptApi::hideWidget(*getWorld(L), (int)luaL_checkinteger(L, 1));
+    ScriptApi::hideWidget(*getWorld(L), static_cast<int>(luaL_checkinteger(L, 1)));
     return 0;
 }
 
 // horizon.setWidgetZOrder(widgetId, z)
 static int lua_horizon_setWidgetZOrder(lua_State* L)
 {
-    ScriptApi::setWidgetZOrder(*getWorld(L), (int)luaL_checkinteger(L, 1),
-                               (int)luaL_checkinteger(L, 2));
+    ScriptApi::setWidgetZOrder(*getWorld(L), static_cast<int>(luaL_checkinteger(L, 1)),
+                               static_cast<int>(luaL_checkinteger(L, 2)));
     return 0;
 }
 
 static int lua_horizon_isWidgetVisible(lua_State* L)
 {
-    lua_pushboolean(L, ScriptApi::isWidgetVisible(*getWorld(L), (int)luaL_checkinteger(L, 1)) ? 1 : 0);
+    lua_pushboolean(L, ScriptApi::isWidgetVisible(*getWorld(L), static_cast<int>(luaL_checkinteger(L, 1))) ? 1 : 0);
     return 1;
 }
 
@@ -428,7 +428,7 @@ static int lua_horizon_isWidgetVisible(lua_State* L)
 static int lua_horizon_callWidgetFunction(lua_State* L)
 {
     const bool ok = ScriptApi::callWidgetFunction(*getWorld(L),
-        (int)luaL_checkinteger(L, 1), luaL_checkstring(L, 2));
+        static_cast<int>(luaL_checkinteger(L, 1)), luaL_checkstring(L, 2));
     lua_pushboolean(L, ok ? 1 : 0);
     return 1;
 }
@@ -559,6 +559,14 @@ static void luaPushFieldValue(lua_State* L, const HorizonCode::Value& v, int dep
         lua_pushnumber(L, v.col.y); lua_rawseti(L, -2, 2);
         lua_pushnumber(L, v.col.z); lua_rawseti(L, -2, 3);
         lua_pushnumber(L, v.col.w); lua_rawseti(L, -2, 4);
+        break;
+    case P::Vec3:   luaPushVec3Table(L, v.v3); break;     // an element of a list: {x, y, z}
+    case P::Vec4:
+        lua_createtable(L, 4, 0);
+        lua_pushnumber(L, v.v4.x); lua_rawseti(L, -2, 1);
+        lua_pushnumber(L, v.v4.y); lua_rawseti(L, -2, 2);
+        lua_pushnumber(L, v.v4.z); lua_rawseti(L, -2, 3);
+        lua_pushnumber(L, v.v4.w); lua_rawseti(L, -2, 4);
         break;
     case P::Transform:
         lua_createtable(L, 0, 3);
@@ -834,7 +842,21 @@ static int lua_engine_dispatch(lua_State* L)
     const std::vector<HorizonCode::Value> res = fn->invoke(c, args);
     int pushed = 0;
     for (size_t i = 0; i < fn->results.size(); ++i)
-        pushed += luaPushValue(L, i < res.size() ? res[i] : HorizonCode::Value{}, fn->results[i].type);
+    {
+        if (fn->results[i].isArray)
+        {
+            // A LIST result (physics.raycastAll, pollJointBroken, water.pollImmersion…) is ONE
+            // table, whatever the element type. luaPushValue below goes by the declared TYPE
+            // alone, so without this a list of ints came back as the number 0 and the row was
+            // unusable from Lua. A row that returned nothing for a list result is an empty list.
+            HorizonCode::Value list = i < res.size() ? res[i] : HorizonCode::Value{};
+            list.isArray = true;
+            luaPushFieldValue(L, list, 0);
+            ++pushed;
+        }
+        else
+            pushed += luaPushValue(L, i < res.size() ? res[i] : HorizonCode::Value{}, fn->results[i].type);
+    }
     return pushed;
 }
 
@@ -920,7 +942,7 @@ static std::vector<HorizonCode::Value> luaVarargs(lua_State* L, int from)
 static int lua_net_callServer(lua_State* L)
 {
     HE::api::Ctx c = apiCtx(L);
-    const int entity = (int)luaL_checkinteger(L, 1);
+    const int entity = static_cast<int>(luaL_checkinteger(L, 1));
     const char* fn   = luaL_checkstring(L, 2);
     lua_pushboolean(L, HE::api::net::callServer(c, entity, fn, luaVarargs(L, 3)) ? 1 : 0);
     return 1;
@@ -930,8 +952,8 @@ static int lua_net_callServer(lua_State* L)
 static int lua_net_callClient(lua_State* L)
 {
     HE::api::Ctx c = apiCtx(L);
-    const int player = (int)luaL_checkinteger(L, 1);
-    const int entity = (int)luaL_checkinteger(L, 2);
+    const int player = static_cast<int>(luaL_checkinteger(L, 1));
+    const int entity = static_cast<int>(luaL_checkinteger(L, 2));
     const char* fn   = luaL_checkstring(L, 3);
     lua_pushboolean(L, HE::api::net::callClient(c, player, entity, fn, luaVarargs(L, 4)) ? 1 : 0);
     return 1;
@@ -941,7 +963,7 @@ static int lua_net_callClient(lua_State* L)
 static int lua_net_callAllClients(lua_State* L)
 {
     HE::api::Ctx c = apiCtx(L);
-    const int entity = (int)luaL_checkinteger(L, 1);
+    const int entity = static_cast<int>(luaL_checkinteger(L, 1));
     const char* fn   = luaL_checkstring(L, 2);
     lua_pushboolean(L, HE::api::net::callAllClients(c, entity, fn, luaVarargs(L, 3)) ? 1 : 0);
     return 1;

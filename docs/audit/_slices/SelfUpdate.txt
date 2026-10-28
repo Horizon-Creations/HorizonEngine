@@ -1,0 +1,22 @@
+## slice 1 loc=3335 files=21 first=SelfUpdate/SelfUpdateApplyCore.h last=updater/main.cpp
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateApplyCore.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateApplyPlan.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateCheck.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateEndpoint.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateInstall.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateManifest.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateProcess.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateTransport.h
+src/HE_SelfUpdate/include/SelfUpdate/SelfUpdateVersion.h
+src/HE_SelfUpdate/include/SelfUpdate/SuCommon.h
+src/HE_SelfUpdate/include/SelfUpdate/Takeover.h
+src/HE_SelfUpdate/src/SelfUpdateApplyCore.cpp
+src/HE_SelfUpdate/src/SelfUpdateCheck.cpp
+src/HE_SelfUpdate/src/SelfUpdateEndpoint.cpp
+src/HE_SelfUpdate/src/SelfUpdateInstall.cpp
+src/HE_SelfUpdate/src/SelfUpdateManifest.cpp
+src/HE_SelfUpdate/src/SelfUpdateProcess.cpp
+src/HE_SelfUpdate/src/SelfUpdateTransport.cpp
+src/HE_SelfUpdate/src/SelfUpdateVersion.cpp
+src/HE_SelfUpdate/src/Takeover.cpp
+src/HE_SelfUpdate/updater/main.cpp

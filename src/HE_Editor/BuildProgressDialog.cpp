@@ -2,11 +2,13 @@
 #include "EditorApplication.h"   // AppContext
 #include "EditorHelp.h"          // "Build Window/<label>" scope for its buttons
 #include "EditorWidgets.h"       // primaryButton, pinDialogToEditorWindow
+#include "NotificationStore.h"    // a build that ends while its window is put away says so
 #include <Diagnostics/Logger.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <mutex>
 #include <SDL3/SDL_process.h>
 
@@ -67,6 +69,7 @@ std::vector<HcFallbackReport::Notice> s_hcInterpreted;
 // ── UI-thread-only state ────────────────────────────────────────────────────
 bool   s_openRequest = false;
 bool   s_visible     = false;  // drew this frame (see isOpen)
+bool   s_hidden      = false;  // the user put a RUNNING build away (see hidden())
 int    s_selected    = -1;     // -1 = follow the running step
 bool   s_userPicked  = false;  // …until the user clicks one
 Action s_action      = Action::None;
@@ -112,8 +115,16 @@ std::optional<float> toolchainProgress(const std::string& line)
 namespace Build
 {
 
+static std::atomic<bool> s_cancel{false};
+static std::atomic<bool> s_cancelable{false};
+
+void setCancelable(bool cancelable) { s_cancelable.store(cancelable); }
+const std::atomic<bool>* cancelFlag() { return &s_cancel; }
+
 void begin(const std::vector<std::string>& stepNames, Kind kind)
 {
+	s_cancel.store(false);
+	s_cancelable.store(false);
 	{
 		std::lock_guard<std::mutex> lk(s_mutex);
 		s_kind = kind;
@@ -137,6 +148,7 @@ void begin(const std::vector<std::string>& stepNames, Kind kind)
 	}
 	s_selected   = -1;
 	s_userPicked = false;
+	s_hidden     = false;   // a new run is shown; the window opens for it
 }
 
 void stepBegin(int index)
@@ -193,14 +205,15 @@ void stepFailed(int index)
 	s_steps[index].indeterminate = false;
 }
 
-void log(int severity, const std::string& text)
+void log(int severity, const std::string& text, int stepOverride)
 {
 	std::lock_guard<std::mutex> lk(s_mutex);
 	// Lines that arrive between steps (the closing summary, a throw caught
 	// outside any step) belong to the last step that ran — otherwise they land
 	// in a per-step view that shows nothing.
-	const int step = s_current >= 0 ? s_current
-	                                : std::max(0, static_cast<int>(s_steps.size()) - 1);
+	int step = s_current >= 0 ? s_current
+	                          : std::max(0, static_cast<int>(s_steps.size()) - 1);
+	if (stepOverride >= 0 && stepOverride < static_cast<int>(s_steps.size())) step = stepOverride;
 	s_log.push_back(LogLine{step, severity, text});
 }
 
@@ -287,7 +300,37 @@ Outcome outcome()
 	return Outcome{ s_runSerial, s_finished, s_success };
 }
 
-void requestOpen() { s_openRequest = true; }
+void requestOpen() { s_openRequest = true; s_hidden = false; }
+
+bool hidden() { return s_hidden && Build::running(); }
+
+bool exportRunning()
+{
+	std::lock_guard<std::mutex> lk(s_mutex);
+	return s_running && s_kind == Kind::Export;
+}
+
+float overallProgress(const std::vector<StepView>& steps, bool* indeterminate)
+{
+	if (indeterminate) *indeterminate = false;
+	if (steps.empty()) return 0.0f;
+	float sum = 0.0f;
+	bool  running = false, runningIndeterminate = false;
+	for (const StepView& st : steps)
+	{
+		if (st.state == Done || st.state == Failed) sum += 1.0f;
+		else if (st.state == Running)
+		{
+			running = true;
+			if (st.indeterminate) runningIndeterminate = true;
+			else sum += std::clamp(st.progress, 0.0f, 1.0f);
+		}
+	}
+	// Only "unknown" when it is the running step that does not know: a run that is
+	// 3 steps in of 4 still says 75 % whatever the last one is doing.
+	if (indeterminate) *indeterminate = running && runningIndeterminate && sum <= 0.0f;
+	return std::clamp(sum / static_cast<float>(steps.size()), 0.0f, 1.0f);
+}
 
 bool isOpen() { return s_visible; }
 
@@ -421,19 +464,227 @@ void launchGame(const std::filesystem::path& exe)
 	const std::string path = exe.string();
 	const char* argv[] = { path.c_str(), nullptr };
 	if (s_launched) { SDL_DestroyProcess(s_launched); s_launched = nullptr; }
-	s_launched = SDL_CreateProcess(argv, false);
+
+	// Not SDL_CreateProcess(argv, false): that one makes the child INHERIT the
+	// editor's standard handles, and on Windows SDL does it by duplicating
+	// GetStdHandle(STD_INPUT/OUTPUT/ERROR_HANDLE). The editor is a GUI-subsystem
+	// program with no console, so those handles are NULL/invalid and the call fails
+	// with "DuplicateHandle(): Das Handle ist ungültig" before the game is even looked
+	// for — which reads as "the editor cannot find the exe" when the file is right there.
+	// The game gets no stdio there (it has no console either); elsewhere the terminal
+	// the editor was started from keeps receiving its log, as before.
+	SDL_PropertiesID props = SDL_CreateProperties();
+	SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ARGS_POINTER, const_cast<char**>(argv));
+#ifdef _WIN32
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDIN_NUMBER,  SDL_PROCESS_STDIO_NULL);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_NULL);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_NULL);
+	// A GUI program started from a GUI program: no console window flashing up.
+	SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_BACKGROUND_BOOLEAN, true);
+#else
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDIN_NUMBER,  SDL_PROCESS_STDIO_INHERITED);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDOUT_NUMBER, SDL_PROCESS_STDIO_INHERITED);
+	SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_INHERITED);
+#endif
+	s_launched = SDL_CreateProcessWithProperties(props);
+	SDL_DestroyProperties(props);
+
 	if (!s_launched)
-		HE_LOG_ERROR(Editor, "Build: could not start %s (%s)", path.c_str(), SDL_GetError());
+	{
+		const std::string why = SDL_GetError();
+		HE_LOG_ERROR(Editor, "Build: could not start %s (%s)", path.c_str(), why.c_str());
+		// The user pressed Start Game (or its toast button) and is owed an answer on
+		// screen, not only a line in the log.
+		HE::Ed::NoteSpec note;
+		note.level     = HE::Ed::NoteLevel::Important;
+		note.title     = "Could not start the game";
+		note.text      = "\"" + exe.filename().string() + "\" did not start.";
+		note.detail    = why;
+		note.assetPath = path;
+		note.key       = "build.launch";
+		HE::Ed::notify(std::move(note));
+	}
 	else
+	{
 		HE_LOG_INFO(Editor, "Build: started %s", path.c_str());
+		HE::Ed::resolveNotification("build.launch");
+	}
+}
+
+
+// ── A run that ended with nobody watching ───────────────────────────────────
+// Polled every frame from render(). `watched` is whether the window was up on the
+// previous frame, i.e. whether the user saw the result land. A game-logic build
+// is left to GameLogicBuildPanel, which posts its own.
+unsigned long long s_announcedRun = 0;
+
+void announceFinish(bool watched)
+{
+	const Outcome o = outcome();
+	if (!o.finished || o.run == s_announcedRun) return;
+	s_announcedRun = o.run;
+	if (watched) return;
+
+	const Snapshot snap = snapshot();
+	if (snap.kind != Kind::Export) return;
+
+	// The model's message carries "Error: " / "OK: " for the result line; the title
+	// already says which.
+	std::string text = snap.message;
+	for (const char* prefix : { "Error: ", "OK: " })
+		if (text.rfind(prefix, 0) == 0) { text.erase(0, std::string(prefix).size()); break; }
+	if (text.empty()) text = o.success ? "The export finished." : "The export failed.";
+
+	HE::Ed::NoteSpec note;
+	note.level = HE::Ed::NoteLevel::Important;
+	note.title = o.success ? "Export finished" : "Export failed";
+	note.text  = text;
+	note.key   = "build.finished";
+	const bool canLaunch = o.success && snap.runnableHere && !snap.executable.empty();
+	if (canLaunch)
+	{
+		const std::filesystem::path exe = snap.executable;
+		note.actions.push_back({ "Start Game", [exe] { launchGame(exe); }, true });
+	}
+	note.actions.push_back({ "Show Build", [] { requestOpen(); }, !canLaunch });
+	HE::Ed::notify(std::move(note));
+}
+
+// ── The footer cluster of a hidden run ──────────────────────────────────────
+// One read of the model per ImGui frame, shared by FooterWidth and DrawFooter: a
+// worker moving the step between the two calls would change the label's width after
+// the footer had already right-aligned against the old one.
+struct Brief
+{
+	int         frame = -1;
+	float       fraction = 0.0f;
+	bool        indeterminate = false;
+	std::string label;
+};
+Brief s_brief;
+
+constexpr float kFooterBarW = 90.0f;
+constexpr float kFooterBarH = 10.0f;
+constexpr float kFooterGap  = 6.0f;
+constexpr std::size_t kFooterLabelChars = 26;
+
+const Brief& brief()
+{
+	const int frame = ImGui::GetFrameCount();
+	if (s_brief.frame == frame) return s_brief;
+	s_brief.frame = frame;
+
+	std::vector<StepView> steps;
+	std::string           stepName;
+	Kind                  kind;
+	{
+		std::lock_guard<std::mutex> lk(s_mutex);
+		kind = s_kind;
+		for (std::size_t i = 0; i < s_steps.size(); ++i)
+		{
+			const Step& st = s_steps[i];
+			steps.push_back(StepView{ "", st.state, st.progress, st.indeterminate, "" });
+			if (static_cast<int>(i) == s_current) stepName = st.name;
+		}
+	}
+	s_brief.fraction = overallProgress(steps, &s_brief.indeterminate);
+	std::string label = kind == Kind::Export ? "Export" : "Build";
+	if (!stepName.empty()) label += ": " + stepName;
+	if (label.size() > kFooterLabelChars) label = label.substr(0, kFooterLabelChars - 1) + "\xE2\x80\xA6";
+	s_brief.label = std::move(label);
+	return s_brief;
+}
+
+std::string percentText(const Brief& b)
+{
+	if (b.indeterminate) return "\xE2\x80\xA6";
+	char buf[16];
+	std::snprintf(buf, sizeof(buf), "%d%%", static_cast<int>(b.fraction * 100.0f + 0.5f));
+	return buf;
 }
 
 } // namespace
 #endif // HE_IMGUI_ENABLED
 
+float FooterWidth([[maybe_unused]] AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (!hidden()) return 0.0f;
+	const Brief& b = brief();
+	// Same item sequence as DrawFooter: label, gap, bar, gap, percent. The percent
+	// is measured at its widest so the cluster does not breathe as it counts up.
+	return ImGui::CalcTextSize(b.label.c_str()).x + kFooterGap + kFooterBarW + kFooterGap +
+	       ImGui::CalcTextSize("100%").x;
+#else
+	return 0.0f;
+#endif
+}
+
+void DrawFooter([[maybe_unused]] AppContext& ctx)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (!hidden()) return;
+	const Brief& b = brief();
+
+	// Painted by hand, in a slot one text line tall, for the reason the download
+	// queue's bar is (EngineContentSyncBar.cpp): a framed ProgressBar does not fit
+	// the 24 px footer and drags the baseline of everything after it.
+	const ImVec2 clusterMin = ImGui::GetCursorScreenPos();
+	ImGui::TextUnformatted(b.label.c_str());
+	ImGui::SameLine(0.0f, kFooterGap);
+
+	const float  lineH   = ImGui::GetTextLineHeight();
+	const ImVec2 slotPos = ImGui::GetCursorScreenPos();
+	ImGui::Dummy(ImVec2(kFooterBarW, lineH));
+	const float  top = slotPos.y + (lineH - kFooterBarH) * 0.5f;
+	const ImVec2 p0(slotPos.x, top);
+	const ImVec2 p1(slotPos.x + kFooterBarW, top + kFooterBarH);
+	const float  radius = kFooterBarH * 0.5f;
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(p0, p1, ImGui::GetColorU32(ImGuiCol_FrameBg), radius);
+	const ImU32 fill = ImGui::GetColorU32(ImGuiCol_PlotHistogram);
+	if (!b.indeterminate)
+	{
+		const float w = kFooterBarW * b.fraction;
+		if (w > 0.0f)
+			dl->AddRectFilled(p0, ImVec2(p0.x + w, p1.y), fill, std::min(radius, w * 0.5f));
+	}
+	else
+	{
+		constexpr float kSegW = 0.3f, kPeriod = 1.6f;
+		const float t  = static_cast<float>(std::fmod(ImGui::GetTime(), kPeriod)) / kPeriod;
+		const float x0 = p0.x + (kFooterBarW * (1.0f + kSegW)) * t - kFooterBarW * kSegW;
+		const float l = std::max(x0, p0.x), r = std::min(x0 + kFooterBarW * kSegW, p1.x);
+		if (r > l) dl->AddRectFilled(ImVec2(l, p0.y), ImVec2(r, p1.y), fill, std::min(radius, (r - l) * 0.5f));
+	}
+	ImGui::SameLine(0.0f, kFooterGap);
+	ImGui::TextDisabled("%s", percentText(b).c_str());
+
+	// The whole cluster is the button: a click brings the window back. Hover-tested
+	// against the painted rectangle plus IsWindowHovered, as the download queue is,
+	// so a floating panel lying over the footer does not steal or double the hint.
+	const ImVec2 clusterMax = ImGui::GetItemRectMax();
+	if (ImGui::IsWindowHovered() &&
+	    ImGui::IsMouseHoveringRect(ImVec2(clusterMin.x - kFooterGap, clusterMin.y), clusterMax))
+	{
+		ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+		if (ImGui::BeginTooltip())
+		{
+			ImGui::TextUnformatted("The build is still running. Click to show its window.");
+			ImGui::EndTooltip();
+		}
+		if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) requestOpen();
+	}
+#endif
+}
+
 void render([[maybe_unused]] AppContext& ctx)
 {
 #ifdef HE_IMGUI_ENABLED
+	// Whether the window was up on the last frame, before it is reset below: a run
+	// that ends under the user's eyes needs no notification.
+	announceFinish(s_visible);
 	s_visible = false;   // set again below if the popup draws this frame
 	if (s_openRequest)
 	{
@@ -445,7 +696,7 @@ void render([[maybe_unused]] AppContext& ctx)
 	// same reason the export dialog held one: nothing may mutate Content/ under
 	// the packer's reads. Another same-level popup force-closes it, so it is
 	// re-opened once that one is gone.
-	if (Build::running()
+	if (Build::running() && !s_hidden
 	    && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel))
 		ImGui::OpenPopup("Build##progress");
 
@@ -579,26 +830,63 @@ void render([[maybe_unused]] AppContext& ctx)
 
 	// Everything above the button row; the row itself is measured, not guessed,
 	// so the log box shrinks with the window instead of pushing the buttons out.
+	// The result line wraps (a long export message is several lines), so its
+	// height is measured with the same wrap width it is drawn with — one line
+	// reserved here pushed the button row out of the window.
+	const std::string& footerText = running ? activity : (finished ? message : std::string());
+	const float textH = footerText.empty() && running
+		? ImGui::GetTextLineHeightWithSpacing()
+		: std::max(ImGui::GetTextLineHeightWithSpacing(),
+		           ImGui::CalcTextSize(footerText.c_str(), nullptr, false, 690.0f).y
+		               + ImGui::GetStyle().ItemSpacing.y);
 	const float footerH = ImGui::GetFrameHeightWithSpacing()
-	                    + ImGui::GetTextLineHeightWithSpacing()
+	                    + textH
 	                    + ImGui::GetStyle().ItemSpacing.y * 2.0f;
-	ImGui::BeginChild("##build_step_log", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders);
+	ImGui::BeginChild("##build_step_log", ImVec2(0.0f, -footerH), ImGuiChildFlags_Borders,
+	                  ImGuiWindowFlags_HorizontalScrollbar);
 	{
 		std::string clip;
 		std::lock_guard<std::mutex> lk(s_mutex);
-		ImGui::PushTextWrapPos(0.0f);
-		for (const LogLine& l : s_log)
+		auto drawLine = [](const LogLine& l)
 		{
-			if (l.step != s_selected) continue;
-			if (copy) { clip += l.text; clip += '\n'; }
 			if (l.severity == 2)
 				ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "%s", l.text.c_str());
 			else if (l.severity == 1)
 				ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s", l.text.c_str());
 			else
 				ImGui::TextUnformatted(l.text.c_str());
+		};
+
+		// The step's own lines, in order. Pointers are good for this frame only —
+		// we hold the model's lock until the end of the block, so the worker cannot
+		// grow (and move) the vector underneath them.
+		std::vector<const LogLine*> lines;
+		for (const LogLine& l : s_log)
+			if (l.step == s_selected) lines.push_back(&l);
+		if (copy)
+			for (const LogLine* l : lines) { clip += l->text; clip += '\n'; }
+
+		// A pack step lists every asset it ships — thousands of lines in a real
+		// project, redrawn sixty times a second. Past this size the log is drawn
+		// through a clipper, which needs one fixed line height: no wrapping, and
+		// the child scrolls sideways instead. Short logs (compiler output
+		// included) keep their wrapping.
+		constexpr size_t kClipFrom = 400;
+		if (lines.size() > kClipFrom)
+		{
+			ImGuiListClipper clipper;
+			clipper.Begin(static_cast<int>(lines.size()));
+			while (clipper.Step())
+				for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i)
+					drawLine(*lines[static_cast<size_t>(i)]);
+			clipper.End();
 		}
-		ImGui::PopTextWrapPos();
+		else
+		{
+			ImGui::PushTextWrapPos(0.0f);
+			for (const LogLine* l : lines) drawLine(*l);
+			ImGui::PopTextWrapPos();
+		}
 		if (copy) ImGui::SetClipboardText(clip.c_str());
 		// Follow the tail of the step being watched, unless the user scrolled up.
 		if (running && s_selected == current && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
@@ -654,9 +942,28 @@ void render([[maybe_unused]] AppContext& ctx)
 	ImGui::EndDisabled();
 
 	ImGui::SameLine();
-	ImGui::BeginDisabled(running);
-	if (ImGui::Button("Close", ImVec2(90.0f, 0.0f))) ImGui::CloseCurrentPopup();
-	ImGui::EndDisabled();
+	if (running)
+	{
+		// The run goes on without the window: the footer shows its progress, a click
+		// there brings it back, and the end of the run raises a notification.
+		if (EditorWidgets::button("Hide", ImVec2(90.0f, 0.0f)))
+		{
+			s_hidden = true;
+			ImGui::CloseCurrentPopup();
+		}
+		if (Build::s_cancelable.load())
+		{
+			ImGui::SameLine();
+			ImGui::BeginDisabled(Build::s_cancel.load());
+			if (EditorWidgets::button("Cancel", ImVec2(90.0f, 0.0f)))
+				Build::s_cancel.store(true);
+			ImGui::EndDisabled();
+		}
+	}
+	else if (ImGui::Button("Close", ImVec2(90.0f, 0.0f)))
+	{
+		ImGui::CloseCurrentPopup();
+	}
 
 	ImGui::EndPopup();
 #endif

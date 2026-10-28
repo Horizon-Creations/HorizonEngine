@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -93,6 +94,9 @@ namespace
 	// The ImGui frame in which the reader was last opened. See
 	// DocsPanel::openedThisFrame() — F1 has two handlers in one frame.
 	int   s_openedFrame = -1;
+	// Test hooks for drawPage's section clipping (see there).
+	bool  s_sectionClipping = true;
+	int   s_sectionsDrawn   = 0;
 
 	// ── The scripting language the examples are read in ──────────────────────
 	// ONE choice for the whole reader, not one per listing: somebody reading the
@@ -395,8 +399,6 @@ namespace
 	// ── Blocks ───────────────────────────────────────────────────────────────
 	void drawBlock(const Ctx& ctx, const docs::Block& b);
 
-	void drawCells(const Ctx& ctx, const docs::Cell& cell) { drawRuns(ctx, cell); }
-
 	void drawTable(const Ctx& ctx, const docs::Block& b)
 	{
 		const int cols = static_cast<int>(
@@ -449,7 +451,7 @@ namespace
 			{
 				ImGui::TableSetColumnIndex(c);
 				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
-				if (c < static_cast<int>(b.head.size())) drawCells(ctx, b.head[c]);
+				if (c < static_cast<int>(b.head.size())) drawRuns(ctx, b.head[c]);
 				ImGui::PopStyleColor();
 			}
 		}
@@ -459,7 +461,7 @@ namespace
 			for (int c = 0; c < cols; ++c)
 			{
 				ImGui::TableSetColumnIndex(c);
-				if (c < static_cast<int>(row.size())) drawCells(ctx, row[c]);
+				if (c < static_cast<int>(row.size())) drawRuns(ctx, row[c]);
 			}
 		}
 		ImGui::EndTable();
@@ -962,9 +964,66 @@ namespace
 		}
 		ImGui::Spacing();
 
+		// ── Sections scrolled out of the body are not drawn (EDT-302) ────────
+		// The Node Reference is one page of some three hundred sections, and every
+		// one of them used to be laid out every frame: word splitting, a text
+		// measure per word, tables, node previews. Each section's height is kept
+		// from the last frame it was drawn in; one wholly outside the body is a
+		// run of empty height instead, laid out as one Dummy before the next
+		// section that shows. Until a section has been drawn once, and while a jump
+		// is still landing (s_scrollFrames: the heights above the target are what
+		// it lands by), every section is drawn, as before.
+		//
+		// The heights hold for one page at one width, font size and example
+		// language (the language switcher changes listings on the whole page,
+		// including sections nobody is looking at). And only a height that came
+		// out the same in two draws in a row is trusted: a table settles its
+		// columns over a frame or two, and a section skipped with the height of
+		// a frame before that would leave everything under it a pixel off.
+		static const docs::Page* s_heightsPage = nullptr;
+		static float             s_heightsWidth = 0.0f, s_heightsFont = 0.0f;
+		static std::string       s_heightsLang;
+		static std::vector<float> s_heights;
+		static std::vector<char>  s_heightSettled;
+		const float bodyWidth = ImGui::GetContentRegionAvail().x;
+		if (s_heightsPage != &page || s_heights.size() != page.sections.size() ||
+		    s_heightsWidth != bodyWidth || s_heightsFont != ImGui::GetFontSize() ||
+		    s_heightsLang != s_lang)
+		{
+			s_heightsPage  = &page;
+			s_heightsWidth = bodyWidth;
+			s_heightsFont  = ImGui::GetFontSize();
+			s_heightsLang  = s_lang;
+			s_heights.assign(page.sections.size(), 0.0f);
+			s_heightSettled.assign(page.sections.size(), 0);
+		}
+		const bool  mayClip    = s_sectionClipping && s_scrollFrames == 0;
+		const float viewTop    = ImGui::GetWindowPos().y;
+		const float viewBottom = viewTop + ImGui::GetWindowHeight();
+		float skipped = 0.0f;
+		const auto flushSkipped = [&skipped]
+		{
+			if (skipped <= 0.0f) return;
+			// A Dummy adds the item spacing itself.
+			ImGui::Dummy(ImVec2(1.0f, std::max(0.0f, skipped - ImGui::GetStyle().ItemSpacing.y)));
+			skipped = 0.0f;
+		};
+		s_sectionsDrawn = 0;
+
 		for (int i = 0; i < static_cast<int>(page.sections.size()); ++i)
 		{
 			const docs::Section& sec = page.sections[static_cast<std::size_t>(i)];
+			const float knownH = s_heights[static_cast<std::size_t>(i)];
+			const float top    = ImGui::GetCursorScreenPos().y + skipped;
+			if (mayClip && s_heightSettled[static_cast<std::size_t>(i)] &&
+			    (top + knownH < viewTop || top > viewBottom))
+			{
+				skipped += knownH;
+				continue;
+			}
+			flushSkipped();
+			const float sectionTop = ImGui::GetCursorScreenPos().y;
+			++s_sectionsDrawn;
 			ImGui::PushID(i);
 			ImGui::Separator();
 			ImGui::Spacing();
@@ -1015,7 +1074,11 @@ namespace
 			for (const docs::Block& b : sec.blocks) drawBlock(ctx, b);
 			ImGui::Spacing();
 			ImGui::PopID();
+			const float drawnH = ImGui::GetCursorScreenPos().y - sectionTop;
+			s_heightSettled[static_cast<std::size_t>(i)] = drawnH == knownH;
+			s_heights[static_cast<std::size_t>(i)] = drawnH;
 		}
+		flushSkipped();
 		if (s_scrollFrames > 0 && --s_scrollFrames == 0) s_scrollTo = -1;
 		if (s_navFrames > 0) --s_navFrames;
 	}
@@ -1168,7 +1231,7 @@ namespace
 	// break every one of them.
 	struct NavGroup { std::string title; std::vector<int> pages; };
 
-	std::vector<NavGroup> navGroups()
+	std::vector<NavGroup> buildNavGroups()
 	{
 		const docs::Library& lib = docs::library();
 		std::vector<NavGroup> out;
@@ -1200,6 +1263,30 @@ namespace
 			if (!ng.pages.empty()) out.push_back(std::move(ng));
 		}
 		return out;
+	}
+
+	// The library only ever grows (ensureLoaded's installs append, load() starts
+	// over), so the sizes below change whenever the result could, and the
+	// per-frame rebuild — a find per listed page — runs once per such change.
+	const std::vector<NavGroup>& navGroups()
+	{
+		const docs::Library& lib = docs::library();
+		struct Key
+		{
+			std::size_t pages, groups, guides;
+			int bundlePages;
+			bool operator==(const Key&) const = default;
+		};
+		const Key key{ lib.pages().size(), lib.groups().size(),
+		               HE::Ed::Guides::pageIds().size(), s_bundlePageCount };
+		static std::vector<NavGroup> cached;
+		static std::optional<Key>    builtFor;
+		if (builtFor != key)
+		{
+			cached   = buildNavGroups();
+			builtFor = key;
+		}
+		return cached;
 	}
 
 	void drawNav()
@@ -1355,6 +1442,24 @@ bool navigatingGroups()
 	return s_navFrames > 0;
 #else
 	return false;
+#endif
+}
+
+void setSectionClipping(bool on)
+{
+#ifdef HE_DOCS_PANEL_IMPL
+	s_sectionClipping = on;
+#else
+	(void)on;
+#endif
+}
+
+int sectionsDrawn()
+{
+#ifdef HE_DOCS_PANEL_IMPL
+	return s_sectionsDrawn;
+#else
+	return 0;
 #endif
 }
 

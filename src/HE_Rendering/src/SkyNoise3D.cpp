@@ -68,7 +68,7 @@ std::vector<uint16_t> BuildSkyNoise3D(int n)
 					const size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
 					glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
 					d[idx + 0] = static_cast<uint16_t>(
-						glm::clamp(hash(glm::vec3(x, y, z)), 0.0f, 1.0f) * 65535.0f + 0.5f);
+						hash(glm::vec3(x, y, z)) * 65535.0f + 0.5f);
 					d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
 				}
 	};

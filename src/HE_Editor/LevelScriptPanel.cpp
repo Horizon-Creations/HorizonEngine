@@ -2976,11 +2976,16 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 		namespace T = EditorToolbar;
 		T::Bar bar;
 		T::assetHeader(bar, assetPath, st.dirty);
+		// Folder, then Save: what every asset tab opens with. The right edge is the
+		// Viewport | Code switch's.
+		if (T::saveButton(bar, true, /*atLeft=*/true)) saveClassState(st, ctx);
 		// Everything on this band goes through the Bar's OWN cells. A raw ImGui
 		// combo or radio drawn here lays itself out in window coordinates while
 		// the Bar places its cells into a draw list — the two do not know about
 		// each other, and the widget lands on top of the band's own text.
-		bar.group();
+		// Declared first so the base-class cell to its left knows how much room is
+		// its own; it is drawn at the right edge.
+		bar.rightGroup(bar.labelGroupWidth({ "Viewport", "Code" }));
 		if (bar.item("##hcmodeviewport", nullptr, "Viewport", st.showViewport, true,
 		             "The class's body — its components, and what they add up to"))
 			st.showViewport = true;
@@ -3023,20 +3028,35 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 			// use everything Enemy already defines.
 			ImGui::Separator();
 			ImGui::TextDisabled("Classes");
-			for (const auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
+			// A class cannot derive from itself, nor from anything that already
+			// derives from IT — the resolver survives a cycle, but offering one
+			// as a choice would be offering a mistake. Finding out means loading
+			// each class's ancestor chain, so it is worked out once as the popup
+			// opens rather than for every class in every frame it is open
+			// (EDT-1101).
+			struct BaseChoice { HcEditorUtil::ClassRef ref; bool wouldCycle = false; };
+			static std::vector<BaseChoice> s_baseChoices;
+			if (ImGui::IsWindowAppearing())
 			{
-				// A class cannot derive from itself, nor from anything that already
-				// derives from IT — the resolver survives a cycle, but offering one
-				// as a choice would be offering a mistake.
-				if (c.path == st.path) continue;
-				bool wouldCycle = false;
-				if (ctx.contentManager)
+				s_baseChoices.clear();
+				for (auto& c : HcEditorUtil::listHorizonCodeClasses(ctx.contentManager))
 				{
-					const HorizonCode::ResolvedClass other =
-						HorizonCode::resolveClassAsset(*ctx.contentManager, c.path);
-					for (const std::string& a : other.chain)
-						if (a == st.path) { wouldCycle = true; break; }
+					if (c.path == st.path) continue;
+					bool wouldCycle = false;
+					if (ctx.contentManager)
+					{
+						const HorizonCode::ResolvedClass other =
+							HorizonCode::resolveClassAsset(*ctx.contentManager, c.path);
+						for (const std::string& a : other.chain)
+							if (a == st.path) { wouldCycle = true; break; }
+					}
+					s_baseChoices.push_back({ std::move(c), wouldCycle });
 				}
+			}
+			for (const BaseChoice& choice : s_baseChoices)
+			{
+				const HcEditorUtil::ClassRef& c = choice.ref;
+				const bool wouldCycle = choice.wouldCycle;
 				if (wouldCycle) ImGui::BeginDisabled();
 				if (ImGui::Selectable((c.label + "##" + c.path).c_str(), st.baseClass == c.path) &&
 				    st.baseClass != c.path)
@@ -3054,7 +3074,6 @@ void HorizonCodeClassPanel::render(AppContext& ctx, const std::string& assetPath
 			}
 			ImGui::EndPopup();
 		}
-		if (T::saveButton(bar, true)) saveClassState(st, ctx);
 	}
 
 	// The event catalog is the base-class chain's events (Object contributes

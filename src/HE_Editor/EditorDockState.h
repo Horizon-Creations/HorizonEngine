@@ -56,4 +56,36 @@ namespace EditorDockState
 	// Must run before any docked window's Begin in the same frame. No-op
 	// without an ImGui context.
 	void keepMainDockspaceAlive();
+
+	// ── Which tab was open ───────────────────────────────────────────────────
+	// imgui.ini already stores, per dock node, the tab that was selected — and
+	// imgui throws it away again on the way in. A node's tab bar is rebuilt as
+	// its windows appear, and every tab that shows up AFTER the first frame is
+	// selected on arrival (ImGuiTabBarFlags_AutoSelectNewTabs: a window you just
+	// opened should be the one you see). In the editor panels appear on
+	// different frames — after the project has loaded, behind View-menu flags,
+	// once a lazily built panel has something to show — so a restart landed on
+	// whichever panel happened to be submitted last: the Console where the
+	// Content Browser had been, Details where the Outliner was.
+	//
+	// holdSavedTabs() puts the remembered tab back. Called once per frame, before
+	// the dockspace is submitted:
+	//  * the first call after a context (and its ini) exists notes each node's
+	//    selected tab, as the ini restored it;
+	//  * while the editor starts up it re-selects that tab whenever new tabs have
+	//    joined a node and it is not the selected one. It lets go at the first
+	//    click once there are tabs to click on — from then on a panel opening is
+	//    most likely a person's doing — and a tab that never turns up (a panel
+	//    that was closed when the editor was shut down) only costs the wait, which
+	//    is capped. A panel that is merely slow to join (an audio engine that takes
+	//    seconds, a project that is still loading) is still the startup's.
+	//    A selection that changes long after the last join, without a click, is a
+	//    panel revealed by a shortcut or a script and is left alone.
+	// Cheap enough for every frame: it walks the dock nodes (a dozen) and returns
+	// early once nothing is held. No-op without an ImGui context.
+	void holdSavedTabs();
+
+	// Forget what is held — a layout that was just rebuilt (Window > Reset
+	// Layout) has no tab worth restoring from the file that was replaced.
+	void forgetSavedTabs();
 }

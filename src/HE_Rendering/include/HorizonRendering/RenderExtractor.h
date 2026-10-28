@@ -9,6 +9,7 @@
 #include <glm/vec3.hpp>
 #include <glm/mat4x4.hpp>
 #include <Types/UUID.h>
+#include <Math/AABB.h>
 #include <string>
 #include <unordered_set>
 
@@ -16,9 +17,12 @@ class HorizonWorld;
 class RenderWorld;
 class ContentManager;
 struct EditorCameraOverride;
+struct UnderwaterCameraData;
 
 namespace HE
 {
+
+struct FoliageLodMemory;   // FoliageExtract.h: the foliage level hysteresis of one view
 
 // ─── Cascaded-shadow-map fit (free functions so they are directly testable) ──
 // The maths the extractor's cascade loop is built from. Kept out of the
@@ -80,6 +84,82 @@ inline constexpr float kEditorIconScreenFraction = 0.05f;
 // symbol sized in screen fractions frames to a few centimetres.
 HE_RENDERING_API bool isEditorIconMaterial(const UUID& materialId);
 
+// How far `cameraPos` sits under a water surface, straight from the flat body LEVEL
+// WaterIndex resolves (HorizonScene/WaterQuery.h) — never the wave-displaced height.
+// The water material shades its waves on top of a geometrically flat mesh (mat_gen's
+// waterMaterial(): the wave trains only ever feed pixel-shading nodes — fresnel, foam,
+// the normal perturbation — never a vertex/world-position offset), so the flat level is
+// exactly where the lens draws the waterline; no wave phase or clock needs to travel
+// here for this to be exact.
+//
+// Several overlapping bodies: WaterIndex::surfaceAt's own rule decides (the highest
+// surface wins) — the same rule the water physics itself queries by. Dry outside
+// [bed, surface level]: below the water's own bed (inside solid ground or a cave
+// under the sheet), being under a surface whose floor is also below you is not
+// "underwater" either; above the surface (flying, a dock, a boat on top of the
+// body) there is simply no water at the camera's own position to be in.
+//
+// Stateless — called fresh every extract(), nothing carried from one frame to the next,
+// so a camera resting exactly on the waterline, or crossing it within a single frame,
+// reads correctly immediately with no hysteresis and no special-casing.
+//
+// Also resolves the post pass's tint/density (Thema 185 Schritt 2) from the body's own
+// UnderwaterFogParams (WaterField.h) — see UnderwaterCameraData's comment for the split
+// between what is resolved here (a per-frame scalar, the camera's own depth) and what
+// the pass still computes per pixel (the view-ray's segment length inside the body).
+//
+// WATER TESSELLATION. A landscape whose water has tessellation on (Field::tessellation)
+// draws the surface as real, moving geometry, so the flat level is no longer where the lens
+// meets it: with `waveClock` >= 0 (the render clock the material's Time node runs on, the
+// same seconds the shaders get) the surface under the camera is level + water::tessellatedHeight
+// there, and surfaceY / signedDepth / wet follow it. The caller's clock is what makes the
+// formula (shared with the material, HE_Core/Physics/WaterWaves.h) land on the drawn surface.
+// -1 (the default, and what every test that predates this passes) = the flat level.
+HE_RENDERING_API UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world,
+                                                             const glm::vec3& cameraPos,
+                                                             double waveClock = -1.0);
+
+// Whether the running backend draws a landscape's water tessellated (IRenderer::SupportsTessellation):
+// the backends tell it once they know. Without it the underwater camera query keeps the surface a
+// flat plane, because that is what the screen shows. Default: no (Metal, Software).
+HE_RENDERING_API void setWaterTessellationAvailable(bool available);
+HE_RENDERING_API bool waterTessellationAvailable();
+
+// The caustic net's waterline fade-in (Thema 185 Schritt 3): the body's causticsIntensity
+// is multiplied by this smoothstep of the camera's depth below the surface — 0 on the
+// line (and above it), 1 from kCausticsFadeInDepth metres down, continuous in between,
+// so the net eases in over the first half metre of a dive instead of popping on at the
+// waterline. Pure function of the argument; no state.
+inline constexpr float kCausticsFadeInDepth = 0.5f;
+HE_RENDERING_API float causticsFadeIn(float signedDepth);
+
+// A camera in shallow water (wading, a fly camera on the sand under a few centimetres of lake) is not
+// "under water" to the eye: the whole view would turn into the underwater fog, sky included. The
+// underwater look (fog, tint, caustics) is therefore scaled by smoothstep(0, kUnderwaterShallowFull,
+// the water's depth over the ground at the camera): nothing in ankle-deep water, full from this many
+// metres on (a bit above eye height).
+inline constexpr float kUnderwaterShallowFull = 1.5f;
+HE_RENDERING_API float underwaterShallowFactor(float waterDepthAtCamera);
+
+// The fog's waterline band (Thema 185 Schritt 5): a DRY camera up to kFogDryBandFull
+// metres above a body's surface still gets that body's fog density (times this factor,
+// 1 in the band, smoothstep down to 0 at kFogDryBandEnd), wet stays false. The pass
+// then fogs, per pixel, only where the near plane has sliced the water sheet off (the
+// pixel's own near-plane point already lies below the surface plane): the floor that
+// shows bare there gets the segment from the plane crossing to the pixel, the way it
+// does from a hair below the line. Without that, it showed bright and unfogged at
+// +0.5 cm and fully fogged at -0.5 cm — the waterline pop (109 of 255 on every backend,
+// docs/underwater-acceptance-2026-10-12.md). Everywhere else nothing changes: the
+// translucent water surface is NOT in the depth buffer the pass reads, so fogging every
+// pixel below the plane would tint the whole lake seen from above. The per-pixel test
+// alone confines the effect to about one near distance above the surface (about twice
+// that on D3D and Metal, which rasterise GL's projection into a [0,1] clip); the band
+// is the cost gate that keeps the pass off for every other dry frame. 1 for
+// signedDepth >= 0.
+inline constexpr float kFogDryBandFull = 0.5f;
+inline constexpr float kFogDryBandEnd  = 1.0f;
+HE_RENDERING_API float fogWaterlineBand(float signedDepth);
+
 } // namespace HE
 
 // Reads the ECS world each frame and fills a RenderWorld snapshot.
@@ -131,22 +211,44 @@ public:
     // ── Reuse within one frame ──────────────────────────────────────────────
     // A backend that extracts once per pass (Metal: shadow, SSAO, G-buffer,
     // scene — every one of them re-extracts so its draw set and cascade fit
-    // match the others) walked the whole registry that many times a frame:
-    // ~26 ms per walk at 50k entities, 4× per frame
+    // match the others; Vulkan: cascades, decal depth, GI, SSAO, scene) walked
+    // the whole registry that many times a frame: ~26 ms per walk at 50k
+    // entities, 4–5× per frame
     // (docs/world-streaming-baseline-2026-10-06.md §3.2, §5 point 1).
     //
     // Between beginFrame() and endFrame() the world does not change, so the
-    // second and later extract() answer from a copy of the first instead of
-    // walking it again — as long as every input is the same: world, editor
-    // camera (by value), day-night, shadow settings, content manager and its
-    // epoch. The aspect ratio may differ (the SSAO pass extracts at half
-    // resolution, rounded): then only what depends on it — the projection, the
-    // cascade fit and the local shadow layers — is recomputed, exactly as the
-    // full walk would. Outside a frame (no beginFrame, or after endFrame)
-    // nothing is reused, so a caller that never opts in behaves as before.
+    // first extract() walks it and the second and later ones find that walk
+    // where it was left: IN the RenderWorld the caller passed. Nothing is
+    // copied — a copy of the result costs ~14 % of the walk that made it, and
+    // used to be paid once for the snapshot and once per reuse
+    // (docs/render-extractor-shadow-pass-plan.md §6). That holds as long as
+    // every input is the same: the world and HorizonWorld::structureEpoch
+    // (a cell streamed in or out, a spawn, a destroy or a reparent between two
+    // passes makes the next one walk again), the editor camera (by value),
+    // day-night, shadow settings, the content manager and its epoch — and the
+    // caller hands in the SAME RenderWorld. Another RenderWorld is another
+    // consumer and gets its own walk. The aspect ratio may differ (the SSAO
+    // pass extracts at half resolution, rounded): then only what depends on it
+    // — the projection, the cascade fit and the local shadow layers — is
+    // recomputed in place, exactly as the full walk would, from the scene box
+    // of the walk's own fit. Outside a frame (no beginFrame, or after
+    // endFrame) nothing is reused, so a caller that never opts in behaves as
+    // before.
+    //
+    // What a pass may do to the RenderWorld between two extracts is what every
+    // backend already does after one: replace a bound by the real mesh bound
+    // (RenderObject::refineWorldBounds), resolve the material scalars. Both
+    // write the same value every time, so the next pass reads what it would
+    // have computed itself. A pass that clears, resizes or reassigns what the
+    // walk produced is caught (FrameShape) and costs the frame one more walk;
+    // an edit in place that is not idempotent is not caught.
     //
     // The world must not be edited between the two calls; that is the whole
     // contract. The renderer's frame encode is the place where that holds.
+    // One half of it is checked rather than trusted: which entities exist and
+    // where they hang (structureEpoch) is part of the key. Component VALUES
+    // are not: a moved transform or a changed material between two extracts
+    // of one frame is still not seen.
     void beginFrame();
     void endFrame();
 
@@ -248,6 +350,9 @@ private:
     // UUIDs never come through.
     std::unordered_set<std::string> m_sectionMaterialMissing;
     uint64_t                        m_sectionMaterialEpoch = 0;
+    // Which detail level each foliage plant was drawn with last time: an extractor is
+    // one view (the scene view, a preview), and the hysteresis is the view's.
+    std::unique_ptr<HE::FoliageLodMemory> m_foliageLod;
     // setShadowSettings() state; defaults = the historical fit constants.
     float     m_shadowDistance = 250.0f;
     int       m_cascadeCount   = 3;
@@ -262,11 +367,14 @@ private:
     float     m_cloudCoverage  = 0.5f;
 
     // ── Frame reuse (beginFrame/endFrame) ───────────────────────────────────
-    // Everything extract() reads besides the registry, captured when the frame
-    // copy was taken. A later call reuses the copy only if all of it matches.
+    // Everything extract() reads besides the registry, captured when the walk
+    // was done. A later call reuses the walk only if all of it matches.
     struct FrameKey
     {
         const HorizonWorld*  world = nullptr;
+        // HorizonWorld::structureEpoch() (Thema 164, plan 7.2): which entities
+        // exist, their parents and the order of siblings. Not component values.
+        uint64_t             structureEpoch = 0;
         bool                 hasEditorCam = false;
         EditorCameraOverride editorCam{};
         ContentManager*      contentManager = nullptr;
@@ -282,15 +390,45 @@ private:
         glm::vec3            moonColor{ 0.0f };
         float                moonIntensity  = 0.0f;
         float                cloudCoverage  = 0.0f;
+        // The Environment's wind, which the water material's wave knobs follow
+        // (water::windTrain): a wind change re-walks the frame.
+        bool                 windOn         = false;
+        float                windDirection  = 0.0f;
+        float                windSpeed      = 0.0f;
+    };
+    // What the walk's RenderWorld looked like when the walk ended: its object
+    // array and how many of everything it holds. A caller that cleared,
+    // resized or reassigned it since no longer holds the walk (anything but the
+    // in-place edits described at beginFrame()), and extract() sees it here.
+    struct FrameShape
+    {
+        const void* objects        = nullptr;
+        size_t      objectCount    = 0;
+        size_t      skinnedCount   = 0;
+        size_t      blockCount     = 0;
+        size_t      lightCount     = 0;
+        size_t      decalCount     = 0;
+        size_t      particleCount  = 0;
+        size_t      ribbonCount    = 0;
+        size_t      landscapeCount = 0;
     };
     FrameKey makeFrameKey(const HorizonWorld& world, const EditorCameraOverride* editorCam) const;
     static bool sameFrameKey(const FrameKey& a, const FrameKey& b);
+    static FrameShape frameShapeOf(const RenderWorld& w);
+    static bool sameFrameShape(const FrameShape& a, const FrameShape& b);
 
-    bool                         m_frameArmed     = false;   // inside beginFrame/endFrame
-    bool                         m_frameCached    = false;   // m_frameCopy holds a full walk
-    float                        m_frameAspect    = 0.0f;    // the aspect it was walked at
-    FrameKey                     m_frameKey{};
-    std::unique_ptr<RenderWorld> m_frameCopy;                // allocated on first use
-    uint64_t                     m_fullExtracts   = 0;
-    uint64_t                     m_reusedExtracts = 0;
+    bool               m_frameArmed     = false;   // inside beginFrame/endFrame
+    bool               m_frameCached    = false;   // *m_frameOut holds a full walk
+    float              m_frameAspect    = 0.0f;    // the aspect it holds right now
+    FrameKey           m_frameKey{};
+    FrameShape         m_frameShape{};
+    const RenderWorld* m_frameOut       = nullptr; // the caller's RenderWorld the walk went into
+    // The one input of the cascade fit that does not depend on the aspect: the
+    // union of the shadow-relevant object bounds as the walk seeded them. Kept
+    // so the aspect-dependent tail can be rerun in place after the backends
+    // refined those bounds, and still land on what a full walk would have.
+    HE::AABB           m_frameShadowBox{};
+    bool               m_frameShadowBoxKnown = false;
+    uint64_t           m_fullExtracts   = 0;
+    uint64_t           m_reusedExtracts = 0;
 };

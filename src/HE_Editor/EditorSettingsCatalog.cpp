@@ -170,6 +170,11 @@ std::vector<SettingDesc> buildCatalog()
 	                    "footer bell, and the node a HorizonCode compile failed "
 	                    "on pulses once. Never a blink. Needs Success Feedback "
 	                    "on."));
+	t.push_back(boolRow("notifications.popups", "Show Notification Popups", "Feedback",
+	                    "notifications", &EditorConfig::NotificationPopups,
+	                    "Show important notifications as a card in the bottom-right "
+	                    "corner and critical ones as a dialog. Off: everything goes "
+	                    "to the notification centre (the footer bell) only."));
 	t.push_back(enumRow("rewards.reducedMotion", "Reduced Motion", "Feedback", "rewards",
 	                    &EditorConfig::RewardsReducedMotion,
 	                    { "Follow System", "Off" },
@@ -252,19 +257,19 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Independent of Success Feedback; clip auditions and the "
 	                    "project's audio are not affected."));
 
-	// ── Editor ▸ Collaboration ──────────────────────────────────────────────
-	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Collaboration",
+	// ── Editor ▸ Team (the session settings) ────────────────────────────────
+	t.push_back(boolRow("collab.lanDiscovery", "LAN Discovery", "Team",
 	                    "landiscovery", &EditorConfig::CollabLanDiscovery,
 	                    "Announce a hosted session on the local network, and listen "
 	                    "for other people's."));
 	t.push_back(boolRow("collab.syncLargeAssets", "Sync Large Assets",
-	                    "Collaboration", "collabsynclarge",
+	                    "Team", "collabsynclarge",
 	                    &EditorConfig::CollabSyncLargeAssets,
 	                    "Also send meshes, textures, audio and fonts over the "
 	                    "session instead of leaving them to source control. The "
 	                    "HOST's decision for the session; it cannot be changed "
 	                    "while one runs."));
-	t.push_back(intRow("collab.maxAssetMB", "Max Asset Size (MB)", "Collaboration",
+	t.push_back(intRow("collab.maxAssetMB", "Max Asset Size (MB)", "Team",
 	                   "collabmaxasset", &EditorConfig::CollabMaxAssetMB, 1, 4096,
 	                   "The biggest single asset this editor will send or accept "
 	                   "over a session. A transfer is held whole in memory on both "
@@ -329,7 +334,7 @@ std::vector<SettingDesc> buildCatalog()
 	}
 	t.push_back(enumRow("display.renderPath", "Render Path", "Display", "renderpath",
 	                    &EditorConfig::RenderPath, { "Forward", "Deferred" },
-	                    "Deferred needs a backend that supports it (Metal, OpenGL); "
+	                    "Deferred needs the backend's G-buffer pipeline ready; "
 	                    "an unsupported choice falls back at push time."));
 
 	t.push_back(boolRow("display.occlusionCulling", "Occlusion Culling", "Display",
@@ -397,7 +402,8 @@ std::vector<SettingDesc> buildCatalog()
 	                     0.0, 128.0, "Longest streak in pixels at 720p."));
 	t.push_back(boolRow("postProcess.ssrEnabled", "Screen-Space Reflections",
 	                    "Post-Processing", "ssr", &EditorConfig::SSREnabled,
-	                    "Metal + the deferred render path; the backend gates it."));
+	                    "All five backends once their post-processing pipeline is ready; "
+	                    "the backend gates it."));
 	t.push_back(floatRow("postProcess.ssrIntensity", "SSR Intensity",
 	                     "Post-Processing", "ssr", &EditorConfig::SSRIntensity,
 	                     0.0, 2.0, ""));
@@ -448,6 +454,10 @@ std::vector<SettingDesc> buildCatalog()
 	                    "gpuparticles", &EditorConfig::GpuParticles,
 	                    "Simulate rain/snow on the GPU instead of the CPU pool. The "
 	                    "backend gates it."));
+	t.push_back(boolRow("effects.weatherSoundInEditor", "Weather Sounds in Edit Mode", "Effects",
+	                    "weathersound", &EditorConfig::WeatherSoundInEditor,
+	                    "Hear the scene's weather (rain, wind, snow, storm, thunder) in the "
+	                    "edit-mode viewport, not only in Play."));
 
 	return t;
 }
@@ -510,6 +520,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	{
 	case SettingType::Bool:
 	{
+		if (!d.pb) { outError = "setting has no config member"; return false; }
 		if (!in.is_boolean()) { outError = "expected a boolean"; return false; }
 		const bool v = in.get<bool>();
 		outChanged = (cfg.*(d.pb) != v);
@@ -518,6 +529,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::Int:
 	{
+		if (!d.pi) { outError = "setting has no config member"; return false; }
 		if (!in.is_number_integer()) { outError = "expected an integer"; return false; }
 		const long long v = in.get<long long>();
 		if (d.hasRange && (static_cast<double>(v) < d.minValue ||
@@ -533,6 +545,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::Float:
 	{
+		if (!d.pf) { outError = "setting has no config member"; return false; }
 		if (!in.is_number()) { outError = "expected a number"; return false; }
 		const double v = in.get<double>();
 		if (d.hasRange && (v < d.minValue || v > d.maxValue))
@@ -547,6 +560,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::String:
 	{
+		if (!d.ps) { outError = "setting has no config member"; return false; }
 		if (!in.is_string()) { outError = "expected a string"; return false; }
 		std::string v = in.get<std::string>();
 		outChanged = (cfg.*(d.ps) != v);
@@ -555,6 +569,7 @@ bool writeEditorSetting(EditorConfig& cfg, const SettingDesc& d, const json& in,
 	}
 	case SettingType::Enum:
 	{
+		if (!d.pi) { outError = "setting has no config member"; return false; }
 		int v = -1;
 		if (in.is_number_integer())
 		{

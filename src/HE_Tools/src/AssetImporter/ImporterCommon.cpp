@@ -1,10 +1,13 @@
 #include "ImporterCommon.h"
+#include <Platform/ProjectWriteGate.h>
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <string_view>
 #include "ContentManager/ContentManager.h"
+#include "ContentManager/AssetFile.h"
 #include "ContentManager/HAsset.h"
 #include "Diagnostics/Logger.h"
 // The whole importer set, because importSource() below is the one place that
@@ -99,9 +102,9 @@ struct MetaFields
 // size would otherwise resize() to gigabytes; keeping the seek-past-payload shape
 // means keeping the bound with it.
 //
-// readOneChunk is that streaming read, shared by readMetaFields and textureSrgbOf:
-// the payload of the first chunk `chunkId` in `file`, every other payload seeked
-// past. False for an unreadable or pre-v2 file (pre-v2 META has no UUID, so its
+// readOneChunk is that streaming read, shared by readMetaFields, textureSrgbOf and
+// meshSidecarAssets: the payload of the first chunk `chunkId` in `file`, every other
+// payload seeked past. False for an unreadable or pre-v2 file (pre-v2 META has no UUID, so its
 // name/path sit where the id would be — reading it with the v2 layout would hand
 // back garbage rather than "nothing recorded") and for one without that chunk.
 bool readOneChunk(const std::filesystem::path& file, uint32_t chunkId,
@@ -353,8 +356,10 @@ bool writeAsset(RuntimeAsset& asset, const std::filesystem::path& contentRoot,
 		asset.sourcePath = sourceFileOf(target);
 	}
 
-	ContentManager cm(contentRoot.string());
-	if (!cm.saveAsset(asset))
+	// The save of a fresh ContentManager(contentRoot), without building one: its
+	// constructor rasterises the editor icons and generates their shaders first, and
+	// this runs once per asset an import writes (TLS-101, see AssetFile.h).
+	if (!HE::saveAssetFile(asset, contentRoot.string()))
 	{
 		HE_LOG_ERROR(Tool, "%s",
 			("Importer: failed to write " + target.string()).c_str());
@@ -586,9 +591,10 @@ enum class SourceKind { None, Mesh, Texture, Audio, Material, Font };
 // pattern is what the Import Asset dialog offers, and offering .fbx in a build
 // that then fails every .fbx is worse than not offering it. The same three
 // extensions are spelled out once more in importBlockedReason(), which has to
-// know them precisely in the build that does NOT have them.
+// know them precisely in the build that does NOT have them (four now: .blend
+// came with the Blender importer).
 #ifdef HE_HAVE_ASSIMP
-constexpr const char* kMeshPattern = "gltf;glb;fbx;obj;dae";
+constexpr const char* kMeshPattern = "gltf;glb;fbx;obj;dae;blend";
 #else
 constexpr const char* kMeshPattern = "gltf;glb";
 #endif
@@ -606,7 +612,7 @@ struct SourceFamilyRow
 constexpr SourceFamilyRow kSourceFamilies[] = {
 	{ "3D Models", kMeshPattern,               SourceKind::Mesh     },
 	{ "Textures",  "png;jpg;jpeg;tga;bmp;hdr", SourceKind::Texture  },
-	{ "Audio",     "wav;ogg",                  SourceKind::Audio    },
+	{ "Audio",     "wav;ogg;mp3;flac",          SourceKind::Audio    },
 	{ "Materials", "hmat",                     SourceKind::Material },
 	{ "Fonts",     "ttf;otf",                  SourceKind::Font     },
 };
@@ -691,10 +697,10 @@ const char* importBlockedReason(const std::filesystem::path& sourcePath)
 {
 	const std::string ext = patternExtensionOf(sourcePath);
 #ifndef HE_HAVE_ASSIMP
-	if (ext == "fbx" || ext == "obj" || ext == "dae")
-		return "FBX, OBJ and COLLADA need Assimp, which this build of the editor was "
-		       "made without (HE_ENABLE_ASSIMP=OFF). Export the model as glTF/GLB, "
-		       "or rebuild with Assimp.";
+	if (ext == "fbx" || ext == "obj" || ext == "dae" || ext == "blend")
+		return "FBX, OBJ, COLLADA and Blender files need Assimp, which this build of the "
+		       "editor was made without (HE_ENABLE_ASSIMP=OFF). Export the model as "
+		       "glTF/GLB, or rebuild with Assimp.";
 #else
 	(void)ext;
 #endif
@@ -707,6 +713,9 @@ bool importSource(const std::filesystem::path& sourcePath,
                   const OutputTargets&         outputs,
                   const ImportOptions&         options)
 {
+	// The project's files are being read by an export (ProjectWriteGate.h).
+	if (HE::ProjectWriteGate::refuse("import a file")) return false;
+
 	switch (classifySource(sourcePath))
 	{
 	case SourceKind::Mesh:
@@ -756,6 +765,8 @@ bool importSource(const std::filesystem::path& sourcePath,
 bool reimport(const std::filesystem::path& assetFile,
               const std::filesystem::path& contentRoot)
 {
+	if (HE::ProjectWriteGate::refuse("reimport an asset")) return false;
+
 	const std::string source = sourceFileOf(assetFile);
 	if (source.empty())
 	{
@@ -877,10 +888,11 @@ std::vector<std::string> meshSidecarAssets(const std::filesystem::path& meshAsse
 {
 	std::vector<std::string> out;
 
-	HAsset::Reader reader;
-	if (!reader.open(meshAsset.string()))
-		return out;
-
+	// Streamed, not HAsset::Reader::open: the up-to-date probe runs this once per
+	// source file on every asset-compiler pass, and Reader::open materialises every
+	// payload — the whole vertex and index buffer of each mesh, to read one string
+	// (TLS-102). readOneChunk seeks past everything but the chunk asked for.
+	std::vector<uint8_t> mref;
 	// Only the two mesh asset types carry MREF, so every other asset type leaves
 	// here with an empty list. Deliberately MREF only, not the section table:
 	// reimport() reads this list POSITIONALLY (material first, then its base-colour
@@ -888,29 +900,25 @@ std::vector<std::string> meshSidecarAssets(const std::filesystem::path& meshAsse
 	// shifting the texture redirect onto a material. They are named after their
 	// glTF material, which is stable across re-imports, so they need no redirect;
 	// what they lack is the up-to-date probe below noticing when one is deleted.
-	const auto* mref = reader.findChunk(HAsset::CHUNK_MREF);
-	if (!mref)
+	if (!readOneChunk(meshAsset, HAsset::CHUNK_MREF, mref))
 		return out;
 
 	std::string materialPath;
 	size_t      off = 0;
-	if (!HAsset::Reader::readString(mref->data, off, materialPath) || materialPath.empty())
+	if (!HAsset::Reader::readString(mref, off, materialPath) || materialPath.empty())
 		return out;
 	out.push_back(materialPath);
 
 	// …and the textures that material references, written by the same import.
-	HAsset::Reader matReader;
-	if (!matReader.open((contentRoot / materialPath).string()))
+	std::vector<uint8_t> mtrl;
+	if (!readOneChunk(contentRoot / materialPath, HAsset::CHUNK_MTRL, mtrl))
 		return out;  // gone — the caller already sees the missing material
-	const auto* mtrl = matReader.findChunk(HAsset::CHUNK_MTRL);
-	if (!mtrl)
-		return out;
 
 	std::string              shaderPath;    // read past it: never a file on disk
 	std::vector<std::string> texturePaths;
 	size_t                   moff = 0;
-	if (!HAsset::Reader::readString(mtrl->data, moff, shaderPath)) return out;
-	if (!HAsset::Reader::readVec(mtrl->data, moff, texturePaths))  return out;
+	if (!HAsset::Reader::readString(mtrl, moff, shaderPath)) return out;
+	if (!HAsset::Reader::readVec(mtrl, moff, texturePaths))  return out;
 	const auto add = [&out](const std::string& tex)
 	{
 		if (!tex.empty() && std::find(out.begin(), out.end(), tex) == out.end())
@@ -933,18 +941,18 @@ std::vector<std::string> meshSidecarAssets(const std::filesystem::path& meshAsse
 	uint32_t paramFloats = 0;
 	std::string skipS;
 	for (int k = 0; k < 6; ++k)                                      // baseColor rgb, metallic, roughness, opacity
-		if (!HAsset::Reader::readPOD(mtrl->data, moff, skipF)) return out;
-	if (!HAsset::Reader::readString(mtrl->data, moff, skipS)) return out;  // customShaderFragGlsl
-	if (!HAsset::Reader::readString(mtrl->data, moff, skipS)) return out;  // nodeGraphJson
-	if (!HAsset::Reader::readPOD(mtrl->data, moff, paramFloats)) return out;
+		if (!HAsset::Reader::readPOD(mtrl, moff, skipF)) return out;
+	if (!HAsset::Reader::readString(mtrl, moff, skipS)) return out;  // customShaderFragGlsl
+	if (!HAsset::Reader::readString(mtrl, moff, skipS)) return out;  // nodeGraphJson
+	if (!HAsset::Reader::readPOD(mtrl, moff, paramFloats)) return out;
 	// Same bound ContentManager applies — a corrupt count must not walk the offset
 	// past the buffer (the readers would then simply stop, but the cap keeps the
 	// two sides reading the same bytes).
 	if (paramFloats > 16 * 4) return out;
 	for (uint32_t i = 0; i < paramFloats; ++i)
-		if (!HAsset::Reader::readPOD(mtrl->data, moff, skipF)) return out;
+		if (!HAsset::Reader::readPOD(mtrl, moff, skipF)) return out;
 	std::vector<std::string> graphTextures;
-	if (!HAsset::Reader::readVec(mtrl->data, moff, graphTextures)) return out;
+	if (!HAsset::Reader::readVec(mtrl, moff, graphTextures)) return out;
 	for (const std::string& tex : graphTextures)
 		add(tex);
 

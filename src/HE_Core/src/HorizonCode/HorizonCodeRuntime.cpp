@@ -1259,22 +1259,21 @@ Runtime::FunctionSignature Runtime::functionSignatureOf(InstanceId id,
     }
 
     // Leaf-first: the derived class's declaration is the one that counts, the
-    // same rule levelWithFunction and levelHandlingEvent follow.
-    for (size_t lv = i->levels.size(); lv-- > 0; )
-        for (const Node& n : i->levels[lv].nodes)
-        {
-            if (n.type != NodeType::FunctionEntry || n.s != fn) continue;
-            sig.found     = true;
-            sig.runOn     = n.runOn;
-            sig.anyClient = n.anyClient;
-            sig.hasParams = true;
-            for (const FuncParam& p : n.params)
-            {
-                sig.params.push_back(p.type);
-                sig.paramIsArray.push_back(p.isArray);
-            }
-            return sig;
-        }
+    // same rule levelWithFunction and levelHandlingEvent follow — the index's
+    // first entry is the one that scan met first.
+    const DispatchIndex& d = dispatchOf(*i);
+    const auto it = d.functions.find(fn);
+    if (it == d.functions.end()) return sig;
+    const Node& n = *it->second.front().entry;
+    sig.found     = true;
+    sig.runOn     = n.runOn;
+    sig.anyClient = n.anyClient;
+    sig.hasParams = true;
+    for (const FuncParam& p : n.params)
+    {
+        sig.params.push_back(p.type);
+        sig.paramIsArray.push_back(p.isArray);
+    }
     return sig;
 }
 
@@ -1502,6 +1501,14 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         CreatorScope creating(m_creatorStack, id);
         return m_services.callApi(id, apiId, args);
     };
+    // No CreatorScope here: the Ctx is handed out, the calls come later, and
+    // HE::api::Scope pushes the creator for as long as they run.
+    ctx.apiCtx        = [this, id](HE::api::Ctx& out) -> bool
+    {
+        if (!m_services.apiCtx) return false;
+        m_services.apiCtx(id, out);
+        return true;
+    };
     // Multiplayer: the Call Function node asks this before running anything
     // whose entry has Run On set (plan §7.2). Unbound = false = run it here,
     // which is what every runtime without a session answers.
@@ -1545,9 +1552,13 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         // node happens to sit in is not the caller's business. Without this,
         // moving a Server function up into a base class would quietly turn it
         // back into a local call on whichever machine ran the caller.
-        for (const Node& fe : i->levels[lv].nodes)
+        // The level's FIRST entry of that name, whatever its access — the
+        // index keeps node order within a level, so this is the one a scan of
+        // the level would have met first.
+        for (const DispatchIndex::Function& f : dispatchOf(*i).functions.at(fn))
         {
-            if (fe.type != NodeType::FunctionEntry || fe.s != fn) continue;
+            if (f.level != (size_t)lv) continue;
+            const Node& fe = *f.entry;
             if (fe.runOn != (std::uint8_t)RunOn::Local && m_rpcRoute &&
                 m_rpcRoute(id, fn, args, fe.runOn, fe.anyClient))
                 return true;   // on the wire; nothing runs here, and no results
@@ -1562,7 +1573,7 @@ Context Runtime::makeContext(InstanceId id, size_t level)
             return false;
         }
         ++m_callDepth;
-        Runner r(i->levels[lv], makeContext(id, (size_t)lv));
+        Runner r(i->levels[lv], contextFor(*i, id, (size_t)lv));
         const bool ok = r.callFunction(fn, /*requirePublic=*/false, args, results);
         --m_callDepth;
         return ok;
@@ -1583,6 +1594,17 @@ Context Runtime::makeContext(InstanceId id, size_t level)
         if (Inst* i = find(id)) i->stateAt(level)[nodeId] = v;
     };
     return ctx;
+}
+
+std::shared_ptr<const Context> Runtime::contextFor(Inst& i, InstanceId id, size_t level)
+{
+    // Built by a Runtime that has since been moved from: its lambdas hold the
+    // old `this`. Never happens in the engine; costs one compare to rule out.
+    if (i.contextsOf != this) { i.contexts.clear(); i.contextsOf = this; }
+    if (i.contexts.size() <= level) i.contexts.resize(level + 1);
+    std::shared_ptr<const Context>& c = i.contexts[level];
+    if (!c) c = std::make_shared<const Context>(makeContext(id, level));
+    return c;
 }
 
 // ── Breakpoints ──────────────────────────────────────────────────────────────
@@ -1630,7 +1652,7 @@ void Runtime::resumeRun(SuspendedRun run)
     if (run.level >= i->levels.size()) return;  // that level is gone
     // Same shape as an expired Delay: a fresh Runner on the graph the run
     // stopped in, with a fresh Context — the captured state is the run's own.
-    Runner runner(i->levels[run.level], makeContext(run.instance, run.level));
+    Runner runner(i->levels[run.level], contextFor(*i, run.instance, run.level));
     runner.resumeSuspended(std::move(run));
 }
 
@@ -1691,7 +1713,7 @@ void Runtime::update(float dt, float unscaledDt)
             // their own node 7, and resuming in the wrong one would run a
             // different chain than the one that paused.
             if (p.level >= i->levels.size()) continue;   // that level is gone
-            Runner runner(i->levels[p.level], makeContext(p.id, p.level));
+            Runner runner(i->levels[p.level], contextFor(*i, p.id, p.level));
             runner.resumeFrom(p.node);
         }
     }
@@ -2051,31 +2073,49 @@ void Runtime::dispatchToListeners(InstanceId owner, EventId ev, const std::strin
     if (m_dispatchDepth == 0) m_dispatchFires = 0; // cascade over — fresh budget
 }
 
-int Runtime::levelHandlingEvent(const Inst& i, const std::string& event, int elem) const
+const Runtime::DispatchIndex& Runtime::dispatchOf(const Inst& i) const
 {
+    if (i.dispatch) return *i.dispatch;
+    auto d = std::make_unique<DispatchIndex>();
     for (size_t lv = i.levels.size(); lv-- > 0; )
         for (const Node& n : i.levels[lv].nodes)
         {
-            if (n.type == NodeType::Event && n.s == event && (n.elem == 0 || n.elem == elem))
-                return (int)lv;
+            if (n.type == NodeType::Event)
+                d->events[n.s].push_back({ lv, n.elem });
             // An Input Action node handles the events its action produces, so a
             // derived class binding one overrides the base's for that action —
-            // the same leaf-first rule every other handler follows.
-            if (n.type == NodeType::InputAction && inputActionChainFor(n, event) >= 0)
-                return (int)lv;
+            // the same leaf-first rule every other handler follows. Any element:
+            // input is not bound to one.
+            else if (n.type == NodeType::InputAction)
+                for (const std::string& ev : inputActionEventNames(n))
+                    d->events[ev].push_back({ lv, 0 });
+            else if (n.type == NodeType::FunctionEntry)
+                d->functions[n.s].push_back({ lv, &n });
         }
+    i.dispatch = std::move(d);
+    return *i.dispatch;
+}
+
+int Runtime::levelHandlingEvent(const Inst& i, const std::string& event, int elem) const
+{
+    const DispatchIndex& d = dispatchOf(i);
+    const auto it = d.events.find(event);
+    if (it == d.events.end()) return -1;
+    for (const DispatchIndex::Handler& h : it->second)
+        if (h.elem == 0 || h.elem == elem) return (int)h.level;
     return -1;
 }
 
 int Runtime::levelWithFunction(const Inst& i, const std::string& fn, bool publicOnly) const
 {
-    for (size_t lv = i.levels.size(); lv-- > 0; )
-        for (const Node& n : i.levels[lv].nodes)
-            if (n.type == NodeType::FunctionEntry && n.s == fn)
-            {
-                if (publicOnly && n.access != 0) continue;   // private to its own class
-                return (int)lv;
-            }
+    const DispatchIndex& d = dispatchOf(i);
+    const auto it = d.functions.find(fn);
+    if (it == d.functions.end()) return -1;
+    for (const DispatchIndex::Function& f : it->second)
+    {
+        if (publicOnly && f.entry->access != 0) continue;   // private to its own class
+        return (int)f.level;
+    }
     return -1;
 }
 
@@ -2084,7 +2124,7 @@ void Runtime::runEventOnLevel(Inst& i, InstanceId id, const std::string& event,
 {
     const int lv = levelHandlingEvent(i, event, elem);
     if (lv < 0) return;
-    Runner r(i.levels[lv], makeContext(id, (size_t)lv));
+    Runner r(i.levels[lv], contextFor(i, id, (size_t)lv));
     r.fireEvent(event, elem, arg);
 }
 
@@ -2111,7 +2151,7 @@ bool Runtime::callFunction(InstanceId id, const std::string& fn, bool requirePub
         ok = i->compiled->callFunction(fn, requirePublic, args, results);
     else if (const int lv = levelWithFunction(*i, fn, /*publicOnly=*/false); lv >= 0)
     {
-        Runner runner(i->levels[lv], makeContext(id, (size_t)lv));
+        Runner runner(i->levels[lv], contextFor(*i, id, (size_t)lv));
         ok = runner.callFunction(fn, requirePublic, args, results);
     }
     --m_callDepth;

@@ -77,6 +77,31 @@ namespace EditorTransformGizmo
 	                EditorUndo* undo, bool* outChanged = nullptr,
 	                const SnapProbe& probe = {});
 
+	// ── A bare point ──────────────────────────────────────────────────────────
+	// The move handles on a point that is not an entity — a spline's control
+	// point. Same ImGuizmo setup, same latch across a drag, same surface / vertex
+	// snapping as the entity gizmo (the toolbar's snap settings apply, the
+	// operation is always Move), but nothing is written anywhere: the new
+	// position comes back through `worldPos`, and the caller decides what it
+	// means and when the undo entry starts and ends.
+	//
+	// `drag` reports the edges the caller needs, once each: `started` on the
+	// frame a handle is grabbed (nothing has moved yet — begin the undo session
+	// BEFORE writing `worldPos` anywhere), `moved` on every frame `worldPos` was
+	// changed, `ended` on the frame the button comes up. The return value is the
+	// same as the entity gizmo's: hovered or in use.
+	struct PointDrag
+	{
+		bool started = false;
+		bool moved   = false;
+		bool ended   = false;
+	};
+	bool manipulatePoint(glm::vec3& worldPos,
+	                     const glm::mat4& view, const glm::mat4& proj,
+	                     const ImVec2& rectMin, const ImVec2& rectMax,
+	                     const ViewportToolbar::State& tb, bool enabled,
+	                     PointDrag& drag, const SnapProbe& probe = {});
+
 	// Where a world point lands on the picture drawn with `view`/`proj` into
 	// `rectMin`..`rectMax`. False behind the camera. Public so the viewport's
 	// probe and this file agree on the projection to the pixel.

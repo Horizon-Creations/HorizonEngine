@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // the cached header sniff — what a path holds
 #include "InputMappingModel.h"        // the decoded mapping + its JSON codec
@@ -247,30 +247,21 @@ Doc openDoc(ContentManager& content, const McpInputHooks& h, const json& args,
 
 	if (forWrite)
 	{
-		if (p.engine) { d.failure = failEngineReadOnly(p.rel); return d; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and the running session has already applied "
+			"this mapping — a change now would be half in effect and half not. It is "
+			"refused rather than half-applied. Ask the user to stop play mode.",
+			"is open in the editor with unsaved changes. The Input "
+			"Asset editor keeps no undo history, so there is no safe place to put "
+			"this edit: writing the file would be reverted by the human's next Save, "
+			"and writing into the tab would be a change they could not take back. "
+			"Ask the user to save or close that tab, then call again." };
+		const bool openDirty = d.openDirty;
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther,
+		                                    [openDirty](const std::string&) { return openDirty; },
+		                                    kGate))
 		{
-			d.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and the running session has already applied "
-				"this mapping — a change now would be half in effect and half not. It is "
-				"refused rather than half-applied. Ask the user to stop play mode.");
-			return d;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			d.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return d;
-		}
-		if (d.openDirty)
-		{
-			d.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' is open in the editor with unsaved changes. The Input "
-				"Asset editor keeps no undo history, so there is no safe place to put "
-				"this edit: writing the file would be reverted by the human's next Save, "
-				"and writing into the tab would be a change they could not take back. "
-				"Ask the user to save or close that tab, then call again.");
+			d.failure = std::move(*refused);
 			return d;
 		}
 	}
@@ -347,20 +338,15 @@ json axisRowJson(const AxisRow& r)
 // and "the binding is in the file" is not the same as "the binding works".
 void collectDeadNames(const AxisRow& r, const char* list, int index, json& into)
 {
-	const auto add = [&](const char* field, const std::string& name) {
-		if (name.empty() || isKnownKey(name)) return;
+	const auto addInvalid = [&](const char* field, const std::string& name, auto isKnown) {
+		if (name.empty() || isKnown(name)) return;
 		into.push_back(json{ { "list", list }, { "index", index },
 		                     { "field", field }, { "name", name } });
 	};
-	const auto addPad = [&](const char* field, const std::string& name) {
-		if (name.empty() || isKnownPadButton(name)) return;
-		into.push_back(json{ { "list", list }, { "index", index },
-		                     { "field", field }, { "name", name } });
-	};
-	add("positive", r.positive);
-	add("negative", r.negative);
-	addPad("positiveButton", r.positiveButton);
-	addPad("negativeButton", r.negativeButton);
+	addInvalid("positive", r.positive, isKnownKey);
+	addInvalid("negative", r.negative, isKnownKey);
+	addInvalid("positiveButton", r.positiveButton, isKnownPadButton);
+	addInvalid("negativeButton", r.negativeButton, isKnownPadButton);
 }
 
 json entryJson(const MapEntry& e)
@@ -374,19 +360,15 @@ json entryJson(const MapEntry& e)
 	if (!e.gamepadButtons.empty()) j["gamepadButtons"] = e.gamepadButtons;
 	if (!e.mouseButtons.empty())   j["mouseButtons"]   = e.mouseButtons;
 
+	const auto buildAxisArray = [&](const auto& src, const char* key) {
+		if (src.empty()) return;
+		json arr = json::array();
+		for (const AxisRow& r : src) arr.push_back(axisRowJson(r));
+		j[key] = std::move(arr);
+	};
 	const char* xList = e.valueType == kVtAxis2D ? "axesX" : "axes";
-	if (!e.axes.empty())
-	{
-		json arr = json::array();
-		for (const AxisRow& r : e.axes) arr.push_back(axisRowJson(r));
-		j[xList] = std::move(arr);
-	}
-	if (!e.axesY.empty())
-	{
-		json arr = json::array();
-		for (const AxisRow& r : e.axesY) arr.push_back(axisRowJson(r));
-		j["axesY"] = std::move(arr);
-	}
+	buildAxisArray(e.axes, xList);
+	buildAxisArray(e.axesY, "axesY");
 
 	json dead = json::array();
 	for (size_t i = 0; i < e.keys.size(); ++i)

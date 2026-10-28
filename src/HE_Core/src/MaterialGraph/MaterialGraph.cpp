@@ -6,8 +6,13 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
+#include <cstdlib>
+#include <functional>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -34,7 +39,8 @@ const std::vector<MatNodeDesc>& registry()
             { "Opacity", F::Float, 1.0f },     // 5 — meaning depends on the blend mode
             { "Normal", F::Vec3, 0.0f },       // 6 — WORLD-space; unconnected = vNormal
             { "Ambient Occlusion", F::Float, 1.0f }, // 7 — scales the ambient term only
-            { "World Position Offset", F::Vec3, 0.0f } }, // 8 — vertex stage
+            { "World Position Offset", F::Vec3, 0.0f },  // 8 — vertex stage
+            { "Displacement", F::Float, 0.0f } },         // 9 — tessellation (domain) stage
           {}, 3 }, // p[0] = lit, p[1] = blend mode, p[2] = mask cutoff, p[3] = domain
         { MatNodeType::ConstFloat, "Float", "Constant",
           {}, { { "Value", F::Float, 0 } }, 1 },
@@ -133,6 +139,10 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "Dist", F::Float, 0 } }, 0 },
         { MatNodeType::ScreenPos, "Screen Position", "Input",
           {}, { { "XY", F::Vec2, 0 } }, 0 },
+        { MatNodeType::Weather, "Weather", "Input",
+          {}, { { "Wetness", F::Float, 0 }, { "Snow Amount", F::Float, 0 },
+                { "Puddles", F::Float, 0 }, { "Snow Cover", F::Float, 0 },
+                { "Puddle Size", F::Float, 0 } }, 0 },
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──
         { MatNodeType::ElementSize, "Element Size", "UI",
@@ -224,11 +234,14 @@ const std::vector<MatNodeDesc>& registry()
           {}, { { "Blended", F::Vec3, 0 } }, 0 },
 
         // ── v13: texture arrays — s = the array texture, Slice picks the layer ──
+        // "Groups" (appended, Thema 180 Schritt 3): 0 / unwired = the array is read slice for
+        // slice as always; N > 0 = it holds N groups of V variants each (depth = N * V + extra),
+        // "Slice" names the group and the node reads that group's variant 0.
         { MatNodeType::TextureArraySample, "Texture Array Sample", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 0 },
         { MatNodeType::NormalMapArraySample, "Normal Map Array", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength
 
         // ── v14: texture bombing — p = Rotation, Sharpness, Seed (+ Strength);
@@ -239,12 +252,37 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::NormalMapBombSample, "Normal Map Bombing", "Texture",
           { { "UV", F::Vec2, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
           { { "N", F::Vec3, 0 } }, 4 },
+        // "Groups" (appended, Thema 180 Schritt 3): wired with N > 0, each of the three hexes
+        // draws its own variant 0..V-1 of group "Slice" from its cell's hash (V = depth / N);
+        // unwired = one slice for all three, as before.
         { MatNodeType::TextureArrayBombSample, "Texture Array Bombing", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
+            { "Groups", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
         { MatNodeType::NormalMapArrayBombSample, "Normal Map Array Bombing", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
+            { "Groups", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 4 },
+
+        // ── v15: the hex grid as data, no texture — p[0] = Seed ──
+        { MatNodeType::BombCells, "Bombing Cells", "Procedural",
+          { { "UV", F::Vec2, 0 }, { "Cell", F::Float, 8.0f }, { "Blend", F::Float, kMatBombDefaultSharpness } },
+          { { "Weights", F::Vec3, 0 }, { "Random A", F::Vec3, 0 }, { "Random B", F::Vec3, 0 },
+            { "Random C", F::Vec3, 0 } }, 1 },
+
+        // ── v16: the rings on the water, read from the lighting block ──
+        { MatNodeType::WaterRipple, "Water Ripple", "Input",
+          { { "Position", F::Vec2, 0 } },
+          { { "Height", F::Float, 0 }, { "Slope", F::Vec2, 0 }, { "Foam", F::Float, 0 } }, 0 },
+
+        // ── v17: the sun, read from the lighting block ──
+        { MatNodeType::Sun, "Sun", "Input",
+          {}, { { "Direction", F::Vec3, 0 }, { "Color", F::Vec3, 0 } }, 0 },
+
+        // ── v18: FBM and its gradient in one evaluation ──
+        { MatNodeType::FbmGrad, "FBM Noise Gradient", "Procedural",
+          { { "UV", F::Vec2, 0 }, { "Scale", F::Float, 8 } },
+          { { "Value", F::Float, 0 }, { "dX", F::Float, 0 }, { "dY", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -311,15 +349,37 @@ const std::vector<MatNodeDesc>& matNodeRegistry() { return registry(); }
 
 const MatNodeDesc& matNodeDesc(MatNodeType type)
 {
-    for (const auto& d : registry())
-        if (d.type == type) return d;
-    return registry().front();
+    // Indexed once from the registry (a function-local static, so it never changes).
+    // The FIRST entry of a type wins, exactly as the old front-to-back scan did.
+    static const std::array<const MatNodeDesc*, 256> kByType = [] {
+        std::array<const MatNodeDesc*, 256> t{};
+        for (const auto& d : registry())
+            if (!t[static_cast<uint8_t>(d.type)]) t[static_cast<uint8_t>(d.type)] = &d;
+        return t;
+    }();
+    const MatNodeDesc* d = kByType[static_cast<uint8_t>(type)];
+    return d ? *d : registry().front();
 }
 
 const MatNodeDesc* matNodeDescByName(const std::string& name)
 {
-    for (const auto& d : registry())
-        if (name == d.name) return &d;
+    // The names are string literals, so the views stay valid. First entry wins, as
+    // in the registry order (emplace keeps the existing key).
+    static const std::unordered_map<std::string_view, const MatNodeDesc*> kByName = [] {
+        std::unordered_map<std::string_view, const MatNodeDesc*> m;
+        m.reserve(registry().size());
+        for (const auto& d : registry()) m.emplace(d.name, &d);
+        return m;
+    }();
+    const auto it = kByName.find(name);
+    return it != kByName.end() ? it->second : nullptr;
+}
+
+// The graph's Output node: the first one in node order (a well-formed graph has one).
+static const MatGraphNode* firstOutputNode(const MaterialGraph& g)
+{
+    for (const MatGraphNode& n : g.nodes)
+        if (n.type == MatNodeType::Output) return &n;
     return nullptr;
 }
 
@@ -508,11 +568,16 @@ struct EmitCtx
     bool usesNoise   = false;                            // 2D value-noise/fbm helpers (UV-space)
     bool usesNoise3  = false;                            // 3D value-noise/fbm helpers (world-space)
     bool usesNoiseI  = false;                            // 2D fbm on the integer hash (Fbm p[0] = 1)
+    bool usesNoiseIGrad = false;                         // the same fbm with its gradient (FbmGrad)
     bool usesNormalPerturb = false;                      // hePerturbNormal (screen-space TBN)
+    bool usesNormalPerturbD = false;                     // the same frame from gradients taken ahead of a branch
     // Texture bombing: the heBombGrid helper, and the grids already emitted —
     // key = scope + uv expression + grid params, value = the grid's variable
     // prefix. One layer's Albedo/Normal/Mask reads reuse ONE grid this way.
     bool usesBombGrid = false;
+    bool usesBombCells = false;                          // heBombCells (Bombing Cells, no texture)
+    bool usesBombGridV = false;                          // heBombGridV (array bombing with a Groups pin)
+    bool usesWaterRipple = false;                        // heWaterRipple (Water Ripple, reads heLight)
     std::unordered_map<std::string, std::string> bombGrids;
     // Landscape layer blending: the fragment declares heLandscapeWeights and the
     // material advertises its layer names (order = weightmap channel order).
@@ -533,6 +598,19 @@ struct EmitCtx
     std::vector<bool>         textureIsArray;            // parallel: slot is a sampler2DArray
     const MatFunctionLoader*  loader = nullptr;
     std::vector<std::string>  fnStack;                   // inline stack (recursion guard)
+    // Real branching for If (fragment, root scope only; see computeBranchGuards). A
+    // node needed only under one side of an If's condition runs inside
+    // `if (cond >= 0.5) {...} else {...}` instead of always: mix() used to compute
+    // both sides for every pixel. guardOf maps a node id to "<cond src>:<pin>+" or
+    // "...-" (absent = always needed). Guarded variables are declared ahead of
+    // their block, so a later block under the same condition can still read them.
+    struct GuardBlock { std::string cond, hoist, yes, no; };
+    std::unordered_map<int, std::string>       guardOf;
+    std::unordered_set<std::string>            branchConds;   // cond keys some node is guarded by
+    std::vector<std::string>                   blockOrder;
+    std::unordered_map<std::string, GuardBlock> blocks;       // pending, by cond key
+    std::unordered_map<std::string, std::string> condExprs;   // cond key → its expression, once emitted
+    std::unordered_set<std::string>            pendingVars;   // If results assigned in a pending block
 };
 
 // One inline instance of a graph. The root scope is the material graph; each
@@ -545,6 +623,259 @@ struct Scope
     const Scope*         parent   = nullptr;
     const MatGraphNode*  callNode = nullptr; // the FunctionCall node in the parent scope
 };
+
+// The Displacement body is emitted in scope "ds" (a function it calls inlines as
+// "ds/<id>"), and it runs in the tessellation DOMAIN stage: after the vertices,
+// before rasterisation. There are no screen derivatives and no pixel there, so the
+// nodes that need one read mip 0 or hand back a neutral value instead of failing
+// to compile (the same courtesy Water Ripple extends to the WPO scope "vs").
+bool dsStage(const Scope& sc) { return sc.key == "ds" || sc.key.rfind("ds/", 0) == 0; }
+
+// ── Real branching for If ────────────────────────────────────────────────────
+// A node may move into an If's branch only when its text is plain arithmetic:
+// no texture read and no screen derivative (implicit-LOD sampling, dFdx, the
+// normal-perturb helper), which are undefined in non-uniform control flow, and no
+// node whose emitted text other nodes share by name (bomb grids, functions).
+bool branchPure(MatNodeType t)
+{
+    switch (t)
+    {
+        case MatNodeType::ConstFloat: case MatNodeType::ConstColor: case MatNodeType::ConstVec2:
+        case MatNodeType::ConstVec4: case MatNodeType::ConstBool: case MatNodeType::VertexColor:
+        case MatNodeType::NormalWS: case MatNodeType::UV: case MatNodeType::Time: case MatNodeType::Fresnel:
+        case MatNodeType::WorldPos: case MatNodeType::ViewDir: case MatNodeType::CameraPos:
+        case MatNodeType::CameraDistance: case MatNodeType::ParamFloat: case MatNodeType::ParamColor:
+        case MatNodeType::ParamVec2: case MatNodeType::ParamVec4: case MatNodeType::ParamBool:
+        case MatNodeType::Sun: case MatNodeType::Weather: case MatNodeType::Wind:
+        case MatNodeType::Add: case MatNodeType::Multiply: case MatNodeType::Lerp: case MatNodeType::OneMinus:
+        case MatNodeType::Power: case MatNodeType::Saturate: case MatNodeType::DotProduct: case MatNodeType::Sine:
+        case MatNodeType::Combine3: case MatNodeType::Subtract: case MatNodeType::Divide: case MatNodeType::Absolute:
+        case MatNodeType::Fract: case MatNodeType::Smoothstep: case MatNodeType::Step: case MatNodeType::Normalize3:
+        case MatNodeType::SplitRGBA: case MatNodeType::CombineRGBA: case MatNodeType::If:
+        case MatNodeType::Greater: case MatNodeType::Less: case MatNodeType::GreaterEqual:
+        case MatNodeType::LessEqual: case MatNodeType::Equal: case MatNodeType::NotEqual:
+        case MatNodeType::And: case MatNodeType::Or: case MatNodeType::Not:
+        case MatNodeType::FbmGrad: case MatNodeType::Panner: case MatNodeType::ValueNoise: case MatNodeType::Fbm:
+        case MatNodeType::Checker: case MatNodeType::StaticSwitch: case MatNodeType::Reroute:
+            return true;
+        // The bombed reads sample with textureGrad from gradients taken ahead of the
+        // branch (the grid's dx/dy, and dFdx(vWorldPos) for the normal frame), so only
+        // their taps move into it; see emitBombNode.
+        case MatNodeType::TextureBombSample: case MatNodeType::TextureArrayBombSample:
+        case MatNodeType::NormalMapBombSample: case MatNodeType::NormalMapArrayBombSample:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool isBombRead(MatNodeType t)
+{
+    return t == MatNodeType::TextureBombSample || t == MatNodeType::TextureArrayBombSample
+        || t == MatNodeType::NormalMapBombSample || t == MatNodeType::NormalMapArrayBombSample;
+}
+
+// Which nodes of the root graph are needed under one side of an If only. A node's
+// guard is the one every consumer agrees on: an unguarded If hands its yes pin
+// "<cond>+" and its no pin "<cond>-", any other consumer hands on its own guard,
+// and the Output node, an impure node or a disagreement means "always". An If
+// that is itself guarded stays a mix() (one level of branching).
+void computeBranchGuards(EmitCtx& c, const MaterialGraph& g)
+{
+    // Only consumers on a path to the Output count: a node left over in the graph (an
+    // editor stray, a builder's discarded split) is never emitted and must not pin its
+    // inputs outside every branch.
+    std::unordered_set<int> live;
+    {
+        std::vector<int> todo;
+        for (const MatGraphNode& n : g.nodes)
+            if (n.type == MatNodeType::Output) todo.push_back(n.id);
+        while (!todo.empty())
+        {
+            const int id = todo.back();
+            todo.pop_back();
+            if (!live.insert(id).second) continue;
+            for (const MatGraphLink& l : g.links)
+                if (l.dstNode == id) todo.push_back(l.srcNode);
+        }
+    }
+    std::unordered_map<int, std::vector<const MatGraphLink*>> consumers;
+    for (const MatGraphLink& l : g.links)
+        if (live.count(l.dstNode)) consumers[l.srcNode].push_back(&l);
+    auto condKeyOf = [&](int ifNode) -> std::string {
+        for (const MatGraphLink& l : g.links)
+            if (l.dstNode == ifNode && l.dstPin == 0)
+                return std::to_string(l.srcNode) + ":" + std::to_string(l.srcPin);
+        return {};
+    };
+    std::unordered_map<int, std::string> memo;
+    std::unordered_set<int> visiting;
+    std::function<std::string(int)> guardOf = [&](int id) -> std::string {
+        if (auto it = memo.find(id); it != memo.end()) return it->second;
+        const MatGraphNode* n = g.findNode(id);
+        if (!n || !branchPure(n->type) || visiting.count(id)) return {};
+        // A node that reads an impure node (an implicit-LOD texture read, a function)
+        // stays out too: were its only use inside a branch, the driver may sink that read
+        // into the branch with it (measured on macOS OpenGL: the plain-read permutation
+        // of the auto landscape moved up to 31/255 on branch-edge pixels).
+        // A Static Switch reads only its taken input (resolved as emitFlowNode does).
+        int onlyPin = -1;
+        if (n->type == MatNodeType::StaticSwitch)
+        {
+            bool on = n->p[0] > 0.5f;
+            const std::string swName = n->s.empty() ? ("switch_" + std::to_string(n->id)) : n->s;
+            if (c.switchOv)
+                if (auto it = c.switchOv->find(swName); it != c.switchOv->end()) on = it->second;
+            onlyPin = on ? 0 : 1;
+        }
+        for (const MatGraphLink& l : g.links)
+            if (l.dstNode == id && (onlyPin < 0 || l.dstPin == onlyPin))
+                if (const MatGraphNode* src = g.findNode(l.srcNode); src && !branchPure(src->type))
+                    return memo[id] = std::string{};
+        visiting.insert(id);
+        std::string common;
+        bool first = true;
+        if (auto it = consumers.find(id); it != consumers.end())
+            for (const MatGraphLink* l : it->second)
+            {
+                const MatGraphNode* m = g.findNode(l->dstNode);
+                std::string e;
+                if (m && !isBombRead(m->type))   // a bombed read's inputs feed its prelude: always
+                {
+                    const std::string gm = guardOf(m->id);
+                    if (gm.empty() && m->type == MatNodeType::If && (l->dstPin == 1 || l->dstPin == 2))
+                    {
+                        const std::string ck = condKeyOf(m->id);
+                        if (!ck.empty()) e = ck + (l->dstPin == 1 ? "+" : "-");
+                    }
+                    else
+                        e = gm;
+                }
+                if (first) { common = e; first = false; }
+                else if (common != e) common.clear();
+                if (common.empty()) break;
+            }
+        visiting.erase(id);
+        memo[id] = common;
+        return common;
+    };
+    // A constant, parameter or input is no reason to branch (its text is a literal
+    // or a uniform read); it may still move along with the work that is.
+    auto isLeaf = [](MatNodeType t) {
+        return matNodeDesc(t).inputs.empty();
+    };
+    for (const MatGraphNode& n : g.nodes)
+    {
+        const std::string s = guardOf(n.id);
+        if (s.empty()) continue;
+        c.guardOf[n.id] = s;
+        if (!isLeaf(n.type)) c.branchConds.insert(s.substr(0, s.size() - 1));
+    }
+}
+
+// True if `text` names a variable whose value a pending block has not assigned yet.
+bool refsPending(const EmitCtx& c, const std::string& text)
+{
+    if (c.pendingVars.empty()) return false;
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] != 'n' || (i > 0 && (std::isalnum(static_cast<unsigned char>(text[i - 1])) || text[i - 1] == '_')))
+            continue;
+        size_t j = i + 1;
+        while (j < text.size() && std::isdigit(static_cast<unsigned char>(text[j]))) ++j;
+        if (j > i + 1 && (j == text.size() || !(std::isalnum(static_cast<unsigned char>(text[j])) || text[j] == '_'))
+            && c.pendingVars.count(text.substr(i, j - i)))
+            return true;
+    }
+    return false;
+}
+
+void flushGuards(EmitCtx& c)
+{
+    for (const std::string& key : c.blockOrder)
+    {
+        const EmitCtx::GuardBlock& b = c.blocks[key];
+        c.body += b.hoist;
+        c.body += "    if (" + b.cond + " >= 0.5) {\n" + b.yes + "    } else {\n" + b.no + "    }\n";
+    }
+    c.blockOrder.clear();
+    c.blocks.clear();
+    c.pendingVars.clear();
+}
+
+EmitCtx::GuardBlock& guardBlock(EmitCtx& c, const std::string& condKey, const std::string& condExpr)
+{
+    auto it = c.blocks.find(condKey);
+    if (it != c.blocks.end()) return it->second;
+    c.blockOrder.push_back(condKey);
+    EmitCtx::GuardBlock& b = c.blocks[condKey];
+    b.cond = condExpr;
+    return b;
+}
+
+// The cond key an If branches on, or empty when it stays a mix(): outside the
+// fragment's root scope, guarded itself, unwired condition, or nothing to move.
+std::string branchCondKey(const EmitCtx& c, const Scope& sc, const MatGraphNode& n)
+{
+    if (!sc.key.empty() || c.guardOf.count(n.id)) return {};
+    for (const MatGraphLink& l : sc.g->links)
+        if (l.dstNode == n.id && l.dstPin == 0)
+        {
+            std::string k = std::to_string(l.srcNode) + ":" + std::to_string(l.srcPin);
+            return c.branchConds.count(k) ? k : std::string{};
+        }
+    return {};
+}
+
+// Separates the part of a declaration that must run ahead of any branch (a bombed
+// read's grid, slices and screen gradients) from the part that may move into one (its
+// taps). Only emitBombNode writes it, and only for a guarded node.
+constexpr char kBranchSplit = '\x01';
+
+// Write one node's declaration: into the body, or, for a guarded node, declared
+// ahead of its block (zero-initialised: FXC warns on a maybe-unset variable) and
+// assigned inside it.
+void placeDecl(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v, const std::string& decl)
+{
+    if (c.guardOf.empty())
+    {
+        c.body += "    " + decl + "\n";
+        return;
+    }
+    std::string pre, post = decl;
+    if (const size_t cut = decl.find(kBranchSplit); cut != std::string::npos)
+    {
+        pre  = decl.substr(0, cut);
+        post = decl.substr(cut + 1);
+    }
+    if (refsPending(c, decl)) flushGuards(c);   // also a function body reading an If's result
+    if (!pre.empty()) c.body += "    " + pre + "\n";
+    const auto g = sc.key.empty() ? c.guardOf.find(n.id) : c.guardOf.end();
+    // The statement that declares the node's own variable: "<type> v = ...;". Everything
+    // else in `post` is a temporary of the block.
+    const std::string own = " " + v + " = ";
+    const size_t at = post.find(own);
+    size_t typeAt = at == std::string::npos ? std::string::npos : post.rfind(' ', at - 1);
+    typeAt = typeAt == std::string::npos ? 0 : typeAt + 1;
+    const bool single = post.find(';') == post.size() - 1;
+    if (g == c.guardOf.end() || at == std::string::npos || post.back() != ';' || (pre.empty() && !single))
+    {
+        c.body += "    " + post + "\n";
+        return;
+    }
+    const std::string type = post.substr(typeAt, at - typeAt);
+    const std::string& key = g->second;
+    const std::string condKey = key.substr(0, key.size() - 1);
+    const auto ce = c.condExprs.find(condKey);
+    if (ce == c.condExprs.end())   // reached before its If (another path): stay plain
+    {
+        c.body += "    " + post + "\n";
+        return;
+    }
+    EmitCtx::GuardBlock& b = guardBlock(c, condKey, ce->second);
+    b.hoist += "    " + type + " " + v + " = " + type + "(0.0);\n";
+    (key.back() == '+' ? b.yes : b.no) += "        " + post.substr(0, typeAt) + v + post.substr(at + v.size() + 1) + "\n";
+}
 
 std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
                       int pinIdx, MatPinType wantType);
@@ -631,23 +962,47 @@ std::string arrayCoord(const std::string& sampler, const std::string& uv, const 
 // <g>; the declaration is appended to `decl` only when this grid is new in the
 // scope, so call it AFTER the node's inputs are emitted (an input may itself be a
 // bombing node that declares the grid first).
+//
+// `variants` = the heBombGridV form: the same grid plus <g>s, the variant numbers
+// (the low 8 bits of each hex's hash) of the three hexes. Its own cache key, so a
+// plain read and a variant read of one layer never share a grid.
 std::string bombGrid(EmitCtx& c, const Scope& sc, const std::string& uv, const std::string& cell,
-                     const MatGraphNode& n, std::string& decl)
+                     const MatGraphNode& n, std::string& decl, bool variants = false)
 {
     const float rot   = std::clamp(n.p[0], 0.0f, 1.0f);
     const float sharp = n.p[1] > 0.0f ? std::min(n.p[1], 32.0f) : kMatBombDefaultSharpness;
     const long  seedI = std::lround(std::clamp(n.p[2], -2.0e9f, 2.0e9f));
     const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
-    c.usesBombGrid = true;
-    const std::string key = sc.key + "|" + uv + "|" + cell + "|" + fmtF(rot) + "|" + fmtF(sharp) + "|" + seed;
+    (variants ? c.usesBombGridV : c.usesBombGrid) = true;
+    std::string key = sc.key;
+    key += '|'; key += uv;
+    key += '|'; key += cell;
+    key += '|'; key += fmtF(rot);
+    key += '|'; key += fmtF(sharp);
+    key += '|'; key += seed;
+    if (variants) key += "|V";
     if (auto it = c.bombGrids.find(key); it != c.bombGrids.end()) return it->second;
     const std::string g = "n" + std::to_string(++c.varCounter) + "_g";
     decl += "vec2 " + g + "t0, " + g + "t1, " + g + "t2; mat2 " + g + "r0, " + g + "r1, " + g
-          + "r2; vec3 " + g + "w; heBombGrid(" + uv + ", " + cell + ", " + fmtF(rot) + ", " + fmtF(sharp) + ", "
-          + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, " + g + "r2, "
-          + g + "w); vec2 " + g + "dx = dFdx(" + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ";
+          + "r2; vec3 " + g + "w; ";
+    if (variants) decl += "uvec3 " + g + "s; ";
+    decl += std::string(variants ? "heBombGridV(" : "heBombGrid(") + uv + ", " + cell + ", " + fmtF(rot) + ", "
+          + fmtF(sharp) + ", " + seed + ", " + g + "t0, " + g + "t1, " + g + "t2, " + g + "r0, " + g + "r1, "
+          + g + "r2, " + g + "w" + (variants ? ", " + g + "s" : std::string()) + "); "
+          // Domain stage: no derivatives, and zero gradients make textureGrad read mip 0.
+          + (dsStage(sc) ? "vec2 " + g + "dx = vec2(0.0); vec2 " + g + "dy = vec2(0.0); "
+                         : "vec2 " + g + "dx = dFdx(" + uv + "); vec2 " + g + "dy = dFdy(" + uv + "); ");
     c.bombGrids.emplace(key, g);
     return g;
+}
+
+// The number of variants per group of an array read with a Groups pin: the array's
+// depth divided by the group count, in integers, so every backend divides the same.
+// A Groups value of 0 (or less) is one variant, i.e. the slice read as it always was.
+std::string variantCount(const std::string& sampler, const std::string& groups)
+{
+    return "int(floor(" + groups + " + 0.5)) > 0 ? max(textureSize(" + sampler + ", 0).z / int(floor(" + groups
+         + " + 0.5)), 1) : 1";
 }
 
 // emitNode's node switch, split by family into functions that are never
@@ -745,7 +1100,17 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
         case MatNodeType::CameraDistance:
             decl = "float " + v + " = length(heLight.camPos.xyz - vWorldPos);"; break;
         case MatNodeType::ScreenPos:
-            decl = "vec2 " + v + " = gl_FragCoord.xy;"; break;
+            decl = dsStage(sc) ? "vec2 " + v + " = vec2(0.0); // Screen Position: no pixel in the domain stage"
+                               : "vec2 " + v + " = gl_FragCoord.xy;";
+            break;
+        case MatNodeType::Weather:
+            // heLight.weather: x wetness, y snow amount (the generic response), z puddles,
+            // w snow cover (set per scene in the Weather details panel).
+            decl = "vec4 " + v + " = clamp(heLight.weather, 0.0, 1.0);";
+            // Puddle Size is metres, not 0..1, and a zero-filled block (previews, UI) must not
+            // divide a noise scale by zero: the node hands out at least half a metre.
+            pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w", "max(heLight.weather2.x, 0.5)" };
+            break;
 
         // ── v11: the widget under the pixel (D5 Schicht 1) ──
         // All of these read heUI, which is a uniform block in a UI material and a
@@ -816,6 +1181,13 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             pinExpr = { v, v + "_s", "(" + v + " * " + v + "_s)" };
             break;
 
+        case MatNodeType::Sun:
+            // The same prefix channels Time (sunDir.w) already reads, so both stages
+            // have them. Unit by construction (dominantDirectionalLight).
+            decl = "vec3 " + v + " = heLight.sunDir.xyz; vec3 " + v + "_c = heLight.sunColor.rgb;";
+            pinExpr = { v, v + "_c" };
+            break;
+
         case MatNodeType::Output:
             decl = ""; break; // handled by generateFragment
         default: return false;
@@ -832,12 +1204,19 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
         case MatNodeType::TextureSample:
         {
             const std::string sampler = textureSampler(c, n);
-            decl = "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
+            decl = dsStage(sc) // no derivatives → mip 0
+                ? "vec4 " + v + " = textureLod(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ", 0.0);"
+                : "vec4 " + v + " = texture(" + sampler + ", " + inputExpr(c, sc, n, 0, F::Vec2) + ");";
             pinExpr = { v + ".xyz", v + ".w" };
             break;
         }
         case MatNodeType::NormalMapSample:
         {
+            if (dsStage(sc)) // the frame needs screen derivatives: the plain normal
+            {
+                decl = "vec3 " + v + " = normalize(vNormal); // Normal Map: fragment stage only";
+                break;
+            }
             // Tangent-space normal map → world space WITHOUT vertex tangents: build the
             // cotangent frame from screen-space derivatives of position+UV (Mikkelsen).
             // Same slot machinery as Texture Sample (empty s → the mesh texture).
@@ -854,16 +1233,34 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
         case MatNodeType::TextureArraySample:
         case MatNodeType::NormalMapArraySample:
         {
+            if (n.type == MatNodeType::NormalMapArraySample && dsStage(sc))
+            {
+                decl = "vec3 " + v + " = normalize(vNormal); // Normal Map: fragment stage only";
+                break;
+            }
             bool isArr = false;
             const std::string sampler = textureSampler(c, n, /*array=*/true, &isArr);
             const std::string uv      = uvInput(c, sc, n, 0);
             decl = "vec2 " + v + "_uv = " + uv + ";";
-            const std::string coord = isArr
-                ? arrayCoord(sampler, v + "_uv", inputExpr(c, sc, n, 1, F::Float))
+            const std::string sliceExpr = isArr ? inputExpr(c, sc, n, 1, F::Float) : std::string();
+            std::string coord = isArr
+                ? arrayCoord(sampler, v + "_uv", sliceExpr)
                 : v + "_uv"; // heTex0 fallback: a plain 2D read, the slice has no meaning
+            if (isArr && hasInput(sc, n, 2))
+            {
+                // Groups wired: "Slice" names a group, this read takes the group's variant 0
+                // (slice = group * V). Without bombing there is no per-hex choice to make, and one
+                // variant per pixel would be a hard seam, so the debug mode shows variant 0.
+                const std::string depth = "float(textureSize(" + sampler + ", 0).z - 1)";
+                decl += " int " + v + "_V = " + variantCount(sampler, inputExpr(c, sc, n, 2, F::Float)) + ";";
+                coord = "vec3(" + v + "_uv, min(clamp(floor(" + sliceExpr
+                      + " + 0.5), 0.0, " + depth + ") * float(" + v + "_V), " + depth + "))";
+            }
             if (n.type == MatNodeType::TextureArraySample)
             {
-                decl += " vec4 " + v + " = texture(" + sampler + ", " + coord + ");";
+                decl += dsStage(sc)
+                    ? " vec4 " + v + " = textureLod(" + sampler + ", " + coord + ", 0.0);"
+                    : " vec4 " + v + " = texture(" + sampler + ", " + coord + ");";
                 pinExpr = { v + ".xyz", v + ".w" };
             }
             else
@@ -898,6 +1295,11 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                                 || n.type == MatNodeType::NormalMapArrayBombSample;
             const bool normal = n.type == MatNodeType::NormalMapBombSample
                              || n.type == MatNodeType::NormalMapArrayBombSample;
+            if (normal && dsStage(sc)) // like Normal Map: the frame needs derivatives
+            {
+                decl = "vec3 " + v + " = normalize(vNormal); // Normal Map: fragment stage only";
+                break;
+            }
             bool isArr = false;
             const std::string sampler = textureSampler(c, n, wantArray, &isArr);
             // The uv EXPRESSION (not a per-node copy) keys the grid, so two nodes
@@ -907,18 +1309,65 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                 decl = "float " + v + "_l = clamp(floor(" + inputExpr(c, sc, n, 1, F::Float)
                      + " + 0.5), 0.0, float(textureSize(" + sampler + ", 0).z - 1)); ";
             const std::string cell = inputExpr(c, sc, n, wantArray ? 2 : 1, F::Float);
-            const std::string g = bombGrid(c, sc, uv, cell, n, decl);
-            // One hex's read: its bombed uv, the unbombed gradients turned with it.
-            auto tap = [&](int k) {
+            // Groups wired (array nodes only): the layer above is the GROUP and every hex draws
+            // its own variant of it from its cell's hash, so a seam between two variants is
+            // the grid's soft hex blend and no texture read is added.
+            const bool variants = isArr && hasInput(sc, n, 3);
+            std::string sliceDecl; // the three variant slices; only the V > 1 branch below runs them
+            if (variants)
+            {
+                decl += "int " + v + "_V = " + variantCount(sampler, inputExpr(c, sc, n, 3, F::Float)) + "; ";
+            }
+            const std::string g = bombGrid(c, sc, uv, cell, n, decl, variants);
+            if (variants)
+            {
+                // slice = group * V + variant, the variant from the hash's 8 free low bits in
+                // integers (no float rounding that could differ per API), clamped into the array.
+                for (int k = 0; k < 3; ++k)
+                {
+                    const std::string i = std::to_string(k);
+                    sliceDecl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + int(((" + g
+                              + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u), 0, textureSize(" + sampler
+                              + ", 0).z - 1); ";
+                }
+            }
+            // Guarded (inside an If's branch, see computeBranchGuards): everything so far
+            // runs ahead of the branch, only the taps below move into it. The normal frame's
+            // position gradients are taken here too, in uniform control flow.
+            const bool guarded = sc.key.empty() && c.guardOf.count(n.id);
+            if (guarded)
+            {
+                if (normal)
+                    decl += "vec3 " + v + "_dp1 = dFdx(vWorldPos); vec3 " + v + "_dp2 = dFdy(vWorldPos); ";
+                decl += kBranchSplit;
+            }
+            // One hex's read: its bombed uv, the unbombed gradients turned with it. `variant` reads
+            // the slice the hash picked, otherwise the layer itself.
+            auto tap = [&](int k, bool variant) {
                 const std::string i = std::to_string(k);
-                const std::string coord = isArr ? "vec3(" + g + "t" + i + ", " + v + "_l)" : g + "t" + i;
+                const std::string coord = !isArr ? g + "t" + i
+                    : variant ? "vec3(" + g + "t" + i + ", float(" + v + "_s" + i + "))"
+                              : "vec3(" + g + "t" + i + ", " + v + "_l)";
                 return "textureGrad(" + sampler + ", " + coord + ", " + g + "r" + i + " * " + g
                      + "dx, " + g + "r" + i + " * " + g + "dy)";
             };
+            // V = 1 (the 5-slice cache arrays: one variant per layer) can only ever pick variant 0, i.e.
+            // slice = layer. That is a branch on a value that is the same for the whole draw, taken
+            // around the reads, so the plain taps run exactly as they did before the Groups pin.
+            // Folding it into the slice maths instead does not help: the slice then depends on the hash
+            // and costs about 1.4 ms of GPU time on Metal (5.2 MP) even though it always selects
+            // slice = layer (docs/landscape-performance-regression-bombgridv-fix-2026-10-22.md).
             if (!normal)
             {
-                decl += "vec4 " + v + " = " + g + "w.x * " + tap(0) + " + " + g + "w.y * " + tap(1)
-                      + " + " + g + "w.z * " + tap(2) + ";";
+                auto blend = [&](bool variant) {
+                    return g + "w.x * " + tap(0, variant) + " + " + g + "w.y * " + tap(1, variant) + " + " + g
+                         + "w.z * " + tap(2, variant) + ";";
+                };
+                if (variants)
+                    decl += "vec4 " + v + "; if (" + v + "_V == 1) { " + v + " = " + blend(false) + " } else { "
+                          + sliceDecl + v + " = " + blend(true) + " }";
+                else
+                    decl += "vec4 " + v + " = " + blend(false);
                 pinExpr = { v + ".xyz", v + ".w" };
             }
             else
@@ -928,17 +1377,49 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
                 // the left in every hex; then the Normal Map node's frame.
                 c.usesNormalPerturb = true;
                 const float strength = n.p[3] > 0.0f ? n.p[3] : 1.0f;
-                for (int k = 0; k < 3; ++k)
-                {
-                    const std::string t = v + "_" + std::to_string(k);
-                    decl += "vec3 " + t + " = " + tap(k) + ".xyz * 2.0 - 1.0; " + t + ".xy = transpose("
-                          + g + "r" + std::to_string(k) + ") * " + t + ".xy; ";
-                }
+                auto reads = [&](bool variant) {
+                    std::string r;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const std::string t = v + "_" + std::to_string(k);
+                        r += (variants ? "" : "vec3 ") + t + " = " + tap(k, variant) + ".xyz * 2.0 - 1.0; " + t
+                           + ".xy = transpose(" + g + "r" + std::to_string(k) + ") * " + t + ".xy; ";
+                    }
+                    return r;
+                };
+                if (variants)
+                    decl += "vec3 " + v + "_0, " + v + "_1, " + v + "_2; if (" + v + "_V == 1) { " + reads(false)
+                          + "} else { " + sliceDecl + reads(true) + "} ";
+                else
+                    decl += reads(false);
                 decl += "vec3 " + v + "_t = " + g + "w.x * " + v + "_0 + " + g + "w.y * " + v + "_1 + "
-                      + g + "w.z * " + v + "_2; " + v + "_t.xy *= " + fmtF(strength) + ";"
-                      + " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
-                      + "_t), vWorldPos, " + uv + ");";
+                      + g + "w.z * " + v + "_2; " + v + "_t.xy *= " + fmtF(strength) + ";";
+                if (guarded)
+                {
+                    c.usesNormalPerturbD = true;
+                    decl += " vec3 " + v + " = hePerturbNormalD(normalize(vNormal), normalize(" + v + "_t), "
+                          + v + "_dp1, " + v + "_dp2, " + g + "dx, " + g + "dy);";
+                }
+                else
+                    decl += " vec3 " + v + " = hePerturbNormal(normalize(vNormal), normalize(" + v
+                          + "_t), vWorldPos, " + uv + ");";
             }
+            break;
+        }
+        case MatNodeType::BombCells:
+        {
+            // The same hex grid as the texture nodes, but the three taps come out as
+            // numbers: weights plus three random numbers per hex. Blend is a PIN (a
+            // material parameter can tune it); the seed is baked like the nodes' above.
+            const std::string uv   = uvInput(c, sc, n, 0);
+            const std::string cell = inputExpr(c, sc, n, 1, F::Float);
+            const std::string sharp = inputExpr(c, sc, n, 2, F::Float);
+            const long seedI = std::lround(std::clamp(n.p[0], -2.0e9f, 2.0e9f));
+            const std::string seed = std::to_string(static_cast<uint32_t>(seedI)) + "u";
+            c.usesBombCells = true;
+            decl = "vec3 " + v + "w, " + v + "a, " + v + "b, " + v + "c; heBombCells(" + uv + ", " + cell
+                 + ", " + sharp + ", " + seed + ", " + v + "w, " + v + "a, " + v + "b, " + v + "c);";
+            pinExpr = { v + "w", v + "a", v + "b", v + "c" };
             break;
         }
         default: return false;
@@ -1003,15 +1484,35 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // only SELECTED by the size test, so no implicit-derivative sample
             // sits in control flow.
             const bool page2 = names.size() > 4;
-            const std::string ts = v + "_ts", wu = v + "_wu";
+            const std::string ts = v + "_ts", wu = v + "_wu", wsz = v + "_wsz", wuv = v + "_wuv";
+            // The weights are read through a SMOOTHED coordinate: the fractional texel
+            // position goes through smoothstep before the bilinear fetch, so the weight
+            // field is C1 across texel borders instead of piecewise linear. Plain
+            // bilinear over a coarse map turns a round brush stamp into a polygon —
+            // the diamond/octagon edge of a painted patch — and the creases of the
+            // linear ramps show as straight facets. At the texel centres and at 0.5 the
+            // result equals the plain fetch; only the shape between them changes. The
+            // coordinate is clamped to the page's texel centres, which is what the
+            // clamp sampler did to the plain uv anyway.
+            // One declaration line, in dependency order: the size probe and page test
+            // first, then the smoothed coordinate, then BOTH page fetches (so the
+            // implicit-derivative one stays outside any branch), then the sum. The
+            // statements are not reordered or split for readability: the emitted text
+            // is baked into the shipped .hasset files and keys the pipeline caches.
             decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
                  + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
-                 + " float " + wu + " = clamp(vUV.x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
-                 + " vec4 " + v + "_wf = texture(heLandscapeWeights, vUV);"
-                 + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", vUV.y), 0.0);"
+                 + " vec2 " + wsz + " = vec2(" + v + "_p2 ? " + ts + ".x * 0.5 : " + ts + ".x, " + ts + ".y);"
+                 + " vec2 " + v + "_wt = vUV * " + wsz + " - 0.5;"
+                 + " vec2 " + v + "_wi = floor(" + v + "_wt);"
+                 + " vec2 " + v + "_wq = " + v + "_wt - " + v + "_wi;"
+                 + " vec2 " + wuv + " = clamp((" + v + "_wi + 0.5 + " + v + "_wq * " + v + "_wq * (3.0 - 2.0 * " + v + "_wq)) / " + wsz
+                 + ", 0.5 / " + wsz + ", 1.0 - 0.5 / " + wsz + ");"
+                 + " float " + wu + " = clamp(" + wuv + ".x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
+                 + " vec4 " + v + "_wf = texture(heLandscapeWeights, " + wuv + ");"
+                 + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", " + wuv + ".y), 0.0);"
                  + " vec4 " + v + "_w = " + v + "_p2 ? " + v + "_wl : " + v + "_wf;";
             if (page2)
-                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, vUV.y), 0.0);"
+                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, " + wuv + ".y), 0.0);"
                       + " vec4 " + v + "_w2 = " + v + "_p2 ? " + v + "_wr : vec4(0.0);";
             decl += " float " + v + "_s = " + wsum + ";"
                  + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
@@ -1023,6 +1524,18 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
     return true;
 }
 
+// Inputs 0 and 1 of a two-operand Vec3 node. Pin 1 is emitted FIRST: the emission
+// order is the order of the statements and of the variable numbering (see the note
+// in emitMathNode), and the shipped .hasset files were baked that way.
+struct Vec3Operands { std::string a, b; };
+Vec3Operands vec3Operands(EmitCtx& c, const Scope& sc, const MatGraphNode& n)
+{
+    Vec3Operands ops;
+    ops.b = inputExpr(c, sc, n, 1, F::Vec3);
+    ops.a = inputExpr(c, sc, n, 0, F::Vec3);
+    return ops;
+}
+
 // Arithmetic.
 HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
                                  std::string& decl, std::vector<std::string>& pinExpr)
@@ -1030,41 +1543,75 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
     (void)pinExpr;
     switch (n.type)
     {
+        // A node with several inputs emits the nodes behind them as a side effect of
+        // inputExpr, so the ORDER of the calls is the order of the statements (and of
+        // the numbering and the parameter slots). Operands of one expression are
+        // unsequenced: MSVC and GCC run the last operand first, Clang the first. The
+        // locals below fix it to last-textual-first — the order the shipped
+        // .hasset files were baked in — so the shader no longer depends on the compiler.
         case MatNodeType::Add:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " + " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const auto [a, b] = vec3Operands(c, sc, n);
+            decl = "vec3 " + v + " = " + a + " + " + b + ";"; break;
+        }
         case MatNodeType::Multiply:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " * " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const auto [a, b] = vec3Operands(c, sc, n);
+            decl = "vec3 " + v + " = " + a + " * " + b + ";"; break;
+        }
         case MatNodeType::Lerp:
-            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 0, F::Vec3) + ", " + inputExpr(c, sc, n, 1, F::Vec3)
-                 + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string t = inputExpr(c, sc, n, 2, F::Float), b = inputExpr(c, sc, n, 1, F::Vec3),
+                              a = inputExpr(c, sc, n, 0, F::Vec3);
+            decl = "vec3 " + v + " = mix(" + a + ", " + b + ", " + t + ");"; break;
+        }
         case MatNodeType::OneMinus:
             decl = "vec3 " + v + " = vec3(1.0) - " + inputExpr(c, sc, n, 0, F::Vec3) + ";"; break;
         case MatNodeType::Power:
-            decl = "float " + v + " = pow(max(" + inputExpr(c, sc, n, 0, F::Float) + ", 0.0), " + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string e = inputExpr(c, sc, n, 1, F::Float), b = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = pow(max(" + b + ", 0.0), " + e + ");"; break;
+        }
         case MatNodeType::Saturate:
             decl = "vec3 " + v + " = clamp(" + inputExpr(c, sc, n, 0, F::Vec3) + ", 0.0, 1.0);"; break;
         case MatNodeType::DotProduct:
-            decl = "float " + v + " = dot(" + inputExpr(c, sc, n, 0, F::Vec3) + ", " + inputExpr(c, sc, n, 1, F::Vec3) + ");"; break;
+        {
+            const auto [a, b] = vec3Operands(c, sc, n);
+            decl = "float " + v + " = dot(" + a + ", " + b + ");"; break;
+        }
         case MatNodeType::Sine:
             decl = "float " + v + " = sin(" + inputExpr(c, sc, n, 0, F::Float) + ");"; break;
         case MatNodeType::Combine3:
-            decl = "vec3 " + v + " = vec3(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string z = inputExpr(c, sc, n, 2, F::Float), y = inputExpr(c, sc, n, 1, F::Float),
+                              x = inputExpr(c, sc, n, 0, F::Float);
+            decl = "vec3 " + v + " = vec3(" + x + ", " + y + ", " + z + ");"; break;
+        }
         case MatNodeType::Subtract:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " - " + inputExpr(c, sc, n, 1, F::Vec3) + ";"; break;
+        {
+            const auto [a, b] = vec3Operands(c, sc, n);
+            decl = "vec3 " + v + " = " + a + " - " + b + ";"; break;
+        }
         case MatNodeType::Divide:
-            decl = "vec3 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec3) + " / max("
-                 + inputExpr(c, sc, n, 1, F::Vec3) + ", vec3(1e-5));"; break;
+        {
+            const auto [a, b] = vec3Operands(c, sc, n);
+            decl = "vec3 " + v + " = " + a + " / max(" + b + ", vec3(1e-5));"; break;
+        }
         case MatNodeType::Absolute:
             decl = "vec3 " + v + " = abs(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         case MatNodeType::Fract:
             decl = "vec3 " + v + " = fract(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         case MatNodeType::Smoothstep:
-            decl = "float " + v + " = smoothstep(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ");"; break;
+        {
+            const std::string x = inputExpr(c, sc, n, 2, F::Float), e1 = inputExpr(c, sc, n, 1, F::Float),
+                              e0 = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = smoothstep(" + e0 + ", " + e1 + ", " + x + ");"; break;
+        }
         case MatNodeType::Step:
-            decl = "float " + v + " = step(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string x = inputExpr(c, sc, n, 1, F::Float), e = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = step(" + e + ", " + x + ");"; break;
+        }
         case MatNodeType::Normalize3:
             decl = "vec3 " + v + " = normalize(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         default: return false;
@@ -1083,38 +1630,75 @@ HE_MG_NOINLINE bool emitLogicNode(EmitCtx& c, const Scope& sc, const MatGraphNod
             decl = "vec4 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec4) + ";";
             pinExpr = { v + ".x", v + ".y", v + ".z", v + ".w" };
             break;
+        // Sequenced last-textual-first, see emitMathNode.
         case MatNodeType::CombineRGBA:
-            decl = "vec4 " + v + " = vec4(" + inputExpr(c, sc, n, 0, F::Float) + ", "
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float) + ", "
-                 + inputExpr(c, sc, n, 3, F::Float) + ");"; break;
+        {
+            const std::string w = inputExpr(c, sc, n, 3, F::Float), z = inputExpr(c, sc, n, 2, F::Float),
+                              y = inputExpr(c, sc, n, 1, F::Float), x = inputExpr(c, sc, n, 0, F::Float);
+            decl = "vec4 " + v + " = vec4(" + x + ", " + y + ", " + z + ", " + w + ");"; break;
+        }
         case MatNodeType::If:
-            decl = "vec3 " + v + " = mix(" + inputExpr(c, sc, n, 2, F::Vec3) + ", "
-                 + inputExpr(c, sc, n, 1, F::Vec3) + ", step(0.5, "
-                 + inputExpr(c, sc, n, 0, F::Float) + "));"; break;
+        {
+            // The text names pin 2, 1, 0 in that order, so last-first is pin 0, 1, 2.
+            const std::string cond = inputExpr(c, sc, n, 0, F::Float);
+            // Branching: the condition is known before either side is emitted, so the
+            // sides' guarded nodes land in its block (placeDecl).
+            if (const std::string ck = branchCondKey(c, sc, n); !ck.empty())
+            {
+                if (refsPending(c, cond)) flushGuards(c);
+                c.condExprs.emplace(ck, cond);
+                const std::string yes = inputExpr(c, sc, n, 1, F::Vec3), no = inputExpr(c, sc, n, 2, F::Vec3);
+                if (refsPending(c, yes) || refsPending(c, no)) flushGuards(c);
+                EmitCtx::GuardBlock& b = guardBlock(c, ck, c.condExprs[ck]);
+                b.hoist += "    vec3 " + v + " = vec3(0.0);\n";
+                b.yes   += "        " + v + " = " + yes + ";\n";
+                b.no    += "        " + v + " = " + no + ";\n";
+                c.pendingVars.insert(v);
+                break;
+            }
+            const std::string yes = inputExpr(c, sc, n, 1, F::Vec3), no = inputExpr(c, sc, n, 2, F::Vec3);
+            decl = "vec3 " + v + " = mix(" + no + ", " + yes + ", step(0.5, " + cond + "));"; break;
+        }
         case MatNodeType::Greater:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > " + b + ");"; break;
+        }
         case MatNodeType::Less:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " < "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " < " + b + ");"; break;
+        }
         case MatNodeType::GreaterEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " >= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " >= " + b + ");"; break;
+        }
         case MatNodeType::LessEqual:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " <= " + b + ");"; break;
+        }
         case MatNodeType::Equal:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") < 1e-4);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(abs(" + a + " - " + b + ") < 1e-4);"; break;
+        }
         case MatNodeType::NotEqual:
-            decl = "float " + v + " = float(abs(" + inputExpr(c, sc, n, 0, F::Float) + " - "
-                 + inputExpr(c, sc, n, 1, F::Float) + ") >= 1e-4);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(abs(" + a + " - " + b + ") >= 1e-4);"; break;
+        }
         case MatNodeType::And:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 && "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > 0.5 && " + b + " > 0.5);"; break;
+        }
         case MatNodeType::Or:
-            decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " > 0.5 || "
-                 + inputExpr(c, sc, n, 1, F::Float) + " > 0.5);"; break;
+        {
+            const std::string b = inputExpr(c, sc, n, 1, F::Float), a = inputExpr(c, sc, n, 0, F::Float);
+            decl = "float " + v + " = float(" + a + " > 0.5 || " + b + " > 0.5);"; break;
+        }
         case MatNodeType::Not:
             decl = "float " + v + " = float(" + inputExpr(c, sc, n, 0, F::Float) + " <= 0.5);"; break;
         default: return false;
@@ -1126,24 +1710,35 @@ HE_MG_NOINLINE bool emitLogicNode(EmitCtx& c, const Scope& sc, const MatGraphNod
 HE_MG_NOINLINE bool emitPatternNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
                                     std::string& decl, std::vector<std::string>& pinExpr)
 {
-    (void)pinExpr;
     switch (n.type)
     {
+        case MatNodeType::FbmGrad:
+        {
+            c.usesNoiseI = c.usesNoiseIGrad = true;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "vec3 " + v + " = heFbmIGrad(" + uv + " * " + freq + ");";
+            pinExpr = { v + ".x", v + ".y", v + ".z" };
+            break;
+        }
         case MatNodeType::Panner:
-            decl = "vec2 " + v + " = " + inputExpr(c, sc, n, 0, F::Vec2) + " + vec2("
-                 + inputExpr(c, sc, n, 1, F::Float) + ", " + inputExpr(c, sc, n, 2, F::Float)
-                 + ") * heLight.sunDir.w;"; break;
+        {
+            const std::string sy = inputExpr(c, sc, n, 2, F::Float), sx = inputExpr(c, sc, n, 1, F::Float),
+                              uv = inputExpr(c, sc, n, 0, F::Vec2);
+            decl = "vec2 " + v + " = " + uv + " + vec2(" + sx + ", " + sy + ") * heLight.sunDir.w;"; break;
+        }
         case MatNodeType::ValueNoise:
+        {
             c.usesNoise = true;
-            decl = "float " + v + " = heValueNoise(" + uvInput(c, sc, n, 0) + " * "
-                 + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "float " + v + " = heValueNoise(" + uv + " * " + freq + ");"; break;
+        }
         case MatNodeType::Fbm:
         {
             // p[0] = 1 → the integer-hash fbm (see heFbmI); 0 keeps the old text.
             const bool robust = n.p[0] > 0.5f;
             (robust ? c.usesNoiseI : c.usesNoise) = true;
-            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uvInput(c, sc, n, 0)
-                 + " * " + inputExpr(c, sc, n, 1, F::Float) + ");"; break;
+            const std::string freq = inputExpr(c, sc, n, 1, F::Float), uv = uvInput(c, sc, n, 0);
+            decl = "float " + v + " = " + (robust ? "heFbmI(" : "heFbm(") + uv + " * " + freq + ");"; break;
         }
         case MatNodeType::Checker:
         {
@@ -1330,12 +1925,49 @@ HE_MG_NOINLINE bool emitWindSwayNode(EmitCtx& c, const Scope& sc, const MatGraph
     return true;
 }
 
+// Water rings.
+HE_MG_NOINLINE bool emitWaterNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
+                                  std::string& decl, std::vector<std::string>& pinExpr)
+{
+    switch (n.type)
+    {
+        case MatNodeType::WaterRipple:
+        {
+            // Same stage test as Wind Sway: the WPO body is emitted in scope "vs" (a
+            // function it calls inlines as "vs/<id>"). The vertex stage declares no ripple
+            // helper and the rings only lean a normal and whiten a crest, so it gets zeros.
+            const bool vertex = sc.key == "vs" || sc.key.rfind("vs/", 0) == 0;
+            if (vertex)
+                decl = "float " + v + "_h = 0.0; vec2 " + v + "_g = vec2(0.0); float " + v + "_f = 0.0;";
+            else
+            {
+                // Unconnected, the point is where the fragment is: the rings live in the world.
+                const std::string pos = hasInput(sc, n, 0) ? inputExpr(c, sc, n, 0, F::Vec2)
+                                                           : std::string("vWorldPos.xz");
+                c.usesWaterRipple = true;
+                decl = "float " + v + "_h; vec2 " + v + "_g; float " + v + "_f; heWaterRipple(" + pos + ", "
+                     + v + "_h, " + v + "_g, " + v + "_f);";
+            }
+            pinExpr = { v + "_h", v + "_g", v + "_f" };
+            break;
+        }
+        default: return false;
+    }
+    return true;
+}
+
 // Emit one node (memoized per scope); returns the expression for output pin `pin`.
 std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin)
 {
-    const std::string memoKey = sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(pin);
+    // "<scope>:<node>" keys the cycle guard; the memo key (outVar) adds ":<pin>".
+    std::string memoKey = sc.key;
+    memoKey += ':';
+    memoKey += std::to_string(n.id);
+    const size_t nodeKeyLen = memoKey.size();
+    memoKey += ':';
+    memoKey += std::to_string(pin);
     if (auto it = c.outVar.find(memoKey); it != c.outVar.end()) return it->second;
-    const std::string cycleKey = sc.key + ":" + std::to_string(n.id);
+    const std::string cycleKey = memoKey.substr(0, nodeKeyLen);
     if (c.emitting.count(cycleKey))
         return "vec3(1.0, 0.0, 1.0)"; // cycle → magenta
     c.emitting.insert(cycleKey);
@@ -1357,18 +1989,23 @@ std::string emitNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pin
         || emitPatternNode(c, sc, n, v, decl, pinExpr)
         || emitFlowNode(c, sc, n, v, decl, pinExpr)
         || emitUiNode(c, sc, n, v, decl, pinExpr)
-        || emitWindSwayNode(c, sc, n, v, decl, pinExpr));
+        || emitWindSwayNode(c, sc, n, v, decl, pinExpr)
+        || emitWaterNode(c, sc, n, v, decl, pinExpr));
 
     if (!decl.empty())
-        c.body += "    " + decl + "\n";
+        placeDecl(c, sc, n, v, decl);
     c.emitting.erase(cycleKey);
 
     // Register per-pin expressions (default: the single var for every output pin).
     const size_t pinCount = std::max<size_t>(d.outputs.size(), pinExpr.size());
+    std::string pinKey = cycleKey;
     for (size_t i = 0; i < std::max<size_t>(pinCount, 1); ++i)
     {
         const std::string expr = i < pinExpr.size() && !pinExpr[i].empty() ? pinExpr[i] : v;
-        c.outVar[sc.key + ":" + std::to_string(n.id) + ":" + std::to_string(i)] = expr;
+        pinKey.resize(nodeKeyLen);
+        pinKey += ':';
+        pinKey += std::to_string(i);
+        c.outVar[pinKey] = expr;
     }
     return c.outVar[memoKey];
 }
@@ -1430,6 +2067,29 @@ std::string inputExpr(EmitCtx& c, const Scope& sc, const MatGraphNode& node,
 }
 
 // True if input pin `pinIdx` of `node` is wired to a source in this scope's graph.
+// Whether `pinIdx` of `node` ends at a real node once Static Switches are resolved the way
+// codegen resolves them (the instance's override beats the node default, only the TAKEN input
+// counts): a switch whose taken input is unconnected is the same as no link at all. The
+// Displacement pin asks this, so a material can offer tessellation as a switch — off, the
+// pin is as good as unconnected and nothing is tessellated, byte for byte.
+bool connectedThroughSwitches(const EmitCtx& c, const MaterialGraph& g, int nodeId, int pinIdx, int depth = 0)
+{
+    const MatGraphLink* link = nullptr;
+    for (const MatGraphLink& l : g.links)
+        if (l.dstNode == nodeId && l.dstPin == pinIdx) { link = &l; break; }
+    if (!link) return false;
+    const MatGraphNode* src = g.findNode(link->srcNode);
+    if (src && src->type == MatNodeType::StaticSwitch && depth < 16)
+    {
+        bool on = src->p[0] > 0.5f;
+        const std::string swName = src->s.empty() ? ("switch_" + std::to_string(src->id)) : src->s;
+        if (c.switchOv)
+            if (auto it = c.switchOv->find(swName); it != c.switchOv->end()) on = it->second;
+        return connectedThroughSwitches(c, g, src->id, on ? 0 : 1, depth + 1);
+    }
+    return true;
+}
+
 bool hasInput(const Scope& sc, const MatGraphNode& node, int pinIdx)
 {
     for (const MatGraphLink& l : sc.g->links)
@@ -1444,106 +2104,17 @@ std::string uvInput(EmitCtx& c, const Scope& sc, const MatGraphNode& n, int pinI
 {
     return hasInput(sc, n, pinIdx) ? inputExpr(c, sc, n, pinIdx, F::Vec2) : std::string("vUV");
 }
-} // namespace
 
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
-                              const std::map<std::string, bool>* switchOverrides)
+// The declaration block of a generated stage: texture samplers, the parameter
+// block, the UI inputs and the helpers the emitted nodes asked for. The fragment
+// and the displacement (domain) stage both take theirs from here, so a helper is
+// written once. `domainStage` leaves out what only a fragment can have: the
+// derivative-based normal frame and the UI pass's backdrop (the nodes that would
+// call them emit neutral values in scope "ds", see dsStage).
+std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, uint32_t& arrayMask)
 {
-    const MatGraphNode* out = nullptr;
-    for (const auto& n : graph.nodes)
-        if (n.type == MatNodeType::Output) { out = &n; break; }
-
-    const std::string headerCommon =
-        "#version 450\n"
-        "// GENERATED by the material node graph — do not edit by hand.\n"
-        "layout(location = 0) in vec3 vNormal;\n"
-        "layout(location = 1) in vec3 vColor;\n"
-        "layout(location = 2) in vec2 vUV;\n"
-        "layout(location = 3) in vec3 vWorldPos;\n";
-    const std::string header = headerCommon + "layout(location = 0) out vec4 oColor;\n";
-    // Deferred variant: three MRT outputs instead of the lit colour — the SAME
-    // graph body feeds both, only the emit tail differs (see the plan's §2).
-    const std::string headerGB = headerCommon +
-        "layout(location = 0) out vec4 oGB0;\n"   // rgb = BaseColor, a = Metallic
-        "layout(location = 1) out vec4 oGB1;\n"   // rg = oct normal, b = Roughness, a = Specular
-        "layout(location = 2) out vec4 oGB2;\n"   // rgb = Emissive (HDR), a = Material-AO
-        // NDC depth for the tile-memory resolve (Metal single-pass P6, which can
-        // framebuffer-fetch colour attachments but not the depth buffer). GL
-        // binds only 3 draw buffers → the write is dropped there; the two-pass
-        // Metal fallback stores it unused (R32F, DontCare).
-        "layout(location = 3) out vec4 oGB3;\n";
-
-    MatShaderGen gen;
-    if (!out)
-    {
-        gen.glsl = header + "void main() { oColor = vec4(1.0, 0.0, 1.0, 1.0); } // no Output node\n";
-        gen.glslGBuffer = headerGB +
-            "void main() { oGB0 = vec4(1.0, 0.0, 1.0, 0.0);"
-            " oGB1 = vec4(0.5, 0.5, 1.0, 0.5); oGB2 = vec4(0.0);"
-            " oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0); } // no Output node\n";
-        return gen;
-    }
-
-    EmitCtx c;
-    c.loader   = &loader;
-    c.switchOv = switchOverrides;
-    Scope root;
-    root.g = &graph;
-    // Read the domain HERE and not with its siblings below: emitting a node is
-    // what needs it (Backdrop), and that happens in the inputExpr calls that
-    // follow. Same expression as `uiDomain` further down, which stays the one
-    // the tail reads.
-    c.uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
-
-    const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
-    const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
-    const std::string spec    = inputExpr(c, root, *out, kMatOutputSpecularPin,  F::Float);
-    const std::string rough   = inputExpr(c, root, *out, kMatOutputRoughnessPin, F::Float);
-    const std::string emis    = inputExpr(c, root, *out, kMatOutputEmissivePin,  F::Vec3);
-    const std::string ao      = inputExpr(c, root, *out, kMatOutputAOPin,        F::Float);
-    // The domain (Output p[3]) decides what this material may compute at all. A
-    // UI material is unlit whatever the Lit toggle says: there is no lighting
-    // where it is drawn, so "lit" there means shaded by a stand-in sun and
-    // fogged against a world position that is really a pixel coordinate.
-    // A value that names no domain is the Surface one: falling back to the
-    // default a graph was written with beats clamping UP into a domain that
-    // changes what the material may compute.
-    const bool uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
-    const int  domain   = uiDomain ? static_cast<int>(MatDomain::UserInterface)
-                                   : static_cast<int>(MatDomain::Surface);
-    const bool lit = !uiDomain && out->p[0] > 0.5f;
-
-    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
-    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
-    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
-    std::string opacity   = "1.0";                                // Opaque/Masked → solid
-    std::string mask;
-    if (blendMode == (int)MatBlendMode::Masked)
-        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
-    else if (blendMode == (int)MatBlendMode::Translucent)
-        opacity = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
-
-    // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
-    const std::string normalExpr = hasInput(root, *out, kMatOutputNormalPin)
-        ? "normalize(" + inputExpr(c, root, *out, kMatOutputNormalPin, F::Vec3) + ")"
-        : "normalize(vNormal)";
-
-    // ── World Position Offset (pin 6) → a VERTEX-stage body, emitted into a separate
-    // scope ("vs") so its statements never share variables with the fragment body. The
-    // same varying NAMES are readable in the vertex template, so the text is reusable. ──
-    if (hasInput(root, *out, kMatOutputWPOPin))
-    {
-        Scope vs;
-        vs.g   = &graph;
-        vs.key = "vs";
-        const size_t mark = c.body.size();
-        const std::string wpoExpr = inputExpr(c, vs, *out, kMatOutputWPOPin, F::Vec3);
-        gen.vertexBody = c.body.substr(mark)
-                       + "    vec3 heWpo = " + wpoExpr + ";\n";
-        c.body.resize(mark); // the WPO statements belong to the vertex stage only
-    }
-
-    std::string src; // shared declaration block (appended to either header)
+    std::string src;
+    src.reserve(4096); // the block grows by dozens of appends; none measured above 4 KB
     if (c.usesTexture)
         src += "layout(set = 0, binding = 2) uniform sampler2D heTex0;\n"; // legacy/mesh texture
     if (c.usesLandscapeWeights)
@@ -1556,7 +2127,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // Project textures (binding 4 + slot). An array slot keeps the SAME binding and
     // register as a 2D one — only the declared type differs — so no backend's pin
     // table, descriptor layout or root signature changes for it.
-    uint32_t arrayMask = 0;
+    arrayMask = 0;
     for (size_t i = 0; i < c.textures.size(); ++i)
     {
         if (c.textureIsArray[i]) arrayMask |= 1u << i;
@@ -1611,7 +2182,7 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     // so a shared shader text would sample the screen mirrored on one of the two
     // backends. GL flips instead through heUI.screen.z, because ITS snapshot is a
     // framebuffer copy and thus upside down as a texture.
-    if (c.usesBackdrop)
+    if (c.usesBackdrop && !domainStage)
         src +=
             "layout(set = 0, binding = 9) uniform sampler2D heBackdrop;\n"
             "vec3 heBd(vec2 uv, float lod) {\n"
@@ -1686,7 +2257,25 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "float heFbmI(vec2 p) { float v = 0.0; float a = 0.5;"
             " for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
-    if (c.usesNormalPerturb)
+    if (c.usesNoiseIGrad)
+        // heFbmI and its gradient from the same corner hashes: the value noise is
+        // mix(mix(a,b,u.x), mix(c,d,u.x), u.y) with u = f²(3 − 2f), so its derivative
+        // needs only u' = 6f(1 − f); each octave doubles p, so its gradient counts twice
+        // as much as its value. Value is bit-for-bit heFbmI's (same operations in the
+        // same order); dX/dY are the exact derivative the engine water used to take by
+        // finite differences with two more fbm calls.
+        src +=
+            "vec3 heValueNoiseIGrad(vec2 p) { vec2 fl = floor(p); ivec2 i = ivec2(fl); vec2 f = p - fl;"
+            " vec2 u = f * f * (3.0 - 2.0 * f); vec2 du = 6.0 * f * (1.0 - f);"
+            " float a = heHashI2(i); float b = heHashI2(i + ivec2(1, 0));"
+            " float cc = heHashI2(i + ivec2(0, 1)); float d = heHashI2(i + ivec2(1, 1));"
+            " float val = mix(mix(a, b, u.x), mix(cc, d, u.x), u.y);"
+            " return vec3(val, du.x * ((b - a) + (a - b - cc + d) * u.y), du.y * ((cc - a) + (a - b - cc + d) * u.x)); }\n"
+            "vec3 heFbmIGrad(vec2 p) { vec3 v = vec3(0.0); float a = 0.5; float s = 1.0;"
+            " for (int k = 0; k < 4; k++) { vec3 n = heValueNoiseIGrad(p);"
+            " v += vec3(a * n.x, a * s * n.y, a * s * n.z); p *= 2.0; a *= 0.5; s *= 2.0; }"
+            " return v; }\n";
+    if (c.usesNormalPerturb && !domainStage)
         // The cotangent frame (Schüler) comes out multiplied by the SIGN of the
         // screen basis: dFdy runs up the screen on OpenGL and down it on D3D,
         // Vulkan and Metal, which mirrored every normal map there (measured,
@@ -1705,6 +2294,50 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
             "    invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;\n"
             "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
+    if (c.usesNormalPerturbD && !domainStage)
+        // The same frame from gradients the caller took in uniform control flow, for a
+        // bombed normal read inside an If's branch (screen derivatives are undefined there).
+        src +=
+            "vec3 hePerturbNormalD(vec3 N, vec3 mapN, vec3 dp1, vec3 dp2, vec2 duv1, vec2 duv2) {\n"
+            "    vec3 dp2perp = cross(dp2, N); vec3 dp1perp = cross(N, dp1);\n"
+            "    vec3 T = dp2perp * duv1.x + dp1perp * duv2.x;\n"
+            "    vec3 B = dp2perp * duv1.y + dp1perp * duv2.y;\n"
+            "    float invmax = inversesqrt(max(dot(T, T), dot(B, B)));\n"
+            "    invmax *= dot(cross(dp1, dp2), N) < 0.0 ? -1.0 : 1.0;\n"
+            "    return normalize(mat3(T * invmax, B * invmax, N) * mapN); }\n";
+    if (c.usesBombGrid || c.usesBombGridV || c.usesBombCells)
+        // The hash both bombing helpers draw their numbers from. A graph that uses
+        // only the texture nodes gets exactly the text it always had.
+        src +=
+            "uvec3 heBombHash(ivec2 cell, uint seed) {\n"
+            "    uvec3 v = uvec3(uvec2(cell), seed) * 1664525u + 1013904223u;\n"
+            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+            "    v ^= v >> 16u;\n"
+            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
+            "    return v; }\n";
+    if (c.usesBombCells)
+        // Bombing Cells: the hex grid of heBombGrid below without the texture. The
+        // three hexes under the pixel come out in the SAME order as heBombGrid's
+        // taps (t0 ↔ w.x, ...), each with the three 24-bit numbers of its own
+        // heBombHash as [0,1) floats (exact, like the offsets there). `sharp`
+        // is clamped here, the pin may be wired to anything.
+        src +=
+            "void heBombCells(vec2 uv, float cell, float sharp, uint seed, out vec3 w, out vec3 ra,\n"
+            "                 out vec3 rb, out vec3 rc) {\n"
+            "    float size = max(cell, 0.001);\n"
+            "    vec2 st = uv / size;\n"
+            "    vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);\n"
+            "    vec2 bf = floor(sk); vec2 f = sk - bf; float fz = 1.0 - f.x - f.y;\n"
+            "    float s = step(0.0, -fz); float s2 = 2.0 * s - 1.0;\n"
+            "    ivec2 b = ivec2(bf); int si = int(s);\n"
+            "    uvec3 h0 = heBombHash(b + ivec2(si, si), seed);\n"
+            "    uvec3 h1 = heBombHash(b + ivec2(si, 1 - si), seed);\n"
+            "    uvec3 h2 = heBombHash(b + ivec2(1 - si, si), seed);\n"
+            "    ra = vec3(uvec3(h0.x >> 8u, h1.x >> 8u, h2.x >> 8u)) * (1.0 / 16777216.0);\n"
+            "    rb = vec3(uvec3(h0.y >> 8u, h1.y >> 8u, h2.y >> 8u)) * (1.0 / 16777216.0);\n"
+            "    rc = vec3(uvec3(h0.z >> 8u, h1.z >> 8u, h2.z >> 8u)) * (1.0 / 16777216.0);\n"
+            "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(clamp(sharp, 1.0, 32.0)));\n"
+            "    w /= w.x + w.y + w.z; }\n";
     if (c.usesBombGrid)
         // Texture bombing as hex tiling (Mikkelsen, JCGT 2022): skew the uv into a
         // triangle grid, the three corners of the triangle under the pixel are the
@@ -1717,12 +2350,6 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         // `cell` = distance between neighbouring hex centres in uv units (texture
         // repeats); the paper's fixed uv * 2√3 is cell = 0.2887.
         src +=
-            "uvec3 heBombHash(ivec2 cell, uint seed) {\n"
-            "    uvec3 v = uvec3(uvec2(cell), seed) * 1664525u + 1013904223u;\n"
-            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
-            "    v ^= v >> 16u;\n"
-            "    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;\n"
-            "    return v; }\n"
             "void heBombTap(vec2 uv, float size, ivec2 cell, float rot, uint seed, out vec2 t, out mat2 r) {\n"
             "    uvec3 h = heBombHash(cell, seed);\n"
             "    vec2 off = vec2(h.xy >> 8u) * (1.0 / 16777216.0);\n"
@@ -1744,6 +2371,215 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
             "    heBombTap(uv, size, b + ivec2(1 - si, si), rot, seed, t2, r2);\n"
             "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
             "    w /= w.x + w.y + w.z; }\n";
+    if (c.usesBombGridV)
+        // heBombGrid with the variant of each hex returned beside its tap: the low 8 bits of
+        // the hex's first hash word, which the offset (h.xy >> 8) and the rotation (h.z >> 8)
+        // never read. Same cell, same hash, same order of the three taps as heBombGrid above,
+        // so the variant belongs to exactly the hex whose texel it picks. Emitted only when a
+        // node has its Groups pin wired: graphs without keep their text.
+        src +=
+            "void heBombTapV(vec2 uv, float size, ivec2 cell, float rot, uint seed, out vec2 t, out mat2 r,\n"
+            "                out uint sel) {\n"
+            "    uvec3 h = heBombHash(cell, seed);\n"
+            "    vec2 off = vec2(h.xy >> 8u) * (1.0 / 16777216.0);\n"
+            "    float a = (float(h.z >> 8u) * (2.0 / 16777216.0) - 1.0) * 3.14159265 * rot;\n"
+            "    float cs = cos(a); float sn = sin(a);\n"
+            "    r = mat2(cs, sn, -sn, cs);\n"
+            "    vec2 cen = vec2(float(cell.x) + 0.5 * float(cell.y), 0.8660254 * float(cell.y)) * size;\n"
+            "    t = r * (uv - cen) + cen + off;\n"
+            "    sel = h.x & 255u; }\n"
+            "void heBombGridV(vec2 uv, float cell, float rot, float sharp, uint seed, out vec2 t0,\n"
+            "                 out vec2 t1, out vec2 t2, out mat2 r0, out mat2 r1, out mat2 r2, out vec3 w,\n"
+            "                 out uvec3 sel) {\n"
+            "    float size = max(cell, 0.001);\n"
+            "    vec2 st = uv / size;\n"
+            "    vec2 sk = vec2(st.x - 0.57735027 * st.y, 1.15470054 * st.y);\n"
+            "    vec2 bf = floor(sk); vec2 f = sk - bf; float fz = 1.0 - f.x - f.y;\n"
+            "    float s = step(0.0, -fz); float s2 = 2.0 * s - 1.0;\n"
+            "    ivec2 b = ivec2(bf); int si = int(s);\n"
+            "    heBombTapV(uv, size, b + ivec2(si, si), rot, seed, t0, r0, sel.x);\n"
+            "    heBombTapV(uv, size, b + ivec2(si, 1 - si), rot, seed, t1, r1, sel.y);\n"
+            "    heBombTapV(uv, size, b + ivec2(1 - si, si), rot, seed, t2, r2, sel.z);\n"
+            "    w = pow(max(vec3(-fz * s2, s - f.y * s2, s - f.x * s2), vec3(0.0)), vec3(sharp));\n"
+            "    w /= w.x + w.y + w.z; }\n";
+    if (c.usesWaterRipple)
+        // Water Ripple: the rings of heLight.waterRipples (A: xy centre, z start radius, w
+        // strength; B: x age; the head: y ring speed, z decay time). One ring is a wave packet
+        // riding its front, r0 + speed * age: a cosine of one wavelength (it grows with the
+        // splash, 0.3 to 1.2 m) under a gaussian that widens with age, fading with age
+        // (exp(-age / decay)) and with the spread of the ring (the energy of a circle is
+        // shared out over a longer rim). h is that height; g is its analytic gradient, so a
+        // normal that leans with g and the height agree. The factor 0.5 is the lean of a
+        // full-strength ring whatever its wavelength (the height is 0.5 / k). f is the
+        // packet's envelope at the crest, thin, for strong young rings only (the crown of a
+        // splash, gone within half a second). Nothing here reads a derivative or a texture,
+        // so the loop may leave early; with no ring (count 0) the loop never runs and the
+        // three results are 0.
+        src += R"HE(void heWaterRipple(vec2 p, out float h, out vec2 g, out float f) {
+    h = 0.0; g = vec2(0.0); f = 0.0;
+    int n = int(heLight.waterRipples.x + 0.5);
+    float speed = heLight.waterRipples.y;
+    float decay = max(heLight.waterRipples.z, 0.05);
+    for (int i = 0; i < 16; i++) {
+        if (i >= n) break;
+        vec4 ra = heLight.waterRippleA[i];
+        vec4 rb = heLight.waterRippleB[i];
+        vec2 dv = p - ra.xy;
+        float d = length(dv);
+        float r0 = max(ra.z, 0.05);
+        float lam = clamp(r0, 0.3, 1.2);
+        float k = 6.2831853 / lam;
+        float front = r0 + speed * rb.x;
+        float w = lam * (0.7 + 0.35 * rb.x);
+        float u = d - front;
+        float q = u / w;
+        float env = ra.w * exp(-rb.x / decay) * inversesqrt(max(front / r0, 1.0));
+        float pk = exp(-q * q);
+        float ph = k * u;
+        float sn = sin(ph);
+        float cs = cos(ph);
+        h += (0.5 / k) * env * pk * cs;
+        g += (0.5 * env * pk * (-sn - 2.0 * u / (w * w * k) * cs)) * dv / max(d, 0.001);
+        f += 0.7 * smoothstep(0.45, 1.0, env) * exp(-(u * u) / (0.1 * lam * lam));
+    }
+    f = clamp(f, 0.0, 1.0);
+}
+)HE";
+    return src;
+}
+} // namespace
+
+MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
+                              const std::map<std::string, bool>* switchOverrides)
+{
+    const MatGraphNode* out = firstOutputNode(graph);
+
+    const std::string headerCommon =
+        "#version 450\n"
+        "// GENERATED by the material node graph — do not edit by hand.\n"
+        "layout(location = 0) in vec3 vNormal;\n"
+        "layout(location = 1) in vec3 vColor;\n"
+        "layout(location = 2) in vec2 vUV;\n"
+        "layout(location = 3) in vec3 vWorldPos;\n";
+    const std::string header = headerCommon + "layout(location = 0) out vec4 oColor;\n";
+    // Deferred variant: three MRT outputs instead of the lit colour — the SAME
+    // graph body feeds both, only the emit tail differs (see the plan's §2).
+    const std::string headerGB = headerCommon +
+        "layout(location = 0) out vec4 oGB0;\n"   // rgb = BaseColor, a = Metallic
+        "layout(location = 1) out vec4 oGB1;\n"   // rg = oct normal, b = Roughness, a = Specular
+        "layout(location = 2) out vec4 oGB2;\n"   // rgb = Emissive (HDR), a = Material-AO
+        // NDC depth for the tile-memory resolve (Metal single-pass P6, which can
+        // framebuffer-fetch colour attachments but not the depth buffer). GL
+        // binds only 3 draw buffers → the write is dropped there; the two-pass
+        // Metal fallback stores it unused (R32F, DontCare).
+        "layout(location = 3) out vec4 oGB3;\n";
+
+    MatShaderGen gen;
+    if (!out)
+    {
+        gen.glsl = header + "void main() { oColor = vec4(1.0, 0.0, 1.0, 1.0); } // no Output node\n";
+        gen.glslGBuffer = headerGB +
+            "void main() { oGB0 = vec4(1.0, 0.0, 1.0, 0.0);"
+            " oGB1 = vec4(0.5, 0.5, 1.0, 0.5); oGB2 = vec4(0.0);"
+            " oGB3 = vec4(gl_FragCoord.z, 0.0, 0.0, 0.0); } // no Output node\n";
+        return gen;
+    }
+
+    EmitCtx c;
+    c.loader   = &loader;
+    c.switchOv = switchOverrides;
+    Scope root;
+    root.g = &graph;
+    // An If whose sides are plain arithmetic computes only the side it takes (the
+    // water's underside and top differ in most of their nodes).
+    computeBranchGuards(c, graph);
+    // Read the domain HERE and not with its siblings below: emitting a node is
+    // what needs it (Backdrop), and that happens in the inputExpr calls that
+    // follow. Same expression as `uiDomain` further down, which stays the one
+    // the tail reads.
+    c.uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
+
+    const std::string base    = inputExpr(c, root, *out, kMatOutputBaseColorPin, F::Vec3);
+    const std::string met     = inputExpr(c, root, *out, kMatOutputMetallicPin,  F::Float);
+    const std::string spec    = inputExpr(c, root, *out, kMatOutputSpecularPin,  F::Float);
+    const std::string rough   = inputExpr(c, root, *out, kMatOutputRoughnessPin, F::Float);
+    const std::string emis    = inputExpr(c, root, *out, kMatOutputEmissivePin,  F::Vec3);
+    const std::string ao      = inputExpr(c, root, *out, kMatOutputAOPin,        F::Float);
+    // The domain (Output p[3]) decides what this material may compute at all. A
+    // UI material is unlit whatever the Lit toggle says: there is no lighting
+    // where it is drawn, so "lit" there means shaded by a stand-in sun and
+    // fogged against a world position that is really a pixel coordinate.
+    // A value that names no domain is the Surface one: falling back to the
+    // default a graph was written with beats clamping UP into a domain that
+    // changes what the material may compute.
+    const bool uiDomain = static_cast<int>(out->p[3]) == static_cast<int>(MatDomain::UserInterface);
+    const int  domain   = uiDomain ? static_cast<int>(MatDomain::UserInterface)
+                                   : static_cast<int>(MatDomain::Surface);
+    const bool lit = !uiDomain && out->p[0] > 0.5f;
+
+    // ── Blend mode (Output p[1]) decides what pin 4 means and where alpha comes from. ──
+    const int   blendMode = std::clamp(static_cast<int>(out->p[1]), 0, 2);
+    const float cutoff    = out->p[2] > 0.0f ? out->p[2] : 0.5f; // mask threshold
+    std::string opacity   = "1.0";                                // Opaque/Masked → solid
+    std::string mask;
+    if (blendMode == (int)MatBlendMode::Masked)
+        mask = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
+    else if (blendMode == (int)MatBlendMode::Translucent)
+        opacity = inputExpr(c, root, *out, kMatOutputOpacityPin, F::Float);
+
+    // ── Surface normal (pin 5): unconnected → the interpolated vertex normal. ──
+    const std::string normalExpr = hasInput(root, *out, kMatOutputNormalPin)
+        ? "normalize(" + inputExpr(c, root, *out, kMatOutputNormalPin, F::Vec3) + ")"
+        : "normalize(vNormal)";
+
+    // Every guarded node has been reached by now; its blocks go in ahead of the tail.
+    flushGuards(c);
+
+    // ── World Position Offset (pin 6) → a VERTEX-stage body, emitted into a separate
+    // scope ("vs") so its statements never share variables with the fragment body. The
+    // same varying NAMES are readable in the vertex template, so the text is reusable. ──
+    if (hasInput(root, *out, kMatOutputWPOPin))
+    {
+        Scope vs;
+        vs.g   = &graph;
+        vs.key = "vs";
+        const size_t mark = c.body.size();
+        const std::string wpoExpr = inputExpr(c, vs, *out, kMatOutputWPOPin, F::Vec3);
+        gen.vertexBody = c.body.substr(mark)
+                       + "    vec3 heWpo = " + wpoExpr + ";\n";
+        c.body.resize(mark); // the WPO statements belong to the vertex stage only
+    }
+
+    // ── Displacement (pin 9) → the tessellation DOMAIN stage, scope "ds" (see
+    // dsStage). Emitted with the fragment's context, so a texture or parameter it
+    // reads takes the fragment's slot: both stages read one binding table. A UI
+    // material ignores the pin, a widget quad is never tessellated. Unconnected,
+    // nothing here touches `c`, so every other output stays byte-identical. ──
+    std::string dispStatements;
+    if (!uiDomain && connectedThroughSwitches(c, graph, out->id, kMatOutputDisplacementPin))
+    {
+        Scope ds;
+        ds.g   = &graph;
+        ds.key = "ds";
+        const size_t mark = c.body.size();
+        const std::string dispExpr = inputExpr(c, ds, *out, kMatOutputDisplacementPin, F::Float);
+        dispStatements = c.body.substr(mark) + "    float heDisp = " + dispExpr + ";\n";
+        c.body.resize(mark); // the displacement statements belong to the domain stage only
+    }
+
+    uint32_t arrayMask = 0;
+    std::string src = emitDeclarations(c, uiDomain, /*domainStage=*/false, arrayMask);
+    if (!dispStatements.empty())
+    {
+        // The settings ride along as the first line (matSplitDisplacement), so the
+        // asset needs one field for all of it and a changed setting is new text.
+        const MatTessSettings t = matSanitizeTess(out->tess);
+        uint32_t dsArrayMask = 0; // same slots, same mask as the fragment's
+        gen.displacementBody = "// heTess " + fmtF(t.maxFactor) + " " + fmtF(t.fadeNear) + " "
+                             + fmtF(t.fadeFar) + " " + fmtF(t.maxDisplacement) + "\n"
+                             + emitDeclarations(c, /*uiDomain=*/false, /*domainStage=*/true, dsArrayMask)
+                             + "// heDispBody\n" + dispStatements;
+    }
     src += "void main() {\n" + c.body;
     // Masked: kill sub-cutoff fragments BEFORE shading — hard-edged holes, opaque pass.
     if (blendMode == (int)MatBlendMode::Masked)
@@ -1831,6 +2667,45 @@ uint32_t matGlslTextureArrayMask(const std::string& glsl)
     return mask & ((1u << kMatMaxGraphTextures) - 1);
 }
 
+MatTessSettings matSanitizeTess(const MatTessSettings& t)
+{
+    const MatTessSettings def;
+    auto finite = [](float v, float d) { return std::isfinite(v) ? v : d; };
+    MatTessSettings s;
+    s.maxFactor       = std::clamp(finite(t.maxFactor, def.maxFactor), 1.0f, kMatTessMaxFactor);
+    s.fadeNear        = std::max(finite(t.fadeNear, def.fadeNear), 0.0f);
+    s.fadeFar         = std::max(finite(t.fadeFar, def.fadeFar), s.fadeNear + 0.01f);
+    s.maxDisplacement = std::max(finite(t.maxDisplacement, def.maxDisplacement), 0.0f);
+    return s;
+}
+
+bool matSplitDisplacement(const std::string& disp, MatTessSettings& tess,
+                          std::string& declarations, std::string& statements)
+{
+    static const std::string kHead = "// heTess ";
+    static const std::string kBody = "// heDispBody\n";
+    if (disp.compare(0, kHead.size(), kHead) != 0) return false;
+    const size_t eol = disp.find('\n');
+    const size_t body = disp.find(kBody);
+    if (eol == std::string::npos || body == std::string::npos || body < eol) return false;
+    const std::string line = disp.substr(kHead.size(), eol - kHead.size());
+    float v[4];
+    const char* p = line.c_str();
+    for (float& f : v)
+    {
+        char* end = nullptr;
+        f = std::strtof(p, &end);
+        if (end == p) return false;
+        p = end;
+    }
+    MatTessSettings t;
+    t.maxFactor = v[0]; t.fadeNear = v[1]; t.fadeFar = v[2]; t.maxDisplacement = v[3];
+    tess         = matSanitizeTess(t);
+    declarations = disp.substr(eol + 1, body - eol - 1);
+    statements   = disp.substr(body + kBody.size());
+    return statements.find("heDisp") != std::string::npos;
+}
+
 bool matGlslUsesTime(const std::string& glsl)
 {
     return glsl.find("heLight.sunDir.w") != std::string::npos;
@@ -1860,6 +2735,11 @@ nlohmann::json matNodeToJsonObj(const MatGraphNode& n)
     if (!n.s.empty())       jn["s"]  = n.s;
     if (!n.group.empty())   jn["g"]  = n.group;   // param metadata (optional keys)
     if (!n.tooltip.empty()) jn["tt"] = n.tooltip;
+    // Tessellation settings (Output node): only when they differ from the defaults,
+    // so every graph saved before them keeps its exact JSON.
+    if (n.type == MatNodeType::Output && n.tess != MatTessSettings{})
+        jn["tess"] = { { "max", n.tess.maxFactor }, { "near", n.tess.fadeNear },
+                       { "far", n.tess.fadeFar }, { "maxDisp", n.tess.maxDisplacement } };
     return jn;
 }
 
@@ -1876,6 +2756,18 @@ bool matNodeFromJsonObj(const nlohmann::json& jn, MatGraphNode& n)
     n.s       = jn.value("s", std::string());
     n.group   = jn.value("g", std::string());
     n.tooltip = jn.value("tt", std::string());
+    if (auto t = jn.find("tess"); t != jn.end() && t->is_object())
+    {
+        const MatTessSettings def;
+        auto num = [&](const char* k, float d) {
+            const auto it = t->find(k);
+            return (it != t->end() && it->is_number()) ? it->get<float>() : d;
+        };
+        n.tess.maxFactor       = num("max", def.maxFactor);
+        n.tess.fadeNear        = num("near", def.fadeNear);
+        n.tess.fadeFar         = num("far", def.fadeFar);
+        n.tess.maxDisplacement = num("maxDisp", def.maxDisplacement);
+    }
     n.x = jn.value("x", 0.0f);
     n.y = jn.value("y", 0.0f);
     // Migration: UV gained tiling params (p[0..1]) after these graphs were
@@ -1906,14 +2798,28 @@ std::string materialGraphToJson(const MaterialGraph& graph)
     nlohmann::json j;
     j["version"] = kMatGraphVersion;
     j["nextId"]  = graph.nextId;
-    for (const auto& n : graph.nodes)
-        j["nodes"].push_back(matNodeToJsonObj(n));
-    for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
-        j["links"].push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
+    // Each key is looked up once, and only when there is something to put in it: an
+    // empty list leaves its key out of the document (it is not written as []).
+    if (!graph.nodes.empty())
+    {
+        nlohmann::json& jnodes = j["nodes"];
+        for (const auto& n : graph.nodes)
+            jnodes.push_back(matNodeToJsonObj(n));
+    }
+    if (!graph.links.empty())
+    {
+        nlohmann::json& jlinks = j["links"];
+        for (const auto& l : graph.links) // OBJECT link form — see GraphJson.h
+            jlinks.push_back(HE::graph::linkToObject(l.srcNode, l.srcPin, l.dstNode, l.dstPin));
+    }
     // Editor-only comment boxes. Older parsers ignore the extra key (forward-compatible);
     // absent key → no comments (backward-compatible).
-    for (const auto& cm : graph.comments)
-        j["comments"].push_back(matCommentToJsonObj(cm));
+    if (!graph.comments.empty())
+    {
+        nlohmann::json& jcomments = j["comments"];
+        for (const auto& cm : graph.comments)
+            jcomments.push_back(matCommentToJsonObj(cm));
+    }
     return j.dump();
 }
 
@@ -2013,6 +2919,9 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
 constexpr float kApproxNoiseMean   = 0.5f;
 constexpr float kApproxFbmMean     = 0.46875f;
 constexpr float kApproxCheckerMean = 0.5f;
+
+// a / b; a divisor too close to zero folds to 0 instead of Inf/NaN.
+float approxSafeDivide(float a, float b) { return std::abs(b) > 1e-8f ? a / b : 0.0f; }
 
 // Fold one INPUT pin: linked → fold the source node, unconnected → the pin's
 // registry default (splat — the same coercion codegen applies to scalars).
@@ -2131,7 +3040,7 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
             out[k] = n->type == MatNodeType::Add      ? a[k] + b[k]
                    : n->type == MatNodeType::Subtract ? a[k] - b[k]
                    : n->type == MatNodeType::Multiply ? a[k] * b[k]
-                   : (std::abs(b[k]) > 1e-8f ? a[k] / b[k] : 0.0f);
+                   : approxSafeDivide(a[k], b[k]);
         return true;
     case MatNodeType::Lerp:
         if (!approxFoldInput(g, *n, 0, depth + 1, a, sw) ||
@@ -2200,6 +3109,9 @@ bool approxFoldNode(const MaterialGraph& g, int nodeId, int depth, float out[4],
     case MatNodeType::NoiseTexture:
         out[0] = out[1] = out[2] = out[3] = kApproxFbmMean;
         return true;
+    // No splat fits all three pins (a value and two slopes of mean 0): not folded.
+    case MatNodeType::FbmGrad:
+        return false;
     case MatNodeType::Checker:
         out[0] = out[1] = out[2] = out[3] = kApproxCheckerMean;
         return true;
@@ -2243,9 +3155,7 @@ MatApproxSurface matGraphApproxSurface(const MaterialGraph& g,
                                        const std::map<std::string, bool>* switchOverrides)
 {
     MatApproxSurface out;
-    const MatGraphNode* output = nullptr;
-    for (const MatGraphNode& n : g.nodes)
-        if (n.type == MatNodeType::Output) { output = &n; break; }
+    const MatGraphNode* output = firstOutputNode(g);
     if (!output) return out;
 
     auto foldPin = [&](int pin, float rgb[3], std::string& param)

@@ -1,6 +1,6 @@
 #include "doctest.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "CollabDocSync.h"
 
 #include <HorizonCode/HorizonCode.h>

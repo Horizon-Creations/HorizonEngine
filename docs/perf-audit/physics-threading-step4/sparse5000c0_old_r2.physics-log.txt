@@ -1,0 +1,4 @@
+[ INFO] [Physics    ] [Main    ] [f      0] Jolt physics initialised (process-global types registered)
+[ INFO] [Physics    ] [Main    ] [f      0] Physics world initialised: 5001 rigid body/-ies (0 landscape), 0 ch[20:28:56.026] [ WARN] [Input      ] [Main    ] [f      0] PlayerHost: no PlayerControlle
+slow-step warnings (PhysicsWorld::step took > 8 ms): 1
+'Jolt dropped contacts' warnings (stepStats saturated): 0

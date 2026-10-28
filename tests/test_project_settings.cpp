@@ -8,6 +8,7 @@
 #include "TestFsUtil.h"
 
 #include <Project/ProjectSettings.h>
+#include <HorizonScene/PhysicsTuning.h>   // kMaxThreads, pinned against the project's
 #include "ProjectManager.h"
 
 #include <nlohmann/json.hpp>
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <type_traits>
 
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
@@ -93,6 +95,7 @@ TEST_CASE("ProjectSettings: toJson/fromJson round-trips every field")
 	a.shadows.slopeBias                = 0.002f;
 	a.shadows.minBias                  = 0.0006f;
 	a.physics.fixedHz                  = 120;
+	a.physics.threads                  = 6;
 	a.physics.gravity                  = glm::vec3(0.5f, -3.7f, 0.0f);
 	a.renderDefaults.useEditorSettings = false;
 	a.renderDefaults.windowWidth       = 1920;
@@ -106,10 +109,12 @@ TEST_CASE("ProjectSettings: toJson/fromJson round-trips every field")
 	CHECK(j["version"] == HE::ProjectSettings::kVersion);
 	CHECK(j["shadows"]["cascadeCount"] == 2);
 	CHECK(j["physics"]["gravity"].size() == 3);
+	CHECK(j["physics"]["threads"] == 6);
 
 	HE::ProjectSettings b;
 	b.fromJson(j);
 	CHECK(a == b);
+	CHECK(b.physics.threads == 6);
 	CHECK(b.game.title == "Sky Harbour");
 	CHECK(b.renderDefaults.windowMode == "Borderless");
 	CHECK(b.physics.gravity.x == doctest::Approx(0.5f));
@@ -129,7 +134,38 @@ TEST_CASE("ProjectSettings: a missing key is its default, an unknown key is igno
 	CHECK(s.shadows.distance == doctest::Approx(120.0f));
 	CHECK(s.shadows.cascadeCount == 3);
 	CHECK(s.physics.fixedHz == 60);
+	CHECK(s.physics.threads == 0);   // a project from before the setting: automatic
 	CHECK(s.renderDefaults.useEditorSettings);
+}
+
+// Thema 178: the thread count of a physics step. 0 is "pick for me", the number is
+// clamped on the way in, and an edit makes the settings non-default.
+TEST_CASE("ProjectPhysicsSettings::threads: automatic by default, clamped, and part of equality")
+{
+	HE::ProjectSettings s;
+	CHECK(s.physics.threads == 0);
+	CHECK(s.isDefault());
+
+	s.physics.threads = 4;
+	CHECK_FALSE(s.isDefault());
+
+	s.physics.threads = -7;
+	s.clamp();
+	CHECK(s.physics.threads == 0);
+	s.physics.threads = 100000;
+	s.clamp();
+	CHECK(s.physics.threads == HE::ProjectPhysicsSettings::kMaxThreads);
+
+	// A hand-edited file: a string is ignored (default), a huge number is clamped.
+	HE::ProjectSettings fromText;
+	fromText.fromJson(json::parse(R"({ "physics": { "threads": "many" } })"));
+	CHECK(fromText.physics.threads == 0);
+	fromText.fromJson(json::parse(R"({ "physics": { "threads": 9999 } })"));
+	CHECK(fromText.physics.threads == HE::ProjectPhysicsSettings::kMaxThreads);
+
+	// The editor's setting and the engine's tuning name the same ceiling.
+	static_assert(HE::ProjectPhysicsSettings::kMaxThreads == HE::PhysicsTuning::kMaxThreads,
+	              "ProjectPhysicsSettings::kMaxThreads and PhysicsTuning::kMaxThreads must agree");
 }
 
 TEST_CASE("ProjectSettings: wrong types and out-of-range numbers are corrected, never trusted")
@@ -490,6 +526,8 @@ TEST_CASE("ProjectMultiplayerSettings: default-constructed is what a session alr
 	CHECK(s.multiplayer.maxPendingInputs      == 64);
 	CHECK(s.multiplayer.discoverLan);
 	CHECK(s.multiplayer.rpcPerSecond == 60);
+	// No relay: peer-to-peer, as every project hosted before the relay existed.
+	CHECK(s.multiplayer.relayAddress.empty());
 
 	s.multiplayer.tickHz = 60.0f;
 	CHECK_FALSE(s.isDefault());
@@ -511,6 +549,7 @@ TEST_CASE("ProjectMultiplayerSettings: toJson writes the plan's shape and fromJs
 	a.multiplayer.discoverDirectory     = false;
 	a.multiplayer.portMapping           = false;
 	a.multiplayer.rpcPerSecond          = 200;
+	a.multiplayer.relayAddress          = "relay.example.com:7777";
 
 	json j;
 	a.toJson(j);
@@ -528,6 +567,7 @@ TEST_CASE("ProjectMultiplayerSettings: toJson writes the plan's shape and fromJs
 	CHECK(m["discovery"]["directory"]   == false);
 	CHECK(m["discovery"]["portMapping"] == false);
 	CHECK(m["rpcPerSecond"] == 200);
+	CHECK(m["relayAddress"] == "relay.example.com:7777");
 
 	HE::ProjectSettings b;
 	b.fromJson(j);
@@ -547,6 +587,7 @@ TEST_CASE("ProjectMultiplayerSettings: a file from before it existed is the defa
 	CHECK(s.multiplayer.tickHz      == doctest::Approx(30.0f));
 	CHECK(s.multiplayer.maxPendingInputs == 64);
 	CHECK(s.multiplayer.discoverLan);
+	CHECK(s.multiplayer.relayAddress.empty());
 }
 
 TEST_CASE("ProjectMultiplayerSettings: clamp corrects a hand-edited file but keeps port 0")
@@ -595,4 +636,387 @@ TEST_CASE("ProjectMultiplayerSettings: a project keeps its session numbers acros
 	CHECK(b.multiplayer.tickHz == doctest::Approx(45.0f));
 	CHECK_FALSE(b.multiplayer.discoverLan);
 	CHECK(readAll(HE::projectSettingsPath(tmp.root)).find("\"multiplayer\"") != std::string::npos);
+}
+
+// ── Source control (topic 198 step 9, the team-server design §6.1) ─────────
+
+TEST_CASE("ProjectSourceControlSettings: every project before it is git, and stays fileless")
+{
+	// No "sourceControl" key: every ProjectSettings.json on disk today. It must
+	// read as direct git, or opening an old project would switch its commits off.
+	const json j = json::parse(R"({ "version": 1, "physics": { "fixedHz": 30 } })");
+	HE::ProjectSettings s;
+	s.fromJson(j);
+	CHECK(s.sourceControl.mode == HE::ProjectSourceControlSettings::Mode::Git);
+	CHECK_FALSE(s.sourceControl.teamServer());
+	CHECK(s.sourceControl.team.empty());
+
+	// The default is part of isDefault(): a project that never touched its
+	// settings still writes no file.
+	CHECK(HE::ProjectSettings{}.isDefault());
+	HE::ProjectSettings t;
+	t.sourceControl.mode = HE::ProjectSourceControlSettings::Mode::TeamServer;
+	CHECK_FALSE(t.isDefault());
+}
+
+TEST_CASE("ProjectSourceControlSettings: toJson writes the design's shape and fromJson reads it back")
+{
+	HE::ProjectSettings a;
+	a.sourceControl.mode    = HE::ProjectSourceControlSettings::Mode::TeamServer;
+	a.sourceControl.team    = "Harbour Crew";
+	a.sourceControl.project = "sky-harbour";
+	json j;
+	a.toJson(j);
+	CHECK(j["sourceControl"]["mode"] == "teamServer");
+	CHECK(j["sourceControl"]["team"] == "Harbour Crew");
+	CHECK(j["sourceControl"]["project"] == "sky-harbour");
+
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+	CHECK(b.sourceControl.teamServer());
+
+	// The default writes "git" explicitly, like every other value in the file.
+	json d;
+	HE::ProjectSettings{}.toJson(d);
+	CHECK(d["sourceControl"]["mode"] == "git");
+
+	// A different team or project is a different setting.
+	HE::ProjectSettings c = a;
+	c.sourceControl.project = "other";
+	CHECK(a != c);
+}
+
+TEST_CASE("ProjectSourceControlSettings: an unknown mode is git, not the team server")
+{
+	// A newer editor's mode, or a typo, must never be what turns direct git off.
+	const json j = json::parse(R"({ "version": 1,
+		"sourceControl": { "mode": "TeamServer", "team": "t", "project": "p" } })");
+	HE::ProjectSettings s;
+	s.fromJson(j);
+	CHECK(s.sourceControl.mode == HE::ProjectSourceControlSettings::Mode::Git);
+	CHECK(s.sourceControl.team == "t");
+
+	const json w = json::parse(R"({ "version": 1, "sourceControl": { "mode": 3 } })");
+	HE::ProjectSettings n;
+	n.fromJson(w);
+	CHECK_FALSE(n.sourceControl.teamServer());
+}
+
+TEST_CASE("ProjectSourceControlSettings: the team-server choice survives a real save and load")
+{
+	TempRoot tmp("sourcecontrol");
+	HE::ProjectSettings a;
+	a.sourceControl.mode    = HE::ProjectSourceControlSettings::Mode::TeamServer;
+	a.sourceControl.team    = "crew";
+	a.sourceControl.project = "game";
+	REQUIRE(HE::saveProjectSettings(tmp.root, a));
+
+	HE::ProjectSettings b;
+	REQUIRE(HE::loadProjectSettings(tmp.root, b));
+	CHECK(a == b);
+	CHECK(readAll(HE::projectSettingsPath(tmp.root)).find("\"teamServer\"") != std::string::npos);
+}
+
+// ── Graphics and Input ───────────────────────────────────────────────────────
+// The graphics half of a build's config.json used to be the exporting editor's
+// own preferences; the project can now own it. Off by default — which IS the old
+// behaviour — and every number held to the range the editor's page enforces.
+
+TEST_CASE("ProjectGraphics: default-constructed is off and equals today's editor defaults")
+{
+	const HE::ProjectSettings s;
+	CHECK_FALSE(s.graphics.enabled);
+	CHECK_FALSE(s.input.enabled);
+	CHECK(s.isDefault());
+	// A few of the values the editor's config has always started with.
+	CHECK(s.graphics.bloomEnabled);
+	CHECK(s.graphics.bloomIntensity == doctest::Approx(0.6f));
+	CHECK(s.graphics.antiAliasing == 1);
+	CHECK_FALSE(s.graphics.giEnabled);
+	CHECK(s.input.stickDeadzone == doctest::Approx(0.15f));
+	CHECK(s.input.triggerDeadzone == doctest::Approx(0.05f));
+}
+
+TEST_CASE("ProjectGraphics: toJson/fromJson round-trips every field, and a change breaks equality")
+{
+	HE::ProjectSettings a;
+	a.graphics.enabled              = true;
+	a.graphics.renderPath           = 1;
+	a.graphics.antiAliasing         = 3;
+	a.graphics.renderScale          = 0.75f;
+	a.graphics.bloomEnabled         = false;
+	a.graphics.bloomThreshold       = 2.5f;
+	a.graphics.ssaoMethod           = 2;
+	a.graphics.dofEnabled           = true;
+	a.graphics.dofAperture          = 4.0f;
+	a.graphics.motionBlurMax        = 48.0f;
+	a.graphics.ssrEnabled           = true;
+	a.graphics.ssrQuality           = 2;
+	a.graphics.giEnabled            = true;
+	a.graphics.giReflBounces        = 3;
+	a.graphics.giReflBlur           = true;
+	a.graphics.occlusionCulling     = true;
+	a.graphics.gpuParticles         = false;
+	a.input.enabled                 = true;
+	a.input.stickDeadzone           = 0.3f;
+	a.input.triggerDeadzone         = 0.2f;
+	CHECK_FALSE(a.isDefault());
+	CHECK(a != HE::ProjectSettings{});
+
+	nlohmann::json j;
+	a.toJson(j);
+	REQUIRE(j.contains("graphics"));
+	CHECK(j["graphics"]["bloomThreshold"].get<float>() == doctest::Approx(2.5f));
+	CHECK(j["graphics"]["giEnabled"].get<bool>());
+	CHECK(j["input"]["stickDeadzone"].get<float>() == doctest::Approx(0.3f));
+
+	HE::ProjectSettings b;
+	b.fromJson(j);
+	CHECK(a == b);
+
+	// One field apart is one field unequal.
+	b.graphics.dofFocusRange += 1.0f;
+	CHECK(a != b);
+}
+
+TEST_CASE("ProjectGraphics: a file from before it existed is the default, and a partial block fills the rest")
+{
+	HE::ProjectSettings s;
+	s.fromJson(nlohmann::json{ { "version", 1 }, { "game", { { "title", "Old" } } } });
+	CHECK_FALSE(s.graphics.enabled);
+	CHECK(s.isDefault() == false);   // the title
+
+	s.fromJson(nlohmann::json{ { "graphics", { { "enabled", true }, { "bloomEnabled", false } } } });
+	CHECK(s.graphics.enabled);
+	CHECK_FALSE(s.graphics.bloomEnabled);
+	CHECK(s.graphics.ssaoEnabled);                                     // not in the file: default
+	CHECK(s.graphics.renderScale == doctest::Approx(1.0f));
+}
+
+TEST_CASE("ProjectGraphics: wrong types and out-of-range numbers are corrected, never trusted")
+{
+	HE::ProjectSettings s;
+	s.fromJson(nlohmann::json{ { "graphics", {
+		{ "enabled", true },
+		{ "renderScale", 99.0 },         // above 2
+		{ "bloomIntensity", -4.0 },      // below 0
+		{ "ssaoMethod", 17 },            // beyond GTAO
+		{ "giReflBounces", 0 },          // below 1
+		{ "dofAperture", "wide" },       // not a number: the default stays
+		{ "bloomEnabled", "yes" },       // not a bool: the default stays
+	} }, { "input", { { "enabled", true }, { "stickDeadzone", 5.0 }, { "triggerDeadzone", -1.0 } } } });
+	CHECK(s.graphics.renderScale == doctest::Approx(2.0f));
+	CHECK(s.graphics.bloomIntensity == doctest::Approx(0.0f));
+	CHECK(s.graphics.ssaoMethod == 2);
+	CHECK(s.graphics.giReflBounces == 1);
+	CHECK(s.graphics.dofAperture == doctest::Approx(2.8f));
+	CHECK(s.graphics.bloomEnabled);
+	CHECK(s.input.stickDeadzone == doctest::Approx(HE::ProjectInputSettings::kMaxDeadzone));
+	CHECK(s.input.triggerDeadzone == doctest::Approx(0.0f));
+
+	// And clamp() on a struct set directly holds a NaN too.
+	s.graphics.renderScale = std::nanf("");
+	s.clamp();
+	CHECK(s.graphics.renderScale == doctest::Approx(1.0f));
+}
+
+// ── operator== sees every field ──────────────────────────────────────────────
+// operator== is a hand-kept field list, and it drives isDefault() and with it
+// the "never grew a file" promise. A member added to a struct and forgotten
+// there would be saved nowhere and compared as equal, with no error: this case
+// flips each member of a default ProjectSettings on its own and wants the
+// comparison to notice. A new member needs a row here as well.
+
+namespace
+{
+
+// Far enough from any default that nearlyEqual (relative 1e-6) cannot hide it.
+void bump(bool& v)         { v = !v; }
+void bump(int& v)          { v += 1; }
+void bump(float& v)        { v += 1.0f; }
+void bump(std::string& v)  { v += "x"; }
+
+template <class Mutate>
+void expectFieldSeen(const char* field, Mutate mutate)
+{
+	INFO("field: " << field);
+	const HE::ProjectSettings base;
+	HE::ProjectSettings changed;
+	mutate(changed);
+	CHECK_FALSE(base == changed);
+	CHECK(base != changed);
+	CHECK_FALSE(changed.isDefault());
+}
+
+} // namespace
+
+TEST_CASE("ProjectSettings: operator== and isDefault see every field")
+{
+	using S = HE::ProjectSettings;
+#define HE_FIELD(path) expectFieldSeen(#path, [](S& s) { bump(s.path); })
+
+	HE_FIELD(game.title);
+	HE_FIELD(game.splashEnabled);
+	HE_FIELD(game.splashImage);
+	HE_FIELD(game.splashSubtitle);
+
+	HE_FIELD(shadows.distance);
+	HE_FIELD(shadows.cascadeCount);
+	HE_FIELD(shadows.resolution);
+	HE_FIELD(shadows.splitLambda);
+	HE_FIELD(shadows.slopeBias);
+	HE_FIELD(shadows.minBias);
+
+	HE_FIELD(physics.fixedHz);
+	HE_FIELD(physics.threads);
+	HE_FIELD(physics.budgetMs);
+	HE_FIELD(physics.eventsPerPoll);
+	HE_FIELD(physics.gravity.x);
+	HE_FIELD(physics.gravity.y);
+	HE_FIELD(physics.gravity.z);
+	HE_FIELD(physics.floatingOriginRadius);
+
+	HE_FIELD(renderDefaults.useEditorSettings);
+	HE_FIELD(renderDefaults.windowWidth);
+	HE_FIELD(renderDefaults.windowHeight);
+	HE_FIELD(renderDefaults.windowMode);
+	HE_FIELD(renderDefaults.vsync);
+	HE_FIELD(renderDefaults.backend);
+
+	HE_FIELD(graphics.enabled);
+#define HE_X(T, name, def, editorName, lo, hi) HE_FIELD(graphics.name);
+	HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+
+	HE_FIELD(input.enabled);
+	HE_FIELD(input.stickDeadzone);
+	HE_FIELD(input.triggerDeadzone);
+
+	HE_FIELD(antiCheat.enabled);
+	HE_FIELD(antiCheat.integrityCheck);
+	HE_FIELD(antiCheat.tolerance);
+	HE_FIELD(antiCheat.windowSec);
+	HE_FIELD(antiCheat.maxInputsPerSecond);
+	HE_FIELD(antiCheat.scoreHalfLifeSec);
+	HE_FIELD(antiCheat.scoreSuspect);
+	HE_FIELD(antiCheat.scoreConfirmed);
+	HE_FIELD(antiCheat.telemetryUrl);
+
+	HE_FIELD(multiplayer.defaultPort);
+	HE_FIELD(multiplayer.maxPlayers);
+	HE_FIELD(multiplayer.timeoutSec);
+	HE_FIELD(multiplayer.tickHz);
+	HE_FIELD(multiplayer.worldExtent);
+	HE_FIELD(multiplayer.interpolationDelaySec);
+	HE_FIELD(multiplayer.reconcileSnapDistance);
+	HE_FIELD(multiplayer.reconcileSmoothing);
+	HE_FIELD(multiplayer.maxPendingInputs);
+	HE_FIELD(multiplayer.discoverLan);
+	HE_FIELD(multiplayer.discoverDirectory);
+	HE_FIELD(multiplayer.portMapping);
+	HE_FIELD(multiplayer.relayAddress);
+	HE_FIELD(multiplayer.rpcPerSecond);
+
+	HE_FIELD(sourceControl.team);
+	HE_FIELD(sourceControl.project);
+#undef HE_FIELD
+
+	// The members a plain bump() does not fit.
+	expectFieldSeen("antiCheat.policySuspect",   [](S& s) { s.antiCheat.policySuspect   ^= HE::ProjectAntiCheatSettings::Flag; });
+	expectFieldSeen("antiCheat.policyConfirmed", [](S& s) { s.antiCheat.policyConfirmed ^= HE::ProjectAntiCheatSettings::Flag; });
+	expectFieldSeen("antiCheat.policyHard",      [](S& s) { s.antiCheat.policyHard      ^= HE::ProjectAntiCheatSettings::Flag; });
+	expectFieldSeen("sourceControl.mode", [](S& s) { s.sourceControl.mode = HE::ProjectSourceControlSettings::Mode::TeamServer; });
+
+	// A rule is part of equality: its presence, and each of its members.
+	expectFieldSeen("antiCheat.rules (added)", [](S& s) { s.antiCheat.rules.push_back({}); });
+	// Each member of a rule is compared against the same rule, not against a
+	// default ProjectSettings, which has no rule to differ from.
+	HE::ProjectSettings withRule, other;
+	HE::ProjectAntiCheatRule rule;
+	rule.name = "speed";
+	withRule.antiCheat.rules.push_back(rule);
+	other.antiCheat.rules.push_back(rule);
+	CHECK(withRule == other);
+	other.antiCheat.rules[0].name = "speedy";
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].level = "hard";
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].min += 1.0f;
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].max += 1.0f;
+	CHECK(withRule != other);
+	other.antiCheat.rules[0] = rule;
+	other.antiCheat.rules[0].maxPerSecond += 1.0f;
+	CHECK(withRule != other);
+}
+
+// ── clamp() on a non-finite float ────────────────────────────────────────────
+// readNumber refuses NaN and Inf, so only a struct set directly (the panel's
+// typed edit, a script) can bring one to clamp(). Each float lands on its own
+// fallback: its default for most, 0 for the origin radius and a rule's range.
+
+TEST_CASE("ProjectSettings::clamp: a NaN or infinite float falls back, field by field")
+{
+	const HE::ProjectSettings def;
+	for (const float bad : { std::nanf(""), INFINITY, -INFINITY })
+	{
+		CAPTURE(bad);
+		HE::ProjectSettings s;
+		s.physics.budgetMs            = bad;
+		s.physics.floatingOriginRadius = bad;
+		s.physics.gravity             = glm::vec3(bad);
+		s.input.stickDeadzone         = bad;
+		s.input.triggerDeadzone       = bad;
+		s.antiCheat.tolerance         = bad;
+		s.antiCheat.windowSec         = bad;
+		s.antiCheat.scoreHalfLifeSec  = bad;
+		s.antiCheat.scoreSuspect      = bad;
+		s.antiCheat.scoreConfirmed    = bad;
+		s.antiCheat.rules.push_back({});
+		s.antiCheat.rules[0].min          = bad;
+		s.antiCheat.rules[0].max          = bad;
+		s.antiCheat.rules[0].maxPerSecond = bad;
+		s.multiplayer.timeoutSec            = bad;
+		s.multiplayer.tickHz                = bad;
+		s.multiplayer.worldExtent           = bad;
+		s.multiplayer.interpolationDelaySec = bad;
+		s.multiplayer.reconcileSnapDistance = bad;
+		s.multiplayer.reconcileSmoothing    = bad;
+#define HE_X(T, name, def_, editorName, lo, hi) \
+		if constexpr (std::is_same_v<T, float>) s.graphics.name = bad;
+		HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+		s.clamp();
+
+		CHECK(s.physics.budgetMs == def.physics.budgetMs);
+		CHECK(s.physics.floatingOriginRadius == 0.0f);
+		CHECK(s.physics.gravity == glm::vec3(0.0f));
+		CHECK(s.input.stickDeadzone == def.input.stickDeadzone);
+		CHECK(s.input.triggerDeadzone == def.input.triggerDeadzone);
+		CHECK(s.antiCheat.tolerance == def.antiCheat.tolerance);
+		CHECK(s.antiCheat.windowSec == def.antiCheat.windowSec);
+		CHECK(s.antiCheat.scoreHalfLifeSec == def.antiCheat.scoreHalfLifeSec);
+		CHECK(s.antiCheat.scoreSuspect == def.antiCheat.scoreSuspect);
+		CHECK(s.antiCheat.scoreConfirmed == def.antiCheat.scoreConfirmed);
+		CHECK(s.antiCheat.rules[0].min == 0.0f);
+		CHECK(s.antiCheat.rules[0].max == 0.0f);
+		CHECK(s.antiCheat.rules[0].maxPerSecond == 0.0f);
+		CHECK(s.multiplayer.timeoutSec == def.multiplayer.timeoutSec);
+		CHECK(s.multiplayer.tickHz == def.multiplayer.tickHz);
+		CHECK(s.multiplayer.worldExtent == def.multiplayer.worldExtent);
+		CHECK(s.multiplayer.interpolationDelaySec == def.multiplayer.interpolationDelaySec);
+		CHECK(s.multiplayer.reconcileSnapDistance == def.multiplayer.reconcileSnapDistance);
+		CHECK(s.multiplayer.reconcileSmoothing == def.multiplayer.reconcileSmoothing);
+		// Every graphics float is back on its default (equality is nearlyEqual,
+		// so the exact bits are pinned on two of them as well).
+		HE::ProjectSettings graphicsOnly;
+		graphicsOnly.graphics = s.graphics;
+		CHECK(graphicsOnly.isDefault());
+		CHECK(s.graphics.aaSharpness == def.graphics.aaSharpness);
+		CHECK(s.graphics.dofAperture == def.graphics.dofAperture);
+	}
 }

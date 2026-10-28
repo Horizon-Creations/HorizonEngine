@@ -6,6 +6,7 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -16,6 +17,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cmath>
 
 // ── Geometry correctness ───────────────────────────────────────────────────────
 
@@ -287,6 +289,99 @@ TEST_CASE("Adjacent chunks share boundary height + normal (no seam) at same LOD"
     }
 }
 
+TEST_CASE("generateTerrainChunkMeshLOD's cached downsample is bit-identical to resampling the field")
+{
+    // A non-flat, non-linear field (not a seeded fBm — just varied enough that a bilinear
+    // resample and a stride-2 downsample would disagree if the LOD cache's indexing were off
+    // by even one cell) so a false-positive match is unlikely.
+    const uint32_t res = 257;
+    std::vector<float> field(static_cast<size_t>(res) * res);
+    for (uint32_t z = 0; z < res; ++z)
+        for (uint32_t x = 0; x < res; ++x)
+        {
+            const float fx = static_cast<float>(x), fz = static_cast<float>(z);
+            field[static_cast<size_t>(z) * res + x] =
+                3.0f * std::sin(fx * 0.37f) + 2.0f * std::cos(fz * 0.21f) + 0.05f * fx * fz / res;
+        }
+
+    const uint32_t lod0Cells = 64;   // verts = lod0Cells>>k + 1 → 65, 33, 17, 9
+    const float sizeX = 200.0f, sizeZ = 150.0f;
+    struct Chunk { float u0, v0, u1, v1; };
+    // One interior chunk, one that hits the u1 = v1 = 1 clamp edge TerrainSystem::buildChunk's
+    // last chunk in each row/column always lands on, and one with a span that is NOT a power of
+    // two itself (1/3, 1/7 are not exactly representable in binary floating point) — a span of
+    // 0.25 or 1.0 would make `(u1-u0)*i` land on a round number for almost any stride, which
+    // would pass even if the power-of-two guard were accidentally relaxed to allow more strides.
+    const Chunk chunks[] = {
+        { 0.25f, 0.0f, 0.5f, 0.25f },
+        { 0.75f, 0.75f, 1.0f, 1.0f },
+        { 1.0f / 3.0f, 1.0f / 7.0f, 2.0f / 3.0f, 4.0f / 7.0f },
+    };
+
+    for (const Chunk& c : chunks)
+    {
+        TerrainChunkLODCache cache;
+        for (uint32_t k = 0; k < 4; ++k)
+        {
+            const uint32_t verts = (lod0Cells >> k) + 1u;
+            const StaticMeshAsset viaCache = generateTerrainChunkMeshLOD(
+                field, res, sizeX, sizeZ, c.u0, c.v0, c.u1, c.v1, verts, 1.0f, cache);
+            const StaticMeshAsset direct = generateTerrainChunkMesh(
+                field, res, sizeX, sizeZ, c.u0, c.v0, c.u1, c.v1, verts, 1.0f);
+
+            // Confirms the CACHED (downsample) path actually ran, not a silent fallback to the
+            // resample path that would make this test pass for the wrong reason: the cache
+            // stays at the finest level's size (65) across every coarser call, it is never
+            // replaced by a smaller grid (see generateTerrainChunkMeshLOD).
+            CHECK(cache.n == lod0Cells + 1);
+
+            CHECK(viaCache.vertices == direct.vertices);
+            CHECK(viaCache.normals  == direct.normals);
+            CHECK(viaCache.uvs      == direct.uvs);
+            CHECK(viaCache.indices  == direct.indices);
+        }
+    }
+}
+
+TEST_CASE("generateTerrainChunkMeshLOD falls back to resampling when the stride is not a power of two")
+{
+    const uint32_t res = 65;
+    std::vector<float> field(static_cast<size_t>(res) * res);
+    for (uint32_t z = 0; z < res; ++z)
+        for (uint32_t x = 0; x < res; ++x)
+            field[static_cast<size_t>(z) * res + x] =
+                static_cast<float>(x) * 0.3f - static_cast<float>(z) * 0.2f;
+
+    const float sizeX = 100.0f, sizeZ = 100.0f;
+    // A span that is not an exact binary fraction (0.1, 0.7), so `(u1-u0)*i` does not land on a
+    // round number for stride 3 either — a test with a span like 0.0..1.0 would not actually
+    // exercise the rounding mismatch the power-of-two guard exists for.
+    const float u0 = 0.1f, u1 = 0.7f, v0 = 0.1f, v1 = 0.7f;
+    TerrainChunkLODCache cache;
+    // Seed the cache with a 49-vertex grid — outside the usual 65/33/17/9 sequence.
+    const StaticMeshAsset base = generateTerrainChunkMeshLOD(
+        field, res, sizeX, sizeZ, u0, v0, u1, v1, 49, 1.0f, cache);
+    REQUIRE(cache.n == 49);
+
+    // (49-1)/(17-1) = 48/16 = 3 — an exact stride, but not a power of two, so this must fall
+    // back to resampling the field directly instead of downsampling the (wrong-stride) cache.
+    const StaticMeshAsset viaCache = generateTerrainChunkMeshLOD(
+        field, res, sizeX, sizeZ, u0, v0, u1, v1, 17, 1.0f, cache);
+    const StaticMeshAsset direct = generateTerrainChunkMesh(
+        field, res, sizeX, sizeZ, u0, v0, u1, v1, 17, 1.0f);
+
+    // Confirms the fallback actually ran (and refreshed the cache to the new, smaller grid) —
+    // without this, the test above would also pass if strideOf were broken and the call had
+    // silently (and in this case harmlessly, by luck) downsampled the 49-vertex cache instead.
+    CHECK(cache.n == 17);
+
+    CHECK(viaCache.vertices == direct.vertices);
+    CHECK(viaCache.normals  == direct.normals);
+    CHECK(viaCache.uvs      == direct.uvs);
+    CHECK(viaCache.indices  == direct.indices);
+    (void)base;
+}
+
 TEST_CASE("resampleHeightField preserves corners and linear fields")
 {
     // A linear ramp on a 3×3 grid: value = x (columns 0,1,2).
@@ -376,6 +471,60 @@ TEST_CASE("TerrainSystem propagates the Landscape's material to its chunks")
         CHECK(mc.paramOverrides[0].name == "Tint");
         CHECK(mc.paramOverrides[0].value[0] == doctest::Approx(0.25f));
     }
+}
+
+// One pass over the chunks serves every landscape (SCN-802): each chunk must
+// still follow its own.
+TEST_CASE("TerrainSystem: chunks of two landscapes each follow their own landscape's material")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto& reg = world.registry();
+
+    Entity tes[2];
+    for (int i = 0; i < 2; ++i)
+    {
+        tes[i] = world.createEntity("Landscape");
+        reg.emplace<TransformComponent>(tes[i]);
+        TerrainComponent tc;
+        tc.resolution = 129;   // 2×2 chunks
+        tc.sizeX = tc.sizeZ = 16.0f;
+        tc.dirty = true;
+        reg.emplace<TerrainComponent>(tes[i], tc);
+    }
+    TerrainSystem::updateTerrains(world, cm);
+
+    const HE::UUID mats[2] = { HE::UUID{ 0xA1ull, 0x1ull }, HE::UUID{ 0xB2ull, 0x2ull } };
+    for (int i = 0; i < 2; ++i)
+    {
+        auto& m = reg.get<MaterialComponent>(tes[i]);
+        m.materialAssetId = mats[i];
+        MaterialParamOverride ov; ov.name = i == 0 ? "Tint" : "Wetness"; ov.value[0] = 0.25f + i;
+        m.paramOverrides = { ov };
+    }
+    // A chunk that lost its MaterialComponent gets the one of its own landscape.
+    entt::entity bare = entt::null;
+    for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+        if (cc.terrain == tes[1]) { bare = ce; break; }
+    REQUIRE((bare != entt::null));
+    reg.remove<MaterialComponent>(bare);
+
+    TerrainSystem::updateTerrains(world, cm);
+    size_t seen[2] = { 0, 0 };
+    for (auto [ce, cc] : reg.view<TerrainChunkComponent>().each())
+    {
+        const int i = cc.terrain == tes[0] ? 0 : 1;
+        REQUIRE((cc.terrain == tes[i]));
+        const auto* mc = reg.try_get<MaterialComponent>(ce);
+        REQUIRE(mc != nullptr);
+        CHECK(mc->materialAssetId == mats[i]);
+        REQUIRE(mc->paramOverrides.size() == 1);
+        CHECK(mc->paramOverrides[0].name == (i == 0 ? "Tint" : "Wetness"));
+        CHECK(mc->paramOverrides[0].value[0] == doctest::Approx(0.25f + i));
+        ++seen[i];
+    }
+    CHECK(seen[0] == 4);
+    CHECK(seen[1] == 4);
 }
 
 // ── Texture tiling ────────────────────────────────────────────────────────────
@@ -503,6 +652,39 @@ TEST_CASE("TerrainPaint moves weight toward the painted layer and keeps the sum 
         TerrainPaint::paint(tc, 0.0f, 0.0f, 0, 8.0f, 0.0f, 0.5f);
     CHECK(texel(c, c)[0] == 255);
     CHECK(texel(c, c)[1] == 0);
+}
+
+TEST_CASE("TerrainPaint::fillLayer puts every texel on one layer, on either page")
+{
+    TerrainComponent tc;
+    tc.sizeX = 40.0f; tc.sizeZ = 40.0f; tc.weightRes = 32;
+
+    REQUIRE(TerrainPaint::fillLayer(tc, 2));
+    REQUIRE(tc.layerWeights.size() == 32u * 32u * 4u);
+    CHECK(tc.weightsDirty);
+    uint8_t w[kTerrainMaxLayers];
+    for (uint32_t z : { 0u, 17u, 31u })
+        for (uint32_t x : { 0u, 9u, 31u })
+        {
+            REQUIRE(TerrainPaint::texelWeights(tc, x, z, w));
+            for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 2 ? 255 : 0));
+        }
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+
+    // A layer on the second page: page one goes to zero, the second page carries it.
+    REQUIRE(TerrainPaint::fillLayer(tc, 5));
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 4, w));
+    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 5 ? 255 : 0));
+    CHECK(TerrainPaint::usesSecondPage(tc));
+
+    // And back: a first-page fill must not leave the second page voting.
+    REQUIRE(TerrainPaint::fillLayer(tc, 0));
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 4, w));
+    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 0 ? 255 : 0));
+    CHECK_FALSE(TerrainPaint::usesSecondPage(tc));
+
+    CHECK_FALSE(TerrainPaint::fillLayer(tc, -1));
+    CHECK_FALSE(TerrainPaint::fillLayer(tc, kTerrainMaxLayers));
 }
 
 TEST_CASE("TerrainPaint falloff fades with distance and rejects bad layers")
@@ -1128,4 +1310,56 @@ TEST_CASE("The terrain tick pulls the collider after a sculpt, without anyone ca
     // not re-armed.
     TerrainSystem::updateTerrains(world, cm, nullptr, &phys);
     CHECK(phys.raycast(from, down, 400.0f).point.y == doctest::Approx(plateau).epsilon(0.01));
+}
+
+// ── The top of the 2ⁿ+1 ladder ─────────────────────────────────────────────────
+// A resolution of 513..1024 snaps UP to 1025. The clamp every consumer used was
+// 1024, so the 1025² height field was read as a 1024² grid, never matched, and the
+// landscape came out flat — while the snap ran again every frame and rebuilt and
+// re-uploaded all 256 chunks each time.
+TEST_CASE("terrain: a resolution that snaps to 1025 keeps its heights and settles")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 100.0f;
+    tc.resolution = 1024;
+    tc.seed = 0;
+    TerrainSculpt::ensureHeights(tc);
+    CHECK(tc.resolution == 1025);
+    REQUIRE(tc.sculptHeights.size() == 1025u * 1025u);
+
+    tc.sculptHeights[5 * 1025 + 7] = 12.0f;
+    const std::vector<float> field = computeTerrainHeightField(tc);
+    REQUIRE(field.size() == 1025u * 1025u);
+    CHECK(field[5 * 1025 + 7] == doctest::Approx(12.0f));
+
+    // Settled: snapping again changes nothing and asks for no rebuild.
+    tc.dirty = false;
+    TerrainSculpt::ensureHeights(tc);
+    CHECK(tc.resolution == 1025);
+    CHECK_FALSE(tc.dirty);
+}
+
+TEST_CASE("terrain: updateTerrains on a 1024 landscape builds the sculpted heights and then rests")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    const auto e = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(e);
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 100.0f;
+    tc.resolution = 1024;
+    tc.seed = 0;
+    TerrainSculpt::ensureHeights(tc);
+    tc.sculptHeights[512 * 1025 + 512] = 25.0f;
+    tc.dirty = true;
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    TerrainSystem::updateTerrains(world, cm);
+    const auto& after = world.registry().get<TerrainComponent>(e);
+    CHECK(after.resolution == 1025);
+    // Rested: nothing is pending, so the next tick does not rebuild.
+    CHECK_FALSE(after.dirty);
+    CHECK_FALSE(after.regionDirty);
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK_FALSE(world.registry().get<TerrainComponent>(e).dirty);
 }

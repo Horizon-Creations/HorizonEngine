@@ -56,6 +56,28 @@ bool nearlyEqual(float a, float b)
     return std::fabs(a - b) <= 1e-6f * std::max(1.0f, std::max(std::fabs(a), std::fabs(b)));
 }
 
+// A NaN or infinity cannot be clamped into anything useful, so it becomes the
+// field's own fallback; every clamp() step below then bounds the result.
+float finiteOr(float v, float fallback) { return std::isfinite(v) ? v : fallback; }
+
+// The graphics list's per-type work, picked by overload so one macro row does it
+// for a bool, an int and a float alike.
+bool fieldEqual(bool a, bool b)   { return a == b; }
+bool fieldEqual(int a, int b)     { return a == b; }
+bool fieldEqual(float a, float b) { return nearlyEqual(a, b); }
+void readField(const json& j, const char* key, bool& v)  { readBool(j, key, v); }
+void readField(const json& j, const char* key, int& v)   { readNumber(j, key, v); }
+void readField(const json& j, const char* key, float& v) { readNumber(j, key, v); }
+void clampFieldFor(bool&, double, double, bool) {}
+void clampFieldFor(int& v, double lo, double hi, int)
+{
+    v = static_cast<int>(std::clamp(static_cast<double>(v), lo, hi));
+}
+void clampFieldFor(float& v, double lo, double hi, float fallback)
+{
+    v = static_cast<float>(std::clamp(static_cast<double>(finiteOr(v, fallback)), lo, hi));
+}
+
 // The three spellings the runtime accepts, and only those: anything else in
 // the file would become "Windowed" in the game with no error anywhere, so it
 // is corrected HERE, where somebody can still see it.
@@ -131,6 +153,18 @@ bool ProjectSettings::isDefault() const
     return *this == ProjectSettings{};
 }
 
+namespace
+{
+bool graphicsEqual(const ProjectGraphics& a, const ProjectGraphics& b)
+{
+    if (a.enabled != b.enabled) return false;
+#define HE_X(T, name, def, editorName, lo, hi) if (!fieldEqual(a.name, b.name)) return false;
+    HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+    return true;
+}
+} // namespace
+
 bool ProjectSettings::operator==(const ProjectSettings& o) const
 {
     return game.title == o.game.title
@@ -144,6 +178,9 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && nearlyEqual(shadows.slopeBias, o.shadows.slopeBias)
         && nearlyEqual(shadows.minBias, o.shadows.minBias)
         && physics.fixedHz == o.physics.fixedHz
+        && physics.threads == o.physics.threads
+        && nearlyEqual(physics.budgetMs, o.physics.budgetMs)
+        && physics.eventsPerPoll == o.physics.eventsPerPoll
         && nearlyEqual(physics.gravity.x, o.physics.gravity.x)
         && nearlyEqual(physics.gravity.y, o.physics.gravity.y)
         && nearlyEqual(physics.gravity.z, o.physics.gravity.z)
@@ -154,6 +191,10 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && renderDefaults.windowMode == o.renderDefaults.windowMode
         && renderDefaults.vsync == o.renderDefaults.vsync
         && renderDefaults.backend == o.renderDefaults.backend
+        && graphicsEqual(graphics, o.graphics)
+        && input.enabled == o.input.enabled
+        && nearlyEqual(input.stickDeadzone, o.input.stickDeadzone)
+        && nearlyEqual(input.triggerDeadzone, o.input.triggerDeadzone)
         && antiCheat.enabled == o.antiCheat.enabled
         && antiCheat.integrityCheck == o.antiCheat.integrityCheck
         && nearlyEqual(antiCheat.tolerance, o.antiCheat.tolerance)
@@ -179,7 +220,11 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && multiplayer.discoverLan == o.multiplayer.discoverLan
         && multiplayer.discoverDirectory == o.multiplayer.discoverDirectory
         && multiplayer.portMapping == o.multiplayer.portMapping
-        && multiplayer.rpcPerSecond == o.multiplayer.rpcPerSecond;
+        && multiplayer.relayAddress == o.multiplayer.relayAddress
+        && multiplayer.rpcPerSecond == o.multiplayer.rpcPerSecond
+        && sourceControl.mode == o.sourceControl.mode
+        && sourceControl.team == o.sourceControl.team
+        && sourceControl.project == o.sourceControl.project;
 }
 
 void ProjectSettings::clamp()
@@ -196,9 +241,12 @@ void ProjectSettings::clamp()
 
     auto& p = physics;
     p.fixedHz = std::clamp(p.fixedHz, ProjectPhysicsSettings::kMinHz, ProjectPhysicsSettings::kMaxHz);
-    p.floatingOriginRadius = std::isfinite(p.floatingOriginRadius)
-        ? std::clamp(p.floatingOriginRadius, 0.0f, ProjectPhysicsSettings::kMaxFloatingOriginRadius)
-        : 0.0f;
+    p.threads = std::clamp(p.threads, 0, ProjectPhysicsSettings::kMaxThreads);
+    p.budgetMs = std::clamp(finiteOr(p.budgetMs, ProjectPhysicsSettings{}.budgetMs),
+                            0.0f, ProjectPhysicsSettings::kMaxBudgetMs);
+    p.eventsPerPoll = std::clamp(p.eventsPerPoll, 0, ProjectPhysicsSettings::kMaxEventsPerPoll);
+    p.floatingOriginRadius = std::clamp(finiteOr(p.floatingOriginRadius, 0.0f),
+                                        0.0f, ProjectPhysicsSettings::kMaxFloatingOriginRadius);
     for (int i = 0; i < 3; ++i)
     {
         if (!std::isfinite(p.gravity[i])) p.gravity[i] = 0.0f;
@@ -214,9 +262,20 @@ void ProjectSettings::clamp()
         == std::end(kWindowModes))
         r.windowMode = ProjectRenderDefaults{}.windowMode;
 
+    {
+        ProjectGraphics& g = graphics;
+        const ProjectGraphics defaults;
+#define HE_X(T, name, def, editorName, lo, hi) clampFieldFor(g.name, lo, hi, defaults.name);
+        HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+        input.stickDeadzone   = std::clamp(finiteOr(input.stickDeadzone, ProjectInputSettings{}.stickDeadzone),
+                                           0.0f, ProjectInputSettings::kMaxDeadzone);
+        input.triggerDeadzone = std::clamp(finiteOr(input.triggerDeadzone, ProjectInputSettings{}.triggerDeadzone),
+                                           0.0f, ProjectInputSettings::kMaxDeadzone);
+    }
+
     using AC = ProjectAntiCheatSettings;
     auto& a = antiCheat;
-    auto finiteOr = [](float v, float fallback) { return std::isfinite(v) ? v : fallback; };
     a.tolerance          = std::clamp(finiteOr(a.tolerance, AC{}.tolerance), 0.0f, AC::kMaxTolerance);
     a.windowSec          = std::clamp(finiteOr(a.windowSec, AC{}.windowSec),
                                       AC::kMinWindowSec, AC::kMaxWindowSec);
@@ -298,7 +357,22 @@ void ProjectSettings::toJson(json& out) const
         { "fixedHz", physics.fixedHz },
         { "gravity", { physics.gravity.x, physics.gravity.y, physics.gravity.z } },
         { "floatingOriginRadius", physics.floatingOriginRadius },
+        { "threads", physics.threads },
+        { "budgetMs", physics.budgetMs },
+        { "eventsPerPoll", physics.eventsPerPoll },
     };
+
+    {
+        json g = json::object();
+        g["enabled"] = graphics.enabled;
+#define HE_X(T, name, def, editorName, lo, hi) g[#name] = graphics.name;
+        HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+        out["graphics"] = std::move(g);
+    }
+    out["input"] = { { "enabled",         input.enabled },
+                     { "stickDeadzone",   input.stickDeadzone },
+                     { "triggerDeadzone", input.triggerDeadzone } };
 
     out["renderDefaults"] = {
         { "useEditorSettings", renderDefaults.useEditorSettings },
@@ -348,6 +422,16 @@ void ProjectSettings::toJson(json& out) const
                          { "directory",   multiplayer.discoverDirectory },
                          { "portMapping", multiplayer.portMapping } } },
         { "rpcPerSecond", multiplayer.rpcPerSecond },
+        // "" = direct. Not under "discovery": it decides how the session is
+        // reached at all, not how it is found.
+        { "relayAddress", multiplayer.relayAddress },
+    };
+
+    // The shape the team-server design §6.1 names.
+    out["sourceControl"] = {
+        { "mode",    sourceControl.teamServer() ? "teamServer" : "git" },
+        { "team",    sourceControl.team },
+        { "project", sourceControl.project },
     };
 }
 
@@ -376,6 +460,9 @@ void ProjectSettings::fromJson(const json& in)
         const json& p = section(in, "physics");
         readNumber(p, "fixedHz", physics.fixedHz);
         readNumber(p, "floatingOriginRadius", physics.floatingOriginRadius);
+        readNumber(p, "threads", physics.threads);
+        readNumber(p, "budgetMs", physics.budgetMs);
+        readNumber(p, "eventsPerPoll", physics.eventsPerPoll);
         const auto g = p.find("gravity");
         if (g != p.end() && g->is_array() && g->size() == 3)
         {
@@ -397,6 +484,17 @@ void ProjectSettings::fromJson(const json& in)
         readString(r, "windowMode",        renderDefaults.windowMode);
         readBool  (r, "vsync",             renderDefaults.vsync);
         readString(r, "backend",           renderDefaults.backend);
+    }
+    {
+        const json& g = section(in, "graphics");
+        readBool(g, "enabled", graphics.enabled);
+#define HE_X(T, name, def, editorName, lo, hi) readField(g, #name, graphics.name);
+        HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
+        const json& i = section(in, "input");
+        readBool  (i, "enabled",         input.enabled);
+        readNumber(i, "stickDeadzone",   input.stickDeadzone);
+        readNumber(i, "triggerDeadzone", input.triggerDeadzone);
     }
     {
         const json& a = section(in, "anticheat");
@@ -452,6 +550,18 @@ void ProjectSettings::fromJson(const json& in)
         readBool(di, "directory",   multiplayer.discoverDirectory);
         readBool(di, "portMapping", multiplayer.portMapping);
         readNumber(m, "rpcPerSecond", multiplayer.rpcPerSecond);
+        readString(m, "relayAddress", multiplayer.relayAddress);
+    }
+    {
+        const json& sc = section(in, "sourceControl");
+        // An unknown mode is "git": a newer editor's mode this one does not know
+        // must not switch direct source control off.
+        std::string mode;
+        readString(sc, "mode", mode);
+        sourceControl.mode = mode == "teamServer" ? ProjectSourceControlSettings::Mode::TeamServer
+                                                  : ProjectSourceControlSettings::Mode::Git;
+        readString(sc, "team",    sourceControl.team);
+        readString(sc, "project", sourceControl.project);
     }
 
     clamp();

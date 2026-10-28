@@ -7,6 +7,12 @@
 #include "HcEditorUtil.h"   // assetNodeTitle — the header a Create node draws
 #include <HorizonCode/HorizonCode.h>
 #include <UIWidget/UIWidgetAnim.h>   // the two vocabularies the dropdowns offer
+#include <ContentManager/ContentManager.h>   // the project half of those lists
+#include <ContentManager/Assets.h>
+#include <HorizonScene/EngineApi.h>   // save::setDefaultTemplate: where the save fields come from
+#include <Types/TypeRegistry.h>
+#include <filesystem>
+#include <fstream>
 #include <vector>
 
 // The quick-spawn bindings are a hand-maintained table, and a table is exactly the
@@ -248,4 +254,139 @@ TEST_CASE("Engine call parameters: the ones with a closed list of values")
 	CHECK(choices(scene, "scene").empty());
 	CHECK(HcEditorUtil::engineParamHint(scene) != nullptr);
 	CHECK(HcEditorUtil::engineParamHint(title) == nullptr);
+}
+
+// The pin asks engineParamHasChoices every frame and only builds the list once
+// its dropdown is open (EDT-1002). If the two ever disagreed, a pin would flip
+// between a text box and an empty dropdown — so every row/parameter pair above
+// is asked both ways, without a project, with an empty one and with a full one.
+TEST_CASE("Engine call parameters: has-a-list agrees with the list")
+{
+	auto call = [](const char* id)
+	{
+		HC::Node n;
+		n.type = HC::NodeType::EngineCall;
+		n.s = id;
+		return n;
+	};
+	const std::vector<std::pair<const char*, const char*>> asks = {
+		{ "widget.playAnimation", "direction" }, { "widget.playAnimation", "easing" },
+		{ "theme.setMode", "mode" }, { "input.mode", "mode" },
+		{ "input.gamepadButton", "button" }, { "input.gamepadAxis", "axis" },
+		{ "scene.load", "scene" }, { "scene.load", "path" }, { "app.setTitle", "path" },
+		{ "object.spawn", "class" }, { "widget.create", "widgetAsset" },
+		{ "theme.apply", "themeAsset" }, { "audio.play", "asset" }, { "prefs.load", "asset" },
+		{ "save.getNumber", "field" }, { "prefs.setString", "key" }, { "app.setTitle", "title" },
+	};
+	auto agree = [&](ContentManager* cm)
+	{
+		for (const auto& [row, param] : asks)
+		{
+			CAPTURE(std::string(row) + " / " + param);
+			const HC::Node n = call(row);
+			CHECK(HcEditorUtil::engineParamHasChoices(n, param, cm) ==
+			      !HcEditorUtil::engineParamChoices(n, param, cm).empty());
+		}
+	};
+	agree(nullptr);
+
+	const std::filesystem::path proj =
+		std::filesystem::temp_directory_path() / "he_test_param_choices_proj";
+	std::filesystem::remove_all(proj);
+	std::filesystem::create_directories(proj / "Content");
+	{
+		ContentManager cm((proj / "Content").string());
+		agree(&cm);   // a project with nothing in it: every project list is empty
+
+		std::ofstream(proj / "Content" / "Main.hescene") << "{}";
+		HorizonCodeClassAsset cls;
+		cls.type = HE::AssetType::HorizonCodeClass;
+		cls.name = "Enemy";
+		cls.path = "Enemy.hasset";
+		REQUIRE(cm.saveAsset(cls));   // a save moves the epoch: the scene is seen too
+		CHECK(HcEditorUtil::engineParamHasChoices(call("scene.load"), "scene", &cm));
+		CHECK(HcEditorUtil::engineParamHasChoices(call("object.spawn"), "class", &cm));
+		agree(&cm);
+	}
+	std::error_code ec;
+	std::filesystem::remove_all(proj, ec);
+}
+
+// The save.* field list comes from the default SaveGame Template and is filtered
+// by the accessor's type; engineParamHasChoices must say the same as the list
+// for every accessor, whatever mix of fields the template holds.
+TEST_CASE("Engine call parameters: save fields, has-a-list agrees with the list")
+{
+	auto call = [](const char* id)
+	{
+		HC::Node n;
+		n.type = HC::NodeType::EngineCall;
+		n.s = id;
+		return n;
+	};
+	const char* rows[] = { "save.getNumber", "save.setNumber", "save.getString", "save.setString",
+	                       "save.getBool", "save.setBool", "save.getStruct", "save.setStruct",
+	                       "save.has" };
+	auto field = [](const char* name, HC::PinType t, bool isArray = false)
+	{
+		HE::StructField f;
+		f.name = name; f.type = t; f.isArray = isArray;
+		return f;
+	};
+	auto use = [&](ContentManager& cm, const char* path, std::vector<HE::StructField> fields)
+	{
+		HE::StructDef def;
+		def.fields = std::move(fields);
+		SaveGameTemplateAsset a;
+		a.name = "Tpl";
+		a.path = path;
+		a.json = HE::TypeRegistry::structToJson(def);
+		cm.registerSaveGameTemplate(std::move(a));
+		HE::api::save::setDefaultTemplate(path);
+	};
+	auto agree = [&](ContentManager* cm)
+	{
+		for (const char* row : rows)
+		{
+			CAPTURE(row);
+			const HC::Node n = call(row);
+			CHECK(HcEditorUtil::engineParamHasChoices(n, "field", cm) ==
+			      !HcEditorUtil::engineParamChoices(n, "field", cm).empty());
+		}
+	};
+
+	const std::filesystem::path proj =
+		std::filesystem::temp_directory_path() / "he_test_save_field_choices_proj";
+	std::filesystem::remove_all(proj);
+	std::filesystem::create_directories(proj / "Content");
+	{
+		ContentManager cm((proj / "Content").string());
+		HE::api::save::setDefaultTemplate("mem://missing");   // named, but nothing behind it
+		agree(&cm);
+
+		use(cm, "mem://tpl_mixed", { field("hp", HC::PinType::Float), field("title", HC::PinType::String),
+		                              field("tags", HC::PinType::String, true) });
+		agree(&cm);
+		CHECK(HcEditorUtil::engineParamHasChoices(call("save.getNumber"), "field", &cm));
+		CHECK(HcEditorUtil::engineParamHasChoices(call("save.getString"), "field", &cm));
+		CHECK_FALSE(HcEditorUtil::engineParamHasChoices(call("save.getBool"), "field", &cm));
+		CHECK_FALSE(HcEditorUtil::engineParamHasChoices(call("save.getStruct"), "field", &cm));
+		CHECK(HcEditorUtil::engineParamChoices(call("save.has"), "field", &cm) ==
+		      std::vector<std::string>{ "hp", "title" });   // an array field is never offered
+
+		// only an array field: nothing is offered for any accessor
+		use(cm, "mem://tpl_arrays", { field("ids", HC::PinType::Int, true) });
+		agree(&cm);
+		CHECK_FALSE(HcEditorUtil::engineParamHasChoices(call("save.getNumber"), "field", &cm));
+		CHECK_FALSE(HcEditorUtil::engineParamHasChoices(call("save.has"), "field", &cm));
+
+		// the text changes while the same path stays the default: the list follows it
+		use(cm, "mem://tpl_bool", { field("hardcore", HC::PinType::Bool) });
+		agree(&cm);
+		CHECK(HcEditorUtil::engineParamHasChoices(call("save.setBool"), "field", &cm));
+		CHECK_FALSE(HcEditorUtil::engineParamHasChoices(call("save.setNumber"), "field", &cm));
+	}
+	HE::api::save::setDefaultTemplate("");
+	std::error_code ec;
+	std::filesystem::remove_all(proj, ec);
 }

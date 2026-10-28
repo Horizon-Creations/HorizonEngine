@@ -1,0 +1,1464 @@
+#pragma once
+
+// ─── The editor state each tool family reaches through ──────────────────────
+// One hooks struct and one register function per tool family. They are kept
+// apart from McpToolRegistry.h (the registry, ToolResult, the call context)
+// because only the tool files, setupMcpTools and the MCP tests need them, and
+// McpBridge.h needs the registry alone: before the split every editor file
+// that included EditorApplication.h parsed these ~1400 lines too (EDT-1209).
+//
+// Each family's hooks are functions rather than an EditorApplication pointer,
+// so a test can drive a family without a window or an editor behind it.
+
+#include "McpToolRegistry.h"
+
+#include <Renderer/IRenderer.h>   // EditorCameraOverride — the screenshot hooks speak it
+#include <Scripting/ScriptTypes.h>
+#include <Types/Enums.h>
+#include <Types/UUID.h>
+
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
+class ContentManager;
+namespace HorizonCode { struct Graph; }
+namespace HE { struct UIWidgetTree; class TaskBoard; class TaskBoardTeam; }
+namespace HE::Planner { class Workspace; }
+// The three types the build and settings hooks speak, all at global scope and
+// all behind headers this one refuses to pull in: ProjectManager.h drags HE_Tools
+// in, EditorConfig.h is the editor's own. A hook signature only needs the name.
+struct ProjectData;     // ProjectManager.h (HE_Tools)
+struct ExportProfile;   // ProjectManager.h (HE_Tools)
+struct EditorConfig;    // EditorConfig.h
+class CollabController; // CollabController.h (global namespace, like the editor's)
+class TeamController;   // TeamController.h (same)
+
+namespace HE::Ed
+{
+
+// ─── The scene the tools report on ───────────────────────────────────────────
+// Everything the stub tools need from the editor, as functions rather than as an
+// EditorApplication pointer — that class is not in the test binary, and the
+// questions asked of it here are five predicates. Any hook may be empty; an
+// absent one reads as "no project open", which is a real state (the listener
+// runs before a scene is loaded).
+struct McpEditorHooks
+{
+	std::function<std::string()> projectName;
+	std::function<std::string()> scenePath;      // content-relative, empty = none
+	std::function<bool()>        sceneDirty;
+	std::function<bool()>        isPlaying;
+	std::function<bool()>        inSession;
+	std::function<int()>         entityCount;    // -1 = no world
+};
+
+// Register the two tools this step exists to prove the pipe with: `ping` (does
+// the editor answer at all) and `scene_info` (does an answer carry real editor
+// state, or just an echo). Entity and HorizonCode tools arrive in later steps
+// through the same door.
+void registerCoreTools(McpToolRegistry& registry, McpEditorHooks hooks);
+
+class EditorCommands;
+
+// ─── Placing and moving objects ──────────────────────────────────────────────
+// The five mutating tools (create, destroy, reparent, set_transform,
+// set_components) and the two reading ones without which they cannot be used at
+// all: every address on this interface is a uuid, and a client that has no way
+// to learn a uuid can only ever address what it made itself.
+//
+// Every mutation goes through `cmds.execute(…, Origin::External)` — there is no
+// second path into the world from here, which is the whole reason the gateway
+// exists. Refusals keep the gateway's own wire names (`not_found`, `play_mode`,
+// `builtin`, `locked_by_other`, `lock_pending`, …), so the client reads the same
+// vocabulary the editor uses internally.
+//
+// The reference is captured, so `cmds` has to outlive the registry. In the
+// editor both are members of EditorApplication; in a test both are locals of the
+// same fixture.
+void registerEntityTools(McpToolRegistry& registry, EditorCommands& cmds);
+
+// ─── Authoring HorizonCode ───────────────────────────────────────────────────
+// The second half of what an external client can do to a project: read a visual
+// script, add and remove nodes, wire and unwire pins, set parameters, save.
+//
+// Two rules shape this interface, and both come from what already exists:
+//
+//   • Every mutation is expressed in the ITEM-LEVEL JSON HorizonCode already
+//     writes (`nodeToJson` / `variableToJson`, the four-int link array) and
+//     applied through `CollabDocSync::forHorizonCodeGraph`'s adapter. That is
+//     the same door a collaboration peer's edit comes through, so an MCP edit
+//     cannot diverge from what a peer's edit does — and in a live session the
+//     panel's own DocMirror diff picks the change up in the next frame and
+//     publishes it, without this file knowing that collaboration exists.
+//
+//   • Wiring is the exception, and deliberately so: the adapter's link upsert
+//     only checks that both endpoints exist, because a peer's link was already
+//     validated on the peer. A client's is not, so `hc_connect` goes through
+//     `HorizonCode::Graph::connect` (types, direction, occupancy) and falls back
+//     to `connectWithConversion` — the same two steps the canvas takes when a
+//     human drags a wire.
+//
+// Deliberately free of ImGui and of EditorApplication, like the two files above:
+// a graph is a value, and "did that node land where the client asked" is a
+// question a test can put to a `HorizonCode::Graph` on the stack.
+
+// The two documents the editor owns itself rather than holding as an asset.
+// Reserved words on this interface: no content-relative path can collide with
+// them, because every asset path carries a '/' and a '.hasset' suffix.
+inline constexpr const char* kMcpDocLevelScript  = "levelscript";
+inline constexpr const char* kMcpDocGameInstance = "gameinstance";
+
+// One addressable document. `key` is what every tool takes: the two words above
+// for the graphs the editor owns, otherwise the content-relative path of a
+// HorizonCode class asset.
+struct McpHcDoc
+{
+	std::string key;
+	std::string label;
+	std::string kind;          // "level", "gameinstance", "class"
+	bool        dirty = false;
+
+	// The frontend's own restrictions, mirrored from HcGraphHost::MenuOpts so
+	// that MCP cannot insert what the add menu refuses to offer. Both empty =
+	// no restriction.
+	//
+	// Only the part of `addExcluded` that is a real restriction belongs here.
+	// That list also holds types the palette merely offers through a DIFFERENT
+	// route (Event through its own section, Get/Set Variable through the
+	// sidebar), and mirroring those would refuse a client the very thing it
+	// came for. See kLevelScriptExcluded in EditorApplication::setupMcpTools.
+	std::vector<std::string> apiGroups;           // HE::api groups, e.g. "math"
+	std::vector<std::string> excludedNodeTypes;   // stored node-type names
+};
+
+struct McpHcHooks
+{
+	// Every document a client may address right now. A class asset the editor
+	// has never opened is deliberately absent rather than loaded on demand:
+	// the panel owns that state, and a second copy loaded behind its back would
+	// be the one edit the human's Save then throws away.
+	std::function<std::vector<McpHcDoc>()> documents;
+
+	// The live graph behind `key`, or null for an unknown one. The pointer is
+	// used within the one call and never stored.
+	std::function<HorizonCode::Graph*(const std::string& key)> resolve;
+
+	// Around a mutation. `beginEdit` is where the editor takes whatever undo
+	// entry fits the document (the level script gets a scene snapshot, exactly
+	// as it does when a human edits it); `endEdit` marks the tab dirty and
+	// re-registers the graph where something is running on it.
+	std::function<void(const std::string& key)> beginEdit;
+	std::function<void(const std::string& key)> endEdit;
+
+	// Persist the document. False = the editor could not write it.
+	std::function<bool(const std::string& key)> save;
+
+	// Play-in-editor. Unlike the entity tools there is no gateway underneath
+	// this file to refuse for us, so the check lives here.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER of the collaboration session hold this document right now?
+	// Same reason as the line above: there is no EditorCommands underneath these
+	// tools to answer it, so the question is asked here — once, in `openDoc`,
+	// for every mutating tool.
+	//
+	// Deliberately only the foreign-lock half of EditorCommands::checkLock. The
+	// entity gateway also refuses `lock_pending` while its own claim is in
+	// flight; documents do not, because the editor's asset policy is optimistic
+	// by design (CollabController::beginAssetEdit — an asset edit that loses the
+	// race is reloaded from disk, unlike a destroyed entity) and because nothing
+	// here holds a document lock of its own to wait for.
+	//
+	// Absent hook, or no session, reads as "nobody else has it", which is the
+	// truth outside a session: CollabController::assetLockedByOther answers
+	// false when there is no session and excludes our own claim.
+	std::function<bool(const std::string& key)> lockedByOther;
+};
+
+void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks);
+
+// ─── The files a project is made of ──────────────────────────────────────────
+// Five tools — resolve, list, create, delete, move — and they are what turns the
+// entity and HorizonCode tools from a demo into something usable: every one of
+// those addresses assets (a mesh reference, a material, a class to spawn) by a
+// path or a uuid the client has no other way to learn.
+//
+// ── Why these do NOT go through EditorCommands ───────────────────────────────
+// The gateway knows five entity commands and records an undo entry for each.
+// Assets have none: "deleting an asset is the one Content Browser operation with
+// no undo" (AssetRefScan.h), and a rename is a filesystem move plus a rewrite of
+// every referrer on disk. Teaching the gateway to invert that would be inventing
+// an undo the editor itself does not offer — a behaviour change dressed as
+// plumbing. So this file follows the McpHcHooks precedent instead: the checks a
+// human gets from the Content Browser for free are asked here, once, through
+// hooks, and the refusals keep the same wire names the entity tools use.
+//
+// ── The one rule ─────────────────────────────────────────────────────────────
+// Everything below is confined to the content root. Every path argument is
+// content-relative, is resolved through ContentManager::resolveAbsolutePath and
+// is then checked to actually LAND inside a known root — the registry header
+// promises an external client no file access, and `../../.ssh/id_rsa` is a path
+// the content manager resolves quite happily.
+struct McpAssetHooks
+{
+	// Play-in-editor. Like the HorizonCode tools and unlike the entity ones,
+	// there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same answer shape and
+	// same optimistic asset policy as McpHcHooks::lockedByOther. The argument is
+	// the COLLAB KEY, not the content-relative path — see collabKey below.
+	std::function<bool(const std::string& collabKey)> lockedByOther;
+
+	// The key a collaboration session addresses a file by. Not always the
+	// content-relative path: a C++ class lives under <project>/Source, a sibling
+	// of Content, and reading its empty content-relative path as "no session"
+	// is how the Content Browser once turned a create and a delete into
+	// local-only operations (ContentBrowserPanel::collabKeyFor). Absent hook =
+	// the content-relative form, which is right for everything these tools touch.
+	std::function<std::string(const std::string& absPath, bool isFolder)> collabKey;
+
+	// ── Asking the host instead of doing it ──────────────────────────────────
+	// Inside a session a delete or a rename is a REQUEST, not an act: it breaks
+	// every reference to the old name, which is as much somebody else's problem
+	// as ours, and the host answers by broadcasting so every machine moves at
+	// once. Both return true when the session TOOK the request — in which case
+	// nothing happens locally yet, and the tool says exactly that rather than
+	// claiming a change it did not make.
+	//
+	// Absent hooks, or no session, answer false: just do it.
+	std::function<bool(const std::string& collabKey, bool folder)> requestDelete;
+	std::function<bool(const std::string& oldKey, const std::string& newKey,
+	                   bool folder)>                               requestMove;
+
+	// A create IS published, not requested — nothing refers to a brand-new asset
+	// yet, so there is nothing for the host to arbitrate.
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+
+	// Carry every stored reference over to the new path. Two halves, and the
+	// split is not ours to change: in-memory first (until it runs, the content
+	// manager still believes the asset lives at the old path and the very next
+	// save would write it back there), on-disk on the editor's single retarget
+	// queue (two walks over one file lose one of the two rewrites). Absent hook =
+	// the on-disk walk runs inline, which is what a test wants.
+	std::function<void(const std::string& oldRel, const std::string& newRel,
+	                   bool folder)> enqueueRetarget;
+
+	// Which asset types may be created here. The Content Browser's create menu
+	// gates on the project (no materials without Advanced Shader Effects, one
+	// scripting language per project, a short flat list for an app project), and
+	// the same principle as kLevelScriptExcluded applies: MCP must not create
+	// what the menu will not offer. Absent hook = everything
+	// `isCreatableAssetType` allows, which is what a test wants.
+	std::function<std::vector<HE::AssetType>()> creatableTypes;
+
+	// The project's scripting language, for a Script asset's CHUNK_SLNG. Absent
+	// hook = Lua.
+	std::function<HE::ScriptLanguage()> scriptLanguage;
+
+	// The editor's own bookkeeping after a file appeared, moved or went away:
+	// the type/thumbnail caches, tabs open on a path that is gone, the content
+	// refresh. Absent outside the editor, where none of that exists.
+	std::function<void(const std::string& absPath)> onAssetGone;      // deleted
+	std::function<void(const std::string& absPath)> onAssetAppeared;  // created
+	std::function<void(const std::string& oldAbs, const std::string& newAbs,
+	                   bool folder)>                onAssetMoved;
+
+	// Where the reference scan looks besides the content root: the .heproj
+	// manifest and a project-root GameInstance.hcode. Empty = skip that half.
+	std::function<std::string()> projectRoot;
+	// The content root's directory NAME ("Content"), which adds the
+	// project-relative rule form scene references use. Empty = skip that form.
+	std::function<std::string()> contentDirName;
+};
+
+// The reference is captured, so `content` has to outlive the registry — in the
+// editor both are members of EditorApplication.
+void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
+                        McpAssetHooks hooks);
+
+// ─── The scene as a file ─────────────────────────────────────────────────────
+// Three tools — save, create, open — and they close the one gap that made every
+// entity tool provisional: a client could place a hundred objects and had no way
+// to make any of it outlast the session, no way to start a second level, and no
+// way to move to one that already existed. `scene_info` told it the scene was
+// dirty and offered nothing to do about that.
+//
+// ── Why these do NOT go through EditorCommands ───────────────────────────────
+// The same answer as McpAssetHooks, and for a sharper reason. The gateway knows
+// five entity commands and records an undo entry that inverts each. Opening a
+// scene REPLACES the world and then clears the undo history outright
+// (EditorApplication::openScene) — there is no inverse to record, and inventing
+// one would be inventing an undo the editor itself does not offer. So the
+// checks a human gets from the UI for free are asked here, once, through hooks,
+// and the refusals keep the wire names the entity tools use.
+//
+// ── The guard that has to be replicated by hand ──────────────────────────────
+// A human never reaches `openScene` directly: File > Open Scene goes through
+// `requestGuarded` (EditorUI.cpp), which raises the save prompt when the scene
+// is dirty. A client cannot see that prompt, so `scene_open` refuses a dirty
+// scene with `dirty` unless it says `discard_changes: true`. Silently throwing
+// away an hour of somebody's placement is the one lie that would be most
+// expensive here, and it is invisible to the caller by construction.
+//
+// ── What is deliberately NOT here ────────────────────────────────────────────
+//   • Additive load. It is a merge into the running world with its own physics
+//     and undo rules (openSceneAdditive), which is a different question from
+//     scene persistence.
+//   • A "new empty scene" that discards the current world without writing it
+//     anywhere. `scene_create` writes a file and can open it; there is no tool
+//     whose only effect is to throw the open scene away.
+//   • Refusing inside a collaboration session. A human is not refused either,
+//     and a gate MCP has but the File menu does not would be a behaviour change
+//     dressed as plumbing. The session state is reported in the result instead.
+struct McpSceneHooks
+{
+	// Absolute path of the scene the editor world was last saved to or loaded
+	// from. Empty = a new, never-saved scene, which is a real state.
+	std::function<std::string()> currentScenePath;
+	std::function<bool()>        sceneDirty;
+	std::function<bool()>        isPlaying;
+	std::function<bool()>        inSession;
+	std::function<int()>         entityCount;   // -1 = no world
+	std::function<std::string()> rootUuid;      // world root, "" = no world
+
+	// Write the editor world to this absolute path / replace it with what is at
+	// this absolute path. False = the editor could not. Both are the editor's
+	// own members, so an MCP save takes the scene thumbnail and an MCP open
+	// preloads the asset references exactly as the File menu's do.
+	std::function<bool(const std::string& absPath)> saveScene;
+	std::function<bool(const std::string& absPath)> openScene;
+
+	// A file that was not there before. Same pair the asset tools use, and for
+	// the same reason: a create IS published (nothing refers to a brand-new file
+	// yet, so there is nothing to arbitrate), and the editor's own bookkeeping
+	// has to hear that something appeared.
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+	std::function<void(const std::string& absPath)> onAssetAppeared;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
+                        McpSceneHooks hooks);
+
+// ─── Shaping the ground ──────────────────────────────────────────────────────
+// Five tools — info, heightmap, sculpt, mountain, paint — for the one component that
+// `entity_get` and `entity_set_components` cannot usefully address.
+//
+// ── Why terrain needs tools of its own ───────────────────────────────────────
+// A TerrainComponent's payload is two blobs: `sculptHeightsB64` (res² floats,
+// 263k of them at the resolution the chunk builder snaps to) and
+// `layerWeightsB64` (weightRes² RGBA texels, layers 0..3; layers 4..7 ride in
+// `layerWeights2B64` once painted). The generic component tools hand
+// those to a client as base64 and take them back the same way, which is not an
+// interface — it is the absence of one. A client cannot read a height out of it,
+// cannot change one without re-encoding the whole field, and has no way at all
+// to express "raise the ground here", which is what a landscape is edited by.
+//
+// So these five speak the vocabulary the Landscape mode speaks: a WORLD position,
+// a brush radius and falloff, an operation, an area. The maths is TerrainSculpt
+// and TerrainGenerate (heights) and TerrainPaint (layer weights) — the same
+// functions the editor's own brushes
+// are built from, so a client cannot produce a landscape the editor could not
+// have produced by hand.
+//
+// ── Everything still goes through the gateway ────────────────────────────────
+// Unlike the asset and scene tools, this file DOES go through EditorCommands: a
+// terrain edit is a component change on an entity, which is exactly what
+// `Command::setComponents` is, and routing it there is what buys undo, the
+// publish to a collaboration session, the play-mode refusal and the lock gate
+// without a second copy of any of them. The brush runs on a COPY of the
+// component and the result is handed to the gateway as the component patch.
+//
+// ── The one thing done outside the gateway, and why ──────────────────────────
+// TerrainComponent carries fields that are explicitly never serialised: the
+// weightmap texture's uuid, the chunk grid the chunks were last built for, and
+// the region-dirty rect. The gateway rebuilds the component from the scene JSON,
+// which cannot carry them, so it lands with a fresh default: no weightmap texture
+// (the next tick REGISTERS A SECOND ONE and the first leaks), no known chunk grid
+// and `dirty`, i.e. a rebuild of all 64+ chunks for a brush dab of ten metres.
+// So after the command lands those runtime fields are carried over onto the new
+// component, and the dirty rect is set to the brush extent. That is a write to
+// the world outside the gateway and it is deliberately the smallest one possible:
+// it touches nothing a scene file, an undo entry or a peer would ever see.
+struct McpTerrainHooks
+{
+	// Rebuild what the edit invalidated — in the editor,
+	// TerrainSystem::updateTerrains with the content manager and the renderer,
+	// the same call the Landscape brush makes at the end of a stroke. Absent in
+	// a test, where there is neither and the component itself is the answer.
+	std::function<void()> regenerate;
+};
+
+// The reference is captured, so `cmds` has to outlive the registry.
+void registerTerrainTools(McpToolRegistry& registry, EditorCommands& cmds,
+                          McpTerrainHooks hooks);
+
+// ─── The widget tree of a UI Widget asset ────────────────────────────────────
+// Eight tools — two readers (widget_tree, widget_types) and six that change a
+// widget (add, remove, move, set_properties, set_anchor, save).
+//
+// ── Why a widget needs tools of its own ──────────────────────────────────────
+// The same reason terrain does, one layer up. A UI Widget asset's whole content
+// is one string, `UIWidgetAsset::treeJson`, and the asset tools can create that
+// file and move it and delete it and cannot put a single button in it. Handing a
+// client the JSON to rewrite would be the base64 mistake again with a nicer
+// encoding: the ids are a numbering it would have to keep itself, sibling order
+// is vector order, and a reparent that only writes `parentId` leaves the element
+// wherever it happened to stand (see UIWidgetTree::moveElement).
+//
+// So these speak the vocabulary the Designer speaks: an element id, a parent, a
+// place among its siblings, an anchor preset out of the sixteen UMG names, and
+// properties BY NAME out of the very table the details panel draws
+// (UIElement::allProperties). A client cannot author a widget the editor could
+// not have authored by hand, and it cannot invent a property that does not
+// exist — an unknown name is refused with the list rather than written nowhere,
+// which is what `setPropAny` does with one.
+//
+// ── Two places a widget can live, and only one of them at a time ─────────────
+// When a Designer tab HOLDS the asset, that tab's `UIWidgetTree` is the truth:
+// the loaded asset is only a copy the tab refreshes on every edit, and the
+// human's next Save writes the tab. So a mutation goes into the LIVE tree
+// (hooks.liveTree) and is finished with `markEdited` — an undo snapshot and the
+// dirty mark, exactly what the panel does after a human's edit. Nothing is
+// written to disk: the tab now has unsaved changes, which is the truthful state,
+// and `widget_save` is what writes them.
+//
+// When no tab holds it, there is no second copy to race with, so the tool edits
+// `UIWidgetAsset::treeJson` through the ContentManager and writes the file at
+// once. This is a deliberate DEVIATION from the McpHcHooks precedent, which
+// refuses a class asset the panel has not opened. The refusal there guards
+// against a second copy of a graph that the human's Save would overwrite; with
+// no tab open that race cannot happen, and refusing would mean a client could
+// create a widget with asset_create and then never put anything in it. The price
+// is that the disk path has no undo — the same price the asset tools already pay
+// (see McpAssetHooks) — and every mutating result says which path it took in
+// `target`, so a client never has to guess whether its change is on disk.
+//
+// What the disk path does NOT do is publish to a collaboration session: an
+// item-level widget edit is CollabDocSync's business and that adapter is bound
+// to an open tab's mirror. Inside a session, work on an open tab.
+struct McpWidgetHooks
+{
+	// Play-in-editor. Like the asset, scene and HorizonCode tools and unlike the
+	// entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// The tree behind an open Designer tab, or null when this panel does not
+	// hold the asset — which is the whole branch above. The pointer is used
+	// within the one call and never stored.
+	std::function<UIWidgetTree*(const std::string& contentRel)> liveTree;
+
+	// After a mutation of that live tree: push the panel's undo snapshot, mark
+	// the tab dirty and refresh the loaded asset so play-in-editor sees the
+	// edit — UIEditorPanel::commitEdit, in one call, so an MCP edit and a
+	// human's leave the tab in the same state.
+	std::function<void(const std::string& contentRel)> markEdited;
+
+	// Write an open tab to disk (UIEditorPanel::saveByContentPath). False = the
+	// editor could not. Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> save;
+
+	// Does that tab have edits the file does not? Reported by every tool that
+	// touched a live tree, so a client can see that its change is in the editor
+	// and not yet on disk — and that widget_save is what finishes it.
+	std::function<bool(const std::string& contentRel)> isDirty;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerWidgetTools(McpToolRegistry& registry, ContentManager& content,
+                         McpWidgetHooks hooks);
+
+// ─── What the game is played with ────────────────────────────────────────────
+// Six tools — three readers (input_actions, input_mappings, input_bindable) and
+// three writers (input_action_set, input_mapping_bind, input_mapping_unbind) —
+// for the two asset types that decide whether a key does anything at all.
+//
+// ── Why input needs tools of its own ─────────────────────────────────────────
+// Both assets are one JSON string (`InputActionAsset::json`,
+// `InputMappingContextAsset::json`), so the asset tools can make the files and
+// move them and delete them and cannot put a single key in them. And handing a
+// client the JSON to write would be worse here than anywhere else, because of
+// what the loader does with a name it does not know: `applyInputMappingContext`
+// SKIPS it. Silently. A context whose every key name is misspelled loads
+// without a complaint and produces a game that ignores the keyboard. A client
+// cannot see that, so the vocabulary is checked HERE and a bad name is a
+// refusal — `SDL_GetScancodeFromName`, `SDL_GetGamepadButtonFromString`,
+// `HE::mouseButtonFromName`, `HE::axisSourceFromName` — and `input_bindable` is
+// what a client reads the legal names out of in the first place.
+//
+// Three more traps the handlers exist to cover:
+//
+//   • THE ACTION'S VALUE TYPE DECIDES THE SHAPE OF ITS BINDINGS. A Button action
+//     takes keys, pad buttons and mouse buttons; an Axis action takes axis rows;
+//     an Axis 2D action takes them per component. Mixing them writes bindings
+//     the runtime never reads (`mapAction` vs `mapAxis` vs `mapAxis2D`), so the
+//     action is resolved first and the wrong shape is refused with the right one
+//     spelled out.
+//
+//   • A 2D ENTRY WHOSE Y LIST IS STILL EMPTY MUST STILL ENCODE AS axesX. That is
+//     not cosmetic: "axes" registers a ONE-dimensional mapping and
+//     `axis2DValue()` then answers 0,0 forever (InputMappingModel.cpp says so at
+//     length). `decodeMapping` leaves `MapEntry::valueType` at -1, so EVERY
+//     entry's value type is re-resolved from its action before anything is
+//     encoded — not just the entry a call touched, or the other entries of a
+//     context would be quietly downgraded by a save that was about something
+//     else.
+//
+//   • A MOUSE OR STICK ROW MUST NOT CARRY KEYS. The runtime reads a Key row's
+//     pairs whatever the source says, so keys left on a row that became a stick
+//     keep binding invisibly — the same rule the source combo enforces by
+//     clearing them (InputMappingModel's `applyDetected`).
+//
+// ── Why an open tab is REFUSED here rather than edited ───────────────────────
+// This is a deliberate deviation from the widget tools, and the reason is what
+// the two panels keep. `UIEditorPanel` holds an undo stack per tab, so an MCP
+// edit can land in the tab as an undoable snapshot and be indistinguishable from
+// a human's. `InputAssetPanel::PanelState` holds no undo at all — just `dirty` —
+// so there is no such thing as landing in that tab safely: writing into it would
+// be an edit the human cannot take back, and writing the file behind it would be
+// an edit the human's next Save silently reverts.
+//
+// So: with unsaved edits in an open Input Asset tab, a mutation is REFUSED with
+// `dirty` and the message says to save or close the tab. With a CLEAN tab (or no
+// tab) the file is written and the tab is told to re-read it — the same
+// `reloadFromDisk` a collaboration peer's change goes through, which is the
+// editor's own answer to "the file changed under an open tab". Nothing can be
+// lost either way, and there is no `input_save`: these tools never leave
+// something unsaved behind them.
+struct McpInputHooks
+{
+	// Play-in-editor. Like the asset, scene, HorizonCode and widget tools and
+	// unlike the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Input Asset tab have edits the file
+	// does not? That is the refusal above. Absent = there are no tabs, which is a
+	// test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset — which is how these tools report `reloadedInEditor` without needing a
+	// second "is it open" question. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerInputTools(McpToolRegistry& registry, ContentManager& content,
+                        McpInputHooks hooks);
+
+// ─── What a surface looks like ───────────────────────────────────────────────
+// Twelve tools — `material_info` (the list and the one material, the same split
+// `terrain_info` uses), `material_graph_info` (the graph's structure, and the
+// one reader that accepts a material FUNCTION), `material_set_param`,
+// `material_create` (a master from a template, its PBR inputs as parameters),
+// `material_create_instance`, and the graph editors `material_node_types`,
+// `material_add_node`, `material_set_node`, `material_remove_node`,
+// `material_connect`, `material_disconnect` and `material_set_pin_default`
+// (masters only — a function's interface nodes are the pin indices of every
+// caller's links, so a function stays read-only here until there is a caller
+// sweep; McpToolsMaterial.cpp). A material node has no per-pin default of its
+// own, so `material_set_pin_default` materialises one as a Constant node wired
+// into the pin — the same effect, the graph format untouched.
+// `material_set_node` is a patch of material_add_node's fields on an existing
+// id rather than hc_set_node's whole-object upsert: a material node is six
+// fields, its type never changes (links are stored by pin index), and the
+// Output node's p[] is where a material's blend mode, lit flag and domain live.
+//
+// ── Why a material needs tools of its own ────────────────────────────────────
+// `asset_create` already makes a material FILE, and that file is a stub: no
+// graph, no shader, no parameters. Everything that makes a material a material
+// lives in `MaterialAsset::nodeGraphJson` and in the param block generated from
+// it, and neither is reachable through a path-level tool. A client could assign
+// a material to a mesh and had no way to learn what could be tuned on it, let
+// alone tune it. `material_create` is the answer to the stub: it goes through
+// the content manager's own writer (register → regenerate → save), the same
+// road `material_set_param` takes, so there is still one theory of what the
+// file holds — `asset_create` keeps writing the bare stub, deliberately.
+//
+// ── The trap this file exists for: WHERE a parameter's value lives ───────────
+// There are two answers and picking the wrong one writes a change that is
+// reverted later, with nothing to see at the time:
+//
+//   • On a MASTER material the truth is the GRAPH. Param node values are the
+//     defaults the codegen emits, and `MaterialEditorPanel::applyToMaterial`
+//     rebuilds `shaderParamData` from them on EVERY edit, keeping nothing. So a
+//     value written only into the param block survives until the human moves a
+//     node, and then silently goes back. This tool writes BOTH: the Param
+//     node's `p[]` and the slot.
+//   • Writing only the node is the same mistake mirrored.
+//     `ContentManager::regenerateMaterialFromGraph` snapshots the param block by
+//     NAME before the codegen and restores it afterwards (values are edited
+//     without recompiling, so the baked block may legitimately differ from the
+//     node defaults) — so the slot write has to come FIRST, or the regenerate
+//     puts the old value back over the new default.
+//   • On an INSTANCE there is no graph at all. The truth is the param block plus
+//     `instanceOverriddenParams`: a slot listed there keeps the instance's value,
+//     every other one follows the parent on the next `syncMaterialInstance`. So
+//     setting a value and NOT marking the override is a value the next sync eats.
+//
+// A Param node declared inside a material FUNCTION this graph calls is a third
+// case, and the honest one: its slot can be set, but no node of this graph
+// carries it, so the next edit in the Material Editor resets it to the
+// function's default. The result says so (`graphDefaultUpdated: false`) instead
+// of leaving the client to find out.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input tools, for a different reason than theirs. That
+// panel has no undo; this one does (JSON graph snapshots). What it does not have
+// is a reachable edit path: the tab's truth is its own `State::graph`, and
+// landing an edit in it means `applyToMaterial` — regenerate, the inline
+// cross-compile check, the preview invalidation, the instance propagation, the
+// collaboration mirror — all of it behind an `AppContext` this file cannot have.
+// A hook that exposed it would be a SECOND regenerate path to keep in step with
+// the first. So: unsaved edits in an open Material Editor tab are refused with
+// `dirty`; a clean tab is told to re-read the file, which is the same
+// `reloadFromDisk` a collaboration peer's change goes through. There is no
+// `material_save` — these tools never leave something unsaved behind them.
+struct McpMaterialHooks
+{
+	// Play-in-editor. Like the asset, scene, HorizonCode, widget and input tools
+	// and unlike the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Material Editor tab have edits the
+	// file does not? That is the refusal above. Absent = there are no tabs, which
+	// is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset — which is how these tools report `reloadedInEditor` without needing a
+	// second "is it open" question. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// Does THIS project author materials at all? The Content Browser's create menu
+	// and its "Create Material Instance" row are both gated on the project's
+	// Advanced Shader Effects setting, and the same rule as everywhere else
+	// applies: MCP must not create what the menu will not offer. Absent = yes,
+	// which is what a test wants.
+	std::function<bool()> materialsAllowed;
+
+	// A file that was not there before — the same pair the asset and scene tools
+	// carry, for the same two reasons: a create IS published (nothing refers to a
+	// brand-new file yet, so there is nothing for the host to arbitrate), and the
+	// editor's own bookkeeping has to hear that something appeared.
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+	std::function<void(const std::string& absPath)> onAssetAppeared;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerMaterialTools(McpToolRegistry& registry, ContentManager& content,
+                           McpMaterialHooks hooks);
+
+// ─── Placing an authored subtree: the prefab tools ───────────────────────────
+// Four tools: `prefab_info` (the catalogue, and one prefab's contents),
+// `prefab_instantiate` (place one in the open scene), `prefab_save` (turn a
+// scene subtree into a prefab asset) and `prefab_instances` (which entities in
+// the scene came from a given prefab).
+//
+// ── Why a prefab needs tools of its own ──────────────────────────────────────
+// `entity_create` builds ONE entity out of component JSON the client writes by
+// hand. A prefab is the opposite: a whole authored subtree — a vehicle with its
+// wheels, a lamp post with its light — that somebody already got right, and the
+// only unit of reuse the editor has. Neither of the two path-level tools reaches
+// it. `asset_create` refuses the type outright (AssetStubWriter: "a prefab with
+// no PFAB payload is an empty file, not an empty prefab"), and a client could
+// not have read the payload anyway: it is CBOR, and the one thing this whole
+// interface refuses to do is hand a model base64 to edit.
+//
+// So before these, an MCP client could see that Prefabs/Lamp.hasset exists and
+// do nothing whatsoever with it, while a human placed one by dragging it into
+// the viewport.
+//
+// ── The rule: one command, and the placement rides in the BLOB ───────────────
+// `prefab_instantiate` is a single `Command::create` through the gateway — the
+// same CBOR subtree that `Command::create` already takes for duplicate, paste
+// and a peer's create, so undo, the structural publish, the play-mode refusal
+// and the lock gate all come from the one place they come from everywhere else.
+// `preserveIds` stays FALSE: the blob carries the uuids of the entities it was
+// captured from, and two placements of one prefab must be two identities.
+//
+// Where the client's position/rotation/scale/name go is the part worth reading
+// twice: they are patched INTO the root record of the blob before the command,
+// not written afterwards with a second `Command::setTransform`. A second command
+// would be a second undo entry (one Ctrl+Z would move the prefab back to its
+// authored spot and leave it in the scene) and a second publish. Only the axes
+// the client actually sent are patched — the prefab's own authored transform is
+// part of what was saved, and resetting the rest of it would silently un-author
+// the thing, which is the reason the viewport's drag-drop only overwrites the
+// position too.
+//
+// ── prefab_save does NOT go through the gateway, on purpose ──────────────────
+// It reads the scene and writes a CONTENT file. The gateway speaks scene changes
+// (its five commands are all "the world now looks like this"), and a prefab
+// asset is not one — nothing in the world changes. Same decision, same reason as
+// the asset tools (8.1 of the plan): the asset half of the editor has its own
+// wiring, and pretending it is a scene command would only make the undo stack
+// promise something it cannot deliver.
+//
+// ── The link, and what it is not ─────────────────────────────────────────────
+// Every entity placed by `prefab_instantiate` (and by the viewport's drag-drop)
+// carries a `PrefabInstanceComponent` naming the asset it came from — the "prefab"
+// key in the scene file. That is what makes `prefab_instances` answerable and
+// what makes deleting a prefab report the scenes that use it (AssetRefScan finds
+// any uuid inside a "components" block). It is NOT prefab inheritance: editing
+// the asset does not update placed instances, and there is no override tracking.
+// A placement is still a copy; it now knows where it came from.
+struct McpPrefabHooks
+{
+	// Play-in-editor. `prefab_instantiate` does not need it — the gateway refuses
+	// Origin::External while play runs — but `prefab_save` writes an asset file
+	// and has no gateway underneath, exactly like the asset and material tools.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther. The argument is the
+	// content-relative path, which is the collab key for anything under Content.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// A file that was not there before — the same pair the asset, scene and
+	// material tools carry, for the same two reasons: a create IS published
+	// (nothing refers to a brand-new file yet, so there is nothing for the host to
+	// arbitrate), and the editor's own bookkeeping has to hear that something
+	// appeared. `publishCreate` is also what claims the name at the host, which is
+	// what stops two people saving an "Arm" prefab at the same moment from
+	// overwriting each other (see OutlinerPanel's "Save as Prefab").
+	std::function<void(const std::string& contentRel, const std::string& absPath)> publishCreate;
+	std::function<void(const std::string& absPath)> onAssetAppeared;
+};
+
+// Both references are captured, so `content` and `cmds` have to outlive the
+// registry. Two of them because a prefab lives on both sides of the editor: the
+// asset is content, the placement is a scene change.
+void registerPrefabTools(McpToolRegistry& registry, ContentManager& content,
+                         EditorCommands& cmds, McpPrefabHooks hooks);
+
+// ─── A project's own types: the Struct / Enum tools ──────────────────────────
+// Five tools: `type_info` (the catalogue, and one definition in full),
+// `type_field_set` / `type_field_remove` (a struct's or a savegame template's
+// fields) and `type_enum_set` / `type_enum_remove` (an enum's entries).
+//
+// ── Why they need tools of their own ─────────────────────────────────────────
+// A Struct or Enum asset is a definition every other frontend then speaks:
+// HorizonCode pins and variables, Lua tables and Python dicts, the generated C++
+// header, savegame template fields. `asset_create` can make the file — and the
+// file it makes is an empty definition with no fields and no entries, which
+// nothing can be built on. The payload is the CHUNK_STDF / CHUNK_ENDF JSON, and
+// handing a model that to rewrite would be the base64 mistake with nicer
+// characters: `type` is an integer enum, a container field carries FOUR coupled
+// fields (isArray, container, keyType, keyTypeName) whose illegal combinations
+// the loader silently repairs, and the default value's encoding depends on the
+// field's own type.
+//
+// So these speak the vocabulary the Type Editor speaks: a field NAME, a type by
+// its editor label ("Float", "Vec3", "Enum"), a container by name, and a default
+// in the shape that type's default has.
+//
+// ── The two gates the panel has, and this must have too ──────────────────────
+//   • A CYCLE IS REFUSED. `structWouldCycle` is what the panel's Save checks
+//     before it writes, because a struct that (directly or through another one)
+//     contains itself never finishes seeding a default value. Refused here for
+//     the same reason and with the same question.
+//   • A NAME COLLISION IS REPORTED, NOT REFUSED. Two definitions with the same
+//     display name would generate colliding `horizon.enums.<Name>` and C++
+//     symbols. The panel WARNS and still saves (the file has to be nameable
+//     before it can be renamed), so the result carries `nameCollision` rather
+//     than refusing a write the human could have made.
+//
+// ── What a save does besides writing the file ────────────────────────────────
+// Two things, and skipping either is a silent divergence from the panel:
+// the definition is RE-REGISTERED in HE::TypeRegistry (or every type dropdown in
+// the editor still offers yesterday's fields), and in a C++ project the
+// generated types header is rewritten (or gameplay code compiles against a
+// struct that no longer matches the asset). The second one is `onTypesChanged`.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input and material tools: unsaved edits in an open Type
+// Editor tab are refused with `dirty`, a clean tab is told to re-read the file.
+// The panel's tab state is the truth while it is dirty, and there is no way to
+// land an edit in it that does not need an AppContext this file cannot have.
+struct McpTypeHooks
+{
+	// Play-in-editor. A definition change reaches the running session's script
+	// bootstrap and its type dropdowns, so it is refused like every other asset
+	// write while play runs.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Type Editor tab have edits the file
+	// does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// A definition changed: in a C++ project, rewrite the generated types header
+	// (HE::writeCppTypesHeader), exactly as TypeAssetPanel::saveState does. Absent
+	// = there is no project, which is a test.
+	std::function<void()> onTypesChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerTypeTools(McpToolRegistry& registry, ContentManager& content,
+                       McpTypeHooks hooks);
+
+// ─── An emitter's values: the particle tools ─────────────────────────────────
+// Three tools: `particle_info` (the catalogue, and one emitter in full),
+// `particle_set` (one Emitter Output input) and `particle_slot_set` (the mesh
+// and material the emitter draws with).
+//
+// ── Why an emitter needs tools of its own ────────────────────────────────────
+// A ParticleSystem asset is a NODE GRAPH (HE::ParticleGraph): what the emitter
+// actually emits is the result of evaluating it, and every authored value sits
+// in a Const node wired to one of the seventeen Emitter Output pins. Handing a
+// client that JSON to rewrite would be the base64 mistake again — the pin INDEX
+// is on-disk format (ParticleGraph.h: pins may only ever be appended), a link is
+// four bare integers, and `type` is a display name rather than the enum.
+//
+// ── Why the graph is addressed by PIN NAME and not by node ───────────────────
+// The handoff of the step before this one (docs/mcp-editor-integration-plan.md
+// §16.3) proposed "the values of existing nodes", modelled on
+// `material_set_param`. Taken literally that is a tool that works on no fresh
+// asset at all: `ParticleGraph::makeDefault` is ONE node — the Emitter Output —
+// with every pin unconnected and therefore at its registry default. There is
+// nothing whose value could be set.
+//
+// So a pin is the address, spelled the way the editor's own slot list spells it
+// ("Emit Rate", "Start Color"), and setting one does the smallest thing that
+// makes that value true:
+//   • pin unconnected  → a Const node is created, set and wired (Const Color for
+//     the two colour pins, because that is what the panel puts there),
+//   • pin driven by a Const node that feeds ONLY this pin → its value is changed
+//     in place,
+//   • pin driven by anything else — Random Range, Add, Lerp, or a Const shared
+//     with a second pin → REFUSED, naming the node. That is the boundary §16.3
+//     drew and it is the honest one: rewiring a graph is a different tool from
+//     setting a value, and silently detaching an author's math node to force a
+//     constant in would be an edit nobody asked for.
+//
+// ── Why an open tab is REFUSED rather than edited ────────────────────────────
+// The same answer as the input, material and type tools: unsaved edits in an
+// open Particle Graph tab are refused with `dirty`, a clean tab is told to
+// re-read the file. There is no `particle_save` — these tools never leave
+// something unsaved behind them.
+struct McpParticleHooks
+{
+	// Play-in-editor. Like the asset, scene, material and type tools and unlike
+	// the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Particle Graph tab have edits the
+	// file does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read the file. TRUE when a tab was actually holding the
+	// asset. Absent = no tabs.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// The graph on disk changed: every LIVE ParticleSystemComponent already using
+	// this asset has to re-resolve, or the edit only shows up the next time its
+	// own particleAssetId changes. This is the second half of
+	// ParticleGraphEditorPanel::saveToDisk (ParticleSystem::markConfigDirty) and
+	// leaving it out is a silent divergence from the panel's own Save. Absent =
+	// there is no world, which is a test.
+	std::function<void(const std::string& contentRel)> onGraphChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerParticleTools(McpToolRegistry& registry, ContentManager& content,
+                           McpParticleHooks hooks);
+
+// ─── The animation assets: the animator and blend-space tools ────────────────
+// Eleven tools. The state machine: `animator_info` (the catalogue, and one
+// machine in full), `animator_state_set` / `animator_state_remove`,
+// `animator_transition_set` / `animator_transition_remove`, `animator_param_set`
+// / `animator_param_remove`. The blend space: `blendspace_info`,
+// `blendspace_set` and `blendspace_sample_set` / `blendspace_sample_remove`.
+//
+// ── The question this family had to answer first ─────────────────────────────
+// Every earlier family had one (§16.2 of the plan doc names them): for materials
+// it was "where does a value really live", for input "the loader stays silent",
+// for types "the registry is the truth, not the file". For a state machine it is
+// WHAT HAPPENS TO A TRANSITION WHEN THE PARAMETER IT NAMES GOES AWAY — a
+// transition names its parameter by name, and its two endpoint STATES by name
+// too, and nothing in the format ties either back.
+//
+// The answer, read out of AnimationStateMachineSystem::evalTransition: a
+// transition whose parameter is not in the live map returns false, every frame,
+// forever. Not an error, not a log line — a transition that silently never
+// fires. So:
+//   • `animator_param_remove` REFUSES while any transition names the parameter,
+//     and lists them. `force` takes it out anyway, because a sync graph or a
+//     script may well be writing that parameter at runtime without it ever being
+//     declared as a default — the map is open. What is refused is doing it by
+//     accident.
+//   • `animator_state_set` can RENAME, and does the fix-up the panel does by
+//     hand (AnimatorStateMachineEditorPanel's name field): every transition
+//     endpoint and `startState` that named the old name is rewritten. A rename
+//     that skipped it would leave dangling endpoints, which the system skips as
+//     silently as the missing parameter.
+//   • `animator_state_remove` drops the transitions that touch the state and
+//     clears `startState` if it pointed there — the same cascade the panel's
+//     node deletion performs.
+//
+// ── Why a transition is addressed by a TRIPLE ────────────────────────────────
+// A transition has no id (AnimatorStateMachineGraph.h says so, and says why it
+// is not fixed yet). Collaboration keys one by hashing from/to/param, so these
+// tools address one the same way: the (from, to, param) triple. A matching
+// triple is updated in place, anything else is appended — which is also what
+// makes two transitions between the same pair of states on DIFFERENT parameters
+// addressable at all.
+//
+// ── Why the blend space is in this family ────────────────────────────────────
+// Because a state points at one instead of a clip (`blendSpaceId` WINS over
+// `clipId`), so authoring the machine without being able to author the space it
+// blends is half a tool. Samples have no id and two of them may name the same
+// clip, so an INDEX is the only honest address; `blendspace_info` reports them.
+struct McpAnimatorHooks
+{
+	std::function<bool()>                             isPlaying;
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// The two tab questions, asked of the panel that owns the addressed asset —
+	// AnimatorStateMachineEditorPanel for a state machine, BlendSpacePanel for a
+	// blend space. Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// A state machine on disk changed: every LIVE AnimatorStateMachineComponent
+	// using it has to re-resolve, exactly as AnimatorStateMachineEditorPanel's
+	// Save does (AnimationStateMachineSystem::markConfigDirty). Deliberately NOT
+	// called for a blend space: BlendSpacePanel's own Save does not do it either,
+	// and a tool that invalidated more than the panel would be a second, quietly
+	// different save path. Absent = there is no world, which is a test.
+	std::function<void(const std::string& contentRel)> onGraphChanged;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerAnimatorTools(McpToolRegistry& registry, ContentManager& content,
+                           McpAnimatorHooks hooks);
+
+// ─── What a clip announces: the animation-clip tools ─────────────────────────
+// Four tools: `clip_info` (the catalogue, and one clip's authored half),
+// `clip_notify_set` / `clip_notify_remove` (the events on its timeline) and
+// `clip_root_motion_set` (its per-clip root-motion switch).
+//
+// ── Why an IMPORTED asset has tools at all ───────────────────────────────────
+// The handoff that asked for this family (docs/mcp-editor-integration-plan.md
+// §16.2) guessed that an AnimationClip would end at "not editable, it is an
+// import" — `AssetStubWriter` refuses to stub one, like a mesh or a texture, and
+// nothing can create one. That guess is wrong, and the evidence is a panel: the
+// Skeletal Mesh Editor authors a clip's NOTIFY TIMELINE and its root-motion
+// switch, saves them with `ContentManager::saveAsset`, and both live in a chunk
+// of their own (`CHUNK_ANOT`). So the authored half is real, it is small, and it
+// is exactly as editable from outside as it is from the tab.
+//
+// The KEYFRAMES stay out. Those are `CHUNK_ANIM` and they are the import: a tool
+// that wrote a channel would be re-authoring animation a DCC tool owns, and the
+// next re-import would throw it away without telling anyone.
+//
+// ── Why an INDEX addresses a notify ──────────────────────────────────────────
+// A notify is a name, a time and a duration, and nothing else — no id. Two of
+// them may legitimately carry the same name (two footsteps), so the position in
+// the list is the only address there is; `SkeletalMeshEditorPanel` reaches for
+// the same one and says so. That makes every answer from these tools list the
+// notifies WITH their current indices, because a removal shifts the rest.
+//
+// ── Why there is no reload hook here ─────────────────────────────────────────
+// The other families tell a clean tab to re-read the file after a write. A clip
+// cannot need that: the loaded clip IS the tab's edit buffer
+// (`ContentManager::getAnimationClipMutable`), and the notify lane reads that
+// list every frame, so the edit is on screen on the next one. The same is true
+// of the running simulation — `AnimationNotify.cpp` walks the asset's own vector,
+// so there is no resolved copy to invalidate either.
+struct McpClipHooks
+{
+	// Play-in-editor. Like the asset, scene, material, type and particle tools
+	// and unlike the entity ones, there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same question, same shape and same
+	// optimistic asset policy as McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does the Skeletal Mesh Editor hold unsaved notify or root-motion edits for
+	// this clip? Asked with the CLIP's content-relative path, not a tab's: the tab
+	// shows a mesh, the edits belong to the clip scrubbed in it, and
+	// SkeletalMeshEditorPanel::isDirty is keyed that way already. Absent = there
+	// are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerClipTools(McpToolRegistry& registry, ContentManager& content,
+                       McpClipHooks hooks);
+
+// ─── A cutscene: the sequence tools ──────────────────────────────────────────
+// Two tools: `sequence_info` (the catalogue, and one sequence in full) and
+// `sequence_write` (the whole sequence, replaced).
+//
+// ── Why the WHOLE document and not one tool per key ─────────────────────────
+// Unlike a particle graph, a sequence has no on-disk index a client could break:
+// CHUNK_SEQU is already JSON with its kinds spelled out (SequenceJson.h says it
+// is "the form the MCP tools read and write"). What a cutscene edit usually is —
+// "put a cut at 3 s to camera B and move the door" — touches three tracks at
+// once, and a family of per-key tools would make that three round trips with a
+// half-edited sequence on disk in between. So the unit is the document: read
+// it, change it, write it back.
+//
+// ── Why the document is TRANSLATED on the way in and out ────────────────────
+// The chunk spells every reference as {"hi":…,"lo":…}, which no client can
+// produce. The tools speak the vocabulary the other families already use: an
+// actor is the 32-hex-digit entity uuid entity_list reports, a clip or a sound
+// is its content-relative path, a property target and a blend curve are names.
+// What `sequence_info` reports is exactly what `sequence_write` takes, so a read
+// followed by an unchanged write is a no-op.
+//
+// ── Why anything doubtful is REFUSED rather than dropped ────────────────────
+// The loader drops a bad entry and keeps going (a file must still play). A tool
+// write is the opposite case: the client is right there and can fix it, and a
+// write that silently lost the key it was meant to add would report success.
+// So a document the loader would shorten, a slot two bindings share, a track
+// naming a slot no binding has, a second camera-cut track (the runtime reads
+// only the first), keys out of order, or a length shorter than the content is
+// refused with the reason, and nothing is written.
+//
+// ── The open tab ────────────────────────────────────────────────────────────
+// Same decision as material, particle and animator: unsaved edits in an open
+// Cinematic tab are refused with `dirty`, a clean tab is told to re-read.
+struct McpSequenceHooks
+{
+	// Play-in-editor. A sequence edited under a running player would change a
+	// cutscene mid-shot; there is no gateway underneath to refuse for us.
+	std::function<bool()> isPlaying;
+
+	// Does a PEER hold this asset right now? Same shape and policy as
+	// McpHcHooks::lockedByOther.
+	std::function<bool(const std::string& contentRel)> lockedByOther;
+
+	// Does an open (or closed-but-remembered) Cinematic tab have edits the file
+	// does not? Absent = there are no tabs, which is a test.
+	std::function<bool(const std::string& contentRel)> isDirty;
+
+	// Tell that tab to re-read. TRUE when a tab was holding the asset.
+	std::function<bool(const std::string& contentRel)> reloadFromDisk;
+
+	// Who a binding's entity uuid is in the OPEN scene: its name, and whether it
+	// carries a CameraComponent (a cut to anything else shows nothing). False =
+	// no entity with that uuid. Absent = there is no scene, which is a test, and
+	// `sequence_info` then says it could not look rather than "missing".
+	std::function<bool(const HE::UUID& entityId, std::string& name, bool& isCamera)> findActor;
+};
+
+// The reference is captured, so `content` has to outlive the registry.
+void registerSequenceTools(McpToolRegistry& registry, ContentManager& content,
+                           McpSequenceHooks hooks);
+
+// ─── Turning the project into something that runs: the build tools ───────────
+// Three tools: `project_package` (Build ▸ Export Project — pack the game),
+// `project_build` (Build ▸ Build and Reload Game Logic — compile the native
+// module and swap it into the running preview) and `project_build_status` (what
+// the Build window shows: the steps, the log and the verdict).
+//
+// ── Why a client needs these ─────────────────────────────────────────────────
+// Every one of the tool families above ends at a file in the project. None of
+// them produces something a person can start. A client could author a scene, a
+// material, a state machine and a UI and had no way to find out whether the
+// thing even builds — the first moment a HorizonCode graph that cannot be
+// translated is reported is the export, and the export was out of reach.
+//
+// ── Both of these are ASYNCHRONOUS, and that is the whole design ─────────────
+// The export runs on a worker (ExportDialogPanel) and the game-logic compile on
+// another (GameLogicBuildPanel); both report into ONE window
+// (BuildProgressDialog), whose model is the only record of what happened. So:
+//
+//   • `project_package` and `project_build` return as soon as the run STARTED.
+//     They report `started: true` and nothing about success, because at that
+//     moment nothing about success is known. A tool that blocked here would
+//     hold the editor's frame loop — these handlers run on the UI thread,
+//     between the collaboration pump and the render, and the reload half of a
+//     game-logic build happens in a LATER frame by design.
+//   • `project_build_status` is where the answer arrives: `running`, the steps
+//     with their state, the current activity, and once `finished` is true the
+//     `success` flag, the message, the executable that was produced and the
+//     HorizonCode classes that had to ship interpreted. Polling it is the
+//     intended use.
+//
+// ── One window, so one run ───────────────────────────────────────────────────
+// The window is shared and `Kind` is what keeps an export and a game-logic build
+// from taking each other's buttons. Neither tool starts anything while the other
+// kind owns it: both refuse with `busy` and say which kind is holding it. That
+// is the same refusal GameLogicBuildPanel::start already gives a human.
+//
+// ── What an override does NOT do ─────────────────────────────────────────────
+// `project_package` takes the export profile's fields as optional arguments, and
+// they apply TO THIS RUN ONLY: the tool copies the stored ExportProfile, patches
+// the copy and hands the copy over. Nothing is written back and the project is
+// not saved. Persisting an override would mean a client's one-off "just build me
+// a Linux copy" silently became what the human's next Export Project does — and
+// the profile write-back is a thing the export dialog does on its Save button,
+// with the human looking at it.
+struct McpBuildStep
+{
+	std::string name;
+	std::string state;          // "pending", "running", "done", "failed"
+	float       progress = 0.0f;
+	bool        indeterminate = true;   // running, length unknown
+	std::string detail;         // "128 / 340", "62 %"
+};
+
+struct McpBuildLogLine
+{
+	int         step     = 0;
+	int         severity = 0;   // 0 info, 1 warning, 2 error
+	std::string text;
+};
+
+// One reading of the Build window's model. Everything in it is a copy taken
+// under the window's own lock — the worker writes into that model from another
+// thread, so a tool may not hold a reference into it.
+struct McpBuildStatus
+{
+	bool        hasRun  = false;   // false = nothing has ever been built this session
+	bool        running = false;
+	std::string kind;              // "export" | "gamelogic"
+
+	std::vector<McpBuildStep> steps;
+	int         currentStep = -1;
+	std::string activity;
+
+	bool        finished = false;
+	bool        success  = false;
+	std::string message;
+
+	// What the finished export produced, and whether this machine could run it
+	// (false for a cross-platform target). Empty when no runtime was shipped.
+	std::string executable;
+	bool        runnableHere = false;
+
+	// The HorizonCode classes this run ships INTERPRETED instead of compiled,
+	// with the reason each one could not be translated. This is the one thing a
+	// SUCCESSFUL export is quietly worth less for, so it travels with the
+	// verdict rather than being left in the log.
+	std::string                                          interpretedHeadline;
+	std::vector<std::pair<std::string, std::string>>     interpretedClasses;  // label, reason
+
+	std::vector<McpBuildLogLine> log;
+};
+
+struct McpBuildHooks
+{
+	// The open project, or null. Everything here refuses with `no_project`
+	// without one, which is a real state: the editor starts without one.
+	std::function<ProjectData*()> project;
+
+	// Start an export from THIS profile — a value, not a name, because the
+	// overrides a client sent were applied to a copy (see above). False +
+	// `outError` when the editor could not start it.
+	std::function<bool(const ExportProfile& profile, std::string& outError)> startExport;
+
+	// Build ▸ Build and Reload Game Logic. `available` is the same predicate the
+	// menu row greys out on: a C++ project with a Source/CMakeLists.txt. Absent
+	// `available` reads as "no", which is what a test without a project wants.
+	std::function<bool()>                 gameLogicAvailable;
+	std::function<bool(std::string& err)> startGameLogicBuild;
+
+	// The shared Build window. `buildRunning` is asked BEFORE either start, so
+	// the refusal names the kind that is holding it (out of `buildStatus`).
+	std::function<bool()>           buildRunning;
+	std::function<McpBuildStatus()> buildStatus;
+};
+
+void registerBuildTools(McpToolRegistry& registry, McpBuildHooks hooks);
+
+// ─── The knobs: the settings tools ───────────────────────────────────────────
+// Two tools, `settings_get` and `settings_set`, over two scopes: `project` (the
+// .heproj manifest — what the project IS and what it allows) and `editor` (this
+// editor's own preferences).
+//
+// ── Why both scopes are one pair of tools ────────────────────────────────────
+// Because that is how the editor presents them: there is no project settings
+// surface, so the project pages live in Preferences next to the editor ones
+// (EditorSettingsPanel::Page — "they live in Preferences because there is no
+// project settings surface yet"). A client that had to know which of two tools a
+// setting belonged to would have to know something the editor itself does not
+// bother to make visible.
+//
+// ── Why the editor scope needs a table and the project scope does not ────────
+// A project setting is a named field of ProjectData, and the list of them that
+// may be written is short and decided here. The editor's are sixty fields drawn
+// by a panel that cannot be compiled without a window, so they go through
+// EditorSettingsCatalog.h — the same list, written as data, with the ranges the
+// widgets enforce by construction.
+//
+// ── Three refusals worth reading before using these ──────────────────────────
+//   • The `Remote Control` category is NEVER writable. It is the page on which
+//     this bridge is switched on and its port chosen; a tool that can turn its
+//     own listener off is useless in the best case and inexplicable in the
+//     worst. Readable, so a client can see the state it is living in.
+//   • `name`, `path`, `id`, `scriptLanguage` and `appProject` are readable and
+//     not writable. Those five say what the project IS — the scripting language
+//     gates what may be created at all and the app flag decides whether there is
+//     a world — and changing one under a project full of assets is not a setting
+//     change, it is a conversion nobody wrote.
+//   • There is no play-mode gate, deliberately. A human can open Preferences
+//     while a preview runs, and a gate MCP has but the UI does not would be a
+//     behaviour change dressed as plumbing. Where a value only reaches a RUNNING
+//     simulation through a callback (the collision matrix), the callback is
+//     called — see applyCollisionLayers.
+//
+// ── Persistence is reported, never assumed ───────────────────────────────────
+// A project write is followed by ProjectManager::saveProject; the result says
+// `persisted`. The editor's config is a different story: the editor writes
+// config.json in OnShutdown and nowhere else, so unless the caller supplies
+// `persistEditorConfig` the honest answer is `persisted: false` with the reason
+// — "in effect now, written to disk when the editor closes". Claiming otherwise
+// would be the kind of lie that is only found out after a crash.
+struct McpSettingsHooks
+{
+	// ── project scope ───────────────────────────────────────────────────────
+	std::function<ProjectData*()> project;
+	// ProjectManager::saveProject(proj.path). False = the manifest could not be
+	// written, which the result reports rather than swallowing.
+	std::function<bool()> saveProject;
+	// Push the project's collision matrix into the RUNNING simulation, exactly
+	// as the Collision Layers page does after its own save. A no-op outside play
+	// mode, which is correct: the next play start reads the matrix afresh.
+	std::function<void()> applyCollisionLayers;
+
+	// ── editor scope ────────────────────────────────────────────────────────
+	// The live config. Null = no editor (a test that only exercises the project
+	// scope), and the editor scope then reports itself unavailable.
+	std::function<EditorConfig*()> editorConfig;
+	// Write config.json NOW. Absent = it is written on shutdown, and the result
+	// says so instead of claiming a file was touched.
+	std::function<bool()> persistEditorConfig;
+
+	// The rows of the catalogue that are not fields of EditorConfig at all
+	// (SettingStorage::External): VSync lives on the Application, the backend
+	// name on the AppContext. Absent hooks make those rows read as unavailable
+	// rather than as false.
+	std::function<bool(const std::string& key, nlohmann::json& out)> readExternalSetting;
+	std::function<bool(const std::string& key, const nlohmann::json& in,
+	                   std::string& outError)>                       writeExternalSetting;
+
+	// A field that IS in EditorConfig and additionally has to travel somewhere:
+	// the catalogue's `apply` name ("maxfps") and the config as it now stands.
+	// Absent = the field is set and nothing else happens, which is right for a
+	// value the renderer re-reads every frame and wrong for the two that do not.
+	std::function<void(const std::string& apply, const EditorConfig& cfg)> applySetting;
+};
+
+void registerSettingsTools(McpToolRegistry& registry, McpSettingsHooks hooks);
+
+// ─── A picture of the scene: the screenshot tool ─────────────────────────────
+// `scene_screenshot`: render the open scene ONCE from a camera the client
+// names — position, a point to look at, a field of view — at a size it names,
+// and hand the picture back. Reading, never mutating: the world is not touched,
+// the editor's own camera is not moved, and the live viewport shows the same
+// thing before and after (that last part is the renderer's contract,
+// IRenderer::RenderSceneImage, not this file's).
+//
+// Two ways out for the picture, chosen by `output`:
+//   • `inline` — a PNG in an MCP image content block. The model sees the image.
+//     Bounded by the shim's 4 MiB frame (scripts/he_mcp.py), so a PNG over
+//     kInlineMaxPngBytes is refused with `too_large` rather than sent into a
+//     wall the client cannot see through.
+//   • `file` — a PNG in the editor's per-user data directory, absolute path
+//     returned. Never a client-chosen path: McpToolRegistry.h promises no file
+//     access, and "write a PNG where I say" is file access with a picture in it.
+//
+// Every camera argument is optional. The first call that says anything about
+// the camera creates the CLIENT'S OWN camera (McpClientCameras, keyed on the
+// connection); from then on every call starts from it, absolute arguments
+// (`position`, `look_at`, `yaw`, `pitch`, `fov`) replace parts of it, relative
+// ones (`move`, `turn`) nudge it, and a call that says nothing renders it as it
+// stands. A client that has never described a camera and says nothing gets
+// the editor's live viewport view, icons and all — the fallback of the first
+// step, kept as a hook (`liveCamera`) rather than a constant. `reset` drops the
+// client's camera and returns it to that state; the bridge does the same when
+// the connection goes.
+struct McpScreenshotHooks
+{
+	std::function<bool()>        hasWorld;
+	std::function<std::string()> backendName;   // "Metal", "OpenGL", … for the refusal text
+
+	// The editor's live camera, as the renderer sees it. Empty hook or an
+	// inactive override = "no camera to fall back on" → the client has to give
+	// `position`.
+	std::function<EditorCameraOverride()> liveCamera;
+
+	// The per-client camera table. The editor owns it (the viewport will draw
+	// it); a test may hand its own in to look at it, and absent, the tool keeps
+	// a private one. Must outlive the registry.
+	McpClientCameras* cameras = nullptr;
+
+	// IRenderer::RenderSceneImage, or a stand-in. False = the backend cannot.
+	std::function<bool(const EditorCameraOverride& camera, std::uint32_t width,
+	                   std::uint32_t height, std::vector<std::uint8_t>& rgba)> renderImage;
+
+	// Where `output: "file"` writes. Absolute; created on demand. Empty = file
+	// output refused with `no_directory`.
+	std::function<std::string()> screenshotDir;
+};
+
+// Limits that are the tool's, not the renderer's. Pixels: 3840×2160 is the
+// biggest still anyone asks a viewport for, and the frame's intermediate targets
+// are resized to the request. Bytes: below the shim's 4 MiB frame with the
+// base64 growth (4/3) and the JSON around it already paid for.
+constexpr std::uint32_t kScreenshotDefaultWidth  = 1280;
+constexpr std::uint32_t kScreenshotDefaultHeight = 720;
+constexpr std::uint32_t kScreenshotMaxSide       = 4096;
+constexpr std::uint64_t kScreenshotMaxPixels     = 3840ull * 2160ull;
+constexpr std::size_t   kInlineMaxPngBytes       = 2560u * 1024u;
+
+void registerScreenshotTools(McpToolRegistry& registry, McpScreenshotHooks hooks);
+
+// ─── The collaboration session ───────────────────────────────────────────────
+// `collab_status` reads what the Collaboration panel shows: idle, hosting,
+// connecting, joined or failed, who is in the session, the host's address. It is
+// always there, because a client that edits the scene has to be able to tell
+// whether its edits go to other people too — scene_info's `inSession` says THAT
+// they do, this says to whom.
+//
+// `collab_host`, `collab_join` and `collab_leave` press the panel's buttons, and
+// they are NOT registered unless `controlAllowed` is set — which the editor only
+// does for HE_MCP_COLLAB_CONTROL=1. Hosting is the one thing a client could do
+// that reaches past this machine: it opens a listening port, asks the router to
+// forward it and publishes an entry on the public directory (unless
+// HE_COLLAB_OFFLINE), and it puts the whole scene in front of anybody holding
+// the join code the tool hands back. That is the human's decision to make, so a
+// client only gets it when a human started the editor saying so. What the flag
+// exists for today is the two-editor run (scripts/he_collab_two_editors.py):
+// two real editor processes, one hosting and one joining, driven from outside.
+//
+// All three go through the same CollabController calls the panel's buttons make
+// (startHosting / joinSession / leave), so the run tests the editor's path and
+// not a copy of it. Joining is asynchronous exactly as it is for a human: the
+// tool answers `connecting` and the client watches `collab_status` for
+// `joined`.
+struct McpCollabHooks
+{
+	// A project is open. Hosting without one would publish an empty world under
+	// an empty project id, and every joiner would be refused as "a different
+	// project" — or worse, accepted by another editor with nothing open either.
+	std::function<bool()> projectOpen;
+	// The name the panel would use: the stored identity's. A `name` argument
+	// overrides it for this session only, without writing the identity.
+	std::function<std::string()> displayName;
+	bool controlAllowed = false;
+};
+
+void registerCollabTools(McpToolRegistry& registry, ::CollabController& collab,
+                         McpCollabHooks hooks);
+
+// ─── The task board ──────────────────────────────────────────────────────────
+// `task_list` reads the project's to-do list (TaskBoard.h) as the Task Board
+// panel shows it, `task_notices` what the team told this editor (the panel's
+// From the Team list). `task_create`, `task_update` (status, comment) and
+// `task_assign` change it.
+//
+// Every change goes through `edit`, which in the editor is TaskBoardPanel::edit:
+// the board has exactly one copy and one writer of Config/TaskBoard.json per
+// editor, and that writer is also what hands the change to the team bridge.
+// A second TaskBoard saved from here would carry a different disk baseline
+// and refuse or overwrite the panel's saves. `edit` may run the function twice
+// (a save refused by a pull reloads and retries), so the tools address tasks
+// by id inside it, never by pointer.
+//
+// `task_assign` is the panel's Assigned To field: only while a team link is
+// signed in (`team()->connected()`), and only to members on its roster. With
+// no team the board is local and the tool refuses with `no_team`, as the panel
+// offers no field. Who hears about a change is the bridge's decision
+// (taskNoticeRecipients), not the tool's.
+struct McpTaskBoardHooks
+{
+	// The open project's board, or null with no project open.
+	std::function<HE::TaskBoard*()> board;
+	// Apply and save; false when nothing changed or the save was refused.
+	std::function<bool(const std::function<bool(HE::TaskBoard&)>& fn)> edit;
+	// Why the last save failed (TaskBoardPanel::lastError), for the refusal.
+	std::function<std::string()> lastError;
+	// The name edits are recorded under: the team member name while signed in.
+	std::function<std::string()> author;
+	// The team bridge, or null: the board is local.
+	std::function<HE::TaskBoardTeam*()> team;
+};
+
+void registerTaskBoardTools(McpToolRegistry& registry, McpTaskBoardHooks hooks);
+
+// ─── The Planner ─────────────────────────────────────────────────────────────
+// Databases, rows and pages of the open project (Planner.h) for a script or a
+// model: `planner_overview` lists them, `planner_read_database` reads rows (a
+// view's filters and sorts apply), `planner_add_row` / `planner_update_row` /
+// `planner_delete_row` change them, `planner_create_database` and
+// `planner_add_property` shape a database, `planner_read_page` /
+// `planner_write_page` / `planner_delete_page` read and write pages as Markdown
+// (PlannerMarkdown.h).
+//
+// Every change goes through the editor's one HE::Planner::Workspace, the same
+// writer the Planner tab uses — so a change shows in the open tab at once, the
+// files are written the way the tab writes them, and the database "Tasks" (a
+// view of the Task Board, PlannerTasks.h) is edited through the board's own
+// writer, with its history and the team's notices. A second Workspace over the
+// same files would refuse or overwrite the tab's saves.
+struct McpPlannerHooks
+{
+	// The open project's workspace, or null with no project open.
+	std::function<HE::Planner::Workspace*()> workspace;
+	// The name new rows and pages are recorded under.
+	std::function<std::string()> author;
+};
+
+void registerPlannerTools(McpToolRegistry& registry, McpPlannerHooks hooks);
+
+// ─── The team server ─────────────────────────────────────────────────────────
+// `team_status` reads what the Team panel shows (sign-in state, members with
+// presence, announced sessions) and is always there. The rest — sign in/out,
+// add a member, host, invite, join, decline, open — press the Team page's and
+// panel's buttons through the same TeamController calls, and are registered
+// only under `controlAllowed` (HE_MCP_COLLAB_CONTROL=1), for the same reason as
+// collab_host: they reach a server past this machine and put the open scene
+// into a session. What they exist for is scripts/he_team_two_editors.py: two
+// editor processes signed in as different members of one team.
+void registerTeamTools(McpToolRegistry& registry, ::TeamController& team,
+                       McpCollabHooks hooks);
+
+// ─── Several tool calls in one request ───────────────────────────────────────
+// `batch`: a list of {tool, args} pairs, each dispatched through this registry
+// exactly as a single tools/call would be. Partial success is the contract —
+// by default every element runs and reports its own outcome, `stopOnError`
+// stops at the first failure and marks the rest skipped. Never atomic, never
+// nested. The full semantics are in McpToolsBatch.cpp; register it LAST, after
+// every family it may dispatch to, so tools/list shows it at the end where the
+// meta-tool belongs. The reference is captured: the registry has to outlive
+// its own tools, which it does — the tools live in it.
+void registerBatchTool(McpToolRegistry& registry);
+
+} // namespace HE::Ed

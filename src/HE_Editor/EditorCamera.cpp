@@ -2,6 +2,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace
 {
@@ -9,6 +10,12 @@ namespace
 	constexpr float kLookSpeed  = 0.005f;    // radians per pixel
 	constexpr float kPitchLimit = 1.55334f;  // ~89° in radians
 	constexpr float kMinPivot   = 0.05f;
+
+	float perfEnvFloat(const char* name)
+	{
+		const char* v = std::getenv(name);
+		return (v && *v) ? std::strtof(v, nullptr) : 0.0f;
+	}
 }
 
 glm::vec3 EditorCamera::forward() const
@@ -184,6 +191,14 @@ void EditorCamera::update(const Input& in)
 		m_pivotDistance  = std::max(kMinPivot, m_pivotDistance - move);
 	}
 
+	// ── Fly speed: the wheel while fly-look is held ──────────────────────────
+	// Up = faster, down = slower, exactly the "scroll to change speed" of every
+	// fly camera. Held RMB means the wheel is not a dolly (the caller routes it here
+	// instead), and the change is a multiplier so it feels the same at any speed.
+	if (in.look && in.speedWheel != 0.0f)
+		m_flySpeed = glm::clamp(m_flySpeed * std::pow(kFlySpeedPerTick, in.speedWheel),
+		                        kMinFlySpeed, kMaxFlySpeed);
+
 	// ── Fly movement (only while fly-look is held) ───────────────────────────
 	if (in.look &&
 	    (in.moveAxis.x != 0.0f || in.moveAxis.y != 0.0f || in.moveAxis.z != 0.0f))
@@ -192,6 +207,24 @@ void EditorCamera::update(const Input& in)
 		m_position += (right()   * in.moveAxis.x +
 		               up()      * in.moveAxis.y +
 		               forward() * in.moveAxis.z) * speed;
+	}
+
+	// ── HE_PERF_CAM_SPIN / HE_PERF_CAM_FLY: scripted motion (perf audit) ─────
+	// A scripted capture has nobody at the mouse, so its camera never moves and
+	// every "nothing changed" cache stays warm. SPIN turns the heading by N
+	// radians per update, FLY moves N units per update along it; both reverse
+	// every 240 updates so the view stays near the pose --cam pinned. Read once,
+	// off (0) unless set; the gestures above are untouched.
+	{
+		static const float kSpin = perfEnvFloat("HE_PERF_CAM_SPIN");
+		static const float kFly  = perfEnvFloat("HE_PERF_CAM_FLY");
+		static unsigned    s_updates = 0;
+		if (kSpin != 0.0f || kFly != 0.0f)
+		{
+			const float dir = ((s_updates++ / 240u) & 1u) ? -1.0f : 1.0f;
+			m_yaw      += kSpin * dir;
+			m_position += forward() * (kFly * dir);
+		}
 	}
 }
 

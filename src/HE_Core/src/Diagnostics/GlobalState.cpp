@@ -1,6 +1,7 @@
 #include "Diagnostics/GlobalState.h"
 #include "Diagnostics/Log.h"
 #include "Diagnostics/Logger.h"
+#include "Platform/BuildProfile.h"   // HE_FEATURE_ENV_OVERRIDES / _TEST_HOOKS
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -77,10 +78,14 @@ void GlobalState::setLogFile(const std::string& exePath)
 	// the "logVerbosity" config entry, and the HE_LOG environment variable, so a
 	// user can crank up one subsystem for a single run without editing anything:
 	//     HE_LOG=Physics=Trace,RHI=Debug ./HorizonEngine
+	// Dev builds only (HE_FEATURE_ENV_OVERRIDES); a release game logs what its
+	// config says.
+#if HE_FEATURE_ENV_OVERRIDES
 	if (const char* env = std::getenv("HE_LOG"))
 		HE::Log::configureFromString(env);
 	if (std::getenv("HE_LOG_NO_CONSOLE"))
 		HE::Log::setConsoleEnabled(false);
+#endif
 
 	// After the sinks are configured, so this lands in the file it is describing.
 	if (m_diagnosticsDir.empty())
@@ -170,6 +175,8 @@ std::filesystem::path GlobalState::configFilePath()
 	// The developer override outranks even a shipped build's pin: pointing a
 	// packaged game at a settings file by hand is what it is for. Resolved once
 	// like the rest — only the pin below has to stay answerable at any time.
+	// Dev builds only (HE_FEATURE_ENV_OVERRIDES): a release game's pin is final.
+#if HE_FEATURE_ENV_OVERRIDES
 	static const fs::path forced = [] {
 		const char* base = std::getenv("HE_CONFIG_DIR");
 		if (!base) return fs::path{};
@@ -179,6 +186,7 @@ std::filesystem::path GlobalState::configFilePath()
 		return p;
 	}();
 	if (!forced.empty()) return forced;
+#endif
 
 	if (!g_shippedConfigDir.empty())
 		return g_shippedConfigDir / "config.json";
@@ -196,12 +204,15 @@ std::filesystem::path GlobalState::configFilePath()
 		//    defaults. Ranked BELOW HE_CONFIG_DIR and the shipped pin on purpose:
 		//    tests that pin a directory of their own must still get it, and a
 		//    test that unpins falls back here rather than to the real file.
+		//    A test hook, so dev builds only.
+#if HE_FEATURE_TEST_HOOKS
 		if (const char* fallback = std::getenv("HE_CONFIG_FALLBACK_DIR"); fallback && *fallback)
 		{
 			fs::path p = fs::path(fallback) / "config.json";
 			fs::create_directories(p.parent_path(), ec);
 			return p;
 		}
+#endif
 
 		// 1. A config.json in the working directory wins. That keeps a portable
 		//    checkout and every existing development setup behaving exactly as
@@ -293,7 +304,7 @@ void GlobalState::readConfig()
 			if (!entry.is_string()) continue;
 			std::string p = entry.get<std::string>();
 			// Guard against corrupted entries (e.g. a settings string stored here by mistake)
-			if (p.size() >= 7 && p.substr(p.size() - 7) == ".heproj")
+			if (p.ends_with(".heproj"))
 				m_engineStatus.knownProjects.push_back(std::move(p));
 		}
 	}
@@ -313,8 +324,10 @@ void GlobalState::readConfig()
 	// the environment always wins over whatever the config happens to hold.
 	if (const std::string spec = getCustomConfigString("logVerbosity"); !spec.empty())
 		HE::Log::configureFromString(spec.c_str());
+#if HE_FEATURE_ENV_OVERRIDES
 	if (const char* env = std::getenv("HE_LOG"))
 		HE::Log::configureFromString(env);
+#endif
 
 	HE_LOG_INFO(Config, "Config loaded: RHI=%d, lastProject='%s', %zu known project(s), %zu custom entrie(s)",
 	            static_cast<int>(m_engineStatus.selectedRHI),
@@ -389,7 +402,7 @@ void GlobalState::addKnownProject(const std::string& path)
 {
 	// Reject anything that isn't a .heproj path (guards against settings strings
 	// or other values being accidentally passed here).
-	if (path.size() < 7 || path.substr(path.size() - 7) != ".heproj")
+	if (!path.ends_with(".heproj"))
 		return;
 	auto& kp = m_engineStatus.knownProjects;
 	// Remove existing occurrence to avoid duplicates
@@ -579,7 +592,7 @@ bool GlobalState::refreshContentFolder()
 		return false;
 	}
 
-	// Daten ausserhalb des Locks zusammenstellen, dann atomar eintauschen
+	// Assemble data outside the lock, then atomically swap
 	HE::Folder fresh;
 	ScopedFolderNodes freshOwner(&fresh);
 	fresh.name     = contentFolderpath.filename().string();

@@ -54,6 +54,39 @@ StaticMeshAsset generateTerrainChunkMesh(
     float u0, float v0, float u1, float v1,
     uint32_t vertsPerSide, float uvTiling = 1.0f);
 
+// Caches one chunk's finest-seen LOD grid (heights + normals, n×n) across the calls of
+// generateTerrainChunkMeshLOD below, so a coarser call in the same chunk can downsample it
+// instead of resampling the field. n == 0 means empty (nothing cached yet).
+struct TerrainChunkLODCache
+{
+    uint32_t n = 0;
+    std::vector<float> heights;
+    std::vector<float> normals;
+};
+
+// Same contract and result as generateTerrainChunkMesh, but reuses `cache` across one chunk's
+// LOD levels: LOD(k+1)'s grid is an exact stride-2 subset of LOD k's (see
+// TerrainSystem::buildChunk, "verts = lod0Cells>>k + 1"), so once the finest level this chunk
+// has built is in `cache`, a coarser `vertsPerSide` is filled by downsampling it instead of
+// re-sampling the height field — bit-identical to the fully-resampled result, but ONLY when the
+// stride is a power of two. The grid coordinate evaluates as `((u1-u0) * i) / (N-1)`: the
+// multiply rounds once, and multiplying an already-rounded float by a power of two is exact (a
+// pure exponent shift), so `round((u1-u0)*i) * 2^k == round((u1-u0)*i*2^k)` and the cached base's
+// vertex at `i*stride` lands on the identical rounded value the coarser level would have computed
+// directly. An arbitrary stride (3, say) has no such guarantee — `round((u1-u0)*i)*3` is not in
+// general `round((u1-u0)*i*3)` — so the power-of-two check in strideOf (TerrainMeshGenerator.cpp)
+// is load-bearing, not a conservative extra: relaxing it would silently stop being bit-identical
+// for non-power-of-two strides. Calls whose `vertsPerSide` is not an exact power-of-two stride
+// subset of what is cached fall back to resampling the field directly (and refresh `cache` with
+// that grid for the next call). Call order does not matter — any order converges, finest-first
+// just avoids ever falling back.
+StaticMeshAsset generateTerrainChunkMeshLOD(
+    const std::vector<float>& heights, uint32_t srcRes,
+    float sizeX, float sizeZ,
+    float u0, float v0, float u1, float v1,
+    uint32_t vertsPerSide, float uvTiling,
+    TerrainChunkLODCache& cache);
+
 // ─── Tessellation / displacement ────────────────────────────────────────────
 // The refined level a chunk near the camera gets on top of LOD0 (see
 // TerrainComponent::tessellationFactor). CPU-side on purpose: the chunks are
@@ -99,3 +132,41 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     float u0, float v0, float u1, float v1,
     uint32_t vertsPerSide, float uvTiling,
     const TerrainDisplacementMap& disp);
+
+// ─── Seam stitching ─────────────────────────────────────────────────────────
+// Where a chunk meets a neighbour drawn COARSER (LOD0 next to LOD2, a refined
+// chunk next to LOD0), the coarse edge runs straight from one of its vertices
+// to the next while the finer edge follows the terrain: a lens-shaped step per
+// coarse segment. It is real geometry, so it casts a real shadow, and the GI
+// sun ray (which starts a few cm above the surface) hits it — the dashed black
+// line along mixed-detail seams. Stitching moves the finer edge onto the
+// coarse one, so the two chunks share their edge exactly.
+//
+// Edges in the order buildChunkMesh rings the chunk: 0 = v0 (bottom),
+// 1 = u1 (right), 2 = v1 (top), 3 = u0 (left). edgeCells[e] = cells per side
+// of the neighbour across edge e, 0 = leave the edge alone (same or finer
+// neighbour, or none). Corner bits, same order: 0 = (u0,v0), 1 = (u1,v0),
+// 2 = (u1,v1), 3 = (u0,v1) — a set bit pins that corner to its LOD0 height,
+// for a displaced refined chunk whose DIAGONAL neighbour is coarser.
+struct TerrainChunkStitch
+{
+    uint32_t edgeCells[4] = { 0, 0, 0, 0 };
+    uint8_t  corners = 0;
+    bool any() const
+    {
+        return edgeCells[0] || edgeCells[1] || edgeCells[2] || edgeCells[3] || corners;
+    }
+};
+
+// A copy of `level` (a chunk mesh from generateTerrainChunkMesh or
+// ...Tessellated with levelCells cells per side) whose stitched edge vertices
+// lie on the neighbour's edge: heights and normals of the coarse vertices are
+// taken from the chunk's own LOD0 mesh (`lod0`, lod0Cells per side), which
+// samples the field at the very same UVs as any coarser level does — so they
+// match the neighbour's bit for bit — and linearly interpolated in between, as
+// the neighbour's triangle does. The skirt below a moved vertex moves with it.
+// An edge whose count does not divide both levelCells and lod0Cells is left
+// alone. Returns an empty mesh if a mesh's layout does not fit its count.
+StaticMeshAsset stitchTerrainChunkEdges(const StaticMeshAsset& level, uint32_t levelCells,
+                                        const StaticMeshAsset& lod0, uint32_t lod0Cells,
+                                        const TerrainChunkStitch& stitch);

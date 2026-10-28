@@ -8,6 +8,7 @@
 #include <HorizonScene/Components/HierarchyComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/LODComponent.h>
+#include <HorizonScene/Components/WaterSurfaceComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonScene/Components/CharacterControllerComponent.h>
@@ -128,6 +129,9 @@ std::size_t NavigationSystem::collectStaticGeometry(HorizonWorld& world, Content
         // all: they read as solid on screen, and Recast has no second source of
         // level geometry to fall back on.
         if (!mc.visible) continue;
+        // Water is something you wade through or swim in, not walk on: the sheet
+        // at a lake's level must not make the lake a walkable floor.
+        if (reg.all_of<WaterSurfaceComponent>(e)) continue;
         if (const auto* col = reg.try_get<ColliderComponent>(e); col && col->isTrigger) continue;
         if (movesAtRuntime(reg, e)) continue;
 

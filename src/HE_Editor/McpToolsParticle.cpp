@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorAssetTypeCache.h"     // what a path holds, without loading it
 #include "McpToolCommon.h"            // the argument readers, the confinement rule, the walk
@@ -75,7 +75,10 @@ std::string allPinNames()
 {
 	std::string s;
 	for (const ParticlePinDesc& p : emitterPins())
-		s += (s.empty() ? "" : ", ") + std::string(p.name);
+	{
+		if (!s.empty()) s += ", ";
+		s += p.name;
+	}
 	return s;
 }
 
@@ -168,30 +171,18 @@ Emitter openEmitter(ContentManager& content, const McpParticleHooks& h, const js
 
 	if (forWrite)
 	{
-		if (p.engine) { e.failure = failEngineReadOnly(p.rel); return e; }
-		if (h.isPlaying && h.isPlaying())
+		static constexpr WriteGateText kGate{
+			"Play-in-editor is running, and the running session's emitters have "
+			"already resolved this graph. A change now would be half in effect, so it "
+			"is refused rather than half-applied. Ask the user to stop play mode.",
+			"is open in the Particle Graph Editor with unsaved "
+			"changes. That tab's own copy is the truth while it is dirty: writing the "
+			"file would be reverted by the human's next Save, and there is no way to "
+			"land an edit in the tab that they could take back. Ask the user to save "
+			"or close that tab, then call again." };
+		if (auto refused = refuseAssetWrite(p, h.isPlaying, h.lockedByOther, h.isDirty, kGate))
 		{
-			e.failure = ToolResult::fail("play_mode",
-				"Play-in-editor is running, and the running session's emitters have "
-				"already resolved this graph. A change now would be half in effect, so it "
-				"is refused rather than half-applied. Ask the user to stop play mode.");
-			return e;
-		}
-		if (h.lockedByOther && h.lockedByOther(p.rel))
-		{
-			e.failure = ToolResult::fail("locked_by_other",
-				"Another participant in the collaboration session holds '" + p.rel +
-				"' right now. Wait until they let go, or work on something else.");
-			return e;
-		}
-		if (h.isDirty && h.isDirty(p.rel))
-		{
-			e.failure = ToolResult::fail("dirty",
-				"'" + p.rel + "' is open in the Particle Graph Editor with unsaved "
-				"changes. That tab's own copy is the truth while it is dirty: writing the "
-				"file would be reverted by the human's next Save, and there is no way to "
-				"land an edit in the tab that they could take back. Ask the user to save "
-				"or close that tab, then call again.");
+			e.failure = std::move(*refused);
 			return e;
 		}
 	}
@@ -241,6 +232,13 @@ json uuidJson(const HE::UUID& id)
 const ParticleGraphNode* outputNode(const ParticleGraph& g)
 {
 	for (const ParticleGraphNode& n : g.nodes)
+		if (n.type == ParticleNodeType::EmitterOutput) return &n;
+	return nullptr;
+}
+
+ParticleGraphNode* findMutableOutputNode(ParticleGraph& g)
+{
+	for (ParticleGraphNode& n : g.nodes)
 		if (n.type == ParticleNodeType::EmitterOutput) return &n;
 	return nullptr;
 }
@@ -538,9 +536,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 				"Either 'value' or 'reset' is required — a call with neither would report "
 				"success without changing anything.");
 
-		ParticleGraphNode* out = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { out = &n; break; }
+		ParticleGraphNode* out = findMutableOutputNode(e.graph);
 		if (!out)
 			return ToolResult::fail("invalid_payload",
 				"'" + e.rel + "' has no Emitter Output node, which every particle graph the "
@@ -572,9 +568,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 				result["changed"]     = true;
 				result["removedNode"] = wasConst && onlyConsumer;
 			}
-			ParticleGraphNode* after = nullptr;
-			for (ParticleGraphNode& n : e.graph.nodes)
-				if (n.type == ParticleNodeType::EmitterOutput) { after = &n; break; }
+			ParticleGraphNode* after = findMutableOutputNode(e.graph);
 			if (after) result["state"] = pinJson(e.graph, *after, index);
 			bool randomised = false;
 			result["emitter"] = configJson(e.graph, randomised);
@@ -600,10 +594,11 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 					"than to a value — these tools do not make it. Use 'reset' to take the "
 					"input back to its default first if that is what you want, or edit the "
 					"graph in the Particle Graph Editor.");
-			if (consumersOf(e.graph, driver->id) != 1)
+			const int driverConsumers = consumersOf(e.graph, driver->id);
+			if (driverConsumers != 1)
 				return ToolResult::fail("driven_by_graph",
 					"'" + pinName + "' is driven by node " + std::to_string(driver->id) +
-					", which also feeds " + std::to_string(consumersOf(e.graph, driver->id) - 1) +
+					", which also feeds " + std::to_string(driverConsumers - 1) +
 					" other input(s). Changing its value would change those too, so it is "
 					"refused rather than applied wider than asked. Use 'reset' on this input "
 					"first to give it a constant of its own.");
@@ -631,9 +626,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 		const int params = particleNodeDesc(node->type).paramCount;
 		for (int i = 0; i < params; ++i) node->p[i] = p[i];
 
-		ParticleGraphNode* after = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { after = &n; break; }
+		ParticleGraphNode* after = findMutableOutputNode(e.graph);
 
 		json result{
 			{ "pin",         pinName },
@@ -711,9 +704,7 @@ void addSlotSet(McpToolRegistry& registry, ContentManager& content,
 					"reference it. The editor log carries the reason.");
 		}
 
-		ParticleGraphNode* out = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { out = &n; break; }
+		ParticleGraphNode* out = findMutableOutputNode(e.graph);
 		if (!out)
 			return ToolResult::fail("invalid_payload",
 				"'" + e.rel + "' has no Emitter Output node, which every particle graph the "

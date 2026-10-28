@@ -17,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -123,9 +124,20 @@ HE_NET_API SocketResult socketAccept(SocketHandle listener, SocketHandle& outAcc
 // Returns Ok (connected immediately, typical on loopback), WouldBlock (in
 // progress — poll socketConnectPoll()), or Error. `outSocket` is kInvalidSocket
 // unless the call returns Ok or WouldBlock.
+//
+// A WouldBlock result is bound to ONE address: the first candidate whose connect
+// did not fail outright. If that address then never answers (a dual-stack host
+// whose IPv6 route is dead, a firewall dropping the SYN) the caller times out and
+// would otherwise have no way to reach the host's other addresses. So the call
+// can also be told to start `skipCandidates` addresses further down the resolver
+// list, and reports how many candidates there are (`outCandidateCount`, set even
+// on Error once the name resolved, 0 when it did not). Call again with
+// skipCandidates + 1 after a timeout until it reaches outCandidateCount.
 HE_NET_API SocketResult socketCreateTcpConnecting(const std::string& host,
                                                   std::uint16_t port,
-                                                  SocketHandle& outSocket);
+                                                  SocketHandle& outSocket,
+                                                  unsigned skipCandidates = 0,
+                                                  unsigned* outCandidateCount = nullptr);
 
 // Start a non-blocking connect on an existing IPv4 socket.
 HE_NET_API SocketResult socketConnect(SocketHandle h, const std::string& host,
@@ -166,6 +178,14 @@ HE_NET_API SocketHandle socketCreateUdp6();
 HE_NET_API bool         socketBindUdp6To(SocketHandle h, const std::string& localAddress,
                                          std::uint16_t port);
 // Bind to a local port (0 = any). Required before receiving.
+//
+// Deliberately WITHOUT SO_REUSEADDR. UDP has no TIME_WAIT, so a port is free the
+// moment its socket closes and a restart never needs it; what it does buy is
+// harm. On Linux two sockets that both set it may bind the same port — and the
+// ephemeral picker (port 0) does not skip a port a reuse socket already holds —
+// so two clients, or a client and a host, end up on one port and each other's
+// datagrams. A caller that really wants a shared port (discovery) says so with
+// socketBindUdpShared.
 HE_NET_API bool         socketBindUdp(SocketHandle h, std::uint16_t port);
 // Allow sending to multicast groups (SSDP's 239.255.255.250).
 HE_NET_API bool         socketSetMulticastTtl(SocketHandle h, int ttl);
@@ -265,6 +285,65 @@ HE_NET_API SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf,
                                        std::size_t len, std::size_t& outReceived,
                                        std::string& outFromHost,
                                        std::uint16_t& outFromPort);
+
+// ─── Parsed addresses (the datagram hot path) ────────────────────────────────
+// The string pair above parses the host with getaddrinfo on every send and
+// formats the sender with inet_ntop on every receive. Fine for discovery and
+// port mapping, which send a handful of packets; not for a transport that talks
+// to the same peers thousands of times a second. That one parses an address
+// once and keeps it in this form.
+//
+// Plain bytes rather than a sockaddr, so this header stays free of the
+// platform socket headers.
+struct SocketAddress {
+    std::uint8_t  family = 0;      // 4 or 6; 0 = no address
+    std::uint8_t  ip[16] = {};     // network byte order; IPv4 uses the first 4
+    std::uint16_t port   = 0;      // host byte order
+    std::uint32_t scope  = 0;      // IPv6 interface index (link-local); not identity
+
+    // Same peer: family, address and port. Not the scope — recvfrom does not
+    // necessarily report the scope a link-local address was dialled with, and
+    // the two spellings of one peer have to compare equal. Not across families
+    // either: "::ffff:1.2.3.4" (a v4 peer seen by a dual-stack socket) and
+    // "1.2.3.4" are different peers here, as their strings always were.
+    bool samePeer(const SocketAddress& o) const {
+        return family == o.family && port == o.port &&
+               std::memcmp(ip, o.ip, family == 4 ? 4 : 16) == 0;
+    }
+};
+
+// Hash/equality over SocketAddress::samePeer, for an unordered_map keyed by peer.
+struct SocketAddressPeerHash {
+    std::size_t operator()(const SocketAddress& a) const {
+        std::uint64_t h = 1469598103934665603ull;   // FNV-1a
+        auto mix = [&h](std::uint8_t b) { h = (h ^ b) * 1099511628211ull; };
+        mix(a.family);
+        const int n = a.family == 4 ? 4 : 16;
+        for (int i = 0; i < n; ++i) mix(a.ip[i]);
+        mix(static_cast<std::uint8_t>(a.port));
+        mix(static_cast<std::uint8_t>(a.port >> 8));
+        return static_cast<std::size_t>(h);
+    }
+};
+struct SocketAddressPeerEq {
+    bool operator()(const SocketAddress& a, const SocketAddress& b) const {
+        return a.samePeer(b);
+    }
+};
+
+// Parse a numeric address of either family, scope suffix included ("fe80::1%en0")
+// — the form socketResolveUdpAddress returns. False for anything else.
+HE_NET_API bool         socketParseAddress(const std::string& numericHost, std::uint16_t port,
+                                           SocketAddress& out);
+// The address without port or scope, as the string socketRecvFrom would have
+// reported it ("192.168.1.5", "::ffff:192.168.1.5"). For logs.
+HE_NET_API std::string  socketAddressText(const SocketAddress& a);
+HE_NET_API SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data,
+                                     std::size_t len, const SocketAddress& to,
+                                     std::size_t& outSent);
+HE_NET_API SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf,
+                                       std::size_t len, std::size_t& outReceived,
+                                       SocketAddress& outFrom);
 
 // ─── Local address ───────────────────────────────────────────────────────────
 

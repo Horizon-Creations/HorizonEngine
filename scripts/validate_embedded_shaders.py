@@ -73,25 +73,36 @@ MSL_SOURCE = RENDER / "Metal" / "MetalRenderer.mm"
 MATERIAL_LIB_H = REPO / "src" / "HE_Rendering" / "include" / "material" / "MaterialShaderLibrary.h"
 
 # Strings that are NOT standalone shaders — they are spliced into others and have
-# no entry point of their own.
+# no entry point of their own. kGiHeightfieldHLSL/GLSL have no entry point either,
+# but unlike the others they are only ever compiled as part of the extra GiShadowCS
+# variant below (D3D11Renderer.cpp:3626, OpenGLRenderer.cpp:6605) — the plain
+# kGiShadowCSHLSL/kGiShadowCS job below does NOT exercise them, so leaving them out
+# of a compile job entirely (just marking them "covered") would be the same mistake
+# this script exists to catch.
 PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLSL",
-            "kSkyVulkanPrelude", "kSkyFuncMSL"}
+            "kSkyVulkanPrelude", "kSkyFuncMSL", "kGiHeightfieldHLSL", "kGiHeightfieldGLSL"}
 
 # What each call site prepends before compiling. Mirrors the C++ verbatim:
 #   D3D11Renderer.cpp:2309  std::string(kSkyFuncHLSL) + kSceneHLSL
 #   D3D11Renderer.cpp:2802  std::string(kSkyFuncHLSL) + kSkyPSHLSL
-#   D3D11Renderer.cpp:1677  std::string(kGiTraversalHLSL) + kGiShadowCSHLSL
+#   D3D12Renderer.cpp       std::string(kGiTraversalHLSL) + kGiShadowCSHLSL (no heightfield)
 #   D3D11Renderer.cpp:1679  std::string(kGiTraversalHLSL) + kGiProbeCSHLSL
-#   OpenGLRenderer.cpp:5607 "#version 430 core\n" + kGiTraversalGLSL + kGiShadowCS
+#   OpenGLRenderer.cpp:6605 header + kGiTraversalGLSL + kGiHeightfieldGLSL + kGiShadowCS
+# D3D11's OWN kGiShadowCSHLSL call (D3D11Renderer.cpp:3626) additionally splices
+# kGiHeightfieldHLSL between the two — see EXTRA_HLSL_CHECKS below, it is not a
+# plain single-prelude job like the others.
 HLSL_PRELUDE_OF = {
     "kGiShadowCSHLSL": "kGiTraversalHLSL",
     "kGiProbeCSHLSL": "kGiTraversalHLSL",
+    "kGiReflCSHLSL": "kGiTraversalHLSL",
     "kSkyPSHLSL": "kSkyFuncHLSL",
     "kSkyPSHLSL12": "kSkyFuncHLSL",  # D3D12Renderer.cpp:1564 — D3D12's own sky PS copy
     "kSceneHLSL": "kSkyFuncHLSL",
 }
+# GL's kGiShadowCS has one call site and it always carries the heightfield prelude
+# (OpenGLRenderer.cpp:6605), unlike D3D11/D3D12 which differ — so one entry, two preludes.
 GLSL_PRELUDE_OF = {
-    "kGiShadowCS": "kGiTraversalGLSL",
+    "kGiShadowCS": ["kGiTraversalGLSL", "kGiHeightfieldGLSL"],
     "kGiProbeCS": "kGiTraversalGLSL",
     "kGiReflCS": "kGiTraversalGLSL",
 }
@@ -100,7 +111,7 @@ GLSL_PRELUDE_OF = {
 # call sites in D3D11Renderer.cpp / D3D12Renderer.cpp.
 HLSL_ENTRY_PROFILE = {
     "GiGBufVS": "vs_5_0", "GiGBufVSInstanced": "vs_5_0", "GiGBufPS": "ps_5_0",
-    "GiProbeCS": "cs_5_0", "GiShadowCS": "cs_5_0",
+    "GiProbeCS": "cs_5_0", "GiShadowCS": "cs_5_0", "GiReflCS": "cs_5_0",
     "PSLine": "ps_5_0", "VSLine": "vs_5_0",
     "PSMain": "ps_5_0", "VSMain": "vs_5_0",
     "VSMainInstanced": "vs_5_0", "VSMainSkinned": "vs_5_0", "VSDepth": "vs_5_0",
@@ -111,6 +122,7 @@ HLSL_ENTRY_PROFILE = {
     "UIPSMain": "ps_5_0", "UIVSMain": "vs_5_0",
     "PSPreviewMesh": "ps_5_0", "PSPreviewSkinned": "ps_5_0",  # kWorldPreviewPSHLSL
     "VSVelocity": "vs_5_0", "PSVelocity": "ps_5_0",            # kTaaVelocityHLSL
+    "GBufPS": "ps_5_0",  # D3D11 + D3D12 kSceneHLSL: deferred G-buffer, built-in materials (Thema 150)
     "main": "ps_5_0",  # the common case; exceptions below
 }
 
@@ -124,11 +136,54 @@ HLSL_PROFILE_OVERRIDE = {
 GLSL_STAGE_BY_SUFFIX = [("VS", "vert"), ("FS", "frag"), ("CS", "comp")]
 
 
+# Every "@WORD@" token below is a call-site splice point: the real C++ inserts something
+# (numbers, a function body) before compiling, so the literal between R"TAG(...)TAG" is not
+# valid shader source by itself. A compiler only needs *something syntactically valid* of the
+# right shape, so each dummy below is NOT the real C++ output, just a stand-in with the same
+# arity / signature.
+#   @TRAINS@ (Thema 185, kUnderwaterCausticsHLSL/FS/MSL): HE::causticsWaveTrainsList() splices
+#   twelve numbers (dirDeg, speed, length, steepness x 3 trains) — twelve plausible floats.
+#   @SURF@ (Thema 205, OpenGLRenderer.cpp:5953 kUnderwaterCausticsFS only): splices
+#   HE::underwaterSurfaceFunctions(SurfaceLang::GLSL) (UnderwaterSurfaceShared.h), which
+#   defines heTrain()/heSurfaceH() — the caustics code below it calls heSurfaceH(), so the
+#   splice must at least define matching GLSL functions, not just vanish.
+PLACEHOLDER_DUMMIES = {
+    "@TRAINS@": "225.0, 2.1, 38.0, 0.28, 140.0, 1.7, 19.0, 0.2, 315.0, 1.3, 9.0, 0.14",
+    "@SURF@": (
+        "float heTrain(vec2 xz, float dirDeg, float speed, float len, float steep, vec4 wv, vec4 sp)"
+        " { return steep * sin(dirDeg + speed * sp.z + len + wv.x + xz.x + xz.y); }\n"
+        "float heSurfaceH(vec2 xz, float groundDepth, vec4 wv, vec4 sp)"
+        " { return groundDepth * wv.y * sp.x + heTrain(xz, 0.0, 0.0, 1.0, 0.0, wv, sp); }\n"
+    ),
+}
+# Any "@WORD@" still present after the splices above is a NEW placeholder this script does not
+# know about yet — report it clearly instead of handing the compiler a literal '@' to choke on
+# (that is how this script itself first caught @SURF@: a bare "ERROR: '@' : unexpected token"
+# with no hint which token or which shader).
+UNHANDLED_PLACEHOLDER_RE = re.compile(r"@[A-Za-z][A-Za-z0-9_]*@")
+
+
 def extract(path: Path, tag: str) -> dict[str, str]:
-    """All `kName = R"TAG( ... )TAG";` literals in one file."""
+    """All `kName = R"TAG( ... )TAG";` literals in one file, call-site tokens spliced."""
     src = path.read_text(encoding="utf-8", errors="replace")
     pat = r'(k[A-Za-z0-9]*)\s*=\s*R"' + tag + r'\((.*?)\)' + tag + r'";'
-    return {m.group(1): m.group(2) for m in re.finditer(pat, src, re.S)}
+    strings = {}
+    for m in re.finditer(pat, src, re.S):
+        body = m.group(2)
+        for token, dummy in PLACEHOLDER_DUMMIES.items():
+            body = body.replace(token, dummy)
+        strings[m.group(1)] = body
+    return strings
+
+
+def unhandled_placeholders(strings: dict[str, str]) -> list[str]:
+    problems = []
+    for name, body in strings.items():
+        leftover = sorted(set(UNHANDLED_PLACEHOLDER_RE.findall(body)))
+        if leftover:
+            problems.append(f"{name}: unreplaced placeholder(s) {', '.join(leftover)} "
+                             f"— extend PLACEHOLDER_DUMMIES")
+    return problems
 
 
 def find_tool(env_var: str, names: list[str], hints: list[str]) -> str | None:
@@ -157,6 +212,17 @@ def run(cmd: list[str]) -> tuple[bool, str]:
     return r.returncode == 0, out
 
 
+# Call sites that splice MORE than the one prelude HLSL_PRELUDE_OF knows about — compiled as
+# an extra job on top of the normal single-prelude one, so the extra variant is not just
+# assumed to compile because the shared base string's default form does.
+#   D3D11Renderer.cpp:3626: only D3D11's own GiShadowCS wires the landscape height field in
+#   (kGiTraversalHLSL + kGiHeightfieldHLSL + kGiShadowCSHLSL); D3D12's copy stays plain.
+EXTRA_HLSL_CHECKS = [
+    ("kGiShadowCSHLSL", ["kGiTraversalHLSL", "kGiHeightfieldHLSL"], "GiShadowCS", "cs_5_0",
+     "D3D11 + heightfield"),
+]
+
+
 def check_hlsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
     fxc = find_tool("FXC", ["fxc.exe", "fxc"],
                     [r"%ProgramFiles(x86)%\Windows Kits\10\bin", r"%ProgramFiles%\Windows Kits\10\bin"])
@@ -176,7 +242,7 @@ def check_hlsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
             strings[f"{tag}:{name}"] = body
             origin[f"{tag}:{name}"] = name
 
-    jobs, covered, failures = [], set(), []
+    jobs, covered, failures = [], set(), unhandled_placeholders(strings)
     for key, body in strings.items():
         name = origin[key]
         if name in PRELUDES:
@@ -196,6 +262,25 @@ def check_hlsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
             if re.search(r"[\w>\]]\s+" + entry + r"\s*\(", body):
                 jobs.append((key, f, entry, HLSL_PROFILE_OVERRIDE.get((name, entry), profile)))
                 covered.add(key)
+
+    for name, prelude_names, entry, profile, label in EXTRA_HLSL_CHECKS:
+        match = [v for k, v in strings.items() if origin[k] == name]
+        if not match:
+            failures.append(f"{name} ({label}): shader not found")
+            continue
+        pre, missing = "", None
+        for p in prelude_names:
+            pmatch = [v for k, v in strings.items() if origin[k] == p]
+            if not pmatch:
+                missing = p
+                break
+            pre += pmatch[0]
+        if missing:
+            failures.append(f"{name} ({label}): prelude {missing} not found")
+            continue
+        f = tmp / (f"{name}__{label}".replace(" ", "_").replace("+", "and") + ".hlsl")
+        f.write_text(pre + match[0], encoding="utf-8")
+        jobs.append((f"{name} ({label})", f, entry, HLSL_PROFILE_OVERRIDE.get((name, entry), profile)))
 
     for key in strings:
         if key not in covered:
@@ -227,7 +312,7 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
             return 0, 1, [f"missing {path}"]
         strings.update(extract(path, "GLSL"))
     skyfunc = strings.get("kSkyFuncGLSL", "")
-    ok_n, failures = 0, []
+    ok_n, failures = 0, unhandled_placeholders(strings)
 
     # The Vulkan/D3D build of the GL sky, assembled like BuildSkyFragmentGLSL450()
     # (SkyShaderSource.h) and checked with Vulkan semantics (-V). The HLSL that
@@ -298,7 +383,10 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
         if stage is None:
             failures.append(f"{name}: not covered — no VS/FS/CS suffix, extend GLSL_STAGE_BY_SUFFIX")
             continue
-        src = strings.get(GLSL_PRELUDE_OF[name], "") + body if name in GLSL_PRELUDE_OF else body
+        pre_names = GLSL_PRELUDE_OF.get(name)
+        if isinstance(pre_names, str):
+            pre_names = [pre_names]
+        src = "".join(strings.get(p, "") for p in pre_names) + body if pre_names else body
         src = src.replace("//#SKYFUNC#", skyfunc)          # injectSkyFunc (OpenGLRenderer.cpp:4095)
         if "#version" not in src:
             src = "#version 430 core\n" + src               # the compute call sites' header
@@ -359,7 +447,7 @@ def check_msl(tmp: Path, verbose: bool, require: bool) -> tuple[int, int, list[s
     strings = extract(MSL_SOURCE, "MSL")
     skyfunc = strings.get("kSkyFuncMSL")
     marker = "//#SKYFUNC#"
-    ok_n, failures = 0, []
+    ok_n, failures = 0, unhandled_placeholders(strings)
     for name, body in strings.items():
         if name in PRELUDES:
             continue

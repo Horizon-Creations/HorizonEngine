@@ -1,0 +1,15 @@
+== base128-rs1-r2 00:09:09
+0:09  up 23 days,  3:30, 1 user, load averages: 3.21 4.37 7.25
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=20
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 3.21
+0:09  up 23 days,  3:30, 1 user, load averages: 3.26 4.32 7.18
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=80
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[base128-rs1-r2] rc=0 wall=14s fps=69.6950089158453 cpu_p50=13.962207999999999 gpu_p50=8.799666306003928 modes={'detailed': 400} size=2840x1528

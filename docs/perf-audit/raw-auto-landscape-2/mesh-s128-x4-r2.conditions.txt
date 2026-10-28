@@ -1,0 +1,17 @@
+== mesh-s128-x4-r2  2026-10-21 05:32:40  attempt 1
+before:
+  uptime:    load averages: 1.90 2.17 2.22
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Python; 10.1% coreaudiod; 6.5% clion; 5.8% runningboardd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.97 2.17 2.22
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Dock; 12.9% coreaudiod; 6.5% Python; 5.9% io.tailscale.ipn.macsys.network-extension
+  foreign:   none

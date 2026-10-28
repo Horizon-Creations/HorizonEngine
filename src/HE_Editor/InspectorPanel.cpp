@@ -12,12 +12,15 @@
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
+#include <HorizonScene/LayerMeshPresets.h>   // the engine's layer meshes as ready-made settings
 #include <HorizonScene/NavigationSystem.h>
 #include <HorizonScene/ParticleSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
 #include <Scripting/ScriptEngine.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/DefaultAssets.h>   // kEngineCrossCardMeshId (foliage detail levels)
+#include <Diagnostics/Log.h>
 #include <MaterialGraph/MaterialGraph.h> // HE::MatParamKind for the entity param editor
 #include <Types/Enums.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -25,10 +28,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <HorizonScene/SplineCurve.h>      // the Spline section's length readout
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,6 +52,27 @@ namespace InspectorPanel
 // contact with it. Both live in EditorWidgets; these are the local spellings.
 namespace Row = EditorWidgets::Row;
 using EditorWidgets::hint;
+
+// A collapsible group INSIDE a component (the Sky's "Sun & Moon", "Clouds" …).
+// A bare tree node looked like one more row, so the groups did not read as
+// groups. This is a framed bar like the component header but one step down:
+// neutral instead of amber, a shorter bar, and its rows indented under it.
+// Pair with ImGui::TreePop() when it returns true.
+bool subSection(const char* label, bool defaultOpen)
+{
+	using namespace HE::Ed::Theme;
+	ImGui::Spacing();
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+	ImGui::PushStyleColor(ImGuiCol_Header,        warm(0.21f, 0.95f));
+	ImGui::PushStyleColor(ImGuiCol_HeaderHovered, warm(0.27f, 0.95f));
+	ImGui::PushStyleColor(ImGuiCol_HeaderActive,  warm(0.31f, 0.95f));
+	const bool open = ImGui::TreeNodeEx(label, ImGuiTreeNodeFlags_Framed |
+	                                           ImGuiTreeNodeFlags_SpanAvailWidth |
+	                                           (defaultOpen ? ImGuiTreeNodeFlags_DefaultOpen : 0));
+	ImGui::PopStyleColor(3);
+	ImGui::PopStyleVar();
+	return open;
+}
 
 // A scene is meant to hold at most one Sky and one Weather entity; everything in
 // the engine reads the FIRST one it finds. A duplicate is therefore completely
@@ -246,8 +272,8 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 	    s_multi.revision != ctx.selection.revision() ||
 	    ImGui::GetFrameCount() - s_multi.frame >= period)
 		refreshMultiSelection(ctx, world, primary, members);
-	const std::vector<std::string> common  = s_multi.common;
-	const std::vector<std::string> partial = s_multi.partial;
+	const std::vector<std::string>& common  = s_multi.common;
+	const std::vector<std::string>& partial = s_multi.partial;
 
 	hint("Edits below apply to every selected entity that has the component; "
 	     "the active entity's values are shown, and a field the selection "
@@ -860,6 +886,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	// the whole call, so an early return out of any section still unwinds it and
 	// no later panel inherits "Rigid Body" as its tooltip scope.
 	HE::Ed::Help::Scope helpScope("");
+	// The Details panel's layout: names in a column on the left, controls in
+	// the column to its right (Row::InlineLabels), and a tighter row pitch than
+	// the editor-wide theme — this panel is the longest list in the editor, and
+	// at the theme's padding a property cost 40 px. Popups opened from here
+	// (the component menu, the asset picker) are separate windows but share the
+	// style stack, so they are compact as well, which suits them.
+	EditorWidgets::Row::InlineLabels labelColumn;
+	// Not in the silent modes: listComponents promises to emit no ImGui calls.
+	if (!quiet)
+	{
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 3.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2(8.0f, 4.0f));
+	}
+	struct PopStyle
+	{
+		bool on;
+		~PopStyle() { if (on) ImGui::PopStyleVar(2); }
+	} popStyle{ !quiet };
 	// The same slot for the undo history: every entry a component section
 	// pushes is labelled with that component ("Light", "Rigid Body") — set by
 	// componentHeader alongside the help scope — and unwound here so no later
@@ -906,7 +950,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		// own `if (removed) registry.remove<T>(entity)` does the rest.
 		removeLabel = std::string("Remove ") + label;
 		if (removeMatching) { removed = removable; structuralChange = removable; return false; }
+		// The one look every component header has: a taller bar than the rows
+		// under it, the heading colour, and a gap above so the sections read
+		// as blocks rather than one long list.
+		ImGui::Spacing();
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.0f, 5.0f));
+		ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
 		const bool open = ImGui::CollapsingHeader(label, ImGuiTreeNodeFlags_DefaultOpen);
+		ImGui::PopStyleColor();
+		ImGui::PopStyleVar();
 		// What the component IS, on the header itself — the question that comes
 		// before any of its properties.
 		{
@@ -974,7 +1026,11 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					if (ImGui::IsItemHovered())
 					{
 						std::string list;
-						for (const std::string& p : props) list += (list.empty() ? "" : ", ") + p;
+						for (const std::string& p : props)
+						{
+							if (!list.empty()) list += ", ";
+							list += p;
+						}
 						ImGui::SetTooltip("Changed on this placement: %s.\nThe prefab's value does "
 						                  "not reach these — revert them in the Prefab Instance "
 						                  "section above.", list.c_str());
@@ -1015,8 +1071,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::InputText("##entity_name", buf, sizeof(buf),
 			                     ImGuiInputTextFlags_EnterReturnsTrue))
 			{
-				if (undo) undo->snapshotNow("Rename Entity");
-				world.renameEntity(entity, buf);
+				// Held by somebody else in the session: a request to the host,
+				// not a local name that only this machine would ever show. Only
+				// for the scene's world: a prefab editor's handles name other
+				// entities, and its world is nobody's to lock.
+				if (!(ctx.askHostToRename && &world == ctx.world && buf[0] != '\0' &&
+				      name->name != buf &&
+				      ctx.askHostToRename(entity, buf)))
+				{
+					if (undo) undo->snapshotNow("Rename Entity");
+					world.renameEntity(entity, buf);
+				}
 			}
 			// Off because of something above it: the box here is ticked, and
 			// the entity is still not in the game — say which is the case.
@@ -1078,7 +1143,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (!env->autoAdvance)
 				hint("Takes effect once Auto-Advance is on.");
 
-			if (ImGui::TreeNodeEx("Sun & Moon", ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (subSection("Sun & Moon", true)) {
 			Row::colorEdit3("Sun Color",  &env->sunColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::sliderFloat("Sun Brightness",  &env->sunIntensity,  0.0f, 10.0f); trackEdit();
 			Row::colorEdit3("Moon Color", &env->moonColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -1107,7 +1172,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			// These are always editable. A Weather preset (below) sets a whole set of
 			// these values when applied / transitioning; otherwise they're yours to move.
-			if (ImGui::TreeNodeEx("Clouds", ImGuiTreeNodeFlags_DefaultOpen)) {
+			if (subSection("Clouds", true)) {
 			Row::sliderFloat("Coverage", &env->cloudCoverage, 0.0f, 1.0f); trackEdit();
 			hint("Full overcast dims the sun & fills with ambient light.");
 			// Cloud render mode (OpenGL backend): sky-dome (cheap, infinite — no parallax)
@@ -1170,7 +1235,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Clouds
 
-			if (ImGui::TreeNodeEx("Contrails & Cirrus")) {
+			if (subSection("Contrails & Cirrus", false)) {
 			Row::sliderFloat("Contrails", &env->contrailAmount, 0.0f, 1.0f); trackEdit();
 			hint("Scattered vapour-trail lines to fill a clear daytime sky; fade as clouds build.");
 			Row::sliderFloat("Cirrus", &env->cirrusAmount, 0.0f, 1.0f); trackEdit();
@@ -1181,7 +1246,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Contrails & Cirrus
 
-			if (ImGui::TreeNodeEx("Sun Effects")) {
+			if (subSection("Sun Effects", false)) {
 			Row::sliderFloat("God Rays", &env->godRays, 0.0f, 1.0f); trackEdit();
 			hint("Warm crepuscular glow where sunlight breaks through gaps in the cloud cover. "
 			     "Needs broken cloud (Coverage > 0) and the sun up; off when overcast or clear.");
@@ -1192,7 +1257,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Sun Effects
 
-			if (ImGui::TreeNodeEx("Atmospheric Fog")) {
+			if (subSection("Atmospheric Fog", false)) {
 			Row::sliderFloat("Density##fog", &env->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
 			ImGui::BeginDisabled(env->fogDensity <= 0.0f);
 			Row::sliderFloat("Ground Hugging", &env->fogHeightFalloff, 0.0f, 1.0f); trackEdit();
@@ -1201,7 +1266,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Atmospheric Fog
 
-			if (ImGui::TreeNodeEx("Precipitation & Ground")) {
+			if (subSection("Precipitation & Ground", false)) {
 			Row::sliderFloat("Rain", &env->rainAmount, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Snow", &env->snowAmount, 0.0f, 1.0f); trackEdit();
 			Row::sliderFloat("Wetness", &env->wetness, 0.0f, 1.0f); trackEdit();
@@ -1209,7 +1274,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Precipitation & Ground
 
-			if (ImGui::TreeNodeEx("Stars & Milky Way")) {
+			if (subSection("Stars & Milky Way", false)) {
 			Row::sliderFloat("Star Brightness", &env->starBrightness, 0.0f, 3.0f); trackEdit();
 			Row::colorEdit3("Star Color", &env->starColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::sliderFloat("Star Amount", &env->starDensity, 0.0f, 1.0f); trackEdit();
@@ -1224,7 +1289,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Stars & Milky Way
 
-			if (ImGui::TreeNodeEx("Nebula")) {
+			if (subSection("Nebula", false)) {
 			// "##neb" the way "Density##fog" already does it: the tree node keeps
 			// the ImGui ids apart on its own, but the help lookup is by label
 			// within the COMPONENT, and this component has three Intensities and
@@ -1247,7 +1312,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 			ImGui::TreePop(); } // end Nebula
 
-			if (ImGui::TreeNodeEx("Aurora")) {
+			if (subSection("Aurora", false)) {
 			Row::sliderFloat("Intensity##aur", &env->auroraIntensity, 0.0f, 1.0f); trackEdit();
 			Row::colorEdit3("Color (base)", &env->auroraColor.x, ImGuiColorEditFlags_NoInputs); trackEdit();
 			Row::colorEdit3("Color (top)",  &env->auroraColorTop.x, ImGuiColorEditFlags_NoInputs); trackEdit();
@@ -1305,8 +1370,33 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				Row::sliderFloat("Cycle Time", &w->cycleSeconds, 5.0f, 600.0f, "%.0f s",
 				                 ImGuiSliderFlags_Logarithmic); trackEdit();
 				ImGui::EndDisabled();
-				hint("Picking a preset sets clouds/fog/wind/precip; the sliders above stay "
-				     "editable, so you can nudge any value afterwards.");
+				hint("Picking a preset sets every value below; each one stays editable, so "
+				     "you can take over any of them afterwards.");
+
+				// ── Every value of the weather on its own ───────────────────────────
+				// The sliders edit the live Sky values (the same ones the Sky's own panel
+				// shows) — a preset writes them, and WeatherSystem leaves a value alone from
+				// the moment you move it, until the next preset pick takes everything back.
+				// Thunder lives on the weather itself and follows the same rule.
+				EditorWidgets::subHeading("Conditions");
+				{
+					const Entity envEnt = world.environmentEntity();
+					EnvironmentComponent* wenv = (envEnt != entt::null && registry.valid(envEnt))
+						? registry.try_get<EnvironmentComponent>(envEnt) : nullptr;
+					if (wenv)
+					{
+						Row::sliderFloat("Cloud Coverage", &wenv->cloudCoverage, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Fog Density##wx", &wenv->fogDensity, 0.0f, 0.15f, "%.3f"); trackEdit();
+						Row::sliderFloat("Wind Speed##wx", &wenv->windSpeed, 0.0f, 4.0f); trackEdit();
+						Row::sliderFloat("Rain##wx", &wenv->rainAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Snow##wx", &wenv->snowAmount, 0.0f, 1.0f); trackEdit();
+						Row::sliderFloat("Wetness##wx", &wenv->wetness, 0.0f, 1.0f); trackEdit();
+					}
+					else
+						hint("No Sky in the scene — add one (Window ▸ Environment) to dial the "
+						     "clouds, fog, wind, rain, snow and wetness.");
+					Row::sliderFloat("Thunder", &w->thunder, 0.0f, 1.0f); trackEdit();
+				}
 
 				EditorWidgets::subHeading("Current State");
 				if (w->currentKind != w->targetKind)
@@ -1319,6 +1409,16 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				     w->curCloudCoverage, w->curFogDensity,
 				     w->curWindSpeed, w->curPrecip);
 
+				// What MATERIALS read from the weather (the material graph's Weather node,
+				// MF_WeatherPuddles / MF_WeatherSnow): set by hand, not by the presets.
+				EditorWidgets::subHeading("Surface");
+				Row::sliderFloat("Puddles",     &w->puddleAmount, 0.0f, 1.0f); trackEdit();
+				Row::sliderFloat("Puddle Size", &w->puddleSize,   0.5f, 100.0f, "%.1f m",
+				                 ImGuiSliderFlags_Logarithmic); trackEdit();
+				Row::sliderFloat("Snow Cover",  &w->snowCover,    0.0f, 1.0f); trackEdit();
+				hint("Read by materials through the Weather node — the auto landscape takes "
+				     "its puddles, their size and its ground snow from these.");
+
 				EditorWidgets::subHeading("Precipitation");
 				Row::dragInt("Max Rain Particles", &w->maxRainParticles, 10.0f, 0, 20000); trackEdit();
 				Row::dragInt("Max Snow Particles", &w->maxSnowParticles, 10.0f, 0, 20000); trackEdit();
@@ -1327,10 +1427,39 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				hint("Drops collide via physics in Play; else they die at Ground Y (the "
 				     "fallback floor).");
 
-				// Thunder sound — drop an audio .hasset here (played on each strike).
+				// Weather sounds (WeatherAudio). Every slot is optional: empty plays the
+				// EngineContent default, a dropped audio .hasset replaces just that one.
+				EditorWidgets::subHeading("Sound");
+				EditorWidgets::checkbox("Weather Sounds", &w->soundEnabled); trackEdit();
+				ImGui::BeginDisabled(!w->soundEnabled);
+				Row::sliderFloat("Volume##wxs", &w->soundVolume, 0.0f, 1.0f); trackEdit();
+				char wxBus[64];
+				std::strncpy(wxBus, w->soundBus.c_str(), sizeof(wxBus) - 1);
+				wxBus[sizeof(wxBus) - 1] = '\0';
+				if (Row::inputText("Bus##wxs", wxBus, sizeof(wxBus))) { w->soundBus = wxBus; trackEdit(); }
+				// An empty slot plays the engine's sound (Engine/Audio/Weather), so it says
+				// which; the entry behind each slot says how it behaves.
+				EditorWidgets::assetDropSlot(ctx, "Rain", w->rainSound,
+					HE::AssetType::Audio, "wxrain", "(default: Rain)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Rain Sound");
+				EditorWidgets::assetDropSlot(ctx, "Wind", w->windSound,
+					HE::AssetType::Audio, "wxwind", "(default: Wind)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Wind Sound");
+				EditorWidgets::assetDropSlot(ctx, "Snow", w->snowSound,
+					HE::AssetType::Audio, "wxsnow", "(default: Snow)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Snow Sound");
+				EditorWidgets::assetDropSlot(ctx, "Storm", w->stormSound,
+					HE::AssetType::Audio, "wxstorm", "(default: Storm)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Storm Sound");
+				// Thunder: one roll per lightning strike, a random distance away.
 				EditorWidgets::assetDropSlot(ctx, "Thunder", w->thunderSound,
-					HE::AssetType::Audio, "thunder", "(none — drop audio)",
-					/*rejectNoun=*/nullptr, /*showClear=*/true);
+					HE::AssetType::Audio, "thunder", "(default: Thunder)",
+					/*rejectNoun=*/nullptr, /*showClear=*/true, /*undo=*/true, "Weather/Thunder Sound");
+				ImGui::EndDisabled();
+				hint("The beds fade with the weather by themselves: rain and snow with how much "
+				     "falls, wind with the wind speed, storm with wind and rain together. An "
+				     "empty slot plays the engine's sound; drop an audio asset to replace it. "
+				     "The bus falls back to the clip's own, then master.");
 
 			}
 			if (!quiet && !only) ImGui::Separator();
@@ -1571,7 +1700,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				auto& l = alc->layers[i];
 				ImGui::PushID(static_cast<int>(i));
-				ImGui::Separator();
+				EditorWidgets::subHeading(("Layer " + std::to_string(i + 1)).c_str());
 
 				// The name is what the scripting API addresses, so it comes
 				// first. Edited in place like every other InputText row here
@@ -1673,7 +1802,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			{
 				auto& f = ik->feet[i];
 				ImGui::PushID(static_cast<int>(i));
-				ImGui::Separator();
+				EditorWidgets::subHeading(("Foot " + std::to_string(i + 1)).c_str());
 
 				// The three names invalidate the resolution cache, so they set the
 				// dirty flag rather than relying on it being noticed next frame.
@@ -1723,7 +1852,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				trackEdit();
 			}
 
-			ImGui::Separator();
+			EditorWidgets::subHeading("Look At");
 			auto& la = ik->lookAt;
 			EditorWidgets::checkbox("Look At", &la.enabled); trackEdit();
 			if (la.enabled)
@@ -1998,7 +2127,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				}
 				if (slots.size() > 1)
 				{
-					ImGui::SeparatorText("Slot Overrides");
+					EditorWidgets::subHeading("Slot Overrides");
 					for (size_t i = 0; i < slots.size(); ++i)
 					{
 						// What the slot draws when left empty: its own material,
@@ -2049,7 +2178,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 
 				// Surface (PBR scalars) — applied live (the renderer reads them
 				// from the shared MaterialAsset each frame); "Save Material" persists.
-				ImGui::SeparatorText("Surface");
+				EditorWidgets::subHeading("Surface");
 				Row::colorEdit3("Base Color", mat->baseColor);
 				Row::sliderFloat("Metallic",  &mat->metallic,  0.0f, 1.0f, "%.2f");
 				Row::sliderFloat("Roughness", &mat->roughness, 0.0f, 1.0f, "%.2f");
@@ -2101,7 +2230,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				// extractor merges them onto the material's defaults each frame.
 				if (!mat->graphParamNames.empty())
 				{
-					ImGui::SeparatorText("Material Parameters (this entity)");
+					EditorWidgets::subHeading("Material Parameters (this entity)");
 					// Index of the override for `nm`, or -1. Index-based (never a pointer
 					// into the vector) so a push_back/erase this frame can't dangle.
 					auto overrideIndex = [&](const std::string& nm) -> int {
@@ -2461,7 +2590,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// ── Lag ──────────────────────────────────────────────────────────
 			// Only the KNOBS live here. The smoothed pose behind them is play
 			// state, is not saved, and has nothing an author could set.
-			ImGui::SeparatorText("Lag");
+			EditorWidgets::subHeading("Lag");
 			EditorWidgets::checkbox("Camera Lag", &rig->lag.enabled); trackEdit();
 			if (rig->lag.enabled)
 			{
@@ -2639,6 +2768,64 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RopeComponent>(entity); }
 	}
 
+	// ── Spline ──────────────────────────────────────────────────────────────
+	// A line or an outline through its control points, in the entity's own space.
+	// It renders nothing and builds nothing by itself: the viewport draws it as a
+	// guide, and whatever uses it (a lake shore, a path) reads the points. The
+	// Spline mode of the Scene toolbar draws and edits the same data; this is the
+	// numeric view of it, and the way to type a point in exactly.
+	if (auto* spline = registry.try_get<SplineComponent>(entity))
+	{
+		if (componentHeader("Spline", true, removed))
+		{
+			EditorWidgets::checkbox("Closed##spline", &spline->closed); trackEdit();
+
+			char summary[96];
+			std::snprintf(summary, sizeof summary, "%zu point%s, %.2f m long",
+			              spline->controlPoints.size(),
+			              spline->controlPoints.size() == 1 ? "" : "s",
+			              HE::spline::Curve(*spline).length());
+			ImGui::TextDisabled("%s", summary);
+			if (spline->closed && spline->controlPoints.size() < 3)
+				hint("A closed spline needs at least three points; with fewer it is drawn open.");
+
+			// One fixed label for every row, so the tooltip lookup and the help
+			// audit see a single control rather than "Point 0", "Point 1" … (the
+			// same arrangement as the rope's control points).
+			ImGui::Spacing();
+			EditorWidgets::subHeading("Control Points");
+			for (int i = 0; i < static_cast<int>(spline->controlPoints.size()); ++i)
+			{
+				ImGui::PushID(i);
+				Row::dragFloat3("Point", &spline->controlPoints[static_cast<size_t>(i)].x,
+				                0.05f, -100000.0f, 100000.0f);
+				trackEdit();
+				// A spline may be emptied: every state on the way to a finished
+				// line is a valid component, the viewport tool deletes down to
+				// zero too.
+				if (EditorWidgets::dangerSmallButton("Remove##splinept"))
+				{
+					if (undo) undo->snapshotNow();
+					spline->controlPoints.erase(spline->controlPoints.begin() + i);
+					--i;
+				}
+				ImGui::PopID();
+			}
+			if (ImGui::Button("+ Point"))
+			{
+				if (undo) undo->snapshotNow();
+				// Carries on in the direction of the last segment, so the new point
+				// is somewhere you can see and grab; a lone point steps along +X.
+				const size_t n = spline->controlPoints.size();
+				const glm::vec3 tail = n ? spline->controlPoints[n - 1] : glm::vec3(0.0f);
+				glm::vec3 step = (n >= 2) ? (tail - spline->controlPoints[n - 2]) : glm::vec3(1.0f, 0.0f, 0.0f);
+				if (glm::dot(step, step) < 1e-8f) step = glm::vec3(1.0f, 0.0f, 0.0f);
+				spline->controlPoints.push_back(tail + step);
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SplineComponent>(entity); }
+	}
+
 	// ── Trail ───────────────────────────────────────────────────────────────
 	// The other half of the same feature and the opposite data rate: nothing here
 	// is geometry, it is the rule by which the entity drops points behind itself.
@@ -2686,6 +2873,15 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TrailComponent>(entity); }
 	}
 
+	// The Rigid Body and Character Controller rows share one set of layer names;
+	// built at the first use, since most entities carry neither component.
+	std::optional<CollisionLayerNames> layerNames;
+	const auto collisionLayers = [&]() -> const CollisionLayerNames&
+	{
+		if (!layerNames) layerNames.emplace(ctx);
+		return *layerNames;
+	};
+
 	// ── Rigid Body ──────────────────────────────────────────────────────────
 	if (auto* r = registry.try_get<RigidBodyComponent>(entity))
 	{
@@ -2702,10 +2898,19 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Friction",    &r->friction,    0.01f, 0.0f, 1.0f); trackEdit();
 			Row::dragFloat("Restitution", &r->restitution, 0.01f, 0.0f, 1.0f); trackEdit();
 			EditorWidgets::checkbox("2D Physics",   &r->is2D); trackEdit();
+			// What water does to this body (Thema 179). Both are read at every physics
+			// step, so changing them while the game plays takes effect at once, and
+			// neither is part of what the body is built from: nothing is rebuilt.
+			EditorWidgets::checkbox("Affected By Water", &r->affectedByWater); trackEdit();
+			// "##rb": a CollapsingHeader opens no id scope, and the Environment's cloud
+			// "Density" is a bare one too; the help lookup ignores the suffix.
+			Row::dragFloat("Density##rb", &r->density, 10.0f, 0.0f, 20000.0f,
+			               r->density > 0.0f ? "%.0f kg/m3" : "from mass"); trackEdit();
+			r->density = std::max(0.0f, r->density);
 			// Which channel this body sits in — what the project's collision
 			// matrix looks up when it decides whether a pair may touch.
 			collisionLayerRow("Collision Layer##rigidbody", &r->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<RigidBodyComponent>(entity); }
 	}
@@ -2994,7 +3199,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// because a character need not have one. It decides what BLOCKS the
 			// character as it walks.
 			collisionLayerRow("Collision Layer##character", &cc->collisionLayer,
-			                  CollisionLayerNames(ctx), undo);
+			                  collisionLayers(), undo);
 			ImGui::Separator();
 			ImGui::BeginDisabled(true);
 			EditorWidgets::checkbox("Is Grounded", &cc->isGrounded);
@@ -3030,6 +3235,22 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::EndDisabled();
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<SaveStateComponent>(entity); }
+	}
+
+	// ── Streaming (where it lives in a scene split into cells) ──────────────
+	if (auto* st = registry.try_get<StreamingComponent>(entity))
+	{
+		if (componentHeader("Streaming", true, removed))
+		{
+			int mode = static_cast<int>(st->mode);
+			if (Row::comboZ("Mode##streaming", &mode, "Auto Resident "))
+				st->mode = mode == 0 ? StreamingComponent::Mode::Auto : StreamingComponent::Mode::Resident;
+			trackEdit();
+			hint("Read when the scene is split into cells (Streaming tab). Resident keeps this "
+			     "entity, and the top-level subtree it is in, in the always-loaded base scene; "
+			     "Auto leaves it to the splitter. Split again after changing it.");
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<StreamingComponent>(entity); }
 	}
 
 	// ── Script (Lua / Python / HorizonCode class) ───────────────────────────
@@ -3179,7 +3400,7 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// Tessellation: a level finer than LOD0 for the chunks near the
 			// camera, smooth between the height samples, plus a detail map's
 			// displacement. Any change rebuilds the chunks (changed → dirty).
-			ImGui::SeparatorText("Tessellation");
+			EditorWidgets::subHeading("Tessellation");
 			{
 				static const char* const kFactors[] = { "Off", "2x", "4x" };
 				int f = t->tessellationFactor >= 4 ? 2 : (t->tessellationFactor >= 2 ? 1 : 0);
@@ -3204,10 +3425,29 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::EndDisabled();
 			}
 
+			// Water: where the sheets of this landscape's lakes and brushed water
+			// end against the ground. The water's own settings, so they go through
+			// setShoreClip and stay out of `changed` — which would regenerate every
+			// chunk of the landscape for a flag that only the water reads.
+			EditorWidgets::subHeading("Water");
+			{
+				bool clip = t->water.clipToGround;
+				if (EditorWidgets::checkbox("Clip To Ground##tcw", &clip))
+					HE::water::setShoreClip(*t, clip, t->water.shoreOvershoot);
+				trackEdit();
+				ImGui::BeginDisabled(!t->water.clipToGround);
+				float over = t->water.shoreOvershoot;
+				if (Row::dragFloat("Shore Overshoot##tcw", &over, 0.01f, 0.0f,
+				                   HE::water::kMaxShoreOvershoot, "%.2f m"))
+					HE::water::setShoreClip(*t, t->water.clipToGround, over);
+				trackEdit();
+				ImGui::EndDisabled();
+			}
+
 			// Noise is a one-time creation input: it is baked into editable
 			// heights when the landscape is created, so these are read-only here
 			// (shown for reference) and can no longer change the terrain.
-			ImGui::SeparatorText("Noise (set at creation)");
+			EditorWidgets::subHeading("Noise (set at creation)");
 			ImGui::BeginDisabled();
 			Row::inputInt("Seed##tc",       &t->seed);
 			int oct = t->octaves;
@@ -3324,11 +3564,79 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 	}
 
 	// ── Foliage ──────────────────────────────────────────────────────────────
-	if (auto* fol = registry.try_get<FoliageComponent>(entity))
+	if (auto* folc = registry.try_get<FoliageComponent>(entity))
 	{
 		if (componentHeader("Foliage", true, removed))
 		{
 			EditorWidgets::WrapText wrap;
+			// One row per layer (one kind of plant: grass, a bush, a tree), the
+			// chosen one's fields below. The Landscape panel's Foliage brush paints
+			// the same chosen layer (FoliageComponent::activeLayer), so picking a
+			// layer here and painting it there go together.
+			if (folc->layers.empty()) folc->layers.emplace_back();   // never empty, see FoliageComponent
+			folc->activeLayer = static_cast<int>(folc->activeIndex());
+			for (size_t i = 0; i < folc->layers.size(); ++i)
+			{
+				FoliageLayer& l = folc->layers[i];
+				ImGui::PushID(static_cast<int>(i));
+				EditorWidgets::checkbox("##folvis", &l.visible); trackEdit();
+				EditorWidgets::helpForKey("Foliage/Layer Visible");
+				ImGui::SameLine();
+				const std::string label = foliageLayerLabel(l, i) + "  ("
+				                        + std::to_string(l.cachedInstances.size()) + ")";
+				if (ImGui::Selectable(label.c_str(), folc->activeLayer == static_cast<int>(i)))
+					folc->activeLayer = static_cast<int>(i);
+				EditorWidgets::helpForKey("Foliage/Layer");
+				ImGui::PopID();
+			}
+			ImGui::BeginDisabled(folc->layers.size() >= FoliageComponent::kMaxLayers);
+			if (EditorWidgets::smallButton("Add Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Layer");
+				folc->addLayer();
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Layer##fol");
+			ImGui::SameLine();
+			// The last layer stays: a component without one would be a component
+			// that does nothing, and removing the component says that better.
+			ImGui::BeginDisabled(folc->layers.size() <= 1);
+			if (EditorWidgets::dangerSmallButton("Remove Layer##fol"))
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Layer");
+				folc->layers.erase(folc->layers.begin() + static_cast<std::ptrdiff_t>(folc->activeIndex()));
+				folc->activeLayer = static_cast<int>(folc->activeIndex());
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Remove Layer##fol");
+			ImGui::Separator();
+
+			FoliageLayer* fol = folc->active();
+			Row::inputText("Name##fol", &fol->name); trackEdit();
+			// The engine's own layer meshes (Engine/Meshes, written by mesh_gen) with the
+			// settings that suit them: mesh, detail levels, density, shadows and the
+			// placement rules. Everything stays editable below; applying overwrites it.
+			{
+				static int presetKind = 0;
+				Row::comboZ("Mesh Preset##fol", &presetKind, "Grass Tuft\0Pebble\0Rock A\0Rock B\0Rock C\0Snow Drift\0");
+				ImGui::SameLine();
+				if (EditorWidgets::smallButton("Apply Preset##fol"))
+				{
+					if (undo) undo->snapshotNow("Apply Foliage Mesh Preset");
+					const HE::LayerMeshKind kind = static_cast<HE::LayerMeshKind>(std::clamp(presetKind, 0, HE::kLayerMeshKindCount - 1));
+					HE::applyLayerMeshPreset(*fol, kind);
+					// The meshes are engine FILES: nothing loads them on its own, and a mesh
+					// that is not resident draws as the fallback cube without a word (see the
+					// cross card below). By UUID once the engine folder is scanned, else by path.
+					for (int lv = 0; lv < HE::layerMeshLevelCount(kind) && ctx.contentManager; ++lv)
+						if (!ctx.contentManager->ensureResident(HE::layerMeshLevelId(kind, lv))
+						    && ctx.contentManager->loadAsset(HE::layerMeshLevelPath(kind, lv)) != HE::layerMeshLevelId(kind, lv))
+							HE_LOG_WARN(Editor, "Foliage: the engine mesh %s is not available — the layer draws the fallback mesh",
+							            HE::layerMeshLevelPath(kind, lv).c_str());
+					trackEdit();
+				}
+				EditorWidgets::helpForLabel("Apply Preset##fol");
+			}
 			// The layer had no way to be pointed at a mesh from here at all:
 			// a Foliage component added from "Add Component" kept a null mesh
 			// and scattered nothing, with only a log line to say why. Same
@@ -3354,8 +3662,113 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::dragFloat("Min Scale##fol",     &fol->minScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragFloat("Max Scale##fol",     &fol->maxScale,     0.01f, 0.01f, 10.f);  if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			Row::dragInt("Seed##fol", &fol->seed, 1);                    if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			// What the renderer does with the layer, not where it grows: no re-scatter.
+			EditorWidgets::checkbox("Cast Shadows##fol", &fol->castsShadow); trackEdit();
+			EditorWidgets::checkbox("Ambient Occlusion##fol", &fol->contributesAO); trackEdit();
+			Row::dragFloat("Shadow Distance##fol", &fol->shadowDistance, 1.0f, 0.0f, 2000.f,
+			               fol->shadowDistance > 0.0f ? "%.0f m" : "= Draw Distance"); trackEdit();
+
+			// Where the layer may grow (FoliageLayer::slopeMin ..): all of it decides
+			// the scatter, so every edit re-scatters this layer when it is let go.
+			EditorWidgets::subHeading("Placement");
+			EditorWidgets::helpForKey("Foliage/Placement");
+			Row::dragFloat("Slope Min##fol", &fol->slopeMin, 0.005f, 0.0f, 1.0f, "%.2f");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Slope Max##fol", &fol->slopeMax, 0.005f, 0.0f, 1.0f, "%.2f");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Height Min##fol", &fol->heightMin, 0.5f, -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit,
+			               fol->heightMin > -FoliageLayer::kNoHeightLimit ? "%.1f m" : "no limit");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			Row::dragFloat("Height Max##fol", &fol->heightMax, 0.5f, -FoliageLayer::kNoHeightLimit, FoliageLayer::kNoHeightLimit,
+			               fol->heightMax < FoliageLayer::kNoHeightLimit ? "%.1f m" : "no limit");
+			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
+			{
+				static const char* const kWeightItems[] = { "Off", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
+				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7" };
+				int wl = fol->weightLayer + 1;
+				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, 9))
+				{
+					if (undo) undo->snapshotNow("Foliage Paint Layer");
+					fol->weightLayer = wl - 1;
+					fol->dirty = true;
+				}
+			}
+
+			// Farther detail levels (FoliageLayer::lods): a simpler mesh, a thinner
+			// layer, the engine's cross card at the far end. The mesh above is the
+			// level the camera stands in; none of this re-scatters.
+			EditorWidgets::subHeading("Detail Levels");
+			EditorWidgets::helpForKey("Foliage/Detail Levels");
+			int  removeLod = -1;
+			bool sortLods  = false;
+			for (size_t k = 0; k < fol->lods.size(); ++k)
+			{
+				FoliageLod& d = fol->lods[k];
+				ImGui::PushID(static_cast<int>(k));
+				ImGui::Text("Level %zu", k + 1);
+				ImGui::SameLine();
+				if (EditorWidgets::smallButton("Cross Card##fol"))
+				{
+					if (undo) undo->snapshotNow("Foliage Level Cross Card");
+					d.meshAssetId = HE::kEngineCrossCardMeshId;
+					// The card is an engine FILE: nothing loads it on its own, and a mesh
+					// that is not resident draws as the fallback cube without a word. By
+					// UUID once the engine folder is scanned, by path before that.
+					if (ctx.contentManager && !ctx.contentManager->ensureResident(HE::kEngineCrossCardMeshId)
+					    && ctx.contentManager->loadAsset("Engine/Meshes/CrossCard.hasset") != HE::kEngineCrossCardMeshId)
+						HE_LOG_WARN(Editor, "Foliage: the engine cross card (Engine/Meshes/CrossCard.hasset) is not "
+						                    "available — the level draws the fallback mesh");
+				}
+				EditorWidgets::helpForLabel("Cross Card##fol");
+				ImGui::SameLine();
+				if (EditorWidgets::dangerSmallButton("Remove Level##fol")) removeLod = static_cast<int>(k);
+				EditorWidgets::helpForLabel("Remove Level##fol");
+				EditorWidgets::assetDropSlot(ctx, "Mesh", d.meshAssetId,
+						HE::AssetType::StaticMesh, "follodmesh",
+						"(none — the layer's mesh, thinned)", "static mesh", /*showClear=*/true);
+				EditorWidgets::helpForKey("Foliage/Level Mesh");
+				if (EditorWidgets::assetDropSlot(ctx, "Material", d.materialAssetId,
+						HE::AssetType::Material, "follodmat",
+						"(none — the layer's material)", "material",
+						/*showClear=*/true) != EditorWidgets::SlotAction::None
+				    && ctx.renderer && d.materialAssetId != HE::UUID{})
+					ctx.renderer->InvalidateMaterial(d.materialAssetId);
+				EditorWidgets::helpForKey("Foliage/Level Material");
+				Row::dragFloat("Level Distance##fol", &d.distance, 1.0f, 0.0f, 2000.f, "from %.0f m"); trackEdit();
+				if (ImGui::IsItemDeactivatedAfterEdit()) sortLods = true;
+				Row::dragFloat("Level Density##fol", &d.density, 0.01f, 0.0f, 1.0f, "%.2f"); trackEdit();
+				if (d.distance >= fol->drawDistance)
+					ImGui::TextDisabled("Starts beyond the Draw Distance: never drawn");
+				ImGui::PopID();
+			}
+			if (removeLod >= 0)
+			{
+				if (undo) undo->snapshotNow("Remove Foliage Level");
+				fol->lods.erase(fol->lods.begin() + removeLod);
+			}
+			// Kept in distance order, the order the list reads in and the file stores.
+			if (sortLods)
+				std::stable_sort(fol->lods.begin(), fol->lods.end(),
+				                 [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			ImGui::BeginDisabled(fol->lods.size() >= FoliageLayer::kMaxLods);
+			if (EditorWidgets::smallButton("Add Level##fol"))
+			{
+				if (undo) undo->snapshotNow("Add Foliage Level");
+				// Halfway out for the first, then halfway from the last level to the edge.
+				const float last = fol->lods.empty() ? 0.0f : fol->lods.back().distance;
+				FoliageLod d;
+				d.distance = std::round(last + (fol->drawDistance - last) * 0.5f);
+				fol->lods.push_back(d);
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Add Level##fol");
+			if (!fol->lods.empty())
+			{
+				Row::dragFloat("Level Hysteresis##fol", &fol->lodHysteresis, 0.1f, 0.0f, 50.f, "%.1f m"); trackEdit();
+			}
+			ImGui::Separator();
 			ImGui::Text("Instances: %zu", fol->cachedInstances.size());
-			if (ImGui::Button("Regenerate")) { fol->dirty = true; trackEdit(); }
+			if (ImGui::Button("Regenerate")) { folc->dirty = true; trackEdit(); }
 			// The painted density mask is authored in Landscape mode's Foliage
 			// brush; here it is only reported and, if need be, dropped.
 			if (fol->densityMask.empty())
@@ -3616,6 +4029,7 @@ constexpr AddRow kRenderingRows[] = {
 	addRow<FoliageComponent>("Foliage"),
 	addRow<LODComponent>("LOD"),
 	addRow<RopeComponent>("Rope"),
+	addRow<SplineComponent>("Spline"),
 	addRow<TrailComponent>("Trail"),
 };
 constexpr AddRow kPhysicsRows[] = {
@@ -3659,6 +4073,7 @@ constexpr AddRow kGameplayRows[] = {
 	// to give it logic, and the gate was hiding exactly the component you need.
 	addRow<ScriptComponent>("Script"),
 	addRow<SaveStateComponent>("Save State"),
+	addRow<StreamingComponent>("Streaming"),
 };
 constexpr AddRow kNavigationRows[] = {
 	addRow<NavMeshComponent>("Nav Mesh"),
@@ -3687,14 +4102,14 @@ constexpr AddGroup kAddGroups[] = {
 
 // Case-insensitive "needle somewhere in haystack" — the same test the Outliner
 // and Content Browser searches apply, so typing "mesh" finds Mesh, Skeletal
-// Mesh and Nav Mesh alike.
-bool labelMatches(const char* label, const std::string& needle)
+// Mesh and Nav Mesh alike. The needle comes already lowered: the caller tests
+// every row against the same one.
+bool labelMatches(const char* label, const std::string& loweredNeedle)
 {
-	if (needle.empty()) return true;
-	std::string hay(label), n(needle);
+	if (loweredNeedle.empty()) return true;
+	std::string hay(label);
 	std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return std::tolower(c); });
-	std::transform(n.begin(),   n.end(),   n.begin(),   [](unsigned char c) { return std::tolower(c); });
-	return hay.find(n) != std::string::npos;
+	return hay.find(loweredNeedle) != std::string::npos;
 }
 } // namespace
 #endif // HE_IMGUI_ENABLED
@@ -3844,11 +4259,14 @@ bool addComponentMenu(HorizonWorld& world, const std::vector<Entity>& entities, 
 		// ── Searching: the hits, flat, each with its group beside it ────────
 		int  hits  = 0;
 		bool first = true;
+		std::string loweredFilter = s_filter;
+		std::transform(loweredFilter.begin(), loweredFilter.end(), loweredFilter.begin(),
+		               [](unsigned char c) { return std::tolower(c); });
 		for (const AddGroup& g : kAddGroups)
 			for (int i = 0; i < g.count; ++i)
 			{
 				const AddRow& row = g.rows[i];
-				if (!anyLacks(row) || !labelMatches(row.label, s_filter)) continue;
+				if (!anyLacks(row) || !labelMatches(row.label, loweredFilter)) continue;
 				++hits;
 				// The group beside the hit: "Mesh" and "Nav Mesh" are told
 				// apart by where they live as much as by their names.

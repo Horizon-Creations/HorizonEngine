@@ -1,0 +1,21 @@
+label: d22d906-base-det-r2
+attempt: 3
+editor: /tmp/he237/cur_d906/Editor/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'BloomEnabled=true', 'BloomThreshold=1.0', 'BloomIntensity=0.6000000238418579', 'SSAOEnabled=true', 'SSAORadius=0.5', 'SSAOIntensity=1.0', 'SSAOMethod=0', 'DoFEnabled=false', 'DoFFocusDistance=10.0', 'DoFFocusRange=4.0', 'DoFAperture=2.799999952316284', 'MotionBlurEnabled=false', 'MotionBlurIntensity=0.5', 'MotionBlurMax=24.0', 'AntiAliasing=1', 'AASharpness=0.3499999940395355', 'RenderScale=1.0', 'SpecularAA=true', 'SpecularAAStrength=1.0', 'RenderPath=1', 'GlobalIlluminationEnabled=true', 'GIIndirectIntensity=1.0', 'GILightRadius=0.5', 'GIShadowQuality=1', 'OcclusionCulling=true', 'SSREnabled=false', 'SSRIntensity=1.0', 'SSRMaxRoughness=0.6000000238418579', 'SSRQuality=1', 'GIReflectionsEnabled=false', 'GIReflIntensity=1.0', 'GIReflMaxRoughness=0.6000000238418579', 'GIReflQuality=1', 'GIReflBounces=1', 'GIReflBlur=false', 'RenderScale=1.86']
+before:
+  uptime:    load averages: 2.45 2.59 2.23
+  locked:    none
+  lowpower:  0
+  gpu:       52
+  power:     Now drawing from 'AC Power'
+  busy:      32.5% WindowServer; 20.4% Hive; 9.8% Python; 7.3% clion
+  foreign:   none
+after:
+  uptime:    load averages: 2.24 2.52 2.22
+  locked:    none
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      39.7% WindowServer; 20.3% Hive; 15.6% Dock; 9.6% cmake
+  foreign:   cmake(13.9%)

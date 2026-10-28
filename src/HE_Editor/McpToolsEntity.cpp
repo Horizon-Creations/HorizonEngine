@@ -1,4 +1,4 @@
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 
 #include "EditorCommands.h"
 #include "StructuralSync.h"
@@ -464,15 +464,14 @@ void registerEntityTools(McpToolRegistry& registry, EditorCommands& cmds)
 			// that can both name a position is a bug waiting for the first client
 			// that fills in both.
 			float v9[9] = { 0, 0, 0, 0, 0, 0, 1, 1, 1 };
+			float tmp[3];
 			if (comps.contains("transform"))
 			{
 				const json& tr = comps["transform"];
-				float tmp[3];
 				if (vec3Arg(tr, "position", tmp)) { v9[0] = tmp[0]; v9[1] = tmp[1]; v9[2] = tmp[2]; }
 				if (vec3Arg(tr, "rotation", tmp)) { v9[3] = tmp[0]; v9[4] = tmp[1]; v9[5] = tmp[2]; }
 				if (vec3Arg(tr, "scale",    tmp)) { v9[6] = tmp[0]; v9[7] = tmp[1]; v9[8] = tmp[2]; }
 			}
-			float tmp[3];
 			if (vec3Arg(args, "position", tmp)) { v9[0] = tmp[0]; v9[1] = tmp[1]; v9[2] = tmp[2]; }
 			if (vec3Arg(args, "rotation", tmp)) { v9[3] = tmp[0]; v9[4] = tmp[1]; v9[5] = tmp[2]; }
 			if (vec3Arg(args, "scale",    tmp)) { v9[6] = tmp[0]; v9[7] = tmp[1]; v9[8] = tmp[2]; }

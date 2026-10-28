@@ -60,7 +60,7 @@ namespace
 		"Foliage",     "LOD",       "Weather",     "UI",         "Widget",
 		"Script",      "Lua",       "Python",      "HorizonCode","GameLogic",
 		"Net",         "Editor",    "Tool",        "Profiler",   "SourceControl",
-		"ContentSync", "AntiCheat", "Replication",
+		"ContentSync", "AntiCheat", "Replication", "SelfUpdate",
 	};
 	static_assert(sizeof(kCategoryNames) / sizeof(kCategoryNames[0]) == kCatCount,
 	              "kCategoryNames must stay index-aligned with HE::Log::Cat");
@@ -471,9 +471,11 @@ bool openLogFile(const std::string& path, int keepBackups)
 		s_file = nullptr;
 	}
 
+	const fs::path p(path);
+	const fs::path dir = p.parent_path();
+
 	{
 		std::error_code ec;
-		const fs::path dir = fs::path(path).parent_path();
 		if (!dir.empty()) fs::create_directories(dir, ec);
 	}
 
@@ -482,8 +484,6 @@ bool openLogFile(const std::string& path, int keepBackups)
 	if (keepBackups > 0)
 	{
 		std::error_code ec;
-		const fs::path p    = fs::path(path);
-		const fs::path dir  = p.parent_path();
 		const std::string stem = p.stem().string();
 		const std::string ext  = p.extension().string();
 		const auto backup = [&](int n) {

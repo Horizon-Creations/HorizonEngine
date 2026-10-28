@@ -77,6 +77,11 @@ enum class MatNodeType : uint8_t
     CameraPos,      // heLight.camPos.xyz
     CameraDistance, // length(camPos - worldPos)
     ScreenPos,      // gl_FragCoord.xy (raw pixels)
+    Weather,        // the scene's WEATHER as five floats (heLight.weather / weather2): Wetness, Snow
+                    // Amount (the generic ground response every lit surface already gets), and the
+                    // three the Weather details panel sets for MATERIALS to read — Puddles and Snow
+                    // Cover (0..1) and Puddle Size (metres, >= 0.5). What the weather material
+                    // functions are built on.
 
     // ── v5: baked constants, more parameter types, logic ──
     ConstBool,      // p[0] = 0/1 (baked literal) → float 0.0/1.0
@@ -188,6 +193,59 @@ enum class MatNodeType : uint8_t
     NormalMapBombSample,        // (UV, Cell) → world-space N
     TextureArrayBombSample,     // (UV, Slice, Cell) → RGB + A
     NormalMapArrayBombSample,   // (UV, Slice, Cell) → world-space N
+
+    // ── v15: bombing cells as data (Thema 152, Schritt 8) ──
+    // The hex grid of the nodes above WITHOUT a texture read: for the pixel's three
+    // hexes, the blend weights and random numbers, so a PROCEDURAL pattern can be
+    // bombed too — evaluate it once per hex with that hex's random offset, angle
+    // or phase, blend the three results by the weights. A sum of sines repeats
+    // exactly (the water's swell is one), and bombing is what breaks that up.
+    //   inputs : UV (the hex grid lives on it, e.g. World Position xz), Cell (hex
+    //            spacing in UV units, e.g. metres), Blend (exponent of the weights,
+    //            clamped to 1..32: ~7 = sharp seams for a texture, ~1..2 = broad
+    //            blends for a smooth signal)
+    //   outputs: Weights (x,y,z = the three hexes, sum 1) and Random A, B, C (x,y,z
+    //            = one number in [0,1) per hex each, independent of each other)
+    //   p[0]   = Seed (rounded to an integer; another seed = another set of numbers)
+    // The numbers come from the integer hash the bombing nodes use (pcg3d of the hex
+    // index), so every backend picks the same ones bit for bit.
+    BombCells,
+
+    // ── v16: the rings on the water (Thema 179, Schritt 3) ──
+    // The rings the water physics raised where a body went into or out of the surface
+    // (heLight.waterRipples / waterRippleA / waterRippleB, which HE::FillMaterialWater
+    // fills from IRenderer::GetWaterRipples), summed at one point. The engine water
+    // subtracts Slope from its wave normal and adds Foam to its foam mask, so a crate
+    // that lands on a lake leaves rings in the shader.
+    //   input  : Position (world XZ in metres; unconnected = this fragment's world XZ)
+    //   outputs: Height (metres), Slope (the height's gradient in world XZ, what a
+    //            normal subtracts to lean with the ring) and Foam (0..1, white on the
+    //            crest of a strong ring)
+    // Without rings (a preview, a UI pass, a scene with no splash) all three are 0.
+    // Fragment stage only: a World Position Offset body gets zeros, since the rings
+    // are a normal-and-foam effect on a flat surface.
+    WaterRipple,
+
+    // ── v17: the sun (Thema 205, Schritt 3) ──
+    // The scene's dominant directional light as a material input, read from the
+    // lighting prefix every backend already fills (heLight.sunDir.xyz / sunColor.rgb:
+    // RenderWorld::dominantDirectionalLight, so it dims at night and under cloud the
+    // way the shadows do). heLitP lights a surface from the sun on its own; this is
+    // for light it cannot see — the engine water's underside, where the sun shines
+    // THROUGH the surface toward a camera below it.
+    //   outputs: Direction (unit world vec3 TOWARD the sun), Color (radiance, colour
+    //            times intensity)
+    // A zero-filled block (UI pass) gives zeros; both stages declare the prefix.
+    Sun,
+
+    // ── v18: FBM with its gradient (Thema 235) ──
+    // The integer-hash FBM (FBM Noise with p[0] = 1) and its analytic gradient, from the
+    // same four hashes per octave: one evaluation where a slope by finite differences took
+    // three (the engine water's chop, twelve FBMs a pixel).
+    //   inputs : UV, Scale
+    //   outputs: Value (as FBM Noise), dX and dY (the derivative of Value along UV·Scale,
+    //            what (FBM(q + h·x) − FBM(q)) / h tends to as h shrinks)
+    FbmGrad,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
@@ -277,7 +335,33 @@ enum : int {
     kMatOutputNormalPin    = 6,
     kMatOutputAOPin        = 7,
     kMatOutputWPOPin       = 8,
+    kMatOutputDisplacementPin = 9, // height along the normal, tessellation stages only
 };
+
+// GPU tessellation of a material whose Displacement pin is connected (Thema 207,
+// docs/material-graph-tessellation-displacement-entwurf-2026-10-15.md). Lives on
+// the Output node (optional JSON object "tess", written only when it differs from
+// these defaults), so collaboration syncs it with the node. The values are baked
+// into the generated displacement text, so a change is a new pipeline.
+struct MatTessSettings
+{
+    float maxFactor       = 8.0f;  // tess factor near the camera, clamped to 1..kMatTessMaxFactor
+    float fadeNear        = 5.0f;  // metres: full maxFactor up to here
+    float fadeFar         = 40.0f; // metres: factor 1 from here on
+    float maxDisplacement = 0.1f;  // metres: the height is clamped to ±this (the bounds contract)
+
+    bool operator==(const MatTessSettings& o) const
+    {
+        return maxFactor == o.maxFactor && fadeNear == o.fadeNear && fadeFar == o.fadeFar
+            && maxDisplacement == o.maxDisplacement;
+    }
+    bool operator!=(const MatTessSettings& o) const { return !(*this == o); }
+};
+// The D3D11 limit; Vulkan guarantees at least 64 (maxTessellationGenerationLevel).
+inline constexpr float kMatTessMaxFactor = 64.0f;
+// What the codegen bakes: maxFactor in 1..kMatTessMaxFactor, fadeNear >= 0,
+// fadeFar > fadeNear, maxDisplacement >= 0; a non-finite field takes its default.
+HE_API MatTessSettings matSanitizeTess(const MatTessSettings& t);
 
 // Serialized graph format version. v2 inserted Specular at pin 2 and Ambient
 // Occlusion at pin 7 of the Output node, shifting everything after them.
@@ -294,6 +378,7 @@ struct MatGraphNode
     // ParamFloat additionally uses p[1]/p[2] as slider min/max (min<max → slider UI).
     std::string group;                 // panel grouping header ("" = ungrouped)
     std::string tooltip;               // hover help shown next to the parameter
+    MatTessSettings tess;              // Output node only (optional JSON key "tess")
 };
 
 // One connection: output pin (srcNode, srcPin) → input pin (dstNode, dstPin).
@@ -471,6 +556,18 @@ struct MatShaderGen
     // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
     // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).
     std::string vertexBody;
+    // Displacement for the tessellation stages (pin kMatOutputDisplacementPin):
+    //   "// heTess <maxFactor> <fadeNear> <fadeFar> <maxDisplacement>\n"
+    //   <declarations the body needs: samplers, HeParams, helpers>
+    //   "// heDispBody\n"
+    //   <statements ending in `float heDisp = ...;`>
+    // Empty when the pin is unconnected (or the domain is User Interface): no
+    // tessellation, and every other output of this struct is byte-identical to a
+    // graph without the pin. Texture slots and parameters are shared with the
+    // fragment. matSplitDisplacement takes it apart; the renderers wrap it into
+    // their domain-stage template (MaterialShaderLibrary::tessEval).
+    // → MaterialAsset::customShaderDispGlsl.
+    std::string displacementBody;
     // Landscape paint layers this material declares, in weightmap-channel order
     // (→ MaterialAsset::graphLayerNames). Non-empty makes it a LANDSCAPE material:
     // the Landscape tool lists exactly these as its paintable layers, so the
@@ -491,6 +588,12 @@ inline constexpr int kMatMaxGraphTextures = 4;
 // packed games, so the MTRL layout needs no new field. O(1): it looks at one
 // fixed position. Hand-written GLSL without the line → 0 (all plain 2D).
 HE_API uint32_t matGlslTextureArrayMask(const std::string& glsl);
+
+// Take MatShaderGen::displacementBody apart: the tessellation settings of its
+// first line, the declaration block and the statements. False for "" and for any
+// text that is not in that form (the caller then draws without tessellation).
+HE_API bool matSplitDisplacement(const std::string& disp, MatTessSettings& tess,
+                                 std::string& declarations, std::string& statements);
 
 // Does this generated GLSL (fragment body, or the WPO vertex body) read the engine
 // clock — heLight.sunDir.w? Every node that moves with time (Time, Panner,

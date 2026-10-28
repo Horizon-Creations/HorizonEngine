@@ -17,6 +17,14 @@ on:
   # (`gh workflow run CI --ref <branch>`), the way a Windows-only link error
   # is otherwise only ever seen on main.
   workflow_dispatch:
+    inputs:
+      # The engine SDK's release lib set is push-only like the app runtimes; a
+      # branch that changes how it is built asks for it here
+      # (`gh workflow run CI --ref <branch> -f release_sdk=true`).
+      release_sdk:
+        description: "Also build the engine SDK's release lib set (push-only otherwise)"
+        type: boolean
+        default: false
 
 # One run per branch: a newer push (or a bee's dispatch on a branch whose pull
 # request already runs) cancels the one still going. Four pushes to
@@ -75,7 +83,7 @@ jobs:
 
       - name: Tidy the workspace, keep the build tree (NN-WS03)
         if: runner.environment == 'self-hosted'
-        run: git clean -ffdx -e build/ -e package/
+        run: git clean -ffdx -e build/ -e build-sdk-release/ -e package/
 
       - name: Install Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
@@ -160,6 +168,10 @@ jobs:
             libasound2-dev libpulse-dev libudev-dev libdbus-1-dev libibus-1.0-dev \
             liblz4-dev libzstd-dev python3-dev \
             libcurl4-openssl-dev
+          # desktop-file-utils / shared-mime-info / xdg-utils: not for the build but for
+          # heproj_file_types, which runs the .heproj installer for real and validates
+          # what it writes (desktop-file-validate, update-mime-database, xdg-mime).
+          sudo apt-get install -y desktop-file-utils shared-mime-info xdg-utils
 
       # The build was the whole run: Windows 46 of ~54 minutes, Linux 28,
       # macOS 21 — every run compiled everything from scratch on four cores.
@@ -226,6 +238,12 @@ jobs:
       # out of CMakeCache.txt, and spares any quoting question about the password.
       # Unset secrets are simply empty: the build then reports "not configured" and
       # the Editor works as it did before the remote library existed.
+      # HE_SELFUPDATE_* is the same for the editor's self-update account, the
+      # second, READ-ONLY one (src/HE_SelfUpdate/CMakeLists.txt; secrets
+      # SELFUPDATE_HOST/USER/PASSWORD): compiled in, so a packaged editor can check
+      # for updates without anyone setting anything. Configure-time only — these
+      # step-level variables never reach "Run tests" or the self-update live leg,
+      # which points HE_SELFUPDATE_* at its own throwaway test server at run time.
       # macOS uses static mbedTLS for the same reason Linux and Windows do, and it
       # was the only one of the three that did not: libcrypto is a LOAD-TIME edge
       # of libHorizonCore, so a shipped build carried 4,8 MB of Homebrew OpenSSL
@@ -239,6 +257,9 @@ jobs:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
 
       # Linux: build a self-contained editor package like Windows — bundle cmake so a
@@ -250,18 +271,67 @@ jobs:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
+
+      # windows-latest's image carries several CPython versions side by side
+      # (one per hostedtoolcache entry, there for actions/setup-python to pick
+      # from) and GitHub rotates which one find_package(Python3) — unhinted,
+      # root CMakeLists.txt around line 502 — treats as newest, without
+      # notice: run 39465915278 (green) built HorizonPython.dll against
+      # 3.14.8, run 39476774032 (red, same commit) against 3.15.0, and only
+      # the second failed "Run tests" with "could not load the HorizonPython
+      # plugin" (test_python_scripting.cpp:59, he_tests/DynLib.cpp logs the
+      # LoadLibrary GetLastError beneath that, into HorizonEngine.log — not
+      # captured in the ctest output above). Neither hostedtoolcache
+      # directory ever showed up on PATH in either run's logs, so whatever
+      # made 3.14.8's DLL resolvable at runtime isn't something this pin
+      # relies on knowing: actions/setup-python fetches one fixed version and
+      # prepends its directory to PATH for every later step in this job,
+      # so Configure below and "Run tests" are guaranteed to agree on the same
+      # pythonXY.dll regardless of what the image does for unpinned versions.
+      # Pinned to 3.14 — the version the last known-good Windows run actually
+      # used (and the one cmake/BundlePython.cmake's and
+      # src/HE_Core/ProjectExporter.cpp's own comments already name as the
+      # example, "python314.dll") — rather than jumping to some other minor,
+      # to keep this a pure CI fix with no other behaviour change.
+      # NN-WS03 is a persistent box with one Python that does not rotate on
+      # its own — left alone, matching the brief ("Windows CI only").
+      - name: Pin Python (Windows, github-hosted)
+        if: runner.os == 'Windows' && runner.environment != 'self-hosted'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
       # Windows: build a self-contained editor package — bundle cmake, deploy into the
       # workspace for the packaging step, and use static mbedTLS so there's no external
       # OpenSSL DLL dependency (a clean PC then needs only the C++ toolchain at build time).
+      #
+      # Python3_ROOT_DIR, when set (github-hosted only — pythonLocation comes
+      # from the setup-python step above), is FindPython3's highest-priority
+      # hint and pins find_package(Python3) to that exact interpreter.
+      # Python3_FIND_REGISTRY=NEVER alongside it so a Development.Embed
+      # component FindPython3 can't find under that root doesn't fall back to
+      # the registry and silently reintroduce the version drift. Both empty
+      # on NN-WS03, where find_package keeps its old unconstrained search.
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         env:
           HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
           HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
           HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
-        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package"
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
+        run: |
+          $pyArgs = @()
+          if ($env:pythonLocation) {
+            $pyArgs += "-DPython3_ROOT_DIR=$env:pythonLocation"
+            $pyArgs += "-DPython3_FIND_REGISTRY=NEVER"
+          }
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_BUNDLE_CMAKE=ON -DHE_PREFER_MBEDTLS=ON "-DDEPLOY_DIR=${{ github.workspace }}/package" @pyArgs
 
       # Configure has fetched everything; nothing is compiled yet.
       - name: Save FetchContent dependencies
@@ -296,7 +366,15 @@ jobs:
 
       # Four jobs on GitHub's four cores; on NN-WS03 Ninja's default (all of
       # its 32 threads — it has room for that next to the bees).
+      #
+      # id: build — the self-update steps below gate on `steps.build.outcome`
+      # rather than just `!cancelled()`, the way the lavapipe job's own build
+      # step already does: without it, a build failure (the Windows C2026
+      # literal-length bug step 3 flagged is exactly this shape) would show up
+      # a confusing second time as "executable not found" instead of being
+      # skipped in favour of the one real failure.
       - name: Build
+        id: build
         run: cmake --build build ${{ runner.environment == 'self-hosted' && '--parallel' || '-j 4' }}
 
       # -j because the suite waits far more than it computes: real git
@@ -311,6 +389,90 @@ jobs:
         env:
           HE_NET_LOOPBACK_ONLY: ${{ runner.environment == 'self-hosted' && '1' || '0' }}
         run: ctest --test-dir build --output-on-failure -j4
+
+      # Layer meshes through the foliage instancing path on the two D3D backends
+      # (Thema 180 Schritt 5): scripts/he_vk_imagetests.py's layer_meshes case with
+      # --rhi, the headless frame dump of the editor just built. On NN-WS03 that is
+      # real hardware, on a hosted runner WARP; the case is picture and log verdicts
+      # (meshes in the picture, all level files resident, cluster path ran, draws flat
+      # while the triangle count grows), nothing Vulkan-specific. Informational for now:
+      # nobody has seen this step on a Windows machine yet, so a red one is data for the
+      # next step (read the uploaded metrics.json), not a reason to fail the build.
+      - name: Layer-mesh image test (D3D11, D3D12)
+        if: ${{ runner.os == 'Windows' && !cancelled() && steps.build.outcome == 'success' }}
+        continue-on-error: true
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+          $rc = 0
+          foreach ($rhi in 'D3D11', 'D3D12') {
+            & $py scripts/he_vk_imagetests.py --editor package/Editor/HorizonEditor.exe `
+              --out "layer-mesh-shots/$rhi" --cases layer_meshes --rhi $rhi --require-device ''
+            if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE }
+          }
+          exit $rc
+
+      - name: Upload layer-mesh image-test shots (Windows)
+        if: ${{ runner.os == 'Windows' && always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer-mesh-shots-windows
+          path: layer-mesh-shots/
+          if-no-files-found: ignore
+
+      # Self-update's live leg (Thema 186 Schritt 4): a real SftpClient/libssh2
+      # session against a real server, not a mock or a directory-backed stand-in.
+      # test_selfupdate.cpp's two "live" cases (docs/editor-selfupdate-sftp-design.md,
+      # "Verification") are skipped without HE_SELFUPDATE_LIVE_TEST=1 and a real
+      # account — this script supplies both: scripts/selfupdate_test_sftp_server.py
+      # as a throwaway, read-only account on 127.0.0.1 with a password generated on
+      # the fly (never written to a file, never printed) and a one-build manifest for
+      # whichever platform this job is. No secret involved, so it runs on every PR,
+      # forks included. Its HE_SELFUPDATE_* in the environment replaces whatever
+      # account the Configure step compiled in from the SELFUPDATE_* secrets, as a
+      # whole, so this leg never touches the real update server.
+      #
+      # `pip install --target` into RUNNER_TEMP, not the ambient interpreter: on
+      # NN-WS03 this Python is the one the device's own account uses for
+      # everything else, shared with up to eight bees at once — a plain
+      # `pip install` would mutate its global site-packages for all of them and
+      # race any other install happening at the same moment.
+      #
+      # Split by OS rather than one `shell: bash` step: NN-WS03 (self-hosted
+      # Windows) isn't guaranteed a bash — the Vulkan-assert and compiler-cache
+      # steps above already say so ("PowerShell, not bash", "the action needs
+      # sh, which a Windows PC needn't have"). The pwsh branch below also picks
+      # `python` BEFORE `python3`, the same order the existing ".heproj
+      # registration" step uses: on a plain Windows PC (NN-WS03 included)
+      # `python3` resolves to the WindowsApps execution-alias stub, a real file
+      # `Get-Command`/`command -v` happily finds, that exits 49 with a
+      # Microsoft-Store nag the moment it is actually RUN — `python`, the real
+      # interpreter, is never reached if it is tried second.
+      - name: Self-update live round trip over SFTP (local test server, Windows)
+        if: ${{ runner.os == 'Windows' && !cancelled() && steps.build.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          PIP_TARGET: ${{ runner.temp }}/selfupdate-ci-deps
+        run: |
+          $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+          & $py -m pip install --quiet --disable-pip-version-check --target "$env:PIP_TARGET" paramiko
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PYTHONPATH = if ($env:PYTHONPATH) { "$env:PIP_TARGET;$env:PYTHONPATH" } else { $env:PIP_TARGET }
+          & $py scripts/selfupdate_live_ci_check.py --build-dir build
+          exit $LASTEXITCODE
+
+      - name: Self-update live round trip over SFTP (local test server)
+        if: ${{ runner.os != 'Windows' && !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        timeout-minutes: 10
+        env:
+          PIP_TARGET: ${{ runner.temp }}/selfupdate-ci-deps
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" -m pip install --quiet --disable-pip-version-check --target "$PIP_TARGET" paramiko
+          PYTHONPATH="$PIP_TARGET${PYTHONPATH:+:$PYTHONPATH}" "$PY" scripts/selfupdate_live_ci_check.py --build-dir build
 
       # The Metal backend compiles its MSL strings at RUNTIME (newLibraryWithSource)
       # and answers a failure by disabling the feature, while the build above only
@@ -358,8 +520,7 @@ jobs:
       #
       # AFTER the tests on purpose: pulling the flavour builds before ctest would let
       # a link error in a runtime nobody runs hold up the statement about whether the
-      # code is good. The two runtime_size ctest cases stay skipped because of that;
-      # the threshold check below is what judges the sizes instead.
+      # code is good.
       #
       # --source-tree hands over the editor tree's FetchContent checkouts (the one
       # actions/cache restores as build/_deps), so the flavours reuse SDL, Jolt,
@@ -389,35 +550,6 @@ jobs:
             --define HE_PORTABLE_BUILD=ON \
             --define HE_PREFER_MBEDTLS=ON
 
-      # The size guard for main, moved here from runtime-flavors.yml — that workflow
-      # is now for feature branches only, and main would otherwise lose the watch on
-      # all three runtimes at once. Game is weighed too: the editor build deployed it.
-      #
-      # Exit code 2 is the script's "nothing I may judge" — a platform or flavour with
-      # no measured threshold yet. That stays green, or the first run on a new platform
-      # goes red for the honest state it exists to establish.
-      - name: Check the runtimes against the size thresholds
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          PY=$(command -v python3 || command -v python)
-          rc=0
-          for pair in "Game:game" "AppAdvanced:app-advanced" "AppBasic:app-basic"; do
-            dir="${pair%%:*}"; flavor="${pair##*:}"
-            echo "── $flavor ──────────────────────────────────────────────"
-            set +e
-            "$PY" scripts/runtime_size.py "$DEPLOY_ROOT/$dir" \
-              --check --flavor="$flavor" --build-type=Release
-            code=$?
-            set -e
-            if [ "$code" = "2" ]; then
-              echo "(no measured threshold yet — skipped)"
-            elif [ "$code" != "0" ]; then
-              rc=1
-            fi
-          done
-          exit $rc
-
       # Windows and Linux ship package/Editor as a whole, so the runtimes have to move
       # INTO it — the same place the editor's own POST_BUILD puts Editor/Game, and the
       # only place findRuntimeBundle() looks once the editor is unzipped somewhere else
@@ -443,6 +575,81 @@ jobs:
             fi
           done
 
+      # The engine SDK's release lib set (topic 222 step 4). Every export compiles its
+      # game from the SDK, and a Shipping export needs EngineSDK/lib/release, which
+      # only a HE_BUILD_PROFILE=release tree builds (the editor tree is dev; its
+      # build installed lib/dev). A whole second engine tree, like an app flavour,
+      # so push-only for the same reason; a dispatch asks for it with release_sdk.
+      #
+      # scripts/build_engine_sdk.py takes everything but the profile from the editor
+      # tree `build`: its HE_ENGINE_SDK_DIR (the same EngineSDK/ the dev set is in,
+      # beside Editor/; on macOS out/deploy, where package_macos.sh copies it from),
+      # its options and its FetchContent checkouts, so include/ keeps the stamp the
+      # dev set was installed with. Its own DEPLOY_DIR: nothing else of the release
+      # tree may land beside the editor. It fails when any lib set's stamp differs.
+      # Before the staging below and before the DMG; the DMG's editor build
+      # reinstalls lib/dev only and leaves lib/release in place.
+      - name: Build the engine SDK's release lib set
+        id: release_sdk
+        if: github.event_name == 'push' || inputs.release_sdk
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" scripts/build_engine_sdk.py \
+            --editor-tree "${{ github.workspace }}/build" \
+            --build-dir "${{ github.workspace }}/build-sdk-release" \
+            --jobs 4
+
+      # The engine SDK (topic 222): the editor build runs the HorizonSDK target, which
+      # installs it into $DEPLOY_ROOT/EngineSDK, beside Editor/. The unzipped editor
+      # looks for <editor>/EngineSDK (every export compiles its game from it), so it
+      # moves in as the runtimes do. Not push-only like those: every editor build
+      # installs it, so a missing folder means the dependency is gone again. When the
+      # step above ran, the package has to carry both lib sets with matching stamps.
+      - name: Stage the engine SDK into the editor package
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          DEPLOY_ROOT="${DEPLOY_ROOT:-package}"
+          # HorizonSDK installs into Editor/EngineSDK itself now; the move only
+          # serves a build tree whose cache still holds the old sibling path.
+          if [ -d "$DEPLOY_ROOT/EngineSDK" ]; then
+            rm -rf "$DEPLOY_ROOT/Editor/EngineSDK"
+            mv "$DEPLOY_ROOT/EngineSDK" "$DEPLOY_ROOT/Editor/EngineSDK"
+          fi
+          if [ ! -d "$DEPLOY_ROOT/Editor/EngineSDK" ]; then
+            echo "::error::$DEPLOY_ROOT/Editor/EngineSDK missing — HorizonEditor no longer builds HorizonSDK (cmake/HorizonSDK.cmake)"
+            exit 1
+          fi
+          echo "staged EngineSDK ($(ls "$DEPLOY_ROOT/Editor/EngineSDK/lib" | tr '\n' ' '))"
+          if [ "${{ steps.release_sdk.outcome }}" = "success" ]; then
+            PY=$(command -v python3 || command -v python)
+            "$PY" scripts/build_engine_sdk.py --verify "$DEPLOY_ROOT/Editor/EngineSDK" --require dev --require release
+          fi
+
+      # .heproj file type (Thema 161): Windows and Linux have no installer, so the
+      # registration is files inside the package, FileTypes/. The ctest case
+      # heproj_file_types judged the SOURCE of those files; this judges what was
+      # DEPLOYED, byte for byte, before it is zipped. On Windows the registry is
+      # also exercised for real: register, read the keys and ask the shell what it
+      # resolves .heproj to, unregister, repeat from a path with spaces and
+      # parentheses. What stays open is a double-click on real hardware.
+      - name: Check the .heproj registration in the package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $py = if (Get-Command python -ErrorAction SilentlyContinue) { 'python' } else { 'python3' }
+          & $py tests/test_heproj_file_types.py --package package/Editor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Writes (and removes again) the .heproj keys under HKCU of the account the
+          # runner runs as, after exporting whatever was there; see the script header.
+          & scripts/windows_assets/check_heproj_registration.ps1 -EditorDir package/Editor
+          exit $LASTEXITCODE
+
+      - name: Check the .heproj registration in the package (Linux)
+        if: runner.os == 'Linux'
+        run: python3 tests/test_heproj_file_types.py --package package/Editor
+
       # The editor POST_BUILD deployed a self-contained bundle into package/Editor:
       # HorizonEditor.exe + engine DLLs + SDL3 + EngineContent/Fonts/Images + Vulkan
       # Shaders + the bundled cmake + the CPython runtime (python3XY.dll/.zip/._pth),
@@ -453,6 +660,24 @@ jobs:
       # run. It used to sit before them, which meant Windows uploaded an editor even
       # when ctest was red; it now behaves like macOS and Linux always have.
       #
+      # HorizonUpdater (Thema 186) deploys next to HorizonEditor the same way the
+      # engine DLLs do (he_deploy_dll(HorizonUpdater), src/HE_SelfUpdate/CMakeLists.txt)
+      # — a build-ordering dependency, not a packaging step, so there is nothing here
+      # that COULD silently drop it the way a hand-written packaging script could.
+      # Checked anyway, cheaply, on the raw deploy directory (works whether or not
+      # this job zips it): preflightTakeover() refuses the takeover without this file
+      # next to the running editor, so its absence is exactly the kind of thing that
+      # must fail loudly in CI rather than ship quietly broken.
+      - name: Check HorizonUpdater is deployed beside the editor (Windows)
+        if: runner.os == 'Windows' && !cancelled() && steps.build.outcome == 'success'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "package/Editor/HorizonUpdater.exe")) {
+            Write-Host "::error::package/Editor/HorizonUpdater.exe is missing — self-update's takeover helper did not deploy"
+            exit 1
+          }
+          Write-Host "HorizonUpdater.exe present in package/Editor"
+
       # Not on NN-WS03: a topic branch's check needs no download package, its
       # package/ is an incremental deploy that keeps old files, and the zip
       # would go up through a home connection.
@@ -476,8 +701,50 @@ jobs:
       # produces out/HorizonEditor-<version>.dmg. Runs after the tests so a packaging
       # failure surfaces without masking the build+test result.
       - name: Package macOS editor (DMG)
+        id: dmg
         if: runner.os == 'macOS'
         run: cmake --build build --target dmg
+
+      # Unlike Windows/Linux, package_macos.sh has to copy HorizonUpdater into the
+      # .app bundle by hand (out/deploy/Editor is a flat directory, not a bundle, until
+      # this script builds one) — and on a missing file it only WARNS and keeps going,
+      # on purpose (a self-update regression must not block every other DMG build). So
+      # this is the one platform where the check has to look inside the shipped
+      # artifact itself: mount the real DMG read-only, exactly how SelfUpdateInstall.cpp
+      # extracts one on a user's machine, and look in Contents/MacOS.
+      # Gated on the DMG step itself having succeeded, not just !cancelled(): in
+      # run 38255921746 an earlier failing step skipped the packaging, this check
+      # still ran, found no DMG at all and reported that as "HorizonUpdater missing
+      # from the DMG" — a second red that was only an echo of the first.
+      - name: Check HorizonUpdater is inside the macOS package (DMG)
+        if: runner.os == 'macOS' && !cancelled() && steps.dmg.outcome == 'success'
+        run: |
+          set -eo pipefail
+          dmg=$(ls out/HorizonEditor-*.dmg 2>/dev/null | head -1 || true)
+          if [ -z "$dmg" ]; then
+            echo "::error::the DMG step succeeded but left no out/HorizonEditor-*.dmg behind — cannot check for HorizonUpdater"
+            exit 1
+          fi
+          mount_point="$(mktemp -d)"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg"
+          app=$(ls -d "$mount_point"/*.app | head -1)
+          found=0
+          if [ -f "$app/Contents/MacOS/HorizonUpdater" ]; then
+            echo "HorizonUpdater present in $(basename "$dmg")"
+            found=1
+          fi
+          hdiutil detach "$mount_point"
+          if [ "$found" -ne 1 ]; then
+            echo "::error::$dmg does not contain Contents/MacOS/HorizonUpdater — package_macos.sh only warns on this, it does not fail the build"
+            exit 1
+          fi
+
+      # The .app the DMG was made from (package_macos.sh leaves its staging in place)
+      # carries both engine SDK lib sets, and the dmg target's editor build, which
+      # reinstalled lib/dev after the release step, left their stamps equal.
+      - name: Check the engine SDK lib sets inside the macOS package
+        if: runner.os == 'macOS' && !cancelled() && steps.dmg.outcome == 'success' && steps.release_sdk.outcome == 'success'
+        run: python3 scripts/build_engine_sdk.py --verify out/dmg_staging/HorizonEditor.app/Contents/Resources/EngineSDK --require dev --require release
 
       - name: Upload macOS editor package
         if: runner.os == 'macOS'
@@ -486,6 +753,18 @@ jobs:
           name: HorizonEditor-macos-arm64
           path: out/HorizonEditor-*.dmg
           if-no-files-found: error
+
+      # Same reasoning as the Windows check above: he_deploy_dll(HorizonUpdater)
+      # puts it beside HorizonEditor as part of the normal build, so this is the
+      # raw deploy directory, not the tarball made from it below.
+      - name: Check HorizonUpdater is deployed beside the editor (Linux)
+        if: runner.os == 'Linux' && !cancelled() && steps.build.outcome == 'success'
+        run: |
+          test -f package/Editor/HorizonUpdater || {
+            echo "::error::package/Editor/HorizonUpdater is missing — self-update's takeover helper did not deploy"
+            exit 1
+          }
+          echo "HorizonUpdater present in package/Editor"
 
       # ── Linux: tarball the self-contained editor bundle ─────────────────────────
       # The editor POST_BUILD deployed package/Editor: HorizonEditor + engine .so
@@ -597,7 +876,27 @@ jobs:
 
       # Default DEPLOY_DIR (out/deploy): the editor and its Shaders/ land in
       # out/deploy/Editor, which is all the image tests need.
+      #
+      # This job builds HorizonEditor too (for the image tests), so it links
+      # HorizonContentSync the same as the three matrix jobs above — the same
+      # env: block for consistency. Without it the configure log read "not
+      # configured" here while the matrix jobs showed the real endpoint, which
+      # looked like a gap the first time someone compared the two logs (it
+      # was: the three matrix jobs had this block, this job never did).
+      # Harmless either way: he_vk_imagetests.py always sets HE_DUMP_PATH, so
+      # every editor launch in this job takes the headless frame-dump path,
+      # which returns before startSftpProbe() (and every other startup probe)
+      # is ever called (EditorApplication.cpp, the "if (m_dumpPath.empty())"
+      # guard around them) — the image tests never open a network connection
+      # whether or not this block is here.
       - name: Configure
+        env:
+          HE_ENGINE_CONTENT_HOST: ${{ secrets.ENGINE_CONTENT_HOST }}
+          HE_ENGINE_CONTENT_USER: ${{ secrets.ENGINE_CONTENT_USER }}
+          HE_ENGINE_CONTENT_PASSWORD: ${{ secrets.ENGINE_CONTENT_PASSWORD }}
+          HE_SELFUPDATE_HOST: ${{ secrets.SELFUPDATE_HOST }}
+          HE_SELFUPDATE_USER: ${{ secrets.SELFUPDATE_USER }}
+          HE_SELFUPDATE_PASSWORD: ${{ secrets.SELFUPDATE_PASSWORD }}
         run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DHE_PORTABLE_BUILD=ON -DHE_PREFER_MBEDTLS=ON
 
       - name: Save FetchContent dependencies

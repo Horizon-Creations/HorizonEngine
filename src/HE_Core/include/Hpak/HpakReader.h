@@ -18,6 +18,7 @@ class HE_API HpakReader
 public:
     // Open, validate the header + TOC hash, and load the TOC. Returns false on
     // I/O errors, a bad magic/version, or a TOC-hash mismatch (corruption).
+    // Reads Hpak::k_oldestVersion..k_version, each with the hash it was written with.
     bool open(const std::string& path);
 
     // The validated table of contents, shared read-only between readers of the
@@ -47,7 +48,7 @@ public:
     struct StoredEntry {
         std::vector<uint8_t> data;        // stored bytes, content-hash verified
         uint32_t             origSize = 0;
-        uint64_t             contentHash = 0;
+        uint64_t             contentHash = 0; // Hpak::hash64 of data, also from an older package
         uint8_t              codec = 0;   // Hpak::Codec
         uint8_t              flags = 0;   // Hpak::kFlag*
         uint8_t              nonce[12] = {};

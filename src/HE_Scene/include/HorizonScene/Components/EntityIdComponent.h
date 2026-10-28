@@ -24,6 +24,13 @@
 // round trip. Prefab INSTANTIATION deliberately does not: a prefab is a template,
 // and keeping the freshly minted id is what stops the same prefab inserted twice
 // from producing two entities with one identity.
+//
+// HorizonWorld::findByEntityId answers from an index that the registry's own
+// signals keep (construct, update, destroy of this component), so any way of
+// giving an entity an id is covered: createEntity, setEntityId, emplace,
+// emplace_or_replace, patch, replace. One is not: assigning to `id` through a
+// plain reference (`registry.get<EntityIdComponent>(e).id = x`) fires no signal
+// and leaves the index on the old value. Go through one of the calls above.
 struct EntityIdComponent {
 	HE::UUID id;
 };

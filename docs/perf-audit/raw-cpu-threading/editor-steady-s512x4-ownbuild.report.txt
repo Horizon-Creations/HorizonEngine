@@ -1,0 +1,32 @@
+/tmp/cta/raw/own-steady-s512x4.profile.json
+  window 15602 ms, 1 lane(s), 33000 spans
+
+== lanes (busy = union of depth-0 spans)
+  Main           spans= 33000 busy=  15597.9 ms (100.0% of window)  WaitForFrame x600 13864.5ms, Render x600 1375.9ms, OnRender x600 311.5ms, PollEvents x600 45.5ms, GameLogicTick x600 0.3ms, SwapBuffers x600 0.1ms
+
+== main thread: busy 15598 ms of 15602 = 100.0%; WaitForFrame 13865 ms (88.9%); work 1733 ms (11.1%)
+  depth-0 scopes (total ms, share of work):
+    Render                                1375.9 ms   79.4% of work
+    OnRender                               311.5 ms   18.0% of work
+    PollEvents                              45.5 ms    2.6% of work
+    GameLogicTick                            0.3 ms    0.0% of work
+    SwapBuffers                              0.1 ms    0.0% of work
+  depth-1 scopes (total ms):
+    Metal::NextDrawable                  13860.4 ms
+    Metal::ExtractFrame                    525.4 ms
+    Metal::EncodeScene                     291.1 ms
+    Metal::EncodeShadowMap                 161.4 ms
+    Metal::EncodeSSAO                       92.2 ms
+    Metal::Overlay                          39.7 ms
+    OutlinerPanel::render                   26.4 ms
+    SceneSystemsTick                        21.7 ms
+    Metal::Commit                           14.2 ms
+    SceneAnimationTick                       3.6 ms
+    WeatherAudio                             1.5 ms
+    EnvironmentPush                          1.4 ms
+
+== per-frame main-thread WORK (depth-0 scopes minus WaitForFrame / NextDrawable): p50 2.88 p90 3.44 p99 4.31 max 33.09 ms over 600 frames; dump cpuMs p50 13.46
+  frames with work >= 25.0 ms: 1; worst:
+    frame  548 work   33.09 ms  Render(d0) 32.5; Metal::ExtractFrame(d1) 31.4; OnRender(d0) 0.6; Metal::EncodeScene(d1) 0.3
+
+== no worker lane in the dump: no pool task ran a profiler scope during the capture

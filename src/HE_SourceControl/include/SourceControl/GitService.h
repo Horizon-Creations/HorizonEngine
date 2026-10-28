@@ -22,13 +22,16 @@
 #include "SourceControl/ScCommon.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace HE::Sc {
 
@@ -68,6 +71,25 @@ public:
 	// Stage everything and commit it with `message`; optionally push right
 	// after a successful commit (the panel's auto-push toggle).
 	void requestCommitAll(const std::string& message, bool pushAfter = false);
+
+	// ── Per-file operations (see the matching GitCli functions) ──────────────
+	// Stage / unstage / discard exactly these repository-relative paths. Staging
+	// routes big media into LFS first, the same size pass a commit-all does -
+	// a file added to the index BEFORE it is tracked would be stored as a plain blob.
+	void requestStage(std::vector<std::string> paths);
+	void requestUnstage(std::vector<std::string> paths);
+	void requestDiscard(std::vector<std::string> paths);
+	// Commit what is staged and nothing else. `amend` rewrites the last commit.
+	void requestCommitStaged(const std::string& message, bool pushAfter, bool amend);
+	// Keep one side of a conflicted path and stage it.
+	void requestResolveConflict(const std::string& path, bool ours);
+	// git switch. `stashFirst` stashes local changes (untracked included) so the
+	// switch starts from a clean tree; without it git carries them along when it can
+	// and refuses when it cannot.
+	void requestSwitchBranch(const std::string& name, bool stashFirst);
+	void requestStashPop();
+	// Reads the files one commit touched; the answer lands in commitFiles().
+	void requestCommitFiles(const std::string& commit);
 
 	// The whole GitHub setup in one worker pass: create the repository via the
 	// API, point origin at it, make sure a credential helper exists, hand the
@@ -151,6 +173,27 @@ public:
 	// Local branches as of the last status refresh (RepoStatus::branch already
 	// names the current one).
 	const std::vector<std::string>& branches() const { return m_branches; }
+	// Remote-tracking branches ("origin/main"), and the stash list, newest first.
+	const std::vector<std::string>& remoteBranches() const { return m_remoteBranches; }
+	const std::vector<std::string>& stashes() const { return m_stashes; }
+	// The files of a commit asked for with requestCommitFiles; nullptr until it answered.
+	const std::vector<GitCli::ChangedFile>* commitFiles(const std::string& commit) const;
+
+	// The new-branch dialog's check while the user types: is `name` a legal branch
+	// name (git check-ref-format) and is it already taken? Asked of git, on the
+	// worker, so the frame never waits on a process; the dialog asks once per
+	// change of the text, not once per frame. Not "work": the buttons stay as
+	// they are while it runs.
+	void requestCheckBranchName(const std::string& name);
+	struct BranchNameCheck
+	{
+		std::string name;           // what was checked
+		bool        valid = false;  // git accepts it as a branch name
+		bool        taken = false;  // refs/heads/<name> exists (only asked when valid)
+	};
+	// The answer for exactly `name`; nullptr while it is still pending (or was
+	// asked for another text since).
+	const BranchNameCheck* branchNameCheck(const std::string& name) const;
 
 	// Drain finished work on the MAIN thread. `maxEvents` bounds how much is
 	// applied per frame — a clone that produced twenty thousand entries should
@@ -163,7 +206,18 @@ public:
 	// A command is queued or running. The UI shows progress rather than a stale
 	// value, the same way the collaboration panel does for directory calls.
 	bool               busy()    const { return m_busy.load(std::memory_order_acquire); }
+	// A command the USER asked for is queued or running (commit, push, pull, a manual
+	// fetch, a switch ...) - as opposed to a status refresh or the quiet timer-driven
+	// fetch, which only bring the numbers up to date. The UI disables its buttons on
+	// this one: a refresh every few seconds used to grey out Push, Pull and Commit each
+	// time, for no reason the user could see.
+	bool               busyWithWork() const { return m_work.load(std::memory_order_acquire) > 0; }
 	const std::string& lastError() const { return m_lastError; }
+	// The last open found no git to run at all. Distinct from !isRepo() on
+	// purpose: without git an EXISTING repository looks exactly like "no
+	// repository yet", and offering `git init` there would be wrong. The UI shows
+	// the install remedy instead; the editor re-opens the project once git runs.
+	bool               gitMissing() const { return m_gitMissing; }
 
 	// Called from pump(), i.e. on the main thread, after a refresh lands.
 	void setOnStatusChanged(std::function<void(const RepoStatus&)> fn) { m_onStatus = std::move(fn); }
@@ -171,7 +225,9 @@ public:
 private:
 	enum class Kind : std::uint8_t {
 		Open, Status, Init, CommitAll, Push, Pull, Fetch, SetRemote, SetupGitHub,
-		StoreCredential, RestoreTo, CreateBranch, Clone, LfsPull, Quit
+		StoreCredential, RestoreTo, CreateBranch, Clone, LfsPull,
+		Stage, Unstage, Discard, CommitStaged, ResolveConflict, SwitchBranch, StashPop,
+		CommitFiles, CheckBranchName, Quit
 	};
 
 	struct Command
@@ -182,6 +238,8 @@ private:
 		std::string           user;   // credential username (StoreCredential)
 		std::string           secret; // PAT — wiped after use
 		bool                  flag = false;
+		bool                  flag2 = false;
+		std::vector<std::string> paths;   // Stage / Unstage / Discard
 	};
 
 	struct Event
@@ -192,9 +250,16 @@ private:
 		bool        remoteUrlValid = false;
 		std::vector<GitCli::CommitInfo> commits;
 		std::vector<std::string>        branches;
+		std::vector<std::string>        remoteBranches;
+		std::vector<std::string>        stashes;
+		std::string                     commitFilesFor;   // set when commitFiles is the answer
+		std::vector<GitCli::ChangedFile> commitFiles;
+		bool            branchCheckValid = false;   // set when branchCheck is the answer
+		BranchNameCheck branchCheck;
 		RepoStatus  status;
 		std::string error;
 		std::filesystem::path clonedRoot;    // applied even alongside an error
+		bool        gitMissing = false;      // with statusValid: no git to ask
 	};
 
 	void workerMain();
@@ -213,11 +278,27 @@ private:
 
 	std::atomic<bool> m_quit{false};
 	std::atomic<bool> m_busy{false};
+	std::atomic<int>  m_work{0};   // queued + running commands that are not background refreshes
+	static bool countsAsWork(const Command& c)
+	{
+		return c.kind != Kind::Status && c.kind != Kind::Open && c.kind != Kind::Quit &&
+		       c.kind != Kind::CheckBranchName && !(c.kind == Kind::Fetch && c.flag);
+	}
 	// Set when a refresh is already queued, so a burst of requests collapses.
 	std::atomic<bool> m_statusPending{false};
 
 	// Worker-only. Not shared: the main thread reads m_status instead.
 	std::filesystem::path m_root;
+	// What the last open was asked about, and whether it had no git to ask: the
+	// next refresh that finds git runs the skipped repository detection.
+	std::filesystem::path m_openPath;
+	bool                  m_openedWithoutGit = false;
+	// origin's URL as last read, carried into the refreshes in between: it only
+	// changes through a command (re-read after every one) or by hand in a
+	// terminal (re-read once it is a minute old), not on every 3-second poll.
+	std::string                           m_cachedRemoteUrl;
+	bool                                  m_remoteUrlStale = true;
+	std::chrono::steady_clock::time_point m_remoteUrlReadAt{};
 
 	// Main-thread-only.
 	RepoStatus                             m_status;
@@ -227,7 +308,13 @@ private:
 	std::filesystem::path                  m_lastClonedRoot;
 	std::vector<GitCli::CommitInfo>        m_commits;
 	std::vector<std::string>               m_branches;
+	std::vector<std::string>               m_remoteBranches;
+	std::vector<std::string>               m_stashes;
+	std::map<std::string, std::vector<GitCli::ChangedFile>> m_commitFiles;
+	BranchNameCheck                        m_branchCheck;
+	bool                                   m_branchCheckValid = false;
 	std::uint64_t                          m_generation = 0;
+	bool                                   m_gitMissing = false;
 	std::function<void(const RepoStatus&)> m_onStatus;
 };
 

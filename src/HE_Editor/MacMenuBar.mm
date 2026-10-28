@@ -4,6 +4,7 @@
 #include "OutlinerPanel.h"    // entityPresetTable — the Entity ▸ Create rows
 #include "ViewportPanel.h"    // showFlagFields — the View ▸ Show rows
 #include "EditorCamera.h"     // ViewPreset + presetName — the View ▸ Camera rows
+#include "SelfUpdateDialog.h"  // available() — Help ▸ Check for Updates only with libssh2
 #include <Renderer/IRenderer.h> // HE::ViewMode + viewModeName — the View ▸ View Mode rows
 
 #import <Cocoa/Cocoa.h>
@@ -239,11 +240,6 @@ void install()
 		[edit addItem:[NSMenuItem separatorItem]];
 		s_gameOnlyItems.push_back(heAddItem(edit, @"Select All",   C::SelectAll,   nil, 0, true));
 		s_gameOnlyItems.push_back(heAddItem(edit, @"Deselect All", C::DeselectAll, nil, 0, true));
-		[edit addItem:[NSMenuItem separatorItem]];
-		// The project's own settings, an editor tab like Preferences (which sits
-		// in the app menu, where macOS keeps an application's preferences). No
-		// key equivalent, for the reason the whole block has none.
-		heAddItem(edit, @"Project Settings…", C::ProjectSettings, nil, 0, true);
 	}
 
 	// ── Entity (game projects only — hidden whole in an application) ──────
@@ -337,19 +333,8 @@ void install()
 #endif
 	}
 
-	// ── Play ───────────────────────────────────────────────────────────────
-	// The toolbar's transport, with a fixed place in the bar. No key
-	// equivalents (⌘P and friends are read by the editor through SDL and
-	// rebindable in Preferences ▸ Shortcuts); the titles follow the state.
-	{
-		NSMenu* play = heAddSubmenu(main, @"Play");
-		s_toggleItems.push_back({ C::PlayToggle, 0,
-			heAddItem(play, @"Play",       C::PlayToggle,  nil, 0, true) });
-		s_toggleItems.push_back({ C::PauseToggle, 0,
-			heAddItem(play, @"Pause",      C::PauseToggle, nil, 0, true) });
-		heAddItem(play, @"Step Frame", C::StepFrame,   nil, 0, true);
-		heAddItem(play, @"Step Node",  C::StepNode,    nil, 0, true);
-	}
+	// No Play menu: the transport is the viewport toolbar's (and ⌘P and friends,
+	// rebindable in Preferences ▸ Shortcuts).
 
 	// ── Build ──────────────────────────────────────────────────────────────
 	{
@@ -360,6 +345,7 @@ void install()
 		heAddItem(build, @"Build and Reload Game Logic", C::BuildGameLogic, nil, 0, true);
 		[build addItem:[NSMenuItem separatorItem]];
 		heAddItem(build, @"Export Project…", C::ExportProject, nil, 0, true);
+		heAddItem(build, @"Show Last Build Log", C::ShowBuildLog, nil, 0, true);
 	}
 
 	// ── View: how the Scene window draws ───────────────────────────────────
@@ -444,10 +430,11 @@ void install()
 		heAddToggle(window, @"Performance Profiler",  C::ToggleProfiler,      false);
 		heAddToggle(window, @"Environment",           C::ToggleEnvironment,   false);
 		heAddToggle(window, @"Collaboration",         C::ToggleCollab,        false);
+		heAddToggle(window, @"Team",                  C::ToggleTeam,          false);
 		heAddToggle(window, @"Source Control",        C::ToggleSourceControl, true);
-		heAddToggle(window, @"Audio Mixer",           C::ToggleAudioMixer,    false);
 		heAddToggle(window, @"Undo History",          C::ToggleUndoHistory,   false);
 		heAddToggle(window, @"Watch",                 C::ToggleWatch,         false);
+		heAddItem(window, @"Task Board",              C::OpenTaskBoard,       nil, 0, true);
 		// The secondary scene viewports, ticked while open like the panels above.
 		{
 			[window addItem:[NSMenuItem separatorItem]];
@@ -465,6 +452,8 @@ void install()
 		// The Game Instance stays: it is the one script an application really does
 		// own — the thing whose OnInit builds its interface.
 		heAddItem(window, @"Game Instance",  C::OpenGameInstance, nil, 0, true);
+		// Project planning: databases and pages, a whole editor tab.
+		heAddItem(window, @"Planner",        C::OpenPlanner,      nil, 0, true);
 		[window addItem:[NSMenuItem separatorItem]];
 		s_gameOnlyItems.push_back(heAddToggle(window, @"Landscape Tools", C::ToggleLandscapeTools, true));
 		[window addItem:[NSMenuItem separatorItem]];
@@ -481,12 +470,13 @@ void install()
 		// one would swallow the keystroke before the panel that is meant to
 		// answer it in context ever sees it, exactly like the Edit menu's ⌘Z.
 		heAddItem(help, @"Documentation",             C::Documentation,       nil, 0, false);
-		heAddItem(help, @"Search the Documentation…", C::SearchDocumentation, nil, 0, false);
 		heAddItem(help, @"Documentation (Website)",   C::DocumentationOnline, nil, 0, false);
 		[help addItem:[NSMenuItem separatorItem]];
 		heAddToggle(help, @"Interactive Tutorial", C::OpenTutorial, false);
 		[help addItem:[NSMenuItem separatorItem]];
 		heAddItem(help, @"Report Issue…", C::ReportIssue, nil, 0, false);
+		if (SelfUpdateDialog::available())
+			heAddItem(help, @"Check for Updates…", C::CheckForUpdates, nil, 0, false);
 		NSApp.helpMenu = help;
 	}
 

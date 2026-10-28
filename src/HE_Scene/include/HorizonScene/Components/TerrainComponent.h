@@ -1,10 +1,20 @@
 #pragma once
 #include <Types/UUID.h>
+#include "HorizonScene/WaterField.h"
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 // Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
 // Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
+// The largest resolution a landscape can have: 1025 = 2^10 + 1, the top of the 2ⁿ+1
+// ladder every landscape is snapped to (TerrainSystem / TerrainSculpt::ensureHeights).
+// The clamp used to be 1024, which is NOT on that ladder: a landscape of 513..1024
+// snaps UP to 1025, every consumer clamped it back down to 1024, and the height
+// field (1025² samples) never matched the grid it was read as (1024²) — so it was
+// read as flat, and the "snap" ran again every frame (dirty → all 256 chunks rebuilt
+// and re-uploaded per frame).
+inline constexpr uint32_t kTerrainMaxResolution = 1025;
 inline constexpr int kTerrainWeightPages = 2;
 inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
 
@@ -52,6 +62,12 @@ struct TerrainComponent {
     bool     dirty = true;        // set to regenerate ALL chunks; not serialised
     // Per-vertex sculpted heights (size == res*res overrides fBm); serialised.
     std::vector<float> sculptHeights;
+    // The height field the chunks were last built from (resolution x resolution, row-major,
+    // the same one the chunk meshes sample), kept for the renderer's GI height-field tracing.
+    // Not serialised; TerrainSystem replaces it (and bumps the version) on every rebuild.
+    std::shared_ptr<const std::vector<float>> builtField;
+    uint32_t builtFieldRes     = 0;
+    uint64_t builtFieldVersion = 0;
 
     // ── Material layers (paint) ──────────────────────────────────────────────
     // Per-texel layer weights, RGBA8 = layers 0..3 (R=0 … A=3), row-major over
@@ -63,7 +79,7 @@ struct TerrainComponent {
     // Kept inline (base64 in the scene, like sculptHeights) rather than as a
     // separate texture asset: it is terrain data, not shared content, and this
     // way a landscape is one self-contained thing to copy or undo.
-    uint32_t              weightRes = 256;   // weightmap side length in texels
+    uint32_t              weightRes = 512;   // weightmap side length in texels (256 made a round stamp a visible polygon)
     std::vector<uint8_t>  layerWeights;      // weightRes² × 4 bytes, or empty
     // Layers 4..7 (R=4 … A=7), same layout as layerWeights. Empty = all four
     // zero, which is every landscape painted before there were eight layers —
@@ -73,6 +89,14 @@ struct TerrainComponent {
     // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
     // shader needs no second sampler or binding on any backend.
     std::vector<uint8_t>  layerWeights2;
+
+    // ── Water ────────────────────────────────────────────────────────────────
+    // The water bodies on this landscape and the raster that says where they are
+    // (WaterField.h). One model for the water brush and the lake tool. Saved with
+    // the terrain, under the "terrain" block, only once there is something to save.
+    // Its edits touch neither `dirty` nor `regionDirty`: a water edit must not
+    // regenerate terrain chunks (Field::dirty is the water surface's own flag).
+    HE::water::Field water;
 
     // ── Runtime weightmap state (never serialised) ──────────────────────────
     // The GPU texture TerrainSystem (re)registers from layerWeights, handed to

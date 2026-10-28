@@ -3,7 +3,7 @@
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"
 #include "McpBridge.h"
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "TestFsUtil.h"
 
 #include <ContentManager/Assets.h>
@@ -1222,7 +1222,7 @@ TEST_CASE("mcp material tools: graph_info reports the param fixture as the canva
 	CHECK(out.at("domain") == "Surface");
 	CHECK(out.at("maskCutoff") == doctest::Approx(0.5));
 	const json& pins = out.at("pins");
-	REQUIRE(pins.size() == 9);
+	REQUIRE(pins.size() == 10); // 0..9, Displacement (Thema 207) included
 	const json* opacity = findPinNamed(pins, "Opacity");
 	REQUIRE(opacity != nullptr);
 	CHECK(opacity->at("pin") == HE::kMatOutputOpacityPin);
@@ -1273,7 +1273,7 @@ TEST_CASE("mcp material tools: graph_info reports the param fixture as the canva
 	const json* outNode = findNode(j.at("nodes"), 1);
 	REQUIRE(outNode != nullptr);
 	CHECK(outNode->at("type") == "Output");
-	REQUIRE(outNode->at("inputs").size() == 9);
+	REQUIRE(outNode->at("inputs").size() == 10);
 	const json* baseIn = findPinNamed(outNode->at("inputs"), "Base Color");
 	REQUIRE(baseIn != nullptr);
 	CHECK(baseIn->at("pin") == HE::kMatOutputBaseColorPin);
@@ -1293,7 +1293,7 @@ TEST_CASE("mcp material tools: graph_info reports the param fixture as the canva
 	REQUIRE_FALSE(s.isError);
 	CHECK_FALSE(s.content.contains("nodes"));
 	CHECK_FALSE(s.content.contains("links"));
-	CHECK(s.content.at("output").at("pins").size() == 9);
+	CHECK(s.content.at("output").at("pins").size() == 10);
 	CHECK(s.content.at("nodeCount") == 7);
 }
 
@@ -1310,7 +1310,7 @@ TEST_CASE("mcp material tools: graph_info names the Output pin by the blend mode
 	const ToolResult r = f.call("material_graph_info", json{ { "path", "Materials/Opaque.hasset" } });
 	REQUIRE_FALSE(r.isError);
 	const json& pins = r.content.at("output").at("pins");
-	CHECK(pins.size() == 8);
+	CHECK(pins.size() == 9);
 	CHECK(findPinNamed(pins, "Opacity") == nullptr);
 	CHECK(findPinNamed(pins, "OpacityMask") == nullptr);
 	REQUIRE(r.content.at("warnings").size() == 1);

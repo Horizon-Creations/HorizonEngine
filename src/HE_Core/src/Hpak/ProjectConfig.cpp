@@ -79,7 +79,10 @@ bool ProjectConfigLoader::save(const std::filesystem::path& dir, const ProjectCo
                          | ((cfg.fontScripts & 3u) << 9)
                          // Bit 2048 is the text weight, NEGATED like bit 32: a
                          // build that predates it has the bit clear and drew bold.
-                         | (cfg.fontWeightBold        ? 0u  : 2048u);
+                         | (cfg.fontWeightBold        ? 0u  : 2048u)
+                         // Bit 4096: the development hotkeys. Straight, so every
+                         // config written before it existed reads as "off".
+                         | (cfg.devTools              ? 4096u : 0u);
     HAsset::Writer::appendPOD(buf, flags);
     buf.insert(buf.end(), cfg.encKey, cfg.encKey + 32);
     buf.insert(buf.end(), cfg.startupSceneUuid, cfg.startupSceneUuid + 16);
@@ -138,6 +141,7 @@ bool ProjectConfigLoader::load(const std::filesystem::path& dir, ProjectConfig& 
     uint32_t flags = 0;
     if (!HAsset::Reader::readPOD(buf, off, flags)) return false;
     out.enableModSupport      = (flags & 1u) != 0;
+    out.devTools              = (flags & 4096u) != 0;
     out.encrypted             = (flags & 2u) != 0;
     out.hasPackedScene        = (flags & 4u) != 0;
     out.horizonCodeCompiled   = (flags & 8u) != 0;

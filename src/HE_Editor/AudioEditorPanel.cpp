@@ -1,4 +1,6 @@
 #include "AudioEditorPanel.h"
+#include <Platform/ProjectWriteGate.h>
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "EditorToolbar.h"        // shared toolbar strip
 #include "EditorApplication.h"    // AppContext
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
@@ -129,7 +131,6 @@ struct State
 	std::vector<std::string> undo;
 	int         undoPos    = -1;
 	bool        editsStale = false;   // reloadFromDisk: re-read the edit chunk next frame
-	std::string lastSaveError;
 
 	// Extract runs AFTER the tab's window has ended (render, at the bottom): the
 	// button only asks for it, so nothing that writes files runs while `clip` —
@@ -421,18 +422,20 @@ void commitEdit(State& st, const HE::AudioEdit& edit)
 
 bool saveState(AppContext& ctx, State& st)
 {
-	st.lastSaveError.clear();
 	AudioAsset* a = editableOf(ctx, st);
 	if (!a)
 	{
-		st.lastSaveError = "Not saved: this clip is no longer loaded.";
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Audio clip not saved",
+		               "This clip is no longer loaded, so there is nothing to write.");
 		return false;
 	}
 	// The samples go back into the file exactly as they were loaded — the same
 	// bytes in the same chunk — so the edit chunk is the only thing that changes.
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		st.lastSaveError = "Not saved: the file could not be written.";
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Audio clip not saved",
+		               "The file could not be written. Check that it is not read-only and the disk has room.");
 		return false;
 	}
 	st.dirty = false;
@@ -1027,15 +1030,20 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			EditorWidgets::helpForLabel("Bake Curve into Extract");
 		}
 		if (!st.extractStatus.empty())
-			ImGui::TextColored(st.extractFailed ? ImVec4(1.0f, 0.6f, 0.4f, 1.0f) : ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
-			                   "%s", st.extractStatus.c_str());
+		{
+			// The result of Extract is a notification, said once, not a line under the
+			// checkbox that stays until the next click.
+			HE::Ed::notify(st.extractFailed ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
+			               st.extractFailed ? "Nothing extracted" : "Extracted", st.extractStatus);
+			st.extractStatus.clear();
+		}
 
 		ImGui::SeparatorText("Volume curve");
 		if (editable && !editable->edit.envelope.empty())
 		{
 			const HE::AudioEnvelope& env = editable->edit.envelope;
 			float lo = env.points.front().gain, hi = lo;
-			for (const HE::AudioEnvelopePoint& p : env.points) { lo = std::min(lo, p.gain); hi = std::max(hi, p.gain); }
+			for (auto it = ++env.points.begin(); it != env.points.end(); ++it) { lo = std::min(lo, it->gain); hi = std::max(hi, it->gain); }
 			ImGui::Text("%zu point%s", env.points.size(), env.points.size() == 1 ? "" : "s");
 			ImGui::Text("Low   %s", AW::formatGain(lo).c_str());
 			ImGui::Text("High  %s", AW::formatGain(hi).c_str());
@@ -1072,15 +1080,12 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			else if (!buses)
 				ImGui::TextDisabled("Open a project to choose one of its mixer buses.");
 			else if (buses->buses.empty())
-				ImGui::TextDisabled("The project has no buses yet: add them in Window > Audio Mixer.");
+				ImGui::TextDisabled("The project has no buses yet: add them in Project Settings > Audio Buses.");
 			else
 				ImGui::TextDisabled("An Audio Source with a Bus of its own still overrides this.");
 		}
 		else
 			ImGui::TextDisabled("Only an imported asset can be assigned to a bus.");
-
-		if (!st.lastSaveError.empty())
-			ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", st.lastSaveError.c_str());
 
 		ImGui::SeparatorText("Preview");
 		if (!audioReady)

@@ -1,0 +1,3 @@
+[0/2] Re-checking globbed directories...
+[1/3] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\SplineTool.cpp.obj
+[2/3] Linking CXX executable tests\he_tests.exe

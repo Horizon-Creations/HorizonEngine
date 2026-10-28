@@ -7,6 +7,7 @@
 #include "EditorWidgets.h"
 #include "EditorHelp.h"   // WrapText — everything a notification shows is a sentence
 #include "EditorRewards.h"   // V8: the bell's ring and the problem tone
+#include "NotificationPopups.h"   // the buttons a row carries are the popups' buttons
 #endif
 
 #include <algorithm>
@@ -24,6 +25,7 @@ namespace
 {
 	using HE::Ed::NoteLevel;
 	using HE::Ed::Notification;
+	using HE::Ed::levelColor;
 
 	// ── One snapshot per frame ───────────────────────────────────────────────
 	// FooterWidth, DrawFooter and DrawOverlay all need the same list, and the
@@ -46,8 +48,8 @@ namespace
 		std::size_t               unseen = 0;
 		NoteLevel                 worstUnseen = NoteLevel::Info;
 		std::uint64_t             nowMs = 0;    // the clock every age on screen is measured against
-		// The newest Problem's stamp, seen or not (0: none) — a repeat restamps
-		// it, so a rise is "a problem just arrived" (EditorRewards.h V8).
+		// The newest Important-or-worse stamp, seen or not (0: none) — a repeat
+		// restamps it, so a rise is "a problem just arrived" (EditorRewards.h V8).
 		std::uint64_t             newestProblemMs = 0;
 	};
 	Cache s_cache;
@@ -69,7 +71,7 @@ namespace
 			s_cache.entries = ctx.notifications->snapshot();
 			for (const Notification& n : s_cache.entries)
 			{
-				if (n.level == NoteLevel::Problem)
+				if (n.level >= NoteLevel::Important)
 					s_cache.newestProblemMs = std::max(s_cache.newestProblemMs, n.whenMs);
 				if (n.seen) continue;
 				++s_cache.unseen;
@@ -80,18 +82,10 @@ namespace
 	}
 
 	// ── Colours ──────────────────────────────────────────────────────────────
-	// The amber is the same literal the collab activity line uses for "you may
-	// need to act": two footer widgets sitting inches apart that mean the same
-	// thing in two different oranges would read as two different states.
-	ImVec4 levelColor(NoteLevel level)
-	{
-		switch (level)
-		{
-			case NoteLevel::Problem: return ImVec4(0.95f, 0.36f, 0.33f, 1.0f);
-			case NoteLevel::Warning: return ImVec4(1.00f, 0.72f, 0.35f, 1.0f);
-			default:                 return ImVec4(0.55f, 0.70f, 0.95f, 1.0f);
-		}
-	}
+	// levelColor() (NotificationStore.h) is the same literal the collab activity
+	// line uses for "you may need to act": two footer widgets sitting inches
+	// apart that mean the same thing in two different oranges would read as two
+	// different states.
 
 	// What the bell itself is tinted. Grey unless something UNSEEN earns a
 	// colour — an unread Info is worth a count, not an alarm, and a bell that is
@@ -405,6 +399,12 @@ namespace
 
 					ImGui::BeginGroup();
 					ImGui::PushTextWrapPos(wrapPos);
+					if (!n.title.empty())
+					{
+						ImGui::PushStyleColor(ImGuiCol_Text, levelColor(n.level));
+						ImGui::TextUnformatted(n.title.c_str());
+						ImGui::PopStyleColor();
+					}
 					ImGui::TextUnformatted(n.text.c_str());
 
 					// The reason, one step quieter. It is the part you read only
@@ -464,6 +464,22 @@ namespace
 							ImGui::SameLine(0.0f, 8.0f);
 							ImGui::TextDisabled("copied");
 						}
+					}
+
+					// The buttons the poster attached (an invitation's Join / Ignore),
+					// or — once one was pressed or the thing went away — a dim record
+					// of how it ended, so a row never promises an action that is gone.
+					if (!n.actions.empty() && !n.handled)
+					{
+						ImGui::Spacing();
+						NotificationPopups::DrawActions(ctx, n);
+					}
+					else if (n.handled)
+					{
+						ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+						if (n.handledBy.empty()) ImGui::TextUnformatted("No longer needed");
+						else                     ImGui::Text("Answered: %s", n.handledBy.c_str());
+						ImGui::PopStyleColor();
 					}
 					ImGui::EndGroup();
 
@@ -548,7 +564,7 @@ void DrawFooter(AppContext& ctx)
 		            layout.countLabel);
 	}
 
-	// Visual cue V8 + the problem tone (EditorRewards.h): a new Problem rings
+	// Visual cue V8 + the problem tone (EditorRewards.h): a new Important/Critical rings
 	// the bell once. Asked every frame so the edge is seen whatever is shown.
 	const double ring =
 		HE::Ed::Rewards::problemSeen(ctx, static_cast<unsigned long long>(c.newestProblemMs));
@@ -556,7 +572,7 @@ void DrawFooter(AppContext& ctx)
 		HE::Ed::Rewards::drawProblemRing(origin.x, origin.y, origin.x + layout.bellW,
 		                                 origin.y + layout.slotH, ring,
 		                                 HE::Ed::Rewards::reducedMotion(ctx),
-		                                 ImGui::GetColorU32(levelColor(NoteLevel::Problem)));
+		                                 ImGui::GetColorU32(levelColor(NoteLevel::Critical)));
 
 	s_bellMin     = origin;
 	s_bellMax     = ImVec2(origin.x + layout.width, origin.y + layout.slotH);
@@ -564,6 +580,18 @@ void DrawFooter(AppContext& ctx)
 	s_bellFrame   = ImGui::GetFrameCount();
 #else
 	(void)ctx;
+#endif
+}
+
+bool FooterTop(float& topY)
+{
+#ifdef HE_IMGUI_ENABLED
+	if (s_bellFrame != ImGui::GetFrameCount()) return false;
+	topY = s_bellMin.y;
+	return true;
+#else
+	(void)topY;
+	return false;
 #endif
 }
 

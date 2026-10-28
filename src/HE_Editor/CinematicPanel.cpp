@@ -1,4 +1,6 @@
 #include "CinematicPanel.h"
+#include <Platform/ProjectWriteGate.h>
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "CinematicPreview.h"      // the write-look-restore bracket
 #include "CinematicTimeline.h"     // the strip and the editing rules
 #include "SequencerTimeline.h"     // targetName/targetGroup/defaultValue — one list of properties
@@ -66,7 +68,6 @@ struct PanelState
 	std::string scratch;
 	std::string scratchKey;
 
-	std::string lastSaveError;
 };
 AssetPanelState<PanelState> s_states;
 
@@ -82,12 +83,12 @@ SequenceAsset* seqOf(const PanelState& st, AppContext& ctx)
 bool saveState(PanelState& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return false;
-	st.lastSaveError.clear();
 	SequenceAsset* a = seqOf(st, ctx);
-	if (!a) { st.lastSaveError = "Not saved: this sequence is no longer loaded."; return false; }
+	if (!a) { HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "This sequence is no longer loaded."); return false; }
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		st.lastSaveError = "Not saved: the file could not be written.";
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;
@@ -269,6 +270,13 @@ void drawControls(PanelState& st, AppContext& ctx, SequenceAsset& seq, Cin::Inte
 	if (EditorWidgets::smallButton("Add Track")) ImGui::OpenPopup("##cin_addtrack");
 	if (ImGui::BeginPopup("##cin_addtrack"))
 	{
+		const auto selectNewTrack = [&st, &seq](int trackIdx, int itemIdx)
+		{
+			st.view.trackSel = trackIdx;
+			st.view.itemSel  = itemIdx;
+			st.view.groupPicked = false;
+			commit(st, seq);
+		};
 		const uint16_t slot = focusSlot(st, seq);
 		const int b = Cin::findBinding(seq, slot);
 		const entt::entity actor = b >= 0 ? entityOf(ctx, seq.bindings[b]) : entt::null;
@@ -284,37 +292,17 @@ void drawControls(PanelState& st, AppContext& ctx, SequenceAsset& seq, Cin::Inte
 				const bool have = Cin::findPropertyTrack(seq, slot, t) >= 0;
 				ImGui::BeginDisabled(have);
 				if (ImGui::Selectable((std::string(Seq::targetName(t)) + "##cin_addtarget").c_str(), false))
-				{
-					st.view.trackSel = Cin::addPropertyTrack(seq, slot, t, currentValue(ctx, actor, t));
-					st.view.itemSel  = 0;
-					st.view.groupPicked = false;
-					commit(st, seq);
-				}
+					selectNewTrack(Cin::addPropertyTrack(seq, slot, t, currentValue(ctx, actor, t)), 0);
 				ImGui::EndDisabled();
 				EditorWidgets::helpForKey("cinematic.add-target");
 			}
 			ImGui::Separator();
 			if (EditorWidgets::selectable("Skeletal Animation"))
-			{
-				st.view.trackSel = Cin::addTrack(seq, SequenceTrackKind::Skeletal, slot);
-				st.view.itemSel  = -1;
-				st.view.groupPicked = false;
-				commit(st, seq);
-			}
+				selectNewTrack(Cin::addTrack(seq, SequenceTrackKind::Skeletal, slot), -1);
 			if (EditorWidgets::selectable("Events on this actor"))
-			{
-				st.view.trackSel = Cin::addTrack(seq, SequenceTrackKind::Event, slot);
-				st.view.itemSel  = -1;
-				st.view.groupPicked = false;
-				commit(st, seq);
-			}
+				selectNewTrack(Cin::addTrack(seq, SequenceTrackKind::Event, slot), -1);
 			if (EditorWidgets::selectable("Sound at this actor"))
-			{
-				st.view.trackSel = Cin::addTrack(seq, SequenceTrackKind::Audio, slot);
-				st.view.itemSel  = -1;
-				st.view.groupPicked = false;
-				commit(st, seq);
-			}
+				selectNewTrack(Cin::addTrack(seq, SequenceTrackKind::Audio, slot), -1);
 			ImGui::Separator();
 		}
 		else
@@ -324,27 +312,12 @@ void drawControls(PanelState& st, AppContext& ctx, SequenceAsset& seq, Cin::Inte
 		}
 		ImGui::BeginDisabled(Cin::cameraCutTrack(seq) >= 0);
 		if (EditorWidgets::selectable("Camera Cuts"))
-		{
-			st.view.trackSel = Cin::addTrack(seq, SequenceTrackKind::CameraCut, kSequenceNoBinding);
-			st.view.itemSel  = -1;
-			st.view.groupPicked = false;
-			commit(st, seq);
-		}
+			selectNewTrack(Cin::addTrack(seq, SequenceTrackKind::CameraCut, kSequenceNoBinding), -1);
 		ImGui::EndDisabled();
 		if (EditorWidgets::selectable("Events"))
-		{
-			st.view.trackSel = Cin::addTrack(seq, SequenceTrackKind::Event, kSequenceNoBinding);
-			st.view.itemSel  = -1;
-			st.view.groupPicked = false;
-			commit(st, seq);
-		}
+			selectNewTrack(Cin::addTrack(seq, SequenceTrackKind::Event, kSequenceNoBinding), -1);
 		if (EditorWidgets::selectable("Sound"))
-		{
-			st.view.trackSel = Cin::addTrack(seq, SequenceTrackKind::Audio, kSequenceNoBinding);
-			st.view.itemSel  = -1;
-			st.view.groupPicked = false;
-			commit(st, seq);
-		}
+			selectNewTrack(Cin::addTrack(seq, SequenceTrackKind::Audio, kSequenceNoBinding), -1);
 		ImGui::EndPopup();
 	}
 
@@ -864,12 +837,6 @@ void CinematicPanel::render(AppContext& ctx, const std::string& assetPath,
 		bar.readout(nullptr, "Cinematic Sequence", T::kFgDim);
 		bar.endGroup();
 		if (T::saveButton(bar, st.dirty && seq != nullptr)) saveState(st, ctx);
-	}
-	if (!st.lastSaveError.empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(220, 80, 80, 255));
-		ImGui::TextWrapped("%s", st.lastSaveError.c_str());
-		ImGui::PopStyleColor();
 	}
 	if (!seq)
 	{

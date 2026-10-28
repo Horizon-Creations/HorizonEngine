@@ -2,6 +2,7 @@
 
 #include "HcFallbackReport.h"   // the interpreted-instead-of-compiled warning list
 
+#include <atomic>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -49,7 +50,11 @@ namespace BuildProgressDialog
 		void stepProgress(int done, int total);
 
 		// A log line for the current step. severity: 0 info, 1 warning, 2 error.
-		void log(int severity, const std::string& text);
+		// `step` >= 0 files the line under that step instead of the running one — for
+		// a summary that is only known once the step's work has returned, by which
+		// time the run has already moved on (the pack summary arrives after
+		// exportProject() has entered "Clean up").
+		void log(int severity, const std::string& text, int step = -1);
 
 		// What the current step is doing right now — the file being packed, the
 		// class being translated. One line under the buttons, not the log.
@@ -78,6 +83,12 @@ namespace BuildProgressDialog
 		                           const std::vector<HcFallbackReport::Notice>& classes);
 
 		bool running();
+
+		// Cancel: a step that can stop midway (a toolchain run) says so with
+		// setCancelable(true) and hands cancelFlag() to it; the window then shows
+		// Cancel, which sets the flag. begin() clears both.
+		void setCancelable(bool cancelable);
+		const std::atomic<bool>* cancelFlag();
 	}
 
 	// The C++ step's progress, read off the toolchain's own output: ninja prints
@@ -186,4 +197,33 @@ namespace BuildProgressDialog
 
 	// Whether the dialog drew this frame (the editor blocks input behind it).
 	bool isOpen();
+
+	// ── Hiding a running build ───────────────────────────────────────────────
+	// "Hide" in the window closes it and lets the run carry on. While it is hidden
+	// the footer shows a progress cluster (label, bar, percent); a click on it
+	// brings the window back. A run that FINISHES while the window is not up
+	// raises a notification instead (Important: "Export finished" / "Export
+	// failed", with Show Build and, for a runnable game, Start Game). A run that
+	// ends while the user is watching the window does not — the window already says.
+	//
+	// The footer pair follows the layout contract of the other footer clusters:
+	// FooterWidth() is 0 unless the cluster will be drawn, and DrawFooter() must be
+	// placed at the position FooterWidth() was used to compute.
+	float FooterWidth(AppContext& ctx);
+	void  DrawFooter(AppContext& ctx);
+
+	// Whether a run is going on with its window put away.
+	bool hidden();
+
+	// An EXPORT is running (a game-logic build reads Source/, not the project's
+	// content, so it does not count). This is what the project write gate asks
+	// (Platform/ProjectWriteGate.h): while it is true, saves, imports and file
+	// operations under the project are refused. Safe from any thread.
+	bool exportRunning();
+
+	// How far the whole run is, 0..1: finished steps count whole, the running one
+	// by its own progress. `indeterminate` (optional) is set while the running step
+	// has no length yet and nothing else says how far the run is — the footer then
+	// slides a segment instead of showing a number that would lie.
+	float overallProgress(const std::vector<StepView>& steps, bool* indeterminate = nullptr);
 }

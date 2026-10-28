@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include "EmbeddedPakKey.h"
+#include "CompiledBuildConfig.h"   // HEGameBuildConfig.h when the export compiled one in
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -20,6 +21,7 @@
 #include <Diagnostics/Profiler.h>
 #include <Diagnostics/GlobalState.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/CellPhysics.h>
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
@@ -34,6 +36,7 @@
 #include <DebugDraw/DebugDraw.h>     // DebugLine (HE::api::debug drain)
 #include <Hpak/ProjectExporter.h>    // sceneUuidForPath (packed scene lookup)
 #include <Integrity/IntegrityProbe.h> // exe/dylib/pak hashes for the join check (anti-cheat plan §3.5)
+#include <Platform/GameLayout.h>      // data/ and HorizonEngine/ beside the executable
 #include <HorizonCode/HcCompiledLoader.h> // compiled HorizonCode classes (hybrid)
 #include <HorizonCode/HcClassResolve.h>
 #include "HorizonVersion.h"          // HE_VERSION_STRING (compiled-classes handshake)
@@ -42,6 +45,7 @@
 #include <HorizonScene/ScriptApi.h>
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/EnvironmentPush.h>      // makeEnvironmentSettings (shared with the editor)
+#include <HorizonScene/WaterRipples.h>         // pushRipples: the water's rings, once per frame
 #include <HorizonScene/FlyCameraController.h>  // free-fly camera (shared with the editor's PIE)
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
@@ -235,15 +239,16 @@ bool notifyShow(const std::string& title, const std::string& body)
 // THAT does nothing, so the bundle itself is what macOS is told to open.
 std::filesystem::path executablePathForAutostart()
 {
-    const char* base = SDL_GetBasePath();
-    if (!base) return {};
-    std::filesystem::path p(base);
+    // The executable carries the project's name since the export renames it.
+    const std::filesystem::path exe = HE::Integrity::currentExecutablePath();
+    if (exe.empty()) return {};
 #ifdef __APPLE__
+    const std::filesystem::path p = exe.parent_path();
     // …/Foo.app/Contents/Resources/ → …/Foo.app
     for (std::filesystem::path up = p; !up.empty() && up != up.root_path(); up = up.parent_path())
         if (up.extension() == ".app") return up;
 #endif
-    return p / "HorizonGame";
+    return exe;
 }
 
 void destroyTray()
@@ -268,8 +273,8 @@ void trayShow(const std::string& tooltip)
     SDL_Surface* icon = nullptr;
     std::vector<std::uint8_t> rgba;
     int w = 0, h = 0;
-    if (const char* base = SDL_GetBasePath())
-        if (HE::heLoadPngRGBA(std::filesystem::path(base) / "AppIcon.png", rgba, w, h))
+    if (const std::filesystem::path data = HE::GameLayout::dataDir(); !data.empty())
+        if (HE::heLoadPngRGBA(data / "AppIcon.png", rgba, w, h))
             icon = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, rgba.data(), w * 4);
 
     g_tray = SDL_CreateTray(icon, tooltip.empty() ? nullptr : tooltip.c_str());
@@ -434,9 +439,10 @@ void GameApplication::applyShippedConfig()
 
 	// SDL_GetBasePath needs no SDL_Init, and inside a macOS .app it resolves to
 	// Contents/Resources — the same directory OnInit reads project.hcfg and the
-	// pak from, and where the exporter puts config.json.
-	const char* baseRaw = SDL_GetBasePath();
-	if (!baseRaw)
+	// pak from, and where the exporter puts config.json. In the export layout
+	// that is data/ beside the executable (GameLayout::dataDir).
+	const fs::path dataDir = HE::GameLayout::dataDir();
+	if (dataDir.empty())
 		HE_LOG_WARN(Core, "%s",
 			"GameApplication: SDL_GetBasePath returned null — the shipped project "
 			"configuration cannot be located");
@@ -457,10 +463,12 @@ void GameApplication::applyShippedConfig()
 	// FPS-style mouse grab at the top of OnInit is the other one (plan E6).
 	// OnInit overwrites the member from the same file a moment later, so this is
 	// the same answer arriving earlier, not a second source of truth.
-	if (baseRaw)
+	if (!dataDir.empty())
 	{
 		ProjectConfig peek;
-		if (ProjectConfigLoader::load(fs::path(baseRaw), peek) && peek.appMode)
+		if (HE::resolveProjectConfig(compiledGameBuildConfig(), dataDir, peek)
+		        != HE::ProjectConfigSource::None
+		    && peek.appMode)
 		{
 			m_appMode    = true;
 			m_windowMode = HE::WindowMode::Windowed;
@@ -472,10 +480,12 @@ void GameApplication::applyShippedConfig()
 		// runs. A missing file is the default (every build made before it
 		// existed); a damaged one is logged and ALSO the default, because a
 		// game must start either way.
-		if (!HE::loadProjectSettings(fs::path(baseRaw), m_projectSettings))
+		// A game built with HEGameBuildConfig.h carries them compiled in and does
+		// not look for the file.
+		if (!HE::resolveProjectSettings(compiledGameBuildConfig(), dataDir, m_projectSettings))
 		{
 			HE_LOG_WARN(Core, "GameApplication: %s is unreadable — using default project settings",
-			            HE::projectSettingsPath(fs::path(baseRaw)).string().c_str());
+			            HE::projectSettingsPath(dataDir).string().c_str());
 			m_projectSettings = HE::ProjectSettings{};
 		}
 	}
@@ -558,9 +568,9 @@ HE::ApplicationConfig GameApplication::GetConfig() const
 	// advertising itself inside somebody else's product. No picture, no splash.
 	if (m_projectSettings.game.splashEnabled)
 	{
-		if (const char* baseRaw = SDL_GetBasePath())
+		if (const fs::path data = HE::GameLayout::dataDir(); !data.empty())
 		{
-			const fs::path logo = fs::path(baseRaw) / "Splash.png";
+			const fs::path logo = data / "Splash.png";
 			std::error_code ec;
 			if (fs::is_regular_file(logo, ec))
 			{
@@ -582,13 +592,25 @@ std::unique_ptr<IRenderer> GameApplication::CreateRenderer()
 	// The flavour goes in the log next to the backend because the two are the
 	// whole difference between the three shipped runtimes, and a report that
 	// says "the app is slow" is worth nothing without knowing which one ran.
-	HE_LOG_INFO(Core, "GameApplication: creating renderer (runtime flavour '%s')",
-	            RendererFactory::RuntimeFlavor());
+	// The build profile likewise: "F9 does nothing" is a release build.
+	HE_LOG_INFO(Core, "GameApplication: creating renderer (runtime flavour '%s', build profile '%s')",
+	            RendererFactory::RuntimeFlavor(), HE::kBuildProfileName);
 	return RendererFactory::Create(m_backend);
 }
 
 void GameApplication::OnInit()
 {
+	// Said once, in the log, whichever way: "the key does nothing" is most often "this
+	// build does not have the key", and the build configuration in the startup banner
+	// is the ENGINE's, not this executable's.
+	// Two doors: this executable was built with them (Debug/RelWithDebInfo or
+	// -DHE_GAME_DEV_HOTKEYS=ON), or the export profile asked for them (project.hcfg,
+	// "Development hotkeys" in the export dialog) - the second is what lets an
+	// exported Release runtime answer F10. A release-profile build (SDK export) has
+	// neither door: the keys, the card and this log line are not compiled in.
+#if HE_FEATURE_DEV_HOTKEYS && defined(HE_GAME_DEV_HOTKEYS)
+	m_devHotkeys = true;
+#endif
 	HE_LOG_INFO(Core, "%s", "GameApplication::OnInit");
 
 	// Rumble reaches the pads through Input, which the script API cannot see.
@@ -622,13 +644,14 @@ void GameApplication::OnInit()
 	if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
 		SDL_StartTextInput(w);
 
-	const char* baseRaw = SDL_GetBasePath();
-	if (!baseRaw)
+	// The shipped data: <exe dir>/data, or the base path itself (.app, old flat
+	// exports). Named exeDir from the time both were the same folder.
+	const std::filesystem::path exeDir = HE::GameLayout::dataDir();
+	if (exeDir.empty())
 	{
 		HE_LOG_WARN(Core, "%s", "GameApplication: SDL_GetBasePath returned null");
 		return;
 	}
-	const std::filesystem::path exeDir(baseRaw);
 
 	// ── The window icon (plan A7) ────────────────────────────────────────────
 	// AppIcon.png sits beside the data because the exporter generated it there.
@@ -641,14 +664,36 @@ void GameApplication::OnInit()
 		HE::heSetWindowIcon(w, exeDir / "AppIcon.png");
 #endif
 
-	if (!ProjectConfigLoader::load(exeDir, m_config))
+	// Compiled-in values (HEGameBuildConfig.h, an SDK export) win; the prebuilt
+	// runtime has none and reads project.hcfg as it always did.
+	m_configSource = HE::resolveProjectConfig(compiledGameBuildConfig(), exeDir, m_config);
+	const bool haveConfig = m_configSource != HE::ProjectConfigSource::None;
+#if HE_FEATURE_DEV_HOTKEYS
+	if (haveConfig && m_config.devTools) m_devHotkeys = true;
+	HE_LOG_INFO(Core, "%s", m_devHotkeys
+		? "GameApplication: development hotkeys ON (V = VSync, F10 = stats card)"
+		: "GameApplication: development hotkeys OFF - export with the Development profile's "
+		  "\"Development hotkeys\" ticked, or build with Debug/RelWithDebInfo or -DHE_GAME_DEV_HOTKEYS=ON");
+#endif
+	if (!haveConfig)
 	{
 		HE_LOG_INFO(Core, "%s", "GameApplication: no project.hcfg — running without pak");
 		return;
 	}
+	HE_LOG_INFO(Core, "GameApplication: project configuration %s",
+	            HE::projectConfigSourceName(m_configSource));
 	// Config/ProjectSettings.json beside it is already in m_projectSettings: the
 	// constructor read it with the hcfg peek, because the window title in it is
 	// needed before OnInit (applyShippedConfig).
+	// The gamepad deadzones the project set (Project Settings > Input). Without
+	// them the game keeps Input's own defaults, as every build has. Set before the
+	// player's settings menu reads them back (api::settings::Host below), so the
+	// menu starts from what the game really uses.
+	if (m_projectSettings.input.enabled)
+	{
+		input().stickDeadzone   = m_projectSettings.input.stickDeadzone;
+		input().triggerDeadzone = m_projectSettings.input.triggerDeadzone;
+	}
 	// Application build (docs/he-apps-plan.md A1): everything below that belongs
 	// to a GAME is skipped. Latched into a member because half a dozen places
 	// downstream ask, and reaching into m_config at each of them invites one of
@@ -702,12 +747,16 @@ void GameApplication::OnInit()
 
 	const std::string pakPath = (exeDir / m_config.hpakFilename).string();
 	// AES key for an encrypted pak; nullptr for an unencrypted one. Preferred
-	// source is the key block the exporter patched into THIS executable
-	// (EmbeddedPakKey.h — no key file next to the game); the key in project.hcfg
-	// is the legacy fallback for exports made against a runtime without the block.
+	// source is the key compiled in with HEGameBuildConfig.h, then the key block
+	// the exporter patched into THIS executable (EmbeddedPakKey.h — no key file
+	// next to the game); the key in project.hcfg is the legacy fallback for
+	// exports made against a runtime without the block. Only the source is
+	// logged, never the key.
 	const uint8_t* pakKey = nullptr;
-	if (g_hePakKeyBlock.hasKey)      pakKey = g_hePakKeyBlock.key;
-	else if (m_config.encrypted)     pakKey = m_config.encKey;
+	const HE::PakKeySource keySource = HE::selectPakKey(
+		m_configSource, m_config, g_hePakKeyBlock.hasKey ? g_hePakKeyBlock.key : nullptr, pakKey);
+	if (pakKey)
+		HE_LOG_INFO(Core, "GameApplication: pak key from %s", HE::pakKeySourceName(keySource));
 	// Mount (not eager-load): open + index the archive. Assets are then streamed on
 	// background workers, seeded from what the scene actually references (below), so
 	// only the reference-graph closure loads — unused pak assets are never touched.
@@ -727,7 +776,7 @@ void GameApplication::OnInit()
 		HE_LOG_INFO(Core, "%s",
 			("GameApplication: mounted " + m_config.hpakFilename).c_str());
 
-		// Mod overlays: every .hpak in Mods/ next to the executable, mounted on
+		// Mod overlays: every .hpak in Mods/ of the data folder (data/Mods), mounted on
 		// top of the base pak in alphabetical order. Same UUID = replacement,
 		// new UUID = addition — this also lets a mod override the packed startup
 		// scene, which is why mods mount BEFORE the scene is read below.
@@ -758,7 +807,10 @@ void GameApplication::OnInit()
 		HE::Integrity::Inputs in;
 		in.executable = HE::Integrity::currentExecutablePath();
 		if (!in.executable.empty())
+		{
 			in.libraryDirs.push_back(in.executable.parent_path());
+			in.libraryDirs.push_back(in.executable.parent_path() / HE::GameLayout::kEngineDirName);
+		}
 		in.libraryDirs.push_back(exeDir);
 		for (const auto& pak : contentManager().mountedPakIds())
 			in.paks.push_back({ std::filesystem::path(pak.path).filename().string(), pak.tocHash });
@@ -797,14 +849,18 @@ void GameApplication::OnInit()
 	}
 
 	// Compiled HorizonCode classes: the export may have translated the project's
-	// graphs to native C++ (HorizonCodeGen library beside the executable). Loaded
-	// once for process lifetime; every host below (GameInstance, createObject,
+	// graphs to native C++ (HorizonCodeGen library in HorizonEngine/, beside the
+	// engine library it was built against; in the flat layout beside the data).
+	// The loader refuses a library of another engine version or build profile.
+	// Loaded once for process lifetime; every host below (GameInstance, createObject,
 	// widgets, level scripts) consults the table and falls back to the
 	// interpreter on a miss. A misconfiguration (hcfg says compiled, library
 	// missing/rejected) is loud, not a silent slowdown.
 	{
-		HorizonCode::compiledClasses().load(exeDir / HorizonCode::compiledLibraryName(),
-		                                    HE_VERSION_STRING);
+		const std::filesystem::path engineDir = HE::GameLayout::engineDir();
+		HorizonCode::compiledClasses().load(
+			(engineDir.empty() ? exeDir : engineDir) / HorizonCode::compiledLibraryName(),
+			HE_VERSION_STRING);
 		if (m_config.horizonCodeCompiled && !HorizonCode::compiledClasses().loaded())
 			HE_LOG_WARN(Core, "%s",
 				"GameApplication: project.hcfg says HorizonCode is compiled, but the "
@@ -1263,6 +1319,12 @@ void GameApplication::OnInit()
 			                        &contentManager(), self);
 			return fn->invoke(c, args);
 		};
+		// Compiled HorizonCode calling HE::api directly gets the Ctx the
+		// dispatcher above would have built, from the same builder and resolved
+		// at the same moment (when its HE::api::Scope opens).
+		svc.apiCtx = [this](HorizonCode::InstanceId self, HE::api::Ctx& out) {
+			out = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager(), self);
+		};
 		m_gameInstance.runtime().setServices(std::move(svc));
 	}
 
@@ -1376,6 +1438,10 @@ void GameApplication::OnInit()
 	// The player's settings over all of that: after the buses (a saved volume
 	// lands on the project's mixer, not under it) and after the window exists.
 	installPlayerSettings();
+	// The script API's streaming group (cellAt, isSettled, pin) asks the game's cell
+	// runtime, for the whole life of the application — before the first script runs,
+	// so a pin set in BeginPlay lands.
+	HE::api::streaming::install(&m_cellRuntime);
 
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
@@ -1488,107 +1554,68 @@ void GameApplication::cancelZoneStreaming()
 	m_zoneStreamTokens.clear();
 }
 
+std::function<bool(std::vector<uint8_t>&)> GameApplication::openCellFile(const std::string& path)
+{
+	// A cell file: the scene's entry in a mounted pak (shipped builds), else the
+	// loose file in the project or next to the executable — the order
+	// loadSceneInto looks in. The worker gets everything by value.
+	if (auto pak = contentManager().detachedMountedEntryReader(sceneUuidForPath(path)))
+		return [pak = std::move(pak)](std::vector<uint8_t>& out) { out = pak(); return !out.empty(); };
+	std::vector<std::filesystem::path> candidates;
+	if (!contentManager().contentRoot().empty())
+		candidates.push_back(std::filesystem::path(contentManager().contentRoot()).parent_path() / path);
+	if (const auto data = HE::GameLayout::dataDir(); !data.empty()) candidates.push_back(data / path);
+	std::error_code ec;
+	for (const auto& file : candidates)
+		if (std::filesystem::exists(file, ec))
+			return [file](std::vector<uint8_t>& out)
+			{
+				std::ifstream in(file, std::ios::binary);
+				out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+				return !out.empty();
+			};
+	return {};
+}
+
+void GameApplication::streamCellAssets(HorizonWorld& world, const HE::CancelToken& token,
+                                       const std::vector<uint32_t>& entities)
+{
+	// What a zone gets when it streams in (executeSceneRequests).
+	streamSceneAssets(world, token, &entities);
+}
+
+void GameApplication::cellApiCtx(HE::api::Ctx& ctx)
+{
+	ctx = apiCtx(m_world.get(), m_physicsWorld.get(), &contentManager());
+}
+
+HE::CellScriptHosts GameApplication::cellScriptHosts()
+{
+	HE::CellScriptHosts h;
+	h.entities      = &m_entityHost;
+	h.text          = m_scriptContext.get();
+	h.textInstances = &m_scriptInstances;
+	h.runtime       = &m_gameInstance.runtime();
+	h.content       = &contentManager();
+	return h;
+}
+
+void GameApplication::cellLoaded(HorizonWorld& world, entt::entity, const std::vector<entt::entity>& created)
+{
+	// Once the whole cell is built, like a zone's startScriptsFor: a BeginPlay sees
+	// every entity of its cell and stands on its bodies.
+	HE::startCellScripts(cellScriptHosts(), world, created);
+}
+
+void GameApplication::cellUnloading(HorizonWorld& world, entt::entity root)
+{
+	HE::stopCellScripts(cellScriptHosts(), world, root);
+}
+
 void GameApplication::updateCellStreaming(float dt)
 {
-	const std::string& manifestJson = m_world->cellManifestJson();
-	if (m_cellWorld != m_world.get() || manifestJson != m_cellManifestJson)
-	{
-		for (auto& [root, token] : m_cellStreamTokens) token.cancel();
-		m_cellStreamTokens.clear();
-		m_cellStreamer.reset();
-		m_cellWorld         = m_world.get();
-		m_cellManifestJson  = manifestJson;
-		m_cellHasLastCamera = false;
-		HE::CellManifest manifest;
-		if (manifestJson.empty()) return;
-		if (!HE::CellManifest::parse(manifestJson, manifest) || manifest.empty())
-		{
-			HE_LOG_WARN(Core, "%s", "GameApplication: the scene's cell manifest is malformed; "
-			                        "only the base scene is loaded");
-			return;
-		}
-
-		// A cell file: the scene's entry in a mounted pak (shipped builds), else
-		// the loose file in the project or next to the executable — the order
-		// loadSceneInto looks in. The worker gets everything by value.
-		auto reader = [this](const std::string& path) -> std::function<bool(std::vector<uint8_t>&)>
-		{
-			if (auto pak = contentManager().detachedMountedEntryReader(sceneUuidForPath(path)))
-				return [pak = std::move(pak)](std::vector<uint8_t>& out) { out = pak(); return !out.empty(); };
-			std::vector<std::filesystem::path> candidates;
-			if (!contentManager().contentRoot().empty())
-				candidates.push_back(std::filesystem::path(contentManager().contentRoot()).parent_path() / path);
-			if (const char* base = SDL_GetBasePath()) candidates.push_back(std::filesystem::path(base) / path);
-			std::error_code ec;
-			for (const auto& file : candidates)
-				if (std::filesystem::exists(file, ec))
-					return [file](std::vector<uint8_t>& out)
-					{
-						std::ifstream in(file, std::ios::binary);
-						out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-						return !out.empty();
-					};
-			return {};
-		};
-		HE::CellStreamer::Hooks hooks;
-		// What a zone gets when it streams in (executeSceneRequests): collision,
-		// and its assets under a token of its own. Cells carry no scripts.
-		hooks.loaded = [this](entt::entity root, const std::vector<entt::entity>& created)
-		{
-			if (m_physicsWorld)
-				for (entt::entity e : created) m_physicsWorld->addEntity(*m_world, (uint32_t)e);
-			std::vector<uint32_t> ids;
-			ids.reserve(created.size());
-			for (entt::entity e : created) ids.push_back((uint32_t)e);
-			HE::CancelToken& token = m_cellStreamTokens[(uint32_t)root];
-			token = HE::CancelToken::create();
-			streamSceneAssets(*m_world, token, &ids);
-		};
-		hooks.unloading = [this](entt::entity root)
-		{
-			if (m_physicsWorld)
-			{
-				std::vector<entt::entity> stack{ root };
-				while (!stack.empty())
-				{
-					const entt::entity e = stack.back();
-					stack.pop_back();
-					m_physicsWorld->removeEntity((uint32_t)e);
-					if (const auto* h = m_world->registry().try_get<HierarchyComponent>(e))
-						stack.insert(stack.end(), h->children.begin(), h->children.end());
-				}
-			}
-			if (const auto t = m_cellStreamTokens.find((uint32_t)root); t != m_cellStreamTokens.end())
-			{
-				t->second.cancel();
-				m_cellStreamTokens.erase(t);
-			}
-		};
-		m_cellStreamer.begin(manifest, std::move(reader), std::move(hooks));
-	}
-	if (!m_cellStreamer.active()) return;
-
-	glm::dvec3 camera(0.0);
-	bool       haveCamera = false;
-	for (auto e : m_world->registry().view<TransformComponent, CameraComponent>())
-	{
-		camera     = glm::dvec3(HE::worldPositionOf(*m_world, e)) + m_world->origin();
-		haveCamera = true;
-		break;
-	}
-	if (!haveCamera) return;
-	// The lookahead follows the camera's motion; a jump (a teleport, a respawn)
-	// is not a speed, so anything faster than an airliner counts as standing.
-	glm::vec3 velocity(0.0f);
-	if (m_cellHasLastCamera && dt > 0.0f)
-	{
-		velocity = glm::vec3((camera - m_cellLastCamera) / static_cast<double>(dt));
-		if (glm::length(velocity) > 300.0f) velocity = glm::vec3(0.0f);
-	}
-	m_cellLastCamera    = camera;
-	m_cellHasLastCamera = true;
 	HE_PROFILE_SCOPE_N("CellStreaming");
-	m_cellStreamer.update(*m_world, camera, velocity, /*budgetMs=*/4.0);
+	m_cellRuntime.update(*m_world, dt);
 }
 
 // ── Scene transitions ────────────────────────────────────────────────────────
@@ -1615,8 +1642,8 @@ bool GameApplication::loadSceneInto(HorizonWorld& world, const std::string& scen
 	int n = 0;
 	if (!contentManager().contentRoot().empty())
 		candidates[n++] = std::filesystem::path(contentManager().contentRoot()).parent_path() / scenePath;
-	if (const char* base = SDL_GetBasePath())
-		candidates[n++] = std::filesystem::path(base) / scenePath;
+	if (const auto data = HE::GameLayout::dataDir(); !data.empty())
+		candidates[n++] = data / scenePath;
 	std::error_code ec;
 	for (int i = 0; i < n; ++i)
 		if (std::filesystem::exists(candidates[i], ec))
@@ -1826,11 +1853,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	cancelZoneStreaming();
 	m_sceneStreamToken = std::move(streamToken);
 	// The old world's cells go with it; the new one starts its own next frame.
-	for (auto& [root, token] : m_cellStreamTokens) token.cancel();
-	m_cellStreamTokens.clear();
-	m_cellStreamer.reset();
-	m_cellWorld = nullptr;
-	m_cellManifestJson.clear();
+	m_cellRuntime.reset();
 
 	// Tear down the old scene: unload event first (handlers still see the world),
 	// then scripts (finalizers may touch entities), sounds, zones. The app-level
@@ -1840,6 +1863,7 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 		m_world->fireLevelUnloaded();
 	m_scriptContext.reset();
 	m_scriptInstances.clear();
+	WeatherAudio::stop(m_weatherAudio, m_audioEngine);   // the new scene's weather fades in on its own
 	m_audioEngine.stopAll();
 	HE::api::scene::clearZones();
 
@@ -2121,6 +2145,26 @@ void GameApplication::startPhysics()
 	// The rate half of that page is m_projectSettings.physics.fixedDt(), read
 	// where the accumulator steps.
 	m_physicsWorld->setGravity(m_projectSettings.physics.gravity);
+	// How many threads a step uses (Thema 178): the project's word, 0 = automatic.
+	// HE_PHYSICS_THREADS in the environment still wins. Before initialize() as well,
+	// so the first step already runs on the right number.
+	m_physicsWorld->setThreadCount(m_projectSettings.physics.threads);
+	// The time budget for the work around the step (Thema 178 step 3), likewise.
+	m_physicsWorld->setBudget({ m_projectSettings.physics.budgetMs,
+	                            static_cast<uint32_t>(m_projectSettings.physics.eventsPerPoll) });
+	// Nothing falls through a floor that is not there: whatever could fall is held
+	// while the cell under it is not built (a cell going out, or still coming in).
+	// Asked at call time, so it follows the streamer through scene changes: an
+	// inactive streamer (no cells in this scene) holds nothing. The second function
+	// is that same fact as a cheap question, so a world without cells does not ask
+	// the first one about every dynamic body in every step.
+	m_physicsWorld->setRegionHold([this](const glm::vec3& p)
+	{
+		return m_world && HE::cellHolds(m_cellRuntime.streamer(), *m_world, p);
+	}, [this]
+	{
+		return m_cellRuntime.active();
+	});
 	m_physicsWorld->initialize(*m_world);
 	// Every runtime spawn goes through the entity host, so it is the host that
 	// has to know where bodies are built. Set HERE rather than at the two call
@@ -2878,18 +2922,34 @@ bool GameApplication::OnEvent(const SDL_Event& event)
 		// shortcut at all. Bare keys are allowed here — F5 means F5 when nobody
 		// is in a text field.
 		if (menuShortcutFromKey(event.key)) return true;
-#ifdef HE_GAME_DEV_HOTKEYS
-		// V: static VSync toggle — DEVELOPMENT BUILDS ONLY. A shipped game has no
-		// settings menu yet, and a stray V must not silently flip the player's
-		// present mode; the define is set only for non-Release configurations
-		// (HE_Game/CMakeLists.txt), so shipping builds don't compile this in.
-		if (event.key.key == SDLK_V)
+#if HE_FEATURE_DEV_HOTKEYS
+		if (m_devHotkeys)
 		{
-			m_vsyncOn = !m_vsyncOn;
-			setVSync(m_vsyncOn);
-			HE_LOG_INFO(Core, "%s",
-				m_vsyncOn ? "GameApplication: VSync ON" : "GameApplication: VSync OFF");
-			return true;
+			// V: static VSync toggle — DEVELOPMENT BUILDS ONLY. A shipped game has no
+			// settings menu yet, and a stray V must not silently flip the player's
+			// present mode; m_devHotkeys is true only for non-Release configurations
+			// (HE_Game/CMakeLists.txt) or an export profile that asked for it.
+			if (event.key.key == SDLK_V)
+			{
+				m_vsyncOn = !m_vsyncOn;
+				setVSync(m_vsyncOn);
+				HE_LOG_INFO(Core, "%s",
+					m_vsyncOn ? "GameApplication: VSync ON" : "GameApplication: VSync OFF");
+				return true;
+			}
+			// F10: the stats card — frame counters plus where the GPU's time goes. Same
+			// rule as V: a development build only, and not swallowed while a text field
+			// has the keyboard (that case returned above).
+			if (event.key.key == SDLK_F10)
+			{
+				const bool on = m_devStats.toggle(m_widgets, contentManager());
+				HE_LOG_INFO(Core, "%s",
+					on ? "GameApplication: stats card ON"
+					   : m_devStats.visible() || m_devStats.widgetId() != 0
+					         ? "GameApplication: stats card OFF"
+					         : "GameApplication: stats card could not be created (see the DevStatsTile line above)");
+				return true;
+			}
 		}
 #endif
 		// Esc closes the topmost dialog, popup or menu FIRST, and only when
@@ -2934,6 +2994,32 @@ void GameApplication::OnRender(float deltaTime)
 	// so every renderer touch below goes through this one handle and its null check
 	// — the checks used to be applied to some calls and forgotten on others.
 	IRenderer* const r = renderer();
+
+	// The stats card (F10): a bool test while hidden. Before the frame's UI is
+	// extracted, so the text it shows is the one drawn this frame.
+#if HE_FEATURE_DEV_HOTKEYS
+	// HE_GAME_STATS=1: the card is up from the first frame, for a run nobody presses F10 in
+	// (a remote reproduction, a scripted capture); HE_GAME_STATS_LOG adds its text to the log.
+	if (m_devHotkeys && !m_devStatsEnvChecked)
+	{
+		m_devStatsEnvChecked = true;
+		if (const char* v = std::getenv("HE_GAME_STATS"); v && *v && std::atoi(v) != 0 && !m_devStats.visible())
+		{
+			const bool on = m_devStats.toggle(m_widgets, contentManager());
+			HE_LOG_INFO(Core, "GameApplication: stats card %s by HE_GAME_STATS", on ? "ON" : "could not be created");
+		}
+	}
+	if (m_devHotkeys && m_devStats.visible())
+	{
+		static const char* const kBackendNames[] = { "OpenGL", "Vulkan", "D3D11", "D3D12", "Metal", "Software" };
+		const std::size_t b = static_cast<std::size_t>(m_backend);
+		int pw = 0, ph = 0;
+		if (SDL_Window* w = window() ? window()->GetNativeWindow() : nullptr)
+			SDL_GetWindowSizeInPixels(w, &pw, &ph);
+		m_devStats.update(m_widgets, r, deltaTime,
+		                  b < std::size(kBackendNames) ? kBackendNames[b] : "", pw, ph);
+	}
+#endif
 
 	// ── "Open with", delivered once ──────────────────────────────────────────
 	// Through the SAME door a drop uses, and deliberately so: an application that
@@ -3212,7 +3298,7 @@ void GameApplication::OnRender(float deltaTime)
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
-		AudioSystem::updateSpatial(*m_world, m_audioEngine);
+		AudioSystem::updateSpatial(*m_world, m_audioEngine, m_physicsWorld.get());
 
 	// Live widgets: per-frame logic tick (EventTick). RAW dt on purpose — the
 	// pause menu is a widget, and a menu that stops ticking when the game pauses
@@ -3316,6 +3402,20 @@ void GameApplication::OnRender(float deltaTime)
 		                                m_scriptContext.get(), m_scriptInstances,
 		                                &m_gameInstance.runtime(), m_entityHost.instances(),
 		                                &m_animatorHost);
+	}
+
+	// The weather's sound: rain/wind/snow/storm beds that follow the live weather and
+	// thunder after each lightning strike, with nothing for gameplay code to do. After
+	// the tick above so a strike is heard the frame it happens; quiet while paused (the
+	// weather itself stands still then).
+	if (m_world && !m_appMode)
+	{
+		HE_PROFILE_SCOPE_N("WeatherAudio");
+		WeatherAudio::Frame frame;
+		frame.realDt  = deltaTime;
+		frame.gameDt  = gameDt;
+		frame.audible = !HE::api::time::isPaused();
+		WeatherAudio::update(m_weatherAudio, *m_world, m_audioEngine, contentManager(), frame);
 	}
 
 	// ── Renderer settings, in BOTH modes ─────────────────────────────────────
@@ -3457,7 +3557,7 @@ void GameApplication::OnRender(float deltaTime)
 			gr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflMaxRoughness", 0.6f));
 			gr.quality      = GlobalState::getInstance().getCustomConfigInt("GIReflQuality", 1);
 			gr.bounces      = GlobalState::getInstance().getCustomConfigInt("GIReflBounces", 1);
-			gr.blur         = GlobalState::getInstance().getCustomConfigBool("GIReflBlur", true);
+			gr.blur         = GlobalState::getInstance().getCustomConfigBool("GIReflBlur", false);
 			r->SetGIReflectionSettings(gr);
 
 			// Anti-aliasing — same config.json keys the editor's Preferences write
@@ -3500,6 +3600,10 @@ void GameApplication::OnRender(float deltaTime)
 				// reading them sees the Sky's values and not a stale default.
 				m_world->syncEnvironmentLights();
 			}
+			// The rings the water physics raised this frame (bodies going into or out of
+			// the water), for the water material. After the physics steps above; no
+			// physics world, no rings.
+			HE::water::pushRipples(r, m_physicsWorld.get());
 		}
 	}
 
@@ -3635,6 +3739,8 @@ void GameApplication::OnShutdown()
 	HE::api::fs::clearWatches();
 	// …and so are the timers, for exactly the same reason.
 	HE::api::timer::cancelAll();
+	// The streaming group must not ask a runtime that is about to go.
+	HE::api::streaming::install(nullptr);
 	// The database connections last: closing one flushes it, and a file left
 	// half-written is the one of these three that costs somebody their data.
 	HE::api::db::closeAll();
@@ -3675,6 +3781,9 @@ void GameApplication::OnShutdown()
 	// Clear the app-level UI while the runtime it registered on is still alive
 	// (fires each widget's Destruct). It's a member destroyed before m_gameInstance
 	// anyway, but the destructor doesn't fire Destruct — do it explicitly.
+#if HE_FEATURE_DEV_HOTKEYS
+	m_devStats.shutdown(m_widgets);
+#endif
 	m_widgets.clear();
 
 	// Tear down ECS scripts before the world (their finalizers may touch entities).

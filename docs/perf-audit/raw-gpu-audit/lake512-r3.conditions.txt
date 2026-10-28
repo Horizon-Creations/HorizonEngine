@@ -1,0 +1,15 @@
+== lake512-r3 00:06:42
+0:06  up 23 days,  3:28, 1 user, load averages: 3.31 5.29 8.08
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=25
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 3.31
+0:07  up 23 days,  3:28, 1 user, load averages: 2.90 5.05 7.92
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=94
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[lake512-r3] rc=0 wall=22s fps=37.382338472250495 cpu_p50=26.36975 gpu_p50=22.623624885454774 modes={'detailed': 400} size=2840x1528

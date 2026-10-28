@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HorizonEngine VERSION 0.5.0 LANGUAGES CXX)
+project(HorizonEngine VERSION 0.7.0 LANGUAGES CXX)
 
 # CMP0135 (CMake >= 3.24): archives fetched via FetchContent URL get the
 # extraction time as file timestamp instead of the archive's own, so a changed
@@ -55,6 +55,18 @@ endif()
 # (PIC is the default there) and ignored by MSVC on Windows, so it is safe on all
 # platforms and subsumes the per-target settings on lz4_static/zstd_static below.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# ─── Floating-point contraction (GCC) ────────────────────────────────────────
+# Jolt adds -mavx2 -mfma as PUBLIC options on x86, so everything linking it gets
+# FMA, and GCC's default for GNU C++ is -ffp-contract=fast: it fuses a multiply
+# and an add even across statements, after inlining, differently at every call
+# site. The same glm product then rounds differently in two functions, and the
+# engine relies on "same maths, same bits" (LODSystem's sibling memo against
+# worldMatrixOf, propagateTransforms against worldPositionOf): on Linux 37 of 800
+# LOD decisions on an exact boundary flipped (tests/test_lod.cpp). Jolt builds
+# itself with -ffp-contract=off for the same reason; MSVC does not contract, and
+# Clang's default (on) fuses only within one expression.
+add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>)
 
 # ─── SDL3 ──────────────────────────────────────────────────────────────────────
 include(FetchContent)
@@ -435,6 +447,13 @@ find_package(Libssh2 QUIET NO_CMAKE_PACKAGE_REGISTRY NO_CMAKE_SYSTEM_PACKAGE_REG
 if(NOT TARGET Libssh2::libssh2 AND NOT LIBSSH2_FOUND)
     if(WIN32)
         set(CRYPTO_BACKEND "WinCNG" CACHE STRING "" FORCE)
+        # WinCNG ships with ECDSA/ECDH OFF, which leaves only the classic
+        # diffie-hellman-group* key exchanges. Current OpenSSH-style servers
+        # (the EngineContent host offers only curve25519-sha256 and
+        # ecdh-sha2-nistp256) share none of those, so the handshake died with
+        # "Unable to exchange encryption keys" before authentication was even
+        # tried. ECDSA needs Windows 10 or later, which the Editor requires anyway.
+        set(ENABLE_ECDSA_WINCNG ON CACHE BOOL "" FORCE)
     else()
         find_package(OpenSSL QUIET COMPONENTS Crypto)
         if(OPENSSL_FOUND)
@@ -578,23 +597,29 @@ if(HE_ENABLE_ASTC)
     endif()
 endif()
 
-# ─── Assimp (optional: FBX / OBJ / COLLADA mesh import) ───────────────────────
+# ─── Assimp (optional: FBX / OBJ / COLLADA / Blender mesh import) ─────────────
 # The mesh importers read glTF natively (cgltf, vendored). Every other DCC
-# interchange format comes in through Assimp, restricted to the three importers
-# we actually route (FBX, OBJ, COLLADA) so the static library stays small and
+# interchange format comes in through Assimp, restricted to the importers we
+# actually route (FBX, OBJ, COLLADA, Blender) so the static library stays small and
 # nothing with a licence question (3DS, MD5, ...) is compiled in at all.
 # Linked ONLY into HorizonImporters (editor + asset_compiler + tests) — never
 # into the shipped game. Disable with -DHE_ENABLE_ASSIMP=OFF; the importer set
 # then falls back to glTF only (HE_HAVE_ASSIMP is not defined).
-option(HE_ENABLE_ASSIMP "Fetch Assimp for FBX/OBJ/COLLADA mesh import" ON)
+#
+# The Blender importer reads .blend files up to Blender 3.4 (gzip-compressed ones
+# too, zstd ones not): Blender 3.5 moved the mesh data into generic attributes
+# and Assimp's reader has no idea where the vertices went. For newer files the
+# importer says so and points at File > Export > glTF 2.0 (AssimpMeshImport.cpp).
+option(HE_ENABLE_ASSIMP "Fetch Assimp for FBX/OBJ/COLLADA/Blender mesh import" ON)
 if(HE_ENABLE_ASSIMP)
-    message(STATUS "HorizonEngine: fetching Assimp (FBX/OBJ/COLLADA importers only)")
+    message(STATUS "HorizonEngine: fetching Assimp (FBX/OBJ/COLLADA/Blender importers only)")
     set(BUILD_SHARED_LIBS_SAVE ${BUILD_SHARED_LIBS})
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE) # static assimp, linked into HorizonImporters only
     set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_FBX_IMPORTER             ON  CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_OBJ_IMPORTER             ON  CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_COLLADA_IMPORTER         ON  CACHE BOOL "" FORCE)
+    set(ASSIMP_BUILD_BLEND_IMPORTER           ON  CACHE BOOL "" FORCE)
     set(ASSIMP_NO_EXPORT                      ON  CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
     set(ASSIMP_BUILD_TESTS                    OFF CACHE BOOL "" FORCE)
@@ -628,13 +653,16 @@ if(HE_ENABLE_ASSIMP)
     set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVE} CACHE BOOL "" FORCE)
     if(TARGET assimp::assimp)
         set(HE_HAVE_ASSIMP TRUE)
-        message(STATUS "HorizonEngine: Assimp fetched — FBX/OBJ/COLLADA mesh import enabled")
+        # Assimp's own sample files (BSD-licensed, shipped in the source tree): the
+        # tests read .blend fixtures from here instead of carrying binaries of ours.
+        set(HE_ASSIMP_TEST_MODELS "${assimp_SOURCE_DIR}/test/models")
+        message(STATUS "HorizonEngine: Assimp fetched — FBX/OBJ/COLLADA/Blender mesh import enabled")
     else()
         message(WARNING "HorizonEngine: Assimp fetch did not produce a usable target — "
-                         "FBX/OBJ/COLLADA mesh import will be unavailable (glTF only).")
+                         "FBX/OBJ/COLLADA/Blender mesh import will be unavailable (glTF only).")
     endif()
 else()
-    message(STATUS "HorizonEngine: Assimp disabled (pass -DHE_ENABLE_ASSIMP=ON to enable FBX/OBJ/COLLADA import)")
+    message(STATUS "HorizonEngine: Assimp disabled (pass -DHE_ENABLE_ASSIMP=ON to enable FBX/OBJ/COLLADA/Blender import)")
 endif()
 
 # ─── Runtime flavour (docs/he-apps-plan.md A3b) ────────────────────────────────
@@ -670,6 +698,91 @@ if(NOT HE_RUNTIME_FLAVOR STREQUAL "game")
     set(HE_ENABLE_SHADERC OFF CACHE BOOL "" FORCE)
 endif()
 message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}'")
+
+# ─── Steam Audio (optional: HRTF / binaural spatial audio) ───────────────────
+# miniaudio stays the mixer and the device; Steam Audio is the spatialiser the
+# project can switch on (AudioBusConfig::spatialBackend, the Audio Mixer's
+# "Spatial audio" combo, AudioEngine::setSpatialBackend). The SDK is Valve's
+# prebuilt binary release (Apache-2.0): only phonon.h is needed to compile, and
+# libphonon is loaded at RUN time (SteamAudio.cpp: dlopen / LoadLibrary), so no
+# link step, no rpath and a missing library just means "stay on miniaudio".
+#
+# This flag decides what a tree contains. ON: HorizonScene compiles the backend
+# (HE_HAVE_STEAM_AUDIO) and the library is copied next to the binaries. OFF: no
+# phonon code in HorizonScene, nothing downloaded, nothing shipped — the game
+# configures its own tree with -DHE_ENABLE_STEAM_AUDIO=OFF when it does not need
+# it. The app runtime flavours leave it out (they are about size).
+#
+# The SDK is downloaded at CONFIGURE time on every platform (file(DOWNLOAD) with
+# a pinned SHA-256; only the headers and the one platform's library are
+# extracted from the ~180 MB zip, into the build tree's _deps). A failed
+# download or an unpacked layout that differs is a warning and the backend is
+# left out — configure never fails on it. HE_STEAM_AUDIO_ROOT points at an
+# already unpacked SDK (the folder holding include/ and lib/) and skips the
+# download, for offline CI. The SDK ships Windows x64, Linux x86_64 and macOS.
+option(HE_ENABLE_STEAM_AUDIO "Compile the optional Steam Audio (HRTF) spatial backend and ship libphonon" ON)
+set(HE_STEAM_AUDIO_ROOT "" CACHE PATH "Unpacked Steam Audio SDK (folder with include/ and lib/); empty = download at configure")
+set(HE_STEAM_AUDIO_VERSION "4.8.1")
+set(HE_STEAM_AUDIO_SHA256 "4a0aa5ec1176f38f0b0993a37c2259d9e86f27e22d5e24f83ec4c3cb9a1d5449")
+set(HE_HAVE_STEAM_AUDIO FALSE)
+set(HE_STEAM_AUDIO_LIB "")
+set(HE_STEAM_AUDIO_INCLUDE_DIR "")
+if(HE_ENABLE_STEAM_AUDIO AND NOT HE_RUNTIME_FLAVOR STREQUAL "game")
+    message(STATUS "HorizonEngine: runtime flavour '${HE_RUNTIME_FLAVOR}' — Steam Audio left out")
+elseif(HE_ENABLE_STEAM_AUDIO)
+    if(WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "(AMD64|x86_64|x64)")
+        set(_sa_libdir "windows-x64")
+        set(_sa_libname "phonon.dll")
+    elseif(APPLE)
+        set(_sa_libdir "osx")
+        set(_sa_libname "libphonon.dylib")
+    elseif(UNIX AND CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64|AMD64)")
+        set(_sa_libdir "linux-x64")
+        set(_sa_libname "libphonon.so")
+    else()
+        set(_sa_libdir "")
+        message(STATUS "HorizonEngine: Steam Audio has no SDK build for ${CMAKE_SYSTEM_NAME}/${CMAKE_SYSTEM_PROCESSOR} — backend left out")
+    endif()
+    if(_sa_libdir)
+        set(_sa_root "${HE_STEAM_AUDIO_ROOT}")
+        if(NOT _sa_root)
+            set(_sa_dir "${CMAKE_BINARY_DIR}/_deps/steamaudio-${HE_STEAM_AUDIO_VERSION}")
+            set(_sa_root "${_sa_dir}/steamaudio")
+            if(NOT EXISTS "${_sa_root}/lib/${_sa_libdir}/${_sa_libname}")
+                set(_sa_zip "${_sa_dir}/steamaudio_${HE_STEAM_AUDIO_VERSION}.zip")
+                message(STATUS "HorizonEngine: downloading Steam Audio SDK ${HE_STEAM_AUDIO_VERSION} (~180 MB, once per build tree)")
+                file(DOWNLOAD
+                    "https://github.com/ValveSoftware/steam-audio/releases/download/v${HE_STEAM_AUDIO_VERSION}/steamaudio_${HE_STEAM_AUDIO_VERSION}.zip"
+                    "${_sa_zip}"
+                    EXPECTED_HASH SHA256=${HE_STEAM_AUDIO_SHA256}
+                    STATUS _sa_status SHOW_PROGRESS)
+                list(GET _sa_status 0 _sa_rc)
+                if(_sa_rc EQUAL 0)
+                    file(ARCHIVE_EXTRACT INPUT "${_sa_zip}" DESTINATION "${_sa_dir}"
+                        PATTERNS "steamaudio/include/*" "steamaudio/lib/${_sa_libdir}/*"
+                                 "steamaudio/THIRDPARTY.md")
+                    file(REMOVE "${_sa_zip}")   # 180 MB we do not need twice
+                else()
+                    list(GET _sa_status 1 _sa_msg)
+                    message(WARNING "HorizonEngine: Steam Audio download failed (${_sa_msg}) — backend left out. "
+                                    "Configure with -DHE_STEAM_AUDIO_ROOT=<unpacked SDK> or -DHE_ENABLE_STEAM_AUDIO=OFF.")
+                    file(REMOVE "${_sa_zip}")
+                endif()
+            endif()
+        endif()
+        if(EXISTS "${_sa_root}/include/phonon.h" AND EXISTS "${_sa_root}/lib/${_sa_libdir}/${_sa_libname}")
+            set(HE_HAVE_STEAM_AUDIO TRUE)
+            set(HE_STEAM_AUDIO_INCLUDE_DIR "${_sa_root}/include")
+            set(HE_STEAM_AUDIO_LIB "${_sa_root}/lib/${_sa_libdir}/${_sa_libname}")
+            message(STATUS "HorizonEngine: Steam Audio enabled (${HE_STEAM_AUDIO_LIB})")
+        elseif(NOT _sa_rc OR _sa_rc EQUAL 0)
+            message(WARNING "HorizonEngine: Steam Audio SDK not found under '${_sa_root}' "
+                             "(expected include/phonon.h and lib/${_sa_libdir}/${_sa_libname}) — backend left out")
+        endif()
+    endif()
+else()
+    message(STATUS "HorizonEngine: Steam Audio disabled (pass -DHE_ENABLE_STEAM_AUDIO=ON to compile the HRTF backend)")
+endif()
 
 # ─── Shader cross-compiler: glslang + SPIRV-Cross (Material-System M0) ──────────
 # Canonical GLSL → glslang → SPIR-V → SPIRV-Cross → MSL / HLSL / GLSL(-ES).
@@ -790,6 +903,11 @@ else()
     message(STATUS "HorizonEngine: in-engine profiler compiled OUT (zero overhead)")
 endif()
 
+# ── Build profile: dev | release (HE_BUILD_PROFILE, he_target_build_profile) ──
+# Only defines the option and the function; no engine target calls it yet, so
+# every target compiles as before (the header's fallback is dev).
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonBuildProfile.cmake")
+
 # ─── Deploy directories ────────────────────────────────────────────────────────
 # Overridable with -DDEPLOY_DIR=... (CI packaging points it at the workspace; the
 # default is the local dev deploy layout).
@@ -800,8 +918,7 @@ else()
 endif()
 set(DEPLOY_DIR "${_default_deploy_dir}" CACHE PATH "Where the editor/game POST_BUILD deploys")
 # One deploy root, one directory per runtime flavour (A3b): the exporter looks
-# for them by these names next to the editor, and scripts/runtime_size.py weighs
-# each of them separately.
+# for them by these names next to the editor.
 if(HE_RUNTIME_FLAVOR STREQUAL "app-advanced")
     set(HE_RUNTIME_DIR_NAME "AppAdvanced")
 elseif(HE_RUNTIME_FLAVOR STREQUAL "app-basic")
@@ -896,7 +1013,7 @@ endfunction()
 # FORCE so editing this line always wins over a value already stored in the CMake
 # cache — without it, a reconfigure keeps the old cached codename (the version from
 # project() updates, but the codename would silently stay stale).
-set(HE_VERSION_CODENAME "Parhelion" CACHE STRING "Sky-themed codename for this release" FORCE)
+set(HE_VERSION_CODENAME "Nimbus" CACHE STRING "Sky-themed codename for this release" FORCE)
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"
@@ -913,11 +1030,19 @@ add_subdirectory(src/HE_SourceControl)
 # and runs, it just falls back to whatever EngineContent is present on disk.
 if(HE_HAVE_LIBSSH2)
     add_subdirectory(src/HE_ContentSync)
+    # The Editor updating itself over SFTP, on a SECOND account of its own. It
+    # reuses HorizonContentSync's SftpClient (which takes the endpoint as an
+    # argument) and so needs that target; it shares neither its account nor any
+    # of its code paths.
+    add_subdirectory(src/HE_SelfUpdate)
 endif()
 add_subdirectory(src/HE_Scene)
 # After HE_Scene: the Python plugin links it (and is loaded by it at runtime).
 add_subdirectory(src/HE_Python)
 add_subdirectory(src/HE_Rendering)
+# The four engine libraries as one HorizonEngine library, for the game and the
+# SDK only. After the four and the Python plugin, before HE_Game, which links it.
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonEngineBundle.cmake")
 add_subdirectory(src/HE_Tools)
 add_subdirectory(src/HE_Game)
 # An app-flavour tree builds a runtime, not an editor. Skipping the subdirectory
@@ -934,6 +1059,10 @@ endif()
 if(TARGET HorizonEditor AND TARGET HorizonGame)
     add_dependencies(HorizonEditor HorizonGame)
 endif()
+
+# ─── Engine SDK (install component HorizonSDK, target HorizonSDK) ─────────────
+# After every library: it reads their final interface definitions.
+include("${CMAKE_SOURCE_DIR}/cmake/HorizonSDK.cmake")
 
 # ─── Tests ─────────────────────────────────────────────────────────────────────
 option(HE_BUILD_TESTS "Build the doctest unit tests" ON)

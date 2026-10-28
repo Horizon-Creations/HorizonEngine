@@ -56,47 +56,37 @@ namespace
 }
 namespace
 {
-	// Scans one root directory for .hasset files of the given type, appending
-	// ClassRefs whose path is prefixed exactly as toContentRelativePath() would
-	// (pathPrefix is "" for the project Content root, "Engine/" for the engine
-	// content root) so the result is directly usable with loadAsset()/pickers.
-	void scanAssetsInto(std::vector<ClassRef>& out, const std::string& root,
-	                     const std::string& pathPrefix, HE::AssetType type)
+	std::vector<ClassRef> toClassRefs(const ContentManager::AssetFileList& files)
 	{
-		if (root.empty()) return;
-		std::error_code ec;
-		std::filesystem::recursive_directory_iterator it(root, ec), end;
-		for (; it != end; it.increment(ec))
-		{
-			if (ec) break;
-			if (!it->is_regular_file(ec)) continue;
-			if (it->path().extension() != ".hasset") continue;
-			// Header only: Reader::open() would pull every chunk of every asset in
-			// the tree into memory just to answer "what type is this?" — with the
-			// static-mesh picker that means reading gigabytes to fill a dropdown.
-			uint16_t assetType = 0;
-			if (HAsset::readAssetTypeFromFile(it->path().string(), assetType) &&
-			    assetType == static_cast<uint16_t>(type))
-			{
-				ClassRef cr;
-				cr.label = it->path().stem().string();
-				cr.path  = pathPrefix + std::filesystem::relative(it->path(), root, ec).generic_string();
-				std::error_code sec;
-				const auto sz = std::filesystem::file_size(it->path(), sec);
-				cr.bytes = sec ? 0 : static_cast<std::uint64_t>(sz);
-				out.push_back(std::move(cr));
-			}
-		}
+		std::vector<ClassRef> out;
+		out.reserve(files->size());
+		for (const ContentManager::AssetFileEntry& f : *files)
+			out.push_back({ f.label, f.path, f.bytes });
+		return out;
 	}
 }
 
+// Both read ContentManager's file index, which walks the trees once per content
+// change rather than once per call. The walks used to happen here, per call, and
+// the callers were draw code — seven panels scanned both content roots and opened
+// every .hasset each frame a dropdown (or the widget palette) was on screen.
 std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type)
 {
-	std::vector<ClassRef> out;
-	if (!cm) return out;
-	scanAssetsInto(out, cm->contentRoot(), "", type);
-	scanAssetsInto(out, cm->engineContentRoot(), "Engine/", type);
-	return out;
+	if (!cm) return {};
+	return toClassRefs(cm->assetFiles(type));
+}
+
+std::string pathStem(const std::string& path)
+{
+	std::string s = path;
+	if (const size_t p = s.find_last_of("/\\"); p != std::string::npos) s.erase(0, p + 1);
+	if (const size_t d = s.rfind('.'); d != std::string::npos) s.erase(d);
+	return s;
+}
+
+bool contains(const std::vector<std::string>& v, const std::string& s)
+{
+	return std::find(v.begin(), v.end(), s) != v.end();
 }
 
 std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
@@ -104,30 +94,11 @@ std::vector<ClassRef> listHorizonCodeClasses(ContentManager* cm)
 
 std::vector<ClassRef> listScenes(ContentManager* cm)
 {
-	std::vector<ClassRef> out;
-	if (!cm) return out;
-	const std::string root = cm->contentRoot();
-	if (root.empty()) return out;
-	// Scenes live anywhere under the PROJECT root (parent of Content/), and the
-	// path we store must be project-relative (e.g. "Content/123.hescene") — that
-	// is exactly the key the exporter packs each scene under (sceneUuidForPath)
-	// and what the game's loadSceneInto resolves. Typing a bare "123.hescene"
-	// mismatches both → this dropdown removes that failure mode.
-	const std::filesystem::path projectRoot = std::filesystem::path(root).parent_path();
-	std::error_code ec;
-	std::filesystem::recursive_directory_iterator it(
-		projectRoot, std::filesystem::directory_options::skip_permission_denied, ec), end;
-	for (; !ec && it != end; it.increment(ec))
-	{
-		if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") { ec.clear(); continue; }
-		ClassRef cr;
-		cr.label = it->path().stem().string();
-		cr.path  = it->path().lexically_relative(projectRoot).generic_string();
-		out.push_back(std::move(cr));
-	}
-	std::sort(out.begin(), out.end(),
-	          [](const ClassRef& a, const ClassRef& b) { return a.path < b.path; });
-	return out;
+	// Project-relative ("Content/123.hescene"), the key the exporter packs each
+	// scene under (sceneUuidForPath) and what the game's loadSceneInto resolves.
+	// Typing a bare "123.hescene" mismatches both — this list is why nobody has to.
+	if (!cm) return {};
+	return toClassRefs(cm->sceneFiles());
 }
 
 // ── Hover tooltips ────────────────────────────────────────────────────────────
@@ -535,11 +506,39 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 	if (ImGui::BeginCombo(label, cur.c_str()))
 	{
 		static std::string search;
-		if (ImGui::IsWindowAppearing()) { search.clear(); ImGui::SetKeyboardFocusHere(); }
+		// What the lists hold is taken once, as the dropdown opens, and only
+		// filtered while it stays open. It used to be fetched every frame —
+		// and the Objects half through listClasses, which loads every class and
+		// widget asset and parses its graph for an interface this list never
+		// shows (EDT-902). Only one combo is open at a time, so one set of
+		// statics serves every picker.
+		static std::vector<HE::EnumDef>   s_enums;
+		static std::vector<HE::StructDef> s_structs;
+		static std::vector<ClassRef>      s_objects;
+		if (ImGui::IsWindowAppearing())
+		{
+			search.clear(); ImGui::SetKeyboardFocusHere();
+			auto& reg = HE::TypeRegistry::instance();
+			s_enums   = reg.enums();
+			s_structs = reg.structs();
+			// Every class and widget asset by name. listClasses also dropped the
+			// ones whose graph is empty or does not parse — but a widget without
+			// logic is still a widget a variable can point at.
+			s_objects.clear();
+			for (HE::AssetType t : { HE::AssetType::HorizonCodeClass, HE::AssetType::Widget })
+				for (ClassRef& c : listAssets(cm, t)) s_objects.push_back(std::move(c));
+		}
 		ImGui::SetNextItemWidth(180.0f);
 		ImGui::InputTextWithHint("##typesearch", "Search…", &search);
 		const std::string q = lc(search);
-		auto hit = [&](const std::string& s){ return q.empty() || lc(s).find(q) != std::string::npos; };
+		std::string lower; // one buffer for every item's lowered label, not a string per item
+		auto hit = [&](std::string_view s)
+		{
+			if (q.empty()) return true;
+			lower.assign(s);
+			for (char& c : lower) c = (char)std::tolower((unsigned char)c);
+			return lower.find(q) != std::string::npos;
+		};
 
 		ImGui::TextDisabled("Default");
 		const P defs[] = { P::Float, P::Double, P::Bool, P::Int, P::String,
@@ -550,8 +549,7 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 
 		if (typeName) // user-defined types (Enum/Struct assets) where allowed
 		{
-			auto& reg = HE::TypeRegistry::instance();
-			const auto enums = reg.enums();
+			const auto& enums = s_enums;
 			if (!enums.empty())
 			{
 				ImGui::Separator();
@@ -561,7 +559,7 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 					        type == P::Enum && *typeName == d.assetPath))
 					{ type = P::Enum; *typeName = d.assetPath; if (className) className->clear(); changed = true; }
 			}
-			const auto structs = reg.structs();
+			const auto& structs = s_structs;
 			if (!structs.empty())
 			{
 				ImGui::Separator();
@@ -577,7 +575,7 @@ bool drawTypePicker(const char* label, ContentManager* cm,
 		{
 			ImGui::Separator();
 			ImGui::TextDisabled("Objects");
-			for (const auto& c : listClasses(cm, nullptr, nullptr))
+			for (const ClassRef& c : s_objects)
 				if (hit(c.label) && ImGui::Selectable(c.label.c_str(), type == P::Ref && *className == c.path))
 				{ type = P::Ref; *className = c.path; if (typeName) typeName->clear(); changed = true; }
 		}
@@ -1122,7 +1120,11 @@ namespace
 		std::string activeKey;            // the highlighted entry
 		std::string bestKey;              // best-ranked entry seen this frame
 		int         bestScore = INT_MAX;
-		std::vector<std::string> keys;    // entries registered this frame, in order
+		// Entries registered this frame, in order: the first keyCount of keys.
+		// The strings outlive the frame so the next one assigns into their
+		// capacity instead of allocating a string per row (EDT-909).
+		std::vector<std::string> keys;
+		std::size_t keyCount = 0;
 		int  move        = 0;             // pending ↑/↓ steps from the search field
 		bool enterQueued = false;         // Enter pressed; the highlight takes it next frame
 		bool scrollTo    = false;         // bring the highlight into view
@@ -1194,7 +1196,7 @@ std::string searchMenuBegin(const char* id, const char* hint, float width)
 	s_nav.queryDirty = (q != s_nav.query);
 	s_nav.query      = q;
 
-	s_nav.keys.clear();
+	s_nav.keyCount = 0;
 	s_nav.bestKey.clear();
 	s_nav.bestScore = INT_MAX;
 	return q;
@@ -1209,13 +1211,17 @@ bool searchMenuItem(const std::string& label, bool disabled)
 	}
 
 	// Rank on the VISIBLE text: an "##id" suffix disambiguates the ImGui id, it is
-	// not part of what the user is searching for.
-	std::string shown = label.substr(0, label.find("##"));
-	std::transform(shown.begin(), shown.end(), shown.begin(),
+	// not part of what the user is searching for. Lowered into one buffer that
+	// every row reuses.
+	static std::string s_shown;
+	s_shown.assign(label, 0, label.find("##"));
+	std::transform(s_shown.begin(), s_shown.end(), s_shown.begin(),
 		[](unsigned char c){ return (char)std::tolower(c); });
-	const int score = rankMatch(shown, s_nav.query);
+	const int score = rankMatch(s_shown, s_nav.query);
 	if (score < s_nav.bestScore) { s_nav.bestScore = score; s_nav.bestKey = label; }
-	s_nav.keys.push_back(label);
+	if (s_nav.keyCount < s_nav.keys.size()) s_nav.keys[s_nav.keyCount] = label;
+	else                                    s_nav.keys.push_back(label);
+	++s_nav.keyCount;
 
 	// The highlight still belongs to the previous query while the query is being
 	// edited this frame, so an Enter that arrived with the keystroke waits.
@@ -1238,7 +1244,7 @@ void searchMenuEnd()
 	// best match (that IS the point); otherwise the highlight stays where it is
 	// — including where ↑/↓ put it — as long as that entry is still listed.
 	auto indexOf = [](const std::string& k) -> int {
-		for (size_t i = 0; i < s_nav.keys.size(); ++i)
+		for (size_t i = 0; i < s_nav.keyCount; ++i)
 			if (s_nav.keys[i] == k) return static_cast<int>(i);
 		return -1; };
 
@@ -1250,10 +1256,10 @@ void searchMenuEnd()
 		idx             = indexOf(s_nav.activeKey);
 		scroll          = true;
 	}
-	if (s_nav.move != 0 && !s_nav.keys.empty())
+	if (s_nav.move != 0 && s_nav.keyCount > 0)
 	{
-		idx = std::clamp(idx + s_nav.move, 0, static_cast<int>(s_nav.keys.size()) - 1);
-		s_nav.activeKey = s_nav.keys[idx];
+		idx = std::clamp(idx + s_nav.move, 0, static_cast<int>(s_nav.keyCount) - 1);
+		s_nav.activeKey = s_nav.keys[static_cast<std::size_t>(idx)];
 		scroll          = true;
 	}
 	s_nav.scrollTo = scroll;
@@ -1294,12 +1300,25 @@ namespace
 		if (paletteHidden(fn.id))                      return false;
 		if (!apiGroupAllowed(fn.id, allowedGroups))    return false;
 		if (lowerQuery.empty())                        return true;
-		auto low = [](std::string v){ std::transform(v.begin(), v.end(), v.begin(),
-			[](unsigned char c){ return (char)std::tolower(c); }); return v; };
+		// Case-insensitive "contains", in place: this runs per registry row and
+		// frame while the palette is open, and lowering three copies of every
+		// row's names was three allocations each (EDT-909).
+		const auto has = [&lowerQuery](const char* hay)
+		{
+			if (!hay) return false;
+			const std::size_t n = lowerQuery.size();
+			for (const char* h = hay; *h; ++h)
+			{
+				std::size_t i = 0;
+				while (i < n && h[i] &&
+				       static_cast<char>(std::tolower(static_cast<unsigned char>(h[i]))) == lowerQuery[i])
+					++i;
+				if (i == n) return true;
+			}
+			return false;
+		};
 		const char* shown = fn.displayName ? fn.displayName : fn.id;
-		return low(shown).find(lowerQuery) != std::string::npos
-		    || low(fn.id).find(lowerQuery) != std::string::npos
-		    || low(fn.category).find(lowerQuery) != std::string::npos;
+		return has(shown) || has(fn.id) || has(fn.category);
 	}
 } // namespace
 
@@ -1336,10 +1355,15 @@ std::string drawEngineApiMenu(const std::string& lowerQuery,
 			if (!*headerDrawn)
 			{ ImGui::TextDisabled("%s", onlyCategory ? onlyCategory : fn.category); *headerDrawn = true; }
 		}
-		else if (!header || std::string(header) != fn.category)
+		else if (!header || std::strcmp(header, fn.category) != 0)
 		{ ImGui::TextDisabled("%s", fn.category); header = fn.category; }
 		// Unique ImGui id via the stable api id (display names may repeat later).
-		if (searchMenuItem(std::string(shown) + "##" + fn.id)) picked = fn.id;
+		// One buffer for every row's label.
+		static std::string s_label;
+		s_label.assign(shown);
+		s_label += "##";
+		s_label += fn.id;
+		if (searchMenuItem(s_label)) picked = fn.id;
 		if (ImGui::IsItemHovered())
 		{
 			// Same self-documentation as the canvas hover: build the EngineCall
@@ -1691,7 +1715,7 @@ float pinInlineEditorWidth(const HorizonCode::Node& n, int unifiedPin)
 }
 
 void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
-                          const ParamChoices& choices)
+                          const ParamChoices& choices, const ParamHasChoices& hasChoices)
 {
 	using P = HorizonCode::PinType; using V = HorizonCode::Value;
 	HorizonCode::PinDesc pd{};
@@ -1751,9 +1775,19 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 			// A list where there is one, a text box where there is not. The
 			// pick lands in the same place the typing would have, so nothing
 			// downstream can tell which control wrote it.
-			const std::vector<std::string> opts = choices ? choices(n, pd.name)
-			                                              : std::vector<std::string>{};
-			if (opts.empty())
+			//
+			// Every visible pin asks this every frame, so with `hasChoices` the
+			// list itself is only built in a frame the dropdown is open (EDT-1002);
+			// without it the old way stands — fetch, and an empty list is a no.
+			std::vector<std::string> opts;
+			bool listed = false;
+			if (hasChoices) listed = choices && hasChoices(n, pd.name);
+			else
+			{
+				if (choices) opts = choices(n, pd.name);
+				listed = !opts.empty();
+			}
+			if (!listed)
 			{
 				ImGui::InputText("##pd", &v.s);
 				committed |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1777,6 +1811,7 @@ void drawPinDefaultEditor(HorizonCode::Node& n, int unifiedPin, bool& committed,
 			}
 			if (open)
 			{
+				if (hasChoices) opts = choices(n, pd.name);
 				for (const std::string& o : opts)
 					if (ImGui::Selectable(o.c_str(), v.s == o)) { v.s = o; committed = true; }
 				ImGui::EndCombo();
@@ -1802,88 +1837,175 @@ const char* engineParamHint(const HorizonCode::Node& n)
 	return nullptr;
 }
 
+namespace
+{
+	// Where a parameter's list comes from — decided on names alone, no I/O. Both
+	// engineParamChoices and engineParamHasChoices start here, so "has a list"
+	// and "the list is not empty" cannot disagree: if they did, a pin would flip
+	// between a text box and an empty dropdown.
+	enum class ChoiceSource { None, Vocabulary, Scenes, Assets, SaveFields };
+	struct ParamSource { ChoiceSource from = ChoiceSource::None; HE::AssetType type = HE::AssetType::Unknown; };
+
+	ParamSource paramSourceOf(const HorizonCode::Node& n, const std::string& param)
+	{
+		using S = ChoiceSource;
+		if (n.type != HorizonCode::NodeType::EngineCall || param.empty()) return {};
+		const std::string& row = n.s;
+		auto startsWith = [&row](const char* p){ return row.rfind(p, 0) == 0; };
+		if (param == "easing" || param == "direction" ||
+		    (param == "mode" && row == "theme.setMode") ||
+		    (param == "button" && row == "input.gamepadButton") ||
+		    (param == "axis" && row == "input.gamepadAxis"))
+			return { S::Vocabulary };
+		if (param == "scene" || (param == "path" && startsWith("scene."))) return { S::Scenes };
+		if (param == "class")       return { S::Assets, HE::AssetType::HorizonCodeClass };
+		if (param == "widgetAsset") return { S::Assets, HE::AssetType::Widget };
+		if (param == "themeAsset")  return { S::Assets, HE::AssetType::Theme };
+		if (param == "asset" && startsWith("audio.")) return { S::Assets, HE::AssetType::Audio };
+		if (param == "field" && startsWith("save.")) return { S::SaveFields };
+		return {};
+	}
+
+	// The engine's own closed vocabularies.
+	std::vector<std::string> vocabularyChoices(const std::string& row, const std::string& param)
+	{
+		std::vector<std::string> out;
+		if (param == "easing")
+		{
+			for (int i = 0; i < (int)HE::UIEase::COUNT; ++i)
+				out.push_back(HE::uiEaseName((HE::UIEase)i));
+		}
+		else if (param == "direction")
+		{
+			for (int i = 0; i < (int)HE::UIAnimDirection::COUNT; ++i)
+				out.push_back(HE::uiAnimDirectionName((HE::UIAnimDirection)i));
+		}
+		else if (param == "mode" && row == "theme.setMode")
+		{
+			// The three ScriptApi::setThemeMode accepts, and the third is the point:
+			// "System" is a rule, not a colour.
+			out = { "Light", "Dark", "System" };
+		}
+		// Asked of SDL rather than written out here: these names are ITS spelling
+		// ("dpup", "lefttrigger"), and a second copy would be a list that drifts.
+		else if (param == "button" && row == "input.gamepadButton")
+		{
+			for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i)
+				if (const char* s = SDL_GetGamepadStringForButton((SDL_GamepadButton)i)) out.push_back(s);
+		}
+		else if (param == "axis" && row == "input.gamepadAxis")
+		{
+			for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i)
+				if (const char* s = SDL_GetGamepadStringForAxis((SDL_GamepadAxis)i)) out.push_back(s);
+		}
+		return out;
+	}
+
+	// The fields of the project's default SaveGame Template that a save.* call
+	// can carry. The accessor's TYPE decides which fields it may touch: Save Get
+	// Number offers the numbers, and offering it a string field would be
+	// offering a call that cannot work.
+	//
+	// The template's JSON is parsed once per change of its text, not once per
+	// frame and pin: the pin asks every frame whether it has a list. Keyed on the
+	// text itself, so an unsaved edit in the template's own tab shows up as it
+	// always did, and the cache cannot answer for another project's template.
+	// The template's parsed schema, or null when there is no project, no default
+	// template or no such asset.
+	const HE::StructDef* saveSchema(ContentManager* cm)
+	{
+		const std::string tpl = HE::api::save::defaultTemplate();
+		if (!cm || tpl.empty()) return nullptr;
+		const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(cm->loadAsset(tpl));
+		if (!a) return nullptr;
+		static std::string    s_json;
+		static HE::StructDef  s_schema;
+		static bool           s_parsed = false;
+		if (!s_parsed || s_json != a->json)
+		{
+			s_json   = a->json;   // copied before the parse: `a` is only good until the next load
+			s_schema = HE::StructDef{};
+			s_parsed = true;
+			if (!HE::TypeRegistry::structFromJson(s_json, s_schema)) s_schema = HE::StructDef{};
+		}
+		return &s_schema;
+	}
+
+	bool acceptsSaveField(const std::string& row, const HE::StructField& f)
+	{
+		using P = HorizonCode::PinType;
+		if (f.isArray) return false;
+		if (row == "save.getNumber" || row == "save.setNumber")
+			return f.type == P::Float || f.type == P::Int || f.type == P::Enum;
+		if (row == "save.getString" || row == "save.setString") return f.type == P::String;
+		if (row == "save.getBool"   || row == "save.setBool")   return f.type == P::Bool;
+		if (row == "save.getStruct" || row == "save.setStruct") return f.type == P::Struct;
+		return true;
+	}
+
+	std::vector<std::string> saveFieldChoices(const std::string& row, ContentManager* cm)
+	{
+		std::vector<std::string> out;
+		const HE::StructDef* schema = saveSchema(cm);
+		if (!schema) return out;
+		for (const auto& f : schema->fields)
+			if (acceptsSaveField(row, f)) out.push_back(f.name);
+		return out;
+	}
+
+	// Same answer as !saveFieldChoices(...).empty(), without the list: the pin asks
+	// this every frame.
+	bool hasSaveFields(const std::string& row, ContentManager* cm)
+	{
+		const HE::StructDef* schema = saveSchema(cm);
+		return schema && std::any_of(schema->fields.begin(), schema->fields.end(),
+			[&row](const HE::StructField& f){ return acceptsSaveField(row, f); });
+	}
+
+	// Same answer as !vocabularyChoices(...).empty(). The UI vocabularies are
+	// closed enums, so only SDL's spellings still need asking.
+	bool hasVocabulary(const std::string& row, const std::string& param)
+	{
+		if (param == "easing")    return (int)HE::UIEase::COUNT > 0;
+		if (param == "direction") return (int)HE::UIAnimDirection::COUNT > 0;
+		if (param == "mode")      return row == "theme.setMode";
+		return !vocabularyChoices(row, param).empty();
+	}
+}
+
+bool engineParamHasChoices(const HorizonCode::Node& n, const std::string& param,
+                           ContentManager* cm)
+{
+	const ParamSource src = paramSourceOf(n, param);
+	switch (src.from)
+	{
+		case ChoiceSource::None:       return false;
+		case ChoiceSource::Vocabulary: return hasVocabulary(n.s, param);
+		case ChoiceSource::Scenes:     return cm && !cm->sceneFiles()->empty();
+		case ChoiceSource::Assets:     return cm && !cm->assetFiles(src.type)->empty();
+		case ChoiceSource::SaveFields: return hasSaveFields(n.s, cm);
+	}
+	return false;
+}
+
 std::vector<std::string> engineParamChoices(const HorizonCode::Node& n,
                                             const std::string& param, ContentManager* cm)
 {
-	using P = HorizonCode::PinType;
 	std::vector<std::string> out;
-	if (n.type != HorizonCode::NodeType::EngineCall || param.empty()) return out;
-	const std::string& row = n.s;
-	auto startsWith = [&row](const char* p){ return row.rfind(p, 0) == 0; };
-
-	// ── The engine's own closed vocabularies ─────────────────────────────────
-	if (param == "easing")
-	{
-		for (int i = 0; i < (int)HE::UIEase::COUNT; ++i)
-			out.push_back(HE::uiEaseName((HE::UIEase)i));
-	}
-	else if (param == "direction")
-	{
-		for (int i = 0; i < (int)HE::UIAnimDirection::COUNT; ++i)
-			out.push_back(HE::uiAnimDirectionName((HE::UIAnimDirection)i));
-	}
-	else if (param == "mode" && row == "theme.setMode")
-	{
-		// The three ScriptApi::setThemeMode accepts, and the third is the point:
-		// "System" is a rule, not a colour.
-		out = { "Light", "Dark", "System" };
-	}
-	// Asked of SDL rather than written out here: these names are ITS spelling
-	// ("dpup", "lefttrigger"), and a second copy would be a list that drifts.
-	else if (param == "button" && row == "input.gamepadButton")
-	{
-		for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; ++i)
-			if (const char* s = SDL_GetGamepadStringForButton((SDL_GamepadButton)i)) out.push_back(s);
-	}
-	else if (param == "axis" && row == "input.gamepadAxis")
-	{
-		for (int i = 0; i < SDL_GAMEPAD_AXIS_COUNT; ++i)
-			if (const char* s = SDL_GetGamepadStringForAxis((SDL_GamepadAxis)i)) out.push_back(s);
-	}
-	// ── Things that exist in the project ────────────────────────────────────
+	const ParamSource src = paramSourceOf(n, param);
 	// A path that is typed is a path that is one rename away from loading
-	// nothing, and the failure is silent in every one of these cases.
-	else if (param == "scene" || (param == "path" && startsWith("scene.")))
+	// nothing, and the failure is silent in every one of the project cases.
+	switch (src.from)
 	{
-		for (const ClassRef& s : listScenes(cm)) out.push_back(s.path);
-	}
-	else if (param == "class")
-	{
-		for (const ClassRef& c : listHorizonCodeClasses(cm)) out.push_back(c.path);
-	}
-	else if (param == "widgetAsset")
-	{
-		for (const ClassRef& a : listAssets(cm, HE::AssetType::Widget)) out.push_back(a.path);
-	}
-	else if (param == "themeAsset")
-	{
-		for (const ClassRef& a : listAssets(cm, HE::AssetType::Theme)) out.push_back(a.path);
-	}
-	else if (param == "asset" && startsWith("audio."))
-	{
-		for (const ClassRef& a : listAssets(cm, HE::AssetType::Audio)) out.push_back(a.path);
-	}
-	else if (param == "field" && startsWith("save."))
-	{
-		// The accessor's TYPE decides which fields it may touch: Save Get Number
-		// offers the numbers, and offering it a string field would be offering a
-		// call that cannot work.
-		auto accepts = [&row](const HE::StructField& f) -> bool {
-			if (f.isArray) return false;
-			if (row == "save.getNumber" || row == "save.setNumber")
-				return f.type == P::Float || f.type == P::Int || f.type == P::Enum;
-			if (row == "save.getString" || row == "save.setString") return f.type == P::String;
-			if (row == "save.getBool"   || row == "save.setBool")   return f.type == P::Bool;
-			if (row == "save.getStruct" || row == "save.setStruct") return f.type == P::Struct;
-			return true;
-		};
-		HE::StructDef schema;
-		const std::string tpl = HE::api::save::defaultTemplate();
-		if (cm && !tpl.empty())
-			if (const SaveGameTemplateAsset* a = cm->getSaveGameTemplate(cm->loadAsset(tpl)))
-				if (HE::TypeRegistry::structFromJson(a->json, schema))
-					for (const auto& f : schema.fields)
-						if (accepts(f)) out.push_back(f.name);
+		case ChoiceSource::None: break;
+		case ChoiceSource::Vocabulary: out = vocabularyChoices(n.s, param); break;
+		case ChoiceSource::Scenes:
+			if (cm) for (const auto& s : *cm->sceneFiles()) out.push_back(s.path);
+			break;
+		case ChoiceSource::Assets:
+			if (cm) for (const auto& a : *cm->assetFiles(src.type)) out.push_back(a.path);
+			break;
+		case ChoiceSource::SaveFields: out = saveFieldChoices(n.s, cm); break;
 	}
 	return out;
 }

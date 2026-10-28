@@ -1,8 +1,13 @@
 #include "HorizonScene/HcCodegen.h"
 #include <HorizonCode/HorizonCodeGenSupport.h>   // hc::kMaxSteps — one definition of the limit
 #include <Types/TypeRegistry.h>   // enum defs at generation time
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
+#include <thread>
 #include "HorizonScene/EngineApi.h"
+#include "HorizonScene/EngineApiCpp.h"   // hook signatures, shared with the API parity source
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
@@ -11,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <regex>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -515,11 +521,11 @@ std::string sanitize(const std::string& s)
     return out;
 }
 
-// Struct members are the only user-authored identifiers that reach the output
-// WITHOUT a prefix (variables get v_, functions f_, events ev_, classes C_,
-// struct types S_), because the generated struct is meant to be readable. Field
-// names are free text in the type panel, so a field called `class` or `int`
-// would otherwise emit a header that does not compile — those get a trailing _.
+// Every user-authored identifier reaches the output under its own name —
+// variables, functions, events, parameters, struct members, classes (only the
+// struct and enum TYPES keep S_/E_) — because the generated code is meant to be
+// read. The names are free text in the editor, so one called `class` or `int`
+// would otherwise emit a file that does not compile — those get a trailing _.
 bool isCppKeyword(const std::string& s)
 {
     static const std::unordered_set<std::string> kKeywords = {
@@ -540,6 +546,26 @@ std::string cppIdent(const std::string& raw)
 {
     const std::string s = sanitize(raw);
     return isCppKeyword(s) ? s + "_" : s;
+}
+
+// A node title as an identifier: "Set Param" → setParam (or SetParam). Words
+// are split at anything that is not a letter or digit; a title that is already
+// one word keeps its own casing after the first letter ("isGrounded").
+std::string camelIdent(const std::string& title, bool upperFirst)
+{
+    std::string out;
+    bool startWord = true;
+    for (const char c : title)
+    {
+        if (!std::isalnum((unsigned char)c)) { startWord = true; continue; }
+        if (out.empty())
+            out += upperFirst ? (char)std::toupper((unsigned char)c)
+                              : (char)std::tolower((unsigned char)c);
+        else
+            out += startWord ? (char)std::toupper((unsigned char)c) : c;
+        startWord = false;
+    }
+    return cppIdent(out);
 }
 
 // Claim `base` in `used`, suffixing _2, _3 … until it is free. Every generated
@@ -906,7 +932,7 @@ struct CompiledClass
     // (they are uniquified against that class's whole scope), so the probe pass
     // records them.
     std::unordered_map<std::string, std::string> publicFn;    // graph function → method
-    std::unordered_map<std::string, std::string> publicVar;   // graph variable → accessor
+    std::unordered_map<std::string, std::string> publicVar;   // graph variable → public member
     // Every public C++ method this class exposes for its events and functions,
     // with its parameter list — what a derived class compares against to know
     // whether its same-named member OVERRIDES one or merely shares a name.
@@ -915,7 +941,10 @@ struct CompiledClass
     // reads and writes an inherited variable as a plain member (the members are
     // protected, and the name resolves through the base) — but only if it knows
     // what that member is called.
-    std::unordered_map<std::string, std::string> varMember;   // graph variable → v_*
+    std::unordered_map<std::string, std::string> varMember;   // graph variable → member
+    // Every name the class declares. A derived class keeps clear of them (a
+    // member of its own would hide the base's), its overrides excepted.
+    std::unordered_set<std::string> names;
 };
 struct ClassTable
 {
@@ -965,31 +994,65 @@ using EngineEvent = HorizonCode::EngineEventDesc;
 const EngineEvent* engineEventFor(const std::string& name)
 { return HorizonCode::findEngineEvent(name); }
 
-// The C++ type of a hook's argument. It has to match CompiledInstance's hook
-// signatures exactly, or the generated `override` overrides nothing and the
-// build stops there. Vec2 (OnDragMoved) and Color (OnColorChanged) take the
-// glm types by const reference, like the hooks do. One function for the
-// declaration and the definition, so the two cannot drift.
-const char* hookArgType(PT arg)
+// The C++ type of a hook's argument and the hook's parameter list. They have
+// to match CompiledInstance's hook signatures exactly, or the generated
+// `override` overrides nothing and the build stops there. Both live in
+// EngineApiCpp so that test_engine_api_direct.cpp overrides every engine event
+// with the very parameter list written here, and a hook that disagrees with
+// engineEvents() fails that build instead of a user's export.
+const char* hookArgType(PT arg) { return HE::api::cpp::hookArgType(arg); }
+std::string hookParams(const EngineEvent& e, bool argUsed)
+{ return HE::api::cpp::hookParams(e, argUsed); }
+
+// ── engine calls: the row an Engine Call node calls directly ─────────────────
+// A row whose cppForm is Ctx or Free comes out as the C++ function it names
+// (ApiFn::cppCall), through HorizonEngine/HorizonEngineApi.h. A Thunk row (its
+// invoke does more than forward) keeps hc::callApi, and so does a row with a
+// Struct pin: a generated struct is its own C++ type, the API's is a Value.
+const HE::api::ApiFn* directRow(const std::string& id)
 {
-    return arg == PT::String ? "const std::string&"
-         : arg == PT::Float  ? "float"
-         : arg == PT::Bool   ? "bool"
-         : arg == PT::Vec2   ? "const glm::vec2&"
-         : arg == PT::Color  ? "const glm::vec4&" : "int";
+    const HE::api::ApiFn* fn = HE::api::find(id);
+    if (!fn || fn->cppForm == HE::api::CppForm::Thunk) return nullptr;
+    for (const HE::api::ApiParam& p : fn->params)
+        if (p.type == PT::Struct) return nullptr;
+    for (const HE::api::ApiParam& r : fn->results)
+        if (r.type == PT::Struct) return nullptr;
+    return fn;
 }
 
-// The hook's parameter list, and how the typed argument reaches rs.eventArg.
-std::string hookParams(const EngineEvent& e, bool argUsed)
+// A direct call's answer in its result pin's C++ type. Only four pin types can
+// differ from what the function returns (an Entity on an Int pin, an RGB colour
+// on a Color pin, …); the rest are used as returned, which the API parity
+// source pins per row with a static_assert.
+std::string asPin(const HE::api::ApiFn& fn, size_t k, const std::string& e)
 {
-    std::string p;
-    if (e.elem) p = "int elem";
-    if (e.arg != PT::Exec)
+    const char* helper = HE::api::cpp::asPinHelper(fn, k);
+    return helper ? "HE::api::pin::" + std::string(helper) + "(" + e + ")" : e;
+}
+
+// Does this C++ expression call anything? Two arguments that do have to be
+// evaluated in the graph's order, which a C++ argument list does not promise
+// (MSVC evaluates right to left). A '(' after a name or a template argument
+// list is a call; one after an operator or another parenthesis is grouping
+// or a cast. Building a value (glm::vec3(1.0f, 2.0f, 3.0f)) is not: it has no
+// effect anything else could observe.
+bool callsSomething(const std::string& e)
+{
+    static const std::unordered_set<std::string> kValues = {
+        "glm::vec2", "glm::vec3", "glm::vec4", "hc::Vec4", "std::string",
+    };
+    for (size_t i = 1; i < e.size(); ++i)
     {
-        if (!p.empty()) p += ", ";
-        p += std::string(hookArgType(e.arg)) + (argUsed ? " arg" : "");
+        if (e[i] != '(') continue;
+        const char p = e[i - 1];
+        if (p == '>') return true;   // a template call: hc::fromValue<float>(…)
+        if (!std::isalnum((unsigned char)p) && p != '_') continue;
+        size_t s = i;
+        while (s > 0 && (std::isalnum((unsigned char)e[s - 1]) || e[s - 1] == '_' || e[s - 1] == ':'))
+            --s;
+        if (!kValues.count(e.substr(s, i - s))) return true;
     }
-    return p;
+    return false;
 }
 
 // ── the per-class emitter ─────────────────────────────────────────────────────
@@ -1011,23 +1074,25 @@ public:
     const std::unordered_map<std::string, std::string>& publicFunctions() const { return m_publicFn; }
     const std::unordered_map<std::string, std::string>& publicVariables()  const { return m_publicVar; }
     const std::unordered_map<std::string, std::string>& variableMembers()  const { return m_varMember; }
-    // Valid after run(): the public surface a derived class matches against.
+    const std::unordered_set<std::string>&              usedNames()        const { return m_usedNames; }
+    // Valid after run(): the public surface a derived class matches against —
+    // the parameter TYPES, since the names are each class's own business.
     std::unordered_map<std::string, std::string> publicMethodSigs() const
     {
         std::unordered_map<std::string, std::string> out;
         for (const auto& [id, name] : m_publicEv) out.emplace(name, std::string());
         for (const Node& n : m_g.nodes)
             if (n.type == NT::FunctionEntry && m_publicFn.count(n.s))
-                out.emplace(m_publicFn.at(n.s), publicFnParams(n));
+                out.emplace(m_publicFn.at(n.s), publicFnTypes(n));
         return out;
     }
 
-    void run(std::string& header, std::string& impl)
+    void run(std::string& header, std::string& impl, std::string& reflect)
     {
         validate();
         buildNames();
         buildSlots();
-        emitClassFiles(header, impl);
+        emitClassFiles(header, impl, reflect);
     }
 
 private:
@@ -1084,16 +1149,21 @@ private:
     TypeRef ctrType(const Node& n, HorizonCode::ContainerKind k) const
     { return trOf(n.propType, true, n.typeName, k, n.keyType, n.keyTypeName); }
 
-    std::unordered_map<std::string, std::string> m_varMember;  // instance var → v_*
-    std::unordered_map<std::string, std::string> m_localName;  // local var → l_* (names graph-unique)
-    std::unordered_map<std::string, std::string> m_fnName;     // function → f_*
-    std::unordered_map<int, std::string>         m_evName;     // Event node id → ev_*
+    std::unordered_map<std::string, std::string> m_varMember;  // instance var → member
+    std::unordered_map<std::string, std::string> m_localName;  // local var → its name (graph-unique)
+    std::unordered_map<std::string, std::string> m_fnName;     // function → body (= public method)
+    std::unordered_map<int, std::string>         m_evName;     // Event node id → body
+    // A function's parameter and result names, as its body and public method
+    // both spell them.
+    std::unordered_map<std::string, std::vector<std::string>> m_fnParams, m_fnResults;
+    std::unordered_map<int, std::string>         m_stateName;  // DoOnce/FlipFlop node → bool member
+    std::unordered_map<int, std::string>         m_resumeName; // Delay node → its continuation
     // InputAction node id → one body method per exec-out (Pressed, Released),
     // or a single one for an axis action.
     std::unordered_map<int, std::vector<std::string>> m_iaName;
     std::unordered_map<int, std::string>         m_publicEv;   // Event node id → public method
     std::unordered_map<std::string, std::string> m_publicFn;   // function → public method
-    std::unordered_map<std::string, std::string> m_publicVar;  // public variable → accessor
+    std::unordered_map<std::string, std::string> m_publicVar;  // public variable → its (public) member
     std::unordered_map<std::string, std::string> m_evtConst;   // event name → EventId constant
     // Other compiled classes this one calls directly — its .cpp includes exactly
     // these headers. Sorted, so the emitted include list is deterministic and an
@@ -1101,6 +1171,17 @@ private:
     std::set<std::string>                        m_usedClasses;
     struct Slot { std::string field; TypeRef tr; };
     std::unordered_map<int, std::vector<Slot>>   m_slots;      // exec-cached node → RunState fields
+    // Every identifier the class itself declares (buildNames): a name a body
+    // adds for itself (hoisted arguments, a taken-apart result) avoids these.
+    std::unordered_set<std::string>              m_usedNames;
+    // The names of the body being translated: the class's, its function's
+    // parameters, and every temporary a statement declared so far. A temporary
+    // takes a fresh one (temp()), so it never shadows anything — not a member
+    // its own initializer reads, not a temporary of an enclosing block.
+    std::unordered_set<std::string>              m_bodyNames;
+    std::string temp(const std::string& base) { return uniqueName(base, m_bodyNames); }
+    bool m_apiUsed    = false;   // this body calls a Ctx row → `HE::api::Scope api(m_ctx);`
+    bool m_directUsed = false;   // this class calls the engine directly → includes the API header
 
     // ── what this class actually needs from the per-run scaffolding ─────────
     // A small graph carries none of it, and then none of it is emitted: no
@@ -1303,7 +1384,7 @@ private:
         HorizonCode::inferUserTypeNames(m_g);
 
         // 0. Inheritance. A class whose base did not reach C++ cannot either:
-        //    `C_Goblin : public C_Enemy` needs C_Enemy to exist. Falling back
+        //    `Goblin : public Enemy` needs Enemy to exist. Falling back
         //    with it is not a loss — the interpreted pair behaves identically —
         //    and it is the only answer that keeps ONE object per instance.
         if (!parentKey().empty() && !parent())
@@ -1478,31 +1559,22 @@ private:
             "varInfos", "eventInfos", "fireEvent", "callFunction",
             "getVariable", "setVariable", "reseedVariables", "collectRefs",
             "resumeFrom", "bindContext", "slots", "RunState", "m_ctx",
+            // What a body names for itself: the engine Scope, the RunState,
+            // and the namespaces its calls are spelled through.
+            "api", "rs", "hc", "HE", "glm", "std", "HorizonCode",
         };
         auto unique = [&used](const std::string& base) { return uniqueName(base, used); };
-        for (const auto& v : m_g.variables)
+        // The base classes' names are taken too — a member here would hide
+        // theirs — except their public methods: re-using one of those names is
+        // what an override IS. They are claimed right after this class's own
+        // public methods had their chance to match them.
+        std::unordered_set<std::string> inheritedMethods;
+        for (const CompiledClass* a = parent(); a;
+             a = a->parentKey.empty() ? nullptr : m_ct.find(a->parentKey))
         {
-            if (v.scope == 0) m_varMember[v.name] = unique("v_" + sanitize(v.name));
-            else              m_localName[v.name] = unique("l_" + sanitize(v.name));
-        }
-        for (const auto& n : m_g.nodes)
-        {
-            if (n.type == NT::FunctionEntry && !m_fnName.count(n.s))
-                m_fnName[n.s] = unique("f_" + sanitize(n.s));
-            if (n.type == NT::Event)
-                m_evName[n.id] = unique("ev_" + sanitize(n.s) + "_" + std::to_string(n.id));
-            // An Input Action node is TWO entry points (Pressed and Released),
-            // or one for an axis — so it gets one body method per exec-out,
-            // named after the event it answers to rather than the pin.
-            if (n.type == NT::InputAction)
-            {
-                std::vector<std::string> names;
-                for (const std::string& ev : HorizonCode::inputActionEventNames(n))
-                    names.push_back(unique("ia_" + sanitize(ev) + "_" + std::to_string(n.id)));
-                m_iaName[n.id] = std::move(names);
-            }
-            if (n.type == NT::DoOnce || n.type == NT::FlipFlop) used.insert(stateMember(n.id));
-            if (n.type == NT::Delay) used.insert("resume_" + std::to_string(n.id));
+            for (const auto& [method, sig] : a->publicMethods) inheritedMethods.insert(method);
+            for (const std::string& name : a->names)
+                if (!a->publicMethods.count(name)) used.insert(name);
         }
         // Public, authored-name methods. An event only gets one when it is
         // unambiguous — several nodes on one name, or an element filter, is a
@@ -1513,6 +1585,59 @@ private:
                                                                      // get the hook instead
         for (const Node* fn : functionEntries())
             m_publicFn[fn->s] = unique(cppIdent(fn->s));
+        used.insert(inheritedMethods.begin(), inheritedMethods.end());
+
+        // The graph's variables are members under their own names; a function's
+        // locals too (they live in the function, but one name per graph keeps
+        // a local from shadowing a member it sits next to).
+        for (const auto& v : m_g.variables)
+        {
+            if (v.scope == 0) m_varMember[v.name] = unique(cppIdent(v.name));
+            else              m_localName[v.name] = unique(cppIdent(v.name));
+        }
+        // The bodies. A function's or a public event's body carries the public
+        // method's name: the same function when the class needs no RunState,
+        // an overload taking it first otherwise. The others are named after
+        // the event they answer, an element filter spelled out.
+        for (const Node* fn : functionEntries()) m_fnName[fn->s] = m_publicFn.at(fn->s);
+        for (const auto& n : m_g.nodes)
+        {
+            if (n.type == NT::Event)
+                m_evName[n.id] = m_publicEv.count(n.id)
+                    ? m_publicEv.at(n.id)
+                    : unique(cppIdent(n.s) +
+                             (n.elem != 0 ? "_element" + std::to_string(n.elem) : std::string()));
+            // An Input Action node is TWO entry points (Pressed and Released),
+            // or one for an axis — so it gets one body method per exec-out,
+            // named after the event it answers to rather than the pin.
+            if (n.type == NT::InputAction)
+            {
+                std::vector<std::string> names;
+                for (const std::string& ev : HorizonCode::inputActionEventNames(n))
+                    names.push_back(unique(cppIdent(ev)));
+                m_iaName[n.id] = std::move(names);
+            }
+            if (n.type == NT::DoOnce)   m_stateName[n.id] = unique("doOnceDone");
+            if (n.type == NT::FlipFlop) m_stateName[n.id] = unique("flipFlopIsA");
+            if (n.type == NT::Delay)    m_resumeName[n.id] = unique("afterDelay");
+        }
+        // A function's parameters and results keep the names the graph gives
+        // them, clear of every class-level name (a parameter must not shadow a
+        // member the body reads), of each other, and of callFunction's own
+        // parameters, where they are declared as locals.
+        for (const Node* fn : functionEntries())
+        {
+            std::unordered_set<std::string> scope = used;
+            scope.insert({ "function", "requirePublic", "args", "results" });
+            std::vector<std::string>& ps = m_fnParams[fn->s];
+            std::vector<std::string>& rn = m_fnResults[fn->s];
+            for (size_t i = 0; i < fn->params.size(); ++i)
+                ps.push_back(uniqueName(cppIdent(fn->params[i].name.empty()
+                    ? "p" + std::to_string(i) : fn->params[i].name), scope));
+            for (size_t i = 0; i < fn->results.size(); ++i)
+                rn.push_back(uniqueName(cppIdent(fn->results[i].name.empty()
+                    ? "r" + std::to_string(i) : fn->results[i].name), scope));
+        }
         // One EventId constant per event this class names in an Emit or a Bind.
         // The constant carries the meaning, so the generated code has no magic
         // numbers — and the id itself is interned at load, never baked.
@@ -1526,53 +1651,68 @@ private:
             for (const std::string& e : sorted)
                 m_evtConst[e] = unique("kEvt_" + sanitize(e));
         }
-        // A public variable gets a typed accessor: it is how another compiled
+        // A public variable is a public member: it is how another compiled
         // class reads and writes it without going through the name seam.
         for (const auto& v : m_g.variables)
             if (v.scope == 0 && v.access == 0)
-                m_publicVar[v.name] = unique(cppIdent(v.name));
+                m_publicVar[v.name] = m_varMember.at(v.name);
+        m_usedNames = used;
     }
 
     // ── RunState slots: one field per exec-cached data-out (plan §5.4) ───────
     void buildSlots()
     {
+        // The fields are named after their node and pin ("raycast_hit",
+        // "forEach_index"), in graph order, unique within the RunState.
+        std::unordered_set<std::string> fields = { "steps", "depth", "aborted", "eventArg" };
+        auto resultName = [](const std::vector<HorizonCode::FuncParam>& rs, size_t k)
+        { return rs[k].name.empty() ? "result" + std::to_string(k) : camelIdent(rs[k].name, false); };
         for (const Node& n : m_g.nodes)
         {
             std::vector<Slot> s;
-            auto field = [&n](int k) { return "n" + std::to_string(n.id) + "_o" + std::to_string(k); };
+            auto field = [&fields](const std::string& node, const std::string& pin)
+            { return uniqueName(node + (pin.empty() ? std::string() : "_" + pin), fields); };
             switch (n.type)
             {
                 case NT::CreateWidget:
+                    s.push_back({ field("createdWidget", {}), { PT::Ref, false } });
+                    break;
                 case NT::CreateObject:
-                    s.push_back({ field(0), { PT::Ref, false } });
+                    s.push_back({ field("createdObject", {}), { PT::Ref, false } });
                     break;
                 case NT::FunctionCall:
                 case NT::CallExternal:
                     for (size_t k = 0; k < n.results.size(); ++k)
-                        s.push_back({ field((int)k), trOf(n.results[k]) });
+                        s.push_back({ field(camelIdent(n.s, false), resultName(n.results, k)),
+                                      trOf(n.results[k]) });
                     break;
                 case NT::EngineCall:
                     if (n.hasArg)
+                    {
+                        const HE::api::ApiFn* fn = HE::api::find(n.s);
+                        const std::string title = camelIdent(fn && fn->displayName ? fn->displayName
+                                                                                   : n.s, false);
                         for (size_t k = 0; k < n.results.size(); ++k)
-                            s.push_back({ field((int)k), trOf(n.results[k]) });
+                            s.push_back({ field(title, resultName(n.results, k)), trOf(n.results[k]) });
+                    }
                     break;
                 case NT::ForEachMap:
                     // Key + Value + Index, in pin order (the Key is data-out 0).
-                    s.push_back({ field(0), trOf(n.keyType, false, n.keyTypeName) });
-                    s.push_back({ field(1), trOf(n.propType, false, n.typeName) });
-                    s.push_back({ field(2), { PT::Int, false } });
+                    s.push_back({ field("forEach", "key"), trOf(n.keyType, false, n.keyTypeName) });
+                    s.push_back({ field("forEach", "value"), trOf(n.propType, false, n.typeName) });
+                    s.push_back({ field("forEach", "index"), { PT::Int, false } });
                     break;
                 case NT::ForEach:
                 case NT::ForEachSet:
-                    s.push_back({ field(0), trOf(n.propType, false, n.typeName) });
-                    s.push_back({ field(1), { PT::Int, false } });
+                    s.push_back({ field("forEach", "element"), trOf(n.propType, false, n.typeName) });
+                    s.push_back({ field("forEach", "index"), { PT::Int, false } });
                     break;
                 // The cast result, cached exactly like the interpreter's: the
                 // branch condition and the "As <Class>" output are one value,
                 // so the check runs once no matter how often the Success chain
                 // reads it.
                 case NT::Cast:
-                    s.push_back({ field(0), { PT::Ref, false } });
+                    s.push_back({ field("castResult", {}), { PT::Ref, false } });
                     break;
                 default: break;
             }
@@ -1723,8 +1863,7 @@ private:
     }
 
     // Per-instance node state (DoOnce fired?, FlipFlop side) → a bool member.
-    static std::string stateMember(int nodeId)
-    { return "n" + std::to_string(nodeId) + "_state"; }
+    std::string stateMember(int nodeId) const { return m_stateName.at(nodeId); }
     std::vector<int> stateNodeIds() const
     {
         std::vector<int> ids;
@@ -1773,7 +1912,11 @@ private:
             // owning function has no equivalent symbol → interpreted fallback.
             if (n.id != fnCtx)
                 throw FallbackError{ "function parameter of '" + n.s + "' read outside its function", n.id };
-            return "p_" + std::to_string(outIdx);
+            const std::vector<std::string>& ps = m_fnParams.at(n.s);
+            if (outIdx < 0 || outIdx >= (int)ps.size())
+                throw FallbackError{ "function parameter " + std::to_string(outIdx) + " of '" + n.s +
+                                     "' does not exist", n.id };
+            return ps[(size_t)outIdx];
         }
         case NT::ConstFloat:  return floatLit(n.f[0]);
         case NT::ConstBool:   return n.f[0] != 0.0f ? "true" : "false";
@@ -1832,7 +1975,7 @@ private:
             {
                 // `this`: no handle to resolve, no class to check.
                 const std::string acc = selfVar(n.s, have);
-                return acc.empty() ? seam : convertExpr(acc + "()", have, want);
+                return acc.empty() ? seam : convertExpr(acc, have, want);
             }
             if (t.gi && t.cls)
             {
@@ -1842,7 +1985,7 @@ private:
                     // for the fallback, and reading it has no observable effect.
                     return "([&]() -> " + cppType(want) + " {\n"
                            "        if (" + t.cls->cpp + "* o__ = hc::gameInstanceAs<" + t.cls->cpp + ">(m_ctx)) return " +
-                           convertExpr("o__->" + acc + "()", have, want) + ";\n"
+                           convertExpr("o__->" + acc, have, want) + ";\n"
                            "        return " + coerceCall("hc::getExternal(m_ctx, hc::gameInstance(m_ctx), " +
                                                           strLit(n.s) + ")", want) + "; }())";
             }
@@ -1856,7 +1999,7 @@ private:
                     const std::string ref = input(n, 0, fnCtx);
                     return "([&]() -> " + cppType(want) + " { const uint32_t t__ = " + ref + ";\n"
                            "        if (" + t.cls->cpp + "* o__ = hc::as<" + t.cls->cpp + ">(m_ctx, t__)) return " +
-                           convertExpr("o__->" + acc + "()", have, want) + ";\n"
+                           convertExpr("o__->" + acc, have, want) + ";\n"
                            "        return " + coerceCall("hc::getExternal(m_ctx, t__, " + strLit(n.s) + ")", want) +
                            "; }())";
                 }
@@ -1886,6 +2029,9 @@ private:
         {
             if (n.hasArg) return slotRef(n, outIdx);
             // Pure engine call: dispatched on EVERY data-out read (§3.4).
+            if (const HE::api::ApiFn* fn = directRow(n.s);
+                fn && outIdx >= 0 && outIdx < (int)fn->results.size())
+                return directRead(n, *fn, outIdx, fnCtx);
             std::string args = "std::vector<hc::Value>{";
             for (size_t i = 0; i < n.params.size(); ++i)
             {
@@ -2239,6 +2385,88 @@ private:
         return "hc::castRef(m_ctx, " + ref + ", " + strLit(n.s) + ")";
     }
 
+    // ── direct engine calls ──────────────────────────────────────────────────
+    // The call of `fn` with this node's inputs, against the body's `api` Scope
+    // (opened at the top of the body when anything in it needs the Ctx). The
+    // arguments are the input expressions themselves, already in the pin's C++
+    // type — unless two or more of them call something: then they are named
+    // first, in pin order, into `hoisted` (one declaration each), because the
+    // interpreter evaluates its inputs left to right and a C++ argument list
+    // does not. The names are the parameters' (temp()).
+    std::string directCall(const Node& n, const HE::api::ApiFn& fn, int fnCtx,
+                           std::vector<std::string>& hoisted)
+    {
+        std::vector<std::string> args;
+        int calling = 0;
+        for (size_t i = 0; i < n.params.size(); ++i)
+        {
+            args.push_back(input(n, (int)i, fnCtx));
+            if (callsSomething(args.back())) ++calling;
+        }
+        if (calling >= 2)
+        {
+            for (size_t i = 0; i < args.size(); ++i)
+            {
+                const HE::api::ApiParam& p = fn.params[i];
+                const std::string name = temp(cppIdent(p.name ? p.name : "arg"));
+                hoisted.push_back("const " + HE::api::cpp::valueType(p.type, p.isArray) + " " +
+                                  name + " = " + args[i] + ";");
+                args[i] = name;
+            }
+        }
+        bool needsCtx = fn.cppForm == HE::api::CppForm::Ctx;
+        for (const HE::api::ApiParam& p : fn.params) needsCtx = needsCtx || p.selfDefault;
+        if (needsCtx) m_apiUsed = true;
+        m_directUsed = true;
+        return HE::api::cpp::callExpr(fn, "api", args);
+    }
+
+    // A pure Engine Call read at output `outIdx`: dispatched at every read, like
+    // the interpreter's (§3.4). Hoisted arguments need statements, so that
+    // rarer form is a lambda run in place.
+    std::string directRead(const Node& n, const HE::api::ApiFn& fn, int outIdx, int fnCtx)
+    {
+        std::vector<std::string> hoisted;
+        std::string call = directCall(n, fn, fnCtx, hoisted);
+        if (fn.results.size() > 1) call += "." + HE::api::cpp::resultMember(fn, (size_t)outIdx);
+        call = asPin(fn, (size_t)outIdx, call);
+        if (hoisted.empty()) return call;
+        std::string s = "[&] { ";
+        for (const std::string& h : hoisted) s += h + " ";
+        return s + "return " + call + "; }()";
+    }
+
+    // An exec Engine Call: the call, and its results into the node's RunState
+    // fields (read later by whatever wires them). Several results are taken
+    // apart from the returned struct, member by member.
+    void directStmt(const Node& n, const HE::api::ApiFn& fn, int fnCtx, Body& b)
+    {
+        std::vector<std::string> hoisted;
+        const std::string call = directCall(n, fn, fnCtx, hoisted);
+        const auto it = m_slots.find(n.id);
+        const bool keep = it != m_slots.end() && !fn.results.empty();
+        const bool block = !hoisted.empty() || (keep && fn.results.size() > 1);
+        if (block) { b.line("{"); ++b.indent; }
+        for (const std::string& h : hoisted) b.line(h);
+        if (!keep)
+            b.line(call + ";");
+        else if (fn.results.size() == 1)
+        {
+            m_rsTouched = true;
+            b.line("rs." + it->second[0].field + " = " + asPin(fn, 0, call) + ";");
+        }
+        else
+        {
+            m_rsTouched = true;
+            const std::string r = temp(camelIdent(fn.displayName ? fn.displayName : fn.id, false));
+            b.line("const auto " + r + " = " + call + ";");
+            for (size_t k = 0; k < it->second.size() && k < fn.results.size(); ++k)
+                b.line("rs." + it->second[k].field + " = " +
+                       asPin(fn, k, r + "." + HE::api::cpp::resultMember(fn, k)) + ";");
+        }
+        if (block) { --b.indent; b.line("}"); }
+    }
+
     // The exec emission shared by CallExternal and EngineCall: pack the data-in
     // args into a std::vector<hc::Value>, make the call, then cache the returned
     // values into this node's RunState slots. The two differ only in where the
@@ -2248,8 +2476,7 @@ private:
     void emitValueCall(const Node& n, int fnCtx, Body& b, int firstArgPin,
                        const std::function<std::string(const std::string&)>& makeCall)
     {
-        const std::string av = "a" + std::to_string(n.id);
-        const std::string rv = "r" + std::to_string(n.id);
+        const std::string av = temp("args");
         b.line("{");
         ++b.indent;
         b.line("std::vector<hc::Value> " + av + ";");
@@ -2260,10 +2487,14 @@ private:
             b.line(av + ".push_back(" +
                    toValueCall(input(n, pin, fnCtx), dataInType(n, pin), m_opt.namespaceName) + ");");
         }
-        b.line("const std::vector<hc::Value> " + rv + " = " + makeCall(av) + ";");
         const auto it = m_slots.find(n.id);
-        if (it != m_slots.end())
+        // The answer is only named when something keeps it.
+        if (it == m_slots.end() || it->second.empty())
+            b.line(makeCall(av) + ";");
+        else
         {
+            const std::string rv = temp("results");
+            b.line("const std::vector<hc::Value> " + rv + " = " + makeCall(av) + ";");
             m_rsTouched = true;
             for (size_t k = 0; k < it->second.size(); ++k)
                 b.line("rs." + it->second[k].field + " = " +
@@ -2303,7 +2534,7 @@ private:
             // The Object input is read ONCE into a local: a pure Engine Call
             // feeding it would otherwise dispatch again for every place the
             // expression is spelled, and the interpreter evaluates it once.
-            const std::string rv = "c" + std::to_string(n.id);
+            const std::string rv = temp("object");
             b.line("{");
             ++b.indent;
             b.line("const uint32_t " + rv + " = " + input(n, 0, fnCtx) + ";");
@@ -2334,8 +2565,8 @@ private:
                 n.type == NT::ForEach ? HorizonCode::ContainerKind::Array
                 : isMap               ? HorizonCode::ContainerKind::Map
                                       : HorizonCode::ContainerKind::Set;
-            const std::string arr = "arr" + std::to_string(n.id);
-            const std::string idx = "i" + std::to_string(n.id);
+            const std::string arr = temp("items");
+            const std::string idx = temp("i");
             const std::string span = n.type == NT::ForEach ? arr + ".size()"
                                    : isMap                 ? arr + ".keys.size()"
                                                            : arr + ".items.size()";
@@ -2425,7 +2656,7 @@ private:
                 b.line(slotRef(n, 0) + " = hc::createWidget(m_ctx, " + strLit(n.s) + ");");
                 break;
             }
-            const std::string sv = "s" + std::to_string(n.id);
+            const std::string sv = temp("spawn");
             b.line("{");
             ++b.indent;
             b.line("hc::SpawnValues " + sv + ";");
@@ -2463,16 +2694,17 @@ private:
             }
             // Wired: the host takes `const float*`, and you cannot take the
             // address of a prvalue — the vectors need names that outlive the
-            // call. Node-scoped names inside a block so two Create Objects in
-            // one scope cannot collide.
-            const std::string nid = std::to_string(n.id);
+            // call. Fresh names (temp()) inside a block, so two Create Objects
+            // in one body cannot collide.
+            const std::string pos = hasPos ? temp("position") : std::string();
+            const std::string rot = hasRot ? temp("rotation") : std::string();
             b.line("{");
             ++b.indent;
-            if (hasPos) b.line("const glm::vec3 n" + nid + "_pos = " + input(n, 0, fnCtx) + ";");
-            if (hasRot) b.line("const glm::vec3 n" + nid + "_rot = " + input(n, 1, fnCtx) + ";");
+            if (hasPos) b.line("const glm::vec3 " + pos + " = " + input(n, 0, fnCtx) + ";");
+            if (hasRot) b.line("const glm::vec3 " + rot + " = " + input(n, 1, fnCtx) + ";");
             b.line(slotRef(n, 0) + " = hc::createObject(m_ctx, " + strLit(n.s) + ", "
-                   + (hasPos ? "&n" + nid + "_pos.x" : "nullptr") + ", "
-                   + (hasRot ? "&n" + nid + "_rot.x" : "nullptr") + ");");
+                   + (hasPos ? "&" + pos + ".x" : "nullptr") + ", "
+                   + (hasRot ? "&" + rot + ".x" : "nullptr") + ");");
             --b.indent;
             b.line("}");
             break;
@@ -2490,7 +2722,7 @@ private:
             else if (t.cls)  acc = directVar(n.s, *t.cls, have);
             if (t.self && !acc.empty())
             {
-                b.line(acc + "() = " + convertExpr(input(n, 1, fnCtx), vt, have) + ";");
+                b.line(acc + " = " + convertExpr(input(n, 1, fnCtx), vt, have) + ";");
                 break;
             }
             if (acc.empty())
@@ -2499,19 +2731,20 @@ private:
                        toValueCall(input(n, 1, fnCtx), vt, m_opt.namespaceName) + ");");
                 break;
             }
+            const std::string tv = t.gi ? std::string() : temp("target");
+            const std::string vv = temp("value");
             b.line("{");
             ++b.indent;
             if (!t.gi)
-                b.line("const uint32_t t" + std::to_string(n.id) + " = " + input(n, 0, fnCtx) + ";");
-            b.line("const " + cppType(vt) + " v" + std::to_string(n.id) + " = " + input(n, 1, fnCtx) + ";");
-            b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, "t" + std::to_string(n.id)) + ")");
-            b.line("    o__->" + acc + "() = " +
-                   convertExpr("v" + std::to_string(n.id), vt, have) + ";");
+                b.line("const uint32_t " + tv + " = " + input(n, 0, fnCtx) + ";");
+            b.line("const " + cppType(vt) + " " + vv + " = " + input(n, 1, fnCtx) + ";");
+            b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, tv) + ")");
+            b.line("    o__->" + acc + " = " + convertExpr(vv, vt, have) + ";");
             b.line("else");
             b.line("    hc::setExternal(m_ctx, " +
-                   (t.gi ? std::string("hc::gameInstance(m_ctx)") : "t" + std::to_string(n.id)) +
+                   (t.gi ? std::string("hc::gameInstance(m_ctx)") : tv) +
                    ", " + strLit(n.s) + ", " +
-                   toValueCall("v" + std::to_string(n.id), vt, m_opt.namespaceName) + ");");
+                   toValueCall(vv, vt, m_opt.namespaceName) + ");");
             --b.indent;
             b.line("}");
             break;
@@ -2551,20 +2784,20 @@ private:
             // come back in typed out-params, so neither side needs a
             // std::vector<Value>. The public method makes a FRESH RunState,
             // which is what callExternal's own per-call Runner does (§3.1).
-            const std::string id = std::to_string(n.id);
             b.line("{");
             ++b.indent;
             std::vector<std::string> argNames, resNames;
             for (size_t i = 0; i < n.params.size(); ++i)   // args first (§3.4)
             {
-                const std::string a = "a" + id + "_" + std::to_string(i);
+                const std::string a = temp(cppIdent(n.params[i].name.empty() ? "arg" : n.params[i].name));
                 const TypeRef tr = trOf(n.params[i]);
                 b.line("const " + cppType(tr) + " " + a + " = " + input(n, (int)i + 1, fnCtx) + ";");
                 argNames.push_back(a);
             }
             for (size_t i = 0; i < n.results.size(); ++i)
             {
-                const std::string r = "r" + id + "_" + std::to_string(i);
+                const std::string r = temp(cppIdent(n.results[i].name.empty() ? "result"
+                                                                               : n.results[i].name));
                 const TypeRef tr = trOf(n.results[i]);
                 b.line(cppType(tr) + " " + r + " = " + zeroLit(tr) + ";");
                 resNames.push_back(r);
@@ -2579,26 +2812,32 @@ private:
             }
             else
             {
-                if (!t.gi) b.line("const uint32_t t" + id + " = " + input(n, 0, fnCtx) + ";");
-                b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, "t" + id) + ")");
+                const std::string tv = t.gi ? std::string() : temp("target");
+                if (!t.gi) b.line("const uint32_t " + tv + " = " + input(n, 0, fnCtx) + ";");
+                b.line("if (" + t.cls->cpp + "* o__ = " + resolveExpr(t, tv) + ")");
                 b.line("    o__->" + method + "(" + args + ");");
                 b.line("else");
                 b.line("{");
                 ++b.indent;
-                const std::string av = "a" + id;
+                const std::string av = temp("args");
                 b.line("std::vector<hc::Value> " + av + ";");
                 if (!argNames.empty()) b.line(av + ".reserve(" + std::to_string(argNames.size()) + ");");
                 for (size_t i = 0; i < argNames.size(); ++i)
                     b.line(av + ".push_back(" +
                            toValueCall(argNames[i],
                                        trOf(n.params[i]), m_opt.namespaceName) + ");");
-                b.line("const std::vector<hc::Value> rr" + id + " = hc::callExternal(m_ctx, " +
-                       (t.gi ? std::string("hc::gameInstance(m_ctx)") : "t" + id) +
-                       ", " + strLit(n.s) + ", " + av + ");");
-                for (size_t i = 0; i < resNames.size(); ++i)
-                    b.line(resNames[i] + " = " +
-                           fromValueCall("rr" + id, i,
-                                         trOf(n.results[i])) + ";");
+                const std::string call = "hc::callExternal(m_ctx, " +
+                    (t.gi ? std::string("hc::gameInstance(m_ctx)") : tv) + ", " + strLit(n.s) +
+                    ", " + av + ")";
+                if (resNames.empty())
+                    b.line(call + ";");
+                else
+                {
+                    const std::string rv = temp("results");
+                    b.line("const std::vector<hc::Value> " + rv + " = " + call + ";");
+                    for (size_t i = 0; i < resNames.size(); ++i)
+                        b.line(resNames[i] + " = " + fromValueCall(rv, i, trOf(n.results[i])) + ";");
+                }
                 --b.indent;
                 b.line("}");
             }
@@ -2632,7 +2871,7 @@ private:
             std::vector<std::string> argNames, resNames;
             for (size_t i = 0; i < entry->params.size(); ++i)
             {
-                const std::string a = "a" + std::to_string(n.id) + "_" + std::to_string(i);
+                const std::string a = temp(cppIdent(entry->params[i].name.empty() ? "arg" : entry->params[i].name));
                 const TypeRef tr = trOf(entry->params[i]);
                 // The call node mirrors the entry (synced) — pin type == param type.
                 b.line("const " + cppType(tr) + " " + a + " = " +
@@ -2641,7 +2880,7 @@ private:
             }
             for (size_t i = 0; i < entry->results.size(); ++i)
             {
-                const std::string rn = "r" + std::to_string(n.id) + "_" + std::to_string(i);
+                const std::string rn = temp(cppIdent(entry->results[i].name.empty() ? "result" : entry->results[i].name));
                 const TypeRef tr = trOf(entry->results[i]);
                 b.line(cppType(tr) + " " + rn + " = " + zeroLit(tr) + ";");   // typed default results
                 resNames.push_back(rn);
@@ -2689,7 +2928,7 @@ private:
             {
                 const size_t count = std::min(n.results.size(), fn->results.size());
                 for (size_t i = 0; i < count; ++i)
-                    b.line("r_" + std::to_string(i) + " = " +
+                    b.line(m_fnResults.at(fn->s)[i] + " = " +
                            convertExpr(input(n, (int)i, fnCtx), dataInType(n, (int)i),
                                        trOf(fn->results[i])) + ";");
             }
@@ -2705,6 +2944,11 @@ private:
             break;
         }
         case NT::EngineCall:
+            if (const HE::api::ApiFn* fn = directRow(n.s))
+            {
+                directStmt(n, *fn, fnCtx, b);
+                break;
+            }
             emitValueCall(n, fnCtx, b, /*firstArgPin=*/0, [&](const std::string& av)
             {
                 return "hc::callApi(m_ctx, " + strLit(n.s) + ", " + av + ")";
@@ -2714,7 +2958,7 @@ private:
             b.line("hc::print(" + input(n, 0, fnCtx) + ");");
             break;
         case NT::Delay:
-            // Latent: schedule the continuation (resume_<id> via resumeFrom)
+            // Latent: schedule the continuation (afterDelay via resumeFrom)
             // and stop the chain — like the interpreter's runExecChain break.
             b.line("hc::scheduleResume(m_ctx, " + std::to_string(resumeId(n.id)) + ", " +
                    input(n, 0, fnCtx) + ", " + input(n, 1, fnCtx) + ");");
@@ -2844,14 +3088,9 @@ private:
     std::string fnParamList(const Node& fn, bool rsUsed) const
     {
         std::string sig = rsParam(rsUsed);
-        auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
-        for (size_t i = 0; i < fn.params.size(); ++i)
-            add(cppType(trOf(fn.params[i])) +
-                " p_" + std::to_string(i));
-        for (size_t i = 0; i < fn.results.size(); ++i)
-            add(cppType(trOf(fn.results[i])) +
-                "& r_" + std::to_string(i));
-        return sig;
+        const std::string rest = publicFnParams(fn);
+        if (!sig.empty() && !rest.empty()) sig += ", ";
+        return sig + rest;
     }
 
     std::vector<std::pair<std::string, std::string>> sortedEvtConsts() const
@@ -2885,11 +3124,13 @@ private:
         std::string prelude;   // function locals
         std::string body;
         bool        rsUsed  = false;
+        bool        pub     = false;   // shares its name with a public method
     };
 
     std::vector<Fragment> translateBodies()
     {
-        m_stmtCount = 0;
+        m_stmtCount  = 0;
+        m_directUsed = false;
         std::vector<Fragment> out;
         // `outPin` is the exec-out to enter from, counted off execOut0 — 0 for
         // everything with one chain, and 0/1 for an Input Action's Pressed and
@@ -2900,6 +3141,8 @@ private:
         {
             Fragment f;
             f.name = name;
+            f.pub  = fn != nullptr ||
+                     (start && start->type == NT::Event && m_publicEv.count(start->id));
             f.fn   = fn;
             if (fn)
                 for (const auto& v : m_g.variables)
@@ -2909,7 +3152,17 @@ private:
             Body b;
             b.indent = 2;   // inside a member function inside the class
             m_rsTouched = false;
+            m_apiUsed   = false;
+            m_bodyNames = m_usedNames;
+            if (fn)
+            {
+                for (const std::string& p : m_fnParams.at(fn->s))  m_bodyNames.insert(p);
+                for (const std::string& r : m_fnResults.at(fn->s)) m_bodyNames.insert(r);
+            }
             if (start) chain(*start, pinRanges(*start).execOut0 + outPin, fnCtx, b);
+            // The engine calls of this body all run against one Ctx: the one
+            // the host builds for this instance (HorizonEngineApi.h, Scope).
+            if (m_apiUsed) b.text = "        HE::api::Scope api(m_ctx);\n" + b.text;
             f.body   = std::move(b.text);
             f.rsUsed = m_rsTouched;
             out.push_back(std::move(f));
@@ -2925,7 +3178,7 @@ private:
             translate(m_fnName.at(fn->s), fn, fn, fn->id);
         // Delay continuations (Runner::resumeFrom's mirror): a FRESH run.
         for (const int id : delayNodeIds())
-            translate("resume_" + std::to_string(id), m_g.findNode(id), nullptr, 0);
+            translate(m_resumeName.at(id), m_g.findNode(id), nullptr, 0);
         return out;
     }
 
@@ -2934,32 +3187,32 @@ private:
     std::string publicFnParams(const Node& fn) const
     {
         std::string sig;
-        std::unordered_set<std::string> used;
-        auto add = [&](const std::string& type, const std::string& name)
-        { if (!sig.empty()) sig += ", "; sig += type + " " + uniqueName(cppIdent(name), used); };
-        for (size_t i = 0; i < fn.params.size(); ++i)
-            add(cppType(trOf(fn.params[i])),
-                fn.params[i].name.empty() ? "p" + std::to_string(i) : fn.params[i].name);
-        for (size_t i = 0; i < fn.results.size(); ++i)
-            add(cppType(trOf(fn.results[i])) + "&",
-                fn.results[i].name.empty() ? "r" + std::to_string(i) : fn.results[i].name);
+        auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
+        const std::vector<std::string>& ps = m_fnParams.at(fn.s);
+        const std::vector<std::string>& rn = m_fnResults.at(fn.s);
+        for (size_t i = 0; i < fn.params.size() && i < ps.size(); ++i)
+            add(cppType(trOf(fn.params[i])) + " " + ps[i]);
+        for (size_t i = 0; i < fn.results.size() && i < rn.size(); ++i)
+            add(cppType(trOf(fn.results[i])) + "& " + rn[i]);
         return sig;
     }
-    // Its forwarding body: names in declaration order, straight into the
-    // internal body function.
+    // The same without the names: what decides whether a derived class's
+    // method of the same name overrides this one.
+    std::string publicFnTypes(const Node& fn) const
+    {
+        std::string sig;
+        auto add = [&sig](const std::string& p) { if (!sig.empty()) sig += ", "; sig += p; };
+        for (const auto& p : fn.params)  add(cppType(trOf(p)));
+        for (const auto& r : fn.results) add(cppType(trOf(r)) + "&");
+        return sig;
+    }
+    // The public method's body when the class has a RunState: a fresh one,
+    // into the body overload, the arguments by name.
     std::string publicFnForward(const Node& fn) const
     {
-        std::vector<std::string> names;
-        std::unordered_set<std::string> used;
-        for (size_t i = 0; i < fn.params.size(); ++i)
-            names.push_back(uniqueName(cppIdent(fn.params[i].name.empty()
-                ? "p" + std::to_string(i) : fn.params[i].name), used));
-        for (size_t i = 0; i < fn.results.size(); ++i)
-            names.push_back(uniqueName(cppIdent(fn.results[i].name.empty()
-                ? "r" + std::to_string(i) : fn.results[i].name), used));
-        std::string call = m_fnName.at(fn.s) + "(" + rsArg();
-        for (size_t i = 0; i < names.size(); ++i)
-            call += (i || useRunState() ? ", " : "") + names[i];
+        std::string call = m_fnName.at(fn.s) + "(rs";
+        for (const std::string& p : m_fnParams.at(fn.s))  call += ", " + p;
+        for (const std::string& r : m_fnResults.at(fn.s)) call += ", " + r;
         return call + ");";
     }
 
@@ -2989,7 +3242,7 @@ private:
         std::vector<std::string> argNames, resNames;
         for (size_t i = 0; i < entry->params.size(); ++i)
         {
-            const std::string a = "a" + std::to_string(n.id) + "_" + std::to_string(i);
+            const std::string a = temp(cppIdent(entry->params[i].name.empty() ? "arg" : entry->params[i].name));
             const TypeRef tr = trOf(entry->params[i].type, entry->params[i].isArray,
                                     entry->params[i].typeName);
             b.line("const " + cppType(tr) + " " + a + " = " +
@@ -2998,7 +3251,7 @@ private:
         }
         for (size_t i = 0; i < entry->results.size(); ++i)
         {
-            const std::string r = "r" + std::to_string(n.id) + "_" + std::to_string(i);
+            const std::string r = temp(cppIdent(entry->results[i].name.empty() ? "result" : entry->results[i].name));
             const TypeRef tr = trOf(entry->results[i].type, entry->results[i].isArray,
                                     entry->results[i].typeName);
             b.line(cppType(tr) + " " + r + " = " + zeroLit(tr) + ";");
@@ -3050,7 +3303,7 @@ private:
         return true;
     }
 
-    void emitClassFiles(std::string& h, std::string& c)
+    void emitClassFiles(std::string& h, std::string& c, std::string& r)
     {
         const std::string ns = m_opt.namespaceName;
 
@@ -3178,7 +3431,7 @@ private:
                 if (m_publicFn.count(fn->s))
                 {
                     const std::string params = publicFnParams(*fn);
-                    const MethodDecl d = methodDecl(m_publicFn.at(fn->s), params);
+                    const MethodDecl d = methodDecl(m_publicFn.at(fn->s), publicFnTypes(*fn));
                     h += "    " + d.prefix + "void " + m_publicFn.at(fn->s) + "(" + params + ")" +
                          d.suffix + ";\n";
                 }
@@ -3205,10 +3458,11 @@ private:
         }
         if (!m_publicVar.empty())
         {
-            h += "    // Its public variables, by reference — read and write them directly.\n";
+            h += "    // Its public variables — read and write them directly.\n";
             for (const auto& v : m_g.variables)
                 if (v.scope == 0 && v.access == 0)
-                    h += "    " + cppType(varType(v)) + "& " + m_publicVar.at(v.name) + "();\n";
+                    h += "    " + cppType(varType(v)) + " " + m_varMember.at(v.name) +
+                         " = " + memberDefault(v) + ";\n";
             h += "\n";
         }
 
@@ -3244,7 +3498,7 @@ private:
         if (!fns.empty())
         {
             h += "    const std::vector<HorizonCode::CompiledFuncInfo>& funcInfos() const override;\n";
-            h += "    bool callFunction(const std::string& name, bool requirePublic,\n";
+            h += "    bool callFunction(const std::string& function, bool requirePublic,\n";
             h += "                      const std::vector<hc::Value>& args,\n";
             h += "                      std::vector<hc::Value>* results) override;\n";
         }
@@ -3262,7 +3516,9 @@ private:
         // protected, not private: a derived class's generated code reads and
         // writes the inherited members directly — that is what keeps ONE C++
         // member per graph variable, matching the interpreter's one store.
-        h += "\nprotected:\n";
+        constexpr std::string_view kProtectedLabel = "\nprotected:\n";
+        h += kProtectedLabel;
+        const size_t protectedStart = h.size();
         if (rsOn)
         {
             // Per-run state: mirrors the Runner exactly (§3.3/§5.4) — and only the
@@ -3282,21 +3538,40 @@ private:
                     h += "        " + cppType(s.tr) + " " + s.field + " = " + zeroLit(s.tr) + ";\n";
             h += "    };\n\n";
         }
+        // The bodies. A public event's or function's body IS its public method
+        // when there is no RunState to hand in, and is declared up there.
+        bool anyBody = false;
         for (const Fragment& f : frags)
+        {
+            if (f.pub && !rsOn) continue;
             h += "    void " + f.name + "(" +
                  (f.fn ? fnParamList(*f.fn, true) : rsParam(true)) + ");\n";
-        if (!frags.empty()) h += "\n";
+            anyBody = true;
+        }
+        if (anyBody) h += "\n";
         for (const auto& v : m_g.variables)
-            if (v.scope == 0)
+            if (v.scope == 0 && v.access != 0)
                 h += "    " + cppType(varType(v)) + " " + m_varMember.at(v.name) +
                      " = " + memberDefault(v) + ";\n";
         // Per-instance node state (DoOnce/FlipFlop) — persists like variables,
         // reset by reseedVariables, never part of the public surface.
         for (const int id : states)
             h += "    bool " + stateMember(id) + " = false;\n";
+        if (h.size() == protectedStart) h.resize(protectedStart - kProtectedLabel.size());
+        else if (h.size() >= 2 && h.compare(h.size() - 2, 2, "\n\n") == 0) h.pop_back();
         h += "};\n\n} // namespace " + ns + "\n";
 
-        // ── the implementation ──────────────────────────────────────────────
+        // ── the implementation: the graph's logic (c) and what the Runtime ──
+        // reaches it by name (r: identity, the variable table, the by-name
+        // dispatchers, the factory) — two files, so the first reads as the graph.
+        r += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
+        r += "// Source: " + m_src.label + " (key " + m_src.key + ")\n";
+        r += "// How the Runtime reaches " + m_cls + " by name: its identity, its variable\n"
+             "// table, the event and function dispatchers and the manifest's factory.\n"
+             "// The logic is in hcgen_" + m_cls + ".cpp.\n";
+        r += "#include \"hcgen_" + m_cls + ".h\"\n";
+        r += "\nnamespace " + ns + " {\n\n";
+
         c += "// GENERATED by HorizonCode → C++ codegen — do not edit.\n";
         c += "// Source: " + m_src.label + " (key " + m_src.key + ")\n";
         // Exactly what this file needs, never the library umbrella (hcgen.h):
@@ -3304,24 +3579,24 @@ private:
         // translation unit, so editing one graph would rebuild all of them.
         // hcgen.h stays for YOUR code, which wants the whole surface at once.
         c += "#include \"hcgen_" + m_cls + ".h\"\n";
+        // The engine functions its Engine Call nodes name, called directly.
+        if (m_directUsed) c += "#include <HorizonEngine/HorizonEngineApi.h>\n";
         for (const std::string& other : m_usedClasses)
             if (other != m_cls) c += "#include \"hcgen_" + other + ".h\"\n";
         c += "\nnamespace " + ns + " {\n\n";
 
-        for (const auto& [id, name] : sortedPublicEv())
-            c += "void " + m_cls + "::" + name + "() { " + (rsOn ? "RunState rs; " : "") +
-                 m_evName.at(id) + "(" + rsArg() + "); }\n";
-        for (const Node* fn : fns)
-            if (m_publicFn.count(fn->s))
-                c += "void " + m_cls + "::" + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) +
-                     ") { " + (rsOn ? "RunState rs; " : "") + publicFnForward(*fn) + " }\n";
-        if (!m_publicEv.empty() || !m_publicFn.empty()) c += "\n";
-
-        for (const auto& v : m_g.variables)
-            if (v.scope == 0 && v.access == 0)
-                c += cppType(varType(v)) + "& " + m_cls + "::" + m_publicVar.at(v.name) +
-                     "() { return " + m_varMember.at(v.name) + "; }\n";
-        if (!m_publicVar.empty()) c += "\n";
+        // With a RunState, the public methods open one and enter the body
+        // overload of the same name. Without, they are the bodies (below).
+        if (rsOn && (!m_publicEv.empty() || !m_publicFn.empty()))
+        {
+            for (const auto& [id, name] : sortedPublicEv())
+                c += "void " + m_cls + "::" + name + "() { RunState rs; " + name + "(rs); }\n";
+            for (const Node* fn : fns)
+                if (m_publicFn.count(fn->s))
+                    c += "void " + m_cls + "::" + m_publicFn.at(fn->s) + "(" + publicFnParams(*fn) +
+                         ") { RunState rs; " + publicFnForward(*fn) + " }\n";
+            c += "\n";
+        }
 
         // The interned ids this class names. One constant per event, so the code
         // below reads the event, not a number — the id is assigned at load and
@@ -3336,28 +3611,28 @@ private:
             c += "\n";
         }
 
-        c += "const char* " + m_cls + "::classKey() const { return " + strLit(m_src.key) + "; }\n";
+        r += "const char* " + m_cls + "::classKey() const { return " + strLit(m_src.key) + "; }\n";
         if (!m_src.baseClass.empty())
-            c += "const char* " + m_cls + "::baseClassKey() const { return " +
+            r += "const char* " + m_cls + "::baseClassKey() const { return " +
                  strLit(m_src.baseClass) + "; }\n";
         if (!m_src.chain.empty())
         {
-            c += "const std::vector<const char*>& " + m_cls + "::classChain() const\n{\n";
-            c += "    static const std::vector<const char*> k = {";
+            r += "const std::vector<const char*>& " + m_cls + "::classChain() const\n{\n";
+            r += "    static const std::vector<const char*> k = {";
             for (size_t i = 0; i < m_src.chain.size(); ++i)
-                c += (i ? ", " : " ") + strLit(m_src.chain[i]);
-            c += " };\n    return k;\n}\n";
+                r += (i ? ", " : " ") + strLit(m_src.chain[i]);
+            r += " };\n    return k;\n}\n";
         }
-        c += "const void* " + m_cls + "::classTag_() { static const char k = 0; return &k; }\n";
-        c += "const void* " + m_cls + "::classTag() const { return classTag_(); }\n\n";
+        r += "const void* " + m_cls + "::classTag_() { static const char k = 0; return &k; }\n";
+        r += "const void* " + m_cls + "::classTag() const { return classTag_(); }\n\n";
 
         if (chainVarCount)
         {
             if (varCount)
             {
-                c += "const hc::VarSlots& " + m_cls + "::" +
+                r += "const hc::VarSlots& " + m_cls + "::" +
                      (ownTable ? "ownSlots" : "slots") + "()\n{\n";
-                c += "    static const hc::VarSlots k = {\n";
+                r += "    static const hc::VarSlots k = {\n";
                 for (const auto& v : m_g.variables)
                 {
                     if (v.scope != 0) continue;
@@ -3411,56 +3686,56 @@ private:
                                                      : std::string(", false, \"\"");
                     //   notify          Notify on Change, last (plan §4.1).
                     if (notify) trailing += ", true";
-                    c += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
+                    r += "        hc::slot<&" + m_cls + "::" + m_varMember.at(v.name) + ">(" +
                          strLit(v.name) + ", hc::PinType::" + pinName(v.type) + ", " +
                          (v.isArray ? "true" : "false") + ", " + std::to_string(v.access) + ", " +
                          strLit(v.typeName) + ", " +
                          toValueCall(memberDefault(v), tr, ns) + trailing +
                          "),\n";
                 }
-                c += "    };\n    return k;\n}\n\n";
+                r += "    };\n    return k;\n}\n\n";
             }
             if (inheritsVars)
             {
                 // The base's table plus this class's. The base's entries keep
                 // accessors typed on the BASE — correct for an object of this
                 // class, since the base sub-object is right there.
-                c += "const hc::VarSlots& " + m_cls + "::slots()\n";
-                c += "{ static const hc::VarSlots k = hc::concatSlots(" + par->cpp + "::slots()" +
+                r += "const hc::VarSlots& " + m_cls + "::slots()\n";
+                r += "{ static const hc::VarSlots k = hc::concatSlots(" + par->cpp + "::slots()" +
                      (ownTable ? ", ownSlots()" : ", {}") + "); return k; }\n\n";
             }
-            c += "const std::vector<HorizonCode::CompiledVarInfo>& " + m_cls + "::varInfos() const\n";
-            c += "{ static const std::vector<HorizonCode::CompiledVarInfo> k = hc::varInfosOf(slots()); return k; }\n\n";
+            r += "const std::vector<HorizonCode::CompiledVarInfo>& " + m_cls + "::varInfos() const\n";
+            r += "{ static const std::vector<HorizonCode::CompiledVarInfo> k = hc::varInfosOf(slots()); return k; }\n\n";
         }
 
         if (!extractLines.empty())
         {
             // Extract on Destruct: Runtime::destroy calls this after onDestruct
             // and before the instance is unregistered.
-            c += "bool " + m_cls + "::extractOnDestruct(hc::Value& out) const\n{\n";
-            for (const std::string& l : extractLines) c += "    " + l + "\n";
-            c += "}\n\n";
+            r += "bool " + m_cls + "::extractOnDestruct(hc::Value& out) const\n{\n";
+            for (const std::string& l : extractLines) r += "    " + l + "\n";
+            r += "}\n\n";
         }
 
         if (anyEvents)
         {
-            c += "const std::vector<HorizonCode::CompiledEventInfo>& " + m_cls + "::eventInfos() const\n{\n";
-            c += "    static const std::vector<HorizonCode::CompiledEventInfo> kEvents = {\n";
+            r += "const std::vector<HorizonCode::CompiledEventInfo>& " + m_cls + "::eventInfos() const\n{\n";
+            r += "    static const std::vector<HorizonCode::CompiledEventInfo> kEvents = {\n";
             // A handler with an argument also names its type: "OnDestroyed"
             // is type-checked per listener against the struct the dying
             // instance sends (design §3.3), and a compiled listener has no
             // graph to ask. Rows without an argument keep the old two fields.
             for (const Node& n : m_g.nodes)
                 if (n.type == NT::Event)
-                    c += "        { " + strLit(n.s) + ", " + std::to_string(n.elem) +
+                    r += "        { " + strLit(n.s) + ", " + std::to_string(n.elem) +
                          (n.hasArg ? ", " + std::to_string((int)n.propType) + ", " + strLit(n.typeName)
                                    : std::string()) + " },\n";
             // One row per input event this class handles — same reason the
             // inherited ones are listed below: this table is what says the
             // instance cares, and a handler missing from it is never fired.
             for (const InputEntry& e : inputs)
-                c += "        { " + strLit(e.event) + ", 0 },\n";
-            c += "    };\n";
+                r += "        { " + strLit(e.event) + ", 0 },\n";
+            r += "    };\n";
             if (par)
             {
                 // Plus the base's. Runtime::eventBindingsOf reports this list as
@@ -3468,51 +3743,51 @@ private:
                 // subscribes against — so leaving the inherited handlers out
                 // would make them unreachable: the handler exists, and nobody
                 // ever fires it.
-                c += "    static const std::vector<HorizonCode::CompiledEventInfo> kAll = [this]\n";
-                c += "    {\n";
-                c += "        std::vector<HorizonCode::CompiledEventInfo> v = " + par->cpp +
+                r += "    static const std::vector<HorizonCode::CompiledEventInfo> kAll = [this]\n";
+                r += "    {\n";
+                r += "        std::vector<HorizonCode::CompiledEventInfo> v = " + par->cpp +
                      "::eventInfos();\n";
-                c += "        v.insert(v.end(), kEvents.begin(), kEvents.end());\n";
-                c += "        return v;\n";
-                c += "    }();\n";
-                c += "    return kAll;\n}\n\n";
+                r += "        v.insert(v.end(), kEvents.begin(), kEvents.end());\n";
+                r += "        return v;\n";
+                r += "    }();\n";
+                r += "    return kAll;\n}\n\n";
             }
             else
-                c += "    return kEvents;\n}\n\n";
+                r += "    return kEvents;\n}\n\n";
 
             // fireEvent: fresh RunState per fire == the per-run cache clear (§3.1);
             // every matching handler of one fire shares it, in graph order.
             // With a base class the parameters always keep their names: whatever
             // this class does not handle is passed on, so `elem` and `arg` are
             // used even when none of its own handlers reads them.
-            c += "void " + m_cls + "::fireEvent(const std::string& name, " +
+            r += "void " + m_cls + "::fireEvent(const std::string& name, " +
                  p("int", "elem", anyElemFilter || par != nullptr) + ", " +
                  p("const hc::Value&", "arg", m_usesEventArg || par != nullptr) + ")\n{\n";
-            if (rsOn) c += "    RunState rs;\n";
-            if (m_usesEventArg) c += "    rs.eventArg = arg;\n";
+            if (rsOn) r += "    RunState rs;\n";
+            if (m_usesEventArg) r += "    rs.eventArg = arg;\n";
             bool first = true;
             for (const auto& [name, nodes] : groups)
             {
-                c += std::string("    ") + (first ? "if" : "else if") + " (name == " +
+                r += std::string("    ") + (first ? "if" : "else if") + " (name == " +
                      strLit(name) + ")\n    {\n";
                 for (const Node* n : nodes)
                 {
                     const std::string call = m_evName.at(n->id) + "(" + rsArg() + ");";
-                    if (n->elem == 0) c += "        " + call + "\n";
-                    else c += "        if (elem == " + std::to_string(n->elem) + ") " + call + "\n";
+                    if (n->elem == 0) r += "        " + call + "\n";
+                    else r += "        if (elem == " + std::to_string(n->elem) + ") " + call + "\n";
                 }
-                c += "    }\n";
+                r += "    }\n";
                 first = false;
             }
             // The input entries, in the same if/else chain: each name enters ONE
             // chain of its node, which is the whole difference from an Event.
             for (const InputEntry& e : inputs)
             {
-                c += std::string("    ") + (first ? "if" : "else if") + " (name == " +
+                r += std::string("    ") + (first ? "if" : "else if") + " (name == " +
                      strLit(e.event) + ")\n    {\n";
-                c += "        " + m_iaName.at(e.node->id)[(size_t)e.chain] +
+                r += "        " + m_iaName.at(e.node->id)[(size_t)e.chain] +
                      "(" + rsArg() + ");\n";
-                c += "    }\n";
+                r += "    }\n";
                 first = false;
             }
             if (par)
@@ -3521,10 +3796,10 @@ private:
                 // first class that declares the handler: an override REPLACES
                 // the base's version, exactly as Runtime::runEventOnLevel
                 // resolves it for an interpreted instance.
-                c += std::string("    ") + (first ? "" : "else ") + "{ " + par->cpp +
+                r += std::string("    ") + (first ? "" : "else ") + "{ " + par->cpp +
                      "::fireEvent(name, elem, arg); }\n";
             }
-            c += "}\n\n";
+            r += "}\n\n";
         }
 
         // The engine-event overrides. Same bodies fireEvent reaches, entered
@@ -3572,22 +3847,22 @@ private:
             for (const Node* fn : fns)
             {
                 if (fn->params.empty()) continue;
-                c += "static const HorizonCode::PinType kFnP_" + m_fnName.at(fn->s) + "[] = { ";
+                r += "static const HorizonCode::PinType kFnP_" + m_fnName.at(fn->s) + "[] = { ";
                 for (size_t i = 0; i < fn->params.size(); ++i)
-                    c += (i ? ", " : "") + std::string("(HorizonCode::PinType)") +
+                    r += (i ? ", " : "") + std::string("(HorizonCode::PinType)") +
                          std::to_string((int)fn->params[i].type);
-                c += " };\n";
+                r += " };\n";
                 // Parallel: which of them are containers. A function declaring
                 // an array parameter has to ACCEPT an array, or the host reads
                 // every honest call to it as a forgery.
-                c += "static const bool kFnA_" + m_fnName.at(fn->s) + "[] = { ";
+                r += "static const bool kFnA_" + m_fnName.at(fn->s) + "[] = { ";
                 for (size_t i = 0; i < fn->params.size(); ++i)
-                    c += (i ? ", " : "") + std::string(fn->params[i].isArray ? "true" : "false");
-                c += " };\n";
+                    r += (i ? ", " : "") + std::string(fn->params[i].isArray ? "true" : "false");
+                r += " };\n";
             }
-            c += "const std::vector<HorizonCode::CompiledFuncInfo>& " + m_cls +
+            r += "const std::vector<HorizonCode::CompiledFuncInfo>& " + m_cls +
                  "::funcInfos() const\n{\n";
-            c += "    static const std::vector<HorizonCode::CompiledFuncInfo> kFns = {\n";
+            r += "    static const std::vector<HorizonCode::CompiledFuncInfo> kFns = {\n";
             for (const Node* fn : fns)
             {
                 // A zero-parameter function still carries a table pointer — an
@@ -3602,12 +3877,12 @@ private:
                 const std::string arrTbl = fn->params.empty()
                     ? "nullptr"
                     : "kFnA_" + m_fnName.at(fn->s);
-                c += "        { " + strLit(fn->s) + ", " +
+                r += "        { " + strLit(fn->s) + ", " +
                      std::to_string((int)fn->runOn) + ", " +
                      (fn->anyClient ? "true" : "false") + ", " + tbl + ", " +
                      std::to_string(fn->params.size()) + ", " + arrTbl + " },\n";
             }
-            c += "    };\n";
+            r += "    };\n";
             if (par)
             {
                 // Plus the base's, for eventInfos' reason: an inherited
@@ -3615,66 +3890,70 @@ private:
                 // up. The derived class's own rows come LAST, so a re-declared
                 // function's Run On is the one that counts — the leaf-first
                 // rule the interpreter follows.
-                c += "    static const std::vector<HorizonCode::CompiledFuncInfo> kAllFns = [this]\n";
-                c += "    {\n";
-                c += "        std::vector<HorizonCode::CompiledFuncInfo> v = " + par->cpp +
+                r += "    static const std::vector<HorizonCode::CompiledFuncInfo> kAllFns = [this]\n";
+                r += "    {\n";
+                r += "        std::vector<HorizonCode::CompiledFuncInfo> v = " + par->cpp +
                      "::funcInfos();\n";
-                c += "        v.insert(v.end(), kFns.begin(), kFns.end());\n";
-                c += "        return v;\n";
-                c += "    }();\n";
-                c += "    return kAllFns;\n}\n\n";
+                r += "        v.insert(v.end(), kFns.begin(), kFns.end());\n";
+                r += "        return v;\n";
+                r += "    }();\n";
+                r += "    return kAllFns;\n}\n\n";
             }
             else
-                c += "    return kFns;\n}\n\n";
+                r += "    return kFns;\n}\n\n";
         }
 
         // callFunction: coerced args, typed default results (§3.1).
         if (!fns.empty())
         {
-            c += "bool " + m_cls + "::callFunction(const std::string& name, " +
+            r += "bool " + m_cls + "::callFunction(const std::string& function, " +
                  p("bool", "requirePublic", anyPrivateFn) + ",\n                  " +
                  p("const std::vector<hc::Value>&", "args", anyFnParams) + ", " +
                  "std::vector<hc::Value>* results)\n{\n";
             for (const Node* fn : fns)
             {
-                c += "    if (name == " + strLit(fn->s) + ")\n    {\n";
+                r += "    if (function == " + strLit(fn->s) + ")\n    {\n";
                 if (fn->access != 0)
-                    c += "        if (requirePublic) return false;   // private function\n";
-                if (rsOn) c += "        RunState rs;\n";
+                    r += "        if (requirePublic) return false;   // private function\n";
+                if (rsOn) r += "        RunState rs;\n";
+                // The function's own parameter names (buildNames keeps them
+                // clear of this function's `function`, `args` and `results`).
+                const std::vector<std::string>& pn = m_fnParams.at(fn->s);
+                const std::vector<std::string>& rn = m_fnResults.at(fn->s);
                 for (size_t i = 0; i < fn->params.size(); ++i)
                 {
                     const TypeRef tr = trOf(fn->params[i]);
-                    c += "        " + cppType(tr) + " p" + std::to_string(i) + " = " +
+                    r += "        " + cppType(tr) + " " + pn[i] + " = " +
                          coerceCall("hc::arg(args, " + std::to_string(i) + ")", tr) + ";\n";
                 }
                 std::vector<TypeRef> resTypes;
                 for (size_t i = 0; i < fn->results.size(); ++i)
                 {
                     resTypes.push_back(trOf(fn->results[i]));
-                    c += "        " + cppType(resTypes[i]) + " r" + std::to_string(i) + " = " +
+                    r += "        " + cppType(resTypes[i]) + " " + rn[i] + " = " +
                          zeroLit(resTypes[i]) + ";\n";
                 }
                 std::vector<std::string> callArgs;
                 if (rsOn) callArgs.push_back("rs");
-                for (size_t i = 0; i < fn->params.size(); ++i)  callArgs.push_back("p" + std::to_string(i));
-                for (size_t i = 0; i < fn->results.size(); ++i) callArgs.push_back("r" + std::to_string(i));
-                c += "        " + m_fnName.at(fn->s) + "(";
-                for (size_t i = 0; i < callArgs.size(); ++i) c += (i ? ", " : "") + callArgs[i];
-                c += ");\n";
-                c += "        if (results)\n        {\n            results->clear();\n";
+                for (size_t i = 0; i < fn->params.size(); ++i)  callArgs.push_back(pn[i]);
+                for (size_t i = 0; i < fn->results.size(); ++i) callArgs.push_back(rn[i]);
+                r += "        " + m_fnName.at(fn->s) + "(";
+                for (size_t i = 0; i < callArgs.size(); ++i) r += (i ? ", " : "") + callArgs[i];
+                r += ");\n";
+                r += "        if (results)\n        {\n            results->clear();\n";
                 for (size_t i = 0; i < fn->results.size(); ++i)
-                    c += "            results->push_back(" +
-                         toValueCall("r" + std::to_string(i), resTypes[i], ns) + ");\n";
-                c += "        }\n        return true;\n    }\n";
+                    r += "            results->push_back(" +
+                         toValueCall(rn[i], resTypes[i], ns) + ");\n";
+                r += "        }\n        return true;\n    }\n";
             }
             // An inherited function is the base's to run — and only if it is
             // public, which is the base's own check, not something to repeat.
             if (par)
-                c += "    return " + par->cpp + "::callFunction(name, " +
+                r += "    return " + par->cpp + "::callFunction(function, " +
                      (anyPrivateFn ? "requirePublic" : "true") + ", " +
                      (anyFnParams ? "args" : "{}") + ", results);\n}\n\n";
             else
-                c += "    return false;\n}\n\n";
+                r += "    return false;\n}\n\n";
         }
 
         if (chainVarCount)
@@ -3682,41 +3961,41 @@ private:
             // slots() is the whole chain, so these three answer for an inherited
             // name as readily as for an own one — which is what the Runtime's
             // name-keyed seam and the garbage collector both need.
-            c += "hc::Value " + m_cls + "::getVariable(const std::string& name) const\n";
-            c += "{ return hc::getVar(slots(), this, name); }\n\n";
-            c += "bool " + m_cls + "::setVariable(const std::string& name, const hc::Value& v)\n";
-            c += "{ return hc::setVar(slots(), this, name, v); }\n\n";
+            r += "hc::Value " + m_cls + "::getVariable(const std::string& name) const\n";
+            r += "{ return hc::getVar(slots(), this, name); }\n\n";
+            r += "bool " + m_cls + "::setVariable(const std::string& name, const hc::Value& v)\n";
+            r += "{ return hc::setVar(slots(), this, name, v); }\n\n";
             if (chainRefVar)
             {
-                c += "void " + m_cls + "::collectRefs(std::vector<uint32_t>& out) const\n";
-                c += "{ hc::collectVarRefs(slots(), this, out); }\n\n";
+                r += "void " + m_cls + "::collectRefs(std::vector<uint32_t>& out) const\n";
+                r += "{ hc::collectVarRefs(slots(), this, out); }\n\n";
             }
         }
         if (varCount || !states.empty())
         {
-            c += "void " + m_cls + "::reseedVariables()\n{\n";
+            r += "void " + m_cls + "::reseedVariables()\n{\n";
             // The base's variables AND its node states first — its own reseed is
             // the only thing that can reach the DoOnce flags it declares.
-            if (par) c += "    " + par->cpp + "::reseedVariables();\n";
+            if (par) r += "    " + par->cpp + "::reseedVariables();\n";
             // Own slots only: the base's were just reseeded, and doing them twice
             // would only be slower, not wrong.
-            if (varCount) c += "    hc::reseedVars(" + std::string(ownTable ? "ownSlots()" : "slots()") +
+            if (varCount) r += "    hc::reseedVars(" + std::string(ownTable ? "ownSlots()" : "slots()") +
                                ", this);\n";
             for (const int id : states)
-                c += "    " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
-            c += "}\n\n";
+                r += "    " + stateMember(id) + " = false;\n";   // DoOnce/FlipFlop start over
+            r += "}\n\n";
         }
         if (!delays.empty())
         {
-            c += "void " + m_cls + "::resumeFrom(int nodeId)\n{\n";
-            if (rsOn) c += "    RunState rs;\n";
+            r += "void " + m_cls + "::resumeFrom(int nodeId)\n{\n";
+            if (rsOn) r += "    RunState rs;\n";
             for (const int id : delays)
-                c += "    if (nodeId == " + std::to_string(resumeId(id)) + ") { resume_" +
-                     std::to_string(id) + "(" + rsArg() + "); return; }\n";
+                r += "    if (nodeId == " + std::to_string(resumeId(id)) + ") { " +
+                     m_resumeName.at(id) + "(" + rsArg() + "); return; }\n";
             // A Delay in a base class schedules a resume by ITS node id; the id
             // means nothing here, so the lookup has to continue up the chain.
-            if (par) c += "    " + par->cpp + "::resumeFrom(nodeId);\n";
-            c += "}\n\n";
+            if (par) r += "    " + par->cpp + "::resumeFrom(nodeId);\n";
+            r += "}\n\n";
         }
 
         for (const Fragment& f : frags)
@@ -3728,10 +4007,12 @@ private:
             c += "}\n\n";
         }
 
-        c += "// The manifest's factory pair (hc_registry.cpp links against these).\n";
-        c += "HorizonCode::CompiledInstance* create_" + m_cls + "() { return new " + m_cls + "(); }\n";
-        c += "void destroy_" + m_cls + "(HorizonCode::CompiledInstance* p) { delete p; }\n\n";
-        c += "} // namespace " + ns + "\n";
+        r += "// The manifest's factory pair (hc_registry.cpp links against these).\n";
+        r += "HorizonCode::CompiledInstance* create_" + m_cls + "() { return new " + m_cls + "(); }\n";
+        r += "void destroy_" + m_cls + "(HorizonCode::CompiledInstance* p) { delete p; }\n\n";
+        r += "} // namespace " + ns + "\n";
+        if (c.size() >= 2 && c.compare(c.size() - 2, 2, "\n\n") == 0) c.pop_back();
+        c += "\n} // namespace " + ns + "\n";
     }
 
     // Bodies are translated at class-member indentation (two levels); a
@@ -3773,6 +4054,10 @@ private:
     }
 };
 
+// The class's C++ name: its asset's file stem in PascalCase ("enemy_goblin.hasset"
+// → EnemyGoblin, a level script → LevelMain). Never S_/E_-shaped (the words are
+// joined without underscores), so it cannot meet a struct or enum type; the
+// names the namespace already has are claimed before any class (generateInto).
 std::string classNameFor(const std::string& key, std::unordered_set<std::string>& used)
 {
     std::string stem = key;
@@ -3780,14 +4065,22 @@ std::string classNameFor(const std::string& key, std::unordered_set<std::string>
     else
     {
         std::string prefix;
-        if (stem.rfind("level:", 0) == 0) { prefix = "Level_"; stem = stem.substr(6); }
+        if (stem.rfind("level:", 0) == 0) { prefix = "Level "; stem = stem.substr(6); }
         if (const size_t slash = stem.find_last_of('/'); slash != std::string::npos)
             stem = stem.substr(slash + 1);
         if (const size_t dot = stem.find_last_of('.'); dot != std::string::npos && dot > 0)
             stem = stem.substr(0, dot);
         stem = prefix + stem;
     }
-    return uniqueName("C_" + sanitize(stem), used);
+    std::string name = camelIdent(stem, true);
+    if (name.empty()) name = "Graph";
+    return uniqueName(name, used);
+}
+
+// What namespace hcgen (and every generated body) already means by a name.
+std::unordered_set<std::string> reservedClassNames()
+{
+    return { "HE", "HorizonCode", "hc", "glm", "std", "classes", "engineVersion" };
 }
 
 } // namespace
@@ -3796,7 +4089,7 @@ std::string classNameFor(const std::string& key, std::unordered_set<std::string>
 // nothing thrown in here reaches a caller.
 static void generateInto(const std::vector<ClassSource>& sources, const Options& opt, Result& res)
 {
-    std::unordered_set<std::string> usedNames;
+    std::unordered_set<std::string> usedNames = reservedClassNames();
 
     // The project's Struct and Enum assets, as C++ types — one header each, so
     // a class depends on the definitions it uses and not on the others. Built
@@ -3818,7 +4111,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     std::vector<Entry> compiled;
 
     // ── base classes first ───────────────────────────────────────────────────
-    // `C_Goblin : public C_Enemy` needs C_Enemy's emitter to have run: its C++
+    // `Goblin : public Enemy` needs Enemy's emitter to have run: its C++
     // name, its member names and its public methods are all things the child
     // asks the ClassTable for. Sorting by how deep a class sits in its chain
     // does that in one pass — the chain is already resolved, so no graph walk is
@@ -3840,7 +4133,7 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     for (const ClassSource& s : sources)
         if (!s.chain.empty()) classes.isBase.insert(s.chain.front());
     {
-        std::unordered_set<std::string> probeNames;
+        std::unordered_set<std::string> probeNames = reservedClassNames();
         const size_t warningsBefore = res.warnings.size();
         for (const ClassSource* srcp : order)
         {
@@ -3849,12 +4142,13 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
             try
             {
                 ClassEmitter em(src, className, opt, types, classes, res.warnings);
-                std::string h, c;
-                em.run(h, c);
+                std::string h, c, r;
+                em.run(h, c, r);
                 classes.byKey[src.key] = { src.key, className, &src.graph,
                                            src.chain.empty() ? std::string() : src.chain.front(),
                                            em.publicFunctions(), em.publicVariables(),
-                                           em.publicMethodSigs(), em.variableMembers() };
+                                           em.publicMethodSigs(), em.variableMembers(),
+                                           em.usedNames() };
             }
             catch (...) { probeNames.erase(className); }
         }
@@ -3917,10 +4211,11 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
                 throw FallbackError{ "base class '" + src.chain.front() +
                                      "' could not be compiled", 0 };
             ClassEmitter em(src, className, opt, types, classes, res.warnings);
-            std::string header, impl;
-            em.run(header, impl);
-            res.files.push_back({ "hcgen_" + className + ".h",   std::move(header) });
-            res.files.push_back({ "hcgen_" + className + ".cpp", std::move(impl) });
+            std::string header, impl, reflect;
+            em.run(header, impl, reflect);
+            res.files.push_back({ "hcgen_" + className + ".h",           std::move(header) });
+            res.files.push_back({ "hcgen_" + className + ".cpp",         std::move(impl) });
+            res.files.push_back({ "hcgen_" + className + ".reflect.cpp", std::move(reflect) });
             compiled.push_back({ src.key, className });
         }
         catch (const FallbackError& e)
@@ -4020,11 +4315,18 @@ static void generateInto(const std::vector<ClassSource>& sources, const Options&
     rc += "// visible would let a host binary that compiled the same headers share\n";
     rc += "// their inline statics with this library — and lose them on unload.\n";
     rc += "#if defined(HCGEN_BUILD_DYLIB)\n";
+    rc += "#include <Platform/BuildProfile.h>\n\n";
     rc += "extern \"C\"\n";
     rc += "#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\n";
     rc += "const HorizonCode::CompiledClassEntry* HE_HorizonCodeGenClasses(int* count, const char** engineVersion)\n";
     rc += "{\n    if (engineVersion) *engineVersion = " + ns + "::engineVersion();\n";
-    rc += "    return " + ns + "::classes(count);\n}\n";
+    rc += "    return " + ns + "::classes(count);\n}\n\n";
+    rc += "// The build profile of the engine SDK this library was compiled against\n";
+    rc += "// (its lib set's HE_BUILD_PROFILE_DEV/RELEASE). The game refuses a library\n";
+    rc += "// of another profile than its engine: no dev classes on a release engine.\n";
+    rc += "extern \"C\"\n";
+    rc += "#if defined(_WIN32)\n__declspec(dllexport)\n#else\n__attribute__((visibility(\"default\")))\n#endif\n";
+    rc += "const char* HE_HorizonCodeGenProfile() { return HE::kBuildProfileName; }\n";
     rc += "#endif\n";
     res.files.push_back({ "hc_registry.cpp", std::move(rc) });
 }
@@ -4059,6 +4361,8 @@ Result generate(const std::vector<ClassSource>& sources, const Options& opt)
     return res;
 }
 
+bool callsDirectly(const std::string& apiId) { return directRow(apiId) != nullptr; }
+
 std::string generateCMakeLists(const Options& opt, const std::vector<std::string>& cppFiles)
 {
     std::string s;
@@ -4067,14 +4371,6 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
     s += "project(HorizonCodeGen CXX)\n";
     s += "set(CMAKE_CXX_STANDARD 20)\n";
     s += "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
-    s += "# SDK layout: either a staged HE_SDK_DIR (include/ + lib/) or explicit\n";
-    s += "# dirs (development builds pass the source tree + build dir directly).\n";
-    s += "if(NOT DEFINED HE_SDK_INCLUDE_DIRS)\n";
-    s += "    set(HE_SDK_INCLUDE_DIRS \"${HE_SDK_DIR}/include\")\n";
-    s += "endif()\n";
-    s += "if(NOT DEFINED HE_SDK_LIB_DIR)\n";
-    s += "    set(HE_SDK_LIB_DIR \"${HE_SDK_DIR}/lib\")\n";
-    s += "endif()\n";
     s += "add_library(HorizonCodeGen SHARED\n";
     for (const auto& f : cppFiles) s += "    " + f + "\n";
     s += ")\n";
@@ -4082,9 +4378,40 @@ std::string generateCMakeLists(const Options& opt, const std::vector<std::string
     s += "# Only HE_HorizonCodeGenClasses leaves this library — see hc_registry.cpp.\n";
     s += "set_target_properties(HorizonCodeGen PROPERTIES\n";
     s += "    CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)\n";
-    s += "target_include_directories(HorizonCodeGen PRIVATE ${HE_SDK_INCLUDE_DIRS})\n";
-    s += "target_link_directories(HorizonCodeGen PRIVATE \"${HE_SDK_LIB_DIR}\")\n";
-    s += "target_link_libraries(HorizonCodeGen PRIVATE HorizonCore)\n";
+    s += "# The engine: Engine Call nodes are direct HE::api calls\n";
+    s += "# (HorizonEngine/HorizonEngineApi.h), so the classes link HorizonScene too.\n";
+    s += "# An installed engine SDK is used through its package (HorizonEngine_DIR, or\n";
+    s += "# HE_SDK_DIR holding lib/cmake/HorizonEngine); otherwise explicit dirs — a\n";
+    s += "# staged HE_SDK_DIR (include/ + lib/), or the source tree + build dirs a\n";
+    s += "# development build passes (HE_SDK_LIB_DIR may list several).\n";
+    s += "if(NOT DEFINED HorizonEngine_DIR AND DEFINED HE_SDK_DIR AND\n";
+    s += "   EXISTS \"${HE_SDK_DIR}/lib/cmake/HorizonEngine/HorizonEngineConfig.cmake\")\n";
+    s += "    set(HorizonEngine_DIR \"${HE_SDK_DIR}/lib/cmake/HorizonEngine\")\n";
+    s += "endif()\n";
+    s += "if(DEFINED HorizonEngine_DIR)\n";
+    s += "    # HE_BUILD_PROFILE picks the SDK's lib set (dev or release), the same one\n";
+    s += "    # the game is built against; its definitions make the classes that profile.\n";
+    s += "    # The library goes into the game's HorizonEngine/ folder, beside the\n";
+    s += "    # engine library it links, and finds it there and nowhere else.\n";
+    s += "    find_package(HorizonEngine REQUIRED CONFIG)\n";
+    s += "    target_link_libraries(HorizonCodeGen PRIVATE HorizonEngine::HorizonEngine)\n";
+    s += "    if(APPLE)\n";
+    s += "        set_target_properties(HorizonCodeGen PROPERTIES INSTALL_RPATH \"@loader_path\")\n";
+    s += "    else()\n";
+    s += "        set_target_properties(HorizonCodeGen PROPERTIES INSTALL_RPATH \"$ORIGIN\")\n";
+    s += "    endif()\n";
+    s += "    set_target_properties(HorizonCodeGen PROPERTIES BUILD_WITH_INSTALL_RPATH ON)\n";
+    s += "else()\n";
+    s += "    if(NOT DEFINED HE_SDK_INCLUDE_DIRS)\n";
+    s += "        set(HE_SDK_INCLUDE_DIRS \"${HE_SDK_DIR}/include\")\n";
+    s += "    endif()\n";
+    s += "    if(NOT DEFINED HE_SDK_LIB_DIR)\n";
+    s += "        set(HE_SDK_LIB_DIR \"${HE_SDK_DIR}/lib\")\n";
+    s += "    endif()\n";
+    s += "    target_include_directories(HorizonCodeGen PRIVATE ${HE_SDK_INCLUDE_DIRS})\n";
+    s += "    target_link_directories(HorizonCodeGen PRIVATE ${HE_SDK_LIB_DIR})\n";
+    s += "    target_link_libraries(HorizonCodeGen PRIVATE HorizonScene HorizonCore)\n";
+    s += "endif()\n";
     s += "if(APPLE)\n";
     s += "    set_target_properties(HorizonCodeGen PROPERTIES INSTALL_RPATH \"@loader_path\" BUILD_WITH_INSTALL_RPATH ON)\n";
     s += "endif()\n";
@@ -4108,8 +4435,15 @@ SdkInfo sdkFromRoot(const std::filesystem::path& root)
     SdkInfo info;
     if (const fs::path core = root / "src" / "HE_Core" / "include"; fs::is_directory(core, ec))
         info.includeDirs.push_back(core);
+    // HorizonEngine/HorizonEngineApi.h and HE::api, which every Engine Call
+    // node of the generated code calls directly.
+    if (const fs::path scene = root / "src" / "HE_Scene" / "include"; fs::is_directory(scene, ec))
+        info.includeDirs.push_back(scene);
     info.includeDirs.push_back(root / "include");
     info.libDir = root / "lib";
+    if (const fs::path pkg = root / "lib" / "cmake" / "HorizonEngine";
+        fs::exists(pkg / "HorizonEngineConfig.cmake", ec))
+        info.packageDir = pkg;
     return info;
 }
 } // namespace
@@ -4138,6 +4472,8 @@ SdkInfo resolveSdk(const std::filesystem::path& editorBaseDir)
             for (const auto& d : j.value("includeDirs", nlohmann::json::array()))
                 if (d.is_string()) info.includeDirs.push_back(fs::path(d.get<std::string>()));
             info.libDir = fs::path(j.value("libDir", std::string()));
+            for (const auto& d : j.value("libDirs", nlohmann::json::array()))
+                if (d.is_string()) info.extraLibDirs.push_back(fs::path(d.get<std::string>()));
             if (info.valid()) return info;
         }
     }
@@ -4220,9 +4556,12 @@ void ensureToolPathAugmented()
 } // namespace
 
 namespace {
+// resolveCmake() runs on the editor's export worker and on the toolchain probe thread
+// while the UI thread re-sets the bundle directory, so the three globals share a lock.
+std::mutex            g_cmakeMutex;
 std::filesystem::path g_bundledCmakeDir; // set by the editor to <app>/cmake (SDL_GetBasePath)
-std::string g_resolvedCmake;             // resolveCmake()'s cache; setBundledCmakeDir drops it
-bool        g_cmakeResolved = false;
+std::string           g_resolvedCmake;   // resolveCmake()'s cache; setBundledCmakeDir drops it
+bool                  g_cmakeResolved = false;
 
 bool cmakeAnswers(const std::string& cmd)
 {
@@ -4233,14 +4572,39 @@ bool cmakeAnswers(const std::string& cmd)
 #endif
 }
 
+#if defined(_WIN32)
+// Where the installers Tool Setup runs (winget Kitware.CMake, the cmake.org MSI) put
+// cmake. A GUI process keeps the PATH it started with, so a cmake installed while the
+// editor runs is on the machine PATH but not on ours: ask these locations directly.
+std::string cmakeInKnownWindowsDir()
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    for (const char* var : { "ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA" })
+    {
+        const char* root = std::getenv(var);
+        if (!root || !*root) continue;
+        const fs::path base = std::string(var) == "LOCALAPPDATA" ? fs::path(root) / "Programs" : fs::path(root);
+        const fs::path exe  = base / "CMake" / "bin" / "cmake.exe";
+        if (!fs::is_regular_file(exe, ec)) continue;
+        const std::string quoted = shq(exe);
+        if (cmakeAnswers(quoted)) return quoted;
+    }
+    return {};
+}
+#endif
+
 // Resolve the cmake command to use, preferring a cmake bundled next to the editor
 // (<app>/cmake/bin/cmake[.exe]) so a user only has to install a C++ compiler, then
 // falling back to a system cmake on PATH. Returns a shell-ready token (a quoted path,
 // or the bare word "cmake"), or empty when neither answers --version — the caller then
-// surfaces the Toolchain-Missing dialog. Resolved once and cached until the bundle
-// directory changes.
-const std::string& resolveCmake()
+// surfaces the Toolchain-Missing dialog. Cached (an empty answer too) until the bundle
+// directory changes or `fresh` asks for a new look: a "not found" taken before Tool
+// Setup installed cmake must not outlive the install.
+std::string resolveCmake(bool fresh = false)
 {
+    std::lock_guard<std::mutex> lock(g_cmakeMutex);
+    if (fresh) g_cmakeResolved = false;
     std::string& s_cmake = g_resolvedCmake;
     if (g_cmakeResolved) return s_cmake;
     g_cmakeResolved = true;
@@ -4261,7 +4625,10 @@ const std::string& resolveCmake()
             if (cmakeAnswers(quoted)) { s_cmake = quoted; return s_cmake; }
         }
     }
-    if (cmakeAnswers("cmake")) s_cmake = "cmake";
+    if (cmakeAnswers("cmake")) { s_cmake = "cmake"; return s_cmake; }
+#if defined(_WIN32)
+    s_cmake = cmakeInKnownWindowsDir();
+#endif
     return s_cmake; // empty ⇒ not found anywhere
 }
 } // namespace
@@ -4270,6 +4637,7 @@ void setBundledCmakeDir(const std::filesystem::path& dir)
 {
     // Only a CHANGED directory drops the cache: the editor re-sets the same one on
     // every Recheck, possibly while an export worker is inside resolveCmake().
+    std::lock_guard<std::mutex> lock(g_cmakeMutex);
     if (dir == g_bundledCmakeDir) return;
     g_bundledCmakeDir = dir;
     g_cmakeResolved   = false;
@@ -4284,7 +4652,8 @@ namespace {
 // Run a shell command, streaming each output line (stdout+stderr merged) to
 // `onLine` and appending everything to `captured`. Returns the exit status.
 int runStreaming(const std::string& cmd, const std::function<void(const std::string&)>& onLine,
-                 std::string& captured)
+                 std::string& captured, const std::atomic<bool>* cancel = nullptr,
+                 ToolchainInstallControl* control = nullptr)
 {
 #if defined(_WIN32)
     FILE* pipe = HE::hiddenPopen(cmdLine(cmd + " 2>&1"));
@@ -4292,9 +4661,63 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
     FILE* pipe = popen((cmd + " 2>&1").c_str(), "r");
 #endif
     if (!pipe) return -1;
+    const auto nowMs = []
+    {
+        return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    };
+    if (control) control->lastActivityMs = nowMs();
+
+#if defined(_WIN32)
+    // The blocked fgets below cannot notice a cancel, and the shell is only the
+    // first link of winget -> installer -> ...: a watcher ends the whole tree and
+    // wakes the reader, and keeps the activity numbers current for the UI.
+    std::atomic<bool> readerDone{false};
+    std::mutex wmx; std::condition_variable wcv;
+    std::thread watcher;
+    if (control || cancel)
+    {
+        void* reader = HE::hiddenThreadHandle();
+        watcher = std::thread([&, reader]
+        {
+            HE::HiddenTreeStats last, now;
+            bool killed = false;
+            std::unique_lock<std::mutex> lk(wmx);
+            while (!readerDone.load())
+            {
+                wcv.wait_for(lk, std::chrono::milliseconds(300));
+                if (readerDone.load()) break;
+                if (cancel && cancel->load())
+                {
+                    HE::hiddenKillTree(pipe);       // repeated: a parent may respawn before it dies
+                    HE::hiddenInterruptRead(reader);
+                    killed = true;
+                    continue;
+                }
+                if (killed || !control || !HE::hiddenTreeStats(pipe, now)) continue;
+                if (now.activity != last.activity || now.processCount != last.processCount)
+                    control->lastActivityMs = nowMs();
+                control->processCount = now.processCount;
+                { std::lock_guard<std::mutex> nl(control->mx); control->processNames = now.names; }
+                last = now;
+            }
+            HE::hiddenCloseThread(reader);
+        });
+    }
+    const auto stopWatcher = [&]
+    {
+        { std::lock_guard<std::mutex> lk(wmx); readerDone = true; }
+        wcv.notify_all();
+        if (watcher.joinable()) watcher.join();
+    };
+#endif
+
     char buf[1024];
+    bool cancelled = false;
     while (std::fgets(buf, sizeof buf, pipe))
     {
+        if (cancel && cancel->load()) { cancelled = true; break; }
+        if (control) control->lastActivityMs = nowMs();
         captured += buf;
         if (onLine)
         {
@@ -4303,11 +4726,19 @@ int runStreaming(const std::string& cmd, const std::function<void(const std::str
             onLine(line);
         }
     }
+    if (cancel && cancel->load()) cancelled = true;
 #if defined(_WIN32)
-    return HE::hiddenPclose(pipe);
+    stopWatcher();
+    const int rc = HE::hiddenPclose(pipe);
 #else
-    return pclose(pipe);
+    const int rc = pclose(pipe);
 #endif
+    if (cancelled)
+    {
+        captured += "-- cancelled\n";
+        return -2;
+    }
+    return rc;
 }
 
 // True if <exe> resolves on PATH — used to pick an available package manager.
@@ -4555,7 +4986,9 @@ ToolchainProbe probeToolchain()
     namespace fs = std::filesystem;
     ToolchainProbe p;
 
-    const std::string cmake = resolveCmake();
+    // A probe is a fresh look (startup, Recheck, the re-probe after Tool Setup
+    // installed something), never the answer cached by an earlier one.
+    const std::string cmake = resolveCmake(/*fresh=*/true);
     if (cmake.empty())
         return p; // cmake missing entirely (bundled + PATH both absent) — nothing to probe
     std::string versionOut;
@@ -4642,18 +5075,67 @@ std::string resolveBrew()
 #endif
 } // namespace
 
+namespace {
+// The last "NN %" or "x MB / y MB" in a chunk of installer output (winget redraws its
+// bar with a carriage return, so one chunk holds many frames). -1 when there is none.
+int parseInstallPercent(const std::string& text)
+{
+    static const std::regex sized(R"((\d+(?:\.\d+)?)\s*(KB|MB|GB)\s*/\s*(\d+(?:\.\d+)?)\s*(KB|MB|GB))");
+    static const std::regex pct(R"((\d{1,3})\s*%)");
+    const auto unit = [](const std::string& u) { return u == "GB" ? 1024.0 : u == "MB" ? 1.0 : 1.0 / 1024.0; };
+    int out = -1;
+    for (std::sregex_iterator it(text.begin(), text.end(), sized), end; it != end; ++it)
+    {
+        const double total = std::stod((*it)[3]) * unit((*it)[4]);
+        if (total > 0.0)
+            out = std::clamp(static_cast<int>(std::stod((*it)[1]) * unit((*it)[2]) / total * 100.0), 0, 100);
+    }
+    if (out >= 0) return out;
+    for (std::sregex_iterator it(text.begin(), text.end(), pct), end; it != end; ++it)
+        out = std::clamp(std::stoi((*it)[1]), 0, 100);
+    return out;
+}
+} // namespace
+
 ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
-                                  const std::function<void(const std::string&)>& onLine)
+                                  const std::function<void(const std::string&)>& onLine,
+                                  ToolchainInstallControl* control)
 {
     ToolchainInstall r;
     const auto emit = [&](const std::string& s) { if (onLine) onLine(s); };
     const auto run  = [&](const std::string& cmd) -> int
     {
         emit("$ " + cmd);
+        // Progress frames go to the bar, not into the log: a download is hundreds of them.
+        const auto filter = [&](const std::string& line)
+        {
+            if (control)
+            {
+                const int p = parseInstallPercent(line);
+                if (p >= 0) control->percent = p;
+            }
+            if (line.find('\r') != std::string::npos)
+            {
+                const size_t cut = line.find_last_of('\r');
+                const std::string tail = line.substr(cut + 1);
+                if (tail.find_first_not_of(" \t") != std::string::npos && parseInstallPercent(tail) < 0)
+                    emit(tail);
+                return;
+            }
+            emit(line);
+        };
         std::string cap;
-        const int rc = runStreaming(cmd, onLine, cap);
-        emit(rc == 0 ? "[done]" : "[exit code " + std::to_string(rc) + "]");
+        const int rc = runStreaming(cmd, filter, cap, control ? &control->cancel : nullptr, control);
+        emit(rc == 0 ? "[done]" : rc == -2 ? "[cancelled]" : "[exit code " + std::to_string(rc) + "]");
         return rc;
+    };
+    // After a cancel nothing else starts; the result says so.
+    const auto cancelled = [&]
+    {
+        if (!control || !control->cancel.load()) return false;
+        r.exitCode = -2;
+        r.message  = "Cancelled.";
+        return true;
     };
 
 #if defined(__APPLE__)
@@ -4711,15 +5193,25 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
     if (needCmake)
     {
         r.attempted = true;
-        if (const int rc = run("winget install --id Kitware.CMake -e" + agree)) r.exitCode = rc;
+        // 0x8A15002B: winget finds the package installed and no newer version. cmake was
+        // needed because it is not on PATH, which an install again would not change.
+        constexpr int kNoApplicableUpgrade = static_cast<int>(0x8A15002Bu);
+        if (const int rc = run("winget install --id Kitware.CMake -e" + agree); rc && rc != kNoApplicableUpgrade)
+            r.exitCode = rc;
+        if (cancelled()) return r;
     }
     if (needCompiler)
     {
         r.attempted = true;
+        // --force: a Build Tools setup that was cancelled half-way is already registered
+        // with winget, which then answers "no upgrade" (0x8A15002B) and never runs the
+        // installer again, so the C++ workload stays missing. Forcing hands the
+        // --add to the Visual Studio installer, which completes or repairs it.
         if (const int rc = run(
-                "winget install --id Microsoft.VisualStudio.2022.BuildTools -e"
+                "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --force"
                 " --override \"--add Microsoft.VisualStudio.Workload.VCTools "
                 "--includeRecommended --quiet --wait --norestart\"" + agree)) r.exitCode = rc;
+        if (cancelled()) return r;
     }
 #else // Linux / other Unix
     std::string install;
@@ -4746,17 +5238,19 @@ ToolchainInstall installToolchain(bool needCmake, bool needCompiler,
 #endif
 
     (void)needCmake; (void)needCompiler; // not every platform branch uses both
+    (void)cancelled;                     // only the Windows branch runs two installers in a row
     return r;
 }
 
 std::filesystem::path findBuiltArtifact(const std::filesystem::path& buildDir,
-                                        const std::vector<std::string>& artifactNames)
+                                        const std::vector<std::string>& artifactNames,
+                                        const std::string& configuration)
 {
     namespace fs = std::filesystem;
     // Single-config generators put the library flat in the build dir; MSVC and
     // Xcode put it under the configuration's own folder.
     for (const std::string& n : artifactNames)
-        for (const fs::path& dir : { buildDir, buildDir / "Release" })
+        for (const fs::path& dir : { buildDir, buildDir / configuration })
         {
             std::error_code ec;
             if (fs::exists(dir / n, ec)) return dir / n;
@@ -4841,10 +5335,23 @@ BuildOutcome buildDylib(const std::filesystem::path& genDir, const SdkInfo& sdk,
         if (i) includes += ";";
         includes += sdk.includeDirs[i].string();
     }
+    std::string libDirs = sdk.libDir.string();
+    for (const std::filesystem::path& d : sdk.extraLibDirs) libDirs += ";" + d.string();
     DylibBuildSpec spec;
     spec.sourceDir = genDir;
     spec.defines   = { "HE_SDK_INCLUDE_DIRS=" + includes,
-                       "HE_SDK_LIB_DIR=" + sdk.libDir.string() };
+                       "HE_SDK_LIB_DIR=" + libDirs };
+    // An installed engine SDK: its package knows the libraries, their
+    // definitions and the profile — generateCMakeLists prefers it.
+    if (!sdk.packageDir.empty())
+        spec.defines.push_back("HorizonEngine_DIR=" + sdk.packageDir.string());
+    // One build folder per lib set: a tree configured against dev and then
+    // reconfigured against release would be a dev/release mix in one cache.
+    if (!sdk.profile.empty())
+    {
+        spec.defines.push_back("HE_BUILD_PROFILE=" + sdk.profile);
+        spec.buildDir = genDir / ("build-" + sdk.profile);
+    }
     return buildDylib(spec, onLine);
 }
 
@@ -4884,27 +5391,29 @@ BuildOutcome buildDylib(const DylibBuildSpec& spec,
     }
     std::string configure =
         cmake + " -S " + shq(spec.sourceDir) + " -B " + shq(buildDir) + gen.args +
-        " -DCMAKE_BUILD_TYPE=Release";
+        " -DCMAKE_BUILD_TYPE=" + spec.configuration;
     // Quoted as ONE argument each: a define's value is a path (or a whole
     // semicolon-separated list of them) and may contain spaces.
     for (const std::string& d : spec.defines)
         configure += " " + shq("-D" + d);
-    if (runStreaming(configure, onLine, captured) != 0)
+    if (runStreaming(configure, onLine, captured, spec.cancel) != 0)
     {
         flushLog();
-        out.message = "cmake configure failed (see " + out.logFile.string() + ")";
+        out.message = (spec.cancel && spec.cancel->load()) ? std::string("cancelled")
+            : "cmake configure failed (see " + out.logFile.string() + ")";
         return out;
     }
-    const std::string build = cmake + " --build " + shq(buildDir) + " --config Release";
-    if (runStreaming(build, onLine, captured) != 0)
+    const std::string build = cmake + " --build " + shq(buildDir) + " --config " + spec.configuration;
+    if (runStreaming(build, onLine, captured, spec.cancel) != 0)
     {
         flushLog();
-        out.message = "compile failed (see " + out.logFile.string() + ")";
+        out.message = (spec.cancel && spec.cancel->load()) ? std::string("cancelled")
+            : "compile failed (see " + out.logFile.string() + ")";
         return out;
     }
     flushLog();
 
-    if (fs::path found = findBuiltArtifact(buildDir, names); !found.empty())
+    if (fs::path found = findBuiltArtifact(buildDir, names, spec.configuration); !found.empty())
     {
         out.artifact = std::move(found);
         out.ok       = true;

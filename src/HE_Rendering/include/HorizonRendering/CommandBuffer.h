@@ -3,8 +3,42 @@
 #include <Types/Handle.h>
 #include <Types/UUID.h>
 #include <Math/Math.h>
+#include <cstring>
 #include <vector>
 #include <cstdint>
+
+// `n` world matrices at `src`, read in place: a run's instances without copying them
+// (RenderSorter::DepthBatchList::useSpans, GeometryPass::setInstanceSpans). For a
+// cluster `src` points into instanceWorldMatrices(block) (RenderWorld.h), for an
+// ordinary object at its RenderObject::transform; valid while the RenderWorld and
+// the frame last.
+struct InstanceSpan {
+    const glm::mat4* src = nullptr;
+    uint32_t         n   = 0;
+};
+
+// A run's matrices as spans, whichever form the run carries: its own spans, or the one
+// copied list as a single span. What a backend that reads both forms loops over, so the
+// copying and the in-place form share every reader (DrawCall::run, DepthBatchList::run).
+class InstanceRun {
+public:
+    InstanceRun(const InstanceSpan* spans, size_t nSpans, const glm::mat4* copied, uint32_t count)
+        : m_spans(nSpans ? spans : nullptr), m_nSpans(nSpans), m_one{ copied, count }, m_total(count) {}
+    const InstanceSpan* begin() const { return m_spans ? m_spans : &m_one; }
+    const InstanceSpan* end() const { return m_spans ? m_spans + m_nSpans : &m_one + 1; }
+    uint32_t size() const { return m_total; }
+    template <class Fn>
+    void forEach(Fn&& fn) const
+    {
+        for (const InstanceSpan& s : *this)
+            for (uint32_t i = 0; i < s.n; ++i) fn(s.src[i]);
+    }
+private:
+    const InstanceSpan* m_spans;
+    size_t              m_nSpans;
+    InstanceSpan        m_one;
+    uint32_t            m_total;
+};
 
 // A single draw recorded by a render pass and replayed by the backend.
 //
@@ -50,6 +84,33 @@ struct DrawCall {
     // Non-empty when GeometryPass batched multiple same-mesh+same-material objects.
     // The backend uploads these to the instance VBO and calls glDrawElementsInstanced.
     std::vector<glm::mat4> instanceTransforms;
+    // GeometryPass::setInstanceSpans: the batch's instances read in place instead of
+    // copied into instanceTransforms (which then stays empty); instanceCount says how
+    // many. A backend that turns it on reads instances through forEachInstance /
+    // instanceTotal, which serve either form.
+    std::vector<InstanceSpan> instanceSpans;
+    size_t instanceTotal() const
+    {
+        return instanceSpans.empty() ? instanceTransforms.size() : static_cast<size_t>(instanceCount);
+    }
+    template <class Fn>
+    void forEachInstance(Fn&& fn) const
+    {
+        if (instanceSpans.empty()) { for (const glm::mat4& m : instanceTransforms) fn(m); return; }
+        for (const InstanceSpan& s : instanceSpans)
+            for (uint32_t i = 0; i < s.n; ++i) fn(s.src[i]);
+    }
+    // The batch's matrices as an InstanceRun (a single object: its own transform is not in it).
+    InstanceRun instanceRun() const
+    {
+        return InstanceRun(instanceSpans.data(), instanceSpans.size(), instanceTransforms.data(),
+                           static_cast<uint32_t>(instanceTotal()));
+    }
+    const glm::mat4& firstInstance() const
+    {
+        if (!instanceSpans.empty()) return instanceSpans.front().src[0];
+        return instanceTransforms.empty() ? transform : instanceTransforms.front();
+    }
     // Per-entity node-graph param override: empty = use the material's own
     // shaderParamData; otherwise the FULL merged HeParams block (16 vec4 = 64
     // floats) the backend uploads instead. Objects carrying an override are never
@@ -74,6 +135,7 @@ class HE_RENDERING_API CommandBuffer {
 public:
     void reset();
     void recordDraw(const DrawCall& call);
+    void recordDraw(DrawCall&& call);   // keeps the instance list instead of copying it
     void recordSkinnedDraw(const SkinnedDrawCall& call);
     void recordPostProcess();   // signals that a post-process pass ran this frame
 

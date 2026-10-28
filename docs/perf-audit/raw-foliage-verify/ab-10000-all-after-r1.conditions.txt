@@ -1,0 +1,15 @@
+== ab-10000-all-after-r1  2026-10-10 20:21:22
+before:
+  uptime:      load averages: 11.63 10.42 8.67
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=0
+  power:       Now drawing from 'AC Power'
+  busy procs:  67.9% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 58.6% /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd; 57.7% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 57.0% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 
+after (rc=0):
+  uptime:      load averages: 11.56 10.46 8.71
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=30
+  power:       Now drawing from 'AC Power'
+  busy procs:  53.6% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 51.5% /Library/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python; 51.4% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 51.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 

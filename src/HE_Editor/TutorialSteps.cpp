@@ -103,20 +103,16 @@ std::string_view listEntry(std::string_view list, int index)
 bool panelVisited(std::string_view name, std::string_view visited)
 {
 	if (name.empty()) return false;
-	// `visited` is '\n'-delimited AND '\n'-terminated, so searching for the name
-	// wrapped in newlines matches whole entries only ("Scene" must not be
-	// satisfied by "Scene Settings"). The haystack gets a leading newline so the
-	// first entry can match too.
-	std::string needle;
-	needle.reserve(name.size() + 2);
-	needle += '\n';
-	needle.append(name);
-	needle += '\n';
-	std::string hay;
-	hay.reserve(visited.size() + 1);
-	hay += '\n';
-	hay.append(visited);
-	return hay.find(needle) != std::string::npos;
+	// `visited` is '\n'-delimited AND '\n'-terminated, so a hit only counts when it
+	// is a whole entry: "Scene" must not be satisfied by "Scene Settings".
+	for (size_t pos = visited.find(name); pos != std::string_view::npos;
+	     pos = visited.find(name, pos + 1))
+	{
+		const bool entryStart = pos == 0 || visited[pos - 1] == '\n';
+		const size_t end = pos + name.size();
+		if (entryStart && end < visited.size() && visited[end] == '\n') return true;
+	}
+	return false;
 }
 
 bool listEntryVisited(std::string_view list, int index, std::string_view visited)
@@ -310,8 +306,8 @@ constexpr Step kContent[] = {
 
 	{ "import",
 	  "Import your own assets",
-	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB, FBX, OBJ "
-	  "and COLLADA models, PNG/JPG/TGA/HDR textures, WAV/OGG audio and fonts. "
+	  "Assets - Import Asset (or dragging files in) brings in glTF/GLB, FBX, OBJ, "
+	  "COLLADA and Blender (.blend, up to 3.4) models, PNG/JPG/TGA/HDR textures, WAV/OGG audio and fonts. "
 	  "Importing converts them to .hasset once; the editor never re-reads the "
 	  "original at runtime.\n"
 	  "A glTF with a skin is imported as a skeletal mesh plus its animation clips, "
@@ -409,7 +405,7 @@ constexpr Step kAssetTypes[] = {
 	  "instances rather than one draw call each.\n"
 	  "A Skeletal Mesh is the same thing plus a rig, and carries its Animation "
 	  "Clips. Both usually arrive through Import from a glTF/GLB — whether the file "
-	  "has a skin decides which one you get. FBX, OBJ and COLLADA always give a "
+	  "has a skin decides which one you get. FBX, OBJ, COLLADA and Blender always give a "
 	  "Static Mesh.\n"
 	  "You do not need a file of your own to look at one: the Engine root ships "
 	  "the built-in primitives (cube, sphere, plane, cylinder and friends) as "

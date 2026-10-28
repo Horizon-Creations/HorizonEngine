@@ -55,13 +55,13 @@ void applyHorizonDarkTheme()
 	// actually is. FramePadding.y also drives every row height, so this is the
 	// single biggest lever the theme has.
 	s.WindowPadding    = ImVec2(10.0f, 8.0f);
-	s.FramePadding     = ImVec2(8.0f, 4.0f);
+	s.FramePadding     = ImVec2(10.0f, 5.0f);
 	s.CellPadding      = ImVec2(6.0f, 4.0f);
 	s.ItemSpacing      = ImVec2(8.0f, 6.0f);
 	s.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
-	s.IndentSpacing    = 16.0f;
-	s.ScrollbarSize    = 11.0f;
-	s.GrabMinSize      = 10.0f;
+	s.IndentSpacing    = 18.0f;
+	s.ScrollbarSize    = 14.0f;
+	s.GrabMinSize      = 12.0f;
 
 	// SeparatorText is the section header of every properties panel (Details,
 	// material properties, the input-asset pages, Preferences). Left-aligned
@@ -135,7 +135,10 @@ void applyHorizonDarkTheme()
 
 	c[ImGuiCol_Button]        = warm(0.19f);
 	c[ImGuiCol_ButtonHovered] = warm(0.25f);
-	c[ImGuiCol_ButtonActive]  = alpha(accent, 0.80f);
+	// Pressed: the accent, but only as far as the label on it stays readable.
+	// At 0.80 the amber put Text at 3.4:1; several panels also use this slot as
+	// the fill of a toggle that is ON, where the label stays for as long as it is.
+	c[ImGuiCol_ButtonActive]  = alpha(accent, 0.55f);
 
 	// Header drives Selectable rows (outliner, lists, menus) AND CollapsingHeader
 	// (every Details section). A tint, not the full accent: a selected row should
@@ -144,7 +147,7 @@ void applyHorizonDarkTheme()
 	// did, and a brown outliner is not what anyone asked for.
 	c[ImGuiCol_Header]        = mix(warm(0.16f), accentHi, 0.22f, 0.65f);
 	c[ImGuiCol_HeaderHovered] = mix(warm(0.16f), accentHi, 0.32f, 0.75f);
-	c[ImGuiCol_HeaderActive]  = alpha(accent, 0.85f);
+	c[ImGuiCol_HeaderActive]  = alpha(accent, 0.55f);   // 0.85 put Text at 3.3:1, see ButtonActive
 
 	c[ImGuiCol_Separator]        = warm(0.24f);
 	c[ImGuiCol_SeparatorHovered] = alpha(accent, 0.70f);

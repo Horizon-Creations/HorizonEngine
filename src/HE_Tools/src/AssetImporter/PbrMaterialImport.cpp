@@ -763,6 +763,7 @@ std::string importMaterial(const PbrMaterialDesc&       m,
 	mat.customShaderFragGlsl = gen.glsl;
 	mat.customShaderGBufGlsl = gen.glslGBuffer;
 	mat.customShaderVertGlsl = gen.vertexBody;
+	mat.customShaderDispGlsl = gen.displacementBody;
 	mat.blendMode            = gen.blendMode;
 	mat.graphTexturePaths    = gen.textures;
 

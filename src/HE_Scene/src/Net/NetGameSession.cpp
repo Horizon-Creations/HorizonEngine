@@ -5,6 +5,8 @@
 #include "HorizonScene/Net/NetMessages.h"
 
 #include <Diagnostics/Log.h>
+#include <Net/RelayFanout.h>
+#include <Net/RelayTransport.h>
 #include <Net/SecureTransport.h>
 #include <Net/UdpTransport.h>
 #include <Project/ProjectSettings.h>
@@ -101,6 +103,7 @@ NetGameSession::HostOptions NetGameSession::defaultHostOptions() const
 	o.announceLan = mp.discoverLan;
 	o.timeoutSec  = mp.timeoutSec;
 	o.replication = defaultReplicationConfig(mp);
+	o.relayAddress = mp.relayAddress;
 	return o;
 }
 
@@ -109,6 +112,7 @@ NetGameSession::JoinOptions NetGameSession::defaultJoinOptions() const
 	JoinOptions o;
 	o.timeoutSec  = m_projectDefaults.timeoutSec;
 	o.replication = defaultReplicationConfig(m_projectDefaults);
+	o.relayAddress = m_projectDefaults.relayAddress;
 	return o;
 }
 
@@ -127,6 +131,57 @@ NetGameSession::LinkStats NetGameSession::linkStats() const
 bool NetGameSession::host(const HostOptions& options)
 {
 	leave();
+
+	// ── Through a relay server ──
+	// Checked first and returning on its own, so the direct path below is the
+	// code it was before the relay existed.
+	if (const std::string relayText = effectiveRelayAddress(options.relayAddress); !relayText.empty())
+	{
+		RelayAddress relay;
+		std::string  why;
+		if (!parseRelayAddress(relayText, relay, &why))
+		{
+			m_error  = "The relay address \"" + relayText + "\" cannot be used (" + why + ").";
+			m_status = Status::Failed;
+			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
+			return false;
+		}
+		m_joinCode = SecureTransport::generateJoinSecret();
+		// The session's name on the relay comes from the join code, so a
+		// joiner who has the code has everything it needs to find us.
+		auto link = RelayTransport::host(relay, RelayTransport::sessionIdForJoinCode(m_joinCode));
+		if (!link)
+		{
+			m_error  = "Could not reach the relay server at " + relayText + ".";
+			m_status = Status::Failed;
+			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
+			return false;
+		}
+		RelayTransport* const relayLink = link.get();   // for the fan-out below
+		SecureTransport::Config sec;
+		sec.joinSecret        = m_joinCode;
+		sec.role              = NetRole::Host;
+		sec.requireEncryption = true;   // replayWindow stays 0: one TCP stream, nothing reorders
+		auto secure = SecureTransport::wrap(std::move(link), sec);
+		if (!secure)
+		{
+			m_error  = "No crypto backend available — a session cannot be secured.";
+			m_status = Status::Failed;
+			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
+			return false;
+		}
+		// Messages for every client go to the relay once, which makes the
+		// copies (property deltas, despawns); per-client snapshots stay per link.
+		RelayFanout::Config fan;
+		fan.role = NetRole::Host;
+		if (!hostOn(RelayFanout::wrap(std::move(secure), relayLink, fan), options)) return false;
+		m_viaRelay = true;
+		// No port of our own and no LAN announcement: an address nobody listens
+		// on would only send people into a wall. The join code is the invitation.
+		HE_LOG_INFO(Replication, "Hosting through the relay server at %s:%u",
+		            relay.host.c_str(), static_cast<unsigned>(relay.port));
+		return true;
+	}
 
 	auto listener = UdpTransport::listen(options.port, udpConfigFor(options.timeoutSec));
 	if (!listener)
@@ -197,6 +252,60 @@ bool NetGameSession::joinDirect(const std::string& address, std::uint16_t port,
                                 const JoinOptions& options)
 {
 	leave();
+
+	// ── Through a relay server ── (see host())
+	if (const std::string relayText = effectiveRelayAddress(options.relayAddress); !relayText.empty())
+	{
+		RelayAddress relay;
+		std::string  why;
+		if (!parseRelayAddress(relayText, relay, &why))
+		{
+			m_error  = "The relay address \"" + relayText + "\" cannot be used (" + why + ").";
+			m_status = Status::Failed;
+			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
+			return false;
+		}
+		if (options.joinCode.empty())
+		{
+			m_error  = "A join code is required: it is how the relay finds the session.";
+			m_status = Status::Failed;
+			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
+			return false;
+		}
+		auto link = RelayTransport::connect(relay, RelayTransport::sessionIdForJoinCode(options.joinCode));
+		if (!link)
+		{
+			m_error  = "Could not reach the relay server at " + relayText + ".";
+			m_status = Status::Failed;
+			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
+			return false;
+		}
+		RelayTransport* const relayLink = link.get();   // see m_relayLink
+		SecureTransport::Config sec;
+		sec.joinSecret        = options.joinCode;
+		sec.role              = NetRole::Client;
+		sec.requireEncryption = true;
+		auto secure = SecureTransport::wrap(std::move(link), sec);
+		if (!secure)
+		{
+			m_error  = "No crypto backend available — a session cannot be secured.";
+			m_status = Status::Failed;
+			HE_LOG_ERROR(Replication, "%s", m_error.c_str());
+			return false;
+		}
+		RelayFanout::Config fan;
+		fan.role = NetRole::Client;
+		if (!joinOn(RelayFanout::wrap(std::move(secure), relayLink, fan), options)) return false;
+		m_viaRelay  = true;
+		m_relayLink = relayLink;
+		// Said, because a typed address that is silently not dialled looks
+		// like a bug to whoever typed it.
+		HE_LOG_INFO(Replication, "Joining through the relay server at %s:%u (the address "
+		                         "%s:%u is not dialled; the join code finds the host)",
+		            relay.host.c_str(), static_cast<unsigned>(relay.port),
+		            address.c_str(), static_cast<unsigned>(port));
+		return true;
+	}
 
 	auto link = UdpTransport::connect(address, port, udpConfigFor(options.timeoutSec));
 	if (!link)
@@ -473,8 +582,9 @@ void NetGameSession::leave()
 	{
 		// Even an idle session resets cleanly: a Failed status must not survive
 		// into the next attempt.
-		m_status = Status::Idle;
-		m_role   = NetRole::None;
+		m_status   = Status::Idle;
+		m_role     = NetRole::None;
+		m_viaRelay = false;
 		return;
 	}
 
@@ -516,6 +626,8 @@ void NetGameSession::leave()
 	m_net.reset();
 	m_transport.reset();
 	m_udp = nullptr;   // it lived inside the chain that just went away
+	m_viaRelay  = false;
+	m_relayLink = nullptr;   // so did this
 
 	m_roster.clear();
 	m_pending.clear();
@@ -916,6 +1028,28 @@ void NetGameSession::update(float dt)
 
 	m_transport->update();
 
+	// A join the relay refused (nobody hosts that join code there, or the host
+	// did not take it in time). The link died inside the secure layer before it
+	// was a connection, so nothing below would ever notice.
+	if (m_relayLink && m_status == Status::Connecting &&
+	    m_relayLink->connectionCount() == 0 && !m_relayLink->lastError().empty())
+	{
+		const std::string& why = m_relayLink->lastError();
+		m_error = "The relay server could not connect you (" + why + ")." +
+		          (why.rfind("no-such-peer", 0) == 0
+		               ? std::string(" Nobody hosts a session with that join code on this "
+		                             "relay: check the code, and that the host uses the "
+		                             "same relay server.")
+		               : std::string());
+		m_status              = Status::Failed;
+		m_disconnectExplained = true;
+		m_relayLink           = nullptr;   // reported once
+		push(Event::Kind::Disconnected, m_localPlayer,
+		     static_cast<int>(DisconnectReason::Timeout));
+		HE_LOG_WARN(Replication, "%s", m_error.c_str());
+		return;
+	}
+
 	// BEFORE pump, not after: a refusal decided during THIS pump has not been
 	// written to the socket yet, and cutting the link in the same frame takes
 	// the explanation with it — the joiner then sees a dead connection instead
@@ -927,9 +1061,8 @@ void NetGameSession::update(float dt)
 		{
 			m_net->disconnect(conn);
 			if (m_replication) m_replication->dropConnection(conn);
+			// A connection id the transport reuses must inherit no rate history.
 			if (m_rpc) m_rpc->dropConnection(conn);
-	// A connection id the transport reuses must inherit no rate history.
-	if (m_rpc) m_rpc->dropConnection(conn);
 		}
 		m_rejected.clear();
 	}

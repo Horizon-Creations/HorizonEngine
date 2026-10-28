@@ -1,13 +1,15 @@
 #pragma once
+#include <bit>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
 #include <Types/Defines.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  .hpak  —  Horizon Engine packed asset archive (binary format), version 2
+//  .hpak  —  Horizon Engine packed asset archive (binary format), version 3
 //
 //  Layout:
 //    [ FileHeader (64 bytes)            ]
@@ -40,7 +42,17 @@ namespace Hpak
 {
 
 inline constexpr char     k_magic[4] = {'H','P','A','K'};
-inline constexpr uint32_t k_version  = 2;
+// v3: tocHash and contentHash are hash64 (word-wise, four lanes) instead of the
+// byte-wise FNV-1a of v2 (fnv1a64Bytes) — the byte-wise one ran at ~0.66 GB/s and
+// was the slowest step of every pak read (CORE-403). The layout is unchanged.
+//
+// A bump by the rule in HAsset.h: the same bytes now carry a different hash, so
+// an older reader would refuse every v3 package as corrupt instead of as "too
+// new". HpakReader reads both: a v2 package is verified with fnv1a64Bytes
+// (hash64ForVersion), and a v2 entry carried verbatim into a v3 package gets its
+// hash recomputed (HpakReader::readStoredEntry).
+inline constexpr uint32_t k_version       = 3;
+inline constexpr uint32_t k_oldestVersion = 2; // oldest version HpakReader still opens
 
 // ── Per-entry compression codec (EntryDesc::codec) ────────────────────────────
 enum class Codec : uint8_t
@@ -74,7 +86,7 @@ inline constexpr uint8_t  kFlagBlockFramed = 0x4; // RESERVED: per-block framing
 struct FileHeader
 {
     char     magic[4];       // "HPAK"
-    uint32_t version;        // k_version = 2
+    uint32_t version;        // k_version = 3 (2 still read, see k_version)
     uint32_t entryCount;
     uint32_t flags;          // kArchive* bits
     uint64_t buildId;        // hash/semver of the build → patch validation
@@ -104,10 +116,13 @@ static_assert(sizeof(EntryDesc) == 56, "Hpak::EntryDesc must be 56 bytes");
 
 #pragma pack(pop)
 
-// ── Fast non-cryptographic hash (FNV-1a, 64-bit) ──────────────────────────────
-// Deterministic across platforms/runs. Used for tocHash + contentHash (corruption
-// detection only — see the header comment). Dependency-free by design.
-inline uint64_t hash64(const uint8_t* data, size_t len) noexcept
+// ── Fast non-cryptographic hashes (corruption detection only, see the top) ────
+// Deterministic across platforms/runs and dependency-free by design.
+
+// Byte-wise FNV-1a, 64-bit: the tocHash/contentHash of version-2 packages. Also
+// the change key of the EngineContent manifest (ContentSync), which lives on the
+// server and must keep matching what earlier builds published there.
+inline uint64_t fnv1a64Bytes(const uint8_t* data, size_t len) noexcept
 {
     uint64_t h = 1469598103934665603ULL;        // FNV offset basis
     for (size_t i = 0; i < len; ++i)
@@ -116,6 +131,54 @@ inline uint64_t hash64(const uint8_t* data, size_t len) noexcept
         h *= 1099511628211ULL;                   // FNV prime
     }
     return h;
+}
+
+// The current hash (version 3): FNV-1a over 64-bit little-endian words in four
+// independent lanes, so four multiplies are in flight instead of one per byte.
+// Plain word-wise FNV only carries a difference UPWARD (a flip of bit 63 stays bit
+// 63, so two such flips in one lane cancel); the xor-shift after each multiply
+// feeds the high half back down. Each step is a bijection of (state ^ word), so a
+// single changed word always changes its lane. Lanes fold in order, then the tail
+// (whole words, then bytes) and the length, then a murmur3 finalizer.
+inline uint64_t hash64(const uint8_t* data, size_t len) noexcept
+{
+    static_assert(std::endian::native == std::endian::little,
+                  "hash64 reads words in native order; the format is little-endian");
+    constexpr uint64_t kBasis = 1469598103934665603ULL;
+    constexpr uint64_t kPrime = 1099511628211ULL;
+    auto step = [](uint64_t h, uint64_t w) noexcept {
+        h = (h ^ w) * kPrime;
+        return h ^ (h >> 32);
+    };
+    auto word = [data](size_t at) noexcept {
+        uint64_t w;
+        std::memcpy(&w, data + at, sizeof(w));
+        return w;
+    };
+
+    uint64_t l0 = kBasis, l1 = kBasis ^ 1, l2 = kBasis ^ 2, l3 = kBasis ^ 3;
+    size_t i = 0;
+    for (; i + 32 <= len; i += 32)
+    {
+        l0 = step(l0, word(i));
+        l1 = step(l1, word(i + 8));
+        l2 = step(l2, word(i + 16));
+        l3 = step(l3, word(i + 24));
+    }
+    uint64_t h = step(step(step(step(kBasis, l0), l1), l2), l3);
+    for (; i + 8 <= len; i += 8) h = step(h, word(i));
+    for (; i < len; ++i) { h ^= static_cast<uint64_t>(data[i]); h *= kPrime; }
+    h ^= static_cast<uint64_t>(len);
+    h ^= h >> 33; h *= 0xFF51AFD7ED558CCDULL;
+    h ^= h >> 33; h *= 0xC4CEB9FE1A85EC53ULL;
+    h ^= h >> 33;
+    return h;
+}
+
+// The hash a package of `version` was written with (k_oldestVersion..k_version).
+inline uint64_t hash64ForVersion(uint32_t version, const uint8_t* data, size_t len) noexcept
+{
+    return version < 3 ? fnv1a64Bytes(data, len) : hash64(data, len);
 }
 
 // Per-entry packing options.
@@ -142,8 +205,9 @@ struct PackSettings {
     bool cook = false;
     // Additionally block-compress RGBA8 textures at pack time to this HE::TextureFormat
     // value (kept as a raw uint8_t so this low-level header needn't include Assets.h):
-    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3. Each needs its encoder in the
-    // build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC / HE_HAVE_STB_DXT); on a missing encoder or
+    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3, 4 = BC1, 5 = BC4 (R only), 6 = BC5
+    // (R and G only). Each needs its encoder in the build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC /
+    // HE_HAVE_STB_DXT, which covers BC1/BC3/BC4/BC5); on a missing encoder or
     // an encode failure the cook silently keeps RGBA8 + baked mipmaps. The chosen format
     // must match what the target's GPU can sample — the editor picks it per target/backend.
     uint8_t textureCompression = 0;
@@ -154,6 +218,12 @@ struct PackSettings {
     // the incremental-pack fingerprint: changing it re-encodes every texture,
     // which is the whole point of changing it.
     uint8_t textureQuality = 0;
+    // Also cook texture ARRAYS (layers > 1) to `textureCompression`, every slice and level
+    // encoded as it stands. Off: arrays ship RGBA8 as they always did. It is off because
+    // some readers still expect RGBA8 arrays in a shipped game (the GI's landscape slice
+    // means, giAutoLandscapeSliceMeans, cannot read BC7 or ASTC); whoever turns it on for
+    // the Auto landscape arrays has to cover that first. Part of the pack fingerprint.
+    bool cookTextureArrays = false;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,
@@ -175,6 +245,19 @@ struct PackSettings {
     // compileShaderVariants above.
     std::function<std::vector<uint8_t>(const std::string& nodeGraphJson, uint32_t backends)>
         compileParticleShaderVariants;
+
+    // Called by HpakWriter::addDirectories once per asset that ENDS UP in the archive,
+    // after it has been stored: (addressed path, e.g. "Textures/Rock.hasset" or
+    // "Engine/Materials/Water.hasset"; true when the entry was carried over verbatim
+    // from the previous archive instead of being packed afresh). Excluded files and
+    // assets shadowed by an override never reach it — the list a caller builds from
+    // this IS the pak's asset list. Same thread as the pack call.
+    std::function<void(const std::string& relPath, bool reused)> onAsset;
+    // Called by HpakWriter::addDirectories for each HpakWriter::warnings() line, as
+    // it is found: a reference no root can satisfy, or a UUID collision that kept
+    // a file out. Both used to be silent, and a pak missing the landscape texture
+    // arrays looked exactly like a good one. Same thread as the pack call.
+    std::function<void(const std::string& message)> onWarning;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).

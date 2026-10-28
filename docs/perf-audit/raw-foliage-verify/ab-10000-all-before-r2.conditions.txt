@@ -1,0 +1,15 @@
+== ab-10000-all-before-r2  2026-10-10 20:25:10
+before:
+  uptime:      load averages: 6.50 8.29 8.18
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=3
+  power:       Now drawing from 'AC Power'
+  busy procs:  55.5% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 53.3% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 53.2% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 52.8% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 
+after (rc=0):
+  uptime:      load averages: 7.12 8.36 8.21
+  locked:      "CGSSessionScreenIsLocked"=Yes
+  lowpower:    0
+  gpu:         "Device Utilization %"=43
+  power:       Now drawing from 'AC Power'
+  busy procs:  107.8% /Applications/CLion.app/Contents/MacOS/clion; 97.9% /usr/libexec/duetexpertd; 45.1% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 44.0% /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang; 

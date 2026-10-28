@@ -2245,6 +2245,46 @@ TEST_CASE("Selectable label: the up arrow keeps the column it left from")
     CHECK(t.byteAtRowX(rows[1], col) == rows[1].end);
 }
 
+TEST_CASE("Selectable label: byteAtRowX and caretAtPoint follow the midpoint rule at every column")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    HE::UIText t;
+    t.selectable = true; t.autoSize = false; t.fontSize = 18.0f; t.alignV = 0;
+    t.text = "Hello w\xC3\xB6rld \xE6\x97\xA5 end\nsecond row";
+    const HE::UIWidgetRect px{ 0.0f, 0.0f, 400.0f, 120.0f };
+    std::vector<UIRenderObject> out;
+    t.render(px, {}, {}, 1.0f, out);
+
+    const std::vector<HE::UITextVisualLine> rows = t.rowRanges();
+    REQUIRE(rows.size() == 2);
+    const auto sel = t.selectRows(px, 1.0f, 1.0f);
+    REQUIRE(sel.size() == 2);
+    for (size_t r = 0; r < rows.size(); ++r)
+        for (float x = -2.0f; x < 220.0f; x += 0.5f)
+        {
+            // The definition: the first boundary whose midpoint with the next
+            // one lies beyond x, measured from the row start each time.
+            size_t want = rows[r].begin;
+            if (x > 0.0f)
+            {
+                want = rows[r].end;
+                for (size_t i = rows[r].begin; i < rows[r].end; )
+                {
+                    const size_t nx = HE::uiUtf8Next(t.text, i);
+                    if (x < (t.caretXInRow(rows[r], i) + t.caretXInRow(rows[r], nx)) * 0.5f)
+                    {
+                        want = i;
+                        break;
+                    }
+                    i = nx;
+                }
+            }
+            CHECK(t.byteAtRowX(rows[r], x) == want);
+            const float y = sel[r].top + 9.0f;
+            CHECK(t.caretAtPoint(px, 1.0f, sel[r].x + x, y) == want);
+        }
+}
+
 // ── Multi-line text ───────────────────────────────────────────────────────────
 // emitUITextGlyphs used to lay out strictly one line and DROP every byte < 32,
 // so '\n' silently vanished and the whole string ran together.
@@ -2737,6 +2777,61 @@ TEST_CASE("uiHcValueToProp follows HorizonCode's coercion rule")
     CHECK(HE::uiHcValueToProp(HCV::ofFloat(0.5f), HE::UIPropType::Bool).b == true);
     // Any other mismatch yields the target's zero.
     CHECK(HE::uiHcValueToProp(HCV::ofString("x"), HE::UIPropType::Float).f == doctest::Approx(0.0f));
+}
+
+TEST_CASE("uiHcValueToProp converts every Float/Double/Int/Bool pair, and the target's own raw field otherwise")
+{
+    using HCV = HorizonCode::Value;
+    using T   = HE::UIPropType;
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(2.5),  T::Float).f == 2.5f);
+    CHECK(HE::uiHcValueToProp(HCV::ofBool(false),  T::Float).f == 0.0f);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(1.25f), T::Float).f == 1.25f);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-2.7f), T::Int).i == -2);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(9.99), T::Int).i == 9);
+    CHECK(HE::uiHcValueToProp(HCV::ofBool(true),   T::Int).i == 1);
+    CHECK(HE::uiHcValueToProp(HCV::ofInt(-4),      T::Int).i == -4);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofInt(0),       T::Bool).b == false);
+    CHECK(HE::uiHcValueToProp(HCV::ofInt(-3),      T::Bool).b == true);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(0.0),  T::Bool).b == false);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(1e-9), T::Bool).b == true);
+    CHECK(HE::uiHcValueToProp(HCV::ofBool(true),   T::Bool).b == true);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofString("x"),  T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofString("x"),  T::Bool).b == false);
+}
+
+TEST_CASE("uiHcValueToProp saturates a Float or Double that does not fit an Int, and maps NaN to 0")
+{
+    // A bare (int) cast of these is undefined behaviour.
+    using HCV = HorizonCode::Value;
+    using T   = HE::UIPropType;
+    constexpr int   kMax = std::numeric_limits<int>::max();
+    constexpr int   kMin = std::numeric_limits<int>::min();
+    constexpr float fNaN = std::numeric_limits<float>::quiet_NaN();
+    constexpr float fInf = std::numeric_limits<float>::infinity();
+    constexpr double dNaN = std::numeric_limits<double>::quiet_NaN();
+    constexpr double dInf = std::numeric_limits<double>::infinity();
+
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(fNaN),    T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(fInf),    T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-fInf),   T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(3.0e9f),  T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-3.0e9f), T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(2147483648.0f), T::Int).i == kMax);
+
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(dNaN),    T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(dInf),    T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-dInf),   T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(1.0e12),  T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-1.0e12), T::Int).i == kMin);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(2147483647.9),  T::Int).i == kMax);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-2147483648.0), T::Int).i == kMin);
+
+    // Values that fit still truncate toward zero.
+    CHECK(HE::uiHcValueToProp(HCV::ofFloat(-0.9f),   T::Int).i == 0);
+    CHECK(HE::uiHcValueToProp(HCV::ofDouble(-2147483647.5), T::Int).i == -2147483647);
 }
 
 TEST_CASE("uiHcValueToProp passes ARRAYS through uncoerced")
@@ -4297,6 +4392,45 @@ TEST_CASE("The caret is measured at the size the glyphs were drawn at")
     CHECK(at200 == big.caretAtPoint(60.0f, 0.0f, 1.0f));
 }
 
+TEST_CASE("Text field: a click lands on the first boundary whose midpoint it has not passed")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    const std::string content = "Hello w\xC3\xB6rld \xE6\x97\xA5 end";
+    for (bool password : { false, true })
+    {
+        CAPTURE(password);
+        HE::UITextInput ti;
+        ti.text = content; ti.fontSize = 18.0f; ti.password = password;
+        // What the walk measures: the dots for a password, the text otherwise.
+        auto widthOfPrefix = [&](size_t bytes)
+        {
+            std::string run = content.substr(0, bytes);
+            if (password)
+            {
+                std::string dots;
+                for (size_t i = 0; i < run.size(); i = HE::uiUtf8Next(run, i)) dots += "\xE2\x80\xA2";
+                run = dots;
+            }
+            return run.empty() ? 0.0f : HE::measureUIText(run, 18.0f, 0.0f, HE::UITextLayout{}).x;
+        };
+        for (float x = -2.0f; x < 200.0f; x += 0.5f)
+        {
+            size_t want = 0;
+            if (x > 0.0f)
+            {
+                want = content.size();
+                for (size_t i = 0; i < content.size(); )
+                {
+                    const size_t next = HE::uiUtf8Next(content, i);
+                    if (x < (widthOfPrefix(i) + widthOfPrefix(next)) * 0.5f) { want = i; break; }
+                    i = next;
+                }
+            }
+            CHECK(ti.caretAtPoint(x, 0.0f, 1.0f) == want);
+        }
+    }
+}
+
 TEST_CASE("The reader's text size reaches the picture AND the pointer")
 {
     // The end-to-end one: through the manager, which is the only place that
@@ -5050,6 +5184,43 @@ TEST_CASE("Text field: an input method's unfinished text is held apart from the 
     TextFieldFixture ro("locked", 0, /*editable=*/false);
     ro.wm.inputComposition("nihao", 5);
     CHECK_FALSE(ro.wm.hasComposition());
+}
+
+TEST_CASE("Text field: the caret sits where the IME put its own, in both layouts")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    const std::string preedit = "xyz\xC3\xA9";   // 5 bytes
+    for (bool multiline : { false, true })
+    {
+        CAPTURE(multiline);
+        HE::UITextInput ti;
+        ti.text = "abc"; ti.caret = ti.selAnchor = 3; ti.fontSize = 18.0f;
+        ti.multiline = multiline;
+        ti.composition = preedit;
+        const HE::UIWidgetRect px{ 0.0f, 0.0f, 300.0f, 60.0f };
+        HE::UIElementRenderState st; st.editing = true;
+        auto caretX = [&](int cursor)
+        {
+            ti.compositionCursor = cursor;
+            std::vector<UIRenderObject> out;
+            ti.render(px, st, {}, 1.0f, out);
+            REQUIRE_FALSE(out.empty());
+            return out.back().position.x;   // the caret is drawn last
+        };
+        const float atStart = caretX(0);
+        // A byte offset into the preedit: the caret moves by the width of what
+        // precedes it, nothing more.
+        for (int c : { 1, 3, 5 })
+        {
+            CAPTURE(c);
+            const float want = HE::measureUIText(preedit.substr(0, static_cast<size_t>(c)),
+                                                 18.0f, 0.0f, HE::UITextLayout{}).x;
+            CHECK(caretX(c) - atStart == doctest::Approx(want).epsilon(1e-4));
+        }
+        // -1 = unspecified: the end of the preedit. Past the end clamps to it.
+        CHECK(caretX(-1) == doctest::Approx(caretX(5)));
+        CHECK(caretX(99) == doctest::Approx(caretX(5)));
+    }
 }
 
 // ─── Undo and redo, per field ────────────────────────────────────────────────
@@ -6856,6 +7027,37 @@ TEST_CASE("Clips: what a timeline says at a moment, including the boring ends")
 
     CHECK(HE::uiAnimFind({ c }, "FadeIn") != nullptr);
     CHECK(HE::uiAnimFind({ c }, "fadein") == nullptr);   // names are exact
+}
+
+TEST_CASE("Clips: keys out of time order evaluate by time, not by list position")
+{
+    // A hand-edited file need not be sorted, and the editor indexes keys by list
+    // position, so evaluation has to cope instead of the loader sorting.
+    HE::UIAnimClip c;
+    c.name = "Unsorted"; c.duration = 1.0f;
+    HE::UIAnimTrack tr;
+    tr.element = 1; tr.prop = "Render Opacity";
+    tr.keys.push_back({ 0.0f, HE::UIPropValue::ofFloat(0.0f), HE::UIEase::Linear });   // A
+    tr.keys.push_back({ 0.3f, HE::UIPropValue::ofFloat(0.6f), HE::UIEase::Linear });   // B
+    tr.keys.push_back({ 0.1f, HE::UIPropValue::ofFloat(0.2f), HE::UIEase::Linear });   // C
+    c.tracks.push_back(std::move(tr));
+    std::vector<HE::UIAnimSample> s;
+    auto at = [&](float t) { s.clear(); HE::uiAnimEvaluate(c, t, s); REQUIRE(s.size() == 1);
+                             return s[0].value.f; };
+
+    // Time order is A(0) C(0.1) B(0.3).
+    CHECK(at(0.35f) == doctest::Approx(0.6f));    // after the last by time: B, not C
+    CHECK(at(0.2f)  == doctest::Approx(0.4f));    // halfway from C to B
+    CHECK(at(0.05f) == doctest::Approx(0.1f));    // halfway from A to C
+    CHECK(at(-1.0f) == doctest::Approx(0.0f));    // before the first by time
+
+    // Before the first when the earliest key is not at the front of the list.
+    c.tracks[0].keys.erase(c.tracks[0].keys.begin());
+    CHECK(at(0.0f) == doctest::Approx(0.2f));     // C (0.1), not B (0.3)
+
+    // Two keys at the earliest time: the earlier in the list holds, as front() did.
+    c.tracks[0].keys.push_back({ 0.1f, HE::UIPropValue::ofFloat(0.9f), HE::UIEase::Linear });
+    CHECK(at(0.0f) == doctest::Approx(0.2f));
 }
 
 TEST_CASE("Clips: they survive a save, and a widget without any saves as before")
@@ -9629,6 +9831,93 @@ TEST_CASE("UIImage 9-slice: the margins round-trip, an unsliced image writes non
     CHECK(back->textureW == 0);
 }
 
+namespace
+{
+    // A two-element document: a Panel, and an Image under it. The extra keys
+    // land on the Image; the colour is the Panel's.
+    std::string panelAndImageDoc(const std::string& panelColor, const std::string& imageExtra)
+    {
+        return std::string(R"J({"canvasWidth":1280.0,"canvasHeight":720.0,"nextId":3,"elements":[)J")
+            + R"J({"id":1,"parent":0,"type":"Panel","name":"P","pos":[0.0,0.0],"size":[40.0,30.0],)J"
+            + R"J("pivot":[0.0,0.0],"anchor":0,"layer":0,"visible":true,"color":)J" + panelColor + "},"
+            + R"J({"id":2,"parent":1,"type":"Image","name":"I","pos":[0.0,0.0],"size":[40.0,30.0],)J"
+            + R"J("pivot":[0.0,0.0],"anchor":0,"layer":0,"visible":true)J" + imageExtra + "}]}";
+    }
+}
+
+TEST_CASE("A colour that is not four numbers loads as the default instead of throwing")
+{
+    // The loader reports failure by its return value, so a type_error out of an
+    // element's readJson would be an exception in the caller's lap instead.
+    const HE::UIPanel defPanel;
+    const HE::UIImage defImage;
+
+    SUBCASE("a string among the colour channels")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc(R"(["a",0,0,1])", ""), t));
+        auto* p = dynamic_cast<HE::UIPanel*>(t.find(1));
+        REQUIRE(p != nullptr);
+        CHECK(p->color == defPanel.color);
+    }
+    SUBCASE("a boolean and a null among the colour channels")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,true,0,1]", R"(,"tint":[1,0,null,1])"), t));
+        CHECK(dynamic_cast<HE::UIPanel*>(t.find(1))->color == defPanel.color);
+        CHECK(dynamic_cast<HE::UIImage*>(t.find(2))->tint == defImage.tint);
+    }
+    SUBCASE("four numbers still load")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[0.25,0.5,0.75,1]", ""), t));
+        const glm::vec4 c = dynamic_cast<HE::UIPanel*>(t.find(1))->color;
+        CHECK(c.x == doctest::Approx(0.25f));
+        CHECK(c.z == doctest::Approx(0.75f));
+    }
+}
+
+TEST_CASE("A slice that is not four numbers loads as no slice instead of throwing")
+{
+    const HE::UIImage defImage;
+
+    SUBCASE("given as an object")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(
+            panelAndImageDoc("[1,1,1,1]", R"(,"slice":{"a":1,"b":2,"c":3,"d":4})"), t));
+        auto* img = dynamic_cast<HE::UIImage*>(t.find(2));
+        REQUIRE(img != nullptr);
+        CHECK(img->sliceLeft == doctest::Approx(defImage.sliceLeft));
+        CHECK(img->sliceBottom == doctest::Approx(defImage.sliceBottom));
+    }
+    SUBCASE("given as a string")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,1,1,1]", R"(,"slice":"4,5,6,7")"), t));
+        CHECK(dynamic_cast<HE::UIImage*>(t.find(2))->sliceTop == doctest::Approx(defImage.sliceTop));
+    }
+    SUBCASE("with a non-number entry")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,1,1,1]", R"(,"slice":[4,"x",6,7])"), t));
+        auto* img = dynamic_cast<HE::UIImage*>(t.find(2));
+        REQUIRE(img != nullptr);
+        // All four stay: a half-read slice would be a margin nobody authored.
+        CHECK(img->sliceLeft == doctest::Approx(defImage.sliceLeft));
+        CHECK(img->sliceRight == doctest::Approx(defImage.sliceRight));
+    }
+    SUBCASE("four numbers still load")
+    {
+        HE::UIWidgetTree t;
+        REQUIRE(HE::uiWidgetTreeFromJson(panelAndImageDoc("[1,1,1,1]", R"(,"slice":[4,5,6,7])"), t));
+        auto* img = dynamic_cast<HE::UIImage*>(t.find(2));
+        REQUIRE(img != nullptr);
+        CHECK(img->sliceLeft == doctest::Approx(4.0f));
+        CHECK(img->sliceBottom == doctest::Approx(7.0f));
+    }
+}
+
 // ═══ Clipping ════════════════════════════════════════════════════════════════
 // "Clip children" cuts a subtree off at the clipping element's own rect. It is
 // what a list longer than its box, a text wider than its field and eventually a
@@ -12142,6 +12431,49 @@ TEST_CASE("Base properties: the enumerable list and the if-chain agree")
     CHECK(HE::uiBaseProperties().size() == 53);
 }
 
+// allProperties() and uiBaseProperties() are cut from one table (CORE-603).
+// Before, allProperties kept its own copy: it did not offer the drag rows, so
+// WidgetManager's "is this a property?" test (rememberOriginal) said no to
+// them, and its Gradient Angle / Shape carried ranges the shared list lacked.
+TEST_CASE("Base properties: allProperties offers the shared rows exactly as uiBaseProperties describes them")
+{
+    HE::UIPanel e;   // has a surface, so the border/gradient/shadow rows are in
+    const std::vector<HE::UIPropDesc> all = e.allProperties();
+    auto find = [&](const std::string& n) -> const HE::UIPropDesc* {
+        for (const HE::UIPropDesc& d : all) if (d.name == n) return &d;
+        return nullptr;
+    };
+    int offered = 0;
+    for (const HE::UIPropDesc& base : HE::uiBaseProperties())
+    {
+        const HE::UIPropDesc* d = find(base.name);
+        if (!d) continue;   // an asset slot this type does not have
+        ++offered;
+        CAPTURE(base.name);
+        CHECK(d->type == base.type);
+        CHECK(d->minV == base.minV);
+        CHECK(d->maxV == base.maxV);
+    }
+    // A panel has the material and texture slots; it lacks only Font.
+    CHECK(offered == static_cast<int>(HE::uiBaseProperties().size()) - 1);
+    CHECK(find("Font") == nullptr);
+    CHECK(find("Accepts Drop") != nullptr);
+    CHECK(find("Draggable") != nullptr);
+    CHECK(find("Drag Payload") != nullptr);
+
+    // A Text label has no surface: none of the surface rows, the drag rows still.
+    HE::UIText t;
+    const std::vector<HE::UIPropDesc> textAll = t.allProperties();
+    auto textHas = [&](const char* n) {
+        return std::any_of(textAll.begin(), textAll.end(),
+                           [&](const HE::UIPropDesc& d) { return d.name == n; });
+    };
+    CHECK_FALSE(textHas("Corner Radius"));
+    CHECK_FALSE(textHas("Inner Shadow Blur"));
+    CHECK(textHas("Draggable"));
+    CHECK(textHas("Font"));
+}
+
 TEST_CASE("Parameters: a declaration writes the property it names")
 {
     HE::UIWidgetTree t = labelledRow();
@@ -12760,6 +13092,58 @@ TEST_CASE("Splitter: two panes, the divider between them, and the minimums bite"
     CHECK(rc.w == doctest::Approx(0.0f));
 }
 
+TEST_CASE("Splitter: the minimums bite on the length left after the SCALED divider")
+{
+    HE::UISplitter s;
+    s.dividerSize = 8.0f; s.ratio = 1.0f; s.minFirst = 0.0f; s.minSecond = 100.0f;
+    // Unscaled: 400 - 8 = 392 usable, the first pane runs to 292.
+    CHECK(s.clampedRatio(400.0f, 1.0f) * (400.0f - 8.0f) == doctest::Approx(292.0f));
+    // At scale 2 the divider is 16 wide, 384 usable, so the second pane keeps
+    // its 100 only if the first pane stops at 284. Measured against the
+    // unscaled divider it came out at 98.
+    const float first = s.clampedRatio(400.0f, 2.0f) * (400.0f - 16.0f);
+    CHECK(first == doctest::Approx(284.0f));
+    CHECK((400.0f - 16.0f) - first == doctest::Approx(100.0f));
+    // The minimum on the other side, the same way.
+    s.ratio = 0.0f; s.minFirst = 100.0f; s.minSecond = 0.0f;
+    CHECK(s.clampedRatio(400.0f, 2.0f) * (400.0f - 16.0f) == doctest::Approx(100.0f));
+}
+
+TEST_CASE("Splitter: inside a scaled widget the second pane keeps its minimum")
+{
+    // A page that embeds a 400-unit-wide widget in 800 host units: one unit of
+    // the embedded splitter is worth two host units, its divider included.
+    HE::UIWidgetTree page;
+    page.canvasWidth = 800.0f; page.canvasHeight = 200.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int refId = page.add(HE::UIWidgetType::WidgetRef);
+    auto* ref = dynamic_cast<HE::UIWidgetRef*>(page.find(refId));
+    REQUIRE(ref != nullptr);
+    HE::uiSetAnchorPreset(*ref, 0); ref->pivotX = ref->pivotY = 0.0f;
+    ref->posX = ref->posY = 0.0f; ref->sizeX = 800.0f; ref->sizeY = 200.0f;
+    ref->contentW = 400.0f; ref->contentH = 200.0f;
+    ref->contentMode = HE::UICanvasScaleMode::Stretch;
+
+    const int sp = page.add(HE::UIWidgetType::Splitter);
+    page.find(sp)->parentId = refId;
+    { HE::UIElement& e = *page.find(sp);
+      HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+      e.posX = e.posY = 0.0f; e.sizeX = 200.0f; e.sizeY = 100.0f; }
+    { auto* s = dynamic_cast<HE::UISplitter*>(page.find(sp));
+      s->dividerSize = 8.0f; s->ratio = 1.0f; s->minFirst = 0.0f; s->minSecond = 100.0f; }
+    const int a = page.add(HE::UIWidgetType::Panel); page.find(a)->parentId = sp;
+    const int b = page.add(HE::UIWidgetType::Panel); page.find(b)->parentId = sp;
+
+    const HE::UIWidgetCanvas canvas = HE::uiResolveCanvas(page, 800.0f, 200.0f, 1.0f);
+    const HE::UIWidgetRect whole = HE::uiElementRect(page, *page.find(sp), &canvas);
+    const HE::UIWidgetRect rb    = HE::uiElementRect(page, *page.find(b), &canvas);
+    REQUIRE(whole.w == doctest::Approx(400.0f));
+    CHECK(rb.w == doctest::Approx(100.0f));
+    // The divider is the 16 host units between the panes.
+    const HE::UIWidgetRect ra = HE::uiElementRect(page, *page.find(a), &canvas);
+    CHECK(ra.w + 16.0f + rb.w == doctest::Approx(400.0f));
+}
+
 TEST_CASE("Splitter: one inside another is the three-pane layout, and it nests")
 {
     HE::UIWidgetTree t;
@@ -12907,10 +13291,10 @@ TEST_CASE("Splitter: dragging the divider moves it, and only the divider does")
     // Dragging PAST a minimum stops at it, in the layout — the ratio itself may
     // run to the edge, but the panes never do.
     wm.processPointer(400.0f, 200.0f,
-                      live->clampedRatio(400.0f) * 390.0f + 4.0f, 100.0f, true, true);
+                      live->clampedRatio(400.0f, 1.0f) * 390.0f + 4.0f, 100.0f, true, true);
     wm.processPointer(400.0f, 200.0f, 399.0f, 100.0f, true, true);
     wm.processPointer(400.0f, 200.0f, 399.0f, 100.0f, false, true);
-    CHECK(live->clampedRatio(400.0f) * 390.0f == doctest::Approx(350.0f));   // 390 - 40
+    CHECK(live->clampedRatio(400.0f, 1.0f) * 390.0f == doctest::Approx(350.0f));   // 390 - 40
 
     // A press that is NOT on the divider must not start a drag: the panes have
     // to stay clickable, and grabbing the whole container would end that.
@@ -16948,6 +17332,54 @@ TEST_CASE("CheckBox: AutoSize fits the row to control, gap and label")
     CHECK(shortOne->sizeY >= doctest::Approx(m.box));
 }
 
+TEST_CASE("CheckBox, switch and radio button: the AutoSize row is control + gap + label + slack")
+{
+    REQUIRE(HE::sharedUIFont().ok);
+    // The formula is written out here and not read from the code under test:
+    // checkbox and radio share one implementation, and this is what pins it.
+    auto expected = [](const HE::UICheckBox::BoxMetrics& m, const std::string& label,
+                       float fontPx)
+    {
+        glm::vec2 lm(0.0f);
+        if (!label.empty()) lm = HE::measureUIText(label, fontPx, 0.0f, HE::UITextLayout{});
+        return glm::vec2(m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fontPx * 0.25f),
+                         std::max(m.box, lm.y + fontPx * 0.35f));
+    };
+    for (const char* label : { "", "Show the grid", "On" })
+        for (float scale : { 1.0f, 1.5f })
+        {
+            CAPTURE(label); CAPTURE(scale);
+            const float fs = 18.0f * scale;
+            HE::UICheckBox box;
+            box.label = label; box.fontSize = 18.0f; box.autoSize = true;
+            box.applyAutoSize(0.0f, scale);
+            const glm::vec2 wantBox = expected(HE::UICheckBox::metricsFor(fs, 0.0f, false), label, fs);
+            CHECK(box.sizeX == doctest::Approx(wantBox.x));
+            CHECK(box.sizeY == doctest::Approx(wantBox.y));
+
+            HE::UICheckBox sw;
+            sw.label = label; sw.fontSize = 18.0f; sw.autoSize = true; sw.switchStyle = true;
+            sw.applyAutoSize(0.0f, scale);
+            const glm::vec2 wantSw = expected(HE::UICheckBox::metricsFor(fs, 0.0f, true), label, fs);
+            CHECK(sw.sizeX == doctest::Approx(wantSw.x));
+            CHECK(sw.sizeY == doctest::Approx(wantSw.y));
+
+            HE::UIRadioButton radio;
+            radio.label = label; radio.fontSize = 18.0f; radio.autoSize = true;
+            radio.applyAutoSize(0.0f, scale);
+            CHECK(radio.sizeX == doctest::Approx(wantBox.x));
+            CHECK(radio.sizeY == doctest::Approx(wantBox.y));
+        }
+
+    // An axis a stretching anchor owns is left alone.
+    HE::UIRadioButton stretched;
+    stretched.label = "Wide"; stretched.autoSize = true;
+    HE::uiSetAnchorPreset(stretched, 11);          // bottom row, stretched width
+    const float keepX = stretched.sizeX;
+    stretched.applyAutoSize(0.0f, 1.0f);
+    CHECK(stretched.sizeX == doctest::Approx(keepX));
+}
+
 TEST_CASE("CheckBox: a switch measures wider than a tick box for the same label")
 {
     HE::UIWidgetTree t;
@@ -18033,4 +18465,570 @@ TEST_CASE("NamedSlot: a component with no slot keeps the default content and the
         if (ep && ep->type() == HE::UIWidgetType::Text && ep->getProp("Text").s == "empty")
             fallbackShown = HE::uiElementEffectiveVisible(*wm.tree(id), *ep);
     CHECK(fallbackShown);
+}
+
+TEST_CASE("WrapBox: a repeated id takes the first entry's place and the asking child's alignment")
+{
+    // A hand-edited file can repeat an id. The slot comes from the first placed
+    // entry with that id, but the vertical alignment is the ASKING child's.
+    WrapCase c = makeWrap(320.0f, 400.0f, 4, 100.0f, 40.0f);
+    c.t.find(c.kids[1])->sizeY = 90.0f;             // line 0 is 90 tall
+    HE::UIElement& first = *c.t.find(c.kids[0]);
+    HE::UIElement& dup   = *c.t.find(c.kids[3]);    // line 1, a different place
+    dup.id = first.id;
+    first.slotVAlign = HE::UISlotVAlign::Fill;
+    dup.slotVAlign   = HE::UISlotVAlign::Bottom;
+
+    const HE::UIWidgetRect r = HE::uiElementRect(c.t, dup);
+    CHECK(r.x == doctest::Approx(0.0f));            // the first entry's column
+    CHECK(r.y == doctest::Approx(50.0f));           // 90-tall line, 40 high, bottom
+    CHECK(r.h == doctest::Approx(40.0f));
+}
+
+TEST_CASE("AutoSize: tab and section label caches follow the children frame by frame")
+{
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int tabs = t.add(HE::UIWidgetType::TabBox);
+    const int acc  = t.add(HE::UIWidgetType::Accordion);
+    std::vector<int> pages, sections;
+    for (int i = 0; i < 3; ++i)
+    {
+        pages.push_back(t.add(HE::UIWidgetType::Panel));
+        t.find(pages.back())->parentId = tabs;
+        sections.push_back(t.add(HE::UIWidgetType::Panel));
+        t.find(sections.back())->parentId = acc;
+    }
+    t.find(pages[0])->name = "A page whose name is far longer than any small-string buffer";
+    t.find(pages[1])->name = "";
+    t.find(pages[2])->name = "Third";
+    t.find(sections[0])->name = "";
+    t.find(sections[1])->name = "A section whose name is far longer than any small-string buffer";
+    t.find(sections[2])->name = "Third";
+    const auto* tb = dynamic_cast<const HE::UITabBox*>(t.find(tabs));
+    const auto* ac = dynamic_cast<const HE::UIAccordion*>(t.find(acc));
+    REQUIRE(tb);
+    REQUIRE(ac);
+
+    // Twice: a frame that changes nothing leaves the same answer.
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        HE::uiApplyAutoSize(t, nullptr);
+        HE::uiUpdateScrollExtents(t);
+        REQUIRE(tb->tabLabels.size() == 3);
+        CHECK(tb->tabLabels[0] == t.find(pages[0])->name);
+        CHECK(tb->tabLabels[1] == "Page");
+        CHECK(tb->tabLabels[2] == "Third");
+        REQUIRE(ac->sectionLabels.size() == 3);
+        CHECK(ac->sectionLabels[0] == "Section");
+        CHECK(ac->sectionLabels[1] == t.find(sections[1])->name);
+        CHECK(ac->sectionLabels[2] == "Third");
+        CHECK(ac->sectionBodies.size() == 3);
+    }
+
+    // A rename and a shorter child list both show on the next frame.
+    t.find(pages[2])->name = "";
+    t.find(sections[1])->name = "Short";
+    t.removeSubtree(pages[0]);
+    t.removeSubtree(sections[0]);
+    HE::uiApplyAutoSize(t, nullptr);
+    HE::uiUpdateScrollExtents(t);
+    REQUIRE(tb->tabLabels.size() == 2);
+    CHECK(tb->tabLabels[0] == "Page");
+    CHECK(tb->tabLabels[1] == "Page");
+    REQUIRE(ac->sectionLabels.size() == 2);
+    CHECK(ac->sectionLabels[0] == "Short");
+    CHECK(ac->sectionLabels[1] == "Third");
+    CHECK(ac->sectionBodies.size() == 2);
+
+    // A longer list grows them again.
+    const int extra = t.add(HE::UIWidgetType::Panel);
+    t.find(extra)->parentId = tabs;
+    t.find(extra)->name = "Extra";
+    HE::uiApplyAutoSize(t, nullptr);
+    REQUIRE(tb->tabLabels.size() == 3);
+    CHECK(tb->tabLabels[2] == "Extra");
+}
+
+TEST_CASE("Tree: a parent chain that is a cycle ends the rect and visibility walks")
+{
+    // A hand-edited file can name an element as its own parent, or two as each
+    // other's. Nothing may recurse until the stack is gone.
+    HE::UIWidgetTree t;
+    t.canvasWidth = 800.0f; t.canvasHeight = 600.0f;
+    const int self = t.add(HE::UIWidgetType::Panel);
+    const int a    = t.add(HE::UIWidgetType::Panel);
+    const int b    = t.add(HE::UIWidgetType::Panel);
+    const int boxA = t.add(HE::UIWidgetType::VerticalBox);
+    const int boxB = t.add(HE::UIWidgetType::VerticalBox);
+    t.find(self)->parentId = self;
+    t.find(a)->parentId    = b;
+    t.find(b)->parentId    = a;
+    t.find(boxA)->parentId = boxB;
+    t.find(boxB)->parentId = boxA;
+
+    for (const int id : { self, a, b, boxA, boxB })
+    {
+        const HE::UIElement& e = *t.find(id);
+        const HE::UIWidgetRect r = HE::uiElementRect(t, e);
+        CHECK(std::isfinite(r.x));
+        CHECK(std::isfinite(r.w));
+        CHECK(HE::uiElementEffectiveVisible(t, e));       // visible, ends the walk
+    }
+
+    // A chain that is not a cycle is unaffected.
+    const int child = t.add(HE::UIWidgetType::Panel);
+    const int root  = t.add(HE::UIWidgetType::Panel);
+    t.find(child)->parentId = root;
+    t.find(root)->sizeX = 300.0f; t.find(root)->sizeY = 200.0f;
+    t.find(child)->visible = true;
+    t.find(root)->visible = false;
+    CHECK_FALSE(HE::uiElementEffectiveVisible(t, *t.find(child)));
+}
+
+TEST_CASE("Serialise: a corner radius is written only when it differs from the type's own")
+{
+    // Button starts at 6, Panel at 0: the same number means a key on one and
+    // nothing on the other. Twice, so the second pass is the cached default.
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        auto button = HE::makeUIElement(HE::UIWidgetType::Button);
+        auto panel  = HE::makeUIElement(HE::UIWidgetType::Panel);
+        auto json = [](const HE::UIElement& e) { return nlohmann::json::parse(HE::uiElementToJson(e)); };
+
+        CHECK_FALSE(json(*button).contains("cornerRadius"));
+        CHECK_FALSE(json(*button).contains("cornerRadii"));
+        CHECK_FALSE(json(*panel).contains("cornerRadius"));
+
+        button->cornerRadius = glm::vec4(0.0f);
+        REQUIRE(json(*button).contains("cornerRadius"));
+        CHECK(json(*button)["cornerRadius"].get<float>() == 0.0f);
+
+        panel->cornerRadius = glm::vec4(6.0f);
+        REQUIRE(json(*panel).contains("cornerRadius"));
+        CHECK(json(*panel)["cornerRadius"].get<float>() == 6.0f);
+
+        panel->cornerRadius = glm::vec4(1.0f, 2.0f, 3.0f, 4.0f);
+        CHECK_FALSE(json(*panel).contains("cornerRadius"));
+        REQUIRE(json(*panel).contains("cornerRadii"));
+        CHECK(json(*panel)["cornerRadii"].size() == 4);
+    }
+}
+
+TEST_CASE("uiWidgetTreeFromJson: a mistyped field or a non-object element refuses without throwing")
+{
+    HE::UIWidgetTree keep;
+    keep.canvasWidth = 123.0f;
+    const int kept = keep.add(HE::UIWidgetType::Panel);
+
+    // A string where a number belongs: refused whole, `out` untouched.
+    {
+        HE::UIWidgetTree out = HE::UIWidgetTree();
+        out.canvasWidth = 123.0f;
+        out.add(HE::UIWidgetType::Panel);
+        bool ok = true;
+        CHECK_NOTHROW(ok = HE::uiWidgetTreeFromJson(R"({"canvasWidth":"wide","elements":[]})", out));
+        CHECK_FALSE(ok);
+        CHECK(out.canvasWidth == doctest::Approx(123.0f));
+        CHECK(out.elements.size() == 1);
+        CHECK(out.elements[0]->id == kept);
+    }
+    // An element entry that is not an object is skipped; the others load.
+    {
+        HE::UIWidgetTree out;
+        bool ok = false;
+        CHECK_NOTHROW(ok = HE::uiWidgetTreeFromJson(
+            R"({"elements":[7,"x",null,[1],{"id":4,"type":"Panel"}]})", out));
+        CHECK(ok);
+        REQUIRE(out.elements.size() == 1);
+        CHECK(out.elements[0]->id == 4);
+    }
+    // A mistyped field inside an element refuses the document too.
+    {
+        HE::UIWidgetTree out;
+        bool ok = true;
+        CHECK_NOTHROW(ok = HE::uiWidgetTreeFromJson(
+            R"({"elements":[{"id":"four","type":"Panel"}]})", out));
+        CHECK_FALSE(ok);
+        CHECK(out.elements.empty());
+    }
+}
+
+TEST_CASE("uiElementFromJson: input that is not an element document gives null without throwing")
+{
+    for (const char* text : { "[1,2]", "7", "\"x\"", "null", "{", "",
+                              R"({"id":"x"})", R"({"type":"Panel","size":["a","b"]})",
+                              R"({"type":"Panel","pos":["a","b"]})" })
+    {
+        std::unique_ptr<HE::UIElement> e;
+        CHECK_NOTHROW(e = HE::uiElementFromJson(text));
+        CHECK_FALSE(e);
+    }
+    CHECK(HE::uiElementFromJson(R"({"id":9,"type":"Panel"})"));
+}
+
+TEST_CASE("Text catalog: loading keeps first-write order and lets a repeated key overwrite in place")
+{
+    HE::UITextCatalog c;
+    REQUIRE(HE::uiTextCatalogFromJson(R"({"fallback":"de","languages":[
+        {"language":"en","entries":[{"key":"a","text":"A1"},{"key":"b","text":"B1"},{"key":"a","text":"A2"}]},
+        {"language":"fr","entries":[]},
+        {"language":"","entries":[{"key":"z","text":"Z"}]},
+        {"language":"de","entries":[{"key":"x","text":"X"}]},
+        {"language":"en","entries":[{"key":"c","text":"C"},{"key":"b","text":"B2"},{"key":"","text":"skip"},7]}
+    ]})", c));
+    CHECK(c.fallback == "de");
+    CHECK(c.languageNames() == std::vector<std::string>{ "en", "de" });
+    REQUIRE(c.languages.size() == 2);
+    const auto& en = c.languages[0].second;
+    REQUIRE(en.size() == 3);
+    CHECK(en[0] == std::pair<std::string, std::string>{ "a", "A2" });
+    CHECK(en[1] == std::pair<std::string, std::string>{ "b", "B2" });
+    CHECK(en[2] == std::pair<std::string, std::string>{ "c", "C" });
+    REQUIRE(c.languages[1].second.size() == 1);
+    CHECK(*c.find("de", "x") == "X");
+}
+
+TEST_CASE("Stacking: the widget with the higher zOrder takes the click above 2148")
+{
+    // zOrder * 1000000 no longer fits a 32-bit long past 2147: the key a
+    // Windows build compared wrapped negative and the lower widget won.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int lowLabel = 0, highLabel = 0;
+    buildClickPage(cm, "mem://low.hasset", lowLabel);
+    buildClickPage(cm, "mem://high.hasset", highLabel);
+
+    WidgetManager wm;
+    const int low  = createShown(wm, cm, "mem://low.hasset");
+    const int high = createShown(wm, cm, "mem://high.hasset");
+    REQUIRE(low != 0);
+    REQUIRE(high != 0);
+    wm.setZOrder(low, 3000);
+    wm.setZOrder(high, 3001);
+
+    clickAt(wm, 200.0f, 200.0f);
+    CHECK(wm.tree(high)->find(highLabel)->getProp("Text").s == "HIT");
+    CHECK(wm.tree(low)->find(lowLabel)->getProp("Text").s.empty());
+}
+
+TEST_CASE("Hiding a dialog closes its own layers and not another window's popup")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int dlgLabel = 0, popLabel = 0;
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+    buildClickPage(cm, "mem://popup.hasset", popLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int dlg = wm.createWidget(cm, "mem://dialog.hasset");
+    const int pop = wm.createWidget(cm, "mem://popup.hasset");
+    REQUIRE(dlg != 0);
+    REQUIRE(pop != 0);
+    wm.setWidgetWindow(pop, 1);
+
+    wm.showModal(dlg);
+    wm.openPopupAt(pop, 10.0f, 10.0f);
+    REQUIRE(wm.isVisible(pop));
+
+    wm.hideWidget(dlg);
+    CHECK_FALSE(wm.isVisible(dlg));
+    // The popup lives in another window; the dialog never owned it.
+    CHECK(wm.isVisible(pop));
+    CHECK_FALSE(wm.hasModal());
+}
+
+TEST_CASE("Hiding a dialog closes a popup opened above it in the same window")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int dlgLabel = 0, popLabel = 0;
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+    buildClickPage(cm, "mem://popup.hasset", popLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int dlg = wm.createWidget(cm, "mem://dialog.hasset");
+    const int pop = wm.createWidget(cm, "mem://popup.hasset");
+    REQUIRE(dlg != 0);
+    REQUIRE(pop != 0);
+
+    wm.showModal(dlg);
+    wm.openPopupAt(pop, 10.0f, 10.0f);
+    REQUIRE(wm.isVisible(pop));
+
+    wm.hideWidget(dlg);
+    CHECK_FALSE(wm.isVisible(dlg));
+    CHECK_FALSE(wm.isVisible(pop));
+    CHECK_FALSE(wm.hasModal());
+}
+
+TEST_CASE("Hiding a dialog releases every grab it holds, however many are stacked")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    int dlgLabel = 0;
+    buildClickPage(cm, "mem://dialog.hasset", dlgLabel, 0.0f, 0.0f, 80.0f, 80.0f);
+
+    WidgetManager wm;
+    const int dlg = wm.createWidget(cm, "mem://dialog.hasset");
+    REQUIRE(dlg != 0);
+    for (int i = 0; i < 70; ++i) wm.showModal(dlg);
+    REQUIRE(wm.hasModal());
+
+    wm.hideWidget(dlg);
+    CHECK_FALSE(wm.hasModal());
+}
+
+TEST_CASE("Text field: an OnTextChanged that destroys the widget leaves nothing to write through")
+{
+    // Typing over a selection leaves the undo run open AFTER the change was
+    // announced; the announcement runs graph code, and this one destroys the
+    // widget the field lives in. Under a guard-malloc or ASan run the old order
+    // wrote through the freed field.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 200.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int fieldId = t.add(HE::UIWidgetType::TextInput);
+    {
+        auto* e = dynamic_cast<HE::UITextInput*>(t.find(fieldId));
+        e->text = "hello";
+        HE::uiSetAnchorPreset(*e, 0); e->pivotX = e->pivotY = 0.0f;
+        e->posX = 0.0f; e->posY = 0.0f; e->sizeX = 400.0f; e->sizeY = 40.0f;
+    }
+    HorizonCode::Graph g;
+    {
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnTextChanged"; ev.elem = fieldId;
+        const int evId = g.addNode(ev);
+        HorizonCode::Node self; self.type = NodeType::GetSelf;
+        const int selfId = g.addNode(self);
+        HorizonCode::Node kill; kill.type = NodeType::DestroyWidget;
+        const int killId = g.addNode(kill);
+        REQUIRE(g.connect(evId, 0, killId, 0));
+        REQUIRE(g.connect(selfId, 0, killId, 2));
+    }
+    registerWidget(cm, t, &g);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    {
+        HorizonCode::Runtime::Services svc;
+        svc.destroyWidget = [&wm](int w) { wm.destroyWidget(w); };
+        rt.setServices(std::move(svc));
+    }
+    const int widget = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(widget != 0);
+    REQUIRE(wm.processPointer(400.0f, 200.0f, 395.0f, 20.0f, true, true));
+    wm.processPointer(400.0f, 200.0f, 395.0f, 20.0f, false, true);
+    REQUIRE(wm.hasFocusedTextField());
+    REQUIRE(wm.editFocusedText(WidgetManager::TextEdit::SelectAll, false));
+
+    wm.inputText("X");
+    CHECK_FALSE(wm.isAlive(widget));
+}
+
+// ── Handlers that run while the manager is walking its widgets ───────────────
+// An event handler is graph code and may create or destroy widgets, which moves
+// m_instances. Each case below has a handler that creates a widget (so the
+// vector reallocates under a held reference) on the first of TWO events fired by
+// one pass, so the second event reads whatever the walk still holds. A plain
+// run passes either way; the failing form is a crash under guard malloc
+// (DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib) or ASan.
+namespace
+{
+    struct HandlerRig
+    {
+        TempWidgetDir dir;
+        ContentManager cm{ dir.path.string() };
+        HorizonCode::Runtime rt;
+        WidgetManager wm;
+        int panel = 0, widget = 0;
+        int created = 0;
+
+        // `event` names the handler that creates a filler widget; `arg` is the
+        // event's payload type. Called with the tree already holding its
+        // elements and clips.
+        void build(HE::UIWidgetTree& t, const char* event, PinType arg, int onElem = 0)
+        {
+            HE::UIWidgetTree filler;
+            filler.canvasWidth = 100.0f; filler.canvasHeight = 100.0f;
+            registerWidget(cm, filler, nullptr, "mem://filler.hasset");
+
+            HorizonCode::Graph g;
+            HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = event; ev.elem = onElem;
+            ev.hasArg = true; ev.propType = arg;
+            const int evId = g.addNode(ev);
+            HorizonCode::Node cw; cw.type = NodeType::CreateWidget; cw.s = "mem://filler.hasset";
+            const int cwId = g.addNode(cw);
+            REQUIRE(g.connect(evId, 0, cwId, 0));
+            registerWidget(cm, t, &g);
+
+            wm.setRuntime(&rt);
+            HorizonCode::Runtime::Services svc;
+            svc.createWidget = [this](const std::string& p, const HorizonCode::SpawnValues&)
+            {
+                ++created;
+                return wm.createWidget(cm, p);
+            };
+            rt.setServices(std::move(svc));
+            widget = createShown(wm, cm, "mem://w.hasset");
+            REQUIRE(widget != 0);
+        }
+    };
+
+    HE::UIWidgetTree handlerRigTree(int& panel)
+    {
+        HE::UIWidgetTree t;
+        t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+        t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+        panel = t.add(HE::UIWidgetType::Panel);
+        HE::UIElement& e = *t.find(panel);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 100.0f; e.sizeY = 100.0f;
+        return t;
+    }
+}
+
+TEST_CASE("Tick: two clips ending in one frame both announce, though the first handler creates a widget")
+{
+    HandlerRig rig;
+    HE::UIWidgetTree t = handlerRigTree(rig.panel);
+    t.animations.push_back(fadeClip(rig.panel, "A"));
+    t.animations.push_back(fadeClip(rig.panel, "B"));
+    rig.build(t, "OnClipFinished", PinType::String);
+
+    REQUIRE(rig.wm.playAnimation(rig.widget, "A"));
+    REQUIRE(rig.wm.playAnimation(rig.widget, "B"));
+    rig.wm.tick(2.0f);
+    CHECK(rig.created == 2);
+    CHECK(rig.wm.count() == 3);
+}
+
+TEST_CASE("Tick: two tweens ending in one frame both announce, though the first handler creates a widget")
+{
+    HandlerRig rig;
+    HE::UIWidgetTree t = handlerRigTree(rig.panel);
+    rig.build(t, "OnAnimationFinished", PinType::String, rig.panel);
+
+    REQUIRE(rig.wm.animate(rig.widget, rig.panel, "Render Opacity", HE::UIPropValue::ofFloat(1.0f), 1.0f));
+    REQUIRE(rig.wm.animate(rig.widget, rig.panel, "Corner Radius", HE::UIPropValue::ofFloat(8.0f), 1.0f));
+    rig.wm.tick(2.0f);
+    CHECK(rig.created == 2);
+    CHECK(rig.wm.count() == 3);
+}
+
+TEST_CASE("Tick: a Tick handler that creates a widget does not derail the walk")
+{
+    HandlerRig rig;
+    HE::UIWidgetTree t = handlerRigTree(rig.panel);
+    rig.build(t, "Tick", PinType::Float);
+
+    rig.wm.tick(0.016f);
+    CHECK(rig.created == 1);
+    CHECK(rig.wm.count() == 2);
+}
+
+TEST_CASE("Add Child themes the row it grafts and leaves the rest of the page alone")
+{
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+
+    HE::UIWidgetTree row;
+    row.canvasWidth = 400.0f; row.canvasHeight = 40.0f;
+    const int rowPanel = row.add(HE::UIWidgetType::Panel);
+    row.find(rowPanel)->setThemeRole("Color", "Surface");
+    registerWidget(cm, row, nullptr, "mem://row.hasset");
+
+    HE::UIWidgetTree page;
+    page.canvasWidth = 400.0f; page.canvasHeight = 600.0f;
+    page.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int chrome = page.add(HE::UIWidgetType::Panel);
+    page.find(chrome)->setThemeRole("Color", "Surface");
+    const int box = page.add(HE::UIWidgetType::VerticalBox);
+    page.find(box)->name = "List";
+    registerWidget(cm, page, nullptr, "mem://page.hasset");
+
+    WidgetManager wm;
+    const int id = createShown(wm, cm, "mem://page.hasset");
+    REQUIRE(id != 0);
+    const glm::vec4 surface = wm.tree(id)->find(chrome)->getProp("Color").col;
+
+    // A script (or an animation) repaints a themed element of the page. Adding
+    // a row is no reason to put the theme's colour back on it.
+    const glm::vec4 red{ 1.0f, 0.0f, 0.0f, 1.0f };
+    REQUIRE(red != surface);
+    const_cast<HE::UIWidgetTree*>(wm.tree(id))->find(chrome)->setProp("Color", HE::UIPropValue::ofColor(red));
+
+    const HorizonCode::InstanceId child = wm.addChild(cm, id, "List", "mem://row.hasset");
+    REQUIRE(child != 0);
+    CHECK(wm.tree(id)->find(chrome)->getProp("Color").col == red);
+
+    // …while the row that came in wears the theme like one that was always there.
+    int themedRows = 0;
+    for (const auto& ep : wm.tree(id)->elements)
+        if (ep && ep->id != chrome && ep->type() == HE::UIWidgetType::Panel &&
+            ep->getProp("Color").col == surface)
+            ++themedRows;
+    CHECK(themedRows == 1);
+}
+
+TEST_CASE("Click: an OnClicked that creates a widget leaves the clicked one released")
+{
+    // OnClicked is graph code, and "open a dialog" is the commonest thing it
+    // does. Creating a widget reallocates m_instances while the pointer walk
+    // still holds the clicked widget; the release that follows the handler used
+    // to write through that reference. Crashes under guard malloc
+    // (DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib) or ASan before the fix.
+    TempWidgetDir dir;
+    ContentManager cm(dir.path.string());
+    HE::UIWidgetTree filler;
+    filler.canvasWidth = 100.0f; filler.canvasHeight = 100.0f;
+    registerWidget(cm, filler, nullptr, "mem://filler.hasset");
+
+    HE::UIWidgetTree t;
+    t.canvasWidth = 400.0f; t.canvasHeight = 400.0f;
+    t.scaleMode = HE::UICanvasScaleMode::ConstantPixel;
+    const int btn = t.add(HE::UIWidgetType::Button);
+    {
+        HE::UIElement& e = *t.find(btn);
+        HE::uiSetAnchorPreset(e, 0); e.pivotX = e.pivotY = 0.0f;
+        e.posX = 0.0f; e.posY = 0.0f; e.sizeX = 400.0f; e.sizeY = 400.0f;
+    }
+    HorizonCode::Graph g;
+    {
+        HorizonCode::Node ev; ev.type = NodeType::Event; ev.s = "OnClicked"; ev.elem = btn;
+        const int evId = g.addNode(ev);
+        HorizonCode::Node cw; cw.type = NodeType::CreateWidget; cw.s = "mem://filler.hasset";
+        const int cwId = g.addNode(cw);
+        REQUIRE(g.connect(evId, 0, cwId, 0));
+    }
+    registerWidget(cm, t, &g);
+
+    HorizonCode::Runtime rt;
+    WidgetManager wm;
+    wm.setRuntime(&rt);
+    int created = 0;
+    {
+        HorizonCode::Runtime::Services svc;
+        svc.createWidget = [&](const std::string& p, const HorizonCode::SpawnValues&)
+        {
+            ++created;
+            return wm.createWidget(cm, p);
+        };
+        rt.setServices(std::move(svc));
+    }
+    const int page = createShown(wm, cm, "mem://w.hasset");
+    REQUIRE(page != 0);
+
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, true, true);
+    REQUIRE(wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, false, true));
+    CHECK(created == 1);
+    CHECK(wm.count() == 2);
+
+    // …and the manager is still sound afterwards: a second click lands too.
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, true, true);
+    wm.processPointer(400.0f, 400.0f, 200.0f, 200.0f, false, true);
+    CHECK(created == 2);
 }

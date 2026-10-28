@@ -3,6 +3,7 @@
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
 #include <ContentManager/HAsset.h>
+#include <ContentManager/TextureArrayBuild.h> // slice math for cooked texture arrays
 #include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
 #include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
@@ -151,6 +152,64 @@ static std::vector<uint8_t> encodeBc3(const uint8_t* rgba, uint32_t w, uint32_t 
         }
     return out;
 }
+
+// BC1 (DXT1, 8 B / 4x4 block): opaque RGB, the alpha channel is ignored. Half the size
+// of BC3 for albedo that carries no alpha. Same `quality` mapping as encodeBc3.
+static std::vector<uint8_t> encodeBc1(const uint8_t* rgba, uint32_t w, uint32_t h,
+                                      uint8_t quality)
+{
+    if (!rgba || w == 0 || h == 0) return {};
+    const int mode = quality >= 1 ? STB_DXT_HIGHQUAL : STB_DXT_NORMAL;
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 8);
+    uint8_t block[64];
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx)
+        {
+            gatherRGBA8Block(rgba, w, h, bx, by, block);
+            stb_compress_dxt_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 8,
+                                   block, /*alpha=*/0, mode);
+        }
+    return out;
+}
+
+// BC4 (8 B / 4x4 block): ONE channel, the R of the RGBA8 mip (G, B, A are dropped).
+// For single-channel data: roughness, height, AO, a mask. stb's BC4 has no quality
+// knob, so the pack quality setting doesn't change its output.
+static std::vector<uint8_t> encodeBc4(const uint8_t* rgba, uint32_t w, uint32_t h)
+{
+    if (!rgba || w == 0 || h == 0) return {};
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 8);
+    uint8_t block[64], r[16];
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx)
+        {
+            gatherRGBA8Block(rgba, w, h, bx, by, block);
+            for (int t = 0; t < 16; ++t) r[t] = block[t * 4];
+            stb_compress_bc4_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 8, r);
+        }
+    return out;
+}
+
+// BC5 (16 B / 4x4 block): TWO channels, R and G of the RGBA8 mip, each its own BC4
+// block. Tangent-space normals as XY. Z is not stored: a shader that reads .xyz gets
+// z = 0 and has to rebuild it (sqrt(1 - x*x - y*y)).
+static std::vector<uint8_t> encodeBc5(const uint8_t* rgba, uint32_t w, uint32_t h)
+{
+    if (!rgba || w == 0 || h == 0) return {};
+    const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    std::vector<uint8_t> out(static_cast<size_t>(bw) * bh * 16);
+    uint8_t block[64], rg[32];
+    for (uint32_t by = 0; by < bh; ++by)
+        for (uint32_t bx = 0; bx < bw; ++bx)
+        {
+            gatherRGBA8Block(rgba, w, h, bx, by, block);
+            for (int t = 0; t < 16; ++t) { rg[t * 2] = block[t * 4]; rg[t * 2 + 1] = block[t * 4 + 1]; }
+            stb_compress_bc5_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 16, rg);
+        }
+    return out;
+}
 #endif
 
 // Extract the asset UUID + embedded path + type from a raw .hasset blob.
@@ -293,7 +352,10 @@ static std::vector<uint8_t> rewriteRefsForPack(
     const Hpak::PackSettings& settings,
     // Raw source blobs by addressed/META path — lets the approx re-fold walk a
     // material INSTANCE's parent chain to the nearest graph. Null = no lookup.
-    const std::unordered_map<std::string, const std::vector<uint8_t>*>* blobByPath = nullptr)
+    const std::unordered_map<std::string, const std::vector<uint8_t>*>* blobByPath = nullptr,
+    // Out: everything this call looked up OUTSIDE `blob` — the incremental cache
+    // records it so an unchanged asset can be skipped only while all of it still holds.
+    Hpak::PackDeps* deps = nullptr)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
@@ -307,7 +369,9 @@ static std::vector<uint8_t> rewriteRefsForPack(
 
     auto resolve = [&](const std::string& p) -> HE::UUID {
         auto it = pathToUuid.find(p);
-        return it != pathToUuid.end() ? it->second : HE::UUID{};
+        const HE::UUID id = it != pathToUuid.end() ? it->second : HE::UUID{};
+        if (deps && !p.empty()) deps->refs.emplace_back(p, id);
+        return id;
     };
 
     HAsset::Writer w;
@@ -451,7 +515,11 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 for (int depth = 0; depth < 8 && !walk.empty(); ++depth)
                 {
                     const auto itp = blobByPath->find(walk);
-                    if (itp == blobByPath->end() || !itp->second) break;
+                    const bool have = itp != blobByPath->end() && itp->second;
+                    if (deps)
+                        deps->parents.emplace_back(walk, have
+                            ? Hpak::hash64(itp->second->data(), itp->second->size()) : 0ull);
+                    if (!have) break;
                     std::string pj, pnext;
                     if (!mtrlGraphAndParent(*itp->second, pj, pnext)) break;
                     if (!pj.empty()) { foldGraphJson = pj; break; }
@@ -689,10 +757,17 @@ static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t 
 // levels directly (Metal gains mips it never had; GL drops glGenerateMipmap).
 // Level 0 stays the leading bytes, so backends that don't read mips are unaffected.
 // `targetFormat` is a HE::TextureFormat value: 0 keeps RGBA8, 1 ASTC_4x4, 2 BC7,
-// 3 BC3 — each mip is block-compressed to it (all encoding done here at pack time),
-// degrading to RGBA8 whenever that encoder isn't built or a level fails to encode.
+// 3 BC3, 4 BC1, 5 BC4, 6 BC5 — each mip is block-compressed to it (all encoding done
+// here at pack time), degrading to RGBA8 whenever that encoder isn't built or a level
+// fails to encode. BC4 keeps only R and BC5 only R and G of the source.
+//
+// A texture ARRAY (layers > 1) is only cooked when PackSettings::cookTextureArrays asks
+// for it. It arrives with its mip chains already baked per slice
+// (HE::buildTextureArray), so its levels are not rebuilt: every slice and level is
+// encoded as it stands, `layers` and `mipLevels` are kept, and the payload is the
+// slice-major concatenation HE::textureArraySliceBytes describes for `format`.
 static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
-                                        uint8_t quality)
+                                        uint8_t quality, bool cookArrays)
 {
     const HAsset::Reader::Chunk* tm = nullptr;
     const HAsset::Reader::Chunk* px = nullptr;
@@ -710,45 +785,23 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     if (!HAsset::readTextureHeader(tm->data, o, width, height, channels)) return {};
     uint32_t existingMips = 1;
     if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, existingMips);
-    // The loose asset's cook tail continues with format + srgb. The format byte is
-    // irrelevant here (only single-level RGBA8 sources get cooked, see below), but
-    // the sRGB flag is the importer's colour-vs-data decision and MUST survive the
-    // cook: the runtime picks the sampler's pixel format from it. Absent tail
-    // (pre-cook TXMI) → linear, as the loader defaults it.
-    uint8_t srgb = 0;
-    if (o + 1 <= tm->data.size()) { uint8_t f = 0; HAsset::Reader::readPOD(tm->data, o, f); }
+    // The loose asset's cook tail continues with format + srgb. The format byte only
+    // matters for arrays (a plain texture is cooked only from a single-level RGBA8
+    // source, see below), but the sRGB flag is the importer's colour-vs-data decision
+    // and MUST survive the cook: the runtime picks the sampler's pixel format from it.
+    // Absent tail (pre-cook TXMI) → linear, as the loader defaults it.
+    uint8_t srcFormat = 0, srgb = 0;
+    if (o + 1 <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, srcFormat);
     if (o + 1 <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, srgb);
-    // A texture ARRAY (Thema 158) is never cooked: buildTextureArray already baked
-    // its mips, and the rewrite below would drop the slice count. {} = the blob
-    // ships unchanged.
     uint32_t layers = 1;
     if (o + sizeof(uint32_t) <= tm->data.size()) HAsset::Reader::readPOD(tm->data, o, layers);
-    if (layers > 1) return {};
+    if (layers == 0) layers = 1;
 
-    // Only cook plain single-level RGBA8 base textures (skip already-cooked,
-    // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).
-    if (channels != 4 || width < 2 || height < 2 || existingMips > 1) return {};
-    if (px->data.size() != static_cast<size_t>(width) * height * 4) return {};
-
-    // Build the RGBA8 mip chain first (also the fallback if compression is unavailable).
-    std::vector<uint8_t> rgbaLevels = px->data;  // level 0
-    std::vector<uint8_t> prev       = px->data;
-    uint32_t cw = static_cast<uint32_t>(width), ch = static_cast<uint32_t>(height), count = 1;
-    while (cw > 1 || ch > 1)
-    {
-        uint32_t nw = 0, nh = 0;
-        std::vector<uint8_t> lvl = halveRGBA8(prev.data(), cw, ch, nw, nh);
-        rgbaLevels.insert(rgbaLevels.end(), lvl.begin(), lvl.end());
-        prev = std::move(lvl); cw = nw; ch = nh; ++count;
-    }
-
-    std::vector<uint8_t> levels = std::move(rgbaLevels);
-    uint8_t format = 0; // TextureFormat: 0 RGBA8, 1 ASTC_4x4, 2 BC7, 3 BC3
-
-    // Block-compress each RGBA8 mip to the requested format (all three are 16 B/4x4
-    // block, so the source stride is width*4 and the encoded blocks concatenate the
-    // same way). Any missing encoder or failed level falls the whole texture back to
-    // RGBA8 — the runtime then samples it uncompressed instead of a broken format.
+    // Block-compress each RGBA8 level to the requested format. The source stride is
+    // width*4 and the encoded blocks concatenate the same way (the byte size per level
+    // is HE::textureLevelBytes). Any missing encoder or failed level falls the whole
+    // texture back to RGBA8 — the runtime then samples it uncompressed instead of a
+    // broken format.
     auto encodeLevel = [targetFormat, quality](const uint8_t* src, uint32_t lw, uint32_t lh)
         -> std::vector<uint8_t>
     {
@@ -763,26 +816,75 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
 #endif
 #ifdef HE_HAVE_STB_DXT
         case 3: return encodeBc3(src, lw, lh, quality);
+        case 4: return encodeBc1(src, lw, lh, quality);
+        case 5: return encodeBc4(src, lw, lh);
+        case 6: return encodeBc5(src, lw, lh);
 #endif
         default: return {}; // unknown / unbuilt encoder → RGBA8 fallback
         }
     };
-
-    if (targetFormat != 0)
+    // Encode `slices` consecutive mip chains of `count` levels each, starting at w x h,
+    // from tightly packed RGBA8 `src`. False when any level fails.
+    auto encodeChains = [&](const uint8_t* src, uint32_t slices, uint32_t count,
+                            std::vector<uint8_t>& dst) -> bool
     {
-        std::vector<uint8_t> encLevels;
-        size_t off = 0; uint32_t lw = static_cast<uint32_t>(width), lh = static_cast<uint32_t>(height);
-        bool ok = true;
-        for (uint32_t l = 0; l < count; ++l)
+        size_t off = 0;
+        for (uint32_t s = 0; s < slices; ++s)
         {
-            std::vector<uint8_t> enc = encodeLevel(levels.data() + off, lw, lh);
-            if (enc.empty()) { ok = false; break; }
-            encLevels.insert(encLevels.end(), enc.begin(), enc.end());
-            off += static_cast<size_t>(lw) * lh * 4;
-            lw = std::max<uint32_t>(1, lw >> 1);
-            lh = std::max<uint32_t>(1, lh >> 1);
+            uint32_t lw = width, lh = height;
+            for (uint32_t l = 0; l < count; ++l)
+            {
+                std::vector<uint8_t> enc = encodeLevel(src + off, lw, lh);
+                if (enc.empty()) return false;
+                dst.insert(dst.end(), enc.begin(), enc.end());
+                off += static_cast<size_t>(lw) * lh * 4;
+                lw = std::max<uint32_t>(1, lw >> 1);
+                lh = std::max<uint32_t>(1, lh >> 1);
+            }
         }
-        if (ok) { levels = std::move(encLevels); format = targetFormat; }
+        return true;
+    };
+
+    std::vector<uint8_t> levels;
+    uint8_t  format = 0; // HE::TextureFormat value
+    uint32_t count  = 1;
+    if (layers > 1)
+    {
+        // Only an RGBA8 array that is to be compressed is touched; anything else ships
+        // as it is (already cooked, already compressed, or no target set).
+        if (!cookArrays || targetFormat == 0 || srcFormat != 0 || channels != 4 || width == 0 || height == 0)
+            return {};
+        count = std::max<uint32_t>(1, existingMips);
+        if (px->data.size() != static_cast<size_t>(layers) * HE::textureArraySliceBytes(width, height, count))
+            return {};
+        if (!encodeChains(px->data.data(), layers, count, levels)) return {};
+        format = targetFormat;
+    }
+    else
+    {
+        // Only cook plain single-level RGBA8 base textures (skip already-cooked,
+        // sub-2px, or non-RGBA8/odd-sized payloads — nothing to gain / can't halve).
+        if (channels != 4 || width < 2 || height < 2 || existingMips > 1) return {};
+        if (px->data.size() != static_cast<size_t>(width) * height * 4) return {};
+
+        // Build the RGBA8 mip chain first (also the fallback if compression is unavailable).
+        std::vector<uint8_t> rgbaLevels = px->data;  // level 0
+        std::vector<uint8_t> prev       = px->data;
+        uint32_t cw = static_cast<uint32_t>(width), ch = static_cast<uint32_t>(height);
+        while (cw > 1 || ch > 1)
+        {
+            uint32_t nw = 0, nh = 0;
+            std::vector<uint8_t> lvl = halveRGBA8(prev.data(), cw, ch, nw, nh);
+            rgbaLevels.insert(rgbaLevels.end(), lvl.begin(), lvl.end());
+            prev = std::move(lvl); cw = nw; ch = nh; ++count;
+        }
+
+        levels = std::move(rgbaLevels);
+        if (targetFormat != 0)
+        {
+            std::vector<uint8_t> enc;
+            if (encodeChains(levels.data(), 1, count, enc)) { levels = std::move(enc); format = targetFormat; }
+        }
     }
 
     HAsset::Writer w;
@@ -795,6 +897,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
             HAsset::Writer::appendPOD(b, count);
             HAsset::Writer::appendPOD(b, format);
             HAsset::Writer::appendPOD(b, static_cast<uint8_t>(srgb ? 1 : 0)); // as imported
+            if (layers > 1) HAsset::Writer::appendPOD(b, layers);            // arrays only, like saveAsset
             w.addChunk(HAsset::CHUNK_TXMI, b.data(), b.size());
         }
         else if (c.id == HAsset::CHUNK_PIXL)
@@ -812,14 +915,14 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
 // their full mip chain baked into PIXL. Unknown/uncookable assets pass through
 // unchanged. Must be lossless w.r.t. what the runtime uploads.
 static std::vector<uint8_t> cookForPack(const std::vector<uint8_t>& blob, uint8_t textureCompression,
-                                        uint8_t textureQuality)
+                                        uint8_t textureQuality, bool cookTextureArrays)
 {
     HAsset::Reader r;
     if (!r.openData(blob)) return blob;
     const HE::AssetType type = static_cast<HE::AssetType>(r.assetType());
     if (type == HE::AssetType::Texture)
     {
-        std::vector<uint8_t> cooked = cookTexture(r, textureCompression, textureQuality);
+        std::vector<uint8_t> cooked = cookTexture(r, textureCompression, textureQuality, cookTextureArrays);
         return cooked.empty() ? blob : cooked;
     }
     if (type != HE::AssetType::StaticMesh) return blob;
@@ -937,8 +1040,24 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     // engine default it shadows) keeps the shared default out of the archive,
     // instead of writing two TOC entries the reader would pick between blindly.
     std::unordered_set<HE::UUID> claimed;
+    // Who claimed each UUID (addressed path), to tell an override (same path in a
+    // later root, dropped quietly) from a collision (different path, warned).
+    std::unordered_map<HE::UUID, std::string> claimedBy;
+    // Every addressed path some root has, claimed or not: a fallbackOnly root
+    // may only fill the gaps, exactly like the resolver's last tier.
+    std::unordered_set<std::string> addressed;
     m_packedPaths.clear();
     m_packedTypes.clear();
+    m_warnings.clear();
+    auto warn = [&](std::string msg)
+    {
+        if (settings.onWarning) settings.onWarning(msg);
+        m_warnings.push_back(std::move(msg));
+    };
+    auto uuidText = [](const HE::UUID& id)
+    {
+        return std::to_string(id.hi) + ":" + std::to_string(id.lo);
+    };
     for (const SourceRoot& root : roots)
     {
         if (root.dir.empty()) continue;
@@ -969,6 +1088,8 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
             for (const auto& pat : settings.excludePatterns)
                 if (!pat.empty() && Hpak::globMatch(pat, rel)) { excluded = true; break; }
             if (excluded) { it.increment(ec); continue; }
+            // A lower tier never replaces what an earlier root serves at this path.
+            if (!addressed.insert(rel).second && root.fallbackOnly) { it.increment(ec); continue; }
 
             do {
                 std::ifstream f(p.path(), std::ios::binary);
@@ -978,7 +1099,18 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
 
                 HE::UUID id; std::string path; uint16_t type = 0;
                 if (!metaFromHasset(bytes, id, path, type) || id == HE::UUID{}) break;
-                if (!claimed.insert(id).second) break;  // already packed from an earlier root
+                if (!claimed.insert(id).second)  // already packed from an earlier root
+                {
+                    // Same addressed path = an override shadowing its default (the
+                    // point of the root order). A different path is two assets that
+                    // share a UUID, and this one silently goes missing in the game.
+                    const std::string& owner = claimedBy[id];
+                    if (owner != rel)
+                        warn(rel + ": UUID " + uuidText(id) + " is already taken by " + owner
+                             + " - not packed, references to it resolve to nothing");
+                    break;
+                }
+                claimedBy[id] = rel;
                 // Runtime UUID→type index. Recorded AFTER the claim check so it
                 // describes the entry that actually ships, and keyed by UUID, so
                 // the two path spellings below collapse into one type entry.
@@ -1006,13 +1138,18 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     }
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
-    // This is the expensive pass (compression + encryption) → progress reports here.
-    // The incremental cache key is hash64 of the REWRITTEN blob (not the source
-    // file): a rename/delete of a *referenced* asset changes the rewrite result
-    // without touching this file, and must invalidate the cached entry.
+    // This is the expensive pass (rewrite, cook, compression, encryption) → progress
+    // reports here. Two reuse levels (see Hpak::IncrementalCache):
+    //   1. an asset whose SOURCE bytes and recorded dependencies are unchanged skips the
+    //      whole pipeline — its stored entry is carried over from the previous archive;
+    //   2. otherwise the pipeline runs, and an output that hashes the same as last time
+    //      still saves the compression + encryption. That hash is of the REWRITTEN blob
+    //      (not the source file): a rename/delete of a *referenced* asset changes the
+    //      rewrite result without touching this file, and must invalidate the entry.
     int count = 0;
     m_reused = 0;
     m_srcHashes.clear();
+    m_entryInfos.clear();
     const int  total         = static_cast<int>(pending.size());
     const bool wantEncrypted = settings.encrypt && Hpak::cryptoAvailable();
     // Source blobs by addressed AND embedded META path (`pending` is stable
@@ -1025,11 +1162,83 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         blobByPath.emplace(pe.relPath, &pe.bytes);
         if (!pe.metaPath.empty()) blobByPath.emplace(pe.metaPath, &pe.bytes);
     }
+
+    // Level-1 validity: does everything the last pipeline run looked at still read the
+    // same? A reference that resolves to a different UUID (or to none) bakes different
+    // bytes into THIS asset, and a changed parent material changes an instance's folded
+    // approximation — neither touches this asset's own file.
+    std::unordered_map<std::string, uint64_t> parentHashMemo;
+    auto parentHash = [&](const std::string& path) -> uint64_t
+    {
+        const auto memo = parentHashMemo.find(path);
+        if (memo != parentHashMemo.end()) return memo->second;
+        const auto it = blobByPath.find(path);
+        const uint64_t h = (it != blobByPath.end() && it->second)
+            ? Hpak::hash64(it->second->data(), it->second->size()) : 0ull;
+        parentHashMemo.emplace(path, h);
+        return h;
+    };
+    // A path ref that resolved to no packed asset bakes a null UUID: the game
+    // then draws the renderers' fallback (white texture, default cube) with not a
+    // line in its log. Say it here, where the author can still act on it.
+    auto warnUnresolved = [&](const std::string& relPath, const Hpak::PackDeps& d)
+    {
+        for (const auto& [path, uuid] : d.refs)
+            if (uuid == HE::UUID{})
+                warn(relPath + ": reference to " + path
+                     + " is in no packed root - baked as a null UUID");
+    };
+    auto depsHold = [&](const Hpak::PackDeps& d) -> bool
+    {
+        for (const auto& [path, uuid] : d.refs)
+        {
+            const auto it = pathToUuid.find(path);
+            const HE::UUID now = it != pathToUuid.end() ? it->second : HE::UUID{};
+            if (!(now == uuid)) return false;
+        }
+        for (const auto& [path, h] : d.parents)
+            if (parentHash(path) != h) return false;
+        return true;
+    };
+
     for (auto& pe : pending)
     {
         if (progress) progress(count, total, pe.relPath);
-        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath);
-        if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality);
+        const uint64_t inHash = Hpak::hash64(pe.bytes.data(), pe.bytes.size());
+
+        // ── Level 1: nothing changed since the last pack → skip the pipeline ─────
+        if (cache && cache->previousPak)
+        {
+            const auto cit = cache->entries.find(pe.id);
+            if (cit != cache->entries.end() && cit->second.inHash != 0
+                && cit->second.inHash == inHash && depsHold(cit->second.deps))
+            {
+                HpakReader::StoredEntry se;
+                // Same guards as level 2 below, minus the size check (the cooked blob
+                // is not rebuilt here): readStoredEntry verifies the content hash, the
+                // manifest is only loaded for exactly this archive (tocHash), and a
+                // dict-compressed entry can never be carried verbatim.
+                if (cache->previousPak->readStoredEntry(pe.id, se)
+                    && ((se.flags & Hpak::kFlagEncrypted) != 0) == wantEncrypted
+                    && (se.flags & Hpak::kFlagUsesDict) == 0)
+                {
+                    addPackedEntry(pe.id, se);
+                    ++m_reused;
+                    warnUnresolved(pe.relPath, cit->second.deps);
+                    m_srcHashes.emplace_back(pe.id, cit->second.srcHash);
+                    m_entryInfos.emplace_back(pe.id, cit->second);
+                    ++count;
+                    if (settings.onAsset) settings.onAsset(pe.relPath, true);
+                    continue;
+                }
+            }
+        }
+
+        // ── The pipeline, recording what it looked at ───────────────────────────
+        Hpak::PackDeps deps;
+        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath, &deps);
+        if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality,
+                                                 settings.cookTextureArrays);
         // After every rewrite above (each of which copies META through verbatim)
         // and BEFORE the hash below: the incremental cache keys on these bytes, so
         // stripping later would leave entries packed by an older build matching
@@ -1040,6 +1249,21 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         const uint64_t srcHash = Hpak::hash64(blob.data(), blob.size());
         m_srcHashes.emplace_back(pe.id, srcHash);
 
+        // One row per path: the same material is often referenced several times.
+        std::sort(deps.refs.begin(), deps.refs.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        deps.refs.erase(std::unique(deps.refs.begin(), deps.refs.end(),
+                        [](const auto& a, const auto& b) { return a.first == b.first; }),
+                        deps.refs.end());
+        std::sort(deps.parents.begin(), deps.parents.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+        deps.parents.erase(std::unique(deps.parents.begin(), deps.parents.end(),
+                           [](const auto& a, const auto& b) { return a.first == b.first; }),
+                           deps.parents.end());
+        warnUnresolved(pe.relPath, deps);
+        m_entryInfos.emplace_back(pe.id, Hpak::CachedEntry{ srcHash, inHash, std::move(deps) });
+
+        // ── Level 2: the output is what the previous archive already holds ──────
         bool reused = false;
         if (cache && cache->previousPak)
         {
@@ -1066,6 +1290,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         }
         if (!reused) addEntry(pe.id, blob, settings);
         ++count;
+        if (settings.onAsset) settings.onAsset(pe.relPath, reused);
     }
     if (progress) progress(count, total, {});
     return count;

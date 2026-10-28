@@ -1,0 +1,16 @@
+src/HE_Editor/AudioMixView.cpp
+src/HE_Editor/AudioMixView.h
+src/HE_Editor/AudioWaveformView.cpp
+src/HE_Editor/AudioWaveformView.h
+src/HE_Editor/BlendSpacePanel.cpp
+src/HE_Editor/BlendSpacePanel.h
+src/HE_Editor/BoneMaskPanel.cpp
+src/HE_Editor/BoneMaskPanel.h
+src/HE_Editor/BuildProgressDialog.cpp
+src/HE_Editor/BuildProgressDialog.h
+src/HE_Editor/CameraBookmarks.cpp
+src/HE_Editor/CameraBookmarks.h
+src/HE_Editor/CinematicPanel.cpp
+src/HE_Editor/CinematicPanel.h
+src/HE_Editor/CinematicPreview.cpp
+src/HE_Editor/CinematicPreview.h

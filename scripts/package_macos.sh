@@ -123,6 +123,18 @@ mkdir -p "$MACOS_PATH" "$FW_PATH" "$RES_PATH"
 # ─── 3. Binary ────────────────────────────────────────────────────────────────
 cp "$DEPLOY_DIR/$APP_NAME" "$BINARY"
 
+# HorizonUpdater (src/HE_SelfUpdate): the self-update takeover helper. It is NOT
+# one of the engine dylibs copied below (it is a separate executable, deployed by
+# its own he_deploy_dll POST_BUILD step beside HorizonEditor in $DEPLOY_DIR, same
+# as this binary), so without this line it is silently absent from the DMG and
+# Takeover.cpp finds nothing next to the bundled editor to copy out and run.
+if [ -f "$DEPLOY_DIR/HorizonUpdater" ]; then
+    cp "$DEPLOY_DIR/HorizonUpdater" "$MACOS_PATH/HorizonUpdater"
+    echo "    HorizonUpdater → Contents/MacOS"
+else
+    echo "    WARNING: $DEPLOY_DIR/HorizonUpdater not found — self-update will not work from this .app."
+fi
+
 # ─── 4. Engine dylibs: copy everything from the flat deploy ───────────────────
 echo "--> Copying engine dylibs..."
 for lib in "$DEPLOY_DIR/"*.dylib; do
@@ -251,16 +263,44 @@ else
     echo "    WARNING: $DEPLOY_DIR/SDK not found — the .app will export HorizonCode interpreted only."
 fi
 
+# The engine SDK (cmake/HorizonSDK.cmake): what every export compiles its game against
+# (topic 222 step 3: no prebuilt game ships). The HorizonSDK target installs it beside
+# the editor's deploy, a sibling like the app flavours, and the editor build runs that
+# target. findGameSdk() looks for <base>/EngineSDK, so a .app without it cannot export
+# at all, and packaging stops. It carries the lib set of the tree that built the editor
+# (dev); a release set beside it comes from a release-profile tree (topic 222 step 4).
+_engine_sdk="$SOURCE_DIR/out/deploy/Editor/EngineSDK"
+[ -d "$_engine_sdk" ] || _engine_sdk="$SOURCE_DIR/out/deploy/EngineSDK"   # older build tree: SDK beside Editor/
+if [ -d "$_engine_sdk" ]; then
+    echo "    engine SDK (lib sets: $(ls "$_engine_sdk/lib" | grep -v '^cmake$' | paste -sd' ' -)) → Resources/EngineSDK"
+    rm -rf "$RES_PATH/EngineSDK"
+    cp -R "$_engine_sdk" "$RES_PATH/EngineSDK"
+else
+    echo "    ERROR: $_engine_sdk not found — the .app could not export any game."
+    echo "           Build HorizonEditor first (it installs the engine SDK alongside)."
+    exit 1
+fi
+
 # ─── 6b. App icon (.icns from the HC logo) ────────────────────────────────────
 # Must land in Resources/ and be referenced in Info.plist BEFORE codesign so the
 # signature covers it and the Finder/Dock icon sticks.
 ICON_PLIST=""
+DOC_ICON_PLIST=""
+UTI_ICON_PLIST=""
 if [ "$FANCY" -eq 1 ]; then
     echo "--> Generating app icon from HC logo..."
     if "$DMG_PY" "$ASSETS_DIR/gen_assets.py" icon --logo "$ICON_SRC" --out "$RES_PATH/AppIcon.icns"; then
         ICON_PLIST=$'\n    <key>CFBundleIconFile</key>\n    <string>AppIcon</string>'
     else
         echo "    WARNING: icon generation failed — bundle will have no custom icon."
+    fi
+    # Finder icon of .heproj files (section 7 registers the type). Without it Finder
+    # shows a blank page; the type is registered either way.
+    if "$DMG_PY" "$ASSETS_DIR/gen_assets.py" docicon --logo "$ICON_SRC" --out "$RES_PATH/ProjectIcon.icns"; then
+        DOC_ICON_PLIST=$'\n            <key>CFBundleTypeIconFile</key>\n            <string>ProjectIcon</string>'
+        UTI_ICON_PLIST=$'\n            <key>UTTypeIconFile</key>\n            <string>ProjectIcon</string>'
+    else
+        echo "    WARNING: document icon generation failed — .heproj files get a blank icon."
     fi
 fi
 
@@ -297,9 +337,59 @@ cat > "$APP_PATH/Contents/Info.plist" <<PLIST
          rather than a missing permission. -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>HorizonEngine uses the local network to discover your router for collaboration sessions and to find peers on your LAN.</string>${ICON_PLIST}
+    <!-- .heproj project files: double-click in Finder opens them in the editor.
+         The editor declares (exports) the type itself, so it exists on a Mac
+         where nothing else knows the extension, and claims it as Owner so it
+         stays the default although text editors also open public.json.
+         Finder hands the file over as application:openFile:, which SDL turns
+         into SDL_EVENT_DROP_FILE — EditorApplication routes that into the same
+         guarded open as the project hub (ProjectLaunchOpen). Keep the UTI and
+         the MIME type in step with the Linux MIME XML and the Windows ProgID. -->
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Horizon Engine Project</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>dev.horizoncreations.heproj</string>
+            </array>${DOC_ICON_PLIST}
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>dev.horizoncreations.heproj</string>
+            <key>UTTypeDescription</key>
+            <string>Horizon Engine Project</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.json</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>heproj</string>
+                </array>
+                <key>public.mime-type</key>
+                <array>
+                    <string>application/x-heproj</string>
+                </array>
+            </dict>${UTI_ICON_PLIST}
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
+# Fail here on a malformed heredoc rather than ship a bundle whose plist Launch
+# Services cannot read — it reports nothing, the app just does not open projects.
+plutil -lint "$APP_PATH/Contents/Info.plist"
 
 # ─── 8. Fix rpaths on the binary ──────────────────────────────────────────────
 # The binary has absolute build-tree rpaths (e.g. /Users/.../cmake-build-release/src/HE_Core).
@@ -382,6 +472,23 @@ done
 if [ "$RES_FAIL" -eq 1 ]; then
     echo "    WARNING: the app is missing content the editor loads at run time."
     echo "             Check EditorDeps/ in the source tree and section 6 above."
+fi
+
+# The .heproj registration of section 7: claimed type == exported type == extension.
+PB=/usr/libexec/PlistBuddy
+PLIST_FILE="$APP_PATH/Contents/Info.plist"
+DOC_UTI="$("$PB" -c 'Print :CFBundleDocumentTypes:0:LSItemContentTypes:0' "$PLIST_FILE" 2>/dev/null || true)"
+EXP_UTI="$("$PB" -c 'Print :UTExportedTypeDeclarations:0:UTTypeIdentifier' "$PLIST_FILE" 2>/dev/null || true)"
+EXP_EXT="$("$PB" -c 'Print :UTExportedTypeDeclarations:0:UTTypeTagSpecification:public.filename-extension:0' "$PLIST_FILE" 2>/dev/null || true)"
+if [ -n "$DOC_UTI" ] && [ "$DOC_UTI" = "$EXP_UTI" ] && [ "$EXP_EXT" = "heproj" ]; then
+    echo "    ok   Info.plist opens .$EXP_EXT as $DOC_UTI"
+    DOC_ICON="$("$PB" -c 'Print :CFBundleDocumentTypes:0:CFBundleTypeIconFile' "$PLIST_FILE" 2>/dev/null || true)"
+    if [ -n "$DOC_ICON" ] && [ ! -f "$RES_PATH/$DOC_ICON.icns" ]; then
+        echo "    MISSING Resources/$DOC_ICON.icns (named as the .heproj document icon)"
+    fi
+else
+    echo "    WARNING: Info.plist does not register .heproj (claimed '$DOC_UTI', exported '$EXP_UTI' for '.$EXP_EXT')."
+    echo "             Double-clicking a project in Finder will not open the editor."
 fi
 
 # ─── 11. Code sign (ad-hoc) ───────────────────────────────────────────────────

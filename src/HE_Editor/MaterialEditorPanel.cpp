@@ -29,7 +29,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
+#include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -46,6 +49,12 @@ struct State
 	MaterialGraph graph;
 	// Last state the peers have seen — see CollabDocSync.
 	CollabDocSync::DocMirror collabMirror;
+	// A peer's delta batch patched `graph`. The generated shader, parameter block and
+	// texture list in the live MaterialAsset are derived from it and are what the
+	// scene and the preview draw, so the next render() regenerates them (without the
+	// dirty mark: the edit is the peer's to save). The batch lands outside render(),
+	// where there is no AppContext to regenerate with.
+	bool          peerEdited = false;
 	HE::UUID      materialId{};
 	bool          loaded  = false;
 	bool          dirty   = false;   // unsaved-to-disk graph edits
@@ -128,7 +137,7 @@ constexpr float kNodeW = 172.0f;
 
 ImU32 categoryColor(const char* cat)
 {
-	const std::string c = cat;
+	const std::string_view c = cat;
 	if (c == "Material") return IM_COL32(140,  60,  60, 255);
 	if (c == "Input")    return IM_COL32( 60, 100, 140, 255);
 	if (c == "Constant") return IM_COL32( 60, 120, 130, 255);
@@ -183,7 +192,11 @@ std::string estimateComplexity(const std::string& glsl)
 // Regenerate the shader from the graph and push it into the live MaterialAsset. The
 // renderers re-resolve the material's shader every frame (pipeline cached per source
 // hash), so the scene updates immediately; Save persists to disk.
-void applyToMaterial(State& st, AppContext& ctx)
+//
+// This half does NOT mark the tab dirty: a collaborator's edit runs through it too
+// (see State::peerEdited), and a "*" on a tab someone else holds would claim the
+// asset's lock and offer an unsaveable save at quit. applyToMaterial is the local edit.
+void regenerateMaterial(State& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return;
 	if (st.isFunction)
@@ -194,7 +207,6 @@ void applyToMaterial(State& st, AppContext& ctx)
 		{
 			fn->nodeGraphJson = HE::materialGraphToJson(st.graph);
 			s_fnGraphCache.erase(st.relPath);
-			st.dirty = true;
 		}
 		return;
 	}
@@ -230,7 +242,7 @@ void applyToMaterial(State& st, AppContext& ctx)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
-	st.dirty = true;
+	mat->customShaderDispGlsl = gen.displacementBody;
 	st.complexity = estimateComplexity(st.lastGlsl);
 	// Live master→variants propagation: re-derive every loaded instance of this material.
 	ctx.contentManager->syncMaterialInstancesOf(st.relPath);
@@ -243,6 +255,38 @@ void applyToMaterial(State& st, AppContext& ctx)
 	const auto& chk = s_checkLib.fragment(std::hash<std::string>{}(st.lastGlsl),
 	                                      st.lastGlsl, HE::MaterialShaderLibrary::Backend::Metal);
 	st.compileLog = chk.ok ? std::string() : chk.log;
+	// The Displacement pin's domain stage compiles on its own (scope "ds"), so a
+	// graph can be fine as a fragment and still fail there. SPIR-V is plain glslang,
+	// so this runs on a Metal editor too, where the stage itself never draws.
+	if (!gen.displacementBody.empty())
+	{
+		const auto& ds = s_checkLib.tessEval(std::hash<std::string>{}(gen.displacementBody),
+		                                     gen.displacementBody,
+		                                     HE::MaterialShaderLibrary::Backend::SpirV);
+		if (!ds.ok)
+			st.compileLog += (st.compileLog.empty() ? "" : "\n") + std::string("Displacement: ") + ds.log;
+	}
+}
+
+void applyToMaterial(State& st, AppContext& ctx)
+{
+	if (!ctx.contentManager) return;
+	const bool hasAsset = st.isFunction
+		? ctx.contentManager->getMaterialFunction(st.materialId) != nullptr
+		: ctx.contentManager->getMaterial(st.materialId) != nullptr;
+	regenerateMaterial(st, ctx);
+	if (hasAsset) st.dirty = true;
+}
+
+// Someone else's edit is not on our undo stack (the same rule the scene's transforms
+// follow, docs/networking-layer-design.md). Left there, the snapshots from before it
+// stay reachable: Ctrl+Z restores one, and the first diff after this editor takes the
+// lock sends it out, reverting the peer's work for everyone. The current graph becomes
+// the floor instead; stateFor seeds it again after a reload.
+void dropUndoHistory(State& st)
+{
+	st.undo.clear();
+	st.undoPos = -1;
 }
 
 // Persist this tab's asset. The header's Save button AND the close/quit prompt's
@@ -253,6 +297,15 @@ bool saveToDisk(State& st, AppContext& ctx, const std::string& assetPath)
 	// Instances have no graph — their state is already live on the asset; masters
 	// regenerate first so the saved file always matches the canvas.
 	if (!st.isInstance) applyToMaterial(st, ctx);
+	// A master's GI-hit colours (approx*) are derived only by the manager's own
+	// codegen, which a save used to reach through its own hot reload. A save is no
+	// longer re-read (CORE-204), so derive them here — before the write, so the
+	// file carries them too — and pass them on to the loaded instances.
+	if (!st.isInstance && !st.isFunction)
+	{
+		ctx.contentManager->regenerateMaterialFromGraph(st.materialId);
+		ctx.contentManager->syncMaterialInstancesOf(st.relPath);
+	}
 	RuntimeAsset* toSave = st.isFunction
 		? static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialFunctionMutable(st.materialId))
 		: static_cast<RuntimeAsset*>(ctx.contentManager->getMaterialMutable(st.materialId));
@@ -315,9 +368,10 @@ std::string serializeSelection(const State& st)
 			    n->type != MatNodeType::FnInput)
 				tmp.nodes.push_back(*n);
 	if (tmp.nodes.empty()) return {};
-	auto inSel = [&](int id){ for (auto& n : tmp.nodes) if (n.id == id) return true; return false; };
+	std::unordered_set<int> selIds;
+	for (const auto& n : tmp.nodes) selIds.insert(n.id);
 	for (const auto& l : st.graph.links)
-		if (inSel(l.srcNode) && inSel(l.dstNode)) tmp.links.push_back(l);
+		if (selIds.count(l.srcNode) && selIds.count(l.dstNode)) tmp.links.push_back(l);
 	return HE::materialGraphToJson(tmp);
 }
 
@@ -441,6 +495,9 @@ State& stateFor(const std::string& path, AppContext& ctx)
 			// panel. Cache the parent's static switches for the switch section.
 			st.isInstance = true;
 			st.lastGlsl   = mat->customShaderFragGlsl;
+			// Cleared first: a reload (a collaborator's save) comes back through here
+			// with the State kept, and appending again doubled every switch row.
+			st.parentSwitches.clear();
 			const HE::UUID pid = ctx.contentManager->loadAsset(mat->parentMaterialPath);
 			if (const MaterialAsset* par = ctx.contentManager->getMaterial(pid))
 			{
@@ -772,6 +829,16 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 			if (EditorWidgets::checkbox("On (default)", &on)) { n.p[0] = on ? 1.0f : 0.0f; committed = true; }
 			break;
 		}
+		// ── v15: bombing cells — the seed picks the set of numbers; Cell and Blend are pins ──
+		case MatNodeType::BombCells:
+		{
+			int seed = static_cast<int>(std::lround(n.p[0]));
+			ImGui::SetNextItemWidth((kNodeW - 76.0f) * scale);
+			if (ImGui::DragInt("Seed", &seed, 0.2f)) n.p[0] = static_cast<float>(seed);
+			committed = ImGui::IsItemDeactivatedAfterEdit();
+			EditorWidgets::helpForLabel("Seed");
+			break;
+		}
 		// ── v6: procedural texture — inline Scale (bigger = finer speckle) ──
 		case MatNodeType::NoiseTexture:
 			ImGui::SetNextItemWidth((kNodeW - 60.0f) * scale);
@@ -868,8 +935,9 @@ bool drawParamConstPanel(MaterialGraph& graph)
 		// Group by the params' metadata group (first-seen order; "" first as ungrouped).
 		std::vector<std::string> groupOrder;
 		auto groupOf = [](const MatGraphNode* n){ return n->group; };
+		std::set<std::string> seenGroups;
 		for (MatGraphNode* n : params)
-			if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(n)) == groupOrder.end())
+			if (seenGroups.insert(groupOf(n)).second)
 				groupOrder.push_back(groupOf(n));
 		std::stable_sort(groupOrder.begin(), groupOrder.end(),
 			[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
@@ -971,6 +1039,55 @@ bool drawParamConstPanel(MaterialGraph& graph)
 		}
 	}
 	return committed;
+}
+
+// ── Displacement pin (Thema 207) ──────────────────────────────────────────────
+// The link into the Output node's Displacement pin, or null when it is not wired.
+const HE::MatGraphLink* displacementLink(const MaterialGraph& g, int outId)
+{
+	for (const HE::MatGraphLink& l : g.links)
+		if (l.dstNode == outId && l.dstPin == HE::kMatOutputDisplacementPin) return &l;
+	return nullptr;
+}
+
+// The type the registry gives the pin that feeds Displacement. Reroutes are
+// followed to what feeds them; a FunctionCall's outputs are not known here and
+// count as Float, so they never warn. The pin is a Float: anything wider is cut
+// to its first component (x, or red of a texture), which the codegen does
+// silently, so the editor is the one place that can say it.
+MatPinType displacementSourceType(const MaterialGraph& g, int outId)
+{
+	const HE::MatGraphLink* l = displacementLink(g, outId);
+	for (int hop = 0; l && hop < 64; ++hop)
+	{
+		const MatGraphNode* src = g.findNode(l->srcNode);
+		if (!src || src->type == MatNodeType::FunctionCall) break;
+		if (src->type != MatNodeType::Reroute)
+		{
+			const auto& outs = HE::matNodeDesc(src->type).outputs;
+			return l->srcPin >= 0 && l->srcPin < (int)outs.size() ? outs[l->srcPin].type
+			                                                      : MatPinType::Float;
+		}
+		const HE::MatGraphLink* in = nullptr;
+		for (const HE::MatGraphLink& r : g.links)
+			if (r.dstNode == src->id) { in = &r; break; }
+		l = in;
+	}
+	return MatPinType::Float;
+}
+
+const char* backendLabel(HE::RendererBackend b)
+{
+	switch (b)
+	{
+		case HE::RendererBackend::OpenGL:   return "OpenGL";
+		case HE::RendererBackend::D3D11:    return "D3D11";
+		case HE::RendererBackend::D3D12:    return "D3D12";
+		case HE::RendererBackend::Vulkan:   return "Vulkan";
+		case HE::RendererBackend::Metal:    return "Metal";
+		case HE::RendererBackend::Software: return "Software";
+		default:                            return "this renderer";
+	}
 }
 
 // ── Pin list for the shared canvas ────────────────────────────────────────────
@@ -1278,7 +1395,12 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			{
 				if (EditorWidgets::menuItem("(mesh texture)", nullptr, n->s.empty()))
 					if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s.clear(); structuralEdit = true; }
-				for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Texture))
+				// Taken as the submenu opens, like the preview-subject picker
+				// below, not once per frame it stays open (EDT-1101).
+				static std::vector<HcEditorUtil::ClassRef> s_textures;
+				if (ImGui::IsWindowAppearing())
+					s_textures = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Texture);
+				for (const auto& a : s_textures)
 					if (ImGui::MenuItem((a.label + "##" + a.path).c_str(), nullptr, n->s == a.path))
 						if (MatGraphNode* mn = st.graph.findNode(nodeId)) { mn->s = a.path; structuralEdit = true; }
 				ImGui::EndMenu();
@@ -1837,14 +1959,22 @@ CollabDocSync::DocBindings collabDocs(const std::string& assetPath)
 {
 	State* st = s_states.find(assetPath);
 	if (!st || !st->loaded) return {};
+	// An instance has no graph: its overrides and switches are fields of the asset
+	// itself and travel with the whole-file autosave (about a second behind).
+	if (st->isInstance) return {};
 	CollabDocSync::DocBindings out;
 	// A peer's edit invalidates the preview render and the generated shader —
 	// both are derived from the graph and neither notices on its own.
 	out.push_back({ CollabDocSync::Scope::Primary,
 	                CollabDocSync::forMaterialGraph(st->graph,
-	                    [st]() { st->previewDirty = true; }),
+	                    [st]() { st->peerEdited = true; st->previewDirty = true; }),
 	                &st->collabMirror });
 	return out;
+}
+
+void forgetFunctionGraph(const std::string& contentPath)
+{
+	s_fnGraphCache.erase(contentPath);
 }
 
 bool isDirty(const std::string& assetPath) { return s_states.dirty(assetPath); }
@@ -1864,6 +1994,10 @@ bool reloadFromDisk(const std::string& assetPath)
 	// it would make the first diff after the reload report the difference
 	// between the peer's file and our old graph as OUR edit.
 	st->collabMirror = {};
+	// The graph the undo stack was taken from is about to be replaced too.
+	dropUndoHistory(*st);
+	st->peerEdited = false;   // the file is newer than any batch
+	if (st->isFunction) s_fnGraphCache.erase(st->relPath);
 	return true;
 }
 
@@ -1906,6 +2040,9 @@ bool reloadByContentPath(const std::string& contentPath)
 	st->loaded = false;
 	st->dirty  = false;
 	st->collabMirror = {};
+	dropUndoHistory(*st);
+	st->peerEdited = false;
+	if (st->isFunction) s_fnGraphCache.erase(st->relPath);
 	return true;
 }
 
@@ -1989,8 +2126,9 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 	std::vector<std::string> groupOrder;
 	auto groupOf = [&](size_t i) -> std::string
 	{ return i < inst.graphParamGroups.size() ? inst.graphParamGroups[i] : std::string(); };
+	std::set<std::string> seenGroups;
 	for (size_t i = 0; i < inst.graphParamNames.size(); ++i)
-		if (std::find(groupOrder.begin(), groupOrder.end(), groupOf(i)) == groupOrder.end())
+		if (seenGroups.insert(groupOf(i)).second)
 			groupOrder.push_back(groupOf(i));
 	std::stable_sort(groupOrder.begin(), groupOrder.end(),
 		[](const std::string& a, const std::string& b){ return a.empty() && !b.empty(); });
@@ -2007,12 +2145,13 @@ bool drawInstanceOverridePanel(AppContext& ctx, State& st, MaterialAsset& inst)
 			const auto kind = i < inst.graphParamTypes.size()
 				? static_cast<HE::MatParamKind>(inst.graphParamTypes[i]) : HE::MatParamKind::Float;
 			ImGui::PushID((int)i);
-			bool ov = ovIndex(nm) >= 0;
+			const int ovIdx = ovIndex(nm);
+			bool ov = ovIdx >= 0;
 			if (ImGui::Checkbox("##ov", &ov))
 			{
 				if (ov) inst.instanceOverriddenParams.push_back(nm);
 				else    inst.instanceOverriddenParams.erase(
-					        inst.instanceOverriddenParams.begin() + ovIndex(nm));
+					        inst.instanceOverriddenParams.begin() + ovIdx);
 				structureEdit = true; // un-override → value falls back to the parent (sync)
 			}
 			ImGui::SameLine();
@@ -2122,6 +2261,26 @@ void render(AppContext& ctx, const std::string& assetPath,
 {
 	State& st = stateFor(assetPath, ctx);
 
+	// A peer's batch landed since the last frame. Before `mat` / `fnAsset` below are
+	// fetched, not after: regenerating can load a function graph this editor has not
+	// seen yet (a FunctionCall the peer just added), and a load may move the asset
+	// the pointers would point into. The local edit path regenerates at the end of
+	// the frame, after their last use.
+	if (st.peerEdited)
+	{
+		st.peerEdited = false;
+		const bool hasAsset = ctx.contentManager && (st.isFunction
+			? ctx.contentManager->getMaterialFunction(st.materialId) != nullptr
+			: ctx.contentManager->getMaterial(st.materialId) != nullptr);
+		if (hasAsset && !st.isInstance)
+		{
+			regenerateMaterial(st, ctx);
+			dropUndoHistory(st);
+			pushUndo(st);
+		}
+		st.previewDirty = true;
+	}
+
 	ImGui::SetNextWindowPos(pos);
 	ImGui::SetNextWindowSize(size);
 	ImGui::Begin("##MaterialGraphTab", nullptr,
@@ -2229,6 +2388,86 @@ void render(AppContext& ctx, const std::string& assetPath,
 					EditorWidgets::helpForLabel("Clip");
 				}
 				ImGui::EndPopup();
+			}
+
+			// Tessellation — exists only while the Displacement pin is wired, which is
+			// also the only time its settings reach the shader. The cell turns amber
+			// where the pin has no effect (a backend without tessellation, or a UI
+			// material), so a flat preview reads as "not here", not as a broken graph.
+			if (displacementLink(st.graph, outN->id))
+			{
+				const bool uiDomain  = outN->p[3] > 0.5f;
+				const bool tessHere  = ctx.renderer && ctx.renderer->SupportsTessellation();
+				const bool effective = tessHere && !uiDomain;
+				const bool truncated = displacementSourceType(st.graph, outN->id) != MatPinType::Float;
+				const char* backend  = backendLabel(ctx.backend);
+				char tip[256];
+				if (uiDomain)
+					std::snprintf(tip, sizeof(tip), "Displacement is ignored: a User Interface material is never tessellated");
+				else if (!tessHere)
+					std::snprintf(tip, sizeof(tip), "Displacement has no effect on %s (no tessellation): the mesh draws flat", backend);
+				else
+					std::snprintf(tip, sizeof(tip), "Displacement pin: tessellation settings (tessellated on %s)", backend);
+
+				bar.group();
+				const bool open = effective
+					? bar.item("##tess", T::iconMountain, "Tessellation", false, true, tip)
+					: bar.itemTinted("##tess", T::iconWarning, "Tessellation", T::kWarn, true, tip);
+				if (open) ImGui::OpenPopup("##tessPopup");
+				bar.endGroup();
+
+				if (ImGui::BeginPopup("##tessPopup"))
+				{
+					HE::Ed::Help::Scope helpScope("Material Settings");
+					{
+						EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 22.0f);
+						if (uiDomain)
+							ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(T::kWarn),
+								"A User Interface material ignores the Displacement pin.");
+						else if (!tessHere)
+							ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(T::kWarn),
+								"Not tessellated on %s: the pin has no effect here and the "
+								"preview shows the flat mesh. It deforms on backends with "
+								"tessellation.", backend);
+						else
+							ImGui::TextDisabled("Tessellated on %s. Height in metres along the "
+							                    "surface normal.", backend);
+						// A note, not a warning: the registry types every Math node as a
+						// vector, so texture × scale (the usual height graph) lands here
+						// too, and there x is what was meant.
+						if (truncated)
+							ImGui::TextDisabled("Displacement is one number: of the wired "
+							                    "vector only the first component (x, or red "
+							                    "of a texture) is used.");
+					}
+					ImGui::Separator();
+					// Committed edits go through matSanitizeTess, so the node holds what
+					// the shader bakes (Fade Far above Fade Near, factor in 1..64).
+					HE::MatTessSettings& t = outN->tess;
+					bool tessEdit = false;
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Max Factor", &t.maxFactor, 0.1f, 1.0f, HE::kMatTessMaxFactor, "%.0f");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Max Factor");
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Fade Near", &t.fadeNear, 0.1f, 0.0f, 10000.0f, "%.1f m");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Fade Near");
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Fade Far", &t.fadeFar, 0.1f, 0.0f, 10000.0f, "%.1f m");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Fade Far");
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragFloat("Max Displacement", &t.maxDisplacement, 0.005f, 0.0f, 100.0f, "%.3f m");
+					tessEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Max Displacement");
+					if (tessEdit)
+					{
+						t = HE::matSanitizeTess(t);
+						headerEdit = true;
+					}
+					ImGui::EndPopup();
+				}
 			}
 		}
 
@@ -2366,9 +2605,13 @@ void render(AppContext& ctx, const std::string& assetPath,
 					}
 				}
 				// Asked of the text the GPU is about to run (the swapped-in source
-				// for a node preview), fragment and WPO vertex stage both.
+				// for a node preview): fragment, WPO vertex and displacement stage. The
+				// last only moves where the backend tessellates; elsewhere a Time-driven
+				// height would re-render the same flat ball every frame.
+				const bool tessHere = ctx.renderer->SupportsTessellation();
 				const bool usesTime = HE::matGlslUsesTime(mat->customShaderFragGlsl)
-				                   || HE::matGlslUsesTime(mat->customShaderVertGlsl);
+				                   || HE::matGlslUsesTime(mat->customShaderVertGlsl)
+				                   || (tessHere && HE::matGlslUsesTime(mat->customShaderDispGlsl));
 				st.previewTex = ctx.renderer->RenderMaterialPreview(*ctx.contentManager, st.materialId,
 					(uint32_t)px, st.previewYaw, st.previewPitch, st.previewDist, st.previewShape,
 					st.previewMeshId, previewClock);
@@ -2454,6 +2697,22 @@ void render(AppContext& ctx, const std::string& assetPath,
 			else
 				pdl->AddText(ImVec2(org.x + av.x * 0.5f - 28.0f, org.y + av.y * 0.5f - 6.0f),
 					IM_COL32(150, 150, 150, 255), "(preview)");
+
+			// A wired Displacement pin on a backend that does not tessellate: the
+			// ball above is the flat mesh, and says so, rather than looking like a
+			// graph whose height does nothing.
+			if (tex && !st.isFunction && mat && !mat->customShaderDispGlsl.empty() &&
+			    !(ctx.renderer && ctx.renderer->SupportsTessellation()))
+			{
+				char note[96];
+				std::snprintf(note, sizeof(note), "Displacement not shown on %s",
+				              backendLabel(ctx.backend));
+				const ImVec2 ts = ImGui::CalcTextSize(note);
+				const ImVec2 p0(org.x + 6.0f, org.y + av.y - ts.y - 10.0f);
+				pdl->AddRectFilled(p0, ImVec2(p0.x + ts.x + 8.0f, p0.y + ts.y + 4.0f),
+				                   IM_COL32(0, 0, 0, 150), 3.0f);
+				pdl->AddText(ImVec2(p0.x + 4.0f, p0.y + 2.0f), EditorToolbar::kWarn, note);
+			}
 
 			// Orbit interaction over the whole preview area (an invisible button on top).
 			ImGui::SetCursorScreenPos(org);

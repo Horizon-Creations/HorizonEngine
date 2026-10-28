@@ -1,0 +1,17 @@
+== var2x-s512-off-V1-r2  2026-10-21 05:22:31  attempt 1
+before:
+  uptime:    load averages: 2.57 2.47 2.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      19.1% Python; 10.1% clion; 9.2% coreaudiod; 5.5% Spotify
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.17 2.38 2.29
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      11.7% coreaudiod; 10.9% Dock; 5.8% WindowServer; 5.5% clion
+  foreign:   none

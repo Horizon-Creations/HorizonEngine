@@ -1,6 +1,8 @@
 #include "doctest.h"
 #include "EditorSelection.h"
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/Components/HierarchyComponent.h>
+#include <algorithm>
 
 // The selection set the outliner, viewport and inspector share. Everything here
 // is handles only — no ImGui, no world except where prune() needs a registry to
@@ -178,4 +180,84 @@ TEST_CASE("EditorSelection: roots leaves out a member whose ancestor is selected
 	REQUIRE(after.size() == 2);
 	CHECK(after[0] == parent);
 	CHECK(after[1] == orphan);
+}
+
+TEST_CASE("EditorSelection: roots over a Select All of thousands, chains and a cycle")
+{
+	// Select All hands the whole scene over and the viewport asks roots() every
+	// frame. 1250 chains of four: only the chain heads are roots, in order.
+	HorizonWorld world;
+	std::vector<Entity> all;
+	std::vector<Entity> heads;
+	for (int c = 0; c < 1250; ++c)
+	{
+		Entity parent = world.createEntity("Head");
+		heads.push_back(parent);
+		all.push_back(parent);
+		for (int d = 0; d < 3; ++d)
+		{
+			const Entity child = world.createEntity("Link");
+			world.reparentEntity(child, parent);
+			all.push_back(child);
+			parent = child;
+		}
+	}
+
+	// A hand-edited file can carry a parent cycle; the step cap ends the walk.
+	// The member below it is a root: nothing selected sits on its chain.
+	const Entity cycA   = world.createEntity("CycleA");
+	const Entity cycB   = world.createEntity("CycleB");
+	const Entity member = world.createEntity("BelowTheCycle");
+	world.registry().get<HierarchyComponent>(cycA).parent   = cycB;
+	world.registry().get<HierarchyComponent>(cycB).parent   = cycA;
+	world.registry().get<HierarchyComponent>(member).parent = cycA;
+
+	EditorSelection sel;
+	sel.setMany(all);
+	sel.add(member);
+	REQUIRE(sel.size() == all.size() + 1);
+
+	const std::vector<Entity> roots = sel.roots(world.registry());
+	REQUIRE(roots.size() == heads.size() + 1);
+	for (std::size_t i = 0; i < heads.size(); ++i) CHECK(roots[i] == heads[i]);
+	CHECK(roots.back() == member);
+}
+
+TEST_CASE("EditorSelection: contains agrees with entities after every change")
+{
+	// contains() answers from a set kept beside the ordered list; every mutator
+	// has to keep the two in step.
+	HorizonWorld world;
+	std::vector<Entity> pool;
+	for (int i = 0; i < 8; ++i) pool.push_back(world.createEntity("E"));
+
+	EditorSelection sel;
+	const auto agrees = [&] {
+		const auto& list = sel.entities();
+		for (const Entity e : pool)
+		{
+			const bool listed = std::find(list.begin(), list.end(), e) != list.end();
+			if (sel.contains(e) != listed) return false;
+		}
+		return !sel.contains(entt::null);
+	};
+
+	sel.set(pool[0]);                               CHECK(agrees());
+	sel.add(pool[1]); sel.add(pool[2]);             CHECK(agrees());
+	sel.add(pool[0]);                               CHECK(agrees()); // moved to the back
+	CHECK(sel.primary() == pool[0]);
+	sel.remove(pool[1]);                            CHECK(agrees());
+	sel.remove(pool[1]);                            CHECK(agrees()); // absent: no-op
+	sel.toggle(pool[3]); sel.toggle(pool[2]);       CHECK(agrees());
+	sel.addMany({ pool[4], pool[4], entt::null, pool[0], pool[5] });
+	CHECK(agrees());
+	CHECK(sel.size() == 4);                          // 0, 3, 4, 5
+	sel.setMany({ pool[6], pool[7], pool[6] });     CHECK(agrees());
+	CHECK(sel.size() == 2);
+	world.destroyEntity(pool[6]);
+	sel.prune(world.registry());                    CHECK(agrees());
+	CHECK_FALSE(sel.contains(pool[6]));
+	sel.set(entt::null);                            CHECK(agrees());
+	sel.add(pool[1]); sel.clear();                  CHECK(agrees());
+	CHECK(sel.empty());
 }

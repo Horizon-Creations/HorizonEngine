@@ -5,6 +5,7 @@
 #include "EditorAssetTypeCache.h" // shared, invalidatable path → AssetType sniff
 #include "EditorHelp.h"           // "Input Action/<label>" scope for the tooltips
 #include "EditorPanelState.h"
+#include "EditorTheme.h"         // the armed amber and the label that reads on it
 #include "EditorToolbar.h"       // shared toolbar strip
 #include "EditorWidgets.h"    // danger buttons for deletion     // shared per-tab state map
 #include "HcEditorUtil.h"         // HcEditorUtil::listAssets (action picker)
@@ -139,6 +140,20 @@ bool captureIsOn(const std::string& assetPath, int entryIndex, int subIndex, Bin
 	       s_capture.entryIndex == entryIndex && s_capture.subIndex == subIndex;
 }
 
+// A button that is listening for an input: the accent, and its label in Ink.
+// It used to be a literal amber (214,122,30) with the default white-ish label,
+// 2.6:1 and 2.1:1 hovered. Pressed is pinned too, because the theme's pressed
+// slot is a translucent amber that Ink would not read on.
+constexpr int kArmedColours = 4;
+void pushArmedColours()
+{
+	using namespace HE::Ed::Theme;
+	ImGui::PushStyleColor(ImGuiCol_Button,        Accent);
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, AccentHi);
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  Accent);
+	ImGui::PushStyleColor(ImGuiCol_Text,          textOn(Accent));
+}
+
 // The Bind button of one binding row, filling the card's bind column. Armed it
 // turns amber and says what it is waiting for; clicking it again (or Esc)
 // cancels. Every binding row in the card gets one — keys, pad buttons, mouse
@@ -150,13 +165,12 @@ void bindButtonCell(const std::string& assetPath, int entryIndex, int subIndex,
 {
 	if (captureIsOn(assetPath, entryIndex, subIndex, slot))
 	{
-		// The armed state in the editor's warn amber, full cell width, and the
+		// The armed state in the accent (pushArmedColours), full cell width, and the
 		// how-to-cancel in the tooltip rather than crammed into the label.
-		ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
-		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
+		pushArmedColours();
 		if (ImGui::Button(armedLabel, ImVec2(-FLT_MIN, 0.0f)))
 			s_capture.slot = BindSlot::None;
-		ImGui::PopStyleColor(2);
+		ImGui::PopStyleColor(kArmedColours);
 		if (ImGui::IsItemHovered())
 			// A mouse row cannot be cancelled by clicking: the click IS the
 			// binding it is waiting for, wherever it lands.
@@ -299,16 +313,19 @@ bool mouseButtonComboCell(const char* id, std::string& value, const char* noneLa
 	return changed;
 }
 
-// Case-insensitive substring match for the Add Binding search field.
-bool matchesFilter(const std::string& label, const std::string& filter)
+std::string lowerCopy(std::string s)
 {
-	if (filter.empty()) return true;
-	auto lower = [](std::string s){
-		std::transform(s.begin(), s.end(), s.begin(),
-		               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-		return s;
-	};
-	return lower(label).find(lower(filter)) != std::string::npos;
+	std::transform(s.begin(), s.end(), s.begin(),
+	               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+	return s;
+}
+
+// Case-insensitive substring match for the Add Binding search field;
+// `loweredFilter` is the search text already run through lowerCopy once per frame.
+bool matchesFilter(const std::string& label, const std::string& loweredFilter)
+{
+	if (loweredFilter.empty()) return true;
+	return lowerCopy(label).find(loweredFilter) != std::string::npos;
 }
 
 // Every named keyboard key, built once. ~240 entries — small enough to filter
@@ -701,7 +718,6 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 		return true;
 	};
 
-	const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 	int removeEntry = -1;
 
 	// Column rails shared by every card, so a Bind button in entry three sits
@@ -741,6 +757,9 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::GetContentRegionAvail().x - 100.0f - ImGui::GetStyle().ItemSpacing.x));
 		if (ImGui::BeginCombo("##action", shown.c_str()))
 		{
+			// Fetched here, with the dropdown open, not once per frame for a
+			// list nobody is looking at (EDT-1001).
+			const auto actions = HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::InputAction);
 			for (const auto& a : actions)
 				if (ImGui::Selectable(a.label.c_str(), a.path == e.actionPath))
 				{ e.actionPath = a.path; e.valueType = -1; st.dirty = true; }
@@ -1059,15 +1078,14 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			ImGui::SameLine();
 			if (detecting)
 			{
-				ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(214, 122, 30, 255));
-				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(230, 140, 40, 255));
+				pushArmedColours();
 				// Both hand-written tooltips here are entries now, so F1 reaches
 				// them and the reference lists them. The one this replaced said
 				// different things for a button action and an axis action; the
 				// entry says both, which is a sentence longer and no less true.
 				if (EditorWidgets::button("Press any input\xE2\x80\xA6", ImVec2(150.0f, 0.0f)))
 					s_capture.slot = BindSlot::None;
-				ImGui::PopStyleColor(2);
+				ImGui::PopStyleColor(kArmedColours);
 			}
 			else if (EditorWidgets::button("Auto Detect", ImVec2(150.0f, 0.0f)))
 			{
@@ -1083,6 +1101,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			// opens, so typing filters immediately.
 			if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
 			ImGui::InputTextWithHint("##search", "Search bindings\xE2\x80\xA6", &s_addFilter);
+			const std::string loweredFilter = lowerCopy(s_addFilter);
 
 			bool chose = false;
 			ImGui::BeginChild("##addlist", ImVec2(280.0f, 320.0f));
@@ -1092,7 +1111,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			auto axisItem = [&](const char* label, AxisSource src, bool padPair,
 			                    std::vector<AxisRow>& into, const char* idSuffix)
 			{
-				if (!matchesFilter(label, s_addFilter)) return;
+				if (!matchesFilter(label, loweredFilter)) return;
 				if (ImGui::Selectable((std::string(label) + idSuffix).c_str()))
 				{
 					AxisRow r;
@@ -1125,7 +1144,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 			                     AxisSource sy, const char* py, const char* ny, bool padY,
 			                     float scaleY)
 			{
-				if (!matchesFilter(label, s_addFilter)) return;
+				if (!matchesFilter(label, loweredFilter)) return;
 				if (ImGui::Selectable((std::string(label) + "##comp").c_str()))
 				{
 					AxisRow x; x.source = sx; x.uiPadRow = padX;
@@ -1150,7 +1169,7 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 					if (!stored || !stored[0]) continue;
 					const std::string label =
 						HE::gamepadButtonDisplayName(static_cast<SDL_GamepadButton>(b));
-					if (!matchesFilter(label, s_addFilter)) continue;
+					if (!matchesFilter(label, loweredFilter)) continue;
 					if (ImGui::Selectable((label + "##gp").c_str()))
 					{ e.gamepadButtons.emplace_back(stored); st.dirty = true; chose = true; }
 				}
@@ -1158,14 +1177,14 @@ void InputAssetPanel::render(AppContext& ctx, const std::string& assetPath,
 				for (int b = 0; b < kMouseButtonCount; ++b)
 				{
 					const std::string label = HE::mouseButtonDisplayName(b);
-					if (!matchesFilter(label, s_addFilter)) continue;
+					if (!matchesFilter(label, loweredFilter)) continue;
 					if (ImGui::Selectable((label + "##ms").c_str()))
 					{ e.mouseButtons.push_back(HE::mouseButtonName(b)); st.dirty = true; chose = true; }
 				}
 				ImGui::SeparatorText("Keyboard");
 				for (const std::string& keyName : allKeyNames())
 				{
-					if (!matchesFilter(keyName, s_addFilter)) continue;
+					if (!matchesFilter(keyName, loweredFilter)) continue;
 					if (ImGui::Selectable((keyName + "##kb").c_str()))
 					{ e.keys.push_back(keyName); st.dirty = true; chose = true; }
 				}

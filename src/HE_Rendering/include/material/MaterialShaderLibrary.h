@@ -169,6 +169,25 @@ public:
         // same frame still sees its eight lights.
         float clusterParams[4] = {};
         float clusterCamFwd[4] = {};
+        // More of the weather for MATERIALS (append-only, v3.4): x = puddle size in
+        // metres (the Weather details panel's Puddle Size; the graph's Weather node
+        // clamps it to >= 0.5). `weather` above carries the 0..1 values. Zero in the
+        // fill sites that never call HE::FillMaterialWeather (previews, UI).
+        float weather2[4]      = {};
+        // Water disturbances (append-only, v3.5, Thema 179): the rings the water
+        // physics raises where a body goes into or out of the surface, laid out
+        // exactly like WaterRippleBlock (Renderer/WaterRipples.h) — HE::FillMaterialWater
+        // copies the three arrays over, LightPacking.cpp static_asserts the sizes. The
+        // Water Ripple node reads them. waterRipples.x = 0 is "no rings": the node
+        // returns zeros and its loop never runs, which is what every fill site that
+        // never calls FillMaterialWater (previews, UI, D3D11 / D3D12 / Vulkan until
+        // they do) leaves in place.
+        //   waterRipples : x = live count (0..16), y = ring speed (m/s), z = decay time (s)
+        //   waterRippleA : xy = centre (world XZ), z = start radius (m), w = strength 0..1
+        //   waterRippleB : x = age (s), y = kind (WaterRippleKind)
+        float waterRipples[4]     = {};
+        float waterRippleA[16][4] = {};
+        float waterRippleB[16][4] = {};
     };
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
     // Clustered variant's light lists (fragmentClustered): GLSL bindings 24/25/26
@@ -407,7 +426,8 @@ public:
         float camPos[4]       = {}; // xyz camera position (normal faces the viewer)
     };
 
-    // Clustered-lighting variants of the two resolves (plan P7, Metal only):
+    // Clustered-lighting variants of the two resolves (plan P7; the sampled one
+    // also for HLSL and SPIR-V since Thema 150, the tile one Metal only):
     // heLitP shades ambient/GI/directional from a DIRECTIONAL-ONLY light window,
     // and all point/spot lights come from per-cluster light lists in SSBOs
     // (bindings 24/25/26 → Metal fragment buffers 4/5/6) — the 8-light limit
@@ -416,6 +436,28 @@ public:
     // GI local masks are not applied to cluster lights (v1 limitation).
     const Compiled& deferredResolveClustered(Backend backend);
     const Compiled& deferredResolveTileClustered(Backend backend);
+
+    // D3D (HLSL SM 5.0) register contract of deferredResolve[Clustered](HLSL),
+    // pinned in compileResolveVariant (Thema 150, docs/deferred-renderer-plan.md
+    // §10.4). Everything the preamble declares keeps the material pin table's
+    // registers (b0, t10..t18, t31..t33 with their moved samplers), the cluster
+    // lists keep t24..t26. Only the resolve's own inputs need numbers:
+    //   HeResolve (binding 23)        → b4   (b0..b13 is all SM 5.0 has)
+    //   heGB0/1/2, heGBDepth (19..22) → t27..t30, samplers s2/s4/s5/s6
+    // t27..t30 rather than the binding numbers: D3D11's built-in scene shader
+    // keeps its structured cluster lists on t18..t20, and a G-buffer view left on
+    // t19/t20 would be read as a cluster grid by the next built-in draw. The
+    // samplers are the ones the resolve leaves free (it declares neither heTex0
+    // nor heTexP0..3); s7 is the one register still unused.
+    static constexpr int kHlslResolveUboReg      = 4;
+    static constexpr int kHlslResolveGB0Reg      = 27;
+    static constexpr int kHlslResolveGB1Reg      = 28;
+    static constexpr int kHlslResolveGB2Reg      = 29;
+    static constexpr int kHlslResolveDepthReg    = 30;
+    static constexpr int kHlslResolveGB0Sampler   = 2;
+    static constexpr int kHlslResolveGB1Sampler   = 4;
+    static constexpr int kHlslResolveGB2Sampler   = 5;
+    static constexpr int kHlslResolveDepthSampler = 6;
 
     // Cross-compile, cached. The Metal backend pins the vertex to verts@0 / Uniforms@1 so
     // it drops into the fixed geometry-pass bind points; other backends use their natural
@@ -445,6 +487,44 @@ public:
     // the HeLighting/HeParams UBOs, and the offset is applied in world space.
     const Compiled& customVertex(uint64_t bodyHash, const std::string& body, Backend backend);
 
+    // Instanced twins of standardVertex / customVertex (Thema 182, plan 2e): one draw
+    // for a whole GeometryPass batch of a graph material, wind (WPO) included. The
+    // per-draw u.model / u.mvp come per instance instead:
+    //   Metal  a mat4 array at vertex buffer 5, {mvp, model} per instance (the
+    //          scene's k_instStride layout); the U block at buffer 1 still carries
+    //          color/flags/pbr. Same maths as the per-draw form.
+    //   others the model as vec4 attributes at locations 4-7 (divisor 1, the mesh
+    //          VAO's instance binding); u.mvp must hold the batch's viewProj.
+    // Varyings and the U block are the plain variant's, so every material fragment
+    // pairs with either form unchanged.
+    const Compiled& standardVertexInstanced(Backend backend);
+    const Compiled& customVertexInstanced(uint64_t bodyHash, const std::string& body, Backend backend);
+
+    // ── Tessellation for the Displacement pin (Thema 207) ─────────────────────
+    // `disp` is MaterialAsset::customShaderDispGlsl (settings line, declarations,
+    // statements ending in `float heDisp`, see HE::matSplitDisplacement). The two
+    // stages sit between the vertex (standard or WPO, unchanged) and the fragment:
+    //   control: per-edge factors from the camera distance of the edge midpoint
+    //            (shared edges get the same factor → no cracks), fractional_odd;
+    //   eval:    interpolates the varyings, runs the statements, moves the vertex
+    //            along the normalised interpolated normal. Height 0 gives back the
+    //            interpolated clip position exactly (the offset is added to it).
+    // Bindings are the FRAGMENT's: HeLighting 0, U 1, heTex0 2, HeParams 3,
+    // heTexP0..3 4..7, heLandscapeWeights 14 — one table serves both stages.
+    // GLSL410/GLSL430/SpirV: real tesc/tese (triangles, ccw = the input winding in
+    // GL's lower-left domain; SpirV says cw, the same winding in Vulkan's default
+    // upper-left domain).
+    // HLSL: hand-written shells (SPIRV-Cross has no HLSL tessellation): the control
+    // source is an hs_5_0 unit with entry kHlslHullEntry, the eval source the
+    // statements as a kernel (compileHlslKernel) plus a ds_5_0 shell with entry
+    // kHlslDomainEntry, same registers as the material fragment.
+    // Metal / GLSLES300, or text that is not a displacement body → ok = false; the
+    // caller then draws the material without tessellation (the fallback).
+    const Compiled& tessControl(uint64_t dispHash, const std::string& disp, Backend backend);
+    const Compiled& tessEval(uint64_t dispHash, const std::string& disp, Backend backend);
+    static constexpr const char* kHlslHullEntry   = "HSMain";
+    static constexpr const char* kHlslDomainEntry = "DSMain";
+
     // Screen-space quad vertex for materials on IN-GAME UI elements: emits the
     // same varyings as standardVertex (so any material fragment drops in) from
     // an attribute-less 4-vertex strip. Repurposes the standard U block (same
@@ -459,15 +539,15 @@ public:
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
                    m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear();
-                   m_reflPrepassCache.clear(); }
+                   m_reflPrepassCache.clear(); m_tessCache.clear(); }
 
 private:
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
                                     bool clustered);
 
-    std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend
+    std::unordered_map<int, Compiled>      m_vertCache;  // key = (int)backend (+0x100 instanced)
     std::unordered_map<uint64_t, Compiled> m_fragCache;  // key = mix(sourceHash, backend, clustered)
-    std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend)
+    std::unordered_map<uint64_t, Compiled> m_cvertCache; // key = mix(bodyHash, backend, instanced)
     std::unordered_map<int, Compiled>      m_uiVertCache; // key = (int)backend
     std::unordered_map<int, Compiled>      m_resolveCache; // key = (int)backend (+64 clustered)
     std::unordered_map<int, Compiled>      m_resolveTileCache; // key = (int)backend (+64 clustered)
@@ -478,5 +558,6 @@ private:
     // full, and a collision there hands a caller someone else's shader while
     // still reporting ok.
     std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment); 0x100 + backend = instanced vertex
+    std::unordered_map<uint64_t, Compiled> m_tessCache;   // key = mix(dispHash, backend, control/eval)
 };
 } // namespace HE

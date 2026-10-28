@@ -1,0 +1,15 @@
+== land512-r2 00:04:19
+0:04  up 23 days,  3:25, 1 user, load averages: 3.21 6.45 8.94
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=27
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 3.21
+0:04  up 23 days,  3:25, 1 user, load averages: 2.91 6.23 8.81
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=90
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[land512-r2] rc=0 wall=16s fps=50.845750852658895 cpu_p50=19.528167 gpu_p50=15.82691678777337 modes={'detailed': 400} size=2840x1528

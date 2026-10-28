@@ -3,6 +3,8 @@
 #include "TestFsUtil.h"
 
 #include "ProjectSettingsPanel.h"
+#include "EditorGraphics.h"
+#include <functional>
 #include "EditorApplication.h"   // AppContext
 #include "EditorSelection.h"
 #include "EditorTheme.h"
@@ -20,12 +22,12 @@
 #include <string>
 #include <vector>
 
-// ── The Project Settings tab, driven headless ────────────────────────────────
-// The tab is a rail and nine pages over a real ProjectData. What can be
+// ── The project pages of Preferences, driven headless ────────────────────────────────
+// The tab is a rail and a dozen pages over a real ProjectData. What can be
 // checked without a person: that every page draws over a real project (and
 // that none of them writes a settings file merely by being LOOKED at — a
 // project that never touched its settings must not grow one), and that one
-// real edit — the first checkbox of Rendering ▸ Defaults — reaches
+// real edit — the first checkbox of Project ▸ Game Window — reaches
 // Config/ProjectSettings.json through the ProjectManager. With HE_UI_DUMP_DIR
 // set every page is written out as well (scripts/he_uishot.py turns them into
 // PNGs), which is how the layout was looked at.
@@ -125,14 +127,25 @@ namespace
 		}
 	};
 
-	// One frame of the tab filling the display, with the pointer where the
+	// What the window draws: a project page's body, or one of the two shared rows
+	// blocks (Preferences ▸ Graphics / Input), each in a window of its own — the
+	// Preferences rail and heading are EditorSettingsPanel's and not under test.
+	std::function<void(AppContext&)> g_body;
+
+	// One frame of the page filling the display, with the pointer where the
 	// caller put it. Returns the id ImGui says the pointer is on.
 	ImGuiID frame(AppContext& ctx, bool mouseDown, he_ui::Image* shot = nullptr)
 	{
 		ImGuiIO& io = ImGui::GetIO();
 		io.AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
 		ImGui::NewFrame();
-		ProjectSettingsPanel::render(ctx, ImVec2(0.0f, 0.0f), ImVec2(float(W), float(H)));
+		ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("##projectpage", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
+		if (g_body) g_body(ctx);
+		ImGui::End();
 		EditorWidgets::drawQueuedHelp();
 		const ImGuiID hovered = ImGui::GetHoveredID();
 		ImGui::Render();
@@ -157,12 +170,25 @@ namespace
 		frame(ctx, false);
 	}
 
-	// Switch the tab to a page the way EditorUI would: raise the request and
-	// consume it (the tab strip does the consuming in the editor).
+	// Show a page the way EditorUI would: raise the request and consume it, then
+	// draw the page's body.
 	void showPage(ProjectSettingsPanel::Page page)
 	{
 		ProjectSettingsPanel::requestOpen(page);
 		ProjectSettingsPanel::takeOpenRequest();
+		g_body = [page](AppContext& c) { ProjectSettingsPanel::drawPage(c, page); };
+	}
+	void showGraphics()
+	{
+		g_body = [](AppContext& c)
+		{
+			const auto rows = EditorGraphics::postProcessingRows();
+			ProjectSettingsPanel::drawGraphics(c, rows.keys, rows.count);
+		};
+	}
+	void showGamepad()
+	{
+		g_body = [](AppContext& c) { ProjectSettingsPanel::drawGamepad(c); };
 	}
 
 	struct Item { ImGuiID id; float mid; };
@@ -195,8 +221,8 @@ namespace
 
 	constexpr std::uint8_t kBgR = 20, kBgG = 18, kBgB = 15;
 
-	// The rail is 210 px wide; the page's controls start right of it.
-	constexpr float kPageX = 240.0f;
+	// The page fills the window: its controls start at the window padding.
+	constexpr float kPageX = 16.0f;
 }
 
 TEST_CASE("project settings ui: every page draws over a real project, and looking writes nothing")
@@ -236,11 +262,20 @@ TEST_CASE("project settings ui: every page draws over a real project, and lookin
 		he_ui::Image img;
 		for (int i = 0; i < 4; ++i) frame(ctx, false, i == 3 ? &img : nullptr);
 		REQUIRE(img.valid());
-		// The rail alone is a few hundred inked pixels; a page with a heading,
-		// a hint and at least one control is thousands.
-		CHECK_MESSAGE(img.inkedPixels(kBgR, kBgG, kBgB) > 4000, pg.name);
+		// A page with a hint and at least one control is thousands of inked pixels.
+		CHECK_MESSAGE(img.inkedPixels(kBgR, kBgG, kBgB) > 1500, pg.name);
 		if (dump && *dump)
 			he_ui::writeBmp(img, std::string(dump) + "/project-settings-" + pg.name + ".bmp");
+	}
+	// The two shared rows blocks draw over a project too, without writing.
+	for (const auto& shared : { std::pair<const char*, void (*)()>{ "graphics", showGraphics },
+	                            std::pair<const char*, void (*)()>{ "gamepad",  showGamepad } })
+	{
+		shared.second();
+		he_ui::Image img;
+		for (int i = 0; i < 4; ++i) frame(ctx, false, i == 3 ? &img : nullptr);
+		REQUIRE(img.valid());
+		CHECK_MESSAGE(img.inkedPixels(kBgR, kBgG, kBgB) > 1000, shared.first);
 	}
 	CHECK_FALSE(std::filesystem::exists(settingsFile));
 	CHECK(pm.currentProject().settings.isDefault());
@@ -248,7 +283,7 @@ TEST_CASE("project settings ui: every page draws over a real project, and lookin
 	he_test::removeAllQuiet(dir);
 }
 
-TEST_CASE("project settings ui: the first edit on Rendering > Defaults lands in Config/ProjectSettings.json")
+TEST_CASE("project settings ui: the first edit on Game Window lands in Config/ProjectSettings.json")
 {
 	Harness harness;
 
@@ -341,10 +376,9 @@ TEST_CASE("project settings ui: the Anti-Cheat page draws its policy grid and a 
 	for (int i = 0; i < 3; ++i) frame(ctx, false, i == 2 ? &above : nullptr);
 	REQUIRE(above.valid());
 
-	// Scroll the page body to its end. The child's name is hashed with its
-	// parents', so it is found by the fragment the panel gives it.
+	// Scroll the page window to its end; it is found by name.
 	for (ImGuiWindow* w : GImGui->Windows)
-		if (w->Name && std::strstr(w->Name, "##projbody"))
+		if (w->Name && std::strstr(w->Name, "##projectpage"))
 			ImGui::SetScrollY(w, w->ScrollMax.y);
 	he_ui::Image below;
 	for (int i = 0; i < 3; ++i) frame(ctx, false, i == 2 ? &below : nullptr);
@@ -360,6 +394,75 @@ TEST_CASE("project settings ui: the Anti-Cheat page draws its policy grid and a 
 	CHECK_FALSE(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
 	REQUIRE(pm.currentProject().settings.antiCheat.rules.size() == 1);
 	CHECK(pm.currentProject().settings.antiCheat.rules[0].name == "Damage");
+
+	he_test::removeAllQuiet(dir);
+}
+
+// The graphics pages are the Preferences rows over a scratch config: switching
+// the project's own graphics on captures what the editor shows into the block,
+// and an edit of a row below it lands in the file.
+TEST_CASE("project settings ui: Graphics - switching graphics on writes the block, and the config stays the user's")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_gfx";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	const auto settingsFile = HE::projectSettingsPath(pm.projectRoot());
+
+	ContextBits bits;
+	bits.config.BloomIntensity = 1.25f;        // the user's value, not the default
+	AppContext ctx = bits.make(pm);
+	showGraphics();
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+
+	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 40.0f);
+	REQUIRE_MESSAGE(!items.empty(), "no control found down the Graphics rows");
+	REQUIRE_FALSE(pm.currentProject().settings.graphics.enabled);
+
+	clickAt(ctx, kPageX + 8.0f, items[0].mid);
+	const HE::ProjectGraphics& g = pm.currentProject().settings.graphics;
+	CHECK(g.enabled);
+	CHECK(g.bloomIntensity == doctest::Approx(1.25f));   // started from what the editor showed
+	REQUIRE(std::filesystem::exists(settingsFile));
+
+	ProjectManager again;
+	REQUIRE(again.loadProject(pm.currentProject().path));
+	CHECK(again.currentProject().settings.graphics.enabled);
+	CHECK(again.currentProject().settings.graphics.bloomIntensity == doctest::Approx(1.25f));
+
+	// The page edits a scratch copy: the editor's own config is untouched.
+	CHECK(bits.config.BloomIntensity == doctest::Approx(1.25f));
+
+	he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("project settings ui: Input - switching the project's deadzones on starts from the editor's")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_input";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+
+	ContextBits bits;
+	bits.config.GamepadStickDeadzone = 0.3f;
+	AppContext ctx = bits.make(pm);
+	showGamepad();
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) frame(ctx, false);
+
+	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 40.0f);
+	REQUIRE_MESSAGE(!items.empty(), "no control found down the Gamepad rows");
+	REQUIRE_FALSE(pm.currentProject().settings.input.enabled);
+
+	clickAt(ctx, kPageX + 8.0f, items[0].mid);
+	CHECK(pm.currentProject().settings.input.enabled);
+	CHECK(pm.currentProject().settings.input.stickDeadzone == doctest::Approx(0.3f));
+	CHECK(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
 
 	he_test::removeAllQuiet(dir);
 }

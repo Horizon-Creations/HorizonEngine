@@ -1,6 +1,6 @@
 #include "doctest.h"
 
-#include "McpToolRegistry.h"
+#include "McpToolHooks.h"
 #include "AssetStubWriter.h"
 #include "EditorAssetTypeCache.h"
 #include "EditorCommands.h"   // entityByUuid / uuidOf — how a test addresses what a client addresses

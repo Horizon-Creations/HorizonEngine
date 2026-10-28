@@ -356,8 +356,11 @@ SocketResult socketConnect(SocketHandle h, const std::string& host,
 }
 
 SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t port,
-                                       SocketHandle& outSocket) {
+                                       SocketHandle& outSocket,
+                                       unsigned skipCandidates,
+                                       unsigned* outCandidateCount) {
     outSocket = kInvalidSocket;
+    if (outCandidateCount) *outCandidateCount = 0;
     if (!socketSystemInit()) return SocketResult::Error;
 
     // AF_UNSPEC: let the resolver decide. A session directory records whichever
@@ -374,8 +377,14 @@ SocketResult socketCreateTcpConnecting(const std::string& host, std::uint16_t po
         return SocketResult::Error;
     }
 
+    unsigned candidateCount = 0;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) ++candidateCount;
+    if (outCandidateCount) *outCandidateCount = candidateCount;
+
     SocketResult result = SocketResult::Error;
-    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+    unsigned candidateIndex = 0;
+    for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next, ++candidateIndex) {
+        if (candidateIndex < skipCandidates) continue;
 #ifdef _WIN32
         SOCKET s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s == INVALID_SOCKET) continue;
@@ -754,7 +763,65 @@ bool parseNumericAddress(const std::string& host, std::uint16_t port,
     return true;
 }
 
+// SocketAddress <-> sockaddr. Only this file sees the platform structs.
+bool fromSockaddr(const sockaddr_storage& ss, SocketAddress& out) {
+    out = SocketAddress{};
+    if (ss.ss_family == AF_INET6) {
+        const auto* v6 = reinterpret_cast<const sockaddr_in6*>(&ss);
+        out.family = 6;
+        std::memcpy(out.ip, &v6->sin6_addr, 16);
+        out.port  = ntohs(v6->sin6_port);
+        out.scope = v6->sin6_scope_id;
+        return true;
+    }
+    if (ss.ss_family == AF_INET) {
+        const auto* v4 = reinterpret_cast<const sockaddr_in*>(&ss);
+        out.family = 4;
+        std::memcpy(out.ip, &v4->sin_addr, 4);
+        out.port = ntohs(v4->sin_port);
+        return true;
+    }
+    return false;
+}
+
+socklen_t toSockaddr(const SocketAddress& a, sockaddr_storage& out) {
+    std::memset(&out, 0, sizeof(out));
+    if (a.family == 6) {
+        auto* v6 = reinterpret_cast<sockaddr_in6*>(&out);
+        v6->sin6_family   = AF_INET6;
+        std::memcpy(&v6->sin6_addr, a.ip, 16);
+        v6->sin6_port     = htons(a.port);
+        v6->sin6_scope_id = a.scope;
+        return static_cast<socklen_t>(sizeof(sockaddr_in6));
+    }
+    if (a.family == 4) {
+        auto* v4 = reinterpret_cast<sockaddr_in*>(&out);
+        v4->sin_family = AF_INET;
+        std::memcpy(&v4->sin_addr, a.ip, 4);
+        v4->sin_port   = htons(a.port);
+        return static_cast<socklen_t>(sizeof(sockaddr_in));
+    }
+    return 0;
+}
+
 } // namespace
+
+bool socketParseAddress(const std::string& numericHost, std::uint16_t port, SocketAddress& out) {
+    sockaddr_storage ss{};
+    socklen_t len = 0;
+    if (!parseNumericAddress(numericHost, port, ss, len)) return false;
+    return fromSockaddr(ss, out);
+}
+
+std::string socketAddressText(const SocketAddress& a) {
+    char ip[INET6_ADDRSTRLEN] = {};
+    if (a.family == 6) {
+        if (::inet_ntop(AF_INET6, a.ip, ip, sizeof(ip))) return ip;
+    } else if (a.family == 4) {
+        if (::inet_ntop(AF_INET, a.ip, ip, sizeof(ip))) return ip;
+    }
+    return {};
+}
 
 bool socketBindUdp6To(SocketHandle h, const std::string& localAddress, std::uint16_t port) {
     if (h == kInvalidSocket) return false;
@@ -771,7 +838,14 @@ bool socketBindUdp6To(SocketHandle h, const std::string& localAddress, std::uint
 
 bool socketBindUdp(SocketHandle h, std::uint16_t port) {
     if (h == kInvalidSocket) return false;
-    socketSetReuseAddr(h, true);
+    // No SO_REUSEADDR here, on purpose (Thema 170). The TCP listener sets it for
+    // TIME_WAIT; UDP has no such state, so there is nothing to reuse and the
+    // option can only do harm: on Linux two sockets that both set it may bind
+    // the same port, and the ephemeral picker for port 0 does not skip a port a
+    // reuse socket holds. Every client transport bound through here then risked
+    // sharing a port with another client or a host, and the kernel delivered
+    // replies to either. A port that is meant to be shared (discovery) goes
+    // through socketBindUdpShared.
 
     sockaddr_in addr{};
     addr.sin_family      = AF_INET;
@@ -880,7 +954,9 @@ SocketHandle socketCreateUdpDualStack(std::uint16_t port) {
                          &readBack, &rbLen) != 0) readBack = 1;
 #endif
         if (readBack == 0) {
-            socketSetReuseAddr(h6, true);
+            // No SO_REUSEADDR on the host's UDP socket either — see socketBindUdp.
+            // A second host on the same fixed port must fail to bind, not
+            // silently share it and split the clients between two servers.
             sockaddr_in6 addr{};
             addr.sin6_family = AF_INET6;
             addr.sin6_addr   = in6addr_any;
@@ -1095,20 +1171,11 @@ bool socketSetMulticastTtl(SocketHandle h, int ttl) {
 #endif
 }
 
-SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t len,
-                          const std::string& host, std::uint16_t port,
-                          std::size_t& outSent) {
-    outSent = 0;
-    if (h == kInvalidSocket) return SocketResult::Error;
+namespace {
 
-    // Either family: the address decides, so an IPv6 socket can be used through
-    // the same call. Scope suffixes on link-local addresses are understood.
-    sockaddr_storage addr{};
-    socklen_t addrLen = 0;
-    if (!parseNumericAddress(host, port, addr, addrLen)) {
-        return SocketResult::Error;
-    }
-
+// The one sendto behind both socketSendTo overloads.
+SocketResult sendToSockaddr(SocketHandle h, const std::uint8_t* data, std::size_t len,
+                            sockaddr_storage& addr, socklen_t addrLen, std::size_t& outSent) {
     // The first sendto on an unbound socket binds it to every interface, which
     // is a bind like any other as far as the Windows Firewall is concerned.
     // Loopback-only binds it to the loopback of the destination's family first.
@@ -1153,15 +1220,9 @@ SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t 
     return SocketResult::Error;
 }
 
-SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf, std::size_t len,
-                            std::size_t& outReceived, std::string& outFromHost,
-                            std::uint16_t& outFromPort) {
-    outReceived = 0;
-    outFromHost.clear();
-    outFromPort = 0;
-    if (h == kInvalidSocket) return SocketResult::Error;
-
-    sockaddr_storage from{};
+// The one recvfrom behind both socketRecvFrom overloads.
+SocketResult recvFromSockaddr(SocketHandle h, std::uint8_t* buf, std::size_t len,
+                              std::size_t& outReceived, sockaddr_storage& from) {
 #ifdef _WIN32
     int fromLen = static_cast<int>(sizeof(from));
     const int n = ::recvfrom(static_cast<SOCKET>(h), reinterpret_cast<char*>(buf),
@@ -1174,21 +1235,76 @@ SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf, std::size_t len,
 #endif
     if (n > 0) {
         outReceived = static_cast<std::size_t>(n);
-        char ip[INET6_ADDRSTRLEN] = {};
-        if (from.ss_family == AF_INET6) {
-            auto* v6 = reinterpret_cast<sockaddr_in6*>(&from);
-            if (::inet_ntop(AF_INET6, &v6->sin6_addr, ip, sizeof(ip))) outFromHost = ip;
-            outFromPort = ntohs(v6->sin6_port);
-        } else {
-            auto* v4 = reinterpret_cast<sockaddr_in*>(&from);
-            if (::inet_ntop(AF_INET, &v4->sin_addr, ip, sizeof(ip))) outFromHost = ip;
-            outFromPort = ntohs(v4->sin_port);
-        }
         return SocketResult::Ok;
     }
     const int e = lastError();
     if (errIsWouldBlock(e) || errIsInterrupted(e)) return SocketResult::WouldBlock;
     return SocketResult::Error;
+}
+
+} // namespace
+
+SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t len,
+                          const std::string& host, std::uint16_t port,
+                          std::size_t& outSent) {
+    outSent = 0;
+    if (h == kInvalidSocket) return SocketResult::Error;
+
+    // Either family: the address decides, so an IPv6 socket can be used through
+    // the same call. Scope suffixes on link-local addresses are understood.
+    sockaddr_storage addr{};
+    socklen_t addrLen = 0;
+    if (!parseNumericAddress(host, port, addr, addrLen)) {
+        return SocketResult::Error;
+    }
+    return sendToSockaddr(h, data, len, addr, addrLen, outSent);
+}
+
+SocketResult socketSendTo(SocketHandle h, const std::uint8_t* data, std::size_t len,
+                          const SocketAddress& to, std::size_t& outSent) {
+    outSent = 0;
+    if (h == kInvalidSocket) return SocketResult::Error;
+    sockaddr_storage addr{};
+    const socklen_t addrLen = toSockaddr(to, addr);
+    if (addrLen == 0) return SocketResult::Error;
+    return sendToSockaddr(h, data, len, addr, addrLen, outSent);
+}
+
+SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf, std::size_t len,
+                            std::size_t& outReceived, std::string& outFromHost,
+                            std::uint16_t& outFromPort) {
+    outReceived = 0;
+    outFromHost.clear();
+    outFromPort = 0;
+    if (h == kInvalidSocket) return SocketResult::Error;
+
+    sockaddr_storage from{};
+    const SocketResult rc = recvFromSockaddr(h, buf, len, outReceived, from);
+    if (rc != SocketResult::Ok) return rc;
+    char ip[INET6_ADDRSTRLEN] = {};
+    if (from.ss_family == AF_INET6) {
+        auto* v6 = reinterpret_cast<sockaddr_in6*>(&from);
+        if (::inet_ntop(AF_INET6, &v6->sin6_addr, ip, sizeof(ip))) outFromHost = ip;
+        outFromPort = ntohs(v6->sin6_port);
+    } else {
+        auto* v4 = reinterpret_cast<sockaddr_in*>(&from);
+        if (::inet_ntop(AF_INET, &v4->sin_addr, ip, sizeof(ip))) outFromHost = ip;
+        outFromPort = ntohs(v4->sin_port);
+    }
+    return SocketResult::Ok;
+}
+
+SocketResult socketRecvFrom(SocketHandle h, std::uint8_t* buf, std::size_t len,
+                            std::size_t& outReceived, SocketAddress& outFrom) {
+    outReceived = 0;
+    outFrom = SocketAddress{};
+    if (h == kInvalidSocket) return SocketResult::Error;
+
+    sockaddr_storage from{};
+    const SocketResult rc = recvFromSockaddr(h, buf, len, outReceived, from);
+    if (rc != SocketResult::Ok) return rc;
+    fromSockaddr(from, outFrom);   // an unknown family leaves family 0: no peer has it
+    return SocketResult::Ok;
 }
 
 // ─── Local address ───────────────────────────────────────────────────────────

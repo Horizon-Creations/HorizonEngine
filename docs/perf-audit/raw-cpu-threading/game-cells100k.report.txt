@@ -1,0 +1,43 @@
+/tmp/cta/game_cells/dumps/profile_20261022_033832.json
+  window 10525 ms, 11 lane(s), 56908 spans
+
+== lanes (busy = union of depth-0 spans)
+  Main           spans= 26976 busy=  10522.1 ms (100.0% of window)  Render x500 10201.3ms, OnRender x500 176.6ms, PollEvents x500 143.4ms, GameLogicTick x500 0.6ms, SwapBuffers x500 0.1ms
+  Worker 0       spans=  3038 busy=    194.9 ms (  1.9% of window)  CellLoad x3 63.0ms, FrustumCull x2441 59.6ms, SkyEnvBake x1 43.8ms, ExtractMeshes x578 23.5ms, CellJsonRelease x15 4.9ms
+  Worker 1       spans=  3124 busy=    184.2 ms (  1.7% of window)  CellLoad x3 63.4ms, FrustumCull x2564 60.2ms, SkyEnvBake x1 36.5ms, ExtractMeshes x545 22.0ms, CellJsonRelease x11 2.1ms
+  Worker 2       spans=  3089 busy=    190.3 ms (  1.8% of window)  FrustumCull x2514 58.7ms, CellLoad x2 53.4ms, SkyEnvBake x1 50.3ms, ExtractMeshes x559 24.3ms, CellJsonRelease x13 3.6ms
+  Worker 3       spans=  3352 busy=    213.8 ms (  2.0% of window)  FrustumCull x2848 76.3ms, CellLoad x3 54.8ms, SkyEnvBake x1 54.3ms, ExtractMeshes x487 25.1ms, CellJsonRelease x13 3.2ms
+  Worker 4       spans=  2533 busy=    173.8 ms (  1.7% of window)  SkyEnvBake x1 50.4ms, FrustumCull x2091 49.7ms, CellLoad x2 49.2ms, ExtractMeshes x425 21.6ms, CellJsonRelease x14 2.8ms
+  Worker 5       spans=  2911 busy=    178.6 ms (  1.7% of window)  FrustumCull x2393 54.5ms, CellLoad x2 52.2ms, SkyEnvBake x1 47.8ms, ExtractMeshes x505 21.5ms, CellJsonRelease x10 2.6ms
+  Worker 6       spans=  2813 busy=    190.9 ms (  1.8% of window)  FrustumCull x2358 68.0ms, SkyEnvBake x1 49.4ms, CellLoad x2 49.1ms, ExtractMeshes x443 22.2ms, CellJsonRelease x9 2.2ms
+  Worker 7       spans=  2790 busy=    183.7 ms (  1.7% of window)  CellLoad x3 57.2ms, FrustumCull x2371 54.0ms, SkyEnvBake x1 49.4ms, ExtractMeshes x403 20.3ms, CellJsonRelease x12 2.8ms
+  Worker 8       spans=  2994 busy=    183.9 ms (  1.7% of window)  FrustumCull x2468 58.1ms, SkyEnvBake x1 53.1ms, CellLoad x2 45.2ms, ExtractMeshes x508 23.7ms, CellJsonRelease x15 3.8ms
+  Worker 9       spans=  3288 busy=    184.2 ms (  1.8% of window)  FrustumCull x2767 60.0ms, CellLoad x2 51.6ms, SkyEnvBake x1 48.4ms, ExtractMeshes x510 23.1ms, CellJsonRelease x8 1.1ms
+
+== main thread: busy 10522 ms of 10525 = 100.0%; WaitForFrame 6484 ms (61.6%); work 4038 ms (38.4%)
+  depth-0 scopes (total ms, share of work):
+    Render                                3717.5 ms   92.1% of work
+    OnRender                               176.6 ms    4.4% of work
+    PollEvents                             143.4 ms    3.6% of work
+    GameLogicTick                            0.6 ms    0.0% of work
+    SwapBuffers                              0.1 ms    0.0% of work
+  depth-1 scopes (total ms):
+    Metal::NextDrawable                   6483.8 ms
+    Metal::ExtractFrame                   1434.8 ms
+    Metal::EncodeShadowMap                1010.1 ms
+    Metal::EncodeScene                     554.6 ms
+    Metal::EncodeSSAO                      491.1 ms
+    CellStreaming                          119.7 ms
+    SceneSystemsTick                        25.7 ms
+    Metal::Commit                           14.1 ms
+    PhysicsStep                              9.5 ms
+    Metal::EncodeSkyViewLut                  2.5 ms
+    WeatherAudio                             0.8 ms
+    Metal::EncodeCloudShadow                 0.1 ms
+
+== per-frame main-thread WORK (depth-0 scopes minus WaitForFrame / NextDrawable): p50 7.84 p90 9.76 p99 21.08 max 176.50 ms over 500 frames; dump cpuMs p50 9.46
+  frames with work >= 25.0 ms: 2; worst:
+    frame    0 work  176.50 ms  Render(d0) 90.3; PollEvents(d0) 76.6; Metal::EncodeScene(d1) 73.4; OnRender(d0) 14.3
+    frame  377 work   59.58 ms  Render(d0) 59.6; Metal::EncodeShadowMap(d1) 51.1; Metal::ExtractFrame(d1) 5.3; Metal::EncodeScene(d1) 1.6
+
+== pool occupancy (1 ms bins; how many non-main lanes had work open): 0:75.7%, 1:1.7%, 2:2.1%, 3:3.2%, 4:5.8%, 5:6.4%, 6:3.1%, 7:0.7%, 8:0.3%, 9:0.0%, 10:1.0%

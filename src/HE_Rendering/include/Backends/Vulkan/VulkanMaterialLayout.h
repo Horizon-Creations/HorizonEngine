@@ -34,6 +34,12 @@
 // at all, so the renderer then builds it WITHOUT this one row (landscapeWeightsFit)
 // and draws a layer-blend material through the built-in path instead: losing
 // the paint there beats losing every graph material.
+//
+// Displacement (Thema 207): MaterialShaderLibrary::tessControl/tessEval (SpirV)
+// read the FRAGMENT's bindings — HeLighting 0 (both stages), U 1, heTex0 2,
+// HeParams 3, heTexP0..3 4..7, heLandscapeWeights 14 (evaluation). Those rows
+// carry the two tessellation bits; the renderer masks them out again on a device
+// without the tessellationShader feature.
 // ─────────────────────────────────────────────────────────────────────────────
 #include <cstdint>
 
@@ -43,12 +49,19 @@ enum class DescKind : uint8_t { UniformBuffer, CombinedImageSampler, StorageBuff
 
 constexpr uint32_t kStageVertex   = 0x01; // VK_SHADER_STAGE_VERTEX_BIT
 constexpr uint32_t kStageFragment = 0x10; // VK_SHADER_STAGE_FRAGMENT_BIT
+constexpr uint32_t kStageTessControl = 0x02; // VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+constexpr uint32_t kStageTessEval    = 0x04; // VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+constexpr uint32_t kStageTess        = kStageTessControl | kStageTessEval;
 
 struct Binding
 {
 	uint32_t binding;
 	DescKind kind;
 	uint32_t stages;
+	// A UniformBuffer row bound as UNIFORM_BUFFER_DYNAMIC: the per-draw ring slot is the dynamic
+	// offset, so ONE descriptor set serves every draw that shares its textures instead of one set
+	// (and ~25 descriptor writes) per draw. The SPIR-V cannot tell the two apart.
+	bool     dynamic = false;
 };
 
 constexpr uint32_t kClusterLightsBinding = 24; // HeClusterLights { vec4 clLights[]; }
@@ -57,19 +70,19 @@ constexpr uint32_t kClusterIdxBinding    = 26; // HeClusterIdx    { uint clIdx[]
 constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (MaterialGraph.cpp)
 
 inline constexpr Binding kBindings[] = {
-	{  0, DescKind::UniformBuffer,        kStageFragment }, // HeLighting
-	{  1, DescKind::UniformBuffer,        kStageVertex   }, // U (per object)
-	{  2, DescKind::CombinedImageSampler, kStageFragment }, // heTex0
-	{  3, DescKind::UniformBuffer,        kStageFragment }, // HeParams
-	{  4, DescKind::CombinedImageSampler, kStageFragment }, // heTexP0
-	{  5, DescKind::CombinedImageSampler, kStageFragment }, // heTexP1
-	{  6, DescKind::CombinedImageSampler, kStageFragment }, // heTexP2
-	{  7, DescKind::CombinedImageSampler, kStageFragment }, // heTexP3
+	{  0, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeLighting
+	{  1, DescKind::UniformBuffer,        kStageVertex   | kStageTess, true }, // U (per object, dynamic offset)
+	{  2, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTex0
+	{  3, DescKind::UniformBuffer,        kStageFragment | kStageTess, true }, // HeParams (dynamic offset)
+	{  4, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP0
+	{  5, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP1
+	{  6, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP2
+	{  7, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heTexP3
 	// 8/9 for the WPO custom vertex, which reads HeLighting/HeParams in the
 	// VERTEX stage at those slots (MaterialShaderLibrary.cpp wpoDeclarations).
 	// Harmless for the standard vertex, which references neither.
 	{  8, DescKind::UniformBuffer,        kStageVertex   }, // HeLighting (WPO VS)
-	{  9, DescKind::UniformBuffer,        kStageVertex   }, // HeParams   (WPO VS)
+	{  9, DescKind::UniformBuffer,        kStageVertex,                true }, // HeParams   (WPO VS, dynamic offset)
 	{ 10, DescKind::CombinedImageSampler, kStageFragment }, // heGIShadow (GI sun mask)
 	{ 11, DescKind::CombinedImageSampler, kStageFragment }, // heGILocal  (GI local mask)
 	{ 12, DescKind::CombinedImageSampler, kStageFragment }, // heCsm (CSM fallback, 2D array)
@@ -83,7 +96,7 @@ inline constexpr Binding kBindings[] = {
 	// heLandscapeWeights: only a Landscape Layer Blend graph declares it, but
 	// that SPIR-V uses it statically; without the row lavapipe crashes in the
 	// draw (Thema 143). Bound per DRAW from the terrain's weightmap.
-	{ kLandscapeWeightsBinding, DescKind::CombinedImageSampler, kStageFragment }, // heLandscapeWeights
+	{ kLandscapeWeightsBinding, DescKind::CombinedImageSampler, kStageFragment | kStageTess }, // heLandscapeWeights
 	// The rest of the preamble's fixed samplers (Thema 120). Its SPIR-V uses
 	// all of them statically, so the layout declares them even where the gate
 	// never opens on this backend (a pipeline whose shader uses a binding its
@@ -121,6 +134,17 @@ constexpr uint32_t countOf(DescKind kind, uint32_t bindingCount = kBindingCount)
 	return n;
 }
 
+// Rows bound as dynamic uniform buffers (bindings 1, 3, 9). vkCmdBindDescriptorSets takes their
+// offsets in ascending binding order.
+constexpr uint32_t dynamicCount(uint32_t bindingCount = kBindingCount)
+{
+	uint32_t n = 0;
+	for (uint32_t i = 0; i < bindingCount; ++i)
+		if (kBindings[i].dynamic) ++n;
+	return n;
+}
+constexpr uint32_t kDynamicOffsetCount = 3;
+
 // Combined image samplers the FRAGMENT stage sees — what the device's
 // per-stage sampler and sampled-image limits are held against (a combined
 // descriptor counts against both).
@@ -152,4 +176,65 @@ static_assert(fragmentSamplerCount(true) == 17 && fragmentSamplerCount(false) ==
 static_assert(!landscapeWeightsFit(16, 16) && landscapeWeightsFit(17, 17));
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
               "the cluster lists must be the last rows (negative control slices them off)");
+
+// ── Deferred lighting resolve, set 0 (Thema 150, docs/deferred-renderer-plan.md
+// §10.3/§10.5) ─────────────────────────────────────────────────────────────────
+// MaterialShaderLibrary::deferredResolve[Clustered](SpirV) keeps the canonical
+// GLSL bindings (no pin): the lighting preamble's HeLighting and fixed samplers
+// at the SAME numbers as the material set above, plus the resolve's own inputs —
+// the G-buffer at 19..22 (heGB0..2, heGBDepth = the R32F GB3 target, plan §10.5
+// way B) and HeResolve at 23 — and, in the clustered variant only, the light
+// lists at 24..26. It declares neither the per-object U / HeParams nor heTex0 /
+// heTexP0..3 / heLandscapeWeights, so it gets a layout of its own: the renderer
+// builds VulkanRenderer::m_resolveSetLayout from this table and he_tests
+// reflects both resolve variants against it (set, binding, kind AND stage).
+// 15 combined samplers in the fragment stage — inside the spec minimum of 16,
+// so no device needs a fallback here.
+constexpr uint32_t kResolveGB0Binding   = 19; // heGB0: rgb BaseColor, a Metallic   (R8G8B8A8_SRGB)
+constexpr uint32_t kResolveGB1Binding   = 20; // heGB1: rg oct normal, b Rough, a Spec (RGBA16F)
+constexpr uint32_t kResolveGB2Binding   = 21; // heGB2: rgb Emissive, a Material-AO  (RGBA16F)
+constexpr uint32_t kResolveDepthBinding = 22; // heGBDepth: GB3, gl_FragCoord.z      (R32F)
+constexpr uint32_t kResolveUboBinding   = 23; // HeResolve
+
+inline constexpr Binding kResolveBindings[] = {
+	{  0, DescKind::UniformBuffer,        kStageFragment }, // HeLighting (the resolve's own block)
+	{ 10, DescKind::CombinedImageSampler, kStageFragment }, // heGIShadow
+	{ 11, DescKind::CombinedImageSampler, kStageFragment }, // heGILocal
+	{ 12, DescKind::CombinedImageSampler, kStageFragment }, // heCsm
+	{ 13, DescKind::CombinedImageSampler, kStageFragment }, // heLocalShadow
+	{ 15, DescKind::CombinedImageSampler, kStageFragment }, // heSkyEnv
+	{ 16, DescKind::CombinedImageSampler, kStageFragment }, // heAO
+	{ 17, DescKind::CombinedImageSampler, kStageFragment }, // heGIIrradiance
+	{ 18, DescKind::CombinedImageSampler, kStageFragment }, // heGIVisibility
+	{ kResolveGB0Binding,   DescKind::CombinedImageSampler, kStageFragment },
+	{ kResolveGB1Binding,   DescKind::CombinedImageSampler, kStageFragment },
+	{ kResolveGB2Binding,   DescKind::CombinedImageSampler, kStageFragment },
+	{ kResolveDepthBinding, DescKind::CombinedImageSampler, kStageFragment },
+	{ kResolveUboBinding,   DescKind::UniformBuffer,        kStageFragment },
+	{ 31, DescKind::CombinedImageSampler, kStageFragment }, // heSSRFwd
+	{ 32, DescKind::CombinedImageSampler, kStageFragment }, // heGIReflFwd
+	{ 33, DescKind::CombinedImageSampler, kStageFragment }, // heCloudShadow
+	// ── the clustered resolve's light lists (keep these LAST, as above) ──
+	{ kClusterLightsBinding, DescKind::StorageBuffer, kStageFragment },
+	{ kClusterGridBinding,   DescKind::StorageBuffer, kStageFragment },
+	{ kClusterIdxBinding,    DescKind::StorageBuffer, kStageFragment },
+};
+
+constexpr uint32_t kResolveBindingCount           = sizeof(kResolveBindings) / sizeof(kResolveBindings[0]);
+constexpr uint32_t kResolvePreClusterBindingCount = kResolveBindingCount - 3;
+
+constexpr uint32_t resolveCountOf(DescKind kind, uint32_t bindingCount = kResolveBindingCount)
+{
+	uint32_t n = 0;
+	for (uint32_t i = 0; i < bindingCount; ++i)
+		if (kResolveBindings[i].kind == kind) ++n;
+	return n;
+}
+
+static_assert(kResolveBindingCount == 20, "resolve set 0: 17 canonical bindings + 3 cluster lists");
+static_assert(resolveCountOf(DescKind::UniformBuffer) == 2);          // b0, b23
+static_assert(resolveCountOf(DescKind::CombinedImageSampler) == 15);  // b10-b13, b15-b22, b31-b33
+static_assert(resolveCountOf(DescKind::StorageBuffer) == 3);          // b24-b26
+static_assert(resolveCountOf(DescKind::StorageBuffer, kResolvePreClusterBindingCount) == 0,
+              "the cluster lists must be the last rows (the 8-light resolve uses none of them)");
 } // namespace HE::vkmat

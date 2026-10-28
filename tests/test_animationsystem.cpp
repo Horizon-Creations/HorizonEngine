@@ -11,6 +11,7 @@
 #include <HorizonScene/Components/AnimatorStateMachineComponent.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
+#include <BlendSpace/BlendSpace.h>
 #include <HorizonScene/AnimationPreview.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/EngineApi.h>
@@ -601,8 +602,8 @@ TEST_CASE("AnimatorStateMachineComponent defaults")
 {
     AnimatorStateMachineComponent sm;
     CHECK(sm.stateMachineAssetId == HE::UUID{});
-    CHECK(sm.resolvedGraph.states.empty());
-    CHECK(sm.resolvedGraph.transitions.empty());
+    CHECK(sm.graph().states.empty());
+    CHECK(sm.graph().transitions.empty());
     CHECK(sm.params.empty());
     CHECK(sm.currentStateName.empty());
     CHECK(sm.clipTime      == doctest::Approx(0.0f));
@@ -928,9 +929,9 @@ TEST_CASE("AnimationStateMachineSystem migrates a legacy inline-graph entity int
     CHECK(!updatedSm.legacy.hasData);                       // migrated exactly once
     CHECK(updatedSm.stateMachineAssetId != HE::UUID{});      // now points at a real asset
     REQUIRE(cm.getAnimatorStateMachine(updatedSm.stateMachineAssetId) != nullptr);
-    REQUIRE(updatedSm.resolvedGraph.states.size() == 1);
-    CHECK(updatedSm.resolvedGraph.states[0].name == "Idle");
-    CHECK(updatedSm.resolvedGraph.states[0].x == doctest::Approx(5.0f));
+    REQUIRE(updatedSm.graph().states.size() == 1);
+    CHECK(updatedSm.graph().states[0].name == "Idle");
+    CHECK(updatedSm.graph().states[0].x == doctest::Approx(5.0f));
     CHECK(updatedSm.currentStateName == "Idle");
 
     // The migrated asset actually drives playback (not just a dangling reference).
@@ -1143,4 +1144,543 @@ TEST_CASE("AnimationPreview::evaluateClipPose at t=0 is the bind pose (identity,
 
     REQUIRE(bones.size() == 1);
     CHECK(bones[0] == glm::mat4(1.0f));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Audit SCN-101/102/103: keyframe search, reused pose buffers, the pose gate
+// ─────────────────────────────────────────────────────────────────────────────
+
+#include <HorizonScene/AnimationNotify.h>
+#include <HorizonScene/Components/RootMotionComponent.h>
+#include <algorithm>
+#include <string>
+
+namespace
+{
+// The linear walk the sampler used before SCN-103, kept as the reference.
+size_t findBracketLinear(const std::vector<float>& times, float t)
+{
+    size_t k = 0;
+    for (size_t i = 0; i + 1 < times.size(); ++i)
+    {
+        if (times[i + 1] >= t) { k = i; return k; }
+        k = i + 1;
+    }
+    return k;
+}
+
+// What applyChannel computes for a translation channel, on the reference bracket.
+glm::vec3 referenceTranslation(const AnimationChannel& ch, float t)
+{
+    if (ch.times.empty()) return glm::vec3(0.0f);
+    const size_t k = findBracketLinear(ch.times, t);
+    float alpha = 0.0f;
+    if (k + 1 < ch.times.size())
+    {
+        const float span = ch.times[k + 1] - ch.times[k];
+        if (span > 0.0f) alpha = std::clamp((t - ch.times[k]) / span, 0.0f, 1.0f);
+    }
+    const glm::vec3 v0(ch.values[k * 3], ch.values[k * 3 + 1], ch.values[k * 3 + 2]);
+    const glm::vec3 v1 = (k + 1 < ch.times.size())
+        ? glm::vec3(ch.values[(k + 1) * 3], ch.values[(k + 1) * 3 + 1], ch.values[(k + 1) * 3 + 2])
+        : v0;
+    return glm::mix(v0, v1, alpha);
+}
+
+// A chain of `joints` joints, each the child of the one before, identity IBMs.
+SkeletalMeshAsset makeChainSkeletalMesh(const HE::UUID& meshId, size_t joints)
+{
+    SkeletalMeshAsset sma;
+    sma.id   = meshId;
+    sma.name = "chain";
+    for (size_t i = 0; i < joints; ++i)
+    {
+        SkeletonJoint j;
+        j.name   = "J" + std::to_string(i);
+        j.parent = static_cast<int32_t>(i) - 1;
+        j.inverseBindMatrix = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };
+        sma.skeleton.push_back(j);
+    }
+    return sma;
+}
+
+// One constant translation key on ONE joint; every other joint keeps its default.
+AnimationClipAsset makeJointClip(uint32_t joint, glm::vec3 pos)
+{
+    AnimationClipAsset clip = makeConstantClip(pos);
+    clip.channels[0].jointIndex = joint;
+    return clip;
+}
+
+const glm::mat4 kSentinel(7.0f);
+
+entt::entity addSkinned(HorizonWorld& world, const HE::UUID& meshId)
+{
+    entt::entity e = world.createEntity();
+    world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(e, smc);
+    return e;
+}
+
+void plantSentinel(HorizonWorld& world, entt::entity e)
+{
+    auto& smc = world.registry().get<SkeletalMeshComponent>(e);
+    for (auto& m : smc.boneMatrices) m = kSentinel;
+    smc.dirty = false;
+}
+
+bool sentinelSurvived(HorizonWorld& world, entt::entity e)
+{
+    const auto& smc = world.registry().get<SkeletalMeshComponent>(e);
+    return !smc.dirty && !smc.boneMatrices.empty() && smc.boneMatrices[0] == kSentinel;
+}
+
+size_t countFires(const HE::NotifyQueue& q, const char* name)
+{
+    return static_cast<size_t>(std::count_if(q.begin(), q.end(),
+        [&](const HE::AnimationNotifyEvent& ev) { return ev.name == name; }));
+}
+} // namespace
+
+TEST_CASE("SCN-103: the binary keyframe search samples exactly what the linear walk did")
+{
+    const SkeletalMeshAsset mesh = makeOneBoneSkeletalMesh(HE::UUID::generate());
+
+    // A fixed LCG: reproducible, and no <random> distribution whose output
+    // differs between standard libraries.
+    uint32_t seed = 0x2545F491u;
+    auto next = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+
+    // Both sides of the walk/binary-search cutoff (64 keys, AnimationEval.cpp).
+    std::vector<size_t> sizes;
+    for (size_t n = 0; n <= 40; ++n) sizes.push_back(n);
+    for (size_t n : { 63u, 64u, 65u, 100u, 300u }) sizes.push_back(n);
+
+    for (size_t n : sizes)
+    {
+        AnimationClipAsset clip;
+        clip.duration = 1.0f;
+        AnimationChannel ch;
+        ch.jointIndex = 0;
+        ch.path       = AnimPathType::Translation;
+        float t = 0.0f;
+        for (size_t k = 0; k < n; ++k)
+        {
+            // Every fourth step repeats the previous key's time: duplicates are
+            // where "the FIRST key at or after t" actually decides something.
+            if (k > 0 && next() % 4 != 0) t += 0.01f + static_cast<float>(next() % 100) / 1000.0f;
+            ch.times.push_back(t);
+            ch.values.insert(ch.values.end(), { static_cast<float>(k + 1),
+                                                static_cast<float>(k * k),
+                                                -static_cast<float>(k) });
+        }
+        clip.channels.push_back(ch);
+
+        std::vector<float> probes = { -1.0f, 0.0f, t, t + 1.0f, std::nanf("") };
+        for (float key : ch.times) { probes.push_back(key); probes.push_back(key + 0.0005f); }
+        for (int i = 0; i < 64; ++i) probes.push_back(static_cast<float>(next() % 1000) / 1000.0f * (t + 0.2f) - 0.1f);
+
+        for (float p : probes)
+        {
+            CAPTURE(n);
+            CAPTURE(p);
+            std::vector<glm::mat4> bones;
+            AnimationPreview::evaluateClipPose(mesh, clip, p, bones);
+            REQUIRE(bones.size() == 1);
+            const glm::vec3 want = referenceTranslation(ch, p);
+            // Neighbouring keys differ by at least 1 in some component, so a
+            // wrong bracket is far outside this; the tolerance only absorbs FMA
+            // contraction differing between this file and the engine's.
+            CHECK(bones[0][3][0] == doctest::Approx(want.x).epsilon(1e-5));
+            CHECK(bones[0][3][1] == doctest::Approx(want.y).epsilon(1e-5));
+            CHECK(bones[0][3][2] == doctest::Approx(want.z).epsilon(1e-5));
+        }
+    }
+}
+
+TEST_CASE("SCN-101: reused pose buffers start every entity from the defaults, whatever its size")
+{
+    // Two skeletons of different sizes whose clips key DIFFERENT joints. A scratch
+    // buffer that kept the previous entity's values would leave that joint in the
+    // second pose; which entity goes first is up to entt, so each one has a joint
+    // only the other one keys.
+    ContentManager cm;
+    HorizonWorld   world;
+    const HE::UUID bigMesh   = HE::UUID::generate();
+    const HE::UUID smallMesh = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeChainSkeletalMesh(bigMesh, 4));
+    cm.registerSkeletalMesh(makeChainSkeletalMesh(smallMesh, 2));
+    const HE::UUID clipJoint0 = cm.registerAnimationClip(makeJointClip(0, { 5.0f, 0.0f, 0.0f }));
+    const HE::UUID clipJoint1 = cm.registerAnimationClip(makeJointClip(1, { 0.0f, 3.0f, 0.0f }));
+
+    auto expectPose = [&](entt::entity e, const HE::UUID& meshId, const HE::UUID& clipId)
+    {
+        std::vector<glm::mat4> want;
+        AnimationPreview::evaluateClipPose(*cm.getSkeletalMesh(meshId), *cm.getAnimationClip(clipId),
+                                           0.25f, want);
+        const auto& got = world.registry().get<SkeletalMeshComponent>(e).boneMatrices;
+        REQUIRE(got.size() == want.size());
+        for (size_t i = 0; i < got.size(); ++i) CHECK(got[i] == want[i]);
+    };
+
+    SUBCASE("clip driver")
+    {
+        const entt::entity a = addSkinned(world, bigMesh);
+        const entt::entity b = addSkinned(world, smallMesh);
+        AnimatorComponent anA; anA.clipAssetId = clipJoint0; anA.playbackTime = 0.25f;
+        AnimatorComponent anB; anB.clipAssetId = clipJoint1; anB.playbackTime = 0.25f;
+        world.addComponent(a, anA);
+        world.addComponent(b, anB);
+        for (int frame = 0; frame < 2; ++frame)
+        {
+            AnimationSystem::update(world, cm, 0.0f);
+            expectPose(a, bigMesh, clipJoint0);
+            expectPose(b, smallMesh, clipJoint1);
+        }
+    }
+    SUBCASE("state machine")
+    {
+        const entt::entity a = addSkinned(world, bigMesh);
+        const entt::entity b = addSkinned(world, smallMesh);
+        auto smA = makeSimpleSM(cm, clipJoint0, clipJoint1); smA.clipTime = 0.25f;
+        auto smB = makeSimpleSM(cm, clipJoint1, clipJoint0); smB.clipTime = 0.25f;
+        world.addComponent(a, smA);
+        world.addComponent(b, smB);
+        AnimationStateMachineSystem::update(world, cm, 0.0f);
+        expectPose(a, bigMesh, clipJoint0);
+        expectPose(b, smallMesh, clipJoint1);
+    }
+}
+
+TEST_CASE("SCN-102: a clip animator whose playhead stands still keeps its bones")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipId = cm.registerAnimationClip(makeTranslationClip(1.0f));
+
+    const entt::entity e = addSkinned(world, meshId);
+    AnimatorComponent an; an.clipAssetId = clipId; an.playbackTime = 0.5f;
+    world.addComponent(e, an);
+
+    AnimationSystem::update(world, cm, 0.0f);   // the first pose is always computed
+    CHECK(world.registry().get<SkeletalMeshComponent>(e).boneMatrices[0][3][0] == doctest::Approx(0.5f));
+
+    // Same clip, same time: nothing to do, and nothing is marked dirty.
+    plantSentinel(world, e);
+    AnimationSystem::update(world, cm, 0.0f);
+    CHECK(sentinelSurvived(world, e));
+
+    // playbackSpeed 0 is the same standstill with a real dt.
+    world.registry().get<AnimatorComponent>(e).playbackSpeed = 0.0f;
+    AnimationSystem::update(world, cm, 0.016f);
+    CHECK(sentinelSurvived(world, e));
+
+    SUBCASE("scrubbing the playhead poses again")
+    {
+        world.registry().get<AnimatorComponent>(e).playbackTime = 0.25f;
+        AnimationSystem::update(world, cm, 0.0f);
+        CHECK(world.registry().get<SkeletalMeshComponent>(e).boneMatrices[0][3][0] == doctest::Approx(0.25f));
+    }
+    SUBCASE("a moving playhead poses every frame")
+    {
+        world.registry().get<AnimatorComponent>(e).playbackSpeed = 1.0f;
+        AnimationSystem::update(world, cm, 0.1f);
+        CHECK(world.registry().get<SkeletalMeshComponent>(e).boneMatrices[0][3][0] == doctest::Approx(0.6f));
+    }
+    SUBCASE("another clip poses again")
+    {
+        const HE::UUID other = cm.registerAnimationClip(makeConstantClip({ 0.0f, 2.0f, 0.0f }));
+        world.registry().get<AnimatorComponent>(e).clipAssetId = other;
+        AnimationSystem::update(world, cm, 0.0f);
+        CHECK(world.registry().get<SkeletalMeshComponent>(e).boneMatrices[0][3][1] == doctest::Approx(2.0f));
+    }
+    SUBCASE("root motion turns the gate off, and its removal does not leave a stale key")
+    {
+        world.registry().emplace<RootMotionComponent>(e);
+        AnimationSystem::update(world, cm, 0.0f);
+        CHECK_FALSE(sentinelSurvived(world, e));
+        plantSentinel(world, e);
+        AnimationSystem::update(world, cm, 0.0f);
+        CHECK_FALSE(sentinelSurvived(world, e));
+
+        world.registry().remove<RootMotionComponent>(e);
+        plantSentinel(world, e);
+        AnimationSystem::update(world, cm, 0.0f);   // posed: the last key was 0
+        CHECK_FALSE(sentinelSurvived(world, e));
+        plantSentinel(world, e);
+        AnimationSystem::update(world, cm, 0.0f);   // and now kept again
+        CHECK(sentinelSurvived(world, e));
+    }
+    SUBCASE("a cleared key (another writer of the bones) poses again")
+    {
+        world.registry().get<SkeletalMeshComponent>(e).poseKey = 0;
+        AnimationSystem::update(world, cm, 0.0f);
+        CHECK_FALSE(sentinelSurvived(world, e));
+    }
+}
+
+TEST_CASE("SCN-102: a blend animator keeps its bones only while time AND alpha stand still")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({ 2.0f, 0.0f, 0.0f }));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({ 0.0f, 4.0f, 0.0f }));
+
+    const entt::entity e = addSkinned(world, meshId);
+    AnimatorBlendComponent ab; ab.clipAId = clipAId; ab.clipBId = clipBId; ab.blendAlpha = 0.0f;
+    world.addComponent(e, ab);
+
+    AnimationBlendSystem::update(world, cm, 0.0f);
+    plantSentinel(world, e);
+    AnimationBlendSystem::update(world, cm, 0.0f);
+    CHECK(sentinelSurvived(world, e));
+
+    // A script moving the weight on a paused timeline is a new pose.
+    world.registry().get<AnimatorBlendComponent>(e).blendAlpha = 1.0f;
+    AnimationBlendSystem::update(world, cm, 0.0f);
+    const auto& bones = world.registry().get<SkeletalMeshComponent>(e).boneMatrices;
+    CHECK(bones[0][3][0] == doctest::Approx(0.0f).epsilon(1e-4));
+    CHECK(bones[0][3][1] == doctest::Approx(4.0f).epsilon(1e-4));
+}
+
+TEST_CASE("SCN-102: a resting state machine keeps its bones; a transition poses again")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({ 3.0f, 0.0f, 0.0f }));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({ 0.0f, 5.0f, 0.0f }));
+
+    const entt::entity e = addSkinned(world, meshId);
+    world.addComponent(e, makeSimpleSM(cm, clipAId, clipBId, 0.2f));
+
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+    plantSentinel(world, e);
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+    CHECK(sentinelSurvived(world, e));
+
+    // The parameter fires Idle -> Walk: every crossfade frame is posed.
+    world.registry().get<AnimatorStateMachineComponent>(e).params["speed"] = 1.0f;
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+    CHECK(world.registry().get<AnimatorStateMachineComponent>(e).inTransition);
+    CHECK_FALSE(sentinelSurvived(world, e));
+    plantSentinel(world, e);
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+    CHECK_FALSE(sentinelSurvived(world, e));
+
+    // Through the crossfade; then at rest in Walk, and kept again.
+    AnimationStateMachineSystem::update(world, cm, 0.25f);
+    CHECK(world.registry().get<AnimatorStateMachineComponent>(e).currentStateName == "Walk");
+    world.registry().get<AnimatorStateMachineComponent>(e).playbackSpeed = 0.0f;
+    AnimationStateMachineSystem::update(world, cm, 0.016f);
+    CHECK(world.registry().get<SkeletalMeshComponent>(e).boneMatrices[0][3][1] == doctest::Approx(5.0f).epsilon(1e-4));
+    plantSentinel(world, e);
+    AnimationStateMachineSystem::update(world, cm, 0.016f);
+    CHECK(sentinelSurvived(world, e));
+}
+
+TEST_CASE("SCN-102: a skipped pose still fires the notifies its playhead swept over")
+{
+    // A looping 1 s clip advanced by exactly one lap lands on the same playhead:
+    // the pose is the same, so the gate skips it, but the lap crossed every
+    // notify on the clip and each one has to fire, once per lap.
+    ContentManager cm;
+    HorizonWorld   world;
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    AnimationClipAsset clip = makeTranslationClip(1.0f);
+    clip.notifies.push_back({ "Step", 0.5f, 0.0f });
+    const HE::UUID clipId = cm.registerAnimationClip(std::move(clip));
+    const HE::UUID idleId = cm.registerAnimationClip(makeConstantClip({ 0.0f, 0.0f, 0.0f }));
+
+    SUBCASE("state machine")
+    {
+        const entt::entity e = addSkinned(world, meshId);
+        auto sm = makeSimpleSM(cm, clipId, idleId);
+        sm.clipTime = 0.25f;
+        world.addComponent(e, sm);
+        for (int lap = 0; lap < 3; ++lap)
+        {
+            HE::NotifyQueue q;
+            if (lap > 0) plantSentinel(world, e);
+            AnimationStateMachineSystem::update(world, cm, 1.0f, nullptr, nullptr, &q);
+            CHECK(world.registry().get<AnimatorStateMachineComponent>(e).clipTime == 0.25f);
+            if (lap > 0) CHECK(sentinelSurvived(world, e));
+            CHECK(countFires(q, "Step") == 1);
+        }
+    }
+    SUBCASE("clip driver")
+    {
+        const entt::entity e = addSkinned(world, meshId);
+        AnimatorComponent an; an.clipAssetId = clipId; an.playbackTime = 0.25f;
+        world.addComponent(e, an);
+        for (int lap = 0; lap < 3; ++lap)
+        {
+            HE::NotifyQueue q;
+            if (lap > 0) plantSentinel(world, e);
+            AnimationSystem::update(world, cm, 1.0f, nullptr, &q);
+            CHECK(world.registry().get<AnimatorComponent>(e).playbackTime == 0.25f);
+            if (lap > 0) CHECK(sentinelSurvived(world, e));
+            CHECK(countFires(q, "Step") == 1);
+        }
+    }
+}
+
+// ─── SCN-302: one parse per asset, shared by every component ─────────────────
+
+TEST_CASE("AnimationStateMachineSystem: entities on one asset share one parsed graph, and an edit re-resolves them onto one new graph")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    auto& reg = world.registry();
+
+    const HE::UUID meshId  = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID clipAId = cm.registerAnimationClip(makeConstantClip({1.0f, 0.0f, 0.0f}));
+    const HE::UUID clipBId = cm.registerAnimationClip(makeConstantClip({0.0f, 1.0f, 0.0f}));
+
+    const AnimatorStateMachineComponent proto = makeSimpleSM(cm, clipAId, clipBId);
+    entt::entity es[2];
+    for (auto& e : es)
+    {
+        e = world.createEntity();
+        world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+        SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+        world.addComponent(e, smc);
+        world.addComponent(e, proto);
+    }
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto first = reg.get<AnimatorStateMachineComponent>(es[0]).resolvedGraph;
+    REQUIRE(first != nullptr);
+    CHECK(first->states.size() == 2);
+    CHECK(reg.get<AnimatorStateMachineComponent>(es[1]).resolvedGraph == first);
+
+    // The asset gains a state; both components are told, and both end up on
+    // the SAME new parse — not on the old one, not on one each.
+    HE::AnimatorStateMachineGraph g = *first;
+    g.states.push_back({ 3, "Run", clipBId, HE::UUID{}, true, 0.0f, 0.0f });
+    cm.getAnimatorStateMachineMutable(proto.stateMachineAssetId)->graphJson = HE::animatorStateMachineToJson(g);
+    for (auto e : es) AnimationStateMachineSystem::markConfigDirty(reg.get<AnimatorStateMachineComponent>(e));
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+
+    const auto second = reg.get<AnimatorStateMachineComponent>(es[0]).resolvedGraph;
+    REQUIRE(second != nullptr);
+    CHECK(second != first);   // `first` is still held here, so the address cannot be reused
+    CHECK(second->states.size() == 3);
+    CHECK(reg.get<AnimatorStateMachineComponent>(es[1]).resolvedGraph == second);
+    CHECK(first->states.size() == 2);   // what a not-yet-told component still holds is untouched
+
+    // A component that is not told keeps posing from what it resolved.
+    const auto third = world.createEntity();
+    world.addComponent(third, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+    SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+    world.addComponent(third, smc);
+    world.addComponent(third, proto);
+    AnimationStateMachineSystem::update(world, cm, 0.0f);
+    CHECK(reg.get<AnimatorStateMachineComponent>(third).resolvedGraph == second);
+}
+
+TEST_CASE("AnimationStateMachineSystem: an unparsable or missing graph leaves the component on an empty graph")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    auto& reg = world.registry();
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+
+    AnimatorStateMachineAsset broken;
+    broken.name      = "Broken";
+    broken.graphJson = "{ not json";
+    const HE::UUID brokenId = cm.registerAnimatorStateMachine(std::move(broken));
+
+    for (const HE::UUID id : { brokenId, HE::UUID::generate() })
+    {
+        const auto e = world.createEntity();
+        world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+        SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+        world.addComponent(e, smc);
+        AnimatorStateMachineComponent sm; sm.stateMachineAssetId = id;
+        world.addComponent(e, sm);
+        AnimationStateMachineSystem::update(world, cm, 0.0f);
+        const auto& got = reg.get<AnimatorStateMachineComponent>(e);
+        CHECK(got.resolvedGraph == nullptr);
+        CHECK(got.graph().states.empty());
+        CHECK_FALSE(got.configDirty);
+        CHECK(got.currentStateName.empty());
+    }
+}
+
+TEST_CASE("AnimationStateMachineSystem: entities on one blend space share one parse of it")
+{
+    ContentManager cm;
+    HorizonWorld   world;
+    auto& reg = world.registry();
+
+    const HE::UUID meshId = HE::UUID::generate();
+    cm.registerSkeletalMesh(makeOneBoneSkeletalMesh(meshId));
+    const HE::UUID walk = cm.registerAnimationClip(makeConstantClip({1.0f, 0.0f, 0.0f}));
+    const HE::UUID run  = cm.registerAnimationClip(makeConstantClip({3.0f, 0.0f, 0.0f}));
+
+    HE::BlendSpace space;
+    space.kind   = HE::BlendSpaceKind::OneD;
+    space.paramX = "speed";
+    { HE::BlendSpaceSample s; s.clipId = walk; s.x = 0.0f; space.samples.push_back(s); }
+    { HE::BlendSpaceSample s; s.clipId = run;  s.x = 1.0f; space.samples.push_back(s); }
+    BlendSpaceAsset bsa;
+    bsa.name = "Locomotion";
+    bsa.json = HE::blendSpaceToJson(space);
+    const HE::UUID spaceId = cm.registerBlendSpace(std::move(bsa));
+
+    HE::AnimatorStateMachineGraph g;
+    g.states.push_back({ 1, "Move", HE::UUID{}, spaceId, true, 0.0f, 0.0f });
+    g.startState = "Move";
+    g.defaultParams["speed"] = 0.5f;
+    AnimatorStateMachineAsset asset;
+    asset.name      = "Mover";
+    asset.graphJson = HE::animatorStateMachineToJson(g);
+    const HE::UUID smId = cm.registerAnimatorStateMachine(std::move(asset));
+
+    entt::entity es[2];
+    for (auto& e : es)
+    {
+        e = world.createEntity();
+        world.addComponent(e, TransformComponent{ .position = {}, .rotation = {}, .scale = glm::vec3(1.0f) });
+        SkeletalMeshComponent smc; smc.meshAssetId = meshId;
+        world.addComponent(e, smc);
+        AnimatorStateMachineComponent sm; sm.stateMachineAssetId = smId;
+        world.addComponent(e, sm);
+    }
+    AnimationStateMachineSystem::update(world, cm, 0.1f);
+
+    const auto& a = reg.get<AnimatorStateMachineComponent>(es[0]).blendSpaces;
+    const auto& b = reg.get<AnimatorStateMachineComponent>(es[1]).blendSpaces;
+    REQUIRE(a.size() == 1);
+    REQUIRE(b.size() == 1);
+    REQUIRE(a.front().ok);
+    CHECK(a.front().space != nullptr);
+    CHECK(a.front().space == b.front().space);
+    CHECK(a.front().space->samples.size() == 2);
+    const auto old = a.front().space;
+
+    // The space is edited; the graph re-resolves (which clears the per-component
+    // list), and both pick up ONE new parse.
+    space.samples[1].x = 2.0f;
+    cm.getBlendSpaceMutable(spaceId)->json = HE::blendSpaceToJson(space);
+    for (auto e : es) AnimationStateMachineSystem::markConfigDirty(reg.get<AnimatorStateMachineComponent>(e));
+    AnimationStateMachineSystem::update(world, cm, 0.1f);
+    const auto& a2 = reg.get<AnimatorStateMachineComponent>(es[0]).blendSpaces;
+    const auto& b2 = reg.get<AnimatorStateMachineComponent>(es[1]).blendSpaces;
+    REQUIRE(a2.size() == 1);
+    REQUIRE(b2.size() == 1);
+    CHECK(a2.front().space != old);
+    CHECK(a2.front().space == b2.front().space);
+    CHECK(a2.front().space->samples[1].x == doctest::Approx(2.0f));
+    CHECK(old->samples[1].x == doctest::Approx(1.0f));
 }

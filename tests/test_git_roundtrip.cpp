@@ -990,6 +990,123 @@ TEST_CASE("A restore refuses to run over uncommitted work")
 	he_test::removeQuiet(repo);
 }
 
+TEST_CASE("A status refresh asks git less and still reports branches, history and remote")
+{
+	// SCM-101/102: one for-each-ref for local and remote branches, the unpushed
+	// check only when status says something is ahead, origin's URL carried over
+	// between background refreshes, and the new-branch dialog's name check on
+	// the worker instead of two git processes per frame.
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+
+	const fs::path repo = makeRepo("refresh");
+	const fs::path bare = uniqueDir("refreshbare");
+	REQUIRE(GitCli::run(bare, { "init", "--bare", "--initial-branch=main" }).ok);
+	writeFile(repo / "a.txt", "one");
+	commitAll(repo, "first");
+	REQUIRE(GitCli::run(repo, { "branch", "feature/x" }).ok);
+
+	// The one-call listing says what the two separate ones say.
+	std::vector<std::string> locals, remotes, oldLocals, oldRemotes;
+	std::string current;
+	REQUIRE(GitCli::listLocalAndRemoteBranches(repo, locals, remotes));
+	REQUIRE(GitCli::listBranches(repo, oldLocals, current));
+	REQUIRE(GitCli::listRemoteBranches(repo, oldRemotes));
+	CHECK(locals == oldLocals);
+	CHECK(remotes == oldRemotes);
+	CHECK(locals == std::vector<std::string>{ "feature/x", "main" });
+	CHECK(remotes.empty());
+
+	GitService svc;
+	svc.open(repo);
+	auto settle = [&] {
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while ((svc.busy() || svc.status().generation == 0) &&
+		       std::chrono::steady_clock::now() < deadline)
+		{
+			svc.pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		svc.pump();
+	};
+	settle();
+	REQUIRE(svc.isRepo());
+	CHECK(svc.branches() == std::vector<std::string>{ "feature/x", "main" });
+	CHECK(svc.remoteBranches().empty());
+	CHECK(svc.remoteUrl().empty());
+	REQUIRE(svc.recentCommits().size() == 1);
+	CHECK_FALSE(svc.recentCommits()[0].unpushed);   // no upstream: nothing to compare with
+
+	// A remote added in a terminal: a background refresh carries the URL it read
+	// before (re-read once a minute); a command the user runs re-reads it.
+	REQUIRE(GitCli::run(repo, { "remote", "add", "origin", bare.string() }).ok);
+	REQUIRE(GitCli::run(repo, { "push", "-u", "origin", "main" }).ok);
+	svc.requestStatus();
+	settle();
+	CHECK(svc.remoteUrl().empty());
+	svc.requestFetch();
+	settle();
+	CHECK(svc.remoteUrl() == bare.string());
+	CHECK(svc.remoteBranches() == std::vector<std::string>{ "origin/main" });
+	REQUIRE(svc.recentCommits().size() == 1);
+	CHECK_FALSE(svc.recentCommits()[0].unpushed);   // upstream, nothing ahead
+
+	// Something ahead: now the unpushed check runs, and marks exactly that commit.
+	writeFile(repo / "b.txt", "two");
+	commitAll(repo, "second");
+	svc.requestStatus();
+	settle();
+	CHECK(svc.status().ahead == 1);
+	REQUIRE(svc.recentCommits().size() == 2);
+	CHECK(svc.recentCommits()[0].unpushed);
+	CHECK_FALSE(svc.recentCommits()[1].unpushed);
+
+	// The name check: nothing until the worker answered, then the answer for
+	// exactly the text asked about.
+	auto checkName = [&](const std::string& name) {
+		svc.requestCheckBranchName(name);
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+		while (!svc.branchNameCheck(name) && std::chrono::steady_clock::now() < deadline)
+		{
+			svc.pump();
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		return svc.branchNameCheck(name);
+	};
+	const GitService::BranchNameCheck* c = checkName("main");
+	REQUIRE(c);
+	CHECK(c->valid);
+	CHECK(c->taken);
+	c = checkName("has space");
+	REQUIRE(c);
+	CHECK_FALSE(c->valid);
+	CHECK_FALSE(c->taken);
+	c = checkName("feature/new-lighting");
+	REQUIRE(c);
+	CHECK(c->valid);
+	CHECK_FALSE(c->taken);
+	CHECK_FALSE(svc.branchNameCheck("main"));   // an answer is only for its own text
+	CHECK_FALSE(svc.busyWithWork());            // and never greys the buttons
+
+	// Answers to the check leave the last operation's outcome alone.
+	svc.requestCreateBranch("main", "", false);
+	settle();
+	REQUIRE_FALSE(svc.lastError().empty());
+	const std::string failure = svc.lastError();
+	REQUIRE(checkName("other"));
+	CHECK(svc.lastError() == failure);
+
+	// A burst of keystrokes: only the last text is answered for sure.
+	svc.requestCheckBranchName("f");
+	svc.requestCheckBranchName("fe");
+	c = checkName("feature/x");
+	REQUIRE(c);
+	CHECK(c->taken);
+
+	svc.close();
+	he_test::removeQuiet(repo);
+	he_test::removeQuiet(bare);
+}
+
 TEST_CASE("History reads back newest first and knows what is unpushed")
 {
 	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
@@ -1739,4 +1856,109 @@ TEST_CASE("Live: a repository from the own GitHub account clones and opens as a 
 	pm.closeProject();
 	git.finishClone();
 	he_test::removeAllQuiet(parent);
+}
+
+// Topic 198 step 9: with Config/ProjectSettings.json sourceControl.mode =
+// "teamServer" the server keeps the history. The editor writes nothing to git,
+// and a live session's settled state is handed to the server's upload.
+TEST_CASE("Team server: direct git is off, and settled session state waits for the upload")
+{
+	GitController git;
+	CHECK(git.mayModify());
+	CHECK_FALSE(git.blockedByTeamServer());
+
+	// Off: the hand-over is dropped, there is nothing to hand it to.
+	git.handOverToTeamServer({ "::Scene::" }, 100);
+	CHECK(git.teamServerPending().empty());
+
+	git.setTeamServer(true, "crew", "game");
+	CHECK(git.blockedByTeamServer());
+	CHECK_FALSE(git.mayModify());
+	CHECK(git.teamServerTeam() == "crew");
+	CHECK(git.teamServerProject() == "game");
+
+	// No upload yet (this build): the keys wait, each once, oldest first.
+	CHECK_FALSE(git.hasTeamServerUpload());
+	git.handOverToTeamServer({ "::Scene::", "Content/a.hmat" }, 200);
+	git.handOverToTeamServer({ "Content/a.hmat", "", "Content/b.hcode" }, 300);
+	REQUIRE(git.teamServerPending().size() == 3);
+	CHECK(git.teamServerPending()[0] == "::Scene::");
+	CHECK(git.teamServerPending()[2] == "Content/b.hcode");
+	CHECK(git.teamServerLastHandedMs() == 0);
+
+	// An upload that refuses keeps them; one that takes them empties the queue.
+	std::vector<std::vector<std::string>> uploads;
+	bool accept = false;
+	git.setTeamServerUpload([&](const std::vector<std::string>& keys) {
+		uploads.push_back(keys);
+		return accept;
+	});
+	git.update(400);
+	CHECK(uploads.size() == 1);
+	CHECK(git.teamServerPending().size() == 3);
+	accept = true;
+	git.update(500);   // keys handed over before the upload existed go on the next frame
+	REQUIRE(uploads.size() == 2);
+	CHECK(uploads[1].size() == 3);
+	CHECK(git.teamServerPending().empty());
+	CHECK(git.teamServerLastHandedMs() == 500);
+	CHECK(git.teamServerLastHandedCount() == 3);
+	git.update(600);
+	CHECK(uploads.size() == 2);   // nothing waiting, nothing sent
+
+	git.handOverToTeamServer({ "::Scene::" }, 700);
+	CHECK(uploads.size() == 3);
+	CHECK(git.teamServerLastHandedMs() == 700);
+
+	// Back to git: writing is allowed again, and nothing still queued for a
+	// server the project no longer uses goes out later.
+	accept = false;
+	git.handOverToTeamServer({ "Content/c.hmat" }, 800);
+	CHECK(git.teamServerPending().size() == 1);
+	git.setTeamServer(false, "crew", "game");
+	CHECK(git.mayModify());
+	CHECK(git.teamServerPending().empty());
+	CHECK(git.teamServerTeam().empty());
+
+	git.setTeamServer(true, "crew", "game");
+	git.closeProject();
+	CHECK_FALSE(git.blockedByTeamServer());
+}
+
+TEST_CASE("Team server: a commit asked for in team-server mode never reaches the repository")
+{
+	if (!gitAvailable()) { MESSAGE("git not installed — skipped"); return; }
+	const fs::path repo = makeRepo("teamserver");
+	writeFile(repo / "a.txt", "one");
+	commitAll(repo, "first");
+	writeFile(repo / "a.txt", "two");
+
+	GitController git;
+	git.openProject(repo);
+	std::uint64_t now = 1;
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+	while (git.status().generation == 0 && std::chrono::steady_clock::now() < deadline)
+	{
+		git.update(now);
+		now += 100;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	REQUIRE(git.isRepo());
+
+	git.setTeamServer(true, "crew", "game");
+	git.requestCommitAll("must not happen", /*forcePush=*/true);
+	CHECK_FALSE(git.busyWithWork());
+	for (int i = 0; i < 20; ++i)
+	{
+		git.update(now);
+		now += 100;
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	const GitResult count = GitCli::run(repo, { "rev-list", "--count", "HEAD" });
+	REQUIRE(count.ok);
+	CHECK(trimmed(count.out) == "1");
+	CHECK(readFile(repo / "a.txt") == "two");   // still a local change, not committed
+
+	git.closeProject();
+	he_test::removeQuiet(repo);
 }

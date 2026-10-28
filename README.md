@@ -4,7 +4,7 @@ A cross-platform 3D game engine and editor, written from scratch in C++20. It is
 built to power our own game **Catania**, which is why the feature list leans
 towards what an actual production needs rather than towards a demo reel.
 
-**Current release: 0.5.0 "Parhelion"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
+**Current release: 0.7.0 "Nimbus"** — [Downloads](https://horizoncreations.dev/HorizonEngine/HE.html) ·
 [Documentation](https://horizoncreations.dev/HorizonEngineDocs/) · [Website](https://horizoncreations.dev)
 
 ---
@@ -55,9 +55,9 @@ in daily use on Catania. It is **not at 1.0**, and the honest gaps are:
 | Area | State |
 |---|---|
 | Metal, OpenGL | Complete |
-| Direct3D 11/12, Vulkan | Close to parity — shadows (cascaded + point/spot atlases) and the material node-graph shader pipeline are now wired on all five backends, still awaiting a manual smoke test on real D3D/Vulkan hardware; the newest sky work (nebula/atmosphere, volumetric clouds) is still Metal/OpenGL only |
+| Direct3D 11/12, Vulkan | Close to parity — shadows (cascaded + point/spot atlases), the material node-graph shader pipeline and the deferred renderer (clustered lighting, decals, SSR, AO, GI) are now wired on all five backends, checked against WARP/lavapipe in CI but still awaiting a manual smoke test on more than one real GPU; the newest sky work (nebula/atmosphere, volumetric clouds) is still Metal/OpenGL only |
 | Linux | Builds and runs, but has had far less real-world use than macOS and Windows |
-| Texture compression | ASTC on Apple hardware; BCn encoders are not written yet |
+| Texture compression | ASTC on Apple hardware (Metal). BC1/BC3/BC4/BC5/BC7 encoders, CPU decoders for BC1/BC3/BC4/BC5 and the upload paths for textures and texture arrays are written for OpenGL, Direct3D 11/12 and Vulkan (a device that cannot sample a block format gets an RGBA8 decode); covered by unit tests (`test_texture_bcn`) and an OpenGL probe on this Mac, and the Windows, Linux and lavapipe CI jobs compile the Direct3D and Vulkan paths. The Direct3D and Vulkan compressed uploads have never run on real hardware, and export still packs one format for every texture, so choosing BC4/BC5/BC7 per map is open |
 
 The full plan, including everything already finished, lives in
 [`CopilotDocs/MASTERPLAN.md`](CopilotDocs/MASTERPLAN.md).

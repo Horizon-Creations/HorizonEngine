@@ -117,10 +117,6 @@ private:
 	mutable float m_snapBuf[3]{};
 };
 
-// Height of the strip in ImGui units. Scales with the font, so the bar keeps
-// its proportions under Preferences ▸ UI Font Scale.
-float height();
-
 // Draws the bar at the current cursor position (expects the Scene window's
 // zero-padding content origin) and leaves the cursor on the first row below it,
 // ready for the viewport image.

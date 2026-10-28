@@ -20,8 +20,10 @@
 #include "PanelSpotlight.h"      // the tour card's step-aside, over a real dock layout
 #include "TutorialSteps.h"       // …and the curriculum steps it is tested with
 #include "GitHubSignInView.h"    // the device-flow dialog's body
+#include "ConsoleView.h"         // the console's buffer and rows
 
 #include <ContentManager/ContentManager.h>
+#include <Diagnostics/Log.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 
@@ -3255,4 +3257,464 @@ TEST_CASE("ui shot: GitHub sign-in names the account once it is done")
 	const he_ui::Image exp = shootSignIn("github-signin-expired", harness, expired);
 	CHECK(brightPixels(exp) > 300);
 	CHECK(greenPixels(exp) == 0);
+}
+
+// ── The console ──────────────────────────────────────────────────────────────
+// The real panel body (ConsoleView), fed through the real sink: lines go in via
+// HE_LOG, so what is drawn is what the editor would draw for the same log.
+namespace
+{
+	// Logs one representative session. Trace/Debug are off for most categories by
+	// default, so the verbosity is raised for the duration and put back after —
+	// the log is process-global and other tests share it.
+	struct ConsoleSession
+	{
+		ConsoleSession()
+		{
+			for (int i = 0; i < static_cast<int>(HE::Log::Cat::Count); ++i)
+				saved[i] = HE::Log::verbosity(static_cast<HE::Log::Cat>(i));
+			HE::Log::setVerbosity(HE::LogLevel::Trace);
+			ConsoleView::resetForTest();
+			ConsoleView::attachToEngineLog();
+		}
+		~ConsoleSession()
+		{
+			ConsoleView::detachFromEngineLog();
+			ConsoleView::resetForTest();
+			for (int i = 0; i < static_cast<int>(HE::Log::Cat::Count); ++i)
+				HE::Log::setVerbosity(static_cast<HE::Log::Cat>(i), saved[i]);
+		}
+		HE::LogLevel saved[static_cast<int>(HE::Log::Cat::Count)] {};
+	};
+
+	void logSampleSession()
+	{
+		HE_LOG_INFO(Render,  "Metal device: Apple M5, 10 cores");
+		HE_LOG_INFO(Physics, "Jolt initialised, 8 workers");
+		HE_LOG_DEBUG(Shader, "Shader cache: 212 entries loaded");
+		HE_LOG_TRACE(Asset,  "Resolved 'Content/Rock/rock_n.png' in 0.4 ms");
+		HE_LOG_INFO(Script,  "mover: spawned 12 enemies");
+		HE_LOG_WARN(Asset,   "Texture 'rock_n.png' is not square (1024x768)");
+		HE_LOG_WARN(Script,  "mover:7: nil field 'speed'");
+		for (int i = 0; i < 38; ++i)
+			HE_LOG_ERROR(Lua, "mover:7: attempt to index a nil value (field 'target')");
+		HE_LOG_ERROR(Shader, "Shader 'water.frag' failed to compile:\n"
+		                     "  line 12: undeclared identifier 'foam'\n"
+		                     "  line 30: no matching overload for 'mix'");
+		HE_LOG_INFO(Net,     "Listening on UDP :7777");
+		HE_LOG_CRIT(Core,    "Out of GPU memory while allocating 512 MB");
+	}
+}
+
+TEST_CASE("ui shot: the console")
+{
+	constexpr int W = 880, H = 330;
+	Harness harness(W, H);
+	ConsoleSession session;
+	logSampleSession();
+
+	ConsoleView::Hooks hooks;
+	hooks.codeFont = harness.body;
+	hooks.goToLine = [](const std::string&, int, bool) {};
+
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Console", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		ConsoleView::draw(hooks);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+
+	const he_ui::Image img = shoot("console", W, H, 4, scene);
+	REQUIRE(img.valid());
+	const int ink = img.inkedPixels(kBgR, kBgG, kBgB);
+	INFO("inked pixels: " << ink);
+	CHECK(ink > 6000);
+}
+
+TEST_CASE("console: repeats fold into one row and the chips count occurrences")
+{
+	ConsoleSession session;
+	logSampleSession();
+
+	const ConsoleView::Stats s = ConsoleView::stats();
+	// 38 identical errors are one row (the log folds them and says "(previous
+	// message repeated 37 more times)", which the console reads as the row's
+	// count instead of showing as a row of its own), the shader's three-line
+	// message is three rows, and the rest is one row each.
+	CHECK(s.rows == 13);
+	CHECK(s.total == 50);
+	CHECK(s.shown == 50);
+	CHECK(s.byLevel[0] == 1);    // Trace
+	CHECK(s.byLevel[1] == 1);    // Debug
+	CHECK(s.byLevel[2] == 4);    // Info
+	CHECK(s.byLevel[3] == 2);    // Warning
+	CHECK(s.byLevel[4] == 41);   // Error: 38 + the shader's three rows
+	CHECK(s.byLevel[5] == 1);    // Critical
+}
+
+TEST_CASE("console: the buffer is bounded and the counts follow the trim")
+{
+	ConsoleSession session;
+	// More than the ring holds, all different so none folds.
+	for (int i = 0; i < 5200; ++i)
+		HE_LOG_INFO(Core, "distinct line %d", i);
+
+	const ConsoleView::Stats s = ConsoleView::stats();
+	CHECK(s.rows == 5000);
+	// Recounted from what is left, not decremented from what was: the chip
+	// would otherwise say 5200 over a list of 5000.
+	CHECK(s.total == 5000);
+	CHECK(s.byLevel[2] == 5000);
+}
+
+TEST_CASE("ui shot: a chip filters to its level, a second click brings the rest back")
+{
+	constexpr int W = 880, H = 330;
+	Harness harness(W, H);
+	ConsoleSession session;
+	logSampleSession();
+
+	ConsoleView::Hooks hooks;
+	hooks.codeFont = harness.body;
+
+	// Where the Error chip sits in a console this wide. Coarse on purpose: the
+	// chip is ~60 px across, so a font change that moves it a few pixels still
+	// lands inside it.
+	constexpr float kErrorChipX = 548.0f, kToolbarY = 52.0f;
+
+	ConsoleView::Stats solo, again;
+	bool second = false;
+	auto scene = [&](int i) {
+		ImGuiIO& io = ImGui::GetIO();
+		// A click is three frames: the pointer arrives (so the chip is hovered),
+		// goes down, comes up. Events queued in frame n are seen in frame n+1.
+		const auto click = [&](int f0) {
+			if (i == f0)     io.AddMousePosEvent(kErrorChipX, kToolbarY);
+			if (i == f0 + 1) io.AddMouseButtonEvent(0, true);
+			if (i == f0 + 2) io.AddMouseButtonEvent(0, false);
+		};
+		click(2);
+		if (i == 7) (second ? again : solo) = ConsoleView::stats();
+
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Console", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		ConsoleView::draw(hooks);
+		ImGui::End();
+	};
+	const he_ui::Image img = shoot("console-errors-only", W, H, 8, scene);
+	REQUIRE(img.valid());
+	INFO("shown after the first click " << solo.shown << ", after the second " << again.shown);
+	// Error + Critical: 41 + 1. The chips keep their own counts while a filter
+	// is on — they say what a click WOULD show, not what is showing.
+	CHECK(solo.shown == 42);
+	CHECK(solo.byLevel[2] == 4);
+	// The same click again, on the chip that is now the only one filled.
+	second = true;
+	shoot("console-errors-restored", W, H, 8, scene);
+	CHECK(again.shown == 50);
+}
+
+TEST_CASE("ui shot: scrolled away from the end, the footer offers the way back")
+{
+	constexpr int W = 880, H = 330;
+	Harness harness(W, H);
+	ConsoleSession session;
+	for (int i = 0; i < 60; ++i) HE_LOG_INFO(Core, "row %d of a log longer than the window", i);
+
+	ConsoleView::Hooks hooks;
+	hooks.codeFont = harness.body;
+
+	// The footer's button sits at the bottom right; the same patch of pixels is
+	// bare while the view follows the newest line.
+	const auto footerInk = [](const he_ui::Image& img) {
+		int ink = 0;
+		// Inside the window, clear of its rounded border and the list's scrollbar.
+		for (int y = 298; y < 316; ++y)
+			for (int x = 740; x < 850; ++x)
+			{
+				std::uint8_t r, g, b, a;
+				img.pixel(x, y, r, g, b, a);
+				if (int(r) + int(g) + int(b) > 150) ++ink;
+			}
+		return ink;
+	};
+
+	int phase = 0;
+	auto scene = [&](int i) {
+		ImGuiIO& io = ImGui::GetIO();
+		if (phase == 0)
+		{
+			if (i == 2) io.AddMousePosEvent(400.0f, 200.0f);
+			if (i == 3) io.AddMouseWheelEvent(0.0f, 8.0f);          // up, away from the end
+			if (i == 5) for (int n = 0; n < 5; ++n) HE_LOG_INFO(Core, "arrived while reading %d", n);
+		}
+		else   // press "Latest"
+		{
+			if (i == 0) io.AddMousePosEvent(815.0f, 307.0f);
+			if (i == 1) io.AddMouseButtonEvent(0, true);
+			if (i == 2) io.AddMouseButtonEvent(0, false);
+		}
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Console", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		ConsoleView::draw(hooks);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+
+	const he_ui::Image away = shoot("console-scrolled-away", W, H, 9, scene);
+	REQUIRE(away.valid());
+	const int inkAway = footerInk(away);
+
+	phase = 1;
+	const he_ui::Image back = shoot("console-back-at-end", W, H, 8, scene);
+	const int inkBack = footerInk(back);
+	INFO("footer ink: scrolled away " << inkAway << ", after Latest " << inkBack);
+	CHECK(inkAway > 150);   // "Latest (5 new)" is there…
+	CHECK(inkBack < 30);    // …and gone once the view follows again
+}
+
+TEST_CASE("ui shot: the category list names what has logged")
+{
+	constexpr int W = 880, H = 330;
+	Harness harness(W, H);
+	ConsoleSession session;
+	logSampleSession();
+
+	ConsoleView::Hooks hooks;
+	hooks.codeFont = harness.body;
+
+	constexpr float kCategoryX = 620.0f, kToolbarY = 52.0f;
+	bool open = false;
+	auto scene = [&](int i) {
+		ImGuiIO& io = ImGui::GetIO();
+		if (open)
+		{
+			if (i == 2) io.AddMousePosEvent(kCategoryX, kToolbarY);
+			if (i == 3) io.AddMouseButtonEvent(0, true);
+			if (i == 4) io.AddMouseButtonEvent(0, false);
+		}
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Console", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		ConsoleView::draw(hooks);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+	const he_ui::Image closed = shoot("console-categories-closed", W, H, 4, scene);
+	open = true;
+	const he_ui::Image popup = shoot("console-categories", W, H, 8, scene);
+	REQUIRE(closed.valid());
+	REQUIRE(popup.valid());
+
+	// The popup hangs under the button; the pixels there must differ from the
+	// same spot without it. (Coarse: that something appeared, not what.)
+	int changed = 0;
+	for (int y = 70; y < 200; ++y)
+		for (int x = 600; x < 700; ++x)
+		{
+			std::uint8_t r0, g0, b0, a0, r1, g1, b1, a1;
+			closed.pixel(x, y, r0, g0, b0, a0);
+			popup.pixel(x, y, r1, g1, b1, a1);
+			if (std::abs(int(r0) - int(r1)) + std::abs(int(g0) - int(g1)) + std::abs(int(b0) - int(b1)) > 30)
+				++changed;
+		}
+	INFO("changed pixels under the Category button: " << changed);
+	CHECK(changed > 1500);
+}
+
+// ── The reader draws only the sections in view (EDT-302) ─────────────────────
+// A page as long as the Node Reference, opened in its middle: with the sections
+// above and below the body skipped, the frame must be the same picture as with
+// every section drawn, the scroll range the same, and a jump to another section
+// must still land where it lands without the skipping.
+namespace
+{
+	HE::Ed::Docs::Page longPage()
+	{
+		using namespace HE::Ed::Docs;
+		Page page;
+		page.id      = "longpage";
+		page.file    = "longpage.html";
+		page.title   = "Long Page Fixture";
+		page.summary = "Many sections of different heights.";
+		for (int i = 0; i < 120; ++i)
+		{
+			Section sec;
+			sec.id    = "s" + std::to_string(i);
+			sec.title = "Section " + std::to_string(i);
+			Block lead;
+			lead.kind = BlockKind::Lead;
+			lead.runs.push_back({ "The opening sentence of section " + std::to_string(i) + ".",
+			                      Style::Body, "" });
+			sec.blocks.push_back(lead);
+			// Paragraphs of different lengths, so the sections differ in height
+			// and a skipped run has to add up exactly.
+			Block para;
+			para.kind = BlockKind::Paragraph;
+			std::string text;
+			for (int w = 0; w < 12 + (i * 7) % 60; ++w) text += "word" + std::to_string(w) + " ";
+			para.runs.push_back({ text, Style::Body, "" });
+			sec.blocks.push_back(para);
+			if (i % 4 == 0)
+			{
+				Block code;
+				code.kind = BlockKind::Code;
+				code.title = "example.lua";
+				code.text  = "local a = " + std::to_string(i) + "\nprint(a)";
+				sec.blocks.push_back(code);
+			}
+			page.sections.push_back(sec);
+		}
+		return page;
+	}
+
+	ImGuiWindow* docsBodyWindow()
+	{
+		for (ImGuiWindow* w : ImGui::GetCurrentContext()->Windows)
+			if (std::strstr(w->Name, "##docsBody")) return w;
+		return nullptr;
+	}
+
+	int differingPixels(const he_ui::Image& a, const he_ui::Image& b)
+	{
+		int differ = 0;
+		for (int y = 0; y < a.height; ++y)
+			for (int x = 0; x < a.width; ++x)
+			{
+				std::uint8_t r0, g0, b0, a0, r1, g1, b1, a1;
+				a.pixel(x, y, r0, g0, b0, a0);
+				b.pixel(x, y, r1, g1, b1, a1);
+				if (r0 != r1 || g0 != g1 || b0 != b1) ++differ;
+			}
+		return differ;
+	}
+}
+
+TEST_CASE("ui shot: the documentation reader skips sections out of view")
+{
+	constexpr int W = 1000, H = 640;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	REQUIRE(lib.loaded());
+	lib.appendPage(longPage());
+	const auto draw = [&](int) { DocsPanel::draw(host); };
+
+	// The reference: every section drawn, after a jump into the middle has landed.
+	DocsPanel::setSectionClipping(false);
+	DocsPanel::openTopic("longpage#s60");
+	REQUIRE(DocsPanel::isOpen());
+	const he_ui::Image all = shoot("docs-long-all", W, H, 8, draw);
+	REQUIRE(all.valid());
+	CHECK(DocsPanel::sectionsDrawn() == 120);
+	ImGuiWindow* body = docsBodyWindow();
+	REQUIRE(body);
+	const float scrollAll    = body->Scroll.y;
+	const float scrollMaxAll = body->ScrollMax.y;
+	CHECK(scrollAll > 1000.0f);
+
+	// Same place, skipping on: the same picture from a handful of sections.
+	DocsPanel::setSectionClipping(true);
+	const he_ui::Image clipped = shoot("docs-long-clipped", W, H, 3, draw);
+	REQUIRE(clipped.valid());
+	INFO("sections drawn with clipping: " << DocsPanel::sectionsDrawn());
+	CHECK(DocsPanel::sectionsDrawn() > 0);
+	CHECK(DocsPanel::sectionsDrawn() < 12);
+	CHECK(body->Scroll.y == doctest::Approx(scrollAll));
+	CHECK(body->ScrollMax.y == doctest::Approx(scrollMaxAll));
+	CHECK(differingPixels(all, clipped) == 0);
+
+	// A jump with skipping on lands where it lands without.
+	DocsPanel::openTopic("longpage#s25");
+	const he_ui::Image jumped = shoot("docs-long-jumped", W, H, 8, draw);
+	const float scrollJumped = body->Scroll.y;
+	DocsPanel::setSectionClipping(false);
+	DocsPanel::openTopic("longpage#s25");
+	const he_ui::Image jumpedAll = shoot("docs-long-jumped-all", W, H, 8, draw);
+	CHECK(body->Scroll.y == doctest::Approx(scrollJumped));
+	CHECK(differingPixels(jumped, jumpedAll) == 0);
+
+	DocsPanel::setSectionClipping(true);
+	DocsPanel::close();
+}
+
+// ── The search palette's keyboard, characterised (EDT-909) ───────────────────
+// searchMenuBegin/Item/End rank every row and keep the highlight; the rows reuse
+// buffers across frames now. What must not move: typing re-picks the best match,
+// ↓ walks the rows in drawn order, Enter picks the highlighted one a frame later.
+TEST_CASE("search palette: typing ranks, the arrow walks, Enter picks")
+{
+	constexpr int W = 600, H = 500;
+	Harness harness(W, H);
+	ImGuiIO& io = ImGui::GetIO();
+
+	std::string picked;
+	const auto frame = [&](bool open)
+	{
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("palette host");
+		if (open) ImGui::OpenPopup("##palette");
+		if (ImGui::BeginPopup("##palette"))
+		{
+			const std::string q = HcEditorUtil::searchMenuBegin("##q", "Search", 200.0f);
+			ImGui::BeginChild("##rows", ImVec2(260.0f, 300.0f));
+			// Like every caller: the rows that match are listed, the rest are not.
+			for (int i = 0; i < 300; ++i)
+			{
+				char shown[32], label[48];
+				std::snprintf(shown, sizeof(shown), "item %d", i);
+				std::snprintf(label, sizeof(label), "Item %d##id%d", i, i);
+				if (!q.empty() && std::string(shown).find(q) == std::string::npos) continue;
+				if (HcEditorUtil::searchMenuItem(label)) picked = label;
+			}
+			ImGui::EndChild();
+			HcEditorUtil::searchMenuEnd();
+			ImGui::EndPopup();
+		}
+		ImGui::End();
+		ImGui::Render();
+	};
+	const auto key = [&](ImGuiKey k)
+	{
+		io.AddKeyEvent(k, true);
+		frame(false);
+		io.AddKeyEvent(k, false);
+		frame(false);
+	};
+
+	frame(true);
+	frame(false);
+	frame(false);
+	// "Item 2" is the one exact name among "item 2", "item 20".. "item 299".
+	io.AddInputCharactersUTF8("Item 2");
+	frame(false);
+	frame(false);
+	CHECK(picked.empty());
+	key(ImGuiKey_DownArrow);           // from "Item 2" to the next row drawn: "Item 20"
+	key(ImGuiKey_Enter);
+	frame(false);
+	CHECK(picked == "Item 20##id20");
+
+	// Many frames with the palette open must keep the choice where it was.
+	picked.clear();
+	for (int i = 0; i < 5; ++i) frame(false);
+	CHECK(picked.empty());
 }

@@ -194,7 +194,8 @@ void Bracket::apply(HorizonWorld& world, ContentManager& cm, const SequenceAsset
 		if (!clip || clip->duration <= 0.0f || !mesh || mesh->skeleton.empty()) continue;
 		AnimationPreview::evaluateClipPose(*mesh, *clip,
 			SequenceSystem::sectionClipTime(*s, t, clip->duration), smc->boneMatrices);
-		smc->dirty = true;
+		smc->dirty   = true;
+		smc->poseKey = 0;   // these bones are not the driver's any more (PoseKey, PoseFinalize.h)
 	}
 }
 
@@ -216,7 +217,7 @@ void Bracket::restore(HorizonWorld& world, ContentManager& cm)
 		putVisible<RopeComponent>(reg, s.e, s.rope);
 		putVisible<TrailComponent>(reg, s.e, s.trail);
 		if (s.hasBones)
-			if (auto* smc = reg.try_get<SkeletalMeshComponent>(s.e)) { smc->boneMatrices = s.bones; smc->dirty = true; }
+			if (auto* smc = reg.try_get<SkeletalMeshComponent>(s.e)) { smc->boneMatrices = s.bones; smc->dirty = true; smc->poseKey = 0; }
 	}
 	for (const SavedMaterial& sm : m_materials)
 	{

@@ -83,6 +83,12 @@ IGNORE = {
     # above DrawAudioMixerWindow, which pushes the "Audio Mixer" scope. Covered
     # by its explicit helpForKey("Audio Mixer/EQ").
     (None, "EQ"),
+    # The console's category popup: drawCategoryFilter() sits above draw(), which
+    # pushes the "Console" scope, and is only ever called from inside it. The
+    # entry "Console/Show all categories" exists and resolves at run time —
+    # checked by the { "Console", "Show all categories" } row in
+    # tests/test_editor_help.cpp.
+    (None, "Show all categories"),
     # The one literal entry in the Target Class dropdown (the others are asset
     # names, built at run time and invisible here). It is not a control with an
     # explanation of its own: "HorizonCode Node/Target Class" is the entry, and it
@@ -111,12 +117,13 @@ SETTINGS_ROW = re.compile(r'row\("[^"]*",\s*"([^"]+)"')
 AREAS: dict[str, list[str]] = {
     "interface": ["EditorUI.cpp", "ViewportToolbar.cpp", "SecondaryViewportPanel.cpp",
                   "OutlinerPanel.cpp",
-                  "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp",
+                  "ContentBrowserPanel.cpp", "ProjectHubPanel.cpp", "ConsolePanel.cpp", "ConsoleView.cpp",
                   "NotificationBar.cpp", "PlayReportPanel.cpp", "DocsPanel.cpp",
                   "TutorialPanel.cpp", "McpStatusBar.cpp", "AudioMixerPanel.cpp",
-                  "TextureViewerPanel.cpp", "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp"],
+                  "TextureViewerPanel.cpp", "TextureColourSpaceDialog.cpp", "AssetRecoveryDialog.cpp",
+                  "TaskBoardPanel.cpp", "TaskBoardFooter.cpp", "PlannerPanel.cpp", "PlannerBoardView.cpp"],
     "components": ["InspectorPanel.cpp"],
-    "settings": ["EditorSettingsPanel.cpp", "ProjectSettingsPanel.cpp", "ToolchainDialog.cpp"],
+    "settings": ["EditorSettingsPanel.cpp", "ProjectSettingsPanel.cpp", "ToolSetupDialog.cpp"],
     "materials": ["MaterialEditorPanel.cpp"],
     "ui": ["UIEditorPanel.cpp", "ThemeAssetPanel.cpp"],
     "horizoncode": ["LevelScriptPanel.cpp", "HcGraphHost.cpp", "HcEditorUtil.cpp",
@@ -133,7 +140,7 @@ AREAS: dict[str, list[str]] = {
     "collab": ["CollabPanel.cpp", "CollabPresenceBar.cpp", "SourceControlPanel.cpp",
                "GitMissingDialog.cpp", "EngineContentPublishDialog.cpp",
                "ReportIssueDialog.cpp", "GitCloneDialog.cpp",
-               "GitHubSignIn.cpp", "GitHubSignInView.cpp"],
+               "GitHubSignIn.cpp", "GitHubSignInView.cpp", "TeamView.cpp", "TeamSyncView.cpp"],
 }
 
 # The gap as it stands, per area. A number that goes UP is a control somebody

@@ -1,4 +1,5 @@
 #include "TutorialPanel.h"
+#include "NotificationStore.h"   // failures are notifications
 #include "TutorialSteps.h"
 #include "EditorApplication.h"   // AppContext, EditorConfig, ProjectManager
 #include "EditorWidgets.h"       // dialog placement + the help-aware button
@@ -7,6 +8,7 @@
 #include "EditorAssetTypeCache.h" // asset-type sniff for the create/open checks
 #include "PanelSpotlight.h"      // the pulsing panel outline, shared with the docs reader
 #include "EditorRewards.h"       // reward moment: Tutorial complete
+#include "EditorUiShot.h"        // the HE_DUMP_TUTORIALUI witness's picture
 #include "HorizonVersion.h"
 
 #include <HorizonScene/HorizonWorld.h>
@@ -46,8 +48,6 @@
 #include <imgui.h>
 #include <imgui_internal.h>   // FindWindowByName — used to outline the step's panel
 #include <misc/cpp/imgui_stdlib.h>
-// The test harness's CPU rasteriser, for the HE_DUMP_TUTORIALUI witness only.
-#include "../../tests/ImGuiSoftwareRaster.h"
 #endif
 
 namespace fs = std::filesystem;
@@ -456,13 +456,8 @@ namespace
 	// rasterised on the CPU — and logs the card's rect, each outlined panel's
 	// rect and how much of them the card covers. The editor quits after the last.
 	//
-	// The rasteriser is the test harness's (tests/ImGuiSoftwareRaster), and it
-	// is fed a CLONE of the draw data. The live draw data carries the GPU
-	// backend's texture ids and texture requests; handed those, the rasteriser
-	// would claim the font atlas from the real backend. The clone's commands
-	// point at CPU copies of ImGui's own textures instead, and anything that is
-	// not one of them (the Scene viewport's GPU image) is drawn flat grey —
-	// there is no picture of it on this side.
+	// The picture is HE::Ed::UiShot::captureDrawData (EditorUiShot.cpp): the
+	// test harness's CPU rasteriser over a clone of this frame's draw data.
 	struct UiWitness
 	{
 		bool                     active = false;
@@ -500,81 +495,6 @@ namespace
 			return out;
 		}();
 		return w;
-	}
-
-	// A CPU copy of the ImGui texture behind `id`, RGBA8 (the atlas may be
-	// Alpha8), registered with the rasteriser. `grey` when `id` is not one of
-	// ImGui's own textures.
-	ImTextureID witnessTexture(ImTextureID id, ImTextureID grey,
-	                           std::vector<std::pair<ImTextureID, ImTextureID>>& made)
-	{
-		for (const auto& [from, to] : made)
-			if (from == id) return to;
-		ImTextureID to = grey;
-		for (ImTextureData* t : ImGui::GetPlatformIO().Textures)
-		{
-			if (!t || t->GetTexID() != id || !t->Pixels || t->Width <= 0 || t->Height <= 0)
-				continue;
-			const size_t n = static_cast<size_t>(t->Width) * static_cast<size_t>(t->Height);
-			std::vector<std::uint8_t> rgba(n * 4);
-			for (size_t i = 0; i < n; ++i)
-			{
-				if (t->BytesPerPixel == 1)
-				{
-					rgba[i * 4 + 0] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = 255;
-					rgba[i * 4 + 3] = t->Pixels[i];
-				}
-				else
-					std::memcpy(&rgba[i * 4], &t->Pixels[i * 4], 4);
-			}
-			to = he_ui::registerTexture(rgba.data(), t->Width, t->Height);
-			break;
-		}
-		made.emplace_back(id, to);
-		return to;
-	}
-
-	bool witnessCapture(const std::string& path)
-	{
-		const ImDrawData* dd = ImGui::GetDrawData();
-		if (!dd || !dd->Valid || dd->DisplaySize.x < 1.0f || dd->DisplaySize.y < 1.0f)
-			return false;
-
-		const std::uint8_t greyPx[4] = { 58, 54, 50, 255 };
-		const ImTextureID grey = he_ui::registerTexture(greyPx, 1, 1);
-		std::vector<std::pair<ImTextureID, ImTextureID>> made;
-		std::vector<ImDrawList*> clones;
-
-		ImDrawData copy;
-		copy.Valid            = true;
-		copy.DisplayPos       = dd->DisplayPos;
-		copy.DisplaySize      = dd->DisplaySize;
-		copy.FramebufferScale = ImVec2(1.0f, 1.0f);   // one pixel per point is plenty
-		copy.Textures         = nullptr;              // no texture requests: not ours to answer
-		for (const ImDrawList* list : dd->CmdLists)
-		{
-			ImDrawList* c = list->CloneOutput();
-			for (ImDrawCmd& cmd : c->CmdBuffer)
-				if (!cmd.UserCallback)
-					cmd.TexRef = ImTextureRef(witnessTexture(cmd.GetTexID(), grey, made));
-			clones.push_back(c);
-			// Straight into the list, not AddDrawList(): that asserts on the
-			// write cursor, which CloneOutput() leaves unset.
-			copy.CmdLists.push_back(c);
-			copy.CmdListsCount += 1;
-			copy.TotalVtxCount += c->VtxBuffer.Size;
-			copy.TotalIdxCount += c->IdxBuffer.Size;
-		}
-
-		const he_ui::Image img = he_ui::rasterize(&copy, static_cast<int>(dd->DisplaySize.x),
-		                                          static_cast<int>(dd->DisplaySize.y));
-		const bool ok = img.valid() && he_ui::writeBmp(img, path);
-
-		for (ImDrawList* c : clones) IM_DELETE(c);
-		for (const auto& [from, to] : made)
-			if (to != grey) he_ui::unregisterTexture(to);
-		he_ui::unregisterTexture(grey);
-		return ok;
 	}
 
 	std::string rectText(ImVec2 a, ImVec2 b)
@@ -745,7 +665,9 @@ void renderWelcome(AppContext& ctx)
 			}
 			else
 			{
-				s_error = "Could not create the project there. Check the path and permissions.";
+				// An outcome, not a mistake in a field (those two stay inline): a notification.
+				HE::Ed::notify(HE::Ed::NoteLevel::Important, "Could not create the project",
+				               "Check the path and permissions.");
 			}
 		}
 	}
@@ -1110,7 +1032,7 @@ void witnessAfterRender()
 	}
 
 	const std::string path = w.dir + "/tutorial-ui-" + id + ".bmp";
-	line += witnessCapture(path) ? " → " + path : " (capture FAILED)";
+	line += HE::Ed::UiShot::captureDrawData(path) ? " → " + path : " (capture FAILED)";
 	HE_LOG_INFO(Editor, "%s", line.c_str());
 
 	++w.index;

@@ -1,4 +1,6 @@
 #include "BoneMaskPanel.h"
+#include <Platform/ProjectWriteGate.h>
+#include "NotificationStore.h"      // a save that fails has to say so
 #include "EditorApplication.h"     // AppContext
 #include "EditorAssetTypeCache.h"  // shared, invalidatable path → AssetType sniff
 #include "EditorPanelState.h"      // shared per-tab state map
@@ -36,24 +38,23 @@ struct PanelState
 	// then edited as the plain name list it is.
 	HE::UUID     referenceMeshId;
 
-	std::string  lastSaveError;
 };
 AssetPanelState<PanelState> s_states;
 
 bool saveState(PanelState& st, AppContext& ctx)
 {
 	if (!ctx.contentManager) return false;
-	st.lastSaveError.clear();
 	BoneMaskAsset* a = ctx.contentManager->getBoneMaskMutable(st.assetId);
 	if (!a)
 	{
-		st.lastSaveError = "Not saved: this bone mask asset is no longer loaded.";
+		HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "This bone mask asset is no longer loaded.");
 		return false;
 	}
 	a->json = HE::boneMaskToJson(st.mask);
 	if (!ctx.contentManager->saveAsset(*a))
 	{
-		st.lastSaveError = "Not saved: the file could not be written.";
+		if (!HE::ProjectWriteGate::locked())
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Not saved", "The file could not be written.");
 		return false;
 	}
 	st.dirty = false;
@@ -256,11 +257,11 @@ void BoneMaskPanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::AssetSn
 	if (!cm) return;
 	s_states.forEach([&](const std::string&, PanelState& st) {
 		if (!st.dirty || st.relPath.empty()) return;
-		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
-			const BoneMaskAsset* a = cm->getBoneMask(st.assetId);
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, assetId = st.assetId, mask = st.mask](const std::string& dest) {
+			const BoneMaskAsset* a = cm->getBoneMask(assetId);
 			if (!a) return false;
 			BoneMaskAsset copy = *a;
-			copy.json = HE::boneMaskToJson(st.mask);
+			copy.json = HE::boneMaskToJson(mask);
 			return cm->writeAssetTo(copy, dest);
 		} });
 	});
@@ -307,12 +308,6 @@ void BoneMaskPanel::render(AppContext& ctx, const std::string& assetPath,
 		bar.readout(nullptr, "Bone Mask", T::kFgDim);
 		bar.endGroup();
 		if (T::saveButton(bar, true)) saveState(st, ctx);
-	}
-	if (!st.lastSaveError.empty())
-	{
-		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(220, 80, 80, 255));
-		ImGui::TextWrapped("%s", st.lastSaveError.c_str());
-		ImGui::PopStyleColor();
 	}
 
 	{

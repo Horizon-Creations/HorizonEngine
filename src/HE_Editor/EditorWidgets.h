@@ -59,12 +59,18 @@ enum class SlotAction { None, Assigned, Cleared };
 // Both the assign and the clear take an undo snapshot BEFORE mutating: the slot
 // points a component at an asset, which is a scene edit. `undo = false` is for
 // slots that hold panel-local preview state (a scrub clip is not a scene edit).
+//
+// `helpKey`: the help entry that explains THIS slot (the Weather component's five
+// sounds each do something different). When it names an entry, that tooltip
+// replaces the generic "click to pick or drop" one — so the entry's text should say
+// how the slot is filled. Null, or a key with no entry, keeps the generic one.
 SlotAction assetDropSlot(AppContext& ctx, const char* label, HE::UUID& target,
                          HE::AssetType want, const char* idSuffix,
                          const char* emptyText  = "(none)",
                          const char* rejectNoun = nullptr,
                          bool        showClear  = false,
-                         bool        undo       = true);
+                         bool        undo       = true,
+                         const char* helpKey    = nullptr);
 
 // ── Confirm / cancel buttons ─────────────────────────────────────────────────
 // Every dialog answers the same question — "do it, or not?" — and until now the
@@ -167,6 +173,44 @@ namespace Row
 	bool inputTextMultiline(const char* label, std::string* s, float height);
 	// Read-only value line, laid out like the editable rows above it.
 	void labelText(const char* label, const char* fmt, ...) IM_FMTARGS(2);
+
+	// ── Label column (the Details panel's layout) ────────────────────────────
+	// By default a row prints its name ABOVE the control, which costs two lines
+	// per property. While an InlineLabels scope is alive, a row instead puts the
+	// name in a fixed-width column on the left and the control in the column to
+	// its right, so every control on the panel starts on the same vertical line
+	// and a section is half as tall. A panel narrower than kInlineMinWidth keeps
+	// the stacked form (a 90 px field is no field). Scopes nest.
+	class InlineLabels
+	{
+	public:
+		InlineLabels();
+		~InlineLabels();
+		InlineLabels(const InlineLabels&) = delete;
+		InlineLabels& operator=(const InlineLabels&) = delete;
+	};
+	// A scope that turns the column off again for the rows inside it — a
+	// paragraph box wants the full width under its name.
+	class StackedLabels
+	{
+	public:
+		StackedLabels();
+		~StackedLabels();
+		StackedLabels(const StackedLabels&) = delete;
+		StackedLabels& operator=(const StackedLabels&) = delete;
+	private:
+		int m_saved;
+	};
+	// Draws `label` (the part before "##") into the label column and leaves the
+	// cursor at the start of the control column, ON THE SAME LINE. Returns false,
+	// drawing nothing, when no InlineLabels scope is alive or the panel is too
+	// narrow — the caller then lays the row out its own, stacked, way. The last
+	// item afterwards is the label text, which is what the help lookup keys off.
+	bool labelCell(const char* label);
+	// Width of the control column from the cursor, or 0 when labelCell would
+	// have refused. Lets a control that is not a plain stretch (the asset slot,
+	// with its Clear button) size itself.
+	bool inlineActive();
 
 	// ── Mixed values (several entities in the Details panel) ────────────────
 	// While a MixedScope is alive, a row whose VISIBLE label names one of its

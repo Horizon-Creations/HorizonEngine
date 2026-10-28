@@ -18,11 +18,6 @@ namespace HcRenameSweep
 {
 namespace
 {
-	bool contains(const std::vector<std::string>& v, const std::string& s)
-	{
-		return std::find(v.begin(), v.end(), s) != v.end();
-	}
-
 	// A scene keeps its level script as a plain JSON section. Reading and writing
 	// just that section beats round-tripping the whole scene through a world: the
 	// rest of the file stays byte-for-byte what it was, which matters for a file
@@ -54,7 +49,7 @@ namespace
 	HcRename::Role roleOf(Kind kind, const std::string& key,
 	                      const std::vector<std::string>& targetKeys, const std::string& classKey)
 	{
-		if (kind == Kind::Class && key != classKey && contains(targetKeys, key))
+		if (kind == Kind::Class && key != classKey && HcEditorUtil::contains(targetKeys, key))
 			return HcRename::Role::Overrides;
 		return HcRename::Role::Other;
 	}
@@ -93,6 +88,10 @@ std::vector<std::string> classAndDescendants(ContentManager& cm, const std::stri
 {
 	std::vector<std::string> keys{ classKey };
 	if (classKey.empty()) return keys;
+	// The asset lists below come from ContentManager's file index, which is only
+	// as fresh as the last content refresh. A rename that misses a file rewrites
+	// everything but that one, so this asks for a new walk first.
+	cm.noteContentChanged();
 
 	// Every class asset's ancestry, resolved the way the runtime resolves it, so
 	// a chain three deep counts as much as a direct child.
@@ -100,7 +99,7 @@ std::vector<std::string> classAndDescendants(ContentManager& cm, const std::stri
 	{
 		if (c.path == classKey) continue;
 		const HorizonCode::ResolvedClass rc = HorizonCode::resolveClassAsset(cm, c.path);
-		if (rc.ok && contains(rc.chain, classKey)) keys.push_back(c.path);
+		if (rc.ok && HcEditorUtil::contains(rc.chain, classKey)) keys.push_back(c.path);
 	}
 	return keys;
 }
@@ -112,11 +111,12 @@ Report scan(ContentManager& cm, const HcRename::Target& t,
 {
 	Report r;
 	if (t.oldName.empty() || t.newName.empty() || t.oldName == t.newName) return r;
+	cm.noteContentChanged();   // a fresh file index, see classAndDescendants
 
 	auto consider = [&](Kind kind, const std::string& display, const std::string& path,
 	                    HE::UUID id, const HorizonCode::Graph& g)
 	{
-		if (contains(handledInMemory, display) || contains(handledInMemory, path)) return;
+		if (HcEditorUtil::contains(handledInMemory, display) || HcEditorUtil::contains(handledInMemory, path)) return;
 		HcRename::Plan plan = HcRename::planGraph(
 			g, roleOf(kind, display, targetKeys, t.classKey), targetKeys, display,
 			kGameInstanceKey, t);

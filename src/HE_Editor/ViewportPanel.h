@@ -70,6 +70,9 @@ namespace ViewportPanel
 		bool primaryLocked = false;  // the verb the Lock row shows
 	};
 	EntityActionState entityActionState(AppContext& ctx);
+	// Only the Lock row's verb: the macOS menu bar sets it every frame, and the whole state
+	// also asks anyHidden(), a walk over every entity (2.1 ms a frame at 50k).
+	bool primaryLocked(AppContext& ctx);
 	void focusSelected(AppContext& ctx);
 	void snapSelectionToGround(AppContext& ctx);
 	void hideSelected(AppContext& ctx);
@@ -129,7 +132,7 @@ namespace ViewportPanel
 		bool joints        = true;  // joint lines, anchors and hinge arcs
 		bool navMesh       = true;  // baked NavMesh polygons (per component too)
 		bool editorIcons   = true;  // light / camera / audio-source billboards
-		bool guides        = true;  // rope + trail handles, root-motion and look-at previews
+		bool guides        = true;  // rope + trail handles, spline lines, root-motion and look-at previews
 		bool collaborators = true;  // peers' rings, selections and name tags
 		bool scriptDebug   = true;  // debug.* lines from scripts and HorizonCode
 		bool streamingCells = true; // a split scene's cell squares + load/unload radius (StreamingDebugView)

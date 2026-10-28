@@ -117,7 +117,7 @@ std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> m
 }
 
 #ifdef HE_HAVE_ASSIMP
-// FBX / OBJ / COLLADA through Assimp. The geometry arrives in the same streams
+// FBX / OBJ / COLLADA / Blender through Assimp. The geometry arrives in the same streams
 // the glTF bake fills, so normals, sections and the write are the shared code
 // above; only the reading differs. Materials go through the same core as
 // glTF's (PbrMaterialImport) — AssimpMaterialImport translates aiMaterial into
@@ -141,7 +141,13 @@ std::unique_ptr<StaticMeshAsset> importViaAssimp(
 	Importer::AssimpBakedGeometry baked;
 	if (!scene.bake(settings.uniformScale, baked))
 	{
-		logError(sourcePath.string() + ": no triangle geometry found");
+		// Assimp's Blender reader takes mesh objects, with the Mirror and
+		// Subdivision modifiers applied; other modifiers and curves, text and
+		// metaballs are not geometry to it.
+		const bool blend = sourcePath.extension() == ".blend" || sourcePath.extension() == ".BLEND";
+		logError(sourcePath.string() + ": no triangle geometry found" +
+		         (blend ? " (only mesh objects are read from .blend files; apply other "
+		                  "objects and modifiers, or export as glTF)" : ""));
 		return nullptr;
 	}
 	if (baked.skinned)

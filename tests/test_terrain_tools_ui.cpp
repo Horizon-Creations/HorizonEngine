@@ -15,6 +15,10 @@
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
+#include <HorizonScene/WaterField.h>             // the Water brush's result
+#include <HorizonScene/WaterBrush.h>             // ... painted through its own API
+#include <HorizonScene/WaterLake.h>              // ... and turned into a lake
+#include <HorizonScene/Components/SplineComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/DefaultAssets.h>
@@ -44,10 +48,16 @@
 // With HE_UI_DUMP_DIR set the panel is written out as well.
 
 using namespace HE::Ed;
+namespace water = HE::water;
 
 namespace
 {
 	constexpr int W = 360, H = 520;
+	// The panel window is taller than the viewport frame: the Landscape panel is a card,
+	// a segmented tab control, a scrolling body and a pinned brush, and the Foliage and
+	// Mountain pages need the room to show every control without scrolling. The viewport
+	// frames keep W x H, so the pixel-to-metre scale the stroke tests rely on is untouched.
+	constexpr int PH = 760;
 
 	struct Harness
 	{
@@ -55,7 +65,7 @@ namespace
 		{
 			ImGui::CreateContext();
 			ImGuiIO& io = ImGui::GetIO();
-			io.DisplaySize = ImVec2(float(W), float(H));
+			io.DisplaySize = ImVec2(float(W), float(PH));
 			io.DeltaTime   = 1.0f / 60.0f;
 			io.IniFilename = nullptr;
 			io.LogFilename = nullptr;
@@ -151,7 +161,7 @@ namespace
 		io.AddMouseButtonEvent(ImGuiMouseButton_Left, mouseDown);
 		ImGui::NewFrame();
 		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
-		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(PH) - 20.0f));
 		ImGui::Begin(kPanelWindow, nullptr,
 		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
 		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
@@ -160,7 +170,7 @@ namespace
 		EditorWidgets::drawQueuedHelp();
 		const ImGuiID hovered = ImGui::GetHoveredID();
 		ImGui::Render();
-		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, H);
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, PH);
 		return hovered;
 	}
 
@@ -181,23 +191,39 @@ namespace
 		panelFrame(ctx, false);
 	}
 
-	// The id a widget label resolves to inside the panel window. The toolbar
-	// cells are InvisibleButtons under their "##id", a button is its label.
-	ImGuiID panelId(const char* label)
+	// A widget label inside the panel. The panel's own items (the card, the tab control)
+	// live in the window itself; the tab's content and the pinned brush live in two child
+	// windows, and an id is hashed against the window it was submitted in - so a label
+	// can match under any of the three. An item inside an open TreeNode (the Mountain
+	// page's "More" group) is hashed against the node's id as well, so `inTree` names
+	// that node by its full label, "##" suffix included.
+	struct PanelRef { const char* label; const char* inTree = nullptr; };
+	PanelRef panelId(const char* label, const char* inTree = nullptr) { return { label, inTree }; }
+
+	ImGuiID refIdIn(ImGuiWindow* w, const PanelRef& ref)
+	{
+		if (!ref.inTree) return w->GetID(ref.label);
+		return ImHashStr(ref.label, 0, w->GetID(ref.inTree));
+	}
+
+	bool idMatches(ImGuiID hovered, const PanelRef& ref)
 	{
 		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
 		REQUIRE(w != nullptr);
-		return w->GetID(label);
+		if (hovered == refIdIn(w, ref)) return true;
+		for (ImGuiWindow* c : w->DC.ChildWindows)
+			if (c && hovered == refIdIn(c, ref)) return true;
+		return false;
 	}
 
 	// Where an item is, found the way a user finds it: by moving the pointer
 	// over the panel until ImGui reports that id. Coarse grid first, so the
 	// scan stays a few thousand frames.
-	bool locate(AppContext& ctx, ImGuiID id, float& outX, float& outY)
+	bool locate(AppContext& ctx, PanelRef ref, float& outX, float& outY)
 	{
-		for (float y = 14.0f; y < float(H) - 14.0f; y += 4.0f)
+		for (float y = 14.0f; y < float(PH) - 14.0f; y += 4.0f)
 			for (float x = 14.0f; x < float(W) - 14.0f; x += 6.0f)
-				if (idAt(ctx, x, y) == id) { outX = x; outY = y; return true; }
+				if (idMatches(idAt(ctx, x, y), ref)) { outX = x; outY = y; return true; }
 		return false;
 	}
 
@@ -282,11 +308,11 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	REQUIRE(reg.all_of<FoliageComponent>(terrain));
 	CHECK(undo.canUndo());
 	auto& fol = reg.get<FoliageComponent>(terrain);
-	fol.meshAssetId = HE::kDefaultCubeMeshId;
-	fol.density     = 0.2f;
+	fol.layers[0].meshAssetId = HE::kDefaultCubeMeshId;
+	fol.layers[0].density     = 0.2f;
 	fol.dirty       = true;
 	FoliageSystem::update(world);
-	const size_t uniformCount = fol.cachedInstances.size();
+	const size_t uniformCount = fol.layers[0].cachedInstances.size();
 	REQUIRE(uniformCount == 2000u);
 
 	// The brush controls are there now: Grow armed, Erase beside it.
@@ -303,7 +329,7 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	clickAt(ctx, ex, ey);
 	const RenderWorld snap = topDownSnapshot(120.0f);
 	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
-	CHECK(fol.densityMask.empty());
+	CHECK(fol.layers[0].densityMask.empty());
 	viewportFrame(ctx, snap, cx, cy, false);
 	viewportFrame(ctx, snap, cx, cy, false);
 	// Strength 5 at dt 1 is 0.8 per frame; a dozen frames drive the mask to
@@ -311,20 +337,20 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	for (int i = 0; i < 12; ++i) viewportFrame(ctx, snap, cx, cy, true);
 	viewportFrame(ctx, snap, cx, cy, false);
 
-	REQUIRE_FALSE(fol.densityMask.empty());
-	CHECK(fol.dirty);
+	REQUIRE_FALSE(fol.layers[0].densityMask.empty());
+	CHECK(fol.layers[0].dirty);
 	const auto& tcc = reg.get<TerrainComponent>(terrain);
-	CHECK(FoliagePaint::sample(fol, tcc, 0.0f, 0.0f) == doctest::Approx(0.0f));
+	CHECK(FoliagePaint::sample(fol.layers[0], tcc, 0.0f, 0.0f) == doctest::Approx(0.0f));
 	// The default brush is 10 m + 5 m falloff: 40 m out is untouched.
-	CHECK(FoliagePaint::sample(fol, tcc, 40.0f, 40.0f) == doctest::Approx(1.0f));
-	CHECK(FoliagePaint::coverage(fol) < 1.0f);
-	CHECK(FoliagePaint::coverage(fol) > 0.9f);
+	CHECK(FoliagePaint::sample(fol.layers[0], tcc, 40.0f, 40.0f) == doctest::Approx(1.0f));
+	CHECK(FoliagePaint::coverage(fol.layers[0]) < 1.0f);
+	CHECK(FoliagePaint::coverage(fol.layers[0]) > 0.9f);
 
 	// The stroke re-scatters: fewer instances, none inside the erased circle.
 	FoliageSystem::update(world);
-	CHECK(fol.cachedInstances.size() < uniformCount);
-	CHECK(!fol.cachedInstances.empty());
-	for (const auto& m : fol.cachedInstances)
+	CHECK(fol.layers[0].cachedInstances.size() < uniformCount);
+	CHECK(!fol.layers[0].cachedInstances.empty());
+	for (const auto& m : fol.layers[0].cachedInstances)
 		CHECK(m[3].x * m[3].x + m[3].z * m[3].z >= 9.0f * 9.0f);
 
 	// One undo step for the whole stroke, and it brings the instances back.
@@ -335,10 +361,10 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	REQUIRE((terrain2 != entt::null));
 	{
 		auto& after = reg.get<FoliageComponent>(terrain2);
-		CHECK(after.densityMask.empty());
+		CHECK(after.layers[0].densityMask.empty());
 		after.dirty = true;
 		FoliageSystem::update(world);
-		CHECK(after.cachedInstances.size() == uniformCount);
+		CHECK(after.layers[0].cachedInstances.size() == uniformCount);
 	}
 
 	// ── Grow: paint a meadow INTO bare ground ──
@@ -348,28 +374,54 @@ TEST_CASE("landscape ui: the Foliage brush arms from the panel and a drag erases
 	{
 		auto& f2 = reg.get<FoliageComponent>(terrain2);
 		const auto& tc2 = reg.get<TerrainComponent>(terrain2);
-		FoliagePaint::fillMask(f2, 0.0f);
+		FoliagePaint::fillMask(f2.layers[0], 0.0f);
 		clickAt(ctx, gx, gy);
 		// After ONE frame the falloff is visible: 0.8 at the centre, about
 		// half that on the ring, nothing outside. Holding on converges the
 		// whole brush to the target, ring included — that is the lerp.
 		viewportFrame(ctx, snap, cx, cy, true);
-		CHECK(FoliagePaint::sample(f2, tc2, 0.0f, 0.0f) == doctest::Approx(0.8f).epsilon(0.02));
-		const float ring = FoliagePaint::sample(f2, tc2, 12.5f, 0.0f);
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 0.0f, 0.0f) == doctest::Approx(0.8f).epsilon(0.02));
+		const float ring = FoliagePaint::sample(f2.layers[0], tc2, 12.5f, 0.0f);
 		CHECK(ring > 0.2f);
 		CHECK(ring < 0.6f);
-		CHECK(FoliagePaint::sample(f2, tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
 		for (int i = 0; i < 11; ++i) viewportFrame(ctx, snap, cx, cy, true);
 		viewportFrame(ctx, snap, cx, cy, false);
-		CHECK(FoliagePaint::sample(f2, tc2, 0.0f, 0.0f) == doctest::Approx(1.0f));
-		CHECK(FoliagePaint::sample(f2, tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 0.0f, 0.0f) == doctest::Approx(1.0f));
+		CHECK(FoliagePaint::sample(f2.layers[0], tc2, 40.0f, 40.0f) == doctest::Approx(0.0f));
 		FoliageSystem::update(world);
-		CHECK(!f2.cachedInstances.empty());
-		for (const auto& m : f2.cachedInstances)
+		CHECK(!f2.layers[0].cachedInstances.empty());
+		for (const auto& m : f2.layers[0].cachedInstances)
 			CHECK(m[3].x * m[3].x + m[3].z * m[3].z <= 16.0f * 16.0f);
 
 		// Sculpting never ran: a foliage stroke does not bake heights.
 		CHECK(tc2.sculptHeights.empty());
+	}
+
+	// ── A second layer: the panel adds it and selects it, the brush paints it alone ──
+	{
+		auto& f3 = reg.get<FoliageComponent>(terrain2);
+		const std::vector<uint8_t> firstMask = f3.layers[0].densityMask;
+		float lx = 0.0f, ly = 0.0f;
+		REQUIRE_MESSAGE(locate(ctx, panelId("Add Foliage Layer##more"), lx, ly),
+		                "Foliage mode with a layer shows no button for another one");
+		clickAt(ctx, lx, ly);
+		REQUIRE(f3.layers.size() == 2u);
+		CHECK(f3.activeIndex() == 1u);
+		CHECK(f3.layers[1].seed != f3.layers[0].seed);
+		CHECK(f3.layers[1].densityMask.empty());
+
+		// The list grew by a row, so the mode cells moved: look for Erase again.
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+		for (int i = 0; i < 2; ++i) panelFrame(ctx, false);
+		float e2x = 0.0f, e2y = 0.0f;
+		REQUIRE(locate(ctx, panelId("##folErase"), e2x, e2y));
+		clickAt(ctx, e2x, e2y);
+		for (int i = 0; i < 4; ++i) viewportFrame(ctx, snap, cx, cy, true);
+		viewportFrame(ctx, snap, cx, cy, false);
+		REQUIRE_FALSE(f3.layers[1].densityMask.empty());
+		CHECK(FoliagePaint::sample(f3.layers[1], reg.get<TerrainComponent>(terrain2), 0.0f, 0.0f) < 0.5f);
+		CHECK(f3.layers[0].densityMask == firstMask);   // the first layer did not see the stroke
 	}
 
 	// Back to Sculpt, so the file-static mode does not leak into another test.
@@ -427,9 +479,11 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	clickAt(ctx, mx, my);
 	float nx = 0.0f, ny = 0.0f;
 	CHECK_MESSAGE(locate(ctx, panelId("##mtRect"), nx, ny), "Mountain armed shows no Rectangle cell");
-	CHECK_MESSAGE(locate(ctx, panelId("Max Height##mountain"), nx, ny), "Mountain armed shows no Max Height");
-	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain"), nx, ny), "Mountain armed shows no New Seed");
-	CHECK_FALSE(locate(ctx, panelId("Radius##brush"), nx, ny));
+	CHECK_MESSAGE(locate(ctx, panelId("##mountain_maxh"), nx, ny), "Mountain armed shows no Max Height");
+	// New Seed sits in the page's "More" group (open by default), so its id is hashed under that node.
+	CHECK_MESSAGE(locate(ctx, panelId("New Seed##mountain", "More (Falloff, Frequency, Seed)##mountainmore"), nx, ny),
+	              "Mountain armed shows no New Seed");
+	CHECK_FALSE(locate(ctx, panelId("##radius_brush"), nx, ny));
 	{
 		he_ui::Image img;
 		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
@@ -550,5 +604,617 @@ TEST_CASE("landscape ui: the Mountain tool grows a formation in the dragged area
 	clickAt(ctx, rx, ry);
 	REQUIRE(locate(ctx, panelId("##lsTool0"), rx, ry));
 	clickAt(ctx, rx, ry);
-	CHECK(locate(ctx, panelId("Radius##brush"), rx, ry));
+	CHECK(locate(ctx, panelId("##radius_brush"), rx, ry));
+}
+
+// ── Setup tab and Ctrl-invert ────────────────────────────────────────────────
+// Two things the viewport has to get right that the panel only asks for: the
+// Setup tab is a form, so a drag over the viewport while it is open must not
+// sculpt; and Ctrl turns the armed brush around (Raise lowers) for as long as it
+// is held.
+TEST_CASE("landscape ui: the Setup tab switches the brush off, and Ctrl turns Raise into Lower")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.sculptHeights.assign(129u * 129u, 0.0f);
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MeshComponent mesh;
+	mesh.meshAssetId = HE::kDefaultCubeMeshId;
+	reg.emplace<MeshComponent>(terrain, mesh);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	auto extremes = [&] {
+		const auto& t = reg.get<TerrainComponent>(terrain);
+		float lo = 0.0f, hi = 0.0f;
+		for (float h : t.sculptHeights) { lo = std::min(lo, h); hi = std::max(hi, h); }
+		return std::pair<float, float>(lo, hi);
+	};
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	auto drag = [&] {
+		viewportFrame(ctx, snap, cx, cy, false);
+		viewportFrame(ctx, snap, cx, cy, false);
+		for (int i = 0; i < 4; ++i) viewportFrame(ctx, snap, cx, cy, true);
+		viewportFrame(ctx, snap, cx, cy, false);
+	};
+
+	// ── Setup: the form is there, the brush is not ──
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("##lsSetup"), sx, sy), "no Setup cell in the tab well");
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("Reset Sculpting"), bx, by), "Setup shows no Reset Sculpting");
+	CHECK_FALSE(locate(ctx, panelId("##radius_brush"), bx, by));
+	const size_t depth0 = undo.undoDepth();
+	drag();
+	CHECK(extremes().first == 0.0f);
+	CHECK(extremes().second == 0.0f);
+	CHECK(undo.undoDepth() == depth0);
+
+	// ── Back on Sculpt, Raise: the same drag lifts the ground ──
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
+	clickAt(ctx, sx, sy);
+	CHECK_FALSE(locate(ctx, panelId("Reset Sculpting"), bx, by));
+	REQUIRE(locate(ctx, panelId("##lsTool0"), bx, by));
+	clickAt(ctx, bx, by);
+	drag();
+	CHECK(extremes().second > 1.0f);
+	CHECK(extremes().first == 0.0f);
+
+	// ── Ctrl held: Raise lowers ──
+	// The panel reads io.KeyCtrl. Under ConfigMacOSXBehaviors (the default on Apple)
+	// AddKeyEvent swaps Ctrl and Cmd, so ImGuiMod_Ctrl would arrive as Super - and
+	// Super + left click is aliased into a RIGHT click, so the drag would never be a
+	// left drag. The key that ends up as io.KeyCtrl there is ImGuiMod_Super (the Cmd
+	// key, the platform's primary modifier).
+	const ImGuiKey ctrlKey = ImGui::GetIO().ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
+	// The ground is already lifted by the Raise drag above and the inverted stroke is the
+	// same size the other way, so ONE Ctrl drag takes the hill back to flat; only a second
+	// one digs below zero. Asserting the dig after a single drag would be asserting that
+	// a Lower stroke is stronger than a Raise one.
+	ImGui::GetIO().AddKeyEvent(ctrlKey, true);
+	drag();
+	viewportFrame(ctx, snap, cx, cy, false);
+	CHECK(extremes().second < 0.5f);
+	CHECK(extremes().first > -0.5f);
+	drag();
+	ImGui::GetIO().AddKeyEvent(ctrlKey, false);
+	viewportFrame(ctx, snap, cx, cy, false);
+	CHECK(extremes().first < -0.5f);
+}
+
+// ── The Water brush: arm it, drag, hold Ctrl, undo ───────────────────────────
+// The stroke logic (which body, which level, the eraser, the dig) has its own
+// tests in test_water_brush.cpp. This one asks what only the Landscape tool can
+// answer: does the panel arm the Water tab and show its form instead of the
+// sculpt tools, does a drag in the viewport leave water where the pointer went,
+// is a whole stroke ONE undo step, does Ctrl erase (as it turns every brush
+// around), does a water stroke leave the terrain's own rebuild flags alone, and
+// does Dig Bed lower the ground.
+TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl erases, Dig Bed lowers the ground")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	// A flat 100 m landscape at the origin, a built one: dirty off, a 2ⁿ+1 grid, so
+	// "the terrain wants a rebuild" can only come from the stroke.
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.dirty = false;
+	tc.water.res = 100;                       // a cell is a metre
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MeshComponent mesh;                       // something for the picking-cache hook to invalidate
+	mesh.meshAssetId = HE::kDefaultCubeMeshId;
+	reg.emplace<MeshComponent>(terrain, mesh);
+	auto land = [&]() -> TerrainComponent&
+	{
+		auto view = reg.view<TerrainComponent>();
+		REQUIRE(view.size() == 1u);
+		return reg.get<TerrainComponent>(*view.begin());   // undo mints new handles
+	};
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// ── Arm Water: its form replaces the sculpt tools ──
+	float wx = 0.0f, wy = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("##lsWater"), wx, wy), "no Water cell in the tab well");
+	clickAt(ctx, wx, wy);
+	float fx = 0.0f, fy = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("##watErase"), fx, fy), "Water armed shows no Erase cell");
+	CHECK_MESSAGE(locate(ctx, panelId("##radius_water"), fx, fy), "Water armed shows no Radius");
+	CHECK_MESSAGE(locate(ctx, panelId("From Ground##water"), fx, fy), "Water armed shows no From Ground");
+	float digX = 0.0f, digY = 0.0f;
+	CHECK_MESSAGE(locate(ctx, panelId("Dig Bed##water"), digX, digY), "Water armed shows no Dig Bed");
+	CHECK_FALSE(locate(ctx, panelId("##lsTool0"), fx, fy));          // the sculpt brushes are gone
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+		for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
+		REQUIRE(img.valid());
+		dump(img, "landscape-water-panel");
+	}
+	// Dig Bed is on by default (a pond without a bed is all shore, see its help):
+	// off for the first strokes, which are about the water alone.
+	clickAt(ctx, digX, digY);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
+	const size_t depth0 = undo.undoDepth();
+	REQUIRE(land().water.bodies.empty());
+
+	// Top-down at 120 m, 60° field of view: 0.2665 m a pixel, +X right, +Z down
+	// (see the Mountain test). 75 px is 20 m.
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	const float px = 75.0f;
+	int invalidations = 0;
+	auto hook = [&](const HE::UUID&) { ++invalidations; };
+
+	// ── A press that misses the landscape takes no undo step ──
+	viewportFrame(ctx, snap, -50.0f, -50.0f, false, hook);       // pointer outside the viewport rectangle
+	viewportFrame(ctx, snap, -50.0f, -50.0f, true, hook);
+	viewportFrame(ctx, snap, -50.0f, -50.0f, false, hook);
+	CHECK(undo.undoDepth() == depth0);
+	CHECK(land().water.bodies.empty());
+
+	// ── Paint: press at the middle, drag 20 m east, let go ──
+	viewportFrame(ctx, snap, cx, cy, false, hook);
+	viewportFrame(ctx, snap, cx, cy, true, hook);
+	for (int i = 1; i <= 5; ++i)
+		viewportFrame(ctx, snap, cx + px * i / 5.0f, cy, true, hook);
+	// While the button is held the stroke is already in the model: water appears
+	// under the cursor as you drag, no release needed.
+	CHECK(land().water.wetCells() > 0u);
+	CHECK(undo.undoDepth() == depth0 + 1);                        // one entry, taken when the stroke began
+	viewportFrame(ctx, snap, cx + px, cy, false, hook);
+	{
+		const TerrainComponent& t = land();
+		REQUIRE(t.water.bodies.size() == 1);
+		CHECK(undo.undoDepth() == depth0 + 1);
+		CHECK(undo.undoLabel() == "Paint Water");
+		CHECK_FALSE(t.water.bodies[0].fromSpline());
+		CHECK(t.water.bodies[0].level == doctest::Approx(0.3f));  // flat ground at 0 plus the default 0.3 m
+		const uint16_t id = t.water.bodies[0].id;
+		CHECK(water::bodyAt(t, 0.0f, 0.0f)   == id);
+		CHECK(water::bodyAt(t, 10.0f, 0.0f)  == id);
+		CHECK(water::bodyAt(t, 20.0f, 0.0f)  == id);
+		CHECK(water::bodyAt(t, -10.0f, 0.0f) == id);              // radius 10 + falloff 5 behind the press
+		CHECK(water::bodyAt(t, 10.0f, 25.0f) == water::kNoBody);
+		CHECK(water::bodyAt(t, 40.0f, 40.0f) == water::kNoBody);
+		// The landscape's own flags: a water stroke is not a terrain edit.
+		CHECK_FALSE(t.dirty);
+		CHECK_FALSE(t.regionDirty);
+		CHECK(t.sculptHeights.empty());
+		CHECK(t.water.dirty);                                      // the sheet is built from this next tick
+		CHECK(invalidations == 0);                                 // the ground did not move
+	}
+
+	// ── One undo takes the whole stroke back, redo brings it back ──
+	const water::Field painted = land().water;
+	REQUIRE(undo.undo());
+	CHECK(land().water.wetCells() == 0u);
+	CHECK(land().water.bodies.empty());
+	REQUIRE(undo.redo());
+	CHECK(water::sameContent(land().water, painted));
+
+	// ── Ctrl flips Paint to Erase: wipe the middle ──
+	// The panel reads io.KeyCtrl. Under ConfigMacOSXBehaviors AddKeyEvent swaps Ctrl
+	// and Cmd, and Ctrl + left click is aliased into a RIGHT click, so the key that
+	// ends up as io.KeyCtrl there is ImGuiMod_Super (see the Setup / Ctrl test above).
+	const ImGuiKey ctrlKey = ImGui::GetIO().ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
+	const uint32_t wetBefore = land().water.wetCells();
+	const size_t depth1 = undo.undoDepth();
+	ImGui::GetIO().AddKeyEvent(ctrlKey, true);
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);   // a frame for the modifier to arrive
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, true, hook);
+	for (int i = 0; i < 3; ++i)
+		viewportFrame(ctx, snap, cx + px * 0.5f, cy, true, hook);
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);
+	ImGui::GetIO().AddKeyEvent(ctrlKey, false);
+	viewportFrame(ctx, snap, cx + px * 0.5f, cy, false, hook);
+	{
+		const TerrainComponent& t = land();
+		CHECK(t.water.wetCells() < wetBefore);
+		CHECK(water::bodyAt(t, 10.0f, 0.0f) == water::kNoBody);   // the pointer's spot is dry
+		CHECK(water::bodyAt(t, -10.0f, 0.0f) != water::kNoBody);  // the far end of the pond is not
+		CHECK(undo.undoDepth() == depth1 + 1);
+		CHECK(undo.undoLabel() == "Erase Water");
+		CHECK(t.water.bodies.size() == 1);                         // the eraser creates nothing
+	}
+	REQUIRE(undo.undo());                                          // the erase alone
+	CHECK(land().water.wetCells() == wetBefore);
+
+	// ── Dig Bed: a second pond, the ground goes down with it ──
+	clickAt(ctx, digX, digY);                                     // the checkbox
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
+	REQUIRE(land().sculptHeights.empty());
+	// Undo rebuilt the landscape entity from a snapshot: its terrain comes back
+	// "dirty" (a loaded landscape wants its chunks built) and without the mesh
+	// component the terrain system owns. Put the test's premise back.
+	land().dirty = false;
+	{
+		const Entity te = reg.view<TerrainComponent>().front();
+		if (!reg.all_of<MeshComponent>(te)) reg.emplace<MeshComponent>(te, mesh);
+	}
+	invalidations = 0;
+	const size_t depth2 = undo.undoDepth();
+	const float gx = 30.0f, gz = 30.0f;                            // 112 px right and down of the middle
+	const float spx = cx + gx / 0.2665f, spy = cy + gz / 0.2665f;
+	viewportFrame(ctx, snap, spx, spy, false, hook);
+	viewportFrame(ctx, snap, spx, spy, true, hook);
+	for (int i = 0; i < 3; ++i) viewportFrame(ctx, snap, spx, spy, true, hook);
+	viewportFrame(ctx, snap, spx, spy, false, hook);
+	{
+		const TerrainComponent& t = land();
+		CHECK(undo.undoDepth() == depth2 + 1);
+		REQUIRE(t.sculptHeights.size() == 129u * 129u);
+		// Water 0.3 m up on flat ground; the bed under its middle has sunk below the
+		// ground, and no deeper than Max Depth (2 m by default) under the level.
+		CHECK(terrainHeightAt(t, gx, gz) < -0.2f);
+		CHECK(terrainHeightAt(t, gx, gz) >= 0.3f - 2.0f * 1.3f);   // roughness may add up to 20 %
+		CHECK(terrainHeightAt(t, -40.0f, -40.0f) == 0.0f);         // out of reach, untouched
+		CHECK(t.regionDirty);                                      // only the chunks under the brush rebuild
+		CHECK_FALSE(t.dirty);
+		CHECK(invalidations > 0);                                  // the picking cache learned the ground moved
+		CHECK(water::bodyAt(t, gx, gz) != water::kNoBody);
+	}
+	REQUIRE(undo.undo());                                          // water and pit go together
+	CHECK(land().sculptHeights.empty());
+	CHECK(water::bodyAt(land(), gx, gz) == water::kNoBody);
+
+	// Back to Sculpt, Dig Bed left on (its default): the file-static mode must not
+	// leak into another test.
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
+	clickAt(ctx, wx, wy);
+	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
+	CHECK(locate(ctx, panelId("##radius_brush"), wx, wy));
+	CHECK_FALSE(locate(ctx, panelId("##radius_water"), wx, wy));
+}
+
+TEST_CASE("landscape ui: the Water panel lists the bodies, and To Lake turns a painted pond into a lake in one undo step")
+{
+	namespace L = HE::water::lake;
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.dirty = false;
+	tc.water.res = 100;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	auto land = [&]() -> TerrainComponent&
+	{
+		auto view = reg.view<TerrainComponent>();
+		REQUIRE(view.size() == 1u);
+		return reg.get<TerrainComponent>(*view.begin());
+	};
+
+	// A pond painted through the brush's own API, and a second one.
+	{
+		HE::water::brush::Params p;
+		p.radius = 8.0f; p.falloff = 0.0f; p.amount = 1.0f; p.levelFromGround = true; p.levelOffset = 0.5f;
+		HE::water::brush::Stroke s;
+		HE::water::brush::begin(s, land(), -20.0f, 0.0f, p);
+		for (int i = 0; i <= 6; ++i) HE::water::brush::dab(s, land(), -20.0f + 4.0f * i, 0.0f, p);
+		HE::water::brush::end(s, land());
+		HE::water::brush::begin(s, land(), 35.0f, 30.0f, p);
+		HE::water::brush::dab(s, land(), 35.0f, 30.0f, p);
+		HE::water::brush::end(s, land());
+	}
+	REQUIRE(land().water.bodies.size() == 2u);
+	const uint16_t pond = land().water.bodies[0].id;
+	const float level = land().water.bodies[0].level;
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// Arm Water on the normal-sized panel, then give the panel room: the list of
+	// bodies sits below the brush settings.
+	float wx = 0.0f, wy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsWater"), wx, wy));
+	clickAt(ctx, wx, wy);
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), 1100.0f);
+	auto tall = [&](bool down, he_ui::Image* shot = nullptr) -> ImGuiID
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, 1080.0f));
+		ImGui::Begin(kPanelWindow, nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		TerrainTools::renderPanel(ctx);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, 1100);
+		return hovered;
+	};
+	for (int i = 0; i < 3; ++i) tall(false);
+
+	// Two bodies, both ponds: each gets a To Lake button (ids are pushed per body,
+	// so the same label is two different items). The tab's content is a child
+	// window of the panel, and an id is hashed against the window it was submitted
+	// in, so the button's id is the one the child computes.
+	float bx = 0.0f, by = 0.0f;
+	ImGuiWindow* win = ImGui::FindWindowByName(kPanelWindow);
+	REQUIRE(win != nullptr);
+	auto isToLake = [&](ImGuiID hovered) -> bool
+	{
+		for (ImGuiWindow* c : win->DC.ChildWindows)
+		{
+			if (!c) continue;
+			c->IDStack.push_back(c->GetID(static_cast<int>(pond)));
+			const ImGuiID id = c->GetID("To Lake");
+			c->IDStack.pop_back();
+			if (id == hovered) return true;
+		}
+		return false;
+	};
+	bool found = false;
+	for (float yy = 14.0f; yy < 1090.0f && !found; yy += 3.0f)
+	{
+		ImGui::GetIO().AddMousePosEvent(30.0f, yy);
+		tall(false);
+		if (isToLake(tall(false))) { bx = 30.0f; by = yy; found = true; }
+	}
+	REQUIRE_MESSAGE(found, "no To Lake button for the first pond");
+	{
+		he_ui::Image img;
+		ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, 1090.0f);
+		for (int i = 0; i < 3; ++i) tall(false, i == 2 ? &img : nullptr);
+		dump(img, "landscape-water-bodies");
+	}
+
+	const size_t depth0 = undo.undoDepth();
+	const size_t splines0 = reg.view<SplineComponent>().size();
+	ImGui::GetIO().AddMousePosEvent(bx, by);
+	tall(false); tall(false); tall(true); tall(false); tall(false);
+
+	// ── The pond is a lake now, its spline a child of the landscape ──
+	REQUIRE(reg.view<SplineComponent>().size() == splines0 + 1);
+	CHECK(undo.undoDepth() == depth0 + 1);
+	CHECK(undo.undoLabel() == "Water To Lake");
+	const water::Body* b = land().water.findBody(pond);
+	REQUIRE(b != nullptr);
+	CHECK(b->fromSpline());
+	CHECK(b->level == level);                                      // converting does not move the surface
+	const Entity sp = *reg.view<SplineComponent>().begin();
+	CHECK(reg.get<HierarchyComponent>(sp).parent == reg.view<TerrainComponent>().front());
+	CHECK(reg.get<SplineComponent>(sp).closed);
+	CHECK(L::linkOf(world, sp).body == pond);
+	CHECK(bits.config.mode == EditorMode::Spline);                 // over to the Spline tool, where the points are
+	CHECK(ctx.selection.primary() == sp);
+	CHECK(land().water.findBody(land().water.bodies[1].id)->fromSpline() == false);   // the other pond is untouched
+
+	// ── One undo gives the pond back as it was ──
+	REQUIRE(undo.undo());
+	CHECK(reg.view<SplineComponent>().size() == splines0);
+	REQUIRE(land().water.findBody(pond) != nullptr);
+	CHECK_FALSE(land().water.findBody(pond)->fromSpline());
+	CHECK(land().water.bodies.size() == 2u);
+
+	// Leave the file-static mode as the next test expects it.
+	bits.config.mode = EditorMode::Landscape;
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(PH));
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
+	clickAt(ctx, wx, wy);
+	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
+}
+
+// ── Thema 179 step 5: what a body of water does to the bodies in it ───────────
+// The Physics rows under each body of the Water tab. What these ask that no model test can:
+// is the section on the panel and does it open, does a click on Enabled and a drag on Density
+// reach the body of water, is each gesture ONE undo step that takes the number back, and does
+// none of it make the landscape rebuild anything (setPhysics, never TerrainComponent::dirty).
+TEST_CASE("landscape ui: the Water panel's Physics rows set what a body of water does, one undo step each, nothing rebuilt")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.dirty = false;
+	tc.water.res = 100;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	auto land = [&]() -> TerrainComponent&
+	{
+		auto view = reg.view<TerrainComponent>();
+		REQUIRE(view.size() == 1u);
+		return reg.get<TerrainComponent>(*view.begin());
+	};
+
+	// One pond, painted through the brush's own API.
+	{
+		HE::water::brush::Params p;
+		p.radius = 8.0f; p.falloff = 0.0f; p.amount = 1.0f; p.levelFromGround = true; p.levelOffset = 0.5f;
+		HE::water::brush::Stroke s;
+		HE::water::brush::begin(s, land(), -20.0f, 0.0f, p);
+		for (int i = 0; i <= 6; ++i) HE::water::brush::dab(s, land(), -20.0f + 4.0f * i, 0.0f, p);
+		HE::water::brush::end(s, land());
+	}
+	REQUIRE(land().water.bodies.size() == 1u);
+	const uint16_t pond = land().water.bodies[0].id;
+	REQUIRE(land().water.bodies[0].physics == water::BodyPhysics{});
+	const bool terrainDirty = land().dirty;
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// Arm Water, then give the panel room: the list of bodies sits below the brush settings.
+	float wx = 0.0f, wy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsWater"), wx, wy));
+	clickAt(ctx, wx, wy);
+	// Tall enough for the brush settings, the body list AND the opened Physics rows below it.
+	constexpr int PT = 1500;
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(PT));
+	auto tall = [&](bool down, he_ui::Image* shot = nullptr) -> ImGuiID
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+		ImGui::NewFrame();
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(PT) - 20.0f));
+		ImGui::Begin(kPanelWindow, nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		TerrainTools::renderPanel(ctx);
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+		const ImGuiID hovered = ImGui::GetHoveredID();
+		ImGui::Render();
+		if (shot) *shot = he_ui::rasterize(ImGui::GetDrawData(), W, PT);
+		return hovered;
+	};
+	for (int i = 0; i < 3; ++i) tall(false);
+
+	// An item under a body's PushID and, when it is inside an open tree node, under the node's
+	// id as well. The tab's content is a child window of the panel, and an id is hashed against
+	// the window it was submitted in (see the To Lake test above).
+	ImGuiWindow* win = ImGui::FindWindowByName(kPanelWindow);
+	REQUIRE(win != nullptr);
+	auto idOf = [&](ImGuiWindow* c, const char* tree, const char* label) -> ImGuiID
+	{
+		c->IDStack.push_back(c->GetID(static_cast<int>(pond)));
+		if (tree) c->IDStack.push_back(c->GetID(tree));
+		const ImGuiID id = c->GetID(label);
+		if (tree) c->IDStack.pop_back();
+		c->IDStack.pop_back();
+		return id;
+	};
+	auto find = [&](const char* tree, const char* label, float& fx, float& fy) -> bool
+	{
+		for (float yy = 14.0f; yy < float(PT) - 10.0f; yy += 3.0f)
+			for (float xx : { 30.0f, 60.0f, 140.0f, 230.0f, 300.0f })   // 60: inside an indented checkbox
+			{
+				ImGui::GetIO().AddMousePosEvent(xx, yy);
+				tall(false);
+				const ImGuiID hovered = tall(false);
+				for (ImGuiWindow* c : win->DC.ChildWindows)
+					if (c && idOf(c, tree, label) == hovered) { fx = xx; fy = yy; return true; }
+			}
+		return false;
+	};
+	const auto parkPointer = [&] { ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(PT) - 6.0f); tall(false); tall(false); };
+
+	// The section is there, closed, and a click opens it.
+	float px = 0.0f, py = 0.0f;
+	REQUIRE_MESSAGE(find(nullptr, "Physics##wphys", px, py), "no Physics section under the body of water");
+	float ex = 0.0f, ey = 0.0f;
+	CHECK_FALSE(find("Physics##wphys", "Enabled##wphys", ex, ey));          // closed: no rows yet
+	REQUIRE(find(nullptr, "Physics##wphys", px, py));
+	ImGui::GetIO().AddMousePosEvent(px, py);
+	tall(false); tall(false); tall(true); tall(false); tall(false);
+	{
+		he_ui::Image img;
+		parkPointer();
+		tall(false, &img);
+		dump(img, "landscape-water-physics-open");
+	}
+	REQUIRE_MESSAGE(find("Physics##wphys", "Enabled##wphys", ex, ey), "Physics opened but shows no Enabled row");
+	float dx = 0.0f, dy = 0.0f;
+	REQUIRE_MESSAGE(find("Physics##wphys", "##wphys_density", dx, dy), "no Density row");
+	CHECK(find("Physics##wphys", "##wphys_ldrag", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_adrag", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_fx", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_fz", wx, wy));
+	CHECK(find("Physics##wphys", "##wphys_splash", wx, wy));
+	{
+		he_ui::Image img;
+		parkPointer();
+		tall(false, &img);
+		dump(img, "landscape-water-physics");
+	}
+
+	const bool waterDirty = land().water.dirty;
+	const uint64_t revision0 = land().water.revision;
+	const size_t depth0 = undo.undoDepth();
+
+	// ── A click on Enabled: off, one undo step ──
+	REQUIRE(find("Physics##wphys", "Enabled##wphys", ex, ey));
+	ImGui::GetIO().AddMousePosEvent(ex, ey);
+	tall(false); tall(false); tall(true); tall(false); tall(false);
+	CHECK_FALSE(land().water.findBody(pond)->physics.enabled);
+	CHECK(undo.undoDepth() == depth0 + 1);
+	CHECK(undo.undoLabel() == "Water Physics");
+	CHECK(land().water.revision > revision0);                      // the physics is told
+	// A water setting is not a terrain edit: nothing to rebuild, no chunk to regenerate. (Read
+	// before the undo: restoring a scene marks the landscape dirty, as loading one does.)
+	CHECK(land().dirty == terrainDirty);
+	CHECK(land().water.dirty == waterDirty);
+	REQUIRE(undo.undo());
+	CHECK(land().water.findBody(pond)->physics.enabled);           // and the click is taken back whole
+	CHECK(undo.undoDepth() == depth0);
+
+	// ── A drag on Density: one undo step for the whole drag, however many frames it took ──
+	parkPointer();
+	REQUIRE(find("Physics##wphys", "##wphys_density", dx, dy));
+	const bool terrainDirty2 = land().dirty, waterDirty2 = land().water.dirty;
+	ImGui::GetIO().AddMousePosEvent(dx, dy);
+	tall(false); tall(false); tall(true);
+	for (int i = 1; i <= 6; ++i)
+	{
+		ImGui::GetIO().AddMousePosEvent(dx + 5.0f * static_cast<float>(i), dy);
+		tall(true);
+	}
+	tall(false); tall(false);
+	const float dragged = land().water.findBody(pond)->physics.density;
+	CHECK(dragged > 1050.0f);                                      // 5 kg/m3 per pixel, to the right
+	CHECK(dragged < 1250.0f);
+	CHECK(undo.undoDepth() == depth0 + 1);                         // not one step per frame
+	CHECK(undo.undoLabel() == "Water Physics");
+	CHECK(land().dirty == terrainDirty2);
+	CHECK(land().water.dirty == waterDirty2);
+	REQUIRE(undo.undo());
+	CHECK(land().water.findBody(pond)->physics.density == water::kDefaultDensity);
+	CHECK(land().water.findBody(pond)->physics == water::BodyPhysics{});   // nothing else moved with it
+
+	// Leave the file-static mode as the next test expects it.
+	bits.config.mode = EditorMode::Landscape;
+	ImGui::GetIO().DisplaySize = ImVec2(float(W), float(PH));
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), wx, wy));
+	clickAt(ctx, wx, wy);
+	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
 }

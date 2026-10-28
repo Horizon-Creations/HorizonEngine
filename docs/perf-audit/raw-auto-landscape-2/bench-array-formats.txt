@@ -1,0 +1,21 @@
+BENCH map=Albedo format=RGBA8 layers=13 size=2048x2048 mips=12 bytes=290805060 encodeMs=0 pakBytes=0 loadLooseMs=412.1 loadPakMs=0
+BENCH map=Albedo format=ASTC 4x4 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=65947 pakBytes=72701911 loadLooseMs=87.0 loadPakMs=117.0
+BENCH map=Albedo format=BC7 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=81379 pakBytes=72701911 loadLooseMs=83.7 loadPakMs=113.2
+BENCH map=Albedo format=BC3 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=6499 pakBytes=72701911 loadLooseMs=76.1 loadPakMs=175.6
+BENCH map=Normal format=RGBA8 layers=13 size=2048x2048 mips=12 bytes=290805060 encodeMs=0 pakBytes=0 loadLooseMs=446.1 loadPakMs=0
+BENCH map=Normal format=ASTC 4x4 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=319665 pakBytes=72701911 loadLooseMs=78.6 loadPakMs=107.5
+BENCH map=Normal format=BC7 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=86613 pakBytes=72701911 loadLooseMs=81.9 loadPakMs=137.1
+BENCH map=Normal format=BC3 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=6748 pakBytes=72701911 loadLooseMs=64.9 loadPakMs=169.6
+BENCH map=Mask format=RGBA8 layers=13 size=2048x2048 mips=12 bytes=290805060 encodeMs=0 pakBytes=0 loadLooseMs=418.7 loadPakMs=0
+BENCH map=Mask format=ASTC 4x4 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=158151 pakBytes=72701907 loadLooseMs=66.0 loadPakMs=127.3
+BENCH map=Mask format=BC7 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=85388 pakBytes=72701907 loadLooseMs=82.5 loadPakMs=95.8
+BENCH map=Mask format=BC3 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=6442 pakBytes=72701907 loadLooseMs=104.9 loadPakMs=113.6
+BENCH map=Albedo format=BC1 layers=13 size=2048x2048 mips=12 bytes=36350808 encodeMs=2716 pakBytes=36351103 loadLooseMs=0.0 loadPakMs=35.1
+BENCH map=Albedo format=BC4 layers=13 size=2048x2048 mips=12 bytes=36350808 encodeMs=2346 pakBytes=36351103 loadLooseMs=0.0 loadPakMs=41.2
+BENCH map=Albedo format=BC5 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=1887 pakBytes=72701911 loadLooseMs=0.0 loadPakMs=253.5
+BENCH map=Normal format=BC1 layers=13 size=2048x2048 mips=12 bytes=36350808 encodeMs=2713 pakBytes=36351103 loadLooseMs=0.0 loadPakMs=36.9
+BENCH map=Normal format=BC4 layers=13 size=2048x2048 mips=12 bytes=36350808 encodeMs=2667 pakBytes=36351103 loadLooseMs=0.0 loadPakMs=61.8
+BENCH map=Normal format=BC5 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=4259 pakBytes=72701911 loadLooseMs=0.0 loadPakMs=99.2
+BENCH map=Mask format=BC1 layers=13 size=2048x2048 mips=12 bytes=36350808 encodeMs=5763 pakBytes=36351099 loadLooseMs=0.0 loadPakMs=43.9
+BENCH map=Mask format=BC4 layers=13 size=2048x2048 mips=12 bytes=36350808 encodeMs=3325 pakBytes=36351099 loadLooseMs=0.0 loadPakMs=42.6
+BENCH map=Mask format=BC5 layers=13 size=2048x2048 mips=12 bytes=72701616 encodeMs=4141 pakBytes=72701907 loadLooseMs=0.0 loadPakMs=105.4

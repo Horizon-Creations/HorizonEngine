@@ -1,0 +1,25 @@
+# Spot-check of table numbers against the raw dump (profile dumps are NOT in the repo: /tmp/gpuaudit/profiles/)
+
+## 1. dump_scope_p50.py (CPU scopes) on land512_foliage-r1
+land512_foliage-r1.profile.json: 400 frames, land512_foliage-r1 | display 1440x932 @60.000000 Hz, density 2.000000
+  frame CPU p50 19.74 ms  p90 21.30  max 35.01
+  Render: 400 calls, per call p50 19.054 ms p90 20.443 max 28.121 | per frame p50 19.054 ms p90 20.443 (mean 19.356)
+  Metal::EncodeScene: 400 calls, per call p50 0.192 ms p90 0.213 max 5.205 | per frame p50 0.192 ms p90 0.213 (mean 0.185)
+
+   (summary.json says Render p50:)
+   {'p10': 18.250709, 'p50': 19.053959, 'p90': 20.442875, 'frames': 400}
+
+## 2. GPU pass p50 recomputed from frames[].gpu (dump_scope_p50.py only reads CPU scopes)
+land512_foliage-r1 Scene: 400 samples, recomputed p50 12.855 ms | table (summary.json gpuPassPercentiles) 12.855 ms
+land512_foliage-r1 Tonemap: 400 samples, recomputed p50 0.355 ms | table (summary.json gpuPassPercentiles) 0.355 ms
+land512_foliage-r1 SSAO: 400 samples, recomputed p50 1.218 ms | table (summary.json gpuPassPercentiles) 1.218 ms
+lake512-r2 Scene: 400 samples, recomputed p50 19.660 ms | table (summary.json gpuPassPercentiles) 19.660 ms
+lake512-r2 Tonemap: 400 samples, recomputed p50 0.330 ms | table (summary.json gpuPassPercentiles) 0.330 ms
+
+## Script used for section 2 (profile dumps were in /tmp/gpuaudit/profiles/ at the time; run from the dump's directory)
+import json
+for lab, pas in (("land512_foliage-r1", ("Scene","Tonemap","SSAO")), ("lake512-r2", ("Scene","Tonemap"))):
+    d = json.load(open(lab + ".profile.json")); sm = json.load(open(lab + ".summary.json"))
+    for p in pas:
+        v = sorted(x["ms"] for f in d["frames"] for x in f.get("gpu", []) if x["n"] == p)
+        print(lab, p, len(v), v[int(round(.5 * (len(v) - 1)))], sm["gpuPassPercentiles"][p]["p50"])

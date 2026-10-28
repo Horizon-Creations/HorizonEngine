@@ -1,0 +1,31 @@
+/tmp/cta2/out/p3_HEFOLIAGEMEMO0HEFOLIAGEPARALLEL0_s512_x4_r3.json
+  window 3713 ms, 1 lane(s), 14250 spans
+
+== lanes (busy = union of depth-0 spans)
+  Main           spans= 14250 busy=   3704.6 ms ( 99.8% of window)  Render x250 3646.9ms, PollEvents x250 38.0ms, OnRender x250 19.4ms, GameLogicTick x250 0.2ms, SwapBuffers x250 0.1ms
+
+== main thread: busy 3705 ms of 3713 = 99.8%; WaitForFrame 3367 ms (90.7%); work 338 ms (9.1%)
+  depth-0 scopes (total ms, share of work):
+    Render                                 279.8 ms   82.9% of work
+    PollEvents                              38.0 ms   11.3% of work
+    OnRender                                19.4 ms    5.8% of work
+    GameLogicTick                            0.2 ms    0.1% of work
+    SwapBuffers                              0.1 ms    0.0% of work
+  depth-1 scopes (total ms):
+    Metal::NextDrawable                   3367.1 ms
+    Metal::ExtractFrame                     99.0 ms
+    Metal::EncodeScene                      75.3 ms
+    Metal::EncodeShadowMap                  30.9 ms
+    Metal::EncodeSSAO                       21.5 ms
+    SceneSystemsTick                         6.0 ms
+    Metal::Commit                            3.1 ms
+    PhysicsStep                              1.8 ms
+    WeatherAudio                             0.3 ms
+    CellStreaming                            0.1 ms
+    Metal::EncodeCloudShadow                 0.1 ms
+    Metal::EncodeSkyViewLut                  0.0 ms
+    ScriptUpdate                             0.0 ms
+
+== per-frame main-thread WORK (depth-0 scopes minus WaitForFrame / NextDrawable): p50 1.14 p90 1.37 p99 5.48 max 23.77 ms over 250 frames; dump cpuMs p50 10.59
+
+== no worker lane in the dump: no pool task ran a profiler scope during the capture

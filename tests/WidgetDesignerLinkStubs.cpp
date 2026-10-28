@@ -42,6 +42,13 @@ namespace EditorSettingsPanel
 	// UIEditorPanel asks (since 610fbcd2 moved Pre Construct into Preferences);
 	// the real one reads config.json and answers true when nothing is stored.
 	bool widgetRunPreConstruct() { return true; }
+
+	// The Project Settings tab (test_project_settings_ui.cpp) draws the engine
+	// settings rows on its graphics pages and the repository section on Source
+	// Control. Both are Preferences code; here they draw nothing, so those pages
+	// show their own switch, hint and (greyed) emptiness, which is all the tests
+	// look at.
+	void DrawEngineSettings(AppContext&, SettingsMode, const DrawOptions&) {}
 }
 
 namespace HcRenameDialog

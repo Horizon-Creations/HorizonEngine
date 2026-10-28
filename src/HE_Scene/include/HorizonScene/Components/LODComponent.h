@@ -25,4 +25,13 @@ struct LODComponent {
     static constexpr uint8_t kRefined = 0xFF;
     HE::UUID              refinedMeshId{};
     float                 refinedMaxDistance = 0.0f;
+
+    // Optional stand-in for ONE level: drawn instead of that level's mesh
+    // while it is the chosen one (current == stitchedLevel, kRefined
+    // included). Terrain chunks put a copy here whose edges follow a coarser
+    // neighbour (TerrainSystem::stitchSeams); LODSystem only honours it, so
+    // it does not swap the copy back to the plain level every tick. Runtime
+    // only, never serialised; a null id means none.
+    HE::UUID              stitchedMeshId{};
+    uint8_t               stitchedLevel = 0;
 };

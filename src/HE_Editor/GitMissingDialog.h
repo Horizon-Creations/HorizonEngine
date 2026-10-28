@@ -2,31 +2,26 @@
 
 struct AppContext;
 
-// ── Startup source-control capability check (git, git-lfs, identity, helper) ──
-// Reacts to the background probe (EditorApplication::startGitProbe), in the same
-// shape as ToolchainDialog: self-triggering, no `open` flag, and the null
-// pointer on AppContext means "still checking" so it never flashes during
-// startup.
+// ── The "git is missing" remedy, drawn in place ──────────────────────────────
+// The startup dialog that used to live here (and ToolchainDialog, its twin) is now
+// ToolSetupDialog: one list for cmake, the compiler, git, Git LFS and the git
+// identity. What stays is the remedy itself, for the places that need git or Git
+// LFS right now and show it where the user already is: Preferences » Source Control,
+// the clone dialog, and the Source Control panel.
 //
-// Deliberately does NOT offer an auto-install. Installing git is a
-// several-hundred-megabyte, per-platform affair with its own privilege prompts,
-// and getting it wrong leaves a half-installed toolchain; the dialog gives the
-// exact command instead. git-lfs is the piece that will eventually ship with the
-// editor, which removes the most common gap without installing anything.
-//
-// It DOES fix the identity in place, because that one is a two-field form rather
-// than an install: user.name / user.email being unset is the most common reason
-// a first commit fails, and the remedy is one git config call.
+// Offers to install (HE::Sc::runGitInstall through ctx.startGitInstall /
+// startGitLfsInstall), but only when asked: installing is hundreds of megabytes and
+// usually a password prompt, so it starts on "Install Git" / "Install Git LFS" and
+// shows the installer's output while it runs — never in the background. Where the
+// editor cannot do it (no package manager it knows, no way to get administrator
+// rights, Windows without winget) the same spot says why and gives the command and
+// the download page instead.
 namespace GitMissingDialog
 {
-	void DrawGitMissingDialog(AppContext& ctx);
-
-	// Force the dialog open on the next completed probe even when the user
-	// permanently dismissed it (an explicit request should always show the result).
-	void requestShow();
-
-	// Platform-specific install instructions (copy-a-command + open-a-page pair),
-	// shared with the Preferences ▸ Editor ▸ Source Control page.
-	void drawGitInstallRemedy();
-	void drawLfsInstallRemedy();
+	// "git is missing, here is how it gets here": the install button with its live
+	// log when the probe found a route the editor can run, otherwise the reason plus
+	// the command to copy and the download page. Opens its own "Source Control" help
+	// scope, so it resolves the same entries wherever it is drawn.
+	void drawGitInstallRemedy(AppContext& ctx);
+	void drawLfsInstallRemedy(AppContext& ctx);
 }

@@ -19,7 +19,6 @@
 #include <Types/Enums.h>
 #include <imgui.h>
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -322,6 +321,10 @@ void commitSlots(AppContext& ctx, State& st, const HE::Ed::MeshMaterialSlots::Ta
 	StaticMeshAsset* mesh = ctx.contentManager->getStaticMeshMutable(st.meshId);
 	if (!mesh) return;
 	HE::Ed::MeshMaterialSlots::applyTo(table, *mesh);
+	// The GPU copy keeps the texture of the material it was uploaded with, and
+	// this tab's preview draws that texture. The save no longer comes back as a
+	// hot reload (which used to invalidate the mesh), so drop the copy here.
+	if (ctx.renderer) ctx.renderer->InvalidateMesh(st.meshId);
 	if (ctx.contentManager->saveAsset(*mesh))
 		HE_LOG_INFO(Editor, "%s", ("StaticMeshEditor: saved material slots of '" + st.relPath + "'").c_str());
 	else
