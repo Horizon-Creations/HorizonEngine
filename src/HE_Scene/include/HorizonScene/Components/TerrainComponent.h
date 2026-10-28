@@ -2,6 +2,7 @@
 #include <Types/UUID.h>
 #include "HorizonScene/WaterField.h"
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 // Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
@@ -61,6 +62,12 @@ struct TerrainComponent {
     bool     dirty = true;        // set to regenerate ALL chunks; not serialised
     // Per-vertex sculpted heights (size == res*res overrides fBm); serialised.
     std::vector<float> sculptHeights;
+    // The height field the chunks were last built from (resolution x resolution, row-major,
+    // the same one the chunk meshes sample), kept for the renderer's GI height-field tracing.
+    // Not serialised; TerrainSystem replaces it (and bumps the version) on every rebuild.
+    std::shared_ptr<const std::vector<float>> builtField;
+    uint32_t builtFieldRes     = 0;
+    uint64_t builtFieldVersion = 0;
 
     // ── Material layers (paint) ──────────────────────────────────────────────
     // Per-texel layer weights, RGBA8 = layers 0..3 (R=0 … A=3), row-major over

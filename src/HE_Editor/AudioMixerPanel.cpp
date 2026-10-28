@@ -151,9 +151,11 @@ StripResult drawStrip(const char* id, const char* title, float* volume, bool* mu
 			ImGui::PushStyleColor(ImGuiCol_Button,        HE::Ed::Theme::Accent);
 			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, HE::Ed::Theme::AccentHi);
 			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  HE::Ed::Theme::Accent);
+			// The label in Ink: Text on the full accent was 2.6:1.
+			ImGui::PushStyleColor(ImGuiCol_Text,          HE::Ed::Theme::textOn(HE::Ed::Theme::Accent));
 		}
 		const bool pressed = ImGui::Button(label, ImVec2(ImGui::GetFrameHeight() * 1.4f, 0.0f));
-		if (lit) ImGui::PopStyleColor(3);
+		if (lit) ImGui::PopStyleColor(4);
 		return pressed;
 	};
 	const float pairW = ImGui::GetFrameHeight() * 1.4f * (solo ? 2.0f : 1.0f) + (solo ? st.ItemSpacing.x : 0.0f);
@@ -189,9 +191,10 @@ StripResult drawStrip(const char* id, const char* title, float* volume, bool* mu
 				ImGui::PushStyleColor(ImGuiCol_Button,        HE::Ed::Theme::Accent);
 				ImGui::PushStyleColor(ImGuiCol_ButtonHovered, HE::Ed::Theme::AccentHi);
 				ImGui::PushStyleColor(ImGuiCol_ButtonActive,  HE::Ed::Theme::Accent);
+				ImGui::PushStyleColor(ImGuiCol_Text,          HE::Ed::Theme::textOn(HE::Ed::Theme::Accent));
 			}
 			if (ImGui::Button("EQ", ImVec2(w, 0.0f))) r.eq = true;
-			if (eqLit) ImGui::PopStyleColor(3);
+			if (eqLit) ImGui::PopStyleColor(4);
 			EditorWidgets::helpForKey("Audio Mixer/EQ");
 		}
 		const float w = ImGui::CalcTextSize("Remove").x + st.FramePadding.x * 2.0f;
@@ -209,25 +212,19 @@ StripResult drawStrip(const char* id, const char* title, float* volume, bool* mu
 
 } // namespace
 
-void DrawAudioMixerWindow(AppContext& ctx, bool& open)
+void DrawAudioMixer(AppContext& ctx)
 {
 	// Every control here is looked up as "Audio Mixer/<its label>".
 	HE::Ed::Help::Scope helpScope("Audio Mixer");
-	if (!open) return;
-
-	ImGui::SetNextWindowSize(ImVec2(560.0f, 340.0f), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Audio Mixer", &open)) { ImGui::End(); return; }
 
 	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
 	{
 		ImGui::TextDisabled("No project is open.");
-		ImGui::End();
 		return;
 	}
 	if (!ctx.audioEngine || !ctx.audioEngine->isInitialized())
 	{
 		ImGui::TextDisabled("The audio device could not be opened — there is nothing to mix.");
-		ImGui::End();
 		return;
 	}
 	ProjectData&        p     = ctx.projectManager->currentProject();
@@ -373,6 +370,48 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 		ImGui::TextDisabled("already exists");
 	}
 
+	// ── Spatial audio ────────────────────────────────────────────────────────
+	// Who spatialises 3D voices. A project setting like the faders (saved with
+	// the project, applied to the engine by applyBusConfig); greyed out in a
+	// build without the Steam Audio SDK, with the status line saying so. A
+	// request the engine could not honour (library missing) stays ticked and the
+	// status says why, instead of the box silently unticking itself.
+	{
+		bool steam = cfg.spatialBackend == HE::AudioSpatialBackend::SteamAudio;
+		ImGui::BeginDisabled(!AudioEngine::steamAudioCompiledIn());
+		if (EditorWidgets::checkbox("Steam Audio (HRTF)", &steam))
+		{
+			cfg.spatialBackend = steam ? HE::AudioSpatialBackend::SteamAudio
+			                           : HE::AudioSpatialBackend::Miniaudio;
+			commit = true;
+		}
+		ImGui::EndDisabled();
+		EditorWidgets::helpForKey("Audio Mixer/Steam Audio (HRTF)");
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", AudioEngine::steamAudioCompiledIn()
+			? audio.spatialBackendStatus().c_str()
+			: "not in this build");
+
+		// What Steam Audio adds on top of the HRTF. Only available while Steam Audio itself
+		// is: the build has it AND the project uses it (the boxes do nothing otherwise, so
+		// they are greyed rather than left to look as if they did).
+		const bool steamUsable = AudioEngine::steamAudioCompiledIn() &&
+		                         cfg.spatialBackend == HE::AudioSpatialBackend::SteamAudio;
+		ImGui::BeginDisabled(!steamUsable);
+		ImGui::Indent();
+		auto option = [&](const char* label, bool& value) {
+			bool v = value;
+			if (EditorWidgets::checkbox(label, &v)) { value = v; commit = true; }
+			EditorWidgets::helpForLabel(label);
+		};
+		option("Air absorption", cfg.steam.airAbsorption);
+		option("Occlusion", cfg.steam.occlusion);
+		option("Reflections", cfg.steam.reflections);
+		option("Pathing", cfg.steam.pathing);
+		ImGui::Unindent();
+		ImGui::EndDisabled();
+	}
+
 	if (!removeBus.empty())
 	{
 		// Engine first — it stops the voices on the bus — then the project.
@@ -396,12 +435,10 @@ void DrawAudioMixerWindow(AppContext& ctx, bool& open)
 			HE::Ed::notify(HE::Ed::NoteLevel::Critical,
 			               "Could not save the project's audio buses", p.path);
 	}
-
-	ImGui::End();
 }
 
 #else
-void DrawAudioMixerWindow(AppContext&, bool&) {}
+void DrawAudioMixer(AppContext&) {}
 #endif
 
 } // namespace AudioMixerPanel

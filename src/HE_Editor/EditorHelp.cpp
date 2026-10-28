@@ -255,7 +255,7 @@ namespace
 	{ "Material/Roughness", "",
 	  "How rough the surface is: 0 is a mirror, 1 is chalk. This is the value "
 	  "that decides whether something reads as wet, polished or worn. On the "
-	  "engine water it is a parameter of its own: keep it low for sharp "
+	  "engine water it is the z component of Surface: keep it low for sharp "
 	  "reflections and a tight sun glint. Distant water is made rougher on top "
 	  "of it, the way the eye averages ripples it can no longer resolve.",
 	  "", "rendering#lighting" },
@@ -263,7 +263,9 @@ namespace
 	  "1 is solid. Below 1 the surface is see-through, which also moves it into "
 	  "the transparent pass — so it no longer writes depth. On the engine water "
 	  "(already transparent) the parameter of that name is the opacity looking "
-	  "straight down into clear water; depth tint, Fresnel and foam raise it.",
+	  "straight down into clear water; depth tint, Fresnel and foam raise it. "
+	  "In the last metres before a landscape's shore it falls toward a quarter "
+	  "of itself as the water gets shallower, so the ground shows through.",
 	  "", "rendering#lighting" },
 	{ "Material/Slot Overrides", "Slot Overrides",
 	  "One picker per material slot of the entity's mesh (its LOD 0 mesh, when "
@@ -293,7 +295,11 @@ namespace
 	{ "Material/Turbidity", "",
 	  "x = absorption per metre: higher is murkier, the deep colour arrives "
 	  "sooner. y = the water depth in metres the tint assumes; the scene depth "
-	  "below the surface is not read yet.",
+	  "below the surface is not read yet (in the last three metres before a "
+	  "landscape's shore the real depth takes over, so shallows are clear). z = shore width: at a landscape's "
+	  "waterline the water fades in over this many metres of depth instead of "
+	  "ending in a hard edge (0 = hard, up to 1). w = shore foam: the lace "
+	  "along the waterline (0 = none, 1 = strong).",
 	  "", "materials#water" },
 	{ "Material/WaveA", "",
 	  "The swell, the largest of three wave trains. x = direction in degrees "
@@ -302,6 +308,13 @@ namespace
 	  "second, shorter and weaker one at a turned angle, so the sea is not a "
 	  "single grid of crests. The waves bend the normal only, the mesh stays "
 	  "flat.",
+	  "", "materials#water" },
+	{ "Material/TessWaves", "",
+	  "Only in the Tessellation permutation of the water. x = how high the real waves "
+	  "stand, as a multiple of the waves' own amplitude (0.6 is the default; a river "
+	  "wants less, an open sea more). y = metres of water over which they grow in from "
+	  "the coast (0.1 to 3): the surface is flat at the waterline whatever x is. A "
+	  "landscape's water sets it per body in the landscape's Water details.",
 	  "", "materials#water" },
 	{ "Material/WaveB", "",
 	  "Second wave train, laid across the swell so the crests do not line up. "
@@ -315,19 +328,29 @@ namespace
 	  "steepnesses together also set how strong the irregular chop on top is: "
 	  "all three at 0 gives a flat surface.",
 	  "", "materials#water" },
-	{ "Material/FresnelPower", "",
-	  "How quickly the surface turns reflective toward grazing angles. 5 is "
-	  "physical water; lower values make the water mirror-like even when you "
-	  "look down into it.",
+	{ "Material/Surface", "",
+	  "The four plain surface numbers of the water in one row. x = Fresnel "
+	  "exponent (1 to 10): how quickly the surface turns reflective toward "
+	  "grazing angles, 5 is physical water, lower values make it mirror-like "
+	  "even when you look down into it. y = reflection (0 to 1): how strongly "
+	  "sky and scene reflection cover the water, it scales the Fresnel lift of "
+	  "the opacity and the specular strength, 0 leaves only the water colour. "
+	  "z = roughness (0 to 1): low gives sharp reflections and a tight sun "
+	  "glint, distant water is made rougher on top. w = specular (0 to 1): "
+	  "strength of the specular reflection for a non-metal (0.5 = F0 0.04), "
+	  "multiplied by the reflection; about 0.3 gives water's real F0 of 0.02.",
 	  "", "materials#water" },
-	{ "Material/Reflection", "",
-	  "How strongly sky and scene reflection cover the water. Scales both the "
-	  "Fresnel lift of the opacity and the specular strength, so 0 leaves only "
-	  "the water colour.",
-	  "", "materials#water" },
-	{ "Material/Specular", "",
-	  "Strength of the specular reflection for a non-metal (0.5 = F0 0.04). It "
-	  "is multiplied by Reflection; about 0.3 gives water's real F0 of 0.02.",
+	{ "Material/ShallowWater", "",
+	  "How water behaves in the last three metres before a landscape's shore (a plane "
+	  "has no shore, so nothing changes there). x = clear depth in metres (0 to 3): "
+	  "from this much water on, Opacity is whole; shallower water lets the "
+	  "ground show through more. Raise it to see further into the shallows "
+	  "before the water turns opaque. y = tint start (0 to 1, shore closeness "
+	  "where 0 is three metres of water or more and 1 is none): where the depth tint "
+	  "has fully taken over the real depth, 0.5 is a metre and a half; further out it "
+	  "blends to the assumed depth in Turbidity. z = opacity floor (0 to 1): "
+	  "the share of Opacity left at no depth at all. w is reserved and does "
+	  "nothing yet.",
 	  "", "materials#water" },
 	{ "Material/Refraction", "",
 	  "How much the waves bend the view into the water: the depth tint and the "
@@ -869,6 +892,131 @@ namespace
 	{ "Foliage/Seed", "",
 	  "Which scatter pattern is generated. The same seed always produces the same "
 	  "layout, so nothing is saved per instance.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Layer", "Foliage Layer",
+	  "One kind of plant on this landscape — grass, a bush, a tree — with its own "
+	  "mesh, density, seed and painted mask. Click a layer to edit it below; the "
+	  "Landscape panel's Foliage brush paints the same layer. The number is how "
+	  "many instances it scattered.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Layer Visible", "Show Layer",
+	  "Draws this layer or hides it. The scatter is kept, so turning it back on "
+	  "is instant; nothing about where it grows changes.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Add Layer", "",
+	  "Adds an empty layer for another kind of plant and selects it. Give it a "
+	  "mesh to make it grow; it gets a seed of its own, so it does not grow in "
+	  "the same spots as the others.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Remove Layer", "",
+	  "Removes the selected layer, its painted mask included (one undo step). "
+	  "The last layer cannot be removed — remove the component instead.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Name", "Layer Name",
+	  "What the layer is called in this list and in the Landscape panel. Empty "
+	  "shows it as \"Layer N\".",
+	  "", "scenes#foliage" },
+	{ "Foliage/Cast Shadows", "",
+	  "Whether the layer casts shadows. Off saves a lot for short grass, whose "
+	  "shadow nobody sees.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Ambient Occlusion", "",
+	  "Whether the layer darkens the ground around it through screen-space "
+	  "ambient occlusion. Off for thin grass that would only add noise.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Shadow Distance", "",
+	  "Beyond this distance the layer stops casting shadows, in metres. 0 casts "
+	  "as far as it is drawn (Draw Distance).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Mesh Preset", "",
+	  "One of the engine's own layer meshes: a grass tuft, a pebble, three boulder "
+	  "shapes, a drift of snow. Each comes with detail levels and with settings that "
+	  "suit its size. Pick one, then press Apply Preset.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Apply Preset", "",
+	  "Fills this layer from the chosen preset: the mesh and its detail levels, "
+	  "density, scale, shadow flags and the placement rules (rocks on the steep, "
+	  "snow above the snow line, tufts and pebbles on the flat). It overwrites "
+	  "those fields, one undo step brings them back; the seed and any painted "
+	  "mask stay. Use one layer per kind, a second boulder shape is a second layer.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Placement", "",
+	  "Where the layer may grow, judged on the ground itself: how steep it is, how "
+	  "high it lies and how much of a paint layer is there. A rule only removes "
+	  "spots, the plants that stay keep their place and size, and the layer scatters "
+	  "again when you let go of a field. The defaults are no rule at all. Use it to "
+	  "put pebbles on dirt, rocks on the steep and tufts of grass on the flat, "
+	  "where the landscape material shows that surface.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Slope Min", "",
+	  "Smallest steepness of the ground the layer grows on. Steepness is 1 minus "
+	  "the up-component of the ground normal, as the landscape material measures "
+	  "it: 0 is flat, about 0.29 a 45 degree hillside, 1 a wall. Raise it to keep "
+	  "the layer off flat ground (rocks on a slope).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Slope Max", "",
+	  "Largest steepness of the ground the layer grows on (see Slope Min). Lower "
+	  "it to keep the layer off cliffs: tufts of grass on the flat and gentle "
+	  "only. 1 means no upper limit.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Height Min", "",
+	  "Lowest ground height the layer grows on, in metres of world height (the "
+	  "landscape's own height included). \"no limit\" is the default.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Height Max", "",
+	  "Highest ground height the layer grows on, in metres of world height. Set it "
+	  "to keep grass off the mountain tops, or Height Min for snow chunks that "
+	  "belong to the peaks. \"no limit\" is the default.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Paint Layer", "",
+	  "Ties the layer to one of the landscape's paint layers (the ones the Layers "
+	  "brush paints): the layer grows with the probability the paint gives at each "
+	  "spot, fully where that layer is painted solid and thinning out toward its "
+	  "edge. Off ignores the paint. Layers are numbered from 0, as the material "
+	  "names them (with the Auto Landscape material: 1 Grass, 2 Dirt, 3 Rock, "
+	  "4 Snow). A landscape nobody painted counts as Layer 0 everywhere. "
+	  "Painting re-scatters the layers that use this.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Detail Levels", "",
+	  "What the layer turns into farther away: a simpler mesh, fewer plants, a "
+	  "cross card at the far end. The mesh above is drawn near the camera; each "
+	  "level takes over from its distance. Each plant picks its level by its own "
+	  "distance, so a whole patch never changes at once.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Add Level", "Add Detail Level",
+	  "Adds a farther detail level, halfway between the last one and the Draw "
+	  "Distance. Without a mesh of its own it draws the layer's mesh, so it can "
+	  "simply thin the layer out.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Remove Level", "Remove Detail Level",
+	  "Removes this detail level; the level before it is then drawn out to the "
+	  "next one, or to the Draw Distance.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Cross Card", "",
+	  "Uses the engine's cross card for this level: two crossed upright quads that "
+	  "show a picture of the plant. Give the level a material with that picture "
+	  "(alpha cut out) — it costs four quads per plant instead of the whole mesh.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Mesh", "Detail Level Mesh",
+	  "The mesh this level draws. Empty draws the layer's own mesh, which makes "
+	  "the level only thin the layer out (Level Density).",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Material", "Detail Level Material",
+	  "The material for this level's mesh. Empty takes the LAYER's material (not "
+	  "the mesh's own), which is what a simpler mesh of the same plant wants.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Distance", "",
+	  "Where this level starts, in metres from the camera along the ground. A "
+	  "level that starts beyond the Draw Distance is never drawn.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Density", "",
+	  "Share of the layer's plants this level still draws: 1 all, 0.25 every "
+	  "fourth, 0 none. The plants kept are spread evenly over the landscape.",
+	  "", "scenes#foliage" },
+	{ "Foliage/Level Hysteresis", "",
+	  "How far past a level boundary a plant keeps the level it had, in metres, "
+	  "so a camera that hovers on a boundary does not make plants flicker "
+	  "between two levels. The Draw Distance edge is not affected.",
 	  "", "scenes#foliage" },
 
 	// ── Navigation ───────────────────────────────────────────────────────────
@@ -1786,6 +1934,14 @@ namespace
 	  "reaching over the bank. Off draws the surface over the whole outline at "
 	  "its level.",
 	  "", "editor#landscape-mode" },
+	{ "Spline Tool/Tessellation##lake", "Tessellation",
+	  "A landscape setting, shared by every lake and painted pond on it: the water's "
+	  "swell is drawn as real geometry instead of only a lit normal, so the surface "
+	  "rises and falls with the waves. Needs a graphics backend with GPU tessellation "
+	  "(OpenGL, Vulkan, D3D11, D3D12); on Metal the surface stays flat. It costs GPU "
+	  "time, so it is off by default. The material's own Static Switch is called "
+	  "Tessellation too.",
+	  "", "editor#landscape-mode" },
 	{ "Spline Tool/Shore Overshoot##lake", "Shore Overshoot",
 	  "How far above the water the ground may stand and still count as under "
 	  "it, in metres, so the edge of the surface sits under the bank and not a "
@@ -2028,17 +2184,10 @@ namespace
 	  "menu or list, a field being typed into, a dialog and a fly-look in the "
 	  "viewport each take the Esc first, and the next press clears.",
 	  "Esc", "editor#outliner" },
-	{ "Edit/Project Settings", "",
-	  "Opens the project's own settings as an editor tab: its title and startup "
-	  "scene, shadows, physics rate and gravity, what the packaged build boots "
-	  "with, permissions, fonts, collision layers. Everything on it travels with "
-	  "the project and into the build you export — the opposite of Preferences, "
-	  "which follow the editor on this machine.",
-	  "", "editor#preferences" },
 	{ "Edit/Preferences", "",
-	  "Opens the settings as an editor tab: renderer, viewport, collaboration, "
-	  "tools. They belong to the editor, not to the project — that one has its "
-	  "own tab, Project Settings.",
+	  "Opens the settings as an editor tab: appearance, input, renderer, "
+	  "collaboration, tools, and the open project's own pages (Project, World, "
+	  "Online), which are saved in the project and not on this machine.",
 	  "Ctrl+,", "editor#preferences" },
 	{ "View/Toggle Fullscreen", "",
 	  "Fills the screen with the editor window. On a Mac the View menu's own "
@@ -2070,10 +2219,6 @@ namespace
 	  "Everything the engine logged this session. The first place to look when "
 	  "something did not happen.",
 	  "Ctrl+`", "advanced#diagnostics" },
-	{ "Window/Audio Mixer", "",
-	  "The project's audio buses as fader strips: master, music, sfx and "
-	  "whatever else you add, with mute and solo for listening.",
-	  "", "systems#audio" },
 	{ "Window/Undo History", "",
 	  "Every step Undo can still take back, as a list with the current state "
 	  "marked. Click a row to jump straight there — several steps in one go, "
@@ -2087,10 +2232,10 @@ namespace
 	  "Instance's variables live.",
 	  "", "horizoncode#debugging" },
 	{ "Window/Task Board", "",
-	  "The project's to-do list: tasks with a status and a priority, linked to "
-	  "the assets, entities, scenes and panels they are about. Kept in "
-	  "Config/TaskBoard.json, so it travels with the project through source "
-	  "control and the whole team sees the same list.",
+	  "Opens the Planner on its Tasks database: the project's to-do list, with a "
+	  "status and a priority per task, linked to the assets, entities, scenes and "
+	  "panels it is about. Kept in Config/TaskBoard.json, so it travels with the "
+	  "project through source control and the whole team sees the same list.",
 	  "", "editor#menus" },
 	{ "View/View Mode", "",
 	  "How the Scene window draws the whole scene: Lit, Unlit, Wireframe, or "
@@ -2154,6 +2299,12 @@ namespace
 	  "The graph that outlives every scene: the app-wide state a level change "
 	  "must not reset.",
 	  "", "horizoncode#hosts" },
+	{ "Window/Planner", "",
+	  "Project planning for the game: databases of features, bugs, tasks and "
+	  "milestones, shown as a table or as lanes, kept in Config/Planner so they "
+	  "travel with the project through source control. Opens as a tab, so the "
+	  "content gets the whole window.",
+	  "", "editor#menus" },
 	// ── The Entity menu ──────────────────────────────────────────────────────
 	// The viewport's and the Outliner's right-click verbs with a fixed address.
 	// Same actions, same sentences in spirit as "Viewport Menu/…" — written
@@ -2936,86 +3087,311 @@ namespace
 	  "goes through as usual.",
 	  "", "horizoncode#debugging" },
 
-	// ── Task Board ───────────────────────────────────────────────────────────
-	// The project's to-do list. The cards, the chips and the panel names in
-	// Link Panel are the board's own data, built at run time; the fixed
-	// controls are the toolbar, the details of the selected task and the
-	// banner a file that cannot be read or written raises.
-	{ "Task Board/New Task", "New Task",
-	  "Adds a task to the board, selects it and opens its details, where you "
-	  "give it a title. It is saved into Config/TaskBoard.json at once.",
+	// ── Planner ──────────────────────────────────────────────────────────────
+	// The planning tab (Window > Planner). The databases, rows, property names
+	// and options are the project's own data, built at run time; the fixed
+	// controls are the sidebar, the view bar and the toolbar.
+	{ "Planner/New Database", "New Database",
+	  "Makes an empty database with one table view and saves it into "
+	  "Config/Planner/Databases. Rename it at the top, then add columns with "
+	  "Properties.",
 	  "", "" },
-	{ "Task Board/Columns", "Columns",
-	  "Shows the board as four lanes — Open, In Progress, Blocked, Done. Drag "
-	  "a card into another lane to change its status.",
+	{ "Planner/Reload", "Reload",
+	  "Reads the databases from disk again, for a file that could not be read "
+	  "(fix it first; a merge conflict leaves <<<<<<< markers in it) or one you "
+	  "changed outside the editor.",
 	  "", "" },
-	{ "Task Board/List", "List",
-	  "Shows the board as one list, grouped by status. Done is folded away "
-	  "until you open it.",
+	{ "Planner/Open", "Open",
+	  "Lists everything you can open: tables, timelines, boards, calendars, pages and whiteboards. Each is open once; picking one that is open takes you to its tab. The x on a tab closes the tab, not the thing.",
 	  "", "" },
-	{ "Task Board/Reload", "Reload",
-	  "Reads Config/TaskBoard.json again. For a file that could not be read — "
-	  "fix it first (a merge conflict leaves <<<<<<< markers in it) — or to "
-	  "drop an edit that could not be saved and take what is on disk instead.",
+	{ "Planner/+ Table", "+ Table",
+	  "Adds a table view to this database: rows down, one column per property. "
+	  "Each view keeps its own filters, sorting and hidden columns.",
 	  "", "" },
-	{ "Task Board/Retry Save", "Retry Save",
-	  "Writes the board to Config/TaskBoard.json again, after a save failed "
+	{ "Planner/+ Board", "+ Board",
+	  "Adds a board view: one lane per option of a Select property, a card per "
+	  "row. Drag a card to another lane to change its value.",
+	  "", "" },
+	{ "Planner/New data", "New data",
+	  "Creates a new database for this view to show (a table, board, timeline or "
+	  "calendar of its own) instead of showing one of the databases listed below.",
+	  "", "" },
+	{ "Planner/This database", "This database",
+	  "Makes the relation point at rows of this same database, for things like "
+	  "\"blocked by\" between two tasks. Pick another database in the list to "
+	  "point at its rows instead.",
+	  "", "" },
+	{ "Planner/New Page", "New Page",
+	  "Makes an empty page in the sidebar: a write-up for the design document, a "
+	  "level concept, playtest notes. Saved in Config/Planner/Pages, so it travels "
+	  "with the project through source control.",
+	  "", "" },
+	{ "Planner/Open Page", "Open Page",
+	  "Opens this row as a page: its properties on top, and below them a "
+	  "document you write in blocks. The page is saved only once it has a block.",
+	  "", "" },
+	{ "Planner/Add Block", "Add Block",
+	  "Adds an empty text block at the end of the page and puts the cursor in it. "
+	  "Enter in a block makes the next one; type # for a heading, - for a list, "
+	  "[] for a to-do, > for a quote, --- for a divider.",
+	  "", "" },
+	{ "Planner/Turn into", "Turn into",
+	  "Changes this block into another kind: text, heading, list, to-do, quote, "
+	  "callout, code, divider, an engine object, a database view or a link to "
+	  "another page. The text stays.",
+	  "", "" },
+	{ "Planner/New Sub-page", "New Sub-page",
+	  "Makes a page under this one and adds a link to it at the end of this page. "
+	  "The sub-page also shows under this page in the sidebar; deleting this page "
+	  "deletes it too.",
+	  "", "" },
+	{ "Planner/Add Block Below", "Add Block Below",
+	  "Adds an empty text block right under this one, at the same level.",
+	  "", "" },
+	{ "Planner/Move Up", "Move Up",
+	  "Moves this block one place up among the blocks at its level.",
+	  "", "" },
+	{ "Planner/Move Down", "Move Down",
+	  "Moves this block one place down among the blocks at its level.",
+	  "", "" },
+	{ "Planner/Indent", "Indent",
+	  "Makes this block a child of the block above it, shown indented under it.",
+	  "", "" },
+	{ "Planner/Outdent", "Outdent",
+	  "Takes this block out of its parent, so it follows the parent at the level "
+	  "above. The blocks that came after it stay under it.",
+	  "", "" },
+	{ "Planner/Delete Block", "Delete Block",
+	  "Removes this block and the blocks indented under it. Backspace in an empty "
+	  "block does the same. Source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Page", "Delete Page",
+	  "Deletes this page, its sub-pages and their files after you confirm. Source "
+	  "control has the previous version.",
+	  "", "" },
+	{ "Planner/+ Calendar", "+ Calendar",
+	  "Adds a calendar view: a month in a grid, each row on the day of its Date "
+	  "property (on every day up to its End, if you pick one). Drag a row onto "
+	  "another day to move it, double-click a day to add a row there, click a row "
+	  "to open it.",
+	  "", "" },
+	{ "Planner/Previous", "Previous",
+	  "Shows the month before the one on screen.",
+	  "", "" },
+	{ "Planner/Today", "Today",
+	  "Jumps the calendar back to the current month.",
+	  "", "" },
+	{ "Planner/Next", "Next",
+	  "Shows the month after the one on screen.",
+	  "", "" },
+	{ "Planner/New Board", "New Board",
+	  "Makes an empty whiteboard: a free surface for cards and arrows, for ideas "
+	  "that a document is too tidy for. Saved in Config/Planner/Boards.",
+	  "", "" },
+	{ "Planner/Delete Board", "Delete Board",
+	  "Deletes this whiteboard and its file after you confirm. Source control has "
+	  "the previous version.",
+	  "", "" },
+	{ "Planner/New Card", "New Card",
+	  "Adds a text card in the middle of what you see and puts the cursor in it. "
+	  "Double-click empty space to make one there instead.",
+	  "", "" },
+	{ "Planner/New Frame", "New Frame",
+	  "Adds a frame: a titled rectangle behind the cards. A frame moves with "
+	  "everything that lies wholly inside it.",
+	  "", "" },
+	{ "Planner/Add", "Add",
+	  "Puts a card for a page or a row of a database in the middle of what you see. Double-click the card to open the page or row. Assets, scenes and entities are dragged in from the Content Browser or the Outliner.",
+	  "", "" },
+	{ "Planner/Duplicate", "Duplicate",
+	  "Copies the selected cards, with the arrows between them, a little to the side (Cmd/Ctrl+D). Cmd/Ctrl+C and V copy and paste, also into another board.",
+	  "", "" },
+	{ "Planner/Align", "Align",
+	  "Lines up the selected cards (two or more) on their left, right, top or bottom edge or on their middle, or spreads three or more evenly.",
+	  "", "" },
+	{ "Planner/Align Left", "Align Left",
+	  "Moves the selected cards to the leftmost edge among them.",
+	  "", "" },
+	{ "Planner/Align Center", "Align Center",
+	  "Centres the selected cards on a common vertical line.",
+	  "", "" },
+	{ "Planner/Align Right", "Align Right",
+	  "Moves the selected cards to the rightmost edge among them.",
+	  "", "" },
+	{ "Planner/Align Top", "Align Top",
+	  "Moves the selected cards up to the topmost edge among them.",
+	  "", "" },
+	{ "Planner/Align Middle", "Align Middle",
+	  "Centres the selected cards on a common horizontal line.",
+	  "", "" },
+	{ "Planner/Align Bottom", "Align Bottom",
+	  "Moves the selected cards down to the lowest edge among them.",
+	  "", "" },
+	{ "Planner/Distribute Horizontally", "Distribute Horizontally",
+	  "Spaces three or more selected cards evenly from the leftmost to the rightmost; those two stay where they are.",
+	  "", "" },
+	{ "Planner/Distribute Vertically", "Distribute Vertically",
+	  "Spaces three or more selected cards evenly from the topmost to the lowest; those two stay where they are.",
+	  "", "" },
+	{ "Planner/Snap", "Snap",
+	  "While on, moving or resizing a card puts it on a grid of 20 units.",
+	  "", "" },
+	{ "Planner/Map", "Map",
+	  "Shows or hides the overview in the bottom right corner of the board: every card as a small box and the part you see as an outline. Click or drag in it to go there.",
+	  "", "" },
+	{ "Planner/Export PNG", "Export PNG",
+	  "Saves the whole board as a picture in the project's Export/Planner folder, named after the board, and says where. Pictures from the board's media folder are in it; a Texture asset shows as its name.",
+	  "", "" },
+	{ "Planner/Zoom In", "Zoom In",
+	  "Zooms in around the middle of what you see. The mouse wheel and the trackpad's pinch zoom at the cursor. Drag with the right or middle mouse button to pan.",
+	  "", "" },
+	{ "Planner/Zoom Out", "Zoom Out",
+	  "Zooms out around the middle of what you see.",
+	  "", "" },
+	{ "Planner/New Step", "New Step",
+	  "Adds an event that starts today and runs three days, and opens its details to name it. Double-click the axis to make a one-day event anywhere; drag an event to move it and the ends of a bar to change its length.",
+	  "", "" },
+	{ "Planner/Timeline Zoom", "Timeline Zoom",
+	  "How wide a day is: Days to plan closely, Weeks and Months to see far ahead. The mouse wheel (a trackpad's pinch) zooms freely at the cursor; drag the background to move along the time.",
+	  "", "" },
+	{ "Planner/Timeline Settings", "Timeline Settings",
+	  "Which Date properties a step starts and ends at, and which Select property colours the bars.",
+	  "", "" },
+	{ "Planner/New Table", "New Table",
+	  "Makes a table: rows down, a column per property. Choose new data of its own, or data that exists, to look at the same rows another way.",
+	  "", "" },
+	{ "Planner/New Timeline", "New Timeline",
+	  "Makes a timeline: a bar per row from its Start to its End date. Choose new data (with Start and End columns ready) or data that exists.",
+	  "", "" },
+	{ "Planner/New Calendar", "New Calendar",
+	  "Makes a calendar: each row on its day. New data comes with a Date column.",
+	  "", "" },
+	{ "Planner/Data", "Data",
+	  "The rows and columns behind this view. Rename them here. Tables, timelines, boards and calendars made from the same data show the same rows; change a row in one and it changes in all.",
+	  "", "" },
+	{ "Planner/Delete Data", "Delete Data",
+	  "Deletes the data behind a view that is its only one, with all its rows, after you confirm. Source control has the previous version.",
+	  "", "" },
+	{ "Planner/New Event", "New Event",
+	  "Adds an event on today (or the first day of the month shown) and opens it. A + in the corner of a day, or a double-click on it, makes one there; drag across several days to make an event that covers them, and pull the right end of a bar to give it more or fewer days.",
+	  "", "" },
+	{ "Planner/New Item", "New Item",
+	  "Adds a card in the first lane and opens it. The + at the top of a lane adds to that lane.",
+	  "", "" },
+	{ "Planner/Close Details", "Close Details",
+	  "Closes the details of this row (Esc does too). The row stays as it is.",
+	  "", "" },
+	{ "Planner/Undo", "Undo",
+	  "Takes back the last change to this board (Cmd/Ctrl+Z). Up to a hundred steps; "
+	  "the history is not saved with the project.",
+	  "", "" },
+	{ "Planner/Redo", "Redo",
+	  "Puts back what Undo took away (Shift+Cmd/Ctrl+Z).",
+	  "", "" },
+	{ "Planner/Delete", "Delete",
+	  "Removes the selected cards, or the selected arrow. Cards take the arrows that "
+	  "ended at them along. Delete or Backspace does the same.",
+	  "", "" },
+	{ "Planner/Card color", "",
+	  "Colours the selected cards. The first square takes the colour away.",
+	  "", "" },
+	{ "Planner/Fit", "Fit",
+	  "Zooms and scrolls so that every card is in view.",
+	  "", "" },
+	{ "Planner/100%", "100%",
+	  "Back to normal size, around the middle of what you see.",
+	  "", "" },
+	{ "Planner/Arrow", "Arrow",
+	  "Whether the selected arrow has a head at the end. Click an arrow to select it, "
+	  "then give it a label in the field beside this.",
+	  "", "" },
+	{ "Planner/+ Timeline", "+ Timeline",
+	  "Adds a timeline view: a row per line and a day per column, a bar from "
+	  "each row's Start date to its End date. Drag a bar to move the row's "
+	  "dates; click it to open the row. Pick the Date properties above.",
+	  "", "" },
+	{ "Planner/New Row", "New Row",
+	  "Adds an empty row at the end and saves it. Type its title in the first "
+	  "column; click a cell to fill in the rest.",
+	  "", "" },
+	{ "Planner/Filter", "Filter",
+	  "Choose which rows this view shows. All conditions must hold. The filter "
+	  "belongs to the view and is saved with it; the search box beside it is "
+	  "temporary.",
+	  "", "" },
+	{ "Planner/Add Filter", "Add Filter",
+	  "Adds a condition to this view: pick a property, how to compare it and "
+	  "the value.",
+	  "", "" },
+	{ "Planner/Properties", "Properties",
+	  "The columns of this database: show or hide each in this view, rename "
+	  "them, delete them, or add a new one with a type (text, number, checkbox, "
+	  "date, select, multi-select, person, relation, engine link, URL).",
+	  "", "" },
+	{ "Planner/Add Property", "Add Property",
+	  "Adds a column of the chosen type to the database. Every row gets an "
+	  "empty cell for it.",
+	  "", "" },
+	{ "Planner/Title", "Title",
+	  "The row's name. Click the header to sort by it: once ascending, twice "
+	  "descending, a third time to clear the sort. Every other column header "
+	  "works the same way.",
+	  "", "" },
+	{ "Planner/Delete Row", "Delete Row",
+	  "Removes this row from the database, and from any relation that pointed "
+	  "at it. There is no undo for it; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Step", "Delete Step",
+	  "Removes this step from the data behind the timeline (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Event", "Delete Event",
+	  "Removes this event from the data behind the calendar (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete Card", "Delete Card",
+	  "Removes this card from the data behind the board (and from every other view of it). You are asked first; source control has the previous version.",
+	  "", "" },
+	{ "Planner/Delete View", "Delete View",
+	  "Removes this view. The rows and properties stay; a database always keeps "
+	  "at least one view.",
+	  "", "" },
+	{ "Planner/Delete Property", "Delete Property",
+	  "Deletes the column and its value in every row. Press twice to confirm; "
+	  "source control has the previous version.",
+	  "", "" },
+	{ "Planner/Link Selection", "Link Selection",
+	  "Links the entities selected in the scene to this row. Each link is "
+	  "stored by the entity's lasting id, so it survives a reload.",
+	  "", "" },
+	{ "Planner/Link Scene", "Link Scene",
+	  "Links the scene that is open to this row. Needs a saved scene.",
+	  "", "" },
+	{ "Planner/Link Panel", "Link Panel",
+	  "Links an editor panel to this row, so a click on the chip brings that "
+	  "panel up. Pick the panel from the list.",
+	  "", "" },
+	{ "Planner/Add Comment", "Add Comment",
+	  "Adds your comment to the task's history, under your name. The people it "
+	  "concerns hear about it when you are signed in to a team.",
+	  "", "" },
+	{ "Planner/From the Team", "From the Team",
+	  "What teammates did to tasks that concern you: assigned, commented, "
+	  "changed the status. A row opens its task. Shown once something has come in.",
+	  "", "" },
+	{ "Planner/Reload Tasks", "Reload Tasks",
+	  "Reads Config/TaskBoard.json again. For a file that could not be read "
+	  "(fix it first; a merge conflict leaves <<<<<<< markers in it) or to drop "
+	  "an edit that could not be saved and take what is on disk instead.",
+	  "", "" },
+	{ "Planner/Retry Save", "Retry Save",
+	  "Writes the tasks to Config/TaskBoard.json again, after a save failed "
 	  "(the file was locked or read-only).",
 	  "", "" },
-	{ "Task Board/Title", "",
-	  "What the task is, in a sentence. Saved when you leave the field.",
+	{ "Planner/Search titles", "Search titles",
+	  "Shows only rows whose title contains this text. Not saved with the view.",
 	  "", "" },
-	{ "Task Board/Status", "",
-	  "Open, In Progress, Blocked or Done. Each change is written into the "
-	  "task's history with your name; on the board the card moves to its "
-	  "group or lane.",
-	  "", "" },
-	{ "Task Board/Priority", "",
-	  "Low, Normal, High or Urgent — the colour of the stripe down the card's "
-	  "left edge.",
-	  "", "" },
-	{ "Task Board/Description", "",
-	  "The details: what is wrong, what done looks like, where to start. "
-	  "Saved when you leave the field.",
-	  "", "" },
-	// Only while signed in to a team server (Preferences ▸ Team).
-	{ "Task Board/Assigned To", "",
-	  "Who on your team does this task. Tick members in the list, one or "
-	  "several; untick to take it from them. Whoever it concerns hears about "
-	  "it: the people it is given to or taken from, whoever created it and "
-	  "whoever wrote in its history. Someone who is not online hears it when "
-	  "they sign in. Without a team server the field is not shown.",
-	  "", "" },
-	{ "Task Board/From the Team", "From the Team",
-	  "What your teammates did to tasks that concern you: assigned you one, "
-	  "changed a status, wrote a comment. The same lines are in the bell. "
-	  "Click one to open the task — a task created on another machine shows "
-	  "up here after your next pull.",
-	  "", "" },
-	{ "Task Board/Link Selection", "Link Selection",
-	  "Links the entities selected in the scene to this task. Dragging an "
-	  "entity from the World Outliner onto the task does the same. A link "
-	  "remembers the entity by its id and the scene it is in, so it still "
-	  "finds it after a reload; click the chip to select it again.",
-	  "", "" },
-	{ "Task Board/Link Scene", "Link Scene",
-	  "Links the open scene to this task. Click the chip to open it — through "
-	  "the unsaved-changes prompt, like File ▸ Open Scene.",
-	  "", "" },
-	{ "Task Board/Link Panel", "Link Panel",
-	  "Links an editor panel to this task — for work that is about the editor "
-	  "itself. Click the chip to bring the panel up. Assets are linked by "
-	  "dragging them from the Content Browser onto the task.",
-	  "", "" },
-	{ "Task Board/Add Comment", "Add Comment",
-	  "Adds what you wrote to the task's history, with your name and the time.",
-	  "", "" },
-	{ "Task Board/Delete Task", "Delete Task",
-	  "Removes the task from the board and from Config/TaskBoard.json. What "
-	  "it linked to is not touched.",
-	  "", "" },
-	// The board's widget in the footer, and the list it opens. The widget and
-	// the rows are drawn by hand, so they are looked up by key.
+	// ── Task Board (footer) ──────────────────────────────────────────────────
+	// The task list is the Planner's Tasks database now (the "Planner/..." entries
+	// above); what is left under this scope is the footer widget and its list.
 	{ "Task Board/Footer", "Tasks",
 	  "How many tasks are still open in this project — everything not Done — "
 	  "and, in the accent colour, how many of them are assigned to you; then "
@@ -3056,6 +3432,45 @@ namespace
 	{ "Audio Mixer/Remove", "",
 	  "Deletes the bus. Sources that still name it play on the master bus "
 	  "from now on, with a warning in the log.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Steam Audio (HRTF)", "",
+	  "Spatialises 3D sounds with Steam Audio's HRTF instead of the engine's own "
+	  "pan and distance volume. On headphones a source is heard in front, behind, "
+	  "above or beside you, not only left or right. Saved with the project. "
+	  "Greyed out when this build was made without Steam Audio "
+	  "(HE_ENABLE_STEAM_AUDIO=OFF); if it is ticked but its library cannot be "
+	  "loaded, the status beside it says why and the sound stays on the engine's "
+	  "own spatialiser.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Air absorption", "",
+	  "Distant 3D sounds lose their high frequencies, the way air swallows them: a far "
+	  "voice sounds duller, not only quieter. Needs Steam Audio (HRTF) switched on, and "
+	  "acts on 3D voices started while it is. Saved with the project.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Occlusion", "",
+	  "A wall between a 3D voice and the listener dims it and takes its treble, like a "
+	  "real wall: the bass still leaks through. Found by casting rays through the "
+	  "physics colliders (a trigger volume does not block), so whatever stops the "
+	  "player stops the sound; a source half behind a pillar is half muffled. Needs "
+	  "Steam Audio (HRTF) switched on, and acts while the game plays. Saved with the "
+	  "project.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Reflections", "",
+	  "Adds reverb that follows the room the listener stands in: a small tiled room "
+	  "rings briefly, a hall for much longer, open ground not at all. The room is "
+	  "measured with rays through the physics colliders (size, how closed it is) and "
+	  "drives Steam Audio's parametric reverb, so it is an estimate of the room, not "
+	  "a simulation of every reflection. Needs Steam Audio (HRTF) switched on, and acts "
+	  "while the game plays. Saved with the project.",
+	  "", "systems#audio" },
+	{ "Audio Mixer/Pathing", "",
+	  "Lets sound find its way round corners and through doors: when a wall blocks the "
+	  "straight line to a 3D voice, a few detours beside it are tried through the "
+	  "physics colliders, and if one is open the voice is heard from the doorway, "
+	  "farther away and a little duller, instead of through the wall. This is a live "
+	  "estimate; it does not use Steam Audio's baked probe pathing, so there is nothing "
+	  "to bake. Needs Steam Audio (HRTF) switched on, and acts while the game plays. "
+	  "Saved with the project.",
 	  "", "systems#audio" },
 	{ "Audio Mixer/Name", "",
 	  "The name of the bus to add. It is what a source's Bus field and a "
@@ -4589,12 +5004,6 @@ namespace
 	  "global illumination. Only the preview changes: exporting still writes the "
 	  "project's values, and play mode follows the project.",
 	  "", "" },
-	{ "Source Control/Open Project Settings\xe2\x80\xa6", "Open Project Settings",
-	  "Opens the Project Settings page of the repository: initialising it, the "
-	  "remote, GitHub setup and large files. The repository belongs to the "
-	  "project, so those controls travel with it and no longer sit here; git on "
-	  "this machine and the signed-in account stay on this page.",
-	  "", "editor#preferences" },
 	// ── Rendering ▸ Defaults ─────────────────────────────────────────────────
 	{ "Render Defaults/Use the editor's settings", "Use the editor's settings",
 	  "On, the packaged build boots with the window and backend this editor's "
@@ -4734,12 +5143,6 @@ namespace
 	  "Play keep absolute coordinates. 5 000–10 000 m is a good radius.",
 	  "", "systems#physics" },
 	// ── Audio ▸ Buses ────────────────────────────────────────────────────────
-	{ "Audio Buses/Open Audio Mixer", "Open Audio Mixer",
-	  "Opens the mixer window, where the project's buses are made and their "
-	  "faders sit. Buses are a project setting like the rest of this tab — saved "
-	  "in the .heproj and shipped with the build — but a fader is something you "
-	  "move while a scene plays, which is why they have a window and not a page.",
-	  "", "systems#audio" },
 	// ── Physics ▸ Collision Layers ───────────────────────────────────────────
 	{ "Collision Layers/Name", "Layer name",
 	  "What this channel is called, everywhere it is offered. The NUMBER is what "
@@ -4927,6 +5330,12 @@ namespace
 	{ "Tool Setup/Retry", "Retry",
 	  "Runs the install for this tool again. The log of the failed run is still "
 	  "there until the new one starts.",
+	  "", "horizoncode#compiler" },
+	{ "Tool Setup/Cancel", "Cancel",
+	  "Ends the running install: winget and every installer it started are "
+	  "terminated. A half-finished Visual Studio setup can be left behind; Retry "
+	  "starts it again. An installer that runs with administrator rights may refuse "
+	  "to end, then the install stays listed as running until it exits.",
 	  "", "horizoncode#compiler" },
 	{ "Tool Setup/Show Log", "Show Log",
 	  "Opens the installer's output below the list, where the last lines say why "
@@ -5131,6 +5540,26 @@ namespace
 	  "Where a masked material cuts: pixels whose opacity falls below this are "
 	  "discarded entirely, leaving a hard edge. It is what makes leaves and "
 	  "chain-link fences out of one quad.",
+	  "", "materials#concept" },
+	{ "Material Settings/Max Factor", "Tessellation Factor",
+	  "How finely each triangle is subdivided close to the camera, so the "
+	  "Displacement pin has vertices to move. 1 adds none, 64 is the most the "
+	  "engine allows (the D3D11 limit). Detail costs: a factor of 16 turns one "
+	  "triangle into a few hundred.",
+	  "", "materials#concept" },
+	{ "Material Settings/Fade Near", "Fade Near",
+	  "Up to this distance from the camera, in metres, triangles get the full "
+	  "Max Factor.",
+	  "", "materials#concept" },
+	{ "Material Settings/Fade Far", "Fade Far",
+	  "From this distance on, in metres, triangles are no longer subdivided and "
+	  "only the mesh's own vertices move. Between Fade Near and here the factor "
+	  "falls off. It always stays above Fade Near.",
+	  "", "materials#concept" },
+	{ "Material Settings/Max Displacement", "Max Displacement",
+	  "The furthest, in metres, the Displacement pin may push the surface in or "
+	  "out. Larger heights are clamped to it. Keep it close to what the graph "
+	  "really produces: shadows and lighting still see the flat mesh.",
 	  "", "materials#concept" },
 	{ "Material Preview/Show Material", "Show Material",
 	  "Puts the finished material back on the preview ball, after Preview This "
@@ -7193,15 +7622,22 @@ namespace
 
 	// ── Landscape: the foliage brush ─────────────────────────────────────────
 	{ "Landscape/Foliage", "Foliage",
-	  "Paints where the landscape's foliage layer grows and where it must not. "
-	  "The brush writes a density mask over the ground: Grow lets the layer "
-	  "come up under the cursor, Erase clears it — a yard, a road, a lake. The "
-	  "instances follow the stroke while you drag.",
+	  "Paints where a foliage layer grows and where it must not. The brush "
+	  "writes the selected layer's density mask over the ground: Grow lets the "
+	  "layer come up under the cursor, Erase clears it — a yard, a road, a "
+	  "lake. The instances follow the stroke while you drag.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Add Foliage Layer", "",
 	  "Puts a Foliage component on the landscape, the same one Details' Add "
-	  "Component would. Give it a mesh next, or the brush paints a mask nobody "
-	  "can see.",
+	  "Component would, or — when it has one — another layer for another kind "
+	  "of plant, selected straight away. Give it a mesh next, or the brush "
+	  "paints a mask nobody can see.",
+	  "", "scenes#foliage" },
+	{ "Landscape/Foliage Layer", "Foliage Layer",
+	  "One kind of plant on this landscape — grass, a bush, a tree — each with "
+	  "its own mesh, density and mask. Click one to paint it; the brush, Density "
+	  "and the mask resets below act on the selected layer only. The number is "
+	  "how many instances it scattered; a dimmed name is a hidden layer.",
 	  "", "scenes#foliage" },
 	{ "Landscape/Density", "Foliage Density",
 	  "Instances per square metre for the layer, the same number as Density on "
@@ -7225,18 +7661,18 @@ namespace
 	  "than full is what makes a meadow thin out toward its edge.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Mask", "Mask Resolution",
-	  "How many texels per side the density mask has, from 32 to 2048, "
+	  "How many texels per side the selected layer's density mask has, from 32 to 2048, "
 	  "stretched over the whole landscape — the finer it is, the sharper an "
 	  "erased edge can be. Locked as soon as anything is painted, because "
 	  "changing it would throw the mask away; Reset Mask unlocks it again.",
 	  "", "scenes#foliage" },
 	{ "Landscape/Erase Everywhere", "",
-	  "Clears the whole mask, so the layer scatters nothing anywhere until you "
+	  "Clears the selected foliage layer's whole mask, so it scatters nothing anywhere until you "
 	  "Grow it back in. The way to start from bare ground and paint the meadows "
 	  "in, rather than erase the paths out. One undo step.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Reset Mask", "",
-	  "Throws the painted mask away entirely: the layer goes back to an even "
+	  "Throws the selected foliage layer's painted mask away entirely: it goes back to an even "
 	  "scatter over the whole landscape, as if nothing had been painted, and "
 	  "the mask resolution unlocks. One undo step, the whole mask.",
 	  "", "editor#landscape-mode" },
@@ -7286,23 +7722,48 @@ namespace
 	  "that water's level.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Dig Bed##water", "Dig Bed",
-	  "Also digs while you paint: the ground under the brush is lowered to a "
-	  "floor Depth below the water level, with the brush falloff as the bank. "
-	  "It digs only where the water is, so the pit never reaches past it: "
-	  "ground at the edge of a stroke stays as it is until the water has "
-	  "spread there, and ground above the water level is cut down to it "
-	  "the moment the water covers it. "
+	  "Also digs while you paint, and it is what makes the water look like water: "
+	  "the surface material shades by how deep the water is, so a pond on flat "
+	  "ground without a bed is nothing but shallow shore (clear, foamy, no body "
+	  "colour). The bed is dug from the shore, not from the brush: under the "
+	  "water the ground sinks by Slope metres for every metre from the shoreline "
+	  "until it is Max Depth below the surface, and stays there. Painting on or "
+	  "pushing the shore out digs the newly inner ground the same way, as far in "
+	  "as it takes to reach Max Depth. "
+	  "It digs only where the water is, so the pit never reaches past it; ground "
+	  "above the water level under the water is cut down to it at once. "
 	  "Where that leaves ground standing above the water (painting uphill), "
 	  "it is shaved into a dry bank that slopes down to the waterline, "
 	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
-	  "does not dig on forever; the bed is as deep as Depth and no deeper. "
+	  "does not dig on forever. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
 	  "together.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Depth##water", "Bed Depth",
-	  "How far below the water level the bed is dug, in metres. Only used "
-	  "with Dig Bed.",
+	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
+	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "
+	  "again, back toward the height it had before the digging, at the brush's "
+	  "strength and profile. Only the brush's own digging is returned, and only "
+	  "where the water is gone: under water that is left, the bed stays. Ground you "
+	  "sculpted yourself afterwards keeps your changes. Off: erasing takes the water "
+	  "and leaves the hole. One undo step takes it back.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Max Depth##water", "Bed Max Depth",
+	  "The deepest the bed gets below the water level, in metres. It is reached at "
+	  "Max Depth / Slope metres from the shore (shown under the sliders) and held "
+	  "from there to the middle. Only used with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Slope##water", "Bed Slope",
+	  "How steeply the bed falls from the shore towards the middle: metres of depth "
+	  "per metre walked in. 0.25 drops a metre over four. A low slope gives a long "
+	  "gentle beach before the water is at full depth, a high one a steep drop-off "
+	  "close to the bank. Only used with Dig Bed.",
+	  "", "editor#landscape-mode" },
+	{ "Landscape/Bed Roughness##water", "Bed Roughness",
+	  "A little unevenness on the floor of the water, from 0 (smooth) to 1. It is a "
+	  "share of the depth at each point that a fixed pattern adds or takes away, so "
+	  "the shoreline itself stays clean and the same stroke always digs the same "
+	  "floor. Only used with Dig Bed.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Resolution##water", "Water Grid Resolution",
 	  "How many cells per side the landscape's water is stored in, from 32 to "
@@ -7404,6 +7865,30 @@ namespace
 	  "Shapes how fast the tint goes from shallow to deep. Above 1 it lingers near "
 	  "the shallow colour before darkening, below 1 it reaches the deep colour "
 	  "sooner. Does not touch the fog.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Tessellation##water", "Tessellation",
+	  "Draws this landscape's water waves as real geometry instead of only a lit "
+	  "normal, so the surface rises and falls with the swell. It follows the wind "
+	  "like the shading does. Needs a graphics backend with GPU tessellation "
+	  "(OpenGL, Vulkan, D3D11, D3D12); on Metal the surface stays flat. It costs GPU "
+	  "time, so it is off by default. Saved with the scene; the water material's "
+	  "Static Switch of the same name is what this turns on.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Tessellated Waves##wtess", "Tessellated Waves",
+	  "How this water body looks when the landscape's Tessellation switch is on: how "
+	  "high the real waves stand and how far from the coast they grow in. They are "
+	  "per body because a river wants a fraction of what an open sea does.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Wave Height##wtess", "Wave Height",
+	  "The height of the real waves as a multiple of the waves' own amplitude. 0 is a "
+	  "flat surface, 0.6 the default, 1 the full swell; a river wants little, a sea "
+	  "more. It follows the wind like the shading does, so a storm raises it further. "
+	  "Saved with the body.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Coast Fade##wtess", "Coast Fade",
+	  "Metres of water over which the waves grow in from the coast: at the waterline "
+	  "the surface is flat, and from this depth on the waves stand at full height. "
+	  "A larger value keeps the shore calmer. Held to 0.1 to 3 m. Saved with the body.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Refracted Light##wcau", "Refracted Light",
 	  "The moving net of bright lines the waves throw onto whatever lies below the "
@@ -7519,7 +8004,10 @@ namespace
 	  "the top-right corner with frame times and the GPU time of each render "
 	  "pass, and V toggles VSync. The Development profile has it on, Shipping off "
 	  "- leave it off for the build players get. Works with any runtime, release "
-	  "builds included. The log says what the game did with the key.",
+	  "builds included. The log says what the game did with the key. It also picks "
+	  "the engine SDK lib set every export compiles the game against: on the dev "
+	  "set, off the release set, which has no development code at all; the line "
+	  "under these settings says whether this editor has it.",
 	  "", "export#mods" },
 	{ "Export/Incremental packing", "",
 	  "Reuses the stored bytes of unchanged assets from the previous export at "
@@ -7532,7 +8020,10 @@ namespace
 	  "Translates HorizonCode graphs — classes, widgets, level scripts and the "
 	  "GameInstance — into C++ and ships them as a compiled library. It needs "
 	  "cmake and a C++ toolchain on this machine and only runs for a Host target. "
-	  "The graphs ship as well either way, so by default anything that fails to "
+	  "The library is built against the same engine SDK and profile the export "
+	  "compiles the game from; it ships in the HorizonEngine folder beside the "
+	  "engine library, and the game refuses a library of another profile. The "
+	  "graphs ship as well either way, so by default anything that fails to "
 	  "translate simply runs interpreted.",
 	  "", "horizoncode#compiler" },
 	{ "Export/Interpret on failure", "",
@@ -7661,6 +8152,11 @@ namespace
 	  "Puts this window away while the build keeps running. The footer shows its "
 	  "progress; click that to bring the window back. When the build ends with the "
 	  "window away, a notification says how it went.",
+	  "", "export#shipped-files" },
+	{ "Build Window/Cancel", "",
+	  "Stops the step that is compiling right now (the game from the engine SDK). "
+	  "A cancelled compile is a failed export: no prebuilt game ships in its place, "
+	  "and what was compiled so far is kept for the next export.",
 	  "", "export#shipped-files" },
 	{ "Build Window/Build Again", "",
 	  "Runs the same export once more with the settings the last run used, "
@@ -7984,7 +8480,7 @@ namespace
 	{ "Audio Editor/Bus", "Mixer Bus",
 	  "The Audio Mixer bus this clip plays through, wherever the game plays it: "
 	  "its fader, mute and solo apply to it. The list is the project's own, the "
-	  "one Window > Audio Mixer edits. An Audio Source whose Bus field names a "
+	  "one Project Settings > Audio Buses edits. An Audio Source whose Bus field names a "
 	  "bus still overrides this for that source. When the bus has since been "
 	  "removed or renamed in the mixer, it is shown as missing and the clip plays "
 	  "on Master; the name is kept, so the clip finds the bus again if it comes "
@@ -9035,7 +9531,7 @@ namespace
 	  "between sessions.",
 	  "", "" },
 	{ "Source Control Panel/Open source-control settings…", "Open source-control settings",
-	  "Opens the Project Settings page that owns the setup: initialising the "
+	  "Opens Preferences \xe2\x96\xb8 Source Control, which owns the setup: initialising the "
 	  "repository, the remote, the access token, auto-push and the fetch "
 	  "schedule. This window only commits, pushes, pulls and shows the history.",
 	  "", "editor#preferences" },
@@ -9330,11 +9826,6 @@ namespace
 	  "Everything the engine logged this session — warnings, errors, script "
 	  "output. The first place to look when something did not happen.",
 	  "Ctrl+`", "advanced#diagnostics" },
-	{ "panel.audio-mixer", "Audio Mixer",
-	  "The project's audio buses as fader strips, with mute and solo. The "
-	  "buses and their levels are saved with the project; a source's Bus field "
-	  "names one of them.",
-	  "", "systems#audio" },
 	{ "panel.profiler", "Performance Profiler",
 	  "Where the frame time goes: a live CPU and GPU readout, and captures that "
 	  "break a single frame down pass by pass.",
@@ -9452,6 +9943,7 @@ namespace
 		{ "Undo History/",     "editor-interface", "Editor Interface", "Undo History" },
 		{ "Watch/",            "editor-interface", "Editor Interface", "Watch" },
 		{ "Task Board/",       "editor-interface", "Editor Interface", "Task Board" },
+		{ "Planner/",          "editor-interface", "Editor Interface", "Planner" },
 		{ "Notifications/",    "editor-interface", "Editor Interface", "Notifications" },
 		{ "Play Report/",      "editor-interface", "Editor Interface", "Play Session Report" },
 		{ "Project Hub/",      "editor-interface", "Editor Interface", "Project Hub" },
@@ -9668,6 +10160,7 @@ const Entry* findKey(std::string_view key)
 const Entry* find(std::string_view label)
 {
 	if (label.empty()) return nullptr;
+	const std::string_view vis = visible(label);
 
 	// Most specific first: the label EXACTLY as written, "##" suffix included.
 	// That suffix is the only thing telling two rows apart when a component has
@@ -9685,7 +10178,6 @@ const Entry* find(std::string_view label)
 		const std::size_t prefix = scoped.size();
 		scoped.append(label);
 		if (const Entry* e = findKey(scoped)) return e;
-		const std::string_view vis = visible(label);
 		if (vis.size() != label.size())
 		{
 			scoped.resize(prefix);
@@ -9694,7 +10186,7 @@ const Entry* find(std::string_view label)
 		}
 	}
 	if (const Entry* e = findKey(label)) return e;
-	return findKey(visible(label));
+	return findKey(vis);
 }
 
 Scope::Scope(const char* name) { scopes().push_back(name ? name : ""); }

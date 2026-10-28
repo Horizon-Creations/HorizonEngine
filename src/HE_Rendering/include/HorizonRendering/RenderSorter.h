@@ -2,14 +2,22 @@
 #include "../HE_RENDERING_API.h"
 #include "CommandBuffer.h"
 #include "RenderWorld.h"
-#include <vector>
 #include <cstdint>
+#include <cstring>
+#include <vector>
 
 class HE_RENDERING_API RenderSorter {
 public:
     void sort(const RenderWorld&          world,
               const std::vector<uint8_t>& visible,
               std::vector<uint32_t>&      outSortedIndices);
+
+    // Grouped by mesh only, in object order within a mesh: for a depth-only pass (a shadow
+    // cascade), where the draw order cannot change the depth written and front-to-back buys
+    // nothing worth reading every object's transform for (audit lever 4).
+    void sortByMesh(const RenderWorld&          world,
+                    const std::vector<uint8_t>& visible,
+                    std::vector<uint32_t>&      outSortedIndices);
 
     // ── Transparency (shared by every backend's draw loop) ───────────────────
     // A draw counts as opaque only at (effectively) full opacity. The epsilon
@@ -80,15 +88,31 @@ public:
     // One run of same-mesh objects: `count` transforms starting at
     // DepthBatchList::transforms[first]. count == 1 is the plain single draw
     // (the backends keep their non-instanced program for it).
+    //
+    // With `useSpans` set (a backend that reads the matrices in place, Metal) the
+    // run's instances are not copied into `transforms`: batch b's are the spans
+    // spans[b.spanFirst, b.spanFirst + b.spanCount), `count` matrices in all, read
+    // straight from instanceWorldMatrices / RenderObject::transform. Same runs, same
+    // order, same bits; `transforms` stays empty.
     struct DepthBatch {
         HE::UUID meshAssetId;
         uint32_t first = 0;
         uint32_t count = 0;
+        uint32_t spanFirst = 0;
+        uint32_t spanCount = 0;
     };
     struct DepthBatchList {
-        std::vector<DepthBatch> batches;
-        std::vector<glm::mat4>  transforms; // world transforms, batch-contiguous
-        void clear() { batches.clear(); transforms.clear(); }
+        std::vector<DepthBatch>   batches;
+        std::vector<glm::mat4>    transforms; // world transforms, batch-contiguous
+        std::vector<InstanceSpan> spans;      // useSpans: batch-contiguous spans instead
+        bool                      useSpans = false;
+        void clear() { batches.clear(); transforms.clear(); spans.clear(); }
+        // Batch `b`'s matrices, in whichever form the list was built.
+        InstanceRun run(const DepthBatch& b) const
+        {
+            return InstanceRun(spans.data() + b.spanFirst, useSpans ? b.spanCount : 0,
+                               transforms.data() + b.first, b.count);
+        }
     };
 
     // Which per-object opt-out a depth-only pass honours. The flags live on
@@ -131,6 +155,71 @@ public:
     // HE_MTL_INSTANCING plays on Metal. Read once per process.
     static bool depthInstancingEnabled();
 
+    // HE_INSTANCE_SPANS=0 makes every backend copy a run's instances per pass again instead of
+    // reading them in place (GeometryPass::setInstanceSpans, DepthBatchList::useSpans): the A/B
+    // switch, same bits either way. HE_MTL_PARALLEL_SHADOW=0 prepares the shadow views one after
+    // the other instead of side by side (the name is Metal's, every backend honours it). Read once.
+    static bool instanceSpansEnabled();
+    static bool parallelShadowViewsEnabled();
+
+    // Write `count` instance records of two matrices each ({mvp, model} on D3D11, D3D12 and Vulkan;
+    // fill(k, pair) sets pair[0] and pair[1]) to `dst`, the one loop behind every instanced depth draw
+    // of those backends. A big batch (a foliage cluster's thousands of plants) goes wide on the job
+    // system's workers like RenderWorld::writeInstancePieces does, a small one stays on the caller;
+    // the records are the same either way, so `fill` must be a pure function of k.
+    template <class Fill>
+    static void fillInstancePairs(uint8_t* dst, uint32_t count, Fill&& fill)
+    {
+        auto one = [dst, &fill](size_t k)
+        {
+            glm::mat4 pair[2];
+            fill(static_cast<uint32_t>(k), pair);
+            std::memcpy(dst + k * sizeof(pair), pair, sizeof(pair));
+        };
+        if (count >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled())
+            parallel_for(count, one, "FillInstancePairs", RenderWorld::kInstancePieceMax);
+        else
+            for (uint32_t k = 0; k < count; ++k) one(k);
+    }
+
+    // The same records for a run's matrices (DrawCall::instanceRun, DepthBatchList::run):
+    // fill(model, pair) sets pair[0] and pair[1] from one matrix. A span after the other,
+    // each wide when it is big, so one foliage cluster in place goes as wide as a copy did.
+    template <class Fill>
+    static void fillInstancePairs(uint8_t* dst, const InstanceRun& run, Fill&& fill)
+    {
+        for (const InstanceSpan& s : run)
+        {
+            const glm::mat4* src = s.src;
+            fillInstancePairs(dst, s.n, [src, &fill](uint32_t k, glm::mat4* pair) { fill(src[k], pair); });
+            dst += static_cast<size_t>(s.n) * 2 * sizeof(glm::mat4);
+        }
+    }
+
+    // The run's matrices into a ring or mapped buffer, `stride` bytes apart (64 = back to back;
+    // a node-graph material's instance record has its model after the first 64 bytes: pass
+    // dst + 64 and stride 128). Wide from kParallelUnfoldMin on, like fillInstancePairs.
+    static void copyInstanceModels(uint8_t* dst, size_t stride, const InstanceRun& run)
+    {
+        for (const InstanceSpan& s : run)
+        {
+            const glm::mat4* src = s.src;
+            auto one = [dst, stride, src](size_t k) { std::memcpy(dst + k * stride, src + k, sizeof(glm::mat4)); };
+            if (s.n >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled())
+                parallel_for(s.n, one, "CopyInstanceModels", RenderWorld::kInstancePieceMax);
+            else
+                for (uint32_t k = 0; k < s.n; ++k) one(k);
+            dst += static_cast<size_t>(s.n) * stride;
+        }
+    }
+
+    // HE_GRAPH_INSTANCING=0 sends a batch of a node-graph material back to the
+    // per-instance loop with the material's plain program, instead of one draw
+    // with its instanced twin (MaterialShaderLibrary::standardVertexInstanced /
+    // customVertexInstanced, Thema 182 2e). The same-binary A/B for that path,
+    // on every backend that has it. Read once per process.
+    static bool graphInstancingEnabled();
+
 private:
     // Precomputed per-object sort key so the O(n log n) comparator never has to
     // recompute camera distance or extract a matrix column. Reused across frames
@@ -142,4 +231,9 @@ private:
         uint32_t index;
     };
     std::vector<SortKey> m_keys;
+    // sortByMesh's scratch: the visible objects, their mesh as a dense id, the open-addressing
+    // table that hands the ids out, and the counting sort's buckets.
+    struct MeshSlot { uint64_t hi, lo; uint32_t dense; bool used; };
+    std::vector<uint32_t> m_visible, m_denseOf, m_rankOfDense, m_bucket;
+    std::vector<MeshSlot> m_meshTable;
 };

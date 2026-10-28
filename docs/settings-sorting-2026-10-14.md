@@ -60,3 +60,22 @@ preview override for the user.**
   calls from it needs a stub in `tests/WidgetDesignerLinkStubs.cpp`.
 - **Next steps:** 1. manual pass in the editor; 2. a test for `syncGraphicsSource` if it can be
   made AppContext-free.
+
+## Handoff 2 — one tab, 2026-10-19
+
+- **Done:** Project Settings tab removed; its pages are Preferences groups Project / World / Online
+  (`ProjectSettingsPanel::drawPage`, called from `EditorSettingsPanel.cpp` render). Editor group is now
+  Appearance (+Panels body), Viewport, Input (pointer rows + gamepad + Shortcuts), Project Data
+  (cpucache/cbrefresh/autosave rows), Feedback. Graphics/gamepad rows exist once
+  (`ProjectSettingsPanel::drawGraphics/drawGamepad`): bound to the project block when it sets its own,
+  else the editor's; `PreviewQualityMode` ("my own values") is gone, the viewport follows an enabled project.
+  Export dialog: no output dir / target / window / backend / icon rows; dir is `<project>/Export/<profile>`,
+  outputDir and targetPlatform are not read from the .heproj (project_build's one-run copy can still set them).
+- **Verified:** he_tests + HorizonEditor build; `test_project_settings_ui` (now draws page bodies in a
+  plain window), `test_editor_graphics`, `test_export_profiles`, `test_project_settings`, `test_mcp_tools_build`
+  green; `editor_help_audit.py --check` clean.
+- **Not verified:** a real editor run (rail, Graphics page with a project that sets its own, Edit ▸ Project Settings),
+  an export round trip on the Mac, `scripts/he_rewards_live.py` (still passes targetPlatform/outputDir via MCP).
+- **Traps:** he_tests compiles ProjectSettingsPanel.cpp but not EditorSettingsPanel.cpp — keep the dependency
+  Preferences -> ProjectSettingsPanel. `ProjectSettingsPanel::requestOpen(Page)` is forwarded by EditorUI.
+- **Next steps:** click through the new rail; old projects with graphics.enabled lose the preview override only.

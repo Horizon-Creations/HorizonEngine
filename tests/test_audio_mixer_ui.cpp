@@ -136,8 +136,10 @@ namespace
 		ImGui::NewFrame();
 		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
 		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
-		bool open = true;
-		AudioMixerPanel::DrawAudioMixerWindow(ctx, open);
+		// The mixer is a page, not a window: give it one to sit in.
+		ImGui::Begin("Audio Mixer");
+		AudioMixerPanel::DrawAudioMixer(ctx);
+		ImGui::End();
 		EditorWidgets::drawQueuedHelp();
 		const ImGuiID hovered = ImGui::GetHoveredID();
 		ImGui::Render();

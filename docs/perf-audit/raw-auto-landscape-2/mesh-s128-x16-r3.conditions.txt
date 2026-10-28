@@ -1,0 +1,17 @@
+== mesh-s128-x16-r3  2026-10-21 05:34:29  attempt 1
+before:
+  uptime:    load averages: 1.81 2.10 2.19
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      120.5% clion; 43.7% Python; 20.8% Python; 8.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.00 2.12 2.19
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      11.8% coreaudiod; 9.8% Dock; 7.4% clion; 6.0% WindowServer
+  foreign:   none

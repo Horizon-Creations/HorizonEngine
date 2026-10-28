@@ -762,6 +762,101 @@ TEST_CASE("Live sync: a HorizonCode graph edit reaches the peer node by node")
     CHECK(client.beginAssetEdit(asset));
 }
 
+// EditorApplication::updateAssetCollabSync's content-asset branch (the one for
+// a class/widget HorizonCode graph, not the Level Script / GameInstance one)
+// runs, per open tab, in this order every frame: diff-and-maybe-send, then (if
+// the tab is dirty) claim the lock, then — once owned — the collab autosave,
+// which clears the tab's dirty flag. CollabSession::requestLock self-grants on
+// the HOST with no round trip, so the claim can land in the SAME frame as the
+// edit that asked for it, after the diff above already ran with owned still
+// false. Without a second diff right after the claim, the autosave clears
+// dirty before the NEXT frame's diff ever sees owned==true and dirty==true
+// together, and the edit that claimed the lock never goes out as a delta — on
+// the host only: a client's grant is always at least one round trip (a frame)
+// later, so its dirty flag is still set the first time its own diff sees
+// owned==true.
+//
+// EditorApplication.cpp is not linked into he_tests (see its own audit,
+// docs/collab-sync-audit-horizoncode-2026-10-14.md), so `frame()` below
+// reproduces its exact per-tab order by hand instead of calling it.
+TEST_CASE("Live sync: the host's edit on a freshly claimed lock reaches the client")
+{
+    HorizonWorld hostWorld;
+    hostWorld.createEntity("Cube");
+
+    CollabController host;
+    host.setWorld(&hostWorld);
+    REQUIRE(host.startHosting(0, "Anna"));
+
+    HorizonWorld clientWorld;
+    CollabController client;
+    client.setWorld(&clientWorld);
+    client.onWorldReplaced([&] { client.seedNetIds(); });
+
+    REQUIRE(client.joinSession("127.0.0.1", host.port(), host.joinCode(), "Bob"));
+    REQUIRE(pumpUntil(host, client, [&] {
+        return client.status() == CollabController::Status::Joined;
+    }));
+
+    const std::string asset = "Content/Scripts/Door.hasset";
+
+    HorizonCode::Graph hostGraph, clientGraph;
+    CollabDocSync::DocMirror hostMirror, clientMirror;
+
+    client.onRemoteDocDeltas([&](const std::string& p,
+                                 const std::vector<HE::Net::CollabSession::DocDelta>& b) {
+        REQUIRE(p == asset);
+        auto doc = CollabDocSync::forHorizonCodeGraph(clientGraph);
+        CollabDocSync::applyDeltas(*doc, clientMirror, CollabDocSync::Scope::Primary, b);
+    });
+
+    host.beginAssetEditSession(asset);
+    client.beginAssetEditSession(asset);
+    using EditState = CollabController::AssetEditState;
+    REQUIRE(pumpUntil(host, client, [&] {
+        return host.assetEditState(asset)   == EditState::Editable &&
+               client.assetEditState(asset) == EditState::Editable;
+    }));
+
+    // Both tabs are open and watching before either edits — the "already open
+    // graph tab" the step asks for — seeded from the same (empty) content,
+    // same as EditorApplication's watching branch.
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(hostGraph),   hostMirror,
+                        CollabDocSync::Scope::Primary);
+    CollabDocSync::seed(*CollabDocSync::forHorizonCodeGraph(clientGraph), clientMirror,
+                        CollabDocSync::Scope::Primary);
+
+    // One frame of the content-asset branch for the host's tab, in its real
+    // order: diff while maybe not yet owning the lock, claim if the tab is
+    // dirty, diff AGAIN if the claim landed just now (the fix), then the
+    // autosave that clears dirty.
+    auto diffAndMaybeSend = [&](bool owned, bool dirty) {
+        if (owned && !dirty) return;
+        auto doc = CollabDocSync::forHorizonCodeGraph(hostGraph);
+        std::vector<HE::Net::CollabSession::DocDelta> batch;
+        if (owned) CollabDocSync::diffInto(*doc, hostMirror, CollabDocSync::Scope::Primary, batch);
+        else if (!hostMirror.seeded) CollabDocSync::seed(*doc, hostMirror, CollabDocSync::Scope::Primary);
+        if (batch.empty()) return;
+        host.publishDocDeltas(asset, batch);
+    };
+
+    // Anna (the host) makes ONE edit on her already-open, still-unclaimed tab.
+    HorizonCode::Node ev; ev.type = HorizonCode::NodeType::Event; ev.s = "OnUse";
+    hostGraph.addNode(ev);
+    bool dirty = true;
+
+    const bool ownedBefore = host.ownsAssetLock(asset);
+    diffAndMaybeSend(ownedBefore, dirty);
+    REQUIRE(dirty);
+    REQUIRE(host.beginAssetEdit(asset));
+    REQUIRE(host.ownsAssetLock(asset));
+    if (!ownedBefore) diffAndMaybeSend(true, dirty);   // the fix
+    dirty = false;                                     // the collab autosave, same frame
+
+    REQUIRE(pumpUntil(host, client, [&] { return clientGraph.nodes.size() == 1; }));
+    CHECK(HorizonCode::toJson(clientGraph) == HorizonCode::toJson(hostGraph));
+}
+
 TEST_CASE("Live sync: the level script and the GameInstance graph travel like any document")
 {
     // Neither is a file under Content: the level script lives in the world (it

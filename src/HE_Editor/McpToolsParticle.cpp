@@ -75,7 +75,10 @@ std::string allPinNames()
 {
 	std::string s;
 	for (const ParticlePinDesc& p : emitterPins())
-		s += (s.empty() ? "" : ", ") + std::string(p.name);
+	{
+		if (!s.empty()) s += ", ";
+		s += p.name;
+	}
 	return s;
 }
 
@@ -229,6 +232,13 @@ json uuidJson(const HE::UUID& id)
 const ParticleGraphNode* outputNode(const ParticleGraph& g)
 {
 	for (const ParticleGraphNode& n : g.nodes)
+		if (n.type == ParticleNodeType::EmitterOutput) return &n;
+	return nullptr;
+}
+
+ParticleGraphNode* findMutableOutputNode(ParticleGraph& g)
+{
+	for (ParticleGraphNode& n : g.nodes)
 		if (n.type == ParticleNodeType::EmitterOutput) return &n;
 	return nullptr;
 }
@@ -526,9 +536,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 				"Either 'value' or 'reset' is required — a call with neither would report "
 				"success without changing anything.");
 
-		ParticleGraphNode* out = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { out = &n; break; }
+		ParticleGraphNode* out = findMutableOutputNode(e.graph);
 		if (!out)
 			return ToolResult::fail("invalid_payload",
 				"'" + e.rel + "' has no Emitter Output node, which every particle graph the "
@@ -560,9 +568,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 				result["changed"]     = true;
 				result["removedNode"] = wasConst && onlyConsumer;
 			}
-			ParticleGraphNode* after = nullptr;
-			for (ParticleGraphNode& n : e.graph.nodes)
-				if (n.type == ParticleNodeType::EmitterOutput) { after = &n; break; }
+			ParticleGraphNode* after = findMutableOutputNode(e.graph);
 			if (after) result["state"] = pinJson(e.graph, *after, index);
 			bool randomised = false;
 			result["emitter"] = configJson(e.graph, randomised);
@@ -588,10 +594,11 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 					"than to a value — these tools do not make it. Use 'reset' to take the "
 					"input back to its default first if that is what you want, or edit the "
 					"graph in the Particle Graph Editor.");
-			if (consumersOf(e.graph, driver->id) != 1)
+			const int driverConsumers = consumersOf(e.graph, driver->id);
+			if (driverConsumers != 1)
 				return ToolResult::fail("driven_by_graph",
 					"'" + pinName + "' is driven by node " + std::to_string(driver->id) +
-					", which also feeds " + std::to_string(consumersOf(e.graph, driver->id) - 1) +
+					", which also feeds " + std::to_string(driverConsumers - 1) +
 					" other input(s). Changing its value would change those too, so it is "
 					"refused rather than applied wider than asked. Use 'reset' on this input "
 					"first to give it a constant of its own.");
@@ -619,9 +626,7 @@ void addSet(McpToolRegistry& registry, ContentManager& content,
 		const int params = particleNodeDesc(node->type).paramCount;
 		for (int i = 0; i < params; ++i) node->p[i] = p[i];
 
-		ParticleGraphNode* after = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { after = &n; break; }
+		ParticleGraphNode* after = findMutableOutputNode(e.graph);
 
 		json result{
 			{ "pin",         pinName },
@@ -699,9 +704,7 @@ void addSlotSet(McpToolRegistry& registry, ContentManager& content,
 					"reference it. The editor log carries the reason.");
 		}
 
-		ParticleGraphNode* out = nullptr;
-		for (ParticleGraphNode& n : e.graph.nodes)
-			if (n.type == ParticleNodeType::EmitterOutput) { out = &n; break; }
+		ParticleGraphNode* out = findMutableOutputNode(e.graph);
 		if (!out)
 			return ToolResult::fail("invalid_payload",
 				"'" + e.rel + "' has no Emitter Output node, which every particle graph the "

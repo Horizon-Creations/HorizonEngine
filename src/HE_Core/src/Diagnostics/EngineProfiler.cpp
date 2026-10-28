@@ -205,6 +205,7 @@ void EngineProfiler::doStart()
 	// worker only reads it after the acquire load in beginScope. That edge is the
 	// whole happens-before argument; keep new plain state on this side of it.
 	m_generation.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().take();   // the capture's first frame starts from zero
 	m_recording.store(true, std::memory_order_release);
 	if (allocProbe().read)
 	{
@@ -244,7 +245,10 @@ void EngineProfiler::beginFrame(double deltaMs)
 		// (waitUntilCompleted per pass), which makes the captured frame much slower.
 		// Respect the user's "Detailed GPU pass timing" checkbox instead: fast by
 		// default (CPU scopes + counters + whole-frame GPU), exclusive per-pass only
-		// when the user opts in. (m_forceDetailed stays false.)
+		// when the user opts in, or when the caller asked for this one frame
+		// (requestSingleFrameCapture(true), the game's stats card).
+		m_forceDetailed = m_pendingSingleDetailed;
+		m_pendingSingleDetailed = false;
 		doStart();
 	}
 
@@ -320,7 +324,7 @@ void EngineProfiler::endFrame()
 
 void EngineProfiler::pushLive(const ProfLiveFrame& f)
 {
-	if (m_live.size() >= m_liveCap) m_live.erase(m_live.begin());
+	if (m_live.size() >= m_liveCap) m_live.pop_front();
 	m_live.push_back(f);
 }
 
@@ -438,9 +442,37 @@ size_t EngineProfiler::timelineDroppedSpans() const
 // earlier in this same frame by the world tick (a different producer at a different
 // point in the loop); assigning the whole struct here would zero them every frame,
 // which is precisely how entities/lights/particles stayed 0 in every dump until v3.
+MeshStreamCounters& meshStreamCounters()
+{
+	static MeshStreamCounters c;
+	return c;
+}
+
+ProfMeshStream MeshStreamCounters::take()
+{
+	ProfMeshStream o;
+	o.chunkBuilds = chunkBuilds.exchange(0, std::memory_order_relaxed);
+	o.tessBuilds = tessBuilds.exchange(0, std::memory_order_relaxed);
+	o.tessReleases = tessReleases.exchange(0, std::memory_order_relaxed);
+	o.stitchBuilds = stitchBuilds.exchange(0, std::memory_order_relaxed);
+	o.lodSwitches = lodSwitches.exchange(0, std::memory_order_relaxed);
+	o.meshReplaceBytes = meshReplaceBytes.exchange(0, std::memory_order_relaxed);
+	o.meshUploads = meshUploads.exchange(0, std::memory_order_relaxed);
+	o.meshUploadBytes = meshUploadBytes.exchange(0, std::memory_order_relaxed);
+	o.meshInvalidations = meshInvalidations.exchange(0, std::memory_order_relaxed);
+	o.gpuStalls = gpuStalls.exchange(0, std::memory_order_relaxed);
+	o.blasBuilds = blasBuilds.exchange(0, std::memory_order_relaxed);
+	o.blasTris = blasTris.exchange(0, std::memory_order_relaxed);
+	o.giInstances = giInstances.load(std::memory_order_relaxed);
+	return o;
+}
+
 void EngineProfiler::setRenderStats(const ProfRenderStats& s)
 {
+	// Taken every frame, recording or not, so a capture starts from a clean frame.
+	const ProfMeshStream ms = meshStreamCounters().take();
 	if (!m_recording) return;
+	m_current.stats.meshStream     = ms;
 	m_current.stats.drawCalls      = s.drawCalls;
 	m_current.stats.triangles      = s.triangles;
 	m_current.stats.visibleObjects = s.visibleObjects;
@@ -493,6 +525,199 @@ struct Stat
 		             {"max", mx}, {"count", n} };
 	}
 };
+
+// Per-scope and per-GPU-pass summaries across the whole capture.
+// CPU scopes are summarised by HE::Prof::aggregateScopes (it adds self time and
+// p95, which this Stat cannot express); only the GPU passes still use it.
+struct FrameAggregates
+{
+	std::map<std::string, Stat> gpuSummary;
+	std::map<std::string, bool> gpuApprox;   // a pass name is approx if any sample was
+	std::map<std::string, uint64_t> gpuModeCounts;  // which GPU-timing path produced each frame
+	Stat cpuFrame, gpuFrame, delta;
+	Stat passOverlap;   // Σ(exact passes)/gpuFrameMs per frame; >1 ⇒ spans overlap (TBDR)
+};
+
+FrameAggregates aggregateFrameStats(const std::vector<ProfFrameRecord>& frames)
+{
+	FrameAggregates a;
+	for (const auto& f : frames)
+	{
+		a.cpuFrame.add(f.cpuFrameMs);
+		a.delta.add(f.deltaMs);
+		if (f.gpuFrameMs >= 0.0) a.gpuFrame.add(f.gpuFrameMs);
+		if (f.gpuTimingMode && f.gpuTimingMode[0]) a.gpuModeCounts[f.gpuTimingMode]++;
+		double sumExact = 0.0; bool anyExact = false;
+		for (const auto& g : f.gpuPasses)
+		{
+			a.gpuSummary[g.name].add(g.ms);
+			if (g.approx) a.gpuApprox[g.name] = true;
+			else { sumExact += g.ms; anyExact = true; }
+		}
+		if (f.gpuFrameMs > 0.0 && anyExact) a.passOverlap.add(sumExact / f.gpuFrameMs);
+	}
+	return a;
+}
+
+// The dump's per-frame "frames" array: scopes, GPU passes, counters and, when the
+// alloc probe recorded this frame, its allocation counts.
+json buildFrameDetails(const std::vector<ProfFrameRecord>& recorded)
+{
+	json frames = json::array();
+	for (const auto& f : recorded)
+	{
+		json jf;
+		jf["i"]       = f.index;
+		jf["wallMs"]  = f.wallMs;
+		jf["deltaMs"] = f.deltaMs;
+		jf["cpuMs"]   = f.cpuFrameMs;
+		if (f.gpuFrameMs >= 0.0) jf["gpuMs"] = f.gpuFrameMs;
+		if (f.gpuTimingMode && f.gpuTimingMode[0]) jf["gpuMode"] = f.gpuTimingMode;
+		json scopes = json::array();
+		for (const auto& s : f.scopes)
+			scopes.push_back({ {"n", s.name}, {"ms", s.ms}, {"d", s.depth} });
+		jf["cpu"] = scopes;
+		if (!f.gpuPasses.empty())
+		{
+			json gp = json::array();
+			for (const auto& g : f.gpuPasses)
+			{
+				json e = { {"n", g.name}, {"ms", g.ms} };
+				if (g.approx) e["approx"] = true;
+				gp.push_back(std::move(e));
+			}
+			jf["gpu"] = gp;
+		}
+		const auto& s = f.stats;
+		jf["stats"] = {
+			{"draws", s.drawCalls}, {"tris", s.triangles},
+			{"visible", s.visibleObjects}, {"total", s.totalObjects},
+			{"entities", s.scene.entities}, {"lights", s.scene.lights},
+			{"particles", s.scene.particles}, {"emitters", s.scene.emitters},
+			{"gpuParticles", s.scene.gpuParticles},
+			{"rigidBodies", s.scene.rigidBodies}, {"audioSources", s.scene.audioSources},
+			{"scripts", s.scene.scripts},
+			{"streamingInFlight", s.scene.streamingInFlight},
+			{"vramUsedMB", s.vramUsedMB}, {"vramBudgetMB", s.vramBudgetMB},
+			{"chunkBuilds", s.meshStream.chunkBuilds}, {"tessBuilds", s.meshStream.tessBuilds},
+			{"tessReleases", s.meshStream.tessReleases}, {"stitchBuilds", s.meshStream.stitchBuilds},
+			{"lodSwitches", s.meshStream.lodSwitches}, {"meshReplaceBytes", s.meshStream.meshReplaceBytes},
+			{"meshUploads", s.meshStream.meshUploads}, {"meshUploadBytes", s.meshStream.meshUploadBytes},
+			{"meshInvalidations", s.meshStream.meshInvalidations}, {"gpuStalls", s.meshStream.gpuStalls},
+			{"blasBuilds", s.meshStream.blasBuilds}, {"blasTris", s.meshStream.blasTris},
+			{"giInstances", s.meshStream.giInstances},
+		};
+		if (!s_allocByFrame.empty())
+		{
+			auto it = std::lower_bound(s_allocByFrame.begin(), s_allocByFrame.end(), f.index,
+			                           [](const auto& e, uint64_t i) { return e.first < i; });
+			if (it != s_allocByFrame.end() && it->first == f.index)
+			{
+				const AllocProbeCounts& a = it->second;
+				jf["stats"]["allocsMain"]     = a.mainAllocs;
+				jf["stats"]["allocBytesMain"] = a.mainBytes;
+				jf["stats"]["freesMain"]      = a.mainFrees;
+				jf["stats"]["allocsOther"]    = a.allocs - a.mainAllocs;
+				jf["stats"]["fileOpsMain"]    = a.mainFileOps;
+				jf["stats"]["fileOpsOther"]   = a.fileOps - a.mainFileOps;
+			}
+		}
+		frames.push_back(std::move(jf));
+	}
+	return frames;
+}
+
+// ── Per-thread timeline (v3) ────────────────────────────────────────────
+// Every lane is summarised (cheap, always useful: "Worker 3 was busy 4% of the
+// capture" is the parallelism verdict). The raw spans are the expensive part —
+// hundreds of thousands over a long capture — so they get a total budget.
+//
+// The budget is spent as a TIME CUTOFF, not as a per-lane quota. The first
+// version wrote lanes in order until the budget ran out, and the main lane ate
+// all of it: a real 4867-frame dump came out with 155k main-thread spans and
+// literally zero on any worker, which reads as an idle thread pool — the exact
+// wrong conclusion, from a lane that was simply never written. Cutting at a
+// shared timestamp instead gives every lane the same shorter window, so the
+// dump is a consistent prefix of the capture rather than an arbitrary subset.
+// Nesting survives for free: a parent starts before its children, so if a child
+// is in, its parent is too.
+// Writes j["threads"] and the thread entries of `summary`; nothing if no lane exists.
+void addThreadTimelines(const EngineProfiler& prof, json& j, json& summary)
+{
+	const std::vector<ProfThreadTimeline> lanes = prof.timelineSnapshot();
+	if (lanes.empty()) return;
+
+	constexpr size_t kMaxDumpSpans = 120000;
+
+	size_t totalSpans = 0;
+	for (const ProfThreadTimeline& lane : lanes) totalSpans += lane.spans.size();
+
+	uint64_t cutoffNs = UINT64_MAX;   // no cutoff = write everything
+	if (totalSpans > kMaxDumpSpans)
+	{
+		std::vector<uint64_t> starts;
+		starts.reserve(totalSpans);
+		for (const ProfThreadTimeline& lane : lanes)
+			for (const ProfThreadSpan& s : lane.spans) starts.push_back(s.startNs);
+		std::nth_element(starts.begin(), starts.begin() + kMaxDumpSpans, starts.end());
+		cutoffNs = starts[kMaxDumpSpans];
+	}
+
+	size_t written = 0, omitted = 0;
+
+	json summaryLanes = json::array();
+	json jthreads     = json::array();
+	for (const ProfThreadTimeline& lane : lanes)
+	{
+		// Busy time = union of depth-0 spans; nested spans are already inside
+		// their parent, so summing every depth would count the same nanosecond
+		// once per level and happily report 300% occupancy.
+		double busyMs = 0.0, deepestMs = 0.0;
+		uint32_t maxDepth = 0;
+		for (const ProfThreadSpan& s : lane.spans)
+		{
+			const double ms = nsToMs(s.endNs - s.startNs);
+			if (s.depth == 0) busyMs += ms;
+			if (s.depth > maxDepth) maxDepth = s.depth;
+			if (ms > deepestMs) deepestMs = ms;
+		}
+		summaryLanes.push_back({ {"thread", lane.label}, {"main", lane.isMain},
+		                         {"spans", lane.spans.size()}, {"busyMs", busyMs},
+		                         {"longestSpanMs", deepestMs}, {"maxDepth", maxDepth},
+		                         {"droppedSpans", lane.dropped} });
+
+		json jspans = json::array();
+		for (const ProfThreadSpan& s : lane.spans)
+		{
+			if (s.startNs >= cutoffNs) { ++omitted; continue; }
+			jspans.push_back({ {"n", s.name}, {"s", s.startNs}, {"e", s.endNs}, {"d", s.depth} });
+			++written;
+		}
+		jthreads.push_back({ {"thread", lane.label}, {"main", lane.isMain},
+		                     {"spans", std::move(jspans)} });
+	}
+	summary["threads"] = summaryLanes;
+	if (omitted > 0)
+	{
+		summary["timelineTruncated"] = omitted;
+		summary["timelineCutoffNs"]  = cutoffNs;
+		summary["timelineNote"] =
+			std::string("timeline truncated at ") +
+			std::to_string(static_cast<double>(cutoffNs) * 1e-6) + " ms into the capture (" +
+			std::to_string(written) + " spans kept, " + std::to_string(omitted) +
+			" omitted, budget " + std::to_string(kMaxDumpSpans) +
+			"). EVERY lane is cut at the same timestamp, so threads[] is a consistent "
+			"prefix of the capture, not a subset of lanes. summary.threads covers the "
+			"FULL capture — use it for totals.";
+		HE_LOG_WARN(Profiler, "%s",
+		            ("Profiler: timeline truncated in dump at " +
+		             std::to_string(static_cast<double>(cutoffNs) * 1e-6) + " ms — " +
+		             std::to_string(omitted) + " spans omitted").c_str());
+	}
+	const size_t droppedLive = prof.timelineDroppedSpans();
+	if (droppedLive > 0) summary["timelineDroppedAtCapture"] = droppedLive;
+	j["threads"] = std::move(jthreads);
+}
 } // namespace
 
 std::string EngineProfiler::doStopDump()
@@ -512,29 +737,8 @@ std::string EngineProfiler::dumpNow()
 	if (m_dumpsDir.empty())
 		m_dumpsDir = GlobalState::getInstance().getDumpsDir();
 
-	// Per-scope and per-GPU-pass summaries across the whole capture.
-	// CPU scopes are summarised by HE::Prof::aggregateScopes below (it adds self
-	// time and p95, which this Stat cannot express); only the GPU passes still use it.
-	std::map<std::string, Stat> gpuSummary;
-	std::map<std::string, bool> gpuApprox;   // a pass name is approx if any sample was
-	std::map<std::string, uint64_t> gpuModeCounts;  // which GPU-timing path produced each frame
-	Stat cpuFrame, gpuFrame, delta;
-	Stat passOverlap;   // Σ(exact passes)/gpuFrameMs per frame; >1 ⇒ spans overlap (TBDR)
-	for (const auto& f : m_frames)
-	{
-		cpuFrame.add(f.cpuFrameMs);
-		delta.add(f.deltaMs);
-		if (f.gpuFrameMs >= 0.0) gpuFrame.add(f.gpuFrameMs);
-		if (f.gpuTimingMode && f.gpuTimingMode[0]) gpuModeCounts[f.gpuTimingMode]++;
-		double sumExact = 0.0; bool anyExact = false;
-		for (const auto& g : f.gpuPasses)
-		{
-			gpuSummary[g.name].add(g.ms);
-			if (g.approx) gpuApprox[g.name] = true;
-			else { sumExact += g.ms; anyExact = true; }
-		}
-		if (f.gpuFrameMs > 0.0 && anyExact) passOverlap.add(sumExact / f.gpuFrameMs);
-	}
+	const FrameAggregates agg = aggregateFrameStats(m_frames);
+	const auto& [gpuSummary, gpuApprox, gpuModeCounts, cpuFrame, gpuFrame, delta, passOverlap] = agg;
 
 	json j;
 	j["tool"]    = "HorizonEngine EngineProfiler";
@@ -668,94 +872,7 @@ std::string EngineProfiler::dumpNow()
 		summary["gpuPasses"] = gpuPasses;
 	}
 
-	// ── Per-thread timeline (v3) ────────────────────────────────────────────
-	// Every lane is summarised (cheap, always useful: "Worker 3 was busy 4% of the
-	// capture" is the parallelism verdict). The raw spans are the expensive part —
-	// hundreds of thousands over a long capture — so they get a total budget.
-	//
-	// The budget is spent as a TIME CUTOFF, not as a per-lane quota. The first
-	// version wrote lanes in order until the budget ran out, and the main lane ate
-	// all of it: a real 4867-frame dump came out with 155k main-thread spans and
-	// literally zero on any worker, which reads as an idle thread pool — the exact
-	// wrong conclusion, from a lane that was simply never written. Cutting at a
-	// shared timestamp instead gives every lane the same shorter window, so the
-	// dump is a consistent prefix of the capture rather than an arbitrary subset.
-	// Nesting survives for free: a parent starts before its children, so if a child
-	// is in, its parent is too.
-	const std::vector<ProfThreadTimeline> lanes = timelineSnapshot();
-	if (!lanes.empty())
-	{
-		constexpr size_t kMaxDumpSpans = 120000;
-
-		size_t totalSpans = 0;
-		for (const ProfThreadTimeline& lane : lanes) totalSpans += lane.spans.size();
-
-		uint64_t cutoffNs = UINT64_MAX;   // no cutoff = write everything
-		if (totalSpans > kMaxDumpSpans)
-		{
-			std::vector<uint64_t> starts;
-			starts.reserve(totalSpans);
-			for (const ProfThreadTimeline& lane : lanes)
-				for (const ProfThreadSpan& s : lane.spans) starts.push_back(s.startNs);
-			std::nth_element(starts.begin(), starts.begin() + kMaxDumpSpans, starts.end());
-			cutoffNs = starts[kMaxDumpSpans];
-		}
-
-		size_t written = 0, omitted = 0;
-
-		json summaryLanes = json::array();
-		json jthreads     = json::array();
-		for (const ProfThreadTimeline& lane : lanes)
-		{
-			// Busy time = union of depth-0 spans; nested spans are already inside
-			// their parent, so summing every depth would count the same nanosecond
-			// once per level and happily report 300% occupancy.
-			double busyMs = 0.0, deepestMs = 0.0;
-			uint32_t maxDepth = 0;
-			for (const ProfThreadSpan& s : lane.spans)
-			{
-				const double ms = nsToMs(s.endNs - s.startNs);
-				if (s.depth == 0) busyMs += ms;
-				if (s.depth > maxDepth) maxDepth = s.depth;
-				if (ms > deepestMs) deepestMs = ms;
-			}
-			summaryLanes.push_back({ {"thread", lane.label}, {"main", lane.isMain},
-			                         {"spans", lane.spans.size()}, {"busyMs", busyMs},
-			                         {"longestSpanMs", deepestMs}, {"maxDepth", maxDepth},
-			                         {"droppedSpans", lane.dropped} });
-
-			json jspans = json::array();
-			for (const ProfThreadSpan& s : lane.spans)
-			{
-				if (s.startNs >= cutoffNs) { ++omitted; continue; }
-				jspans.push_back({ {"n", s.name}, {"s", s.startNs}, {"e", s.endNs}, {"d", s.depth} });
-				++written;
-			}
-			jthreads.push_back({ {"thread", lane.label}, {"main", lane.isMain},
-			                     {"spans", std::move(jspans)} });
-		}
-		summary["threads"] = summaryLanes;
-		if (omitted > 0)
-		{
-			summary["timelineTruncated"] = omitted;
-			summary["timelineCutoffNs"]  = cutoffNs;
-			summary["timelineNote"] =
-				std::string("timeline truncated at ") +
-				std::to_string(static_cast<double>(cutoffNs) * 1e-6) + " ms into the capture (" +
-				std::to_string(written) + " spans kept, " + std::to_string(omitted) +
-				" omitted, budget " + std::to_string(kMaxDumpSpans) +
-				"). EVERY lane is cut at the same timestamp, so threads[] is a consistent "
-				"prefix of the capture, not a subset of lanes. summary.threads covers the "
-				"FULL capture — use it for totals.";
-			HE_LOG_WARN(Profiler, "%s",
-			            ("Profiler: timeline truncated in dump at " +
-			             std::to_string(static_cast<double>(cutoffNs) * 1e-6) + " ms — " +
-			             std::to_string(omitted) + " spans omitted").c_str());
-		}
-		const size_t droppedLive = timelineDroppedSpans();
-		if (droppedLive > 0) summary["timelineDroppedAtCapture"] = droppedLive;
-		j["threads"] = std::move(jthreads);
-	}
+	addThreadTimelines(*this, j, summary);
 
 	j["summary"] = summary;
 
@@ -777,62 +894,7 @@ std::string EngineProfiler::dumpNow()
 		j["frameMarks"] = std::move(marks);
 	}
 
-	// Per-frame detail.
-	json frames = json::array();
-	for (const auto& f : m_frames)
-	{
-		json jf;
-		jf["i"]       = f.index;
-		jf["wallMs"]  = f.wallMs;
-		jf["deltaMs"] = f.deltaMs;
-		jf["cpuMs"]   = f.cpuFrameMs;
-		if (f.gpuFrameMs >= 0.0) jf["gpuMs"] = f.gpuFrameMs;
-		if (f.gpuTimingMode && f.gpuTimingMode[0]) jf["gpuMode"] = f.gpuTimingMode;
-		json scopes = json::array();
-		for (const auto& s : f.scopes)
-			scopes.push_back({ {"n", s.name}, {"ms", s.ms}, {"d", s.depth} });
-		jf["cpu"] = scopes;
-		if (!f.gpuPasses.empty())
-		{
-			json gp = json::array();
-			for (const auto& g : f.gpuPasses)
-			{
-				json e = { {"n", g.name}, {"ms", g.ms} };
-				if (g.approx) e["approx"] = true;
-				gp.push_back(std::move(e));
-			}
-			jf["gpu"] = gp;
-		}
-		const auto& s = f.stats;
-		jf["stats"] = {
-			{"draws", s.drawCalls}, {"tris", s.triangles},
-			{"visible", s.visibleObjects}, {"total", s.totalObjects},
-			{"entities", s.scene.entities}, {"lights", s.scene.lights},
-			{"particles", s.scene.particles}, {"emitters", s.scene.emitters},
-			{"gpuParticles", s.scene.gpuParticles},
-			{"rigidBodies", s.scene.rigidBodies}, {"audioSources", s.scene.audioSources},
-			{"scripts", s.scene.scripts},
-			{"streamingInFlight", s.scene.streamingInFlight},
-			{"vramUsedMB", s.vramUsedMB}, {"vramBudgetMB", s.vramBudgetMB},
-		};
-		if (!s_allocByFrame.empty())
-		{
-			auto it = std::lower_bound(s_allocByFrame.begin(), s_allocByFrame.end(), f.index,
-			                           [](const auto& e, uint64_t i) { return e.first < i; });
-			if (it != s_allocByFrame.end() && it->first == f.index)
-			{
-				const AllocProbeCounts& a = it->second;
-				jf["stats"]["allocsMain"]     = a.mainAllocs;
-				jf["stats"]["allocBytesMain"] = a.mainBytes;
-				jf["stats"]["freesMain"]      = a.mainFrees;
-				jf["stats"]["allocsOther"]    = a.allocs - a.mainAllocs;
-				jf["stats"]["fileOpsMain"]    = a.mainFileOps;
-				jf["stats"]["fileOpsOther"]   = a.fileOps - a.mainFileOps;
-			}
-		}
-		frames.push_back(std::move(jf));
-	}
-	j["frames"] = frames;
+	j["frames"] = buildFrameDetails(m_frames);
 
 	fs::path out = fs::path(m_dumpsDir) / ("profile_" + timestampStamp() + ".json");
 	std::error_code ec;

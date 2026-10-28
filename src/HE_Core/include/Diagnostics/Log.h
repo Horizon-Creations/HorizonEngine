@@ -147,15 +147,15 @@ namespace HE::Log
 	// ── Records + sinks ──────────────────────────────────────────────────────
 	struct Record
 	{
-		Level       level;
-		Cat         category;
 		const char* message;   // formatted, NUL-terminated, never null
 		const char* file;      // may be null
-		int         line;      // 0 when unknown
 		const char* function;  // may be null
 		const char* thread;    // never null
 		uint64_t    frame;
 		int64_t     unixMillis;
+		int         line;      // 0 when unknown
+		Level       level;
+		Cat         category;
 	};
 
 	// Additional consumers (editor console, play-session capture, telemetry).

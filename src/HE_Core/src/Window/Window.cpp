@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <SDL3/SDL.h>
 #include "Diagnostics/Log.h"
+#include "Platform/BuildProfile.h"   // HE_FEATURE_TEST_HOOKS: the HE_HIDDEN_WINDOW family
 #include <stdexcept>
 
 namespace HE
@@ -64,6 +66,11 @@ namespace
 
     bool hiddenWindowRequested()
     {
+#if !HE_FEATURE_TEST_HOOKS
+        // A release build has no headless mode: a player's environment must not
+        // be able to hide the game's window.
+        return false;
+#else
         static const bool kHidden = []
         {
             const char* hw = std::getenv("HE_HIDDEN_WINDOW");
@@ -83,6 +90,7 @@ namespace
             return hidden;
         }();
         return kHidden;
+#endif
     }
 
     uint64_t backgroundFrameIntervalFromEnv(const char* backgroundFps,
@@ -106,15 +114,23 @@ namespace
             char* end = nullptr;
             const double v = std::strtod(backgroundFps, &end);
             // "0" is the off switch; garbage or a negative rate is not a
-            // request for anything, so it keeps the default.
+            // request for anything, so it keeps the default. A rate so small
+            // that the interval does not fit a uint64 is no request either: the
+            // cast below would be undefined.
             if (end != backgroundFps && v == 0.0) return 0;
-            if (end != backgroundFps && v > 0.0) fps = v;
+            if (end != backgroundFps && v > 0.0 &&
+                1.0e9 / v < static_cast<double>(std::numeric_limits<uint64_t>::max()))
+                fps = v;
         }
         return static_cast<uint64_t>(1.0e9 / fps);
     }
 
     uint64_t backgroundFrameInterval()
     {
+#if !HE_FEATURE_TEST_HOOKS
+        // No overrides in a release build, so always the default throttle.
+        return backgroundFrameIntervalFromEnv(nullptr, nullptr, nullptr, nullptr);
+#else
         static const uint64_t kInterval = []
         {
             const char* bg = std::getenv("HE_BACKGROUND_FPS");
@@ -135,6 +151,7 @@ namespace
             return ns;
         }();
         return kInterval;
+#endif
     }
 
     uint64_t backgroundThrottleDelayNs(uint64_t intervalNs, bool inBackground,
@@ -144,11 +161,19 @@ namespace
         return elapsedNs < intervalNs ? intervalNs - elapsedNs : 0;
     }
 
-    Window::Window(const WindowProps& props, bool isPrimary) { m_isPrimary = isPrimary; Init(props); }
+    Window::Window(const WindowProps& props, bool isPrimary)
+    {
+        m_isPrimary = isPrimary;
+        // A throwing constructor never runs the destructor, so a half-built
+        // window (and the primary's SDL_Init) would be left behind.
+        try { Init(props); }
+        catch (...) { Shutdown(); throw; }
+    }
     Window::~Window()                        { Shutdown(); }
 
-    void Window::Init(const WindowProps& props)
+    void Window::Init(const WindowProps& requested)
     {
+        WindowProps props = requested;
         m_width  = props.width;
         m_height = props.height;
         m_api    = props.api;
@@ -233,10 +258,14 @@ namespace
         // into that too-small window. Multiplying by the content scale is a
         // no-op on the platforms that need none and the whole fix on the two
         // that do.
+        // SDL is up, so the displays can be asked: the owner may swap in a
+        // remembered rectangle now (WindowProps::resolveRect).
+        if (m_isPrimary && props.resolveRect) props.resolveRect(props);
+
         const float contentScale = m_isPrimary
             ? SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()) : 1.0f;
         uint32_t createW = props.width, createH = props.height;
-        if (contentScale > 1.0f)
+        if (contentScale > 1.0f && !props.restoreRect)
         {
             createW = static_cast<uint32_t>(props.width  * contentScale + 0.5f);
             createH = static_cast<uint32_t>(props.height * contentScale + 0.5f);
@@ -269,6 +298,15 @@ namespace
             throw std::runtime_error("SDL_CreateWindow failed: " + std::string(SDL_GetError()));
         }
 
+        if (props.restoreRect)
+        {
+            if (props.restorePosition) SDL_SetWindowPosition(m_window, props.x, props.y);
+            else                       SDL_SetWindowPosition(m_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+            // Still hidden here (the splash is up), so the maximized frame is
+            // there when the window first appears instead of animating open.
+            if (props.startMaximized) SDL_MaximizeWindow(m_window);
+        }
+
         // m_width/m_height are the logical (points) size — asked for above, but
         // read back rather than assumed: the scaling and the clamp both changed
         // it, and a window manager may have had a further opinion. The drawable
@@ -286,6 +324,7 @@ namespace
         // blurry" or "the viewport is half the window" reports; the display scale
         // beside it is the first thing to check for "everything is tiny", which is
         // the same report one platform further along.
+        const SDL_DisplayID display = SDL_GetDisplayForWindow(m_window);
         HE_LOG_INFO(Window, "%s window created: %ux%u logical, %ux%u pixels, display scale %.2f, "
                             "backend %d, vsync %s, display '%s'",
                     m_isPrimary ? "Primary" : "Secondary", m_width, m_height,
@@ -293,8 +332,7 @@ namespace
                     static_cast<double>(SDL_GetWindowDisplayScale(m_window)),
                     static_cast<int>(props.api),
                     props.vsync ? "on" : "off",
-                    SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window))
-                        ? SDL_GetDisplayName(SDL_GetDisplayForWindow(m_window)) : "?");
+                    SDL_GetDisplayName(display) ? SDL_GetDisplayName(display) : "?");
 
         if (props.api == RendererBackend::OpenGL)
         {

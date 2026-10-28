@@ -31,6 +31,31 @@ FILE* hiddenPopen(const std::string& line);
 // Like _pclose: closes the stream, waits for the shell and returns its exit code.
 int hiddenPclose(FILE* stream);
 
+// What a hiddenPopen shell and everything it started is doing right now (a
+// package manager hands the work to installers of its own, so the shell itself
+// says nothing). `activity` changes whenever the tree does something measurable
+// (CPU time, I/O, a process appearing or going away); elevated children show up
+// by name only, their counters are not readable from here.
+struct HiddenTreeStats
+{
+	int                processCount = 0;
+	unsigned long long activity     = 0;
+	std::string        names;          // "winget.exe, vs_installer.exe" (the shell itself left out)
+};
+bool hiddenTreeStats(FILE* stream, HiddenTreeStats& out);
+
+// Ends the shell and every process below it (best effort: a process of a higher
+// integrity level refuses). Safe from any thread while `stream` is open; the
+// reader blocked on it sees EOF once nothing holds the pipe any more.
+void hiddenKillTree(FILE* stream);
+
+// A handle on the CALLING thread that another thread can use to wake it out of a
+// blocking read on a hiddenPopen stream (hiddenInterruptRead), once the processes
+// holding the pipe are gone or refuse to die. Close it with hiddenCloseThread.
+void* hiddenThreadHandle();
+void  hiddenInterruptRead(void* thread);
+void  hiddenCloseThread(void* thread);
+
 // Like std::system(line), but with stdin, stdout and stderr on NUL. Only for
 // lines whose output is discarded anyway (">NUL 2>&1"). -1 if it could not start.
 int hiddenSystem(const std::string& line);

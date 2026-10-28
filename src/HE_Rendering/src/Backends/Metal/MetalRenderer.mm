@@ -4,8 +4,10 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/ClipSpace.h>       // HE::kMetalClipFix
+#include <HorizonRendering/GiCasterRange.h>   // HE::GiCasterFilter: which casters enter the GI accel
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
+#include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
 #include <HorizonRendering/LightPacking.h>    // HE::BuildPackedLightArray / BuildMaskedLocalLights
 #include <HorizonRendering/WeatherParticleSeed.h> // shared rain/snow pool seeding
 #include <HorizonRendering/WorldPreviewGrid.h>    // shared world-preview ground + grid
@@ -16,6 +18,7 @@
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
 #include <HorizonRendering/GiInstanceSurface.h> // shared GI-hit surface resolution
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <Renderer/UIFont.h>             // shared baked UI font atlas
 #include <material/PreviewMesh.h> // shared preview primitives (sphere/cube/plane)
 #include <Diagnostics/Logger.h>
@@ -1745,9 +1748,12 @@ constant float kTrains[12] = { @TRAINS@ };
 constant int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
 constant float kChopSteep  = 0.05;
 constant float kFocal      = 6.0;    // m the bent light travels to the floor, whatever the real depth
-constant float kGain       = 0.45;   // line brightness per unit of squeeze above 1
-constant float kDark       = 0.6;    // how much of the cells' light the lines take at intensity >= 1
-constant float kCore       = 0.2;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
+constant float kGain       = 0.05;   // line brightness per unit of squeeze above 1
+constant float kMaxLine    = 0.2;    // soft ceiling of a line's light (x sun colour): bright cores bend towards it instead of clipping to white
+constant float kFineScale  = 1.8;    // the whole net this much finer than the water's own wavelengths: real caustics are small filaments, not metre-wide cells
+constant float kTimeScale  = 0.75;   // the net's clock runs this much of the water's own: the lines slid too fast against the swell
+constant float kDark       = 0.3;    // how much of the cells' light the lines take at intensity >= 1
+constant float kCore       = 0.45;    // share of the cap's squeeze a line must pass to light up (Thema 205 step 6)
 
 // The refracted-sun net at P: rgb = light the lines gain, a = share of the scene's light the
 // cells between them lose (float4(0) where there is no net; Thema 205 Schritt 2, the GL twin
@@ -1769,7 +1775,10 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float  cosT = sqrt(max(1.0 - dot(hz, hz), 0.0));
 	float3 Lr   = float3(hz.x, cosT, hz.y);
 	float2 S    = P.xz + hz / max(cosT, 0.1) * depth;
-	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * u.caustics.z), sin(0.37 * S.x - 0.27 * u.caustics.z));
+	// The scene's wind turned the sea from the material's own heading (sun.w, radians): evaluate the
+	// trains in the frame rotated back by it, so they travel that much further round.
+	{ float wc = cos(u.sun.w), ws = sin(u.sun.w); S = float2(wc * S.x + ws * S.y, -ws * S.x + wc * S.y); }
+	S += 1.6 * float2(sin(0.43 * S.y + 0.31 * (u.caustics.z * kTimeScale)), sin(0.37 * S.x - 0.27 * (u.caustics.z * kTimeScale)));
 
 	// Trains 0-2 the engine water's, 3-5 their companions, 6+ the fine chop (GL twin).
 	float  mxx = 0.0, mzz = 0.0, mxz = 0.0;
@@ -1796,8 +1805,8 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 		}
 		float  rad = deg * (3.14159265359 / 180.0);
 		float2 dv  = float2(cos(rad), sin(rad));
-		float  k   = kTwoPi / len * u.caustics.y;
-		float  ph  = k * (dot(dv, S) - spd * u.caustics.z);
+		float  k   = kTwoPi / len * (u.caustics.y * kFineScale);
+		float  ph  = k * (dot(dv, S) - spd * (u.caustics.z * kTimeScale));
 		float  c   = stp * k * sin(ph);
 		float2 dc  = (stp * k * k * cos(ph)) * dv;
 		mxx -= c * dv.x * dv.x;   gxx -= dc * dv.x * dv.x;
@@ -1812,7 +1821,7 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float2 dSx  = dfdx(S);
 	float2 dSy  = dfdy(S);
 	float dDet  = max(abs(dot(gdet, dSx)) + abs(dot(gdet, dSy)),
-	                  10.0 * u.caustics.y * (length(dSx) + length(dSy)));
+	                  10.0 * (u.caustics.y * kFineScale) * (length(dSx) + length(dSy)));
 	float t     = clamp(depth / fadeDepth, 0.0, 1.0);
 	float fade  = (1.0 - t * t * (3.0 - 2.0 * t)) * smoothstep(0.0, 0.15, depth);
 	float capAA = 2.0 / max(dDet, 1e-4);                      // fold lines >= 2 px, else fade (GL twin)
@@ -1822,7 +1831,7 @@ static float4 causticLight(constant UcParams& u, float3 P, float3 dPx, float3 dP
 	float3 n = normalize(cross(dPx, dPy));
 	if (dot(n, u.camSurface.xyz - P) < 0.0) n = -n;
 	float w = u.caustics.x * clamp(dot(n, Lr), 0.0, 1.0) * fade * smoothstep(1.0, 2.0, capAA);
-	float4 net = float4(u.sunColor.rgb * (w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)),
+	float4 net = float4(u.sunColor.rgb * (kMaxLine * (1.0 - exp(-(w * kGain * pow(max(J - 1.0 - kCore * (cap - 1.0), 0.0), 1.5)) / kMaxLine))),
 	                    kDark * min(w, 1.0) * max(1.0 - J, 0.0));
 	return hit ? net : float4(0.0);
 }
@@ -6611,7 +6620,7 @@ struct GIReflParamsCPU
 	glm::vec4 gridOrigin;   // xyz = probe-grid origin, w = spacing
 	glm::vec4 gridCounts;   // xyz = probes per axis, w = probesPerRow
 	glm::vec4 extra;        // x = glossy jitter on, y = mesh data valid, z = SW instance count, w = max bounces
-	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube)
+	glm::vec4 land;         // x = landscape count (capped at kGiMaxLandscapes), y = rays per pixel, z = sky cube baked (EncodeSkyReflCube
 };
 static_assert(sizeof(GIReflParamsCPU) == 2 * 64 + 9 * 16, "must match the MSL GIReflParams layout");
 struct GITemporalParamsCPU
@@ -7118,6 +7127,107 @@ bool MetalRenderer::UploadTransientBytes(const void* data, size_t len, void*& ou
 	void* dst = UploadTransient(len, outBuf, outOffset);
 	if (!dst) return false;
 	if (data && len) std::memcpy(dst, data, len);
+	return true;
+}
+
+// Metal reads a run's instances in place (InstanceSpan) in every instanced pass: the
+// foliage matrices are unfolded once per block (instanceWorldMatrices), not once per pass.
+// HE_INSTANCE_SPANS=0 copies them per pass as before: the A/B switch, same bits either way
+// (RenderSorter::instanceSpansEnabled).
+
+static std::unique_ptr<GeometryPass> MakeMetalGeometryPass()
+{
+	auto pass = std::make_unique<GeometryPass>();
+	pass->setInstanceSpans(RenderSorter::instanceSpansEnabled());
+	return pass;
+}
+
+// Every instance of `spans` (k = 0..total-1 in order) handed to fn(k, world matrix), a
+// foliage-sized run cut into pieces on the job system's workers. The matrices are read in
+// place (instanceWorldMatrices / RenderObject::transform): nothing is unfolded or copied
+// first, the caller writes its per-pass products straight from them.
+template <class Fn>
+static void forSpanInstances(const InstanceSpan* spans, size_t spanCount, size_t total, Fn&& fn,
+                             const char* name)
+{
+	struct Piece { const glm::mat4* src; uint32_t n; size_t pos; };
+	constexpr uint32_t kPiece = 1024;
+	if (total < RenderWorld::kParallelUnfoldMin || !RenderWorld::parallelUnfoldEnabled())
+	{
+		size_t k = 0;
+		for (size_t s = 0; s < spanCount; ++s)
+			for (uint32_t i = 0; i < spans[s].n; ++i, ++k) fn(k, spans[s].src[i]);
+		return;
+	}
+	std::vector<Piece> pieces;
+	pieces.reserve(total / kPiece + spanCount);
+	size_t pos = 0;
+	for (size_t s = 0; s < spanCount; ++s)
+		for (uint32_t from = 0; from < spans[s].n; from += kPiece)
+		{
+			const uint32_t n = std::min(kPiece, spans[s].n - from);
+			pieces.push_back({ spans[s].src + from, n, pos });
+			pos += n;
+		}
+	parallel_for(pieces.size(), [&](size_t p)
+	{
+		const Piece& x = pieces[p];
+		for (uint32_t i = 0; i < x.n; ++i) fn(x.pos + i, x.src[i]);
+	}, name, 1);
+}
+
+// The instances of one depth run, spans (DepthBatchList::useSpans) or the copied list.
+// `serial` for a caller that encodes per instance: those binds belong to this thread.
+template <class Fn>
+static void forBatchInstances(const RenderSorter::DepthBatchList& list, const RenderSorter::DepthBatch& b,
+                              Fn&& fn, const char* name, bool serial = false)
+{
+	const InstanceSpan  whole{ list.useSpans ? nullptr : list.transforms.data() + b.first, b.count };
+	const InstanceSpan* spans = list.useSpans ? list.spans.data() + b.spanFirst : &whole;
+	const size_t        count = list.useSpans ? b.spanCount : 1;
+	if (serial)
+	{
+		size_t k = 0;
+		for (size_t s = 0; s < count; ++s)
+			for (uint32_t i = 0; i < spans[s].n; ++i, ++k) fn(k, spans[s].src[i]);
+		return;
+	}
+	forSpanInstances(spans, count, b.count, fn, name);
+}
+
+bool MetalRenderer::UploadMvpModel(const DrawCall& dc, const glm::mat4& viewProj, void*& outBuf, size_t& outOffset)
+{
+	if (dc.instanceSpans.empty()) return UploadMvpModel(dc.instanceTransforms, viewProj, outBuf, outOffset);
+	const size_t n   = dc.instanceTotal();
+	auto*        dst = static_cast<glm::mat4*>(UploadTransient(n * 2 * sizeof(glm::mat4), outBuf, outOffset));
+	if (!dst) return false;
+	forSpanInstances(dc.instanceSpans.data(), dc.instanceSpans.size(), n,
+		[dst, &viewProj](size_t k, const glm::mat4& m)
+		{
+			dst[2 * k]     = viewProj * m; // mvp
+			dst[2 * k + 1] = m;            // model
+		}, "SceneInstanceMvp");
+	return true;
+}
+
+bool MetalRenderer::UploadMvpModel(const std::vector<glm::mat4>& models, const glm::mat4& viewProj,
+                                   void*& outBuf, size_t& outOffset)
+{
+	// {mvp, model} per instance, the layout of every instanced scene and G-buffer pipeline
+	// (k_instStride), written straight into the ring: the four instanced paths each built
+	// the array on the main thread first and then copied it. A foliage-sized run goes to the
+	// job system's workers (docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 1).
+	const size_t n   = models.size();
+	auto*        dst = static_cast<glm::mat4*>(UploadTransient(n * 2 * sizeof(glm::mat4), outBuf, outOffset));
+	if (!dst) return false;
+	const glm::mat4* src = models.data();
+	auto fill = [dst, src, &viewProj](size_t k)
+	{
+		dst[2 * k]     = viewProj * src[k]; // mvp
+		dst[2 * k + 1] = src[k];            // model
+	};
+	if (n >= RenderWorld::kParallelUnfoldMin && RenderWorld::parallelUnfoldEnabled()) parallel_for(n, fill, "SceneInstanceMvp", 1024);
+	else for (size_t k = 0; k < n; ++k) fill(k);
 	return true;
 }
 
@@ -7948,15 +8058,60 @@ void MetalRenderer::RefineObjectBounds()
 	const RenderObject* objects = m_renderWorld.objects.data();
 	const size_t        count   = m_renderWorld.objects.size();
 	if (walk == m_refinedWalk && objects == m_refinedObjects && count == m_refinedCount) return;
+	HE::AABB sceneBox;
 	{
 		HE_PROFILE_SCOPE_N("Metal::RefineBounds");
+		m_refinedBounds.resize(count);
+		size_t i = 0;
 		for (RenderObject& obj : m_renderWorld.objects)
+		{
 			if (const GpuMesh* mesh = ResolveMesh(obj.meshAssetId))
 				obj.refineWorldBounds(mesh->localBounds);
+			sceneBox.expand(obj.worldBounds);
+			m_refinedBounds[i++] = obj.worldBounds;
+		}
 	}
-	m_refinedWalk    = walk;
-	m_refinedObjects = objects;
-	m_refinedCount   = count;
+	m_refinedWalk     = walk;
+	m_refinedObjects  = objects;
+	m_refinedCount    = count;
+	m_refinedSceneBox = sceneBox;
+}
+
+void MetalRenderer::CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible)
+{
+	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
+	    && m_refinedCount == m_renderWorld.objects.size())
+		m_culler.cull(m_refinedBounds, viewProj, outVisible);
+	else
+		m_culler.cull(m_renderWorld, viewProj, outVisible);
+}
+
+HE::AABB MetalRenderer::FrameSceneBox() const
+{
+	if (m_refinedWalk == m_extractor.fullExtractCount() && m_refinedObjects == m_renderWorld.objects.data()
+	    && m_refinedCount == m_renderWorld.objects.size())
+		return m_refinedSceneBox;
+	HE::AABB sceneBox;
+	for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
+	return sceneBox;
+}
+
+// The point/spot lights whose shadow comes from the GI ray mask instead of the local shadow
+// atlas: the first kMaxMaskedLocalLights non-directional lights of the first kMaxLightWindow
+// lights, the exact scan of HE::BuildMaskedLocalLights (that is the set the mask kernel
+// traces and the shaders index by channel). Indexed by position in rw.lights.
+static std::array<bool, HE::kMaxLightWindow> GiMaskedLocalSlots(const RenderWorld& rw)
+{
+	std::array<bool, HE::kMaxLightWindow> masked{};
+	int local = 0;
+	const int n = std::min(static_cast<int>(rw.lights.size()), HE::kMaxLightWindow);
+	for (int li = 0; li < n; ++li)
+	{
+		if (rw.lights[static_cast<size_t>(li)].type == 0) continue;
+		if (local < HE::kMaxMaskedLocalLights) masked[static_cast<size_t>(li)] = true;
+		++local;
+	}
+	return masked;
 }
 
 void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
@@ -7975,14 +8130,43 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 	ExtractFrame(aspect);
 	// CSM needs a directional light; the local (point/spot) atlas is independent
 	// of it — night scenes with only shadow-casting point lights still render.
-	const bool wantCsm   = m_renderWorld.shadow.enabled;
+	// With GI active the ray-traced sun mask replaces the cascades in every shader that
+	// reads them (fragmentMain: gi.enabled; the material preamble: bound only when
+	// !giActive), so the three cascade passes would render a map nobody samples. This is
+	// the SAME condition the scene passes use for giActive; the GI textures are the ones
+	// the previous frame left, so the first GI frame (still null) renders the cascades.
+	const bool giOwnsSun = m_giEnabled && m_giSupported && m_giShadowResult
+	                    && m_giIrradianceAtlas && m_giVisibilityAtlas;
+	const bool wantCsm   = m_renderWorld.shadow.enabled && !giOwnsSun;
 	const bool wantLocal = m_renderWorld.shadow.localLayerCount > 0 && m_localShadowTex;
 	if ((!wantCsm && !wantLocal) || m_renderWorld.objects.empty()) return;
 	RefineObjectBounds();
 	const int cascades    = wantCsm ? std::clamp(m_renderWorld.shadow.cascadeCount, 1, kCsmCascades) : 0;
 	const int localLayers = wantLocal
 		? std::clamp(m_renderWorld.shadow.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers) : 0;
-	const int totalViews  = cascades + localLayers;
+	// Layers of lights the GI mask shadows need no map (their layer lane is zeroed where the
+	// shaders get it, see GiMaskedLocalSlots); a point light owns six consecutive layers.
+	std::array<bool, ShadowData::kMaxLocalShadowLayers> skipLocal{};
+	if (giOwnsSun)
+	{
+		const std::array<bool, HE::kMaxLightWindow> masked = GiMaskedLocalSlots(m_renderWorld);
+		for (size_t li = 0; li < masked.size() && li < m_renderWorld.lights.size(); ++li)
+		{
+			const LightData& ld = m_renderWorld.lights[li];
+			if (!masked[li] || ld.shadowLayer < 0) continue;
+			const int faces = ld.type == 1 ? 6 : 1;
+			for (int f = 0; f < faces && ld.shadowLayer + f < ShadowData::kMaxLocalShadowLayers; ++f)
+				skipLocal[static_cast<size_t>(ld.shadowLayer + f)] = true;
+		}
+	}
+	// (csm, layer) of every view that is rendered: the cascades, then the local layers.
+	std::vector<std::pair<bool, int>> viewSrc;
+	viewSrc.reserve(static_cast<size_t>(cascades + localLayers));
+	for (int c = 0; c < cascades; ++c) viewSrc.emplace_back(true, c);
+	for (int l = 0; l < localLayers; ++l)
+		if (!skipLocal[static_cast<size_t>(l)]) viewSrc.emplace_back(false, l);
+	const int totalViews  = static_cast<int>(viewSrc.size());
+	if (totalViews == 0) return;
 
 	@autoreleasepool
 	{
@@ -7992,18 +8176,103 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 		const uint32_t shBase = ftBeginMulti("Shadow");
 		int viewIdx = 0;
 
+		// The views (cascades, then local layers) are prepared before any is encoded, in
+		// four steps: (1) cull, sort and form the runs of every view at once, each view on
+		// its own scratch (the culler keeps no state, every view has its own sorter); (2) on
+		// this thread, resolve the meshes (a resolve can load) and reserve the ring slices;
+		// (3) every instanced run's products, all views together, on the workers; (4) encode.
+		// The views used to run one after the other, cull to draw, on this thread (the
+		// frame-parallelism audit's lever 2). Same products, same draw order, same bits.
+		// HE_MTL_PARALLEL_SHADOW=0 prepares the views one after the other: the A/B switch.
+		const int nViews = totalViews;
+		if (m_shadowViews.size() < static_cast<size_t>(nViews)) m_shadowViews.resize(static_cast<size_t>(nViews));
+		for (int v = 0; v < nViews; ++v)
+		{
+			ShadowView& sv = m_shadowViews[static_cast<size_t>(v)];
+			const bool csm = viewSrc[static_cast<size_t>(v)].first;
+			const int  l   = viewSrc[static_cast<size_t>(v)].second;
+			sv.target   = csm ? m_shadowDepthTex : m_localShadowTex;
+			sv.layer    = l;
+			sv.size     = csm ? m_shadowSize : m_localShadowSize;
+			sv.viewProj = csm ? m_renderWorld.shadow.cascadeViewProj[l] : m_renderWorld.shadow.localViewProj[l];
+			sv.skip     = csm ? kNoOwnerEntity : m_renderWorld.shadow.localOwnerEntity[l];
+			sv.batches.useSpans = RenderSorter::instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
+		}
+		auto prepareView = [this](size_t v)
+		{
+			ShadowView& sv = m_shadowViews[v];
+			CullObjects(sv.viewProj, sv.visible);
+			sv.sorter.sortByMesh(m_renderWorld, sv.visible, sv.sorted);
+			RenderSorter::batchDepthCasters(m_renderWorld, sv.sorted, sv.skip, sv.batches);
+		};
+		const bool parallelViews = RenderSorter::parallelShadowViewsEnabled();
+		{
+			HE_PROFILE_SCOPE_N("Metal::ShadowPrepare");
+			// The camera's cull + sort rides along: SSAO and the scene take it from
+			// m_cameraCull instead of doing it after the shadow pass, on this thread. Not
+			// with occlusion culling on: that refine reads the ContentManager, this thread's alone.
+			const bool   warmCamera = parallelViews && !m_occlusionCuller.settings().enabled;
+			const size_t tasks      = static_cast<size_t>(nViews) + (warmCamera ? 1u : 0u);
+			auto task = [&](size_t t)
+			{
+				if (t < static_cast<size_t>(nViews)) prepareView(t);
+				else CullCameraObjects();
+			};
+			if (parallelViews && tasks > 1) parallel_for(tasks, task, "ShadowViews", 1);
+			else for (size_t t = 0; t < tasks; ++t) task(t);
+		}
+		const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
+		struct Fill { const RenderSorter::DepthBatchList* list; const RenderSorter::DepthBatch* b;
+		              glm::mat4* mvp; glm::mat4 lightClip; };
+		std::vector<Fill> fills;
+		for (int v = 0; v < nViews; ++v)
+		{
+			ShadowView& sv = m_shadowViews[static_cast<size_t>(v)];
+			sv.lightClip = HE::kMetalClipFix * sv.viewProj;
+			sv.draws.clear();
+			for (const RenderSorter::DepthBatch& b : sv.batches.batches)
+			{
+				ShadowView::Draw d;
+				d.mesh = ResolveMesh(b.meshAssetId);
+				if (!d.mesh) d.mesh = ResolveMesh(HE::kDefaultCubeMeshId);
+				if (d.mesh && b.count > 1 && canInstance && b.count <= k_maxInstances)
+				{
+					// A slice of the frame's upload ring (UploadTransient), released when this
+					// frame's command buffer completes; filled in step 3.
+					d.mvp = static_cast<glm::mat4*>(UploadTransient(b.count * sizeof(glm::mat4), d.instBuf, d.instOff));
+					if (d.mvp) fills.push_back({ &sv.batches, &b, d.mvp, sv.lightClip });
+					else d.mesh = nullptr;
+				}
+				sv.draws.push_back(d);
+			}
+		}
+		{
+			HE_PROFILE_SCOPE_N("Metal::ShadowInstanceMvp");
+			auto fillOne = [&fills](size_t f)
+			{
+				const Fill& x = fills[f];
+				glm::mat4* mvp = x.mvp;
+				const glm::mat4 lightClip = x.lightClip;
+				forBatchInstances(*x.list, *x.b,
+					[mvp, lightClip](size_t k, const glm::mat4& m) { mvp[k] = lightClip * m; },
+					"ShadowInstanceMvp");
+			};
+			if (parallelViews && fills.size() > 1) parallel_for(fills.size(), fillOne, "ShadowFills", 1);
+			else for (size_t f = 0; f < fills.size(); ++f) fillOne(f);
+		}
+
 		// Depth-only render of every shadow caster into one layer of `target`,
 		// shared by the CSM cascades and the local (point/spot) shadow views.
 		// `skipEntity` keeps ONE entity's geometry out of this layer: the entity the
 		// local light itself sits on. Without it a light authored onto a mesh entity
 		// renders that mesh at z≈0 into its own depth map and shadows itself out
 		// completely. kNoOwnerEntity (every cascade) skips nothing.
-		auto encodeDepthLayer = [&](void* target, int layer, int size, const glm::mat4& viewProj,
-		                            uint32_t skipEntity)
+		auto encodeDepthLayer = [&](const ShadowView& sv)
 		{
-			m_culler.cull(m_renderWorld, viewProj, m_visible);
-			m_sorter.sort(m_renderWorld, m_visible, m_sortedIndices);
-			const glm::mat4 lightClip = HE::kMetalClipFix * viewProj;
+			void* const     target    = sv.target;
+			const int       layer     = sv.layer;
+			const int       size      = sv.size;
+			const glm::mat4 lightClip = sv.lightClip;
 
 			MTLRenderPassDescriptor* sp = [MTLRenderPassDescriptor renderPassDescriptor];
 			sp.depthAttachment.texture       = (__bridge id<MTLTexture>)target;
@@ -8023,23 +8292,18 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 			// Same-mesh runs → one instanced draw each; a run of one stays on the
 			// plain pipeline. HE_MTL_INSTANCING=0 is the same A/B switch as the
 			// scene pass: it sends every run back through the per-caster loop.
-			RenderSorter::batchDepthCasters(m_renderWorld, m_sortedIndices, skipEntity,
-			                                m_shadowBatches);
-			const bool canInstance = m_shadowInstancedPipeline && metalInstancingEnabled();
 			void* boundPipeline = m_shadowPipeline;
-			std::vector<glm::mat4> mvps;
-			for (const RenderSorter::DepthBatch& b : m_shadowBatches.batches)
+			for (size_t i = 0; i < sv.batches.batches.size(); ++i)
 			{
-				const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
-				if (!drawMesh) drawMesh = ResolveMesh(HE::kDefaultCubeMeshId);
-				if (!drawMesh) continue;
-				id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
-				id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
-				NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
-				const glm::mat4* xf = m_shadowBatches.transforms.data() + b.first;
+				const RenderSorter::DepthBatch& b = sv.batches.batches[i];
+				const ShadowView::Draw&         d = sv.draws[i];
+				if (!d.mesh) continue;
+				id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)d.mesh->vertexBuf;
+				id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)d.mesh->indexBuf;
+				NSUInteger    ic   = (NSUInteger)d.mesh->indexCount;
 				[enc setVertexBuffer:vbuf offset:0 atIndex:0];
 
-				if (b.count > 1 && canInstance && b.count <= k_maxInstances)
+				if (d.mvp)
 				{
 					if (boundPipeline != m_shadowInstancedPipeline)
 					{
@@ -8047,9 +8311,6 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 							(__bridge id<MTLRenderPipelineState>)m_shadowInstancedPipeline];
 						boundPipeline = m_shadowInstancedPipeline;
 					}
-					mvps.clear();
-					mvps.reserve(b.count);
-					for (uint32_t k = 0; k < b.count; ++k) mvps.push_back(lightClip * xf[k]);
 					// Once per session: the headless A/B (HE_MTL_INSTANCING=0 vs on)
 					// only proves something if this path actually ran.
 					static bool loggedOnce = false;
@@ -8059,13 +8320,7 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 						HE_LOG_INFO(RHI, "MetalRenderer: shadow pass instanced (first run: %u casters)",
 						            static_cast<unsigned>(b.count));
 					}
-					// A slice of the frame's upload ring (UploadTransient), released
-					// when this frame's command buffer completes.
-					void*  instBuf = nullptr;
-					size_t instOff = 0;
-					if (!UploadTransientBytes(mvps.data(), mvps.size() * sizeof(glm::mat4), instBuf, instOff))
-						continue;
-					[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[enc setVertexBuffer:(__bridge id<MTLBuffer>)d.instBuf offset:d.instOff atIndex:5];
 					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 					                indexCount:ic
 					                 indexType:MTLIndexTypeUInt32
@@ -8080,28 +8335,23 @@ void MetalRenderer::EncodeShadowMap(void* cmdBufPtr, float aspect)
 					[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_shadowPipeline];
 					boundPipeline = m_shadowPipeline;
 				}
-				for (uint32_t k = 0; k < b.count; ++k)
+				forBatchInstances(sv.batches, b, [&](size_t, const glm::mat4& m)
 				{
 					UnlitUniforms u;
-					u.mvp = lightClip * xf[k];
+					u.mvp = lightClip * m;
 					[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 					[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 					                indexCount:ic
 					                 indexType:MTLIndexTypeUInt32
 					               indexBuffer:ibuf
 					         indexBufferOffset:0];
-				}
+				}, "ShadowLoop", /*serial=*/true);
 			}
 			[enc endEncoding];
 		};
 
-		for (int c = 0; c < cascades; ++c)
-			encodeDepthLayer(m_shadowDepthTex, c, m_shadowSize,
-			                 m_renderWorld.shadow.cascadeViewProj[c], kNoOwnerEntity);
-		for (int v = 0; v < localLayers; ++v)
-			encodeDepthLayer(m_localShadowTex, v, m_localShadowSize,
-			                 m_renderWorld.shadow.localViewProj[v],
-			                 m_renderWorld.shadow.localOwnerEntity[v]);
+		for (int v = 0; v < nViews; ++v)
+			encodeDepthLayer(m_shadowViews[static_cast<size_t>(v)]);
 	}
 }
 // ─── Global Illumination (ray-traced DDGI) — acceleration structures ──────────
@@ -8274,10 +8524,11 @@ void MetalRenderer::EncodeGISwAccelBuild()
 			it = m_giSwBlasCache.emplace(id, BuildGISwBlas(id)).first;
 		return it->second;
 	};
+	const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
 	for (RenderObject& obj : m_renderWorld.objects)
 	{
 		// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-		if (!obj.castsShadow || obj.isCluster()) continue;
+		if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
 		// Default-cube fallback — must match the draw loops (see the HW path).
 		GISwBlasRange range = resolveSwRange(obj.meshAssetId);
 		if (!range.valid) range = resolveSwRange(HE::kDefaultCubeMeshId);
@@ -8295,6 +8546,7 @@ void MetalRenderer::EncodeGISwAccelBuild()
 		instances.push_back(inst);
 	}
 	m_giSwInstanceCount = static_cast<int>(instances.size());
+	meshStreamCounters().giInstances.store(static_cast<uint32_t>(m_giSwInstanceCount), std::memory_order_relaxed);
 	if (m_giSwInstanceCount == 0) return;
 
 	@autoreleasepool
@@ -8465,10 +8717,11 @@ void MetalRenderer::EncodeGIAccelBuild(void* cmdBufPtr, float aspect)
 		instanceBaseColor.reserve(m_renderWorld.objects.size() * 2);
 		instanceLandIndex.reserve(m_renderWorld.objects.size());
 
+		const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(m_renderWorld, m_giReflEnabled);   // GiCasterRange.h
 		for (RenderObject& obj : m_renderWorld.objects)
 		{
 			// A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-			if (!obj.castsShadow || obj.isCluster()) continue;
+			if (!obj.castsShadow || obj.isCluster() || !casterFilter.keeps(obj)) continue;
 			// Same fallback the shadow-caster/G-buffer DRAW loops use: an entity
 			// without a resolvable mesh asset renders as the default cube, so it
 			// must occlude as one too — skipping it here made such objects
@@ -8837,6 +9090,7 @@ void MetalRenderer::EncodeGIShadowRays(void* cmdBufPtr, int width, int height)
 		// buffer 5, the loop's own products); a run of one stays on the plain
 		// pipeline. DepthFilter::All: this pass has always drawn every visible
 		// object, billboards included. HE_MTL_INSTANCING=0 is the A/B switch.
+		m_prepassBatches.useSpans = false;   // the GI pre-pass reads the copied list (SSAO below reads spans)
 		RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
 		                             RenderSorter::DepthFilter::All,
 		                             kNoOwnerEntity, m_prepassBatches);
@@ -9286,6 +9540,9 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 	const std::vector<float>& interleaved = *vtx;
 
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+	meshStreamCounters().meshUploadBytes.fetch_add(
+		interleaved.size() * sizeof(float) + asset->indices.size() * sizeof(uint32_t), std::memory_order_relaxed);
 	mesh.vertexBuf  = (void*)CFBridgingRetain(
 		[device newBufferWithBytes:interleaved.data()
 		                    length:interleaved.size() * sizeof(float)
@@ -9401,15 +9658,18 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 // ─── Material override texture ──────────────────────────────────────────────
 // Map a cooked TextureFormat to its Metal pixel format, whether this DEVICE can
 // sample it, and whether it's block-compressed (all block formats here are
-// 16 B / 4x4 so they share the upload byte-math). ASTC needs Apple-family GPUs
-// (Apple Silicon); BC7/BC3 need BC support (Intel/AMD Macs, macOS 11+). These are
+// 4x4 texel blocks; their byte size is textureLevelBytes). ASTC needs Apple-family
+// GPUs (Apple Silicon); the BC formats need BC support (Intel/AMD Macs, macOS 11+;
+// BC1/BC4/BC5 are available wherever BC7/BC3 are, but nothing in the engine ships
+// them to Metal yet: Apple Silicon takes ASTC). These are
 // mutually exclusive on a given GPU — which is why one pak can't serve both Metal
 // and OpenGL on Apple Silicon (see EditorUI texture-compression selection).
 // `srgb` (TextureAsset::srgb, the importer's colour-vs-data decision) selects the
 // _sRGB twin of each format: the sampler then decodes to linear, so colour
 // textures shade in linear light and only the tonemap's gamma encode re-curves
-// them. Every format here has an sRGB variant with identical block/byte layout,
-// so the upload math and the device-support checks are the same for both.
+// them. Every colour format here has an sRGB variant with identical block/byte
+// layout, so the upload math and the device-support checks are the same for both.
+// BC4 / BC5 carry data (single channel, normal XY) and have none.
 static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt, bool srgb,
                                 MTLPixelFormat& outFmt, bool& outIsBlock, bool& outSupported)
 {
@@ -9429,6 +9689,21 @@ static bool metalTexPixelFormat(id<MTLDevice> device, TextureFormat fmt, bool sr
 		return true;
 	case TextureFormat::BC3:
 		outFmt = srgb ? MTLPixelFormatBC3_RGBA_sRGB : MTLPixelFormatBC3_RGBA;
+		outSupported = false;
+		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
+		return true;
+	case TextureFormat::BC1:
+		outFmt = srgb ? MTLPixelFormatBC1_RGBA_sRGB : MTLPixelFormatBC1_RGBA;
+		outSupported = false;
+		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
+		return true;
+	case TextureFormat::BC4:
+		outFmt = MTLPixelFormatBC4_RUnorm;
+		outSupported = false;
+		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
+		return true;
+	case TextureFormat::BC5:
+		outFmt = MTLPixelFormatBC5_RGUnorm;
 		outSupported = false;
 		if (@available(macOS 11.0, *)) outSupported = device.supportsBCTextureCompression;
 		return true;
@@ -9460,13 +9735,12 @@ static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, b
 	if (texture)
 	{
 		// Upload the pre-baked mip chain (level 0 first). Block formats are
-		// compressed (16 B / 4x4 block); RGBA8 is 4 B / texel.
+		// compressed (8 or 16 B / 4x4 block); RGBA8 is 4 B / texel.
 		size_t off = 0; uint32_t lw = (uint32_t)tex->width, lh = (uint32_t)tex->height;
 		for (uint32_t l = 0; l < mips; ++l)
 		{
-			const size_t bpr = isBlock ? ((size_t)((lw + 3) / 4) * 16) : ((size_t)lw * 4);
-			const size_t lvl = isBlock ? ((size_t)((lw + 3) / 4) * ((lh + 3) / 4) * 16)
-			                           : ((size_t)lw * lh * 4);
+			const size_t bpr = isBlock ? ((size_t)((lw + 3) / 4) * textureFormatBlockBytes(tex->format)) : ((size_t)lw * 4);
+			const size_t lvl = textureLevelBytes(tex->format, lw, lh);
 			if (off + lvl > tex->data.size()) break; // truncated payload guard
 			[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l
 			             withBytes:tex->data.data() + off bytesPerRow:bpr];
@@ -9503,24 +9777,26 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 }
 
 // The MTLTextureType2DArray twin of uploadMetalTexture for a sampler2DArray heTexP
-// slot (Thema 158): every slice of a texture-array asset (layers > 1, RGBA8, the
-// HE::buildTextureArray layout — slice-major, each slice with its full chain), or a
-// plain 2D asset as one slice. nullptr = unusable → the caller binds the white array.
+// slot (Thema 158): every slice of a texture-array asset (layers > 1, RGBA8 or a block
+// format, the HE::buildTextureArray layout — slice-major, each slice with its full
+// chain), or a plain 2D asset as one slice. nullptr = unusable (or a block format
+// this GPU can't sample) → the caller binds the white array.
 static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* tex)
 {
-	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0
-	    || tex->format != TextureFormat::RGBA8)
+	if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
+		return nullptr;
+	MTLPixelFormat pf = MTLPixelFormatRGBA8Unorm; bool isBlock = false, supported = false;
+	if (!metalTexPixelFormat(device, tex->format, tex->srgb, pf, isBlock, supported) || !supported)
 		return nullptr;
 	const bool     isArray = tex->layers > 1;
 	if (isArray && !HE::textureArrayPayloadValid(*tex)) return nullptr;
 	const uint32_t layers = isArray ? tex->layers : 1;
 	const uint32_t mips   = tex->mipLevels > 0 ? tex->mipLevels : 1;
 	const uint32_t w = tex->width, h = tex->height;
-	if (tex->data.size() < (size_t)layers * HE::textureArraySliceBytes(w, h, mips)) return nullptr;
+	if (tex->data.size() < (size_t)layers * HE::textureArraySliceBytes(w, h, mips, tex->format)) return nullptr;
 
 	MTLTextureDescriptor* desc = [MTLTextureDescriptor
-		texture2DDescriptorWithPixelFormat:(tex->srgb ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatRGBA8Unorm)
-		width:w height:h mipmapped:(mips > 1)];
+		texture2DDescriptorWithPixelFormat:pf width:w height:h mipmapped:(mips > 1)];
 	desc.textureType      = MTLTextureType2DArray;
 	desc.arrayLength      = layers;
 	desc.mipmapLevelCount = mips;
@@ -9533,9 +9809,10 @@ static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* t
 		uint32_t lw = w, lh = h;
 		for (uint32_t l = 0; l < mips; ++l)
 		{
+			const size_t bpr = isBlock ? (size_t)((lw + 3) / 4) * textureFormatBlockBytes(tex->format) : (size_t)lw * 4;
 			[texture replaceRegion:MTLRegionMake2D(0, 0, lw, lh) mipmapLevel:l slice:s
-			             withBytes:tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l)
-			           bytesPerRow:(size_t)lw * 4 bytesPerImage:(size_t)lw * lh * 4];
+			             withBytes:tex->data.data() + HE::textureArrayOffset(w, h, mips, s, l, tex->format)
+			           bytesPerRow:bpr bytesPerImage:textureLevelBytes(tex->format, lw, lh)];
 			lw = lw > 1 ? (lw >> 1) : 1; lh = lh > 1 ? (lh >> 1) : 1;
 		}
 	}
@@ -9555,6 +9832,10 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return array ? m_whiteArrayTexture : nullptr;
 	if (array) key += "#arr";
+	// A miss is cached (no file open per frame) until files may have appeared: an
+	// EngineContent download landing after this first ask (Thema 210).
+	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
+	                             [](void* tex) { return tex == nullptr; });
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
@@ -11877,8 +12158,7 @@ void MetalRenderer::EncodeCloudShadow(void* cmdBufPtr)
 	// streaming in and out of the scene bounds cannot make the region — and
 	// with it the map's edge fade — breathe.
 	{
-		HE::AABB sceneBox;
-		for (const RenderObject& o : m_renderWorld.objects) sceneBox.expand(o.worldBounds);
+		const HE::AABB sceneBox = FrameSceneBox();
 		const float groundY = sceneBox.isValid() ? sceneBox.min.y : 0.0f;
 		if (std::isnan(m_cloudShadowGroundY)) m_cloudShadowGroundY = groundY;
 		const float dead = cloudH * 0.35f;
@@ -12291,7 +12571,7 @@ void* MetalRenderer::EncodeUnderwaterCaustics(void* cmdBufPtr, void* sourceHdr, 
 	} u{};
 	std::memcpy(u.invViewProj, glm::value_ptr(invViewProj), sizeof(u.invViewProj));
 	u.camSurface[0] = cam.x; u.camSurface[1] = cam.y; u.camSurface[2] = cam.z; u.camSurface[3] = uc.surfaceY;
-	u.sun[0] = towardSun.x; u.sun[1] = towardSun.y; u.sun[2] = towardSun.z;
+	u.sun[0] = towardSun.x; u.sun[1] = towardSun.y; u.sun[2] = towardSun.z; u.sun[3] = uc.causticsWindTurn;
 	u.sunColor[0] = sunColor.r; u.sunColor[1] = sunColor.g; u.sunColor[2] = sunColor.b;
 	u.caustics[0] = uc.causticsIntensity;
 	u.caustics[1] = uc.causticsScale;
@@ -12386,6 +12666,84 @@ void MetalRenderer::DestroySSAOTargets()
 	if (m_reflDepthTex) { CFBridgingRelease(m_reflDepthTex); m_reflDepthTex = nullptr; }
 	m_ssaoResult = nullptr;
 	m_ssaoW = m_ssaoH = 0;
+}
+
+// Deferred frames: the water (and every other translucent graph material) is not in the
+// G-buffer, so the reflection traces only know the opaque surface BEHIND it - a rough lake
+// bed whose roughness and normal say nothing about the water, or nothing at all where no
+// ground lies behind. This fills the forward path's pre-pass pair (oct normal + NDC depth)
+// with the opaque scene from the G-buffer and draws those surfaces over it, depth-tested
+// against the scene, so the traces can start from the water itself exactly as they do in a
+// forward frame. Returns false = nothing drawn.
+bool MetalRenderer::EncodeWaterReflPrepass(void* cmdBufPtr, int width, int height,
+                                           const std::vector<TPDraw>& draws)
+{
+	if (!m_reflPosPipeline || !m_skyDepthState || !m_hdrDepth) return false;
+	size_t graphDraws = 0;
+	for (const TPDraw& d : draws) graphDraws += d.pipeline ? 1 : 0;
+	if (graphDraws == 0) return false;
+	EnsureSSAOTargets(width, height);
+	if (!m_ssaoPosTex || !m_reflNormTex || !m_reflDepthTex) return false;
+	@autoreleasepool
+	{
+		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+		// Start from the opaque scene: the SSR march needs its depth to find what the water
+		// reflects (a pair with only the water in it hits nothing), and the water then
+		// replaces the pixels it covers, which is what a forward frame's pre-pass holds.
+		if (!m_gbColor1 || !m_gbDepthLin || m_gbW != width || m_gbH != height) return false;
+		{
+			id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+			const MTLSize  sz  = MTLSizeMake(width, height, 1);
+			const MTLOrigin org = MTLOriginMake(0, 0, 0);
+			[blit copyFromTexture:(__bridge id<MTLTexture>)m_gbColor1 sourceSlice:0 sourceLevel:0
+			         sourceOrigin:org sourceSize:sz
+			            toTexture:(__bridge id<MTLTexture>)m_reflNormTex destinationSlice:0 destinationLevel:0
+			    destinationOrigin:org];
+			[blit copyFromTexture:(__bridge id<MTLTexture>)m_gbDepthLin sourceSlice:0 sourceLevel:0
+			         sourceOrigin:org sourceSize:sz
+			            toTexture:(__bridge id<MTLTexture>)m_reflDepthTex destinationSlice:0 destinationLevel:0
+			    destinationOrigin:org];
+			[blit endEncoding];
+		}
+		const glm::mat4 view     = m_renderWorld.camera.view;
+		const glm::mat4 viewProj = m_renderWorld.camera.projection * view;
+		MTLRenderPassDescriptor* pp = [MTLRenderPassDescriptor renderPassDescriptor];
+		pp.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_ssaoPosTex;
+		pp.colorAttachments[0].loadAction  = MTLLoadActionClear;
+		pp.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+		pp.colorAttachments[0].clearColor  = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+		pp.colorAttachments[1].texture     = (__bridge id<MTLTexture>)m_reflNormTex;
+		pp.colorAttachments[1].loadAction  = MTLLoadActionLoad;
+		pp.colorAttachments[1].storeAction = MTLStoreActionStore;
+		pp.colorAttachments[2].texture     = (__bridge id<MTLTexture>)m_reflDepthTex;
+		pp.colorAttachments[2].loadAction  = MTLLoadActionLoad;
+		pp.colorAttachments[2].storeAction = MTLStoreActionStore;
+		// The scene's own depth, test only: a water surface behind a wall stays out.
+		pp.depthAttachment.texture     = (__bridge id<MTLTexture>)m_hdrDepth;
+		pp.depthAttachment.loadAction  = MTLLoadActionLoad;
+		pp.depthAttachment.storeAction = MTLStoreActionDontCare;
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:pp];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_reflPosPipeline];
+		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
+		// Back-to-front like the tail itself: nothing writes depth here, so the surface
+		// drawn LAST (the nearest) is the one the traces see.
+		for (const TPDraw& d : draws)
+		{
+			if (!d.pipeline || !d.vbuf || !d.ibuf) continue;
+			SSAOPosUniforms u;
+			u.model     = d.u.model;
+			u.modelView = view * d.u.model;
+			u.mvp       = viewProj * d.u.model;
+			[enc setVertexBuffer:(__bridge id<MTLBuffer>)d.vbuf offset:0 atIndex:0];
+			[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:d.indexCount
+			                 indexType:MTLIndexTypeUInt32
+			               indexBuffer:(__bridge id<MTLBuffer>)d.ibuf indexBufferOffset:d.indexOffset];
+		}
+		[enc endEncoding];
+		++m_counters.draws;
+	}
+	return true;
 }
 
 // View-space position pre-pass → occlusion → blur. Runs its own extract/cull/sort
@@ -12494,12 +12852,12 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 		[enc setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
 		// Same-mesh runs → one instanced draw each; a run of one stays on the
 		// plain pipeline. HE_MTL_INSTANCING=0 is the A/B switch, as everywhere.
+		m_prepassBatches.useSpans = RenderSorter::instanceSpansEnabled();   // read in place, see MakeMetalGeometryPass
 		RenderSorter::batchDepthRuns(m_renderWorld, m_sortedIndices,
 		                             RenderSorter::DepthFilter::AoContributors,
 		                             kNoOwnerEntity, m_prepassBatches);
 		const bool canInstance = instPipeline && metalInstancingEnabled();
 		void* boundPipeline = plainPipeline;
-		std::vector<glm::mat4> xf;
 		for (const RenderSorter::DepthBatch& b : m_prepassBatches.batches)
 		{
 			const GpuMesh* drawMesh = ResolveMesh(b.meshAssetId);
@@ -12508,7 +12866,6 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 			id<MTLBuffer> vbuf = (__bridge id<MTLBuffer>)drawMesh->vertexBuf;
 			id<MTLBuffer> ibuf = (__bridge id<MTLBuffer>)drawMesh->indexBuf;
 			NSUInteger    ic   = (NSUInteger)drawMesh->indexCount;
-			const glm::mat4* models = m_prepassBatches.transforms.data() + b.first;
 			[enc setVertexBuffer:vbuf offset:0 atIndex:0];
 
 			if (b.count > 1 && canInstance && b.count <= k_maxInstances)
@@ -12525,20 +12882,6 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 						[enc setVertexBytes:&cu length:sizeof(cu) atIndex:1];
 					}
 				}
-				xf.clear();
-				if (mrt)
-				{
-					xf.assign(models, models + b.count);
-				}
-				else
-				{
-					xf.reserve(b.count * 2);
-					for (uint32_t k = 0; k < b.count; ++k)
-					{
-						xf.push_back(viewProj * models[k]); // mvp
-						xf.push_back(view * models[k]);     // modelView
-					}
-				}
 				static bool loggedOnce = false; // once per session, like the shadow pass
 				if (!loggedOnce)
 				{
@@ -12546,11 +12889,23 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 					HE_LOG_INFO(RHI, "MetalRenderer: SSAO pre-pass instanced (first run: %u objects, %s)",
 					            static_cast<unsigned>(b.count), mrt ? "MRT" : "plain");
 				}
-				// A slice of the frame's upload ring (UploadTransient).
+				// A slice of the frame's upload ring (UploadTransient), written in place:
+				// the models (MRT) or mvp + modelView per instance, a foliage-sized run on
+				// the workers as in the shadow pass.
 				void*  instBuf = nullptr;
 				size_t instOff = 0;
-				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
-					continue;
+				const size_t per = mrt ? 1 : 2;
+				auto* dst = static_cast<glm::mat4*>(UploadTransient(b.count * per * sizeof(glm::mat4), instBuf, instOff));
+				if (!dst) continue;
+				if (mrt)
+					forBatchInstances(m_prepassBatches, b,
+						[dst](size_t k, const glm::mat4& m) { dst[k] = m; }, "PrepassInstanceModel");
+				else
+					forBatchInstances(m_prepassBatches, b, [dst, &viewProj, &view](size_t k, const glm::mat4& m)
+					{
+						dst[2 * k]     = viewProj * m; // mvp
+						dst[2 * k + 1] = view * m;     // modelView
+					}, "PrepassInstanceMvp");
 				[enc setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
 				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
 				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0
@@ -12563,16 +12918,16 @@ void MetalRenderer::EncodeSSAO(void* cmdBufPtr, int width, int height)
 				[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)plainPipeline];
 				boundPipeline = plainPipeline;
 			}
-			for (uint32_t k = 0; k < b.count; ++k)
+			forBatchInstances(m_prepassBatches, b, [&](size_t, const glm::mat4& m)
 			{
 				SSAOPosUniforms u;
-				u.mvp       = viewProj * models[k];
-				u.modelView = view * models[k];
-				u.model     = models[k];
+				u.mvp       = viewProj * m;
+				u.modelView = view * m;
+				u.model     = m;
 				[enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 				[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:ic
 				                 indexType:MTLIndexTypeUInt32 indexBuffer:ibuf indexBufferOffset:0];
-			}
+			}, "PrepassLoop", /*serial=*/true);
 		}
 		[enc endEncoding];
 		}
@@ -12703,10 +13058,16 @@ void* MetalRenderer::EnsureMaterialArchive()
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool blend, bool gbuffer)
+                                               bool blend, bool gbuffer, bool instanced)
 {
+	// The pak bakes no instanced vertex: the caller loops with the plain PSO.
+	if (instanced && precompiled) return nullptr;
 	if (blend)   key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (gbuffer) key ^= 0x6BB0F6BB0F6BB0F6ULL; // deferred G-buffer variant, own cache slot
+	// `key` also keys the fragment cache below: the instanced twin (2e) gets its
+	// own PSO slot but shares the plain form's fragment.
+	const uint64_t fragKey = key;
+	if (instanced) key ^= 0x1D57A9CEDB0B1E55ULL;
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
@@ -12736,18 +13097,22 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	else
 	{
 		// WPO materials get the graph-generated vertex; everything else the shared one.
-		const auto& v = vertBody.empty()
-			? m_matShaderLib.standardVertex(Backend::Metal)
-			: m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::Metal);
+		// The instanced twin takes the instanced form of either.
+		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+		const auto& v = instanced
+			? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::Metal)
+			                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::Metal))
+			: (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::Metal)
+			                    : m_matShaderLib.customVertex(vh, vertBody, Backend::Metal));
 		// Forward PSOs (opaque + blended) take the clustered heLitP variant —
 		// EncodeScene binds its lists on fragment buffers 4/5/6 and sets the gate;
 		// the material preview binds empty lists with the gate at 0. The G-buffer
 		// variant never shades lights. A variant that fails to compile falls back
 		// to the plain fragment (8-light window), not to a missing material.
-		const auto* f = &m_matShaderLib.fragment(key, fragGlsl, Backend::Metal); // shared, cached MSL
+		const auto* f = &m_matShaderLib.fragment(fragKey, fragGlsl, Backend::Metal); // shared, cached MSL
 		if (m_forwardClustered && !gbuffer)
 		{
-			const auto& fc = m_matShaderLib.fragmentClustered(key, fragGlsl, Backend::Metal);
+			const auto& fc = m_matShaderLib.fragmentClustered(fragKey, fragGlsl, Backend::Metal);
 			if (fc.ok) f = &fc;
 			else HE_LOG_WARN(RHI, "%s", ("MetalRenderer: clustered material variant failed, "
 			                             "using the 8-light window\n" + fc.log).c_str());
@@ -13855,6 +14220,7 @@ void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
 	// The baked sky only changes with the sun direction — skip the rebuild + upload
 	// when it hasn't moved.
 	if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 1e-4f) return;
+	HE_PROFILE_SCOPE_N("Metal::SkyEnvRebake");   // the main-thread cost of one sun move (Thema 238)
 	m_skyEnvSunDir = sunDir; m_skyEnvValid = true;
 	id<MTLTexture> cube = (__bridge id<MTLTexture>)m_skyEnvCube;
 	constexpr int N = 128;
@@ -14177,19 +14543,40 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// selection — must match the planar splits the cascades were fit with.
 	scene.cameraFwd  = glm::vec4(
 		-glm::normalize(glm::vec3(glm::inverse(m_renderWorld.camera.view)[2])), 0.0f);
-	scene.lightCount = std::min(static_cast<int>(m_renderWorld.lights.size()), 8);
-	for (int i = 0; i < scene.lightCount; ++i)
+	// Directionals at intensity 0 (the day-night moon in daytime) are left out: they add
+	// nothing but still pay the cascade filter per pixel. Only directionals are skipped,
+	// so the order of the point/spot lights (GI local-mask channels) is untouched. If that
+	// leaves no light at all (overcast: the sun is at 0 too) the first one stays, because
+	// lightCount == 0 means "unlit scene" to the shader and switches to the headlight.
+	// Lights the GI mask shadows get no atlas layer (-1) while the mask is live: the mask
+	// is the only shadow source for them, so the fragment shader skips the PCF taps.
+	const std::array<bool, HE::kMaxLightWindow> giMasked =
+		giActive ? GiMaskedLocalSlots(m_renderWorld) : std::array<bool, HE::kMaxLightWindow>{};
+	auto putLight = [&](const LightData& l, bool maskShadowed)
 	{
-		const LightData& l = m_renderWorld.lights[i];
+		const int i = scene.lightCount++;
 		scene.lights[i].posType        = glm::vec4(l.position,  static_cast<float>(l.type));
 		scene.lights[i].dirSpot        = glm::vec4(l.direction, l.spotAngleCos);
 		scene.lights[i].colorIntensity = glm::vec4(l.color,     l.intensity);
 		// params.y = local shadow atlas base layer; force -1 (no shadow) when the
 		// atlas texture doesn't exist so the shader never samples an unbound layer.
 		scene.lights[i].params         = glm::vec4(l.range,
-		                                           m_localShadowTex ? static_cast<float>(l.shadowLayer) : -1.0f,
+		                                           (m_localShadowTex && !maskShadowed)
+		                                               ? static_cast<float>(l.shadowLayer) : -1.0f,
 		                                           0.0f, 0.0f);
+	};
+	scene.lightCount = 0;
+	// Only the first kMaxLightWindow lights are ever admitted (the window the GI mask scan and
+	// the cluster builder use), so a dropped dark directional never lets a ninth light in.
+	const int lightWindow = std::min(static_cast<int>(m_renderWorld.lights.size()), HE::kMaxLightWindow);
+	for (int li = 0; li < lightWindow; ++li)
+	{
+		const LightData& l = m_renderWorld.lights[static_cast<size_t>(li)];
+		if (l.type == 0 && l.intensity <= 0.0f) continue;
+		putLight(l, giMasked[static_cast<size_t>(li)]);
 	}
+	if (scene.lightCount == 0 && !m_renderWorld.lights.empty())
+		putLight(m_renderWorld.lights.front(), false);
 	{
 		const ShadowData& sh = m_renderWorld.shadow;
 		const int nl = std::clamp(sh.localLayerCount, 0, ShadowData::kMaxLocalShadowLayers);
@@ -14405,7 +14792,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// state (pipeline, lights, camera) is set up above and the meshes are
 	// resolved by UUID here, exactly as the immediate loop used to.
 	if (!deferred && m_renderGraph.empty())
-		m_renderGraph.addPass(std::make_unique<GeometryPass>());
+		m_renderGraph.addPass(MakeMetalGeometryPass());
 
 	// Per-pass sink: bind the pass's target, then replay its draws. Today the
 	// only pass renders to the backbuffer (the active scene encoder); offscreen
@@ -14432,6 +14819,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// only re-bind on an actual change (draws arrive sorted, so this is rare).
 		void*     cMaterialPipeline      = nullptr;
 		void*     cMaterialPipelineBlend = nullptr; // alpha-blended variant (transparency pass)
+		// Instanced twin (Thema 182, 2e): built on the material's first batch, not
+		// on sight. The sources are kept for that; a baked variant has no twin.
+		void*     cMaterialPipelineInst  = nullptr; bool cMaterialInstTried = false;
+		uint64_t  cShKey = 0; std::string cShFrag, cShVert; bool cShBaked = false;
 		bool      cMaterialWpo           = false;   // custom WPO vertex → vertex-stage binds
 		void*     boundPipeline     = defaultPipeline;
 		const std::vector<float>* cMaterialParams = nullptr; // HeParams data (buffer 2)
@@ -14458,6 +14849,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// own cross-compiled pipeline (cached by source hash); else the default.
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
+				cMaterialPipelineInst = nullptr; cMaterialInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
@@ -14474,6 +14866,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
 						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						cShKey = shKey; cShFrag = shFrag; cShVert = shVert; cShBaked = pre != nullptr;
 						// Translucent-routed materials additionally need the alpha-blended
 						// pipeline variant for the transparency pass. Built unconditionally
 						// (not gated on this material's own opacity): a per-instance tint
@@ -14560,7 +14953,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// above, only mvp/model differ per instance. Without this only dc.transform drew
 			// and every OTHER copy of an identical mesh vanished (the other backends already
 			// iterate instanceTransforms).
-			auto drawInstance = [&](const glm::mat4& xform)
+			// With `instPso` (2e) the same binds draw the whole batch: the material's
+			// instanced PSO, {mvp, model} per instance at vertex buffer 5 (instBuf),
+			// `instCount` instances in one call. Opaque only — the caller checks.
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
@@ -14569,7 +14967,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				// resolves the material×instance-tint product itself above, so the
 				// shared threshold is applied to that instead of RenderSorter::
 				// isTransparent (which re-derives it from a DrawCall).
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -14589,7 +14987,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 				// M1: switch to this material's cross-compiled pipeline if it has one,
 				// else the default PBR pipeline. Re-bound only on a real change.
-				void* wantPipeline = cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipeline ? cMaterialPipeline : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -14652,6 +15051,19 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -14665,7 +15077,35 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// once per DrawCall because every input to it is constant over the batch —
 			// that is exactly the condition under which GeometryPass batched at all.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
-			const size_t instCount = dc.instanceTransforms.size();
+			const size_t instCount = dc.instanceTotal();   // spans or copies (GeometryPass::setInstanceSpans)
+			// A graph-material batch (2e): the same {mvp, model} array, drawn with
+			// the material's instanced PSO and every bind of drawInstance. Built on
+			// the material's first batch; null (baked variant, failed build,
+			// HE_GRAPH_INSTANCING=0) keeps the per-instance loop below.
+			const bool graphBatch = instCount > 0 && cMaterialPipeline
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances && !cShBaked
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialInstTried)
+			{
+				cMaterialInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert, nullptr,
+				                                                   /*blend=*/false, /*gbuffer=*/false,
+				                                                   /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineInst)
+			{
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadMvpModel(dc, viewProj, instBuf, instOff))
+				{
+					drawInstance(dc.firstInstance(), cMaterialPipelineInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_sceneInstancedPipeline
@@ -14687,19 +15127,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						(__bridge id<MTLRenderPipelineState>)m_sceneInstancedPipeline];
 					boundPipeline = m_sceneInstancedPipeline;
 				}
-				std::vector<glm::mat4> xf;
-				xf.reserve(instCount * 2);
-				for (const glm::mat4& t : dc.instanceTransforms)
-				{
-					xf.push_back(viewProj * t); // mvp
-					xf.push_back(t);            // model
-				}
 				// A slice of the frame's upload ring (UploadTransient): released by
 				// the frame command buffer's completion handler, so nothing to
 				// hand-synchronise. Outside EncodeFrame (previews) a fresh buffer.
 				void*  instBuf = nullptr;
 				size_t instOff = 0;
-				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				if (!UploadMvpModel(dc, viewProj, instBuf, instOff))
 					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
@@ -14715,11 +15148,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3)
 				                 * static_cast<uint32_t>(instCount);
 			}
-			else if (dc.instanceTransforms.empty())
+			else if (instCount == 0)
 				drawInstance(dc.transform);
 			else
-				for (const glm::mat4& t : dc.instanceTransforms)
-					drawInstance(t);
+				dc.forEachInstance([&](const glm::mat4& t) { drawInstance(t); });
 		}
 	});
 	if (!deferred) wire(false);
@@ -14856,6 +15288,13 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// texture is bound this frame.
 	HE::FillMaterialLightWindow(m_renderWorld, matLight,
 	                            /*localShadowsActive=*/m_localShadowTex != nullptr);
+	// The lights the GI ray mask shadows take it as their only shadow source: no atlas layer.
+	if (giActive)
+	{
+		const std::array<bool, HE::kMaxLightWindow> masked = GiMaskedLocalSlots(m_renderWorld);
+		for (size_t li = 0; li < masked.size(); ++li)
+			if (masked[li]) matLight.lightParams[li][1] = 0.0f;
+	}
 	HE::FillMaterialWind(GetEnvironment(), matLight); // Wind / Wind Sway nodes, next to Time
 	HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 	HE::FillMaterialWater(GetWaterRipples(), matLight); // Water Ripple node: the rings the physics raised
@@ -14958,9 +15397,15 @@ HE::ClusterLightBuild MetalRenderer::BuildFrameClusterLights() const
 	// scan, but only while the mask is actually produced this frame.
 	const bool giMasksValid = m_giEnabled && m_giSupported && m_giShadowResult
 	                       && m_giIrradianceAtlas && m_giVisibilityAtlas;
-	return HE::BuildClusterLights(m_renderWorld,
+	HE::ClusterLightBuild build = HE::BuildClusterLights(m_renderWorld,
 	                              /*localShadowsActive=*/m_localShadowTex != nullptr,
 	                              giMasksValid);
+	// A light with a mask channel is shadowed by the ray mask alone: zero its atlas layer lane
+	// (the 4th vec4 of each light is {range, layer + 1, channel + 1, 0}).
+	if (giMasksValid)
+		for (size_t k = 3; k < build.lights.size(); k += 4)
+			if (build.lights[k].z > 0.5f) build.lights[k].y = 0.0f;
+	return build;
 }
 
 void MetalRenderer::BindClusterBuffers(void* renderEncoder, const HE::ClusterLightBuild& build)
@@ -15006,7 +15451,9 @@ void MetalRenderer::EncodeClusterData(void* renderEncoder, const HE::ClusterLigh
 	int nDir = 0;
 	for (const LightData& l : m_renderWorld.lights)
 	{
-		if (l.type != 0 || nDir >= 8) continue;
+		// A directional at intensity 0 (the day-night moon in daytime) adds nothing but
+		// still pays the cascade filter, the cloud-shadow lookup and the specular pow.
+		if (l.type != 0 || nDir >= 8 || l.intensity <= 0.0f) continue;
 		matLight.lightPos[nDir][0] = l.position.x;
 		matLight.lightPos[nDir][1] = l.position.y;
 		matLight.lightPos[nDir][2] = l.position.z;
@@ -15591,10 +16038,12 @@ void MetalRenderer::EncodeSSRPasses(void* cmdBufPtr, int width, int height)
 void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 {
 	m_fwdReflSsrTex = nullptr;
-	if (!m_ssrFrameActive || m_deferredFrameActive) return;
+	if (!m_ssrFrameActive || (m_deferredFrameActive && !m_reflWaterPass)) return;
 	if (!m_ssrTracePipeline || !m_ssrBlurPipeline)  return;
 	if (!m_reflNormTex || !m_reflDepthTex)          return;
-	if (!m_ssrColorHist || !m_ssrColorHistValid)    return; // frame 1 seeds the copy first
+	// Water pass (deferred frame): this frame's resolved HDR is already there, no copy to seed.
+	if (!m_reflWaterPass && (!m_ssrColorHist || !m_ssrColorHistValid)) return; // frame 1 seeds the copy first
+	if (m_reflWaterPass && !m_hdrColor)             return;
 	@autoreleasepool
 	{
 		id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
@@ -15611,7 +16060,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 		{
 			const bool temporal = m_ssrQuality >= 2;
 			float hist = 0.0f;
-			if (temporal && m_ssrHistValid)
+			if (temporal && m_ssrHistValid && !m_reflWaterPass) // water pass: no history of its own
 			{
 				float delta = 0.0f;
 				for (int c = 0; c < 4; ++c)
@@ -15629,7 +16078,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 			std::memcpy(tu.prevViewProj, &m_ssrPrevViewProj[0][0], 16 * sizeof(float));
 			tu.cfg2[0] = m_ssrFrameSeed;
 			tu.cfg2[1] = hist;
-			tu.cfg2[2] = 1.0f; // forward: colour from the previous frame's copy
+			tu.cfg2[2] = m_reflWaterPass ? 0.0f : 1.0f; // forward: colour from the previous frame's copy; water pass: this frame's HDR, as the deferred trace
 			tu.cfg2[3] = temporal ? 1.0f : 0.0f; // glossy cone jitter (High)
 			tu.camPos[0] = m_renderWorld.camera.position.x;
 			tu.camPos[1] = m_renderWorld.camera.position.y;
@@ -15658,7 +16107,7 @@ void MetalRenderer::EncodeForwardSSR(void* cmdBufPtr, int width, int height)
 			[enc setFragmentBytes:&tu length:sizeof(tu) atIndex:0];
 			id<MTLSamplerState> pointSmp = (__bridge id<MTLSamplerState>)
 				(m_ssaoPointSampler ? m_ssaoPointSampler : m_linearSampler);
-			[enc setFragmentTexture:(__bridge id<MTLTexture>)m_ssrColorHist atIndex:0];
+			[enc setFragmentTexture:(__bridge id<MTLTexture>)(m_reflWaterPass ? m_hdrColor : m_ssrColorHist) atIndex:0];
 			[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
 			// Point-sampled for the same reason as the deferred variant: lerped
 			// oct normals decode to garbage at geometry edges.
@@ -15804,7 +16253,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 	// Input pair: the stored G-buffer in the deferred tile mode, the MRT
 	// pre-pass in the forward path — identical formats/conventions, so the
 	// kernels are byte-shared between both.
-	const bool deferredIn = m_deferredFrameActive;
+	// The water pass reads the pre-pass pair even in a deferred frame (EncodeWaterReflPrepass).
+	const bool deferredIn = m_deferredFrameActive && !m_reflWaterPass;
 	void* const attrTex  = deferredIn ? m_gbColor1   : m_reflNormTex;
 	void* const depthTex = deferredIn ? m_gbDepthLin : m_reflDepthTex;
 	if (deferredIn ? !m_gbStored : !(attrTex && depthTex)) return;
@@ -15820,13 +16270,13 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// did not trace, so its width follows resDiv — quarter-res gets four
 		// texels of it, full res one. Higher tier = more rays AND more pixels =
 		// sharper, which is the direction a quality setting should move in.
-		const int resDiv = m_giReflQuality >= 2 ? 1 : (m_giReflQuality >= 1 ? 2 : 4);
+		const HE::GIReflTier tier = HE::giReflTierFor(m_giReflQuality, m_giReflBlurEnabled);
+		const int resDiv = tier.resDiv;
 		const int tw = std::max(1, width / resDiv), th = std::max(1, height / resDiv);
 		// How much blur even a MIRROR gets, purely to hide the resolution:
 		// none at full res, most at quarter. Without it a quarter-res mirror
 		// keeps its stair-steps — "sharp" is not the same as "detailed".
-		const float giReflBlurFloor = m_giReflBlurEnabled
-			? (resDiv >= 4 ? 0.75f : (resDiv >= 2 ? 0.35f : 0.0f)) : 0.0f;
+		const float giReflBlurFloor = tier.blurFloor;
 		m_giReflBlurFloor = giReflBlurFloor;
 		EnsureGIReflTarget(tw, th);
 		if (!m_giReflTex) return;
@@ -15847,8 +16297,8 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 		// EMA, so it looked WORSE than the tier below whenever that EMA had to
 		// be damped. A near-mirror still traces one ray (its cone is narrower
 		// than a pixel), so mirrors cost the same at every tier.
-		const int  rays     = m_giReflQuality >= 2 ? 4 : (m_giReflQuality >= 1 ? 2 : 1);
-		const bool jitter   = rays > 1;
+		const int  rays     = tier.rays;
+		const bool jitter   = tier.jitter;
 		const bool meshData = m_giHwRt && m_giMeshPtrBuf && m_giInstanceMeshBuf;
 		m_giReflFrameSeed = HE::NextGIJitterSeed(m_giReflFrameSeed); // wraps: GIJitter.h
 
@@ -16055,20 +16505,15 @@ void MetalRenderer::EncodeGIReflections(void* cmdBufPtr, int width, int height)
 			// composite, forward: the mix pass below) is what keeps a MIRROR
 			// mirror-sharp at every tier while a rough surface gets the lobe.
 			// Screen pixels → reflection texels: one texel spans resDiv of them.
-			const float lobeScreen = kGIReflLobeScreenPx
-			                       * std::clamp(m_giReflMaxRoughness, 0.0f, 1.0f)
-			                       / static_cast<float>(std::max(rays, 1));
-			const float reach = std::clamp(1.0f + lobeScreen / static_cast<float>(resDiv),
-			                               1.0f, 512.0f); // also pins a NaN setting
+			const HE::GIReflBlurReach br = HE::giReflBlurReachFor(m_giReflMaxRoughness, rays, resDiv);
 			// Levels, then strides SCALED to land on `reach` exactly. Doubling raw
 			// strides 1,2,4,… and stopping at the first one past the target snaps
 			// the total to 2^n − 1, so the "tier-independent" screen reach came out
 			// quantized — Medium could end up blurring WIDER than Low, which is the
 			// inversion this whole rework exists to remove. n levels of scaled
 			// strides sum to `reach` for any value.
-			const int levels = std::clamp(
-				static_cast<int>(std::ceil(std::log2(reach + 1.0f))), 1, 6);
-			const float unit = reach / (std::exp2(static_cast<float>(levels)) - 1.0f);
+			const int levels = br.levels;
+			const float unit = br.unit;
 			// Every pass reads ONE texture and writes a DIFFERENT one: H always
 			// lands in ping, V always in rough, and the next level reads rough.
 			// Letting a non-final level write back into ping is a read-write
@@ -16209,7 +16654,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	const glm::vec3 camPos = m_renderWorld.camera.position;
 
 	if (m_renderGraph.empty())
-		m_renderGraph.addPass(std::make_unique<GeometryPass>());
+		m_renderGraph.addPass(MakeMetalGeometryPass());
 
 	// Wireframe view: the G-buffer geometry rasterises as lines; the resolve
 	// (tile mode runs on THIS encoder right after us) discards the untouched
@@ -16230,6 +16675,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		void*     cMaterialPipeline      = nullptr; // forward PSO (forward-routed replay)
 		void*     cMaterialPipelineBlend = nullptr; // blended forward PSO (transparency)
 		void*     cMaterialPipelineGB    = nullptr; // G-buffer PSO (this pass)
+		// Instanced twin of the G-buffer PSO (2e), built on the first batch.
+		void*     cMaterialPipelineGBInst = nullptr; bool cMaterialGBInstTried = false;
+		uint64_t  cGbKey = 0; std::string cGbFrag, cGbVert;
 		bool      cMaterialWpo           = false;
 		bool      cMaterialCustom        = false;   // material HAS a custom shader at all
 		void*     boundPipeline     = defaultPipeline;
@@ -16252,6 +16700,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineGB = nullptr;
+				cMaterialPipelineGBInst = nullptr; cMaterialGBInstTried = false;
 				cMaterialWpo      = false;
 				cMaterialCustom   = false;
 				cMaterialParams   = nullptr;
@@ -16278,8 +16727,11 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						// packs carry no G-buffer MSL yet), never blended.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
+						{
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
 								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+							cGbKey = gbKey; cGbFrag = std::move(gbFrag); cGbVert = std::move(gbVert);
+						}
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -16342,14 +16794,17 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			u.pbr.z   *= dc.instanceTint.a;
 			u.color = glm::vec4(baseColor, 1.0f);
 
-			auto drawInstance = [&](const glm::mat4& xform)
+			// `instPso` etc.: the whole batch in one draw, as in the forward loop (2e).
+			auto drawInstance = [&](const glm::mat4& xform, void* instPso = nullptr,
+			                        void* instBuf = nullptr, size_t instOff = 0,
+			                        NSUInteger instCount = 0)
 			{
 				UnlitUniforms ui = u;
 				ui.mvp   = viewProj * xform;
 				ui.model = xform;
 				// Same routing threshold as the forward loop — translucent draws
 				// go to the lighting pass's sorted blend replay.
-				if (ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
+				if (!instPso && ui.pbr.z < RenderSorter::kOpaqueOpacityThreshold)
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
@@ -16383,7 +16838,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 					out.forwardOpaque.push_back(std::move(t));
 					return;
 				}
-				void* wantPipeline = cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
+				void* wantPipeline = instPso ? instPso
+				                   : cMaterialPipelineGB ? cMaterialPipelineGB : defaultPipeline;
 				if (wantPipeline != boundPipeline)
 				{
 					[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)wantPipeline];
@@ -16434,6 +16890,19 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				}
 #endif
 				[encoder setFragmentTexture:texture atIndex:0];
+				if (instPso)
+				{
+					[encoder setVertexBuffer:(__bridge id<MTLBuffer>)instBuf offset:instOff atIndex:5];
+					[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+					                    indexCount:indexCount
+					                     indexType:MTLIndexTypeUInt32
+					                   indexBuffer:indexBuf
+					             indexBufferOffset:indexOffset
+					                 instanceCount:instCount];
+					++m_counters.draws;
+					m_counters.tris += static_cast<uint32_t>(indexCount / 3) * static_cast<uint32_t>(instCount);
+					return;
+				}
 				[encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
 				                    indexCount:indexCount
 				                     indexType:MTLIndexTypeUInt32
@@ -16447,7 +16916,35 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// this loop as a forwardOpaque re-route, which an instanced draw has no
 			// way to perform — and one WITH a variant carries its own vertex stage.
 			static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be mvp+model");
-			const size_t instCount = dc.instanceTransforms.size();
+			const size_t instCount = dc.instanceTotal();   // spans or copies (GeometryPass::setInstanceSpans)
+			// ...which since 2e has an instanced twin: a graph-material batch with
+			// a G-buffer PSO draws once through drawInstance's binds. Built on the
+			// first batch; null (failed build, HE_GRAPH_INSTANCING=0) keeps the loop.
+			// The G-buffer PSO is always runtime cross-compiled, so no baked check.
+			const bool graphBatch = instCount > 0 && cMaterialPipelineGB
+			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
+			               && instCount <= k_maxInstances
+			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			if (graphBatch && !cMaterialGBInstTried)
+			{
+				cMaterialGBInstTried = true;
+#if defined(HE_HAVE_SHADERC)
+				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert, nullptr,
+				                                                     /*blend=*/false, /*gbuffer=*/true,
+				                                                     /*instanced=*/true);
+#endif
+			}
+			if (graphBatch && cMaterialPipelineGBInst)
+			{
+				void*  instBuf = nullptr;
+				size_t instOff = 0;
+				if (UploadMvpModel(dc, viewProj, instBuf, instOff))
+				{
+					drawInstance(dc.firstInstance(), cMaterialPipelineGBInst, instBuf, instOff,
+					             (NSUInteger)instCount);
+					continue;
+				}
+			}
 			const bool fits = instCount > 0
 			               && metalInstancingEnabled()
 			               && m_gbufferInstancedPipeline
@@ -16464,16 +16961,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						(__bridge id<MTLRenderPipelineState>)m_gbufferInstancedPipeline];
 					boundPipeline = m_gbufferInstancedPipeline;
 				}
-				std::vector<glm::mat4> xf;
-				xf.reserve(instCount * 2);
-				for (const glm::mat4& t : dc.instanceTransforms)
-				{
-					xf.push_back(viewProj * t); // mvp
-					xf.push_back(t);            // model
-				}
 				void*  instBuf = nullptr;   // a slice of the frame's upload ring
 				size_t instOff = 0;
-				if (!UploadTransientBytes(xf.data(), xf.size() * sizeof(glm::mat4), instBuf, instOff))
+				if (!UploadMvpModel(dc, viewProj, instBuf, instOff))
 					continue;
 				[encoder setVertexBuffer:vertexBuf offset:0 atIndex:0];
 				[encoder setVertexBytes:&u length:sizeof(u) atIndex:1]; // mvp/model unused here
@@ -16489,11 +16979,10 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				m_counters.tris += static_cast<uint32_t>(indexCount / 3)
 				                 * static_cast<uint32_t>(instCount);
 			}
-			else if (dc.instanceTransforms.empty())
+			else if (instCount == 0)
 				drawInstance(dc.transform);
 			else
-				for (const glm::mat4& t : dc.instanceTransforms)
-					drawInstance(t);
+				dc.forEachInstance([&](const glm::mat4& t) { drawInstance(t); });
 		}
 	});
 	if (wire) [encoder setTriangleFillMode:MTLTriangleFillModeFill];
@@ -16511,6 +17000,9 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 		if (isPrimary)
 		{
+			// Foliage world matrices are kept across frames (instanceWorldMatrices); what no
+			// frame read for a while (a re-scatter, a moved terrain) is let go here.
+			instanceWorldCacheNextFrame();
 			// Reset the render counters before any early-return below, so a frame
 			// that bails out (e.g. minimized / zero-size window) honestly reports
 			// zeros instead of last frame's draws/tris/visible/total.
@@ -16554,6 +17046,8 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// Release cached GPU buffers for any mesh invalidated since last frame
 			// (e.g. sculpted terrain). In-flight GPU work may reference them, so
 			// release via CFBridgingRelease (ARC autoreleasepool handles safety here).
+			meshStreamCounters().meshInvalidations.fetch_add(
+				static_cast<uint32_t>(m_pendingMeshInvalidations.size()), std::memory_order_relaxed);
 			for (const HE::UUID& id : m_pendingMeshInvalidations)
 			{
 				if (auto it = m_meshCache.find(id); it != m_meshCache.end())
@@ -17017,6 +17511,32 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 				{
 					EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
 					EncodeSSRPasses((__bridge void*)cmdBuf, sceneW, sceneH);
+					// The forward tail (water and every other translucent graph material) is
+					// not in the G-buffer, so the composite above never touched it and slots
+					// 9/10 stayed empty: the water mirrored only the flat sky cube. Its
+					// surfaces get their own pre-pass, and the forward trace chain runs over
+					// it, as in a forward frame.
+					if (EncodeWaterReflPrepass((__bridge void*)cmdBuf, sceneW, sceneH, deferredFrame.transparent))
+					{
+						// The forward chain over the water pre-pass. The SSR trace keeps its
+						// history pair, flip and matrix for the opaque composite of the next
+						// frame: restore them, the water result has no history of its own.
+						const int      histIdx   = m_ssrHistIdx;
+						const bool     histValid = m_ssrHistValid;
+						const glm::mat4 prevVP   = m_ssrPrevViewProj;
+						m_reflWaterPass = true;
+						if (m_giReflFrameActive)
+						{
+							m_giReflGlossyTex = nullptr;
+							EncodeGIReflections((__bridge void*)cmdBuf, sceneW, sceneH);
+							m_fwdReflGiTex = m_giReflGlossyTex ? m_giReflGlossyTex : m_giReflTex;
+						}
+						EncodeForwardSSR((__bridge void*)cmdBuf, sceneW, sceneH);
+						m_reflWaterPass = false;
+						m_ssrHistIdx      = histIdx;
+						m_ssrHistValid    = histValid;
+						m_ssrPrevViewProj = prevVP;
+					}
 				}
 
 				if (!deferredTile)
@@ -17119,9 +17639,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 					                    static_cast<float>(sceneW) / static_cast<float>(std::max(1, sceneH)),
 					                    &m_editorCamera);
 					m_prepassViewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+					// The sky's clock, HE_SKY_TIME included (EncodeScene's drawSky): on the wall
+					// clock alone the pinned A/B captures drew the low-res clouds at another
+					// moment of their drift than the sky they are composited into.
+					float cloudClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+					if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) cloudClock = static_cast<float>(std::atof(ov));
 					EncodeCloudPrepass((__bridge void*)cmdBuf, glm::inverse(m_prepassViewProj),
-						m_renderWorld.sunDirection,
-						static_cast<float>(SDL_GetTicks()) / 1000.0f,
+						m_renderWorld.sunDirection, cloudClock,
 						std::max(1, sceneW / 2), std::max(1, sceneH / 2));
 				}
 				else if (m_cloudColor) DestroyCloudTarget(); // freed when toggled off
@@ -17944,7 +18468,34 @@ void MetalRenderer::SetOcclusionCullingSettings(const OcclusionCullingSettings& 
 
 void MetalRenderer::CullCameraObjects()
 {
-	m_culler.cull(m_renderWorld, m_visible);
+	const uint64_t  walk      = m_extractor.fullExtractCount();
+	const glm::mat4 vp        = m_renderWorld.camera.projection * m_renderWorld.camera.view;
+	const bool      occlusion = m_occlusionCuller.settings().enabled;
+	CameraCullCache& c = m_cameraCull;
+	const bool refined = m_refinedWalk == walk && m_refinedObjects == m_renderWorld.objects.data()
+	                  && m_refinedCount == m_renderWorld.objects.size();
+	if (refined && c.stamp == m_frameStamp && c.walk == walk && c.objects == m_renderWorld.objects.data()
+	    && c.count == m_renderWorld.objects.size() && c.viewProj == vp
+	    && c.camPos == m_renderWorld.camera.position && c.occlusion == occlusion)
+	{
+		HE_PROFILE_SCOPE_N("Metal::CullCameraObjects::reuse");
+		m_visible       = c.visible;
+		m_sortedIndices = c.sorted;
+		if (occlusion) m_counters.occlusionCulled = c.occlusionCulled;
+		return;
+	}
+	CullCameraObjectsFresh();
+	if (!refined) { c.stamp = ~0ull; return; }   // bounds may still change this walk: keep nothing
+	c.stamp = m_frameStamp; c.walk = walk; c.objects = m_renderWorld.objects.data();
+	c.count = m_renderWorld.objects.size(); c.viewProj = vp; c.camPos = m_renderWorld.camera.position;
+	c.occlusion = occlusion; c.occlusionCulled = m_counters.occlusionCulled;
+	c.visible = m_visible;
+	c.sorted  = m_sortedIndices;
+}
+
+void MetalRenderer::CullCameraObjectsFresh()
+{
+	CullObjects(m_renderWorld.camera.projection * m_renderWorld.camera.view, m_visible);
 	if (m_occlusionCuller.settings().enabled)
 	{
 		const glm::mat4 viewProj = m_renderWorld.camera.projection * m_renderWorld.camera.view;

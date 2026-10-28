@@ -19,7 +19,8 @@ static uint64_t encodeH(RenderHandle h) noexcept
     return (static_cast<uint64_t>(h.generation) << 32) | h.index;
 }
 
-RenderHandle RenderResourceManager::uploadMesh(const HE::UUID& assetId, const MeshData& data)
+template<typename T>
+RenderHandle RenderResourceManager::uploadImpl(const HE::UUID& assetId, const T& data)
 {
     auto it = m_assetIndex.find(assetId);
     if (it != m_assetIndex.end()) return it->second; // already uploaded
@@ -31,28 +32,19 @@ RenderHandle RenderResourceManager::uploadMesh(const HE::UUID& assetId, const Me
     return h;
 }
 
+RenderHandle RenderResourceManager::uploadMesh(const HE::UUID& assetId, const MeshData& data)
+{
+    return uploadImpl(assetId, data);
+}
+
 RenderHandle RenderResourceManager::uploadTexture(const HE::UUID& assetId, const TextureData& data)
 {
-    auto it = m_assetIndex.find(assetId);
-    if (it != m_assetIndex.end()) return it->second;
-
-    RenderHandle h = nextHandle();
-    m_allocator.requestAllocation(data.sizeBytes(), h);
-    m_assetIndex[assetId]     = h;
-    m_handleToAsset[encodeH(h)] = assetId;
-    return h;
+    return uploadImpl(assetId, data);
 }
 
 RenderHandle RenderResourceManager::createMaterial(const HE::UUID& assetId, const MaterialDesc& desc)
 {
-    auto it = m_assetIndex.find(assetId);
-    if (it != m_assetIndex.end()) return it->second;
-
-    RenderHandle h = nextHandle();
-    m_allocator.requestAllocation(desc.sizeBytes(), h);
-    m_assetIndex[assetId]     = h;
-    m_handleToAsset[encodeH(h)] = assetId;
-    return h;
+    return uploadImpl(assetId, desc);
 }
 
 void RenderResourceManager::release(RenderHandle handle)

@@ -1,7 +1,6 @@
 #include <UIWidget/UIWidgetAnim.h>
 
 #include <algorithm>
-#include <cstring>
 
 namespace HE
 {
@@ -206,19 +205,22 @@ void uiAnimEvaluate(const UIAnimClip& clip, float time, std::vector<UIAnimSample
         s.element = tr.element;
         s.prop    = tr.prop;
 
-        // The last key at or before `time`, and the first one after it. Walked
-        // rather than searched: a track has keys, not samples, and a linear walk
-        // over a handful of them is cheaper than being clever about it.
+        // The latest key at or before `time`, and the earliest one after it, by
+        // TIME: a hand-edited file need not be sorted, and the editor addresses
+        // keys by list position, so the list is never reordered to make it so.
+        // Walked rather than searched: a track has keys, not samples, and a linear
+        // walk over a handful of them is cheaper than being clever about it.
         const UIAnimKey* prev = nullptr;
         const UIAnimKey* next = nullptr;
         for (const UIAnimKey& k : tr.keys)
         {
-            // "<=" so that two keys at the same time resolve to the LATER one in
-            // the list — deterministic, which is all a hand-edited file needs.
-            if (k.time <= time) prev = &k;
-            else if (!next)     next = &k;
+            // ">=" and "<" so that two keys at the same time resolve to the LATER
+            // one in the list as prev and the EARLIER as next — deterministic,
+            // which is all a hand-edited file needs.
+            if (k.time <= time) { if (!prev || k.time >= prev->time) prev = &k; }
+            else if (!next || k.time < next->time) next = &k;
         }
-        if (!prev)       s.value = tr.keys.front().value;   // before the first
+        if (!prev)       s.value = next->value;   // before the first: no prev means every key is later, so next is the earliest
         else if (!next)  s.value = prev->value;             // after the last
         else
         {

@@ -3053,7 +3053,8 @@ namespace input {
 // One ApiFn per function. The interpreter looks a function up by `id` and calls
 // `invoke`; the editor builds its add-menu from `category`/`params`/`results`;
 // codegen emits the generic `hc::callApi(ctx, "<id>", …)` thunk, which lands on
-// the same `invoke`. This is the single source of truth.
+// the same `invoke`, or calls `cppCall` directly in the shape `cppForm` names
+// (HorizonEngine/HorizonEngineApi.h). This is the single source of truth.
 
 struct ApiParam
 {
@@ -3071,6 +3072,22 @@ struct ApiParam
     bool        selfDefault = false;
 };
 
+// How generated C++ reaches a row WITHOUT the registry (HorizonEngine/
+// HorizonEngineApi.h). The registry's params/results say what the node carries;
+// this says what `cppCall` looks like, which is the one fact an emitter cannot
+// read off them:
+//   Ctx   — cppCall(ctx, params…), the shape of nearly every row;
+//   Free  — cppCall(params…): plain functions over process-wide state (math,
+//           string, input, fs, save, time…), which take no Ctx at all;
+//   Thunk — no direct call: `invoke` does more than forward (out-parameters,
+//           parallel-array results, an argument list it unpacks, a Ctx member
+//           it hands over), so generated code keeps hc::callApi for it.
+// Set in a post-pass when the table is built (see registry()), never at a row.
+// Kept honest by a compiled test: every non-Thunk row is called directly in a
+// file generated from this table (hc_codegen --api-direct, test_engine_api_direct.cpp),
+// so a wrong form does not build.
+enum class CppForm : uint8_t { Ctx, Free, Thunk };
+
 struct ApiFn
 {
     const char* id;          // stable identifier, e.g. "transform.setPosition"
@@ -3078,11 +3095,11 @@ struct ApiFn
     bool        isExec;      // true = side-effecting (exec node); false = pure data node
     std::vector<ApiParam> params;    // typed inputs (in call order)
     std::vector<ApiParam> results;   // typed outputs (in return order)
-    // Fully-qualified C++ callee this row stands for. Staged input for a planned
-    // codegen migration (emit the direct call instead of routing through
-    // hc::callApi) — nothing emits it today, so it is only as correct as the
-    // invariant test in test_engine_api.cpp keeps it: one distinct callee per row,
-    // its signature matching `params` in order.
+    // Fully-qualified C++ callee this row stands for: what generated C++ calls
+    // instead of routing through hc::callApi, in the shape `cppForm` names. Two
+    // tests keep it correct: test_engine_api.cpp (one distinct callee per row)
+    // and test_engine_api_direct.cpp, which calls it for every non-Thunk row
+    // with `params` in order and compares the answer with `invoke`'s.
     const char* cppCall;
     // Marshalling thunk: HorizonCode Values in → typed C++ call → Values out.
     // Missing/extra args are tolerated (defaults fill in), mirroring the API's
@@ -3092,12 +3109,24 @@ struct ApiFn
     // titles show; `id` stays the stable machine identifier. Assigned in a post-
     // pass when the table is built (trailing member so rows stay positional).
     const char* displayName = nullptr;
+    // How a direct call looks (see CppForm). Post-pass, like displayName.
+    CppForm     cppForm = CppForm::Ctx;
 };
 
 // The full table (built once). Order is stable and grouped by category.
 const std::vector<ApiFn>& registry();
 // Look up a single entry by id; nullptr if unknown.
 const ApiFn* find(const std::string& id);
+
+// "Left at 0, this parameter means the caller itself" (ApiParam::selfDefault),
+// as a function: `e` unless it is 0, else the entity of the calling instance.
+// `row` names the row in the warning when there is no caller to stand in, in
+// which case `e` (0) comes back unchanged. This IS the rule the registry's
+// thunks apply, not a copy of it, so a direct call from generated C++ that
+// passes its pin through here answers exactly what the EngineCall node does.
+Entity   entityOrSelf(Ctx& c, Entity e, const char* row);
+// The same for the widget rows that default to the calling widget (a Ref).
+uint32_t widgetOrSelf(Ctx& c, uint32_t widget, const char* row);
 
 // True for a registry id's namespace ("math" of "math.clamp") that the text
 // scripting frontends expose as horizon.<group>.<fn>. Lua (ScriptContext) and

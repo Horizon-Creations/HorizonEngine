@@ -140,6 +140,27 @@ void announceNewFile(const McpSceneHooks& h, const std::string& rel, const std::
 	if (h.onAssetAppeared) h.onAssetAppeared(abs);
 }
 
+// The containing folder has to be there. Created rather than refused: a scene
+// path in a folder that does not exist yet is the ordinary first-save/first-
+// create case, not an error. Shared by scene_save and scene_create.
+ToolResult* ensureSceneDirectory(const std::string& abs, const std::string& rel, ToolResult& scratch)
+{
+	std::error_code ec;
+	const std::filesystem::path parent = std::filesystem::path(abs).parent_path();
+	if (!parent.empty() && !std::filesystem::exists(parent, ec))
+	{
+		std::error_code mkEc;
+		std::filesystem::create_directories(parent, mkEc);
+		if (mkEc)
+		{
+			scratch = ToolResult::fail("failed",
+				"Could not create the folder for '" + rel + "': " + mkEc.message());
+			return &scratch;
+		}
+	}
+	return nullptr;
+}
+
 } // namespace
 
 // ─── The tools ───────────────────────────────────────────────────────────────
@@ -190,15 +211,7 @@ void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
 				// refused: 'Levels/Main.hescene' in a project with no Levels folder
 				// is the ordinary first save, and the Save As dialog lets a human
 				// make the folder in the same gesture.
-				const std::filesystem::path parent = std::filesystem::path(abs).parent_path();
-				if (!parent.empty() && !std::filesystem::exists(parent, ec))
-				{
-					std::error_code mkEc;
-					std::filesystem::create_directories(parent, mkEc);
-					if (mkEc)
-						return ToolResult::fail("failed",
-							"Could not create the folder for '" + rel + "': " + mkEc.message());
-				}
+				if (ToolResult* r = ensureSceneDirectory(abs, rel, scratch)) return *r;
 			}
 			else
 			{
@@ -269,15 +282,7 @@ void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
 					"throw them out. Call scene_save first, or create without open=true "
 					"and switch later with scene_open (which can be told to discard).");
 
-			const std::filesystem::path parent = std::filesystem::path(s.p.abs).parent_path();
-			if (!parent.empty() && !std::filesystem::exists(parent, ec))
-			{
-				std::error_code mkEc;
-				std::filesystem::create_directories(parent, mkEc);
-				if (mkEc)
-					return ToolResult::fail("failed",
-						"Could not create the folder for '" + s.p.rel + "': " + mkEc.message());
-			}
+			if (ToolResult* r = ensureSceneDirectory(s.p.abs, s.p.rel, scratch)) return *r;
 
 			if (!writeEmptySceneFile(s.p.abs))
 				return ToolResult::fail("failed",

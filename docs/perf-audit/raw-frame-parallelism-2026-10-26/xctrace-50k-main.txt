@@ -1,0 +1,84 @@
+samples: 15710 (1 ms each while on-CPU)
+per thread (samples, P/E core):
+   10451  P     0  E  9974  Main Thread
+    5208  P     0  E  5200  HorizonEditor
+      51  P     0  E    51  com.apple.audio.IOThread.client
+
+== Main Thread: 10451 samples; inclusive by function
+   10451 100.0%  start
+   10451 100.0%  HE::Application::Run(int, char**)
+   10451 100.0%  main
+    9044  86.5%  MetalRenderer::EncodeFrame(SDL_Window*, MetalRenderer::WindowTarget&, bool)
+    3475  33.3%  RenderExtractor::extract(HorizonWorld&, RenderWorld&, float, EditorCameraOverride const*)
+    1600  15.3%  MetalRenderer::CullCameraObjects()
+    1443  13.8%  MetalRenderer::EncodeScene(void*, int, int, MetalDeferredFrame*)
+    1441  13.8%  RenderSorter::sort(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>> const&, std::__1::vector<unsigned int, std::__1::allocator<unsi
+    1401  13.4%  MetalRenderer::EncodeFrame(SDL_Window*, MetalRenderer::WindowTarget&, bool)::$_3::operator()() const
+    1399  13.4%  MetalRenderer::EncodeSSAO(void*, int, int)
+    1331  12.7%  EditorApplication::OnRender(float)
+    1235  11.8%  parallel_for_run_chunks(ParallelForJob&)
+    1228  11.8%  EditorUI::render(AppContext&, float)
+    1186  11.3%  EditorUI::renderEditor(AppContext&, float)
+    1125  10.8%  MetalRenderer::EncodeShadowMap(void*, float)
+    1123  10.7%  MetalRenderer::EncodeShadowMap(void*, float)::$_0::operator()(void*, int, int, glm::mat<4, 4, float, (glm::qualifier)0> const&, unsigned int) const
+    1042  10.0%  FrustumCuller::cull(RenderWorld const&, glm::mat<4, 4, float, (glm::qualifier)0> const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>>&)
+     979   9.4%  void parallel_for<FrustumCuller::cull(RenderWorld const&, glm::mat<4, 4, float, (glm::qualifier)0> const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned ch
+     911   8.7%  Frustum::intersects(HE::AABB const&) const
+     832   8.0%  void std::__1::__introsort<std::__1::_ClassicAlgPolicy, RenderSorter::sort(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>> const&,
+     700   6.7%  MetalRenderer::EncodeCloudShadow(void*)
+     683   6.5%  ViewportPanel::entityActionState(AppContext&)
+     683   6.5%  ViewportActions::anyHidden(HorizonWorld&)
+     683   6.5%  std::__1::__function::__func<ViewportActions::(anonymous namespace)::forEachInScene(HorizonWorld&, std::__1::function<void (entt::entity)> const&)::$_0, void (entt::entit
+     628   6.0%  MetalRenderer::RefineObjectBounds()
+     616   5.9%  RenderGraph::execute(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, std::__1::function<void (RenderPass const&, RenderPassI
+     528   5.1%  HE::AABB::transformed(glm::mat<4, 4, float, (glm::qualifier)0> const&) const
+     495   4.7%  (anonymous namespace)::resolveEntitySlots(std::__1::vector<MeshSection, std::__1::allocator<MeshSection>>, std::__1::vector<MeshSection, std::__1::allocator<MeshSection>>
+     492   4.7%  std::__1::__function::__func<ViewportActions::anyHidden(HorizonWorld&)::$_0, void (entt::entity)>::operator()(entt::entity&&)
+     482   4.6%  FrustumCuller::cull(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>>&)
+     431   4.1%  HE::entityVisibility(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>> const&, entt::entity)
+     420   4.0%  OutlinerPanel::render(AppContext&)
+     397   3.8%  operator new(unsigned long)
+     395   3.8%  void std::__1::vector<MeshSection, std::__1::allocator<MeshSection>>::__init_with_size[abi:nqe220106]<MeshSection*, MeshSection*>(MeshSection*, MeshSection*, unsigned lon
+     393   3.8%  RenderSorter::batchDepthRuns(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, RenderSorter::DepthFilter, unsigned int, Render
+     354   3.4%  (anonymous namespace)::fitDirectionalShadow(RenderWorld&, float, int, float, int, HE::AABB&, bool&)
+     353   3.4%  GeometryPass::execute(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, CommandBuffer&)
+     292   2.8%  std::__1::vector<RenderObject, std::__1::allocator<RenderObject>>::resize(unsigned long)
+     291   2.8%  _xzm_xzone_malloc_tiny
+     272   2.6%  RenderWorld::appendInstances(RenderObject const&, std::__1::vector<glm::mat<4, 4, float, (glm::qualifier)0>, std::__1::allocator<glm::mat<4, 4, float, (glm::qualifier)0>>
+     260   2.5%  std::__1::__function::__func<MetalRenderer::EncodeScene(void*, int, int, MetalDeferredFrame*)::$_0, void (RenderPass const&, RenderPassIO const&, CommandBuffer const&)>::
+     252   2.4%  void parallel_for<(anonymous namespace)::extractMeshes(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>>&, RenderWorld&, ContentManager*, std::__1::un
+     249   2.4%  (anonymous namespace)::extractMeshes(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>>&, RenderWorld&, ContentManager*, std::__1::unordered_set<std::_
+     235   2.2%  RenderWorld::clear()
+     231   2.2%  HE::propagateTransforms(HorizonWorld&)
+     208   2.0%  _platform_memmove
+     188   1.8%  ImHashData(void const*, unsigned long, unsigned int)
+     186   1.8%  <deduplicated_symbol>
+     178   1.7%  -[AGXG17GFamilyCommandBuffer renderCommandEncoderWithDescriptor:]
+     149   1.4%  glm::mat<4, 4, float, (glm::qualifier)0> glm::operator*<float, (glm::qualifier)0>(glm::mat<4, 4, float, (glm::qualifier)0> const&, glm::mat<4, 4, float, (glm::qualifier)0
+
+== leaf (self) functions
+     911   8.7%  Frustum::intersects(HE::AABB const&) const
+     861   8.2%  RenderExtractor::extract(HorizonWorld&, RenderWorld&, float, EditorCameraOverride const*)
+     800   7.7%  void std::__1::__introsort<std::__1::_ClassicAlgPolicy, RenderSorter::sort(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>> const&,
+     672   6.4%  MetalRenderer::EncodeCloudShadow(void*)
+     609   5.8%  RenderSorter::sort(RenderWorld const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned char>> const&, std::__1::vector<unsigned int, std::__1::allocator<unsi
+     528   5.1%  HE::AABB::transformed(glm::mat<4, 4, float, (glm::qualifier)0> const&) const
+     492   4.7%  (anonymous namespace)::resolveEntitySlots(std::__1::vector<MeshSection, std::__1::allocator<MeshSection>>, std::__1::vector<MeshSection, std::__1::allocator<MeshSection>>
+     431   4.1%  HE::entityVisibility(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>> const&, entt::entity)
+     330   3.2%  GeometryPass::execute(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, CommandBuffer&)
+     292   2.8%  std::__1::vector<RenderObject, std::__1::allocator<RenderObject>>::resize(unsigned long)
+     291   2.8%  _xzm_xzone_malloc_tiny
+     272   2.6%  RenderWorld::appendInstances(RenderObject const&, std::__1::vector<glm::mat<4, 4, float, (glm::qualifier)0>, std::__1::allocator<glm::mat<4, 4, float, (glm::qualifier)0>>
+     239   2.3%  (anonymous namespace)::fitDirectionalShadow(RenderWorld&, float, int, float, int, HE::AABB&, bool&)
+     235   2.2%  RenderWorld::clear()
+     231   2.2%  HE::propagateTransforms(HorizonWorld&)
+     208   2.0%  _platform_memmove
+     191   1.8%  std::__1::__function::__func<ViewportActions::(anonymous namespace)::forEachInScene(HorizonWorld&, std::__1::function<void (entt::entity)> const&)::$_0, void (entt::entit
+     188   1.8%  ImHashData(void const*, unsigned long, unsigned int)
+     170   1.6%  OutlinerPanel::render(AppContext&)
+     160   1.5%  <deduplicated_symbol>
+     149   1.4%  glm::mat<4, 4, float, (glm::qualifier)0> glm::operator*<float, (glm::qualifier)0>(glm::mat<4, 4, float, (glm::qualifier)0> const&, glm::mat<4, 4, float, (glm::qualifier)0
+     148   1.4%  void std::__1::allocator_traits<std::__1::allocator<(anonymous namespace)::extractMeshes(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>>&, RenderWor
+     147   1.4%  RenderSorter::batchDepthRuns(RenderWorld const&, std::__1::vector<unsigned int, std::__1::allocator<unsigned int>> const&, RenderSorter::DepthFilter, unsigned int, Render
+     120   1.1%  ContentManager::getStaticMesh(HE::UUID) const
+     114   1.1%  HE::AABB::expand(HE::AABB const&)

@@ -1,0 +1,24 @@
+CI run 39532559913 (tip 6d1c5dca), vulkan-lavapipe job, case layer_meshes (llvmpipe, CPU raster: counts, not timings):
+── layer_meshes ────────────────────────────────────────────────
+  off            5.6 s  exit=0  1280x720  mean=122.457  device=llvmpipe (LLVM 20.1.2, 256 bits) (Vulkan 1.4.318, driver 0x6402008)  validation(dump)=0/total=0
+      [02:28:18.371] [ INFO] [RHI        ] [Main    ] [f      1] VulkanRenderer: uploads — 5 meshes, 26 textures, 25.0 MB in 28 batches (0 oversize staging buffers); 6.3 ms CPU in upload call
+      dump counters: draws=2 tris=17408
+  x4             5.8 s  exit=0  1280x720  mean=123.294  device=llvmpipe (LLVM 20.1.2, 256 bits) (Vulkan 1.4.318, driver 0x6402008)  validation(dump)=0/total=0
+      [02:28:24.255] [ INFO] [RHI        ] [Main    ] [f      1] VulkanRenderer: uploads — 18 meshes, 26 textures, 25.2 MB in 28 batches (0 oversize staging buffers); 6.6 ms CPU in upload cal
+      dump counters: draws=13 tris=375804
+  x16            6.3 s  exit=0  1280x720  mean=124.899  device=llvmpipe (LLVM 20.1.2, 256 bits) (Vulkan 1.4.318, driver 0x6402008)  validation(dump)=0/total=0
+      [02:28:30.591] [ INFO] [RHI        ] [Main    ] [f      1] VulkanRenderer: uploads — 18 meshes, 26 textures, 25.2 MB in 28 batches (0 oversize staging buffers); 7.1 ms CPU in upload cal
+      dump counters: draws=13 tris=1473604
+  flat x4 -> x16: draws 13 -> 13 (tolerance +2), tris 375804 -> 1473604 -> ok
+  off vs x4: mean |Δ| 2.1219, max 220, 66310 px changed, px>2 6.201 %  → ok (min 0.8)
+  x4 vs x16: mean |Δ| 3.8786, max 227, 150206 px changed, px>2 13.447 %  → report
+
+
+Windows job, step 'Layer-mesh image test (D3D11, D3D12)': died before rendering anything:
+he_vk_imagetests: editor D:\a\HorizonEngine\HorizonEngine\package\Editor\HorizonEditor.exe
+Traceback (most recent call last):
+  File "D:\a\HorizonEngine\HorizonEngine\scripts\he_vk_imagetests.py", line 653, in main
+UnicodeEncodeError: 'charmap' codec can't encode characters in position 2-3: character maps to <undefined>
+Traceback (most recent call last):
+he_vk_imagetests: editor D:\a\HorizonEngine\HorizonEngine\package\Editor\HorizonEditor.exe
+  File "D:\a\HorizonEngine\HorizonEngine\scripts\he_vk_imagetests.py", line 653, in main

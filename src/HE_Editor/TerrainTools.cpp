@@ -27,6 +27,7 @@
 #include <cstdarg>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
@@ -47,12 +48,13 @@ static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
 static bool        s_landscapePaint  = false;
 static int         s_paintLayer      = 0;
-// Landscape FOLIAGE mode: the same brush paints the foliage layer's density
-// mask (FoliageComponent::densityMask) — Grow raises it toward the target
+// Landscape FOLIAGE mode: the same brush paints a foliage layer's density
+// mask (FoliageLayer::densityMask) — Grow raises it toward the target
 // density, Erase pulls it to 0, which is how an exclusion area (a yard, a
-// road, a lake) is made. The terrain entity's own FoliageComponent is the
-// layer; FoliageSystem re-scatters it on the next tick, so a stroke shows up
-// under the cursor straight away.
+// road, a lake) is made. The layers live in the terrain entity's own
+// FoliageComponent; the brush paints the active one (activeLayer, shared with
+// Details), and FoliageSystem re-scatters it on the next tick, so a stroke
+// shows up under the cursor straight away.
 static bool        s_landscapeFoliage = false;
 // The Setup tab: material, heightmap, resolutions, resets. While it is open the brush is
 // off - a click in the viewport must not sculpt just because the user is reading a form.
@@ -69,8 +71,11 @@ static bool        s_waterErase       = false;  // the tab's Paint | Erase; Ctrl
 static bool        s_waterFromGround  = true;   // level = the ground under the first point + offset
 static float       s_waterLevel       = 0.0f;   // ... or this number (terrain-local Y)
 static float       s_waterOffset      = 0.3f;   // above the ground at the first point
-static bool        s_waterDig         = false;  // also dig a bed under the water
-static float       s_waterDigDepth    = 1.0f;   // bed this far below the level
+static bool        s_waterDig         = true;   // also dig a bed under the water (a pond without one is all shore, see the help)
+static float       s_waterDigDepth    = 2.0f;   // Max Depth: the bed never goes deeper below the level
+static float       s_waterBedSlope    = HE::water::kDefaultBedSlope;   // metres of depth per metre from the shore
+static float       s_waterBedRough    = 0.2f;   // Bed Roughness, 0..1
+static bool        s_waterCloseBed    = true;   // the eraser gives the dug ground back under the water it dries
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
 static bool        s_waterResEditing  = false;
@@ -121,6 +126,7 @@ namespace
 	ImU32 layerColour(const std::string& name)
 	{
 		std::string n;
+		n.reserve(name.size());
 		for (char c : name) n += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 		auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
 		if (has("auto"))                                 return IM_COL32(120, 150, 110, 255);
@@ -149,6 +155,7 @@ namespace
 	std::string upperCase(const char* s)
 	{
 		std::string out;
+		out.reserve(std::strlen(s));
 		for (; *s; ++s) out += static_cast<char>(std::toupper(static_cast<unsigned char>(*s)));
 		return out;
 	}
@@ -501,6 +508,9 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			waterParams.levelOffset     = s_waterOffset;
 			waterParams.dig             = s_waterDig;
 			waterParams.digDepth        = s_waterDigDepth;
+			waterParams.bedSlope        = s_waterBedSlope;
+			waterParams.bedRoughness    = s_waterBedRough;
+			waterParams.closeBed        = s_waterCloseBed;
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -733,14 +743,15 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			}
 			// ── Foliage mode: the layer's density mask ────────────
 			// Same brush, same hit, a third target: the mask of the
-			// terrain entity's FoliageComponent. FoliagePaint dirties
-			// the layer, and FoliageSystem re-scatters it on the next
-			// tick — the instances under the brush appear or vanish
-			// while dragging. Without a layer there is nothing to
-			// paint; the panel offers to add one.
+			// active layer of the terrain entity's FoliageComponent.
+			// FoliagePaint dirties that layer, and FoliageSystem
+			// re-scatters it on the next tick — the instances under the
+			// brush appear or vanish while dragging. Without a layer
+			// there is nothing to paint; the panel offers to add one.
 			else if (s_landscapeFoliage)
 			{
-				if (auto* fol = terrainReg.try_get<FoliageComponent>(terrainEnt))
+				auto* folc = terrainReg.try_get<FoliageComponent>(terrainEnt);
+				if (FoliageLayer* fol = folc ? folc->active() : nullptr)
 				{
 					if (lmbDown && !s_brushWasDown && ctx.undoSys)
 						ctx.undoSys->snapshotNow("Paint Foliage");   // one undo entry per stroke
@@ -1297,7 +1308,9 @@ void renderPanel(AppContext& ctx)
         const std::vector<std::string> layers =
             lmat ? lmat->graphLayerNames : std::vector<std::string>{};
         if (layers.empty()) s_landscapePaint = false;
-        auto* fol = reg.try_get<FoliageComponent>(terrainEnt);
+        // The foliage component and the layer the tab and the brush work on.
+        auto*         folc = reg.try_get<FoliageComponent>(terrainEnt);
+        FoliageLayer* fol  = folc ? folc->active() : nullptr;
 
         // ── The card ─────────────────────────────────────────────────────
         {
@@ -1535,9 +1548,9 @@ void renderPanel(AppContext& ctx)
             // ═════════════════════════ FOLIAGE ═══════════════════════════
             else if (s_landscapeFoliage)
             {
-                if (!fol)
+                if (!folc)
                 {
-                    // The layer is the terrain entity's own FoliageComponent - the same one
+                    // The layers are the terrain entity's own FoliageComponent - the same one
                     // "Add Component" in Details would put there.
                     dimText("This landscape has no foliage layer yet.");
                     if (EditorWidgets::primaryButton("Add Foliage Layer", ImVec2(-FLT_MIN, 0.0f)))
@@ -1550,6 +1563,56 @@ void renderPanel(AppContext& ctx)
                 }
                 else
                 {
+                    // Which layer the brush paints: one row per kind of plant, the same
+                    // list as the Foliage component's in Details, sharing its choice
+                    // (FoliageComponent::activeLayer). The number is what it scattered.
+                    sectionLabel("Layers");
+                    {
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        const float rowH = ImGui::GetFrameHeight() * 1.2f;
+                        const int   on   = static_cast<int>(folc->activeIndex());
+                        for (int i = 0; i < static_cast<int>(folc->layers.size()); ++i)
+                        {
+                            const FoliageLayer& l = folc->layers[static_cast<size_t>(i)];
+                            ImGui::PushID(i);
+                            const ImVec2 p = ImGui::GetCursorScreenPos();
+                            const float  w = ImGui::GetContentRegionAvail().x;
+                            if (ImGui::InvisibleButton("##follayer", ImVec2(w, rowH))) folc->activeLayer = i;
+                            const bool hov = ImGui::IsItemHovered();
+                            // The label is the layer's own name, so it is looked up by key.
+                            EditorWidgets::helpForKey("Landscape/Foliage Layer");
+                            if (i == on)
+                            {
+                                dl->AddRectFilled(p, ImVec2(p.x + w, p.y + rowH),
+                                                  (ImGui::GetColorU32(ImGuiCol_ButtonActive) & 0x00FFFFFFu) | 0x30000000u, 5.0f);
+                                dl->AddRect(p, ImVec2(p.x + w, p.y + rowH), ImGui::GetColorU32(ImGuiCol_ButtonActive), 5.0f);
+                            }
+                            else if (hov)
+                                dl->AddRectFilled(p, ImVec2(p.x + w, p.y + rowH), ImGui::GetColorU32(ImGuiCol_FrameBgHovered), 5.0f);
+                            const float ty = p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
+                            const std::string name = foliageLayerLabel(l, static_cast<size_t>(i));
+                            // A hidden layer reads dimmed, as it is in the viewport.
+                            dl->AddText(ImVec2(p.x + 8.0f, ty),
+                                        ImGui::GetColorU32(l.visible ? ImGuiCol_Text : ImGuiCol_TextDisabled), name.c_str());
+                            char count[24];
+                            std::snprintf(count, sizeof(count), "%zu", l.cachedInstances.size());
+                            const float countW = ImGui::CalcTextSize(count).x;
+                            dl->AddText(ImVec2(p.x + w - countW - 8.0f, ty), ImGui::GetColorU32(ImGuiCol_TextDisabled), count);
+                            ImGui::PopID();
+                        }
+                    }
+                    if (folc->layers.size() < FoliageComponent::kMaxLayers)
+                    {
+                        if (EditorWidgets::button("Add Foliage Layer##more"))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Add Foliage Layer");
+                            folc->addLayer();
+                        }
+                        EditorWidgets::helpForLabel("Add Foliage Layer##more");
+                    }
+                    // The choice may have changed and the list may have grown (moving it).
+                    fol = folc->active();
+
                     // What grows: the mesh and material live on the layer, and without a
                     // mesh the brush paints a mask nobody can see.
                     sectionLabel("Layer");
@@ -1646,11 +1709,22 @@ void renderPanel(AppContext& ctx)
                 EditorWidgets::checkbox("Dig Bed##water", &s_waterDig);
                 EditorWidgets::helpForLabel("Dig Bed##water");
                 ImGui::BeginDisabled(!s_waterDig);
-                rowLabel("Depth");
+                rowLabel("Max Depth");
                 ImGui::DragFloat("##water_depth", &s_waterDigDepth, 0.05f, 0.0f, 200.0f, "%.2f m");
-                EditorWidgets::helpForLabel("Depth##water");
-                ImGui::EndDisabled();
+                EditorWidgets::helpForLabel("Max Depth##water");
+                rowLabel("Slope");
+                ImGui::DragFloat("##water_slope", &s_waterBedSlope, 0.005f, HE::water::kMinBedSlope, HE::water::kMaxBedSlope, "%.3f");
+                EditorWidgets::helpForLabel("Slope##water");
+                rowLabel("Bed Roughness");
+                ImGui::SliderFloat("##water_rough", &s_waterBedRough, 0.0f, 1.0f, "%.2f");
+                EditorWidgets::helpForLabel("Bed Roughness##water");
                 s_waterDigDepth = std::max(0.0f, s_waterDigDepth);
+                s_waterBedSlope = std::clamp(s_waterBedSlope, HE::water::kMinBedSlope, HE::water::kMaxBedSlope);
+                s_waterBedRough = std::clamp(s_waterBedRough, 0.0f, 1.0f);
+                dimText("Full depth %.1f m from the shore", s_waterDigDepth / s_waterBedSlope);
+                ImGui::EndDisabled();
+                EditorWidgets::checkbox("Close Bed on Erase##water", &s_waterCloseBed);
+                EditorWidgets::helpForLabel("Close Bed on Erase##water");
 
                 // The grid the water lives on: cells per side over the whole
                 // landscape. A typed field, like the weightmap's (32..2048 on a few
@@ -1679,6 +1753,20 @@ void renderPanel(AppContext& ctx)
                     }
                 }
                 dimText("%.1f m per cell", tc.sizeX / static_cast<float>(std::max(1u, tc.water.res)));
+
+                // The water's waves as real geometry (GPU tessellation of the engine water material's
+                // Static Switch "Tessellation"): a landscape-wide switch, like the shore clipping.
+                {
+                    bool tess = tc.water.tessellation;
+                    if (EditorWidgets::checkbox("Tessellation##water", &tess))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow("Water Tessellation");
+                        tc.water.tessellation = tess;
+                    }
+                    EditorWidgets::helpForLabel("Tessellation##water");
+                    ImGui::SameLine();
+                    dimText("(per-body height and coast fade: Tessellated Waves, below)");
+                }
 
                 ImGui::Spacing();
                 dimText("LMB drag in the viewport to paint water. Ctrl+drag does the opposite.");
@@ -1891,6 +1979,45 @@ void renderPanel(AppContext& ctx)
 
                             if (fogEdited && fog != b.underwaterFog)
                                 WF::setUnderwaterFog(tc, b.id, fog);
+                            ImGui::TreePop();
+                        }
+
+                        // ── Tessellated waves of this body ───────────────────────────────
+                        // HE::water::TessellationParams: how high the real waves stand and how
+                        // far from the coast they grow in. A river wants a fraction of what a
+                        // sea does, so it is per body. Only acts while the landscape's
+                        // Tessellation switch (above) is on, so the rows grey out otherwise.
+                        const bool tessOpen = ImGui::TreeNodeEx("Tessellated Waves##wtess", physFlags);
+                        EditorWidgets::helpForLabel("Tessellated Waves##wtess");
+                        if (tessOpen)
+                        {
+                            WF::TessellationParams tp = b.tessellation;
+                            bool tpEdited = false;
+                            const auto trackTess = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Tessellated Waves");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+                            ImGui::BeginDisabled(!tc.water.tessellation);
+                            rowLabel("Wave Height");
+                            if (ImGui::DragFloat("##wtess_height", &tp.height, 0.01f, 0.0f, HE::water::kMaxTessHeight, "%.2f x"))
+                                tpEdited = true;
+                            trackTess();
+                            EditorWidgets::helpForLabel("Wave Height##wtess");
+                            rowLabel("Coast Fade");
+                            if (ImGui::DragFloat("##wtess_shore", &tp.shoreWidth, 0.02f, HE::water::kMinTessShore,
+                                                 HE::water::kMaxTessShore, "%.2f m"))
+                                tpEdited = true;
+                            trackTess();
+                            EditorWidgets::helpForLabel("Coast Fade##wtess");
+                            ImGui::EndDisabled();
+                            if (tpEdited && tp != b.tessellation)
+                                WF::setTessellation(tc, b.id, tp);
                             ImGui::TreePop();
                         }
 

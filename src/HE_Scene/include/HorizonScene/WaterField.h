@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/UUID.h>
 #include <Math/Math.h>
+#include <Physics/WaterWaves.h>   // the tessellated surface's defaults (TessellationParams)
 #include <cstdint>
 #include <vector>
 
@@ -245,6 +246,48 @@ namespace HE::water
     // default, each knob clamped to its kMin..kMax above (intensity and speed 0..max).
     UnderwaterCausticsParams clampUnderwaterCaustics(const UnderwaterCausticsParams& p);
 
+    // How the tessellated surface of ONE body behaves (Physics/WaterWaves.h, the material's
+    // "TessWaves" knob): a river wants a fraction of the swell, an open sea the whole of it, and
+    // every body fades the waves out toward its coast. Only read while the landscape's
+    // Field::tessellation is on.
+    struct TessellationParams
+    {
+        float height     = kDefaultTessHeight;   // x the trains' own amplitude
+        float shoreWidth = kDefaultTessShore;    // metres of water over which the waves grow in from the shore
+
+        bool operator==(const TessellationParams& o) const { return height == o.height && shoreWidth == o.shoreWidth; }
+        bool operator!=(const TessellationParams& o) const { return !(*this == o); }
+    };
+    // Held to 0..kMaxTessHeight and kMinTessShore..kMaxTessShore; a non-finite value is the default.
+    TessellationParams clampTessellation(const TessellationParams& p);
+
+    // The bed the water brush digs under a body (Thema 206 Schritt 9): its depth
+    // follows the distance from the shore, not the brush. The bed sinks by `slope`
+    // metres per metre walked in from the shoreline until it is `maxDepth` below
+    // the surface, and stays there; `roughness` is a share of the depth that a
+    // fixed noise adds or takes away, so the shoreline itself stays clean.
+    // Saved with the body only while `enabled`; part of sameContent and Delta.
+    inline constexpr float kMaxBedDepth     = 200.0f;
+    inline constexpr float kMinBedSlope     = 0.01f;
+    inline constexpr float kMaxBedSlope     = 2.0f;
+    inline constexpr float kDefaultBedSlope = 0.25f;
+    struct BrushBedParams
+    {
+        bool  enabled   = false;
+        float maxDepth  = 1.0f;                 // m below the body's level
+        float slope     = kDefaultBedSlope;     // m of depth per m from the shore
+        float roughness = 0.0f;                 // 0..1, share of the depth
+        // The distance from the shore at which the bed reaches maxDepth.
+        float fullDepthDistance() const { return slope > 0.0f ? maxDepth / slope : 0.0f; }
+        bool operator==(const BrushBedParams& o) const
+        {
+            return enabled == o.enabled && maxDepth == o.maxDepth && slope == o.slope && roughness == o.roughness;
+        }
+        bool operator!=(const BrushBedParams& o) const { return !(*this == o); }
+    };
+    // Held to its bounds; a non-finite value becomes the default.
+    BrushBedParams clampBrushBed(const BrushBedParams& p);
+
     struct Body
     {
         uint16_t id    = kNoBody;
@@ -258,6 +301,14 @@ namespace HE::water
         UnderwaterFogParams underwaterFog{};
         // The refracted-light net from below (Thema 185 Schritt 3); same rule.
         UnderwaterCausticsParams underwaterCaustics{};
+        // The tessellated surface's strength and coast fade (only with Field::tessellation).
+        TessellationParams tessellation{};
+        // The bed the water brush last dug under this body (see BrushBedParams).
+        BrushBedParams brushBed{};
+        // What the brush's digs moved, summed over every dab (height after minus
+        // height before, so lowered ground is negative): the way back for the eraser's
+        // "Close Bed". Saved with the bed; sanitize drops one that does not fit.
+        GroundPatch brushPatch;
         // The outline the lake's cells were last laid from (terrain-local XZ, the
         // polygon of the spline, no closing duplicate). Empty for brush water and
         // for a lake whose spline never reached the field. It is the baseline the
@@ -320,6 +371,11 @@ namespace HE::water
         //                   level meets the ground.
         bool  clipToGround   = true;
         float shoreOvershoot = kDefaultShoreOvershoot;
+        // The water's waves as real geometry: the engine water material with its
+        // "Tessellation" switch on (GPU tessellation displaces the surface along its
+        // normal by the swell). A landscape-wide setting like the shore clipping; off by
+        // default (it costs GPU time, and Metal draws the surface flat either way).
+        bool  tessellation   = false;
 
         // ── Runtime, never serialised ────────────────────────────────────────
         // An edit that changed cells sets `dirty`, widens the terrain-local XZ
@@ -328,6 +384,8 @@ namespace HE::water
         // rather compare numbers than watch a flag. A loaded field starts dirty
         // over the whole terrain (the surface is rebuilt, never saved).
         bool     dirty = false;
+        // Ticks until WaterSurface tries to load a missing water material again.
+        uint32_t materialWait = 0;
         float    dirtyMinX = 0.0f, dirtyMinZ = 0.0f, dirtyMaxX = 0.0f, dirtyMaxZ = 0.0f;
         uint64_t revision = 0;
 
@@ -340,7 +398,7 @@ namespace HE::water
         bool pristine() const
         {
             return bodies.empty() && coverage.empty() && owner.empty() && res == kDefaultRes &&
-                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot;
+                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot && !tessellation;
         }
 
         const Body* findBody(uint16_t id) const;
@@ -411,6 +469,13 @@ namespace HE::water
     // bounds (clampUnderwaterCaustics). Same non-effect on the sheet as
     // setUnderwaterFog. False for an unknown body.
     bool setUnderwaterCaustics(TerrainComponent& tc, uint16_t id, const UnderwaterCausticsParams& c);
+    // The body's tessellation numbers (TessellationParams), held to their bounds. False for an unknown body.
+    bool setTessellation(TerrainComponent& tc, uint16_t id, const TessellationParams& t);
+
+    // The brush's bed settings of a body, held to their bounds (clampBrushBed).
+    // Moves no sheet (the ground is the brush's to dig, not this call's), so like the
+    // settings above it only bumps Field::revision. False for an unknown body.
+    bool setBrushBed(TerrainComponent& tc, uint16_t id, const BrushBedParams& bed);
 
     // Shore clipping on or off and its overshoot (Field::clipToGround,
     // shoreOvershoot), every surface of the landscape rebuilt. The overshoot is

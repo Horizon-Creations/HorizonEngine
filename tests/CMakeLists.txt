@@ -8,6 +8,9 @@ add_executable(he_tests
     test_asset_ref_scan.cpp
     test_scene_pick.cpp
     test_material_graph.cpp
+    test_material_branching.cpp
+    test_material_tessellation.cpp
+    test_auto_landscape_variants.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp
     test_animator_state_machine_graph.cpp
@@ -66,6 +69,13 @@ add_executable(he_tests
     # velocity/resolve/sharpen drawn on WARP (Windows only for the latter).
     test_temporal_aa.cpp
     test_gi_bvh.cpp
+    test_gi_blas_store.cpp
+    # Rays / resolution / blur per GI-reflection tier, one table for all backends.
+    test_gi_reflection_tier.cpp
+    # Staging ring + mesh-memory free list of the Vulkan upload path (REN-802/803).
+    test_vulkan_upload_alloc.cpp
+    # Accept/reject rules of the on-disk VkPipelineCache file (REN-808).
+    test_vulkan_pipeline_cache.cpp
     test_gi_probe_grid.cpp
     test_undo.cpp
     test_editor_selection.cpp
@@ -90,6 +100,9 @@ add_executable(he_tests
     # HE_DUMP_RHI against the config's RHI: the forced backend is the one the
     # editor keeps after OnInit, or its first UI frame crashes (Thema 124, A6).
     test_editor_backend_choice.cpp
+    # Window size/position/maximized remembered across starts: the pure rules,
+    # incl. the fall-back when the saved monitor is gone.
+    test_editor_window_placement.cpp
     # …and the row itself, driven headless: the two buttons sit ON the tree
     # node (AllowOverlap), and whether a click reaches them or selects the row
     # is a question only a pointer can answer.
@@ -110,12 +123,13 @@ add_executable(he_tests
     # The Watch window, driven the same way: sections and rows from a real
     # runtime stopped at a breakpoint, Go to Node raising the reveal.
     test_hc_watch_ui.cpp
-    # The Task Board window, driven the same way: cards from a real board in a
-    # real project, links dropped onto them, chips that select and jump.
-    test_taskboard_ui.cpp
     # The board's footer widget in a stand-in footer: one line tall in every
     # state, kept out of the middle, and its list ticks tasks off on disk.
     test_taskboard_footer_ui.cpp
+    # The Planner tab, driven the same way: Tasks is the Task Board (a new row, a
+    # title typed into a cell, links dropped on it and chips that jump, a pull under
+    # it, assignees from a team), a header sort, a card dragged to another lane.
+    test_planner_ui.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -133,6 +147,10 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    # The Material Editor tab, driven the same way: the Tessellation cell and its
+    # popup while the Displacement pin is wired, on a renderer that tessellates
+    # and on one that does not (Thema 207).
+    test_material_editor_ui.cpp
     # The reward moments: once per frame, once per build run, the fade.
     test_editor_rewards.cpp
     test_editorcamera.cpp
@@ -144,6 +162,9 @@ add_executable(he_tests
     test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # Thema 210: a landscape texture array that arrives late renders like a first load
+    # (content epoch on download + the backends' graph-texture miss sweep, source-pinned).
+    test_landscape_reload.cpp
     # The water model: bodies, coverage + owner raster, circle/polygon edits, scene format, undo.
     test_water_field.cpp
     test_water_surface.cpp
@@ -188,15 +209,31 @@ add_executable(he_tests
     # scatter had no running test until the density mask needed one.
     test_foliage.cpp
     test_foliage_cluster.cpp
+    # Several foliage layers per landscape (Thema 182): format, scatter, extract, refs.
+    test_foliage_layers.cpp
+    # Placement rules of a foliage layer (Thema 180 S4): slope, height, paint weight, determinism.
+    test_foliage_rules.cpp
+    # The layer meshes through the instancing path (Thema 180 S5): boxes, flat draw count, passes.
+    test_layer_mesh_instancing.cpp
+    # Detail levels of a foliage layer (Thema 182 S3, plan 3a): level per plant, thinning,
+    # hysteresis per view, the cross-card file.
+    test_foliage_lod.cpp
+    # Straddler buckets on the pool give the single-threaded result (Thema 238 S2).
+    test_foliage_parallel.cpp
+    # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
+    test_graph_instancing.cpp
     test_debug_draw.cpp
     # Bloom's 9-tap blur folded into 5 bilinear taps (perf audit B4): CPU replay.
     test_bloom_kernel.cpp
     # Metal's per-frame upload ring (perf audit B6): slices, recycling, threads.
     test_frame_upload_ring.cpp
+    # D3D12/Vulkan instance-arena sizing (Thema 182 step 8): 500k plants in range replayed.
+    test_instance_arena.cpp
     test_profiler.cpp
     test_profiler_stats.cpp
     test_profiler_layout.cpp
     test_audio.cpp
+    test_audio_formats.cpp
     # Audio Editor edit model (Thema 168): trim, volume curve, bus, EQ biquads.
     test_audio_edit.cpp
     # …and what the engine does with its bus and EQ: routing, measured response.
@@ -255,6 +292,7 @@ add_executable(he_tests
     test_root_motion.cpp
     test_animation_notify.cpp
     test_animation_layers.cpp
+    test_animation_bench.cpp
     test_blend_space.cpp
     test_sequencer_timeline.cpp
     test_sequence.cpp
@@ -271,6 +309,9 @@ add_executable(he_tests
     # Its own file so it gets its own PROCESS: the shared font atlas is baked
     # once, and this is the one run that bakes it in the regular weight.
     test_ui_font_weight.cpp
+    # Same reason: needs a process whose shared font is not baked yet.
+    test_ui_font_scripts.cpp
+    test_ui_text_layout_digest.cpp
     test_app_icon.cpp
     test_hidden_window.cpp
     test_document_types.cpp
@@ -288,13 +329,33 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
+    test_texture_bcn.cpp
+    # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
+    test_bench_landscape_arrays.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
+    test_export_sdk_build.cpp
+    # Topic 219 step 2: the importers' lean asset writer (TLS-101) and the pack
+    # manifest the packer CLI now shares with the export (TLS-203).
+    test_tools_writer_cache.cpp
+    # The export lock (Platform/ProjectWriteGate.h). Was only in the HE_IMGUI_ENABLED
+    # property list below, so it never ran, and the gate's state being one copy per
+    # Windows DLL went unseen.
+    test_project_write_gate.cpp
     test_project_settings.cpp
     test_task_board.cpp
+    # The Planner's databases and pages and their files (Config/Planner/*).
+    test_planner.cpp
+    # ...its workspace and the Task Board import (ImGui-free).
+    test_planner_workspace.cpp
+    # The Planner as tools: the Markdown a page speaks, and planner_* over a real workspace.
+    test_planner_markdown.cpp
+    test_planner_board.cpp
+    test_mcp_tools_planner.cpp
     # Assigning, posting updates and notices between two editors over a fake
     # team link, on one fake clock.
     test_taskboard_team.cpp
@@ -346,6 +407,8 @@ add_executable(he_tests
     # The same probe through a bundled (quoted) cmake — what a packaged editor
     # runs, and what cmd.exe /c used to cut apart (Thema 96).
     test_toolchain_quoting.cpp
+    # Recheck after Tool Setup installed cmake must not serve the cached "not found".
+    test_toolchain_recheck.cpp
     test_toolchain_vswhere.cpp
     test_crypto_x25519.cpp
     test_net_bitstream.cpp
@@ -436,8 +499,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderExtractor.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FoliageExtract.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiAutoLandscape.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiInstanceSurface.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderWorld.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrustumCuller.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/FrameCull.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/OcclusionCuller.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderSorter.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/ScenePick.cpp
@@ -452,6 +517,7 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GPUMemoryAllocator.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/RenderResourceManager.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBvh.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/GiBlasStore.cpp
     # The software UI rasterizer, compiled in for the same reason as the culler:
     # it is quads-in-pixels-out with no SDL, no window and no IRenderer, so what
     # the UI style vocabulary ACTUALLY draws is answerable headless — the one
@@ -618,6 +684,10 @@ add_executable(he_tests
     # The task tools, with the Task Board panel's real board behind one editor
     # and a second editor's bridge on the fake team (test_mcp_tools_taskboard.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsTaskBoard.cpp
+    # The Planner tools and the Markdown they speak (test_mcp_tools_planner.cpp,
+    # test_planner_markdown.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolsPlanner.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerMarkdown.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorSettingsCatalog.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/McpToolCommon.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetStubWriter.cpp
@@ -637,6 +707,13 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationStore.cpp
     # The task board's data and its project file (test_task_board.cpp).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoard.cpp
+    # The Planner over the same helpers (test_planner.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/Planner.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerImport.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerTasks.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerWorkspace.cpp
+    # The Whiteboard: nodes, edges, their file and the media folder (test_planner_board.cpp).
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoard.cpp
     # ...and its team half (test_taskboard_team.cpp; the panel calls it too).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardTeam.cpp
     # The runtime's exec trace as the editor keeps it (test_hc_exec_trace.cpp).
@@ -714,6 +791,9 @@ add_executable(he_tests
     # by construction, so "does a fallback reach the list with its reason" is
     # answerable without a window.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcFallbackReport.cpp
+    # Export with the game compiled from an engine SDK: SDK lookup, the compiled-in
+    # configuration and the swap over the prebuilt runtime. ImGui-free.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkBuild.cpp
     # Renaming a HorizonCode member across assets. Deliberately free of ImGui and
     # of the content system, which is what lets the whole decision — whose call is
     # this, may it be rewritten — be asserted here instead of clicked through.
@@ -857,12 +937,17 @@ add_executable(he_tests
     # The Watch window, for test_hc_watch_ui.cpp: same AppContext, same per-file
     # HE_IMGUI_ENABLED. It reads HcExecTrace and HcWatch (both already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
-    # The Task Board window, for test_taskboard_ui.cpp: same AppContext, same
-    # per-file HE_IMGUI_ENABLED. It reads TaskBoard, EditorCommands and the
-    # thumbnail cache, all already here.
+    # The Task Board's data core and link chips (the window is the Planner's now):
+    # same AppContext, same per-file HE_IMGUI_ENABLED. It reads TaskBoard,
+    # EditorCommands and the thumbnail cache, all already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
     # And its footer widget, for test_taskboard_footer_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
+    # The Planner tab, for test_planner_ui.cpp: same AppContext, same per-file
+    # HE_IMGUI_ENABLED. It reads the Planner (already here) and the Task Board.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     # The recovery dialog, for test_scene_recovery_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED. It reads four callbacks and a RecoveryInfo.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
@@ -876,6 +961,9 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. It reads both probes and the two installers'
     # callbacks; HorizonScene (HcCodegen) and HorizonSourceControl are linked below.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
+    # The export dialog's game-compile line (topic 222), for test_tool_setup_ui.cpp:
+    # same AppContext, same per-file HE_IMGUI_ENABLED; ExportSdkBuild.cpp is above.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkGateUi.cpp
     # The texture colour-space dialog, for test_texture_colour_space_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
@@ -889,7 +977,10 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationPopups.cpp
     # The Build window and its footer cluster, for test_build_footer_ui.cpp: hide a
     # running build, the progress in the footer, the notification when it ends.
+    # The test file itself was only ever in the per-file properties list below,
+    # so it never compiled; listed here since topic 222 step 6.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/BuildProgressDialog.cpp
+    test_build_footer_ui.cpp
     # The Project Settings tab, for test_project_settings_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads ProjectData and
     # writes Config/ProjectSettings.json through the ProjectManager.
@@ -914,6 +1005,10 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED; importer and ContentManager are
     # linked already.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
+    # The Material Editor tab, for test_material_editor_ui.cpp (Thema 207): same
+    # AppContext, same per-file HE_IMGUI_ENABLED. The canvas (GraphEditor), the
+    # pickers, the thumbnail cache and the shader library are already here.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
     # The profiler's Streaming tab and the editor's split/merge of streaming
     # cells, for test_streaming_view.cpp (Thema 153, Schritt 6). Its one
     # outside symbol, the Scene window's show flags, is stubbed in
@@ -949,12 +1044,15 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/HcWatchPanel.cpp
     test_hc_watch_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardPanel.cpp
-    test_taskboard_ui.cpp
     # Builds an AppContext for TaskBoardPanel::board/edit: its layout must be
     # the one the panel was compiled with.
     test_mcp_tools_taskboard.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TaskBoardFooter.cpp
     test_taskboard_footer_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerBoardView.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
+    test_planner_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
@@ -962,6 +1060,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
     test_git_install_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/ExportSdkGateUi.cpp
     test_tool_setup_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
@@ -970,8 +1069,8 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationPopups.cpp
     test_editor_rewards.cpp
     test_notification_popups_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/BuildProgressDialog.cpp
     test_build_footer_ui.cpp
-    test_project_write_gate.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ProjectSettingsPanel.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AppMetadataRows.cpp
     test_project_settings_ui.cpp
@@ -985,6 +1084,8 @@ set_source_files_properties(
     test_widget_designer_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureViewerPanel.cpp
     test_texture_viewer.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/MaterialEditorPanel.cpp
+    test_material_editor_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/StreamingDebugView.cpp
     test_streaming_view.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
@@ -1041,6 +1142,10 @@ endif()
 if(HE_HAVE_ZSTD)
     target_compile_definitions(he_tests PRIVATE HE_HAVE_ZSTD)
 endif()
+# Only the OpenSSL backend caps aesGcm* lengths at INT_MAX (test_game_build_config.cpp).
+if(HE_HAVE_OPENSSL)
+    target_compile_definitions(he_tests PRIVATE HE_HAVE_OPENSSL)
+endif()
 # hpak encryption tests run whenever a crypto backend (system OpenSSL or the
 # fetched mbedTLS fallback) is compiled in — the round-trips go through
 # HorizonCore's backend-agnostic Hpak::aesGcm* API.
@@ -1093,17 +1198,20 @@ endif()
 # emits the compiled classes at BUILD time; they are compiled INTO he_tests so
 # no compiler is needed at test runtime.
 set(HCGEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/hcgen_fixtures)
+# The generated class names: each fixture's file stem in PascalCase (fix/math_ops
+# → MathOps, see classNameFor in HcCodegen.cpp), one hcgen_<Class>.h/.cpp each.
 set(HCGEN_CLASSES
-    flow_branch_sequence coerce_matrix math_ops bitwise_ops vector_ops variables functions_basic
-    functions_recursive foreach_arrays events_multi widget_props limits_smoke
-    functions_locals engine_pure_multiout engine_exec_cached animator_sync
-    ref_target refs_objects dispatch_owner dispatch_listener dispatch_sink
-    latent_flow enums structs GameInstance gi_caller engine_events
-    cast_target casts inherit_base inherit_derived
-    inherit_novars_base inherit_novars input_actions containers reroutes
-    cheat_event datetime_double sequence_transport input_rumble input_rebind player_settings player_slots
-    pull_construct pull_spawner bind_to
-    extract_destruct extract_derived extract_listener
+    FlowBranchSequence CoerceMatrix MathOps BitwiseOps VectorOps Variables FunctionsBasic
+    FunctionsRecursive ForeachArrays EventsMulti WidgetProps LimitsSmoke
+    FunctionsLocals EnginePureMultiout EngineExecCached AnimatorSync
+    RefTarget RefsObjects DispatchOwner DispatchListener DispatchSink
+    LatentFlow Enums Structs GameInstance GiCaller EngineEvents
+    CastTarget Casts InheritBase InheritDerived
+    InheritNovarsBase InheritNovars InputActions Containers Reroutes
+    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings PlayerSlots
+    PullConstruct PullSpawner BindTo
+    ExtractDestruct ExtractDerived ExtractListener
+    EngineWorld
 )
 set(HCGEN_SOURCES ${HCGEN_DIR}/hc_registry.cpp)
 # The generated headers carry the classes themselves and are declared outputs
@@ -1116,15 +1224,20 @@ foreach(t E_FixMood E_FixDup S_FixInner S_FixStats)
     list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_type_${t}.h)
 endforeach()
 foreach(c ${HCGEN_CLASSES})
-    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_C_${c}.cpp)
-    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_C_${c}.h)
+    list(APPEND HCGEN_SOURCES ${HCGEN_DIR}/hcgen_${c}.cpp ${HCGEN_DIR}/hcgen_${c}.reflect.cpp)
+    list(APPEND HCGEN_HEADERS ${HCGEN_DIR}/hcgen_${c}.h)
 endforeach()
 add_custom_command(OUTPUT ${HCGEN_SOURCES} ${HCGEN_HEADERS}
     COMMAND hc_codegen --fixtures --out ${HCGEN_DIR}
     DEPENDS hc_codegen ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen/fixtures.h
     COMMENT "hc_codegen: generating HorizonCode parity fixtures")
-target_sources(he_tests PRIVATE ${HCGEN_SOURCES} test_horizoncode_codegen.cpp)
+target_sources(he_tests PRIVATE ${HCGEN_SOURCES} test_horizoncode_codegen.cpp
+                                test_hc_codegen_readable.cpp)
 target_include_directories(he_tests PRIVATE ${HCGEN_DIR} fixtures/hcodegen)
+# What the generated code looks like (Thema 211 step 7): byte-for-byte golden
+# files of three fixtures, kept LF by .gitattributes.
+set_source_files_properties(test_hc_codegen_readable.cpp PROPERTIES
+    COMPILE_DEFINITIONS HE_TEST_HCGEN_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hcodegen_golden")
 
 # The same generated sources also become a REAL shared library with the C
 # manifest export — test_hccompiled_loader.cpp loads it through
@@ -1137,12 +1250,62 @@ target_compile_definitions(test_hcgen PRIVATE HCGEN_BUILD_DYLIB)
 # project generateCMakeLists() writes does exactly this too.
 set_target_properties(test_hcgen PROPERTIES
     CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON)
-target_link_libraries(test_hcgen PRIVATE HorizonCore)
+# HorizonScene, like generateCMakeLists' project: an Engine Call node is a direct
+# HE::api call (HorizonEngine/HorizonEngineApi.h), and HE::api lives there.
+target_link_libraries(test_hcgen PRIVATE HorizonScene)
 target_include_directories(test_hcgen PRIVATE ${HCGEN_DIR})
 add_dependencies(he_tests test_hcgen)
 target_sources(he_tests PRIVATE test_hccompiled_loader.cpp)
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_HCGEN_LIB="$<TARGET_FILE:test_hcgen>")
+
+# ─── Engine API for generated code (Thema 211 step 6) ─────────────────────────
+# hc_codegen spells every HE::api registry row as a direct C++ call through
+# HorizonEngine/HorizonEngineApi.h; the file is compiled INTO he_tests, so a row
+# whose cppCall/cppForm/params do not match its function fails this build, and
+# test_engine_api_direct.cpp compares each call with the row's invoke. Depends on
+# HorizonScene as well: the rows live there, and a changed registry must
+# regenerate even if the hc_codegen binary itself comes out unchanged.
+# Not named test_*, so the ctest loop does not register it.
+set(HE_API_DIRECT_SRC ${CMAKE_CURRENT_BINARY_DIR}/engine_api_direct/engine_api_direct_gen.cpp)
+add_custom_command(OUTPUT ${HE_API_DIRECT_SRC}
+    COMMAND hc_codegen --api-direct ${HE_API_DIRECT_SRC}
+    DEPENDS hc_codegen HorizonScene
+    COMMENT "hc_codegen: generating the engine-API direct-call parity source")
+target_sources(he_tests PRIVATE ${HE_API_DIRECT_SRC}
+    test_engine_api_direct.cpp test_engine_api_header.cpp)
+# engine_api_direct.h, which the generated file (in the build tree) includes.
+set_source_files_properties(${HE_API_DIRECT_SRC} PROPERTIES
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Build profile probes (Thema 211 step 2): he_tests has one profile, so the same
+# probe source is compiled once per profile into its own static library and
+# test_build_profile.cpp compares what each copy saw. "default" deliberately
+# skips he_target_build_profile to pin the header's fallback. Not named test_*,
+# so the ctest loop below does not register them as tests of their own.
+foreach(_probe dev release default override)
+    set(_lib he_build_profile_probe_${_probe})
+    add_library(${_lib} STATIC build_profile_probe.cpp)
+    target_compile_features(${_lib} PRIVATE cxx_std_20)
+    string(SUBSTRING "${_probe}" 0 1 _head)
+    string(SUBSTRING "${_probe}" 1 -1 _tail)
+    string(TOUPPER "${_head}" _head)
+    target_compile_definitions(${_lib} PRIVATE HE_PROBE_FN=buildProfileProbe${_head}${_tail})
+    target_include_directories(${_lib} PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+    target_link_libraries(he_tests PRIVATE ${_lib})
+endforeach()
+he_target_build_profile(he_build_profile_probe_dev PROFILE dev)
+he_target_build_profile(he_build_profile_probe_release PROFILE release)
+he_target_build_profile(he_build_profile_probe_override PRIVATE PROFILE release
+                        FEATURES TEST_HOOKS=1)
+target_sources(he_tests PRIVATE test_build_profile.cpp)
+
+# Compiled-in project configuration (Thema 211 step 4): the test includes the
+# generator's checked-in output, so only its own TU gets the fixture directory.
+target_sources(he_tests PRIVATE test_game_build_config.cpp)
+set_source_files_properties(test_game_build_config.cpp PROPERTIES
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config
+    COMPILE_DEFINITIONS HE_TEST_GAME_BUILD_CONFIG_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config/HEGameBuildConfig.h")
 
 # ─── Process-runner fixture ────────────────────────────────────────────────────
 # A real child process, because every bug HE::Proc exists to avoid is invisible
@@ -1197,6 +1360,13 @@ target_compile_definitions(he_tests PRIVATE
 # of engineRootFromSdk(); here the build system already knows it.
 target_compile_definitions(he_tests PRIVATE
     HE_TEST_ENGINE_ROOT="${CMAKE_SOURCE_DIR}")
+
+# The "Compile HorizonCode" export with a real compiler (Thema 211 step 7): the
+# test writes the he_sdk_config.json a development editor writes beside itself
+# (src/HE_Editor/CMakeLists.txt), so it needs the same three values.
+target_sources(he_tests PRIVATE test_hc_codegen_export_build.cpp)
+set_source_files_properties(test_hc_codegen_export_build.cpp PROPERTIES
+    COMPILE_DEFINITIONS "HE_TEST_GLM_DIR=\"${glm_SOURCE_DIR}\";HE_TEST_CORE_LIB_DIR=\"$<TARGET_FILE_DIR:HorizonCore>\";HE_TEST_SCENE_LIB_DIR=\"$<TARGET_LINKER_FILE_DIR:HorizonScene>\"")
 
 add_library(test_gamelogic_services SHARED fixtures/test_gamelogic_services.cpp)
 target_include_directories(test_gamelogic_services PRIVATE
@@ -1269,7 +1439,9 @@ endif()
 # with libssh2, like HorizonSelfUpdate) and its private src/ for CsRename.h. Its
 # ctest entry gets its own HOME/APPDATA below — see the ENVIRONMENT after the loop.
 if(TARGET HorizonContentSync)
-    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp)
+    # test_sftp_connection.cpp: SftpConnection's session reuse (CSY-101); its live
+    # case runs only with HE_TEST_SFTP pointing at a throwaway server.
+    target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)
@@ -1333,6 +1505,21 @@ if(WIN32)
         ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D11/D3D11ShaderManager.cpp
         ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/D3D12/D3D12ShaderManager.cpp)
     target_link_libraries(he_tests PRIVATE d3dcompiler d3d11)
+    # The FXC bytecode cache both renderers start from (Thema 196): header-only
+    # under src/Backends/D3D_Shared, driven through timedD3DCompile.
+    target_sources(he_tests PRIVATE test_d3d_shader_cache.cpp)
+    target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src)
+endif()
+
+# The Vulkan shader manager (review 4, findings 385/386): compiled straight into
+# the test exe, same reasoning as the D3D managers above — load() needs no
+# VkDevice to exercise its id allocation and file-to-SPIR-V-bytes path, so this
+# runs without a Vulkan driver, CI included.
+if(HE_VULKAN_ENABLED)
+    target_sources(he_tests PRIVATE
+        test_vulkan_shader_manager.cpp
+        ${CMAKE_SOURCE_DIR}/src/HE_Rendering/src/Backends/Vulkan/VulkanShaderManager.cpp)
+    target_link_libraries(he_tests PRIVATE Vulkan::Vulkan)
 endif()
 
 # One ctest entry per test SOURCE FILE, not one for the whole binary.
@@ -1437,53 +1624,30 @@ if(Python3_Interpreter_FOUND)
                      "${CMAKE_SOURCE_DIR}/tests/test_heproj_file_types.py")
 endif()
 
-# ── "How heavy is what we actually ship?" ────────────────────────────────────
-# docs/he-apps-plan.md A3 wrote a size table into the plan and got it wrong,
-# because the numbers came from a tree that was not a Release build. That is why
-# this is a test with a threshold rather than a paragraph: the MEASURING POINT is
-# part of the claim, and it is printed with every run.
-#
-# It measures the deploy tree the exporter copies verbatim into a packaged build.
-# Absent (a configure without the deploy step, a fresh checkout) is a SKIP, not a
-# failure — exit code 2, declared below — or every such build would go red for
-# having nothing to weigh.
-#
-# The build type is handed over for the same reason the path is printed: the
-# thresholds were measured on a RELEASE tree and mean nothing on a Debug one,
-# which is several times the size. Anything else reports and skips.
-#
-# One test per runtime flavour (docs/he-apps-plan.md A3b), because the three are
-# different artefacts with different limits and a single number would either let
-# the app runtimes grow unwatched or fail the game runtime on day one. Only the
-# game flavour is deployed by an ordinary build; the two app ones come from
-# scripts/build_runtimes.py, so on a normal machine — and in CI — they skip. That
-# is deliberate: the test exists so that a tree which HAS built them is measured,
-# and it costs nothing in one that has not.
-if(Python3_Interpreter_FOUND)
-    set(_runtime_size_dirs
-        runtime_size              "${DEPLOY_DIR}/Game"        game
-        runtime_size_app_advanced "${DEPLOY_DIR}/AppAdvanced" app-advanced
-        runtime_size_app_basic    "${DEPLOY_DIR}/AppBasic"    app-basic)
-    list(LENGTH _runtime_size_dirs _rs_len)
-    math(EXPR _rs_last "${_rs_len} / 3 - 1")
-    foreach(_i RANGE ${_rs_last})
-        math(EXPR _n "${_i} * 3")
-        math(EXPR _d "${_n} + 1")
-        math(EXPR _f "${_n} + 2")
-        list(GET _runtime_size_dirs ${_n} _rs_name)
-        list(GET _runtime_size_dirs ${_d} _rs_dir)
-        list(GET _runtime_size_dirs ${_f} _rs_flavor)
-        # --flavor is passed explicitly rather than left to the directory name:
-        # DEPLOY_DIR is a cache PATH a user may point anywhere, and a runtime
-        # weighed against the wrong flavour's threshold is worse than none.
-        add_test(NAME ${_rs_name}
-                 COMMAND ${Python3_EXECUTABLE}
-                         "${CMAKE_SOURCE_DIR}/scripts/runtime_size.py"
-                         "${_rs_dir}" --check "--flavor=${_rs_flavor}"
-                         "--build-type=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,${CMAKE_BUILD_TYPE}>")
-        set_tests_properties(${_rs_name} PROPERTIES SKIP_RETURN_CODE 2)
-    endforeach()
-endif()
+# ── "Does a game build against the engine SDK?" (Thema 211 steps 5 and 9) ───
+# Installs this tree's HorizonSDK component (its lib set of the one SDK), moves
+# it, checks that only compiler input is in it, and builds two projects that see
+# nothing of this tree: a probe (one call into each library, the profile it was
+# handed, a missing lib set and a stale header stamp refused) and the shipped
+# template, i.e. HorizonGame from the SDK with the golden HEGameBuildConfig.h
+# compiled in. Both lib sets in one SDK: run the driver by hand with
+# -DHE_BUILD_DIR_2=<release tree> -DHE_PROFILE_2=release. Same
+# generator and compilers as this tree; the work dir sits in the build tree, not
+# in /tmp. Needs the engine libraries built (an ordinary full build).
+add_test(NAME sdk_example_project
+         COMMAND ${CMAKE_COMMAND}
+                 "-DHE_BUILD_DIR=${CMAKE_BINARY_DIR}"
+                 "-DHE_SOURCE_DIR=${CMAKE_SOURCE_DIR}"
+                 "-DHE_WORK_DIR=${CMAKE_BINARY_DIR}/sdk-test"
+                 "-DHE_PROFILE=${HE_BUILD_PROFILE}"
+                 "-DHE_CONFIG=$<IF:$<BOOL:$<CONFIG>>,$<CONFIG>,Release>"
+                 "-DHE_GENERATOR=${CMAKE_GENERATOR}"
+                 "-DHE_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+                 "-DHE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}"
+                 "-DHE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+                 "-DHE_OBJCXX_COMPILER=${CMAKE_OBJCXX_COMPILER}"
+                 -P "${CMAKE_SOURCE_DIR}/tests/sdk_example/run_sdk_example.cmake")
+set_tests_properties(sdk_example_project PROPERTIES TIMEOUT 1500 LABELS sdk)
 
 # The socket tests bind ephemeral ports, but they also probe the LAN (SSDP
 # multicast) and hand sessions between two live endpoints. Letting two of them

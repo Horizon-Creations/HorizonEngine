@@ -27,6 +27,13 @@ Exit code 0 = every selected case passed, 1 = a case failed, 2 = usage.
 """
 import argparse, json, os, pathlib, re, shutil, struct, subprocess, sys, time
 
+# The case headers and verdicts print box-drawing characters and arrows. On a Windows runner stdout is
+# cp1252 and the first header raised UnicodeEncodeError (run 39532559913: the D3D11/D3D12 layer-mesh step
+# died before it rendered anything). Write UTF-8 whatever the console says.
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace")
+
 # ── Cases ────────────────────────────────────────────────────────────────────
 # Each case: shared HE_DUMP_* keys (`base`), then named variants that add keys
 # (`dump`) or raw environment (`env`). `pairs` are the A/B comparisons;
@@ -80,9 +87,16 @@ CASES = {
         "variants": {
             "window":    {"env": {"HE_FORWARD_CLUSTER": "0"}},
             "clustered": {},
+            # REN-802/803: the old wait after every upload. The meshes now copy
+            # through the deferred upload batch into device-local memory; drawn
+            # with the batch submitted in front of the frame, the picture must
+            # be the one the blocking path draws (this scene is bit-identical
+            # from run to run, so the bound is near zero).
+            "sync":      {"env": {"HE_VK_UPLOAD_SYNC": "1"}},
         },
-        "pairs": [("window", "clustered", 1.5)],
-        "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"]},
+        "pairs": [("window", "clustered", 1.5), ("sync", "clustered", None, 0.05)],
+        "require": {"clustered": ["HE_DUMP_MANYLIGHTS witness scene added"],
+                    "sync":      ["HE_VK_UPLOAD_SYNC"]},
     },
     # Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10.11):
     # G-buffer pass → resolve (heLitP, the same code graph materials shade with)
@@ -196,10 +210,16 @@ CASES = {
                     "sw": ["GI probe grid", "software GI path forced"]},
     },
     # GI reflections on the same scene: the green and the glowing red cube should
-    # appear in the mirror floor (docs/gi-reflections-plan.md). REPORT ONLY:
-    # Vulkan has no GI reflections yet (giRefl gate stays 0, GI doc §7.1) and the
-    # first lavapipe run measured off == on to the byte. The number is here so the
-    # day it moves is visible; make it a judged pair once Vulkan draws them.
+    # appear in the mirror floor (docs/gi-reflections-plan.md). Still REPORT
+    # ONLY as of Thema 191 step 6 (gi_refl.comp SW kernel + blur/mix landed):
+    # the mirror FLOOR itself is a plain MaterialAsset, so it renders through
+    # the built-in PBR shader and shows nothing (no giRefl cascade there on any
+    # backend yet) — only the graph-material cubes change. First real (non-
+    # byte-identical) measurement, RTX 4070 not lavapipe: off vs on mean |Δ|
+    # 0.19, max 49, 3.7% of pixels changed by >2 steps — no validation layer
+    # messages. No lavapipe number yet (CI's software ICD may differ from a
+    # real GPU's numbers); make it a judged pair (min_mean) once CI reports
+    # one, the same way "gi" above picked 0.3.
     "gi_refl": {
         "base": {"GIREFLTEST": "1", "GI": "1", "SKYTEST": "1", "CAMY": "3", "CAMZ": "0",
                  "PITCH": "-12", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
@@ -264,6 +284,37 @@ CASES = {
                                "-> heLandscapeWeights bound"]},
         "probes": {v: [("green disc", 0.50, 0.50, "g"), ("blue disc", 0.32, 0.70, "b"),
                        ("red field", 0.50, 0.20, "r")] for v in ("gi_off", "gi_on")},
+    },
+    # Layer meshes on the instancing path (Thema 180 Schritt 5, docs/auto-landscape-material-2-instancing-2026-10-21.md):
+    # the six preset meshes (tuft, pebble, rocks A/B/C, snow drift - engine FILES, loaded by the
+    # witness) scattered over the Auto Landscape witness relief with the default terrain
+    # material, seen from above. "off" has no layer; x4 and x16 scatter four and sixteen times
+    # the preset density. The verdicts: the meshes are in the picture (off vs x4 differs), all
+    # 16 level files came with their engine UUID (a mesh that is not resident is never culled
+    # and a backend draws a fallback), the cluster path ran (the FoliageExtract line), and the
+    # draw count does not follow the instance count: x16 carries ~4x the instances (triangles)
+    # of x4 in the same number of draws (`flat`: draws may differ by at most the tolerance,
+    # triangles must grow). Measured on Metal and OpenGL (macOS, 21.10.2026), top-down view:
+    # draws 9 (off) / 20 (x4) / 20 (x16), triangles 78336 / 436732 / 1534532, identical on both
+    # backends; off vs x4 mean |d| 1.7 (Metal) and 2.1 (GL), so 0.8 is about half. D3D12 counts
+    # the shadow cascades in its draws (docs/foliage-instancing-lod-plan-2026-10-10.md 17.4),
+    # which is why the verdict compares x4 with x16 and never with off.
+    "layer_meshes": {
+        "base": {"AUTOLAND": "builtin", "SKYTEST": "1", "CAMX": "-20", "CAMY": "345", "CAMZ": "0",
+                 "PITCH": "-89", "YAW": "0", "TOD": "0.4", "CLOUDMODE": "0", "COVERAGE": "0",
+                 "AA": "0", "RENDERPATH": "0"},
+        "variants": {
+            "off": {"dump": {}},
+            "x4":  {"dump": {"AUTOLANDMESHES": "tuft,pebble,rocka,rockb,rockc,snowdrift",
+                             "AUTOLANDMESHDENS": "4"}, "env": {"HE_FOLIAGE_STATS": "1"}},
+            "x16": {"dump": {"AUTOLANDMESHES": "tuft,pebble,rocka,rockb,rockc,snowdrift",
+                             "AUTOLANDMESHDENS": "16"}, "env": {"HE_FOLIAGE_STATS": "1"}},
+        },
+        "pairs": [("off", "x4", 0.8), ("x4", "x16", None)],
+        "require": {v: ["HE_DUMP_AUTOLANDMESHES 6 layer(s), 16 of 16 level mesh(es) loaded with their engine UUID",
+                        "FoliageExtract: 6 layer(s)"] for v in ("x4", "x16")},
+        "forbid": {v: ["HE_DUMP_AUTOLANDMESHES 6 layer(s), 0 of", "cluster(s) for 0 of"] for v in ("x4", "x16")},
+        "flat": [("x4", "x16", 2)],
     },
     # Black GI stripes (Thema 159, docs/gi-stripes-vulkan-d3d-ursache-2026-10-07.md):
     # the GI sun-shadow mask starts its rays at the GI G-buffer position + 5 cm
@@ -340,8 +391,18 @@ CASES = {
     # 11.73; up window (0.45, 0.12) rgb (171, 190, 203) vs below the rim (0.50, 0.85)
     # (34, 99, 112). Vulkan draws this scene brighter (the floor nearly white, Thema 185
     # §8.1) and the net saturates there: 185's net measured 0.23 on Vulkan against 0.63
-    # on GL. 1.5 is a third of 11.73 scaled by that factor — it fails when the net is
-    # silently off (0), not when it is one shade weaker. Tighten after the first run.
+    # on GL. 1.5 was a third of 11.73 scaled by that factor — it failed when the net was
+    # silently off (0), not when it was one shade weaker.
+    #
+    # Commit ae454c76 (27.10.2026, "gain 0.12 and a soft ceiling so the lines stop
+    # clipping to white") deliberately dimmed the net — kGain 0.45->0.05/0.12, kMaxLine
+    # 0.2 caps every line's brightness, kDark 0.6->0.3 — to fix lines that blew out to
+    # white. That retuning lowered the real on/off delta on lavapipe to 0.8653, bit-for-bit
+    # identical across three independent CI runs on three different commits since
+    # (40591581239, 40559168721, 40534310520): this is the new deterministic baseline,
+    # not flake. 0.5 keeps the same margin the old threshold had (a fraction of the
+    # measured baseline) and still fails hard on a silently-disabled net (delta 0).
+    # Re-tighten if the net is retuned again.
     "underwater": {
         "base": {"WATERLAKE": "bowl", "SKYTEST": "1", "TOD": "0.45", "COVERAGE": "0.2",
                  "CLOUDMODE": "0", "AA": "0", "BLOOM": "0", "RENDERPATH": "1",
@@ -352,7 +413,7 @@ CASES = {
             "floor":     {"dump": {"CAMZ": "28", "PITCH": "-20"}, "env": {"HE_SKY_TIME": "5"}},
             "up":        {"dump": {"CAMZ": "20", "PITCH": "35"}, "env": {"HE_SKY_TIME": "5"}},
         },
-        "pairs": [("floor_off", "floor", 1.5)],
+        "pairs": [("floor_off", "floor", 0.5)],
         "require": {v: ["HE_DUMP_WATERLAKE witness landscape added"]
                     for v in ("floor_off", "floor", "up")},
         "samples": {"up": {"window": (0.45, 0.12), "below_rim": (0.50, 0.85)}},
@@ -371,8 +432,11 @@ CASES = {
     # scripts/ui-image-repro/ana157.py's job on hardware.
     "ui_image": {
         "base": {"UITEST": "image", "FRAMES": "16"},
-        "variants": {"image": {}},
-        "pairs": [],
+        # "sync": the texture through the old blocking upload (REN-802), the
+        # same picture as the deferred upload batch draws.
+        "variants": {"image": {}, "sync": {"env": {"HE_VK_UPLOAD_SYNC": "1"}}},
+        "pairs": [("sync", "image", None, 0.05)],
+        "require": {"sync": ["HE_VK_UPLOAD_SYNC"]},
         "probes": {"image": [("red TL", 0.09375, 0.857, "r"), ("green TR", 0.1875, 0.857, "g"),
                              ("blue BL", 0.09375, 0.933, "b")]},
         # The witness texture is flagged sRGB; sampled through an _SRGB view it
@@ -417,6 +481,7 @@ LOG_MARK_ARMED  = "frame dump armed"
 LOG_MARK_DUMPED = "frame dumped ("
 RE_DEVICE       = re.compile(r"VulkanRenderer: device 0 of \d+: (.*)")
 RE_VALIDATION   = re.compile(r"Vulkan validation: (.*)")
+RE_COUNTERS     = re.compile(r"dump counters \S+ draws=(\d+) tris=(\d+)")
 
 
 # ── BMP ──────────────────────────────────────────────────────────────────────
@@ -512,7 +577,7 @@ def judge_probe(rgb, channel):
 
 
 # ── One shot ─────────────────────────────────────────────────────────────────
-def run_shot(editor, outdir, name, dump_kv, env_kv, timeout):
+def run_shot(editor, outdir, name, dump_kv, env_kv, timeout, rhi="Vulkan"):
     bmp = outdir / f"{name}.bmp"
     log = outdir / f"{name}.log"
     home = outdir / "_homes" / name
@@ -529,7 +594,7 @@ def run_shot(editor, outdir, name, dump_kv, env_kv, timeout):
     env.setdefault("HE_COLLAB_OFFLINE", "1")
     env.setdefault("HE_HIDDEN_WINDOW", "1")
     env.setdefault("HE_SKY_TIME", "10")
-    env["HE_DUMP_RHI"] = "Vulkan"
+    env["HE_DUMP_RHI"] = rhi
     env["HE_DUMP_PATH"] = str(bmp)
     env["HE_DUMP_QUIT"] = "1"
     for k, v in dump_kv.items():
@@ -580,6 +645,10 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--cases", default=",".join(CASES))
     ap.add_argument("--timeout", type=int, default=900, help="seconds per shot")
+    ap.add_argument("--rhi", default="Vulkan",
+                    help="backend to force (HE_DUMP_RHI): Vulkan (default), D3D11, D3D12. The cases are "
+                         "backend-neutral picture and log verdicts; Vulkan-only checks (device name, "
+                         "validation) need --require-device '' on the others")
     ap.add_argument("--require-device", default="llvmpipe",
                     help="substring the logged Vulkan device name must contain ('' = any)")
     args = ap.parse_args()
@@ -608,7 +677,7 @@ def main():
         shots, problems = {}, []
         for vname, v in spec["variants"].items():
             dump_kv = dict(spec["base"]); dump_kv.update(v.get("dump", {}))
-            shot = run_shot(editor, outdir, f"{case}_{vname}", dump_kv, v.get("env", {}), args.timeout)
+            shot = run_shot(editor, outdir, f"{case}_{vname}", dump_kv, v.get("env", {}), args.timeout, args.rhi)
             shots[vname] = shot
             img = shot.get("image")
             print(f"  {vname:10s} {shot['seconds']:7.1f} s  exit={shot['exit_code']}"
@@ -619,6 +688,11 @@ def main():
                   f"/total={shot['validation_total']}", flush=True)
             for line in sorted(set(shot["validation_in_dump"]))[:10]:
                 print(f"      validation: {line[:300]}")
+            # The renderer's upload totals at shutdown (REN-802/803): uploads,
+            # batches, oversize staging buffers, time in upload calls and waits.
+            for line in shot["_log"].splitlines():
+                if "VulkanRenderer: uploads" in line:
+                    print(f"      {line.strip()[:300]}")
             if not img:
                 problems.append(f"{vname}: no image ({shot.get('bmp_error', 'missing')})")
                 print(f"  ── last log lines of {shot['log']} ──")
@@ -644,6 +718,10 @@ def main():
             for needle in spec.get("forbid", {}).get(vname, []):
                 if needle in shot["_log"]:
                     problems.append(f"{vname}: log has '{needle}'")
+            cm = RE_COUNTERS.findall(shot["_log"])
+            if cm:
+                shot["draws"], shot["tris"] = int(cm[-1][0]), int(cm[-1][1])
+                print(f"      dump counters: draws={shot['draws']} tris={shot['tris']}")
             samples = spec.get("samples", {}).get(vname)
             if samples:
                 p = {k: probe_box(shot["_pix"], shot["width"], shot["height"], fx, fy, r=4)
@@ -684,6 +762,20 @@ def main():
                       f"energy {e} → {'ok' if ok else 'FAIL'} (max {mx})")
                 if not ok:
                     problems.append(f"{vname}: stripes in '{label}', energy {e} > {mx}")
+
+        # `flat` (a, b, tolerance): b carries more triangles than a (more instances) in at most
+        # `tolerance` more draws - the draw count follows the meshes in play, not the plants.
+        for a, b, tol in spec.get("flat", []):
+            sa, sb = shots.get(a, {}), shots.get(b, {})
+            if "draws" not in sa or "draws" not in sb:
+                problems.append(f"{a}/{b}: no 'dump counters' line to compare draws")
+                continue
+            ok = sb["draws"] <= sa["draws"] + tol and sb["tris"] > sa["tris"]
+            print(f"  flat {a} -> {b}: draws {sa['draws']} -> {sb['draws']} (tolerance +{tol}), "
+                  f"tris {sa['tris']} -> {sb['tris']} -> {'ok' if ok else 'FAIL'}")
+            if not ok:
+                problems.append(f"{a} -> {b}: draws {sa['draws']} -> {sb['draws']} (tolerance +{tol}), "
+                                f"tris {sa['tris']} -> {sb['tris']}: the draw count follows the instances")
 
         pairs = []
         for pair in spec["pairs"]:

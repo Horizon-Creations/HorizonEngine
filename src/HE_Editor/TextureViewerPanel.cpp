@@ -107,17 +107,7 @@ std::filesystem::file_time_type stampOf(const std::string& path)
 	return ec ? std::filesystem::file_time_type{} : t;
 }
 
-const char* formatName(TextureFormat f)
-{
-	switch (f)
-	{
-		case TextureFormat::RGBA8:    return "RGBA8";
-		case TextureFormat::ASTC_4x4: return "ASTC 4x4";
-		case TextureFormat::BC7:      return "BC7";
-		case TextureFormat::BC3:      return "BC3";
-	}
-	return "unknown";
-}
+const char* formatName(TextureFormat f) { return textureFormatName(f); }
 
 void formatBytes(size_t bytes, char* buf, size_t n)
 {

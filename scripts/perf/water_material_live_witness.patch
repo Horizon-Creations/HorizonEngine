@@ -1,0 +1,12 @@
+diff --git a/src/HE_Scene/src/WaterSurface.cpp b/src/HE_Scene/src/WaterSurface.cpp
+index 533c6d0a..c62b5848 100644
+--- a/src/HE_Scene/src/WaterSurface.cpp
++++ b/src/HE_Scene/src/WaterSurface.cpp
+@@ -158,6 +158,7 @@ namespace
+             if (e == entt::null)
+             {
+                 ensureWaterMaterial(cm);
++                HE_LOG_INFO(Asset, "TEMP235 water material: getMaterial=%p isLoaded=%d", (const void*)cm.getMaterial(HE::kEngineWaterMaterialId), (int)cm.isLoaded(HE::kEngineWaterMaterialId)); // TEMP235
+                 e = world.createEntity("WaterSurface");
+                 world.reparentEntity(e, te);
+                 MaterialComponent mat;

@@ -1,5 +1,7 @@
 #include <UIWidget/UIWidgetBinding.h>
 
+#include <limits>
+
 namespace HE {
 
 HorizonCode::PinType uiPropTypeToPin(UIPropType t)
@@ -39,6 +41,59 @@ HorizonCode::Value uiPropToHcValue(const UIPropValue& v)
     return out;
 }
 
+namespace
+{
+
+// One helper per numeric target; each switch lists the source types that convert
+// and falls back to the target's own raw field (a String, Color, ... value).
+float asFloat(const HorizonCode::Value& v)
+{
+    using P = HorizonCode::PinType;
+    switch (v.type)
+    {
+        case P::Int:    return (float)v.i;
+        case P::Bool:   return v.b ? 1.0f : 0.0f;
+        case P::Double: return (float)v.d;
+        default:        return v.f;
+    }
+}
+
+// A float->int cast of NaN or of a value outside the int range is undefined
+// behaviour, so saturate (NaN -> 0) first. A float widens to double exactly.
+int saturatingInt(double x)
+{
+    if (x != x) return 0;
+    if (x >= 2147483648.0) return std::numeric_limits<int>::max();
+    if (x <= -2147483648.0) return std::numeric_limits<int>::min();
+    return (int)x;
+}
+
+int asInt(const HorizonCode::Value& v)
+{
+    using P = HorizonCode::PinType;
+    switch (v.type)
+    {
+        case P::Float:  return saturatingInt(v.f);
+        case P::Bool:   return v.b ? 1 : 0;
+        case P::Double: return saturatingInt(v.d);
+        default:        return v.i;
+    }
+}
+
+bool asBool(const HorizonCode::Value& v)
+{
+    using P = HorizonCode::PinType;
+    switch (v.type)
+    {
+        case P::Float:  return v.f != 0.0f;
+        case P::Int:    return v.i != 0;
+        case P::Double: return v.d != 0.0;
+        default:        return v.b;
+    }
+}
+
+} // namespace
+
 // The third implementation of HorizonCode's coercion rule (the other two are the
 // interpreter's `coerce` in HorizonCode.cpp and `hc::coerce*` in
 // HorizonCodeGenSupport.h — see the notes there). It cannot simply call either:
@@ -52,17 +107,13 @@ HorizonCode::Value uiPropToHcValue(const UIPropValue& v)
 //   • Otherwise only Float↔Double↔Int↔Bool convert.
 UIPropValue uiHcValueToProp(const HorizonCode::Value& v, UIPropType want)
 {
-    using P = HorizonCode::PinType;
     UIPropValue out;
     out.type = want;
     switch (want)
     {
-        case UIPropType::Float:  out.f = v.isArray ? v.f : (v.type == P::Int ? (float)v.i : (v.type == P::Bool ? (v.b ? 1.0f : 0.0f)
-                                                         : (v.type == P::Double ? (float)v.d : v.f))); break;
-        case UIPropType::Int:    out.i = v.isArray ? v.i : (v.type == P::Float ? (int)v.f : (v.type == P::Bool ? (v.b ? 1 : 0)
-                                                         : (v.type == P::Double ? (int)v.d : v.i))); break;
-        case UIPropType::Bool:   out.b = v.isArray ? v.b : (v.type == P::Float ? v.f != 0.0f : (v.type == P::Int ? v.i != 0
-                                                         : (v.type == P::Double ? v.d != 0.0 : v.b))); break;
+        case UIPropType::Float:  out.f = v.isArray ? v.f : asFloat(v); break;
+        case UIPropType::Int:    out.i = v.isArray ? v.i : asInt(v);   break;
+        case UIPropType::Bool:   out.b = v.isArray ? v.b : asBool(v);  break;
         case UIPropType::String: out.s = v.s; break;
         case UIPropType::Color:  out.col = v.col; break;
         case UIPropType::Vec2:   out.v2 = v.v2; break;

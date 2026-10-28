@@ -47,7 +47,8 @@ namespace HE::water
         glm::vec3    flow    { 0.0f };       // the current, m/s
         BodyPhysics  physics {};             // that body's settings (density, drags, …)
         UnderwaterFogParams underwaterFog{}; // that body's look from below (Thema 185 Schritt 2)
-        UnderwaterCausticsParams underwaterCaustics{};   // …and its refracted-light net (Schritt 3)
+        UnderwaterCausticsParams underwaterCaustics{};   // …and its refracted-light net
+        TessellationParams tessellation{};               // …and how its tessellated surface behaves (Schritt 3)
     };
 
     // A box in world space where there is water (for the physics' broad phase).
@@ -117,5 +118,9 @@ namespace HE::water
         void ensureBounds(Entry& e);
 
         std::vector<Entry> m_entries;   // sorted by entity id
+        // The two trains the physics follows, under the scene's wind (refresh() reads
+        // the Environment; no Environment = the material's own, kPhysicsWaves). The
+        // surface a body floats on turns and grows with the same wind the water shows.
+        WaveTrain          m_waves[kPhysicsWaveCount] = { kPhysicsWaves[0], kPhysicsWaves[1] };
     };
 }

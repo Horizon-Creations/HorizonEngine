@@ -1,0 +1,21 @@
+label: d22b1010a_b218-base-det-r2
+attempt: 1
+editor: /tmp/he237/b1010a_b218/Editor/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'BloomEnabled=true', 'BloomThreshold=1.0', 'BloomIntensity=0.6000000238418579', 'SSAOEnabled=true', 'SSAORadius=0.5', 'SSAOIntensity=1.0', 'SSAOMethod=0', 'DoFEnabled=false', 'DoFFocusDistance=10.0', 'DoFFocusRange=4.0', 'DoFAperture=2.799999952316284', 'MotionBlurEnabled=false', 'MotionBlurIntensity=0.5', 'MotionBlurMax=24.0', 'AntiAliasing=1', 'AASharpness=0.3499999940395355', 'RenderScale=1.0', 'SpecularAA=true', 'SpecularAAStrength=1.0', 'RenderPath=1', 'GlobalIlluminationEnabled=true', 'GIIndirectIntensity=1.0', 'GILightRadius=0.5', 'GIShadowQuality=1', 'OcclusionCulling=true', 'SSREnabled=false', 'SSRIntensity=1.0', 'SSRMaxRoughness=0.6000000238418579', 'SSRQuality=1', 'GIReflectionsEnabled=false', 'GIReflIntensity=1.0', 'GIReflMaxRoughness=0.6000000238418579', 'GIReflQuality=1', 'GIReflBounces=1', 'GIReflBlur=false', 'RenderScale=1.86']
+before:
+  uptime:    load averages: 4.99 4.18 5.39
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      31.5% WindowServer; 20.8% Python; 7.0% WallpaperAerialsExtension; 6.7% clion
+  foreign:   none
+after:
+  uptime:    load averages: 4.24 4.11 5.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      36.8% WindowServer; 17.8% Dock; 8.0% WallpaperAerialsExtension; 6.8% clion
+  foreign:   none

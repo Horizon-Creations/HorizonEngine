@@ -33,6 +33,7 @@ constexpr const char* kPopupId = "Check for Updates##selfupdate";
 bool        s_openRequested = false;
 bool        s_isOpen        = false;
 bool        s_installRequested = false;
+bool        s_installStarted   = false;   // beginInstall handed the takeover to the worker
 std::string s_lastApply;   // one line about the previous takeover, read on open
 
 std::unique_ptr<EditorSelfUpdate::Session> s_session;
@@ -134,20 +135,34 @@ bool takeInstallRequest()
 	return r;
 }
 
-bool beginInstall(AppContext& ctx)
+void beginInstall(AppContext& ctx)
 {
 	const std::string project = (ctx.projectLoaded && ctx.projectManager)
 		? ctx.projectManager->currentProject().path : std::string{};
-	const HE::Su::TakeoverResult r =
-		session().install(EditorSelfUpdate::relaunchArgsFor(ctx.projectLoaded, project));
-	if (!r.ok)
+	// Started either way the dialog comes back in front: with "Installing" while
+	// the worker unpacks (a modal, so nothing is edited that the quit would then
+	// drop), or with the reason where the Restart button was.
+	s_installStarted = session().install(EditorSelfUpdate::relaunchArgsFor(ctx.projectLoaded, project));
+	s_isOpen = false;
+	s_openRequested = true;
+}
+
+bool finishInstall()
+{
+	if (!s_installStarted) return false;
+	const EditorSelfUpdate::Phase p = session().snapshot().phase;
+	if (p == EditorSelfUpdate::Phase::Installing)
 	{
-		// Back in front, with the reason where the Restart button was. The editor
-		// has not quit and nothing of the install was touched.
-		s_isOpen = false;
-		s_openRequested = true;
+		// Escape must not take the modal away while the takeover runs.
+		if (!isOpen()) s_openRequested = true;
+		return false;
 	}
-	return r.ok;
+	s_installStarted = false;
+	if (p == EditorSelfUpdate::Phase::Installed) return true;
+	// Failed: back to Ready with the reason as the install blocker. The editor
+	// has not quit and nothing of the install was touched.
+	if (!isOpen()) s_openRequested = true;
+	return false;
 }
 
 void Draw(AppContext& ctx)
@@ -179,7 +194,7 @@ void Draw(AppContext& ctx)
 		// or waiting for the user (a staged build, a failed install's reason).
 		const EditorSelfUpdate::Phase p = su.snapshot().phase;
 		if (!su.snapshot().busy() && p != EditorSelfUpdate::Phase::Ready &&
-		    p != EditorSelfUpdate::Phase::Available)
+		    p != EditorSelfUpdate::Phase::Available && p != EditorSelfUpdate::Phase::Installed)
 			su.startCheck();
 		ImGui::OpenPopup(kPopupId);
 	}
@@ -243,8 +258,13 @@ void Draw(AppContext& ctx)
 			ImGui::ProgressBar(f, ImVec2(-1.0f, 0.0f), overlay);
 			break;
 		}
-		case P::Ready:
 		case P::Installing:
+		case P::Installed:
+			ImGui::Text("Preparing version %s...", s.remoteVersion.c_str());
+			ImGui::TextDisabled("Checking and unpacking the download. The editor closes and "
+			                    "restarts in the new version when this is done.");
+			break;
+		case P::Ready:
 			ImGui::Text("Version %s is downloaded and verified.", s.remoteVersion.c_str());
 			if (s.installBlocker.empty())
 				ImGui::TextDisabled("Restarting closes the editor. You are asked about unsaved "
@@ -302,12 +322,15 @@ void Draw(AppContext& ctx)
 		}
 		ImGui::SameLine();
 	}
-	if (!s.busy() && s.phase != P::Installing)
+	const bool installing = s.phase == P::Installing || s.phase == P::Installed;
+	if (!s.busy() && !installing)
 	{
 		if (EditorWidgets::button("Check Again", ImVec2(110, 0))) su.startCheck();
 		ImGui::SameLine();
 	}
-	if (EditorWidgets::cancelButton("Close", ImVec2(100, 0)))
+	// No way out while the takeover runs: it cannot be stopped halfway, and the
+	// editor quits the moment it is through.
+	if (!installing && EditorWidgets::cancelButton("Close", ImVec2(100, 0)))
 	{
 		s_isOpen = false;
 		ImGui::CloseCurrentPopup();
@@ -349,7 +372,8 @@ void open() {}
 bool isOpen() { return false; }
 void Draw(AppContext&) {}
 bool takeInstallRequest() { return false; }
-bool beginInstall(AppContext&) { return false; }
+void beginInstall(AppContext&) {}
+bool finishInstall() { return false; }
 void startHousekeeping() {}
 void joinPendingWork() {}
 PromptAnswer takeE2EPromptAnswer() { return PromptAnswer::None; }

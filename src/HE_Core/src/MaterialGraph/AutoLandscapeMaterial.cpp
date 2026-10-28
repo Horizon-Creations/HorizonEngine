@@ -89,7 +89,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
         "0.32 = scattered puddles (~1/5 of the flat ground), ~0.5 = half.");
     const int pPudSlope   = w.param(kAutoLandscapeParamPuddleMaxSlope, 0.08f, 0.002f, 0.4f, "Puddles",
         "Slope (1 - normal.y) where automatic standing water has faded out completely; it starts to thin "
-        "out from a fifth of that. 0.08 ~ 23 degrees. Painted puddles ignore it.");
+        "out from a fifth of that, and the damp ground beside a puddle fades out at twice it. "
+        "0.08 ~ 23 degrees. Painted puddles ignore it.");
 
     // ── Coordinates and slope (column 1) ─────────────────────────────────────
     const int wpos   = w.node(T::WorldPos, 1);
@@ -106,6 +107,11 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // ── Texture reads (column 2): albedo / normal / mask per layer ──────────
     // A bombed layer reads all three maps on ONE hex grid: same uv node, same
     // Cell node, same rotation/sharpness/seed → codegen emits the grid once.
+    //
+    // Groups = the four painted layers: the arrays hold 4 * V + 1 slices (V variants per layer,
+    // then WetGround), V = depth / 4 in the shader. Each hex of a bombed read draws its own
+    // variant; a 5-slice array (V = 1) reads exactly the slices it always did.
+    const int groups = w.constF(static_cast<float>(kAutoLandscapeVariantGroups), 2);
     auto layer = [&](AutoLandscapeLayer L, int uv, int seed) {
         LayerReads lr;
         const int slice = w.constF(static_cast<float>(static_cast<int>(L)), 2);
@@ -114,6 +120,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
             r.graph.findNode(p)->s = path;
             r.graph.connect(uv, 0, p, 0);
             r.graph.connect(slice, 0, p, 1);
+            r.graph.connect(groups, 0, p, 2); // the unbombed debug read shows variant 0 of the layer
             if (seed < 0) return p;
             const int b = w.node(bombed, 2);
             MatGraphNode* bn = r.graph.findNode(b);
@@ -122,6 +129,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
             r.graph.connect(uv, 0, b, 0);
             r.graph.connect(slice, 0, b, 1);
             r.graph.connect(pCell, 0, b, 2);
+            r.graph.connect(groups, 0, b, 3);
             // Compile-time choice: the untaken read is never emitted.
             const int sw = w.op(T::StaticSwitch, 2, { { b }, { p } });
             r.graph.findNode(sw)->s = kAutoLandscapeSwitchBombing;
@@ -135,11 +143,11 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
         return lr;
     };
     const LayerReads grass = layer(AutoLandscapeLayer::Grass,     uvGround, 11);
-    const LayerReads dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
-    const LayerReads rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
+    LayerReads       dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
+    LayerReads       rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
     // Snow is bombed too: read plainly, its one tile showed as a visible grid of the
     // same dark marks on any larger painted or high-altitude field of it.
-    const LayerReads snow  = layer(AutoLandscapeLayer::Snow,      uvRock,   53);
+    LayerReads       snow  = layer(AutoLandscapeLayer::Snow,      uvRock,   53);
     // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on
     // the ground below, not a layer of their own.
 
@@ -157,6 +165,65 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
                         w.op(T::Lerp, col, { { a.mask },   { b.mask },   { t } }) };
     };
 
+    // ── Painted weights (column 6, read here: the layer gates below need them) ─
+    // The landscape's painted weightmap, read through the engine's own Landscape Layer
+    // Blend node fed unit vectors: input k = (1,0,0) / (0,1,0) / (0,0,1) makes channel
+    // x / y / z of the blended result BE layer k's weight. Two nodes carry the five
+    // painted layers; a texel that sums to nothing falls back to input 0 = (0,0,0) =
+    // "no paint", i.e. fully automatic. (What the weights do: column 6 below.)
+    const int none = w.node(T::ConstColor, 6);
+    { MatGraphNode* c = r.graph.findNode(none); c->p[0] = c->p[1] = c->p[2] = 0.0f; }
+    auto unit = [&](int axis) {
+        const int n = w.node(T::ConstColor, 6);
+        MatGraphNode* c = r.graph.findNode(n);
+        c->p[0] = c->p[1] = c->p[2] = 0.0f;
+        c->p[axis] = 1.0f;
+        return n;
+    };
+    const int ux = unit(0), uy = unit(1), uz = unit(2);
+    // One source per layer, in kAutoLandscapePaintLayerNames order.
+    auto layerBlend = [&](std::initializer_list<int> perLayer, int col) {
+        const int n = w.node(T::LandscapeLayerBlend, col);
+        r.graph.findNode(n)->s = kAutoLandscapePaintLayerNames;
+        int pin = 0;
+        for (int src : perLayer) r.graph.connect(src, 0, n, pin++);
+        return n;
+    };
+    //                                     Auto  Grass Dirt  Rock  Snow  Puddles
+    const int wA = layerBlend({ none, ux, uy, uz, none, none }, 6);  // (grass, dirt, rock)
+    const int wB = layerBlend({ none, none, none, none, ux, uy }, 6); // (snow, puddles, -)
+    const int wASplit = w.op(T::SplitRGBA, 6, { { wA } });
+    const int wBSplit = w.op(T::SplitRGBA, 6, { { wB } });
+    const int mG = wASplit, mD = wASplit, mR = wASplit, mS = wBSplit, mP = wBSplit;
+
+    // ── Layer gates: read a layer only where it can have weight ──────────────
+    // Each of Dirt, Rock and Snow sits behind an If whose condition is an UPPER
+    // bound of its automatic weight: the ramp's input with the height bias at its
+    // largest (|hA - hB| <= 1, so the bias is at most Height Blend x scale, the
+    // same product in the same order as heightBias), or a painted weight. Where the
+    // condition fails the weight is exactly 0 whatever the layer's texels hold, so
+    // reading zeros instead changes no pixel; the If is a real branch, so the 9
+    // bombed taps of the layer (albedo, normal, mask x 3 hexes) are not run there.
+    // Grass stays ungated: it is the ground everything else lies on. The mask views
+    // are not gated: they are the automatic masks alone and read no weightmap.
+    const bool gated = view == AutoLandscapeView::Lit || view == AutoLandscapeView::Normal
+                    || view == AutoLandscapeView::Surface;
+    auto gate = [&](LayerReads& lr, int cond, int col) {
+        if (!gated) return;
+        const int zeroC = w.node(T::ConstColor, col);
+        { MatGraphNode* c = r.graph.findNode(zeroC); c->p[0] = c->p[1] = c->p[2] = 0.0f; }
+        lr.albedo = w.op(T::If, col, { { cond }, { lr.albedo }, { zeroC } });
+        lr.normal = w.op(T::If, col, { { cond }, { lr.normal }, { zeroC } });
+        lr.mask   = w.op(T::If, col, { { cond }, { lr.mask },   { zeroC } });
+        lr.height = w.op(T::SplitRGBA, col, { { lr.mask } });
+    };
+    auto possible = [&](Wire::Src x, int biasMax, int e0, int paint, int paintPin, int col) {
+        const int upper = w.op(T::Add, col, { x, { biasMax } });
+        const int can   = w.op(T::Greater, col, { { upper }, { e0 } });
+        const int drawn = w.op(T::Greater, col, { { paint, paintPin }, { zero } });
+        return w.op(T::Or, col, { { can }, { drawn } });
+    };
+
     // ── Ground: grass, dirt patches, dirt belt below the rock (column 3) ─────
     const int invDirt  = w.op(T::Divide, 3, { { one }, { pDirtSize } });
     const int dirtFbm  = w.op(T::Fbm, 3, { { xz }, { invDirt } });
@@ -164,15 +231,21 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // indices (blocky patches on D3D12/Vulkan, Thema 158 Schritt 7/8).
     r.graph.findNode(dirtFbm)->p[0] = 1.0f;
     const int tenth    = w.constF(0.1f, 3);
-    const int dirtT    = w.op(T::Add, 3, { { dirtFbm }, { heightBias(dirt.height, 2, grass.height, 2, tenth, 3) } });
     // fBm sits around 0.5 (range ~0.1..0.85): edge = 0.75 − 0.5 × amount.
     const int half     = w.constF(0.5f, 3);
     const int amtHalf  = w.op(T::Multiply, 3, { { pDirtAmt }, { half } });
     const int edgeBase = w.constF(0.75f, 3);
     const int dirtE0   = w.op(T::Subtract, 3, { { edgeBase }, { amtHalf } });
+    const int beltE0   = w.op(T::Subtract, 3, { { pRockSlope }, { pRockBlend } });
+    {
+        // Dirt: the noise patches (bias scale 0.1), the belt below the rock (no bias), or paint.
+        const int noiseCan = possible({ dirtFbm }, w.op(T::Multiply, 3, { { pHeight }, { tenth } }), dirtE0, mD, 1, 3);
+        const int beltCan  = w.op(T::Greater, 3, { { r.slope }, { beltE0 } });
+        gate(dirt, w.op(T::Or, 3, { { noiseCan }, { beltCan } }), 3);
+    }
+    const int dirtT    = w.op(T::Add, 3, { { dirtFbm }, { heightBias(dirt.height, 2, grass.height, 2, tenth, 3) } });
     const int dirtW    = w.constF(0.06f, 3);
     const int dirtNoise = w.ramp(dirtE0, dirtW, { dirtT }, 3);
-    const int beltE0   = w.op(T::Subtract, 3, { { pRockSlope }, { pRockBlend } });
     const int dirtBelt = w.ramp(beltE0, pRockBlend, { r.slope }, 3);
     const int dirtSum  = w.op(T::Add, 3, { { dirtNoise }, { dirtBelt } });
     r.dirtMask = w.op(T::Saturate, 3, { { dirtSum } });
@@ -180,6 +253,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int groundSplit = w.op(T::SplitRGBA, 3, { { ground.mask } });
 
     // ── Rock on the slopes (column 4) ────────────────────────────────────────
+    gate(rock, possible({ r.slope }, w.op(T::Multiply, 4, { { pHeight }, { pRockBlend } }), pRockSlope, mR, 2, 4), 4);
     const int rockT = w.op(T::Add, 4, { { r.slope },
                                         { heightBias(rock.height, 2, groundSplit, 2, pRockBlend, 4) } });
     r.rockMask = w.ramp(pRockSlope, pRockBlend, { rockT }, 4);
@@ -187,6 +261,14 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int s1Split = w.op(T::SplitRGBA, 4, { { s1.mask } });
 
     // ── Snow above a height, not on cliffs (column 5) ────────────────────────
+    {
+        // Height snow, or the weather's (MF_WeatherSnow is 0 at Snow Cover 0 whatever the
+        // bias: cover x (1 + bias) through a ramp from 0), or paint.
+        const int heightCan = possible({ wsplit, 1 }, w.op(T::Multiply, 5, { { pHeight }, { pSnowBlend } }), pSnowH, mS, 0, 5);
+        const int weather  = w.node(T::Weather, 5);
+        const int covered  = w.op(T::Greater, 5, { { weather, 3 }, { zero } });
+        gate(snow, w.op(T::Or, 5, { { heightCan }, { covered } }), 5);
+    }
     const int snowT  = w.op(T::Add, 5, { { wsplit, 1 },
                                          { heightBias(snow.height, 2, s1Split, 2, pSnowBlend, 5) } });
     const int snowHi = w.ramp(pSnowH, pSnowBlend, { snowT }, 5);
@@ -226,30 +308,6 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // the blended result BE layer k's weight. Two nodes carry the five painted
     // layers; a texel that sums to nothing falls back to input 0 = (0,0,0) = "no
     // paint", i.e. fully automatic.
-    const int none = w.node(T::ConstColor, 6);
-    r.graph.findNode(none)->p[0] = r.graph.findNode(none)->p[1] = r.graph.findNode(none)->p[2] = 0.0f;
-    auto unit = [&](int axis) {
-        const int n = w.node(T::ConstColor, 6);
-        MatGraphNode* c = r.graph.findNode(n);
-        c->p[0] = c->p[1] = c->p[2] = 0.0f;
-        c->p[axis] = 1.0f;
-        return n;
-    };
-    const int ux = unit(0), uy = unit(1), uz = unit(2);
-    // One source per layer, in kAutoLandscapePaintLayerNames order.
-    auto layerBlend = [&](std::initializer_list<int> perLayer, int col) {
-        const int n = w.node(T::LandscapeLayerBlend, col);
-        r.graph.findNode(n)->s = kAutoLandscapePaintLayerNames;
-        int pin = 0;
-        for (int src : perLayer) r.graph.connect(src, 0, n, pin++);
-        return n;
-    };
-    //                                     Auto  Grass Dirt  Rock  Snow  Puddles
-    const int wA = layerBlend({ none, ux, uy, uz, none, none }, 6);  // (grass, dirt, rock)
-    const int wB = layerBlend({ none, none, none, none, ux, uy }, 6); // (snow, puddles, -)
-    const int wASplit = w.op(T::SplitRGBA, 6, { { wA } });
-    const int wBSplit = w.op(T::SplitRGBA, 6, { { wB } });
-    const int mG = wASplit, mD = wASplit, mR = wASplit, mS = wBSplit, mP = wBSplit;
     const int sumGD  = w.op(T::Add, 6, { { mG, 0 }, { mD, 1 } });
     const int sumRS  = w.op(T::Add, 6, { { mR, 2 }, { mS, 0 } });
     const int sumAll = w.op(T::Add, 6, { { sumGD }, { sumRS } });
@@ -300,11 +358,18 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int basin  = w.op(T::Fbm, 7, { { xzOff }, { invPud } });
     r.graph.findNode(basin)->p[0] = 1.0f; // integer hash, see dirtFbm
     const int depth  = w.op(T::Subtract, 7, { { puddleCall, 0 }, { basin } });  // > 0 inside a hollow
-    // Wet rim: from 0.06 below the water line up to it.
+    // Wet rim: from 0.06 below the water line up to it. The damp film is NOT cut at the
+    // water's own slope limit: the ground beside a puddle stays damp up the bank, and it
+    // fades over a band wider than the water's ("Puddle Max Slope" x 0.2 up to
+    // x 2). It is the same hollow-shaped patch, so its edge follows the noise, and the
+    // step from dark water to dry ground is a dark -> damp -> dry gradient, not one line.
     const int rimW   = w.constF(0.06f, 7);
     const int negRim = w.constF(-0.06f, 7);
     const int rim    = w.ramp(negRim, rimW, { depth }, 7);
-    r.wetMask = w.op(T::Multiply, 7, { { rim }, { r.flatMask } });
+    const int twoL      = w.op(T::Multiply, 7, { { pPudSlope }, { w.constF(2.0f, 7) } });
+    const int dampSteep = w.op(T::Smoothstep, 7, { { fadeFrom }, { twoL }, { r.slope } });
+    const int dampHolds = w.op(T::OneMinus, 7, { { dampSteep } });
+    r.wetMask = w.op(T::Multiply, 7, { { w.op(T::Multiply, 7, { { rim }, { dampHolds } }) }, { noSnow } });
     // Water fills the low texels of the ground below first (its height map, the
     // blended B channel of everything under the puddle). The AUTOMATIC surface s2
     // is used here, not the painted mix: the masks stay a pure function of the
@@ -315,9 +380,18 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     const int hOff   = w.op(T::Subtract, 7, { { s2Split, 2 }, { midH } });
     const int hBias  = w.op(T::Multiply, 7, { { hOff }, { pHeight } });
     const int hBias2 = w.op(T::Multiply, 7, { { hBias }, { k004 } });
-    const int waterT = w.op(T::Subtract, 7, { { depth }, { hBias2 } });
+    // The slope does not multiply the water away (that cut every puddle along a slope
+    // contour, a clean arc wherever a hollow ran into a bank). It LOWERS THE WATER LEVEL
+    // instead: the tilted ground holds less, so a puddle shrinks towards the deepest part
+    // of its hollow and ends on the noise's own contour, and at "Puddle Max Slope" the
+    // level has dropped by (level + 0.2), below every hollow, which is none left. Water
+    // against a wall of a bank can still end on a straight line, but then it is the bank.
+    const int shiftK = w.op(T::Add, 7, { { puddleCall, 0 }, { w.constF(0.2f, 7) } });
+    const int shift  = w.op(T::Multiply, 7, { { steep }, { shiftK } });
+    const int depthW = w.op(T::Subtract, 7, { { depth }, { shift } });
+    const int waterT = w.op(T::Subtract, 7, { { depthW }, { hBias2 } });
     const int water  = w.ramp(zero, k004, { waterT }, 7);
-    r.waterMask = w.op(T::Multiply, 7, { { water }, { r.flatMask } });
+    r.waterMask = w.op(T::Multiply, 7, { { water }, { noSnow } });
 
     // The strength the overlay is applied with: the automatic puddle where the
     // terrain is left to the automatic rules, plus whatever was painted (a painted
@@ -335,14 +409,22 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // ── Puddles as an overlay on the ground below (column 8) ─────────────────
     // No layer of its own: wet soil is the same soil, darker and smoother.
     //   wet rim  albedo x 0.6, roughness x 0.5; normal, AO and the texture untouched
-    //   water    albedo x 0.35 of the DRY ground, roughness 0.05, flat geometric normal
+    //   water    albedo x 0.35 of the DRY ground, roughness 0.05, a LEVEL normal (straight up):
+    //            standing water is horizontal whatever the bank under it does, and the
+    //            tilted terrain normal made a sliver of water at a slope's foot mirror the
+    //            sky like a tilted pane
     const int wetDark = w.constF(0.6f, 8);
     const int wetA    = w.op(T::Multiply, 8, { { s3.albedo }, { wetDark } });
     const int albedoW = w.op(T::Lerp, 8, { { s3.albedo }, { wetA }, { wetF } });
     const int dark    = w.constF(0.35f, 8);
     const int darkA   = w.op(T::Multiply, 8, { { s3.albedo }, { dark } });
     const int albedo  = w.op(T::Lerp, 8, { { albedoW }, { darkA }, { waterF } });
-    const int nWater  = w.op(T::Lerp, 8, { { s3.normal }, { nrm }, { waterF } });
+    const int upN = w.node(T::ConstColor, 8);
+    {
+        MatGraphNode* c = r.graph.findNode(upN);
+        c->p[0] = 0.0f; c->p[1] = 1.0f; c->p[2] = 0.0f;
+    }
+    const int nWater  = w.op(T::Lerp, 8, { { s3.normal }, { upN }, { waterF } });
     const int normal  = w.op(T::Normalize3, 8, { { nWater } });
     const int mSplit  = w.op(T::SplitRGBA, 8, { { s3.mask } });
     const int wetRgh  = w.constF(0.5f, 8);

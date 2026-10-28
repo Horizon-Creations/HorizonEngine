@@ -2,12 +2,16 @@
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
+#include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the device cannot sample them
 #include <HorizonRendering/RenderWorld.h>
+#include <HorizonRendering/GiCasterRange.h>
+#include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
 #include <Renderer/UIRenderObject.h>
 #include <Renderer/UIFont.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <HorizonRendering/FrameCull.h>
 #include <HorizonRendering/FrustumCuller.h>
 #include <HorizonRendering/RenderSorter.h>
 #include <HorizonRendering/MaterialScalars.h>
@@ -16,8 +20,12 @@
 #include <Math/AABB.h>
 #include <Types/UUID.h>
 #include <HorizonRendering/GiBvh.h>          // GI: CPU BLAS (shared with GL/Vulkan/Metal-SW)
+#include <HorizonRendering/GiBlasStore.h>    // GI: per-mesh BLAS cache in the concatenated arrays
+#include <HorizonRendering/GiInstanceSurface.h> // GI reflections: a hit's albedo / emissive (all backends)
+#include <HorizonRendering/GiLandscape.h>       // GI reflections: painted / auto landscape at a hit (all backends)
 #include <HorizonRendering/GIProbeGrid.h>    // GI: probe-grid fit + refit policy (all backends)
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
+#include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays/blur reach per quality tier (all backends)
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
@@ -41,7 +49,11 @@
 #include <HorizonRendering/WorldPreviewFrame.h> // RenderWorldPreview: camera, snapshot, light
 #include <HorizonRendering/RenderConstants.h> // shadow-map size, GPU timer ring depth
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D12/Vulkan)
+#include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
+#include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
+#include <Renderer/GpuPassTimeline.h>         // per-pass GPU timing: GpuPassScope
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D12 backend
+#include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
 #include "Backends/D3D11/D3D11MaterialBindings.h" // A4: heLandscapeWeights t14/s0 per draw, shared with he_tests (Thema 57)
 #include <SDL3/SDL.h>
 #include <d3d11.h>
@@ -63,6 +75,8 @@
 #include <Diagnostics/Logger.h>
 
 using Microsoft::WRL::ComPtr;
+// Every FXC call below goes through the stopwatch (D3DStartupTiming.h).
+using HE::d3dtiming::timedD3DCompile;
 
 // [blind] added D3D11 sky+IBL+debuglines parity
 
@@ -1392,8 +1406,48 @@ struct D3D11RendererImpl
         ComPtr<ID3D11VertexShader> vs;
         ComPtr<ID3D11PixelShader>  ps;
         ComPtr<ID3D11InputLayout>  il;
+        // Displacement pin (Thema 207): both set → the draw binds them and draws
+        // 3-control-point patches; null → the plain VS/PS pair (the fallback).
+        ComPtr<ID3D11HullShader>   hs;
+        ComPtr<ID3D11DomainShader> ds;
     };
+    // GL's scheme (OpenGLRenderer::foldDisplacement): with tessellation (feature level
+    // 11_0, HE_TESSELLATION not 0) the material's displacement body is folded into the
+    // shader hash right after resolveShaders and filed under the folded hash, where
+    // GetOrBuildMaterialShaders picks it up. Without it the key stays the unconnected
+    // pin's — same shaders, same draw.
+    bool m_tessSupported = false;
+    std::unordered_map<uint64_t, std::string> m_tessDispByKey;
+    void foldDisplacement(const ContentManager& cm, const HE::UUID& materialId, uint64_t& hash)
+    {
+        if (!m_tessSupported) return;
+        const MaterialAsset* ma = cm.getMaterial(materialId);
+        if (!ma || ma->customShaderDispGlsl.empty()) return;
+        hash ^= std::hash<std::string>{}(ma->customShaderDispGlsl) * 0xC2B2AE3D27D4EB4FULL;
+        m_tessDispByKey.try_emplace(hash, ma->customShaderDispGlsl);
+    }
     std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = shader hash (opaque + blended share one entry)
+    // The model matrix per instance (64 B, vertex buffer 1, TEXCOORD4..7) for a graph
+    // material's instanced twin (Thema 182, 2f). Its own buffer: instanceSB is a
+    // structured buffer, which D3D11 does not let double as a vertex buffer. Dynamic,
+    // k_maxInstances deep, refilled per batch with MAP_WRITE_DISCARD; made on first use.
+    ComPtr<ID3D11Buffer>       m_matInstVB;
+    bool                       m_matInstVBFailed = false;
+    ID3D11Buffer* ensureMatInstVB()
+    {
+        if (m_matInstVB || m_matInstVBFailed) return m_matInstVB.Get();
+        D3D11_BUFFER_DESC bd{};
+        bd.ByteWidth      = k_maxInstances * static_cast<UINT>(sizeof(glm::mat4));
+        bd.Usage          = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags      = D3D11_BIND_VERTEX_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&bd, nullptr, &m_matInstVB)))
+        {
+            m_matInstVBFailed = true;
+            HE_LOG_WARN(RHI, "%s", "D3D11Renderer: no instance buffer for graph materials, their batches draw per instance");
+        }
+        return m_matInstVB.Get();
+    }
     ComPtr<ID3D11Buffer>       m_matLightCB;  // HeLighting (full Lighting struct) — b0 PS / b8 WPO VS, filled once/frame
     ComPtr<ID3D11Buffer>       m_matObjCB;    // U (176 B)         — b1 VS,          filled per draw
     ComPtr<ID3D11Buffer>       m_matParamCB;  // HeParams (256 B)  — b3 PS / b9 WPO VS, filled per draw
@@ -1446,6 +1500,7 @@ struct D3D11RendererImpl
     // white default, no per-frame retry). InvalidateTexture drops the UUID key so an
     // edited texture re-uploads; a path-keyed loose asset is not hot-reloaded (same as GL).
     std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> graphTexCache;
+    uint64_t graphTexMissEpoch = 0; // contentEpoch its null misses were taken at (HE::forgetGraphTextureMisses)
     // UI quad images (Image widget, textured Panel/Border/Button): same keys, but
     // uploaded UNORM even for an sRGB-flagged asset (see resolveUITexture).
     std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> uiTexCache;
@@ -1480,9 +1535,7 @@ struct D3D11RendererImpl
     bool debugShadowCascades = false;
     // Per-cascade caster cull/sort scratch (NOT m_visible/m_sortedIndices —
     // those hold the camera cull the geometry pass consumes).
-    std::vector<uint8_t>         shadowVisible;
-    std::vector<uint32_t>        shadowSorted;
-    RenderSorter::DepthBatchList shadowBatches;
+    std::vector<ShadowViewCpu>   shadowViews;
 
     // ── Local (point/spot) shadow atlas ─────────────────────────────────────
     // Same depth-array pattern as the cascades, independent of the directional
@@ -1873,12 +1926,31 @@ struct D3D11RendererImpl
         for (const uint32_t idx : m_sortedIndices)
         {
             const RenderObject& obj = m_renderWorld.objects[idx];
-            // A foliage cluster is one plant's transform with a whole bucket's worth
-            // of instances: it writes no velocity here yet (Metal and GL draw each
-            // plant, static). Windows track: unfold it like they do.
-            if (obj.isCluster()) continue;
             const GpuMesh* mesh = resolveMesh(obj.meshAssetId, cm);
             if (!mesh || !mesh->vbuf || !mesh->ibuf || mesh->indexCount == 0) continue;
+
+            // A foliage cluster stands for a bucket of plants: draw every one of them,
+            // static (previous pose = this pose, so the velocity is the camera's own
+            // motion), as GL and Metal do (Thema 182, 2f). The entity-keyed history
+            // below holds ONE pose per entity, which a cluster must not use: every
+            // plant of a layer shares the terrain's id.
+            if (obj.isCluster())
+            {
+                ctx->IASetVertexBuffers(0, 1, mesh->vbuf.GetAddressOf(), &stride, &offset);
+                ctx->IASetIndexBuffer(mesh->ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
+                m_renderWorld.forEachInstance(obj, [&](const glm::mat4& model) {
+                    HE::TaaVelocityConstants c;
+                    c.mvpJitter = vpJit * model;
+                    c.mvpNow    = vpClean * model;
+                    c.mvpPrev   = taaPrevViewProj * model;
+                    D3D11_MAPPED_SUBRESOURCE m{};
+                    if (FAILED(ctx->Map(taaVelocityCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) return;
+                    std::memcpy(m.pData, &c, sizeof(c));
+                    ctx->Unmap(taaVelocityCB.Get(), 0);
+                    ctx->DrawIndexed(mesh->indexCount, 0, 0);
+                });
+                continue;
+            }
 
             // An object seen for the first time reports no motion — its
             // "previous" position is where it is now.
@@ -1929,6 +2001,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> ssaoPosSRV;
     ComPtr<ID3D11Texture2D>          ssaoPosDepth;      // separate depth for position prepass
     ComPtr<ID3D11DepthStencilView>   ssaoPosDepthDSV;
+    static constexpr DXGI_FORMAT     kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT; // not D16, see createSSAOTargets
     ComPtr<ID3D11Texture2D>          ssaoTex;           // R8 AO output
     ComPtr<ID3D11RenderTargetView>   ssaoRTV;
     ComPtr<ID3D11ShaderResourceView> ssaoSRV;
@@ -2078,9 +2151,15 @@ struct D3D11RendererImpl
     // path otherwise, mirroring the GL backend). The ring DEPTH is shared with
     // GL/Vulkan; the payload below is D3D11-specific (a DISJOINT query per slot,
     // which nobody else has — see gpuTimerReap's disjoint-frame rejection).
+    //
+    // Per-pass timing: between tsStart and tsEnd the frame's passes write timestamp
+    // marks (GpuPassScope, GpuPassTimeline), one query each, created on first use
+    // and kept per slot; the reap turns the marks into FrameGpuStats::passes.
     struct GpuTimerSlot
     {
         ComPtr<ID3D11Query> disjoint, tsStart, tsEnd;
+        std::vector<ComPtr<ID3D11Query>> marks;
+        GpuPassTimeline timeline;
         bool pending = false; // issued, result not consumed yet
     };
     GpuTimerSlot gpuSlots[HE::kGpuTimerRing];
@@ -2099,6 +2178,7 @@ struct D3D11RendererImpl
     void gpuTimerReap(GpuTimerSlot& slot, bool block)
     {
         if (!slot.pending) return;
+        HE_PROFILE_SCOPE_N("GpuTimerReap");   // blocking in a detailed capture: the CPU waits for the GPU here
         if (block) context->Flush(); // make sure the queries can complete
         auto fetch = [&](ID3D11Query* q, void* out, UINT size) -> bool
         {
@@ -2122,9 +2202,54 @@ struct D3D11RendererImpl
         if (dj.Disjoint || dj.Frequency == 0 || t1 < t0) return;
         lastGpuStats.gpuFrameMs    = static_cast<double>(t1 - t0) * 1000.0
                                    / static_cast<double>(dj.Frequency);
-        lastGpuStats.passes.clear(); // whole-frame timing: no per-pass breakdown
+        lastGpuStats.passes.clear();
         lastGpuStats.gpuTimingMode = "whole-frame";
+        // The passes' marks, all or nothing: one that is not ready leaves the frame
+        // at whole-frame timing rather than a breakdown with a hole in it.
+        const uint32_t n = slot.timeline.used();
+        if (n > 1 && n <= slot.marks.size())
+        {
+            uint64_t ticks[GpuPassTimeline::kMaxTimestamps];
+            bool all = true;
+            for (uint32_t i = 0; i < n && all; ++i)
+                all = fetch(slot.marks[i].Get(), &ticks[i], sizeof(uint64_t));
+            if (all)
+            {
+                slot.timeline.toPasses(ticks, static_cast<double>(dj.Frequency), lastGpuStats.passes);
+                lastGpuStats.gpuTimingMode = "d3d11-ts";
+            }
+        }
     }
+
+    // The mark query behind timeline index `i` of the current slot, written now.
+    bool gpuMark(uint32_t i)
+    {
+        GpuTimerSlot& slot = gpuSlots[gpuCurSlot];
+        while (slot.marks.size() <= i)
+        {
+            const D3D11_QUERY_DESC tq{ D3D11_QUERY_TIMESTAMP, 0 };
+            ComPtr<ID3D11Query> q;
+            if (FAILED(device->CreateQuery(&tq, &q))) return false;
+            slot.marks.push_back(std::move(q));
+        }
+        context->End(slot.marks[i].Get());
+        return true;
+    }
+    // GpuPassScope's two calls (GpuPassScopeT): the scope times its pass when the profiler
+    // is capturing, else both are no-ops.
+    bool gpuPassBegin(const char* name)
+    {
+        if (!gpuTimingActive || gpuCurSlot < 0 || !GpuPassTimeline::envEnabled()) return false;
+        uint32_t i = 0;
+        if (!gpuSlots[gpuCurSlot].timeline.push(name, i)) return false;
+        return gpuMark(i);
+    }
+    void gpuPassEnd()
+    {
+        uint32_t i = 0;
+        if (gpuCurSlot >= 0 && gpuSlots[gpuCurSlot].timeline.pop(i)) gpuMark(i);
+    }
+    using GpuPassScope = GpuPassScopeT<D3D11RendererImpl>;
 
     void gpuTimerBeginFrame()
     {
@@ -2173,14 +2298,17 @@ struct D3D11RendererImpl
         GpuTimerSlot& slot = gpuSlots[idx];
         gpuTimerReap(slot, /*block=*/false); // issued HE::kGpuTimerRing frames ago
         gpuCurSlot = idx;
+        slot.timeline.reset();
         context->Begin(slot.disjoint.Get());
         context->End(slot.tsStart.Get()); // timestamps have no Begin, only End
+        gpuMark(slot.timeline.start());
     }
 
     void gpuTimerEndFrame()
     {
         if (!gpuTimingActive || gpuCurSlot < 0) { ++gpuFrameIdx; return; }
         GpuTimerSlot& slot = gpuSlots[gpuCurSlot];
+        gpuMark(slot.timeline.finish());
         context->End(slot.tsEnd.Get());
         context->End(slot.disjoint.Get());
         slot.pending = true;
@@ -2251,12 +2379,12 @@ struct D3D11RendererImpl
         // Compile position prepass VS+PS
         {
             ComPtr<ID3DBlob> vsBlob, psBlob, err;
-            if (FAILED(D3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
                                   "VSPos", "vs_5_0", 0, 0, &vsBlob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
             }
-            if (FAILED(D3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
                                   "PSPos", "ps_5_0", 0, 0, &psBlob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
@@ -2266,7 +2394,7 @@ struct D3D11RendererImpl
             // Instanced twin for GeometryPass batches. Optional: without it every
             // batch loops through VSPos, so a failure is logged, not returned.
             ComPtr<ID3DBlob> ivsBlob;
-            if (SUCCEEDED(D3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
+            if (SUCCEEDED(timedD3DCompile(kSSAOPosHLSL, strlen(kSSAOPosHLSL), nullptr, nullptr, nullptr,
                                      "VSPosInstanced", "vs_5_0", 0, 0, &ivsBlob, &err)))
                 device->CreateVertexShader(ivsBlob->GetBufferPointer(), ivsBlob->GetBufferSize(),
                                            nullptr, &ssaoPosVSInstanced);
@@ -2281,7 +2409,7 @@ struct D3D11RendererImpl
         // Compile SSAO main PS
         {
             ComPtr<ID3DBlob> blob, err;
-            if (FAILED(D3DCompile(kSSAOHLSL, strlen(kSSAOHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOHLSL, strlen(kSSAOHLSL), nullptr, nullptr, nullptr,
                                   "SSAOMain", "ps_5_0", 0, 0, &blob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
@@ -2291,7 +2419,7 @@ struct D3D11RendererImpl
         // Compile SSAO blur PS
         {
             ComPtr<ID3DBlob> blob, err;
-            if (FAILED(D3DCompile(kSSAOBlurHLSL, strlen(kSSAOBlurHLSL), nullptr, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(kSSAOBlurHLSL, strlen(kSSAOBlurHLSL), nullptr, nullptr, nullptr,
                                   "SSAOBlurMain", "ps_5_0", 0, 0, &blob, &err))) {
                 if (err) OutputDebugStringA((char*)err->GetBufferPointer());
                 return false;
@@ -2383,12 +2511,16 @@ struct D3D11RendererImpl
         makeRT(DXGI_FORMAT_R8_UNORM,           ssaoTex,    ssaoRTV,    ssaoSRV);
         makeRT(DXGI_FORMAT_R8_UNORM,           ssaoBlurTex, ssaoBlurRTV, ssaoBlurSRV);
 
-        // Depth buffer for position prepass
+        // Depth buffer for position prepass (and the reflection MRT pre-pass,
+        // which binds the same DSV). D32 like the GI G-buffer (Thema 182 step 6,
+        // decision 110): as D16 a depth step is z^2/6554 m at near 0.1 (0.4 m at
+        // 50 m), so at 50-90 m a plant and the ground rounded to one value and
+        // the draw order decided which landed in the position target.
         {
             D3D11_TEXTURE2D_DESC dd{};
             dd.Width = (UINT)w; dd.Height = (UINT)h;
             dd.MipLevels = dd.ArraySize = 1;
-            dd.Format = DXGI_FORMAT_D16_UNORM; dd.SampleDesc.Count = 1;
+            dd.Format = kSsaoPosDepthFormat; dd.SampleDesc.Count = 1;
             dd.Usage = D3D11_USAGE_DEFAULT;
             dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
             device->CreateTexture2D(&dd, nullptr, &ssaoPosDepth);
@@ -2436,7 +2568,7 @@ struct D3D11RendererImpl
 
     // Returns the SRV that the scene shader should bind as t2 (AO texture).
     // One instanced draw for a depth-only batch (a shadow caster run, an SSAO or
-    // GI pre-pass batch): `count` {A, B} matrix pairs from fill(k, pair) go into
+    // GI pre-pass batch): the run's {A, B} matrix pairs from fill(model, pair) go into
     // instanceSB — the scene pass's 128-byte buffer — and instVS reads them at
     // t3 by SV_InstanceID. Every caller writes the products its per-object loop
     // puts into a constant buffer, so the instanced frame is the loop's frame.
@@ -2446,21 +2578,17 @@ struct D3D11RendererImpl
     template <class Fill>
     bool drawDepthInstanced(ID3D11DeviceContext* ctx, ID3D11VertexShader* instVS,
                             ID3D11VertexShader* restoreVS, UINT indexCount, UINT startIndex,
-                            UINT count, Fill&& fill)
+                            const InstanceRun& run, Fill&& fill)
     {
         static_assert(k_instStride == 2 * sizeof(glm::mat4), "instance stride must be two mat4");
+        const UINT count = run.size();
         if (!instVS || !instanceSB || !instanceSRV || count < 2 || count > k_maxInstances
             || !RenderSorter::depthInstancingEnabled())
             return false;
         D3D11_MAPPED_SUBRESOURCE im{};
         if (FAILED(ctx->Map(instanceSB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im))) return false;
         auto* dst = static_cast<uint8_t*>(im.pData);
-        for (UINT k = 0; k < count; ++k)
-        {
-            glm::mat4 pair[2];
-            fill(k, pair);
-            std::memcpy(dst + static_cast<size_t>(k) * k_instStride, pair, sizeof(pair));
-        }
+        RenderSorter::fillInstancePairs(dst, run, fill);
         ctx->Unmap(instanceSB.Get(), 0);
         ctx->VSSetShader(instVS, nullptr, 0);
         ctx->VSSetShaderResources(3, 1, instanceSRV.GetAddressOf());
@@ -2483,6 +2611,7 @@ struct D3D11RendererImpl
                                       ID3D11RasterizerState* rasterSt,
                                       bool reflMrt = false, bool aoWanted = true)
     {
+        GpuPassScope _passTimer(this, "SSAO");
         // `reflMrt` and `aoWanted` are SEPARATE gates (plan C2, the same shape
         // GL and Vulkan grew). SSR needs pass 1 on frames where SSAO is off or
         // the GI probes replaced it, and it needs it with three attachments
@@ -2561,18 +2690,18 @@ struct D3D11RendererImpl
                     ctx->DrawIndexed(range.count, range.start, 0);
                 };
 
-                // A GeometryPass batch (instanceTransforms non-empty ⇔ run > 1) is
+                // A GeometryPass batch (instanceTotal() > 1 ⇔ run > 1) is
                 // one instanced draw on the position-only path, with the loop's
                 // {mvp, modelView} per instance. The MRT reflection pre-pass
                 // keeps the loop: its VS is the library's cross-compiled GLSL,
                 // whose instanced variant reads the model as vertex attributes,
                 // not from a structured buffer.
-                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                const InstanceRun inst = dc->instanceRun();
                 if (!reflMrt && drawDepthInstanced(ctx, ssaoPosVSInstanced.Get(), ssaoPosVS.Get(),
-                        range.count, range.start, static_cast<UINT>(inst.size()),
-                        [&](UINT k, glm::mat4* pair) {
-                            pair[0] = viewProj * inst[k];
-                            pair[1] = view     * inst[k];
+                        range.count, range.start, inst,
+                        [&](const glm::mat4& m, glm::mat4* pair) {
+                            pair[0] = viewProj * m;
+                            pair[1] = view     * m;
                         }))
                 {
                     static bool loggedOnce = false; // the runtime witness on Windows
@@ -2584,8 +2713,8 @@ struct D3D11RendererImpl
                     }
                     continue;
                 }
-                if (!inst.empty())
-                    for (const glm::mat4& t : inst) drawWithTransform(t);
+                if (inst.size())
+                    inst.forEach(drawWithTransform);
                 else
                     drawWithTransform(dc->transform);
             }
@@ -2686,14 +2815,14 @@ struct D3D11RendererImpl
         }
         ComPtr<ID3DBlob> vsb, psb, err;
         // SPIRV-Cross emits the GLSL-sourced entry point as `main`.
-        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "reflPrepassVS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(vc.source.c_str(), vc.source.size(), "reflPrepassVS", nullptr, nullptr,
                               "main", "vs_5_0", 0, 0, &vsb, &err)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: refl pre-pass VS compile failed: ")
                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
-        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "reflPrepassPS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(fc.source.c_str(), fc.source.size(), "reflPrepassPS", nullptr, nullptr,
                               "main", "ps_5_0", 0, 0, &psb, &err)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: refl pre-pass PS compile failed: ")
@@ -2752,7 +2881,7 @@ struct D3D11RendererImpl
         auto makePS = [&](const std::string& src, const char* name,
                           ComPtr<ID3D11PixelShader>& out) -> bool {
             ComPtr<ID3DBlob> blob, err;
-            if (FAILED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
                                   "main", "ps_5_0", 0, 0, &blob, &err)))
             {
                 // A log line holds 512 bytes and fxc lists its warnings first:
@@ -3052,18 +3181,26 @@ struct D3D11RendererImpl
     // concatenated into structured buffers + a flat per-frame instance array;
     // compute shadow rays + DDGI probe gather, temporal + blur as fullscreen
     // pixel passes. Mirrors OpenGLRenderer's kGi* stages 1:1.
-    struct GIBlasRange
-    {
-        int32_t nodeOffset = 0, nodeCount = 0;
-        int32_t triOffset  = 0, triCount  = 0;
-        bool    valid      = false;
-    };
+    using GIBlasRange = HE::GiBlasRange;
     struct GIInstanceGpu // must match the HLSL GiInst layout (raw structured buffer)
     {
         glm::mat4 invTransform;
         glm::vec4 baseColor;
-        int32_t   nodeOffset = 0, triOffset = 0, pad0 = 0, pad1 = 0;
+        // emissiveRG / emissiveB: the hit's emissive as packed halves (r,g and b,0) for the GI-reflection
+        // kernel — the former pad words, so the struct stays 96 bytes (same as D3D12). Only filled in
+        // giReflInstancesCpu, the reflection-only copy; giInstancesCpu (shadow/probe) keeps obj.baseColor.
+        int32_t   nodeOffset = 0, triOffset = 0, emissiveRG = 0, emissiveB = 0;
     };
+    // Painted / auto landscape for the reflection kernel — HE::GiLandscape (GiLandscape.h); the HLSL's GiLand,
+    // 192 bytes (kGiReflCSHLSL). Same contract and cap (HE::kGiMaxLandscapes) as the GL and Metal paths.
+    struct GILandGpu
+    {
+        glm::mat4 worldToLocal{1.0f};
+        glm::vec4 cfg{0.0f};   // xy = 1/size, z = uvTiling, w = layer count (< 0 = auto)
+        glm::vec4 layer[4]{};
+        glm::vec4 autoWet{0.0f}, autoSlope{0.0f}, autoSnow{0.0f};
+    };
+    static_assert(sizeof(GILandGpu) == 192, "HLSL GiLand is 192 bytes");
     static constexpr int   kGIProbeOctSize     = 8;
 
     bool  giSupported          = true;  // FL 11.0 guarantees CS 5.0; compile failure clears it
@@ -3086,14 +3223,27 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Buffer>        giShadowCB, giCountCB, giTemporalCB, giAtrousCB, giProbeCB;
     ComPtr<ID3D11SamplerState>  giLinearClamp;
 
-    std::unordered_map<HE::UUID, GIBlasRange> giBlasCache;
-    std::vector<HE::GiBvhNode>     giNodesCpu;
-    std::vector<HE::GiBvhTriangle> giTrisCpu;
+    HE::GiBlasStore                giBlas;   // per-mesh BLASes, concatenated (GiBlasStore.h)
     std::vector<GIInstanceGpu>     giInstancesCpu;
-    bool giBlasDirty     = false;
+    std::vector<GIInstanceGpu>     giReflInstancesCpu;   // same order; graph-material colour folded in (reflections only)
     int  giInstanceCount = 0;
-    ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB;
-    ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV;
+    // The landscape's height field for the shadow kernel (kGiHeightfieldHLSL): with it, the shadow kernel's
+    // instance list leaves the terrain chunks out and the field answers for them. HE_GI_HEIGHTFIELD=0 = off.
+    ComPtr<ID3D11Texture2D>          giHfTex;
+    ComPtr<ID3D11ShaderResourceView> giHfSRV;
+    ComPtr<ID3D11Buffer>             giHfCB;
+    uint64_t giHfVersion = 0, giHfKey = ~0ull;
+    int      giHfTopLevel = 0;
+    float    giHfMaxH = 0.0f;
+    bool     giHfActive = false;
+    std::vector<GIInstanceGpu>       giShadowInstancesCpu;   // giInstancesCpu without the terrain chunks while giHfActive
+    int  giShadowInstanceCount = 0;
+    ComPtr<ID3D11Buffer>             giShadowInstanceSB;
+    ComPtr<ID3D11ShaderResourceView> giShadowInstanceSRV;
+    ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB, giReflInstanceSB, giLandSB;
+    ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV, giReflInstanceSRV, giLandSRV;
+    ID3D11ShaderResourceView*        giLandWeightSRV[4] = {};   // the table's weightmaps (owned by graphTexCache), this frame
+    size_t giNodeCap = 0, giTriCap = 0;   // node/tri buffer capacities in elements
 
     int giShadowW = 0, giShadowH = 0;
     ComPtr<ID3D11Texture2D> giGBufPosTex, giGBufNormTex, giGBufDepth, giRawTex,
@@ -3121,49 +3271,179 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView>  giIrrSRV, giVisSRV, giIrrPrevSRV, giVisPrevSRV;
     ComPtr<ID3D11UnorderedAccessView> giIrrUAV, giVisUAV;
 
-    GIBlasRange BuildGIBlas(ContentManager* cm, const HE::UUID& meshId)
+    // ── GI reflections (GIReflectionSettings, pushed by SetGIReflectionSettings) ──
+    bool  giReflEnabled        = false;
+    float giReflIntensity      = 1.0f;
+    float giReflMaxRoughness   = 0.6f;
+    float giReflMaxDistance    = 200.0f;
+    int   giReflQuality        = 1;
+    bool  giReflBlurEnabled    = true;
+    bool  giReflPipesTried     = false;  // one compile attempt per session
+    bool  giReflReady          = false;  // giReflSRV holds this frame's result
+    float giReflFrameSeed      = 0.0f;
+    ComPtr<ID3D11ComputeShader> giReflCS;      // GiReflCS, giComputeRS-equivalent bind set
+    ComPtr<ID3D11PixelShader>   giReflBlurPS;  // fullscreen RGBA16F
+    ComPtr<ID3D11PixelShader>   giReflMixPS;   // fullscreen RGBA16F
+    ComPtr<ID3D11Buffer>        giReflCB;      // GiReflCB, b0 of GiReflCS
+    ComPtr<ID3D11Buffer>        giReflBlurCB;  // b0 of the blur PS
+    ComPtr<ID3D11Buffer>        giReflMixCB;   // b0 of the mix PS
+    ComPtr<ID3D11Texture2D>           giReflRawTex, giReflPingTex, giReflBlurTex, giReflTex;
+    ComPtr<ID3D11ShaderResourceView>  giReflRawSRV, giReflPingSRV, giReflBlurSRV, giReflSRV;
+    ComPtr<ID3D11RenderTargetView>    giReflPingRTV, giReflBlurRTV, giReflRTV;
+    ComPtr<ID3D11UnorderedAccessView> giReflRawUAV;
+    int giReflW = 0, giReflH = 0;
+
+    HE::GiBvhRefitCache giBvhCache;   // a re-stitched / sculpted mesh refits its tree instead of rebuilding it
+    HE::GiBvh BuildGIBvh(ContentManager* cm, const HE::UUID& meshId)
     {
-        GIBlasRange range;
-        if (!cm) return range;
+        HE_PROFILE_SCOPE_N("D3D11::GiBuildBlas");
+        HE::GiBvh bvh;
+        if (!cm) return bvh;
         const StaticMeshAsset* asset = cm->getStaticMesh(meshId);
-        if (!asset || asset->indices.empty()) return range;
+        if (!asset || asset->indices.empty()) return bvh;
+        meshStreamCounters().blasBuilds.fetch_add(1, std::memory_order_relaxed);
+        meshStreamCounters().blasTris.fetch_add(asset->indices.size() / 3, std::memory_order_relaxed);
 
         // Same two layouts resolveMesh uploads: cooked = interleaved 8-float
         // (position at offset 0), loose = tightly packed 3-float positions.
-        HE::GiBvh bvh;
         if (asset->cooked && !asset->interleaved.empty())
-            bvh = HE::buildGiBvh(asset->interleaved.data(), asset->vertexCount, 8,
+            bvh = giBvhCache.build(meshId, asset->interleaved.data(), asset->vertexCount, 8,
                                  asset->indices.data(), asset->indices.size());
         else if (!asset->vertices.empty())
-            bvh = HE::buildGiBvh(asset->vertices.data(), asset->vertices.size() / 3, 3,
+            bvh = giBvhCache.build(meshId, asset->vertices.data(), asset->vertices.size() / 3, 3,
                                  asset->indices.data(), asset->indices.size());
-        if (!bvh.valid()) return range;
+        return bvh;
+    }
 
-        range.nodeOffset = static_cast<int32_t>(giNodesCpu.size());
-        range.nodeCount  = static_cast<int32_t>(bvh.nodes.size());
-        range.triOffset  = static_cast<int32_t>(giTrisCpu.size());
-        range.triCount   = static_cast<int32_t>(bvh.triangles.size());
-        range.valid      = true;
-        giNodesCpu.insert(giNodesCpu.end(), bvh.nodes.begin(), bvh.nodes.end());
-        giTrisCpu.insert(giTrisCpu.end(), bvh.triangles.begin(), bvh.triangles.end());
-        giBlasDirty = true;
-        return range;
+    // One of the store's two arrays into its structured buffer (`cap`
+    // elements, DEFAULT usage). Between rewrites only the tail [from, n) is
+    // new: UpdateSubresource of just that byte range. A rewrite (compaction
+    // moved every range) or growth makes a fresh buffer with headroom; the
+    // runtime keeps the old one alive for work already submitted.
+    template <class T>
+    void uploadGiBlasSB(ComPtr<ID3D11Buffer>& buf, ComPtr<ID3D11ShaderResourceView>& srv,
+                        size_t& cap, const std::vector<T>& src, size_t from)
+    {
+        const size_t n = src.size();
+        if (n == 0) return; // no instance points into it
+        if (!buf || !srv || from == 0 || n > cap)
+        {
+            buf.Reset(); srv.Reset();
+            cap = n + n / 2;
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth           = static_cast<UINT>(cap * sizeof(T));
+            bd.Usage               = D3D11_USAGE_DEFAULT;
+            bd.BindFlags           = D3D11_BIND_SHADER_RESOURCE;
+            bd.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+            bd.StructureByteStride = sizeof(T);
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &buf))) { buf.Reset(); cap = 0; return; }
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.Format              = DXGI_FORMAT_UNKNOWN; // required for structured SRVs
+            sd.ViewDimension       = D3D11_SRV_DIMENSION_BUFFER;
+            sd.Buffer.FirstElement = 0;
+            sd.Buffer.NumElements  = static_cast<UINT>(cap);
+            if (FAILED(device->CreateShaderResourceView(buf.Get(), &sd, &srv))) { buf.Reset(); cap = 0; return; }
+            from = 0;
+        }
+        const D3D11_BOX box{ static_cast<UINT>(from * sizeof(T)), 0, 0,
+                             static_cast<UINT>(n * sizeof(T)), 1, 1 };
+        if (box.right > box.left)
+            context->UpdateSubresource(buf.Get(), 0, &box, src.data() + from, 0, 0);
+    }
+
+    // Upload the height field (R32_FLOAT, a conservative max pyramid in the mips) when it is new or rebuilt.
+    // Returns false when it cannot be used (the shadow kernel then keeps the chunk meshes).
+    bool ensureGiHeightfield(const GiHeightfield& hf)
+    {
+        HE_PROFILE_SCOPE_N("D3D11::GiHeightfield");
+        if (!hf.data || hf.res < 8 || hf.data->size() < size_t(hf.res) * hf.res) return false;
+        if (giHfTex && giHfVersion == hf.version && giHfKey == hf.key) return true;
+        const HE::GiHeightPyramid pyr = HE::BuildGiHeightPyramid(hf);   // GiHeightfield.h
+        if (pyr.levels.empty()) return false;
+        const int res = static_cast<int>(hf.res);
+        const std::vector<std::vector<float>>& lv = pyr.levels;
+        const std::vector<int>& dim = pyr.dims;
+        const float maxH = pyr.maxHeight;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = static_cast<UINT>(res);
+        td.MipLevels = static_cast<UINT>(lv.size()); td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R32_FLOAT; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        std::vector<D3D11_SUBRESOURCE_DATA> init(lv.size());
+        for (size_t k = 0; k < lv.size(); ++k)
+        { init[k].pSysMem = lv[k].data(); init[k].SysMemPitch = static_cast<UINT>(dim[k] * sizeof(float)); }
+        ComPtr<ID3D11Texture2D> tex;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        if (FAILED(device->CreateTexture2D(&td, init.data(), &tex)) ||
+            FAILED(device->CreateShaderResourceView(tex.Get(), nullptr, &srv)))
+            return false;
+        giHfTex = tex; giHfSRV = srv;
+        giHfVersion = hf.version; giHfKey = hf.key;
+        giHfTopLevel = static_cast<int>(lv.size()) - 1;
+        giHfMaxH = maxH;
+        if (!giHfCB)
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth = 96; bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            if (FAILED(device->CreateBuffer(&bd, nullptr, &giHfCB))) { giHfTex.Reset(); giHfSRV.Reset(); return false; }
+        }
+        HE_LOG_INFO(RHI, "D3D11Renderer: GI height field %dx%d, %zu mips, max height %.2f", res, res, lv.size(), maxH);
+        return true;
     }
 
     void updateGiAccel(ContentManager* cm, const RenderWorld& rw)
     {
+        HE_PROFILE_SCOPE_N("D3D11::GiUpdateAccel");
         giInstanceCount = 0;
-        if (!giEnabled || !giSupported) return;
+        // GI reflections (Thema 191 step 2) run with the diffuse GI off: they
+        // trace the same accel structure, so it must be built whenever either
+        // switch is on (mirrors D3D12's updateGiAccel).
+        if (!(giEnabled || giReflEnabled) || !giSupported) return;
 
-        // Same caster filter as the shadow pass: castsShadow only, UNCULLED —
+        // Before any instance reads an offset: a compaction moves the ranges.
+        if (giBlas.compactIfWasteful())
+            HE_LOG_INFO(RHI, "D3D11Renderer: GI BLAS store compacted (%zu meshes, %zu triangles)",
+                        giBlas.entries(), giBlas.tris().size());
+
+        // Same caster filter as the shadow pass: castsShadow only, thinned by distance (GiCasterRange.h) —
         // rays go in arbitrary directions, an off-screen caster still occludes.
         giInstancesCpu.clear();
+        giReflInstancesCpu.clear();
+        // Landscape table for the reflection kernel: an entry (and its weightmap) per terrain the extractor found,
+        // so a hit reads the paint / the slope and height instead of one flat colour for the whole terrain.
+        // `landRemap` maps the extractor's index to the table's (-1 = left out: over the cap, or its weightmap is
+        // not resident yet; it keeps the flat colour).
+        std::vector<GILandGpu> lands;
+        std::vector<int>       landRemap(rw.landscapes.size(), -1);
+        for (ID3D11ShaderResourceView*& v : giLandWeightSRV) v = nullptr;
+        if (giReflEnabled)
+            for (size_t i = 0; i < rw.landscapes.size(); ++i)
+            {
+                if (static_cast<int>(lands.size()) >= HE::kGiMaxLandscapes) break;
+                const HE::GiLandscape& ls = rw.landscapes[i];
+                const bool autoLand = ls.layerCount == HE::kGiLandAuto;
+                ID3D11ShaderResourceView* wm = dummyTexture.Get();   // an auto entry has no weightmap: never sampled
+                if (!autoLand)
+                {
+                    wm = resolveGraphTexture(ls.weightmapId, {}, cm);
+                    if (!wm) continue;
+                }
+                GILandGpu g;
+                g.worldToLocal = ls.worldToLocal;
+                g.cfg = glm::vec4(ls.invSize.x, ls.invSize.y, ls.uvTiling, static_cast<float>(ls.layerCount));
+                for (int k = 0; k < 4; ++k) g.layer[k] = ls.layerColor[k];
+                g.autoWet   = ls.autoWet;
+                g.autoSlope = ls.autoSlope;
+                g.autoSnow  = ls.autoSnow;
+                landRemap[i] = static_cast<int>(lands.size());
+                giLandWeightSRV[lands.size()] = wm;
+                lands.push_back(g);
+            }
         auto resolveRange = [&](const HE::UUID& id) -> GIBlasRange
         {
-            auto it = giBlasCache.find(id);
-            if (it == giBlasCache.end())
-                it = giBlasCache.emplace(id, BuildGIBlas(cm, id)).first;
-            return it->second;
+            if (const GIBlasRange* r = giBlas.find(id)) return *r;
+            return giBlas.add(id, BuildGIBvh(cm, id));
         };
         // HE_GI_LOG_INSTANCES=N: same one-shot instance-colour log as Vulkan's.
         static const int s_giLogAt = [] {
@@ -3172,10 +3452,18 @@ struct D3D11RendererImpl
         }();
         static int s_giLogCall = 0;
         const bool logInst = s_giLogAt > 0 && ++s_giLogCall == s_giLogAt;
+        const HE::GiCasterFilter casterFilter = HE::GiCasterFilter::For(rw, giReflEnabled);   // GiCasterRange.h
+        // The sun-shadow kernel has its own instance list, so it is thinned by distance even while reflections
+        // keep the far scene in the list the probes and mirrors walk.
+        const HE::GiCasterFilter shadowFilter = HE::GiCasterFilter::For(rw, false);
+        static const bool s_hfOn = [] { const char* v = std::getenv("HE_GI_HEIGHTFIELD"); return !(v && v[0] == '0'); }();
+        const GiHeightfield* gHf = (s_hfOn && rw.heightfields.size() == 1) ? &rw.heightfields[0] : nullptr;
+        giHfActive = gHf && ensureGiHeightfield(*gHf);
+        giShadowInstancesCpu.clear();
         for (const RenderObject& obj : rw.objects)
         {
             // A foliage cluster is one plant's transform with a whole bucket's box: not a GI occluder.
-            if (!obj.castsShadow || obj.isCluster()) continue;
+            if (!obj.castsShadow || obj.isCluster() || !(casterFilter.keeps(obj) || shadowFilter.keeps(obj))) continue;
             // Default-cube fallback — entities without a resolvable mesh RENDER
             // as the default cube, so they must occlude as one too.
             GIBlasRange range = resolveRange(obj.meshAssetId);
@@ -3186,7 +3474,26 @@ struct D3D11RendererImpl
             inst.baseColor    = glm::vec4(obj.baseColor, 1.0f);
             inst.nodeOffset   = range.nodeOffset;
             inst.triOffset    = range.triOffset;
-            giInstancesCpu.push_back(inst);
+            if (casterFilter.keeps(obj)) giInstancesCpu.push_back(inst);
+            if (shadowFilter.keeps(obj) && !(giHfActive && obj.terrainChunk)) giShadowInstancesCpu.push_back(inst);
+            if (!casterFilter.keeps(obj)) continue;
+            if (giReflEnabled)
+            {
+                // The shared per-instance surface (HE::giInstanceSurface): a graph material's folded
+                // BaseColor / Emissive (an auto landscape's ground colour) instead of the mesh's own colour,
+                // which is plain white for every material and made each of them reflect white. Reflection
+                // buffer only: giInstancesCpu keeps obj.baseColor, so the GI-only image does not change
+                // when reflections are toggled (as on D3D12 and Vulkan).
+                const HE::GiInstanceSurface surf = HE::giInstanceSurface(obj, cm, &rw.landscapes);
+                GIInstanceGpu reflInst = inst;
+                // .a = the landscape table index + 1 (0 = none); the kernel never reads it as an alpha.
+                const int landSlot = (obj.landscapeIndex >= 0 && obj.landscapeIndex < static_cast<int32_t>(landRemap.size()))
+                                         ? landRemap[static_cast<size_t>(obj.landscapeIndex)] : -1;
+                reflInst.baseColor  = glm::vec4(surf.albedo, static_cast<float>(landSlot + 1));
+                reflInst.emissiveRG = static_cast<int32_t>(glm::packHalf2x16(glm::vec2(surf.emissive.r, surf.emissive.g)));
+                reflInst.emissiveB  = static_cast<int32_t>(glm::packHalf2x16(glm::vec2(surf.emissive.b, 0.0f)));
+                giReflInstancesCpu.push_back(reflInst);
+            }
             if (logInst)
                 HE_LOG_INFO(RHI, "D3D11Renderer: GI instance %zu pos (%.2f, %.2f, %.2f) mat %016llx "
                             "baseColor (%.3f, %.3f, %.3f)", giInstancesCpu.size() - 1,
@@ -3195,6 +3502,7 @@ struct D3D11RendererImpl
                             inst.baseColor.r, inst.baseColor.g, inst.baseColor.b);
         }
         giInstanceCount = static_cast<int>(giInstancesCpu.size());
+        meshStreamCounters().giInstances.store(static_cast<uint32_t>(giInstanceCount), std::memory_order_relaxed);
         if (giInstanceCount == 0) return;
 
         auto makeSB = [&](const void* data, UINT count, UINT strideBytes,
@@ -3217,31 +3525,55 @@ struct D3D11RendererImpl
             sd.Buffer.NumElements  = count;
             device->CreateShaderResourceView(buf.Get(), &sd, &srv);
         };
-        // Nodes/tris only when a new BLAS was appended, instances every frame
-        // (transforms move; counts are small → IMMUTABLE re-create is fine).
-        if (giBlasDirty)
+        // Nodes/tris only when a BLAS was appended (or a compaction moved them),
+        // see uploadGiBlasSB; instances every frame (transforms move; counts are
+        // small → IMMUTABLE re-create is fine).
+        if (giBlas.dirty())
         {
-            makeSB(giNodesCpu.data(), static_cast<UINT>(giNodesCpu.size()),
-                   sizeof(HE::GiBvhNode), giNodeSB, giNodeSRV);
-            makeSB(giTrisCpu.data(), static_cast<UINT>(giTrisCpu.size()),
-                   sizeof(HE::GiBvhTriangle), giTriSB, giTriSRV);
-            giBlasDirty = false;
+            HE_PROFILE_SCOPE_N("D3D11::GiUploadBlas");
+            uploadGiBlasSB(giNodeSB, giNodeSRV, giNodeCap, giBlas.nodes(), giBlas.uploadFromNodes());
+            uploadGiBlasSB(giTriSB,  giTriSRV,  giTriCap,  giBlas.tris(),  giBlas.uploadFromTris());
+            giBlas.markUploaded();
         }
         makeSB(giInstancesCpu.data(), static_cast<UINT>(giInstancesCpu.size()),
                sizeof(GIInstanceGpu), giInstanceSB, giInstanceSRV);
+        if (giShadowInstancesCpu.size() != giInstancesCpu.size())
+        {
+            // Never an empty buffer; the count says how many are real.
+            const GIInstanceGpu dummy{};
+            giShadowInstanceCount = static_cast<int>(giShadowInstancesCpu.size());
+            makeSB(giShadowInstancesCpu.empty() ? &dummy : giShadowInstancesCpu.data(),
+                   static_cast<UINT>(std::max<size_t>(giShadowInstancesCpu.size(), 1)),
+                   sizeof(GIInstanceGpu), giShadowInstanceSB, giShadowInstanceSRV);
+        }
+        else { giShadowInstanceCount = giInstanceCount; giShadowInstanceSB.Reset(); giShadowInstanceSRV.Reset(); }
+        if (giReflEnabled)
+            makeSB(giReflInstancesCpu.data(), static_cast<UINT>(giReflInstancesCpu.size()),
+                   sizeof(GIInstanceGpu), giReflInstanceSB, giReflInstanceSRV);
+        else { giReflInstanceSB.Reset(); giReflInstanceSRV.Reset(); }
+        if (giReflEnabled)
+        {
+            // Never an empty buffer: the kernel gates every read on the table's size and the instance's index.
+            const GILandGpu dummy{};
+            makeSB(lands.empty() ? &dummy : lands.data(), static_cast<UINT>(std::max<size_t>(lands.size(), 1)),
+                   sizeof(GILandGpu), giLandSB, giLandSRV);
+        }
+        else { giLandSB.Reset(); giLandSRV.Reset(); }
         if (!giNodeSRV || !giTriSRV || !giInstanceSRV) giInstanceCount = 0;
     }
 
     void destroyGiAccel()
     {
-        giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset();
-        giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset();
-        giBlasCache.clear();
-        giNodesCpu.clear();
-        giTrisCpu.clear();
+        HE_PROFILE_SCOPE_N("D3D11::GiDropAccel");
+        giNodeSB.Reset(); giTriSB.Reset(); giInstanceSB.Reset(); giReflInstanceSB.Reset(); giLandSB.Reset();
+        giNodeSRV.Reset(); giTriSRV.Reset(); giInstanceSRV.Reset(); giReflInstanceSRV.Reset(); giLandSRV.Reset();
+        for (ID3D11ShaderResourceView*& v : giLandWeightSRV) v = nullptr;
+        giNodeCap = giTriCap = 0;
+        giBlas.clear();
         giInstancesCpu.clear();
         giInstanceCount = 0;
-        giBlasDirty     = false;
+        giHfTex.Reset(); giHfSRV.Reset(); giHfVersion = 0; giHfKey = ~0ull; giHfActive = false;
+        giShadowInstancesCpu.clear(); giShadowInstanceSB.Reset(); giShadowInstanceSRV.Reset(); giShadowInstanceCount = 0;
     }
 
     // Builds the GI pipelines. Called eagerly from Initialize (so the compile cost
@@ -3261,7 +3593,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& blob) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src.c_str(), src.size(), "gi", nullptr, nullptr,
                                   entry, profile, flags, 0, &blob, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s",
@@ -3292,7 +3624,7 @@ struct D3D11RendererImpl
         // every batch then loops through giGBufVS.
         if (ok && compile(kGiGBufHLSL, "GiGBufVSInstanced", "vs_5_0", b))
             device->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giGBufVSInstanced);
-        if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", b)))
+        if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiHeightfieldHLSL + kGiShadowCSHLSL, "GiShadowCS", "cs_5_0", b)))
             ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giShadowCS));
         if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL, "GiProbeCS", "cs_5_0", b)))
             ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giProbeCS));
@@ -3389,12 +3721,16 @@ struct D3D11RendererImpl
                && makeTex(DXGI_FORMAT_R16_FLOAT,
                           D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
                           giFilterTmpTex, &giFilterTmpRTV, &giFilterTmpSRV, nullptr);
-        // Depth buffer for the G-buffer prepass.
+        // Depth buffer for the G-buffer prepass. D32 like Vulkan/Metal (Thema
+        // 204, defect B): as D16 a depth step is z^2/6554 m at near 0.1 (1.5 m
+        // at 100 m), so the chunk skirts won the depth test against the
+        // neighbour chunk and the stored ray origin sat under the terrain:
+        // dark dashes on every chunk seam beyond ~100 m.
         giGBufDSV.Reset(); giGBufDepth.Reset();
         D3D11_TEXTURE2D_DESC dd{};
         dd.Width = (UINT)w; dd.Height = (UINT)h;
         dd.MipLevels = dd.ArraySize = 1;
-        dd.Format = DXGI_FORMAT_D16_UNORM; dd.SampleDesc.Count = 1;
+        dd.Format = DXGI_FORMAT_D32_FLOAT; dd.SampleDesc.Count = 1;
         dd.Usage = D3D11_USAGE_DEFAULT;
         dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
         ok = ok && SUCCEEDED(device->CreateTexture2D(&dd, nullptr, &giGBufDepth))
@@ -3522,6 +3858,14 @@ struct D3D11RendererImpl
         giShadowW = giShadowH = 0;
         giHistValid = false;
         destroyGiProbeAtlas();
+        // GI reflections (Thema 191 step 2): sized off giShadowW/H, so a
+        // reset here must drop them too, or ensureGiReflTargets' size check
+        // against the fresh 0/0 would wrongly skip a rebuild.
+        giReflRawTex.Reset(); giReflPingTex.Reset(); giReflBlurTex.Reset(); giReflTex.Reset();
+        giReflRawSRV.Reset(); giReflPingSRV.Reset(); giReflBlurSRV.Reset(); giReflSRV.Reset();
+        giReflPingRTV.Reset(); giReflBlurRTV.Reset(); giReflRTV.Reset(); giReflRawUAV.Reset();
+        giReflW = giReflH = 0;
+        giReflReady = false;
     }
 
     // The 4-stage shadow-mask pipeline (G-buffer → compute rays → temporal →
@@ -3534,8 +3878,10 @@ struct D3D11RendererImpl
                                           const GpuMesh& fallbackMesh,
                                           ID3D11InputLayout* il,
                                           ID3D11DepthStencilState* depthSt,
-                                          ID3D11RasterizerState* rasterSt)
+                                          ID3D11RasterizerState* rasterSt,
+                                          bool maskPasses = true)
     {
+        GpuPassScope _passTimer(this, "GIShadow");
         createGiPipelines();
         if (!giGBufVS || !giShadowCS || !giTemporalPS || !giAtrousPS) return nullptr;
         ensureGiShadowTargets(w, h);
@@ -3563,6 +3909,11 @@ struct D3D11RendererImpl
             ctx->OMSetDepthStencilState(depthSt, 0);
             ctx->RSSetState(rasterSt);
             ctx->VSSetConstantBuffers(0, 1, perObjectCB.GetAddressOf());
+            // GiGBufPS also reads this cbuffer (uPBR, the receiver's
+            // metallic/roughness it packs into pos.a/norm.a) — bind it
+            // explicitly rather than relying on whatever a previous pass left
+            // on PS b0.
+            ctx->PSSetConstantBuffers(0, 1, perObjectCB.GetAddressOf());
 
             for (const DrawCall* dc : opaqueDCs)
             {
@@ -3577,6 +3928,10 @@ struct D3D11RendererImpl
                 {
                     PerObjectCB o{};
                     o.mvp = viewProj * t; o.model = t;
+                    // Receiver roughness/metallic for GiGBufPS (pos.a = 1 +
+                    // metallic, norm.a = roughness) — what runGiReflections'
+                    // trace gates on. Left zero before Thema 191 step 2.
+                    o.pbr = glm::vec4(dc->metallic, dc->roughness, 0.0f, 0.0f);
                     D3D11_MAPPED_SUBRESOURCE mapped{};
                     if (SUCCEEDED(ctx->Map(perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
                     {
@@ -3587,12 +3942,27 @@ struct D3D11RendererImpl
                 };
                 // A GeometryPass batch is one instanced draw with the loop's
                 // {mvp, model} per instance (same bytes as PerObjectCB's head).
-                const std::vector<glm::mat4>& inst = dc->instanceTransforms;
+                // The instanced VS takes mvp/model off the instance buffer, not
+                // PerObject — but GiGBufPS still reads uPBR off cbuffer b0, and
+                // a batch is one material, so the whole batch's roughness/
+                // metallic goes in here once, same as drawOne's per-instance set.
+                const InstanceRun inst = dc->instanceRun();
+                if (inst.size())
+                {
+                    PerObjectCB o{};
+                    o.pbr = glm::vec4(dc->metallic, dc->roughness, 0.0f, 0.0f);
+                    D3D11_MAPPED_SUBRESOURCE mapped{};
+                    if (SUCCEEDED(ctx->Map(perObjectCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+                    {
+                        std::memcpy(mapped.pData, &o, sizeof(o));
+                        ctx->Unmap(perObjectCB.Get(), 0);
+                    }
+                }
                 if (drawDepthInstanced(ctx, giGBufVSInstanced.Get(), giGBufVS.Get(),
-                        range.count, range.start, static_cast<UINT>(inst.size()),
-                        [&](UINT k, glm::mat4* pair) {
-                            pair[0] = viewProj * inst[k];
-                            pair[1] = inst[k];
+                        range.count, range.start, inst,
+                        [&](const glm::mat4& m, glm::mat4* pair) {
+                            pair[0] = viewProj * m;
+                            pair[1] = m;
                         }))
                 {
                     static bool loggedOnce = false;
@@ -3604,14 +3974,15 @@ struct D3D11RendererImpl
                     }
                     continue;
                 }
-                if (!inst.empty())
-                    for (const glm::mat4& t : inst) drawOne(t);
+                if (inst.size())
+                    inst.forEach(drawOne);
                 else
                     drawOne(dc->transform);
             }
             ID3D11RenderTargetView* nulls[2] = {};
             ctx->OMSetRenderTargets(2, nulls, nullptr);
         }
+        if (!maskPasses) return giGBufPosSRV.Get(); // reflections only: the prepass is all they need
 
         // ── 2. Shadow rays (compute, 1 cone-jittered ray/pixel vs the BVH) ──
         {
@@ -3635,23 +4006,39 @@ struct D3D11RendererImpl
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (SUCCEEDED(ctx->Map(giShadowCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &scb, sizeof(scb)); ctx->Unmap(giShadowCB.Get(), 0); }
-            glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
+            // The kernel's instance list: without the terrain chunks while the height field stands in for them.
+            const bool sep = giShadowInstanceSRV != nullptr;
+            const bool hf  = giHfActive && sep && giHfSRV && giHfCB && !rw.heightfields.empty();
+            glm::ivec4 cnt(sep ? giShadowInstanceCount : giInstanceCount, 0, 0, 0);
             if (SUCCEEDED(ctx->Map(giCountCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
             { std::memcpy(mapped.pData, &cnt, sizeof(cnt)); ctx->Unmap(giCountCB.Get(), 0); }
+            if (hf)
+            {
+                struct { glm::mat4 worldToLocal; glm::vec4 p, p2; } hcb{};
+                const GiHeightfield& h0 = rw.heightfields[0];
+                hcb.worldToLocal = h0.worldToLocal;
+                hcb.p  = glm::vec4(1.0f / std::max(h0.size.x, 1e-4f), 1.0f / std::max(h0.size.y, 1e-4f),
+                                   float(h0.res - 1), 1.0f);
+                hcb.p2 = glm::vec4(float(giHfTopLevel), giHfMaxH, 0.0f, 512.0f);
+                if (SUCCEEDED(ctx->Map(giHfCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+                { std::memcpy(mapped.pData, &hcb, sizeof(hcb)); ctx->Unmap(giHfCB.Get(), 0); }
+            }
 
             ctx->CSSetShader(giShadowCS.Get(), nullptr, 0);
-            ID3D11ShaderResourceView* srvs[5] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
-                                                  giNodeSRV.Get(), giTriSRV.Get(), giInstanceSRV.Get() };
-            ctx->CSSetShaderResources(0, 5, srvs);
-            ID3D11Buffer* cbs[2] = { giShadowCB.Get(), giCountCB.Get() };
-            ctx->CSSetConstantBuffers(0, 2, cbs);
+            ID3D11ShaderResourceView* srvs[6] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
+                                                  giNodeSRV.Get(), giTriSRV.Get(),
+                                                  sep ? giShadowInstanceSRV.Get() : giInstanceSRV.Get(),
+                                                  hf ? giHfSRV.Get() : nullptr };
+            ctx->CSSetShaderResources(0, 6, srvs);
+            ID3D11Buffer* cbs[3] = { giShadowCB.Get(), giCountCB.Get(), hf ? giHfCB.Get() : nullptr };
+            ctx->CSSetConstantBuffers(0, 3, cbs);
             ID3D11UnorderedAccessView* uavs[2] = { giRawUAV.Get(), giLocalMaskUAV.Get() };
             ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
             ctx->Dispatch((UINT)((giShadowW + 7) / 8), (UINT)((giShadowH + 7) / 8), 1);
             ID3D11UnorderedAccessView* nullUavs[2] = {};
             ctx->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
-            ID3D11ShaderResourceView* nullSrvs[5] = {};
-            ctx->CSSetShaderResources(0, 5, nullSrvs);
+            ID3D11ShaderResourceView* nullSrvs[6] = {};
+            ctx->CSSetShaderResources(0, 6, nullSrvs);
             ctx->CSSetShader(nullptr, nullptr, 0);
         }
 
@@ -3719,6 +4106,7 @@ struct D3D11RendererImpl
 
     void dispatchGiProbeUpdate(ID3D11DeviceContext* ctx, const RenderWorld& rw)
     {
+        GpuPassScope _passTimer(this, "GIProbes");
         if (!giProbeCS || giInstanceCount == 0) return;
         ensureGiProbeGrid(rw);
         if (!giProbeGridBuilt) return;
@@ -3782,6 +4170,269 @@ struct D3D11RendererImpl
         giProbeCursor = (giProbeCursor + budget) % giProbeCount;
     }
 
+    // The trace's cbuffer (b0 of kGiReflCSHLSL); field order IS the HLSL's.
+    struct GiReflCBData
+    {
+        glm::vec4 camPos, sunDir, sunColor, ambient, gridOrigin, gridCounts, reflParams, frame, rays;
+        glm::vec4 lightPosRange[8], lightColorType[8], lightDirCos[8];
+    };
+
+    // Builds the GI-reflection pipelines (compiled lazily on the first
+    // reflection frame, mirrors D3D12). A compile failure logs + leaves the
+    // pass off for the session; it does NOT clear giSupported (the diffuse
+    // GI path may still work).
+    void createGiReflPipelines()
+    {
+        if (giReflPipesTried) return;
+        giReflPipesTried = true;
+
+        UINT flags = 0;
+#if defined(_DEBUG)
+        flags |= D3DCOMPILE_DEBUG;
+#endif
+        auto compile = [&](const std::string& src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& blob) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(timedD3DCompile(src.c_str(), src.size(), "gi_refl", nullptr, nullptr,
+                                  entry, profile, flags, 0, &blob, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s",
+                    (std::string("D3D11Renderer: GI reflection shader compile failed (") + entry + "): "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown")).c_str());
+                return false;
+            }
+            return true;
+        };
+        auto makeCB = [&](UINT bytes, ComPtr<ID3D11Buffer>& cb) -> bool
+        {
+            D3D11_BUFFER_DESC bd{};
+            bd.ByteWidth      = (bytes + 15u) & ~15u;
+            bd.Usage          = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            return SUCCEEDED(device->CreateBuffer(&bd, nullptr, &cb));
+        };
+
+        bool ok = true;
+        ComPtr<ID3DBlob> b;
+        if (ok && (ok = compile(std::string(kGiTraversalHLSL) + kGiReflCSHLSL, "GiReflCS", "cs_5_0", b)))
+            ok = SUCCEEDED(device->CreateComputeShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giReflCS));
+        if (ok && (ok = compile(kGiReflBlurHLSL, "main", "ps_5_0", b)))
+            ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giReflBlurPS));
+        if (ok && (ok = compile(kGiReflMixHLSL, "main", "ps_5_0", b)))
+            ok = SUCCEEDED(device->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &giReflMixPS));
+
+        ok = ok && makeCB(static_cast<UINT>(sizeof(GiReflCBData)), giReflCB)
+                && makeCB(16, giReflBlurCB)
+                && makeCB(16, giReflMixCB);
+
+        if (!ok)
+        {
+            HE_LOG_ERROR(RHI, "%s",
+                        "D3D11Renderer: GI reflection pipeline build failed — reflections disabled");
+            giReflCS.Reset(); giReflBlurPS.Reset(); giReflMixPS.Reset();
+            giReflCB.Reset(); giReflBlurCB.Reset(); giReflMixCB.Reset();
+            return;
+        }
+        HE_LOG_INFO(RHI, "%s", "D3D11Renderer: GI reflection pipelines built");
+    }
+
+    // Result chain at the prepass' size (half-res, same as the shadow mask).
+    // Rebuilt whenever ensureGiShadowTargets recreated the prepass (it resets
+    // giShadowW/H, which resets this through the size check below).
+    void ensureGiReflTargets()
+    {
+        if (giReflRawTex && giReflW == giShadowW && giReflH == giShadowH) return;
+        if (!giGBufPosTex || !giGBufNormTex) return;
+        giReflRawTex.Reset(); giReflPingTex.Reset(); giReflBlurTex.Reset(); giReflTex.Reset();
+        giReflRawSRV.Reset(); giReflPingSRV.Reset(); giReflBlurSRV.Reset(); giReflSRV.Reset();
+        giReflPingRTV.Reset(); giReflBlurRTV.Reset(); giReflRTV.Reset(); giReflRawUAV.Reset();
+        giReflW = giShadowW; giReflH = giShadowH;
+        giReflReady = false;
+
+        auto makeTex = [&](UINT bind, ComPtr<ID3D11Texture2D>& t,
+                           ComPtr<ID3D11RenderTargetView>* rtv,
+                           ComPtr<ID3D11ShaderResourceView>* srv,
+                           ComPtr<ID3D11UnorderedAccessView>* uav) -> bool
+        {
+            D3D11_TEXTURE2D_DESC td{};
+            td.Width = static_cast<UINT>(giReflW); td.Height = static_cast<UINT>(giReflH);
+            td.MipLevels = td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = bind;
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &t))) return false;
+            if (rtv && FAILED(device->CreateRenderTargetView(t.Get(), nullptr, rtv->GetAddressOf()))) return false;
+            if (srv && FAILED(device->CreateShaderResourceView(t.Get(), nullptr, srv->GetAddressOf()))) return false;
+            if (uav && FAILED(device->CreateUnorderedAccessView(t.Get(), nullptr, uav->GetAddressOf()))) return false;
+            return true;
+        };
+        const bool ok = makeTex(D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE,
+                                giReflRawTex, nullptr, &giReflRawSRV, &giReflRawUAV)
+                     && makeTex(D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                                giReflPingTex, &giReflPingRTV, &giReflPingSRV, nullptr)
+                     && makeTex(D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                                giReflBlurTex, &giReflBlurRTV, &giReflBlurSRV, nullptr)
+                     && makeTex(D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE,
+                                giReflTex, &giReflRTV, &giReflSRV, nullptr);
+        if (!ok)
+        {
+            giReflRawTex.Reset(); giReflPingTex.Reset(); giReflBlurTex.Reset(); giReflTex.Reset();
+            giReflRawSRV.Reset(); giReflPingSRV.Reset(); giReflBlurSRV.Reset(); giReflSRV.Reset();
+            giReflPingRTV.Reset(); giReflBlurRTV.Reset(); giReflRTV.Reset(); giReflRawUAV.Reset();
+            giReflW = giReflH = 0;
+        }
+    }
+
+    // Trace + blur + roughness mix. Needs the prepass (pos/norm from
+    // runGiShadow, maskPasses=false is enough) and the BVH buffers; the probe
+    // atlases only when `probesValid` (the diffuse GI ran this frame, so they
+    // hold data). Returns giReflSRV (the frame's result, for heGIReflFwd t32),
+    // or null when the pass did not run.
+    ID3D11ShaderResourceView* runGiReflections(ID3D11DeviceContext* ctx, const RenderWorld& rw,
+                                               bool probesValid)
+    {
+        GpuPassScope _passTimer(this, "GIRefl");
+        createGiReflPipelines();
+        if (!giReflCS || !giReflBlurPS || !giReflMixPS || !giReflCB || !giReflBlurCB || !giReflMixCB)
+            return nullptr;
+        ensureGiReflTargets();
+        if (!giReflRawTex || !giNodeSRV || !giTriSRV || !giInstanceSRV || giInstanceCount == 0)
+            return nullptr;
+
+        const HE::GIReflTier tier = HE::giReflTierFor(giReflQuality, giReflBlurEnabled);
+
+        // ── 1. Trace ─────────────────────────────────────────────────────────
+        {
+            GiReflCBData cb{};
+            glm::vec3 towardLight, lightColorIntensity;
+            rw.dominantDirectionalLight(towardLight, lightColorIntensity);
+            static_assert(HE::kMaxLightWindow == 8, "cb light arrays hold 8 entries");
+            const HE::PackedLightArray lights = HE::BuildPackedLightArray(rw);
+            for (int i = 0; i < HE::kMaxLightWindow; ++i)
+            {
+                cb.lightPosRange[i]  = lights.posRange[i];
+                cb.lightColorType[i] = lights.colorType[i];
+                cb.lightDirCos[i]    = lights.dirCos[i];
+            }
+            giReflFrameSeed = HE::NextGIJitterSeed(giReflFrameSeed); // wraps: GIJitter.h
+            const bool atlasesValid = probesValid && giIrrTex && giVisTex;
+            cb.camPos     = glm::vec4(rw.camera.position, 0.0f);
+            cb.sunDir     = glm::vec4(towardLight, static_cast<float>(lights.count));
+            cb.sunColor   = glm::vec4(lightColorIntensity, 0.0f);
+            cb.ambient    = glm::vec4(rw.ambient, 0.0f);
+            cb.gridOrigin = glm::vec4(giGridOrigin, giProbeSpacing);
+            cb.gridCounts = glm::vec4(glm::vec3(giGridCounts), static_cast<float>(giProbesPerRow));
+            cb.reflParams = glm::vec4(giReflMaxDistance, giReflMaxRoughness, giIndirectIntensity,
+                                      atlasesValid ? 1.0f : 0.0f);
+            // frame.w gates the glossy cone: derived from the ray count, not
+            // from the tier, exactly as the GL/D3D12 port does.
+            cb.frame      = glm::vec4(giReflFrameSeed, static_cast<float>(giReflW),
+                                      static_cast<float>(giReflH), tier.rays > 1 ? 1.0f : 0.0f);
+            cb.rays       = glm::vec4(static_cast<float>(tier.rays), 0.0f, 0.0f, 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(ctx->Map(giReflCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &cb, sizeof(cb)); ctx->Unmap(giReflCB.Get(), 0); }
+            // The count CB is also written by the shadow/probe dispatches (same
+            // value); a reflection-only frame (diffuse GI off) has neither.
+            const glm::ivec4 cnt(giInstanceCount, 0, 0, 0);
+            if (SUCCEEDED(ctx->Map(giCountCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &cnt, sizeof(cnt)); ctx->Unmap(giCountCB.Get(), 0); }
+
+            ctx->CSSetShader(giReflCS.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* atlasIrr = atlasesValid ? giIrrSRV.Get() : nullptr;
+            ID3D11ShaderResourceView* atlasVis = atlasesValid ? giVisSRV.Get() : nullptr;
+            // The reflection kernel reads the reflection-only instance copy (graph-material colours).
+            // t7 = the landscape table, t8..t11 its weightmaps (the white dummy behind them: every slot a valid SRV).
+            ID3D11ShaderResourceView* srvs[12] = { giGBufPosSRV.Get(), giGBufNormSRV.Get(),
+                                                   giNodeSRV.Get(), giTriSRV.Get(),
+                                                   giReflInstanceSRV ? giReflInstanceSRV.Get() : giInstanceSRV.Get(),
+                                                   atlasIrr, atlasVis,
+                                                   giLandSRV.Get(),
+                                                   giLandWeightSRV[0] ? giLandWeightSRV[0] : dummyTexture.Get(),
+                                                   giLandWeightSRV[1] ? giLandWeightSRV[1] : dummyTexture.Get(),
+                                                   giLandWeightSRV[2] ? giLandWeightSRV[2] : dummyTexture.Get(),
+                                                   giLandWeightSRV[3] ? giLandWeightSRV[3] : dummyTexture.Get() };
+            ctx->CSSetShaderResources(0, 12, srvs);
+            ID3D11Buffer* cbs[2] = { giReflCB.Get(), giCountCB.Get() };
+            ctx->CSSetConstantBuffers(0, 2, cbs);
+            ID3D11UnorderedAccessView* uavs[1] = { giReflRawUAV.Get() };
+            ctx->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+            ID3D11SamplerState* linSamp = giLinearClamp.Get();
+            ctx->CSSetSamplers(1, 1, &linSamp);
+            ctx->Dispatch(static_cast<UINT>((giReflW + 7) / 8), static_cast<UINT>((giReflH + 7) / 8), 1);
+            ID3D11UnorderedAccessView* nullUavs[1] = {};
+            ctx->CSSetUnorderedAccessViews(0, 1, nullUavs, nullptr);
+            ID3D11ShaderResourceView* nullSrvs[12] = {};
+            ctx->CSSetShaderResources(0, 12, nullSrvs);
+            ctx->CSSetShader(nullptr, nullptr, 0);
+        }
+
+        // ── 2. Separable confidence-weighted blur (an a-trous chain) + mix ───
+        D3D11_VIEWPORT vp{}; vp.Width = float(giReflW); vp.Height = float(giReflH); vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &vp);
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(fsVS.Get(), nullptr, 0);
+        ctx->OMSetDepthStencilState(noDepthDSS.Get(), 0);
+        ctx->RSSetState(fsRastState.Get());
+        ID3D11SamplerState* fsLinSamp = giLinearClamp.Get();
+        ctx->PSSetSamplers(1, 1, &fsLinSamp);
+
+        auto drawFs = [&](ID3D11PixelShader* ps, ID3D11RenderTargetView* rtv, ID3D11Buffer* cb,
+                          ID3D11ShaderResourceView* const* srvs, UINT nSrvs, float x, float y)
+        {
+            const glm::vec4 v(x, y, 0.0f, 0.0f);
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            { std::memcpy(mapped.pData, &v, sizeof(v)); ctx->Unmap(cb, 0); }
+            ctx->OMSetRenderTargets(1, &rtv, nullptr);
+            ctx->PSSetShader(ps, nullptr, 0);
+            ctx->PSSetConstantBuffers(0, 1, &cb);
+            ctx->PSSetShaderResources(0, nSrvs, srvs);
+            ctx->Draw(3, 0);
+            ID3D11ShaderResourceView* nulls[3] = {};
+            ctx->PSSetShaderResources(0, nSrvs, nulls);
+            ID3D11RenderTargetView* n = nullptr;
+            ctx->OMSetRenderTargets(1, &n, nullptr);
+        };
+
+        const bool blur = giReflBlurEnabled;
+        if (blur)
+        {
+            // Reach measured against the half-resolution trace (resDivUsed = 2,
+            // the shared prepass resolution — the GL gap the plan documents),
+            // strides scaled to land on it exactly (GIReflectionTier.h).
+            const HE::GIReflBlurReach br = HE::giReflBlurReachFor(giReflMaxRoughness, tier.rays, 2);
+            for (int lvl = 0; lvl < br.levels; ++lvl)
+            {
+                const float stride = br.unit * std::exp2(static_cast<float>(lvl));
+                const float tx = stride / static_cast<float>(std::max(1, giReflW));
+                const float ty = stride / static_cast<float>(std::max(1, giReflH));
+                // H: the previous level's result (raw at level 0) -> ping.
+                ID3D11ShaderResourceView* hSrv[1] = { lvl == 0 ? giReflRawSRV.Get() : giReflBlurSRV.Get() };
+                drawFs(giReflBlurPS.Get(), giReflPingRTV.Get(), giReflBlurCB.Get(), hSrv, 1, tx, 0.0f);
+                // V: ping -> blur.
+                ID3D11ShaderResourceView* vSrv[1] = { giReflPingSRV.Get() };
+                drawFs(giReflBlurPS.Get(), giReflBlurRTV.Get(), giReflBlurCB.Get(), vSrv, 1, 0.0f, ty);
+            }
+        }
+        // Mix the SHARP trace back in per pixel by roughness so a mirror stays
+        // a mirror (floor 0.35 = the half-resolution floor, as the GL/D3D12
+        // port). With the blur off this is a plain copy: the "blurred" input
+        // is the raw trace.
+        ID3D11ShaderResourceView* mixSrvs[3] = { giReflRawSRV.Get(),
+                                                 blur ? giReflBlurSRV.Get() : giReflRawSRV.Get(),
+                                                 giGBufNormSRV.Get() };
+        drawFs(giReflMixPS.Get(), giReflRTV.Get(), giReflMixCB.Get(), mixSrvs, 3, 0.35f, 0.0f);
+
+        ID3D11SamplerState* nullSamp = nullptr;
+        ctx->PSSetSamplers(1, 1, &nullSamp);
+        giReflReady = true;
+        return giReflSRV.Get();
+    }
+
     bool createPostFX()
     {
         UINT flags = 0;
@@ -3792,7 +4443,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& out) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src, strlen(src), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s",
@@ -3889,7 +4540,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& out) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src, strlen(src), entry, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src, strlen(src), entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
                 HE_LOG_ERROR(RHI, "D3D11Renderer: TAA shader '%s' failed: %s", entry,
@@ -3934,6 +4585,7 @@ struct D3D11RendererImpl
     // (bloomTex[0]) or dummyTexture if bloom resources are missing.
     ID3D11ShaderResourceView* runBloom(uint32_t bw, uint32_t bh)
     {
+        GpuPassScope _passTimer(this, "Bloom");
         if (!bloomBrightPS || !bloomBlurPS || !bloomTex[0]) return dummyTexture.Get();
         auto* ctx = context.Get();
 
@@ -4021,6 +4673,7 @@ struct D3D11RendererImpl
     RenderGraph     m_renderGraph;
     CommandBuffer   m_cmds;
     std::vector<uint8_t>  m_visible;
+    FrameCull             m_frameCull;   // refined bounds of the frame's walk, shared by every cull below
     std::vector<uint32_t> m_sortedIndices;
     std::unordered_map<HE::UUID, GpuMesh> meshCache;
 
@@ -4144,14 +4797,14 @@ struct D3D11RendererImpl
 #endif
         ComPtr<ID3DBlob> vsBlob, psBlob, err;
         const std::string sceneSource = std::string(kSkyFuncHLSL) + kSceneHLSL;
-        if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "VSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: VS compile failed: ")
                 + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
             return false;
         }
-        if (FAILED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                               "PSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: PS compile failed: ")
@@ -4170,13 +4823,13 @@ struct D3D11RendererImpl
 
         // Depth-only vertex shader for the shadow pass.
         ComPtr<ID3DBlob> dvsBlob;
-        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (SUCCEEDED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSDepth", "vs_5_0", flags, 0, &dvsBlob, &err)))
             device->CreateVertexShader(dvsBlob->GetBufferPointer(), dvsBlob->GetBufferSize(), nullptr, &depthVS);
         // Its instanced twin (one draw per same-mesh caster run, reads t3 like
         // VSMainInstanced). Optional: without it every run loops through VSDepth.
         ComPtr<ID3DBlob> divsBlob;
-        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (SUCCEEDED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSDepthInstanced", "vs_5_0", flags, 0, &divsBlob, &err)))
             device->CreateVertexShader(divsBlob->GetBufferPointer(), divsBlob->GetBufferSize(),
                                        nullptr, &depthVSInstanced);
@@ -4187,7 +4840,7 @@ struct D3D11RendererImpl
         // Instanced geometry VS (A3) + the per-instance {mvp,model} structured buffer
         // it reads at t3 (dynamic, refilled per instanced batch via MAP_WRITE_DISCARD).
         ComPtr<ID3DBlob> ivsBlob;
-        if (SUCCEEDED(D3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
+        if (SUCCEEDED(timedD3DCompile(sceneSource.c_str(), sceneSource.size(), "scene", nullptr, nullptr,
                                  "VSMainInstanced", "vs_5_0", flags, 0, &ivsBlob, &err)))
         {
             device->CreateVertexShader(ivsBlob->GetBufferPointer(), ivsBlob->GetBufferSize(), nullptr, &vsInstanced);
@@ -4372,28 +5025,33 @@ struct D3D11RendererImpl
                 device->CreateShaderResourceView(tex.Get(), &ad, &dummyArrayTexture);
             }
         }
-        createPostFX();
-        createSSAOPipeline();
-        createSkyPipeline();
-        createDebugLinePipeline();
-        createSkinnedPipeline();
-        createUIPipeline();
-        createMaterialResources(); // A4: node-graph material CBs + sampler
+        // Each sub-step timed on its own ([startup] D3D11 phase=…, Thema 196).
+        using HE::d3dtiming::Phase;
+        { Phase t("D3D11", "createPostFX");            createPostFX(); }
+        { Phase t("D3D11", "createSSAOPipeline");      createSSAOPipeline(); }
+        { Phase t("D3D11", "createSkyPipeline");       createSkyPipeline(); }
+        { Phase t("D3D11", "createDebugLinePipeline"); createDebugLinePipeline(); }
+        { Phase t("D3D11", "createSkinnedPipeline");   createSkinnedPipeline(); }
+        { Phase t("D3D11", "createUIPipeline");        createUIPipeline(); }
+        { Phase t("D3D11", "createMaterialResources"); createMaterialResources(); } // A4: node-graph material CBs + sampler
         // GI up front rather than on the first GI draw. Two reasons: the shader
         // compile is the expensive part and belongs in init, not in a frame; and
         // a compile failure here clears giSupported BEFORE GetCapabilities() is
         // first read, so the editor's GI toggle reflects reality from the start.
         // Idempotent (giPipelinesBuilt), so the lazy call in runGiShadow is a no-op.
-        createGiPipelines();
+        { Phase t("D3D11", "createGiPipelines");       createGiPipelines(); }
         // The deferred path likewise (Thema 150): supportsDeferredRendering must be
         // true before the editor first asks, and only if the resolve really built.
-        createDeferredPipelines();
+        { Phase t("D3D11", "createDeferredPipelines"); createDeferredPipelines(); }
         return vs && ps && inputLayout && perObjectCB && perFrameCB && sampler;
     }
 
     void uploadBuffers(GpuMesh& mesh, const std::vector<float>& interleaved,
                        const std::vector<uint32_t>& indices)
     {
+        meshStreamCounters().meshUploads.fetch_add(1, std::memory_order_relaxed);
+        meshStreamCounters().meshUploadBytes.fetch_add(
+            interleaved.size() * sizeof(float) + indices.size() * sizeof(uint32_t), std::memory_order_relaxed);
         D3D11_BUFFER_DESC vbd{};
         vbd.ByteWidth = static_cast<UINT>(interleaved.size() * sizeof(float));
         vbd.Usage     = D3D11_USAGE_IMMUTABLE;
@@ -4435,7 +5093,7 @@ struct D3D11RendererImpl
     }
 
     // Create an immutable base-color texture + SRV from a cooked TextureAsset — RGBA8
-    // or a block format (BC7/BC3) — with its full pre-baked mip chain (one immutable
+    // or a block format (BC7/BC3/BC1/BC4/BC5) — with its full pre-baked mip chain (one immutable
     // subresource per level). Returns a null SRV when the asset is unusable or this
     // device can't sample the shipped format (→ flat). Shared by every base-color
     // upload site (static/skeletal mesh, override material). Block formats need no
@@ -4448,7 +5106,7 @@ struct D3D11RendererImpl
     // are unchanged; the null SRV desc below inherits the resource format.
     //
     // asArray (Thema 158) = a Texture2DArray SRV for a sampler2DArray heTexP slot: every
-    // slice of a texture-array asset (RGBA8, HE::buildTextureArray layout -- slice-major,
+    // slice of a texture-array asset (RGBA8 or a block format, HE::buildTextureArray layout -- slice-major,
     // which IS D3D's subresource order), or a plain 2D asset as one slice. An array
     // asset WITHOUT asArray reads its leading bytes, i.e. slice 0, as a 2D texture.
     // honourSrgb = false uploads an sRGB-flagged texture UNORM anyway (bytes sampled
@@ -4463,28 +5121,41 @@ struct D3D11RendererImpl
         if (layers > 1 && !HE::textureArrayPayloadValid(*tex)) return srv;
 
         const bool srgb = tex->srgb && honourSrgb;
-        DXGI_FORMAT fmt; bool isBlock; UINT blockBytes = 16;
+        DXGI_FORMAT fmt; bool isBlock;
         switch (tex->format)
         {
         case TextureFormat::RGBA8: fmt = srgb ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; isBlock = false; break;
         case TextureFormat::BC7:   fmt = srgb ? DXGI_FORMAT_BC7_UNORM_SRGB      : DXGI_FORMAT_BC7_UNORM;      isBlock = true;  break;
         case TextureFormat::BC3:   fmt = srgb ? DXGI_FORMAT_BC3_UNORM_SRGB      : DXGI_FORMAT_BC3_UNORM;      isBlock = true;  break;
+        case TextureFormat::BC1:   fmt = srgb ? DXGI_FORMAT_BC1_UNORM_SRGB      : DXGI_FORMAT_BC1_UNORM;      isBlock = true;  break;
+        // BC4 / BC5 have no sRGB twin: they carry data (single channel, normal XY).
+        case TextureFormat::BC4:   fmt = DXGI_FORMAT_BC4_UNORM; isBlock = true; break;
+        case TextureFormat::BC5:   fmt = DXGI_FORMAT_BC5_UNORM; isBlock = true; break;
         default: return srv; // ASTC / unknown → D3D can't sample it
         }
         // BC is core on FL11, but stay defensive: skip if the driver can't sample it.
+        // A format the CPU can expand (BC1/BC3/BC4/BC5) is uploaded as RGBA8 instead.
         if (isBlock)
         {
             UINT sup = 0;
             if (FAILED(device->CheckFormatSupport(fmt, &sup)) ||
                 !(sup & D3D11_FORMAT_SUPPORT_TEXTURE2D))
-                return srv;
+            {
+                TextureAsset rgba;
+                if (!HE::textureFormatCpuDecodable(tex->format) || !HE::decodeTextureToRGBA8(*tex, rgba))
+                    return srv;
+                HE_LOG_WARN(RHI, "D3D11Renderer: device can't sample %s textures; uploading them as RGBA8",
+                            textureFormatName(tex->format));
+                return createAlbedoSRV(&rgba, asArray, honourSrgb);
+            }
         }
 
         const UINT mips = tex->mipLevels > 0 ? tex->mipLevels : 1;
         // One immutable subresource per mip (level 0 first), per slice (D3D order:
         // subresource = mip + slice * mips). Row pitch: block formats are
-        // blocks-per-row × 16 B; RGBA8 is width × 4 B.
-        if (layers > 1 && isBlock) return srv; // arrays are RGBA8 only
+        // blocks-per-row × the block size (8 B BC1/BC4, 16 B otherwise); RGBA8 is
+        // width × 4 B. The slices of an array are stored back to back, each with its chain.
+        const UINT blockBytes = textureFormatBlockBytes(tex->format);
         std::vector<D3D11_SUBRESOURCE_DATA> srd(static_cast<size_t>(mips) * layers);
         size_t off = 0;
         for (UINT s = 0; s < layers; ++s)
@@ -4493,8 +5164,7 @@ struct D3D11RendererImpl
             for (UINT l = 0; l < mips; ++l)
             {
                 const UINT rowPitch = isBlock ? ((lw + 3) / 4) * blockBytes : lw * 4;
-                const size_t bytes  = isBlock ? static_cast<size_t>((lw + 3) / 4) * ((lh + 3) / 4) * blockBytes
-                                              : static_cast<size_t>(lw) * lh * 4;
+                const size_t bytes  = textureLevelBytes(tex->format, lw, lh);
                 if (off + bytes > tex->data.size()) return {}; // truncated payload
                 D3D11_SUBRESOURCE_DATA& d = srd[static_cast<size_t>(s) * mips + l];
                 d.pSysMem          = tex->data.data() + off;
@@ -4637,6 +5307,41 @@ struct D3D11RendererImpl
         m_skyEnvValid  = true;
     }
 
+    // Displacement (Thema 207): the hull + domain shells for one body, FXC hs_5_0 /
+    // ds_5_0. Cross-compiled even next to a baked pair (a pak carries no
+    // tessellation stages yet), so without shaderc the material draws untessellated.
+    // Any failure leaves both null and logs once per shader set — the fallback,
+    // never a missing draw.
+    void buildTessStages(const std::string& disp, UINT cflags, MatShaders& sh)
+    {
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const uint64_t dh = std::hash<std::string>{}(disp);
+        const HE::MaterialShaderLibrary::Compiled& hc = m_matShaderLib.tessControl(dh, disp, Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& dc = m_matShaderLib.tessEval(dh, disp, Backend::HLSL);
+        std::string why = hc.log + dc.log;
+        ComPtr<ID3DBlob> hsb, dsb, err;
+        if (hc.ok && dc.ok)
+        {
+            if (FAILED(D3DCompile(hc.source.c_str(), hc.source.size(), "matHS", nullptr, nullptr,
+                                  HE::MaterialShaderLibrary::kHlslHullEntry, "hs_5_0", cflags, 0, &hsb, &err)))
+                why += std::string("hs_5_0: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "");
+            else if (FAILED(D3DCompile(dc.source.c_str(), dc.source.size(), "matDS", nullptr, nullptr,
+                                       HE::MaterialShaderLibrary::kHlslDomainEntry, "ds_5_0", cflags, 0, &dsb, &err)))
+                why += std::string("ds_5_0: ") + (err ? static_cast<const char*>(err->GetBufferPointer()) : "");
+            else if (FAILED(device->CreateHullShader(hsb->GetBufferPointer(), hsb->GetBufferSize(), nullptr, &sh.hs))
+                  || FAILED(device->CreateDomainShader(dsb->GetBufferPointer(), dsb->GetBufferSize(), nullptr, &sh.ds)))
+                why += "shader-object creation failed";
+        }
+        if (sh.hs && sh.ds)
+        {
+            HE_LOG_INFO(RHI, "%s", "D3D11Renderer: built a tessellated material shader set (Displacement pin)");
+            return;
+        }
+        sh.hs.Reset(); sh.ds.Reset();
+        HE_LOG_WARN(RHI, "%s", ("D3D11Renderer: displacement stages failed, drawing the material "
+                                "untessellated\n" + why).c_str());
+    }
+
     // Build (or fetch from cache) the per-material VS + PS + input layout from the
     // MaterialShaderLibrary HLSL. Cached by the shader hash ALONE: D3D11 shader objects
     // bake neither blend nor depth state (the enclosing pass binds those), so the opaque
@@ -4659,11 +5364,24 @@ struct D3D11RendererImpl
     MatShaders* GetOrBuildMaterialShaders(uint64_t hash, const std::string& frag,
                                           const std::string& vertBody,
                                           const MaterialShaderVariant* precompiled,
-                                          bool transparent, bool gbuffer = false)
+                                          bool transparent, bool gbuffer = false, bool instanced = false)
     {
         (void)transparent; // blend/depth are pass state on D3D11, not shader state
+        // Displacement: foldDisplacement filed the body under this hash (before the salt).
+        const std::string* disp = nullptr;
+        if (m_tessSupported)
+            if (auto it = m_tessDispByKey.find(hash); it != m_tessDispByKey.end()) disp = &it->second;
         if (gbuffer) precompiled = nullptr;
-        const uint64_t key = gbuffer ? (hash ^ 0x6742756666657231ULL) : hash;
+        // `instanced` (Thema 182, 2f): the twin with the material's instanced vertex
+        // (customVertexInstanced / standardVertexInstanced) that draws a GeometryPass
+        // batch in ONE call, the model per instance at TEXCOORD4..7 from m_matInstVB
+        // on vertex buffer 1. Its own key: the PLAIN vertex behind the instanced input
+        // layout would draw every instance on one spot. The fragment is the plain one,
+        // so the library's fragment caches keep `hash`. The pak bakes no instanced
+        // vertex: no twin, the caller loops (as on GL).
+        if (instanced && precompiled) return nullptr;
+        const uint64_t key = (gbuffer ? (hash ^ 0x6742756666657231ULL) : hash)
+                           ^ (instanced ? 0x1D57A9CEDB0B1E55ULL : 0ULL);
         if (auto it = m_materialShaders.find(key); it != m_materialShaders.end())
             return it->second.vs ? &it->second : nullptr; // null vs == cached miss
 
@@ -4677,14 +5395,14 @@ struct D3D11RendererImpl
         auto compilePair = [&](const std::string& vsSrc, const std::string& psSrc, const char* origin) -> bool {
             ComPtr<ID3DBlob> cerr;
             vsb.Reset(); psb.Reset();
-            if (FAILED(D3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
+            if (FAILED(timedD3DCompile(vsSrc.c_str(), vsSrc.size(), "matVS", nullptr, nullptr,
                                   "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
             {
                 HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material VS compile failed (") + origin + "): "
                     + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
                 return false;
             }
-            if (FAILED(D3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
+            if (FAILED(timedD3DCompile(psSrc.c_str(), psSrc.size(), "matPS", nullptr, nullptr,
                                   "main", "ps_5_0", cflags, 0, &psb, &cerr)))
             {
                 HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: A4 material PS compile failed (") + origin + "): "
@@ -4726,9 +5444,12 @@ struct D3D11RendererImpl
         }
         if (!built)
         {
-            const HE::MaterialShaderLibrary::Compiled& vc = vertBody.empty()
-                ? m_matShaderLib.standardVertex(Backend::HLSL)
-                : m_matShaderLib.customVertex(std::hash<std::string>{}(vertBody), vertBody, Backend::HLSL);
+            const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
+            const HE::MaterialShaderLibrary::Compiled& vc = instanced
+                ? (vertBody.empty() ? m_matShaderLib.standardVertexInstanced(Backend::HLSL)
+                                    : m_matShaderLib.customVertexInstanced(vh, vertBody, Backend::HLSL))
+                : (vertBody.empty() ? m_matShaderLib.standardVertex(Backend::HLSL)
+                                    : m_matShaderLib.customVertex(vh, vertBody, Backend::HLSL));
             // Clustered heLitP first (Thema 117): point/spot lights from the
             // t24..t26 cluster lists instead of the 8-light window. A variant
             // that does not cross-compile or that FXC rejects falls back to the
@@ -4774,18 +5495,31 @@ struct D3D11RendererImpl
         // IMPORTANT: SPIRV-Cross names GLSL vertex inputs by location as TEXCOORD{location}
         // (no remap_vertex_attributes registered in ShaderCompiler.cpp), so the material input
         // layout uses TEXCOORD0/1/2 — NOT the scene's POSITION/NORMAL/TEXCOORD. Same interleaved
-        // 32-B pos/normal/uv vertex buffer the scene meshes use.
+        // 32-B pos/normal/uv vertex buffer the scene meshes use. The instanced twin adds
+        // the model (locations 4..7 = TEXCOORD4..7) per instance from vertex buffer 1.
         const D3D11_INPUT_ELEMENT_DESC layout[] = {
             { "TEXCOORD", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0,  0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
             { "TEXCOORD", 1, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
             { "TEXCOORD", 2, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 4, DXGI_FORMAT_R32G32B32A32_FLOAT, 1,  0, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+            { "TEXCOORD", 5, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+            { "TEXCOORD", 6, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
+            { "TEXCOORD", 7, DXGI_FORMAT_R32G32B32A32_FLOAT, 1, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1 },
         };
-        if (FAILED(device->CreateInputLayout(layout, 3, vsb->GetBufferPointer(), vsb->GetBufferSize(), &sh.il)))
+        if (FAILED(device->CreateInputLayout(layout, instanced ? 7 : 3,
+                                             vsb->GetBufferPointer(), vsb->GetBufferSize(), &sh.il)))
         {
-            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: A4 material input layout creation failed");
+            HE_LOG_ERROR(RHI, "%s", instanced
+                ? "D3D11Renderer: A4 instanced material input layout creation failed, its batches draw per instance"
+                : "D3D11Renderer: A4 material input layout creation failed");
             m_materialShaders.emplace(key, MatShaders{});
             return nullptr;
         }
+        if (disp) buildTessStages(*disp, cflags, sh);
+        if (instanced)
+            HE_LOG_INFO(RHI, "%s", gbuffer
+                ? "D3D11Renderer: built an INSTANCED G-buffer material twin (one draw per batch)"
+                : "D3D11Renderer: built an INSTANCED material twin (one draw per batch)");
         return &m_materialShaders.emplace(key, std::move(sh)).first->second;
     }
 
@@ -4821,14 +5555,14 @@ struct D3D11RendererImpl
         cflags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsb, psb, cerr;
-        if (FAILED(D3DCompile(vc.source.c_str(), vc.source.size(), "decalVS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(vc.source.c_str(), vc.source.size(), "decalVS", nullptr, nullptr,
                               "main", "vs_5_0", cflags, 0, &vsb, &cerr)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal VS compile failed: ")
                 + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
             return false;
         }
-        if (FAILED(D3DCompile(fc.source.c_str(), fc.source.size(), "decalPS", nullptr, nullptr,
+        if (FAILED(timedD3DCompile(fc.source.c_str(), fc.source.size(), "decalPS", nullptr, nullptr,
                               "main", "ps_5_0", cflags, 0, &psb, &cerr)))
         {
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: decal PS compile failed: ")
@@ -4846,7 +5580,7 @@ struct D3D11RendererImpl
             const HE::MaterialShaderLibrary::Compiled& gc = m_matShaderLib.decalFragmentSampled(Backend::HLSL);
             ComPtr<ID3DBlob> gsb, gerr;
             if (!gc.ok || gc.source.empty()
-                || FAILED(D3DCompile(gc.source.c_str(), gc.source.size(), "decalGBufPS", nullptr, nullptr,
+                || FAILED(timedD3DCompile(gc.source.c_str(), gc.source.size(), "decalGBufPS", nullptr, nullptr,
                                      "main", "ps_5_0", cflags, 0, &gsb, &gerr))
                 || FAILED(device->CreatePixelShader(gsb->GetBufferPointer(), gsb->GetBufferSize(),
                                                     nullptr, &decalGBufPS)))
@@ -4951,6 +5685,10 @@ struct D3D11RendererImpl
         std::string key = graphTexKey(id, path);
         if (key.empty() || !cm) return nullptr;
         if (array) key += "#arr";
+        // A miss is cached (no file open per frame) until files may have appeared: an
+        // EngineContent download landing after this first ask (Thema 210, mirrors GL).
+        HE::forgetGraphTextureMisses(graphTexCache, graphTexMissEpoch, cm->contentEpoch(),
+                                     [](const ComPtr<ID3D11ShaderResourceView>& srv) { return srv.Get() == nullptr; });
         if (auto it = graphTexCache.find(key); it != graphTexCache.end())
             return it->second.Get();
         // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format
@@ -5000,6 +5738,7 @@ struct D3D11RendererImpl
     void EncodeDecals(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
                       int width, int height, ContentManager* cm, bool intoGBuffer = false)
     {
+        GpuPassScope _passTimer(this, "Decals");
 #if !defined(HE_HAVE_SHADERC)
         (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm; (void)intoGBuffer;
 #else
@@ -5160,7 +5899,7 @@ struct D3D11RendererImpl
                            const char* consequence = "the deferred path stays off") -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (SUCCEEDED(D3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
+            if (SUCCEEDED(timedD3DCompile(src.c_str(), src.size(), name, nullptr, nullptr,
                                      entry, profile, flags, 0, &out, &err)))
                 return true;
             HE_LOG_WARN(RHI, "%s", (std::string("D3D11Renderer: deferred ") + name + " compile failed — "
@@ -5276,20 +6015,22 @@ struct D3D11RendererImpl
         pendingMatInval.clear();
         for (const HE::UUID& id : pendingTexInval)
         {
-            graphTexCache.erase(graphTexKey(id, {}));
-            graphTexCache.erase(graphTexKey(id, {}) + "#arr"); // its texture-array upload
-            uiTexCache.erase(graphTexKey(id, {}));
+            std::string key = graphTexKey(id, {});
+            graphTexCache.erase(key);
+            graphTexCache.erase(key + "#arr"); // its texture-array upload
+            uiTexCache.erase(key);
         }
         pendingTexInval.clear();
+        meshStreamCounters().meshInvalidations.fetch_add(
+            static_cast<uint32_t>(pendingMeshInval.size()), std::memory_order_relaxed);
         for (const HE::UUID& id : pendingMeshInval)
         {
             meshCache.erase(id);
             skeletalMeshCache.erase(id);
-            // GI BLAS ranges live in CONCATENATED buffers — no splice, so an
-            // edited mesh drops the whole cache and it rebuilds lazily (same
-            // policy as the GL port's InvalidateMesh).
-            if (giBlasCache.count(id))
-                destroyGiAccel();
+            // Just this mesh's BLAS: its range turns into dead space and it
+            // rebuilds lazily. Dropping the whole cache here cost every BVH of
+            // the scene per re-stitched terrain chunk (Thema 221, GiBlasStore.h).
+            giBlas.erase(id);
         }
         // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
         // box without changing which objects exist → re-check the probe grid fit.
@@ -5317,12 +6058,16 @@ struct D3D11RendererImpl
         {
             uint64_t hash = 0; std::string frag, vertBody;
             if (!m_matShaderLib.resolveShaders(*cm, id, hash, frag, vertBody)) continue;
+            foldDisplacement(*cm, id, hash);
             if (deferred && deferredReady)
             {
                 uint64_t gbHash = 0; std::string gbFrag, gbVert;
-                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert)
-                    && GetOrBuildMaterialShaders(gbHash, gbFrag, gbVert, nullptr, false, /*gbuffer=*/true))
-                    ++built;
+                if (m_matShaderLib.resolveGBufferShaders(*cm, id, gbHash, gbFrag, gbVert))
+                {
+                    foldDisplacement(*cm, id, gbHash);
+                    if (GetOrBuildMaterialShaders(gbHash, gbFrag, gbVert, nullptr, false, /*gbuffer=*/true))
+                        ++built;
+                }
             }
             if (m_materialShaders.count(hash)) continue; // already warm (or a cached miss)
             const MaterialShaderVariant* pre =
@@ -5388,6 +6133,126 @@ struct D3D11RendererImpl
         return &meshCache.emplace(assetId, mesh).first->second;
     }
 
+#if defined(HE_HAVE_SHADERC)
+    // The GL sky cross-compiled to HLSL, once per process: the prefetch at the
+    // top of Initialize and createSkyPipeline need the same text.
+    static const he::shaderc::Result& skyCrossHlsl()
+    {
+        static const he::shaderc::Result r = [] {
+            using he::shaderc::Stage;
+            using namespace HE::glsl;
+            return he::shaderc::compileHlslPinned(
+                BuildSkyFragmentGLSL450(), Stage::Fragment, {
+                    { Stage::Fragment, 0, kSkySlotEnv.binding,   kSkySlotEnv.hlslReg   },
+                    { Stage::Fragment, 0, kSkySlotMoon.binding,  kSkySlotMoon.hlslReg  },
+                    { Stage::Fragment, 0, kSkySlotNoise.binding, kSkySlotNoise.hlslReg },
+                });
+        }();
+        return r;
+    }
+#endif
+
+    // ─── Startup shader prefetch (Thema 200, D3DShaderPrefetch.h) ───────────
+    // The compiles Initialize makes eagerly, queued on the job pool before the
+    // first of them is needed, so they run side by side instead of one after
+    // the other (7.9 s on a cold cache, the sky alone 5 s). The arguments are
+    // those of the call sites below — source, entry, profile, flags; a request
+    // that drifts from its call site is never handed out (no wrong shader), it
+    // only shows up as unused in the "[startup] D3D11 shader prefetch" line.
+    static UINT startupCompileFlags()
+    {
+        UINT flags = 0;
+#ifdef _DEBUG
+        flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+        return flags;
+    }
+
+    // The sky first and before the device exists: it is the longest compile,
+    // and its source (shaderc) needs nothing from D3D.
+    static void prefetchSkyShaders()
+    {
+#if defined(HE_HAVE_SHADERC)
+        const he::shaderc::Result& hlsl = skyCrossHlsl();
+        if (!hlsl.ok) return;
+        const UINT flags = startupCompileFlags() | D3DCOMPILE_PREFER_FLOW_CONTROL;
+        HE::d3dprefetch::submit(hlsl.source, "main", "main", "ps_5_0", flags);
+        HE::d3dprefetch::submit(HE::glsl::kSkyVSCrossHLSL, "VSSkyCross", "VSSkyCross", "vs_5_0", flags);
+#endif
+    }
+
+    // Everything else createPipeline builds (PostFX + TAA, deferred, scene,
+    // GI, skinned, debug lines, UI, SSAO), roughly the slowest first.
+    void prefetchPipelineShaders()
+    {
+        using HE::d3dprefetch::submit;
+        const UINT flags = startupCompileFlags();
+        // createPostFX / createTaaPipeline: sourceName = entry.
+        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        causticsSrc.replace(causticsSrc.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
+        for (const char* src : { kTonemapHLSL, kFxaaHLSL, kSmaaHLSL, kAABlitHLSL,
+                                 kBloomBrightHLSL, kBloomBlurHLSL, kUnderwaterFogHLSL })
+            submit(src, "main", "main", "ps_5_0", flags);
+        submit(causticsSrc, "main", "main", "ps_5_0", flags);
+        submit(kFSTriangleVS, "main", "main", "vs_5_0", flags);
+        submit(kTaaVelocityHLSL, "VSVelocity", "VSVelocity", "vs_5_0", flags);
+        submit(kTaaVelocityHLSL, "PSVelocity", "PSVelocity", "ps_5_0", flags);
+        submit(kTaaResolveHLSL,  "main", "main", "ps_5_0", flags);
+        submit(kTaaSharpenHLSL,  "main", "main", "ps_5_0", flags);
+        // createDeferredPipelines; the clustered resolve on speculation (it is
+        // built where the raw cluster lists exist, which createPipeline decides).
+        const std::string sceneSource = std::string(kSkyFuncHLSL) + kSceneHLSL;
+#if defined(HE_HAVE_SHADERC)
+        {
+            using Backend = HE::MaterialShaderLibrary::Backend;
+            const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.fullscreenVertex(Backend::HLSL);
+            const HE::MaterialShaderLibrary::Compiled& rc = m_matShaderLib.deferredResolve(Backend::HLSL);
+            const HE::MaterialShaderLibrary::Compiled& cc = m_matShaderLib.deferredResolveClustered(Backend::HLSL);
+            if (cc.ok) submit(cc.source, "resolveClusteredPS", "main", "ps_5_0", flags);
+            if (rc.ok) submit(rc.source, "resolvePS", "main", "ps_5_0", flags);
+            if (vc.ok) submit(vc.source, "resolveVS", "main", "vs_5_0", flags);
+            submit(sceneSource, "GBufPS", "GBufPS", "ps_5_0", flags);
+        }
+#endif
+        // createPipeline
+        submit(sceneSource, "scene", "PSMain", "ps_5_0", flags);
+        for (const char* e : { "VSMain", "VSDepth", "VSDepthInstanced", "VSMainInstanced" })
+            submit(sceneSource, "scene", e, "vs_5_0", flags);
+        // createGiPipelines: its own flags (no SKIP_OPTIMIZATION in Debug).
+        {
+            UINT giFlags = 0;
+#if defined(_DEBUG)
+            giFlags |= D3DCOMPILE_DEBUG;
+#endif
+            submit(std::string(kGiTraversalHLSL) + kGiShadowCSHLSL, "gi", "GiShadowCS", "cs_5_0", giFlags);
+            submit(std::string(kGiTraversalHLSL) + kGiProbeCSHLSL,  "gi", "GiProbeCS",  "cs_5_0", giFlags);
+            submit(kGiGBufHLSL, "gi", "GiGBufVS", "vs_5_0", giFlags);
+            submit(kGiGBufHLSL, "gi", "GiGBufPS", "ps_5_0", giFlags);
+            submit(kGiGBufHLSL, "gi", "GiGBufVSInstanced", "vs_5_0", giFlags);
+            submit(kGiTemporalHLSL, "gi", "main", "ps_5_0", giFlags);
+            submit(kGiAtrousHLSL,   "gi", "main", "ps_5_0", giFlags);
+            // createGiReflPipelines (Thema 191 step 2): compiled lazily on the
+            // first reflection frame, but the FXC compile itself is warmed
+            // here like every other GI kernel — same source/entry/profile/
+            // flags as the real compile() calls, so the cache key matches.
+            submit(std::string(kGiTraversalHLSL) + kGiReflCSHLSL, "gi_refl", "GiReflCS", "cs_5_0", giFlags);
+            submit(kGiReflBlurHLSL, "gi_refl", "main", "ps_5_0", giFlags);
+            submit(kGiReflMixHLSL,  "gi_refl", "main", "ps_5_0", giFlags);
+        }
+        // createSkinnedPipeline, createDebugLinePipeline, createUIPipeline
+        submit(kSkinnedHLSL, "skinned", "VSMainSkinned", "vs_5_0", flags);
+        submit(kDebugLineHLSL, "dbgline", "VSLine", "vs_5_0", flags);
+        submit(kDebugLineHLSL, "dbgline", "PSLine", "ps_5_0", flags);
+        submit(kUIHLSL, nullptr, "UIVSMain", "vs_5_0", flags | D3DCOMPILE_ENABLE_STRICTNESS);
+        submit(kUIHLSL, nullptr, "UIPSMain", "ps_5_0", flags | D3DCOMPILE_ENABLE_STRICTNESS);
+        // createSSAOPipeline: flags 0 in every build.
+        for (const char* e : { "VSPos", "VSPosInstanced" })
+            submit(kSSAOPosHLSL, nullptr, e, "vs_5_0", 0);
+        submit(kSSAOPosHLSL,  nullptr, "PSPos",        "ps_5_0", 0);
+        submit(kSSAOHLSL,     nullptr, "SSAOMain",     "ps_5_0", 0);
+        submit(kSSAOBlurHLSL, nullptr, "SSAOBlurMain", "ps_5_0", 0);
+    }
+
     bool createSkyPipeline()
     {
         UINT flags = 0;
@@ -5398,7 +6263,7 @@ struct D3D11RendererImpl
                            ComPtr<ID3DBlob>& out) -> bool
         {
             ComPtr<ID3DBlob> err;
-            if (FAILED(D3DCompile(src, srcLen, entry, nullptr, nullptr,
+            if (FAILED(timedD3DCompile(src, srcLen, entry, nullptr, nullptr,
                                   entry, profile, flags, 0, &out, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s",
@@ -5419,18 +6284,11 @@ struct D3D11RendererImpl
         skyFullModel = false;
 #if defined(HE_HAVE_SHADERC)
         {
-            using he::shaderc::Stage;
-            using namespace HE::glsl;
-            const he::shaderc::Result hlsl = he::shaderc::compileHlslPinned(
-                BuildSkyFragmentGLSL450(), Stage::Fragment, {
-                    { Stage::Fragment, 0, kSkySlotEnv.binding,   kSkySlotEnv.hlslReg   },
-                    { Stage::Fragment, 0, kSkySlotMoon.binding,  kSkySlotMoon.hlslReg  },
-                    { Stage::Fragment, 0, kSkySlotNoise.binding, kSkySlotNoise.hlslReg },
-                });
+            const he::shaderc::Result& hlsl = skyCrossHlsl();
             const UINT savedFlags = flags;
             flags |= D3DCOMPILE_PREFER_FLOW_CONTROL;
             skyFullModel = hlsl.ok
-                && compile(kSkyVSCrossHLSL, std::strlen(kSkyVSCrossHLSL), "VSSkyCross", "vs_5_0", vsB)
+                && compile(HE::glsl::kSkyVSCrossHLSL, std::strlen(HE::glsl::kSkyVSCrossHLSL), "VSSkyCross", "vs_5_0", vsB)
                 && compile(hlsl.source.c_str(), hlsl.source.size(), "main", "ps_5_0", psB);
             flags = savedFlags;
             if (!skyFullModel)
@@ -5506,13 +6364,13 @@ struct D3D11RendererImpl
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsB, psB, err;
-        if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
+        if (FAILED(timedD3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "VSLine", "vs_5_0", flags, 0, &vsB, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11 DebugLine VS compile failed");
             return false;
         }
-        if (FAILED(D3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
+        if (FAILED(timedD3DCompile(kDebugLineHLSL, std::strlen(kDebugLineHLSL),
                               "dbgline", nullptr, nullptr, "PSLine", "ps_5_0", flags, 0, &psB, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11 DebugLine PS compile failed");
@@ -5658,7 +6516,7 @@ struct D3D11RendererImpl
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsBlob, err;
-        if (FAILED(D3DCompile(kSkinnedHLSL, std::strlen(kSkinnedHLSL), "skinned",
+        if (FAILED(timedD3DCompile(kSkinnedHLSL, std::strlen(kSkinnedHLSL), "skinned",
                               nullptr, nullptr, "VSMainSkinned", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             const char* msg = err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown";
@@ -5707,7 +6565,7 @@ struct D3D11RendererImpl
         auto compile = [&](const char* entry, ComPtr<ID3D11PixelShader>& out) -> bool
         {
             ComPtr<ID3DBlob> b, err;
-            if (FAILED(D3DCompile(kWorldPreviewPSHLSL, std::strlen(kWorldPreviewPSHLSL), "worldpreview",
+            if (FAILED(timedD3DCompile(kWorldPreviewPSHLSL, std::strlen(kWorldPreviewPSHLSL), "worldpreview",
                                   nullptr, nullptr, entry, "ps_5_0", flags, 0, &b, &err)))
             {
                 HE_LOG_ERROR(RHI, "%s", (std::string("D3D11 world preview '") + entry + "': "
@@ -5778,14 +6636,14 @@ struct D3D11RendererImpl
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         ComPtr<ID3DBlob> vsBlob, psBlob, err;
-        if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
+        if (FAILED(timedD3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
                               "UIVSMain", "vs_5_0", flags, 0, &vsBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11: UI VS compile failed");
             if (err) OutputDebugStringA(static_cast<const char*>(err->GetBufferPointer()));
             return;
         }
-        if (FAILED(D3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
+        if (FAILED(timedD3DCompile(kUIHLSL, strlen(kUIHLSL), nullptr, nullptr, nullptr,
                               "UIPSMain", "ps_5_0", flags, 0, &psBlob, &err)))
         {
             HE_LOG_ERROR(RHI, "%s", "D3D11: UI PS compile failed");
@@ -5844,6 +6702,7 @@ struct D3D11RendererImpl
 
     void renderUIPass(ID3D11DeviceContext* ctx, int width, int height, ContentManager* cm)
     {
+        GpuPassScope _passTimer(this, "UI");
         if (!uiVS || m_renderWorld.uiObjects.empty()) return;
 
         ctx->VSSetShader(uiVS.Get(), nullptr, 0);
@@ -6037,12 +6896,26 @@ struct D3D11RendererImpl
     }
 };
 
+// Initialize() start → first Render(); see D3DStartupTiming.h.
+static HE::d3dtiming::StartupClock s_startupClock;
+
 D3D11Renderer::D3D11Renderer()  : m_impl(new D3D11RendererImpl{}) {}
 D3D11Renderer::~D3D11Renderer() { delete m_impl; }
 
 void D3D11Renderer::Initialize(HE::Window* window)
 {
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: initializing");
+    using HE::d3dtiming::Phase;
+    s_startupClock.begin();
+    Phase initPhase("D3D11", "Initialize");
+    HE::d3dprefetch::DrainOnFailure drainOnThrow;
+    {
+        Phase phase("D3D11", "prefetchSkyShaders");
+        D3D11RendererImpl::prefetchSkyShaders();
+    }
+    // No debug layer in any build: the device is created with flags 0 (no
+    // D3D11_CREATE_DEVICE_DEBUG); stated here so the timeline answers it too.
+    HE_LOG_INFO(RHI, "%s", "[startup] D3D11 device flags=0 (no debug layer)");
     SDL_PropertiesID props = SDL_GetWindowProperties(window->GetNativeWindow());
     HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
         props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
@@ -6067,19 +6940,47 @@ void D3D11Renderer::Initialize(HE::Window* window)
     scd.SwapEffect                         = DXGI_SWAP_EFFECT_DISCARD;
 
     D3D_FEATURE_LEVEL fl;
-    HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-        nullptr, 0, D3D11_SDK_VERSION,
-        &scd, &m_impl->swapchain,
-        &m_impl->device, &fl, &m_impl->context);
+    HRESULT hr;
+    {
+        Phase phase("D3D11", "D3D11CreateDeviceAndSwapChain");
+        hr = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+            nullptr, 0, D3D11_SDK_VERSION,
+            &scd, &m_impl->swapchain,
+            &m_impl->device, &fl, &m_impl->context);
+    }
     if (FAILED(hr))
         throw std::runtime_error("D3D11Renderer: D3D11CreateDeviceAndSwapChain failed");
+    // Hull/domain shaders are a feature level 11_0 feature: the Displacement pin
+    // (Thema 207) tessellates from there on; HE_TESSELLATION=0 is GL's A/B switch.
+    {
+        const char* tessEnv = std::getenv("HE_TESSELLATION");
+        m_impl->m_tessSupported = fl >= D3D_FEATURE_LEVEL_11_0 && !(tessEnv && std::strcmp(tessEnv, "0") == 0);
+        HE::setWaterTessellationAvailable(m_impl->m_tessSupported);
+        HE_LOG_INFO(RHI, "%s", m_impl->m_tessSupported
+            ? "D3D11Renderer: tessellation available (material Displacement pin)"
+            : "D3D11Renderer: no tessellation (feature level below 11_0 or HE_TESSELLATION=0), "
+              "displacement materials draw untessellated");
+    }
 
-    m_impl->createRTV();
-    m_impl->createDepth(m_impl->width, m_impl->height);
-    if (!m_impl->createPipeline())
-        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: scene pipeline creation failed — only clear will work");
-    m_impl->createCube();
+    {
+        Phase phase("D3D11", "createRTV+createDepth");
+        m_impl->createRTV();
+        m_impl->createDepth(m_impl->width, m_impl->height);
+    }
+    {
+        Phase phase("D3D11", "prefetchPipelineShaders");
+        m_impl->prefetchPipelineShaders();
+    }
+    {
+        Phase phase("D3D11", "createPipeline");
+        if (!m_impl->createPipeline())
+            HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: scene pipeline creation failed — only clear will work");
+    }
+    {
+        Phase phase("D3D11", "createCube");
+        m_impl->createCube();
+    }
     // Deferred-path debug/headless knobs, GL's and Metal's: HE_RENDER_PATH=1/
     // deferred forces the path without touching config, HE_DUMP_GBUFFER=1..4
     // seeds a raw G-buffer view (the editor pushes its own view mode every
@@ -6091,12 +6992,14 @@ void D3D11Renderer::Initialize(HE::Window* window)
         if (const int n = std::clamp(std::atoi(dv), 0, 4); n > 0)
             m_viewMode = static_cast<HE::ViewMode>(
                 static_cast<int>(HE::ViewMode::GBufferBaseColor) + n - 1);
+    drainOnThrow.dismiss();
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: initialized successfully");
 }
 
 void D3D11Renderer::Shutdown()
 {
     HE_LOG_INFO(RHI, "%s", "D3D11Renderer: shutdown");
+    HE::d3dprefetch::drain();   // no prefetch job may outlive the renderer
     m_impl->meshCache.clear();
     m_impl->materialTexCache.clear(); // override-material textures (ComPtr auto-release)
     m_impl->pendingMatInval.clear();
@@ -6163,6 +7066,11 @@ void D3D11Renderer::Shutdown()
     m_impl->giShadowCB.Reset(); m_impl->giCountCB.Reset(); m_impl->giTemporalCB.Reset();
     m_impl->giAtrousCB.Reset(); m_impl->giProbeCB.Reset();
     m_impl->giLinearClamp.Reset();
+    // GI reflections (Thema 191 step 2).
+    m_impl->giReflCS.Reset(); m_impl->giReflBlurPS.Reset(); m_impl->giReflMixPS.Reset();
+    m_impl->giReflCB.Reset(); m_impl->giReflBlurCB.Reset(); m_impl->giReflMixCB.Reset();
+    m_impl->giReflPipesTried = false;
+    m_impl->giReflReady = false;
     m_impl->rtv.Reset();
     m_impl->dsv.Reset();
     m_impl->depthSRV.Reset();
@@ -6179,6 +7087,7 @@ void D3D11Renderer::Shutdown()
 void D3D11Renderer::DrawScene(int width, int height)
 {
     if (!m_world || !m_impl->vs || width <= 0 || height <= 0) return;
+    HE_PROFILE_SCOPE_N("DrawScene");
     auto& p = *m_impl;
 
     // Drop caches for materials/meshes edited since last frame; they re-resolve this frame.
@@ -6243,31 +7152,45 @@ void D3D11Renderer::DrawScene(int width, int height)
     // that has nothing BUT a trail still has something to draw past here.
     if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
-    for (RenderObject& obj : p.m_renderWorld.objects)
+    const uint64_t walk = p.m_extractor.fullExtractCount();
     {
-        if (const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager))
-            obj.refineWorldBounds(mesh->localBounds);
+        HE_PROFILE_SCOPE_N("RefineBounds");
+        p.m_frameCull.refine(p.m_renderWorld, walk, [&](const RenderObject& obj) -> const HE::AABB*
+        {
+            const GpuMesh* mesh = p.resolveMesh(obj.meshAssetId, m_contentManager);
+            return mesh ? &mesh->localBounds : nullptr;
+        });
     }
     // PBR scalars per object, per material slot and per skinned object, each from
     // its own material (+ the Translucent clamp) — what GL/Metal's per-draw
     // ResolveMaterialParams gives them, in time for partitionByOpacity.
-    HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);
+    {
+        HE_PROFILE_SCOPE_N("MaterialScalars");
+        HE::resolveWorldMaterialScalars(p.m_renderWorld, m_contentManager);
+    }
 
     // GI acceleration structures: refresh the BLAS cache + per-frame instance
     // array right after extraction (UNCULLED — off-screen casters still occlude),
     // mirroring GL's UpdateGiAccel placement. No-op when GI is off.
     p.updateGiAccel(m_contentManager, p.m_renderWorld);
 
-    p.m_culler.cull(p.m_renderWorld, p.m_visible);
-    p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    p.m_frameCull.cull(p.m_culler, p.m_renderWorld, walk, p.m_renderWorld.camera.projection * p.m_renderWorld.camera.view, p.m_visible);
+    {
+        HE_PROFILE_SCOPE_N("SortObjects");
+        p.m_sorter.sort(p.m_renderWorld, p.m_visible, p.m_sortedIndices);
+    }
     p.counters.total   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.counters.visible = static_cast<uint32_t>(p.m_sortedIndices.size());
     if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
 
     if (p.m_renderGraph.empty())
     {
-        p.m_renderGraph.addPass(std::make_unique<ShadowPass>());
-        p.m_renderGraph.addPass(std::make_unique<GeometryPass>());
+        auto shadow = std::make_unique<ShadowPass>();
+        shadow->setRecordDraws(false);   // the depth views are built by prepareShadowViews; the recorded set is not read
+        p.m_renderGraph.addPass(std::move(shadow));
+        auto geometry = std::make_unique<GeometryPass>();
+        geometry->setInstanceSpans(RenderSorter::instanceSpansEnabled());   // read in place, see InstanceRun
+        p.m_renderGraph.addPass(std::move(geometry));
     }
 
     const glm::mat4 camView   = p.m_renderWorld.camera.view;
@@ -6505,6 +7428,19 @@ void D3D11Renderer::DrawScene(int width, int height)
         lit.giParams[0] = static_cast<float>(width);
         lit.giParams[1] = static_cast<float>(height);
         lit.giParams[2] = giActive ? 1.0f : 0.0f;
+        // GI reflections (Thema 191 step 2): the gate rises only when
+        // runGiReflections produced this frame's result (reset in
+        // updateGiAccel), so heGIReflFwd (t32, BindGIReflFwd) is never sampled
+        // stale. Unlike lit.ssr below, this is set HERE in the shared fill —
+        // every graph draw gets it (drawDC's forward path, the deferred-
+        // forward replay, AND the resolve's own copy), not just the resolve.
+        if (p.giReflReady)
+        {
+            lit.giRefl[0] = p.giReflIntensity;
+            lit.giRefl[1] = p.giReflMaxRoughness;
+            lit.giRefl[2] = 1.0f;
+            lit.giRefl[3] = 0.0f;
+        }
         // DDGI probe field for heLitP (Lighting v2.5): the built-in shader's
         // grid; the gate rises with the same giShadingActive, and the material
         // draw puts the atlases on t17/t18 exactly then (BindDDGIAtlases).
@@ -6606,6 +7542,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         // Mirrors GL's renderDepthLayer / Metal's encodeDepthLayer.
         if (io.output.id == kShadowMapTarget)
         {
+            D3D11RendererImpl::GpuPassScope _shadowTimer(&p, "Shadow");
             // CSM needs a directional light; the local (point/spot) atlas is
             // independent of it — night scenes with only shadow-casting point
             // lights still render their atlas (mirrors Metal/GL).
@@ -6643,31 +7580,42 @@ void D3D11Renderer::DrawScene(int width, int height)
             // product); a run of one, or a run the buffer cannot take, stays on
             // the per-caster draw. Mirrors GL's renderDepthLayer / Metal's
             // encodeDepthLayer.
+            // Every view (the cascades, then the local layers) is culled, sorted by mesh and cut
+            // into runs before the first is drawn, side by side on the workers (FrameCull::
+            // prepareShadowViews); the D3D calls stay on this thread, view after view.
+            const int cascades = shadows ? std::clamp(csm.cascadeCount, 1, D3D11RendererImpl::kCsmCascades) : 0;
+            const int nLocal   = localShadows ? nLocalLayers : 0;
+            if (p.shadowViews.size() < static_cast<size_t>(cascades + nLocal))
+                p.shadowViews.resize(static_cast<size_t>(cascades + nLocal));
+            for (int v = 0; v < cascades + nLocal; ++v)
+            {
+                ShadowViewCpu& sv = p.shadowViews[static_cast<size_t>(v)];
+                sv.viewProj = v < cascades ? csm.cascadeViewProj[v] : csm.localViewProj[v - cascades];
+                sv.skip     = v < cascades ? kNoOwnerEntity : csm.localOwnerEntity[v - cascades];
+            }
+            p.m_frameCull.prepareShadowViews(p.m_culler, p.m_renderWorld, p.m_extractor.fullExtractCount(),
+                                             p.shadowViews.data(), static_cast<size_t>(cascades + nLocal),
+                                             "D3D11ShadowViews");
             auto renderDepthLayer = [&](ID3D11DepthStencilView* dsv, int size,
-                                        const glm::mat4& viewProj, const glm::mat4& clip,
-                                        uint32_t skipEntity)
+                                        const ShadowViewCpu& view, const glm::mat4& clip)
             {
                 D3D11_VIEWPORT svp{}; svp.Width = svp.Height = static_cast<float>(size); svp.MaxDepth = 1.0f;
                 ctx->RSSetViewports(1, &svp);
                 ctx->OMSetRenderTargets(1, &noRTV, dsv);
                 ctx->ClearDepthStencilView(dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-                p.m_culler.cull(p.m_renderWorld, viewProj, p.shadowVisible);
-                p.m_sorter.sort(p.m_renderWorld, p.shadowVisible, p.shadowSorted);
-                RenderSorter::batchDepthCasters(p.m_renderWorld, p.shadowSorted, skipEntity,
-                                                p.shadowBatches);
-                for (const RenderSorter::DepthBatch& b : p.shadowBatches.batches)
+                for (const RenderSorter::DepthBatch& b : view.batches.batches)
                 {
                     const GpuMesh* mesh = p.resolveMesh(b.meshAssetId, m_contentManager);
                     const GpuMesh& m    = mesh ? *mesh : p.cube;
                     if (!m.vbuf || !m.ibuf) continue;
                     ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
                     ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-                    const glm::mat4* xf = p.shadowBatches.transforms.data() + b.first;
+                    const InstanceRun run = view.batches.run(b);
                     if (p.drawDepthInstanced(ctx, p.depthVSInstanced.Get(), p.depthVS.Get(),
-                            m.indexCount, 0, b.count,
-                            [&](UINT k, glm::mat4* pair) {
-                                pair[0] = clip * xf[k];
-                                pair[1] = xf[k];
+                            m.indexCount, 0, run,
+                            [&](const glm::mat4& model, glm::mat4* pair) {
+                                pair[0] = clip * model;
+                                pair[1] = model;
                             }))
                     {
                         static bool loggedOnce = false; // the runtime witness on Windows
@@ -6679,24 +7627,18 @@ void D3D11Renderer::DrawScene(int width, int height)
                         }
                         continue;
                     }
-                    for (uint32_t k = 0; k < b.count; ++k)
+                    run.forEach([&](const glm::mat4& model)
                     {
-                        uploadObject(clip * xf[k], xf[k], glm::vec3(1.0f), 0.0f, 0.0f, 1.0f);
+                        uploadObject(clip * model, model, glm::vec3(1.0f), 0.0f, 0.0f, 1.0f);
                         ctx->DrawIndexed(m.indexCount, 0, 0);
-                    }
+                    });
                 }
             };
-            if (shadows)
-            {
-                const int cascades = std::clamp(csm.cascadeCount, 1, D3D11RendererImpl::kCsmCascades);
-                for (int c = 0; c < cascades; ++c)
-                    renderDepthLayer(p.shadowDSV[c].Get(), p.shadowSize,
-                                     csm.cascadeViewProj[c], cascadeClip[c], kNoOwnerEntity);
-            }
-            if (localShadows)
-                for (int v = 0; v < nLocalLayers; ++v)
-                    renderDepthLayer(p.localShadowDSV[v].Get(), D3D11RendererImpl::kLocalShadowSize,
-                                     csm.localViewProj[v], localClip[v], csm.localOwnerEntity[v]);
+            for (int c = 0; c < cascades; ++c)
+                renderDepthLayer(p.shadowDSV[c].Get(), p.shadowSize, p.shadowViews[static_cast<size_t>(c)], cascadeClip[c]);
+            for (int v = 0; v < nLocal; ++v)
+                renderDepthLayer(p.localShadowDSV[v].Get(), D3D11RendererImpl::kLocalShadowSize,
+                                 p.shadowViews[static_cast<size_t>(cascades + v)], localClip[v]);
             // Restore saved target + viewport + raster state + scene shaders.
             ID3D11RenderTargetView* restoreRTV = savedRTV.Get();
             ctx->OMSetRenderTargets(1, &restoreRTV, savedDSV.Get());
@@ -6709,6 +7651,9 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
 
         if (io.output.id != kBackbufferTarget) return;
+        // The scene body: the passes inside it (SSAO, GI, decals) interrupt this scope, so its
+        // row is what is left, the opaque and blended draws and the sky.
+        D3D11RendererImpl::GpuPassScope _sceneTimer(&p, "Scene");
 
         // ── SSAO prepass (position -> AO -> blur) ────────────────────────────
         // Collect opaque/transparent DCs early (needed for position prepass AND main scene).
@@ -6726,8 +7671,14 @@ void D3D11Renderer::DrawScene(int width, int height)
         // SSAO — when GI shades, SSAO is skipped entirely (probe indirect
         // replaces AO, the ray mask replaces the shadow-map lookup).
         ID3D11ShaderResourceView* giShadowSRV = nullptr;
+        ID3D11ShaderResourceView* giReflSRV   = nullptr;
         bool giShadingActive = false;
-        if (p.giEnabled && p.giSupported && p.giInstanceCount > 0)
+        // GI reflections (Thema 191 step 2) have their own switch and run with
+        // the diffuse GI off: then only the prepass (maskPasses=false) and the
+        // reflection pass execute, mirroring D3D12/GL. Every call below is
+        // behind the setting, so with both off nothing here changes.
+        const bool giReflWanted = p.giReflEnabled && p.giSupported;
+        if ((p.giEnabled || giReflWanted) && p.giSupported && p.giInstanceCount > 0)
         {
             ComPtr<ID3D11RenderTargetView> savedRTV;
             ComPtr<ID3D11DepthStencilView> savedDSV;
@@ -6736,10 +7687,15 @@ void D3D11Renderer::DrawScene(int width, int height)
             giShadowSRV = p.runGiShadow(ctx, opaqueDCs_, viewProjClean,
                 std::max(1, width / 2), std::max(1, height / 2), p.m_renderWorld,
                 [&](HE::UUID id) -> const GpuMesh* { return p.resolveMesh(id, m_contentManager); },
-                p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get());
-            if (giShadowSRV)
+                p.cube, p.inputLayout.Get(), p.depthState.Get(), p.rasterState.Get(),
+                /*maskPasses=*/p.giEnabled);
+            if (giShadowSRV && p.giEnabled)
                 p.dispatchGiProbeUpdate(ctx, p.m_renderWorld);
-            giShadingActive = giShadowSRV && p.giIrrSRV && p.giVisSRV && p.giProbeGridBuilt;
+            giShadingActive = p.giEnabled && giShadowSRV && p.giIrrSRV && p.giVisSRV && p.giProbeGridBuilt;
+            // After the probe update: the trace shades its hits from the
+            // atlases it just refreshed.
+            if (giShadowSRV && giReflWanted)
+                giReflSRV = p.runGiReflections(ctx, p.m_renderWorld, giShadingActive);
 
             ID3D11RenderTargetView* restRTV = savedRTV.Get();
             ctx->OMSetRenderTargets(1, &restRTV, savedDSV.Get());
@@ -7010,6 +7966,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                     matHash, matFrag, matVertBody))
                 {
+                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
                     // Transparent graph materials get a blend-on / depth-write-off
                     // shader variant. MUST use the same predicate the opaque/blended
                     // partition above used, or a draw lands in the blended pass with a
@@ -7022,6 +7979,14 @@ void D3D11Renderer::DrawScene(int width, int height)
                     const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
                         m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D11);
                     D3D11RendererImpl::MatShaders* sh = nullptr;
+                    // A GeometryPass batch in the opaque or G-buffer pass draws ONCE with
+                    // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
+                    // built only for batches, null (baked pak, HE_GRAPH_INSTANCING=0,
+                    // build failed) sends it back to the per-instance loop.
+                    const bool wantTwin = dc.instanceTotal() > 1 && allowInstancing && !matTransp
+                                       && dc.instanceTotal() <= p.k_maxInstances
+                                       && RenderSorter::graphInstancingEnabled() && p.ensureMatInstVB();
+                    D3D11RendererImpl::MatShaders* shInst = nullptr;
                     if (gbufferPass)
                     {
                         // The G-buffer tail of the same graph (same expressions,
@@ -7030,16 +7995,27 @@ void D3D11Renderer::DrawScene(int width, int height)
                         uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
                         if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
                                                                    gbHash, gbFrag, gbVertBody))
+                        {
+                            p.foldDisplacement(*m_contentManager, dc.materialAssetId, gbHash);
                             sh = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
                                                              false, /*gbuffer=*/true);
+                        }
                         if (!(sh && sh->vs && sh->ps && sh->il))
                         {
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
+                        if (wantTwin)
+                            shInst = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
+                                                                 false, /*gbuffer=*/true, /*instanced=*/true);
                     }
                     else
+                    {
                         sh = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, matTransp);
+                        if (sh && wantTwin)
+                            shInst = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, false,
+                                                                 /*gbuffer=*/false, /*instanced=*/true);
+                    }
                     if (sh && sh->vs && sh->ps && sh->il)
                     {
                         // heTex0 = the material's base texture, matching the built-in selection +
@@ -7160,13 +8136,46 @@ void D3D11Renderer::DrawScene(int width, int height)
                         HE::d3d11mat::BindSkyEnvAndAO(ctx,
                             p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
                             aoSRV, p.m_matWeightSampler.Get());
+                        // heGIReflFwd (t32/s9, Thema 191 step 2): this frame's
+                        // ray-traced reflection result, or null when the pass
+                        // did not run — fillMatLight's giRefl.z gates the read.
+                        // Restored below with the rest of the material block.
+                        HE::d3d11mat::BindGIReflFwd(ctx, giReflSRV, p.giLinearClamp.Get());
+                        // Displacement (Thema 207): hull + domain between the VS and the
+                        // PS, 3-control-point patches. The domain stage runs the graph's
+                        // height statements on the PIXEL stage's registers (b0 HeLighting,
+                        // b1 U, b3 HeParams, t2/t4..t7/t14, s0/s2/s4..s7 —
+                        // MaterialShaderLibrary::tessEval), so it gets the same objects;
+                        // the hull reads only camPos from b0. U and HeParams are DISCARD-
+                        // mapped per instance below, the buffer objects stay the same.
+                        // Unbound again with the rest of the material state below.
+                        const bool matTess = sh->hs && sh->ds;
+                        if (matTess)
+                        {
+                            ctx->HSSetShader(sh->hs.Get(), nullptr, 0);
+                            ctx->DSSetShader(sh->ds.Get(), nullptr, 0);
+                            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+                            ctx->HSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
+                            ctx->DSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
+                            ctx->DSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());
+                            ctx->DSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf());
+                            ctx->DSSetShaderResources(2, 1, &heTex0);
+                            ctx->DSSetShaderResources(4, 4, heTexP);
+                            ctx->DSSetShaderResources(14, 1, &heWeights);
+                            ID3D11SamplerState* wSamp = p.m_matWeightSampler.Get();
+                            ctx->DSSetSamplers(0, 1, &wSamp);
+                            ctx->DSSetSamplers(2, 1, &matSamp);
+                            ctx->DSSetSamplers(4, 4, matSamp4);
+                        }
 
-                        auto drawMatInstance = [&](const glm::mat4& model) {
+                        // The per-draw half of every material draw: U at b1 VS,
+                        // HeParams at b3 PS / b9 WPO VS.
+                        auto uploadMatDraw = [&](const glm::mat4& mvp, const glm::mat4& model) {
                             // std140 U block (176 B) at b1 VS.
                             struct MatU { glm::mat4 mvp; glm::mat4 model; glm::vec4 color; glm::vec4 flags; glm::vec4 pbr; };
                             static_assert(sizeof(MatU) == 176, "material U block must be std140 176 B");
                             MatU u;
-                            u.mvp   = viewProj * model;
+                            u.mvp   = mvp;
                             u.model = model;
                             // Per-instance tint (RenderObject::instanceTint), as Metal and GL
                             // multiply it in: a graph reads it through Vertex Color (the editor
@@ -7194,14 +8203,41 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ctx->VSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());   // b1 U (VS)
                             ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf()); // b3 HeParams (PS)
                             ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
+                        };
+                        auto drawMatInstance = [&](const glm::mat4& model) {
+                            uploadMatDraw(viewProj * model, model);
                             ctx->DrawIndexed(range.count, range.start, 0);
                             ++p.counters.draws;
                             p.counters.tris += range.count / 3;
                         };
-                        // Instanced graph materials draw each instance via the material path (this
-                        // increment does NOT combine graph materials with A3 GPU instancing).
-                        if (!dc.instanceTransforms.empty())
-                            for (const glm::mat4& t : dc.instanceTransforms) drawMatInstance(t);
+                        D3D11_MAPPED_SUBRESOURCE im{};
+                        if (shInst && shInst->vs && shInst->ps && shInst->il
+                            && SUCCEEDED(ctx->Map(p.m_matInstVB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im)))
+                        {
+                            // The batch: every model into m_matInstVB, ONE U with the
+                            // batch-constant half (U.mvp = viewProj, the twin multiplies
+                            // the model in), one instanced draw. The twin's VS/IL replace
+                            // the plain ones bound above; the restore below puts the
+                            // built-in pass's back, and vertex buffer 1 comes off.
+                            const UINT instCount = static_cast<UINT>(dc.instanceTotal());
+                            RenderSorter::copyInstanceModels(static_cast<uint8_t*>(im.pData), sizeof(glm::mat4), dc.instanceRun());
+                            ctx->Unmap(p.m_matInstVB.Get(), 0);
+                            const UINT instStride = sizeof(glm::mat4), instOffset = 0;
+                            ctx->IASetVertexBuffers(1, 1, p.m_matInstVB.GetAddressOf(), &instStride, &instOffset);
+                            ctx->VSSetShader(shInst->vs.Get(), nullptr, 0);
+                            ctx->PSSetShader(shInst->ps.Get(), nullptr, 0);
+                            ctx->IASetInputLayout(shInst->il.Get());
+                            uploadMatDraw(viewProj, glm::mat4(1.0f));
+                            ctx->DrawIndexedInstanced(range.count, instCount, range.start, 0, 0);
+                            ++p.counters.draws;
+                            p.counters.tris += (range.count / 3) * instCount;
+                            ID3D11Buffer* nullVB = nullptr;
+                            const UINT zero = 0;
+                            ctx->IASetVertexBuffers(1, 1, &nullVB, &zero, &zero);
+                        }
+                        else if (dc.instanceTotal())
+                            // No twin: each instance through the material path.
+                            dc.forEachInstance(drawMatInstance);
                         else
                             drawMatInstance(dc.transform);
 
@@ -7220,8 +8256,15 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // cluster lights, AO point sampler and shadow sampler come back.
                         // And t15/t16: the sky cube comes off, the forward SSR result
                         // (uSSRFwd) goes back on t16.
+                        if (matTess)
+                        {
+                            ctx->HSSetShader(nullptr, nullptr, 0);
+                            ctx->DSSetShader(nullptr, nullptr, 0);
+                            ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+                        }
                         HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
                         HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
+                        HE::d3d11mat::RestoreAfterGIReflFwd(ctx); // t32 off; the built-in shader never reads it
                         {
                             HE::d3d11mat::BuiltinGISlots builtin;
                             builtin.localShadowArray = localShadowSrv_;
@@ -7278,11 +8321,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                 drawBase *= glm::vec3(dc.instanceTint);
             }
             ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-            if (!dc.instanceTransforms.empty())
+            if (dc.instanceTotal())
             {
                 static_assert(D3D11RendererImpl::k_instStride == 2 * sizeof(glm::mat4),
                               "instance stride must be mvp+model");
-                const UINT count = static_cast<UINT>(dc.instanceTransforms.size());
+                const UINT count = static_cast<UINT>(dc.instanceTotal());
                 const bool fits = allowInstancing && p.vsInstanced && p.instanceSRV
                                   && count <= p.k_maxInstances;
                 if (fits)
@@ -7291,13 +8334,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                     D3D11_MAPPED_SUBRESOURCE im{};
                     if (SUCCEEDED(ctx->Map(p.instanceSB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &im)))
                     {
-                        auto* dst = static_cast<uint8_t*>(im.pData);
-                        for (UINT k = 0; k < count; ++k)
-                        {
-                            const glm::mat4& t = dc.instanceTransforms[k];
-                            const glm::mat4 xf[2] = { viewProj * t, t }; // mvp, model (column-major)
-                            std::memcpy(dst + static_cast<size_t>(k) * p.k_instStride, xf, sizeof(xf));
-                        }
+                        RenderSorter::fillInstancePairs(static_cast<uint8_t*>(im.pData), dc.instanceRun(),
+                            [&](const glm::mat4& t, glm::mat4* pair) {
+                                pair[0] = viewProj * t;   // mvp, model (column-major)
+                                pair[1] = t;
+                            });
                         ctx->Unmap(p.instanceSB.Get(), 0);
                     }
                     // … one PerObject CB (batch-constant colour/pbr; the instanced VS reads
@@ -7317,14 +8358,14 @@ void D3D11Renderer::DrawScene(int width, int height)
                 }
                 else
                 {
-                    for (const glm::mat4& t : dc.instanceTransforms) { // fallback: transparent / ring full
+                    dc.forEachInstance([&](const glm::mat4& t) { // fallback: transparent / ring full
                         uploadObject(viewProj * t, t, drawBase, hasTex,
                                      dc.metallic, dc.roughness, dc.opacity,
                                      dc.receivesShadow ? 0.0f : 1.0f);
                         ctx->DrawIndexed(range.count, range.start, 0);
                         ++p.counters.draws;
                         p.counters.tris += range.count / 3;
-                    }
+                    });
                 }
             }
             else {
@@ -7478,6 +8519,10 @@ void D3D11Renderer::DrawScene(int width, int height)
                     ctx->PSSetShaderResources(kSSRFwdReg, 1, &ssrSRV);
                     ctx->PSSetSamplers(kSSRFwdSampler, 1, p.ssrLinearClamp.GetAddressOf());
                 }
+                // heGIReflFwd (t32/s9, Thema 191 step 2): same shape as heSSRFwd
+                // above, for the G-buffer-shaded opaque graph materials this
+                // resolve lights. Restored below with the rest of the block.
+                HE::d3d11mat::BindGIReflFwd(ctx, giReflSRV, p.giLinearClamp.Get());
 
                 ctx->IASetInputLayout(nullptr);
                 ID3D11Buffer* noVB = nullptr; UINT zero = 0;
@@ -7508,6 +8553,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 if (ssrActive) // the next frame's trace renders into it again
                     ctx->PSSetShaderResources(kSSRFwdReg, 1, noIn);
                 HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
+                HE::d3d11mat::RestoreAfterGIReflFwd(ctx); // t32 off; the built-in shader never reads it
                 {
                     HE::d3d11mat::BuiltinGISlots builtin;
                     builtin.localShadowArray = localShadowSrv_;
@@ -7648,6 +8694,7 @@ void D3D11Renderer::DrawScene(int width, int height)
 // RenderSceneImage() follows it with a readback instead.
 void D3D11Renderer::DrawViewportFrame()
 {
+    HE_PROFILE_SCOPE_N("DrawViewportFrame");
     auto& p = *m_impl;
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
@@ -7727,7 +8774,7 @@ void D3D11Renderer::DrawViewportFrame()
             ucb.camSurface[1] = p.m_renderWorld.camera.position.y;
             ucb.camSurface[2] = p.m_renderWorld.camera.position.z;
             ucb.camSurface[3] = uwCam.surfaceY;
-            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z;
+            ucb.sun[0] = towardSun.x; ucb.sun[1] = towardSun.y; ucb.sun[2] = towardSun.z; ucb.sun[3] = uwCam.causticsWindTurn;
             ucb.sunColor[0] = ucSunColor.r; ucb.sunColor[1] = ucSunColor.g; ucb.sunColor[2] = ucSunColor.b;
             ucb.caustics[0] = uwCam.causticsIntensity;
             ucb.caustics[1] = uwCam.causticsScale;
@@ -7827,7 +8874,8 @@ void D3D11Renderer::DrawViewportFrame()
         p.context->PSSetConstantBuffers(0, 1, p.postFxCB.GetAddressOf());
 
         // Tonemap: (hdrSRV, bloomSRV) → ldrRTV.
-        { const float cb[4] = { p.exposure,
+        { D3D11RendererImpl::GpuPassScope _tonemapTimer(&p, "Tonemap");
+          const float cb[4] = { p.exposure,
                                 p.bloomEnabled ? p.bloomStrength : 0.0f, 0, 0 };
           p.updatePostFxCB(cb);
           p.context->OMSetRenderTargets(1, p.ldrRTV.GetAddressOf(), nullptr);
@@ -7846,6 +8894,7 @@ void D3D11Renderer::DrawViewportFrame()
                         && p.taaW == p.viewportW && p.taaH == p.viewportH;
         if (aaTaa)
         {
+            D3D11RendererImpl::GpuPassScope _taaTimer(&p, "TAA");
             const int cur  = p.taaHistoryCur;
             const int prev = 1 - cur;
             const float cb[4] = { 1.0f / float(p.viewportW), 1.0f / float(p.viewportH),
@@ -7876,7 +8925,8 @@ void D3D11Renderer::DrawViewportFrame()
         // AA resolve: ldrSRV (or the TAA result) → viewportRTV (final output
         // sampled by ImGui). Always drawn — the method only picks the pixel
         // shader; TAA's slot is the sharpen the temporal blur asks for.
-        { const float cb[4] = { 1.0f / float(p.viewportW),
+        { D3D11RendererImpl::GpuPassScope _aaTimer(&p, aaTaa ? "TAA Sharpen" : "AA");
+          const float cb[4] = { 1.0f / float(p.viewportW),
                                 1.0f / float(p.viewportH), aaTaa ? p.aaSharpness : 0.0f, 0 };
           p.updatePostFxCB(cb);
           p.context->OMSetRenderTargets(1, p.viewportRTV.GetAddressOf(), nullptr);
@@ -8009,9 +9059,18 @@ void D3D11Renderer::Render()
         p.renderUIPass(p.context.Get(), p.width, p.height, m_contentManager);
     }
 
-    if (m_overlayCallback) m_overlayCallback(nullptr);
+    if (m_overlayCallback)
+    {
+        HE_PROFILE_SCOPE_N("Overlay");   // the editor's ImGui draw lists
+        m_overlayCallback(nullptr);
+    }
+    instanceWorldCacheNextFrame();   // frees the unfolded foliage blocks nothing read for a while
     p.gpuTimerEndFrame();
-    p.swapchain->Present(p.vsync ? 1 : 0, 0);
+    {
+        HE_PROFILE_SCOPE_N("Present");   // the driver turns the frame's recorded draws into work here
+        p.swapchain->Present(p.vsync ? 1 : 0, 0);
+    }
+    s_startupClock.endFirstFrame("D3D11");
 }
 
 IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
@@ -8025,6 +9084,25 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // Software ray-traced DDGI via CS 5.0 (FL 11.0 baseline) — same CPU-BVH
     // path as GL 4.3/Vulkan; cleared if the GI shaders fail to compile.
     c.supportsGlobalIllumination = m_impl->giSupported;
+    // GI reflections trace the same software BVH (Thema 191 step 2). They
+    // reach the image through graph materials (heLitP, t32); the built-in PBR
+    // shader has no stage for them yet, and a failed reflection-shader
+    // compile only leaves the pass off (it does not clear this).
+    //
+    // Forced off regardless of giSupported (Thema 191 step 4, measured on the
+    // RTX 4070 / NN-WS03): turning the pass on costs a flat +~22ms/frame
+    // (median whole-frame GPU time 7-8ms -> ~30ms) at EVERY quality tier and
+    // with blur on or off alike — the tier ladder (rays/resolution) gives zero
+    // mitigation here, unlike D3D12/Vulkan where the same A/B is within noise
+    // (~3-4ms regardless of the pass). The flat, tier-independent cost points
+    // at updateGiAccel's instance buffer (D3D11Renderer.cpp, makeSB call in
+    // updateGiAccel): it recreates one D3D11_USAGE_IMMUTABLE buffer+SRV every
+    // frame with no frame-in-flight indexing, unlike D3D12/Vulkan's per-frame
+    // -indexed instance buffers — a likely CPU/GPU sync stall, not GI-specific
+    // rendering cost. Hidden here (not fixed: that is a D3D11 port change,
+    // out of this step's scope) so no quality tier can be mistaken for a fix.
+    // Re-enable once a future step removes the per-frame recreate.
+    c.supportsGIReflections = false;
     // Forward SSR reads radiance out of the post chain's HDR scene target, so
     // it is there exactly when the chain is (docs/ssr-cross-backend-plan.md C6,
     // closed by the swapchain post chain): editor viewport and packaged game
@@ -8082,6 +9160,20 @@ void D3D11Renderer::SetGISettings(const GISettings& s)
     p.giShadowRays          = std::clamp(s.shadowRays, 1, 256);
     p.giShadowHistoryWeight       = std::clamp(s.shadowHistory, 0.0f, 0.98f);
     p.giShadowFilter        = s.shadowFilter;
+}
+
+// GI reflections. Same clamps as the GL/D3D12 port; `bounces` is ignored here
+// too (one traced segment), and the quality tier only sets rays + blur reach
+// (the trace resolution is the prepass', the documented GL gap).
+void D3D11Renderer::SetGIReflectionSettings(const GIReflectionSettings& s)
+{
+    auto& p = *m_impl;
+    p.giReflEnabled      = s.enabled && p.giSupported;
+    p.giReflIntensity    = std::clamp(s.intensity, 0.0f, 1.0f);
+    p.giReflMaxRoughness = std::clamp(s.maxRoughness, 0.0f, 1.0f);
+    p.giReflMaxDistance  = std::max(1.0f, s.maxDistance);
+    p.giReflQuality      = std::clamp(s.quality, 0, 2);
+    p.giReflBlurEnabled  = s.blur;
 }
 
 void D3D11Renderer::SetViewportSize(uint32_t width, uint32_t height)
@@ -8559,6 +9651,11 @@ void D3D11Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
     if (!m_impl) return;
     for (const HE::UUID& id : materialIds)
         if (id != HE::UUID{}) m_impl->pendingMatWarmup.push_back(id);
+}
+
+bool D3D11Renderer::SupportsTessellation() const
+{
+    return m_impl && m_impl->m_tessSupported;
 }
 
 void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)

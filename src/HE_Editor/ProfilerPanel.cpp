@@ -290,7 +290,7 @@ void DrawOverview(EngineProfiler& prof)
 	}
 	else
 	{
-		const std::vector<ProfLiveFrame> live = prof.liveSnapshot();
+		const std::vector<ProfLiveFrame>& live = prof.liveSnapshot();
 		if (live.empty()) { ImGui::TextDisabled("Collecting live data…"); return; }
 		deltas.reserve(live.size()); bars.reserve(live.size());
 		for (const ProfLiveFrame& f : live)

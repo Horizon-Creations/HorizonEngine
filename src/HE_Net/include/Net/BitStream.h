@@ -24,13 +24,21 @@ namespace HE::Net {
 class BitWriter {
 public:
     // Write the low `numBits` bits of `value` (numBits in [0,32]).
+    //
+    // A byte at a time rather than a bit at a time: as many bits as still fit
+    // into the open byte, then whole bytes. Same LSB-first layout as the
+    // bit loop this replaced; bits above `numBits` are never read.
     void writeBits(std::uint32_t value, int numBits) {
         if (numBits <= 0) return;
         if (numBits > 32) numBits = 32;
-        for (int i = 0; i < numBits; ++i) {
-            const std::uint32_t bit = (value >> i) & 1u;
-            m_current |= static_cast<std::uint8_t>(bit << m_bitInByte);
-            if (++m_bitInByte == 8) {
+        while (numBits > 0) {
+            const int take = std::min(8 - m_bitInByte, numBits);
+            const std::uint32_t mask = (1u << take) - 1u;
+            m_current |= static_cast<std::uint8_t>((value & mask) << m_bitInByte);
+            value     >>= take;
+            numBits    -= take;
+            m_bitInByte += take;
+            if (m_bitInByte == 8) {
                 m_bytes.push_back(m_current);
                 m_current    = 0;
                 m_bitInByte  = 0;
@@ -66,9 +74,25 @@ public:
         writeBits(q, bits);
     }
 
+    // Bulk bytes. Snapshot and asset chunks arrive here byte-aligned almost
+    // always, and then they are appended verbatim. Unaligned, every byte
+    // straddles the open byte and the next one: its low bits finish the open
+    // byte, its high bits start the following one.
     void writeBytes(const void* data, std::size_t len) {
+        if (len == 0) return;
         const auto* p = static_cast<const std::uint8_t*>(data);
-        for (std::size_t i = 0; i < len; ++i) writeByte(p[i]);
+        if (m_bitInByte == 0) {
+            m_bytes.insert(m_bytes.end(), p, p + len);
+            return;
+        }
+        const int shift = m_bitInByte;
+        const std::size_t base = m_bytes.size();
+        m_bytes.resize(base + len);
+        std::uint8_t* out = m_bytes.data() + base;
+        for (std::size_t i = 0; i < len; ++i) {
+            out[i]    = static_cast<std::uint8_t>(m_current | (p[i] << shift));
+            m_current = static_cast<std::uint8_t>(p[i] >> (8 - shift));
+        }
     }
 
     // Length-prefixed string (16-bit length, so up to 65535 bytes).
@@ -82,11 +106,26 @@ public:
     // Total bits written so far (including the partial trailing byte).
     std::size_t bitCount() const { return m_bytes.size() * 8 + m_bitInByte; }
 
+    // Size of data() in bytes, partial trailing byte included.
+    std::size_t byteSize() const { return m_bytes.size() + (m_bitInByte > 0 ? 1 : 0); }
+
+    // Room for `bytes` more without reallocating, for a caller that knows how
+    // big the message is about to get.
+    void reserveBytes(std::size_t bytes) { m_bytes.reserve(m_bytes.size() + bytes); }
+
     // Serialized bytes; the final partial byte (if any) is zero-padded.
     std::vector<std::uint8_t> data() const {
-        std::vector<std::uint8_t> out = m_bytes;
-        if (m_bitInByte > 0) out.push_back(m_current);
+        std::vector<std::uint8_t> out;
+        appendTo(out);
         return out;
+    }
+
+    // The same bytes as data(), appended to `out` instead of copied into a
+    // vector of their own — how a frame is put together around a payload.
+    void appendTo(std::vector<std::uint8_t>& out) const {
+        out.reserve(out.size() + byteSize());
+        out.insert(out.end(), m_bytes.begin(), m_bytes.end());
+        if (m_bitInByte > 0) out.push_back(m_current);
     }
 
 private:
@@ -112,13 +151,18 @@ public:
         if (numBits <= 0) { out = 0; return true; }
         if (numBits > 32) numBits = 32;
         if (m_bitPos + static_cast<std::size_t>(numBits) > m_bitCapacity) return false;
+        // The rest of the current byte, then whole bytes — the mirror of
+        // BitWriter::writeBits.
         std::uint32_t v = 0;
-        for (int i = 0; i < numBits; ++i) {
-            const std::size_t byte = m_bitPos >> 3;
-            const std::size_t bit  = m_bitPos & 7;
-            const std::uint32_t b  = (m_data[byte] >> bit) & 1u;
-            v |= (b << i);
-            ++m_bitPos;
+        int got = 0;
+        while (got < numBits) {
+            const int bit  = static_cast<int>(m_bitPos & 7);
+            const int take = std::min(8 - bit, numBits - got);
+            const std::uint32_t chunk =
+                (static_cast<std::uint32_t>(m_data[m_bitPos >> 3]) >> bit) & ((1u << take) - 1u);
+            v |= chunk << got;
+            got      += take;
+            m_bitPos += static_cast<std::size_t>(take);
         }
         out = v;
         return true;
@@ -158,12 +202,26 @@ public:
         return true;
     }
 
+    // Bulk bytes, memcpy when the read head sits on a byte boundary. Short of
+    // data it behaves as the byte loop it replaced did: the whole bytes that
+    // are there are read (and the head moves past them), then false.
     bool readBytes(void* dst, std::size_t len) {
         auto* p = static_cast<std::uint8_t*>(dst);
-        for (std::size_t i = 0; i < len; ++i) {
-            if (!readByte(p[i])) return false;
+        const std::size_t n = std::min(len, (m_bitCapacity - m_bitPos) / 8);
+        const std::uint8_t* src = m_data + (m_bitPos >> 3);
+        const int shift = static_cast<int>(m_bitPos & 7);
+        if (n == 0) {
+            // nothing to copy (and dst may be null)
+        } else if (shift == 0) {
+            std::memcpy(p, src, n);
+        } else {
+            // n whole bytes fit, so src[n] holds the high bits of the last one.
+            for (std::size_t i = 0; i < n; ++i) {
+                p[i] = static_cast<std::uint8_t>((src[i] >> shift) | (src[i + 1] << (8 - shift)));
+            }
         }
-        return true;
+        m_bitPos += n * 8;
+        return n == len;
     }
 
     bool readString(std::string& out) {

@@ -1,0 +1,8 @@
+ 67/301 Test  #62: test_inspector_ui ......................***Failed    0.80 sec
+ 93/301 Test #100: test_foliage_layers ....................***Failed    0.02 sec
+ 95/301 Test #101: test_foliage_lod .......................***Failed    0.13 sec
+ 96/301 Test #102: test_graph_instancing ..................***Failed    0.02 sec
+281/301 Test #299: runtime_size ...........................   Passed    0.04 sec
+282/301 Test #300: runtime_size_app_advanced ..............***Skipped   0.02 sec
+283/301 Test #301: runtime_size_app_basic .................***Skipped   0.02 sec
+99% tests passed, 4 tests failed out of 301

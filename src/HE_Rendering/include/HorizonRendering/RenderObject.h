@@ -116,6 +116,9 @@ struct RenderObject {
     // the paint per texel, instead of settling for the mean above (a mirrored
     // hillside would otherwise be one flat colour). See GiLandscape.h.
     int32_t      landscapeIndex = -1;
+    // A piece of a landscape (TerrainChunkComponent). The GI sun-shadow kernel traces the
+    // landscape's height field instead of these meshes when one is available.
+    bool         terrainChunk = false;
     // Foliage cluster. -1 = an ordinary object, one entity = one entry. >= 0 = this
     // ONE object stands for a whole run of instances (one bucket of a foliage layer):
     // the index into RenderWorld::instanceBlocks that holds their storage, range and
