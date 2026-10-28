@@ -49,6 +49,7 @@
 #include <HorizonRendering/InstanceArena.h>   // instance-arena sizing (shared with Vulkan)
 #include <HorizonRendering/GraphTextureMisses.h> // graph-texture misses forgotten per content epoch
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
+#include <HorizonRendering/UnderwaterSurfaceShared.h>  // the tessellated surface height for the post passes
 #include <Diagnostics/Profiler.h>             // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <Renderer/GpuPassTimeline.h>         // per-pass GPU timing: GpuPassScope
 #include "Backends/D3D_Shared/HlslSources.h"  // HLSL byte-identical to the D3D11 backend
@@ -2226,13 +2227,14 @@ struct D3D12RendererImpl
         // Underwater fog (Thema 185 Schritt 2): its own root sig + PSO, see the
         // member declaration for why it does not share postFxRootSig.
         ComPtr<ID3DBlob> uwB;
-        if (compile(kUnderwaterFogHLSL, "main", "ps_5_0", uwB))
+        const std::string fogSrc = HE::withUnderwaterSurface(kUnderwaterFogHLSL, HE::SurfaceLang::HLSL);
+        if (compile(fogSrc.c_str(), "main", "ps_5_0", uwB))
         {
             D3D12_DESCRIPTOR_RANGE r0{}; r0.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
             r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
             D3D12_ROOT_PARAMETER params[2]{};
             params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-            params[0].Constants = { 0, 0, 28 };   // mat4 + 3×float4, see kUnderwaterFogHLSL
+            params[0].Constants = { 0, 0, 36 };   // mat4 + 5×float4, see kUnderwaterFogHLSL
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
             params[1].DescriptorTable = { 1, &r0 };
@@ -2277,7 +2279,7 @@ struct D3D12RendererImpl
         // does. Optional like the fog: a failure here leaves underwaterCausticsReady false and
         // the rest of the chain alone.
         ComPtr<ID3DBlob> ucB;
-        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        std::string causticsSrc = HE::withUnderwaterSurface(kUnderwaterCausticsHLSL, HE::SurfaceLang::HLSL);
         const size_t trainsAt = causticsSrc.find("@TRAINS@");
         if (trainsAt != std::string::npos)
             causticsSrc.replace(trainsAt, 8, HE::causticsWaveTrainsList());
@@ -2287,7 +2289,7 @@ struct D3D12RendererImpl
             r0.NumDescriptors = 1; r0.BaseShaderRegister = 0;
             D3D12_ROOT_PARAMETER params[2]{};
             params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-            params[0].Constants = { 0, 0, 36 };   // mat4 + 5×float4, see kUnderwaterCausticsHLSL
+            params[0].Constants = { 0, 0, 44 };   // mat4 + 7×float4, see kUnderwaterCausticsHLSL
             params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
             params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
             params[1].DescriptorTable = { 1, &r0 };
@@ -2526,9 +2528,11 @@ struct D3D12RendererImpl
                 float sun[4];
                 float sunColor[4];
                 float caustics[4];
+                float surfWave[4];
+                float surfParams[4];
             } ucb{};
-            static_assert(sizeof(UnderwaterCausticsConstants) == 144,
-                          "36 root constants: must match the cbuffer of kUnderwaterCausticsHLSL");
+            static_assert(sizeof(UnderwaterCausticsConstants) == 176,
+                          "44 root constants: must match the cbuffer of kUnderwaterCausticsHLSL");
             std::memcpy(ucb.invViewProj, &invViewProjUc[0][0], 16 * sizeof(float));
             ucb.depthParams[0] = -1.0f; ucb.depthParams[1] = 1.0f; ucb.depthParams[2] = 0.0f;   // same as the fog
             ucb.camSurface[0] = m_renderWorld.camera.position.x;
@@ -2541,6 +2545,11 @@ struct D3D12RendererImpl
             ucb.caustics[1] = ucCam.causticsScale;
             ucb.caustics[2] = ucSeconds * ucCam.causticsSpeed;
             ucb.caustics[3] = ucCam.causticsDepth;
+            {
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(ucCam, ucSeconds);
+                std::memcpy(ucb.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(ucb.surfParams, su.params, sizeof(su.params));
+            }
 
             ID3D12DescriptorHeap* ucHeaps[] = { postFxSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, ucHeaps);
@@ -2549,7 +2558,7 @@ struct D3D12RendererImpl
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             setVP(w, h);
             setRTV(hdrRtvHeap);
-            cl->SetGraphicsRoot32BitConstants(0, 36, &ucb, 0);
+            cl->SetGraphicsRoot32BitConstants(0, 44, &ucb, 0);
             // Depth off the DSV before it is readable as an SRV — the fog's own dance, round trip.
             barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2577,7 +2586,11 @@ struct D3D12RendererImpl
                 float depthParams[4];
                 float camPosSurfaceY[4];
                 float tintDensity[4];
+                float surfWave[4];
+                float surfParams[4];
             } cb{};
+            static_assert(sizeof(UnderwaterFogConstants) == 144,
+                          "36 root constants: must match the cbuffer of kUnderwaterFogHLSL");
             std::memcpy(cb.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
             cb.depthParams[0] = -1.0f; cb.depthParams[1] = 1.0f; cb.depthParams[2] = 0.0f; cb.depthParams[3] = 0.0f;
             cb.camPosSurfaceY[0] = m_renderWorld.camera.position.x;
@@ -2586,6 +2599,14 @@ struct D3D12RendererImpl
             cb.camPosSurfaceY[3] = uwCam.surfaceY;
             cb.tintDensity[0] = uwCam.tintColor.x; cb.tintDensity[1] = uwCam.tintColor.y;
             cb.tintDensity[2] = uwCam.tintColor.z; cb.tintDensity[3] = uwCam.density;
+            {
+                static const char* s_uwTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+                const float uwSeconds = (s_uwTimeOv && *s_uwTimeOv) ? static_cast<float>(std::atof(s_uwTimeOv))
+                                                                    : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(uwCam, uwSeconds);
+                std::memcpy(cb.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(cb.surfParams, su.params, sizeof(su.params));
+            }
 
             ID3D12DescriptorHeap* uwHeaps[] = { postFxSrvHeap.Get() };
             cl->SetDescriptorHeaps(1, uwHeaps);
@@ -2594,7 +2615,7 @@ struct D3D12RendererImpl
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             setVP(w, h);
             setRTV(hdrRtvHeap);
-            cl->SetGraphicsRoot32BitConstants(0, 28, &cb, 0);
+            cl->SetGraphicsRoot32BitConstants(0, 36, &cb, 0);
             // Depth off the DSV before it is readable as an SRV — same dance EncodeDecals uses.
             barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -2893,10 +2914,11 @@ struct D3D12RendererImpl
         const UINT flags = startupCompileFlags();
         // createPostFXPipelines / createTaaPipelines: sourceName = entry.
         for (const char* src : { kTonemapHLSL, kFxaaHLSL12, kSmaaHLSL12, kAABlitHLSL12,
-                                 kBloomBrightHLSL12, kBloomBlurHLSL12, kUnderwaterFogHLSL })
+                                 kBloomBrightHLSL12, kBloomBlurHLSL12 })
             submit(src, "main", "main", "ps_5_0", flags);
+        submit(HE::withUnderwaterSurface(kUnderwaterFogHLSL, HE::SurfaceLang::HLSL), "main", "main", "ps_5_0", flags);
         {
-            std::string causticsSrc = kUnderwaterCausticsHLSL;
+            std::string causticsSrc = HE::withUnderwaterSurface(kUnderwaterCausticsHLSL, HE::SurfaceLang::HLSL);
             const size_t trainsAt = causticsSrc.find("@TRAINS@");
             if (trainsAt != std::string::npos)
             {

@@ -434,7 +434,10 @@ float4 main(In i) : SV_Target {
 // camera's own eye crosses y = surfaceY, never a step.
 //
 // cbuffer CB (b0, PS only): invViewProj (64B) + depthParams (16B) +
-// camPos.xyz/surfaceY (16B) + tintColor.rgb/density (16B) = 112B, no padding.
+// camPos.xyz/surfaceY (16B) + tintColor.rgb/density (16B) + surfWave (16B) + surfParams (16B) = 144B, no padding.
+// The last two are the tessellated surface (UnderwaterSurfaceShared.h, @SURF@ is spliced in before compiling):
+// the surface is the plane at surfParams.w plus the wave AT each point, so the waterline on the screen follows the
+// waves; height 0 (surfParams.x) is the flat plane exactly as before.
 // Output is PREMULTIPLIED (rgb = tint * fogAmount, a = fogAmount) for a
 // ONE/INV_SRC_ALPHA blend state: dst' = tint*fog + dst*(1-fog) in one draw.
 inline constexpr const char* kUnderwaterFogHLSL = R"HLSL(
@@ -446,7 +449,10 @@ cbuffer CB : register(b0)
     float4   uDepthParams;    // x = uv.y sign, y/z = ndc-z scale/bias, w unused
     float4   uCamPosSurfaceY; // xyz = camera world pos, w = surfaceY
     float4   uTintDensity;    // rgb = resolved tint, a = per-metre density
+    float4   uSurfWave;       // the wind on the tessellated surface: turn (rad), length / speed / steepness factor
+    float4   uSurfParams;     // height (0 = flat plane), shore width, wave clock (s), flat level
 };
+@SURF@
 struct In { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
 float4 main(In i) : SV_Target
 {
@@ -458,9 +464,14 @@ float4 main(In i) : SV_Target
     float3 P = wp.xyz / max(wp.w, 1e-8);
 
     float3 camPos   = uCamPosSurfaceY.xyz;
-    float  surfaceY = uCamPosSurfaceY.w;
+    float  surfaceY = uCamPosSurfaceY.w;     // the surface under the camera
+    // The surface is a plane at uSurfParams.w plus, with tessellation, the wave AT each point (heSurfaceH):
+    // the camera, this pixel's point and the near-plane point each compare against their own height.
+    float  level  = uSurfParams.w;
+    float  gDepth = max(level - P.y, 0.0);
+    float  sP     = level + heSurfaceH(P.xz, gDepth, uSurfWave, uSurfParams);
     bool camBelow = camPos.y < surfaceY;
-    bool pBelow   = P.y < surfaceY;
+    bool pBelow   = P.y < sP;
 
     // This pixel's point on the near plane (d = 0 through the same mapping). For a DRY
     // camera (the waterline band, Thema 185 Schritt 5) the fog only belongs where the
@@ -469,15 +480,25 @@ float4 main(In i) : SV_Target
     // surface. Everywhere else the translucent surface itself is drawn (it is not in
     // this depth buffer), and fogging what lies under it would tint the lake.
     float4 wn = mul(uInvViewProj, float4(clip.xy, uDepthParams.z, 1.0));
-    bool nearBelow = wn.y / max(wn.w, 1e-8) < surfaceY;
+    float3 nearPt = wn.xyz / max(wn.w, 1e-8);
+    bool nearBelow = nearPt.y < level + heSurfaceH(nearPt.xz, 1000.0, uSurfWave, uSurfParams);
 
     float segment;
     if (camBelow == pBelow)
         segment = camBelow ? length(camPos - P) : 0.0;
     else
     {
-        float t = (surfaceY - camPos.y) / (P.y - camPos.y);
-        float3 crossPt = camPos + t * (P - camPos);
+        // Where the ray meets the displaced surface: a few steps of "intersect the plane at the height the
+        // wave has where the last guess landed" (the surface is gently sloped, it settles at once).
+        float  sY = camBelow ? surfaceY : sP;
+        float3 crossPt = camPos;
+        [unroll]
+        for (int it = 0; it < 3; ++it)
+        {
+            float t = clamp((sY - camPos.y) / (P.y - camPos.y), 0.0, 1.0);
+            crossPt = camPos + t * (P - camPos);
+            sY = level + heSurfaceH(crossPt.xz, gDepth, uSurfWave, uSurfParams);
+        }
         segment = camBelow ? length(camPos - crossPt) : (nearBelow ? length(crossPt - P) : 0.0);
     }
 
@@ -501,7 +522,8 @@ float4 main(In i) : SV_Target
 // else. Same depthParams convention as kUnderwaterFogHLSL. The derivatives are taken in
 // uniform flow only (HLSL leaves ddx/ddy undefined after divergent flow): the one early-out
 // is the same for every pixel, the sky is selected away at the end.
-// cbuffer b0 = mat4 + 5 x float4 (144 bytes), t0 = scene depth, s0 = point clamp.
+// cbuffer b0 = mat4 + 7 x float4 (176 bytes: the last two are the tessellated surface, see kUnderwaterFogHLSL),
+// t0 = scene depth, s0 = point clamp.
 inline constexpr const char* kUnderwaterCausticsHLSL = R"HLSL(
 Texture2D    uDepth : register(t0);
 SamplerState uSamp  : register(s0);
@@ -513,7 +535,10 @@ cbuffer CB : register(b0)
     float4   uSun;           // xyz = direction TOWARD the sun (unit)
     float4   uSunColor;      // rgb = sun radiance (0 at night)
     float4   uCaustics;      // x = intensity (faded in), y = scale, z = wave clock (s), w = depth where the net is gone (m)
+    float4   uSurfWave;      // the wind on the tessellated surface: turn (rad), length / speed / steepness factor
+    float4   uSurfParams;    // height (0 = flat plane), shore width, wave clock (s), flat level
 };
+@SURF@
 static const float kTrains[12] = { @TRAINS@ };
 static const int   kChopTrains = 10;     // short trains on top of the engine's six (see the GL twin)
 static const float kChopSteep  = 0.05;
@@ -546,7 +571,8 @@ float4 main(In i) : SV_Target
         return float4(0.0, 0.0, 0.0, 0.0);           // no sun
     bool hit = d < 1.0;                              // the sky has no floor to catch the net
     P = hit ? P : uCamSurface.xyz;
-    float depth = uCamSurface.w - P.y;               // metres below the flat surface
+    // Metres below the surface AT this pixel: the flat level, plus the tessellated wave there (0 when flat).
+    float depth = uSurfParams.w + heSurfaceH(P.xz, max(uSurfParams.w - P.y, 0.0), uSurfWave, uSurfParams) - P.y;
     float fadeDepth = uCaustics.w;
 
     float2 hz   = L.xz / kEta;

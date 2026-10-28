@@ -7,6 +7,7 @@
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
 #include <HorizonRendering/UnderwaterCausticsShared.h> // shared wave trains for the caustic pass
+#include <HorizonRendering/UnderwaterSurfaceShared.h>  // the tessellated surface height for the post passes
 #include <Renderer/UIRenderObject.h>
 #include <Renderer/UIFont.h>
 #include <Diagnostics/EngineProfiler.h>
@@ -4461,9 +4462,10 @@ struct D3D11RendererImpl
         if (!compile(kAABlitHLSL,     "main", "ps_5_0", btB)) return false;
         if (!compile(kBloomBrightHLSL,"main", "ps_5_0", brB)) return false;
         if (!compile(kBloomBlurHLSL,  "main", "ps_5_0", blB)) return false;
-        const bool underwaterCompiled = compile(kUnderwaterFogHLSL, "main", "ps_5_0", uwB);
+        const std::string fogSrc = HE::withUnderwaterSurface(kUnderwaterFogHLSL, HE::SurfaceLang::HLSL);
+        const bool underwaterCompiled = compile(fogSrc.c_str(), "main", "ps_5_0", uwB);
         ComPtr<ID3DBlob> ucB;
-        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        std::string causticsSrc = HE::withUnderwaterSurface(kUnderwaterCausticsHLSL, HE::SurfaceLang::HLSL);
         causticsSrc.replace(causticsSrc.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
         const bool causticsCompiled = compile(causticsSrc.c_str(), "main", "ps_5_0", ucB);
 
@@ -4499,7 +4501,7 @@ struct D3D11RendererImpl
           device->CreateBuffer(&bd, nullptr, &postFxCB); }
 
         { D3D11_BUFFER_DESC bd{};
-          bd.ByteWidth = 112u; bd.Usage = D3D11_USAGE_DYNAMIC;   // mat4 + 3 x float4, see kUnderwaterFogHLSL
+          bd.ByteWidth = 144u; bd.Usage = D3D11_USAGE_DYNAMIC;   // mat4 + 5 x float4, see kUnderwaterFogHLSL
           bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
           device->CreateBuffer(&bd, nullptr, &underwaterFogCB); }
         { D3D11_BLEND_DESC bd{};
@@ -4515,7 +4517,7 @@ struct D3D11RendererImpl
         underwaterFogReady = underwaterCompiled && underwaterFogPS && underwaterFogCB
                            && underwaterFogBlendState && fsVS && noDepthDSS && fsRastState;
         { D3D11_BUFFER_DESC bd{};
-          bd.ByteWidth = 144u; bd.Usage = D3D11_USAGE_DYNAMIC;   // mat4 + 5 x float4, see kUnderwaterCausticsHLSL
+          bd.ByteWidth = 176u; bd.Usage = D3D11_USAGE_DYNAMIC;   // mat4 + 7 x float4, see kUnderwaterCausticsHLSL
           bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
           device->CreateBuffer(&bd, nullptr, &underwaterCausticsCB); }
         underwaterCausticsReady = causticsCompiled && underwaterCausticsPS && underwaterCausticsCB
@@ -6188,11 +6190,12 @@ struct D3D11RendererImpl
         using HE::d3dprefetch::submit;
         const UINT flags = startupCompileFlags();
         // createPostFX / createTaaPipeline: sourceName = entry.
-        std::string causticsSrc = kUnderwaterCausticsHLSL;
+        std::string causticsSrc = HE::withUnderwaterSurface(kUnderwaterCausticsHLSL, HE::SurfaceLang::HLSL);
         causticsSrc.replace(causticsSrc.find("@TRAINS@"), 8, HE::causticsWaveTrainsList());
         for (const char* src : { kTonemapHLSL, kFxaaHLSL, kSmaaHLSL, kAABlitHLSL,
-                                 kBloomBrightHLSL, kBloomBlurHLSL, kUnderwaterFogHLSL })
+                                 kBloomBrightHLSL, kBloomBlurHLSL })
             submit(src, "main", "main", "ps_5_0", flags);
+        submit(HE::withUnderwaterSurface(kUnderwaterFogHLSL, HE::SurfaceLang::HLSL), "main", "main", "ps_5_0", flags);
         submit(causticsSrc, "main", "main", "ps_5_0", flags);
         submit(kFSTriangleVS, "main", "main", "vs_5_0", flags);
         submit(kTaaVelocityHLSL, "VSVelocity", "VSVelocity", "vs_5_0", flags);
@@ -8767,6 +8770,8 @@ void D3D11Renderer::DrawViewportFrame()
                 float sun[4];
                 float sunColor[4];
                 float caustics[4];
+                float surfWave[4];
+                float surfParams[4];
             } ucb{};
             std::memcpy(ucb.invViewProj, &invViewProjUc[0][0], 16 * sizeof(float));
             ucb.depthParams[0] = -1.0f; ucb.depthParams[1] = 1.0f; ucb.depthParams[2] = 0.0f;   // same as the fog
@@ -8780,6 +8785,11 @@ void D3D11Renderer::DrawViewportFrame()
             ucb.caustics[1] = uwCam.causticsScale;
             ucb.caustics[2] = ucSeconds * uwCam.causticsSpeed;
             ucb.caustics[3] = uwCam.causticsDepth;
+            {
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(uwCam, ucSeconds);
+                std::memcpy(ucb.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(ucb.surfParams, su.params, sizeof(su.params));
+            }
 
             D3D11_MAPPED_SUBRESOURCE ucm{};
             if (SUCCEEDED(p.context->Map(p.underwaterCausticsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &ucm)))
@@ -8820,6 +8830,8 @@ void D3D11Renderer::DrawViewportFrame()
                 float depthParams[4];
                 float camPosSurfaceY[4];
                 float tintDensity[4];
+                float surfWave[4];
+                float surfParams[4];
             } cb{};
             std::memcpy(cb.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
             cb.depthParams[0] = -1.0f; cb.depthParams[1] = 1.0f; cb.depthParams[2] = 0.0f; cb.depthParams[3] = 0.0f;
@@ -8829,6 +8841,14 @@ void D3D11Renderer::DrawViewportFrame()
             cb.camPosSurfaceY[3] = uwCam.surfaceY;
             cb.tintDensity[0] = uwCam.tintColor.x; cb.tintDensity[1] = uwCam.tintColor.y;
             cb.tintDensity[2] = uwCam.tintColor.z; cb.tintDensity[3] = uwCam.density;
+            {
+                static const char* s_uwTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+                const float uwSeconds = (s_uwTimeOv && *s_uwTimeOv) ? static_cast<float>(std::atof(s_uwTimeOv))
+                                                                    : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(uwCam, uwSeconds);
+                std::memcpy(cb.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(cb.surfParams, su.params, sizeof(su.params));
+            }
 
             D3D11_MAPPED_SUBRESOURCE mr{};
             if (SUCCEEDED(p.context->Map(p.underwaterFogCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
