@@ -1429,6 +1429,70 @@ struct D3D11RendererImpl
         m_tessDispByKey.try_emplace(hash, ma->customShaderDispGlsl);
     }
     std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = shader hash (opaque + blended share one entry)
+
+    // Everything a graph-material draw derives from the MaterialAsset, kept per material
+    // so a draw does not copy the GLSL, hash it (twice: fragment + vertex fold, then the
+    // displacement body), look the shader up in two maps and re-format the texture keys
+    // again for every one of its draws. A record is valid while the material still holds
+    // the sources it was built from (a string compare — the edit paths do NOT all call
+    // InvalidateMaterial: a re-derived material instance swaps its GLSL in place), the
+    // graph-texture lists and the content epoch are unchanged. The resolved shader
+    // pointers point into m_materialShaders (node-based, never erased before shutdown),
+    // the SRVs into the texture caches (dropped with the records by texture invalidation
+    // and shutdown; null misses are re-asked when the content epoch moves, which also
+    // rebuilds the record).
+    struct MatDrawRec {
+        // what the record was built from (the validation stamp)
+        uint64_t                epoch = 0;
+        std::string             fragSrc, vertSrc, dispSrc, gbufSrc;
+        std::vector<HE::UUID>   texIds;
+        std::vector<std::string> texPaths;
+        // forward (resolveShaders)
+        bool                    valid = false;          // the material has a graph shader
+        uint64_t                hash = 0;
+        const MaterialShaderVariant* pre = nullptr;     // the pak's baked HLSL for this backend
+        bool                    shDone = false, shInstDone = false;
+        MatShaders*             sh = nullptr;
+        MatShaders*             shInst = nullptr;
+        // G-buffer tail (resolveGBufferShaders), resolved on the first deferred draw
+        bool                    gbTried = false, gbValid = false;
+        uint64_t                gbHash = 0;
+        bool                    shGDone = false, shGInstDone = false;
+        MatShaders*             shG = nullptr;
+        MatShaders*             shGInst = nullptr;
+        // heTexP0..3, resolved on the first draw
+        bool                    texDone = false;
+        ID3D11ShaderResourceView* heTexP[HE::kMatMaxGraphTextures] = {};
+    };
+    std::unordered_map<HE::UUID, MatDrawRec> m_matRecs;
+    // The (valid or not) record of a material, rebuilt when its sources moved; null when
+    // the material is not loaded.
+    MatDrawRec* matRec(const ContentManager& cm, const HE::UUID& id)
+    {
+        const MaterialAsset* maPtr = cm.getMaterial(id);
+        if (!maPtr) return nullptr;
+        const MaterialAsset& ma = *maPtr;
+        auto [it, fresh] = m_matRecs.try_emplace(id);
+        MatDrawRec& r = it->second;
+        if (!fresh && r.epoch == cm.contentEpoch()
+            && r.fragSrc == ma.customShaderFragGlsl && r.vertSrc == ma.customShaderVertGlsl
+            && r.dispSrc == ma.customShaderDispGlsl && r.gbufSrc == ma.customShaderGBufGlsl
+            && r.texIds == ma.graphTextureIds && r.texPaths == ma.graphTexturePaths)
+            return &r;
+        r = MatDrawRec{};
+        r.epoch   = cm.contentEpoch();
+        r.fragSrc = ma.customShaderFragGlsl; r.vertSrc = ma.customShaderVertGlsl;
+        r.dispSrc = ma.customShaderDispGlsl; r.gbufSrc = ma.customShaderGBufGlsl;
+        r.texIds  = ma.graphTextureIds;      r.texPaths = ma.graphTexturePaths;
+        std::string frag, vertBody; // the library's copies; the shader build takes them on a miss only
+        r.valid = m_matShaderLib.resolveShaders(cm, id, r.hash, frag, vertBody);
+        if (r.valid)
+        {
+            foldDisplacement(cm, id, r.hash);
+            r.pre = HE::MaterialShaderLibrary::precompiledFor(&ma, HE::RendererBackend::D3D11);
+        }
+        return &r;
+    }
     // The model matrix per instance (64 B, vertex buffer 1, TEXCOORD4..7) for a graph
     // material's instanced twin (Thema 182, 2f). Its own buffer: instanceSB is a
     // structured buffer, which D3D11 does not let double as a vertex buffer. Dynamic,
@@ -1497,20 +1561,21 @@ struct D3D11RendererImpl
     bool decalFailed = false; // build failed once — never retried per frame
 
     // Node-graph project textures (MaterialAsset::graphTextureIds/Paths → heTexP0..3, the
-    // Texture Sample nodes), keyed exactly like GL's ResolveGraphTexture: "hi:lo" for a
-    // packed UUID, the path for a loose editor asset. Null is cached too (unloadable →
-    // white default, no per-frame retry). InvalidateTexture drops the UUID key so an
-    // edited texture re-uploads; a path-keyed loose asset is not hot-reloaded (same as GL).
-    std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> graphTexCache;
+    // Texture Sample nodes), keyed like GL's ResolveGraphTexture: the packed UUID for a
+    // packed asset, the path for a loose editor asset. The UUID lives in a UUID-keyed map
+    // (the per-draw lookup used to format "hi:lo" into a std::string); the texture-array
+    // upload of the same asset has its own map ("#arr" before). Null is cached too
+    // (unloadable → white default, no per-frame retry). InvalidateTexture drops the UUID
+    // keys so an edited texture re-uploads; a path-keyed loose asset is not hot-reloaded
+    // (same as GL).
+    std::unordered_map<HE::UUID, ComPtr<ID3D11ShaderResourceView>> graphTexById;
+    std::unordered_map<HE::UUID, ComPtr<ID3D11ShaderResourceView>> graphTexArrById;
+    std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> graphTexByPath; // id-less; array keys carry "#arr"
     uint64_t graphTexMissEpoch = 0; // contentEpoch its null misses were taken at (HE::forgetGraphTextureMisses)
     // UI quad images (Image widget, textured Panel/Border/Button): same keys, but
     // uploaded UNORM even for an sRGB-flagged asset (see resolveUITexture).
-    std::unordered_map<std::string, ComPtr<ID3D11ShaderResourceView>> uiTexCache;
+    std::unordered_map<HE::UUID, ComPtr<ID3D11ShaderResourceView>> uiTexCache;
     std::vector<HE::UUID> pendingTexInval;
-    static std::string graphTexKey(const HE::UUID& id, const std::string& path)
-    {
-        return id != HE::UUID{} ? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
-    }
 
     // ── Cascaded shadow maps ────────────────────────────────────────────────
     // One R32 depth ARRAY, kCsmCascades slices (one per cascade), a DSV per
@@ -2665,6 +2730,9 @@ struct D3D11RendererImpl
             else         ctx->VSSetConstantBuffers(0, 1, &posCB);
 
             for (const DrawCall* dc : opaqueDCs) {
+                // Precipitation / particles / trails opt out, as on GL and Vulkan; the
+                // reflection MRT variant shares this loop on every backend (GL's too).
+                if (!dc->contributesAO) continue;
                 const GpuMesh* mesh = resolveMeshFn(dc->meshAssetId);
                 const GpuMesh& m = mesh ? *mesh : fallbackMesh;
                 if (!m.vbuf || !m.ibuf) continue;
@@ -2753,8 +2821,14 @@ struct D3D11RendererImpl
             cb.proj       = proj;
             cb.noiseScale = glm::vec4(float(w) / 4.0f, float(h) / 4.0f, 0, 0);
             cb.params     = glm::vec4(ssaoRadius, ssaoBias, ssaoIntensity, float(ssaoMethod));
-            std::vector<glm::vec3> kernel = HE::BuildSSAOKernel(HE::kSsaoKernelSize);
-            for (int i = 0; i < 32; ++i) cb.kernel[i] = glm::vec4(kernel[i], 0);
+            // The kernel is a fixed hemisphere sample set: built once, not per frame.
+            static const std::vector<glm::vec4> kKernel = [] {
+                const std::vector<glm::vec3> k = HE::BuildSSAOKernel(HE::kSsaoKernelSize);
+                std::vector<glm::vec4> out(32, glm::vec4(0.0f));
+                for (size_t i = 0; i < out.size() && i < k.size(); ++i) out[i] = glm::vec4(k[i], 0.0f);
+                return out;
+            }();
+            std::memcpy(cb.kernel, kKernel.data(), sizeof(cb.kernel));
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (SUCCEEDED(ctx->Map(ssaoCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
                 std::memcpy(mapped.pData, &cb, sizeof(cb));
@@ -3244,7 +3318,7 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> giShadowInstanceSRV;
     ComPtr<ID3D11Buffer>             giNodeSB, giTriSB, giInstanceSB, giReflInstanceSB, giLandSB;
     ComPtr<ID3D11ShaderResourceView> giNodeSRV, giTriSRV, giInstanceSRV, giReflInstanceSRV, giLandSRV;
-    ID3D11ShaderResourceView*        giLandWeightSRV[4] = {};   // the table's weightmaps (owned by graphTexCache), this frame
+    ID3D11ShaderResourceView*        giLandWeightSRV[4] = {};   // the table's weightmaps (owned by graphTexById), this frame
     size_t giNodeCap = 0, giTriCap = 0;   // node/tri buffer capacities in elements
 
     int giShadowW = 0, giShadowH = 0;
@@ -4586,6 +4660,8 @@ struct D3D11RendererImpl
 
     // Bright-pass + 10-pass ping-pong blur.  Returns the SRV of the bloom result
     // (bloomTex[0]) or dummyTexture if bloom resources are missing.
+    ComPtr<ID3D11Buffer> bloomBlurCB[2]; // immutable {texel, direction} constants, [0] horizontal
+    uint32_t bloomBlurCBW = 0, bloomBlurCBH = 0;
     ID3D11ShaderResourceView* runBloom(uint32_t bw, uint32_t bh)
     {
         GpuPassScope _passTimer(this, "Bloom");
@@ -4614,14 +4690,40 @@ struct D3D11RendererImpl
         { ID3D11RenderTargetView* n = nullptr; ctx->OMSetRenderTargets(1, &n, nullptr); }
 
         // 10 ping-pong Gaussian blur passes (5H + 5V); result lands in bloomTex[0].
+        // The horizontal and the vertical constants are immutable buffers made once per
+        // size, so the passes only swap the binding instead of Map-ing postFxCB ten times.
         ctx->PSSetShader(bloomBlurPS.Get(), nullptr, 0);
-        const float tw = 1.0f / float(bw), th = 1.0f / float(bh);
+        if (bloomBlurCBW != bw || bloomBlurCBH != bh || !bloomBlurCB[0] || !bloomBlurCB[1])
+        {
+            const float tw = 1.0f / float(bw), th = 1.0f / float(bh);
+            for (int d = 0; d < 2; ++d)
+            {
+                const float cb[4] = { tw, th, d == 0 ? 1.0f : 0.0f, 0.0f }; // d 0 = horizontal
+                D3D11_BUFFER_DESC bd{};
+                bd.ByteWidth = 16; bd.Usage = D3D11_USAGE_IMMUTABLE; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+                D3D11_SUBRESOURCE_DATA init{}; init.pSysMem = cb;
+                bloomBlurCB[d].Reset();
+                device->CreateBuffer(&bd, &init, &bloomBlurCB[d]);
+            }
+            bloomBlurCBW = bw; bloomBlurCBH = bh;
+        }
+        const bool immutableCBs = bloomBlurCB[0] && bloomBlurCB[1];
         bool horiz = true;
         for (int p = 0; p < 10; ++p)
         {
             const int dst = horiz ? 1 : 0, src = horiz ? 0 : 1;
-            const float cb[4] = { tw, th, horiz ? 1.0f : 0.0f, 0.0f };
-            updatePostFxCB(cb);
+            if (immutableCBs)
+            {
+                ID3D11Buffer* cb = bloomBlurCB[horiz ? 0 : 1].Get();
+                ctx->VSSetConstantBuffers(0, 1, &cb);
+                ctx->PSSetConstantBuffers(0, 1, &cb);
+            }
+            else
+            {
+                const float tw = 1.0f / float(bw), th = 1.0f / float(bh);
+                const float cb[4] = { tw, th, horiz ? 1.0f : 0.0f, 0.0f };
+                updatePostFxCB(cb);
+            }
             ctx->OMSetRenderTargets(1, bloomRTV[dst].GetAddressOf(), nullptr);
             ID3D11ShaderResourceView* s = bloomSRV[src].Get();
             ctx->PSSetShaderResources(0, 1, &s);
@@ -4629,6 +4731,9 @@ struct D3D11RendererImpl
             { ID3D11RenderTargetView* n = nullptr; ctx->OMSetRenderTargets(1, &n, nullptr); }
             horiz = !horiz;
         }
+        // Later passes expect the shared post-FX buffer on b0, as the entry above left it.
+        ctx->VSSetConstantBuffers(0, 1, postFxCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, postFxCB.GetAddressOf());
         return bloomSRV[0].Get();
     }
 
@@ -5286,22 +5391,28 @@ struct D3D11RendererImpl
     // GL/Metal/Vulkan; the upload is one UpdateSubresource per face. Runs on
     // the immediate context before the frame's first material draw, so no
     // draw of this frame can see a half-written cube.
+    std::vector<uint16_t> m_skyEnvHalf; // persistent bake output (RGBA16F, 6 faces)
     void updateSkyEnvCube(ID3D11DeviceContext* ctx, const glm::vec3& sunDir)
     {
         if (!m_skyEnvTex) return;
         if (m_skyEnvValid && glm::distance(sunDir, m_skyEnvSunDir) < 2.0e-3f) return;
 
         constexpr int N = k_skyEnvFace;
-        std::vector<float> px(static_cast<size_t>(N) * N * 6 * 4);
+        // Each (face, row) bakes into a stack row and converts it to half right there, in
+        // the parallel body: the same per-element packHalf1x16 the serial pass did, into a
+        // persistent buffer — no 1.5 MB float array, no second single-threaded loop.
+        m_skyEnvHalf.resize(static_cast<size_t>(N) * N * 6 * 4);
         parallel_for(static_cast<size_t>(6) * N, [&](size_t idx)
         {
             const int f = static_cast<int>(idx / N);
             const int t = static_cast<int>(idx % N);
-            HE::BuildSkyEnvFaceRow(N, f, t, sunDir, &px[((static_cast<size_t>(f) * N + t) * N) * 4]);
+            float row[static_cast<size_t>(N) * 4];
+            HE::BuildSkyEnvFaceRow(N, f, t, sunDir, row);
+            uint16_t* dst = &m_skyEnvHalf[((static_cast<size_t>(f) * N + t) * N) * 4];
+            for (int i = 0; i < N * 4; ++i)
+                dst[i] = glm::packHalf1x16(row[i]);
         }, "SkyEnvBake", 1);
-        std::vector<uint16_t> half(px.size());
-        for (size_t i = 0; i < px.size(); ++i)
-            half[i] = glm::packHalf1x16(px[i]);
+        const std::vector<uint16_t>& half = m_skyEnvHalf;
 
         // Face order and texel layout go in unchanged (UploadSkyEnvCube; the
         // WARP orientation case in test_material_graph.cpp samples it back).
@@ -5685,20 +5796,41 @@ struct D3D11RendererImpl
     ID3D11ShaderResourceView* resolveGraphTexture(const HE::UUID& id, const std::string& path,
                                                   ContentManager* cm, bool array = false)
     {
-        std::string key = graphTexKey(id, path);
-        if (key.empty() || !cm) return nullptr;
-        if (array) key += "#arr";
+        if (!cm || (id == HE::UUID{} && path.empty())) return nullptr;
         // A miss is cached (no file open per frame) until files may have appeared: an
         // EngineContent download landing after this first ask (Thema 210, mirrors GL).
-        HE::forgetGraphTextureMisses(graphTexCache, graphTexMissEpoch, cm->contentEpoch(),
-                                     [](const ComPtr<ID3D11ShaderResourceView>& srv) { return srv.Get() == nullptr; });
-        if (auto it = graphTexCache.find(key); it != graphTexCache.end())
-            return it->second.Get();
+        // One epoch for the three maps: each is swept before the shared stamp moves.
+        if (const uint64_t epoch = cm->contentEpoch(); epoch != graphTexMissEpoch)
+        {
+            const auto isMiss = [](const ComPtr<ID3D11ShaderResourceView>& srv) { return srv.Get() == nullptr; };
+            uint64_t seen = graphTexMissEpoch;
+            HE::forgetGraphTextureMisses(graphTexById, seen, epoch, isMiss);
+            seen = graphTexMissEpoch;
+            HE::forgetGraphTextureMisses(graphTexArrById, seen, epoch, isMiss);
+            seen = graphTexMissEpoch;
+            HE::forgetGraphTextureMisses(graphTexByPath, seen, epoch, isMiss);
+            graphTexMissEpoch = epoch;
+        }
+        const bool byId = id != HE::UUID{};
+        std::string pathKey;
+        if (!byId)
+        {
+            pathKey = array ? path + "#arr" : path;
+            if (auto it = graphTexByPath.find(pathKey); it != graphTexByPath.end())
+                return it->second.Get();
+        }
+        else
+        {
+            auto& map = array ? graphTexArrById : graphTexById;
+            if (auto it = map.find(id); it != map.end())
+                return it->second.Get();
+        }
         // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format
         // this device can't sample → null → white default).
         ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(id, path), array);
         ID3D11ShaderResourceView* raw = srv.Get();
-        graphTexCache.emplace(key, std::move(srv));
+        if (byId) (array ? graphTexArrById : graphTexById).emplace(id, std::move(srv));
+        else      graphTexByPath.emplace(std::move(pathKey), std::move(srv));
         return raw;
     }
 
@@ -5710,14 +5842,13 @@ struct D3D11RendererImpl
     // cached as null → the quad draws its tint, no per-frame retry.
     ID3D11ShaderResourceView* resolveUITexture(const HE::UUID& id, ContentManager* cm)
     {
-        const std::string key = graphTexKey(id, {});
-        if (key.empty() || !cm) return nullptr;
-        if (auto it = uiTexCache.find(key); it != uiTexCache.end())
+        if (id == HE::UUID{} || !cm) return nullptr;
+        if (auto it = uiTexCache.find(id); it != uiTexCache.end())
             return it->second.Get();
         ComPtr<ID3D11ShaderResourceView> srv =
             createAlbedoSRV(cm->resolveTextureRef(id, {}), /*asArray=*/false, /*honourSrgb=*/false);
         ID3D11ShaderResourceView* raw = srv.Get();
-        uiTexCache.emplace(key, std::move(srv));
+        uiTexCache.emplace(id, std::move(srv));
         return raw;
     }
 
@@ -5741,11 +5872,11 @@ struct D3D11RendererImpl
     void EncodeDecals(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
                       int width, int height, ContentManager* cm, bool intoGBuffer = false)
     {
-        GpuPassScope _passTimer(this, "Decals");
 #if !defined(HE_HAVE_SHADERC)
         (void)ctx; (void)viewProj; (void)width; (void)height; (void)cm; (void)intoGBuffer;
 #else
-        if (m_renderWorld.decals.empty()) return;
+        if (m_renderWorld.decals.empty()) return; // before the GPU timer: no decals, no pass row
+        GpuPassScope _passTimer(this, "Decals");
         if (!EnsureDecalPipeline()) return;
         if (intoGBuffer && !decalGBufPS) return;
 
@@ -6014,15 +6145,18 @@ struct D3D11RendererImpl
     void processPendingInvalidations()
     {
         for (const HE::UUID& id : pendingMatInval)
+        {
             materialTexCache.erase(id);
+            m_matRecs.erase(id);
+        }
         pendingMatInval.clear();
         for (const HE::UUID& id : pendingTexInval)
         {
-            std::string key = graphTexKey(id, {});
-            graphTexCache.erase(key);
-            graphTexCache.erase(key + "#arr"); // its texture-array upload
-            uiTexCache.erase(key);
+            graphTexById.erase(id);
+            graphTexArrById.erase(id); // its texture-array upload
+            uiTexCache.erase(id);
         }
+        if (!pendingTexInval.empty()) m_matRecs.clear(); // records hold the SRVs just dropped
         pendingTexInval.clear();
         meshStreamCounters().meshInvalidations.fetch_add(
             static_cast<uint32_t>(pendingMeshInval.size()), std::memory_order_relaxed);
@@ -6462,12 +6596,17 @@ struct D3D11RendererImpl
 
     // `lineDepth` overrides the depth state (null = the scene's test+write);
     // the world preview's grid passes a read-only one so it occludes nothing.
+    std::vector<float> debugVertScratch;
+    std::vector<const DrawCall*> m_opaqueDCs, m_transparentDCs, m_deferredForwardDCs; // DrawScene scratch
+    std::vector<glm::mat4> m_boneScratch;  // identity beyond m_boneScratchUsed
+    size_t m_boneScratchUsed = 0;
     void drawDebugLines(ID3D11DeviceContext* ctx, const glm::mat4& viewProj,
                         const std::vector<DebugLine>& lines,
                         ID3D11DepthStencilState* lineDepth = nullptr)
     {
         if (!debugReady || lines.empty()) return;
-        std::vector<float> verts;
+        std::vector<float>& verts = debugVertScratch; // persistent: no per-frame heap traffic
+        verts.clear();
         verts.reserve(lines.size() * 12);
         for (const DebugLine& l : lines) {
             verts.insert(verts.end(), {l.start.x,l.start.y,l.start.z,l.color.r,l.color.g,l.color.b});
@@ -6706,8 +6845,8 @@ struct D3D11RendererImpl
 
     void renderUIPass(ID3D11DeviceContext* ctx, int width, int height, ContentManager* cm)
     {
+        if (!uiVS || m_renderWorld.uiObjects.empty()) return; // no UI, no pass row
         GpuPassScope _passTimer(this, "UI");
-        if (!uiVS || m_renderWorld.uiObjects.empty()) return;
 
         ctx->VSSetShader(uiVS.Get(), nullptr, 0);
         ctx->PSSetShader(uiPS.Get(), nullptr, 0);
@@ -7019,6 +7158,7 @@ void D3D11Renderer::Shutdown()
     // unguarded; the shader/CB/sampler ComPtrs auto-release).
     m_impl->m_matReady = false;
     m_impl->m_matHlslLogged = false;
+    m_impl->m_matRecs.clear();
     m_impl->m_materialShaders.clear();
     m_impl->m_matShaderLib.clear();
     m_impl->m_matLightCB.Reset();
@@ -7031,7 +7171,9 @@ void D3D11Renderer::Shutdown()
     m_impl->m_skyEnvValid = false;
     // Screen-space decals + graph project textures (ComPtr auto-release).
     m_impl->decalTexCache.clear();
-    m_impl->graphTexCache.clear();
+    m_impl->graphTexById.clear();
+    m_impl->graphTexArrById.clear();
+    m_impl->graphTexByPath.clear();
     m_impl->uiTexCache.clear();
     m_impl->pendingTexInval.clear();
     m_impl->decalVS.Reset(); m_impl->decalPS.Reset(); m_impl->decalGBufPS.Reset(); m_impl->decalCB.Reset();
@@ -7261,11 +7403,21 @@ void D3D11Renderer::DrawScene(int width, int height)
                         && !p.m_renderWorld.lights.empty();
     const bool matClustered = clustered && p.m_matReady && p.matClustered();
     HE::ClusterLightBuild frameClusters;
+    // The second fill (after the GI decision) differs from the first only through the
+    // local-mask flag; when that flag is the same the lists on the GPU are already right,
+    // so the rebuild and the six uploads are skipped and only the SRVs are bound again.
+    bool clustersBuilt = false, clustersMask = false;
     auto uploadClusters = [&](bool giActive)
     {
-        frameClusters = HE::BuildClusterLights(p.m_renderWorld, localShadows, giActive && p.giLocalMaskSRV);
+        const bool mask  = giActive && p.giLocalMaskSRV;
+        const bool reuse = clustersBuilt && clustersMask == mask;
+        if (!reuse)
+        {
+            frameClusters = HE::BuildClusterLights(p.m_renderWorld, localShadows, mask);
+            clustersBuilt = true; clustersMask = mask;
+        }
         const HE::ClusterLightBuild& cb = frameClusters;
-        if (cb.droppedLights > 0 && !p.clusterCapWarned)
+        if (!reuse && cb.droppedLights > 0 && !p.clusterCapWarned)
         {
             p.clusterCapWarned = true;
             HE_LOG_WARN(RHI, "D3D11Renderer: %d point/spot light(s) exceed the cluster caps "
@@ -7274,6 +7426,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
         auto upload = [&](ID3D11Buffer* sb, const void* data, size_t bytes)
         {
+            if (reuse) return;
             D3D11_MAPPED_SUBRESOURCE m{};
             if (SUCCEEDED(ctx->Map(sb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
             {
@@ -7536,6 +7689,12 @@ void D3D11Renderer::DrawScene(int width, int height)
             std::memcpy(mapped.pData, &o, sizeof(o));
             ctx->Unmap(p.perObjectCB.Get(), 0);
         }
+    };
+    // The b0 binding uploadObject's buffer needs, once per run of draws instead of once per
+    // draw: every pass that calls uploadObject binds it first (nothing between its draws
+    // moves VS/PS b0 — a graph material's PS b0 comes back with flushMat, before the next
+    // built-in draw).
+    auto bindObjectCB = [&]() {
         ctx->VSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
         ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
     };
@@ -7644,6 +7803,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                     });
                 }
             };
+            bindObjectCB();
             for (int c = 0; c < cascades; ++c)
                 renderDepthLayer(p.shadowDSV[c].Get(), p.shadowSize, p.shadowViews[static_cast<size_t>(c)], cascadeClip[c]);
             for (int v = 0; v < nLocal; ++v)
@@ -7673,7 +7833,8 @@ void D3D11Renderer::DrawScene(int width, int height)
         // sectionAware: every draw below applies DrawCall::indexOffset/indexCount
         // (DrawIndexRange), so a multi-section mesh's per-slot DCs all come
         // through — one draw per material slot, as on GL and Metal.
-        std::vector<const DrawCall*> opaqueDCs_, transparentDCs_;
+        std::vector<const DrawCall*>& opaqueDCs_      = p.m_opaqueDCs;      // persistent, cleared by partitionByOpacity
+        std::vector<const DrawCall*>& transparentDCs_ = p.m_transparentDCs;
         RenderSorter::partitionByOpacity(cmds.drawCalls(), opaqueDCs_, transparentDCs_,
                                          /*sectionAware=*/true);
 
@@ -7944,7 +8105,82 @@ void D3D11Renderer::DrawScene(int width, int height)
         // `deferredForward`, Metal's `forwardOpaque`.
         bool gbufferPass = false;
         ID3D11PixelShader* builtinPS = p.ps.Get();
-        std::vector<const DrawCall*> deferredForwardDCs;
+        std::vector<const DrawCall*>& deferredForwardDCs = p.m_deferredForwardDCs;
+        deferredForwardDCs.clear();
+        // Graph-material draw state, see "Bind material pipeline state" in drawDC. A run of
+        // graph-material draws shares one bind of the frame-constant half and one restore:
+        // matStateLive says the material half is on the pipeline, the bound* members what
+        // the run has put on it since (null = unknown), flushMat() puts the built-in pass's
+        // state back (every restore the per-draw version made) and forgets all of it. Called
+        // before a built-in draw and after each loop over draw calls, so nothing but
+        // drawDC's material branch ever sees the material half.
+        bool matStateLive  = false;
+        bool paramsBound   = false;    // b3 / b9 hold m_matParamCB
+        bool paramsUploaded = false;   // lastParams is what m_matParamCB holds
+        float lastParams[64] = {};
+        ID3D11VertexShader*       boundVS = nullptr;
+        ID3D11PixelShader*        boundPS = nullptr;
+        ID3D11InputLayout*        boundIL = nullptr;
+        ID3D11Buffer*             boundVB = nullptr;
+        ID3D11Buffer*             boundIB = nullptr;
+        ID3D11ShaderResourceView* boundTex0 = nullptr;
+        ID3D11ShaderResourceView* boundTexP[HE::kMatMaxGraphTextures] = {};
+        ID3D11ShaderResourceView* boundWeights = nullptr;
+        auto flushMat = [&]() {
+            if (!matStateLive) return;
+            matStateLive = false;
+            paramsBound  = false;
+            boundVS = nullptr; boundPS = nullptr; boundIL = nullptr; boundVB = nullptr; boundIB = nullptr;
+            boundTex0 = nullptr; boundWeights = nullptr;
+            std::fill(std::begin(boundTexP), std::end(boundTexP), nullptr);
+            // The material path clobbered: VS/PS/IL, VS b1 (was perFrameCB, overwritten
+            // by U), PS b0 (was perObjectCB, overwritten by HeLighting), PS t2 (was
+            // aoSRV, overwritten by heTex0), and — since the GI port — PS t4..t6 +
+            // s2, which the built-in scene shader now reads (GI mask + probe
+            // atlases + linear-clamp sampler). VS b0 / PS b0 (perObject) and t0
+            // (albedo) are re-bound per draw by the built-in path, but PS b0 is
+            // restored here too since HeLighting overwrote it. And PS s0: the
+            // weightmap's clamp sampler sat there for the draw, the built-in
+            // shader's albedo sampler (p.sampler, set once per pass) goes back;
+            // t14 (heLandscapeWeights) comes off with it. And t17/t18/s1/s3:
+            // the DDGI atlases go, the built-in pass's local shadow atlas,
+            // cluster lights, AO point sampler and shadow sampler come back.
+            // And t15/t16: the sky cube comes off, the forward SSR result
+            // (uSSRFwd) goes back on t16.
+            HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
+            HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
+            HE::d3d11mat::RestoreAfterGIReflFwd(ctx); // t32 off; the built-in shader never reads it
+            {
+                HE::d3d11mat::BuiltinGISlots builtin;
+                builtin.localShadowArray = localShadowSrv_;
+                builtin.clusterLights    = clustered ? p.clusterLightSRV.Get() : nullptr;
+                builtin.pointSampler     = p.pointSampler.Get();
+                builtin.shadowSampler    = p.shadowSampler.Get();
+                HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
+            }
+            ctx->VSSetShader(p.vs.Get(), nullptr, 0);
+            ctx->PSSetShader(builtinPS, nullptr, 0); // PSMain, or GBufPS in the G-buffer pass
+            ctx->IASetInputLayout(p.inputLayout.Get());
+            ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
+            ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
+            ctx->PSSetShaderResources(2, 1, &aoSRV); // t2 = AO (unoccluded white when off)
+            {
+                ID3D11ShaderResourceView* giSrvs[4] = {
+                    giShadingActive ? giShadowSRV      : p.whiteSRV.Get(),
+                    giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
+                    giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
+                    (giShadingActive && p.giLocalMaskSRV) ? p.giLocalMaskSRV.Get()
+                                                          : p.whiteSRV.Get() };
+                ctx->PSSetShaderResources(4, 4, giSrvs);
+                if (p.giLinearClamp)
+                    ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
+            }
+        };
+        // The last landscape weightmap drawDC resolved (see there): consecutive chunks
+        // of one landscape share it. Forgotten at the pass ends where the caches can move.
+        ID3D11ShaderResourceView* lastWeights = nullptr;
+        HE::UUID weightsFor{};
+        bool weightsValid = false;
         auto drawDC = [&](const DrawCall& dc) {
             // A trail carries no mesh asset — its geometry sits in the ribbon
             // pool, looked up by the DrawCall that was synthesised for it.
@@ -7972,22 +8208,19 @@ void D3D11Renderer::DrawScene(int width, int height)
             // which is exactly what an opaque / transparent graph material wants.
             if (p.m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
-                if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                    matHash, matFrag, matVertBody))
+                D3D11RendererImpl::MatDrawRec* rec = p.matRec(*m_contentManager, dc.materialAssetId);
+                if (rec && rec->valid)
                 {
-                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
                     // Transparent graph materials get a blend-on / depth-write-off
                     // shader variant. MUST use the same predicate the opaque/blended
                     // partition above used, or a draw lands in the blended pass with a
                     // depth-writing variant (hence RenderSorter::isTransparent, tint
                     // alpha included, not a bare dc.opacity test).
                     const bool matTransp = RenderSorter::isTransparent(dc);
-                    // The pak's baked HLSL when the export carried one (any D3D tag),
-                    // else cross-compile now. resolveShaders just fetched this material,
-                    // so the pointer is fresh; it is consumed before anything can load.
-                    const MaterialShaderVariant* matPre = HE::MaterialShaderLibrary::precompiledFor(
-                        m_contentManager->getMaterial(dc.materialAssetId), HE::RendererBackend::D3D11);
+                    // The shader pointers and the rest of what the material resolves to
+                    // are cached in `rec` (D3D11RendererImpl::matRec): the hash, the
+                    // baked HLSL (rec->pre) and the maps below are touched once per
+                    // material, not once per draw.
                     D3D11RendererImpl::MatShaders* sh = nullptr;
                     // A GeometryPass batch in the opaque or G-buffer pass draws ONCE with
                     // the material's instanced twin (Thema 182, 2f; GL's and Metal's 2e):
@@ -8002,29 +8235,57 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // The G-buffer tail of the same graph (same expressions,
                         // attributes instead of heLitP). No variant, or one that
                         // does not build → the lit forward replay after the resolve.
-                        uint64_t gbHash = 0; std::string gbFrag, gbVertBody;
-                        if (p.m_matShaderLib.resolveGBufferShaders(*m_contentManager, dc.materialAssetId,
-                                                                   gbHash, gbFrag, gbVertBody))
+                        std::string gbFrag, gbVertBody;
+                        if (!rec->gbTried)
                         {
-                            p.foldDisplacement(*m_contentManager, dc.materialAssetId, gbHash);
-                            sh = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
-                                                             false, /*gbuffer=*/true);
+                            rec->gbTried = true;
+                            rec->gbValid = p.m_matShaderLib.resolveGBufferShaders(
+                                *m_contentManager, dc.materialAssetId, rec->gbHash, gbFrag, gbVertBody);
+                            if (rec->gbValid)
+                                p.foldDisplacement(*m_contentManager, dc.materialAssetId, rec->gbHash);
                         }
+                        if (!rec->shGDone)
+                        {
+                            rec->shGDone = true;
+                            if (rec->gbValid)
+                                rec->shG = p.GetOrBuildMaterialShaders(rec->gbHash, rec->gbufSrc, rec->vertSrc,
+                                                                       nullptr, false, /*gbuffer=*/true);
+                        }
+                        sh = rec->shG;
                         if (!(sh && sh->vs && sh->ps && sh->il))
                         {
                             deferredForwardDCs.push_back(&dc);
                             return;
                         }
                         if (wantTwin)
-                            shInst = p.GetOrBuildMaterialShaders(gbHash, gbFrag, gbVertBody, nullptr,
-                                                                 false, /*gbuffer=*/true, /*instanced=*/true);
+                        {
+                            if (!rec->shGInstDone)
+                            {
+                                rec->shGInstDone = true;
+                                rec->shGInst = p.GetOrBuildMaterialShaders(rec->gbHash, rec->gbufSrc, rec->vertSrc, nullptr,
+                                                                           false, /*gbuffer=*/true, /*instanced=*/true);
+                            }
+                            shInst = rec->shGInst;
+                        }
                     }
                     else
                     {
-                        sh = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, matTransp);
+                        if (!rec->shDone)
+                        {
+                            rec->shDone = true;
+                            rec->sh = p.GetOrBuildMaterialShaders(rec->hash, rec->fragSrc, rec->vertSrc, rec->pre, false);
+                        }
+                        sh = rec->sh;
                         if (sh && wantTwin)
-                            shInst = p.GetOrBuildMaterialShaders(matHash, matFrag, matVertBody, matPre, false,
-                                                                 /*gbuffer=*/false, /*instanced=*/true);
+                        {
+                            if (!rec->shInstDone)
+                            {
+                                rec->shInstDone = true;
+                                rec->shInst = p.GetOrBuildMaterialShaders(rec->hash, rec->fragSrc, rec->vertSrc, rec->pre, false,
+                                                                          /*gbuffer=*/false, /*instanced=*/true);
+                            }
+                            shInst = rec->shInst;
+                        }
                     }
                     if (sh && sh->vs && sh->ps && sh->il)
                     {
@@ -8047,38 +8308,33 @@ void D3D11Renderer::DrawScene(int width, int height)
                         if (!heTex0) heTex0 = p.dummyTexture.Get(); // white default → not textured
 
                         // heTexP0..3 = the graph's project textures (Texture Sample nodes),
-                        // white where a slot is empty or unloadable. The slot list is
-                        // snapshotted BEFORE any resolve: a resolve may load, and a load
-                        // can move the material asset out from under a held pointer —
-                        // which is also why `ma` below is fetched only AFTER this block.
-                        // A sampler2DArray slot (Texture Array Sample, Thema 158) takes a
-                        // Texture2DArray SRV, the white ARRAY dummy when empty.
-                        ID3D11ShaderResourceView* heTexP[HE::kMatMaxGraphTextures] = {
-                            p.dummyTexture.Get(), p.dummyTexture.Get(),
-                            p.dummyTexture.Get(), p.dummyTexture.Get() };
+                        // white where a slot is empty or unloadable, resolved once per
+                        // material into the record. A sampler2DArray slot (Texture Array
+                        // Sample, Thema 158) takes a Texture2DArray SRV, the white ARRAY
+                        // dummy when empty. A resolve may load, and a load can move the
+                        // material asset out from under a held pointer — which is why the
+                        // asset is fetched again after this block.
+                        if (!rec->texDone)
                         {
-                            HE::UUID    gIds[HE::kMatMaxGraphTextures]{};
-                            std::string gPaths[HE::kMatMaxGraphTextures];
-                            size_t nTex = 0;
-                            uint32_t arrMask = 0;
-                            if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
-                            {
-                                arrMask = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
-                                for (int i = 0; i < HE::kMatMaxGraphTextures; ++i)
-                                    if ((arrMask >> i) & 1u) heTexP[i] = p.dummyArrayTexture.Get();
-                                nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
-                                    std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
-                                for (size_t i = 0; i < nTex; ++i)
-                                {
-                                    if (i < ma0->graphTextureIds.size())   gIds[i]   = ma0->graphTextureIds[i];
-                                    if (i < ma0->graphTexturePaths.size()) gPaths[i] = ma0->graphTexturePaths[i];
-                                }
-                            }
+                            rec->texDone = true;
+                            for (int i = 0; i < HE::kMatMaxGraphTextures; ++i)
+                                rec->heTexP[i] = p.dummyTexture.Get();
+                            const uint32_t arrMask = HE::matGlslTextureArrayMask(rec->fragSrc);
+                            for (int i = 0; i < HE::kMatMaxGraphTextures; ++i)
+                                if ((arrMask >> i) & 1u) rec->heTexP[i] = p.dummyArrayTexture.Get();
+                            const size_t nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
+                                std::max(rec->texPaths.size(), rec->texIds.size()));
                             for (size_t i = 0; i < nTex; ++i)
-                                if (ID3D11ShaderResourceView* srv = p.resolveGraphTexture(gIds[i], gPaths[i], m_contentManager,
+                            {
+                                const HE::UUID id = i < rec->texIds.size() ? rec->texIds[i] : HE::UUID{};
+                                static const std::string kNoPath;
+                                const std::string& path = i < rec->texPaths.size() ? rec->texPaths[i] : kNoPath;
+                                if (ID3D11ShaderResourceView* srv = p.resolveGraphTexture(id, path, m_contentManager,
                                                                                           (arrMask >> i) & 1u))
-                                    heTexP[i] = srv;
+                                    rec->heTexP[i] = srv;
+                            }
                         }
+                        ID3D11ShaderResourceView* const* heTexP = rec->heTexP;
 
                         // heLandscapeWeights (t14) = the object's landscape weightmap, PER
                         // DRAW like GL unit 13 / Metal slot 13: it belongs to the terrain
@@ -8087,70 +8343,97 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // not a landscape chunk gets the 1x1 (1,0,0,0) default, so a
                         // Landscape Layer Blend resolves to layer 0 instead of black; the
                         // white dummy is the last resort so a live sample never hits a
-                        // null SRV. Resolved HERE, inside the snapshot block's rules: the
-                        // resolve may load, and a load can move the material asset —
-                        // which is why `ma` below is fetched only after this.
-                        ID3D11ShaderResourceView* heWeights = nullptr;
-                        if (dc.weightmapTextureId != HE::UUID{})
-                            heWeights = p.resolveGraphTexture(dc.weightmapTextureId, {}, m_contentManager);
-                        if (!heWeights)
-                            heWeights = p.resolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);
-                        if (!heWeights) heWeights = p.dummyTexture.Get();
+                        // null SRV. A run of chunks with one weightmap resolves it once.
+                        if (!weightsValid || weightsFor != dc.weightmapTextureId)
+                        {
+                            ID3D11ShaderResourceView* w = nullptr;
+                            if (dc.weightmapTextureId != HE::UUID{})
+                                w = p.resolveGraphTexture(dc.weightmapTextureId, {}, m_contentManager);
+                            if (!w)
+                                w = p.resolveGraphTexture(HE::kDefaultLayer0WeightTextureId, {}, m_contentManager);
+                            if (!w) w = p.dummyTexture.Get();
+                            lastWeights = w; weightsFor = dc.weightmapTextureId; weightsValid = true;
+                        }
+                        ID3D11ShaderResourceView* heWeights = lastWeights;
 
                         // Per-entity HeParams override wins over the material's shared params.
+                        // Fetched only now: the resolves above (and the override's) may load,
+                        // and a load can move the material asset.
                         const MaterialAsset* ma = m_contentManager->getMaterial(dc.materialAssetId);
                         const std::vector<float>* params =
                             !dc.paramOverride.empty() ? &dc.paramOverride
                             : (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 
                         // ── Bind material pipeline state ──────────────────────────────────
-                        ctx->VSSetShader(sh->vs.Get(), nullptr, 0);
-                        ctx->PSSetShader(sh->ps.Get(), nullptr, 0);
-                        ctx->IASetInputLayout(sh->il.Get());
-                        ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset);
-                        ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0);
-                        // HeLighting (b0 PS, b8 WPO VS) — same CB, filled once per frame.
-                        ctx->PSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
-                        ctx->VSSetConstantBuffers(8, 1, p.m_matLightCB.GetAddressOf());
-                        // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS) + linear-wrap samplers
-                        // (s2 + s4..s7). t3 is intentionally unused by the mesh path.
-                        ctx->PSSetShaderResources(2, 1, &heTex0);
-                        static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy t4..t7");
-                        ctx->PSSetShaderResources(4, 4, heTexP);
+                        // The frame-constant half (HeLighting at b0/b8, the samplers, the DDGI
+                        // atlases, the sky cube + AO, the GI reflection result) goes on once
+                        // per RUN of graph-material draws: the built-in state comes back
+                        // lazily (flushMat), only when a built-in draw or the end of the
+                        // pass needs it, so a run of N material draws pays one bind and one
+                        // restore instead of N of each. What differs per draw (shaders,
+                        // buffers, heTex0/heTexP/weights) is skipped when it is what is
+                        // already bound.
+                        if (!matStateLive)
+                        {
+                            matStateLive = true;
+                            // HeLighting (b0 PS, b8 WPO VS) — same CB, filled once per frame.
+                            ctx->PSSetConstantBuffers(0, 1, p.m_matLightCB.GetAddressOf());
+                            ctx->VSSetConstantBuffers(8, 1, p.m_matLightCB.GetAddressOf());
+                            // linear-wrap samplers (s2 + s4..s7).
+                            ID3D11SamplerState* matSamp = p.m_matSampler.Get();
+                            ctx->PSSetSamplers(2, 1, &matSamp);
+                            ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
+                            ctx->PSSetSamplers(4, 4, matSamp4);
+                            // heLandscapeWeights (t14 PS) is bound below with its linear-CLAMP
+                            // sampler on s0 — explicitly, because s0 is where the enclosing
+                            // built-in pass keeps its albedo sampler (p.sampler, linear-wrap):
+                            // without this the weightmap is filtered with whatever the last
+                            // built-in pass left on s0. Restored by flushMat.
+                            // (D3D11MaterialBindings.h, Thema 57)
+                            // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
+                            // (Thema 120): the live probe atlases while GI shades — the gate
+                            // fillMatLight raised — the white dummy otherwise, so the 2D slots
+                            // never hold the built-in pass's array / structured buffer during
+                            // the draw. m_matWeightSampler is the same linear-clamp description
+                            // as giLinearClamp and, unlike it, exists without the GI path.
+                            HE::d3d11mat::BindDDGIAtlases(ctx,
+                                giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
+                                giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
+                                p.m_matWeightSampler.Get());
+                            // heSkyEnv (t15/s15) + heAO (t16) (Thema 126): the baked sky cube
+                            // under the same flag fillMatLight raised fog.z with, and the AO
+                            // SRV the built-in shader reads at t2 (white when SSAO did not
+                            // run, fog.w is 0 then). t16 is the built-in pass's forward SSR
+                            // result — restored by flushMat, with t15.
+                            HE::d3d11mat::BindSkyEnvAndAO(ctx,
+                                p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
+                                aoSRV, p.m_matWeightSampler.Get());
+                            // heGIReflFwd (t32/s9, Thema 191 step 2): this frame's
+                            // ray-traced reflection result, or null when the pass
+                            // did not run — fillMatLight's giRefl.z gates the read.
+                            HE::d3d11mat::BindGIReflFwd(ctx, giReflSRV, p.giLinearClamp.Get());
+                        }
                         ID3D11SamplerState* matSamp = p.m_matSampler.Get();
-                        ctx->PSSetSamplers(2, 1, &matSamp);
                         ID3D11SamplerState* matSamp4[4] = { matSamp, matSamp, matSamp, matSamp };
-                        ctx->PSSetSamplers(4, 4, matSamp4);
-                        // heLandscapeWeights (t14 PS) + its linear-CLAMP sampler on s0 —
-                        // explicitly, because s0 is where the enclosing built-in pass keeps
-                        // its albedo sampler (p.sampler, linear-wrap): without this the
-                        // weightmap is filtered with whatever the last built-in pass left
-                        // on s0. Restored below. (D3D11MaterialBindings.h, Thema 57)
-                        HE::d3d11mat::BindLandscapeWeights(ctx, heWeights, p.m_matWeightSampler.Get());
-                        // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
-                        // (Thema 120): the live probe atlases while GI shades — the gate
-                        // fillMatLight raised — the white dummy otherwise, so the 2D slots
-                        // never hold the built-in pass's array / structured buffer during
-                        // the draw. m_matWeightSampler is the same linear-clamp description
-                        // as giLinearClamp and, unlike it, exists without the GI path.
-                        // Restored below.
-                        HE::d3d11mat::BindDDGIAtlases(ctx,
-                            giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
-                            giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
-                            p.m_matWeightSampler.Get());
-                        // heSkyEnv (t15/s15) + heAO (t16) (Thema 126): the baked sky cube
-                        // under the same flag fillMatLight raised fog.z with, and the AO
-                        // SRV the built-in shader reads at t2 (white when SSAO did not
-                        // run, fog.w is 0 then). t16 is the built-in pass's forward SSR
-                        // result — restored below, with t15.
-                        HE::d3d11mat::BindSkyEnvAndAO(ctx,
-                            p.m_skyEnvValid ? p.m_skyEnvSRV.Get() : nullptr,
-                            aoSRV, p.m_matWeightSampler.Get());
-                        // heGIReflFwd (t32/s9, Thema 191 step 2): this frame's
-                        // ray-traced reflection result, or null when the pass
-                        // did not run — fillMatLight's giRefl.z gates the read.
-                        // Restored below with the rest of the material block.
-                        HE::d3d11mat::BindGIReflFwd(ctx, giReflSRV, p.giLinearClamp.Get());
+                        if (boundVS != sh->vs.Get()) { ctx->VSSetShader(sh->vs.Get(), nullptr, 0); boundVS = sh->vs.Get(); }
+                        if (boundPS != sh->ps.Get()) { ctx->PSSetShader(sh->ps.Get(), nullptr, 0); boundPS = sh->ps.Get(); }
+                        if (boundIL != sh->il.Get()) { ctx->IASetInputLayout(sh->il.Get()); boundIL = sh->il.Get(); }
+                        if (boundVB != m.vbuf.Get()) { ctx->IASetVertexBuffers(0, 1, m.vbuf.GetAddressOf(), &stride, &offset); boundVB = m.vbuf.Get(); }
+                        if (boundIB != m.ibuf.Get()) { ctx->IASetIndexBuffer(m.ibuf.Get(), DXGI_FORMAT_R32_UINT, 0); boundIB = m.ibuf.Get(); }
+                        // heTex0 (t2 PS) + heTexP0..3 (t4..t7 PS).
+                        if (boundTex0 != heTex0) { ctx->PSSetShaderResources(2, 1, &heTex0); boundTex0 = heTex0; }
+                        static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy t4..t7");
+                        if (std::memcmp(boundTexP, heTexP, sizeof(boundTexP)) != 0)
+                        {
+                            ctx->PSSetShaderResources(4, 4, heTexP);
+                            std::memcpy(boundTexP, heTexP, sizeof(boundTexP));
+                        }
+                        // heLandscapeWeights (t14 PS) + its linear-CLAMP sampler on s0.
+                        if (boundWeights != heWeights)
+                        {
+                            HE::d3d11mat::BindLandscapeWeights(ctx, heWeights, p.m_matWeightSampler.Get());
+                            boundWeights = heWeights;
+                        }
                         // Displacement (Thema 207): hull + domain between the VS and the
                         // PS, 3-control-point patches. The domain stage runs the graph's
                         // height statements on the PIXEL stage's registers (b0 HeLighting,
@@ -8200,19 +8483,32 @@ void D3D11Renderer::DrawScene(int width, int height)
                                 ctx->Unmap(p.m_matObjCB.Get(), 0);
                             }
                             // HeParams (16 vec4 = 64 floats = 256 B) at b3 PS / b9 WPO VS, zero-padded.
+                            // Re-uploaded only when the 256 B differ from what the buffer holds
+                            // (a slider drag edits the material's params in place, so the
+                            // bytes — not a pointer — decide); the binds only after a flush.
                             float padded[64] = { 0.0f };
                             if (params)
                                 std::memcpy(padded, params->data(),
                                             std::min(params->size(), size_t(64)) * sizeof(float));
-                            D3D11_MAPPED_SUBRESOURCE mp{};
-                            if (SUCCEEDED(ctx->Map(p.m_matParamCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
+                            if (!paramsUploaded || std::memcmp(padded, lastParams, sizeof(padded)) != 0)
                             {
-                                std::memcpy(mp.pData, padded, sizeof(padded));
-                                ctx->Unmap(p.m_matParamCB.Get(), 0);
+                                D3D11_MAPPED_SUBRESOURCE mp{};
+                                if (SUCCEEDED(ctx->Map(p.m_matParamCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
+                                {
+                                    std::memcpy(mp.pData, padded, sizeof(padded));
+                                    ctx->Unmap(p.m_matParamCB.Get(), 0);
+                                    std::memcpy(lastParams, padded, sizeof(padded));
+                                    paramsUploaded = true;
+                                }
+                                else paramsUploaded = false;
                             }
                             ctx->VSSetConstantBuffers(1, 1, p.m_matObjCB.GetAddressOf());   // b1 U (VS)
-                            ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf()); // b3 HeParams (PS)
-                            ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
+                            if (!paramsBound)
+                            {
+                                ctx->PSSetConstantBuffers(3, 1, p.m_matParamCB.GetAddressOf()); // b3 HeParams (PS)
+                                ctx->VSSetConstantBuffers(9, 1, p.m_matParamCB.GetAddressOf()); // b9 HeParams (WPO VS)
+                                paramsBound = true;
+                            }
                         };
                         auto drawMatInstance = [&](const glm::mat4& model) {
                             uploadMatDraw(viewProj * model, model);
@@ -8244,6 +8540,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ID3D11Buffer* nullVB = nullptr;
                             const UINT zero = 0;
                             ctx->IASetVertexBuffers(1, 1, &nullVB, &zero, &zero);
+                            boundVS = nullptr; boundPS = nullptr; boundIL = nullptr; // the twin's pair is on
                         }
                         else if (dc.instanceTotal())
                             // No twin: each instance through the material path.
@@ -8251,59 +8548,21 @@ void D3D11Renderer::DrawScene(int width, int height)
                         else
                             drawMatInstance(dc.transform);
 
-                        // ── CRITICAL: restore scene state for subsequent built-in draws ───
-                        // The material path clobbered: VS/PS/IL, VS b1 (was perFrameCB, overwritten
-                        // by U), PS b0 (was perObjectCB, overwritten by HeLighting), PS t2 (was
-                        // aoSRV, overwritten by heTex0), and — since the GI port — PS t4..t6 +
-                        // s2, which the built-in scene shader now reads (GI mask + probe
-                        // atlases + linear-clamp sampler). VS b0 / PS b0 (perObject) and t0
-                        // (albedo) are re-bound per draw by the built-in path, but PS b0 is
-                        // restored here too since HeLighting overwrote it. And PS s0: the
-                        // weightmap's clamp sampler sat there for the draw, the built-in
-                        // shader's albedo sampler (p.sampler, set once per pass) goes back;
-                        // t14 (heLandscapeWeights) comes off with it. And t17/t18/s1/s3:
-                        // the DDGI atlases go, the built-in pass's local shadow atlas,
-                        // cluster lights, AO point sampler and shadow sampler come back.
-                        // And t15/t16: the sky cube comes off, the forward SSR result
-                        // (uSSRFwd) goes back on t16.
+                        // ── Restore scene state for subsequent built-in draws ─────────────
+                        // Not here: flushMat() puts the built-in state back once the run of
+                        // material draws is over. Tessellation is unbound right away — a
+                        // hull/domain pair must not stay on for the next material's plain VS/PS.
                         if (matTess)
                         {
                             ctx->HSSetShader(nullptr, nullptr, 0);
                             ctx->DSSetShader(nullptr, nullptr, 0);
                             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                         }
-                        HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
-                        HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
-                        HE::d3d11mat::RestoreAfterGIReflFwd(ctx); // t32 off; the built-in shader never reads it
-                        {
-                            HE::d3d11mat::BuiltinGISlots builtin;
-                            builtin.localShadowArray = localShadowSrv_;
-                            builtin.clusterLights    = clustered ? p.clusterLightSRV.Get() : nullptr;
-                            builtin.pointSampler     = p.pointSampler.Get();
-                            builtin.shadowSampler    = p.shadowSampler.Get();
-                            HE::d3d11mat::RestoreBuiltinGISlots(ctx, builtin);
-                        }
-                        ctx->VSSetShader(p.vs.Get(), nullptr, 0);
-                        ctx->PSSetShader(builtinPS, nullptr, 0); // PSMain, or GBufPS in the G-buffer pass
-                        ctx->IASetInputLayout(p.inputLayout.Get());
-                        ctx->VSSetConstantBuffers(1, 1, p.perFrameCB.GetAddressOf());
-                        ctx->PSSetConstantBuffers(0, 1, p.perObjectCB.GetAddressOf());
-                        ctx->PSSetShaderResources(2, 1, &aoSRV); // t2 = AO (unoccluded white when off)
-                        {
-                            ID3D11ShaderResourceView* giSrvs[4] = {
-                                giShadingActive ? giShadowSRV      : p.whiteSRV.Get(),
-                                giShadingActive ? p.giIrrSRV.Get() : p.whiteSRV.Get(),
-                                giShadingActive ? p.giVisSRV.Get() : p.whiteSRV.Get(),
-                                (giShadingActive && p.giLocalMaskSRV) ? p.giLocalMaskSRV.Get()
-                                                                      : p.whiteSRV.Get() };
-                            ctx->PSSetShaderResources(4, 4, giSrvs);
-                            if (p.giLinearClamp)
-                                ctx->PSSetSamplers(2, 1, p.giLinearClamp.GetAddressOf());
-                        }
                         return;
                     }
                 }
             }
+            flushMat(); // a graph-material run before this draw leaves its state on
             // Base color: an explicit MaterialComponent override (dc.materialAssetId), once its
             // material is loaded, fully replaces the mesh's baked texture — even to flat.
             ID3D11ShaderResourceView* albedo = m.texture.Get(); // baked (may be null)
@@ -8393,7 +8652,11 @@ void D3D11Renderer::DrawScene(int width, int height)
         const bool gbDecals = deferredActive && !p.m_renderWorld.decals.empty()
                            && p.EnsureDecalPipeline() && p.decalGBufPS;
         if (!deferredActive)
+        {
+            bindObjectCB();
             for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+            flushMat();
+        }
         else
         {
             // ── Deferred (Thema 150): G-buffer pass → lighting resolve → forward
@@ -8418,7 +8681,9 @@ void D3D11Renderer::DrawScene(int width, int height)
             builtinPS   = p.gbufferPS.Get();
             gbufferPass = true;
             ctx->PSSetShader(builtinPS, nullptr, 0);
+            bindObjectCB();
             for (const DrawCall* dc : opaqueDCs) drawDC(*dc);
+            flushMat();
             gbufferPass = false;
             builtinPS   = p.ps.Get();
 
@@ -8585,7 +8850,9 @@ void D3D11Renderer::DrawScene(int width, int height)
 
             // Forward replay: graph materials without a G-buffer variant, lit by
             // their own forward shader against the G-buffer depth (test + write).
+            bindObjectCB();
             for (const DrawCall* dc : deferredForwardDCs) drawDC(*dc);
+            flushMat();
         }
 
         // ── Skinned mesh pass ─────────────────────────────────────────────────
@@ -8596,9 +8863,17 @@ void D3D11Renderer::DrawScene(int width, int height)
             ctx->VSSetShader(p.skinnedVS.Get(), nullptr, 0);
             ctx->IASetInputLayout(p.skinnedLayout.Get());
             ctx->VSSetConstantBuffers(2, 1, p.bonesCB.GetAddressOf());
+            bindObjectCB();
 
             constexpr int kMaxBones = 128;
-            std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
+            // Persistent scratch: identity everywhere but the first m_boneScratchUsed
+            // entries, so a draw only restores the tail the previous one overwrote.
+            if (p.m_boneScratch.size() != size_t(kMaxBones))
+            {
+                p.m_boneScratch.assign(kMaxBones, glm::mat4(1.0f));
+                p.m_boneScratchUsed = 0;
+            }
+            std::vector<glm::mat4>& boneScratch = p.m_boneScratch;
 
             for (const SkinnedDrawCall& dc : cmds.skinnedDrawCalls())
             {
@@ -8612,9 +8887,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                     albedo = ovr;
 
                 // Upload bone matrices to b2
-                std::fill(boneScratch.begin(), boneScratch.end(), glm::mat4(1.0f));
                 const int n = std::min(static_cast<int>(dc.boneMatrices.size()), kMaxBones);
+                if (p.m_boneScratchUsed > static_cast<size_t>(n))
+                    std::fill(boneScratch.begin() + n, boneScratch.begin() + p.m_boneScratchUsed, glm::mat4(1.0f));
                 if (n > 0) std::copy_n(dc.boneMatrices.begin(), n, boneScratch.begin());
+                p.m_boneScratchUsed = static_cast<size_t>(n);
                 {
                     D3D11_MAPPED_SUBRESOURCE mr{};
                     if (SUCCEEDED(ctx->Map(p.bonesCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mr)))
@@ -8673,7 +8950,9 @@ void D3D11Renderer::DrawScene(int width, int height)
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             ctx->OMSetBlendState(p.alphaBlendState.Get(), nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthReadOnlyState.Get(), 0);
+            bindObjectCB();
             for (const DrawCall* dc : transparentDCs) drawDC(*dc);
+            flushMat();
             ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
         }
