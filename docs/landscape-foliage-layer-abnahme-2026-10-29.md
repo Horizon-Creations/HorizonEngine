@@ -20,7 +20,7 @@ render backends, and that the Apply-on-click design carries no per-frame cost.
 | D3D12 | **verified** (build, visual); same open test item | same; pixel-identical to D3D11 (0 px differ) |
 | Vulkan | **verified** (build, visual); same open test item | same; 19/921600 px differ (known sky-edge run-to-run noise, see `foliage_graph_ab.py`'s docstring) |
 | OpenGL | **verified** (build, visual); same open test item | same; shading-only difference from D3D, traced to source (see Findings) |
-| Metal | **pending, requested** (no macOS device in this bee's hands) | asked the queen (`hive_request` #157) to have a Mac bee run the same witness on `MacBook-Air-von-Connor` (online, 0 bees); CI's macOS job only compiles MSL and runs ctest, no render — it is not a stand-in for this. CI matrix for this HEAD also dispatched: run **40852164598**, still running at hand-off — `https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40852164598` |
+| Metal | **verified (witness only), step 6, see "Metal addendum" below** | `HE_DUMP_FOLIAGETEST` on MacBook-Air-von-Connor (Apple M5): identical counters, near-identical to OpenGL's image. Not covered on Metal: `he_tests` and the full test run (Mac tests were not part of step 6). The original Windows step asked for this via `hive_request` #157. CI matrix for the Windows HEAD: run **40852164598** — `https://github.com/Horizon-Creations/HorizonEngine/actions/runs/40852164598` |
 
 ## Results
 
@@ -114,3 +114,47 @@ render backends, and that the Apply-on-click design carries no per-frame cost.
   own investigation before this topic's branch is backend-accepted, not a line in this report.
   (2) wait for the Mac bee's Metal witness (request #157) or the macOS CI job, whichever answers
   first. No further code changes are expected from this step otherwise — it is acceptance only.
+
+## Metal addendum (Thema 327, step 6, 2026-10-29)
+
+MacBook-Air-von-Connor (Apple M5, macOS), branch @ `d234ee67`, **Release**, Ninja, build tree
+`<worktree>/cmake-build-release` (739 steps, rc 0, HorizonEditor only; no `he_tests` run on the Mac).
+Binary: `out/deploy/Editor/HorizonEditor`. No code, shader or test changed. The log shows
+`Configuration: backend=Metal` and `MetalRenderer: initialized on Apple M5`, no fallback.
+
+Witness: the Reproduce one-liner above with `HE_DUMP_RHI=Metal` and a scratch `HE_CONFIG_DIR`
+(plus `HE_COLLAB_OFFLINE=1 HE_NET_LOOPBACK_ONLY=1`), run from `out/deploy/Editor`. Same pins as the
+Windows rows: `HE_DUMP_SKYTEST` not set, `HE_DUMP_SHADOW=0.1`.
+
+| Backend | `dump counters` line (verbatim) |
+|---|---|
+| D3D11 / D3D12 / Vulkan / OpenGL | `draws=5 tris=45352 visible=8/20 occluded=0` (all four, from the table above) |
+| **Metal** | `EditorApplication: dump counters — draws=5 tris=45352 visible=8/20 occluded=0` |
+
+**draws, tris and visible all match.** Run-to-run: two Metal runs are byte-identical BMPs.
+
+* **Shadow caveat checked, not assumed.** The Windows run used `HE_DUMP_SHADOW=0.1`; so did Metal. On
+  Metal `HE_DUMP_SHADOW=150,3` (a real shadow range) gives the same counters **and a byte-identical BMP**
+  (the default time of day has no sun up, hence the black sky), so in this witness the shadow setting cannot
+  move the counters. Metal's `draws=5` is therefore not inflated by cascades.
+* **Pin trap:** adding `HE_DUMP_SKYTEST=1` (as `foliage_graph_ab.py` does) changes the counters on
+  Metal to `draws=5 tris=58060 visible=16/20`: the sky test adds scene geometry. Do not compare counters
+  across runs with and without it. `HE_DUMP_TOD=0.4`, `HE_SKY_TIME`, AA/clouds off do not change them.
+* **Image** (`docs/landscape-foliage-layer-abnahme/metal-foliagetest.png`): the cube field is visible, grey
+  ground, black sky (56 black rows, same as D3D11). Against the committed D3D11 PNG: 302496/921600 px
+  differ by >10, mean diff 9.77/255. Against the committed **OpenGL** PNG: 10 px >10 (max 54), mean 0.01 and mean
+  luminance 174.0 vs 174.0. So Metal reproduces OpenGL's shading, not D3D's (D3D11 mean luminance 183.7).
+  This agrees with Finding 1: the tone gap splits Windows D3D (brighter) from the GL-family look. Whether
+  the D3D side or the GL/Metal side is "right" was not examined; the numbers only show Metal is not an outlier.
+* **Not done:** no live-editor session, no real foliage mesh, no `he_tests` on the Mac, no Windows/D3D/Vulkan runs.
+
+## Handoff (step 6)
+
+* **Done:** Metal witness above. All three counters match the four Windows backends.
+* **Pending:** nothing for Metal. Windows-only open items stay with the Windows side:
+  `test_hc_codegen_export_build` and CI run `40852164598`.
+* **Reproduce (Mac):** `cd out/deploy/Editor && HE_CONFIG_DIR=/tmp/x HE_HIDDEN_WINDOW=1 HE_DUMP_PATH=/tmp/m.bmp
+  HE_DUMP_QUIT=1 HE_DUMP_RHI=Metal HE_DUMP_FOLIAGETEST=2000 HE_DUMP_FOLIAGESIZE=100 HE_DUMP_CAMX=0 HE_DUMP_CAMY=25
+  HE_DUMP_CAMZ=60 HE_DUMP_PITCH=-20 HE_DUMP_SHADOW=0.1 ./HorizonEditor > m.log 2>&1` (redirect stdout to a file,
+  the run is ~2 s). The bmp is bottom-up 24-bit; `sips -s format png` converts it.
+* **Next:** optional, only if wanted: look into the D3D vs GL/Metal shading-tone gap (Finding 1).
