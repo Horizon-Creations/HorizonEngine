@@ -118,7 +118,7 @@ any other material can call them too.
 
 ## Handoff (steps 3, 5a; step 4 withdrawn)
 
-- **Topic / step:** 328, step 3 (Hive 1576). Branch `claude/schnee-sand-weiter-parameter-screenshots`.
+- **Topic / step:** 328, step 3 (Hive 1576) done, step 4 withdrawn (1577), step 5a done (CPU field + function look), step 5b open (Hive 1578). Branch `claude/schnee-sand-weiter-parameter-screenshots`.
 - **Decisions taken:** Vec4 packing; sand colour baked; Desert = 16 params. **Suggested, not taken:** raise the slot budget (needs all five renderers + Windows verification), group-specific defaults from the picker values.
 - **Trap:** 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
 - **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 4 (mix texture + procedural, a Mix parameter will need a slot: free one or pack); 3. step 5 trails (Disturbance pin).
