@@ -1449,9 +1449,10 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             c.usesLandscapeWeights = true;
             if (c.layerNames.empty()) c.layerNames = names;
 
-            // Layers 0..3 are the weightmap's first RGBA page, 4..7 its second.
+            // Layers 0..3 are the weightmap's first RGBA page, 4..7 its second, 8..11 its third.
             static const char* kChan[kMatMaxLandscapeLayers] =
-                { "_w.x", "_w.y", "_w.z", "_w.w", "_w2.x", "_w2.y", "_w2.z", "_w2.w" };
+                { "_w.x",  "_w.y",  "_w.z",  "_w.w",  "_w2.x", "_w2.y", "_w2.z", "_w2.w",
+                  "_w3.x", "_w3.y", "_w3.z", "_w3.w" };
             std::string sum, wsum;
             for (size_t i = 0; i < names.size(); ++i)
             {
@@ -1467,24 +1468,31 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // its zero sum by the 1e-4 floor and come out as a black hole.
             const std::string layer0 = names.empty()
                 ? std::string("vec3(0.0)") : inputExpr(c, sc, n, 0, F::Vec3);
-            // Two weightmap shapes share the one binding (TerrainPaint::
+            // Up to three weightmap shapes share the one binding (TerrainPaint::
             // buildWeightTexture): a square map = layers 0..3 only, exactly
             // what every landscape had before there were eight layers, sampled
             // exactly as before; a 2:1 map = layers 0..3 in the left half and
-            // 4..7 in the right. Told apart by the texture's own size, so the
-            // MATERIAL needs to know nothing about the terrain it lands on and
-            // no backend needs a second sampler, binding or uniform. Every
-            // blend is page-aware, also one with four layers or fewer: on a 2:1
-            // map the plain full-width sample would smear both halves together.
+            // 4..7 in the right; a 3:1 map = the same in thirds, 8..11 in the
+            // last. Told apart by the texture's own size (the page count N is
+            // width / height), so the MATERIAL needs to know nothing about the
+            // terrain it lands on and no backend needs a second sampler, binding
+            // or uniform. Every blend is page-aware, also one with four layers
+            // or fewer: on a 2:1 or 3:1 map the plain full-width sample would
+            // smear the pages together, and a blend of eight layers must not
+            // read a 3:1 map as two halves.
             //
-            // In the 2:1 case each half is read at mip 0 with U clamped half a
-            // texel inside it: bilinear filtering at a half's edge (and any
+            // With N = 2 every divide below is by a power of two, i.e. exactly
+            // the multiplies by 0.5 and the + 0.5 the two-page read always made.
+            //
+            // In the paged case each page is read at mip 0 with U clamped half a
+            // texel inside it: bilinear filtering at a page's edge (and any
             // runtime mip of the atlas — GL and Metal build one) would bleed
-            // the other page's weights in. Both samples are taken up front and
+            // the other pages' weights in. All samples are taken up front and
             // only SELECTED by the size test, so no implicit-derivative sample
             // sits in control flow.
             const bool page2 = names.size() > 4;
-            const std::string ts = v + "_ts", wu = v + "_wu", wsz = v + "_wsz", wuv = v + "_wuv";
+            const bool page3 = names.size() > 8;
+            const std::string ts = v + "_ts", wu = v + "_wu", wsz = v + "_wsz", wuv = v + "_wuv", np = v + "_np";
             // The weights are read through a SMOOTHED coordinate: the fractional texel
             // position goes through smoothstep before the bilinear fetch, so the weight
             // field is C1 across texel borders instead of piecewise linear. Plain
@@ -1500,20 +1508,24 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // statements are not reordered or split for readability: the emitted text
             // is baked into the shipped .hasset files and keys the pipeline caches.
             decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
-                 + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
-                 + " vec2 " + wsz + " = vec2(" + v + "_p2 ? " + ts + ".x * 0.5 : " + ts + ".x, " + ts + ".y);"
+                 + " float " + np + " = max(floor(" + ts + ".x / max(" + ts + ".y, 1.0) + 0.5), 1.0);"
+                 + " bool " + v + "_p2 = " + np + " > 1.5;"
+                 + " vec2 " + wsz + " = vec2(" + ts + ".x / " + np + ", " + ts + ".y);"
                  + " vec2 " + v + "_wt = vUV * " + wsz + " - 0.5;"
                  + " vec2 " + v + "_wi = floor(" + v + "_wt);"
                  + " vec2 " + v + "_wq = " + v + "_wt - " + v + "_wi;"
                  + " vec2 " + wuv + " = clamp((" + v + "_wi + 0.5 + " + v + "_wq * " + v + "_wq * (3.0 - 2.0 * " + v + "_wq)) / " + wsz
                  + ", 0.5 / " + wsz + ", 1.0 - 0.5 / " + wsz + ");"
-                 + " float " + wu + " = clamp(" + wuv + ".x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
+                 + " float " + wu + " = clamp(" + wuv + ".x / " + np + ", 0.5 / " + ts + ".x, 1.0 / " + np + " - 0.5 / " + ts + ".x);"
                  + " vec4 " + v + "_wf = texture(heLandscapeWeights, " + wuv + ");"
                  + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", " + wuv + ".y), 0.0);"
                  + " vec4 " + v + "_w = " + v + "_p2 ? " + v + "_wl : " + v + "_wf;";
             if (page2)
-                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, " + wuv + ".y), 0.0);"
+                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 1.0 / " + np + ", " + wuv + ".y), 0.0);"
                       + " vec4 " + v + "_w2 = " + v + "_p2 ? " + v + "_wr : vec4(0.0);";
+            if (page3)
+                decl += " vec4 " + v + "_wr3 = textureLod(heLandscapeWeights, vec2(" + wu + " + 2.0 / " + np + ", " + wuv + ".y), 0.0);"
+                      + " vec4 " + v + "_w3 = " + np + " > 2.5 ? " + v + "_wr3 : vec4(0.0);";
             decl += " float " + v + "_s = " + wsum + ";"
                  + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
                  + layer0 + ";";

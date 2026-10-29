@@ -1596,6 +1596,7 @@ void renderPanel(AppContext& ctx)
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
                     tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
                     tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }
@@ -1712,6 +1713,7 @@ void renderPanel(AppContext& ctx)
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
                     tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
                     tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }

@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-// Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
+// Paintable landscape layers: three RGBA8 weightmap pages of four channels each.
 // Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
 // The largest resolution a landscape can have: 1025 = 2^10 + 1, the top of the 2ⁿ+1
 // ladder every landscape is snapped to (TerrainSystem / TerrainSculpt::ensureHeights).
@@ -15,7 +15,7 @@
 // read as flat, and the "snap" ran again every frame (dirty → all 256 chunks rebuilt
 // and re-uploaded per frame).
 inline constexpr uint32_t kTerrainMaxResolution = 1025;
-inline constexpr int kTerrainWeightPages = 2;
+inline constexpr int kTerrainWeightPages = 3;
 inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
 
 struct TerrainComponent {
@@ -85,10 +85,16 @@ struct TerrainComponent {
     // zero, which is every landscape painted before there were eight layers —
     // they load without it and render exactly as before. Allocated by the first
     // stroke on layer 4+, never without layerWeights; the weights of one texel
-    // sum to 255 across BOTH pages. Uploaded as the right half of a 2:1
+    // sum to 255 across ALL pages. Uploaded as the middle of a 2:1 (or 3:1)
     // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
     // shader needs no second sampler or binding on any backend.
     std::vector<uint8_t>  layerWeights2;
+    // Layers 8..11 (R=8 … A=11), same layout again. Empty = all four zero, which
+    // is every landscape painted before there were twelve layers: it saves and
+    // uploads exactly as it did, and loads without the key. Allocated by the
+    // first stroke on layer 8+, never without layerWeights2 beside it. Uploaded
+    // as the right third of a 3:1 weightmap, and only once a byte in it is set.
+    std::vector<uint8_t>  layerWeights3;
 
     // ── Mixed texture groups (Thema 233, step 7) ─────────────────────────────
     // A terrain's own group is its landscape material (MaterialComponent::materialAssetId).

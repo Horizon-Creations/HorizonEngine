@@ -129,7 +129,10 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // The masks travel as TerrainPatch fields 16 + layer (field 4 is gone), and the
 // component blob gains a "layers" list. A v16 peer drops the new fields and
 // reads a multi-layer component as one empty layer: a bump.
-inline constexpr std::uint16_t kCollabProtocolVersion = 17;
+// v18: a landscape has a third weight page (layers 8..11), TerrainPatch field 4 again
+// (the retired foliage-mask id, free since v17). A v17 peer drops the field, so paint on
+// layers 8..11 would exist on one machine only: a bump.
+inline constexpr std::uint16_t kCollabProtocolVersion = 18;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,

@@ -1348,7 +1348,7 @@ TEST_CASE("landscape ui: the Texture Group picker switches the material only, pa
 		const uint32_t tz = static_cast<uint32_t>(std::lround((lz / t.sizeZ + 0.5f) * float(n - 1)));
 		REQUIRE(TerrainPaint::texelWeights(t, tx, tz, out));
 	};
-	uint8_t centre[8], was[8], far[8], farWas[8];
+	uint8_t centre[kTerrainMaxLayers], was[kTerrainMaxLayers], far[kTerrainMaxLayers], farWas[kTerrainMaxLayers];
 	texel(painted, 0.0f, 0.0f, centre);
 	TerrainComponent before;
 	before.sizeX = before.sizeZ = 100.0f; before.weightRes = 64;
@@ -1356,12 +1356,12 @@ TEST_CASE("landscape ui: the Texture Group picker switches the material only, pa
 	texel(before, 0.0f, 0.0f, was);
 	CHECK(centre[3] == 255);                                  // the chosen channel took the centre
 	int sum = 0;
-	for (int k = 0; k < 8; ++k) sum += centre[k];
+	for (int k = 0; k < kTerrainMaxLayers; ++k) sum += centre[k];
 	CHECK(sum == 255);                                        // and the texel is still normalised
 	CHECK(was[3] == 0);
 	texel(painted, 30.0f, 30.0f, far);
 	texel(before, 30.0f, 30.0f, farWas);
-	for (int k = 0; k < 8; ++k) CHECK(far[k] == farWas[k]);   // outside the brush nothing moved
+	for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(far[k] == farWas[k]);   // outside the brush nothing moved
 	CHECK(far[2] > 0);                                        // the earlier paint is still there
 
 	// ── Auto (row 0) paints back to the default: a channel-0 stroke takes a texture choice back ──

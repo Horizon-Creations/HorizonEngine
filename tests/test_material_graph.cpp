@@ -2194,10 +2194,11 @@ TEST_CASE("matLandscapeLayerNames splits, trims and caps the layer list")
 	      == std::vector<std::string>{ "Grass", "Rock" });
 	// Never empty — a node with no names still has one pin.
 	CHECK(HE::matLandscapeLayerNames("").size() == 1);
-	// Two RGBA weightmap pages = eight channels, so the list is capped there.
-	CHECK(HE::kMatMaxLandscapeLayers == 8);
-	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj").size()
+	// Three RGBA weightmap pages = twelve channels, so the list is capped there.
+	CHECK(HE::kMatMaxLandscapeLayers == 12);
+	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn").size()
 	      == static_cast<size_t>(HE::kMatMaxLandscapeLayers));
+	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj").size() == 10);
 	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne").size() == 5);
 }
 
@@ -2293,12 +2294,15 @@ TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the sa
 	CHECK(count(three.glsl, "textureLod(heLandscapeWeights") == 1);
 	CHECK(count(eight.glsl, "textureLod(heLandscapeWeights") == 2);
 	CHECK(three.glsl.find("_w2.") == std::string::npos);
-	CHECK(eight.glsl.find("_wu + 0.5") != std::string::npos);
+	CHECK(eight.glsl.find("_wu + 1.0 / ") != std::string::npos);
 	// Layers 4..7 are the second page's channels, in order.
 	for (const char* ch : { "_w2.x", "_w2.y", "_w2.z", "_w2.w" })
 		CHECK(eight.glsl.find(ch) != std::string::npos);
 	CHECK(five.glsl.find("_w2.x") != std::string::npos);
 	CHECK(five.glsl.find("_w2.y") == std::string::npos);
+	// Eight layers or fewer never touch a third page.
+	CHECK(eight.glsl.find("_w3") == std::string::npos);
+	CHECK(eight.glsl.find("_wr3") == std::string::npos);
 	// The approximate surface keeps one colour per layer in memory; the asset
 	// format still persists four (kMatApproxLayerColors).
 	HE::MaterialGraph g8;
@@ -2318,6 +2322,61 @@ TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the sa
 	CHECK(ap.layerCount == 6);
 	CHECK(ap.layerColor[5][0] == doctest::Approx(0.6f));
 	CHECK(HE::kMatApproxLayerColors == 4);
+}
+
+TEST_CASE("Landscape Layer Blend reads layers 8..11 from the last third of the same weightmap")
+{
+	// Twelve layers, still ONE sampler: the blend's page count N is the texture's own
+	// width / height (1, 2 or 3), every page offset is a multiple of 1 / N, and the
+	// third page is only read by a blend that names a ninth layer.
+	auto blend = [](int layers) {
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+		std::string names;
+		for (int i = 0; i < layers; ++i) names += (i ? "\n" : "") + std::string("L") + std::to_string(i);
+		g.findNode(lb)->s = names;
+		for (int i = 0; i < layers; ++i)
+		{
+			const int c = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(c)->p[0] = static_cast<float>(i + 1) / 12.0f;
+			REQUIRE(g.connect(c, 0, lb, i));
+		}
+		REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+		return HE::generateFragment(g);
+	};
+	auto count = [](const std::string& hay, const std::string& needle) {
+		size_t n = 0;
+		for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+		return n;
+	};
+
+	const HE::MatShaderGen nine = blend(9), twelve = blend(12), eight = blend(8);
+	REQUIRE(twelve.layerNames.size() == 12);
+	REQUIRE(nine.layerNames.size() == 9);
+	for (const HE::MatShaderGen* g : { &eight, &nine, &twelve })
+	{
+		CHECK(count(g->glsl, "uniform sampler2D heLandscapeWeights") == 1);   // never a second map
+		// The page count comes from the size, not from a "2:1" test any more.
+		CHECK(g->glsl.find("_np = max(floor(") != std::string::npos);
+		CHECK(g->glsl.find("> 1.5 *") == std::string::npos);
+	}
+	// 1 + 1 + 1 reads of the atlas page by page, plus the square-map read.
+	CHECK(count(twelve.glsl, "textureLod(heLandscapeWeights") == 3);
+	CHECK(count(nine.glsl,   "textureLod(heLandscapeWeights") == 3);
+	CHECK(count(eight.glsl,  "textureLod(heLandscapeWeights") == 2);
+	CHECK(twelve.glsl.find("_wu + 1.0 / ") != std::string::npos);   // page 1 at 1/N
+	CHECK(twelve.glsl.find("_wu + 2.0 / ") != std::string::npos);   // page 2 at 2/N
+	// Selected by the page count, so a 2:1 map reads nothing there.
+	CHECK(twelve.glsl.find("_np > 2.5 ? ") != std::string::npos);
+	// Layers 8..11 are the third page's channels, in order; a ninth layer is its first.
+	for (const char* ch : { "_w3.x", "_w3.y", "_w3.z", "_w3.w" })
+		CHECK(twelve.glsl.find(ch) != std::string::npos);
+	CHECK(nine.glsl.find("_w3.x") != std::string::npos);
+	CHECK(nine.glsl.find("_w3.y") == std::string::npos);
+	// The weight sum covers the channels of all three pages.
+	for (const char* ch : { "_w.x", "_w.w", "_w2.x", "_w2.w", "_w3.x", "_w3.w" })
+		CHECK(twelve.glsl.find(ch) != std::string::npos);
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
@@ -6743,6 +6802,65 @@ TEST_CASE("D3D11: an eight-layer blend reads layers 4..7 from the right half of 
 	{
 		const Pixel11 px = drawAt(ps8.Get(), nullptr, 0.9f);
 		CHECK_MESSAGE(isLayer(px, 0), "t14 unbound: expected layer 0, got ", int(px.r), ",", int(px.g), ",", int(px.b));
+	}
+
+	// 5. Twelve layers on a 3:1 map (Thema 329): layers 8..11 are the last third. Four
+	//    texel columns per page, one marked column each: layer 1 (page 0, column 0),
+	//    layer 6 (page 1, column 1), layer 10 (page 2, column 2) and layer 3 (page 0,
+	//    column 3). Drawn at the column centres, so no filtering mixes them.
+	{
+		MaterialGraph g12;
+		const int out = g12.addNode(MatNodeType::Output);
+		const int lb  = g12.addNode(MatNodeType::LandscapeLayerBlend);
+		g12.findNode(lb)->s = "L0\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11";
+		for (int i = 0; i < 12; ++i)
+		{
+			const int c = g12.addNode(MatNodeType::ConstColor);
+			g12.findNode(c)->p[0] = static_cast<float>(i + 1) / 12.0f;
+			g12.findNode(c)->p[1] = 0.5f;
+			g12.findNode(c)->p[2] = 0.0f;
+			REQUIRE(g12.connect(c, 0, lb, i));
+		}
+		REQUIRE(g12.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+		ComPtr<ID3DBlob> b12;
+		ComPtr<ID3D11PixelShader> ps12 = pixelShader("twelve-layer landscape", g12, b12);
+		{
+			// Still the same two registers: a third page costs no binding.
+			const std::vector<Binding> b = reflectBindings(b12.Get());
+			CHECK(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kWeightmapSrvSlot));
+			CHECK(binds(b, D3D_SIT_SAMPLER, HE::d3d11mat::kWeightmapSamplerSlot));
+		}
+		std::vector<uint8_t> row3(12 * 4, 0);            // 3 pages x 4 columns, RGBA8
+		auto mark = [&](int page, int col, int channel) { row3[(page * 4 + col) * 4 + channel] = 255; };
+		mark(0, 0, 1);   // layer 1
+		mark(1, 1, 2);   // layer 6
+		mark(2, 2, 2);   // layer 10
+		mark(0, 3, 3);   // layer 3
+		std::vector<uint8_t> map3;
+		for (int r = 0; r < 4; ++r) map3.insert(map3.end(), row3.begin(), row3.end());
+		ComPtr<ID3D11ShaderResourceView> map3to1 = makeTexture11(dev, 12, map3, 4);
+		REQUIRE(map3to1.Get() != nullptr);
+
+		auto layer12R = [](int i) { return static_cast<int>(std::lround((i + 1) / 12.0 * 255.0)); };
+		const struct { float u; int layer; } want[] = { { 0.125f, 1 }, { 0.375f, 6 }, { 0.625f, 10 }, { 0.875f, 3 } };
+		for (const auto& wn : want)
+		{
+			const Pixel11 px = drawAt(ps12.Get(), map3to1.Get(), wn.u);
+			CHECK_MESSAGE((near8(px.r, layer12R(wn.layer)) && near8(px.g, 128) && near8(px.b, 0)),
+			              "3:1 map, u=", wn.u, ": expected layer ", wn.layer, ", got ",
+			              int(px.r), ",", int(px.g), ",", int(px.b));
+		}
+		// The eight-layer blend on the same 3:1 map reads the thirds as thirds: layer 6
+		// is still on page 1, layer 10 on a page it does not read (column 2 then holds no
+		// weight at all, and falls back to layer 0).
+		const Pixel11 p6 = drawAt(ps8.Get(), map3to1.Get(), 0.375f);
+		CHECK_MESSAGE(isLayer(p6, 6), "8 layers on a 3:1 map, u=0.375: expected layer 6, got ", int(p6.r));
+		const Pixel11 p10 = drawAt(ps8.Get(), map3to1.Get(), 0.625f);
+		CHECK_MESSAGE(isLayer(p10, 0), "8 layers on a 3:1 map, u=0.625: expected the layer-0 fallback, got ", int(p10.r));
+		// And twelve layers on the 2:1 map of a landscape without a third page: page 2 reads nothing.
+		const Pixel11 q6 = drawAt(ps12.Get(), map2to1.Get(), 0.9f);
+		CHECK_MESSAGE((near8(q6.r, layer12R(6)) && near8(q6.g, 128) && near8(q6.b, 0)),
+		              "12 layers on a 2:1 map, u=0.9: expected layer 6, got ", int(q6.r), ",", int(q6.g), ",", int(q6.b));
 	}
 	const std::string why = drainInfoQueue11(w);
 	MESSAGE(why);

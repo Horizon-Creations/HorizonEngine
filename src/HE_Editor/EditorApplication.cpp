@@ -7177,6 +7177,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
 	// orange (7) — the last three on the weightmap's SECOND page, which the
 	// renderer uploads as the right half of the one heLandscapeWeights texture.
+	// =12 adds lime (8), pink (9), brown (10) and navy (11) on the THIRD page,
+	// the right third of a 3:1 texture.
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -7187,18 +7189,24 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
 		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
-		const bool eight = std::string_view(ll) == "8";
-		g.findNode(lb)->s = eight ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
-		                          : "Red\nGreen\nBlue";
-		const float rgb[8][3] = { { 0.90f, 0.10f, 0.10f },
-		                          { 0.10f, 0.85f, 0.15f },
-		                          { 0.15f, 0.25f, 0.95f },
-		                          { 0.95f, 0.90f, 0.10f },
-		                          { 0.90f, 0.10f, 0.90f },
-		                          { 0.10f, 0.90f, 0.90f },
-		                          { 0.95f, 0.95f, 0.95f },
-		                          { 0.95f, 0.50f, 0.05f } };
-		for (int i = 0; i < (eight ? 8 : 3); ++i)
+		const bool twelve = std::string_view(ll) == "12";
+		const bool eight  = twelve || std::string_view(ll) == "8";
+		g.findNode(lb)->s = twelve ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange\nLime\nPink\nBrown\nNavy"
+		                  : eight  ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
+		                           : "Red\nGreen\nBlue";
+		const float rgb[12][3] = { { 0.90f, 0.10f, 0.10f },
+		                           { 0.10f, 0.85f, 0.15f },
+		                           { 0.15f, 0.25f, 0.95f },
+		                           { 0.95f, 0.90f, 0.10f },
+		                           { 0.90f, 0.10f, 0.90f },
+		                           { 0.10f, 0.90f, 0.90f },
+		                           { 0.95f, 0.95f, 0.95f },
+		                           { 0.95f, 0.50f, 0.05f },
+		                           { 0.60f, 0.95f, 0.10f },
+		                           { 1.00f, 0.60f, 0.75f },
+		                           { 0.45f, 0.25f, 0.10f },
+		                           { 0.05f, 0.05f, 0.40f } };
+		for (int i = 0; i < (twelve ? 12 : eight ? 8 : 3); ++i)
 		{
 			const int c = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(c)->p[0] = rgb[i][0];
@@ -7243,6 +7251,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			TerrainPaint::paint(ltc, -34.0f, -30.0f, /*White*/   6, 9.0f, 3.0f, 1.0f);
 			TerrainPaint::paint(ltc,   0.0f,  40.0f, /*Orange*/  7, 7.0f, 2.0f, 1.0f);
 		}
+		if (twelve)   // the third weight page: the right third of the 3:1 map
+		{
+			TerrainPaint::paint(ltc,   0.0f, -36.0f, /*Lime*/    8, 7.0f, 2.0f, 1.0f);
+			TerrainPaint::paint(ltc, -36.0f,  -5.0f, /*Pink*/    9, 7.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,  34.0f,   0.0f, /*Brown*/  10, 8.0f, 2.0f, 1.0f);
+			TerrainPaint::paint(ltc,  20.0f,  46.0f, /*Navy*/   11, 4.0f, 2.0f, 1.0f);
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 		// The headless dump renders from OnInit, BEFORE the main loop's
@@ -7250,8 +7265,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// entities yet and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added "
-			"(%d layers, weightmap %ux%u)", eight ? 8 : 3,
-			TerrainPaint::usesSecondPage(ltc) ? 2 * ltc.weightRes : ltc.weightRes,
+			"(%d layers, weightmap %ux%u)", twelve ? 12 : eight ? 8 : 3,
+			static_cast<unsigned>(TerrainPaint::weightPageCount(ltc)) * ltc.weightRes,
 			ltc.weightRes);
 	}
 

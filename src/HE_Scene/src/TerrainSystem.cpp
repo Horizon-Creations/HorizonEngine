@@ -90,7 +90,7 @@ namespace
     // the flat-shaded consumers (GI hits) to reproduce the terrain's colour.
     // Normalising per texel first matches the shader, which divides each texel's
     // blend by that texel's weight sum, so half-painted texels don't count less.
-    // Both pages count: a texel half on layer 5 has only half its weight left
+    // All pages count: a texel half on layer 5 has only half its weight left
     // for layers 0..3.
     void computeAverageLayerWeights(TerrainComponent& tc)
     {
@@ -99,6 +99,7 @@ namespace
         double shareAcc[2] = {};
         size_t texels = 0;
         const bool second = tc.layerWeights2.size() == tc.layerWeights.size();
+        const bool third  = tc.layerWeights3.size() == tc.layerWeights.size();
         // A reserved layer (TerrainComponent::mixGroup, Thema 233 step 7) holds a group's
         // SHARE, not a paint weight: it sits outside the 255-sum TerrainPaint::paint
         // normalises layers 0..5 over, so it is left out of `s` and of the paint average
@@ -114,6 +115,7 @@ namespace
             {
                 w[k]     = tc.layerWeights[i + k] / 255.0;
                 w[k + 4] = second ? tc.layerWeights2[i + k] / 255.0 : 0.0;
+                w[k + 8] = third  ? tc.layerWeights3[i + k] / 255.0 : 0.0;
             }
             for (int k = 0; k < L; ++k)
                 if (!(k >= 6 && (reserved >> (k - 6) & 1))) s += w[k];
@@ -459,7 +461,7 @@ namespace TerrainSystem
         // a texture the chunks' draw calls carry, so a material's Landscape Layer
         // Blend node can sample them. Registered once and REPLACED in place on
         // later paints, so the UUID stays stable for anything already holding it.
-        // Layers 4..7 ride in the same texture, as its right half
+        // Layers 4..7 and 8..11 ride in the same texture, beside the first page
         // (TerrainPaint::buildWeightTexture) — one binding, one sampler.
         for (entt::entity te : terrains)
         {

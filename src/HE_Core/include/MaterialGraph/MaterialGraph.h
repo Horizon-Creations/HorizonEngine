@@ -280,11 +280,12 @@ inline bool matNodeIsBombing(MatNodeType t)
 }
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
-// channel each, over two pages of four (TerrainComponent::layerWeights /
-// layerWeights2). Both pages travel in ONE texture, side by side, so the eight
-// layers cost the same single heLandscapeWeights binding and sampler as four
-// did — the SM 5.0 / Metal sampler budget is full (MaterialShaderLibrary).
-inline constexpr int kMatMaxLandscapeLayers = 8;
+// channel each, over three pages of four (TerrainComponent::layerWeights /
+// layerWeights2 / layerWeights3). The pages travel in ONE texture, side by side
+// (1:1, 2:1 or 3:1 by the texture's own size), so the twelve layers cost the same
+// single heLandscapeWeights binding and sampler as four did — the SM 5.0 / Metal
+// sampler budget is full (MaterialShaderLibrary).
+inline constexpr int kMatMaxLandscapeLayers = 12;
 
 // How many per-layer colours the CPU fold persists for the GI bounce
 // (MaterialAsset::approxLayerColor, the MTRL tail, GiLandscape::layerColor).
