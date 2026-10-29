@@ -72,6 +72,7 @@
 #include <Types/UUID.h>
 
 #include <cstdint>
+#include <string_view>
 
 namespace HE
 {
@@ -96,14 +97,16 @@ inline constexpr int kAutoLandscapePaintLayerCount = 6;
 // It stays so the array layout and its texture ids (0x40F..0x411) do not move.
 enum class AutoLandscapeLayer : int { Grass = 0, Dirt = 1, Rock = 2, Snow = 3, WetGround = 4 };
 
-// Variants per layer (Thema 180, Schritt 3). The three arrays hold kAutoLandscapeVariantGroups * V + 1
-// slices: layer g's variant v is slice g * V + v (g = Grass..Snow), the unread WetGround slice
+// Variants per layer (Thema 180, Schritt 3). A "role" is one of the four painted layers (Grass, Dirt,
+// Rock, Snow; "texture group" below is the terrain theme and a different thing). The three arrays hold
+// kAutoLandscapeRoleCount * V + 1
+// slices: role g's variant v is slice g * V + v (g = Grass..Snow), the unread WetGround slice
 // comes last. V is not stored anywhere: the shader takes depth / 4, so the same material renders
 // the 5-slice placeholder arrays (V = 1) and a 13-slice set (V = 3) alike.
-inline constexpr int kAutoLandscapeVariantGroups = 4;
-inline constexpr int autoLandscapeArrayDepth(int variants) { return kAutoLandscapeVariantGroups * variants + 1; }
+inline constexpr int kAutoLandscapeRoleCount = 4;
+inline constexpr int autoLandscapeArrayDepth(int variants) { return kAutoLandscapeRoleCount * variants + 1; }
 inline constexpr int autoLandscapeVariantCount(int depth)
-{ return depth / kAutoLandscapeVariantGroups > 1 ? depth / kAutoLandscapeVariantGroups : 1; }
+{ return depth / kAutoLandscapeRoleCount > 1 ? depth / kAutoLandscapeRoleCount : 1; }
 // The variant a hex draws: the low 8 bits of its hash's first word, scaled to 0..V-1 in integers
 // (the shader's `((h.x & 255u) * uint(V)) >> 8u`, which every backend computes bit for bit).
 inline constexpr int autoLandscapeVariantOf(uint32_t hashX, int variants)
@@ -120,9 +123,87 @@ inline constexpr int autoLandscapeSliceOf(int group, int variant, int depth)
 // Layers are AutoLandscapeLayer values; the last slice (4 * V) is WetGround, variant 0.
 inline constexpr void autoLandscapeSliceSource(int slice, int variants, int& layer, int& variant)
 {
-    if (slice >= kAutoLandscapeVariantGroups * variants) { layer = kAutoLandscapeVariantGroups; variant = 0; return; }
+    if (slice >= kAutoLandscapeRoleCount * variants) { layer = kAutoLandscapeRoleCount; variant = 0; return; }
     layer = slice / variants;
     variant = slice % variants;
+}
+
+// ── Texture groups (Thema 233) ────────────────────────────────────────────────
+// A texture group is a terrain THEME: one landscape material with its own three arrays, chosen per
+// terrain through MaterialComponent::materialAssetId (the material id IS the group). Every group is
+// the same graph skeleton — roles, slice layout (4 * V + 1), the Groups pin, the 13 parameters and the
+// six paint-layer channels do not change; a group differs by the files its roles read, the names it
+// gives the paint layers, and the default values of a few parameters. Mountains is the original
+// material, byte for byte (the members above are its row).
+enum class AutoLandscapeGroupId : int { Mountains = 0, Forest = 1, Grassland = 2 };
+inline constexpr int kAutoLandscapeGroupCount = 3;
+
+struct AutoLandscapeGroup
+{
+    AutoLandscapeGroupId id;
+    const char* name;
+    UUID        materialId;
+    const char* materialPath;
+    const char* arrayPaths[3];      // Albedo, Normal, Mask: the heTexP0..2 order of the graph
+    const char* paintLayerNames;    // '\n'-separated, kAutoLandscapePaintLayerNames' channel order
+    const char* roleLabels[4];      // the group's name for role Grass, Dirt, Rock, Snow
+    // The default value of the parameters a group tunes (the others keep the Mountains value).
+    float rockSlope, dirtAmount, snowHeight;
+};
+
+// Ids, in landscape_tex_gen's 0x400 block: 0x412 is Mountains, 0x413 / 0x414 are the weather
+// functions (WeatherMaterialFunctions.h — the ContentManager keeps ONE entry per UUID, so a clash
+// loads the group's material as a function), a group takes its material id and the three ids after
+// it for its arrays (0x415..0x418 Forest, 0x419..0x41C Grassland). 0x41D..0x41F are free.
+inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCount] = {
+    { AutoLandscapeGroupId::Mountains, "Mountains",
+      kAutoLandscapeMaterialId, kAutoLandscapeMaterialPath,
+      { kAutoLandscapeAlbedoArray, kAutoLandscapeNormalArray, kAutoLandscapeMaskArray },
+      kAutoLandscapePaintLayerNames, { "Grass", "Dirt", "Rock", "Snow" },
+      0.12f, 0.35f, 60.0f },
+    { AutoLandscapeGroupId::Forest, "Forest",
+      { 0x0000000000000415ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Forest.hasset",
+      { "Engine/Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Forest_Normal_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Forest_Mask_Array.hasset" },
+      "Auto\nForest Floor\nRoots\nMossy Rock\nSnow\nPuddles",
+      { "Forest Floor", "Roots", "Mossy Rock", "Snow" },
+      0.10f, 0.50f, 2000.0f },
+    { AutoLandscapeGroupId::Grassland, "Grassland",
+      { 0x0000000000000419ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Grassland.hasset",
+      { "Engine/Textures/Landscape/T_Landscape_Grassland_Albedo_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Grassland_Normal_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Grassland_Mask_Array.hasset" },
+      "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles",
+      { "Meadow", "Bare Soil", "Stones", "Snow" },
+      0.20f, 0.20f, 2000.0f },
+};
+
+inline constexpr const AutoLandscapeGroup& autoLandscapeGroup(AutoLandscapeGroupId id)
+{ return kAutoLandscapeGroups[static_cast<int>(id)]; }
+
+// The group whose material is `id`, or -1 (a custom landscape material, a scene saved before groups
+// that names none, ...). A terrain bound to Mountains' id is the Mountains group like it always was.
+inline constexpr int autoLandscapeGroupOfMaterial(const UUID& id)
+{
+    for (int i = 0; i < kAutoLandscapeGroupCount; ++i)
+        if (kAutoLandscapeGroups[i].materialId == id) return i;
+    return -1;
+}
+
+// Which group (and map: 0 Albedo, 1 Normal, 2 Mask) a texture path is an array of; -1 if none.
+// `path` is compared the way graphTexturePaths store it ("Engine/Textures/...").
+inline int autoLandscapeGroupOfArray(const char* path, int* map = nullptr)
+{
+    if (!path) return -1;
+    for (int i = 0; i < kAutoLandscapeGroupCount; ++i)
+        for (int m = 0; m < 3; ++m)
+            if (std::string_view(path) == kAutoLandscapeGroups[i].arrayPaths[m])
+            {
+                if (map) *map = m;
+                return i;
+            }
+    return -1;
 }
 
 // Exposed parameter names (HeParams slots, Material Instance overrides) and the
@@ -161,5 +242,8 @@ struct AutoLandscapeGraph
         flatMask = 0, wetMask = 0, waterMask = 0;
 };
 
-HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit);
+// `group` picks the three arrays the roles read, the paint-layer names and the defaults of the tuned
+// parameters; the default (Mountains) builds exactly the graph this material always had.
+HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit,
+                                                  AutoLandscapeGroupId group = AutoLandscapeGroupId::Mountains);
 } // namespace HE

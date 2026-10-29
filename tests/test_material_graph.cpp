@@ -4214,6 +4214,9 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 	// type, so the registry loop never builds it: 33 array taps, two fBm fields
 	// and 14 HeParams slots through FXC, the D3D12 root signature and the GL link.
 	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()).glsl, {} });
+	// Thema 233: the texture groups are the same skeleton over their own arrays — the same sweeps.
+	cases.push_back({ "Auto landscape material (Forest)", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, HE::AutoLandscapeGroupId::Forest).graph, HE::weatherFunctionLoader()).glsl, {} });
+	cases.push_back({ "Auto landscape material (Grassland)", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, HE::AutoLandscapeGroupId::Grassland).graph, HE::weatherFunctionLoader()).glsl, {} });
 	return cases;
 }
 

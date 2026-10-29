@@ -91,8 +91,9 @@ constexpr uint64_t kTexBaseHi = 0x0000000000000400ULL;
 
 // The loose Roughness / AO / Height maps (--loose) count on from kTexBaseHi + 0x20
 // = 0x420. 0x400..0x411 are the 15 layer textures and 3 arrays, 0x412 is
-// M_AutoLandscape (kAutoLandscapeMaterialId), 0x413..0x41F stay free for more
-// landscape materials. Index = kLooseIndexBase + layer * 3 + map, per kLayers order
+// M_AutoLandscape (kAutoLandscapeMaterialId), 0x413 / 0x414 are the weather functions
+// (WeatherMaterialFunctions.h), 0x415..0x41C are the Forest and Grassland groups
+// (kAutoLandscapeGroups: material + its three arrays each), and 0x41D..0x41F stay free. Index = kLooseIndexBase + layer * 3 + map, per kLayers order
 // (WetGround would get 0x42C..0x42E), so a layer added later never shifts one.
 constexpr int kLooseIndexBase = 0x20;
 
@@ -303,6 +304,75 @@ int writeArrays(const std::string& outDir, int variants = 1)
     return ok;
 }
 
+// ─── Texture groups (Thema 233): Forest / Grassland ──────────────────────────
+// A group has its own three arrays and no per-layer files: the placeholder slices are made in memory
+// (the same checker + L marker as the Mountains ones, in the group's own tones, so a screenshot says
+// which array a terrain reads) and go straight into the array. Real textures for a group are not
+// packed yet (--pack is Mountains only); the shipping V and texture size are the human's call.
+// Array ids follow the group's material: materialId.hi + 1 + map (0x416..0x418, 0x41A..0x41C).
+const uint8_t kGroupTones[HE::kAutoLandscapeGroupCount][HE::kAutoLandscapeRoleCount][3] = {
+    { {} },                                                               // Mountains: kLayers
+    { {  74,  62,  38 }, {  64,  44,  30 }, {  84, 104,  80 }, { 225, 230, 238 } },   // Forest
+    { { 112, 162,  62 }, { 152, 126,  86 }, { 150, 148, 140 }, { 225, 230, 238 } },   // Grassland
+};
+
+int writeGroupArrays(const std::string& outDir, const HE::AutoLandscapeGroup& group, int variants)
+{
+    const int depth = HE::autoLandscapeArrayDepth(variants);
+    const int gi    = static_cast<int>(group.id);
+    int ok = 0;
+    for (int map = 0; map < MapCount; ++map)
+    {
+        std::vector<TextureAsset> store(static_cast<size_t>(depth));
+        std::vector<const TextureAsset*> slices;
+        for (int slice = 0; slice < depth; ++slice)
+        {
+            int role = 0, variant = 0;
+            HE::autoLandscapeSliceSource(slice, variants, role, variant);
+            Layer L = kLayers[role];            // role 4 = WetGround, never retoned
+            if (role < HE::kAutoLandscapeRoleCount)
+                for (int c = 0; c < 3; ++c) L.albedo[c] = kGroupTones[gi][role][c];
+            TextureAsset& t = store[static_cast<size_t>(slice)];
+            t.type = HE::AssetType::Texture;
+            t.width = kSize; t.height = kSize; t.channels = 4; t.mipLevels = 1;
+            t.format = TextureFormat::RGBA8;
+            t.srgb = (map == Albedo);
+            t.data = makeMap(L, static_cast<Map>(map), variant);
+            slices.push_back(&t);
+        }
+        const std::string leaf = std::filesystem::path(group.arrayPaths[map]).stem().string();
+        TextureAsset a;
+        std::string err;
+        if (!HE::buildTextureArray(slices, a, /*bakeMips=*/true, &err))
+        {
+            std::fprintf(stderr, "  %s: %s\n", leaf.c_str(), err.c_str());
+            continue;
+        }
+        a.type = HE::AssetType::Texture;
+        a.name = leaf;
+        a.path = leaf + ".hasset";
+        a.id   = HE::UUID{ group.materialId.hi + 1 + static_cast<uint64_t>(map), 0x0000000000000001ULL };
+        ContentManager cm(outDir);
+        if (!cm.saveAsset(a))
+        {
+            std::fprintf(stderr, "  FAILED to write %s.hasset\n", leaf.c_str());
+            continue;
+        }
+        ContentManager check(outDir);
+        const TextureAsset* t = check.getTexture(check.loadAsset(a.path));
+        if (!t || t->id != a.id || t->layers != static_cast<uint32_t>(depth) || t->srgb != a.srgb ||
+            t->data != a.data || !HE::textureArrayPayloadValid(*t))
+        {
+            std::fprintf(stderr, "  %s.hasset does NOT read back as written\n", leaf.c_str());
+            continue;
+        }
+        std::printf("  %-34s %ux%u x%u slices, %u mips %s\n", leaf.c_str(), a.width, a.height,
+                    a.layers, a.mipLevels, a.srgb ? "sRGB" : "linear");
+        ++ok;
+    }
+    return ok;
+}
+
 // ─── Packing real textures ───────────────────────────────────────────────────
 struct Image
 {
@@ -456,7 +526,7 @@ int packReal(const std::string& outDir, const std::string& pngDir, int requested
         found[li] = findLayer(kLayers[li].name, "", true);
     // Variants 2..: the highest v any of the four painted layers has a file for. WetGround is
     // never read by the material and has one variant.
-    const int groups = HE::kAutoLandscapeVariantGroups;
+    const int groups = HE::kAutoLandscapeRoleCount;
     int variants = 1;
     std::vector<std::vector<Found>> extra;   // [variant - 1][layer]
     for (int v = 2; v <= kMaxVariants; ++v)
@@ -642,15 +712,18 @@ static void registerWeatherFunctions(ContentManager& cm)
     }
 }
 
-bool writeMaterial(const std::string& outDir)
+bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& group)
 {
-    const char* kFile = "M_AutoLandscape.hasset";
-    const HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph();
+    // Mountains: "M_AutoLandscape.hasset", {0x412,1} — the shipped bytes. Forest / Grassland: the
+    // group row's own path and id.
+    const std::string fileName = std::filesystem::path(group.materialPath).filename().string();
+    const char* kFile = fileName.c_str();
+    const HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, group.id);
     MaterialAsset am;
     am.type          = HE::AssetType::Material;
-    am.name          = "M_AutoLandscape";
+    am.name          = std::filesystem::path(group.materialPath).stem().string();
     am.path          = kFile;
-    am.id            = HE::kAutoLandscapeMaterialId;
+    am.id            = group.materialId;
     am.nodeGraphJson = HE::materialGraphToJson(built.graph);
 
     ContentManager cm(outDir);
@@ -660,7 +733,7 @@ bool writeMaterial(const std::string& outDir)
     MaterialAsset* m = cm.getMaterialMutable(id);
     if (!m || m->customShaderFragGlsl.empty())
     {
-        std::fprintf(stderr, "  M_AutoLandscape: the graph did not compile\n");
+        std::fprintf(stderr, "  %s: the graph did not compile\n", kFile);
         return false;
     }
     if (!cm.saveAsset(*m))
@@ -671,13 +744,13 @@ bool writeMaterial(const std::string& outDir)
     ContentManager check(outDir);
     registerWeatherFunctions(check);   // a load regenerates the GLSL from the graph
     const MaterialAsset* t = check.getMaterial(check.loadAsset(kFile));
-    if (!t || t->id != HE::kAutoLandscapeMaterialId || t->nodeGraphJson != m->nodeGraphJson ||
+    if (!t || t->id != group.materialId || t->nodeGraphJson != m->nodeGraphJson ||
         t->customShaderFragGlsl != m->customShaderFragGlsl || t->graphParamNames != m->graphParamNames)
     {
         std::fprintf(stderr, "  %s does NOT read back as written\n", kFile);
         return false;
     }
-    std::printf("  %-30s %zu nodes, %zu params, %zu textures, array mask %u\n", kFile,
+    std::printf("  %-36s %zu nodes, %zu params, %zu textures, array mask %u\n", kFile,
                 built.graph.nodes.size(), t->graphParamNames.size(), t->graphTexturePaths.size(),
                 HE::matGlslTextureArrayMask(t->customShaderFragGlsl));
     return true;
@@ -697,7 +770,10 @@ int main(int argc, char** argv)
                              "  --arrays-only  only (re)assemble the three _Array textures from the\n"
                              "                 per-layer files already in <output-dir>\n"
                              "  --material     write the auto landscape material M_AutoLandscape.hasset\n"
-                             "                 into <output-dir> (EditorDeps/EngineContent/Materials)\n");
+                             "                 into <output-dir> (EditorDeps/EngineContent/Materials)\n"
+                             "  --group G      Mountains (default) | Forest | Grassland: the texture group (Thema 233).\n"
+                             "                 Forest / Grassland write M_AutoLandscape_<G>.hasset (--material) or their\n"
+                             "                 own placeholder arrays T_Landscape_<G>_{Albedo,Normal,Mask}_Array\n");
         return 2;
     }
     const std::string outDir = argv[1];
@@ -709,6 +785,44 @@ int main(int argc, char** argv)
         if (std::string(argv[i]) == "--variants") variants = std::clamp(std::atoi(argv[i + 1]), 1, kMaxVariants);
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
+
+    // --group Mountains|Forest|Grassland (anywhere after the output folder; default Mountains = the
+    // shipped set). A group other than Mountains writes only its own material (--material) or its own
+    // placeholder arrays (everything else); --pack / --loose are Mountains only.
+    int groupIndex = 0;
+    for (int i = 2; i + 1 < argc; ++i)
+        if (std::string(argv[i]) == "--group")
+        {
+            groupIndex = -1;
+            for (int k = 0; k < HE::kAutoLandscapeGroupCount; ++k)
+                if (std::string(argv[i + 1]) == HE::kAutoLandscapeGroups[k].name) groupIndex = k;
+            if (groupIndex < 0)
+            {
+                std::fprintf(stderr, "landscape_tex_gen: unknown group '%s' (Mountains, Forest, Grassland)\n", argv[i + 1]);
+                return 2;
+            }
+        }
+    const HE::AutoLandscapeGroup& group = HE::kAutoLandscapeGroups[groupIndex];
+    if (groupIndex != 0)
+    {
+        const std::string mode = argc > 2 ? argv[2] : "";
+        if (mode == "--pack" || mode == "--loose")
+        {
+            std::fprintf(stderr, "landscape_tex_gen: %s is Mountains only (no source textures for %s yet)\n",
+                         mode.c_str(), group.name);
+            return 2;
+        }
+        if (mode == "--material")
+        {
+            const bool ok = writeMaterial(outDir, group);
+            std::printf("landscape_tex_gen: %s the %s landscape material to %s\n",
+                        ok ? "wrote" : "FAILED to write", group.name, outDir.c_str());
+            return ok ? 0 : 1;
+        }
+        const int arrays = writeGroupArrays(outDir, group, variants);
+        std::printf("landscape_tex_gen: wrote %d/%d %s texture arrays to %s\n", arrays, MapCount, group.name, outDir.c_str());
+        return arrays == MapCount ? 0 : 1;
+    }
 
     if (argc > 3 && std::string(argv[2]) == "--pack")
     {
@@ -728,7 +842,7 @@ int main(int argc, char** argv)
 
     if (argc > 2 && std::string(argv[2]) == "--material")
     {
-        const bool ok = writeMaterial(outDir);
+        const bool ok = writeMaterial(outDir, group);
         std::printf("landscape_tex_gen: %s the auto landscape material to %s\n",
                     ok ? "wrote" : "FAILED to write", outDir.c_str());
         return ok ? 0 : 1;
@@ -787,7 +901,7 @@ int main(int argc, char** argv)
     // The synthetic variants 2.. of the four painted layers (--variants N).
     int okVar = 0, totalVar = 0;
     for (int v = 1; v < variants; ++v)
-        for (size_t li = 0; li < std::size(kLayers) && static_cast<int>(li) < HE::kAutoLandscapeVariantGroups; ++li)
+        for (size_t li = 0; li < std::size(kLayers) && static_cast<int>(li) < HE::kAutoLandscapeRoleCount; ++li)
             for (int map = 0; map < MapCount; ++map)
             {
                 ++totalVar;

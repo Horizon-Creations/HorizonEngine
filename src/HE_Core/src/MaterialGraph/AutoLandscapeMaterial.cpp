@@ -56,8 +56,9 @@ struct Wire
 struct LayerReads { int albedo = 0, normal = 0, mask = 0, height = 0; };
 } // namespace
 
-AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
+AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId)
 {
+    const AutoLandscapeGroup& group = autoLandscapeGroup(groupId);
     AutoLandscapeGraph r;
     Wire w{ r.graph };
 
@@ -68,17 +69,17 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
         "Metres one Rock / Snow texture covers (world space).");
     const int pCell       = w.param(kAutoLandscapeParamBombCell, 0.5f, 0.1f, 2.0f, "Tiling",
         "Texture bombing: spacing of the random hexes, in texture repeats. Smaller = more variation, more seams.");
-    const int pRockSlope  = w.param(kAutoLandscapeParamRockSlope, 0.12f, 0.0f, 1.0f, "Rock",
+    const int pRockSlope  = w.param(kAutoLandscapeParamRockSlope, group.rockSlope, 0.0f, 1.0f, "Rock",
         "Slope (1 - normal.y) where rock starts. 0.12 ~ 28 degrees, 0.29 ~ 45 degrees.");
     const int pRockBlend  = w.param(kAutoLandscapeParamRockBlend, 0.12f, 0.01f, 0.5f, "Rock",
         "Slope range over which ground turns into rock.");
     const int pHeight     = w.param(kAutoLandscapeParamHeightBlend, 1.0f, 0.0f, 4.0f, "Rock",
         "How much the layers' height maps bend every transition (0 = plain smooth blends).");
-    const int pDirtAmt    = w.param(kAutoLandscapeParamDirtAmount, 0.35f, 0.0f, 1.0f, "Ground",
+    const int pDirtAmt    = w.param(kAutoLandscapeParamDirtAmount, group.dirtAmount, 0.0f, 1.0f, "Ground",
         "Share of the flat ground covered by dirt patches instead of grass.");
     const int pDirtSize   = w.param(kAutoLandscapeParamDirtSize, 24.0f, 1.0f, 200.0f, "Ground",
         "Size of the dirt patches, metres.");
-    const int pSnowH      = w.param(kAutoLandscapeParamSnowHeight, 60.0f, -500.0f, 3000.0f, "Snow",
+    const int pSnowH      = w.param(kAutoLandscapeParamSnowHeight, group.snowHeight, -500.0f, 3000.0f, "Snow",
         "World height (Y, metres) where snow starts.");
     const int pSnowBlend  = w.param(kAutoLandscapeParamSnowBlend, 6.0f, 0.1f, 100.0f, "Snow",
         "Height range over which the snow cover closes, metres.");
@@ -111,7 +112,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // Groups = the four painted layers: the arrays hold 4 * V + 1 slices (V variants per layer,
     // then WetGround), V = depth / 4 in the shader. Each hex of a bombed read draws its own
     // variant; a 5-slice array (V = 1) reads exactly the slices it always did.
-    const int groups = w.constF(static_cast<float>(kAutoLandscapeVariantGroups), 2);
+    const int groups = w.constF(static_cast<float>(kAutoLandscapeRoleCount), 2);
     auto layer = [&](AutoLandscapeLayer L, int uv, int seed) {
         LayerReads lr;
         const int slice = w.constF(static_cast<float>(static_cast<int>(L)), 2);
@@ -136,9 +137,9 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
             r.graph.findNode(sw)->p[0] = 1.0f;
             return sw;
         };
-        lr.albedo = read(T::TextureArraySample,   T::TextureArrayBombSample,   kAutoLandscapeAlbedoArray);
-        lr.normal = read(T::NormalMapArraySample, T::NormalMapArrayBombSample, kAutoLandscapeNormalArray);
-        lr.mask   = read(T::TextureArraySample,   T::TextureArrayBombSample,   kAutoLandscapeMaskArray);
+        lr.albedo = read(T::TextureArraySample,   T::TextureArrayBombSample,   group.arrayPaths[0]);
+        lr.normal = read(T::NormalMapArraySample, T::NormalMapArrayBombSample, group.arrayPaths[1]);
+        lr.mask   = read(T::TextureArraySample,   T::TextureArrayBombSample,   group.arrayPaths[2]);
         lr.height = w.op(T::SplitRGBA, 2, { { lr.mask } }); // pin 2 = B = height
         return lr;
     };
@@ -184,7 +185,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view)
     // One source per layer, in kAutoLandscapePaintLayerNames order.
     auto layerBlend = [&](std::initializer_list<int> perLayer, int col) {
         const int n = w.node(T::LandscapeLayerBlend, col);
-        r.graph.findNode(n)->s = kAutoLandscapePaintLayerNames;
+        r.graph.findNode(n)->s = group.paintLayerNames;
         int pin = 0;
         for (int src : perLayer) r.graph.connect(src, 0, n, pin++);
         return n;

@@ -1877,20 +1877,18 @@ const MaterialAsset* ContentManager::resolveMaterialRef(HE::UUID bakedId, const 
 static void noteLandscapeArrayDepth(const std::string& path, const TextureAsset* t)
 {
 	if (!t || t->layers == 0) return;
-	static std::atomic<uint32_t> depth[3] = {};
-	static std::atomic<bool> warned{ false };
-	const char* const names[3] = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
-	                               HE::kAutoLandscapeMaskArray };
-	for (int i = 0; i < 3; ++i)
-	{
-		if (path != names[i]) continue;
-		depth[i].store(t->layers);
-		const uint32_t a = depth[0].load(), b = depth[1].load(), c = depth[2].load();
-		if (a && b && c && (a != b || b != c) && !warned.exchange(true))
-			HE_LOG_WARN(Asset, "Auto landscape arrays differ in depth (Albedo %u, Normal %u, Mask %u slices): "
-			            "the variants of a layer will not line up across the maps", a, b, c);
-		return;
-	}
+	// One set per texture group: Forest's arrays are checked against each other, not against Mountains'.
+	static std::atomic<uint32_t> depth[HE::kAutoLandscapeGroupCount][3] = {};
+	static std::atomic<bool> warned[HE::kAutoLandscapeGroupCount] = {};
+	int i = 0;
+	const int g = HE::autoLandscapeGroupOfArray(path.c_str(), &i);
+	if (g < 0) return;
+	depth[g][i].store(t->layers);
+	const uint32_t a = depth[g][0].load(), b = depth[g][1].load(), c = depth[g][2].load();
+	if (a && b && c && (a != b || b != c) && !warned[g].exchange(true))
+		HE_LOG_WARN(Asset, "Auto landscape arrays (%s) differ in depth (Albedo %u, Normal %u, Mask %u slices): "
+		            "the variants of a layer will not line up across the maps",
+		            HE::kAutoLandscapeGroups[g].name, a, b, c);
 }
 
 const TextureAsset* ContentManager::resolveTextureRef(HE::UUID bakedId, const std::string& path)
