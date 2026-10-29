@@ -283,6 +283,9 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::FbmGrad, "FBM Noise Gradient", "Procedural",
           { { "UV", F::Vec2, 0 }, { "Scale", F::Float, 8 } },
           { { "Value", F::Float, 0 }, { "dX", F::Float, 0 }, { "dY", F::Float, 0 } }, 0 },
+
+        // ── v19: the landscape's foliage set — metadata only, no pins, s = asset UUID ──
+        { MatNodeType::LandscapeFoliage, "Landscape Foliage", "Landscape", {}, {}, 0 },
     };
     return kReg;
 }
@@ -421,6 +424,32 @@ std::vector<std::string> matLandscapeLayerNames(const std::string& s)
     flush();
     if (out.empty()) out.push_back("Layer 1");
     return out;
+}
+
+std::string matFoliageSetIdToString(const HE::UUID& id)
+{
+    if (id == HE::UUID{}) return {};
+    char buf[33];
+    std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                  static_cast<unsigned long long>(id.hi), static_cast<unsigned long long>(id.lo));
+    return buf;
+}
+
+HE::UUID matFoliageSetIdFromString(const std::string& s)
+{
+    if (s.size() != 32) return {};
+    uint64_t part[2] = { 0, 0 };
+    for (size_t i = 0; i < 32; ++i)
+    {
+        const char ch = s[i];
+        uint64_t v;
+        if (ch >= '0' && ch <= '9')      v = static_cast<uint64_t>(ch - '0');
+        else if (ch >= 'a' && ch <= 'f') v = static_cast<uint64_t>(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F') v = static_cast<uint64_t>(ch - 'A' + 10);
+        else return {};
+        part[i / 16] = (part[i / 16] << 4) | v;
+    }
+    return { part[0], part[1] };
 }
 
 // A material function's interface pins, in PIN ORDER. The order is the FnInput /
@@ -2475,6 +2504,17 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         "layout(location = 3) out vec4 oGB3;\n";
 
     MatShaderGen gen;
+    // The foliage set is a property of the graph, not of any pin: a Landscape Foliage
+    // node has no outputs, so the demand-driven emit below never reaches it. Scan the
+    // top-level nodes (lowest id wins), before the no-Output early return too.
+    {
+        const MatGraphNode* best = nullptr;
+        for (const MatGraphNode& n : graph.nodes)
+            if (n.type == MatNodeType::LandscapeFoliage && (!best || n.id < best->id)
+                && matFoliageSetIdFromString(n.s) != HE::UUID{})
+                best = &n;
+        if (best) gen.foliageSetId = matFoliageSetIdFromString(best->s);
+    }
     if (!out)
     {
         gen.glsl = header + "void main() { oColor = vec4(1.0, 0.0, 1.0, 1.0); } // no Output node\n";

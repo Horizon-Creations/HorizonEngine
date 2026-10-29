@@ -225,6 +225,10 @@ public:
 	// reason: the editor edits the loaded asset and persists it with saveAsset().
 	const SequenceAsset*         getSequence(HE::UUID id) const;
 	SequenceAsset*               getSequenceMutable(HE::UUID id);
+	// A foliage rule set for a landscape, parsed once at load. Mutable for the same
+	// reason as the sequence: an editor edits the loaded document in place.
+	const LandscapeFoliageLayerAsset* getLandscapeFoliageLayer(HE::UUID id) const;
+	LandscapeFoliageLayerAsset*       getLandscapeFoliageLayerMutable(HE::UUID id);
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
 	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;
@@ -303,6 +307,7 @@ public:
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 	HE::UUID registerSequence(SequenceAsset asset);
+	HE::UUID registerLandscapeFoliageLayer(LandscapeFoliageLayerAsset asset);
 	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
 	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
 	HE::UUID registerStructType(StructTypeAsset asset);
@@ -864,6 +869,7 @@ private:
 	SlotMap<BoneMaskAsset>           m_boneMaskAssets;
 	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
 	SlotMap<SequenceAsset>           m_sequenceAssets;
+	SlotMap<LandscapeFoliageLayerAsset> m_landscapeFoliageLayerAssets;
 
 	// The ONE list of every SlotMap above. A new pool goes here as well, nowhere
 	// else: unloadAsset, forgetProjectContent and retargetAssetReferencesInMemory
@@ -889,7 +895,7 @@ private:
 		       f(m_structTypeAssets)       || f(m_enumTypeAssets)      ||
 		       f(m_saveTemplateAssets)     || f(m_themeAssets)         ||
 		       f(m_boneMaskAssets)         || f(m_blendSpaceAssets)    ||
-		       f(m_sequenceAssets);
+		       f(m_sequenceAssets)         || f(m_landscapeFoliageLayerAssets);
 	}
 	template<typename F>
 	void forEachPool(F&& f)
