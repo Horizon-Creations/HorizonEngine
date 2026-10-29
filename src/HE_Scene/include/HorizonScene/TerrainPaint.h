@@ -39,6 +39,14 @@ namespace TerrainPaint
     bool paint(TerrainComponent& tc, float localX, float localZ,
                int layer, float radius, float falloff, float strength);
 
+    // Hand `layer`'s weight back to layer 0 ("Auto") under the brush, and leave every other
+    // layer as it is - the eraser of ONE layer, where painting layer 0 would also thin out
+    // whatever else was painted there. Same radius / falloff / strength as paint(); never
+    // allocates a page (a layer whose page does not exist has nothing to give back). False
+    // for layer 0, a group share, or when nothing under the brush held any of `layer`.
+    bool eraseLayer(TerrainComponent& tc, float localX, float localZ,
+                    int layer, float radius, float falloff, float strength);
+
     // Every texel fully on `layer` - "start the landscape from this layer". Allocates the
     // weightmap if there is none (and the pages below `layer` for layers 4..11); a
     // layer on a lower page clears the higher ones, whose weights would otherwise

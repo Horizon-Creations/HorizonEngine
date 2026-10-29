@@ -7784,6 +7784,16 @@ namespace
 	  "sculpted yourself afterwards keeps your changes. Off: erasing takes the water "
 	  "and leaves the hole. One undo step takes it back.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Paint Pebbles##water", "Paint Pebbles",
+	  "Also paints the material's Water layer (river-bed pebbles) under the brush while "
+	  "you paint water: the whole reach of the brush at full strength and a bank half as "
+	  "wide again fading out past it, so the shore is stony and the bed under the water "
+	  "too. Painting goes to the group chosen as Active Group in the Paint tab. The eraser "
+	  "takes the pebbles away again, and only them: other painted layers stay. Off by "
+	  "default; greyed out when the landscape's material has no layer called Water (the "
+	  "auto landscape materials have one). Painted by hand, the layer is the Water row of "
+	  "the Paint tab. One undo step takes it back together with the water.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Max Depth##water", "Bed Max Depth",
 	  "The deepest the bed gets below the water level, in metres. It is reached at "
 	  "Max Depth / Slope metres from the shore (shown under the sliders) and held "

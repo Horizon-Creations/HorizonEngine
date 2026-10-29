@@ -5,6 +5,7 @@
 #include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/WaterSurface.h>
 #include <HorizonScene/TerrainSculpt.h>
+#include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainMeshGenerator.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -1307,4 +1308,146 @@ TEST_CASE("Water brush Close Bed: ground still under remaining water keeps its b
     e.radius = 14.0f; e.falloff = 4.0f;
     drag(lt, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 12);
     CHECK(lt.sculptHeights[32u * 65u + 32u] > 9.9f);
+}
+
+// ── Pebbles: the water brush also paints the material's Water layer (Thema 329 step 4) ──
+
+namespace
+{
+    constexpr int kWaterLayer = 9;   // AutoLandscapePaintLayer::Water; the brush gets it from the material's names
+
+    // The kTerrainMaxLayers weights of the weightmap texel under terrain-local (x, z).
+    std::vector<uint8_t> weightsAt(const TerrainComponent& tc, float x, float z)
+    {
+        std::vector<uint8_t> w(kTerrainMaxLayers, 0);
+        const uint32_t wr = tc.weightRes;
+        const uint32_t tx = std::min<uint32_t>(wr - 1, static_cast<uint32_t>((x / tc.sizeX + 0.5f) * static_cast<float>(wr)));
+        const uint32_t tz = std::min<uint32_t>(wr - 1, static_cast<uint32_t>((z / tc.sizeZ + 0.5f) * static_cast<float>(wr)));
+        REQUIRE(TerrainPaint::texelWeights(tc, tx, tz, w.data()));
+        return w;
+    }
+    int sumOf(const std::vector<uint8_t>& w) { int s = 0; for (uint8_t b : w) s += b; return s; }
+}
+
+TEST_CASE("Water brush pebbles: off by default, the weightmap is never allocated by a plain water stroke")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, params(), 6);
+    CHECK(tc.layerWeights.empty());
+    CHECK(tc.layerWeights3.empty());
+    // A pebble layer outside the weight range is as good as off.
+    brush::Params p = params();
+    p.pebbleLayer = kTerrainMaxLayers;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 6);
+    CHECK(tc.layerWeights.empty());
+}
+
+TEST_CASE("Water brush pebbles: the Water layer lands under the brush and its bank, nowhere else, and every texel stays at 255")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    brush::Params p = params();
+    p.pebbleLayer = kWaterLayer;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 6);
+
+    REQUIRE(TerrainPaint::usesThirdPage(tc));                   // channel 9 is on the third page
+    CHECK(weightsAt(tc, 0.0f, 0.0f)[kWaterLayer] == 255);       // the middle: all pebbles
+    CHECK(weightsAt(tc, 5.0f, 0.0f)[kWaterLayer] == 255);       // inside radius + falloff
+    const int bank = weightsAt(tc, 8.0f, 0.0f)[kWaterLayer];    // past it (6 m), the bank (+3 m) fades out
+    CHECK(bank > 0);
+    CHECK(bank < 255);
+    CHECK(weightsAt(tc, 12.0f, 0.0f)[kWaterLayer] == 0);
+    CHECK(weightsAt(tc, 0.0f, -20.0f)[kWaterLayer] == 0);
+    for (float x : { 0.0f, 5.0f, 8.0f, 12.0f })
+        CHECK(sumOf(weightsAt(tc, x, 0.0f)) == 255);
+}
+
+TEST_CASE("Water brush pebbles: they take weight from the painted ground, and only the pebbles go when erased")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(TerrainPaint::fillLayer(tc, 2));                    // the whole landscape painted Dirt (layer 2)
+
+    brush::Params p = params();
+    p.pebbleLayer = kWaterLayer;
+    p.amount = 0.3f;                                            // a partial pebble cover: two dabs ~ 0.51
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 1);             // two dabs at one spot
+    const std::vector<uint8_t> mixed = weightsAt(tc, 0.0f, 0.0f);
+    CHECK(mixed[kWaterLayer] > 100);
+    CHECK(mixed[kWaterLayer] < 155);
+    CHECK(mixed[2] > 100);                                      // the dirt gave up what the pebbles took
+    CHECK(sumOf(mixed) == 255);
+    const std::vector<uint8_t> farBefore = weightsAt(tc, 20.0f, 0.0f);
+
+    brush::Params e = p;
+    e.erase = true;
+    e.amount = 1.0f;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 2);
+    const std::vector<uint8_t> after = weightsAt(tc, 0.0f, 0.0f);
+    CHECK(after[kWaterLayer] == 0);
+    CHECK(after[2] == mixed[2]);                                // the dirt is untouched: erase is not "paint Auto"
+    CHECK(after[0] == mixed[0] + mixed[kWaterLayer]);           // the pebbles went back to Auto
+    CHECK(sumOf(after) == 255);
+    CHECK(weightsAt(tc, 20.0f, 0.0f) == farBefore);
+}
+
+TEST_CASE("Water brush pebbles: the eraser clears them even where the water is already gone, and a pebble-less eraser leaves them")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    brush::Params p = params();
+    p.pebbleLayer = kWaterLayer;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 6);
+    REQUIRE(weightsAt(tc, 0.0f, 0.0f)[kWaterLayer] == 255);
+
+    brush::Params plain = params();
+    plain.erase = true;                                          // pebbles off in the tool
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, plain, 6);
+    CHECK(weightsAt(tc, 0.0f, 0.0f)[kWaterLayer] == 255);        // water gone, pebbles stay
+
+    brush::Params e = plain;
+    e.pebbleLayer = kWaterLayer;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 6);              // no water left to dry at all
+    CHECK(weightsAt(tc, 0.0f, 0.0f)[kWaterLayer] == 0);
+    CHECK(weightsAt(tc, 0.0f, 0.0f)[0] == 255);
+}
+
+TEST_CASE("Water brush pebbles: they feed the active mix group's share like a hand-painted stroke")
+{
+    TerrainComponent tc = makeLand(10.0f);
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(TerrainPaint::setMixGroup(tc, 0, 1));                // group 1 is mixGroup[0]: layer 6 is its share
+    brush::Params p = params();
+    p.pebbleLayer = kWaterLayer;
+    p.pebbleGroup = 1;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, p, 6);
+    float shares[3] = {};
+    const uint32_t mid = tc.weightRes / 2;
+    REQUIRE(TerrainPaint::groupShares(tc, mid, mid, shares));
+    CHECK(shares[1] == doctest::Approx(1.0f));
+    CHECK(weightsAt(tc, 0.0f, 0.0f)[kWaterLayer] == 255);
+}
+
+TEST_CASE("Water brush pebbles: the weights save and load with the scene")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(e);
+    world.registry().emplace<TerrainComponent>(e, makeLand(10.0f));
+    auto& tc = world.registry().get<TerrainComponent>(e);
+    brush::Params p = params();
+    p.pebbleLayer = kWaterLayer;
+    drag(tc, { -6.0f, 0.0f }, { 6.0f, 0.0f }, p, 8);
+    REQUIRE(TerrainPaint::usesThirdPage(tc));
+
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    auto view = loaded.registry().view<TerrainComponent>();
+    REQUIRE(view.size() == 1u);
+    const TerrainComponent& lt = loaded.registry().get<TerrainComponent>(*view.begin());
+    CHECK(lt.layerWeights  == tc.layerWeights);
+    CHECK(lt.layerWeights2 == tc.layerWeights2);
+    CHECK(lt.layerWeights3 == tc.layerWeights3);
+    CHECK(weightsAt(lt, 0.0f, 0.0f)[kWaterLayer] == 255);
 }

@@ -83,6 +83,7 @@ static float       s_waterDigDepth    = 2.0f;   // Max Depth: the bed never goes
 static float       s_waterBedSlope    = HE::water::kDefaultBedSlope;   // metres of depth per metre from the shore
 static float       s_waterBedRough    = 0.2f;   // Bed Roughness, 0..1
 static bool        s_waterCloseBed    = true;   // the eraser gives the dug ground back under the water it dries
+static bool        s_waterPebbles     = false;  // also paint the material's Water layer (river-bed pebbles) along the shore (Thema 329 step 4)
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
 static bool        s_waterResEditing  = false;
@@ -407,6 +408,25 @@ namespace
 	}
 }
 
+// The weight layer the terrain's material names "Water" (the Water layer of the auto landscape
+// materials, Thema 329 step 4), -1 when it has none. A name match, not a fixed channel, so a custom
+// material that declares such a layer works too and one that does not paints nothing.
+static int waterLayerOf(AppContext& ctx, entt::registry& reg, entt::entity ent)
+{
+	const auto* mc = reg.try_get<MaterialComponent>(ent);
+	if (!mc || mc->materialAssetId == HE::UUID{} || !ctx.contentManager) return -1;
+	const MaterialAsset* m = ctx.contentManager->getMaterial(mc->materialAssetId);
+	if (!m) return -1;
+	for (size_t i = 0; i < m->graphLayerNames.size() && i < static_cast<size_t>(kTerrainMaxLayers); ++i)
+	{
+		const std::string& n = m->graphLayerNames[i];
+		if (n.size() == 5 && (n[0] | 32) == 'w' && (n[1] | 32) == 'a' && (n[2] | 32) == 't'
+		    && (n[3] | 32) == 'e' && (n[4] | 32) == 'r')
+			return static_cast<int>(i);
+	}
+	return -1;
+}
+
 void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
                       const ImVec2& rectMin, const ImVec2& rectMax,
                       bool navigating, bool viewportHovered, float dt,
@@ -575,6 +595,14 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			waterParams.bedSlope        = s_waterBedSlope;
 			waterParams.bedRoughness    = s_waterBedRough;
 			waterParams.closeBed        = s_waterCloseBed;
+			// Pebbles: the weight layer is whichever one the terrain's material calls "Water" (the
+			// auto landscape materials: channel 9, the same in every group, so the Active Group of the
+			// Paint tab decides only whose share the stroke feeds). A material without one paints none.
+			if (s_waterPebbles)
+			{
+				waterParams.pebbleLayer = waterLayerOf(ctx, terrainReg, terrainEnt);
+				waterParams.pebbleGroup = s_activeGroupSlot;
+			}
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -1907,6 +1935,18 @@ void renderPanel(AppContext& ctx)
                 ImGui::EndDisabled();
                 EditorWidgets::checkbox("Close Bed on Erase##water", &s_waterCloseBed);
                 EditorWidgets::helpForLabel("Close Bed on Erase##water");
+
+                // The shore: river-bed pebbles on the material's Water layer.
+                sectionLabel("Shore");
+                {
+                    const int pebbleLayer = waterLayerOf(ctx, reg, terrainEnt);
+                    ImGui::BeginDisabled(pebbleLayer < 0);
+                    EditorWidgets::checkbox("Paint Pebbles##water", &s_waterPebbles);
+                    EditorWidgets::helpForLabel("Paint Pebbles##water");
+                    ImGui::EndDisabled();
+                    if (pebbleLayer < 0)
+                        dimText("This material has no Water layer");
+                }
 
                 // The grid the water lives on: cells per side over the whole
                 // landscape. A typed field, like the weightmap's (32..2048 on a few

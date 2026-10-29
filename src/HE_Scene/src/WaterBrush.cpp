@@ -1,5 +1,6 @@
 #include "HorizonScene/WaterBrush.h"
 #include "HorizonScene/TerrainMeshGenerator.h"   // terrainHeightAt
+#include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/TerrainSculpt.h"
 #include "HorizonScene/WaterMesh.h"
 #include "HorizonScene/Components/TerrainComponent.h"
@@ -572,6 +573,29 @@ void begin(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
     s.active = s.body != kNoBody;
 }
 
+namespace
+{
+    // The pebble layer under a dab (Thema 329 step 4): the brush's whole reach, its soft edge
+    // included, at full strength, and a bank half as wide again fading out beyond it — the
+    // shore the water lies on (and the stretch of land the dig's bank shapeBank reshapes) shows
+    // river-bed pebbles, the bed under the water is covered by the sheet anyway.
+    constexpr float kPebbleBankShare = 0.5f;
+
+    bool pebblesOn(const Params& p) { return p.pebbleLayer >= 0 && p.pebbleLayer < kTerrainMaxLayers; }
+
+    // True when the weightmap changed.
+    bool dabPebbles(TerrainComponent& tc, float x, float z, const Params& p, bool erase)
+    {
+        if (!pebblesOn(p)) return false;
+        const float amount = std::clamp(std::isfinite(p.amount) ? p.amount : 0.0f, 0.0f, 1.0f);
+        const float inner  = std::max(0.0f, p.radius) + std::max(0.0f, p.falloff);
+        const float bank   = inner * kPebbleBankShare;
+        if (erase)
+            return TerrainPaint::eraseLayer(tc, x, z, p.pebbleLayer, inner, bank, amount);
+        return TerrainPaint::paintInGroup(tc, x, z, p.pebbleLayer, p.pebbleGroup, inner, bank, amount);
+    }
+}
+
 Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
 {
     Dab d;
@@ -579,6 +603,9 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
 
     if (s.erase)
     {
+        // The pebbles go whether or not any water is left to dry: a layer the brush put
+        // down must be one the brush can take away.
+        d.pebbles = dabPebbles(tc, x, z, p, true);
         // Nothing painted yet: removeCircle would allocate an all-dry grid just to
         // take nothing out of it, and that grid makes the scene non-pristine.
         if (!tc.water.allocated()) { d.ok = true; ++s.dabs; return d; }
@@ -609,6 +636,7 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
     const Result r = addCircle(tc, s.body, x, z, p.radius, p.falloff, p.amount);
     d.ok    = r.ok;
     d.cells = r.changed;
+    d.pebbles = dabPebbles(tc, x, z, p, false);
     if (p.dig && p.digDepth > 0.0f && std::isfinite(p.digDepth))
     {
         // The bed follows the shore (Thema 206 Schritt 9, see digBed): the body keeps

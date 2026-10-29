@@ -168,6 +168,66 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
     return true;
 }
 
+bool eraseLayer(TerrainComponent& tc, float localX, float localZ,
+                int layer, float radius, float falloff, float strength)
+{
+    if (layer <= 0 || layer >= kTerrainMaxLayers) return false;
+    if (isReservedLayer(tc, layer)) return false;
+    const uint32_t wr = tc.weightRes;
+    const size_t pageBytes = tc.layerWeights.size();
+    // A layer on a page that does not exist holds no weight: nothing to give back, and
+    // nothing to allocate just to find that out.
+    std::vector<uint8_t>& page = weightPage(tc, layer >> 2);
+    if (wr == 0 || pageBytes != static_cast<size_t>(wr) * wr * 4 || page.size() != pageBytes
+        || tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f)
+        return false;
+
+    radius   = std::max(0.0f, radius);
+    falloff  = std::max(0.0f, falloff);
+    strength = std::clamp(strength, 0.0f, 1.0f);
+    const float outer = radius + falloff;
+    if (outer <= 0.0f || strength <= 0.0f) return false;
+
+    const float halfX = tc.sizeX * 0.5f, halfZ = tc.sizeZ * 0.5f;
+    const float texelX = tc.sizeX / static_cast<float>(wr);
+    const float texelZ = tc.sizeZ / static_cast<float>(wr);
+    auto toTexel = [](float v, float lo, float size, uint32_t n) {
+        return (v - lo) / size * static_cast<float>(n);
+    };
+    const int x0 = std::max(0, static_cast<int>(std::floor(toTexel(localX - outer, -halfX, tc.sizeX, wr))));
+    const int x1 = std::min<int>(wr - 1, static_cast<int>(std::ceil(toTexel(localX + outer, -halfX, tc.sizeX, wr))));
+    const int z0 = std::max(0, static_cast<int>(std::floor(toTexel(localZ - outer, -halfZ, tc.sizeZ, wr))));
+    const int z1 = std::min<int>(wr - 1, static_cast<int>(std::ceil(toTexel(localZ + outer, -halfZ, tc.sizeZ, wr))));
+    bool any = false;
+    for (int tz = z0; tz <= z1; ++tz)
+    {
+        const float wz = -halfZ + (static_cast<float>(tz) + 0.5f) * texelZ;
+        for (int tx = x0; tx <= x1; ++tx)
+        {
+            const float wx = -halfX + (static_cast<float>(tx) + 0.5f) * texelX;
+            const float dx = wx - localX, dz = wz - localZ;
+            const float dist = std::sqrt(dx * dx + dz * dz);
+            if (dist > outer) continue;
+            const float fall = (dist <= radius || falloff <= 0.0f)
+                ? 1.0f : 1.0f - (dist - radius) / falloff;
+            const float a = std::clamp(strength * fall, 0.0f, 1.0f);
+            if (a <= 0.0f) continue;
+            const size_t at = (static_cast<size_t>(tz) * wr + tx) * 4;
+            uint8_t& src = page[at + (layer & 3)];
+            if (src == 0) continue;
+            // Whole bytes, rounded up so a repeated stroke reaches 0 instead of stalling on
+            // a residue; the sum over the layers stays 255 because they all go to layer 0.
+            const int moved = std::min<int>(src, static_cast<int>(std::ceil(src * a)));
+            src = static_cast<uint8_t>(src - moved);
+            uint8_t& dst = tc.layerWeights[at];
+            dst = static_cast<uint8_t>(std::min(255, dst + moved));
+            any = true;
+        }
+    }
+    if (any) tc.weightsDirty = true;
+    return any;
+}
+
 bool fillLayer(TerrainComponent& tc, int layer)
 {
     if (layer < 0 || layer >= kTerrainMaxLayers) return false;

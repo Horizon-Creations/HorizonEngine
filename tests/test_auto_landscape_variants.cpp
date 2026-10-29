@@ -165,17 +165,16 @@ TEST_CASE("The auto landscape graph reads variants: 27 hex reads, one variant gr
 	const MaterialGraph g = HE::buildAutoLandscapeGraph().graph;
 	const HE::MatShaderGen lit = HE::generateFragment(g, HE::weatherFunctionLoader());
 	REQUIRE(lit.textures.size() == 4);   // the three arrays + Path's own Albedo (Thema 329, step 3)
-	// 3 layers (Grass, Dirt, Rock) x (Albedo + Normal + Mask) x 3 hexes = 27 reads per pixel (36 while Snow was
-	// a bombed texture layer too; since Thema 329 step 2 it is MF_ProceduralSnow and reads nothing); the text holds
-	// them once for V = 1 and once for V > 1 (see the grouped test above).
-	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 54u);
-	CHECK(countOf(lit.glsl, "_V == 1) {") == 9u);
-	CHECK(countOf(lit.glsl, "_s0))") == 9u);
-	CHECK(countOf(lit.glsl, "heBombGridV(") == 4u);    // the definition and one call per layer (three seeds)
+	// 4 layers (Grass, Dirt, Rock and the paint-only Water pebbles on the WetGround slice) x (Albedo + Normal +
+	// Mask) x 3 hexes = 36 reads per pixel (Snow is MF_ProceduralSnow since Thema 329 step 2 and reads nothing;
+	// Water joined in step 4); the text holds them once for V = 1 and once for V > 1 (see the grouped test above).
+	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 72u);
+	CHECK(countOf(lit.glsl, "_V == 1) {") == 12u);
+	CHECK(countOf(lit.glsl, "_s0))") == 12u);
+	CHECK(countOf(lit.glsl, "heBombGridV(") == 5u);    // the definition and one call per layer (four seeds)
 	CHECK(lit.glsl.find("heBombGrid(n") == std::string::npos);
-	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n" })
+	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n", ", 53u, n" })
 		CHECK_MESSAGE(lit.glsl.find(seed) != std::string::npos, seed);
-	CHECK(lit.glsl.find(", 53u, n") == std::string::npos);   // the snow's old seed: no bombed snow read left
 	// No new parameter, no new texture slot.
 	CHECK(lit.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 

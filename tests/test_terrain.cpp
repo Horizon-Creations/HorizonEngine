@@ -1812,3 +1812,41 @@ TEST_CASE("Texture groups: the weightmap does not depend on the group, a pre-gro
         CHECK(HE::autoLandscapeGroupOfMaterial(w3.registry().get<MaterialComponent>(ent).materialAssetId)
               == static_cast<int>(HE::AutoLandscapeGroupId::Forest));
 }
+
+TEST_CASE("TerrainPaint::eraseLayer hands one layer back to layer 0 and leaves the others, without allocating a page")
+{
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 64.0f;
+    tc.weightRes = 64;                 // 1 texel = 1 m
+    TerrainPaint::ensureWeightmap(tc);
+    const uint32_t c = tc.weightRes / 2;
+
+    // Nothing painted on layer 9's page: nothing to give back, and no page made to find out.
+    CHECK_FALSE(TerrainPaint::eraseLayer(tc, 0.0f, 0.0f, 9, 6.0f, 2.0f, 1.0f));
+    CHECK(tc.layerWeights3.empty());
+    CHECK_FALSE(TerrainPaint::eraseLayer(tc, 0.0f, 0.0f, 0, 6.0f, 2.0f, 1.0f));   // layer 0 is where it goes
+
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, 2, 8.0f, 0.0f, 0.5f));    // dirt, half
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, 9, 8.0f, 0.0f, 0.5f));    // pebbles, half of what is left
+    const int dirt = texelLayer(tc, c, c, 2);
+    const int pebbles = texelLayer(tc, c, c, 9);
+    const int autoW = texelLayer(tc, c, c, 0);
+    REQUIRE(pebbles > 0);
+
+    tc.weightsDirty = false;
+    REQUIRE(TerrainPaint::eraseLayer(tc, 0.0f, 0.0f, 9, 8.0f, 0.0f, 1.0f));
+    CHECK(tc.weightsDirty);
+    CHECK(texelLayer(tc, c, c, 9) == 0);
+    CHECK(texelLayer(tc, c, c, 2) == dirt);
+    CHECK(texelLayer(tc, c, c, 0) == autoW + pebbles);
+    // Outside the brush nothing moved; a second erase finds nothing.
+    CHECK_FALSE(TerrainPaint::eraseLayer(tc, 0.0f, 0.0f, 9, 8.0f, 0.0f, 1.0f));
+
+    // A partial strength takes a share of the layer, not all of it.
+    REQUIRE(TerrainPaint::fillLayer(tc, 9));
+    REQUIRE(TerrainPaint::eraseLayer(tc, 0.0f, 0.0f, 9, 8.0f, 0.0f, 0.25f));
+    const int left = texelLayer(tc, c, c, 9);
+    CHECK(left > 150);
+    CHECK(left < 255);
+    CHECK(texelLayer(tc, c, c, 0) + left == 255);
+}

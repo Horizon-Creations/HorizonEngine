@@ -89,6 +89,13 @@ namespace HE::water::brush
         float bedSlope = kDefaultBedSlope;   // Slope: bed sinks this many metres per metre from the shore
         bool  closeBed = false;    // erasing also gives the ground the brush dug under the erased water back
         float bedRoughness = 0.0f; // Bed Roughness 0..1: share of the depth a fixed noise adds or takes
+
+        // PEBBLES (Thema 329 step 4): also paint the landscape material's Water layer (river-bed
+        // pebbles) along the shore and bed of the dab, and take it away again when erasing. -1 = off.
+        // The caller resolves the weight layer (the material's "Water" name), pebbleGroup is the mix
+        // group slot TerrainPaint::paintInGroup takes (-1 / 0 without a mix group).
+        int   pebbleLayer = -1;
+        int   pebbleGroup = -1;
     };
 
     struct Stroke
@@ -123,6 +130,7 @@ namespace HE::water::brush
         uint32_t cells  = 0;       // water cells whose coverage or owner moved
         uint32_t ground = 0;       // terrain vertices lowered (digging), the bank's included
         uint32_t bank   = 0;       // ... of them shaved into the bank, outside the water and above it
+        bool     pebbles = false;  // the weightmap moved (TerrainComponent::weightsDirty is set)
     };
     // One dab at terrain-local (x, z). Sets the water field's dirty rectangle and,
     // when it dug, the terrain's region-dirty rectangle (never TerrainComponent::dirty

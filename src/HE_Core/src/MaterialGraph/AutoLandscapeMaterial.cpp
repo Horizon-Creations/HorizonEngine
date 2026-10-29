@@ -211,6 +211,13 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         path.height = w.op(T::SplitRGBA, 2, { { path.mask } }); // pin 2 = B = height
     }
     LayerReads       rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
+    // Water (Thema 329, step 4): the river-bed pebbles the Water tool paints along the shore and
+    // bed of its water, and a layer the human can paint by hand. Paint-only like Path, so it is
+    // weight 0 until painted and gated below like the other array reads. It has no texture of its
+    // own (the graph is full at kMatMaxGraphTextures = 4: three arrays plus Path's albedo) and
+    // reads the arrays' WetGround slice instead, the one slice nothing else reads — a group's
+    // pebble photograph is packed into that slice. Bombed like the rest, since pebbles repeat.
+    LayerReads       pebbles = layer(AutoLandscapeLayer::WetGround, uvGround, 53);
     // Snow is MF_ProceduralSnow, in every group: noise in world space has no tile and no hex seam to
     // hide, and nothing to read. Cover is the weather's Snow Cover slider, Melt its wetness (rain
     // melts it); it takes no gate (see below). The Weather node, not MF_WeatherSnow's Cover output,
@@ -229,8 +236,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(weather, 0, call, kSnowInMelt);
         snow = surfaceOf(call, 2);
     }
-    // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on
-    // the ground below, not a layer of their own.
+    // Slice 4 of the arrays (WetGround) is the Water layer's pebbles (above), not the
+    // puddles': puddles are an overlay on the ground below, not a layer of their own.
 
     // (hA − hB) × Height Blend × scale — the height bias of a transition.
     auto heightBias = [&](int hA, int pinA, int hB, int pinB, int scale, int col) {
@@ -270,12 +277,15 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         for (int src : perLayer) r.graph.connect(src, 0, n, pin++);
         return n;
     };
-    //                               Auto Grass Dirt Rock Snow Puddles  -    -   Path
-    const int wA = layerBlend({ none, ux, uy, uz, none, none, none, none, none }, 6);  // (grass, dirt, rock)
-    const int wB = layerBlend({ none, none, none, none, ux, uy, none, none, uz }, 6); // (snow, puddles, -, -, path)
+    //                               Auto Grass Dirt Rock Snow Puddles  -    -   Path Water
+    const int wA = layerBlend({ none, ux, uy, uz, none, none, none, none, none, none }, 6);  // (grass, dirt, rock)
+    const int wB = layerBlend({ none, none, none, none, ux, uy, none, none, uz, none }, 6); // (snow, puddles, -, -, path)
+    const int wC = layerBlend({ none, none, none, none, none, none, none, none, none, ux }, 6); // (water, -, -)
     const int wASplit = w.op(T::SplitRGBA, 6, { { wA } });
     const int wBSplit = w.op(T::SplitRGBA, 6, { { wB } });
-    const int mG = wASplit, mD = wASplit, mR = wASplit, mS = wBSplit, mP = wBSplit, mPath = wBSplit;
+    const int wCSplit = w.op(T::SplitRGBA, 6, { { wC } });
+    const int mG = wASplit, mD = wASplit, mR = wASplit, mS = wBSplit, mP = wBSplit, mPath = wBSplit,
+              mWater = wCSplit;
 
     // ── Layer gates: read a layer only where it can have weight ──────────────
     // Each of Dirt, Rock and Snow sits behind an If whose condition is an UPPER
@@ -300,6 +310,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         lr.mask   = w.op(T::If, col, { { cond }, { lr.mask },   { zeroC } });
         lr.height = w.op(T::SplitRGBA, col, { { lr.mask } });
     };
+    // Water has no automatic rule: it exists only where it is painted.
+    gate(pebbles, w.op(T::Greater, 6, { { mWater, 0 }, { zero } }), 6);
     auto possible = [&](Wire::Src x, int biasMax, int e0, int paint, int paintPin, int col) {
         const int upper = w.op(T::Add, col, { x, { biasMax } });
         const int can   = w.op(T::Greater, col, { { upper }, { e0 } });
@@ -373,22 +385,23 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // Everything above is the AUTOMATIC distribution (s2). The landscape's painted
     // weightmap sits on top of it: layer 0 "Auto" is what an unpainted terrain reads
     // (the engine's 1x1 (1,0,0,0) default), so a fresh landscape looks exactly as
-    // before, and painting Grass / Dirt / Rock / Snow / Puddles / Path moves weight
+    // before, and painting Grass / Dirt / Rock / Snow / Puddles / Path / Water moves weight
     // from Auto to that layer — painting Auto again hands the spot back to the
     // automatic rules. Path has no automatic rule of its own: it is weight 0 until
     // painted (Thema 329, step 3). The weights of a texel sum to 1, so the final surface is
-    //     Auto x s2 + Grass x grass + Dirt x dirt + Rock x rock + Snow x snow + Path x path
+    //     Auto x s2 + Grass x grass + Dirt x dirt + Rock x rock + Snow x snow + Path x path + Water x pebbles
     // and Puddles is not a surface but the strength of the water overlay below.
     //
     // The weights are read through the engine's own Landscape Layer Blend node, fed
     // unit vectors: input k = (1,0,0) / (0,1,0) / (0,0,1) makes channel x / y / z of
-    // the blended result BE layer k's weight. Two nodes carry the six painted
-    // layers (Path rides wB's third, otherwise unused, slot); a texel that sums to
+    // the blended result BE layer k's weight. Three nodes carry the seven painted
+    // layers (Path rides wB's third, otherwise unused, slot; Water is alone in wC); a texel that sums to
     // nothing falls back to input 0 = (0,0,0) = "no paint", i.e. fully automatic.
     const int sumGD   = w.op(T::Add, 6, { { mG, 0 }, { mD, 1 } });
     const int sumRS   = w.op(T::Add, 6, { { mR, 2 }, { mS, 0 } });
     const int sumGDRS = w.op(T::Add, 6, { { sumGD }, { sumRS } });
-    const int sumAll  = w.op(T::Add, 6, { { sumGDRS }, { mPath, 2 } });
+    const int sumGDRSP = w.op(T::Add, 6, { { sumGDRS }, { mPath, 2 } });
+    const int sumAll   = w.op(T::Add, 6, { { sumGDRSP }, { mWater, 0 } });
     // How much of the AUTOMATIC PUDDLES survives painted ground. A puddle is a thin
     // wet/glossy film, and a film left at half strength over ground the user has painted
     // over reads as a leftover sheen, not as "half painted". So it dies three times as fast
@@ -406,11 +419,11 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // so this filler is never read, but it keeps every input Vec3-typed and the
     // list's length matching the name list without one more sentinel type.
     const int mixAlbedo = layerBlend({ s2.albedo, grass.albedo, dirt.albedo, rock.albedo,
-                                       snow.albedo, s2.albedo, s2.albedo, s2.albedo, path.albedo }, 6);
+                                       snow.albedo, s2.albedo, s2.albedo, s2.albedo, path.albedo, pebbles.albedo }, 6);
     const int mixNormal = layerBlend({ s2.normal, grass.normal, dirt.normal, rock.normal,
-                                       snow.normal, s2.normal, s2.normal, s2.normal, path.normal }, 6);
+                                       snow.normal, s2.normal, s2.normal, s2.normal, path.normal, pebbles.normal }, 6);
     const int mixMask   = layerBlend({ s2.mask, grass.mask, dirt.mask, rock.mask,
-                                       snow.mask, s2.mask, s2.mask, s2.mask, path.mask }, 6);
+                                       snow.mask, s2.mask, s2.mask, s2.mask, path.mask, pebbles.mask }, 6);
     const Surface s3{ mixAlbedo, mixNormal, mixMask };
 
     // ── Puddles: flat ground in the minima of a noise field (column 7) ───────

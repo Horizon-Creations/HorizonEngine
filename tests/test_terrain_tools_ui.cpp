@@ -1455,3 +1455,87 @@ TEST_CASE("landscape ui: Apply Group Meshes adds the group's layers, never remov
 }
 
 #endif // HE_EDITOR_DEPS_DIR
+
+TEST_CASE("landscape ui: Paint Pebbles puts the Water layer under the water brush, only with a material that has one")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	REQUIRE(cm.loadAsset(HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest).materialPath)
+	        == HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest).materialId);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0;
+	tc.resolution = 129;
+	tc.dirty = false;
+	tc.water.res = 100;
+	tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest).materialId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+	MeshComponent mesh;
+	mesh.meshAssetId = HE::kDefaultCubeMeshId;
+	reg.emplace<MeshComponent>(terrain, mesh);
+	auto land = [&]() -> TerrainComponent& { return reg.get<TerrainComponent>(terrain); };
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float wx = 0.0f, wy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsWater"), wx, wy));
+	clickAt(ctx, wx, wy);
+	float px0 = 0.0f, py0 = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Paint Pebbles##water"), px0, py0), "Water armed shows no Paint Pebbles");
+	float digX = 0.0f, digY = 0.0f;
+	REQUIRE(locate(ctx, panelId("Dig Bed##water"), digX, digY));
+	clickAt(ctx, digX, digY);                                       // the first strokes are about water and pebbles alone
+	clickAt(ctx, px0, py0);                                         // Paint Pebbles on
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
+
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	const float pxm = 75.0f;                                        // 20 m
+	auto hook = [](const HE::UUID&) {};
+	viewportFrame(ctx, snap, cx, cy, false, hook);
+	viewportFrame(ctx, snap, cx, cy, true, hook);
+	for (int i = 1; i <= 5; ++i)
+		viewportFrame(ctx, snap, cx + pxm * i / 5.0f, cy, true, hook);
+	viewportFrame(ctx, snap, cx + pxm, cy, false, hook);
+
+	// Water and pebbles from one stroke; Forest's Water is channel 9, on the third page.
+	REQUIRE(land().water.wetCells() > 0u);
+	REQUIRE(TerrainPaint::usesThirdPage(land()));
+	uint8_t w[kTerrainMaxLayers] = {};
+	REQUIRE(TerrainPaint::texelWeights(land(), 32, 32, w));         // the stroke's start (the landscape's middle)
+	CHECK(w[9] == 255);
+	uint8_t far[kTerrainMaxLayers] = {};
+	REQUIRE(TerrainPaint::texelWeights(land(), 4, 4, far));         // a corner, 45 m away
+	CHECK(far[9] == 0);
+
+	// Ctrl turns the stroke around: it wipes water and pebbles under the pointer (Super is Ctrl
+	// under ConfigMacOSXBehaviors, see the Water test above).
+	const ImGuiKey ctrlKey = ImGui::GetIO().ConfigMacOSXBehaviors ? ImGuiMod_Super : ImGuiMod_Ctrl;
+	ImGui::GetIO().AddKeyEvent(ctrlKey, true);
+	viewportFrame(ctx, snap, cx, cy, false, hook);                   // a frame for the modifier to arrive
+	viewportFrame(ctx, snap, cx, cy, true, hook);
+	for (int i = 0; i < 3; ++i)
+		viewportFrame(ctx, snap, cx, cy, true, hook);
+	viewportFrame(ctx, snap, cx, cy, false, hook);
+	ImGui::GetIO().AddKeyEvent(ctrlKey, false);
+	viewportFrame(ctx, snap, cx, cy, false, hook);
+	REQUIRE(TerrainPaint::texelWeights(land(), 32, 32, w));
+	CHECK(w[9] == 0);
+	CHECK(w[0] == 255);                                              // the pebbles went back to Auto
+}

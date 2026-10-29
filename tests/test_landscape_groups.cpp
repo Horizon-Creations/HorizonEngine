@@ -77,9 +77,9 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 			// landscape_tex_gen writes the arrays under materialId.hi + 1 + map (0x400 block).
 			CHECK(g.materialId.hi + 1 + map <= g.materialId.hi + 3);
 		}
-		// Nine paint channels in the same role order in every group: Auto first, then the
+		// Ten paint channels in the same role order in every group: Auto first, then the
 		// four roles and Puddles, then a two-channel gap (mix-group shares, never a paint
-		// weight here) and Path (Thema 329, step 3).
+		// weight here), Path (Thema 329, step 3) and Water, the river-bed pebbles (step 4).
 		const std::vector<std::string> names = HE::matLandscapeLayerNames(g.paintLayerNames);
 		REQUIRE(names.size() == static_cast<size_t>(HE::kAutoLandscapePaintLayerCount));
 		CHECK(names.front() == "Auto");
@@ -88,7 +88,8 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 		CHECK(names[6].empty());
 		CHECK(names[7].empty());
 		CHECK(names[static_cast<int>(HE::AutoLandscapePaintLayer::Path)] == "Path");
-		CHECK(names.back() == "Path");
+		CHECK(names[static_cast<int>(HE::AutoLandscapePaintLayer::Water)] == "Water");
+		CHECK(names.back() == "Water");
 		for (int role = 0; role < HE::kAutoLandscapeRoleCount; ++role)
 			CHECK(names[1 + role] == g.roleLabels[role]);
 	}

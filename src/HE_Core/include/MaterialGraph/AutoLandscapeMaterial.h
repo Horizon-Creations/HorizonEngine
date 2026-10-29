@@ -13,8 +13,8 @@
 // Textures: the three engine arrays of docs/auto-landscape-material-textures.md
 // §8 (T_Landscape_{Albedo,Normal,Mask}_Array, slices Grass, Dirt, Rock, Snow,
 // WetGround; Mask = R AO, G roughness, B height) in heTexP0..2. heTexP3 stays free.
-// The material reads slices 0..2 (Grass, Dirt, Rock); slice 4 (WetGround) stays in the arrays but is
-// not read — puddles are an overlay, not a layer (see below). Slice 3 (Snow) is not read either since
+// The material reads slices 0..2 (Grass, Dirt, Rock) and, since Thema 329 step 4, slice 4 (WetGround)
+// for the paint-only Water (pebble) layer — puddles are an overlay, not a layer (see below). Slice 3 (Snow) is not read either since
 // Thema 329 step 2: the Snow role is MF_ProceduralSnow (ProceduralSurfaceFunctions.h), made from noise
 // in world space, in every group; and the Desert group's ground role is MF_ProceduralSand, so its
 // slice 0 is unread too. The slices stay in the arrays so the layout (4 * V + 1) does not move.
@@ -101,17 +101,21 @@ inline constexpr char kAutoLandscapeMaskArray[]   = "Engine/Textures/Landscape/T
 // name out of its sum, so the baked text of every list that has no gap (every material
 // before this one) is unchanged. Path is channel 8, not 6: it reads only where it is
 // painted, so old scenes (channel 8 is always empty — Thema 329 step 1's layerWeights3
-// loads as all-zero when absent) show it nowhere. Channel 9 is reserved for Water
-// (Thema 329 step 4) on the same page — the next name after Path, no further gap.
+// loads as all-zero when absent) show it nowhere. Channel 9 is Water (Thema 329 step 4), the
+// next name after Path with no further gap: the river-bed pebbles the Water tool paints along
+// the shore and bed of the water it lays down (WaterBrush Params::pebbleLayer), and a layer the
+// human can paint by hand as well. Paint-only like Path. It has no texture of its own (a graph
+// holds kMatMaxGraphTextures = 4, all taken): it reads the arrays' WetGround slice, the one slice
+// the material never read, so a group's pebbles are packed into that slice.
 inline constexpr char kAutoLandscapePaintLayerNames[] =
-    "Auto\nGrass\nDirt\nRock\nSnow\nPuddles\n\n\nPath";
+    "Auto\nGrass\nDirt\nRock\nSnow\nPuddles\n\n\nPath\nWater";
 enum class AutoLandscapePaintLayer : int
-{ Auto = 0, Grass = 1, Dirt = 2, Rock = 3, Snow = 4, Puddles = 5, Path = 8 };
-inline constexpr int kAutoLandscapePaintLayerCount = 9;
+{ Auto = 0, Grass = 1, Dirt = 2, Rock = 3, Snow = 4, Puddles = 5, Path = 8, Water = 9 };
+inline constexpr int kAutoLandscapePaintLayerCount = 10;
 
 // Slice order of the three arrays (landscape_tex_gen kLayers). WetGround is slice
-// 4 of the arrays only; the material does not read it (puddles are an overlay).
-// It stays so the array layout and its texture ids (0x40F..0x411) do not move.
+// 4 of the arrays only: puddles are an overlay and do not read it, the paint-only Water layer
+// (Thema 329 step 4) does — it is that layer's pebble texture.
 enum class AutoLandscapeLayer : int { Grass = 0, Dirt = 1, Rock = 2, Snow = 3, WetGround = 4 };
 
 // Variants per layer (Thema 180, Schritt 3). A "role" is one of the four painted layers (Grass, Dirt,
@@ -197,7 +201,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       { "Engine/Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Forest_Normal_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Forest_Mask_Array.hasset" },
-      "Auto\nForest Floor\nRoots\nMossy Rock\nSnow\nPuddles\n\n\nPath",
+      "Auto\nForest Floor\nRoots\nMossy Rock\nSnow\nPuddles\n\n\nPath\nWater",
       { "Forest Floor", "Roots", "Mossy Rock", "Snow" },
       "Engine/Textures/Landscape/T_Landscape_Forest_Path_Albedo.hasset",
       0.10f, 0.50f, 2000.0f },
@@ -206,7 +210,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       { "Engine/Textures/Landscape/T_Landscape_Grassland_Albedo_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Grassland_Normal_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Grassland_Mask_Array.hasset" },
-      "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles\n\n\nPath",
+      "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles\n\n\nPath\nWater",
       { "Meadow", "Bare Soil", "Stones", "Snow" },
       "Engine/Textures/Landscape/T_Landscape_Grassland_Path_Albedo.hasset",
       0.20f, 0.20f, 2000.0f },
@@ -217,7 +221,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       { "Engine/Textures/Landscape/T_Landscape_Desert_Albedo_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Desert_Normal_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Desert_Mask_Array.hasset" },
-      "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles\n\n\nPath",
+      "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles\n\n\nPath\nWater",
       { "Sand", "Hardpan", "Sandstone", "Snow" },
       "Engine/Textures/Landscape/T_Landscape_Desert_Path_Albedo.hasset",
       0.30f, 0.15f, 2000.0f, true },

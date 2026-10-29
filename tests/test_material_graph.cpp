@@ -2767,7 +2767,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	}
 	// The paint layers on top of the automatic rules: Auto first — an unpainted
 	// terrain binds the (1,0,0,0) default weightmap and must resolve to it — then
-	// the five textures. Five Landscape Layer Blend nodes read the weightmap (two
+	// the five textures. Six Landscape Layer Blend nodes read the weightmap (three
 	// extract the weights, three mix albedo / normal / mask), all with the same names.
 	{
 		const std::vector<std::string> names = HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames);
@@ -2779,7 +2779,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 		size_t blends = 0;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
 			if (n.type == HE::MatNodeType::LandscapeLayerBlend) { ++blends; CHECK(n.s == HE::kAutoLandscapePaintLayerNames); }
-		CHECK(blends == 5u);
+		CHECK(blends == 6u);
 	}
 	// The mask views are the AUTOMATIC masks and need no weightmap — the witness
 	// renders them on an unpainted terrain.
@@ -2791,14 +2791,15 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	}
 
 	// Puddles are an OVERLAY on the ground below, not a layer: slice 4 of the arrays
-	// (WetGround) stays in them but no read asks for it — every array read takes its
-	// slice from a constant below it. Snow is MF_ProceduralSnow (Thema 329 step 2), so slice 3 is not
-	// read either; positive control: slice 2 (Rock) IS.
+	// (WetGround) is read only by the paint-only Water (pebble) layer (Thema 329 step 4) — every
+	// array read takes its slice from a constant below it. Snow is MF_ProceduralSnow (Thema 329
+	// step 2), so slice 3 is not read; positive controls: slice 2 (Rock) and slice 4 (Water) ARE.
 	{
 		using NT = HE::MatNodeType;
 		const int wetSlice = static_cast<int>(HE::AutoLandscapeLayer::WetGround);
 		int reads = 0;
 		bool sawRock = false;
+		int wetReads = 0;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
 		{
 			if (n.type != NT::TextureArraySample && n.type != NT::NormalMapArraySample &&
@@ -2811,22 +2812,23 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 				REQUIRE(s);
 				REQUIRE(s->type == NT::ConstFloat);
 				++reads;
-				CHECK(static_cast<int>(s->p[0]) != wetSlice);
+				wetReads += static_cast<int>(s->p[0]) == wetSlice ? 1 : 0;
 				CHECK(static_cast<int>(s->p[0]) != static_cast<int>(HE::AutoLandscapeLayer::Snow));
 				sawRock = sawRock || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Rock);
 			}
 		}
-		CHECK(reads == 18); // 3 bombed layers (Grass, Dirt, Rock) x 3 maps x (plain + bombed)
+		CHECK(reads == 24); // 4 bombed layers (Grass, Dirt, Rock, Water) x 3 maps x (plain + bombed)
+		CHECK(wetReads == 6); // ... of them the Water layer's 3 maps x (plain + bombed)
 		CHECK(sawRock);
 	}
 
-	// Grass, Dirt and Rock each read albedo + normal + mask on ONE grid (three
+	// Grass, Dirt, Rock and the Water pebbles each read albedo + normal + mask on ONE grid (four
 	// grids in total; Snow is procedural now). The uv here is a coerced
 	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
 	// Thema 180 Schritt 3: the layers read through the variant grid (Groups wired), which
 	// is heBombGrid plus the variant numbers; the plain heBombGrid is not emitted at all.
 	CHECK(countOf(gen.glsl, "void heBombGridV(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 3u);
+	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 4u);
 	CHECK(gen.glsl.find("heBombGrid(") == std::string::npos);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
