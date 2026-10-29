@@ -167,7 +167,7 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		std::sort(want.begin(), want.end());
 		CHECK(tex == want);                       // its own arrays and not one of Mountains'
 		CHECK(gen.textureArrayMask == 0x7u);
-		CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
 
 		int blends = 0, legacyBlends = 0;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
@@ -188,6 +188,47 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet,
 		                                 HE::AutoLandscapeView::Normal, HE::AutoLandscapeView::Surface })
 			CHECK_FALSE(HE::generateFragment(HE::buildAutoLandscapeGraph(v, id).graph, HE::weatherFunctionLoader()).glsl.empty());
+	}
+}
+
+TEST_CASE("Procedural snow and sand: the look is an exposed parameter, packed into the slot budget")
+{
+	for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+	{
+		const HE::AutoLandscapeGroup& g = HE::kAutoLandscapeGroups[i];
+		CAPTURE(g.name);
+		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, static_cast<AutoLandscapeGroupId>(i));
+		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
+		// Nothing baked for being over budget: every parameter is a real HeParams slot.
+		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
+		CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
+		auto find = [&](const char* name) -> const HE::MatParamSlot* {
+			for (const HE::MatParamSlot& s : gen.params) if (s.name == name) return &s;
+			return nullptr;
+		};
+		const HE::MatParamSlot* color = find(HE::kAutoLandscapeParamSnowColor);
+		const HE::MatParamSlot* look  = find(HE::kAutoLandscapeParamSnowLook);
+		REQUIRE(color);
+		REQUIRE(look);
+		CHECK(color->kind == HE::MatParamKind::Color);
+		CHECK(look->kind == HE::MatParamKind::Vec4);
+		// The defaults are the functions' own (Grain, Drift, Glitter, Softness).
+		CHECK(look->value[0] == 0.5f);
+		CHECK(look->value[1] == 0.5f);
+		CHECK(look->value[2] == 0.35f);
+		CHECK(look->value[3] == 0.5f);
+		const HE::MatParamSlot* sand = find(HE::kAutoLandscapeParamSandLook);
+		CHECK((sand != nullptr) == g.proceduralSand);
+		if (sand)
+		{
+			CHECK(sand->kind == HE::MatParamKind::Vec4);
+			CHECK(sand->value[0] == 0.03f);
+			CHECK(sand->value[1] == 0.5f);
+			CHECK(sand->value[2] == 0.3f);
+			CHECK(sand->value[3] == 0.3f);
+		}
+		// The functions' pins are fed by the parameters (through Split RGBA), not by constants.
+		CHECK(gen.glsl.find("// param: Snow Look") != std::string::npos);
 	}
 }
 
@@ -245,7 +286,7 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(g.paintLayerNames));
 		std::string have;
 		for (const std::string& pn : m->graphParamNames) have += pn + "; ";
-		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount), have);
+		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)), have);
 		REQUIRE(!m->customShaderFragGlsl.empty());
 
 		// The packer ships the fragment text stored in the file: it must be what the codegen makes today.

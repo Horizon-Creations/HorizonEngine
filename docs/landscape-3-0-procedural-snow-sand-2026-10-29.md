@@ -106,3 +106,19 @@ any other material can call them too.
 - **Fix (d27fad34):** every op call has at most one node-creating call among its arguments; sibling nodes are named locals, built left to right (the order Clang already used). `matfn_gen` therefore reproduces the committed `MF_ProceduralSnow/Sand.hasset` byte for byte, and the baked landscape materials need no regeneration.
 - **Verified on the Mac:** `matfn_gen` leaves `git status` clean, `test_material_graph` green, full ctest 345/345 (`test_hpak` only with a private `HOME`, otherwise it counts the real EngineContent cache). A source scan finds no call with two node-creating arguments (it flagged 38 in the old file). **Not verified:** GCC/MSVC locally, CI run pending.
 - **Rule for new builder code:** never put two `o.*` node-creating calls (or `fadeFar`/`bendNormal`) in the same argument list; assign each to a named local first. A `{}` initializer list is ordered and is fine.
+
+## Step 3 (Thema 328): look as landscape parameters
+
+- **What:** `Snow Color` (Color picker), `Snow Look` (Vec4: Grain, Drift, Glitter, Softness) in every group, `Sand Look` (Vec4: Grain Size m, Ripple, Ripple Size m, Glitter) in the Desert. The wiring goes Param -> Split RGBA -> the function's pins (`AutoLandscapeMaterial.cpp`, param block after `pPudSlope`, wiring at the sand and snow calls). Defaults are the functions' own, colours as before. Melt/Wetness stay driven by the weather.
+- **Why packed:** a graph has `kMatMaxParams` = 16 HeParams slots (hard-coded 256-byte upload in all five renderers, `test_engine_materials`), 13 were taken. Packing gives 15 per group, Desert 16 (budget full). Sand colour therefore stays baked (reference mean, sRGB 129/114/91). `autoLandscapeParamCount(group)` is the new count; `kAutoLandscapeParamCount` = 15 is the common part.
+- **Assets:** all four `M_AutoLandscape*.hasset` regenerated (`landscape_tex_gen ... --material [--group G]`), 221/221/221/218 nodes, 15/15/15/16 params.
+- **Verified (Mac, Release, Metal):** full ctest 345/345 (private HOME). New test "Procedural snow and sand: the look is an exposed parameter" (kinds, defaults, no slot baked for budget). Witness A/B before/after (`cap233.sh`, Mountains top + snow plateau close, Desert top + sand close): max difference 1/255, mean < 2e-4 (float rounding of the defaults), Mountains top bit-identical. The pin order is distinct in the defaults (0.5/0.5/0.35/0.5 and 0.03/0.5/0.3/0.3), so a mixed-up pin would show.
+- **Not verified:** a changed value in the live editor (instance panel / Vec4 widget), OpenGL/D3D/Vulkan, a Material Instance override of the new names.
+- **Shots:** `docs/landscape-3-0-procedural-snow-sand-shots/` (snow plateau, Desert sand ripples).
+
+## Handoff (step 3)
+
+- **Topic / step:** 328, step 3 (Hive 1576). Branch `claude/schnee-sand-weiter-parameter-screenshots`.
+- **Decisions taken:** Vec4 packing; sand colour baked; Desert = 16 params. **Suggested, not taken:** raise the slot budget (needs all five renderers + Windows verification), group-specific defaults from the picker values.
+- **Trap:** 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
+- **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 4 (mix texture + procedural, a Mix parameter will need a slot: free one or pack); 3. step 5 trails (Disturbance pin).

@@ -93,6 +93,36 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         "Slope (1 - normal.y) where automatic standing water has faded out completely; it starts to thin "
         "out from a fifth of that, and the damp ground beside a puddle fades out at twice it. "
         "0.08 ~ 23 degrees. Painted puddles ignore it.");
+    // The procedural snow / sand (MF_ProceduralSnow / MF_ProceduralSand). The defaults are the
+    // functions' own, the colours the references': see where they are wired below.
+    const int pSnowColor = w.node(T::ParamColor, 0);
+    {
+        MatGraphNode* c = r.graph.findNode(pSnowColor);
+        c->s = kAutoLandscapeParamSnowColor;
+        c->p[0] = 0.82f; c->p[1] = 0.85f; c->p[2] = 0.90f;
+        c->group = "Snow";
+        c->tooltip = "Colour of the procedural snow (linear).";
+    }
+    const int pSnowLook = w.node(T::ParamVec4, 0);
+    {
+        MatGraphNode* c = r.graph.findNode(pSnowLook);
+        c->s = kAutoLandscapeParamSnowLook;
+        c->p[0] = 0.5f; c->p[1] = 0.5f; c->p[2] = 0.35f; c->p[3] = 0.5f;
+        c->group = "Snow";
+        c->tooltip = "Procedural snow, x..w: Grain (0..1, how coarse the crystals read), Drift (0..1, wind-blown "
+                     "ridges), Glitter (0..1, sparkle in the sun), Softness (0..1, how deep and rounded the surface is).";
+    }
+    int pSandLook = -1;
+    if (group.proceduralSand)
+    {
+        pSandLook = w.node(T::ParamVec4, 0);
+        MatGraphNode* c = r.graph.findNode(pSandLook);
+        c->s = kAutoLandscapeParamSandLook;
+        c->p[0] = 0.03f; c->p[1] = 0.5f; c->p[2] = 0.3f; c->p[3] = 0.3f;
+        c->group = "Sand";
+        c->tooltip = "Procedural sand, x..w: Grain Size (metres), Ripple (0..1, how pronounced the wind ripples "
+                     "are), Ripple Size (metres from crest to crest), Glitter (0..1).";
+    }
 
     // ── Coordinates and slope (column 1) ─────────────────────────────────────
     const int wpos   = w.node(T::WorldPos, 1);
@@ -177,8 +207,13 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
             MatGraphNode* c = r.graph.findNode(sandColor);
             c->p[0] = 0.221f; c->p[1] = 0.168f; c->p[2] = 0.104f;
         }
+        const int look = w.op(T::SplitRGBA, 2, { { pSandLook } });
         r.graph.connect(xz, 0, sand, kSandInPosition);
         r.graph.connect(sandColor, 0, sand, kSandInColor);
+        r.graph.connect(look, 0, sand, kSandInGrainSize);
+        r.graph.connect(look, 1, sand, kSandInRipple);
+        r.graph.connect(look, 2, sand, kSandInRippleSize);
+        r.graph.connect(look, 3, sand, kSandInGlitter);
         r.graph.connect(weather, 0, sand, kSandInWetness);
         grass = surfaceOf(sand, 2);
     }
@@ -193,14 +228,14 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     LayerReads snow;
     {
         const int call = callFunction(kProceduralSnowFunctionPath, 2);
-        const int snowColor = w.node(T::ConstColor, 2);
-        {
-            MatGraphNode* c = r.graph.findNode(snowColor);
-            c->p[0] = 0.82f; c->p[1] = 0.85f; c->p[2] = 0.90f;
-        }
+        const int look = w.op(T::SplitRGBA, 2, { { pSnowLook } });
         r.graph.connect(xz, 0, call, kSnowInPosition);
         r.graph.connect(weather, 3, call, kSnowInCover);
-        r.graph.connect(snowColor, 0, call, kSnowInColor);
+        r.graph.connect(pSnowColor, 0, call, kSnowInColor);
+        r.graph.connect(look, 0, call, kSnowInGrain);
+        r.graph.connect(look, 1, call, kSnowInDrift);
+        r.graph.connect(look, 2, call, kSnowInGlitter);
+        r.graph.connect(look, 3, call, kSnowInSoftness);
         r.graph.connect(weather, 0, call, kSnowInMelt);
         snow = surfaceOf(call, 2);
     }

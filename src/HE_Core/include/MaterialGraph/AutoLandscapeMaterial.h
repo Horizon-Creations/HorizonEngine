@@ -244,7 +244,15 @@ inline constexpr char kAutoLandscapeParamSnowMaxSlope[]   = "Snow Max Slope";
 inline constexpr char kAutoLandscapeParamPuddleAmount[]   = "Puddle Amount";
 inline constexpr char kAutoLandscapeParamPuddleMaxSlope[] = "Puddle Max Slope";
 inline constexpr char kAutoLandscapeSwitchBombing[]       = "Texture Bombing";
-inline constexpr int  kAutoLandscapeParamCount            = 13;   // "Puddle Size" moved to the Weather panel
+// The procedural surfaces. A graph has kMatMaxParams (16) HeParams slots and 13 were taken, so the
+// look is packed: one Vec4 each (x..w in the order named here), plus the snow's colour as a colour
+// picker. The sand's colour is the reference's mean and stays baked, the Desert would be over budget.
+inline constexpr char kAutoLandscapeParamSnowColor[]      = "Snow Color";
+inline constexpr char kAutoLandscapeParamSnowLook[]       = "Snow Look";  // Grain, Drift, Glitter, Softness
+inline constexpr char kAutoLandscapeParamSandLook[]       = "Sand Look";  // Grain Size (m), Ripple, Ripple Size (m), Glitter
+inline constexpr int  kAutoLandscapeParamCount            = 15;   // every group; the Desert adds Sand Look
+inline constexpr int  autoLandscapeParamCount(const AutoLandscapeGroup& g)
+{ return kAutoLandscapeParamCount + (g.proceduralSand ? 1 : 0); }
 
 // What the Output node shows. Lit is the material. The mask views are UNLIT
 // debug views over the very same mask nodes (the witness's numeric oracle):
