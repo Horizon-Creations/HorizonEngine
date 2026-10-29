@@ -29,6 +29,7 @@
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
 #include <ContentManager/DefaultAssets.h>   // kLegacyEngineWaterMaterialId
+#include <MaterialGraph/AutoLandscapeMaterial.h>   // kAutoLandscapeGroupCount, for mixGroups
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
@@ -741,6 +742,12 @@ namespace
 					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
 					                                      t->layerWeights2.size());
 			}
+			// Mixed texture groups (Thema 233, step 7): the second/third group whose
+			// share sits in weight layer 6/7. Written only when one is set, so a
+			// one-group terrain (every scene before this field, and every terrain that
+			// never used it) saves byte for byte as before.
+			if (t->mixGroup[0] >= 0 || t->mixGroup[1] >= 0)
+				tc["mixGroups"] = { t->mixGroup[0], t->mixGroup[1] };
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -1755,6 +1762,20 @@ namespace
 				t.layerWeights2 = base64Decode(c["layerWeights2B64"].get<std::string>());
 				if (t.layerWeights2.size() != t.layerWeights.size())
 					t.layerWeights2.clear();
+			}
+			// Mixed texture groups. Absent in every scene written before this field, and in
+			// every one-group terrain written by this build → both slots stay -1, which is
+			// the legacy, single-group look. Out-of-range or duplicate entries are dropped
+			// rather than carried, same as a truncated weightmap above.
+			t.mixGroup[0] = t.mixGroup[1] = -1;
+			if (c.contains("mixGroups") && c["mixGroups"].is_array() && c["mixGroups"].size() == 2)
+			{
+				int g0 = c["mixGroups"][0].get<int>();
+				int g1 = c["mixGroups"][1].get<int>();
+				if (g0 < 0 || g0 >= HE::kAutoLandscapeGroupCount) g0 = -1;
+				if (g1 < 0 || g1 >= HE::kAutoLandscapeGroupCount || g1 == g0) g1 = -1;
+				t.mixGroup[0] = g0;
+				t.mixGroup[1] = g1;
 			}
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{

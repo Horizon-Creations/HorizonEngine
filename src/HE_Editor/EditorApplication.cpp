@@ -7747,6 +7747,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		const bool builtin = mode == "builtin";
 		const bool normalV = mode == "normal";
 		const bool surface = mode == "surface";
+		// HE_DUMP_AUTOLANDGROUP=Forest|Grassland|Desert (Thema 233): the texture group the witness shows
+		// (default Mountains = the shipped material). Its arrays are its own, so a group without them
+		// in the cache or EngineContent draws the white fallback, like Mountains does without its own.
+		const HE::AutoLandscapeGroup* group = &HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains);
+		if (const char* gn = std::getenv("HE_DUMP_AUTOLANDGROUP"); gn && *gn)
+			for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+				if (std::string_view(gn) == g.name) group = &g;
 		constexpr float kBaseY = 300.0f;
 		// HE_DUMP_AUTOLANDHEIGHT / HE_DUMP_AUTOLANDRAMP (metres): the plateau height and the
 		// width of the smoothstep ramp. The defaults (40 / 32) are the steep ramp every
@@ -7787,7 +7794,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(
 				masks   ? HE::AutoLandscapeView::MasksRockSnowWater :
 				ground  ? HE::AutoLandscapeView::MasksDirtWet :
-				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface);
+				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface, group->id);
 			for (HE::MatGraphNode& n : built.graph.nodes)
 				if (n.type == HE::MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamSnowHeight)
 					n.p[0] = snowHeight;
@@ -7802,11 +7809,11 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		}
 		else
 		{
-			const HE::UUID parent = contentManager().loadAsset(HE::kAutoLandscapeMaterialPath);
+			const HE::UUID parent = contentManager().loadAsset(group->materialPath);
 			MaterialAsset inst;
 			inst.type = HE::AssetType::Material;
 			inst.name = "AutoLandscapeWitness";
-			inst.parentMaterialPath       = HE::kAutoLandscapeMaterialPath;
+			inst.parentMaterialPath       = group->materialPath;
 			inst.graphParamNames          = { HE::kAutoLandscapeParamSnowHeight };
 			inst.shaderParamData          = { snowHeight, 0.0f, 0.0f, 0.0f };
 			inst.instanceOverriddenParams = { HE::kAutoLandscapeParamSnowHeight };
@@ -7817,7 +7824,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			}
 			amId = contentManager().registerMaterial(std::move(inst));
 			contentManager().syncMaterialInstance(amId);
-			what = std::string(parent == HE::kAutoLandscapeMaterialId ? "shipped asset" : "ASSET NOT FOUND")
+			what = std::string(parent == group->materialId ? "shipped asset" : "ASSET NOT FOUND")
+			     + " (" + group->name + ")"
 			     + (noBomb ? ", bombing off" : ", bombing on");
 		}
 
@@ -7851,7 +7859,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			ma ? HE::matGlslTextureArrayMask(ma->customShaderFragGlsl) : 0u,
 			ma ? ma->graphParamNames.size() : size_t(0), snowHeight);
 
-		// HE_DUMP_AUTOLANDMESHES=tuft,pebble,rocka,rockb,rockc,snowdrift (Thema 180 Schritt 5): a
+		// HE_DUMP_AUTOLANDMESHES=tuft,pebble,rocka,rockb,rockc,snowdrift,fern,.. (Thema 180 Schritt 5, any kind's stem): a
 		// Foliage component on this landscape with one layer per named kind, each filled by its
 		// preset (LayerMeshPresets.h) and so drawn through the foliage cluster path. Every level
 		// file is loaded here (engine files are not resident by themselves, and a mesh the
@@ -7880,17 +7888,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				std::string item = spec.substr(at, end - at);
 				at = end + 1;
 				for (char& ch : item) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-				static const std::pair<const char*, HE::LayerMeshKind> kinds[] = {
-					{ "tuft", HE::LayerMeshKind::Tuft },     { "pebble", HE::LayerMeshKind::Pebble },
-					{ "rocka", HE::LayerMeshKind::RockA },   { "rockb", HE::LayerMeshKind::RockB },
-					{ "rockc", HE::LayerMeshKind::RockC },   { "snowdrift", HE::LayerMeshKind::SnowDrift } };
-				const HE::LayerMeshKind* kind = nullptr;
-				for (const auto& kv : kinds) if (item == kv.first) kind = &kv.second;
+				// A kind's file stem, any case (tuft, pebble, rocka .. snowdrift, fern, foreststump,
+				// fallenlog, mossrock, tallgrass, flowertuft, screechip).
+				const HE::LayerMeshKind kindOfItem = HE::layerMeshKindOfStem(item);
+				const HE::LayerMeshKind* kind = kindOfItem == HE::LayerMeshKind::Count ? nullptr : &kindOfItem;
 				if (!kind) continue;
 				FoliageLayer* layer = made == 0 ? &fol.layers[0] : fol.addLayer();
 				if (!layer) break;
 				++made;
-				HE::applyLayerMeshPreset(*layer, *kind);
+				HE::applyLayerMeshPreset(*layer, *kind, group->id);   // the witness's HE_DUMP_AUTOLANDGROUP
 				layer->density *= densMul;
 				if (const char* ru = std::getenv("HE_DUMP_AUTOLANDMESHRULES"); ru && *ru && std::atoi(ru) == 0)
 				{
@@ -9121,8 +9127,12 @@ void EditorApplication::dumpFrameHeadless()
 	auto arriveArrays = [&](const char* when)
 	{
 		namespace fs = std::filesystem;
-		for (const char* rel : { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
-		                         HE::kAutoLandscapeMaskArray })
+		// The arrays of the texture group HE_DUMP_AUTOLANDGROUP names (default Mountains), Thema 233.
+		const HE::AutoLandscapeGroup* arriveGroup = &HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains);
+		if (const char* gn = std::getenv("HE_DUMP_AUTOLANDGROUP"); gn && *gn)
+			for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+				if (std::string_view(gn) == g.name) arriveGroup = &g;
+		for (const char* rel : arriveGroup->arrayPaths)
 		{
 			const std::string relPath(rel);
 			const std::string leaf = fs::path(relPath).filename().string();

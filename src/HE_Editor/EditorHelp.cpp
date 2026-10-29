@@ -7425,6 +7425,33 @@ namespace
 	  "can paint are the ones named by the material's Landscape Layer Blend "
 	  "node, and with no such node the Paint tool stays greyed out.",
 	  "", "scenes#terrain" },
+	{ "Landscape/Texture Group", "Texture Group",
+	  "The terrain theme the landscape is shaded as: Mountains, Forest, "
+	  "Grassland or Desert. Each is its own landscape material with its own textures and its "
+	  "own names for the paint layers. Switching keeps everything you painted — "
+	  "there is one weightmap per landscape and layer 1 to 4 mean the same role "
+	  "(ground, soil, rock, snow) in every group, so only the look changes. Auto "
+	  "(layer 0) picks the texture by slope and height; painting a layer on top "
+	  "chooses one by hand.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Mix Group", "Mix Group",
+	  "A second (and third) group whose share of this landscape is kept apart from "
+	  "the one above — None leaves the slot unused. Picking one does not change how "
+	  "the landscape looks by itself: it reserves paint channels 6 and 7 for that "
+	  "group's share, which the Paint tab's Active Group then lets you set by hand. "
+	  "A group already used by the terrain's own slot or the other Mix Group slot is "
+	  "greyed out.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Group Meshes", "",
+	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
+	  "group that it does not scatter yet: ferns, stumps, logs and mossy rocks in "
+	  "the Forest, tall grass, flower tufts and a few stones in the Grassland, dune "
+	  "grass, cacti and sandstone blocks in the Desert, grass "
+	  "tufts, pebbles, boulders and snow drifts in the Mountains. Rock is placed "
+	  "where the group's own material shows rock. It only adds - switching the "
+	  "group never removes or changes a layer, and a layer you already have is left "
+	  "alone.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
 	  "offered while a material of your own is assigned.",
@@ -7450,6 +7477,12 @@ namespace
 	  "was painted. A starting point for a landscape built by hand: fill with the "
 	  "base layer, then paint the rest over it. One undo step.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Active Group", "Active Group",
+	  "Only shown once a Mix Group is set up (Setup tab). Which group this stroke "
+	  "marks the ground as, beside painting the layer below: the terrain's own group, "
+	  "or one of the Mix Groups. A dash is a slot with no group in it yet. Ctrl+drag "
+	  "always hands the spot back to the terrain's own group, whichever is active.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
 	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
@@ -7574,7 +7607,8 @@ namespace
 	  "Throws away every painted layer weight, putting the whole landscape back "
 	  "on the first layer. It is one undo step, but it removes the entire "
 	  "weightmap rather than the last stroke — and it is what unlocks the "
-	  "weightmap resolution again.",
+	  "weightmap resolution again. Any Mix Groups are dropped with it, since "
+	  "their shares lived in the same weightmap.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Reset Sculpting", "",
 	  "Discards every sculpted height, so the landscape falls back to the shape "

@@ -90,6 +90,18 @@ struct TerrainComponent {
     // shader needs no second sampler or binding on any backend.
     std::vector<uint8_t>  layerWeights2;
 
+    // ── Mixed texture groups (Thema 233, step 7) ─────────────────────────────
+    // A terrain's own group is its landscape material (MaterialComponent::materialAssetId).
+    // mixGroup[k] names a SECOND group whose share of every texel lives in weight layer
+    // 6 + k (k = 0, 1): the AutoLandscapeGroupId's int, -1 = none. The terrain's own group
+    // is the remainder (1 - share6 - share7), so a texel nobody painted is the own group
+    // alone, exactly what every landscape was before this field. A reserved layer is a
+    // GROUP SHARE and not a paint layer: it is left out of the 255-sum of layers 0..5
+    // (TerrainPaint), and the material must not use layers 6/7 as its own paint layers
+    // (the engine's group materials declare six). Saved only once one is set.
+    // Order matters nowhere else: -1 on both is the legacy, one-group terrain.
+    int mixGroup[2] = { -1, -1 };
+
     // ── Water ────────────────────────────────────────────────────────────────
     // The water bodies on this landscape and the raster that says where they are
     // (WaterField.h). One model for the water brush and the lake tool. Saved with

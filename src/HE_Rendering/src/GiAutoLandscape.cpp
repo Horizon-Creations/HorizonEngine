@@ -46,7 +46,12 @@ int giAutoLandscapeParams(const MaterialAsset& ma,
 
 	int slot = -1;
 	for (size_t i = 0; i < ma.graphTexturePaths.size(); ++i)
-		if (ma.graphTexturePaths[i] == kAutoLandscapeAlbedoArray) { slot = static_cast<int>(i); break; }
+	{
+		// The albedo array of ANY texture group (Forest and Grassland have their own arrays).
+		int map = -1;
+		if (autoLandscapeGroupOfArray(ma.graphTexturePaths[i].c_str(), &map) >= 0 && map == 0)
+		{ slot = static_cast<int>(i); break; }
+	}
 	if (slot < 0 && ma.graphTexturePaths.empty() && !ma.graphTextureIds.empty()) slot = 0; // packed: ids only
 	if (slot < 0) return -1;
 

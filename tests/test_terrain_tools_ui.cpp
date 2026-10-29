@@ -12,6 +12,7 @@
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/Components/FoliageComponent.h>
+#include <HorizonScene/LayerMeshPresets.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
@@ -22,6 +23,10 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/DefaultAssets.h>
+#include <ContentManager/ContentManager.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/Components/MaterialComponent.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>   // GetHoveredID / FindWindowByName: which item the pointer is on
@@ -31,6 +36,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
@@ -1218,3 +1224,234 @@ TEST_CASE("landscape ui: the Water panel's Physics rows set what a body of water
 	clickAt(ctx, wx, wy);
 	CHECK(locate(ctx, panelId("##lsTool0"), wx, wy));
 }
+
+#ifdef HE_EDITOR_DEPS_DIR
+// ── Texture groups: the Setup picker and the Paint list (Thema 233, step 3) ───
+// A group IS the terrain's landscape material. What this asks of the real panel: the picker lists
+// exactly the group table, picking Forest binds Forest's material and moves no weight, the Paint list
+// is then Forest's, and a stroke on one row writes only that channel (normalised to 255) at the centre
+// of the brush and nothing outside it.
+TEST_CASE("landscape ui: the Texture Group picker switches the material only, painting writes the chosen channel")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+		REQUIRE_MESSAGE(cm.loadAsset(g.materialPath) == g.materialId, g.name);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	TerrainPaint::ensureWeightmap(tc);
+	TerrainPaint::paint(tc, 30.0f, 30.0f, 2, 8.0f, 4.0f, 1.0f);   // some paint to keep
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::kAutoLandscapeMaterialId;              // a scene from before groups
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	const std::vector<uint8_t> weights0 = tc.layerWeights;
+
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	// ── Setup: one cell per row of the group table, and nothing else ──
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float gx[HE::kAutoLandscapeGroupCount], gy[HE::kAutoLandscapeGroupCount];
+	for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+	{
+		const std::string id = std::string("##lsGroup") + HE::kAutoLandscapeGroups[i].name;
+		REQUIRE_MESSAGE(locate(ctx, panelId(id.c_str()), gx[i], gy[i]), id);
+	}
+	CHECK_FALSE(locate(ctx, panelId("##lsGroupMixed"), sx, sy));    // no "mixed" cell (step 7)
+	he_ui::Image img;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
+	dump(img, "landscape-group-picker");
+
+	// Clicking the group the terrain already has is nothing: no undo step, no change.
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, gx[0], gy[0]);
+	CHECK(undo.undoDepth() == depth0);
+
+	// ── Forest: the material changes, the weights do not ──
+	clickAt(ctx, gx[1], gy[1]);
+	const HE::AutoLandscapeGroup& forest = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == forest.materialId);
+	CHECK(reg.get<MaterialComponent>(terrain).dirty);
+	CHECK(reg.get<TerrainComponent>(terrain).layerWeights == weights0);
+	CHECK(reg.get<TerrainComponent>(terrain).layerWeights2.empty());
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// ── Desert, the fourth cell: its own material, the weights still untouched; then back to Forest ──
+	clickAt(ctx, gx[3], gy[3]);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Desert).materialId);
+	CHECK(reg.get<TerrainComponent>(terrain).layerWeights == weights0);
+	clickAt(ctx, gx[1], gy[1]);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == forest.materialId);
+
+	// ── Paint: Forest's list; the stroke writes the row's channel ──
+	REQUIRE(locate(ctx, panelId("##lsPaint"), sx, sy));
+	clickAt(ctx, sx, sy);
+	const MaterialAsset* fm = cm.getMaterial(forest.materialId);
+	REQUIRE(fm);
+	REQUIRE(fm->graphLayerNames.size() == static_cast<size_t>(HE::kAutoLandscapePaintLayerCount));
+	CHECK(fm->graphLayerNames[0] == "Auto");
+	CHECK(fm->graphLayerNames[1] == "Forest Floor");
+	CHECK(fm->graphLayerNames[3] == "Mossy Rock");
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
+	dump(img, "landscape-paint-forest");
+
+	// A row's id: PushID(i) under the body child, then "##layer".
+	auto layerRow = [&](int i, float& x, float& y)
+	{
+		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
+		REQUIRE(w != nullptr);
+		for (float py = 14.0f; py < float(PH) - 14.0f; py += 4.0f)
+			for (float px = 14.0f; px < float(W) - 14.0f; px += 12.0f)
+			{
+				const ImGuiID hov = idAt(ctx, px, py);
+				for (ImGuiWindow* c : w->DC.ChildWindows)
+					if (c && hov == ImHashStr("##layer", 0, ImHashData(&i, sizeof(i), c->ID)))
+					{ x = px; y = py; return true; }
+			}
+		return false;
+	};
+	float rx = 0.0f, ry = 0.0f;
+	REQUIRE_MESSAGE(layerRow(3, rx, ry), "no 4th row (Mossy Rock) in Forest's paint list");
+	clickAt(ctx, rx, ry);
+
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cx = float(W) * 0.5f, cy = float(H) * 0.5f;
+	viewportFrame(ctx, snap, cx, cy, false);
+	viewportFrame(ctx, snap, cx, cy, false);
+	viewportFrame(ctx, snap, cx, cy, true);
+	viewportFrame(ctx, snap, cx, cy, false);
+
+	const TerrainComponent& painted = reg.get<TerrainComponent>(terrain);
+	REQUIRE(painted.layerWeights.size() == weights0.size());
+	auto texel = [&](const TerrainComponent& t, float lx, float lz, uint8_t* out)
+	{
+		const uint32_t n = t.weightRes;
+		const uint32_t tx = static_cast<uint32_t>(std::lround((lx / t.sizeX + 0.5f) * float(n - 1)));
+		const uint32_t tz = static_cast<uint32_t>(std::lround((lz / t.sizeZ + 0.5f) * float(n - 1)));
+		REQUIRE(TerrainPaint::texelWeights(t, tx, tz, out));
+	};
+	uint8_t centre[8], was[8], far[8], farWas[8];
+	texel(painted, 0.0f, 0.0f, centre);
+	TerrainComponent before;
+	before.sizeX = before.sizeZ = 100.0f; before.weightRes = 64;
+	before.layerWeights = weights0;
+	texel(before, 0.0f, 0.0f, was);
+	CHECK(centre[3] == 255);                                  // the chosen channel took the centre
+	int sum = 0;
+	for (int k = 0; k < 8; ++k) sum += centre[k];
+	CHECK(sum == 255);                                        // and the texel is still normalised
+	CHECK(was[3] == 0);
+	texel(painted, 30.0f, 30.0f, far);
+	texel(before, 30.0f, 30.0f, farWas);
+	for (int k = 0; k < 8; ++k) CHECK(far[k] == farWas[k]);   // outside the brush nothing moved
+	CHECK(far[2] > 0);                                        // the earlier paint is still there
+
+	// ── Auto (row 0) paints back to the default: a channel-0 stroke takes a texture choice back ──
+	REQUIRE(layerRow(0, rx, ry));
+	clickAt(ctx, rx, ry);
+	viewportFrame(ctx, snap, cx, cy, false);
+	viewportFrame(ctx, snap, cx, cy, true);
+	viewportFrame(ctx, snap, cx, cy, false);
+	texel(reg.get<TerrainComponent>(terrain), 0.0f, 0.0f, centre);
+	CHECK(centre[0] == 255);
+
+	// Back to Sculpt, so the file-static mode does not leak into another test.
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
+	clickAt(ctx, sx, sy);
+}
+TEST_CASE("landscape ui: Apply Group Meshes adds the group's layers, never removes or repeats one")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+		REQUIRE_MESSAGE(cm.loadAsset(g.materialPath) == g.materialId, g.name);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest).materialId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+	// A layer the author made: it carries a mesh of its own and tuned numbers, and must survive.
+	FoliageComponent fol;
+	fol.layers[0].name = "My Bush";
+	fol.layers[0].meshAssetId = HE::UUID{ 0xABCDEFULL, 0x1ULL };
+	fol.layers[0].density = 0.777f;
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Group Meshes"), bx, by), "no Apply Group Meshes button in Setup");
+
+	const auto layerNames = [&] {
+		std::vector<std::string> n;
+		for (const FoliageLayer& l : reg.get<FoliageComponent>(terrain).layers) n.push_back(l.name);
+		return n;
+	};
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, bx, by);
+	// Forest's four kinds, after the author's own layer (which is untouched).
+	CHECK(layerNames() == std::vector<std::string>{ "My Bush", "Fern", "Forest Stump", "Fallen Log", "Mossy Rock" });
+	{
+		const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		CHECK(f.layers[0].density == 0.777f);
+		CHECK(f.layers[0].meshAssetId == HE::UUID{ 0xABCDEFULL, 0x1ULL });
+		CHECK(f.layers[1].meshAssetId == HE::layerMeshLevel0(HE::LayerMeshKind::Fern));
+		// Forest's row: the Mossy Rock stands from 0.13, not Mountains' 0.15.
+		CHECK(f.layers[4].slopeMin == 0.13f);
+	}
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Again: nothing is missing, so nothing is added and no undo step is spent.
+	clickAt(ctx, bx, by);
+	CHECK(layerNames().size() == 5u);
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Switching the group keeps every layer; Apply then adds that group's kinds beside them.
+	float gx = 0.0f, gy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsGroupMountains"), gx, gy));
+	clickAt(ctx, gx, gy);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == HE::kAutoLandscapeMaterialId);
+	CHECK(layerNames().size() == 5u);
+	clickAt(ctx, bx, by);
+	CHECK(layerNames().size() == 5u + 6u);
+	CHECK(layerNames()[5] == "Grass Tuft");
+	CHECK(reg.get<FoliageComponent>(terrain).layers[0].name == "My Bush");
+}
+
+#endif // HE_EDITOR_DEPS_DIR
