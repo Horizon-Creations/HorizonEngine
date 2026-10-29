@@ -127,6 +127,9 @@ Consequence of B, stated plainly: **one terrain = one group.** Mixing groups = t
   * **Mountains**: today's `Tuft, Pebble, RockA, RockB, RockC, SnowDrift` unchanged (`LayerMeshPresets.h:78-118`), plus `ScreeChip` (2 levels).
   * **Forest**: `Fern` (3), `ForestStump` (2), `FallenLog` (2), `MossRock` (3, rounder than RockA/B/C).
   * **Grassland**: `TallGrass` (3), `FlowerTuft` (3); reuses `Pebble` and a small rock.
+* **As built (step 4, see `docs/landscape-3-0-layer-meshes-2026-10-29.md`):** Mountains stays exactly the six (a test pins every value); Forest =
+  `Fern, ForestStump, FallenLog, MossRock`; Grassland = `TallGrass, FlowerTuft, Pebble, RockA, ScreeChip` (ScreeChip went to Grassland, not
+  Mountains, because Mountains is pinned to six). The ids below were used as suggested (`0x119..0x12A`, all 18 files exist).
 * **Ids.** Last used: SnowDrift `0x117` + 1 level = `0x118` (`DefaultAssets.h:128-133`). Next free is `0x119`; `mesh_gen` derives an id as
   `0x100 + table index` (`MeshGen/main.cpp:38`, check `:653-657`), append only. A suggested allocation, **to be fixed against the table position when
   step 4 adds the rows**: Fern `0x119-0x11B`, ForestStump `0x11C-0x11D`, FallenLog `0x11E-0x11F`, MossRock `0x120-0x122`, TallGrass `0x123-0x125`,
