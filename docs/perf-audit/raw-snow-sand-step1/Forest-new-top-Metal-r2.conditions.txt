@@ -1,0 +1,21 @@
+label: Forest-new-top-Metal-r2
+attempt: 1
+editor: /tmp/he328/new/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 3.82 3.30 2.93
+  locked:    Yes
+  lowpower:  0
+  gpu:       10
+  power:     Now drawing from 'AC Power'
+  busy:      20.3% WindowServer; 18.3% Python; 10.0% coreaudiod; 5.7% WallpaperAerialsExtension
+  foreign:   none
+after:
+  uptime:    load averages: 3.43 3.24 2.92
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      94.7% icloudmailagent; 25.3% WindowServer; 14.0% Dock; 12.9% coreaudiod
+  foreign:   none

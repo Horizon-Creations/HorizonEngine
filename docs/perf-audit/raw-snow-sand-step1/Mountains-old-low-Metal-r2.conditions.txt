@@ -1,0 +1,21 @@
+label: Mountains-old-low-Metal-r2
+attempt: 1
+editor: /tmp/he328/old/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 3.30 3.24 2.96
+  locked:    Yes
+  lowpower:  0
+  gpu:       10
+  power:     Now drawing from 'AC Power'
+  busy:      20.7% WindowServer; 16.1% Python; 9.9% coreaudiod; 4.7% clion
+  foreign:   none
+after:
+  uptime:    load averages: 3.66 3.33 3.00
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      25.4% WindowServer; 13.0% lskdd; 11.4% coreaudiod; 11.1% Dock
+  foreign:   none
