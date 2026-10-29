@@ -116,12 +116,28 @@ any other material can call them too.
 - **Not verified:** a changed value in the live editor (instance panel / Vec4 widget), OpenGL/D3D/Vulkan, a Material Instance override of the new names.
 - **Shots:** `docs/landscape-3-0-procedural-snow-sand-shots/` (snow plateau, Desert sand ripples).
 
-## Handoff (step 3)
+## Handoff (steps 3, 5a; step 4 withdrawn)
 
 - **Topic / step:** 328, step 3 (Hive 1576). Branch `claude/schnee-sand-weiter-parameter-screenshots`.
 - **Decisions taken:** Vec4 packing; sand colour baked; Desert = 16 params. **Suggested, not taken:** raise the slot budget (needs all five renderers + Windows verification), group-specific defaults from the picker values.
 - **Trap:** 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
 - **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 4 (mix texture + procedural, a Mix parameter will need a slot: free one or pack); 3. step 5 trails (Disturbance pin).
+
+## Step 5a (Thema 328): trail field on the CPU, print look in the functions
+
+Step 5 of the topic is split: this part is everything that can be built and verified on the Mac without a new texture binding in five renderers; the GPU upload and the landscape wiring are step 5b (below).
+
+- **Functions:** `MF_ProceduralSnow` / `MF_ProceduralSand` got one appended input, `Disturbance Slope` (Vec2, pin 10 / 9, default 0), and now read `Disturbance` (pin 9 / 8). A print is darker (snow x(1-0.18 D), sand x(1-0.25 D)), glossier (-0.25 / -0.15 D roughness), shaded (-0.35 D AO), its rim leans the normal by 0.3 x slope, and in the sand it stamps the ripples flat (ripple slope x (1-D)). **Height is untouched** (the interface test now asserts neither input reaches Height). Both defaults 0 = the surface exactly as before.
+- **`HE::TrailField`** (`src/HE_Core/include/Trails/TrailField.h`, `src/Trails/TrailField.cpp`): sparse pages of 128 m x 128 m at 0.25 m, 16-bit depth, allocated on the first stamp and freed when empty. `stampEllipse` (footprint, yaw), `stampCapsule` (tyre / sled line, spans pages), `tick(time, TrailWeather, TrailSettings)` (fixed 4 Hz steps, the plan's heal formulas: snow = hSnow x snowfall + hDrift x wind + hMelt x wetness, sand = hWind x wind^2 x (1 - 0.9 wet) x (1 - 0.9 rain), a page uses the faster of its kinds), `sample` (bilinear) and `gradient` (what `Disturbance Slope` takes). `tests/test_trail_field.cpp` (9 cases): soft press, max semantics, yaw, capsule across page borders, gradient sign, no-weather = no heal, snowfall rate, slow heal not truncating, sand wind^2 and wet/rain freezing, long pause.
+- **Decisions changed against the plan (3.2/3.3/3.4):** (1) pages are **16 bit**, not R8: the plan's 8-bit store needs a float heal on the GPU to avoid truncation; the heal now runs on the CPU, so the extra byte buys it; (2) `eff = D` for snow, not `D x cover`: the snow mask already decides where snow lies, and `Cover` is 0 on height-snow, which would never take a print; (3) the field is **not** a GPU compute/FBO path (see 5b).
+- **Verified (Mac, Release, Metal):** ctest 346/346. Witness A/B of the default render (D = 0) against the step 3 baseline: Mountains top bit-identical, snow plateau and sand close max 1/255 (same md5s as step 3: e7384f1d..., ff7b31d1...). `matfn_gen` + `landscape_tex_gen` regenerate every asset deterministically. A temporary experiment (functions rebuilt with a constant D = 0.8 and slope 1.2, deployed functions and materials swapped, restored byte-identical) changed the render hard (snow dark blue, sand black from the leaned normals), so the pins do reach the lighting; a constant is not a footprint, no screenshot is kept.
+- **Trap found:** the editor reads the function assets from its deploy's `EngineContent/MaterialFunctions`, not only the baked landscape text: a function default changed in a test must be swapped there too.
+- **Not done / not verified:** no footprint is visible yet; nothing feeds the pins. No GPU code, no landscape wiring, no D3D / Vulkan / OpenGL. The CPU heal is a 512 x 512 pass per page per tick (fine for tens of pages, not measured).
+
+### Step 5b (next, not started): what makes it visible
+1. A texture the landscape shader can read: the plan's clipmap (2 layers of 512 x 512, R32F / R16F, around the camera) **filled from `TrailField` by the CPU** (upload the changed rows; no compute or FBO write path needed any more), an integer fetch in a new material node ("Trail Sample": depth and slope) and `AutoLandscapeMaterial.cpp` wiring `Disturbance` / `Disturbance Slope` of both calls to it.
+2. Per-backend binding, the same list as `heLandscapeWeights` (~14 files: `MaterialShaderLibrary`, `OpenGLRenderer`, `D3D11/D3D12Renderer` + root signature, `VulkanRenderer` + layout, Metal). Metal and OpenGL can be done and shown on this Mac; D3D / Vulkan stay open Windows steps. First check: the live sampler count of the linked landscape program on macOS GL (16 allowed). Every group is at 16/16 HeParams slots, but trails need no parameter (settings are CPU-side).
+3. Footprints from a test source to see it: a debug key that stamps along the camera path.
 
 ## Step 4 withdrawn (2026-10-29)
 
