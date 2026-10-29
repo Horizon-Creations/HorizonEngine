@@ -353,6 +353,10 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			// Tessellation displacement (Thema 207): appended after the approx block,
 			// absent in older files → empty = no tessellation.
 			HAsset::Reader::readString(c->data,o,a.customShaderDispGlsl);
+			// Landscape foliage set (Thema 327): after the displacement body, absent in
+			// older files → {} = none (readPOD leaves it untouched at EOF).
+			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.hi);
+			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.lo);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -855,6 +859,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->domain               = gen.domain;
 	mat->graphTexturePaths    = gen.textures;
 	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
+	mat->foliageSetId         = gen.foliageSetId; // landscape foliage set (metadata node)
 	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
 	applyApproxSurface(*mat, g);                  // GI-hit colours (needs final param slots)
 }
@@ -928,6 +933,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			applyGraphParams(*inst, gen, nullptr);
 			inst->graphTexturePaths = gen.textures;
 			inst->graphLayerNames      = gen.layerNames; // landscape paint layers
+			inst->foliageSetId         = gen.foliageSetId;
 			inst->blendMode            = gen.blendMode;
 			inst->domain               = gen.domain;
 			inst->customShaderVertGlsl = gen.vertexBody;
@@ -954,6 +960,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		// panel refused to paint with it ("needs a material with a Landscape
 		// Layer Blend node") even though its shader samples the weightmap.
 		inst->graphLayerNames      = parent->graphLayerNames;
+		inst->foliageSetId         = parent->foliageSetId; // same graph = same foliage set
 		inst->shaderParamData      = parent->shaderParamData;
 		inst->precompiledShaders   = parent->precompiledShaders;
 		inst->blendMode            = parent->blendMode;
@@ -2141,6 +2148,10 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		// Tessellation displacement body — after the approx block, which the packer
 		// re-folds and then copies everything behind it verbatim, so this ships too.
 		HAsset::Writer::appendString(b,a.customShaderDispGlsl);
+		// Landscape foliage set — behind the displacement body, so the packer's
+		// verbatim copy of everything after the approx block ships it too.
+		HAsset::Writer::appendPOD(b,a.foliageSetId.hi);
+		HAsset::Writer::appendPOD(b,a.foliageSetId.lo);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

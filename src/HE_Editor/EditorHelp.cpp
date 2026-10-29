@@ -5460,6 +5460,12 @@ namespace
 	  "here IS the set of layers the Landscape tool offers, in this order — up to "
 	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
 	  "", "materials#nodes" },
+	{ "Material Node/Foliage Set", "Landscape Foliage Set",
+	  "The foliage set (a Landscape Foliage asset) this landscape material names for "
+	  "its terrain: which plants grow on which paint layer, and where. Click to pick one "
+	  "or drop it from the Content Browser. The node draws nothing and changes no "
+	  "shader, it only tells the Landscape tool which set belongs to this material.",
+	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
 	  "the graph's colour is the pixel, useful for skies, holograms and anything "

@@ -385,6 +385,13 @@ struct MaterialAsset : public RuntimeAsset
 	// the terrain only stores the weights.
 	std::vector<std::string> graphLayerNames;
 
+	// The LandscapeFoliageLayer a Landscape Foliage node names for this material
+	// (Thema 327); {} = none. Generated from the graph with graphLayerNames, and the
+	// LAST MTRL tail field (after customShaderDispGlsl, which the packer passes on
+	// verbatim). A UUID, not a path: the packer bakes only the refs it knows. Carried
+	// by a material instance like graphLayerNames; the Landscape tool's Apply reads it.
+	HE::UUID foliageSetId{};
+
 	// Precompiled per-backend shaders baked into the .hpak at export time (CHUNK_PSHD).
 	// Empty for loose editor assets → the renderer cross-compiles customShaderFragGlsl at
 	// runtime; when present, the renderer uses the variant for the active backend directly

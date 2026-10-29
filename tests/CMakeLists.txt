@@ -299,6 +299,7 @@ add_executable(he_tests
     test_sequencer_timeline.cpp
     test_sequence.cpp
     test_landscape_foliage_layer.cpp
+    test_landscape_foliage_node.cpp
     test_sequence_runtime.cpp
     test_cinematic_timeline.cpp
     test_animation_ik.cpp
