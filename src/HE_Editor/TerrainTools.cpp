@@ -327,11 +327,15 @@ namespace
 				// layer only qualifies as that pristine starter, never one the author
 				// began hand-tuning (named it, painted a mask, set a rule, added a LOD)
 				// before picking a mesh — meshAssetId=={} alone is not proof of that,
-				// so every other sign of hand-tuning is checked too.
+				// so every other sign of hand-tuning is checked too, the slope and
+				// height rules included (compared bit for bit against FoliageLayer{}).
+				const FoliageLayer pristine{};
 				for (FoliageLayer& l : folc->layers)
 					if (l.meshAssetId == HE::UUID{} && l.materialAssetId == HE::UUID{} &&
 					    l.sourceAssetId == HE::UUID{} && l.name.empty() && l.densityMask.empty() &&
-					    l.lods.empty() && l.weightLayer == -1) { layer = &l; break; }
+					    l.lods.empty() && l.weightLayer == -1 &&
+					    l.slopeMin == pristine.slopeMin && l.slopeMax == pristine.slopeMax &&
+					    l.heightMin == pristine.heightMin && l.heightMax == pristine.heightMax) { layer = &l; break; }
 				if (!layer) layer = folc->addLayer();
 				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
 				layer->sourceAssetId = setId;

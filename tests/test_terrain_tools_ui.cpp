@@ -1941,4 +1941,87 @@ TEST_CASE("landscape ui: Apply Foliage never adopts a hand-tuned layer that has 
 	CHECK(f.layers[1].sourceEntry == 0);
 }
 
+// Step 10 review-fix: the same guard also has to see a layer whose ONLY hand-tuning
+// is a slope or height rule (default name, mesh, mask, LODs, weight layer). Each
+// SUBCASE changes exactly one of the four rule fields; "pristine" is the positive
+// control: an untouched starter is still reused, so the test discriminates.
+TEST_CASE("landscape ui: Apply Foliage reuses only a starter layer whose slope and height rules are default")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const HE::UUID tuftMesh{ 0x7301ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Rule Set";
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Tuft"; e.meshAssetId = tuftMesh; e.density = 0.1f;
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	FoliageComponent fol;                       // one default starter layer
+	bool handTuned = true;
+	SUBCASE("pristine starter")  { handTuned = false; }
+	SUBCASE("slopeMin")          { fol.layers[0].slopeMin  = 0.3f; }
+	SUBCASE("slopeMax")          { fol.layers[0].slopeMax  = 0.7f; }
+	SUBCASE("heightMin")         { fol.layers[0].heightMin = 5.0f; }
+	SUBCASE("heightMax")         { fol.layers[0].heightMax = 50.0f; }
+	const FoliageLayer before = fol.layers[0];
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+	clickAt(ctx, bx, by);
+
+	const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+	if (handTuned)
+	{
+		REQUIRE(f.layers.size() == 2u);                  // the rule layer kept, a new one added
+		CHECK(f.layers[0].sourceAssetId == HE::UUID{});
+		CHECK(f.layers[0].meshAssetId == HE::UUID{});
+		CHECK(f.layers[0].slopeMin  == before.slopeMin);
+		CHECK(f.layers[0].slopeMax  == before.slopeMax);
+		CHECK(f.layers[0].heightMin == before.heightMin);
+		CHECK(f.layers[0].heightMax == before.heightMax);
+		CHECK(f.layers[1].sourceAssetId == setId);
+		CHECK(f.layers[1].meshAssetId == tuftMesh);
+	}
+	else
+	{
+		REQUIRE(f.layers.size() == 1u);                  // the starter itself was reused
+		CHECK(f.layers[0].sourceAssetId == setId);
+		CHECK(f.layers[0].meshAssetId == tuftMesh);
+	}
+}
+
 #endif // HE_EDITOR_DEPS_DIR
