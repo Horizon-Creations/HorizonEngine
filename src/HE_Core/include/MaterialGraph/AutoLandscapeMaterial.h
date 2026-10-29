@@ -93,9 +93,21 @@ inline constexpr char kAutoLandscapeMaskArray[]   = "Engine/Textures/Landscape/T
 // The paint layers, in weightmap-channel order (a Landscape Layer Blend node's
 // names, '\n'-separated → MaterialAsset::graphLayerNames → the Landscape tool's
 // layer list). Auto is layer 0 on purpose: an unpainted landscape resolves to it.
-inline constexpr char kAutoLandscapePaintLayerNames[] = "Auto\nGrass\nDirt\nRock\nSnow\nPuddles";
-enum class AutoLandscapePaintLayer : int { Auto = 0, Grass = 1, Dirt = 2, Rock = 3, Snow = 4, Puddles = 5 };
-inline constexpr int kAutoLandscapePaintLayerCount = 6;
+// Channels 6 and 7 are a deliberate GAP, not Path's position: they are TerrainComponent::
+// mixGroup's two group-share channels (Thema 233 step 7), which a material must never read
+// as a paint weight — an old scene's mix-group share would otherwise be reinterpreted as
+// paint the moment it loads. An empty name segment (two '\n' back to back) keeps list
+// position == weight channel while skipping those two; emitLayerBlendNode drops an empty
+// name out of its sum, so the baked text of every list that has no gap (every material
+// before this one) is unchanged. Path is channel 8, not 6: it reads only where it is
+// painted, so old scenes (channel 8 is always empty — Thema 329 step 1's layerWeights3
+// loads as all-zero when absent) show it nowhere. Channel 9 is reserved for Water
+// (Thema 329 step 4) on the same page — the next name after Path, no further gap.
+inline constexpr char kAutoLandscapePaintLayerNames[] =
+    "Auto\nGrass\nDirt\nRock\nSnow\nPuddles\n\n\nPath";
+enum class AutoLandscapePaintLayer : int
+{ Auto = 0, Grass = 1, Dirt = 2, Rock = 3, Snow = 4, Puddles = 5, Path = 8 };
+inline constexpr int kAutoLandscapePaintLayerCount = 9;
 
 // Slice order of the three arrays (landscape_tex_gen kLayers). WetGround is slice
 // 4 of the arrays only; the material does not read it (puddles are an overlay).
@@ -152,6 +164,12 @@ struct AutoLandscapeGroup
     const char* arrayPaths[3];      // Albedo, Normal, Mask: the heTexP0..2 order of the graph
     const char* paintLayerNames;    // '\n'-separated, kAutoLandscapePaintLayerNames' channel order
     const char* roleLabels[4];      // the group's name for role Grass, Dirt, Rock, Snow
+    // Path's own standalone Albedo texture (Thema 329, step 3) — not one of the arrays above: Path
+    // is paint-only and does not need variants or texture bombing, so a single plain texture is
+    // enough, with no slice/depth math to keep in step with the other roles'. Its normal reads
+    // Dirt's array slot instead of a texture of its own (AutoLandscapeMaterial.cpp explains why:
+    // kMatMaxGraphTextures has no room for a fifth).
+    const char* pathAlbedoPath;
     // The default value of the parameters a group tunes (the others keep the Mountains value).
     float rockSlope, dirtAmount, snowHeight;
     // Role 0 (the ground everything else lies on) is made by MF_ProceduralSand instead of read from
@@ -172,22 +190,25 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       kAutoLandscapeMaterialId, kAutoLandscapeMaterialPath,
       { kAutoLandscapeAlbedoArray, kAutoLandscapeNormalArray, kAutoLandscapeMaskArray },
       kAutoLandscapePaintLayerNames, { "Grass", "Dirt", "Rock", "Snow" },
+      "Engine/Textures/Landscape/T_Landscape_Mountains_Path_Albedo.hasset",
       0.12f, 0.35f, 60.0f },
     { AutoLandscapeGroupId::Forest, "Forest",
       { 0x0000000000000415ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Forest.hasset",
       { "Engine/Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Forest_Normal_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Forest_Mask_Array.hasset" },
-      "Auto\nForest Floor\nRoots\nMossy Rock\nSnow\nPuddles",
+      "Auto\nForest Floor\nRoots\nMossy Rock\nSnow\nPuddles\n\n\nPath",
       { "Forest Floor", "Roots", "Mossy Rock", "Snow" },
+      "Engine/Textures/Landscape/T_Landscape_Forest_Path_Albedo.hasset",
       0.10f, 0.50f, 2000.0f },
     { AutoLandscapeGroupId::Grassland, "Grassland",
       { 0x0000000000000419ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Grassland.hasset",
       { "Engine/Textures/Landscape/T_Landscape_Grassland_Albedo_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Grassland_Normal_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Grassland_Mask_Array.hasset" },
-      "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles",
+      "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles\n\n\nPath",
       { "Meadow", "Bare Soil", "Stones", "Snow" },
+      "Engine/Textures/Landscape/T_Landscape_Grassland_Path_Albedo.hasset",
       0.20f, 0.20f, 2000.0f },
     // Untuned first numbers (Thema 233 step 6): sand holds steep dune flanks, so rock shows late, little
     // hardpan, no snow in reach.
@@ -196,8 +217,9 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       { "Engine/Textures/Landscape/T_Landscape_Desert_Albedo_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Desert_Normal_Array.hasset",
         "Engine/Textures/Landscape/T_Landscape_Desert_Mask_Array.hasset" },
-      "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles",
+      "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles\n\n\nPath",
       { "Sand", "Hardpan", "Sandstone", "Snow" },
+      "Engine/Textures/Landscape/T_Landscape_Desert_Path_Albedo.hasset",
       0.30f, 0.15f, 2000.0f, true },
 };
 

@@ -2191,10 +2191,17 @@ TEST_CASE("Specular and Ambient Occlusion reach the lit shading call")
 TEST_CASE("matLandscapeLayerNames splits, trims and caps the layer list")
 {
 	CHECK(HE::matLandscapeLayerNames("Grass\nRock") == std::vector<std::string>{ "Grass", "Rock" });
+	// A blank segment BETWEEN two real names is kept, not dropped: list position is
+	// weight channel (a reserved mix-group share, or a gap before a later layer —
+	// Thema 329 step 3), so losing it would shift every name after it onto the wrong
+	// channel. Only trimmed to empty, same as any other segment.
 	CHECK(HE::matLandscapeLayerNames("  Grass \n\n\t Rock  ")
-	      == std::vector<std::string>{ "Grass", "Rock" });
-	// Never empty — a node with no names still has one pin.
+	      == std::vector<std::string>{ "Grass", "", "Rock" });
+	// Never empty — a node with no names still has one pin, and the degenerate
+	// all-blank case reads as a fresh, unnamed node ("Layer 1"), not a gap.
 	CHECK(HE::matLandscapeLayerNames("").size() == 1);
+	CHECK(HE::matLandscapeLayerNames("") == std::vector<std::string>{ "Layer 1" });
+	CHECK(HE::matLandscapeLayerNames("   ") == std::vector<std::string>{ "Layer 1" });
 	// Three RGBA weightmap pages = twelve channels, so the list is capped there.
 	CHECK(HE::kMatMaxLandscapeLayers == 12);
 	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn").size()
@@ -2723,17 +2730,24 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	REQUIRE_FALSE(gen.glsl.empty());
 	CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle / missing-output magenta
 
-	// The three engine arrays and nothing else — heTexP3 stays free, no read
-	// falls back to the mesh texture. Slot order is emission order, so compare
-	// as a set.
+	// The three engine arrays plus Path's own standalone Albedo (Thema 329, step 3) —
+	// heTexP4+ stays free, no read falls back to the mesh texture. Slot order is
+	// emission order, so compare as a set; which slot is Path's (a plain, non-array
+	// sample) depends on that order too, so pin the POPULATION COUNT of array slots,
+	// not a literal mask.
 	std::vector<std::string> tex = gen.textures;
 	std::sort(tex.begin(), tex.end());
 	std::vector<std::string> want = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
-	                                  HE::kAutoLandscapeMaskArray };
+	                                  HE::kAutoLandscapeMaskArray, HE::kAutoLandscapeGroups[0].pathAlbedoPath };
 	std::sort(want.begin(), want.end());
 	CHECK(tex == want);
-	CHECK(gen.textureArrayMask == 0x7u);
-	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == 0x7u);
+	{
+		uint32_t bits = 0; for (uint32_t m = gen.textureArrayMask; m; m &= m - 1) ++bits;
+		CHECK(bits == 3u);
+		uint32_t glslBits = 0;
+		for (uint32_t m = HE::matGlslTextureArrayMask(gen.glsl); m; m &= m - 1) ++glslBits;
+		CHECK(glslBits == 3u);
+	}
 	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
 
 	// Every parameter is a real HeParams slot (none baked for being over budget).
@@ -2818,12 +2832,16 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
 	CHECK(gen.switches[0].second);
 
-	// The bombing-off permutation: no grid at all, the same three slots.
+	// The bombing-off permutation: no grid at all, the same four slots (the three
+	// arrays plus Path's own standalone Albedo, Thema 329 step 3).
 	const std::map<std::string, bool> off{ { HE::kAutoLandscapeSwitchBombing, false } };
 	const HE::MatShaderGen plain = HE::generateFragment(a.graph, HE::weatherFunctionLoader(), &off);
 	CHECK(plain.glsl.find("heBomb") == std::string::npos);
-	CHECK(plain.textureArrayMask == 0x7u);
-	CHECK(plain.textures.size() == 3u);
+	{
+		uint32_t bits = 0; for (uint32_t m = plain.textureArrayMask; m; m &= m - 1) ++bits;
+		CHECK(bits == 3u);
+	}
+	CHECK(plain.textures.size() == 4u);
 	CHECK(plain.glsl != gen.glsl);
 
 	// Lit by default; the mask views are unlit, read the same masks and need no
@@ -3678,7 +3696,7 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	REQUIRE(m);
 	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
-	CHECK(m->graphTexturePaths.size() == 3u);
+	CHECK(m->graphTexturePaths.size() == 4u);   // the three arrays + Path's own Albedo
 	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 	// The Landscape tool lists these as the paintable layers — Auto first, so an
 	// unpainted terrain reads the automatic distribution.

@@ -7432,7 +7432,8 @@ namespace
 	  "there is one weightmap per landscape and layer 1 to 4 mean the same role "
 	  "(ground, soil, rock, snow) in every group, so only the look changes. Auto "
 	  "(layer 0) picks the texture by slope and height; painting a layer on top "
-	  "chooses one by hand.",
+	  "chooses one by hand. Layer 8 is Path in every group — manually painted "
+	  "only, with no automatic placement of its own.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Mix Group", "Mix Group",
 	  "A second (and third) group whose share of this landscape is kept apart from "
@@ -7486,7 +7487,8 @@ namespace
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
 	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
-	  "eight, four per weightmap page.",
+	  "twelve, four per weightmap page. A channel with no name (a mix-group share, "
+	  "or a gap reserved for a layer not added yet) shows no row.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Radius", "Brush Radius",
 	  "The inner, full-strength part of the brush, in metres — the tight circle "

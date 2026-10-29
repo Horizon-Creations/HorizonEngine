@@ -413,13 +413,20 @@ std::vector<std::string> matLandscapeLayerNames(const std::string& s)
         // would make two layers that look identical compare unequal.
         size_t b = cur.find_first_not_of(" \t\r");
         size_t e = cur.find_last_not_of(" \t\r");
-        if (b != std::string::npos && (int)out.size() < kMatMaxLandscapeLayers)
-            out.push_back(cur.substr(b, e - b + 1));
+        // An empty segment is kept, not dropped: it is a RESERVED weight channel (a
+        // group share, Thema 233 step 7) that this material does not use as a paint
+        // layer, but a later channel after it (Path, Thema 329 step 3) still needs its
+        // own position — list position is weight channel, with no exception.
+        if ((int)out.size() < kMatMaxLandscapeLayers)
+            out.push_back(b != std::string::npos ? cur.substr(b, e - b + 1) : std::string());
         cur.clear();
     };
     for (char ch : s) { if (ch == '\n') flush(); else cur.push_back(ch); }
     flush();
-    if (out.empty()) out.push_back("Layer 1");
+    // Never empty, and the degenerate "no text at all" case (one blank segment from an
+    // empty or whitespace-only string, e.g. a freshly dropped node) still reads as one
+    // named pin, not one reserved gap — a gap only means something between two REAL names.
+    if (out.size() == 1 && out[0].empty()) out[0] = "Layer 1";
     return out;
 }
 
@@ -1454,11 +1461,18 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
                 { "_w.x",  "_w.y",  "_w.z",  "_w.w",  "_w2.x", "_w2.y", "_w2.z", "_w2.w",
                   "_w3.x", "_w3.y", "_w3.z", "_w3.w" };
             std::string sum, wsum;
+            bool first = true;
             for (size_t i = 0; i < names.size(); ++i)
             {
+                // An empty name is a RESERVED channel (e.g. a group share, Thema 233 step
+                // 7), not one of this material's paint layers: it stays out of the sum and
+                // the weight sum both, exactly as if the list stopped short of it. This is
+                // what lets a later layer (Path) sit past a gap instead of on top of it.
+                if (names[i].empty()) continue;
                 const std::string w = v + kChan[i];
-                sum  += (i ? " + " : "") + inputExpr(c, sc, n, (int)i, F::Vec3) + " * " + w;
-                wsum += (i ? " + " : "") + w;
+                sum  += (first ? "" : " + ") + inputExpr(c, sc, n, (int)i, F::Vec3) + " * " + w;
+                wsum += (first ? "" : " + ") + w;
+                first = false;
             }
             // A texel whose weights sum to nothing falls back to LAYER 0 rather
             // than to black. That is the same answer the 1x1 (1,0,0,0) default

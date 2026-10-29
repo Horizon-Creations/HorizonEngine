@@ -77,12 +77,18 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 			// landscape_tex_gen writes the arrays under materialId.hi + 1 + map (0x400 block).
 			CHECK(g.materialId.hi + 1 + map <= g.materialId.hi + 3);
 		}
-		// Six paint channels in the same role order in every group: Auto first, Puddles last.
+		// Nine paint channels in the same role order in every group: Auto first, then the
+		// four roles and Puddles, then a two-channel gap (mix-group shares, never a paint
+		// weight here) and Path (Thema 329, step 3).
 		const std::vector<std::string> names = HE::matLandscapeLayerNames(g.paintLayerNames);
 		REQUIRE(names.size() == static_cast<size_t>(HE::kAutoLandscapePaintLayerCount));
 		CHECK(names.front() == "Auto");
 		CHECK(names[static_cast<int>(HE::AutoLandscapePaintLayer::Snow)] == "Snow");
-		CHECK(names.back() == "Puddles");
+		CHECK(names[static_cast<int>(HE::AutoLandscapePaintLayer::Puddles)] == "Puddles");
+		CHECK(names[6].empty());
+		CHECK(names[7].empty());
+		CHECK(names[static_cast<int>(HE::AutoLandscapePaintLayer::Path)] == "Path");
+		CHECK(names.back() == "Path");
 		for (int role = 0; role < HE::kAutoLandscapeRoleCount; ++role)
 			CHECK(names[1 + role] == g.roleLabels[role]);
 	}
@@ -162,11 +168,16 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 		REQUIRE_FALSE(gen.glsl.empty());
 		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
-		std::vector<std::string> tex = gen.textures, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = gen.textures,
+		    want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], g.pathAlbedoPath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
-		CHECK(tex == want);                       // its own arrays and not one of Mountains'
-		CHECK(gen.textureArrayMask == 0x7u);
+		CHECK(tex == want);                       // its own arrays and Path, not one of Mountains'
+		// Exactly 3 of the 4 texture slots are arrays; which bit is Path's own (a plain,
+		// non-array sample) depends on the order codegen's graph walk first reaches each
+		// texture, not on declaration order — pin the POPULATION COUNT, not a literal mask.
+		uint32_t bits = 0; for (uint32_t m = gen.textureArrayMask; m; m &= m - 1) ++bits;
+		CHECK(bits == 3u);
 		CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 
 		int blends = 0, legacyBlends = 0;
@@ -238,7 +249,8 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		REQUIRE(m);
 		CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, id).graph),
 		              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material --group ", g.name);
-		std::vector<std::string> tex = m->graphTexturePaths, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = m->graphTexturePaths,
+		    want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], g.pathAlbedoPath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
 		CHECK(tex == want);
@@ -259,6 +271,8 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		const std::vector<std::string> refs = HE::EngineDeps::findEngineReferences(bytes.data(), bytes.size());
 		for (const char* arr : g.arrayPaths)
 			CHECK_MESSAGE(std::find(refs.begin(), refs.end(), arr) != refs.end(), arr, " is not referenced by ", file);
+		CHECK_MESSAGE(std::find(refs.begin(), refs.end(), g.pathAlbedoPath) != refs.end(),
+		              g.pathAlbedoPath, " is not referenced by ", file);
 		// ... and so is every material function the graph calls (Thema 329 step 2: snow in every group, sand in
 		// the Desert): a function the resolver does not find would not be fetched, and the call is magenta.
 		std::vector<const char*> fns = { HE::kWeatherPuddlesFunctionPath, HE::kWeatherSnowFunctionPath, HE::kProceduralSnowFunctionPath };

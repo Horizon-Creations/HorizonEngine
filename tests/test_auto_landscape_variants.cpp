@@ -164,7 +164,7 @@ TEST_CASE("The auto landscape graph reads variants: 27 hex reads, one variant gr
 {
 	const MaterialGraph g = HE::buildAutoLandscapeGraph().graph;
 	const HE::MatShaderGen lit = HE::generateFragment(g, HE::weatherFunctionLoader());
-	REQUIRE(lit.textures.size() == 3);
+	REQUIRE(lit.textures.size() == 4);   // the three arrays + Path's own Albedo (Thema 329, step 3)
 	// 3 layers (Grass, Dirt, Rock) x (Albedo + Normal + Mask) x 3 hexes = 27 reads per pixel (36 while Snow was
 	// a bombed texture layer too; since Thema 329 step 2 it is MF_ProceduralSnow and reads nothing); the text holds
 	// them once for V = 1 and once for V > 1 (see the grouped test above).

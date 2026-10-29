@@ -143,6 +143,7 @@ namespace
 		if (has("snow") || has("ice"))                   return IM_COL32(222, 232, 245, 255);
 		if (has("puddle") || has("water") || has("wet")) return IM_COL32( 74, 127, 168, 255);
 		if (has("sand") || has("beach"))                 return IM_COL32(214, 190, 130, 255);
+		if (has("path") || has("trail") || has("track")) return IM_COL32(168, 150, 112, 255);
 		uint32_t h = 2166136261u;
 		for (char c : n) h = (h ^ static_cast<unsigned char>(c)) * 16777619u;
 		float r, g, b;
@@ -1665,6 +1666,11 @@ void renderPanel(AppContext& ctx)
                     const float rowH = ImGui::GetFrameHeight() * 1.45f;
                     for (int i = 0; i < static_cast<int>(layers.size()); ++i)
                     {
+                        // A reserved weight channel (mix-group shares, Thema 233 step 7, or a
+                        // gap reserved for a future layer) has an empty name — no row, but the
+                        // index after it keeps its place: the next real layer still paints its
+                        // own channel, not the row count's.
+                        if (layers[i].empty()) continue;
                         ImGui::PushID(i);
                         const ImVec2 p = ImGui::GetCursorScreenPos();
                         const float  w = ImGui::GetContentRegionAvail().x;

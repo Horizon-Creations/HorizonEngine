@@ -531,6 +531,43 @@ bool saveLayerTexture(const std::string& outDir, const std::string& name, int in
     return true;
 }
 
+// Path (Thema 329, step 3): a per-group, manually-painted layer with its own standalone
+// Albedo texture — not one of the three per-group arrays' roles (it adds no entry to
+// kLayers, no kGroupTones row, and no id in the variant/loose-group blocks those index), so
+// writing it here cannot run into either block's static_assert. Its normal reads Dirt's own
+// array slot instead (AutoLandscapeMaterial.cpp: kMatMaxGraphTextures has no room for a
+// fifth distinct texture), so there is no Path normal map to write. A worn, compacted tone
+// per group, distinct from that group's own Grass/Dirt/Rock; a real photograph per group is
+// step 6's ("Echte Texturen packen") to add later, at the same asset path.
+const uint8_t kPathTone[HE::kAutoLandscapeGroupCount][3] = {
+    { 150, 136, 118 },   // Mountains (rocky_trail)
+    { 120, 100,  74 },   // Forest (forest_ground_04)
+    { 168, 148, 104 },   // Grassland (grass_path_3)
+    { 196, 168, 132 },   // Desert (sandy_gravel_02)
+};
+// One id per group, right after the group-loose block (0x4A8..0x4CB) and clear of the
+// weather sounds at 0x500: 0x4D0..0x4D3.
+constexpr int kPathTexIndexBase = 0xD0;
+static_assert(kTexBaseHi + kPathTexIndexBase + HE::kAutoLandscapeGroupCount <= 0x500,
+              "Path textures run into the weather sounds");
+
+std::string pathAlbedoName(const HE::AutoLandscapeGroup& group)
+{ return std::string("T_Landscape_") + group.name + "_Path_" + kMapNames[Albedo]; }
+
+bool writePathTextures(const std::string& outDir)
+{
+    int ok = 0;
+    for (int gi = 0; gi < HE::kAutoLandscapeGroupCount; ++gi)
+    {
+        const HE::AutoLandscapeGroup& group = HE::kAutoLandscapeGroups[gi];
+        const Layer L{ "Path", { kPathTone[gi][0], kPathTone[gi][1], kPathTone[gi][2] },
+                       0.88f, 0.22f, 0.35f, 0.8f };
+        ok += saveLayerTexture(outDir, pathAlbedoName(group), kPathTexIndexBase + gi,
+                               kSize, kSize, /*srgb=*/true, makeMap(L, Albedo)) ? 1 : 0;
+    }
+    return ok == HE::kAutoLandscapeGroupCount;
+}
+
 // One role/layer's files, loaded: empty images are a missing map, `any` is false only when none of
 // the five were found at all. Shared by Mountains' packReal and a group's packGroupReal.
 struct Found { Image albedo, normal, rough, ao, height; bool any = false; };
@@ -1011,6 +1048,11 @@ int main(int argc, char** argv)
         if (std::string(argv[i]) == "--variants") variants = std::clamp(std::atoi(argv[i + 1]), 1, kMaxVariants);
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
+
+    // Path's own standalone textures (Thema 329, step 3): unconditional, every mode and every
+    // --group, since Path is not one of the three per-group arrays' roles and so has nothing
+    // to pack/split/arrays-only about — it is always just these two files per group.
+    writePathTextures(outDir);
 
     // --group Mountains|Forest|Grassland|Desert (anywhere after the output folder; default Mountains
     // = the shipped set). A group other than Mountains writes its own material (--material), its own
