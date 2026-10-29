@@ -9243,6 +9243,7 @@ void EditorApplication::dumpFrameHeadless()
 				mat->blendMode            = gen.blendMode;
 				mat->domain               = gen.domain;
 				mat->graphLayerNames      = gen.layerNames;
+				mat->foliageSetId         = gen.foliageSetId;
 			}
 			HE_LOG_INFO(Editor, "%s",
 				("EditorApplication: HE_DUMP_LAYEREDIT re-authored the layers (" + mode + ")").c_str());
