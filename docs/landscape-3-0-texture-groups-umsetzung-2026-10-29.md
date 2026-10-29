@@ -32,6 +32,8 @@ new, nothing group-specific reaches a backend.
     `test_landscape_groups` pins: table/ids unique (also against 0x400..0x414), same node types and links as Mountains, own arrays only, 13 params,
     the shipped Forest/Grassland files equal the builder's graph, their baked GLSL is the codegen's today, every array path is found by
     `EngineDeps::findEngineReferences` (= the editor prefetch and the pak's refs), bakes on all RendererBackends (cross-compile only for D3D11/D3D12/Vulkan).
+  * Full `ctest -j4` in the Release tree: 342/343. The one red, `test_hpak` ("scanContentDirectory == 2", got 7), counts the five assets of this Mac's real
+    `EngineContentCache`; it passes with `HOME=<empty dir>`. Not caused by this step (an environment trap for any machine with a populated cache).
   * Headless witness on **Metal and OpenGL**: Forest and Grassland draw (`draws=4`, no "Cannot load asset") in their own tones with placeholder arrays;
     arrays absent = the known white-array hexagons (control, `Cannot load asset` x5). Shots were in `/tmp/l3shots`, not committed.
   * `EditorApplication.cpp` compiles (HorizonEditor linked in the build tree).
