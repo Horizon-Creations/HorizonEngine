@@ -226,6 +226,10 @@ add_executable(he_tests
     test_foliage_lod.cpp
     # Straddler buckets on the pool give the single-threaded result (Thema 238 S2).
     test_foliage_parallel.cpp
+    # meshoptimizer-backed LOD simplifier, tool-only, not wired into the importer or
+    # editor yet (Thema 331 S2): triangle/attribute floors, UV-seam and border locks,
+    # the foliage alpha-coverage retry loop.
+    test_mesh_simplifier.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp

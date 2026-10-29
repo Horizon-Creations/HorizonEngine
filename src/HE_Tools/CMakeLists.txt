@@ -34,15 +34,18 @@ add_library(HorizonImporters STATIC
     src/AssetImporter/MaterialImporter.cpp
     src/AssetImporter/AudioImporter.cpp
     src/AssetImporter/FontImporter.cpp
+    src/MeshSimplify/MeshSimplifier.cpp
 )
 set_target_properties(HorizonImporters PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(HorizonImporters
     PUBLIC  HorizonCore
     PUBLIC  glm::glm
     PRIVATE nlohmann_json::nlohmann_json
+    PRIVATE meshoptimizer
 )
 target_include_directories(HorizonImporters
     PUBLIC  src/AssetImporter
+    PUBLIC  src/MeshSimplify
     PRIVATE vendor   # stb_image.h, cgltf.h, dr_wav.h
     # stb_vorbis.c is vendored once, beside miniaudio, and AudioImporter.cpp
     # compiles its own copy to validate .ogg sources (see the note there).
