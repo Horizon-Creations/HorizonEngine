@@ -3916,7 +3916,7 @@ TEST_CASE("Procedural surface functions: the interface callers wire by, flat, de
 
 	HE::matFunctionPins(snowFn, ins, outs);
 	CHECK(pinNames(ins) == std::vector<std::string>{ "Position", "Cover", "Color", "Grain", "Drift",
-		"Wind Direction", "Glitter", "Softness", "Melt", "Disturbance", "Disturbance Slope" });
+		"Wind Direction", "Glitter", "Softness", "Melt", "Disturbance", "Disturbance Slope", "Disturbance Heap" });
 	REQUIRE(ins.size() == static_cast<size_t>(HE::kSnowInCount));
 	CHECK(std::string(ins[HE::kSnowInCover].name) == "Cover");
 	CHECK(std::string(ins[HE::kSnowInMelt].name) == "Melt");
@@ -3928,7 +3928,7 @@ TEST_CASE("Procedural surface functions: the interface callers wire by, flat, de
 
 	HE::matFunctionPins(sandFn, ins, outs);
 	CHECK(pinNames(ins) == std::vector<std::string>{ "Position", "Color", "Grain Size", "Ripple", "Ripple Size",
-		"Wind Direction", "Glitter", "Wetness", "Disturbance", "Disturbance Slope" });
+		"Wind Direction", "Glitter", "Wetness", "Disturbance", "Disturbance Slope", "Disturbance Heap" });
 	REQUIRE(ins.size() == static_cast<size_t>(HE::kSandInCount));
 	CHECK(std::string(ins[HE::kSandInWetness].name) == "Wetness");
 	CHECK(pinNames(outs) == std::vector<std::string>{ "Albedo", "Normal", "Roughness", "AO", "Height" });
@@ -3961,6 +3961,14 @@ TEST_CASE("Procedural surface functions: the interface callers wire by, flat, de
 			CHECK(fnInputsReaching(*fn, "Roughness").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
 			CHECK(fnInputsReaching(*fn, "AO").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
 		}
+	// The heap input only lightens and loosens: albedo and roughness, never the normal, AO or Height.
+	for (const MaterialGraph* fn : { &snowFn, &sandFn })
+	{
+		CHECK(fnInputsReaching(*fn, "Albedo").count("Disturbance Heap") == 1u);
+		CHECK(fnInputsReaching(*fn, "Roughness").count("Disturbance Heap") == 1u);
+		for (const char* out : { "Normal", "AO", "Height" })
+			CHECK(fnInputsReaching(*fn, out).count("Disturbance Heap") == 0u);
+	}
 	// Both interfaces only GREW: every earlier pin keeps its index (callers wire by index).
 	CHECK(HE::kSnowInDisturbance == 9);
 	CHECK(HE::kSandInDisturbance == 8);

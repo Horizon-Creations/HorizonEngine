@@ -29,7 +29,10 @@
 //                            Disturbance Slope  Vec2, the gradient of the trail field per metre (a pit
 //                                           positive, a heap negative: it also carries the heaps
 //                                           beside a dragged track): leans the normal so a rim or
-//                                           a ridge catches the light (both default 0 = no trail, the surface as before)
+//                                           a ridge catches the light
+//                            Disturbance Heap  0..1 how high the material pushed aside lies here (the
+//                                           heap beside a dragged track): lighter and looser
+//                                           (all three default 0 = no trail, the surface as before)
 //                       Out: Albedo, Normal (world space, the geometric normal bent by the
 //                            detail), Roughness, AO, Height (0..1, the structure of the surface
 //                            for a height blend — grain and drifts only: it does NOT move with
@@ -40,7 +43,7 @@
 //                            wind ripples across the wind), Ripple Size (wavelength in metres),
 //                            Wind Direction, Glitter (mica / quartz), Wetness (0..1: wet sand is
 //                            darker and glossier), Disturbance and Disturbance Slope (as above;
-//                            a print also stamps the ripples flat)
+//                            a print also stamps the ripples flat; Disturbance Heap likewise)
 //                       Out: the same five.
 //
 // Both fade their fine detail out with the distance from the camera (a grain a few
@@ -67,12 +70,12 @@ inline constexpr UUID kProceduralSandFunctionId = { 0x000000000000041EULL, 0x000
 enum ProceduralSnowIn : int
 {
     kSnowInPosition = 0, kSnowInCover, kSnowInColor, kSnowInGrain, kSnowInDrift, kSnowInWindDirection,
-    kSnowInGlitter, kSnowInSoftness, kSnowInMelt, kSnowInDisturbance, kSnowInDisturbanceSlope, kSnowInCount
+    kSnowInGlitter, kSnowInSoftness, kSnowInMelt, kSnowInDisturbance, kSnowInDisturbanceSlope, kSnowInDisturbanceHeap, kSnowInCount
 };
 enum ProceduralSandIn : int
 {
     kSandInPosition = 0, kSandInColor, kSandInGrainSize, kSandInRipple, kSandInRippleSize,
-    kSandInWindDirection, kSandInGlitter, kSandInWetness, kSandInDisturbance, kSandInDisturbanceSlope, kSandInCount
+    kSandInWindDirection, kSandInGlitter, kSandInWetness, kSandInDisturbance, kSandInDisturbanceSlope, kSandInDisturbanceHeap, kSandInCount
 };
 // Both functions answer with the same five outputs.
 enum ProceduralSurfaceOut : int

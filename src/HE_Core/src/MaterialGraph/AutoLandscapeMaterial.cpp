@@ -202,7 +202,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // only a texel whose alpha is about one half is trusted: a missing texture (a white or black
     // stand-in) must never read as a deep print. Beyond kTrailFadeStart metres the window no longer
     // belongs to this place (it wraps), so the trail fades out before it ends.
-    int trailDepth, trailSlope;
+    int trailDepth, trailSlope, trailHeap;
     {
         const int invWindow = w.constF(1.0f / 128.0f, 2);
         const int uvTrail   = w.op(T::Multiply, 2, { { xz }, { invWindow } });
@@ -229,6 +229,10 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int pit1   = w.op(T::Multiply, 2, { { pit0 }, { unitK } });
         const int depth  = w.op(T::Saturate, 2, { { pit1 } });
         trailDepth       = w.op(T::Multiply, 2, { { depth }, { gate } });
+        const int heap0  = w.op(T::Subtract, 2, { { rgb, 0 }, { mid } });
+        const int heap1  = w.op(T::Multiply, 2, { { heap0 }, { unitK } });
+        const int heapS  = w.op(T::Saturate, 2, { { heap1 } });
+        trailHeap        = w.op(T::Multiply, 2, { { heapS }, { gate } });
         const int slopeK = w.constF(255.0f / 127.0f * TrailClipmap::kSlopeRange, 2);
         const int gx0    = w.op(T::Subtract, 2, { { rgb, 1 }, { mid } });
         const int gx1    = w.op(T::Multiply, 2, { { gx0 }, { slopeK } });
@@ -263,6 +267,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(weather, 0, sand, kSandInWetness);
         r.graph.connect(trailDepth, 0, sand, kSandInDisturbance);
         r.graph.connect(trailSlope, 0, sand, kSandInDisturbanceSlope);
+        r.graph.connect(trailHeap, 0, sand, kSandInDisturbanceHeap);
         grass = surfaceOf(sand, 2);
     }
     else
@@ -287,6 +292,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(weather, 0, call, kSnowInMelt);
         r.graph.connect(trailDepth, 0, call, kSnowInDisturbance);
         r.graph.connect(trailSlope, 0, call, kSnowInDisturbanceSlope);
+        r.graph.connect(trailHeap, 0, call, kSnowInDisturbanceHeap);
         snow = surfaceOf(call, 2);
     }
     // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on

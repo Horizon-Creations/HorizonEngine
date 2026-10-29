@@ -151,10 +151,12 @@ MaterialGraph buildProceduralSnowFunction()
     const R melt     = f.input(f.in("Melt",           P::Float, 0.0f));
     const R dist     = f.input(f.in("Disturbance",       P::Float, 0.0f));
     const R distSlope = f.input(f.in("Disturbance Slope", P::Vec2,  0.0f));
+    const R distHeap  = f.input(f.in("Disturbance Heap",  P::Float, 0.0f));
 
     const R ps = o.split(pos);
     const WindFrame w = windFrame(o, wind, o.pin(ps, 0), o.pin(ps, 1));
-    const R eff = o.sat(dist);                       // how deep a print lies here, 0..1
+    const R eff  = o.sat(dist);                      // how deep a print lies here, 0..1
+    const R heap = o.sat(distHeap);                  // how high the pushed-aside snow lies here, 0..1
     const RimLean rim = disturbanceRim(o, distSlope);
 
     // ── Drifts: ridges long along the wind (8 m) and narrow across it (1.8 m) ───────────────
@@ -216,15 +218,21 @@ MaterialGraph buildProceduralSnowFunction()
     const R albedoBase  = o.mul(o.mul(color, speck), meltDark);
     const R albedoSpark = o.mul(spark, 0.3f);
     const R albedoLit = o.sat(o.add(albedoBase, albedoSpark));
-    // A print is compacted snow: darker (and, below, glossier and shaded by its own pit).
-    const R albedo = o.mul(albedoLit, o.inv(o.mul(eff, 0.18f)));
+    // A print is compacted snow: darker (and, below, glossier and shaded by its own pit). A heap is loose, fresh
+    // snow: it lifts toward white.
+    const R albedoPress = o.mul(albedoLit, o.inv(o.mul(eff, 0.18f)));
+    const R toWhite = o.inv(albedoPress);
+    const R heapLift = o.mul(heap, 0.55f);
+    const R albedoLift = o.mul(toWhite, heapLift);
+    const R albedo = o.add(albedoPress, albedoLift);
 
     // ── Roughness: crust is glossy, powder matte, meltwater and glittering crystals catch light ─
     const R base = o.mix(0.55f, 0.92f, soft);
     const R roughMelt  = o.mul(base, o.mix(1.0f, 0.4f, melt));
     const R roughSpark = o.mul(spark, 0.45f);
     const R roughLit = o.sub(roughMelt, roughSpark);
-    const R rough0 = o.sub(roughLit, o.mul(eff, 0.25f));
+    const R roughPress = o.sub(roughLit, o.mul(eff, 0.25f));
+    const R rough0 = o.add(roughPress, o.mul(heap, 0.15f));   // loose snow is matte
     const R roughness = o.add(o.mul(o.sat(rough0), 0.95f), 0.05f);
 
     // ── AO: the troughs of the drifts and the pits between the grains ───────────────────────
@@ -257,10 +265,12 @@ MaterialGraph buildProceduralSandFunction()
     const R wet        = f.input(f.in("Wetness",        P::Float, 0.0f));
     const R dist       = f.input(f.in("Disturbance",       P::Float, 0.0f));
     const R distSlope  = f.input(f.in("Disturbance Slope", P::Vec2,  0.0f));
+    const R distHeap   = f.input(f.in("Disturbance Heap",  P::Float, 0.0f));
 
     const R ps = o.split(pos);
     const WindFrame w = windFrame(o, wind, o.pin(ps, 0), o.pin(ps, 1));
-    const R eff = o.sat(dist);                       // how deep a print lies here, 0..1
+    const R eff  = o.sat(dist);                      // how deep a print lies here, 0..1
+    const R heap = o.sat(distHeap);                  // how high the pushed-aside sand lies here, 0..1
     const RimLean rim = disturbanceRim(o, distSlope);
 
     // ── Grain: the speckle of the sand itself ───────────────────────────────────────────────
@@ -325,8 +335,10 @@ MaterialGraph buildProceduralSandFunction()
     const R albedoBase  = o.mul(o.mul(o.mul(color, speck), crest), wetDark);
     const R albedoSpark = o.mul(spark, 0.22f);
     const R albedoLit = o.sat(o.add(albedoBase, albedoSpark));
-    // A print is compacted, slightly damp sand: darker.
-    const R albedo = o.mul(albedoLit, o.inv(o.mul(eff, 0.25f)));
+    // A print is compacted, slightly damp sand: darker. A heap is loose dry sand from below the surface crust: lighter.
+    const R albedoPress = o.mul(albedoLit, o.inv(o.mul(eff, 0.25f)));
+    const R heapGain = o.add(o.mul(heap, 0.3f), 1.0f);
+    const R albedo = o.sat(o.mul(albedoPress, heapGain));
 
     // ── Roughness: dry sand is rough, wet sand sleek, a glint is a mirror ───────────────────
     const R dryRough = o.k(0.92f);
@@ -334,7 +346,8 @@ MaterialGraph buildProceduralSandFunction()
     const R roughWet   = o.mul(dryRough, wetMix);
     const R roughSpark = o.mul(spark, 0.5f);
     const R roughLit = o.sub(roughWet, roughSpark);
-    const R rough0 = o.sub(roughLit, o.mul(eff, 0.15f));
+    const R roughPress = o.sub(roughLit, o.mul(eff, 0.15f));
+    const R rough0 = o.add(roughPress, o.mul(heap, 0.1f));
     const R roughness = o.add(o.mul(o.sat(rough0), 0.95f), 0.05f);
 
     // ── AO: the troughs between the ripples, the pits between the grains ────────────────────
