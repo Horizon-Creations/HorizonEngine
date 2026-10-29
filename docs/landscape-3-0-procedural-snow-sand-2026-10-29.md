@@ -99,3 +99,10 @@ any other material can call them too.
   `out/deploy/Editor` libs, so keep a copy before the next A/B (`scripts/perf/selfcontain_deploy_copy.sh`).
 - **Next steps:** 1. step 3 (Path layer) can take layers 8..11, nothing here blocks it; 2. a perf A/B (old deploy vs new) before the human ships this;
   3. tune the look in the live editor with real Desert arrays (sand colour constant in `AutoLandscapeMaterial.cpp`, ripple/grain numbers in the builders).
+
+## Step 7: CI regression (Linux/Windows `nodeGraphJson == materialGraphToJson` red)
+
+- **Cause:** `ProceduralSurfaceFunctions.cpp` built nodes as nested sibling arguments (`add(mul(a,b), mul(c,d))`). C++ leaves the order of a call's arguments unspecified, so Clang (the Mac that committed the `.hasset`) numbered the nodes differently from GCC/MSVC. Same shader, other node ids: CI's two JSONs (run 40879630317) had 155 nodes, the same node-type multiset, 46 differing ids and different links.
+- **Fix (d27fad34):** every op call has at most one node-creating call among its arguments; sibling nodes are named locals, built left to right (the order Clang already used). `matfn_gen` therefore reproduces the committed `MF_ProceduralSnow/Sand.hasset` byte for byte, and the baked landscape materials need no regeneration.
+- **Verified on the Mac:** `matfn_gen` leaves `git status` clean, `test_material_graph` green, full ctest 345/345 (`test_hpak` only with a private `HOME`, otherwise it counts the real EngineContent cache). A source scan finds no call with two node-creating arguments (it flagged 38 in the old file). **Not verified:** GCC/MSVC locally, CI run pending.
+- **Rule for new builder code:** never put two `o.*` node-creating calls (or `fadeFar`/`bendNormal`) in the same argument list; assign each to a named local first. A `{}` initializer list is ordered and is fine.
