@@ -1735,4 +1735,210 @@ TEST_CASE("landscape ui: Apply Foliage recovers once a pending foliage set arriv
 	CHECK(undo.undoDepth() == depth0 + 1);
 }
 
+// Step 9 review-fix (point 1): ContentManager only LOGS
+// validateLandscapeFoliageLayer's problems when it loads a LFOL chunk
+// (LandscapeFoliageLayerJson.cpp / ContentManager.cpp) — it never rejects or
+// repairs them, so a hand-edited or stale .hasset can still reach Apply with a
+// negative density, an inverted min/max or slope range, or an unordered LOD
+// list. Apply must clamp every numeric field to what FoliageSystem actually
+// scatters against, not hand it straight through.
+TEST_CASE("landscape ui: Apply Foliage clamps out-of-range values from the asset "
+          "instead of writing them straight into the layer")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const HE::UUID badMesh{ 0x7101ULL, 0x1ULL };
+	const HE::UUID negMesh{ 0x7102ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Bad Ranges Set";
+	{
+		LandscapeFoliageEntry e;
+		e.name = "BadRanges"; e.meshAssetId = badMesh; e.density = 0.3f;
+		e.minScale = 2.0f;  e.maxScale = 0.5f;            // inverted
+		e.slopeMin = 1.5f;  e.slopeMax = -0.5f;           // out of [0,1] and inverted
+		e.heightMin = 100.0f; e.heightMax = -100.0f;      // inverted
+		e.drawDistance   = -10.0f;                        // must be positive
+		e.bucketSize     = 0.0f;                          // must be positive (a scatter-grid divisor)
+		e.shadowDistance = -5.0f;                         // must be >= 0
+		e.lodHysteresis  = -2.0f;                         // must be >= 0
+		LandscapeFoliageLod lod0; lod0.distance = 50.0f; lod0.density = 2.0f;    // out of [0,1]
+		LandscapeFoliageLod lod1; lod1.distance = 10.0f; lod1.density = -1.0f;   // out of [0,1] and out of order
+		e.lods.push_back(lod0);
+		e.lods.push_back(lod1);
+		set.entries.push_back(e);
+	}
+	{
+		LandscapeFoliageEntry e;
+		e.name = "NegDensity"; e.meshAssetId = negMesh; e.density = -5.0f;   // must never scatter negatively
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+	clickAt(ctx, bx, by);
+
+	FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+	REQUIRE(f.layers.size() == 2u);
+	FoliageLayer* bad = nullptr;
+	FoliageLayer* neg = nullptr;
+	for (FoliageLayer& l : f.layers)
+	{
+		if (l.sourceAssetId == setId && l.sourceEntry == 0) bad = &l;
+		if (l.sourceAssetId == setId && l.sourceEntry == 1) neg = &l;
+	}
+	REQUIRE(bad);
+	REQUIRE(neg);
+
+	CHECK(bad->minScale     == doctest::Approx(0.5f));     // swapped into min <= max
+	CHECK(bad->maxScale     == doctest::Approx(2.0f));
+	CHECK(bad->slopeMin     == doctest::Approx(0.0f));      // clamped into 0..1, then swapped
+	CHECK(bad->slopeMax     == doctest::Approx(1.0f));
+	CHECK(bad->heightMin    == doctest::Approx(-100.0f));   // swapped into min <= max
+	CHECK(bad->heightMax    == doctest::Approx(100.0f));
+	CHECK(bad->drawDistance   > 0.0f);                      // negative rejected, a positive default kept
+	CHECK(bad->bucketSize     > 0.0f);                      // zero rejected (it divides the scatter grid)
+	CHECK(bad->shadowDistance >= 0.0f);
+	CHECK(bad->lodHysteresis  >= 0.0f);
+	REQUIRE(bad->lods.size() == 2u);
+	CHECK(bad->lods[0].distance == doctest::Approx(10.0f));  // sorted ascending by distance
+	CHECK(bad->lods[0].density  == doctest::Approx(0.0f));   // -1 clamped into 0..1
+	CHECK(bad->lods[1].distance == doctest::Approx(50.0f));
+	CHECK(bad->lods[1].density  == doctest::Approx(1.0f));   // 2.0 clamped into 0..1
+
+	CHECK(neg->density == doctest::Approx(0.0f));   // negative density clamped, never scatters backwards
+
+	// Not just the fields: the scatter itself must tolerate the corrected ranges
+	// (no crash, no NaN instances), and the clamped-to-zero density must really
+	// spawn nothing rather than something with a garbage transform.
+	FoliageSystem::update(world);
+	CHECK_FALSE(bad->cachedInstances.empty());
+	for (const auto& m : bad->cachedInstances)
+	{
+		CHECK(std::isfinite(m[3].x));
+		CHECK(std::isfinite(m[3].y));
+		CHECK(std::isfinite(m[3].z));
+	}
+	CHECK(neg->cachedInstances.empty());
+}
+
+// Step 9 review-fix (point 2): the reuse pass used to grab ANY layer with no
+// mesh and no asset tag, even one the author had already started hand-tuning
+// (a name, a placement rule, a painted mask) before picking a mesh — an empty
+// FoliageComponent starts with exactly one such layer (FoliageComponent.h),
+// and an author can set its rules up before its mesh. Apply must never
+// silently adopt that layer, name or index collision with an asset entry or
+// not.
+TEST_CASE("landscape ui: Apply Foliage never adopts a hand-tuned layer that has no mesh yet, "
+          "even when its name collides with an asset entry's")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const HE::UUID tuftMesh{ 0x7201ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Collide Set";
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Helper Rule";       // same name as the hand layer below, on purpose
+		e.meshAssetId = tuftMesh; e.density = 0.1f;
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	// The author set placement rules and painted a mask on this landscape's one
+	// starter layer, same name as the asset entry above, but never picked a
+	// mesh — a plausible, real editing order (rules first, mesh later).
+	FoliageComponent fol;
+	fol.layers[0].name        = "Helper Rule";
+	fol.layers[0].slopeMin    = 0.2f;
+	fol.layers[0].slopeMax    = 0.6f;
+	fol.layers[0].weightLayer = 3;
+	fol.layers[0].maskRes     = 4;
+	fol.layers[0].densityMask.assign(16, 200);
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+	clickAt(ctx, bx, by);
+
+	const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+	REQUIRE(f.layers.size() == 2u);   // the hand layer kept, a new one added — never merged into one
+
+	// The hand layer: completely untouched, still mesh-less, still unmarked.
+	CHECK(f.layers[0].name == "Helper Rule");
+	CHECK(f.layers[0].meshAssetId == HE::UUID{});
+	CHECK(f.layers[0].slopeMin == doctest::Approx(0.2f));
+	CHECK(f.layers[0].slopeMax == doctest::Approx(0.6f));
+	CHECK(f.layers[0].weightLayer == 3);
+	CHECK(f.layers[0].densityMask.size() == 16u);
+	CHECK(f.layers[0].sourceAssetId == HE::UUID{});
+	CHECK(f.layers[0].sourceEntry == -1);
+
+	// The asset entry got its OWN new layer instead of stealing the hand one.
+	CHECK(f.layers[1].name == "Helper Rule");      // same text, different layer
+	CHECK(f.layers[1].meshAssetId == tuftMesh);
+	CHECK(f.layers[1].sourceAssetId == setId);
+	CHECK(f.layers[1].sourceEntry == 0);
+}
+
 #endif // HE_EDITOR_DEPS_DIR

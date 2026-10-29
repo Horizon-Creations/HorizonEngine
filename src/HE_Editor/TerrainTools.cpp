@@ -323,38 +323,83 @@ namespace
 			if (!layer)
 			{
 				// Reuse an empty, untagged layer first (the one a fresh component starts
-				// with), same precedent as applyGroupMeshes; otherwise grow the list.
+				// with), same precedent as applyGroupMeshes; otherwise grow the list. A
+				// layer only qualifies as that pristine starter, never one the author
+				// began hand-tuning (named it, painted a mask, set a rule, added a LOD)
+				// before picking a mesh — meshAssetId=={} alone is not proof of that,
+				// so every other sign of hand-tuning is checked too.
 				for (FoliageLayer& l : folc->layers)
-					if (l.meshAssetId == HE::UUID{} && l.sourceAssetId == HE::UUID{}) { layer = &l; break; }
+					if (l.meshAssetId == HE::UUID{} && l.materialAssetId == HE::UUID{} &&
+					    l.sourceAssetId == HE::UUID{} && l.name.empty() && l.densityMask.empty() &&
+					    l.lods.empty() && l.weightLayer == -1) { layer = &l; break; }
 				if (!layer) layer = folc->addLayer();
 				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
 				layer->sourceAssetId = setId;
 				layer->sourceEntry   = static_cast<int>(i);
 			}
 
+			// The asset is loaded leniently (ContentManager only logs
+			// validateLandscapeFoliageLayer's problems, it never rejects or fixes them —
+			// LandscapeFoliageLayerJson.cpp), so a hand-edited or stale file can still
+			// carry a negative density, an inverted min/max or slope range, or an
+			// unordered LOD list. Clamp every numeric field to what FoliageSystem and the
+			// scatter actually expect instead of handing it garbage.
+			auto positive = [](float v, float fallback) { return (std::isfinite(v) && v > 0.0f) ? v : fallback; };
+			auto nonNeg    = [](float v, float fallback) { return (std::isfinite(v) && v >= 0.0f) ? v : fallback; };
+
 			layer->name            = e.name;
 			layer->meshAssetId     = e.meshAssetId;
 			layer->materialAssetId = e.materialAssetId;
-			layer->density         = e.density * set.densityScale;
-			layer->minScale        = e.minScale;
-			layer->maxScale        = e.maxScale;
-			layer->drawDistance    = e.drawDistance;
-			layer->bucketSize      = e.bucketSize;
+			{
+				const float density = e.density * set.densityScale;   // a product: validate it, not the factors
+				layer->density = (std::isfinite(density) && density > 0.0f) ? density : 0.0f;
+			}
+			{
+				float minS = positive(e.minScale, FoliageLayer{}.minScale);
+				float maxS = positive(e.maxScale, FoliageLayer{}.maxScale);
+				if (minS > maxS) std::swap(minS, maxS);
+				layer->minScale = minS;
+				layer->maxScale = maxS;
+			}
+			layer->drawDistance    = positive(e.drawDistance, FoliageLayer{}.drawDistance);
+			layer->bucketSize      = positive(e.bucketSize, FoliageLayer{}.bucketSize);
 			layer->castsShadow     = e.castsShadow;
 			layer->contributesAO   = e.contributesAO;
-			layer->shadowDistance  = e.shadowDistance;
-			layer->lodHysteresis   = e.lodHysteresis;
-			layer->slopeMin        = e.slopeMin;
-			layer->slopeMax        = e.slopeMax;
-			layer->heightMin       = e.heightMin;
-			layer->heightMax       = e.heightMax;
+			layer->shadowDistance  = nonNeg(e.shadowDistance, 0.0f);
+			layer->lodHysteresis   = nonNeg(e.lodHysteresis, 0.0f);
+			{
+				float slopeMin = std::isfinite(e.slopeMin) ? std::clamp(e.slopeMin, 0.0f, 1.0f) : 0.0f;
+				float slopeMax = std::isfinite(e.slopeMax) ? std::clamp(e.slopeMax, 0.0f, 1.0f) : 1.0f;
+				if (slopeMin > slopeMax) std::swap(slopeMin, slopeMax);
+				layer->slopeMin = slopeMin;
+				layer->slopeMax = slopeMax;
+			}
+			{
+				float heightMin = std::isfinite(e.heightMin) ? e.heightMin : -FoliageLayer::kNoHeightLimit;
+				float heightMax = std::isfinite(e.heightMax) ? e.heightMax :  FoliageLayer::kNoHeightLimit;
+				if (heightMin > heightMax) std::swap(heightMin, heightMax);
+				layer->heightMin = heightMin;
+				layer->heightMax = heightMax;
+			}
 			// Out of range = no paint rule, the same leniency SceneSerializer gives a
 			// hand-edited scene (a set authored against more terrain channels than this
 			// landscape has).
 			layer->weightLayer     = (e.paintLayer >= 0 && e.paintLayer < kTerrainMaxLayers) ? e.paintLayer : -1;
 			layer->lods.clear();
 			for (const LandscapeFoliageLod& lod : e.lods)
-				layer->lods.push_back(FoliageLod{ lod.meshAssetId, lod.materialAssetId, lod.distance, lod.density });
+			{
+				FoliageLod fl;
+				fl.meshAssetId     = lod.meshAssetId;
+				fl.materialAssetId = lod.materialAssetId;
+				fl.distance        = nonNeg(lod.distance, 0.0f);
+				fl.density         = std::isfinite(lod.density) ? std::clamp(lod.density, 0.0f, 1.0f) : 1.0f;
+				layer->lods.push_back(fl);
+			}
+			// A level boundary only makes sense as a staircase out from the camera
+			// (FoliageComponent.h's own description of what a LOD level is); an asset
+			// entry's list is not guaranteed to arrive in that order.
+			std::sort(layer->lods.begin(), layer->lods.end(),
+			          [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
 			layer->dirty = true;   // mesh/density/rules changed → re-scatter
 
 			// The entry's meshes and materials are project or EngineContent FILES like the
