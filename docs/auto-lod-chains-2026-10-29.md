@@ -36,33 +36,30 @@
 ## Handoff
 
 - **Topic / step:** 331, step 3 of 7
-- **Branch / commit:** claude/auto-lod-und-sichtbarkeitsgetriebenes-rendern-f-r-foliage-un (WIP commit, pushed: see the Hive post)
-- **Done:** all code above is written. Help audit passes.
-- **Verified:** only `editor_help_audit.py --check` (green). The `he_tests` build started with `test_auto_lod.cpp`
-  in the list and got to ~1300/1709 before the stop; no compile result for any new file was read.
-- **Not verified:** that anything compiles (AutoLod.cpp, AutoLodApply.h, AutoLodDialog.cpp, InspectorPanel/
-  ContentBrowser edits), that any new test passes, the full `he_tests` run, the baseline measurement (triangles per
-  pass vs. step 1), a screenshot of the dialog, the asset_compiler (untouched; has no `--lods` flag).
-- **Decisions taken:** name convention instead of a LOD0 chunk (no format change, scenes hold UUIDs anyway; cost:
-  renaming LOD0 in the browser leaves the sidecars under the old name, so Reimport/regenerate will not find them);
-  buttons live in the Inspector (Foliage Detail Levels, LOD component), not in the Landscape tab; default off for
-  import; cross card is opt-in because it draws the layer's material until the step-4 impostor gives it a picture;
-  levels past `drawDistance` are dropped rather than moving the user's cut-off.
-- **Decisions suggested, not taken:** a `--lods` flag for asset_compiler; storing the ratios in LOD0 (tail chunk
-  `MLOD`) if rename-safety matters; a Landscape-tab shortcut button.
-- **Pending:** compile + fix, run `he_tests --source-file='*test_auto_lod*'` then the full run (no `--no-skip`),
-  UI screenshot (`HE_UI_DUMP_DIR`, `scripts/he_uishot.py`), measurement, mark the topic.
-- **Traps:** the `grep` in this shell silently returns nothing for some patterns, use `/usr/bin/grep`. No ninja in
-  PATH: use `/Applications/CLion.app/Contents/bin/ninja/mac/aarch64/ninja` (configure recipe in memory
-  `headless-dump-log-and-worktree-configure`; configure takes ~9 min, it fetches meshoptimizer). The tree is
-  `out/build/release`; I left a `cmake --build ... --target he_tests` running (a classifier denied `pkill`), log
-  `/tmp/auto-lod3-build.log`. Files edited while it compiled and so possibly stale: `MeshImporter.{h,cpp}`,
-  `ImporterCommon.{h,cpp}`, `ContentBrowserPanel.cpp`, `InspectorPanel.cpp`, `EditorApplication.cpp`,
-  `EditorSettings*.cpp`, `EditorHelp.cpp`, `EditorUI.cpp`: `touch` those `.cpp` files (only them) before rebuilding.
-  The CMake edits (`tests/`, `src/HE_Editor`, `src/HE_Tools`) cause one reconfigure.
-- **Next steps:** 1. wait for or restart `cmake --build out/build/release --target he_tests -j8`, fix compile errors.
-  2. run the two new test files, then the full suite. 3. build `HorizonEditor`, open the dialog once, screenshot.
-  4. Measurement: a small env-guarded harness (or the editor) that runs `AutoLodDialog::run` on the 12 layers of a
-  clone of `~/HorizonEngineTestAssets/foliage-test-project` and `scripts/he_perf_capture.py --scene` (read the
-  baseline doc's lessons first: always pass `--scene`, APFS clone, `counters_midframe.tris` is the main pass only).
-  5. Step 4 can then bake the impostor into the cross-card level (`FoliageOptions::crossCard`).
+- **Branch:** claude/auto-lod-und-sichtbarkeitsgetriebenes-rendern-f-r-foliage-un
+- **Done:** all code above compiles and its tests pass. Fixes in the finishing run: `AutoLodDialog.cpp` was missing
+  from the he_tests source lists (link error; now in `tests/CMakeLists.txt`), `test_auto_lod_ui.cpp` needed
+  `using namespace HE::Ed` and must not call `ImGui::IsPopupOpen(const char*)` between frames (null current
+  window, SIGSEGV; it now looks the popup up in `OpenPopupStack`), `EditorHelp.cpp` needed an area rule
+  `"Generate LODs/"` (test_editor_help requires every key to have one).
+- **Verified:** `he_tests` built (Release, out/build/release); `--source-file='*test_auto_lod*'` 14/14 pass; full
+  `he_tests` run from `out/build/release` 5982/5983, the one failure is `test_hpak` "Disk registry: scanContentDirectory
+  resolves UUIDs" (7 == 2): `scanContentDirectory` also indexes `~/Library/Application Support/HorizonEngine/
+  EngineContentCache` which holds 5 synced Landscape textures on this Mac; environmental, not this branch.
+  `editor_help_audit.py --check` rc 0. Dialog screenshot looked at (HE_UI_DUMP_DIR, he_ui bmp): layout fine.
+- **Not verified:** HorizonEditor target not built (he_tests compiles the panels and the dialog, the editor exe was
+  not linked/run); baseline measurement (triangles per pass vs. step 1) not done; asset_compiler has no `--lods` flag;
+  CI for the new commits.
+- **Decisions taken:** name convention `<stem>_LOD<n>.hasset` instead of a LOD0 chunk (renaming LOD0 in the browser
+  orphans the sidecars); buttons in the Inspector (Foliage Detail Levels, LOD component); import generation default off;
+  cross card opt-in (draws the layer's material until the step-4 impostor); levels past `drawDistance` dropped;
+  Undo covers the scene edit only, not the sidecar files.
+- **Decisions suggested, not taken:** `--lods` for asset_compiler; `MLOD` tail chunk in LOD0 for rename safety;
+  Landscape-tab shortcut button.
+- **Traps:** `/usr/bin/grep` (the wrapper returns empty); ninja at `/Applications/CLion.app/Contents/bin/ninja/mac/
+  aarch64`; run he_tests from `out/build/release`, not from `tests/`; do not use `IsPopupOpen(const char*)` outside a
+  window in headless UI tests.
+- **Next steps:** 1. measure on an APFS clone of `~/HorizonEngineTestAssets/foliage-test-project`
+  (`he_perf_capture.py --scene`, read the baseline doc's lessons: always `--scene`, main-pass tris only).
+  2. build HorizonEditor and open the dialog once for real. 3. Step 4 bakes the impostor into the cross-card level
+  (`FoliageOptions::crossCard`).

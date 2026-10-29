@@ -10034,6 +10034,7 @@ namespace
 		// The target-folder dialog of "Import to Project...", raised from the same
 		// context menu.
 		{ "Import to Project/", "editor-interface", "Editor Interface", "Content Browser" },
+		{ "Generate LODs/",     "editor-interface", "Editor Interface", "Content Browser" },
 		{ "New Asset/",        "editor-interface", "Editor Interface", "Creating assets" },
 		{ "Console/",          "editor-interface", "Editor Interface", "Console" },
 		{ "Audio Mixer/",      "editor-interface", "Editor Interface", "Audio Mixer" },
