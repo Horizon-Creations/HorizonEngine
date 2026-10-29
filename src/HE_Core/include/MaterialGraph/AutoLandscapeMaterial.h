@@ -13,8 +13,11 @@
 // Textures: the three engine arrays of docs/auto-landscape-material-textures.md
 // §8 (T_Landscape_{Albedo,Normal,Mask}_Array, slices Grass, Dirt, Rock, Snow,
 // WetGround; Mask = R AO, G roughness, B height) in heTexP0..2. heTexP3 stays free.
-// The material reads slices 0..3; slice 4 (WetGround) stays in the arrays but is
-// not read — puddles are an overlay, not a layer (see below).
+// The material reads slices 0..2 (Grass, Dirt, Rock); slice 4 (WetGround) stays in the arrays but is
+// not read — puddles are an overlay, not a layer (see below). Slice 3 (Snow) is not read either since
+// Thema 329 step 2: the Snow role is MF_ProceduralSnow (ProceduralSurfaceFunctions.h), made from noise
+// in world space, in every group; and the Desert group's ground role is MF_ProceduralSand, so its
+// slice 0 is unread too. The slices stay in the arrays so the layout (4 * V + 1) does not move.
 //
 // What decides a layer — the AUTOMATIC rules (all per pixel, all procedural):
 //   slope    = 1 − N.y of the GEOMETRIC normal (0 flat, 1 vertical)
@@ -23,7 +26,9 @@
 //   rock     = slope past "Rock Slope", over "Rock Blend" — rock is the bulk of
 //              the automatic distribution on any relief
 //   snow     = world height past "Snow Height", over "Snow Blend", not on faces
-//              steeper than "Snow Max Slope" (rock shows through on cliffs)
+//              steeper than "Snow Max Slope" (rock shows through on cliffs); plus the weather's
+//              snow (MF_WeatherSnow). What the snow LOOKS like is MF_ProceduralSnow, fed the
+//              weather's Snow Cover and wetness; r.snowMask stays the height snow alone.
 //   puddles  = flat ground (slope < "Puddle Max Slope") in the low spots of a
 //              world-space noise field (the field's minima are the "hollows"),
 //              a wet rim around, standing water in the middle; never under snow.
@@ -59,10 +64,10 @@
 //
 // Tiling runs in WORLD space (world XZ / tile size), not over the terrain's
 // 0..1 UV, so a texel is the same size on a 100 m and on a 4 km landscape.
-// Rock, Grass, Dirt and Snow are read through texture bombing (hex tiling, one grid
+// Rock, Grass and Dirt are read through texture bombing (hex tiling, one grid
 // per layer shared by its albedo/normal/mask, own seed per layer). Snow used to be
-// read plainly to save the reads (docs §9.4) — on a painted or high field of it the
-// single tile showed as a grid of identical marks. The static switch "Texture
+// read through it too (before that plainly, docs §9.4) and is procedural now, so it
+// has no tile to hide. The static switch "Texture
 // Bombing" turns the bombed reads into plain ones at compile time (instance
 // override → own permutation; the witness uses it as the negative control).
 #pragma once
@@ -149,6 +154,10 @@ struct AutoLandscapeGroup
     const char* roleLabels[4];      // the group's name for role Grass, Dirt, Rock, Snow
     // The default value of the parameters a group tunes (the others keep the Mountains value).
     float rockSlope, dirtAmount, snowHeight;
+    // Role 0 (the ground everything else lies on) is made by MF_ProceduralSand instead of read from
+    // the arrays: its albedo / normal / AO / roughness / height come from the function in world
+    // space, so the group's first array slice is never read. Desert only (Thema 329, step 2).
+    bool proceduralSand = false;
 };
 
 // Ids, in landscape_tex_gen's 0x400 block: 0x412 is Mountains, 0x413 / 0x414 are the weather
@@ -157,7 +166,7 @@ struct AutoLandscapeGroup
 // it for its arrays (0x415..0x418 Forest, 0x419..0x41C Grassland). Desert takes 0x4A0..0x4A3: the
 // three ids left under 0x420 are one short of a group, 0x420..0x42E are the loose maps and
 // 0x430..0x498 the variants (kMaxVariants 8 of 5 layers), so the first block clear of both is 0x4A0.
-// 0x41D..0x41F stay free.
+// 0x41D / 0x41E are the procedural snow and sand functions (ProceduralSurfaceFunctions.h), 0x41F stays free.
 inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCount] = {
     { AutoLandscapeGroupId::Mountains, "Mountains",
       kAutoLandscapeMaterialId, kAutoLandscapeMaterialPath,
@@ -189,7 +198,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
         "Engine/Textures/Landscape/T_Landscape_Desert_Mask_Array.hasset" },
       "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles",
       { "Sand", "Hardpan", "Sandstone", "Snow" },
-      0.30f, 0.15f, 2000.0f },
+      0.30f, 0.15f, 2000.0f, true },
 };
 
 inline constexpr const AutoLandscapeGroup& autoLandscapeGroup(AutoLandscapeGroupId id)

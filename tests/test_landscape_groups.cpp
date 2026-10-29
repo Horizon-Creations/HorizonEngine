@@ -15,6 +15,7 @@
 #include <HorizonRendering/GiLandscape.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Renderer/IRenderer.h>
 #include <material/MaterialShaderBake.h>
@@ -93,6 +94,10 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 	CHECK(used.count(HE::kAutoLandscapeMaterialId.hi) == 1);
 	CHECK(used.insert(HE::kWeatherPuddlesFunctionId.hi).second);
 	CHECK(used.insert(HE::kWeatherSnowFunctionId.hi).second);
+	// The procedural surface functions (Thema 329, step 2) took 0x41D / 0x41E: the two ids left below the
+	// loose maps (0x420..) after the Forest and Grassland blocks; 0x41F stays free.
+	CHECK(used.insert(HE::kProceduralSnowFunctionId.hi).second);
+	CHECK(used.insert(HE::kProceduralSandFunctionId.hi).second);
 	// landscape_tex_gen's loose maps (0x420..0x42E) and variants (0x430..0x498: 8 variants of 5 layers),
 	// which the groups after Grassland must not land on. Forest and Grassland sit below them, Desert above.
 	for (uint64_t hi = 0x420; hi <= 0x498; ++hi) used.insert(hi);
@@ -128,11 +133,31 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, id);
 		CHECK(HE::materialGraphToJson(a.graph) != legacyJson);
 
-		// Same nodes, same wiring: only strings and three default values differ.
-		REQUIRE(a.graph.nodes.size() == legacy.graph.nodes.size());
-		CHECK(a.graph.links.size() == legacy.graph.links.size());
-		for (size_t i = 0; i < a.graph.nodes.size(); ++i)
-			CHECK(a.graph.nodes[i].type == legacy.graph.nodes[i].type);
+		if (!g.proceduralSand)
+		{
+			// Same nodes, same wiring: only strings and three default values differ.
+			REQUIRE(a.graph.nodes.size() == legacy.graph.nodes.size());
+			CHECK(a.graph.links.size() == legacy.graph.links.size());
+			for (size_t i = 0; i < a.graph.nodes.size(); ++i)
+				CHECK(a.graph.nodes[i].type == legacy.graph.nodes[i].type);
+		}
+		else
+		{
+			// The Desert's ground is MF_ProceduralSand (Thema 329 step 2) instead of three array reads
+			// on one bombing grid: fewer nodes, the rest of the skeleton (parameters, paint layers,
+			// dirt / rock / snow / puddles, the Dirt and Rock reads) unchanged — checked below.
+			CHECK(a.graph.nodes.size() != legacy.graph.nodes.size());
+			int sandCalls = 0, grassSlices = 0;
+			for (const HE::MatGraphNode& n : a.graph.nodes)
+				if (n.type == HE::MatNodeType::FunctionCall && n.s == HE::kProceduralSandFunctionPath) ++sandCalls;
+			for (const HE::MatGraphNode& n : a.graph.nodes)
+				if (n.type == HE::MatNodeType::TextureArraySample || n.type == HE::MatNodeType::NormalMapArraySample)
+					for (const HE::MatGraphLink& l : a.graph.links)
+						if (l.dstNode == n.id && l.dstPin == 1)
+							grassSlices += static_cast<int>(a.graph.findNode(l.srcNode)->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Grass);
+			CHECK(sandCalls == 1);
+			CHECK(grassSlices == 0);   // the ground's slice is never read
+		}
 
 		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 		REQUIRE_FALSE(gen.glsl.empty());
@@ -234,6 +259,12 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		const std::vector<std::string> refs = HE::EngineDeps::findEngineReferences(bytes.data(), bytes.size());
 		for (const char* arr : g.arrayPaths)
 			CHECK_MESSAGE(std::find(refs.begin(), refs.end(), arr) != refs.end(), arr, " is not referenced by ", file);
+		// ... and so is every material function the graph calls (Thema 329 step 2: snow in every group, sand in
+		// the Desert): a function the resolver does not find would not be fetched, and the call is magenta.
+		std::vector<const char*> fns = { HE::kWeatherPuddlesFunctionPath, HE::kWeatherSnowFunctionPath, HE::kProceduralSnowFunctionPath };
+		if (g.proceduralSand) fns.push_back(HE::kProceduralSandFunctionPath);
+		for (const char* fn : fns)
+			CHECK_MESSAGE(std::find(refs.begin(), refs.end(), fn) != refs.end(), fn, " is not referenced by ", file);
 
 		// One variant per backend, the way the exporter bakes them (no GPU involved).
 		HE::MaterialShaderLibrary lib;
