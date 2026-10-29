@@ -561,6 +561,187 @@ Mesh makeTuft(int blades, int segments)
     return m;
 }
 
+// A bunch of strips for the plants of the Forest and Grassland sets (Fern, Tall Grass, Flower
+// Tuft). Same construction as the tuft: a bent strip per blade, a face in front and one behind.
+// What differs: `drop` bends the blade over (a fern frond arches, a stem stands), `leaf` gives the
+// strip a belly instead of a taper, `yawSpread` how far a strip may turn from "flat to the
+// outside" (pi: any way, like grass), `heads` a flower on every second blade. Blade 0 always
+// has the full height and a fixed place so the detail levels, which have fewer blades, keep the
+// bunch's height; the foot sits 2 cm below the ground like the stones do.
+struct Bunch
+{
+    float radius, height, width, lean, drop;
+    bool  leaf;
+    float yawSpread;
+    bool  heads;
+    float headRadius;
+    uint32_t seed;
+};
+
+Mesh makeBunch(const Bunch& s, int blades, int segments)
+{
+    Mesh m;
+    for (int b = 0; b < blades; ++b)
+    {
+        const float heading = 6.2831853f * (static_cast<float>(b) + 0.4f * (b == 0 ? 0.0f : rand01(s.seed, b, 1))) / static_cast<float>(blades);
+        const float radius  = s.radius * (b == 0 ? 1.0f : 0.4f + 0.6f * rand01(s.seed, b, 2));
+        const float height  = s.height * (b == 0 ? 1.0f : 0.7f + 0.3f * rand01(s.seed, b, 3));
+        const float width   = s.width  * (0.85f + 0.3f * rand01(s.seed, b, 4));
+        const float lean    = s.lean   * (0.7f + 0.6f * rand01(s.seed, b, 5));
+        const float yaw     = heading + 1.5707963f + s.yawSpread * (rand01(s.seed, b, 6) * 2.0f - 1.0f);
+        const float ox = std::cos(heading), oz = std::sin(heading);
+        const float ax = std::cos(yaw),     az = std::sin(yaw);
+        float tipC[3] = {}, tipN[3] = {};
+        for (int side = 0; side < 2; ++side)
+        {
+            const float sgn = side == 0 ? 1.0f : -1.0f;
+            uint32_t row[2][64];
+            for (int r = 0; r <= segments; ++r)
+            {
+                const float t  = static_cast<float>(r) / static_cast<float>(segments);
+                const float cx = ox * (radius + lean * t * t), cy = -0.02f + height * (t - s.drop * t * t), cz = oz * (radius + lean * t * t);
+                const float prof = s.leaf ? std::max(0.10f, std::sin(3.1415927f * std::pow(t, 0.7f))) : 1.0f - 0.85f * t;
+                const float hw = 0.5f * width * prof;
+                float tx = ox * lean * 2.0f * t, ty = height * (1.0f - 2.0f * s.drop * t), tz = oz * lean * 2.0f * t;
+                const float tl = std::sqrt(tx*tx + ty*ty + tz*tz); tx /= tl; ty /= tl; tz /= tl;
+                float nx = 0.0f * tz - az * ty, ny = az * tx - ax * tz, nz = ax * ty - 0.0f * tx;
+                const float nl = std::sqrt(nx*nx + ny*ny + nz*nz); nx = sgn * nx / nl; ny = sgn * ny / nl; nz = sgn * nz / nl;
+                row[0][r] = m.addVertex(cx - ax * hw, cy, cz - az * hw, nx, ny, nz, 0.0f, t);
+                row[1][r] = m.addVertex(cx + ax * hw, cy, cz + az * hw, nx, ny, nz, 1.0f, t);
+                if (side == 0 && r == segments) { tipC[0] = cx; tipC[1] = cy; tipC[2] = cz; tipN[0] = nx; tipN[1] = ny; tipN[2] = nz; }
+            }
+            for (int r = 0; r < segments; ++r)
+                m.quad(row[0][r], row[1][r], row[1][r+1], row[0][r+1]);
+        }
+        if (s.heads && (b % 2) == 0)
+        {
+            // A flower: a six-sided disc at the tip, facing up and a little outward, both faces.
+            const float up[3] = { ox * 0.3f, 1.0f, oz * 0.3f };
+            const float ul = std::sqrt(up[0]*up[0] + up[1]*up[1] + up[2]*up[2]);
+            const float n[3] = { up[0]/ul, up[1]/ul, up[2]/ul };
+            const float vx = n[1]*az - n[2]*0.0f, vy = n[2]*ax - n[0]*az, vz = n[0]*0.0f - n[1]*ax;   // n x across
+            for (int face = 0; face < 2; ++face)
+            {
+                const float f = face == 0 ? 1.0f : -1.0f;
+                const uint32_t c = m.addVertex(tipC[0], tipC[1], tipC[2], f*n[0], f*n[1], f*n[2], 0.5f, 0.5f);
+                uint32_t ring[7];
+                for (int k = 0; k <= 6; ++k)
+                {
+                    const float a = 6.2831853f * static_cast<float>(k % 6) / 6.0f;
+                    const float cu = std::cos(a), cv = std::sin(a);
+                    ring[k] = m.addVertex(tipC[0] + s.headRadius * (cu * ax + cv * vx), tipC[1] + s.headRadius * cv * vy,
+                                          tipC[2] + s.headRadius * (cu * az + cv * vz), f*n[0], f*n[1], f*n[2],
+                                          0.5f + 0.5f * cu, 0.5f + 0.5f * cv);
+                }
+                for (int k = 0; k < 6; ++k) m.tri(c, ring[k], ring[k+1]);
+            }
+            (void)tipN;
+        }
+    }
+    return m;
+}
+
+// A tree stump: a flared trunk piece with a rough top, the base sunk 6 cm. Noise is a function
+// of the angle and height, so every detail level (fewer sectors and rings) wears the same bark.
+Mesh makeStump(int sectors, int rings, int octaves)
+{
+    const uint32_t seed = 0x57A3Fu;
+    const float y0 = -0.06f, y1 = 0.42f;
+    Mesh m;
+    const auto radiusAt = [&](float ang, float t) {
+        const float flare = 1.0f + 0.55f * std::exp(-5.0f * t);
+        return 0.26f * flare * (1.0f + 0.14f * noiseFbm(std::cos(ang) * 1.8f, t * 2.5f, std::sin(ang) * 1.8f, seed, octaves));
+    };
+    for (int r = 0; r <= rings; ++r)
+    {
+        const float t = static_cast<float>(r) / static_cast<float>(rings);
+        const float y = y0 + (y1 - y0) * t;
+        for (int j = 0; j <= sectors; ++j)
+        {
+            const float ang = 6.2831853f * static_cast<float>(j % sectors) / static_cast<float>(sectors);
+            const float rad = radiusAt(ang, t) * (r == rings ? 0.92f : 1.0f);
+            const float cu = std::cos(ang), cv = std::sin(ang);
+            m.addVertex(cu * rad, y, cv * rad, cu * 0.98058f, 0.19612f, cv * 0.98058f,   // (cu, 0.2, cv) normalised
+                        static_cast<float>(j) / static_cast<float>(sectors), t * 0.6f);
+        }
+    }
+    const int stride = sectors + 1;
+    for (int r = 0; r < rings; ++r)
+        for (int j = 0; j < sectors; ++j)
+        {
+            const uint32_t a = r * stride + j;
+            m.quad(a, a + stride, a + stride + 1, a + 1);
+        }
+    // The top: a fan around a centre sunk a little (a weathered, slightly dished cut).
+    const uint32_t c = m.addVertex(0.0f, y1 - 0.025f, 0.0f, 0.0f, 1.0f, 0.0f, 0.5f, 0.5f);
+    const uint32_t top = static_cast<uint32_t>(m.pos.size() / 3);
+    for (int j = 0; j <= sectors; ++j)
+    {
+        const float ang = 6.2831853f * static_cast<float>(j % sectors) / static_cast<float>(sectors);
+        const float rad = radiusAt(ang, 1.0f) * 0.92f;
+        m.addVertex(std::cos(ang) * rad, y1, std::sin(ang) * rad, 0.0f, 1.0f, 0.0f, 0.5f + 0.5f * std::cos(ang), 0.5f + 0.5f * std::sin(ang));
+    }
+    for (int j = 0; j < sectors; ++j) m.tri(c, top + j, top + j + 1);
+    fixWinding(m);
+    return m;
+}
+
+// A fallen log: a rough cylinder lying along x, 1.6 m long, 17 cm of radius, sunk 3 cm. One end
+// is cut square, the other ragged; the noise is a function of the position along the log.
+Mesh makeLog(int sectors, int rings, int octaves)
+{
+    const uint32_t seed = 0x1066Au;
+    const float halfLen = 0.8f, cy = 0.14f;
+    Mesh m;
+    const auto radiusAt = [&](float ang, float x) {
+        const float taper = 1.0f - 0.12f * (x / halfLen * 0.5f + 0.5f);
+        return 0.17f * taper * (1.0f + 0.10f * noiseFbm(x * 2.2f, std::cos(ang) * 1.6f, std::sin(ang) * 1.6f, seed, octaves));
+    };
+    for (int r = 0; r <= rings; ++r)
+    {
+        const float x = -halfLen + 2.0f * halfLen * static_cast<float>(r) / static_cast<float>(rings);
+        for (int j = 0; j <= sectors; ++j)
+        {
+            const float ang = 6.2831853f * static_cast<float>(j % sectors) / static_cast<float>(sectors);
+            const float rad = radiusAt(ang, x);
+            const float cu = std::cos(ang), cv = std::sin(ang);
+            m.addVertex(x, cy + cu * rad, cv * rad, 0.0f, cu, cv, x / (2.0f * halfLen) * 4.0f, static_cast<float>(j) / static_cast<float>(sectors));
+        }
+    }
+    const int stride = sectors + 1;
+    for (int r = 0; r < rings; ++r)
+        for (int j = 0; j < sectors; ++j)
+        {
+            const uint32_t a = r * stride + j;
+            m.quad(a, a + stride, a + stride + 1, a + 1);
+        }
+    for (int end = 0; end < 2; ++end)
+    {
+        const float x = end == 0 ? -halfLen : halfLen, nx = end == 0 ? -1.0f : 1.0f;
+        const uint32_t c = m.addVertex(x + nx * (end == 0 ? 0.0f : 0.03f), cy, 0.0f, nx, 0.0f, 0.0f, 0.5f, 0.5f);
+        const uint32_t first = static_cast<uint32_t>(m.pos.size() / 3);
+        for (int j = 0; j <= sectors; ++j)
+        {
+            const float ang = 6.2831853f * static_cast<float>(j % sectors) / static_cast<float>(sectors);
+            const float rad = radiusAt(ang, x);
+            const float cu = std::cos(ang), cv = std::sin(ang);
+            m.addVertex(x, cy + cu * rad, cv * rad, nx, 0.0f, 0.0f, 0.5f + 0.5f * cu, 0.5f + 0.5f * cv);
+        }
+        for (int j = 0; j < sectors; ++j) m.tri(c, first + j, first + j + 1);
+    }
+    fixWinding(m);
+    return m;
+}
+
+// The stone shapes of the other sets: a rounder, bigger boulder (Forest), a flat chip (Grassland).
+const Stone kMossRock = { 1.10f, 0.62f, 0.95f, 0.16f, 1.6f, 1, 0.90f, 0.22f, 0x30551u };
+const Stone kScree    = { 0.34f, 0.13f, 0.24f, 0.28f, 2.0f, 2, 0.80f, 0.25f, 0x5C4EEu };
+
+//                              radius height width  lean  drop  leaf  yawSpread heads headR seed
+const Bunch kFern       = {  0.04f, 0.50f, 0.15f, 0.45f, 0.45f, true,  0.35f,   false, 0.0f,  0xFE12u };
+const Bunch kTallGrass  = {  0.09f, 0.85f, 0.04f, 0.14f, 0.0f,  false, 3.1416f, false, 0.0f,  0x7A11u };
+const Bunch kFlowerTuft = {  0.07f, 0.32f, 0.04f, 0.07f, 0.0f,  false, 3.1416f, true,  0.045f, 0xF10Eu };
+
 // The layer meshes, one entry per detail level (level 0 first). Each kind's levels are
 // consecutive in the table in main() so their UUIDs are consecutive too.
 const Stone kRockA   = { 1.00f, 0.70f, 0.85f, 0.30f, 1.8f, 3, 0.82f, 0.18f, 0xA11CEu };
@@ -644,6 +825,25 @@ int main(int argc, char** argv)
         { "RockCLod2",      makeStone(kRockC, 1, 1) },
         { "SnowDrift",      makeDrift(3, 3) },
         { "SnowDriftLod1",  makeDrift(2, 1) },
+        // Landscape 3.0 (Thema 233): the Forest and Grassland sets. Append only, ids 0x119..0x12A.
+        { "Fern",           makeBunch(kFern, 8, 5) },
+        { "FernLod1",       makeBunch(kFern, 5, 3) },
+        { "FernLod2",       makeBunch(kFern, 4, 2) },
+        { "ForestStump",    makeStump(14, 6, 3) },
+        { "ForestStumpLod1", makeStump(8, 3, 2) },
+        { "FallenLog",      makeLog(12, 8, 3) },
+        { "FallenLogLod1",  makeLog(8, 4, 2) },
+        { "MossRock",       makeStone(kMossRock, 3, 3) },
+        { "MossRockLod1",   makeStone(kMossRock, 2, 2) },
+        { "MossRockLod2",   makeStone(kMossRock, 1, 1) },
+        { "TallGrass",      makeBunch(kTallGrass, 11, 5) },
+        { "TallGrassLod1",  makeBunch(kTallGrass, 7, 3) },
+        { "TallGrassLod2",  makeBunch(kTallGrass, 4, 2) },
+        { "FlowerTuft",     makeBunch(kFlowerTuft, 9, 4) },
+        { "FlowerTuftLod1", makeBunch(kFlowerTuft, 6, 2) },
+        { "FlowerTuftLod2", makeBunch(kFlowerTuft, 4, 1) },
+        { "ScreeChip",      makeStone(kScree, 2, 2) },
+        { "ScreeChipLod1",  makeStone(kScree, 1, 1) },
     };
     // The entries code names by UUID sit at a fixed index: the entry index is the id.
     const auto indexOf = [&](const char* name) {
@@ -653,7 +853,11 @@ int main(int argc, char** argv)
     for (const auto& [name, id] : { std::pair<const char*, HE::UUID>{ "Tuft", HE::kEngineTuftMeshId },
                                     { "Pebble", HE::kEnginePebbleMeshId }, { "RockA", HE::kEngineRockAMeshId },
                                     { "RockB", HE::kEngineRockBMeshId },   { "RockC", HE::kEngineRockCMeshId },
-                                    { "SnowDrift", HE::kEngineSnowDriftMeshId } })
+                                    { "SnowDrift", HE::kEngineSnowDriftMeshId },
+                                    { "Fern", HE::kEngineFernMeshId },     { "ForestStump", HE::kEngineForestStumpMeshId },
+                                    { "FallenLog", HE::kEngineFallenLogMeshId }, { "MossRock", HE::kEngineMossRockMeshId },
+                                    { "TallGrass", HE::kEngineTallGrassMeshId }, { "FlowerTuft", HE::kEngineFlowerTuftMeshId },
+                                    { "ScreeChip", HE::kEngineScreeChipMeshId } })
         if (id.lo != 1 || id.hi != kMeshBaseHi + static_cast<uint64_t>(indexOf(name)))
         {
             std::fprintf(stderr, "mesh_gen: DefaultAssets.h names %s at the wrong index\n", name);

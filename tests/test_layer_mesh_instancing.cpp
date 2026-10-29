@@ -74,7 +74,8 @@ namespace
 			return p.string();
 		}
 
-		explicit Land(float densityMul) : cm(contentDir())
+		explicit Land(float densityMul, HE::AutoLandscapeGroupId group = HE::AutoLandscapeGroupId::Mountains)
+			: cm(contentDir())
 		{
 			cm.setEngineContentRoot((fs::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
 			auto& reg = world.registry();
@@ -95,12 +96,14 @@ namespace
 			reg.emplace<TerrainComponent>(terrain, tc);
 
 			FoliageComponent fol;
-			for (int k = 0; k < HE::kLayerMeshKindCount; ++k)
+			// The kinds of the texture group: Mountains' six (Thema 180) unless a test asks for another.
+			const HE::LayerMeshSet set = HE::layerMeshKindsOfGroup(group);
+			for (int k = 0; k < set.count; ++k)
 			{
-				const auto kind = static_cast<HE::LayerMeshKind>(k);
+				const HE::LayerMeshKind kind = set.kinds[k];
 				FoliageLayer* l = k == 0 ? &fol.layers[0] : fol.addLayer();
 				REQUIRE(l);
-				HE::applyLayerMeshPreset(*l, kind);
+				HE::applyLayerMeshPreset(*l, kind, group);
 				l->density *= densityMul;
 				if (kind == HE::LayerMeshKind::SnowDrift) l->heightMin = 30.0f;   // the plateau is 40 m
 				kinds.push_back(kind);
@@ -405,4 +408,37 @@ TEST_CASE("Layer meshes: a scene that names them by UUID gets them resident from
 			CAPTURE(HE::layerMeshKindName(static_cast<HE::LayerMeshKind>(k)));
 			CHECK(fresh.getStaticMesh(id) != nullptr);
 		}
+}
+
+TEST_CASE("Layer meshes: the Forest and Grassland sets scatter and draw boxed clusters too")
+{
+	for (const HE::AutoLandscapeGroupId g : { HE::AutoLandscapeGroupId::Forest, HE::AutoLandscapeGroupId::Grassland })
+	{
+		CAPTURE(HE::autoLandscapeGroup(g).name);
+		Land land(1.0f, g);
+		REQUIRE(land.fol().layers.size() == static_cast<size_t>(HE::layerMeshKindsOfGroup(g).count));
+		for (const FoliageLayer& l : land.fol().layers)
+		{
+			CAPTURE(l.name);
+			CHECK(l.cachedInstances.size() > 0u);       // the group's rules leave ground for every kind
+		}
+		const RenderWorld rw = extract(land, kAcross);
+		size_t clusters = 0, unboxed = 0, foreign = 0;
+		UuidSet known;
+		for (int i = 0; i < HE::layerMeshKindsOfGroup(g).count; ++i)
+		{
+			const auto ids = idsOf(HE::layerMeshKindsOfGroup(g).kinds[i]);
+			known.insert(ids.begin(), ids.end());
+		}
+		for (const RenderObject& o : rw.objects)
+		{
+			if (!o.isCluster()) continue;
+			++clusters;
+			if (!o.worldBounds.isValid()) ++unboxed;
+			if (!known.count(o.meshAssetId)) ++foreign;
+		}
+		CHECK(clusters > 5u);
+		CHECK(unboxed == 0u);
+		CHECK(foreign == 0u);
+	}
 }

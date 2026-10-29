@@ -132,6 +132,18 @@ constexpr UUID kEngineRockBMeshId     = { 0x0000000000000111ULL, 0x0000000000000
 constexpr UUID kEngineRockCMeshId     = { 0x0000000000000114ULL, 0x0000000000000001ULL };   // 3 levels
 constexpr UUID kEngineSnowDriftMeshId = { 0x0000000000000117ULL, 0x0000000000000001ULL };   // 2 levels
 
+// Landscape 3.0 (Thema 233): the Forest and Grassland sets, the next ids in mesh_gen's table (the
+// index is the id, append only). Names: Fern, FernLod1, FernLod2, ForestStump, ForestStumpLod1,
+// FallenLog, FallenLogLod1, MossRock .. MossRockLod2, TallGrass .. TallGrassLod2, FlowerTuft ..
+// FlowerTuftLod2, ScreeChip, ScreeChipLod1. Which set shows which kinds: LayerMeshPresets.h.
+constexpr UUID kEngineFernMeshId        = { 0x0000000000000119ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineForestStumpMeshId = { 0x000000000000011CULL, 0x0000000000000001ULL };   // 2 levels
+constexpr UUID kEngineFallenLogMeshId   = { 0x000000000000011EULL, 0x0000000000000001ULL };   // 2 levels
+constexpr UUID kEngineMossRockMeshId    = { 0x0000000000000120ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineTallGrassMeshId   = { 0x0000000000000123ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineFlowerTuftMeshId  = { 0x0000000000000126ULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineScreeChipMeshId   = { 0x0000000000000129ULL, 0x0000000000000001ULL };   // 2 levels
+
 // ── Engine weather sounds (FILES, not registered here) ──────────────────────
 // The sounds WeatherComponent plays when none of its sound slots is set, so a
 // project gets rain, wind, snow, storm and thunder without a file of its own.
