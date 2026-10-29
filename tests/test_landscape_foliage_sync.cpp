@@ -116,6 +116,20 @@ bool pumpUntil(ContentManager& cm, Pred pred)
 	}
 	return pred();
 }
+
+// Not EngineContentManifest::findByUuid/findByPath (test_engine_content_manifest_refresh.cpp's
+// note): the struct is not HE_CS_API, so its out-of-line members are not exported from the
+// Windows DLL — a direct call links on this platform's compiler but fails LNK2019 at link time.
+bool hasUuid(const HE::Cs::EngineContentManifest& m, HE::UUID id)
+{
+	return std::any_of(m.entries.begin(), m.entries.end(),
+	                   [id](const HE::Cs::EngineContentManifestEntry& e) { return e.uuid == id; });
+}
+bool hasPath(const HE::Cs::EngineContentManifest& m, const std::string& path)
+{
+	return std::any_of(m.entries.begin(), m.entries.end(),
+	                   [&path](const HE::Cs::EngineContentManifestEntry& e) { return e.relativePath == path; });
+}
 }
 
 TEST_CASE("landscape foliage layer sync: a set in EngineContent/LandscapeFoliage is published and pulled")
@@ -161,8 +175,8 @@ TEST_CASE("landscape foliage layer sync: a set in EngineContent/LandscapeFoliage
 	HE::Cs::EngineContentManifest manifest;
 	REQUIRE(HE::Cs::parseManifest(HE::Cs::serializeManifest(local), manifest));
 	REQUIRE(manifest.entries.size() == 1);
-	CHECK(manifest.findByUuid(id) != nullptr);
-	CHECK(manifest.findByPath(rel) != nullptr);
+	CHECK(hasUuid(manifest, id));
+	CHECK(hasPath(manifest, rel));
 	CHECK(manifest.entries[0].contentHash == entry.contentHash);
 
 	// PULL: the editor registers every manifest entry that has a UUID under
