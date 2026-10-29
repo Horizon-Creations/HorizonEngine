@@ -1,0 +1,21 @@
+label: Mountains-old-top-Metal-r3
+attempt: 1
+editor: /tmp/he328/old/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 2.80 3.12 2.96
+  locked:    Yes
+  lowpower:  0
+  gpu:       10
+  power:     Now drawing from 'AC Power'
+  busy:      23.2% WindowServer; 14.3% Python; 10.2% coreaudiod; 9.5% Python
+  foreign:   none
+after:
+  uptime:    load averages: 2.39 3.00 2.92
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      26.5% WindowServer; 13.6% Dock; 12.8% coreaudiod; 8.0% WallpaperAerialsExtension
+  foreign:   none
