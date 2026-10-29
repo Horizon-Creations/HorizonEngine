@@ -116,19 +116,9 @@ any other material can call them too.
 - **Not verified:** a changed value in the live editor (instance panel / Vec4 widget), OpenGL/D3D/Vulkan, a Material Instance override of the new names.
 - **Shots:** `docs/landscape-3-0-procedural-snow-sand-shots/` (snow plateau, Desert sand ripples).
 
-## Step 4 (Thema 328): texture + procedural
+## Handoff (step 3)
 
-- **What:** new parameter `Texture Mix` (Vec4, x = snow, y = sand, z/w unused, default 0). x mixes the group's **Snow texture** into the procedural snow, y mixes the **ground (Grass slot) texture** into the procedural sand (Desert only). `AutoLandscapeMaterial.cpp`, block "Texture + procedural" right after the gate helpers: plain (unbombed) read of the slice, behind an `If` on `mix > 0`, then the same `blend` (Lerp over albedo, normal, mask) as the layers, `saturate(mix)` as weight; the mixed height replaces `snow.height` / `grass.height`, so every later bias sees it.
-- **Cost at the default:** no tap (the If is a uniform branch), result = procedural surface (`mix(a, b, 0) = a`).
-- **Slot budget:** every group is now at 16. The Desert's `Snow Color` slot went to the Texture Mix (its snow colour is a baked constant, like its sand colour); the other groups have no `Sand Look`. `autoLandscapeParamCount` is gone, `kAutoLandscapeParamCount` = 16 for all.
-- **Verified (Mac, Release, Metal):** ctest 345/345 (two assertions changed on purpose: the Snow slice and the Desert's Grass slice are now read, exactly 3 plain reads each, never bombed; reads 18 -> 21). Witness A/B at the default: Mountains top bit-identical, Mountains snow plateau max 1/255, Desert sand close: one pixel of 921 600 differs (367,328, a glitter sparkle, 101/255), everything else within 1/255. Effect: a temporary build with the default 0.7 (deployed material swapped, restored, assets regenerate byte-stable) shows the real snow texture in the snow (mean 6.2/255 from the default) and the placeholder ground array in the sand (mean 24/255): `docs/landscape-3-0-procedural-snow-sand-shots/snow-texture-mix-0.7.jpg`, `sand-texture-mix-0.7-placeholder-array.jpg`.
-- **Not verified:** the Vec4 widget in the instance panel; the real Desert ground texture (only the 128 px placeholder array is on this Mac); OpenGL / D3D / Vulkan (the new reads are the layers' own plain reads, no new sampler: the three arrays are the same).
-- **Decisions taken:** plain read, no bombing (a mixed overlay hides tiling less than a layer; add `seed` later if it shows); per-role amount, not per-pixel; Height of the mixed result feeds the biases.
-- **Suggested, not taken:** a paint-layer weight for the mix; taking the texture's height to modulate the procedural ripples instead of a plain lerp.
-
-## Handoff (steps 3 and 4)
-
-- **Topic / step:** 328, steps 3 (Hive 1576) and 4 (Hive 1577). Branch `claude/schnee-sand-weiter-parameter-screenshots`.
+- **Topic / step:** 328, step 3 (Hive 1576). Branch `claude/schnee-sand-weiter-parameter-screenshots`.
 - **Decisions taken:** Vec4 packing; sand colour baked; Desert = 16 params. **Suggested, not taken:** raise the slot budget (needs all five renderers + Windows verification), group-specific defaults from the picker values.
-- **Trap (budget):** every group sits at 16/16 HeParams slots; the next parameter (Path layer, trails) needs a packed slot or the renderers' budget raised. 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
-- **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 5 trails (Disturbance pin; trail settings are CPU-side, no slot); 3. real Desert arrays to judge the sand mix.
+- **Trap:** 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
+- **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 4 (mix texture + procedural, a Mix parameter will need a slot: free one or pack); 3. step 5 trails (Disturbance pin).

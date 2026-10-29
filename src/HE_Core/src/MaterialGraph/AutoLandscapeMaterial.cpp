@@ -95,22 +95,13 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         "0.08 ~ 23 degrees. Painted puddles ignore it.");
     // The procedural snow / sand (MF_ProceduralSnow / MF_ProceduralSand). The defaults are the
     // functions' own, the colours the references': see where they are wired below.
-    // The snow colour: a parameter in every group but the Desert (its slot is the Sand Look's, see the
-    // header), a constant there.
-    int pSnowColor;
-    if (group.proceduralSand)
-        pSnowColor = w.node(T::ConstColor, 0);
-    else
+    const int pSnowColor = w.node(T::ParamColor, 0);
     {
-        pSnowColor = w.node(T::ParamColor, 0);
         MatGraphNode* c = r.graph.findNode(pSnowColor);
         c->s = kAutoLandscapeParamSnowColor;
+        c->p[0] = 0.82f; c->p[1] = 0.85f; c->p[2] = 0.90f;
         c->group = "Snow";
         c->tooltip = "Colour of the procedural snow (linear).";
-    }
-    {
-        MatGraphNode* c = r.graph.findNode(pSnowColor);
-        c->p[0] = 0.82f; c->p[1] = 0.85f; c->p[2] = 0.90f;
     }
     const int pSnowLook = w.node(T::ParamVec4, 0);
     {
@@ -120,16 +111,6 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         c->group = "Snow";
         c->tooltip = "Procedural snow, x..w: Grain (0..1, how coarse the crystals read), Drift (0..1, wind-blown "
                      "ridges), Glitter (0..1, sparkle in the sun), Softness (0..1, how deep and rounded the surface is).";
-    }
-    const int pTexMix = w.node(T::ParamVec4, 0);
-    {
-        MatGraphNode* c = r.graph.findNode(pTexMix);
-        c->s = kAutoLandscapeParamTextureMix;
-        c->p[0] = c->p[1] = c->p[2] = c->p[3] = 0.0f;
-        c->group = "Snow";
-        c->tooltip = "Texture + procedural, x: share of the group's Snow texture mixed into the procedural snow, "
-                     "y: share of the ground (Grass slot) texture mixed into the procedural sand (Desert only). "
-                     "0 = purely procedural; the texture is then not read at all. z, w unused.";
     }
     int pSandLook = -1;
     if (group.proceduralSand)
@@ -335,27 +316,6 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int drawn = w.op(T::Greater, col, { { paint, paintPin }, { zero } });
         return w.op(T::Or, col, { { can }, { drawn } });
     };
-
-    // ── Texture + procedural (Thema 328 step 4) ──────────────────────────────
-    // "Texture Mix" lets a group's own texture shine through its procedural surface: the snow
-    // takes the group's Snow texture, the Desert's sand its ground (Grass slot) texture. The read
-    // sits behind an If on the parameter, so at the default 0 it costs a branch and no tap, and the
-    // result is the procedural surface exactly (mix(a, b, 0) = a). The mixed height feeds every
-    // later bias, like any other layer's.
-    {
-        const int texMix  = w.op(T::SplitRGBA, 2, { { pTexMix } });
-        auto overlay = [&](LayerReads& surf, LayerReads tex, int amountPin, int col) {
-            gate(tex, w.op(T::Greater, col, { { texMix, amountPin }, { zero } }), col);
-            const Surface mixed = blend({ surf.albedo, surf.normal, surf.mask }, tex, w.op(T::Saturate, col, { { texMix, amountPin } }), col);
-            surf.albedo = mixed.albedo;
-            surf.normal = mixed.normal;
-            surf.mask   = mixed.mask;
-            surf.height = w.op(T::SplitRGBA, col, { { mixed.mask } });
-        };
-        overlay(snow, layer(AutoLandscapeLayer::Snow, uvRock, -1), 0, 2);
-        if (group.proceduralSand)
-            overlay(grass, layer(AutoLandscapeLayer::Grass, uvGround, -1), 1, 2);
-    }
 
     // ── Ground: grass, dirt patches, dirt belt below the rock (column 3) ─────
     const int invDirt  = w.op(T::Divide, 3, { { one }, { pDirtSize } });
