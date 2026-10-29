@@ -8,6 +8,7 @@
 #include "CollabPresenceBar.h"   // ditto for the collaboration avatars
 #include "EditorUI.h"
 #include "EditorTabs.h"            // retarget / dedupe the open asset tabs
+#include "AssetIdentity.h"        // an asset's identity is its UUID, not the tab's path string
 #include "ProjectPreflight.h"      // engine-content check in front of the first project open
 #include "SceneDiskWatch.h"        // the open scene's file stamp: our own save is not a pull
 #include "EditorTheme.h"           // the brand palette every piece of chrome derives from
@@ -801,6 +802,9 @@ void EditorApplication::OnInit()
 	// Every asset type funnels through ContentManager::saveAsset, so one hook
 	// covers HorizonCode graphs, materials, UI widgets, particle and animator
 	// graphs and scenes alike.
+	// Which asset a panel state or a peer's key means is decided by its UUID, and
+	// where that asset lives right now is this ContentManager's answer.
+	HE::Ed::AssetIdentity::bind(&contentManager());
 	contentManager().setOnAssetSaved(
 		[this](const std::string& relPath, const std::string& fullPath) {
 			m_collab.publishAsset(relPath, fullPath);
