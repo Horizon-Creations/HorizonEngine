@@ -85,9 +85,10 @@ struct TerrainComponent {
     // zero, which is every landscape painted before there were eight layers —
     // they load without it and render exactly as before. Allocated by the first
     // stroke on layer 4+, never without layerWeights; the weights of one texel
-    // sum to 255 across ALL pages. Uploaded as the middle of a 2:1 (or 3:1)
-    // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
-    // shader needs no second sampler or binding on any backend.
+    // sum to 255 across ALL pages. Uploaded as the right half of a 2:1 weightmap
+    // (the middle third of a 3:1 one) in the same texture (TerrainPaint::
+    // buildWeightTexture), so the shader needs no second sampler or binding on
+    // any backend.
     std::vector<uint8_t>  layerWeights2;
     // Layers 8..11 (R=8 … A=11), same layout again. Empty = all four zero, which
     // is every landscape painted before there were twelve layers: it saves and
