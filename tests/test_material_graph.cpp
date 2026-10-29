@@ -2821,7 +2821,9 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 				sawRock = sawRock || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Rock);
 			}
 		}
-		CHECK(reads == 24); // 4 bombed layers (Grass, Dirt, Rock, Water) x 3 maps x (plain + bombed)
+		// 4 bombed layers (Grass, Dirt, Rock, Water) x 3 maps x (plain + bombed), plus Mountains' two
+		// extra rock sizes (boulders, pebbles; Thema 329 step 5) x 3 maps x (plain + bombed)
+		CHECK(reads == 36);
 		CHECK(wetReads == 6); // ... of them the Water layer's 3 maps x (plain + bombed)
 		CHECK(sawRock);
 	}
@@ -2832,7 +2834,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	// Thema 180 Schritt 3: the layers read through the variant grid (Groups wired), which
 	// is heBombGrid plus the variant numbers; the plain heBombGrid is not emitted at all.
 	CHECK(countOf(gen.glsl, "void heBombGridV(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 4u);
+	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 6u); // 4 layers + Mountains' 2 extra rock sizes
 	CHECK(gen.glsl.find("heBombGrid(") == std::string::npos);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
