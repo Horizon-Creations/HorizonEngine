@@ -1,5 +1,11 @@
 # Wolken 2.0, Schritt 4c: Kosten des Realistic-Marschs senken, Low-Res geprüft (Thema 227, Hive-Schritt 1140, dritter Teil)
 
+> **Korrektur (spätere Messung, siehe `docs/clouds-2-0-sun-march-2026-10-29.md`):** Die hier beschriebene Licht-Kadenz (`qLightEvery`) ist wieder entfernt: ihr
+> Fehler ist Rauschen (Mittel 3,3 von 255 gegen 1,3 ohne), weil der Cache an einem pro Pixel verschobenen Schritt beginnt. Die Wetterkarten-Interpolation gilt nur noch
+> für steile Strahlen (Abstand der Stützstellen auf 35 Einheiten seitlich begrenzt), ohne die Bedingung zeigte sie horizontale Streifen am Horizont.
+> Die Kostentabelle unten ist der Zwischenstand.
+
+
 Zweig `claude/wolken-2-0-wind-sprung-dome-hoehe`, nach `a60e2430`. Gilt für `applyClouds3DReal` (3D, Realistic) in `SkyShaderSource.h` und im Metal-Spiegel.
 
 ## Was geändert ist

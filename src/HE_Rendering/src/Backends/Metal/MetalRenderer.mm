@@ -5091,12 +5091,11 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.28 : 0.20);
 	float qMinN   = (quality < 0.5) ? 14.0 : (quality < 1.5 ? 26.0 : 32.0);
 	float qMaxN   = (quality < 0.5) ? 44.0 : (quality < 1.5 ? 80.0 : 128.0);
-	int   qShadow = (quality < 0.5) ? 3    : (quality < 1.5 ? 4    : 6);
+	int   qShadow = (quality < 0.5) ? 3    : (quality < 1.5 ? 3    : 6);
 
-	// How often an in-cloud step re-marches the sun: every step (High, exact), every 2nd (Medium) or 3rd (Low). The
-	// view density is sampled every step, the lighting varies slowly along a ray and is reused in between: the sun
-	// march (qShadow field evaluations) is where the milliseconds are. A step out of the cloud forgets the cache.
-	int qLightEvery = (quality < 0.5) ? 3 : (quality < 1.5) ? 2 : 1;
+	// Medium marches the sun in 3 steps instead of 4 and reaches as far by growing the step faster (2.6 instead of 1.85):
+	// 15, 54, 155 units against 15, 43, 92, 175. The step is the biggest cost of the Realistic clouds.
+	float stGrow = (quality >= 0.5 && quality < 1.5 && interSh >= 0.5) ? 2.6 : 1.85;   // without inter-shadows: own body only, as before
 	// The weather map (the column half of the field) is smooth along a ray: evaluate it on every Kth step and interpolate
 	// in between (Low 4, Medium 3, High exact). Empty space costs one column test per step, so this is where Medium spent
 	// almost half of its time (docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md).
@@ -5114,6 +5113,10 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
+	// The weather map varies over ~100 units; interpolating it across more than ~35 horizontal units per anchor smears it into
+	// horizontal streaks on grazing rays. So the anchor spacing is capped by how far a step moves sideways: steep views keep
+	// the full interval, a ray near the horizon evaluates every step.
+	qColEvery = min(qColEvery, max(1, int(35.0 / max(ds * length(dir.xz), 1.0))));
 	float jitter = skyBlueDither(fragCoord);
 
 	float sunY  = clamp(sunDir.y, -0.3, 1.0);
@@ -5144,8 +5147,6 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float3 L = float3(0.0);
 	float2 colA = float2(0.0);
 	float2 colB = float2(0.0);
-	float sunCache = 1.0;
-	int   lightAge = 1000;
 	for (int i = 0; i < N; ++i)
 	{
 		float  t   = tNear + (float(i) + jitter) * ds;
@@ -5165,7 +5166,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 			col = mix(colA, colB, float(i % qColEvery) / float(qColEvery));
 		}
 		float dens = cloudBodyReal(pos, baseY, thick, nscale, lo, time, wind, drift, fluff, evo, col, noiseTex, noiseSamp);
-		if (dens <= 0.002) { lightAge = 1000; continue; }
+		if (dens <= 0.002) continue;
 		// Fine cauliflower octave, boiling upward with the convection. Bites
 		// hardest at the silhouette (low density) so the outline breaks into
 		// crisp lobes while the core stays solid.
@@ -5176,43 +5177,37 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		             * (1.0 - 0.45 * clamp(dens * 2.5, 0.0, 1.0));
 		dens *= mix(1.0, smoothstep(0.15, 0.55, bfine), fineW);
 		dens *= smoothstep(0.0, 0.05, dens); // kill only true dust — the mist skirt stays
-		if (dens <= 0.002) { lightAge = 1000; continue; }
+		if (dens <= 0.002) continue;
 
 		// Sun march over the same field; the FIRST step is tight so each
 		// cauliflower lobe shades its neighbour (per-lobe relief), the
 		// exponential tail reaches ~0.5 thick (3 steps, own body) or ~2.3 thick
 		// (6 steps — interShadows: neighbouring towers darken this cloud).
-		if (lightAge >= qLightEvery)
+		float od = 0.0;
 		{
-			float od = 0.0;
+			float  st = thick * 0.05;
+			float3 sp = pos;
+			for (int j = 0; j < qShadow; ++j)
 			{
-				float  st = thick * 0.05;
-				float3 sp = pos;
-				for (int j = 0; j < qShadow; ++j)
-				{
-					sp += sunDir * st;
-					float shf = (sp.y - baseY) / thick;
-					if (shf > 1.35) break;                 // left the slab upward
-					od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind, drift,
-					                        fluff, 1.0, evo, noiseTex, noiseSamp) * (st / thick) * 10.0;
-					st *= 1.85;
-				}
+				sp += sunDir * st;
+				float shf = (sp.y - baseY) / thick;
+				if (shf > 1.35) break;                 // left the slab upward
+				od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind, drift,
+				                        fluff, 1.0, evo, noiseTex, noiseSamp) * (st / thick) * 10.0;
+				st *= stGrow;
 			}
-			// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
-			// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
-			// the tops by 1.75× and burn out before the tonemap).
-			float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
-			for (int o = 0; o < 3; ++o)
-			{
-				ms += aa * exp(-od * 5.5 * bb);
-				wsum += aa;
-				aa *= 0.5; bb *= 0.35;
-			}
-			sunCache = ms / wsum;
-			lightAge = 0;
 		}
-		lightAge++;
-		float sun    = sunCache;
+		// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
+		// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
+		// the tops by 1.75× and burn out before the tonemap).
+		float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
+		for (int o = 0; o < 3; ++o)
+		{
+			ms += aa * exp(-od * 5.5 * bb);
+			wsum += aa;
+			aa *= 0.5; bb *= 0.35;
+		}
+		float sun    = ms / wsum;
 		float powder = 1.0 - exp(-dens * mix(3.5, 5.0, fluff));
 		// Powder FLOOR: the thin mist skirt must read as luminous sunlit haze,
 		// not as grey soot — darkness should come from the sun march (od), not
