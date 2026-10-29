@@ -5,6 +5,7 @@
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "MaterialGraph/AutoLandscapeMaterial.h" // the three auto landscape array paths
+#include "Trails/TrailClipmap.h"           // the runtime trail texture answers its own path in loadAsset
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
@@ -1099,6 +1100,10 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	HE_PROFILE_SCOPE_N("ContentManager::load");
 	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
 		return loaded->second;
+	// The landscape's trail clipmap is a runtime texture with no file (Trails/TrailClipmap.h): answer it
+	// here, untouched, so a material that asks before the first scene tick finds it.
+	if (relativePath == HE::kTrailTexturePath)
+		return HE::TrailClipmap::ensureTexture(*this);
 
 	// Packed build: resolve the content path to a mounted-pak UUID via the asset
 	// index, then load that entry synchronously (registers it under its embedded

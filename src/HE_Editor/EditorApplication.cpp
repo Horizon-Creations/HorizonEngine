@@ -94,6 +94,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TrailSystem.h>
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
@@ -7867,6 +7868,27 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
 			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		// HE_DUMP_TRAILTEST=1 (Thema 328 step 5b): boot-sized footprints along parallel lines over the snow plateau
+		// (x 12..60, snow) and the plain (x -100..-30, sand), a tyre line at the far edge of each, so a close-up
+		// pose shows prints with no gameplay. Stamped once here; the scene tick heals them with the (calm) weather.
+		if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0')
+		{
+			HE::TrailField& tf = TrailSystem::runtime(*m_editorWorld).field;
+			auto walk = [&](float x0, float x1, float z, HE::TrailSurface kind) {
+				int i = 0;
+				for (float x = x0; x < x1; x += 0.8f, ++i)
+					tf.stampEllipse(x, z + ((i & 1) ? 0.25f : -0.25f), 0.4f, 0.17f, 0.0f, 0.9f, kind);
+			};
+			for (float z = -16.0f; z <= 16.0f; z += 4.0f)
+			{
+				walk(12.0f, 60.0f, z, HE::TrailSurface::Snow);
+				walk(-100.0f, -30.0f, z, HE::TrailSurface::Sand);
+			}
+			tf.stampCapsule(12.0f, 22.0f, 60.0f, 22.0f, 0.3f, 0.8f, HE::TrailSurface::Snow);
+			tf.stampCapsule(-100.0f, 22.0f, -30.0f, 22.0f, 0.3f, 0.8f, HE::TrailSurface::Sand);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILTEST stamped %zu texels on %zu pages",
+			            tf.activeTexels(), tf.pageCount());
+		}
 		const MaterialAsset* ma = contentManager().getMaterial(amId);
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLAND witness landscape added "
 			"(mode %s, %s, %zu graph textures, array mask %u, %zu params, snow at y=%.0f)",
@@ -10201,6 +10223,10 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in
+	// line with the camera's final pose here, once.
+	if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0' && m_editorWorld)
+		TrailSystem::update(*m_editorWorld, contentManager(), r, m_editorCamera.position(), 0.0f, nullptr);
 
 	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur
 	// witness. A headless dump has no camera history — every settle frame

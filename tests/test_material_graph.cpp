@@ -13,6 +13,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <Trails/TrailClipmap.h>
 #include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <MaterialGraph/MaterialGraph.h>
@@ -2728,12 +2729,17 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	// as a set.
 	std::vector<std::string> tex = gen.textures;
 	std::sort(tex.begin(), tex.end());
+	// The three arrays and, since Thema 328 step 5b, the trail clipmap (a plain 2D texture, kTrailTexturePath).
 	std::vector<std::string> want = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
-	                                  HE::kAutoLandscapeMaskArray };
+	                                  HE::kAutoLandscapeMaskArray, HE::kTrailTexturePath };
 	std::sort(want.begin(), want.end());
 	CHECK(tex == want);
-	CHECK(gen.textureArrayMask == 0x7u);
-	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == 0x7u);
+	// The array slots are every slot but the trail's, wherever the emission order put it.
+	uint32_t arrays = 0;
+	for (size_t i = 0; i < gen.textures.size(); ++i)
+		if (gen.textures[i] != HE::kTrailTexturePath) arrays |= 1u << i;
+	CHECK(gen.textureArrayMask == arrays);
+	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == arrays);
 	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
 
 	// Every parameter is a real HeParams slot (none baked for being over budget).
@@ -2823,8 +2829,8 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	const std::map<std::string, bool> off{ { HE::kAutoLandscapeSwitchBombing, false } };
 	const HE::MatShaderGen plain = HE::generateFragment(a.graph, HE::weatherFunctionLoader(), &off);
 	CHECK(plain.glsl.find("heBomb") == std::string::npos);
-	CHECK(plain.textureArrayMask == 0x7u);
-	CHECK(plain.textures.size() == 3u);
+	CHECK(plain.textureArrayMask == arrays);
+	CHECK(plain.textures.size() == 4u);
 	CHECK(plain.glsl != gen.glsl);
 
 	// Lit by default; the mask views are unlit, read the same masks and need no
@@ -3679,7 +3685,7 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	REQUIRE(m);
 	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
-	CHECK(m->graphTexturePaths.size() == 3u);
+	CHECK(m->graphTexturePaths.size() == 4u);   // three arrays + the trail clipmap
 	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 	// The Landscape tool lists these as the paintable layers — Auto first, so an
 	// unpainted terrain reads the automatic distribution.

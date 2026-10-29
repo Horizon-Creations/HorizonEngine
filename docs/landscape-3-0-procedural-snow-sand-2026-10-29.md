@@ -118,7 +118,7 @@ any other material can call them too.
 
 ## Handoff (steps 3, 5a; step 4 withdrawn)
 
-- **Topic / step:** 328, step 3 (Hive 1576) done, step 4 withdrawn (1577), step 5a done (CPU field + function look), step 5b open (Hive 1578). Branch `claude/schnee-sand-weiter-parameter-screenshots`.
+- **Topic / step:** 328, step 3 (Hive 1576) done, step 4 withdrawn (1577), step 5 done on Metal + OpenGL (Hive 1578: CPU field, function look, clipmap texture, landscape wiring); D3D/Vulkan runtime check open. Branch `claude/schnee-sand-weiter-parameter-screenshots`.
 - **Decisions taken:** Vec4 packing; sand colour baked; Desert = 16 params. **Suggested, not taken:** raise the slot budget (needs all five renderers + Windows verification), group-specific defaults from the picker values.
 - **Trap:** 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
 - **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 4 (mix texture + procedural, a Mix parameter will need a slot: free one or pack); 3. step 5 trails (Disturbance pin).
@@ -134,10 +134,25 @@ Step 5 of the topic is split: this part is everything that can be built and veri
 - **Trap found:** the editor reads the function assets from its deploy's `EngineContent/MaterialFunctions`, not only the baked landscape text: a function default changed in a test must be swapped there too.
 - **Not done / not verified:** no footprint is visible yet; nothing feeds the pins. No GPU code, no landscape wiring, no D3D / Vulkan / OpenGL. The CPU heal is a 512 x 512 pass per page per tick (fine for tens of pages, not measured).
 
-### Step 5b (next, not started): what makes it visible
-1. A texture the landscape shader can read: the plan's clipmap (2 layers of 512 x 512, R32F / R16F, around the camera) **filled from `TrailField` by the CPU** (upload the changed rows; no compute or FBO write path needed any more), an integer fetch in a new material node ("Trail Sample": depth and slope) and `AutoLandscapeMaterial.cpp` wiring `Disturbance` / `Disturbance Slope` of both calls to it.
-2. Per-backend binding, the same list as `heLandscapeWeights` (~14 files: `MaterialShaderLibrary`, `OpenGLRenderer`, `D3D11/D3D12Renderer` + root signature, `VulkanRenderer` + layout, Metal). Metal and OpenGL can be done and shown on this Mac; D3D / Vulkan stay open Windows steps. First check: the live sampler count of the linked landscape program on macOS GL (16 allowed). Every group is at 16/16 HeParams slots, but trails need no parameter (settings are CPU-side).
-3. Footprints from a test source to see it: a debug key that stamps along the camera path.
+## Step 5b (Thema 328): trails reach the screen
+
+Footprints and tracks are now visible in snow and sand on Metal and OpenGL. **No renderer code changed**: the clipmap is an ordinary texture asset in the landscape material's free fourth graph-texture slot (heTexP, resolved by every backend for the three arrays already).
+
+- **`HE::TrailClipmap`** (`Trails/TrailClipmap.h/.cpp`): a 128 m x 128 m window around the camera as a 512 x 512 RGBA8 texture, path `mem://HorizonTrails` (no file, so the EngineContent resolver never looks for it), `srgb = false`, one mip. World-aligned and toroidal: the texel of (x, z) is (floor(x/0.25) mod 512, floor(z/0.25) mod 512), the shader uv is `xz / 128` with the sampler's repeat wrap, so **no window origin travels to the GPU** (Desert is at 16/16 parameters). R = 255 - depth8 (white = untouched), G / B = slope x / z (128 = flat, +-8 per metre), A = 128 marker. The CPU computes the slope from the 16-bit field, so the shader needs one tap and no neighbours. `update()` registers the untouched texture, rewrites it (`replaceTexture` + `InvalidateTexture`, the weightmap's path) only when the field changed or the camera crossed a texel while something is near.
+- **`ContentManager::loadAsset("mem://HorizonTrails")`** answers with `TrailClipmap::ensureTexture`: a material asks for the path on the first draw, before the first scene tick, and the renderers cache a miss until the content epoch moves. Without this hook the log showed the miss and the texture never appeared.
+- **`TrailSystem`** (`HE_Scene/TrailSystem.h`, `SceneSystems::tickWorld` right after the weather): one `TrailField` + clipmap per world in the registry context (`TrailSystem::runtime(world)`), heals with `WeatherComponent` cur* values at the scene clock, uploads. Gameplay stamps through `runtime(world).field` (the `HE::api` wrappers are step 7).
+- **Landscape graph** (`AutoLandscapeMaterial.cpp`, block "Trails"): TextureSample -> decode -> `Disturbance` and `Disturbance Slope` of both calls. Safe against a missing texture: only a texel with alpha about one half counts (a white or black stand-in has 1 or 0 there). Faded out between `kTrailFadeStart` 46 m and `kTrailFadeEnd` 58 m of camera distance, because the window wraps and belongs to this place only within 64 m. Height does not read it (interface test, unchanged cone test).
+- **Slot order:** the trail takes the slot the emission order gives it (Mountains/Forest/Grassland: arrays 0, 2, 3 and trail 1, mask 13; Desert: trail 0, arrays 1..3, mask 14). The tests now compute the array mask from the texture list instead of `0x7`.
+- **Debug source:** `HE_DUMP_TRAILTEST=1` (EditorApplication, next to HE_DUMP_AUTOLAND) stamps boot-sized footprints (0.8 m stride, 0.4 x 0.17 m, depth 0.9) on parallel lines over the snow plateau (x 12..60) and the plain (x -100..-30) and two tyre lines, and updates the clipmap once (the dump renders without scene ticks).
+
+**Verified (Mac, Release):** ctest 346/346; new tests: encoding, registration, a print at the texel of its world position, rim sign (G/B left or right of the centre), the 128 m wrap, rewrite only on change, a healed field clears the picture once. Witness A/B without trails vs step 3: Mountains snow plateau and Desert sand within 1/255. With `HE_DUMP_TRAILTEST=1` footprints are visible on **Metal** (`docs/landscape-3-0-procedural-snow-sand-shots/trail-snow-footprints.jpg`, `trail-sand-footprints.jpg`: dark, rimmed prints in the snow, ripples stamped flat and shaded in the sand) and on **OpenGL** (Mountains). `missing-logs=0`.
+
+**Not verified / open:**
+- D3D11, D3D12, Vulkan at runtime: they inherit the fourth graph-texture slot (no code of their own), but the shader linking (a plain 2D sampler beside arrays, SM 5.0 sampler registers, the Vulkan 17-sampler stage) was not run. **Windows step, stays open.**
+- GL logs one `UNSUPPORTED (log once): ... unit 2 GLD_TEXTURE_INDEX_2D is unloadable` warning on the first frame; it appears without trails too (the render is right), cause not traced (a unit read before its texture bound).
+- Packed/exported builds: the baked material turns paths into UUIDs and `mem://HorizonTrails` has none; a shipped game must call `TrailSystem::update` (it registers the texture) before the first landscape draw, and the pak packer's treatment of the unresolvable path was not checked.
+- Cost not measured (one extra tap per landscape pixel plus a 1 MB upload on a frame the field or the camera-near field changed). The camera walking over trodden ground rewrites 1 MB per texel crossed.
+- The prints are a test pattern: gameplay stamping (steps, vehicles, `HE::api`) is step 7, persistence step 6.
 
 ## Step 4 withdrawn (2026-10-29)
 

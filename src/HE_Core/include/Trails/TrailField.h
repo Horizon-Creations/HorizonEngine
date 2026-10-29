@@ -70,10 +70,16 @@ public:
     // "Disturbance Slope" input takes.
     glm::vec2 gradient(float x, float z) const;
 
+    // Texels [ix0, ix0 + w) x [iz0, iz0 + h) (global texel indices: x / kCellSize, floored) as 16-bit
+    // depths, row-major, zero where no page exists. What the renderer's clipmap copies per frame.
+    void copyWindow(int ix0, int iz0, int w, int h, uint16_t* out) const;
+    // Counts up whenever a stamp or a heal step changed anything: a cache keyed on it is current.
+    uint64_t version() const { return m_version; }
+
     size_t pageCount() const { return m_pages.size(); }
     // The texels above zero over all pages (a cheap "is anything trodden" for tests and tools).
     size_t activeTexels() const;
-    void   clear() { m_pages.clear(); m_clockStarted = false; }
+    void   clear() { m_pages.clear(); m_clockStarted = false; ++m_version; }
 
 private:
     struct Page
@@ -87,10 +93,11 @@ private:
     uint16_t* texelForWrite(int ix, int iz, TrailSurface surface);   // allocates the page
     uint16_t  texel(int ix, int iz) const;                           // 0 off the pages
     float     healRate(uint8_t surfaces, const TrailWeather& w, const TrailSettings& s) const;
-    void      healPage(Page& page, float rate, float dt);
+    bool      healPage(Page& page, float rate, float dt);   // true when it changed a texel
 
     std::unordered_map<int64_t, Page> m_pages;
-    bool   m_clockStarted = false;
-    double m_clock        = 0.0;
+    bool     m_clockStarted = false;
+    double   m_clock        = 0.0;
+    uint64_t m_version      = 0;
 };
 } // namespace HE

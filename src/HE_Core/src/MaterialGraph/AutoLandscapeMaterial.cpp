@@ -1,6 +1,7 @@
 // Auto landscape material — see AutoLandscapeMaterial.h for what it does and why
 // it is a plain graph. This file is only the wiring.
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <Trails/TrailClipmap.h>
 #include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 
@@ -194,6 +195,46 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.findNode(call)->s = path;
         return call;
     };
+    // ── Trails (Thema 328 step 5b): the depth and slope of whatever pressed the snow or sand ──────
+    // TrailClipmap's texture (kTrailTexturePath, the fourth graph texture): a 128 m window around
+    // the camera, world-aligned and wrapping, so the uv is simply xz / 128 and the sampler repeats.
+    // Decoding mirrors TrailClipmap.h: depth = 1 - R, slope = (G|B - 128/255) * (255 / 127 * 8), and
+    // only a texel whose alpha is about one half is trusted: a missing texture (a white or black
+    // stand-in) must never read as a deep print. Beyond kTrailFadeStart metres the window no longer
+    // belongs to this place (it wraps), so the trail fades out before it ends.
+    int trailDepth, trailSlope;
+    {
+        const int invWindow = w.constF(1.0f / 128.0f, 2);
+        const int uvTrail   = w.op(T::Multiply, 2, { { xz }, { invWindow } });
+        const int tex       = w.op(T::TextureSample, 2, { { uvTrail } });
+        r.graph.findNode(tex)->s = kTrailTexturePath;
+        const int rgb  = w.op(T::SplitRGBA, 2, { { tex } });
+        const int lo   = w.constF(0.45f, 2);
+        const int hi   = w.constF(0.55f, 2);
+        const int stepLo = w.op(T::Step, 2, { { lo }, { tex, 1 } });
+        const int stepHi = w.op(T::Step, 2, { { hi }, { tex, 1 } });
+        const int below  = w.op(T::OneMinus, 2, { { stepHi } });
+        const int valid  = w.op(T::Multiply, 2, { { stepLo }, { below } });
+        const int dist   = w.node(T::CameraDistance, 2);
+        const int fadeS  = w.constF(kTrailFadeStart, 2);
+        const int fadeE  = w.constF(kTrailFadeEnd, 2);
+        const int far    = w.op(T::Smoothstep, 2, { { fadeS }, { fadeE }, { dist } });
+        const int near   = w.op(T::OneMinus, 2, { { far } });
+        const int gate   = w.op(T::Multiply, 2, { { valid }, { near } });
+        const int depth  = w.op(T::OneMinus, 2, { { rgb, 0 } });
+        trailDepth       = w.op(T::Multiply, 2, { { depth }, { gate } });
+        const int mid    = w.constF(128.0f / 255.0f, 2);
+        const int slopeK = w.constF(255.0f / 127.0f * TrailClipmap::kSlopeRange, 2);
+        const int gx0    = w.op(T::Subtract, 2, { { rgb, 1 }, { mid } });
+        const int gx1    = w.op(T::Multiply, 2, { { gx0 }, { slopeK } });
+        const int gx     = w.op(T::Multiply, 2, { { gx1 }, { gate } });
+        const int gz0    = w.op(T::Subtract, 2, { { rgb, 2 }, { mid } });
+        const int gz1    = w.op(T::Multiply, 2, { { gz0 }, { slopeK } });
+        const int gz     = w.op(T::Multiply, 2, { { gz1 }, { gate } });
+        const int zeroC  = w.constF(0.0f, 2);
+        trailSlope       = w.op(T::Combine3, 2, { { gx }, { gz }, { zeroC } });
+    }
+
     // Role 0, the ground: the group's own texture, or in the Desert the procedural sand. Its colour
     // is the mean of the human's reference (coast_sand_01, 4k diffuse: sRGB 129/114/91); the grain,
     // the ripples and the glitter keep the function's defaults. The weather's wetness darkens it
@@ -215,6 +256,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(look, 2, sand, kSandInRippleSize);
         r.graph.connect(look, 3, sand, kSandInGlitter);
         r.graph.connect(weather, 0, sand, kSandInWetness);
+        r.graph.connect(trailDepth, 0, sand, kSandInDisturbance);
+        r.graph.connect(trailSlope, 0, sand, kSandInDisturbanceSlope);
         grass = surfaceOf(sand, 2);
     }
     else
@@ -237,6 +280,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(look, 2, call, kSnowInGlitter);
         r.graph.connect(look, 3, call, kSnowInSoftness);
         r.graph.connect(weather, 0, call, kSnowInMelt);
+        r.graph.connect(trailDepth, 0, call, kSnowInDisturbance);
+        r.graph.connect(trailSlope, 0, call, kSnowInDisturbanceSlope);
         snow = surfaceOf(call, 2);
     }
     // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on

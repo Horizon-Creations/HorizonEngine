@@ -38,6 +38,7 @@ uint16_t TrailField::texel(int ix, int iz) const
 void TrailField::stampEllipse(float x, float z, float rx, float rz, float yaw, float depth, TrailSurface surface)
 {
     if (!(rx > 0.0f) || !(rz > 0.0f) || !(depth > 0.0f)) return;
+    ++m_version;
     const float d = std::min(depth, 1.0f);
     const float cy = std::cos(yaw), sy = std::sin(yaw);
     const float reach = std::max(rx, rz);
@@ -61,6 +62,7 @@ void TrailField::stampEllipse(float x, float z, float rx, float rz, float yaw, f
 void TrailField::stampCapsule(float x0, float z0, float x1, float z1, float radius, float depth, TrailSurface surface)
 {
     if (!(radius > 0.0f) || !(depth > 0.0f)) return;
+    ++m_version;
     const float d = std::min(depth, 1.0f);
     const float minX = std::min(x0, x1) - radius, maxX = std::max(x0, x1) + radius;
     const float minZ = std::min(z0, z1) - radius, maxZ = std::max(z0, z1) + radius;
@@ -95,15 +97,16 @@ float TrailField::healRate(uint8_t surfaces, const TrailWeather& w, const TrailS
     return rate;
 }
 
-void TrailField::healPage(Page& page, float rate, float dt)
+bool TrailField::healPage(Page& page, float rate, float dt)
 {
     page.carry += rate * dt * kMaxU16;
     const float whole = std::floor(page.carry);
-    if (whole < 1.0f) return;
+    if (whole < 1.0f) return false;
     page.carry -= whole;
     const uint16_t step = static_cast<uint16_t>(std::min(whole, kMaxU16));
     for (uint16_t& t : page.depth)
         t = t > step ? static_cast<uint16_t>(t - step) : static_cast<uint16_t>(0);
+    return true;
 }
 
 void TrailField::tick(double time, const TrailWeather& weather, const TrailSettings& settings)
@@ -116,14 +119,37 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
         m_clock += tickLen;
         ++steps;
         for (auto& [k, page] : m_pages)
-            healPage(page, healRate(page.surfaces, weather, settings), static_cast<float>(tickLen));
+            if (healPage(page, healRate(page.surfaces, weather, settings), static_cast<float>(tickLen)))
+                ++m_version;
     }
     if (steps == 4096) m_clock = time;   // beyond that the rest of a very long pause is dropped
     if (steps == 0) return;
     // A page with nothing left on it is freed: the field only ever holds what was trodden.
     for (auto it = m_pages.begin(); it != m_pages.end();)
-        it = std::all_of(it->second.depth.begin(), it->second.depth.end(), [](uint16_t t) { return t == 0; })
-                 ? m_pages.erase(it) : std::next(it);
+        if (std::all_of(it->second.depth.begin(), it->second.depth.end(), [](uint16_t t) { return t == 0; }))
+        {
+            it = m_pages.erase(it);
+            ++m_version;
+        }
+        else
+            ++it;
+}
+
+void TrailField::copyWindow(int ix0, int iz0, int w, int h, uint16_t* out) const
+{
+    std::fill(out, out + static_cast<size_t>(w) * h, static_cast<uint16_t>(0));
+    for (int pz = floorDiv(iz0, kPageCells); pz <= floorDiv(iz0 + h - 1, kPageCells); ++pz)
+        for (int px = floorDiv(ix0, kPageCells); px <= floorDiv(ix0 + w - 1, kPageCells); ++px)
+        {
+            const auto it = m_pages.find(key(px, pz));
+            if (it == m_pages.end()) continue;
+            const int gx0 = std::max(ix0, px * kPageCells), gx1 = std::min(ix0 + w, (px + 1) * kPageCells);
+            const int gz0 = std::max(iz0, pz * kPageCells), gz1 = std::min(iz0 + h, (pz + 1) * kPageCells);
+            for (int gz = gz0; gz < gz1; ++gz)
+                std::copy(&it->second.depth[static_cast<size_t>(gz - pz * kPageCells) * kPageCells + (gx0 - px * kPageCells)],
+                          &it->second.depth[static_cast<size_t>(gz - pz * kPageCells) * kPageCells + (gx1 - px * kPageCells)],
+                          out + static_cast<size_t>(gz - iz0) * w + (gx0 - ix0));
+        }
 }
 
 float TrailField::sample(float x, float z) const

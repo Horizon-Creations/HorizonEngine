@@ -1,5 +1,10 @@
 #include "doctest.h"
+#include <ContentManager/Assets.h>
+#include <ContentManager/ContentManager.h>
+#include <Trails/TrailClipmap.h>
 #include <Trails/TrailField.h>
+
+#include <filesystem>
 
 #include <cmath>
 
@@ -154,4 +159,68 @@ TEST_CASE("TrailField: a long pause heals in one go and stays bounded")
 	f.tick(0.0, snow);
 	f.tick(1.0e7, snow);                     // 115 days
 	CHECK(f.pageCount() == 0u);
+}
+
+TEST_CASE("TrailClipmap: registers an untouched window, writes prints into the torus, rewrites only on change")
+{
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_trail_clipmap_test";
+	std::filesystem::create_directories(dir);
+	ContentManager cm(dir.string());
+	HE::TrailField field;
+	HE::TrailClipmap map;
+	const glm::vec3 cam(10.0f, 5.0f, 20.0f);
+
+	// First call: the texture exists (so the material can resolve the path) and holds nothing.
+	CHECK(map.update(cm, nullptr, field, cam));
+	REQUIRE(map.textureId() != HE::UUID{});
+	const TextureAsset* tex = cm.getTexture(map.textureId());
+	REQUIRE(tex);
+	CHECK(tex->width == 512u);
+	CHECK(tex->height == 512u);
+	CHECK(tex->channels == 4u);
+	CHECK_FALSE(tex->srgb);
+	CHECK(cm.idForPath(HE::kTrailTexturePath) == map.textureId());
+	for (size_t i = 0; i < tex->data.size(); i += 4 * 997)
+	{
+		CHECK(tex->data[i + 0] == 255);                 // R = 1 - depth: untouched is white
+		CHECK(tex->data[i + 1] == 128);                 // flat
+		CHECK(tex->data[i + 2] == 128);
+		CHECK(tex->data[i + 3] == 128);                 // the alpha marker
+	}
+	// Nothing changed, nothing near: no rewrite, also when the camera walks.
+	CHECK_FALSE(map.update(cm, nullptr, field, cam));
+	CHECK_FALSE(map.update(cm, nullptr, field, glm::vec3(30.0f, 5.0f, 20.0f)));
+
+	// A print under the camera lands at the texel of its world position, modulo the window.
+	field.stampEllipse(10.0f, 20.0f, 0.5f, 0.5f, 0.0f, 1.0f, HE::TrailSurface::Snow);
+	CHECK(map.update(cm, nullptr, field, cam));
+	tex = cm.getTexture(map.textureId());
+	REQUIRE(tex);
+	const auto px = [&](float x, float z) {
+		const int ix = static_cast<int>(std::floor(x / 0.25f)), iz = static_cast<int>(std::floor(z / 0.25f));
+		const int u = ((ix % 512) + 512) % 512, v = ((iz % 512) + 512) % 512;
+		return &tex->data[(static_cast<size_t>(v) * 512 + u) * 4];
+	};
+	CHECK(px(10.1f, 20.1f)[0] < 20);                    // deep: R near 0
+	CHECK(px(10.1f, 20.1f)[3] == 128);
+	CHECK(px(40.0f, 20.0f)[0] == 255);                  // far from the print
+	// The rim leans toward the pit: east of the centre the depth falls with x, so G < 128, west G > 128.
+	CHECK(px(10.4f, 20.1f)[1] < 128);
+	CHECK(px(9.6f, 20.1f)[1] > 128);
+	CHECK(px(10.1f, 20.45f)[2] < 128);                  // south of it: B < 128
+	// The same world texel one window (128 m) away shares the pixel: the wrap the shader relies on.
+	CHECK(px(10.1f + 128.0f, 20.1f) == px(10.1f, 20.1f));
+
+	// No new change: no rewrite while the camera stays; walking one texel rewrites (something is near).
+	CHECK_FALSE(map.update(cm, nullptr, field, cam));
+	CHECK(map.update(cm, nullptr, field, glm::vec3(10.5f, 5.0f, 20.0f)));
+	// A healed field clears the picture once, then stays quiet.
+	HE::TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	field.tick(0.0, snow);
+	field.tick(500.0, snow);
+	CHECK(map.update(cm, nullptr, field, cam));
+	CHECK(cm.getTexture(map.textureId())->data[(256 * 512 + 256) * 4] == 255);
+	CHECK_FALSE(map.update(cm, nullptr, field, cam));
+	std::filesystem::remove_all(dir);
 }

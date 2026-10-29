@@ -254,6 +254,11 @@ inline constexpr int  kAutoLandscapeParamCount            = 15;   // every group
 inline constexpr int  autoLandscapeParamCount(const AutoLandscapeGroup& g)
 { return kAutoLandscapeParamCount + (g.proceduralSand ? 1 : 0); }
 
+// Trails fade out between these camera distances (metres): the clipmap window is 128 m wide and wraps, so
+// it only belongs to the place within 64 m of the camera (Trails/TrailClipmap.h).
+inline constexpr float kTrailFadeStart = 46.0f;
+inline constexpr float kTrailFadeEnd   = 58.0f;
+
 // What the Output node shows. Lit is the material. The mask views are UNLIT
 // debug views over the very same mask nodes (the witness's numeric oracle):
 //   MasksRockSnowWater  R = rock, G = snow, B = standing water

@@ -16,6 +16,7 @@
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <MaterialGraph/ProceduralSurfaceFunctions.h>
+#include <Trails/TrailClipmap.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Renderer/IRenderer.h>
 #include <material/MaterialShaderBake.h>
@@ -162,11 +163,14 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 		REQUIRE_FALSE(gen.glsl.empty());
 		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
-		std::vector<std::string> tex = gen.textures, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = gen.textures, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], HE::kTrailTexturePath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
-		CHECK(tex == want);                       // its own arrays and not one of Mountains'
-		CHECK(gen.textureArrayMask == 0x7u);
+		CHECK(tex == want);                       // its own arrays and not one of Mountains', + the trail clipmap
+		uint32_t arrays = 0;                      // every slot but the trail's is an array
+		for (size_t i = 0; i < gen.textures.size(); ++i)
+			if (gen.textures[i] != HE::kTrailTexturePath) arrays |= 1u << i;
+		CHECK(gen.textureArrayMask == arrays);
 		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
 
 		int blends = 0, legacyBlends = 0;
@@ -279,7 +283,7 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		REQUIRE(m);
 		CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, id).graph),
 		              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material --group ", g.name);
-		std::vector<std::string> tex = m->graphTexturePaths, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = m->graphTexturePaths, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], HE::kTrailTexturePath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
 		CHECK(tex == want);
