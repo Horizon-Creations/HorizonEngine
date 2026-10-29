@@ -875,6 +875,18 @@ void EditorApplication::OnInit()
 		return collabLocalPath(key);
 	});
 
+	// An asset is addressed by the UUID in its file, not by its path: a lock, a
+	// claim and a frame survive a rename, and a peer's edit finds the file wherever
+	// it lives here now. Both directions answer from the same place the peers
+	// share — the file's own header, via the ContentManager's registry.
+	m_collab.setAssetIdentityResolvers(
+		[this](const std::string& key) -> HE::UUID {
+			const std::string full = collabLocalPath(key);
+			return full.empty() ? HE::UUID{} : HE::Ed::AssetIdentity::uuidFor(full);
+		},
+		[this](std::uint64_t subject) { return keyForCollabSubject(subject); });
+	m_collab.setProjectFingerprintProvider([this] { return collabProjectFingerprint(); });
+
 	// An approved delete or rename. Fires on every peer INCLUDING the host, so
 	// there is one implementation of "this happened" rather than two that have
 	// to agree.
@@ -10808,6 +10820,42 @@ std::string EditorApplication::collabLocalPath(const std::string& key)
 		return full;
 	}
 	return contentManager().resolveSavePath(key);
+}
+
+std::string EditorApplication::keyForCollabSubject(std::uint64_t subject)
+{
+	ContentManager& cm = contentManager();
+	const auto lookup = [&]() -> std::string {
+		const auto it = m_collabSubjectIndex.find(subject);
+		return it == m_collabSubjectIndex.end() ? std::string() : cm.pathForId(it->second);
+	};
+	const auto rebuild = [&] {
+		m_collabSubjectIndex.clear();
+		for (const HE::UUID& id : cm.projectAssetIds())
+			m_collabSubjectIndex[HE::Net::assetUuidSubject(id.hi, id.lo)] = id;
+		m_collabSubjectEpoch   = cm.contentEpoch();
+		m_collabSubjectRebuilt = std::chrono::steady_clock::now();
+	};
+	if (m_collabSubjectEpoch != cm.contentEpoch()) rebuild();
+	std::string key = lookup();
+	if (!key.empty()) return key;
+	// A miss may be an asset that arrived since the index was built without the
+	// epoch moving; look again, but not for every frame of a flood of strangers.
+	constexpr auto kMinRebuildGap = std::chrono::milliseconds(500);
+	if (std::chrono::steady_clock::now() - m_collabSubjectRebuilt >= kMinRebuildGap)
+	{
+		rebuild();
+		key = lookup();
+	}
+	return key;
+}
+
+HE::Net::ProjectFingerprint EditorApplication::collabProjectFingerprint()
+{
+	std::vector<std::uint64_t> hashes;
+	for (const HE::UUID& id : contentManager().projectAssetIds())
+		hashes.push_back(HE::Net::ProjectFingerprint::fold(id.hi, id.lo));
+	return HE::Net::ProjectFingerprint::fromHashes(std::move(hashes));
 }
 
 CollabDocSync::DocBindings EditorApplication::collabDocsForTab(const std::string& tabPath)

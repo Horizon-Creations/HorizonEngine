@@ -1,4 +1,6 @@
 #pragma once
+#include <Types/UUID.h>
+
 #include <string>
 
 class ContentManager;
@@ -45,6 +47,11 @@ namespace HE::Ed::AssetIdentity
 	// Cheap enough to ask many times a frame: answers are cached per spelling and
 	// re-checked against the file's mtime/size a few times a second.
 	std::string keyFor(const std::string& assetPath);
+
+	// The UUID behind `assetPath` when keyFor answers "uuid:…", else a null UUID. The
+	// same verdict, so a duplicate the ContentManager places elsewhere has none.
+	// What a collaboration session derives an asset's lock from.
+	HE::UUID uuidFor(const std::string& assetPath);
 
 	// The "path:" key keyFor falls back to, whatever the file carries. A panel
 	// state created before the file had a UUID sits under this one, and is moved

@@ -114,6 +114,15 @@ std::string contentRelative(const std::string& assetPath)
 	return s_content->toContentRelativePath(assetPath);
 }
 
+HE::UUID uuidFor(const std::string& assetPath)
+{
+	if (isVirtualTab(assetPath)) return {};
+	const std::string key = keyFor(assetPath);
+	if (key.rfind("uuid:", 0) != 0) return {};
+	const auto it = s_cache.find(assetPath);
+	return it == s_cache.end() ? HE::UUID{} : it->second.uuid;
+}
+
 std::string keyFor(const std::string& assetPath)
 {
 	if (isVirtualTab(assetPath)) return assetPath;

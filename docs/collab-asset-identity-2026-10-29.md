@@ -1,4 +1,4 @@
-# Asset identity: panel documents are filed by UUID, not by the tab's path string (2026-10-29)
+# Asset identity: panel documents, collab locks and frames are addressed by UUID (2026-10-29)
 
 Trigger: a two-editor collab test where landscape edits arrived but HorizonCode class edits were
 not visible. Reading the code found one concrete way for that to happen, and a second, related
@@ -34,37 +34,78 @@ keyed by the **exact tab path string**.
 * `LevelScriptPanel.cpp`: `ClassState::onAssetMoved` also re-files the canvas view state (`s_graphStates`) and the name.
 * CMake: `AssetIdentity.cpp` in HorizonEditor and in `he_tests`; `tests/test_asset_identity.cpp` (9 cases).
 
-## 3. Not done (and why)
+## 3. Collab wire: locks and frames by UUID, protocol 18
 
-* **The collab wire and the lock subject are still path-based** (`CollabController::assetSubject` = FNV-1a of the
-  project-relative path; `collabSyncKey`; every asset message carries the path). Moving them to UUIDs is a protocol
-  change (`kCollabProtocolVersion` 17 → 18, mixed-version peers) with real design questions: an asset one peer has and the
-  other does not has no UUID there yet (new assets, creates), C++ sources and folders have none, rename arbitration
-  needs both ids. Not attempted without a live two-editor run.
-* Other path-keyed editor maps outside `AssetPanelState` (`m_assetLastAutosaveMs`, `m_docMirrorPaths`, thumbnail caches, `s_graphStates`
-  of other panels) were not touched; they are keyed by the tab's own string consistently, so they restart after a rename (harmless).
+Second step of the same topic, on the user's request ("locks per id, changes referenced per id,
+nothing has to be touched when a name or path changes; make the same-project check better").
+
+* **Lock subject.** `CollabController::subjectFor(key)`: when the identity resolver gives the asset a UUID the
+  subject is `HE::Net::assetUuidSubject(hi, lo)` (folded UUID, top bit set), else the old path hash
+  (`assetSubject`). Every claim, release, query and frame goes through it (21 call sites switched). A rename
+  therefore changes nothing the host's lock table holds: no release, no re-claim.
+* **Incoming frames** (`onDocDeltas`, `onAssetUpdated`) are resolved by their subject to this machine's
+  CURRENT key (`resolveIncomingKey` → editor `keyForCollabSubject` → `ContentManager::pathForId`), and only
+  fall back to the path in the frame when we do not have that asset (a create, a new asset). Revision counters
+  are filed per subject for UUID assets (`revisionIdentity`), so they survive a rename.
+* **Bookkeeping by key** (held locks, subject→key table, pending releases, answers, edit requests, session-touched)
+  is moved by `rekeyAsset` after an approved rename has been carried out. It only follows entries whose NEW key
+  still gives the same subject, i.e. the UUID-addressed ones; a path-addressed asset keeps the old behaviour.
+* **Resolvers** are wired in `EditorApplication.cpp` next to `setLocalPathResolver`: key → file →
+  `AssetIdentity::uuidFor` (the file header, duplicates excluded); subject → UUID via an index over
+  `ContentManager::projectAssetIds()` (new accessor), rebuilt on `contentEpoch()` change or a miss
+  (max once per 500 ms). The path is always asked of the ContentManager, never cached.
+* **Protocol 17 → 18.** A v17 peer derives subjects from paths, so the same asset would be two locks across the
+  builds; handshake equality check refuses the mix, as for every earlier bump.
+
+### Same-project check (`CollabSession.h` `ProjectFingerprint`, join request)
+
+The manifest id stays the primary check. A join now also carries a **fingerprint**: asset count + a bottom-k
+(k = 64) sketch of the hashed asset UUIDs, appended to the request. The host estimates the Jaccard overlap and
+tells three cases apart (both sides need at least 8 assets, else only the id counts):
+
+| ids | overlap | verdict |
+|---|---|---|
+| equal | < 0.15 | `ProjectDiverged` (template copy / "Save As" with the same id) |
+| differ | ≥ 0.6 | `ProjectIdMismatch` (same files, id minted separately; fix = same `id` in both .heproj) |
+| differ | else | `ProjectMismatch` as before |
+| equal | else | joins (two people on one project differ by what one has not pulled yet) |
+
+Thresholds are mine, not measured on real projects. The wire reader bounds the sketch (<= 64, strictly ascending,
+<= asset count) before allocating.
+
+## 4. Not done
+
+* Asset operations (`requestAssetOp`: rename/delete) still carry paths; they are arbitrated by the host by key.
+  Only the lock and the content frames are by id.
+* C++ sources, folders, legacy assets without a UUID and assets this machine has not received yet stay path-addressed.
+* A lock claimed for an asset *created* mid-session (before the peer has the file) can be a path subject on the peer
+  until the file arrives; the window is the create → transfer gap.
+* Other path-keyed editor maps (`m_assetLastAutosaveMs`, `m_docMirrorPaths`, thumbnails) restart after a rename.
 * `State::name` (cosmetic) is not refreshed on a move, except for the HorizonCode class.
-* Engine default vs. its project override share one UUID, so their two tabs now share one state (they were already
-  treated as one asset by `EditorTabs::sameAsset`).
+* Engine default vs its project override share one UUID, so their two tabs share one state.
 
 ## Handoff
 
-- **Topic / step:** collab sync, asset identity (follow-up to `collab-sync-audit-horizoncode-2026-10-14.md`)
-- **Branch / commit:** working tree of `/home/user/HorizonEngine`, not committed, not pushed
-- **Done:** panel documents are found by asset UUID under any path spelling, and survive rename/move with their edits.
-- **Files touched:** `src/HE_Editor/AssetIdentity.{h,cpp}`, `EditorPanelState.h`, `LevelScriptPanel.cpp` (`ClassState::onAssetMoved`),
-  `EditorApplication.cpp` (bind), `CMakeLists.txt` (editor), `tests/CMakeLists.txt`, `tests/test_asset_identity.cpp`.
-- **Verified:** `he_tests` and `HorizonEditor` build (Linux, Release). `test_asset_identity.cpp` 9 cases / 46 assertions green.
-  Full `he_tests` (minus material_graph): 5835 of 5837 cases pass; the 2 failures are `test_net_discovery.cpp` (`socketDefaultGateway`,
-  `socketOwnsAddress("::1")`): the container has no private gateway and no IPv6 loopback, unrelated to this change (not run on the
-  base commit). `editor_help_audit.py --check` 1243/1243.
-- **Not verified:** no live two-editor run, so whether this was the cause of the HC class report is **unconfirmed**; the
-  Windows backslash spelling itself is argued from the code (the test uses `..` and `//` spellings, Linux has no `\`).
-  No UI run of a rename with an open dirty tab.
-- **Decisions taken:** identity = file UUID checked against `ContentManager::pathForId`, fall back to normalised path; state keeps
-  its object across a move (panels hold references into it); wire/locks left on paths.
-- **Decisions suggested, not taken:** UUID on the collab wire + lock subject (see §3).
-- **Traps:** `AssetPanelState` is used by 18 panels, so `EditorPanelState.h` rebuilds all of them. A State with `relPath` is
-  refreshed automatically; one that caches a path under another name must declare `onAssetMoved`.
-- **Next steps:** 1. Live two-editor run: edit an HC class on both sides, rename it mid-session. 2. Decide the wire/lock change
-  (§3). 3. Add diagnostic logging in `updateAssetCollabSync`/`applyRemoteDocDeltas` ("nobody has that tab open" is silent today).
+- **Topic / step:** collab sync, asset identity, steps 1 (panel documents) and 2 (wire, locks, project check)
+- **Branch / commit:** `claude/collab-asset-identity-uuid`, PR #209 (step 1 pushed; step 2 see the PR)
+- **Done:** panel documents by UUID under any path spelling and across a move; lock subject and frame routing by UUID
+  (protocol 18); join compares an asset fingerprint next to the manifest id, with two new rejection reasons.
+- **Files touched:** `src/HE_Editor/AssetIdentity.{h,cpp}`, `EditorPanelState.h`, `LevelScriptPanel.cpp`
+  (`ClassState::onAssetMoved`), `CollabController.{h,cpp}` (`subjectFor`, `resolveIncomingKey`, `rekeyAsset`,
+  `setAssetIdentityResolvers`), `EditorApplication.{h,cpp}` (resolvers, `keyForCollabSubject`, fingerprint),
+  `src/HE_Net/{include/Net,src}/CollabSession.{h,cpp}` (fingerprint, reasons, `assetUuidSubject`, v18),
+  `src/HE_Core/include/ContentManager/ContentManager.h` (`projectAssetIds`), tests below.
+- **Verified:** `he_tests` and `HorizonEditor` build; `test_asset_identity` 9 cases; `test_net_collab` 122 cases (incl. 7
+  new: overlap estimate, diverged / id-mismatch / mismatch / ahead-collaborator / too-small, subject); `test_collab_controller`
+  104 cases (incl. 6 new: lock survives a rename, path-addressed unchanged, delta lands on the receiver's current key,
+  unknown asset keeps the frame's path, held locks follow an applied rename). Full `he_tests` (minus material_graph): 5848 of 5850 cases; the 2 failures are the container-network ones in
+  `test_net_discovery.cpp` (no private gateway, no IPv6 loopback), also red before this change set. `HorizonEditor` builds.
+- **Not verified:** no live two-editor run (neither step); the overlap thresholds against real projects; behaviour of the
+  new reasons in the join panel UI (text only); a rename arbitrated through a real client/host pair with files on disk.
+- **Decisions taken:** UUID subject only when both the key and the registry agree it is that asset, else path; fingerprint
+  is advisory below 8 assets; no auto-adopt of a peer's project id.
+- **Decisions suggested, not taken:** carry the UUID explicitly in asset ops so a rename racing a delete is unambiguous.
+- **Traps:** `CollabSession.h` and `ContentManager.h` rebuild ~260 targets (about 10 min at -j4 here). Tests that write a
+  JoinRequest by hand (`writeJoinRequest` in `test_net_collab.cpp`) must append the fingerprint block.
+- **Next steps:** 1. Live two-editor run: edit an HC class on both sides, rename it while one holds the lock.
+  2. Check the join panel shows the two new messages. 3. Add logging for "nobody has that tab open" in `applyRemoteDocDeltas`.
