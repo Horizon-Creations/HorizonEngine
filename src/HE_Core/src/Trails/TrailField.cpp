@@ -25,6 +25,7 @@ int16_t* TrailField::texelForWrite(int ix, int iz, TrailSurface surface)
     const int px = floorDiv(ix, kPageCells), pz = floorDiv(iz, kPageCells);
     Page& page = m_pages[key(px, pz)];
     page.surfaces |= static_cast<uint8_t>(surface);
+    page.version = m_version;   // callers bump m_version once per stamp, before writing
     return &page.depth[static_cast<size_t>(floorMod(iz, kPageCells)) * kPageCells + floorMod(ix, kPageCells)];
 }
 
@@ -160,7 +161,7 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
         ++steps;
         for (auto& [k, page] : m_pages)
             if (healPage(page, healRate(page.surfaces, weather, settings), static_cast<float>(tickLen)))
-                ++m_version;
+                page.version = ++m_version;
     }
     if (steps == 4096) m_clock = time;   // beyond that the rest of a very long pause is dropped
     if (steps == 0) return;
@@ -168,11 +169,54 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
     for (auto it = m_pages.begin(); it != m_pages.end();)
         if (std::all_of(it->second.depth.begin(), it->second.depth.end(), [](int16_t t) { return t == 0; }))
         {
+            m_freed[it->first] = ++m_version;
             it = m_pages.erase(it);
-            ++m_version;
         }
         else
             ++it;
+}
+
+uint64_t TrailField::regionVersion(float minX, float minZ, float maxX, float maxZ) const
+{
+    uint64_t v = 0;
+    const int p0x = floorDiv(static_cast<int>(std::floor(minX / kCellSize)), kPageCells);
+    const int p1x = floorDiv(static_cast<int>(std::floor(maxX / kCellSize)), kPageCells);
+    const int p0z = floorDiv(static_cast<int>(std::floor(minZ / kCellSize)), kPageCells);
+    const int p1z = floorDiv(static_cast<int>(std::floor(maxZ / kCellSize)), kPageCells);
+    for (int pz = p0z; pz <= p1z; ++pz)
+        for (int px = p0x; px <= p1x; ++px)
+        {
+            if (const auto it = m_pages.find(key(px, pz)); it != m_pages.end()) v = std::max(v, it->second.version);
+            if (const auto it = m_freed.find(key(px, pz)); it != m_freed.end()) v = std::max(v, it->second);
+        }
+    return v;
+}
+
+TrailWindow TrailField::window(float minX, float minZ, float maxX, float maxZ) const
+{
+    TrailWindow w;
+    w.m_ix0 = static_cast<int>(std::floor(minX / kCellSize)) - 1;
+    w.m_iz0 = static_cast<int>(std::floor(minZ / kCellSize)) - 1;
+    w.m_w   = static_cast<int>(std::floor(maxX / kCellSize)) + 2 - w.m_ix0 + 1;
+    w.m_h   = static_cast<int>(std::floor(maxZ / kCellSize)) + 2 - w.m_iz0 + 1;
+    w.m_d.resize(static_cast<size_t>(w.m_w) * w.m_h);
+    copyWindow(w.m_ix0, w.m_iz0, w.m_w, w.m_h, w.m_d.data());
+    w.m_any = std::any_of(w.m_d.begin(), w.m_d.end(), [](int16_t t) { return t != 0; });
+    return w;
+}
+
+float TrailWindow::sample(float x, float z) const
+{
+    const float u = x / TrailField::kCellSize - 0.5f, v = z / TrailField::kCellSize - 0.5f;
+    const int i0 = static_cast<int>(std::floor(u)), j0 = static_cast<int>(std::floor(v));
+    const float fx = u - static_cast<float>(i0), fz = v - static_cast<float>(j0);
+    auto at = [&](int i, int j) -> float {
+        const int a = i - m_ix0, b = j - m_iz0;
+        return (a < 0 || b < 0 || a >= m_w || b >= m_h) ? 0.0f : static_cast<float>(m_d[static_cast<size_t>(b) * m_w + a]);
+    };
+    const float p = at(i0, j0), q = at(i0 + 1, j0), r = at(i0, j0 + 1), t = at(i0 + 1, j0 + 1);
+    const float top = p + (q - p) * fx, bottom = r + (t - r) * fx;
+    return (top + (bottom - top) * fz) / kMax16;
 }
 
 void TrailField::copyWindow(int ix0, int iz0, int w, int h, int16_t* out) const

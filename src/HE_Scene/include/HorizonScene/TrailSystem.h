@@ -24,6 +24,8 @@ struct Runtime
 
 // The world's trails, created on first use.
 HE_API Runtime& runtime(HorizonWorld& world);
+// The same without creating it: nullptr in a world nothing ever walked in.
+HE_API Runtime* tryRuntime(HorizonWorld& world);
 
 // Once per frame: heals with the weather (nullptr = calm and dry), then brings the clipmap texture in line
 // with the field around the camera. Registers the texture on the first call, even with nothing trodden, so

@@ -7864,6 +7864,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					kPlateau * t * t * (3.0f - 2.0f * t);
 			}
 		ltc.dirty = true;
+		// HE_DUMP_TRAILTEST (Thema 328): the refined ground carries the trails as real geometry; one vertex per metre
+		// refined four times is the field's 0.25 m.
+		if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0')
+		{
+			ltc.tessellationFactor   = 4;
+			ltc.tessellationDistance = 80.0f;
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
 			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
@@ -10239,7 +10246,17 @@ void EditorApplication::dumpFrameHeadless()
 	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in
 	// line with the camera's final pose here, once.
 	if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0' && m_editorWorld)
+	{
 		TrailSystem::update(*m_editorWorld, contentManager(), r, m_editorCamera.position(), 0.0f, nullptr);
+		// The refined chunks near the camera pick the trails up as geometry (two builds per tick), then LOD and seams.
+		const glm::vec3 camPos = m_editorCamera.position();
+		for (int i = 0; i < 40; ++i)
+		{
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			LODSystem::update(*m_editorWorld, camPos);
+			TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
+		}
+	}
 
 	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur
 	// witness. A headless dump has no camera history — every settle frame

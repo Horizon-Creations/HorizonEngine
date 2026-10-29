@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <ContentManager/Assets.h>
 #include <cstdint>
 #include <vector>
@@ -119,6 +120,16 @@ float sampleTerrainDisplacement(const TerrainDisplacementMap& disp, float u, flo
 float sampleTerrainHeightSmooth(const std::vector<float>& heights, uint32_t srcRes,
                                 float u, float v);
 
+// A second, caller-supplied height offset laid over the refined surface (the trails in snow and sand): world-Y
+// metres at terrain UV (u, v), |offset| <= maxAbs. It raises and lowers like the displacement map, tilts the
+// normals by its own gradient and deepens the skirt by maxAbs.
+struct TerrainHeightOffset
+{
+    std::function<float(float u, float v)> fn;
+    float maxAbs = 0.0f;
+    bool active() const { return static_cast<bool>(fn) && maxAbs > 0.0f; }
+};
+
 // A chunk mesh like generateTerrainChunkMesh, but with heights from
 // sampleTerrainHeightSmooth plus `disp`. Pass vertsPerSide = lod0Cells ×
 // factor + 1 so every LOD0 vertex is also a vertex here. Normals are the same
@@ -131,7 +142,7 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     float sizeX, float sizeZ,
     float u0, float v0, float u1, float v1,
     uint32_t vertsPerSide, float uvTiling,
-    const TerrainDisplacementMap& disp);
+    const TerrainDisplacementMap& disp, const TerrainHeightOffset* extra = nullptr);
 
 // ─── Seam stitching ─────────────────────────────────────────────────────────
 // Where a chunk meets a neighbour drawn COARSER (LOD0 next to LOD2, a refined

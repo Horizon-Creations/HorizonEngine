@@ -10,6 +10,7 @@
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TerrainHeightmap.h"
 #include "HorizonScene/TerrainPaint.h"
+#include "HorizonScene/TrailSystem.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/WaterSurface.h"
 #include "HorizonScene/WaterField.h"
@@ -218,14 +219,62 @@ namespace
 
     StaticMeshAsset buildTessMesh(const std::vector<float>& field, uint32_t res,
                                   const TerrainComponent& tc, const ChunkGrid& g,
-                                  uint32_t cx, uint32_t cz, const TerrainDisplacementMap& disp)
+                                  uint32_t cx, uint32_t cz, const TerrainDisplacementMap& disp,
+                                  const TerrainHeightOffset* extra = nullptr)
     {
         const float cps = static_cast<float>(g.chunksPerSide);
         return generateTerrainChunkMeshTessellated(
             field, res, tc.sizeX, tc.sizeZ,
             static_cast<float>(cx) / cps, static_cast<float>(cz) / cps,
             static_cast<float>(cx + 1) / cps, static_cast<float>(cz + 1) / cps,
-            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp);
+            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp, extra);
+    }
+
+    // ── Trails in the refined ground (Thema 328) ─────────────────────────────
+    // A refined chunk is real geometry, so it can carry what walked, dragged and ploughed through the snow:
+    // the TrailField's signed value lowers the surface where it is a pit and raises it where it is a heap
+    // (TrailSettings::displacementMeters). It is as fine as the refined grid: lod0Cells x tessellationFactor
+    // cells per chunk, i.e. cell size / factor metres (a 1 m landscape at factor 4 matches the field's
+    // 0.25 m). Visual only, like the displacement map: the collider keeps reading the height field.
+    //
+    // Rebuilding is bounded: a chunk is rebuilt when the field changed under it (regionVersion), at most
+    // every kTrailRebuildTicks scene ticks and from the shared per-tick build budget.
+    constexpr uint32_t kTrailRebuildTicks = 10;
+    uint32_t g_tessTick = 0;
+
+    struct ChunkTrails
+    {
+        HE::TrailWindow    window;
+        TerrainHeightOffset offset;
+        bool               any = false;
+    };
+
+    // The world rectangle of a chunk (terrain at `pos`, local x = -size/2 + u * size, as the mesh builder lays it out).
+    void chunkRect(const TerrainComponent& tc, const ChunkGrid& g, uint32_t cx, uint32_t cz, const glm::vec3& pos,
+                   float& x0, float& z0, float& x1, float& z1)
+    {
+        const float cps = static_cast<float>(g.chunksPerSide);
+        x0 = pos.x - tc.sizeX * 0.5f + static_cast<float>(cx)     / cps * tc.sizeX;
+        x1 = pos.x - tc.sizeX * 0.5f + static_cast<float>(cx + 1) / cps * tc.sizeX;
+        z0 = pos.z - tc.sizeZ * 0.5f + static_cast<float>(cz)     / cps * tc.sizeZ;
+        z1 = pos.z - tc.sizeZ * 0.5f + static_cast<float>(cz + 1) / cps * tc.sizeZ;
+    }
+
+    void buildChunkTrails(ChunkTrails& out, const TrailSystem::Runtime& rt, const TerrainComponent& tc,
+                          const ChunkGrid& g, uint32_t cx, uint32_t cz, const glm::vec3& pos)
+    {
+        float x0, z0, x1, z1;
+        chunkRect(tc, g, cx, cz, pos, x0, z0, x1, z1);
+        out.window = rt.field.window(x0, z0, x1, z1);
+        out.any    = out.window.any();
+        if (!out.any) return;
+        const float meters = rt.settings.displacementMeters;
+        const float sx = tc.sizeX, sz = tc.sizeZ;
+        const float ox = pos.x - sx * 0.5f, oz = pos.z - sz * 0.5f;
+        const HE::TrailWindow* win = &out.window;
+        // pit (v > 0) lowers, heap (v < 0) raises
+        out.offset.fn     = [win, meters, sx, sz, ox, oz](float u, float v) { return -win->sample(ox + u * sx, oz + v * sz) * meters; };
+        out.offset.maxAbs = meters;
     }
 
     // Chunk entity → its refined mesh, per world, so the mesh of a chunk that
@@ -412,9 +461,12 @@ namespace TerrainSystem
         reg.emplace_or_replace<LODComponent>(chunkEnt, newLod);
         cc.stitchKey = 0;   // the levels it copied are new; stitchSeams copies again
         if (keepTess)
+        {
             fillTessLevel(world, cm, renderer, chunkEnt, cc,
                           buildTessMesh(field, res, tc, g, cx, cz, disp),
                           tc.tessellationDistance);
+            cc.trailVersion = ~0ull;   // built without the trails: updateTessellation looks again
+        }
         else if (cc.tessActive)
             emptyTessLevel(reg, cm, renderer, chunkEnt, cc);   // tessellation switched off
 
@@ -914,6 +966,8 @@ namespace TerrainSystem
 
         // The shared build budget goes to the landscapes in view order.
         uint32_t budget = kTessBuildsPerTick;
+        ++g_tessTick;
+        TrailSystem::Runtime* trails = TrailSystem::tryRuntime(world);
         for (size_t li = 0; li < numLandscapes; ++li)
         {
             Landscape& l = landscapes[li];
@@ -948,6 +1002,32 @@ namespace TerrainSystem
                         // Distance edited in the Inspector: follow it without a rebuild.
                         if (auto* lod = reg.try_get<LODComponent>(n.e); hasTessLevel(lod, cc))
                             lod->refinedMaxDistance = D;
+                        // The trails under it changed: refill the mesh with the new ground.
+                        if (trails && budget > 0 && cc.cx < g.chunksPerSide && cc.cz < g.chunksPerSide)
+                        {
+                            const glm::vec3 pos = HE::worldPositionOf(world, l.te);
+                            float x0, z0, x1, z1;
+                            chunkRect(tc, g, cc.cx, cc.cz, pos, x0, z0, x1, z1);
+                            const uint64_t want = trails->field.regionVersion(x0 - 0.5f, z0 - 0.5f, x1 + 0.5f, z1 + 0.5f);
+                            if (cc.trailVersion == ~0ull && want == 0)
+                                cc.trailVersion = 0;   // built without trails and none lie here
+                            else if (cc.trailVersion != want && g_tessTick - cc.trailTick >= kTrailRebuildTicks)
+                            {
+                                if (field.empty())
+                                {
+                                    field = computeTerrainHeightField(tc);
+                                    disp  = displacementFor(tc, cm);
+                                }
+                                ChunkTrails ct;
+                                buildChunkTrails(ct, *trails, tc, g, cc.cx, cc.cz, pos);
+                                fillTessLevel(world, cm, renderer, n.e, cc,
+                                              buildTessMesh(field, res, tc, g, cc.cx, cc.cz, disp,
+                                                            ct.any ? &ct.offset : nullptr), D);
+                                cc.trailVersion = want;
+                                cc.trailTick    = g_tessTick;
+                                --budget;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -963,8 +1043,20 @@ namespace TerrainSystem
                 // a different grid would have been destroyed by updateTerrains.
                 if (cc.cx >= g.chunksPerSide || cc.cz >= g.chunksPerSide) continue;
                 const uint32_t cx = cc.cx, cz = cc.cz;
+                ChunkTrails ct;
+                uint64_t    want = 0;
+                if (trails)
+                {
+                    const glm::vec3 pos = HE::worldPositionOf(world, l.te);
+                    float x0, z0, x1, z1;
+                    chunkRect(tc, g, cx, cz, pos, x0, z0, x1, z1);
+                    want = trails->field.regionVersion(x0 - 0.5f, z0 - 0.5f, x1 + 0.5f, z1 + 0.5f);
+                    buildChunkTrails(ct, *trails, tc, g, cx, cz, pos);
+                }
                 fillTessLevel(world, cm, renderer, n.e, cc,
-                              buildTessMesh(field, res, tc, g, cx, cz, disp), D);
+                              buildTessMesh(field, res, tc, g, cx, cz, disp, ct.any ? &ct.offset : nullptr), D);
+                cc.trailVersion = want;
+                cc.trailTick    = g_tessTick;
                 ++kept;
                 --budget;
             }

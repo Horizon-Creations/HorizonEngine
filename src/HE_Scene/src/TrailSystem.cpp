@@ -13,6 +13,11 @@ Runtime& runtime(HorizonWorld& world)
     return ctx.emplace<Runtime>();
 }
 
+Runtime* tryRuntime(HorizonWorld& world)
+{
+    return world.registry().ctx().find<Runtime>();
+}
+
 void update(HorizonWorld& world, ContentManager& cm, IRenderer* renderer,
             const glm::vec3& cameraPos, float dt, const WeatherComponent* weather)
 {

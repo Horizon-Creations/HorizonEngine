@@ -3,6 +3,7 @@
 #include <ContentManager/ContentManager.h>
 #include <Trails/TrailClipmap.h>
 #include <Trails/TrailField.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
 
 #include <filesystem>
 
@@ -311,4 +312,70 @@ TEST_CASE("TrailField: heaps slump back to nothing like pits fill, and the clipm
 	CHECK(px(5.1f, 10.65f)[0] > 150);         // the heap: above the middle
 	CHECK(px(5.1f, 10.65f)[3] == 128);
 	std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("TrailField: region versions say where the ground changed, also after a page healed away")
+{
+	TrailField f;
+	CHECK(f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f) == 0u);
+	f.stampEllipse(10.0f, 10.0f, 0.5f, 0.5f, 0.0f, 0.8f, TrailSurface::Snow);
+	const uint64_t a = f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f);
+	CHECK(a > 0u);
+	CHECK(f.regionVersion(300.0f, 300.0f, 350.0f, 350.0f) == 0u);        // another page: untouched
+	f.stampEllipse(300.0f, 300.0f, 0.5f, 0.5f, 0.0f, 0.8f, TrailSurface::Snow);
+	CHECK(f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f) == a);               // the first rectangle did not change
+	CHECK(f.regionVersion(300.0f, 300.0f, 350.0f, 350.0f) > a);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	f.tick(0.0, snow);
+	f.tick(500.0, snow);                                                   // everything healed, both pages freed
+	CHECK(f.pageCount() == 0u);
+	CHECK(f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f) > a);                 // a mesh built with the pit is told it is gone
+}
+
+TEST_CASE("TrailWindow reads like the field")
+{
+	TrailField f;
+	f.plowCapsule(0.0f, 10.0f, 10.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	const HE::TrailWindow w = f.window(-1.0f, 8.0f, 11.0f, 12.0f);
+	CHECK(w.any());
+	for (float x = 0.5f; x < 10.0f; x += 1.1f)
+		for (float z = 9.0f; z < 11.5f; z += 0.13f)
+			CHECK(w.sample(x, z) == doctest::Approx(f.sample(x, z)).epsilon(1e-4));
+	CHECK(w.sample(500.0f, 500.0f) == 0.0f);                              // outside the copy
+	CHECK_FALSE(f.window(100.0f, 100.0f, 110.0f, 110.0f).any());
+}
+
+TEST_CASE("Refined terrain chunk: a height offset lowers pits and raises heaps, tilts the normals, deepens the skirt")
+{
+	const std::vector<float> flat(33u * 33u, 0.0f);
+	TerrainDisplacementMap none;
+	// A pit of 0.3 m around the chunk centre and a 0.2 m ridge along u = 0.75.
+	TerrainHeightOffset off;
+	off.maxAbs = 0.3f;
+	off.fn = [](float u, float v) {
+		const float du = u - 0.5f, dv = v - 0.5f;
+		float h = -0.3f * std::max(0.0f, 1.0f - std::sqrt(du * du + dv * dv) / 0.1f);
+		h += 0.2f * std::max(0.0f, 1.0f - std::fabs(u - 0.75f) / 0.05f);
+		return h;
+	};
+	const StaticMeshAsset plain = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, nullptr);
+	const StaticMeshAsset shown = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, &off);
+	REQUIRE(plain.vertices.size() == shown.vertices.size());
+	const size_t N = 65;
+	auto y = [&](const StaticMeshAsset& m, size_t i, size_t j) { return m.vertices[(j * N + i) * 3 + 1]; };
+	CHECK(y(plain, 32, 32) == 0.0f);
+	CHECK(y(shown, 32, 32) == doctest::Approx(-0.3f).epsilon(0.02));    // the pit's floor
+	CHECK(y(shown, 48, 32) == doctest::Approx(0.2f).epsilon(0.05));     // the ridge's crest (u = 0.75)
+	CHECK(y(shown, 4, 4) == 0.0f);                                       // untouched ground stays
+	// The wall of the pit leans toward its floor: a vertex east of the centre has a normal with x < 0 ... in the
+	// engine's convention n = (-gx, 1, -gz), the height rises toward +x there, so nx < 0.
+	const size_t k = (32 * N + 34) * 3;
+	CHECK(shown.normals[k + 0] < -0.05f);
+	CHECK(plain.normals[k + 0] == doctest::Approx(0.0f).epsilon(1e-3));
+	// No offset, an empty one or maxAbs 0: the plain mesh, bit for bit.
+	TerrainHeightOffset inert;
+	const StaticMeshAsset same = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, &inert);
+	CHECK(same.vertices == plain.vertices);
+	CHECK(same.normals == plain.normals);
 }

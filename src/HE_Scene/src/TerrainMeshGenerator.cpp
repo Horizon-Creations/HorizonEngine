@@ -576,7 +576,7 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     float sizeX, float sizeZ,
     float u0, float v0, float u1, float v1,
     uint32_t vertsPerSide, float uvTiling,
-    const TerrainDisplacementMap& disp)
+    const TerrainDisplacementMap& disp, const TerrainHeightOffset* extra)
 {
     const uint32_t N = std::max(2u, vertsPerSide);
     // Displacement slope is measured over one REFINED cell: that is the finest
@@ -584,13 +584,16 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     // cell size, so two refined neighbours agree on their shared edge.
     const float du = (u1 - u0) / static_cast<float>(N - 1);
     const float dv = (v1 - v0) / static_cast<float>(N - 1);
-    const bool displaced = disp.active();
+    const bool mapped  = disp.active();
+    const bool offset  = extra && extra->active();
+    const bool displaced = mapped || offset;
 
     StaticMeshAsset mesh = buildChunkMesh(
         [&](float u, float v)
         {
             return sampleTerrainHeightSmooth(heights, srcRes, u, v)
-                 + (displaced ? sampleTerrainDisplacement(disp, u, v) : 0.0f);
+                 + (mapped ? sampleTerrainDisplacement(disp, u, v) : 0.0f)
+                 + (offset ? extra->fn(u, v) : 0.0f);
         },
         [&](float u, float v, float& nx, float& ny, float& nz)
         {
@@ -599,16 +602,23 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
             // Back from the unit normal to the height gradient (n ∝ (-gx, 1, -gz)),
             // add the displacement's, and renormalise.
             const float gx = -nx / ny, gz = -nz / ny;
-            const float dgx = (sampleTerrainDisplacement(disp, u + du, v)
-                             - sampleTerrainDisplacement(disp, u - du, v)) / (sizeX * du * 2.0f);
-            const float dgz = (sampleTerrainDisplacement(disp, u, v + dv)
-                             - sampleTerrainDisplacement(disp, u, v - dv)) / (sizeZ * dv * 2.0f);
+            float dgx = 0.0f, dgz = 0.0f;
+            if (mapped)
+            {
+                dgx += (sampleTerrainDisplacement(disp, u + du, v) - sampleTerrainDisplacement(disp, u - du, v)) / (sizeX * du * 2.0f);
+                dgz += (sampleTerrainDisplacement(disp, u, v + dv) - sampleTerrainDisplacement(disp, u, v - dv)) / (sizeZ * dv * 2.0f);
+            }
+            if (offset)
+            {
+                dgx += (extra->fn(u + du, v) - extra->fn(u - du, v)) / (sizeX * du * 2.0f);
+                dgz += (extra->fn(u, v + dv) - extra->fn(u, v - dv)) / (sizeZ * dv * 2.0f);
+            }
             nx = -(gx + dgx); ny = 1.0f; nz = -(gz + dgz);
             const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
             if (len > 0.0f) { nx /= len; ny /= len; nz /= len; }
         },
         sizeX, sizeZ, u0, v0, u1, v1, N, uvTiling,
-        displaced ? std::fabs(disp.strength) * 0.5f : 0.0f);
+        displaced ? std::max(mapped ? std::fabs(disp.strength) * 0.5f : 0.0f, offset ? extra->maxAbs : 0.0f) : 0.0f);
     mesh.name = "terrain_chunk_tess";
     mesh.path = "mem://terrain_chunk_tess";
     return mesh;

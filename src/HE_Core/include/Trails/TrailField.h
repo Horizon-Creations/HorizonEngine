@@ -42,6 +42,9 @@ struct TrailSettings
     float hMelt  = 1.0f / 600.0f;    // per second at full thaw
     float hWind  = 1.0f / 900.0f;    // per second in a gale: wind refills sand (quadratic in the wind)
     float tick   = 0.25f;            // game seconds per heal step (4 Hz)
+    // The terrain's real geometry: a pit of value 1 lowers the ground this many metres, a heap raises it by
+    // v x this (only where the landscape refines its chunks: TerrainComponent::tessellationFactor).
+    float displacementMeters = 0.30f;
 };
 
 // The weather values that heal a trail, all 0..1 except the wind speed (as on WeatherComponent;
@@ -53,6 +56,24 @@ struct TrailWeather
     bool  raining   = false;
     float windSpeed = 1.0f;
     float wetness   = 0.0f;
+};
+
+class TrailField;
+
+// A copy of a rectangle of the field for many bilinear reads: what a mesh builder wants, since one chunk asks
+// for tens of thousands of positions (each a hash lookup on the field itself).
+class HE_API TrailWindow
+{
+public:
+    // The signed value v (pit positive) at a world position; 0 outside the rectangle.
+    float sample(float x, float z) const;
+    bool  any() const { return m_any; }
+
+private:
+    friend class TrailField;
+    int  m_ix0 = 0, m_iz0 = 0, m_w = 0, m_h = 0;
+    bool m_any = false;
+    std::vector<int16_t> m_d;
 };
 
 class HE_API TrailField
@@ -91,17 +112,24 @@ public:
     void copyWindow(int ix0, int iz0, int w, int h, int16_t* out) const;
     // Counts up whenever a stamp or a heal step changed anything: a cache keyed on it is current.
     uint64_t version() const { return m_version; }
+    // The newest change inside a world rectangle (0 = nothing was ever written there): a mesh built from this
+    // rectangle is current while the number is the one it was built with. Pages that healed away and were
+    // freed still count, so a mesh that has their pits in it is told to let them go.
+    uint64_t regionVersion(float minX, float minZ, float maxX, float maxZ) const;
+    // The rectangle, copied (with a one-texel margin so slopes at its edge are right).
+    TrailWindow window(float minX, float minZ, float maxX, float maxZ) const;
 
     size_t pageCount() const { return m_pages.size(); }
     // The texels that are not zero over all pages (a cheap "is anything trodden" for tests and tools).
     size_t activeTexels() const;
-    void   clear() { m_pages.clear(); m_clockStarted = false; ++m_version; }
+    void   clear() { m_pages.clear(); m_freed.clear(); m_clockStarted = false; ++m_version; }
 
 private:
     struct Page
     {
         std::vector<int16_t>  depth = std::vector<int16_t>(static_cast<size_t>(kPageCells) * kPageCells, 0);
         uint8_t               surfaces = 0;   // bit set of TrailSurface
+        uint64_t              version  = 0;   // the field's version at this page's last change
         float                 carry = 0.0f;   // heal the last steps could not apply yet, in texel units
     };
     static int64_t key(int px, int pz) { return (static_cast<int64_t>(px) << 32) ^ static_cast<uint32_t>(pz); }
@@ -112,6 +140,7 @@ private:
     bool      healPage(Page& page, float rate, float dt);   // true when it changed a texel
 
     std::unordered_map<int64_t, Page> m_pages;
+    std::unordered_map<int64_t, uint64_t> m_freed;   // pages that healed away: the version they were freed at
     bool     m_clockStarted = false;
     double   m_clock        = 0.0;
     uint64_t m_version      = 0;
