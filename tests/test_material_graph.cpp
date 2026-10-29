@@ -2409,16 +2409,17 @@ TEST_CASE("A wired Landscape Layer Blend cross-compiles for Metal and GL")
 	CHECK_MESSAGE(gl.ok, "GLSL compile failed: ", gl.log);
 }
 
-TEST_CASE("A five- and an eight-layer Landscape Layer Blend cross-compile for all five backends")
+TEST_CASE("A five-, eight-, nine- and twelve-layer Landscape Layer Blend cross-compile for all five backends")
 {
 	// The second page is read through textureSize + textureLod on the SAME
-	// sampler. Every backend's compiler has to take that: MSL (Metal — no
+	// sampler, the third (nine layers and up, Thema 329) through a second textureLod
+	// at 2 / np. Every backend's compiler has to take that: MSL (Metal — no
 	// hardware here, this compile is its evidence), GLSL 4.10 / ES 3.00 / 4.30
 	// (OpenGL), HLSL (D3D11/D3D12; FXC is the Windows-only case further down)
 	// and SPIR-V (Vulkan).
 	using B = HE::MaterialShaderLibrary::Backend;
 	HE::MaterialShaderLibrary lib;
-	for (int layers : { 5, 8 })
+	for (int layers : { 5, 8, 9, 12 })
 	{
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
