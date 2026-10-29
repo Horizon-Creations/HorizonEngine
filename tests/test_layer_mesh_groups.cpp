@@ -92,6 +92,7 @@ namespace
 	constexpr auto kMountains = HE::AutoLandscapeGroupId::Mountains;
 	constexpr auto kForest    = HE::AutoLandscapeGroupId::Forest;
 	constexpr auto kGrassland = HE::AutoLandscapeGroupId::Grassland;
+	constexpr auto kDesert    = HE::AutoLandscapeGroupId::Desert;
 }
 
 TEST_CASE("Layer mesh groups: Mountains lists exactly the six kinds of Thema 180, in order")
@@ -120,6 +121,15 @@ TEST_CASE("Layer mesh groups: Forest and Grassland offer kinds of their own")
 		for (K m : kindsOf(kMountains)) shared += k == m ? 1 : 0;
 	CHECK(shared == 2);
 
+	// Desert lists three kinds of its own and borrows the flat chip from Grassland.
+	CHECK(kindsOf(kDesert) == std::vector<K>{ K::DuneGrass, K::Cactus, K::Sandstone, K::ScreeChip });
+	for (K k : { K::DuneGrass, K::Cactus, K::Sandstone })
+	{
+		for (K m : kindsOf(kMountains)) CHECK(k != m);
+		for (K m : kindsOf(kForest))    CHECK(k != m);
+		for (K m : kindsOf(kGrassland)) CHECK(k != m);
+	}
+
 	// No kind is left out of every group (an unreachable kind could not be picked), and none repeats
 	// within a group.
 	std::set<int> offered;
@@ -145,16 +155,20 @@ TEST_CASE("Layer mesh groups: every mesh id of every kind and level is unique, a
 			CHECK(id.lo == 1);
 			CHECK(id.hi >= 0x109);                                     // after CrossCard (0x108), in mesh_gen's block
 			CHECK(seen.insert({ id.hi, id.lo }).second);
-			// Nothing else in the 0x1xx block of the table: the kinds fill 0x109 .. 0x12A without a gap.
-			CHECK(id.hi <= 0x12A);
+			// Nothing else in the 0x1xx block of the table: the kinds fill 0x109 .. 0x132 without a gap.
+			CHECK(id.hi <= 0x132);
 			++levels;
 		}
 	}
-	CHECK(levels == 0x12A - 0x109 + 1);
+	CHECK(levels == 0x132 - 0x109 + 1);
 	CHECK(static_cast<int>(seen.size()) == levels);
 	// The new kinds start where Snow Drift's two levels end.
 	CHECK(HE::layerMeshLevel0(HE::LayerMeshKind::Fern).hi == 0x119);
 	CHECK(HE::layerMeshLevel0(HE::LayerMeshKind::ScreeChip).hi == 0x129);
+	// The Desert set follows ScreeChip's two levels.
+	CHECK(HE::layerMeshLevel0(HE::LayerMeshKind::DuneGrass).hi == 0x12B);
+	CHECK(HE::layerMeshLevel0(HE::LayerMeshKind::Cactus).hi == 0x12E);
+	CHECK(HE::layerMeshLevel0(HE::LayerMeshKind::Sandstone).hi == 0x130);
 }
 
 TEST_CASE("Layer mesh groups: the group's table row sets where rock and snow kinds stand")
@@ -172,6 +186,11 @@ TEST_CASE("Layer mesh groups: the group's table row sets where rock and snow kin
 	CHECK(make(K::ScreeChip, kGrassland).slopeMin == 0.23f);
 	CHECK(make(K::TallGrass, kGrassland).slopeMax == 0.20f);
 	CHECK(make(K::FlowerTuft, kGrassland).slopeMax == 0.20f);
+	// Desert's at 0.30: sandstone from 0.33; cacti and dune grass stay on the sand below 0.30.
+	CHECK(make(K::Sandstone, kDesert).slopeMin == 0.33f);
+	CHECK(make(K::ScreeChip, kDesert).slopeMin == 0.33f);
+	CHECK(make(K::Cactus, kDesert).slopeMax == 0.30f);
+	CHECK(make(K::DuneGrass, kDesert).slopeMax == 0.30f);
 	// A Forest or Grassland snow line is far above any hill: a drift asked for there stays up with it.
 	CHECK(make(K::SnowDrift, kForest).heightMin == 2006.0f);
 	CHECK(make(K::SnowDrift, kMountains).heightMin == 66.0f);
@@ -196,6 +215,7 @@ TEST_CASE("Layer mesh groups: a terrain's group is found from its material, Moun
 	CHECK(HE::layerMeshGroupOfMaterial(HE::kAutoLandscapeMaterialId) == kMountains);
 	CHECK(HE::layerMeshGroupOfMaterial(HE::autoLandscapeGroup(kForest).materialId) == kForest);
 	CHECK(HE::layerMeshGroupOfMaterial(HE::autoLandscapeGroup(kGrassland).materialId) == kGrassland);
+	CHECK(HE::layerMeshGroupOfMaterial(HE::autoLandscapeGroup(kDesert).materialId) == kDesert);
 	CHECK(HE::layerMeshGroupOfMaterial(HE::UUID{}) == kMountains);                  // no material
 	CHECK(HE::layerMeshGroupOfMaterial(HE::UUID{ 0x1234, 0x5678 }) == kMountains);  // a custom one
 

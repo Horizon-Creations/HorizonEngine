@@ -17,7 +17,7 @@
 // layer keeps exactly what is saved in it (nothing here is read again later).
 //
 // The kinds are a set per texture group (Thema 233): Mountains has the six of Thema 180,
-// Forest and Grassland their own (layerMeshKindsOfGroup). The rules that put a rock or a snow
+// Forest, Grassland and Desert their own (layerMeshKindsOfGroup). The rules that put a rock or a snow
 // drift where the material shows rock or snow read the group's row (AutoLandscapeGroup::rockSlope,
 // snowHeight), so a group that turns to rock earlier also grows its rocks earlier. A kind is not
 // bound to one group: Grassland scatters Pebble and Rock A with its own numbers.
@@ -30,14 +30,16 @@ namespace HE
     // Append only (a kind's number is not saved, but tests and the witness list them in order).
     enum class LayerMeshKind : int { Tuft, Pebble, RockA, RockB, RockC, SnowDrift,
                                      Fern, ForestStump, FallenLog, MossRock,
-                                     TallGrass, FlowerTuft, ScreeChip, Count };
+                                     TallGrass, FlowerTuft, ScreeChip,
+                                     DuneGrass, Cactus, Sandstone, Count };
     constexpr int kLayerMeshKindCount = static_cast<int>(LayerMeshKind::Count);
 
     inline const char* layerMeshKindName(LayerMeshKind k)
     {
         static const char* const names[] = { "Grass Tuft", "Pebble", "Rock A", "Rock B", "Rock C", "Snow Drift",
                                               "Fern", "Forest Stump", "Fallen Log", "Mossy Rock",
-                                              "Tall Grass", "Flower Tuft", "Scree Chip" };
+                                              "Tall Grass", "Flower Tuft", "Scree Chip",
+                                              "Dune Grass", "Cactus", "Sandstone" };
         return names[static_cast<int>(k)];
     }
 
@@ -47,7 +49,8 @@ namespace HE
     {
         static const char* const stems[] = { "Tuft", "Pebble", "RockA", "RockB", "RockC", "SnowDrift",
                                               "Fern", "ForestStump", "FallenLog", "MossRock",
-                                              "TallGrass", "FlowerTuft", "ScreeChip" };
+                                              "TallGrass", "FlowerTuft", "ScreeChip",
+                                              "DuneGrass", "Cactus", "Sandstone" };
         return stems[static_cast<int>(k)];
     }
 
@@ -68,6 +71,9 @@ namespace HE
             case LayerMeshKind::TallGrass:   return kEngineTallGrassMeshId;
             case LayerMeshKind::FlowerTuft:  return kEngineFlowerTuftMeshId;
             case LayerMeshKind::ScreeChip:   return kEngineScreeChipMeshId;
+            case LayerMeshKind::DuneGrass:   return kEngineDuneGrassMeshId;
+            case LayerMeshKind::Cactus:      return kEngineCactusMeshId;
+            case LayerMeshKind::Sandstone:   return kEngineSandstoneMeshId;
             default:                       return UUID{};
         }
     }
@@ -80,7 +86,8 @@ namespace HE
             case LayerMeshKind::Tuft: case LayerMeshKind::RockA:
             case LayerMeshKind::RockB: case LayerMeshKind::RockC:
             case LayerMeshKind::Fern: case LayerMeshKind::MossRock:
-            case LayerMeshKind::TallGrass: case LayerMeshKind::FlowerTuft: return 3;
+            case LayerMeshKind::TallGrass: case LayerMeshKind::FlowerTuft:
+            case LayerMeshKind::DuneGrass: case LayerMeshKind::Sandstone: return 3;
             default:                                                       return 2;
         }
     }
@@ -108,10 +115,12 @@ namespace HE
         static constexpr K mountains[] = { K::Tuft, K::Pebble, K::RockA, K::RockB, K::RockC, K::SnowDrift };
         static constexpr K forest[]    = { K::Fern, K::ForestStump, K::FallenLog, K::MossRock };
         static constexpr K grassland[] = { K::TallGrass, K::FlowerTuft, K::Pebble, K::RockA, K::ScreeChip };
+        static constexpr K desert[]    = { K::DuneGrass, K::Cactus, K::Sandstone, K::ScreeChip };
         switch (g)
         {
             case AutoLandscapeGroupId::Forest:    return { forest,    static_cast<int>(sizeof(forest)    / sizeof(K)) };
             case AutoLandscapeGroupId::Grassland: return { grassland, static_cast<int>(sizeof(grassland) / sizeof(K)) };
+            case AutoLandscapeGroupId::Desert:    return { desert,    static_cast<int>(sizeof(desert)    / sizeof(K)) };
             default:                              return { mountains, static_cast<int>(sizeof(mountains) / sizeof(K)) };
         }
     }
@@ -224,6 +233,23 @@ namespace HE
                 l.density = 0.05f; l.minScale = 0.5f; l.maxScale = 1.4f; l.drawDistance = 70.0f;
                 l.slopeMin = rockStart;                               // loose stones where the Stones texture shows
                 levels[0] = { 20.0f, 0.6f };
+                break;
+            case LayerMeshKind::DuneGrass:
+                l.density = 0.05f; l.minScale = 0.7f; l.maxScale = 1.5f; l.drawDistance = 75.0f;
+                l.slopeMax = rockSlope;                               // sparse tufts on the sand, not on the cliffs
+                levels[0] = { 18.0f, 0.7f }; levels[1] = { 40.0f, 0.4f };
+                break;
+            case LayerMeshKind::Cactus:
+                l.density = 0.0015f; l.minScale = 0.8f; l.maxScale = 2.2f; l.drawDistance = 150.0f;
+                l.slopeMax = rockSlope;
+                l.castsShadow = true; l.shadowDistance = 50.0f; l.contributesAO = true;
+                levels[0] = { 35.0f, 0.8f };
+                break;
+            case LayerMeshKind::Sandstone:
+                l.density = 0.005f; l.minScale = 0.6f; l.maxScale = 2.2f; l.drawDistance = 160.0f;
+                l.slopeMin = rockStart;                               // where the material shows its sandstone
+                l.castsShadow = true; l.shadowDistance = 60.0f; l.contributesAO = true;
+                levels[0] = { 30.0f, 1.0f }; levels[1] = { 75.0f, 0.7f };
                 break;
             default: break;
         }

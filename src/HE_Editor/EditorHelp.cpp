@@ -7426,8 +7426,8 @@ namespace
 	  "node, and with no such node the Paint tool stays greyed out.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Texture Group", "Texture Group",
-	  "The terrain theme the landscape is shaded as: Mountains, Forest or "
-	  "Grassland. Each is its own landscape material with its own textures and its "
+	  "The terrain theme the landscape is shaded as: Mountains, Forest, "
+	  "Grassland or Desert. Each is its own landscape material with its own textures and its "
 	  "own names for the paint layers. Switching keeps everything you painted — "
 	  "there is one weightmap per landscape and layer 1 to 4 mean the same role "
 	  "(ground, soil, rock, snow) in every group, so only the look changes. Auto "
@@ -7437,7 +7437,8 @@ namespace
 	{ "Landscape/Apply Group Meshes", "",
 	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
 	  "group that it does not scatter yet: ferns, stumps, logs and mossy rocks in "
-	  "the Forest, tall grass, flower tufts and a few stones in the Grassland, grass "
+	  "the Forest, tall grass, flower tufts and a few stones in the Grassland, dune "
+	  "grass, cacti and sandstone blocks in the Desert, grass "
 	  "tufts, pebbles, boulders and snow drifts in the Mountains. Rock is placed "
 	  "where the group's own material shows rock. It only adds - switching the "
 	  "group never removes or changes a layer, and a layer you already have is left "

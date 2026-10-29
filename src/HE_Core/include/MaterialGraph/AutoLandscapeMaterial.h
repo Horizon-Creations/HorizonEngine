@@ -135,8 +135,8 @@ inline constexpr void autoLandscapeSliceSource(int slice, int variants, int& lay
 // six paint-layer channels do not change; a group differs by the files its roles read, the names it
 // gives the paint layers, and the default values of a few parameters. Mountains is the original
 // material, byte for byte (the members above are its row).
-enum class AutoLandscapeGroupId : int { Mountains = 0, Forest = 1, Grassland = 2 };
-inline constexpr int kAutoLandscapeGroupCount = 3;
+enum class AutoLandscapeGroupId : int { Mountains = 0, Forest = 1, Grassland = 2, Desert = 3 };
+inline constexpr int kAutoLandscapeGroupCount = 4;
 
 struct AutoLandscapeGroup
 {
@@ -154,7 +154,10 @@ struct AutoLandscapeGroup
 // Ids, in landscape_tex_gen's 0x400 block: 0x412 is Mountains, 0x413 / 0x414 are the weather
 // functions (WeatherMaterialFunctions.h — the ContentManager keeps ONE entry per UUID, so a clash
 // loads the group's material as a function), a group takes its material id and the three ids after
-// it for its arrays (0x415..0x418 Forest, 0x419..0x41C Grassland). 0x41D..0x41F are free.
+// it for its arrays (0x415..0x418 Forest, 0x419..0x41C Grassland). Desert takes 0x4A0..0x4A3: the
+// three ids left under 0x420 are one short of a group, 0x420..0x42E are the loose maps and
+// 0x430..0x498 the variants (kMaxVariants 8 of 5 layers), so the first block clear of both is 0x4A0.
+// 0x41D..0x41F stay free.
 inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCount] = {
     { AutoLandscapeGroupId::Mountains, "Mountains",
       kAutoLandscapeMaterialId, kAutoLandscapeMaterialPath,
@@ -177,6 +180,16 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles",
       { "Meadow", "Bare Soil", "Stones", "Snow" },
       0.20f, 0.20f, 2000.0f },
+    // Untuned first numbers (Thema 233 step 6): sand holds steep dune flanks, so rock shows late, little
+    // hardpan, no snow in reach.
+    { AutoLandscapeGroupId::Desert, "Desert",
+      { 0x00000000000004A0ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Desert.hasset",
+      { "Engine/Textures/Landscape/T_Landscape_Desert_Albedo_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Desert_Normal_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Desert_Mask_Array.hasset" },
+      "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles",
+      { "Sand", "Hardpan", "Sandstone", "Snow" },
+      0.30f, 0.15f, 2000.0f },
 };
 
 inline constexpr const AutoLandscapeGroup& autoLandscapeGroup(AutoLandscapeGroupId id)

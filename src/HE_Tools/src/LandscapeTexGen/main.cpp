@@ -93,7 +93,8 @@ constexpr uint64_t kTexBaseHi = 0x0000000000000400ULL;
 // = 0x420. 0x400..0x411 are the 15 layer textures and 3 arrays, 0x412 is
 // M_AutoLandscape (kAutoLandscapeMaterialId), 0x413 / 0x414 are the weather functions
 // (WeatherMaterialFunctions.h), 0x415..0x41C are the Forest and Grassland groups
-// (kAutoLandscapeGroups: material + its three arrays each), and 0x41D..0x41F stay free. Index = kLooseIndexBase + layer * 3 + map, per kLayers order
+// (kAutoLandscapeGroups: material + its three arrays each), 0x41D..0x41F stay free, and the Desert
+// group sits at 0x4A0..0x4A3 (clear of the variants below). Index = kLooseIndexBase + layer * 3 + map, per kLayers order
 // (WetGround would get 0x42C..0x42E), so a layer added later never shifts one.
 constexpr int kLooseIndexBase = 0x20;
 
@@ -102,6 +103,9 @@ constexpr int kLooseIndexBase = 0x20;
 // 0x30..0x6B, clear of the weather functions at 0x500.
 constexpr int kVariantIndexBase = 0x30;
 constexpr int kMaxVariants      = 8;
+// The last variant id (8 variants of the 5 layers' 15 maps each beyond the first) stays below the
+// Desert group's block (0x4A0).
+static_assert(kTexBaseHi + kVariantIndexBase + (kMaxVariants - 2) * 5 * 3 + 5 * 3 <= 0x4A0, "variants run into the Desert group");
 
 constexpr int kSize  = 128;          // texels per side
 constexpr int kCells = 4;            // checker cells per side
@@ -304,16 +308,17 @@ int writeArrays(const std::string& outDir, int variants = 1)
     return ok;
 }
 
-// ─── Texture groups (Thema 233): Forest / Grassland ──────────────────────────
+// ─── Texture groups (Thema 233): Forest / Grassland / Desert ──────────────────────────
 // A group has its own three arrays and no per-layer files: the placeholder slices are made in memory
 // (the same checker + L marker as the Mountains ones, in the group's own tones, so a screenshot says
 // which array a terrain reads) and go straight into the array. Real textures for a group are not
 // packed yet (--pack is Mountains only); the shipping V and texture size are the human's call.
-// Array ids follow the group's material: materialId.hi + 1 + map (0x416..0x418, 0x41A..0x41C).
+// Array ids follow the group's material: materialId.hi + 1 + map (0x416..0x418, 0x41A..0x41C, 0x4A1..0x4A3).
 const uint8_t kGroupTones[HE::kAutoLandscapeGroupCount][HE::kAutoLandscapeRoleCount][3] = {
     { {} },                                                               // Mountains: kLayers
     { {  74,  62,  38 }, {  64,  44,  30 }, {  84, 104,  80 }, { 225, 230, 238 } },   // Forest
     { { 112, 162,  62 }, { 152, 126,  86 }, { 150, 148, 140 }, { 225, 230, 238 } },   // Grassland
+    { { 214, 184, 126 }, { 170, 140, 104 }, { 176, 112,  78 }, { 225, 230, 238 } },   // Desert
 };
 
 int writeGroupArrays(const std::string& outDir, const HE::AutoLandscapeGroup& group, int variants)
@@ -771,8 +776,8 @@ int main(int argc, char** argv)
                              "                 per-layer files already in <output-dir>\n"
                              "  --material     write the auto landscape material M_AutoLandscape.hasset\n"
                              "                 into <output-dir> (EditorDeps/EngineContent/Materials)\n"
-                             "  --group G      Mountains (default) | Forest | Grassland: the texture group (Thema 233).\n"
-                             "                 Forest / Grassland write M_AutoLandscape_<G>.hasset (--material) or their\n"
+                             "  --group G      Mountains (default) | Forest | Grassland | Desert: the texture group (Thema 233).\n"
+                             "                 Forest / Grassland / Desert write M_AutoLandscape_<G>.hasset (--material) or their\n"
                              "                 own placeholder arrays T_Landscape_<G>_{Albedo,Normal,Mask}_Array\n");
         return 2;
     }
@@ -798,7 +803,7 @@ int main(int argc, char** argv)
                 if (std::string(argv[i + 1]) == HE::kAutoLandscapeGroups[k].name) groupIndex = k;
             if (groupIndex < 0)
             {
-                std::fprintf(stderr, "landscape_tex_gen: unknown group '%s' (Mountains, Forest, Grassland)\n", argv[i + 1]);
+                std::fprintf(stderr, "landscape_tex_gen: unknown group '%s' (Mountains, Forest, Grassland, Desert)\n", argv[i + 1]);
                 return 2;
             }
         }

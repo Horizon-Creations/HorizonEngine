@@ -1273,7 +1273,7 @@ TEST_CASE("landscape ui: the Texture Group picker switches the material only, pa
 		const std::string id = std::string("##lsGroup") + HE::kAutoLandscapeGroups[i].name;
 		REQUIRE_MESSAGE(locate(ctx, panelId(id.c_str()), gx[i], gy[i]), id);
 	}
-	CHECK_FALSE(locate(ctx, panelId("##lsGroupMixed"), sx, sy));    // no fourth group, no "mixed"
+	CHECK_FALSE(locate(ctx, panelId("##lsGroupMixed"), sx, sy));    // no "mixed" cell (step 7)
 	he_ui::Image img;
 	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 	for (int i = 0; i < 3; ++i) panelFrame(ctx, false, i == 2 ? &img : nullptr);
@@ -1292,6 +1292,13 @@ TEST_CASE("landscape ui: the Texture Group picker switches the material only, pa
 	CHECK(reg.get<TerrainComponent>(terrain).layerWeights == weights0);
 	CHECK(reg.get<TerrainComponent>(terrain).layerWeights2.empty());
 	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// ── Desert, the fourth cell: its own material, the weights still untouched; then back to Forest ──
+	clickAt(ctx, gx[3], gy[3]);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Desert).materialId);
+	CHECK(reg.get<TerrainComponent>(terrain).layerWeights == weights0);
+	clickAt(ctx, gx[1], gy[1]);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == forest.materialId);
 
 	// ── Paint: Forest's list; the stroke writes the row's channel ──
 	REQUIRE(locate(ctx, panelId("##lsPaint"), sx, sy));

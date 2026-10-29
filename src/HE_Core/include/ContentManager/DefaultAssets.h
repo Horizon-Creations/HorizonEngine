@@ -144,6 +144,12 @@ constexpr UUID kEngineTallGrassMeshId   = { 0x0000000000000123ULL, 0x00000000000
 constexpr UUID kEngineFlowerTuftMeshId  = { 0x0000000000000126ULL, 0x0000000000000001ULL };   // 3 levels
 constexpr UUID kEngineScreeChipMeshId   = { 0x0000000000000129ULL, 0x0000000000000001ULL };   // 2 levels
 
+// The Desert set (step 6), the next block: DuneGrass .. DuneGrassLod2, Cactus, CactusLod1,
+// Sandstone .. SandstoneLod2 (0x12B..0x132). The Desert set also lists Scree Chip.
+constexpr UUID kEngineDuneGrassMeshId   = { 0x000000000000012BULL, 0x0000000000000001ULL };   // 3 levels
+constexpr UUID kEngineCactusMeshId      = { 0x000000000000012EULL, 0x0000000000000001ULL };   // 2 levels
+constexpr UUID kEngineSandstoneMeshId   = { 0x0000000000000130ULL, 0x0000000000000001ULL };   // 3 levels
+
 // ── Engine weather sounds (FILES, not registered here) ──────────────────────
 // The sounds WeatherComponent plays when none of its sound slots is set, so a
 // project gets rain, wind, snow, storm and thunder without a file of its own.

@@ -7747,7 +7747,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		const bool builtin = mode == "builtin";
 		const bool normalV = mode == "normal";
 		const bool surface = mode == "surface";
-		// HE_DUMP_AUTOLANDGROUP=Forest|Grassland (Thema 233): the texture group the witness shows
+		// HE_DUMP_AUTOLANDGROUP=Forest|Grassland|Desert (Thema 233): the texture group the witness shows
 		// (default Mountains = the shipped material). Its arrays are its own, so a group without them
 		// in the cache or EngineContent draws the white fallback, like Mountains does without its own.
 		const HE::AutoLandscapeGroup* group = &HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Mountains);

@@ -410,9 +410,9 @@ TEST_CASE("Layer meshes: a scene that names them by UUID gets them resident from
 		}
 }
 
-TEST_CASE("Layer meshes: the Forest and Grassland sets scatter and draw boxed clusters too")
+TEST_CASE("Layer meshes: the Forest, Grassland and Desert sets scatter and draw boxed clusters too")
 {
-	for (const HE::AutoLandscapeGroupId g : { HE::AutoLandscapeGroupId::Forest, HE::AutoLandscapeGroupId::Grassland })
+	for (const HE::AutoLandscapeGroupId g : { HE::AutoLandscapeGroupId::Forest, HE::AutoLandscapeGroupId::Grassland, HE::AutoLandscapeGroupId::Desert })
 	{
 		CAPTURE(HE::autoLandscapeGroup(g).name);
 		Land land(1.0f, g);
