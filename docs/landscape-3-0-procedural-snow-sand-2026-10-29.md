@@ -122,3 +122,7 @@ any other material can call them too.
 - **Decisions taken:** Vec4 packing; sand colour baked; Desert = 16 params. **Suggested, not taken:** raise the slot budget (needs all five renderers + Windows verification), group-specific defaults from the picker values.
 - **Trap:** 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
 - **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 4 (mix texture + procedural, a Mix parameter will need a slot: free one or pack); 3. step 5 trails (Disturbance pin).
+
+## Step 4 withdrawn (2026-10-29)
+
+The Texture Mix (commit e66ff0e3) was reverted on the human's word: snow and sand get **no texture at all**, purely procedural, as before step 4 ("es soll garkeine textur, vorher war viel besser"). The code, the four engine materials and the tests are byte-identical to step 3 (6233f51c; `git diff 6233f51c HEAD -- src tests EditorDeps` is empty), so the Desert has its `Snow Color` slot back (15 / 16 params, `autoLandscapeParamCount`) and the Snow / Grass slices are not read in the procedural roles. Do not re-add a texture overlay for the procedural roles; a "texture + procedural" idea has to come from the human again.
