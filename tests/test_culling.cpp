@@ -3543,7 +3543,7 @@ TEST_CASE("Realistic clouds: the blue-noise dither tile is one permutation, iden
 	CHECK(mtlFile.find("float jitter = skyBlueDither(fragCoord);") != std::string::npos);
 }
 
-TEST_CASE("Realistic clouds: the weather-map cadence of the march is the same numbers in GL and MSL")
+TEST_CASE("Realistic clouds: the quality constants of the march (weather-map cadence, sun-march skip) are the same numbers in GL and MSL")
 {
 	// The Realistic march evaluates the weather map on every qColEvery-th step (Low / Medium / High). The two dialects spell the quality test differently; the numbers must match, and High stays exact.
 	using namespace nebuladrift;
@@ -3578,6 +3578,11 @@ TEST_CASE("Realistic clouds: the weather-map cadence of the march is the same nu
 	REQUIRE(gl.size() == 3);
 	CHECK(gl == mtl);
 	CHECK(gl.back() == 1.0);                        // High stays exact: every step, no interpolation
+	// The opacity under which a step skips the sun march: 0 for High (never), the same threshold in both dialects.
+	const std::vector<double> sGl = numbers(glFile, "float", "qSkipA"), sMtl = numbers(mtlFile, "float", "qSkipA");
+	REQUIRE(sGl.size() == 2);
+	CHECK(sGl == sMtl);
+	CHECK(sGl.front() == 0.0);
 }
 
 TEST_CASE("Nebula: Metal's kSkyMSL copy matches the GL sky shader after normalisation")

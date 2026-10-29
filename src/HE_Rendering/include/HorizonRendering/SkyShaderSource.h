@@ -880,7 +880,8 @@ vec2 cloudColumnReal(vec3 pos, float baseY, float thick, float nscale, float tim
 // The 3D half: from the column's cover/macro to the density (envelope, body lumps, erosion, mist skirt).
 float cloudBodyReal(vec3 pos, float baseY, float thick, float nscale, float lo, float time, vec3 wind, float fluff, float evo, vec2 col)
 {
-	float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+	float hfu = (pos.y - baseY) / thick;               // unclamped: below the nominal base it is negative
+	float hf  = clamp(hfu, 0.0, 1.0);
 		// Wind shear: tops lean downwind. World-space offset before noise
 		// scaling; strength follows the actual wind speed (|wind| is per-sec).
 		float wlen = length(wind.xz);
@@ -894,7 +895,11 @@ float cloudBodyReal(vec3 pos, float baseY, float thick, float nscale, float lo, 
 		// others billow into towers — not one uniform dome height.
 		float towerTop = mix(0.28, 1.0, smoothstep(lo, lo + 0.30, cover))
 		               * mix(0.55, 1.25, macro);
-		float rise  = smoothstep(0.0, 0.06, hf);               // FLAT base
+		// The base is flat but not one plane: it rides up and down with the formation (macro, +-0.10 thick) and rises over
+		// a soft 0.10 instead of a razor 0.06, so an underside is a soft ragged edge and not a cut. The march starts
+		// below the nominal base to let it show (applyClouds3DReal).
+		float baseShift = (macro - 0.5) * 0.20;
+		float rise  = smoothstep(0.0, 0.10, hfu - baseShift);
 		float crown = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
 		if (crown <= 0.0) return 0.0;
 		// 3D body: rounded interior lumps inside the column envelope.
@@ -912,7 +917,7 @@ float cloudBodyReal(vec3 pos, float baseY, float thick, float nscale, float lo, 
 		// of one smooth rounded shell.
 		float billow = cloudBillowFbm(np * 1.2 + vec3(0.0, -time * 0.08 * evo, 0.0), 1.0) * 0.62
 		             + worleyNoise3(np * 2.4 + vec3(3.0, -time * 0.06 * evo, 0.0)) * 0.38;
-		float carve  = billow * mix(0.55, 0.85, fluff);
+		float carve  = billow * (mix(0.55, 0.85, fluff) + 0.22 * (1.0 - smoothstep(0.0, 0.30, hfu - baseShift)));   // ragged underside
 		float x      = (env - carve) / max(1.0 - carve, 1e-3);
 		// MIST SKIRT: a low-density veil in the zone the carve just cut away —
 		// it hugs every lobe as a soft evaporating fringe, so the crisp cores
@@ -1176,6 +1181,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	// in between (Low 4, Medium 3, High exact). Empty space costs one column test per step, so this is where Medium spent
 	// almost half of its time (docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md).
 	int qColEvery = (uCloudQuality <= 0) ? 4 : (uCloudQuality == 1 ? 3 : 1);
+	float qSkipA = (uCloudQuality >= 2) ? 0.0 : 0.04;   // opacity below which a step skips the sun march (High: never)
 	if (uCloudInterShadows == 0) qShadow = min(qShadow, 3); // short march: own body only
 	float evo = uCloudEvolution;
 
@@ -1184,7 +1190,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	float baseY = cloudH;                         // ABSOLUTE world altitude of the deck
 	float maxDist = cloudH * 60.0;
 	float tNear, tFar;
-	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
+	if (!cloudSlabRange(camPos, dir, baseY - 0.12 * thick, baseY + thick, maxDist, tNear, tFar))
 		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
 		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
 
@@ -1222,6 +1228,8 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 
 	float T = 1.0;
 	vec3  L = vec3(0.0);
+	float tAcc = 0.0;   // opacity-weighted mean distance of what the pixel sees: where the visible surface is
+	float wAcc = 0.0;
 	vec2 colA = vec2(0.0);
 	vec2 colB = vec2(0.0);
 	for (int i = 0; i < N; ++i)
@@ -1259,31 +1267,40 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		// cauliflower lobe shades its neighbour (per-lobe relief), the
 		// exponential tail reaches ~0.5 thick (3 steps, own body) or ~2.3 thick
 		// (6 steps — interShadows: neighbouring towers darken this cloud).
-		float od = 0.0;
+		float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
+		float opticalDepth = dens * (ds / thick) * 12.0 * distFade * densMul * (1.0 + 2.0 * ov);
+		float a = 1.0 - exp(-opticalDepth);
+		// A thin wisp (a < qSkipA: the skirt and the ragged underside) hardly shows, so it skips the sun march and takes a
+		// typical light (High never skips).
+		float sun = 0.8;
+		if (a >= qSkipA)
 		{
-			float st = thick * 0.05;
-			vec3  sp = pos;
-			for (int j = 0; j < qShadow; ++j)
+			float od = 0.0;
 			{
-				sp += sunDir * st;
-				float shf = (sp.y - baseY) / thick;
-				if (shf > 1.35) break;                 // left the slab upward
-				od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind,
-				                        fluff, 1.0, evo) * (st / thick) * 10.0;
-				st *= stGrow;
+				float st = thick * 0.05;
+				vec3  sp = pos;
+				for (int j = 0; j < qShadow; ++j)
+				{
+					sp += sunDir * st;
+					float shf = (sp.y - baseY) / thick;
+					if (shf > 1.35) break;                 // left the slab upward
+					od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind,
+					                        fluff, 1.0, evo) * (st / thick) * 10.0;
+					st *= stGrow;
+				}
 			}
+			// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
+			// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
+			// the tops by 1.75× and burn out before the tonemap).
+			float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
+			for (int o = 0; o < 3; ++o)
+			{
+				ms += aa * exp(-od * 5.5 * bb);
+				wsum += aa;
+				aa *= 0.5; bb *= 0.35;
+			}
+			sun = ms / wsum;
 		}
-		// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
-		// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
-		// the tops by 1.75× and burn out before the tonemap).
-		float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
-		for (int o = 0; o < 3; ++o)
-		{
-			ms += aa * exp(-od * 5.5 * bb);
-			wsum += aa;
-			aa *= 0.5; bb *= 0.35;
-		}
-		float sun    = ms / wsum;
 		float powder = 1.0 - exp(-dens * mix(3.5, 5.0, fluff));
 		// Powder FLOOR: the thin mist skirt must read as luminous sunlit haze,
 		// not as grey soot — darkness should come from the sun march (od), not
@@ -1310,12 +1327,31 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
 		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
 
-		float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
-		float opticalDepth = dens * (ds / thick) * 12.0 * distFade * densMul * (1.0 + 2.0 * ov);
-		float a = 1.0 - exp(-opticalDepth);
+		tAcc += T * a * t;
+		wAcc += T * a;
 		L += T * a * cloudCol;
 		T *= 1.0 - a;
 		if (T < 0.02) break;
+	}
+	// Surface detail, once per pixel: the march steps are coarser than any lump worth drawing, so lumps cannot live in the
+	// density. Instead the lighting of the visible surface (opacity-weighted mean distance) is modulated by a small lump
+	// field: sun-facing slopes brighter, hollows darker. Three fetches per pixel, only up close (far lumps would alias),
+	// no dependence on the step size or the dither. See docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md.
+	if (wAcc > 0.02)
+	{
+		float tS   = tAcc / wAcc;
+		float fade = 1.0 - smoothstep(maxDist * 0.02, maxDist * 0.12, tS);
+		if (fade > 0.0)
+		{
+			vec3 q    = ((camPos + dir * tS) * nscale + uWindDrift) * 6.5 + vec3(0.0, -time * 0.12 * evo, 4.0);
+			float d0  = worleyNoise3(q);
+			float dS  = worleyNoise3(q + sunDir * 0.35);
+			float d1  = worleyNoise3(q * 2.3 + 9.0);
+			float relief = (d0 - dS) * 3.0;                      // the slope toward the sun: lit side brighter
+			float lump   = (d0 * 0.65 + d1 * 0.35) - 0.5;        // crowns bright, hollows dark
+			float strength = fade * (1.0 - T);
+			L *= clamp(1.0 + strength * (0.35 * relief + 0.50 * lump), 0.5, 1.6);
+		}
 	}
 	// Grazing-angle fade, symmetric in |dir.y| (see the Metal note): works the
 	// same looking down from above the deck as looking up from below.
