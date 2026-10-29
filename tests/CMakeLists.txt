@@ -164,6 +164,10 @@ add_executable(he_tests
     test_sky_shader.cpp
     test_jobsystem.cpp
     test_terrain.cpp
+    # Thema 233 step 7: a terrain mixing a second/third texture group (weight
+    # layers 6/7 as group shares), and that paint()/fillLayer() are unchanged
+    # byte for byte when no mix group is set.
+    test_terrain_mix_groups.cpp
     # Thema 210: a landscape texture array that arrives late renders like a first load
     # (content epoch on download + the backends' graph-texture miss sweep, source-pinned).
     test_landscape_reload.cpp

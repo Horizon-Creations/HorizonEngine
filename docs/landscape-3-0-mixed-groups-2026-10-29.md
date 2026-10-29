@@ -1,7 +1,8 @@
-# Landscape 3.0: several texture groups on one terrain (Thema 233, step 7), WIP
+# Landscape 3.0: several texture groups on one terrain (Thema 233, step 7)
 
-Status: **stopped by the queen part-way.** The CPU data model and the paint API are written and syntax-checked;
-nothing is built, no test exists, no UI, no serializer, no renderer. Read the Handoff.
+Status: **done for a CPU/UI-only mix (no fat-array render material yet).** Started on the Mac (data model +
+paint API, syntax-checked only, commit f9714437), finished on NN-WS03 (serializer, avgLayerWeights, editor UI,
+tests, full Windows build + ctest). Read the Handoff.
 
 ## Binding route (the first thing the step asked to settle)
 
@@ -31,35 +32,69 @@ nothing is built, no test exists, no UI, no serializer, no renderer. Read the Ha
 
 ## Handoff
 
-**Done** (uncommitted before this doc; commit "WIP" on the branch):
-* `TerrainComponent.h` field, `TerrainPaint.h/.cpp` API above. `c++ -std=c++20 -fsyntax-only` on `TerrainPaint.cpp` is clean
-  (`-Isrc/HE_Scene/include -Isrc/HE_Core/include -Isrc/HE_Rendering/glm`). Nothing else compiled.
+**Done:**
+* Mac (f9714437, syntax-checked only): `TerrainComponent::mixGroup[2]`, `TerrainPaint.h/.cpp` API (`reservedLayers`,
+  `isReservedLayer`, `groupShares`, `setMixGroup`, `paintGroup`, `fillGroup`, `paintInGroup`; `paint()`/`fillLayer()` refuse/keep
+  reserved layers 6/7).
+* NN-WS03 (this run): `SceneSerializer.cpp` write (after `layerWeights2B64`, ~line 745) / read (after `layerWeights2`, ~line 1760):
+  key `mixGroups` as `[a, b]`, written only when one slot is >= 0; read defaults both to -1, clamps to
+  `0..kAutoLandscapeGroupCount-1`, drops a second slot equal to the first. `TerrainSystem.cpp` `computeAverageLayerWeights`:
+  layers 0..5 normalise without the share bytes when reserved, `avgLayerWeights[6/7]` get the mean (clamped-to-1) share instead;
+  `reservedLayers(tc) == 0` reproduces the old loop exactly (every new bit test is then always false). Verified by reading, no
+  code change needed: `McpToolsTerrain.cpp`'s `terrain_paint` MCP tool (refuses a reserved layer the same "nothing happened" way
+  `texelWeights` already handles, via the byte-diff check); `TerrainSync.cpp`'s `GridsAside`/`serializeWithoutGrids` (`mixGroup`
+  is not a grid, rides the full-component settings blob like `resolution`/`weightRes` do; `restoreTerrain` never touches it).
+  `FoliageSystem.cpp`'s `weightLayer` 6/7 now reads a group share where one is reserved — left as emergent behaviour (a layer
+  gated on it grows where that group's share is) rather than special-cased; not wired to anything else this step.
+* Editor UI (`TerrainTools.cpp`): Setup "Mix Groups" — two independent segmented rows (None + the four groups, the terrain's own
+  group and the other slot's pick disabled) calling `TerrainPaint::setMixGroup`. Paint tab "Active Group" selector (own + both
+  mix slots, shown only once `reservedLayers(tc) != 0`); the brush stroke calls `TerrainPaint::paintInGroup` with the active slot
+  (Ctrl+drag always targets slot 0, the own group). Both "Clear Paint" buttons now also reset `mixGroup` to `{-1,-1}` (the shares
+  lived in the bytes they clear). Two new `EditorHelp.cpp` entries (`Landscape/Mix Group`, `Landscape/Active Group`) plus an
+  addition to `Landscape/Clear Paint`'s text.
+* `tests/test_terrain_mix_groups.cpp` (9 cases; added to `tests/CMakeLists.txt`): default/no-mix state, `paint()`/`fillLayer()`
+  byte-identical without a mix group, `setMixGroup` reserve/refuse/clear, paint normalising 0..5 only, `fillLayer` keeping shares,
+  `groupShares` remainder maths, scene round-trip, pre-mix-field scene loads as one group, `paintInGroup` combined stroke.
+* **Built and tested on NN-WS03** (first real Windows build of this topic — not a syntax check): fresh configure outside the
+  worktree's long path (`cmake -S <worktree> -B C:\hb\l7 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=/EHsc
+  -DDEPLOY_DIR=C:/hb/l7deploy`, VS "18" BuildTools + bundled Ninja, vcvars64). `cmake --build C:\hb\l7 --target he_tests -j16`:
+  **EXIT=0**. This links `RendererOpenGL;RendererSoftware;RendererVulkan;RendererD3D11;RendererD3D12` into `he_tests` — a real
+  *compile*, not a syntax check, of GL/Vulkan/D3D11/D3D12/Software on this change, using the real Vulkan SDK and `dxc` (D3D12
+  DXR). `ctest -R "test_terrain_mix_groups|test_terrain$|test_landscape_groups|test_material_graph|test_foliage_rules|
+  test_terrain_tools_ui"`: **6/6 passed**. Full suite `ctest -j4` (scratch `HOME`): **345/348 passed**; the 3 failures
+  (`test_planner_ui`, `test_hpak`, `sdk_example_project`) touch none of this step's files and match the known pre-existing
+  Windows-runner noise (hive lesson "Pre-existing Vulkan/D3D/ctest noise") — not investigated further here.
+  `python3 scripts/editor_help_audit.py --check` (via `py -3`): **1244/1244, unchanged** (the new controls are `segmented()`
+  cells / `InvisibleButton`, which the audit's regex does not scan — same as the existing Texture Group picker).
 
-**Not done, in this order**
-1. `SceneSerializer.cpp` write (~732-742) / read (~1752): key `mixGroups` as `[a, b]`, written only when one is >= 0; read default
-   -1, clamp to `0..kAutoLandscapeGroupCount-1`, drop a second slot equal to the first. Old scenes must load as one group.
-2. `TerrainSystem.cpp:93-120` `computeAverageLayerWeights`: with reserved layers, normalise layers 0..5 without the share bytes and
-   store the (scaled) shares in `avgLayerWeights[6/7]` (`sharesOf` logic); keep the old code when `reservedLayers == 0`.
-3. `TerrainTools.cpp`: Setup "Mix Groups" row under the group picker (`~1474`; two 5-cell `segmented` rows: None + the four
-   groups, the own group and the other slot's group disabled; call `TerrainPaint::setMixGroup` after `snapshotNow`); Paint tab
-   "Active Group" selector (own + mixes) above the layer list (`~1578`), stroke at `~798` becomes `paintInGroup(..., slot, ...)`,
-   Ctrl+drag = layer 0 + slot 0; "Fill With Layer" at `~1631` and the two "Clear Paint" (`~1555`, `~1639`) must decide about the
-   shares (Clear Paint should clear them; say so in its help). Help entries in `EditorHelp.cpp` for every new label, then
-   `python3 scripts/editor_help_audit.py --check`.
-4. Checks the step listed: `McpToolsTerrain.cpp:816-882` (builds its own terrain JSON, must carry `mixGroups`),
-   `TerrainSync.cpp` (raw bytes, `replaceKeepingGrids` at :292 takes the blob's `mixGroup` from the new side: read, believed fine),
-   `FoliageSystem.cpp:178` / `weightLayer` 6/7 now read a share (a foliage layer gated by 6/7 grows where that group is; the own
-   group has no layer, decide whether to add a pseudo layer).
-5. `tests/test_terrain_mix_groups.cpp` (+ `tests/CMakeLists.txt`): paint without mix equals the old bytes (copy a fixture from
-   `test_terrain_paint.cpp`), reserved layers refused, `fillLayer` keeps shares, `paintGroup` sums, `setMixGroup` fold/clear,
-   scene round-trip, scene without the key loads as one group. Then `he_tests` (TerrainComponent.h is included by 63 files: one
-   rebuild, batch the header edits) and the ctest list from the assignment.
-6. Fat-array mix material (route above) + five-backend witnesses: separate step, needs the human's call on shipping sizes.
-   Vulkan / D3D11 / D3D12 stay unverified (not possible on this Mac); do not mark them done from CI.
+**Not done:**
+* The fat-array mix material (render route, below) and any pixel/visual verification of a mix — nothing samples `mixGroup` yet,
+  so Metal/GL witness scripts would show byte-identical pixels to before this step; not run.
+* Runtime smoke-test of the editor itself on D3D11/D3D12/Vulkan/GL (only `he_tests`, not `HorizonEditor`, was built this session;
+  no backend-specific code was touched, so this is lower-risk, but it is **not verified**).
+* An MCP endpoint for `setMixGroup`/Active Group (none exists for the single Texture Group picker either — no parity gap
+  introduced, but also no MCP-driven test of the new paint path).
+* CI was not triggered for this specific commit from this session.
 
-**Decisions**: shares live in weight layers 6/7 as the design says (reuses the 2:1 weightmap upload and TerrainSync with no new
-grid or sampler); the group set is per-terrain `mixGroup[2]` and not tied to Forest/Grassland, because Desert is a fourth group and
-two channels hold two secondary groups. **Only suggested**: the combined role+group stroke, the foliage reading.
+**Decisions:** shares live in weight layers 6/7 as the design's option C (reuses the 2:1 weightmap upload and TerrainSync, no new
+grid or sampler); `mixGroup` is per-terrain and generic over groups (not tied to "Forest/Grassland") because Desert is a fourth
+group and only two channels exist; a stroke with a mix slot active also pulls the group share toward that slot (`paintInGroup`),
+including slot 0 ("Own"), so selecting "Own" and painting also reclaims a texel from the other groups' shares; "Clear Paint"
+drops the mix groups along with the weightmap. Render route if a mix is ever made visible: option A's fat array set in the same
+three graph-texture slots (`kMatMaxGraphTextures = 4`, one is `heTexP3`/free) plus a dedicated mix material from id `0x4A4`, not
+six separate arrays (those do not fit: `MaterialGraph.h:581`, Vulkan's `static_assert(... == 4, ...)` at
+`VulkanRenderer.cpp:9492`, D3D's sampler table full per the design doc §3.1/§3.4). **Only suggested, not decided:** the foliage
+`weightLayer` 6/7 reading a share as "grows where that group is."
 
-**Traps**: do not use `mv` to swap files, do not `touch` headers; `TerrainComponent.h` rebuilds ~63 files. No `Grep` tool in this
-session, use `/usr/bin/grep`. zsh: `echo ====` fails, quote it.
+**Traps:** a fresh Ninja+MSVC configure on this machine needs `-DCMAKE_CXX_FLAGS=/EHsc` explicitly — without it, `cl.exe`'s
+default (no `/EH` flag) leaves `__cpp_exceptions` undefined and doctest's `REQUIRE`/`CHECK` macros fail a `static_assert`
+project-wide (not file-specific; this project's `CMakeLists.txt` never sets `/EHsc` itself, unlike the CI workflow's exact same
+`cmake -B build -G Ninja ...` invocation — root cause of that difference not chased further). The worktree's path is long enough
+that `FetchContent`'s subbuild under `out/build/<preset>/_deps/...` hits Windows' 260-character `MAX_PATH` during
+`nlohmann_json-populate`; configure to a short `-B` path outside the worktree instead (`C:\hb\l7` here) and override
+`-DDEPLOY_DIR` so it doesn't default into the shared `C:/Users/conno/source/repos/HorizonEngineBuild`. `TerrainComponent.h`
+rebuilds ~63 files; batch header edits before the first build. Background shell tasks (`run_in_background: true`) on this box
+got torn down between harness turns before finishing even a 30+ minute build — ninja's own incremental state survived each
+restart, but a **foreground** call with the tool's 600000 ms (10 min) cap, re-run until done, was the reliable way to drive it
+to completion; `ctest` has no equivalent incremental resume, so run it in one foreground call too. No `Grep` tool in the Mac
+session, use `/usr/bin/grep`; on Windows use the `Grep`/`Glob` tools or plain `grep` via Git Bash — both are available here.

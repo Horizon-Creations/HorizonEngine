@@ -50,6 +50,11 @@ static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
 static bool        s_landscapePaint  = false;
 static int         s_paintLayer      = 0;
+// Which group a Paint stroke leans the texel toward (Thema 233 step 7): 0 = the
+// terrain's own group, 1/2 = TerrainComponent::mixGroup[0]/[1]. Only meaningful
+// once a mix group is set (Setup "Mix Groups"); a terrain with none ignores it
+// (TerrainPaint::paintInGroup is a no-op on the share when reservedLayers() == 0).
+static int         s_activeGroupSlot = 0;
 // Landscape FOLIAGE mode: the same brush paints a foliage layer's density
 // mask (FoliageLayer::densityMask) — Grow raises it toward the target
 // density, Erase pulls it to 0, which is how an exclusion area (a yard, a
@@ -795,8 +800,13 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					const float s01    = std::clamp(s_paintStrength, 0.0f, 1.0f);
 					const float amount = s01 >= 1.0f ? 1.0f
 						: 1.0f - std::pow(1.0f - s01, static_cast<float>(dt) * 60.0f);
-					TerrainPaint::paint(tc, lx, lz, invert ? 0 : s_paintLayer,
-					                    s_brushRadius, s_falloffRadius, amount);
+					// Ctrl+drag restores the base layer AND hands the texel back to the
+					// terrain's own group (slot 0) regardless of the Active Group picked —
+					// "paint the auto choice back" always means the terrain's own ground.
+					// paintInGroup's group write is a no-op without a mix group set.
+					TerrainPaint::paintInGroup(tc, lx, lz, invert ? 0 : s_paintLayer,
+					                           invert ? 0 : s_activeGroupSlot,
+					                           s_brushRadius, s_falloffRadius, amount);
 				}
 			}
 			// ── Foliage mode: the layer's density mask ────────────
@@ -1499,6 +1509,39 @@ void renderPanel(AppContext& ctx)
                     }
                     ImGui::EndDisabled();
                     EditorWidgets::helpForLabel("Apply Group Meshes");
+
+                    // ── Mix groups (Thema 233 step 7) ───────────────────────
+                    // A second and third group whose SHARE of each texel is kept in paint
+                    // channels 6/7 (TerrainComponent::mixGroup); the group above is what is
+                    // left over. No renderer reads a mix yet (that needs a fat-array material,
+                    // not built this step) — this only stores where a future one would blend;
+                    // the Paint tab's Active Group lets a stroke mark a spot for one now.
+                    sectionLabel("Mix Groups");
+                    for (int slot = 0; slot < 2; ++slot)
+                    {
+                        SegCell mcells[HE::kAutoLandscapeGroupCount + 1];
+                        std::string mids[HE::kAutoLandscapeGroupCount + 1];
+                        mids[0] = std::string("##lsMixNone") + std::to_string(slot);
+                        mcells[0] = { mids[0].c_str(), "None", "Landscape/Mix Group", nullptr, true };
+                        for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+                        {
+                            mids[i + 1] = std::string("##lsMix") + std::to_string(slot)
+                                        + HE::kAutoLandscapeGroups[i].name;
+                            const bool taken = i == cur || i == tc.mixGroup[1 - slot];
+                            mcells[i + 1] = { mids[i + 1].c_str(), HE::kAutoLandscapeGroups[i].name,
+                                               "Landscape/Mix Group",
+                                               taken ? "Already this terrain's own group or the other mix slot" : nullptr,
+                                               !taken };
+                        }
+                        const int active = tc.mixGroup[slot] < 0 ? 0 : tc.mixGroup[slot] + 1;
+                        const int mpick = segmented(mcells, HE::kAutoLandscapeGroupCount + 1,
+                                                    HE::kAutoLandscapeGroupCount + 1, active);
+                        if (mpick >= 0 && mcells[mpick].enabled)
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Group");
+                            TerrainPaint::setMixGroup(tc, slot, mpick - 1);
+                        }
+                    }
                 }
 
                 // ── Heightmap ────────────────────────────────────────────
@@ -1552,7 +1595,8 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }
                 if (fol)
@@ -1581,6 +1625,37 @@ void renderPanel(AppContext& ctx)
                 // The list is the material's, so a group switch (or a material with fewer
                 // layers) changes its length: the index is clamped every frame, never kept.
                 s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
+
+                // ── Active group (Thema 233 step 7) ─────────────────────────
+                // Shown only once a Mix Group is set (Setup); the own group alone has
+                // nothing to distinguish. Picking a mix slot makes the stroke ALSO mark
+                // the texel as that group's — the group share painted here is what a
+                // future mixed material would blend by; today only the data is kept.
+                if (TerrainPaint::reservedLayers(tc) != 0)
+                {
+                    const int ownGroup = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId);
+                    SegCell gcells[3];
+                    std::string gids[3];
+                    gids[0] = "##lsActiveOwn";
+                    gcells[0] = { gids[0].c_str(),
+                                  ownGroup >= 0 ? HE::kAutoLandscapeGroups[ownGroup].name : "Own",
+                                  "Landscape/Active Group", nullptr, true };
+                    for (int slot = 0; slot < 2; ++slot)
+                    {
+                        gids[slot + 1] = std::string("##lsActiveMix") + std::to_string(slot);
+                        const bool has = tc.mixGroup[slot] >= 0;
+                        gcells[slot + 1] = { gids[slot + 1].c_str(),
+                                              has ? HE::kAutoLandscapeGroups[tc.mixGroup[slot]].name : "\xe2\x80\x94",
+                                              "Landscape/Active Group",
+                                              has ? nullptr : "No mix group in this slot (Setup)", has };
+                    }
+                    if (!gcells[s_activeGroupSlot].enabled) s_activeGroupSlot = 0;
+                    sectionLabel("Active Group");
+                    const int gpick = segmented(gcells, 3, 3, s_activeGroupSlot);
+                    if (gpick >= 0 && gcells[gpick].enabled) s_activeGroupSlot = gpick;
+                }
+                else
+                    s_activeGroupSlot = 0;
                 {
                     // One row per layer: a swatch, the name, the share of the landscape it
                     // covers right now (the mean weight, refreshed with every weightmap upload)
@@ -1636,7 +1711,8 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }
                 EditorWidgets::helpForLabel("Clear Paint");
