@@ -16,6 +16,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>   // texture groups (Thema 233)
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -231,6 +232,20 @@ namespace
 		ImGui::SetCursorScreenPos(p0);
 		ImGui::Dummy(ImVec2(w, wellH));
 		return clicked;
+	}
+
+	// Bind the terrain to texture group `g`: its landscape material goes into the
+	// terrain's MaterialComponent, nothing else is touched (the weightmap is shared by
+	// every group). The engine material is loaded first, by path, because the Content
+	// Browser is not the only way to reach it. No-op on the group the terrain already has.
+	void assignTextureGroup(AppContext& ctx, MaterialComponent& tmat, const HE::AutoLandscapeGroup& g)
+	{
+		if (tmat.materialAssetId == g.materialId) return;
+		if (ctx.contentManager) ctx.contentManager->loadAsset(g.materialPath);
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Texture Group");
+		tmat.materialAssetId = g.materialId;
+		tmat.dirty = true;   // TerrainSystem pushes it to the chunks
+		if (ctx.renderer) ctx.renderer->InvalidateMaterial(g.materialId);
 	}
 
 	// The name on the left, the control filling the rest - ImGui itself puts a label to
@@ -1408,6 +1423,28 @@ void renderPanel(AppContext& ctx)
                 else
                     dimText("Drag a material from the Content Browser.");
 
+                // ── Texture group ────────────────────────────────────────
+                // The group IS the landscape material (Thema 233): picking one assigns that
+                // group's material and nothing else. The weightmap is one set per terrain whose
+                // channel k means the same role in every group, so every painted weight survives
+                // the switch; only what the channels look like (and are called) changes.
+                sectionLabel("Texture Group");
+                {
+                    SegCell cells[HE::kAutoLandscapeGroupCount];
+                    std::string ids[HE::kAutoLandscapeGroupCount];
+                    for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+                    {
+                        ids[i]   = std::string("##lsGroup") + HE::kAutoLandscapeGroups[i].name;
+                        cells[i] = { ids[i].c_str(), HE::kAutoLandscapeGroups[i].name,
+                                     "Landscape/Texture Group", nullptr, true };
+                    }
+                    const int pick = segmented(cells, HE::kAutoLandscapeGroupCount,
+                                               HE::kAutoLandscapeGroupCount,
+                                               HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId));
+                    if (pick >= 0)
+                        assignTextureGroup(ctx, *tmat, HE::kAutoLandscapeGroups[pick]);
+                }
+
                 // ── Heightmap ────────────────────────────────────────────
                 drawHeightmapBlock(ctx, terrainEnt);
 
@@ -1482,6 +1519,11 @@ void renderPanel(AppContext& ctx)
             else if (s_landscapePaint)
             {
                 sectionLabel("Layer");
+                if (const int grp = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId); grp >= 0)
+                    dimText("%s group: Auto picks by slope and height, the others paint over it.",
+                            HE::kAutoLandscapeGroups[grp].name);
+                // The list is the material's, so a group switch (or a material with fewer
+                // layers) changes its length: the index is clamped every frame, never kept.
                 s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
                 {
                     // One row per layer: a swatch, the name, the share of the landscape it

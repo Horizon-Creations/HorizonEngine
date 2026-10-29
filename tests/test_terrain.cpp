@@ -15,6 +15,7 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -1362,4 +1363,61 @@ TEST_CASE("terrain: updateTerrains on a 1024 landscape builds the sculpted heigh
     CHECK_FALSE(after.regionDirty);
     TerrainSystem::updateTerrains(world, cm);
     CHECK_FALSE(world.registry().get<TerrainComponent>(e).dirty);
+}
+
+// Texture groups (Thema 233 step 3): the group is the terrain's MATERIAL, the weightmap is the same
+// one in every group (channel k = role k). A scene saved before groups names Mountains' id and reads
+// back as Mountains; switching the id to Forest's changes no byte of the terrain component.
+TEST_CASE("Texture groups: the weightmap does not depend on the group, a pre-group scene reads as Mountains")
+{
+    HorizonWorld world;
+    Entity e = world.createEntity("Landscape");
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 32.0f;
+    tc.weightRes = 16;
+    TerrainPaint::ensureWeightmap(tc);
+    TerrainPaint::paint(tc, 4.0f, -3.0f, 2, 6.0f, 2.0f, 0.7f);
+    TerrainPaint::paint(tc, -5.0f, 6.0f, 4, 5.0f, 3.0f, 0.9f);   // layer 4: the second page
+    world.registry().emplace<TerrainComponent>(e, tc);
+    MaterialComponent mc;
+    mc.materialAssetId = HE::kAutoLandscapeMaterialId;           // what every earlier scene stored
+    world.registry().emplace<MaterialComponent>(e, mc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> before;
+    REQUIRE(ser.saveToMemory(world, before));
+
+    HorizonWorld w2;
+    REQUIRE(ser.loadFromMemory(w2, before));
+    const TerrainComponent* l = onlyTerrain(w2);
+    REQUIRE(l != nullptr);
+    CHECK(l->layerWeights  == tc.layerWeights);
+    CHECK(l->layerWeights2 == tc.layerWeights2);
+    for (auto ent : w2.registry().view<TerrainComponent, MaterialComponent>())
+    {
+        const HE::UUID id = w2.registry().get<MaterialComponent>(ent).materialAssetId;
+        CHECK(id == HE::kAutoLandscapeMaterialId);
+        CHECK(HE::autoLandscapeGroupOfMaterial(id) == static_cast<int>(HE::AutoLandscapeGroupId::Mountains));
+    }
+
+    // Bind the terrain to Forest: the terrain component's JSON is the same, byte for byte.
+    nlohmann::json sceneMountains = nlohmann::json::from_cbor(before);
+    world.registry().get<MaterialComponent>(e).materialAssetId =
+        HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest).materialId;
+    std::vector<uint8_t> after;
+    REQUIRE(ser.saveToMemory(world, after));
+    nlohmann::json sceneForest = nlohmann::json::from_cbor(after);
+    REQUIRE(terrainJsonOf(sceneMountains) != nullptr);
+    REQUIRE(terrainJsonOf(sceneForest) != nullptr);
+    CHECK(*terrainJsonOf(sceneForest) == *terrainJsonOf(sceneMountains));
+
+    HorizonWorld w3;
+    REQUIRE(ser.loadFromMemory(w3, after));
+    const TerrainComponent* f = onlyTerrain(w3);
+    REQUIRE(f != nullptr);
+    CHECK(f->layerWeights  == tc.layerWeights);
+    CHECK(f->layerWeights2 == tc.layerWeights2);
+    for (auto ent : w3.registry().view<TerrainComponent, MaterialComponent>())
+        CHECK(HE::autoLandscapeGroupOfMaterial(w3.registry().get<MaterialComponent>(ent).materialAssetId)
+              == static_cast<int>(HE::AutoLandscapeGroupId::Forest));
 }

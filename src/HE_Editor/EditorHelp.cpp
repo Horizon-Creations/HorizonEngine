@@ -7425,6 +7425,15 @@ namespace
 	  "can paint are the ones named by the material's Landscape Layer Blend "
 	  "node, and with no such node the Paint tool stays greyed out.",
 	  "", "scenes#terrain" },
+	{ "Landscape/Texture Group", "Texture Group",
+	  "The terrain theme the landscape is shaded as: Mountains, Forest or "
+	  "Grassland. Each is its own landscape material with its own textures and its "
+	  "own names for the paint layers. Switching keeps everything you painted — "
+	  "there is one weightmap per landscape and layer 1 to 4 mean the same role "
+	  "(ground, soil, rock, snow) in every group, so only the look changes. Auto "
+	  "(layer 0) picks the texture by slope and height; painting a layer on top "
+	  "chooses one by hand.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
 	  "offered while a material of your own is assigned.",
