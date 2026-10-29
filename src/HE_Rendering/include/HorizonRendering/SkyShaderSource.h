@@ -830,12 +830,12 @@ bool cloudSlabRange(vec3 camPos, vec3 dir, float baseY, float topY, float maxDis
 //     and remap-style Worley erosion for the cauliflower silhouette.
 // (The classic VIEW march below stays untouched/byte-identical — it does not
 // call this; only the classic shadow map shares the classic branch here.)
-float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float lo,
-                        float time, vec3 wind, float fluff, float style, float evo)
+// The weather-map half of the Realistic field: where clouds are (cover) and how tall they tower (macro). Smooth
+// along a view ray, so the view march evaluates it at every Kth step and interpolates; the sun march and the
+// cloud-shadow map call cloudFieldDensity, which evaluates it exactly. Mirror of the Metal cloudColumnReal.
+vec2 cloudColumnReal(vec3 pos, float baseY, float thick, float nscale, float time, vec3 wind, float evo)
 {
 	float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
-	if (style > 0.5)
-	{
 		// Wind shear: tops lean downwind. World-space offset before noise
 		// scaling; strength follows the actual wind speed (|wind| is per-sec).
 		float wlen = length(wind.xz);
@@ -875,6 +875,19 @@ float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float 
 		// env is intermediate, and the carve erosion below then has no volume
 		// to sculpt — the clouds stay smooth balls with rough skin. The wide
 		// band gives the erosion a thick rind to cut real lobes out of.
+	return vec2(cover, macro);
+}
+// The 3D half: from the column's cover/macro to the density (envelope, body lumps, erosion, mist skirt).
+float cloudBodyReal(vec3 pos, float baseY, float thick, float nscale, float lo, float time, vec3 wind, float fluff, float evo, vec2 col)
+{
+	float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+		// Wind shear: tops lean downwind. World-space offset before noise
+		// scaling; strength follows the actual wind speed (|wind| is per-sec).
+		float wlen = length(wind.xz);
+		if (wlen > 1e-5)
+			pos.xz += wind.xz * ((hf * hf * (0.35 / nscale) * min(wlen * 40.0, 1.0)) / wlen);
+	float cover = col.x;
+	float macro = col.y;
 		float pres = smoothstep(lo - 0.05, lo + 0.30, cover);
 		if (pres <= 0.0) return 0.0;
 		// Tower height varies per formation (macro): some stay flat banks,
@@ -906,7 +919,14 @@ float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float 
 		// keep their shape but the outline stops being knife-sharp.
 		float mist = 0.17 * smoothstep(-0.40, 0.0, min(x, 0.0)) * rise;
 		return clamp(max(x, 0.0) + mist, 0.0, 1.0);
-	}
+}
+float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float lo,
+                        float time, vec3 wind, float fluff, float style, float evo)
+{
+	float hf = clamp((pos.y - baseY) / thick, 0.0, 1.0);
+	if (style > 0.5)
+		return cloudBodyReal(pos, baseY, thick, nscale, lo, time, wind, fluff, evo,
+		                     cloudColumnReal(pos, baseY, thick, nscale, time, wind, evo));
 	// Classic branch — MUST stay term-for-term the cloud-shadow map's original
 	// formula (the ground shadows of classic scenes must not change).
 	vec3 np = pos * nscale + uWindDrift;
@@ -1148,6 +1168,15 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	float qMinN   = (uCloudQuality <= 0) ? 14.0 : (uCloudQuality == 1 ? 26.0 : 32.0);
 	float qMaxN   = (uCloudQuality <= 0) ? 44.0 : (uCloudQuality == 1 ? 80.0 : 128.0);
 	int   qShadow = (uCloudQuality <= 0) ? 3    : (uCloudQuality == 1 ? 4    : 6);
+
+	// How often an in-cloud step re-marches the sun: every step (High, exact), every 2nd (Medium) or 3rd (Low). The
+	// view density is sampled every step, the lighting varies slowly along a ray and is reused in between: the sun
+	// march (qShadow field evaluations) is where the milliseconds are. A step out of the cloud forgets the cache.
+	int qLightEvery = (uCloudQuality <= 0) ? 3 : (uCloudQuality == 1) ? 2 : 1;
+	// The weather map (the column half of the field) is smooth along a ray: evaluate it on every Kth step and interpolate
+	// in between (Low 4, Medium 3, High exact). Empty space costs one column test per step, so this is where Medium spent
+	// almost half of its time (docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md).
+	int qColEvery = (uCloudQuality <= 0) ? 4 : (uCloudQuality == 1 ? 3 : 1);
 	if (uCloudInterShadows == 0) qShadow = min(qShadow, 3); // short march: own body only
 	float evo = uCloudEvolution;
 
@@ -1190,15 +1219,30 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 
 	float T = 1.0;
 	vec3  L = vec3(0.0);
+	vec2 colA = vec2(0.0);
+	vec2 colB = vec2(0.0);
+	float sunCache = 1.0;
+	int   lightAge = 1000;
 	for (int i = 0; i < N; ++i)
 	{
 		float t   = tNear + (float(i) + jitter) * ds;
 		vec3  pos = camPos + dir * t;
 		float hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
 		float detailFade = 1.0 - smoothstep(maxDist * 0.10, maxDist * 0.40, t);
-		float dens = cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind,
-		                               fluff, 1.0, evo);
-		if (dens <= 0.002) continue;
+		vec2 col;
+		if (qColEvery <= 1)
+			col = cloudColumnReal(pos, baseY, thick, nscale, time, wind, evo);
+		else
+		{
+			if ((i % qColEvery) == 0)
+			{
+				colA = (i == 0) ? cloudColumnReal(pos, baseY, thick, nscale, time, wind, evo) : colB;
+				colB = cloudColumnReal(camPos + dir * (t + float(qColEvery) * ds), baseY, thick, nscale, time, wind, evo);
+			}
+			col = mix(colA, colB, float(i % qColEvery) / float(qColEvery));
+		}
+		float dens = cloudBodyReal(pos, baseY, thick, nscale, lo, time, wind, fluff, evo, col);
+		if (dens <= 0.002) { lightAge = 1000; continue; }
 		// Fine cauliflower octave, boiling upward with the convection. Bites
 		// hardest at the silhouette (low density) so the outline breaks into
 		// crisp lobes while the core stays solid.
@@ -1208,37 +1252,43 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		            * (1.0 - 0.45 * clamp(dens * 2.5, 0.0, 1.0));
 		dens *= mix(1.0, smoothstep(0.15, 0.55, bfine), fineW);
 		dens *= smoothstep(0.0, 0.05, dens); // kill only true dust — the mist skirt stays
-		if (dens <= 0.002) continue;
+		if (dens <= 0.002) { lightAge = 1000; continue; }
 
 		// Sun march over the same field; the FIRST step is tight so each
 		// cauliflower lobe shades its neighbour (per-lobe relief), the
 		// exponential tail reaches ~0.5 thick (3 steps, own body) or ~2.3 thick
 		// (6 steps — interShadows: neighbouring towers darken this cloud).
-		float od = 0.0;
+		if (lightAge >= qLightEvery)
 		{
-			float st = thick * 0.05;
-			vec3  sp = pos;
-			for (int j = 0; j < qShadow; ++j)
+			float od = 0.0;
 			{
-				sp += sunDir * st;
-				float shf = (sp.y - baseY) / thick;
-				if (shf > 1.35) break;                 // left the slab upward
-				od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind,
-				                        fluff, 1.0, evo) * (st / thick) * 10.0;
-				st *= 1.85;
+				float st = thick * 0.05;
+				vec3  sp = pos;
+				for (int j = 0; j < qShadow; ++j)
+				{
+					sp += sunDir * st;
+					float shf = (sp.y - baseY) / thick;
+					if (shf > 1.35) break;                 // left the slab upward
+					od += cloudFieldDensity(sp, baseY, thick, nscale, lo, time, wind,
+					                        fluff, 1.0, evo) * (st / thick) * 10.0;
+					st *= 1.85;
+				}
 			}
+			// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
+			// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
+			// the tops by 1.75× and burn out before the tonemap).
+			float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
+			for (int o = 0; o < 3; ++o)
+			{
+				ms += aa * exp(-od * 5.5 * bb);
+				wsum += aa;
+				aa *= 0.5; bb *= 0.35;
+			}
+			sunCache = ms / wsum;
+			lightAge = 0;
 		}
-		// Normalized multi-scatter (Wrenninge): Σ aⁱ·exp(-od·k·bⁱ) / Σ aⁱ —
-		// normalized so od = 0 → exactly 1 (unnormalized it would overbrighten
-		// the tops by 1.75× and burn out before the tonemap).
-		float ms = 0.0, wsum = 0.0, aa = 1.0, bb = 1.0;
-		for (int o = 0; o < 3; ++o)
-		{
-			ms += aa * exp(-od * 5.5 * bb);
-			wsum += aa;
-			aa *= 0.5; bb *= 0.35;
-		}
-		float sun    = ms / wsum;
+		lightAge++;
+		float sun    = sunCache;
 		float powder = 1.0 - exp(-dens * mix(3.5, 5.0, fluff));
 		// Powder FLOOR: the thin mist skirt must read as luminous sunlit haze,
 		// not as grey soot — darkness should come from the sun march (od), not

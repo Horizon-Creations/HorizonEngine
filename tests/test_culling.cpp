@@ -3543,6 +3543,47 @@ TEST_CASE("Realistic clouds: the blue-noise dither tile is one permutation, iden
 	CHECK(mtlFile.find("float jitter = skyBlueDither(fragCoord);") != std::string::npos);
 }
 
+TEST_CASE("Realistic clouds: the quality cadences (light march, weather map) are the same numbers in GL and MSL")
+{
+	// The Realistic march re-marches the sun on every qLightEvery-th in-cloud step and evaluates the weather map on every
+	// qColEvery-th step (Low / Medium / High). The two dialects spell the quality test differently; the numbers must match.
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - cadence comparison skipped");
+		return;
+	}
+	const std::string glFile  = readFile(root / "src" / "HE_Rendering" / "include" /
+	                                     "HorizonRendering" / "SkyShaderSource.h");
+	const std::string mtlFile = readFile(root / "src" / "HE_Rendering" / "src" /
+	                                     "Backends" / "Metal" / "MetalRenderer.mm");
+	const auto numbers = [](const std::string& src, const std::string& name)
+	{
+		std::vector<int> v;
+		const size_t a = src.find("int " + name + " = ");
+		if (a == std::string::npos) return v;
+		const std::string line = src.substr(a, src.find(';', a) - a);
+		const size_t q = line.find('?');            // after the first '?': the three values with their conditions
+		for (size_t i = q; i < line.size(); ++i)
+			if (line[i] == '?' || line[i] == ':')
+			{
+				size_t j = line.find_first_not_of(" (", i + 1);
+				if (j != std::string::npos && std::isdigit(static_cast<unsigned char>(line[j])) && (j + 1 >= line.size() || !std::isdigit(static_cast<unsigned char>(line[j + 1]))))
+					v.push_back(line[j] - '0');
+			}
+		return v;
+	};
+	for (const char* name : { "qLightEvery", "qColEvery" })
+	{
+		const std::vector<int> gl = numbers(glFile, name), mtl = numbers(mtlFile, name);
+		INFO(name);
+		REQUIRE(gl.size() == 3);
+		CHECK(gl == mtl);
+		CHECK(gl.back() == 1);                      // High stays exact: every step
+	}
+}
+
 TEST_CASE("Nebula: Metal's kSkyMSL copy matches the GL sky shader after normalisation")
 {
 	// Nebula parity analysis 01.10.2026, point 3 (PR review A13). D3D11, D3D12 and
