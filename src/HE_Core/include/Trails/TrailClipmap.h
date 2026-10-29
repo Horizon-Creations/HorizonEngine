@@ -40,11 +40,16 @@ public:
     static constexpr int   kSize      = 512;
     static constexpr float kWorldSize = TrailField::kPageSize;   // 128 m: the texture's repeat length
     static constexpr float kSlopeRange = 8.0f;                     // metre-1 mapped to +-127 counts
+    // The window is re-centred on the camera only after it has moved this many texels (6 m) from the centre of
+    // the last one: the material fades trails out at 58 m, the window is valid to 64 m, and in between only the
+    // tiles the field changed are rewritten.
+    static constexpr int   kRecenterTexels = 24;
 
     // Brings the texture in line with the field around `cameraPos`: registers it on the first call (an
-    // all-untouched window, so the material can resolve the path from the first frame), then rewrites it
-    // when the field changed or the camera crossed a texel while there is something near. Returns true
-    // when the texture was written. `renderer` may be null (tests, tools).
+    // all-untouched window, so the material can resolve the path from the first frame), then keeps it current:
+    // a full rewrite when the camera has left the window's middle, otherwise only the tiles the field changed
+    // (a dragged track costs a few tiles, not the 1 MB window). Returns true when the texture was written.
+    // `renderer` may be null (tests, tools).
     bool update(ContentManager& cm, IRenderer* renderer, const TrailField& field, const glm::vec3& cameraPos);
 
     // The texture asset, registered untouched if it is not there yet. ContentManager::loadAsset calls this for
@@ -56,14 +61,16 @@ public:
     // The 512 x 512 x 4 bytes of the last write (tests).
     const std::vector<uint8_t>& pixels() const { return m_pixels; }
 
-    // The encoding, public so a test and the shader's constants cannot drift apart.
-    static void encode(const std::vector<int16_t>& values, std::vector<uint8_t>& rgba);
-
 private:
+    // Recomputes the pixels of the world texels [ix0, ix0 + w) x [iz0, iz0 + h) from the field (a one-texel margin
+    // is read for the slopes). Returns whether any of them is not flat.
+    bool fillRect(const TrailField& field, int ix0, int iz0, int w, int h);
+
     HE::UUID             m_id{};
     uint64_t             m_version  = ~0ull;
-    int                  m_originX  = 0x7fffffff, m_originZ = 0x7fffffff;   // window origin, texels
-    bool                 m_hasContent = false;                              // the texture holds a non-empty window
+    int                  m_cx = 0, m_cz = 0;       // the window's centre, texels
+    bool                 m_centred = false;        // m_cx/m_cz were set (and the pixels belong to them)
+    bool                 m_hasContent = false;     // the texture holds a trodden texel
     std::vector<uint8_t> m_pixels;
 };
 } // namespace HE

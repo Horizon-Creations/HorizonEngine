@@ -19,32 +19,6 @@ inline uint8_t slopeByte(float s)
 }
 } // namespace
 
-void TrailClipmap::encode(const std::vector<int16_t>& values, std::vector<uint8_t>& rgba)
-{
-    constexpr int N = kSize;
-    rgba.assign(static_cast<size_t>(N) * N * 4, 0);
-    // The slope is a central difference over the neighbours in the TORUS (the window wraps): at the
-    // window's own seam it looks across to the far side, which the material has faded out by then.
-    auto d = [&](int x, int z) { return static_cast<float>(values[static_cast<size_t>(floorMod(z, N)) * N + floorMod(x, N)]) / 32767.0f; };
-    const float inv2h = 1.0f / (2.0f * TrailField::kCellSize);
-    for (int z = 0; z < N; ++z)
-        for (int x = 0; x < N; ++x)
-        {
-            const int16_t v = values[static_cast<size_t>(z) * N + x];
-            uint8_t* p = &rgba[(static_cast<size_t>(z) * N + x) * 4];
-            p[0] = static_cast<uint8_t>(std::clamp(128 - static_cast<int>(std::lround(static_cast<float>(v) * (127.0f / 32767.0f))), 1, 255));
-            // A flat texel (the vast majority) skips the four neighbour reads.
-            if (v == 0 && d(x - 1, z) == 0.0f && d(x + 1, z) == 0.0f && d(x, z - 1) == 0.0f && d(x, z + 1) == 0.0f)
-                p[1] = p[2] = 128;
-            else
-            {
-                p[1] = slopeByte((d(x + 1, z) - d(x - 1, z)) * inv2h);
-                p[2] = slopeByte((d(x, z + 1) - d(x, z - 1)) * inv2h);
-            }
-            p[3] = 128;
-        }
-}
-
 namespace
 {
 TextureAsset makeTexture(std::vector<uint8_t> pixels)
@@ -64,49 +38,96 @@ TextureAsset makeTexture(std::vector<uint8_t> pixels)
 }
 } // namespace
 
+namespace
+{
+std::vector<uint8_t> untouchedPixels()
+{
+    std::vector<uint8_t> px(static_cast<size_t>(TrailClipmap::kSize) * TrailClipmap::kSize * 4, 128);   // R,G,B,A all 128
+    return px;
+}
+} // namespace
+
 HE::UUID TrailClipmap::ensureTexture(ContentManager& cm)
 {
     if (const HE::UUID id = cm.idForPath(kTrailTexturePath); id != HE::UUID{} && cm.getTexture(id)) return id;
-    std::vector<uint8_t> pixels;
-    encode(std::vector<int16_t>(static_cast<size_t>(kSize) * kSize, 0), pixels);
-    return cm.registerTexture(makeTexture(std::move(pixels)));
+    return cm.registerTexture(makeTexture(untouchedPixels()));
+}
+
+bool TrailClipmap::fillRect(const TrailField& field, int ix0, int iz0, int w, int h)
+{
+    constexpr int N = kSize;
+    const int tw = w + 2, th = h + 2;
+    std::vector<int16_t> v(static_cast<size_t>(tw) * th);
+    field.copyWindow(ix0 - 1, iz0 - 1, tw, th, v.data());
+    auto at = [&](int x, int z) { return static_cast<float>(v[static_cast<size_t>(z + 1) * tw + (x + 1)]) / 32767.0f; };
+    const float inv2h = 1.0f / (2.0f * TrailField::kCellSize);
+    bool any = false;
+    for (int z = 0; z < h; ++z)
+        for (int x = 0; x < w; ++x)
+        {
+            const int16_t value = v[static_cast<size_t>(z + 1) * tw + (x + 1)];
+            uint8_t* p = &m_pixels[(static_cast<size_t>(floorMod(iz0 + z, N)) * N + floorMod(ix0 + x, N)) * 4];
+            p[0] = static_cast<uint8_t>(std::clamp(128 - static_cast<int>(std::lround(static_cast<float>(value) * (127.0f / 32767.0f))), 1, 255));
+            // A flat texel (the vast majority) skips the neighbour reads.
+            if (value == 0 && at(x - 1, z) == 0.0f && at(x + 1, z) == 0.0f && at(x, z - 1) == 0.0f && at(x, z + 1) == 0.0f)
+                p[1] = p[2] = 128;
+            else
+            {
+                any = true;
+                p[1] = slopeByte((at(x + 1, z) - at(x - 1, z)) * inv2h);
+                p[2] = slopeByte((at(x, z + 1) - at(x, z - 1)) * inv2h);
+            }
+            p[3] = 128;
+        }
+    return any;
 }
 
 bool TrailClipmap::update(ContentManager& cm, IRenderer* renderer, const TrailField& field, const glm::vec3& cameraPos)
 {
     constexpr int N = kSize;
-    const int cx = static_cast<int>(std::floor(cameraPos.x / TrailField::kCellSize));
-    const int cz = static_cast<int>(std::floor(cameraPos.z / TrailField::kCellSize));
-    const int ox = cx - N / 2, oz = cz - N / 2;
+    const int camX = static_cast<int>(std::floor(cameraPos.x / TrailField::kCellSize));
+    const int camZ = static_cast<int>(std::floor(cameraPos.z / TrailField::kCellSize));
 
-    const bool fresh      = m_id == HE::UUID{} || cm.getTexture(m_id) == nullptr;
-    if (fresh) { m_id = ensureTexture(cm); m_version = ~0ull; m_hasContent = false; }   // a first call, or a new ContentManager state
-    const bool fieldMoved = field.version() != m_version;
-    const bool camMoved   = ox != m_originX || oz != m_originZ;
-    // An untouched window stays untouched when the camera walks: only a write that CHANGES the picture is worth 1 MB.
-    if (!fieldMoved && !(camMoved && m_hasContent)) return fresh;
-
-    std::vector<int16_t> depth(static_cast<size_t>(N) * N);
-    // The window in world texels, then rotated into the torus: pixel (x mod N, z mod N) holds the texel (x, z).
-    std::vector<int16_t> window(static_cast<size_t>(N) * N);
-    field.copyWindow(ox, oz, N, N, window.data());
-    bool any = false;
-    for (int z = 0; z < N; ++z)
-        for (int x = 0; x < N; ++x)
+    const bool fresh = m_id == HE::UUID{} || cm.getTexture(m_id) == nullptr;
+    if (fresh)
+    {
+        m_id = ensureTexture(cm);
+        m_pixels = untouchedPixels();
+        m_version = ~0ull; m_centred = false; m_hasContent = false;
+    }
+    bool wrote = false;
+    const bool recentre = !m_centred || std::abs(camX - m_cx) > kRecenterTexels || std::abs(camZ - m_cz) > kRecenterTexels;
+    if (recentre)
+    {
+        m_cx = camX; m_cz = camZ; m_centred = true;
+        // The whole window, from the field. Nothing near and nothing in the texture before: it already is the
+        // untouched window, not worth a megabyte.
+        const bool any = fillRect(field, m_cx - N / 2, m_cz - N / 2, N, N);
+        if (any || m_hasContent) wrote = true;
+        m_hasContent = any;
+        m_version = field.version();
+    }
+    else if (field.version() != m_version)
+    {
+        std::vector<std::pair<int, int>> tiles;
+        field.changedTiles(m_version, tiles);
+        const int wx0 = m_cx - N / 2, wz0 = m_cz - N / 2;
+        for (const auto& [tx, tz] : tiles)
         {
-            const int16_t v = window[static_cast<size_t>(z) * N + x];
-            if (v) any = true;
-            depth[static_cast<size_t>(floorMod(oz + z, N)) * N + floorMod(ox + x, N)] = v;
+            // The tile and one texel around it (its edge texels' slopes read across), clipped to the window.
+            const int x0 = std::max(tx * TrailField::kTileCells - 1, wx0), x1 = std::min((tx + 1) * TrailField::kTileCells + 1, wx0 + N);
+            const int z0 = std::max(tz * TrailField::kTileCells - 1, wz0), z1 = std::min((tz + 1) * TrailField::kTileCells + 1, wz0 + N);
+            if (x1 <= x0 || z1 <= z0) continue;
+            if (fillRect(field, x0, z0, x1 - x0, z1 - z0)) m_hasContent = true;
+            wrote = true;
         }
-    m_version = field.version();
-    m_originX = ox; m_originZ = oz;
-    // Nothing near and nothing written before: the registered texture already is the untouched window.
-    if (!any && !m_hasContent) return fresh;
-    m_hasContent = any;
-
-    encode(depth, m_pixels);
-    cm.replaceTexture(m_id, makeTexture(m_pixels));
-    if (renderer) renderer->InvalidateTexture(m_id);
-    return true;
+        m_version = field.version();
+    }
+    if (wrote)
+    {
+        cm.replaceTexture(m_id, makeTexture(m_pixels));
+        if (renderer) renderer->InvalidateTexture(m_id);
+    }
+    return wrote || fresh;
 }
 } // namespace HE

@@ -24,6 +24,7 @@ struct TerrainChunkComponent {
     // looking, e.g. by a sculpt rebuild) and the tick of that build, so a track under the camera rebuilds at a few Hz.
     uint64_t     trailVersion = ~0ull;
     uint32_t     trailTick    = 0;
+    bool         trailHas     = false;   // the refined mesh carries trail geometry
 
     // Stitched copy of the drawn level (TerrainSystem::stitchSeams): its edges
     // follow a coarser neighbour so the seam has no step. Registered once per

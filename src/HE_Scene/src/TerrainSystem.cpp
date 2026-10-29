@@ -466,6 +466,7 @@ namespace TerrainSystem
                           buildTessMesh(field, res, tc, g, cx, cz, disp),
                           tc.tessellationDistance);
             cc.trailVersion = ~0ull;   // built without the trails: updateTessellation looks again
+            cc.trailHas     = false;
         }
         else if (cc.tessActive)
             emptyTessLevel(reg, cm, renderer, chunkEnt, cc);   // tessellation switched off
@@ -981,8 +982,26 @@ namespace TerrainSystem
 
             const uint32_t   res = tc.builtRes;
             const ChunkGrid  g   = computeGrid(res);
-            std::vector<float> field;              // computed on the first build only
+            // The height field the chunks were built from, kept by updateTerrains: no need to evaluate a
+            // 1025 x 1025 landscape again for every refined chunk (computed here only if it is missing).
+            std::vector<float> fieldLocal;
+            const std::vector<float>* fieldPtr = nullptr;
             TerrainDisplacementMap disp;
+            auto loadField = [&]() -> const std::vector<float>&
+            {
+                if (!fieldPtr)
+                {
+                    if (tc.builtField && tc.builtFieldRes == res && !tc.builtField->empty())
+                        fieldPtr = tc.builtField.get();
+                    else
+                    {
+                        fieldLocal = computeTerrainHeightField(tc);
+                        fieldPtr   = &fieldLocal;
+                    }
+                    disp = displacementFor(tc, cm);
+                }
+                return *fieldPtr;
+            };
 
             // Nearest first: the refined slots go to the closest chunks. A
             // near chunk still waiting for its build does not take a slot, so
@@ -1013,19 +1032,26 @@ namespace TerrainSystem
                                 cc.trailVersion = 0;   // built without trails and none lie here
                             else if (cc.trailVersion != want && g_tessTick - cc.trailTick >= kTrailRebuildTicks)
                             {
-                                if (field.empty())
-                                {
-                                    field = computeTerrainHeightField(tc);
-                                    disp  = displacementFor(tc, cm);
-                                }
                                 ChunkTrails ct;
                                 buildChunkTrails(ct, *trails, tc, g, cc.cx, cc.cz, pos);
-                                fillTessLevel(world, cm, renderer, n.e, cc,
-                                              buildTessMesh(field, res, tc, g, cc.cx, cc.cz, disp,
-                                                            ct.any ? &ct.offset : nullptr), D);
-                                cc.trailVersion = want;
-                                cc.trailTick    = g_tessTick;
-                                --budget;
+                                if (!ct.any && !cc.trailHas)
+                                {
+                                    // The change is in a neighbouring corner of a shared 16 m tile: nothing lies on this
+                                    // chunk and nothing did. Not worth a mesh.
+                                    cc.trailVersion = want;
+                                    cc.trailTick    = g_tessTick;
+                                }
+                                else
+                                {
+                                    const std::vector<float>& field = loadField();
+                                    fillTessLevel(world, cm, renderer, n.e, cc,
+                                                  buildTessMesh(field, res, tc, g, cc.cx, cc.cz, disp,
+                                                                ct.any ? &ct.offset : nullptr), D);
+                                    cc.trailVersion = want;
+                                    cc.trailTick    = g_tessTick;
+                                    cc.trailHas     = ct.any;
+                                    --budget;
+                                }
                             }
                         }
                     }
@@ -1034,11 +1060,7 @@ namespace TerrainSystem
                 if (n.dist > D * kTessBuildMargin || kept >= kTessMaxChunksPerTerrain ||
                     budget == 0)
                     continue;
-                if (field.empty())
-                {
-                    field = computeTerrainHeightField(tc);
-                    disp  = displacementFor(tc, cm);
-                }
+                const std::vector<float>& field = loadField();
                 // Grid coordinate from the chunk itself; a chunk left over from
                 // a different grid would have been destroyed by updateTerrains.
                 if (cc.cx >= g.chunksPerSide || cc.cz >= g.chunksPerSide) continue;
@@ -1057,6 +1079,7 @@ namespace TerrainSystem
                               buildTessMesh(field, res, tc, g, cx, cz, disp, ct.any ? &ct.offset : nullptr), D);
                 cc.trailVersion = want;
                 cc.trailTick    = g_tessTick;
+                cc.trailHas     = ct.any;
                 ++kept;
                 --budget;
             }

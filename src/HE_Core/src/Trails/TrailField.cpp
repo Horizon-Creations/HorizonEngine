@@ -26,7 +26,9 @@ int16_t* TrailField::texelForWrite(int ix, int iz, TrailSurface surface)
     Page& page = m_pages[key(px, pz)];
     page.surfaces |= static_cast<uint8_t>(surface);
     page.version = m_version;   // callers bump m_version once per stamp, before writing
-    return &page.depth[static_cast<size_t>(floorMod(iz, kPageCells)) * kPageCells + floorMod(ix, kPageCells)];
+    const int lx = floorMod(ix, kPageCells), lz = floorMod(iz, kPageCells);
+    page.tileVersion[static_cast<size_t>(lz / kTileCells) * kTilesPerSide + lx / kTileCells] = m_version;
+    return &page.depth[static_cast<size_t>(lz) * kPageCells + lx];
 }
 
 int16_t TrailField::texel(int ix, int iz) const
@@ -138,15 +140,26 @@ float TrailField::healRate(uint8_t surfaces, const TrailWeather& w, const TrailS
     return rate;
 }
 
-bool TrailField::healPage(Page& page, float rate, float dt)
+bool TrailField::healPage(Page& page, float rate, float dt, uint64_t newVersion)
 {
     page.carry += rate * dt * kMax16;
     const float whole = std::floor(page.carry);
     if (whole < 1.0f) return false;
     page.carry -= whole;
     const int step = static_cast<int>(std::min(whole, kMax16));
-    for (int16_t& t : page.depth)   // pits fill, heaps slump: both move toward 0
-        t = t > step ? static_cast<int16_t>(t - step) : (t < -step ? static_cast<int16_t>(t + step) : static_cast<int16_t>(0));
+    std::array<bool, kTilesPerSide * kTilesPerSide> touched{};
+    for (int z = 0; z < kPageCells; ++z)
+        for (int x = 0; x < kPageCells; ++x)
+        {
+            int16_t& t = page.depth[static_cast<size_t>(z) * kPageCells + x];
+            if (t == 0) continue;
+            // pits fill, heaps slump: both move toward 0
+            t = t > step ? static_cast<int16_t>(t - step) : (t < -step ? static_cast<int16_t>(t + step) : static_cast<int16_t>(0));
+            touched[static_cast<size_t>(z / kTileCells) * kTilesPerSide + x / kTileCells] = true;
+        }
+    page.version = newVersion;
+    for (size_t i = 0; i < touched.size(); ++i)
+        if (touched[i]) page.tileVersion[i] = newVersion;
     return true;
 }
 
@@ -160,8 +173,8 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
         m_clock += tickLen;
         ++steps;
         for (auto& [k, page] : m_pages)
-            if (healPage(page, healRate(page.surfaces, weather, settings), static_cast<float>(tickLen)))
-                page.version = ++m_version;
+            if (healPage(page, healRate(page.surfaces, weather, settings), static_cast<float>(tickLen), m_version + 1))
+                ++m_version;
     }
     if (steps == 4096) m_clock = time;   // beyond that the rest of a very long pause is dropped
     if (steps == 0) return;
@@ -169,8 +182,16 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
     for (auto it = m_pages.begin(); it != m_pages.end();)
         if (std::all_of(it->second.depth.begin(), it->second.depth.end(), [](int16_t t) { return t == 0; }))
         {
-            m_freed[it->first] = ++m_version;
+            m_freed[it->first] = it->second.tileVersion;
+            ++m_version;
             it = m_pages.erase(it);
+            if (m_freed.size() > 8192)   // a very long session: forget the oldest half (a consumer that old rebuilds anyway)
+            {
+                std::vector<std::pair<uint64_t, int64_t>> byAge;
+                for (const auto& [fk, tiles] : m_freed) byAge.emplace_back(*std::max_element(tiles.begin(), tiles.end()), fk);
+                std::sort(byAge.begin(), byAge.end());
+                for (size_t i = 0; i < byAge.size() / 2; ++i) m_freed.erase(byAge[i].second);
+            }
         }
         else
             ++it;
@@ -179,17 +200,30 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
 uint64_t TrailField::regionVersion(float minX, float minZ, float maxX, float maxZ) const
 {
     uint64_t v = 0;
-    const int p0x = floorDiv(static_cast<int>(std::floor(minX / kCellSize)), kPageCells);
-    const int p1x = floorDiv(static_cast<int>(std::floor(maxX / kCellSize)), kPageCells);
-    const int p0z = floorDiv(static_cast<int>(std::floor(minZ / kCellSize)), kPageCells);
-    const int p1z = floorDiv(static_cast<int>(std::floor(maxZ / kCellSize)), kPageCells);
-    for (int pz = p0z; pz <= p1z; ++pz)
-        for (int px = p0x; px <= p1x; ++px)
+    const int i0 = static_cast<int>(std::floor(minX / kCellSize)), i1 = static_cast<int>(std::floor(maxX / kCellSize));
+    const int j0 = static_cast<int>(std::floor(minZ / kCellSize)), j1 = static_cast<int>(std::floor(maxZ / kCellSize));
+    for (int tz = floorDiv(j0, kTileCells); tz <= floorDiv(j1, kTileCells); ++tz)
+        for (int tx = floorDiv(i0, kTileCells); tx <= floorDiv(i1, kTileCells); ++tx)
         {
-            if (const auto it = m_pages.find(key(px, pz)); it != m_pages.end()) v = std::max(v, it->second.version);
-            if (const auto it = m_freed.find(key(px, pz)); it != m_freed.end()) v = std::max(v, it->second);
+            const int64_t k = key(floorDiv(tx, kTilesPerSide), floorDiv(tz, kTilesPerSide));
+            const size_t  t = static_cast<size_t>(floorMod(tz, kTilesPerSide)) * kTilesPerSide + floorMod(tx, kTilesPerSide);
+            if (const auto it = m_pages.find(k); it != m_pages.end()) v = std::max(v, it->second.tileVersion[t]);
+            if (const auto it = m_freed.find(k); it != m_freed.end()) v = std::max(v, it->second[t]);
         }
     return v;
+}
+
+void TrailField::changedTiles(uint64_t since, std::vector<std::pair<int, int>>& out) const
+{
+    auto scan = [&](int64_t k, const std::array<uint64_t, kTilesPerSide * kTilesPerSide>& tiles) {
+        const int px = static_cast<int>(k >> 32), pz = static_cast<int>(static_cast<uint32_t>(k & 0xFFFFFFFFull));
+        for (size_t t = 0; t < tiles.size(); ++t)
+            if (tiles[t] > since)
+                out.emplace_back(px * kTilesPerSide + static_cast<int>(t % kTilesPerSide),
+                                 pz * kTilesPerSide + static_cast<int>(t / kTilesPerSide));
+    };
+    for (const auto& [k, page] : m_pages) if (page.version > since) scan(k, page.tileVersion);
+    for (const auto& [k, tiles] : m_freed) scan(k, tiles);
 }
 
 TrailWindow TrailField::window(float minX, float minZ, float maxX, float maxZ) const

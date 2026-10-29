@@ -587,13 +587,35 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
     const bool mapped  = disp.active();
     const bool offset  = extra && extra->active();
     const bool displaced = mapped || offset;
+    // The offset is asked at every vertex and, for the normal's central difference, at its four neighbours: the
+    // same grid points again and again. Evaluate it once per point (and one ring outside the chunk) and answer
+    // from that; a position off the grid still asks the callback.
+    const int G = static_cast<int>(N) + 2;
+    std::vector<float> offsetGrid;
+    if (offset)
+    {
+        offsetGrid.resize(static_cast<size_t>(G) * G);
+        for (int j = -1; j <= static_cast<int>(N); ++j)
+            for (int i = -1; i <= static_cast<int>(N); ++i)
+                offsetGrid[static_cast<size_t>(j + 1) * G + (i + 1)] =
+                    extra->fn(u0 + static_cast<float>(i) * du, v0 + static_cast<float>(j) * dv);
+    }
+    auto offsetAt = [&](float u, float v) -> float
+    {
+        const float fi = (u - u0) / du, fj = (v - v0) / dv;
+        const int   i  = static_cast<int>(std::lround(fi)), j = static_cast<int>(std::lround(fj));
+        if (std::fabs(fi - static_cast<float>(i)) < 1e-3f && std::fabs(fj - static_cast<float>(j)) < 1e-3f &&
+            i >= -1 && j >= -1 && i <= static_cast<int>(N) && j <= static_cast<int>(N))
+            return offsetGrid[static_cast<size_t>(j + 1) * G + (i + 1)];
+        return extra->fn(u, v);
+    };
 
     StaticMeshAsset mesh = buildChunkMesh(
         [&](float u, float v)
         {
             return sampleTerrainHeightSmooth(heights, srcRes, u, v)
                  + (mapped ? sampleTerrainDisplacement(disp, u, v) : 0.0f)
-                 + (offset ? extra->fn(u, v) : 0.0f);
+                 + (offset ? offsetAt(u, v) : 0.0f);
         },
         [&](float u, float v, float& nx, float& ny, float& nz)
         {
@@ -610,8 +632,8 @@ StaticMeshAsset generateTerrainChunkMeshTessellated(
             }
             if (offset)
             {
-                dgx += (extra->fn(u + du, v) - extra->fn(u - du, v)) / (sizeX * du * 2.0f);
-                dgz += (extra->fn(u, v + dv) - extra->fn(u, v - dv)) / (sizeZ * dv * 2.0f);
+                dgx += (offsetAt(u + du, v) - offsetAt(u - du, v)) / (sizeX * du * 2.0f);
+                dgz += (offsetAt(u, v + dv) - offsetAt(u, v - dv)) / (sizeZ * dv * 2.0f);
             }
             nx = -(gx + dgx); ny = 1.0f; nz = -(gz + dgz);
             const float len = std::sqrt(nx * nx + ny * ny + nz * nz);

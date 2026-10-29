@@ -25,6 +25,7 @@
 #include <Math/Math.h>
 #include <Types/Defines.h>
 
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -82,6 +83,10 @@ public:
     static constexpr int   kPageCells = 512;
     static constexpr float kCellSize  = 0.25f;                       // metres per texel
     static constexpr float kPageSize  = kPageCells * kCellSize;      // 128 m
+    // Changes are tracked per TILE of a page (64 texels = 16 m, 8 x 8 a page), so a track dragged through one
+    // corner of a page tells the 16 m around it, not the 128 m.
+    static constexpr int   kTileCells = 64;
+    static constexpr int   kTilesPerSide = kPageCells / kTileCells;
 
     // An ellipse of radii (rx along the yaw direction, rz across it) pressed `depth` deep, soft at
     // the rim; yaw in radians around +Y (0 = +X, as the engine's ground-plane convention). The
@@ -116,6 +121,9 @@ public:
     // rectangle is current while the number is the one it was built with. Pages that healed away and were
     // freed still count, so a mesh that has their pits in it is told to let them go.
     uint64_t regionVersion(float minX, float minZ, float maxX, float maxZ) const;
+    // Every tile (global tile indices: texel / kTileCells, floored) that changed after version `since`, healed away
+    // pages included. What the clipmap texture rewrites instead of the whole window.
+    void changedTiles(uint64_t since, std::vector<std::pair<int, int>>& out) const;
     // The rectangle, copied (with a one-texel margin so slopes at its edge are right).
     TrailWindow window(float minX, float minZ, float maxX, float maxZ) const;
 
@@ -130,6 +138,7 @@ private:
         std::vector<int16_t>  depth = std::vector<int16_t>(static_cast<size_t>(kPageCells) * kPageCells, 0);
         uint8_t               surfaces = 0;   // bit set of TrailSurface
         uint64_t              version  = 0;   // the field's version at this page's last change
+        std::array<uint64_t, kTilesPerSide * kTilesPerSide> tileVersion{};   // ... and at each tile's
         float                 carry = 0.0f;   // heal the last steps could not apply yet, in texel units
     };
     static int64_t key(int px, int pz) { return (static_cast<int64_t>(px) << 32) ^ static_cast<uint32_t>(pz); }
@@ -137,10 +146,11 @@ private:
     int16_t* texelForWrite(int ix, int iz, TrailSurface surface);    // allocates the page
     int16_t  texel(int ix, int iz) const;                            // 0 off the pages
     float     healRate(uint8_t surfaces, const TrailWeather& w, const TrailSettings& s) const;
-    bool      healPage(Page& page, float rate, float dt);   // true when it changed a texel
+    bool      healPage(Page& page, float rate, float dt, uint64_t newVersion);   // true when it changed a texel
 
     std::unordered_map<int64_t, Page> m_pages;
-    std::unordered_map<int64_t, uint64_t> m_freed;   // pages that healed away: the version they were freed at
+    // Pages that healed away keep their tile versions: a mesh or texture that still shows their pits is told.
+    std::unordered_map<int64_t, std::array<uint64_t, kTilesPerSide * kTilesPerSide>> m_freed;
     bool     m_clockStarted = false;
     double   m_clock        = 0.0;
     uint64_t m_version      = 0;

@@ -7866,9 +7866,14 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		ltc.dirty = true;
 		// HE_DUMP_TRAILTEST (Thema 328): the refined ground carries the trails as real geometry; one vertex per metre
 		// refined four times is the field's 0.25 m.
-		if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0')
+		// HE_DUMP_TRAILDRAG=<frames> (the cost witness, below) uses the same refined ground; HE_DUMP_TRAILTESS=1|2|4
+		// overrides the factor (1 = no refinement, the baseline).
+		const char* tdw = std::getenv("HE_DUMP_TRAILDRAG");
+		const char* ttw = std::getenv("HE_DUMP_TRAILTEST");
+		if ((tdw && *tdw && *tdw != '0') || (ttw && *ttw && *ttw != '0'))
 		{
-			ltc.tessellationFactor   = 4;
+			const char* tf = std::getenv("HE_DUMP_TRAILTESS");
+			ltc.tessellationFactor   = (tf && *tf) ? std::atoi(tf) : 4;
 			ltc.tessellationDistance = 80.0f;
 		}
 		reg.emplace<TerrainComponent>(land, ltc);
@@ -10256,6 +10261,64 @@ void EditorApplication::dumpFrameHeadless()
 			LODSystem::update(*m_editorWorld, camPos);
 			TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
 		}
+	}
+
+	// HE_DUMP_TRAILDRAG=<frames> (Thema 328, the cost witness): a snow plough is dragged along the plateau, one
+	// segment per frame at HE_DUMP_TRAILDRAGSPEED metres per frame (default 0.25, about 15 m/s at 60 fps), and every
+	// frame runs what the scene tick runs for trails (TrailSystem::update, the terrain refinement, LOD, seams) and
+	// then renders. HE_DUMP_TRAILDRAGOFF=1 runs the same frames without dragging (the idle baseline). The log line
+	// is the per-frame time of each phase in ms (mean / p95 / max) and how many refined chunks were rebuilt.
+	if (const char* td = std::getenv("HE_DUMP_TRAILDRAG"); td && *td && *td != '0' && m_editorWorld)
+	{
+		using Clock = std::chrono::steady_clock;
+		const int frames = std::max(1, std::atoi(td));
+		const char* sp = std::getenv("HE_DUMP_TRAILDRAGSPEED");
+		const float speed = (sp && *sp) ? static_cast<float>(std::atof(sp)) : 0.25f;
+		const bool idle = [] { const char* o = std::getenv("HE_DUMP_TRAILDRAGOFF"); return o && *o && *o != '0'; }();
+		const glm::vec3 camPos = m_editorCamera.position();
+		TrailSystem::Runtime& rt = TrailSystem::runtime(*m_editorWorld);
+		const float x0 = 12.0f, z = camPos.z - 6.0f;
+		std::vector<double> tTrail, tTess, tLod, tStitch, tRender;
+		const uint32_t builds0 = meshStreamCounters().tessBuilds.load();
+		auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+		for (int i = 0; i < frames; ++i)
+		{
+			if (!idle)
+			{
+				const float xa = x0 + static_cast<float>(i) * speed, xb = xa + speed;
+				rt.field.plowCapsule(xa, z, xb, z, 0.35f, 0.7f, 0.55f, 0.55f, HE::TrailSurface::Snow);
+			}
+			const auto a = Clock::now();
+			TrailSystem::update(*m_editorWorld, contentManager(), r, camPos, 1.0f / 60.0f, nullptr);
+			const auto b = Clock::now();
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			const auto b2 = Clock::now();
+			LODSystem::update(*m_editorWorld, camPos);
+			const auto b3 = Clock::now();
+			TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
+			const auto c = Clock::now();
+			r->Render();
+			const auto d = Clock::now();
+			if (i >= 8)   // first frames: warm-up
+			{
+				tTrail.push_back(ms(a, b)); tTess.push_back(ms(b, b2)); tLod.push_back(ms(b2, b3));
+				tStitch.push_back(ms(b3, c)); tRender.push_back(ms(c, d));
+			}
+		}
+		auto stat = [](std::vector<double> v) {
+			std::sort(v.begin(), v.end());
+			double sum = 0.0; for (double x : v) sum += x;
+			const double mean = v.empty() ? 0.0 : sum / static_cast<double>(v.size());
+			return std::array<double, 3>{ mean, v.empty() ? 0.0 : v[static_cast<size_t>(static_cast<double>(v.size() - 1) * 0.95)], v.empty() ? 0.0 : v.back() };
+		};
+		const auto st = stat(tTrail), se = stat(tTess), sl = stat(tLod), ss = stat(tStitch), sr = stat(tRender);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG %d frames, %s, %.2f m/frame, factor %d: "
+			"trails %.3f/%.3f/%.3f ms, refine %.3f/%.3f/%.3f, lod %.3f/%.3f/%.3f, seams %.3f/%.3f/%.3f ms, render %.3f/%.3f/%.3f ms (mean/p95/max), "
+			"%u refined chunk builds, %zu pages",
+			frames, idle ? "idle (no drag)" : "dragging", speed,
+			[&] { int f = 0; for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each()) { f = tc.tessellationFactor; break; } return f; }(),
+			st[0], st[1], st[2], se[0], se[1], se[2], sl[0], sl[1], sl[2], ss[0], ss[1], ss[2], sr[0], sr[1], sr[2],
+			meshStreamCounters().tessBuilds.load() - builds0, rt.field.pageCount());
 	}
 
 	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur

@@ -5,6 +5,8 @@
 #include <Trails/TrailField.h>
 #include <HorizonScene/TerrainMeshGenerator.h>
 
+#include <chrono>
+#include <cstdio>
 #include <filesystem>
 
 #include <cmath>
@@ -169,7 +171,7 @@ TEST_CASE("TrailClipmap: registers an untouched window, writes prints into the t
 	ContentManager cm(dir.string());
 	HE::TrailField field;
 	HE::TrailClipmap map;
-	const glm::vec3 cam(10.0f, 5.0f, 20.0f);
+	glm::vec3 cam(10.0f, 5.0f, 20.0f);
 
 	// First call: the texture exists (so the material can resolve the path) and holds nothing.
 	CHECK(map.update(cm, nullptr, field, cam));
@@ -212,9 +214,22 @@ TEST_CASE("TrailClipmap: registers an untouched window, writes prints into the t
 	// The same world texel one window (128 m) away shares the pixel: the wrap the shader relies on.
 	CHECK(px(10.1f + 128.0f, 20.1f) == px(10.1f, 20.1f));
 
-	// No new change: no rewrite while the camera stays; walking one texel rewrites (something is near).
+	// No new change: no rewrite while the camera stays, and a small step (inside the window's middle) rewrites nothing
+	// either: only moving more than 6 m re-centres the window (and then rewrites it, something is near).
 	CHECK_FALSE(map.update(cm, nullptr, field, cam));
-	CHECK(map.update(cm, nullptr, field, glm::vec3(10.5f, 5.0f, 20.0f)));
+	CHECK_FALSE(map.update(cm, nullptr, field, glm::vec3(10.5f, 5.0f, 20.0f)));
+	CHECK(map.update(cm, nullptr, field, glm::vec3(20.0f, 5.0f, 20.0f)));
+	tex = cm.getTexture(map.textureId());
+	CHECK(px(10.1f, 20.1f)[0] < 20);                    // the print is where it was: the world-aligned torus did not move
+
+	// A second print somewhere else in the window rewrites only its tiles, and the first one stays.
+	field.stampEllipse(40.0f, 20.0f, 0.5f, 0.5f, 0.0f, 1.0f, HE::TrailSurface::Snow);
+	CHECK(map.update(cm, nullptr, field, glm::vec3(20.0f, 5.0f, 20.0f)));
+	tex = cm.getTexture(map.textureId());
+	CHECK(px(40.1f, 20.1f)[0] < 20);
+	CHECK(px(10.1f, 20.1f)[0] < 20);
+	CHECK_FALSE(map.update(cm, nullptr, field, glm::vec3(20.0f, 5.0f, 20.0f)));
+	cam = glm::vec3(20.0f, 5.0f, 20.0f);
 	// A healed field clears the picture once, then stays quiet.
 	HE::TrailWeather snow;
 	snow.precip = 1.0f; snow.snowing = true;
@@ -378,4 +393,55 @@ TEST_CASE("Refined terrain chunk: a height offset lowers pits and raises heaps, 
 	const StaticMeshAsset same = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, &inert);
 	CHECK(same.vertices == plain.vertices);
 	CHECK(same.normals == plain.normals);
+}
+
+// A timing probe, not a check: run with `he_tests --no-skip --test-case="*cost probe*"` (Thema 328 cost measurement).
+TEST_CASE("Refined terrain chunk cost probe" * doctest::skip())
+{
+	using Clock = std::chrono::steady_clock;
+	const uint32_t res = 129;
+	std::vector<float> field(static_cast<size_t>(res) * res);
+	for (uint32_t z = 0; z < res; ++z)
+		for (uint32_t x = 0; x < res; ++x)
+			field[static_cast<size_t>(z) * res + x] = std::sin(x * 0.2f) * 2.0f + std::cos(z * 0.13f) * 3.0f;
+	TrailField tf;
+	tf.plowCapsule(12.0f, -8.0f, 60.0f, -8.0f, 0.35f, 0.7f, 0.55f, 0.55f, TrailSurface::Snow);
+	auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+	const TerrainDisplacementMap none;
+	const int reps = 10;
+	auto time = [&](const char* what, auto&& fn) {
+		fn();
+		const auto a = Clock::now();
+		for (int i = 0; i < reps; ++i) fn();
+		std::printf("  %-44s %.3f ms\n", what, ms(a, Clock::now()) / reps);
+	};
+	// One chunk of a 128 m / 129 sample landscape: 32 cells at factor 4 -> 129 verts per side... use 257 like factor 4 on 64 cells.
+	const auto build = [&](const TerrainHeightOffset* off) {
+		return generateTerrainChunkMeshTessellated(field, res, 128.0f, 128.0f, 0.5f, 0.0f, 1.0f, 0.5f, 257, 1.0f, none, off);
+	};
+	time("chunk 257x257, no offset", [&] { auto m = build(nullptr); (void)m; });
+	HE::TrailWindow win = tf.window(0.0f, -64.0f, 64.0f, 0.0f);
+	std::printf("  window any=%d\n", win.any() ? 1 : 0);
+	TerrainHeightOffset off;
+	off.maxAbs = 0.3f;
+	off.fn = [&](float u, float v) { return -win.sample(-64.0f + u * 128.0f, -64.0f + v * 128.0f) * 0.3f; };
+	time("chunk 257x257, trail offset", [&] { auto m = build(&off); (void)m; });
+	time("TrailField::window (64 m rectangle)", [&] { auto w = tf.window(0.0f, -64.0f, 64.0f, 0.0f); (void)w; });
+	// The clipmap: a full rewrite (camera left the window's middle), and a dragged track's few tiles per frame.
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_trail_probe";
+	std::filesystem::create_directories(dir);
+	ContentManager cm(dir.string());
+	HE::TrailClipmap map;
+	glm::vec3 cam(30.0f, 5.0f, -2.0f);
+	map.update(cm, nullptr, tf, cam);
+	int flip = 0;
+	time("clipmap full rewrite (re-centre)", [&] { cam.x += (flip++ & 1) ? -8.0f : 8.0f; map.update(cm, nullptr, tf, cam); });
+	float x = 30.0f;
+	time("clipmap per-frame drag (changed tiles)", [&] {
+		tf.plowCapsule(x, -8.0f, x + 0.25f, -8.0f, 0.35f, 0.7f, 0.55f, 0.55f, TrailSurface::Snow);
+		x += 0.25f;
+		map.update(cm, nullptr, tf, glm::vec3(30.0f, 5.0f, -2.0f));
+	});
+	time("copyWindow 512x512", [&] { std::vector<int16_t> v(512 * 512); tf.copyWindow(0, -256, 512, 512, v.data()); });
+	std::filesystem::remove_all(dir);
 }
