@@ -103,6 +103,10 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 		for (int k = 0; k < 4; ++k)
 			CHECK_MESSAGE(used.insert(g.materialId.hi + k).second, g.name, ": id ", g.materialId.hi + k, " is taken");
 	}
+	// landscape_tex_gen's per-group loose Roughness/AO/Height (--loose --group, Thema 233 Schritt 8):
+	// kLooseGroupIndexBase 0x4A8..0x4CB (3 groups * 4 roles * 3 maps), right after the 0x4A4..0x4A7 a
+	// fifth group's material + arrays would take.
+	for (uint64_t hi = 0x4A8; hi <= 0x4CB; ++hi) CHECK(used.insert(hi).second);
 	CHECK(HE::autoLandscapeGroupOfArray("Engine/Textures/Landscape/T_Landscape_Rock_Albedo.hasset") == -1);
 	CHECK(HE::autoLandscapeGroupOfArray(nullptr) == -1);
 	// A terrain that names no landscape group: a custom material, or none at all.
