@@ -128,10 +128,19 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 
 TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Desert keep the skeleton")
 {
-	const HE::AutoLandscapeGraph legacy = HE::buildAutoLandscapeGraph();
+	// The skeleton is Mountains without its rock sizes (Thema 329 step 5): the one switch the other groups
+	// do not have, flipped off in a copy of its row.
+	HE::AutoLandscapeGroup skeletonRow = row(AutoLandscapeGroupId::Mountains);
+	skeletonRow.rockBySize = false;
+	const HE::AutoLandscapeGraph legacy = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, skeletonRow);
 	const std::string legacyJson = HE::materialGraphToJson(legacy.graph);
+	const HE::AutoLandscapeGraph mountains = HE::buildAutoLandscapeGraph();
 	CHECK(HE::materialGraphToJson(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains).graph)
-	      == legacyJson);
+	      == HE::materialGraphToJson(mountains.graph));
+	CHECK(row(AutoLandscapeGroupId::Mountains).rockBySize);
+	CHECK(mountains.graph.nodes.size() > legacy.graph.nodes.size());
+	for (AutoLandscapeGroupId id : { AutoLandscapeGroupId::Forest, AutoLandscapeGroupId::Grassland, AutoLandscapeGroupId::Desert })
+		CHECK_FALSE(row(id).rockBySize);
 
 	for (AutoLandscapeGroupId id : { AutoLandscapeGroupId::Forest, AutoLandscapeGroupId::Grassland, AutoLandscapeGroupId::Desert })
 	{
@@ -179,7 +188,7 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		// texture, not on declaration order — pin the POPULATION COUNT, not a literal mask.
 		uint32_t bits = 0; for (uint32_t m = gen.textureArrayMask; m; m &= m - 1) ++bits;
 		CHECK(bits == 3u);
-		CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
 
 		int blends = 0, legacyBlends = 0;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
@@ -258,7 +267,7 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(g.paintLayerNames));
 		std::string have;
 		for (const std::string& pn : m->graphParamNames) have += pn + "; ";
-		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount), have);
+		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)), have);
 		REQUIRE(!m->customShaderFragGlsl.empty());
 
 		// The packer ships the fragment text stored in the file: it must be what the codegen makes today.

@@ -28,6 +28,9 @@
 using HE::MaterialGraph;
 using HE::MatNodeType;
 
+// Mountains has three more parameters than the other groups (the rock sizes, Thema 329 step 5).
+static constexpr int MtnParams = HE::autoLandscapeParamCount(HE::kAutoLandscapeGroups[0]);
+
 namespace
 {
 size_t countOf(const std::string& s, const std::string& what)
@@ -160,30 +163,31 @@ TEST_CASE("Groups wired: a variant per hex, no extra texture read")
 	CHECK(plain.glsl.find("> 0 ? max(textureSize(heTexP0, 0).z / int(floor(n") != std::string::npos);
 }
 
-TEST_CASE("The auto landscape graph reads variants: 27 hex reads, one variant grid per layer")
+TEST_CASE("The auto landscape graph reads variants: 54 hex reads, one variant grid per layer")
 {
 	const MaterialGraph g = HE::buildAutoLandscapeGraph().graph;
 	const HE::MatShaderGen lit = HE::generateFragment(g, HE::weatherFunctionLoader());
 	REQUIRE(lit.textures.size() == 4);   // the three arrays + Path's own Albedo (Thema 329, step 3)
-	// 4 layers (Grass, Dirt, Rock and the paint-only Water pebbles on the WetGround slice) x (Albedo + Normal +
-	// Mask) x 3 hexes = 36 reads per pixel (Snow is MF_ProceduralSnow since Thema 329 step 2 and reads nothing;
-	// Water joined in step 4); the text holds them once for V = 1 and once for V > 1 (see the grouped test above).
-	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 72u);
-	CHECK(countOf(lit.glsl, "_V == 1) {") == 12u);
-	CHECK(countOf(lit.glsl, "_s0))") == 12u);
-	CHECK(countOf(lit.glsl, "heBombGridV(") == 5u);    // the definition and one call per layer (four seeds)
+	// 6 layer reads (Grass, Dirt, the three Rock sizes of Mountains, and the paint-only Water pebbles on the
+	// WetGround slice) x (Albedo + Normal + Mask) x 3 hexes = 54 reads per pixel (Snow is MF_ProceduralSnow
+	// since Thema 329 step 2 and reads nothing; Water joined in step 4, the rock sizes in step 5); the text
+	// holds them once for V = 1 and once for V > 1 (see the grouped test above).
+	CHECK(countOf(lit.glsl, "textureGrad(heTexP") == 108u);
+	CHECK(countOf(lit.glsl, "_V == 1) {") == 18u);
+	CHECK(countOf(lit.glsl, "_s0))") == 18u);
+	CHECK(countOf(lit.glsl, "heBombGridV(") == 7u);    // the definition and one call per layer read (six seeds)
 	CHECK(lit.glsl.find("heBombGrid(n") == std::string::npos);
-	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n", ", 53u, n" })
+	for (const char* seed : { ", 11u, n", ", 23u, n", ", 37u, n", ", 41u, n", ", 43u, n", ", 53u, n" })
 		CHECK_MESSAGE(lit.glsl.find(seed) != std::string::npos, seed);
-	// No new parameter, no new texture slot.
-	CHECK(lit.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	// No new texture slot; the rock sizes are the only new parameters (Mountains).
+	CHECK(lit.params.size() == static_cast<size_t>(MtnParams));
 
 	// The negative control: bombing off reads variant 0 of every layer with plain reads.
 	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
 	const HE::MatShaderGen off = HE::generateFragment(g, HE::weatherFunctionLoader(), &noBomb);
 	CHECK(off.glsl.find("heBombGridV") == std::string::npos);
 	CHECK(off.glsl.find("textureGrad(heTexP") == std::string::npos);
-	CHECK(off.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount) - 1);
+	CHECK(off.params.size() == static_cast<size_t>(MtnParams) - 1);
 }
 
 TEST_CASE("The variant helpers cross-compile for all five backends")

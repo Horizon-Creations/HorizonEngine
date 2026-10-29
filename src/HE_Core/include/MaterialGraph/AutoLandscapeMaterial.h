@@ -152,7 +152,7 @@ inline constexpr void autoLandscapeSliceSource(int slice, int variants, int& lay
 // ── Texture groups (Thema 233) ────────────────────────────────────────────────
 // A texture group is a terrain THEME: one landscape material with its own three arrays, chosen per
 // terrain through MaterialComponent::materialAssetId (the material id IS the group). Every group is
-// the same graph skeleton — roles, slice layout (4 * V + 1), the Groups pin, the 13 parameters and the
+// the same graph skeleton — roles, slice layout (4 * V + 1), the Groups pin, the 13 parameters (16 with the Mountains rock sizes) and the
 // six paint-layer channels do not change; a group differs by the files its roles read, the names it
 // gives the paint layers, and the default values of a few parameters. Mountains is the original
 // material, byte for byte (the members above are its row).
@@ -180,6 +180,11 @@ struct AutoLandscapeGroup
     // the arrays: its albedo / normal / AO / roughness / height come from the function in world
     // space, so the group's first array slice is never read. Desert only (Thema 329, step 2).
     bool proceduralSand = false;
+    // The Rock role is three textures by size instead of one (Thema 329, step 5): variant 0 of the
+    // role's slices is the medium rock, variant 1 the large (boulders on steep faces), variant 2 the
+    // small (stones on gentle slopes), each at its own tile size and blended by slope. Mountains
+    // only; the other groups' rock stays one texture (a 3-variant Rock would only repeat it).
+    bool rockBySize = false;
 };
 
 // Ids, in landscape_tex_gen's 0x400 block: 0x412 is Mountains, 0x413 / 0x414 are the weather
@@ -195,7 +200,7 @@ inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCoun
       { kAutoLandscapeAlbedoArray, kAutoLandscapeNormalArray, kAutoLandscapeMaskArray },
       kAutoLandscapePaintLayerNames, { "Grass", "Dirt", "Rock", "Snow" },
       "Engine/Textures/Landscape/T_Landscape_Mountains_Path_Albedo.hasset",
-      0.12f, 0.35f, 60.0f },
+      0.12f, 0.35f, 60.0f, false, true },
     { AutoLandscapeGroupId::Forest, "Forest",
       { 0x0000000000000415ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Forest.hasset",
       { "Engine/Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset",
@@ -269,8 +274,21 @@ inline constexpr char kAutoLandscapeParamSnowBlend[]      = "Snow Blend";
 inline constexpr char kAutoLandscapeParamSnowMaxSlope[]   = "Snow Max Slope";
 inline constexpr char kAutoLandscapeParamPuddleAmount[]   = "Puddle Amount";
 inline constexpr char kAutoLandscapeParamPuddleMaxSlope[] = "Puddle Max Slope";
+// The three rock sizes of a group with rockBySize (Mountains): the tile size of the large and the small
+// rock texture ("Rock Tile Size" stays the medium one) and the slope where the large rock takes over.
+// The small -> medium change sits halfway between "Rock Slope" and this one.
+inline constexpr char kAutoLandscapeParamBoulderTile[]    = "Boulder Tile Size";
+inline constexpr char kAutoLandscapeParamPebbleTile[]     = "Pebble Tile Size";
+inline constexpr char kAutoLandscapeParamBoulderSlope[]   = "Boulder Slope";
 inline constexpr char kAutoLandscapeSwitchBombing[]       = "Texture Bombing";
 inline constexpr int  kAutoLandscapeParamCount            = 13;   // "Puddle Size" moved to the Weather panel
+inline constexpr int  kAutoLandscapeRockSizeParamCount    = 3;    // the three above, only in a rockBySize group
+// The role variants the three rock sizes read (see AutoLandscapeGroup::rockBySize).
+inline constexpr int  kAutoLandscapeRockVariantMedium     = 0;
+inline constexpr int  kAutoLandscapeRockVariantLarge      = 1;
+inline constexpr int  kAutoLandscapeRockVariantSmall      = 2;
+inline constexpr int autoLandscapeParamCount(const AutoLandscapeGroup& g)
+{ return kAutoLandscapeParamCount + (g.rockBySize ? kAutoLandscapeRockSizeParamCount : 0); }
 
 // What the Output node shows. Lit is the material. The mask views are UNLIT
 // debug views over the very same mask nodes (the witness's numeric oracle):
@@ -294,4 +312,6 @@ struct AutoLandscapeGraph
 // parameters; the default (Mountains) builds exactly the graph this material always had.
 HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit,
                                                   AutoLandscapeGroupId group = AutoLandscapeGroupId::Mountains);
+// The same from a group row, for a row that is not one of the four (a test's copy with a switch flipped).
+HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, const AutoLandscapeGroup& group);
 } // namespace HE

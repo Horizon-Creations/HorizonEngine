@@ -28,6 +28,9 @@
 using HE::MaterialGraph;
 using HE::MatNodeType;
 
+// Mountains has three more parameters than the other groups (the rock sizes, Thema 329 step 5).
+static constexpr int MtnParams = HE::autoLandscapeParamCount(HE::kAutoLandscapeGroups[0]);
+
 // Build the demo graph used across tests: lerp(orange, blue, fresnel) → lit output,
 // with a time-driven sine on metallic — exercises inputs, math, shading and coercion.
 static MaterialGraph makeDemoGraph()
@@ -2751,7 +2754,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
 
 	// Every parameter is a real HeParams slot (none baked for being over budget).
-	REQUIRE(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	REQUIRE(gen.params.size() == static_cast<size_t>(MtnParams));
 	CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
 	for (const char* name : { HE::kAutoLandscapeParamGroundTile, HE::kAutoLandscapeParamRockTile,
 	                          HE::kAutoLandscapeParamBombCell, HE::kAutoLandscapeParamRockSlope,
@@ -2759,7 +2762,8 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	                          HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
 	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
 	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
-	                          HE::kAutoLandscapeParamPuddleMaxSlope })
+	                          HE::kAutoLandscapeParamPuddleMaxSlope, HE::kAutoLandscapeParamBoulderTile,
+	                          HE::kAutoLandscapeParamPebbleTile, HE::kAutoLandscapeParamBoulderSlope })
 	{
 		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
 		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
@@ -2858,7 +2862,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 			CHECK(m.graph.findNode(id) != nullptr);
 		const HE::MatShaderGen mg = HE::generateFragment(m.graph, HE::weatherFunctionLoader());
 		CHECK_FALSE(mg.glsl.empty());
-		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+		CHECK(mg.params.size() == static_cast<size_t>(MtnParams));
 	}
 
 	// The graph survives its JSON (what the .hasset stores) byte for byte.
@@ -3699,7 +3703,7 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
 	CHECK(m->graphTexturePaths.size() == 4u);   // the three arrays + Path's own Albedo
-	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(m->graphParamNames.size() == static_cast<size_t>(MtnParams));
 	// The Landscape tool lists these as the paintable layers — Auto first, so an
 	// unpainted terrain reads the automatic distribution.
 	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
@@ -4049,7 +4053,7 @@ TEST_CASE("Auto landscape: puddles and ground snow come from the weather functio
 	for (const HE::MatParamSlot& s : HE::generateFragment(a.graph, HE::weatherFunctionLoader()).params)
 		CHECK(s.name != "Puddle Size");
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
-	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	CHECK(gen.params.size() == static_cast<size_t>(MtnParams));
 	CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
 	CHECK(gen.glsl.find("missing function") == std::string::npos);
 

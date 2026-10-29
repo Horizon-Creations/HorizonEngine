@@ -236,12 +236,14 @@ const std::vector<MatNodeDesc>& registry()
         // ── v13: texture arrays — s = the array texture, Slice picks the layer ──
         // "Groups" (appended, Thema 180 Schritt 3): 0 / unwired = the array is read slice for
         // slice as always; N > 0 = it holds N groups of V variants each (depth = N * V + extra),
-        // "Slice" names the group and the node reads that group's variant 0.
+        // "Slice" names the group and the node reads that group's variant 0. "Variant" (appended,
+        // Thema 329 Schritt 5): wired next to Groups it names the variant to read instead of 0
+        // (clamped into 0..V-1, so a 1-variant array still reads the group's only slice).
         { MatNodeType::TextureArraySample, "Texture Array Sample", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 0 },
         { MatNodeType::NormalMapArraySample, "Normal Map Array", "Texture",
-          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 } },
+          { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 1 }, // p[0] = strength
 
         // ── v14: texture bombing — p = Rotation, Sharpness, Seed (+ Strength);
@@ -254,14 +256,15 @@ const std::vector<MatNodeDesc>& registry()
           { { "N", F::Vec3, 0 } }, 4 },
         // "Groups" (appended, Thema 180 Schritt 3): wired with N > 0, each of the three hexes
         // draws its own variant 0..V-1 of group "Slice" from its cell's hash (V = depth / N);
-        // unwired = one slice for all three, as before.
+        // unwired = one slice for all three, as before. "Variant" (appended, Thema 329 Schritt 5):
+        // wired next to Groups, all three hexes read that one variant instead of drawing their own.
         { MatNodeType::TextureArrayBombSample, "Texture Array Bombing", "Texture",
           { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
-            { "Groups", F::Float, 0 } },
+            { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "RGB", F::Vec3, 0 }, { "A", F::Float, 0 } }, 3 },
         { MatNodeType::NormalMapArrayBombSample, "Normal Map Array Bombing", "Texture",
           { { "UV", F::Vec2, 0 }, { "Slice", F::Float, 0 }, { "Cell", F::Float, kMatBombDefaultCell },
-            { "Groups", F::Float, 0 } },
+            { "Groups", F::Float, 0 }, { "Variant", F::Float, 0 } },
           { { "N", F::Vec3, 0 } }, 4 },
 
         // ── v15: the hex grid as data, no texture — p[0] = Seed ──
@@ -1260,8 +1263,12 @@ HE_MG_NOINLINE bool emitTextureNode(EmitCtx& c, const Scope& sc, const MatGraphN
                 // variant per pixel would be a hard seam, so the debug mode shows variant 0.
                 const std::string depth = "float(textureSize(" + sampler + ", 0).z - 1)";
                 decl += " int " + v + "_V = " + variantCount(sampler, inputExpr(c, sc, n, 2, F::Float)) + ";";
+                // Variant wired: the group's variant `Variant` (0..V-1) instead of its variant 0.
+                const std::string pick = hasInput(sc, n, 3)
+                    ? " + float(clamp(int(floor(" + inputExpr(c, sc, n, 3, F::Float) + " + 0.5)), 0, " + v + "_V - 1))"
+                    : std::string();
                 coord = "vec3(" + v + "_uv, min(clamp(floor(" + sliceExpr
-                      + " + 0.5), 0.0, " + depth + ") * float(" + v + "_V), " + depth + "))";
+                      + " + 0.5), 0.0, " + depth + ") * float(" + v + "_V)" + pick + ", " + depth + "))";
             }
             if (n.type == MatNodeType::TextureArraySample)
             {
@@ -1330,12 +1337,19 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             {
                 // slice = group * V + variant, the variant from the hash's 8 free low bits in
                 // integers (no float rounding that could differ per API), clamped into the array.
+                // Variant wired: no draw, every hex reads the named variant (clamped into 0..V-1).
+                const bool fixedVariant = hasInput(sc, n, 4);
+                const std::string fixedPick = fixedVariant
+                    ? "clamp(int(floor(" + inputExpr(c, sc, n, 4, F::Float) + " + 0.5)), 0, " + v + "_V - 1)"
+                    : std::string();
                 for (int k = 0; k < 3; ++k)
                 {
                     const std::string i = std::to_string(k);
-                    sliceDecl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + int(((" + g
-                              + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u), 0, textureSize(" + sampler
-                              + ", 0).z - 1); ";
+                    const std::string pick = fixedVariant
+                        ? fixedPick
+                        : "int(((" + g + "s." + std::string(1, "xyz"[k]) + " & 255u) * uint(" + v + "_V)) >> 8u)";
+                    sliceDecl += "int " + v + "_s" + i + " = clamp(int(" + v + "_l) * " + v + "_V + " + pick
+                              + ", 0, textureSize(" + sampler + ", 0).z - 1); ";
                 }
             }
             // Guarded (inside an If's branch, see computeBranchGuards): everything so far

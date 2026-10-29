@@ -59,7 +59,11 @@ struct LayerReads { int albedo = 0, normal = 0, mask = 0, height = 0; };
 
 AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId)
 {
-    const AutoLandscapeGroup& group = autoLandscapeGroup(groupId);
+    return buildAutoLandscapeGraph(view, autoLandscapeGroup(groupId));
+}
+
+AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, const AutoLandscapeGroup& group)
+{
     AutoLandscapeGraph r;
     Wire w{ r.graph };
 
@@ -68,6 +72,19 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         "Metres one Grass / Dirt texture covers (world space).");
     const int pRockTile   = w.param(kAutoLandscapeParamRockTile, 4.0f, 0.25f, 32.0f, "Tiling",
         "Metres one Rock / Snow texture covers (world space).");
+    // The other two rock sizes (group.rockBySize): a larger tile reads as larger blocks, a smaller one as
+    // smaller stones. Boulder Slope is where the large rock takes over from the medium one.
+    int pBoulderTile = -1, pPebbleTile = -1, pBoulderSlope = -1;
+    if (group.rockBySize)
+    {
+        pBoulderTile = w.param(kAutoLandscapeParamBoulderTile, 12.0f, 0.25f, 64.0f, "Tiling",
+            "Metres one large rock texture (boulders on steep faces) covers (world space).");
+        pPebbleTile = w.param(kAutoLandscapeParamPebbleTile, 1.5f, 0.1f, 16.0f, "Tiling",
+            "Metres one small rock texture (stones on gentle slopes) covers (world space).");
+        pBoulderSlope = w.param(kAutoLandscapeParamBoulderSlope, 0.40f, 0.0f, 1.0f, "Rock",
+            "Slope (1 - normal.y) where large boulders take over from the medium rock; small stones give way "
+            "to the medium rock halfway between Rock Slope and this. 0.40 ~ 53 degrees.");
+    }
     const int pCell       = w.param(kAutoLandscapeParamBombCell, 0.5f, 0.1f, 2.0f, "Tiling",
         "Texture bombing: spacing of the random hexes, in texture repeats. Smaller = more variation, more seams.");
     const int pRockSlope  = w.param(kAutoLandscapeParamRockSlope, group.rockSlope, 0.0f, 1.0f, "Rock",
@@ -116,15 +133,19 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // then WetGround), V = depth / 4 in the shader. Each hex of a bombed read draws its own
     // variant; a 5-slice array (V = 1) reads exactly the slices it always did.
     const int groups = w.constF(static_cast<float>(kAutoLandscapeRoleCount), 2);
-    auto layer = [&](AutoLandscapeLayer L, int uv, int seed) {
+    // `variant` >= 0 pins all three maps (and the unbombed debug read) to that variant of the role instead
+    // of letting every hex draw its own: one rock size per read (see the Rock block below).
+    auto layer = [&](AutoLandscapeLayer L, int uv, int seed, int variant = -1) {
         LayerReads lr;
         const int slice = w.constF(static_cast<float>(static_cast<int>(L)), 2);
+        const int variantC = variant >= 0 ? w.constF(static_cast<float>(variant), 2) : -1;
         auto read = [&](T plain, T bombed, const char* path) {
             const int p = w.node(plain, 2);
             r.graph.findNode(p)->s = path;
             r.graph.connect(uv, 0, p, 0);
             r.graph.connect(slice, 0, p, 1);
             r.graph.connect(groups, 0, p, 2); // the unbombed debug read shows variant 0 of the layer
+            if (variantC >= 0) r.graph.connect(variantC, 0, p, 3);
             if (seed < 0) return p;
             const int b = w.node(bombed, 2);
             MatGraphNode* bn = r.graph.findNode(b);
@@ -134,6 +155,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
             r.graph.connect(slice, 0, b, 1);
             r.graph.connect(pCell, 0, b, 2);
             r.graph.connect(groups, 0, b, 3);
+            if (variantC >= 0) r.graph.connect(variantC, 0, b, 4);
             // Compile-time choice: the untaken read is never emitted.
             const int sw = w.op(T::StaticSwitch, 2, { { b }, { p } });
             r.graph.findNode(sw)->s = kAutoLandscapeSwitchBombing;
@@ -210,7 +232,22 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         path.mask = maskNode;
         path.height = w.op(T::SplitRGBA, 2, { { path.mask } }); // pin 2 = B = height
     }
-    LayerReads       rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
+    // Rock: one texture, or (group.rockBySize, Mountains) three by size. The sizes are the role's first
+    // three variants — 0 medium (the rock this material always had, "Rock Tile Size"), 1 large, 2 small —
+    // each pinned to its variant and tiled on its own: the same photograph covers more ground per
+    // repeat at a larger tile, so its blocks read larger. They are blended by slope in the Rock block.
+    // On a 1-variant array the three read the same slice, so the look then is one rock at three tilings.
+    LayerReads       rock, rockMedium, rockLarge, rockSmall;
+    if (!group.rockBySize)
+        rock = layer(AutoLandscapeLayer::Rock, uvRock, 37);
+    else
+    {
+        rockMedium = layer(AutoLandscapeLayer::Rock, uvRock, 37, kAutoLandscapeRockVariantMedium);
+        rockLarge  = layer(AutoLandscapeLayer::Rock, w.op(T::Divide, 1, { { xz }, { pBoulderTile } }), 41,
+                           kAutoLandscapeRockVariantLarge);
+        rockSmall  = layer(AutoLandscapeLayer::Rock, w.op(T::Divide, 1, { { xz }, { pPebbleTile } }), 43,
+                           kAutoLandscapeRockVariantSmall);
+    }
     // Water (Thema 329, step 4): the river-bed pebbles the Water tool paints along the shore and
     // bed of its water, and a layer the human can paint by hand. Paint-only like Path, so it is
     // weight 0 until painted and gated below like the other array reads. It has no texture of its
@@ -348,7 +385,46 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     const int groundSplit = w.op(T::SplitRGBA, 3, { { ground.mask } });
 
     // ── Rock on the slopes (column 4) ────────────────────────────────────────
-    gate(rock, possible({ r.slope }, w.op(T::Multiply, 4, { { pHeight }, { pRockBlend } }), pRockSlope, mR, 2, 4), 4);
+    const int rockCan = possible({ r.slope }, w.op(T::Multiply, 4, { { pHeight }, { pRockBlend } }), pRockSlope, mR, 2, 4);
+    if (!group.rockBySize)
+        gate(rock, rockCan, 4);
+    else
+    {
+        // Small stones on gentle rock slopes, medium rock between, large boulders on steep faces: two
+        // slope ramps, small -> medium halfway between Rock Slope and Boulder Slope, medium -> large
+        // at Boulder Slope, both over Rock Blend. The weights come from the slope alone (no height
+        // bias), so each size's read can sit behind an If on an upper bound of its own weight: its
+        // ramp's range widened by 0.01 (a float rounding margin, a read that is not needed costs
+        // nothing but time), and only where rock can show at all (rockCan, which includes paint). The
+        // size is a property of the slope, painted rock gets it the same way.
+        const int half2   = w.constF(0.5f, 4);
+        const int eps     = w.constF(0.01f, 4);
+        const int midSum  = w.op(T::Add, 4, { { pRockSlope }, { pBoulderSlope } });
+        const int midSlope = w.op(T::Multiply, 4, { { midSum }, { half2 } });
+        const int tMid    = w.ramp(midSlope, pRockBlend, { r.slope }, 4);
+        const int tBig    = w.ramp(pBoulderSlope, pRockBlend, { r.slope }, 4);
+        // Small stones: until the medium ramp has closed.
+        const int midEnd  = w.op(T::Add, 4, { { w.op(T::Add, 4, { { midSlope }, { pRockBlend } }) }, { eps } });
+        const int smallCan = w.op(T::And, 4, { { rockCan }, { w.op(T::Less, 4, { { r.slope }, { midEnd } }) } });
+        // Medium: from where the medium ramp opens until the large one has closed.
+        const int midBeg  = w.op(T::Subtract, 4, { { midSlope }, { eps } });
+        const int bigEnd  = w.op(T::Add, 4, { { w.op(T::Add, 4, { { pBoulderSlope }, { pRockBlend } }) }, { eps } });
+        const int mediumCan = w.op(T::And, 4, { { rockCan },
+            { w.op(T::And, 4, { { w.op(T::Greater, 4, { { r.slope }, { midBeg } }) },
+                                { w.op(T::Less, 4, { { r.slope }, { bigEnd } }) } }) } });
+        // Large: from where the large ramp opens.
+        const int bigBeg  = w.op(T::Subtract, 4, { { pBoulderSlope }, { eps } });
+        const int largeCan = w.op(T::And, 4, { { rockCan }, { w.op(T::Greater, 4, { { r.slope }, { bigBeg } }) } });
+        gate(rockSmall,  smallCan,  4);
+        gate(rockMedium, mediumCan, 4);
+        gate(rockLarge,  largeCan,  4);
+        const Surface sm = blend({ rockSmall.albedo, rockSmall.normal, rockSmall.mask }, rockMedium, tMid, 4);
+        const Surface sl = blend(sm, rockLarge, tBig, 4);
+        rock.albedo = sl.albedo;
+        rock.normal = sl.normal;
+        rock.mask   = sl.mask;
+        rock.height = w.op(T::SplitRGBA, 4, { { rock.mask } }); // pin 2 = B = height
+    }
     const int rockT = w.op(T::Add, 4, { { r.slope },
                                         { heightBias(rock.height, 2, groundSplit, 2, pRockBlend, 4) } });
     r.rockMask = w.ramp(pRockSlope, pRockBlend, { rockT }, 4);
