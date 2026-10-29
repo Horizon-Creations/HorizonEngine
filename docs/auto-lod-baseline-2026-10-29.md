@@ -46,7 +46,8 @@ der Massstab fuer die Schritte 2 bis 7 und fuer das Ziel-Budget-Gespraech.
   zaehlt also **nur den Hauptpass**. **Dreiecke je Schatten- und SSAO-Pass werden von der Engine nicht gezaehlt**; ersatzweise
   steht die Zahl der Caster-Batches aus der Logzeile `shadow pass instanced (first run: N casters)` / `SSAO pre-pass instanced
   (first run: N objects)` in der Tabelle (Batches der ersten Frames, kein Dreieckszaehler).
-* GI war aus (GIAccel/GIProbes/GIShadow 0,00 ms in jedem Lauf): **GI-Vorpass nicht gemessen**.
+* GI war in der Konfiguration **aus** (GIAccel/GIProbes/GIShadow 0,00 ms in Abschnitt 4.1 bis 4.4). Mit GI an (`--set GlobalIlluminationEnabled=true`)
+  je ein Lauf in 4.5; GI ersetzt dort Cascaded Shadows und SSAO, die Kosten verschieben sich.
 
 ## 3. Szene und Varianten
 
@@ -69,6 +70,9 @@ Groessenklassen nach der groessten Bounding-Box-Seite der glTF-Meshes (Knotenska
 | v4 drawdist | drawDistance klein 25, mittel 40, gross unveraendert |
 | v5 all | v1 (klein) + v2 (mittel/gross) + v3 + v4 |
 | v6 nofoliage | alle Layer `layerVisible=false` (Boden: Terrain, Himmel, Wolken) |
+
+Gegenprobe des Zaehlers: 47,75 M Dreiecke im Hauptpass entsprechen Instanzen x glTF-Dreiecke je Pflanze (README der Pflanzen), alle 1900 Instanzen liegen
+von der Kamera aus in Reichweite.
 
 Wirkung bestaetigt: Szenendatei enthaelt die Schluessel (geprueft per Skript, alle 12 Layer), und die Logzeile aendert sich
 (Spalte Caster/AO), die Dreiecke aendern sich nur dort, wo Mesh oder Reichweite sich aendern.
@@ -128,6 +132,18 @@ Verbesserung unter einer Stufe kann ganz verschwinden. **Die kontinuierliche Zah
 | v5 | 20,8 | 18,8 | 0,8 | 0,3 | 0,143 | 36,0 |
 | v6 | 16,8 | 13,9 | 1,3 | 0,5 | **0,210** | 44,4 (nicht vergleichbar) |
 
+### 4.5 GI an (`GlobalIlluminationEnabled=true`), RenderScale 2, je ein Lauf, Zaehler an
+
+| Variante | GPU | Scene | Shadow | GIShadow | SSAO | Tonemap | Tris | GI-Vorpass-Objekte (Log) | fps |
+|---|---|---|---|---|---|---|---|---|---|
+| v0 Baseline | 80,9 | 67,4 | 0,6 | 11,25 | 0,0 | 0,39 | 47,75 M | 144 | 12,0 |
+| v5 all | 52,6 | 48,2 | 0,6 | 2,18 | 0,0 | 0,38 | 6,30 M | 296 | 18,2 |
+
+Mit GI an faellt der Cascaded-Shadow- und der SSAO-Pass weg (0,6 / 0,0 ms), GIShadow (11,3 ms) tritt an ihre Stelle; die Baseline ist damit
+**40 ms billiger als ohne GI** (80,9 gegen 121,0), und die Massnahmen sparen weniger (-28,3 ms, -35 %), weil der Hauptpass (Scene)
+dann der Grossteil ist. Zwei Einzelmessungen ohne Wiederholung: die Streuung ist hier nicht bekannt (bei den Wiederholungen 4.1 hoechstens 7 ms).
+Ob der Mensch GI an hatte, ist unbekannt; sein Wert 8 fps passt zu GI aus (4.1), nicht zu GI an (12,0 fps).
+
 ## 5. Streuung und Rauschen
 
 * Baseline Pass-Lauf: GPU 121,9 / 120,1 ms (1,5 %), Scene 74,6 / 72,7, Shadow 33,4 / 33,3, SSAO 12,3 / 12,3. FPS-Lauf: 13,62 / 13,68 (0,4 %),
@@ -162,7 +178,7 @@ Verbesserung unter einer Stufe kann ganz verschwinden. **Die kontinuierliche Zah
 ## Handoff
 
 - **Topic / step:** 331 Auto-LOD, Schritt 1 von 7 (Baseline und Sofortmassnahmen)
-- **Branch / commit:** `claude/auto-lod-und-sichtbarkeitsgetriebenes-rendern-f-r-foliage-un`, Commit siehe `git log` (pushed: nein, Queen merged)
+- **Branch / commit:** `claude/auto-lod-und-sichtbarkeitsgetriebenes-rendern-f-r-foliage-un` @ `4ff13ce3` plus ein Folge-Commit mit GI-Zeile (pushed: ja)
 - **Done:** Baseline und fuenf Massnahmen-Varianten gemessen, je zwei Laeufe; Tabellen oben; Boden ohne Foliage; Zeugenbilder.
 - **Files touched:** `docs/auto-lod-baseline-2026-10-29.md` (diese Doku), `scripts/perf/foliage_variants.py` (Varianten-Generator),
   `docs/perf-audit/scenes/foliage-test-base.hescene` (Basisszene), `docs/perf-audit/img/auto-lod-baseline-{base,v5}.jpg`. Kein `src/`.
@@ -170,7 +186,7 @@ Verbesserung unter einer Stufe kann ganz verschwinden. **Die kontinuierliche Zah
   (29 Summaries, Logs, `conditions.txt`, `cap.sh`, `tab.py`).
 - **Verified:** Alle Zahlen aus `*.summary.json` (`he_perf_capture.py`); Variantenwirkung per Skript (Schluessel) und Logzeile;
   Tonemap-Zeuge je Zeile; Baseline zweimal in verschiedener Last; Bilder angesehen.
-- **Not verified:** Dreiecke je Schatten-/SSAO-Pass (Engine zaehlt sie nicht); GI-Vorpass (GI war aus); OpenGL/D3D/Vulkan;
+- **Not verified:** Dreiecke je Schatten-/SSAO-/GI-Pass (Engine zaehlt sie nicht); GI an nur je ein Lauf, ohne FPS-Lauf; OpenGL/D3D/Vulkan;
   Ueberzeichnung als Ursache der Hauptpass-Kosten (nur aus RS1 gegen RS2 geschlossen, v6-RS1-Zeile unsauber);
   Stromnetz statt Akku; das Gefuehl des Menschen bei 8 fps (er hatte moeglicherweise andere Kamera/Skala).
 - **Decisions taken:** Messung gegen Klon von Editor und Projekt (Original unberuehrt); Grossenklassen aus der glTF-Bounding-Box;
