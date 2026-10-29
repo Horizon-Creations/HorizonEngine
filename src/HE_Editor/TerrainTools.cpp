@@ -33,7 +33,7 @@
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -1602,11 +1602,21 @@ void renderPanel(AppContext& ctx)
                         ctx.contentManager ? ctx.contentManager->getLandscapeFoliageLayer(setId) : nullptr;
                     if (!foliageSet && ctx.contentManager)
                     {
-                        // Passive pull (design §7): ask once. Never ensureResident here —
+                        // Passive pull (design §7): ask once per content epoch, not once
+                        // per process — a set that EngineContent has not pulled yet still
+                        // bumps contentEpoch() when it arrives (noteContentChanged()), and
+                        // that must trigger a retry instead of leaving Apply Foliage
+                        // disabled until the editor restarts. Never ensureResident here —
                         // it is synchronous and does not start a download of a set that
                         // still sits on the EngineContent server.
-                        static std::unordered_set<HE::UUID> s_asked;
-                        if (s_asked.insert(setId).second) ctx.contentManager->loadAssetAsync(setId);
+                        static std::unordered_map<HE::UUID, uint64_t> s_askedAt;
+                        const uint64_t epoch = ctx.contentManager->contentEpoch();
+                        auto it = s_askedAt.find(setId);
+                        if (it == s_askedAt.end() || it->second < epoch)
+                        {
+                            s_askedAt[setId] = epoch;
+                            ctx.contentManager->loadAssetAsync(setId);
+                        }
                     }
                     sectionLabel("Foliage Set");
                     dimText("%s", foliageSet ? foliageSet->name.c_str() : "(fetching the foliage set\xe2\x80\xa6)");

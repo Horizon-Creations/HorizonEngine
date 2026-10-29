@@ -33,12 +33,14 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ── The Landscape panel's Foliage brush, driven headless ─────────────────────
@@ -1607,6 +1609,130 @@ TEST_CASE("landscape ui: Apply Foliage materializes a set's entries, tags them, 
 		CHECK(f.layers[0].name == "My Bush");           // the hand-added layer, still untouched
 	}
 	CHECK(undo.undoDepth() == depth0 + 2);
+}
+
+// Thema 327 step 7: the review's scenario for the passive pull in the "Foliage
+// Set" row — a material names a set EngineContent has not pulled yet. The first
+// frame's ask is a true no-op (an unknown UUID, step 4's own comment: nothing is
+// in any pak/disk/remote registry for it). The set then "arrives" the way a real
+// sync delivers it: a file appears under the EngineContent root and the editor's
+// own refresh re-indexes it (ContentManager::scanContentDirectory(), which bumps
+// contentEpoch() — the same signal the "##arr" texture-array fix keys on). Before
+// this fix the function-static s_asked set only ever asked once per UUID per
+// process, so a file that arrived after that first ask was never picked up and
+// "Apply Foliage" stayed disabled until the editor restarted.
+TEST_CASE("landscape ui: Apply Foliage recovers once a pending foliage set arrives, "
+          "without an editor restart")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	struct TempDir
+	{
+		std::filesystem::path path;
+		explicit TempDir(const char* name)
+		{
+			path = std::filesystem::temp_directory_path() / name;
+			std::error_code ec;
+			std::filesystem::remove_all(path, ec);
+			std::filesystem::create_directories(path);
+		}
+		~TempDir() { std::error_code ec; std::filesystem::remove_all(path, ec); }
+	};
+	TempDir projectRoot("he_test_tt_foliage_pending_project");
+	TempDir engineRoot("he_test_tt_foliage_pending_engine");
+
+	ContentManager cm(projectRoot.path.string());
+	cm.setEngineContentRoot(engineRoot.path.string());
+
+	// As if a Landscape Foliage node (step 3) named a set the editor has not
+	// seen a file for yet — freshly generated, so it cannot collide with a UUID
+	// any other test case asked this same TerrainTools.cpp translation unit
+	// about (the retry map is a function-static, shared by every TEST_CASE in
+	// this binary).
+	const HE::UUID setId = HE::UUID::generate();
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+
+	// Not resident, nothing on disk yet: the ask made inside panelFrame() above
+	// is a clean no-op. Clicking must do nothing.
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, bx, by);
+	CHECK_FALSE(reg.any_of<FoliageComponent>(terrain));
+	CHECK(undo.undoDepth() == depth0);
+	CHECK(cm.getLandscapeFoliageLayer(setId) == nullptr);
+
+	// The set "arrives": EngineContent writes the real file under the engine
+	// content root, and the editor's own refresh re-indexes it — in production
+	// this is what bumps contentEpoch() (ContentManager::scanContentDirectory()).
+	{
+		ContentManager author(engineRoot.path.string());
+		LandscapeFoliageLayerAsset set;
+		set.type = HE::AssetType::LandscapeFoliageLayer;
+		set.name = "LF_Pending";
+		set.path = "LandscapeFoliage/LF_Pending.hasset";
+		set.id   = setId;
+		LandscapeFoliageEntry e;
+		e.name = "Tuft"; e.meshAssetId = HE::UUID{ 0x7003ULL, 0x1ULL }; e.density = 0.3f;
+		set.entries.push_back(e);
+		REQUIRE(author.saveAsset(set));
+	}
+	cm.scanContentDirectory();
+
+	// One more frame: the retry must fire now that the epoch moved, queuing the
+	// real disk load — it has not completed on THIS frame yet, the panel never
+	// blocks for it.
+	panelFrame(ctx, false);
+	CHECK(cm.getLandscapeFoliageLayer(setId) == nullptr);
+
+	// Drain the async read, the same way ContentManager's own worker completes it.
+	bool loaded = false;
+	for (int i = 0; i < 400 && !loaded; ++i)
+	{
+		cm.pollAsyncResults(16);
+		loaded = cm.getLandscapeFoliageLayer(setId) != nullptr;
+		if (!loaded) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	REQUIRE_MESSAGE(loaded, "the retried loadAssetAsync never resolved the pending set");
+
+	// One more draw: the row now shows the set, and Apply Foliage works without
+	// any restart.
+	panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("Apply Foliage"), bx, by));
+	clickAt(ctx, bx, by);
+	const FoliageComponent* fol = reg.try_get<FoliageComponent>(terrain);
+	REQUIRE(fol);
+	bool found = false;
+	for (const FoliageLayer& l : fol->layers)
+		if (l.sourceAssetId == setId) { found = true; CHECK(l.name == "Tuft"); }
+	CHECK(found);
+	CHECK(undo.undoDepth() == depth0 + 1);
 }
 
 #endif // HE_EDITOR_DEPS_DIR
