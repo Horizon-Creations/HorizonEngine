@@ -1,0 +1,100 @@
+# Landscape 3.0 Folge, step 2: procedural snow and sand as material functions (Thema 329)
+
+The auto landscape's Snow role (all four groups) and the Desert group's ground role (Sand) are no
+longer read from the texture arrays. Two flat engine functions make them from noise in world space, and
+any other material can call them too.
+
+## The functions
+
+`HE_Core/include/MaterialGraph/ProceduralSurfaceFunctions.h` (interface, pin enums, ids) and
+`src/MaterialGraph/ProceduralSurfaceFunctions.cpp` (the builders, the single source). Assets
+`EditorDeps/EngineContent/MaterialFunctions/Surface/MF_ProceduralSnow|Sand.hasset` (matfn_gen), ids
+`0x41D` / `0x41E` (the two left below the loose maps; `0x41F` stays free). Path
+`Engine/MaterialFunctions/Surface/…`. `weatherFunctionLoader()` answers all four functions the landscape graph calls.
+
+| | MF_ProceduralSnow | MF_ProceduralSand |
+|---|---|---|
+| In (all with a default) | Position (Vec2, world XZ m), Cover 1, Color 0.85, Grain 0.5, Drift 0.5, Wind Direction (Vec2), Glitter 0.35, Softness 0.5, Melt 0, Disturbance 0 | Position, Color 0.76, Grain Size 0.03 m, Ripple 0.5, Ripple Size 0.3 m, Wind Direction, Glitter 0.3, Wetness 0, Disturbance 0 |
+| Out | Albedo, Normal (world), Roughness, AO, Height | the same five |
+| Noise | 2 x FbmGrad (drift in the wind frame, 8 m x 1.8 m; grain at 6 cm) | 1 x FbmGrad (grain), 1 x Fbm (ripple wobble, 4 m), 3 sines |
+
+* **Flat** (no FunctionCall inside), no Param node, no texture, **no Weather node**: Cover / Melt / Wetness are wired by the caller.
+* **Disturbance** is declared (pin 9 / 8) and read by nothing: the hook for trails.
+* **Height does not move with Cover, Softness, Melt, Wetness or Color** (it reads Position, Wind, Drift/Ripple, Grain only),
+  so the landscape's height-snow mask stays weather-free. Both properties are tests (`fnInputsReaching`).
+* Fine detail fades with the camera distance (`CameraDistance`, cell x 150..450) so a 6 cm grain does not shimmer.
+* Ripple phase goes through `fract()` before the sine (a km from the origin it is 10^4..10^5 rad).
+* Wind: `Wind Direction` is a Vec2, a zero vector falls back to +X (no NaN). The landscape leaves it at the default
+  on purpose: wired to the live Wind node every ripple would rotate about the world origin when the wind turns.
+
+## Wiring in `buildAutoLandscapeGraph`
+
+* `AutoLandscapeGroup::proceduralSand` (Desert only): role 0 comes from `MF_ProceduralSand` instead of the Grass slice.
+  Colour = mean of the reference (coast_sand_01 4k diffuse, sRGB 129/114/91 = linear 0.221/0.168/0.104), Wetness = Weather.wetness.
+  Slice 0 of the Desert arrays is not read any more.
+* Snow, every group: `MF_ProceduralSnow` with Position = world XZ, Cover = **the Weather node's Snow Cover pin** (not
+  MF_WeatherSnow's Cover output: that call takes the snow's own height bias as an input, which would make the call node depend on
+  itself), Melt = Weather.wetness, Color constant (0.82, 0.85, 0.90). Slice 3 is not read.
+* The function outputs enter the existing blends as `Reroute` (albedo, normal; one output pin per node) and `Combine3(AO, roughness,
+  height)` (the arrays' mask layout), so `blend()`, the height biases and the paint-layer mix are untouched.
+* **The snow gate is gone**: a function call is never moved into an If branch (`branchPure` has no FunctionCall, and function
+  bodies are not guarded at all), so the `If` would have been a `mix()`. The noise now runs on every pixel (see Not verified).
+* `r.snowMask` is the same formula; its height bias reads the function's Height output. The old test "no FunctionCall in the
+  cone" is now pin-aware: no Weather node and no weather function in the cone, and of the snow call only the pins Height reads count.
+
+## Verified (Mac, Release, tree of this commit)
+
+* `he_tests --source-file=*test_material_graph.cpp` 109/109 (15 618 assertions), `*test_landscape_groups.cpp` 4/4. New cases: interface
+  and flatness, an unwired call compiles on its own (no weather, no texture, integer-hash noise only), the shipped-function tripwire
+  now covers `Surface/` and both M_AutoLandscape and the Desert material, the hand-built graph calling both functions and the Desert
+  material in the cross-compile sweep (HLSL 93/93, SPIR-V 93/93, GLSL 4.10/4.30, MSL in the same sweeps).
+* `matfn_gen` rewrites every UI effect and weather function byte-identical; the four `M_AutoLandscape*.hasset` are regenerated with
+  `landscape_tex_gen EditorDeps/EngineContent/Materials --material [--group G]`, the deploy equals the committed file.
+* Witness `scripts/landscape-3-0-accept/cap233.sh` (top-down 400 m, real Mountains arrays from the cache, Desert placeholder arrays,
+  GI/SSAO/AA/bloom off, `missing-logs=0`, counters unchanged 4 draws / 34 816 tris):
+
+| Witness | before (step 1 deploy) | after |
+|---|---|---|
+| Mountains Metal | `5c591e66375d49a41919bc4e5405a534` | `819b347a055a2e65754096f4f4e28c43` (twice, identical) |
+| Mountains OpenGL | `ac06582d97fcafe699167c9d6972419f` | `6d40e52737cdfe443f32ef6da8aca3e9` |
+| Desert Metal / OpenGL (top) | n.a. (no baseline kept) | `3d9a3c15…` / `93854baf…` |
+| Close snow (`CAMX=30 CAMY=346 PITCH=-30 TOD=0.3`) Metal vs OpenGL | | mean abs diff 0.0/255, max 1 |
+
+  The Mountains baseline is **new** by design (the human allowed it): the hex-tiled snow texture is gone, the snow is smooth with
+  wind-drift streaks (`mountains-top-before.jpg` / `-after.jpg`, `snow-close-metal.jpg`, `sand-close-metal.jpg` here). Regression
+  guard from now on: the after md5s above, with the same camera and `cap233.sh`.
+
+## Not verified / open
+
+* **Cost.** Every landscape pixel now runs 2 FbmGrad (snow) and, in the Desert, FbmGrad + Fbm + 3 sines (sand) where the old snow
+  read 9 gated taps only above the snow line. Not measured (the machine was shared; `scripts/perf/autoland_matrix.py` /
+  `landscape_regression.py` with the old deploy are the tools). The cure would be codegen: let a flat pure function body move into an
+  If branch (`computeBranchGuards`, `placeDecl` guard child scopes).
+* D3D11 / D3D12 / Vulkan not run (no device); the text goes through the HLSL, SPIR-V and GL cross-compile sweeps above.
+* Sand look tuned against the reference only for mean colour and speckle contrast (std 13/255 in the photo), by eye in two Metal /
+  OpenGL oblique frames; never looked at in the live editor, never with real Desert arrays.
+* GI bounce kernels still read slice 3 / slice 0 of the arrays for their layer colour (their own approximation, unchanged).
+* `heightBias` / slope ramp were **not** extracted into functions: nothing gained (a function call is impure for the branch
+  guards and adds inlined interface copies to four baked shaders) and a bit-identity claim would have been confounded by the
+  re-baseline in this very step.
+
+## Handoff
+
+- **Topic / step:** 329, step 2 of 6
+- **Branch / commit:** `claude/landscape-3-0-folge-path-layer-prozeduraler-schnee-sand-mate`, code @ 59c92753 + the tuning commit that follows it (pushed: see the hive post)
+- **Done:** snow (all groups) and Desert sand are `MF_ProceduralSnow` / `MF_ProceduralSand`; reusable by any material; r.snowMask unchanged in formula.
+- **Files touched:** `ProceduralSurfaceFunctions.h/.cpp` (new), `MatFnBuilder.h` (new, shared builder; Weather builders use it, assets byte-identical),
+  `WeatherMaterialFunctions.cpp:~120` (loader answers 4 paths), `AutoLandscapeMaterial.cpp:~140-215` (reads), `AutoLandscapeMaterial.h` (`proceduralSand`),
+  `HE_Core/CMakeLists.txt` (explicit source list!), both generator mains, `tests/test_material_graph.cpp` (cone test ~l.3990, tripwire, cross-compile list), `tests/test_landscape_groups.cpp`.
+- **Verified / Not verified:** see above.
+- **Decisions taken:** Cover from the Weather node, not MF_WeatherSnow (node-level cycle); Height weather-free instead of routing the bias around
+  snowMask; no snow gate; wind fixed in the landscape; colours are constants in the graph, **no new exposed parameters** (the count stays 13);
+  new folder `Surface/`; `weatherFunctionLoader()` extended instead of a second loader.
+- **Decisions suggested, not taken:** expose snow/sand colour and drift as landscape parameters (changes `kAutoLandscapeParamCount` and the instance panel);
+  branch-guard flat function bodies in codegen (perf); a wind-driven (not origin-rotating) ripple direction.
+- **Pending:** perf A/B of the landscape pass; EngineContent upload of the two new functions and four materials (outward-facing, not done); D3D/Vulkan look.
+- **Traps:** a function tuning change means `matfn_gen` AND `landscape_tex_gen --material` for all four groups (the baked text inlines the function body);
+  editor deploy gets `EngineContent` at editor build only; `HE_Core` sources are listed by hand in `src/HE_Core/CMakeLists.txt`; the he_tests build overwrites
+  `out/deploy/Editor` libs, so keep a copy before the next A/B (`scripts/perf/selfcontain_deploy_copy.sh`).
+- **Next steps:** 1. step 3 (Path layer) can take layers 8..11, nothing here blocks it; 2. a perf A/B (old deploy vs new) before the human ships this;
+  3. tune the look in the live editor with real Desert arrays (sand colour constant in `AutoLandscapeMaterial.cpp`, ripple/grain numbers in the builders).

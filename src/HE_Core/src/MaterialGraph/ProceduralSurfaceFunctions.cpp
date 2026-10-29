@@ -105,7 +105,7 @@ MaterialGraph buildProceduralSnowFunction()
     // The inputs, in the order kSnowIn* names.
     const R pos      = f.input(f.in("Position",       P::Vec2,  0.0f));
     const R cover    = f.input(f.in("Cover",          P::Float, 1.0f));
-    const R color    = f.input(f.in("Color",          P::Vec3,  0.92f));
+    const R color    = f.input(f.in("Color",          P::Vec3,  0.85f));
     const R grain    = f.input(f.in("Grain",          P::Float, 0.5f));
     const R drift    = f.input(f.in("Drift",          P::Float, 0.5f));
     const R wind     = f.input(f.in("Wind Direction", P::Vec2,  1.0f));
@@ -122,7 +122,7 @@ MaterialGraph buildProceduralSnowFunction()
     // slope through the same two directions. More snow on the ground, more to blow around.
     const R q  = o.f.e(T::CombineRGBA, { o.mul(w.across, 0.55f), o.mul(w.along, 0.125f) });
     const R dn = o.f.e(T::FbmGrad, { q, o.k(1.0f) });
-    const R driftAmp   = o.mul(o.mul(drift, 0.45f), o.add(o.mul(cover, 0.6f), 0.4f));
+    const R driftAmp   = o.mul(o.mul(drift, 1.0f), o.add(o.mul(cover, 0.6f), 0.4f));
     const R slopeAcross = o.mul(o.mul(driftAmp, o.pin(dn, 1)), 0.55f);
     const R slopeAlong  = o.mul(o.mul(driftAmp, o.pin(dn, 2)), 0.125f);
     const R gxDrift = o.sub(o.mul(slopeAlong, w.dx), o.mul(slopeAcross, w.dz));
@@ -157,7 +157,7 @@ MaterialGraph buildProceduralSnowFunction()
     const R roughness = o.add(o.mul(o.sat(rough0), 0.95f), 0.05f);
 
     // ── AO: the troughs of the drifts and the pits between the grains ───────────────────────
-    const R cavity = o.add(o.mul(o.mul(drift, 0.35f), o.inv(d)), o.mul(o.mul(grain, 0.12f), o.inv(g)));
+    const R cavity = o.add(o.mul(o.mul(drift, 0.6f), o.inv(d)), o.mul(o.mul(grain, 0.12f), o.inv(g)));
     const R ao = o.sat(o.inv(o.mul(cavity, o.inv(o.mul(soft, 0.6f)))));
 
     surfaceOutputs(f, albedo, normal, roughness, ao, height);
@@ -190,28 +190,32 @@ MaterialGraph buildProceduralSandFunction()
     const R grainRelief = o.mul(o.mul(o.k(0.3f), fadeG), o.inv(o.mul(wet, 0.5f)));
 
     // ── Ripples: ridges across the wind, wavelength "Ripple Size", wandering with a slow noise ─
-    // The phase is the distance along the wind in wavelengths plus a low-frequency wobble (3 m
-    // cells, integer hash), so the crests bend and fork instead of ruling the ground like lines.
-    // It goes through fract() before the sine: a kilometre from the origin it is tens of thousands
-    // of radians, where a GPU's sin() is no longer exact.
-    const R wob = o.f.e(T::Fbm, { pos, o.k(0.35f) });
+    // The phase is the distance along the wind in wavelengths plus a low-frequency wobble (4 m
+    // cells, integer hash) worth several wavelengths, so the crests bend, fork and bunch up
+    // instead of ruling the ground like lines; the same noise takes the ripples out of the flat
+    // patches between the fields of them. A crest is a sine and a weaker second harmonic: the
+    // windward flank long and gentle, the lee flank short and steep.
+    // The phase goes through fract() before the sine: a kilometre from the origin it is tens of
+    // thousands of radians, where a GPU's sin() is no longer exact.
+    const R wob = o.f.e(T::Fbm, { pos, o.k(0.25f) });
     o.f.g.findNode(wob.node)->p[0] = 1.0f;
-    const R phase = o.mul(o.fract(o.add(o.div(w.along, rippleSize), o.mul(o.sub(wob, 0.47f), 2.2f))), kTwoPi);
-    const R s  = o.sin(phase);
-    const R cs = o.sin(o.add(phase, kHalfPi));
+    const R phase = o.mul(o.fract(o.add(o.div(w.along, rippleSize), o.mul(o.sub(wob, 0.47f), 5.0f))), kTwoPi);
+    const R phase2 = o.add(o.mul(phase, 2.0f), 1.1f);
+    const R shape  = o.add(o.sin(phase), o.mul(o.sin(phase2), 0.3f));                          // the crest profile
+    const R slope  = o.add(o.sin(o.add(phase, kHalfPi)), o.mul(o.sin(o.add(phase2, kHalfPi)), 0.6f)); // its derivative in phase
     const R fadeR = fadeFar(o, rippleSize);
-    const R rip   = o.mul(ripple, fadeR);
-    const R slopeRip = o.mul(o.mul(rip, 0.3f), cs);   // d(height)/d(along): the crests' flank slope
+    const R rip   = o.mul(o.mul(ripple, fadeR), o.ss(0.28f, 0.5f, wob));
+    const R slopeRip = o.mul(o.mul(rip, 0.2f), slope);   // d(height)/d(along): the crests' flank slope
     const R gx = o.add(o.mul(slopeRip, w.dx), o.mul(o.pin(gn, 1), grainRelief));
     const R gz = o.add(o.mul(slopeRip, w.dz), o.mul(o.pin(gn, 2), grainRelief));
     const R normal = bendNormal(o, gx, gz);
 
     // ── Height: ripples and grain ───────────────────────────────────────────────────────────
-    const R height = o.sat(o.add(o.add(o.mul(o.mul(ripple, 0.3f), s), o.mul(o.sub(g, 0.47f), 0.3f)), 0.5f));
+    const R height = o.sat(o.add(o.add(o.mul(o.mul(ripple, 0.25f), shape), o.mul(o.sub(g, 0.47f), 0.3f)), 0.5f));
 
     // ── Colour: speckle, lighter crests, wet darkening, glitter ─────────────────────────────
     const R speck = o.add(o.mul(o.mul(o.sub(g, 0.47f), 0.45f), fadeG), 1.0f);
-    const R crest = o.add(o.mul(o.mul(o.mul(ripple, 0.07f), s), fadeR), 1.0f);
+    const R crest = o.add(o.mul(o.mul(o.mul(ripple, 0.07f), shape), o.mul(fadeR, o.ss(0.28f, 0.5f, wob))), 1.0f);
     const R wetDark = o.mix(1.0f, 0.52f, wet);
     const R spark = o.mul(o.mul(o.mul(o.ss(0.66f, 0.82f, g), glitter), fadeG), o.inv(wet));
     const R albedo = o.sat(o.add(o.mul(o.mul(o.mul(color, speck), crest), wetDark), o.mul(spark, 0.22f)));
@@ -221,7 +225,7 @@ MaterialGraph buildProceduralSandFunction()
     const R roughness = o.add(o.mul(o.sat(rough0), 0.95f), 0.05f);
 
     // ── AO: the troughs between the ripples, the pits between the grains ────────────────────
-    const R aoRip   = o.mul(o.mul(o.mul(ripple, 0.15f), fadeR), o.inv(s));
+    const R aoRip   = o.mul(o.mul(rip, 0.12f), o.inv(shape));
     const R aoGrain = o.mul(o.mul(o.k(0.12f), fadeG), o.sat(o.sub(o.k(0.5f), g)));
     const R ao = o.sat(o.inv(o.add(aoRip, aoGrain)));
 

@@ -196,7 +196,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int snowColor = w.node(T::ConstColor, 2);
         {
             MatGraphNode* c = r.graph.findNode(snowColor);
-            c->p[0] = 0.92f; c->p[1] = 0.94f; c->p[2] = 0.97f;
+            c->p[0] = 0.82f; c->p[1] = 0.85f; c->p[2] = 0.90f;
         }
         r.graph.connect(xz, 0, call, kSnowInPosition);
         r.graph.connect(weather, 3, call, kSnowInCover);
