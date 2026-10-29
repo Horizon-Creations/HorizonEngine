@@ -105,6 +105,10 @@ std::vector<SettingDesc> buildCatalog()
 	                    "Content Browser", "cpucache", &EditorConfig::KeepCPUAssets,
 	                    "Keep mesh/texture data in RAM after upload. Costs memory, "
 	                    "saves a re-read."));
+	t.push_back(boolRow("contentBrowser.autoLodOnImport", "Generate LODs on Import",
+	                    "Content Browser", "autolodimport", &EditorConfig::AutoLodOnImport,
+	                    "Importing a static mesh also writes simplified copies next to it "
+	                    "(Name_LOD1, Name_LOD2 ...)."));
 	t.push_back(intRow("contentBrowser.refreshRate", "Refresh Rate",
 	                   "Content Browser", "cbrefresh",
 	                   &EditorConfig::ContentBrowserRefreshRate, 1, 600,

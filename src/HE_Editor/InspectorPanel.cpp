@@ -8,6 +8,7 @@
 #include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
+#include "AutoLodDialog.h"               // Generate LODs on a foliage layer and a LOD component
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
@@ -3772,6 +3773,21 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			ImGui::EndDisabled();
 			EditorWidgets::helpForLabel("Add Level##fol");
+			// The chain from the layer's mesh: Name_LOD1.. as assets, and the levels
+			// above filled in with distances worked out from their pixel error.
+			ImGui::SameLine();
+			ImGui::BeginDisabled(fol->meshAssetId == HE::UUID{});
+			if (EditorWidgets::smallButton("Generate LODs##fol"))
+			{
+				AutoLodDialog::Request req;
+				req.kind   = AutoLodDialog::Kind::FoliageLayer;
+				req.mesh   = fol->meshAssetId;
+				req.entity = entity;
+				req.layer  = static_cast<int>(folc->activeIndex());
+				AutoLodDialog::open(req);
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Generate LODs##fol");
 			if (!fol->lods.empty())
 			{
 				Row::dragFloat("Level Hysteresis##fol", &fol->lodHysteresis, 0.1f, 0.0f, 50.f, "%.1f m"); trackEdit();
@@ -3836,6 +3852,17 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				ImGui::PopID();
 			}
 			if (ImGui::Button("+ Level")) { lod->levels.push_back({}); trackEdit(); }
+			// Simpler copies of the mesh as Name_LOD1.. assets, filled in here with the
+			// distance each one is good enough from. LOD 0 stays the entity's own mesh.
+			ImGui::SameLine();
+			if (EditorWidgets::button("Generate LODs##lod"))
+			{
+				AutoLodDialog::Request req;
+				req.kind   = AutoLodDialog::Kind::Entity;
+				req.entity = entity;
+				AutoLodDialog::open(req);
+			}
+			EditorWidgets::helpForLabel("Generate LODs##lod");
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<LODComponent>(entity); }
 	}

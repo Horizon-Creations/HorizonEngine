@@ -959,6 +959,9 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
 			ImGui::SetTooltip("Not implemented — CPU asset data is always kept.");
 	});
+	row("autolodimport", "Content Browser", [&]{
+		EditorWidgets::checkbox("Generate LODs on Import", &cfg.AutoLodOnImport);
+	});
 	row("cbrefresh", "Content Browser", [&]{
 		Row::inputInt("Refresh Interval (s)", &cfg.ContentBrowserRefreshRate);
 		if (cfg.ContentBrowserRefreshRate < 0) cfg.ContentBrowserRefreshRate = 0;
@@ -2454,6 +2457,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 			cfg.EditorCameraSpeed = 6.0f;
 			cfg.KeepCPUAssets     = false;
 			cfg.ContentBrowserRefreshRate = 60;
+			cfg.AutoLodOnImport   = false;
 			cfg.AutosaveEnabled     = true;
 			cfg.AutosaveIntervalSec = 60;
 			cfg.RewardsEnabled       = true;

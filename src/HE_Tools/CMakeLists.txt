@@ -35,6 +35,7 @@ add_library(HorizonImporters STATIC
     src/AssetImporter/AudioImporter.cpp
     src/AssetImporter/FontImporter.cpp
     src/MeshSimplify/MeshSimplifier.cpp
+    src/MeshSimplify/AutoLod.cpp
 )
 set_target_properties(HorizonImporters PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(HorizonImporters

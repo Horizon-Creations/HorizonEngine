@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include "ImporterCommon.h"
+#include "AutoLod.h"
 #include "Diagnostics/Logger.h"
 #ifdef HE_HAVE_ASSIMP
 #include "AssimpMeshImport.h"   // FBX / OBJ / COLLADA (no Assimp headers leak through it)
@@ -99,7 +100,8 @@ void generateNormals(StaticMeshAsset& mesh)
 // re-import redirect rather than the source file.
 std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> mesh,
                                               const std::filesystem::path&     sourcePath,
-                                              const std::filesystem::path&     contentRoot)
+                                              const std::filesystem::path&     contentRoot,
+                                              const MeshImporter::ImportSettings& settings)
 {
 	if (!mesh->sections.empty() && mesh->sections[0].materialPath.empty())
 		mesh->sections[0].materialPath = mesh->materialPath;
@@ -113,6 +115,19 @@ std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> m
 		 + std::to_string(mesh->indices.size() / 3) + " tris, "
 		 + std::to_string(mesh->sections.size()) + " section"
 		 + (mesh->sections.size() == 1 ? "" : "s") + ")").c_str());
+
+	// The chain goes beside the mesh, after it is on disk: a sidecar is named after the
+	// mesh's final path, which a re-import has just pinned onto the existing file.
+	if (settings.generateLods)
+	{
+		AutoLod::Settings lod;
+		lod.ratios  = settings.lodRatios;
+		lod.foliage = settings.lodFoliage;
+		const AutoLod::Chain chain = AutoLod::generate(*mesh, contentRoot, lod);
+		// A mesh that cannot be reduced is not a failed import; it just has no chain.
+		if (!chain.error.empty())
+			HE_LOG_WARN(Tool, "%s", ("MeshImporter: no LODs for " + mesh->path + ": " + chain.error).c_str());
+	}
 	return mesh;
 }
 
@@ -186,7 +201,7 @@ std::unique_ptr<StaticMeshAsset> importViaAssimp(
 	mesh->sections = Importer::buildMeshSections(
 		baked.ranges, primary, materials.paths, mesh->indices);
 
-	return finishImport(std::move(mesh), sourcePath, contentRoot);
+	return finishImport(std::move(mesh), sourcePath, contentRoot, settings);
 }
 #endif
 
@@ -288,5 +303,5 @@ std::unique_ptr<StaticMeshAsset> MeshImporter::import(
 
 	cgltf_free(data);
 
-	return finishImport(std::move(mesh), sourcePath, contentRoot);
+	return finishImport(std::move(mesh), sourcePath, contentRoot, settings);
 }

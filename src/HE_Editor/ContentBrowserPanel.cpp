@@ -48,6 +48,8 @@
 #include <HorizonCode/HorizonCode.h>     // starter graph for freshly created HorizonCode classes
 #include <Types/Enums.h>
 #include "MeshImporter.h"
+#include "AutoLodDialog.h"      // Generate LODs...
+#include "AutoLod.h"            // isLodSidecarPath
 #include "SkeletalMeshImporter.h"
 #include "AnimationClipImporter.h"
 #include "TextureImporter.h"
@@ -4692,6 +4694,25 @@ void render(AppContext& ctx, int& tabSelectRequest,
 							("Editor: created material instance of '" + parentRel + "'").c_str());
 					}
 					ImGui::CloseCurrentPopup();
+				}
+
+				// ── Generate LODs (Thema 331, step 3) ─────────────────────
+				// Simpler copies of a static mesh as Name_LOD1.. beside it. Not on
+				// engine ground (read-only, and the engine meshes ship their own
+				// levels) and not on a level itself.
+				if (!engineLocked && ext == ".hasset" && ctx.contentManager &&
+				    EditorAssetTypeCache::is(s_ctxMenuItem, HE::AssetType::StaticMesh) &&
+				    !AutoLod::isLodSidecarPath(srcPath.string()) &&
+				    EditorWidgets::menuItem("Generate LODs..."))
+				{
+					const std::string rel = ctx.contentManager->toContentRelativePath(srcPath.string());
+					if (!rel.empty())
+					{
+						AutoLodDialog::Request req;
+						req.kind = AutoLodDialog::Kind::MeshAsset;
+						req.mesh = ctx.contentManager->loadAsset(rel);
+						AutoLodDialog::open(req);
+					}
 				}
 
 				// ── Add a StaticMesh .hasset to the scene ─────────────────

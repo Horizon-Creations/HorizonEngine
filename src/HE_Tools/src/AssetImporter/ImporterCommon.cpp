@@ -1,6 +1,7 @@
 #include "ImporterCommon.h"
 #include <Platform/ProjectWriteGate.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +14,7 @@
 // The whole importer set, because importSource() below is the one place that
 // decides which of them a given file belongs to.
 #include "AnimationClipImporter.h"
+#include "AutoLod.h"
 #include "AudioImporter.h"
 #include "FontImporter.h"
 #include "MaterialImporter.h"
@@ -707,6 +709,13 @@ const char* importBlockedReason(const std::filesystem::path& sourcePath)
 	return "";
 }
 
+namespace
+{
+	std::atomic<bool> s_autoLodOnImport{ false };
+}
+bool autoLodOnImport() { return s_autoLodOnImport.load(std::memory_order_relaxed); }
+void setAutoLodOnImport(bool on) { s_autoLodOnImport.store(on, std::memory_order_relaxed); }
+
 bool importSource(const std::filesystem::path& sourcePath,
                   const std::filesystem::path& contentRoot,
                   const std::filesystem::path& relativeOutputDir,
@@ -734,8 +743,14 @@ bool importSource(const std::filesystem::path& sourcePath,
 			AnimationClipImporter::importAndWrite(sourcePath, contentRoot, relativeOutputDir);
 			return true;
 		}
+	{
+		MeshImporter::ImportSettings settings;
+		settings.generateLods = options.generateLods.value_or(autoLodOnImport());
+		settings.lodRatios    = options.lodRatios;
+		settings.lodFoliage   = options.lodFoliage;
 		return MeshImporter::import(sourcePath, contentRoot, relativeOutputDir,
-		                            MeshImporter::ImportSettings{}, outputs)     != nullptr;
+		                            settings, outputs)                           != nullptr;
+	}
 	case SourceKind::Texture:
 	{
 		TextureImporter::ImportSettings settings;
@@ -860,6 +875,19 @@ bool reimport(const std::filesystem::path& assetFile,
 	ImportOptions options;
 	if (classifySource(source) == SourceKind::Texture)
 		options.textureSrgb = textureSrgbOf(assetFile);
+	// A mesh that has an Auto-LOD chain keeps one: the levels are derived from LOD0,
+	// so a changed source leaves them describing the old geometry. How many it had is
+	// all the file records (the ratios are not stored), so the default run is cut to
+	// that count.
+	if (classifySource(source) == SourceKind::Mesh)
+	{
+		const std::vector<std::string> levels = AutoLod::findLodSidecars(contentRoot, outputs.asset);
+		if (!levels.empty())
+		{
+			options.generateLods = true;
+			options.lodRatios.resize(std::min(options.lodRatios.size(), levels.size()));
+		}
+	}
 
 	if (!importSource(source, contentRoot, relDir, outputs, options))
 		return false;

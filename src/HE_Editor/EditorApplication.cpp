@@ -1,5 +1,6 @@
 #include "EditorApplication.h"
 #include "EditorGraphics.h"   // the project's copy of the graphics fields
+#include "ImporterCommon.h"   // Importer::setAutoLodOnImport
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
 #include <cstring>
@@ -1576,6 +1577,7 @@ void EditorApplication::OnInit()
 	GlobalState& globalstate = GlobalState::getInstance();
 	m_editorConfig.ContentBrowserRefreshRate   = globalstate.getCustomConfigInt("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	m_editorConfig.KeepCPUAssets               = globalstate.getCustomConfigBool("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	m_editorConfig.AutoLodOnImport             = globalstate.getCustomConfigBool("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
 	// The persisted key was misspelled "KeepCPUAssetsInfoAcknoleged" until the
 	// 2026-07 rework. Read the old spelling FIRST and hand it in as the default for
 	// the corrected key, so a user who already dismissed the info box keeps that
@@ -3434,6 +3436,9 @@ void EditorApplication::OnRender(float dt)
 			window()->SetTitle(title);
 		}
 	}
+	// The importers read the preference through a process default (they have no
+	// AppContext), so it is handed over every frame: live, no restart.
+	Importer::setAutoLodOnImport(m_editorConfig.AutoLodOnImport);
 	// ── Automatic asynchronous content refresh ────────────────────────────────
 	if (m_projectLoaded && m_editorConfig.ContentBrowserRefreshRate > 0)
 	{
@@ -15062,6 +15067,7 @@ void EditorApplication::writeEditorConfig()
 {
 	GlobalState& globalstate = GlobalState::getInstance();
 	globalstate.setCustomConfigEntry("KeepCPUAssets",               m_editorConfig.KeepCPUAssets);
+	globalstate.setCustomConfigEntry("AutoLodOnImport",             m_editorConfig.AutoLodOnImport);
 	globalstate.setCustomConfigEntry("KeepCPUAssetsInfoAcknowledged", m_editorConfig.KeepCPUAssetsInfoAcknowledged);
 	globalstate.setCustomConfigEntry("ContentBrowserRefreshRate",   m_editorConfig.ContentBrowserRefreshRate);
 	globalstate.setCustomConfigEntry("CbTreeWidth",                 m_editorConfig.CbTreeWidth);

@@ -314,7 +314,18 @@ namespace Importer
 		// to come out linear, so an albedo PNG sampled its encoded values as
 		// linear light and looked washed out and too bright.
 		std::optional<bool> textureSrgb;
+		// Static mesh sources only: also write the Auto-LOD chain beside the mesh
+		// (AutoLod.h, Thema 331 step 3). reimport() sets it for a mesh that already
+		// has `<name>_LOD1.hasset`, so refreshing the mesh refreshes its levels.
+		// Unset: the process default (autoLodOnImport(), which the editor sets from its
+		// preference and the asset compiler leaves off).
+		std::optional<bool> generateLods;
+		std::vector<float>  lodRatios    = { 0.5f, 0.25f, 0.1f };
+		bool                lodFoliage   = false;
 	};
+	// The process-wide default for ImportOptions::generateLods. Off.
+	bool autoLodOnImport();
+	void setAutoLodOnImport(bool on);
 	bool importSource(const std::filesystem::path& sourcePath,
 	                  const std::filesystem::path& contentRoot,
 	                  const std::filesystem::path& relativeOutputDir = {},

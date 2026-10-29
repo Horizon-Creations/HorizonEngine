@@ -139,6 +139,9 @@ add_executable(he_tests
     # Its sibling for asset tabs: per-row answers carry the row's key, and it
     # waits for the scene's offer.
     test_asset_recovery_ui.cpp
+    # Generate LODs: the dialog opens and closes, the runner fills a foliage layer / a
+    # LOD component / only the sidecars, and Undo takes the scene edit back (Thema 331 S3).
+    test_auto_lod_ui.cpp
     # The "git is missing" remedy: Install Git exactly when the route can run,
     # the manual way otherwise. Nothing is installed (the callback is a counter).
     test_git_install_ui.cpp
@@ -230,6 +233,8 @@ add_executable(he_tests
     # editor yet (Thema 331 S2): triangle/attribute floors, UV-seam and border locks,
     # the foliage alpha-coverage retry loop.
     test_mesh_simplifier.cpp
+    # Auto-LOD chains: generator, sidecars, screen-error distances, foliage/LOD fill (Thema 331 S3).
+    test_auto_lod.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp
@@ -963,6 +968,9 @@ add_executable(he_tests
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     # And the asset tabs' recovery dialog, for test_asset_recovery_ui.cpp.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
+    # The Generate LODs dialog and runner, for test_auto_lod_ui.cpp (Thema 331 S3):
+    # same AppContext, same per-file HE_IMGUI_ENABLED. HorizonImporters is linked.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AutoLodDialog.cpp
     # The git-missing dialog and its remedy, for test_git_install_ui.cpp: same
     # AppContext, same per-file HE_IMGUI_ENABLED. It reads the probe and the
     # git-install callbacks; HorizonSourceControl is linked below.
@@ -1067,6 +1075,8 @@ set_source_files_properties(
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
     test_asset_recovery_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AutoLodDialog.cpp
+    test_auto_lod_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/GitMissingDialog.cpp
     test_git_install_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ToolSetupDialog.cpp
