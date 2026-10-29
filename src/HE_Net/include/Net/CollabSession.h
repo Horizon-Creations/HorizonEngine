@@ -31,6 +31,8 @@
 #include "Net/NetCommon.h"
 #include "Net/NetSession.h"
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -129,7 +131,14 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // The masks travel as TerrainPatch fields 16 + layer (field 4 is gone), and the
 // component blob gains a "layers" list. A v16 peer drops the new fields and
 // reads a multi-layer component as one empty layer: a bump.
-inline constexpr std::uint16_t kCollabProtocolVersion = 17;
+// v18: an asset is addressed by its UUID, not by its path. The lock subject of an
+// asset that carries a UUID is derived from it (assetUuidSubject), so a rename or
+// move no longer changes what a lock, a delta or a file frame is about, and a
+// receiver resolves the subject to the asset's CURRENT path before it looks at the
+// path the frame carries. A v17 peer derives its subjects from paths: the same asset
+// would be two different locks across the two builds, which is a bump. The join also
+// carries a ProjectFingerprint (two new rejection reasons), appended to the request.
+inline constexpr std::uint16_t kCollabProtocolVersion = 18;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,
@@ -154,7 +163,85 @@ enum class JoinRejectReason : std::uint8_t {
     // the client can tell it apart and ASK, rather than reporting a dead end to
     // a user who would happily have agreed. See the prompt in CollabPanel.
     LargeAssetsRequired = 6,
+    // The manifest ids agree but the two projects share almost no assets: a copy of
+    // a template or a "Save As" that was never meant to be joined, or one side's
+    // content is not what it claims to be. Joining would hand the joiner a scene whose
+    // asset references dangle, exactly like ProjectMismatch.
+    ProjectDiverged = 7,
+    // The manifest ids differ but the assets are (nearly) the same: the same project
+    // whose id was minted separately on one machine (a manifest that had none, or
+    // one that was never committed). A different cause from ProjectMismatch with a
+    // different fix, so it is told apart.
+    ProjectIdMismatch = 8,
 };
+
+// A cheap, order-free summary of which assets a project contains, sent with a join.
+// The manifest id says "these are meant to be the same project"; this says whether the
+// files agree. A bottom-k sketch of the hashed asset UUIDs: the k smallest hashes
+// of the set. Two sketches give an unbiased estimate of the Jaccard overlap of the
+// sets (the share of assets both have) in O(k), however large the projects are.
+//
+// Deliberately coarse. Two collaborators on one project differ by whatever one of
+// them has made since the last pull, so an honest session sees an overlap close to
+// 1; the thresholds below only trip for projects that are not the same.
+struct ProjectFingerprint {
+    static constexpr std::size_t   kSketchSize = 64;
+    // Below this many assets a project says too little about itself (a fresh one
+    // has a handful) and the content comparison is skipped.
+    static constexpr std::uint32_t kMinAssets = 8;
+    // Overlap under this is "not the same project" even with a matching id.
+    static constexpr double        kDivergedBelow = 0.15;
+    // Overlap at or above this with DIFFERENT ids is "same project, different id".
+    static constexpr double        kSameContentAtLeast = 0.6;
+
+    std::uint32_t              assetCount = 0;
+    std::vector<std::uint64_t> sketch;      // ascending, unique, at most kSketchSize
+
+    bool comparable() const { return assetCount >= kMinAssets && !sketch.empty(); }
+
+    // One asset id folded to the 64 bits the sketch and the lock subject use. A
+    // mixer rather than a plain xor so ids that differ in few bits spread evenly.
+    static std::uint64_t fold(std::uint64_t hi, std::uint64_t lo) {
+        std::uint64_t x = hi * 0x9E3779B97F4A7C15ull ^ (lo + 0x7F4A7C159E3779B9ull);
+        x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 27; x *= 0x94D049BB133111EBull;
+        x ^= x >> 31;
+        return x;
+    }
+
+    // From the folded hashes of every asset (any order, duplicates allowed).
+    static ProjectFingerprint fromHashes(std::vector<std::uint64_t> hashes) {
+        ProjectFingerprint f;
+        std::sort(hashes.begin(), hashes.end());
+        hashes.erase(std::unique(hashes.begin(), hashes.end()), hashes.end());
+        f.assetCount = static_cast<std::uint32_t>(hashes.size());
+        if (hashes.size() > kSketchSize) hashes.resize(kSketchSize);
+        f.sketch = std::move(hashes);
+        return f;
+    }
+
+    // The share of assets the two projects have in common, 0..1, or -1 when either
+    // is too small to judge.
+    static double overlap(const ProjectFingerprint& a, const ProjectFingerprint& b) {
+        if (!a.comparable() || !b.comparable()) return -1.0;
+        std::size_t i = 0, j = 0, taken = 0, both = 0;
+        while (taken < kSketchSize && (i < a.sketch.size() || j < b.sketch.size())) {
+            if (j >= b.sketch.size() || (i < a.sketch.size() && a.sketch[i] < b.sketch[j])) ++i;
+            else if (i >= a.sketch.size() || b.sketch[j] < a.sketch[i])                    ++j;
+            else { ++i; ++j; ++both; }
+            ++taken;
+        }
+        return taken ? static_cast<double>(both) / static_cast<double>(taken) : -1.0;
+    }
+};
+
+// The lock subject of an asset that carries a UUID. The top bit is set so asset
+// subjects never collide with entity handles (small integers), the same rule the
+// path-derived subject follows; the rest is the folded UUID, so it is the same on
+// every machine and does not change when the file does.
+inline std::uint64_t assetUuidSubject(std::uint64_t hi, std::uint64_t lo) {
+    return ProjectFingerprint::fold(hi, lo) | (1ull << 63);
+}
 
 // Why a participant stopped being in the session, as told to the participant
 // itself. A kick is a door held open; a ban locks it for the session's lifetime.
@@ -351,6 +438,10 @@ public:
         // interpret it — the editor puts the project's uuid here — and an empty
         // key on BOTH sides matches, so a projectless session still works.
         std::string projectKey;
+        // What the project contains, sent with a join and compared by the host (see
+        // ProjectFingerprint). Left empty it is not compared: a projectless session
+        // and the library's own tests do not have one.
+        ProjectFingerprint projectFingerprint;
         // Human-readable name for the same thing, sent with a rejection so the
         // joiner can be told WHICH project to open rather than just "no".
         std::string projectLabel;

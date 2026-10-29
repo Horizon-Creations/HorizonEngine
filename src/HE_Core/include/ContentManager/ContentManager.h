@@ -78,6 +78,23 @@ public:
 			if (uuid == id) return path;
 		return {};
 	}
+	// The UUIDs of every loose asset of THIS project — the registry plus what was
+	// loaded or saved since the last scan, without the shipped "Engine/…"
+	// defaults every project has. What a collaboration session compares on join
+	// to tell two copies of one project from two projects that share a manifest
+	// id, and what it resolves a peer's asset id against. Unordered; a pure
+	// lookup that loads nothing.
+	std::vector<HE::UUID> projectAssetIds() const
+	{
+		std::vector<HE::UUID> out;
+		out.reserve(m_diskRegistry.size() + m_pathToUUID.size());
+		const auto own = [](const std::string& p) { return p.rfind("Engine/", 0) != 0; };
+		for (const auto& [id, path] : m_diskRegistry)
+			if (own(path)) out.push_back(id);
+		for (const auto& [path, id] : m_pathToUUID)
+			if (own(path) && !m_diskRegistry.count(id)) out.push_back(id);
+		return out;
+	}
 	bool saveAsset(RuntimeAsset& asset);
 	// The same bytes saveAsset() would write, written to `fullPath` instead —
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a

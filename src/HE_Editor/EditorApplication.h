@@ -57,6 +57,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -1006,6 +1007,13 @@ private:
 	std::string collabSyncKey(const std::string& tabPath, bool isFolder = false);
 	// Where a key lives locally; empty for a document that has no file of its own.
 	std::string collabLocalPath(const std::string& key);
+	// A collaboration frame names an asset by its subject (derived from the UUID in
+	// its file). This machine's current key for it — wherever the file lives now —
+	// or empty when we do not have that asset. The index behind it is rebuilt when
+	// the content changes, never per frame.
+	std::string keyForCollabSubject(std::uint64_t subject);
+	// What this project contains, for the join's content check.
+	HE::Net::ProjectFingerprint collabProjectFingerprint();
 	// The project directory (currentProject().path may name the .heproj itself).
 	std::string projectRoot();
 	// Bindings for a tab, including the two documents the editor owns rather than
@@ -1071,6 +1079,12 @@ private:
 	// Syncable asset tabs that were open last pass, so the ones that closed can
 	// drop what the host told them about their lock.
 	std::unordered_set<std::string> m_docMirrorPaths;
+	// collaboration subject → the asset's UUID, for keyForCollabSubject. The PATH is
+	// not stored: it is asked of the ContentManager each time, so a rename needs no
+	// invalidation here.
+	std::unordered_map<std::uint64_t, HE::UUID> m_collabSubjectIndex;
+	std::uint64_t                               m_collabSubjectEpoch = ~0ull;
+	std::chrono::steady_clock::time_point       m_collabSubjectRebuilt{};
 	// Last transform we recorded for the held subject, so an undo entry spans a
 	// whole edit rather than one entry per frame of a drag.
 	std::uint64_t    m_undoBaselineSubject = 0;
