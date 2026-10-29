@@ -96,6 +96,11 @@ struct EnvironmentSettings
     // ABSOLUTE world altitude of the cloud deck base (layer is 1.5x as thick).
     // Camera-independent, so the viewer can fly into and above the clouds.
     float     cloudHeight = 200.0f;
+    // How high the SKY-DOME clouds (cloudMode 0) look: a multiplier on the dome's noise
+    // projection. 1 is the classic look; larger puts the clouds further up (smaller, more
+    // compressed toward the horizon, drifting slower against their own size), smaller brings
+    // them close and large. cloudHeight only drives the 3D mode, this only the dome.
+    float     cloudDomeHeight = 1.0f;
     // Cloud raymarch quality (perf knob): 0 Low, 1 Medium, 2 High — scales step counts.
     int       cloudQuality = 1;
     bool      lowResClouds = true;  // quarter-res cloud pre-pass + upsample (perf; default on)

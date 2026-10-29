@@ -4642,6 +4642,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyAuroraFragment = glGetUniformLocation(m_skyProgram, "uAuroraFragment");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
 	m_uSkyWindDrift   = glGetUniformLocation(m_skyProgram, "uWindDrift");
+	m_uSkyCloudDomeHeight = glGetUniformLocation(m_skyProgram, "uCloudDomeHeight");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
 	m_uSkyCloudShadowPass   = glGetUniformLocation(m_skyProgram, "uCloudShadowPass");
 	m_uSkyCloudShadowRegion = glGetUniformLocation(m_skyProgram, "uCloudShadowRegion");
@@ -5356,6 +5357,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
 		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2 (as in the sky pass)
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -11333,6 +11335,7 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
 		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);

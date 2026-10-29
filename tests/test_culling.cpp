@@ -2015,10 +2015,17 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 	CHECK(p.wind.z == doctest::Approx(w.z));
 	CHECK(p.wind.w == doctest::Approx(0.5f));
 	// drift.xyz is the wind integrated over time (CloudDrift, process-wide state, so only its
-	// shape is checked here; test_sky_shader covers the values); drift.w is unused.
+	// shape is checked here; test_sky_shader covers the values); drift.w is the dome cloud height.
 	CHECK(std::isfinite(p.drift.x));
 	CHECK(std::isfinite(p.drift.z));
-	CHECK(p.drift.w == doctest::Approx(0.0f));
+	{
+		IRenderer::EnvironmentSettings tall = env;
+		tall.cloudDomeHeight = 2.5f;
+		CHECK(HE::BuildSkyFrameParams(tall, in).drift.w == doctest::Approx(2.5f));
+		tall.cloudDomeHeight = 0.0f;                  // a broken value must not collapse the dome
+		CHECK(HE::BuildSkyFrameParams(tall, in).drift.w >= 0.1f);
+	}
+	CHECK(p.drift.w == doctest::Approx(1.0f));      // cloudDomeHeight, the classic look by default
 
 	CHECK(p.sunDir.w   == doctest::Approx(1.0f));    // has-moon flag
 	CHECK(p.sunColor.w == doctest::Approx(0.3f));    // lunar phase

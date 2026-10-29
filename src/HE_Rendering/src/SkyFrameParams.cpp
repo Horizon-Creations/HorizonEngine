@@ -1,4 +1,5 @@
 #include "HorizonRendering/SkyFrameParams.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 
@@ -54,7 +55,7 @@ SkyFrameParams BuildSkyFrameParams(const IRenderer::EnvironmentSettings& env,
 	p.auroraColor    = glm::vec4(env.auroraColor, env.milkyWayIntensity);
 	const glm::vec3 wind = CloudWindVector(env);
 	p.wind           = glm::vec4(wind, env.flash);
-	p.drift          = glm::vec4(CloudDriftOffset(wind, skyTime), 0.0f);
+	p.drift          = glm::vec4(CloudDriftOffset(wind, skyTime), std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	p.cameraPos      = glm::vec4(in.cameraPos, static_cast<float>(env.cloudMode));
 	p.cloud          = glm::vec4(env.cloudHeight, env.cloudDensity, env.cloudFluffiness, env.contrailAmount);
 	p.cloudTint      = glm::vec4(env.cloudTint, env.cirrusAmount);

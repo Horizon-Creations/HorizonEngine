@@ -61,6 +61,7 @@ uniform vec3      uAuroraColor;    // aurora lower/base colour (e.g. green)
 uniform vec3      uAuroraColorTop; // aurora upper colour (e.g. purple)
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
 uniform vec3      uWindDrift;   // where that wind has carried the clouds so far (world units; CloudDrift)
+uniform float     uCloudDomeHeight; // how high the SKY-DOME clouds look (1 = classic): scales the dome's noise projection
 uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 uniform sampler2D uCloudTex;    // quarter-res cloud buffer (rgb = L, a = T) for low-res clouds
 uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inline raymarch
@@ -485,7 +486,7 @@ vec3 overcastBand(vec3 baseSky, float gap, vec3 dir, vec3 sunDir, vec3 sunColor,
 // of a unit hemisphere), in noise units; the same wind drift as the march.
 vec2 domeDeckXZ(vec3 dir, vec3 wind, float time)
 {
-	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5) + uWindDrift.xz * (kCloudScale * 0.5);
+	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5 * uCloudDomeHeight) + uWindDrift.xz * (kCloudScale * 0.5);
 }
 // Worley (cellular) lookup from the noise volume's G channel — bright at the cell
 // feature points. fBm of it is the billowy cumulus shape. The bake already tiles,
@@ -525,7 +526,7 @@ float cloudDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
 	float hgrad = cloudHeightGrad(pos.y);
 	if (hgrad <= 0.0) return 0.0;                                  // outside slab → no fetches
-	vec3  p      = pos * kCloudScale + uWindDrift;
+	vec3  p      = pos * (kCloudScale * uCloudDomeHeight) + uWindDrift;
 	float morph  = time * 0.030;                                  // slow forming/dissolving
 	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 4);        // large-scale coverage
 	float billow = worleyFbm(p * 0.9 + vec3(morph, 0.0, 0.0));    // fine cauliflower detail
@@ -540,7 +541,7 @@ float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
 	float hgrad = cloudHeightGrad(pos.y);
 	if (hgrad <= 0.0) return 0.0;
-	vec3  p      = pos * kCloudScale + uWindDrift;
+	vec3  p      = pos * (kCloudScale * uCloudDomeHeight) + uWindDrift;
 	float morph  = time * 0.030;
 	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 3);
 	float billow = worleyNoise3(p * 0.9 + vec3(morph, 0.0, 0.0)) * 0.7
@@ -626,7 +627,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 		// under that above 0.3125). At the default 0.5 it skips nothing and no exact bound
 		// could: 67 % of slab samples ARE cloud there (measured on the baked volume) and
 		// worleyFbm peaks at 0.87. See the Metal applyClouds() for the full note.
-		vec3  pp     = pos * kCloudScale + uWindDrift;
+		vec3  pp     = pos * (kCloudScale * uCloudDomeHeight) + uWindDrift;
 		float morph  = time * 0.030;
 		float perlin = starFbm3(pp + vec3(0.0, morph, 0.0), 4);
 		if (perlin * 0.5 + 0.55 < lo) continue;
@@ -2022,7 +2023,7 @@ float godrayClear(vec3 d, float time, float coverage, vec3 wind)
 	if (d.y < 0.05) return 1.0;                          // toward the horizon → no cloud slab hit
 	float s    = kCloudBase / max(d.y, 1e-3);
 	vec3  pos  = d * s;
-	vec3  pp   = pos * kCloudScale + uWindDrift;
+	vec3  pp   = pos * (kCloudScale * uCloudDomeHeight) + uWindDrift;
 	float perlin = starFbm3(pp + vec3(0.0, time * 0.030, 0.0), 4);
 	float lo   = cloudLo(coverage); // same threshold as applyClouds
 	float dens = smoothstep(lo, lo + 0.10, perlin * 0.5 + 0.275); // billow≈0.5 mean (sharper gap/cloud edge)
@@ -2495,6 +2496,7 @@ vec4 heSkyTexture(sampler3D s, vec3 p)  { return textureLod(s, p, 0.0); }
 #define uMilkyWay           heSky.auroraColor.w
 #define uWind               heSky.wind.xyz
 #define uWindDrift          heSky.drift.xyz
+#define uCloudDomeHeight    heSky.drift.w
 #define uFlash              heSky.wind.w
 #define uCameraPos          heSky.cameraPos.xyz
 #define uCloudMode          int(heSky.cameraPos.w + 0.5)

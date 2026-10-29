@@ -2143,6 +2143,7 @@ namespace
 		{ "WindDirection", "which way the clouds drift, in degrees" },
 		{ "WindSpeed", "how fast the clouds drift", Wx::Driven },
 		{ "CloudHeight", "the world height of the cloud deck's base, in metres" },
+		{ "CloudDomeHeight", "how high the sky-dome clouds look: 1 is classic, larger is further up and smaller" },
 		{ "CloudShadowStrength", "how dark the shadows the cloud layer casts on the ground get" },
 		{ "CloudEvolution", "how fast clouds change shape as they drift; 0 freezes the formation" },
 		{ "CloudDensity", "how solid the clouds are: low is wispy, high is thick and dark underneath" },

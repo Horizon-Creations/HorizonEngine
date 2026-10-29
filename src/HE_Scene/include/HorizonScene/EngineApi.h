@@ -1473,6 +1473,7 @@ namespace camera {
     X(windDirection,       WindDirection,       "Wind Direction") \
     X(windSpeed,           WindSpeed,           "Wind Speed") \
     X(cloudHeight,         CloudHeight,         "Cloud Height") \
+    X(cloudDomeHeight,     CloudDomeHeight,     "Cloud Dome Height") \
     X(cloudShadowStrength, CloudShadowStrength, "Cloud Shadow Strength") \
     X(cloudEvolution,      CloudEvolution,      "Cloud Evolution") \
     X(cloudDensity,        CloudDensity,        "Cloud Density") \

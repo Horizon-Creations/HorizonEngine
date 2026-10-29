@@ -1182,6 +1182,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				const char* cloudModes[] = { "Sky-dome (default)", "3D volumetric (parallax)" };
 				int cmode = (env->cloudMode == 1) ? 1 : 0;
 				if (Row::combo("Render Mode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
+				if (env->cloudMode != 1)
+				{
+					Row::sliderFloat("Dome Cloud Height", &env->cloudDomeHeight, 0.25f, 3.0f, "%.2fx"); trackEdit();
+					hint("How high the dome clouds look. 1 is the classic look; raise it and they "
+					     "sit further up, smaller and slower against their size; lower it and they come close.");
+				}
 				if (env->cloudMode == 1)
 				{
 					Row::sliderFloat("Cloud Altitude", &env->cloudHeight, 20.0f, 2000.0f, "%.0f m"); trackEdit();

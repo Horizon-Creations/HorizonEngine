@@ -40,7 +40,7 @@ IRenderer::EnvironmentSettings makeEnvironmentSettings(EnvironmentComponent& env
         .windDirection = env.windDirection, .windSpeed = env.windSpeed, .flash = env.flash,
         .wetness = env.wetness, .snowAmount = env.snowAmount, .rainAmount = env.rainAmount,
         .puddleAmount = env.puddleAmount, .snowCover = env.snowCover, .puddleSize = env.puddleSize,
-        .cloudMode = env.cloudMode, .cloudHeight = env.cloudHeight,
+        .cloudMode = env.cloudMode, .cloudHeight = env.cloudHeight, .cloudDomeHeight = env.cloudDomeHeight,
         .cloudQuality = env.cloudQuality, .lowResClouds = env.lowResClouds,
         .cloudShadows = env.cloudShadows, .cloudShadowStrength = env.cloudShadowStrength,
         .cloudStyle = env.cloudStyle, .cloudInterShadows = env.cloudInterShadows,

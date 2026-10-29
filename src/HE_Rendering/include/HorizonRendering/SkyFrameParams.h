@@ -132,7 +132,8 @@ struct SkyFrameParams
 	// x = nebulaCoverage, y = cloudStyle (0 Classic / 1 Realistic),
 	// z = cloudInterShadows (0/1), w = cloudEvolution (shape-evolution speed).
 	glm::vec4 neb2           = glm::vec4(0.5f, 1.0f, 1.0f, 1.0f);
-	// xyz = how far the wind has carried the clouds so far (world units, horizontal), w = unused.
+	// xyz = how far the wind has carried the clouds so far (world units, horizontal), w = dome cloud
+	// height (EnvironmentSettings::cloudDomeHeight, a multiplier on the dome's noise projection).
 	// This is the wind INTEGRATED over time (CloudDrift), not wind * time: the clouds sit at
 	// pos * scale + drift, so a changed wind speed or direction bends the motion from now on
 	// instead of teleporting every cloud by (new - old) * time. `wind` above stays the

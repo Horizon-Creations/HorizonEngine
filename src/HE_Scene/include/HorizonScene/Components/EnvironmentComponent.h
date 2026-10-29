@@ -46,6 +46,10 @@ struct EnvironmentComponent
     // whose playfield sits high up must raise this accordingly, or its ground
     // ends up above the clouds.
     float cloudHeight = 200.0f;
+    // How high the sky-dome clouds (cloudMode 0) look, a multiplier on the dome projection:
+    // 1 = the classic look, larger = further up and smaller, smaller = close and large.
+    // cloudHeight above only drives the 3D mode.
+    float cloudDomeHeight = 1.0f;
     // Cloud raymarch quality (performance knob): 0 = Low, 1 = Medium, 2 = High.
     // Scales the view-ray step count and sun light-march steps in both cloud paths.
     // Lower = cheaper (helps on integrated GPUs / Apple Silicon Air); default Medium.
