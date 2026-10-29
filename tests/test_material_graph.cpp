@@ -2746,7 +2746,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
 	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
 	                          HE::kAutoLandscapeParamPuddleMaxSlope, HE::kAutoLandscapeParamSnowColor,
-	                          HE::kAutoLandscapeParamSnowLook })
+	                          HE::kAutoLandscapeParamSnowLook, HE::kAutoLandscapeParamTextureMix })
 	{
 		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
 		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
@@ -2784,7 +2784,7 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	{
 		using NT = HE::MatNodeType;
 		const int wetSlice = static_cast<int>(HE::AutoLandscapeLayer::WetGround);
-		int reads = 0;
+		int reads = 0, snowReads = 0;
 		bool sawRock = false;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
 		{
@@ -2799,11 +2799,17 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 				REQUIRE(s->type == NT::ConstFloat);
 				++reads;
 				CHECK(static_cast<int>(s->p[0]) != wetSlice);
-				CHECK(static_cast<int>(s->p[0]) != static_cast<int>(HE::AutoLandscapeLayer::Snow));
+				// The Snow slice is read only by the Texture Mix overlay (Thema 328 step 4): plain, never bombed.
+				if (static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Snow))
+				{
+					++snowReads;
+					CHECK((n.type == NT::TextureArraySample || n.type == NT::NormalMapArraySample));
+				}
 				sawRock = sawRock || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Rock);
 			}
 		}
-		CHECK(reads == 18); // 3 bombed layers (Grass, Dirt, Rock) x 3 maps x (plain + bombed)
+		CHECK(snowReads == 3);   // albedo, normal, mask, behind an If on the Texture Mix
+		CHECK(reads == 18 + 3); // 3 bombed layers (Grass, Dirt, Rock) x 3 maps x (plain + bombed), + the snow overlay
 		CHECK(sawRock);
 	}
 

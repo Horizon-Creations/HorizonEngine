@@ -245,14 +245,17 @@ inline constexpr char kAutoLandscapeParamPuddleAmount[]   = "Puddle Amount";
 inline constexpr char kAutoLandscapeParamPuddleMaxSlope[] = "Puddle Max Slope";
 inline constexpr char kAutoLandscapeSwitchBombing[]       = "Texture Bombing";
 // The procedural surfaces. A graph has kMatMaxParams (16) HeParams slots and 13 were taken, so the
-// look is packed: one Vec4 each (x..w in the order named here), plus the snow's colour as a colour
-// picker. The sand's colour is the reference's mean and stays baked, the Desert would be over budget.
-inline constexpr char kAutoLandscapeParamSnowColor[]      = "Snow Color";
-inline constexpr char kAutoLandscapeParamSnowLook[]       = "Snow Look";  // Grain, Drift, Glitter, Softness
-inline constexpr char kAutoLandscapeParamSandLook[]       = "Sand Look";  // Grain Size (m), Ripple, Ripple Size (m), Glitter
-inline constexpr int  kAutoLandscapeParamCount            = 15;   // every group; the Desert adds Sand Look
-inline constexpr int  autoLandscapeParamCount(const AutoLandscapeGroup& g)
-{ return kAutoLandscapeParamCount + (g.proceduralSand ? 1 : 0); }
+// look is packed: one Vec4 each (x..w in the order named here). Every group is at the budget (16):
+// the Desert, whose ground is the sand, has no Snow Color slot (its snow colour is baked), the
+// other groups have no Sand Look. The sand's own colour is the reference's mean and stays baked.
+inline constexpr char kAutoLandscapeParamSnowColor[]      = "Snow Color";   // not in the Desert
+inline constexpr char kAutoLandscapeParamSnowLook[]       = "Snow Look";    // Grain, Drift, Glitter, Softness
+inline constexpr char kAutoLandscapeParamSandLook[]       = "Sand Look";    // Desert only: Grain Size (m), Ripple, Ripple Size (m), Glitter
+// Texture + procedural (Thema 328 step 4): x = how much of the group's Snow texture is mixed into the
+// procedural snow, y = how much of its ground (Grass slot) texture is mixed into the procedural sand
+// (Desert only; ignored elsewhere). 0 = purely procedural (the default, and then the texture is not read).
+inline constexpr char kAutoLandscapeParamTextureMix[]     = "Texture Mix";
+inline constexpr int  kAutoLandscapeParamCount            = 16;   // every group, at the HeParams budget
 
 // What the Output node shows. Lit is the material. The mask views are UNLIT
 // debug views over the very same mask nodes (the witness's numeric oracle):
