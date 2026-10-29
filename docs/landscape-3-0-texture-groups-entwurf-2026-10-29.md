@@ -150,7 +150,8 @@ Consequence of B, stated plainly: **one terrain = one group.** Mixing groups = t
    ones. Which set is the human's pick?
 4. **A fifth role / second slope band per group** (§2): not in 3.0 unless a group's look demands it.
 5. **Group switch UX** with existing foliage layers (§4): additive "Apply group meshes" vs. ask-to-replace.
-6. **Texture ids.** `0x413..0x41F` are reserved "for more landscape materials" (`LandscapeTexGen/main.cpp:93-96`): 2 materials + 6 arrays = 8 ids fit
+6. **Texture ids.** (**Corrected in step 2:** `0x413`/`0x414` are the weather functions, so Forest is `0x415` + arrays `0x416-0x418` and Grassland `0x419` +
+   `0x41A-0x41C`; see `docs/landscape-3-0-texture-groups-umsetzung-2026-10-29.md`.) `0x413..0x41F` were thought reserved "for more landscape materials" (`LandscapeTexGen/main.cpp:93-96`): 2 materials + 6 arrays = 8 ids fit
    (e.g. Forest `0x413` + arrays `0x414-0x416`, Grassland `0x417` + `0x418-0x41A`). The per-group *source layer textures* (12+ each) need a block; which
    hi-ranges are taken beyond `0x100/0x200/0x300/0x400/0x500` is **unverified**.
 

@@ -52,6 +52,11 @@ new, nothing group-specific reaches a backend.
   null, the Forest graph compiled with 12 params. Free now: `0x41D..0x41F`. (2) `test_landscape_reload` must use stand-in array names: the real
   `T_Landscape_*_Array` may sit in the machine's EngineContent cache and resolve before anything "arrives". (3) Do not `touch` anything to rebuild; adding the
   test file only needed a CMake re-run. (4) The terrain tool still lists the material chip generically (`TerrainTools.cpp:~1322`): no picker yet (step 3).
+* **Regenerate the group files:** the generator is deterministic. `landscape_tex_gen <dir> --material --group Forest` (the mode flag must be argv[2], before
+  `--group`; `<dir> --group Forest --material` silently writes arrays instead) and `landscape_tex_gen <dir> --group Forest` for the arrays; same for Grassland.
+  Until the arrays are on the EngineContent server a terrain bound to a group draws the white-array hexagons (the "absent" witness).
+* **Deferred on purpose (step 3's first item):** a test that binds a terrain to Forest's id and loads a scene saved before groups as Mountains with identical weights.
+  No serializer or weight code was touched and Mountains' id `0x412` is unchanged; only the hook `autoLandscapeGroupOfMaterial` is pinned here.
 * **Next steps:** step 3: group picker in `TerrainTools.cpp` (list `kAutoLandscapeGroups`), paint list from the material's `graphLayerNames` (already per group),
   switch-group + old-scene-loads-as-Mountains test (`autoLandscapeGroupOfMaterial(kAutoLandscapeMaterialId) == 0` is the hook; a scene stores the material id only).
   Step 4: mesh kinds per group read the group row's defaults (`rockSlope`, `snowHeight`). Step 5: hardware acceptance, V/size decision, upload arrays.
