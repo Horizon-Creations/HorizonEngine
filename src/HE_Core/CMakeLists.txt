@@ -45,6 +45,7 @@ add_library(HorizonCore SHARED
 	src/BoneMask/BoneMask.cpp
 	src/BlendSpace/BlendSpace.cpp
 	src/Sequence/SequenceJson.cpp
+	src/LandscapeFoliage/LandscapeFoliageLayerJson.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
 	src/UIWidget/UITheme.cpp

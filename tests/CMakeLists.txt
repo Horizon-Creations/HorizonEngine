@@ -298,6 +298,7 @@ add_executable(he_tests
     test_blend_space.cpp
     test_sequencer_timeline.cpp
     test_sequence.cpp
+    test_landscape_foliage_layer.cpp
     test_sequence_runtime.cpp
     test_cinematic_timeline.cpp
     test_animation_ik.cpp
@@ -1444,6 +1445,8 @@ if(TARGET HorizonContentSync)
     # test_sftp_connection.cpp: SftpConnection's session reuse (CSY-101); its live
     # case runs only with HE_TEST_SFTP pointing at a throwaway server.
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
+    # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
+    target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)

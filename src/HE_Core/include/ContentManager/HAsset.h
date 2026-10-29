@@ -195,6 +195,12 @@ inline constexpr uint32_t CHUNK_PANM = makeChunkId('P','A','N','M'); // property
 // the reference scan and the rename retarget see the asset and entity UUIDs in
 // it. Absent = an empty sequence of no length, which is what a stub is.
 inline constexpr uint32_t CHUNK_SEQU = makeChunkId('S','E','Q','U'); // cinematic sequence (JSON)
+// A LandscapeFoliageLayer: the foliage rule set of a landscape material group,
+// one JSON document (HE::landscapeFoliageLayerToJson) with every asset named as a
+// {"hi","lo"} UUID. Absent = an empty set, which is what a stub is; a chunk that
+// does not parse is a failed load. A whole new chunk of a new asset type is
+// neither an append to an old layout nor a truncation, so k_version stays 2.
+inline constexpr uint32_t CHUNK_LFOL = makeChunkId('L','F','O','L'); // landscape foliage layer (JSON)
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Writer
