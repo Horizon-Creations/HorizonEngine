@@ -12,6 +12,7 @@
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/FoliagePaint.h>
 #include <HorizonScene/Components/FoliageComponent.h>
+#include <HorizonScene/LayerMeshPresets.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/TerrainMeshGenerator.h>   // terrainHeightAt
@@ -1370,4 +1371,80 @@ TEST_CASE("landscape ui: the Texture Group picker switches the material only, pa
 	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
 	clickAt(ctx, sx, sy);
 }
+TEST_CASE("landscape ui: Apply Group Meshes adds the group's layers, never removes or repeats one")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups)
+		REQUIRE_MESSAGE(cm.loadAsset(g.materialPath) == g.materialId, g.name);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::autoLandscapeGroup(HE::AutoLandscapeGroupId::Forest).materialId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+	// A layer the author made: it carries a mesh of its own and tuned numbers, and must survive.
+	FoliageComponent fol;
+	fol.layers[0].name = "My Bush";
+	fol.layers[0].meshAssetId = HE::UUID{ 0xABCDEFULL, 0x1ULL };
+	fol.layers[0].density = 0.777f;
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Group Meshes"), bx, by), "no Apply Group Meshes button in Setup");
+
+	const auto layerNames = [&] {
+		std::vector<std::string> n;
+		for (const FoliageLayer& l : reg.get<FoliageComponent>(terrain).layers) n.push_back(l.name);
+		return n;
+	};
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, bx, by);
+	// Forest's four kinds, after the author's own layer (which is untouched).
+	CHECK(layerNames() == std::vector<std::string>{ "My Bush", "Fern", "Forest Stump", "Fallen Log", "Mossy Rock" });
+	{
+		const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		CHECK(f.layers[0].density == 0.777f);
+		CHECK(f.layers[0].meshAssetId == HE::UUID{ 0xABCDEFULL, 0x1ULL });
+		CHECK(f.layers[1].meshAssetId == HE::layerMeshLevel0(HE::LayerMeshKind::Fern));
+		// Forest's row: the Mossy Rock stands from 0.13, not Mountains' 0.15.
+		CHECK(f.layers[4].slopeMin == 0.13f);
+	}
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Again: nothing is missing, so nothing is added and no undo step is spent.
+	clickAt(ctx, bx, by);
+	CHECK(layerNames().size() == 5u);
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Switching the group keeps every layer; Apply then adds that group's kinds beside them.
+	float gx = 0.0f, gy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsGroupMountains"), gx, gy));
+	clickAt(ctx, gx, gy);
+	CHECK(reg.get<MaterialComponent>(terrain).materialAssetId == HE::kAutoLandscapeMaterialId);
+	CHECK(layerNames().size() == 5u);
+	clickAt(ctx, bx, by);
+	CHECK(layerNames().size() == 5u + 6u);
+	CHECK(layerNames()[5] == "Grass Tuft");
+	CHECK(reg.get<FoliageComponent>(terrain).layers[0].name == "My Bush");
+}
+
 #endif // HE_EDITOR_DEPS_DIR

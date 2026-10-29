@@ -7434,6 +7434,15 @@ namespace
 	  "(layer 0) picks the texture by slope and height; painting a layer on top "
 	  "chooses one by hand.",
 	  "", "scenes#terrain" },
+	{ "Landscape/Apply Group Meshes", "",
+	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
+	  "group that it does not scatter yet: ferns, stumps, logs and mossy rocks in "
+	  "the Forest, tall grass, flower tufts and a few stones in the Grassland, grass "
+	  "tufts, pebbles, boulders and snow drifts in the Mountains. Rock is placed "
+	  "where the group's own material shows rock. It only adds - switching the "
+	  "group never removes or changes a layer, and a layer you already have is left "
+	  "alone.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
 	  "offered while a material of your own is assigned.",

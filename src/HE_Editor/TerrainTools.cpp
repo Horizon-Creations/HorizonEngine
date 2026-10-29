@@ -17,6 +17,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>   // texture groups (Thema 233)
+#include <HorizonScene/LayerMeshPresets.h>        // the group's layer meshes (Thema 233 step 4)
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -246,6 +247,48 @@ namespace
 		tmat.materialAssetId = g.materialId;
 		tmat.dirty = true;   // TerrainSystem pushes it to the chunks
 		if (ctx.renderer) ctx.renderer->InvalidateMaterial(g.materialId);
+	}
+
+	// Give the terrain a foliage layer for every mesh kind of group `g` it does not scatter yet
+	// (a layer counts as having the kind when its level-0 mesh is the kind's). Only ever adds:
+	// the layers the author made or tuned stay as they are, and a layer without a mesh (the one
+	// a new component starts with) is filled first, since it scatters nothing. The layers come
+	// from the preset with the group's row, so rock stands where THAT group's material shows it.
+	// Returns how many kinds were added.
+	int applyGroupMeshes(AppContext& ctx, entt::registry& reg, entt::entity terrain, const HE::AutoLandscapeGroup& g)
+	{
+		const HE::LayerMeshSet set = HE::layerMeshKindsOfGroup(g.id);
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+		const auto has = [&](HE::LayerMeshKind k) {
+			if (!folc) return false;
+			for (const FoliageLayer& l : folc->layers) if (l.meshAssetId == HE::layerMeshLevel0(k)) return true;
+			return false;
+		};
+		int missing = 0;
+		for (int i = 0; i < set.count; ++i) missing += has(set.kinds[i]) ? 0 : 1;
+		if (missing == 0) return 0;
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Group Meshes");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+		int added = 0;
+		for (int i = 0; i < set.count; ++i)
+		{
+			const HE::LayerMeshKind kind = set.kinds[i];
+			if (has(kind)) continue;
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers) if (l.meshAssetId == HE::UUID{}) { layer = &l; break; }
+			if (!layer) layer = folc->addLayer();
+			if (!layer) break;                                  // kMaxLayers: the rest stays unadded
+			HE::applyLayerMeshPreset(*layer, kind, g.id);
+			// The meshes are engine FILES that nothing loads on its own (see the Inspector's preset).
+			for (int lv = 0; lv < HE::layerMeshLevelCount(kind) && ctx.contentManager; ++lv)
+				if (!ctx.contentManager->ensureResident(HE::layerMeshLevelId(kind, lv))
+				    && ctx.contentManager->loadAsset(HE::layerMeshLevelPath(kind, lv)) != HE::layerMeshLevelId(kind, lv))
+					HE_LOG_WARN(Editor, "Foliage: the engine mesh %s is not available \xe2\x80\x94 the layer draws the fallback mesh",
+					            HE::layerMeshLevelPath(kind, lv).c_str());
+			++added;
+		}
+		return added;
 	}
 
 	// The name on the left, the control filling the rest - ImGui itself puts a label to
@@ -1443,6 +1486,19 @@ void renderPanel(AppContext& ctx)
                                                HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId));
                     if (pick >= 0)
                         assignTextureGroup(ctx, *tmat, HE::kAutoLandscapeGroups[pick]);
+
+                    // The group's procedural layer meshes (ferns in the Forest, tall grass in the
+                    // Grassland, ...). Switching the group never touches the foliage layers; this
+                    // adds the ones the group offers and the landscape lacks.
+                    const int cur = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId);
+                    ImGui::BeginDisabled(cur < 0);
+                    if (EditorWidgets::button("Apply Group Meshes", ImVec2(-FLT_MIN, 0.0f)) && cur >= 0)
+                    {
+                        const int added = applyGroupMeshes(ctx, reg, terrainEnt, HE::kAutoLandscapeGroups[cur]);
+                        if (added > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Group Meshes");
                 }
 
                 // ── Heightmap ────────────────────────────────────────────

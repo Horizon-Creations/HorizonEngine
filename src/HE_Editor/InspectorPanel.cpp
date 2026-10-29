@@ -3617,14 +3617,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// settings that suit them: mesh, detail levels, density, shadows and the
 			// placement rules. Everything stays editable below; applying overwrites it.
 			{
+				// The kinds are the texture group's (Thema 233): the group of the entity's landscape
+				// material, Mountains (the six of Thema 180) when it has none. The combo index is a
+				// place in that list, so it is clamped every frame, never kept across a group switch.
+				const auto* groupMat = registry.try_get<MaterialComponent>(entity);
+				const HE::AutoLandscapeGroupId group = groupMat ? HE::layerMeshGroupOfMaterial(groupMat->materialAssetId)
+				                                                : HE::AutoLandscapeGroupId::Mountains;
+				const HE::LayerMeshSet kindSet = HE::layerMeshKindsOfGroup(group);
+				std::string kindItems;
+				for (int i = 0; i < kindSet.count; ++i) { kindItems += HE::layerMeshKindName(kindSet.kinds[i]); kindItems.push_back('\0'); }
 				static int presetKind = 0;
-				Row::comboZ("Mesh Preset##fol", &presetKind, "Grass Tuft\0Pebble\0Rock A\0Rock B\0Rock C\0Snow Drift\0");
+				presetKind = std::clamp(presetKind, 0, kindSet.count - 1);
+				Row::comboZ("Mesh Preset##fol", &presetKind, kindItems.c_str());
 				ImGui::SameLine();
 				if (EditorWidgets::smallButton("Apply Preset##fol"))
 				{
 					if (undo) undo->snapshotNow("Apply Foliage Mesh Preset");
-					const HE::LayerMeshKind kind = static_cast<HE::LayerMeshKind>(std::clamp(presetKind, 0, HE::kLayerMeshKindCount - 1));
-					HE::applyLayerMeshPreset(*fol, kind);
+					const HE::LayerMeshKind kind = kindSet.kinds[presetKind];
+					HE::applyLayerMeshPreset(*fol, kind, group);
 					// The meshes are engine FILES: nothing loads them on its own, and a mesh
 					// that is not resident draws as the fallback cube without a word (see the
 					// cross card below). By UUID once the engine folder is scanned, else by path.
