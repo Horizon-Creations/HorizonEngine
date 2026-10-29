@@ -1773,7 +1773,7 @@ void RenderExtractor::extractUI(HorizonWorld& world, float vpWidth, float vpHeig
 {
 	out.uiObjects.clear();
 	if (windowId == 0)
-		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects);
+		UISystem::extract(world, vpWidth, vpHeight, out.uiObjects, m_contentManager);
 	// Live widgets (WidgetManager) append after the sorted entity UI, so they
 	// always draw on top of it; internally sorted by (zOrder, layer, depth).
 	world.widgets().extract(windowId, vpWidth, vpHeight, out.uiObjects);

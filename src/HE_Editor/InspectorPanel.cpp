@@ -397,6 +397,63 @@ void renderMultiSelection(AppContext& ctx, HorizonWorld& world, Entity primary)
 }
 #endif
 
+#ifdef HE_IMGUI_ENABLED
+// A Font asset path for UITextComponent, combo-picked from the project's Font
+// assets — the same list+selectable shape as the widget Font slot
+// (UIEditorPanel.cpp's local assetSlot, for the "FontSize" elements). The
+// field itself is a path string, like UIElement::font, not a UUID: step 2
+// resolves it at runtime the same way widgets do (see
+// docs/font-asset-survey-2026-10-29.md); whether it becomes a UUID is step 3's
+// serialization decision, not this slot's.
+static bool fontPathSlot(AppContext& ctx, const char* label, std::string& path, const char* idSuffix)
+{
+	const bool inlineSlot = Row::labelCell(label);
+	if (!inlineSlot)
+	{
+		ImGui::TextUnformatted(label);
+		ImGui::SameLine();
+	}
+	const std::string shown = path.empty()
+		? "(none)" : std::filesystem::path(path).stem().string();
+	ImGui::SetNextItemWidth(inlineSlot ? ImGui::GetContentRegionAvail().x : -FLT_MIN);
+	bool changed = false;
+	if (ImGui::BeginCombo((std::string("##fontslot_") + idSuffix).c_str(), shown.c_str()))
+	{
+		if (ImGui::Selectable("(none)", path.empty()) && !path.empty())
+		{
+			path.clear();
+			changed = true;
+		}
+		for (const auto& a : HcEditorUtil::listAssets(ctx.contentManager, HE::AssetType::Font))
+		{
+			if (ImGui::Selectable((a.label + "##" + a.path).c_str(), path == a.path))
+			{
+				path    = a.path;
+				changed = true;
+			}
+		}
+		ImGui::EndCombo();
+	}
+	// Same reasoning as the widget Font slot's tooltip: the combo shows only the
+	// file stem, and the content-relative path is what the hover is for.
+	if (ImGui::IsItemHovered() && !path.empty())
+	{
+		ImGui::BeginTooltip();
+		{
+			EditorWidgets::WrapText wrap(ImGui::GetFontSize() * 35.0f);
+			ImGui::TextUnformatted(path.c_str());
+		}
+		ImGui::EndTooltip();
+	}
+	if (const EditorWidgets::AssetDrop drop = EditorWidgets::acceptAssetDrop(ctx, HE::AssetType::Font, "font"))
+	{
+		path    = drop.relPath;
+		changed = true;
+	}
+	return changed;
+}
+#endif
+
 // ─── Inspector (Details panel) ────────────────────────────────────────────────
 void render(AppContext& ctx)
 {
@@ -3898,6 +3955,8 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (Row::inputText("Text##txt", buf, sizeof(buf))) { txt->text = buf; trackEdit(); }
 			Row::dragFloat("Font Size##txt", &txt->fontSize, 0.5f, 4.0f, 256.0f); trackEdit();
 			Row::colorEdit4("Color##txt",    glm::value_ptr(txt->color)); trackEdit();
+			if (fontPathSlot(ctx, "Font##txt", txt->font, "uitext")) trackEdit();
+			ImGui::TextDisabled("Empty = default UI font.");
 		}
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<UITextComponent>(entity); }
 	}

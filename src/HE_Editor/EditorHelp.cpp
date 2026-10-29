@@ -1471,6 +1471,11 @@ namespace
 	  "Text colour, alpha included. Fading a whole panel is usually better done on "
 	  "the panel's opacity than on each label.",
 	  "", "ui#elements" },
+	{ "UI Text/Font", "",
+	  "The Font asset this text draws with, baked into its own atlas at the "
+	  "font's size. Empty uses the shared default UI font — the same resolution "
+	  "a widget's Font slot goes through.",
+	  "", "ui#elements" },
 	{ "UI Image/Tint", "",
 	  "Multiplied into the image. White leaves the texture alone; the alpha "
 	  "channel fades it.",
