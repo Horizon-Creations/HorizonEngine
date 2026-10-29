@@ -24,19 +24,22 @@
 //                            Softness       0..1 powder (1) .. crust (0): smooths the relief,
 //                                           matte against glossy
 //                            Melt           0..1 meltwater: darker, glossier, smoother
-//                            Disturbance    0..1 RESERVED for trails (footprints, tracks); the
-//                                           input exists so a material can wire it today, the
-//                                           function does not read it yet
+//                            Disturbance    0..1 how deep a trail (footprint, track) presses the snow
+//                                           here: darker, glossier, shaded by its own pit
+//                            Disturbance Slope  Vec2, d(Disturbance)/dx, d(Disturbance)/dz per
+//                                           metre: leans the normal so a print's rim catches the
+//                                           light (both default 0 = no trail, the surface as before)
 //                       Out: Albedo, Normal (world space, the geometric normal bent by the
 //                            detail), Roughness, AO, Height (0..1, the structure of the surface
 //                            for a height blend — grain and drifts only: it does NOT move with
-//                            Cover, Softness, Melt or Disturbance, so a mask built from it stays
+//                            Cover, Softness, Melt, Disturbance or its slope, so a mask built from it stays
 //                            independent of the weather)
 //
 //   MF_ProceduralSand   In:  Position, Color (the dry sand), Grain Size (metres), Ripple (0..1
 //                            wind ripples across the wind), Ripple Size (wavelength in metres),
 //                            Wind Direction, Glitter (mica / quartz), Wetness (0..1: wet sand is
-//                            darker and glossier), Disturbance (reserved, as above)
+//                            darker and glossier), Disturbance and Disturbance Slope (as above;
+//                            a print also stamps the ripples flat)
 //                       Out: the same five.
 //
 // Both fade their fine detail out with the distance from the camera (a grain a few
@@ -63,12 +66,12 @@ inline constexpr UUID kProceduralSandFunctionId = { 0x000000000000041EULL, 0x000
 enum ProceduralSnowIn : int
 {
     kSnowInPosition = 0, kSnowInCover, kSnowInColor, kSnowInGrain, kSnowInDrift, kSnowInWindDirection,
-    kSnowInGlitter, kSnowInSoftness, kSnowInMelt, kSnowInDisturbance, kSnowInCount
+    kSnowInGlitter, kSnowInSoftness, kSnowInMelt, kSnowInDisturbance, kSnowInDisturbanceSlope, kSnowInCount
 };
 enum ProceduralSandIn : int
 {
     kSandInPosition = 0, kSandInColor, kSandInGrainSize, kSandInRipple, kSandInRippleSize,
-    kSandInWindDirection, kSandInGlitter, kSandInWetness, kSandInDisturbance, kSandInCount
+    kSandInWindDirection, kSandInGlitter, kSandInWetness, kSandInDisturbance, kSandInDisturbanceSlope, kSandInCount
 };
 // Both functions answer with the same five outputs.
 enum ProceduralSurfaceOut : int

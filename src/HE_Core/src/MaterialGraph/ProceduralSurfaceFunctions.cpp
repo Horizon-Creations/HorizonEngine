@@ -110,6 +110,20 @@ R bendNormal(Ops& o, R gx, R gz)
                                                      o.sub(o.pin(ns, 2), gz) }) });
 }
 
+// The slope of a trail's depth field (d(depth)/dx, d(depth)/dz per metre, the "Disturbance Slope"
+// input) as a normal lean: a print's pit floor is flat, its rim is steep, so the rim catches the
+// grazing sun and the floor does not. The same sign as bendNormal's gradient (n - (gx, 0, gz)):
+// the surface dips where the depth rises. The lean stays small (0.3 per unit of slope) so a
+// 0.25 m texel's steepest bilinear flank does not fold the normal over.
+struct RimLean { R x, z; };
+RimLean disturbanceRim(Ops& o, R slope)
+{
+    const R s = o.split(slope);
+    const R x = o.mul(o.pin(s, 0), 0.3f);
+    const R z = o.mul(o.pin(s, 1), 0.3f);
+    return { x, z };
+}
+
 // "Albedo, Normal, Roughness, AO, Height" — the five outputs both surfaces end in.
 void surfaceOutputs(Fn& f, R albedo, R normal, R roughness, R ao, R height)
 {
@@ -135,10 +149,13 @@ MaterialGraph buildProceduralSnowFunction()
     const R glitter  = f.input(f.in("Glitter",        P::Float, 0.35f));
     const R soft     = f.input(f.in("Softness",       P::Float, 0.5f));
     const R melt     = f.input(f.in("Melt",           P::Float, 0.0f));
-    f.in("Disturbance", P::Float, 0.0f);   // reserved for trails: declared, not read (yet)
+    const R dist     = f.input(f.in("Disturbance",       P::Float, 0.0f));
+    const R distSlope = f.input(f.in("Disturbance Slope", P::Vec2,  0.0f));
 
     const R ps = o.split(pos);
     const WindFrame w = windFrame(o, wind, o.pin(ps, 0), o.pin(ps, 1));
+    const R eff = o.sat(dist);                       // how deep a print lies here, 0..1
+    const RimLean rim = disturbanceRim(o, distSlope);
 
     // ── Drifts: ridges long along the wind (8 m) and narrow across it (1.8 m) ───────────────
     // FBM in the wind's own frame; its gradient comes with it, and turns back into a world
@@ -170,8 +187,10 @@ MaterialGraph buildProceduralSnowFunction()
     const R grainBase   = o.mul(grain, 0.2f);
     const R relaxFade   = o.mul(relax, fadeG);
     const R grainRelief = o.mul(grainBase, relaxFade);
-    const R gx = o.add(gxDrift, o.mul(o.pin(gn, 1), grainRelief));
-    const R gz = o.add(gzDrift, o.mul(o.pin(gn, 2), grainRelief));
+    const R gxSnow = o.add(gxDrift, o.mul(o.pin(gn, 1), grainRelief));
+    const R gzSnow = o.add(gzDrift, o.mul(o.pin(gn, 2), grainRelief));
+    const R gx = o.add(gxSnow, rim.x);
+    const R gz = o.add(gzSnow, rim.z);
     const R normal = bendNormal(o, gx, gz);
 
     // ── Height: the structure alone — Position, Wind, Drift and Grain, nothing weather-driven ─
@@ -196,13 +215,16 @@ MaterialGraph buildProceduralSnowFunction()
     const R meltDark = o.mix(1.0f, 0.8f, melt);
     const R albedoBase  = o.mul(o.mul(color, speck), meltDark);
     const R albedoSpark = o.mul(spark, 0.3f);
-    const R albedo = o.sat(o.add(albedoBase, albedoSpark));
+    const R albedoLit = o.sat(o.add(albedoBase, albedoSpark));
+    // A print is compacted snow: darker (and, below, glossier and shaded by its own pit).
+    const R albedo = o.mul(albedoLit, o.inv(o.mul(eff, 0.18f)));
 
     // ── Roughness: crust is glossy, powder matte, meltwater and glittering crystals catch light ─
     const R base = o.mix(0.55f, 0.92f, soft);
     const R roughMelt  = o.mul(base, o.mix(1.0f, 0.4f, melt));
     const R roughSpark = o.mul(spark, 0.45f);
-    const R rough0 = o.sub(roughMelt, roughSpark);
+    const R roughLit = o.sub(roughMelt, roughSpark);
+    const R rough0 = o.sub(roughLit, o.mul(eff, 0.25f));
     const R roughness = o.add(o.mul(o.sat(rough0), 0.95f), 0.05f);
 
     // ── AO: the troughs of the drifts and the pits between the grains ───────────────────────
@@ -213,7 +235,8 @@ MaterialGraph buildProceduralSnowFunction()
     const R gInv = o.inv(g);
     const R grainCavity = o.mul(grainCavityRelief, gInv);
     const R cavity = o.add(driftCavity, grainCavity);
-    const R ao = o.sat(o.inv(o.mul(cavity, o.inv(o.mul(soft, 0.6f)))));
+    const R aoLit = o.sat(o.inv(o.mul(cavity, o.inv(o.mul(soft, 0.6f)))));
+    const R ao = o.sat(o.sub(aoLit, o.mul(eff, 0.35f)));
 
     surfaceOutputs(f, albedo, normal, roughness, ao, height);
     return f.g;
@@ -232,10 +255,13 @@ MaterialGraph buildProceduralSandFunction()
     const R wind       = f.input(f.in("Wind Direction", P::Vec2,  1.0f));
     const R glitter    = f.input(f.in("Glitter",        P::Float, 0.3f));
     const R wet        = f.input(f.in("Wetness",        P::Float, 0.0f));
-    f.in("Disturbance", P::Float, 0.0f);   // reserved for trails: declared, not read (yet)
+    const R dist       = f.input(f.in("Disturbance",       P::Float, 0.0f));
+    const R distSlope  = f.input(f.in("Disturbance Slope", P::Vec2,  0.0f));
 
     const R ps = o.split(pos);
     const WindFrame w = windFrame(o, wind, o.pin(ps, 0), o.pin(ps, 1));
+    const R eff = o.sat(dist);                       // how deep a print lies here, 0..1
+    const RimLean rim = disturbanceRim(o, distSlope);
 
     // ── Grain: the speckle of the sand itself ───────────────────────────────────────────────
     const R gn    = o.f.e(T::FbmGrad, { pos, o.div(o.k(1.0f), grainSize) });
@@ -270,13 +296,16 @@ MaterialGraph buildProceduralSandFunction()
     const R rippleFade = o.mul(ripple, fadeR);
     const R wobShape    = o.ss(0.28f, 0.5f, wob);
     const R rip   = o.mul(rippleFade, wobShape);
-    const R slopeRip = o.mul(o.mul(rip, 0.2f), slope);   // d(height)/d(along): the crests' flank slope
+    const R slopeRipFull = o.mul(o.mul(rip, 0.2f), slope);   // d(height)/d(along): the crests' flank slope
+    const R slopeRip = o.mul(slopeRipFull, o.inv(eff));       // a print stamps the ripples flat
     const R slopeDx = o.mul(slopeRip, w.dx);
     const R grainDx = o.mul(o.pin(gn, 1), grainRelief);
-    const R gx = o.add(slopeDx, grainDx);
+    const R gxSand = o.add(slopeDx, grainDx);
+    const R gx = o.add(gxSand, rim.x);
     const R slopeDz = o.mul(slopeRip, w.dz);
     const R grainDz = o.mul(o.pin(gn, 2), grainRelief);
-    const R gz = o.add(slopeDz, grainDz);
+    const R gzSand = o.add(slopeDz, grainDz);
+    const R gz = o.add(gzSand, rim.z);
     const R normal = bendNormal(o, gx, gz);
 
     // ── Height: ripples and grain ───────────────────────────────────────────────────────────
@@ -295,14 +324,17 @@ MaterialGraph buildProceduralSandFunction()
     const R spark = o.mul(sparkShape, wetInv);
     const R albedoBase  = o.mul(o.mul(o.mul(color, speck), crest), wetDark);
     const R albedoSpark = o.mul(spark, 0.22f);
-    const R albedo = o.sat(o.add(albedoBase, albedoSpark));
+    const R albedoLit = o.sat(o.add(albedoBase, albedoSpark));
+    // A print is compacted, slightly damp sand: darker.
+    const R albedo = o.mul(albedoLit, o.inv(o.mul(eff, 0.25f)));
 
     // ── Roughness: dry sand is rough, wet sand sleek, a glint is a mirror ───────────────────
     const R dryRough = o.k(0.92f);
     const R wetMix    = o.mix(1.0f, 0.45f, wet);
     const R roughWet   = o.mul(dryRough, wetMix);
     const R roughSpark = o.mul(spark, 0.5f);
-    const R rough0 = o.sub(roughWet, roughSpark);
+    const R roughLit = o.sub(roughWet, roughSpark);
+    const R rough0 = o.sub(roughLit, o.mul(eff, 0.15f));
     const R roughness = o.add(o.mul(o.sat(rough0), 0.95f), 0.05f);
 
     // ── AO: the troughs between the ripples, the pits between the grains ────────────────────
@@ -312,7 +344,8 @@ MaterialGraph buildProceduralSandFunction()
     const R grainAoBase = o.mul(o.k(0.12f), fadeG);
     const R halfMinusG  = o.sat(o.sub(o.k(0.5f), g));
     const R aoGrain = o.mul(grainAoBase, halfMinusG);
-    const R ao = o.sat(o.inv(o.add(aoRip, aoGrain)));
+    const R aoLit = o.sat(o.inv(o.add(aoRip, aoGrain)));
+    const R ao = o.sat(o.sub(aoLit, o.mul(eff, 0.35f)));
 
     surfaceOutputs(f, albedo, normal, roughness, ao, height);
     return f.g;

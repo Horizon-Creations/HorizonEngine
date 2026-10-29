@@ -3910,18 +3910,19 @@ TEST_CASE("Procedural surface functions: the interface callers wire by, flat, de
 
 	HE::matFunctionPins(snowFn, ins, outs);
 	CHECK(pinNames(ins) == std::vector<std::string>{ "Position", "Cover", "Color", "Grain", "Drift",
-		"Wind Direction", "Glitter", "Softness", "Melt", "Disturbance" });
+		"Wind Direction", "Glitter", "Softness", "Melt", "Disturbance", "Disturbance Slope" });
 	REQUIRE(ins.size() == static_cast<size_t>(HE::kSnowInCount));
 	CHECK(std::string(ins[HE::kSnowInCover].name) == "Cover");
 	CHECK(std::string(ins[HE::kSnowInMelt].name) == "Melt");
 	CHECK(std::string(ins[HE::kSnowInDisturbance].name) == "Disturbance");
+	CHECK(std::string(ins[HE::kSnowInDisturbanceSlope].name) == "Disturbance Slope");
 	CHECK(pinNames(outs) == std::vector<std::string>{ "Albedo", "Normal", "Roughness", "AO", "Height" });
 	REQUIRE(outs.size() == static_cast<size_t>(HE::kSurfaceOutCount));
 	CHECK(std::string(outs[HE::kSurfaceOutHeight].name) == "Height");
 
 	HE::matFunctionPins(sandFn, ins, outs);
 	CHECK(pinNames(ins) == std::vector<std::string>{ "Position", "Color", "Grain Size", "Ripple", "Ripple Size",
-		"Wind Direction", "Glitter", "Wetness", "Disturbance" });
+		"Wind Direction", "Glitter", "Wetness", "Disturbance", "Disturbance Slope" });
 	REQUIRE(ins.size() == static_cast<size_t>(HE::kSandInCount));
 	CHECK(std::string(ins[HE::kSandInWetness].name) == "Wetness");
 	CHECK(pinNames(outs) == std::vector<std::string>{ "Albedo", "Normal", "Roughness", "AO", "Height" });
@@ -3940,13 +3941,23 @@ TEST_CASE("Procedural surface functions: the interface callers wire by, flat, de
 			CHECK(n.type != MatNodeType::Weather);
 		}
 
-	// The trail hook is declared and reserved: no output reads Disturbance yet.
-	for (const char* out : { "Albedo", "Normal", "Roughness", "AO", "Height" })
-	{
-		CAPTURE(out);
-		CHECK(fnInputsReaching(snowFn, out).count("Disturbance") == 0u);
-		CHECK(fnInputsReaching(sandFn, out).count("Disturbance") == 0u);
-	}
+	// The trail inputs shape albedo, normal, roughness and AO (a print is darker, glossier, shaded and
+	// leaves a rim) but never Height: the layer-blend masks built from it must not depend on gameplay state.
+	for (const MaterialGraph* fn : { &snowFn, &sandFn })
+		for (const char* in : { "Disturbance", "Disturbance Slope" })
+		{
+			CAPTURE(in);
+			CHECK(fnInputsReaching(*fn, "Height").count(in) == 0u);
+			CHECK(fnInputsReaching(*fn, "Albedo").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
+			// The rim lean is in both normals; the depth itself flattens the sand's ripples only.
+			CHECK(fnInputsReaching(*fn, "Normal").count(in)
+			      == ((std::string(in) == "Disturbance Slope" || fn == &sandFn) ? 1u : 0u));
+			CHECK(fnInputsReaching(*fn, "Roughness").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
+			CHECK(fnInputsReaching(*fn, "AO").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
+		}
+	// Both interfaces only GREW: every earlier pin keeps its index (callers wire by index).
+	CHECK(HE::kSnowInDisturbance == 9);
+	CHECK(HE::kSandInDisturbance == 8);
 
 	// Height is the STRUCTURE of the surface: it feeds a height blend and the landscape's height-snow
 	// mask, so it must not move with the weather (Cover, Softness, Melt, Wetness) or with the colour.

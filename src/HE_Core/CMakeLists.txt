@@ -41,6 +41,7 @@ add_library(HorizonCore SHARED
 	src/MaterialGraph/AutoLandscapeMaterial.cpp
 	src/MaterialGraph/WeatherMaterialFunctions.cpp
 	src/MaterialGraph/ProceduralSurfaceFunctions.cpp
+	src/Trails/TrailField.cpp
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/BoneMask/BoneMask.cpp
