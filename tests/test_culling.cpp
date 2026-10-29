@@ -3501,6 +3501,48 @@ inline std::vector<std::string> splitArgs(const std::string& list)
 }
 } // namespace nebuladrift
 
+TEST_CASE("Realistic clouds: the blue-noise dither tile is one permutation, identical in GL and MSL")
+{
+	// skyBlueDither replaces skyIgn as the ray-start jitter of the Realistic march (the diagonal hatching).
+	// The 16x16 void-and-cluster table is pasted into both dialects; a one-sided edit would give one backend
+	// another dither. Every entry must be a distinct rank (k + 0.5) / 256, so the tile is a permutation.
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - dither table comparison skipped");
+		return;
+	}
+	const std::string glFile  = readFile(root / "src" / "HE_Rendering" / "include" /
+	                                     "HorizonRendering" / "SkyShaderSource.h");
+	const std::string mtlFile = readFile(root / "src" / "HE_Rendering" / "src" /
+	                                     "Backends" / "Metal" / "MetalRenderer.mm");
+	const auto table = [](const std::string& src, const std::string& open, const std::string& close)
+	{
+		std::vector<double> v;
+		const size_t a = src.find(open);
+		if (a == std::string::npos) return v;
+		const size_t b = src.find(close, a);
+		if (b == std::string::npos) return v;
+		std::stringstream ss(src.substr(a + open.size(), b - a - open.size()));
+		for (std::string tok; std::getline(ss, tok, ',');)
+			if (tok.find_first_of("0123456789") != std::string::npos) v.push_back(std::atof(tok.c_str()));
+		return v;
+	};
+	const std::vector<double> gl  = table(glFile,  "kSkyBlue16[256] = float[256](", ");");
+	const std::vector<double> mtl = table(mtlFile, "kSkyBlue16[256] = {", "};");
+	REQUIRE(gl.size() == 256);
+	REQUIRE(mtl.size() == 256);
+	CHECK(gl == mtl);
+	std::vector<int> rank;
+	for (double x : gl) rank.push_back(static_cast<int>(std::lround(x * 256.0 - 0.5)));
+	std::sort(rank.begin(), rank.end());
+	for (int k = 0; k < 256; ++k) CHECK(rank[k] == k);
+	// The Realistic march uses it, the classic march and the aurora keep the structured one.
+	CHECK(glFile.find("float jitter = skyBlueDither(gl_FragCoord.xy);") != std::string::npos);
+	CHECK(mtlFile.find("float jitter = skyBlueDither(fragCoord);") != std::string::npos);
+}
+
 TEST_CASE("Nebula: Metal's kSkyMSL copy matches the GL sky shader after normalisation")
 {
 	// Nebula parity analysis 01.10.2026, point 3 (PR review A13). D3D11, D3D12 and

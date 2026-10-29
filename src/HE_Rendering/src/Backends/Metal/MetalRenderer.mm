@@ -4681,6 +4681,33 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 // Interleaved-gradient noise — blue-noise-like screen-space dither for raymarch
 // ray-start jitter (shared by applyClouds3D + applyAurora3D). Mirrors GL skyIgn().
 float skyIgn(float2 p) { return fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y)); }
+// Blue-noise ray-start jitter for the Realistic cloud march. Mirrors GL skyBlueDither() - change one, change both.
+constant float kSkyBlue16[256] = {
+	0.63086, 0.25977, 0.01367, 0.43555, 0.75586, 0.66992, 0.22070, 0.83398, 0.55664, 0.06445, 0.47852, 0.22852, 0.53711, 0.15430, 0.98633, 0.33008,
+	0.86133, 0.38867, 0.17383, 0.59961, 0.99414, 0.49805, 0.10352, 0.41602, 0.27148, 0.62695, 0.93164, 0.31445, 0.90039, 0.43164, 0.20117, 0.74414,
+	0.52148, 0.68555, 0.92383, 0.78711, 0.32227, 0.14258, 0.87305, 0.74023, 0.95117, 0.16602, 0.38086, 0.68164, 0.08008, 0.83008, 0.58008, 0.04102,
+	0.13477, 0.29883, 0.09961, 0.46680, 0.24414, 0.63867, 0.35742, 0.04883, 0.51367, 0.80664, 0.59180, 0.75977, 0.26367, 0.47070, 0.36133, 0.94727,
+	0.42383, 0.82227, 0.56445, 0.72070, 0.02539, 0.91211, 0.57617, 0.70117, 0.45898, 0.21289, 0.00977, 0.12305, 0.96289, 0.64648, 0.77539, 0.24023,
+	0.88477, 0.65820, 0.20898, 0.97070, 0.39648, 0.79492, 0.18555, 0.28320, 0.97461, 0.33398, 0.84180, 0.41211, 0.50977, 0.18164, 0.09570, 0.60352,
+	0.01758, 0.48633, 0.34961, 0.08398, 0.52930, 0.85352, 0.42773, 0.06836, 0.77148, 0.64258, 0.54883, 0.87695, 0.28711, 0.68945, 0.92773, 0.32617,
+	0.73242, 0.86914, 0.15820, 0.69727, 0.25586, 0.61914, 0.11523, 0.50195, 0.91992, 0.24805, 0.14648, 0.72461, 0.03320, 0.38477, 0.80273, 0.53320,
+	0.27930, 0.95898, 0.58398, 0.44727, 0.90430, 0.31836, 0.75195, 0.67383, 0.36914, 0.05664, 0.48242, 0.61133, 0.99805, 0.45117, 0.11914, 0.19727,
+	0.07617, 0.40430, 0.76367, 0.03711, 0.82617, 0.21680, 0.99023, 0.16992, 0.56836, 0.88867, 0.78320, 0.20508, 0.33789, 0.83789, 0.57227, 0.67773,
+	0.81055, 0.30664, 0.63477, 0.13867, 0.37695, 0.55273, 0.00586, 0.46289, 0.81836, 0.29492, 0.40820, 0.09180, 0.66211, 0.25195, 0.89648, 0.47461,
+	0.97852, 0.52539, 0.23242, 0.91602, 0.49023, 0.73633, 0.65039, 0.34180, 0.10742, 0.69336, 0.95508, 0.54102, 0.74805, 0.16211, 0.00195, 0.36523,
+	0.17773, 0.05273, 0.84961, 0.70898, 0.08789, 0.26758, 0.85742, 0.93555, 0.23633, 0.59570, 0.04492, 0.84570, 0.43945, 0.94336, 0.62305, 0.71680,
+	0.77930, 0.44336, 0.34570, 0.58789, 0.96680, 0.41992, 0.15039, 0.51758, 0.76758, 0.39258, 0.18945, 0.27539, 0.50586, 0.11133, 0.30273, 0.56055,
+	0.93945, 0.12695, 0.66602, 0.29102, 0.19336, 0.79883, 0.61523, 0.02930, 0.45508, 0.98242, 0.65430, 0.35352, 0.79102, 0.88086, 0.40039, 0.22461,
+	0.49414, 0.81445, 0.89258, 0.54492, 0.06055, 0.37305, 0.90820, 0.31055, 0.71289, 0.13086, 0.86523, 0.72852, 0.02148, 0.60742, 0.70508, 0.07227
+};
+float skyBlueDither(float2 p)
+{
+	int2 q = int2(p);
+	int2 t = q >> 4;
+	int  h = (t.x * 73856093) ^ (t.y * 19349663);
+	int2 r = (q + int2(h & 15, (h >> 4) & 15)) & 15;
+	return kSkyBlue16[r.x + r.y * 16];
+}
 
 // Coverage value-noise fBm with DISTANCE OCTAVE-LOD: the two highest-frequency octaves
 // fade to zero far away (farW: 1 near → 0 far) so distant coarsely-stepped clouds keep
@@ -5058,7 +5085,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
-	float jitter = skyIgn(fragCoord);
+	float jitter = skyBlueDither(fragCoord);
 
 	float sunY  = clamp(sunDir.y, -0.3, 1.0);
 	float day   = smoothstep(-0.10, 0.10, sunY);
@@ -5077,6 +5104,12 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float fluff     = clamp(cloudFluffiness, 0.0, 1.0);
 	float densMul   = clamp(cloudDensity, 0.0, 3.0);
 	float lo        = cloudLo(coverage);
+
+	// Skylight on the belly: the sky behind the ray (blue overhead, hazy toward the horizon) instead of one
+	// fixed blue-grey, so a cloud low on the horizon is lit by the bright haze and one overhead by the deep blue.
+	float3 skyAmb = mix(float3(0.30, 0.35, 0.46), baseSky * 0.85, 0.5);
+	// A closed deck is lit evenly from above: brighter and greyer, not the deep blue of a clear sky.
+	skyAmb = mix(skyAmb, float3(dot(skyAmb, float3(0.3333))), 0.6 * ov) * (1.0 + 0.45 * ov);
 
 	float  T = 1.0;
 	float3 L = float3(0.0);
@@ -5134,20 +5167,20 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		// Powder FLOOR: the thin mist skirt must read as luminous sunlit haze,
 		// not as grey soot — darkness should come from the sun march (od), not
 		// from low local density.
-		float lit    = sun * mix(0.55, 1.0, powder);
+		float lit    = pow(sun, 1.15) * mix(0.50, 1.0, powder);   // sharper: the shadowed side falls off faster
 		// Blue-grey skylit belly → near-white sunlit top; night/dusk logic kept
 		// from classic so the clouds enter and leave sunset with the sky.
-		float3 dayCol   = mix(float3(0.30, 0.35, 0.46), sunColor * 1.30, lit);
+		float3 dayCol   = mix(skyAmb, sunColor * 1.45, lit);
 		float3 nightCol = mix(float3(0.015, 0.018, 0.035), float3(0.13, 0.15, 0.24), lit);
 		float3 cloudCol = mix(nightCol, dayCol, day);
 		float3 duskTop  = sunColor * float3(1.5, 0.85, 0.42);
 		cloudCol = mix(cloudCol, duskTop, dusk * (0.35 + 0.65 * lit));
 		cloudCol += baseSky * ((1.0 - day) * (0.30 + 0.50 * lit));
 		cloudCol += sunColor * mix(float3(1.0), float3(1.25, 0.78, 0.42), dusk)
-		          * (phase * sun * 0.9 * max(day, dusk));
+		          * (phase * sun * 1.15 * max(day, dusk));
 		// Flat dark base → bright crown. Milder than classic's 0.30..1.32 ramp —
 		// the sun march already carries most of the vertical contrast.
-		cloudCol *= mix(0.45, 1.15, smoothstep(0.0, 0.55, hf));
+		cloudCol *= mix(0.40, 1.22, smoothstep(0.0, 0.60, hf));
 		cloudCol += float3(0.06, 0.09, 0.15) * ((1.0 - hf) * day * 0.20); // sky bounce under the base
 		cloudCol *= cloudTint;
 		if (ov > 0.0)   // overcast: lighter and darker masses so a closed deck still reads as clouds
