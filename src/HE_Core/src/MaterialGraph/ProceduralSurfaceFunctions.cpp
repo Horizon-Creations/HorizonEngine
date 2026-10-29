@@ -110,17 +110,17 @@ R bendNormal(Ops& o, R gx, R gz)
                                                      o.sub(o.pin(ns, 2), gz) }) });
 }
 
-// The slope of a trail's depth field (d(depth)/dx, d(depth)/dz per metre, the "Disturbance Slope"
-// input) as a normal lean: a print's pit floor is flat, its rim is steep, so the rim catches the
-// grazing sun and the floor does not. The same sign as bendNormal's gradient (n - (gx, 0, gz)):
-// the surface dips where the depth rises. The lean stays small (0.3 per unit of slope) so a
-// 0.25 m texel's steepest bilinear flank does not fold the normal over.
+// The slope of a trail's field (dv/dx, dv/dz per metre, the "Disturbance Slope" input; v = pit depth, so a
+// heap is negative) as a normal lean. The surface HEIGHT is -v, and bendNormal takes the height gradient g
+// (n - (gx, 0, gz)), so g = -0.3 x slope: the wall of a pit leans toward its floor, a heap's flank away from
+// its crest. The lean stays small (0.3 per unit of slope) so a 0.25 m texel's steepest bilinear flank does
+// not fold the normal over.
 struct RimLean { R x, z; };
 RimLean disturbanceRim(Ops& o, R slope)
 {
     const R s = o.split(slope);
-    const R x = o.mul(o.pin(s, 0), 0.3f);
-    const R z = o.mul(o.pin(s, 1), 0.3f);
+    const R x = o.mul(o.pin(s, 0), -0.3f);
+    const R z = o.mul(o.pin(s, 1), -0.3f);
     return { x, z };
 }
 

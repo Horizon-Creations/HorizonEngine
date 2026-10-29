@@ -26,9 +26,10 @@
 //                            Melt           0..1 meltwater: darker, glossier, smoother
 //                            Disturbance    0..1 how deep a trail (footprint, track) presses the snow
 //                                           here: darker, glossier, shaded by its own pit
-//                            Disturbance Slope  Vec2, d(Disturbance)/dx, d(Disturbance)/dz per
-//                                           metre: leans the normal so a print's rim catches the
-//                                           light (both default 0 = no trail, the surface as before)
+//                            Disturbance Slope  Vec2, the gradient of the trail field per metre (a pit
+//                                           positive, a heap negative: it also carries the heaps
+//                                           beside a dragged track): leans the normal so a rim or
+//                                           a ridge catches the light (both default 0 = no trail, the surface as before)
 //                       Out: Albedo, Normal (world space, the geometric normal bent by the
 //                            detail), Roughness, AO, Height (0..1, the structure of the surface
 //                            for a height blend — grain and drifts only: it does NOT move with

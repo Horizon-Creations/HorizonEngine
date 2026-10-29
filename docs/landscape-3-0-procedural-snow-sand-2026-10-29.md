@@ -118,7 +118,7 @@ any other material can call them too.
 
 ## Handoff (steps 3, 5a; step 4 withdrawn)
 
-- **Topic / step:** 328, step 3 (Hive 1576) done, step 4 withdrawn (1577), step 5 done on Metal + OpenGL (Hive 1578: CPU field, function look, clipmap texture, landscape wiring); D3D/Vulkan runtime check open. Branch `claude/schnee-sand-weiter-parameter-screenshots`.
+- **Topic / step:** 328, step 3 (Hive 1576) done, step 4 withdrawn (1577), step 5 done on Metal + OpenGL (Hive 1578: CPU field, function look, clipmap texture, landscape wiring, 5c: press vs dragged track with heaps); D3D/Vulkan runtime check open. Branch `claude/schnee-sand-weiter-parameter-screenshots`.
 - **Decisions taken:** Vec4 packing; sand colour baked; Desert = 16 params. **Suggested, not taken:** raise the slot budget (needs all five renderers + Windows verification), group-specific defaults from the picker values.
 - **Trap:** 329 step 3 (Path layer) edits the same file and also needs parameters; there are no free slots left in the Desert.
 - **Next steps:** 1. live check of the Vec4 widgets in the instance panel; 2. step 4 (mix texture + procedural, a Mix parameter will need a slot: free one or pack); 3. step 5 trails (Disturbance pin).
@@ -153,6 +153,17 @@ Footprints and tracks are now visible in snow and sand on Metal and OpenGL. **No
 - Packed/exported builds: the baked material turns paths into UUIDs and `mem://HorizonTrails` has none; a shipped game must call `TrailSystem::update` (it registers the texture) before the first landscape draw, and the pak packer's treatment of the unresolvable path was not checked.
 - Cost not measured (one extra tap per landscape pixel plus a 1 MB upload on a frame the field or the camera-near field changed). The camera walking over trodden ground rewrites 1 MB per texel crossed.
 - The prints are a test pattern: gameplay stamping (steps, vehicles, `HE::api`) is step 7, persistence step 6.
+
+## Step 5c (Thema 328): dragged tracks with a heap, versus a pressed print
+
+On the human's word: a track that is dragged through snow or sand should be continuous and pile the displaced material up on both sides; a mere press should leave only a print. The field is now signed and has two verbs.
+
+- **`TrailField`** (`Trails/TrailField.h/.cpp`): a texel is one signed value v in [-1, 1] (16 bit, +-32767): **v > 0 a pit, v < 0 a heap**. `stampEllipse` / `stampCapsule` are **press**: pits only, never a heap. New **`plowCapsule(x0,z0,x1,z1, radius, depth, bermWidth, bermHeight, surface)`** is **drag**: the capsule's groove plus a heap on both sides (`sin^2` hump, 0 at the groove edge and at the outer foot, crest in the middle). Call it every frame with the last and the new position and the track is continuous (many short segments equal one long one, tested). A pit always wins over a heap on a texel (so the next stretch of groove clears the heap at the front of the previous one, and a foot set into a heap leaves a pit); a heap never grows on a pit and the higher of two heaps stays. Healing moves both signs toward 0 at the same rate (a heap slumps like a pit fills). `sample` / `gradient` are signed (a footstep wants `max(v, 0)`).
+- **`TrailClipmap`**: R = 128 - round(127 v) (128 untouched, below a pit, above a heap), G / B the slope of v, A = 128 marker. The landscape graph decodes the pit as `Disturbance` (`saturate((128/255 - R) * 255/127)`); the heap shows only through the **slope** (it lights as a ridge). No new function pin and no new parameter.
+- **Bug fixed on the way:** the rim lean had the wrong sign (`bendNormal` takes the HEIGHT gradient, the height is -v, so the lean is `-0.3 x slope`). Printed pits were lit as if raised. Fixed in `ProceduralSurfaceFunctions.cpp` (`disturbanceRim`); `matfn_gen` and all four landscape materials regenerated.
+- **Debug:** `HE_DUMP_TRAILTEST=1` now has footprints (press) on parallel lines, two dragged tracks at z = -8 and z = -16 (heap both sides) and a set-down tyre line (press) at z = -22; the pose looks toward -Z.
+- **Verified (Mac, Release):** ctest 345/346 in one parallel run, the one failure `test_collab_controller` (a 15 s timing test) passes alone, i.e. load flake, unrelated; the trail and material tests are green (new: press never goes negative, plow groove + symmetric heaps + continuity + step-by-step equals long segment, pit over heap, heap slump and page freed, clipmap shows heaps above 128). No-trail render vs the step 3 baseline within 1/255. Metal: dark groove with a bright heap on each side next to the footprints, in snow and sand (`docs/landscape-3-0-procedural-snow-sand-shots/trail-snow-plow.jpg`, `trail-sand-plow.jpg`); OpenGL renders the same scene (not compared pixel by pixel).
+- **Not done:** the heap has no real height, only a normal lean: no silhouette, no shadow cast by it (the surface is still flat geometry). A heap-specific albedo (fluffier, brighter) is not applied. Gameplay calls (`HE::api`, footstep or vehicle emitters that choose press or drag) are step 7. D3D / Vulkan as in 5b.
 
 ## Step 4 withdrawn (2026-10-29)
 

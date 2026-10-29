@@ -7868,9 +7868,11 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
 			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
-		// HE_DUMP_TRAILTEST=1 (Thema 328 step 5b): boot-sized footprints along parallel lines over the snow plateau
-		// (x 12..60, snow) and the plain (x -100..-30, sand), a tyre line at the far edge of each, so a close-up
-		// pose shows prints with no gameplay. Stamped once here; the scene tick heals them with the (calm) weather.
+		// HE_DUMP_TRAILTEST=1 (Thema 328 step 5b): over the snow plateau (x 12..60) and the plain (x -100..-30, sand)
+		// boot-sized footprints along parallel lines (a press: a pit and nothing else), two tracks DRAGGED through
+		// (z = -8 and z = -16: a groove with a heap on both sides) and a set-down tyre line (z = -22, a pit only). The
+		// pose looks toward -Z. Stamped
+		// once here; the scene tick heals them with the (calm) weather.
 		if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0')
 		{
 			HE::TrailField& tf = TrailSystem::runtime(*m_editorWorld).field;
@@ -7879,13 +7881,24 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				for (float x = x0; x < x1; x += 0.8f, ++i)
 					tf.stampEllipse(x, z + ((i & 1) ? 0.25f : -0.25f), 0.4f, 0.17f, 0.0f, 0.9f, kind);
 			};
+			auto drag = [&](float x0, float x1, float z, HE::TrailSurface kind) {
+				// One short segment per "frame", as gameplay will call it.
+				for (float x = x0; x < x1; x += 0.35f)
+					tf.plowCapsule(x, z, x + 0.35f, z, 0.35f, 0.7f, 0.55f, 0.55f, kind);
+			};
 			for (float z = -16.0f; z <= 16.0f; z += 4.0f)
 			{
+				if (z == -8.0f || z == -16.0f)
+				{
+					drag(12.0f, 60.0f, z, HE::TrailSurface::Snow);
+					drag(-100.0f, -30.0f, z, HE::TrailSurface::Sand);
+					continue;
+				}
 				walk(12.0f, 60.0f, z, HE::TrailSurface::Snow);
 				walk(-100.0f, -30.0f, z, HE::TrailSurface::Sand);
 			}
-			tf.stampCapsule(12.0f, 22.0f, 60.0f, 22.0f, 0.3f, 0.8f, HE::TrailSurface::Snow);
-			tf.stampCapsule(-100.0f, 22.0f, -30.0f, 22.0f, 0.3f, 0.8f, HE::TrailSurface::Sand);
+			tf.stampCapsule(12.0f, -22.0f, 60.0f, -22.0f, 0.3f, 0.8f, HE::TrailSurface::Snow);
+			tf.stampCapsule(-100.0f, -22.0f, -30.0f, -22.0f, 0.3f, 0.8f, HE::TrailSurface::Sand);
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILTEST stamped %zu texels on %zu pages",
 			            tf.activeTexels(), tf.pageCount());
 		}

@@ -182,7 +182,7 @@ TEST_CASE("TrailClipmap: registers an untouched window, writes prints into the t
 	CHECK(cm.idForPath(HE::kTrailTexturePath) == map.textureId());
 	for (size_t i = 0; i < tex->data.size(); i += 4 * 997)
 	{
-		CHECK(tex->data[i + 0] == 255);                 // R = 1 - depth: untouched is white
+		CHECK(tex->data[i + 0] == 128);                 // R = 128 - 127 v: untouched is the middle
 		CHECK(tex->data[i + 1] == 128);                 // flat
 		CHECK(tex->data[i + 2] == 128);
 		CHECK(tex->data[i + 3] == 128);                 // the alpha marker
@@ -201,9 +201,9 @@ TEST_CASE("TrailClipmap: registers an untouched window, writes prints into the t
 		const int u = ((ix % 512) + 512) % 512, v = ((iz % 512) + 512) % 512;
 		return &tex->data[(static_cast<size_t>(v) * 512 + u) * 4];
 	};
-	CHECK(px(10.1f, 20.1f)[0] < 20);                    // deep: R near 0
+	CHECK(px(10.1f, 20.1f)[0] < 20);                    // deep pit: R near 1
 	CHECK(px(10.1f, 20.1f)[3] == 128);
-	CHECK(px(40.0f, 20.0f)[0] == 255);                  // far from the print
+	CHECK(px(40.0f, 20.0f)[0] == 128);                  // far from the print
 	// The rim leans toward the pit: east of the centre the depth falls with x, so G < 128, west G > 128.
 	CHECK(px(10.4f, 20.1f)[1] < 128);
 	CHECK(px(9.6f, 20.1f)[1] > 128);
@@ -220,7 +220,95 @@ TEST_CASE("TrailClipmap: registers an untouched window, writes prints into the t
 	field.tick(0.0, snow);
 	field.tick(500.0, snow);
 	CHECK(map.update(cm, nullptr, field, cam));
-	CHECK(cm.getTexture(map.textureId())->data[(256 * 512 + 256) * 4] == 255);
+	CHECK(cm.getTexture(map.textureId())->data[(256 * 512 + 256) * 4] == 128);
 	CHECK_FALSE(map.update(cm, nullptr, field, cam));
+	std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("TrailField: pressing leaves a pit and nothing else, plowing drags a groove with a heap on both sides")
+{
+	// Pressed: a capsule of pits, no heap anywhere (the field never goes negative).
+	TrailField press;
+	press.stampCapsule(0.0f, 10.0f, 20.0f, 10.0f, 0.4f, 0.8f, TrailSurface::Snow);
+	for (float z = 8.0f; z <= 12.0f; z += 0.2f)
+		for (float x = -1.0f; x <= 21.0f; x += 1.3f)
+			CHECK(press.sample(x, z) >= 0.0f);
+
+	// Plowed along +X at z = 10: groove radius 0.4, berms 0.5 m wide and 0.5 tall beside it.
+	TrailField plow;
+	plow.plowCapsule(0.0f, 10.0f, 20.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(plow.sample(10.0f, 10.0f) == doctest::Approx(0.8f).epsilon(0.03));       // the groove: a pit
+	CHECK(plow.sample(10.0f, 10.65f) < -0.2f);                                       // a heap on the +Z side ...
+	CHECK(plow.sample(10.0f, 9.35f) < -0.2f);                                        // ... and on the -Z side
+	CHECK(plow.sample(10.0f, 11.5f) == 0.0f);                                        // none farther out
+	CHECK(plow.sample(10.0f, 10.65f) == doctest::Approx(plow.sample(10.0f, 9.35f)).epsilon(0.1));   // symmetric
+	// Continuous: no gap along the groove, and the heap runs the whole length.
+	for (float x = 1.0f; x < 19.0f; x += 0.9f)
+	{
+		CHECK(plow.sample(x, 10.0f) > 0.5f);
+		CHECK(plow.sample(x, 10.65f) < -0.1f);
+	}
+	// The gradient across a heap points up its far flank: the value falls (more negative) toward the crest.
+	CHECK(plow.gradient(10.0f, 10.5f).y < 0.0f);                                     // groove side of the heap: v falls with z
+	CHECK(plow.gradient(10.0f, 10.9f).y > 0.0f);                                     // outer side: v rises back to 0
+
+	// Dragging in many small steps (one per frame) makes the same track as one long segment, and the next
+	// stretch clears the heap at the front of the previous one (a pit wins).
+	TrailField steps;
+	for (float x = 0.0f; x < 20.0f; x += 0.3f)
+		steps.plowCapsule(x, 10.0f, x + 0.3f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(steps.sample(10.0f, 10.0f) == doctest::Approx(0.8f).epsilon(0.03));
+	CHECK(steps.sample(10.0f, 10.65f) < -0.2f);
+	CHECK(steps.sample(10.0f, 10.0f) > 0.0f);                                        // not buried by the berm of a later step
+
+	// A pit overwrites a heap; a heap never grows on a pit.
+	TrailField mix;
+	mix.plowCapsule(0.0f, 10.0f, 20.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(mix.sample(10.0f, 10.65f) < -0.2f);
+	mix.stampEllipse(10.0f, 10.65f, 0.3f, 0.3f, 0.0f, 0.6f, TrailSurface::Snow);    // a foot in the heap
+	CHECK(mix.sample(10.0f, 10.65f) > 0.3f);
+	const float pit = mix.sample(10.0f, 10.0f);
+	mix.plowCapsule(0.0f, 10.65f, 20.0f, 10.65f, 0.2f, 0.2f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(mix.sample(10.0f, 10.0f) >= pit * 0.9f);                                   // the old groove stays a pit
+
+	// A degenerate plow (no berm width) is a plain groove; bad input does nothing.
+	TrailField bare;
+	bare.plowCapsule(0, 0, 5, 0, 0.4f, 0.8f, 0.0f, 0.5f, TrailSurface::Sand);
+	CHECK(bare.sample(2.0f, 0.65f) == 0.0f);
+	bare.plowCapsule(0, 0, 5, 0, 0.0f, 0.8f, 0.5f, 0.5f, TrailSurface::Sand);
+	CHECK(bare.activeTexels() > 0u);
+}
+
+TEST_CASE("TrailField: heaps slump back to nothing like pits fill, and the clipmap shows them above the middle")
+{
+	TrailField f;
+	f.plowCapsule(0.0f, 10.0f, 10.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(f.sample(5.0f, 10.65f) < -0.2f);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	f.tick(0.0, snow);
+	f.tick(60.0, snow);                       // half a minute: -0.5 at 1/120 per second
+	CHECK(f.sample(5.0f, 10.65f) > -0.01f);   // the heap (<= 0.5 tall) is gone
+	CHECK(f.sample(5.0f, 10.0f) == doctest::Approx(0.3f).epsilon(0.1));   // the pit only lost 0.5 of its 0.8
+	f.tick(500.0, snow);
+	CHECK(f.pageCount() == 0u);               // everything healed, the page is freed
+
+	// Clipmap: R above 128 = heap, below = pit.
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_trail_clipmap_heap_test";
+	std::filesystem::create_directories(dir);
+	ContentManager cm(dir.string());
+	TrailField g;
+	g.plowCapsule(0.0f, 10.0f, 10.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	HE::TrailClipmap map;
+	map.update(cm, nullptr, g, glm::vec3(5.0f, 5.0f, 10.0f));
+	const TextureAsset* tex = cm.getTexture(map.textureId());
+	REQUIRE(tex);
+	const auto px = [&](float x, float z) {
+		const int ix = static_cast<int>(std::floor(x / 0.25f)), iz = static_cast<int>(std::floor(z / 0.25f));
+		return &tex->data[(static_cast<size_t>(((iz % 512) + 512) % 512) * 512 + ((ix % 512) + 512) % 512) * 4];
+	};
+	CHECK(px(5.1f, 10.1f)[0] < 40);           // the groove: a pit
+	CHECK(px(5.1f, 10.65f)[0] > 150);         // the heap: above the middle
+	CHECK(px(5.1f, 10.65f)[3] == 128);
 	std::filesystem::remove_all(dir);
 }

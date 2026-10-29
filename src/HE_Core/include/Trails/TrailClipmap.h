@@ -9,13 +9,12 @@
 // out the texels belong to places near the camera, so the material fades the trail out before that
 // (AutoLandscapeMaterial.cpp: kTrailFadeStart / kTrailFadeEnd).
 //
-// Texel layout (what AutoLandscapeMaterial decodes):
-//   R = 255 - depth8   white = untouched, so a missing texture (the renderer's white/black stand-in)
-//                      cannot read as a deep print
-//   G = 128 + clamp(d(depth)/dx / 8) * 127     the slope per metre, 128 = flat
-//   B = 128 + clamp(d(depth)/dz / 8) * 127
+// Texel layout (what AutoLandscapeMaterial decodes), v = the field's signed value, pit depth positive:
+//   R = 128 - round(v * 127)   128 = untouched, below = a pit (R 1 = fully deep), above = a heap
+//   G = 128 + clamp(dv/dx / 8) * 127     the slope per metre, 128 = flat
+//   B = 128 + clamp(dv/dz / 8) * 127
 //   A = 128            a marker: the material only trusts texels whose alpha is about one half
-//                      (a missing texture is 0 or 1 there)
+//                      (a missing texture's white or black stand-in is 1 or 0 there)
 #pragma once
 
 #include <Math/Math.h>
@@ -58,7 +57,7 @@ public:
     const std::vector<uint8_t>& pixels() const { return m_pixels; }
 
     // The encoding, public so a test and the shader's constants cannot drift apart.
-    static void encode(const std::vector<uint16_t>& depth, std::vector<uint8_t>& rgba);
+    static void encode(const std::vector<int16_t>& values, std::vector<uint8_t>& rgba);
 
 private:
     HE::UUID             m_id{};

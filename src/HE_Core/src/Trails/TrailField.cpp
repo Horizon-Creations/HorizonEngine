@@ -7,7 +7,7 @@ namespace HE
 {
 namespace
 {
-constexpr float kMaxU16 = 65535.0f;
+constexpr float kMax16 = 32767.0f;   // the signed range's edge: +-1
 
 inline int floorDiv(int a, int b) { int q = a / b; return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q; }
 inline int floorMod(int a, int b) { return a - floorDiv(a, b) * b; }
@@ -20,7 +20,7 @@ inline float rimProfile(float r)   // r = distance in units of the radius
 }
 } // namespace
 
-uint16_t* TrailField::texelForWrite(int ix, int iz, TrailSurface surface)
+int16_t* TrailField::texelForWrite(int ix, int iz, TrailSurface surface)
 {
     const int px = floorDiv(ix, kPageCells), pz = floorDiv(iz, kPageCells);
     Page& page = m_pages[key(px, pz)];
@@ -28,7 +28,7 @@ uint16_t* TrailField::texelForWrite(int ix, int iz, TrailSurface surface)
     return &page.depth[static_cast<size_t>(floorMod(iz, kPageCells)) * kPageCells + floorMod(ix, kPageCells)];
 }
 
-uint16_t TrailField::texel(int ix, int iz) const
+int16_t TrailField::texel(int ix, int iz) const
 {
     const auto it = m_pages.find(key(floorDiv(ix, kPageCells), floorDiv(iz, kPageCells)));
     if (it == m_pages.end()) return 0;
@@ -52,9 +52,9 @@ void TrailField::stampEllipse(float x, float z, float rx, float rz, float yaw, f
             const float v = (-dx * sy + dz * cy) / rz;     // across it
             const float r = std::sqrt(u * u + v * v);
             if (r >= 1.0f) continue;
-            const uint16_t value = static_cast<uint16_t>(d * rimProfile(r) * kMaxU16 + 0.5f);
+            const int16_t value = static_cast<int16_t>(d * rimProfile(r) * kMax16 + 0.5f);
             if (value == 0) continue;
-            uint16_t* t = texelForWrite(i, j, surface);
+            int16_t* t = texelForWrite(i, j, surface);
             *t = std::max(*t, value);
         }
 }
@@ -76,10 +76,50 @@ void TrailField::stampCapsule(float x0, float z0, float x1, float z1, float radi
             const float qx = px - t * sx, qz = pz - t * sz;
             const float r = std::sqrt(qx * qx + qz * qz) / radius;
             if (r >= 1.0f) continue;
-            const uint16_t value = static_cast<uint16_t>(d * rimProfile(r) * kMaxU16 + 0.5f);
+            const int16_t value = static_cast<int16_t>(d * rimProfile(r) * kMax16 + 0.5f);
             if (value == 0) continue;
-            uint16_t* tx = texelForWrite(i, j, surface);
+            int16_t* tx = texelForWrite(i, j, surface);
             *tx = std::max(*tx, value);
+        }
+}
+
+void TrailField::plowCapsule(float x0, float z0, float x1, float z1, float radius, float depth,
+                             float bermWidth, float bermHeight, TrailSurface surface)
+{
+    if (!(radius > 0.0f) || !(depth > 0.0f)) return;
+    ++m_version;
+    const float d = std::min(depth, 1.0f);
+    const float bw = std::max(bermWidth, 0.0f);
+    const float bh = std::clamp(bermHeight, 0.0f, 1.0f);
+    const float reach = radius + bw;
+    const float minX = std::min(x0, x1) - reach, maxX = std::max(x0, x1) + reach;
+    const float minZ = std::min(z0, z1) - reach, maxZ = std::max(z0, z1) + reach;
+    const float sx = x1 - x0, sz = z1 - z0;
+    const float len2 = sx * sx + sz * sz;
+    for (int j = static_cast<int>(std::floor(minZ / kCellSize)); j <= static_cast<int>(std::floor(maxZ / kCellSize)); ++j)
+        for (int i = static_cast<int>(std::floor(minX / kCellSize)); i <= static_cast<int>(std::floor(maxX / kCellSize)); ++i)
+        {
+            const float px = (i + 0.5f) * kCellSize - x0, pz = (j + 0.5f) * kCellSize - z0;
+            const float t = len2 > 0.0f ? std::clamp((px * sx + pz * sz) / len2, 0.0f, 1.0f) : 0.0f;
+            const float qx = px - t * sx, qz = pz - t * sz;
+            const float dist = std::sqrt(qx * qx + qz * qz);
+            if (dist < radius)
+            {
+                const int16_t value = static_cast<int16_t>(d * rimProfile(dist / radius) * kMax16 + 0.5f);
+                if (value == 0) continue;
+                int16_t* t16 = texelForWrite(i, j, surface);
+                *t16 = std::max(*t16, value);   // a pit wins over whatever heap lay here
+            }
+            else if (bw > 0.0f && bh > 0.0f && dist < reach)
+            {
+                // A smooth hump: 0 at the groove's edge, the crest in the middle of the berm, 0 at its outer foot.
+                const float u = (dist - radius) / bw;
+                const float hump = std::sin(u * 3.14159265f);
+                const int16_t value = static_cast<int16_t>(-(bh * hump * hump * kMax16) - 0.5f);   // negative = heap
+                if (value == 0) continue;
+                int16_t* t16 = texelForWrite(i, j, surface);
+                if (*t16 <= 0) *t16 = std::min(*t16, value);   // never on a pit; the higher heap stays
+            }
         }
 }
 
@@ -99,13 +139,13 @@ float TrailField::healRate(uint8_t surfaces, const TrailWeather& w, const TrailS
 
 bool TrailField::healPage(Page& page, float rate, float dt)
 {
-    page.carry += rate * dt * kMaxU16;
+    page.carry += rate * dt * kMax16;
     const float whole = std::floor(page.carry);
     if (whole < 1.0f) return false;
     page.carry -= whole;
-    const uint16_t step = static_cast<uint16_t>(std::min(whole, kMaxU16));
-    for (uint16_t& t : page.depth)
-        t = t > step ? static_cast<uint16_t>(t - step) : static_cast<uint16_t>(0);
+    const int step = static_cast<int>(std::min(whole, kMax16));
+    for (int16_t& t : page.depth)   // pits fill, heaps slump: both move toward 0
+        t = t > step ? static_cast<int16_t>(t - step) : (t < -step ? static_cast<int16_t>(t + step) : static_cast<int16_t>(0));
     return true;
 }
 
@@ -126,7 +166,7 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
     if (steps == 0) return;
     // A page with nothing left on it is freed: the field only ever holds what was trodden.
     for (auto it = m_pages.begin(); it != m_pages.end();)
-        if (std::all_of(it->second.depth.begin(), it->second.depth.end(), [](uint16_t t) { return t == 0; }))
+        if (std::all_of(it->second.depth.begin(), it->second.depth.end(), [](int16_t t) { return t == 0; }))
         {
             it = m_pages.erase(it);
             ++m_version;
@@ -135,9 +175,9 @@ void TrailField::tick(double time, const TrailWeather& weather, const TrailSetti
             ++it;
 }
 
-void TrailField::copyWindow(int ix0, int iz0, int w, int h, uint16_t* out) const
+void TrailField::copyWindow(int ix0, int iz0, int w, int h, int16_t* out) const
 {
-    std::fill(out, out + static_cast<size_t>(w) * h, static_cast<uint16_t>(0));
+    std::fill(out, out + static_cast<size_t>(w) * h, static_cast<int16_t>(0));
     for (int pz = floorDiv(iz0, kPageCells); pz <= floorDiv(iz0 + h - 1, kPageCells); ++pz)
         for (int px = floorDiv(ix0, kPageCells); px <= floorDiv(ix0 + w - 1, kPageCells); ++px)
         {
@@ -159,7 +199,7 @@ float TrailField::sample(float x, float z) const
     const float fx = u - static_cast<float>(i0), fz = v - static_cast<float>(j0);
     const float a = texel(i0, j0), b = texel(i0 + 1, j0), c = texel(i0, j0 + 1), d = texel(i0 + 1, j0 + 1);
     const float top = a + (b - a) * fx, bottom = c + (d - c) * fx;
-    return (top + (bottom - top) * fz) / kMaxU16;
+    return (top + (bottom - top) * fz) / kMax16;
 }
 
 glm::vec2 TrailField::gradient(float x, float z) const
@@ -173,7 +213,7 @@ size_t TrailField::activeTexels() const
 {
     size_t n = 0;
     for (const auto& [k, page] : m_pages)
-        n += static_cast<size_t>(std::count_if(page.depth.begin(), page.depth.end(), [](uint16_t t) { return t != 0; }));
+        n += static_cast<size_t>(std::count_if(page.depth.begin(), page.depth.end(), [](int16_t t) { return t != 0; }));
     return n;
 }
 } // namespace HE

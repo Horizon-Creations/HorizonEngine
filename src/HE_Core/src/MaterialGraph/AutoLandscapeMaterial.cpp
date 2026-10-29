@@ -198,7 +198,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // ── Trails (Thema 328 step 5b): the depth and slope of whatever pressed the snow or sand ──────
     // TrailClipmap's texture (kTrailTexturePath, the fourth graph texture): a 128 m window around
     // the camera, world-aligned and wrapping, so the uv is simply xz / 128 and the sampler repeats.
-    // Decoding mirrors TrailClipmap.h: depth = 1 - R, slope = (G|B - 128/255) * (255 / 127 * 8), and
+    // Decoding mirrors TrailClipmap.h: depth = max((128/255 - R) * 255/127, 0), slope = (G|B - 128/255) * (255 / 127 * 8), and
     // only a texel whose alpha is about one half is trusted: a missing texture (a white or black
     // stand-in) must never read as a deep print. Beyond kTrailFadeStart metres the window no longer
     // belongs to this place (it wraps), so the trail fades out before it ends.
@@ -221,9 +221,14 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int far    = w.op(T::Smoothstep, 2, { { fadeS }, { fadeE }, { dist } });
         const int near   = w.op(T::OneMinus, 2, { { far } });
         const int gate   = w.op(T::Multiply, 2, { { valid }, { near } });
-        const int depth  = w.op(T::OneMinus, 2, { { rgb, 0 } });
-        trailDepth       = w.op(T::Multiply, 2, { { depth }, { gate } });
+        // R is the field's signed value: 128 untouched, below a pit, above a heap. A pit is the Disturbance
+        // (compacted, darker); a heap only shows in the slope below (it lights as a ridge).
         const int mid    = w.constF(128.0f / 255.0f, 2);
+        const int unitK  = w.constF(255.0f / 127.0f, 2);
+        const int pit0   = w.op(T::Subtract, 2, { { mid }, { rgb, 0 } });
+        const int pit1   = w.op(T::Multiply, 2, { { pit0 }, { unitK } });
+        const int depth  = w.op(T::Saturate, 2, { { pit1 } });
+        trailDepth       = w.op(T::Multiply, 2, { { depth }, { gate } });
         const int slopeK = w.constF(255.0f / 127.0f * TrailClipmap::kSlopeRange, 2);
         const int gx0    = w.op(T::Subtract, 2, { { rgb, 1 }, { mid } });
         const int gx1    = w.op(T::Multiply, 2, { { gx0 }, { slopeK } });
