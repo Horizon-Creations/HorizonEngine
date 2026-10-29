@@ -22,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@
 // engine mesh, and the scene edit is one undo step. HE_UI_DUMP_DIR writes a frame.
 
 namespace fs = std::filesystem;
+using namespace HE::Ed;
 
 namespace
 {
@@ -123,6 +125,16 @@ namespace
 		}
 	};
 
+	// IsPopupOpen(const char*) needs a current window; between frames there is none, so
+	// look the popup up by its window name in the open stack.
+	bool popupOpen()
+	{
+		const ImGuiContext& g = *ImGui::GetCurrentContext();
+		for (const ImGuiPopupData& p : g.OpenPopupStack)
+			if (p.Window && std::strstr(p.Window->Name, kPopup)) return true;
+		return false;
+	}
+
 	void frame(AppContext& ctx, he_ui::Image* shot = nullptr)
 	{
 		ImGui::NewFrame();
@@ -191,21 +203,21 @@ TEST_CASE("Generate LODs: the dialog opens on request and Escape closes it witho
 	ContextBits bits;
 	AppContext ctx = bits.make();
 	frame(ctx);
-	CHECK_FALSE(ImGui::IsPopupOpen(kPopup));
+	CHECK_FALSE(popupOpen());
 
 	AutoLodDialog::Request req;
 	req.kind = AutoLodDialog::Kind::MeshAsset;
 	AutoLodDialog::open(req);
 	he_ui::Image shot;
 	settle(ctx, &shot);
-	CHECK(ImGui::IsPopupOpen(kPopup));
+	CHECK(popupOpen());
 	dump(shot, "auto_lod_dialog.bmp");
 
 	ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape, true);
 	frame(ctx);
 	ImGui::GetIO().AddKeyEvent(ImGuiKey_Escape, false);
 	settle(ctx);
-	CHECK_FALSE(ImGui::IsPopupOpen(kPopup));
+	CHECK_FALSE(popupOpen());
 }
 
 TEST_CASE("Generate LODs: the option rows change the level run they announce")
