@@ -92,6 +92,7 @@ TEST_CASE("Sky prelude uniform block has HE::SkyFrameParams' field order")
 		{ "nebulaColor3",   offsetof(P, nebulaColor3)   }, { "auroraColorTop", offsetof(P, auroraColorTop) },
 		{ "starColor",      offsetof(P, starColor)      }, { "star",         offsetof(P, star)         },
 		{ "star2",          offsetof(P, star2)          }, { "neb2",         offsetof(P, neb2)         },
+		{ "drift",          offsetof(P, drift)          },
 	};
 	REQUIRE(fields.size() == cpp.size());
 	for (size_t i = 0; i < cpp.size(); ++i)
@@ -100,7 +101,77 @@ TEST_CASE("Sky prelude uniform block has HE::SkyFrameParams' field order")
 		CHECK_MESSAGE(fields[i] == cpp[i].first, "prelude field ", i, " is '", fields[i], "', SkyFrameParams has '", cpp[i].first, "'");
 		CHECK_MESSAGE(glslOffset == cpp[i].second, cpp[i].first, ": std140 offset ", glslOffset, " vs C++ ", cpp[i].second);
 	}
-	CHECK(sizeof(P) == 64 + 16 * 17);
+	CHECK(sizeof(P) == 64 + 16 * 18);
+}
+
+// ── Cloud drift: the wind INTEGRATED over time ────────────────────────────────
+// The clouds sit at pos * scale + drift. With drift = wind * time a changed wind teleported every
+// cloud by (new - old) * time; with the integral it only bends the motion from then on.
+TEST_CASE("CloudDrift: a constant wind drifts exactly as wind * time did")
+{
+	HE::CloudDrift d;
+	const glm::vec3 wind(0.01f, 0.0f, -0.02f);
+	// The first call starts at wind * time (a scene that opens with a constant wind is unchanged).
+	CHECK(d.advance(wind, 100.0) == wind * 100.0f);
+	glm::vec3 last(0.0f);
+	for (int i = 1; i <= 600; ++i)
+		last = d.advance(wind, 100.0 + i / 60.0);        // ten seconds at 60 Hz
+	const glm::vec3 expected = wind * 110.0f;
+	CHECK(last.x == doctest::Approx(expected.x).epsilon(1e-5));
+	CHECK(last.z == doctest::Approx(expected.z).epsilon(1e-5));
+}
+
+TEST_CASE("CloudDrift: a wind change bends the path instead of jumping")
+{
+	HE::CloudDrift d;
+	const glm::vec3 slow(0.01f, 0.0f, 0.0f), fast(0.04f, 0.0f, 0.0f);
+	d.advance(slow, 0.0);
+	const glm::vec3 before = d.advance(slow, 500.0);      // 500 s of slow wind
+	CHECK(before.x == doctest::Approx(5.0f));
+	// The slider moves: the same clock, a faster wind. Nothing may move.
+	const glm::vec3 atChange = d.advance(fast, 500.0);
+	CHECK(atChange == before);
+	// 10 s later the clouds travelled 10 s * the NEW speed, not (new - old) * 510 s on top.
+	const glm::vec3 after = d.advance(fast, 510.0);
+	CHECK(after.x == doctest::Approx(before.x + 0.4f).epsilon(1e-4));
+	// Negative control: the formula this replaces would have jumped by 15 units at the change.
+	CHECK(fast.x * 500.0f - slow.x * 500.0f == doctest::Approx(15.0f));
+}
+
+TEST_CASE("CloudDrift: a direction change is continuous too")
+{
+	HE::CloudDrift d;
+	const glm::vec3 north(0.0f, 0.0f, -0.02f), east(0.02f, 0.0f, 0.0f);
+	d.advance(north, 0.0);
+	const glm::vec3 a = d.advance(north, 300.0);
+	CHECK(d.advance(east, 300.0) == a);
+	const glm::vec3 b = d.advance(east, 310.0);
+	CHECK(b.x == doctest::Approx(a.x + 0.2f).epsilon(1e-4));
+	CHECK(b.z == doctest::Approx(a.z).epsilon(1e-5));    // no more drift to the north
+}
+
+TEST_CASE("CloudDrift: calls at the same clock agree and an earlier clock moves nothing")
+{
+	HE::CloudDrift d;
+	const glm::vec3 wind(0.02f, 0.0f, 0.0f);
+	d.advance(wind, 10.0);
+	const glm::vec3 a = d.advance(wind, 12.0);            // the sky pass
+	CHECK(d.advance(wind, 12.0) == a);                   // the cloud-shadow pass of the same frame
+	CHECK(d.advance(wind, 12.0) == a);                   // the quarter-res cloud pre-pass
+	CHECK(d.advance(wind, 11.0) == a);                   // an earlier clock (pass jitter): no negative drift
+	CHECK(d.advance(wind, 12.0) == a);                   // ... and that second is not integrated again
+	d.reset();
+	CHECK(d.advance(wind, 3.0) == wind * 3.0f);          // a fresh accumulator starts at wind * time
+}
+
+TEST_CASE("The sky shaders no longer position clouds with wind * time")
+{
+	const std::string fs   = HE::glsl::kSkyFS;
+	const std::string func = HE::glsl::kSkyFuncGLSL;
+	static const std::regex oldForm(R"(wind[A-Za-z.]*\s*\*\s*time)");
+	CHECK_FALSE(std::regex_search(fs, oldForm));
+	CHECK_FALSE(std::regex_search(func, oldForm));
+	CHECK(fs.find("uWindDrift") != std::string::npos);
 }
 
 TEST_CASE("BuildSkyFragmentGLSL450 swaps the GL header for the prelude and keeps the body")
@@ -198,6 +269,7 @@ TEST_CASE("The GL sky cross-compiles to SPIR-V (Vulkan) and pinned HLSL SM 5.0 (
 	CHECK(h.find("uNoise_sampler : register(s1)") != std::string::npos);
 	// Same byte layout as SkyFrameParams: the last vec4 in constant register 20.
 	CHECK(h.find("heSky_neb2 : packoffset(c20)") != std::string::npos);
+	CHECK(h.find("heSky_drift : packoffset(c21)") != std::string::npos);
 	// The noise volume is fetched with an explicit LOD (see kSkyVulkanPrelude).
 	CHECK(h.find("SampleLevel(") != std::string::npos);
 }

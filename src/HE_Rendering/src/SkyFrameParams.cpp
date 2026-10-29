@@ -11,6 +11,21 @@ glm::vec3 CloudWindVector(const IRenderer::EnvironmentSettings& env)
 	return glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * (env.windSpeed * 0.025f);
 }
 
+glm::vec3 CloudDriftOffset(const glm::vec3& wind, float time)
+{
+	// A pinned clock means a headless frame that must not depend on earlier frames.
+	static const bool s_pinned = []
+	{
+		const char* a = std::getenv("HE_SKY_TIME");
+		const char* b = std::getenv("HE_DUMP_SKYTIME");
+		return (a && *a) || (b && *b);
+	}();
+	if (s_pinned)
+		return wind * time;
+	static CloudDrift s_drift;
+	return s_drift.advance(wind, static_cast<double>(time));
+}
+
 // HE_DUMP_SKYTIME pins the sky animation clock to a fixed second for a headless frame dump.
 // Everything animated in the sky (cloud drift, aurora surges and streaming rays, shooting
 // stars) is driven by this one clock, which is normally SDL_GetTicks() and therefore
@@ -33,10 +48,13 @@ SkyFrameParams BuildSkyFrameParams(const IRenderer::EnvironmentSettings& env,
 	p.invViewProj    = in.invViewProj;
 	p.sunDir         = glm::vec4(in.sunDir, in.hasMoonTexture ? 1.0f : 0.0f);
 	p.sunColor       = glm::vec4(env.sunColor, env.moonPhase);
-	p.params         = glm::vec4(env.timeOfDay, env.cloudCoverage, SkyTimeOverride(in.time), env.auroraIntensity);
+	const float skyTime = SkyTimeOverride(in.time);
+	p.params         = glm::vec4(env.timeOfDay, env.cloudCoverage, skyTime, env.auroraIntensity);
 	p.nebulaColor    = glm::vec4(env.nebulaColor, env.nebulaIntensity);
 	p.auroraColor    = glm::vec4(env.auroraColor, env.milkyWayIntensity);
-	p.wind           = glm::vec4(CloudWindVector(env), env.flash);
+	const glm::vec3 wind = CloudWindVector(env);
+	p.wind           = glm::vec4(wind, env.flash);
+	p.drift          = glm::vec4(CloudDriftOffset(wind, skyTime), 0.0f);
 	p.cameraPos      = glm::vec4(in.cameraPos, static_cast<float>(env.cloudMode));
 	p.cloud          = glm::vec4(env.cloudHeight, env.cloudDensity, env.cloudFluffiness, env.contrailAmount);
 	p.cloudTint      = glm::vec4(env.cloudTint, env.cirrusAmount);

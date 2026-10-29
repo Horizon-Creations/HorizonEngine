@@ -1979,7 +1979,7 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 {
 	// The constant buffer is memcpy'd straight to the GPU — the size is a contract
 	// with the MSL/GLSL/HLSL struct.
-	CHECK(sizeof(HE::SkyFrameParams) == 64 + 17 * 16);
+	CHECK(sizeof(HE::SkyFrameParams) == 64 + 18 * 16);
 
 	IRenderer::EnvironmentSettings env;
 	env.windDirection    = 90.0f;
@@ -2014,6 +2014,11 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 	CHECK(p.wind.x == doctest::Approx(w.x));
 	CHECK(p.wind.z == doctest::Approx(w.z));
 	CHECK(p.wind.w == doctest::Approx(0.5f));
+	// drift.xyz is the wind integrated over time (CloudDrift, process-wide state, so only its
+	// shape is checked here; test_sky_shader covers the values); drift.w is unused.
+	CHECK(std::isfinite(p.drift.x));
+	CHECK(std::isfinite(p.drift.z));
+	CHECK(p.drift.w == doctest::Approx(0.0f));
 
 	CHECK(p.sunDir.w   == doctest::Approx(1.0f));    // has-moon flag
 	CHECK(p.sunColor.w == doctest::Approx(0.3f));    // lunar phase

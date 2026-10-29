@@ -742,6 +742,7 @@ private:
 	int          m_uSkyAuroraHeight   = -1; // aurora band elevation
 	int          m_uSkyAuroraFragment = -1; // aurora streak fragmentation
 	int          m_uSkyWind        = -1;  // cloud drift vector
+	int          m_uSkyWindDrift   = -1;  // where the wind has carried the clouds (HE::CloudDriftOffset)
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
 	int          m_uSkyCloudShadowPass   = -1; // 1 = render the cloud-shadow map (transmittance only)
 	int          m_uSkyCloudShadowRegion = -1; // vec4: origin XZ, region size, map size px

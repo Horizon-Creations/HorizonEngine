@@ -60,6 +60,7 @@ uniform float     uNebulaCover; // nebula sky coverage: 0 none .. 1 nearly the w
 uniform vec3      uAuroraColor;    // aurora lower/base colour (e.g. green)
 uniform vec3      uAuroraColorTop; // aurora upper colour (e.g. purple)
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
+uniform vec3      uWindDrift;   // where that wind has carried the clouds so far (world units; CloudDrift)
 uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 uniform sampler2D uCloudTex;    // quarter-res cloud buffer (rgb = L, a = T) for low-res clouds
 uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inline raymarch
@@ -484,7 +485,7 @@ vec3 overcastBand(vec3 baseSky, float gap, vec3 dir, vec3 sunDir, vec3 sunColor,
 // of a unit hemisphere), in noise units; the same wind drift as the march.
 vec2 domeDeckXZ(vec3 dir, vec3 wind, float time)
 {
-	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5) + wind.xz * time * (kCloudScale * 0.5);
+	return dir.xz / max(dir.y, 0.004) * (1.8 * kCloudScale * 0.5) + uWindDrift.xz * (kCloudScale * 0.5);
 }
 // Worley (cellular) lookup from the noise volume's G channel — bright at the cell
 // feature points. fBm of it is the billowy cumulus shape. The bake already tiles,
@@ -524,7 +525,7 @@ float cloudDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
 	float hgrad = cloudHeightGrad(pos.y);
 	if (hgrad <= 0.0) return 0.0;                                  // outside slab → no fetches
-	vec3  p      = pos * kCloudScale + wind * time;
+	vec3  p      = pos * kCloudScale + uWindDrift;
 	float morph  = time * 0.030;                                  // slow forming/dissolving
 	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 4);        // large-scale coverage
 	float billow = worleyFbm(p * 0.9 + vec3(morph, 0.0, 0.0));    // fine cauliflower detail
@@ -539,7 +540,7 @@ float cloudShadowDensity(vec3 pos, float time, float coverage, vec3 wind)
 {
 	float hgrad = cloudHeightGrad(pos.y);
 	if (hgrad <= 0.0) return 0.0;
-	vec3  p      = pos * kCloudScale + wind * time;
+	vec3  p      = pos * kCloudScale + uWindDrift;
 	float morph  = time * 0.030;
 	float perlin = starFbm3(p + vec3(0.0, morph, 0.0), 3);
 	float billow = worleyNoise3(p * 0.9 + vec3(morph, 0.0, 0.0)) * 0.7
@@ -625,7 +626,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 		// under that above 0.3125). At the default 0.5 it skips nothing and no exact bound
 		// could: 67 % of slab samples ARE cloud there (measured on the baked volume) and
 		// worleyFbm peaks at 0.87. See the Metal applyClouds() for the full note.
-		vec3  pp     = pos * kCloudScale + wind * time;
+		vec3  pp     = pos * kCloudScale + uWindDrift;
 		float morph  = time * 0.030;
 		float perlin = starFbm3(pp + vec3(0.0, morph, 0.0), 4);
 		if (perlin * 0.5 + 0.55 < lo) continue;
@@ -754,7 +755,7 @@ vec2 deck3DXZ(vec3 camPos, vec3 dir, float cloudH, vec3 wind, float time)
 	float midY = max(cloudH, 1.0) + kCloudRefAltitude * 0.75;
 	float t    = abs(midY - camPos.y) / max(abs(dir.y), 0.004);
 	vec2  xz   = camPos.xz + dir.xz * t;
-	return xz * (1.6 / kCloudRefAltitude * 0.5) + wind.xz * time * 0.5;
+	return xz * (1.6 / kCloudRefAltitude * 0.5) + uWindDrift.xz * 0.5;
 }
 
 // ── Cloud slab intersection ──────────────────────────────────────────────────
@@ -815,7 +816,7 @@ float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float 
 		// camera-relative in Y, and sampling the columns at baseY made the
 		// whole cloud PATTERN morph when the camera climbed — and the ground
 		// shadows with it. The 3D body/erosion below still vary with height.
-		vec3 npc = vec3(pos.x, 0.0, pos.z) * (nscale * 0.55) + wind * time;
+		vec3 npc = vec3(pos.x, 0.0, pos.z) * (nscale * 0.55) + uWindDrift;
 		npc.y += 37.0; // fixed weather-map slice (wind is horizontal; evolution scrolls y at sample time)
 		// DOMAIN WARP: bend the column field with a low-frequency vector noise
 		// so cells stop reading as same-sized round balls — outlines become
@@ -853,7 +854,7 @@ float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float 
 		float crown = 1.0 - smoothstep(towerTop * 0.55, towerTop, hf);
 		if (crown <= 0.0) return 0.0;
 		// 3D body: rounded interior lumps inside the column envelope.
-		vec3 np    = pos * nscale + wind * time;
+		vec3 np    = pos * nscale + uWindDrift;
 		float body  = cloudCoverFbm(np + vec3(0.0, time * 0.02 * evo, 0.0), 1.0);
 		float bodyD = smoothstep(0.30, 0.60, body + pres * 0.10);
 		float env   = pres * rise * crown * bodyD;             // smooth envelope 0..1
@@ -877,7 +878,7 @@ float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float 
 	}
 	// Classic branch — MUST stay term-for-term the cloud-shadow map's original
 	// formula (the ground shadows of classic scenes must not change).
-	vec3 np = pos * nscale + wind * time;
+	vec3 np = pos * nscale + uWindDrift;
 	float cover = cloudCoverFbm(np + vec3(0.0, time * 0.03, 0.0), 1.0);
 	float pres  = smoothstep(lo, lo + 0.26, cover);
 	if (pres <= 0.0) return 0.0;
@@ -972,7 +973,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 		float t   = tNear + (float(i) + jitter) * ds;
 		vec3  pos = camPos + dir * t;             // WORLD position → parallax
 		float hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
-		vec3  np  = pos * nscale + wind * time;
+		vec3  np  = pos * nscale + uWindDrift;
 		// Distance LOD weight (1 near → 0 far): used to fade fine detail and widen the
 		// noise thresholds far away so the coarsely-sampled distant clouds don't speckle.
 		float detailFade = 1.0 - smoothstep(maxDist * 0.10, maxDist * 0.40, t);
@@ -1021,7 +1022,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 				float shf = clamp((sp.y - baseY) / thick, 0.0, 1.0);
 				float shg = smoothstep(0.0, 0.25, shf) * (1.0 - smoothstep(0.6, 1.0, shf));
 				if (shg <= 0.0) continue;
-				vec3  snp = sp * nscale + wind * time;
+				vec3  snp = sp * nscale + uWindDrift;
 				float p2  = starFbm3(snp + vec3(0.0, time * 0.03, 0.0), 3);
 				float b2  = worleyNoise3(snp * 0.9 + vec3(time * 0.03, 0.0, 0.0)) * 0.7
 				          + worleyNoise3(snp * 1.8) * 0.3;
@@ -1164,7 +1165,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		// Fine cauliflower octave, boiling upward with the convection. Bites
 		// hardest at the silhouette (low density) so the outline breaks into
 		// crisp lobes while the core stays solid.
-		vec3  np    = pos * nscale + wind * time;
+		vec3  np    = pos * nscale + uWindDrift;
 		float bfine = worleyNoise3(np * 2.6 + vec3(0.0, -time * 0.10 * evo, 5.0));
 		float fineW = (0.50 + 0.35 * fluff) * detailFade
 		            * (1.0 - 0.45 * clamp(dens * 2.5, 0.0, 1.0));
@@ -1223,7 +1224,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		cloudCol *= uCloudTint;
 		if (ov > 0.0)   // overcast: lighter and darker masses so a closed deck still reads as clouds
 			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68,
-			                cloudCoverFbm(pos * nscale * 0.35 + wind * time, 0.0))), ov);
+			                cloudCoverFbm(pos * nscale * 0.35 + uWindDrift, 0.0))), ov);
 		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
 		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
 
@@ -1923,7 +1924,7 @@ vec3 contrails(vec3 baseSky, vec3 dir, vec3 sunDir, float amount, float coverage
 // hooks), with fine across-strand striations — all on a SEPARATE cirrusFbm so the strands
 // don't reveal the noise lattice. Translucent alpha-composite; white at noon, gold/pink at
 // low sun, with a subtle forward-scatter sheen toward the sun. Drifts slowly. Daytime.
-vec3 cirrus(vec3 baseSky, vec3 dir, vec3 sunDir, vec3 sunColor, float amount, float seed, float time, vec2 windXZ)
+vec3 cirrus(vec3 baseSky, vec3 dir, vec3 sunDir, vec3 sunColor, float amount, float seed, float time, vec2 driftXZ)
 {
 	if (amount <= 0.0) return baseSky;
 	dir    = normalize(dir);
@@ -1937,7 +1938,7 @@ vec3 cirrus(vec3 baseSky, vec3 dir, vec3 sunDir, vec3 sunColor, float amount, fl
 	// Flat high sheet: project onto a horizontal plane (dir.xz/dir.y) so the streaks
 	// foreshorten and converge toward the horizon for free. Seed offsets; slow drift.
 	vec2  so = vec2(seed * 13.1, seed * 7.3);
-	vec2  P  = dir.xz / (dir.y + 0.12) + windXZ * time * 0.5 + so;
+	vec2  P  = dir.xz / (dir.y + 0.12) + driftXZ * 0.5 + so;
 
 	// Strong anisotropy → long fibres along x. Then a mostly-cross-wind domain warp bends
 	// the straight strands into wavy/hooked mare's-tails (stretch FIRST, then warp small).
@@ -2021,7 +2022,7 @@ float godrayClear(vec3 d, float time, float coverage, vec3 wind)
 	if (d.y < 0.05) return 1.0;                          // toward the horizon → no cloud slab hit
 	float s    = kCloudBase / max(d.y, 1e-3);
 	vec3  pos  = d * s;
-	vec3  pp   = pos * kCloudScale + wind * time;
+	vec3  pp   = pos * kCloudScale + uWindDrift;
 	float perlin = starFbm3(pp + vec3(0.0, time * 0.030, 0.0), 4);
 	float lo   = cloudLo(coverage); // same threshold as applyClouds
 	float dens = smoothstep(lo, lo + 0.10, perlin * 0.5 + 0.275); // billow≈0.5 mean (sharper gap/cloud edge)
@@ -2211,7 +2212,7 @@ void main()
 	}
 	// High thin cirrus sits highest (farthest), then contrails, then the cumulus layer
 	// in front — so the lower clouds correctly occlude the thin upper layers.
-	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWind.xz); // alpha-blended
+	col  = cirrus(col, dir, uSunDir, uSunColor, uCirrus, uCirrusSeed, uTime, uWindDrift.xz); // alpha-blended
 	col  = contrails(col, dir, uSunDir, uContrails, uCloudCoverage); // alpha-blended into the sky
 	col += rainbow(dir, uSunDir, uRainAmount);           // anti-solar arc while raining (clouds occlude it below)
 	col += moonCorona(dir, uSunDir, true, uMoonPhase) * celestialVeil;   // subtle phase-shaped glow ring around the moon (moon always up in GL)
@@ -2438,7 +2439,7 @@ inline constexpr SkySlot kSkySlotNoise{ 2, 1 };
 
 // Replaces kSkyFS's GL declaration block for the Vulkan/D3D build. The uniform
 // block is HE::SkyFrameParams byte for byte (std140 = the HLSL cbuffer packing
-// for a mat4 + 17 vec4), so the renderers upload it with one memcpy. Every GL
+// for a mat4 + 18 vec4), so the renderers upload it with one memcpy. Every GL
 // uniform of kSkyFS maps onto its field below; the field meanings are the ones
 // BuildSkyFrameParams writes (SkyFrameParams.h).
 inline constexpr const char* kSkyVulkanPrelude = R"GLSL(#version 450
@@ -2465,6 +2466,7 @@ layout(set = 0, binding = 0, std140) uniform SkyEnv
 	vec4 star;
 	vec4 star2;
 	vec4 neb2;
+	vec4 drift;
 } heSky;
 layout(set = 0, binding = 1) uniform sampler2D uMoonTex;
 layout(set = 0, binding = 2) uniform sampler3D uNoise;
@@ -2492,6 +2494,7 @@ vec4 heSkyTexture(sampler3D s, vec3 p)  { return textureLod(s, p, 0.0); }
 #define uAuroraColor        heSky.auroraColor.xyz
 #define uMilkyWay           heSky.auroraColor.w
 #define uWind               heSky.wind.xyz
+#define uWindDrift          heSky.drift.xyz
 #define uFlash              heSky.wind.w
 #define uCameraPos          heSky.cameraPos.xyz
 #define uCloudMode          int(heSky.cameraPos.w + 0.5)

@@ -41,9 +41,53 @@ namespace HE
 // ~40x too fast.
 //
 // The result is a world-space vector and is NOT clip-space dependent: every
-// backend's sky shader uses it the same way (`pos * kCloudScale + wind * time`),
-// so no backend may flip a component for its own NDC convention.
+// backend's sky shader uses it the same way (`pos * kCloudScale + drift`, with the drift
+// being this vector integrated over time, see CloudDrift), so no backend may flip a
+// component for its own NDC convention.
 HE_RENDERING_API glm::vec3 CloudWindVector(const IRenderer::EnvironmentSettings& env);
+
+// The wind integrated over time: where the clouds have been carried to, as a world-space
+// offset. Position = pos * scale + offset, which is `wind * time` for a wind that never
+// changes and stays continuous when it does (the old `wind * time` jumped by
+// (new wind - old wind) * time the moment a slider moved).
+//
+// advance() may be called any number of times per frame: a call at the same clock moves
+// nothing, so the sky pass, the cloud-shadow pass and the quarter-res cloud pre-pass of one
+// frame read one value (a call with an earlier clock moves nothing). The first call starts at
+// wind * time, so a scene that opens with a constant wind looks exactly as it did before. The state is double: a float offset would
+// swallow a 16 ms step once it is a few hundred units away.
+class CloudDrift
+{
+public:
+	glm::vec3 advance(const glm::vec3& wind, double time)
+	{
+		if (!m_started)
+		{
+			m_started = true;
+			m_time    = time;
+			m_offset  = glm::dvec3(wind) * time;
+		}
+		else if (time > m_time)
+		{
+			m_offset += glm::dvec3(wind) * (time - m_time);
+			m_time    = time;
+		}
+		// An earlier (or equal) clock moves nothing and is not remembered: two passes whose
+		// clocks differ by a millisecond must not re-integrate that millisecond every frame.
+		return glm::vec3(m_offset);
+	}
+	void reset() { *this = CloudDrift(); }
+
+private:
+	bool       m_started = false;
+	double     m_time    = 0.0;
+	glm::dvec3 m_offset  = glm::dvec3(0.0);
+};
+
+// The process-wide drift every backend reads (BuildSkyFrameParams, and OpenGL's loose
+// uniforms). With the sky clock pinned (HE_SKY_TIME / HE_DUMP_SKYTIME, headless dumps) it
+// is the closed form wind * time, so a pinned frame does not depend on what ran before it.
+HE_RENDERING_API glm::vec3 CloudDriftOffset(const glm::vec3& wind, float time);
 
 // Per-frame values the environment cannot supply (camera/time/resource state).
 struct SkyFrameInputs
@@ -88,11 +132,17 @@ struct SkyFrameParams
 	// x = nebulaCoverage, y = cloudStyle (0 Classic / 1 Realistic),
 	// z = cloudInterShadows (0/1), w = cloudEvolution (shape-evolution speed).
 	glm::vec4 neb2           = glm::vec4(0.5f, 1.0f, 1.0f, 1.0f);
+	// xyz = how far the wind has carried the clouds so far (world units, horizontal), w = unused.
+	// This is the wind INTEGRATED over time (CloudDrift), not wind * time: the clouds sit at
+	// pos * scale + drift, so a changed wind speed or direction bends the motion from now on
+	// instead of teleporting every cloud by (new - old) * time. `wind` above stays the
+	// velocity, which the cloud-top shear needs.
+	glm::vec4 drift          = glm::vec4(0.0f);
 };
-// Byte layout must stay identical to the MSL SkyParams (mat4 + 17 x float4): the
+// Byte layout must stay identical to the MSL SkyParams (mat4 + 18 x float4): the
 // whole struct is uploaded with a single setFragmentBytes/memcpy. Guard against
 // silent drift.
-static_assert(sizeof(SkyFrameParams) == 64 + 17 * 16, "SkyFrameParams must match the MSL SkyParams layout (336 bytes)");
+static_assert(sizeof(SkyFrameParams) == 64 + 18 * 16, "SkyFrameParams must match the MSL SkyParams layout (352 bytes)");
 
 // EnvironmentSettings → sky-constants translation for the four backends listed at
 // the top of this header. OpenGL is NOT one of them — see that note.
