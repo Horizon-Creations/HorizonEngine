@@ -1941,11 +1941,13 @@ TEST_CASE("landscape ui: Apply Foliage never adopts a hand-tuned layer that has 
 	CHECK(f.layers[1].sourceEntry == 0);
 }
 
-// Step 10 review-fix: the same guard also has to see a layer whose ONLY hand-tuning
-// is a slope or height rule (default name, mesh, mask, LODs, weight layer). Each
-// SUBCASE changes exactly one of the four rule fields; "pristine" is the positive
-// control: an untouched starter is still reused, so the test discriminates.
-TEST_CASE("landscape ui: Apply Foliage reuses only a starter layer whose slope and height rules are default")
+// Step 10/11 review-fix: the same guard also has to see a layer whose ONLY hand-tuning
+// is one scalar field (default name, mesh, mask, LODs, weight layer): a slope/height
+// rule, density, seed, scale range, draw/shadow distance, bucket size, the shadow/AO
+// switches, LOD hysteresis or visibility. Each SUBCASE changes exactly one field;
+// "pristine" is the positive control: an untouched starter is still reused, so the
+// test discriminates.
+TEST_CASE("landscape ui: Apply Foliage reuses only a starter layer whose hand-tunable fields are default")
 {
 	Harness harness;
 	HorizonWorld world;
@@ -1987,6 +1989,17 @@ TEST_CASE("landscape ui: Apply Foliage reuses only a starter layer whose slope a
 	SUBCASE("slopeMax")          { fol.layers[0].slopeMax  = 0.7f; }
 	SUBCASE("heightMin")         { fol.layers[0].heightMin = 5.0f; }
 	SUBCASE("heightMax")         { fol.layers[0].heightMax = 50.0f; }
+	SUBCASE("density")           { fol.layers[0].density        = 0.5f; }
+	SUBCASE("seed")              { fol.layers[0].seed           = 7; }
+	SUBCASE("minScale")          { fol.layers[0].minScale       = 0.5f; }
+	SUBCASE("maxScale")          { fol.layers[0].maxScale       = 2.0f; }
+	SUBCASE("drawDistance")      { fol.layers[0].drawDistance   = 150.0f; }
+	SUBCASE("bucketSize")        { fol.layers[0].bucketSize     = 64.0f; }
+	SUBCASE("castsShadow")       { fol.layers[0].castsShadow    = false; }
+	SUBCASE("contributesAO")     { fol.layers[0].contributesAO  = false; }
+	SUBCASE("shadowDistance")    { fol.layers[0].shadowDistance = 40.0f; }
+	SUBCASE("lodHysteresis")     { fol.layers[0].lodHysteresis  = 5.0f; }
+	SUBCASE("visible")           { fol.layers[0].visible        = false; }
 	const FoliageLayer before = fol.layers[0];
 	reg.emplace<FoliageComponent>(terrain, fol);
 
@@ -2013,6 +2026,17 @@ TEST_CASE("landscape ui: Apply Foliage reuses only a starter layer whose slope a
 		CHECK(f.layers[0].slopeMax  == before.slopeMax);
 		CHECK(f.layers[0].heightMin == before.heightMin);
 		CHECK(f.layers[0].heightMax == before.heightMax);
+		CHECK(f.layers[0].density        == before.density);
+		CHECK(f.layers[0].seed           == before.seed);
+		CHECK(f.layers[0].minScale       == before.minScale);
+		CHECK(f.layers[0].maxScale       == before.maxScale);
+		CHECK(f.layers[0].drawDistance   == before.drawDistance);
+		CHECK(f.layers[0].bucketSize     == before.bucketSize);
+		CHECK(f.layers[0].castsShadow    == before.castsShadow);
+		CHECK(f.layers[0].contributesAO  == before.contributesAO);
+		CHECK(f.layers[0].shadowDistance == before.shadowDistance);
+		CHECK(f.layers[0].lodHysteresis  == before.lodHysteresis);
+		CHECK(f.layers[0].visible        == before.visible);
 		CHECK(f.layers[1].sourceAssetId == setId);
 		CHECK(f.layers[1].meshAssetId == tuftMesh);
 	}

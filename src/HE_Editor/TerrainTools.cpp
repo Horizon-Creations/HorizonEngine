@@ -327,15 +327,25 @@ namespace
 				// layer only qualifies as that pristine starter, never one the author
 				// began hand-tuning (named it, painted a mask, set a rule, added a LOD)
 				// before picking a mesh — meshAssetId=={} alone is not proof of that,
-				// so every other sign of hand-tuning is checked too, the slope and
-				// height rules included (compared bit for bit against FoliageLayer{}).
+				// so every other sign of hand-tuning is checked too: the slope and
+				// height rules, density, seed, scale range, draw/shadow distances,
+				// bucket size, the shadow/AO switches, LOD hysteresis and visibility.
+				// All compared bit for bit against FoliageLayer{}: this starter has
+				// never been written, so there is nothing to be "close" to. This runs
+				// before the write block below, which sets density/scale itself.
 				const FoliageLayer pristine{};
 				for (FoliageLayer& l : folc->layers)
 					if (l.meshAssetId == HE::UUID{} && l.materialAssetId == HE::UUID{} &&
 					    l.sourceAssetId == HE::UUID{} && l.name.empty() && l.densityMask.empty() &&
 					    l.lods.empty() && l.weightLayer == -1 &&
 					    l.slopeMin == pristine.slopeMin && l.slopeMax == pristine.slopeMax &&
-					    l.heightMin == pristine.heightMin && l.heightMax == pristine.heightMax) { layer = &l; break; }
+					    l.heightMin == pristine.heightMin && l.heightMax == pristine.heightMax &&
+					    l.density == pristine.density && l.seed == pristine.seed &&
+					    l.minScale == pristine.minScale && l.maxScale == pristine.maxScale &&
+					    l.drawDistance == pristine.drawDistance && l.bucketSize == pristine.bucketSize &&
+					    l.castsShadow == pristine.castsShadow && l.contributesAO == pristine.contributesAO &&
+					    l.shadowDistance == pristine.shadowDistance && l.lodHysteresis == pristine.lodHysteresis &&
+					    l.visible == pristine.visible) { layer = &l; break; }
 				if (!layer) layer = folc->addLayer();
 				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
 				layer->sourceAssetId = setId;
