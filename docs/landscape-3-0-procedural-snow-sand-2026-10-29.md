@@ -44,10 +44,11 @@ any other material can call them too.
 
 ## Verified (Mac, Release, tree of this commit)
 
-* `he_tests --source-file=*test_material_graph.cpp` 109/109 (15 618 assertions), `*test_landscape_groups.cpp` 4/4. New cases: interface
+* Full `ctest -j4` (empty HOME) 345/345 on the final tree (the first full run caught `test_auto_landscape_variants`, which counted four bombed layers: now 27 reads). `he_tests --source-file=*test_material_graph.cpp` 109/109 (15 618 assertions), `*test_landscape_groups.cpp` 4/4. New cases: interface
   and flatness, an unwired call compiles on its own (no weather, no texture, integer-hash noise only), the shipped-function tripwire
   now covers `Surface/` and both M_AutoLandscape and the Desert material, the hand-built graph calling both functions and the Desert
-  material in the cross-compile sweep (HLSL 93/93, SPIR-V 93/93, GLSL 4.10/4.30, MSL in the same sweeps).
+  material in the node sweeps (HLSL text 93/93, SPIR-V 93/93, GLSL 4.30 clustered 93/93); the shipped-material bake test (`test_landscape_groups`) bakes all four
+  materials for every backend incl. MSL, and Metal / OpenGL ran them for real in the witness. FXC / D3D12 / Vulkan validation of the new cases only exists on other devices: not run.
 * `matfn_gen` rewrites every UI effect and weather function byte-identical; the four `M_AutoLandscape*.hasset` are regenerated with
   `landscape_tex_gen EditorDeps/EngineContent/Materials --material [--group G]`, the deploy equals the committed file.
 * Witness `scripts/landscape-3-0-accept/cap233.sh` (top-down 400 m, real Mountains arrays from the cache, Desert placeholder arrays,
