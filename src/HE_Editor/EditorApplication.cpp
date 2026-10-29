@@ -5495,6 +5495,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			e->cirrusSeed     = static_cast<float>(envF("HE_DUMP_CIRRUSSEED", 0.0f));
 			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
 			e->cloudDomeHeight = static_cast<float>(envF("HE_DUMP_CLOUDDOMEHEIGHT", 1.0f));
+			e->cloudQuality    = static_cast<int>(envF("HE_DUMP_CLOUDQUALITY", static_cast<float>(e->cloudQuality)));   // 0 Low, 1 Medium, 2 High
 			e->cloudShadows        = envF("HE_DUMP_CLOUDSHADOWS", e->cloudShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudShadowStrength = static_cast<float>(envF("HE_DUMP_CLOUDSHADOWSTR", e->cloudShadowStrength));
 			e->cloudStyle          = static_cast<int>(envF("HE_DUMP_CLOUDSTYLE", static_cast<float>(e->cloudStyle)));
