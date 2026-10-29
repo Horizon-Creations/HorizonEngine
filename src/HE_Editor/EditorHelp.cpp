@@ -7449,6 +7449,16 @@ namespace
 	  "group never removes or changes a layer, and a layer you already have is left "
 	  "alone.",
 	  "", "scenes#terrain" },
+	{ "Landscape/Apply Foliage", "",
+	  "Materializes the foliage set named on the landscape's material (a Landscape "
+	  "Foliage node in its graph) into this terrain's foliage layers: one layer per "
+	  "entry, with the mesh, material, density and placement rules (slope, height, "
+	  "paint channel) the set author gave it. It only adds and refreshes its own "
+	  "layers - a layer you added by hand, or one from a different foliage set, is "
+	  "never touched, and re-pressing it after editing the set brings its layers up "
+	  "to date without losing their painted density masks or visibility. Disabled "
+	  "while the set is still downloading from the EngineContent server.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
 	  "offered while a material of your own is assigned.",

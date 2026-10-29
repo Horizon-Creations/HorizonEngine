@@ -33,6 +33,7 @@
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -289,6 +290,92 @@ namespace
 			++added;
 		}
 		return added;
+	}
+
+	// Materialize the LandscapeFoliageLayerAsset `set` (UUID `setId`) into the terrain's
+	// foliage layers (design doc §4, Thema 327): one `FoliageLayer` per entry, tagged with
+	// {setId, entry index} so a re-apply finds its own layers again. A tagged layer's
+	// asset-owned fields (mesh, material, LODs, rules, density, scale, flags) are refreshed
+	// every call; `seed`, `densityMask` and `visible` are the editor's own and are never
+	// touched. A layer nobody tagged — hand-added, or from a different asset/entry — is
+	// never read or written, so this never clobbers what the author tuned (the same
+	// add-only promise `applyGroupMeshes` makes, plus update). Spawning itself stays
+	// FoliageSystem's: this only sets the fields it already scatters from and flags the
+	// layer dirty, so the next `FoliageSystem::update()` (not this call) does the actual
+	// per-frame work — no placement work happens here. Returns how many entries were
+	// added or refreshed.
+	int applyFoliageSet(AppContext& ctx, entt::registry& reg, entt::entity terrain,
+	                     HE::UUID setId, const LandscapeFoliageLayerAsset& set)
+	{
+		if (set.entries.empty()) return 0;
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Foliage");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+
+		int touched = 0;
+		for (size_t i = 0; i < set.entries.size(); ++i)
+		{
+			const LandscapeFoliageEntry& e = set.entries[i];
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers)
+				if (l.sourceAssetId == setId && l.sourceEntry == static_cast<int>(i)) { layer = &l; break; }
+			if (!layer)
+			{
+				// Reuse an empty, untagged layer first (the one a fresh component starts
+				// with), same precedent as applyGroupMeshes; otherwise grow the list.
+				for (FoliageLayer& l : folc->layers)
+					if (l.meshAssetId == HE::UUID{} && l.sourceAssetId == HE::UUID{}) { layer = &l; break; }
+				if (!layer) layer = folc->addLayer();
+				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
+				layer->sourceAssetId = setId;
+				layer->sourceEntry   = static_cast<int>(i);
+			}
+
+			layer->name            = e.name;
+			layer->meshAssetId     = e.meshAssetId;
+			layer->materialAssetId = e.materialAssetId;
+			layer->density         = e.density * set.densityScale;
+			layer->minScale        = e.minScale;
+			layer->maxScale        = e.maxScale;
+			layer->drawDistance    = e.drawDistance;
+			layer->bucketSize      = e.bucketSize;
+			layer->castsShadow     = e.castsShadow;
+			layer->contributesAO   = e.contributesAO;
+			layer->shadowDistance  = e.shadowDistance;
+			layer->lodHysteresis   = e.lodHysteresis;
+			layer->slopeMin        = e.slopeMin;
+			layer->slopeMax        = e.slopeMax;
+			layer->heightMin       = e.heightMin;
+			layer->heightMax       = e.heightMax;
+			// Out of range = no paint rule, the same leniency SceneSerializer gives a
+			// hand-edited scene (a set authored against more terrain channels than this
+			// landscape has).
+			layer->weightLayer     = (e.paintLayer >= 0 && e.paintLayer < kTerrainMaxLayers) ? e.paintLayer : -1;
+			layer->lods.clear();
+			for (const LandscapeFoliageLod& lod : e.lods)
+				layer->lods.push_back(FoliageLod{ lod.meshAssetId, lod.materialAssetId, lod.distance, lod.density });
+			layer->dirty = true;   // mesh/density/rules changed → re-scatter
+
+			// The entry's meshes and materials are project or EngineContent FILES like the
+			// group presets' (§7: only fetched on Apply, not a streamed material dependency).
+			if (ctx.contentManager)
+			{
+				if (e.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.meshAssetId))
+					ctx.contentManager->loadAssetAsync(e.meshAssetId);
+				if (e.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.materialAssetId))
+					ctx.contentManager->loadAssetAsync(e.materialAssetId);
+				for (const LandscapeFoliageLod& lod : e.lods)
+				{
+					if (lod.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.meshAssetId))
+						ctx.contentManager->loadAssetAsync(lod.meshAssetId);
+					if (lod.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.materialAssetId))
+						ctx.contentManager->loadAssetAsync(lod.materialAssetId);
+				}
+			}
+			++touched;
+		}
+		return touched;
 	}
 
 	// The name on the left, the control filling the rest - ImGui itself puts a label to
@@ -1499,6 +1586,38 @@ void renderPanel(AppContext& ctx)
                     }
                     ImGui::EndDisabled();
                     EditorWidgets::helpForLabel("Apply Group Meshes");
+                }
+
+                // ── Foliage set ──────────────────────────────────────────
+                // The material names its LandscapeFoliageLayer by UUID (the Landscape
+                // Foliage node, Thema 327 step 3, MaterialAsset::foliageSetId); this is
+                // the one place that materializes it onto the terrain, same button
+                // precedent as "Apply Group Meshes" above (one undo snapshot, add +
+                // update, never deletes). Only custom materials carry the field today —
+                // the three engine materials still rely on "Apply Group Meshes".
+                if (lmat && lmat->foliageSetId != HE::UUID{})
+                {
+                    const HE::UUID setId = lmat->foliageSetId;
+                    const LandscapeFoliageLayerAsset* foliageSet =
+                        ctx.contentManager ? ctx.contentManager->getLandscapeFoliageLayer(setId) : nullptr;
+                    if (!foliageSet && ctx.contentManager)
+                    {
+                        // Passive pull (design §7): ask once. Never ensureResident here —
+                        // it is synchronous and does not start a download of a set that
+                        // still sits on the EngineContent server.
+                        static std::unordered_set<HE::UUID> s_asked;
+                        if (s_asked.insert(setId).second) ctx.contentManager->loadAssetAsync(setId);
+                    }
+                    sectionLabel("Foliage Set");
+                    dimText("%s", foliageSet ? foliageSet->name.c_str() : "(fetching the foliage set\xe2\x80\xa6)");
+                    ImGui::BeginDisabled(foliageSet == nullptr);
+                    if (EditorWidgets::button("Apply Foliage", ImVec2(-FLT_MIN, 0.0f)) && foliageSet)
+                    {
+                        const int touched = applyFoliageSet(ctx, reg, terrainEnt, setId, *foliageSet);
+                        if (touched > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Foliage");
                 }
 
                 // ── Heightmap ────────────────────────────────────────────

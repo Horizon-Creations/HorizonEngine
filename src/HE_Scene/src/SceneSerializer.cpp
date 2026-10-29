@@ -199,6 +199,12 @@ namespace
 		if (l.heightMin != def.heightMin)           j["heightMin"]      = l.heightMin;
 		if (l.heightMax != def.heightMax)           j["heightMax"]      = l.heightMax;
 		if (l.weightLayer != def.weightLayer)       j["weightLayer"]    = l.weightLayer;
+		// Apply-tag (Thema 327): absent for a hand-added layer, exactly like today.
+		if (l.sourceAssetId != def.sourceAssetId)
+		{
+			j["sourceAsset"] = uuidToJson(l.sourceAssetId);
+			j["sourceEntry"] = l.sourceEntry;
+		}
 		// Farther detail levels; a layer without any writes no key at all.
 		if (!l.lods.empty())
 		{
@@ -242,6 +248,11 @@ namespace
 		// Out of range = no paint rule (a hand-edited file, or a peer with more layers).
 		l.weightLayer     = c.value("weightLayer", l.weightLayer);
 		if (l.weightLayer < 0 || l.weightLayer >= kTerrainMaxLayers) l.weightLayer = -1;
+		if (c.contains("sourceAsset"))
+		{
+			l.sourceAssetId = jsonToUuid(c["sourceAsset"]);
+			l.sourceEntry   = c.value("sourceEntry", l.sourceEntry);
+		}
 		if (c.contains("lods") && c["lods"].is_array())
 		{
 			for (const json& d : c["lods"])

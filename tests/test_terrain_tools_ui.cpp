@@ -1447,4 +1447,166 @@ TEST_CASE("landscape ui: Apply Group Meshes adds the group's layers, never remov
 	CHECK(reg.get<FoliageComponent>(terrain).layers[0].name == "My Bush");
 }
 
+// Thema 327 step 4: a material with no Landscape Foliage node (every engine group
+// material, and any custom one nobody set the node on) carries no `foliageSetId`,
+// so the button that applies a set must not even offer itself there — there is
+// nothing to apply, and showing a disabled row would just be another thing to
+// explain in a tool nobody is forced to use.
+TEST_CASE("landscape ui: Apply Foliage does not appear for a material with no foliage set")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::kAutoLandscapeMaterialId;   // the built-in Mountains material: no node
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	CHECK_FALSE(locate(ctx, panelId("Apply Foliage"), bx, by));
+}
+
+// Thema 327 step 4: the one place that turns a LandscapeFoliageLayer asset (the
+// Landscape Foliage node's set, step 3) into something that actually scatters.
+// Placeholder meshes stand in for real foliage meshes (a human provides those
+// later, design §0); this proves the WIRING — entries become tagged layers that
+// FoliageSystem scatters exactly like a hand-added one — not any particular mesh.
+TEST_CASE("landscape ui: Apply Foliage materializes a set's entries, tags them, and re-apply "
+          "refreshes them without touching a hand-added layer or what the author tuned on its own")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+	// Placeholder meshes (Thema 163/182's own instancing/pooling needs only a mesh
+	// UUID to scatter against, not a real file — the human supplies real foliage
+	// meshes later, design §0).
+	const HE::UUID tuftMesh{ 0x7001ULL, 0x1ULL };
+	const HE::UUID rockMesh{ 0x7002ULL, 0x1ULL };
+
+	LandscapeFoliageLayerAsset set;
+	set.name = "Test Set";
+	set.densityScale = 2.0f;   // "make this biome sparser/denser" (design §3), applies at Apply time
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Tuft"; e.meshAssetId = tuftMesh; e.density = 0.2f;
+		e.slopeMin = 0.0f; e.slopeMax = 0.5f; e.paintLayer = 1;
+		set.entries.push_back(e);
+	}
+	{
+		LandscapeFoliageEntry e;
+		e.name = "Rock"; e.meshAssetId = rockMesh; e.density = 0.05f;
+		e.slopeMin = 0.4f; e.heightMin = 10.0f; e.paintLayer = 2;
+		set.entries.push_back(e);
+	}
+	const HE::UUID setId = cm.registerLandscapeFoliageLayer(set);
+
+	MaterialAsset mat;
+	mat.foliageSetId = setId;   // as if a Landscape Foliage node named it (step 3)
+	const HE::UUID matId = cm.registerMaterial(mat);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 100.0f; tc.sizeZ = 100.0f; tc.seed = 0; tc.weightRes = 64;
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = matId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+	// A layer the author made by hand: no tag, must survive untouched.
+	FoliageComponent fol;
+	fol.layers[0].name = "My Bush";
+	fol.layers[0].meshAssetId = HE::UUID{ 0xABCDEFULL, 0x1ULL };
+	fol.layers[0].density = 0.777f;
+	reg.emplace<FoliageComponent>(terrain, fol);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsSetup"), sx, sy));
+	clickAt(ctx, sx, sy);
+	float bx = 0.0f, by = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Apply Foliage"), bx, by), "no Apply Foliage button in Setup");
+
+	const size_t depth0 = undo.undoDepth();
+	clickAt(ctx, bx, by);
+	{
+		const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		REQUIRE(f.layers.size() == 3u);
+		CHECK(f.layers[0].name == "My Bush");          // untouched
+		CHECK(f.layers[0].density == 0.777f);
+		CHECK(f.layers[0].sourceAssetId == HE::UUID{});
+		CHECK(f.layers[1].name == "Tuft");
+		CHECK(f.layers[1].sourceAssetId == setId);
+		CHECK(f.layers[1].sourceEntry == 0);
+		CHECK(f.layers[1].meshAssetId == tuftMesh);
+		CHECK(f.layers[1].density == doctest::Approx(0.4f));   // 0.2 * densityScale 2.0
+		CHECK(f.layers[1].slopeMax == 0.5f);
+		CHECK(f.layers[1].weightLayer == 1);
+		CHECK(f.layers[1].dirty);
+		CHECK(f.layers[2].name == "Rock");
+		CHECK(f.layers[2].sourceAssetId == setId);
+		CHECK(f.layers[2].sourceEntry == 1);
+		CHECK(f.layers[2].heightMin == 10.0f);
+		CHECK(f.layers[2].weightLayer == 2);
+	}
+	CHECK(undo.undoDepth() == depth0 + 1);
+
+	// Tune the applied layer by hand (visibility, a painted mask, its own seed) and
+	// edit the set's entry — re-apply must refresh the asset-owned fields and bring
+	// no new layer, but leave the hand-tuned per-scene state exactly as it was.
+	{
+		FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		f.layers[1].visible = false;
+		f.layers[1].seed = 999;
+		f.layers[1].densityMask.assign(16, 128);
+		f.layers[1].maskRes = 4;
+	}
+	LandscapeFoliageLayerAsset* mutSet = cm.getLandscapeFoliageLayerMutable(setId);
+	REQUIRE(mutSet);
+	mutSet->entries[0].name    = "Tuft v2";
+	mutSet->entries[0].density = 0.3f;
+
+	clickAt(ctx, bx, by);
+	{
+		const FoliageComponent& f = reg.get<FoliageComponent>(terrain);
+		REQUIRE(f.layers.size() == 3u);                // no duplicate, the tag found its layer again
+		CHECK(f.layers[1].name == "Tuft v2");           // asset-owned field refreshed
+		CHECK(f.layers[1].density == doctest::Approx(0.6f));   // 0.3 * densityScale 2.0
+		CHECK(f.layers[1].visible == false);            // the editor's own state, untouched
+		CHECK(f.layers[1].seed == 999);
+		CHECK(f.layers[1].densityMask.size() == 16u);
+		CHECK(f.layers[0].name == "My Bush");           // the hand-added layer, still untouched
+	}
+	CHECK(undo.undoDepth() == depth0 + 2);
+}
+
 #endif // HE_EDITOR_DEPS_DIR
