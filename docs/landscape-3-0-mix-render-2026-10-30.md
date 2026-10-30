@@ -23,10 +23,28 @@ Branch `claude/landscape-3-0-multi-group-paint`, PR #213 (base `release/0.8.0`).
 * Metal and OpenGL: same picture, sand blends softly into grass (`docs/images-landscape-mix-metal-2026-10-30.png`).
   Placeholder fat arrays (128 px), so only the sand is clearly distinct.
 
+## Cost (Metal, M5, Catania 2000 m terrain, `landscape_regression.py --detailed`, 3 interleaved rounds, battery 59% LPM off)
+The landscape cost lands in the SSAO bucket (pass p50, ms) / whole GPU p50:
+
+| Scene | SSAO pass | GPU p50 |
+|---|---|---|
+| Mountains material (today) | 8.56 | 17.13 |
+| mix material, one group everywhere (`mixS`) | 13.55 (+5.0) | 22.06 (+4.9) |
+| mix material, ~25 % of the view blended (`mixB`) | 15.84 (+7.3) | 24.36 (+7.2) |
+
+Ablation on `mixS` (temporary graph switches, not committed; fat arrays = Mountains' real 2K arrays x4): without the
+second group's reads 10.39 (-3.2), without the procedural sand 11.93 (-1.6), without both 8.94 (+0.4 over today = the pick
+node). So: second set of taps 3.2 ms, sand 1.6 ms (a FunctionCall is not branch-pure, it runs on every fragment), pick 0.4 ms.
+Round 2 drifted warm (+1 ms everywhere); use the ratios. Distance LOD on the old material was no gain, so taps are cheap
+alone; here the second read set also costs the per-tap hex weights.
+
+Optimisation candidates (NOT done): (1) two mix assets, with and without sand, bound by whether any Desert share exists
+(saves 1.6 ms on every non-Desert mix); (2) skip group B's reads where A's weight is ~1 with a root-level If (only one branch
+level exists, the layer gates already use it for Dirt/Rock, so this needs the conditions merged); (3) 1 group pixels use the
+group's own material (mix only where shares differ), e.g. per chunk.
+
 ## Not verified
 * D3D11, D3D12, Vulkan: variants are baked (HLSL / SPIR-V) in `test_landscape_groups`, never run on a GPU. Windows step OPEN.
-* Cost: not measured. Expect ~2x the texture taps and the sand function on every fragment of a mixed terrain; the earlier
-  Metal A/B (distance LOD) showed taps are cheap and ALU is what costs, so measure with `landscape_regression.py` on AC.
 * Real group textures (Forest/Grassland/Desert) do not exist; the fat arrays must be built from them and published
   (EngineContent sync) before a terrain shows real group looks. Memory: 4 groups x 4 roles x 3 maps, 2K RGBA8 ~ 1 GiB.
 * Gate/If layers: the mix material keeps the existing gates; effect on GPU time unknown.
