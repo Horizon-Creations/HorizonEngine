@@ -56,9 +56,12 @@ struct Wire
 };
 
 struct LayerReads { int albedo = 0, normal = 0, mask = 0, height = 0; };
+
+// The three fat arrays of the mix material, in the heTexP0..2 order of the graph.
+const char* const kMixArrays[3] = { kAutoLandscapeMixAlbedoArray, kAutoLandscapeMixNormalArray, kAutoLandscapeMixMaskArray };
 } // namespace
 
-AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId)
+AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscapeGroupId groupId, bool mixed)
 {
     const AutoLandscapeGroup& group = autoLandscapeGroup(groupId);
     AutoLandscapeGraph r;
@@ -114,7 +117,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
                      "ridges), Glitter (0..1, sparkle in the sun), Softness (0..1, how deep and rounded the surface is).";
     }
     int pSandLook = -1;
-    if (group.proceduralSand)
+    if (group.proceduralSand || mixed)
     {
         pSandLook = w.node(T::ParamVec4, 0);
         MatGraphNode* c = r.graph.findNode(pSandLook);
@@ -146,10 +149,21 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // Groups = the four painted layers: the arrays hold 4 * V + 1 slices (V variants per layer,
     // then WetGround), V = depth / 4 in the shader. Each hex of a bombed read draws its own
     // variant; a 5-slice array (V = 1) reads exactly the slices it always did.
-    const int groups = w.constF(static_cast<float>(kAutoLandscapeRoleCount), 2);
-    auto layer = [&](AutoLandscapeLayer L, int uv, int seed) {
+    // The mix material reads 16 slices (group * 4 + role): the Groups pin is 16, so V = depth / 16.
+    const int groups = w.constF(static_cast<float>(mixed ? kAutoLandscapeMixDepth : kAutoLandscapeRoleCount), 2);
+    // Which two groups a fragment mixes, and A's weight in the pair (mix material only).
+    int pick = -1, pickMix = -1, four = -1;   // pick: pins 0 (A), 1 (B), 2 (Mix)
+    if (mixed)
+    {
+        pick    = w.node(T::LandscapeGroupPick, 2);
+        pickMix = pick;
+        four    = w.constF(static_cast<float>(kAutoLandscapeRoleCount), 2);
+    }
+    const char* const* arrays = mixed ? kMixArrays : group.arrayPaths;
+    // One bombed read of role `L` at array slice `slice` (a node): the role's constant in a group's
+    // own material, role + 4 * group in the mix material.
+    auto layerAt = [&](int slice, int uv, int seed) {
         LayerReads lr;
-        const int slice = w.constF(static_cast<float>(static_cast<int>(L)), 2);
         auto read = [&](T plain, T bombed, const char* path) {
             const int p = w.node(plain, 2);
             r.graph.findNode(p)->s = path;
@@ -171,10 +185,26 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
             r.graph.findNode(sw)->p[0] = 1.0f;
             return sw;
         };
-        lr.albedo = read(T::TextureArraySample,   T::TextureArrayBombSample,   group.arrayPaths[0]);
-        lr.normal = read(T::NormalMapArraySample, T::NormalMapArrayBombSample, group.arrayPaths[1]);
-        lr.mask   = read(T::TextureArraySample,   T::TextureArrayBombSample,   group.arrayPaths[2]);
+        lr.albedo = read(T::TextureArraySample,   T::TextureArrayBombSample,   arrays[0]);
+        lr.normal = read(T::NormalMapArraySample, T::NormalMapArrayBombSample, arrays[1]);
+        lr.mask   = read(T::TextureArraySample,   T::TextureArrayBombSample,   arrays[2]);
         lr.height = w.op(T::SplitRGBA, 2, { { lr.mask } }); // pin 2 = B = height
+        return lr;
+    };
+    auto layer = [&](AutoLandscapeLayer L, int uv, int seed) {
+        const int role = w.constF(static_cast<float>(static_cast<int>(L)), 2);
+        if (!mixed) return layerAt(role, uv, seed);
+        // Two groups' slices on the same hex grid, blended by A's weight: only the slice differs, so
+        // the grid is emitted once and the extra cost is the second set of taps and a lerp.
+        auto sliceOf = [&](int groupPin) {
+            return w.op(T::Add, 2, { { role }, { w.op(T::Multiply, 2, { { pick, groupPin }, { four } }) } });
+        };
+        const LayerReads a = layerAt(sliceOf(0), uv, seed), b = layerAt(sliceOf(1), uv, seed);
+        LayerReads lr;
+        lr.albedo = w.op(T::Lerp, 2, { { b.albedo }, { a.albedo }, { pickMix, 2 } });
+        lr.normal = w.op(T::Lerp, 2, { { b.normal }, { a.normal }, { pickMix, 2 } });
+        lr.mask   = w.op(T::Lerp, 2, { { b.mask },   { a.mask },   { pickMix, 2 } });
+        lr.height = w.op(T::SplitRGBA, 2, { { lr.mask } });
         return lr;
     };
     // A surface the procedural functions make, as the three channel sets the blends take: albedo and
@@ -249,8 +279,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // the ripples and the glitter keep the function's defaults. The weather's wetness darkens it
     // (the generic wet response of the lit shader comes on top, sand just darkens more).
     LayerReads grass;
-    if (group.proceduralSand)
-    {
+    // The sand as a surface (Desert's role 0, and the Desert's share of the mix material).
+    auto makeSand = [&]() {
         const int sand = callFunction(kProceduralSandFunctionPath, 2);
         const int sandColor = w.node(T::ConstColor, 2);
         {
@@ -268,8 +298,34 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(trailDepth, 0, sand, kSandInDisturbance);
         r.graph.connect(trailSlope, 0, sand, kSandInDisturbanceSlope);
         r.graph.connect(trailHeap, 0, sand, kSandInDisturbanceHeap);
-        grass = surfaceOf(sand, 2);
+        return surfaceOf(sand, 2);
+    };
+    if (mixed)
+    {
+        // Role 0 of a mix: each of the two groups' ground is its array slice, or the procedural sand
+        // where that group is the Desert, then the pair blends by A's weight. Both are always
+        // evaluated (no branch): the Desert's sand costs every fragment of a mixed terrain.
+        const LayerReads sand  = makeSand();
+        // Per side (A, B): the group's slice, or the sand where that group is the Desert.
+        const int role0 = w.constF(0.0f, 2);
+        auto sideOf = [&](int groupPin) {
+            const int slice = w.op(T::Add, 2, { { role0 }, { w.op(T::Multiply, 2, { { pick, groupPin }, { four } }) } });
+            const LayerReads rd = layerAt(slice, uvGround, 11);
+            const int isDesert = w.op(T::Greater, 2, { { pick, groupPin }, { w.constF(2.5f, 2) } });
+            LayerReads o;
+            o.albedo = w.op(T::Lerp, 2, { { rd.albedo }, { sand.albedo }, { isDesert } });
+            o.normal = w.op(T::Lerp, 2, { { rd.normal }, { sand.normal }, { isDesert } });
+            o.mask   = w.op(T::Lerp, 2, { { rd.mask },   { sand.mask },   { isDesert } });
+            return o;
+        };
+        const LayerReads ga = sideOf(0), gb = sideOf(1);
+        grass.albedo = w.op(T::Lerp, 2, { { gb.albedo }, { ga.albedo }, { pickMix, 2 } });
+        grass.normal = w.op(T::Lerp, 2, { { gb.normal }, { ga.normal }, { pickMix, 2 } });
+        grass.mask   = w.op(T::Lerp, 2, { { gb.mask },   { ga.mask },   { pickMix, 2 } });
+        grass.height = w.op(T::SplitRGBA, 2, { { grass.mask } });
     }
+    else if (group.proceduralSand)
+        grass = makeSand();
     else
         grass = layer(AutoLandscapeLayer::Grass, uvGround, 11);
     LayerReads       dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);

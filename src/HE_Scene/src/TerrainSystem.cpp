@@ -97,16 +97,12 @@ namespace
     {
         constexpr int L = kTerrainMaxLayers;
         double acc[L] = {};
-        double shareAcc[2] = {};
         size_t texels = 0;
         const bool second = tc.layerWeights2.size() == tc.layerWeights.size();
         const bool third  = tc.layerWeights3.size() == tc.layerWeights.size();
-        // A reserved layer (TerrainComponent::mixGroup, Thema 233 step 7) holds a group's
-        // SHARE, not a paint weight: it sits outside the 255-sum TerrainPaint::paint
-        // normalises layers 0..5 over, so it is left out of `s` and of the paint average
-        // below and averaged on its own, clamped the same way TerrainPaint's group brush
-        // clamps a texel's two shares to sum <= 1. 0 (no reservation) reproduces the old
-        // loop exactly — every bit test below is then always false.
+        // Reserved layers (TerrainComponent::groupMix) hold a group's SHARE, not a paint weight:
+        // they sit outside the 255-sum the paint layers are normalised over, so they are left
+        // out of `s` and averaged on their own (the share is already a fraction of 255).
         const int reserved = TerrainPaint::reservedLayers(tc);
         for (size_t i = 0; i + 3 < tc.layerWeights.size(); i += 4)
         {
@@ -119,24 +115,22 @@ namespace
                 w[k + 8] = third  ? tc.layerWeights3[i + k] / 255.0 : 0.0;
             }
             for (int k = 0; k < L; ++k)
-                if (!(k >= 6 && (reserved >> (k - 6) & 1))) s += w[k];
+                if (!TerrainPaint::isReservedLayer(tc, k)) s += w[k];
             if (s <= 1e-4) continue;                       // blank texel: the shader's
             for (int k = 0; k < L; ++k)                     // 1e-4 floor, same skip
-                if (!(k >= 6 && (reserved >> (k - 6) & 1))) acc[k] += w[k] / s;
+                if (!TerrainPaint::isReservedLayer(tc, k)) acc[k] += w[k] / s;
             if (reserved)
             {
-                double s1 = (reserved & 1) ? w[6] : 0.0, s2 = (reserved & 2) ? w[7] : 0.0;
-                const double t = s1 + s2;
-                if (t > 1.0) { s1 /= t; s2 /= t; }
-                shareAcc[0] += s1; shareAcc[1] += s2;
+                double t = 0.0;
+                for (int g = 0; g < TerrainPaint::kGroupCount; ++g) t += w[TerrainPaint::kGroupShareFirstLayer + g];
+                for (int g = 0; g < TerrainPaint::kGroupCount; ++g)
+                    acc[TerrainPaint::kGroupShareFirstLayer + g] += t > 1e-5 ? w[TerrainPaint::kGroupShareFirstLayer + g] / t : (g == 0 ? 1.0 : 0.0);
             }
             ++texels;
         }
         if (texels == 0) { setUnpaintedLayerAverage(tc); return; }
         for (int k = 0; k < L; ++k)
             tc.avgLayerWeights[k] = static_cast<float>(acc[k] / static_cast<double>(texels));
-        if (reserved & 1) tc.avgLayerWeights[6] = static_cast<float>(shareAcc[0] / static_cast<double>(texels));
-        if (reserved & 2) tc.avgLayerWeights[7] = static_cast<float>(shareAcc[1] / static_cast<double>(texels));
     }
 
     // ── Terrains whose collider still has to catch up ────────────────────────

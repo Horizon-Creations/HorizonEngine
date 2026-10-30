@@ -7440,13 +7440,13 @@ namespace
 	  "(layer 0) picks the texture by slope and height; painting a layer on top "
 	  "chooses one by hand.",
 	  "", "scenes#terrain" },
-	{ "Landscape/Mix Group", "Mix Group",
-	  "A second (and third) group whose share of this landscape is kept apart from "
-	  "the one above — None leaves the slot unused. Picking one does not change how "
-	  "the landscape looks by itself: it reserves paint channels 6 and 7 for that "
-	  "group's share, which the Paint tab's Active Group then lets you set by hand. "
-	  "A group already used by the terrain's own slot or the other Mix Group slot is "
-	  "greyed out.",
+	{ "Landscape/Mix Texture Groups", "",
+	  "Lets this landscape show all four texture groups at once. The group chosen above "
+	  "stays what every spot starts as; the Paint tab's Group row then paints any other "
+	  "group onto it, with that group's own layers underneath. It uses the paint channels "
+	  "8 to 11 for the groups' shares, so a custom material that paints there loses that "
+	  "paint when this is switched on (it is folded into layer 0). Switching it off drops "
+	  "the groups' shares and the landscape is its one group again.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Apply Group Meshes", "",
 	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
@@ -7493,11 +7493,12 @@ namespace
 	  "was painted. A starting point for a landscape built by hand: fill with the "
 	  "base layer, then paint the rest over it. One undo step.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Active Group", "Active Group",
-	  "Only shown once a Mix Group is set up (Setup tab). Which group this stroke "
-	  "marks the ground as, beside painting the layer below: the terrain's own group, "
-	  "or one of the Mix Groups. A dash is a slot with no group in it yet. Ctrl+drag "
-	  "always hands the spot back to the terrain's own group, whichever is active.",
+	{ "Landscape/Active Group", "Group",
+	  "Which texture group this stroke paints, beside the layer below: the terrain's "
+	  "own group or any other, all on the same landscape. Picking a group other than the "
+	  "terrain's own switches Mix Texture Groups on (Setup tab); the layer list below "
+	  "then shows that group's own layers. Ctrl+drag always hands the spot back to the "
+	  "terrain's own group, whichever is picked.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
