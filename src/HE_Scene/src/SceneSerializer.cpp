@@ -765,7 +765,7 @@ namespace
 			// Written only when on, so a one-group terrain (every scene before this field)
 			// saves byte for byte as before. The first build kept two shares in layers 6/7
 			// under "mixGroups"; that was never rendered and is not read any more.
-			if (t->groupMix) tc["groupMix"] = true;
+			if (t->groupMix) { tc["groupMix"] = true; tc["baseGroup"] = t->baseGroup; }
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -1797,6 +1797,7 @@ namespace
 			// rather than carried, same as a truncated weightmap above.
 			t.groupMix = c.value("groupMix", false)
 			             && !t.layerWeights.empty() && t.layerWeights3.size() == t.layerWeights.size();
+			t.baseGroup = t.groupMix ? std::clamp(c.value("baseGroup", 0), 0, 3) : -1;
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =

@@ -213,6 +213,25 @@ inline constexpr int autoLandscapeGroupOfMaterial(const UUID& id)
     return -1;
 }
 
+// ── The mix material (Thema 233): all four groups on one terrain ──────────────────────────────
+// A terrain with TerrainComponent::groupMix on binds this material instead of its group's. It reads
+// the groups' shares (weight layers 8..11, the Landscape Group Pick node), takes the two strongest
+// groups of a fragment and reads THEIR slices of three FAT arrays: slice = (group * 4 + role), one
+// variant per role (V = depth / 16 in the shader, so 16 slices = V 1), roles Grass / Dirt / Rock /
+// Snow in the group's slot order. Snow is the procedural function in every group and Desert's role 0
+// is the procedural sand, so those two slices are placeholders no fragment reads. The tuned parameters
+// (Rock Slope, Dirt Amount, Snow Height) are Mountains' for the whole terrain: a decision, not a
+// limit (per-group values would cost ALU per fragment, see docs/landscape-3-0-mix-render-*.md).
+// Ids: the 0x4A4..0x4A7 block (material, then its three arrays), clear of Desert's 0x4A0..0x4A3.
+inline constexpr UUID kAutoLandscapeMixMaterialId = { 0x00000000000004A4ULL, 0x0000000000000001ULL };
+inline constexpr char kAutoLandscapeMixMaterialPath[] = "Engine/Materials/M_AutoLandscape_Mix.hasset";
+inline constexpr char kAutoLandscapeMixAlbedoArray[]  = "Engine/Textures/Landscape/T_Landscape_Mix_Albedo_Array.hasset";
+inline constexpr char kAutoLandscapeMixNormalArray[]  = "Engine/Textures/Landscape/T_Landscape_Mix_Normal_Array.hasset";
+inline constexpr char kAutoLandscapeMixMaskArray[]    = "Engine/Textures/Landscape/T_Landscape_Mix_Mask_Array.hasset";
+inline constexpr int  kAutoLandscapeMixDepth = kAutoLandscapeGroupCount * kAutoLandscapeRoleCount;   // V = 1
+inline constexpr int  autoLandscapeMixSlice(int group, int role) { return group * kAutoLandscapeRoleCount + role; }
+inline constexpr bool isAutoLandscapeMixMaterial(const UUID& id) { return id == kAutoLandscapeMixMaterialId; }
+
 // Which group (and map: 0 Albedo, 1 Normal, 2 Mask) a texture path is an array of; -1 if none.
 // `path` is compared the way graphTexturePaths store it ("Engine/Textures/...").
 inline int autoLandscapeGroupOfArray(const char* path, int* map = nullptr)
@@ -279,6 +298,9 @@ struct AutoLandscapeGraph
 
 // `group` picks the three arrays the roles read, the paint-layer names and the defaults of the tuned
 // parameters; the default (Mountains) builds exactly the graph this material always had.
+// `mixed` builds the mix material above instead (the group then only names the parameter defaults,
+// Mountains).
 HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit,
-                                                  AutoLandscapeGroupId group = AutoLandscapeGroupId::Mountains);
+                                                  AutoLandscapeGroupId group = AutoLandscapeGroupId::Mountains,
+                                                  bool mixed = false);
 } // namespace HE

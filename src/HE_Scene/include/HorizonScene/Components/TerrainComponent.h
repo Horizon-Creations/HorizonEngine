@@ -105,6 +105,10 @@ struct TerrainComponent {
     // and only the group brush writes them. Off (every landscape before this field, and the
     // default) the layers are plain paint layers again. Saved only once it is on.
     bool groupMix = false;
+    // The group the terrain was (an AutoLandscapeGroupId) when the mix went on, -1 while it is off. With
+    // the mix on the terrain's material is the mix material and no longer names its group; this does,
+    // and it is the group the material returns to when the mix goes off.
+    int  baseGroup = -1;
 
     // ── Water ────────────────────────────────────────────────────────────────
     // The water bodies on this landscape and the raster that says where they are

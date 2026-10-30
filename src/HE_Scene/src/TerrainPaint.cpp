@@ -268,6 +268,7 @@ bool enableGroupMix(TerrainComponent& tc, int baseGroup)
         tc.layerWeights3[i + baseGroup] = 255;   // everything starts as the terrain's own group
     }
     tc.groupMix = true;
+    tc.baseGroup = baseGroup;
     tc.weightsDirty = true;
     return true;
 }
