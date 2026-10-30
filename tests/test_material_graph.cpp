@@ -2655,7 +2655,7 @@ TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambl
 
 // ═══ Auto landscape material (Thema 158, Schritt 5) ═══════════════════════════
 
-TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex grid per bombed layer")
+TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex grid per bombed layer")
 {
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
@@ -2775,8 +2775,7 @@ TEST_CASE("Auto landscape material: three arrays, fourteen parameters, one hex g
 			CHECK(m.graph.findNode(id) != nullptr);
 		const HE::MatShaderGen mg = HE::generateFragment(m.graph, HE::weatherFunctionLoader());
 		CHECK_FALSE(mg.glsl.empty());
-		// The mask views read no normal or mask map, so Detail Distance has no reader there.
-		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount) - 1);
+		CHECK(mg.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 	}
 
 	// The graph survives its JSON (what the .hasset stores) byte for byte.
