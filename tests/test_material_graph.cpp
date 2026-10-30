@@ -408,10 +408,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// FbmGrad is the LAST enum value today; a node added after it
+	// LandscapeFoliage is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::FbmGrad; ++t)
+	for (int t = 0; t <= (int)MatNodeType::LandscapeFoliage; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);

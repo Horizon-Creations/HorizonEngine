@@ -385,6 +385,13 @@ struct MaterialAsset : public RuntimeAsset
 	// the terrain only stores the weights.
 	std::vector<std::string> graphLayerNames;
 
+	// The LandscapeFoliageLayer a Landscape Foliage node names for this material
+	// (Thema 327); {} = none. Generated from the graph with graphLayerNames, and the
+	// LAST MTRL tail field (after customShaderDispGlsl, which the packer passes on
+	// verbatim). A UUID, not a path: the packer bakes only the refs it knows. Carried
+	// by a material instance like graphLayerNames; the Landscape tool's Apply reads it.
+	HE::UUID foliageSetId{};
+
 	// Precompiled per-backend shaders baked into the .hpak at export time (CHUNK_PSHD).
 	// Empty for loose editor assets → the renderer cross-compiles customShaderFragGlsl at
 	// runtime; when present, the renderer uses the variant for the active backend directly
@@ -872,4 +879,68 @@ struct SequenceAsset : public RuntimeAsset
     float                        frameRate = 30.0f;   // snapping in the editor only; evaluation is continuous
     std::vector<SequenceBinding> bindings;
     std::vector<SequenceTrack>   tracks;
+};
+
+// ── LandscapeFoliageLayer ────────────────────────────────────────────────────
+// An authored foliage rule set for a landscape (docs/landscape-foliage-layer-
+// entwurf-2026-10-29.md): which meshes grow, how dense, on what slope, at what
+// height, gated by which paint channel. An entry is a FoliageLayer (HE_Scene)
+// minus its per-scene state — seed, density mask, visibility, dirty flag — and
+// "apply" later copies entries into the terrain's FoliageComponent, so the
+// scatter, clusters, LODs and pooling stay the one existing path. The defaults
+// below are FoliageLayer's own, so an entry that says nothing is a default layer.
+// HE_Core cannot see HE_Scene, so the struct is spelled out here; a parity test
+// in step 4 pins the two against each other.
+//
+// Stored as ONE JSON document in CHUNK_LFOL (LandscapeFoliage/LandscapeFoliageLayerJson.h),
+// parsed once at load like the Sequence: every asset it names (meshes, materials)
+// is a {"hi","lo"} UUID, never a path, because the pack writer rewrites paths only
+// inside Mesh/Material/Scene/ParticleSystem blobs and the reference scan only sees
+// UUIDs spelled that way inside a JSON payload chunk.
+struct LandscapeFoliageLod
+{
+    HE::UUID meshAssetId;
+    HE::UUID materialAssetId;
+    float    distance = 50.0f;
+    float    density  = 1.0f;
+};
+
+struct LandscapeFoliageEntry
+{
+    std::string name;                       // the layer's inspector label
+    HE::UUID    meshAssetId;
+    HE::UUID    materialAssetId;            // null = the layer's own default
+    std::vector<LandscapeFoliageLod> lods;  // <= kLandscapeFoliageMaxLods
+
+    // The role channel of the landscape material that gates the entry
+    // (FoliageLayer::weightLayer): -1 ignore the paint, 0..7 a channel.
+    int   paintLayer = -1;
+    float slopeMin   = 0.0f;
+    float slopeMax   = 1.0f;
+    float heightMin  = -10000.0f;
+    float heightMax  =  10000.0f;
+
+    float density        = 0.1f;            // instances per m²
+    float minScale       = 0.8f;
+    float maxScale       = 1.2f;
+    float drawDistance   = 80.0f;
+    float bucketSize     = 32.0f;
+    bool  castsShadow    = true;
+    bool  contributesAO  = true;
+    float shadowDistance = 0.0f;
+    float lodHysteresis  = 2.0f;
+};
+
+inline constexpr size_t kLandscapeFoliageMaxEntries = 32;  // FoliageComponent::kMaxLayers
+inline constexpr size_t kLandscapeFoliageMaxLods    = 7;   // FoliageLayer::kMaxLods
+inline constexpr int    kLandscapeFoliageMaxPaintLayer = 7;
+
+struct LandscapeFoliageLayerAsset : public RuntimeAsset
+{
+    std::string description;
+    // One slider on the whole set ("make this biome sparser"), multiplied into
+    // every entry's density when applied. There is no per-entry weight: a share
+    // between entries on one channel is their density ratio.
+    float densityScale = 1.0f;
+    std::vector<LandscapeFoliageEntry> entries;
 };
