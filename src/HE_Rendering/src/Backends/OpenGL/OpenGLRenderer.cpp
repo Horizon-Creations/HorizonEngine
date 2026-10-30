@@ -7118,7 +7118,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 // EncodeSkyReflCube, which this mirrors: six faces of the real sky pass around
 // the camera, low-res clouds off (that buffer is screen-space, a face is not).
 // Leaves the caller's framebuffer, viewport and depth-test state as it found them.
-static constexpr int kSkyReflCubeSize = 128;
+static constexpr int kSkyReflCubeSize = 512;
 void OpenGLRenderer::RenderSkyReflCube()
 {
 	m_skyReflValid = false;
@@ -7127,9 +7127,10 @@ void OpenGLRenderer::RenderSkyReflCube()
 		return e && e[0] == '0';
 	}();
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
-	if (s_off || !m_skyProgram || !env.skyEnabled) return;
+	if (s_off || !m_skyProgram || !env.skyEnabled) { m_skyReflBaked = false; return; }
 	if (!m_skyReflCube)
 	{
+		m_skyReflBaked = false;
 		glGenTextures(1, &m_skyReflCube);
 		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflCube);
 		for (int f = 0; f < 6; ++f)
@@ -7152,7 +7153,10 @@ void OpenGLRenderer::RenderSkyReflCube()
 	glDisable(GL_DEPTH_TEST); // no depth attachment: every texel is sky
 	const glm::vec3 camPos = m_renderWorld.camera.position;
 	bool complete = true;
-	for (int f = 0; f < 6 && complete; ++f)
+	// All six faces the first time, then a rotating pair (a face not drawn keeps its picture).
+	const int firstFace = m_skyReflBaked ? m_skyReflPhase * kSkyReflFacesPerFrame : 0;
+	const int endFace   = m_skyReflBaked ? firstFace + kSkyReflFacesPerFrame : 6;
+	for (int f = firstFace; f < endFace && complete; ++f)
 	{
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 		                       GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, m_skyReflCube, 0);
@@ -7168,6 +7172,13 @@ void OpenGLRenderer::RenderSkyReflCube()
 	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
 	glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
 	m_skyReflValid = complete;
+	if (complete)
+	{
+		m_skyReflPhase = m_skyReflBaked ? (m_skyReflPhase + 1) % (6 / kSkyReflFacesPerFrame) : 0;
+		m_skyReflBaked = true;
+	}
+	else
+		m_skyReflBaked = false; // a failed face: draw all six again next time
 }
 
 unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
@@ -12818,7 +12829,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					// re-asserted here because the units are only ever used by these
 					// material programs. Gated by heLight.fog.z/.w.
 					glActiveTexture(GL_TEXTURE14);
-					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
 					glActiveTexture(GL_TEXTURE15);
 					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 					// DDGI probe atlases on 16/17 (white fallbacks keep the samplers
@@ -13088,7 +13099,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// Shared material inputs the preamble samples (sky env / AO / DDGI
 				// atlases) — the same units the custom-material draws use.
 				glActiveTexture(GL_TEXTURE14);
-				glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+				glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
 				glActiveTexture(GL_TEXTURE15);
 				glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 				glActiveTexture(GL_TEXTURE16);
@@ -13449,7 +13460,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, t.wmTex);
 					}
 					glActiveTexture(GL_TEXTURE14);
-					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
 					glActiveTexture(GL_TEXTURE15);
 					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 					glActiveTexture(GL_TEXTURE16);

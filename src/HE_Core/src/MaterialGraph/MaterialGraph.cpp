@@ -2642,6 +2642,10 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     };
 
     src = withArrayMask(header) + common;
+    if (lit && blendMode == (int)MatBlendMode::Translucent)
+        // The GI-reflection trace belongs to the opaque surface behind a translucent
+        // fragment (see heSkipGIReflTrace in the lighting preamble).
+        src += "    heSkipGIReflTrace = true;\n";
     if (lit)
         // Aerial perspective wraps the WHOLE lit colour (emissive included), the
         // same place the built-in scene shaders apply it — without it a distant

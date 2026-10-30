@@ -9563,9 +9563,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // Linear-CLAMP like GL/Metal's cube sampler; the repeat
                             // address mode of m_albedoSampler is moot on a cube, but the
                             // SSAO sampler is the clamp one this backend already has.
+                            // GI reflections on: the real-sky cube instead (aurora, stars, clouds) -
+                            // transparent water never reaches the GI trace, so this lookup is its only sky.
+                            const bool realSky = m_giReflEnabled && m_skyReflValid && m_skyReflCubeView && m_skyReflSampler;
                             VkDescriptorImageInfo skyII{
-                                m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler,
-                                m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+                                realSky ? m_skyReflSampler
+                                        : (m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler),
+                                realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
                             // heAO (16): this frame's blurred SSAO — the image the
@@ -9982,9 +9986,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     localShadows ? m_shadowSampler   : m_albedoSampler,
                     localShadows ? m_localShadowView : m_whiteArrayView,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                const bool realSky = m_giReflEnabled && m_skyReflValid && m_skyReflCubeView && m_skyReflSampler;
                 const VkDescriptorImageInfo skyII{
-                    m_skyEnvValid ? clampSampler  : m_albedoSampler,
-                    m_skyEnvValid ? m_skyEnvView  : m_whiteCubeView,
+                    realSky ? m_skyReflSampler  : (m_skyEnvValid ? clampSampler : m_albedoSampler),
+                    realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                 const VkDescriptorImageInfo aoII{
                     m_ssaoRanThisFrame ? m_ssaoSampler     : m_albedoSampler,
