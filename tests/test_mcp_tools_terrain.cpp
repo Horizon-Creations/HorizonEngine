@@ -621,7 +621,7 @@ TEST_CASE("terrain_paint reaches layers 4..7 on the second weight page, and undo
 	});
 	REQUIRE_MESSAGE(!r.isError, codeOf(r));
 	CHECK(f.terrain(e).layerWeights2.empty());
-	REQUIRE(r.content["mixAtCenter"].size() == 8);
+	REQUIRE(r.content["mixAtCenter"].size() == 12);
 
 	r = f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 210.0 }, { "z", -50.0 },
@@ -629,7 +629,7 @@ TEST_CASE("terrain_paint reaches layers 4..7 on the second weight page, and undo
 	});
 	REQUIRE_MESSAGE(!r.isError, codeOf(r));
 	CHECK(r.content["changed"] == true);
-	REQUIRE(r.content["mixAtCenter"].size() == 8);
+	REQUIRE(r.content["mixAtCenter"].size() == 12);
 	CHECK(r.content["mixAtCenter"][5].get<float>() == doctest::Approx(1.0f));
 	CHECK(r.content["mixAtCenter"][0].get<float>() == doctest::Approx(0.0f));
 
@@ -653,6 +653,49 @@ TEST_CASE("terrain_paint reaches layers 4..7 on the second weight page, and undo
 	CHECK(f.terrain(after).layerWeights2.empty());
 }
 
+TEST_CASE("terrain_paint reaches layers 8..11 on the third weight page, and undo takes it back")
+{
+	Fixture f;
+	const Entity e = f.makeTerrain();
+
+	// A second-page stroke first, so the third page is the new thing.
+	ToolResult r = f.call("terrain_paint", json{
+		{ "uuid", f.uuid(e) }, { "x", 190.0 }, { "z", -50.0 },
+		{ "layer", 5 }, { "radius", 4.0 }, { "falloff", 0.0 }, { "strength", 1.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(f.terrain(e).layerWeights3.empty());
+
+	r = f.call("terrain_paint", json{
+		{ "uuid", f.uuid(e) }, { "x", 210.0 }, { "z", -50.0 },
+		{ "layer", 10 }, { "radius", 4.0 }, { "falloff", 0.0 }, { "strength", 1.0 },
+	});
+	REQUIRE_MESSAGE(!r.isError, codeOf(r));
+	CHECK(r.content["changed"] == true);
+	REQUIRE(r.content["mixAtCenter"].size() == 12);
+	CHECK(r.content["mixAtCenter"][10].get<float>() == doctest::Approx(1.0f));
+	CHECK(r.content["mixAtCenter"][5].get<float>() == doctest::Approx(0.0f));
+
+	// All three pages landed in the component (they travel as one scene patch).
+	const auto& tc = f.terrain(e);
+	REQUIRE(tc.layerWeights2.size() == tc.layerWeights.size());
+	REQUIRE(tc.layerWeights3.size() == tc.layerWeights.size());
+	CHECK(TerrainPaint::usesThirdPage(tc));
+	std::uint8_t w[kTerrainMaxLayers] = {};
+	const std::uint32_t wr = tc.weightRes;
+	const auto tx = static_cast<std::uint32_t>((10.0f + tc.sizeX * 0.5f) / tc.sizeX * wr);
+	REQUIRE(TerrainPaint::texelWeights(tc, tx, wr / 2, w));
+	CHECK(static_cast<int>(w[10]) == 255);
+
+	// Undo restores the state before the layer-10 stroke: two pages, no third.
+	const std::string id = f.uuid(e);
+	REQUIRE(f.snapshotUndo.undo());
+	const Entity after = HE::Ed::entityByUuid(f.world, id);
+	REQUIRE((after != entt::null));
+	CHECK_FALSE(f.terrain(after).layerWeights2.empty());
+	CHECK(f.terrain(after).layerWeights3.empty());
+}
+
 TEST_CASE("terrain_paint refuses a layer a landscape does not have")
 {
 	Fixture f;
@@ -660,7 +703,7 @@ TEST_CASE("terrain_paint refuses a layer a landscape does not have")
 
 	CHECK(codeOf(f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
-		{ "layer", 8 } })) == "invalid_payload");
+		{ "layer", 12 } })) == "invalid_payload");
 	CHECK(codeOf(f.call("terrain_paint", json{
 		{ "uuid", f.uuid(e) }, { "x", 200.0 }, { "z", -50.0 },
 		{ "layer", -1 } })) == "invalid_payload");

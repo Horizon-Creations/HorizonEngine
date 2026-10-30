@@ -2524,3 +2524,15 @@ reichte ihm einen Temporären, die Namen waren im optimierten Build leer. Der Te
 * Die hellen **Glanzlinien** am Rand mancher Pfützen auf Metal und OpenGL (ein heller Saum, wo die Rauheit schon
   auf 0,05 gefallen ist, die Normale aber noch die des Bodens ist) gab es schon vorher (im Bild vor der Änderung
   zu sehen) und sind nicht Teil dieser Änderung.
+
+---
+
+## 23. Schnee und Wüstensand sind Material-Funktionen (Thema 329, Schritt 2)
+
+Die Schnee-Rolle (alle Gruppen) und die Boden-Rolle der Desert-Gruppe lesen keine Array-Slices mehr: `MF_ProceduralSnow` und
+`MF_ProceduralSand` (`ProceduralSurfaceFunctions.h`, Assets unter `EngineContent/MaterialFunctions/Surface/`, Ids `0x41D` /
+`0x41E`) machen sie aus Rauschen im Weltraum und liefern Albedo, Normal, Roughness, AO und Height. Jedes andere Material kann sie
+aufrufen. Cover und Nässe kommen vom Aufrufer (hier dem Weather-Knoten), die Funktionen lesen kein Wetter; die Höhe ändert sich nicht
+mit dem Wetter, darum bleibt `r.snowMask` der Höhenschnee allein. Das Snow-Tor (`If`) entfällt: ein Funktionsaufruf liegt nie in einem
+Zweig. Slice 3 (und in der Desert Slice 0) bleibt im Array, damit das Layout (4 × V + 1) gleich bleibt. Die Mountains-Baseline ist neu
+(kein Hex-Raster mehr im Schnee); Zahlen, Bilder und Übergabe: `docs/landscape-3-0-procedural-snow-sand-2026-10-29.md`.

@@ -33,6 +33,7 @@
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -50,11 +51,10 @@ static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
 static bool        s_landscapePaint  = false;
 static int         s_paintLayer      = 0;
-// Which group a Paint stroke leans the texel toward (Thema 233 step 7): 0 = the
-// terrain's own group, 1..3 = TerrainComponent::mixGroup[0..2]. Picking a group in the
-// Paint tab that the terrain does not mix yet gives it a free slot; a terrain with none ignores it
-// (TerrainPaint::paintInGroup is a no-op on the share when mixSlotMask() == 0).
-static int         s_activeGroupSlot = 0;
+// Which texture group a Paint stroke leans the texel toward (Thema 233): an
+// AutoLandscapeGroupId. Only meaningful while the terrain mixes groups
+// (TerrainComponent::groupMix); otherwise the stroke is a plain layer paint.
+static int         s_activeGroup = 0;
 // Landscape FOLIAGE mode: the same brush paints a foliage layer's density
 // mask (FoliageLayer::densityMask) — Grow raises it toward the target
 // density, Erase pulls it to 0, which is how an exclusion area (a yard, a
@@ -294,6 +294,151 @@ namespace
 			++added;
 		}
 		return added;
+	}
+
+	// Materialize the LandscapeFoliageLayerAsset `set` (UUID `setId`) into the terrain's
+	// foliage layers (design doc §4, Thema 327): one `FoliageLayer` per entry, tagged with
+	// {setId, entry index} so a re-apply finds its own layers again. A tagged layer's
+	// asset-owned fields (mesh, material, LODs, rules, density, scale, flags) are refreshed
+	// every call; `seed`, `densityMask` and `visible` are the editor's own and are never
+	// touched. A layer nobody tagged — hand-added, or from a different asset/entry — is
+	// never read or written, so this never clobbers what the author tuned (the same
+	// add-only promise `applyGroupMeshes` makes, plus update). Spawning itself stays
+	// FoliageSystem's: this only sets the fields it already scatters from and flags the
+	// layer dirty, so the next `FoliageSystem::update()` (not this call) does the actual
+	// per-frame work — no placement work happens here. Returns how many entries were
+	// added or refreshed.
+	int applyFoliageSet(AppContext& ctx, entt::registry& reg, entt::entity terrain,
+	                     HE::UUID setId, const LandscapeFoliageLayerAsset& set)
+	{
+		if (set.entries.empty()) return 0;
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Foliage");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+
+		int touched = 0;
+		for (size_t i = 0; i < set.entries.size(); ++i)
+		{
+			const LandscapeFoliageEntry& e = set.entries[i];
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers)
+				if (l.sourceAssetId == setId && l.sourceEntry == static_cast<int>(i)) { layer = &l; break; }
+			if (!layer)
+			{
+				// Reuse an empty, untagged layer first (the one a fresh component starts
+				// with), same precedent as applyGroupMeshes; otherwise grow the list. A
+				// layer only qualifies as that pristine starter, never one the author
+				// began hand-tuning (named it, painted a mask, set a rule, added a LOD)
+				// before picking a mesh — meshAssetId=={} alone is not proof of that,
+				// so every other sign of hand-tuning is checked too: the slope and
+				// height rules, density, seed, scale range, draw/shadow distances,
+				// bucket size, the shadow/AO switches, LOD hysteresis and visibility.
+				// All compared bit for bit against FoliageLayer{}: this starter has
+				// never been written, so there is nothing to be "close" to. This runs
+				// before the write block below, which sets density/scale itself.
+				const FoliageLayer pristine{};
+				for (FoliageLayer& l : folc->layers)
+					if (l.meshAssetId == HE::UUID{} && l.materialAssetId == HE::UUID{} &&
+					    l.sourceAssetId == HE::UUID{} && l.name.empty() && l.densityMask.empty() &&
+					    l.lods.empty() && l.weightLayer == -1 &&
+					    l.slopeMin == pristine.slopeMin && l.slopeMax == pristine.slopeMax &&
+					    l.heightMin == pristine.heightMin && l.heightMax == pristine.heightMax &&
+					    l.density == pristine.density && l.seed == pristine.seed &&
+					    l.minScale == pristine.minScale && l.maxScale == pristine.maxScale &&
+					    l.drawDistance == pristine.drawDistance && l.bucketSize == pristine.bucketSize &&
+					    l.castsShadow == pristine.castsShadow && l.contributesAO == pristine.contributesAO &&
+					    l.shadowDistance == pristine.shadowDistance && l.lodHysteresis == pristine.lodHysteresis &&
+					    l.visible == pristine.visible) { layer = &l; break; }
+				if (!layer) layer = folc->addLayer();
+				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
+				layer->sourceAssetId = setId;
+				layer->sourceEntry   = static_cast<int>(i);
+			}
+
+			// The asset is loaded leniently (ContentManager only logs
+			// validateLandscapeFoliageLayer's problems, it never rejects or fixes them —
+			// LandscapeFoliageLayerJson.cpp), so a hand-edited or stale file can still
+			// carry a negative density, an inverted min/max or slope range, or an
+			// unordered LOD list. Clamp every numeric field to what FoliageSystem and the
+			// scatter actually expect instead of handing it garbage.
+			auto positive = [](float v, float fallback) { return (std::isfinite(v) && v > 0.0f) ? v : fallback; };
+			auto nonNeg    = [](float v, float fallback) { return (std::isfinite(v) && v >= 0.0f) ? v : fallback; };
+
+			layer->name            = e.name;
+			layer->meshAssetId     = e.meshAssetId;
+			layer->materialAssetId = e.materialAssetId;
+			{
+				const float density = e.density * set.densityScale;   // a product: validate it, not the factors
+				layer->density = (std::isfinite(density) && density > 0.0f) ? density : 0.0f;
+			}
+			{
+				float minS = positive(e.minScale, FoliageLayer{}.minScale);
+				float maxS = positive(e.maxScale, FoliageLayer{}.maxScale);
+				if (minS > maxS) std::swap(minS, maxS);
+				layer->minScale = minS;
+				layer->maxScale = maxS;
+			}
+			layer->drawDistance    = positive(e.drawDistance, FoliageLayer{}.drawDistance);
+			layer->bucketSize      = positive(e.bucketSize, FoliageLayer{}.bucketSize);
+			layer->castsShadow     = e.castsShadow;
+			layer->contributesAO   = e.contributesAO;
+			layer->shadowDistance  = nonNeg(e.shadowDistance, 0.0f);
+			layer->lodHysteresis   = nonNeg(e.lodHysteresis, 0.0f);
+			{
+				float slopeMin = std::isfinite(e.slopeMin) ? std::clamp(e.slopeMin, 0.0f, 1.0f) : 0.0f;
+				float slopeMax = std::isfinite(e.slopeMax) ? std::clamp(e.slopeMax, 0.0f, 1.0f) : 1.0f;
+				if (slopeMin > slopeMax) std::swap(slopeMin, slopeMax);
+				layer->slopeMin = slopeMin;
+				layer->slopeMax = slopeMax;
+			}
+			{
+				float heightMin = std::isfinite(e.heightMin) ? e.heightMin : -FoliageLayer::kNoHeightLimit;
+				float heightMax = std::isfinite(e.heightMax) ? e.heightMax :  FoliageLayer::kNoHeightLimit;
+				if (heightMin > heightMax) std::swap(heightMin, heightMax);
+				layer->heightMin = heightMin;
+				layer->heightMax = heightMax;
+			}
+			// Out of range = no paint rule, the same leniency SceneSerializer gives a
+			// hand-edited scene (a set authored against more terrain channels than this
+			// landscape has).
+			layer->weightLayer     = (e.paintLayer >= 0 && e.paintLayer < kTerrainMaxLayers) ? e.paintLayer : -1;
+			layer->lods.clear();
+			for (const LandscapeFoliageLod& lod : e.lods)
+			{
+				FoliageLod fl;
+				fl.meshAssetId     = lod.meshAssetId;
+				fl.materialAssetId = lod.materialAssetId;
+				fl.distance        = nonNeg(lod.distance, 0.0f);
+				fl.density         = std::isfinite(lod.density) ? std::clamp(lod.density, 0.0f, 1.0f) : 1.0f;
+				layer->lods.push_back(fl);
+			}
+			// A level boundary only makes sense as a staircase out from the camera
+			// (FoliageComponent.h's own description of what a LOD level is); an asset
+			// entry's list is not guaranteed to arrive in that order.
+			std::sort(layer->lods.begin(), layer->lods.end(),
+			          [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			layer->dirty = true;   // mesh/density/rules changed → re-scatter
+
+			// The entry's meshes and materials are project or EngineContent FILES like the
+			// group presets' (§7: only fetched on Apply, not a streamed material dependency).
+			if (ctx.contentManager)
+			{
+				if (e.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.meshAssetId))
+					ctx.contentManager->loadAssetAsync(e.meshAssetId);
+				if (e.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.materialAssetId))
+					ctx.contentManager->loadAssetAsync(e.materialAssetId);
+				for (const LandscapeFoliageLod& lod : e.lods)
+				{
+					if (lod.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.meshAssetId))
+						ctx.contentManager->loadAssetAsync(lod.meshAssetId);
+					if (lod.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.materialAssetId))
+						ctx.contentManager->loadAssetAsync(lod.materialAssetId);
+				}
+			}
+			++touched;
+		}
+		return touched;
 	}
 
 	// The name on the left, the control filling the rest - ImGui itself puts a label to
@@ -801,11 +946,14 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					const float amount = s01 >= 1.0f ? 1.0f
 						: 1.0f - std::pow(1.0f - s01, static_cast<float>(dt) * 60.0f);
 					// Ctrl+drag restores the base layer AND hands the texel back to the
-					// terrain's own group (slot 0) regardless of the Active Group picked —
-					// "paint the auto choice back" always means the terrain's own ground.
-					// paintInGroup's group write is a no-op without a mix group set.
+					// terrain's own group regardless of the group picked — "paint the auto
+					// choice back" always means the terrain's own ground. paintInGroup's
+					// group write is a no-op while the terrain does not mix groups.
+					int ownGroup = -1;
+					if (const auto* mc = terrainReg.try_get<MaterialComponent>(terrainEnt))
+						ownGroup = HE::autoLandscapeGroupOfMaterial(mc->materialAssetId);
 					TerrainPaint::paintInGroup(tc, lx, lz, invert ? 0 : s_paintLayer,
-					                           invert ? 0 : s_activeGroupSlot,
+					                           invert ? ownGroup : s_activeGroup,
 					                           s_brushRadius, s_falloffRadius, amount);
 				}
 			}
@@ -1510,39 +1658,65 @@ void renderPanel(AppContext& ctx)
                     ImGui::EndDisabled();
                     EditorWidgets::helpForLabel("Apply Group Meshes");
 
-                    // ── Mix groups (Thema 233 step 7) ───────────────────────
-                    // A second and third group whose SHARE of each texel is kept in paint
-                    // channels 6/7 (TerrainComponent::mixGroup); the group above is what is
-                    // left over. No renderer reads a mix yet (that needs a fat-array material,
-                    // not built this step) — this only stores where a future one would blend;
-                    // the Paint tab's Active Group lets a stroke mark a spot for one now.
+                    // ── Mix groups (Thema 233) ──────────────────────────────
+                    // Turns the layers 8..11 into the four groups' shares so the Paint tab can
+                    // paint any group on this terrain; the group above stays the base every
+                    // texel starts as. Off again drops the shares (the look returns to the group).
                     sectionLabel("Mix Groups");
-                    for (int slot = 0; slot < kMixGroupSlots; ++slot)
                     {
-                        SegCell mcells[HE::kAutoLandscapeGroupCount + 1];
-                        std::string mids[HE::kAutoLandscapeGroupCount + 1];
-                        mids[0] = std::string("##lsMixNone") + std::to_string(slot);
-                        mcells[0] = { mids[0].c_str(), "None", "Landscape/Mix Group", nullptr, true };
-                        for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+                        bool mix = tc.groupMix;
+                        ImGui::BeginDisabled(cur < 0);
+                        if (EditorWidgets::checkbox("Mix Texture Groups", &mix))
                         {
-                            mids[i + 1] = std::string("##lsMix") + std::to_string(slot)
-                                        + HE::kAutoLandscapeGroups[i].name;
-                            bool taken = i == cur;
-                            for (int o = 0; o < kMixGroupSlots; ++o) taken |= o != slot && tc.mixGroup[o] == i;
-                            mcells[i + 1] = { mids[i + 1].c_str(), HE::kAutoLandscapeGroups[i].name,
-                                               "Landscape/Mix Group",
-                                               taken ? "Already this terrain's own group or the other mix slot" : nullptr,
-                                               !taken };
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Groups");
+                            if (mix) TerrainPaint::enableGroupMix(tc, cur);
+                            else     TerrainPaint::disableGroupMix(tc);
                         }
-                        const int active = tc.mixGroup[slot] < 0 ? 0 : tc.mixGroup[slot] + 1;
-                        const int mpick = segmented(mcells, HE::kAutoLandscapeGroupCount + 1,
-                                                    HE::kAutoLandscapeGroupCount + 1, active);
-                        if (mpick >= 0 && mcells[mpick].enabled)
+                        ImGui::EndDisabled();
+                        EditorWidgets::helpForLabel("Mix Texture Groups");
+                    }
+                }
+
+                // ── Foliage set ──────────────────────────────────────────
+                // The material names its LandscapeFoliageLayer by UUID (the Landscape
+                // Foliage node, Thema 327 step 3, MaterialAsset::foliageSetId); this is
+                // the one place that materializes it onto the terrain, same button
+                // precedent as "Apply Group Meshes" above (one undo snapshot, add +
+                // update, never deletes). Only custom materials carry the field today —
+                // the three engine materials still rely on "Apply Group Meshes".
+                if (lmat && lmat->foliageSetId != HE::UUID{})
+                {
+                    const HE::UUID setId = lmat->foliageSetId;
+                    const LandscapeFoliageLayerAsset* foliageSet =
+                        ctx.contentManager ? ctx.contentManager->getLandscapeFoliageLayer(setId) : nullptr;
+                    if (!foliageSet && ctx.contentManager)
+                    {
+                        // Passive pull (design §7): ask once per content epoch, not once
+                        // per process — a set that EngineContent has not pulled yet still
+                        // bumps contentEpoch() when it arrives (noteContentChanged()), and
+                        // that must trigger a retry instead of leaving Apply Foliage
+                        // disabled until the editor restarts. Never ensureResident here —
+                        // it is synchronous and does not start a download of a set that
+                        // still sits on the EngineContent server.
+                        static std::unordered_map<HE::UUID, uint64_t> s_askedAt;
+                        const uint64_t epoch = ctx.contentManager->contentEpoch();
+                        auto it = s_askedAt.find(setId);
+                        if (it == s_askedAt.end() || it->second < epoch)
                         {
-                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Group");
-                            TerrainPaint::setMixGroup(tc, slot, mpick - 1);
+                            s_askedAt[setId] = epoch;
+                            ctx.contentManager->loadAssetAsync(setId);
                         }
                     }
+                    sectionLabel("Foliage Set");
+                    dimText("%s", foliageSet ? foliageSet->name.c_str() : "(fetching the foliage set\xe2\x80\xa6)");
+                    ImGui::BeginDisabled(foliageSet == nullptr);
+                    if (EditorWidgets::button("Apply Foliage", ImVec2(-FLT_MIN, 0.0f)) && foliageSet)
+                    {
+                        const int touched = applyFoliageSet(ctx, reg, terrainEnt, setId, *foliageSet);
+                        if (touched > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Foliage");
                 }
 
                 // ── Heightmap ────────────────────────────────────────────
@@ -1596,9 +1770,9 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
-                    tc.groupWeights.clear();   // and the mixed groups' shares
-                    for (int& g : tc.mixGroup) g = -1;  // the shares they lived in are gone
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
+                    TerrainPaint::disableGroupMix(tc);  // the shares lived in the weights just cleared
                     tc.weightsDirty = true;
                 }
                 if (fol)
@@ -1628,57 +1802,43 @@ void renderPanel(AppContext& ctx)
                 // layers) changes its length: the index is clamped every frame, never kept.
                 s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
 
-                // ── Groups (Thema 233 step 7) ───────────────────────────────
-                // Every texture group is a brush here, several at once: the terrain's own
-                // group and up to three mixed in. A group the terrain does not use yet is
-                // shown as "+ Name"; picking it gives it a free mix slot. The stroke marks
-                // the texel as the picked group's AND paints the chosen layer of that group,
-                // so "Forest / Mossy Rock" is one pick of the group and one of the layer below.
+                // ── Groups (Thema 233) ──────────────────────────────────────
+                // Every texture group is a brush here, all of them on the one landscape. The
+                // first pick of a group other than the terrain's own turns the mix on (Setup
+                // "Mix Texture Groups"); the stroke then marks the texel as the picked group's AND
+                // paints the chosen layer of that group, so "Forest / Mossy Rock" is one pick
+                // of the group and one of the layer below.
                 const int ownGroup = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId);
-                int slotOfGroup[HE::kAutoLandscapeGroupCount];
-                for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
-                {
-                    slotOfGroup[g] = g == ownGroup ? 0 : -1;
-                    for (int k = 0; k < kMixGroupSlots; ++k) if (tc.mixGroup[k] == g) slotOfGroup[g] = k + 1;
-                }
                 if (ownGroup >= 0)
                 {
                     SegCell gcells[HE::kAutoLandscapeGroupCount];
-                    std::string gids[HE::kAutoLandscapeGroupCount], glabels[HE::kAutoLandscapeGroupCount];
-                    int freeSlot = -1;
-                    for (int k = 0; k < kMixGroupSlots && freeSlot < 0; ++k) if (tc.mixGroup[k] < 0) freeSlot = k;
-                    int activeCell = 0;
+                    std::string gids[HE::kAutoLandscapeGroupCount];
                     for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
                     {
-                        const bool used = slotOfGroup[g] >= 0;
-                        gids[g]    = std::string("##lsActive") + HE::kAutoLandscapeGroups[g].name;
-                        glabels[g] = used ? HE::kAutoLandscapeGroups[g].name
-                                          : std::string("+ ") + HE::kAutoLandscapeGroups[g].name;
-                        gcells[g]  = { gids[g].c_str(), glabels[g].c_str(), "Landscape/Active Group",
-                                       (!used && freeSlot < 0) ? "All mix slots are in use (Setup)" : nullptr,
-                                       used || freeSlot >= 0 };
-                        if (slotOfGroup[g] == s_activeGroupSlot) activeCell = g;
+                        gids[g]   = std::string("##lsActive") + HE::kAutoLandscapeGroups[g].name;
+                        gcells[g] = { gids[g].c_str(), HE::kAutoLandscapeGroups[g].name,
+                                      "Landscape/Active Group", nullptr, true };
                     }
+                    if (!tc.groupMix) s_activeGroup = ownGroup;
                     sectionLabel("Group");
                     const int gpick = segmented(gcells, HE::kAutoLandscapeGroupCount,
-                                                HE::kAutoLandscapeGroupCount, activeCell);
-                    if (gpick >= 0 && gcells[gpick].enabled)
+                                                HE::kAutoLandscapeGroupCount, s_activeGroup);
+                    if (gpick >= 0)
                     {
-                        if (slotOfGroup[gpick] < 0)
+                        if (gpick != ownGroup && !tc.groupMix)
                         {
-                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Group");
-                            TerrainPaint::setMixGroup(tc, freeSlot, gpick);
-                            slotOfGroup[gpick] = freeSlot + 1;
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Groups");
+                            TerrainPaint::enableGroupMix(tc, ownGroup);
                         }
-                        s_activeGroupSlot = slotOfGroup[gpick];
+                        s_activeGroup = gpick;
                     }
                 }
-                if (s_activeGroupSlot > 0 && tc.mixGroup[s_activeGroupSlot - 1] < 0) s_activeGroupSlot = 0;
+                s_activeGroup = std::clamp(s_activeGroup, 0, HE::kAutoLandscapeGroupCount - 1);
 
                 // The group's own names for the four role layers (Forest Floor, Roots, ...); Auto
                 // and Puddles are the same in every group.
                 std::vector<std::string> layerNames = layers;
-                const int activeGroup = s_activeGroupSlot == 0 ? ownGroup : tc.mixGroup[s_activeGroupSlot - 1];
+                const int activeGroup = tc.groupMix ? s_activeGroup : ownGroup;
                 if (activeGroup >= 0)
                     for (int r = 0; r < HE::kAutoLandscapeRoleCount; ++r)
                         if (r + 1 < static_cast<int>(layers.size()))
@@ -1738,9 +1898,9 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
-                    tc.groupWeights.clear();   // and the mixed groups' shares
-                    for (int& g : tc.mixGroup) g = -1;  // the shares they lived in are gone
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
+                    TerrainPaint::disableGroupMix(tc);  // the shares lived in the weights just cleared
                     tc.weightsDirty = true;
                 }
                 EditorWidgets::helpForLabel("Clear Paint");

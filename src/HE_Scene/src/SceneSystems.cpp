@@ -1,6 +1,7 @@
 #include "HorizonScene/SceneSystems.h"
 #include <algorithm>
 #include "HorizonScene/TerrainSystem.h"
+#include "HorizonScene/TrailSystem.h"
 #include "HorizonScene/AnimationSystem.h"
 #include "HorizonScene/AnimationBlendSystem.h"
 #include "HorizonScene/AnimationStateMachineSystem.h"
@@ -141,6 +142,8 @@ void SceneSystems::tickWorld(HorizonWorld& world, ContentManager& cm, IRenderer*
     // (if any) and used to each run this same view().each() search themselves.
     const WeatherComponent* weather = nullptr;
     for (auto [e, wc] : world.registry().view<WeatherComponent>().each()) { weather = &wc; break; }
+    // The trodden snow and sand heal with this weather, and the landscape reads them back through a texture.
+    { HE_PROFILE_SCOPE_N("Trails");              TrailSystem::update(world, cm, renderer, cameraPos, dt, weather); }
     if (renderer)
     {
         HE_PROFILE_SCOPE_N("GpuParticleParams");

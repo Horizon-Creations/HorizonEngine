@@ -19,6 +19,7 @@
 #pragma once
 
 #include <Types/Defines.h> // HE_API — HorizonCore.dll uses explicit exports on Windows
+#include <Types/UUID.h>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -246,6 +247,16 @@ enum class MatNodeType : uint8_t
     //   outputs: Value (as FBM Noise), dX and dY (the derivative of Value along UV·Scale,
     //            what (FBM(q + h·x) − FBM(q)) / h tends to as h shrinks)
     FbmGrad,
+
+    // ── v19: the landscape's foliage set (Thema 327, Schritt 3) ──
+    // A METADATA node, like the layer list of a Landscape Layer Blend: no pins, nothing
+    // is emitted. s = the LandscapeFoliageLayer asset the material names for its terrain
+    // (matFoliageSetIdToString; empty = none) → MaterialAsset::foliageSetId, which the
+    // Landscape tool's Apply reads. It shades nothing and spawns nothing, so assigning
+    // or changing the set never changes the shader text (no recompile, same pipeline).
+    // The generator finds it by SCANNING the graph, not by walking from the Output: a
+    // node without outputs is never reached by the demand-driven emit.
+    LandscapeFoliage,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
@@ -280,11 +291,12 @@ inline bool matNodeIsBombing(MatNodeType t)
 }
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
-// channel each, over two pages of four (TerrainComponent::layerWeights /
-// layerWeights2). Both pages travel in ONE texture, side by side, so the eight
-// layers cost the same single heLandscapeWeights binding and sampler as four
-// did — the SM 5.0 / Metal sampler budget is full (MaterialShaderLibrary).
-inline constexpr int kMatMaxLandscapeLayers = 8;
+// channel each, over three pages of four (TerrainComponent::layerWeights /
+// layerWeights2 / layerWeights3). The pages travel in ONE texture, side by side
+// (1:1, 2:1 or 3:1 by the texture's own size), so the twelve layers cost the same
+// single heLandscapeWeights binding and sampler as four did — the SM 5.0 / Metal
+// sampler budget is full (MaterialShaderLibrary).
+inline constexpr int kMatMaxLandscapeLayers = 12;
 
 // How many per-layer colours the CPU fold persists for the GI bounce
 // (MaterialAsset::approxLayerColor, the MTRL tail, GiLandscape::layerColor).
@@ -296,6 +308,12 @@ inline constexpr int kMatApproxLayerColors = 4;
 // Split a LandscapeLayerBlend node's `s` into its layer names (newline separated,
 // blanks dropped, capped at kMatMaxLandscapeLayers). Empty → one "Layer 1".
 HE_API std::vector<std::string> matLandscapeLayerNames(const std::string& s);
+
+// A Landscape Foliage node keeps its asset as a UUID in `s` (the packer rewrites only the
+// refs it knows, so a path would dangle in a pak): 32 hex digits, hi then lo, "" for none.
+// The parser takes upper or lower case and nothing else; malformed text is {} (= none).
+HE_API std::string matFoliageSetIdToString(const HE::UUID& id);
+HE_API HE::UUID    matFoliageSetIdFromString(const std::string& s);
 
 // Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
 // Output pins are meaningful — see matOutputPins:
@@ -574,6 +592,10 @@ struct MatShaderGen
     // material — not the terrain — is the single source of truth for what a layer
     // means. Empty for every ordinary material.
     std::vector<std::string> layerNames;
+    // The LandscapeFoliageLayer asset a Landscape Foliage node names (→ MaterialAsset::
+    // foliageSetId); {} = none. Found by a scan of the top-level graph, lowest node id
+    // wins when a graph holds more than one. Never touches the generated GLSL.
+    HE::UUID foliageSetId{};
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend

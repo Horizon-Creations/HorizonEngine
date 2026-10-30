@@ -12,6 +12,7 @@ add_executable(he_tests
     test_material_tessellation.cpp
     test_auto_landscape_variants.cpp
     test_landscape_groups.cpp
+    test_trail_field.cpp
     test_layer_mesh_groups.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp
@@ -86,6 +87,9 @@ add_executable(he_tests
     # (Content Browser double-click, Open Function, restore), and the tabs
     # following a rename.
     test_editor_tabs.cpp
+    # Which asset a panel's open document belongs to: its UUID, not the tab's path
+    # string — so a peer's edit finds the tab and a rename keeps the edits.
+    test_asset_identity.cpp
     # The D3D12 ImGui SRV heap's free-list: a freed slot waits for its fence
     # before it is handed out again (Dock-Splitter drag, Thema 113).
     test_deferred_slot_free_list.cpp
@@ -302,6 +306,8 @@ add_executable(he_tests
     test_blend_space.cpp
     test_sequencer_timeline.cpp
     test_sequence.cpp
+    test_landscape_foliage_layer.cpp
+    test_landscape_foliage_node.cpp
     test_sequence_runtime.cpp
     test_cinematic_timeline.cpp
     test_animation_ik.cpp
@@ -541,6 +547,9 @@ add_executable(he_tests
     # ContentManager in, which tab out — no ImGui. AppContext::EditorTab lives
     # under HE_IMGUI_ENABLED, set per file below.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorTabs.cpp
+    # An asset's identity (file UUID, else the normalised path): ContentManager and
+    # the filesystem in, a key out — no ImGui.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetIdentity.cpp
     # The viewport's right-click verbs (hide / isolate / show all / group /
     # ungroup): a registry and a selection in, touched entities out — no ImGui.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ViewportActions.cpp
@@ -1448,6 +1457,8 @@ if(TARGET HorizonContentSync)
     # test_sftp_connection.cpp: SftpConnection's session reuse (CSY-101); its live
     # case runs only with HE_TEST_SFTP pointing at a throwaway server.
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
+    # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
+    target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)

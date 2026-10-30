@@ -40,11 +40,15 @@ add_library(HorizonCore SHARED
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp
 	src/MaterialGraph/WeatherMaterialFunctions.cpp
+	src/MaterialGraph/ProceduralSurfaceFunctions.cpp
+	src/Trails/TrailField.cpp
+	src/Trails/TrailClipmap.cpp
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/BoneMask/BoneMask.cpp
 	src/BlendSpace/BlendSpace.cpp
 	src/Sequence/SequenceJson.cpp
+	src/LandscapeFoliage/LandscapeFoliageLayerJson.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
 	src/UIWidget/UITheme.cpp

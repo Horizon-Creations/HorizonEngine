@@ -78,6 +78,23 @@ public:
 			if (uuid == id) return path;
 		return {};
 	}
+	// The UUIDs of every loose asset of THIS project — the registry plus what was
+	// loaded or saved since the last scan, without the shipped "Engine/…"
+	// defaults every project has. What a collaboration session compares on join
+	// to tell two copies of one project from two projects that share a manifest
+	// id, and what it resolves a peer's asset id against. Unordered; a pure
+	// lookup that loads nothing.
+	std::vector<HE::UUID> projectAssetIds() const
+	{
+		std::vector<HE::UUID> out;
+		out.reserve(m_diskRegistry.size() + m_pathToUUID.size());
+		const auto own = [](const std::string& p) { return p.rfind("Engine/", 0) != 0; };
+		for (const auto& [id, path] : m_diskRegistry)
+			if (own(path)) out.push_back(id);
+		for (const auto& [path, id] : m_pathToUUID)
+			if (own(path) && !m_diskRegistry.count(id)) out.push_back(id);
+		return out;
+	}
 	bool saveAsset(RuntimeAsset& asset);
 	// The same bytes saveAsset() would write, written to `fullPath` instead —
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a
@@ -167,6 +184,9 @@ public:
 	// buffer (same reasoning as getMaterialMutable), a slot assigned there is
 	// what the renderer draws next frame, and saveAsset() persists it.
 	StaticMeshAsset*           getStaticMeshMutable(HE::UUID id);
+	// For a texture that is rewritten in place every frame (the landscape's trail clipmap): the caller edits `data` and
+	// tells the renderer with IRenderer::InvalidateTexture, no new asset and no copy.
+	TextureAsset*              getTextureMutable(HE::UUID id);
 	SkeletalMeshAsset*         getSkeletalMeshMutable(HE::UUID id);
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
@@ -208,6 +228,10 @@ public:
 	// reason: the editor edits the loaded asset and persists it with saveAsset().
 	const SequenceAsset*         getSequence(HE::UUID id) const;
 	SequenceAsset*               getSequenceMutable(HE::UUID id);
+	// A foliage rule set for a landscape, parsed once at load. Mutable for the same
+	// reason as the sequence: an editor edits the loaded document in place.
+	const LandscapeFoliageLayerAsset* getLandscapeFoliageLayer(HE::UUID id) const;
+	LandscapeFoliageLayerAsset*       getLandscapeFoliageLayerMutable(HE::UUID id);
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
 	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;
@@ -286,6 +310,7 @@ public:
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 	HE::UUID registerSequence(SequenceAsset asset);
+	HE::UUID registerLandscapeFoliageLayer(LandscapeFoliageLayerAsset asset);
 	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
 	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
 	HE::UUID registerStructType(StructTypeAsset asset);
@@ -847,6 +872,7 @@ private:
 	SlotMap<BoneMaskAsset>           m_boneMaskAssets;
 	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
 	SlotMap<SequenceAsset>           m_sequenceAssets;
+	SlotMap<LandscapeFoliageLayerAsset> m_landscapeFoliageLayerAssets;
 
 	// The ONE list of every SlotMap above. A new pool goes here as well, nowhere
 	// else: unloadAsset, forgetProjectContent and retargetAssetReferencesInMemory
@@ -872,7 +898,7 @@ private:
 		       f(m_structTypeAssets)       || f(m_enumTypeAssets)      ||
 		       f(m_saveTemplateAssets)     || f(m_themeAssets)         ||
 		       f(m_boneMaskAssets)         || f(m_blendSpaceAssets)    ||
-		       f(m_sequenceAssets);
+		       f(m_sequenceAssets)         || f(m_landscapeFoliageLayerAssets);
 	}
 	template<typename F>
 	void forEachPool(F&& f)

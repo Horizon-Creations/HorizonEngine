@@ -80,6 +80,7 @@
 #include "TextureImporter.h"   // HorizonImporters — decodes the PNGs the way the editor's import does
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Types/UUID.h>
 
@@ -109,8 +110,9 @@ constexpr uint64_t kTexBaseHi = 0x0000000000000400ULL;
 // = 0x420. 0x400..0x411 are the 15 layer textures and 3 arrays, 0x412 is
 // M_AutoLandscape (kAutoLandscapeMaterialId), 0x413 / 0x414 are the weather functions
 // (WeatherMaterialFunctions.h), 0x415..0x41C are the Forest and Grassland groups
-// (kAutoLandscapeGroups: material + its three arrays each), 0x41D..0x41F stay free, and the Desert
-// group sits at 0x4A0..0x4A3 (clear of the variants below). Index = kLooseIndexBase + layer * 3 + map, per kLayers order
+// (kAutoLandscapeGroups: material + its three arrays each), 0x41D / 0x41E are the procedural snow
+// and sand functions (ProceduralSurfaceFunctions.h), 0x41F stays free, and the Desert group sits at
+// 0x4A0..0x4A3 (clear of the variants below). Index = kLooseIndexBase + layer * 3 + map, per kLayers order
 // (WetGround would get 0x42C..0x42E), so a layer added later never shifts one.
 constexpr int kLooseIndexBase = 0x20;
 
@@ -895,16 +897,18 @@ int writeGroupLoose(const std::string& outDir, const std::string& pngDir, int re
 // ContentManager's own regenerate path, so the file is exactly what the material
 // editor would save. Its texture paths point at the engine arrays ("Engine/…"),
 // which do not have to exist in <output-dir>.
-// The two weather functions the graph calls, registered under the very path its
-// FunctionCall nodes store — so the regenerate (and the one a load does) finds them
-// from the builders, with no engine-content root and no dependency on matfn_gen having
+// The four functions the graph calls (the two weather functions and the procedural snow and sand),
+// registered under the very path its FunctionCall nodes store — so the regenerate (and the one a
+// load does) finds them from the builders, with no engine-content root and no dependency on matfn_gen having
 // run first. The shipped assets (matfn_gen) are built from the same builders.
 static void registerWeatherFunctions(ContentManager& cm)
 {
     struct F { const char* path; HE::UUID id; HE::MaterialGraph g; };
     const std::vector<F> fns = {
         F{ HE::kWeatherPuddlesFunctionPath, HE::kWeatherPuddlesFunctionId, HE::buildWeatherPuddlesFunction() },
-        F{ HE::kWeatherSnowFunctionPath,    HE::kWeatherSnowFunctionId,    HE::buildWeatherSnowFunction() } };
+        F{ HE::kWeatherSnowFunctionPath,    HE::kWeatherSnowFunctionId,    HE::buildWeatherSnowFunction() },
+        F{ HE::kProceduralSnowFunctionPath, HE::kProceduralSnowFunctionId, HE::buildProceduralSnowFunction() },
+        F{ HE::kProceduralSandFunctionPath, HE::kProceduralSandFunctionId, HE::buildProceduralSandFunction() } };
     for (const F& f : fns)
     {
         MaterialFunctionAsset a;

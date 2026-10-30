@@ -5460,6 +5460,12 @@ namespace
 	  "here IS the set of layers the Landscape tool offers, in this order — up to "
 	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
 	  "", "materials#nodes" },
+	{ "Material Node/Foliage Set", "Landscape Foliage Set",
+	  "The foliage set (a Landscape Foliage asset) this landscape material names for "
+	  "its terrain: which plants grow on which paint layer, and where. Click to pick one "
+	  "or drop it from the Content Browser. The node draws nothing and changes no "
+	  "shader, it only tells the Landscape tool which set belongs to this material.",
+	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
 	  "the graph's colour is the pixel, useful for skies, holograms and anything "
@@ -7434,13 +7440,13 @@ namespace
 	  "(layer 0) picks the texture by slope and height; painting a layer on top "
 	  "chooses one by hand.",
 	  "", "scenes#terrain" },
-	{ "Landscape/Mix Group", "Mix Group",
-	  "Up to three more groups whose share of this landscape is kept apart from "
-	  "the one above - None leaves the slot unused. Picking one does not change how "
-	  "the landscape looks by itself: it reserves a paint channel (6, 7, and the "
-	  "Puddles channel for the third) for that group's share, which the Paint tab's "
-	  "Group row lets you set by hand. A group already used by the terrain's own slot "
-	  "or another Mix Group slot is greyed out.",
+	{ "Landscape/Mix Texture Groups", "",
+	  "Lets this landscape show all four texture groups at once. The group chosen above "
+	  "stays what every spot starts as; the Paint tab's Group row then paints any other "
+	  "group onto it, with that group's own layers underneath. It uses the paint channels "
+	  "8 to 11 for the groups' shares, so a custom material that paints there loses that "
+	  "paint when this is switched on (it is folded into layer 0). Switching it off drops "
+	  "the groups' shares and the landscape is its one group again.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Apply Group Meshes", "",
 	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
@@ -7451,6 +7457,16 @@ namespace
 	  "where the group's own material shows rock. It only adds - switching the "
 	  "group never removes or changes a layer, and a layer you already have is left "
 	  "alone.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Foliage", "",
+	  "Materializes the foliage set named on the landscape's material (a Landscape "
+	  "Foliage node in its graph) into this terrain's foliage layers: one layer per "
+	  "entry, with the mesh, material, density and placement rules (slope, height, "
+	  "paint channel) the set author gave it. It only adds and refreshes its own "
+	  "layers - a layer you added by hand, or one from a different foliage set, is "
+	  "never touched, and re-pressing it after editing the set brings its layers up "
+	  "to date without losing their painted density masks or visibility. Disabled "
+	  "while the set is still downloading from the EngineContent server.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
@@ -7479,10 +7495,10 @@ namespace
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Active Group", "Group",
 	  "Which texture group this stroke paints, beside the layer below: the terrain's "
-	  "own group or any of up to three more, all on the same landscape. A group shown "
-	  "as \"+ Name\" is not used yet; picking it adds it to the landscape, and the "
-	  "layer list below then shows that group's own layers. Ctrl+drag always hands the "
-	  "spot back to the terrain's own group, whichever is active.",
+	  "own group or any other, all on the same landscape. Picking a group other than the "
+	  "terrain's own switches Mix Texture Groups on (Setup tab); the layer list below "
+	  "then shows that group's own layers. Ctrl+drag always hands the spot back to the "
+	  "terrain's own group, whichever is picked.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "

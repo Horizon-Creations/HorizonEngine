@@ -6,12 +6,10 @@
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 
 // ── Mixed texture groups (Thema 233) ────────────────────────────────────────
-// TerrainComponent::mixGroup[3] names up to three further groups whose share of a
-// texel is a channel of TerrainComponent::groupWeights, a grid of its own: the paint
-// layers (Puddles included) are not touched by a mix. The terrain's own group
-// (MaterialComponent) is the remainder. A terrain with no mix group must behave
-// EXACTLY as it did before this field; most of this file proves that, then exercises
-// the group paths.
+// TerrainComponent::groupMix turns weight layers 8..11 into the four groups' shares of a
+// texel (by AutoLandscapeGroupId), outside the 255-sum of the paint layers. A terrain
+// without it must behave EXACTLY as before; most of this file proves that, then
+// exercises the group paths.
 
 using G = HE::AutoLandscapeGroupId;
 
@@ -43,19 +41,18 @@ namespace
     }
 }
 
-TEST_CASE("A terrain starts with no mix group and no group grid")
+TEST_CASE("A terrain starts without a group mix and with no reserved layer")
 {
     TerrainComponent tc;
-    for (int g : tc.mixGroup) CHECK(g == -1);
-    CHECK(TerrainPaint::mixSlotMask(tc) == 0);
-    CHECK(tc.groupWeights.empty());
+    CHECK_FALSE(tc.groupMix);
+    CHECK(TerrainPaint::reservedLayers(tc) == 0);
+    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK_FALSE(TerrainPaint::isReservedLayer(tc, k));
 }
 
-TEST_CASE("Painting layers is byte-identical with and without a mix group")
+TEST_CASE("Painting layers is byte-identical with the mix off, and layers 0..7 are unchanged with it on")
 {
     TerrainComponent a = smallTerrain(), b = smallTerrain();
-    REQUIRE(TerrainPaint::setMixGroup(b, 0, static_cast<int>(G::Forest)));
-    REQUIRE(TerrainPaint::setMixGroup(b, 2, static_cast<int>(G::Desert)));
+    REQUIRE(TerrainPaint::enableGroupMix(b, static_cast<int>(G::Forest)));
     for (int layer : { 1, 3, 5, 6, 7, 2 })
     {
         REQUIRE(TerrainPaint::paint(a, 1.0f, 2.0f, layer, 5.0f, 2.0f, 0.7f));
@@ -63,135 +60,113 @@ TEST_CASE("Painting layers is byte-identical with and without a mix group")
     }
     CHECK(a.layerWeights == b.layerWeights);
     CHECK(a.layerWeights2 == b.layerWeights2);
-    // Puddles (5) and 6/7 stay ordinary paint layers whatever the mix.
+    // Puddles (5) stays an ordinary paint layer; the share layers refuse a stroke.
+    CHECK_FALSE(TerrainPaint::paint(b, 0.0f, 0.0f, 8, 4.0f, 0.0f, 1.0f));
+    CHECK_FALSE(TerrainPaint::fillLayer(b, 11));
     TerrainPaint::fillLayer(b, 5);
     uint8_t w[kTerrainMaxLayers];
     REQUIRE(TerrainPaint::texelWeights(b, 4, 4, w));
-    for (int k = 0; k < kTerrainMaxLayers; ++k) CHECK(w[k] == (k == 5 ? 255 : 0));
+    for (int k = 0; k < 8; ++k) CHECK(w[k] == (k == 5 ? 255 : 0));
+    CHECK(w[static_cast<int>(G::Forest) + 8] == 255);   // fillLayer kept the shares
 }
 
-TEST_CASE("setMixGroup reserves, refuses duplicates and clears a slot")
+TEST_CASE("enableGroupMix starts every texel as the base group and folds old page-3 paint into layer 0")
 {
     TerrainComponent tc = smallTerrain();
-    CHECK(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Forest)));
-    CHECK(tc.mixGroup[0] == static_cast<int>(G::Forest));
-    CHECK(TerrainPaint::mixSlotMask(tc) == 1);
-    CHECK_FALSE(TerrainPaint::setMixGroup(tc, 1, static_cast<int>(G::Forest)));   // same group twice
-    CHECK(TerrainPaint::setMixGroup(tc, 1, static_cast<int>(G::Desert)));
-    CHECK(TerrainPaint::setMixGroup(tc, 2, static_cast<int>(G::Grassland)));
-    CHECK(TerrainPaint::mixSlotMask(tc) == 7);
-    CHECK_FALSE(TerrainPaint::setMixGroup(tc, 3, 0));                              // no fourth slot
-    CHECK(TerrainPaint::setMixGroup(tc, 0, -1));
-    CHECK(TerrainPaint::mixSlotMask(tc) == 6);
+    REQUIRE(TerrainPaint::paint(tc, 0.0f, 0.0f, 9, 100.0f, 0.0f, 1.0f));   // a custom material's layer 9
+    CHECK_FALSE(TerrainPaint::enableGroupMix(tc, 99) == false);              // base group is clamped
+    CHECK(tc.groupMix);
+    uint8_t w[kTerrainMaxLayers];
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 3, w));
+    CHECK(w[0] == 255);                                                      // folded into layer 0
+    CHECK(w[9] == 0);
+    CHECK(w[11] == 255);                                                     // base 99 -> clamped to group 3
+    CHECK_FALSE(TerrainPaint::enableGroupMix(tc, 0));                        // already on
+    CHECK(TerrainPaint::disableGroupMix(tc));
+    CHECK_FALSE(tc.groupMix);
+    REQUIRE(TerrainPaint::texelWeights(tc, 3, 3, w));
+    for (int k = 8; k < 12; ++k) CHECK(w[k] == 0);
 }
 
-TEST_CASE("groupShares reads the terrain's own group as the remainder")
+TEST_CASE("Group shares: four groups, normalised, painted per group")
 {
     TerrainComponent tc = smallTerrain();
-    float s[4];
-    REQUIRE(TerrainPaint::groupShares(tc, 3, 4, s));       // unpainted: own group alone
-    CHECK(s[0] == doctest::Approx(1.0f));
-    CHECK(s[1] + s[2] + s[3] == 0.0f);
-
-    REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Grassland)));
-    REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 1, 100.0f, 0.0f, 1.0f));   // whole map
-    REQUIRE(TerrainPaint::groupShares(tc, 3, 4, s));
-    CHECK(s[0] == doctest::Approx(0.0f));
-    CHECK(s[1] == doctest::Approx(1.0f));
-}
-
-TEST_CASE("Four groups on one terrain: three shares, normalised, painted per group")
-{
-    TerrainComponent tc = smallTerrain();
-    REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Forest)));
-    REQUIRE(TerrainPaint::setMixGroup(tc, 1, static_cast<int>(G::Grassland)));
-    REQUIRE(TerrainPaint::setMixGroup(tc, 2, static_cast<int>(G::Desert)));
-    CHECK_FALSE(TerrainPaint::paintGroup(tc, 0, 0, 4, 8.0f, 0.0f, 1.0f));
+    CHECK_FALSE(TerrainPaint::paintGroup(tc, 0, 0, 1, 8.0f, 0.0f, 1.0f));   // no mix yet
+    REQUIRE(TerrainPaint::enableGroupMix(tc, static_cast<int>(G::Mountains)));
+    CHECK_FALSE(TerrainPaint::paintGroup(tc, 0, 0, 4, 8.0f, 0.0f, 1.0f));   // not a group
 
     const uint32_t c = tc.weightRes / 2;
     float s[4];
-    for (int slot = 1; slot <= 3; ++slot)
+    REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
+    CHECK(s[0] == doctest::Approx(1.0f));
+    for (int g = 1; g <= 3; ++g)
     {
-        REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, slot, 100.0f, 0.0f, 1.0f));
+        REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, g, 100.0f, 0.0f, 1.0f));
         REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
-        for (int i = 0; i < 4; ++i) CHECK(s[i] == doctest::Approx(i == slot ? 1.0f : 0.0f));
+        for (int i = 0; i < 4; ++i) CHECK(s[i] == doctest::Approx(i == g ? 1.0f : 0.0f));
     }
-    // A half stroke of another group leaves the shares summing to one.
+    // A half stroke of another group leaves the shares summing to one, bytes to 255.
     REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 1, 100.0f, 0.0f, 0.5f));
     REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
     CHECK(s[0] + s[1] + s[2] + s[3] == doctest::Approx(1.0f).epsilon(0.01));
     CHECK(s[1] > 0.4f);
     CHECK(s[3] > 0.4f);
-
-    REQUIRE(TerrainPaint::fillGroup(tc, 0));
-    REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
-    CHECK(s[0] == doctest::Approx(1.0f));
-    // Clearing a slot drops its share.
-    REQUIRE(TerrainPaint::fillGroup(tc, 3));
-    REQUIRE(TerrainPaint::setMixGroup(tc, 2, -1));
-    REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
-    CHECK(s[0] == doctest::Approx(1.0f));
-}
-
-TEST_CASE("paintInGroup paints the texture and the active group's share together")
-{
-    TerrainComponent tc = smallTerrain();
-    REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Forest)));
-    TerrainComponent plain = smallTerrain();
-    CHECK(TerrainPaint::paintInGroup(plain, 0.0f, 0.0f, 2, -1, 8.0f, 0.0f, 1.0f));
-    CHECK(plain.groupWeights.empty());
-
-    REQUIRE(TerrainPaint::paintInGroup(tc, 0.0f, 0.0f, 2, 1, 8.0f, 0.0f, 1.0f));
-    const uint32_t c = tc.weightRes / 2;
     uint8_t w[kTerrainMaxLayers];
     REQUIRE(TerrainPaint::texelWeights(tc, c, c, w));
-    CHECK(w[2] == 255);
-    float s[4];
+    CHECK(w[8] + w[9] + w[10] + w[11] == 255);
+
+    REQUIRE(TerrainPaint::fillGroup(tc, 2));
     REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
-    CHECK(s[1] == doctest::Approx(1.0f));
+    CHECK(s[2] == doctest::Approx(1.0f));
 }
 
-TEST_CASE("The weight texture carries the group page only when asked and used")
+TEST_CASE("paintInGroup paints the texture and the group's share together")
 {
     TerrainComponent tc = smallTerrain();
-    REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Forest)));
-    uint32_t w = 0, h = 0;
-    CHECK(TerrainPaint::buildWeightTexture(tc, w, h, true).size() == tc.layerWeights.size());
-    REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 1, 100.0f, 0.0f, 1.0f));
-    CHECK(TerrainPaint::usesGroupPage(tc));
-    // A material that does not read it keeps the 1:1 / 2:1 layouts.
-    CHECK(TerrainPaint::buildWeightTexture(tc, w, h, false).size() == tc.layerWeights.size());
-    CHECK(w == 8);
-    const std::vector<uint8_t> t = TerrainPaint::buildWeightTexture(tc, w, h, true);
-    CHECK(w == 24);
-    CHECK(h == 8);
-    REQUIRE(t.size() == 24u * 8u * 4u);
-    CHECK(t[0] == tc.layerWeights[0]);
-    CHECK(t[2 * 8 * 4] == 255);   // row 0, third block, texel 0: slot 0's share
+    TerrainComponent plain = smallTerrain();
+    CHECK(TerrainPaint::paintInGroup(plain, 0.0f, 0.0f, 2, 1, 8.0f, 0.0f, 1.0f));   // mix off: plain paint
+    uint8_t w[kTerrainMaxLayers];
+    const uint32_t c = plain.weightRes / 2;
+    REQUIRE(TerrainPaint::texelWeights(plain, c, c, w));
+    CHECK(w[2] == 255);
+    CHECK_FALSE(plain.groupMix);
+
+    REQUIRE(TerrainPaint::enableGroupMix(tc, 0));
+    REQUIRE(TerrainPaint::paintInGroup(tc, 0.0f, 0.0f, 2, 1, 8.0f, 0.0f, 1.0f));
+    REQUIRE(TerrainPaint::texelWeights(tc, c, c, w));
+    CHECK(w[2] == 255);
+    CHECK(w[9] == 255);   // group 1's share
 }
 
-TEST_CASE("Three mix groups and their shares round-trip through the scene file")
-{
-    TerrainComponent tc = smallTerrain();
-    REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Forest)));
-    REQUIRE(TerrainPaint::setMixGroup(tc, 1, static_cast<int>(G::Grassland)));
-    REQUIRE(TerrainPaint::setMixGroup(tc, 2, static_cast<int>(G::Desert)));
-    REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 3, 6.0f, 0.0f, 1.0f));
-    HorizonWorld w2;
-    const TerrainComponent* l = roundTrip(w2, tc);
-    CHECK(l->mixGroup[0] == static_cast<int>(G::Forest));
-    CHECK(l->mixGroup[1] == static_cast<int>(G::Grassland));
-    CHECK(l->mixGroup[2] == static_cast<int>(G::Desert));
-    CHECK(l->groupWeights == tc.groupWeights);
-}
-
-TEST_CASE("A terrain saved with no mix group loads as one group (legacy)")
+TEST_CASE("The group mix round-trips through the scene file; a terrain without it stays legacy")
 {
     TerrainComponent tc = smallTerrain();
     TerrainPaint::paint(tc, 0, 0, 2, 4.0f, 0.0f, 1.0f);
+    HorizonWorld wl;
+    const TerrainComponent* legacy = roundTrip(wl, tc);
+    CHECK_FALSE(legacy->groupMix);
+    CHECK(legacy->layerWeights == tc.layerWeights);
+
+    REQUIRE(TerrainPaint::enableGroupMix(tc, static_cast<int>(G::Forest)));
+    REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 3, 6.0f, 0.0f, 1.0f));
     HorizonWorld w2;
     const TerrainComponent* l = roundTrip(w2, tc);
-    for (int g : l->mixGroup) CHECK(g == -1);
-    CHECK(l->groupWeights.empty());
-    CHECK(l->layerWeights == tc.layerWeights);
+    CHECK(l->groupMix);
+    CHECK(l->layerWeights3 == tc.layerWeights3);
+    CHECK(TerrainPaint::isReservedLayer(*l, 10));
+}
+
+TEST_CASE("The weight texture is 3:1 while the mix is on, and 1:1 again when it is off")
+{
+    TerrainComponent tc = smallTerrain();
+    uint32_t w = 0, h = 0;
+    TerrainPaint::buildWeightTexture(tc, w, h);
+    CHECK(w == tc.weightRes);
+    REQUIRE(TerrainPaint::enableGroupMix(tc, static_cast<int>(G::Desert)));
+    TerrainPaint::buildWeightTexture(tc, w, h);
+    CHECK(w == 3 * tc.weightRes);
+    TerrainPaint::disableGroupMix(tc);
+    TerrainPaint::fillLayer(tc, 0);
+    TerrainPaint::buildWeightTexture(tc, w, h);
+    CHECK(w == tc.weightRes);
 }

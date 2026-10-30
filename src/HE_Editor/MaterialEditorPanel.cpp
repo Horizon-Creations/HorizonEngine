@@ -239,6 +239,7 @@ void regenerateMaterial(State& st, AppContext& ctx)
 	// binds these on loose materials; packing bakes them to graphTextureIds (MTLU).
 	mat->graphTexturePaths = gen.textures;
 	mat->graphLayerNames   = gen.layerNames;   // landscape paint layers
+	mat->foliageSetId      = gen.foliageSetId; // landscape foliage set (metadata node)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->customShaderVertGlsl = gen.vertexBody; // WPO vertex body ("" = standard vertex)
@@ -599,7 +600,7 @@ bool nodeParamWidgets(MatGraphNode& n, float scale = 1.0f, bool drawName = true,
 				committed = true;
 			}
 			if (static_cast<int>(names.size()) >= HE::kMatMaxLandscapeLayers)
-				ImGui::TextDisabled("8 layers max (two RGBA weightmap pages)");
+				ImGui::TextDisabled("12 layers max (three RGBA weightmap pages)");
 			// Rebuild `s`. The link surgery below happens ONLY for an explicit ×:
 			// this runs every frame while the user types, and clearing a name
 			// field to retype it (select-all, delete) makes
@@ -865,6 +866,7 @@ float nodeValueHeight(const MatGraphNode& n)
 {
 	const MatNodeType type = n.type;
 	const HE::MatNodeDesc& d = HE::matNodeDesc(type);
+	if (type == MatNodeType::LandscapeFoliage) return 30.0f;      // the asset slot
 	if (d.paramCount == 0 && !isTextureNode(type)) return 0.0f;
 	if (HE::matNodeIsBombing(type))                                // Rot/Blend/Seed (+Strength) + filename
 		return 44.0f + 26.0f * static_cast<float>(d.paramCount);
@@ -1215,6 +1217,36 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 				n->s = drop.relPath;
 				structuralEdit = true; // texture list changed → regenerate
 			}
+		}
+		// Landscape Foliage: a metadata node with no pins, so its one control is the
+		// slot for the LandscapeFoliageLayer it names. Click it for a picker over
+		// every foliage set in the project, or drop one from the Content Browser. The
+		// node keeps the asset's UUID in `s` (matFoliageSetIdToString), so a rename or
+		// move of the file never breaks the link. The shader text does not change when
+		// the set does; the structural edit only re-reads the material's metadata.
+		if (n->type == MatNodeType::LandscapeFoliage)
+		{
+			ImGui::SetCursorScreenPos(bodyMin);
+			pushWidgetScale(zoom);
+			HE::UUID setId = HE::matFoliageSetIdFromString(n->s);
+			// A set saved with the material is not necessarily resident (it may still be
+			// on the EngineContent server): ask for it once so the slot can show its name.
+			if (setId != HE::UUID{} && ctx.contentManager && !ctx.contentManager->getLandscapeFoliageLayer(setId))
+			{
+				static std::unordered_set<HE::UUID> s_asked;
+				if (s_asked.insert(setId).second) ctx.contentManager->loadAssetAsync(setId);
+			}
+			const std::string slotId = "foliageset" + std::to_string(n->id);
+			if (EditorWidgets::assetDropSlot(ctx, nullptr, setId, HE::AssetType::LandscapeFoliageLayer,
+			                                 slotId.c_str(), "(pick a foliage set)", "landscape foliage layer",
+			                                 /*showClear=*/true, /*undo=*/false, "Material Node/Foliage Set")
+			    != EditorWidgets::SlotAction::None)
+			{
+				n->s = HE::matFoliageSetIdToString(setId);
+				structuralEdit = true; // regenerate → MaterialAsset::foliageSetId
+			}
+			popWidgetScale();
+			return;
 		}
 		// Align the name field with the value widgets below it: both sit at the
 		// child window's content-left (= bodyMin.x). Flowed widgets reset to that

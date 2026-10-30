@@ -29,7 +29,6 @@
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
 #include <ContentManager/DefaultAssets.h>   // kLegacyEngineWaterMaterialId
-#include <MaterialGraph/AutoLandscapeMaterial.h>   // kAutoLandscapeGroupCount, for mixGroups
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
@@ -200,6 +199,12 @@ namespace
 		if (l.heightMin != def.heightMin)           j["heightMin"]      = l.heightMin;
 		if (l.heightMax != def.heightMax)           j["heightMax"]      = l.heightMax;
 		if (l.weightLayer != def.weightLayer)       j["weightLayer"]    = l.weightLayer;
+		// Apply-tag (Thema 327): absent for a hand-added layer, exactly like today.
+		if (l.sourceAssetId != def.sourceAssetId)
+		{
+			j["sourceAsset"] = uuidToJson(l.sourceAssetId);
+			j["sourceEntry"] = l.sourceEntry;
+		}
 		// Farther detail levels; a layer without any writes no key at all.
 		if (!l.lods.empty())
 		{
@@ -243,6 +248,11 @@ namespace
 		// Out of range = no paint rule (a hand-edited file, or a peer with more layers).
 		l.weightLayer     = c.value("weightLayer", l.weightLayer);
 		if (l.weightLayer < 0 || l.weightLayer >= kTerrainMaxLayers) l.weightLayer = -1;
+		if (c.contains("sourceAsset"))
+		{
+			l.sourceAssetId = jsonToUuid(c["sourceAsset"]);
+			l.sourceEntry   = c.value("sourceEntry", l.sourceEntry);
+		}
 		if (c.contains("lods") && c["lods"].is_array())
 		{
 			for (const json& d : c["lods"])
@@ -739,25 +749,23 @@ namespace
 				// its weightRes² × 4 meaning and older builds still read the
 				// first four layers of a scene written by this one.
 				if (t->layerWeights2.size() == t->layerWeights.size())
+				{
 					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
 					                                      t->layerWeights2.size());
-				// The mixed groups' shares (see mixGroups below), a grid of their own.
-				if (t->groupWeights.size() == t->layerWeights.size())
-					tc["groupWeightsB64"] = base64Encode(t->groupWeights.data(),
-					                                     t->groupWeights.size());
+					// Layers 8..11 the same way, only beside a second page and only
+					// once there is one: a scene with no third page is written exactly
+					// as before there were twelve layers, and an older build reads
+					// the first eight layers of one that has it.
+					if (t->layerWeights3.size() == t->layerWeights.size())
+						tc["layerWeights3B64"] = base64Encode(t->layerWeights3.data(),
+						                                      t->layerWeights3.size());
+				}
 			}
-			// Mixed texture groups (Thema 233, step 7): the further groups whose
-			// shares are the channels of groupWeights. Written only when one is set, so a
-			// one-group terrain (every scene before this field, and every terrain that
-			// never used it) saves byte for byte as before.
-			if (t->mixGroup[0] >= 0 || t->mixGroup[1] >= 0 || t->mixGroup[2] >= 0)
-			{
-				// Two entries until the third slot is used, so a scene that needs only two still
-				// reads in a build that accepts exactly two.
-				tc["mixGroups"] = t->mixGroup[2] >= 0
-					? nlohmann::json{ t->mixGroup[0], t->mixGroup[1], t->mixGroup[2] }
-					: nlohmann::json{ t->mixGroup[0], t->mixGroup[1] };
-			}
+			// Mixed texture groups (Thema 233): layers 8..11 are the four groups' shares.
+			// Written only when on, so a one-group terrain (every scene before this field)
+			// saves byte for byte as before. The first build kept two shares in layers 6/7
+			// under "mixGroups"; that was never rendered and is not read any more.
+			if (t->groupMix) tc["groupMix"] = true;
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -1773,43 +1781,22 @@ namespace
 				if (t.layerWeights2.size() != t.layerWeights.size())
 					t.layerWeights2.clear();
 			}
+			// Absent in every scene written before there were twelve layers → empty =
+			// layers 8..11 all zero. Needs a second page beside it (the writer only
+			// emits it then); a mismatched blob is dropped like the others.
+			if (!t.layerWeights2.empty() && c.contains("layerWeights3B64")
+			    && c["layerWeights3B64"].is_string())
+			{
+				t.layerWeights3 = base64Decode(c["layerWeights3B64"].get<std::string>());
+				if (t.layerWeights3.size() != t.layerWeights.size())
+					t.layerWeights3.clear();
+			}
 			// Mixed texture groups. Absent in every scene written before this field, and in
 			// every one-group terrain written by this build → both slots stay -1, which is
 			// the legacy, single-group look. Out-of-range or duplicate entries are dropped
 			// rather than carried, same as a truncated weightmap above.
-			t.groupWeights.clear();
-			for (int& g : t.mixGroup) g = -1;
-			if (c.contains("mixGroups") && c["mixGroups"].is_array()
-			    && (c["mixGroups"].size() == 2 || c["mixGroups"].size() == kMixGroupSlots))
-			{
-				for (size_t k = 0; k < c["mixGroups"].size(); ++k)
-				{
-					int g = c["mixGroups"][k].get<int>();
-					if (g < 0 || g >= HE::kAutoLandscapeGroupCount) g = -1;
-					for (size_t o = 0; o < k && g >= 0; ++o) if (t.mixGroup[o] == g) g = -1;
-					t.mixGroup[k] = g;
-				}
-			}
-			if (!t.layerWeights.empty() && c.contains("groupWeightsB64") && c["groupWeightsB64"].is_string())
-			{
-				t.groupWeights = base64Decode(c["groupWeightsB64"].get<std::string>());
-				if (t.groupWeights.size() != t.layerWeights.size()) t.groupWeights.clear();
-			}
-			// The first build of mixed groups (before groupWeights) kept the shares of its two
-			// slots in paint layers 6/7. Move them over so those scenes keep their paint.
-			else if (!t.layerWeights.empty() && t.layerWeights2.size() == t.layerWeights.size()
-			         && (t.mixGroup[0] >= 0 || t.mixGroup[1] >= 0))
-			{
-				t.groupWeights.assign(t.layerWeights.size(), 0);
-				for (size_t i = 0; i + 3 < t.layerWeights2.size(); i += 4)
-					for (int k = 0; k < 2; ++k)
-						if (t.mixGroup[k] >= 0)
-						{
-							t.groupWeights[i + k] = t.layerWeights2[i + 2 + k];
-							t.layerWeights2[i + 2 + k] = 0;
-							// The texel summed to 255 across the paint layers only.
-						}
-			}
+			t.groupMix = c.value("groupMix", false)
+			             && !t.layerWeights.empty() && t.layerWeights3.size() == t.layerWeights.size();
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =
