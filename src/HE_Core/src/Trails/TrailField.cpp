@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace HE
 {
@@ -160,6 +161,152 @@ bool TrailField::healPage(Page& page, float rate, float dt, uint64_t newVersion)
     page.version = newVersion;
     for (size_t i = 0; i < touched.size(); ++i)
         if (touched[i]) page.tileVersion[i] = newVersion;
+    return true;
+}
+
+void TrailField::clear()
+{
+    ++m_version;
+    for (const auto& [k, page] : m_pages) m_freed[k].fill(m_version);
+    m_pages.clear();
+    m_clockStarted = false;
+}
+
+void TrailField::catchUp(double seconds, const TrailWeather& weather, const TrailSettings& settings)
+{
+    if (!(seconds > 0.0)) return;
+    const double capped = std::min(seconds, 86400.0);   // one game day: beyond that everything soft has healed anyway
+    for (auto& [k, page] : m_pages)
+        if (healPage(page, healRate(page.surfaces, weather, settings), static_cast<float>(capped), m_version + 1))
+            ++m_version;
+    for (auto it = m_pages.begin(); it != m_pages.end();)
+        if (std::all_of(it->second.depth.begin(), it->second.depth.end(), [](int16_t t) { return t == 0; }))
+        {
+            m_freed[it->first] = it->second.tileVersion;
+            ++m_version;
+            it = m_pages.erase(it);
+        }
+        else
+            ++it;
+}
+
+namespace
+{
+constexpr uint32_t kBlobMagic = 0x31525448;   // "HTR1"
+void put32(std::vector<uint8_t>& o, uint32_t v) { for (int i = 0; i < 4; ++i) o.push_back(static_cast<uint8_t>(v >> (8 * i))); }
+void put64(std::vector<uint8_t>& o, uint64_t v) { for (int i = 0; i < 8; ++i) o.push_back(static_cast<uint8_t>(v >> (8 * i))); }
+struct Reader
+{
+    const uint8_t* p; size_t n; size_t at = 0; bool ok = true;
+    uint32_t u32() { if (at + 4 > n) { ok = false; return 0; } uint32_t v = 0; for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(p[at + i]) << (8 * i); at += 4; return v; }
+    uint64_t u64() { if (at + 8 > n) { ok = false; return 0; } uint64_t v = 0; for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(p[at + i]) << (8 * i); at += 8; return v; }
+    uint8_t  u8()  { if (at + 1 > n) { ok = false; return 0; } return p[at++]; }
+};
+} // namespace
+
+std::vector<uint8_t> TrailField::serialize() const
+{
+    std::vector<uint8_t> o;
+    put32(o, kBlobMagic);
+    uint64_t clockBits; std::memcpy(&clockBits, &m_clock, 8);
+    put64(o, clockBits);
+    put32(o, static_cast<uint32_t>(m_pages.size()));
+    // Deterministic order (a save of the same field is the same bytes): by key.
+    std::vector<int64_t> keys;
+    for (const auto& [k, page] : m_pages) keys.push_back(k);
+    std::sort(keys.begin(), keys.end());
+    for (const int64_t k : keys)
+    {
+        const Page& page = m_pages.at(k);
+        put32(o, static_cast<uint32_t>(static_cast<int32_t>(k >> 32)));
+        put32(o, static_cast<uint32_t>(k & 0xFFFFFFFFull));
+        o.push_back(page.surfaces);
+        // Tokens: (zero run, literal count, literals) until the page is used up.
+        const size_t total = page.depth.size();
+        size_t i = 0;
+        std::vector<uint8_t> body;
+        uint32_t tokens = 0;
+        while (i < total)
+        {
+            size_t z = 0;
+            while (i + z < total && page.depth[i + z] == 0) ++z;
+            size_t l = 0;
+            // A literal stretch ends where a run of 8 or more zeros starts (shorter runs are cheaper inside it).
+            while (i + z + l < total)
+            {
+                if (page.depth[i + z + l] == 0)
+                {
+                    size_t zz = 0;
+                    while (i + z + l + zz < total && page.depth[i + z + l + zz] == 0 && zz < 8) ++zz;
+                    if (zz >= 8 || i + z + l + zz >= total) break;
+                    l += zz;
+                    continue;
+                }
+                ++l;
+            }
+            put32(body, static_cast<uint32_t>(z));
+            put32(body, static_cast<uint32_t>(l));
+            for (size_t c = 0; c < l; ++c)
+            {
+                const uint16_t u = static_cast<uint16_t>(page.depth[i + z + c]);
+                body.push_back(static_cast<uint8_t>(u)); body.push_back(static_cast<uint8_t>(u >> 8));
+            }
+            i += z + l;
+            ++tokens;
+        }
+        put32(o, tokens);
+        o.insert(o.end(), body.begin(), body.end());
+    }
+    return o;
+}
+
+bool TrailField::deserialize(const uint8_t* data, size_t size)
+{
+    Reader r{ data, size };
+    if (r.u32() != kBlobMagic || !r.ok) return false;
+    const uint64_t clockBits = r.u64();
+    const uint32_t pages = r.u32();
+    if (!r.ok || pages > 1u << 20) return false;
+    std::unordered_map<int64_t, Page> loaded;
+    for (uint32_t pi = 0; pi < pages; ++pi)
+    {
+        const int32_t px = static_cast<int32_t>(r.u32()), pz = static_cast<int32_t>(r.u32());
+        Page page;
+        page.surfaces = r.u8();
+        const uint32_t tokens = r.u32();
+        if (!r.ok) return false;
+        size_t at = 0;
+        const size_t total = page.depth.size();
+        for (uint32_t t = 0; t < tokens; ++t)
+        {
+            const uint32_t z = r.u32(), l = r.u32();
+            if (!r.ok || z > total - at || l > total - at - z || r.at + static_cast<size_t>(l) * 2 > size) return false;
+            at += z;
+            for (uint32_t c = 0; c < l; ++c, ++at)
+            {
+                const uint16_t u = static_cast<uint16_t>(r.p[r.at] | (r.p[r.at + 1] << 8));
+                r.at += 2;
+                page.depth[at] = static_cast<int16_t>(u);
+            }
+        }
+        if (at > total) return false;
+        loaded[key(px, pz)] = std::move(page);
+    }
+    if (loaded.size() != pages) return false;   // a duplicated key
+    ++m_version;   // monotonic across loads: whatever cached the old field sees every page as changed
+    // A page the old field had and the loaded one does not is "freed" at this version, so a mesh or texture that still
+    // shows its pits is told to let them go (changedTiles lists it).
+    for (const auto& [k, page] : m_pages)
+        if (!loaded.count(k)) m_freed[k].fill(m_version);
+    m_pages = std::move(loaded);
+    for (auto& [k, page] : m_pages)
+    {
+        m_freed.erase(k);
+        page.version = m_version;
+        page.tileVersion.fill(m_version);
+    }
+    std::memcpy(&m_clock, &clockBits, 8);
+    m_clockStarted = true;
     return true;
 }
 

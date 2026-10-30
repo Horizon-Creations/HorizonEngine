@@ -4,6 +4,10 @@
 #include <Trails/TrailClipmap.h>
 #include <Trails/TrailField.h>
 #include <HorizonScene/TerrainMeshGenerator.h>
+#include <HorizonScene/EngineApi.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/TrailSystem.h>
+#include <HorizonScene/Components/WeatherComponent.h>
 
 #include <chrono>
 #include <cstdio>
@@ -393,6 +397,142 @@ TEST_CASE("Refined terrain chunk: a height offset lowers pits and raises heaps, 
 	const StaticMeshAsset same = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, &inert);
 	CHECK(same.vertices == plain.vertices);
 	CHECK(same.normals == plain.normals);
+}
+
+TEST_CASE("TrailField: save and load keep every texel, are small and deterministic, and refuse damaged input")
+{
+	TrailField f;
+	f.plowCapsule(-10.0f, -3.0f, 150.0f, -3.0f, 0.4f, 0.7f, 0.6f, 0.5f, TrailSurface::Snow);   // 160 m: across pages
+	f.stampEllipse(40.0f, 40.0f, 0.4f, 0.17f, 0.3f, 0.9f, TrailSurface::Sand);
+	f.tick(0.0, TrailWeather{});
+	f.tick(123.0, TrailWeather{});
+	const std::vector<uint8_t> blob = f.serialize();
+	CHECK(f.serialize() == blob);                                    // deterministic
+	CHECK(blob.size() < 200000u);                                    // 160 m of track in a couple of hundred KB, not 3 x 512 KB dense
+	TrailField g;
+	REQUIRE(g.deserialize(blob.data(), blob.size()));
+	CHECK(g.pageCount() == f.pageCount());
+	CHECK(g.clock() == f.clock());
+	CHECK(g.activeTexels() == f.activeTexels());
+	for (float x = -12.0f; x < 152.0f; x += 0.37f)
+		for (float z = -5.0f; z < -1.0f; z += 0.11f)
+			CHECK(g.sample(x, z) == f.sample(x, z));
+	CHECK(g.sample(40.0f, 40.0f) == f.sample(40.0f, 40.0f));
+	CHECK(g.serialize() == blob);                                    // a loaded field saves the same bytes
+	// An empty field round-trips, and a field that was loaded can be changed (versions work again).
+	TrailField empty, e2;
+	const std::vector<uint8_t> eb = empty.serialize();
+	REQUIRE(e2.deserialize(eb.data(), eb.size()));
+	CHECK(e2.pageCount() == 0u);
+	g.stampEllipse(0.0f, 0.0f, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Snow);
+	CHECK(g.regionVersion(-1.0f, -1.0f, 1.0f, 1.0f) > 0u);
+
+	// Damaged input: wrong magic, truncation at every length, an absurd page count, a run that overshoots the page.
+	TrailField h;
+	h.stampEllipse(1.0f, 1.0f, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Snow);
+	const size_t before = h.activeTexels();
+	std::vector<uint8_t> bad = blob;
+	bad[0] ^= 0xFF;
+	CHECK_FALSE(h.deserialize(bad.data(), bad.size()));
+	CHECK_FALSE(h.deserialize(nullptr, 0));
+	for (size_t n = 0; n < blob.size(); n += blob.size() / 40 + 1)
+		CHECK_FALSE(h.deserialize(blob.data(), n));
+	std::vector<uint8_t> huge = blob;
+	huge[12] = huge[13] = huge[14] = 0xFF; huge[15] = 0x7F;           // page count
+	CHECK_FALSE(h.deserialize(huge.data(), huge.size()));
+	std::vector<uint8_t> overshoot = blob;
+	overshoot[24 + 5] = 0xFF; overshoot[24 + 6] = 0xFF; overshoot[24 + 7] = 0xFF; overshoot[24 + 8] = 0x7F;   // first token's zero run
+	CHECK_FALSE(h.deserialize(overshoot.data(), overshoot.size()));
+	CHECK(h.activeTexels() == before);                                // a refusal changes nothing
+}
+
+TEST_CASE("TrailField: catching up on healing that passed while nothing ticked")
+{
+	TrailField f;
+	f.stampEllipse(10.0f, 10.0f, 0.5f, 0.5f, 0.0f, 0.6f, TrailSurface::Snow);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	f.catchUp(30.0, snow);                                            // a quarter of 120 s at 1/120 per second: -0.25
+	CHECK(f.sample(10.0f, 10.0f) == doctest::Approx(0.35f).epsilon(0.03));
+	f.catchUp(0.0, snow);                                             // nothing passed: nothing moves
+	f.catchUp(-5.0, snow);
+	CHECK(f.sample(10.0f, 10.0f) == doctest::Approx(0.35f).epsilon(0.03));
+	f.catchUp(1.0e9, snow);                                           // a week offline: capped at a day, and a day is plenty
+	CHECK(f.pageCount() == 0u);
+	TrailField calm;
+	calm.stampEllipse(10.0f, 10.0f, 0.5f, 0.5f, 0.0f, 0.6f, TrailSurface::Snow);
+	calm.catchUp(86400.0, TrailWeather{});                            // dry and windless: a print lasts
+	CHECK(calm.sample(10.0f, 10.0f) == doctest::Approx(0.6f).epsilon(0.02));
+}
+
+TEST_CASE("Trail API: press leaves a pit, drag a groove with heaps, queries answer, rows reach the script frontends")
+{
+	HorizonWorld world;
+	HE::api::Ctx c;
+	c.world = &world;
+	const auto& reg = HE::api::registry();
+	auto row = [&](const char* id) -> const HE::api::ApiFn* {
+		for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+		return nullptr;
+	};
+	for (const char* id : { "trail.footprint", "trail.press", "trail.drag", "trail.depthAt", "trail.heightAt",
+	                        "trail.clear", "trail.save", "trail.load", "trail.pageCount" })
+		CHECK_MESSAGE(row(id) != nullptr, id);
+	CHECK(HE::api::isScriptGroup("trail"));
+	using V = HorizonCode::Value;
+
+	// No world, no marks, queries answer 0.
+	HE::api::Ctx none;
+	HE::api::trail::footprint(none, 0, 0, 1, 1, 0, 1, 0);
+	CHECK(HE::api::trail::depthAt(none, 0, 0) == 0.0f);
+	CHECK_FALSE(HE::api::trail::save(none));
+
+	// A footprint through the C++ function and a drag through the registry row.
+	HE::api::trail::footprint(c, 10.125f, 10.125f, 1.0f, 0.5f, 0.0f, 0.8f, 0);   // the field's texel is 0.25 m: a print needs about a texel to show
+	CHECK(HE::api::trail::pageCount(c) == 1);
+	CHECK(HE::api::trail::depthAt(c, 10.125f, 10.125f) == doctest::Approx(0.8f).epsilon(0.05));
+	CHECK(HE::api::trail::heightAt(c, 10.125f, 10.125f) < -0.2f);                  // a pit lowers the ground
+	row("trail.drag")->invoke(c, { V::ofFloat(20), V::ofFloat(30), V::ofFloat(30), V::ofFloat(30), V::ofFloat(0.4f),
+	                               V::ofFloat(0.7f), V::ofFloat(0.6f), V::ofFloat(0.5f), V::ofInt(1) });
+	CHECK(row("trail.depthAt")->invoke(c, { V::ofFloat(25), V::ofFloat(30) })[0].f > 0.5f);
+	CHECK(row("trail.depthAt")->invoke(c, { V::ofFloat(25), V::ofFloat(30.65f) })[0].f == 0.0f);   // the heap is not "deep"
+	CHECK(row("trail.heightAt")->invoke(c, { V::ofFloat(25), V::ofFloat(30.65f) })[0].f > 0.05f);  // ... it is high
+	// A press sets down pits only.
+	row("trail.press")->invoke(c, { V::ofFloat(40), V::ofFloat(40), V::ofFloat(50), V::ofFloat(40), V::ofFloat(0.3f), V::ofFloat(0.6f), V::ofInt(0) });
+	CHECK(row("trail.heightAt")->invoke(c, { V::ofFloat(45), V::ofFloat(40.4f) })[0].f == 0.0f);
+
+	// Save / load through the world's JSON document: the same marks, healing applied for the time that passed.
+	const std::string doc = TrailSystem::toJson(world);
+	CHECK_FALSE(doc.empty());
+	HorizonWorld other;
+	const float before = HE::api::trail::depthAt(c, 10.125f, 10.125f);
+	REQUIRE(TrailSystem::fromJson(other, doc, 0.0, nullptr));
+	HE::api::Ctx c2; c2.world = &other;
+	CHECK(HE::api::trail::depthAt(c2, 10.125f, 10.125f) == before);
+	CHECK(HE::api::trail::pageCount(c2) == HE::api::trail::pageCount(c));
+	// An hour later in snowfall, the pits have filled.
+	WeatherComponent snow;
+	snow.curPrecip = 1.0f; snow.curPrecipType = PrecipType::Snow;
+	HorizonWorld later;
+	REQUIRE(TrailSystem::fromJson(later, doc, 3600.0, &snow));
+	HE::api::Ctx c3; c3.world = &later;
+	CHECK(HE::api::trail::pageCount(c3) == 0);
+	// Not one of ours: refused, nothing touched.
+	CHECK_FALSE(TrailSystem::fromJson(other, "not json", 0.0, nullptr));
+	CHECK_FALSE(TrailSystem::fromJson(other, "{\"v\":2,\"data\":\"AAAA\"}", 0.0, nullptr));
+	CHECK_FALSE(TrailSystem::fromJson(other, "{\"v\":1,\"data\":\"AAAAAAAA\"}", 0.0, nullptr));
+	CHECK(HE::api::trail::depthAt(c2, 10.125f, 10.125f) == before);
+	// Clean ground is a document too, and loading it clears.
+	HorizonWorld clean;
+	const std::string cleanDoc = TrailSystem::toJson(clean);
+	CHECK_FALSE(cleanDoc.empty());
+	REQUIRE(TrailSystem::fromJson(other, cleanDoc, 0.0, nullptr));
+	CHECK(HE::api::trail::pageCount(c2) == 0);
+	// Without an active save the slot cannot be written or read.
+	CHECK_FALSE(HE::api::trail::save(c));
+	CHECK_FALSE(HE::api::trail::load(c, 0.0f));
+	HE::api::trail::clear(c);
+	CHECK(HE::api::trail::pageCount(c) == 0);
 }
 
 TEST_CASE("Refined terrain chunk, cached: updating only the changed vertices equals building it again, bit for bit")

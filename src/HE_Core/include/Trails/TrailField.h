@@ -127,10 +127,25 @@ public:
     // The rectangle, copied (with a one-texel margin so slopes at its edge are right).
     TrailWindow window(float minX, float minZ, float maxX, float maxZ) const;
 
+    // ── Persistence (a savegame, a streamed tile) ───────────────────────────────────────────────
+    // The field as bytes: every page's key, surface kinds and its 16-bit values, run-length coded (a trodden page is
+    // mostly zeros: a few hundred bytes for a footpath, 512 KB dense only for a page walked flat), plus the clock the
+    // healing ran on. deserialize() REPLACES the field; it refuses (returns false, field unchanged) anything that is not
+    // a well-formed blob, since a save file is untrusted input.
+    std::vector<uint8_t> serialize() const;
+    bool                 deserialize(const uint8_t* data, size_t size);
+    // The healing of `seconds` that passed while the field was not ticking (a save loaded a day later, a tile streamed
+    // back in): the same rates as tick(), applied in one go with the CURRENT weather, capped at one game day. The weather in
+    // between is unknown: this is an approximation and says so (docs/procedural-snow-sand-trails-plan section 3.4).
+    void catchUp(double seconds, const TrailWeather& weather, const TrailSettings& settings = {});
+    double clock() const { return m_clock; }
+    void   setClock(double time) { m_clock = time; m_clockStarted = true; }
+
     size_t pageCount() const { return m_pages.size(); }
     // The texels that are not zero over all pages (a cheap "is anything trodden" for tests and tools).
     size_t activeTexels() const;
-    void   clear() { m_pages.clear(); m_freed.clear(); m_clockStarted = false; ++m_version; }
+    // Forgets every trail; consumers that show them are told (the pages count as freed at the new version).
+    void   clear();
 
 private:
     struct Page
