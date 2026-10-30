@@ -25,6 +25,7 @@ TextureAsset makeTexture(std::vector<uint8_t> pixels)
 {
     TextureAsset tex;
     tex.type      = HE::AssetType::Texture;
+    tex.id        = HE::kTrailTextureId;
     tex.name      = "trail_clipmap";
     tex.path      = HE::kTrailTexturePath;
     tex.width     = HE::TrailClipmap::kSize;
@@ -53,7 +54,7 @@ HE::UUID TrailClipmap::ensureTexture(ContentManager& cm)
     return cm.registerTexture(makeTexture(untouchedPixels()));
 }
 
-bool TrailClipmap::fillRect(const TrailField& field, int ix0, int iz0, int w, int h)
+bool TrailClipmap::fillRect(const TrailField& field, std::vector<uint8_t>& px, int ix0, int iz0, int w, int h)
 {
     constexpr int N = kSize;
     const int tw = w + 2, th = h + 2;
@@ -66,7 +67,7 @@ bool TrailClipmap::fillRect(const TrailField& field, int ix0, int iz0, int w, in
         for (int x = 0; x < w; ++x)
         {
             const int16_t value = v[static_cast<size_t>(z + 1) * tw + (x + 1)];
-            uint8_t* p = &m_pixels[(static_cast<size_t>(floorMod(iz0 + z, N)) * N + floorMod(ix0 + x, N)) * 4];
+            uint8_t* p = &px[(static_cast<size_t>(floorMod(iz0 + z, N)) * N + floorMod(ix0 + x, N)) * 4];
             p[0] = static_cast<uint8_t>(std::clamp(128 - static_cast<int>(std::lround(static_cast<float>(value) * (127.0f / 32767.0f))), 1, 255));
             // A flat texel (the vast majority) skips the neighbour reads.
             if (value == 0 && at(x - 1, z) == 0.0f && at(x + 1, z) == 0.0f && at(x, z - 1) == 0.0f && at(x, z + 1) == 0.0f)
@@ -92,7 +93,14 @@ bool TrailClipmap::update(ContentManager& cm, IRenderer* renderer, const TrailFi
     if (fresh)
     {
         m_id = ensureTexture(cm);
-        m_pixels = untouchedPixels();
+        m_version = ~0ull; m_centred = false; m_hasContent = false;
+    }
+    // The texture's own pixels, edited in place (no copy, no new asset): the renderer is told below.
+    TextureAsset* tex = cm.getTextureMutable(m_id);
+    if (!tex) return false;
+    if (tex->data.size() != static_cast<size_t>(N) * N * 4)
+    {
+        tex->data = untouchedPixels();   // someone replaced it with something else: start from a clean window
         m_version = ~0ull; m_centred = false; m_hasContent = false;
     }
     bool wrote = false;
@@ -102,7 +110,7 @@ bool TrailClipmap::update(ContentManager& cm, IRenderer* renderer, const TrailFi
         m_cx = camX; m_cz = camZ; m_centred = true;
         // The whole window, from the field. Nothing near and nothing in the texture before: it already is the
         // untouched window, not worth a megabyte.
-        const bool any = fillRect(field, m_cx - N / 2, m_cz - N / 2, N, N);
+        const bool any = fillRect(field, tex->data, m_cx - N / 2, m_cz - N / 2, N, N);
         if (any || m_hasContent) wrote = true;
         m_hasContent = any;
         m_version = field.version();
@@ -118,16 +126,12 @@ bool TrailClipmap::update(ContentManager& cm, IRenderer* renderer, const TrailFi
             const int x0 = std::max(tx * TrailField::kTileCells - 1, wx0), x1 = std::min((tx + 1) * TrailField::kTileCells + 1, wx0 + N);
             const int z0 = std::max(tz * TrailField::kTileCells - 1, wz0), z1 = std::min((tz + 1) * TrailField::kTileCells + 1, wz0 + N);
             if (x1 <= x0 || z1 <= z0) continue;
-            if (fillRect(field, x0, z0, x1 - x0, z1 - z0)) m_hasContent = true;
+            if (fillRect(field, tex->data, x0, z0, x1 - x0, z1 - z0)) m_hasContent = true;
             wrote = true;
         }
         m_version = field.version();
     }
-    if (wrote)
-    {
-        cm.replaceTexture(m_id, makeTexture(m_pixels));
-        if (renderer) renderer->InvalidateTexture(m_id);
-    }
+    if (wrote && renderer) renderer->InvalidateTexture(m_id);
     return wrote || fresh;
 }
 } // namespace HE

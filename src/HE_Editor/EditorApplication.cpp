@@ -10278,12 +10278,21 @@ void EditorApplication::dumpFrameHeadless()
 		const glm::vec3 camPos = m_editorCamera.position();
 		TrailSystem::Runtime& rt = TrailSystem::runtime(*m_editorWorld);
 		const float x0 = 12.0f, z = camPos.z - 6.0f;
+		// HE_DUMP_TRAILDRAGPRE=1: the whole track is stamped BEFORE the first frame (so the refined chunks are built once,
+		// from the finished field) and the frames run idle: the picture to compare the dragged, updated-in-place one with.
+		const bool pre = [] { const char* o = std::getenv("HE_DUMP_TRAILDRAGPRE"); return o && *o && *o != '0'; }();
+		if (pre)
+			for (int i = 0; i < frames; ++i)
+			{
+				const float xa = x0 + static_cast<float>(i) * speed;
+				rt.field.plowCapsule(xa, z, xa + speed, z, 0.35f, 0.7f, 0.55f, 0.55f, HE::TrailSurface::Snow);
+			}
 		std::vector<double> tTrail, tTess, tLod, tStitch, tRender;
 		const uint32_t builds0 = meshStreamCounters().tessBuilds.load();
 		auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
 		for (int i = 0; i < frames; ++i)
 		{
-			if (!idle)
+			if (!idle && !pre)
 			{
 				const float xa = x0 + static_cast<float>(i) * speed, xb = xa + speed;
 				rt.field.plowCapsule(xa, z, xb, z, 0.35f, 0.7f, 0.55f, 0.55f, HE::TrailSurface::Snow);
@@ -10303,6 +10312,32 @@ void EditorApplication::dumpFrameHeadless()
 			{
 				tTrail.push_back(ms(a, b)); tTess.push_back(ms(b, b2)); tLod.push_back(ms(b2, b3));
 				tStitch.push_back(ms(b3, c)); tRender.push_back(ms(c, d));
+			}
+		}
+		// A fingerprint of what the frames ended with (the clipmap's pixels, every refined chunk's mesh and its seam copy):
+		// a dragged track updated in place and the same track built at once must give the same numbers.
+		{
+			auto fnv = [](uint64_t h, const void* d, size_t n) {
+				const uint8_t* p = static_cast<const uint8_t*>(d);
+				for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+				return h;
+			};
+			uint64_t hc = 1469598103934665603ull;
+			if (const TextureAsset* ct = contentManager().getTexture(rt.clipmap.textureId()))
+				hc = fnv(hc, ct->data.data(), ct->data.size());
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG fingerprint clipmap %016llx", static_cast<unsigned long long>(hc));
+			for (auto [ce, cc] : m_editorWorld->registry().view<TerrainChunkComponent>().each())
+			{
+				for (const HE::UUID& id : { cc.tessMeshId, cc.stitchMeshId })
+				{
+					const StaticMeshAsset* m = id != HE::UUID{} ? contentManager().getStaticMesh(id) : nullptr;
+					if (!m || m->vertices.empty()) continue;
+					uint64_t h = 1469598103934665603ull;
+					h = fnv(h, m->vertices.data(), m->vertices.size() * 4);
+					h = fnv(h, m->normals.data(), m->normals.size() * 4);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG fingerprint chunk %u,%u %s %016llx (%zu verts)",
+						cc.cx, cc.cz, id == cc.tessMeshId ? "refined" : "seams  ", static_cast<unsigned long long>(h), m->vertices.size() / 3);
+				}
 			}
 		}
 		auto stat = [](std::vector<double> v) {

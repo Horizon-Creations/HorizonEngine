@@ -240,6 +240,9 @@ namespace
     // Rebuilding is bounded: a chunk is rebuilt when the field changed under it (regionVersion), at most
     // every kTrailRebuildTicks scene ticks and from the shared per-tick build budget.
     constexpr uint32_t kTrailRebuildTicks = 10;
+    // A chunk whose cache is there is brought up to date vertex by vertex, every tick it changed, and these are
+    // cheap (a 16 m tile of vertices): this only bounds a flood of them.
+    constexpr uint32_t kTrailIncrementalPerTick = 8;
     uint32_t g_tessTick = 0;
 
     struct ChunkTrails
@@ -277,12 +280,51 @@ namespace
         out.offset.maxAbs = meters;
     }
 
+    // A refined chunk, built with its cache (stored under the chunk once the mesh has an id).
+    StaticMeshAsset buildTessMeshCached(const std::vector<float>& field, uint32_t res, const TerrainComponent& tc,
+                                        const ChunkGrid& g, uint32_t cx, uint32_t cz, const TerrainDisplacementMap& disp,
+                                        const TerrainHeightOffset* extra, TerrainTessCache& cache)
+    {
+        const float cps = static_cast<float>(g.chunksPerSide);
+        return generateTerrainChunkMeshTessellatedCached(
+            field, res, tc.sizeX, tc.sizeZ,
+            static_cast<float>(cx) / cps, static_cast<float>(cz) / cps,
+            static_cast<float>(cx + 1) / cps, static_cast<float>(cz + 1) / cps,
+            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp, extra, cache);
+    }
+
+    // The offset of `win` as the mesh generator wants it (world rectangle of the terrain at `pos`).
+    void trailOffsetOf(TerrainHeightOffset& out, const HE::TrailWindow* win, const TrailSystem::Runtime& rt,
+                       const TerrainComponent& tc, const glm::vec3& pos)
+    {
+        const float meters = rt.settings.displacementMeters;
+        const float sx = tc.sizeX, sz = tc.sizeZ;
+        const float ox = pos.x - sx * 0.5f, oz = pos.z - sz * 0.5f;
+        out.fn     = [win, meters, sx, sz, ox, oz](float u, float v) { return -win->sample(ox + u * sx, oz + v * sz) * meters; };
+        out.maxAbs = meters;
+    }
+
     // Chunk entity → its refined mesh, per world, so the mesh of a chunk that
     // is gone (undo rebuilds the scene, a deleted landscape, a resized grid)
     // can be given back. The same bookkeeping RopeTrailSystem keeps: entt
     // recycles handles, so the key alone is not proof — the id must match too.
     std::unordered_map<const HorizonWorld*, std::unordered_map<uint32_t, HE::UUID>>
         g_tessMeshes;
+
+    // The refined chunk's kept per-vertex state (TerrainTessCache), so a track under it updates the vertices it
+    // changed instead of building the chunk again. Keyed like g_tessMeshes; the mesh id says which mesh it belongs
+    // to (a cache whose mesh was rebuilt some other way, e.g. by a sculpt, is dropped).
+    struct TessCacheEntry { HE::UUID meshId{}; TerrainTessCache cache; };
+    std::unordered_map<const void*, std::unordered_map<uint32_t, TessCacheEntry>> g_tessCaches;   // key: the world's registry
+
+    void dropTessCache(const void* registry, entt::entity ce)
+    {
+        if (const auto it = g_tessCaches.find(registry); it != g_tessCaches.end())
+        {
+            it->second.erase(static_cast<uint32_t>(ce));
+            if (it->second.empty()) g_tessCaches.erase(it);
+        }
+    }
 
     bool hasTessLevel(const LODComponent* lod, const TerrainChunkComponent& cc)
     {
@@ -327,6 +369,58 @@ namespace
             std::memory_order_relaxed);
     }
 
+    // The vertices of a refined chunk that the changed trail tiles cover (and two vertices around them), re-evaluated in
+    // place from the chunk's cache: no new mesh, no copy, just the numbers that moved. The renderer then re-reads the
+    // mesh and the seams copy the chunk's edges again.
+    void refreshTrailVertices(ContentManager& cm, IRenderer* renderer, const TrailSystem::Runtime& rt,
+                              const TerrainComponent& tc, const TerrainTessCache& cache, TerrainChunkComponent& cc,
+                              const glm::vec3& pos, float x0, float z0, float x1, float z1)
+    {
+        const int N = static_cast<int>(cache.N);
+        const float cellX = (x1 - x0) / static_cast<float>(N - 1), cellZ = (z1 - z0) / static_cast<float>(N - 1);
+        std::vector<std::pair<int, int>> tiles;
+        rt.field.changedTiles(cc.trailVersion, tiles);
+        const float tileM = static_cast<float>(HE::TrailField::kTileCells) * HE::TrailField::kCellSize;
+        int i0 = N, j0 = N, i1 = -1, j1 = -1;
+        for (const auto& [tx, tz] : tiles)
+        {
+            const float wx0 = static_cast<float>(tx) * tileM, wx1 = wx0 + tileM, wz0 = static_cast<float>(tz) * tileM, wz1 = wz0 + tileM;
+            if (wx1 < x0 || wx0 > x1 || wz1 < z0 || wz0 > z1) continue;
+            i0 = std::min(i0, static_cast<int>(std::floor((wx0 - x0) / cellX)) - 2);
+            i1 = std::max(i1, static_cast<int>(std::ceil((wx1 - x0) / cellX)) + 2);
+            j0 = std::min(j0, static_cast<int>(std::floor((wz0 - z0) / cellZ)) - 2);
+            j1 = std::max(j1, static_cast<int>(std::ceil((wz1 - z0) / cellZ)) + 2);
+        }
+        i0 = std::max(i0, 0); j0 = std::max(j0, 0); i1 = std::min(i1, N - 1); j1 = std::min(j1, N - 1);
+        if (i1 < i0 || j1 < j0) return;   // the tiles that changed lie outside this chunk
+        StaticMeshAsset* mesh = cm.getStaticMeshMutable(cc.tessMeshId);
+        const size_t verts = static_cast<size_t>(N) * N + static_cast<size_t>(4) * (N - 1);
+        if (!mesh || mesh->vertices.size() != verts * 3 || mesh->normals.size() != verts * 3) return;
+        // The trails around the region, copied once (the offset reads them per vertex and for the normals' neighbours).
+        const HE::TrailWindow win = rt.field.window(x0 + static_cast<float>(i0 - 2) * cellX, z0 + static_cast<float>(j0 - 2) * cellZ,
+                                                    x0 + static_cast<float>(i1 + 2) * cellX, z0 + static_cast<float>(j1 + 2) * cellZ);
+        TerrainHeightOffset off;
+        trailOffsetOf(off, &win, rt, tc, pos);
+        const TerrainHeightOffset* applied = win.any() ? &off : nullptr;
+        const bool ringChanged = applyTerrainHeightOffset(*mesh, cache, applied, i0, j0, i1, j1);
+        if (renderer) renderer->InvalidateMesh(cc.tessMeshId);
+        // The seams (stitchSeams) copy this mesh and force the edges onto a coarser neighbour's. The copy's interior is
+        // this mesh's, so the same vertices are updated there too (all but the border ring, which is the neighbour's);
+        // only when the border ring itself moved is the copy made again.
+        if (stitchKeyIsRefined(cc.stitchKey))
+        {
+            StaticMeshAsset* copy = ringChanged ? nullptr : cm.getStaticMeshMutable(cc.stitchMeshId);
+            if (copy && copy->vertices.size() == mesh->vertices.size() && copy->normals.size() == mesh->normals.size())
+            {
+                applyTerrainHeightOffset(*copy, cache, applied, std::max(i0, 1), std::max(j0, 1), std::min(i1, N - 2), std::min(j1, N - 2));
+                if (renderer) renderer->InvalidateMesh(cc.stitchMeshId);
+            }
+            else
+                cc.stitchKey = 0;   // the seams copied the old edges: copy again
+        }
+        if (win.any()) cc.trailHas = true;
+    }
+
     // Unhook the refined level from the chunk's LODComponent and empty its
     // mesh. The UUID stays registered and owned, so coming back is a replace.
     void emptyTessLevel(entt::registry& reg, ContentManager& cm, IRenderer* renderer,
@@ -360,6 +454,7 @@ namespace
             if (renderer) renderer->InvalidateMesh(cc.tessMeshId);
         }
         cc.tessActive = false;
+        dropTessCache(&reg, ce);
     }
 
     // Fill (or refill) the chunk's refined mesh and hook it into the chunk's
@@ -467,6 +562,7 @@ namespace TerrainSystem
                           tc.tessellationDistance);
             cc.trailVersion = ~0ull;   // built without the trails: updateTessellation looks again
             cc.trailHas     = false;
+            dropTessCache(&reg, chunkEnt);   // the mesh was rebuilt without a cache: the next build makes a new one
         }
         else if (cc.tessActive)
             emptyTessLevel(reg, cm, renderer, chunkEnt, cc);   // tessellation switched off
@@ -892,6 +988,7 @@ namespace TerrainSystem
                 const auto* cc = reg.valid(e) ? reg.try_get<TerrainChunkComponent>(e) : nullptr;
                 if (cc && cc->tessMeshId == it->second) { ++it; continue; }
                 if (renderer) renderer->InvalidateMesh(it->second);
+                dropTessCache(&reg, e);
                 if (!cm.unloadAsset(it->second))
                     HE_LOG_DEBUG(Asset, "Terrain tessellation mesh %016llx%016llx stayed loaded"
                                  " — something still holds a handle on it",
@@ -967,6 +1064,7 @@ namespace TerrainSystem
 
         // The shared build budget goes to the landscapes in view order.
         uint32_t budget = kTessBuildsPerTick;
+        uint32_t incrementals = 0;
         ++g_tessTick;
         TrailSystem::Runtime* trails = TrailSystem::tryRuntime(world);
         for (size_t li = 0; li < numLandscapes; ++li)
@@ -1021,8 +1119,8 @@ namespace TerrainSystem
                         // Distance edited in the Inspector: follow it without a rebuild.
                         if (auto* lod = reg.try_get<LODComponent>(n.e); hasTessLevel(lod, cc))
                             lod->refinedMaxDistance = D;
-                        // The trails under it changed: refill the mesh with the new ground.
-                        if (trails && budget > 0 && cc.cx < g.chunksPerSide && cc.cz < g.chunksPerSide)
+                        // The trails under it changed: bring the mesh's ground up to date.
+                        if (trails && cc.cx < g.chunksPerSide && cc.cz < g.chunksPerSide)
                         {
                             const glm::vec3 pos = HE::worldPositionOf(world, l.te);
                             float x0, z0, x1, z1;
@@ -1030,27 +1128,47 @@ namespace TerrainSystem
                             const uint64_t want = trails->field.regionVersion(x0 - 0.5f, z0 - 0.5f, x1 + 0.5f, z1 + 0.5f);
                             if (cc.trailVersion == ~0ull && want == 0)
                                 cc.trailVersion = 0;   // built without trails and none lie here
-                            else if (cc.trailVersion != want && g_tessTick - cc.trailTick >= kTrailRebuildTicks)
+                            else if (cc.trailVersion != want)
                             {
-                                ChunkTrails ct;
-                                buildChunkTrails(ct, *trails, tc, g, cc.cx, cc.cz, pos);
-                                if (!ct.any && !cc.trailHas)
+                                const auto cit = g_tessCaches.find(&reg);
+                                TessCacheEntry* ce = nullptr;
+                                if (cit != g_tessCaches.end())
+                                    if (const auto f = cit->second.find(static_cast<uint32_t>(n.e)); f != cit->second.end()) ce = &f->second;
+                                const bool incremental = ce && ce->meshId == cc.tessMeshId && ce->cache.valid() && cc.trailVersion != ~0ull;
+                                if (incremental)
                                 {
-                                    // The change is in a neighbouring corner of a shared 16 m tile: nothing lies on this
-                                    // chunk and nothing did. Not worth a mesh.
-                                    cc.trailVersion = want;
-                                    cc.trailTick    = g_tessTick;
+                                    if (incrementals < kTrailIncrementalPerTick)
+                                    {
+                                        ++incrementals;
+                                        refreshTrailVertices(cm, renderer, *trails, tc, ce->cache, cc, pos, x0, z0, x1, z1);
+                                        cc.trailVersion = want;
+                                        cc.trailTick    = g_tessTick;
+                                    }
                                 }
-                                else
+                                else if (budget > 0 && g_tessTick - cc.trailTick >= kTrailRebuildTicks)
                                 {
-                                    const std::vector<float>& field = loadField();
-                                    fillTessLevel(world, cm, renderer, n.e, cc,
-                                                  buildTessMesh(field, res, tc, g, cc.cx, cc.cz, disp,
-                                                                ct.any ? &ct.offset : nullptr), D);
-                                    cc.trailVersion = want;
-                                    cc.trailTick    = g_tessTick;
-                                    cc.trailHas     = ct.any;
-                                    --budget;
+                                    ChunkTrails ct;
+                                    buildChunkTrails(ct, *trails, tc, g, cc.cx, cc.cz, pos);
+                                    if (!ct.any && !cc.trailHas)
+                                    {
+                                        // The change is in a neighbouring corner of a shared 16 m tile: nothing lies on this
+                                        // chunk and nothing did. Not worth a mesh.
+                                        cc.trailVersion = want;
+                                        cc.trailTick    = g_tessTick;
+                                    }
+                                    else
+                                    {
+                                        const std::vector<float>& field = loadField();
+                                        TerrainTessCache tcache;
+                                        StaticMeshAsset m = buildTessMeshCached(field, res, tc, g, cc.cx, cc.cz, disp,
+                                                                                ct.any ? &ct.offset : nullptr, tcache);
+                                        fillTessLevel(world, cm, renderer, n.e, cc, std::move(m), D);
+                                        g_tessCaches[&reg][static_cast<uint32_t>(n.e)] = { cc.tessMeshId, std::move(tcache) };
+                                        cc.trailVersion = want;
+                                        cc.trailTick    = g_tessTick;
+                                        cc.trailHas     = ct.any;
+                                        --budget;
+                                    }
                                 }
                             }
                         }
@@ -1075,8 +1193,12 @@ namespace TerrainSystem
                     want = trails->field.regionVersion(x0 - 0.5f, z0 - 0.5f, x1 + 0.5f, z1 + 0.5f);
                     buildChunkTrails(ct, *trails, tc, g, cx, cz, pos);
                 }
-                fillTessLevel(world, cm, renderer, n.e, cc,
-                              buildTessMesh(field, res, tc, g, cx, cz, disp, ct.any ? &ct.offset : nullptr), D);
+                {
+                    TerrainTessCache tcache;
+                    StaticMeshAsset m = buildTessMeshCached(field, res, tc, g, cx, cz, disp, ct.any ? &ct.offset : nullptr, tcache);
+                    fillTessLevel(world, cm, renderer, n.e, cc, std::move(m), D);
+                    g_tessCaches[&reg][static_cast<uint32_t>(n.e)] = { cc.tessMeshId, std::move(tcache) };
+                }
                 cc.trailVersion = want;
                 cc.trailTick    = g_tessTick;
                 cc.trailHas     = ct.any;

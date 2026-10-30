@@ -167,6 +167,9 @@ public:
 	// buffer (same reasoning as getMaterialMutable), a slot assigned there is
 	// what the renderer draws next frame, and saveAsset() persists it.
 	StaticMeshAsset*           getStaticMeshMutable(HE::UUID id);
+	// For a texture that is rewritten in place every frame (the landscape's trail clipmap): the caller edits `data` and
+	// tells the renderer with IRenderer::InvalidateTexture, no new asset and no copy.
+	TextureAsset*              getTextureMutable(HE::UUID id);
 	SkeletalMeshAsset*         getSkeletalMeshMutable(HE::UUID id);
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;

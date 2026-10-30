@@ -395,6 +395,71 @@ TEST_CASE("Refined terrain chunk: a height offset lowers pits and raises heaps, 
 	CHECK(same.normals == plain.normals);
 }
 
+TEST_CASE("Refined terrain chunk, cached: updating only the changed vertices equals building it again, bit for bit")
+{
+	const uint32_t res = 33;
+	std::vector<float> field(static_cast<size_t>(res) * res);
+	for (uint32_t z = 0; z < res; ++z)
+		for (uint32_t x = 0; x < res; ++x)
+			field[static_cast<size_t>(z) * res + x] = std::sin(x * 0.4f) * 1.5f + std::cos(z * 0.3f) * 2.0f;
+	const TerrainDisplacementMap none;
+	const uint32_t N = 65;
+	// A world of 32 m: one chunk is the whole terrain (u, v in 0..1), 0.5 m per refined cell.
+	auto offsetOf = [](const HE::TrailWindow* win) {
+		TerrainHeightOffset off;
+		off.maxAbs = 0.3f;
+		off.fn = [win](float u, float v) { return -win->sample(-16.0f + u * 32.0f, -16.0f + v * 32.0f) * 0.3f; };
+		return off;
+	};
+	HE::TrailField tf;
+	tf.plowCapsule(-10.0f, -3.0f, 4.0f, -3.0f, 0.5f, 0.7f, 0.8f, 0.55f, TrailSurface::Snow);
+	HE::TrailWindow w1 = tf.window(-16.0f, -16.0f, 16.0f, 16.0f);
+	TerrainHeightOffset off1 = offsetOf(&w1);
+	TerrainTessCache cache;
+	StaticMeshAsset mesh = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, &off1, cache);
+	REQUIRE(cache.valid());
+	REQUIRE(mesh.vertices.size() == (static_cast<size_t>(N) * N + 4 * (N - 1)) * 3);
+
+	// Rebuilding with the same offset gives the same mesh (determinism), and the whole-grid update reproduces it.
+	TerrainTessCache cache2;
+	StaticMeshAsset again = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, &off1, cache2);
+	CHECK(again.vertices == mesh.vertices);
+	CHECK(again.normals == mesh.normals);
+	StaticMeshAsset whole = mesh;
+	applyTerrainHeightOffset(whole, cache, &off1, 0, 0, static_cast<int>(N) - 1, static_cast<int>(N) - 1);
+	CHECK(whole.vertices == mesh.vertices);
+	CHECK(whole.normals == mesh.normals);
+	CHECK(mesh.vertices[(26 * N + 28) * 3 + 1] < cache.baseY[26 * N + 28] - 0.1f);   // on the groove (x -2, z -3): the offset is in the mesh
+
+	// A second track appears elsewhere. The fresh build and the partial update agree everywhere.
+	tf.plowCapsule(2.0f, 6.0f, 12.0f, 9.0f, 0.5f, 0.7f, 0.8f, 0.55f, TrailSurface::Snow);
+	HE::TrailWindow w2 = tf.window(-16.0f, -16.0f, 16.0f, 16.0f);
+	TerrainHeightOffset off2 = offsetOf(&w2);
+	TerrainTessCache cacheFresh;
+	const StaticMeshAsset fresh = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, &off2, cacheFresh);
+	// grid cells that cover x 0..13, z 4..11 (cell = 0.5 m, origin -16): i = 32..60, j = 40..54, plus a margin of 2
+	applyTerrainHeightOffset(mesh, cache, &off2, 30, 38, 62, 56);
+	CHECK(mesh.vertices == fresh.vertices);
+	CHECK(mesh.normals == fresh.normals);
+	CHECK(mesh.uvs == fresh.uvs);
+	CHECK(mesh.indices == fresh.indices);
+
+	// Healed away: updating the region with no offset gives the plain chunk back, skirt included.
+	TerrainTessCache plainCache;
+	const StaticMeshAsset plain = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, nullptr, plainCache);
+	applyTerrainHeightOffset(mesh, cache, nullptr, 0, 0, static_cast<int>(N) - 1, static_cast<int>(N) - 1);
+	// (the cached chunk's skirt was cut for an offset of 0.3 m, the plain one without: compare the grid and the normals)
+	for (size_t gi = 0; gi < static_cast<size_t>(N) * N; ++gi)
+	{
+		CHECK(mesh.vertices[gi * 3 + 1] == plain.vertices[gi * 3 + 1]);
+		CHECK(mesh.normals[gi * 3 + 0] == plain.normals[gi * 3 + 0]);
+	}
+	// A region outside the chunk or a mesh the cache does not belong to changes nothing.
+	StaticMeshAsset untouched = mesh;
+	applyTerrainHeightOffset(untouched, cache, &off2, 500, 500, 600, 600);
+	CHECK(untouched.vertices == mesh.vertices);
+}
+
 // A timing probe, not a check: run with `he_tests --no-skip --test-case="*cost probe*"` (Thema 328 cost measurement).
 TEST_CASE("Refined terrain chunk cost probe" * doctest::skip())
 {

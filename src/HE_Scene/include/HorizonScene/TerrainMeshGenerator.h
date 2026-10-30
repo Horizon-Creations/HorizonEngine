@@ -130,6 +130,36 @@ struct TerrainHeightOffset
     bool active() const { return static_cast<bool>(fn) && maxAbs > 0.0f; }
 };
 
+// A refined chunk built so that its height offset can be CHANGED afterwards without building it again: what
+// the offset does not touch (the height before it, the slope the normals are made from) is kept per grid
+// point. A dragged track then re-evaluates only the vertices in the tiles it changed (applyTerrainHeightOffset)
+// instead of the 66 000 of the chunk.
+struct TerrainTessCache
+{
+    uint32_t N = 0;                       // vertices per side
+    float    sizeX = 0, sizeZ = 0, u0 = 0, v0 = 0, u1 = 0, v1 = 0, du = 0, dv = 0;
+    float    skirtDepth = 0;              // the skirt's drop below its ring vertex
+    std::vector<float> baseY;             // N x N: smooth height + displacement map, before the offset
+    std::vector<float> gx, gz;            // N x N: the slope (dh/dx, dh/dz) the normal is made from, before the offset
+    bool valid() const { return N >= 2 && baseY.size() == static_cast<size_t>(N) * N; }
+};
+
+// Same mesh as generateTerrainChunkMeshTessellated (with `extra`), and fills `cache`. The normals are composed from
+// the cached slope, so applyTerrainHeightOffset over the whole grid gives this mesh back bit for bit.
+StaticMeshAsset generateTerrainChunkMeshTessellatedCached(
+    const std::vector<float>& heights, uint32_t srcRes,
+    float sizeX, float sizeZ,
+    float u0, float v0, float u1, float v1,
+    uint32_t vertsPerSide, float uvTiling,
+    const TerrainDisplacementMap& disp, const TerrainHeightOffset* extra, TerrainTessCache& cache);
+
+// Re-evaluates `extra` (null or inactive = no offset) for the grid vertices i0..i1 x j0..j1 (clamped to the chunk)
+// and for the skirt vertices under them: height = baseY + offset, normal from the cached slope tilted by the
+// offset's gradient. `mesh` must be the mesh `cache` was filled with. Returns whether a vertex on the chunk's border
+// ring (and with it the skirt) changed: a seam copy only has to be made again then.
+bool applyTerrainHeightOffset(StaticMeshAsset& mesh, const TerrainTessCache& cache, const TerrainHeightOffset* extra,
+                              int i0, int j0, int i1, int j1);
+
 // A chunk mesh like generateTerrainChunkMesh, but with heights from
 // sampleTerrainHeightSmooth plus `disp`. Pass vertsPerSide = lod0Cells ×
 // factor + 1 so every LOD0 vertex is also a vertex here. Normals are the same
