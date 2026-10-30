@@ -93,6 +93,11 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         "out from a fifth of that, and the damp ground beside a puddle fades out at twice it. "
         "0.08 ~ 23 degrees. Painted puddles ignore it.");
 
+    const int pDetail     = w.param(kAutoLandscapeParamDetailDistance, 120.0f, 0.0f, 100000.0f, "Detail",
+        "Distance (metres) beyond which the layers' normal and mask maps are no longer read: the ground "
+        "takes the mesh normal and a flat mask, which costs two thirds of the texture reads there. They fade "
+        "out over the last quarter of it. 0 = never read them; a very large value keeps full detail everywhere.");
+
     // ── Coordinates and slope (column 1) ─────────────────────────────────────
     const int wpos   = w.node(T::WorldPos, 1);
     const int wsplit = w.op(T::SplitRGBA, 1, { { wpos } });
@@ -143,7 +148,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         lr.height = w.op(T::SplitRGBA, 2, { { lr.mask } }); // pin 2 = B = height
         return lr;
     };
-    const LayerReads grass = layer(AutoLandscapeLayer::Grass,     uvGround, 11);
+    LayerReads       grass = layer(AutoLandscapeLayer::Grass,     uvGround, 11);
     LayerReads       dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
     LayerReads       rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
     // Snow is bombed too: read plainly, its one tile showed as a visible grid of the
@@ -151,6 +156,43 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     LayerReads       snow  = layer(AutoLandscapeLayer::Snow,      uvRock,   53);
     // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on
     // the ground below, not a layer of their own.
+
+    // ── Distance detail: far ground reads the albedo only ────────────────────
+    // Beyond Detail Distance the normal and mask maps of a layer (six of its nine bombed
+    // taps) are not read: the normal falls back to the mesh normal, the mask to a flat
+    // roughness / AO / height. Over the last quarter of the distance the maps fade out, so
+    // there is no line. The If is a real branch like the layer gates, and it takes the
+    // gate's condition with it (one level of branching: the gate's own If stays on the
+    // albedo). Where a layer cannot have weight the fallback is read instead, harmless
+    // because its weight is exactly 0 there.
+    const int camDist   = w.node(T::CameraDistance, 2);
+    const int fadeLen   = w.op(T::Multiply, 2, { { pDetail }, { w.constF(0.25f, 2) } });
+    const int nearW     = w.op(T::Subtract, 2, { { pDetail }, { camDist } });
+    const int nearF     = w.op(T::Saturate, 2, { { w.op(T::Divide, 2, { { nearW }, { fadeLen } }) } });
+    const int isNear    = w.op(T::Greater, 2, { { pDetail }, { camDist } });
+    const bool detailLod = view == AutoLandscapeView::Lit || view == AutoLandscapeView::Normal
+                        || view == AutoLandscapeView::Surface;
+    // Flat mask of a layer: R = AO 1, G = roughness of the layer's generated maps, B = height 0.5
+    // (equal heights make every transition a plain smooth blend).
+    static const float kFarRoughness[4] = { 0.85f, 0.90f, 0.70f, 0.60f };   // Grass, Dirt, Rock, Snow
+    auto detail = [&](LayerReads& lr, int layerIdx, int cond, int col) {
+        if (!detailLod) return;
+        const int near = cond > 0 ? w.op(T::And, col, { { cond }, { isNear } }) : isNear;
+        const int farMask = w.node(T::ConstColor, col);
+        {
+            MatGraphNode* c = r.graph.findNode(farMask);
+            c->p[0] = 1.0f; c->p[1] = kFarRoughness[layerIdx]; c->p[2] = 0.5f;
+        }
+        lr.normal = w.op(T::If, col, { { near },
+                                       { w.op(T::Lerp, col, { { nrm }, { lr.normal }, { nearF } }) },
+                                       { nrm } });
+        lr.mask   = w.op(T::If, col, { { near },
+                                       { w.op(T::Lerp, col, { { farMask }, { lr.mask }, { nearF } }) },
+                                       { farMask } });
+        lr.height = w.op(T::SplitRGBA, col, { { lr.mask } });
+    };
+
+    detail(grass, 0, -1, 2);   // the ground everything lies on: no gate, only the distance
 
     // (hA − hB) × Height Blend × scale — the height bias of a transition.
     auto heightBias = [&](int hA, int pinA, int hB, int pinB, int scale, int col) {
@@ -209,14 +251,12 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // are not gated: they are the automatic masks alone and read no weightmap.
     const bool gated = view == AutoLandscapeView::Lit || view == AutoLandscapeView::Normal
                     || view == AutoLandscapeView::Surface;
-    auto gate = [&](LayerReads& lr, int cond, int col) {
+    auto gate = [&](LayerReads& lr, int layerIdx, int cond, int col) {
         if (!gated) return;
         const int zeroC = w.node(T::ConstColor, col);
         { MatGraphNode* c = r.graph.findNode(zeroC); c->p[0] = c->p[1] = c->p[2] = 0.0f; }
         lr.albedo = w.op(T::If, col, { { cond }, { lr.albedo }, { zeroC } });
-        lr.normal = w.op(T::If, col, { { cond }, { lr.normal }, { zeroC } });
-        lr.mask   = w.op(T::If, col, { { cond }, { lr.mask },   { zeroC } });
-        lr.height = w.op(T::SplitRGBA, col, { { lr.mask } });
+        detail(lr, layerIdx, cond, col);   // normal / mask: gated by the same condition AND distance
     };
     auto possible = [&](Wire::Src x, int biasMax, int e0, int paint, int paintPin, int col) {
         const int upper = w.op(T::Add, col, { x, { biasMax } });
@@ -242,7 +282,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         // Dirt: the noise patches (bias scale 0.1), the belt below the rock (no bias), or paint.
         const int noiseCan = possible({ dirtFbm }, w.op(T::Multiply, 3, { { pHeight }, { tenth } }), dirtE0, mD, 1, 3);
         const int beltCan  = w.op(T::Greater, 3, { { r.slope }, { beltE0 } });
-        gate(dirt, w.op(T::Or, 3, { { noiseCan }, { beltCan } }), 3);
+        gate(dirt, 1, w.op(T::Or, 3, { { noiseCan }, { beltCan } }), 3);
     }
     const int dirtT    = w.op(T::Add, 3, { { dirtFbm }, { heightBias(dirt.height, 2, grass.height, 2, tenth, 3) } });
     const int dirtW    = w.constF(0.06f, 3);
@@ -254,7 +294,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     const int groundSplit = w.op(T::SplitRGBA, 3, { { ground.mask } });
 
     // ── Rock on the slopes (column 4) ────────────────────────────────────────
-    gate(rock, possible({ r.slope }, w.op(T::Multiply, 4, { { pHeight }, { pRockBlend } }), pRockSlope, mR, 2, 4), 4);
+    gate(rock, 2, possible({ r.slope }, w.op(T::Multiply, 4, { { pHeight }, { pRockBlend } }), pRockSlope, mR, 2, 4), 4);
     const int rockT = w.op(T::Add, 4, { { r.slope },
                                         { heightBias(rock.height, 2, groundSplit, 2, pRockBlend, 4) } });
     r.rockMask = w.ramp(pRockSlope, pRockBlend, { rockT }, 4);
@@ -268,7 +308,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int heightCan = possible({ wsplit, 1 }, w.op(T::Multiply, 5, { { pHeight }, { pSnowBlend } }), pSnowH, mS, 0, 5);
         const int weather  = w.node(T::Weather, 5);
         const int covered  = w.op(T::Greater, 5, { { weather, 3 }, { zero } });
-        gate(snow, w.op(T::Or, 5, { { heightCan }, { covered } }), 5);
+        gate(snow, 3, w.op(T::Or, 5, { { heightCan }, { covered } }), 5);
     }
     const int snowT  = w.op(T::Add, 5, { { wsplit, 1 },
                                          { heightBias(snow.height, 2, s1Split, 2, pSnowBlend, 5) } });

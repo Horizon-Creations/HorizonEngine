@@ -234,8 +234,9 @@ inline constexpr char kAutoLandscapeParamSnowBlend[]      = "Snow Blend";
 inline constexpr char kAutoLandscapeParamSnowMaxSlope[]   = "Snow Max Slope";
 inline constexpr char kAutoLandscapeParamPuddleAmount[]   = "Puddle Amount";
 inline constexpr char kAutoLandscapeParamPuddleMaxSlope[] = "Puddle Max Slope";
+inline constexpr char kAutoLandscapeParamDetailDistance[] = "Detail Distance";
 inline constexpr char kAutoLandscapeSwitchBombing[]       = "Texture Bombing";
-inline constexpr int  kAutoLandscapeParamCount            = 13;   // "Puddle Size" moved to the Weather panel
+inline constexpr int  kAutoLandscapeParamCount            = 14;   // "Puddle Size" moved to the Weather panel; Detail Distance added
 
 // What the Output node shows. Lit is the material. The mask views are UNLIT
 // debug views over the very same mask nodes (the witness's numeric oracle):
