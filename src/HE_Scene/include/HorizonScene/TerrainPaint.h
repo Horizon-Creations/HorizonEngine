@@ -50,15 +50,12 @@ namespace TerrainPaint
     bool texelWeights(const TerrainComponent& tc, uint32_t tx, uint32_t tz, uint8_t* out);
 
     // ── Mixed texture groups (TerrainComponent::mixGroup) ─────────────────────
-    // Weight layer shareLayer(k) (6, 7, 5) is mix slot k's SHARE when tc.mixGroup[k] >= 0. A share is not a
-    // paint layer: layers 0..5 keep their own 255-sum without it, paint()/fillLayer()
-    // leave the share bytes alone and refuse to paint a reserved layer, and the group
-    // brush below is the only thing that writes one. The terrain's own group is the
-    // remainder, so a terrain with no share painted is one group exactly as before.
-    // Bit k of the result = mix slot k has a group (its layer shareLayer(k) is a share).
-    int  shareLayer(int slot);
-    int  reservedLayers(const TerrainComponent& tc);
-    bool isReservedLayer(const TerrainComponent& tc, int layer);
+    // Up to three more groups beside the terrain's own. Each one's SHARE of a texel lives in
+    // its own grid (TerrainComponent::groupWeights, channel k = mixGroup[k]), apart from the
+    // paint layers: painting layers, Puddles included, is untouched by a mix. The terrain's
+    // own group is the remainder, so a terrain with no share painted is one group exactly as
+    // before. Bit k of the result = mix slot k has a group.
+    int  mixSlotMask(const TerrainComponent& tc);
 
     // Slot 0 = the terrain's own group, 1..3 = mixGroup[0..2]. The four shares of
     // texel (tx, tz), summing to 1 (out4 has four floats); slots without a mix group are 0.
@@ -67,11 +64,9 @@ namespace TerrainPaint
     // terrain is {1, 0, 0, 0}.
     bool groupShares(const TerrainComponent& tc, uint32_t tx, uint32_t tz, float* out4);
 
-    // Set mixGroup[k] (group >= 0) or clear it (-1). Taking the layer over folds what
-    // it held (paint a custom material put there) into layer 0 so the texel still sums
-    // to 255; clearing drops the share, the texels fall back to the own group. A group
-    // already used by the other slot is refused, as is a slot outside 0..2. True when
-    // anything changed.
+    // Set mixGroup[k] (group >= 0) or clear it (-1). A new slot starts at share 0, clearing
+    // drops the share (the texels fall back to the own group). A group already used by
+    // another slot is refused, as is a slot outside 0..2. True when anything changed.
     bool setMixGroup(TerrainComponent& tc, int k, int group);
 
     // The group brush: move each touched texel's three shares toward "all slot", with
@@ -89,6 +84,10 @@ namespace TerrainPaint
     bool paintInGroup(TerrainComponent& tc, float localX, float localZ,
                       int layer, int slot, float radius, float falloff, float strength);
 
+    // True when the group grid exists, matches the first page and any mix slot carries
+    // any share at all.
+    bool usesGroupPage(const TerrainComponent& tc);
+
     // True when the second page exists, matches the first and carries any
     // weight at all — i.e. when the landscape actually uses layers 4..7.
     bool usesSecondPage(const TerrainComponent& tc);
@@ -100,7 +99,10 @@ namespace TerrainPaint
     // followed by the second page's, so layers 0..3 sit in the left half and
     // 4..7 in the right half of ONE texture. The material shader tells the two
     // shapes apart by the texture's aspect ratio (MaterialGraph codegen).
+    // With `withGroupPage` (only for a material that reads it) and a used group grid, the
+    // group page follows as the third block: 3·weightRes × weightRes, shares in RGB.
     // Empty when the terrain has no valid weightmap.
     std::vector<uint8_t> buildWeightTexture(const TerrainComponent& tc,
-                                            uint32_t& width, uint32_t& height);
+                                            uint32_t& width, uint32_t& height,
+                                            bool withGroupPage = false);
 }

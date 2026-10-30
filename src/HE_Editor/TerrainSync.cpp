@@ -39,13 +39,13 @@ std::uint32_t elemOf(std::uint8_t f)
 bool isGrid(std::uint8_t f)
 {
 	return f == TerrainSync::Heights || f == TerrainSync::Weights ||
-	       f == TerrainSync::Weights2 || isFoliageMask(f);
+	       f == TerrainSync::Weights2 || f == TerrainSync::GroupWeights || isFoliageMask(f);
 }
 
 // Every grid field, in the order they are looked at.
 template <class Fn> void forEachGrid(Fn&& fn)
 {
-	for (std::uint8_t f = TerrainSync::Heights; f <= TerrainSync::Weights2; ++f) fn(f);
+	for (std::uint8_t f = TerrainSync::Heights; f <= TerrainSync::GroupWeights; ++f) fn(f);
 	for (std::uint8_t f = TerrainSync::FoliageMask; f < TerrainSync::kFieldCount; ++f) fn(f);
 }
 
@@ -142,6 +142,11 @@ bool viewGrid(entt::registry& reg, Entity e, std::uint8_t f, GridView& out)
 		out.bytes = t->layerWeights2.size();
 		out.res   = t->weightRes;
 		break;
+	case TerrainSync::GroupWeights:
+		out.data  = t->groupWeights.data();
+		out.bytes = t->groupWeights.size();
+		out.res   = t->weightRes;
+		break;
 	default:
 	{
 		auto* fol = isFoliageMask(f) ? foliageLayerOf(reg, e, f) : nullptr;
@@ -172,7 +177,9 @@ bool reallocateGrid(entt::registry& reg, Entity e, std::uint8_t f, std::uint32_t
 		return true;
 	case TerrainSync::Weights:
 	case TerrainSync::Weights2:
-		(f == TerrainSync::Weights ? t->layerWeights : t->layerWeights2).assign(n * 4, 0);
+	case TerrainSync::GroupWeights:
+		(f == TerrainSync::Weights ? t->layerWeights
+		 : f == TerrainSync::Weights2 ? t->layerWeights2 : t->groupWeights).assign(n * 4, 0);
 		if (res > 0) t->weightRes = res;
 		t->weightsDirty = true;
 		return true;
@@ -212,6 +219,7 @@ void markWritten(entt::registry& reg, Entity e, std::uint8_t f, const TerrainSyn
 	}
 	case TerrainSync::Weights:
 	case TerrainSync::Weights2:
+	case TerrainSync::GroupWeights:
 		t->weightsDirty = true;
 		break;
 	default:
@@ -228,7 +236,7 @@ struct GridsAside
 	TerrainComponent* t = nullptr;
 	FoliageComponent* f = nullptr;
 	std::vector<float>        heights;
-	std::vector<std::uint8_t> w1, w2;
+	std::vector<std::uint8_t> w1, w2, w3;
 	std::vector<std::vector<std::uint8_t>> masks;   // one per foliage layer
 
 	GridsAside(entt::registry& reg, Entity e)
@@ -240,6 +248,7 @@ struct GridsAside
 			heights.swap(t->sculptHeights);
 			w1.swap(t->layerWeights);
 			w2.swap(t->layerWeights2);
+			w3.swap(t->groupWeights);
 		}
 		if (f)
 		{
@@ -254,6 +263,7 @@ struct GridsAside
 			heights.swap(t->sculptHeights);
 			w1.swap(t->layerWeights);
 			w2.swap(t->layerWeights2);
+			w3.swap(t->groupWeights);
 		}
 		if (f)
 			for (std::size_t i = 0; i < masks.size(); ++i) masks[i].swap(f->layers[i].densityMask);
@@ -290,6 +300,7 @@ void restoreTerrain(TerrainComponent& n, TerrainComponent&& o)
 	{
 		n.layerWeights  = std::move(o.layerWeights);
 		n.layerWeights2 = std::move(o.layerWeights2);
+		n.groupWeights  = std::move(o.groupWeights);
 		n.weightRes     = o.weightRes;   // not written without the weights
 	}
 	n.weightmapTextureId = o.weightmapTextureId;

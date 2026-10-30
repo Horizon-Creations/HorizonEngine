@@ -53,7 +53,7 @@ static int         s_paintLayer      = 0;
 // Which group a Paint stroke leans the texel toward (Thema 233 step 7): 0 = the
 // terrain's own group, 1..3 = TerrainComponent::mixGroup[0..2]. Picking a group in the
 // Paint tab that the terrain does not mix yet gives it a free slot; a terrain with none ignores it
-// (TerrainPaint::paintInGroup is a no-op on the share when reservedLayers() == 0).
+// (TerrainPaint::paintInGroup is a no-op on the share when mixSlotMask() == 0).
 static int         s_activeGroupSlot = 0;
 // Landscape FOLIAGE mode: the same brush paints a foliage layer's density
 // mask (FoliageLayer::densityMask) — Grow raises it toward the target
@@ -1596,7 +1596,8 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.groupWeights.clear();   // and the mixed groups' shares
                     for (int& g : tc.mixGroup) g = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }
@@ -1737,7 +1738,8 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.groupWeights.clear();   // and the mixed groups' shares
                     for (int& g : tc.mixGroup) g = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }

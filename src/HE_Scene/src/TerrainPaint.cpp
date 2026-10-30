@@ -13,6 +13,7 @@ void ensureWeightmap(TerrainComponent& tc)
     tc.weightRes = wr;
     const size_t want = static_cast<size_t>(wr) * wr * 4;
     // A second page only means something beside a first page of the same size.
+    if (!tc.groupWeights.empty() && tc.groupWeights.size() != want) tc.groupWeights.clear();
     if (!tc.layerWeights2.empty() && tc.layerWeights2.size() != want)
     {
         tc.layerWeights2.clear();
@@ -25,6 +26,7 @@ void ensureWeightmap(TerrainComponent& tc)
     tc.layerWeights.assign(want, 0);
     for (size_t i = 0; i < want; i += 4) tc.layerWeights[i] = 255;
     tc.layerWeights2.clear();   // its texels described the old first page
+    tc.groupWeights.clear();
     tc.weightsDirty = true;
 }
 
@@ -32,7 +34,6 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
            int layer, float radius, float falloff, float strength)
 {
     if (layer < 0 || layer >= kTerrainMaxLayers) return false;
-    if (isReservedLayer(tc, layer)) return false;   // a group share: paintGroup() writes it
     ensureWeightmap(tc);
     if (tc.layerWeights.empty()) return false;
 
@@ -68,16 +69,10 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
     if (layer >= 4 && tc.layerWeights2.size() != pageBytes)
         tc.layerWeights2.assign(pageBytes, 0);
     const int nAll = tc.layerWeights2.size() == pageBytes ? kTerrainMaxLayers : 4;
-    // The channels this stroke normalises over: all of them, less the group shares (they
-    // are not part of the 255-sum, and a stroke must neither feed nor drain them).
     // `ch[i]` is the layer of the i-th entry; `target` is the entry of `layer` itself.
-    int ch[kTerrainMaxLayers], n = 0, target = 0;
-    for (int k = 0; k < nAll; ++k)
-    {
-        if (isReservedLayer(tc, k)) continue;
-        if (k == layer) target = n;
-        ch[n++] = k;
-    }
+    int ch[kTerrainMaxLayers], n = 0;
+    for (int k = 0; k < nAll; ++k) ch[n++] = k;
+    const int target = layer;
 
     for (int tz = z0; tz <= z1; ++tz)
     {
@@ -147,25 +142,10 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
 bool fillLayer(TerrainComponent& tc, int layer)
 {
     if (layer < 0 || layer >= kTerrainMaxLayers) return false;
-    if (isReservedLayer(tc, layer)) return false;
     ensureWeightmap(tc);
     if (tc.layerWeights.empty()) return false;
 
     const size_t bytes = tc.layerWeights.size();
-    if (reservedLayers(tc) != 0)
-    {
-        // The group shares stay: only the paint layers are started over. (Page 2 holds
-        // them, so it is kept - and allocated - with the rest zeroed.)
-        if (tc.layerWeights2.size() != bytes) tc.layerWeights2.assign(bytes, 0);
-        for (size_t i = 0; i < bytes; i += 4)
-            for (int k = 0; k < kTerrainMaxLayers; ++k)
-                if (!isReservedLayer(tc, k))
-                    (k < 4 ? tc.layerWeights[i + k] : tc.layerWeights2[i + k - 4]) = 0;
-        std::vector<uint8_t>& page = layer < 4 ? tc.layerWeights : tc.layerWeights2;
-        for (size_t i = static_cast<size_t>(layer % 4); i < bytes; i += 4) page[i] = 255;
-        tc.weightsDirty = true;
-        return true;
-    }
     std::fill(tc.layerWeights.begin(), tc.layerWeights.end(), uint8_t{ 0 });
     if (layer >= 4)
         tc.layerWeights2.assign(bytes, 0);
@@ -194,32 +174,18 @@ bool texelWeights(const TerrainComponent& tc, uint32_t tx, uint32_t tz, uint8_t*
 
 // ── Mixed texture groups ─────────────────────────────────────────────────────
 
-int shareLayer(int slot)
-{
-    // Slots 0/1 keep the layers 6/7 they always had; the third takes Puddles' layer 5 (a
-    // mix of three groups gives up painted puddles, the automatic wetness stays).
-    return slot == 2 ? 5 : 6 + slot;
-}
-
-int reservedLayers(const TerrainComponent& tc)
+int mixSlotMask(const TerrainComponent& tc)
 {
     int m = 0;
     for (int k = 0; k < kMixGroupSlots; ++k) if (tc.mixGroup[k] >= 0) m |= 1 << k;
     return m;
 }
 
-bool isReservedLayer(const TerrainComponent& tc, int layer)
-{
-    for (int k = 0; k < kMixGroupSlots; ++k)
-        if (tc.mixGroup[k] >= 0 && shareLayer(k) == layer) return true;
-    return false;
-}
-
 namespace
 {
-    // The group shares of one texel, by slot (0 = own group, 1..3 = mixGroup[0..2]), out of
-    // its share bytes `b[k]` (mix slot k's layer). A slot with no mix group is 0, shares that
-    // add past 1 are scaled to fit, the own group is the rest.
+    // The group shares of one texel by slot (0 = own group, 1..3 = mixGroup[0..2]) out of its
+    // three share bytes `b`. A slot with no mix group is 0, shares that add past 1 are
+    // scaled to fit, the own group is the rest.
     void sharesOf(const TerrainComponent& tc, const uint8_t* b, float* out)
     {
         float t = 0.0f;
@@ -232,20 +198,11 @@ namespace
         out[0] = std::max(0.0f, 1.0f - t);
     }
 
-    // Slot k's share byte of the texel starting at `at` (page 2 is there when this is called).
-    uint8_t& shareByte(TerrainComponent& tc, size_t at, int k) { return tc.layerWeights2[at + shareLayer(k) - 4]; }
-
-    void readShareBytes(const TerrainComponent& tc, size_t at, bool second, uint8_t* b)
+    // The group grid allocated (zero) beside the first page.
+    void ensureGroupGrid(TerrainComponent& tc)
     {
-        for (int k = 0; k < kMixGroupSlots; ++k)
-            b[k] = second ? tc.layerWeights2[at + shareLayer(k) - 4] : uint8_t{ 0 };
-    }
-
-    // Page 2 allocated (zero) beside a first page; the group brush needs it for the share bytes.
-    void ensureSecondPage(TerrainComponent& tc)
-    {
-        if (tc.layerWeights2.size() != tc.layerWeights.size())
-            tc.layerWeights2.assign(tc.layerWeights.size(), 0);
+        if (tc.groupWeights.size() != tc.layerWeights.size())
+            tc.groupWeights.assign(tc.layerWeights.size(), 0);
     }
 }
 
@@ -255,8 +212,9 @@ bool groupShares(const TerrainComponent& tc, uint32_t tx, uint32_t tz, float* ou
     const size_t page = static_cast<size_t>(wr) * wr * 4;
     if (wr == 0 || tx >= wr || tz >= wr || tc.layerWeights.size() != page) return false;
     const size_t at = (static_cast<size_t>(tz) * wr + tx) * 4;
-    uint8_t b[kMixGroupSlots];
-    readShareBytes(tc, at, tc.layerWeights2.size() == page, b);
+    uint8_t b[kMixGroupSlots] = {};
+    if (tc.groupWeights.size() == page)
+        for (int k = 0; k < kMixGroupSlots; ++k) b[k] = tc.groupWeights[at + k];
     sharesOf(tc, b, out4);
     return true;
 }
@@ -270,21 +228,13 @@ bool setMixGroup(TerrainComponent& tc, int k, int group)
         for (int o = 0; o < kMixGroupSlots; ++o)
             if (o != k && tc.mixGroup[o] == group) return false;
 
-    const size_t page = static_cast<size_t>(tc.weightRes) * tc.weightRes * 4;
-    if (page != 0 && tc.layerWeights.size() == page && tc.layerWeights2.size() == page)
+    // A new slot starts at share 0 and a cleared one is dropped, so the texels fall back to
+    // the own group. Re-pointing a live slot at another group keeps its bytes, as switching
+    // the terrain's group keeps the paint.
+    if (tc.groupWeights.size() == tc.layerWeights.size() && !tc.groupWeights.empty()
+        && (tc.mixGroup[k] < 0 || group < 0))
     {
-        // Becoming a share: what a custom material painted on this layer is folded into
-        // layer 0 (the texel keeps summing to 255). Leaving: the share is dropped, the texel
-        // falls back to the own group. Re-pointing a live share at another group keeps its
-        // bytes, as switching the terrain's group keeps the paint.
-        const bool taking = tc.mixGroup[k] < 0 && group >= 0;
-        for (size_t i = 0; i < page; i += 4)
-        {
-            uint8_t& b = shareByte(tc, i, k);
-            if (taking)
-                tc.layerWeights[i] = static_cast<uint8_t>(std::min(255, tc.layerWeights[i] + b));
-            if (taking || group < 0) b = 0;
-        }
+        for (size_t i = static_cast<size_t>(k); i < tc.groupWeights.size(); i += 4) tc.groupWeights[i] = 0;
         tc.weightsDirty = true;
     }
     tc.mixGroup[k] = group;
@@ -320,7 +270,7 @@ bool paintGroup(TerrainComponent& tc, float localX, float localZ,
     const int z1 = std::min<int>(wr - 1, static_cast<int>(std::ceil(toTexel(localZ + outer, -halfZ, tc.sizeZ, wr))));
     if (x0 > x1 || z0 > z1) return false;
 
-    ensureSecondPage(tc);
+    ensureGroupGrid(tc);
     for (int tz = z0; tz <= z1; ++tz)
     {
         const float wz = -halfZ + (static_cast<float>(tz) + 0.5f) * texelZ;
@@ -335,9 +285,7 @@ bool paintGroup(TerrainComponent& tc, float localX, float localZ,
             const float a = std::clamp(strength * fall, 0.0f, 1.0f);
             if (a <= 0.0f) continue;
 
-            const size_t at = (static_cast<size_t>(tz) * wr + tx) * 4;
-            uint8_t b[kMixGroupSlots];
-            readShareBytes(tc, at, true, b);
+            uint8_t* b = &tc.groupWeights[(static_cast<size_t>(tz) * wr + tx) * 4];
             // Toward "all `slot`", the same lerp and residue snap as paint(): the shares
             // always sum to 1, the own group is the one that is not stored.
             float w[kMixGroupSlots + 1];
@@ -365,7 +313,7 @@ bool paintGroup(TerrainComponent& tc, float localX, float localZ,
                 --q[big]; --total;
             }
             for (int i = 0; i < kMixGroupSlots; ++i)
-                if (tc.mixGroup[i] >= 0) shareByte(tc, at, i) = static_cast<uint8_t>(q[i]);
+                if (tc.mixGroup[i] >= 0) b[i] = static_cast<uint8_t>(q[i]);
         }
     }
     tc.weightsDirty = true;
@@ -378,10 +326,10 @@ bool fillGroup(TerrainComponent& tc, int slot)
     if (slot > 0 && tc.mixGroup[slot - 1] < 0) return false;
     ensureWeightmap(tc);
     if (tc.layerWeights.empty()) return false;
-    ensureSecondPage(tc);
-    for (size_t i = 0; i < tc.layerWeights2.size(); i += 4)
+    ensureGroupGrid(tc);
+    for (size_t i = 0; i < tc.groupWeights.size(); i += 4)
         for (int k = 0; k < kMixGroupSlots; ++k)
-            if (tc.mixGroup[k] >= 0) shareByte(tc, i, k) = slot == k + 1 ? 255 : 0;
+            tc.groupWeights[i + k] = (tc.mixGroup[k] >= 0 && slot == k + 1) ? 255 : 0;
     tc.weightsDirty = true;
     return true;
 }
@@ -390,7 +338,7 @@ bool paintInGroup(TerrainComponent& tc, float localX, float localZ,
                   int layer, int slot, float radius, float falloff, float strength)
 {
     const bool tex = paint(tc, localX, localZ, layer, radius, falloff, strength);
-    const bool grp = slot >= 0 && reservedLayers(tc) != 0
+    const bool grp = slot >= 0 && mixSlotMask(tc) != 0
         && paintGroup(tc, localX, localZ, slot, radius, falloff, strength);
     return tex || grp;
 }
@@ -404,27 +352,44 @@ bool usesSecondPage(const TerrainComponent& tc)
                        [](uint8_t b) { return b != 0; });
 }
 
+bool usesGroupPage(const TerrainComponent& tc)
+{
+    const size_t page = static_cast<size_t>(tc.weightRes) * tc.weightRes * 4;
+    if (page == 0 || tc.layerWeights.size() != page || tc.groupWeights.size() != page
+        || mixSlotMask(tc) == 0)
+        return false;
+    return std::any_of(tc.groupWeights.begin(), tc.groupWeights.end(),
+                       [](uint8_t b) { return b != 0; });
+}
+
 std::vector<uint8_t> buildWeightTexture(const TerrainComponent& tc,
-                                        uint32_t& width, uint32_t& height)
+                                        uint32_t& width, uint32_t& height, bool withGroupPage)
 {
     const uint32_t wr = tc.weightRes;
     width = height = 0;
     if (wr == 0 || tc.layerWeights.size() != static_cast<size_t>(wr) * wr * 4) return {};
     height = wr;
-    if (!usesSecondPage(tc))
+    const bool group = withGroupPage && usesGroupPage(tc);
+    if (!group && !usesSecondPage(tc))
     {
         width = wr;
         return tc.layerWeights;
     }
-    // Side by side, row by row: [page 0 row z | page 1 row z]. Same rows, same
-    // V, so the shader only rescales U.
-    width = 2 * wr;
+    // Side by side, row by row: [page 0 row z | page 1 row z (| group row z)]. Same rows,
+    // same V, so the shader only rescales U. The group page only travels for a material
+    // that reads it (a 3:1 map would confuse the 2:1 test of every other landscape blend).
+    const uint32_t pages = group ? 3 : 2;
+    width = pages * wr;
     const size_t row = static_cast<size_t>(wr) * 4;
-    std::vector<uint8_t> out(row * 2 * wr);
+    std::vector<uint8_t> out(row * pages * wr, 0);
+    const bool second = tc.layerWeights2.size() == tc.layerWeights.size();
     for (uint32_t z = 0; z < wr; ++z)
     {
-        std::copy_n(tc.layerWeights.begin()  + z * row, row, out.begin() + (2 * z) * row);
-        std::copy_n(tc.layerWeights2.begin() + z * row, row, out.begin() + (2 * z + 1) * row);
+        std::copy_n(tc.layerWeights.begin() + z * row, row, out.begin() + (pages * z) * row);
+        if (second)
+            std::copy_n(tc.layerWeights2.begin() + z * row, row, out.begin() + (pages * z + 1) * row);
+        if (group)
+            std::copy_n(tc.groupWeights.begin() + z * row, row, out.begin() + (pages * z + 2) * row);
     }
     return out;
 }

@@ -741,9 +741,13 @@ namespace
 				if (t->layerWeights2.size() == t->layerWeights.size())
 					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
 					                                      t->layerWeights2.size());
+				// The mixed groups' shares (see mixGroups below), a grid of their own.
+				if (t->groupWeights.size() == t->layerWeights.size())
+					tc["groupWeightsB64"] = base64Encode(t->groupWeights.data(),
+					                                     t->groupWeights.size());
 			}
 			// Mixed texture groups (Thema 233, step 7): the further groups whose
-			// shares sit in weight layers 6/7/5. Written only when one is set, so a
+			// shares are the channels of groupWeights. Written only when one is set, so a
 			// one-group terrain (every scene before this field, and every terrain that
 			// never used it) saves byte for byte as before.
 			if (t->mixGroup[0] >= 0 || t->mixGroup[1] >= 0 || t->mixGroup[2] >= 0)
@@ -1773,6 +1777,7 @@ namespace
 			// every one-group terrain written by this build → both slots stay -1, which is
 			// the legacy, single-group look. Out-of-range or duplicate entries are dropped
 			// rather than carried, same as a truncated weightmap above.
+			t.groupWeights.clear();
 			for (int& g : t.mixGroup) g = -1;
 			if (c.contains("mixGroups") && c["mixGroups"].is_array()
 			    && (c["mixGroups"].size() == 2 || c["mixGroups"].size() == kMixGroupSlots))
@@ -1784,6 +1789,26 @@ namespace
 					for (size_t o = 0; o < k && g >= 0; ++o) if (t.mixGroup[o] == g) g = -1;
 					t.mixGroup[k] = g;
 				}
+			}
+			if (!t.layerWeights.empty() && c.contains("groupWeightsB64") && c["groupWeightsB64"].is_string())
+			{
+				t.groupWeights = base64Decode(c["groupWeightsB64"].get<std::string>());
+				if (t.groupWeights.size() != t.layerWeights.size()) t.groupWeights.clear();
+			}
+			// The first build of mixed groups (before groupWeights) kept the shares of its two
+			// slots in paint layers 6/7. Move them over so those scenes keep their paint.
+			else if (!t.layerWeights.empty() && t.layerWeights2.size() == t.layerWeights.size()
+			         && (t.mixGroup[0] >= 0 || t.mixGroup[1] >= 0))
+			{
+				t.groupWeights.assign(t.layerWeights.size(), 0);
+				for (size_t i = 0; i + 3 < t.layerWeights2.size(); i += 4)
+					for (int k = 0; k < 2; ++k)
+						if (t.mixGroup[k] >= 0)
+						{
+							t.groupWeights[i + k] = t.layerWeights2[i + 2 + k];
+							t.layerWeights2[i + 2 + k] = 0;
+							// The texel summed to 255 across the paint layers only.
+						}
 			}
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{

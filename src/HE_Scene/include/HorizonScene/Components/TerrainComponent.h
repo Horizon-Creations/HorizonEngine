@@ -94,14 +94,13 @@ struct TerrainComponent {
 
     // ── Mixed texture groups (Thema 233, step 7) ─────────────────────────────
     // A terrain's own group is its landscape material (MaterialComponent::materialAssetId).
-    // mixGroup[k] names a further group whose share of every texel lives in weight layer
-    // TerrainPaint::shareLayer(k) (6, 7, and 5 for the third): the AutoLandscapeGroupId's
-    // int, -1 = none. The terrain's own group is the remainder (1 - the shares), so a texel nobody painted is the own group
-    // alone, exactly what every landscape was before this field. A reserved layer is a
-    // GROUP SHARE and not a paint layer: it is left out of the 255-sum of layers 0..5
-    // (TerrainPaint), and the material must not use layers 6/7 as its own paint layers
-    // (the engine's group materials declare six; the third slot takes the Puddles layer). Saved only once one is set.
-    // Order matters nowhere else: -1 on both is the legacy, one-group terrain.
+    // mixGroup[k] names a further group (the AutoLandscapeGroupId's int, -1 = none) whose
+    // share of every texel is channel k of `groupWeights`: RGBA8, weightRes x weightRes,
+    // empty = no share painted anywhere. The terrain's own group is the remainder
+    // (1 - the shares), so a texel nobody painted is the own group alone, exactly what
+    // every landscape was before this field. Kept apart from the paint layers on purpose
+    // (TerrainPaint::paintGroup writes it); saved only once one is set.
+    std::vector<uint8_t> groupWeights;
     int mixGroup[kMixGroupSlots] = { -1, -1, -1 };
 
     // ── Water ────────────────────────────────────────────────────────────────
