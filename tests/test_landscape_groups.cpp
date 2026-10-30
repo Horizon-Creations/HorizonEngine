@@ -15,6 +15,8 @@
 #include <HorizonRendering/GiLandscape.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
+#include <Trails/TrailClipmap.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Renderer/IRenderer.h>
 #include <material/MaterialShaderBake.h>
@@ -93,6 +95,10 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 	CHECK(used.count(HE::kAutoLandscapeMaterialId.hi) == 1);
 	CHECK(used.insert(HE::kWeatherPuddlesFunctionId.hi).second);
 	CHECK(used.insert(HE::kWeatherSnowFunctionId.hi).second);
+	// The procedural surface functions (Thema 329, step 2) took 0x41D / 0x41E: the two ids left below the
+	// loose maps (0x420..) after the Forest and Grassland blocks; 0x41F stays free.
+	CHECK(used.insert(HE::kProceduralSnowFunctionId.hi).second);
+	CHECK(used.insert(HE::kProceduralSandFunctionId.hi).second);
 	// landscape_tex_gen's loose maps (0x420..0x42E) and variants (0x430..0x498: 8 variants of 5 layers),
 	// which the groups after Grassland must not land on. Forest and Grassland sit below them, Desert above.
 	for (uint64_t hi = 0x420; hi <= 0x498; ++hi) used.insert(hi);
@@ -128,21 +134,44 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, id);
 		CHECK(HE::materialGraphToJson(a.graph) != legacyJson);
 
-		// Same nodes, same wiring: only strings and three default values differ.
-		REQUIRE(a.graph.nodes.size() == legacy.graph.nodes.size());
-		CHECK(a.graph.links.size() == legacy.graph.links.size());
-		for (size_t i = 0; i < a.graph.nodes.size(); ++i)
-			CHECK(a.graph.nodes[i].type == legacy.graph.nodes[i].type);
+		if (!g.proceduralSand)
+		{
+			// Same nodes, same wiring: only strings and three default values differ.
+			REQUIRE(a.graph.nodes.size() == legacy.graph.nodes.size());
+			CHECK(a.graph.links.size() == legacy.graph.links.size());
+			for (size_t i = 0; i < a.graph.nodes.size(); ++i)
+				CHECK(a.graph.nodes[i].type == legacy.graph.nodes[i].type);
+		}
+		else
+		{
+			// The Desert's ground is MF_ProceduralSand (Thema 329 step 2) instead of three array reads
+			// on one bombing grid: fewer nodes, the rest of the skeleton (parameters, paint layers,
+			// dirt / rock / snow / puddles, the Dirt and Rock reads) unchanged — checked below.
+			CHECK(a.graph.nodes.size() != legacy.graph.nodes.size());
+			int sandCalls = 0, grassSlices = 0;
+			for (const HE::MatGraphNode& n : a.graph.nodes)
+				if (n.type == HE::MatNodeType::FunctionCall && n.s == HE::kProceduralSandFunctionPath) ++sandCalls;
+			for (const HE::MatGraphNode& n : a.graph.nodes)
+				if (n.type == HE::MatNodeType::TextureArraySample || n.type == HE::MatNodeType::NormalMapArraySample)
+					for (const HE::MatGraphLink& l : a.graph.links)
+						if (l.dstNode == n.id && l.dstPin == 1)
+							grassSlices += static_cast<int>(a.graph.findNode(l.srcNode)->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Grass);
+			CHECK(sandCalls == 1);
+			CHECK(grassSlices == 0);   // the ground's slice is never read
+		}
 
 		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 		REQUIRE_FALSE(gen.glsl.empty());
 		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
-		std::vector<std::string> tex = gen.textures, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = gen.textures, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], HE::kTrailTexturePath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
-		CHECK(tex == want);                       // its own arrays and not one of Mountains'
-		CHECK(gen.textureArrayMask == 0x7u);
-		CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+		CHECK(tex == want);                       // its own arrays and not one of Mountains', + the trail clipmap
+		uint32_t arrays = 0;                      // every slot but the trail's is an array
+		for (size_t i = 0; i < gen.textures.size(); ++i)
+			if (gen.textures[i] != HE::kTrailTexturePath) arrays |= 1u << i;
+		CHECK(gen.textureArrayMask == arrays);
+		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
 
 		int blends = 0, legacyBlends = 0;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
@@ -163,6 +192,47 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet,
 		                                 HE::AutoLandscapeView::Normal, HE::AutoLandscapeView::Surface })
 			CHECK_FALSE(HE::generateFragment(HE::buildAutoLandscapeGraph(v, id).graph, HE::weatherFunctionLoader()).glsl.empty());
+	}
+}
+
+TEST_CASE("Procedural snow and sand: the look is an exposed parameter, packed into the slot budget")
+{
+	for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+	{
+		const HE::AutoLandscapeGroup& g = HE::kAutoLandscapeGroups[i];
+		CAPTURE(g.name);
+		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, static_cast<AutoLandscapeGroupId>(i));
+		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
+		// Nothing baked for being over budget: every parameter is a real HeParams slot.
+		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
+		CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
+		auto find = [&](const char* name) -> const HE::MatParamSlot* {
+			for (const HE::MatParamSlot& s : gen.params) if (s.name == name) return &s;
+			return nullptr;
+		};
+		const HE::MatParamSlot* color = find(HE::kAutoLandscapeParamSnowColor);
+		const HE::MatParamSlot* look  = find(HE::kAutoLandscapeParamSnowLook);
+		REQUIRE(color);
+		REQUIRE(look);
+		CHECK(color->kind == HE::MatParamKind::Color);
+		CHECK(look->kind == HE::MatParamKind::Vec4);
+		// The defaults are the functions' own (Grain, Drift, Glitter, Softness).
+		CHECK(look->value[0] == 0.5f);
+		CHECK(look->value[1] == 0.5f);
+		CHECK(look->value[2] == 0.35f);
+		CHECK(look->value[3] == 0.5f);
+		const HE::MatParamSlot* sand = find(HE::kAutoLandscapeParamSandLook);
+		CHECK((sand != nullptr) == g.proceduralSand);
+		if (sand)
+		{
+			CHECK(sand->kind == HE::MatParamKind::Vec4);
+			CHECK(sand->value[0] == 0.03f);
+			CHECK(sand->value[1] == 0.5f);
+			CHECK(sand->value[2] == 0.3f);
+			CHECK(sand->value[3] == 0.3f);
+		}
+		// The functions' pins are fed by the parameters (through Split RGBA), not by constants.
+		CHECK(gen.glsl.find("// param: Snow Look") != std::string::npos);
 	}
 }
 
@@ -213,14 +283,14 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		REQUIRE(m);
 		CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, id).graph),
 		              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material --group ", g.name);
-		std::vector<std::string> tex = m->graphTexturePaths, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = m->graphTexturePaths, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], HE::kTrailTexturePath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
 		CHECK(tex == want);
 		CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(g.paintLayerNames));
 		std::string have;
 		for (const std::string& pn : m->graphParamNames) have += pn + "; ";
-		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount), have);
+		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)), have);
 		REQUIRE(!m->customShaderFragGlsl.empty());
 
 		// The packer ships the fragment text stored in the file: it must be what the codegen makes today.
@@ -234,6 +304,12 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		const std::vector<std::string> refs = HE::EngineDeps::findEngineReferences(bytes.data(), bytes.size());
 		for (const char* arr : g.arrayPaths)
 			CHECK_MESSAGE(std::find(refs.begin(), refs.end(), arr) != refs.end(), arr, " is not referenced by ", file);
+		// ... and so is every material function the graph calls (Thema 329 step 2: snow in every group, sand in
+		// the Desert): a function the resolver does not find would not be fetched, and the call is magenta.
+		std::vector<const char*> fns = { HE::kWeatherPuddlesFunctionPath, HE::kWeatherSnowFunctionPath, HE::kProceduralSnowFunctionPath };
+		if (g.proceduralSand) fns.push_back(HE::kProceduralSandFunctionPath);
+		for (const char* fn : fns)
+			CHECK_MESSAGE(std::find(refs.begin(), refs.end(), fn) != refs.end(), fn, " is not referenced by ", file);
 
 		// One variant per backend, the way the exporter bakes them (no GPU involved).
 		HE::MaterialShaderLibrary lib;

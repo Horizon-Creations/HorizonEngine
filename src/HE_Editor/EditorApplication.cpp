@@ -95,6 +95,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <material/MaterialShaderBake.h>
 #include <glm/gtc/quaternion.hpp>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TrailSystem.h>
 #include <HorizonScene/TerrainPaint.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainGenerate.h>
@@ -7193,6 +7194,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 	// three discs plus yellow (layer 3, page 0), magenta (4), white (6) and
 	// orange (7) — the last three on the weightmap's SECOND page, which the
 	// renderer uploads as the right half of the one heLandscapeWeights texture.
+	// =12 adds lime (8), pink (9), brown (10) and navy (11) on the THIRD page,
+	// the right third of a 3:1 texture.
 	if (const char* ll = std::getenv("HE_DUMP_LANDSCAPELAYERS"); ll && *ll && m_editorWorld)
 	{
 		auto& reg = m_editorWorld->registry();
@@ -7203,18 +7206,24 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
 		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
-		const bool eight = std::string_view(ll) == "8";
-		g.findNode(lb)->s = eight ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
-		                          : "Red\nGreen\nBlue";
-		const float rgb[8][3] = { { 0.90f, 0.10f, 0.10f },
-		                          { 0.10f, 0.85f, 0.15f },
-		                          { 0.15f, 0.25f, 0.95f },
-		                          { 0.95f, 0.90f, 0.10f },
-		                          { 0.90f, 0.10f, 0.90f },
-		                          { 0.10f, 0.90f, 0.90f },
-		                          { 0.95f, 0.95f, 0.95f },
-		                          { 0.95f, 0.50f, 0.05f } };
-		for (int i = 0; i < (eight ? 8 : 3); ++i)
+		const bool twelve = std::string_view(ll) == "12";
+		const bool eight  = twelve || std::string_view(ll) == "8";
+		g.findNode(lb)->s = twelve ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange\nLime\nPink\nBrown\nNavy"
+		                  : eight  ? "Red\nGreen\nBlue\nYellow\nMagenta\nCyan\nWhite\nOrange"
+		                           : "Red\nGreen\nBlue";
+		const float rgb[12][3] = { { 0.90f, 0.10f, 0.10f },
+		                           { 0.10f, 0.85f, 0.15f },
+		                           { 0.15f, 0.25f, 0.95f },
+		                           { 0.95f, 0.90f, 0.10f },
+		                           { 0.90f, 0.10f, 0.90f },
+		                           { 0.10f, 0.90f, 0.90f },
+		                           { 0.95f, 0.95f, 0.95f },
+		                           { 0.95f, 0.50f, 0.05f },
+		                           { 0.60f, 0.95f, 0.10f },
+		                           { 1.00f, 0.60f, 0.75f },
+		                           { 0.45f, 0.25f, 0.10f },
+		                           { 0.05f, 0.05f, 0.40f } };
+		for (int i = 0; i < (twelve ? 12 : eight ? 8 : 3); ++i)
 		{
 			const int c = g.addNode(HE::MatNodeType::ConstColor);
 			g.findNode(c)->p[0] = rgb[i][0];
@@ -7259,6 +7268,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			TerrainPaint::paint(ltc, -34.0f, -30.0f, /*White*/   6, 9.0f, 3.0f, 1.0f);
 			TerrainPaint::paint(ltc,   0.0f,  40.0f, /*Orange*/  7, 7.0f, 2.0f, 1.0f);
 		}
+		if (twelve)   // the third weight page: the right third of the 3:1 map
+		{
+			TerrainPaint::paint(ltc,   0.0f, -36.0f, /*Lime*/    8, 7.0f, 2.0f, 1.0f);
+			TerrainPaint::paint(ltc, -36.0f,  -5.0f, /*Pink*/    9, 7.0f, 3.0f, 1.0f);
+			TerrainPaint::paint(ltc,  34.0f,   0.0f, /*Brown*/  10, 8.0f, 2.0f, 1.0f);
+			TerrainPaint::paint(ltc,  20.0f,  46.0f, /*Navy*/   11, 4.0f, 2.0f, 1.0f);
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		reg.emplace<MaterialComponent>(land, MaterialComponent{ lmId });
 		// The headless dump renders from OnInit, BEFORE the main loop's
@@ -7266,8 +7282,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// entities yet and there is simply nothing to draw.
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_LANDSCAPELAYERS witness landscape added "
-			"(%d layers, weightmap %ux%u)", eight ? 8 : 3,
-			TerrainPaint::usesSecondPage(ltc) ? 2 * ltc.weightRes : ltc.weightRes,
+			"(%d layers, weightmap %ux%u)", twelve ? 12 : eight ? 8 : 3,
+			static_cast<unsigned>(TerrainPaint::weightPageCount(ltc)) * ltc.weightRes,
 			ltc.weightRes);
 	}
 
@@ -7864,10 +7880,56 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					kPlateau * t * t * (3.0f - 2.0f * t);
 			}
 		ltc.dirty = true;
+		// HE_DUMP_TRAILTEST (Thema 328): the refined ground carries the trails as real geometry; one vertex per metre
+		// refined four times is the field's 0.25 m.
+		// HE_DUMP_TRAILDRAG=<frames> (the cost witness, below) uses the same refined ground; HE_DUMP_TRAILTESS=1|2|4
+		// overrides the factor (1 = no refinement, the baseline).
+		const char* tdw = std::getenv("HE_DUMP_TRAILDRAG");
+		const char* ttw = std::getenv("HE_DUMP_TRAILTEST");
+		if ((tdw && *tdw && *tdw != '0') || (ttw && *ttw && *ttw != '0'))
+		{
+			const char* tf = std::getenv("HE_DUMP_TRAILTESS");
+			ltc.tessellationFactor   = (tf && *tf) ? std::atoi(tf) : 4;
+			ltc.tessellationDistance = 80.0f;
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
 			reg.emplace<MaterialComponent>(land, MaterialComponent{ amId });
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		// HE_DUMP_TRAILTEST=1 (Thema 328 step 5b): over the snow plateau (x 12..60) and the plain (x -100..-30, sand)
+		// boot-sized footprints along parallel lines (a press: a pit and nothing else), two tracks DRAGGED through
+		// (z = -8 and z = -16: a groove with a heap on both sides) and a set-down tyre line (z = -22, a pit only). The
+		// pose looks toward -Z. Stamped
+		// once here; the scene tick heals them with the (calm) weather.
+		if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0')
+		{
+			HE::TrailField& tf = TrailSystem::runtime(*m_editorWorld).field;
+			auto walk = [&](float x0, float x1, float z, HE::TrailSurface kind) {
+				int i = 0;
+				for (float x = x0; x < x1; x += 0.8f, ++i)
+					tf.stampEllipse(x, z + ((i & 1) ? 0.25f : -0.25f), 0.4f, 0.17f, 0.0f, 0.9f, kind);
+			};
+			auto drag = [&](float x0, float x1, float z, HE::TrailSurface kind) {
+				// One short segment per "frame", as gameplay will call it.
+				for (float x = x0; x < x1; x += 0.35f)
+					tf.plowCapsule(x, z, x + 0.35f, z, 0.35f, 0.7f, 0.55f, 0.55f, kind);
+			};
+			for (float z = -16.0f; z <= 16.0f; z += 4.0f)
+			{
+				if (z == -8.0f || z == -16.0f)
+				{
+					drag(12.0f, 60.0f, z, HE::TrailSurface::Snow);
+					drag(-100.0f, -30.0f, z, HE::TrailSurface::Sand);
+					continue;
+				}
+				walk(12.0f, 60.0f, z, HE::TrailSurface::Snow);
+				walk(-100.0f, -30.0f, z, HE::TrailSurface::Sand);
+			}
+			tf.stampCapsule(12.0f, -22.0f, 60.0f, -22.0f, 0.3f, 0.8f, HE::TrailSurface::Snow);
+			tf.stampCapsule(-100.0f, -22.0f, -30.0f, -22.0f, 0.3f, 0.8f, HE::TrailSurface::Sand);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILTEST stamped %zu texels on %zu pages",
+			            tf.activeTexels(), tf.pageCount());
+		}
 		const MaterialAsset* ma = contentManager().getMaterial(amId);
 		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLAND witness landscape added "
 			"(mode %s, %s, %zu graph textures, array mask %u, %zu params, snow at y=%.0f)",
@@ -10203,6 +10265,113 @@ void EditorApplication::dumpFrameHeadless()
 	int settleFrames = 3;
 	if (const char* sf = std::getenv("HE_DUMP_FRAMES"); sf && *sf)
 		settleFrames = std::clamp(std::atoi(sf), 1, 240);
+	// The dump renders without scene ticks, so the trail clipmap (HE_DUMP_TRAILTEST's footprints) is brought in
+	// line with the camera's final pose here, once.
+	if (const char* tt = std::getenv("HE_DUMP_TRAILTEST"); tt && *tt && *tt != '0' && m_editorWorld)
+	{
+		TrailSystem::update(*m_editorWorld, contentManager(), r, m_editorCamera.position(), 0.0f, nullptr);
+		// The refined chunks near the camera pick the trails up as geometry (two builds per tick), then LOD and seams.
+		const glm::vec3 camPos = m_editorCamera.position();
+		for (int i = 0; i < 40; ++i)
+		{
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			LODSystem::update(*m_editorWorld, camPos);
+			TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
+		}
+	}
+
+	// HE_DUMP_TRAILDRAG=<frames> (Thema 328, the cost witness): a snow plough is dragged along the plateau, one
+	// segment per frame at HE_DUMP_TRAILDRAGSPEED metres per frame (default 0.25, about 15 m/s at 60 fps), and every
+	// frame runs what the scene tick runs for trails (TrailSystem::update, the terrain refinement, LOD, seams) and
+	// then renders. HE_DUMP_TRAILDRAGOFF=1 runs the same frames without dragging (the idle baseline). The log line
+	// is the per-frame time of each phase in ms (mean / p95 / max) and how many refined chunks were rebuilt.
+	if (const char* td = std::getenv("HE_DUMP_TRAILDRAG"); td && *td && *td != '0' && m_editorWorld)
+	{
+		using Clock = std::chrono::steady_clock;
+		const int frames = std::max(1, std::atoi(td));
+		const char* sp = std::getenv("HE_DUMP_TRAILDRAGSPEED");
+		const float speed = (sp && *sp) ? static_cast<float>(std::atof(sp)) : 0.25f;
+		const bool idle = [] { const char* o = std::getenv("HE_DUMP_TRAILDRAGOFF"); return o && *o && *o != '0'; }();
+		const glm::vec3 camPos = m_editorCamera.position();
+		TrailSystem::Runtime& rt = TrailSystem::runtime(*m_editorWorld);
+		const float x0 = 12.0f, z = camPos.z - 6.0f;
+		// HE_DUMP_TRAILDRAGPRE=1: the whole track is stamped BEFORE the first frame (so the refined chunks are built once,
+		// from the finished field) and the frames run idle: the picture to compare the dragged, updated-in-place one with.
+		const bool pre = [] { const char* o = std::getenv("HE_DUMP_TRAILDRAGPRE"); return o && *o && *o != '0'; }();
+		if (pre)
+			for (int i = 0; i < frames; ++i)
+			{
+				const float xa = x0 + static_cast<float>(i) * speed;
+				rt.field.plowCapsule(xa, z, xa + speed, z, 0.35f, 0.7f, 0.55f, 0.55f, HE::TrailSurface::Snow);
+			}
+		std::vector<double> tTrail, tTess, tLod, tStitch, tRender;
+		const uint32_t builds0 = meshStreamCounters().tessBuilds.load();
+		auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+		for (int i = 0; i < frames; ++i)
+		{
+			if (!idle && !pre)
+			{
+				const float xa = x0 + static_cast<float>(i) * speed, xb = xa + speed;
+				rt.field.plowCapsule(xa, z, xb, z, 0.35f, 0.7f, 0.55f, 0.55f, HE::TrailSurface::Snow);
+			}
+			const auto a = Clock::now();
+			TrailSystem::update(*m_editorWorld, contentManager(), r, camPos, 1.0f / 60.0f, nullptr);
+			const auto b = Clock::now();
+			TerrainSystem::updateTessellation(*m_editorWorld, contentManager(), r, camPos);
+			const auto b2 = Clock::now();
+			LODSystem::update(*m_editorWorld, camPos);
+			const auto b3 = Clock::now();
+			TerrainSystem::stitchSeams(*m_editorWorld, contentManager(), r);
+			const auto c = Clock::now();
+			r->Render();
+			const auto d = Clock::now();
+			if (i >= 8)   // first frames: warm-up
+			{
+				tTrail.push_back(ms(a, b)); tTess.push_back(ms(b, b2)); tLod.push_back(ms(b2, b3));
+				tStitch.push_back(ms(b3, c)); tRender.push_back(ms(c, d));
+			}
+		}
+		// A fingerprint of what the frames ended with (the clipmap's pixels, every refined chunk's mesh and its seam copy):
+		// a dragged track updated in place and the same track built at once must give the same numbers.
+		{
+			auto fnv = [](uint64_t h, const void* d, size_t n) {
+				const uint8_t* p = static_cast<const uint8_t*>(d);
+				for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+				return h;
+			};
+			uint64_t hc = 1469598103934665603ull;
+			if (const TextureAsset* ct = contentManager().getTexture(rt.clipmap.textureId()))
+				hc = fnv(hc, ct->data.data(), ct->data.size());
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG fingerprint clipmap %016llx", static_cast<unsigned long long>(hc));
+			for (auto [ce, cc] : m_editorWorld->registry().view<TerrainChunkComponent>().each())
+			{
+				for (const HE::UUID& id : { cc.tessMeshId, cc.stitchMeshId })
+				{
+					const StaticMeshAsset* m = id != HE::UUID{} ? contentManager().getStaticMesh(id) : nullptr;
+					if (!m || m->vertices.empty()) continue;
+					uint64_t h = 1469598103934665603ull;
+					h = fnv(h, m->vertices.data(), m->vertices.size() * 4);
+					h = fnv(h, m->normals.data(), m->normals.size() * 4);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG fingerprint chunk %u,%u %s %016llx (%zu verts)",
+						cc.cx, cc.cz, id == cc.tessMeshId ? "refined" : "seams  ", static_cast<unsigned long long>(h), m->vertices.size() / 3);
+				}
+			}
+		}
+		auto stat = [](std::vector<double> v) {
+			std::sort(v.begin(), v.end());
+			double sum = 0.0; for (double x : v) sum += x;
+			const double mean = v.empty() ? 0.0 : sum / static_cast<double>(v.size());
+			return std::array<double, 3>{ mean, v.empty() ? 0.0 : v[static_cast<size_t>(static_cast<double>(v.size() - 1) * 0.95)], v.empty() ? 0.0 : v.back() };
+		};
+		const auto st = stat(tTrail), se = stat(tTess), sl = stat(tLod), ss = stat(tStitch), sr = stat(tRender);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_TRAILDRAG %d frames, %s, %.2f m/frame, factor %d: "
+			"trails %.3f/%.3f/%.3f ms, refine %.3f/%.3f/%.3f, lod %.3f/%.3f/%.3f, seams %.3f/%.3f/%.3f ms, render %.3f/%.3f/%.3f ms (mean/p95/max), "
+			"%u refined chunk builds, %zu pages",
+			frames, idle ? "idle (no drag)" : "dragging", speed,
+			[&] { int f = 0; for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each()) { f = tc.tessellationFactor; break; } return f; }(),
+			st[0], st[1], st[2], se[0], se[1], se[2], sl[0], sl[1], sl[2], ss[0], ss[1], ss[2], sr[0], sr[1], sr[2],
+			meshStreamCounters().tessBuilds.load() - builds0, rt.field.pageCount());
+	}
 
 	// HE_DUMP_MBYAWSTEP / HE_DUMP_MBPITCHSTEP (degrees): the motion-blur
 	// witness. A headless dump has no camera history — every settle frame

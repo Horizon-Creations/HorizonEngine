@@ -1,0 +1,21 @@
+label: Desert-old-top-Metal-r2
+attempt: 1
+editor: /tmp/he328/old/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 3.06 3.19 2.93
+  locked:    Yes
+  lowpower:  0
+  gpu:       10
+  power:     Now drawing from 'AC Power'
+  busy:      21.6% WindowServer; 19.2% Python; 13.9% Python; 10.4% coreaudiod
+  foreign:   none
+after:
+  uptime:    load averages: 2.81 3.12 2.91
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      25.6% WindowServer; 11.9% coreaudiod; 9.6% Dock; 8.8% WallpaperAerialsExtension
+  foreign:   none

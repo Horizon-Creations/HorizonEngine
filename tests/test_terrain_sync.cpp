@@ -199,6 +199,7 @@ TEST_CASE("Landscape sync: layer paint and the foliage mask travel the same way"
 	TerrainPaint::ensureWeightmap(host->tc());
 	TerrainPaint::paint(host->tc(), 5.0f, 5.0f, /*layer*/2, 6.0f, 2.0f, 1.0f);
 	TerrainPaint::paint(host->tc(), -9.0f, 4.0f, /*layer*/5, 4.0f, 1.0f, 1.0f);   // second page
+	TerrainPaint::paint(host->tc(), 12.0f, -8.0f, /*layer*/9, 4.0f, 1.0f, 1.0f);  // third page
 	auto& fol = host->world.registry().get<FoliageComponent>(host->terrain);
 	FoliagePaint::paint(fol.layers[0], host->tc(), 0.0f, 0.0f, 8.0f, 2.0f, 1.0f, 0.0f);
 	net.collect(*host);
@@ -207,6 +208,8 @@ TEST_CASE("Landscape sync: layer paint and the foliage mask travel the same way"
 	const auto& got = client->world.registry().get<FoliageComponent>(client->terrain);
 	CHECK(client->tc().layerWeights == host->tc().layerWeights);
 	CHECK(client->tc().layerWeights2 == host->tc().layerWeights2);
+	REQUIRE(host->tc().layerWeights3.size() == host->tc().layerWeights.size());
+	CHECK(client->tc().layerWeights3 == host->tc().layerWeights3);
 	CHECK(client->tc().weightRes == host->tc().weightRes);
 	CHECK(client->tc().weightsDirty);
 	CHECK(got.layers[0].densityMask == fol.layers[0].densityMask);

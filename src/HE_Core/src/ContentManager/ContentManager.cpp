@@ -5,12 +5,33 @@
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "MaterialGraph/AutoLandscapeMaterial.h" // the three auto landscape array paths
+#include "Trails/TrailClipmap.h"           // the runtime trail texture answers its own path in loadAsset
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Sequence/SequenceJson.h"        // CHUNK_SEQU <-> SequenceAsset
 #include "LandscapeFoliage/LandscapeFoliageLayerJson.h" // CHUNK_LFOL <-> LandscapeFoliageLayerAsset
 #include "Hpak/HpakReader.h"
+
+namespace
+{
+// A graph texture that is made at runtime and changes (the landscape's trail clipmap, kTrailTexturePath) must reach the
+// renderers by ID: they cache a path-referenced texture under its path, and IRenderer::InvalidateTexture only drops
+// id-keyed entries, so a texture bound by path would stay at its first upload. Every material that lists it gets
+// its fixed id next to the path (`graphTextureIds` is parallel to `graphTexturePaths`; a baked pak already carries ids
+// and is left alone), and the texture is made right away so the first request finds it.
+void bindRuntimeTextureIds(ContentManager& cm, MaterialAsset& m)
+{
+    for (size_t i = 0; i < m.graphTexturePaths.size(); ++i)
+        if (m.graphTexturePaths[i] == HE::kTrailTexturePath)
+        {
+            if (m.graphTextureIds.size() < m.graphTexturePaths.size()) m.graphTextureIds.resize(m.graphTexturePaths.size());
+            m.graphTextureIds[i] = HE::kTrailTextureId;
+            HE::TrailClipmap::ensureTexture(cm);
+        }
+}
+} // namespace
+
 #include "Hpak/ProjectExporter.h"        // sceneUuidForPath + the reserved pak entry names
 #include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
@@ -369,6 +390,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PSHD)) // precompiled shaders (packed)
 			a.precompiledShaders = HE::decodeMaterialShaderVariants(c->data);
+		bindRuntimeTextureIds(*this, a);
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Scene:
@@ -858,6 +880,8 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->graphTexturePaths    = gen.textures;
+	mat->graphTextureIds.clear();
+	bindRuntimeTextureIds(*this, *mat);
 	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
 	mat->foliageSetId         = gen.foliageSetId; // landscape foliage set (metadata node)
 	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
@@ -932,6 +956,8 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			// re-applied from oldValues below, the rest must follow the parent.
 			applyGraphParams(*inst, gen, nullptr);
 			inst->graphTexturePaths = gen.textures;
+			inst->graphTextureIds.clear();
+			bindRuntimeTextureIds(*this, *inst);
 			inst->graphLayerNames      = gen.layerNames; // landscape paint layers
 			inst->foliageSetId         = gen.foliageSetId;
 			inst->blendMode            = gen.blendMode;
@@ -1129,6 +1155,10 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	HE_PROFILE_SCOPE_N("ContentManager::load");
 	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
 		return loaded->second;
+	// The landscape's trail clipmap is a runtime texture with no file (Trails/TrailClipmap.h): answer it
+	// here, untouched, so a material that asks before the first scene tick finds it.
+	if (relativePath == HE::kTrailTexturePath)
+		return HE::TrailClipmap::ensureTexture(*this);
 
 	// Packed build: resolve the content path to a mounted-pak UUID via the asset
 	// index, then load that entry synchronously (registers it under its embedded
@@ -2705,6 +2735,7 @@ static T* lookupAssetMutable(const std::unordered_map<HE::UUID, SlotHandle>& ind
 const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
 const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
 StaticMeshAsset*          ContentManager::getStaticMeshMutable(HE::UUID id)   { return lookupAssetMutable(m_handleToUUID, m_staticMeshAssets, id); }
+TextureAsset*             ContentManager::getTextureMutable(HE::UUID id)      { return lookupAssetMutable(m_handleToUUID, m_textureAssets, id); }
 SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_skeletalMeshAssets, id); }
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }

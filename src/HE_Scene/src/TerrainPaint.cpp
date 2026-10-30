@@ -7,15 +7,31 @@
 namespace TerrainPaint
 {
 
+namespace
+{
+    // Weight page p (0 = layers 0..3, 1 = 4..7, 2 = 8..11); `p` is layer / 4.
+    std::vector<uint8_t>& weightPage(TerrainComponent& tc, int p)
+    {
+        return p == 0 ? tc.layerWeights : p == 1 ? tc.layerWeights2 : tc.layerWeights3;
+    }
+}
+
 void ensureWeightmap(TerrainComponent& tc)
 {
     const uint32_t wr = std::clamp(tc.weightRes, 1u, 4096u);
     tc.weightRes = wr;
     const size_t want = static_cast<size_t>(wr) * wr * 4;
-    // A second page only means something beside a first page of the same size.
+    // A second page only means something beside a first page of the same size, a
+    // third only beside a second.
     if (!tc.layerWeights2.empty() && tc.layerWeights2.size() != want)
     {
         tc.layerWeights2.clear();
+        tc.weightsDirty = true;
+    }
+    if (!tc.layerWeights3.empty()
+        && (tc.layerWeights3.size() != want || tc.layerWeights2.size() != want))
+    {
+        tc.layerWeights3.clear();
         tc.weightsDirty = true;
     }
     if (tc.layerWeights.size() == want) return;
@@ -25,6 +41,7 @@ void ensureWeightmap(TerrainComponent& tc)
     tc.layerWeights.assign(want, 0);
     for (size_t i = 0; i < want; i += 4) tc.layerWeights[i] = 255;
     tc.layerWeights2.clear();   // its texels described the old first page
+    tc.layerWeights3.clear();
     tc.weightsDirty = true;
 }
 
@@ -60,14 +77,20 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
     const int z1 = std::min<int>(wr - 1, static_cast<int>(std::ceil(toTexel(localZ + outer, -halfZ, tc.sizeZ, wr))));
     if (x0 > x1 || z0 > z1) return false;
 
-    // Layers 4..7 live on the second page. The first stroke that needs it
-    // allocates it all zero — every texel keeps its mix, now spelled over eight
-    // channels. Without it the loop below runs over four channels and does
-    // exactly what painting did before there were eight layers.
+    // Layers 4..7 live on the second page, 8..11 on the third. The first stroke
+    // that needs a page allocates it all zero — every texel keeps its mix, now
+    // spelled over more channels. Without them the loop below runs over four (or
+    // eight) channels and does exactly what painting did before there were that
+    // many layers. A third page never exists without a second beside it.
     const size_t pageBytes = tc.layerWeights.size();
     if (layer >= 4 && tc.layerWeights2.size() != pageBytes)
         tc.layerWeights2.assign(pageBytes, 0);
-    const int nAll = tc.layerWeights2.size() == pageBytes ? kTerrainMaxLayers : 4;
+    if (layer >= 8 && tc.layerWeights3.size() != pageBytes)
+        tc.layerWeights3.assign(pageBytes, 0);
+    const int nAll = tc.layerWeights2.size() != pageBytes ? 4
+                   : tc.layerWeights3.size() != pageBytes ? 8 : kTerrainMaxLayers;
+    uint8_t* const pagePtr[kTerrainWeightPages] =
+        { tc.layerWeights.data(), tc.layerWeights2.data(), tc.layerWeights3.data() };
     // The channels this stroke normalises over: all of them, less the group shares (they
     // are not part of the 255-sum, and a stroke must neither feed nor drain them).
     // `ch[i]` is the layer of the i-th entry; `target` is the entry of `layer` itself.
@@ -99,7 +122,7 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
             const size_t at = (static_cast<size_t>(tz) * wr + tx) * 4;
             uint8_t* px[kTerrainMaxLayers];
             for (int k = 0; k < n; ++k)
-                px[k] = ch[k] < 4 ? &tc.layerWeights[at + ch[k]] : &tc.layerWeights2[at + ch[k] - 4];
+                px[k] = pagePtr[ch[k] >> 2] + at + (ch[k] & 3);
             // Move toward "all `layer`" by `a`, keeping the sum at 255: the target
             // channel rises, the others are scaled down by the same factor. Doing
             // it as a lerp (rather than add + renormalise) keeps repeated strokes
@@ -164,7 +187,11 @@ bool fillLayer(TerrainComponent& tc, int layer)
             for (int k = 0; k < 4; ++k)
                 if (!(k >= 2 && (reserved >> (k - 2) & 1))) tc.layerWeights2[i + k] = 0;
         }
-        std::vector<uint8_t>& page = layer < 4 ? tc.layerWeights : tc.layerWeights2;
+        // Page 3 carries no share: started over like page 1, and only kept (all zero) for
+        // a target that sits on it.
+        if (layer >= 8) tc.layerWeights3.assign(bytes, 0);
+        else            tc.layerWeights3.clear();
+        std::vector<uint8_t>& page = weightPage(tc, layer / 4);
         for (size_t i = static_cast<size_t>(layer % 4); i < bytes; i += 4) page[i] = 255;
         tc.weightsDirty = true;
         return true;
@@ -174,7 +201,11 @@ bool fillLayer(TerrainComponent& tc, int layer)
         tc.layerWeights2.assign(bytes, 0);
     else
         tc.layerWeights2.clear();   // nothing on page 1: it is "all zero" without the bytes
-    std::vector<uint8_t>& page = layer < 4 ? tc.layerWeights : tc.layerWeights2;
+    if (layer >= 8)
+        tc.layerWeights3.assign(bytes, 0);
+    else
+        tc.layerWeights3.clear();
+    std::vector<uint8_t>& page = weightPage(tc, layer / 4);
     for (size_t i = static_cast<size_t>(layer % 4); i < bytes; i += 4) page[i] = 255;
     tc.weightsDirty = true;
     return true;
@@ -187,10 +218,12 @@ bool texelWeights(const TerrainComponent& tc, uint32_t tx, uint32_t tz, uint8_t*
     if (wr == 0 || tx >= wr || tz >= wr || tc.layerWeights.size() != page) return false;
     const size_t at = (static_cast<size_t>(tz) * wr + tx) * 4;
     const bool second = tc.layerWeights2.size() == page;
+    const bool third  = tc.layerWeights3.size() == page;
     for (int k = 0; k < 4; ++k)
     {
         out[k]     = tc.layerWeights[at + k];
         out[k + 4] = second ? tc.layerWeights2[at + k] : 0;
+        out[k + 8] = third  ? tc.layerWeights3[at + k] : 0;
     }
     return true;
 }
@@ -376,6 +409,21 @@ bool usesSecondPage(const TerrainComponent& tc)
                        [](uint8_t b) { return b != 0; });
 }
 
+bool usesThirdPage(const TerrainComponent& tc)
+{
+    const size_t page = static_cast<size_t>(tc.weightRes) * tc.weightRes * 4;
+    if (page == 0 || tc.layerWeights.size() != page || tc.layerWeights3.size() != page)
+        return false;
+    return std::any_of(tc.layerWeights3.begin(), tc.layerWeights3.end(),
+                       [](uint8_t b) { return b != 0; });
+}
+
+int weightPageCount(const TerrainComponent& tc)
+{
+    if (usesThirdPage(tc)) return 3;
+    return usesSecondPage(tc) ? 2 : 1;
+}
+
 std::vector<uint8_t> buildWeightTexture(const TerrainComponent& tc,
                                         uint32_t& width, uint32_t& height)
 {
@@ -383,20 +431,27 @@ std::vector<uint8_t> buildWeightTexture(const TerrainComponent& tc,
     width = height = 0;
     if (wr == 0 || tc.layerWeights.size() != static_cast<size_t>(wr) * wr * 4) return {};
     height = wr;
-    if (!usesSecondPage(tc))
+    const int pages = weightPageCount(tc);
+    if (pages == 1)
     {
         width = wr;
         return tc.layerWeights;
     }
-    // Side by side, row by row: [page 0 row z | page 1 row z]. Same rows, same
-    // V, so the shader only rescales U.
-    width = 2 * wr;
-    const size_t row = static_cast<size_t>(wr) * 4;
-    std::vector<uint8_t> out(row * 2 * wr);
+    // Side by side, row by row: [page 0 row z | page 1 row z | page 2 row z]. Same
+    // rows, same V, so the shader only rescales U. A page that is not there reads as
+    // zeros (only the middle one can be missing, beside a used third).
+    width = static_cast<uint32_t>(pages) * wr;
+    const size_t row  = static_cast<size_t>(wr) * 4;
+    const size_t page = row * wr;
+    std::vector<uint8_t> out(row * static_cast<size_t>(pages) * wr);
     for (uint32_t z = 0; z < wr; ++z)
     {
-        std::copy_n(tc.layerWeights.begin()  + z * row, row, out.begin() + (2 * z) * row);
-        std::copy_n(tc.layerWeights2.begin() + z * row, row, out.begin() + (2 * z + 1) * row);
+        const size_t dst = static_cast<size_t>(pages) * z * row;
+        std::copy_n(tc.layerWeights.begin() + z * row, row, out.begin() + dst);
+        if (tc.layerWeights2.size() == page)
+            std::copy_n(tc.layerWeights2.begin() + z * row, row, out.begin() + dst + row);
+        if (pages == 3)
+            std::copy_n(tc.layerWeights3.begin() + z * row, row, out.begin() + dst + 2 * row);
     }
     return out;
 }
