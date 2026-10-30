@@ -138,7 +138,10 @@ inline constexpr ParticipantId kInvalidParticipant = 0;
 // path the frame carries. A v17 peer derives its subjects from paths: the same asset
 // would be two different locks across the two builds, which is a bump. The join also
 // carries a ProjectFingerprint (two new rejection reasons), appended to the request.
-inline constexpr std::uint16_t kCollabProtocolVersion = 18;
+// v19: a landscape has a third weight page (layers 8..11), TerrainPatch field 4 again
+// (the retired foliage-mask id, free since v17). A v17 peer drops the field, so paint on
+// layers 8..11 would exist on one machine only: a bump.
+inline constexpr std::uint16_t kCollabProtocolVersion = 19;
 
 enum class JoinRejectReason : std::uint8_t {
     None            = 0,

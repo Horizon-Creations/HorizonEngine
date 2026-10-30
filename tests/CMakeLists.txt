@@ -12,6 +12,7 @@ add_executable(he_tests
     test_material_tessellation.cpp
     test_auto_landscape_variants.cpp
     test_landscape_groups.cpp
+    test_trail_field.cpp
     test_layer_mesh_groups.cpp
     test_engine_materials.cpp
     test_particle_graph.cpp

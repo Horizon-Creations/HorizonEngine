@@ -51,6 +51,7 @@ public:
 		Heights     = 1,   // TerrainComponent::sculptHeights, float, side = resolution
 		Weights     = 2,   // layerWeights,  RGBA8, side = weightRes
 		Weights2    = 3,   // layerWeights2, RGBA8, side = weightRes
+		Weights3    = 4,   // layerWeights3, RGBA8, side = weightRes (empty = nothing sent; an older peer drops it)
 		Settings    = 5,   // settingsBlob(): both components without their grids
 		// FoliageLayer::densityMask of layer i is field FoliageMask + i, 1 byte,
 		// side = maskRes. Layers are matched by index; a mask that moved to another

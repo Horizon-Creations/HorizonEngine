@@ -750,8 +750,17 @@ namespace
 				// its weightRes² × 4 meaning and older builds still read the
 				// first four layers of a scene written by this one.
 				if (t->layerWeights2.size() == t->layerWeights.size())
+				{
 					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
 					                                      t->layerWeights2.size());
+					// Layers 8..11 the same way, only beside a second page and only
+					// once there is one: a scene with no third page is written exactly
+					// as before there were twelve layers, and an older build reads
+					// the first eight layers of one that has it.
+					if (t->layerWeights3.size() == t->layerWeights.size())
+						tc["layerWeights3B64"] = base64Encode(t->layerWeights3.data(),
+						                                      t->layerWeights3.size());
+				}
 			}
 			// Mixed texture groups (Thema 233, step 7): the second/third group whose
 			// share sits in weight layer 6/7. Written only when one is set, so a
@@ -1773,6 +1782,16 @@ namespace
 				t.layerWeights2 = base64Decode(c["layerWeights2B64"].get<std::string>());
 				if (t.layerWeights2.size() != t.layerWeights.size())
 					t.layerWeights2.clear();
+			}
+			// Absent in every scene written before there were twelve layers → empty =
+			// layers 8..11 all zero. Needs a second page beside it (the writer only
+			// emits it then); a mismatched blob is dropped like the others.
+			if (!t.layerWeights2.empty() && c.contains("layerWeights3B64")
+			    && c["layerWeights3B64"].is_string())
+			{
+				t.layerWeights3 = base64Decode(c["layerWeights3B64"].get<std::string>());
+				if (t.layerWeights3.size() != t.layerWeights.size())
+					t.layerWeights3.clear();
 			}
 			// Mixed texture groups. Absent in every scene written before this field, and in
 			// every one-group terrain written by this build → both slots stay -1, which is

@@ -5,8 +5,8 @@
 struct TerrainComponent;
 
 // ─── Landscape layer painting ────────────────────────────────────────────────
-// Brush operations on TerrainComponent::layerWeights (layers 0..3) and
-// layerWeights2 (layers 4..7), RGBA8, channel = layer.
+// Brush operations on TerrainComponent::layerWeights (layers 0..3),
+// layerWeights2 (layers 4..7) and layerWeights3 (layers 8..11), RGBA8, channel = layer.
 // Pure CPU, no ContentManager / renderer — freely testable, mirroring how
 // TerrainMeshGenerator keeps the heightfield maths out of the editor.
 namespace TerrainPaint
@@ -26,11 +26,12 @@ namespace TerrainPaint
     // falloff     transition width outside it; strength falls linearly to 0
     // strength    0..1 per call — how far each texel moves toward "all `layer`"
     //
-    // The touched texels stay normalised (weights sum to 255 across both pages):
+    // The touched texels stay normalised (weights sum to 255 across all pages):
     // the painted layer gains, the others give up the same amount proportionally.
     // That is what makes painting reversible by simply painting a different
     // layer over it. The second page is allocated (all zero) by the first stroke
-    // on layer 4+; until then strokes on 0..3 behave exactly as with four layers.
+    // on layer 4+, the third by the first on layer 8+; until then strokes on 0..3
+    // (or 0..7) behave exactly as with four (or eight) layers.
     //
     // Sets tc.weightsDirty so TerrainSystem re-uploads the texture, and widens
     // the sculpt region-dirty rect so callers can reuse it. Returns false when
@@ -39,14 +40,14 @@ namespace TerrainPaint
                int layer, float radius, float falloff, float strength);
 
     // Every texel fully on `layer` - "start the landscape from this layer". Allocates the
-    // weightmap if there is none (and the second page for layers 4..7); a first-page
-    // layer clears the second page, whose weights would otherwise outvote it. Sets
-    // tc.weightsDirty. False for a layer outside 0 .. kTerrainMaxLayers-1.
+    // weightmap if there is none (and the pages below `layer` for layers 4..11); a
+    // layer on a lower page clears the higher ones, whose weights would otherwise
+    // outvote it. Sets tc.weightsDirty. False for a layer outside 0 .. kTerrainMaxLayers-1.
     bool fillLayer(TerrainComponent& tc, int layer);
 
-    // The kTerrainMaxLayers weights of texel (tx, tz), layers 4..7 zero when
-    // there is no second page. False (out untouched) when the terrain has no
-    // weightmap or the texel is outside it.
+    // The kTerrainMaxLayers weights of texel (tx, tz), the layers of a missing page
+    // zero. False (out untouched) when the terrain has no weightmap or the texel is
+    // outside it.
     bool texelWeights(const TerrainComponent& tc, uint32_t tx, uint32_t tz, uint8_t* out);
 
     // ── Mixed texture groups (TerrainComponent::mixGroup) ─────────────────────
@@ -92,14 +93,22 @@ namespace TerrainPaint
     // weight at all — i.e. when the landscape actually uses layers 4..7.
     bool usesSecondPage(const TerrainComponent& tc);
 
+    // The same for the third page (layers 8..11).
+    bool usesThirdPage(const TerrainComponent& tc);
+
+    // How many pages the uploaded texture carries: 1, 2 or 3 (the highest page in
+    // use; a used third page carries the second one too, zeros if it is empty).
+    int  weightPageCount(const TerrainComponent& tc);
+
     // The RGBA8 texture the shader samples as heLandscapeWeights. Without a used
     // second page it is layerWeights itself, weightRes × weightRes — byte for
     // byte what every landscape uploaded before there were eight layers. With
     // one it is 2·weightRes × weightRes: each row is the first page's row
     // followed by the second page's, so layers 0..3 sit in the left half and
-    // 4..7 in the right half of ONE texture. The material shader tells the two
-    // shapes apart by the texture's aspect ratio (MaterialGraph codegen).
-    // Empty when the terrain has no valid weightmap.
+    // 4..7 in the right half of ONE texture; a used third page makes it
+    // 3·weightRes × weightRes with layers 8..11 in the last third. The material
+    // shader tells the shapes apart by the texture's aspect ratio (MaterialGraph
+    // codegen). Empty when the terrain has no valid weightmap.
     std::vector<uint8_t> buildWeightTexture(const TerrainComponent& tc,
                                             uint32_t& width, uint32_t& height);
 }

@@ -16,6 +16,7 @@
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Physics/WaterWaves.h>   // the wave trains the water physics shares with the material
@@ -366,8 +367,14 @@ TEST_CASE("Engine content: no two shipped assets share a UUID")
 		// them cannot show as a duplicate here: keep its 0x400 block (T_Landscape_*,
 		// the arrays, M_AutoLandscape, the weather functions) free of anything else.
 		const bool inLandscapeBlock = id.hi >= 0x400 && id.hi < 0x500;
-		const bool knownOccupant = id == HE::kAutoLandscapeMaterialId
+		// The Forest / Grassland / Desert materials (0x415..) and the procedural snow and sand functions (0x41D, 0x41E)
+		// are landscape_tex_gen / matfn_gen output that lives in this block too (Thema 329); the trail clipmap's runtime
+		// texture claims 0x41F but is never a shipped file.
+		bool groupMaterial = false;
+		for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups) groupMaterial = groupMaterial || id == g.materialId;
+		const bool knownOccupant = id == HE::kAutoLandscapeMaterialId || groupMaterial
 		                        || id == HE::kWeatherPuddlesFunctionId || id == HE::kWeatherSnowFunctionId
+		                        || id == HE::kProceduralSnowFunctionId || id == HE::kProceduralSandFunctionId
 		                        || rel.rfind("Engine/Textures/", 0) == 0;
 		const bool clear = !inLandscapeBlock || knownOccupant;
 		CHECK_MESSAGE(clear,
