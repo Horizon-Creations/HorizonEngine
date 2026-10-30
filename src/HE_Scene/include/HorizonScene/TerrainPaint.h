@@ -50,26 +50,27 @@ namespace TerrainPaint
     bool texelWeights(const TerrainComponent& tc, uint32_t tx, uint32_t tz, uint8_t* out);
 
     // ── Mixed texture groups (TerrainComponent::mixGroup) ─────────────────────
-    // Weight layer 6 + k is group k's SHARE when tc.mixGroup[k] >= 0. A share is not a
+    // Weight layer shareLayer(k) (6, 7, 5) is mix slot k's SHARE when tc.mixGroup[k] >= 0. A share is not a
     // paint layer: layers 0..5 keep their own 255-sum without it, paint()/fillLayer()
     // leave the share bytes alone and refuse to paint a reserved layer, and the group
     // brush below is the only thing that writes one. The terrain's own group is the
     // remainder, so a terrain with no share painted is one group exactly as before.
-    // Bit k of the result = layer 6 + k is a share.
+    // Bit k of the result = mix slot k has a group (its layer shareLayer(k) is a share).
+    int  shareLayer(int slot);
     int  reservedLayers(const TerrainComponent& tc);
     bool isReservedLayer(const TerrainComponent& tc, int layer);
 
-    // Slot 0 = the terrain's own group, 1 / 2 = mixGroup[0] / [1]. The three shares of
-    // texel (tx, tz), summing to 1; slots without a mix group are 0. The own group
-    // takes 1 - s1 - s2, and two shares that add past 1 are scaled to fit. False (out
+    // Slot 0 = the terrain's own group, 1..3 = mixGroup[0..2]. The four shares of
+    // texel (tx, tz), summing to 1 (out4 has four floats); slots without a mix group are 0.
+    // The own group takes the rest, and shares that add past 1 are scaled to fit. False (out
     // untouched) when there is no weightmap or the texel is outside it; an unpainted
-    // terrain is {1, 0, 0}.
-    bool groupShares(const TerrainComponent& tc, uint32_t tx, uint32_t tz, float* out3);
+    // terrain is {1, 0, 0, 0}.
+    bool groupShares(const TerrainComponent& tc, uint32_t tx, uint32_t tz, float* out4);
 
     // Set mixGroup[k] (group >= 0) or clear it (-1). Taking the layer over folds what
     // it held (paint a custom material put there) into layer 0 so the texel still sums
     // to 255; clearing drops the share, the texels fall back to the own group. A group
-    // already used by the other slot is refused, as is a slot outside 0..1. True when
+    // already used by the other slot is refused, as is a slot outside 0..2. True when
     // anything changed.
     bool setMixGroup(TerrainComponent& tc, int k, int group);
 

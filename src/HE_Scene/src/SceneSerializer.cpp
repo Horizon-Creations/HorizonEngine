@@ -742,12 +742,18 @@ namespace
 					tc["layerWeights2B64"] = base64Encode(t->layerWeights2.data(),
 					                                      t->layerWeights2.size());
 			}
-			// Mixed texture groups (Thema 233, step 7): the second/third group whose
-			// share sits in weight layer 6/7. Written only when one is set, so a
+			// Mixed texture groups (Thema 233, step 7): the further groups whose
+			// shares sit in weight layers 6/7/5. Written only when one is set, so a
 			// one-group terrain (every scene before this field, and every terrain that
 			// never used it) saves byte for byte as before.
-			if (t->mixGroup[0] >= 0 || t->mixGroup[1] >= 0)
-				tc["mixGroups"] = { t->mixGroup[0], t->mixGroup[1] };
+			if (t->mixGroup[0] >= 0 || t->mixGroup[1] >= 0 || t->mixGroup[2] >= 0)
+			{
+				// Two entries until the third slot is used, so a scene that needs only two still
+				// reads in a build that accepts exactly two.
+				tc["mixGroups"] = t->mixGroup[2] >= 0
+					? nlohmann::json{ t->mixGroup[0], t->mixGroup[1], t->mixGroup[2] }
+					: nlohmann::json{ t->mixGroup[0], t->mixGroup[1] };
+			}
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -1767,15 +1773,17 @@ namespace
 			// every one-group terrain written by this build → both slots stay -1, which is
 			// the legacy, single-group look. Out-of-range or duplicate entries are dropped
 			// rather than carried, same as a truncated weightmap above.
-			t.mixGroup[0] = t.mixGroup[1] = -1;
-			if (c.contains("mixGroups") && c["mixGroups"].is_array() && c["mixGroups"].size() == 2)
+			for (int& g : t.mixGroup) g = -1;
+			if (c.contains("mixGroups") && c["mixGroups"].is_array()
+			    && (c["mixGroups"].size() == 2 || c["mixGroups"].size() == kMixGroupSlots))
 			{
-				int g0 = c["mixGroups"][0].get<int>();
-				int g1 = c["mixGroups"][1].get<int>();
-				if (g0 < 0 || g0 >= HE::kAutoLandscapeGroupCount) g0 = -1;
-				if (g1 < 0 || g1 >= HE::kAutoLandscapeGroupCount || g1 == g0) g1 = -1;
-				t.mixGroup[0] = g0;
-				t.mixGroup[1] = g1;
+				for (size_t k = 0; k < c["mixGroups"].size(); ++k)
+				{
+					int g = c["mixGroups"][k].get<int>();
+					if (g < 0 || g >= HE::kAutoLandscapeGroupCount) g = -1;
+					for (size_t o = 0; o < k && g >= 0; ++o) if (t.mixGroup[o] == g) g = -1;
+					t.mixGroup[k] = g;
+				}
 			}
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{

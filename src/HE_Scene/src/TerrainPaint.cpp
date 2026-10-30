@@ -71,11 +71,10 @@ bool paint(TerrainComponent& tc, float localX, float localZ,
     // The channels this stroke normalises over: all of them, less the group shares (they
     // are not part of the 255-sum, and a stroke must neither feed nor drain them).
     // `ch[i]` is the layer of the i-th entry; `target` is the entry of `layer` itself.
-    const int reserved = reservedLayers(tc);
     int ch[kTerrainMaxLayers], n = 0, target = 0;
     for (int k = 0; k < nAll; ++k)
     {
-        if (k >= 6 && (reserved >> (k - 6) & 1)) continue;
+        if (isReservedLayer(tc, k)) continue;
         if (k == layer) target = n;
         ch[n++] = k;
     }
@@ -153,17 +152,15 @@ bool fillLayer(TerrainComponent& tc, int layer)
     if (tc.layerWeights.empty()) return false;
 
     const size_t bytes = tc.layerWeights.size();
-    if (const int reserved = reservedLayers(tc))
+    if (reservedLayers(tc) != 0)
     {
         // The group shares stay: only the paint layers are started over. (Page 2 holds
-        // them, so it is kept - and allocated - with layers 4/5 and the rest zeroed.)
+        // them, so it is kept - and allocated - with the rest zeroed.)
         if (tc.layerWeights2.size() != bytes) tc.layerWeights2.assign(bytes, 0);
         for (size_t i = 0; i < bytes; i += 4)
-        {
-            for (int k = 0; k < 4; ++k) tc.layerWeights[i + k] = 0;
-            for (int k = 0; k < 4; ++k)
-                if (!(k >= 2 && (reserved >> (k - 2) & 1))) tc.layerWeights2[i + k] = 0;
-        }
+            for (int k = 0; k < kTerrainMaxLayers; ++k)
+                if (!isReservedLayer(tc, k))
+                    (k < 4 ? tc.layerWeights[i + k] : tc.layerWeights2[i + k - 4]) = 0;
         std::vector<uint8_t>& page = layer < 4 ? tc.layerWeights : tc.layerWeights2;
         for (size_t i = static_cast<size_t>(layer % 4); i < bytes; i += 4) page[i] = 255;
         tc.weightsDirty = true;
@@ -197,29 +194,51 @@ bool texelWeights(const TerrainComponent& tc, uint32_t tx, uint32_t tz, uint8_t*
 
 // ── Mixed texture groups ─────────────────────────────────────────────────────
 
+int shareLayer(int slot)
+{
+    // Slots 0/1 keep the layers 6/7 they always had; the third takes Puddles' layer 5 (a
+    // mix of three groups gives up painted puddles, the automatic wetness stays).
+    return slot == 2 ? 5 : 6 + slot;
+}
+
 int reservedLayers(const TerrainComponent& tc)
 {
-    return (tc.mixGroup[0] >= 0 ? 1 : 0) | (tc.mixGroup[1] >= 0 ? 2 : 0);
+    int m = 0;
+    for (int k = 0; k < kMixGroupSlots; ++k) if (tc.mixGroup[k] >= 0) m |= 1 << k;
+    return m;
 }
 
 bool isReservedLayer(const TerrainComponent& tc, int layer)
 {
-    return layer >= 6 && layer < kTerrainMaxLayers && ((reservedLayers(tc) >> (layer - 6)) & 1) != 0;
+    for (int k = 0; k < kMixGroupSlots; ++k)
+        if (tc.mixGroup[k] >= 0 && shareLayer(k) == layer) return true;
+    return false;
 }
 
 namespace
 {
-    // The three shares of one texel out of its two share bytes (layer 6 and 7). A slot with
-    // no mix group is 0, shares that add past 1 are scaled to fit, the own group is the rest.
-    void sharesOf(const TerrainComponent& tc, uint8_t b6, uint8_t b7, float* out)
+    // The group shares of one texel, by slot (0 = own group, 1..3 = mixGroup[0..2]), out of
+    // its share bytes `b[k]` (mix slot k's layer). A slot with no mix group is 0, shares that
+    // add past 1 are scaled to fit, the own group is the rest.
+    void sharesOf(const TerrainComponent& tc, const uint8_t* b, float* out)
     {
-        float s1 = tc.mixGroup[0] >= 0 ? static_cast<float>(b6) / 255.0f : 0.0f;
-        float s2 = tc.mixGroup[1] >= 0 ? static_cast<float>(b7) / 255.0f : 0.0f;
-        const float t = s1 + s2;
-        if (t > 1.0f) { s1 /= t; s2 /= t; }
-        out[0] = std::max(0.0f, 1.0f - s1 - s2);
-        out[1] = s1;
-        out[2] = s2;
+        float t = 0.0f;
+        for (int k = 0; k < kMixGroupSlots; ++k)
+        {
+            out[k + 1] = tc.mixGroup[k] >= 0 ? static_cast<float>(b[k]) / 255.0f : 0.0f;
+            t += out[k + 1];
+        }
+        if (t > 1.0f) { for (int k = 1; k <= kMixGroupSlots; ++k) out[k] /= t; t = 1.0f; }
+        out[0] = std::max(0.0f, 1.0f - t);
+    }
+
+    // Slot k's share byte of the texel starting at `at` (page 2 is there when this is called).
+    uint8_t& shareByte(TerrainComponent& tc, size_t at, int k) { return tc.layerWeights2[at + shareLayer(k) - 4]; }
+
+    void readShareBytes(const TerrainComponent& tc, size_t at, bool second, uint8_t* b)
+    {
+        for (int k = 0; k < kMixGroupSlots; ++k)
+            b[k] = second ? tc.layerWeights2[at + shareLayer(k) - 4] : uint8_t{ 0 };
     }
 
     // Page 2 allocated (zero) beside a first page; the group brush needs it for the share bytes.
@@ -230,24 +249,26 @@ namespace
     }
 }
 
-bool groupShares(const TerrainComponent& tc, uint32_t tx, uint32_t tz, float* out3)
+bool groupShares(const TerrainComponent& tc, uint32_t tx, uint32_t tz, float* out4)
 {
     const uint32_t wr = tc.weightRes;
     const size_t page = static_cast<size_t>(wr) * wr * 4;
     if (wr == 0 || tx >= wr || tz >= wr || tc.layerWeights.size() != page) return false;
     const size_t at = (static_cast<size_t>(tz) * wr + tx) * 4;
-    const bool second = tc.layerWeights2.size() == page;
-    sharesOf(tc, second ? tc.layerWeights2[at + 2] : uint8_t{ 0 },
-             second ? tc.layerWeights2[at + 3] : uint8_t{ 0 }, out3);
+    uint8_t b[kMixGroupSlots];
+    readShareBytes(tc, at, tc.layerWeights2.size() == page, b);
+    sharesOf(tc, b, out4);
     return true;
 }
 
 bool setMixGroup(TerrainComponent& tc, int k, int group)
 {
-    if (k < 0 || k > 1) return false;
+    if (k < 0 || k >= kMixGroupSlots) return false;
     group = std::max(group, -1);
     if (tc.mixGroup[k] == group) return false;
-    if (group >= 0 && tc.mixGroup[1 - k] == group) return false;
+    if (group >= 0)
+        for (int o = 0; o < kMixGroupSlots; ++o)
+            if (o != k && tc.mixGroup[o] == group) return false;
 
     const size_t page = static_cast<size_t>(tc.weightRes) * tc.weightRes * 4;
     if (page != 0 && tc.layerWeights.size() == page && tc.layerWeights2.size() == page)
@@ -259,7 +280,7 @@ bool setMixGroup(TerrainComponent& tc, int k, int group)
         const bool taking = tc.mixGroup[k] < 0 && group >= 0;
         for (size_t i = 0; i < page; i += 4)
         {
-            uint8_t& b = tc.layerWeights2[i + 2 + k];
+            uint8_t& b = shareByte(tc, i, k);
             if (taking)
                 tc.layerWeights[i] = static_cast<uint8_t>(std::min(255, tc.layerWeights[i] + b));
             if (taking || group < 0) b = 0;
@@ -273,7 +294,7 @@ bool setMixGroup(TerrainComponent& tc, int k, int group)
 bool paintGroup(TerrainComponent& tc, float localX, float localZ,
                 int slot, float radius, float falloff, float strength)
 {
-    if (slot < 0 || slot > 2) return false;
+    if (slot < 0 || slot > kMixGroupSlots) return false;
     if (slot > 0 && tc.mixGroup[slot - 1] < 0) return false;
     ensureWeightmap(tc);
     if (tc.layerWeights.empty()) return false;
@@ -315,27 +336,36 @@ bool paintGroup(TerrainComponent& tc, float localX, float localZ,
             if (a <= 0.0f) continue;
 
             const size_t at = (static_cast<size_t>(tz) * wr + tx) * 4;
-            uint8_t& b6 = tc.layerWeights2[at + 2];
-            uint8_t& b7 = tc.layerWeights2[at + 3];
-            // Toward "all `slot`", the same lerp and residue snap as paint(): the three shares
+            uint8_t b[kMixGroupSlots];
+            readShareBytes(tc, at, true, b);
+            // Toward "all `slot`", the same lerp and residue snap as paint(): the shares
             // always sum to 1, the own group is the one that is not stored.
-            float w[3];
-            sharesOf(tc, b6, b7, w);
-            for (int i = 0; i < 3; ++i) w[i] = w[i] * (1.0f - a) + (i == slot ? a : 0.0f);
+            float w[kMixGroupSlots + 1];
+            sharesOf(tc, b, w);
+            for (int i = 0; i <= kMixGroupSlots; ++i) w[i] = w[i] * (1.0f - a) + (i == slot ? a : 0.0f);
             float keep = 0.0f;
-            for (int i = 0; i < 3; ++i)
+            for (int i = 0; i <= kMixGroupSlots; ++i)
             {
                 if (i != slot && w[i] < 1.0f / 255.0f) w[i] = 0.0f;
                 keep += w[i];
             }
-            if (keep > 1e-5f) for (int i = 0; i < 3; ++i) w[i] /= keep;
+            if (keep > 1e-5f) for (int i = 0; i <= kMixGroupSlots; ++i) w[i] /= keep;
 
-            int q1 = static_cast<int>(std::lround(w[1] * 255.0f));
-            int q2 = static_cast<int>(std::lround(w[2] * 255.0f));
-            if (q1 + q2 > 255)   // two halves rounding up past the whole: the larger gives it back
-                (q1 >= q2 ? q1 : q2) -= q1 + q2 - 255;
-            if (tc.mixGroup[0] >= 0) b6 = static_cast<uint8_t>(q1);
-            if (tc.mixGroup[1] >= 0) b7 = static_cast<uint8_t>(q2);
+            int q[kMixGroupSlots];
+            int total = 0;
+            for (int i = 0; i < kMixGroupSlots; ++i)
+            {
+                q[i] = static_cast<int>(std::lround(w[i + 1] * 255.0f));
+                total += q[i];
+            }
+            while (total > 255)   // halves rounding up past the whole: the largest gives it back
+            {
+                int big = 0;
+                for (int i = 1; i < kMixGroupSlots; ++i) if (q[i] > q[big]) big = i;
+                --q[big]; --total;
+            }
+            for (int i = 0; i < kMixGroupSlots; ++i)
+                if (tc.mixGroup[i] >= 0) shareByte(tc, at, i) = static_cast<uint8_t>(q[i]);
         }
     }
     tc.weightsDirty = true;
@@ -344,16 +374,14 @@ bool paintGroup(TerrainComponent& tc, float localX, float localZ,
 
 bool fillGroup(TerrainComponent& tc, int slot)
 {
-    if (slot < 0 || slot > 2) return false;
+    if (slot < 0 || slot > kMixGroupSlots) return false;
     if (slot > 0 && tc.mixGroup[slot - 1] < 0) return false;
     ensureWeightmap(tc);
     if (tc.layerWeights.empty()) return false;
     ensureSecondPage(tc);
     for (size_t i = 0; i < tc.layerWeights2.size(); i += 4)
-    {
-        if (tc.mixGroup[0] >= 0) tc.layerWeights2[i + 2] = slot == 1 ? 255 : 0;
-        if (tc.mixGroup[1] >= 0) tc.layerWeights2[i + 3] = slot == 2 ? 255 : 0;
-    }
+        for (int k = 0; k < kMixGroupSlots; ++k)
+            if (tc.mixGroup[k] >= 0) shareByte(tc, i, k) = slot == k + 1 ? 255 : 0;
     tc.weightsDirty = true;
     return true;
 }

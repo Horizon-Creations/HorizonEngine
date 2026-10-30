@@ -96,7 +96,7 @@ namespace
     {
         constexpr int L = kTerrainMaxLayers;
         double acc[L] = {};
-        double shareAcc[2] = {};
+        double shareAcc[kMixGroupSlots] = {};
         size_t texels = 0;
         const bool second = tc.layerWeights2.size() == tc.layerWeights.size();
         // A reserved layer (TerrainComponent::mixGroup, Thema 233 step 7) holds a group's
@@ -116,24 +116,28 @@ namespace
                 w[k + 4] = second ? tc.layerWeights2[i + k] / 255.0 : 0.0;
             }
             for (int k = 0; k < L; ++k)
-                if (!(k >= 6 && (reserved >> (k - 6) & 1))) s += w[k];
+                if (!TerrainPaint::isReservedLayer(tc, k)) s += w[k];
             if (s <= 1e-4) continue;                       // blank texel: the shader's
             for (int k = 0; k < L; ++k)                     // 1e-4 floor, same skip
-                if (!(k >= 6 && (reserved >> (k - 6) & 1))) acc[k] += w[k] / s;
+                if (!TerrainPaint::isReservedLayer(tc, k)) acc[k] += w[k] / s;
             if (reserved)
             {
-                double s1 = (reserved & 1) ? w[6] : 0.0, s2 = (reserved & 2) ? w[7] : 0.0;
-                const double t = s1 + s2;
-                if (t > 1.0) { s1 /= t; s2 /= t; }
-                shareAcc[0] += s1; shareAcc[1] += s2;
+                double sh[kMixGroupSlots], t = 0.0;
+                for (int g = 0; g < kMixGroupSlots; ++g)
+                {
+                    sh[g] = (reserved >> g & 1) ? w[TerrainPaint::shareLayer(g)] : 0.0;
+                    t += sh[g];
+                }
+                for (int g = 0; g < kMixGroupSlots; ++g) shareAcc[g] += t > 1.0 ? sh[g] / t : sh[g];
             }
             ++texels;
         }
         if (texels == 0) { setUnpaintedLayerAverage(tc); return; }
         for (int k = 0; k < L; ++k)
             tc.avgLayerWeights[k] = static_cast<float>(acc[k] / static_cast<double>(texels));
-        if (reserved & 1) tc.avgLayerWeights[6] = static_cast<float>(shareAcc[0] / static_cast<double>(texels));
-        if (reserved & 2) tc.avgLayerWeights[7] = static_cast<float>(shareAcc[1] / static_cast<double>(texels));
+        for (int g = 0; g < kMixGroupSlots; ++g)
+            if (reserved >> g & 1)
+                tc.avgLayerWeights[TerrainPaint::shareLayer(g)] = static_cast<float>(shareAcc[g] / static_cast<double>(texels));
     }
 
     // ── Terrains whose collider still has to catch up ────────────────────────

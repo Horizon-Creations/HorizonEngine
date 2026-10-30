@@ -7435,12 +7435,12 @@ namespace
 	  "chooses one by hand.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Mix Group", "Mix Group",
-	  "A second (and third) group whose share of this landscape is kept apart from "
-	  "the one above — None leaves the slot unused. Picking one does not change how "
-	  "the landscape looks by itself: it reserves paint channels 6 and 7 for that "
-	  "group's share, which the Paint tab's Active Group then lets you set by hand. "
-	  "A group already used by the terrain's own slot or the other Mix Group slot is "
-	  "greyed out.",
+	  "Up to three more groups whose share of this landscape is kept apart from "
+	  "the one above - None leaves the slot unused. Picking one does not change how "
+	  "the landscape looks by itself: it reserves a paint channel (6, 7, and the "
+	  "Puddles channel for the third) for that group's share, which the Paint tab's "
+	  "Group row lets you set by hand. A group already used by the terrain's own slot "
+	  "or another Mix Group slot is greyed out.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Apply Group Meshes", "",
 	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
@@ -7477,11 +7477,12 @@ namespace
 	  "was painted. A starting point for a landscape built by hand: fill with the "
 	  "base layer, then paint the rest over it. One undo step.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Active Group", "Active Group",
-	  "Only shown once a Mix Group is set up (Setup tab). Which group this stroke "
-	  "marks the ground as, beside painting the layer below: the terrain's own group, "
-	  "or one of the Mix Groups. A dash is a slot with no group in it yet. Ctrl+drag "
-	  "always hands the spot back to the terrain's own group, whichever is active.",
+	{ "Landscape/Active Group", "Group",
+	  "Which texture group this stroke paints, beside the layer below: the terrain's "
+	  "own group or any of up to three more, all on the same landscape. A group shown "
+	  "as \"+ Name\" is not used yet; picking it adds it to the landscape, and the "
+	  "layer list below then shows that group's own layers. Ctrl+drag always hands the "
+	  "spot back to the terrain's own group, whichever is active.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "

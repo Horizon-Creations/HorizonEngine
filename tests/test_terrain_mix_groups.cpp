@@ -6,8 +6,8 @@
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 
 // ── Mixed texture groups (Thema 233, step 7) ────────────────────────────────
-// TerrainComponent::mixGroup[2] names a second/third group whose share of a texel
-// lives in weight layer 6/7; the terrain's own group (MaterialComponent) is the
+// TerrainComponent::mixGroup[3] names up to three further groups whose share of a texel
+// lives in weight layer 6/7/5; the terrain's own group (MaterialComponent) is the
 // remainder. The whole point of reserving layers rather than adding a grid is that
 // a terrain with no mix group must behave EXACTLY as it did before this field:
 // most of this file proves that, then exercises the new paths once a slot is set.
@@ -130,12 +130,13 @@ TEST_CASE("groupShares reads the terrain's own group as the remainder")
     tc.sizeX = tc.sizeZ = 16.0f;
     tc.weightRes = 8;
     TerrainPaint::ensureWeightmap(tc);
-    float shares[3];
+    float shares[4];
     // Unpainted, no mix group: entirely the own group.
     REQUIRE(TerrainPaint::groupShares(tc, 3, 4, shares));
     CHECK(shares[0] == doctest::Approx(1.0f));
     CHECK(shares[1] == 0.0f);
     CHECK(shares[2] == 0.0f);
+    CHECK(shares[3] == 0.0f);
 
     REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(HE::AutoLandscapeGroupId::Grassland)));
     REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 1, 100.0f, 0.0f, 1.0f));  // whole map
@@ -222,4 +223,75 @@ TEST_CASE("paintInGroup paints the texture and the active group's share together
     REQUIRE(TerrainPaint::texelWeights(tc, c, c, w));
     CHECK(w[2] == 255);   // the role texture, as plain paint() would leave it
     CHECK(w[6] == 255);   // slot 1's share, as paintGroup() would leave it
+}
+
+TEST_CASE("Four groups on one terrain: three shares, normalised, painted per group")
+{
+    using G = HE::AutoLandscapeGroupId;
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 16.0f;
+    tc.weightRes = 8;
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Forest)));
+    REQUIRE(TerrainPaint::setMixGroup(tc, 1, static_cast<int>(G::Grassland)));
+    REQUIRE(TerrainPaint::setMixGroup(tc, 2, static_cast<int>(G::Desert)));
+    CHECK(TerrainPaint::reservedLayers(tc) == 7);
+    CHECK(TerrainPaint::shareLayer(2) == 5);
+    CHECK(TerrainPaint::isReservedLayer(tc, 5));
+    CHECK_FALSE(TerrainPaint::paint(tc, 0.0f, 0.0f, 5, 8.0f, 0.0f, 1.0f));   // Puddles became a share
+    CHECK(TerrainPaint::paint(tc, 0.0f, 0.0f, 3, 8.0f, 0.0f, 1.0f));
+
+    // A group may not be mixed in twice.
+    CHECK_FALSE(TerrainPaint::setMixGroup(tc, 2, static_cast<int>(G::Forest)));
+
+    const uint32_t c = tc.weightRes / 2;
+    float s[4];
+    for (int slot = 1; slot <= 3; ++slot)
+    {
+        REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, slot, 100.0f, 0.0f, 1.0f));
+        REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
+        for (int i = 0; i < 4; ++i) CHECK(s[i] == doctest::Approx(i == slot ? 1.0f : 0.0f));
+    }
+
+    // A half stroke of another group leaves the shares summing to one.
+    REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 1, 100.0f, 0.0f, 0.5f));
+    REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
+    CHECK(s[0] + s[1] + s[2] + s[3] == doctest::Approx(1.0f).epsilon(0.01));
+    CHECK(s[1] > 0.4f);
+    CHECK(s[3] > 0.4f);
+
+    // Fill, then clear the third slot: its share goes, the layer is paintable again.
+    REQUIRE(TerrainPaint::fillGroup(tc, 0));
+    REQUIRE(TerrainPaint::groupShares(tc, c, c, s));
+    CHECK(s[0] == doctest::Approx(1.0f));
+    REQUIRE(TerrainPaint::setMixGroup(tc, 2, -1));
+    CHECK(TerrainPaint::paint(tc, 0.0f, 0.0f, 5, 8.0f, 0.0f, 1.0f));
+}
+
+TEST_CASE("Three mix groups round-trip through the scene file")
+{
+    using G = HE::AutoLandscapeGroupId;
+    HorizonWorld world;
+    Entity e = world.createEntity("Landscape");
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 16.0f;
+    tc.weightRes = 8;
+    TerrainPaint::ensureWeightmap(tc);
+    REQUIRE(TerrainPaint::setMixGroup(tc, 0, static_cast<int>(G::Forest)));
+    REQUIRE(TerrainPaint::setMixGroup(tc, 1, static_cast<int>(G::Grassland)));
+    REQUIRE(TerrainPaint::setMixGroup(tc, 2, static_cast<int>(G::Desert)));
+    world.registry().emplace<TerrainComponent>(e, tc);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld w2;
+    REQUIRE(ser.loadFromMemory(w2, bytes));
+    const TerrainComponent* l = nullptr;
+    for (auto ent : w2.registry().view<TerrainComponent>())
+        l = &w2.registry().get<TerrainComponent>(ent);
+    REQUIRE(l != nullptr);
+    CHECK(l->mixGroup[0] == static_cast<int>(G::Forest));
+    CHECK(l->mixGroup[1] == static_cast<int>(G::Grassland));
+    CHECK(l->mixGroup[2] == static_cast<int>(G::Desert));
 }
