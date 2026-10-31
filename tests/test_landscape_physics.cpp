@@ -331,3 +331,54 @@ TEST_CASE("landscape physics: the real tile size is accepted by Jolt, 257 x 257 
 	CHECK(ground2.stats().failed == 0);
 	CHECK(down(phys2, 700.0f, 300.0f).hit);
 }
+
+// ── through the runtime ──────────────────────────────────────────────────────
+#include <HorizonScene/Components/LandscapeWorldComponent.h>
+#include <HorizonScene/LandscapeRuntime.h>
+
+TEST_CASE("landscape runtime: with a physics world attached the ground follows the camera, reports the landscape entity, and goes with it")
+{
+	ProceduralLandscapeParams p;                     // the real tile size
+	p.tilesX = p.tilesZ = 12;
+	auto src = std::make_shared<ProceduralLandscapeSource>(p);
+	HorizonWorld w;
+	PhysicsWorld phys;
+	phys.initialize(w);
+
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;
+	cfg.store.loadRadius = 8000.0f;
+	REQUIRE(rt.begin(src, cfg));
+	LandscapePhysicsConfig pc;
+	pc.radius = 700.0f;
+	pc.maxBuildsPerUpdate = 50;
+	rt.setPhysics(&phys, pc);
+
+	const glm::dvec3 cam(2000.0, 700.0, 2000.0);
+	for (int i = 0; i < 4000; ++i)
+	{
+		rt.updateAt(cam, glm::vec3(0.0f), 5.0);
+		if (rt.store()->settled() && rt.ground().count() > 0 && rt.ground().stats().deferred == 0) break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	REQUIRE(rt.ground().count() >= 4);
+	CHECK(phys.groundFieldCount() == rt.ground().count());
+	CHECK(down(phys, 2000.0f, 2000.0f).hit);
+	CHECK(rt.groundHolds({ 5.0f, 10.0f, 5.0f }, glm::dvec3(0.0)) == true);        // a tile far from the camera: no ground, held
+	CHECK(rt.groundHolds({ 2000.0f, 10.0f, 2000.0f }, glm::dvec3(0.0)) == false); // under the camera: ground
+
+	// a second anchor (a vehicle far away) gets its own ground
+	rt.setPhysicsAnchors({ glm::dvec3(5000.0, 0.0, 5000.0) });
+	for (int i = 0; i < 4000; ++i)
+	{
+		rt.updateAt(cam, glm::vec3(0.0f), 5.0);
+		if (rt.ground().hasGround({ 9, 9 })) break;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	CHECK(rt.ground().hasGround({ 9, 9 }));        // tile (9, 9) covers 4608..5120: the vehicle's tile (resident, 4400 m from the camera, inside the 8 km store)
+
+	// the runtime lets go: no ground is left behind
+	rt.reset();
+	CHECK(phys.groundFieldCount() == 0);
+	rt.setPhysics(nullptr);
+}

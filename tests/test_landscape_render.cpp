@@ -193,6 +193,7 @@ TEST_CASE("landscape atlas: slots follow the store, the lookup table follows the
 		atlas.sync(store, up, rel, tab, 3);
 		for (const auto& r : rel) REQUIRE(onGpu.erase({ r.key.x, r.key.z }) == 1);
 		for (const auto& u : up) REQUIRE(onGpu.insert({ u.key.x, u.key.z }).second);
+		totalUploads += up.size();
 		check();
 		if (up.empty() && rel.empty()) break;
 	}
@@ -201,7 +202,8 @@ TEST_CASE("landscape atlas: slots follow the store, the lookup table follows the
 	CHECK(onGpu.size() == store.residentKeys().size());
 	CHECK(atlas.stats().aliased == 0);
 	CHECK(atlas.stats().full == 0);
-	CHECK(totalUploads > 100);
+	CHECK(totalUploads >= store.residentKeys().size());      // every tile in memory now went up at least once (how many more depends on the walk's speed: not asserted)
+	CHECK(totalUploads == atlas.stats().uploads);
 	MESSAGE("atlas: " << totalUploads << " uploads, " << atlas.stats().deferred << " tile-syncs deferred by the three-a-frame cap");   // timing dependent: not asserted
 	// a tile that is not there has no slot
 	CHECK(atlas.lookup(59, 59) == LandscapeAtlas::kNoSlot);

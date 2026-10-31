@@ -1,5 +1,6 @@
 #pragma once
 #include "HorizonScene/LandscapeAtlas.h"
+#include "HorizonScene/LandscapePhysics.h"
 #include "HorizonScene/LandscapeQuadtree.h"
 #include "HorizonScene/LandscapeSource.h"
 #include "HorizonScene/LandscapeStore.h"
@@ -12,6 +13,7 @@
 #include <vector>
 
 class HorizonWorld;
+class PhysicsWorld;
 
 namespace HE
 {
@@ -87,8 +89,18 @@ public:
 	// The scene's tile landscape (the first entity with a LandscapeWorldComponent) drives the runtime: it begins when the
 	// component appears or changes its pack, resets when it goes. Then the camera moves the store. Main thread.
 	void update(HorizonWorld& world, float dt, double budgetMs = 1.0);
-	// The same without a world: the camera's absolute position and velocity.
-	void updateAt(const glm::dvec3& cameraAbsolute, const glm::vec3& velocity, double budgetMs = 1.0);
+	// The same without a world: the camera's absolute position and velocity, and the world's floating origin (what the ground is built
+	// relative to; update(world, ...) passes world.origin()).
+	void updateAt(const glm::dvec3& cameraAbsolute, const glm::vec3& velocity, double budgetMs = 1.0, const glm::dvec3& origin = glm::dvec3(0.0));
+
+	// Ground for physics (step 3). With a PhysicsWorld attached every update gives the tiles near the camera, and near the extra
+	// anchors, a Jolt height field (LandscapePhysics.h); a null world detaches and takes the ground away. Call update() BEFORE the
+	// physics step. Detach (null) before the physics world is destroyed. `anchors`: absolute positions of whatever else needs ground (players, vehicles), set again each frame.
+	void setPhysics(PhysicsWorld* physics, const LandscapePhysicsConfig& config = {});
+	void setPhysicsAnchors(std::vector<glm::dvec3> anchors) { m_physicsAnchors = std::move(anchors); }
+	// PhysicsWorld::setRegionHold's test for a landscape: a body over a tile whose ground is not built yet is held.
+	bool groundHolds(const glm::vec3& worldPosition, const glm::dvec3& origin) const;
+	const LandscapePhysics& ground() const { return m_ground; }
 
 	// The frame for the camera that was just rendered with `viewProjRelative` (origin-relative world to clip). `zeroToOne`: the
 	// backend's clip depth range. Moves the uploads and table changes collected since the last frame into `out`.
@@ -117,6 +129,10 @@ private:
 	std::string m_pack;
 	std::string m_failedPack;   // a pack that could not start: not tried again until the component names another
 	int         m_beginAttempts = 0;
+	PhysicsWorld*                            m_physics = nullptr;
+	LandscapePhysics                         m_ground;
+	std::vector<glm::dvec3>                  m_physicsAnchors;
+	uint32_t                                 m_landscapeEntity = 0xFFFFFFFEu;   // PhysicsWorld::kGroundOwner until a component names the entity
 	std::vector<LandscapeAtlas::Upload>      m_pendingUploads;
 	std::vector<LandscapeAtlas::Release>     m_pendingReleases;
 	std::vector<LandscapeAtlas::TableUpdate> m_pendingTable;

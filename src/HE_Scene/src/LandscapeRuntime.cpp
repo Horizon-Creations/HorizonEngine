@@ -4,6 +4,7 @@
 #include "HorizonScene/Components/LandscapeWorldComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/PhysicsWorld.h"
 #include "HorizonScene/TransformHierarchy.h"
 
 #include <Diagnostics/Log.h>
@@ -13,6 +14,7 @@
 
 namespace HE
 {
+static_assert(PhysicsWorld::kGroundOwner == 0xFFFFFFFEu, "LandscapeRuntime's default ground owner is PhysicsWorld::kGroundOwner");
 namespace
 {
 bool fail(std::string* error, const std::string& why)
@@ -90,6 +92,7 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 
 void LandscapeRuntime::reset()
 {
+	if (m_physics) m_ground.clear(*m_physics);
 	m_store.reset();
 	m_atlas.reset();
 	m_source.reset();
@@ -107,7 +110,7 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 	for (auto e : world.registry().view<LandscapeWorldComponent>())
 	{
 		const auto& c = world.registry().get<LandscapeWorldComponent>(e);
-		if (c.enabled && !c.pack.empty()) { comp = &c; break; }
+		if (c.enabled && !c.pack.empty()) { comp = &c; m_landscapeEntity = static_cast<uint32_t>(e); break; }
 	}
 	if (!comp) { if (active()) reset(); m_failedPack.clear(); return; }
 	if (!active() && comp->pack == m_failedPack) return;       // it failed before; a changed path is a new try
@@ -140,14 +143,14 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 			v = glm::vec3((camera - m_lastCamera) / static_cast<double>(dt));
 			if (glm::length(v) > 300.0f) v = glm::vec3(0.0f);
 		}
-		updateAt(camera, v, budgetMs);
+		updateAt(camera, v, budgetMs, world.origin());
 		m_lastCamera = camera;
 		m_hasLastCamera = true;
 		return;
 	}
 }
 
-void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec3& velocity, double budgetMs)
+void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec3& velocity, double budgetMs, const glm::dvec3& origin)
 {
 	if (!active()) return;
 	m_camera = cameraAbsolute;
@@ -164,6 +167,28 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 	for (auto& u : up) m_pendingUploads.push_back(std::move(u));
 	for (auto& r : rel) m_pendingReleases.push_back(r);
 	for (auto& t : tab) m_pendingTable.push_back(t);
+
+	if (m_physics)
+	{
+		std::vector<glm::dvec3> anchors = m_physicsAnchors;
+		anchors.push_back(cameraAbsolute);
+		LandscapePhysicsConfig pc = m_ground.config();
+		pc.reportAs = m_landscapeEntity;
+		m_ground.setConfig(pc);
+		m_ground.update(*m_physics, *m_store, anchors, origin, m_config.heightMinM, m_config.heightScaleM);
+	}
+}
+
+void LandscapeRuntime::setPhysics(PhysicsWorld* physics, const LandscapePhysicsConfig& config)
+{
+	if (m_physics && m_physics != physics) m_ground.clear(*m_physics);
+	m_physics = physics;
+	m_ground = LandscapePhysics(config);
+}
+
+bool LandscapeRuntime::groundHolds(const glm::vec3& worldPosition, const glm::dvec3& origin) const
+{
+	return m_physics && m_store && m_ground.holdsAt(worldPosition, origin, *m_store);
 }
 
 void LandscapeRuntime::buildFrame(const glm::dmat4& viewProjRelative, const glm::dvec3& origin, bool zeroToOne, LandscapeFrame& out)
