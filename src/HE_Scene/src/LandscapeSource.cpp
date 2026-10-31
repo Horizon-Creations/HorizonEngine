@@ -261,6 +261,11 @@ uint32_t LandscapePackSource::storedSize(LandscapeTileKey key) const
 	return inWorld(*this, key) ? m_size[static_cast<size_t>(key.z) * m_tilesX + key.x] : 0;
 }
 
+uint64_t LandscapePackSource::storedOffset(LandscapeTileKey key) const
+{
+	return inWorld(*this, key) ? m_offset[static_cast<size_t>(key.z) * m_tilesX + key.x] : 0;
+}
+
 bool LandscapePackSource::load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const
 {
 	if (!inWorld(*this, key)) return false;

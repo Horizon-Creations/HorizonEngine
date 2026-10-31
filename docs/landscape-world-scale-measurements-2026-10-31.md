@@ -7,6 +7,8 @@ Stand 31.10.2026, Basis `release/0.8.0`. Plan: `landscape-world-scale-plan-2026-
 Plan §4 abnimmt, war offline (`hive_devices`: zuletzt vor 10 h). Jede Zahl hier ist also "pending on NN-WS03"; das Werkzeug läuft dort unverändert,
 liefert unter Windows aber nur warme Lesewerte (siehe "Nicht verifiziert").**
 
+> **Nachtrag (Schritt 1):** Seit Schritt 1 benutzt das Werkzeug den Engine-Code (`LandscapeTile`, `ProceduralLandscapeSource`, `LandscapePackWriter`) statt eines eigenen Containers. Die Größen sind unverändert; zur Neumessung siehe `landscape-world-scale-store-2026-10-31.md` §5.
+
 ## 1. Was gemessen wird
 
 Eine prozedurale 100-km-Welt als reiner Datenspeicher, ohne Rendering. Die Höhen kommen aus dem vorhandenen `terrainFbm` (12 Oktaven, 6 Zyklen

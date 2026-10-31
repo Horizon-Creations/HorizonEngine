@@ -365,6 +365,7 @@ TEST_CASE("landscape store: loads the tiles around an anchor, each exactly once,
 	// idle frames do not start anything
 	for (int i = 0; i < 20; ++i) store.update(anchors, 1.0);
 	CHECK(store.stats().loadsStarted == expected);
+	CHECK(store.stats().plans == 1);                         // the anchor did not move: no second plan
 }
 
 TEST_CASE("landscape store: walking 100 km keeps the resident set inside the kept ring, under the budget, without duplicates")

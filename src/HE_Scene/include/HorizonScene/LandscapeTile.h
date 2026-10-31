@@ -33,7 +33,7 @@ struct LandscapeGeometry
 	// The pyramids end at this raster, in metres.
 	static constexpr float kCoarsestRasterM = 128.0f;
 
-	bool    valid() const;     // powers of two, a coarse level exists, channels in 1..32
+	bool    valid() const;     // powers of two, a coarse level exists, channels in 1..16
 	int     heightLevels() const;
 	int     weightLevels() const;
 	int     heightDim(int level) const { return (hCells >> level) + 1; }

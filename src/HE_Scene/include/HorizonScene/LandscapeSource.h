@@ -124,8 +124,9 @@ public:
 	int  tilesZ() const override { return m_tilesZ; }
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override;
 	bool has(LandscapeTileKey key) const;
-	// Stored bytes of a tile, 0 for none.
+	// Stored bytes of a tile, 0 for none, and where in the file they start (for tools that read the file themselves).
 	uint32_t storedSize(LandscapeTileKey key) const;
+	uint64_t storedOffset(LandscapeTileKey key) const;
 
 private:
 	LandscapePackSource() = default;
