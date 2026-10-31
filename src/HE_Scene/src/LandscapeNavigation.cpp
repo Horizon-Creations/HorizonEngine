@@ -70,8 +70,8 @@ LandscapeNavBuild buildLandscapeNavTile(const std::function<std::shared_ptr<cons
 	rc.walkableRadius = static_cast<int>(std::ceil(cfg.walkableRadius / cs));
 	rc.maxEdgeLen = static_cast<int>(cfg.maxEdgeLen / cs);
 	rc.maxSimplificationError = cfg.maxSimplification;
-	rc.minRegionArea = static_cast<int>(rcSqr(static_cast<int>(cfg.minRegionArea)));
-	rc.mergeRegionArea = static_cast<int>(rcSqr(static_cast<int>(cfg.mergeRegionArea)));
+	rc.minRegionArea = static_cast<int>(cfg.minRegionArea);       // cells, as NavigationSystem::bake passes them
+	rc.mergeRegionArea = static_cast<int>(cfg.mergeRegionArea);
 	rc.maxVertsPerPoly = DT_VERTS_PER_POLYGON;
 	rc.detailSampleDist = cfg.detailSampleDist < 0.9f ? 0.0f : cs * cfg.detailSampleDist;
 	rc.detailSampleMaxError = ch * cfg.detailMaxError;
@@ -363,17 +363,18 @@ void LandscapeNavigation::update(const LandscapeStore& store, const std::vector<
 			dtTileRef ref = 0;
 			if (dtStatusFailed(m_mesh->addTile(r.data, r.size, DT_TILE_FREE_DATA, 0, &ref)))
 			{
+				// No entry left behind: a tile that is "done" without being in the mesh would stay a hole until the anchors left. Without an
+				// entry it is wanted again, and step 3 waits for a free slot.
 				HE_LOG_WARN(Nav, "LandscapeNavigation: the mesh took no tile (all %d slots in use?)", kMaxTiles);
 				dtFree(r.data);
 				++m_stats.failed;
+				m_entries.erase(it);
+				continue;
 			}
-			else
-			{
-				e.inMesh = true;
-				e.ref = ref;
-				e.polygons = r.polygons;
-				++m_stats.finished;
-			}
+			e.inMesh = true;
+			e.ref = ref;
+			e.polygons = r.polygons;
+			++m_stats.finished;
 		}
 		else if (r.status == LandscapeNavBuild::Failed) ++m_stats.failed;
 		else ++m_stats.finished;
@@ -414,12 +415,17 @@ void LandscapeNavigation::update(const LandscapeStore& store, const std::vector<
 		return a.tile.z != b.tile.z ? a.tile.z < b.tile.z : a.tile.x < b.tile.x;
 	});
 	need.erase(std::unique(need.begin(), need.end(), [](const Need& a, const Need& b) { return a.tile == b.tile; }), need.end());
-	size_t pending = 0;
-	for (const auto& [k, e] : m_entries) pending += e.done ? 0 : 1;
+	size_t pending = 0, inMesh = 0;
+	for (const auto& [k, e] : m_entries)
+	{
+		pending += e.done ? 0 : 1;
+		inMesh += e.inMesh ? 1 : 0;
+	}
 	size_t starts = 0;
 	for (const Need& n : need)
 	{
 		if (starts >= m_config.maxStartsPerUpdate || pending >= m_config.maxInFlight) break;
+		if (inMesh + pending >= static_cast<size_t>(kMaxTiles)) break;   // every slot is taken or promised: wait for one to come free
 		std::vector<std::shared_ptr<const LandscapeTile>> nb(9);
 		bool ready = true;
 		for (int dz = -1; dz <= 1 && ready; ++dz)

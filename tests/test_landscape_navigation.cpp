@@ -206,6 +206,38 @@ TEST_CASE("landscape navigation: a slope past maxSlope is a wall, a gentler one 
 	}
 }
 
+TEST_CASE("landscape navigation: at the production cell size a 40 degree ramp is a way through and a 50 degree one is a wall")
+{
+	// The landscape defaults (0.5 m cells, 0.25 m height cells, climb 1.0 m): maxSlope 45 degrees is what limits, not the ledge filter.
+	struct Case { const char* name; double slope; bool connected; };
+	const Case cases[] = { { "40 degrees", std::tan(40.0 * 3.14159265358979 / 180.0), true }, { "50 degrees", std::tan(50.0 * 3.14159265358979 / 180.0), false } };
+	for (const Case& c : cases)
+	{
+		CAPTURE(c.name);
+		const double s = c.slope;
+		auto src = std::make_shared<FnSource>(2, [s](double x, double) { return x < 300.0 ? 100.0 : std::min(200.0, 100.0 + (x - 300.0) * s); });
+		LandscapeStoreConfig cfg;
+		cfg.loadRadius = 6000.0f;
+		LandscapeStore store(src, cfg);
+		const glm::dvec3 centre(512.0, 150.0, 100.0);
+		REQUIRE(settleStore(store, centre));
+		LandscapeNavConfig nc;                // all defaults: cellSize 0.5 m
+		nc.radius = 300.0f;                   // the tile row z = 0 only
+		nc.maxInFlight = 4;
+		nc.maxStartsPerUpdate = 4;
+		LandscapeNavigation nav(nc);
+		REQUIRE(settleNav(nav, store, { centre }, { { 0, 0 }, { 1, 0 } }));
+		CHECK(nav.stats().failed == 0);
+
+		NavScene scene(nav);
+		scene.place({ 100.0f, 100.0f, 100.0f });
+		REQUIRE(scene.moveTo({ 800.0f, 200.0f, 100.0f }));
+		const float d = scene.remaining();
+		if (c.connected) { CHECK(d >= 700.0f); CHECK(d <= 780.0f); }
+		else CHECK(d < 400.0f);
+	}
+}
+
 TEST_CASE("landscape navigation: tiles leave the mesh when the anchors do, and wait for neighbours that are not in memory")
 {
 	auto src = std::make_shared<FnSource>(6, [](double, double) { return 200.0; });

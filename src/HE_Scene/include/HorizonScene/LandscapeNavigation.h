@@ -34,7 +34,7 @@ namespace HE
 // store has to hold at least one tile more than the navigation radius (the default store reaches 8 km, the radius is 600 m).
 //
 // The last limit is Detour's polygon reference (32 bit): 8 bits of tile slot, 14 bits of polygon, 10 bits of salt. At most kMaxTiles tiles
-// with data are held at once and a tile of kMaxPolysPerTile polygons or more is refused (counted in `failed`). findPath keeps its 256
+// with data are held at once (no new build starts while they are all used) and a tile of kMaxPolysPerTile polygons or more is refused (counted in `failed`). findPath keeps its 256
 // polygons (NavigationSystem), so a path longer than that stops short, the same on any navmesh.
 struct LandscapeNavConfig
 {
@@ -50,6 +50,10 @@ struct LandscapeNavConfig
 		NavMeshConfig c;
 		c.cellSize = 0.5f;
 		c.cellHeight = 0.25f;
+		// Recast's ledge filter drops a span whose neighbours on the two sides together differ from it by more than the climb, so on a ramp
+		// the climb has to be twice the rise of one cell: 0.5 m of rise per 0.5 m cell is 45 degrees (maxSlope) at a climb of 1.0 m = 4 height
+		// cells. At the single navmesh's 0.9 m the effective limit would be 37 degrees. In general: min(maxSlope, atan(climb cells * cellHeight / (2 * cellSize))).
+		c.walkableClimb = 1.0f;
 		c.detailSampleDist = 6.0f;
 		return c;
 	}
