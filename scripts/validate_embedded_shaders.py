@@ -57,6 +57,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 RENDER = REPO / "src" / "HE_Rendering" / "src" / "Backends"
 SKY_SOURCE = REPO / "src" / "HE_Rendering" / "include" / "HorizonRendering" / "SkyShaderSource.h"
+# The world-scale landscape (Thema 326): kLandscapeVS / kLandscapeFS, GLSL 4.10 like the sky.
+LANDSCAPE_SOURCE = REPO / "src" / "HE_Rendering" / "include" / "HorizonRendering" / "LandscapeShaderSource.h"
 
 HLSL_SOURCES = {
     "HlslSources.h": RENDER / "D3D_Shared" / "HlslSources.h",
@@ -67,7 +69,7 @@ HLSL_SOURCES = {
 }
 # kSkyFS + kSkyFuncGLSL moved to SkyShaderSource.h (Thema 78, Schritt 3): the
 # GL sky is also what Vulkan/D3D11/D3D12 compile, behind kSkyVulkanPrelude.
-GLSL_SOURCES = [RENDER / "OpenGL" / "OpenGLRenderer.cpp", SKY_SOURCE]
+GLSL_SOURCES = [RENDER / "OpenGL" / "OpenGLRenderer.cpp", SKY_SOURCE, LANDSCAPE_SOURCE]
 MSL_SOURCE = RENDER / "Metal" / "MetalRenderer.mm"
 # kGlCluster*SsboBinding — the SSBO bindings the clustered kUnlitFS build defines.
 MATERIAL_LIB_H = REPO / "src" / "HE_Rendering" / "include" / "material" / "MaterialShaderLibrary.h"

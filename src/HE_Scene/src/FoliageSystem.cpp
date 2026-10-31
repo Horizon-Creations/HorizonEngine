@@ -182,20 +182,16 @@ namespace
 
     // One layer's scatter: the layout every layer always had, from the layer's own
     // seed, density, scale range and mask. Writes cachedInstances and store.
-    void scatterLayer(entt::registry& registry, entt::entity entity, size_t li,
-                      FoliageLayer& layer, const TerrainComponent& terrain)
+    void scatterLayer(uint32_t logId, const glm::vec3& origin, size_t li,
+                      FoliageLayer& layer, const TerrainComponent& terrain, bool warn)
     {
         if (layer.meshAssetId == HE::UUID{})
         {
-            HE_LOG_WARN(Foliage, "Entity %u: foliage layer %zu has no mesh assigned — "
-                                 "nothing will be scattered", static_cast<uint32_t>(entity), li);
+            if (warn)
+                HE_LOG_WARN(Foliage, "Entity %u: foliage layer %zu has no mesh assigned — "
+                                     "nothing will be scattered", logId, li);
             return;
         }
-
-        // Terrain world-space origin from TransformComponent if present
-        glm::vec3 origin(0.f);
-        if (const auto* tf = registry.try_get<TransformComponent>(entity))
-            origin = tf->position;
 
         const float sizeX  = terrain.sizeX;
         const float sizeZ  = terrain.sizeZ;
@@ -203,18 +199,19 @@ namespace
         const int   count  = static_cast<int>(area * layer.density);
         if (count <= 0)
         {
-            HE_LOG_WARN(Foliage, "Entity %u: foliage layer %zu density %.4f over a %.0fx%.0f "
-                                 "terrain yields 0 instances", static_cast<uint32_t>(entity), li,
-                        layer.density, sizeX, sizeZ);
+            if (warn)
+                HE_LOG_WARN(Foliage, "Entity %u: foliage layer %zu density %.4f over a %.0fx%.0f "
+                                     "terrain yields 0 instances", logId, li,
+                            layer.density, sizeX, sizeZ);
             return;
         }
         // Scattering is O(count) and rebuilt whenever the layer is dirtied; a
         // density typo (0.5/m² over a 1 km terrain) is otherwise felt only as a
         // mysterious multi-second editor freeze.
-        if (count > 200000)
+        if (warn && count > 200000)
             HE_LOG_WARN(Foliage, "Entity %u: scattering %d foliage instances in layer %zu "
                                  "(density %.4f over %.0fx%.0f) — this is very expensive",
-                        static_cast<uint32_t>(entity), count, li, layer.density, sizeX, sizeZ);
+                        logId, count, li, layer.density, sizeX, sizeZ);
 
         layer.cachedInstances.reserve(static_cast<size_t>(count));
         // The same instances, terrain-local, in generation order: the input of the
@@ -301,11 +298,21 @@ namespace
 
         layer.store = sortIntoBuckets(local, sizeX, sizeZ, layer.bucketSize);
 
-        HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) of layer %zu "
-                              "over %.0fx%.0f%s into %zu bucket(s)",
-                     static_cast<uint32_t>(entity), placed, count, li, sizeX, sizeZ,
-                     masked ? " (density mask)" : "", layer.store->buckets.size());
+        if (warn)   // the per-tile path scatters hundreds of these and says nothing
+            HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) of layer %zu "
+                                  "over %.0fx%.0f%s into %zu bucket(s)",
+                         logId, placed, count, li, sizeX, sizeZ,
+                         masked ? " (density mask)" : "", layer.store->buckets.size());
     }
+}
+
+// The scatter of one layer over a terrain that is not an entity (a tile of the world-scale landscape builds a TerrainComponent on
+// the stack for each tile it scatters). Exactly the layout the entity path gives for the same terrain, layer and origin.
+void FoliageSystem::scatterLayer(const TerrainComponent& terrain, const glm::vec3& origin, FoliageLayer& layer, uint32_t logId)
+{
+    layer.cachedInstances.clear();
+    layer.store.reset();
+    ::scatterLayer(logId, origin, 0, layer, terrain, false);
 }
 
 void FoliageSystem::update(HorizonWorld& world)
@@ -355,6 +362,9 @@ void FoliageSystem::update(HorizonWorld& world)
     // One layer is a job of its own: a scatter that large has no use for a grain.
     parallel_for(jobs.size(), [&](size_t j) {
         HE_PROFILE_SCOPE_N("FoliageScatterLayer");
-        scatterLayer(registry, jobs[j].entity, jobs[j].li, *jobs[j].layer, *jobs[j].terrain);
+        glm::vec3 origin(0.f);   // the terrain's world position, if it has one
+        if (const auto* tf = registry.try_get<TransformComponent>(jobs[j].entity))
+            origin = tf->position;
+        ::scatterLayer(static_cast<uint32_t>(jobs[j].entity), origin, jobs[j].li, *jobs[j].layer, *jobs[j].terrain, true);
     }, "FoliageScatter", 1);
 }

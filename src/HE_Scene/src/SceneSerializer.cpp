@@ -20,6 +20,7 @@
 #include "HorizonScene/Components/JointComponent.h"
 #include "HorizonScene/Components/CharacterControllerComponent.h"
 #include "HorizonScene/Components/ScriptComponent.h"
+#include "HorizonScene/Components/LandscapeWorldComponent.h"
 #include "HorizonScene/Components/SaveStateComponent.h"
 #include "HorizonScene/Components/StreamingComponent.h"
 #include "HorizonScene/Components/EditorLockComponent.h"   // the Outliner's lock, an entity-level field
@@ -624,6 +625,18 @@ namespace
 				{ "saveTransform",  ss->saveTransform },
 				{ "saveVisibility", ss->saveVisibility },
 				{ "saveScriptVars", ss->saveScriptVars },
+			};
+		}
+		// The world-scale tile landscape (Thema 326): a pack and how far to stream it.
+		if (auto* lw = registry.try_get<LandscapeWorldComponent>(entity))
+		{
+			comps["landscapeWorld"] = {
+				{ "enabled",      lw->enabled },
+				{ "pack",         lw->pack },
+				{ "loadRadius",   lw->loadRadius },
+				{ "budgetMB",     lw->budgetMB },
+				{ "heightMinM",   lw->heightMinM },
+				{ "heightScaleM", lw->heightScaleM },
 			};
 		}
 		// Where the entity lives in a split scene (the splitter reads it, CellSplit.cpp).
@@ -1623,6 +1636,18 @@ namespace
 			ss.saveVisibility = c.value("saveVisibility", ss.saveVisibility);
 			ss.saveScriptVars = c.value("saveScriptVars", ss.saveScriptVars);
 			registry.emplace_or_replace<SaveStateComponent>(entity, ss);
+		}
+		if (comps.contains("landscapeWorld"))
+		{
+			const json& c = comps["landscapeWorld"];
+			LandscapeWorldComponent lw;
+			lw.enabled      = c.value("enabled",      lw.enabled);
+			lw.pack         = c.value("pack",         lw.pack);
+			lw.loadRadius   = c.value("loadRadius",   lw.loadRadius);
+			lw.budgetMB     = c.value("budgetMB",     lw.budgetMB);
+			lw.heightMinM   = c.value("heightMinM",   lw.heightMinM);
+			lw.heightScaleM = c.value("heightScaleM", lw.heightScaleM);
+			registry.emplace_or_replace<LandscapeWorldComponent>(entity, lw);
 		}
 		if (comps.contains("streaming"))
 		{
@@ -3018,6 +3043,7 @@ namespace
 	X("joint",               JointComponent) \
 	X("characterController", CharacterControllerComponent) \
 	X("saveState",           SaveStateComponent) 	X("streaming",           StreamingComponent) \
+	X("landscapeWorld",      LandscapeWorldComponent) \
 	X("prefab",              PrefabInstanceComponent) \
 	X("script",              ScriptComponent) \
 	X("environment",         EnvironmentComponent) \
@@ -3286,6 +3312,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"network",
 		"decal", "environment", "foliage", "joint", "light", "lod", "material", "mesh",
 		"navagent", "navmesh", "particlesystem",
+		// The world-scale tile landscape (LandscapeWorldComponent, Thema 326).
+		"landscapeWorld",
 		// Which prefab an entity was instantiated from (PrefabInstanceComponent).
 		"prefab",
 		"propertyanimator",
