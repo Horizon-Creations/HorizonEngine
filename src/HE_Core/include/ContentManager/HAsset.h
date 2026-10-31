@@ -495,6 +495,18 @@ public:
 		return nullptr;
 	}
 
+	// Hand the bytes of the first chunk with this id to the caller and leave the
+	// chunk empty: for a parse that is the last reader of the chunk and would
+	// otherwise copy a multi-megabyte payload (a texture's pixels) on the thread
+	// that registers the asset. False when there is no such chunk. After this the
+	// reader must not be asked for that chunk again.
+	bool takeChunkData(uint32_t id, std::vector<uint8_t>& out)
+	{
+		for (auto& c : m_chunks)
+			if (c.id == id) { out = std::move(c.data); c.data.clear(); return true; }
+		return false;
+	}
+
 	// All chunks in file order — for transforms that reserialize an asset
 	// (e.g. the pack-time path→UUID reference rewrite).
 	const std::vector<Chunk>& chunks() const { return m_chunks; }

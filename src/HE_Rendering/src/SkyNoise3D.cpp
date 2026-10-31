@@ -1,8 +1,8 @@
 #include "HorizonRendering/SkyNoise3D.h"
+#include <JobSystem/JobSystem.h>
 #include <Math/Math.h>
 #include <algorithm>
 #include <cmath>
-#include <thread>
 
 namespace HE
 {
@@ -58,27 +58,24 @@ std::vector<uint16_t> BuildSkyNoise3D(int n)
 	const float inv = 1.0f / static_cast<float>(n);
 
 	// Each voxel is fully independent and written to its own fixed index, so the
-	// z-slabs run on plain threads (the parallel STL is unimplemented in
-	// libc++/Apple Clang) without any effect on the bytes.
-	auto fillSlab = [&](int z0, int z1) {
-		for (int z = z0; z < z1; ++z)
-			for (int y = 0; y < n; ++y)
-				for (int x = 0; x < n; ++x)
-				{
-					const size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
-					glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
-					d[idx + 0] = static_cast<uint16_t>(
-						hash(glm::vec3(x, y, z)) * 65535.0f + 0.5f);
-					d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
-				}
+	// z-slabs can run in any order on any thread without any effect on the bytes.
+	// On the job pool (one slab per index, a slab is n² voxels of Worley noise)
+	// instead of threads started for each bake: those sat on top of the pool's own
+	// workers. A small volume stays on the caller (minGrain == n → no split).
+	auto fillSlab = [&](size_t zs) {
+		const int z = static_cast<int>(zs);
+		for (int y = 0; y < n; ++y)
+			for (int x = 0; x < n; ++x)
+			{
+				const size_t idx = ((static_cast<size_t>(z) * n + y) * n + x) * 2;
+				glm::vec3 uv((x + 0.5f) * inv, (y + 0.5f) * inv, (z + 0.5f) * inv);
+				d[idx + 0] = static_cast<uint16_t>(
+					hash(glm::vec3(x, y, z)) * 65535.0f + 0.5f);
+				d[idx + 1] = static_cast<uint16_t>(worley(uv) * 65535.0f + 0.5f);
+			}
 	};
-	const int workers = n < 32 ? 1 : std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 8);
-	std::vector<std::thread> pool;
-	for (int t = 1; t < workers; ++t)
-		pool.emplace_back(fillSlab, n * t / workers, n * (t + 1) / workers);
-	fillSlab(0, n / workers);
-	for (std::thread& th : pool)
-		th.join();
+	const size_t slabs = static_cast<size_t>(n);
+	parallel_for(slabs, fillSlab, "SkyNoise3D", n < 32 ? slabs : 1);
 	return d;
 }
 

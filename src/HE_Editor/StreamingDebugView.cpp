@@ -273,6 +273,8 @@ struct PoolRates
 {
 	double jobsPerSec[HE::kJobPriorityCount] = {};
 	double poolShare[HE::kJobPriorityCount]  = {};   // busy time / (wall time × workers)
+	double waitAvgMs[HE::kJobPriorityCount]  = {};   // queue wait per job that ran in the window
+	double waitMaxMs[HE::kJobPriorityCount]  = {};   // longest single wait in the window
 };
 
 const PoolRates& poolRates(const HE::ThreadPoolStats& now)
@@ -297,7 +299,12 @@ const PoolRates& poolRates(const HE::ThreadPoolStats& now)
 		const auto& b = now.lanes[p];
 		s_rates.jobsPerSec[p] = static_cast<double>(b.executed - a.executed) / dt;
 		s_rates.poolShare[p]  = static_cast<double>(b.busyNs - a.busyNs) * 1e-9 / (dt * workers);
+		const uint64_t ran = b.executed - a.executed;
+		s_rates.waitAvgMs[p] = ran > 0 ? static_cast<double>(b.waitNs - a.waitNs) * 1e-6 / static_cast<double>(ran) : 0.0;
+		s_rates.waitMaxMs[p] = static_cast<double>(b.waitMaxNs) * 1e-6;
 	}
+	// The peak is per window: without the reset it would show the worst moment since start.
+	globalPool().resetPeaks();
 	s_prev = now; s_prevAt = t;
 	return s_rates;
 }
@@ -321,8 +328,9 @@ void drawJobs()
 	ImGui::Text("%zu workers", s.threads);
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
 	                                 | ImGuiTableFlags_SizingStretchProp;
-	if (!ImGui::BeginTable("##jobs", 8, kFlags)) return;
-	for (const char* h : { "Priority", "Queued", "Running", "Cap", "Jobs/s", "Pool", "Cancelled", "Failed" })
+	if (!ImGui::BeginTable("##jobs", 10, kFlags)) return;
+	for (const char* h : { "Priority", "Queued", "Running", "Cap", "Jobs/s", "Pool", "Wait avg", "Wait max",
+	                       "Cancelled", "Failed" })
 		ImGui::TableSetupColumn(h);
 	ImGui::TableHeadersRow();
 	static const char* kNames[HE::kJobPriorityCount] = { "High", "Normal", "Low" };
@@ -338,14 +346,19 @@ void drawJobs()
 		else                      ImGui::Text("%zu", l.limit);
 		ImGui::TableNextColumn(); ImGui::Text("%.0f", r.jobsPerSec[p]);
 		ImGui::TableNextColumn(); ImGui::Text("%.0f %%", r.poolShare[p] * 100.0);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f ms", r.waitAvgMs[p]);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f ms", r.waitMaxMs[p]);
 		ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(l.cancelled));
 		ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(l.failed));
 	}
 	ImGui::EndTable();
 	EditorWidgets::WrapText wrap;
 	ImGui::TextDisabled("Pool is the share of all workers' time the priority took over the last "
-	                    "half second. Low is background streaming; its cap keeps workers free "
-	                    "for the frame. The Timeline tab names every job on the worker lanes.");
+	                    "half second. Wait is how long jobs stood in the queue before a worker took "
+	                    "them (average and longest over the same window): a Low wait that keeps "
+	                    "growing means streaming is starved or capped. Low is background streaming; "
+	                    "its cap keeps workers free for the frame. The Timeline tab names every job "
+	                    "on the worker lanes.");
 }
 
 constexpr double kBytesPerMB = 1048576.0;
@@ -360,6 +373,7 @@ void drawAssets(ContentManager& cm)
 	            static_cast<unsigned long long>(ps.dropped), static_cast<unsigned long long>(ps.restarted));
 	ImGui::Text("Last poll: %.2f ms on the main thread, %zu taken, %zu left for the next frame",
 	            ps.lastPollMs, ps.lastPollHandled, ps.lastPollLeft);
+	ImGui::Text("Decoded, waiting for the main thread: %.1f MB", static_cast<double>(cm.asyncBacklogBytes()) / kBytesPerMB);
 	constexpr size_t kShown = 12;
 	const std::vector<std::string> paths = cm.asyncInFlightPaths(kShown);
 	for (const std::string& p : paths)

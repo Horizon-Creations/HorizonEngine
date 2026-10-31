@@ -30,6 +30,17 @@ class ThreadPool;
 //     meshes arrived, a chunk the camera has left) never starts.
 // submit()/post()/parallel_for keep their signatures and behaviour; the new
 // entry point is ThreadPool::schedule().
+//
+// Streaming added four more on top (Thema 153, job-system audit 2026-10-31):
+//   - JobDesc::order, a sort key inside one priority (near chunks before far ones
+//     queued earlier), and JobHandle::promote(), which moves a job that is still
+//     queued to a more urgent priority (a prefetch the camera now needs);
+//   - JobKind::Io with its own concurrency limit, so blocking reads cannot park
+//     every worker that decoding and parsing could have used;
+//   - the time jobs spent QUEUED in ThreadPoolStats (waitNs/waitMaxNs): for
+//     streaming that, not the run time, is the latency that counts;
+//   - scheduled Low jobs that have not begun end Cancelled when the pool is
+//     destroyed, instead of being run to completion on the way out.
 namespace HE {
 
 // Queue order. A worker always takes the oldest job of the highest priority it
@@ -45,6 +56,17 @@ enum class JobPriority : uint8_t
     Low    = 2,   // background streaming: asset reads, thumbnails
 };
 inline constexpr size_t kJobPriorityCount = 3;
+
+// What a job mostly waits for. Cpu is the default. Io is a job that spends its time
+// in a blocking read — a pak or file read — and is limited separately
+// (ThreadPool::setIoConcurrencyLimit): a handful of reads already saturate a disk,
+// and more of them only park workers that decoding and parsing could have used.
+enum class JobKind : uint8_t
+{
+    Cpu = 0,
+    Io  = 1,
+};
+inline constexpr size_t kJobKindCount = 2;
 
 enum class JobStatus : uint8_t
 {
@@ -71,10 +93,14 @@ struct ThreadPoolStats
         size_t   limit     = 0;   // setConcurrencyLimit; == threads means no cap
         uint64_t executed  = 0;   // tasks a worker ran (post/submit/schedule), since start
         uint64_t busyNs    = 0;   // …and the time they took, summed over workers
+        uint64_t waitNs    = 0;   // time those tasks stood in the queue before a worker took them
+        uint64_t waitMaxNs = 0;   // longest such wait since start or the last ThreadPool::resetPeaks()
         uint64_t cancelled = 0;   // scheduled jobs that ended Cancelled (wherever they ended)
         uint64_t failed    = 0;   // scheduled jobs whose body threw
     };
     size_t threads = 0;
+    size_t ioRunning = 0;   // Io-kind jobs on a worker right now (all priorities)
+    size_t ioLimit   = 0;   // setIoConcurrencyLimit
     Lane   lanes[kJobPriorityCount];
 };
 
@@ -137,6 +163,13 @@ public:
     // A running job is not interrupted; give it a CancelToken to poll for that.
     void cancel() const;
 
+    // Move a job that is still waiting to `priority` if that is more urgent than its
+    // own (a lower value); anything else is ignored. For an asset the camera needs
+    // now that a prefetch queued earlier at Low: it keeps its place by `order`, and a
+    // Waiting job simply queues in the new lane once its dependencies are done. A job
+    // that is already running or finished is not affected.
+    void promote(JobPriority priority) const;
+
     // Block until the job has finished. Rethrows the body's exception when it
     // Failed; returns normally when it was Cancelled (check status()).
     //
@@ -171,6 +204,15 @@ struct JobDesc
     // job is Cancelled without running: its input is missing. Handles from another
     // pool work too, as long as that pool outlives the dependency.
     std::vector<JobHandle> after;
+    // Position among the jobs of ONE priority: smaller starts first, equal keys stay
+    // FIFO. For work whose urgency is known when it is queued — a chunk's distance
+    // to the camera — so a far chunk queued earlier no longer runs before a near one
+    // queued later. Jobs that never set it all share 0, i.e. plain FIFO; mixing keyed
+    // and unkeyed jobs in one priority puts the unkeyed ones first.
+    uint32_t order = 0;
+    // Io jobs share one concurrency limit across all priorities, on top of the
+    // priority's own.
+    JobKind kind = JobKind::Cpu;
     // Called exactly once if the job ends Cancelled without its body having run —
     // so an owner can release whatever it reserved for the job (a coalescing key,
     // a progress slot). Runs on whichever thread finished the job off: a worker,
@@ -237,12 +279,22 @@ public:
     // simply wait in their queue; a wait() on one of them still runs it inline.
     void   setConcurrencyLimit(HE::JobPriority priority, size_t maxRunning);
     size_t concurrencyLimit(HE::JobPriority priority) const;
+    // At most `maxRunning` Io-kind jobs (HE::JobKind::Io) run at the same time,
+    // whatever their priority (0 is treated as 1). Default min(4, max(2, threads/2)),
+    // at most the worker count. Io jobs over the limit wait in their queue while
+    // Cpu jobs behind them still start.
+    void   setIoConcurrencyLimit(size_t maxRunning);
+    size_t ioConcurrencyLimit() const;
     // Jobs currently queued at `priority`, including cancelled ones a worker has
     // not yet popped and discarded. For diagnostics and tests.
     size_t queuedCount(HE::JobPriority priority) const;
     // Every priority's queue, running count, cap and totals at once (one lock for
     // the queues; the rest are atomics the workers bump without one).
     HE::ThreadPoolStats stats() const;
+    // Zero the per-priority peak values (ThreadPoolStats::Lane::waitMaxNs). The
+    // streaming view calls this once per sampling window, so the peak it shows is
+    // the window's and not the worst moment since start. One reader at a time.
+    void resetPeaks();
 
     size_t threadCount() const { return m_threads.size(); }
 
