@@ -732,6 +732,19 @@ public:
     // pipelines are a cheap cache hit. No-op on backends that build eagerly.
     virtual void WarmupMaterials(const std::vector<HE::UUID>& /*materialIds*/) {}
 
+    // ── Background shader builds ───────────────────────────────────────────
+    // A backend that compiles material pipelines off the render thread (Metal)
+    // does not draw an object whose pipeline is still compiling; it appears when
+    // the build lands. `pending` is how many builds are still running, `total`
+    // how many were started since the queue was last empty (so a progress bar
+    // reads total - pending of total). Both 0 on a backend that builds
+    // synchronously, which is the default.
+    struct ShaderBuildStatus { int pending = 0; int total = 0; };
+    // Collects the builds that finished since the last call and reports the
+    // state. Main thread. Cheap enough for once per frame, and the loop of a
+    // startup step ("Compiling shaders 3/8") that waits for pending == 0.
+    virtual ShaderBuildStatus PumpShaderBuilds() { return {}; }
+
     // ── Material preview ───────────────────────────────────────────────────
     // Render a single primitive shaded with material `materialId` into a small
     // dedicated offscreen target and return an ImGui-compatible texture handle

@@ -260,7 +260,10 @@ TEST_CASE("GL and Metal draw a graph-material batch once, with the material's in
 
 	const std::string mtl = readFile(dir / "Metal" / "MetalRenderer.mm");
 	REQUIRE(!mtl.empty());
-	CHECK(countOf(mtl, "/*instanced=*/true)") == 2);
+	// Metal builds the twin in the background: the call passes `&instPending`, and a batch whose twin is
+	// still compiling is skipped (`if (instPending) continue;`), asked for again with the next one.
+	CHECK(countOf(mtl, "/*instanced=*/true, &instPending)") == 2);
+	CHECK(countOf(mtl, "if (instPending) continue;") == 2);
 	CHECK(countOf(mtl, "RenderSorter::graphInstancingEnabled()") == 2);
 	CHECK(mtl.find("if (instanced && precompiled) return nullptr;") != std::string::npos);
 	// The forward PSO may come from the pak (no twin); the G-buffer PSO never does.
