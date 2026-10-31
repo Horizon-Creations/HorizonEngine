@@ -47,6 +47,7 @@ struct LandscapeFrame
 		uint8_t  quadrants = 15;      // which quarters to draw (LandscapePatchMesh::quadrantFirst/Count)
 		bool     coarse = false;      // true: heights from the coarse world grid `gridIndex`, false: from the tile atlas
 		int      gridIndex = 0;       // coarse only: LandscapeCoarseWorld::heights[gridIndex]
+		int      ix = 0, iz = 0;      // node index at this level; the shader's global corner cell is ix * 64, iz * 64 (uPatch.yz)
 		float    x0 = 0.0f, z0 = 0.0f;  // corner of the node, origin-relative
 		float    size = 0.0f;         // node edge in metres
 		float    morphStart = 0.0f;   // distances (landscapeMorphDistance) between which the odd vertices morph, see LandscapeQuadtree.h

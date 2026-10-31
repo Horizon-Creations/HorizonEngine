@@ -133,6 +133,8 @@ TEST_CASE("landscape runtime: the frame covers the view, the fine levels sit on 
 		CHECK(p.morphStart < p.morphEnd);
 		CHECK(p.size == doctest::Approx(rt.quadtree().patchSize(p.level)));
 		CHECK(std::fmod(p.x0 + origin.x, p.size) == doctest::Approx(0.0).epsilon(1e-3).scale(1.0));   // a node sits on its level's grid
+		CHECK(static_cast<double>(p.ix) * p.size == doctest::Approx(p.x0 + origin.x));            // the integer cell the shader uses: ix * 64 cells of size/64
+		CHECK(static_cast<double>(p.iz) * p.size == doctest::Approx(p.z0 + origin.z));
 		if (p.coarse)
 		{
 			++coarse;

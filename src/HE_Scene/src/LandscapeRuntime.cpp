@@ -185,6 +185,8 @@ void LandscapeRuntime::buildFrame(const glm::dmat4& viewProjRelative, const glm:
 	{
 		LandscapeFrame::Patch d;
 		d.level = p.level;
+		d.ix = p.ix;
+		d.iz = p.iz;
 		d.quadrants = p.quadrants;
 		d.coarse = p.level > m_quadtree.tileLevels;
 		d.gridIndex = d.coarse ? std::min(p.level - (m_quadtree.tileLevels + 1), static_cast<int>(coarse->heights.size()) - 1) : 0;
