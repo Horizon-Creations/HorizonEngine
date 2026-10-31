@@ -2,6 +2,7 @@
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/LandscapeAtlas.h"
 #include "HorizonScene/LandscapeFoliage.h"
+#include "HorizonScene/LandscapeNavigation.h"
 #include "HorizonScene/LandscapePhysics.h"
 #include "HorizonScene/LandscapeQuadtree.h"
 #include "HorizonScene/LandscapeSource.h"
@@ -118,6 +119,14 @@ public:
 	const LandscapeWater& water() const { return m_water; }
 	void foliageDraws(std::vector<LandscapeFoliageDraw>& out) const { m_foliage.draws(out); }
 
+	// Navigation (step 3). With a config the runtime builds a tiled navmesh around the anchors (LandscapeNavigation.h); null takes it away. Anchors
+	// are absolute positions of whatever walks. update(world, ...) uses the scene's nav agents (where they stand and, while they move, where they
+	// are going) and puts the mesh into the scene's NavMeshComponent, which is what NavigationSystem reads; updateAt takes `setNavigationAnchors`.
+	// A path to a tile that has no mesh yet fails like a path off any navmesh: ask again a moment later.
+	void setNavigation(const LandscapeNavConfig* config);
+	void setNavigationAnchors(std::vector<glm::dvec3> anchors) { m_navAnchors = std::move(anchors); }
+	const LandscapeNavigation* navigation() const { return m_nav.get(); }
+
 	// The frame for the camera that was just rendered with `viewProjRelative` (origin-relative world to clip). `zeroToOne`: the
 	// backend's clip depth range. Moves the uploads and table changes collected since the last frame into `out`.
 	void buildFrame(const glm::dmat4& viewProjRelative, const glm::dvec3& origin, bool zeroToOne, LandscapeFrame& out);
@@ -149,6 +158,8 @@ private:
 	LandscapePhysics                         m_ground;
 	LandscapeFoliage                         m_foliage;
 	LandscapeWater                           m_water;
+	std::unique_ptr<LandscapeNavigation>     m_nav;
+	std::vector<glm::dvec3>                  m_navAnchors;
 	uint64_t                                 m_foliageKey = 0;   // of the layer settings last given to m_foliage; 0 = none
 	std::vector<glm::dvec3>                  m_physicsAnchors;
 	uint32_t                                 m_landscapeEntity = 0xFFFFFFFEu;   // PhysicsWorld::kGroundOwner until a component names the entity

@@ -3,6 +3,8 @@
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/LandscapeWorldComponent.h"
+#include "HorizonScene/Components/NavAgentComponent.h"
+#include "HorizonScene/Components/NavMeshComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/PhysicsWorld.h"
@@ -131,6 +133,7 @@ void LandscapeRuntime::reset()
 	if (m_physics) m_ground.clear(*m_physics);
 	m_foliage.clear();
 	m_water.clear();
+	if (m_nav) m_nav->clear();
 	m_foliageKey = 0;
 	m_store.reset();
 	m_atlas.reset();
@@ -186,7 +189,23 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 		const FoliageComponent* fol = world.registry().try_get<FoliageComponent>(static_cast<entt::entity>(m_landscapeEntity));
 		if (fol) { const uint64_t key = foliageKey(fol->layers, fol->visible); if (key != m_foliageKey) { setFoliageLayers(fol->visible ? fol->layers : std::vector<FoliageLayer>{}); m_foliageKey = key; } }
 		else if (m_foliageKey != 0) { setFoliageLayers({}); m_foliageKey = 0; }
+		if (m_nav)
+		{
+			// who walks: the agents, and where the moving ones are going
+			m_navAnchors.clear();
+			for (auto [e, agent, tc] : world.registry().view<NavAgentComponent, TransformComponent>().each())
+			{
+				m_navAnchors.push_back(glm::dvec3(worldPositionOf(world, e)) + world.origin());
+				if (agent.moving) m_navAnchors.push_back(glm::dvec3(agent.targetPos) + world.origin());
+			}
+		}
 		updateAt(camera, v, budgetMs, world.origin());
+		if (m_nav)
+			for (auto [e, nmc] : world.registry().view<NavMeshComponent>().each())
+			{
+				if (nmc.navMesh != m_nav->navMesh()) m_nav->attach(nmc);
+				break;
+			}
 		m_lastCamera = camera;
 		m_hasLastCamera = true;
 		return;
@@ -213,6 +232,7 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 
 	m_foliage.update(*m_store, { cameraAbsolute }, m_config.heightMinM, m_config.heightScaleM);
 	m_water.update(*m_store, cameraAbsolute, { m_config.heightMinM, m_config.heightScaleM }, m_source->water());
+	if (m_nav) m_nav->update(*m_store, m_navAnchors, m_config.heightMinM, m_config.heightScaleM);
 
 	if (m_physics)
 	{
@@ -223,6 +243,12 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 		m_ground.setConfig(pc);
 		m_ground.update(*m_physics, *m_store, anchors, origin, m_config.heightMinM, m_config.heightScaleM);
 	}
+}
+
+void LandscapeRuntime::setNavigation(const LandscapeNavConfig* config)
+{
+	if (!config) { m_nav.reset(); m_navAnchors.clear(); return; }
+	m_nav = std::make_unique<LandscapeNavigation>(*config);
 }
 
 void LandscapeRuntime::setFoliageLayers(const std::vector<FoliageLayer>& layers)

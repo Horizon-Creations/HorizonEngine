@@ -29,6 +29,7 @@ add_library(HorizonScene SHARED
     src/LandscapeWaterData.cpp
     src/LandscapeWater.cpp
     src/LandscapeFoliage.cpp
+    src/LandscapeNavigation.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp
