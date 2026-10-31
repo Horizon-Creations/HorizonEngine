@@ -94,6 +94,13 @@ Zeile außer wo zwei stehen. `sync` ist derselbe Build mit `HE_MATERIAL_PIPELINE
 
 ## Offen / nicht belegt
 - Kein Lauf mit entsperrtem Bildschirm: Frame-/GPU-Zeiten sind nicht verglichen.
+- **Im Spiel gibt es keinen Startup-Schritt**, nur die Karte: `GameApplication` ruft `WarmupMaterials` nur im Streaming
+  (`pollAsyncResults`), nicht nach dem Laden der Startszene. Dort erscheinen Grafik-Materialien also nach dem ersten
+  Sehen, mit der Karte darüber. Ein Schritt hinter dem Splash (nach `setWorld`: `WarmupMaterials(collectAssetRefs(...))`
+  plus dieselbe Warteschleife) wäre möglich, ohne Spiel-Build hier aber nicht zu prüfen.
+- **Auch warm ist es ein Frame später**: eine Pipeline, die früher in ≈ 1 ms synchron fertig war, kommt jetzt über den
+  Briefkasten und liegt einen Frame später im Cache. Jedes `openScene` mitten in der Sitzung lässt Grafik-Materialien
+  deshalb einen Frame lang aus und zeigt kurz „Compiling shaders  0 / N“.
 - Spiel-Hinweis (Metal-UI-Quads) und Deferred-Pfad nicht angesehen; Ribbons nicht getestet. Eine Szene, die zur
   Laufzeit per `openScene` oder Streaming neue Materialien bekommt, wurde nur über `HE_SHADER_BUILD_NOWAIT=1`
   nachgestellt.
