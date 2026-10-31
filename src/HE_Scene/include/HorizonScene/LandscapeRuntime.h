@@ -1,5 +1,7 @@
 #pragma once
+#include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/LandscapeAtlas.h"
+#include "HorizonScene/LandscapeFoliage.h"
 #include "HorizonScene/LandscapePhysics.h"
 #include "HorizonScene/LandscapeQuadtree.h"
 #include "HorizonScene/LandscapeSource.h"
@@ -102,6 +104,13 @@ public:
 	bool groundHolds(const glm::vec3& worldPosition, const glm::dvec3& origin) const;
 	const LandscapePhysics& ground() const { return m_ground; }
 
+	// Foliage (step 3b). With a FoliageComponent on the landscape's entity (no TerrainComponent beside it, or the single-landscape system would
+	// scatter it too) its layers are scattered per tile around the camera (LandscapeFoliage.h); update(world, ...) keeps them in step with
+	// the component. Without a world, setFoliageLayers does the same by hand. The draws are what the renderer extracts (part B).
+	void setFoliageLayers(const std::vector<FoliageLayer>& layers);
+	const LandscapeFoliage& foliage() const { return m_foliage; }
+	void foliageDraws(std::vector<LandscapeFoliageDraw>& out) const { m_foliage.draws(out); }
+
 	// The frame for the camera that was just rendered with `viewProjRelative` (origin-relative world to clip). `zeroToOne`: the
 	// backend's clip depth range. Moves the uploads and table changes collected since the last frame into `out`.
 	void buildFrame(const glm::dmat4& viewProjRelative, const glm::dvec3& origin, bool zeroToOne, LandscapeFrame& out);
@@ -131,6 +140,8 @@ private:
 	int         m_beginAttempts = 0;
 	PhysicsWorld*                            m_physics = nullptr;
 	LandscapePhysics                         m_ground;
+	LandscapeFoliage                         m_foliage;
+	uint64_t                                 m_foliageKey = 0;   // of the layer settings last given to m_foliage; 0 = none
 	std::vector<glm::dvec3>                  m_physicsAnchors;
 	uint32_t                                 m_landscapeEntity = 0xFFFFFFFEu;   // PhysicsWorld::kGroundOwner until a component names the entity
 	std::vector<LandscapeAtlas::Upload>      m_pendingUploads;

@@ -336,3 +336,83 @@ TEST_CASE("landscape foliage: a layer without a mesh, or hidden, scatters nothin
 	}
 	CHECK(true);   // reaching here means no scatter outlived its LandscapeFoliage (the destructor waited)
 }
+
+// ── through the runtime ──────────────────────────────────────────────────────
+#include <HorizonScene/Components/CameraComponent.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h>
+#include <HorizonScene/Components/TransformComponent.h>
+#include <HorizonScene/LandscapeRuntime.h>
+#include <filesystem>
+#include <random>
+
+TEST_CASE("landscape runtime: the FoliageComponent on the landscape's entity is scattered per tile around the camera, and follows the component")
+{
+	ProceduralLandscapeParams p;                      // real tile size, 8 x 8 tiles = 4 km
+	p.tilesX = p.tilesZ = 8;
+	const ProceduralLandscapeSource src(p);
+	const auto path = std::filesystem::temp_directory_path() / ("he_landscape_foliage_" + std::to_string(std::random_device{}()) + ".bin");
+	{
+		LandscapePackWriter w;
+		REQUIRE(w.begin(path.string(), src.geometry(), 8, 8));
+		for (int z = 0; z < 8; ++z)
+			for (int x = 0; x < 8; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src.generate({ x, z }))));
+		REQUIRE(w.finish());
+	}
+
+	HorizonWorld w;
+	const Entity land = w.createEntity("Landscape");
+	auto& comp = w.registry().emplace<LandscapeWorldComponent>(land);
+	comp.pack = path.string();
+	FoliageComponent fol;
+	fol.layers[0] = grass(0.001f, 400.0f, 31);
+	w.registry().emplace<FoliageComponent>(land, fol);
+	const Entity cam = w.createEntity("Camera");
+	w.registry().get_or_emplace<TransformComponent>(cam).position = { 2048.0f, 700.0f, 2048.0f };
+	w.registry().emplace<CameraComponent>(cam);
+
+	LandscapeRuntime rt;
+	const auto tick = [&](int n, const auto& done) {
+		for (int i = 0; i < n; ++i)
+		{
+			rt.update(w, 0.016f);
+			if (done()) return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return false;
+	};
+	const size_t expect = tilesWithin(2048.0, 2048.0, 400.0, 8);
+	REQUIRE(tick(6000, [&] { return rt.active() && rt.foliage().stats().pending == 0 && rt.foliage().stats().scattered == expect; }));
+	std::vector<LandscapeFoliageDraw> draws;
+	rt.foliageDraws(draws);
+	CHECK(draws.size() == expect);
+	for (const auto& d : draws) CHECK(d.store->local.size() == static_cast<size_t>(512.0f * 512.0f * 0.001f));
+
+	// changing a layer in the component re-scatters (the revision moves, the old scatter is gone, the new one has the new count)
+	const uint32_t rev = rt.foliage().revision();
+	w.registry().get<FoliageComponent>(land).layers[0].density = 0.002f;
+	REQUIRE(tick(6000, [&] { return rt.foliage().revision() != rev && rt.foliage().stats().pending == 0 && rt.foliage().stats().scattered == expect; }));
+	rt.foliageDraws(draws);
+	REQUIRE_FALSE(draws.empty());
+	CHECK(draws[0].store->local.size() == static_cast<size_t>(512.0f * 512.0f * 0.002f));
+	// the same change again, nothing changed: no re-scatter
+	const uint32_t rev2 = rt.foliage().revision();
+	for (int i = 0; i < 40; ++i) rt.update(w, 0.016f);
+	CHECK(rt.foliage().revision() == rev2);
+
+	// hidden or removed: no foliage; the landscape itself stays
+	w.registry().get<FoliageComponent>(land).visible = false;
+	REQUIRE(tick(200, [&] { return rt.foliage().stats().scattered == 0; }));
+	CHECK(rt.active());
+	w.registry().get<FoliageComponent>(land).visible = true;
+	REQUIRE(tick(6000, [&] { return rt.foliage().stats().scattered == expect && rt.foliage().stats().pending == 0; }));
+	w.registry().remove<FoliageComponent>(land);
+	REQUIRE(tick(200, [&] { return rt.foliage().stats().scattered == 0; }));
+	CHECK(rt.active());
+
+	// the landscape goes: nothing is left
+	w.registry().emplace<FoliageComponent>(land, fol);
+	REQUIRE(tick(6000, [&] { return rt.foliage().stats().scattered == expect && rt.foliage().stats().pending == 0; }));
+	rt.reset();
+	CHECK(rt.foliage().stats().scattered == 0);
+	std::filesystem::remove(path);
+}

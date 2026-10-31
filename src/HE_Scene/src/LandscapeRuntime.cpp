@@ -1,6 +1,7 @@
 #include "HorizonScene/LandscapeRuntime.h"
 
 #include "HorizonScene/Components/CameraComponent.h"
+#include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/LandscapeWorldComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/HorizonWorld.h"
@@ -17,6 +18,41 @@ namespace HE
 static_assert(PhysicsWorld::kGroundOwner == 0xFFFFFFFEu, "LandscapeRuntime's default ground owner is PhysicsWorld::kGroundOwner");
 namespace
 {
+// A key over what a layer's scatter depends on (not the runtime state, not the mask, which a tile landscape ignores). FoliageSystem does not
+// bump FoliageComponent::revision for an entity without a TerrainComponent, so the runtime keeps its own.
+uint64_t foliageKey(const std::vector<FoliageLayer>& layers, bool visible)
+{
+	uint64_t h = 1469598103934665603ull;
+	const auto mix = [&h](const void* d, size_t n) {
+		const uint8_t* p = static_cast<const uint8_t*>(d);
+		for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+	};
+	mix(&visible, sizeof(visible));
+	const size_t n = layers.size();
+	mix(&n, sizeof(n));
+	for (const FoliageLayer& l : layers)
+	{
+		mix(&l.visible, sizeof(l.visible));
+		mix(&l.meshAssetId, sizeof(l.meshAssetId));
+		mix(&l.materialAssetId, sizeof(l.materialAssetId));
+		mix(&l.density, sizeof(l.density));
+		mix(&l.seed, sizeof(l.seed));
+		mix(&l.minScale, sizeof(l.minScale));
+		mix(&l.maxScale, sizeof(l.maxScale));
+		mix(&l.drawDistance, sizeof(l.drawDistance));
+		mix(&l.bucketSize, sizeof(l.bucketSize));
+		mix(&l.slopeMin, sizeof(l.slopeMin));
+		mix(&l.slopeMax, sizeof(l.slopeMax));
+		mix(&l.heightMin, sizeof(l.heightMin));
+		mix(&l.heightMax, sizeof(l.heightMax));
+		mix(&l.weightLayer, sizeof(l.weightLayer));
+		const size_t lods = l.lods.size();
+		mix(&lods, sizeof(lods));
+		for (const FoliageLod& lod : l.lods) { mix(&lod.meshAssetId, sizeof(lod.meshAssetId)); mix(&lod.materialAssetId, sizeof(lod.materialAssetId)); mix(&lod.distance, sizeof(lod.distance)); mix(&lod.density, sizeof(lod.density)); }
+	}
+	return h | 1;   // never 0
+}
+
 bool fail(std::string* error, const std::string& why)
 {
 	if (error) *error = why;
@@ -93,6 +129,8 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 void LandscapeRuntime::reset()
 {
 	if (m_physics) m_ground.clear(*m_physics);
+	m_foliage.clear();
+	m_foliageKey = 0;
 	m_store.reset();
 	m_atlas.reset();
 	m_source.reset();
@@ -143,6 +181,10 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 			v = glm::vec3((camera - m_lastCamera) / static_cast<double>(dt));
 			if (glm::length(v) > 300.0f) v = glm::vec3(0.0f);
 		}
+		// the landscape entity's foliage layers, scattered per tile; no component (or removed) means none
+		const FoliageComponent* fol = world.registry().try_get<FoliageComponent>(static_cast<entt::entity>(m_landscapeEntity));
+		if (fol) { const uint64_t key = foliageKey(fol->layers, fol->visible); if (key != m_foliageKey) { setFoliageLayers(fol->visible ? fol->layers : std::vector<FoliageLayer>{}); m_foliageKey = key; } }
+		else if (m_foliageKey != 0) { setFoliageLayers({}); m_foliageKey = 0; }
 		updateAt(camera, v, budgetMs, world.origin());
 		m_lastCamera = camera;
 		m_hasLastCamera = true;
@@ -168,6 +210,8 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 	for (auto& r : rel) m_pendingReleases.push_back(r);
 	for (auto& t : tab) m_pendingTable.push_back(t);
 
+	m_foliage.update(*m_store, { cameraAbsolute }, m_config.heightMinM, m_config.heightScaleM);
+
 	if (m_physics)
 	{
 		std::vector<glm::dvec3> anchors = m_physicsAnchors;
@@ -177,6 +221,11 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 		m_ground.setConfig(pc);
 		m_ground.update(*m_physics, *m_store, anchors, origin, m_config.heightMinM, m_config.heightScaleM);
 	}
+}
+
+void LandscapeRuntime::setFoliageLayers(const std::vector<FoliageLayer>& layers)
+{
+	m_foliage.setLayers(layers);
 }
 
 void LandscapeRuntime::setPhysics(PhysicsWorld* physics, const LandscapePhysicsConfig& config)

@@ -298,10 +298,11 @@ namespace
 
         layer.store = sortIntoBuckets(local, sizeX, sizeZ, layer.bucketSize);
 
-        HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) of layer %zu "
-                              "over %.0fx%.0f%s into %zu bucket(s)",
-                     logId, placed, count, li, sizeX, sizeZ,
-                     masked ? " (density mask)" : "", layer.store->buckets.size());
+        if (warn)   // the per-tile path scatters hundreds of these and says nothing
+            HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) of layer %zu "
+                                  "over %.0fx%.0f%s into %zu bucket(s)",
+                         logId, placed, count, li, sizeX, sizeZ,
+                         masked ? " (density mask)" : "", layer.store->buckets.size());
     }
 }
 
