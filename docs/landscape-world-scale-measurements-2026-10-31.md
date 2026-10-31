@@ -35,8 +35,8 @@ Welt = 196 x 196 Tiles (100,4 km, 100 000 / 512 geht nicht auf; 195 wären 99,84
 | **zstd+pred** | **97,3** | 32,7 | 64,6 | **4,40** | 0,91 | **0,483** | 0,345 |
 | store+pred (nur der Prädiktor) | 428,7 | | | 1,00 | 0,15 | 0,164 | 0,123 |
 
-Mit `--rough 2` (Höhenrauschen ±2 LSB, ≈ 9 cm bei 3000 m Höhenumfang): zstd+pred 116,5 KB (3,68x), lz4+pred 217,0 KB (1,98x), lz4 301,7 KB (1,42x); Decodezeiten unverändert.
-Erzeugung (fBm + Gewichte + beide Pyramiden): 8,4 ms/Tile und Thread; die ganze Welt in 68 s auf 10 Threads (564 Tiles/s).
+Mit `--rough 2` (Höhenrauschen ±2 LSB, ≈ 9 cm, wenn 65 535 Stufen 3000 m abdecken): zstd+pred 116,5 KB (3,68x), lz4+pred 217,0 KB (1,98x), lz4 301,7 KB (1,42x); Decodezeiten unverändert.
+Erzeugung (fBm + Gewichte + beide Pyramiden): 8,4 ms/Tile bei 1 Thread; die ganze Welt samt Encode in 68 s auf 10 Threads (564 Tiles/s, 17,7 ms je Tile und Thread, weil sich 10 Threads Speicherbandbreite und Kerne teilen).
 
 ### Ganze Welt (38 416 Tiles, zstd+pred, gemessen)
 
@@ -76,19 +76,19 @@ Neu eintretende Tiles bei Radius 8 km: 30 m/s → 1,8/s, 100 m/s → 6,1/s, 250 
 ## 3. Befunde
 
 1. **Das Plan-Budget war zu klein, aus zwei Gründen.** Es rechnete Gewichte mit 2 Seiten und ohne Mips (256 MB bei 8 km). Gemessen: 3 Seiten, Mips dazu: **321 MB bei 8 km, 722 MB bei 12 km**. Die Gewichte sind 256 von 429 KB roh
-   und etwa 2/3 des komprimierten Tiles. 8 km passt unter 0,5 GB (CPU wie VRAM); 12 km nicht. Nur Stufe 0 resident: 8 km = 250 MB.
+   und etwa 2/3 des komprimierten Tiles. 8 km passt unter 0,5 GB (CPU wie VRAM); 12 km nicht. Nur Stufe 0 resident: 8 km = 240 MB (Stufe 0 = 321 KB je Tile, die Mips kosten weitere 107 KB).
 2. **Streaming ist weder CPU- noch Platten-gebunden.** 15 Tiles/s x 0,5 ms Decode liegt weit unter dem Frame-Budget, wenn das Decodieren auf den Workern läuft; kalt liest eine Platte ≈ 900 Tiles/s mit einem Thread
    (6 400 mit 10) einschließlich Decode. Der Hauptthread-Teil von Plan-Schritt 1 (< 1 ms/Frame) ist damit eine Frage des Hochladens/Einhängens, nicht des Ladens.
 3. **Codec: zstd+pred auf Platte (3,85 GB), lz4+pred, wo `HE_HAVE_ZSTD` aus ist (≈ 7,2 GB).** Der Prädiktor allein kostet 0,16 ms beim Decodieren, also die Hälfte von lz4+pred und ein Drittel von zstd+pred; er ist
    gut vektorisierbar, aber kein Grund, ihn wegzulassen: er halbiert die Höhen-Bytes. zstd war schon im Build (`CMakeLists.txt:244`), nichts Neues nötig.
 4. **Die Kompressionsfaktoren sind eine Klammer, keine Vorhersage.** fBm-Höhen sind glatter als echte DEMs (obere Schranke); die synthetischen Gewichte belegen alle 12 Kanäle mit Rauschen und komprimieren schlechter als
    gemalter Inhalt (meist 2 bis 4 lebende Kanäle). Mit ±2 LSB Rauschen 3,7x statt 4,4x. Für echte Inhalte ist 2,5x bis 4x ein ehrlicher Bereich, also 4 bis 6,5 GB für die Welt.
-5. **Erzeugung ist nicht billig:** 100 km prozedural zur Ladezeit (Plan §3.1) wäre 8 ms je Tile und Thread, ≈ 125 Tiles/s bei 1 Thread; für 15 Tiles/s Wanderung reicht das, aber nur ohne die teuren Gewichte-Nebenrechnungen
-   zu verdoppeln.
+5. **Prozedurale Erzeugung zur Ladezeit (Plan §3.1) ist machbar, aber nicht gratis:** 8,4 ms je Tile bei 1 Thread allein (≈ 120 Tiles/s); mit allen 10 Threads samt Encode 17,7 ms je Tile und Thread.
+   Für 15 Tiles/s Wanderung reicht das; gespeicherte Tiles (0,5 ms Decode) sind 17x billiger.
 
 ## 4. Nicht verifiziert
 
-* Alles auf NN-WS03 (9950X, 4070, NVMe). Die Mac-SSD ist schneller als viele NVMe beim Zufallslesen, der M5 langsamer pro Kern.
+* Alles auf NN-WS03 (9950X, 4070, NVMe): Decode- und Erzeugungszeiten hängen am Kern, Lesewerte an der Platte; keiner von beiden ist mit dem Mac vergleichbar gemessen.
 * Windows: `Reader`/`Writer` im `#else`-Zweig sind nie übersetzt worden. Dort fehlt der Cache-Bypass (`FILE_FLAG_NO_BUFFERING`), "cold" wird nicht gemessen, und das Werkzeug sagt das in der Überschrift von Abschnitt C.
   Auf Linux sind `posix_fadvise`-Pfade ebenfalls nicht gelaufen.
 * "Lesen ms/Tile" enthält `open()`/`close()` je Tile; ein echter Streamer hält die Pack-Datei offen. VRAM-Upload und BC-Kompression der Gewichte sind nicht gemessen (die 321 MB sind unkomprimierte Texturen).
@@ -115,7 +115,7 @@ landscape_store_bench --tile-m 512 --raster-h 1 --raster-w 4                    
 - **Not verified:** NN-WS03-Zahlen; Windows- und Linux-Zweige des Werkzeugs; echte DEM-/Malinhalte; VRAM-Upload (siehe §4).
 - **Decisions taken:** keine für die Engine. Werkzeug misst zstd Stufe 3 (`--zstd-level`), nicht mehrere Stufen.
 - **Decisions suggested, not taken:** Tile 512 m / Höhen 2 m / Gewichte 4 m bleibt Startwert (Schritt 1 kann es per Konstante ändern); residenter Radius 8 km; Deckel ≈ 350 MB RAM und ≈ 350 MB VRAM für Terraindaten;
-  zstd+pred auf Platte, lz4+pred als Rückfall; entscheiden, ob grobe Mip-Stufen nur auf Platte oder immer im RAM liegen (sie kosten ≈ 29 % der entpackten Größe); Tile-Datei = ein Pack mit Index (offen gehalten).
+  zstd+pred auf Platte, lz4+pred als Rückfall; entscheiden, ob grobe Mip-Stufen nur auf Platte oder immer im RAM liegen (sie kosten ≈ 33 % auf Stufe 0, 25 % der entpackten Gesamtgröße); Tile-Datei = ein Pack mit Index (offen gehalten).
 - **Pending (Mensch):** Raster und Authoring (Plan "Handoff": 100 km von Hand malen oder aus Generator/Import?) ist weiterhin unbeantwortet und bestimmt, wie realistisch die Kompressionsfaktoren sind.
 - **Traps:** Build-Ordner im Worktree braucht `-DFETCHCONTENT_FULLY_DISCONNECTED=ON` und eine Kopie von `_deps` (`cp -Rc`); Ninja liegt hier nur in CLion (`CMAKE_MAKE_PROGRAM`). macOS-`F_NOCACHE` räumt vorhandene Cache-Seiten nicht, nur Schreiben ohne Cache macht "cold" echt.
 - **Next steps:** 1. Bench auf NN-WS03 laufen lassen (`--full`), Windows-Zweige übersetzen und Cache-Bypass ergänzen.  2. Schritt 1 (`LandscapeStore`, Tile-Format, Streaming-Kern) mit den Budgets aus §3 beginnen; Containerformat aus `encodeTile` übernehmen (Header, Strom je Stufe).  3. Vor Schritt 2 die Gewichte-Seitenzahl und BC-Kompression der Gewichte klären (Budget).
