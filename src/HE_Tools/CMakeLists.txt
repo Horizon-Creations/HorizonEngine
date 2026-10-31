@@ -196,6 +196,35 @@ add_executable(landscape_tex_gen
 target_link_libraries(landscape_tex_gen PRIVATE HorizonCore HorizonImporters)
 target_include_directories(landscape_tex_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── landscape_store_bench.exe (measurement base of the world-scale landscape) ─
+# Step 0 of docs/landscape-world-scale-plan-2026-10-28.md: a procedural 100 km world as a
+# pure tile store (generate, encode with LZ4/zstd, write, read back cold and warm, decode),
+# timed per stage. Not part of the engine and not in he_tests: a run writes hundreds of MB.
+# Usage: see the header comment in main.cpp.
+add_executable(landscape_store_bench
+    src/LandscapeStoreBench/main.cpp
+)
+target_link_libraries(landscape_store_bench PRIVATE HorizonScene)
+target_include_directories(landscape_store_bench PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+if(HE_HAVE_LZ4)
+    target_link_libraries(landscape_store_bench PRIVATE lz4::lz4)
+    target_compile_definitions(landscape_store_bench PRIVATE HE_HAVE_LZ4)
+endif()
+if(HE_HAVE_ZSTD)
+    target_link_libraries(landscape_store_bench PRIVATE zstd::zstd)
+    target_compile_definitions(landscape_store_bench PRIVATE HE_HAVE_ZSTD)
+endif()
+if(WIN32)
+    # Same reason as hc_codegen above: no rpath, the exe must find its DLLs next to itself.
+    add_custom_command(TARGET landscape_store_bench POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:landscape_store_bench>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:landscape_store_bench>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:landscape_store_bench>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:landscape_store_bench>
+        VERBATIM
+    )
+endif()
+
 # ─── weather_sound_gen.exe (the engine's weather sounds) ──────────────────────
 # Same bargain: weather_sound_gen <out-dir> writes Rain/Wind/Snow/Storm/Thunder
 # .hasset files (Audio, PCM16) via ContentManager, synthesised from seeded noise
