@@ -27,6 +27,7 @@ add_library(HorizonScene SHARED
     src/LandscapePhysics.cpp
     src/LandscapeTileTerrain.cpp
     src/LandscapeWaterData.cpp
+    src/LandscapeWater.cpp
     src/LandscapeFoliage.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp

@@ -4,6 +4,7 @@
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/LandscapeTileTerrain.h>
+#include <HorizonScene/LandscapeWater.h>
 #include <HorizonScene/LandscapeStore.h>
 #include <HorizonScene/LandscapeTile.h>
 #include <HorizonScene/LandscapeWaterData.h>
@@ -13,7 +14,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstring>
+#include <thread>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -439,4 +442,273 @@ TEST_CASE("landscape region terrain: four tiles of the real size fit a TerrainCo
 	CHECK(r.terrain.water.allocated());
 	LandscapeRegionTerrain too;
 	CHECK_FALSE(landscapeRegionTerrain(same, { 0, 0 }, 5, { 0.0f, 3000.0f }, src.water(), too));   // 5 * 256 + 1 samples do not fit
+}
+
+// ── water around the camera ──────────────────────────────────────────────────
+namespace
+{
+bool settleStore(LandscapeStore& store, const glm::dvec3& cam, int ms = 20000)
+{
+	const auto t0 = std::chrono::steady_clock::now();
+	for (;;)
+	{
+		store.update({ { cam } }, 5.0);
+		if (store.settled()) return true;
+		if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() > ms) return false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+}
+
+// Updates until a region exists whose origin is `origin`, and nothing is in flight.
+bool settleWater(LandscapeWater& w, const LandscapeStore& store, const glm::dvec3& cam, const LandscapeWaterTable* table, LandscapeTileKey origin, int ms = 20000)
+{
+	const auto t0 = std::chrono::steady_clock::now();
+	for (;;)
+	{
+		w.update(store, cam, { 0.0f, 3000.0f }, table);
+		const auto r = w.region();
+		if (r && r->origin == origin && !w.stats().building) return true;
+		if (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() > ms) return false;
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+}
+} // namespace
+
+TEST_CASE("landscape water: the region follows the camera in whole tiles and stays put while the camera stays in its inner tiles")
+{
+	auto src = std::make_shared<ProceduralLandscapeSource>(seaWorld(10));
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 6000.0f;
+	LandscapeStore store(src, cfg);
+	const glm::dvec3 cam(5 * 512.0 + 100.0, 600.0, 5 * 512.0 + 100.0);           // tile (5, 5)
+	REQUIRE(settleStore(store, cam));
+
+	LandscapeWater water;
+	REQUIRE(settleWater(water, store, cam, src->water(), { 3, 3 }));              // 5 - 4/2
+	const auto first = water.region();
+	REQUIRE(first);
+	CHECK(first->n == 4);
+	CHECK(first->centre == glm::dvec3(5 * 512.0, 0.0, 5 * 512.0));
+	const uint64_t started = water.stats().started;
+	CHECK(started == 1);
+
+	// inside the inner 2 x 2 tiles of the region (tiles 4 and 5 of 3..6): nothing is rebuilt, the region is the same object
+	for (const glm::dvec3& c : { glm::dvec3(4 * 512.0 + 10.0, 600.0, 4 * 512.0 + 10.0), glm::dvec3(6 * 512.0 - 10.0, 600.0, 6 * 512.0 - 10.0),
+	                              glm::dvec3(5 * 512.0, 600.0, 4 * 512.0 + 300.0) })
+	{
+		for (int i = 0; i < 20; ++i) water.update(store, c, { 0.0f, 3000.0f }, src->water());
+		CHECK(water.stats().started == started);
+		CHECK(water.region() == first);
+	}
+
+	// one tile out of the inner range: a new region, one tile on
+	const glm::dvec3 east(6 * 512.0 + 10.0, 600.0, 5 * 512.0 + 100.0);
+	REQUIRE(settleStore(store, east));
+	REQUIRE(settleWater(water, store, east, src->water(), { 4, 3 }));
+	CHECK(water.stats().started == started + 1);
+	CHECK(water.region() != first);
+	CHECK(water.region()->revision > first->revision);
+
+	// at the world's edge the region does not leave the world
+	const glm::dvec3 corner(20.0, 600.0, 20.0);
+	REQUIRE(settleStore(store, corner));
+	REQUIRE(settleWater(water, store, corner, src->water(), { 0, 0 }));
+	const glm::dvec3 far(10 * 512.0 - 20.0, 600.0, 10 * 512.0 - 20.0);
+	REQUIRE(settleStore(store, far));
+	REQUIRE(settleWater(water, store, far, src->water(), { 6, 6 }));              // 10 - 4
+	CHECK(water.region()->origin == LandscapeTileKey{ 6, 6 });
+
+	// a world without water has no region, and a table that lists nothing is the same
+	LandscapeWater none;
+	for (int i = 0; i < 20; ++i) none.update(store, far, { 0.0f, 3000.0f }, nullptr);
+	CHECK(none.region() == nullptr);
+	LandscapeWaterTable empty;
+	for (int i = 0; i < 20; ++i) none.update(store, far, { 0.0f, 3000.0f }, &empty);
+	CHECK(none.region() == nullptr);
+	CHECK(none.stats().started == 0);
+}
+
+TEST_CASE("landscape water: a region waits for tiles that are not in memory yet, and a world smaller than the region still gets one")
+{
+	auto src = std::make_shared<ProceduralLandscapeSource>(seaWorld(10));
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 1500.0f;
+	LandscapeStore store(src, cfg);
+	LandscapeWater water;
+	// the store has not loaded anything: nothing can be built, and nothing crashes
+	for (int i = 0; i < 10; ++i) water.update(store, glm::dvec3(2560.0, 600.0, 2560.0), { 0.0f, 3000.0f }, src->water());
+	CHECK(water.region() == nullptr);
+	CHECK(water.stats().started == 0);
+	CHECK(water.stats().deferred > 0);
+
+	auto tiny = std::make_shared<ProceduralLandscapeSource>(seaWorld(2));        // two tiles a side: the region is 2 x 2, not 4 x 4
+	LandscapeStore tinyStore(tiny, cfg);
+	REQUIRE(settleStore(tinyStore, glm::dvec3(500.0, 600.0, 500.0)));
+	LandscapeWater w2;
+	REQUIRE(settleWater(w2, tinyStore, glm::dvec3(500.0, 600.0, 500.0), tiny->water(), { 0, 0 }));
+	CHECK(w2.region()->n == 2);
+}
+
+TEST_CASE("landscape water: the sheet of the sea lies at its level, inside the region, never over ground that stands above it, and crosses the tile borders inside")
+{
+	auto src = std::make_shared<ProceduralLandscapeSource>(seaWorld(8));
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 6000.0f;
+	LandscapeStore store(src, cfg);
+	const glm::dvec3 cam(4 * 512.0, 600.0, 4 * 512.0);
+	REQUIRE(settleStore(store, cam));
+	LandscapeWater water;
+	REQUIRE(settleWater(water, store, cam, src->water(), { 2, 2 }));
+	const auto r = water.region();
+	REQUIRE(r);
+	REQUIRE(r->terrain);
+	REQUIRE(r->sheets.size() == 1);
+	const LandscapeWaterSheet& sheet = r->sheets[0];
+	CHECK(sheet.body == 1);
+	CHECK(sheet.level == doctest::Approx(1500.0f));
+	REQUIRE_FALSE(sheet.surface.empty());
+	CHECK(sheet.params.id == 1);
+	CHECK(sheet.surface.triangles > 0);
+
+	const auto& mesh = sheet.surface.mesh;
+	REQUIRE(mesh.vertices.size() % 3 == 0);
+	const TerrainComponent& tc = *r->terrain;
+	const double half = tc.sizeX * 0.5;
+	// the steepest slope of the region's ground (per height cell) times a water cell (the lattice is one cell wide), both axes
+	double maxGrad = 0.0;
+	const float cellH = tc.sizeX / static_cast<float>(tc.resolution - 1), cellW = tc.sizeX / static_cast<float>(tc.water.res);
+	for (uint32_t z = 0; z + 1 < tc.resolution; ++z)
+		for (uint32_t x = 0; x + 1 < tc.resolution; ++x)
+		{
+			const float h = tc.sculptHeights[static_cast<size_t>(z) * tc.resolution + x];
+			maxGrad = std::max({ maxGrad, std::abs(static_cast<double>(tc.sculptHeights[static_cast<size_t>(z) * tc.resolution + x + 1] - h)) / cellH,
+			                     std::abs(static_cast<double>(tc.sculptHeights[static_cast<size_t>(z + 1) * tc.resolution + x] - h)) / cellH });
+		}
+	const float chordBound = static_cast<float>(maxGrad * cellW * 1.5);
+	MESSAGE("steepest ground " << maxGrad << " m/m, water cell " << cellW << " m: the shore may be " << chordBound << " m off in height");
+	size_t belowZero = 0, aboveZero = 0, zBelow = 0, zAbove = 0;
+	for (size_t i = 0; i + 2 < mesh.vertices.size(); i += 3)
+	{
+		const double lx = sheet.surface.center.x + mesh.vertices[i], lz = sheet.surface.center.y + mesh.vertices[i + 2];
+		REQUIRE(mesh.vertices[i + 1] == doctest::Approx(0.0f));            // the mesh sits at y = 0 under an entity at the level
+		REQUIRE(std::abs(lx) <= half + 1e-3);
+		REQUIRE(std::abs(lz) <= half + 1e-3);
+		// where the sheet is, the ground does not stand above the water by more than the overshoot, give or take the contour's chord across a
+		// cell (the shore is only as fine as the water grid): at most the steepest slope times the cell, taken both ways across it
+		REQUIRE(terrainHeightAt(tc, static_cast<float>(lx), static_cast<float>(lz)) <= sheet.level + r->shoreOvershoot + chordBound);
+		(lx < -1.0 ? belowZero : aboveZero) += (std::abs(lx) > 1.0);
+		(lz < -1.0 ? zBelow : zAbove) += (std::abs(lz) > 1.0);
+	}
+	// The region's middle (local 0) is the border between its tiles 1 and 2: the sea passes across it, in both directions
+	CHECK(belowZero > 0);
+	CHECK(aboveZero > 0);
+	CHECK(zBelow > 0);
+	CHECK(zAbove > 0);
+
+	// surfaceAt agrees with the field and the ground
+	int wet = 0, dry = 0, outside = 0;
+	for (double x = r->centre.x - half + 3.0; x < r->centre.x + half; x += 67.0)
+		for (double z = r->centre.z - half + 3.0; z < r->centre.z + half; z += 67.0)
+		{
+			LandscapeWaterQuery q;
+			const bool w = water.surfaceAt(x, z, q);
+			const float lx = static_cast<float>(x - r->centre.x), lz = static_cast<float>(z - r->centre.z);
+			float level = 0.0f;
+			const bool cellWet = water::levelAt(tc, lx, lz, level);
+			const float ground = terrainHeightAt(tc, lx, lz);
+			REQUIRE(w == (cellWet && ground <= level + r->shoreOvershoot));
+			REQUIRE(q.wet == w);
+			if (w)
+			{
+				++wet;
+				REQUIRE(q.body == 1);
+				REQUIRE(q.level == doctest::Approx(1500.0f));
+				REQUIRE(q.depth == doctest::Approx(std::max(0.0f, 1500.0f - ground)));
+				REQUIRE(q.params.id == 1);
+			}
+			else ++dry;
+		}
+	CHECK(wet > 0);
+	CHECK(dry > 0);
+	LandscapeWaterQuery q;
+	CHECK_FALSE(water.surfaceAt(r->centre.x + half + 50.0, r->centre.z, q));           // outside the region: no water here
+	CHECK_FALSE(water.surfaceAt(-100.0, -100.0, q));
+	(void)outside;
+}
+
+TEST_CASE("landscape water: destroying it with a build running waits for the build")
+{
+	auto src = std::make_shared<ProceduralLandscapeSource>(seaWorld(8));
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 6000.0f;
+	LandscapeStore store(src, cfg);
+	REQUIRE(settleStore(store, glm::dvec3(2048.0, 600.0, 2048.0)));
+	{
+		LandscapeWater water;
+		water.update(store, glm::dvec3(2048.0, 600.0, 2048.0), { 0.0f, 3000.0f }, src->water());
+		CHECK(water.stats().started == 1);
+	}   // the build was started a moment ago and is waited for here
+	const auto held = store.tile({ 4, 4 });
+	REQUIRE(held);
+	// the tiles of the region are the store's and ours; nothing of the finished (or cancelled) build still holds one
+	for (int i = 0; i < 100 && held.use_count() > 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	CHECK(held.use_count() == 2);
+}
+
+TEST_CASE("landscape water: a straight bank across a tile border gives a straight shore, exactly where the ground meets the level")
+{
+	// Four tiles whose ground is a plane rising to the east (0.2 m per metre), crossing the sea level at x = 2048 (the border between tile
+	// 3 and 4); every cell is wet (coverage 255) and the ground decides, so the sheet is the west half and its shore is the line x = 2048.
+	const ProceduralLandscapeSource base(seaWorld(8));
+	const auto tileAt = [&](LandscapeTileKey k) -> std::shared_ptr<const LandscapeTile> {
+		if (k.x < 0 || k.z < 0 || k.x >= 8 || k.z >= 8) return nullptr;
+		auto t = std::make_shared<LandscapeTile>(base.generate(k));
+		const int n = t->geometry.heightDim(0);
+		for (int z = 0; z < n; ++z)
+			for (int x = 0; x < n; ++x)
+			{
+				const double xAbs = k.x * 512.0 + x * (512.0 / (n - 1));
+				const double metres = 1500.0 + 0.2 * (xAbs - 2048.0);
+				t->heights[0][static_cast<size_t>(z) * n + x] = static_cast<uint16_t>(std::clamp(std::lround(metres / 3000.0 * 65535.0), 0l, 65535l));
+			}
+		t->heights.resize(1);
+		t->buildMips();
+		std::fill(t->waterCoverage.begin(), t->waterCoverage.end(), uint8_t(255));
+		std::fill(t->waterOwner.begin(), t->waterOwner.end(), uint16_t(1));
+		return t;
+	};
+	LandscapeRegionTerrain rt;
+	REQUIRE(landscapeRegionTerrain(tileAt, { 2, 2 }, 4, { 0.0f, 3000.0f }, base.water(), rt));
+	water::SurfaceOptions opt;
+	opt.clipToGround = rt.terrain.water.clipToGround;
+	opt.shoreOvershoot = rt.terrain.water.shoreOvershoot;
+	water::SurfaceMesh sm;
+	REQUIRE(water::buildSurface(rt.terrain, 1, opt, sm));
+	REQUIRE_FALSE(sm.empty());
+	CHECK(rt.centre.x == 2048.0);                                              // the shore is the middle of the region
+	size_t onShore = 0, west = 0;
+	double minX = 1e9, maxX = -1e9;
+	for (size_t i = 0; i + 2 < sm.mesh.vertices.size(); i += 3)
+	{
+		const double lx = sm.center.x + sm.mesh.vertices[i];
+		minX = std::min(minX, lx);
+		maxX = std::max(maxX, lx);
+		// overshoot 0.05 m / slope 0.2 = 0.25 m east of the middle; the heights are 16 bit (4.6 cm a step, 0.23 m along this slope), so within that
+		if (std::abs(lx) < 2.0) { ++onShore; REQUIRE(std::abs(lx - 0.25) < 0.3); }
+		else REQUIRE(lx < 0.0);                                                // every other vertex is on the water's side
+		if (lx < -1000.0) ++west;
+	}
+	CHECK(onShore >= 2);                                                       // the shore line has its ends (and the sheet is a half of the region)
+	CHECK(west >= 2);                                                          // and the far side reaches the region's border
+	CHECK(std::abs(minX + 1024.0) < 0.01);                                     // the far side is the region's border
+	CHECK(maxX < 1.0);
+	// The area of the sheet is the water half: 1024 x 2048 m (plus a sliver for the overshoot)
+	double area = 0.0;
+	for (size_t t = 0; t + 2 < sm.mesh.indices.size(); t += 3)
+	{
+		const auto vtx = [&](uint32_t i) { return glm::dvec2(sm.mesh.vertices[i * 3], sm.mesh.vertices[i * 3 + 2]); };
+		const glm::dvec2 a = vtx(sm.mesh.indices[t]), b = vtx(sm.mesh.indices[t + 1]), c = vtx(sm.mesh.indices[t + 2]);
+		area += std::abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) * 0.5;
+	}
+	CHECK(area == doctest::Approx(1024.0 * 2048.0 + 0.25 * 2048.0).epsilon(1e-3));
 }
