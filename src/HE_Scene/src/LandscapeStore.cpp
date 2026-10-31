@@ -100,7 +100,7 @@ std::vector<LandscapeTileKey> LandscapeStore::residentKeys() const
 
 bool LandscapeStore::settled() const
 {
-	if (m_loading != 0) return false;
+	if (!m_havePlan || m_dirty || m_loading != 0) return false;   // before the first update nothing has been planned
 	for (const auto& k : m_wanted)
 		if (m_tiles.find(k) == m_tiles.end()) return false;
 	return true;

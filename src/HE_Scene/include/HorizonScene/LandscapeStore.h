@@ -95,7 +95,7 @@ public:
 	bool    isResident(LandscapeTileKey key) const;
 	bool    isLoading(LandscapeTileKey key) const;
 	std::vector<LandscapeTileKey> residentKeys() const;
-	// True when every wanted tile is resident or failed and nothing is loading.
+	// True when every wanted tile is resident or failed and nothing is loading. False before the first update().
 	bool    settled() const;
 
 	// Tiles within the kept ring at the last plan (hysteresis set), for tests and the editor's view.

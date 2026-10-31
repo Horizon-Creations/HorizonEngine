@@ -278,6 +278,7 @@ add_executable(he_tests
     test_cell_village.cpp
     test_landscape_store.cpp
     test_landscape_quadtree.cpp
+    test_landscape_render.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp
