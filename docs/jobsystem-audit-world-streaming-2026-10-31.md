@@ -1,6 +1,7 @@
 # Job-System-Audit im Hinblick auf mehr World-Streaming, Map-Bauten, Shader- und Mesh-Upload
 
-Stand 31.10.2026. Reiner Code-Audit (nichts gemessen, nichts gebaut, kein Engine-Code geändert).
+Stand 31.10.2026. Der Audit selbst ist reine Code-Lektüre (nichts gemessen). Was danach aus §4 umgesetzt
+wurde, steht in §5; die Befunde in §3 beschreiben den Zustand VOR dem Umbau.
 Gelesen: `JobSystem.h/.cpp` komplett, `ContentManager.cpp` (Load-Pfad, `pollAsyncResults`,
 `parseAndRegisterAsset`), `CellStreamer.cpp:470-540`, `SceneJsonParse.cpp:240-310`,
 `D3DShaderPrefetch.h`, die `WarmupMaterials`-Stellen der Backends, Vulkans Upload-Batches,
@@ -192,28 +193,54 @@ Jeder Schritt braucht einen Test, der das alte Verhalten weiter prüft (CLAUDE.m
 hier nicht, aber `test_jobsystem.cpp` und `test_async_streaming.cpp` sind die Regression). Für 2, 5, 6, 9
 zusätzlich ein Linux-TSan-Lauf der beiden Dateien (das Doc zur Jolt-Umstellung vermerkt: kein TSan-Lauf).
 
+## 5. Umsetzungsstand (gleicher Zweig, nach dem Audit)
+
+| §4 | Befund | Stand | Wo |
+|---|---|---|---|
+| 1 | D2 Wartezeit in der Queue | **umgesetzt** | `ThreadPoolStats::Lane::waitNs/waitMaxNs`, `ThreadPool::resetPeaks()`, Spalten *Wait avg/max* und Backlog-Zeile in `StreamingDebugView.cpp` |
+| 2 | A1 Hochstufen | **umgesetzt** | `JobHandle::promote()` (zweiter Queue-Eintrag, alter wird toter Eintrag); `LoadInterest::join` stuft Datei- und Pak-Loads hoch (`ContentManager.cpp`) |
+| 3 | B1a Verschieben statt Kopieren | **umgesetzt** (Textur `PIXL`, Prefab `PFAB`) | `HAsset::Reader::takeChunkData`; Mesh-`readVec` kopiert weiter (Typwechsel) |
+| 4 | D3 Stop-Flag, C4 `SkyNoise3D` | **umgesetzt** | `PoolCore::draining` in `runClaimed` (nur Low); `SkyNoise3D.cpp` auf `parallel_for`, Ausgabe bytegleich (FNV-Hash vor/nach für n = 8/31/32/64) |
+| 5 | A2 Sortierschlüssel | **umgesetzt**, ohne 5. Lane | `JobDesc::order` (Heap je Lane, FIFO bei gleichem Schlüssel); `CellStreamer` setzt Distanz in mm |
+| 6 | C1+C2 Io-Klasse, `after`-Pipeline | **umgesetzt für Pak-Loads** | `JobKind::Io` + `setIoConcurrencyLimit` (Default `clamp(threads/2, 2, 4)`); Pak: `AssetReadPak` (Io) → `AssetLoadPak` (Cpu, `after`); `HpakReader::readStoredStoppable/decodeStored`. Loose-Datei-Loads sind als Ganzes `Io` |
+| 7 | D1 Gegendruck | **umgesetzt** | `AsyncSink::backlogBytes`, Grenze 256 MB, nur Low-Loads warten (max 10 s), `ContentManager::awaitBacklogRoom` |
+| 8 | B1b Parse auf den Worker | **nicht umgesetzt** | Umbau von `parseAndRegisterAsset` (400 Zeilen); ohne Messung nicht gerechtfertigt, B1a nimmt die größte Kopie schon weg |
+| 9 | B2 Material-/PSO-Aufbau im Pool | **nicht umgesetzt** | betrifft fünf Backends, braucht GPU und einen „ready“-Zustand im Draw; hier weder Metal noch D3D noch Vulkan prüfbar |
+| 10 | B3 Upload-Budget, C3 QoS | **nicht umgesetzt** | QoS: Linux kann eine gesenkte Priorität ohne Rechte nicht zurücknehmen, macOS/Windows hier nicht prüfbar; Upload: backend-spezifisch, siehe 9 |
+| 11 | E Skalierung, Jolt | **nicht umgesetzt** | erst nach Durchsatz-Benchmark |
+
+Entscheidung gegenüber §3-A2: keine zusätzlichen Lanes (`Critical`/`Idle`). Eine Idle-Lane unter Low
+würde die zwei für den Frame freigehaltenen Worker mitnutzen und die Reservierung aufweichen, ohne dass
+ein Aufrufer sie heute braucht.
+
+**Verhaltensänderungen, auf die man achten sollte**
+- Ein Pak-Load braucht jetzt zwei Scheduling-Schritte (Read, dann Decode): minimal mehr Latenz je Asset,
+  dafür blockiert die Platte nicht mehr den Dekodier-Platz.
+- Beim Zerstören des Pools enden nicht gestartete **geplante** Low-Jobs als `Cancelled` (`onCancelled`
+  läuft). `submit()`/`post()` und High/Normal laufen wie vorher zu Ende.
+- Low-Loads warten bei über 256 MB unregistrierter Ergebnisse (höchstens 10 s); wer nie
+  `pollAsyncResults` aufruft, bekommt deshalb nach 10 s weiter Ergebnisse, nur verzögert.
+
 ## Handoff
 
-- **Topic / step:** Job-System-Audit (World-Streaming, Map-Bauten, Shader-/Mesh-Upload), Schritt 1 von n.
-- **Branch / commit:** Arbeitsbaum, nicht committet, nicht gepusht.
-- **Done:** Befundliste mit Beleg und Priorisierung (§3, §4). Kein Engine-Code geändert.
-- **Files touched:** nur dieses Doc.
-- **Verified (gelesen, nicht ausgeführt):** `JobSystem.h/.cpp` komplett; Load-Pfad und Poll in
-  `ContentManager.cpp:187-330, 1220-1305, 1330-1640, 1730-1800`; `CellStreamer.cpp:470-540`;
-  `SceneJsonParse.cpp:240-310`; `D3DShaderPrefetch.h:90-170`; `WarmupMaterials` in Metal, Vulkan
-  (nur Queue), D3D12 (`drainMaterialWarmup`); Vulkan `noteUpload`; Grep: kein QoS/Thread-Priority-Aufruf,
-  `desc.after` nur in JobSystem und Tests, `JobPriority::` nur an den genannten Stellen.
-- **Not verified:** keine Messung, kein Build, kein Test gelaufen. Nicht gelesen: der Vulkan-Drain
-  der Material-Warmups, Metals Upload-Pfad für Meshes/Texturen im Detail (welche der
-  `waitUntilCompleted` im Streaming-Pfad liegen), D3D11/GL-Upload, `expandFrontier`-Kosten,
-  `TerrainSystem`-Chunk-Build auf dem Pool (nicht gefunden, vermutlich nicht im Pool).
-- **Decisions taken:** keine Wiederholung der Befunde aus `cpu-threading-*` (Foliage, Animation,
-  Extract) und `world-streaming-baseline` (Pak-TOC, Szenen-Parse).
-- **Decisions suggested, not taken:** Reihenfolge in §4; `promote()` als Doppel-Eintrag statt
-  Queue-Umbau; Ressourcenklasse Io/Cpu statt weiterer Prioritäts-Lanes.
-- **Traps:** `ContentManager.cpp` und die `*Renderer.*` nie ganz lesen (CLAUDE.md §3); das Poll-Budget
-  lässt immer ein Asset durch, nur `budgetMs`-Prüfung allein beweist nichts über Einzelspikes.
-- **Next steps:** 1. D2 in `JobSystem.cpp` (Zeitstempel in `PoolTask`, Lane-Wartezeit in
-  `ThreadPoolStats`, Anzeige in `StreamingDebugView.cpp`). 2. Mit den Zahlen A1 umsetzen
-  (`JobHandle::promote`, Test in `test_jobsystem.cpp`, Verhalten in `test_async_streaming.cpp`).
-  3. B1a als eigener kleiner Schritt mit Texturgrößen-Messung vorher/nachher.
+- **Topic / step:** Job-System-Audit (World-Streaming, Map-Bauten, Shader-/Mesh-Upload), Schritte 1-7 aus §4 umgesetzt (§5).
+- **Branch / commit:** `claude/jobsystem-audit-world-streaming` (PR #215), Commits Audit + Umsetzung; gepusht.
+- **Done:** siehe §5. Pool: `promote`, `order`, `JobKind::Io`, Wartezeit-Stats, Shutdown-Cancel. ContentManager: Hochstufen, Move statt Copy,
+  Backlog-Grenze, Pak als Read+Decode. `HpakReader` geteilt. `CellStreamer`-Distanzschlüssel. `SkyNoise3D` auf den Pool.
+- **Files touched:** `src/HE_Core/{include,src}/JobSystem/JobSystem.*`, `src/HE_Core/src/ContentManager/ContentManager.cpp` (Load-Pfad, `awaitBacklogRoom`,
+  `launchPakLoad`), `ContentManager.h` (`LoadInterest::jobs`, `AsyncSink`), `HAsset.h` (`takeChunkData`), `Hpak/HpakReader.*`, `HE_Scene/src/CellStreamer.cpp`,
+  `HE_Rendering/src/SkyNoise3D.cpp`, `HE_Editor/StreamingDebugView.cpp`, Tests `test_jobsystem.cpp`, `test_async_streaming.cpp`, `test_hasset.cpp`, `test_hpak.cpp`.
+- **Verified (Linux, g++ 13, Release):** `test_jobsystem` 38/38 als Einzelbinary (6 Wiederholungen) und unter ThreadSanitizer ohne Meldung;
+  `test_async_streaming` + `test_hasset` + `test_hpak` + `test_profiler` gegen frisch gebautes `HorizonCore`/`HorizonScene`: 116 Fälle grün,
+  Pak/Async-Teilmenge 5× wiederholt; Mutationscheck: ohne `promote()` in `LoadInterest::join` schlägt der neue Async-Test fehl;
+  `scripts/editor_help_audit.py --check` ok; `SkyNoise3D` bytegleich zu vorher.
+- **Not verified:** voller `he_tests` (nur die genannten Dateien, per Hand gelinkt, ohne `HorizonImporters`), `test_contentmanager`, Editor/Spiel
+  gestartet, macOS/Windows/Metal/D3D/Vulkan, die neuen Streaming-Tab-Spalten **optisch** (kein UI-Test, nur Help-Audit und Syntax), keine Messung
+  des Nutzens (Wartezeiten, Frame-Zeiten, Durchsatz). Ob `Io`-Limit 2-4 auf echten Platten passt, ist ungemessen.
+- **Decisions taken:** `promote()` als Doppel-Eintrag; keine neuen Lanes; Shutdown-Cancel nur für geplante Low-Jobs; Backlog-Grenze fest 256 MB / 10 s.
+- **Decisions suggested, not taken:** B1b, B2, B3/C3, E (siehe §5), und ein `Io`-Limit aus den Projekteinstellungen.
+- **Traps:** `ContentManager::LoadInterest` und seine Jobs halten sich gegenseitig, bis die Jobs fertig sind (Kommentar in `ContentManager.h`); `Lane::queued`
+  zählt tote Einträge (Promote legt absichtlich einen zweiten an); ein voller Build braucht `libgl-dev` & Co. (`apt-get install libgl-dev libglx-dev libopengl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev`);
+  Mini-Tests: `ninja -t commands tests/CMakeFiles/he_tests.dir/<datei>.cpp.o` liefert die Compilezeile, dann gegen `libHorizonCore.so`/`libHorizonScene.so` linken.
+- **Next steps:** 1. Im Editor mit einer Zellen-Szene den Streaming-Tab ansehen (Wait avg/max, Backlog) und Vorher/Nachher der Ladezeit messen.
+  2. CI-Lauf des PR abwarten (volle Suite, macOS-Leg). 3. B2 (Material-PSO im Pool) mit Metal oder D3D12 zuerst, hinter einem „ready“-Zustand im Draw.

@@ -1861,6 +1861,53 @@ TEST_CASE("Pak streaming: cancelled loads drop, shared or re-requested ones stil
     removeQuiet(pak);
 }
 
+// A pak load is two jobs (read, then decode). Asking for it at a higher priority
+// while it waits must move both: the read is what is queued, the decode follows it.
+TEST_CASE("Pak streaming: a High request promotes a queued Low load past the Low cap")
+{
+    const HE::UUID a{0xCA21, 1};
+    HpakWriter p;
+    p.addEntry(a, makeMaterialBlob(a, "promote_a"), {Hpak::Codec::Zstd});
+    auto pak = std::filesystem::temp_directory_path() / "he_stream_promote.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+
+    ThreadPool& pool = globalPool();
+    const size_t lowCap = pool.concurrencyLimit(HE::JobPriority::Low);
+    REQUIRE(lowCap < pool.threadCount());
+
+    std::atomic<bool>   go{ false };
+    std::atomic<size_t> parked{ 0 };
+    std::vector<std::future<void>> blockers;
+    for (size_t i = 0; i < lowCap; ++i)
+        blockers.push_back(pool.submit([&] {
+            parked.fetch_add(1);
+            while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }, "TestPakLowHold", HE::JobPriority::Low));
+    while (parked.load() < lowCap) std::this_thread::yield();
+
+    bool fired = false;
+    cm.loadAssetAsync(a, [&](HE::UUID) { fired = true; });       // Low, over the cap: waits
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    cm.pollAsyncResults();
+    CHECK_FALSE(fired);
+
+    HE::AsyncLoadOptions urgent;
+    urgent.priority = HE::JobPriority::High;
+    cm.loadAssetAsync(a, {}, urgent);                             // coalesced, promoted
+
+    pumpUntil(cm, [&] { return fired; }, 3000);
+    const bool arrivedWhileHeld = fired;
+    go.store(true);
+    for (auto& b : blockers) b.get();
+
+    CHECK(arrivedWhileHeld);
+    CHECK(cm.isLoaded(a));
+    removeQuiet(pak);
+}
+
 // Thema 153, Schritt 5: a started pak load can be dropped too. The reader asks
 // its stop condition between 4 MiB read blocks, before each decode step and
 // between 4 MiB zstd windows.
