@@ -78,7 +78,7 @@ Gesamt 22 + 87 · count. Der Leser verweigert: falsches Magic oder Version, `byt
 
 Verifiziert (`cmake-build-bench`, echte `he_tests`): `test_landscape_*` 106 Testfälle, `test_foliage*` 76, `test_terrain*` 155, `test_water*` 245, `test_physics*` 134, `test_world_scale*` 44, `test_scene_serializer*` 46, `test_cell_*` 34, alle grün; die Wasser-Suite dreimal hintereinander. CI des Foliage-Stands (68e07e61): Windows, Linux, Linux Vulkan und macOS grün; ebenso der Stand `43a90014` mit den Wasser-Commits.
 Mutationsprüfungen früherer Schritte (zu frühes Morphen, Store ohne Verwerfen später Ladungen, alte Randsuche, kein Warten beim Aufräumen) schlugen an.
-**Nicht verifiziert:** Zeiten, Speicher im Betrieb, Zeichnen, ein Pack mit echtem Gelände (alle Tests laufen auf prozeduralen Quellen), 
+**Nicht verifiziert:** Zeiten, Speicher im Betrieb, Zeichnen, ein Pack mit echtem Gelände (alle Tests laufen auf prozeduralen Quellen).
 
 ## Handoff
 
