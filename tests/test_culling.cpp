@@ -3593,6 +3593,19 @@ TEST_CASE("Realistic clouds: the quality constants of the march (weather-map cad
 	REQUIRE(sGl.size() == 2);
 	CHECK(sGl == sMtl);
 	CHECK(sGl.front() == 0.0);
+	// The adaptive march: the fine step as a fraction of the coarse one (Low / Medium / High), and the distance and the
+	// opacity limits of the fine mode. Same numbers in both dialects; the fine step only ever gets finer with quality.
+	const std::vector<double> fGl = numbers(glFile, "float", "qFineF"), fMtl = numbers(mtlFile, "float", "qFineF");
+	REQUIRE(fGl.size() == 3);
+	CHECK(fGl == fMtl);
+	CHECK(fGl[0] > fGl[1]);
+	CHECK(fGl[1] > fGl[2]);
+	for (const std::string* src : { &glFile, &mtlFile })
+	{
+		CHECK(src->find("float tFineMax = maxDist * 0.12;") != std::string::npos);
+		CHECK(src->find("if (!fine && dens > 0.01 && t < tFineMax && T > 0.4)") != std::string::npos);
+		CHECK(src->find("bool fineNext = fine && emptyRun < 2 && T > 0.4;") != std::string::npos);
+	}
 }
 
 TEST_CASE("Realistic clouds: the cloud-type table (cell size, tower profile) is the same numbers in GL and MSL")

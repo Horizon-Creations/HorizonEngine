@@ -4792,7 +4792,7 @@ float4 cloudShapeParams(float4 drift)
 	if (t == 2) return float4(0.85, 0.50, 1.15, 1.00);
 	if (t == 3) return float4(1.25, 0.10, 0.45, 0.45);
 	if (t == 4) return float4(0.50, 0.80, 1.35, 1.00);
-	return float4(1.0, 0.28, 1.0, 1.0e9);
+	return float4(1.0, 0.28, 1.0, 1.0);   // a tower never reaches the slab's flat top: the crowns are domes
 }
 // ── Shared cloud shape field ─────────────────────────────────────────────────
 // Coarse density (presence × vertical profile × billow erosion, no fine octave)
@@ -5121,6 +5121,10 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	// almost half of its time (docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md).
 	int qColEvery = (quality < 0.5) ? 4 : (quality < 1.5 ? 3 : 1);
 	float qSkipA = (quality >= 1.5) ? 0.0 : 0.04;   // opacity below which a step skips the sun march (High: never)
+	// Adaptive march: coarse steps through empty space, a finer step (this fraction of ds) through the surface layer of a
+	// cloud near the camera, where the lumps are. Low 0.5, Medium 0.34, High 0.25.
+	float qFineF = (quality < 0.5) ? 0.5 : (quality < 1.5 ? 0.34 : 0.25);
+
 	if (interSh < 0.5) qShadow = min(qShadow, 3); // short march: own body only
 
 	cloudH      = max(cloudH, 1.0);
@@ -5170,25 +5174,61 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	float wAcc = 0.0;
 	float2 colA = float2(0.0);
 	float2 colB = float2(0.0);
-	for (int i = 0; i < N; ++i)
+	// Explicit march position: the step length changes between coarse and fine samples.
+	int   NM       = int(float(N) * 1.6) + 4;
+	float dsFine   = ds * qFineF;
+	float tFineMax = maxDist * 0.12;
+	float tCur     = tNear + jitter * ds;
+	bool  fine     = false;
+	int   emptyRun = 0;
+	bool  usedFine = false;   // a fine segment happened: the surface is resolved, so its lit lumps get stronger
+	float tCol0 = 0.0, tCol1 = -1.0;
+	for (int i = 0; i < NM; ++i)
 	{
-		float  t   = tNear + (float(i) + jitter) * ds;
+		float  t   = tCur;
+		if (t > tFar) break;
 		float3 pos = camPos + dir * t;
 		float  hf  = clamp((pos.y - baseY) / thick, 0.0, 1.0);
 		float  detailFade = 1.0 - smoothstep(maxDist * 0.10, maxDist * 0.40, t);
 		float2 col;
-		if (qColEvery <= 1)
+		// The weather map is smooth along a ray: anchors every qColEvery coarse steps, interpolated by distance; fine
+		// samples (inside a cloud) read it exactly.
+		if (qColEvery <= 1 || fine)
 			col = cloudColumnReal(pos, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp);
 		else
 		{
-			if ((i % qColEvery) == 0)
+			if (t > tCol1)
 			{
-				colA = (i == 0) ? cloudColumnReal(pos, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp) : colB;
-				colB = cloudColumnReal(camPos + dir * (t + float(qColEvery) * ds), baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp);
+				if (tCol1 >= 0.0 && t - tCol1 < 1.01 * ds)   // the next anchor interval starts where the last ended: reuse its far end
+				{
+					tCol0 = tCol1;
+					colA  = colB;
+				}
+				else
+				{
+					tCol0 = t;
+					colA  = cloudColumnReal(pos, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp);
+				}
+				tCol1 = tCol0 + float(qColEvery) * ds;
+				colB  = cloudColumnReal(camPos + dir * tCol1, baseY, thick, nscale, time, wind, drift, evo, noiseTex, noiseSamp);
 			}
-			col = mix(colA, colB, float(i % qColEvery) / float(qColEvery));
+			col = mix(colA, colB, clamp((t - tCol0) / (tCol1 - tCol0), 0.0, 1.0));
 		}
 		float dens = cloudBodyReal(pos, baseY, thick, nscale, lo, time, wind, drift, fluff, evo, col, noiseTex, noiseSamp);
+		// Mode update. Entering: the first coarse sample of a cloud near the camera (and while the ray is still mostly clear)
+		// re-marches that interval with fine samples; the interval centred on t starts half a coarse step back. Leaving: two
+		// empty fine samples, or the ray went opaque (the inside of a cloud needs no resolution).
+		float dsCur = fine ? dsFine : ds;
+		if (!fine && dens > 0.01 && t < tFineMax && T > 0.4)
+		{
+			fine = true; usedFine = true; emptyRun = 0;
+			tCur = t - 0.5 * ds + 0.5 * dsFine;
+			continue;
+		}
+		if (fine) emptyRun = (dens <= 0.002) ? emptyRun + 1 : 0;
+		bool fineNext = fine && emptyRun < 2 && T > 0.4;
+		tCur = t + 0.5 * (dsCur + (fineNext ? dsFine : ds));
+		fine = fineNext;
 		if (dens <= 0.002) continue;
 		// Fine cauliflower octave, boiling upward with the convection. Bites
 		// hardest at the silhouette (low density) so the outline breaks into
@@ -5199,6 +5239,21 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		float  fineW = (0.50 + 0.35 * fluff) * detailFade
 		             * (1.0 - 0.45 * clamp(dens * 2.5, 0.0, 1.0));
 		dens *= mix(1.0, smoothstep(0.15, 0.55, bfine), fineW);
+		// Fine lumps on the surface layer: two curl-warped Worley octaves (cells ~70 and ~35 units), only on the skin of a
+		// cloud near the camera and only in fine mode, where the sample spacing is finer than the cells. They carve the
+		// remaining density like the coarse erosion, so the outline breaks into lumps on lumps.
+		if (fine)
+		{
+			float skin  = 1.0 - smoothstep(0.25, 0.75, dens);
+			float nearW = 1.0 - smoothstep(maxDist * 0.02, maxDist * 0.10, t);
+			if (skin * nearW > 0.0)
+			{
+				float3 q = (pos * nscale + drift.xyz) * 9.0 + float3(0.0, -time * 0.12 * evo, 11.0);
+				float3 warp = float3(starNoise3(q * 0.5 + 3.0, noiseTex, noiseSamp), starNoise3(q * 0.5 + 7.0, noiseTex, noiseSamp), starNoise3(q * 0.5 + 13.0, noiseTex, noiseSamp)) - 0.5;
+				float fl = worleyNoise3(q + warp * 0.9, noiseTex, noiseSamp) * 0.6 + worleyNoise3(q * 2.0 + warp * 0.9 + 5.0, noiseTex, noiseSamp) * 0.4;
+				dens *= mix(1.0, smoothstep(0.15, 0.75, fl), 0.75 * skin * nearW);
+			}
+		}
 		dens *= smoothstep(0.0, 0.05, dens); // kill only true dust — the mist skirt stays
 		if (dens <= 0.002) continue;
 
@@ -5207,7 +5262,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		// exponential tail reaches ~0.5 thick (3 steps, own body) or ~2.3 thick
 		// (6 steps — interShadows: neighbouring towers darken this cloud).
 		float distFade     = 1.0 - smoothstep(maxDist * 0.5, maxDist, t);
-		float opticalDepth = dens * (ds / thick) * 12.0 * distFade * densMul * (1.0 + 2.0 * ov);
+		float opticalDepth = dens * (dsCur / thick) * 12.0 * distFade * densMul * (1.0 + 2.0 * ov);
 		float a = 1.0 - exp(-opticalDepth);
 		// A thin wisp (a < qSkipA: the skirt and the ragged underside) hardly shows, so it skips the sun march and takes a
 		// typical light (High never skips).
@@ -5290,8 +5345,8 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 			float d1  = worleyNoise3(q * 2.3 + 9.0, noiseTex, noiseSamp);
 			float relief = (d0 - dS) * 3.0;                      // the slope toward the sun: lit side brighter
 			float lump   = (d0 * 0.65 + d1 * 0.35) - 0.5;        // crowns bright, hollows dark
-			float strength = fade * (1.0 - T);
-			L *= clamp(1.0 + strength * (0.35 * relief + 0.50 * lump), 0.5, 1.6);
+			float strength = fade * (1.0 - T) * (usedFine ? 1.6 : 1.0);
+			L *= clamp(1.0 + strength * (0.35 * relief + 0.50 * lump), 0.4, 1.8);
 		}
 	}
 	// Grazing-angle fade, symmetric in |dir.y|: near-horizontal rays cross an
@@ -6362,7 +6417,7 @@ float2 atmoRaySphere(float3 ro, float3 rd, float R)
 	float b = dot(ro, rd);
 	float c = dot(ro, ro) - R * R;
 	float d = b * b - c;
-	if (d < 0.0) return float2(-1.0e9, -1.0e9);
+	if (d < 0.0) return float2(-1.0e9, -1.0);   // a tower never reaches the slab's flat top: the crowns are domes
 	d = sqrt(d);
 	return float2(-b - d, -b + d);
 }
