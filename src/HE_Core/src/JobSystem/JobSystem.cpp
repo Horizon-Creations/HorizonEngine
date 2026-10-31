@@ -29,11 +29,52 @@ static bool chainCancelled(const CancelState* s)
 // carries `job`, whose body lives in the JobState. So an entry whose job was
 // cancelled meanwhile — or already run inline by a wait() — is simply dropped
 // when a worker pops it: the job's status is no longer Queued.
+using QueueClock = std::chrono::steady_clock;
+
 struct PoolTask
 {
     std::function<void()>     fn;
     const char*               name = nullptr;
     std::shared_ptr<JobState> job;
+    QueueClock::time_point    queuedAt{};   // for ThreadPoolStats::Lane::waitNs
+};
+
+// One priority's queue: smallest (order, sequence) first. With every order equal
+// it is the FIFO the deque was; the heap only costs a few comparisons per push.
+class TaskQueue
+{
+public:
+    bool   empty() const { return m_heap.empty(); }
+    size_t size()  const { return m_heap.size(); }
+
+    void push(PoolTask&& task, uint32_t order, uint64_t seq)
+    {
+        m_heap.push_back(Entry{ order, seq, std::move(task) });
+        std::push_heap(m_heap.begin(), m_heap.end(), later);
+    }
+    // (order, sequence) of what pop() would return; the queue must not be empty.
+    std::pair<uint32_t, uint64_t> frontKey() const { return { m_heap.front().order, m_heap.front().seq }; }
+    PoolTask pop()
+    {
+        std::pop_heap(m_heap.begin(), m_heap.end(), later);
+        PoolTask task = std::move(m_heap.back().task);
+        m_heap.pop_back();
+        return task;
+    }
+    // Everything, in no particular order (the destructor's leftovers).
+    void takeAll(std::vector<PoolTask>& out)
+    {
+        for (Entry& e : m_heap) out.push_back(std::move(e.task));
+        m_heap.clear();
+    }
+
+private:
+    struct Entry { uint32_t order; uint64_t seq; PoolTask task; };
+    static bool later(const Entry& a, const Entry& b)
+    {
+        return a.order != b.order ? a.order > b.order : a.seq > b.seq;
+    }
+    std::vector<Entry> m_heap;
 };
 
 // The queues, shared by the ThreadPool and every job it scheduled. A Waiting job
@@ -45,38 +86,67 @@ struct PoolCore
 {
     mutable std::mutex      mutex;
     std::condition_variable cv;
-    std::deque<PoolTask>    queues[kJobPriorityCount];
+    TaskQueue               queues[kJobKindCount][kJobPriorityCount];
+    size_t                  ioRunning = 0;
+    size_t                  ioLimit   = 0;
+    uint64_t                nextSeq = 0;   // FIFO tie-break within one order key
     size_t                  running[kJobPriorityCount] = {};   // only for capped priorities
     size_t                  limit[kJobPriorityCount]   = {};
     size_t                  threads = 0;
     bool                    stop = false;   // destructor: drain the queues, then exit
     bool                    dead = false;   // workers joined: nothing runs here any more
+    // Set when the destructor starts: scheduled Low jobs that have not begun end
+    // Cancelled instead of being run to completion on the way out (see runClaimed).
+    std::atomic<bool>       draining{ false };
 
     // ThreadPool::stats(). Atomics, bumped outside the mutex: a worker already
     // takes it once per task and a diagnostic must not make that twice.
     std::atomic<size_t>     active[kJobPriorityCount]    = {};
     std::atomic<uint64_t>   executed[kJobPriorityCount]  = {};
     std::atomic<uint64_t>   busyNs[kJobPriorityCount]    = {};
+    std::atomic<uint64_t>   waitNs[kJobPriorityCount]    = {};
+    std::atomic<uint64_t>   waitMaxNs[kJobPriorityCount] = {};
     std::atomic<uint64_t>   cancelled[kJobPriorityCount] = {};
     std::atomic<uint64_t>   failed[kJobPriorityCount]    = {};
 
-    // Highest priority with a queued task that may start now. Caller holds mutex.
-    bool pick(size_t& prio) const
+    // The next task that may start now: the highest priority with one whose limits
+    // allow it; within a priority the Cpu and the Io queue compete by (order,
+    // sequence), an Io queue that is at its limit does not take part. Caller holds mutex.
+    bool pick(size_t& prio, size_t& kind) const
     {
         for (size_t p = 0; p < kJobPriorityCount; ++p)
-            if (!queues[p].empty() && running[p] < limit[p]) { prio = p; return true; }
+        {
+            if (running[p] >= limit[p]) continue;
+            const TaskQueue& cpu = queues[static_cast<size_t>(JobKind::Cpu)][p];
+            const TaskQueue& io  = queues[static_cast<size_t>(HE::JobKind::Io)][p];
+            const bool cpuOk = !cpu.empty();
+            const bool ioOk  = !io.empty() && ioRunning < ioLimit;
+            if (!cpuOk && !ioOk) continue;
+            prio = p;
+            kind = (cpuOk && (!ioOk || cpu.frontKey() <= io.frontKey()))
+                 ? static_cast<size_t>(JobKind::Cpu) : static_cast<size_t>(HE::JobKind::Io);
+            return true;
+        }
         return false;
     }
     bool empty() const
     {
-        for (const auto& q : queues)
-            if (!q.empty()) return false;
+        for (const auto& byKind : queues)
+            for (const auto& q : byKind)
+                if (!q.empty()) return false;
         return true;
     }
     size_t queuedTotal() const
     {
         size_t n = 0;
-        for (const auto& q : queues) n += q.size();
+        for (const auto& byKind : queues)
+            for (const auto& q : byKind) n += q.size();
+        return n;
+    }
+    size_t queued(size_t prio) const
+    {
+        size_t n = 0;
+        for (const auto& byKind : queues) n += byKind[prio].size();
         return n;
     }
 };
@@ -88,7 +158,15 @@ struct JobState
     std::function<void()> onCancelled;
     CancelToken           cancel;
     const char*           name     = "Job::Execute";
-    JobPriority           priority = JobPriority::Normal;
+    // Atomic since promote() can change it while the job is queued; the lane a
+    // pushed entry sits in is what counts for running it, this decides where the
+    // next push (and the stats of a cancel) goes.
+    std::atomic<JobPriority> priority{ JobPriority::Normal };
+    uint32_t              order = 0;
+    JobKind               kind  = JobKind::Cpu;
+    // When the job (first) became ready, in QueueClock ticks; 0 = not yet. A
+    // promote() re-queues with this, so the wait it reports is the whole one.
+    std::atomic<int64_t>  queuedTicks{ 0 };
     std::shared_ptr<PoolCore> core;
 
     // Every transition out of Waiting/Queued is a compare-exchange, so exactly one
@@ -136,13 +214,30 @@ static void notifyStatus(JobState& j)
     j.cv.notify_all();
 }
 
+static QueueClock::time_point queuedAtOf(JobState& job)
+{
+    int64_t ticks = job.queuedTicks.load(std::memory_order_relaxed);
+    if (ticks == 0)
+    {
+        // First push: remember it. Losing the race to a concurrent promote() is fine,
+        // both stamp "now".
+        const int64_t now = QueueClock::now().time_since_epoch().count();
+        job.queuedTicks.compare_exchange_strong(ticks, now, std::memory_order_relaxed);
+        ticks = job.queuedTicks.load(std::memory_order_relaxed);
+    }
+    return QueueClock::time_point(QueueClock::duration(ticks));
+}
+
 static bool pushReady(const std::shared_ptr<JobState>& job)
 {
     PoolCore& core = *job->core;
+    const QueueClock::time_point at = queuedAtOf(*job);
     {
         std::lock_guard<std::mutex> lock(core.mutex);
         if (core.dead) return false;
-        core.queues[static_cast<size_t>(job->priority)].push_back(PoolTask{ {}, job->name, job });
+        const JobPriority prio = job->priority.load();
+        core.queues[static_cast<size_t>(job->kind)][static_cast<size_t>(prio)]
+            .push(PoolTask{ {}, job->name, job, at }, job->order, core.nextSeq++);
     }
     core.cv.notify_one();
     return true;
@@ -182,7 +277,7 @@ static void finishJobs(Worklist& work)
 
         if (job->core && (st == JobStatus::Cancelled || st == JobStatus::Failed))
         {
-            const size_t p = static_cast<size_t>(job->priority);
+            const size_t p = static_cast<size_t>(job->priority.load());
             (st == JobStatus::Cancelled ? job->core->cancelled[p] : job->core->failed[p])
                 .fetch_add(1, std::memory_order_relaxed);
         }
@@ -226,6 +321,12 @@ static bool runClaimed(const std::shared_ptr<JobState>& job)
 {
     JobStatus st = JobStatus::Done;
     bool skip = cancelWanted(*job);
+    // The pool is being destroyed: background work that has not begun is not worth
+    // waiting for on the way out (hundreds of queued asset reads made quitting take
+    // as long as reading them). High jobs still run — someone may be blocked on one.
+    if (!skip && job->core && job->priority.load() == JobPriority::Low
+        && job->core->draining.load(std::memory_order_acquire))
+        skip = true;
     if (!skip && job->stale)
     {
         try { skip = job->stale(); }
@@ -377,6 +478,22 @@ void JobHandle::cancel() const
     }
 }
 
+void JobHandle::promote(JobPriority priority) const
+{
+    if (!m_state) return;
+    JobState& j = *m_state;
+    if (static_cast<size_t>(priority) >= static_cast<size_t>(j.priority.load())) return;
+    // The new priority first, the status second (both seq_cst): a job that turns
+    // Queued after the status read below pushes itself into the new lane, and one
+    // that was already Queued gets the second entry from here.
+    j.priority.store(priority);
+    if (j.status.load() != JobStatus::Queued) return;   // Waiting queues itself later; the rest is past promoting
+    // A second entry in the higher lane. The first one stays where it is and is
+    // dropped by whichever worker pops it after this one has run: claim(Queued)
+    // fails there, exactly like the entry of a cancelled or inline-run job.
+    pushReady(m_state);
+}
+
 void JobHandle::wait() const
 {
     const std::shared_ptr<JobState>& job = m_state;
@@ -440,6 +557,9 @@ ThreadPool::ThreadPool(size_t threadCount)
     // every worker inside a 50 ms pak read.
     core.limit[static_cast<size_t>(JobPriority::Low)]    = threadCount > 3 ? threadCount - 2 : 1;
 
+    core.ioLimit = std::clamp<size_t>(threadCount / 2, 2, 4);
+    if (core.ioLimit > all) core.ioLimit = all;
+
     m_threads.reserve(threadCount);
     for (size_t i = 0; i < threadCount; ++i)
     {
@@ -455,15 +575,18 @@ ThreadPool::ThreadPool(size_t threadCount)
             {
                 HE::detail::PoolTask task;
                 size_t prio    = 0;
+                size_t kind    = 0;
                 bool   counted = false;
+                bool   isIo    = false;
                 {
                     std::unique_lock<std::mutex> lock(core->mutex);
                     core->cv.wait(lock, [&] {
-                        return core->pick(prio) || (core->stop && core->empty());
+                        return core->pick(prio, kind) || (core->stop && core->empty());
                     });
-                    if (!core->pick(prio)) return;   // stopping and drained
-                    task = std::move(core->queues[prio].front());
-                    core->queues[prio].pop_front();
+                    if (!core->pick(prio, kind)) return;   // stopping and drained
+                    task = core->queues[kind][prio].pop();
+                    isIo = kind == static_cast<size_t>(HE::JobKind::Io);
+                    if (isIo) ++core->ioRunning;
                     // Only capped priorities are counted: an uncapped one would pay
                     // a second lock per task for a number nobody reads.
                     counted = core->limit[prio] < core->threads;
@@ -514,17 +637,27 @@ ThreadPool::ThreadPool(size_t threadCount)
                     core->busyNs[prio].fetch_add(static_cast<uint64_t>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(StatClock::now() - began).count()),
                         std::memory_order_relaxed);
+                    if (task.queuedAt.time_since_epoch().count() != 0 && began > task.queuedAt)
+                    {
+                        const uint64_t waited = static_cast<uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(began - task.queuedAt).count());
+                        core->waitNs[prio].fetch_add(waited, std::memory_order_relaxed);
+                        uint64_t peak = core->waitMaxNs[prio].load(std::memory_order_relaxed);
+                        while (waited > peak &&
+                               !core->waitMaxNs[prio].compare_exchange_weak(peak, waited, std::memory_order_relaxed)) {}
+                    }
                 }
 
-                if (counted)
+                if (counted || isIo)
                 {
                     bool more = false;
                     {
                         std::lock_guard<std::mutex> lock(core->mutex);
-                        --core->running[prio];
-                        more = !core->queues[prio].empty();
+                        if (counted) --core->running[prio];
+                        if (isIo)    --core->ioRunning;
+                        more = core->queued(prio) > 0 || (isIo && !core->empty());
                     }
-                    // The cap may be what kept the next one waiting; nothing else
+                    // A cap may be what kept the next one waiting; nothing else
                     // would wake a worker for it.
                     if (more) core->cv.notify_one();
                 }
@@ -535,6 +668,7 @@ ThreadPool::ThreadPool(size_t threadCount)
 
 ThreadPool::~ThreadPool()
 {
+    m_core->draining.store(true, std::memory_order_release);
     {
         std::unique_lock<std::mutex> lock(m_core->mutex);
         m_core->stop = true;
@@ -549,13 +683,12 @@ ThreadPool::~ThreadPool()
     // The workers drained every queue before leaving. Anything here was pushed by
     // a dependency that finished on a thread outside this pool after the last
     // worker had gone: it can no longer run, so it ends as Cancelled.
-    std::deque<HE::detail::PoolTask> leftovers;
+    std::vector<HE::detail::PoolTask> leftovers;
     {
         std::lock_guard<std::mutex> lock(m_core->mutex);
         m_core->dead = true;
-        for (auto& q : m_core->queues)
-            for (auto& t : q) leftovers.push_back(std::move(t));
-        for (auto& q : m_core->queues) q.clear();
+        for (auto& byKind : m_core->queues)
+            for (auto& q : byKind) q.takeAll(leftovers);
     }
     HE::detail::Worklist work;
     for (auto& t : leftovers)
@@ -569,12 +702,13 @@ void ThreadPool::enqueue(std::function<void()> fn, const char* name, HE::JobPrio
                          size_t copies)
 {
     if (copies == 0) return;
+    const HE::detail::QueueClock::time_point at = HE::detail::QueueClock::now();
     {
         std::lock_guard<std::mutex> lock(m_core->mutex);
-        auto& q = m_core->queues[static_cast<size_t>(priority)];
+        auto& q = m_core->queues[static_cast<size_t>(HE::JobKind::Cpu)][static_cast<size_t>(priority)];
         for (size_t i = 1; i < copies; ++i)
-            q.push_back(HE::detail::PoolTask{ fn, name, nullptr });
-        q.push_back(HE::detail::PoolTask{ std::move(fn), name, nullptr });
+            q.push(HE::detail::PoolTask{ fn, name, nullptr, at }, 0, m_core->nextSeq++);
+        q.push(HE::detail::PoolTask{ std::move(fn), name, nullptr, at }, 0, m_core->nextSeq++);
     }
     if (copies >= m_threads.size()) m_core->cv.notify_all();
     else for (size_t i = 0; i < copies; ++i) m_core->cv.notify_one();
@@ -589,7 +723,9 @@ HE::JobHandle ThreadPool::scheduleFn(std::function<void()> fn, HE::JobDesc desc)
     job->onCancelled = std::move(desc.onCancelled);
     job->cancel      = std::move(desc.cancel);
     job->name        = desc.name ? desc.name : "Job::Execute";
-    job->priority    = desc.priority;
+    job->priority.store(desc.priority);
+    job->order       = desc.order;
+    job->kind        = desc.kind;
     job->core        = m_core;
 
     // One count held by this function, so no dependency finishing on another
@@ -630,6 +766,21 @@ void ThreadPool::setConcurrencyLimit(HE::JobPriority priority, size_t maxRunning
     m_core->cv.notify_all();   // a raised cap lets waiting jobs start now
 }
 
+void ThreadPool::setIoConcurrencyLimit(size_t maxRunning)
+{
+    {
+        std::lock_guard<std::mutex> lock(m_core->mutex);
+        m_core->ioLimit = std::max<size_t>(1, maxRunning);
+    }
+    m_core->cv.notify_all();
+}
+
+size_t ThreadPool::ioConcurrencyLimit() const
+{
+    std::lock_guard<std::mutex> lock(m_core->mutex);
+    return m_core->ioLimit;
+}
+
 size_t ThreadPool::concurrencyLimit(HE::JobPriority priority) const
 {
     std::lock_guard<std::mutex> lock(m_core->mutex);
@@ -639,7 +790,7 @@ size_t ThreadPool::concurrencyLimit(HE::JobPriority priority) const
 size_t ThreadPool::queuedCount(HE::JobPriority priority) const
 {
     std::lock_guard<std::mutex> lock(m_core->mutex);
-    return m_core->queues[static_cast<size_t>(priority)].size();
+    return m_core->queued(static_cast<size_t>(priority));
 }
 
 HE::ThreadPoolStats ThreadPool::stats() const
@@ -648,10 +799,12 @@ HE::ThreadPoolStats ThreadPool::stats() const
     const HE::detail::PoolCore& core = *m_core;
     {
         std::lock_guard<std::mutex> lock(core.mutex);
-        s.threads = core.threads;
+        s.threads   = core.threads;
+        s.ioRunning = core.ioRunning;
+        s.ioLimit   = core.ioLimit;
         for (size_t p = 0; p < HE::kJobPriorityCount; ++p)
         {
-            s.lanes[p].queued = core.queues[p].size();
+            s.lanes[p].queued = core.queued(p);
             s.lanes[p].limit  = core.limit[p];
         }
     }
@@ -661,10 +814,17 @@ HE::ThreadPoolStats ThreadPool::stats() const
         l.running   = core.active[p].load(std::memory_order_relaxed);
         l.executed  = core.executed[p].load(std::memory_order_relaxed);
         l.busyNs    = core.busyNs[p].load(std::memory_order_relaxed);
+        l.waitNs    = core.waitNs[p].load(std::memory_order_relaxed);
+        l.waitMaxNs = core.waitMaxNs[p].load(std::memory_order_relaxed);
         l.cancelled = core.cancelled[p].load(std::memory_order_relaxed);
         l.failed    = core.failed[p].load(std::memory_order_relaxed);
     }
     return s;
+}
+
+void ThreadPool::resetPeaks()
+{
+    for (auto& m : m_core->waitMaxNs) m.store(0, std::memory_order_relaxed);
 }
 
 // ─── parallel_for ─────────────────────────────────────────────────────────────

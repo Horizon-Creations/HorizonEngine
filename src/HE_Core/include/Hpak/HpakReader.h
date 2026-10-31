@@ -71,6 +71,18 @@ public:
     std::vector<uint8_t> readEntry(const HE::UUID& id, const uint8_t key[32],
                                    const std::function<bool()>& stop, bool* stopped) const;
 
+    // readEntry in its two halves, so a streaming job can do the disk read and the
+    // CPU work (decrypt, decompress) as two jobs with different limits:
+    // readStoredStoppable is the IO half (content-hash verified stored bytes, stops
+    // like readEntry; false with *stopped set when abandoned), decodeStored the CPU
+    // half. decodeStored needs no reader and no file, so it can run on any thread.
+    // Both return/accept exactly what readEntry would have handled in one go.
+    bool readStoredStoppable(const HE::UUID& id, StoredEntry& out,
+                             const std::function<bool()>& stop, bool* stopped) const;
+    static std::vector<uint8_t> decodeStored(const HE::UUID& id, StoredEntry&& stored,
+                                             const uint8_t key[32],
+                                             const std::function<bool()>& stop, bool* stopped);
+
 private:
     struct EntryMeta {
         HE::UUID uuid;
