@@ -31,8 +31,11 @@ LandscapeStore::LandscapeStore(std::shared_ptr<const LandscapeTileSource> source
 
 LandscapeStore::~LandscapeStore()
 {
-	// Queued loads never start; a running one finishes into the shared queue, which it keeps alive.
+	// Queued loads never start; a running one finishes into the shared queue, which it keeps alive. The handles are cancelled
+	// as well as the token: the token is only looked at when a worker dequeues the job, a handle finishes it at once.
 	m_storeToken.cancel();
+	for (auto& [k, e] : m_tiles)
+		if (e.state == Entry::State::Loading) e.job.cancel();
 }
 
 void LandscapeStore::setConfig(const LandscapeStoreConfig& config)
@@ -61,6 +64,8 @@ void LandscapeStore::dropEntry(std::unordered_map<LandscapeTileKey, Entry, Lands
 void LandscapeStore::clear()
 {
 	m_storeToken.cancel();
+	for (auto& [k, e] : m_tiles)
+		if (e.state == Entry::State::Loading) e.job.cancel();
 	m_storeToken = CancelToken::create();
 	// Whatever is running now finishes with a ticket nobody holds and is thrown away.
 	m_tiles.clear();

@@ -97,6 +97,8 @@ public:
 	const LandscapeAtlas*  atlas() const { return m_atlas.get(); }
 	const LandscapeQuadtreeConfig& quadtree() const { return m_quadtree; }
 	const LandscapeRuntimeConfig&  config() const { return m_config; }
+	// How often update() tried to start from a pack (a failing pack counts once, not once a frame).
+	int beginAttempts() const { return m_beginAttempts; }
 
 private:
 	bool beginWith(std::shared_ptr<const LandscapeTileSource> source, const LandscapeRuntimeConfig& config, std::string* error);
@@ -112,6 +114,8 @@ private:
 	bool       m_hasLastCamera = false;
 	uint64_t   m_generation = 0;
 	std::string m_pack;
+	std::string m_failedPack;   // a pack that could not start: not tried again until the component names another
+	int         m_beginAttempts = 0;
 	std::vector<LandscapeAtlas::Upload>      m_pendingUploads;
 	std::vector<LandscapeAtlas::Release>     m_pendingReleases;
 	std::vector<LandscapeAtlas::TableUpdate> m_pendingTable;

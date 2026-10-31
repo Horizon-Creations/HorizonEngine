@@ -43,13 +43,19 @@ bool LandscapeRuntime::beginFromPack(const std::string& path, const LandscapeRun
 	return ok;
 }
 
-bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> source, const LandscapeRuntimeConfig& config, std::string* error)
+bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> source, const LandscapeRuntimeConfig& configIn, std::string* error)
 {
 	if (!source) return fail(error, "no tile source");
 	const LandscapeCoarseWorld* coarse = source->coarse();
 	if (!coarse || !coarse->valid()) return fail(error, "the tile source has no coarse world (a version 1 pack): the far levels have no data");
 	const LandscapeGeometry& g = source->geometry();
 
+	// The pack says what its heights mean; the config's numbers are for a source that does not.
+	LandscapeRuntimeConfig config = configIn;
+	{
+		float mn = 0.0f, sc = 0.0f;
+		if (source->heightRange(mn, sc)) { config.heightMinM = mn; config.heightScaleM = sc; }
+	}
 	LandscapeQuadtreeConfig q = LandscapeQuadtreeConfig::fromGeometry(g, source->tilesX(), source->tilesZ());
 	// The tile levels are exactly those below the coarse world's raster: one number, taken from the pack.
 	q.tileLevels = coarse->heightLevel - 1;
@@ -98,7 +104,8 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 		const auto& c = world.registry().get<LandscapeWorldComponent>(e);
 		if (c.enabled && !c.pack.empty()) { comp = &c; break; }
 	}
-	if (!comp) { if (active()) reset(); return; }
+	if (!comp) { if (active()) reset(); m_failedPack.clear(); return; }
+	if (!active() && comp->pack == m_failedPack) return;       // it failed before; a changed path is a new try
 	if (!active() || m_pack != comp->pack)
 	{
 		LandscapeRuntimeConfig cfg;
@@ -107,12 +114,14 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 		cfg.heightMinM = comp->heightMinM;
 		cfg.heightScaleM = comp->heightScaleM;
 		std::string err;
+		++m_beginAttempts;
 		if (!beginFromPack(comp->pack, cfg, &err))
 		{
 			HE_LOG_WARN(World, "Landscape: %s", err.c_str());
-			m_pack = comp->pack;   // do not try again every frame; a changed pack path does
+			m_failedPack = comp->pack;
 			return;
 		}
+		m_failedPack.clear();
 	}
 	if (!active()) return;
 

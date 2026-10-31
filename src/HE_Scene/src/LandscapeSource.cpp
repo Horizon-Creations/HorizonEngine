@@ -195,8 +195,11 @@ LandscapePackWriter::~LandscapePackWriter()
 	if (m_open) m_out.close();
 }
 
-bool LandscapePackWriter::begin(const std::string& path, const LandscapeGeometry& geometry, int tilesX, int tilesZ, int firstCoarseLevel)
+bool LandscapePackWriter::begin(const std::string& path, const LandscapeGeometry& geometry, int tilesX, int tilesZ, int firstCoarseLevel,
+                                float heightMinM, float heightScaleM)
 {
+	m_heightMinM = heightMinM;
+	m_heightScaleM = heightScaleM;
 	if (!geometry.valid() || tilesX <= 0 || tilesZ <= 0) return false;
 	m_geometry = geometry;
 	m_tilesX = tilesX;
@@ -289,6 +292,10 @@ bool LandscapePackWriter::finish()
 	put64(&head[32], coarseOffset);
 	put32(&head[40], heightSize);
 	put32(&head[44], weightSize);
+	std::memcpy(&bits, &m_heightMinM, 4);
+	put32(&head[48], bits);
+	std::memcpy(&bits, &m_heightScaleM, 4);
+	put32(&head[52], bits);
 	for (size_t i = 0; i < m_offset.size(); ++i)
 	{
 		put64(&head[kLandscapePackHeaderBytes + i * kLandscapePackIndexEntryBytes], m_offset[i]);
@@ -384,6 +391,14 @@ std::shared_ptr<LandscapePackSource> LandscapePackSource::open(const std::string
 			return fail("pack index points outside the file");
 	}
 
+	if (version == 2)
+	{
+		bits = get32(head + 48);
+		std::memcpy(&src->m_heightMinM, &bits, 4);
+		bits = get32(head + 52);
+		std::memcpy(&src->m_heightScaleM, &bits, 4);
+		if (!std::isfinite(src->m_heightMinM) || !std::isfinite(src->m_heightScaleM) || src->m_heightScaleM < 0.0f) src->m_heightMinM = src->m_heightScaleM = 0.0f;
+	}
 	// The coarse world (version 2): both grids are decoded now and stay in memory.
 	if (version == 2 && head[25] != 255)
 	{

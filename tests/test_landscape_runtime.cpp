@@ -7,6 +7,7 @@
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/SceneSerializer.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -238,9 +239,15 @@ TEST_CASE("landscape runtime: the scene's LandscapeWorldComponent starts it from
 
 	// a component that names a pack that is not there: a warning once, no crash, no landscape
 	world.registry().emplace<LandscapeWorldComponent>(landscape).pack = (path.string() + ".missing");
+	const int attempts = rt.beginAttempts();
+	rt.update(world, 0.016f);
 	rt.update(world, 0.016f);
 	rt.update(world, 0.016f);
 	CHECK_FALSE(rt.active());
+	CHECK(rt.beginAttempts() == attempts + 1);                    // tried once, warned once, not every frame
+	world.registry().get<LandscapeWorldComponent>(landscape).pack = path.string() + ".other";
+	rt.update(world, 0.016f);
+	CHECK(rt.beginAttempts() == attempts + 2);                    // another path is a new try
 }
 
 TEST_CASE("landscape runtime: beyond the tile levels the patches read the coarse world's grids")
@@ -278,4 +285,92 @@ TEST_CASE("landscape runtime: beyond the tile levels the patches read the coarse
 	bad.morphStart = 0.5f;
 	CHECK_FALSE(rt.begin(src, bad, &err));
 	CHECK(err.find("sqrt(2)") != std::string::npos);
+}
+
+TEST_CASE("landscape runtime: the heights' metres come from the pack when it says them")
+{
+	const auto src = smallRealWorld(8);
+	const auto path = std::filesystem::temp_directory_path() / ("he_landscape_range_" + std::to_string(std::random_device{}()) + ".bin");
+	const auto writeWith = [&](float minM, float scaleM) {
+		LandscapePackWriter w;
+		REQUIRE(w.begin(path.string(), src->geometry(), 8, 8, 4, minM, scaleM));
+		for (int z = 0; z < 8; ++z)
+			for (int x = 0; x < 8; ++x) REQUIRE(w.add({ x, z }, encodeLandscapeTile(src->generate({ x, z }))));
+		REQUIRE(w.finish());
+	};
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;                         // 0 .. 3000 unless the pack says otherwise
+	std::string err;
+
+	writeWith(-50.0f, 1800.0f);
+	REQUIRE_MESSAGE(rt.beginFromPack(path.string(), cfg, &err), err);
+	CHECK(rt.quadtree().minY == doctest::Approx(-50.0f));
+	CHECK(rt.quadtree().maxY == doctest::Approx(1750.0f));
+	{
+		const auto pack = LandscapePackSource::open(path.string());
+		float mn = 0, sc = 0;
+		REQUIRE(pack);
+		CHECK(pack->heightRange(mn, sc));
+		CHECK(mn == doctest::Approx(-50.0f));
+		CHECK(sc == doctest::Approx(1800.0f));
+	}
+	rt.reset();
+
+	writeWith(0.0f, 0.0f);                              // a pack that does not say: the config's numbers count
+	cfg.heightMinM = 10.0f;
+	cfg.heightScaleM = 900.0f;
+	REQUIRE_MESSAGE(rt.beginFromPack(path.string(), cfg, &err), err);
+	CHECK(rt.quadtree().minY == doctest::Approx(10.0f));
+	CHECK(rt.quadtree().maxY == doctest::Approx(910.0f));
+	rt.reset();
+	std::filesystem::remove(path);
+}
+
+TEST_CASE("landscape world component: saved with the scene, loaded back, absent in a scene from before it")
+{
+	const auto file = std::filesystem::temp_directory_path() / ("he_landscape_scene_" + std::to_string(std::random_device{}()) + ".json");
+	{
+		HorizonWorld world;
+		const Entity e = world.createEntity("World");
+		auto& lw = world.registry().emplace<LandscapeWorldComponent>(e);
+		lw.pack = "Landscape/world.hlp";
+		lw.loadRadius = 6500.0f;
+		lw.budgetMB = 200;
+		lw.heightMinM = -20.0f;
+		lw.heightScaleM = 2400.0f;
+		lw.enabled = false;
+		const Entity plain = world.createEntity("Plain");
+		(void)plain;
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	}
+	HorizonWorld back;
+	SceneSerializer ser;
+	REQUIRE(ser.load(back, file, SerializeFormat::JSON));
+	int found = 0;
+	for (auto e : back.registry().view<LandscapeWorldComponent>())
+	{
+		const auto& lw = back.registry().get<LandscapeWorldComponent>(e);
+		++found;
+		CHECK(lw.pack == "Landscape/world.hlp");
+		CHECK(lw.loadRadius == doctest::Approx(6500.0f));
+		CHECK(lw.budgetMB == 200u);
+		CHECK(lw.heightMinM == doctest::Approx(-20.0f));
+		CHECK(lw.heightScaleM == doctest::Approx(2400.0f));
+		CHECK_FALSE(lw.enabled);
+	}
+	CHECK(found == 1);
+
+	// a scene without the key (every scene written before) loads without the component, and keys it does not know about stay harmless
+	std::filesystem::remove(file);
+	{
+		HorizonWorld world;
+		world.createEntity("Old");
+		SceneSerializer s2;
+		REQUIRE(s2.save(world, file, SerializeFormat::JSON));
+	}
+	HorizonWorld old;
+	REQUIRE(ser.load(old, file, SerializeFormat::JSON));
+	CHECK(old.registry().view<LandscapeWorldComponent>().size() == 0);
+	std::filesystem::remove(file);
 }
