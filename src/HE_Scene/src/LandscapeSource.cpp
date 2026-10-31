@@ -114,6 +114,17 @@ const LandscapeCoarseWorld* ProceduralLandscapeSource::coarse() const
 }
 
 // ── Procedural ───────────────────────────────────────────────────────────────
+ProceduralLandscapeSource::ProceduralLandscapeSource(ProceduralLandscapeParams p) : m_p(p)
+{
+	if (m_p.seaLevelM > -1.0e8f)
+	{
+		LandscapeWaterBody sea;
+		sea.id = 1;
+		sea.level = m_p.seaLevelM;
+		m_water.bodies.push_back(sea);
+	}
+}
+
 LandscapeTile ProceduralLandscapeSource::generate(LandscapeTileKey key) const
 {
 	const LandscapeGeometry& g = m_p.geometry;
@@ -173,6 +184,19 @@ LandscapeTile ProceduralLandscapeSource::generate(LandscapeTileKey key) const
 			p[best] = static_cast<uint8_t>(std::clamp(p[best] + 255 - acc, 0, 255));
 		}
 	t.weights.push_back(std::move(w0));
+	if (m_p.seaLevelM > -1.0e8f)
+	{
+		// A cell is water where the ground at its centre is below the sea. Heights are in metres from 0 (heightRange).
+		t.waterCoverage.assign(static_cast<size_t>(W) * W, 0);
+		t.waterOwner.assign(static_cast<size_t>(W) * W, 0);
+		for (int z = 0; z < W; ++z)
+			for (int x = 0; x < W; ++x)
+			{
+				const int hx = std::min(x * step, n - 1), hz = std::min(z * step, n - 1);
+				const float metres = H[static_cast<size_t>(hz) * n + hx] / 65535.0f * m_p.heightScale;
+				if (metres < m_p.seaLevelM) { t.waterCoverage[static_cast<size_t>(z) * W + x] = 255; t.waterOwner[static_cast<size_t>(z) * W + x] = 1; }
+			}
+	}
 	t.buildMips();
 	return t;
 }
@@ -276,7 +300,16 @@ bool LandscapePackWriter::finish()
 		m_out.write(reinterpret_cast<const char*>(wb.data()), static_cast<std::streamsize>(wb.size()));
 		m_pos += hb.size() + wb.size();
 	}
+	uint64_t waterOffset = 0;
+	if (m_hasWater)
+	{
+		const std::vector<uint8_t> tb = encodeLandscapeWaterTable(m_water);
+		waterOffset = m_pos;
+		m_out.write(reinterpret_cast<const char*>(tb.data()), static_cast<std::streamsize>(tb.size()));
+		m_pos += tb.size();
+	}
 	std::vector<uint8_t> head(kLandscapePackHeaderBytes + m_offset.size() * kLandscapePackIndexEntryBytes, 0);
+	put64(&head[56], waterOffset);
 	put32(&head[0], kLandscapePackMagic);
 	put32(&head[4], kLandscapePackVersion);
 	put32(&head[8], static_cast<uint32_t>(m_tilesX));
@@ -398,6 +431,23 @@ std::shared_ptr<LandscapePackSource> LandscapePackSource::open(const std::string
 		bits = get32(head + 52);
 		std::memcpy(&src->m_heightScaleM, &bits, 4);
 		if (!std::isfinite(src->m_heightMinM) || !std::isfinite(src->m_heightScaleM) || src->m_heightScaleM < 0.0f) src->m_heightMinM = src->m_heightScaleM = 0.0f;
+	}
+	if (version == 2)
+	{
+		const uint64_t wOff = get64(head + 56);
+		if (wOff != 0)
+		{
+			if (wOff < indexEnd || wOff + kLandscapeWaterHeaderBytes > fileSize) return fail("pack water table points outside the file");
+			uint8_t wh[kLandscapeWaterHeaderBytes];
+			if (!src->readAt(wOff, wh, sizeof(wh))) return fail("pack water table cannot be read");
+			const uint32_t wSize = get32(wh + 8);
+			if (wSize < kLandscapeWaterHeaderBytes || wOff + wSize > fileSize) return fail("pack water table points outside the file");
+			std::vector<uint8_t> tb(wSize);
+			if (!src->readAt(wOff, tb.data(), tb.size())) return fail("pack water table cannot be read");
+			std::string err;
+			if (!decodeLandscapeWaterTable(tb.data(), tb.size(), src->m_water, &err)) return fail("pack water table is damaged");
+			src->m_hasWater = true;
+		}
 	}
 	// The coarse world (version 2): both grids are decoded now and stay in memory.
 	if (version == 2 && head[25] != 255)

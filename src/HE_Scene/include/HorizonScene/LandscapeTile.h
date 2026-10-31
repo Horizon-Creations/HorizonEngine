@@ -55,6 +55,12 @@ struct LandscapeTile
 	LandscapeGeometry                  geometry;
 	std::vector<std::vector<uint16_t>> heights;   // [level]
 	std::vector<std::vector<uint8_t>>  weights;   // [level]
+	// Water (Thema 326, step 3c), at the raster of the weights' level 0 (wTexels x wTexels, 4 m for the default tile): how much of a
+	// cell is water (255 = all, the water::Field coverage) and which body of water owns it (0 = none; ids are the pack's water table's).
+	// Both empty = no water in this tile; both set or neither.
+	std::vector<uint8_t>               waterCoverage;
+	std::vector<uint16_t>              waterOwner;
+	bool   hasWater() const { return !waterCoverage.empty() && waterOwner.size() == waterCoverage.size(); }
 
 	// Memory the tile holds (what the store's budget counts).
 	size_t bytes() const;
@@ -63,7 +69,7 @@ struct LandscapeTile
 	void   buildMips();
 	bool   operator==(const LandscapeTile& o) const
 	{
-		return geometry == o.geometry && heights == o.heights && weights == o.weights;
+		return geometry == o.geometry && heights == o.heights && weights == o.weights && waterCoverage == o.waterCoverage && waterOwner == o.waterOwner;
 	}
 };
 
@@ -84,10 +90,14 @@ struct LandscapeCodec
 };
 
 // Container, little endian, format version 1:
-//   u32 magic 'HLT1' (0x31544c48)   u8 version (1)   u8 backend   u8 flags (bit 0: predictor)
+//   u32 magic 'HLT1' (0x31544c48)   u8 version (1)   u8 backend   u8 flags (bit 0: predictor, bit 1: water)
 //   u8 heightLevels  u8 weightLevels  u8 channels  u16 hCells  u16 wTexels  f32 tileM   -> 18 bytes
 //   then heightLevels + weightLevels streams, heights first, level 0 first:
 //   u32 rawSize  u32 storedSize  storedSize bytes (compressed with `backend`)
+//   With flag bit 1 two more streams follow the weights, both at the raster of the weights' level 0 (wTexels squared):
+//   the water coverage (u8 each; with the predictor the weights' row delta) and the water owner (u16 each, little endian; with the
+//   predictor the heights' plane predictor, so a constant owner is all zeros). Appended, no version bump (HAsset.h's rule for a
+//   new tail): a reader from before them stops after the weights and never looks at the flag; a blob without the flag decodes as before.
 // A reader rejects an unknown version, a geometry that is not valid, a stream whose rawSize is
 // not what the geometry says, and a stored size that runs past the buffer. Never reads past `size`.
 constexpr uint32_t kLandscapeTileMagic   = 0x31544c48u;

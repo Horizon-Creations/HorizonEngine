@@ -64,6 +64,8 @@ void LandscapeStore::setConfig(const LandscapeStoreConfig& config)
 	m_config.loadRadius = std::max(0.0f, m_config.loadRadius);
 	const LandscapeGeometry& g = m_source->geometry();
 	m_tileBytes = std::max<size_t>(1, g.decodedBytes(m_config.maxLevels));
+	// A world with water carries two more rasters per tile (coverage u8, owner u16, at the weights' level 0): three bytes a texel.
+	if (m_source->water() && m_config.maxLevels != 0) m_tileBytes += static_cast<size_t>(g.weightDim(0)) * g.weightDim(0) * 3;
 	m_maxTiles  = m_config.byteBudget / m_tileBytes;
 	m_stats.maxTiles = m_maxTiles;
 	m_dirty = true;

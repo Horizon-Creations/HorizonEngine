@@ -165,6 +165,7 @@ struct Header
 	LandscapeGeometry geometry;
 	LandscapeCodec    codec;
 	int               hLevels = 0, wLevels = 0;
+	bool              water = false;   // flag bit 1: two streams after the weights
 };
 
 bool readHeader(const uint8_t* d, size_t size, Header& h, std::string* error)
@@ -175,6 +176,7 @@ bool readHeader(const uint8_t* d, size_t size, Header& h, std::string* error)
 	if (d[5] > static_cast<uint8_t>(LandscapeCodec::Backend::Zstd)) return fail(error, "unknown tile backend");
 	h.codec.backend   = static_cast<LandscapeCodec::Backend>(d[5]);
 	h.codec.predictor = (d[6] & 1) != 0;
+	h.water           = (d[6] & 2) != 0;
 	h.hLevels         = d[7];
 	h.wLevels         = d[8];
 	h.geometry.channels = d[9];
@@ -224,6 +226,7 @@ size_t LandscapeTile::bytes() const
 	size_t s = 0;
 	for (const auto& h : heights) s += h.size() * 2;
 	for (const auto& w : weights) s += w.size();
+	s += waterCoverage.size() + waterOwner.size() * 2;
 	return s;
 }
 
@@ -292,7 +295,8 @@ std::vector<uint8_t> encodeLandscapeTile(const LandscapeTile& tile, LandscapeCod
 	put32(out, kLandscapeTileMagic);
 	out.push_back(kLandscapeTileVersion);
 	out.push_back(static_cast<uint8_t>(codec.backend));
-	out.push_back(codec.predictor ? 1 : 0);
+	const bool water = tile.hasWater() && tile.waterCoverage.size() == static_cast<size_t>(g.weightDim(0)) * g.weightDim(0);
+	out.push_back(static_cast<uint8_t>((codec.predictor ? 1 : 0) | (water ? 2 : 0)));
 	out.push_back(static_cast<uint8_t>(g.heightLevels()));
 	out.push_back(static_cast<uint8_t>(g.weightLevels()));
 	out.push_back(g.channels);
@@ -320,6 +324,14 @@ std::vector<uint8_t> encodeLandscapeTile(const LandscapeTile& tile, LandscapeCod
 		if (tile.weights[k].size() != static_cast<size_t>(g.weightDim(k)) * g.weightDim(k) * g.channels) return {};
 		if (codec.predictor) { weightForward(tile.weights[k], g.weightDim(k), g.weightDim(k), g.channels, tmp); stream(tmp.data(), tmp.size()); }
 		else stream(tile.weights[k].data(), tile.weights[k].size());
+	}
+	if (water)
+	{
+		const int w = g.weightDim(0);
+		if (codec.predictor) { weightForward(tile.waterCoverage, w, w, 1, tmp); stream(tmp.data(), tmp.size()); }
+		else stream(tile.waterCoverage.data(), tile.waterCoverage.size());
+		if (codec.predictor) { heightForward(tile.waterOwner, w, w, tmp); stream(tmp.data(), tmp.size()); }
+		else stream(reinterpret_cast<const uint8_t*>(tile.waterOwner.data()), tile.waterOwner.size() * 2);
 	}
 	return out;
 }
@@ -381,6 +393,22 @@ bool decodeLandscapeTile(const uint8_t* data, size_t size, LandscapeTile& out, i
 		if (h.codec.predictor) weightInverse(raw.data(), g.weightDim(k), g.weightDim(k), g.channels, v);
 		else v = raw;
 		out.weights.push_back(std::move(v));
+	}
+	if (h.water && wl > 0)   // level-0 data: kept under any maxLevels that keeps level 0
+	{
+		const int w = g.weightDim(0);
+		const size_t texels = static_cast<size_t>(w) * w;
+		const uint8_t* p = nullptr; uint32_t stored = 0;
+		if (!next(texels, p, stored)) return false;
+		raw.resize(texels);
+		if (!decompress(h.codec.backend, p, stored, raw.data(), texels)) return fail(error, "tile water coverage stream is corrupt");
+		if (h.codec.predictor) weightInverse(raw.data(), w, w, 1, out.waterCoverage);
+		else out.waterCoverage = raw;
+		if (!next(texels * 2, p, stored)) return false;
+		raw.resize(texels * 2);
+		if (!decompress(h.codec.backend, p, stored, raw.data(), texels * 2)) return fail(error, "tile water owner stream is corrupt");
+		if (h.codec.predictor) heightInverse(raw.data(), w, w, out.waterOwner);
+		else { out.waterOwner.resize(texels); std::memcpy(out.waterOwner.data(), raw.data(), texels * 2); }
 	}
 	return true;
 }

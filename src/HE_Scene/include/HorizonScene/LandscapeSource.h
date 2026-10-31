@@ -1,5 +1,6 @@
 #pragma once
 #include "HorizonScene/LandscapeTile.h"
+#include "HorizonScene/LandscapeWaterData.h"
 
 #include <cstdint>
 #include <fstream>
@@ -102,6 +103,8 @@ public:
 	virtual bool heightRange(float& minM, float& scaleM) const { (void)minM; (void)scaleM; return false; }
 	// The always-resident coarse world, or null when the source has none (a version 1 pack). Valid as long as the source.
 	virtual const LandscapeCoarseWorld* coarse() const { return nullptr; }
+	// The bodies of water the tiles' owner ids name, or null when the world has no water (then its tiles carry none).
+	virtual const LandscapeWaterTable* water() const { return nullptr; }
 };
 
 // ── Procedural world ─────────────────────────────────────────────────────────
@@ -118,12 +121,15 @@ struct ProceduralLandscapeParams
 	float  baseFrequency = 6.0f;  // cycles over the world
 	float  heightScale = 3000.0f; // metres for the full 16 bit range (only the weight slope uses it)
 	int    roughLsb = 0;          // +-LSB white noise on the heights: real surveyed data is not noise-free
+	// Water: every cell whose ground is below this many metres is water (coverage 255) of body 1, whose level is this. Off by default (any
+	// value below -1e8): a world with no sea has no water table and its tiles carry no water streams.
+	float  seaLevelM = -1.0e9f;
 };
 
 class ProceduralLandscapeSource final : public LandscapeTileSource
 {
 public:
-	explicit ProceduralLandscapeSource(ProceduralLandscapeParams p) : m_p(p) {}
+	explicit ProceduralLandscapeSource(ProceduralLandscapeParams p);
 	const LandscapeGeometry& geometry() const override { return m_p.geometry; }
 	int  tilesX() const override { return m_p.tilesX; }
 	int  tilesZ() const override { return m_p.tilesZ; }
@@ -132,12 +138,14 @@ public:
 	// for 100 km. Real worlds read it from their pack.
 	const LandscapeCoarseWorld* coarse() const override;
 	bool heightRange(float& minM, float& scaleM) const override { minM = 0.0f; scaleM = m_p.heightScale; return true; }
+	const LandscapeWaterTable* water() const override { return m_p.seaLevelM > -1.0e8f ? &m_water : nullptr; }
 
 	// The whole pyramid of one tile. Deterministic: the same key gives the same bytes.
 	LandscapeTile generate(LandscapeTileKey key) const;
 
 private:
 	ProceduralLandscapeParams m_p;
+	LandscapeWaterTable       m_water;   // body 1 at the sea level, when there is one
 	mutable std::once_flag    m_coarseOnce;
 	mutable LandscapeCoarseWorld m_coarse;
 };
@@ -146,11 +154,13 @@ private:
 // One file for the whole world, little endian. Version 2 (written today); version 1 (no coarse world, 32-byte header) is still read.
 //   u32 magic 'HLP1' (0x31504c48)  u32 version  u32 tilesX  u32 tilesZ
 //   f32 tileM  u16 hCells  u16 wTexels  u8 channels  u8 coarseHeightLevel  u8 coarseWeightLevel  u8[5] 0      -> offset 0..31 (as version 1)
-//   version 2 only: u64 coarseOffset  u32 coarseHeightSize  u32 coarseWeightSize  f32 heightMinM  f32 heightScaleM  u8[36] 0   -> offset 32..63
+//   version 2 only: u64 coarseOffset  u32 coarseHeightSize  u32 coarseWeightSize  f32 heightMinM  f32 heightScaleM  u8[4] 0
+//                   u64 waterTableOffset (0 = no water; LandscapeWaterData.h)                                           -> offset 32..63
 //   (metres of a stored height 0 and of 65535 above it; scale 0 = not said)
 //   index: tilesX * tilesZ entries, row-major (z * tilesX + x), each  u64 offset  u32 size   (size 0: no tile)  -> right after the header
 //   then the tile blobs (LandscapeTile container, see LandscapeTile.h), back to back,
-//   then the coarse world: a height grid blob and a weight grid blob (LandscapeTile.h, "Grids"), at coarseOffset.
+//   then the coarse world: a height grid blob and a weight grid blob (LandscapeTile.h, "Grids"), at coarseOffset,
+//   then the water table (LandscapeWaterData.h) at waterTableOffset.
 // coarseHeightLevel 255 = the pack has no coarse world. Grid sizes: heights (tilesX * (hCells >> level) + 1) x (tilesZ * ...),
 // weights (tilesX * (wTexels >> level)) x (tilesZ * ...).
 constexpr uint32_t kLandscapePackMagic   = 0x31504c48u;
@@ -173,6 +183,8 @@ public:
 	// `blob` is an encodeLandscapeTile() result; its geometry has to be the pack's. `coarse`: this tile's share of the coarse
 	// world (landscapeCoarseSampleOf); without it the writer decodes the blob to get it, which costs a tile decode.
 	bool add(LandscapeTileKey key, const std::vector<uint8_t>& blob, const LandscapeCoarseSample* coarse = nullptr);
+	// The bodies of water the tiles' owner ids name. Before finish(); none = no table, and a reader sees a world without water.
+	void setWaterTable(const LandscapeWaterTable& table) { m_water = table; m_hasWater = true; }
 	bool finish();
 	size_t tilesWritten() const { return m_written; }
 
@@ -188,6 +200,8 @@ private:
 	LandscapeCoarseLayout m_layout;
 	float                 m_heightMinM = 0.0f, m_heightScaleM = 0.0f;
 	bool                  m_withCoarse = false;
+	LandscapeWaterTable   m_water;
+	bool                  m_hasWater = false;
 	LandscapeCoarseWorld  m_coarse;     // grid 0 and the weights; the point-sampled grids are made when it is read
 	std::vector<uint8_t>  m_coarseSeen; // per tile
 };
@@ -205,6 +219,7 @@ public:
 	int  tilesZ() const override { return m_tilesZ; }
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override;
 	const LandscapeCoarseWorld* coarse() const override { return m_coarse.valid() ? &m_coarse : nullptr; }
+	const LandscapeWaterTable* water() const override { return m_hasWater ? &m_water : nullptr; }
 	int  version() const { return m_version; }
 	bool heightRange(float& minM, float& scaleM) const override { minM = m_heightMinM; scaleM = m_heightScaleM; return m_heightScaleM > 0.0f; }
 	bool has(LandscapeTileKey key) const;
@@ -221,6 +236,8 @@ private:
 	int                   m_version = 0;
 	float                 m_heightMinM = 0.0f, m_heightScaleM = 0.0f;
 	LandscapeCoarseWorld  m_coarse;
+	LandscapeWaterTable   m_water;
+	bool                  m_hasWater = false;
 	std::vector<uint64_t> m_offset;
 	std::vector<uint32_t> m_size;
 	uint64_t              m_fileSize = 0;
