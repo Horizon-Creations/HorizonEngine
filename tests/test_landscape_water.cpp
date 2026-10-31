@@ -1,16 +1,23 @@
 // Water on the world-scale landscape (Thema 326, step 3c): the tile's water streams, the pack's table of bodies, the procedural sea,
 // and (further down) the region that turns tiles into one water::Field-carrying terrain. Real data, no timing.
 #include "doctest.h"
+#include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/LandscapeSource.h>
+#include <HorizonScene/LandscapeTileTerrain.h>
 #include <HorizonScene/LandscapeStore.h>
 #include <HorizonScene/LandscapeTile.h>
 #include <HorizonScene/LandscapeWaterData.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
+#include <HorizonScene/TerrainPaint.h>
+#include <HorizonScene/WaterField.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <random>
 
 using namespace HE;
@@ -285,4 +292,130 @@ TEST_CASE("landscape store: a world with water counts the water rasters in its t
 	const LandscapeGeometry g = dry->geometry();
 	CHECK(b.tileBytes() == a.tileBytes() + static_cast<size_t>(g.weightDim(0)) * g.weightDim(0) * 3);
 	CHECK(a.tileBytes() == g.decodedBytes());
+}
+
+// ── a region of tiles as one terrain ────────────────────────────────────────
+
+namespace
+{
+using TileFn = std::function<std::shared_ptr<const LandscapeTile>(LandscapeTileKey)>;
+
+// Tiles of a procedural world, generated once each.
+struct Tiles
+{
+    const ProceduralLandscapeSource& src;
+    mutable std::map<std::pair<int, int>, std::shared_ptr<const LandscapeTile>> cache;
+    std::shared_ptr<const LandscapeTile> operator()(LandscapeTileKey k) const
+    {
+        if (k.x < 0 || k.z < 0 || k.x >= src.tilesX() || k.z >= src.tilesZ()) return nullptr;
+        auto& slot = cache[{ k.x, k.z }];
+        if (!slot) slot = std::make_shared<LandscapeTile>(src.generate(k));
+        return slot;
+    }
+};
+} // namespace
+
+TEST_CASE("landscape region terrain: n x n tiles are one terrain with the tiles' heights, weights and water, exactly")
+{
+	const ProceduralLandscapeSource sea(seaWorld(4));
+	Tiles tiles{ sea };
+	const TileFn fn = [&](LandscapeTileKey k) { return tiles(k); };
+	LandscapeRegionTerrain r;
+	REQUIRE(landscapeRegionTerrain(fn, { 1, 1 }, 2, { 0.0f, 3000.0f }, sea.water(), r));
+	const TerrainComponent& tc = r.terrain;
+	CHECK(r.n == 2);
+	CHECK(r.centre == glm::dvec3(1024.0, 0.0, 1024.0));              // origin tile 1 + half of 2 tiles, 512 m each
+	CHECK(tc.sizeX == doctest::Approx(1024.0f));
+	REQUIRE(tc.resolution == 65u);                                    // 2 * 32 + 1
+	REQUIRE(tc.sculptHeights.size() == 65u * 65u);
+
+	// every sample of every tile is where it belongs; the samples two tiles share agree from both sides
+	for (int tj = 0; tj < 2; ++tj)
+		for (int ti = 0; ti < 2; ++ti)
+		{
+			const auto t = tiles({ 1 + ti, 1 + tj });
+			for (int z = 0; z < 33; ++z)
+				for (int x = 0; x < 33; ++x)
+					REQUIRE(tc.sculptHeights[static_cast<size_t>(tj * 32 + z) * 65 + static_cast<size_t>(ti * 32 + x)] ==
+					        doctest::Approx(t->heights[0][static_cast<size_t>(z) * 33 + x] * (3000.0f / 65535.0f)).epsilon(1e-5));
+		}
+	for (int z = 0; z <= 32; ++z)                                     // the border column between the two tiles of the first row
+		REQUIRE(tiles({ 1, 1 })->heights[0][static_cast<size_t>(z) * 33 + 32] == tiles({ 2, 1 })->heights[0][static_cast<size_t>(z) * 33]);
+
+	// weights through the paint API at region texels
+	REQUIRE(tc.weightRes == 32u);
+	for (int z = 0; z < 32; z += 3)
+		for (int x = 0; x < 32; x += 3)
+		{
+			uint8_t w[kTerrainMaxLayers] = {};
+			REQUIRE(TerrainPaint::texelWeights(tc, static_cast<uint32_t>(x), static_cast<uint32_t>(z), w));
+			const auto t = tiles({ 1 + x / 16, 1 + z / 16 });
+			for (int c = 0; c < 4; ++c) REQUIRE(w[c] == t->weights[0][(static_cast<size_t>(z % 16) * 16 + static_cast<size_t>(x % 16)) * 4 + static_cast<size_t>(c)]);
+		}
+
+	// the water field: allocated, at the weights' raster, with the pack's body, and its answers are the streams'
+	REQUIRE(r.hasWater);
+	const water::Field& f = tc.water;
+	CHECK(f.allocated());
+	CHECK(f.res == 32u);
+	REQUIRE(f.bodies.size() == 1);
+	CHECK(f.bodies[0].id == 1);
+	CHECK(f.bodies[0].level == doctest::Approx(1500.0f));
+	int wet = 0, dry = 0;
+	for (int z = 0; z < 32; ++z)
+		for (int x = 0; x < 32; ++x)
+		{
+			const auto t = tiles({ 1 + x / 16, 1 + z / 16 });
+			const size_t src = static_cast<size_t>(z % 16) * 16 + static_cast<size_t>(x % 16);
+			REQUIRE(f.coverage[static_cast<size_t>(z) * 32 + x] == t->waterCoverage[src]);
+			REQUIRE(f.owner[static_cast<size_t>(z) * 32 + x] == t->waterOwner[src]);
+			const float lx = (static_cast<float>(x) + 0.5f) / 32.0f * 1024.0f - 512.0f, lz = (static_cast<float>(z) + 0.5f) / 32.0f * 1024.0f - 512.0f;
+			float level = -1.0f;
+			if (t->waterCoverage[src] == 255)
+			{
+				++wet;
+				REQUIRE(water::levelAt(tc, lx, lz, level));
+				REQUIRE(level == doctest::Approx(1500.0f));
+				REQUIRE(water::bodyAt(tc, lx, lz) == 1);
+				REQUIRE(water::coverageAt(tc, lx, lz) >= 250.0f / 255.0f);
+			}
+			else
+			{
+				++dry;
+				REQUIRE_FALSE(water::levelAt(tc, lx, lz, level));
+				REQUIRE(water::bodyAt(tc, lx, lz) == water::kNoBody);
+			}
+		}
+	CHECK(wet > 0);
+	CHECK(dry > 0);
+	CHECK(f.clipToGround);
+
+	// no table: heights and weights only
+	LandscapeRegionTerrain bare;
+	REQUIRE(landscapeRegionTerrain(fn, { 0, 0 }, 2, { 0.0f, 3000.0f }, nullptr, bare));
+	CHECK_FALSE(bare.hasWater);
+	CHECK_FALSE(bare.terrain.water.allocated());
+	// a region that reaches outside the world, or one with a missing tile, is refused
+	LandscapeRegionTerrain bad;
+	CHECK_FALSE(landscapeRegionTerrain(fn, { 3, 3 }, 2, { 0.0f, 3000.0f }, sea.water(), bad));
+	CHECK_FALSE(landscapeRegionTerrain(fn, { 0, 0 }, 0, { 0.0f, 3000.0f }, sea.water(), bad));
+	CHECK_FALSE(landscapeRegionTerrain(TileFn{}, { 0, 0 }, 2, { 0.0f, 3000.0f }, sea.water(), bad));
+}
+
+TEST_CASE("landscape region terrain: four tiles of the real size fit a TerrainComponent, five do not")
+{
+	ProceduralLandscapeParams p;                  // 512 m, 256 cells
+	p.tilesX = p.tilesZ = 6;
+	p.seaLevelM = 1500.0f;
+	const ProceduralLandscapeSource src(p);
+	const auto one = std::make_shared<LandscapeTile>(src.generate({ 0, 0 }));
+	const TileFn same = [&](LandscapeTileKey) { return one; };     // the same tile everywhere is enough to ask the size question
+	LandscapeRegionTerrain r;
+	REQUIRE(landscapeRegionTerrain(same, { 0, 0 }, 4, { 0.0f, 3000.0f }, src.water(), r));
+	CHECK(r.terrain.resolution == 1025u);
+	CHECK(r.terrain.sizeX == doctest::Approx(2048.0f));
+	CHECK(r.terrain.water.res == 512u);               // 4 * 128 cells, 4 m each
+	CHECK(r.terrain.water.allocated());
+	LandscapeRegionTerrain too;
+	CHECK_FALSE(landscapeRegionTerrain(same, { 0, 0 }, 5, { 0.0f, 3000.0f }, src.water(), too));   // 5 * 256 + 1 samples do not fit
 }
