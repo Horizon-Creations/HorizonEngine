@@ -3,7 +3,8 @@
 // read back and decoded, and each stage is timed. The numbers replace the estimates in plan section 2.
 //
 //   landscape_store_bench [--dir D] [--tiles-x N] [--tiles-z N] [--full] [--tile-m 512] [--raster-h 2] [--raster-w 4]
-//                         [--weight-pages 3] [--rough LSB] [--threads N] [--sample N] [--disk-mb N] [--keep]
+//                         [--weight-pages 3] [--rough LSB] [--threads N] [--sample N] [--disk-mb N]
+//                         [--zstd-level 3] [--primary store|lz4|lz4+pred|zstd|zstd+pred] [--keep]
 //
 // Everything is std C++ plus POSIX pread where there is one; the cold-cache reads need fcntl/posix_fadvise, so on
 // Windows they fall back to warm reads and the output says so.
@@ -553,6 +554,7 @@ int main(int argc, char** argv)
     fs::create_directories(c.dir, ec);
     std::vector<std::string> created;
 
+    double primaryDecodeMs = 0; // single-thread, whole pyramid, primary codec (section A)
     // ── A. single-thread latency per codec over a spread sample ──────────────
     {
         const int ns = std::min<size_t>(c.sample, nTiles);
@@ -588,6 +590,7 @@ int main(int argc, char** argv)
                 dec0.add(msSince(t0));
                 ok = ok && d.h == t.h && d.w == t.w;
             }
+            if (std::strcmp(cd.name, primary.name) == 0) primaryDecodeMs = dec.mean();
             std::printf("| %s | %.1f | %.1f | %.1f | %.2f | %.2f | %.3f | %.3f | %.3f | %s |\n", cd.name, size.mean() / 1024.0, hsize.mean() / 1024.0,
                         (size.mean() - hsize.mean()) / 1024.0, rawBytes(g) / size.mean(), enc.mean(),
                         dec.mean(), dec.pct(0.99), dec0.mean(), ok ? "ok" : "MISMATCH");
@@ -741,11 +744,12 @@ int main(int argc, char** argv)
         std::printf("## E. Extrapolation to the %d x %d tile world (from the sample above)\n\n", worldTiles, worldTiles);
         std::printf("- tiles: %.0f; on disk with %s: %.2f GB; raw (all levels): %.2f GB; raw level 0 only: %.2f GB\n", allTiles, primary.name,
                     perTile * allTiles / 1e9, rawBytes(g) * allTiles / 1e9, rawBytesLevel0(g) * allTiles / 1e9);
-        std::printf("\n| radius | tiles | decoded in RAM / VRAM (all levels) | compressed | decode CPU for a full fill (1 thread) |\n|---|---:|---:|---:|---:|\n");
+        std::printf("\n| radius | tiles | decoded in RAM / VRAM (all levels) | compressed | decode CPU for a full fill: 1 thread / all threads |\n|---|---:|---:|---:|---:|\n");
         for (double r : {2000.0, 4000.0, 8000.0, 12000.0})
         {
             const double tiles = 3.14159265 * r * r / (c.tileM * c.tileM);
-            std::printf("| %.0f km | %.0f | %.0f MB | %.0f MB | see section C |\n", r / 1000.0, tiles, tiles * rawBytes(g) / 1048576.0, tiles * perTile / 1048576.0);
+            std::printf("| %.0f km | %.0f | %.0f MB | %.0f MB | %.2f s / %.2f s |\n", r / 1000.0, tiles, tiles * rawBytes(g) / 1048576.0, tiles * perTile / 1048576.0,
+                        tiles * primaryDecodeMs / 1000.0, tiles * primaryDecodeMs / 1000.0 / c.threads);
         }
         std::printf("\nNew tiles per second while the camera moves (radius 8 km, a ring 2R wide enters): ");
         for (double v : {30.0, 100.0, 250.0}) std::printf("%.0f m/s -> %.1f tiles/s; ", v, 2 * 8000.0 * v / (c.tileM * c.tileM));
