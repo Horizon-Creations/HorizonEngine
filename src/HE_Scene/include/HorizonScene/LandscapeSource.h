@@ -16,7 +16,7 @@ namespace HE
 // What a level of the quadtree draws when its node spans more tiles than can be in memory (levels above
 // LandscapeQuadtreeConfig::tileLevels). Heights are the tiles' own mip samples laid side by side, so a patch of
 // the first coarse level meets the last tile level exactly: grid 0 is tile mip `heightLevel` (32 m for the default
-// tile, 3137 x 3137 samples for 100 km), the next grids are point-sampled by 2 up to the 128 m raster. Weights are
+// tile, 3137 x 3137 samples for 100 km), the next grids are point-sampled by 2, one for each coarser quadtree level (64 m, 128 m, 256 m ...). Weights are
 // the tiles' coarsest mip (128 m, 4 x 4 texels a tile) side by side: blurry by design from about 6 km out.
 struct LandscapeGrid16
 {

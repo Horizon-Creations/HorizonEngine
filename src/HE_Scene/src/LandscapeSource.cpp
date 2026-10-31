@@ -81,11 +81,12 @@ void placeCoarse(LandscapeCoarseWorld& c, LandscapeTileKey key, const LandscapeC
 			std::memcpy(&c.weights[(static_cast<size_t>(key.z * t + z) * c.weightsW + key.x * t) * C], &s.weights[static_cast<size_t>(z) * t * C], static_cast<size_t>(t) * C);
 }
 
-// The grids above grid 0: point-sampled by 2 each, up to the 128 m raster.
+// The grids above grid 0: point-sampled by 2 each, one per quadtree level the world has, down to a few samples (about 26 MB
+// in all for 100 km). The quadtree draws levels up to its top one; each needs a grid of its own cell size.
 void buildCoarseChain(LandscapeCoarseWorld& c)
 {
 	c.heights.resize(1);
-	while (c.cellM(static_cast<int>(c.heights.size())) <= LandscapeGeometry::kCoarsestRasterM + 1e-3f)
+	for (;;)
 	{
 		const LandscapeGrid16& src = c.heights.back();
 		LandscapeGrid16 dst;

@@ -305,7 +305,7 @@ TEST_CASE("landscape pack: written in any order, every tile reads back; damaged 
 		CHECK(w.tilesWritten() == 29);
 	}
 	std::string err;
-	const auto pack = LandscapePackSource::open(path.string(), &err);
+	auto pack = LandscapePackSource::open(path.string(), &err);
 	REQUIRE_MESSAGE(pack, err);
 	CHECK(pack->tilesX() == 6);
 	CHECK(pack->tilesZ() == 5);
@@ -338,6 +338,7 @@ TEST_CASE("landscape pack: written in any order, every tile reads back; damaged 
 	}
 	CHECK_FALSE(LandscapePackSource::open(cut.string(), &err));
 	CHECK_FALSE(LandscapePackSource::open((path.string() + ".missing"), &err));
+	pack.reset();   // Windows cannot delete a file that is still open
 	std::filesystem::remove(cut);
 	std::filesystem::remove(path);
 }
@@ -524,11 +525,14 @@ TEST_CASE("landscape store: from a pack file, like from the procedural source")
 	REQUIRE(pack);
 	LandscapeStoreConfig cfg;
 	cfg.loadRadius = 1200.0f;
+	{
 	LandscapeStore store(pack, cfg);
 	const std::vector<LandscapeAnchor> anchors = { { glm::dvec3(3000.0, 0.0, 3000.0) } };
 	REQUIRE(settleStore(store, anchors));
 	CHECK(store.stats().resident == tilesWithin(3000.0, 3000.0, 1200.0, 12, 512.0));
 	for (const auto& k : store.residentKeys()) CHECK(*store.tile(k) == s.generate(k));
+	}   // the store, its tiles and the pack have to let go of the file before it can be deleted (Windows)
+	pack.reset();
 	std::filesystem::remove(path);
 }
 
@@ -570,7 +574,7 @@ TEST_CASE("landscape coarse world: the 32 m grid is the tiles' own samples, seam
 	REQUIRE(writePack(source, path, allKeys(3, 2), 4, true));
 
 	std::string err;
-	const auto pack = LandscapePackSource::open(path.string(), &err);
+	auto pack = LandscapePackSource::open(path.string(), &err);
 	REQUIRE_MESSAGE(pack, err);
 	CHECK(pack->version() == 2);
 	const LandscapeCoarseWorld* c = pack->coarse();
@@ -578,11 +582,15 @@ TEST_CASE("landscape coarse world: the 32 m grid is the tiles' own samples, seam
 	CHECK(c->heightLevel == 4);
 	CHECK(c->cellsPerTile == 16);
 	CHECK(c->cellM(0) == doctest::Approx(32.0f));
-	REQUIRE(c->heights.size() == 3);                           // 32 m, 64 m, 128 m
+	REQUIRE(c->heights.size() >= 5);                           // 32 m, 64 m, 128 m, 256 m ... down to a few samples
 	CHECK(c->heights[0].w == 3 * 16 + 1);
 	CHECK(c->heights[0].h == 2 * 16 + 1);
 	CHECK(c->heights[1].w == 25);
 	CHECK(c->heights[2].w == 13);
+	CHECK(c->heights[3].w == 7);
+	CHECK(c->heights.back().w >= 2);
+	CHECK(c->heights.back().h >= 2);
+	for (size_t i = 1; i < c->heights.size(); ++i) CHECK(c->cellM(static_cast<int>(i)) == doctest::Approx(c->cellM(static_cast<int>(i) - 1) * 2.0f));
 	CHECK(c->weightsW == 3 * 4);                               // 4 x 4 texels of 128 m per tile
 	CHECK(c->weightsH == 2 * 4);
 	CHECK(c->channels == 12);
@@ -611,6 +619,7 @@ TEST_CASE("landscape coarse world: the 32 m grid is the tiles' own samples, seam
 	// the clamped read at the world's edge
 	CHECK(c->heights[0].at(-5, -5) == c->heights[0].at(0, 0));
 	CHECK(c->heights[0].at(10000, 10000) == c->heights[0].at(c->heights[0].w - 1, c->heights[0].h - 1));
+	pack.reset();   // Windows cannot delete a file that is still open
 	std::filesystem::remove(path);
 }
 
@@ -622,7 +631,8 @@ TEST_CASE("landscape coarse world: the pack's coarse world equals the procedural
 	REQUIRE(writePack(source, a, keys, 4, true));
 	std::shuffle(keys.begin(), keys.end(), std::mt19937(9));
 	REQUIRE(writePack(source, b, keys, 4, false));     // the writer decodes each blob itself
-	const auto pa = LandscapePackSource::open(a.string()), pb = LandscapePackSource::open(b.string());
+	auto pa = LandscapePackSource::open(a.string());
+	auto pb = LandscapePackSource::open(b.string());
 	REQUIRE(pa);
 	REQUIRE(pb);
 	const LandscapeCoarseWorld* ref = source.coarse();
@@ -638,6 +648,8 @@ TEST_CASE("landscape coarse world: the pack's coarse world equals the procedural
 		}
 		CHECK(c->weights == ref->weights);
 	}
+	pa.reset();
+	pb.reset();
 	std::filesystem::remove(a);
 	std::filesystem::remove(b);
 }
@@ -648,11 +660,12 @@ TEST_CASE("landscape coarse world: a pack without one, a version 1 pack, and a c
 	// no coarse world requested
 	const auto none = tempFile("nocoarse");
 	REQUIRE(writePack(source, none, allKeys(4, 4), -1, true));
-	const auto packNone = LandscapePackSource::open(none.string());
+	auto packNone = LandscapePackSource::open(none.string());
 	REQUIRE(packNone);
 	CHECK(packNone->coarse() == nullptr);
 	LandscapeTile t;
 	CHECK(packNone->load({ 2, 2 }, -1, t));
+	packNone.reset();
 	std::filesystem::remove(none);
 
 	// a version 1 file, made by hand: 32-byte header, index, blobs, nothing else
@@ -686,7 +699,7 @@ TEST_CASE("landscape coarse world: a pack without one, a version 1 pack, and a c
 		for (const auto& bl : blobs) f.write(reinterpret_cast<const char*>(bl.data()), static_cast<std::streamsize>(bl.size()));
 	}
 	std::string err;
-	const auto packV1 = LandscapePackSource::open(v1.string(), &err);
+	auto packV1 = LandscapePackSource::open(v1.string(), &err);
 	REQUIRE_MESSAGE(packV1, err);
 	CHECK(packV1->version() == 1);
 	CHECK(packV1->coarse() == nullptr);
@@ -696,6 +709,7 @@ TEST_CASE("landscape coarse world: a pack without one, a version 1 pack, and a c
 		REQUIRE(packV1->load(k, -1, loaded));
 		CHECK(loaded == source.generate(k));
 	}
+	packV1.reset();
 	std::filesystem::remove(v1);
 
 	// a coarse section cut short
