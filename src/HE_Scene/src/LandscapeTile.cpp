@@ -38,15 +38,15 @@ uint32_t get32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (s
 // ── transforms ───────────────────────────────────────────────────────────────
 // Plane predictor in wrapping 16 bit; zigzag so small residuals of either sign have small high bytes;
 // lo-byte plane then hi-byte plane. First row predicts from the left, first column from above.
-void heightForward(const std::vector<uint16_t>& v, int n, std::vector<uint8_t>& out)
+void heightForward(const std::vector<uint16_t>& v, int w, int h, std::vector<uint8_t>& out)
 {
 	const size_t cnt = v.size();
 	out.resize(cnt * 2);
-	for (int z = 0; z < n; ++z)
-		for (int x = 0; x < n; ++x)
+	for (int z = 0; z < h; ++z)
+		for (int x = 0; x < w; ++x)
 		{
-			const size_t i  = static_cast<size_t>(z) * n + x;
-			const int    l  = x ? v[i - 1] : 0, u = z ? v[i - n] : 0, ul = (x && z) ? v[i - n - 1] : 0;
+			const size_t i  = static_cast<size_t>(z) * w + x;
+			const int    l  = x ? v[i - 1] : 0, u = z ? v[i - w] : 0, ul = (x && z) ? v[i - w - 1] : 0;
 			const int    pr = (x && z) ? (l + u - ul) : (x ? l : u);
 			const uint16_t d  = static_cast<uint16_t>(v[i] - pr);
 			const uint16_t zz = static_cast<uint16_t>((d << 1) ^ (static_cast<int16_t>(d) >> 15));
@@ -55,48 +55,48 @@ void heightForward(const std::vector<uint16_t>& v, int n, std::vector<uint8_t>& 
 		}
 }
 
-void heightInverse(const uint8_t* in, int n, std::vector<uint16_t>& v)
+void heightInverse(const uint8_t* in, int w, int h, std::vector<uint16_t>& v)
 {
-	const size_t cnt = static_cast<size_t>(n) * n;
+	const size_t cnt = static_cast<size_t>(w) * h;
 	v.resize(cnt);
-	for (int z = 0; z < n; ++z)
-		for (int x = 0; x < n; ++x)
+	for (int z = 0; z < h; ++z)
+		for (int x = 0; x < w; ++x)
 		{
-			const size_t i  = static_cast<size_t>(z) * n + x;
+			const size_t i  = static_cast<size_t>(z) * w + x;
 			const uint16_t zz = static_cast<uint16_t>(in[i] | (in[cnt + i] << 8));
 			const uint16_t d  = static_cast<uint16_t>((zz >> 1) ^ -(zz & 1));
-			const int      l  = x ? v[i - 1] : 0, u = z ? v[i - n] : 0, ul = (x && z) ? v[i - n - 1] : 0;
+			const int      l  = x ? v[i - 1] : 0, u = z ? v[i - w] : 0, ul = (x && z) ? v[i - w - 1] : 0;
 			const int      pr = (x && z) ? (l + u - ul) : (x ? l : u);
 			v[i] = static_cast<uint16_t>(d + pr);
 		}
 }
 
 // Channel planes, horizontal delta (mod 256) inside each plane.
-void weightForward(const std::vector<uint8_t>& v, int dim, int C, std::vector<uint8_t>& out)
+void weightForward(const std::vector<uint8_t>& v, int w, int h, int C, std::vector<uint8_t>& out)
 {
-	const size_t plane = static_cast<size_t>(dim) * dim;
+	const size_t plane = static_cast<size_t>(w) * h;
 	out.resize(v.size());
 	for (int ch = 0; ch < C; ++ch)
-		for (int z = 0; z < dim; ++z)
-			for (int x = 0; x < dim; ++x)
+		for (int z = 0; z < h; ++z)
+			for (int x = 0; x < w; ++x)
 			{
-				const size_t  i   = static_cast<size_t>(z) * dim + x;
+				const size_t  i   = static_cast<size_t>(z) * w + x;
 				const uint8_t cur = v[i * C + ch], prev = x ? v[(i - 1) * C + ch] : 0;
 				out[ch * plane + i] = static_cast<uint8_t>(cur - prev);
 			}
 }
 
-void weightInverse(const uint8_t* in, int dim, int C, std::vector<uint8_t>& v)
+void weightInverse(const uint8_t* in, int w, int h, int C, std::vector<uint8_t>& v)
 {
-	const size_t plane = static_cast<size_t>(dim) * dim;
+	const size_t plane = static_cast<size_t>(w) * h;
 	v.resize(plane * C);
 	for (int ch = 0; ch < C; ++ch)
-		for (int z = 0; z < dim; ++z)
+		for (int z = 0; z < h; ++z)
 		{
 			uint8_t acc = 0;
-			for (int x = 0; x < dim; ++x)
+			for (int x = 0; x < w; ++x)
 			{
-				const size_t i = static_cast<size_t>(z) * dim + x;
+				const size_t i = static_cast<size_t>(z) * w + x;
 				acc = static_cast<uint8_t>(acc + in[ch * plane + i]);
 				v[i * C + ch] = acc;
 			}
@@ -312,13 +312,13 @@ std::vector<uint8_t> encodeLandscapeTile(const LandscapeTile& tile, LandscapeCod
 	for (int k = 0; k < g.heightLevels(); ++k)
 	{
 		if (tile.heights[k].size() != static_cast<size_t>(g.heightDim(k)) * g.heightDim(k)) return {};
-		if (codec.predictor) { heightForward(tile.heights[k], g.heightDim(k), tmp); stream(tmp.data(), tmp.size()); }
+		if (codec.predictor) { heightForward(tile.heights[k], g.heightDim(k), g.heightDim(k), tmp); stream(tmp.data(), tmp.size()); }
 		else stream(reinterpret_cast<const uint8_t*>(tile.heights[k].data()), tile.heights[k].size() * 2);
 	}
 	for (int k = 0; k < g.weightLevels(); ++k)
 	{
 		if (tile.weights[k].size() != static_cast<size_t>(g.weightDim(k)) * g.weightDim(k) * g.channels) return {};
-		if (codec.predictor) { weightForward(tile.weights[k], g.weightDim(k), g.channels, tmp); stream(tmp.data(), tmp.size()); }
+		if (codec.predictor) { weightForward(tile.weights[k], g.weightDim(k), g.weightDim(k), g.channels, tmp); stream(tmp.data(), tmp.size()); }
 		else stream(tile.weights[k].data(), tile.weights[k].size());
 	}
 	return out;
@@ -365,7 +365,7 @@ bool decodeLandscapeTile(const uint8_t* data, size_t size, LandscapeTile& out, i
 		raw.resize(rawN);
 		if (!decompress(h.codec.backend, p, stored, raw.data(), rawN)) return fail(error, "tile height stream is corrupt");
 		std::vector<uint16_t> v;
-		if (h.codec.predictor) heightInverse(raw.data(), g.heightDim(k), v);
+		if (h.codec.predictor) heightInverse(raw.data(), g.heightDim(k), g.heightDim(k), v);
 		else { v.resize(rawN / 2); std::memcpy(v.data(), raw.data(), rawN); }
 		out.heights.push_back(std::move(v));
 	}
@@ -378,10 +378,103 @@ bool decodeLandscapeTile(const uint8_t* data, size_t size, LandscapeTile& out, i
 		raw.resize(rawN);
 		if (!decompress(h.codec.backend, p, stored, raw.data(), rawN)) return fail(error, "tile weight stream is corrupt");
 		std::vector<uint8_t> v;
-		if (h.codec.predictor) weightInverse(raw.data(), g.weightDim(k), g.channels, v);
+		if (h.codec.predictor) weightInverse(raw.data(), g.weightDim(k), g.weightDim(k), g.channels, v);
 		else v = raw;
 		out.weights.push_back(std::move(v));
 	}
+	return true;
+}
+
+// ── grids (the coarse world) ─────────────────────────────────────────────────
+namespace
+{
+constexpr uint32_t kGridMagic = 0x31474c48u;   // 'HLG1'
+constexpr size_t   kGridHeaderBytes = 28;
+constexpr uint8_t  kKindHeights = 1, kKindWeights = 2;
+
+std::vector<uint8_t> encodeGrid(uint8_t kind, const uint8_t* data, size_t rawSize, int w, int h, int channels, bool predictor,
+                                LandscapeCodec codec, const std::vector<uint8_t>& transformed)
+{
+	if (!LandscapeCodec::available(codec.backend)) codec.backend = LandscapeCodec::Backend::Store;
+	const uint8_t* src = predictor ? transformed.data() : data;
+	const auto c = compress(codec.backend, codec.zstdLevel, src, rawSize);
+	std::vector<uint8_t> out;
+	put32(out, kGridMagic);
+	out.push_back(1);
+	out.push_back(static_cast<uint8_t>(codec.backend));
+	out.push_back(predictor ? 1 : 0);
+	out.push_back(kind);
+	out.push_back(static_cast<uint8_t>(channels));
+	out.push_back(0); out.push_back(0); out.push_back(0);
+	put32(out, static_cast<uint32_t>(w));
+	put32(out, static_cast<uint32_t>(h));
+	put32(out, static_cast<uint32_t>(rawSize));
+	put32(out, static_cast<uint32_t>(c.size()));
+	out.insert(out.end(), c.begin(), c.end());
+	return out;
+}
+
+// Reads and validates the header and returns the decoded (inverse-transformed) payload in `raw` (kind-sized).
+bool decodeGrid(const uint8_t* d, size_t size, uint8_t wantKind, int& w, int& h, int& channels, std::vector<uint8_t>& raw,
+                bool& predictor, std::string* error)
+{
+	if (size < kGridHeaderBytes) return fail(error, "grid blob shorter than its header");
+	if (get32(d) != kGridMagic) return fail(error, "not a landscape grid (bad magic)");
+	if (d[4] != 1) return fail(error, "unknown landscape grid version");
+	if (d[5] > static_cast<uint8_t>(LandscapeCodec::Backend::Zstd)) return fail(error, "unknown grid backend");
+	const auto backend = static_cast<LandscapeCodec::Backend>(d[5]);
+	predictor = (d[6] & 1) != 0;
+	if (d[7] != wantKind) return fail(error, "grid is not of the expected kind");
+	channels = d[8];
+	const uint32_t gw = get32(d + 12), gh = get32(d + 16), rawSize = get32(d + 20), stored = get32(d + 24);
+	if (gw == 0 || gh == 0 || gw > 65536 || gh > 65536) return fail(error, "grid size is not valid");
+	if (wantKind == kKindWeights && (channels < 1 || channels > 16)) return fail(error, "grid channel count is not valid");
+	const uint64_t expect = static_cast<uint64_t>(gw) * gh * (wantKind == kKindHeights ? 2 : channels);
+	if (expect != rawSize || expect > (1ull << 31)) return fail(error, "grid payload size does not match its dimensions");
+	if (stored > size - kGridHeaderBytes) return fail(error, "grid payload runs past the blob");
+	if (!LandscapeCodec::available(backend)) return fail(error, "this build cannot read the grid's backend");
+	w = static_cast<int>(gw);
+	h = static_cast<int>(gh);
+	raw.resize(rawSize);
+	if (!decompress(backend, d + kGridHeaderBytes, stored, raw.data(), rawSize)) return fail(error, "grid payload is corrupt");
+	return true;
+}
+} // namespace
+
+std::vector<uint8_t> encodeLandscapeHeightGrid(const std::vector<uint16_t>& v, int w, int h, LandscapeCodec codec)
+{
+	if (w <= 0 || h <= 0 || v.size() != static_cast<size_t>(w) * h) return {};
+	std::vector<uint8_t> tmp;
+	if (codec.predictor) heightForward(v, w, h, tmp);
+	return encodeGrid(kKindHeights, reinterpret_cast<const uint8_t*>(v.data()), v.size() * 2, w, h, 1, codec.predictor, codec, tmp);
+}
+
+bool decodeLandscapeHeightGrid(const uint8_t* data, size_t size, std::vector<uint16_t>& out, int& w, int& h, std::string* error)
+{
+	std::vector<uint8_t> raw;
+	int ch = 0;
+	bool pred = false;
+	if (!decodeGrid(data, size, kKindHeights, w, h, ch, raw, pred, error)) return false;
+	if (pred) heightInverse(raw.data(), w, h, out);
+	else { out.resize(raw.size() / 2); std::memcpy(out.data(), raw.data(), raw.size()); }
+	return true;
+}
+
+std::vector<uint8_t> encodeLandscapeWeightGrid(const std::vector<uint8_t>& v, int w, int h, int channels, LandscapeCodec codec)
+{
+	if (w <= 0 || h <= 0 || channels < 1 || channels > 16 || v.size() != static_cast<size_t>(w) * h * channels) return {};
+	std::vector<uint8_t> tmp;
+	if (codec.predictor) weightForward(v, w, h, channels, tmp);
+	return encodeGrid(kKindWeights, v.data(), v.size(), w, h, channels, codec.predictor, codec, tmp);
+}
+
+bool decodeLandscapeWeightGrid(const uint8_t* data, size_t size, std::vector<uint8_t>& out, int& w, int& h, int& channels, std::string* error)
+{
+	std::vector<uint8_t> raw;
+	bool pred = false;
+	if (!decodeGrid(data, size, kKindWeights, w, h, channels, raw, pred, error)) return false;
+	if (pred) weightInverse(raw.data(), w, h, channels, out);
+	else out = std::move(raw);
 	return true;
 }
 

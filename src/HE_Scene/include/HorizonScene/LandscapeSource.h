@@ -12,6 +12,62 @@
 namespace HE
 {
 
+// ── The coarse world: always resident ────────────────────────────────────────
+// What a level of the quadtree draws when its node spans more tiles than can be in memory (levels above
+// LandscapeQuadtreeConfig::tileLevels). Heights are the tiles' own mip samples laid side by side, so a patch of
+// the first coarse level meets the last tile level exactly: grid 0 is tile mip `heightLevel` (32 m for the default
+// tile, 3137 x 3137 samples for 100 km), the next grids are point-sampled by 2 up to the 128 m raster. Weights are
+// the tiles' coarsest mip (128 m, 4 x 4 texels a tile) side by side: blurry by design from about 6 km out.
+struct LandscapeGrid16
+{
+	int                   w = 0, h = 0;
+	std::vector<uint16_t> v;
+	uint16_t at(int x, int z) const   // clamped: a patch at the world's edge reads the last row/column
+	{
+		x = x < 0 ? 0 : (x >= w ? w - 1 : x);
+		z = z < 0 ? 0 : (z >= h ? h - 1 : z);
+		return v[static_cast<size_t>(z) * w + x];
+	}
+};
+
+struct LandscapeCoarseWorld
+{
+	int   tilesX = 0, tilesZ = 0;
+	float tileM = 0.0f;
+	int   heightLevel = 0;               // the tile mip grid 0 is made of
+	int   cellsPerTile = 0;              // height cells a tile contributes on grid 0 (hCells >> heightLevel)
+	std::vector<LandscapeGrid16> heights; // [i]: grid 0 point-sampled by 2^i
+	int   weightLevel = 0;               // the tile mip the weights are made of
+	int   texelsPerTile = 0;             // weight texels a tile contributes (wTexels >> weightLevel)
+	int   channels = 0;
+	int   weightsW = 0, weightsH = 0;
+	std::vector<uint8_t> weights;        // weightsW x weightsH x channels, interleaved
+	float cellM(int i) const { return tileM / static_cast<float>(cellsPerTile) * static_cast<float>(1 << i); }
+	bool  valid() const { return !heights.empty() && cellsPerTile > 0 && tileM > 0.0f; }
+	size_t bytes() const
+	{
+		size_t b = weights.size();
+		for (const auto& g : heights) b += g.v.size() * 2;
+		return b;
+	}
+};
+
+// One tile's share of the coarse world, taken from a tile decoded with at least heightLevel + 1 levels.
+struct LandscapeCoarseSample
+{
+	std::vector<uint16_t> heights;   // (cellsPerTile + 1)^2 samples of the tile's mip `heightLevel`, edges included
+	std::vector<uint8_t>  weights;   // texelsPerTile^2 x channels of the tile's mip `weightLevel`
+};
+
+// Mip levels of the coarse world for a tile geometry: heights from mip `firstCoarseLevel` (tileLevels + 1), weights from the
+// coarsest mip. Clamped to what the geometry has.
+struct LandscapeCoarseLayout
+{
+	int heightLevel = 0, weightLevel = 0;
+	static LandscapeCoarseLayout forGeometry(const LandscapeGeometry& g, int firstCoarseLevel = 4);
+};
+LandscapeCoarseSample landscapeCoarseSampleOf(const LandscapeTile& tile, const LandscapeCoarseLayout& layout);
+
 // A tile of the world grid. (x, z) = (0, 0) is the corner at the absolute origin.
 struct LandscapeTileKey
 {
@@ -42,6 +98,8 @@ public:
 	virtual int  tilesZ() const = 0;
 	// Decodes the first `maxLevels` levels (< 0: all). False: the tile is missing or unreadable.
 	virtual bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const = 0;
+	// The always-resident coarse world, or null when the source has none (a version 1 pack). Valid as long as the source.
+	virtual const LandscapeCoarseWorld* coarse() const { return nullptr; }
 };
 
 // ── Procedural world ─────────────────────────────────────────────────────────
@@ -68,23 +126,33 @@ public:
 	int  tilesX() const override { return m_p.tilesX; }
 	int  tilesZ() const override { return m_p.tilesZ; }
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override;
+	// Built on first use from every tile of the world (generate() each): fast for the small worlds of the tests, minutes
+	// for 100 km. Real worlds read it from their pack.
+	const LandscapeCoarseWorld* coarse() const override;
 
 	// The whole pyramid of one tile. Deterministic: the same key gives the same bytes.
 	LandscapeTile generate(LandscapeTileKey key) const;
 
 private:
 	ProceduralLandscapeParams m_p;
+	mutable std::once_flag    m_coarseOnce;
+	mutable LandscapeCoarseWorld m_coarse;
 };
 
 // ── Pack file ────────────────────────────────────────────────────────────────
-// One file for the whole world, little endian:
-//   u32 magic 'HLP1' (0x31504c48)  u32 version (1)  u32 tilesX  u32 tilesZ
-//   f32 tileM  u16 hCells  u16 wTexels  u8 channels  u8[3] 0                    -> 28 bytes, padded to 32
-//   index: tilesX * tilesZ entries, row-major (z * tilesX + x), each  u64 offset  u32 size   (size 0: no tile)
-//   then the tile blobs (LandscapeTile container, see LandscapeTile.h), back to back.
+// One file for the whole world, little endian. Version 2 (written today); version 1 (no coarse world, 32-byte header) is still read.
+//   u32 magic 'HLP1' (0x31504c48)  u32 version  u32 tilesX  u32 tilesZ
+//   f32 tileM  u16 hCells  u16 wTexels  u8 channels  u8 coarseHeightLevel  u8 coarseWeightLevel  u8[5] 0      -> offset 0..31 (as version 1)
+//   version 2 only: u64 coarseOffset  u32 coarseHeightSize  u32 coarseWeightSize  u8[44] 0                    -> offset 32..63
+//   index: tilesX * tilesZ entries, row-major (z * tilesX + x), each  u64 offset  u32 size   (size 0: no tile)  -> right after the header
+//   then the tile blobs (LandscapeTile container, see LandscapeTile.h), back to back,
+//   then the coarse world: a height grid blob and a weight grid blob (LandscapeTile.h, "Grids"), at coarseOffset.
+// coarseHeightLevel 255 = the pack has no coarse world. Grid sizes: heights (tilesX * (hCells >> level) + 1) x (tilesZ * ...),
+// weights (tilesX * (wTexels >> level)) x (tilesZ * ...).
 constexpr uint32_t kLandscapePackMagic   = 0x31504c48u;
-constexpr uint32_t kLandscapePackVersion = 1;
-constexpr size_t   kLandscapePackHeaderBytes = 32;
+constexpr uint32_t kLandscapePackVersion = 2;
+constexpr size_t   kLandscapePackHeaderBytesV1 = 32;
+constexpr size_t   kLandscapePackHeaderBytes   = 64;   // version 2
 constexpr size_t   kLandscapePackIndexEntryBytes = 12;
 
 // Writes a pack: tiles are appended in the order add() is called (any order, each key once), the index
@@ -94,9 +162,11 @@ class LandscapePackWriter
 public:
 	LandscapePackWriter() = default;
 	~LandscapePackWriter();
-	bool begin(const std::string& path, const LandscapeGeometry& geometry, int tilesX, int tilesZ);
-	// `blob` is an encodeLandscapeTile() result; its geometry has to be the pack's.
-	bool add(LandscapeTileKey key, const std::vector<uint8_t>& blob);
+	// `firstCoarseLevel`: the tile mip the coarse world's heights are made of (the quadtree's tileLevels + 1); < 0 writes no coarse world.
+	bool begin(const std::string& path, const LandscapeGeometry& geometry, int tilesX, int tilesZ, int firstCoarseLevel = 4);
+	// `blob` is an encodeLandscapeTile() result; its geometry has to be the pack's. `coarse`: this tile's share of the coarse
+	// world (landscapeCoarseSampleOf); without it the writer decodes the blob to get it, which costs a tile decode.
+	bool add(LandscapeTileKey key, const std::vector<uint8_t>& blob, const LandscapeCoarseSample* coarse = nullptr);
 	bool finish();
 	size_t tilesWritten() const { return m_written; }
 
@@ -109,6 +179,10 @@ private:
 	uint64_t              m_pos = 0;
 	size_t                m_written = 0;
 	bool                  m_open = false;
+	LandscapeCoarseLayout m_layout;
+	bool                  m_withCoarse = false;
+	LandscapeCoarseWorld  m_coarse;     // grid 0 and the weights; the point-sampled grids are made when it is read
+	std::vector<uint8_t>  m_coarseSeen; // per tile
 };
 
 // Reads a pack. The index stays in memory (12 bytes a tile: 460 KB for 100 km), the file stays open.
@@ -123,6 +197,8 @@ public:
 	int  tilesX() const override { return m_tilesX; }
 	int  tilesZ() const override { return m_tilesZ; }
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override;
+	const LandscapeCoarseWorld* coarse() const override { return m_coarse.valid() ? &m_coarse : nullptr; }
+	int  version() const { return m_version; }
 	bool has(LandscapeTileKey key) const;
 	// Stored bytes of a tile, 0 for none, and where in the file they start (for tools that read the file themselves).
 	uint32_t storedSize(LandscapeTileKey key) const;
@@ -134,6 +210,8 @@ private:
 
 	LandscapeGeometry     m_geometry;
 	int                   m_tilesX = 0, m_tilesZ = 0;
+	int                   m_version = 0;
+	LandscapeCoarseWorld  m_coarse;
 	std::vector<uint64_t> m_offset;
 	std::vector<uint32_t> m_size;
 	uint64_t              m_fileSize = 0;

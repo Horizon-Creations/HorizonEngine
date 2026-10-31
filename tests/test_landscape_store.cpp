@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -529,4 +530,182 @@ TEST_CASE("landscape store: from a pack file, like from the procedural source")
 	CHECK(store.stats().resident == tilesWithin(3000.0, 3000.0, 1200.0, 12, 512.0));
 	for (const auto& k : store.residentKeys()) CHECK(*store.tile(k) == s.generate(k));
 	std::filesystem::remove(path);
+}
+
+// ── coarse world (pack version 2) ────────────────────────────────────────────
+namespace
+{
+// Writes `source`'s whole world into a pack at `path` in the given order of keys.
+bool writePack(const ProceduralLandscapeSource& source, const std::filesystem::path& path, std::vector<LandscapeTileKey> keys,
+               int firstCoarseLevel, bool withSample)
+{
+	LandscapePackWriter w;
+	if (!w.begin(path.string(), source.geometry(), source.tilesX(), source.tilesZ(), firstCoarseLevel)) return false;
+	const LandscapeCoarseLayout layout = LandscapeCoarseLayout::forGeometry(source.geometry(), firstCoarseLevel);
+	for (const auto& k : keys)
+	{
+		const LandscapeTile t = source.generate(k);
+		const LandscapeCoarseSample sample = landscapeCoarseSampleOf(t, layout);
+		if (!w.add(k, encodeLandscapeTile(t), withSample ? &sample : nullptr)) return false;
+	}
+	return w.finish();
+}
+
+std::vector<LandscapeTileKey> allKeys(int tx, int tz)
+{
+	std::vector<LandscapeTileKey> k;
+	for (int z = 0; z < tz; ++z)
+		for (int x = 0; x < tx; ++x) k.push_back({ x, z });
+	return k;
+}
+} // namespace
+
+TEST_CASE("landscape coarse world: the 32 m grid is the tiles' own samples, seam to the tile levels included")
+{
+	ProceduralLandscapeParams p;       // the real geometry: 512 m tiles, 256 cells, 12 channels
+	p.tilesX = 3;
+	p.tilesZ = 2;
+	const ProceduralLandscapeSource source(p);
+	const auto path = tempFile("coarse");
+	REQUIRE(writePack(source, path, allKeys(3, 2), 4, true));
+
+	std::string err;
+	const auto pack = LandscapePackSource::open(path.string(), &err);
+	REQUIRE_MESSAGE(pack, err);
+	CHECK(pack->version() == 2);
+	const LandscapeCoarseWorld* c = pack->coarse();
+	REQUIRE(c);
+	CHECK(c->heightLevel == 4);
+	CHECK(c->cellsPerTile == 16);
+	CHECK(c->cellM(0) == doctest::Approx(32.0f));
+	REQUIRE(c->heights.size() == 3);                           // 32 m, 64 m, 128 m
+	CHECK(c->heights[0].w == 3 * 16 + 1);
+	CHECK(c->heights[0].h == 2 * 16 + 1);
+	CHECK(c->heights[1].w == 25);
+	CHECK(c->heights[2].w == 13);
+	CHECK(c->weightsW == 3 * 4);                               // 4 x 4 texels of 128 m per tile
+	CHECK(c->weightsH == 2 * 4);
+	CHECK(c->channels == 12);
+
+	// The grid is exactly tile level 0 at stride 16 (2 m x 16 = 32 m): at every tile corner and edge too.
+	for (int tz = 0; tz < 2; ++tz)
+		for (int tx = 0; tx < 3; ++tx)
+		{
+			const LandscapeTile t = source.generate({ tx, tz });
+			const int n0 = t.geometry.heightDim(0);
+			for (int j = 0; j <= 16; ++j)
+				for (int i = 0; i <= 16; ++i)
+					REQUIRE(c->heights[0].at(tx * 16 + i, tz * 16 + j) == t.heights[0][static_cast<size_t>(j * 16) * n0 + i * 16]);
+			// and the tile's own mip 4 (what a tile-level patch next to it would read)
+			for (int j = 0; j <= 16; ++j)
+				for (int i = 0; i <= 16; ++i) REQUIRE(c->heights[0].at(tx * 16 + i, tz * 16 + j) == t.heights[4][static_cast<size_t>(j) * 17 + i]);
+			// weights: the tile's coarsest mip
+			for (int j = 0; j < 4; ++j)
+				for (int i = 0; i < 4; ++i)
+					for (int ch = 0; ch < 12; ++ch)
+						REQUIRE(c->weights[(static_cast<size_t>(tz * 4 + j) * c->weightsW + tx * 4 + i) * 12 + ch] == t.weights[5][(static_cast<size_t>(j) * 4 + i) * 12 + ch]);
+		}
+	// the coarser grids are point samples of the 32 m one
+	for (int z = 0; z < c->heights[1].h; ++z)
+		for (int x = 0; x < c->heights[1].w; ++x) REQUIRE(c->heights[1].at(x, z) == c->heights[0].at(2 * x, 2 * z));
+	// the clamped read at the world's edge
+	CHECK(c->heights[0].at(-5, -5) == c->heights[0].at(0, 0));
+	CHECK(c->heights[0].at(10000, 10000) == c->heights[0].at(c->heights[0].w - 1, c->heights[0].h - 1));
+	std::filesystem::remove(path);
+}
+
+TEST_CASE("landscape coarse world: the pack's coarse world equals the procedural source's, in any write order, with or without the sample")
+{
+	const ProceduralLandscapeSource source(smallWorld(5));
+	const auto a = tempFile("coarseA"), b = tempFile("coarseB");
+	auto keys = allKeys(5, 5);
+	REQUIRE(writePack(source, a, keys, 4, true));
+	std::shuffle(keys.begin(), keys.end(), std::mt19937(9));
+	REQUIRE(writePack(source, b, keys, 4, false));     // the writer decodes each blob itself
+	const auto pa = LandscapePackSource::open(a.string()), pb = LandscapePackSource::open(b.string());
+	REQUIRE(pa);
+	REQUIRE(pb);
+	const LandscapeCoarseWorld* ref = source.coarse();
+	REQUIRE(ref);
+	for (const auto* c : { pa->coarse(), pb->coarse() })
+	{
+		REQUIRE(c);
+		REQUIRE(c->heights.size() == ref->heights.size());
+		for (size_t i = 0; i < ref->heights.size(); ++i)
+		{
+			CHECK(c->heights[i].w == ref->heights[i].w);
+			CHECK(c->heights[i].v == ref->heights[i].v);
+		}
+		CHECK(c->weights == ref->weights);
+	}
+	std::filesystem::remove(a);
+	std::filesystem::remove(b);
+}
+
+TEST_CASE("landscape coarse world: a pack without one, a version 1 pack, and a cut-off coarse section")
+{
+	const ProceduralLandscapeSource source(smallWorld(4));
+	// no coarse world requested
+	const auto none = tempFile("nocoarse");
+	REQUIRE(writePack(source, none, allKeys(4, 4), -1, true));
+	const auto packNone = LandscapePackSource::open(none.string());
+	REQUIRE(packNone);
+	CHECK(packNone->coarse() == nullptr);
+	LandscapeTile t;
+	CHECK(packNone->load({ 2, 2 }, -1, t));
+	std::filesystem::remove(none);
+
+	// a version 1 file, made by hand: 32-byte header, index, blobs, nothing else
+	const auto v1 = tempFile("v1");
+	{
+		const LandscapeGeometry g = source.geometry();
+		const size_t n = 16;
+		std::vector<std::vector<uint8_t>> blobs;
+		for (const auto& k : allKeys(4, 4)) blobs.push_back(encodeLandscapeTile(source.generate(k)));
+		std::vector<uint8_t> head(32 + n * 12, 0);
+		const auto put32 = [&](size_t o, uint32_t v) { for (int i = 0; i < 4; ++i) head[o + i] = static_cast<uint8_t>(v >> (8 * i)); };
+		put32(0, kLandscapePackMagic);
+		put32(4, 1);
+		put32(8, 4);
+		put32(12, 4);
+		uint32_t bits;
+		std::memcpy(&bits, &g.tileM, 4);
+		put32(16, bits);
+		head[20] = static_cast<uint8_t>(g.hCells); head[21] = static_cast<uint8_t>(g.hCells >> 8);
+		head[22] = static_cast<uint8_t>(g.wTexels); head[23] = static_cast<uint8_t>(g.wTexels >> 8);
+		head[24] = g.channels;
+		uint64_t pos = head.size();
+		for (size_t i = 0; i < n; ++i)
+		{
+			for (int b = 0; b < 8; ++b) head[32 + i * 12 + b] = static_cast<uint8_t>(pos >> (8 * b));
+			put32(32 + i * 12 + 8, static_cast<uint32_t>(blobs[i].size()));
+			pos += blobs[i].size();
+		}
+		std::ofstream f(v1, std::ios::binary);
+		f.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
+		for (const auto& bl : blobs) f.write(reinterpret_cast<const char*>(bl.data()), static_cast<std::streamsize>(bl.size()));
+	}
+	std::string err;
+	const auto packV1 = LandscapePackSource::open(v1.string(), &err);
+	REQUIRE_MESSAGE(packV1, err);
+	CHECK(packV1->version() == 1);
+	CHECK(packV1->coarse() == nullptr);
+	for (const auto& k : allKeys(4, 4))
+	{
+		LandscapeTile loaded;
+		REQUIRE(packV1->load(k, -1, loaded));
+		CHECK(loaded == source.generate(k));
+	}
+	std::filesystem::remove(v1);
+
+	// a coarse section cut short
+	const auto good = tempFile("coarsegood");
+	REQUIRE(writePack(source, good, allKeys(4, 4), 4, true));
+	const uint64_t size = std::filesystem::file_size(good);
+	const auto cut = tempFile("coarsecut");
+	std::filesystem::copy_file(good, cut);
+	std::filesystem::resize_file(cut, size - 30);
+	CHECK_FALSE(LandscapePackSource::open(cut.string(), &err));
+	std::filesystem::remove(cut);
+	std::filesystem::remove(good);
 }

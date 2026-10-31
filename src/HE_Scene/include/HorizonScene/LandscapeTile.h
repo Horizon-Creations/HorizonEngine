@@ -106,4 +106,14 @@ bool decodeLandscapeTile(const uint8_t* data, size_t size, LandscapeTile& out, i
 bool peekLandscapeTile(const uint8_t* data, size_t size, LandscapeGeometry& geometry,
                        LandscapeCodec* codec = nullptr, std::string* error = nullptr);
 
+// ── Grids: the coarse world (one array for the whole world, not one per tile) ─────────────────────────
+// Same transforms and backends as a tile, rectangular, in a small container of their own:
+//   u32 magic 'HLG1' (0x31474c48)  u8 version (1)  u8 backend  u8 flags (bit 0: predictor)  u8 kind (1 heights, 2 weights)
+//   u8 channels (weights; 1 for heights)  u8[3] 0  u32 width  u32 height  u32 rawSize  u32 storedSize   -> 28 bytes, then the payload
+// A reader checks rawSize against width x height x (2 or channels), the stored size against the blob, and the kind.
+std::vector<uint8_t> encodeLandscapeHeightGrid(const std::vector<uint16_t>& v, int w, int h, LandscapeCodec codec = LandscapeCodec::best());
+bool decodeLandscapeHeightGrid(const uint8_t* data, size_t size, std::vector<uint16_t>& out, int& w, int& h, std::string* error = nullptr);
+std::vector<uint8_t> encodeLandscapeWeightGrid(const std::vector<uint8_t>& v, int w, int h, int channels, LandscapeCodec codec = LandscapeCodec::best());
+bool decodeLandscapeWeightGrid(const uint8_t* data, size_t size, std::vector<uint8_t>& out, int& w, int& h, int& channels, std::string* error = nullptr);
+
 } // namespace HE

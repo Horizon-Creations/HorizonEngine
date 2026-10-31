@@ -314,3 +314,53 @@ TEST_CASE("landscape quadtree: a small world and a camera outside it")
 	for (int i = 0; i < 1000; ++i) REQUIRE(coverCount(rects, px(rng), pz(rng)) == 1);
 	for (const Rect& r : rects) CHECK(r.x0 < 3072.0);   // nothing is drawn beyond the world
 }
+
+TEST_CASE("landscape quadtree: the config follows the source's geometry and says how far the store has to load")
+{
+	LandscapeGeometry g;   // 512 m tile, 256 cells
+	const LandscapeQuadtreeConfig cfg = LandscapeQuadtreeConfig::fromGeometry(g, 196, 196);
+	CHECK(cfg.tileM == doctest::Approx(512.0f));
+	CHECK(cfg.cell0M == doctest::Approx(2.0f));
+	CHECK(cfg.cellSize(cfg.tileLevels + 1) == doctest::Approx(32.0f));   // the first coarse level is the coarse world's raster
+	CHECK(cfg.minLoadRadius() == doctest::Approx(6144.0f + 1.4143f * 1024.0f));
+	CHECK(cfg.fitsStore(8000.0f));                                       // the store's default radius
+	CHECK_FALSE(cfg.fitsStore(5000.0f));
+}
+
+TEST_CASE("landscape quadtree: with the store's disc loaded, neighbouring levels still differ by one at most")
+{
+	const LandscapeQuadtreeConfig cfg = defaultConfig();
+	std::mt19937 rng(31);
+	std::uniform_real_distribution<double> world(12000.0, worldMeters(cfg) - 12000.0), height(100.0, 2500.0);
+	const auto maxJump = [&](float radius, const glm::dvec3& cam) {
+		const auto inDisc = [&](int tx, int tz) {
+			const double dx = std::max({ tx * 512.0 - cam.x, 0.0, cam.x - (tx + 1) * 512.0 });
+			const double dz = std::max({ tz * 512.0 - cam.z, 0.0, cam.z - (tz + 1) * 512.0 });
+			return std::sqrt(dx * dx + dz * dz) <= radius;
+		};
+		const auto rects = rectsOf(cfg, selectLandscapePatches(cfg, cam, nullptr, inDisc));
+		int jump = 0;
+		for (size_t i = 0; i < rects.size(); ++i)
+			for (size_t j = i + 1; j < rects.size(); ++j)
+			{
+				const Rect &a = rects[i], &b = rects[j];
+				const double eps = 1e-6;
+				const bool touchX = std::abs(a.x0 + a.size - b.x0) < eps || std::abs(b.x0 + b.size - a.x0) < eps;
+				const bool touchZ = std::abs(a.z0 + a.size - b.z0) < eps || std::abs(b.z0 + b.size - a.z0) < eps;
+				const bool overlapX = std::min(a.x0 + a.size, b.x0 + b.size) - std::max(a.x0, b.x0) > eps;
+				const bool overlapZ = std::min(a.z0 + a.size, b.z0 + b.size) - std::max(a.z0, b.z0) > eps;
+				if ((touchX && overlapZ) || (touchZ && overlapX)) jump = std::max(jump, std::abs(a.level - b.level));
+			}
+		return jump;
+	};
+	int worstFit = 0, worstShort = 0;
+	for (int round = 0; round < 5; ++round)
+	{
+		const glm::dvec3 cam(world(rng), height(rng), world(rng));
+		worstFit = std::max(worstFit, maxJump(8000.0f, cam));          // the store's default radius, fits
+		worstShort = std::max(worstShort, maxJump(3000.0f, cam));      // too small: the disc edge cuts the fine levels
+	}
+	MESSAGE("largest level jump between neighbours: " << worstFit << " with a 8 km store, " << worstShort << " with a 3 km store");
+	CHECK(worstFit <= 1);
+	CHECK(worstShort >= 1);
+}

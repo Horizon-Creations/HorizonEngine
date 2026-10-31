@@ -1,4 +1,6 @@
 #pragma once
+#include "HorizonScene/LandscapeTile.h"
+
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 #include <glm/mat4x4.hpp>
@@ -47,6 +49,14 @@ struct LandscapeQuadtreeConfig
 	float rangeOf(int level) const { return level < 0 ? 0.0f : rangeFactor * patchSize(level); }
 	// First level whose single node covers the whole world.
 	int   topLevel() const;
+
+	// The tile geometry and the world size of a source, so the two cannot drift apart.
+	static LandscapeQuadtreeConfig fromGeometry(const LandscapeGeometry& g, int tilesX, int tilesZ);
+	// The store has to keep every tile under a node of level <= tileLevels whenever such a node is in range: a node of level
+	// tileLevels is drawn up to rangeOf(tileLevels) away and reaches sqrt(2) patch sizes beyond that. A smaller load radius
+	// leaves holes in the fine levels at the edge of the loaded disc, drawn by a coarser parent next to finer siblings: a step.
+	float minLoadRadius() const;
+	bool  fitsStore(float loadRadius) const { return loadRadius >= minLoadRadius(); }
 };
 
 // One patch to draw: a node of the quadtree, or some quadrants of it.

@@ -104,6 +104,21 @@ int LandscapeQuadtreeConfig::topLevel() const
 	return l;
 }
 
+LandscapeQuadtreeConfig LandscapeQuadtreeConfig::fromGeometry(const LandscapeGeometry& g, int tilesX_, int tilesZ_)
+{
+	LandscapeQuadtreeConfig c;
+	c.tileM = g.tileM;
+	c.cell0M = g.tileM / static_cast<float>(g.hCells);
+	c.tilesX = tilesX_;
+	c.tilesZ = tilesZ_;
+	return c;
+}
+
+float LandscapeQuadtreeConfig::minLoadRadius() const
+{
+	return rangeOf(tileLevels) + 1.4143f * patchSize(tileLevels);
+}
+
 LandscapeFrustum LandscapeFrustum::fromViewProjection(const glm::dmat4& m, bool zeroToOne)
 {
 	const auto row = [&](int i) { return glm::dvec4(m[0][i], m[1][i], m[2][i], m[3][i]); };
