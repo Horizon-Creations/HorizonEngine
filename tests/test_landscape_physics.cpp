@@ -2,11 +2,13 @@
 // near an anchor has a Jolt height field of its own, they meet without a gap, they go when the anchor leaves, they move with a
 // floating origin, and nothing falls through a tile that is not there yet. Real Jolt, no timing.
 #include "doctest.h"
+#include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/RigidBodyComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/FloatingOrigin.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapePhysics.h>
+#include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <Physics/CollisionLayers.h>
 
@@ -333,8 +335,6 @@ TEST_CASE("landscape physics: the real tile size is accepted by Jolt, 257 x 257 
 }
 
 // ── through the runtime ──────────────────────────────────────────────────────
-#include <HorizonScene/Components/LandscapeWorldComponent.h>
-#include <HorizonScene/LandscapeRuntime.h>
 
 TEST_CASE("landscape runtime: with a physics world attached the ground follows the camera, reports the landscape entity, and goes with it")
 {

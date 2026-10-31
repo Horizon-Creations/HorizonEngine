@@ -4,6 +4,7 @@
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/LandscapeTileTerrain.h>
+#include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/LandscapeWater.h>
 #include <HorizonScene/LandscapeStore.h>
 #include <HorizonScene/LandscapeTile.h>
@@ -711,4 +712,47 @@ TEST_CASE("landscape water: a straight bank across a tile border gives a straigh
 		area += std::abs((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) * 0.5;
 	}
 	CHECK(area == doctest::Approx(1024.0 * 2048.0 + 0.25 * 2048.0).epsilon(1e-3));
+}
+
+TEST_CASE("landscape runtime: a world with a sea gets a water region around the camera, a world without water gets none, reset clears it")
+{
+	ProceduralLandscapeParams p;                    // the real tile size, 8 x 8 tiles
+	p.tilesX = p.tilesZ = 8;
+	p.seaLevelM = 1500.0f;
+	auto sea = std::make_shared<ProceduralLandscapeSource>(p);
+	LandscapeRuntime rt;
+	std::string err;
+	REQUIRE_MESSAGE(rt.begin(sea, LandscapeRuntimeConfig{}, &err), err);
+	const glm::dvec3 cam(2048.0, 700.0, 2048.0);
+	for (int i = 0; i < 6000 && !(rt.waterRegion() && !rt.water().stats().building); ++i)
+	{
+		rt.updateAt(cam, glm::vec3(0.0f), 5.0);
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	const auto region = rt.waterRegion();
+	REQUIRE(region);
+	CHECK(region->origin == LandscapeTileKey{ 2, 2 });
+	CHECK(region->n == 4);
+	REQUIRE(region->sheets.size() == 1);
+	CHECK(region->sheets[0].level == doctest::Approx(1500.0f));
+	CHECK(region->sheets[0].params.id == 1);
+	int wet = 0;
+	for (double x = 1100.0; x < 3000.0; x += 97.0)
+		for (double z = 1100.0; z < 3000.0; z += 97.0)
+		{
+			LandscapeWaterQuery q;
+			if (rt.waterSurfaceAt(x, z, q)) { ++wet; REQUIRE(q.level == doctest::Approx(1500.0f)); REQUIRE(q.body == 1); }
+		}
+	CHECK(wet > 0);
+	rt.reset();
+	CHECK(rt.waterRegion() == nullptr);
+
+	// no sea: no table, no region
+	p.seaLevelM = -1.0e9f;
+	auto dry = std::make_shared<ProceduralLandscapeSource>(p);
+	REQUIRE(rt.begin(dry, LandscapeRuntimeConfig{}, &err));
+	const uint64_t startedBefore = rt.water().stats().started;   // the counters run over the runtime's life
+	for (int i = 0; i < 200; ++i) { rt.updateAt(cam, glm::vec3(0.0f), 5.0); std::this_thread::sleep_for(std::chrono::milliseconds(1)); }
+	CHECK(rt.waterRegion() == nullptr);
+	CHECK(rt.water().stats().started == startedBefore);
 }

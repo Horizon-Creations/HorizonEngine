@@ -6,6 +6,7 @@
 #include "HorizonScene/LandscapeQuadtree.h"
 #include "HorizonScene/LandscapeSource.h"
 #include "HorizonScene/LandscapeStore.h"
+#include "HorizonScene/LandscapeWater.h"
 
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
@@ -109,6 +110,12 @@ public:
 	// the component. Without a world, setFoliageLayers does the same by hand. The draws are what the renderer extracts (part B).
 	void setFoliageLayers(const std::vector<FoliageLayer>& layers);
 	const LandscapeFoliage& foliage() const { return m_foliage; }
+
+	// Water (step 3c). A source with a table of bodies (a pack that has one, or a procedural world with a sea) gets a water region of n x n tiles
+	// around the camera (LandscapeWater.h): the sheets to draw and the answer to "is there water here". No table, no region.
+	std::shared_ptr<const LandscapeWaterRegion> waterRegion() const { return m_water.region(); }
+	bool waterSurfaceAt(double x, double z, LandscapeWaterQuery& out) const { return m_water.surfaceAt(x, z, out); }
+	const LandscapeWater& water() const { return m_water; }
 	void foliageDraws(std::vector<LandscapeFoliageDraw>& out) const { m_foliage.draws(out); }
 
 	// The frame for the camera that was just rendered with `viewProjRelative` (origin-relative world to clip). `zeroToOne`: the
@@ -141,6 +148,7 @@ private:
 	PhysicsWorld*                            m_physics = nullptr;
 	LandscapePhysics                         m_ground;
 	LandscapeFoliage                         m_foliage;
+	LandscapeWater                           m_water;
 	uint64_t                                 m_foliageKey = 0;   // of the layer settings last given to m_foliage; 0 = none
 	std::vector<glm::dvec3>                  m_physicsAnchors;
 	uint32_t                                 m_landscapeEntity = 0xFFFFFFFEu;   // PhysicsWorld::kGroundOwner until a component names the entity
