@@ -47,6 +47,7 @@ namespace
 			case HE::AssetType::BoneMask:             return take(cm.getBoneMask(id));
 			case HE::AssetType::BlendSpace:           return take(cm.getBlendSpace(id));
 			case HE::AssetType::Sequence:             return take(cm.getSequence(id));
+			case HE::AssetType::LandscapeFoliageLayer: return take(cm.getLandscapeFoliageLayer(id));
 			default:                                  return cm.assetType(id) == want;
 		}
 	}

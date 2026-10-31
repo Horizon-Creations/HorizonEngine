@@ -33,6 +33,7 @@
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -294,6 +295,151 @@ namespace
 			++added;
 		}
 		return added;
+	}
+
+	// Materialize the LandscapeFoliageLayerAsset `set` (UUID `setId`) into the terrain's
+	// foliage layers (design doc §4, Thema 327): one `FoliageLayer` per entry, tagged with
+	// {setId, entry index} so a re-apply finds its own layers again. A tagged layer's
+	// asset-owned fields (mesh, material, LODs, rules, density, scale, flags) are refreshed
+	// every call; `seed`, `densityMask` and `visible` are the editor's own and are never
+	// touched. A layer nobody tagged — hand-added, or from a different asset/entry — is
+	// never read or written, so this never clobbers what the author tuned (the same
+	// add-only promise `applyGroupMeshes` makes, plus update). Spawning itself stays
+	// FoliageSystem's: this only sets the fields it already scatters from and flags the
+	// layer dirty, so the next `FoliageSystem::update()` (not this call) does the actual
+	// per-frame work — no placement work happens here. Returns how many entries were
+	// added or refreshed.
+	int applyFoliageSet(AppContext& ctx, entt::registry& reg, entt::entity terrain,
+	                     HE::UUID setId, const LandscapeFoliageLayerAsset& set)
+	{
+		if (set.entries.empty()) return 0;
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Foliage");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+
+		int touched = 0;
+		for (size_t i = 0; i < set.entries.size(); ++i)
+		{
+			const LandscapeFoliageEntry& e = set.entries[i];
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers)
+				if (l.sourceAssetId == setId && l.sourceEntry == static_cast<int>(i)) { layer = &l; break; }
+			if (!layer)
+			{
+				// Reuse an empty, untagged layer first (the one a fresh component starts
+				// with), same precedent as applyGroupMeshes; otherwise grow the list. A
+				// layer only qualifies as that pristine starter, never one the author
+				// began hand-tuning (named it, painted a mask, set a rule, added a LOD)
+				// before picking a mesh — meshAssetId=={} alone is not proof of that,
+				// so every other sign of hand-tuning is checked too: the slope and
+				// height rules, density, seed, scale range, draw/shadow distances,
+				// bucket size, the shadow/AO switches, LOD hysteresis and visibility.
+				// All compared bit for bit against FoliageLayer{}: this starter has
+				// never been written, so there is nothing to be "close" to. This runs
+				// before the write block below, which sets density/scale itself.
+				const FoliageLayer pristine{};
+				for (FoliageLayer& l : folc->layers)
+					if (l.meshAssetId == HE::UUID{} && l.materialAssetId == HE::UUID{} &&
+					    l.sourceAssetId == HE::UUID{} && l.name.empty() && l.densityMask.empty() &&
+					    l.lods.empty() && l.weightLayer == -1 &&
+					    l.slopeMin == pristine.slopeMin && l.slopeMax == pristine.slopeMax &&
+					    l.heightMin == pristine.heightMin && l.heightMax == pristine.heightMax &&
+					    l.density == pristine.density && l.seed == pristine.seed &&
+					    l.minScale == pristine.minScale && l.maxScale == pristine.maxScale &&
+					    l.drawDistance == pristine.drawDistance && l.bucketSize == pristine.bucketSize &&
+					    l.castsShadow == pristine.castsShadow && l.contributesAO == pristine.contributesAO &&
+					    l.shadowDistance == pristine.shadowDistance && l.lodHysteresis == pristine.lodHysteresis &&
+					    l.visible == pristine.visible) { layer = &l; break; }
+				if (!layer) layer = folc->addLayer();
+				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
+				layer->sourceAssetId = setId;
+				layer->sourceEntry   = static_cast<int>(i);
+			}
+
+			// The asset is loaded leniently (ContentManager only logs
+			// validateLandscapeFoliageLayer's problems, it never rejects or fixes them —
+			// LandscapeFoliageLayerJson.cpp), so a hand-edited or stale file can still
+			// carry a negative density, an inverted min/max or slope range, or an
+			// unordered LOD list. Clamp every numeric field to what FoliageSystem and the
+			// scatter actually expect instead of handing it garbage.
+			auto positive = [](float v, float fallback) { return (std::isfinite(v) && v > 0.0f) ? v : fallback; };
+			auto nonNeg    = [](float v, float fallback) { return (std::isfinite(v) && v >= 0.0f) ? v : fallback; };
+
+			layer->name            = e.name;
+			layer->meshAssetId     = e.meshAssetId;
+			layer->materialAssetId = e.materialAssetId;
+			{
+				const float density = e.density * set.densityScale;   // a product: validate it, not the factors
+				layer->density = (std::isfinite(density) && density > 0.0f) ? density : 0.0f;
+			}
+			{
+				float minS = positive(e.minScale, FoliageLayer{}.minScale);
+				float maxS = positive(e.maxScale, FoliageLayer{}.maxScale);
+				if (minS > maxS) std::swap(minS, maxS);
+				layer->minScale = minS;
+				layer->maxScale = maxS;
+			}
+			layer->drawDistance    = positive(e.drawDistance, FoliageLayer{}.drawDistance);
+			layer->bucketSize      = positive(e.bucketSize, FoliageLayer{}.bucketSize);
+			layer->castsShadow     = e.castsShadow;
+			layer->contributesAO   = e.contributesAO;
+			layer->shadowDistance  = nonNeg(e.shadowDistance, 0.0f);
+			layer->lodHysteresis   = nonNeg(e.lodHysteresis, 0.0f);
+			{
+				float slopeMin = std::isfinite(e.slopeMin) ? std::clamp(e.slopeMin, 0.0f, 1.0f) : 0.0f;
+				float slopeMax = std::isfinite(e.slopeMax) ? std::clamp(e.slopeMax, 0.0f, 1.0f) : 1.0f;
+				if (slopeMin > slopeMax) std::swap(slopeMin, slopeMax);
+				layer->slopeMin = slopeMin;
+				layer->slopeMax = slopeMax;
+			}
+			{
+				float heightMin = std::isfinite(e.heightMin) ? e.heightMin : -FoliageLayer::kNoHeightLimit;
+				float heightMax = std::isfinite(e.heightMax) ? e.heightMax :  FoliageLayer::kNoHeightLimit;
+				if (heightMin > heightMax) std::swap(heightMin, heightMax);
+				layer->heightMin = heightMin;
+				layer->heightMax = heightMax;
+			}
+			// Out of range = no paint rule, the same leniency SceneSerializer gives a
+			// hand-edited scene (a set authored against more terrain channels than this
+			// landscape has).
+			layer->weightLayer     = (e.paintLayer >= 0 && e.paintLayer < kTerrainMaxLayers) ? e.paintLayer : -1;
+			layer->lods.clear();
+			for (const LandscapeFoliageLod& lod : e.lods)
+			{
+				FoliageLod fl;
+				fl.meshAssetId     = lod.meshAssetId;
+				fl.materialAssetId = lod.materialAssetId;
+				fl.distance        = nonNeg(lod.distance, 0.0f);
+				fl.density         = std::isfinite(lod.density) ? std::clamp(lod.density, 0.0f, 1.0f) : 1.0f;
+				layer->lods.push_back(fl);
+			}
+			// A level boundary only makes sense as a staircase out from the camera
+			// (FoliageComponent.h's own description of what a LOD level is); an asset
+			// entry's list is not guaranteed to arrive in that order.
+			std::sort(layer->lods.begin(), layer->lods.end(),
+			          [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			layer->dirty = true;   // mesh/density/rules changed → re-scatter
+
+			// The entry's meshes and materials are project or EngineContent FILES like the
+			// group presets' (§7: only fetched on Apply, not a streamed material dependency).
+			if (ctx.contentManager)
+			{
+				if (e.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.meshAssetId))
+					ctx.contentManager->loadAssetAsync(e.meshAssetId);
+				if (e.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.materialAssetId))
+					ctx.contentManager->loadAssetAsync(e.materialAssetId);
+				for (const LandscapeFoliageLod& lod : e.lods)
+				{
+					if (lod.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.meshAssetId))
+						ctx.contentManager->loadAssetAsync(lod.meshAssetId);
+					if (lod.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.materialAssetId))
+						ctx.contentManager->loadAssetAsync(lod.materialAssetId);
+				}
+			}
+			++touched;
+		}
+		return touched;
 	}
 
 	// The name on the left, the control filling the rest - ImGui itself puts a label to
@@ -1544,6 +1690,48 @@ void renderPanel(AppContext& ctx)
                     }
                 }
 
+                // ── Foliage set ──────────────────────────────────────────
+                // The material names its LandscapeFoliageLayer by UUID (the Landscape
+                // Foliage node, Thema 327 step 3, MaterialAsset::foliageSetId); this is
+                // the one place that materializes it onto the terrain, same button
+                // precedent as "Apply Group Meshes" above (one undo snapshot, add +
+                // update, never deletes). Only custom materials carry the field today —
+                // the three engine materials still rely on "Apply Group Meshes".
+                if (lmat && lmat->foliageSetId != HE::UUID{})
+                {
+                    const HE::UUID setId = lmat->foliageSetId;
+                    const LandscapeFoliageLayerAsset* foliageSet =
+                        ctx.contentManager ? ctx.contentManager->getLandscapeFoliageLayer(setId) : nullptr;
+                    if (!foliageSet && ctx.contentManager)
+                    {
+                        // Passive pull (design §7): ask once per content epoch, not once
+                        // per process — a set that EngineContent has not pulled yet still
+                        // bumps contentEpoch() when it arrives (noteContentChanged()), and
+                        // that must trigger a retry instead of leaving Apply Foliage
+                        // disabled until the editor restarts. Never ensureResident here —
+                        // it is synchronous and does not start a download of a set that
+                        // still sits on the EngineContent server.
+                        static std::unordered_map<HE::UUID, uint64_t> s_askedAt;
+                        const uint64_t epoch = ctx.contentManager->contentEpoch();
+                        auto it = s_askedAt.find(setId);
+                        if (it == s_askedAt.end() || it->second < epoch)
+                        {
+                            s_askedAt[setId] = epoch;
+                            ctx.contentManager->loadAssetAsync(setId);
+                        }
+                    }
+                    sectionLabel("Foliage Set");
+                    dimText("%s", foliageSet ? foliageSet->name.c_str() : "(fetching the foliage set\xe2\x80\xa6)");
+                    ImGui::BeginDisabled(foliageSet == nullptr);
+                    if (EditorWidgets::button("Apply Foliage", ImVec2(-FLT_MIN, 0.0f)) && foliageSet)
+                    {
+                        const int touched = applyFoliageSet(ctx, reg, terrainEnt, setId, *foliageSet);
+                        if (touched > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Foliage");
+                }
+
                 // ── Heightmap ────────────────────────────────────────────
                 drawHeightmapBlock(ctx, terrainEnt);
 
@@ -1596,6 +1784,7 @@ void renderPanel(AppContext& ctx)
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
                     tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
                     tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }
@@ -1712,6 +1901,7 @@ void renderPanel(AppContext& ctx)
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
                     tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
                     tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }

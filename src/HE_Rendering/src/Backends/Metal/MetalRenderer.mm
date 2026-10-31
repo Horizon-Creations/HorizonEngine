@@ -4289,7 +4289,8 @@ float3 starField(float3 dir, float3 cdir, float3 sunDir, float time, float milky
 		core = core * core;
 		float  halo  = exp(-(d * d) / (sigma * sigma * 3.5)) * sz * sz * 0.14 * starGlow;
 		float  win   = smoothstep(1.0, 0.6, d);
-		float  shape = (core * 1.8 + halo) * win;
+		float  aaE   = min(1.0, (radius * radius) / (sigma * sigma)); // energy-conserving AA floor (see kSkyFS starField)
+		float  shape = (core * 1.8 + halo) * win * aaE;
 		float  mag   = (0.4 + 0.6 * smoothstep(thresh, 1.0, present)) * mix(0.8, 2.6, sz);
 		float  twa     = clamp(starTwinkle, 0.0, 1.0);
 		float  twPhase = starHash(cell + 23.5) * 6.2831;
@@ -14303,9 +14304,9 @@ void MetalRenderer::DestroySkyViewLut()
 // the camera, so a reflection ray that misses the scene returns the sky the
 // viewer sees — clouds and weather included — instead of m_skyEnvCube's
 // cloudless CPU atmosphere. Every frame the reflections trace (clouds drift
-// with the clock); 6 × 128² texels is about a tenth of a 720p sky pass. No
+// with the clock); two of the six 512² faces per frame after the first full bake. No
 // low-res cloud composite: that buffer is screen-space, a face is not.
-static constexpr int kSkyReflCubeSize = 128;
+static constexpr int kSkyReflCubeSize = 512;
 void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 {
 	m_skyReflValid = false;
@@ -14313,11 +14314,12 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 		const char* e = std::getenv("HE_GIREFL_SKY");
 		return e && e[0] == '0';
 	}();
-	if (s_off || !m_skyReflPipeline || !GetEnvironment().skyEnabled) return;
+	if (s_off || !m_skyReflPipeline || !GetEnvironment().skyEnabled) { m_skyReflBaked = false; return; }
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	if (!device) return;
 	if (!m_skyReflCube)
 	{
+		m_skyReflBaked = false;
 		MTLTextureDescriptor* d = [MTLTextureDescriptor
 			textureCubeDescriptorWithPixelFormat:kSceneColorFormat
 			size:kSkyReflCubeSize mipmapped:NO];
@@ -14330,7 +14332,10 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
 	const glm::vec3 camPos = m_renderWorld.camera.position;
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
-	for (int f = 0; f < 6; ++f)
+	// All six faces the first time, then a rotating pair (a face not drawn keeps its picture).
+	const int firstFace = m_skyReflBaked ? m_skyReflPhase * kSkyReflFacesPerFrame : 0;
+	const int endFace   = m_skyReflBaked ? firstFace + kSkyReflFacesPerFrame : 6;
+	for (int f = firstFace; f < endFace; ++f)
 	{
 		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
 		pass.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_skyReflCube;
@@ -14344,6 +14349,8 @@ void MetalRenderer::EncodeSkyReflCube(void* cmdBufPtr)
 		[enc endEncoding];
 	}
 	m_skyReflValid = true;
+	m_skyReflPhase = m_skyReflBaked ? (m_skyReflPhase + 1) % (6 / kSkyReflFacesPerFrame) : 0;
+	m_skyReflBaked = true;
 }
 
 void MetalRenderer::UpdateSkyEnvCube(const glm::vec3& sunDir)
@@ -14428,7 +14435,7 @@ void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameSta
 	// gate the samples, so an absent cubemap (nil — legal in Metal, reads zero)
 	// or a dummy AO bind here is inert. The cube slot must NOT get the 2D dummy:
 	// Metal validates the texture TYPE.
-	[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:14];
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)MaterialSkyCube() atIndex:14];
 	[encoder setFragmentTexture:pick(ssaoActive ? m_ssaoResult : nullptr) atIndex:15];
 	// Cloud-shadow map at texture 16 — TEXTURE only, deliberately no sampler
 	// (both fragmentMain and the material preamble sample it through an inline
@@ -15688,7 +15695,7 @@ void MetalRenderer::EncodeDeferredResolveTile(void* renderEncoder, int width, in
 	bindTex(m_fwdReflGiTex  ? m_fwdReflGiTex  : m_dummyTexture, 10);
 	bindTex(m_shadowDepthTex, 11);
 	bindTex(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex, 12);
-	bindTex(m_skyEnvCube, 14);
+	bindTex(MaterialSkyCube(), 14);
 	bindTex(ssaoActive ? m_ssaoResult : m_dummyTexture, 15);
 	// Cloud-shadow map: TEXTURE only at 16 — sampler indices stop at 15; the
 	// preamble samples it through an inline constexpr sampler.

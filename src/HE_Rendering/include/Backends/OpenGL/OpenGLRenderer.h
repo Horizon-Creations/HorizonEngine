@@ -1277,6 +1277,18 @@ private:
 	unsigned int m_skyReflCube  = 0;     // GL_TEXTURE_CUBE_MAP RGBA16F, kSkyReflCubeSize²
 	unsigned int m_skyReflFBO   = 0;
 	bool         m_skyReflValid = false; // the cube holds THIS frame's sky
+	// Only kSkyReflFacesPerFrame of the six faces are redrawn per frame (the clouds drift slowly; all six at
+	// 512² cost ~2.5 ms on a 4070 at 1080p), the first frame draws all of them. A face not drawn keeps its picture.
+	static constexpr int kSkyReflFacesPerFrame = 2;
+	bool         m_skyReflBaked = false; // every face holds a picture
+	int          m_skyReflPhase = 0;     // which pair of faces is next
+	// The cube graph materials bind as heSkyEnv (unit 14). Transparent surfaces (water)
+	// never reach the GI-reflection trace, so their specular lookup is the only place the
+	// real sky (aurora, stars, clouds) can show in them; the CPU-baked m_skyEnvCube has none.
+	unsigned int MaterialSkyCube() const
+	{
+		return (m_giReflEnabled && m_skyReflValid && m_skyReflCube) ? m_skyReflCube : m_skyEnvCube;
+	}
 	void         DispatchGIProbeUpdate();
 
 	static constexpr int   kGIProbeOctSize     = 8;    // octahedral tile size

@@ -110,7 +110,8 @@ namespace HE
         Theme,            // UI colour roles + sizes + shadows, light and dark (docs/he-apps-plan.md D1)
         BoneMask,         // which joints an animation layer may touch, by joint NAME (HE::BoneMask)
         BlendSpace,       // N clips in a 1D/2D parameter space, mixed by parameter (HE::BlendSpace)
-        Sequence          // cinematic timeline: several actors, camera cuts, events on one clock (SequenceAsset)
+        Sequence,         // cinematic timeline: several actors, camera cuts, events on one clock (SequenceAsset)
+        LandscapeFoliageLayer // authored foliage rule set per landscape material group (LandscapeFoliageLayerAsset)
     };
 
     // Does this kind of asset travel over a collaboration session?
@@ -162,6 +163,10 @@ namespace HE
             // editor — a director and an animator blocking the same cutscene is
             // the case this whole switch exists for.
             case AssetType::Sequence:
+            // A short list of foliage rules (mesh, density, slope, height, paint
+            // channel) tuned by looking at the landscape — a level artist and a
+            // technical artist adjusting the same biome's set is the use case.
+            case AssetType::LandscapeFoliageLayer:
                 return true;
 
             case AssetType::StaticMesh:
@@ -227,6 +232,7 @@ namespace HE
             case AssetType::BoneMask:             return "BoneMask";
             case AssetType::BlendSpace:           return "BlendSpace";
             case AssetType::Sequence:             return "Sequence";
+            case AssetType::LandscapeFoliageLayer: return "LandscapeFoliageLayer";
         }
         // Only reachable through a cast from an out-of-range value — the same
         // "unknown" the enum's own first entry means.

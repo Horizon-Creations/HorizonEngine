@@ -3706,9 +3706,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			{
 				static const char* const kWeightItems[] = { "Off", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
-				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7" };
+				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7",
+				                                            "Layer 8", "Layer 9", "Layer 10", "Layer 11" };
+				static_assert(sizeof(kWeightItems) / sizeof(kWeightItems[0]) == kTerrainMaxLayers + 1,
+				              "Off plus one entry per paint layer");
 				int wl = fol->weightLayer + 1;
-				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, 9))
+				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, kTerrainMaxLayers + 1))
 				{
 					if (undo) undo->snapshotNow("Foliage Paint Layer");
 					fol->weightLayer = wl - 1;

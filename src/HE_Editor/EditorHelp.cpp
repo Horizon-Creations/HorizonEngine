@@ -5470,6 +5470,12 @@ namespace
 	  "here IS the set of layers the Landscape tool offers, in this order — up to "
 	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
 	  "", "materials#nodes" },
+	{ "Material Node/Foliage Set", "Landscape Foliage Set",
+	  "The foliage set (a Landscape Foliage asset) this landscape material names for "
+	  "its terrain: which plants grow on which paint layer, and where. Click to pick one "
+	  "or drop it from the Content Browser. The node draws nothing and changes no "
+	  "shader, it only tells the Landscape tool which set belongs to this material.",
+	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
 	  "the graph's colour is the pixel, useful for skies, holograms and anything "
@@ -7461,6 +7467,16 @@ namespace
 	  "where the group's own material shows rock. It only adds - switching the "
 	  "group never removes or changes a layer, and a layer you already have is left "
 	  "alone.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Foliage", "",
+	  "Materializes the foliage set named on the landscape's material (a Landscape "
+	  "Foliage node in its graph) into this terrain's foliage layers: one layer per "
+	  "entry, with the mesh, material, density and placement rules (slope, height, "
+	  "paint channel) the set author gave it. It only adds and refreshes its own "
+	  "layers - a layer you added by hand, or one from a different foliage set, is "
+	  "never touched, and re-pressing it after editing the set brings its layers up "
+	  "to date without losing their painted density masks or visibility. Disabled "
+	  "while the set is still downloading from the EngineContent server.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "

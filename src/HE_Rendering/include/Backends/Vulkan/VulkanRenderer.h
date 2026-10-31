@@ -1108,7 +1108,7 @@ private:
 	// the REAL sky - clouds, weather - drawn around the camera into six 128x128 faces every frame the reflections run.
 	// A reflection ray that hits nothing reads it, so a water surface mirrors the clouds; without it a miss returned
 	// nothing and the material fell back to the cloudless analytic heSkyEnv cube. HE_GIREFL_SKY=0 turns it off.
-	static constexpr int kSkyReflCubeSize = 128;
+	static constexpr int kSkyReflCubeSize = 512;
 	SkyUBO                m_skyReflUBO[2][6];
 	VkRenderPass          m_skyReflRP        = VK_NULL_HANDLE;
 	VkPipeline            m_skyReflPipe      = VK_NULL_HANDLE;

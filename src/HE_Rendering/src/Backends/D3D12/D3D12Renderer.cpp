@@ -3948,7 +3948,10 @@ struct D3D12RendererImpl
         sv.Shader4ComponentMapping     = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         sv.TextureCube.MostDetailedMip = 0;
         sv.TextureCube.MipLevels       = 1;
-        device->CreateShaderResourceView(m_skyEnvCube.Get(), &sv, h);
+        // GI reflections on: the real-sky cube (aurora, stars, clouds). Transparent water never
+        // reaches the GI trace, so this specular lookup is the only place the sky shows in it.
+        const bool realSky = giReflEnabled && skyReflValid && skyReflTex;
+        device->CreateShaderResourceView(realSky ? skyReflTex.Get() : m_skyEnvCube.Get(), &sv, h);
     }
 
     void createMaterialResources();
@@ -8559,7 +8562,7 @@ struct D3D12RendererImpl
     // sky - clouds, weather - drawn around the camera into six 128x128 faces; a reflection ray that hits nothing reads it, so a
     // mirror shows clouds instead of the cloudless analytic cube. Only kSkyReflFacesPerFrame of the six faces are redrawn per
     // frame (the clouds drift slowly; all six cost 0.3 ms), the first frame draws all of them. HE_GIREFL_SKY=0 turns it off.
-    static constexpr UINT k_skyReflSize = 128;
+    static constexpr UINT k_skyReflSize = 512;
     static constexpr UINT k_skyReflFacesPerFrame = 2;
     ComPtr<ID3D12Resource>       skyReflTex;       // Texture2DArray x6, RGBA16F
     ComPtr<ID3D12DescriptorHeap> skyReflRtvHeap;   // 6 face RTVs

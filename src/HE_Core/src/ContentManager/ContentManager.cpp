@@ -5,11 +5,33 @@
 #include <cstdint>
 #include "MaterialGraph/MaterialGraph.h" // instance sync: switch-permutation regenerate
 #include "MaterialGraph/AutoLandscapeMaterial.h" // the three auto landscape array paths
+#include "Trails/TrailClipmap.h"           // the runtime trail texture answers its own path in loadAsset
 #include "Renderer/UIFont.h"           // uiRasterizeIcon: the editor icon textures
 #include "ContentManager/HAsset.h"
 #include "ContentManager/AssetRefRetarget.h" // move/rename: carry path references over
 #include "Sequence/SequenceJson.h"        // CHUNK_SEQU <-> SequenceAsset
+#include "LandscapeFoliage/LandscapeFoliageLayerJson.h" // CHUNK_LFOL <-> LandscapeFoliageLayerAsset
 #include "Hpak/HpakReader.h"
+
+namespace
+{
+// A graph texture that is made at runtime and changes (the landscape's trail clipmap, kTrailTexturePath) must reach the
+// renderers by ID: they cache a path-referenced texture under its path, and IRenderer::InvalidateTexture only drops
+// id-keyed entries, so a texture bound by path would stay at its first upload. Every material that lists it gets
+// its fixed id next to the path (`graphTextureIds` is parallel to `graphTexturePaths`; a baked pak already carries ids
+// and is left alone), and the texture is made right away so the first request finds it.
+void bindRuntimeTextureIds(ContentManager& cm, MaterialAsset& m)
+{
+    for (size_t i = 0; i < m.graphTexturePaths.size(); ++i)
+        if (m.graphTexturePaths[i] == HE::kTrailTexturePath)
+        {
+            if (m.graphTextureIds.size() < m.graphTexturePaths.size()) m.graphTextureIds.resize(m.graphTexturePaths.size());
+            m.graphTextureIds[i] = HE::kTrailTextureId;
+            HE::TrailClipmap::ensureTexture(cm);
+        }
+}
+} // namespace
+
 #include "Hpak/ProjectExporter.h"        // sceneUuidForPath + the reserved pak entry names
 #include "JobSystem/JobSystem.h"
 #include "Diagnostics/Logger.h"
@@ -352,6 +374,10 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			// Tessellation displacement (Thema 207): appended after the approx block,
 			// absent in older files → empty = no tessellation.
 			HAsset::Reader::readString(c->data,o,a.customShaderDispGlsl);
+			// Landscape foliage set (Thema 327): after the displacement body, absent in
+			// older files → {} = none (readPOD leaves it untouched at EOF).
+			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.hi);
+			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.lo);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -364,6 +390,7 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PSHD)) // precompiled shaders (packed)
 			a.precompiledShaders = HE::decodeMaterialShaderVariants(c->data);
+		bindRuntimeTextureIds(*this, a);
 		handle = m_materialAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Scene:
@@ -672,6 +699,28 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 		}
 		handle = m_sequenceAssets.insert(std::move(a)); break;
 	}
+	case HE::AssetType::LandscapeFoliageLayer:
+	{
+		// Same rule as the Sequence: no chunk is an empty set (a stub, or a file
+		// from before the chunk), a chunk that does not parse is a FAILED load so
+		// a save cannot overwrite the author's rules with nothing.
+		LandscapeFoliageLayerAsset a{}; a.id = id; a.type = type; a.name = assetName; a.path = relativePath;
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_LFOL))
+		{
+			const std::string text(reinterpret_cast<const char*>(c->data.data()), c->data.size());
+			std::string why;
+			if (!HE::landscapeFoliageLayerFromJson(text, a, &why))
+			{
+				HE_LOG_ERROR(Asset, "LandscapeFoliageLayer '%s': the LFOL chunk is not readable (%s) "
+				                    "— not loaded, so a save cannot overwrite it",
+				             relativePath.c_str(), why.c_str());
+				return HE::UUID();
+			}
+			for (const std::string& problem : HE::validateLandscapeFoliageLayer(a))
+				HE_LOG_WARN(Asset, "LandscapeFoliageLayer '%s': %s", relativePath.c_str(), problem.c_str());
+		}
+		handle = m_landscapeFoliageLayerAssets.insert(std::move(a)); break;
+	}
 	default:
 		return HE::UUID();
 	}
@@ -831,7 +880,10 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
 	mat->graphTexturePaths    = gen.textures;
+	mat->graphTextureIds.clear();
+	bindRuntimeTextureIds(*this, *mat);
 	mat->graphLayerNames      = gen.layerNames;   // landscape paint layers
+	mat->foliageSetId         = gen.foliageSetId; // landscape foliage set (metadata node)
 	applyGraphParams(*mat, gen, &oldValues);      // keep every user-edited value
 	applyApproxSurface(*mat, g);                  // GI-hit colours (needs final param slots)
 }
@@ -904,7 +956,10 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			// re-applied from oldValues below, the rest must follow the parent.
 			applyGraphParams(*inst, gen, nullptr);
 			inst->graphTexturePaths = gen.textures;
+			inst->graphTextureIds.clear();
+			bindRuntimeTextureIds(*this, *inst);
 			inst->graphLayerNames      = gen.layerNames; // landscape paint layers
+			inst->foliageSetId         = gen.foliageSetId;
 			inst->blendMode            = gen.blendMode;
 			inst->domain               = gen.domain;
 			inst->customShaderVertGlsl = gen.vertexBody;
@@ -931,6 +986,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		// panel refused to paint with it ("needs a material with a Landscape
 		// Layer Blend node") even though its shader samples the weightmap.
 		inst->graphLayerNames      = parent->graphLayerNames;
+		inst->foliageSetId         = parent->foliageSetId; // same graph = same foliage set
 		inst->shaderParamData      = parent->shaderParamData;
 		inst->precompiledShaders   = parent->precompiledShaders;
 		inst->blendMode            = parent->blendMode;
@@ -1099,6 +1155,10 @@ HE::UUID ContentManager::loadAsset(const std::string& relativePath)
 	HE_PROFILE_SCOPE_N("ContentManager::load");
 	if (const auto loaded = m_pathToUUID.find(relativePath); loaded != m_pathToUUID.end())
 		return loaded->second;
+	// The landscape's trail clipmap is a runtime texture with no file (Trails/TrailClipmap.h): answer it
+	// here, untouched, so a material that asks before the first scene tick finds it.
+	if (relativePath == HE::kTrailTexturePath)
+		return HE::TrailClipmap::ensureTexture(*this);
 
 	// Packed build: resolve the content path to a mounted-pak UUID via the asset
 	// index, then load that entry synchronously (registers it under its embedded
@@ -1948,6 +2008,16 @@ void ContentManager::expandFrontier(HE::UUID id, const LoadRequester& requester)
 			for (HE::UUID r : refs) enqueue(r);
 		}
 		break;
+	case HE::AssetType::LandscapeFoliageLayer:
+		// The meshes and materials the rules name: applying the set needs them,
+		// and the set itself is only requested when something wants to apply it.
+		if (const auto* a = getLandscapeFoliageLayer(id))
+		{
+			std::vector<HE::UUID> refs;
+			HE::landscapeFoliageLayerAssetRefs(*a, refs);
+			for (HE::UUID r : refs) enqueue(r);
+		}
+		break;
 	default:
 		break;
 	}
@@ -2108,6 +2178,10 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		// Tessellation displacement body — after the approx block, which the packer
 		// re-folds and then copies everything behind it verbatim, so this ships too.
 		HAsset::Writer::appendString(b,a.customShaderDispGlsl);
+		// Landscape foliage set — behind the displacement body, so the packer's
+		// verbatim copy of everything after the approx block ships it too.
+		HAsset::Writer::appendPOD(b,a.foliageSetId.hi);
+		HAsset::Writer::appendPOD(b,a.foliageSetId.lo);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}
@@ -2325,6 +2399,15 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		// into a stub.
 		const std::string text = HE::sequenceToJson(static_cast<SequenceAsset&>(asset));
 		w.addChunk(HAsset::CHUNK_SEQU, text.data(), text.size());
+		break;
+	}
+	case HE::AssetType::LandscapeFoliageLayer:
+	{
+		// Written even when empty, like the sequence: a set whose entries were all
+		// removed keeps its description and scale rather than turning into a stub.
+		const std::string text =
+			HE::landscapeFoliageLayerToJson(static_cast<LandscapeFoliageLayerAsset&>(asset));
+		w.addChunk(HAsset::CHUNK_LFOL, text.data(), text.size());
 		break;
 	}
 	default:
@@ -2652,6 +2735,7 @@ static T* lookupAssetMutable(const std::unordered_map<HE::UUID, SlotHandle>& ind
 const StaticMeshAsset*    ContentManager::getStaticMesh(HE::UUID id) const    { return lookupAsset(m_handleToUUID, m_staticMeshAssets, id); }
 const SkeletalMeshAsset*  ContentManager::getSkeletalMesh(HE::UUID id) const  { return lookupAsset(m_handleToUUID, m_skeletalMeshAssets, id); }
 StaticMeshAsset*          ContentManager::getStaticMeshMutable(HE::UUID id)   { return lookupAssetMutable(m_handleToUUID, m_staticMeshAssets, id); }
+TextureAsset*             ContentManager::getTextureMutable(HE::UUID id)      { return lookupAssetMutable(m_handleToUUID, m_textureAssets, id); }
 SkeletalMeshAsset*        ContentManager::getSkeletalMeshMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_skeletalMeshAssets, id); }
 const TextureAsset*       ContentManager::getTexture(HE::UUID id) const       { return lookupAsset(m_handleToUUID, m_textureAssets, id); }
 const MaterialAsset*      ContentManager::getMaterial(HE::UUID id) const      { return lookupAsset(m_handleToUUID, m_materialAssets, id); }
@@ -2681,6 +2765,8 @@ const PropertyAnimClipAsset*   ContentManager::getPropertyAnimClip(HE::UUID id) 
 PropertyAnimClipAsset*         ContentManager::getPropertyAnimClipMutable(HE::UUID id)  { return lookupAssetMutable(m_handleToUUID, m_propAnimClipAssets, id); }
 const SequenceAsset*           ContentManager::getSequence(HE::UUID id) const           { return lookupAsset(m_handleToUUID, m_sequenceAssets, id); }
 SequenceAsset*                 ContentManager::getSequenceMutable(HE::UUID id)          { return lookupAssetMutable(m_handleToUUID, m_sequenceAssets, id); }
+const LandscapeFoliageLayerAsset* ContentManager::getLandscapeFoliageLayer(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_landscapeFoliageLayerAssets, id); }
+LandscapeFoliageLayerAsset*       ContentManager::getLandscapeFoliageLayerMutable(HE::UUID id)    { return lookupAssetMutable(m_handleToUUID, m_landscapeFoliageLayerAssets, id); }
 const ThemeAsset*            ContentManager::getTheme(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_themeAssets, id); }
 ThemeAsset*                  ContentManager::getThemeMutable(HE::UUID id) { return lookupAssetMutable(m_handleToUUID, m_themeAssets, id); }
 const BoneMaskAsset*         ContentManager::getBoneMask(HE::UUID id) const { return lookupAsset(m_handleToUUID, m_boneMaskAssets, id); }
@@ -2792,6 +2878,7 @@ HE::UUID ContentManager::registerSaveGameTemplate(SaveGameTemplateAsset asset) {
 HE::UUID ContentManager::registerTheme(ThemeAsset asset) { return registerRuntimeAsset(m_themeAssets, std::move(asset), HE::AssetType::Theme); }
 HE::UUID ContentManager::registerBoneMask(BoneMaskAsset asset) { return registerRuntimeAsset(m_boneMaskAssets, std::move(asset), HE::AssetType::BoneMask); }
 HE::UUID ContentManager::registerSequence(SequenceAsset asset) { return registerRuntimeAsset(m_sequenceAssets, std::move(asset), HE::AssetType::Sequence); }
+HE::UUID ContentManager::registerLandscapeFoliageLayer(LandscapeFoliageLayerAsset asset) { return registerRuntimeAsset(m_landscapeFoliageLayerAssets, std::move(asset), HE::AssetType::LandscapeFoliageLayer); }
 HE::UUID ContentManager::registerBlendSpace(BlendSpaceAsset asset) { return registerRuntimeAsset(m_blendSpaceAssets, std::move(asset), HE::AssetType::BlendSpace); }
 HE::UUID ContentManager::registerEnumType(EnumTypeAsset asset)     { return registerRuntimeAsset(m_enumTypeAssets,   std::move(asset), HE::AssetType::EnumType);   }
 

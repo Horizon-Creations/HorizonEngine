@@ -1,6 +1,8 @@
 // Auto landscape material — see AutoLandscapeMaterial.h for what it does and why
 // it is a plain graph. This file is only the wiring.
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <Trails/TrailClipmap.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 
 namespace HE
@@ -92,6 +94,36 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         "Slope (1 - normal.y) where automatic standing water has faded out completely; it starts to thin "
         "out from a fifth of that, and the damp ground beside a puddle fades out at twice it. "
         "0.08 ~ 23 degrees. Painted puddles ignore it.");
+    // The procedural snow / sand (MF_ProceduralSnow / MF_ProceduralSand). The defaults are the
+    // functions' own, the colours the references': see where they are wired below.
+    const int pSnowColor = w.node(T::ParamColor, 0);
+    {
+        MatGraphNode* c = r.graph.findNode(pSnowColor);
+        c->s = kAutoLandscapeParamSnowColor;
+        c->p[0] = 0.82f; c->p[1] = 0.85f; c->p[2] = 0.90f;
+        c->group = "Snow";
+        c->tooltip = "Colour of the procedural snow (linear).";
+    }
+    const int pSnowLook = w.node(T::ParamVec4, 0);
+    {
+        MatGraphNode* c = r.graph.findNode(pSnowLook);
+        c->s = kAutoLandscapeParamSnowLook;
+        c->p[0] = 0.5f; c->p[1] = 0.5f; c->p[2] = 0.35f; c->p[3] = 0.5f;
+        c->group = "Snow";
+        c->tooltip = "Procedural snow, x..w: Grain (0..1, how coarse the crystals read), Drift (0..1, wind-blown "
+                     "ridges), Glitter (0..1, sparkle in the sun), Softness (0..1, how deep and rounded the surface is).";
+    }
+    int pSandLook = -1;
+    if (group.proceduralSand)
+    {
+        pSandLook = w.node(T::ParamVec4, 0);
+        MatGraphNode* c = r.graph.findNode(pSandLook);
+        c->s = kAutoLandscapeParamSandLook;
+        c->p[0] = 0.03f; c->p[1] = 0.5f; c->p[2] = 0.3f; c->p[3] = 0.3f;
+        c->group = "Sand";
+        c->tooltip = "Procedural sand, x..w: Grain Size (metres), Ripple (0..1, how pronounced the wind ripples "
+                     "are), Ripple Size (metres from crest to crest), Glitter (0..1).";
+    }
 
     // ── Coordinates and slope (column 1) ─────────────────────────────────────
     const int wpos   = w.node(T::WorldPos, 1);
@@ -104,6 +136,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     const int nrm    = w.node(T::NormalWS, 1);
     const int nsplit = w.op(T::SplitRGBA, 1, { { nrm } });
     r.slope = w.op(T::Subtract, 1, { { one }, { nsplit, 1 } });
+    // The weather, read once: Wetness (pin 0) and Snow Cover (pin 3) drive the procedural surfaces.
+    const int weather = w.node(T::Weather, 1);
 
     // ── Texture reads (column 2): albedo / normal / mask per layer ──────────
     // A bombed layer reads all three maps on ONE hex grid: same uv node, same
@@ -143,12 +177,124 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         lr.height = w.op(T::SplitRGBA, 2, { { lr.mask } }); // pin 2 = B = height
         return lr;
     };
-    const LayerReads grass = layer(AutoLandscapeLayer::Grass,     uvGround, 11);
+    // A surface the procedural functions make, as the three channel sets the blends take: albedo and
+    // normal through a Reroute (a node with ONE output pin, which `blend` and the layer mix wire by
+    // node id), the mask as (AO, roughness, height) — the arrays' mask layout, so the height blends
+    // read it exactly like a texture's B channel.
+    auto surfaceOf = [&](int call, int col) {
+        LayerReads lr;
+        lr.albedo = w.op(T::Reroute, col, { { call, kSurfaceOutAlbedo } });
+        lr.normal = w.op(T::Reroute, col, { { call, kSurfaceOutNormal } });
+        lr.mask   = w.op(T::Combine3, col, { { call, kSurfaceOutAO }, { call, kSurfaceOutRoughness },
+                                             { call, kSurfaceOutHeight } });
+        lr.height = w.op(T::SplitRGBA, col, { { lr.mask } }); // pin 2 = B = height
+        return lr;
+    };
+    auto callFunction = [&](const char* path, int col) {
+        const int call = w.node(T::FunctionCall, col);
+        r.graph.findNode(call)->s = path;
+        return call;
+    };
+    // ── Trails (Thema 328 step 5b): the depth and slope of whatever pressed the snow or sand ──────
+    // TrailClipmap's texture (kTrailTexturePath, the fourth graph texture): a 128 m window around
+    // the camera, world-aligned and wrapping, so the uv is simply xz / 128 and the sampler repeats.
+    // Decoding mirrors TrailClipmap.h: depth = max((128/255 - R) * 255/127, 0), slope = (G|B - 128/255) * (255 / 127 * 8), and
+    // only a texel whose alpha is about one half is trusted: a missing texture (a white or black
+    // stand-in) must never read as a deep print. Beyond kTrailFadeStart metres the window no longer
+    // belongs to this place (it wraps), so the trail fades out before it ends.
+    int trailDepth, trailSlope, trailHeap;
+    {
+        const int invWindow = w.constF(1.0f / 128.0f, 2);
+        const int uvTrail   = w.op(T::Multiply, 2, { { xz }, { invWindow } });
+        const int tex       = w.op(T::TextureSample, 2, { { uvTrail } });
+        r.graph.findNode(tex)->s = kTrailTexturePath;
+        const int rgb  = w.op(T::SplitRGBA, 2, { { tex } });
+        const int lo   = w.constF(0.45f, 2);
+        const int hi   = w.constF(0.55f, 2);
+        const int stepLo = w.op(T::Step, 2, { { lo }, { tex, 1 } });
+        const int stepHi = w.op(T::Step, 2, { { hi }, { tex, 1 } });
+        const int below  = w.op(T::OneMinus, 2, { { stepHi } });
+        const int valid  = w.op(T::Multiply, 2, { { stepLo }, { below } });
+        const int dist   = w.node(T::CameraDistance, 2);
+        const int fadeS  = w.constF(kTrailFadeStart, 2);
+        const int fadeE  = w.constF(kTrailFadeEnd, 2);
+        const int far    = w.op(T::Smoothstep, 2, { { fadeS }, { fadeE }, { dist } });
+        const int near   = w.op(T::OneMinus, 2, { { far } });
+        const int gate   = w.op(T::Multiply, 2, { { valid }, { near } });
+        // R is the field's signed value: 128 untouched, below a pit, above a heap. A pit is the Disturbance
+        // (compacted, darker); a heap only shows in the slope below (it lights as a ridge).
+        const int mid    = w.constF(128.0f / 255.0f, 2);
+        const int unitK  = w.constF(255.0f / 127.0f, 2);
+        const int pit0   = w.op(T::Subtract, 2, { { mid }, { rgb, 0 } });
+        const int pit1   = w.op(T::Multiply, 2, { { pit0 }, { unitK } });
+        const int depth  = w.op(T::Saturate, 2, { { pit1 } });
+        trailDepth       = w.op(T::Multiply, 2, { { depth }, { gate } });
+        const int heap0  = w.op(T::Subtract, 2, { { rgb, 0 }, { mid } });
+        const int heap1  = w.op(T::Multiply, 2, { { heap0 }, { unitK } });
+        const int heapS  = w.op(T::Saturate, 2, { { heap1 } });
+        trailHeap        = w.op(T::Multiply, 2, { { heapS }, { gate } });
+        const int slopeK = w.constF(255.0f / 127.0f * TrailClipmap::kSlopeRange, 2);
+        const int gx0    = w.op(T::Subtract, 2, { { rgb, 1 }, { mid } });
+        const int gx1    = w.op(T::Multiply, 2, { { gx0 }, { slopeK } });
+        const int gx     = w.op(T::Multiply, 2, { { gx1 }, { gate } });
+        const int gz0    = w.op(T::Subtract, 2, { { rgb, 2 }, { mid } });
+        const int gz1    = w.op(T::Multiply, 2, { { gz0 }, { slopeK } });
+        const int gz     = w.op(T::Multiply, 2, { { gz1 }, { gate } });
+        const int zeroC  = w.constF(0.0f, 2);
+        trailSlope       = w.op(T::Combine3, 2, { { gx }, { gz }, { zeroC } });
+    }
+
+    // Role 0, the ground: the group's own texture, or in the Desert the procedural sand. Its colour
+    // is the mean of the human's reference (coast_sand_01, 4k diffuse: sRGB 129/114/91); the grain,
+    // the ripples and the glitter keep the function's defaults. The weather's wetness darkens it
+    // (the generic wet response of the lit shader comes on top, sand just darkens more).
+    LayerReads grass;
+    if (group.proceduralSand)
+    {
+        const int sand = callFunction(kProceduralSandFunctionPath, 2);
+        const int sandColor = w.node(T::ConstColor, 2);
+        {
+            MatGraphNode* c = r.graph.findNode(sandColor);
+            c->p[0] = 0.221f; c->p[1] = 0.168f; c->p[2] = 0.104f;
+        }
+        const int look = w.op(T::SplitRGBA, 2, { { pSandLook } });
+        r.graph.connect(xz, 0, sand, kSandInPosition);
+        r.graph.connect(sandColor, 0, sand, kSandInColor);
+        r.graph.connect(look, 0, sand, kSandInGrainSize);
+        r.graph.connect(look, 1, sand, kSandInRipple);
+        r.graph.connect(look, 2, sand, kSandInRippleSize);
+        r.graph.connect(look, 3, sand, kSandInGlitter);
+        r.graph.connect(weather, 0, sand, kSandInWetness);
+        r.graph.connect(trailDepth, 0, sand, kSandInDisturbance);
+        r.graph.connect(trailSlope, 0, sand, kSandInDisturbanceSlope);
+        r.graph.connect(trailHeap, 0, sand, kSandInDisturbanceHeap);
+        grass = surfaceOf(sand, 2);
+    }
+    else
+        grass = layer(AutoLandscapeLayer::Grass, uvGround, 11);
     LayerReads       dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
     LayerReads       rock  = layer(AutoLandscapeLayer::Rock,      uvRock,   37);
-    // Snow is bombed too: read plainly, its one tile showed as a visible grid of the
-    // same dark marks on any larger painted or high-altitude field of it.
-    LayerReads       snow  = layer(AutoLandscapeLayer::Snow,      uvRock,   53);
+    // Snow is MF_ProceduralSnow, in every group: noise in world space has no tile and no hex seam to
+    // hide, and nothing to read. Cover is the weather's Snow Cover slider, Melt its wetness (rain
+    // melts it); it takes no gate (see below). The Weather node, not MF_WeatherSnow's Cover output,
+    // because that call takes the snow's own height bias as an input further down.
+    LayerReads snow;
+    {
+        const int call = callFunction(kProceduralSnowFunctionPath, 2);
+        const int look = w.op(T::SplitRGBA, 2, { { pSnowLook } });
+        r.graph.connect(xz, 0, call, kSnowInPosition);
+        r.graph.connect(weather, 3, call, kSnowInCover);
+        r.graph.connect(pSnowColor, 0, call, kSnowInColor);
+        r.graph.connect(look, 0, call, kSnowInGrain);
+        r.graph.connect(look, 1, call, kSnowInDrift);
+        r.graph.connect(look, 2, call, kSnowInGlitter);
+        r.graph.connect(look, 3, call, kSnowInSoftness);
+        r.graph.connect(weather, 0, call, kSnowInMelt);
+        r.graph.connect(trailDepth, 0, call, kSnowInDisturbance);
+        r.graph.connect(trailSlope, 0, call, kSnowInDisturbanceSlope);
+        r.graph.connect(trailHeap, 0, call, kSnowInDisturbanceHeap);
+        snow = surfaceOf(call, 2);
+    }
     // Slice 4 of the arrays (WetGround) is not read: puddles are an overlay on
     // the ground below, not a layer of their own.
 
@@ -206,7 +352,9 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // reading zeros instead changes no pixel; the If is a real branch, so the 9
     // bombed taps of the layer (albedo, normal, mask x 3 hexes) are not run there.
     // Grass stays ungated: it is the ground everything else lies on. The mask views
-    // are not gated: they are the automatic masks alone and read no weightmap.
+    // are not gated: they are the automatic masks alone and read no weightmap. Snow has no gate
+    // either: it is a function call, which the code generator never moves into a branch (a
+    // function body is not branch-pure), so an If around it would only be a mix().
     const bool gated = view == AutoLandscapeView::Lit || view == AutoLandscapeView::Normal
                     || view == AutoLandscapeView::Surface;
     auto gate = [&](LayerReads& lr, int cond, int col) {
@@ -262,14 +410,6 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     const int s1Split = w.op(T::SplitRGBA, 4, { { s1.mask } });
 
     // ── Snow above a height, not on cliffs (column 5) ────────────────────────
-    {
-        // Height snow, or the weather's (MF_WeatherSnow is 0 at Snow Cover 0 whatever the
-        // bias: cover x (1 + bias) through a ramp from 0), or paint.
-        const int heightCan = possible({ wsplit, 1 }, w.op(T::Multiply, 5, { { pHeight }, { pSnowBlend } }), pSnowH, mS, 0, 5);
-        const int weather  = w.node(T::Weather, 5);
-        const int covered  = w.op(T::Greater, 5, { { weather, 3 }, { zero } });
-        gate(snow, w.op(T::Or, 5, { { heightCan }, { covered } }), 5);
-    }
     const int snowT  = w.op(T::Add, 5, { { wsplit, 1 },
                                          { heightBias(snow.height, 2, s1Split, 2, pSnowBlend, 5) } });
     const int snowHi = w.ramp(pSnowH, pSnowBlend, { snowT }, 5);
@@ -282,7 +422,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // the layers' height maps (snow settles in the snow texture's high texels first). The
     // two add as probabilities, a + b - a*b, so neither can push the other past 1.
     // r.snowMask stays the HEIGHT snow alone — the mask views and the witness read it, and
-    // they must not depend on a function or on the scene's weather.
+    // they must not depend on the scene's weather. The snow surface's Height output feeds its
+    // bias (snowT) and is the one output of MF_ProceduralSnow that reads no weather input.
     const int snowCall = w.node(T::FunctionCall, 5);
     r.graph.findNode(snowCall)->s = kWeatherSnowFunctionPath;
     r.graph.connect(r.slope, 0, snowCall, 0);                       // Slope
