@@ -3,6 +3,7 @@
 // tile lives in which GPU layer. No GPU here: what a backend would upload and draw is checked as data.
 #include "doctest.h"
 #include <HorizonScene/LandscapeAtlas.h>
+#include <HorizonScene/LandscapeGpuLayout.h>
 #include <HorizonScene/LandscapePatchMesh.h>
 
 #include <algorithm>
@@ -226,4 +227,117 @@ TEST_CASE("landscape atlas: a window too small for the loaded disc is counted, n
 	CHECK(atlas.stats().used <= 16);                         // one tile per table entry at most
 	for (const LandscapeTileKey& k : store.residentKeys())
 		if (atlas.contains(k)) REQUIRE(atlas.lookup(k.x, k.z) == atlas.slotOf(k));
+}
+
+// ── GPU image layouts ────────────────────────────────────────────────────────
+
+TEST_CASE("landscape gpu layout: every sample of a tile has its own texel, in a 386 x 258 image for the default tile")
+{
+	LandscapeGeometry g;   // 512 m, 257 heights, 128 x 12 weights
+	const LandscapeTileImageLayout l = LandscapeTileImageLayout::forGeometry(g);
+	CHECK(l.heightW == 257 + 129);
+	CHECK(l.heightH == 258);                       // 129 + 65 + 33 + 17 + 9 + 5
+	CHECK(l.heightRect.size() == 7);
+	CHECK(l.weightRect.size() == 6);
+	CHECK(l.weightPages == 3);
+	CHECK(l.heightRect[0].x == 0);
+	CHECK(l.heightRect[1].x == 257);
+	CHECK(l.heightRect[2].y == 129);
+	CHECK(l.heightRect[3].y == 129 + 65);
+	// nothing overlaps, everything is inside
+	const auto disjoint = [](const std::vector<LandscapeImageRect>& rs, int w, int h) {
+		std::vector<uint8_t> used(static_cast<size_t>(w) * h, 0);
+		for (const auto& r : rs)
+		{
+			REQUIRE(r.x >= 0);
+			REQUIRE(r.y >= 0);
+			REQUIRE(r.x + r.w <= w);
+			REQUIRE(r.y + r.h <= h);
+			for (int y = r.y; y < r.y + r.h; ++y)
+				for (int x = r.x; x < r.x + r.w; ++x)
+				{
+					REQUIRE(used[static_cast<size_t>(y) * w + x] == 0);
+					used[static_cast<size_t>(y) * w + x] = 1;
+				}
+		}
+	};
+	disjoint(l.heightRect, l.heightW, l.heightH);
+	disjoint(l.weightRect, l.weightW, l.weightH);
+	// the padding the layout costs
+	size_t samples = 0;
+	for (const auto& r : l.heightRect) samples += static_cast<size_t>(r.w) * r.h;
+	const double waste = 1.0 - static_cast<double>(samples) / (static_cast<double>(l.heightW) * l.heightH);
+	CHECK(waste < 0.15);
+}
+
+TEST_CASE("landscape gpu layout: a packed tile reads back sample by sample, weights spread over RGBA pages")
+{
+	ProceduralLandscapeParams p;
+	p.tilesX = p.tilesZ = 4;
+	const ProceduralLandscapeSource src(p);
+	const LandscapeTile t = src.generate({ 2, 1 });
+	const LandscapeTileImageLayout l = LandscapeTileImageLayout::forGeometry(t.geometry);
+	std::vector<uint16_t> img;
+	std::vector<std::vector<uint8_t>> pages;
+	landscapePackTile(t, l, img, pages);
+	REQUIRE(img.size() == static_cast<size_t>(l.heightW) * l.heightH);
+	REQUIRE(pages.size() == 3);
+	for (size_t k = 0; k < t.heights.size(); ++k)
+	{
+		const auto& r = l.heightRect[k];
+		for (int z = 0; z < r.h; ++z)
+			for (int x = 0; x < r.w; ++x) REQUIRE(img[static_cast<size_t>(r.y + z) * l.heightW + r.x + x] == t.heights[k][static_cast<size_t>(z) * r.w + x]);
+	}
+	for (size_t k = 0; k < t.weights.size(); ++k)
+	{
+		const auto& r = l.weightRect[k];
+		for (int z = 0; z < r.h; ++z)
+			for (int x = 0; x < r.w; ++x)
+				for (int c = 0; c < 12; ++c)
+					REQUIRE(pages[static_cast<size_t>(c / 4)][(static_cast<size_t>(r.y + z) * l.weightW + r.x + x) * 4 + static_cast<size_t>(c % 4)] ==
+					        t.weights[k][(static_cast<size_t>(z) * r.w + x) * 12 + c]);
+	}
+	// a tile decoded with fewer levels leaves the others zero
+	LandscapeTile one = t;
+	one.heights.resize(1);
+	one.weights.resize(1);
+	landscapePackTile(one, l, img, pages);
+	const auto& r1 = l.heightRect[1];
+	CHECK(img[static_cast<size_t>(r1.y) * l.heightW + r1.x] == 0);
+}
+
+TEST_CASE("landscape gpu layout: the coarse world stacked in one image, each grid at its row offset")
+{
+	ProceduralLandscapeParams p;
+	p.tilesX = 3;
+	p.tilesZ = 2;
+	const ProceduralLandscapeSource src(p);
+	const LandscapeCoarseWorld* c = src.coarse();
+	REQUIRE(c);
+	const LandscapeCoarseImageLayout l = LandscapeCoarseImageLayout::forCoarse(*c);
+	REQUIRE(l.grids.size() == c->heights.size());
+	CHECK(l.width == c->heights[0].w);               // the widest grid is the first
+	CHECK(l.grids[0].rowOffset == 0);
+	int rows = 0;
+	for (size_t i = 0; i < l.grids.size(); ++i)
+	{
+		CHECK(l.grids[i].rowOffset == rows);
+		CHECK(l.grids[i].w == c->heights[i].w);
+		rows += l.grids[i].h;
+	}
+	CHECK(l.height == rows);
+	std::vector<uint16_t> img;
+	std::vector<std::vector<uint8_t>> pages;
+	landscapePackCoarse(*c, l, img, pages);
+	for (size_t i = 0; i < c->heights.size(); ++i)
+		for (int z = 0; z < c->heights[i].h; ++z)
+			for (int x = 0; x < c->heights[i].w; ++x)
+				REQUIRE(img[static_cast<size_t>(l.grids[i].rowOffset + z) * l.width + x] == c->heights[i].v[static_cast<size_t>(z) * c->heights[i].w + x]);
+	REQUIRE(pages.size() == 3);
+	CHECK(pages[0].size() == static_cast<size_t>(l.weightW) * l.weightH * 4);
+	for (int z = 0; z < l.weightH; ++z)
+		for (int x = 0; x < l.weightW; ++x)
+			for (int ch = 0; ch < 12; ++ch)
+				REQUIRE(pages[static_cast<size_t>(ch / 4)][(static_cast<size_t>(z) * l.weightW + x) * 4 + static_cast<size_t>(ch % 4)] ==
+				        c->weights[(static_cast<size_t>(z) * c->weightsW + x) * 12 + ch]);
 }
