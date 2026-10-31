@@ -9910,6 +9910,7 @@ void MetalRenderer::InvalidateTexture(const HE::UUID& textureId)
 
 void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
+	HE_PROFILE_SCOPE_N("Metal::WarmupMaterials");
 	// Build each custom-shader material's pipeline state NOW so the first draw
 	// doesn't stall on cross-compile + PSO creation inside the encoder loop. The
 	// Metal device is always available; cache hits are cheap; built-in-PBR
@@ -13072,6 +13073,9 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
 
+	// Only a build is timed, a cache hit returned above. The three phases below are
+	// what a first draw or a warm-up stalls on.
+	HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild");
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertMSL, fragMSL, log;
 	std::string fragFallbackMSL; // baked plain fragment, if the baked clustered one is rejected
@@ -13097,6 +13101,7 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	}
 	else
 	{
+		HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::CrossCompile");
 		// WPO materials get the graph-generated vertex; everything else the shared one.
 		// The instanced twin takes the instanced form of either.
 		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
@@ -13127,11 +13132,15 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* err = nil;
-		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
-		                                           options:nil error:&err];
-		id<MTLLibrary> fLib = err ? nil
-			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
-			                       options:nil error:&err];
+		id<MTLLibrary> vLib = nil, fLib = nil;
+		{
+			HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::Libraries");
+			vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
+			                            options:nil error:&err];
+			fLib = err ? nil
+				: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
+				                       options:nil error:&err];
+		}
 		if (vLib && !fLib && !fragFallbackMSL.empty())
 		{
 			// The baked clustered fragment did not compile: the baked plain one
@@ -13185,7 +13194,11 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 				arch = (__bridge id<MTLBinaryArchive>)EnsureMaterialArchive();
 				if (arch) desc.binaryArchives = @[arch];
 			}
-			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			id<MTLRenderPipelineState> pso = nil;
+			{
+				HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::Pipeline");
+				pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			}
 			if (pso)
 			{
 				result = (void*)CFBridgingRetain(pso);
