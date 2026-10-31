@@ -3,7 +3,7 @@
 Stand 31.10.2026, Basis `release/0.8.0`, Hive-Topic 326, Schritt 3 von 8.
 Vorher: `landscape-world-scale-store-2026-10-31.md` (Store, Kachel-Format), `-renderer-` (Quadtree, Laufzeit, Shader-Quelle), `-physics-` (Boden je Kachel).
 
-**Foliage (3b) und Wasser (3c) sind als CPU-Daten und Laufzeit gebaut und getestet. Gezeichnet wird nichts davon (Teil B, braucht Vulkan). Navigation ist offen.
+**Foliage (3b) und Wasser (3c) sind als CPU-Daten und Laufzeit gebaut und getestet. Gezeichnet wird nichts davon (Teil B, braucht Vulkan). Die Navigation steht in `landscape-world-scale-navigation-2026-10-31.md`.
 Es wurde nichts gemessen: keine Streuzeit, keine Aufbauzeit der Wasserregion, kein Speicher im Betrieb (Plan-§4-Abnahme auf NN-WS03).** Schritt 1521 bleibt offen.
 
 ## 1. Was gebaut ist
@@ -70,18 +70,18 @@ Gesamt 22 + 87 · count. Der Leser verweigert: falsches Magic oder Version, `byt
 
 * **Wasser jenseits der Region (2 km):** keine ferne Ebene, keine Wellen, keine Ripples, kein `WaterIndex`, kein Auftrieb, keine `WaterSurface`-Entitäten. `surfaceAt` antwortet ohne Wellen.
 * **Foliage ignoriert Wasser** (Pflanzen können im See stehen), und Masken (§2).
-* **Navigation:** nicht angefasst. Plan: Recast-Kacheln über das Region-Terrain, CPU-seitig und hier machbar.
+* **Navigation:** gebaut, siehe das Navigationsdokument (Detour-Kacheln je Landschaftskachel, nicht über das Region-Terrain).
 * **Teil B (Vulkan, NN-WS03):** Zeichnen von Foliage und Wasser, GPU-Abnahme, alle Messungen.
 * **Editor (Schritt 6):** Masken je Kachel, Pinsel und Seenwerkzeug schreiben Felder.
 
 ## 7. Verifikation
 
-Verifiziert (`cmake-build-bench`, echte `he_tests`): `test_landscape_*` 106 Testfälle, `test_foliage*` 76, `test_terrain*` 155, `test_water*` 245, `test_physics*` 134, `test_world_scale*` 44, `test_scene_serializer*` 46, `test_cell_*` 34, alle grün; die Wasser-Suite dreimal hintereinander. CI des Foliage-Stands (68e07e61): Windows, Linux, Linux Vulkan und macOS grün. Die Wasser-Commits sind mit dem Push dieser Zeile erst in der CI; ihr Ergebnis steht beim Hive-Ergebnis.
+Verifiziert (`cmake-build-bench`, echte `he_tests`): `test_landscape_*` 106 Testfälle, `test_foliage*` 76, `test_terrain*` 155, `test_water*` 245, `test_physics*` 134, `test_world_scale*` 44, `test_scene_serializer*` 46, `test_cell_*` 34, alle grün; die Wasser-Suite dreimal hintereinander. CI des Foliage-Stands (68e07e61): Windows, Linux, Linux Vulkan und macOS grün; ebenso der Stand `43a90014` mit den Wasser-Commits.
 Mutationsprüfungen früherer Schritte (zu frühes Morphen, Store ohne Verwerfen später Ladungen, alte Randsuche, kein Warten beim Aufräumen) schlugen an.
-**Nicht verifiziert:** Zeiten, Speicher im Betrieb, Zeichnen, Navigation, ein Pack mit echtem Gelände (alle Tests laufen auf prozeduralen Quellen), Windows-CI der letzten Wasser-Commits bis zum Push.
+**Nicht verifiziert:** Zeiten, Speicher im Betrieb, Zeichnen, ein Pack mit echtem Gelände (alle Tests laufen auf prozeduralen Quellen), 
 
 ## Handoff
 
 1. Wasser (3c) liegt in `LandscapeRuntime` (`waterRegion()`, `waterSurfaceAt()`); Foliage (3b) in `foliageDraws()`. Beides zeichnet der Renderer in Teil B nach §2 und §4.
 2. `kGroundOwner`, `holdsAt`, die Regionsgrenze n ≤ 4 und `clipToGround` aus dem Feld sind die Stellen, an denen es leicht falsch geht.
-3. Offen in Schritt 3: Navigation (Recast-Kacheln über das Region-Terrain). Alles andere wartet auf NN-WS03.
+3. Navigation ist gebaut (eigenes Dokument). Alles andere wartet auf NN-WS03.
