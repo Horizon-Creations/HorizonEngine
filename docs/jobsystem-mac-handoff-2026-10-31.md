@@ -43,3 +43,36 @@ dort auch der ausführliche Handoff). Dieses Doc ist nur die Mac-Checkliste: was
   - Gesperrter Bildschirm macht `NextDrawable` zu 20-40-ms-Warten (siehe `cpu-threading-audit-2026-10-22.md`): Messungen mit entsperrtem Bildschirm.
   - Linux-Build-Hinweis, falls ein Container gebraucht wird: `apt-get install libgl-dev libglx-dev libopengl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev`.
 - **Next steps:** 1. PR-CI und lokale Voll-Suite grün machen (Befunde als Commits auf denselben Zweig). 2. Streaming-Tab und Messung (Punkte 2-3). 3. Metal-PSO-Aufbau im Pool (Punkt 4) als eigener PR.
+
+## Ergebnis der Mac-Verifikation (2026-10-31)
+
+Apple Silicon, 10 Kerne, Release, Metal. Alle Messläufe mit **gesperrtem Bildschirm** (`CGSSessionScreenIsLocked=Yes`), Editor mit
+`HE_HIDDEN_WINDOW=1`. Deshalb gilt hier nur, was CPU-seitig und von `NextDrawable` unabhängig ist; fps- und GPU-Zeiten stehen
+nicht als Vergleich da (beide Seiten lagen bei ~11 fps, GPU-gebunden bei 3200x1800).
+
+- **Punkt 1, Tests: erledigt.** Volle `he_tests`-Suite 350/350 grün (ohne `--no-skip`, `HOME` auf leeren Ordner), davon die acht gezielten
+  (`test_jobsystem`, `test_async_streaming`, `test_hpak`, `test_hasset`, `test_streaming_view`, drei Profiler-Tests). Damit sind
+  „voller `he_tests`“ aus dem Handoff und auch macOS/Metal-Build der Job-System-Dateien belegt; `test_contentmanager` ist Teil der 350.
+- **Punkt 2, Streaming-Tab: nur das Layout.** `ui shot: the profiler's Streaming tab` (`scripts/he_uishot.py`): Spalten *Wait avg*/*Wait max*,
+  Backlog-Zeile und Hilfetext rendern sauber, nichts abgeschnitten. Werte dort sind 0 (Pool leer). **Nicht beobachtet:** dass *Wait avg*
+  unter Last steigt und danach fällt, und das Zurückspringen von *Wait max* je Halbsekunden-Fenster. Das Verhalten von `waitNs`/`waitMaxNs`
+  deckt `test_jobsystem` ab; ein Blick im laufenden Editor mit entsperrtem Bildschirm steht aus.
+- **Punkt 3, Vorher/Nachher** (`origin/release/0.8.0`, zugleich Merge-Base, gegen den Branch; je 3 Läufe im Wechsel, frischer Projektklon,
+  Foliage-Testprojekt = 154 lose `.hasset`, 24 beim Szenenstart vorgeladen, `he_perf_capture.py --warmup 0`):
+
+  | Messgröße (CPU, Szenenstart) | Base | Branch |
+  |---|---|---|
+  | `ParseAndRegisterAsset`, Summe der 60 Aufrufe auf dem Main-Thread | 64,0 / 66,3 / 77,5 ms | 3,6 / 3,7 / 3,7 ms |
+  | größter einzelner Aufruf | 2,2 / 2,3 / 2,7 ms | 0,4 / 0,4 / 0,4 ms |
+  | Resident-Peak (`rssMB`.max) | 1931,6 / 1931,3 / 1931,3 MB | 1914,8 / 1914,9 / 1914,9 MB |
+  | „Preload → letzter Mesh-Upload“ | 0,24 s | 0,24 s |
+
+  Das ist der messbare Gewinn von B1a (Chunk verschieben statt kopieren). Gleich geblieben: Ladezeit, erster Draw-Frame (~515 ms auf
+  beiden Seiten). `base_1` lief mit kaltem Metal-Cache (`warmupMs` 2507 statt 85) und taugt nicht für einen Median dieser Größe.
+  **Nicht durch diese Szene belegt:** Hochstufen, 256-MB-Backlog, Pak-Read→Decode, `Io`-Limit, Distanzschlüssel (keine Pak-Szene, keine
+  Warteschlange unter Last); die sind nur durch Tests gedeckt. `lastPollMs` steht nicht im Profiler-Dump (nur `ContentManager::load` und
+  `ParseAndRegisterAsset`).
+- **Punkt 4, Metal:** eigener Zweig `claude/metal-material-pipeline-async` (nur Scopes + Messung + Entwurf, kein Umbau), Doc
+  `docs/metal-material-pipeline-build-2026-10-31.md`. Kurz: kalter Erststart 2829 ms in `WarmupMaterials`, davon 2516 ms
+  `newLibraryWithSource`; warm 85 ms, fast nur Cross-Compile (der nicht thread-sicher belegt ist). Die Frame-Spitze im ersten Draw-Frame
+  (EncodeScene 350-540 ms) ist **nicht** Material-Pipeline-Aufbau. `waitUntilCompleted` und QoS nicht angefasst.
