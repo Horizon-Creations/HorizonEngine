@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -109,7 +110,8 @@ public:
 	size_t tileBytes() const { return m_tileBytes; }
 	const LandscapeTileSource& source() const { return *m_source; }
 
-	// Drops every tile and cancels what has not started.
+	// Drops every tile and cancels what has not started. Waits for the loads that are running (they are short), so that when it
+	// returns no job holds the source any more.
 	void clear();
 
 private:
@@ -135,11 +137,14 @@ private:
 	{
 		std::mutex        mutex;
 		std::vector<Done> done;
+		std::atomic<int>  running{ 0 };      // load bodies that have started and not yet let go of the source
+		std::atomic<bool> closed{ false };   // set by the destructor: a body that starts now does not touch the source
 	};
 
 	void   plan(const std::vector<LandscapeAnchor>& anchors);
 	void   pump();
 	void   drain(double budgetMs);
+	void   quiesce();     // cancel what has not started, wait for what is running
 	void   dropEntry(std::unordered_map<LandscapeTileKey, Entry, LandscapeTileKeyHash>::iterator it);
 	bool   needsPlan(const std::vector<LandscapeAnchor>& anchors) const;
 	size_t slotsUsed() const { return m_resident + m_loading; }

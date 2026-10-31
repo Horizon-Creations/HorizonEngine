@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <thread>
 
 namespace HE
 {
@@ -31,11 +32,29 @@ LandscapeStore::LandscapeStore(std::shared_ptr<const LandscapeTileSource> source
 
 LandscapeStore::~LandscapeStore()
 {
-	// Queued loads never start; a running one finishes into the shared queue, which it keeps alive. The handles are cancelled
-	// as well as the token: the token is only looked at when a worker dequeues the job, a handle finishes it at once.
+	// A load body that starts after this point does not touch the source; the ones running let go of it before the destructor returns.
+	// So when a store is gone nothing of it holds the tile source, and a pack file can be deleted (Windows cannot delete an open file).
+	m_shared->closed.store(true);
+	quiesce();
+}
+
+// Cancels the jobs that have not started (the token is only looked at when a worker dequeues a job, a handle finishes it at once) and
+// waits for the loads that are running. They are short (one tile), but a source that blocks would block this: it gives up after 5 s.
+void LandscapeStore::quiesce()
+{
 	m_storeToken.cancel();
 	for (auto& [k, e] : m_tiles)
 		if (e.state == Entry::State::Loading) e.job.cancel();
+	const auto t0 = Clock::now();
+	while (m_shared->running.load() > 0)
+	{
+		if (msSince(t0) > 5000.0)
+		{
+			HE_LOG_WARN(World, "LandscapeStore: a tile load is still running after 5 s; the source stays open");
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::microseconds(200));
+	}
 }
 
 void LandscapeStore::setConfig(const LandscapeStoreConfig& config)
@@ -63,11 +82,9 @@ void LandscapeStore::dropEntry(std::unordered_map<LandscapeTileKey, Entry, Lands
 
 void LandscapeStore::clear()
 {
-	m_storeToken.cancel();
-	for (auto& [k, e] : m_tiles)
-		if (e.state == Entry::State::Loading) e.job.cancel();
+	quiesce();
 	m_storeToken = CancelToken::create();
-	// Whatever is running now finishes with a ticket nobody holds and is thrown away.
+	// A body that slipped past the cancel check finished by now; anything still arriving carries a ticket nobody holds.
 	m_tiles.clear();
 	m_keep.clear();
 	m_wanted.clear();
@@ -294,14 +311,21 @@ void LandscapeStore::pump()
 			shared->done.push_back(Done{ key, ticket, Done::Kind::Cancelled, nullptr });
 		};
 		e.job = m_pool->scheduleFn([shared, source, key, ticket, maxLevels] {
+			shared->running.fetch_add(1);
 			auto tile = std::make_shared<LandscapeTile>();
 			bool ok = false;
-			if (auto src = source.lock())
+			if (!shared->closed.load())
 			{
-				try { ok = src->load(key, maxLevels, *tile); } catch (...) { ok = false; }
-			}   // `src` is gone before the result is published: whoever sees the result can delete the file
-			std::lock_guard<std::mutex> lock(shared->mutex);
-			shared->done.push_back(Done{ key, ticket, ok ? Done::Kind::Loaded : Done::Kind::Failed, ok ? tile : nullptr });
+				if (auto src = source.lock())
+				{
+					try { ok = src->load(key, maxLevels, *tile); } catch (...) { ok = false; }
+				}   // `src` is gone before the result is published: whoever sees the result can delete the file
+			}
+			{
+				std::lock_guard<std::mutex> lock(shared->mutex);
+				shared->done.push_back(Done{ key, ticket, ok ? Done::Kind::Loaded : Done::Kind::Failed, ok ? tile : nullptr });
+			}
+			shared->running.fetch_sub(1);
 		}, std::move(desc));
 		const auto c = m_tiles.emplace(key, std::move(e));
 		(void)c;

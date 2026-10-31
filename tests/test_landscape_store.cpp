@@ -724,3 +724,37 @@ TEST_CASE("landscape coarse world: a pack without one, a version 1 pack, and a c
 	std::filesystem::remove(cut);
 	std::filesystem::remove(good);
 }
+
+TEST_CASE("landscape store: destroying it waits for the loads that are running, so nothing holds the source (or its file) afterwards")
+{
+	ThreadPool pool(2);
+	auto src = std::make_shared<GatedSource>(smallWorld(40));
+	LandscapeStoreConfig cfg;
+	cfg.loadRadius = 1500.0f;
+	auto store = std::make_unique<LandscapeStore>(src, cfg, &pool);
+	store->update({ { glm::dvec3(10240.0, 0.0, 10240.0) } }, 1.0);
+	for (int i = 0; i < 2000 && src->started.load() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	REQUIRE(src->started.load() >= 1);                    // a load is running now, blocked inside the source
+
+	// the source lets go a little later, from another thread: until then the destructor has to wait
+	std::thread opener([&] { std::this_thread::sleep_for(std::chrono::milliseconds(80)); src->open = true; });
+	const auto t0 = std::chrono::steady_clock::now();
+	store.reset();
+	const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+	opener.join();
+	CHECK(waited >= 40);                                  // it did wait for the running load
+	CHECK(src.use_count() == 1);                          // and no job holds the source any more
+
+	// clear() does the same: the loads that run finish, the ones that wait never start
+	ThreadPool pool2(2);
+	auto src2 = std::make_shared<GatedSource>(smallWorld(40));
+	LandscapeStore store2(src2, cfg, &pool2);
+	store2.update({ { glm::dvec3(10240.0, 0.0, 10240.0) } }, 1.0);
+	for (int i = 0; i < 2000 && src2->started.load() < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	std::thread opener2([&] { std::this_thread::sleep_for(std::chrono::milliseconds(60)); src2->open = true; });
+	store2.clear();
+	opener2.join();
+	CHECK(src2.use_count() == 2);                         // the store itself still has the source; no job does
+	CHECK(store2.stats().resident == 0);
+	CHECK(store2.residentKeys().empty());
+}
