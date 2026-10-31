@@ -341,3 +341,70 @@ TEST_CASE("landscape gpu layout: the coarse world stacked in one image, each gri
 				REQUIRE(pages[static_cast<size_t>(ch / 4)][(static_cast<size_t>(z) * l.weightW + x) * 4 + static_cast<size_t>(ch % 4)] ==
 				        c->weights[(static_cast<size_t>(z) * c->weightsW + x) * 12 + ch]);
 }
+
+// The vertex shader's height lookup (LandscapeShaderSource.h, heightOfTile) done on the CPU against the packed images:
+// the contract between the packer, the slot table and the shader, checked sample by sample.
+TEST_CASE("landscape gpu layout: the shader's tile lookup, replayed on the CPU, finds every lattice sample, tile borders and the world's edge included")
+{
+	ProceduralLandscapeParams p;
+	p.tilesX = 4;
+	p.tilesZ = 3;
+	const ProceduralLandscapeSource src(p);
+	const LandscapeTileImageLayout lay = LandscapeTileImageLayout::forGeometry(p.geometry);
+	const int window = 8, mask = window - 1;
+
+	// what the renderer would hold: a layer per slot, the slot table, tiles in some order
+	std::vector<std::vector<uint16_t>> layers;
+	std::vector<uint16_t> table(static_cast<size_t>(window) * window, 0xFFFF);
+	std::vector<LandscapeTile> tiles;
+	for (int tz = 0; tz < 3; ++tz)
+		for (int tx = 0; tx < 4; ++tx)
+		{
+			tiles.push_back(src.generate({ tx, tz }));
+			std::vector<uint16_t> img;
+			std::vector<std::vector<uint8_t>> pages;
+			landscapePackTile(tiles.back(), lay, img, pages);
+			table[static_cast<size_t>(tz & mask) * window + (tx & mask)] = static_cast<uint16_t>(layers.size());
+			layers.push_back(std::move(img));
+		}
+	const auto tileAt = [&](int tx, int tz) -> const LandscapeTile& { return tiles[static_cast<size_t>(tz) * 4 + tx]; };
+
+	// heightOfTile(g, level), line by line
+	const auto shaderHeight = [&](int gx, int gz, int level) -> int {
+		const int cpt = p.geometry.hCells >> level;
+		const int tx = std::min(gx / cpt, 4 - 1), tz = std::min(gz / cpt, 3 - 1);
+		const int lx = std::min(gx - tx * cpt, cpt), lz = std::min(gz - tz * cpt, cpt);
+		const uint16_t slot = table[static_cast<size_t>(tz & mask) * window + (tx & mask)];
+		if (slot == 0xFFFF) return -1;
+		const LandscapeImageRect& r = lay.heightRect[static_cast<size_t>(level)];
+		return layers[slot][static_cast<size_t>(r.y + lz) * lay.heightW + r.x + lx];
+	};
+
+	std::mt19937 rng(5);
+	for (int level = 0; level <= 3; ++level)
+	{
+		const int cpt = p.geometry.hCells >> level;
+		const int maxGx = 4 * cpt, maxGz = 3 * cpt;       // the world's last lattice column / row
+		for (int i = 0; i < 4000; ++i)
+		{
+			const int gx = static_cast<int>(rng() % (maxGx + 1)), gz = static_cast<int>(rng() % (maxGz + 1));
+			const int tx = std::min(gx / cpt, 3), tz = std::min(gz / cpt, 2);
+			const int dim = tileAt(tx, tz).geometry.heightDim(level);
+			const int expect = tileAt(tx, tz).heights[static_cast<size_t>(level)][static_cast<size_t>(std::min(gz - tz * cpt, cpt)) * dim + std::min(gx - tx * cpt, cpt)];
+			REQUIRE(shaderHeight(gx, gz, level) == expect);
+		}
+		// on a tile border the right/lower tile's first sample IS the left/upper tile's last sample: the lookup is continuous
+		for (int tz = 0; tz < 3; ++tz)
+			for (int tx = 1; tx < 4; ++tx)
+				for (int k = 0; k <= cpt; ++k)
+				{
+					const LandscapeTile& left = tileAt(tx - 1, tz);
+					const int dim = left.geometry.heightDim(level);
+					REQUIRE(shaderHeight(tx * cpt, tz * cpt + k, level) ==
+					        left.heights[static_cast<size_t>(level)][static_cast<size_t>(std::min(k, cpt)) * dim + cpt]);
+				}
+	}
+	// a tile that is not in the table reads as "none"
+	table[static_cast<size_t>(1 & mask) * window + (2 & mask)] = 0xFFFF;
+	CHECK(shaderHeight(2 * 256 + 10, 1 * 256 + 10, 0) == -1);
+}
