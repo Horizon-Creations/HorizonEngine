@@ -279,7 +279,10 @@ void LandscapeStore::pump()
 		e.cancel = m_storeToken.child();
 		const uint64_t ticket = e.ticket;
 		const int maxLevels = m_config.maxLevels;
-		std::shared_ptr<const LandscapeTileSource> source = m_source;
+		// The job holds the source only WHILE it loads: a queued, cancelled or finished job keeps nothing alive. (A strong pointer in
+		// the closure outlives the job until the pool lets go of it, which holds a pack file open after the store is gone: Windows
+		// cannot delete it then.) A store destroyed before the job runs makes it a no-op.
+		std::weak_ptr<const LandscapeTileSource> source = m_source;
 		std::shared_ptr<Shared> shared = m_shared;
 
 		JobDesc desc;
@@ -293,7 +296,10 @@ void LandscapeStore::pump()
 		e.job = m_pool->scheduleFn([shared, source, key, ticket, maxLevels] {
 			auto tile = std::make_shared<LandscapeTile>();
 			bool ok = false;
-			try { ok = source->load(key, maxLevels, *tile); } catch (...) { ok = false; }
+			if (auto src = source.lock())
+			{
+				try { ok = src->load(key, maxLevels, *tile); } catch (...) { ok = false; }
+			}   // `src` is gone before the result is published: whoever sees the result can delete the file
 			std::lock_guard<std::mutex> lock(shared->mutex);
 			shared->done.push_back(Done{ key, ticket, ok ? Done::Kind::Loaded : Done::Kind::Failed, ok ? tile : nullptr });
 		}, std::move(desc));

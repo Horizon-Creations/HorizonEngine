@@ -532,6 +532,7 @@ TEST_CASE("landscape store: from a pack file, like from the procedural source")
 	CHECK(store.stats().resident == tilesWithin(3000.0, 3000.0, 1200.0, 12, 512.0));
 	for (const auto& k : store.residentKeys()) CHECK(*store.tile(k) == s.generate(k));
 	}   // the store, its tiles and the pack have to let go of the file before it can be deleted (Windows)
+	CHECK(pack.use_count() == 1);   // no job, queued or finished, still holds the source
 	pack.reset();
 	std::filesystem::remove(path);
 }

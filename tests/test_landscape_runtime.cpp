@@ -167,6 +167,11 @@ TEST_CASE("landscape runtime: the frame covers the view, the fine levels sit on 
 	LandscapeFrame f3;
 	rt.buildFrame(viewProjRelative(high, origin, glm::dvec3(1, -0.4, 0.2)), origin, false, f3);
 	CHECK(f3.slabDistance == doctest::Approx(1200.0f));
+
+	// Once the runtime lets go, nothing of it keeps the source alive: not a job, not a queue entry (a pack file stays open as long as
+	// anything holds its source, and Windows cannot delete an open file).
+	rt.reset();
+	CHECK(src.use_count() == 1);
 }
 
 TEST_CASE("landscape runtime: the same view gives the same patches whatever the floating origin is")
