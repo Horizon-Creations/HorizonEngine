@@ -7,6 +7,7 @@
 #include <HorizonScene/LandscapePatchMesh.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <map>
@@ -369,15 +370,26 @@ TEST_CASE("landscape gpu layout: the shader's tile lookup, replayed on the CPU, 
 		}
 	const auto tileAt = [&](int tx, int tz) -> const LandscapeTile& { return tiles[static_cast<size_t>(tz) * 4 + tx]; };
 
-	// heightOfTile(g, level), line by line
+	const LandscapeCoarseWorld* coarse = src.coarse();
+	REQUIRE(coarse);
+	// heightOfTile(g, level), line by line (LandscapeShaderSource.h): the tile it lies in, the neighbours that share a border point,
+	// then the coarse world's finest grid
 	const auto shaderHeight = [&](int gx, int gz, int level) -> int {
 		const int cpt = p.geometry.hCells >> level;
 		const int tx = std::min(gx / cpt, 4 - 1), tz = std::min(gz / cpt, 3 - 1);
 		const int lx = std::min(gx - tx * cpt, cpt), lz = std::min(gz - tz * cpt, cpt);
-		const uint16_t slot = table[static_cast<size_t>(tz & mask) * window + (tx & mask)];
-		if (slot == 0xFFFF) return -1;
-		const LandscapeImageRect& r = lay.heightRect[static_cast<size_t>(level)];
-		return layers[slot][static_cast<size_t>(r.y + lz) * lay.heightW + r.x + lx];
+		for (int k = 0; k < 4; ++k)
+		{
+			const int sx = k & 1, sz = k >> 1;
+			if ((sx && lx != 0) || (sz && lz != 0)) continue;
+			const int ttx = tx - sx, ttz = tz - sz;
+			if (ttx < 0 || ttz < 0) continue;
+			const uint16_t slot = table[static_cast<size_t>(ttz & mask) * window + (ttx & mask)];
+			if (slot == 0xFFFF) continue;
+			const LandscapeImageRect& r = lay.heightRect[static_cast<size_t>(level)];
+			return layers[slot][static_cast<size_t>(r.y + lz + sz * cpt) * lay.heightW + r.x + lx + sx * cpt];
+		}
+		return 100000 + coarse->heights[0].at(gx >> (3 + 1 - level), gz >> (3 + 1 - level));   // marks a fall back to the coarse world
 	};
 
 	std::mt19937 rng(5);
@@ -404,7 +416,25 @@ TEST_CASE("landscape gpu layout: the shader's tile lookup, replayed on the CPU, 
 					        left.heights[static_cast<size_t>(level)][static_cast<size_t>(std::min(k, cpt)) * dim + cpt]);
 				}
 	}
-	// a tile that is not in the table reads as "none"
-	table[static_cast<size_t>(1 & mask) * window + (2 & mask)] = 0xFFFF;
-	CHECK(shaderHeight(2 * 256 + 10, 1 * 256 + 10, 0) == -1);
+	// The edge of the loaded disc: the tile to the right is missing, the border point is still the left tile's last sample, not the floor.
+	const uint16_t keep = table[static_cast<size_t>(1 & mask) * window + (2 & mask)];
+	table[static_cast<size_t>(1 & mask) * window + (2 & mask)] = 0xFFFF;                  // tile (2, 1) is not in the atlas
+	for (int level = 0; level <= 3; ++level)
+	{
+		const int cpt = p.geometry.hCells >> level;
+		const LandscapeTile& left = tileAt(1, 1);
+		const int dim = left.geometry.heightDim(level);
+		for (int k = 0; k <= cpt; ++k)
+		{
+			// (2 * cpt, cpt + k) lies on the border between tiles (1, 1) and (2, 1): the missing right one does not hide it
+			REQUIRE(shaderHeight(2 * cpt, cpt + k, level) == left.heights[static_cast<size_t>(level)][static_cast<size_t>(k) * dim + cpt]);
+		}
+		// and so does the corner shared with the tile above: (2 * cpt, cpt) belongs to (1,0), (2,0), (1,1) and (2,1)
+		const LandscapeTile& up = tileAt(1, 0);
+		REQUIRE(shaderHeight(2 * cpt, cpt, level) == up.heights[static_cast<size_t>(level)][static_cast<size_t>(cpt) * dim + cpt]);
+		// a point strictly inside the missing tile has no tile at all: the coarse world answers (marked by the +100000)
+		REQUIRE(shaderHeight(2 * cpt + 3, cpt + 3, level) >= 100000);
+		REQUIRE(shaderHeight(2 * cpt + 3, cpt + 3, level) - 100000 == coarse->heights[0].at((2 * cpt + 3) >> (4 - level), (cpt + 3) >> (4 - level)));
+	}
+	table[static_cast<size_t>(1 & mask) * window + (2 & mask)] = keep;
 }

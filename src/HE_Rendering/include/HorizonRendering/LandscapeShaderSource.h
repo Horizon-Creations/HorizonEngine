@@ -12,6 +12,9 @@
 //   * The MORPH distance is horizontal distance to the vertex plus uCameraRel.w, the camera's distance to the height slab; it
 //     does NOT include the vertex's own height. The selection on the CPU (landscapeMorphDistance) uses the same metric, which is
 //     what makes the seams between levels exact. A shader that morphs by the true 3D distance opens cracks.
+//   * A lattice point on a tile border is shared by two tiles; the lookup tries the tile it lies in and then the neighbours that
+//     share it, and falls back to the coarse world's finest grid when no tile has it (still streaming): at the edge of the
+//     loaded disc the last fine patch keeps its far edge, and a tile that is not there yet shows coarser ground, not a hole.
 //   * An odd vertex morphs toward the middle of its neighbours on the SAME level (landscapeMorphSource): 1 or 2 more fetches.
 //   * A fragment beyond the world's absolute extent is discarded: the top node of the quadtree is bigger than the world, and its
 //     vertices past the edge read the last row of heights.
@@ -43,6 +46,14 @@ uniform usampler2D      uCoarseHeights; // R16UI, the coarse grids stacked
 
 out vec3 vWorldRel;                  // origin-relative position, height in absolute metres minus the origin's y
 
+float heightOfCoarseGrid(ivec2 g, int grid)
+{
+    ivec4 gr = uCoarseGrid[grid];
+    ivec2 c = clamp(g, ivec2(0), gr.xy - ivec2(1));
+    uint v = texelFetch(uCoarseHeights, ivec2(c.x, gr.z + c.y), 0).r;
+    return uHeightInfo.x + float(v) * (uWorld.w / 65535.0);
+}
+
 float heightOfTile(ivec2 g, int level)
 {
     int cpt = uTile.x >> level;      // cells of a tile at this mip
@@ -50,24 +61,29 @@ float heightOfTile(ivec2 g, int level)
     ivec2 t = min(g / cpt, maxTile);
     ivec2 l = min(g - t * cpt, ivec2(cpt));   // the world's last row/column: the tile's last sample
     int mask = int(uHeightInfo.w) - 1;
-    uint slot = texelFetch(uSlotTable, ivec2(t.x & mask, t.y & mask), 0).r;
-    if (slot == 65535u) return uHeightInfo.x;
-    ivec4 r = uHeightRect[level];
-    uint v = texelFetch(uTileHeights, ivec3(r.x + l.x, r.y + l.y, int(slot)), 0).r;
-    return uHeightInfo.x + float(v) * (uWorld.w / 65535.0);
-}
-
-float heightOfCoarse(ivec2 g)
-{
-    ivec4 gr = uCoarseGrid[int(uPatchPos.w)];
-    ivec2 c = clamp(g, ivec2(0), gr.xy - ivec2(1));
-    uint v = texelFetch(uCoarseHeights, ivec2(c.x, gr.z + c.y), 0).r;
-    return uHeightInfo.x + float(v) * (uWorld.w / 65535.0);
+    // A lattice point on a tile border is the last sample of the tile before it and the first of the tile it lies in (the
+    // edge samples are shared). The edge of the loaded disc is where one of the two is missing: try the tile it lies in, then
+    // the neighbours that share the point, so the last fine patch keeps its far edge instead of dropping to the floor.
+    for (int k = 0; k < 4; ++k)
+    {
+        ivec2 step = ivec2(k & 1, k >> 1);
+        if ((step.x != 0 && l.x != 0) || (step.y != 0 && l.y != 0)) continue;     // only a border point is shared
+        ivec2 tt = t - step;
+        if (tt.x < 0 || tt.y < 0) continue;
+        uint slot = texelFetch(uSlotTable, ivec2(tt.x & mask, tt.y & mask), 0).r;
+        if (slot == 65535u) continue;
+        ivec2 ll = l + step * cpt;
+        ivec4 r = uHeightRect[level];
+        uint v = texelFetch(uTileHeights, ivec3(r.x + ll.x, r.y + ll.y, int(slot)), 0).r;
+        return uHeightInfo.x + float(v) * (uWorld.w / 65535.0);
+    }
+    // No tile has it (still streaming): the coarse world's finest grid, so the ground is there, only coarser, not a hole.
+    return heightOfCoarseGrid(g >> (uTile.z + 1 - level), 0);
 }
 
 float heightAt(ivec2 g)
 {
-    return uPatch.w == 0 ? heightOfTile(g, uPatch.x) : heightOfCoarse(g);
+    return uPatch.w == 0 ? heightOfTile(g, uPatch.x) : heightOfCoarseGrid(g, int(uPatchPos.w));
 }
 
 void main()

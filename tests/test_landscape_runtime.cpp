@@ -76,6 +76,17 @@ TEST_CASE("landscape runtime: starts only when the parts fit together")
 	narrow.atlasWindow = 16;
 	CHECK_FALSE(rt.begin(src, narrow, &err));
 	CHECK(err.find("atlasWindow") != std::string::npos);
+	// a tile the shaders have no room for: caught before anything is generated
+	ProceduralLandscapeParams wide;
+	wide.tilesX = wide.tilesZ = 2;
+	wide.geometry.channels = 16;
+	CHECK_FALSE(rt.begin(std::make_shared<ProceduralLandscapeSource>(wide), cfg, &err));
+	CHECK(err.find("weight channels") != std::string::npos);
+	ProceduralLandscapeParams fine;
+	fine.tilesX = fine.tilesZ = 2;
+	fine.geometry.hCells = 1024;                 // nine height mips
+	CHECK_FALSE(rt.begin(std::make_shared<ProceduralLandscapeSource>(fine), cfg, &err));
+	CHECK(err.find("height mips") != std::string::npos);
 	// no source, a missing pack
 	CHECK_FALSE(rt.begin(nullptr, cfg, &err));
 	CHECK_FALSE(rt.beginFromPack((std::filesystem::temp_directory_path() / "he_landscape_no_such_pack.bin").string(), cfg, &err));

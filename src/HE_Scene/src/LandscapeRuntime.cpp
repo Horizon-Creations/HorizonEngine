@@ -46,8 +46,13 @@ bool LandscapeRuntime::beginFromPack(const std::string& path, const LandscapeRun
 bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> source, const LandscapeRuntimeConfig& configIn, std::string* error)
 {
 	if (!source) return fail(error, "no tile source");
+	// What the shaders have room for (LandscapeShaderSource.h): eight tile mips, twelve weight channels in three pages.
+	const LandscapeGeometry& geo = source->geometry();
+	if (geo.heightLevels() > 8) return fail(error, "the tile has " + std::to_string(geo.heightLevels()) + " height mips: the shader holds 8");
+	if (geo.channels > 12) return fail(error, "the tile has " + std::to_string(geo.channels) + " weight channels: the shader holds 12 (three pages)");
 	const LandscapeCoarseWorld* coarse = source->coarse();
 	if (!coarse || !coarse->valid()) return fail(error, "the tile source has no coarse world (a version 1 pack): the far levels have no data");
+	if (coarse->heights.size() > 16) return fail(error, "the coarse world has " + std::to_string(coarse->heights.size()) + " grids: the shader holds 16");
 	const LandscapeGeometry& g = source->geometry();
 
 	// The pack says what its heights mean; the config's numbers are for a source that does not.
