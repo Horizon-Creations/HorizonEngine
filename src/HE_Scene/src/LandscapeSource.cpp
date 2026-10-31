@@ -186,7 +186,7 @@ LandscapeTile ProceduralLandscapeSource::generate(LandscapeTileKey key) const
 	t.weights.push_back(std::move(w0));
 	if (m_p.seaLevelM > -1.0e8f)
 	{
-		// A cell is water where the ground at its centre is below the sea. Heights are in metres from 0 (heightRange).
+		// A cell is water where the ground at its corner (the sample the weights use for it too) is below the sea. Heights are in metres from 0 (heightRange).
 		t.waterCoverage.assign(static_cast<size_t>(W) * W, 0);
 		t.waterOwner.assign(static_cast<size_t>(W) * W, 0);
 		for (int z = 0; z < W; ++z)

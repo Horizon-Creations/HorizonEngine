@@ -79,7 +79,8 @@ LandscapeCodec codecOf(LandscapeCodec::Backend b, bool predictor, int zstdLevel)
 }
 
 // Stored bytes of the height streams and of the weight streams of one container (walks the stream table that
-// LandscapeTile.h documents; a tool, not the reader).
+// LandscapeTile.h documents; a tool, not the reader). The bench world has no sea, so there are no water streams after the weights; with
+// water they would be counted as weights here.
 void splitStreams(const std::vector<uint8_t>& blob, int hLevels, int wLevels, size_t& heights, size_t& weights)
 {
 	heights = weights = 0;

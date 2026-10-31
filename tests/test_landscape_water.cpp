@@ -390,6 +390,27 @@ TEST_CASE("landscape region terrain: n x n tiles are one terrain with the tiles'
 	CHECK(dry > 0);
 	CHECK(f.clipToGround);
 
+	// a tile without water streams in the region (an authored world has dry tiles beside a lake): the Field is still built, dry there
+	{
+		const TileFn partly = [&](LandscapeTileKey k) {
+			auto t = std::make_shared<LandscapeTile>(*tiles(k));
+			if (k.x == 2 && k.z == 1) { t->waterCoverage.clear(); t->waterOwner.clear(); }
+			return std::shared_ptr<const LandscapeTile>(t);
+		};
+		LandscapeRegionTerrain p;
+		REQUIRE(landscapeRegionTerrain(partly, { 1, 1 }, 2, { 0.0f, 3000.0f }, sea.water(), p));
+		REQUIRE(p.hasWater);
+		REQUIRE(p.terrain.water.allocated());
+		for (int z = 0; z < 16; ++z)
+			for (int x = 16; x < 32; ++x)                            // tile (2, 1) covers region texels x 16..31, z 0..15
+			{
+				REQUIRE(p.terrain.water.coverage[static_cast<size_t>(z) * 32 + x] == 0);
+				REQUIRE(p.terrain.water.owner[static_cast<size_t>(z) * 32 + x] == 0);
+			}
+		bool wetElsewhere = false;
+		for (int x = 0; x < 16 && !wetElsewhere; ++x) wetElsewhere = p.terrain.water.coverage[static_cast<size_t>(x)] != 0 || p.terrain.water.coverage[static_cast<size_t>(16 * 32 + x)] != 0;
+		CHECK(wetElsewhere);                                          // the other tiles' water is still there
+	}
 	// no table: heights and weights only
 	LandscapeRegionTerrain bare;
 	REQUIRE(landscapeRegionTerrain(fn, { 0, 0 }, 2, { 0.0f, 3000.0f }, nullptr, bare));

@@ -116,8 +116,10 @@ bool landscapeRegionTerrain(const std::function<std::shared_ptr<const LandscapeT
 	// water: one Field over the region
 	if (waterTable)
 	{
-		bool anyWater = true;
-		for (const auto& t : tiles) anyWater = anyWater && t->hasWater() && t->waterCoverage.size() == static_cast<size_t>(wt) * wt;
+		// Any tile with water makes the Field; a tile without streams (an authored world has dry tiles beside a lake) is dry in it.
+		const auto tileWater = [wt](const LandscapeTile& t) { return t.hasWater() && t.waterCoverage.size() == static_cast<size_t>(wt) * wt; };
+		bool anyWater = false;
+		for (const auto& t : tiles) anyWater = anyWater || tileWater(*t);
 		if (anyWater)
 		{
 			water::Field& f = tc.water;
@@ -129,6 +131,7 @@ bool landscapeRegionTerrain(const std::function<std::shared_ptr<const LandscapeT
 				for (int ti = 0; ti < n; ++ti)
 				{
 					const LandscapeTile& t = *tiles[static_cast<size_t>(tj) * n + ti];
+					if (!tileWater(t)) continue;
 					for (uint32_t z = 0; z < wt; ++z)
 						for (uint32_t x = 0; x < wt; ++x)
 						{
