@@ -19,6 +19,7 @@ add_library(HorizonScene SHARED
     src/LandscapeTile.cpp
     src/LandscapeSource.cpp
     src/LandscapeStore.cpp
+    src/LandscapeQuadtree.cpp
     src/GameInstanceHost.cpp
     src/PlayerHost.cpp
     src/EntityHost.cpp
