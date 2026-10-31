@@ -77,6 +77,7 @@ struct LandscapeWaterStats
 	uint64_t started = 0;    // rebuilds started
 	uint64_t finished = 0;   // regions taken in
 	uint64_t discarded = 0;  // finished after a newer one was wanted
+	uint64_t failed = 0;     // a build that could not make a terrain of its tiles (the region is not retried until the camera moves on)
 	uint64_t deferred = 0;   // a region was wanted but a tile of it was not in memory
 	bool     building = false;
 };
@@ -123,6 +124,9 @@ private:
 	uint64_t m_ticket = 0;
 	uint64_t m_nextRevision = 1;
 	bool m_building = false;
+	LandscapeTileKey m_failedOrigin{ -1, -1 };
+	bool m_hasFailed = false;
+	bool m_warnedSize = false;
 	LandscapeWaterStats m_stats;
 };
 

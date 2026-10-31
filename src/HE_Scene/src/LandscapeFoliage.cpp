@@ -194,7 +194,7 @@ void LandscapeFoliage::update(const LandscapeStore& store, const std::vector<glm
 		desc.name = "LandscapeFoliageScatter";
 		desc.priority = JobPriority::Low;
 		desc.cancel = e.cancel;
-		e.job = m_pool->scheduleFn([shared, tile, layer, params, key, ticket]() mutable {
+		e.job = m_pool->scheduleFn([shared, tile = std::shared_ptr<const LandscapeTile>(tile), layer, params, key, ticket]() mutable {
 			shared->running.fetch_add(1);
 			std::shared_ptr<const FoliageStore> result;
 			if (!shared->closed.load())
@@ -206,6 +206,8 @@ void LandscapeFoliage::update(const LandscapeStore& store, const std::vector<glm
 					result = layer.store;
 				}
 			}
+			layer = FoliageLayer{};   // the scatter's world-space copy of every instance is not read by anyone: not held past the job
+			tile.reset();
 			const size_t n = result ? result->local.size() : 0;
 			{
 				std::lock_guard<std::mutex> lock(shared->mutex);

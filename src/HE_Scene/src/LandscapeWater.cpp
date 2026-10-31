@@ -65,7 +65,19 @@ void LandscapeWater::update(const LandscapeStore& store, const glm::dvec3& camer
 	}
 	for (Result& r : done)
 	{
-		if (m_building && r.ticket == m_ticket && r.region) { m_region = std::move(r.region); m_building = false; ++m_stats.finished; }
+		if (m_building && r.ticket == m_ticket)
+		{
+			m_building = false;   // the build the region in flight was waiting for is over, whatever it brought
+			if (r.region) { m_region = std::move(r.region); ++m_stats.finished; }
+			else
+			{
+				// It could not make a terrain of its tiles: the old region stays, and this one is asked for again only when the camera moves
+				// to another (m_wantOrigin keeps the failed one so the same request is not repeated every frame).
+				++m_stats.failed;
+				m_failedOrigin = m_wantOrigin;
+				m_hasFailed = true;
+			}
+		}
 		else ++m_stats.discarded;
 	}
 	m_stats.building = m_building;
@@ -78,7 +90,14 @@ void LandscapeWater::update(const LandscapeStore& store, const glm::dvec3& camer
 
 	const LandscapeTileSource& src = store.source();
 	const double tileM = src.geometry().tileM;
-	const int n = std::min({ m_config.tilesPerSide, src.tilesX(), src.tilesZ() });
+	// A TerrainComponent holds kTerrainMaxResolution samples a side: the region cannot have more tiles than they cover.
+	const int fits = static_cast<int>((kTerrainMaxResolution - 1) / std::max<uint32_t>(1, src.geometry().hCells));
+	const int n = std::min({ m_config.tilesPerSide, src.tilesX(), src.tilesZ(), fits });
+	if (n < m_config.tilesPerSide && n == fits && !m_warnedSize)
+	{
+		HE_LOG_WARN(World, "LandscapeWater: %d tiles a side do not fit a terrain of %u samples; the region has %d", m_config.tilesPerSide, kTerrainMaxResolution, n);
+		m_warnedSize = true;
+	}
 	if (n < 1) return;
 	const int cx = clampi(static_cast<int>(std::floor(camera.x / tileM)), 0, src.tilesX() - 1);
 	const int cz = clampi(static_cast<int>(std::floor(camera.z / tileM)), 0, src.tilesZ() - 1);
@@ -94,6 +113,9 @@ void LandscapeWater::update(const LandscapeStore& store, const glm::dvec3& camer
 	LandscapeTileKey target = desired;
 	if (have && currentN == n && (inner || desired == current)) target = current;
 	if (have && target == current && currentN == n) return;   // nothing to do: the region (built or in flight) is the right one
+
+	if (m_hasFailed && target == m_failedOrigin) return;     // that request failed; the camera has to move on before it is tried again
+	m_hasFailed = m_hasFailed && target == m_failedOrigin;
 
 	// 3. start the build for `target`, if every tile of it is in memory
 	std::vector<std::shared_ptr<const LandscapeTile>> tiles(static_cast<size_t>(n) * n);
@@ -160,6 +182,7 @@ void LandscapeWater::update(const LandscapeStore& store, const glm::dvec3& camer
 				result = std::move(region);
 			}
 		}
+		tiles.clear();   // the region keeps what it needs; the tiles are the store's and not held past the build
 		{
 			std::lock_guard<std::mutex> lock(shared->mutex);
 			shared->done.push_back(Result{ ticket, std::move(result) });
