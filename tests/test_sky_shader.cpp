@@ -92,7 +92,7 @@ TEST_CASE("Sky prelude uniform block has HE::SkyFrameParams' field order")
 		{ "nebulaColor3",   offsetof(P, nebulaColor3)   }, { "auroraColorTop", offsetof(P, auroraColorTop) },
 		{ "starColor",      offsetof(P, starColor)      }, { "star",         offsetof(P, star)         },
 		{ "star2",          offsetof(P, star2)          }, { "neb2",         offsetof(P, neb2)         },
-		{ "drift",          offsetof(P, drift)          },
+		{ "drift",          offsetof(P, drift)          }, { "shape",        offsetof(P, shape)        },
 	};
 	REQUIRE(fields.size() == cpp.size());
 	for (size_t i = 0; i < cpp.size(); ++i)
@@ -101,7 +101,7 @@ TEST_CASE("Sky prelude uniform block has HE::SkyFrameParams' field order")
 		CHECK_MESSAGE(fields[i] == cpp[i].first, "prelude field ", i, " is '", fields[i], "', SkyFrameParams has '", cpp[i].first, "'");
 		CHECK_MESSAGE(glslOffset == cpp[i].second, cpp[i].first, ": std140 offset ", glslOffset, " vs C++ ", cpp[i].second);
 	}
-	CHECK(sizeof(P) == 64 + 16 * 18);
+	CHECK(sizeof(P) == 64 + 16 * 19);
 }
 
 // ── Cloud drift: the wind INTEGRATED over time ────────────────────────────────
@@ -270,6 +270,7 @@ TEST_CASE("The GL sky cross-compiles to SPIR-V (Vulkan) and pinned HLSL SM 5.0 (
 	// Same byte layout as SkyFrameParams: the last vec4 in constant register 20.
 	CHECK(h.find("heSky_neb2 : packoffset(c20)") != std::string::npos);
 	CHECK(h.find("heSky_drift : packoffset(c21)") != std::string::npos);
+	CHECK(h.find("heSky_shape : packoffset(c22)") != std::string::npos);
 	// The noise volume is fetched with an explicit LOD (see kSkyVulkanPrelude).
 	CHECK(h.find("SampleLevel(") != std::string::npos);
 }

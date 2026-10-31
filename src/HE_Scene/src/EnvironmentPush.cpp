@@ -43,7 +43,7 @@ IRenderer::EnvironmentSettings makeEnvironmentSettings(EnvironmentComponent& env
         .cloudMode = env.cloudMode, .cloudHeight = env.cloudHeight, .cloudDomeHeight = env.cloudDomeHeight,
         .cloudQuality = env.cloudQuality, .lowResClouds = env.lowResClouds,
         .cloudShadows = env.cloudShadows, .cloudShadowStrength = env.cloudShadowStrength,
-        .cloudStyle = env.cloudStyle, .cloudInterShadows = env.cloudInterShadows,
+        .cloudStyle = env.cloudStyle, .cloudType = env.cloudType, .cloudInterShadows = env.cloudInterShadows,
         .cloudEvolution = env.cloudEvolution,
         .cloudDensity = env.cloudDensity, .cloudFluffiness = env.cloudFluffiness,
         .cloudTint = env.cloudTint,

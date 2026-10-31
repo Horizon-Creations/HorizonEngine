@@ -1186,6 +1186,11 @@ namespace
 	  "Classic is the original flat, drifting layer. Realistic builds cauliflower "
 	  "shapes that tower and dissolve, at a higher cost.",
 	  "", "rendering#sky" },
+	{ "Environment/Cloud Type", "",
+	  "The kind of cloud the Realistic layer grows: mixed cumulus (default), flat "
+	  "cumulus, towering cumulus, stratocumulus sheets or cumulonimbus. Changes cell size "
+	  "and height; Coverage still decides how much sky they fill.",
+	  "", "rendering#sky" },
 	{ "Environment/Evolution", "",
 	  "How fast clouds change shape as they drift. 0 freezes the formation and "
 	  "only moves it.",

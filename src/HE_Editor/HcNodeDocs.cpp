@@ -2182,6 +2182,7 @@ namespace
 		{ "CloudMode", "the cloud layer: 0 painted on the sky dome (cheap, never comes closer), 1 real 3D volumes the camera can fly into" },
 		{ "CloudQuality", "how many steps the cloud raymarch takes: 0 low, 1 medium, 2 high — the most expensive sky setting there is" },
 		{ "CloudStyle", "0 the original flat drifting layer, 1 cauliflower shapes that tower and dissolve" },
+		{ "CloudType", "the kind of Realistic cloud: 0 mixed cumulus, 1 flat cumulus, 2 towering cumulus, 3 stratocumulus sheets, 4 cumulonimbus" },
 		{ "NebulaQuality", "the nebula's detail level: 0 performance, 1 high, 2 max" },
 		{ "SunColor", "the tint of the sunlight; the sky reddens the sun near the horizon on its own" },
 		{ "MoonColor", "the tint of the moonlight at night" },

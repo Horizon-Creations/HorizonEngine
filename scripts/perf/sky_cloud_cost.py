@@ -27,6 +27,11 @@ VARIANTS = {
     "cov05":  dict(cloudCoverage=0.05, cloudQuality=1),
     "cov95":  dict(cloudCoverage=0.95, cloudQuality=1),
     "noshad": dict(cloudCoverage=0.55, cloudQuality=1, cloudInterShadows=False),
+    # the cloud types of the Realistic layer at Medium: flat cumulus, towering cumulus, stratocumulus, cumulonimbus
+    "type1":  dict(cloudCoverage=0.55, cloudQuality=1, cloudType=1),
+    "type2":  dict(cloudCoverage=0.55, cloudQuality=1, cloudType=2),
+    "type3":  dict(cloudCoverage=0.55, cloudQuality=1, cloudType=3),
+    "type4":  dict(cloudCoverage=0.55, cloudQuality=1, cloudType=4),
 }
 
 def main():

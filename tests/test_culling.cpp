@@ -1979,7 +1979,7 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 {
 	// The constant buffer is memcpy'd straight to the GPU — the size is a contract
 	// with the MSL/GLSL/HLSL struct.
-	CHECK(sizeof(HE::SkyFrameParams) == 64 + 18 * 16);
+	CHECK(sizeof(HE::SkyFrameParams) == 64 + 19 * 16);
 
 	IRenderer::EnvironmentSettings env;
 	env.windDirection    = 90.0f;
@@ -2026,6 +2026,16 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 		CHECK(HE::BuildSkyFrameParams(tall, in).drift.w >= 0.1f);
 	}
 	CHECK(p.drift.w == doctest::Approx(1.0f));      // cloudDomeHeight, the classic look by default
+	{
+		CHECK(p.shape.x == doctest::Approx(0.0f));    // cloudType 0: the look before cloud types existed
+		IRenderer::EnvironmentSettings typed = env;
+		typed.cloudType = 4;
+		CHECK(HE::BuildSkyFrameParams(typed, in).shape.x == doctest::Approx(4.0f));
+		typed.cloudType = 99;                         // a broken value must not index past the table
+		CHECK(HE::BuildSkyFrameParams(typed, in).shape.x == doctest::Approx(4.0f));
+		typed.cloudType = -3;
+		CHECK(HE::BuildSkyFrameParams(typed, in).shape.x == doctest::Approx(0.0f));
+	}
 
 	CHECK(p.sunDir.w   == doctest::Approx(1.0f));    // has-moon flag
 	CHECK(p.sunColor.w == doctest::Approx(0.3f));    // lunar phase
@@ -3583,6 +3593,46 @@ TEST_CASE("Realistic clouds: the quality constants of the march (weather-map cad
 	REQUIRE(sGl.size() == 2);
 	CHECK(sGl == sMtl);
 	CHECK(sGl.front() == 0.0);
+}
+
+TEST_CASE("Realistic clouds: the cloud-type table (cell size, tower profile) is the same numbers in GL and MSL")
+{
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - cloud type table comparison skipped");
+		return;
+	}
+	const std::string glFile  = readFile(root / "src" / "HE_Rendering" / "include" /
+	                                     "HorizonRendering" / "SkyShaderSource.h");
+	const std::string mtlFile = readFile(root / "src" / "HE_Rendering" / "src" /
+	                                     "Backends" / "Metal" / "MetalRenderer.mm");
+	// Every "return vecN(a, b, c, d);" of cloudShapeParams, as one flat list of numbers.
+	const auto table = [](const std::string& src, const std::string& head, const std::string& ctor)
+	{
+		std::vector<double> v;
+		const size_t a = src.find(head);
+		if (a == std::string::npos) return v;
+		const size_t end = src.find("\n}\n", a);
+		for (size_t i = src.find(ctor + "(", a); i != std::string::npos && i < end; i = src.find(ctor + "(", i + 1))
+		{
+			const size_t close = src.find(')', i);
+			std::string args = src.substr(i + ctor.size() + 1, close - i - ctor.size() - 1);
+			for (char& c : args) if (c == ',') c = ' ';
+			const char* p = args.c_str();
+			char* endp = nullptr;
+			for (double d = std::strtod(p, &endp); endp != p; d = std::strtod(p, &endp)) { v.push_back(d); p = endp; }
+		}
+		return v;
+	};
+	const std::vector<double> gl  = table(glFile,  "vec4 cloudShapeParams()", "vec4");
+	const std::vector<double> mtl = table(mtlFile, "float4 cloudShapeParams(float4 drift)", "float4");
+	REQUIRE(gl.size() == 5 * 4);                    // types 1..4 and the default: four numbers each
+	CHECK(gl == mtl);
+	// The default type multiplies by one and caps nothing: the picture before cloud types existed.
+	CHECK(gl[16] == 1.0);
+	CHECK(gl[18] == 1.0);
 }
 
 TEST_CASE("Nebula: Metal's kSkyMSL copy matches the GL sky shader after normalisation")

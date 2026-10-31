@@ -112,6 +112,11 @@ struct EnvironmentSettings
     // Cloud look (3D volumetric mode): 0 = Classic (original soft look),
     // 1 = Realistic (Perlin-Worley shapes, flat bases, multi-scatter lighting).
     int       cloudStyle = 1;
+    // What kind of cloud the Realistic 3D layer grows (cloudStyle 1): 0 = Mixed cumulus (the classic
+    // Realistic look), 1 = Flat cumulus (small low cells), 2 = Cumulus congestus (tall towers),
+    // 3 = Stratocumulus (low lumpy sheets), 4 = Cumulonimbus (few huge cells, full-depth towers).
+    // Sets the cell size and the height profile; the amount of sky they cover stays cloudCoverage.
+    int       cloudType = 0;
     // Clouds shade each other (3D mode): extended sun light-march.
     bool      cloudInterShadows = true;
     // Shape-evolution speed (3D Realistic): 0 = frozen drift … 1 = natural

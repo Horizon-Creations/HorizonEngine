@@ -4096,6 +4096,7 @@ struct SkyParams {
 	float4 star2;         // x = starTwinkle, y = cloudQuality, z = low-res-cloud flag, w = rainAmount
 	float4 neb2;          // x = nebulaCoverage (0 none .. 1 whole band)
 	float4 drift;         // xyz = where the wind has carried the clouds so far (HE::CloudDrift), w = dome cloud height multiplier
+	float4 shape;         // x = cloudType (Realistic 3D layer: 0 mixed, 1 flat, 2 towering, 3 stratocumulus, 4 cumulonimbus)
 };
 
 vertex SkyOut skyVertex(uint vid [[vertex_id]])
@@ -4780,6 +4781,18 @@ bool cloudSlabRange(float3 camPos, float3 dir, float baseY, float topY, float ma
 	return tFar > tNear;
 }
 
+// Cloud type of the Realistic layer (EnvironmentSettings::cloudType), carried in drift.w of the Realistic entry points:
+// x = cell-size factor on the weather-map frequency, y = lowest tower height (fraction of the slab), z = tower height
+// factor, w = tower cap (1e9 = none). Type 0 multiplies by one throughout. Mirror of the GLSL cloudShapeParams.
+float4 cloudShapeParams(float4 drift)
+{
+	int t = int(drift.w + 0.5);
+	if (t == 1) return float4(1.55, 0.16, 0.62, 0.60);
+	if (t == 2) return float4(0.85, 0.50, 1.15, 1.00);
+	if (t == 3) return float4(1.25, 0.10, 0.45, 0.45);
+	if (t == 4) return float4(0.50, 0.80, 1.35, 1.00);
+	return float4(1.0, 0.28, 1.0, 1.0e9);
+}
 // ── Shared cloud shape field ─────────────────────────────────────────────────
 // Coarse density (presence × vertical profile × billow erosion, no fine octave)
 // of the 3D cloud slab at a world position. ONE shape model for the realistic
@@ -4812,7 +4825,7 @@ float2 cloudColumnReal(float3 pos, float baseY, float thick, float nscale, float
 		// camera-relative in Y, and sampling the columns at baseY made the
 		// whole cloud PATTERN morph when the camera climbed — and the ground
 		// shadows with it. The 3D body/erosion below still vary with height.
-		float3 npc = float3(pos.x, 0.0, pos.z) * (nscale * 0.55) + drift.xyz;
+		float3 npc = (float3(pos.x, 0.0, pos.z) * (nscale * 0.55) + drift.xyz) * cloudShapeParams(drift).x;   // cell size of the cloud type
 		npc.y += 37.0; // fixed weather-map slice (wind is horizontal; evolution scrolls y at sample time)
 		// DOMAIN WARP: bend the column field with a low-frequency vector noise
 		// so cells stop reading as same-sized round balls — outlines become
@@ -4860,8 +4873,9 @@ float cloudBodyReal(float3 pos, float baseY, float thick, float nscale, float lo
 		if (pres <= 0.0) return 0.0;
 		// Tower height varies per formation (macro): some stay flat banks,
 		// others billow into towers — not one uniform dome height.
-		float towerTop = mix(0.28, 1.0, smoothstep(lo, lo + 0.30, cover))
-		               * mix(0.55, 1.25, macro);
+		float4 shp     = cloudShapeParams(drift);
+		float towerTop = min(mix(shp.y, 1.0, smoothstep(lo, lo + 0.30, cover))
+		                     * mix(0.55, 1.25, macro) * shp.z, shp.w);
 		// The base is flat but not one plane: it rides up and down with the formation (macro, +-0.10 thick) and rises over
 		// a soft 0.10 instead of a razor 0.06, so an underside is a soft ragged edge and not a cut. The march starts
 		// below the nominal base to let it show (applyClouds3DReal).
@@ -5248,8 +5262,10 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 		if (ov > 0.0)   // overcast: lighter and darker masses so a closed deck still reads as clouds
 			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68,
 			                cloudCoverFbm(pos * nscale * 0.35 + drift.xyz, 0.0, noiseTex, noiseSamp))), ov);
-		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
-		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
+		// Aerial perspective: extinction along the ray (Beer), not a late linear ramp, so a far cloud recedes into the haze
+		// colour of its own direction instead of standing sharp until it hits the grazing-angle fade.
+		float hazeFar = 1.0 - exp(-t / (maxDist * 0.20));
+		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.9);
 
 		tAcc += T * a * t;
 		wAcc += T * a;
@@ -5281,7 +5297,7 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	// enormous stretch of slab and would otherwise pile into a hard wall of
 	// cloud at the horizon. abs() so it works looking DOWN from above the deck
 	// exactly as it always did looking up from below.
-	float horizon = smoothstep(elevFloor, elevFloor + 0.14, abs(dir.y));
+	float horizon = smoothstep(elevFloor, elevFloor + 0.09, abs(dir.y));   // narrower than classic: the aerial perspective already melts far slab into the haze
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	// Overcast: the deck stands in where the horizon fade cleared it, and at full coverage
@@ -5369,7 +5385,7 @@ fragment float4 cloudShadowFragment(SkyOut in [[stage_in]],
 	{
 		float3 pos = float3(xz.x, midY, xz.y) + sd * (t0 + (float(i) + 0.5) * ds);
 		// Same optical-depth normalisation as the view march (ds/thick * 7).
-		od += cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind, drift, fluff,
+		od += cloudFieldDensity(pos, baseY, thick, nscale, lo, time, wind, float4(drift.xyz, p.shape.x), fluff,
 		                        p.neb2.y, p.neb2.w, noiseTex, noiseSamp)
 		    * (ds / thick) * 7.0 * densMul;
 	}
@@ -6062,7 +6078,7 @@ fragment float4 cloudFragment(SkyOut in [[stage_in]],
 	float3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
 	if (p.cameraPos.w > 0.5)
 		return clouds3DLT(dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
-		                  p.sunColor.xyz, p.wind.xyz, p.drift, p.cloud.x, p.cloud.z, p.cloud.y,
+		                  p.sunColor.xyz, p.wind.xyz, float4(p.drift.xyz, p.shape.x), p.cloud.x, p.cloud.z, p.cloud.y,
 		                  p.star2.y, p.cloudTint.xyz, in.position.xy,
 		                  p.neb2.y, p.neb2.z, p.neb2.w, noiseTex, noiseSamp);
 	return cloudsDomeLT(dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz, p.drift,
@@ -6299,7 +6315,7 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		// are occluded by the transmittance instead of being painted onto the
 		// cloud bodies. L = comp − atmoBase·T recovers the clouds' own light.
 		float3 comp = applyClouds3DReal(atmoBase, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z,
-		                                p.params.y, p.sunColor.xyz, p.wind.xyz, p.drift, p.cloud.x, p.cloud.z,
+		                                p.params.y, p.sunColor.xyz, p.wind.xyz, float4(p.drift.xyz, p.shape.x), p.cloud.x, p.cloud.z,
 		                                p.cloud.y, p.star2.y, p.cloudTint.xyz, p.neb2.z, p.neb2.w,
 		                                in.position.xy, noiseTex, noiseSamp, cloudT);
 		col = col * cloudT + (comp - atmoBase * cloudT);
@@ -6762,7 +6778,7 @@ struct GIProbeParamsCPU
 };
 static_assert(sizeof(GIProbeParamsCPU) == (6 + 24) * 16, "GIProbeParamsCPU must match the MSL GIProbeParams layout");
 
-// The MSL SkyParams twin (mat4 + 17×float4, with the byte-layout static_assert) is
+// The MSL SkyParams twin (mat4 + 19×float4, with the byte-layout static_assert) is
 // HE::SkyFrameParams in <HorizonRendering/SkyFrameParams.h>, and the one
 // EnvironmentSettings → sky-constants translation is HE::BuildSkyFrameParams.
 // The GL-clip → Metal-clip depth remap (0..1) is HE::kMetalClipFix in

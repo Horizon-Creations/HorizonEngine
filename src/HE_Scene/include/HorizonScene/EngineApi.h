@@ -1514,6 +1514,7 @@ namespace camera {
     X(cloudMode,           CloudMode,           "Cloud Mode") \
     X(cloudQuality,        CloudQuality,        "Cloud Quality") \
     X(cloudStyle,          CloudStyle,          "Cloud Style") \
+    X(cloudType,           CloudType,           "Cloud Type") \
     X(nebulaQuality,       NebulaQuality,       "Nebula Quality")
 #define HE_ENV_FIELDS_COLOR(X) \
     X(sunColor,            SunColor,            "Sun Color") \

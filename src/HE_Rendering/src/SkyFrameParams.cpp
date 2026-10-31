@@ -69,6 +69,7 @@ SkyFrameParams BuildSkyFrameParams(const IRenderer::EnvironmentSettings& env,
 	                             in.lowResClouds ? 1.0f : 0.0f, env.rainAmount);
 	p.neb2           = glm::vec4(env.nebulaCoverage, static_cast<float>(env.cloudStyle),
 	                             env.cloudInterShadows ? 1.0f : 0.0f, env.cloudEvolution);
+	p.shape          = glm::vec4(static_cast<float>(std::clamp(env.cloudType, 0, 4)), 0.0f, 0.0f, 0.0f);
 	return p;
 }
 

@@ -1135,6 +1135,7 @@ namespace
 		CHECK(a.cloudHeight         == doctest::Approx(b.cloudHeight));
 		CHECK(a.cloudDomeHeight     == doctest::Approx(b.cloudDomeHeight));
 		CHECK(a.cloudQuality        == b.cloudQuality);
+		CHECK(a.cloudType           == b.cloudType);
 		CHECK(a.lowResClouds        == b.lowResClouds);
 		CHECK(a.cloudDensity        == doctest::Approx(b.cloudDensity));
 		CHECK(a.cloudFluffiness     == doctest::Approx(b.cloudFluffiness));
@@ -1169,7 +1170,7 @@ TEST_CASE("A round-tripped Sky pushes identical EnvironmentSettings to the rende
 	env.moonColor = glm::vec3(0.21f, 0.22f, 0.23f);  env.moonIntensity = 0.42f;
 	env.moonPhase = 0.23f;     env.moonPhaseAuto = false;     env.moonCycleDays = 12.5f;
 	env.cloudCoverage = 0.71f; env.windDirection = 210.0f;    env.windSpeed = 2.2f;
-	env.cloudMode = 1;         env.cloudHeight = 275.0f;      env.cloudQuality = 2;   env.cloudDomeHeight = 2.4f;
+	env.cloudMode = 1;         env.cloudHeight = 275.0f;      env.cloudQuality = 2;   env.cloudDomeHeight = 2.4f;   env.cloudType = 3;
 	env.lowResClouds = true;   env.cloudDensity = 1.6f;       env.cloudFluffiness = 0.34f;
 	env.cloudTint = glm::vec3(0.31f, 0.32f, 0.33f);
 	env.contrailAmount = 0.18f; env.cirrusAmount = 0.29f;     env.cirrusSeed = 7.0f;

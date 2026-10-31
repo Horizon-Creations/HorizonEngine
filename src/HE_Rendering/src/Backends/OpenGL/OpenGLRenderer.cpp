@@ -4656,6 +4656,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
 	m_uSkyCloudStyle        = glGetUniformLocation(m_skyProgram, "uCloudStyle");
+	m_uSkyCloudType         = glGetUniformLocation(m_skyProgram, "uCloudType");
 	m_uSkyCloudInterShadows = glGetUniformLocation(m_skyProgram, "uCloudInterShadows");
 	m_uSkyCloudEvolution    = glGetUniformLocation(m_skyProgram, "uCloudEvolution");
 	m_uSkyCameraPos   = glGetUniformLocation(m_skyProgram, "uCameraPos");
@@ -5334,6 +5335,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	glUniform4f(m_uSkyCloudShadowRegion, origin.x, origin.y, size,
 	            static_cast<float>(kCloudShadowMapSize));
 	glUniform1i(m_uSkyCloudStyle, env.cloudStyle);
+	glUniform1i(m_uSkyCloudType, std::clamp(env.cloudType, 0, 4));
 	glUniform1f(m_uSkyCloudEvolution, env.cloudEvolution);
 	// Dome vs 3D deck picks the density field. Set it here: the value left over
 	// from the previous frame's sky draw is stale on the first frame and for one
@@ -11288,6 +11290,7 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	glUniform1i(m_uSkyCloudMode,   env.cloudMode);
 	glUniform1i(m_uSkyCloudQuality, env.cloudQuality);
 	glUniform1i(m_uSkyCloudStyle,        env.cloudStyle);
+	glUniform1i(m_uSkyCloudType,         std::clamp(env.cloudType, 0, 4));
 	glUniform1i(m_uSkyCloudInterShadows, env.cloudInterShadows ? 1 : 0);
 	glUniform1f(m_uSkyCloudEvolution,    env.cloudEvolution);
 	glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(camPos));

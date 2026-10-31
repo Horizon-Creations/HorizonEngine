@@ -62,6 +62,7 @@ uniform vec3      uAuroraColorTop; // aurora upper colour (e.g. purple)
 uniform vec3      uWind;        // cloud drift vector (world units / s, horizontal)
 uniform vec3      uWindDrift;   // where that wind has carried the clouds so far (world units; CloudDrift)
 uniform float     uCloudDomeHeight; // how high the SKY-DOME clouds look (1 = classic): scales the dome's noise projection
+uniform int       uCloudType;       // Realistic 3D clouds: 0 mixed cumulus, 1 flat, 2 towering, 3 stratocumulus, 4 cumulonimbus
 uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 uniform sampler2D uCloudTex;    // quarter-res cloud buffer (rgb = L, a = T) for low-res clouds
 uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inline raymarch
@@ -830,6 +831,19 @@ bool cloudSlabRange(vec3 camPos, vec3 dir, float baseY, float topY, float maxDis
 //     and remap-style Worley erosion for the cauliflower silhouette.
 // (The classic VIEW march below stays untouched/byte-identical — it does not
 // call this; only the classic shadow map shares the classic branch here.)
+// Cloud type of the Realistic layer (EnvironmentSettings::cloudType): the cell size and the height profile of the weather map.
+// x = cell-size factor on the weather-map frequency (larger = smaller cells, more of them), y = lowest tower height as a
+// fraction of the slab, z = tower height factor, w = tower cap (a tower never reaches into the slab's flat top; 1e9 = no cap).
+// Type 0 is the look before types existed and multiplies by one throughout. Mirror of the Metal cloudShapeParams.
+vec4 cloudShapeParams()
+{
+	int t = uCloudType;
+	if (t == 1) return vec4(1.55, 0.16, 0.62, 0.60);    // flat cumulus: small, low cells
+	if (t == 2) return vec4(0.85, 0.50, 1.15, 1.00);    // towering cumulus: fewer, taller
+	if (t == 3) return vec4(1.25, 0.10, 0.45, 0.45);    // stratocumulus: low lumpy sheets
+	if (t == 4) return vec4(0.50, 0.80, 1.35, 1.00);    // cumulonimbus: few huge cells, full-depth towers
+	return vec4(1.0, 0.28, 1.0, 1.0e9);
+}
 // The weather-map half of the Realistic field: where clouds are (cover) and how tall they tower (macro). Smooth
 // along a view ray, so the view march evaluates it at every Kth step and interpolates; the sun march and the
 // cloud-shadow map call cloudFieldDensity, which evaluates it exactly. Mirror of the Metal cloudColumnReal.
@@ -847,7 +861,7 @@ vec2 cloudColumnReal(vec3 pos, float baseY, float thick, float nscale, float tim
 		// camera-relative in Y, and sampling the columns at baseY made the
 		// whole cloud PATTERN morph when the camera climbed — and the ground
 		// shadows with it. The 3D body/erosion below still vary with height.
-		vec3 npc = vec3(pos.x, 0.0, pos.z) * (nscale * 0.55) + uWindDrift;
+		vec3 npc = (vec3(pos.x, 0.0, pos.z) * (nscale * 0.55) + uWindDrift) * cloudShapeParams().x;   // cell size of the cloud type
 		npc.y += 37.0; // fixed weather-map slice (wind is horizontal; evolution scrolls y at sample time)
 		// DOMAIN WARP: bend the column field with a low-frequency vector noise
 		// so cells stop reading as same-sized round balls — outlines become
@@ -893,8 +907,9 @@ float cloudBodyReal(vec3 pos, float baseY, float thick, float nscale, float lo, 
 		if (pres <= 0.0) return 0.0;
 		// Tower height varies per formation (macro): some stay flat banks,
 		// others billow into towers — not one uniform dome height.
-		float towerTop = mix(0.28, 1.0, smoothstep(lo, lo + 0.30, cover))
-		               * mix(0.55, 1.25, macro);
+		vec4  shp      = cloudShapeParams();
+		float towerTop = min(mix(shp.y, 1.0, smoothstep(lo, lo + 0.30, cover))
+		                     * mix(0.55, 1.25, macro) * shp.z, shp.w);
 		// The base is flat but not one plane: it rides up and down with the formation (macro, +-0.10 thick) and rises over
 		// a soft 0.10 instead of a razor 0.06, so an underside is a soft ragged edge and not a cut. The march starts
 		// below the nominal base to let it show (applyClouds3DReal).
@@ -1324,8 +1339,10 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		if (ov > 0.0)   // overcast: lighter and darker masses so a closed deck still reads as clouds
 			cloudCol *= mix(1.0, mix(0.60, 1.30, smoothstep(0.30, 0.68,
 			                cloudCoverFbm(pos * nscale * 0.35 + uWindDrift, 0.0))), ov);
-		float hazeFar = smoothstep(maxDist * 0.35, maxDist, t);
-		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.6);
+		// Aerial perspective: extinction along the ray (Beer), not a late linear ramp, so a far cloud recedes into the haze
+		// colour of its own direction instead of standing sharp until it hits the grazing-angle fade.
+		float hazeFar = 1.0 - exp(-t / (maxDist * 0.20));
+		cloudCol = mix(cloudCol, baseSky, hazeFar * 0.9);
 
 		tAcc += T * a * t;
 		wAcc += T * a;
@@ -1355,7 +1372,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	}
 	// Grazing-angle fade, symmetric in |dir.y| (see the Metal note): works the
 	// same looking down from above the deck as looking up from below.
-	float horizon = smoothstep(elevFloor, elevFloor + 0.14, abs(dir.y));
+	float horizon = smoothstep(elevFloor, elevFloor + 0.09, abs(dir.y));   // narrower than classic: the aerial perspective already melts far slab into the haze
 	T = 1.0 - (1.0 - T) * horizon;
 	L *= horizon;
 	// Overcast: where the horizon fade cleared the deck, the deck stands in instead, so the
@@ -2557,7 +2574,7 @@ inline constexpr SkySlot kSkySlotNoise{ 2, 1 };
 
 // Replaces kSkyFS's GL declaration block for the Vulkan/D3D build. The uniform
 // block is HE::SkyFrameParams byte for byte (std140 = the HLSL cbuffer packing
-// for a mat4 + 18 vec4), so the renderers upload it with one memcpy. Every GL
+// for a mat4 + 19 vec4), so the renderers upload it with one memcpy. Every GL
 // uniform of kSkyFS maps onto its field below; the field meanings are the ones
 // BuildSkyFrameParams writes (SkyFrameParams.h).
 inline constexpr const char* kSkyVulkanPrelude = R"GLSL(#version 450
@@ -2585,6 +2602,7 @@ layout(set = 0, binding = 0, std140) uniform SkyEnv
 	vec4 star2;
 	vec4 neb2;
 	vec4 drift;
+	vec4 shape;
 } heSky;
 layout(set = 0, binding = 1) uniform sampler2D uMoonTex;
 layout(set = 0, binding = 2) uniform sampler3D uNoise;
@@ -2614,6 +2632,7 @@ vec4 heSkyTexture(sampler3D s, vec3 p)  { return textureLod(s, p, 0.0); }
 #define uWind               heSky.wind.xyz
 #define uWindDrift          heSky.drift.xyz
 #define uCloudDomeHeight    heSky.drift.w
+#define uCloudType          int(heSky.shape.x + 0.5)
 #define uFlash              heSky.wind.w
 #define uCameraPos          heSky.cameraPos.xyz
 #define uCloudMode          int(heSky.cameraPos.w + 0.5)

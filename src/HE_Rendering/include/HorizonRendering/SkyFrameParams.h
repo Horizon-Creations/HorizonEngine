@@ -7,7 +7,7 @@
 // Every backend used to re-translate the same ~40 EnvironmentSettings fields into
 // its own sky constant buffer by hand — five hand-maintained mappings that could
 // (and did) drift; D3D11/D3D12 both had the cloud wind's Z sign inverted. The
-// layout mirrors the MSL SkyParams struct (mat4 + 17 float4) because that is the
+// layout mirrors the MSL SkyParams struct (mat4 + 19 float4) because that is the
 // richest of the five; backends whose sky shader takes a smaller constant buffer
 // read the named fields they need out of this instead of memcpy'ing the whole
 // thing (Vulkan, D3D11 and D3D12 all do that — their UBO/CB is a subset).
@@ -139,11 +139,14 @@ struct SkyFrameParams
 	// instead of teleporting every cloud by (new - old) * time. `wind` above stays the
 	// velocity, which the cloud-top shear needs.
 	glm::vec4 drift          = glm::vec4(0.0f);
+	// x = cloudType (0..4: the Realistic 3D layer's cell size and height profile, see EnvironmentSettings),
+	// yzw reserved. Read only by the Realistic cloud functions; 0 is the picture before cloud types existed.
+	glm::vec4 shape          = glm::vec4(0.0f);
 };
-// Byte layout must stay identical to the MSL SkyParams (mat4 + 18 x float4): the
+// Byte layout must stay identical to the MSL SkyParams (mat4 + 19 x float4): the
 // whole struct is uploaded with a single setFragmentBytes/memcpy. Guard against
 // silent drift.
-static_assert(sizeof(SkyFrameParams) == 64 + 18 * 16, "SkyFrameParams must match the MSL SkyParams layout (352 bytes)");
+static_assert(sizeof(SkyFrameParams) == 64 + 19 * 16, "SkyFrameParams must match the MSL SkyParams layout (368 bytes)");
 
 // EnvironmentSettings → sky-constants translation for the four backends listed at
 // the top of this header. OpenGL is NOT one of them — see that note.

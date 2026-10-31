@@ -66,6 +66,9 @@ struct EnvironmentComponent
     // bases, sharper silhouettes, multi-scattered sun lighting with bright tops
     // over blue-grey bellies and a silver lining toward the sun.
     int   cloudStyle = 1;
+    // Cloud type of the Realistic 3D layer: 0 mixed cumulus (default), 1 flat cumulus, 2 cumulus
+    // congestus, 3 stratocumulus, 4 cumulonimbus. Cell size and height profile; coverage is separate.
+    int   cloudType = 0;
     // Clouds shade EACH OTHER (3D mode): extends the sun light-march beyond the
     // cloud's own body so a tall neighbour tower darkens the clouds behind it.
     // Slightly more expensive; step count scales with cloudQuality.

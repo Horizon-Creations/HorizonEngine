@@ -1202,6 +1202,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					     "sunlit tops over blue-grey bellies and a silver lining.");
 					if (env->cloudStyle == 1)
 					{
+						const char* cloudTypes[] = { "Mixed cumulus", "Flat cumulus", "Towering cumulus",
+						                             "Stratocumulus", "Cumulonimbus" };
+						int ctype = std::clamp(env->cloudType, 0, 4);
+						if (Row::combo("Cloud Type", &ctype, cloudTypes, 5)) { env->cloudType = ctype; trackEdit(); }
+						hint("The kind of cloud: cell size and height profile. Coverage still sets how much "
+						     "sky they fill.");
 						if (EditorWidgets::checkbox("Clouds Shade Each Other", &env->cloudInterShadows)) trackEdit();
 						hint("Extends the sun march so tall towers darken clouds behind them. "
 						     "Slightly more expensive (scales with Quality).");
