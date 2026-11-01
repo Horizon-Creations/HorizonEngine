@@ -577,8 +577,15 @@ TEST_CASE("Slice means survive a save and load; a texture without the chunk load
 		REQUIRE(cmw.saveAsset(flat));
 	}
 	ContentManager cm(dir.string());
-	const TextureAsset* a = cm.getTexture(cm.loadAsset("io_arr.hasset"));
-	const TextureAsset* f = cm.getTexture(cm.loadAsset("io_flat.hasset"));
+	// Both loads first: loadAsset() registers into the SlotMap-backed asset pool
+	// and can reallocate it (ContentManager.h "THE POINTER IS ONLY GOOD UNTIL THE
+	// NEXT LOAD"), so a getTexture() pointer taken between the two loadAsset()
+	// calls would dangle once the second load grows the pool — exactly the SIGSEGV
+	// this test used to hit on Windows Release (Thema 332).
+	const HE::UUID arrId = cm.loadAsset("io_arr.hasset");
+	const HE::UUID flatId = cm.loadAsset("io_flat.hasset");
+	const TextureAsset* a = cm.getTexture(arrId);
+	const TextureAsset* f = cm.getTexture(flatId);
 	REQUIRE(a); REQUIRE(f);
 	CHECK(a->sliceMeans == arr.sliceMeans);
 	CHECK(f->sliceMeans.empty());
