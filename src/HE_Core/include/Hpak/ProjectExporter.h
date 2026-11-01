@@ -241,7 +241,7 @@ struct HE_API ExportSettings {
     // `compileShaderVariants` is supplied by the editor (it links the shader compiler):
     // (fragment GLSL, backend bitmask) → PSHD-encoded bytes.
     uint32_t shaderBackends = 0;
-    std::function<std::vector<uint8_t>(const std::string&, const std::string&, uint32_t)> compileShaderVariants;
+    std::function<std::vector<uint8_t>(const std::string&, const std::string&, const std::string&, uint32_t)> compileShaderVariants;
     // Precompile particle color/alpha-over-life shaders (CHUNK_PPSD), reusing
     // shaderBackends above. (nodeGraphJson, backend bitmask) → PPSD-encoded bytes —
     // see Hpak::PackSettings::compileParticleShaderVariants.

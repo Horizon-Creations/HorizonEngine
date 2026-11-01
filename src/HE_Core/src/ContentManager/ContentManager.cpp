@@ -2545,6 +2545,9 @@ inline constexpr bool kHasUIVertex = requires(Variant v) { v.uiVertex; };
 // …and the clustered-lighting pair (Thema 117)? Material only, detected the same way.
 template<typename Variant>
 inline constexpr bool kHasClustered = requires(Variant v) { v.fragmentClustered; v.vertexClustered; };
+// …and the deferred G-buffer fragment + the instanced vertex twins? Material only.
+template<typename Variant>
+inline constexpr bool kHasGBuffer = requires(Variant v) { v.fragmentGBuffer; v.vertexInstanced; v.vertexInstancedClustered; };
 
 // A record grew a field, and the record is repeated — so a reader that stops early
 // mis-parses everything AFTER it, not just the tail. Hence a version, and hence it is
@@ -2556,7 +2559,10 @@ constexpr uint8_t kShaderVariantVersionMark = 0;
 // record's clustered pair (fragmentClustered, vertexClustered) in record order — a
 // tail rather than two more per-record strings so a v2 reader, which walks the
 // records and stops, still parses a v3 blob correctly (it just never sees the tail).
-constexpr uint8_t kShaderVariantVersion     = 3;
+// v4 = + a second tail after the clustered one: each record's fragmentGBuffer,
+// vertexInstanced and vertexInstancedClustered, in record order. A v3 reader stops
+// after its own tail and never sees it.
+constexpr uint8_t kShaderVariantVersion     = 4;
 
 template<typename Variant>
 std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
@@ -2585,6 +2591,13 @@ std::vector<uint8_t> encodeShaderVariants(const std::vector<Variant>& vars)
 		{
 			HAsset::Writer::appendString(b, vars[i].fragmentClustered);
 			HAsset::Writer::appendString(b, vars[i].vertexClustered);
+		}
+	if constexpr (kHasGBuffer<Variant>)
+		for (size_t i = 0; i < count; ++i)
+		{
+			HAsset::Writer::appendString(b, vars[i].fragmentGBuffer);
+			HAsset::Writer::appendString(b, vars[i].vertexInstanced);
+			HAsset::Writer::appendString(b, vars[i].vertexInstancedClustered);
 		}
 	return b;
 }
@@ -2617,19 +2630,37 @@ std::vector<Variant> decodeShaderVariants(const std::vector<uint8_t>& bytes)
 		}
 		out.push_back(std::move(v));
 	}
+	// Whether every tail so far was read whole: a torn one leaves `o` mid-record, and the
+	// next tail would read garbage from there.
+	bool tailsIntact = out.size() == count;
 	if constexpr (kHasClustered<Variant>)
 	{
 		// v1/v2 paks have no tail: every clustered pair stays empty and the renderer
 		// draws the plain fragment, as before. A torn tail leaves the rest empty too.
 		// Indexed by out.size(), not count — the record loop may have stopped early.
-		if (version >= 3 && out.size() == count)
+		if (version >= 3 && tailsIntact)
 			for (auto& v : out)
 			{
 				std::string frag, vert;
-				if (!HAsset::Reader::readString(bytes, o, frag)) break;
-				if (!HAsset::Reader::readString(bytes, o, vert)) break;
+				if (!HAsset::Reader::readString(bytes, o, frag)) { tailsIntact = false; break; }
+				if (!HAsset::Reader::readString(bytes, o, vert)) { tailsIntact = false; break; }
 				v.fragmentClustered = std::move(frag);
 				v.vertexClustered   = std::move(vert);
+			}
+	}
+	if constexpr (kHasGBuffer<Variant>)
+	{
+		// v1..v3 paks have no G-buffer tail: the deferred path cross-compiles, as before.
+		if (version >= 4 && tailsIntact)
+			for (auto& v : out)
+			{
+				std::string gb, vi, vic;
+				if (!HAsset::Reader::readString(bytes, o, gb))  break;
+				if (!HAsset::Reader::readString(bytes, o, vi))  break;
+				if (!HAsset::Reader::readString(bytes, o, vic)) break;
+				v.fragmentGBuffer          = std::move(gb);
+				v.vertexInstanced          = std::move(vi);
+				v.vertexInstancedClustered = std::move(vic);
 			}
 	}
 	return out;

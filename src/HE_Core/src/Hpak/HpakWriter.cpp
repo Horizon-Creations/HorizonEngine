@@ -461,6 +461,7 @@ static std::vector<uint8_t> rewriteRefsForPack(
             std::string parentPath;    // instance parent — approx re-fold walks it
             std::vector<std::string> switchNames;  // instance switch permutation —
             std::vector<uint8_t>     switchValues; // the fold takes the same branches
+            std::string customGBufGlsl; // the deferred tail: PSHD bakes its fragment too
             size_t afterGBuf = 0;      // end of customShaderGBufGlsl (approx tail follows)
             bool   tailReachedGBuf = false;
             {
@@ -479,9 +480,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 // Continue to the end of customShaderGBufGlsl — the GI-hit
                 // approximation (approxBaseColor/…) sits after it and is
                 // RE-COMPUTED at pack time below.
-                std::string gbuf;
                 tailReachedGBuf = HAsset::Reader::readVec(c.data, o2, sv)     // graphLayerNames
-                               && HAsset::Reader::readString(c.data, o2, gbuf); // customShaderGBufGlsl
+                               && HAsset::Reader::readString(c.data, o2, customGBufGlsl); // customShaderGBufGlsl
                 afterGBuf = o2;
             }
 
@@ -594,10 +594,17 @@ static std::vector<uint8_t> rewriteRefsForPack(
 
             // Precompile this material's shader for the chosen backends (CHUNK_PSHD) so
             // the shipped game never cross-compiles. The editor supplies the compiler.
-            if (!customShaderGlsl.empty() && settings.shaderBackends != 0 && settings.compileShaderVariants)
+            //
+            // Not for an instance with switch overrides: ContentManager::syncMaterialInstance
+            // regenerates its shader from the PARENT's graph at load and discards whatever
+            // PSHD it carries (the permutation differs from the GLSL stored here), so baking
+            // it only ships bytes nothing reads. Its parent keeps its graph and its own PSHD.
+            if (!customShaderGlsl.empty() && switchNames.empty()
+                && settings.shaderBackends != 0 && settings.compileShaderVariants)
             {
                 std::vector<uint8_t> pshd = settings.compileShaderVariants(
-                    customShaderGlsl, customVertBody, settings.shaderBackends);
+                    customShaderGlsl, customVertBody, tailReachedGBuf ? customGBufGlsl : std::string{},
+                    settings.shaderBackends);
                 if (!pshd.empty()) w.addChunk(HAsset::CHUNK_PSHD, pshd.data(), pshd.size());
             }
             continue;

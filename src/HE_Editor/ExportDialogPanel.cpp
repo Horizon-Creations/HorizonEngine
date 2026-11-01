@@ -446,6 +446,7 @@ static std::vector<std::string> parseExcludeLines(const char* buf)
 // simply omits the chunk and the shipped game cross-compiles at load.
 static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fragGlsl,
                                                           const std::string& vertBody,
+                                                          const std::string& gbufGlsl,
                                                           uint32_t backends)
 {
 	if (fragGlsl.empty() || backends == 0) return {};
@@ -459,7 +460,7 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 		std::string error;
 		std::vector<std::string> warnings;
 		const bool ok = HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v),
-		                                              fragGlsl, vertBody, var, error, warnings);
+		                                              fragGlsl, vertBody, var, error, warnings, gbufGlsl);
 		// A half that failed but is optional (UI vertex, clustered twin) still
 		// ships the rest — the runtime cross-compiles / draws the plain fragment.
 		for (const std::string& w : warnings)

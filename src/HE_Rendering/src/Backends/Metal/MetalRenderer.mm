@@ -9938,7 +9938,7 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		{
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (ResolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
-			    && GetOrBuildMaterialPipeline(gbKey, gbFrag, gbVert, nullptr,
+			    && GetOrBuildMaterialPipeline(gbKey, gbFrag, gbVert, pre,
 			                                  /*blend=*/false, /*gbuffer=*/true))
 				++built;
 		}
@@ -13056,13 +13056,28 @@ void* MetalRenderer::EnsureMaterialArchive()
 // glslang→SPIRV-Cross cross-compile (so every backend shares them); this function only
 // turns the emitted MSL into an MTLRenderPipelineState. Cached by `key` (fragment source
 // hash); a null result is cached too so a broken shader isn't rebuilt every frame.
+// The Metal variant the pak baked for `materialId`, looked up FRESH: ContentManager's getters
+// point into dense vectors the next load invalidates, so a pointer kept across draws dangles.
+static const MaterialShaderVariant* bakedMetalVariant(const ContentManager* cm, const HE::UUID& materialId)
+{
+	const MaterialAsset* ma = cm ? cm->getMaterial(materialId) : nullptr;
+	if (ma)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) return &var;
+	return nullptr;
+}
+
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
                                                bool blend, bool gbuffer, bool instanced)
 {
-	// The pak bakes no instanced vertex: the caller loops with the plain PSO.
-	if (instanced && precompiled) return nullptr;
+	// What the pak baked for the twin asked for (CHUNK_PSHD v4). A twin it did not bake is
+	// not cross-compiled next to a baked plain pair (a packaged build may have no
+	// translator): the G-buffer twin simply cross-compiles, as the deferred path always
+	// could; the instanced one returns null and the caller loops with the plain PSO.
+	if (precompiled && gbuffer && precompiled->fragmentGBuffer.empty()) precompiled = nullptr;
+	if (precompiled && instanced && precompiled->vertexInstanced.empty()) return nullptr;
 	if (blend)   key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (gbuffer) key ^= 0x6BB0F6BB0F6BB0F6ULL; // deferred G-buffer variant, own cache slot
 	// `key` also keys the fragment cache below: the instanced twin (2e) gets its
@@ -13082,13 +13097,15 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		// Baked at export time — no runtime cross-compile. Forward PSOs take the
 		// baked clustered twin under the same rule as the cross-compiled path
 		// below (Thema 117); a pak without it keeps the plain window variant.
-		vertMSL = precompiled->vertex; fragMSL = precompiled->fragment;
+		vertMSL = instanced ? precompiled->vertexInstanced : precompiled->vertex;
+		fragMSL = gbuffer   ? precompiled->fragmentGBuffer : precompiled->fragment;
 		if (m_forwardClustered && !gbuffer && !precompiled->fragmentClustered.empty())
 		{
 			// The exporter never bakes a separate clustered vertex for Metal; honour
-			// one anyway, but then the plain fragment no longer pairs with it and
-			// there is no fallback to offer.
-			if (!precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
+			// one anyway (not for the instanced twin: it has no clustered form), but
+			// then the plain fragment no longer pairs with it and there is no fallback
+			// to offer.
+			if (!instanced && !precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
 			else                                       fragFallbackMSL = fragMSL;
 			fragMSL = precompiled->fragmentClustered;
 			bakedClustered = true;
@@ -13146,8 +13163,13 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		}
 		if (precompiled && vLib && fLib)
 			HE_LOG_INFO(RHI, "%s", bakedClustered
-				? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered"
-				: "MetalRenderer: material pipeline from a PRECOMPILED variant, plain");
+				? (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered")
+				: gbuffer
+				? (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, G-buffer, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, G-buffer")
+				: (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, plain, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, plain"));
 		if (vLib && fLib)
 		{
 			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
@@ -15091,13 +15113,15 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// HE_GRAPH_INSTANCING=0) keeps the per-instance loop below.
 			const bool graphBatch = instCount > 0 && cMaterialPipeline
 			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
-			               && instCount <= k_maxInstances && !cShBaked
+			               && instCount <= k_maxInstances
 			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
 			if (graphBatch && !cMaterialInstTried)
 			{
 				cMaterialInstTried = true;
 #if defined(HE_HAVE_SHADERC)
-				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert, nullptr,
+				// Baked: the pak's instanced vertex (a null build keeps the loop).
+				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert,
+				                                                   cShBaked ? bakedMetalVariant(m_contentManager, dc.materialAssetId) : nullptr,
 				                                                   /*blend=*/false, /*gbuffer=*/false,
 				                                                   /*instanced=*/true);
 #endif
@@ -16730,13 +16754,13 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						if (cMaterialPipeline)
 							cMaterialPipelineBlend =
 								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
-						// G-buffer variant — always runtime cross-compiled (baked
-						// packs carry no G-buffer MSL yet), never blended.
+						// G-buffer variant — the baked one when the pak carries it
+						// (CHUNK_PSHD v4), else cross-compiled at load; never blended.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 						{
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
-								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+								gbKey, gbFrag, gbVert, pre, /*blend=*/false, /*gbuffer=*/true);
 							cGbKey = gbKey; cGbFrag = std::move(gbFrag); cGbVert = std::move(gbVert);
 						}
 						if (const MaterialAsset* ma = m_contentManager
@@ -16927,7 +16951,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// ...which since 2e has an instanced twin: a graph-material batch with
 			// a G-buffer PSO draws once through drawInstance's binds. Built on the
 			// first batch; null (failed build, HE_GRAPH_INSTANCING=0) keeps the loop.
-			// The G-buffer PSO is always runtime cross-compiled, so no baked check.
+			// A pak that baked no G-buffer / instanced twin builds none here (null keeps the loop).
 			const bool graphBatch = instCount > 0 && cMaterialPipelineGB
 			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
 			               && instCount <= k_maxInstances
@@ -16936,7 +16960,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			{
 				cMaterialGBInstTried = true;
 #if defined(HE_HAVE_SHADERC)
-				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert, nullptr,
+				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert,
+				                                                     bakedMetalVariant(m_contentManager, dc.materialAssetId),
 				                                                     /*blend=*/false, /*gbuffer=*/true,
 				                                                     /*instanced=*/true);
 #endif

@@ -315,6 +315,47 @@ Verhältnis. Die Gelegenheit ist eher, Materialfunktionen und Graph erst bei ein
 Switch-Instanzen weglassen oder statt der Neuerzeugung verwenden (Letzteres ändert Laufzeitverhalten, braucht eine Prüfung gegen den
 Editor-Sync); (c) instanzierten Vertex mitbacken.
 
+## 12. Umgesetzt: G-Buffer-Variante, instanzierter Vertex, kein PSHD für Switch-Instanzen (Abschnitt 11 a, b, c)
+
+**Wichtig vorweg (Berichtigung zu Abschnitt 11):** Metal baut den instanzierten Zwilling bei einem *nicht* gebackenen Material beim Laden
+(`cShBaked` verbot ihn für gebackene), GL gibt bei `instanced && precompiled` 0 zurück. Beide zeichneten gebackene Materialien also
+per Instanz in einer Schleife, nicht instanziert. Vulkan und D3D genauso (laut ihren Kommentaren, nicht gelesen).
+
+**a) G-Buffer-Fragment gebacken.** `MaterialShaderVariant::fragmentGBuffer` (Material-G-Buffer-Tail aus `customShaderGBufGlsl`, gleicher
+Übersetzer wie das Forward-Fragment, gepaart mit dem normalen Vertex). **c) Instanzierter Vertex:** `vertexInstanced` und, nur GL,
+`vertexInstancedClustered` (GLSL 4.30 für das Cluster-Paar). Gebacken wird nur für OpenGL und Metal, die Backends, deren Renderer es
+liest. PSHD-Version 4 (`ContentManager.cpp`): drei Strings pro Eintrag als Schwanz nach dem Cluster-Schwanz; ein v3-Leser hört davor auf, ein
+v4-Leser nimmt v1 bis v3 wie bisher (Test mit handgeschriebenem v3-Blob, abgeschnittener Schwanz bleibt heil bis dorthin).
+`kPackPipelineVersion` 3 → 4, damit inkrementelle Exporte die Materialien neu backen. Der Editor-Export reicht den G-Buffer-Text über den
+Rückruf (`compileShaderVariants` hat jetzt vier Argumente), `HpakWriter` liest ihn aus dem MTRL.
+**Renderer:** GL (`GetOrBuildMaterialProgram`) und Metal (`GetOrBuildMaterialPipeline`) nehmen die gebackene G-Buffer- und Instanz-Variante,
+sonst wie vorher (G-Buffer: Übersetzung beim Laden; Instanz: Schleife). Metal fragt für die Instanz-Pipelines die Variante frisch ab
+(`bakedMetalVariant`), weil ContentManager-Zeiger beim nächsten Laden ungültig werden. Das Verbot `!cShBaked` für gebackene Batches ist
+weg, **gebackene Materialien zeichnen auf Metal jetzt instanziert**. Das Log sagt, was aus dem Pak kam ("PRECOMPILED variant, G-buffer",
+"..., G-buffer, instanced", "..., clustered").
+
+**b) Switch-Instanzen:** `HpakWriter` bäckt für eine Instanz mit Switch-Überschreibungen kein PSHD mehr (das Spiel verwirft es beim Laden,
+`ContentManager.cpp:978`). Das Elternmaterial behält Graph und PSHD. Test `Pack hands the G-buffer tail ... and skips switch instances`.
+
+**Gemessen:** Catania (Reached): 95,87 MB ohne Shader, 96,38 MB mit gebackenen Metal-Shadern (+0,5 MB, vier Materialien). Foliage-Testprojekt:
+215,10 gegen 216,14 MB (+1,0 MB).
+
+**Verifiziert (Metal, Deferred, `RenderPath` = 1, `HE_SKY_TIME=30`, Frame 2100, je zwei echte Exporte, Kontrolle ohne PSHD gegen mit PSHD):**
+Catania: Frames byte-gleich, 0 Fehler; das Log der gebackenen Variante zeigt "G-buffer" und zweimal "clustered" aus dem Pak, die Kontrolle nichts.
+Foliage-Testprojekt: Frames byte-gleich, 0 Fehler; zweimal "G-buffer", zweimal "G-buffer, instanced", zweimal "clustered" aus dem Pak.
+Tests: `PSHD v4` und `Pack hands the G-buffer tail` in `test_hpak.cpp`, der Torn-Tail-Test in `test_material_graph.cpp` angepasst (der v4-Schwanz
+kommt jetzt nach dem Cluster-Schwanz). Die Test-Dateien zu Hpak, Exporter, Profil, Material-Graph, Engine-Materialien und Landscape-Gruppen sind
+grün bis auf den bekannten `scanContentDirectory`-Fehler dieses Rechners.
+Wiederholbar: `HE_REACH_SHADERS=16` (Bit `1u << Metal`) im Bench `tests/test_bench_export_reach.cpp` bäckt wie der Editor-Export.
+
+**Nicht verifiziert:**
+- **OpenGL:** Code kompiliert und die Bake-/Codec-Tests laufen, das Spiel lief nicht mit einem gebackenen GL-Pak.
+- **Metal forward instanziert (gebacken):** Der Foliage-Lauf war Deferred, der Forward-Instanz-Pfad mit gebackenem Vertex lief nicht.
+- **Vulkan und D3D11/12:** Das Pak bäckt für sie weiter keine Zwillinge, ihre Renderer lesen sie nicht (G-Buffer wird dort weiter beim Laden übersetzt, ein
+  Batch gebackener Materialien zeichnet in der Schleife). Auf dem Mac nicht prüfbar.
+- **Editor-Export und Dialog** (die Bake-Funktion im Editor ist per `-fsyntax-only` geprüft, nicht gebaut), Windows und Linux.
+- Kein Zeitvergleich der Ladezeit oder der Draw-Calls mit und ohne Instanzierung.
+
 ## Handoff
 
 - **Topic / step:** 228, Schritt 1585 (Audit, fertig) und Punkt 1 der Liste (Arrays, umgesetzt); Schritt 1586 (Filter) umgesetzt, Abschnitt 8
@@ -325,6 +366,6 @@ Editor-Sync); (c) instanzierten Vertex mitbacken.
 - **Not verified:** siehe Abschnitt 7.
 - **Decisions taken:** Schalter standardmäßig an, weil die Arrays 94 % des Shipping-Paks sind. Means immer backen, auch bei BC3 (genauer und ohne Dekodieren).
 - **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
-- **Pending:** Export aus dem Editor einmal von Hand ansehen (Dialog mit der neuen Checkbox, Log, gebackene Varianten). Punkt 5 geklärt, nicht umgesetzt (Abschnitt 11); die drei Arbeiten dort (G-Buffer backen, Switch-Instanz-PSHD, Instanz-Vertex) sind offen. Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
+- **Pending:** Export aus dem Editor einmal von Hand ansehen (Dialog mit der neuen Checkbox, Log, gebackene Varianten). Punkt 5 geklärt (Abschnitt 11), die drei Arbeiten daraus umgesetzt (Abschnitt 12, Metal geprüft, GL nur kompiliert). Offen: Vulkan/D3D-Zwillinge (nicht auf dem Mac prüfbar), Metal forward instanziert mit gebackenem Vertex im Lauf ansehen. Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
 - **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
-- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Falls Deferred ausgeliefert wird: G-Buffer-Variante backen (Abschnitt 11 a).
+- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. GL mit einem gebackenen Pak laufen lassen (`GameBackend` OpenGL, Bench mit `HE_REACH_SHADERS=1`), falls das auf einem Rechner mit GL-Display geht.

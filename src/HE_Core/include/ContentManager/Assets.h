@@ -41,6 +41,20 @@ struct MaterialShaderVariant
 	// whose clustered program is GLSL 4.30 on both stages while `vertex` is 4.10.
 	// Empty = pair `fragmentClustered` with `vertex` (Metal / HLSL / SPIR-V).
 	std::string vertexClustered;
+	// The deferred twin of `fragment` (the material's G-buffer tail, customShaderGBufGlsl),
+	// for the backends that take it (OpenGL, Metal): it pairs with `vertex`, the same
+	// vertex the plain draw uses, and never clusters. Empty = the deferred path
+	// cross-compiles the G-buffer fragment at load, as it did before the field existed
+	// (a pak baked earlier, a material without a G-buffer tail, a backend not baked for).
+	std::string fragmentGBuffer;
+	// The instanced twin of `vertex` (Thema 182): the same stage reading each instance's
+	// model matrix from the instance buffer, so a GeometryPass batch draws in ONE call.
+	// It pairs with `fragment`, with `fragmentClustered` (Metal) and with `fragmentGBuffer`.
+	// `vertexInstancedClustered` is the same stage at GLSL 4.30 for the clustered pair on
+	// GL (empty elsewhere). Empty = no baked twin: GL then draws such a batch per instance
+	// with the plain program, Metal cross-compiles the twin at load, as before the fields.
+	std::string vertexInstanced;
+	std::string vertexInstancedClustered;
 };
 
 namespace HE

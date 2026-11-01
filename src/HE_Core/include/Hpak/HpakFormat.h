@@ -231,8 +231,9 @@ struct PackSettings {
     // per-backend variants (already PSHD-encoded bytes). Null / 0 backends → no precompile
     // (the shipped game cross-compiles at runtime as before).
     uint32_t shaderBackends = 0;
-    std::function<std::vector<uint8_t>(const std::string& fragGlsl,
-                                       const std::string& vertBody, uint32_t backends)>
+    // `gbufGlsl` is the material's G-buffer tail (customShaderGBufGlsl), empty when it has none.
+    std::function<std::vector<uint8_t>(const std::string& fragGlsl, const std::string& vertBody,
+                                       const std::string& gbufGlsl, uint32_t backends)>
         compileShaderVariants;
 
     // Precompile particle color/alpha-over-life shaders into the pak (CHUNK_PPSD),

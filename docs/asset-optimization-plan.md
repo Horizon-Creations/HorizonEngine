@@ -79,6 +79,10 @@ der Packaged-Build die gekochte.
 - ✅ **Shader-Backends folgen dem Spiel** (2026-11-01, Thema 228): Profilfeld `autoShaderBackends` (Standard an), der Export
   backt die PSHD-Varianten des einen Backends, auf dem das Spiel startet (`GameBackendRules.h`). Abschnitt 10 des Audits.
 
+- ✅ **PSHD v4: G-Buffer, instanzierter Vertex** (2026-11-02, Thema 228): das Pak trägt für OpenGL und Metal das
+  G-Buffer-Fragment und den instanzierten Vertex; ein Deferred-Spiel übersetzt nichts mehr beim Laden, gebackene Materialien
+  zeichnen auf Metal instanziert; Switch-Instanzen bekommen kein PSHD mehr. Abschnitt 12 des Audits.
+
 **Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
 Durchgang):**
 - **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +

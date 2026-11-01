@@ -6,6 +6,9 @@
 //   HE_REACH_RUNTIME=<a game export folder to take the executable + engine libraries from>
 //   HE_REACH_OUT=<folder for the two exports: <out>/all and <out>/reached>
 //   HE_REACH_ENGINE=<EditorDeps/EngineContent>   HE_REACH_CACHE=<EngineContentCache>
+//   HE_REACH_SHADERS=<backend bitmask, 1u << RendererBackend>  bake the node-graph material
+//                     shaders into the pak the way the editor's export does (the cross-compiler
+//                     lives here, not in HE_Core); unset = none, the game cross-compiles at load
 //
 // Each export is a runnable game folder (project.hcfg, the pak, the runtime). Run both with
 // HE_HIDDEN_WINDOW=1 HE_EXIT_AFTER_FRAMES=N HE_CAPTURE_FRAME=M HE_CAPTURE_PATH=x.ppm and compare
@@ -16,6 +19,9 @@
 #include <Hpak/HpakReader.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <ContentManager/Assets.h>
+#include <material/MaterialShaderBake.h>
+#include <material/MaterialShaderLibrary.h>
 #include <nlohmann/json.hpp>
 
 #include <chrono>
@@ -65,6 +71,31 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 	}
 	REQUIRE_FALSE(startup.empty());
 
+	const char* shaders = std::getenv("HE_REACH_SHADERS");
+	const uint32_t shaderMask = shaders && *shaders ? static_cast<uint32_t>(std::strtoul(shaders, nullptr, 10)) : 0u;
+	// The editor's CompileMaterialShaderVariants (ExportDialogPanel.cpp), minus its logging.
+	auto bake = [](const std::string& frag, const std::string& vert, const std::string& gbuf, uint32_t backends)
+	{
+		std::vector<uint8_t> none;
+		if (frag.empty() || backends == 0) return none;
+		HE::MaterialShaderLibrary lib;
+		std::vector<MaterialShaderVariant> variants;
+		for (uint8_t v = 0; v <= static_cast<uint8_t>(HE::RendererBackend::Metal); ++v)
+		{
+			if ((backends & (1u << v)) == 0) continue;
+			MaterialShaderVariant var; std::string error; std::vector<std::string> warnings;
+			if (!HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v), frag, vert, var, error,
+			                                   warnings, gbuf))
+			{
+				std::printf("REACH shader bake failed (backend %d): %s\n", int(v), error.c_str());
+				continue;
+			}
+			for (const auto& w : warnings) std::printf("REACH shader bake warning: %s\n", w.c_str());
+			variants.push_back(std::move(var));
+		}
+		return variants.empty() ? none : HE::encodeMaterialShaderVariants(variants);
+	};
+
 	for (const bool reached : { false, true })
 	{
 		ExportSettings s;
@@ -75,6 +106,8 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 		if (rt && *rt) s.gameRuntimeDir = rt;
 		if (eng && *eng) s.engineContentDir = eng;
 		if (cch && *cch) s.engineContentCacheDir = cch;
+		s.shaderBackends = shaderMask;
+		if (shaderMask) s.compileShaderVariants = bake;
 		s.onNotice = [](const std::string& m) { std::printf("REACH notice: %s\n", m.c_str()); };
 		s.onWarning = [](const std::string& m) { std::printf("REACH warning: %s\n", m.c_str()); };
 		const fs::path dst = fs::path(out) / (reached ? "reached" : "all");

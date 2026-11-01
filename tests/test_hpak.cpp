@@ -1684,7 +1684,7 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     std::string   seenGlsl;
     uint32_t      seenBackends = 0;
     auto stub = [&](const std::string& glsl, const std::string& /*vertBody*/,
-                    uint32_t backends) -> std::vector<uint8_t> {
+                    const std::string& /*gbufGlsl*/, uint32_t backends) -> std::vector<uint8_t> {
         seenGlsl = glsl; seenBackends = backends;
         std::vector<MaterialShaderVariant> vs;
         MaterialShaderVariant a; a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
@@ -1731,6 +1731,106 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 
     removeQuiet(pak);
     he_test::removeAllQuiet(dir);
+}
+
+// The deferred twin rides in PSHD: the packer hands the material's G-buffer tail to the
+// compile callback, and an instance with switch overrides gets no PSHD at all (the
+// runtime regenerates its shader from the parent's graph and drops what it carries).
+TEST_CASE("Pack hands the G-buffer tail to the shader callback and skips switch instances")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_pshd_gbuf_pack";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+    ContentManager cm(dir.string());
+
+    MaterialAsset parent;
+    parent.type = HE::AssetType::Material; parent.name = "parent"; parent.path = "parent.hasset";
+    parent.customShaderFragGlsl = "// fwd\nvoid main(){ oColor = vec4(1.0); }";
+    parent.customShaderGBufGlsl = "// gbuf\nvoid main(){ oGB0 = vec4(1.0); }";
+    parent.nodeGraphJson        = "{\"nodes\":[]}";
+    REQUIRE(cm.saveAsset(parent));
+
+    MaterialAsset inst;
+    inst.type = HE::AssetType::Material; inst.name = "inst"; inst.path = "inst.hasset";
+    inst.parentMaterialPath      = "parent.hasset";
+    inst.customShaderFragGlsl    = "// permutation\nvoid main(){ oColor = vec4(0.5); }";
+    inst.customShaderGBufGlsl    = "// permutation gbuf\nvoid main(){ oGB0 = vec4(0.5); }";
+    inst.instanceSwitchNames     = { "UseDetail" };
+    inst.instanceSwitchValues    = { 1 };
+    REQUIRE(cm.saveAsset(inst));
+
+    std::vector<std::string> seenFrag, seenGBuf;
+    Hpak::PackSettings s;
+    s.codec          = Hpak::Codec::Store;
+    s.shaderBackends = 1u << static_cast<uint32_t>(HE::RendererBackend::Metal);
+    s.compileShaderVariants = [&](const std::string& frag, const std::string&,
+                                  const std::string& gbuf, uint32_t) {
+        seenFrag.push_back(frag); seenGBuf.push_back(gbuf);
+        MaterialShaderVariant v; v.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
+        v.vertex = "V"; v.fragment = "F"; v.fragmentGBuffer = "GB";
+        v.vertexInstanced = "VI"; v.vertexInstancedClustered = "VIC";
+        return HE::encodeMaterialShaderVariants({ v });
+    };
+    HpakWriter packer;
+    REQUIRE(packer.addDirectory(dir, s) >= 2);
+    const auto pak = dir / "out.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    REQUIRE(seenFrag.size() == 1);                       // the instance was not offered
+    CHECK(seenFrag[0] == parent.customShaderFragGlsl);
+    CHECK(seenGBuf[0] == parent.customShaderGBufGlsl);
+
+    ContentManager loaded;
+    REQUIRE(loaded.loadPak(pak.string()));
+    const MaterialAsset* pm = loaded.getMaterial(parent.id);
+    REQUIRE(pm != nullptr);
+    REQUIRE(pm->precompiledShaders.size() == 1);
+    CHECK(pm->precompiledShaders[0].fragmentGBuffer == "GB");
+    CHECK(pm->precompiledShaders[0].vertexInstanced == "VI");
+    CHECK(pm->precompiledShaders[0].vertexInstancedClustered == "VIC");
+    he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("PSHD v4: the G-buffer and instanced tail round-trips; a v3 blob and a torn tail still decode")
+{
+    MaterialShaderVariant a, b;
+    a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
+    a.vertex = "MV"; a.fragment = "MF"; a.uiVertex = "MUV";
+    a.fragmentClustered = "MFC"; a.vertexClustered = "MVC";
+    a.fragmentGBuffer = "MGB"; a.vertexInstanced = "MVI"; a.vertexInstancedClustered = "MVIC";
+    b.backend = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
+    b.vertex = "GV"; b.fragment = "GF"; b.uiVertex = "GUV";
+    b.fragmentClustered = "GFC"; b.vertexClustered = "GVC";
+    b.fragmentGBuffer = "GGB"; b.vertexInstanced = "GVI"; b.vertexInstancedClustered = "GVIC";
+    const std::vector<uint8_t> blob = HE::encodeMaterialShaderVariants({ a, b });
+    auto back = HE::decodeMaterialShaderVariants(blob);
+    REQUIRE(back.size() == 2);
+    CHECK(back[1].fragmentGBuffer == "GGB");
+    CHECK(back[0].vertexInstanced == "MVI");
+    CHECK(back[1].vertexInstancedClustered == "GVIC");
+    CHECK(back[1].fragmentClustered == "GFC");
+
+    // The same blob cut inside the G-buffer tail: everything before it survives, the new
+    // fields stay empty (the renderer then cross-compiles the deferred twin).
+    std::vector<uint8_t> torn(blob.begin(), blob.end() - 3);
+    back = HE::decodeMaterialShaderVariants(torn);
+    REQUIRE(back.size() == 2);
+    CHECK(back[1].fragmentClustered == "GFC");
+    CHECK(back[1].vertexInstanced.empty());
+
+    // A v3 blob byte for byte (no G-buffer tail at all).
+    auto str = [](std::vector<uint8_t>& o, const std::string& t) {
+        const uint32_t n = static_cast<uint32_t>(t.size());
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&n);
+        o.insert(o.end(), p, p + sizeof(n)); o.insert(o.end(), t.begin(), t.end());
+    };
+    std::vector<uint8_t> v3 = { 0, 3, 1, static_cast<uint8_t>(HE::RendererBackend::Metal) };
+    str(v3, "V"); str(v3, "F"); str(v3, "UV"); str(v3, "FC"); str(v3, "VC");
+    back = HE::decodeMaterialShaderVariants(v3);
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].fragmentClustered == "FC");
+    CHECK(back[0].fragmentGBuffer.empty());
+    CHECK(back[0].vertexInstanced.empty());
 }
 
 // ─── PSHD wire format: the record grew a field ───────────────────────────────
@@ -1819,7 +1919,7 @@ TEST_CASE("Pack skips PSHD when no backends selected")
     Hpak::PackSettings s;
     s.codec = Hpak::Codec::Store;
     s.shaderBackends = 0; // ← nothing selected
-    s.compileShaderVariants = [&](const std::string&, const std::string&, uint32_t) {
+    s.compileShaderVariants = [&](const std::string&, const std::string&, const std::string&, uint32_t) {
         called = true; return std::vector<uint8_t>{};
     };
 
