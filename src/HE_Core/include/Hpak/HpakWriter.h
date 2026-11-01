@@ -138,6 +138,12 @@ public:
     // file whose UUID an asset at a DIFFERENT path already claimed (a real
     // collision, not an override). Each is also passed to PackSettings::onWarning.
     const std::vector<std::string>& warnings() const { return m_warnings; }
+    // After addDirectories with PackSettings::onlyReferenced: the paths of the
+    // PackSettings::reachScenes nothing reached. The caller leaves those out of the pak.
+    const std::vector<std::string>& unreachableScenes() const { return m_unreachableScenes; }
+    // Assets the filter left out, and their size in bytes (0 when it was off).
+    int    unreferencedCount() const { return m_unreferencedCount; }
+    size_t unreferencedBytes() const { return m_unreferencedBytes; }
 
 private:
     struct PendingEntry {
@@ -155,5 +161,8 @@ private:
     std::unordered_map<std::string, HE::UUID>  m_packedPaths; // filled by addDirectory
     std::unordered_map<HE::UUID, uint16_t>     m_packedTypes; // filled by addDirectory
     std::vector<std::string>                   m_warnings;    // filled by addDirectory
+    std::vector<std::string>                   m_unreachableScenes; // onlyReferenced
+    int                                        m_unreferencedCount = 0;
+    size_t                                     m_unreferencedBytes = 0;
     int m_reused = 0;
 };

@@ -112,7 +112,8 @@ inline glm::vec3 giAutoLandscapeAlbedo(const GiLandscape& L, const glm::vec3& po
 // copies of M_AutoLandscape count too — and if so, fill the auto parameters of
 // `out` (layerCount = kGiLandAuto) from the live slot values, `overrideValue`
 // first (a per-entity override; may be empty). Returns the graph-texture slot
-// holding the albedo array (the one whose path is kAutoLandscapeAlbedoArray,
+// holding the albedo array (the one whose path is a texture group's albedo array,
+// AutoLandscapeGroup::arrayPaths[0] — Mountains' kAutoLandscapeAlbedoArray or Forest's, ...;
 // slot 0 when the asset carries baked ids only), or -1 = not an auto material.
 HE_RENDERING_API int giAutoLandscapeParams(
 	const MaterialAsset& ma,

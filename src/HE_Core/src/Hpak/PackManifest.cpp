@@ -119,7 +119,8 @@ uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
     // would leave the previous export's blocks in the pak, encoded at the old one.
     buf[3] = static_cast<uint8_t>((s.cook ? 1 : 0) | ((s.textureCompression & 0x7) << 1)
                                   | ((s.textureQuality & 0x3) << 4)
-                                  | ((s.cookTextureArrays ? 1 : 0) << 6));
+                                  | ((s.cookTextureArrays ? 1 : 0) << 6)
+                                  | ((s.onlyReferenced ? 1 : 0) << 7));
     std::memcpy(buf + 4, &s.shaderBackends, 4); // precompiled-shader backend set → re-pack materials
     std::memcpy(buf + 8, s.key, 32);  // all-zero when not encrypting
     buf[8 + 32] = kPackPipelineVersion;

@@ -670,6 +670,12 @@ vec3 heFwdClusterLights(vec3 P, vec3 n, vec3 V, vec3 diffuseColor, vec3 specColo
 }
 #endif
 
+// Set by a TRANSLUCENT graph material's main() before it shades: the GI-reflection trace
+// is built from the opaque surface BEHIND such a fragment (prepass G-buffer), so its
+// result is that surface's reflection, not this one's - and for water it carries the
+// trace's per-pixel jitter as grain. The sky/SSR terms still apply.
+bool heSkipGIReflTrace = false;
+
 vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos,
             float specular, float ambientOcclusion) {
     // Unlit view mode (heLight.viewMode.x, IRenderer::SetViewMode): the base
@@ -737,6 +743,8 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
         // probe field active it would be a wasted cube fetch per pixel.
         if (heLight.giProbe.y <= 0.5)
             ambDiff = texture(heSkyEnv, Nup).rgb * diffuseColor;
+        // One tap, no blur: a calm water surface must show the sky sharply (small stars
+        // included); only the surface's own normals may break it up.
         envSpec = texture(heSkyEnv, Rrough).rgb;
     }
     // FORWARD reflection cascade (sky → ray-traced GI refl → SSR), the
@@ -745,7 +753,7 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
     // material data), so the roughness fade lives HERE with the exact
     // shading values. Gates are 0 in the deferred path and on backends
     // without the passes — dead code after constant folding.
-    if (heLight.giRefl.z > 0.5)
+    if (!heSkipGIReflTrace && heLight.giRefl.z > 0.5)
     {
         vec4 rr = texture(heGIReflFwd, gl_FragCoord.xy / max(heLight.giParams.xy, vec2(1.0)));
         float fade = 1.0 - smoothstep(heLight.giRefl.y * 0.7, heLight.giRefl.y, rough);

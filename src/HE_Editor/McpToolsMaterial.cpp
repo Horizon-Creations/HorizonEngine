@@ -685,6 +685,7 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::Sun:                 return "Sun";
 	case T::FbmGrad:             return "FbmGrad";
 	case T::LandscapeLayerBlend: return "LandscapeLayerBlend";
+	case T::LandscapeFoliage:    return "LandscapeFoliage";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";
 	case T::RoundedRectSDF:      return "RoundedRectSDF";
@@ -963,6 +964,9 @@ json nodeJson(const HE::MaterialGraph& g, const HE::MatGraphNode& n, int blendMo
 		break;
 	case HE::MatNodeType::LandscapeLayerBlend:
 		j["layers"] = layerScratch;
+		break;
+	case HE::MatNodeType::LandscapeFoliage:
+		j["foliageSet"] = n.s;
 		break;
 	case HE::MatNodeType::StaticSwitch:
 		j["switchName"]    = n.s;
@@ -1586,6 +1590,12 @@ void addNodeTypes(McpToolRegistry& registry, ContentManager& content,
 			case HE::MatNodeType::LandscapeLayerBlend:
 				j["dynamicPins"] = true;
 				j["requires"]    = "s = layer names, one per line; one input pin per name.";
+				break;
+			case HE::MatNodeType::LandscapeFoliage:
+				j["requires"]    = "s = the UUID of a LandscapeFoliageLayer asset as 32 hex digits "
+				                   "(hi then lo), or empty for none. No pins; it shades nothing and "
+				                   "spawns nothing, it only names the foliage set of this landscape "
+				                   "material.";
 				break;
 			case HE::MatNodeType::TextureSample:
 			case HE::MatNodeType::NormalMapSample:

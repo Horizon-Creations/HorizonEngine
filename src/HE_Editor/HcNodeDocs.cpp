@@ -2025,6 +2025,30 @@ namespace
 	{ "save.fields",
 	  "Field names the active save's template declares — so a graph never has to "
 	  "hardcode them." },
+	{ "trail.footprint",
+	  "Presses a boot-sized pit into snow or sand at a point: Length runs along the Yaw direction "
+	  "(degrees around Y, 0 = +X), Width across it, Depth is 0..1. Only a pit, no heap. Surface 0 = snow, 1 = sand." },
+	{ "trail.press",
+	  "Presses a line of pits between two points (a tyre or a sled set down). Only a pit, no heap beside it. "
+	  "Depth 0..1, Surface 0 = snow, 1 = sand." },
+	{ "trail.drag",
+	  "Drags a groove through snow or sand from the last position to the new one and heaps the displaced material "
+	  "along both sides (Berm Width in metres, Berm Height 0..1). Call it every frame with the previous and the current "
+	  "position for a continuous track." },
+	{ "trail.depthAt",
+	  "How deep the snow or sand is pressed at a point, 0..1 (0 on a heap and on untouched ground). What footstep audio "
+	  "and tracking read." },
+	{ "trail.heightAt",
+	  "The ground's offset at a point in metres: negative in a pit, positive on a heap, 0 untouched." },
+	{ "trail.clear",
+	  "Forgets every trail in the world." },
+	{ "trail.save",
+	  "Writes the trails into the ACTIVE save (create or load a save first), then Write Save to put it on disk." },
+	{ "trail.load",
+	  "Reads the trails back from the active save and applies Elapsed Seconds of healing in one go (game time since the "
+	  "save was written, at most one day, with the current weather). A save without trails clears them." },
+	{ "trail.pageCount",
+	  "How many 128 m pages of trodden ground exist right now (0 = untouched world)." },
 	{ "save.setNumber",
 	  "Writes a Float, Int or Enum field of the active save. The field is picked "
 	  "from the template on the node itself." },

@@ -30,6 +30,7 @@
 #include <Diagnostics/EngineProfiler.h>
 #include <HorizonRendering/GIJitter.h>       // GI: wrapped cone-jitter frame index (all backends)
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: quality tier + blur reach (shared, D3D/Vulkan)
+#include <HorizonRendering/UnderwaterSurfaceShared.h>  // the tessellated surface for the underwater fog
 #include <HorizonRendering/GiInstanceSurface.h> // GI reflections: a hit's albedo/emissive (all backends)
 #include <HorizonRendering/TemporalAA.h>      // TAA jitter sequence + jittered matrix (shared with D3D11/D3D12)
 #include <HorizonRendering/WorldPreviewGrid.h>  // RenderWorldPreview: grid, background, dump
@@ -325,6 +326,7 @@ void VulkanRenderer::Shutdown()
     for (auto& s : m_giReflSet) s = VK_NULL_HANDLE;
     m_giReflTabRaw = m_giReflTabPing = m_giReflTabBlur = m_giReflTabMix = VK_NULL_HANDLE;
     m_giReflPipesTried = false;
+    m_giReflWhyNot.clear();
     m_giReflReady      = false;
     if (m_giPointSampler) { vkDestroySampler(m_device, m_giPointSampler, nullptr);          m_giPointSampler = VK_NULL_HANDLE; }
     m_giPipelinesTried = false;
@@ -965,18 +967,28 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             struct UnderwaterFogPC
             {
                 float invViewProj[16];
-                float depthParams[4];
                 float camPosSurfaceY[4];
                 float tintDensity[4];
+                float surfWave[4];
+                float surfParams[4];
             } pc{};
+            static_assert(sizeof(UnderwaterFogPC) == 128,
+                          "must match the push-constant block of postfx_underwaterfog.frag and the 128-byte range");
             std::memcpy(pc.invViewProj, &invViewProjUw[0][0], 16 * sizeof(float));
-            pc.depthParams[0] = 1.0f; pc.depthParams[1] = 1.0f; pc.depthParams[2] = 0.0f; pc.depthParams[3] = 0.0f;
             pc.camPosSurfaceY[0] = m_renderWorld.camera.position.x;
             pc.camPosSurfaceY[1] = m_renderWorld.camera.position.y;
             pc.camPosSurfaceY[2] = m_renderWorld.camera.position.z;
             pc.camPosSurfaceY[3] = uwCam.surfaceY;
             pc.tintDensity[0] = uwCam.tintColor.x; pc.tintDensity[1] = uwCam.tintColor.y;
             pc.tintDensity[2] = uwCam.tintColor.z; pc.tintDensity[3] = uwCam.density;
+            {
+                static const char* s_uwTimeOv = std::getenv("HE_SKY_TIME");   // pins the wave clock for captures
+                const float uwSeconds = (s_uwTimeOv && *s_uwTimeOv) ? static_cast<float>(std::atof(s_uwTimeOv))
+                                                                    : static_cast<float>(SDL_GetTicks()) / 1000.0f;
+                const HE::UnderwaterSurfaceUniforms su = HE::underwaterSurfaceUniforms(uwCam, uwSeconds);
+                std::memcpy(pc.surfWave, su.wave, sizeof(su.wave));
+                std::memcpy(pc.surfParams, su.params, sizeof(su.params));
+            }
 
             // Depth off the attachment before it is readable as a sampler — the
             // same flip EncodeDecalDepth's consumers use, just on the live
@@ -1062,7 +1074,7 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_underwaterFogPipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                 m_underwaterFogPipeLayout, 0, 1, &m_underwaterFogDS, 0, nullptr);
-            vkCmdPushConstants(cmd, m_underwaterFogPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 112, &pc);
+            vkCmdPushConstants(cmd, m_underwaterFogPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128, &pc);
             VkViewport vp{0,0,(float)m_viewportW,(float)m_viewportH,0,1}; vkCmdSetViewport(cmd,0,1,&vp);
             VkRect2D sc{{0,0},{m_viewportW,m_viewportH}}; vkCmdSetScissor(cmd,0,1,&sc);
             vkCmdDraw(cmd, 3, 1, 0, 0);
@@ -5228,7 +5240,7 @@ void VulkanRenderer::createPostFXPipelines()
         vkCheck(vkCreateRenderPass(m_device, &rpci, nullptr, &m_underwaterFogRP), "underwaterfog render pass");
 
         VkPushConstantRange pcr2{};
-        pcr2.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr2.size = 112;   // mat4 + 3×vec4, see the .frag
+        pcr2.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pcr2.size = 128;   // mat4 + 4×vec4, see the .frag
         VkPipelineLayoutCreateInfo plci2{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         plci2.setLayoutCount = 1; plci2.pSetLayouts = &m_underwaterFogDSLayout;
         plci2.pushConstantRangeCount = 1; plci2.pPushConstantRanges = &pcr2;
@@ -9551,9 +9563,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // Linear-CLAMP like GL/Metal's cube sampler; the repeat
                             // address mode of m_albedoSampler is moot on a cube, but the
                             // SSAO sampler is the clamp one this backend already has.
+                            // GI reflections on: the real-sky cube instead (aurora, stars, clouds) -
+                            // transparent water never reaches the GI trace, so this lookup is its only sky.
+                            const bool realSky = m_giReflEnabled && m_skyReflValid && m_skyReflCubeView && m_skyReflSampler;
                             VkDescriptorImageInfo skyII{
-                                m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler,
-                                m_skyEnvValid ? m_skyEnvView : m_whiteCubeView,
+                                realSky ? m_skyReflSampler
+                                        : (m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler),
+                                realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
                             // heAO (16): this frame's blurred SSAO — the image the
@@ -9970,9 +9986,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                     localShadows ? m_shadowSampler   : m_albedoSampler,
                     localShadows ? m_localShadowView : m_whiteArrayView,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                const bool realSky = m_giReflEnabled && m_skyReflValid && m_skyReflCubeView && m_skyReflSampler;
                 const VkDescriptorImageInfo skyII{
-                    m_skyEnvValid ? clampSampler  : m_albedoSampler,
-                    m_skyEnvValid ? m_skyEnvView  : m_whiteCubeView,
+                    realSky ? m_skyReflSampler  : (m_skyEnvValid ? clampSampler : m_albedoSampler),
+                    realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                 const VkDescriptorImageInfo aoII{
                     m_ssaoRanThisFrame ? m_ssaoSampler     : m_albedoSampler,
@@ -13418,6 +13435,7 @@ void VulkanRenderer::createGiReflPipelines()
     if (!reflCS || !fsVS || !blurFS || !mixFS)
     {
         HE_LOG_WARN(RHI, "%s", "VulkanRenderer: GI reflection shaders missing — reflections disabled");
+        m_giReflWhyNot = "The reflection shaders (gi_refl*.spv) are missing from the Shaders folder.";
         destroyModules();
         return;
     }
@@ -13749,7 +13767,14 @@ bool VulkanRenderer::runGiReflections(VkCommandBuffer cmd, bool probesValid, boo
 {
     createGiReflPipelines();
     m_giReflReady = false;
-    if (!m_giReflPipe || !m_giReflBlurPipe || !m_giReflMixPipe) return false;
+    if (!m_giReflPipe || !m_giReflBlurPipe || !m_giReflMixPipe)
+    {
+        // createGiReflPipelines already logged which step failed; the shader-missing case
+        // wrote its own text. Anything else gets the general one.
+        if (m_giReflWhyNot.empty())
+            m_giReflWhyNot = "The reflection pipelines could not be created on this GPU/driver (see HorizonEngine.log).";
+        return false;
+    }
     ensureGiReflTargets();
     if (!m_giReflRaw.img || !m_giNodeBuf.buf || !m_giTriBuf.buf || m_giInstanceCount == 0) return false;
 

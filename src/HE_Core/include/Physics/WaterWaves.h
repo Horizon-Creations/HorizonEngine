@@ -99,10 +99,15 @@ namespace HE::water
 
     inline WindWaveFactors windWaveFactors(float windSpeed)
     {
-        const float u = windSpeed < 0.25f ? 0.25f : (windSpeed > 4.0f ? 4.0f : windSpeed);
+        const float w = windSpeed < 0.0f ? 0.0f : (windSpeed > 4.0f ? 4.0f : windSpeed);
+        const float u = w < 0.25f ? 0.25f : w;     // the wavelength/speed floor (a train needs a length)
         const float l = u;                         // wavelength grows with the wind
-        const float st = 1.0f + 0.3f * (u - 1.0f); // and so does the steepness, gently
-        return { l, std::sqrt(l), st < 0.4f ? 0.4f : st };
+        // Steepness is the SLOPE of the surface, which is what a reflection sees: it grows
+        // gently above calm, and below calm it runs down to a nearly still surface at wind 0
+        // (continuous at 1 = the material's own sea). The old floor of 0.4 kept a 40 % slope
+        // at wind 0, which broke every reflection up.
+        const float st = w >= 1.0f ? 1.0f + 0.3f * (w - 1.0f) : 0.04f + 0.96f * w;
+        return { l, std::sqrt(l), st };
     }
 
     // Compass heading (0 = toward -Z, clockwise: 90 = +X) -> a wave direction in this

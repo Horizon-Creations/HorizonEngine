@@ -18,6 +18,7 @@
 #include <HorizonRendering/LightPacking.h>
 #include <HorizonRendering/GiLandscape.h>
 #include <HorizonRendering/GiInstanceSurface.h>
+#include <HorizonRendering/UnderwaterSurfaceShared.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
@@ -4600,4 +4601,25 @@ TEST_CASE("GI auto landscape: the three kernel copies carry the reference's mask
 	CHECK(count(mtl, "landWeights, hitPos, hitN, painted)") == 2);
 	CHECK(count(mtl, "if (L.cfg.w < -0.5) { albedoOut = giAutoLandAlbedo(L, hitPos, hitN); return true; }") == 2);
 	CHECK(count(gl, "albedo = giAutoLandAlbedo(li, hitPos, hitN);") == 1);
+}
+
+TEST_CASE("Underwater fog: the Vulkan shader carries the shared surface text")
+{
+	using namespace shaderdrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("source checkout not found - underwater surface comparison skipped");
+		return;
+	}
+	// postfx_underwaterfog.frag is compiled offline, so it cannot splice @SURF@ the way the GL and D3D
+	// passes do: it holds a copy of HE::underwaterSurfaceFunctions(GLSL). When the wave trains or the
+	// formula change, this fails until the .frag carries the new text (and the .spv is rebuilt).
+	const std::string frag = readFile(root / "src" / "HE_Rendering" / "shaders" / "postfx_underwaterfog.frag");
+	const std::string text = HE::underwaterSurfaceFunctions(HE::SurfaceLang::GLSL);
+	CHECK_MESSAGE(frag.find(text) != std::string::npos,
+	              "postfx_underwaterfog.frag no longer carries HE::underwaterSurfaceFunctions(GLSL):\n" << text);
+	// The 128 B push-constant block: the fog sends the surface, not the depth parameters.
+	CHECK(frag.find("vec4 surfWave;") != std::string::npos);
+	CHECK(frag.find("vec4 surfParams;") != std::string::npos);
 }

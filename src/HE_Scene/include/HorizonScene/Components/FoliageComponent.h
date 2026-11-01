@@ -104,6 +104,17 @@ struct FoliageLayer {
     // landscape (no weightmap) counts as layer 0 fully, like the shader does.
     int   weightLayer = -1;
 
+    // ── Where this layer came from (Thema 327) ──────────────────────────────
+    // {} / -1 = a layer the author added by hand (the usual case, and every old
+    // scene). Otherwise this layer was materialized from entry `sourceEntry` of
+    // the LandscapeFoliageLayerAsset `sourceAssetId` ("Apply Foliage",
+    // TerrainTools.cpp): re-applying that asset finds it by this tag, refreshes
+    // the fields above and leaves `seed`, `densityMask`, `visible` alone. A
+    // layer nobody tagged is never touched by Apply, so hand-tuned layers and
+    // ones from a different asset or a different entry are safe from it.
+    HE::UUID sourceAssetId;
+    int      sourceEntry = -1;
+
     // ── Runtime (not serialised) ────────────────────────────────────────────
     // Per-instance model matrices as the scatter produced them: WORLD space at
     // scatter time (origin = the terrain entity's position), in generation order.

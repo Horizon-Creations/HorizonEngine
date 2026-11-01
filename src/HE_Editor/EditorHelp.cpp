@@ -5460,6 +5460,12 @@ namespace
 	  "here IS the set of layers the Landscape tool offers, in this order — up to "
 	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
 	  "", "materials#nodes" },
+	{ "Material Node/Foliage Set", "Landscape Foliage Set",
+	  "The foliage set (a Landscape Foliage asset) this landscape material names for "
+	  "its terrain: which plants grow on which paint layer, and where. Click to pick one "
+	  "or drop it from the Content Browser. The node draws nothing and changes no "
+	  "shader, it only tells the Landscape tool which set belongs to this material.",
+	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
 	  "the graph's colour is the pixel, useful for skies, holograms and anything "
@@ -7425,6 +7431,43 @@ namespace
 	  "can paint are the ones named by the material's Landscape Layer Blend "
 	  "node, and with no such node the Paint tool stays greyed out.",
 	  "", "scenes#terrain" },
+	{ "Landscape/Texture Group", "Texture Group",
+	  "The terrain theme the landscape is shaded as: Mountains, Forest, "
+	  "Grassland or Desert. Each is its own landscape material with its own textures and its "
+	  "own names for the paint layers. Switching keeps everything you painted — "
+	  "there is one weightmap per landscape and layer 1 to 4 mean the same role "
+	  "(ground, soil, rock, snow) in every group, so only the look changes. Auto "
+	  "(layer 0) picks the texture by slope and height; painting a layer on top "
+	  "chooses one by hand.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Mix Group", "Mix Group",
+	  "A second (and third) group whose share of this landscape is kept apart from "
+	  "the one above — None leaves the slot unused. Picking one does not change how "
+	  "the landscape looks by itself: it reserves paint channels 6 and 7 for that "
+	  "group's share, which the Paint tab's Active Group then lets you set by hand. "
+	  "A group already used by the terrain's own slot or the other Mix Group slot is "
+	  "greyed out.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Group Meshes", "",
+	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
+	  "group that it does not scatter yet: ferns, stumps, logs and mossy rocks in "
+	  "the Forest, tall grass, flower tufts and a few stones in the Grassland, dune "
+	  "grass, cacti and sandstone blocks in the Desert, grass "
+	  "tufts, pebbles, boulders and snow drifts in the Mountains. Rock is placed "
+	  "where the group's own material shows rock. It only adds - switching the "
+	  "group never removes or changes a layer, and a layer you already have is left "
+	  "alone.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Foliage", "",
+	  "Materializes the foliage set named on the landscape's material (a Landscape "
+	  "Foliage node in its graph) into this terrain's foliage layers: one layer per "
+	  "entry, with the mesh, material, density and placement rules (slope, height, "
+	  "paint channel) the set author gave it. It only adds and refreshes its own "
+	  "layers - a layer you added by hand, or one from a different foliage set, is "
+	  "never touched, and re-pressing it after editing the set brings its layers up "
+	  "to date without losing their painted density masks or visibility. Disabled "
+	  "while the set is still downloading from the EngineContent server.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
 	  "offered while a material of your own is assigned.",
@@ -7450,6 +7493,12 @@ namespace
 	  "was painted. A starting point for a landscape built by hand: fill with the "
 	  "base layer, then paint the rest over it. One undo step.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Active Group", "Active Group",
+	  "Only shown once a Mix Group is set up (Setup tab). Which group this stroke "
+	  "marks the ground as, beside painting the layer below: the terrain's own group, "
+	  "or one of the Mix Groups. A dash is a slot with no group in it yet. Ctrl+drag "
+	  "always hands the spot back to the terrain's own group, whichever is active.",
+	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
 	  "material's Landscape Layer Blend node, in weightmap-channel order — up to "
@@ -7574,7 +7623,8 @@ namespace
 	  "Throws away every painted layer weight, putting the whole landscape back "
 	  "on the first layer. It is one undo step, but it removes the entire "
 	  "weightmap rather than the last stroke — and it is what unlocks the "
-	  "weightmap resolution again.",
+	  "weightmap resolution again. Any Mix Groups are dropped with it, since "
+	  "their shares lived in the same weightmap.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Reset Sculpting", "",
 	  "Discards every sculpted height, so the landscape falls back to the shape "
@@ -8077,6 +8127,28 @@ namespace
 	{ "Export/None (RGBA8)", "None (RGBA8)",
 	  "No block compression: RGBA8 with the mip chain baked in. The exact "
 	  "pixels, at roughly four to eight times the size of a compressed texture.",
+	  "", "export#overview" },
+	{ "Export/Pack only referenced assets", "Pack only referenced assets",
+	  "Leave out every asset the game never reaches. The game starts from the "
+	  "startup scene, the scenes something loads, the project manifest, "
+	  "GameInstance and the scripts, and follows what they name: a scene's "
+	  "meshes and their materials and textures, a widget's textures, a "
+	  "graph's classes. Reaching is transitive from those starting points: a "
+	  "mesh that names a material is no reason to keep either when nothing "
+	  "reachable names the mesh. The engine's own needs (input actions, "
+	  "player classes, struct and enum types, weather sounds, layer meshes) "
+	  "always stay. A script that builds a path at run time cannot be "
+	  "followed: list it under Always include. The export log lists what "
+	  "was left out. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Compress texture arrays", "Compress texture arrays",
+	  "Also block-compress texture arrays: the Auto landscape's albedo, normal "
+	  "and mask arrays, about 110 MB each as RGBA8 and by far the largest part "
+	  "of an exported game. They shrink to a quarter, in the pak and in video "
+	  "memory, at the same quality as every other compressed texture. The GI "
+	  "keeps its landscape colours: they are baked into the pak from the "
+	  "uncompressed pixels. Switch it off to ship the arrays as RGBA8. "
+	  "Needs a texture compression other than None. Saved in the profile.",
 	  "", "export#overview" },
 	{ "Export/Texture quality", "Texture quality",
 	  "How hard the encoder works on each texture. Fast is what every export "

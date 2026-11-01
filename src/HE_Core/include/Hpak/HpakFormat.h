@@ -219,10 +219,10 @@ struct PackSettings {
     // which is the whole point of changing it.
     uint8_t textureQuality = 0;
     // Also cook texture ARRAYS (layers > 1) to `textureCompression`, every slice and level
-    // encoded as it stands. Off: arrays ship RGBA8 as they always did. It is off because
-    // some readers still expect RGBA8 arrays in a shipped game (the GI's landscape slice
-    // means, giAutoLandscapeSliceMeans, cannot read BC7 or ASTC); whoever turns it on for
-    // the Auto landscape arrays has to cover that first. Part of the pack fingerprint.
+    // encoded as it stands. Off: arrays ship RGBA8 as they always did. The only CPU reader of
+    // array pixels, the GI landscape's slice means (giAutoLandscapeSliceMeans), cannot decode
+    // BC7 or ASTC; a cooked array therefore carries those means baked from its RGBA8 source
+    // (CHUNK_TXSM). Part of the pack fingerprint.
     bool cookTextureArrays = false;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
@@ -258,6 +258,26 @@ struct PackSettings {
     // a file out. Both used to be silent, and a pak missing the landscape texture
     // arrays looked exactly like a good one. Same thread as the pack call.
     std::function<void(const std::string& message)> onWarning;
+
+    // Pack only what the game reaches (Hpak/ReachFilter.h). Roots: the scenes and blobs below,
+    // the engine's implicit needs, alwaysIncludePatterns. An asset nothing reachable names is
+    // left out, and so is an asset only another unreached asset names. Off = every .hasset in
+    // the roots, as before. Part of the pack fingerprint.
+    bool onlyReferenced = false;
+    // Globs (same shape as excludePatterns, matched against the addressed path) that are
+    // roots too: for what a script builds a path for at run time.
+    std::vector<std::string> alwaysIncludePatterns;
+    // Blobs scanned for references that are always kept and are not assets themselves: the
+    // startup scene, the project manifest, GameInstance.hcode, loose scripts.
+    std::vector<std::vector<uint8_t>> referenceRoots;
+    // Scenes the game MAY load, addressed by project-relative path. Each is a node of the
+    // graph like an asset: kept only when something reachable names it. The startup scene
+    // belongs in referenceRoots instead. HpakWriter::unreachableScenes() names the ones left out.
+    struct ReachScene { std::string path; std::vector<uint8_t> bytes; };
+    std::vector<ReachScene> reachScenes;
+    // One summary line for what the filter left out (count, size, the largest). Same thread
+    // as the pack call.
+    std::function<void(const std::string& message)> onNotice;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).

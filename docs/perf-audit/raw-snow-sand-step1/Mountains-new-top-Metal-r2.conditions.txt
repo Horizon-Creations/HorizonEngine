@@ -1,0 +1,21 @@
+label: Mountains-new-top-Metal-r2
+attempt: 1
+editor: /tmp/he328/new/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 3.69 3.16 2.86
+  locked:    Yes
+  lowpower:  0
+  gpu:       10
+  power:     Now drawing from 'AC Power'
+  busy:      24.0% Python; 21.4% WindowServer; 16.4% commerce; 10.2% coreaudiod
+  foreign:   none
+after:
+  uptime:    load averages: 4.13 3.31 2.92
+  locked:    Yes
+  lowpower:  0
+  gpu:       87
+  power:     Now drawing from 'AC Power'
+  busy:      24.7% WindowServer; 12.3% coreaudiod; 11.5% Dock; 4.6% WallpaperAerialsExtension
+  foreign:   none

@@ -143,7 +143,13 @@ ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
 
 	// Per-cell light lists, flattened below. A few hundred lights × a few
 	// touched cells each — rebuilt fresh every frame, no GPU sync hazards.
-	std::vector<std::vector<uint32_t>> cells(kClusterCount);
+	// Counting-sort layout instead of 3456 little vectors: each light records the cell box it
+	// covers, a count per cell is summed from the boxes, and a second pass writes the indices.
+	// The result is identical (indices per cell stay in light order) without a heap
+	// allocation per touched cell; the call runs twice a frame on D3D11/D3D12.
+	struct CellBox { uint32_t li; int16_t x0, x1, y0, y1, z0, z1; };
+	std::vector<CellBox> boxes;
+	boxes.reserve(64);
 	size_t indexTotal = 0;
 
 	// GI local-mask channel bookkeeping: the mask covers the first
@@ -221,20 +227,36 @@ ClusterLightBuild BuildClusterLights(const RenderWorld& rw,
 			(localShadowsActive && l.shadowLayer >= 0) ? static_cast<float>(l.shadowLayer + 1) : 0.0f,
 			static_cast<float>(maskChannel + 1),
 			0.0f));
-		for (int z = z0; z <= z1; ++z)
-			for (int y = y0; y <= y1; ++y)
-				for (int x = x0; x <= x1; ++x)
-					cells[(z * kClusterGridY + y) * kClusterGridX + x].push_back(li);
+		boxes.push_back({ li, static_cast<int16_t>(x0), static_cast<int16_t>(x1),
+		                  static_cast<int16_t>(y0), static_cast<int16_t>(y1),
+		                  static_cast<int16_t>(z0), static_cast<int16_t>(z1) });
 	}
 
 	// Flatten: per-cluster {offset, count} + one index list.
-	out.indices.reserve(indexTotal);
+	uint32_t counts[kClusterCount] = {};
+	for (const CellBox& b : boxes)
+		for (int z = b.z0; z <= b.z1; ++z)
+			for (int y = b.y0; y <= b.y1; ++y)
+				for (int x = b.x0; x <= b.x1; ++x)
+					++counts[(z * kClusterGridY + y) * kClusterGridX + x];
+	uint32_t offsets[kClusterCount];
+	uint32_t running = 0;
 	for (int cIdx = 0; cIdx < kClusterCount; ++cIdx)
 	{
-		out.grid[cIdx] = glm::uvec2(static_cast<uint32_t>(out.indices.size()),
-		                            static_cast<uint32_t>(cells[cIdx].size()));
-		out.indices.insert(out.indices.end(), cells[cIdx].begin(), cells[cIdx].end());
+		offsets[cIdx] = running;
+		out.grid[cIdx] = glm::uvec2(running, counts[cIdx]);
+		running += counts[cIdx];
 	}
+	out.indices.resize(running);
+	uint32_t fill[kClusterCount] = {};
+	for (const CellBox& b : boxes)
+		for (int z = b.z0; z <= b.z1; ++z)
+			for (int y = b.y0; y <= b.y1; ++y)
+				for (int x = b.x0; x <= b.x1; ++x)
+				{
+					const int cIdx = (z * kClusterGridY + y) * kClusterGridX + x;
+					out.indices[offsets[cIdx] + fill[cIdx]++] = b.li;
+				}
 	if (out.lights.empty())  out.lights.push_back(glm::vec4(0.0f)); // never a 0-byte buffer
 	if (out.indices.empty()) out.indices.push_back(0u);
 

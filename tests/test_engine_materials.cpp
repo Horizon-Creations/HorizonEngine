@@ -15,7 +15,10 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
 #include <ContentManager/HAsset.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Physics/WaterWaves.h>   // the wave trains the water physics shares with the material
 
 #include <chrono>
@@ -25,6 +28,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -339,6 +343,49 @@ TEST_CASE("Engine water material: every knob has a tooltip in the Details panel"
 	CHECK(HE::Ed::Help::find("WaveD") == nullptr);
 }
 
+// One UUID names ONE asset in the ContentManager, whatever its type. Twice a generated
+// engine asset shipped with the id of another one (Water, then DisplacementDemo, both
+// {0x400/0x401, 1} next to the landscape textures) and the later load silently
+// replaced the earlier, so a reference resolved to the wrong asset. This walks every
+// shipped .hasset and fails on the first duplicate id, whichever generator wrote it.
+TEST_CASE("Engine content: no two shipped assets share a UUID")
+{
+	Scratch s("uuidunique");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+
+	std::map<std::string, std::string> seen;   // uuid text -> first path
+	int files = 0;
+	for (const auto& e : fs::recursive_directory_iterator(engineRoot()))
+	{
+		if (!e.is_regular_file() || e.path().extension() != ".hasset") continue;
+		const std::string rel = "Engine/" + fs::relative(e.path(), engineRoot()).generic_string();
+		const HE::UUID id = cm.loadAsset(rel);
+		if (id.hi == 0 && id.lo == 0) continue;   // a type this build cannot load; not this test's business
+		++files;
+		// landscape_tex_gen's textures are not shipped in the repo, so a clash with
+		// them cannot show as a duplicate here: keep its 0x400 block (T_Landscape_*,
+		// the arrays, M_AutoLandscape, the weather functions) free of anything else.
+		const bool inLandscapeBlock = id.hi >= 0x400 && id.hi < 0x500;
+		// The Forest / Grassland / Desert materials (0x415..) and the procedural snow and sand functions (0x41D, 0x41E)
+		// are landscape_tex_gen / matfn_gen output that lives in this block too (Thema 329); the trail clipmap's runtime
+		// texture claims 0x41F but is never a shipped file.
+		bool groupMaterial = false;
+		for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups) groupMaterial = groupMaterial || id == g.materialId;
+		const bool knownOccupant = id == HE::kAutoLandscapeMaterialId || groupMaterial
+		                        || id == HE::kWeatherPuddlesFunctionId || id == HE::kWeatherSnowFunctionId
+		                        || id == HE::kProceduralSnowFunctionId || id == HE::kProceduralSandFunctionId
+		                        || rel.rfind("Engine/Textures/", 0) == 0;
+		const bool clear = !inLandscapeBlock || knownOccupant;
+		CHECK_MESSAGE(clear,
+		              rel << " uses a UUID of landscape_tex_gen's 0x400 block (hi 0x" << std::hex << id.hi << ")");
+		const std::string key = std::to_string(id.hi) + ":" + std::to_string(id.lo);
+		const auto it = seen.emplace(key, rel);
+		CHECK_MESSAGE(it.second, "UUID of " << rel << " is already used by " << it.first->second);
+	}
+	CHECK(files > 20);
+}
+
 // ── DisplacementDemo (Thema 207): the example for the Output node's Displacement pin ──
 TEST_CASE("Engine displacement demo: the Displacement pin is wired, sine-only, three knobs")
 {
@@ -348,7 +395,7 @@ TEST_CASE("Engine displacement demo: the Displacement pin is wired, sine-only, t
 	cm.setEngineContentRoot(engineRoot().string());
 
 	const HE::UUID id = cm.loadAsset("Engine/Materials/DisplacementDemo.hasset");
-	CHECK(id == HE::UUID{ 0x0000000000000401ULL, 0x0000000000000001ULL });   // mat_gen entry 1
+	CHECK(id == HE::UUID{ 0x0000000000000601ULL, 0x0000000000000001ULL });   // mat_gen entry 1 (0x600 block)
 	const MaterialAsset* m = cm.getMaterial(id);
 	REQUIRE(m);
 	CHECK(m->blendMode == static_cast<uint8_t>(HE::MatBlendMode::Opaque));

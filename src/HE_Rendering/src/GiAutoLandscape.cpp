@@ -46,7 +46,12 @@ int giAutoLandscapeParams(const MaterialAsset& ma,
 
 	int slot = -1;
 	for (size_t i = 0; i < ma.graphTexturePaths.size(); ++i)
-		if (ma.graphTexturePaths[i] == kAutoLandscapeAlbedoArray) { slot = static_cast<int>(i); break; }
+	{
+		// The albedo array of ANY texture group (Forest and Grassland have their own arrays).
+		int map = -1;
+		if (autoLandscapeGroupOfArray(ma.graphTexturePaths[i].c_str(), &map) >= 0 && map == 0)
+		{ slot = static_cast<int>(i); break; }
+	}
 	if (slot < 0 && ma.graphTexturePaths.empty() && !ma.graphTextureIds.empty()) slot = 0; // packed: ids only
 	if (slot < 0) return -1;
 
@@ -65,55 +70,35 @@ int giAutoLandscapeParams(const MaterialAsset& ma,
 
 bool giAutoLandscapeSliceMeans(const TextureAsset& t, GiLandscape& out)
 {
-	if (t.layers < 5 || !textureArrayPayloadValid(t)) return false;
-	// This reads RGBA8 texels. A block-compressed array (BC1/BC3/BC4/BC5) is expanded one level of one
-	// slice at a time below; BC7 and ASTC have no CPU decoder here, so the GI keeps its default colours.
-	if (t.format != ::TextureFormat::RGBA8 && !textureFormatCpuDecodable(t.format)) return false;
-	// Smallest level with both sides ≤ 16 (or the last one stored).
-	uint32_t level = 0, w = t.width, h = t.height;
-	while (level + 1 < t.mipLevels && (w > 16 || h > 16))
+	if (t.layers < 5) return false;
+	// A cooked array carries its slice means (CHUNK_TXSM): BC7 and ASTC have no CPU decoder, so
+	// they come from the pack, taken from the RGBA8 the encoder saw. Without them (a loose asset,
+	// or an array cooked before the chunk existed) the means are read from the pixels: RGBA8 in
+	// place, a block-compressed BC1/BC3/BC4/BC5 array expanded one small level of one slice at a
+	// time (decoding the whole array costs ~440 ms for a 13-slice 2K BC3 array and the extractor
+	// asks every frame: Thema 180 Schritt 6, docs/perf-audit/).
+	const bool baked = t.sliceMeans.size() == static_cast<size_t>(t.layers) * 3;
+	if (!baked)
 	{
-		++level;
-		w = std::max<uint32_t>(1, w >> 1);
-		h = std::max<uint32_t>(1, h >> 1);
+		if (!textureArrayPayloadValid(t)) return false;
+		if (t.format != ::TextureFormat::RGBA8 && !textureFormatCpuDecodable(t.format)) return false;
 	}
-	// Level 0 of a mip-less 4k array is still 16M texels: walk a ≤ 16×16 grid.
-	const uint32_t sx = std::max<uint32_t>(1, w / 16), sy = std::max<uint32_t>(1, h / 16);
-	auto decode = [&](uint8_t b)
-	{
-		const float c = b / 255.0f;
-		if (!t.srgb) return c;
-		return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
-	};
-	// The texels of one slice at `level`: in place for RGBA8, decoded into `scratch` for a block format.
-	// (Decoding the whole array here, as the first BCn version did, costs ~440 ms for a 13-slice 2K BC3
-	// array and the extractor asks every frame: Thema 180 Schritt 6, docs/perf-audit/.)
-	std::vector<uint8_t> scratch;
-	auto texels = [&](uint32_t slice) -> const uint8_t*
-	{
-		const size_t off = textureArrayOffset(t.width, t.height, t.mipLevels, slice, level, t.format);
-		if (t.format == ::TextureFormat::RGBA8) return t.data.data() + off;
-		scratch.resize(static_cast<size_t>(w) * h * 4);
-		return decodeBlockLevelToRGBA8(t.format, t.data.data() + off, textureLevelBytes(t.format, w, h), w, h,
-		                               scratch.data()) ? scratch.data() : nullptr;
-	};
 	// Layer g's variant 0 (the arrays hold 4 * V + 1 slices, Thema 180 Schritt 3: V = 1 is slices 0..4 as ever,
 	// V = 3 has Grass at 0, Dirt at 3, Rock at 6, Snow at 9 and WetGround last).
 	const int depth = static_cast<int>(t.layers);
 	glm::vec3 mean[5];
 	for (int g = 0; g < 5; ++g)
 	{
-		const uint8_t* px = texels(static_cast<uint32_t>(autoLandscapeSliceOf(g, 0, depth)));
-		if (!px) return false;
-		glm::vec3 sum(0.0f);
-		uint32_t  n = 0;
-		for (uint32_t y = 0; y < h; y += sy)
-			for (uint32_t x = 0; x < w; x += sx, ++n)
-			{
-				const uint8_t* p = px + (static_cast<size_t>(y) * w + x) * 4;
-				sum += glm::vec3(decode(p[0]), decode(p[1]), decode(p[2]));
-			}
-		mean[g] = sum / static_cast<float>(std::max<uint32_t>(n, 1));
+		const uint32_t slice = static_cast<uint32_t>(autoLandscapeSliceOf(g, 0, depth));
+		float m[3];
+		if (baked)
+		{
+			if (slice >= t.layers) return false;
+			for (int i = 0; i < 3; ++i) m[i] = t.sliceMeans[static_cast<size_t>(slice) * 3 + i];
+		}
+		else if (!textureArraySliceMean(t, slice, m))
+			return false;
+		mean[g] = glm::vec3(m[0], m[1], m[2]);
 	}
 	for (int i = 0; i < 4; ++i) out.layerColor[i] = glm::vec4(mean[i], 0.0f);
 	// A puddle is half wet rim, half standing water (the graph darkens water

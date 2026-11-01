@@ -1,0 +1,21 @@
+label: Grassland-old-low-Metal-r3
+attempt: 1
+editor: /tmp/he328/old/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 4.33 3.25 3.01
+  locked:    Yes
+  lowpower:  0
+  gpu:       10
+  power:     Now drawing from 'AC Power'
+  busy:      57.0% Hive; 22.2% WindowServer; 15.7% Python; 10.9% coreaudiod
+  foreign:   none
+after:
+  uptime:    load averages: 3.90 3.21 3.00
+  locked:    Yes
+  lowpower:  0
+  gpu:       86
+  power:     Now drawing from 'AC Power'
+  busy:      36.3% Hive; 26.1% WindowServer; 12.9% coreaudiod; 12.2% Dock
+  foreign:   none

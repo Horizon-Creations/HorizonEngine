@@ -2520,6 +2520,36 @@ namespace save {
     bool inPlayMode();
 }
 
+// ── Trails in snow and sand ──────────────────────────────────────────────────
+// What walks, drives and drags over snow or sand leaves a mark that heals with the weather (Thema 328;
+// Trails/TrailField.h). Two verbs, and they differ on purpose:
+//   footprint / press   a pit and nothing else: a boot, a paw, a wheel set down.
+//   drag                a groove dragged along a segment WITH the displaced material heaped along both sides: a sled,
+//                       a plough, a foot dragged through, a tyre that digs in. Call it every frame with the last and
+//                       the new position (a fast mover leaves a line, not dots).
+// `surface` picks the healing and the look: 0 snow, 1 sand. Depth and heap height are 0..1 (1 = as deep as the
+// surface goes; the ground follows by TrailSettings::displacementMeters, 0.3 m, where the landscape refines its
+// chunks, otherwise the mark is a shading effect only). x/z are world metres, yaw degrees around +Y (0 = +X). The field's
+// texel is 0.25 m: a footprint narrower than about 0.4 m hardly registers, make boots and paws at least that wide.
+// Without a world these do nothing and the queries answer 0.
+namespace trail {
+    void  footprint(Ctx&, float x, float z, float length, float width, float yawDegrees, float depth, int surface);
+    void  press(Ctx&, float x0, float z0, float x1, float z1, float radius, float depth, int surface);
+    void  drag(Ctx&, float x0, float z0, float x1, float z1, float radius, float depth,
+               float bermWidth, float bermHeight, int surface);
+    // How deep it is pressed here, 0..1 (0 on a heap and on untouched ground): what footstep audio and tracking read.
+    float depthAt(Ctx&, float x, float z);
+    // The ground's offset in metres: negative in a pit, positive on a heap, 0 untouched.
+    float heightAt(Ctx&, float x, float z);
+    void  clear(Ctx&);
+    // Into / out of the ACTIVE save (save.create / save.load first): the entity-state slot "__trails__". load() applies
+    // `elapsedSeconds` of healing in one go (game time since the save was written, capped at a day, with the current
+    // weather); a save written on clean ground clears the trails. False without an active save or for a damaged slot.
+    bool  save(Ctx&);
+    bool  load(Ctx&, float elapsedSeconds);
+    int   pageCount(Ctx&);
+}
+
 // ── C++ GameLogic services (HorizonGameServices.h) ───────────────────────────
 // Fill the C-ABI tables a GameLogic library receives via HE_SetEngineServicesV2.
 // `binding` must outlive the tables' use (the app owns both).

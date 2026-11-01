@@ -1,0 +1,21 @@
+label: Desert-new-low-Metal-r3
+attempt: 1
+editor: /tmp/he328/new/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 2.94 3.03 2.94
+  locked:    Yes
+  lowpower:  0
+  gpu:       9
+  power:     Now drawing from 'AC Power'
+  busy:      22.9% WindowServer; 18.7% Python; 15.0% Hive; 10.6% coreaudiod
+  foreign:   none
+after:
+  uptime:    load averages: 2.74 2.98 2.92
+  locked:    Yes
+  lowpower:  0
+  gpu:       84
+  power:     Now drawing from 'AC Power'
+  busy:      28.5% WindowServer; 12.4% coreaudiod; 11.0% Dock; 9.2% Python
+  foreign:   none

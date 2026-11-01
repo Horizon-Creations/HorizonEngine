@@ -16,6 +16,7 @@
 #include "TestFsUtil.h"
 #include <ContentManager/ContentManager.h>
 #include <HorizonRendering/GraphTextureMisses.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -233,6 +234,37 @@ TEST_CASE("Landscape reload: the backend asking in the frame the download lands 
 	CHECK(be.resolve(path) == id);
 	CHECK(be.loads == 2);
 	CHECK(late.calls == 1);
+}
+
+TEST_CASE("Landscape reload: a texture group's arrays arrive late like Mountains' (Thema 233)")
+{
+	// Forest and Grassland read their own arrays through the same path-keyed resolve, so a download that
+	// lands after the first ask has to reach them too (the cache stores a miss as null per epoch). Stand-in
+	// names, as in the Thema 210 cases: the per-user EngineContent cache of the machine running the test may
+	// hold the real T_Landscape_*_Array, which would resolve before anything "arrives".
+	for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
+		for (int map = 0; map < 3; ++map)
+		{
+			static const char* const kMaps[3] = { "Albedo", "Normal", "Mask" };
+			const std::string leaf = std::string("T_He233_") + HE::kAutoLandscapeGroups[g].name + "_" + kMaps[map] + "_Array.hasset";
+			const std::string rel  = "Textures/Landscape/" + leaf;
+			const std::string path = "Engine/" + rel;
+			CAPTURE(path);
+			TempDir project("he_test_l233_project"), engine("he_test_l233_engine"), stage("he_test_l233_stage");
+			const HE::UUID id = writeArray(stage.path, leaf);
+			ContentManager cm(project.path.string());
+			cm.setEngineContentRoot(engine.path.string());
+			LateArray late;
+			late.from = stage.path / leaf;
+			late.to   = engine.path / rel;
+			cm.registerRemoteAsset(id, path, [&late](std::function<void(bool)> done) {
+				++late.calls; late.done = std::move(done); });
+			FakeBackend be; be.cm = &cm;
+			CHECK(be.resolve(path) == HE::UUID{});
+			late.arrive();
+			REQUIRE(pumpUntil(cm, [&] { return cm.isLoaded(id); }));
+			CHECK(be.resolve(path) == id);
+		}
 }
 
 TEST_CASE("Landscape reload: a texture that never loads is not reopened every frame (Thema 210)")

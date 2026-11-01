@@ -283,6 +283,9 @@ const std::vector<MatNodeDesc>& registry()
         { MatNodeType::FbmGrad, "FBM Noise Gradient", "Procedural",
           { { "UV", F::Vec2, 0 }, { "Scale", F::Float, 8 } },
           { { "Value", F::Float, 0 }, { "dX", F::Float, 0 }, { "dY", F::Float, 0 } }, 0 },
+
+        // ── v19: the landscape's foliage set — metadata only, no pins, s = asset UUID ──
+        { MatNodeType::LandscapeFoliage, "Landscape Foliage", "Landscape", {}, {}, 0 },
     };
     return kReg;
 }
@@ -421,6 +424,32 @@ std::vector<std::string> matLandscapeLayerNames(const std::string& s)
     flush();
     if (out.empty()) out.push_back("Layer 1");
     return out;
+}
+
+std::string matFoliageSetIdToString(const HE::UUID& id)
+{
+    if (id == HE::UUID{}) return {};
+    char buf[33];
+    std::snprintf(buf, sizeof(buf), "%016llx%016llx",
+                  static_cast<unsigned long long>(id.hi), static_cast<unsigned long long>(id.lo));
+    return buf;
+}
+
+HE::UUID matFoliageSetIdFromString(const std::string& s)
+{
+    if (s.size() != 32) return {};
+    uint64_t part[2] = { 0, 0 };
+    for (size_t i = 0; i < 32; ++i)
+    {
+        const char ch = s[i];
+        uint64_t v;
+        if (ch >= '0' && ch <= '9')      v = static_cast<uint64_t>(ch - '0');
+        else if (ch >= 'a' && ch <= 'f') v = static_cast<uint64_t>(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F') v = static_cast<uint64_t>(ch - 'A' + 10);
+        else return {};
+        part[i / 16] = (part[i / 16] << 4) | v;
+    }
+    return { part[0], part[1] };
 }
 
 // A material function's interface pins, in PIN ORDER. The order is the FnInput /
@@ -1449,9 +1478,10 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             c.usesLandscapeWeights = true;
             if (c.layerNames.empty()) c.layerNames = names;
 
-            // Layers 0..3 are the weightmap's first RGBA page, 4..7 its second.
+            // Layers 0..3 are the weightmap's first RGBA page, 4..7 its second, 8..11 its third.
             static const char* kChan[kMatMaxLandscapeLayers] =
-                { "_w.x", "_w.y", "_w.z", "_w.w", "_w2.x", "_w2.y", "_w2.z", "_w2.w" };
+                { "_w.x",  "_w.y",  "_w.z",  "_w.w",  "_w2.x", "_w2.y", "_w2.z", "_w2.w",
+                  "_w3.x", "_w3.y", "_w3.z", "_w3.w" };
             std::string sum, wsum;
             for (size_t i = 0; i < names.size(); ++i)
             {
@@ -1467,24 +1497,31 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // its zero sum by the 1e-4 floor and come out as a black hole.
             const std::string layer0 = names.empty()
                 ? std::string("vec3(0.0)") : inputExpr(c, sc, n, 0, F::Vec3);
-            // Two weightmap shapes share the one binding (TerrainPaint::
+            // Up to three weightmap shapes share the one binding (TerrainPaint::
             // buildWeightTexture): a square map = layers 0..3 only, exactly
             // what every landscape had before there were eight layers, sampled
             // exactly as before; a 2:1 map = layers 0..3 in the left half and
-            // 4..7 in the right. Told apart by the texture's own size, so the
-            // MATERIAL needs to know nothing about the terrain it lands on and
-            // no backend needs a second sampler, binding or uniform. Every
-            // blend is page-aware, also one with four layers or fewer: on a 2:1
-            // map the plain full-width sample would smear both halves together.
+            // 4..7 in the right; a 3:1 map = the same in thirds, 8..11 in the
+            // last. Told apart by the texture's own size (the page count N is
+            // width / height), so the MATERIAL needs to know nothing about the
+            // terrain it lands on and no backend needs a second sampler, binding
+            // or uniform. Every blend is page-aware, also one with four layers
+            // or fewer: on a 2:1 or 3:1 map the plain full-width sample would
+            // smear the pages together, and a blend of eight layers must not
+            // read a 3:1 map as two halves.
             //
-            // In the 2:1 case each half is read at mip 0 with U clamped half a
-            // texel inside it: bilinear filtering at a half's edge (and any
+            // With N = 2 every divide below is by a power of two, i.e. exactly
+            // the multiplies by 0.5 and the + 0.5 the two-page read always made.
+            //
+            // In the paged case each page is read at mip 0 with U clamped half a
+            // texel inside it: bilinear filtering at a page's edge (and any
             // runtime mip of the atlas — GL and Metal build one) would bleed
-            // the other page's weights in. Both samples are taken up front and
+            // the other pages' weights in. All samples are taken up front and
             // only SELECTED by the size test, so no implicit-derivative sample
             // sits in control flow.
             const bool page2 = names.size() > 4;
-            const std::string ts = v + "_ts", wu = v + "_wu", wsz = v + "_wsz", wuv = v + "_wuv";
+            const bool page3 = names.size() > 8;
+            const std::string ts = v + "_ts", wu = v + "_wu", wsz = v + "_wsz", wuv = v + "_wuv", np = v + "_np";
             // The weights are read through a SMOOTHED coordinate: the fractional texel
             // position goes through smoothstep before the bilinear fetch, so the weight
             // field is C1 across texel borders instead of piecewise linear. Plain
@@ -1500,20 +1537,24 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             // statements are not reordered or split for readability: the emitted text
             // is baked into the shipped .hasset files and keys the pipeline caches.
             decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
-                 + " bool " + v + "_p2 = " + ts + ".x > 1.5 * " + ts + ".y;"
-                 + " vec2 " + wsz + " = vec2(" + v + "_p2 ? " + ts + ".x * 0.5 : " + ts + ".x, " + ts + ".y);"
+                 + " float " + np + " = max(floor(" + ts + ".x / max(" + ts + ".y, 1.0) + 0.5), 1.0);"
+                 + " bool " + v + "_p2 = " + np + " > 1.5;"
+                 + " vec2 " + wsz + " = vec2(" + ts + ".x / " + np + ", " + ts + ".y);"
                  + " vec2 " + v + "_wt = vUV * " + wsz + " - 0.5;"
                  + " vec2 " + v + "_wi = floor(" + v + "_wt);"
                  + " vec2 " + v + "_wq = " + v + "_wt - " + v + "_wi;"
                  + " vec2 " + wuv + " = clamp((" + v + "_wi + 0.5 + " + v + "_wq * " + v + "_wq * (3.0 - 2.0 * " + v + "_wq)) / " + wsz
                  + ", 0.5 / " + wsz + ", 1.0 - 0.5 / " + wsz + ");"
-                 + " float " + wu + " = clamp(" + wuv + ".x * 0.5, 0.5 / " + ts + ".x, 0.5 - 0.5 / " + ts + ".x);"
+                 + " float " + wu + " = clamp(" + wuv + ".x / " + np + ", 0.5 / " + ts + ".x, 1.0 / " + np + " - 0.5 / " + ts + ".x);"
                  + " vec4 " + v + "_wf = texture(heLandscapeWeights, " + wuv + ");"
                  + " vec4 " + v + "_wl = textureLod(heLandscapeWeights, vec2(" + wu + ", " + wuv + ".y), 0.0);"
                  + " vec4 " + v + "_w = " + v + "_p2 ? " + v + "_wl : " + v + "_wf;";
             if (page2)
-                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 0.5, " + wuv + ".y), 0.0);"
+                decl += " vec4 " + v + "_wr = textureLod(heLandscapeWeights, vec2(" + wu + " + 1.0 / " + np + ", " + wuv + ".y), 0.0);"
                       + " vec4 " + v + "_w2 = " + v + "_p2 ? " + v + "_wr : vec4(0.0);";
+            if (page3)
+                decl += " vec4 " + v + "_wr3 = textureLod(heLandscapeWeights, vec2(" + wu + " + 2.0 / " + np + ", " + wuv + ".y), 0.0);"
+                      + " vec4 " + v + "_w3 = " + np + " > 2.5 ? " + v + "_wr3 : vec4(0.0);";
             decl += " float " + v + "_s = " + wsum + ";"
                  + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
                  + layer0 + ";";
@@ -2475,6 +2516,17 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         "layout(location = 3) out vec4 oGB3;\n";
 
     MatShaderGen gen;
+    // The foliage set is a property of the graph, not of any pin: a Landscape Foliage
+    // node has no outputs, so the demand-driven emit below never reaches it. Scan the
+    // top-level nodes (lowest id wins), before the no-Output early return too.
+    {
+        const MatGraphNode* best = nullptr;
+        for (const MatGraphNode& n : graph.nodes)
+            if (n.type == MatNodeType::LandscapeFoliage && (!best || n.id < best->id)
+                && matFoliageSetIdFromString(n.s) != HE::UUID{})
+                best = &n;
+        if (best) gen.foliageSetId = matFoliageSetIdFromString(best->s);
+    }
     if (!out)
     {
         gen.glsl = header + "void main() { oColor = vec4(1.0, 0.0, 1.0, 1.0); } // no Output node\n";
@@ -2602,6 +2654,10 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     };
 
     src = withArrayMask(header) + common;
+    if (lit && blendMode == (int)MatBlendMode::Translucent)
+        // The GI-reflection trace belongs to the opaque surface behind a translucent
+        // fragment (see heSkipGIReflTrace in the lighting preamble).
+        src += "    heSkipGIReflTrace = true;\n";
     if (lit)
         // Aerial perspective wraps the WHOLE lit colour (emissive included), the
         // same place the built-in scene shaders apply it — without it a distant

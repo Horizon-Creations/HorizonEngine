@@ -78,12 +78,15 @@ static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
 static bool   s_exportDevTools    = false;
 static std::string s_exportExcludes;               // one glob pattern per line
+static std::string s_exportIncludes;               // always-include globs, one per line
+static bool        s_exportOnlyReferenced = true;  // pack only what the game reaches
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
 static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
 static std::string s_exportTextureFormat = "Auto"; // Auto (per target GPU) | None (RGBA8)
 static int    s_exportTextureQuality = 0;          // 0 Fast, 1 Balanced, 2 High
+static bool   s_exportTextureArrays  = true;       // block-compress texture arrays too
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 // The window + backend the exported game starts in. They are NOT part of the
@@ -533,12 +536,16 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportHcStop       = p.hcStopOnFailure;
 	s_exportTextureFormat  = p.textureFormat;
 	s_exportTextureQuality = p.textureQuality;
+	s_exportTextureArrays  = p.compressTextureArrays;
 	// Canonicalize via the enum round-trip. The platform is not read from disk
 	// any more (always Host); only project_build's one-run copy can name another.
 	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
 	s_exportShaderBackends = p.shaderBackends;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
+	s_exportOnlyReferenced = p.onlyReferenced;
+	s_exportIncludes.clear();
+	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
 }
 
 // Read the dialog fields back into a profile (the name stays as-is).
@@ -551,6 +558,8 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.devTools         = s_exportDevTools;
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+	p.onlyReferenced   = s_exportOnlyReferenced;
+	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
 	p.appBundle        = s_exportAppBundle;
@@ -559,6 +568,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.hcStopOnFailure    = s_exportHcStop;
 	p.textureFormat      = s_exportTextureFormat;
 	p.textureQuality     = s_exportTextureQuality;
+	p.compressTextureArrays = s_exportTextureArrays;
 }
 
 void open(AppContext& ctx)
@@ -1053,6 +1063,10 @@ void render(AppContext& ctx)
                 else
                     ImGui::TextDisabled("Auto: ASTC on Metal, BC3 on macOS OpenGL, BC7 on desktop. "
                                         "High encodes several times slower than Fast.");
+                ImGui::BeginDisabled(s_exportTextureFormat == "None");
+                EditorWidgets::checkbox("Compress texture arrays", &s_exportTextureArrays);
+                ImGui::EndDisabled();
+                EditorWidgets::helpForKey("Export/Compress texture arrays");
             }
 
             ImGui::Spacing();
@@ -1166,6 +1180,25 @@ void render(AppContext& ctx)
                                   "Examples: Debug/*   *_test.hasset   Scenes/Playground*");
             ImGui::InputTextMultiline("##exportExcludes", &s_exportExcludes,
                                       ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
+
+            // Only what the game reaches. On by default: an export used to pack every asset
+            // in Content and in the engine library, used or not. What is left out is listed
+            // in the export log; the patterns below keep what a script loads by a path it builds.
+            ImGui::Spacing();
+            EditorWidgets::checkbox("Pack only referenced assets", &s_exportOnlyReferenced);
+            EditorWidgets::helpForKey("Export/Pack only referenced assets");
+            if (s_exportOnlyReferenced)
+            {
+                ImGui::Text("Always include:");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("One glob per line, same shape as the exclude patterns.\n"
+                                      "Assets matching one are kept even when nothing names them,\n"
+                                      "e.g. a script loads \"Props/Crate\" + n at run time: Props/Crate*");
+                ImGui::InputTextMultiline("##exportIncludes", &s_exportIncludes,
+                                          ImVec2(-1.0f, ImGui::GetTextLineHeight() * 2.5f));
+            }
 
             // ── Precompiled material shaders ──────────────────────────────────
             // Nothing to precompile without materials, and a project with Advanced
@@ -1632,6 +1665,9 @@ void startExport(AppContext& ctx)
                 es.encrypt          = s_exportEncrypt;
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+                es.onlyReferenced   = s_exportOnlyReferenced;
+                es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
+                es.onNotice = [](const std::string& msg) { Build::log(0, msg); };
                 es.incremental      = s_exportIncremental;
                 // The project's default SaveGameTemplate rides into project.hcfg
                 // so save.create() in the shipped game finds the same schema.
@@ -1719,6 +1755,7 @@ void startExport(AppContext& ctx)
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
                 es.textureQuality     = static_cast<uint8_t>(std::clamp(s_exportTextureQuality, 0, 2));
+                es.cookTextureArrays  = s_exportTextureArrays;
                 // The settings the game boots with, shipped as a config.json next
                 // to its data. Built HERE, on the UI thread — it reads the editor's
                 // live configuration, which the export worker must not touch — and

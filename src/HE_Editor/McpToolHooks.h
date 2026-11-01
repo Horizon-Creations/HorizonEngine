@@ -352,7 +352,7 @@ void registerSceneTools(McpToolRegistry& registry, ContentManager& content,
 // A TerrainComponent's payload is two blobs: `sculptHeightsB64` (res² floats,
 // 263k of them at the resolution the chunk builder snaps to) and
 // `layerWeightsB64` (weightRes² RGBA texels, layers 0..3; layers 4..7 ride in
-// `layerWeights2B64` once painted). The generic component tools hand
+// `layerWeights2B64` once painted, layers 8..11 in `layerWeights3B64`). The generic component tools hand
 // those to a client as base64 and take them back the same way, which is not an
 // interface — it is the absence of one. A client cannot read a height out of it,
 // cannot change one without re-encoding the whole field, and has no way at all

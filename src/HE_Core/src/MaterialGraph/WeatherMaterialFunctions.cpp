@@ -1,5 +1,8 @@
 // Weather material functions — see WeatherMaterialFunctions.h.
 #include <MaterialGraph/WeatherMaterialFunctions.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
+
+#include "MatFnBuilder.h"
 
 #include <string>
 
@@ -10,47 +13,7 @@ namespace
 using T = MatNodeType;
 using P = MatPinType;
 
-constexpr float kColStep = 230.0f;
-constexpr float kRowStep = 110.0f;
-
-// The same thin builder matfn_gen uses for the UI effects: MaterialGraph with column
-// bookkeeping so the function opens tidy in the editor.
-struct Fn
-{
-    MaterialGraph g;
-    int inRow = 0;
-
-    // Inputs first and in display order: a call node's pins are its FnInput nodes by id.
-    int in(const char* name, P type, float def)
-    {
-        const int id = g.addNode(T::FnInput, 0.0f, static_cast<float>(inRow++) * kRowStep);
-        MatGraphNode& n = *g.findNode(id);
-        n.s    = name;
-        n.p[0] = static_cast<float>(type);
-        n.p[1] = def;
-        n.p[2] = 1.0f;   // the default is authored (see the FnInput registry entry)
-        return id;
-    }
-    int node(T type, int col, float row = 0.0f)
-    {
-        return g.addNode(type, static_cast<float>(col) * kColStep, row * kRowStep);
-    }
-    int k(float v, int col, float row = 0.0f)
-    {
-        const int id = node(T::ConstFloat, col, row);
-        g.findNode(id)->p[0] = v;
-        return id;
-    }
-    int out(const char* name, P type, int col, float row = 0.0f)
-    {
-        const int id = node(T::FnOutput, col, row);
-        MatGraphNode& n = *g.findNode(id);
-        n.s    = name;
-        n.p[0] = static_cast<float>(type);
-        return id;
-    }
-    void link(int src, int srcPin, int dst, int dstPin) { g.connect(src, srcPin, dst, dstPin); }
-};
+using MatFnBuild::Fn;
 
 // Weather node pins.
 constexpr int kPinWetness = 0, kPinPuddles = 2, kPinSnowCover = 3, kPinPuddleSize = 4;
@@ -124,10 +87,14 @@ MatFunctionLoader weatherFunctionLoader()
 {
     static const MaterialGraph puddles = buildWeatherPuddlesFunction();
     static const MaterialGraph snow    = buildWeatherSnowFunction();
+    static const MaterialGraph pSnow   = buildProceduralSnowFunction();
+    static const MaterialGraph pSand   = buildProceduralSandFunction();
     return [](const std::string& path) -> const MaterialGraph*
     {
-        if (path == kWeatherPuddlesFunctionPath) return &puddles;
-        if (path == kWeatherSnowFunctionPath)    return &snow;
+        if (path == kWeatherPuddlesFunctionPath)  return &puddles;
+        if (path == kWeatherSnowFunctionPath)     return &snow;
+        if (path == kProceduralSnowFunctionPath)  return &pSnow;
+        if (path == kProceduralSandFunctionPath)  return &pSand;
         return nullptr;
     };
 }

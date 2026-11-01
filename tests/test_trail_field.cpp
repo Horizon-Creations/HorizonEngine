@@ -1,0 +1,652 @@
+#include "doctest.h"
+#include <ContentManager/Assets.h>
+#include <ContentManager/ContentManager.h>
+#include <Trails/TrailClipmap.h>
+#include <Trails/TrailField.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
+#include <HorizonScene/EngineApi.h>
+#include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/TrailSystem.h>
+#include <HorizonScene/Components/WeatherComponent.h>
+
+#include <chrono>
+#include <cstdio>
+#include <filesystem>
+
+#include <cmath>
+
+using HE::TrailField;
+using HE::TrailSettings;
+using HE::TrailSurface;
+using HE::TrailWeather;
+
+TEST_CASE("TrailField: an ellipse stamp presses a soft print and nothing outside it")
+{
+	TrailField f;
+	CHECK(f.pageCount() == 0u);
+	CHECK(f.sample(3.0f, 4.0f) == 0.0f);          // no page, no depth
+
+	f.stampEllipse(10.0f, 20.0f, 0.5f, 0.25f, 0.0f, 0.8f, TrailSurface::Snow);
+	CHECK(f.pageCount() == 1u);
+	CHECK(f.sample(10.0f, 20.0f) == doctest::Approx(0.8f).epsilon(0.02));   // the centre: the full depth
+	CHECK(f.sample(10.0f, 20.0f) > f.sample(10.4f, 20.0f));                  // falls off along the long axis
+	CHECK(f.sample(10.0f, 20.6f) == 0.0f);                                   // beyond rz = 0.25 across it
+	CHECK(f.sample(11.0f, 20.0f) == 0.0f);                                   // beyond rx = 0.5 along it
+	// The press is a maximum: a shallower print over a deeper one changes nothing.
+	f.stampEllipse(10.0f, 20.0f, 0.5f, 0.25f, 0.0f, 0.3f, TrailSurface::Snow);
+	CHECK(f.sample(10.0f, 20.0f) == doctest::Approx(0.8f).epsilon(0.02));
+}
+
+TEST_CASE("TrailField: the yaw turns the ellipse")
+{
+	TrailField f;
+	f.stampEllipse(0.0f, 0.0f, 0.6f, 0.2f, 1.5707963f, 1.0f, TrailSurface::Sand);   // long axis along +Z
+	CHECK(f.sample(0.0f, 0.4f) > 0.1f);
+	CHECK(f.sample(0.4f, 0.0f) == 0.0f);
+}
+
+TEST_CASE("TrailField: a capsule leaves a continuous line, and a stamp may cross page borders")
+{
+	TrailField f;
+	// 300 m long: more than two pages, along the page border z = 0 (texels on both sides).
+	f.stampCapsule(-100.0f, 0.0f, 200.0f, 0.0f, 0.3f, 0.6f, TrailSurface::Sand);
+	CHECK(f.pageCount() >= 4u);                    // x in [-100, 200] spans 3 page columns, z = 0 is a row border
+	for (float x = -99.0f; x < 199.0f; x += 7.3f)
+		CHECK(f.sample(x, 0.0f) > 0.2f);
+	CHECK(f.sample(50.0f, 1.0f) == 0.0f);
+	// Degenerate segment = a disc.
+	TrailField g;
+	g.stampCapsule(5.0f, 5.0f, 5.0f, 5.0f, 0.4f, 1.0f, TrailSurface::Snow);
+	CHECK(g.sample(5.0f, 5.0f) > 0.5f);
+	// Bad input stamps nothing.
+	TrailField h;
+	h.stampEllipse(0, 0, 0.0f, 1.0f, 0.0f, 1.0f, TrailSurface::Snow);
+	h.stampEllipse(0, 0, 1.0f, 1.0f, 0.0f, 0.0f, TrailSurface::Snow);
+	h.stampCapsule(0, 0, 1, 1, -1.0f, 1.0f, TrailSurface::Snow);
+	CHECK(h.pageCount() == 0u);
+}
+
+TEST_CASE("TrailField: the gradient leans toward the pit")
+{
+	TrailField f;
+	f.stampEllipse(0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f, TrailSurface::Snow);
+	const glm::vec2 right = f.gradient(0.8f, 0.0f);   // east of the centre: depth falls with x
+	const glm::vec2 left  = f.gradient(-0.8f, 0.0f);
+	const glm::vec2 south = f.gradient(0.0f, 0.8f);
+	CHECK(right.x < -0.1f);
+	CHECK(left.x > 0.1f);
+	CHECK(south.y < -0.1f);
+	CHECK(std::fabs(right.y) < 0.05f);
+	CHECK(f.gradient(0.0f, 0.0f).x == doctest::Approx(0.0f).epsilon(0.05));   // the pit floor is flat
+}
+
+TEST_CASE("TrailField: no weather, no healing; the clock starts at the first call and never runs back")
+{
+	TrailField f;
+	f.stampEllipse(0, 0, 0.5f, 0.5f, 0.0f, 0.8f, TrailSurface::Snow);
+	const float before = f.sample(0, 0);
+	TrailWeather calm;                       // no precip, windSpeed 1, dry
+	f.tick(100.0, calm);                     // starts the clock
+	f.tick(100000.0, calm);
+	CHECK(f.sample(0, 0) == before);
+	f.tick(5.0, TrailWeather{ 1.0f, true, false, 1.0f, 0.0f });   // back in time: nothing
+	CHECK(f.sample(0, 0) == before);
+}
+
+TEST_CASE("TrailField: snowfall fills a print at the authored rate, and an empty page is freed")
+{
+	TrailField f;
+	f.stampEllipse(10, 10, 0.5f, 0.5f, 0.0f, 0.6f, TrailSurface::Snow);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	TrailSettings s;                         // hSnow = 1/120 per second
+	f.tick(0.0, snow, s);
+	f.tick(30.0, snow, s);                   // a quarter of the way: -0.25 depth
+	CHECK(f.sample(10, 10) == doctest::Approx(0.35f).epsilon(0.02));
+	CHECK(f.pageCount() == 1u);
+	f.tick(200.0, snow, s);                  // long past 0.6 * 120 = 72 s in total
+	CHECK(f.sample(10, 10) == 0.0f);
+	CHECK(f.pageCount() == 0u);
+	CHECK(f.activeTexels() == 0u);
+}
+
+TEST_CASE("TrailField: slow healing does not truncate away (16-bit depth, carried remainder)")
+{
+	TrailField f;
+	f.stampEllipse(0, 0, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Snow);
+	TrailWeather drift;                      // a gale on dry snow: 1/1800 per second
+	drift.windSpeed = 5.0f;
+	f.tick(0.0, drift);
+	f.tick(900.0, drift);                    // half an hour's worth is 0.5: here a quarter of an hour
+	CHECK(f.sample(0, 0) == doctest::Approx(0.0f).epsilon(0.05));   // 0.5 - 900/1800 = 0
+	// A breeze: a tenth of the gale's rate must still move the print after a long while.
+	TrailField g;
+	g.stampEllipse(0, 0, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Snow);
+	TrailWeather breeze;
+	breeze.windSpeed = 1.4f;                 // wind = 0.1
+	g.tick(0.0, breeze);
+	g.tick(600.0, breeze);
+	CHECK(g.sample(0, 0) < 0.5f - 0.02f);
+}
+
+TEST_CASE("TrailField: sand follows the wind squared, and wet or rained-on sand keeps its prints")
+{
+	const auto remaining = [](const TrailWeather& w) {
+		TrailField f;
+		f.stampEllipse(0, 0, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Sand);
+		f.tick(0.0, w);
+		f.tick(300.0, w);
+		return f.sample(0, 0);
+	};
+	TrailWeather gale;   gale.windSpeed = 5.0f;                     // wind 1
+	TrailWeather half;   half.windSpeed = 3.0f;                     // wind 0.5
+	TrailWeather wet = gale;   wet.wetness = 1.0f;
+	TrailWeather rain = gale;  rain.precip = 1.0f; rain.raining = true;
+	const float start = 0.5f;
+	const float lostGale = start - remaining(gale);
+	const float lostHalf = start - remaining(half);
+	CHECK(lostGale > 0.1f);
+	CHECK(lostHalf == doctest::Approx(lostGale * 0.25f).epsilon(0.1));   // (1/2)^2
+	CHECK(start - remaining(wet)  < lostGale * 0.2f);
+	CHECK(start - remaining(rain) < lostGale * 0.2f);
+	// Snow does not heal from sand's wind: a snow print under the same gale uses hDrift (1/1800), sand hWind (1/900).
+	TrailField s;
+	s.stampEllipse(0, 0, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Snow);
+	s.tick(0.0, gale);
+	s.tick(300.0, gale);
+	CHECK(start - s.sample(0, 0) == doctest::Approx(300.0f / 1800.0f).epsilon(0.05));
+}
+
+TEST_CASE("TrailField: a long pause heals in one go and stays bounded")
+{
+	TrailField f;
+	f.stampEllipse(0, 0, 0.5f, 0.5f, 0.0f, 1.0f, TrailSurface::Snow);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	f.tick(0.0, snow);
+	f.tick(1.0e7, snow);                     // 115 days
+	CHECK(f.pageCount() == 0u);
+}
+
+TEST_CASE("TrailClipmap: registers an untouched window, writes prints into the torus, rewrites only on change")
+{
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_trail_clipmap_test";
+	std::filesystem::create_directories(dir);
+	ContentManager cm(dir.string());
+	HE::TrailField field;
+	HE::TrailClipmap map;
+	glm::vec3 cam(10.0f, 5.0f, 20.0f);
+
+	// First call: the texture exists (so the material can resolve the path) and holds nothing.
+	CHECK(map.update(cm, nullptr, field, cam));
+	REQUIRE(map.textureId() != HE::UUID{});
+	const TextureAsset* tex = cm.getTexture(map.textureId());
+	REQUIRE(tex);
+	CHECK(tex->width == 512u);
+	CHECK(tex->height == 512u);
+	CHECK(tex->channels == 4u);
+	CHECK_FALSE(tex->srgb);
+	CHECK(cm.idForPath(HE::kTrailTexturePath) == map.textureId());
+	for (size_t i = 0; i < tex->data.size(); i += 4 * 997)
+	{
+		CHECK(tex->data[i + 0] == 128);                 // R = 128 - 127 v: untouched is the middle
+		CHECK(tex->data[i + 1] == 128);                 // flat
+		CHECK(tex->data[i + 2] == 128);
+		CHECK(tex->data[i + 3] == 128);                 // the alpha marker
+	}
+	// Nothing changed, nothing near: no rewrite, also when the camera walks.
+	CHECK_FALSE(map.update(cm, nullptr, field, cam));
+	CHECK_FALSE(map.update(cm, nullptr, field, glm::vec3(30.0f, 5.0f, 20.0f)));
+
+	// A print under the camera lands at the texel of its world position, modulo the window.
+	field.stampEllipse(10.0f, 20.0f, 0.5f, 0.5f, 0.0f, 1.0f, HE::TrailSurface::Snow);
+	CHECK(map.update(cm, nullptr, field, cam));
+	tex = cm.getTexture(map.textureId());
+	REQUIRE(tex);
+	const auto px = [&](float x, float z) {
+		const int ix = static_cast<int>(std::floor(x / 0.25f)), iz = static_cast<int>(std::floor(z / 0.25f));
+		const int u = ((ix % 512) + 512) % 512, v = ((iz % 512) + 512) % 512;
+		return &tex->data[(static_cast<size_t>(v) * 512 + u) * 4];
+	};
+	CHECK(px(10.1f, 20.1f)[0] < 20);                    // deep pit: R near 1
+	CHECK(px(10.1f, 20.1f)[3] == 128);
+	CHECK(px(40.0f, 20.0f)[0] == 128);                  // far from the print
+	// The rim leans toward the pit: east of the centre the depth falls with x, so G < 128, west G > 128.
+	CHECK(px(10.4f, 20.1f)[1] < 128);
+	CHECK(px(9.6f, 20.1f)[1] > 128);
+	CHECK(px(10.1f, 20.45f)[2] < 128);                  // south of it: B < 128
+	// The same world texel one window (128 m) away shares the pixel: the wrap the shader relies on.
+	CHECK(px(10.1f + 128.0f, 20.1f) == px(10.1f, 20.1f));
+
+	// No new change: no rewrite while the camera stays, and a small step (inside the window's middle) rewrites nothing
+	// either: only moving more than 6 m re-centres the window (and then rewrites it, something is near).
+	CHECK_FALSE(map.update(cm, nullptr, field, cam));
+	CHECK_FALSE(map.update(cm, nullptr, field, glm::vec3(10.5f, 5.0f, 20.0f)));
+	CHECK(map.update(cm, nullptr, field, glm::vec3(20.0f, 5.0f, 20.0f)));
+	tex = cm.getTexture(map.textureId());
+	CHECK(px(10.1f, 20.1f)[0] < 20);                    // the print is where it was: the world-aligned torus did not move
+
+	// A second print somewhere else in the window rewrites only its tiles, and the first one stays.
+	field.stampEllipse(40.0f, 20.0f, 0.5f, 0.5f, 0.0f, 1.0f, HE::TrailSurface::Snow);
+	CHECK(map.update(cm, nullptr, field, glm::vec3(20.0f, 5.0f, 20.0f)));
+	tex = cm.getTexture(map.textureId());
+	CHECK(px(40.1f, 20.1f)[0] < 20);
+	CHECK(px(10.1f, 20.1f)[0] < 20);
+	CHECK_FALSE(map.update(cm, nullptr, field, glm::vec3(20.0f, 5.0f, 20.0f)));
+	cam = glm::vec3(20.0f, 5.0f, 20.0f);
+	// A healed field clears the picture once, then stays quiet.
+	HE::TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	field.tick(0.0, snow);
+	field.tick(500.0, snow);
+	CHECK(map.update(cm, nullptr, field, cam));
+	CHECK(cm.getTexture(map.textureId())->data[(256 * 512 + 256) * 4] == 128);
+	CHECK_FALSE(map.update(cm, nullptr, field, cam));
+	std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("TrailField: pressing leaves a pit and nothing else, plowing drags a groove with a heap on both sides")
+{
+	// Pressed: a capsule of pits, no heap anywhere (the field never goes negative).
+	TrailField press;
+	press.stampCapsule(0.0f, 10.0f, 20.0f, 10.0f, 0.4f, 0.8f, TrailSurface::Snow);
+	for (float z = 8.0f; z <= 12.0f; z += 0.2f)
+		for (float x = -1.0f; x <= 21.0f; x += 1.3f)
+			CHECK(press.sample(x, z) >= 0.0f);
+
+	// Plowed along +X at z = 10: groove radius 0.4, berms 0.5 m wide and 0.5 tall beside it.
+	TrailField plow;
+	plow.plowCapsule(0.0f, 10.0f, 20.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(plow.sample(10.0f, 10.0f) == doctest::Approx(0.8f).epsilon(0.03));       // the groove: a pit
+	CHECK(plow.sample(10.0f, 10.65f) < -0.2f);                                       // a heap on the +Z side ...
+	CHECK(plow.sample(10.0f, 9.35f) < -0.2f);                                        // ... and on the -Z side
+	CHECK(plow.sample(10.0f, 11.5f) == 0.0f);                                        // none farther out
+	CHECK(plow.sample(10.0f, 10.65f) == doctest::Approx(plow.sample(10.0f, 9.35f)).epsilon(0.1));   // symmetric
+	// Continuous: no gap along the groove, and the heap runs the whole length.
+	for (float x = 1.0f; x < 19.0f; x += 0.9f)
+	{
+		CHECK(plow.sample(x, 10.0f) > 0.5f);
+		CHECK(plow.sample(x, 10.65f) < -0.1f);
+	}
+	// The gradient across a heap points up its far flank: the value falls (more negative) toward the crest.
+	CHECK(plow.gradient(10.0f, 10.5f).y < 0.0f);                                     // groove side of the heap: v falls with z
+	CHECK(plow.gradient(10.0f, 10.9f).y > 0.0f);                                     // outer side: v rises back to 0
+
+	// Dragging in many small steps (one per frame) makes the same track as one long segment, and the next
+	// stretch clears the heap at the front of the previous one (a pit wins).
+	TrailField steps;
+	for (float x = 0.0f; x < 20.0f; x += 0.3f)
+		steps.plowCapsule(x, 10.0f, x + 0.3f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(steps.sample(10.0f, 10.0f) == doctest::Approx(0.8f).epsilon(0.03));
+	CHECK(steps.sample(10.0f, 10.65f) < -0.2f);
+	CHECK(steps.sample(10.0f, 10.0f) > 0.0f);                                        // not buried by the berm of a later step
+
+	// A pit overwrites a heap; a heap never grows on a pit.
+	TrailField mix;
+	mix.plowCapsule(0.0f, 10.0f, 20.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(mix.sample(10.0f, 10.65f) < -0.2f);
+	mix.stampEllipse(10.0f, 10.65f, 0.3f, 0.3f, 0.0f, 0.6f, TrailSurface::Snow);    // a foot in the heap
+	CHECK(mix.sample(10.0f, 10.65f) > 0.3f);
+	const float pit = mix.sample(10.0f, 10.0f);
+	mix.plowCapsule(0.0f, 10.65f, 20.0f, 10.65f, 0.2f, 0.2f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(mix.sample(10.0f, 10.0f) >= pit * 0.9f);                                   // the old groove stays a pit
+
+	// A degenerate plow (no berm width) is a plain groove; bad input does nothing.
+	TrailField bare;
+	bare.plowCapsule(0, 0, 5, 0, 0.4f, 0.8f, 0.0f, 0.5f, TrailSurface::Sand);
+	CHECK(bare.sample(2.0f, 0.65f) == 0.0f);
+	bare.plowCapsule(0, 0, 5, 0, 0.0f, 0.8f, 0.5f, 0.5f, TrailSurface::Sand);
+	CHECK(bare.activeTexels() > 0u);
+}
+
+TEST_CASE("TrailField: heaps slump back to nothing like pits fill, and the clipmap shows them above the middle")
+{
+	TrailField f;
+	f.plowCapsule(0.0f, 10.0f, 10.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	CHECK(f.sample(5.0f, 10.65f) < -0.2f);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	f.tick(0.0, snow);
+	f.tick(60.0, snow);                       // half a minute: -0.5 at 1/120 per second
+	CHECK(f.sample(5.0f, 10.65f) > -0.01f);   // the heap (<= 0.5 tall) is gone
+	CHECK(f.sample(5.0f, 10.0f) == doctest::Approx(0.3f).epsilon(0.1));   // the pit only lost 0.5 of its 0.8
+	f.tick(500.0, snow);
+	CHECK(f.pageCount() == 0u);               // everything healed, the page is freed
+
+	// Clipmap: R above 128 = heap, below = pit.
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_trail_clipmap_heap_test";
+	std::filesystem::create_directories(dir);
+	ContentManager cm(dir.string());
+	TrailField g;
+	g.plowCapsule(0.0f, 10.0f, 10.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	HE::TrailClipmap map;
+	map.update(cm, nullptr, g, glm::vec3(5.0f, 5.0f, 10.0f));
+	const TextureAsset* tex = cm.getTexture(map.textureId());
+	REQUIRE(tex);
+	const auto px = [&](float x, float z) {
+		const int ix = static_cast<int>(std::floor(x / 0.25f)), iz = static_cast<int>(std::floor(z / 0.25f));
+		return &tex->data[(static_cast<size_t>(((iz % 512) + 512) % 512) * 512 + ((ix % 512) + 512) % 512) * 4];
+	};
+	CHECK(px(5.1f, 10.1f)[0] < 40);           // the groove: a pit
+	CHECK(px(5.1f, 10.65f)[0] > 150);         // the heap: above the middle
+	CHECK(px(5.1f, 10.65f)[3] == 128);
+	std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("TrailField: region versions say where the ground changed, also after a page healed away")
+{
+	TrailField f;
+	CHECK(f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f) == 0u);
+	f.stampEllipse(10.0f, 10.0f, 0.5f, 0.5f, 0.0f, 0.8f, TrailSurface::Snow);
+	const uint64_t a = f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f);
+	CHECK(a > 0u);
+	CHECK(f.regionVersion(300.0f, 300.0f, 350.0f, 350.0f) == 0u);        // another page: untouched
+	f.stampEllipse(300.0f, 300.0f, 0.5f, 0.5f, 0.0f, 0.8f, TrailSurface::Snow);
+	CHECK(f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f) == a);               // the first rectangle did not change
+	CHECK(f.regionVersion(300.0f, 300.0f, 350.0f, 350.0f) > a);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	f.tick(0.0, snow);
+	f.tick(500.0, snow);                                                   // everything healed, both pages freed
+	CHECK(f.pageCount() == 0u);
+	CHECK(f.regionVersion(0.0f, 0.0f, 50.0f, 50.0f) > a);                 // a mesh built with the pit is told it is gone
+}
+
+TEST_CASE("TrailWindow reads like the field")
+{
+	TrailField f;
+	f.plowCapsule(0.0f, 10.0f, 10.0f, 10.0f, 0.4f, 0.8f, 0.5f, 0.5f, TrailSurface::Snow);
+	const HE::TrailWindow w = f.window(-1.0f, 8.0f, 11.0f, 12.0f);
+	CHECK(w.any());
+	for (float x = 0.5f; x < 10.0f; x += 1.1f)
+		for (float z = 9.0f; z < 11.5f; z += 0.13f)
+			CHECK(w.sample(x, z) == doctest::Approx(f.sample(x, z)).epsilon(1e-4));
+	CHECK(w.sample(500.0f, 500.0f) == 0.0f);                              // outside the copy
+	CHECK_FALSE(f.window(100.0f, 100.0f, 110.0f, 110.0f).any());
+}
+
+TEST_CASE("Refined terrain chunk: a height offset lowers pits and raises heaps, tilts the normals, deepens the skirt")
+{
+	const std::vector<float> flat(33u * 33u, 0.0f);
+	TerrainDisplacementMap none;
+	// A pit of 0.3 m around the chunk centre and a 0.2 m ridge along u = 0.75.
+	TerrainHeightOffset off;
+	off.maxAbs = 0.3f;
+	off.fn = [](float u, float v) {
+		const float du = u - 0.5f, dv = v - 0.5f;
+		float h = -0.3f * std::max(0.0f, 1.0f - std::sqrt(du * du + dv * dv) / 0.1f);
+		h += 0.2f * std::max(0.0f, 1.0f - std::fabs(u - 0.75f) / 0.05f);
+		return h;
+	};
+	const StaticMeshAsset plain = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, nullptr);
+	const StaticMeshAsset shown = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, &off);
+	REQUIRE(plain.vertices.size() == shown.vertices.size());
+	const size_t N = 65;
+	auto y = [&](const StaticMeshAsset& m, size_t i, size_t j) { return m.vertices[(j * N + i) * 3 + 1]; };
+	CHECK(y(plain, 32, 32) == 0.0f);
+	CHECK(y(shown, 32, 32) == doctest::Approx(-0.3f).epsilon(0.02));    // the pit's floor
+	CHECK(y(shown, 48, 32) == doctest::Approx(0.2f).epsilon(0.05));     // the ridge's crest (u = 0.75)
+	CHECK(y(shown, 4, 4) == 0.0f);                                       // untouched ground stays
+	// The wall of the pit leans toward its floor: a vertex east of the centre has a normal with x < 0 ... in the
+	// engine's convention n = (-gx, 1, -gz), the height rises toward +x there, so nx < 0.
+	const size_t k = (32 * N + 34) * 3;
+	CHECK(shown.normals[k + 0] < -0.05f);
+	CHECK(plain.normals[k + 0] == doctest::Approx(0.0f).epsilon(1e-3));
+	// No offset, an empty one or maxAbs 0: the plain mesh, bit for bit.
+	TerrainHeightOffset inert;
+	const StaticMeshAsset same = generateTerrainChunkMeshTessellated(flat, 33, 32.0f, 32.0f, 0, 0, 1, 1, 65, 1.0f, none, &inert);
+	CHECK(same.vertices == plain.vertices);
+	CHECK(same.normals == plain.normals);
+}
+
+TEST_CASE("TrailField: save and load keep every texel, are small and deterministic, and refuse damaged input")
+{
+	TrailField f;
+	f.plowCapsule(-10.0f, -3.0f, 150.0f, -3.0f, 0.4f, 0.7f, 0.6f, 0.5f, TrailSurface::Snow);   // 160 m: across pages
+	f.stampEllipse(40.0f, 40.0f, 0.4f, 0.17f, 0.3f, 0.9f, TrailSurface::Sand);
+	f.tick(0.0, TrailWeather{});
+	f.tick(123.0, TrailWeather{});
+	const std::vector<uint8_t> blob = f.serialize();
+	CHECK(f.serialize() == blob);                                    // deterministic
+	CHECK(blob.size() < 200000u);                                    // 160 m of track in a couple of hundred KB, not 3 x 512 KB dense
+	TrailField g;
+	REQUIRE(g.deserialize(blob.data(), blob.size()));
+	CHECK(g.pageCount() == f.pageCount());
+	CHECK(g.clock() == f.clock());
+	CHECK(g.activeTexels() == f.activeTexels());
+	for (float x = -12.0f; x < 152.0f; x += 0.37f)
+		for (float z = -5.0f; z < -1.0f; z += 0.11f)
+			CHECK(g.sample(x, z) == f.sample(x, z));
+	CHECK(g.sample(40.0f, 40.0f) == f.sample(40.0f, 40.0f));
+	CHECK(g.serialize() == blob);                                    // a loaded field saves the same bytes
+	// An empty field round-trips, and a field that was loaded can be changed (versions work again).
+	TrailField empty, e2;
+	const std::vector<uint8_t> eb = empty.serialize();
+	REQUIRE(e2.deserialize(eb.data(), eb.size()));
+	CHECK(e2.pageCount() == 0u);
+	g.stampEllipse(0.0f, 0.0f, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Snow);
+	CHECK(g.regionVersion(-1.0f, -1.0f, 1.0f, 1.0f) > 0u);
+
+	// Damaged input: wrong magic, truncation at every length, an absurd page count, a run that overshoots the page.
+	TrailField h;
+	h.stampEllipse(1.0f, 1.0f, 0.5f, 0.5f, 0.0f, 0.5f, TrailSurface::Snow);
+	const size_t before = h.activeTexels();
+	std::vector<uint8_t> bad = blob;
+	bad[0] ^= 0xFF;
+	CHECK_FALSE(h.deserialize(bad.data(), bad.size()));
+	CHECK_FALSE(h.deserialize(nullptr, 0));
+	for (size_t n = 0; n < blob.size(); n += blob.size() / 40 + 1)
+		CHECK_FALSE(h.deserialize(blob.data(), n));
+	std::vector<uint8_t> huge = blob;
+	huge[12] = huge[13] = huge[14] = 0xFF; huge[15] = 0x7F;           // page count
+	CHECK_FALSE(h.deserialize(huge.data(), huge.size()));
+	std::vector<uint8_t> overshoot = blob;
+	overshoot[24 + 5] = 0xFF; overshoot[24 + 6] = 0xFF; overshoot[24 + 7] = 0xFF; overshoot[24 + 8] = 0x7F;   // first token's zero run
+	CHECK_FALSE(h.deserialize(overshoot.data(), overshoot.size()));
+	CHECK(h.activeTexels() == before);                                // a refusal changes nothing
+}
+
+TEST_CASE("TrailField: catching up on healing that passed while nothing ticked")
+{
+	TrailField f;
+	f.stampEllipse(10.0f, 10.0f, 0.5f, 0.5f, 0.0f, 0.6f, TrailSurface::Snow);
+	TrailWeather snow;
+	snow.precip = 1.0f; snow.snowing = true;
+	f.catchUp(30.0, snow);                                            // a quarter of 120 s at 1/120 per second: -0.25
+	CHECK(f.sample(10.0f, 10.0f) == doctest::Approx(0.35f).epsilon(0.03));
+	f.catchUp(0.0, snow);                                             // nothing passed: nothing moves
+	f.catchUp(-5.0, snow);
+	CHECK(f.sample(10.0f, 10.0f) == doctest::Approx(0.35f).epsilon(0.03));
+	f.catchUp(1.0e9, snow);                                           // a week offline: capped at a day, and a day is plenty
+	CHECK(f.pageCount() == 0u);
+	TrailField calm;
+	calm.stampEllipse(10.0f, 10.0f, 0.5f, 0.5f, 0.0f, 0.6f, TrailSurface::Snow);
+	calm.catchUp(86400.0, TrailWeather{});                            // dry and windless: a print lasts
+	CHECK(calm.sample(10.0f, 10.0f) == doctest::Approx(0.6f).epsilon(0.02));
+}
+
+TEST_CASE("Trail API: press leaves a pit, drag a groove with heaps, queries answer, rows reach the script frontends")
+{
+	HorizonWorld world;
+	HE::api::Ctx c;
+	c.world = &world;
+	const auto& reg = HE::api::registry();
+	auto row = [&](const char* id) -> const HE::api::ApiFn* {
+		for (const HE::api::ApiFn& f : reg) if (std::string(f.id) == id) return &f;
+		return nullptr;
+	};
+	for (const char* id : { "trail.footprint", "trail.press", "trail.drag", "trail.depthAt", "trail.heightAt",
+	                        "trail.clear", "trail.save", "trail.load", "trail.pageCount" })
+		CHECK_MESSAGE(row(id) != nullptr, id);
+	CHECK(HE::api::isScriptGroup("trail"));
+	using V = HorizonCode::Value;
+
+	// No world, no marks, queries answer 0.
+	HE::api::Ctx none;
+	HE::api::trail::footprint(none, 0, 0, 1, 1, 0, 1, 0);
+	CHECK(HE::api::trail::depthAt(none, 0, 0) == 0.0f);
+	CHECK_FALSE(HE::api::trail::save(none));
+
+	// A footprint through the C++ function and a drag through the registry row.
+	HE::api::trail::footprint(c, 10.125f, 10.125f, 1.0f, 0.5f, 0.0f, 0.8f, 0);   // the field's texel is 0.25 m: a print needs about a texel to show
+	CHECK(HE::api::trail::pageCount(c) == 1);
+	CHECK(HE::api::trail::depthAt(c, 10.125f, 10.125f) == doctest::Approx(0.8f).epsilon(0.05));
+	CHECK(HE::api::trail::heightAt(c, 10.125f, 10.125f) < -0.2f);                  // a pit lowers the ground
+	row("trail.drag")->invoke(c, { V::ofFloat(20), V::ofFloat(30), V::ofFloat(30), V::ofFloat(30), V::ofFloat(0.4f),
+	                               V::ofFloat(0.7f), V::ofFloat(0.6f), V::ofFloat(0.5f), V::ofInt(1) });
+	CHECK(row("trail.depthAt")->invoke(c, { V::ofFloat(25), V::ofFloat(30) })[0].f > 0.5f);
+	CHECK(row("trail.depthAt")->invoke(c, { V::ofFloat(25), V::ofFloat(30.65f) })[0].f == 0.0f);   // the heap is not "deep"
+	CHECK(row("trail.heightAt")->invoke(c, { V::ofFloat(25), V::ofFloat(30.65f) })[0].f > 0.05f);  // ... it is high
+	// A press sets down pits only.
+	row("trail.press")->invoke(c, { V::ofFloat(40), V::ofFloat(40), V::ofFloat(50), V::ofFloat(40), V::ofFloat(0.3f), V::ofFloat(0.6f), V::ofInt(0) });
+	CHECK(row("trail.heightAt")->invoke(c, { V::ofFloat(45), V::ofFloat(40.4f) })[0].f == 0.0f);
+
+	// Save / load through the world's JSON document: the same marks, healing applied for the time that passed.
+	const std::string doc = TrailSystem::toJson(world);
+	CHECK_FALSE(doc.empty());
+	HorizonWorld other;
+	const float before = HE::api::trail::depthAt(c, 10.125f, 10.125f);
+	REQUIRE(TrailSystem::fromJson(other, doc, 0.0, nullptr));
+	HE::api::Ctx c2; c2.world = &other;
+	CHECK(HE::api::trail::depthAt(c2, 10.125f, 10.125f) == before);
+	CHECK(HE::api::trail::pageCount(c2) == HE::api::trail::pageCount(c));
+	// An hour later in snowfall, the pits have filled.
+	WeatherComponent snow;
+	snow.curPrecip = 1.0f; snow.curPrecipType = PrecipType::Snow;
+	HorizonWorld later;
+	REQUIRE(TrailSystem::fromJson(later, doc, 3600.0, &snow));
+	HE::api::Ctx c3; c3.world = &later;
+	CHECK(HE::api::trail::pageCount(c3) == 0);
+	// Not one of ours: refused, nothing touched.
+	CHECK_FALSE(TrailSystem::fromJson(other, "not json", 0.0, nullptr));
+	CHECK_FALSE(TrailSystem::fromJson(other, "{\"v\":2,\"data\":\"AAAA\"}", 0.0, nullptr));
+	CHECK_FALSE(TrailSystem::fromJson(other, "{\"v\":1,\"data\":\"AAAAAAAA\"}", 0.0, nullptr));
+	CHECK(HE::api::trail::depthAt(c2, 10.125f, 10.125f) == before);
+	// Clean ground is a document too, and loading it clears.
+	HorizonWorld clean;
+	const std::string cleanDoc = TrailSystem::toJson(clean);
+	CHECK_FALSE(cleanDoc.empty());
+	REQUIRE(TrailSystem::fromJson(other, cleanDoc, 0.0, nullptr));
+	CHECK(HE::api::trail::pageCount(c2) == 0);
+	// Without an active save the slot cannot be written or read.
+	CHECK_FALSE(HE::api::trail::save(c));
+	CHECK_FALSE(HE::api::trail::load(c, 0.0f));
+	HE::api::trail::clear(c);
+	CHECK(HE::api::trail::pageCount(c) == 0);
+}
+
+TEST_CASE("Refined terrain chunk, cached: updating only the changed vertices equals building it again, bit for bit")
+{
+	const uint32_t res = 33;
+	std::vector<float> field(static_cast<size_t>(res) * res);
+	for (uint32_t z = 0; z < res; ++z)
+		for (uint32_t x = 0; x < res; ++x)
+			field[static_cast<size_t>(z) * res + x] = std::sin(x * 0.4f) * 1.5f + std::cos(z * 0.3f) * 2.0f;
+	const TerrainDisplacementMap none;
+	const uint32_t N = 65;
+	// A world of 32 m: one chunk is the whole terrain (u, v in 0..1), 0.5 m per refined cell.
+	auto offsetOf = [](const HE::TrailWindow* win) {
+		TerrainHeightOffset off;
+		off.maxAbs = 0.3f;
+		off.fn = [win](float u, float v) { return -win->sample(-16.0f + u * 32.0f, -16.0f + v * 32.0f) * 0.3f; };
+		return off;
+	};
+	HE::TrailField tf;
+	tf.plowCapsule(-10.0f, -3.0f, 4.0f, -3.0f, 0.5f, 0.7f, 0.8f, 0.55f, TrailSurface::Snow);
+	HE::TrailWindow w1 = tf.window(-16.0f, -16.0f, 16.0f, 16.0f);
+	TerrainHeightOffset off1 = offsetOf(&w1);
+	TerrainTessCache cache;
+	StaticMeshAsset mesh = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, &off1, cache);
+	REQUIRE(cache.valid());
+	REQUIRE(mesh.vertices.size() == (static_cast<size_t>(N) * N + 4 * (N - 1)) * 3);
+
+	// Rebuilding with the same offset gives the same mesh (determinism), and the whole-grid update reproduces it.
+	TerrainTessCache cache2;
+	StaticMeshAsset again = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, &off1, cache2);
+	CHECK(again.vertices == mesh.vertices);
+	CHECK(again.normals == mesh.normals);
+	StaticMeshAsset whole = mesh;
+	applyTerrainHeightOffset(whole, cache, &off1, 0, 0, static_cast<int>(N) - 1, static_cast<int>(N) - 1);
+	CHECK(whole.vertices == mesh.vertices);
+	CHECK(whole.normals == mesh.normals);
+	CHECK(mesh.vertices[(26 * N + 28) * 3 + 1] < cache.baseY[26 * N + 28] - 0.1f);   // on the groove (x -2, z -3): the offset is in the mesh
+
+	// A second track appears elsewhere. The fresh build and the partial update agree everywhere.
+	tf.plowCapsule(2.0f, 6.0f, 12.0f, 9.0f, 0.5f, 0.7f, 0.8f, 0.55f, TrailSurface::Snow);
+	HE::TrailWindow w2 = tf.window(-16.0f, -16.0f, 16.0f, 16.0f);
+	TerrainHeightOffset off2 = offsetOf(&w2);
+	TerrainTessCache cacheFresh;
+	const StaticMeshAsset fresh = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, &off2, cacheFresh);
+	// grid cells that cover x 0..13, z 4..11 (cell = 0.5 m, origin -16): i = 32..60, j = 40..54, plus a margin of 2
+	applyTerrainHeightOffset(mesh, cache, &off2, 30, 38, 62, 56);
+	CHECK(mesh.vertices == fresh.vertices);
+	CHECK(mesh.normals == fresh.normals);
+	CHECK(mesh.uvs == fresh.uvs);
+	CHECK(mesh.indices == fresh.indices);
+
+	// Healed away: updating the region with no offset gives the plain chunk back, skirt included.
+	TerrainTessCache plainCache;
+	const StaticMeshAsset plain = generateTerrainChunkMeshTessellatedCached(field, res, 32.0f, 32.0f, 0, 0, 1, 1, N, 1.0f, none, nullptr, plainCache);
+	applyTerrainHeightOffset(mesh, cache, nullptr, 0, 0, static_cast<int>(N) - 1, static_cast<int>(N) - 1);
+	// (the cached chunk's skirt was cut for an offset of 0.3 m, the plain one without: compare the grid and the normals)
+	for (size_t gi = 0; gi < static_cast<size_t>(N) * N; ++gi)
+	{
+		CHECK(mesh.vertices[gi * 3 + 1] == plain.vertices[gi * 3 + 1]);
+		CHECK(mesh.normals[gi * 3 + 0] == plain.normals[gi * 3 + 0]);
+	}
+	// A region outside the chunk or a mesh the cache does not belong to changes nothing.
+	StaticMeshAsset untouched = mesh;
+	applyTerrainHeightOffset(untouched, cache, &off2, 500, 500, 600, 600);
+	CHECK(untouched.vertices == mesh.vertices);
+}
+
+// A timing probe, not a check: run with `he_tests --no-skip --test-case="*cost probe*"` (Thema 328 cost measurement).
+TEST_CASE("Refined terrain chunk cost probe" * doctest::skip())
+{
+	using Clock = std::chrono::steady_clock;
+	const uint32_t res = 129;
+	std::vector<float> field(static_cast<size_t>(res) * res);
+	for (uint32_t z = 0; z < res; ++z)
+		for (uint32_t x = 0; x < res; ++x)
+			field[static_cast<size_t>(z) * res + x] = std::sin(x * 0.2f) * 2.0f + std::cos(z * 0.13f) * 3.0f;
+	TrailField tf;
+	tf.plowCapsule(12.0f, -8.0f, 60.0f, -8.0f, 0.35f, 0.7f, 0.55f, 0.55f, TrailSurface::Snow);
+	auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+	const TerrainDisplacementMap none;
+	const int reps = 10;
+	auto time = [&](const char* what, auto&& fn) {
+		fn();
+		const auto a = Clock::now();
+		for (int i = 0; i < reps; ++i) fn();
+		std::printf("  %-44s %.3f ms\n", what, ms(a, Clock::now()) / reps);
+	};
+	// One chunk of a 128 m / 129 sample landscape: 32 cells at factor 4 -> 129 verts per side... use 257 like factor 4 on 64 cells.
+	const auto build = [&](const TerrainHeightOffset* off) {
+		return generateTerrainChunkMeshTessellated(field, res, 128.0f, 128.0f, 0.5f, 0.0f, 1.0f, 0.5f, 257, 1.0f, none, off);
+	};
+	time("chunk 257x257, no offset", [&] { auto m = build(nullptr); (void)m; });
+	HE::TrailWindow win = tf.window(0.0f, -64.0f, 64.0f, 0.0f);
+	std::printf("  window any=%d\n", win.any() ? 1 : 0);
+	TerrainHeightOffset off;
+	off.maxAbs = 0.3f;
+	off.fn = [&](float u, float v) { return -win.sample(-64.0f + u * 128.0f, -64.0f + v * 128.0f) * 0.3f; };
+	time("chunk 257x257, trail offset", [&] { auto m = build(&off); (void)m; });
+	time("TrailField::window (64 m rectangle)", [&] { auto w = tf.window(0.0f, -64.0f, 64.0f, 0.0f); (void)w; });
+	// The clipmap: a full rewrite (camera left the window's middle), and a dragged track's few tiles per frame.
+	const std::filesystem::path dir = std::filesystem::temp_directory_path() / "he_trail_probe";
+	std::filesystem::create_directories(dir);
+	ContentManager cm(dir.string());
+	HE::TrailClipmap map;
+	glm::vec3 cam(30.0f, 5.0f, -2.0f);
+	map.update(cm, nullptr, tf, cam);
+	int flip = 0;
+	time("clipmap full rewrite (re-centre)", [&] { cam.x += (flip++ & 1) ? -8.0f : 8.0f; map.update(cm, nullptr, tf, cam); });
+	float x = 30.0f;
+	time("clipmap per-frame drag (changed tiles)", [&] {
+		tf.plowCapsule(x, -8.0f, x + 0.25f, -8.0f, 0.35f, 0.7f, 0.55f, 0.55f, TrailSurface::Snow);
+		x += 0.25f;
+		map.update(cm, nullptr, tf, glm::vec3(30.0f, 5.0f, -2.0f));
+	});
+	time("copyWindow 512x512", [&] { std::vector<int16_t> v(512 * 512); tf.copyWindow(0, -256, 512, 512, v.data()); });
+	std::filesystem::remove_all(dir);
+}

@@ -7,7 +7,7 @@ Thema 207, Schritt 5. Vorgänger: `docs/material-graph-tessellation-backends-202
 ## Was neu ist
 
 - **Beispielmaterial `Engine/Materials/DisplacementDemo.hasset`** (`mat_gen`, Eintrag 1, UUID
-  `0x401/1`, angehängt): gesteppte Kissen, `|sin(π·4·u)·sin(π·4·v)| · Height` am Displacement-Pin,
+  `0x601/1`, angehängt; bis 2026-10-28 stand die Datei noch auf `0x401/1`, der UUID von T_Landscape_Grass_Normal): gesteppte Kissen, `|sin(π·4·u)·sin(π·4·v)| · Height` am Displacement-Pin,
   dieselbe Kissenform als Farbe (Fugen dunkel) und Rauheit. Knöpfe `Height` (0,15 m, Regler bis
   0,5 = Max Displacement), `TopColor`, `GrooveColor`. Tess: maxFactor 16, Fade 8–40 m.
   **Nur Sinus, kein Rauschen:** Wertrauschen hasht auf D3D12/Vulkan anders als auf D3D11/GL

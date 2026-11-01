@@ -23,6 +23,7 @@
 #include <Net/PortMapper.h>
 #include <Net/RelayFanout.h>
 #include <Net/RelayTransport.h>
+#include <Types/UUID.h>
 #include <Types/Enums.h>   // HE::AssetType — the .hasset header's real type
 
 #include <cstdint>
@@ -121,6 +122,39 @@ public:
 	// What a discovered session is compared against, so the join panel can say
 	// "a different project" before someone tries and is refused.
 	const std::string& projectId() const { return m_projectId; }
+
+	// What this project contains, for the join's content check (see
+	// HE::Net::ProjectFingerprint): asked when a session is opened or joined, so it
+	// reflects the files as they are then. Without one nothing is compared.
+	void setProjectFingerprintProvider(std::function<HE::Net::ProjectFingerprint()> fn)
+	{
+		m_fingerprintProvider = std::move(fn);
+	}
+
+	// ── Which asset is this key? ──
+	// A key names an asset by its path, and a path is not the asset: rename or move
+	// the file and a lock, a delta or a revision counter filed under the old path is
+	// about nothing any more. With these two set an asset that carries a UUID is
+	// addressed by it:
+	//   * its lock subject is derived from the UUID (HE::Net::assetUuidSubject), so
+	//     the lock — and the claim a tab holds on it — survives a rename untouched;
+	//   * a peer's frame is resolved by that subject to the asset's CURRENT key on
+	//     this machine before the path the frame carries is looked at, so an edit
+	//     that raced a rename still lands on the right file.
+	// An asset with no UUID (a C++ source, a folder, a file that has none yet), or
+	// one this machine does not have yet, keeps the path-derived subject. Both
+	// directions must answer from the same registry the peers share — the file's own
+	// header — which is why the editor wires them to the ContentManager.
+	using UuidForKey    = std::function<HE::UUID(const std::string& key)>;
+	using KeyForSubject = std::function<std::string(std::uint64_t subject)>;
+	void setAssetIdentityResolvers(UuidForKey uuidForKey, KeyForSubject keyForSubject)
+	{
+		m_uuidForKey    = std::move(uuidForKey);
+		m_keyForSubject = std::move(keyForSubject);
+	}
+	// The lock subject of an asset key: the UUID's when it has one, else the path's
+	// (assetSubject). Every lock, claim and frame in this class goes through here.
+	std::uint64_t subjectFor(const std::string& key) const;
 
 	// Fires after a received snapshot replaced the world. The editor must drop
 	// its selection and undo history here — both refer to entity handles that no
@@ -1562,6 +1596,24 @@ private:
 	// goes back unless a tab here holds it.
 	std::unordered_map<std::uint64_t, std::pair<std::string, std::string>> m_publishOnGrant;
 	std::function<std::string(const std::string&)> m_localPathForKey;
+	UuidForKey                                      m_uuidForKey;
+	KeyForSubject                                   m_keyForSubject;
+	std::function<HE::Net::ProjectFingerprint()>    m_fingerprintProvider;
+
+	// The key a peer's frame is about, on THIS machine: the asset the subject names
+	// if we have it (its current key, whatever path the sender used), else the path
+	// the frame carries. `byId` says which.
+	std::string resolveIncomingKey(std::uint64_t subject, const std::string& path,
+	                               bool& byId) const;
+	// What the revision counters are filed under: the subject for an asset addressed
+	// by its UUID (it does not change when the file does), else the path.
+	std::string revisionIdentity(std::uint64_t subject, const std::string& key,
+	                             bool byId) const;
+	// An approved rename has been carried out here: the bookkeeping that holds an
+	// asset by key (held locks, the subject→key table, answers, edit requests)
+	// follows it. Only for an asset whose subject did not change — a path-addressed
+	// one is a new subject by definition and keeps the old behaviour.
+	void rekeyAsset(const std::string& oldKey, const std::string& newKey, bool folder);
 	std::function<void(HE::Net::CollabSession::AssetOp, const std::string&,
 	                   const std::string&, bool)> m_onRemoteAssetOp;
 	std::function<void(HE::Net::CollabSession::AssetOp, std::uint64_t,

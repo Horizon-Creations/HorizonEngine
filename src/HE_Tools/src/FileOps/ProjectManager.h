@@ -229,6 +229,16 @@ struct ExportProfile
 	// 0 Fast (what every export did), 1 Balanced, 2 High — how hard the encoder
 	// works, whichever format Auto chose. See Hpak::PackSettings::textureQuality.
 	int textureQuality = 0;
+	// Block-compress texture ARRAYS (the Auto landscape albedo/normal/mask arrays, ~110 MB
+	// each as RGBA8) like every other texture. On by default; off ships them as RGBA8.
+	// See Hpak::PackSettings::cookTextureArrays.
+	bool compressTextureArrays = true;
+	// Pack only the assets the game reaches (the startup scene, the scenes something loads,
+	// scripts, the manifest, the engine's own needs) and leave out the rest. On by default.
+	// `alwaysIncludePatterns` are globs on the addressed path (like excludePatterns) that
+	// count as reached: for what a script builds a path for at run time.
+	bool onlyReferenced = true;
+	std::vector<std::string> alwaysIncludePatterns;
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by

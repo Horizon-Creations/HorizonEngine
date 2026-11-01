@@ -2,6 +2,8 @@
 #include <cstdint>
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/TrailSystem.h"
+#include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/CellRuntime.h"   // the streaming group
 #include "HorizonScene/TransformHierarchy.h"   // world position, composed on demand
 #include "HorizonScene/PhysicsWorld.h"
@@ -5425,6 +5427,70 @@ bool hasEntityState(const std::string& uuid)
 
 } // namespace save
 
+// ── Trails in snow and sand ──────────────────────────────────────────────────
+namespace trail {
+namespace {
+TrailSystem::Runtime* rtOf(Ctx& c) { return c.world ? &TrailSystem::runtime(*c.world) : nullptr; }
+HE::TrailSurface surfaceOf(int s) { return s == 1 ? HE::TrailSurface::Sand : HE::TrailSurface::Snow; }
+const WeatherComponent* weatherIn(Ctx& c)
+{
+    if (!c.world) return nullptr;
+    for (auto [e, wc] : c.world->registry().view<WeatherComponent>().each()) return &wc;
+    return nullptr;
+}
+constexpr const char* kSaveSlot = "__trails__";
+} // namespace
+
+void footprint(Ctx& c, float x, float z, float length, float width, float yawDegrees, float depth, int surface)
+{
+    if (TrailSystem::Runtime* rt = rtOf(c))
+        rt->field.stampEllipse(x, z, length * 0.5f, width * 0.5f, glm::radians(yawDegrees), depth, surfaceOf(surface));
+}
+void press(Ctx& c, float x0, float z0, float x1, float z1, float radius, float depth, int surface)
+{
+    if (TrailSystem::Runtime* rt = rtOf(c)) rt->field.stampCapsule(x0, z0, x1, z1, radius, depth, surfaceOf(surface));
+}
+void drag(Ctx& c, float x0, float z0, float x1, float z1, float radius, float depth,
+          float bermWidth, float bermHeight, int surface)
+{
+    if (TrailSystem::Runtime* rt = rtOf(c))
+        rt->field.plowCapsule(x0, z0, x1, z1, radius, depth, bermWidth, bermHeight, surfaceOf(surface));
+}
+float depthAt(Ctx& c, float x, float z)
+{
+    TrailSystem::Runtime* rt = rtOf(c);
+    return rt ? std::max(rt->field.sample(x, z), 0.0f) : 0.0f;
+}
+float heightAt(Ctx& c, float x, float z)
+{
+    TrailSystem::Runtime* rt = rtOf(c);
+    return rt ? -rt->field.sample(x, z) * rt->settings.displacementMeters : 0.0f;
+}
+void clear(Ctx& c)
+{
+    if (TrailSystem::Runtime* rt = rtOf(c)) rt->field.clear();
+}
+bool save(Ctx& c)
+{
+    if (!c.world) return false;
+    return ::HE::api::save::setEntityState(kSaveSlot, TrailSystem::toJson(*c.world));
+}
+bool load(Ctx& c, float elapsedSeconds)
+{
+    if (!c.world || save::activeId().empty()) return false;
+    const std::string json = save::entityState(kSaveSlot);
+    if (json.empty()) { clear(c); return true; }   // a save written before trails existed, or never saved: clean ground
+    const bool ok = TrailSystem::fromJson(*c.world, json, static_cast<double>(elapsedSeconds), weatherIn(c));
+    if (!ok) HE_LOG_WARN(Script, "%s", "trail.load: the save's trail slot is damaged, the trails were left as they are");
+    return ok;
+}
+int pageCount(Ctx& c)
+{
+    TrailSystem::Runtime* rt = rtOf(c);
+    return rt ? static_cast<int>(rt->field.pageCount()) : 0;
+}
+} // namespace trail
+
 // ── Scene transitions ────────────────────────────────────────────────────────
 namespace scene {
 namespace {
@@ -8055,6 +8121,35 @@ const std::vector<ApiFn>& registry()
         t.push_back({ "save.getStruct", "Save", false, {{"field", P::String}}, {{"value", P::Struct}}, "HE::api::save::getStructV",
             [](Ctx&, const VV& a){ return VV{ save::getStructV(aS(a, 0)) }; } });
 
+        // ── Trails in snow and sand (Thema 328) ──────────────────────────────
+        t.push_back({ "trail.footprint", "Trail", true,
+            {{"x", P::Float}, {"z", P::Float}, {"length", P::Float}, {"width", P::Float}, {"yaw", P::Float}, {"depth", P::Float}, {"surface", P::Int}}, {},
+            "HE::api::trail::footprint",
+            [](Ctx& c, const VV& a){ trail::footprint(c, aF(a,0), aF(a,1), aF(a,2), aF(a,3), aF(a,4), aF(a,5), aI(a,6)); return VV{}; } });
+        t.push_back({ "trail.press", "Trail", true,
+            {{"x0", P::Float}, {"z0", P::Float}, {"x1", P::Float}, {"z1", P::Float}, {"radius", P::Float}, {"depth", P::Float}, {"surface", P::Int}}, {},
+            "HE::api::trail::press",
+            [](Ctx& c, const VV& a){ trail::press(c, aF(a,0), aF(a,1), aF(a,2), aF(a,3), aF(a,4), aF(a,5), aI(a,6)); return VV{}; } });
+        t.push_back({ "trail.drag", "Trail", true,
+            {{"x0", P::Float}, {"z0", P::Float}, {"x1", P::Float}, {"z1", P::Float}, {"radius", P::Float}, {"depth", P::Float},
+             {"bermWidth", P::Float}, {"bermHeight", P::Float}, {"surface", P::Int}}, {},
+            "HE::api::trail::drag",
+            [](Ctx& c, const VV& a){ trail::drag(c, aF(a,0), aF(a,1), aF(a,2), aF(a,3), aF(a,4), aF(a,5), aF(a,6), aF(a,7), aI(a,8)); return VV{}; } });
+        t.push_back({ "trail.depthAt", "Trail", false, {{"x", P::Float}, {"z", P::Float}}, {{"depth", P::Float}},
+            "HE::api::trail::depthAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(trail::depthAt(c, aF(a,0), aF(a,1))) }; } });
+        t.push_back({ "trail.heightAt", "Trail", false, {{"x", P::Float}, {"z", P::Float}}, {{"meters", P::Float}},
+            "HE::api::trail::heightAt",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofFloat(trail::heightAt(c, aF(a,0), aF(a,1))) }; } });
+        t.push_back({ "trail.clear", "Trail", true, {}, {}, "HE::api::trail::clear",
+            [](Ctx& c, const VV&){ trail::clear(c); return VV{}; } });
+        t.push_back({ "trail.save", "Trail", true, {}, {{"ok", P::Bool}}, "HE::api::trail::save",
+            [](Ctx& c, const VV&){ return VV{ Value::ofBool(trail::save(c)) }; } });
+        t.push_back({ "trail.load", "Trail", true, {{"elapsedSeconds", P::Float}}, {{"ok", P::Bool}}, "HE::api::trail::load",
+            [](Ctx& c, const VV& a){ return VV{ Value::ofBool(trail::load(c, aF(a,0))) }; } });
+        t.push_back({ "trail.pageCount", "Trail", false, {}, {{"pages", P::Int}}, "HE::api::trail::pageCount",
+            [](Ctx& c, const VV&){ return VV{ Value::ofInt(trail::pageCount(c)) }; } });
+
         // Scene transitions (deferred; the app runtime executes the requests).
         // "hidden": unwired = false = present immediately (today's behavior); true
         // defers presentation — a hidden zone loads invisible until Show Zone, a
@@ -8552,6 +8647,11 @@ const std::vector<ApiFn>& registry()
             { "save.setString", "Save Set String" }, { "save.getString", "Save Get String" },
             { "save.setBool", "Save Set Bool" },     { "save.getBool", "Save Get Bool" },
             { "save.setStruct", "Save Set Struct" }, { "save.getStruct", "Save Get Struct" },
+            { "trail.footprint", "Trail Footprint" }, { "trail.press", "Trail Press" },
+            { "trail.drag", "Trail Drag" },           { "trail.depthAt", "Trail Depth At" },
+            { "trail.heightAt", "Trail Height At" },  { "trail.clear", "Clear Trails" },
+            { "trail.save", "Save Trails" },          { "trail.load", "Load Trails" },
+            { "trail.pageCount", "Trail Page Count" },
             { "scene.load", "Load Scene" },          { "scene.loadAdditive", "Load Scene Additive" },
             { "scene.unloadZone", "Unload Zone" },   { "scene.activate", "Activate Loaded Scene" },
             { "scene.hasPendingLevel", "Has Pending Scene" },
@@ -8768,7 +8868,7 @@ bool isScriptGroup(std::string_view group)
 {
     static constexpr std::string_view kGroups[] = { "math", "random", "time", "input",
                                                     "string", "camera", "env", "entity", "audio",
-                                                    "debug", "fs", "save", "scene", "player",
+                                                    "debug", "fs", "save", "trail", "scene", "player",
                                                     "animator", "movement", "locomotion",
                                                     // "particle" has no flat twin either:
                                                     // without it on this list a text script

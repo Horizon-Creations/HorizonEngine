@@ -79,6 +79,7 @@ public:
 	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
 	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	bool SupportsTessellation() const override { return m_tessSupported; }
+	std::string GIReflectionsInactiveReason() const override { return m_giReflWhyNot; }
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.
 	void InvalidateTexture(const HE::UUID& textureId) override;
@@ -1107,7 +1108,7 @@ private:
 	// the REAL sky - clouds, weather - drawn around the camera into six 128x128 faces every frame the reflections run.
 	// A reflection ray that hits nothing reads it, so a water surface mirrors the clouds; without it a miss returned
 	// nothing and the material fell back to the cloudless analytic heSkyEnv cube. HE_GIREFL_SKY=0 turns it off.
-	static constexpr int kSkyReflCubeSize = 128;
+	static constexpr int kSkyReflCubeSize = 512;
 	SkyUBO                m_skyReflUBO[2][6];
 	VkRenderPass          m_skyReflRP        = VK_NULL_HANDLE;
 	VkPipeline            m_skyReflPipe      = VK_NULL_HANDLE;
@@ -1749,6 +1750,7 @@ private:
 	int   m_giReflQuality        = 1;
 	bool  m_giReflBlurEnabled    = true;
 	bool  m_giReflPipesTried     = false; // one compile attempt per session
+	std::string m_giReflWhyNot;           // set when that attempt failed (GIReflectionsInactiveReason)
 	bool  m_giReflReady          = false; // m_giReflTex holds this frame's result
 	float m_giReflFrameSeed      = 0.0f;
 	VkDescriptorSetLayout m_giReflDSL   = VK_NULL_HANDLE; // compute: 3 SSBOs + 4 samplers + storage image + UBO
