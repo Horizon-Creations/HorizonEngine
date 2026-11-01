@@ -615,6 +615,7 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.cook = true; // always cook exports into the runtime-optimal form
     packSettings.textureCompression = settings.textureCompression;
     packSettings.textureQuality     = settings.textureQuality;
+    packSettings.cookTextureArrays  = settings.cookTextureArrays;
     packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;

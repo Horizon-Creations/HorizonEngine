@@ -675,6 +675,11 @@ struct TextureAsset : public RuntimeAsset
 	// block format, every slice and level encoded on its own. Written to the TXMI tail only
 	// when > 1, so every 2D asset keeps its exact bytes.
 	uint32_t             layers    = 1;
+
+	// Mean LINEAR colour of every slice, three floats per slice (CHUNK_TXSM), baked at pack
+	// time when an array is cooked to a format the CPU cannot read (BC7, ASTC). Empty on
+	// every loose asset and every 2D texture: the means are then read from the pixels.
+	std::vector<float>   sliceMeans;
 };
 
 struct ShaderAsset : public RuntimeAsset

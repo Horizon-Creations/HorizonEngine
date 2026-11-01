@@ -1,5 +1,8 @@
 # Export-Audit: was packt der Export, und wo steckt die Größe? (Thema 228, Schritt 1585)
 
+> **Stand 2026-11-01 (später):** Punkt 1 der Liste (Texturarrays komprimieren) ist umgesetzt, siehe
+> Abschnitt 7. Der Erreichbarkeitsfilter (Punkt 2) bleibt geplant und ist ausdrücklich nicht verworfen.
+
 Wiederholung des fehlgeschlagenen Audits (Schritt 1144). Lokal auf dem MacBook gemacht, ohne Hive
 (Thema gehört der Queen auf NN-RP01, Deadline abgelaufen). Nur gelesen und gemessen; Quelltext
 unverändert. Der ältere Plan `docs/asset-optimization-plan.md` bleibt gültig (Cook-Stand dort).
@@ -97,16 +100,49 @@ der Cook macht daraus BC7/ASTC/BC3 mit Mips (Plan 0.). Die Cook-Ersparnis dort i
 5. Graph-JSON/GLSL aus MTRL streichen, wenn PSHD vorhanden und kein Laufzeit-Konsument (erst klären, s. 4).
 6. Normal/Mask-Arrays mit BC5/BC4 statt BC7 (nur wenn sie Kanäle sparen), Audio als Vorbis, Mesh uint16.
 
+## 7. Umgesetzt: Texturarrays werden gecookt (Punkt 1)
+
+Der Export komprimiert jetzt auch Texture Arrays (`ExportSettings::cookTextureArrays`, Standard an,
+Schalter "Compress texture arrays" im Export-Dialog und im Profil, MCP-Argument `compressTextureArrays`).
+Das Hindernis war `giAutoLandscapeSliceMeans`: Es liest die Pixel, kann BC7/ASTC aber nicht dekodieren.
+Jetzt backt der Cook die Mittelwerte jeder Slice aus dem RGBA8 der Quelle in einen neuen optionalen
+Chunk `TXSM` (`HAsset.h`, `TextureAsset::sliceMeans`); die GI nimmt sie, wenn vorhanden, sonst liest sie
+wie bisher die Pixel (RGBA8, BC1/3/4/5). Gemeinsame Rechnung: `HE::textureArraySliceMean` /
+`bakeTextureArraySliceMeans` in `TextureBlockDecode.cpp`, gebackener und gelesener Wert sind identisch.
+
+**Gemessen** (`test_bench_landscape_arrays`, echte Arrays aus dem EngineContentCache, V=1, 5 Slices, Qualität 0):
+
+| Array | RGBA8 | ASTC 4x4 / BC7 | Encode ASTC / BC7 |
+|---|---|---|---|
+| Albedo | 111,85 MB | 27,96 MB | 4,1 s / 4,1 s |
+| Normal | 111,85 MB | 27,96 MB | 17,3 s / 4,5 s |
+| Mask | 111,85 MB | 27,96 MB | 1,8 s / 4,3 s |
+
+Drei Arrays: 335,5 MB → 83,9 MB (Development, Store: -251,6 MB). Shipping (zstd): die BC7-Arrays
+komprimieren mit `zstd -19` auf 20,9 + 15,9 + 17,8 = 54,6 MB, gegen 120,7 MB heute: etwa -66 MB, das
+Catania-Pak läge bei ca. 62 MB statt 128 MB (nicht neu exportiert, aus den Teilmessungen gerechnet).
+VRAM der Arrays -75 %. Bildabweichung (frühere Messung, Thema 180): 0,6 (ASTC) / 0,8 (BC7) mittlere Kanalstufen.
+
+**Getestet:** `test_texture_bcn.cpp` (Cook trägt die Means, exakt gleich den Pixel-Means; BC7/ASTC-Array ohne
+lesbare Pixel nimmt die gebackenen Werte; falsche Anzahl wird verworfen; Chunk überlebt Speichern/Laden;
+Textur ohne Chunk lädt wie vorher), `test_culling.cpp` (alter Pixelpfad unverändert). Ganze Suite: 6043 von 6044
+grün; der eine Fehler (`Disk registry: scanContentDirectory`, 7 statt 2) kommt vom echten EngineContentCache
+dieses Rechners (5 Assets zusätzlich) und hat mit der Änderung nichts zu tun.
+
+**Nicht verifiziert:** Sichtprüfung eines kompletten Exports auf der GPU; D3D11/D3D12/Vulkan (Array-Upload
+komprimierter Formate ist dort wie bei 2D-Texturen "blind", keine Windows/Linux-Maschine); ein neuer Voll-Export
+von Catania (Größen oben sind Teilmessungen). Normal-Arrays bleiben BC7/ASTC (BC5 würde Z verlieren).
+
 ## Handoff
 
-- **Topic / step:** 228, Schritt 1585 (Audit), lokal ohne Hive; danach 1586 (Filter)
-- **Branch / commit:** claude/landscape-3-0-multi-group-paint, dieses Dokument (pushed: siehe Commit)
-- **Done:** Pak-Aufbau am echten Export gemessen, Quelle der Größe gefunden (3 Arrays = 94 % des Shipping-Paks), Fehlen des Erreichbarkeitsfilters belegt.
-- **Files touched:** nur diese Datei.
-- **Verified:** Pak-TOC-Parser (Python) auf Catania Development + Shipping; Größen je Typ per HAsset-Header (`sizes.py`); Fundstellen oben gelesen.
-- **Not verified:** Wirkung des Cooks auf Größe (kein Build des Packers aktuell, `build/src/HE_Tools/hpak_packer` ist vom 11.10. und ohne Cook-Optionen); Laufzeitverbrauch von nodeGraphJson/GLSL; der Erreichbarkeits-Prototyp ist nur ein Python-Skript.
-- **Decisions taken:** Audit lokal ausgeführt, weil Hive-Dispatch gesperrt war.
-- **Decisions suggested, not taken:** Reihenfolge der Liste in 6.
-- **Pending:** Schritt 1586; Hive-Schritt 1144 (failed) auf skipped setzen, wenn das Thema zumachen soll.
-- **Traps:** `grep --include` in zsh bricht ab, `/usr/bin/grep` oder das Grep-Tool nehmen; Slice-Means-Leser (`GiAutoLandscape.cpp:71`) liest RGBA8.
-- **Next steps:** 1. Slice-Means beim Pack berechnen (`cookTexture`, HpakWriter.cpp:769) und `giAutoLandscapeSliceMeans` darauf umstellen. 2. `cookTextureArrays` im Export setzen und mit Catania neu messen. 3. Filter in `addDirectories` einbauen.
+- **Topic / step:** 228, Schritt 1585 (Audit, fertig) und Punkt 1 der Liste (Arrays, umgesetzt); Schritt 1586 (Filter) offen
+- **Branch / commit:** release/0.8.0 (pushed: siehe Commit)
+- **Done:** Audit-Bericht; Texturarrays werden beim Export komprimiert, GI-Mittelwerte kommen aus dem Pak (TXSM).
+- **Files touched:** `src/HE_Core/src/Hpak/HpakWriter.cpp` (cookTexture: Means backen), `src/HE_Core/src/ContentManager/TextureBlockDecode.cpp` (Mittelwert-Helfer), `src/HE_Core/src/ContentManager/ContentManager.cpp` (TXSM laden/speichern), `src/HE_Rendering/src/GiAutoLandscape.cpp` (baked bevorzugt), `src/HE_Core/include/Hpak/ProjectExporter.h` + `ProjectExporter.cpp` (Schalter), `src/HE_Tools/src/FileOps/ProjectManager.*` (Profilfeld), `src/HE_Editor/ExportDialogPanel.cpp`, `EditorHelp.cpp`, `McpToolsBuild.cpp`, `tests/test_texture_bcn.cpp`.
+- **Verified:** he_tests gebaut und gelaufen (6043/6044, der Fehler ist umgebungsbedingt, s. o.); Bench auf den echten Arrays; `editor_help_audit.py --check` grün; die drei Editor-Dateien per compdb `-fsyntax-only` ohne Fehler (HorizonEditor selbst nicht gebaut).
+- **Not verified:** siehe Abschnitt 7.
+- **Decisions taken:** Schalter standardmäßig an, weil die Arrays 94 % des Shipping-Paks sind. Means immer backen, auch bei BC3 (genauer und ohne Dekodieren).
+- **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
+- **Pending:** Schritt 1586 (Erreichbarkeitsfilter, bleibt Ziel); übrige Punkte der Liste (Startszene doppelt, Shader-Backends an Ziel koppeln, MTRL-Graph streichen).
+- **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
+- **Next steps:** 1. Catania neu exportieren (Editor, Profil Shipping) und die Pak-Größe gegen 128,3 MB messen, Bild auf Metal ansehen. 2. Schritt 1586: Filter in `HpakWriter::addDirectories`, Wurzeln aus `EngineDependencies.h`/`AssetRefScan.h`. 3. Startszene nicht doppelt packen.

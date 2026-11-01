@@ -8128,6 +8128,15 @@ namespace
 	  "No block compression: RGBA8 with the mip chain baked in. The exact "
 	  "pixels, at roughly four to eight times the size of a compressed texture.",
 	  "", "export#overview" },
+	{ "Export/Compress texture arrays", "Compress texture arrays",
+	  "Also block-compress texture arrays: the Auto landscape's albedo, normal "
+	  "and mask arrays, about 110 MB each as RGBA8 and by far the largest part "
+	  "of an exported game. They shrink to a quarter, in the pak and in video "
+	  "memory, at the same quality as every other compressed texture. The GI "
+	  "keeps its landscape colours: they are baked into the pak from the "
+	  "uncompressed pixels. Switch it off to ship the arrays as RGBA8. "
+	  "Needs a texture compression other than None. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Texture quality", "Texture quality",
 	  "How hard the encoder works on each texture. Fast is what every export "
 	  "did before this existed; Balanced tries every block partition; High adds "

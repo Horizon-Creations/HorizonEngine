@@ -310,6 +310,15 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			if (a.layers == 0) a.layers = 1;
 		}
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_PIXL)) a.data = c->data;
+		// Baked slice means (cooked arrays only). Dropped when the count disagrees with the
+		// slice count, so a stale chunk can never feed the GI a wrong colour.
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_TXSM))
+		{
+			size_t o = 0;
+			if (HAsset::Reader::readVec(c->data, o, a.sliceMeans) &&
+			    a.sliceMeans.size() != static_cast<size_t>(a.layers) * 3)
+				a.sliceMeans.clear();
+		}
 		handle = m_textureAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::Material:
@@ -2126,6 +2135,11 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		  if (a.layers > 1) HAsset::Writer::appendPOD(b, a.layers);
 		  w.addChunk(HAsset::CHUNK_TXMI,b.data(),b.size()); }
 		w.addChunk(HAsset::CHUNK_PIXL, a.data.data(), a.data.size());
+		if (!a.sliceMeans.empty())
+		{
+			std::vector<uint8_t> b; HAsset::Writer::appendVec(b, a.sliceMeans);
+			w.addChunk(HAsset::CHUNK_TXSM, b.data(), b.size());
+		}
 		break;
 	}
 	case HE::AssetType::Material:

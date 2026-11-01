@@ -219,10 +219,10 @@ struct PackSettings {
     // which is the whole point of changing it.
     uint8_t textureQuality = 0;
     // Also cook texture ARRAYS (layers > 1) to `textureCompression`, every slice and level
-    // encoded as it stands. Off: arrays ship RGBA8 as they always did. It is off because
-    // some readers still expect RGBA8 arrays in a shipped game (the GI's landscape slice
-    // means, giAutoLandscapeSliceMeans, cannot read BC7 or ASTC); whoever turns it on for
-    // the Auto landscape arrays has to cover that first. Part of the pack fingerprint.
+    // encoded as it stands. Off: arrays ship RGBA8 as they always did. The only CPU reader of
+    // array pixels, the GI landscape's slice means (giAutoLandscapeSliceMeans), cannot decode
+    // BC7 or ASTC; a cooked array therefore carries those means baked from its RGBA8 source
+    // (CHUNK_TXSM). Part of the pack fingerprint.
     bool cookTextureArrays = false;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`

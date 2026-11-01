@@ -84,6 +84,7 @@ static bool   s_exportCompileHC   = false;         // compile HorizonCode → C+
 static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
 static std::string s_exportTextureFormat = "Auto"; // Auto (per target GPU) | None (RGBA8)
 static int    s_exportTextureQuality = 0;          // 0 Fast, 1 Balanced, 2 High
+static bool   s_exportTextureArrays  = true;       // block-compress texture arrays too
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
 // The window + backend the exported game starts in. They are NOT part of the
@@ -533,6 +534,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportHcStop       = p.hcStopOnFailure;
 	s_exportTextureFormat  = p.textureFormat;
 	s_exportTextureQuality = p.textureQuality;
+	s_exportTextureArrays  = p.compressTextureArrays;
 	// Canonicalize via the enum round-trip. The platform is not read from disk
 	// any more (always Host); only project_build's one-run copy can name another.
 	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
@@ -559,6 +561,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.hcStopOnFailure    = s_exportHcStop;
 	p.textureFormat      = s_exportTextureFormat;
 	p.textureQuality     = s_exportTextureQuality;
+	p.compressTextureArrays = s_exportTextureArrays;
 }
 
 void open(AppContext& ctx)
@@ -1053,6 +1056,10 @@ void render(AppContext& ctx)
                 else
                     ImGui::TextDisabled("Auto: ASTC on Metal, BC3 on macOS OpenGL, BC7 on desktop. "
                                         "High encodes several times slower than Fast.");
+                ImGui::BeginDisabled(s_exportTextureFormat == "None");
+                EditorWidgets::checkbox("Compress texture arrays", &s_exportTextureArrays);
+                ImGui::EndDisabled();
+                EditorWidgets::helpForKey("Export/Compress texture arrays");
             }
 
             ImGui::Spacing();
@@ -1719,6 +1726,7 @@ void startExport(AppContext& ctx)
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
                 es.textureQuality     = static_cast<uint8_t>(std::clamp(s_exportTextureQuality, 0, 2));
+                es.cookTextureArrays  = s_exportTextureArrays;
                 // The settings the game boots with, shipped as a config.json next
                 // to its data. Built HERE, on the UI thread — it reads the editor's
                 // live configuration, which the export worker must not touch — and

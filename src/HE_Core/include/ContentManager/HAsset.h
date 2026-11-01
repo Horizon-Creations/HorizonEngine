@@ -106,6 +106,12 @@ inline constexpr uint32_t CHUNK_MSEC = makeChunkId('M','S','E','C'); // material
 // Texture
 inline constexpr uint32_t CHUNK_TXMI = makeChunkId('T','X','M','I'); // texture meta
 inline constexpr uint32_t CHUNK_PIXL = makeChunkId('P','I','X','L'); // pixel data
+// Texture ARRAY slice means: one linear RGB triple per slice (a length-prefixed float
+// vector, layers * 3 values). Baked at pack time from the RGBA8 source of an array that is
+// cooked to a block format, because BC7 / ASTC have no CPU decoder and the GI landscape
+// colours (giAutoLandscapeSliceMeans) must not depend on reading the pixels back.
+// OPTIONAL tail chunk (old files and every loose asset simply lack it): no version bump.
+inline constexpr uint32_t CHUNK_TXSM = makeChunkId('T','X','S','M');
 
 // Audio
 inline constexpr uint32_t CHUNK_AUMI = makeChunkId('A','U','M','I'); // audio meta

@@ -196,6 +196,10 @@ struct HE_API ExportSettings {
     // Hpak::PackSettings::textureQuality). Fast is what every export did before
     // the knob existed.
     uint8_t textureQuality = 0;
+    // Also block-compress texture ARRAYS (Hpak::PackSettings::cookTextureArrays). The GI
+    // landscape colours of such an array come from means baked at pack time (CHUNK_TXSM),
+    // so BC7 / ASTC arrays are safe to ship; off keeps them RGBA8.
+    bool cookTextureArrays = true;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a

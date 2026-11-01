@@ -4,6 +4,7 @@
 #include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
 #include <ContentManager/HAsset.h>
 #include <ContentManager/TextureArrayBuild.h> // slice math for cooked texture arrays
+#include <ContentManager/TextureBlockDecode.h> // baked per-slice means (CHUNK_TXSM)
 #include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
 #include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
@@ -846,6 +847,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     };
 
     std::vector<uint8_t> levels;
+    std::vector<float>   sliceMeans; // arrays only, see CHUNK_TXSM
     uint8_t  format = 0; // HE::TextureFormat value
     uint32_t count  = 1;
     if (layers > 1)
@@ -857,6 +859,10 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
         count = std::max<uint32_t>(1, existingMips);
         if (px->data.size() != static_cast<size_t>(layers) * HE::textureArraySliceBytes(width, height, count))
             return {};
+        // The CPU cannot read BC7 / ASTC back, and the GI landscape colours are the mean of
+        // five slices — so the means leave here, computed from the RGBA8 the encoder sees.
+        if (!HE::bakeTextureArraySliceMeans(px->data.data(), px->data.size(), width, height, count,
+                                            layers, srgb != 0, sliceMeans)) return {};
         if (!encodeChains(px->data.data(), layers, count, levels)) return {};
         format = targetFormat;
     }
@@ -902,8 +908,13 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
         }
         else if (c.id == HAsset::CHUNK_PIXL)
             w.addChunk(HAsset::CHUNK_PIXL, levels.data(), levels.size());
-        else
+        else if (c.id != HAsset::CHUNK_TXSM) // re-baked below
             w.addChunk(c.id, c.data.data(), c.data.size());
+    }
+    if (!sliceMeans.empty())
+    {
+        std::vector<uint8_t> b; HAsset::Writer::appendVec(b, sliceMeans);
+        w.addChunk(HAsset::CHUNK_TXSM, b.data(), b.size());
     }
     return w.toBytes(r.assetType());
 }

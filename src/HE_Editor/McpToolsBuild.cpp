@@ -176,6 +176,10 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 			{ "description",
 			  "How hard the texture encoder works: 0 Fast, 1 Balanced, 2 High. "
 			  "Changing it re-encodes every texture on the next export." } } },
+		{ "compressTextureArrays", json{ { "type", "boolean" },
+			{ "description",
+			  "Also block-compress texture arrays (the Auto landscape arrays, ~110 MB each "
+			  "as RGBA8). On by default. Changing it re-encodes the arrays on the next export." } } },
 		{ "excludePatterns", json{
 			{ "type", "array" },
 			{ "items", json{ { "type", "string" } } },
@@ -269,6 +273,8 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 			p.textureFormat = strArg(args, "textureFormat") == "None" ? "None" : "Auto";
 		if (hasArg(args, "textureQuality"))
 			p.textureQuality = std::clamp(intArg(args, "textureQuality", p.textureQuality), 0, 2);
+		if (hasArg(args, "compressTextureArrays"))
+			p.compressTextureArrays = boolArg(args, "compressTextureArrays", p.compressTextureArrays);
 		if (args.contains("excludePatterns") && args["excludePatterns"].is_array())
 		{
 			p.excludePatterns.clear();
