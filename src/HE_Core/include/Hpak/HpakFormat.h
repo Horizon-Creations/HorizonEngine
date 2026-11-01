@@ -258,6 +258,26 @@ struct PackSettings {
     // a file out. Both used to be silent, and a pak missing the landscape texture
     // arrays looked exactly like a good one. Same thread as the pack call.
     std::function<void(const std::string& message)> onWarning;
+
+    // Pack only what the game reaches (Hpak/ReachFilter.h). Roots: the scenes and blobs below,
+    // the engine's implicit needs, alwaysIncludePatterns. An asset nothing reachable names is
+    // left out, and so is an asset only another unreached asset names. Off = every .hasset in
+    // the roots, as before. Part of the pack fingerprint.
+    bool onlyReferenced = false;
+    // Globs (same shape as excludePatterns, matched against the addressed path) that are
+    // roots too: for what a script builds a path for at run time.
+    std::vector<std::string> alwaysIncludePatterns;
+    // Blobs scanned for references that are always kept and are not assets themselves: the
+    // startup scene, the project manifest, GameInstance.hcode, loose scripts.
+    std::vector<std::vector<uint8_t>> referenceRoots;
+    // Scenes the game MAY load, addressed by project-relative path. Each is a node of the
+    // graph like an asset: kept only when something reachable names it. The startup scene
+    // belongs in referenceRoots instead. HpakWriter::unreachableScenes() names the ones left out.
+    struct ReachScene { std::string path; std::vector<uint8_t> bytes; };
+    std::vector<ReachScene> reachScenes;
+    // One summary line for what the filter left out (count, size, the largest). Same thread
+    // as the pack call.
+    std::function<void(const std::string& message)> onNotice;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).

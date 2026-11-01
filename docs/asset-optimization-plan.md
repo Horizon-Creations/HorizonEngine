@@ -69,6 +69,10 @@ der Packaged-Build die gekochte.
   Chunk `TXSM` gebacken, damit BC7/ASTC lesbar bleiben. Auto-Landscape-Arrays 335 MB → 84 MB;
   Details und Messung in `docs/asset-export-audit-2026-11-01.md` Abschnitt 7.
 
+- ✅ **Nur Erreichbares packen** (2026-11-01, Thema 228): `PackSettings::onlyReferenced` (Profil, Standard an),
+  Wurzeln aus Startszene/Manifest/Skripten/Engine-Implizitem, transitiv. Details und Beweis in
+  `docs/asset-export-audit-2026-11-01.md` Abschnitt 8.
+
 **Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
 Durchgang):**
 - **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +

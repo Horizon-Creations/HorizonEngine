@@ -78,6 +78,8 @@ static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
 static bool   s_exportDevTools    = false;
 static std::string s_exportExcludes;               // one glob pattern per line
+static std::string s_exportIncludes;               // always-include globs, one per line
+static bool        s_exportOnlyReferenced = true;  // pack only what the game reaches
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
@@ -541,6 +543,9 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportShaderBackends = p.shaderBackends;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
+	s_exportOnlyReferenced = p.onlyReferenced;
+	s_exportIncludes.clear();
+	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
 }
 
 // Read the dialog fields back into a profile (the name stays as-is).
@@ -553,6 +558,8 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.devTools         = s_exportDevTools;
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+	p.onlyReferenced   = s_exportOnlyReferenced;
+	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
 	p.appBundle        = s_exportAppBundle;
@@ -1174,6 +1181,25 @@ void render(AppContext& ctx)
             ImGui::InputTextMultiline("##exportExcludes", &s_exportExcludes,
                                       ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
 
+            // Only what the game reaches. On by default: an export used to pack every asset
+            // in Content and in the engine library, used or not. What is left out is listed
+            // in the export log; the patterns below keep what a script loads by a path it builds.
+            ImGui::Spacing();
+            EditorWidgets::checkbox("Pack only referenced assets", &s_exportOnlyReferenced);
+            EditorWidgets::helpForKey("Export/Pack only referenced assets");
+            if (s_exportOnlyReferenced)
+            {
+                ImGui::Text("Always include:");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("One glob per line, same shape as the exclude patterns.\n"
+                                      "Assets matching one are kept even when nothing names them,\n"
+                                      "e.g. a script loads \"Props/Crate\" + n at run time: Props/Crate*");
+                ImGui::InputTextMultiline("##exportIncludes", &s_exportIncludes,
+                                          ImVec2(-1.0f, ImGui::GetTextLineHeight() * 2.5f));
+            }
+
             // ── Precompiled material shaders ──────────────────────────────────
             // Nothing to precompile without materials, and a project with Advanced
             // Shader Effects off has none by construction — the editor never let it
@@ -1639,6 +1665,9 @@ void startExport(AppContext& ctx)
                 es.encrypt          = s_exportEncrypt;
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+                es.onlyReferenced   = s_exportOnlyReferenced;
+                es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
+                es.onNotice = [](const std::string& msg) { Build::log(0, msg); };
                 es.incremental      = s_exportIncremental;
                 // The project's default SaveGameTemplate rides into project.hcfg
                 // so save.create() in the shipped game finds the same schema.

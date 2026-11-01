@@ -361,6 +361,9 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].appBundle       = true;
     proj.exportProfiles[1].textureFormat   = "None";
     proj.exportProfiles[1].textureQuality  = 2;
+    proj.exportProfiles[1].onlyReferenced  = false;
+    proj.exportProfiles[1].alwaysIncludePatterns = { "Props/Crate*" };
+    proj.exportProfiles[1].compressTextureArrays = false;
     ExportProfile extra;
     extra.name = "DemoDisk";
     extra.compress = true;
@@ -385,12 +388,18 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK(p2.exportProfiles[1].appBundle);
     CHECK(p2.exportProfiles[1].textureFormat == "None");
     CHECK(p2.exportProfiles[1].textureQuality == 2);
+    CHECK_FALSE(p2.exportProfiles[1].onlyReferenced);
+    CHECK(p2.exportProfiles[1].alwaysIncludePatterns == std::vector<std::string>{ "Props/Crate*" });
+    CHECK_FALSE(p2.exportProfiles[1].compressTextureArrays);
     CHECK_FALSE(p2.exportProfiles[2].appBundle); // default
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
     CHECK(p2.exportProfiles[2].incremental);              // default true
     CHECK(p2.exportProfiles[2].targetPlatform == "Host"); // default
     CHECK(p2.exportProfiles[2].textureFormat == "Auto");  // default: what every export did
     CHECK(p2.exportProfiles[2].textureQuality == 0);
+    CHECK(p2.exportProfiles[2].onlyReferenced);           // default: pack only what the game reaches
+    CHECK(p2.exportProfiles[2].alwaysIncludePatterns.empty());
+    CHECK(p2.exportProfiles[2].compressTextureArrays);    // default
     // startupScene survives the read-modify-write save (old saveProject lost it).
     CHECK_FALSE(p2.startupScene.empty());
 

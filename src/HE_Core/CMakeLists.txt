@@ -36,6 +36,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/GameBuildConfig.cpp
 	src/Hpak/ProjectExporter.cpp
 	src/Hpak/PackManifest.cpp
+	src/Hpak/ReachFilter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp

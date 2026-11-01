@@ -177,6 +177,17 @@ struct HE_API ExportSettings {
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.
     std::vector<std::string> excludePatterns;
+    // Pack only the assets the game reaches (Hpak/ReachFilter.h): from the startup scene, the
+    // scenes something loads, the manifest, GameInstance and scripts, and the engine's implicit
+    // needs. An asset nothing reachable names is left out, and so is one only another unreached
+    // asset names. `alwaysIncludePatterns` (globs on the addressed path, like excludePatterns)
+    // are roots too, for the assets a script builds a path for at run time.
+    // Off here (a caller that hands over loose assets and no scene wants them all); the editor
+    // passes the export profile's setting, which is on by default.
+    bool onlyReferenced = false;
+    std::vector<std::string> alwaysIncludePatterns;
+    // One line for what the filter left out. Same thread rule as `progress`.
+    std::function<void(const std::string&)> onNotice;
     // Incremental packing: reuse the stored (compressed + encrypted) bytes of
     // unchanged assets from the previous export at the same outputDir, keyed by
     // the hash of each asset's rewritten blob (persisted in a

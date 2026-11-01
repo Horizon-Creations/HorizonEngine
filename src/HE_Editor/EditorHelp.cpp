@@ -8128,6 +8128,19 @@ namespace
 	  "No block compression: RGBA8 with the mip chain baked in. The exact "
 	  "pixels, at roughly four to eight times the size of a compressed texture.",
 	  "", "export#overview" },
+	{ "Export/Pack only referenced assets", "Pack only referenced assets",
+	  "Leave out every asset the game never reaches. The game starts from the "
+	  "startup scene, the scenes something loads, the project manifest, "
+	  "GameInstance and the scripts, and follows what they name: a scene's "
+	  "meshes and their materials and textures, a widget's textures, a "
+	  "graph's classes. Reaching is transitive from those starting points: a "
+	  "mesh that names a material is no reason to keep either when nothing "
+	  "reachable names the mesh. The engine's own needs (input actions, "
+	  "player classes, struct and enum types, weather sounds, layer meshes) "
+	  "always stay. A script that builds a path at run time cannot be "
+	  "followed: list it under Always include. The export log lists what "
+	  "was left out. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Compress texture arrays", "Compress texture arrays",
 	  "Also block-compress texture arrays: the Auto landscape's albedo, normal "
 	  "and mask arrays, about 110 MB each as RGBA8 and by far the largest part "

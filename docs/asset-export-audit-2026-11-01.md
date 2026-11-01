@@ -1,7 +1,7 @@
 # Export-Audit: was packt der Export, und wo steckt die Größe? (Thema 228, Schritt 1585)
 
 > **Stand 2026-11-01 (später):** Punkt 1 der Liste (Texturarrays komprimieren) ist umgesetzt, siehe
-> Abschnitt 7. Der Erreichbarkeitsfilter (Punkt 2) bleibt geplant und ist ausdrücklich nicht verworfen.
+> Abschnitt 7. Der Erreichbarkeitsfilter (Punkt 2) ist ebenfalls umgesetzt, siehe Abschnitt 8.
 
 Wiederholung des fehlgeschlagenen Audits (Schritt 1144). Lokal auf dem MacBook gemacht, ohne Hive
 (Thema gehört der Queen auf NN-RP01, Deadline abgelaufen). Nur gelesen und gemessen; Quelltext
@@ -148,9 +148,68 @@ dieses Rechners (5 Assets zusätzlich) und hat mit der Änderung nichts zu tun.
 **Nicht verifiziert:** Sichtprüfung eines kompletten Exports auf der GPU; D3D11/D3D12/Vulkan (Array-Upload
 komprimierter Formate ist dort wie bei 2D-Texturen "blind", keine Windows/Linux-Maschine); ein Voll-Export aus dem Editor (die Paketmessung oben kommt vom `hpak_packer`). Normal-Arrays bleiben BC7/ASTC (BC5 würde Z verlieren).
 
+## 8. Umgesetzt: Export packt nur Erreichbares (Punkt 2, Schritt 1586)
+
+**Regel:** Erreichbarkeit ist transitiv ab echten Wurzeln, nicht "hat irgendeinen Verweiser". Ein Mesh, das ein
+Material nennt, hält weder Mesh noch Material, wenn nichts Erreichbares das Mesh nennt; ein Material, das ein
+erreichtes und ein nicht erreichtes Mesh nennen, bleibt (das erreichte braucht es).
+
+**Wurzeln** (`src/HE_Core/src/Hpak/ReachFilter.cpp`, `src/HE_Core/src/Hpak/ProjectExporter.cpp` `packContent`):
+- die Startszene (als CBOR-Blob), `GameInstance.hcode`, das `.heproj`, lose `.lua/.py/.hcode` unter Content, `Config/`;
+- jede andere Szene ist ein Knoten und bleibt nur, wenn etwas Erreichbares ihren Pfad nennt (die Startszene
+  behält auch ihren Pfad-Eintrag, damit `scene.load` auf sie geht); ohne gepackte Startszene bleiben alle;
+- Engine-implizit (`engineImplicitRoots()`): Assets, die die Laufzeit **nach Typ** findet (`PlayerHost.cpp:37-80`
+  InputAction, InputMappingContext, HorizonCodeClass; `TypeRegistry::refreshFromContent` Struct/Enum; dazu
+  SaveGameTemplate, Theme), die Wetter-Sounds `Engine/Audio/Weather/`, `Engine/MaterialFunctions/`,
+  `Engine/Meshes/` (LayerMeshPresets baut diese Namen aus der Material-Gruppe), `Engine/Materials/Water.hasset`,
+  die Trail-Textur `0x41F`;
+- "Immer mitpacken"-Globs im Profil (`alwaysIncludePatterns`) für Pfade, die ein Skript zur Laufzeit baut.
+
+**Kanten:** Pfad (Suffix-Treffer auf `.hasset`/`.hescene`, mit/ohne `Content/`, auch hinter einem Längenbyte), UUID als
+16 Rohbytes (little- und big-endian), als CBOR-Array `82 <uint> <uint>` in kürzester Form (**wichtig**: die Engine-IDs
+wie `{0x412,1}` sind `82 19 04 12 01`, ein 16-Byte-Muster findet sie nicht; ohne diese Form flogen bei der ersten
+echten Messung die drei Landscape-Arrays, 344 MB, aus dem Pak) und als JSON-Dezimalpaar/-Objekt. Texturen, Audio,
+Fonts werden nie gelesen, bei Meshes nur die Strukturchunks (kein VERT/INDX/…); im Zweifel wird behalten.
+
+**Einbau:** `HpakWriter::addDirectories`, Pass 1b zwischen Einlesen und Umschreiben; ausgelassene Assets verschwinden
+auch aus `packedPaths`/`packedTypes` und aus `pathToUuid` (ein von einem behaltenen Asset doch genannter Pfad wird so zur
+bekannten Warnung "in no packed root" statt zu einer UUID, die das Pak nicht hält). Fingerprint-Bit 7. Der Export-Log
+bekommt eine Zeile (`onNotice`: Anzahl, Größe, die fünf größten, nicht geladene Szenen). Schalter: Profilfeld
+`onlyReferenced` (Standard an) + `alwaysIncludePatterns`, Dialog-Checkbox "Pack only referenced assets", MCP-Argumente,
+`hpak_packer --only-referenced --startup-scene <f> [--always-include <glob>]`. `ExportSettings::onlyReferenced` ist
+auf Bibliotheksebene aus (wer lose Assets ohne Szene übergibt, will alle); der Editor reicht das Profil durch.
+
+**Gemessen an Catania** (zwei echte Exporte über `ProjectExporter::exportProject`, `tests/test_bench_export_reach.cpp`,
+ASTC, Arrays komprimiert, ohne Zstd):
+
+| | Assets | Pak |
+|---|---|---|
+| alles | 99 | 108,94 MB |
+| nur Erreichbares | 78 | 102,90 MB |
+
+21 Assets raus (nur 6 MB, weil die großen Arrays erreichbar sind): die Alt-Textur `Grass_Albedo` (16,4 MB roh, 5,0 MB
+gepackt), `Grass_Normal`, die drei Gruppen-Materialien Desert/Grassland/Forest, 14 Editor-Widgets, ein unbenutztes
+Projekt-Material. Mit zstd (hpak_packer): 61,7 MB → 56,7 MB. Das Foliage-Testprojekt: 0 von 60 raus (alles erreichbar).
+
+**Beweis, dass nichts fehlt:** beide Exporte als lauffähiges Spiel (`HEProject`, derselbe Runtime-Ordner) headless mit
+`HE_SKY_TIME=30` auf Frame 2100 aufgenommen. Kontrolle zuerst: zwei Läufe des Voll-Exports sind byte-gleich. Gefiltert
+gegen voll: einmal byte-gleich, einmal 16 Bytes um höchstens 1 verschieden an der Bergkante (derselbe gefilterte Export,
+zweiter Lauf, ist wieder byte-gleich zum vollen: Lauf-zu-Lauf-Rauschen, nicht der Filter). Logs: gleiche 4 Warnungen,
+0 Fehler, "loaded packed startup scene". Ohne gepinnte Sky-Zeit unterscheidet sich nur der animierte Himmel.
+Die Aufnahme ist erst nach rund 3000 Frames die Szene (davor der Intro-Splash).
+
+**Tests:** `tests/test_reach_filter.cpp` (Insel, Spielarten der Referenz inkl. CBOR-Kurzform, Szenen als Knoten,
+Typ-/Engine-/Glob-Wurzeln, Fingerprint, Exporter-Ende-zu-Ende), `tests/test_export_profiles.cpp` (Profilfelder).
+Ganze Suite: nur `Disk registry: scanContentDirectory` (EngineContentCache dieses Rechners) und einmal
+`test_team_ui` (Netz-Timing unter Last, allein grün) fehlen.
+
+**Nicht verifiziert:** Export aus dem laufenden Editor (Dialog, Log-Zeile; die drei Editor-Dateien nur per
+`-fsyntax-only` und Hilfe-Audit); Shader-Vorkompilierung (PSHD) im Filterlauf; Windows/Linux; ein Projekt mit Skripten, die
+Pfade zur Laufzeit bauen (dafür die Globs); mehrere Szenen mit Level-Wechsel im echten Spiel.
+
 ## Handoff
 
-- **Topic / step:** 228, Schritt 1585 (Audit, fertig) und Punkt 1 der Liste (Arrays, umgesetzt); Schritt 1586 (Filter) offen
+- **Topic / step:** 228, Schritt 1585 (Audit, fertig) und Punkt 1 der Liste (Arrays, umgesetzt); Schritt 1586 (Filter) umgesetzt, Abschnitt 8
 - **Branch / commit:** release/0.8.0 (pushed: siehe Commit)
 - **Done:** Audit-Bericht; Texturarrays werden beim Export komprimiert, GI-Mittelwerte kommen aus dem Pak (TXSM).
 - **Files touched:** `src/HE_Core/src/Hpak/HpakWriter.cpp` (cookTexture: Means backen), `src/HE_Core/src/ContentManager/TextureBlockDecode.cpp` (Mittelwert-Helfer), `src/HE_Core/src/ContentManager/ContentManager.cpp` (TXSM laden/speichern), `src/HE_Rendering/src/GiAutoLandscape.cpp` (baked bevorzugt), `src/HE_Core/include/Hpak/ProjectExporter.h` + `ProjectExporter.cpp` (Schalter), `src/HE_Tools/src/FileOps/ProjectManager.*` (Profilfeld), `src/HE_Editor/ExportDialogPanel.cpp`, `EditorHelp.cpp`, `McpToolsBuild.cpp`, `tests/test_texture_bcn.cpp`.
@@ -158,6 +217,6 @@ komprimierter Formate ist dort wie bei 2D-Texturen "blind", keine Windows/Linux-
 - **Not verified:** siehe Abschnitt 7.
 - **Decisions taken:** Schalter standardmäßig an, weil die Arrays 94 % des Shipping-Paks sind. Means immer backen, auch bei BC3 (genauer und ohne Dekodieren).
 - **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
-- **Pending:** Schritt 1586 (Erreichbarkeitsfilter, bleibt Ziel); übrige Punkte der Liste (Startszene doppelt, Shader-Backends an Ziel koppeln, MTRL-Graph streichen).
+- **Pending:** übrige Punkte der Liste (Startszene doppelt packen, Shader-Backends an das Ziel koppeln, MTRL-Graph streichen); Export aus dem Editor einmal von Hand ansehen.
 - **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
 - **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Schritt 1586: Filter in `HpakWriter::addDirectories`, Wurzeln aus `EngineDependencies.h`/`AssetRefScan.h`. 3. Startszene nicht doppelt packen.

@@ -1,4 +1,5 @@
 #include <Hpak/HpakWriter.h>
+#include <Hpak/ReachFilter.h>
 #include <cstdint>
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
@@ -27,6 +28,7 @@
 #  include <bc7enc/stb_dxt.h>
 #endif
 #include <algorithm>
+#include <iterator>
 #include <fstream>
 #include <string>
 #include <map>
@@ -1060,6 +1062,9 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     m_packedPaths.clear();
     m_packedTypes.clear();
     m_warnings.clear();
+    m_unreachableScenes.clear();
+    m_unreferencedCount = 0;
+    m_unreferencedBytes = 0;
     auto warn = [&](std::string msg)
     {
         if (settings.onWarning) settings.onWarning(msg);
@@ -1146,6 +1151,78 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
             it.increment(ec);
         }
         ec.clear();
+    }
+
+    // Pass 1b: leave out what the game does not reach (Hpak/ReachFilter.h). Every blob is
+    // in `pending` and every path is in pathToUuid by now, so this is the one place the whole
+    // reference graph is visible. Scenes the game may load are nodes of the same graph.
+    if (settings.onlyReferenced)
+    {
+        std::vector<HE::reach::Node> nodes;
+        nodes.reserve(pending.size() + settings.reachScenes.size());
+        for (const Pending& pe : pending)
+        {
+            HE::reach::Node n;
+            n.id = pe.id; n.path = pe.relPath;
+            if (pe.metaPath != pe.relPath) n.metaPath = pe.metaPath;
+            const auto ty = m_packedTypes.find(pe.id);
+            n.type = ty != m_packedTypes.end() ? ty->second : uint16_t(0);
+            n.data = pe.bytes.data(); n.size = pe.bytes.size();
+            nodes.push_back(std::move(n));
+        }
+        for (const Hpak::PackSettings::ReachScene& sc : settings.reachScenes)
+        {
+            HE::reach::Node n;
+            n.path = sc.path;
+            if (sc.path.rfind("Content/", 0) == 0) n.metaPath = sc.path.substr(8);
+            n.data = sc.bytes.data(); n.size = sc.bytes.size();
+            nodes.push_back(std::move(n));
+        }
+        HE::reach::Roots roots = HE::reach::engineImplicitRoots();
+        roots.globs = settings.alwaysIncludePatterns;
+        for (const auto& b : settings.referenceRoots) roots.blobs.emplace_back(b.data(), b.size());
+        const HE::reach::Result res = HE::reach::computeReachable(nodes, roots);
+
+        struct Dropped { std::string path; size_t bytes; };
+        std::vector<Dropped> dropped;
+        const size_t nAssets = pending.size();
+        std::vector<Pending> kept;
+        kept.reserve(pending.size());
+        for (size_t i = 0; i < pending.size(); ++i)
+        {
+            if (res.reachable[i]) { kept.push_back(std::move(pending[i])); continue; }
+            const Pending& pe = pending[i];
+            dropped.push_back({ pe.relPath, pe.bytes.size() });
+            m_unreferencedBytes += pe.bytes.size();
+            ++m_unreferencedCount;
+            // Out of every index the pak derives from this scan. A kept asset that still
+            // names it (a spelling the scan missed) now bakes to a null UUID WITH the "in no
+            // packed root" warning below, instead of a UUID the pak does not hold.
+            m_packedTypes.erase(pe.id);
+            for (auto it = m_packedPaths.begin(); it != m_packedPaths.end();)
+                it = (it->second == pe.id) ? m_packedPaths.erase(it) : std::next(it);
+            for (auto it = pathToUuid.begin(); it != pathToUuid.end();)
+                it = (it->second == pe.id) ? pathToUuid.erase(it) : std::next(it);
+        }
+        pending = std::move(kept);
+        for (size_t i = 0; i < settings.reachScenes.size(); ++i)
+            if (!res.reachable[nAssets + i])
+                m_unreachableScenes.push_back(settings.reachScenes[i].path);
+
+        if (settings.onNotice)
+        {
+            std::sort(dropped.begin(), dropped.end(),
+                      [](const Dropped& a, const Dropped& b) { return a.bytes > b.bytes; });
+            std::string msg = "Not packed, nothing the game reaches names them: "
+                            + std::to_string(m_unreferencedCount) + " asset(s), "
+                            + std::to_string(m_unreferencedBytes / 1024) + " KB";
+            if (!dropped.empty()) msg += "; largest:";
+            for (size_t i = 0; i < dropped.size() && i < 5; ++i)
+                msg += " " + dropped[i].path + " (" + std::to_string(dropped[i].bytes / 1024) + " KB)";
+            if (!m_unreachableScenes.empty())
+                msg += "; " + std::to_string(m_unreachableScenes.size()) + " scene(s) nothing loads";
+            settings.onNotice(msg);
+        }
     }
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
