@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <random>
 #include <string>
 #include <thread>
@@ -143,6 +144,13 @@ Ray pixelRay(const gpucheck::RenderIn& in, int px, int py)
 	glm::dvec4 a = inv * glm::dvec4(nx, ny, zNear, 1.0), b = inv * glm::dvec4(nx, ny, 1.0, 1.0);
 	const glm::dvec3 pa = glm::dvec3(a) / a.w + in.origin, pb = glm::dvec3(b) / b.w + in.origin;
 	return { pa, glm::normalize(pb - pa) };
+}
+
+// What each backend drew, kept to be compared with the other (the morph, the lookups and the shading are the same maths in GLSL and MSL).
+std::map<std::string, gpucheck::RenderOut>& drawn(const char* scene)
+{
+	static std::map<std::string, std::map<std::string, gpucheck::RenderOut>> all;
+	return all[scene];
 }
 
 struct Tally
@@ -256,6 +264,7 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		const uint64_t baseline = out.uploads;   // 0 in the first scene; the backend counts across scenes
 		checkRamp("ramp, first position", in, out, a, rt.atlas()->stats().uploads, rt.atlas()->stats().releases, tally);
 		writePng((outDir / (std::string("landscape_") + be.name() + "_ramp.png")).string(), out);
+		drawn("ramp")[be.name()] = out;
 
 		// a tile and a half on: the store streams, the second frame's uploads go on top of the first's
 		Camera b{ { 12000.0, 1640.0, 9000.0 }, { -0.8, -0.1, 0.5 }, { 11264.0, 1000.0, 8192.0 } };
@@ -293,6 +302,7 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		tally.check(ground > static_cast<int>(out.depth.size()) / 5, "the hills fill part of the image");
 		tally.check(out.uploads - uploadsBefore == rt.atlas()->stats().uploads, "every upload the runtime counted was executed");
 		writePng((outDir / (std::string("landscape_") + be.name() + "_hills.png")).string(), out);
+		drawn("hills")[be.name()] = out;
 	}
 	std::printf("  %s\n", tally.failures == 0 ? "OK" : "FAILED");
 	return tally.failures == 0 ? 0 : 1;
@@ -360,6 +370,29 @@ int main(int argc, char** argv)
 		}
 	}
 #endif
+	// OpenGL against Metal on the same frames: the same shader maths in two languages must give the same picture. A plane morphs to itself, so the
+	// hills are the only place a wrong morph or a wrong lookup in ONE of the ports shows; a fraction above 0.1 % of the pixels (more than 2/255
+	// apart) is a difference between the ports, not rounding. (Crack-free seams and popping are not judged here: Plan section 4, on NN-WS03.)
+	for (const char* scene : { "ramp", "hills" })
+	{
+		auto& m = drawn(scene);
+		if (m.count("OpenGL") == 0 || m.count("Metal") == 0) continue;
+		const gpucheck::RenderOut& a = m["OpenGL"];
+		const gpucheck::RenderOut& b = m["Metal"];
+		if (a.rgba.size() != b.rgba.size() || a.rgba.empty()) { std::printf("[OpenGL vs Metal] %s: sizes differ\n", scene); rc = std::max(rc, 1); continue; }
+		size_t differing = 0, far = 0;
+		for (size_t i = 0; i + 3 < a.rgba.size(); i += 4)
+		{
+			int worst = 0;
+			for (int k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(a.rgba[i + static_cast<size_t>(k)]) - static_cast<int>(b.rgba[i + static_cast<size_t>(k)])));
+			differing += worst > 2 ? 1 : 0;
+			far += worst > 16 ? 1 : 0;
+		}
+		const size_t pixels = a.rgba.size() / 4;
+		const bool ok = differing * 1000 <= pixels;
+		std::printf("[OpenGL vs Metal] %-6s %zu of %zu pixels more than 2/255 apart (%zu more than 16/255)  %s\n", scene, differing, pixels, far, ok ? "OK" : "FAILED");
+		if (!ok) rc = std::max(rc, 1);
+	}
 	std::filesystem::remove(pack);
 	if (ran == 0) { std::printf("no backend ran\n"); return 3; }
 	return rc;

@@ -14413,9 +14413,9 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 }
 
-void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj)
+void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame)
 {
-	if (!m_landscapeProvider || m_landscapeFailed) return;
+	if (!frame.active || m_landscapeFailed) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
 	if (!m_landscape.ready())
 	{
 		std::string err;
@@ -14426,10 +14426,6 @@ void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewPr
 			return;
 		}
 	}
-	HE::LandscapeRenderFrame frame;
-	// The scene pass rasterises with this plain GL-convention matrix (see MetalLandscape::encode), so the frustum is a GL one too.
-	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
-	if (!frame.active) return;
 
 	MetalLandscape::Shading sh;
 	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
@@ -14503,8 +14499,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// are skinned meshes (RenderWorld::skinnedObjects, drawn by
 	// EncodeSkinnedObjects below): a scene of nothing but a character used to
 	// take this sky-only exit and never draw it.
-	// A world-scale landscape is drawn by this function too, so a scene of nothing but a landscape is not sky-only.
-	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty() && !m_landscapeProvider;
+	// A world-scale landscape is drawn by this function too, so a scene of nothing but a landscape is not sky-only. Asked for once, here, with
+	// the matrix the scene pass rasterises with (the plain GL-convention one, see MetalLandscape::encode), so the frustum is a GL one too; a
+	// scene without a landscape gets an inactive frame and the sky-only exits below stay as they were.
+	HE::LandscapeRenderFrame landscapeFrame;
+	if (m_landscapeProvider && !m_landscapeFailed) m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, landscapeFrame);
+	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty() && !landscapeFrame.active;
 	if (m_renderWorld.objects.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
@@ -15199,7 +15199,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	SamplePoint(renderEncoder, "Skinned");
 
 	// World-scale landscape (Thema 326): forward patches into the same target and depth, before the sky fills what they leave.
-	EncodeLandscape(renderEncoder, viewProj);
+	EncodeLandscape(renderEncoder, viewProj, landscapeFrame);
 	SamplePoint(renderEncoder, "Landscape");
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.

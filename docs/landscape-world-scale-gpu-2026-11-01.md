@@ -24,7 +24,7 @@ Es wurde nichts gemessen: keine Zeit, kein GPU-Speicher im Betrieb (Stromsparmod
 
 ## 2. Der Vertrag zwischen Anwendung und Backend
 
-Das Backend ruft, einmal je Szenen-Frame, `provider(viewProj, zeroToOne, frame)` mit der Matrix, mit der es **gleich selbst rastert** (so entfällt "die Anwendung rechnet Editor-Kamera und Seitenverhältnis nach"), und führt den Frame aus, bevor es zeichnet: **jeder gebaute Frame muss ausgeführt werden**, die Laufzeit zählt die Uploads als erledigt.
+Das Backend ruft, einmal je Szenen-Frame (Metal: ganz oben in `EncodeScene`, vor den Sky-only-Abkürzungen; GL: im Haken), `provider(viewProj, zeroToOne, frame)` mit der Matrix, mit der es **gleich selbst rastert** (so entfällt "die Anwendung rechnet Editor-Kamera und Seitenverhältnis nach"), und führt den Frame aus, bevor es zeichnet: **jeder gebaute Frame muss ausgeführt werden**, die Laufzeit zählt die Uploads als erledigt.
 Der Ursprung (`world.origin()`) ist Sache des Providers: der Render-World trägt nur ursprungsrelative Positionen, das Backend kennt ihn nicht. Der Provider ruft die Laufzeit auf dem Hauptthread; nur der Haupt-Szenenpass fragt, nie eine Vorschau oder ein Thumbnail.
 
 | Teil | Inhalt | Wann neu |
@@ -53,7 +53,7 @@ damit der Haken keine Bindung des Renderers überschreibt, die später im Pass n
 
 * **Position:** im Opaque-Pass nach den Skinned-Meshes, vor dem Himmel (GL: vor `GpuTimerEndPass("Opaque")`, Metal: zwischen `"Skinned"` und `drawSky()`), mit Tiefentest und Tiefenschreiben, ohne Culling, ohne Blending. Der Himmel (`LEQUAL`, z = 1, kein Schreiben) füllt nur, was die Landschaft übrig lässt. Auf beiden Pfaden (Forward, Deferred) läuft derselbe Haken, nach dem Resolve.
 * **Metal-Tiefe (Fund):** der Metal-Szenenpass rastert mit der **unkorrigierten GL-Matrix** (`u.mvp = viewProj * model`, `HE::kMetalClipFix` wird dort nicht angewandt; der G-Buffer legt die GL-NDC-Tiefe ab). Damit Landschaft, Objekte und Himmel sortiert zusammenpassen, nimmt `MetalLandscape::encode` dieselbe Matrix und der Frustum-Aufruf `zeroToOne = false`. Folge, wie für jeden Szenen-Draw: Geometrie näher als etwa das Doppelte der Near-Ebene wird abgeschnitten.
-* **GL-Zustand:** `StateGuard` setzt Programm, VAO, aktive Einheit, Tiefenzustand, Culling, Blending und Unpack-Ausrichtung zurück. Metal setzt Pipeline und Tiefenzustand selbst; jeder folgende Pass des Renderers setzt seine wieder.
+* **GL-Zustand:** `StateGuard` setzt Programm, VAO, aktive Einheit, Tiefenzustand, Culling, Blending und Unpack-Ausrichtung zurück. Metal setzt Pipeline und Tiefenzustand selbst; jeder folgende Pass des Renderers setzt seine wieder. **Shader und Pipeline entstehen erst beim ersten aktiven Frame**: eine Szene ohne Landschaft (Provider gesetzt, `frame.active` falsch) übersetzt nichts, zeichnet nichts und lässt die Sky-only-Abkürzungen des Metal-Renderers wie sie waren.
 * **Beleuchtung:** erste Richtungslicht-Farbe mal Intensität, `sunDirection`, `ambient` der Render-World; Ebenenfarben flach (Material-Graph später, Welt-UVs nötig, siehe Teil-A-Dokument §8).
 
 ## 5. Bekannte Grenzen (nicht gelöst)
@@ -67,6 +67,7 @@ damit der Haken keine Bindung des Renderers überschreibt, die später im Pass n
 | Draw-Aufrufe je Patch, kein Instancing, kein Frustum-Test auf der GPU | bewusst einfach |
 | GL: 9 Texturen-Einheiten ab 21 | ein Kontext mit weniger als 30 kombinierten Einheiten schaltet die Landschaft ab (Warnung, einmal) |
 | der Renderer ruft den Provider **zweimal**, wenn Viewport-Frame und Screenshot im selben App-Frame laufen | der zweite bekommt keine Uploads mehr (sie sind beim ersten ausgeführt), die Bilder bleiben im selben Backend; ein Screenshot ohne vorherigen Viewport-Frame liefert die Uploads selbst |
+| `m_landscapeBound` (Spiel, Editor) ist einmalig | ein neu erzeugter Renderer müsste den Provider neu setzen, und die Laufzeit `reset()` (sonst hält sie Uploads für Bilder, die der neue Renderer nicht hat) |
 | Physik, Navigation, Foliage und Wasser (Schritt 3) hängen **nicht** an Spiel und Editor | Spiel und Editor rufen `update` (Store, Atlas), aber `setPhysics`, `setNavigation`, `setFoliageLayers` und die Wasser-Zeichnung sind Aufrufer-Sache und noch nicht verdrahtet |
 
 ## 6. Das Prüfwerkzeug `landscape_gpu_check`
@@ -78,6 +79,8 @@ Kein Test (braucht Fenstersystem und GPU, nicht in der CI; `src/HE_Tools/src/Lan
    Danach springt die Kamera 10 km (der Atlas fasst rund 190 der 1024 Kacheln: Slots werden frei und wiederverwendet, `releases > 0`), und dieselben Prüfungen laufen auf denselben Bildern. Eine zweite Szene (die fBm-Hügel der Engine) wird nur auf "Boden da" geprüft und als PNG geschrieben.
 2. **Engine**: der **echte Renderer** (`RendererFactory`, verstecktes Fenster, Szenen-Pass des Backends, **Forward und Deferred**) zeichnet dieselbe Welt über `SetLandscapeProvider` und `RenderSceneImage`; geprüft wird, ob dort Boden ist, wo die Ebene ist (>= 97 % grün), und nichts Grünes darüber (<= 3 %). Das Bild ist tone-gemappt, also keine Farbgenauigkeit.
 
+3. **OpenGL gegen Metal**: beide Backends zeichnen dieselben Frames; mehr als 0,1 % der Pixel mehr als 2/255 auseinander ist ein Unterschied zwischen den beiden Portierungen, kein Rundungsfehler. Das ist die einzige Stelle, an der ein Morph- oder Abruf-Fehler in nur **einer** der beiden Fassungen auffällt: eine Ebene morpht auf sich selbst, die Hügel sind es, die zählen.
+
 Ergebnis dieses Laufs (Mac, Apple-Silikon), **gezählt, nicht gemessen**:
 
 | | OpenGL | Metal |
@@ -88,7 +91,7 @@ Ergebnis dieses Laufs (Mac, Apple-Silikon), **gezählt, nicht gemessen**:
 | Echter Renderer, Forward / Deferred | Boden 100 % grün, Himmel 1 % grün; beide OK | gleich |
 | GL gegen Metal | Rampe: 0 von 129 600 Pixeln über 2/255 verschieden; Hügel: 18 von 518 400 (9 davon über 16/255, Kanten) | |
 
-**Absichtlich eingebaute Fehler** werden auf beiden Backends gefunden: ohne `- uOrigin.y` im Höhenshader stimmt jede Tiefe nicht mehr (größte Abweichung 2392 m); ohne die Grobwelt-Gewichte werden ferne Pixel grau (857 Pixel falsch, bis 65/255). Zwei weitere Fehler dieser Art hatte schon Teil A in den CPU-Tests gefunden.
+**Absichtlich eingebaute Fehler** werden auf beiden Backends gefunden: ohne `- uOrigin.y` im Höhenshader stimmt jede Tiefe nicht mehr (größte Abweichung 2392 m); ohne die Grobwelt-Gewichte werden ferne Pixel grau (857 Pixel falsch, bis 65/255); ohne Morph nur in der MSL-Fassung weichen 14 791 von 518 400 Hügel-Pixeln ab (der Vergleich unter 3 schlägt an). Zwei weitere Fehler dieser Art hatte schon Teil A in den CPU-Tests gefunden.
 
 ## 7. Verifikation
 

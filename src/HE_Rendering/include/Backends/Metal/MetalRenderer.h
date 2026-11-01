@@ -1483,9 +1483,9 @@ private:
 	                       const glm::vec3& camPos);                     // billboard draw
 
 	// ── World-scale landscape (Thema 326, step 2 part B) ─────────────────────
-	// EncodeLandscape asks the application's provider (IRenderer::SetLandscapeProvider) for the frame of the camera the scene pass rasterises
-	// with and encodes it into that pass, after the skinned meshes and before the sky. Forward geometry: no shadows, SSAO or GI, not in the G-buffer.
-	void EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj);
+	// EncodeScene asks the application's provider (IRenderer::SetLandscapeProvider) once for the frame of the camera the scene pass rasterises
+	// with, and EncodeLandscape encodes it into that pass, after the skinned meshes and before the sky. Forward geometry: no shadows, SSAO or GI, not in the G-buffer.
+	void EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame);
 	MetalLandscape m_landscape;
 	bool           m_landscapeFailed = false;   // init failed once: not tried again
 

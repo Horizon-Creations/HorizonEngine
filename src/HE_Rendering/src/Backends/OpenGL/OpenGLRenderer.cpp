@@ -11276,6 +11276,9 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 {
 	if (!m_landscapeProvider || m_landscapeFailed) return;
+	HE::LandscapeRenderFrame frame;
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);   // viewProj is origin-relative, in GL clip space (-1..1)
+	if (!frame.active) return;                                                // no landscape in this scene: nothing is compiled, nothing drawn
 	if (!m_landscape.ready())
 	{
 		std::string err;
@@ -11286,9 +11289,6 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 			return;
 		}
 	}
-	HE::LandscapeRenderFrame frame;
-	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);   // viewProj is origin-relative, in GL clip space (-1..1)
-	if (!frame.active) return;
 
 	// The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
 	OpenGLLandscape::Shading sh;
