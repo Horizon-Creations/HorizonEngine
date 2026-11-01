@@ -48,6 +48,9 @@ public:
 	virtual bool render(const RenderIn& in, RenderOut& out) = 0;
 };
 
+// Writes an RGBA8 PNG (main.cpp holds the one stb implementation).
+void writePngFile(const std::string& path, int width, int height, const uint8_t* rgba);
+
 std::unique_ptr<Backend> makeGlBackend();
 #ifdef HE_CHECK_METAL
 std::unique_ptr<Backend> makeMetalBackend();

@@ -232,8 +232,9 @@ endif()
 add_executable(landscape_gpu_check
     src/LandscapeGpuCheck/main.cpp
     src/LandscapeGpuCheck/GlBackend.cpp
+    src/LandscapeGpuCheck/EngineCheck.cpp
 )
-target_link_libraries(landscape_gpu_check PRIVATE HorizonScene RendererOpenGL glad SDL3::SDL3)
+target_link_libraries(landscape_gpu_check PRIVATE HorizonScene HorizonRendering RendererOpenGL glad SDL3::SDL3)
 target_include_directories(landscape_gpu_check PRIVATE
     ${CMAKE_SOURCE_DIR}/src/HE_Core/include
     ${CMAKE_SOURCE_DIR}/src/HE_Core/vendor
@@ -250,6 +251,7 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:landscape_gpu_check>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:landscape_gpu_check>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonRendering> $<TARGET_FILE_DIR:landscape_gpu_check>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:landscape_gpu_check>
         VERBATIM
     )

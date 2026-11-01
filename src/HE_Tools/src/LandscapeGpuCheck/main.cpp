@@ -3,6 +3,11 @@
 //
 //   landscape_gpu_check [--out <dir>] [--only gl|metal]
 //
+// Two layers per backend. (1) OFFSCREEN: the backend's landscape class (OpenGLLandscape, MetalLandscape) draws into a target of the tool's own,
+// and colour and depth are compared with the plane, pixel by pixel. (2) ENGINE: the real renderer (RendererFactory, hidden window, the backend's
+// scene pass, forward and deferred) draws the same world through IRenderer::SetLandscapeProvider and RenderSceneImage, and the picture is
+// checked for ground where the plane is and sky where it is not (tone-mapped, so not for exact colours).
+//
 // Scene 1 ("ramp"): 32 x 32 tiles of the real geometry whose ground is the plane y = 600 + 0.1 * (x - 3072), all paint on layer 0. A plane is
 // reproduced exactly at every level of detail, so the ground height at any pixel is known, and the quadtree's levels, the morph and the
 // tile/coarse lookups cannot hide behind "close enough". Per pixel the checker intersects the camera ray with the plane and compares
@@ -12,6 +17,7 @@
 // The camera then jumps 10 km, the store streams (the atlas holds ~190 of the 1024 tiles, so slots are released and reused) and the same
 // checks run on the same images (the second frame's uploads and table updates are executed on top of the first). Scene 2 ("hills") is the engine's procedural fBm, drawn for the eye and checked only for "ground there".
 // Writes landscape_<backend>_<scene>.png. Not a test: it needs a window system and a GPU, and it measures no time.
+#include "EngineCheck.h"
 #include "GpuCheck.h"
 
 #include <HorizonScene/LandscapeRuntime.h>
@@ -150,7 +156,7 @@ struct Tally
 
 void writePng(const std::string& path, const gpucheck::RenderOut& out)
 {
-	stbi_write_png(path.c_str(), out.width, out.height, 4, out.rgba.data(), out.width * 4);
+	gpucheck::writePngFile(path, out.width, out.height, out.rgba.data());
 }
 
 // The checks of scene 1 on one image.
@@ -200,7 +206,7 @@ void checkRamp(const char* label, const gpucheck::RenderIn& in, const gpucheck::
 					worstDepth = std::max(worstDepth, err - tol);
 					if (err > tol) ++depthBad;
 				}
-				if (te < 2500.0)
+				if (te < 5000.0)   // out to where the coarse world's weights are read, not only the tiles'
 				{
 					++colourChecked;
 					const uint8_t* c = &out.rgba[(static_cast<size_t>(py) * static_cast<size_t>(in.width) + static_cast<size_t>(px)) * 4];
@@ -293,6 +299,11 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 }
 } // namespace
 
+namespace gpucheck
+{
+void writePngFile(const std::string& path, int width, int height, const uint8_t* rgba) { stbi_write_png(path.c_str(), width, height, 4, rgba, width * 4); }
+} // namespace gpucheck
+
 int main(int argc, char** argv)
 {
 	std::filesystem::path outDir = ".";
@@ -320,18 +331,35 @@ int main(int argc, char** argv)
 	}
 
 	int rc = 0, ran = 0;
-	std::vector<std::unique_ptr<gpucheck::Backend>> backends;
-	if (only.empty() || only == "gl") backends.push_back(gpucheck::makeGlBackend());
-#ifdef HE_CHECK_METAL
-	if (only.empty() || only == "metal") backends.push_back(gpucheck::makeMetalBackend());
-#endif
-	for (auto& be : backends)
-	{
+	const auto start = [&](std::unique_ptr<gpucheck::Backend> be) {
 		std::string err;
-		if (!be->init(err)) { std::printf("[%s] cannot start here: %s\n", be->name(), err.c_str()); rc = std::max(rc, 3); continue; }
+		if (!be->init(err)) { std::printf("[%s] cannot start here: %s\n", be->name(), err.c_str()); rc = std::max(rc, 3); return; }
 		++ran;
 		rc = std::max(rc, runBackend(*be, pack, outDir));
+	};
+	// Each backend in turn, and its offscreen check gone before the real renderer starts: the engine's window owns SDL (it quits it).
+	if (only.empty() || only == "gl")
+	{
+		start(gpucheck::makeGlBackend());
+		for (auto path : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
+		{
+			++ran;
+			rc = std::max(rc, gpucheck::runEngineCheck(HE::RendererBackend::OpenGL, path, pack,
+			                                           (outDir / (std::string("landscape_OpenGL_engine_") + (path == HE::RenderPath::Deferred ? "deferred" : "forward") + ".png")).string()));
+		}
 	}
+#ifdef HE_CHECK_METAL
+	if (only.empty() || only == "metal")
+	{
+		start(gpucheck::makeMetalBackend());
+		for (auto path : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
+		{
+			++ran;
+			rc = std::max(rc, gpucheck::runEngineCheck(HE::RendererBackend::Metal, path, pack,
+			                                           (outDir / (std::string("landscape_Metal_engine_") + (path == HE::RenderPath::Deferred ? "deferred" : "forward") + ".png")).string()));
+		}
+	}
+#endif
 	std::filesystem::remove(pack);
 	if (ran == 0) { std::printf("no backend ran\n"); return 3; }
 	return rc;
