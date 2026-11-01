@@ -120,8 +120,24 @@ wie bisher die Pixel (RGBA8, BC1/3/4/5). Gemeinsame Rechnung: `HE::textureArrayS
 
 Drei Arrays: 335,5 MB → 83,9 MB (Development, Store: -251,6 MB). Shipping (zstd): die BC7-Arrays
 komprimieren mit `zstd -19` auf 20,9 + 15,9 + 17,8 = 54,6 MB, gegen 120,7 MB heute: etwa -66 MB, das
-Catania-Pak läge bei ca. 62 MB statt 128 MB (nicht neu exportiert, aus den Teilmessungen gerechnet).
+Catania-Pak liegt bei 61,7 MB statt 128,2 MB (gemessen, siehe unten).
 VRAM der Arrays -75 %. Bildabweichung (frühere Messung, Thema 180): 0,6 (ASTC) / 0,8 (BC7) mittlere Kanalstufen.
+
+**Gemessen am Projekt (Catania, 2026-11-01):** `hpak_packer` mit den Export-Einstellungen von Shipping
+(zstd, Cook, ASTC wie auf Metal, Qualität Fast; Wurzeln Projekt-Content + EngineContent + Cache), einmal
+ohne und einmal mit `--cook-arrays` (die Flags `--cook`, `--texture-format`, `--texture-quality`,
+`--cook-arrays`, `--engine-content-cache` sind neu, vorher packte das Tool nur roh):
+
+| Pak | Größe | Zeit |
+|---|---|---|
+| Arrays aus (bisheriges Verhalten) | 128,2 MB | 69 s |
+| Arrays an | **61,7 MB** (-52 %) | 33 s |
+
+Die Zeile "aus" trifft den Export vom 30.10. (128,3 MB) fast genau, die Messung ist also repräsentativ.
+Nicht enthalten sind die vorkompilierten Material-Shader (PSHD, ca. 0,9 MB; der Compiler gehört dem Editor)
+und die Szenen. In einem Store-Pak mit Arrays an liegen die drei Arrays als ASTC (Format 1, 12 Mips,
+5 Slices, je 27,96 MB) mit `TXSM` (15 Floats); die gebackenen Mittelwerte stimmen mit einer unabhängigen
+Python-Rechnung aus den Quellpixeln überein (Albedo-Slice 0: 0,159 / 0,120 / 0,049).
 
 **Getestet:** `test_texture_bcn.cpp` (Cook trägt die Means, exakt gleich den Pixel-Means; BC7/ASTC-Array ohne
 lesbare Pixel nimmt die gebackenen Werte; falsche Anzahl wird verworfen; Chunk überlebt Speichern/Laden;
@@ -130,8 +146,7 @@ grün; der eine Fehler (`Disk registry: scanContentDirectory`, 7 statt 2) kommt 
 dieses Rechners (5 Assets zusätzlich) und hat mit der Änderung nichts zu tun.
 
 **Nicht verifiziert:** Sichtprüfung eines kompletten Exports auf der GPU; D3D11/D3D12/Vulkan (Array-Upload
-komprimierter Formate ist dort wie bei 2D-Texturen "blind", keine Windows/Linux-Maschine); ein neuer Voll-Export
-von Catania (Größen oben sind Teilmessungen). Normal-Arrays bleiben BC7/ASTC (BC5 würde Z verlieren).
+komprimierter Formate ist dort wie bei 2D-Texturen "blind", keine Windows/Linux-Maschine); ein Voll-Export aus dem Editor (die Paketmessung oben kommt vom `hpak_packer`). Normal-Arrays bleiben BC7/ASTC (BC5 würde Z verlieren).
 
 ## Handoff
 
@@ -145,4 +160,4 @@ von Catania (Größen oben sind Teilmessungen). Normal-Arrays bleiben BC7/ASTC (
 - **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
 - **Pending:** Schritt 1586 (Erreichbarkeitsfilter, bleibt Ziel); übrige Punkte der Liste (Startszene doppelt, Shader-Backends an Ziel koppeln, MTRL-Graph streichen).
 - **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
-- **Next steps:** 1. Catania neu exportieren (Editor, Profil Shipping) und die Pak-Größe gegen 128,3 MB messen, Bild auf Metal ansehen. 2. Schritt 1586: Filter in `HpakWriter::addDirectories`, Wurzeln aus `EngineDependencies.h`/`AssetRefScan.h`. 3. Startszene nicht doppelt packen.
+- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Schritt 1586: Filter in `HpakWriter::addDirectories`, Wurzeln aus `EngineDependencies.h`/`AssetRefScan.h`. 3. Startszene nicht doppelt packen.
