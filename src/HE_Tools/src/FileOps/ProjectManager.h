@@ -213,6 +213,11 @@ struct ExportProfile
 	// (bitmask of 1u << HE::RendererBackend). Default = Metal | OpenGL (the runtime-
 	// consumed backends). 0 → shaders cross-compile at runtime as before.
 	uint32_t shaderBackends = (1u << 4) | (1u << 0); // Metal | OpenGL
+	// true (default): the backends above are ignored and the pak carries the variants of the
+	// ONE backend the shipped game runs (the project's Render Defaults backend, else the
+	// platform default; GameBackendRules.h shaderBackendMaskFor). A profile saved before this
+	// field existed keeps its explicit set unless that set is the old Metal | OpenGL default.
+	bool autoShaderBackends = true;
 	// Compile HorizonCode graphs to native C++ in the packaged build (needs
 	// cmake + a C++ toolchain on the exporting machine).
 	bool compileHorizonCode = false;

@@ -76,6 +76,9 @@ der Packaged-Build die gekochte.
 - ✅ **Startszene nur einmal im Pak** (2026-11-01, Thema 228): `HpakWriter::addAlias`, zweite TOC-Zeile auf
   dieselben Bytes. Catania −7,03 MB im Store-Pak. `docs/asset-export-audit-2026-11-01.md` Abschnitt 9.
 
+- ✅ **Shader-Backends folgen dem Spiel** (2026-11-01, Thema 228): Profilfeld `autoShaderBackends` (Standard an), der Export
+  backt die PSHD-Varianten des einen Backends, auf dem das Spiel startet (`GameBackendRules.h`). Abschnitt 10 des Audits.
+
 **Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
 Durchgang):**
 - **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +

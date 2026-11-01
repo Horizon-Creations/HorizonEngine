@@ -8150,6 +8150,15 @@ namespace
 	  "uncompressed pixels. Switch it off to ship the arrays as RGBA8. "
 	  "Needs a texture compression other than None. Saved in the profile.",
 	  "", "export#overview" },
+	{ "Export/Match the game's backend", "Match the game's backend",
+	  "Bake the precompiled material shaders for the one graphics backend the "
+	  "exported game runs: the one the project's Render Defaults name, else the "
+	  "platform's default (Metal on macOS, OpenGL elsewhere). The other "
+	  "backends' variants would only be dead weight in the pak. Switch it off "
+	  "to pick the backends by hand, for a build that may run on several. A "
+	  "game that ends up on a backend without baked shaders compiles them on "
+	  "first use, as it does with none selected. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Texture quality", "Texture quality",
 	  "How hard the encoder works on each texture. Fast is what every export "
 	  "did before this existed; Balanced tries every block partition; High adds "

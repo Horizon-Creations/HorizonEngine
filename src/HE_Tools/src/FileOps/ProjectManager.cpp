@@ -670,6 +670,7 @@ static json profileToJson(const ExportProfile& p)
 	j["targetPlatform"]   = p.targetPlatform;
 	j["appBundle"]        = p.appBundle;
 	j["shaderBackends"]   = p.shaderBackends;
+	j["autoShaderBackends"] = p.autoShaderBackends;
 	j["compileHorizonCode"] = p.compileHorizonCode;
 	j["hcStopOnFailure"]    = p.hcStopOnFailure;
 	j["textureFormat"]      = p.textureFormat;
@@ -698,6 +699,9 @@ static ExportProfile profileFromJson(const json& j)
 	p.appBundle        = jsonBool(j, "appBundle", false);
 	p.shaderBackends   = j.contains("shaderBackends") && j["shaderBackends"].is_number_unsigned()
 	                     ? j["shaderBackends"].get<uint32_t>() : ((1u << 4) | (1u << 0));
+	// Absent in a profile saved before the field: the old default set was never a deliberate
+	// choice (nobody ships Metal AND OpenGL by intent), anything else was.
+	p.autoShaderBackends = jsonBool(j, "autoShaderBackends", p.shaderBackends == ((1u << 4) | (1u << 0)));
 	p.compileHorizonCode = jsonBool(j, "compileHorizonCode", false);
 	p.hcStopOnFailure    = jsonBool(j, "hcStopOnFailure", false);
 	// "compileGameFromSdk" (topic 211) is read by nobody any more: every export

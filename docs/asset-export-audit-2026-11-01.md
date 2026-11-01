@@ -96,7 +96,7 @@ der Cook macht daraus BC7/ASTC/BC3 mit Mips (Plan 0.). Die Cook-Ersparnis dort i
 2. **Erreichbarkeitsfilter** (Schritt 1586), mit Engine-Wurzeln (Wetter `0x500`, Clipmap `0x41F`, Defaults)
    und "Immer mitpacken"-Muster. Spart bei Catania nur ~2,5 MB, bei Projekten mit viel Altbestand mehr.
 3. Startszene nicht doppelt packen (7 MB im Store-Modus). ✅ umgesetzt, Abschnitt 9.
-4. Shader-Backends an die Zielplattform koppeln (Standard aus Ziel + Renderer).
+4. Shader-Backends an die Zielplattform koppeln (Standard aus Ziel + Renderer). ✅ umgesetzt, Abschnitt 10.
 5. Graph-JSON/GLSL aus MTRL streichen, wenn PSHD vorhanden und kein Laufzeit-Konsument (erst klären, s. 4).
 6. Normal/Mask-Arrays mit BC5/BC4 statt BC7 (nur wenn sie Kanäle sparen), Audio als Vorbis, Mesh uint16.
 
@@ -237,6 +237,36 @@ jetzt über Aliase und ist grün.
 **Nicht verifiziert:** `scene.load` der Startszene im laufenden Spiel (nur der Pak-Eintrag unter der Pfad-UUID gelesen);
 Export aus dem Editor; Windows/Linux.
 
+## 10. Umgesetzt: Shader-Backends folgen dem Backend des Spiels (Punkt 4)
+
+Vorher ein Häkchenfeld, Standard Metal|OpenGL, unabhängig vom Ziel (Abschnitt 4): ein Windows-Export bekam Metal- und
+GL-Varianten, ein D3D12-Spiel gar keine, und jeder Export trug die Varianten von zwei Backends, von denen das Spiel eines läuft.
+
+**Regel (`GameBackendRules.h`, `shaderBackendMaskFor`):** die PSHD-Varianten des einen Backends, auf dem das fertige Spiel startet.
+Das ist das Backend der Render Defaults des Projekts (`effectiveExportBackend`), sonst der Plattform-Standard der Laufzeit
+(`defaultBackendNameFor`: macOS Metal, sonst OpenGL, wie `RendererFactory::Default`). Eine App ohne Advanced Shader Effects
+(Software) bekommt 0, es gibt nichts zu backen.
+
+**Profil:** neues Feld `autoShaderBackends` (Standard an, Dialog-Checkbox "Match the game's backend", Hilfe-Eintrag). Aus: die
+Häkchen gelten wie bisher. Ein Profil ohne das Feld bleibt manuell, wenn sein Satz nicht der alte Standard Metal|OpenGL ist
+(den hat niemand bewusst gewählt); der alte Standard wird Auto. Der Auto-Satz geht in den Fingerprint (`PackManifest`), ein
+Wechsel packt die Materialien neu.
+
+**Gefahr:** ein Spiel, das zur Laufzeit auf einem anderen Backend landet (Config nennt eines, das die Laufzeit nicht hat),
+übersetzt beim Laden, wie ein Pak ohne Varianten. Kein Fehler, nur die alte Wartezeit.
+
+**Größe:** nicht am echten Export gemessen: die Übersetzung (`CompileMaterialShaderVariants`) hängt am Editor und läuft nicht in
+`he_tests`. Shader und Materialien sind bei Catania ca. 0,4 % des Paks (Abschnitt 1), die Ersparnis ist also unter 1 MB. Der Gewinn
+ist die Richtigkeit: Windows/Linux-Exporte tragen jetzt die Varianten ihres Backends.
+
+**Verifiziert:** Tests `shader precompile follows the backend the shipped game runs` (`test_export_backend.cpp`), Profil-Runde und
+Migration (`test_export_profiles.cpp`); die vier Exporter/Hpak/Profil-Testdateien grün bis auf den bekannten
+`scanContentDirectory`-Fehler dieses Rechners; `editor_help_audit.py --check` grün; `ExportDialogPanel.cpp` und `EditorHelp.cpp`
+per compdb `-fsyntax-only` ohne Fehler.
+**Nicht verifiziert:** der Dialog selbst (nicht gebaut, nicht gesehen); ein echter Export aus dem Editor mit gebackenen
+Varianten; Windows/Linux. Partikel-Shader teilen sich dieselbe Maske, bei D3D/Vulkan backen sie weiterhin nichts (siehe
+`CompileParticleShaderVariants`), das ist unverändert.
+
 ## Handoff
 
 - **Topic / step:** 228, Schritt 1585 (Audit, fertig) und Punkt 1 der Liste (Arrays, umgesetzt); Schritt 1586 (Filter) umgesetzt, Abschnitt 8
@@ -247,6 +277,6 @@ Export aus dem Editor; Windows/Linux.
 - **Not verified:** siehe Abschnitt 7.
 - **Decisions taken:** Schalter standardmäßig an, weil die Arrays 94 % des Shipping-Paks sind. Means immer backen, auch bei BC3 (genauer und ohne Dekodieren).
 - **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
-- **Pending:** übrige Punkte der Liste (Shader-Backends an das Ziel koppeln, MTRL-Graph streichen); Export aus dem Editor einmal von Hand ansehen. Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
+- **Pending:** MTRL-Graph streichen (Punkt 5, erst klären); Export aus dem Editor einmal von Hand ansehen (Dialog mit der neuen Checkbox, Log, gebackene Varianten). Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
 - **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
-- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Shader-Backends an das Exportziel koppeln (Punkt 4 der Liste). 3. MTRL-Graph streichen, wenn PSHD gebacken ist (erst prüfen, ob der Editor-Reimport ihn braucht).
+- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. MTRL-Graph streichen, wenn PSHD gebacken ist (erst prüfen, ob der Editor-Reimport ihn braucht; Fundstellen `ContentManager.cpp` 749, 857, 928, 953, 975, 1865).

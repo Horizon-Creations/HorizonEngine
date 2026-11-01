@@ -17,6 +17,7 @@
 // these rules, and no shared library links all three.
 #include <Types/Enums.h>
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -81,6 +82,23 @@ inline std::string forExport(bool appProject, bool advancedShaderEffects,
     return advancedShaderEffects ? std::string() : std::string("Software");
 }
 
+// The backend a game built for `platform` starts on when config.json names none
+// (RendererFactory::Default of the shipped runtime: Metal where it is linked, else
+// OpenGL on the desktop runtimes).
+inline const char* defaultBackendNameFor(std::string_view platform)
+{
+    return targetPlatformName(platform) == "macOS" ? "Metal" : "OpenGL";
+}
+
+// Which precompiled material shaders (CHUNK_PSHD) an export has to carry, as the
+// bitmask the packer takes (1u << RendererBackend). A shipped game runs ONE backend,
+// the one `shipped` names (forExport's answer) or, with no name, the platform
+// default; the variants for any other backend are dead weight in the pak. A game
+// that falls back to another backend (a config naming one its runtime lacks) just
+// cross-compiles at load, which is what an unprecompiled pak does anyway.
+// 0 for the software renderer: it draws no 3D, so there is nothing to compile.
+inline uint32_t shaderBackendMaskFor(std::string_view platform, const std::string& shipped);
+
 // Backends by NAME (the editor's getRHIName spelling), because config.json is a
 // file a player or a support ticket edits by hand: "Metal" survives a
 // renumbering of the enum, a bare 4 does not.
@@ -93,6 +111,15 @@ inline bool fromName(const std::string& name, RendererBackend& out)
     if (name == "Metal")    { out = RendererBackend::Metal;    return true; }
     if (name == "Software") { out = RendererBackend::Software; return true; }
     return false;
+}
+
+inline uint32_t shaderBackendMaskFor(std::string_view platform, const std::string& shipped)
+{
+    RendererBackend b{};
+    if (!fromName(shipped.empty() ? std::string(defaultBackendNameFor(platform)) : shipped, b))
+        b = RendererBackend::OpenGL;   // an unknown name: the game keeps its default, near enough
+    if (b == RendererBackend::Software) return 0;
+    return 1u << static_cast<uint32_t>(b);
 }
 
 // What the runtime does with the name it found in config.json.

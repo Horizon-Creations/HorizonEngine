@@ -89,6 +89,7 @@ static int    s_exportTextureQuality = 0;          // 0 Fast, 1 Balanced, 2 High
 static bool   s_exportTextureArrays  = true;       // block-compress texture arrays too
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
+static bool     s_exportShaderAuto     = true;     // bake the variants of the backend the game runs, ignore the set above
 // The window + backend the exported game starts in. They are NOT part of the
 // ExportProfile: the profile lives in the .heproj, and these are shipped
 // through config.json instead — so they persist in the editor's own settings
@@ -115,6 +116,17 @@ static const HE::ProjectRenderDefaults* projectRenderDefaults(const AppContext& 
     if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty()) return nullptr;
     const HE::ProjectRenderDefaults& r = ctx.projectManager->currentProject().settings.renderDefaults;
     return r.useEditorSettings ? nullptr : &r;
+}
+
+static std::string effectiveExportBackend(const AppContext& ctx);
+
+// The precompiled-shader set this export bakes: the hand-picked one, or (Auto, the default)
+// the single backend the shipped game runs. An application without Advanced Shader Effects
+// ships the software renderer, which has no variants to bake.
+static uint32_t effectiveShaderBackends(const AppContext& ctx)
+{
+    if (!s_exportShaderAuto) return s_exportShaderBackends;
+    return HE::BackendRules::shaderBackendMaskFor(s_exportPlatform, effectiveExportBackend(ctx));
 }
 
 static std::string effectiveExportBackend(const AppContext& ctx)
@@ -541,6 +553,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	// any more (always Host); only project_build's one-run copy can name another.
 	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
 	s_exportShaderBackends = p.shaderBackends;
+	s_exportShaderAuto     = p.autoShaderBackends;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 	s_exportOnlyReferenced = p.onlyReferenced;
@@ -564,6 +577,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.targetPlatform   = s_exportPlatform;
 	p.appBundle        = s_exportAppBundle;
 	p.shaderBackends   = s_exportShaderBackends;
+	p.autoShaderBackends = s_exportShaderAuto;
 	p.compileHorizonCode = s_exportCompileHC;
 	p.hcStopOnFailure    = s_exportHcStop;
 	p.textureFormat      = s_exportTextureFormat;
@@ -1220,6 +1234,8 @@ void render(AppContext& ctx)
                                   "selected backends, so the shipped game never cross-compiles at\n"
                                   "load. Ship only the backend(s) the target actually runs.\n"
                                   "None selected \xe2\x86\x92 the game compiles shaders on first use.");
+            EditorWidgets::checkbox("Match the game's backend", &s_exportShaderAuto);
+            EditorWidgets::helpForKey("Export/Match the game's backend");
             {
                 struct Bk { const char* label; HE::RendererBackend rb; };
                 static const Bk kBackends[] = {
@@ -1229,12 +1245,17 @@ void render(AppContext& ctx)
                     { "D3D11",  HE::RendererBackend::D3D11  },
                     { "D3D12",  HE::RendererBackend::D3D12  },
                 };
+                // Auto shows what it will bake, greyed out; the hand-picked set is kept
+                // underneath so switching Auto off again finds it as it was.
+                const uint32_t shown = s_exportShaderAuto ? effectiveShaderBackends(ctx)
+                                                          : s_exportShaderBackends;
+                ImGui::BeginDisabled(s_exportShaderAuto);
                 int col = 0;
                 for (const Bk& b : kBackends)
                 {
                     const uint32_t bit = 1u << static_cast<uint32_t>(b.rb);
-                    bool on = (s_exportShaderBackends & bit) != 0;
-                    if (EditorWidgets::checkbox(b.label, &on))
+                    bool on = (shown & bit) != 0;
+                    if (EditorWidgets::checkbox(b.label, &on) && !s_exportShaderAuto)
                     {
                         if (on) s_exportShaderBackends |=  bit;
                         else    s_exportShaderBackends &= ~bit;
@@ -1242,6 +1263,7 @@ void render(AppContext& ctx)
                     if (++col < 3) ImGui::SameLine();
                     else           col = 0;
                 }
+                ImGui::EndDisabled();
             }
             }
             else
@@ -1785,7 +1807,7 @@ void startExport(AppContext& ctx)
                     ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Python;
                 // Precompile node-graph material shaders into the pak for the
                 // selected backends (0 → runtime cross-compiles as before).
-                es.shaderBackends        = s_exportShaderBackends;
+                es.shaderBackends        = effectiveShaderBackends(ctx);
                 es.compileShaderVariants = &CompileMaterialShaderVariants;
                 // Same bitmask + toggle UI as materials — particles only ever bake
                 // OpenGL/Metal variants (see CompileParticleShaderVariants), so
