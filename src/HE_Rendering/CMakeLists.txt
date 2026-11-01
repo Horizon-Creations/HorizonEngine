@@ -40,6 +40,8 @@ find_package(OpenGL REQUIRED)
 add_library(RendererOpenGL STATIC
     src/Backends/OpenGL/OpenGLRenderer.cpp
     src/Backends/OpenGL/OpenGLShaderManager.cpp
+    src/Backends/OpenGL/OpenGLLandscape.cpp
+    include/Backends/OpenGL/OpenGLLandscape.h
     include/Backends/OpenGL/OpenGLShaderManager.h)
 target_include_directories(RendererOpenGL PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include

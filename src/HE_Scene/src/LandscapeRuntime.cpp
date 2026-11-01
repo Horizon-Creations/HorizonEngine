@@ -1,5 +1,8 @@
 #include "HorizonScene/LandscapeRuntime.h"
 
+#include "HorizonScene/LandscapeGpuLayout.h"
+#include "HorizonScene/LandscapePatchMesh.h"
+
 #include "HorizonScene/Components/CameraComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/LandscapeWorldComponent.h"
@@ -125,6 +128,7 @@ bool LandscapeRuntime::beginWith(std::shared_ptr<const LandscapeTileSource> sour
 	m_store = std::make_unique<LandscapeStore>(m_source, config.store);
 	m_atlas = std::make_unique<LandscapeAtlas>(m_store->stats().maxTiles, config.atlasWindow);
 	++m_generation;
+	m_renderStatic.reset();
 	return true;
 }
 
@@ -143,6 +147,7 @@ void LandscapeRuntime::reset()
 	m_pendingReleases.clear();
 	m_pendingTable.clear();
 	m_haveCamera = m_hasLastCamera = false;
+	m_renderStatic.reset();
 }
 
 void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
@@ -321,6 +326,128 @@ void LandscapeRuntime::buildFrame(const glm::dmat4& viewProjRelative, const glm:
 	out.heightMinM = m_config.heightMinM;
 	out.heightScaleM = m_config.heightScaleM;
 	out.tileLevels = m_quadtree.tileLevels;
+}
+
+std::array<glm::vec4, 12> LandscapeRuntimeConfig::defaultLayerColors()
+{
+	// grass, rock, sand, snow, dirt, forest floor, then six neighbours that are told apart on screen
+	return { glm::vec4(0.22f, 0.40f, 0.12f, 1), glm::vec4(0.42f, 0.40f, 0.38f, 1), glm::vec4(0.76f, 0.68f, 0.45f, 1), glm::vec4(0.92f, 0.94f, 0.96f, 1),
+	         glm::vec4(0.35f, 0.26f, 0.17f, 1), glm::vec4(0.12f, 0.26f, 0.10f, 1), glm::vec4(0.55f, 0.50f, 0.30f, 1), glm::vec4(0.30f, 0.30f, 0.34f, 1),
+	         glm::vec4(0.60f, 0.35f, 0.25f, 1), glm::vec4(0.25f, 0.45f, 0.45f, 1), glm::vec4(0.70f, 0.70f, 0.20f, 1), glm::vec4(0.50f, 0.20f, 0.50f, 1) };
+}
+
+void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, const glm::dvec3& origin, bool zeroToOne, LandscapeRenderFrame& out)
+{
+	out = LandscapeRenderFrame{};
+	LandscapeFrame f;
+	buildFrame(viewProjRelative, origin, zeroToOne, f);
+	if (!f.active) return;
+	const LandscapeCoarseWorld* coarse = f.coarse;
+	if (!coarse || !coarse->valid()) return;
+
+	if (!m_renderStatic || m_renderStatic->generation != f.coarseGeneration)
+	{
+		auto w = std::make_shared<LandscapeRenderStatic>();
+		const LandscapeGeometry& g = m_source->geometry();
+		const LandscapeTileImageLayout tl = LandscapeTileImageLayout::forGeometry(g);
+		const LandscapeCoarseImageLayout cl = LandscapeCoarseImageLayout::forCoarse(*coarse);
+		w->generation = f.coarseGeneration;
+		w->tileM = f.tileM;
+		w->heightMinM = f.heightMinM;
+		w->heightScaleM = f.heightScaleM;
+		w->worldMaxX = f.worldMaxX;
+		w->worldMaxZ = f.worldMaxZ;
+		w->tilesX = f.tilesX;
+		w->tilesZ = f.tilesZ;
+		w->hCells = g.hCells;
+		w->wTexels = g.wTexels;
+		w->tileLevels = f.tileLevels;
+		w->tableWindow = f.tableWindow;
+		w->slotCapacity = f.slotCapacity;
+		w->heightW = tl.heightW;
+		w->heightH = tl.heightH;
+		w->weightW = tl.weightW;
+		w->weightH = tl.weightH;
+		w->weightPages = tl.weightPages;
+		w->heightLevels = static_cast<int>(std::min<size_t>(tl.heightRect.size(), 8));
+		for (int i = 0; i < w->heightLevels; ++i)
+		{
+			w->heightRect[i][0] = tl.heightRect[static_cast<size_t>(i)].x;
+			w->heightRect[i][1] = tl.heightRect[static_cast<size_t>(i)].y;
+			w->heightRect[i][2] = tl.heightRect[static_cast<size_t>(i)].w;
+			w->heightRect[i][3] = tl.heightRect[static_cast<size_t>(i)].h;
+		}
+		w->coarseW = cl.width;
+		w->coarseH = cl.height;
+		w->coarseGridCount = static_cast<int>(std::min<size_t>(cl.grids.size(), 16));
+		for (int i = 0; i < w->coarseGridCount; ++i)
+		{
+			w->coarseGrid[i][0] = cl.grids[static_cast<size_t>(i)].w;
+			w->coarseGrid[i][1] = cl.grids[static_cast<size_t>(i)].h;
+			w->coarseGrid[i][2] = cl.grids[static_cast<size_t>(i)].rowOffset;
+		}
+		w->coarseWeightW = cl.weightW;
+		w->coarseWeightH = cl.weightH;
+		landscapePackCoarse(*coarse, cl, w->coarseHeights, w->coarseWeights);
+		for (int i = 0; i < 12; ++i)
+			for (int c = 0; c < 4; ++c) w->layerColor[i][c] = m_config.layerColors[static_cast<size_t>(i)][c];
+		const LandscapePatchMesh mesh = LandscapePatchMesh::build(64);
+		w->patchCells = mesh.cells;
+		w->patchIndices = mesh.indices;
+		for (int q = 0; q < 4; ++q)
+		{
+			w->quadrantFirst[q] = mesh.quadrantFirst[q];
+			w->quadrantCount[q] = mesh.quadrantCount[q];
+		}
+		m_renderStatic = std::move(w);
+	}
+
+	out.active = true;
+	out.world = m_renderStatic;
+	out.origin = f.origin;
+	out.cameraRel = glm::vec3(f.cameraAbsolute - f.origin);
+	out.slabDistance = f.slabDistance;
+	out.patches.reserve(f.patches.size());
+	for (const LandscapeFrame::Patch& p : f.patches)
+	{
+		LandscapeRenderPatch d;
+		d.level = p.level;
+		d.quadrants = p.quadrants;
+		d.coarse = p.coarse;
+		d.gridIndex = p.gridIndex;
+		d.cornerX = p.ix * 64;
+		d.cornerZ = p.iz * 64;
+		d.x0 = p.x0;
+		d.z0 = p.z0;
+		d.size = p.size;
+		d.morphStart = p.morphStart;
+		d.morphEnd = p.morphEnd;
+		out.patches.push_back(d);
+	}
+	const LandscapeTileImageLayout tl = LandscapeTileImageLayout::forGeometry(m_source->geometry());
+	out.uploads.reserve(f.uploads.size());
+	for (LandscapeAtlas::Upload& u : f.uploads)
+	{
+		LandscapeRenderUpload r;
+		r.slot = u.slot;
+		if (u.tile) landscapePackTile(*u.tile, tl, r.heights, r.pages);
+		u.tile.reset();   // the store's tile is not held past the copy
+		out.uploads.push_back(std::move(r));
+	}
+	out.tableUpdates.reserve(f.tableUpdates.size());
+	for (const LandscapeAtlas::TableUpdate& t : f.tableUpdates) out.tableUpdates.push_back({ t.index, t.slot });
+}
+
+LandscapeProvider LandscapeRuntime::renderProvider(std::function<glm::dvec3()> origin)
+{
+	return [this, origin = std::move(origin)](const glm::dmat4& vp, bool zeroToOne, LandscapeRenderFrame& out) {
+		buildRenderFrame(vp, origin ? origin() : glm::dvec3(0.0), zeroToOne, out);
+	};
+}
+
+LandscapeProvider LandscapeRuntime::renderProvider(const HorizonWorld& world)
+{
+	return renderProvider([&world]() { return world.origin(); });
 }
 
 } // namespace HE

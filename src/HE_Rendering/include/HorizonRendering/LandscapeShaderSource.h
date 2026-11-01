@@ -20,8 +20,9 @@
 //     vertices past the edge read the last row of heights.
 //   * Normals: derivatives of the interpolated world position in the fragment shader. Flat shaded at the patch's resolution, no
 //     normal texture; a smooth normal is part B.
-//   * Weights: the fragment's own tile, nearest texel, three RGBA8 pages, flat layer colours. The material graph / auto-landscape
-//     material (which assumes one UV over the whole landscape, uvTiling) is part B and needs world-space UVs at this size.
+//   * Weights: the fragment's own tile, nearest texel, three RGBA8 pages, flat layer colours; a tile that is not in the atlas reads the
+//     coarse world's weights (128 m texels) the same way. The material graph / auto-landscape material (which assumes one UV over the
+//     whole landscape, uvTiling) needs world-space UVs at this size and comes after the draw paths.
 namespace HE::glsl
 {
 
@@ -130,6 +131,9 @@ uniform usampler2D      uSlotTable;
 uniform sampler2DArray  uTileWeights0;   // RGBA8, layers 0-3 of every tile's twelve
 uniform sampler2DArray  uTileWeights1;
 uniform sampler2DArray  uTileWeights2;
+uniform sampler2D       uCoarseWeights0; // RGBA8, the finest weight grid of the coarse world (one texel per 128 m), pages as above
+uniform sampler2D       uCoarseWeights1;
+uniform sampler2D       uCoarseWeights2;
 
 void main()
 {
@@ -141,8 +145,20 @@ void main()
     int mask = int(uHeightInfo.w) - 1;
     uint slot = texelFetch(uSlotTable, ivec2(tile.x & mask, tile.y & mask), 0).r;
 
-    vec3 albedo = vec3(0.45);                      // a tile that is not in the atlas (the coarse levels): neutral
-    if (slot != 65535u)
+    vec3 albedo;
+    if (slot == 65535u)
+    {
+        // A tile that is not in the atlas (the coarse levels, or one still streaming): the coarse world's weights, one texel per 128 m.
+        ivec2 cs = textureSize(uCoarseWeights0, 0);
+        ivec2 c = clamp(ivec2(floor(abs2 / uWorld.xy * vec2(cs))), ivec2(0), cs - ivec2(1));
+        vec4 w0 = texelFetch(uCoarseWeights0, c, 0);
+        vec4 w1 = texelFetch(uCoarseWeights1, c, 0);
+        vec4 w2 = texelFetch(uCoarseWeights2, c, 0);
+        albedo = w0.x * uLayerColor[0].rgb + w0.y * uLayerColor[1].rgb + w0.z * uLayerColor[2].rgb + w0.w * uLayerColor[3].rgb
+               + w1.x * uLayerColor[4].rgb + w1.y * uLayerColor[5].rgb + w1.z * uLayerColor[6].rgb + w1.w * uLayerColor[7].rgb
+               + w2.x * uLayerColor[8].rgb + w2.y * uLayerColor[9].rgb + w2.z * uLayerColor[10].rgb + w2.w * uLayerColor[11].rgb;
+    }
+    else
     {
         float texel = uWorld.z / float(uTile.y);
         ivec2 t = clamp(ivec2(floor((abs2 - vec2(tile) * uWorld.z) / texel)), ivec2(0), ivec2(uTile.y - 1));

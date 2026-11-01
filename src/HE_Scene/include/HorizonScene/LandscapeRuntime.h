@@ -9,9 +9,13 @@
 #include "HorizonScene/LandscapeStore.h"
 #include "HorizonScene/LandscapeWater.h"
 
+#include <Renderer/LandscapeRenderFrame.h>
+
+#include <array>
 #include <glm/mat4x4.hpp>
 #include <glm/vec3.hpp>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,6 +46,9 @@ struct LandscapeRuntimeConfig
 	// smaller loadRadius (fitsStore) and shows the coarse levels sooner; rangeFactor * morphStart has to stay >= sqrt(2) for the seams.
 	float    rangeFactor = 6.0f;
 	float    morphStart = 0.6f;
+	// The flat colour of each of the twelve paint layers until the material graph takes over (LandscapeShaderSource.h).
+	std::array<glm::vec4, 12> layerColors = defaultLayerColors();
+	static std::array<glm::vec4, 12> defaultLayerColors();
 };
 
 // What a renderer needs for one frame. Positions are origin-relative; heights are metres.
@@ -130,6 +137,13 @@ public:
 	// The frame for the camera that was just rendered with `viewProjRelative` (origin-relative world to clip). `zeroToOne`: the
 	// backend's clip depth range. Moves the uploads and table changes collected since the last frame into `out`.
 	void buildFrame(const glm::dmat4& viewProjRelative, const glm::dvec3& origin, bool zeroToOne, LandscapeFrame& out);
+	// The same for a renderer: patches, and the images packed into bytes (LandscapeRenderFrame.h). Executing it is the renderer's duty, like
+	// the frame's; the static images are made once per landscape and shared. Call it from the main thread, once per rendered frame.
+	void buildRenderFrame(const glm::dmat4& viewProjRelative, const glm::dvec3& origin, bool zeroToOne, LandscapeRenderFrame& out);
+	// buildRenderFrame as the callback IRenderer::SetLandscapeProvider takes; `origin` says what the floating origin is at each call. The runtime
+	// (and, for the second form, the world) has to outlive the renderer's use of it.
+	LandscapeProvider renderProvider(std::function<glm::dvec3()> origin);
+	LandscapeProvider renderProvider(const HorizonWorld& world);
 
 	const LandscapeStore*  store() const { return m_store.get(); }
 	const LandscapeAtlas*  atlas() const { return m_atlas.get(); }
@@ -151,6 +165,7 @@ private:
 	bool       m_haveCamera = false;
 	bool       m_hasLastCamera = false;
 	uint64_t   m_generation = 0;
+	std::shared_ptr<const LandscapeRenderStatic> m_renderStatic;   // for m_generation
 	std::string m_pack;
 	std::string m_failedPack;   // a pack that could not start: not tried again until the component names another
 	int         m_beginAttempts = 0;

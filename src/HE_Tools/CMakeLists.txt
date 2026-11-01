@@ -225,6 +225,29 @@ if(WIN32)
     )
 endif()
 
+# ─── landscape_gpu_check (the world-scale landscape drawn by the real backend code) ───
+# Part B of docs/landscape-world-scale-plan-2026-10-28.md, step 2: OpenGL (and, on a Mac, Metal) render a LandscapeRenderFrame offscreen
+# and the checker compares colour and depth with geometry it knows. Needs a window system and a GPU; not part of he_tests and not run in CI.
+# Usage: see the header comment in main.cpp.
+add_executable(landscape_gpu_check
+    src/LandscapeGpuCheck/main.cpp
+    src/LandscapeGpuCheck/GlBackend.cpp
+)
+target_link_libraries(landscape_gpu_check PRIVATE HorizonScene RendererOpenGL glad SDL3::SDL3)
+target_include_directories(landscape_gpu_check PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/HE_Core/include
+    ${CMAKE_SOURCE_DIR}/src/HE_Core/vendor
+    ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include)
+if(WIN32)
+    add_custom_command(TARGET landscape_gpu_check POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonNet>   $<TARGET_FILE_DIR:landscape_gpu_check>
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL3-shared>  $<TARGET_FILE_DIR:landscape_gpu_check>
+        VERBATIM
+    )
+endif()
+
 # ─── weather_sound_gen.exe (the engine's weather sounds) ──────────────────────
 # Same bargain: weather_sound_gen <out-dir> writes Rain/Wind/Snow/Storm/Thunder
 # .hasset files (Audio, PCM16) via ContentManager, synthesised from seeded noise
