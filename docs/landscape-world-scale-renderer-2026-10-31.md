@@ -112,7 +112,7 @@ Der Shader will die **ganzzahlige** Eck-Zelle des Knotens (`ix · 64`, `iz · 64
   seine Kante, und eine noch nicht geladene Kachel zeigt gröberen Boden statt eines Lochs. (Dieser Fehler wurde in der Durchsicht gefunden, nicht vom Übersetzer; der Replay-Test deckt ihn jetzt ab und schlägt mit dem alten Lookup an.)
 * **Morph:** ungerade Vertices blenden zur Mitte ihrer Nachbarn **derselben Stufe** (1 bis 2 Zusatzabfragen), `m = clamp((d − morphStart)/(morphEnd − morphStart), 0, 1)`; `morphStart/End` kommen je Draw aus dem Frame, im Shader steht keine Konstante.
 * **Fragment:** Weltrand-`discard` in absoluten Koordinaten; Gewichte der eigenen Kachel, nächster Texel, drei RGBA8-Seiten, flache Ebenenfarben `uLayerColor[12]`, Normale aus `dFdx/dFdy` der Weltposition (flach schattiert, **keine Normal-Textur**).
-  **Die Grob-Patches werden grau: die Grobwelt-Gewichte sind gepackt, aber der Shader liest sie noch nicht.**
+  **Seit Teil B (01.11.2026) liest der Fragment-Shader die Grobwelt-Gewichte (ein Texel je 128 m) für Kacheln, die nicht im Atlas sind; vorher waren die Grob-Patches grau.**
 
 ## 8. Entscheidungen (mit Grund)
 
@@ -130,13 +130,16 @@ Der Shader will die **ganzzahlige** Eck-Zelle des Knotens (`ix · 64`, `iz · 64
 **`uvTiling` (Plan §5, geprüft):** die Material-Pfade nehmen **eine** UV über die ganze Landschaft an (`HlslSources.h:1513` "z = uvTiling, w = layer count", `VulkanRenderer.h:1630` "xy = 1/size, z = uvTiling"; die Chunk-Meshes schreiben globale UVs 0..uvTiling).
 Bei 100 km bräuchte das Material Welt-Koordinaten-UVs (`uv = world.xz / textureMeters`) und die Gewichte aus dem Atlas statt einer Gewichts-Textur; das ist Material-Graph-Arbeit über alle Backends und gehört nach Teil B, nicht in einen Shader ohne GPU zum Ausprobieren.
 
-## 9. Teil B (nicht gemacht, in dieser Reihenfolge)
+## 9. Teil B
 
-1. Vulkan (NN-WS03): `kLandscapeVulkanPrelude` wie beim Himmel (Block statt loser Uniforms), Pipeline, Vertex-/Indexpuffer aus `LandscapePatchMesh`, die Bilder aus §5, ein `IRenderer`-Eintrag, der einen `LandscapeFrame` nimmt und die Uploads **vor** dem Zeichnen ausführt.
-2. Zwei Aufrufstellen in der Anwendung: `m_landscape.update(*m_world, gameDt)` neben `updateCellStreaming` (`GameApplication.cpp:3297`) und `buildFrame(viewProj, m_world->origin(), …)` direkt vor dem Renderer-Aufruf; `zeroToOne` je Backend.
-3. Grobwelt-Gewichte im Fragment-Shader; Material mit Welt-UVs (§8); Normale glätten.
-4. D3D11/D3D12 über SPIRV-Cross wie der Himmel, GL, Metal (MSL-Spiegel, `kLandscape*` ist dort Handarbeit).
-5. Abnahme (Plan §4): Terrain-CPU < 0,5 ms, GPU < 1,5 ms, keine Risse, kein Popping über 1 px: **auf NN-WS03, gemessen**.
+**Stand 01.11.2026:** OpenGL und Metal sind gemacht und auf einem Mac ausgeführt, siehe `landscape-world-scale-gpu-2026-11-01.md` (Vertrag `LandscapeRenderFrame`, Bilder je Backend, Haken im Szenen-Pass, Prüfwerkzeug). Offen, in dieser Reihenfolge:
+
+1. Vulkan (NN-WS03): `kLandscapeVulkanPrelude` wie beim Himmel (Block statt loser Uniforms), Pipeline, Vertex-/Indexpuffer aus dem `LandscapeRenderFrame`, die Bilder aus §5; `LsGlobals` im Metal-Quelltext ist die Vorlage für den Block. Vulkans Clip-Konvention (`kVulkanClipFix`, y gedreht) gehört in den Provider-Aufruf.
+2. D3D11 und D3D12 über SPIRV-Cross wie der Himmel.
+3. Material mit Welt-UVs (§8), Normale glätten, Schatten und GI (Schritt 4).
+4. Abnahme (Plan §4): Terrain-CPU < 0,5 ms, GPU < 1,5 ms, keine Risse, kein Popping über 1 px: **auf NN-WS03, gemessen**.
+
+(Die zwei Aufrufstellen in der Anwendung und der Eintrag in `IRenderer` stehen inzwischen: `SetLandscapeProvider`, `GameApplication::updateLandscape`, im Editor der Landschafts-Block neben den Zellen. Die Grobwelt-Gewichte liest der Fragment-Shader jetzt; die Grobwelt-Patches sind nicht mehr grau.)
 
 ## 10. Verifikation
 

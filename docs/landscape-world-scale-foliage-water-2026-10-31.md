@@ -3,7 +3,7 @@
 Stand 31.10.2026, Basis `release/0.8.0`, Hive-Topic 326, Schritt 3 von 8.
 Vorher: `landscape-world-scale-store-2026-10-31.md` (Store, Kachel-Format), `-renderer-` (Quadtree, Laufzeit, Shader-Quelle), `-physics-` (Boden je Kachel).
 
-**Foliage (3b) und Wasser (3c) sind als CPU-Daten und Laufzeit gebaut und getestet. Gezeichnet wird nichts davon (Teil B, braucht Vulkan). Die Navigation steht in `landscape-world-scale-navigation-2026-10-31.md`.
+**Foliage (3b) und Wasser (3c) sind als CPU-Daten und Laufzeit gebaut und getestet. Gezeichnet wird nichts davon (Renderer-Teil B für alle Backends; die Landschaft selbst zeichnen OpenGL und Metal inzwischen, siehe `landscape-world-scale-gpu-2026-11-01.md`, Foliage und Wasser noch nicht). Die Navigation steht in `landscape-world-scale-navigation-2026-10-31.md`.
 Es wurde nichts gemessen: keine Streuzeit, keine Aufbauzeit der Wasserregion, kein Speicher im Betrieb (Plan-§4-Abnahme auf NN-WS03).** Schritt 1521 bleibt offen.
 
 ## 1. Was gebaut ist
@@ -71,7 +71,7 @@ Gesamt 22 + 87 · count. Der Leser verweigert: falsches Magic oder Version, `byt
 * **Wasser jenseits der Region (2 km):** keine ferne Ebene, keine Wellen, keine Ripples, kein `WaterIndex`, kein Auftrieb, keine `WaterSurface`-Entitäten. `surfaceAt` antwortet ohne Wellen.
 * **Foliage ignoriert Wasser** (Pflanzen können im See stehen), und Masken (§2).
 * **Navigation:** gebaut, siehe das Navigationsdokument (Detour-Kacheln je Landschaftskachel, nicht über das Region-Terrain).
-* **Teil B (Vulkan, NN-WS03):** Zeichnen von Foliage und Wasser, GPU-Abnahme, alle Messungen.
+* **Renderer-Teil B für Foliage und Wasser, auf allen Backends** (OpenGL und Metal hier machbar wie bei der Landschaft, Vulkan und D3D auf NN-WS03): Zeichnen von Foliage und Wasser; dazu die Messungen auf NN-WS03.
 * **Editor (Schritt 6):** Masken je Kachel, Pinsel und Seenwerkzeug schreiben Felder.
 
 ## 7. Verifikation
