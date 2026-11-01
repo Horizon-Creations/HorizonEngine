@@ -73,6 +73,9 @@ der Packaged-Build die gekochte.
   Wurzeln aus Startszene/Manifest/Skripten/Engine-Implizitem, transitiv. Details und Beweis in
   `docs/asset-export-audit-2026-11-01.md` Abschnitt 8.
 
+- ✅ **Startszene nur einmal im Pak** (2026-11-01, Thema 228): `HpakWriter::addAlias`, zweite TOC-Zeile auf
+  dieselben Bytes. Catania −7,03 MB im Store-Pak. `docs/asset-export-audit-2026-11-01.md` Abschnitt 9.
+
 **Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
 Durchgang):**
 - **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +

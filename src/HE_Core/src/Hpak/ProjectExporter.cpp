@@ -653,9 +653,23 @@ static void addSceneEntries(
     // Every other project scene rides along under a path-derived UUID so the
     // game runtime can scene.load("<project-relative path>") for level
     // transitions. Same codec + encryption as the assets.
+    //
+    // A scene whose bytes equal one already packed (the startup scene is also a
+    // scene.load target, and nothing stops two copies of a level) becomes a second TOC row on
+    // those bytes instead of a second copy: on a big map that was another 7 MB.
+    std::vector<std::pair<const std::vector<uint8_t>*, HE::UUID>> packedScenes;
+    if (!startupSceneBinary.empty()) packedScenes.emplace_back(&startupSceneBinary, ctx.sceneUuid);
     for (const auto& [relPath, bytes] : extraScenes)
-        if (!bytes.empty())
-            packer.addEntry(sceneUuidForPath(relPath), bytes, packSettings);
+    {
+        if (bytes.empty()) continue;
+        const HE::UUID id = sceneUuidForPath(relPath);
+        bool aliased = false;
+        for (const auto& [other, otherId] : packedScenes)
+            if (*other == bytes && packer.addAlias(id, otherId)) { aliased = true; break; }
+        if (aliased) continue;
+        packer.addEntry(id, bytes, packSettings);
+        packedScenes.emplace_back(&bytes, id);
+    }
     // …plus a scene INDEX (a JSON string array of those paths) under a
     // well-known name, so scene.available() can enumerate scenes in shipped
     // builds (pak entries are UUID-keyed — paths aren't recoverable from them).

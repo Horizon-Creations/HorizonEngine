@@ -730,6 +730,27 @@ void HpakWriter::addPackedEntry(const HE::UUID& id, const HpakReader::StoredEntr
     m_entries.push_back(std::move(e));
 }
 
+bool HpakWriter::addAlias(const HE::UUID& id, const HE::UUID& target)
+{
+    size_t owner = m_entries.size();
+    for (size_t i = m_entries.size(); i-- > 0;)
+        if (m_entries[i].uuid == target) { owner = i; break; }
+    if (owner == m_entries.size()) return false;
+    if (m_entries[owner].aliasOf >= 0)
+        owner = static_cast<size_t>(m_entries[owner].aliasOf); // an alias of an alias shares the owner
+
+    PendingEntry e;
+    e.uuid        = id;
+    e.origSize    = m_entries[owner].origSize;
+    e.contentHash = m_entries[owner].contentHash;
+    e.codec       = m_entries[owner].codec;
+    e.flags       = m_entries[owner].flags;
+    std::memcpy(e.nonce, m_entries[owner].nonce, sizeof(e.nonce));
+    e.aliasOf     = static_cast<int64_t>(owner);
+    m_entries.push_back(std::move(e));
+    return true;
+}
+
 // Box-downsample an RGBA8 image to half size (min 1px), averaging each 2x2 block
 // (clamped on odd dimensions). Used to bake the mip chain at pack time.
 static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t h,
@@ -1408,22 +1429,33 @@ bool HpakWriter::write(const std::string& outputPath) const
     std::vector<uint8_t> toc(m_entries.size() * sizeof(Hpak::EntryDesc));
     uint64_t offset       = dataStart;
     uint32_t archiveFlags = Hpak::kArchiveSortedTOC;
+    // Where each OWNING entry's bytes start; an alias row points at its owner's range, which
+    // may sort after the alias, so the offsets are laid out before any row is built.
+    std::vector<uint64_t> dataAt(m_entries.size(), 0);
     for (size_t k = 0; k < order.size(); ++k)
     {
         const auto& e = m_entries[order[k]];
+        if (e.aliasOf >= 0) continue;
+        dataAt[order[k]] = offset;
+        offset += e.data.size();
+    }
+    for (size_t k = 0; k < order.size(); ++k)
+    {
+        const auto& e     = m_entries[order[k]];
+        const size_t own  = e.aliasOf >= 0 ? static_cast<size_t>(e.aliasOf) : order[k];
+        const auto& bytes = m_entries[own].data;
         Hpak::EntryDesc desc{};
         desc.uuidHi      = e.uuid.hi;
         desc.uuidLo      = e.uuid.lo;
-        desc.dataOffset  = offset;
+        desc.dataOffset  = dataAt[own];
         desc.origSize    = e.origSize;
-        desc.dataSize    = static_cast<uint32_t>(e.data.size());
+        desc.dataSize    = static_cast<uint32_t>(bytes.size());
         desc.contentHash = e.contentHash;
         std::memcpy(desc.nonce, e.nonce, sizeof(desc.nonce));
         desc.codec       = e.codec;
         desc.entryFlags  = e.flags;
         std::memcpy(toc.data() + k * sizeof(Hpak::EntryDesc), &desc, sizeof(desc));
         if (e.flags & Hpak::kFlagEncrypted) archiveFlags |= Hpak::kArchiveEncrypted;
-        offset += e.data.size();
     }
 
     // Header
@@ -1444,11 +1476,11 @@ bool HpakWriter::write(const std::string& outputPath) const
         f.write(reinterpret_cast<const char*>(toc.data()),
                 static_cast<std::streamsize>(toc.size()));
 
-    // Data blocks — same (sorted) order as the TOC offsets
+    // Data blocks — same (sorted) order as the TOC offsets (an alias has no bytes of its own)
     for (size_t k = 0; k < order.size(); ++k)
     {
         const auto& e = m_entries[order[k]];
-        if (!e.data.empty())
+        if (e.aliasOf < 0 && !e.data.empty())
             f.write(reinterpret_cast<const char*>(e.data.data()),
                     static_cast<std::streamsize>(e.data.size()));
     }

@@ -284,6 +284,76 @@ TEST_CASE("zstd codec actually shrinks compressible data")
 
 // ─── Encryption (AES-256-GCM, Phase B) ─────────────────────────────────────────
 
+TEST_CASE("addAlias: a second TOC row on the same bytes, written once")
+{
+    // Bytes that do not compress, so the file size says whether they were stored twice.
+    std::vector<uint8_t> data(4096);
+    uint32_t x = 0x1234567u;
+    for (auto& b : data) { x = x * 1664525u + 1013904223u; b = static_cast<uint8_t>(x >> 24); }
+    const std::vector<uint8_t> other = {9, 8, 7};
+
+    // The alias sorts BEFORE and AFTER its owner in the two runs: the writer lays every
+    // owner's bytes out first, so either order must resolve.
+    for (const HE::UUID aliasId : { HE::UUID{1, 1}, HE::UUID{9, 9} })
+    {
+        const HE::UUID ownerId{5, 5}, otherId{3, 3};
+        HpakWriter packer;
+        packer.addEntry(ownerId, data);
+        packer.addEntry(otherId, other);
+        REQUIRE(packer.addAlias(aliasId, ownerId));
+        CHECK_FALSE(packer.addAlias(HE::UUID{7, 7}, HE::UUID{0xDEAD, 0xBEEF}));   // unknown target adds nothing
+        CHECK(packer.entryCount() == 3);
+
+        const auto tmp = std::filesystem::temp_directory_path() / "he_test_alias.hpak";
+        REQUIRE(packer.write(tmp.string()));
+        CHECK(std::filesystem::file_size(tmp) ==
+              sizeof(Hpak::FileHeader) + 3 * sizeof(Hpak::EntryDesc) + data.size() + other.size());
+
+        HpakReader reader; REQUIRE(reader.open(tmp.string()));
+        CHECK(reader.readEntry(ownerId) == data);
+        CHECK(reader.readEntry(aliasId) == data);    // contentHash is verified on the way
+        CHECK(reader.readEntry(otherId) == other);
+        removeQuiet(tmp);
+    }
+}
+
+TEST_CASE("addAlias: an alias of an alias, a compressed owner")
+{
+    std::vector<uint8_t> data(8192, 0x42);
+    Hpak::PackSettings s;
+    s.codec = Hpak::Codec::Zstd;
+    HpakWriter packer;
+    packer.addEntry(HE::UUID{2, 2}, data, s);
+    REQUIRE(packer.addAlias(HE::UUID{3, 3}, HE::UUID{2, 2}));
+    REQUIRE(packer.addAlias(HE::UUID{4, 4}, HE::UUID{3, 3}));
+
+    const auto tmp = std::filesystem::temp_directory_path() / "he_test_alias2.hpak";
+    REQUIRE(packer.write(tmp.string()));
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    for (uint64_t i = 2; i <= 4; ++i)
+        CHECK(reader.readEntry(HE::UUID{i, i}) == data);
+    removeQuiet(tmp);
+}
+
+#ifdef HE_HAVE_CRYPTO
+TEST_CASE("addAlias: an encrypted owner decrypts through the alias")
+{
+    const std::vector<uint8_t> data(256, 0x5A);
+    Hpak::PackSettings s; s.encrypt = true;
+    for (int i = 0; i < 32; ++i) s.key[i] = static_cast<uint8_t>(i + 3);
+    HpakWriter packer;
+    packer.addEntry(HE::UUID{1, 2}, data, s);
+    REQUIRE(packer.addAlias(HE::UUID{1, 3}, HE::UUID{1, 2}));
+
+    const auto tmp = std::filesystem::temp_directory_path() / "he_test_alias_enc.hpak";
+    REQUIRE(packer.write(tmp.string()));
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    CHECK(reader.readEntry(HE::UUID{1, 3}, s.key) == data);
+    CHECK(reader.readEntry(HE::UUID{1, 3}).empty());   // still needs the key
+    removeQuiet(tmp);
+}
+#endif
+
 #ifdef HE_HAVE_CRYPTO
 TEST_CASE("AES-256-GCM round-trip (store + encrypt)")
 {

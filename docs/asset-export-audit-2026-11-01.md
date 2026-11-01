@@ -95,7 +95,7 @@ der Cook macht daraus BC7/ASTC/BC3 mit Mips (Plan 0.). Die Cook-Ersparnis dort i
    `giAutoLandscapeSliceMeans` nicht mehr lesen muss; dann `cookTextureArrays` im Export setzen.
 2. **Erreichbarkeitsfilter** (Schritt 1586), mit Engine-Wurzeln (Wetter `0x500`, Clipmap `0x41F`, Defaults)
    und "Immer mitpacken"-Muster. Spart bei Catania nur ~2,5 MB, bei Projekten mit viel Altbestand mehr.
-3. Startszene nicht doppelt packen (7 MB im Store-Modus).
+3. Startszene nicht doppelt packen (7 MB im Store-Modus). ✅ umgesetzt, Abschnitt 9.
 4. Shader-Backends an die Zielplattform koppeln (Standard aus Ziel + Renderer).
 5. Graph-JSON/GLSL aus MTRL streichen, wenn PSHD vorhanden und kein Laufzeit-Konsument (erst klären, s. 4).
 6. Normal/Mask-Arrays mit BC5/BC4 statt BC7 (nur wenn sie Kanäle sparen), Audio als Vorbis, Mesh uint16.
@@ -207,6 +207,36 @@ Ganze Suite: nur `Disk registry: scanContentDirectory` (EngineContentCache diese
 `-fsyntax-only` und Hilfe-Audit); Shader-Vorkompilierung (PSHD) im Filterlauf; Windows/Linux; ein Projekt mit Skripten, die
 Pfade zur Laufzeit bauen (dafür die Globs); mehrere Szenen mit Level-Wechsel im echten Spiel.
 
+## 9. Umgesetzt: Startszene nur einmal im Pak (Punkt 3)
+
+Der Editor übergibt die Startszene zweimal: als `sceneBinary` (UUID im `project.hcfg`) und als Eintrag der Szenenliste
+(Pfad-UUID für `scene.load("<Pfad>")`). `addSceneEntries` packte beide Male die Bytes.
+
+**Änderung:** `HpakWriter::addAlias(id, target)` legt eine zweite TOC-Zeile auf dieselben gespeicherten Bytes; der Writer
+schreibt sie einmal und vergibt zuerst alle Offsets der Besitzer (der Alias kann vor seinem Besitzer sortieren). Der Reader
+braucht nichts: er sucht pro Zeile `dataOffset`/`dataSize` und prüft den `contentHash`, und sonst liest niemand
+`dataOffset` (grep). Verschlüsselt geht es auch, Nonce und Tag gehören zu den Bytes und stehen in beiden Zeilen. Der Exporter
+nimmt jede Szene, deren Bytes schon gepackt sind, als Alias (Startszene oder zwei gleiche Levels).
+Kein Formatwechsel: ältere Reader lesen so ein Pak, weil die TOC-Zeilen gewöhnlich aussehen.
+
+**Gemessen (Catania, zwei echte Exporte über `exportProject`, Store, ASTC-Arrays):**
+
+| | vorher | nachher |
+|---|---|---|
+| alles packen | 108,94 MB | 101,91 MB |
+| nur Erreichbares | 102,90 MB | 95,87 MB |
+
+Das sind 7,03 MB, genau eine Szene. Mit zstd bringt es fast nichts (Szene 7,04 MB → 53 KB), dort ist es nur sauberer.
+
+**Verifiziert:** Spiel aus dem alten und dem neuen Pak, gleiche Flags (`HE_SKY_TIME=30`, Frame 2100): die Aufnahmen sind
+byte-gleich, "loaded packed startup scene". Tests: `addAlias` (Alias vor und hinter dem Besitzer, Alias eines Alias, zstd-Besitzer,
+verschlüsselt) in `tests/test_hpak.cpp`, Exporter-Ende-zu-Ende in `tests/test_project_exporter.cpp` (drei Namen, zwei Szenen
+im Pak, Startszene, Pfad-UUID und die andere Szene lesen richtig). Der bestehende Szenenindex-Test (drei gleiche Szenen) läuft
+jetzt über Aliase und ist grün.
+
+**Nicht verifiziert:** `scene.load` der Startszene im laufenden Spiel (nur der Pak-Eintrag unter der Pfad-UUID gelesen);
+Export aus dem Editor; Windows/Linux.
+
 ## Handoff
 
 - **Topic / step:** 228, Schritt 1585 (Audit, fertig) und Punkt 1 der Liste (Arrays, umgesetzt); Schritt 1586 (Filter) umgesetzt, Abschnitt 8
@@ -217,6 +247,6 @@ Pfade zur Laufzeit bauen (dafür die Globs); mehrere Szenen mit Level-Wechsel im
 - **Not verified:** siehe Abschnitt 7.
 - **Decisions taken:** Schalter standardmäßig an, weil die Arrays 94 % des Shipping-Paks sind. Means immer backen, auch bei BC3 (genauer und ohne Dekodieren).
 - **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
-- **Pending:** übrige Punkte der Liste (Startszene doppelt packen, Shader-Backends an das Ziel koppeln, MTRL-Graph streichen); Export aus dem Editor einmal von Hand ansehen.
+- **Pending:** übrige Punkte der Liste (Shader-Backends an das Ziel koppeln, MTRL-Graph streichen); Export aus dem Editor einmal von Hand ansehen. Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
 - **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
-- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Schritt 1586: Filter in `HpakWriter::addDirectories`, Wurzeln aus `EngineDependencies.h`/`AssetRefScan.h`. 3. Startszene nicht doppelt packen.
+- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Shader-Backends an das Exportziel koppeln (Punkt 4 der Liste). 3. MTRL-Graph streichen, wenn PSHD gebacken ist (erst prüfen, ob der Editor-Reimport ihn braucht).
