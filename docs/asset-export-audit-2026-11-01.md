@@ -97,7 +97,7 @@ der Cook macht daraus BC7/ASTC/BC3 mit Mips (Plan 0.). Die Cook-Ersparnis dort i
    und "Immer mitpacken"-Muster. Spart bei Catania nur ~2,5 MB, bei Projekten mit viel Altbestand mehr.
 3. Startszene nicht doppelt packen (7 MB im Store-Modus). ✅ umgesetzt, Abschnitt 9.
 4. Shader-Backends an die Zielplattform koppeln (Standard aus Ziel + Renderer). ✅ umgesetzt, Abschnitt 10.
-5. Graph-JSON/GLSL aus MTRL streichen, wenn PSHD vorhanden und kein Laufzeit-Konsument (erst klären, s. 4).
+5. Graph-JSON/GLSL aus MTRL streichen, wenn PSHD vorhanden und kein Laufzeit-Konsument (erst klären, s. 4). Geklärt, **nicht umgesetzt**: Abschnitt 11.
 6. Normal/Mask-Arrays mit BC5/BC4 statt BC7 (nur wenn sie Kanäle sparen), Audio als Vorbis, Mesh uint16.
 
 ## 7. Umgesetzt: Texturarrays werden gecookt (Punkt 1)
@@ -267,6 +267,54 @@ per compdb `-fsyntax-only` ohne Fehler.
 Varianten; Windows/Linux. Partikel-Shader teilen sich dieselbe Maske, bei D3D/Vulkan backen sie weiterhin nichts (siehe
 `CompileParticleShaderVariants`), das ist unverändert.
 
+## 11. Geklärt: Graph und GLSL im MTRL, und was das Spiel aus Quelltext kompiliert (Punkt 5)
+
+Gelesen am Code (`ContentManager.cpp`, `MaterialShaderLibrary.*`, die fünf Renderer) und gemessen am echten Catania-Development-Pak
+vom 27.10. (4 Materialien, Store, mit PSHD für Metal und OpenGL). Nichts im Spiel gestartet, nichts geändert.
+
+**GLSL im MTRL (`customShaderFragGlsl`, `customShaderGBufGlsl`, `customShaderVertGlsl`): bleibt.** Es ist nicht nur Quelle für die
+Übersetzung. `MaterialShaderLibrary::resolveShaders`/`resolveGBufferShaders` leiten daraus den Pipeline-Schlüssel ab (Hash der Quelle),
+ein leeres Fragment heißt "eingebautes PBR", und den G-Buffer-Fall (unten) kompiliert das Spiel aus genau diesem Text.
+
+**Graph-JSON (`nodeGraphJson`): zur Laufzeit nur an drei Stellen gelesen**, alle in `ContentManager.cpp`:
+1. Basismaterial beim Laden (`:758`): neu erzeugen, aber nur wenn **kein** PSHD da ist. Mit PSHD ist der Graph für ein Basismaterial tot.
+2. Instanz mit Switch-Überschreibungen (`syncMaterialInstance`, `:937`): erzeugt GLSL aus dem Graphen des **Elternmaterials** neu und
+   verwirft dabei das PSHD der Instanz (`:978`). Fehlt der Graph beim Elternteil, fällt der Code in den Zweig "reine Parameter" und
+   die Switches werden still ignoriert, das Bild wäre falsch.
+3. `prefetchRemoteReferences` (Funktionsaufrufe, nur im Editor mit Remote-Assets).
+Sonst liest ihn kein Laufzeitcode (Szene, Renderer, Partikel haben ihren eigenen). Streichen wäre also nur für Materialien mit PSHD und
+ohne Switch-Instanz im Elternbaum sicher, und das ist ein Pack-Zeit-Walk über Elternketten.
+
+**Gemessen:** vier Materialien, MTRL 445 KB roh, davon Graph höchstens ca. 320 KB (die Schätzung schließt GLSL-Klammern ein), zlib
+zusammen ca. 82 KB für alle vier MTRL. PSHD dagegen 886 KB roh. Streichen spart im Shipping-Pak (zstd) ein paar zehn KB, bei
+Catania unter 0,1 %. **Empfehlung: nicht machen.** Aufwand und Risiko (falsches Bild bei Switch-Instanzen) stehen in keinem
+Verhältnis. Die Gelegenheit ist eher, Materialfunktionen und Graph erst bei einem Projekt mit hunderten Materialien anzusehen.
+
+**Wird im Spiel aus Quelltext kompiliert? Ja, in diesen Fällen:**
+- **Immer, auf Metal, D3D11/12 und OpenGL: das "vorkompilierte" PSHD ist Quelltext.** Metal bekommt MSL und ruft
+  `newLibraryWithSource` auf, D3D ruft `D3DCompile` auf HLSL, OpenGL gibt GLSL an den Treiber. Das PSHD erspart nur die Übersetzung
+  durch glslang/SPIRV-Cross, nicht den nativen Compiler. Nur Vulkan bekommt SPIR-V (einen echten Binärblock).
+- **Deferred-Pfad:** Das Pak bäckt keine G-Buffer-Variante (`HpakWriter.cpp:597` bäckt nur Forward, UI-Vertex und die geclusterte
+  Zwilling-Variante). Läuft das Spiel im Deferred-Pfad (`RenderPath` = 1 in `config.json`, kommt aus dem Editor und steht standardmäßig
+  auf 0, Forward), übersetzt es `customShaderGBufGlsl` beim Laden, in allen Backends (`pre = nullptr`, `gbuffer = true`).
+  Das ist der einzige Fall, in dem ein Spiel, das exakt nach Vorschrift exportiert wurde, noch glslang braucht.
+- **Instanzierte Draws** (Thema 182): Die gebackene Variante hat keinen instanzierten Vertex. Vulkan und D3D geben bei
+  `instanced && precompiled` null zurück, der Aufrufer zeichnet dann in einer Schleife statt instanziert (kein Compile, aber auch keine
+  Instanzierung für gebackene Materialien).
+- **Instanz mit Switch-Überschreibungen:** neu aus dem Graphen des Elternmaterials erzeugt und danach vom Treiber kompiliert, das
+  PSHD der Instanz wird verworfen. Das Pak trägt es trotzdem (verschwendete Bytes).
+- **Backend ohne gebackene Variante** (Spiel startet auf einem anderen als dem gebackenen, oder der Bake eines Materials schlug fehl):
+  Übersetzung beim Laden, wie ohne PSHD.
+- **Eingebaute Shader der Engine** (PBR ohne Graph, Himmel, Post-Processing, UI): sind Quelltext im Binär und werden beim Start kompiliert.
+- Partikel: nur OpenGL und Metal werden gebacken, D3D/Vulkan setzen die Vorlagen beim Laden zusammen.
+
+**Nicht verifiziert:** nichts davon durch einen Lauf mit Zähler oder Log bestätigt (z. B. ob ein Deferred-Spiel beim Start wirklich
+Übersetzungen loggt); die Aussage zu `RenderPath` beruht auf dem Standardwert und der Export-Konfiguration, nicht auf einem Export mit 1.
+
+**Mögliche Arbeit daraus, nicht begonnen:** (a) G-Buffer-Variante mitbacken (nur sinnvoll für Spiele mit Deferred); (b) PSHD der
+Switch-Instanzen weglassen oder statt der Neuerzeugung verwenden (Letzteres ändert Laufzeitverhalten, braucht eine Prüfung gegen den
+Editor-Sync); (c) instanzierten Vertex mitbacken.
+
 ## Handoff
 
 - **Topic / step:** 228, Schritt 1585 (Audit, fertig) und Punkt 1 der Liste (Arrays, umgesetzt); Schritt 1586 (Filter) umgesetzt, Abschnitt 8
@@ -277,6 +325,6 @@ Varianten; Windows/Linux. Partikel-Shader teilen sich dieselbe Maske, bei D3D/Vu
 - **Not verified:** siehe Abschnitt 7.
 - **Decisions taken:** Schalter standardmäßig an, weil die Arrays 94 % des Shipping-Paks sind. Means immer backen, auch bei BC3 (genauer und ohne Dekodieren).
 - **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
-- **Pending:** MTRL-Graph streichen (Punkt 5, erst klären); Export aus dem Editor einmal von Hand ansehen (Dialog mit der neuen Checkbox, Log, gebackene Varianten). Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
+- **Pending:** Export aus dem Editor einmal von Hand ansehen (Dialog mit der neuen Checkbox, Log, gebackene Varianten). Punkt 5 geklärt, nicht umgesetzt (Abschnitt 11); die drei Arbeiten dort (G-Buffer backen, Switch-Instanz-PSHD, Instanz-Vertex) sind offen. Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
 - **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
-- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. MTRL-Graph streichen, wenn PSHD gebacken ist (erst prüfen, ob der Editor-Reimport ihn braucht; Fundstellen `ContentManager.cpp` 749, 857, 928, 953, 975, 1865).
+- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Falls Deferred ausgeliefert wird: G-Buffer-Variante backen (Abschnitt 11 a).
