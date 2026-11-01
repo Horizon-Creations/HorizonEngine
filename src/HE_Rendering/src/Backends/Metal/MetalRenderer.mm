@@ -6919,6 +6919,7 @@ void MetalRenderer::Shutdown()
 	if (m_mbVelocityPipeline)   { CFBridgingRelease(m_mbVelocityPipeline);   m_mbVelocityPipeline = nullptr; }
 	if (m_mbBlurPipeline)       { CFBridgingRelease(m_mbBlurPipeline);       m_mbBlurPipeline = nullptr; }
 	m_mbHasPrev = false;
+	m_landscape.shutdown();
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_skyReflPipeline)      { CFBridgingRelease(m_skyReflPipeline);      m_skyReflPipeline = nullptr; }
 	if (m_skyReflCube)          { CFBridgingRelease(m_skyReflCube);          m_skyReflCube = nullptr; }
@@ -14412,6 +14413,32 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 }
 
+void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj)
+{
+	if (!m_landscapeProvider || m_landscapeFailed) return;
+	if (!m_landscape.ready())
+	{
+		std::string err;
+		if (!m_landscape.init(m_device, static_cast<unsigned long>(kSceneColorFormat), static_cast<unsigned long>(kDepthFormat), &err))
+		{
+			HE_LOG_WARN(RHI, "MetalRenderer: the world-scale landscape is off: %s", err.c_str());
+			m_landscapeFailed = true;
+			return;
+		}
+	}
+	HE::LandscapeRenderFrame frame;
+	// The scene pass rasterises with this plain GL-convention matrix (see MetalLandscape::encode), so the frustum is a GL one too.
+	m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, frame);
+	if (!frame.active) return;
+
+	MetalLandscape::Shading sh;
+	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+	sh.ambient = m_renderWorld.ambient;
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+	m_landscape.encode(renderEncoder, frame, viewProj, sh);
+}
+
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
                                 MetalDeferredFrame* deferred)
 {
@@ -14476,7 +14503,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// are skinned meshes (RenderWorld::skinnedObjects, drawn by
 	// EncodeSkinnedObjects below): a scene of nothing but a character used to
 	// take this sky-only exit and never draw it.
-	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty();
+	// A world-scale landscape is drawn by this function too, so a scene of nothing but a landscape is not sky-only.
+	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty() && !m_landscapeProvider;
 	if (m_renderWorld.objects.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
@@ -15169,6 +15197,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	EncodeSkinnedObjects(renderEncoder, viewProj, shadows, &scene);
 	wire(false);
 	SamplePoint(renderEncoder, "Skinned");
+
+	// World-scale landscape (Thema 326): forward patches into the same target and depth, before the sky fills what they leave.
+	EncodeLandscape(renderEncoder, viewProj);
+	SamplePoint(renderEncoder, "Landscape");
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.
 	drawSky();

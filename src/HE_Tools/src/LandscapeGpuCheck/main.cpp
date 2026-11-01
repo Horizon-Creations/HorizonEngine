@@ -14,7 +14,6 @@
 // Writes landscape_<backend>_<scene>.png. Not a test: it needs a window system and a GPU, and it measures no time.
 #include "GpuCheck.h"
 
-#include <HorizonRendering/ClipSpace.h>
 #include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/LandscapeTile.h>
@@ -112,17 +111,16 @@ struct Camera
 	glm::dvec3 origin;    // the floating origin the frame is relative to
 };
 
-gpucheck::RenderIn makeInput(const Camera& c, bool zeroToOne, LandscapeRuntime& rt)
+gpucheck::RenderIn makeInput(const Camera& c, bool depthIsNdc, LandscapeRuntime& rt)
 {
 	gpucheck::RenderIn in;
 	in.width = kW;
 	in.height = kH;
-	in.zeroToOne = zeroToOne;
+	in.depthIsNdc = depthIsNdc;
 	in.origin = c.origin;
 	const glm::vec3 eye = glm::vec3(c.pos - c.origin);
 	const glm::mat4 view = glm::lookAt(eye, eye + glm::vec3(glm::normalize(c.dir)), glm::vec3(0, 1, 0));
-	glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
-	if (zeroToOne) proj = HE::kMetalClipFix * proj;
+	const glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
 	in.viewProj = proj * view;
 	const glm::dvec3 origin = c.origin;
 	in.provider = rt.renderProvider([origin]() { return origin; });
@@ -135,7 +133,7 @@ Ray pixelRay(const gpucheck::RenderIn& in, int px, int py)
 {
 	const glm::dmat4 inv = glm::inverse(glm::dmat4(in.viewProj));
 	const double nx = (px + 0.5) / in.width * 2.0 - 1.0, ny = 1.0 - (py + 0.5) / in.height * 2.0;
-	const double zNear = in.zeroToOne ? 0.0 : -1.0;
+	const double zNear = -1.0;   // the GL-convention matrix: ndc z of the near plane
 	glm::dvec4 a = inv * glm::dvec4(nx, ny, zNear, 1.0), b = inv * glm::dvec4(nx, ny, 1.0, 1.0);
 	const glm::dvec3 pa = glm::dvec3(a) / a.w + in.origin, pb = glm::dvec3(b) / b.w + in.origin;
 	return { pa, glm::normalize(pb - pa) };
@@ -189,7 +187,7 @@ void checkRamp(const char* label, const gpucheck::RenderIn& in, const gpucheck::
 				++expectedHit;
 				if (!drawn) { ++holes; continue; }
 				// distance to the drawn surface
-				const double ndcz = in.zeroToOne ? zw : zw * 2.0 - 1.0;
+				const double ndcz = in.depthIsNdc ? zw : zw * 2.0 - 1.0;
 				const double nx = (px + 0.5) / in.width * 2.0 - 1.0, ny = 1.0 - (py + 0.5) / in.height * 2.0;
 				glm::dvec4 q = glm::inverse(glm::dmat4(in.viewProj)) * glm::dvec4(nx, ny, ndcz, 1.0);
 				const glm::dvec3 P = glm::dvec3(q) / q.w + in.origin;
@@ -243,7 +241,7 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		cfg.store.byteBudget = 80ull * 1024 * 1024;     // about 190 slots, not the 836-slot default
 		std::string err;
 		if (!rt.beginFromPack(packPath, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
-		const bool z1 = be.zeroToOne();
+		const bool z1 = be.depthIsNdc();
 		Camera a{ { 2600.0, 720.0, 3072.0 }, { 1.0, -0.12, 0.2 }, { 2048.0, 100.0, 1024.0 } };
 		if (!settle(rt, a.pos, a.origin)) { std::printf("  the store did not settle\n"); return 1; }
 		gpucheck::RenderIn in = makeInput(a, z1, rt);
@@ -277,7 +275,7 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		if (!rt.begin(src, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
 		Camera c{ { 1200.0, 2600.0, 1200.0 }, { 0.7, -0.22, 0.7 }, { 0.0, 0.0, 0.0 } };
 		if (!settle(rt, c.pos, c.origin)) { std::printf("  the store did not settle (hills)\n"); return 1; }
-		gpucheck::RenderIn in = makeInput(c, be.zeroToOne(), rt);
+		gpucheck::RenderIn in = makeInput(c, be.depthIsNdc(), rt);
 		in.width = 960;
 		in.height = 540;
 		gpucheck::RenderOut out;

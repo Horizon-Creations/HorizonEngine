@@ -177,4 +177,164 @@ void main()
 }
 )GLSL";
 
+// ─── Metal ───────────────────────────────────────────────────────────────────
+// The same two shaders in MSL, by hand (MetalRenderer's sky is hand-written MSL too). Same maths, line for line: a change to the GLSL
+// above is a change here, and tests/test_landscape_shader.cpp compares the two sources' uniform sets. Differences that are not maths:
+//   * no vertex buffer: the grid position comes from [[vertex_id]] (the index value of the indexed draw, base vertex 0): (id % 65, id / 65)
+//   * the loose uniforms are one constant struct (LsGlobals, buffer 20, both stages) and the per-patch ones another (LsPatch, vertex buffer 21)
+//   * images: vertex textures 20 tile heights, 21 slot table, 22 coarse heights; fragment textures 20 slot table, 21-23 tile weight pages,
+//     24-26 coarse weight pages. High indices on purpose: MetalRenderer binds its own below 17 and does not rebind them after us.
+//   * integer images are texture2d<ushort> / texture2d_array<ushort> read with read(), RGBA8 as float, nothing is sampled
+//   * dFdy points the other way (the framebuffer's y is down), which the fragment's `if (n.y < 0) n = -n` already absorbs
+// The C++ mirror of the structs is MetalLandscape.mm (a static_assert on their sizes lives there).
+inline constexpr const char* kLandscapeMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct LsGlobals
+{
+    float4x4 viewProj;       // origin-relative world to clip, the GL-convention matrix of MetalRenderer's scene pass (depth -1..1)
+    float4   cameraRel;      // xyz = camera, origin-relative; w = distance of the camera to the height slab
+    float4   world;          // x = world max x, y = world max z (absolute), z = tile size, w = metres of a height of 65535
+    float4   heightInfo;     // x = metres of height 0, y = tiles in x, z = tiles in z, w = slot table window
+    float4   origin;         // xyz = floating origin
+    int4     tile;           // x = height cells of a tile at level 0, y = weight texels, z = tile levels
+    int4     heightRect[8];
+    int4     coarseGrid[16];
+    float4   layerColor[12];
+    float4   sunDir;         // xyz = towards the sun
+    float4   sunColor;
+    float4   ambient;
+};
+
+struct LsPatch
+{
+    int4   patch;            // x = level, y/z = global cell of the node's corner, w = 1 coarse / 0 tiles
+    float4 patchPos;         // x/y = corner, origin-relative, z = node size, w = coarse grid index
+    float4 morph;            // x = morph start distance, y = morph end distance
+};
+
+struct LsVertexOut
+{
+    float4 position [[position]];
+    float3 worldRel;
+};
+
+static float lsHeightOfCoarseGrid(int2 g, int grid, constant LsGlobals& G, texture2d<ushort, access::read> coarse)
+{
+    int4 gr = G.coarseGrid[grid];
+    int2 c = clamp(g, int2(0), gr.xy - int2(1));
+    uint v = coarse.read(uint2(uint(c.x), uint(gr.z + c.y))).r;
+    return G.heightInfo.x + float(v) * (G.world.w / 65535.0);
+}
+
+static float lsHeightOfTile(int2 g, int level, constant LsGlobals& G, texture2d_array<ushort, access::read> tiles,
+                            texture2d<ushort, access::read> slots, texture2d<ushort, access::read> coarse)
+{
+    int cpt = G.tile.x >> level;
+    int2 maxTile = int2(int(G.heightInfo.y), int(G.heightInfo.z)) - int2(1);
+    int2 t = min(g / cpt, maxTile);
+    int2 l = min(g - t * cpt, int2(cpt));
+    int mask = int(G.heightInfo.w) - 1;
+    for (int k = 0; k < 4; ++k)
+    {
+        int2 step = int2(k & 1, k >> 1);
+        if ((step.x != 0 && l.x != 0) || (step.y != 0 && l.y != 0)) continue;
+        int2 tt = t - step;
+        if (tt.x < 0 || tt.y < 0) continue;
+        uint slot = slots.read(uint2(uint(tt.x & mask), uint(tt.y & mask))).r;
+        if (slot == 65535u) continue;
+        int2 ll = l + step * cpt;
+        int4 r = G.heightRect[level];
+        uint v = tiles.read(uint2(uint(r.x + ll.x), uint(r.y + ll.y)), slot).r;
+        return G.heightInfo.x + float(v) * (G.world.w / 65535.0);
+    }
+    return lsHeightOfCoarseGrid(g >> (G.tile.z + 1 - level), 0, G, coarse);
+}
+
+static float lsHeightAt(int2 g, constant LsGlobals& G, constant LsPatch& P, texture2d_array<ushort, access::read> tiles,
+                        texture2d<ushort, access::read> slots, texture2d<ushort, access::read> coarse)
+{
+    return P.patch.w == 0 ? lsHeightOfTile(g, P.patch.x, G, tiles, slots, coarse) : lsHeightOfCoarseGrid(g, int(P.patchPos.w), G, coarse);
+}
+
+vertex LsVertexOut vertexMain(uint vid [[vertex_id]],
+                              constant LsGlobals& G [[buffer(20)]],
+                              constant LsPatch& P [[buffer(21)]],
+                              texture2d_array<ushort, access::read> tiles [[texture(20)]],
+                              texture2d<ushort, access::read> slots [[texture(21)]],
+                              texture2d<ushort, access::read> coarse [[texture(22)]])
+{
+    int2 ij = int2(int(vid % 65u), int(vid / 65u));
+    float cell = P.patchPos.z / 64.0;
+    float2 xz = P.patchPos.xy + float2(ij) * cell;
+    int2 g = P.patch.yz + ij;
+    float h = lsHeightAt(g, G, P, tiles, slots, coarse);
+
+    // CDLOD morph. The distance is horizontal plus the slab term, NOT the vertex's own height.
+    float2 d2 = xz - G.cameraRel.xz;
+    float d = sqrt(dot(d2, d2) + G.cameraRel.w * G.cameraRel.w);
+    float m = clamp((d - P.morph.x) / max(P.morph.y - P.morph.x, 1e-3), 0.0, 1.0);
+    bool oi = (ij.x & 1) == 1;
+    bool oj = (ij.y & 1) == 1;
+    if (m > 0.0 && (oi || oj))
+    {
+        int2 a, b;
+        if (oi && !oj)      { a = g + int2(-1, 0);  b = g + int2(1, 0); }
+        else if (!oi && oj) { a = g + int2(0, -1);  b = g + int2(0, 1); }
+        else                { a = g + int2(-1, -1); b = g + int2(1, 1); }   // on the triangulation's diagonal
+        h = mix(h, 0.5 * (lsHeightAt(a, G, P, tiles, slots, coarse) + lsHeightAt(b, G, P, tiles, slots, coarse)), m);
+    }
+    LsVertexOut o;
+    o.worldRel = float3(xz.x, h - G.origin.y, xz.y);
+    o.position = G.viewProj * float4(o.worldRel, 1.0);
+    return o;
+}
+
+fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
+                             constant LsGlobals& G [[buffer(20)]],
+                             texture2d<ushort, access::read> slots [[texture(20)]],
+                             texture2d_array<float, access::read> w0t [[texture(21)]],
+                             texture2d_array<float, access::read> w1t [[texture(22)]],
+                             texture2d_array<float, access::read> w2t [[texture(23)]],
+                             texture2d<float, access::read> c0t [[texture(24)]],
+                             texture2d<float, access::read> c1t [[texture(25)]],
+                             texture2d<float, access::read> c2t [[texture(26)]])
+{
+    float2 abs2 = in.worldRel.xz + G.origin.xz;
+    if (abs2.x > G.world.x || abs2.y > G.world.y || abs2.x < 0.0 || abs2.y < 0.0) discard_fragment();
+
+    int2 tile = int2(floor(abs2 / G.world.z));
+    tile = clamp(tile, int2(0), int2(int(G.heightInfo.y), int(G.heightInfo.z)) - int2(1));
+    int mask = int(G.heightInfo.w) - 1;
+    uint slot = slots.read(uint2(uint(tile.x & mask), uint(tile.y & mask))).r;
+
+    float4 w0, w1, w2;
+    if (slot == 65535u)
+    {
+        // A tile that is not in the atlas (the coarse levels, or one still streaming): the coarse world's weights, one texel per 128 m.
+        int2 cs = int2(int(c0t.get_width()), int(c0t.get_height()));
+        int2 c = clamp(int2(floor(abs2 / G.world.xy * float2(cs))), int2(0), cs - int2(1));
+        w0 = c0t.read(uint2(c));
+        w1 = c1t.read(uint2(c));
+        w2 = c2t.read(uint2(c));
+    }
+    else
+    {
+        float texel = G.world.z / float(G.tile.y);
+        int2 t = clamp(int2(floor((abs2 - float2(tile) * G.world.z) / texel)), int2(0), int2(G.tile.y - 1));
+        w0 = w0t.read(uint2(t), slot);
+        w1 = w1t.read(uint2(t), slot);
+        w2 = w2t.read(uint2(t), slot);
+    }
+    float3 albedo = w0.x * G.layerColor[0].rgb + w0.y * G.layerColor[1].rgb + w0.z * G.layerColor[2].rgb + w0.w * G.layerColor[3].rgb
+                  + w1.x * G.layerColor[4].rgb + w1.y * G.layerColor[5].rgb + w1.z * G.layerColor[6].rgb + w1.w * G.layerColor[7].rgb
+                  + w2.x * G.layerColor[8].rgb + w2.y * G.layerColor[9].rgb + w2.z * G.layerColor[10].rgb + w2.w * G.layerColor[11].rgb;
+    float3 n = normalize(cross(dfdx(in.worldRel), dfdy(in.worldRel)));
+    if (n.y < 0.0) n = -n;
+    float ndl = max(dot(n, normalize(G.sunDir.xyz)), 0.0);
+    return float4(albedo * (G.ambient.xyz + G.sunColor.xyz * ndl), 1.0);
+}
+)MSL";
+
 } // namespace HE::glsl

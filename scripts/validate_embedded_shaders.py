@@ -456,6 +456,7 @@ def check_msl(tmp: Path, verbose: bool, require: bool) -> tuple[int, int, list[s
     print("  negative control rejected, as it must be")
 
     strings = extract(MSL_SOURCE, "MSL")
+    strings.update(extract(LANDSCAPE_SOURCE, "MSL"))     # kLandscapeMSL, the hand port of the landscape GLSL
     skyfunc = strings.get("kSkyFuncMSL")
     marker = "//#SKYFUNC#"
     ok_n, failures = 0, unhandled_placeholders(strings)

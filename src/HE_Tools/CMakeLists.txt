@@ -238,6 +238,13 @@ target_include_directories(landscape_gpu_check PRIVATE
     ${CMAKE_SOURCE_DIR}/src/HE_Core/include
     ${CMAKE_SOURCE_DIR}/src/HE_Core/vendor
     ${CMAKE_SOURCE_DIR}/src/HE_Rendering/include)
+if(APPLE)
+    # Metal beside OpenGL (docs/landscape-world-scale-gpu-2026-11-01.md): the same checks on the Mac's own backend.
+    target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/MetalBackend.mm)
+    set_source_files_properties(src/LandscapeGpuCheck/MetalBackend.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(landscape_gpu_check PRIVATE RendererMetal)
+    target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_METAL)
+endif()
 if(WIN32)
     add_custom_command(TARGET landscape_gpu_check POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:landscape_gpu_check>

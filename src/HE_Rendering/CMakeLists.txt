@@ -190,7 +190,9 @@ if(APPLE)
     add_library(RendererMetal STATIC
         src/Backends/Metal/MetalRenderer.mm
         src/Backends/Metal/MetalShaderManager.mm
+        src/Backends/Metal/MetalLandscape.mm
         include/Backends/Metal/MetalRenderer.h
+        include/Backends/Metal/MetalLandscape.h
         include/Backends/Metal/MetalShaderManager.h)
     target_include_directories(RendererMetal PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -199,6 +201,7 @@ if(APPLE)
     set_source_files_properties(
         src/Backends/Metal/MetalRenderer.mm
         src/Backends/Metal/MetalShaderManager.mm
+        src/Backends/Metal/MetalLandscape.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     # MetalFX (docs/anti-aliasing-plan.md A5): the OS temporal scaler. Weak-linked
     # so a build still runs on a system whose SDK predates it — the backend asks
