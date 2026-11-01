@@ -6,6 +6,7 @@
 #include <HorizonScene/Components/LandscapeWorldComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/HorizonWorld.h>
+#include <HorizonScene/LandscapeGpuLayout.h>
 #include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/SceneSerializer.h>
 
@@ -198,6 +199,118 @@ TEST_CASE("landscape runtime: the same view gives the same patches whatever the 
 	LandscapeFrame c;
 	rt.buildFrame(viewProjRelative(cam, oa, -dir), oa, false, c);
 	CHECK(c.patches.size() > 0);
+}
+
+TEST_CASE("landscape runtime: the render frame is the frame with its images packed: bytes as the layout says, one shared static part, uploads once")
+{
+	auto src = smallRealWorld();
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;
+	REQUIRE(rt.begin(src, cfg));
+	const glm::dvec3 cam(3000.0, 900.0, 3000.0);
+	const glm::dvec3 origin(1024.0, 0.0, -512.0);
+	const glm::dmat4 vp = viewProjRelative(cam, origin, glm::dvec3(1, -0.1, 0.2));
+
+	LandscapeRenderFrame none;
+	rt.buildRenderFrame(vp, origin, false, none);
+	CHECK_FALSE(none.active);                                          // nothing before the first update
+
+	REQUIRE(settle(rt, cam));
+	LandscapeRenderFrame f1, f2;
+	rt.buildRenderFrame(vp, origin, false, f1);
+	REQUIRE(f1.active);
+	REQUIRE(f1.world);
+	const LandscapeRenderStatic& w = *f1.world;
+	CHECK_FALSE(f1.patches.empty());
+	CHECK(f1.uploads.size() == rt.atlas()->stats().uploads);           // everything the atlas took is handed over
+	CHECK(f1.origin == origin);
+	CHECK(f1.cameraRel.x == doctest::Approx(3000.0f - 1024.0f));
+	CHECK(f1.slabDistance == doctest::Approx(0.0f));
+
+	// the static part: numbers, the coarse images, the grid
+	const LandscapeTileImageLayout layout = LandscapeTileImageLayout::forGeometry(src->geometry());
+	CHECK(w.tilesX == 12);
+	CHECK(w.tileM == doctest::Approx(512.0f));
+	CHECK(w.worldMaxX == doctest::Approx(12 * 512.0f));
+	CHECK(w.slotCapacity == static_cast<int>(rt.atlas()->capacity()));
+	CHECK(w.tableWindow == rt.atlas()->window());
+	CHECK(w.heightW == layout.heightW);
+	CHECK(w.weightPages == layout.weightPages);
+	CHECK(w.heightLevels == static_cast<int>(layout.heightRect.size()));
+	CHECK(w.coarseHeights.size() == static_cast<size_t>(w.coarseW) * static_cast<size_t>(w.coarseH));
+	REQUIRE(w.coarseWeights.size() == static_cast<size_t>(layout.weightPages));
+	for (const auto& page : w.coarseWeights) CHECK(page.size() == static_cast<size_t>(w.coarseWeightW) * static_cast<size_t>(w.coarseWeightH) * 4);
+	CHECK(w.patchIndices.size() == 24576);
+	CHECK(w.quadrantFirst[3] + w.quadrantCount[3] == w.patchIndices.size());
+	for (int i = 0; i < 12; ++i) CHECK(w.layerColor[i][3] == doctest::Approx(1.0f));
+
+	// the uploads: sizes as the layout says, and the bytes are what landscapePackTile makes of that slot's tile
+	REQUIRE_FALSE(f1.uploads.empty());
+	std::set<uint16_t> slots;
+	for (const LandscapeRenderUpload& u : f1.uploads)
+	{
+		CHECK(u.slot < w.slotCapacity);
+		CHECK(slots.insert(u.slot).second);
+		CHECK(u.heights.size() == static_cast<size_t>(w.heightW) * static_cast<size_t>(w.heightH));
+		REQUIRE(u.pages.size() == static_cast<size_t>(layout.weightPages));
+		for (const auto& page : u.pages) CHECK(page.size() == static_cast<size_t>(w.weightW) * static_cast<size_t>(w.weightH) * 4);
+	}
+	{
+		const LandscapeRenderUpload& u = f1.uploads.front();
+		LandscapeTileKey key{ -1, -1 };
+		for (const LandscapeTileKey& k : rt.store()->residentKeys())
+			if (rt.atlas()->slotOf(k) == u.slot) key = k;
+		REQUIRE(key.x >= 0);
+		const auto tile = rt.store()->tile(key);
+		REQUIRE(tile);
+		std::vector<uint16_t> heights;
+		std::vector<std::vector<uint8_t>> pages;
+		landscapePackTile(*tile, layout, heights, pages);
+		CHECK(heights == u.heights);
+		CHECK(pages == u.pages);
+		CHECK(tile.use_count() == 2);                                  // the store's and ours: the frame does not keep a tile
+	}
+
+	// the table the renderer builds from the updates is the atlas's
+	std::vector<uint16_t> table(static_cast<size_t>(w.tableWindow) * static_cast<size_t>(w.tableWindow), LandscapeAtlas::kNoSlot);
+	for (const auto& t : f1.tableUpdates) table[t.index] = t.slot;
+	CHECK(table == rt.atlas()->table());
+
+	// patches: the integer corner cell the shader uses
+	for (const LandscapeRenderPatch& p : f1.patches)
+	{
+		CHECK(p.cornerX * (static_cast<double>(p.size) / 64.0) == doctest::Approx(p.x0 + origin.x));
+		CHECK(p.cornerZ * (static_cast<double>(p.size) / 64.0) == doctest::Approx(p.z0 + origin.z));
+		CHECK(p.morphStart < p.morphEnd);
+	}
+
+	// the second frame: the same static part, nothing to upload
+	rt.buildRenderFrame(vp, origin, false, f2);
+	CHECK(f2.world == f1.world);
+	CHECK(f2.uploads.empty());
+	CHECK(f2.tableUpdates.empty());
+	CHECK(f2.patches.size() == f1.patches.size());
+
+	// the provider IRenderer takes is the same call, with the origin it is asked for each time
+	glm::dvec3 askedOrigin = origin;
+	const LandscapeProvider provider = rt.renderProvider([&askedOrigin]() { return askedOrigin; });
+	LandscapeRenderFrame f4;
+	provider(vp, false, f4);
+	CHECK(f4.active);
+	CHECK(f4.origin == origin);
+	askedOrigin = glm::dvec3(2048.0, 0.0, 0.0);
+	provider(viewProjRelative(cam, askedOrigin, glm::dvec3(1, -0.1, 0.2)), false, f4);
+	CHECK(f4.origin == askedOrigin);
+
+	// a landscape that begins again is a new one: the renderer is told by a new static part
+	REQUIRE(rt.begin(src, cfg));
+	REQUIRE(settle(rt, cam));
+	LandscapeRenderFrame f3;
+	rt.buildRenderFrame(vp, origin, false, f3);
+	REQUIRE(f3.world);
+	CHECK(f3.world != f1.world);
+	CHECK(f3.world->generation != f1.world->generation);
+	CHECK(f3.uploads.size() == rt.atlas()->stats().uploads);
 }
 
 TEST_CASE("landscape runtime: the scene's LandscapeWorldComponent starts it from a pack and takes it away again")

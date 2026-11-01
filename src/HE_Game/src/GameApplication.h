@@ -22,6 +22,7 @@
 #include <HorizonScene/AnimationNotify.h>
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/CellRuntime.h>
+#include <HorizonScene/LandscapeRuntime.h>
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
@@ -392,5 +393,12 @@ private:
     }
     HE::CellScriptHosts cellScriptHosts();
     HE::CellRuntime m_cellRuntime{ *this };
+
+    // ── World-scale landscape (Thema 326) ───────────────────────────────────
+    // The scene's LandscapeWorldComponent streams tiles around the camera (HE::LandscapeRuntime); the renderer draws what it hands over
+    // (IRenderer::SetLandscapeProvider, bound once, at the first update after the renderer exists).
+    void updateLandscape(float dt);
+    HE::LandscapeRuntime m_landscape;
+    bool m_landscapeBound = false;
 };
 

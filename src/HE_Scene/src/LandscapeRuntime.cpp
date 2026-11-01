@@ -150,7 +150,7 @@ void LandscapeRuntime::reset()
 	m_renderStatic.reset();
 }
 
-void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
+void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, const glm::dvec3* cameraOverride)
 {
 	// The scene says whether there is a tile landscape: the first enabled LandscapeWorldComponent.
 	const LandscapeWorldComponent* comp = nullptr;
@@ -180,9 +180,8 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 	}
 	if (!active()) return;
 
-	for (auto e : world.registry().view<TransformComponent, CameraComponent>())
+	const auto run = [&](const glm::dvec3& camera)
 	{
-		const glm::dvec3 camera = glm::dvec3(worldPositionOf(world, e)) + world.origin();
 		// A jump (teleport, respawn) is not a speed.
 		glm::vec3 v(0.0f);
 		if (m_hasLastCamera && dt > 0.0f)
@@ -213,6 +212,11 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs)
 			}
 		m_lastCamera = camera;
 		m_hasLastCamera = true;
+	};
+	if (cameraOverride) { run(*cameraOverride); return; }
+	for (auto e : world.registry().view<TransformComponent, CameraComponent>())
+	{
+		run(glm::dvec3(worldPositionOf(world, e)) + world.origin());
 		return;
 	}
 }

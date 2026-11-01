@@ -4085,6 +4085,25 @@ void EditorApplication::OnRender(float dt)
 			m_playCells->update(*m_editorWorld, gameDt);
 		}
 
+		// The tile landscape of the scene, if it has one: around the play camera, or around the editor's while editing (it is not an entity).
+		if (m_editorWorld)
+		{
+			HE_PROFILE_SCOPE_N("Landscape");
+			if (!m_landscapeBound && renderer())
+			{
+				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+					if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
+				});
+				m_landscapeBound = true;
+			}
+			if (m_isPlaying) m_landscape.update(*m_editorWorld, gameDt);
+			else
+			{
+				const glm::dvec3 eye = glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin();
+				m_landscape.update(*m_editorWorld, gameDt, 1.0, &eye);
+			}
+		}
+
 		// Keep spatial audio sources and listener in sync each play-mode frame
 		if (m_isPlaying && m_editorWorld)
 		{

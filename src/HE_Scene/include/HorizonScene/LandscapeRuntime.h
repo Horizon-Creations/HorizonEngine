@@ -99,7 +99,9 @@ public:
 
 	// The scene's tile landscape (the first entity with a LandscapeWorldComponent) drives the runtime: it begins when the
 	// component appears or changes its pack, resets when it goes. Then the camera moves the store. Main thread.
-	void update(HorizonWorld& world, float dt, double budgetMs = 1.0);
+	// `cameraOverride`: an absolute position to stream around instead of the scene's first CameraComponent (the editor's own camera, which is not
+	// an entity); null = the scene's camera.
+	void update(HorizonWorld& world, float dt, double budgetMs = 1.0, const glm::dvec3* cameraOverride = nullptr);
 	// The same without a world: the camera's absolute position and velocity, and the world's floating origin (what the ground is built
 	// relative to; update(world, ...) passes world.origin()).
 	void updateAt(const glm::dvec3& cameraAbsolute, const glm::vec3& velocity, double budgetMs = 1.0, const glm::dvec3& origin = glm::dvec3(0.0));

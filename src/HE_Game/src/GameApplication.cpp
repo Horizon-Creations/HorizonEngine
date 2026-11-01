@@ -1612,6 +1612,20 @@ void GameApplication::cellUnloading(HorizonWorld& world, entt::entity root)
 	HE::stopCellScripts(cellScriptHosts(), world, root);
 }
 
+void GameApplication::updateLandscape(float dt)
+{
+	HE_PROFILE_SCOPE_N("Landscape");
+	if (!m_landscapeBound && renderer())
+	{
+		// Reads m_world at each call: a scene swap replaces the world, and the runtime keeps its own state.
+		renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+			if (m_world) m_landscape.buildRenderFrame(vp, m_world->origin(), zeroToOne, out);
+		});
+		m_landscapeBound = true;
+	}
+	m_landscape.update(*m_world, dt);
+}
+
 void GameApplication::updateCellStreaming(float dt)
 {
 	HE_PROFILE_SCOPE_N("CellStreaming");
@@ -3295,6 +3309,8 @@ void GameApplication::OnRender(float deltaTime)
 	}
 	// Then the cells of a split scene, against the camera where it now stands.
 	if (m_world && !m_appMode) updateCellStreaming(gameDt);
+	// The tile landscape of the scene, if it has one: tiles around the camera, before anything draws.
+	if (m_world && !m_appMode) updateLandscape(gameDt);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())

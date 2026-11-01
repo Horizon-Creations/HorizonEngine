@@ -4,6 +4,7 @@
 #include "doctest.h"
 #include <HorizonRendering/LandscapeShaderSource.h>
 
+#include <cctype>
 #include <map>
 #include <regex>
 #include <set>
@@ -84,4 +85,40 @@ TEST_CASE("landscape shader source: the morph distance is horizontal plus the sl
 	const std::string fs = HE::glsl::kLandscapeFS;
 	CHECK(fs.find("discard") != std::string::npos);
 	CHECK(fs.find("uOrigin.xz") != std::string::npos);
+}
+
+TEST_CASE("landscape shader source: the MSL port has every GLSL uniform as a member of its two structs, and the bindings MetalLandscape uses")
+{
+	const std::string msl = HE::glsl::kLandscapeMSL;
+	std::set<std::string> uniforms = uniformsOf(HE::glsl::kLandscapeVS);
+	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
+	// the images are textures in MSL, not struct members
+	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
+	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2" };
+	int members = 0;
+	for (const std::string& u : uniforms)
+	{
+		if (images.count(u)) continue;
+		std::string m = u.substr(1);                        // uViewProj -> viewProj
+		m[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(m[0])));
+		INFO("GLSL uniform " << u << " as MSL member " << m);
+		CHECK((msl.find(" " + m + ";") != std::string::npos || msl.find(" " + m + "[") != std::string::npos));
+		++members;
+	}
+	CHECK(members == 15);                                   // the vertex stage's 11 plus the fragment stage's 4 (layer colours, sun colour and direction, ambient)
+	// entry points (MetalLandscape.mm looks them up by name) and the indices it binds: buffers 20 and 21, vertex textures 20-22, fragment 20-26
+	CHECK(msl.find("vertex LsVertexOut vertexMain") != std::string::npos);
+	CHECK(msl.find("fragment float4 fragmentMain") != std::string::npos);
+	for (const char* b : { "[[buffer(20)]]", "[[buffer(21)]]" }) CHECK(msl.find(b) != std::string::npos);
+	for (int t = 20; t <= 26; ++t) CHECK(msl.find("[[texture(" + std::to_string(t) + ")]]") != std::string::npos);
+	CHECK(msl.find("[[texture(27)]]") == std::string::npos);
+	CHECK(msl.find("[[texture(19)]]") == std::string::npos);   // nothing below 20: MetalRenderer owns those
+	// the same distance for the morph as the GLSL: horizontal plus the slab term, never the vertex's own height
+	const size_t at = msl.find("float d = sqrt(");
+	REQUIRE(at != std::string::npos);
+	const std::string line = msl.substr(at, msl.find(';', at) - at);
+	CHECK(line.find("G.cameraRel.w") != std::string::npos);
+	CHECK(line.find("d2") != std::string::npos);
+	CHECK(msl.find("discard_fragment") != std::string::npos);   // the world's edge
+	CHECK(msl.find("layout(") == std::string::npos);
 }
