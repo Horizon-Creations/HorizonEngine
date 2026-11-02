@@ -198,6 +198,12 @@ MaterialShaderLibrary::Compiled toCompiled(he::shaderc::Result&& r)
 // the four copies embedded as C++ string literals above — change one, change all
 // six, and run that test.
 constexpr const char* kLightingPreamble = R"(
+// PCF half-width of the shadow lookups below: 1 = the 3x3 filter every surface uses. The fog
+// kernel defines 0 BEFORE the preamble (one tap per froxel: the volume is filtered by its
+// slice jitter and temporal blend anyway, and a froxel is far more numerous than a pixel).
+#ifndef HE_SHADOW_PCF_R
+#define HE_SHADOW_PCF_R 1
+#endif
 layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 sunDir;    // xyz = direction TO the sun (normalized); w = engine time (s)
     vec4 sunColor;  // rgb = sun radiance; w = wind direction X (unit, world)
@@ -476,12 +482,12 @@ float heCsmShadow(vec3 worldPos, vec3 n, vec3 L) {
     // over csmVP hand over this too (0.0008 / 0.0002 by default).
     float bias = clamp(heLight.shadowBias.x * tan(acos(ndl)), heLight.shadowBias.y, 0.02) * float(c + 1);
     float vis = 0.0;
-    for (int y = -1; y <= 1; ++y)
-        for (int x = -1; x <= 1; ++x) {
+    for (int y = -HE_SHADOW_PCF_R; y <= HE_SHADOW_PCF_R; ++y)
+        for (int x = -HE_SHADOW_PCF_R; x <= HE_SHADOW_PCF_R; ++x) {
             float cd = texture(heCsm, vec3(uv + vec2(x, y) * texel, float(c))).r;
             vis += (p.z - bias > cd) ? 0.0 : 1.0;
         }
-    return vis / 9.0;
+    return vis / float((2 * HE_SHADOW_PCF_R + 1) * (2 * HE_SHADOW_PCF_R + 1));
 }
 // Local (point/spot) shadow lookup in the atlas — mirror of the built-in
 // shaders' localShadowFactor(). Spot lights project into their single layer;
@@ -513,12 +519,12 @@ float heLocalShadowFactor(int i, vec3 worldPos, vec3 n) {
         return 1.0;
     float bias = clamp(0.0015 * tan(acos(ndl)), 0.0006, 0.01);
     float vis = 0.0;
-    for (int y = -1; y <= 1; ++y)
-        for (int x = -1; x <= 1; ++x) {
+    for (int y = -HE_SHADOW_PCF_R; y <= HE_SHADOW_PCF_R; ++y)
+        for (int x = -HE_SHADOW_PCF_R; x <= HE_SHADOW_PCF_R; ++x) {
             float cd = texture(heLocalShadow, vec3(uv + vec2(x, y) * texel, float(layer))).r;
             vis += (p.z - bias > cd) ? 0.0 : 1.0;
         }
-    return vis / 9.0;
+    return vis / float((2 * HE_SHADOW_PCF_R + 1) * (2 * HE_SHADOW_PCF_R + 1));
 }
 // Cloud-shadow visibility for the directional light (1 = fully lit). Projects
 // the fragment along the light direction L (TOWARD the light) onto the cloud
@@ -2859,7 +2865,8 @@ namespace
 constexpr const char* kComputeStubs =
     "#define gl_FragCoord vec4(0.0)\n"
     "#define dFdx(x) ((x) * 0.0)\n"
-    "#define dFdy(x) ((x) * 0.0)\n";
+    "#define dFdy(x) ((x) * 0.0)\n"
+    "#define HE_SHADOW_PCF_R 0\n";
 } // namespace
 
 std::string MaterialShaderLibrary::fogInjectGlsl()

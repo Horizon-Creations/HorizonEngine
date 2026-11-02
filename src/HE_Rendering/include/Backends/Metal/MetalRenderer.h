@@ -1114,6 +1114,7 @@ private:
 	bool       m_fogTried         = false;   // the pipelines are built once; a failure keeps the analytic fog
 	void*      m_fogInject[2]     = { nullptr, nullptr }; // id<MTLTexture> 3D RGBA16F, ping-pong (S, sigma_t)
 	void*      m_fogIntegrated    = nullptr; // id<MTLTexture> 3D RGBA16F (L, T at each slice's far edge)
+	void*      m_fogNoise         = nullptr; // id<MTLTexture> 3D RG16Unorm 64^3: HE::BuildSkyNoise3D(64), the same generator as the sky's 256^3 volume, small enough to stay in cache
 	void*      m_fogDummy3D       = nullptr; // id<MTLTexture> 1x1x1 3D: what texture 17 holds when the volume is off
 	glm::ivec3 m_fogGrid          = glm::ivec3(0);
 	int        m_fogHist          = 0;       // index of the inject volume holding LAST frame's result

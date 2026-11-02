@@ -6925,6 +6925,7 @@ void MetalRenderer::Shutdown()
 	if (m_fogIntegratePipe) { CFBridgingRelease(m_fogIntegratePipe); m_fogIntegratePipe = nullptr; }
 	if (m_fogApplyPipe)     { CFBridgingRelease(m_fogApplyPipe);     m_fogApplyPipe = nullptr; }
 	if (m_fogDummy3D)       { CFBridgingRelease(m_fogDummy3D);       m_fogDummy3D = nullptr; }
+	if (m_fogNoise)         { CFBridgingRelease(m_fogNoise);         m_fogNoise = nullptr; }
 	if (m_fogSceneEncoder)  { CFBridgingRelease(m_fogSceneEncoder);  m_fogSceneEncoder = nullptr; }
 	m_fogTried = false;
 	if (m_skyLutPipeline)       { CFBridgingRelease(m_skyLutPipeline);       m_skyLutPipeline = nullptr; }
@@ -12433,6 +12434,29 @@ bool MetalRenderer::EnsureFogPipelines()
 			             err ? [[err localizedDescription] UTF8String] : "unknown");
 			return false;
 		}
+		// The fog's own noise volume: the sky generator at 64^3 (1 MB). The sky's 256^3 one (67 MB)
+		// is far too big to sample once per froxel (the inject pass spent two thirds of its time
+		// in those fetches); the sky's bytes are untouched.
+		{
+			constexpr int kN = 64;
+			const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kN);
+			MTLTextureDescriptor* nd = [[MTLTextureDescriptor alloc] init];
+			nd.textureType = MTLTextureType3D;
+			nd.pixelFormat = MTLPixelFormatRG16Unorm;
+			nd.width = kN; nd.height = kN; nd.depth = kN;
+			nd.usage       = MTLTextureUsageShaderRead;
+			nd.storageMode = MTLStorageModeShared;
+			id<MTLTexture> nt = [device newTextureWithDescriptor:nd];
+			[nt replaceRegion:MTLRegionMake3D(0, 0, 0, kN, kN, kN) mipmapLevel:0 slice:0
+			        withBytes:noise.data() bytesPerRow:kN * 2 * sizeof(uint16_t)
+			    bytesPerImage:kN * kN * 2 * sizeof(uint16_t)];
+			m_fogNoise = nt ? (void*)CFBridgingRetain(nt) : nullptr;
+		}
+		if (!m_fogNoise)
+		{
+			HE_LOG_ERROR(RHI, "%s", "MetalRenderer: volumetric fog noise volume creation failed — analytic fog stays");
+			return false;
+		}
 		m_fogInjectPipe    = (void*)CFBridgingRetain(iPso);
 		m_fogIntegratePipe = (void*)CFBridgingRetain(gPso);
 		m_fogApplyPipe     = (void*)CFBridgingRetain(aPso);
@@ -12530,6 +12554,21 @@ void MetalRenderer::EncodeFogVolume(void* cmdBufPtr, float aspect)
 	FillMaterialLighting(lit, std::max(1, fd.grid.x), std::max(1, fd.grid.y), false, false, shadows, skyClock);
 
 	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	// HE_FOG_TIMING=1: the pass-cost witness. Inject and Integrate each get a command buffer of
+	// their own, committed and waited on, and the GPU start/end times are logged (median over
+	// the frames so far, every 100th). It stalls the CPU and reads a shadow map that has not
+	// been committed yet, so the picture of such a frame is wrong: a measurement run only.
+	static const bool s_timing = [] { const char* v = std::getenv("HE_FOG_TIMING"); return v && *v && *v != '0'; }();
+	id<MTLCommandBuffer> mainCmdBuf = cmdBuf;
+	static std::vector<double> s_tInject, s_tIntegrate;
+	auto timedBuffer = [&]() { if (s_timing) cmdBuf = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer]; };
+	auto timedFinish = [&](std::vector<double>& acc) {
+		if (!s_timing) return;
+		[cmdBuf commit];
+		[cmdBuf waitUntilCompleted];
+		acc.push_back((cmdBuf.GPUEndTime - cmdBuf.GPUStartTime) * 1000.0);
+		cmdBuf = mainCmdBuf;
+	};
 	const int cur = 1 - m_fogHist;           // written now; m_fogHist holds last frame's result
 	auto computePass = [&](const char* timerName) -> id<MTLComputeCommandEncoder> {
 		MTLComputePassDescriptor* cpd = [MTLComputePassDescriptor computePassDescriptor];
@@ -12553,6 +12592,7 @@ void MetalRenderer::EncodeFogVolume(void* cmdBufPtr, float aspect)
 	id<MTLSamplerState> lin = (__bridge id<MTLSamplerState>)m_linearSampler;
 
 	// ── Inject ──────────────────────────────────────────────────────────────
+	timedBuffer();
 	{
 		id<MTLComputeCommandEncoder> enc = computePass("FogInject");
 		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_fogInjectPipe];
@@ -12565,7 +12605,7 @@ void MetalRenderer::EncodeFogVolume(void* cmdBufPtr, float aspect)
 		[enc setTexture:tex(m_skyEnvCube) atIndex:14];
 		[enc setSamplerState:lin atIndex:14];
 		[enc setTexture:tex(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
-		[enc setTexture:tex(m_noiseTexture) atIndex:3];
+		[enc setTexture:tex(m_fogNoise) atIndex:3];
 		[enc setSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:3];
 		[enc setTexture:tex(m_fogInject[m_fogHist]) atIndex:4];
 		[enc setSamplerState:lin atIndex:4];
@@ -12575,7 +12615,9 @@ void MetalRenderer::EncodeFogVolume(void* cmdBufPtr, float aspect)
 		[enc dispatchThreadgroups:groups threadsPerThreadgroup:tg];
 		[enc endEncoding];
 	}
+	timedFinish(s_tInject);
 	// ── Integrate (one thread per column) ───────────────────────────────────
+	timedBuffer();
 	{
 		id<MTLComputeCommandEncoder> enc = computePass("FogIntegrate");
 		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_fogIntegratePipe];
@@ -12588,6 +12630,13 @@ void MetalRenderer::EncodeFogVolume(void* cmdBufPtr, float aspect)
 		[enc endEncoding];
 	}
 
+	timedFinish(s_tIntegrate);
+	if (s_timing && s_tInject.size() % 100 == 0 && !s_tInject.empty())
+	{
+		auto med = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
+		HE_LOG_INFO(RHI, "MetalRenderer: HE_FOG_TIMING frames=%zu grid %dx%dx%d inject median %.3f ms, integrate median %.3f ms",
+		            s_tInject.size(), fd.grid.x, fd.grid.y, fd.grid.z, med(s_tInject), med(s_tIntegrate));
+	}
 	m_fogHist         = cur;
 	m_fogHistValid    = true;
 	m_fogPrevViewProj = viewProj;

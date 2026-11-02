@@ -68,7 +68,7 @@ vec3 heFogRayDir(vec2 uv) {
 // lighting preamble, then this. Resources: HeLighting (binding 0, preamble),
 // HeFogVol (36), noise (35), history (37), output image (38).
 inline constexpr const char* kInjectBody = R"GLSL(
-layout(set = 0, binding = 35) uniform sampler3D heFogNoise;     // SkyNoise3D: R value noise, G Worley billows
+layout(set = 0, binding = 35) uniform sampler3D heFogNoise;     // SkyNoise3D bake at 64^3: R value noise, G Worley billows
 layout(set = 0, binding = 37) uniform sampler3D heFogHistory;   // last frame's inject volume
 layout(set = 0, binding = 38, rgba16f) uniform writeonly image3D heFogOut;
 )GLSL";
@@ -81,7 +81,11 @@ float heFogPhase(float g, float c) {
 }
 // Two octaves of the Worley billows, the second one drifting against the first.
 float heFogNoise01(vec3 p) {
-    vec3 q = (p + fv.noise.xyz) * fv.density.w;
+    // One tile of the noise volume spans 16 x fogNoiseScale: the Worley field has 48 feature
+    // cells per tile, so a billow comes out about fogNoiseScale wide, and neighbouring froxels
+    // land on neighbouring texels (a 40 m tile sampled per froxel jumped tens of texels and
+    // thrashed the cache: 5.5 of 8.2 ms of the inject pass on the M5, measured).
+    vec3 q = (p + fv.noise.xyz) * (fv.density.w * 0.0625);
     float a = textureLod(heFogNoise, q, 0.0).g;
     float b = textureLod(heFogNoise, q * 2.07 + vec3(0.37, 0.11, -fv.noise.w * 0.006), 0.0).g;
     // G is about 0.48 +- 0.15 (p05 0.20, p95 0.77, measured on BuildSkyNoise3D): stretch to 0..1.

@@ -135,8 +135,8 @@ struct FogVolumeData
     float      anisotropy = 0.5f;
     float      localLightScatter = 1.0f;
     float      flash = 0.0f;
-    float      sunGain   = 0.25f; // radiance gain of the sun's in-scatter term (isotropic-normalised phase); HE_FOG_SUNGAIN overrides
-    float      lightGain = 0.25f; // same for the window lights; HE_FOG_LIGHTGAIN overrides
+    float      sunGain   = 0.3f;  // radiance gain of the sun's in-scatter term (isotropic-normalised phase); HE_FOG_SUNGAIN overrides
+    float      lightGain = 0.1f;  // same for the window lights; HE_FOG_LIGHTGAIN overrides
     bool       parity = false; // HE_FOG_PARITY=1: noise/bank/haze/sun/lights off — the volume must equal the analytic fog (plan §9)
 };
 
@@ -177,6 +177,7 @@ inline FogVolumeData MakeFogVolumeData(const ::EnvironmentSettings& env,
     // result may be compared against mode 0 on graph-material pixels.
     if (const char* v = std::getenv("HE_FOG_SUNGAIN"); v && *v)   out.sunGain   = static_cast<float>(std::atof(v));
     if (const char* v = std::getenv("HE_FOG_LIGHTGAIN"); v && *v) out.lightGain = static_cast<float>(std::atof(v));
+    if (const char* v = std::getenv("HE_FOG_DENSITY"); v && *v)   out.density   = std::max(static_cast<float>(std::atof(v)), 0.0f);
     int mode = env.fogMode;
     if (const char* v = std::getenv("HE_FOG_MODE"); v && *v) mode = std::atoi(v);
     if (const char* v = std::getenv("HE_FOG_PARITY"); v && *v && std::atoi(v) != 0)
