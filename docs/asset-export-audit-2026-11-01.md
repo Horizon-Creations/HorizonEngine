@@ -371,7 +371,9 @@ Die geclusterten Paare (GLSL 4.30) kann macOS nicht benutzen, sie sind hier also
 
 **Falle:** Ein verstecktes Fenster (`HE_HIDDEN_WINDOW`) mit OpenGL und eingeschaltetem VSync blieb nach Frame 1 stehen (0 % CPU, Hauptthread in
 einer SDL-Bedingungsvariable, `SDL_GL_SwapWindow`). Das betraf Kontrolle und gebackene Variante gleich, hat also nichts mit dem Pak zu tun.
-Abhilfe für Bildläufe: `GameVSync` = false in der `config.json` des Exports. Die Ursache im Fenstercode ist nicht behoben.
+Behoben in `Window.cpp`: Ein Fenster, das nie sichtbar wird (`hiddenWindowRequested()`), bekommt Swap-Intervall 0, beim Anlegen und in
+`Window::SetVSync`. Geprüft mit dem Export aus diesem Abschnitt, `GameVSync` true, neu gebaute Bibliothek: 300 Frames, 0 Fehler, Frame 250
+byte-gleich zum Lauf mit VSync aus. Nicht geprüft: Metal/Vulkan/D3D (dort wird nichts am Swap geändert) und ein sichtbares Fenster.
 
 **Nicht verifiziert:** Der erste Frame der gebackenen Variante zeichnete 19 Draw-Calls, die Kontrolle 18 (der gespeicherte Frame 250 ist
 gleich); den Grund habe ich nicht verfolgt. Kein Lauf mit Forward auf GL. Windows und Linux.
