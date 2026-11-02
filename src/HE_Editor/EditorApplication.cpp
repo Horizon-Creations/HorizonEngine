@@ -4096,6 +4096,19 @@ void EditorApplication::OnRender(float dt)
 				});
 				m_landscapeBound = true;
 			}
+			if (m_landscapePhysics != m_physicsWorld.get())
+			{
+				m_landscape.setPhysics(m_physicsWorld.get());   // ground for the play session's bodies; none while editing
+				m_landscapePhysics = m_physicsWorld.get();
+			}
+			if (m_isPlaying != m_landscapeNavigation)
+			{
+				// Only while playing: the runtime swaps the scene's NavMeshComponent over to its tiled mesh, which an editor
+				// that is just looking at the scene must not do to a navmesh somebody baked.
+				const HE::LandscapeNavConfig nav;
+				m_landscape.setNavigation(m_isPlaying ? &nav : nullptr);
+				m_landscapeNavigation = m_isPlaying;
+			}
 			if (m_isPlaying) m_landscape.update(*m_editorWorld, gameDt);
 			else
 			{
@@ -14043,6 +14056,8 @@ void EditorApplication::setPlayMode(bool play)
 		// the play world and the snapshot restored the scene as it was authored.
 		// So a play session leaves neither a body without an entity nor an entity
 		// with a body it should not have.
+		m_landscape.setPhysics(nullptr);   // its ground lives in that world: give it back first
+		m_landscapePhysics = nullptr;
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
 

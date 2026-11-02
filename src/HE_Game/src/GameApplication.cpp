@@ -1623,6 +1623,19 @@ void GameApplication::updateLandscape(float dt)
 		});
 		m_landscapeBound = true;
 	}
+	// Ground for the physics world and a navmesh for the agents, both around the camera and the things that move. The physics world is
+	// rebuilt with every scene, so it is attached when it changes; the runtime builds nothing for a scene without a landscape.
+	if (m_landscapePhysics != m_physicsWorld.get())
+	{
+		m_landscape.setPhysics(m_physicsWorld.get());
+		m_landscapePhysics = m_physicsWorld.get();
+	}
+	if (!m_landscapeNavigation)
+	{
+		const HE::LandscapeNavConfig nav;
+		m_landscape.setNavigation(&nav);
+		m_landscapeNavigation = true;
+	}
 	m_landscape.update(*m_world, dt);
 	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
 }
@@ -3790,6 +3803,8 @@ void GameApplication::OnShutdown()
 	// that (the apps set it before begin()), so it is dropped here — before the
 	// world it points at goes away.
 	m_entityHost.setPhysicsWorld(nullptr);
+	m_landscape.setPhysics(nullptr);   // its ground lives in that world: give it back first
+	m_landscapePhysics = nullptr;
 	m_physicsWorld.reset();
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).

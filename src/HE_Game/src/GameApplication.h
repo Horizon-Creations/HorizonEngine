@@ -400,6 +400,8 @@ private:
     // (IRenderer::SetLandscapeProvider, bound once, at the first update after the renderer exists).
     void updateLandscape(float dt);
     HE::LandscapeRuntime m_landscape;
+    PhysicsWorld* m_landscapePhysics = nullptr;   // the physics world the landscape gives its ground to (detached BEFORE that world is destroyed)
+    bool m_landscapeNavigation = false;
     HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
     bool m_landscapeBound = false;
 };
