@@ -345,6 +345,8 @@ add_executable(he_tests
     test_reach_filter.cpp
     # Which materials the export may bake onto a mesh (Thema 228, Punkt 6, Schritt B)
     test_simple_texture_material.cpp
+    # The atlas bake itself: lossless merge, resampling, groups, kept sections (Schritt C1)
+    test_mesh_texture_bake.cpp
     # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
