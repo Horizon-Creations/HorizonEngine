@@ -24,7 +24,7 @@ namespace HE
 
 // One texture read: which texture and through which UV transform (a UV node's tiling and
 // offset; identity when the sample reads the mesh UV as it is).
-struct TextureRef
+struct HE_API TextureRef
 {
 	std::string path;                      // content-relative texture asset; empty = no texture
 	float       uvScale[2]  = { 1.0f, 1.0f };
@@ -53,7 +53,7 @@ struct ScalarRole
 	float      factor  = 1.0f;
 };
 
-struct SimpleTextureMaterial
+struct HE_API SimpleTextureMaterial
 {
 	ColorRole  baseColor;                                   // default: flat white
 	ScalarRole metallic  = { {}, 0, 0.0f };
