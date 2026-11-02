@@ -1711,6 +1711,11 @@ struct D3D11RendererImpl
     // True when skyPS is the GL sky cross-compiled through he::shaderc (skyCB is
     // then a whole HE::SkyFrameParams); false on the kSkyPSHLSL fallback (SkyCB).
     bool skyFullModel = false;
+    // Clouds over the opaque geometry (cloudMode 1): the geo variant of the same GL sky
+    // (BuildSkyFragmentGLSL450(true)) marches the slab up to each opaque pixel and outputs
+    // (L, T); skyGeoBlend lays it over the lit scene (rgb = L + dst * T). Needs skyFullModel.
+    ComPtr<ID3D11PixelShader>        skyGeoPS;
+    ComPtr<ID3D11BlendState>         skyGeoBlend;
     // ── Debug line pipeline ───────────────────────────────────────────────
     ComPtr<ID3D11VertexShader>  debugVS;
     ComPtr<ID3D11PixelShader>   debugPS;
@@ -6171,6 +6176,24 @@ struct D3D11RendererImpl
         }();
         return r;
     }
+
+    // The clouds-over-geometry variant of that sky (same text, HE_SKY_GEO_PASS): one more
+    // register, the opaque depth on t2.
+    static const he::shaderc::Result& skyCrossHlslGeo()
+    {
+        static const he::shaderc::Result r = [] {
+            using he::shaderc::Stage;
+            using namespace HE::glsl;
+            return he::shaderc::compileHlslPinned(
+                BuildSkyFragmentGLSL450(/*cloudGeoPass=*/true), Stage::Fragment, {
+                    { Stage::Fragment, 0, kSkySlotEnv.binding,        kSkySlotEnv.hlslReg        },
+                    { Stage::Fragment, 0, kSkySlotMoon.binding,       kSkySlotMoon.hlslReg       },
+                    { Stage::Fragment, 0, kSkySlotNoise.binding,      kSkySlotNoise.hlslReg      },
+                    { Stage::Fragment, 0, kSkySlotSceneDepth.binding, kSkySlotSceneDepth.hlslReg },
+                });
+        }();
+        return r;
+    }
 #endif
 
     // ─── Startup shader prefetch (Thema 200, D3DShaderPrefetch.h) ───────────
@@ -6199,6 +6222,10 @@ struct D3D11RendererImpl
         const UINT flags = startupCompileFlags() | D3DCOMPILE_PREFER_FLOW_CONTROL;
         HE::d3dprefetch::submit(hlsl.source, "main", "main", "ps_5_0", flags);
         HE::d3dprefetch::submit(HE::glsl::kSkyVSCrossHLSL, "VSSkyCross", "VSSkyCross", "vs_5_0", flags);
+        // The clouds-over-geometry variant, same flags as its compile in createSkyPipeline.
+        const he::shaderc::Result& geo = skyCrossHlslGeo();
+        if (geo.ok)
+            HE::d3dprefetch::submit(geo.source, "main", "main", "ps_5_0", flags);
 #endif
     }
 
@@ -6295,7 +6322,7 @@ struct D3D11RendererImpl
             }
             return true;
         };
-        ComPtr<ID3DBlob> vsB, psB;
+        ComPtr<ID3DBlob> vsB, psB, geoB;
         // The GL sky (HorizonRendering/SkyShaderSource.h) cross-compiled to HLSL:
         // atmosphere, three-colour nebula, 3D aurora, phased moon, cirrus, 3D
         // volumetric clouds, god rays — the same text GL runs. Its loops exit on
@@ -6312,6 +6339,14 @@ struct D3D11RendererImpl
             skyFullModel = hlsl.ok
                 && compile(HE::glsl::kSkyVSCrossHLSL, std::strlen(HE::glsl::kSkyVSCrossHLSL), "VSSkyCross", "vs_5_0", vsB)
                 && compile(hlsl.source.c_str(), hlsl.source.size(), "main", "ps_5_0", psB);
+            // Clouds over the geometry: the same sky, as the geo variant. Optional — without it
+            // the 3D clouds simply stay a backdrop for the sky pixels.
+            if (skyFullModel)
+            {
+                const he::shaderc::Result& geo = skyCrossHlslGeo();
+                if (!(geo.ok && compile(geo.source.c_str(), geo.source.size(), "main", "ps_5_0", geoB)))
+                    geoB.Reset();
+            }
             flags = savedFlags;
             if (!skyFullModel)
                 HE_LOG_WARN(RHI, "%s", "D3D11 sky: cross-compiled GL sky unavailable, "
@@ -6327,6 +6362,23 @@ struct D3D11RendererImpl
         }
         device->CreateVertexShader(vsB->GetBufferPointer(), vsB->GetBufferSize(), nullptr, &skyVS);
         device->CreatePixelShader (psB->GetBufferPointer(), psB->GetBufferSize(), nullptr, &skyPS);
+        if (geoB)
+        {
+            device->CreatePixelShader(geoB->GetBufferPointer(), geoB->GetBufferSize(), nullptr, &skyGeoPS);
+            // rgb = L + dst * T (the clouds' own light, the scene seen through their transmittance);
+            // alpha is left as it was.
+            D3D11_BLEND_DESC gbd{};
+            gbd.RenderTarget[0].BlendEnable           = TRUE;
+            gbd.RenderTarget[0].SrcBlend              = D3D11_BLEND_ONE;
+            gbd.RenderTarget[0].DestBlend             = D3D11_BLEND_SRC_ALPHA;
+            gbd.RenderTarget[0].BlendOp               = D3D11_BLEND_OP_ADD;
+            gbd.RenderTarget[0].SrcBlendAlpha         = D3D11_BLEND_ZERO;
+            gbd.RenderTarget[0].DestBlendAlpha        = D3D11_BLEND_ONE;
+            gbd.RenderTarget[0].BlendOpAlpha          = D3D11_BLEND_OP_ADD;
+            gbd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+            if (FAILED(device->CreateBlendState(&gbd, &skyGeoBlend)))
+                skyGeoPS.Reset();
+        }
         D3D11_BUFFER_DESC bd{};
         // Sized for the larger of the two layouts, so either shader fits.
         bd.ByteWidth = (static_cast<UINT>(std::max(sizeof(HE::SkyFrameParams), sizeof(SkyCB))) + 15u) & ~15u;
@@ -6427,6 +6479,36 @@ struct D3D11RendererImpl
     {
         if (!skyReady) return;
         if (!env.skyEnabled) return; // no Sky entity → leave the cleared background
+        uploadSkyConstants(ctx, invVP, sunDir, env, cameraPos, time);
+        ctx->IASetInputLayout(nullptr);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->VSSetShader(skyVS.Get(), nullptr, 0);
+        ctx->PSSetShader(skyPS.Get(), nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, skyCB.GetAddressOf());
+        ctx->PSSetConstantBuffers(0, 1, skyCB.GetAddressOf());
+        ctx->OMSetDepthStencilState(noDepthDSS.Get(), 0);
+        ctx->RSSetState(fsRastState.Get());
+        ctx->PSSetSamplers(0, 1, linearSampler.GetAddressOf());
+        ID3D11ShaderResourceView* moonSrv = moonSRV ? moonSRV.Get() : nullptr;
+        ctx->PSSetShaderResources(0, 1, &moonSrv);
+        ctx->PSSetShaderResources(1, 1, noiseSRV.GetAddressOf());
+        ctx->PSSetSamplers(1, 1, skyNoiseSampler.GetAddressOf());
+        ctx->Draw(3, 0);
+        // Unbind textures and restore scene state
+        ID3D11ShaderResourceView* nullSrv = nullptr;
+        ctx->PSSetShaderResources(0, 1, &nullSrv);
+        ctx->PSSetShaderResources(1, 1, &nullSrv);
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->RSSetState(rasterState.Get());
+        ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
+    }
+
+    // Fills skyCB for one sky draw — shared by the sky and the clouds-over-geometry draw,
+    // which read the same constants.
+    void uploadSkyConstants(ID3D11DeviceContext* ctx, const glm::mat4& invVP,
+                            const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env,
+                            const glm::vec3& cameraPos, float time)
+    {
         // Translate the environment through the SHARED sky-constants builder
         // instead of hand-assigning fields (which is how D3D11 previously ended up
         // with +cos where GL/Metal have -cos, drifting the clouds 180° the wrong
@@ -6455,27 +6537,92 @@ struct D3D11RendererImpl
             else              std::memcpy(m.pData, &cb, sizeof(cb));
             ctx->Unmap(skyCB.Get(), 0);
         }
+    }
+
+    // Clouds over the opaque geometry (cloudMode 1). The sky above is drawn FIRST, so its clouds
+    // only ever back the pixels the geometry leaves empty: a peak could not stand in front of the
+    // deck behind it, the deck in front of it could not cover it, and flying above the deck showed
+    // the ground through no clouds at all. This draw runs after the opaque geometry: the geo
+    // variant of the same sky marches the slab up to each opaque pixel (depth on t2; sky pixels
+    // are discarded in the shader — the sky pass already did them with the whole slab) and
+    // skyGeoBlend lays the (L, T) over the lit scene.
+    //
+    // Like EncodeDecals, the DSV comes OFF the output merger before its SRV goes on and back on
+    // after: D3D11 would unbind one of them silently otherwise. The scene's own t0..t2 / s0..s1 /
+    // b0 are saved around the draw, since the sky resources sit on the same registers.
+    // Self-restoring, mid-scene: the transparent draws follow. A no-op unless the geo variant
+    // exists, the frame's depth has an SRV, and the clouds are the 3D ones.
+    void drawCloudsOverGeometry(ID3D11DeviceContext* ctx, const glm::mat4& invVP,
+                                const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env,
+                                const glm::vec3& cameraPos, float time)
+    {
+        if (!skyReady || !skyFullModel || !skyGeoPS || !skyGeoBlend) return;
+        if (!env.skyEnabled || env.cloudMode != 1 || !(env.cloudCoverage > 0.0f)) return;
+
+        ComPtr<ID3D11RenderTargetView> curRTV;
+        ComPtr<ID3D11DepthStencilView> curDSV;
+        ctx->OMGetRenderTargets(1, curRTV.GetAddressOf(), curDSV.GetAddressOf());
+        if (!curRTV || !curDSV) return; // not inside a scene pass
+        ID3D11ShaderResourceView* depthRead =
+              (curDSV.Get() == dsv.Get())         ? depthSRV.Get()
+            : (curDSV.Get() == viewportDSV.Get()) ? viewportDepthSRV.Get()
+                                                  : nullptr;
+        if (!depthRead) return;
+
+        GpuPassScope _passTimer(this, "Clouds");
+        uploadSkyConstants(ctx, invVP, sunDir, env, cameraPos, time);
+
+        // What the scene has on the registers the sky draw takes over.
+        ID3D11ShaderResourceView* savedSrv[3] = {};
+        ID3D11SamplerState*       savedSmp[2] = {};
+        ID3D11Buffer*             savedVsCB0  = nullptr;
+        ID3D11Buffer*             savedPsCB0  = nullptr;
+        ctx->PSGetShaderResources(0, 3, savedSrv);
+        ctx->PSGetSamplers(0, 2, savedSmp);
+        ctx->VSGetConstantBuffers(0, 1, &savedVsCB0);
+        ctx->PSGetConstantBuffers(0, 1, &savedPsCB0);
+
+        ID3D11RenderTargetView* rtvOnly = curRTV.Get();
+        ctx->OMSetRenderTargets(1, &rtvOnly, nullptr); // release the depth FIRST
+        ID3D11ShaderResourceView* srvs[3] = { moonSRV ? moonSRV.Get() : nullptr, noiseSRV.Get(), depthRead };
+        ctx->PSSetShaderResources(0, 3, srvs);         // t0 moon, t1 noise, t2 opaque depth
+        ID3D11SamplerState* smps[2] = { linearSampler.Get(), skyNoiseSampler.Get() };
+        ctx->PSSetSamplers(0, 2, smps);
+
         ctx->IASetInputLayout(nullptr);
         ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx->VSSetShader(skyVS.Get(), nullptr, 0);
-        ctx->PSSetShader(skyPS.Get(), nullptr, 0);
+        ctx->PSSetShader(skyGeoPS.Get(), nullptr, 0);
         ctx->VSSetConstantBuffers(0, 1, skyCB.GetAddressOf());
         ctx->PSSetConstantBuffers(0, 1, skyCB.GetAddressOf());
         ctx->OMSetDepthStencilState(noDepthDSS.Get(), 0);
         ctx->RSSetState(fsRastState.Get());
-        ctx->PSSetSamplers(0, 1, linearSampler.GetAddressOf());
-        ID3D11ShaderResourceView* moonSrv = moonSRV ? moonSRV.Get() : nullptr;
-        ctx->PSSetShaderResources(0, 1, &moonSrv);
-        ctx->PSSetShaderResources(1, 1, noiseSRV.GetAddressOf());
-        ctx->PSSetSamplers(1, 1, skyNoiseSampler.GetAddressOf());
+        ctx->OMSetBlendState(skyGeoBlend.Get(), nullptr, 0xFFFFFFFF);
         ctx->Draw(3, 0);
-        // Unbind textures and restore scene state
-        ID3D11ShaderResourceView* nullSrv = nullptr;
-        ctx->PSSetShaderResources(0, 1, &nullSrv);
-        ctx->PSSetShaderResources(1, 1, &nullSrv);
-        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ++counters.draws;
+
+        // Depth SRV off BEFORE the depth goes back on the output merger.
+        ID3D11ShaderResourceView* nullSrvs[3] = {};
+        ctx->PSSetShaderResources(0, 3, nullSrvs);
+        ID3D11RenderTargetView* restoreRTV = curRTV.Get();
+        ctx->OMSetRenderTargets(1, &restoreRTV, curDSV.Get());
+
+        // The scene's state back, as after the decal pass: shaders, layout, raster/depth/blend,
+        // then the registers the sky draw borrowed.
+        ctx->VSSetShader(vs.Get(), nullptr, 0);
+        ctx->PSSetShader(ps.Get(), nullptr, 0);
+        ctx->IASetInputLayout(inputLayout.Get());
         ctx->RSSetState(rasterState.Get());
-        ctx->PSSetSamplers(0, 1, sampler.GetAddressOf());
+        ctx->OMSetDepthStencilState(depthState.Get(), 0);
+        ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+        ctx->PSSetShaderResources(0, 3, savedSrv);
+        ctx->PSSetSamplers(0, 2, savedSmp);
+        ctx->VSSetConstantBuffers(0, 1, &savedVsCB0);
+        ctx->PSSetConstantBuffers(0, 1, &savedPsCB0);
+        for (ID3D11ShaderResourceView* s : savedSrv) if (s) s->Release();   // the Get* calls AddRef'd them
+        for (ID3D11SamplerState* s : savedSmp)        if (s) s->Release();
+        if (savedVsCB0) savedVsCB0->Release();
+        if (savedPsCB0) savedPsCB0->Release();
     }
 
     // `lineDepth` overrides the depth state (null = the scene's test+write);
@@ -7080,6 +7227,7 @@ void D3D11Renderer::Shutdown()
     m_impl->uiSampler.Reset();
     m_impl->gpuTimerShutdown();
     m_impl->skyVS.Reset(); m_impl->skyPS.Reset(); m_impl->skyCB.Reset();
+    m_impl->skyGeoPS.Reset(); m_impl->skyGeoBlend.Reset();
     m_impl->moonSRV.Reset(); m_impl->moonTex2D.Reset();
     m_impl->noiseSRV.Reset(); m_impl->noiseTex3D.Reset(); m_impl->skyNoiseSampler.Reset();
     m_impl->debugVS.Reset(); m_impl->debugPS.Reset(); m_impl->debugVB.Reset();
@@ -8686,6 +8834,15 @@ void D3D11Renderer::DrawScene(int width, int height)
         // A deferred frame put them into GB0 already (gbDecals).
         if (!gbDecals)
             p.EncodeDecals(ctx, viewProj, width, height, m_contentManager);
+
+        // ── Clouds over the opaque geometry ──────────────────────────────────
+        // The sky went in first, so its 3D clouds back only the pixels the geometry left empty.
+        // Now that the opaque depth is final (and the decals are on it), the same sky's cloud
+        // slab is marched up to each surface and blended over the lit scene — before the
+        // transparent draws, which belong in front of the clouds' own surface only where they
+        // are. Same jittered matrix and clock as the sky draw. Self-restoring.
+        p.drawCloudsOverGeometry(ctx, glm::inverse(viewProj), p.m_renderWorld.sunDirection,
+                                 m_environment, p.m_renderWorld.camera.position, p.m_wallTime);
 
         if (!transparentDCs.empty()) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)

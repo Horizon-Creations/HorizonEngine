@@ -1141,6 +1141,27 @@ private:
 	// HE::SkyFrameParams); false on the reduced sky.frag.spv fallback (SkyUBOData).
 	bool                  m_skyFullModel       = false;
 
+	// ── Clouds over the opaque geometry ─────────────────────────────────────
+	// The sky is drawn FIRST here, so the 3D clouds (cloudMode 1) would only ever be a backdrop: terrain
+	// is drawn over them and the deck cannot be seen from above. After the opaque geometry a second
+	// fullscreen draw (the GL sky compiled as its HE_SKY_GEO_PASS variant, BuildSkyFragmentGLSL450(true))
+	// marches the slab up to each opaque surface and blends (L, T) over the lit colour:
+	// rgb = L + dst * T, no depth test. It reads the opaque depth as binding 3 of the sky set layout
+	// (the plain sky never uses that binding): the DecalDepth pre-pass image on a forward frame, GB3 on
+	// a deferred one - both already SHADER_READ_ONLY, so the render pass need not be split. The pre-pass
+	// therefore also runs on a decal-free frame whenever this pass wants it (cloudsOverGeometryWanted).
+	// Opaque static meshes only, like the decals; skinned meshes and the deferred forward replay are not in it.
+	bool                  cloudsOverGeometryWanted() const;
+	void                  drawCloudsOverGeometry(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr,
+	                                             VkImageView depthView);
+	VkPipeline            m_skyGeoPipeline     = VK_NULL_HANDLE;   // m_renderPass (LDR)
+	VkPipeline            m_skyGeoPipelineHDR  = VK_NULL_HANDLE;   // m_postFxSceneRP (also used inside m_hdrLoadRP)
+	VkSampler             m_skyGeoDepthSampler = VK_NULL_HANDLE;   // NEAREST: filtering depth invents surfaces
+	// Per frame slot: sky UBO (shared with the sky draw, same SkyFrameParams) + moon + noise + the depth,
+	// whose view is rewritten each frame before the draw (this slot's fence was waited on in Render()).
+	VkDescriptorSet       m_skyGeoSet[2]       = {};
+	bool                  m_decalDepthFilled   = false;            // EncodeDecalDepth recorded its pass this frame
+
 	// Moon texture (uploaded once via SetMoonTexture).
 	VkImage        m_moonImage   = VK_NULL_HANDLE;
 	VkDeviceMemory m_moonMemory  = VK_NULL_HANDLE;
