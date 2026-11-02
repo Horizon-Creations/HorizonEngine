@@ -51,6 +51,34 @@ Bytes vor der zstd-Kompression des Paks (Texturen daraus komprimieren bei Fotos 
 ein 500-MB-Budget heißt 16 m Raster auf der feinsten gebackenen Stufe, und das echte Material muss bis zu dem Radius reichen, in dem ein Pixel größer ist (hier rund 15 km bei 1080p). **Der Übergangsradius ist deshalb ein Regler
 im Projekt**, und der Editor sollte beim Export sagen, welches Raster er je Stufe erreicht hat und welche Stufen herunterskaliert wurden.
 
+## 3a. Messungen (2026-11-02, MacBook M5; was gemessen und was nur abgeleitet ist)
+
+**Encode-Durchsatz, gemessen** (`tests/test_bench_landscape_arrays.cpp`, die echten Landscape-Arrays, 5 × 2048² mit Mips = 28 Mio. Texel je Array): ASTC 4×4 Fast 0,14 / 0,62 / 0,07 s je Mio. Texel für Albedo / Normal / Mask (die Normal-Karte ist 4× langsamer
+als die Mask-Karte bei gleicher Größe: der Encoder hängt stark vom Inhalt ab), BC7 0,15 bis 0,16, BC3 0,015 bis 0,017.
+
+**Eine gebackene Kachel durch den echten Pak-Koch, gemessen** (neu: `tests/test_bench_hlod_tile.cpp`, nur mit `HE_BENCH_TILE_PNG`; Eingabe: ein Top-down-Render des echten `M_AutoLandscape` aus dem Witness `HE_DUMP_AUTOLAND`, Forest-Gruppe, auf 256 / 128 / 64 / 32 Texel
+heruntergefiltert; drei Ausschnitte: gemischt, verrauschte Ebene mit Textur-Bombing, glatte Schnee-Hochfläche; je Zelle 5 Läufe, Median):
+
+| Seite | roh (ASTC/BC7/BC3) | zstd-19 gespart, ASTC: verrauscht / gemischt / glatt | BC7: verrauscht / gemischt / glatt | ASTC Pack-Aufruf |
+|---|---|---|---|---|
+| 256 | 87 659 B | 18 % / 37 % / 63 % | 19 % / 49 % / 80 % | 11,4 bis 13,0 ms |
+| 128 | 22 123 B | 12 % / 33 % / 57 % | 13 % / 45 % / 75 % | 7,4 bis 8,0 ms |
+| 64 | 5 739 B | 6 % / 30 % / 51 % | 8 % / 40 % / 69 % | 5,9 bis 6,5 ms |
+| 32 | 1 643 B | 4 % / 25 % / 41 % | 6 % / 28 % / 50 % | 4,8 bis 5,0 ms |
+
+* Die rohe Größe stimmt mit dem Planer überein (65 536 Texel × 4/3 = 87 381 B plus rund 280 B Kopf).
+* **Jeder Pack-Aufruf kostet fest 4 bis 5 ms** (ASTC-Kontext), auch bei 32². Der Durchsatz allein unterschätzt kleine Kacheln: Mit dem 500-MB-Budget (32², 16², …) sagte das Durchsatzmodell 1,6 Minuten für die Welt, mit 3 Aufrufen je Kachel
+  (je einer pro Karte, die Pyramide ist die Mip-Kette dieses einen Texturaufrufs) sind es rund 3 × 5 ms × 38 025 = **9,5 Minuten**; jede Stufe einzeln zu kochen wären rund 78 Minuten. **Folgerung: je Karte eine Textur mit Mip-Kette, besser mehrere Kacheln
+  in ein Array (`cookTextureArrays`), nie jede Stufe einzeln.**
+* **Kompression:** Auf dem Witness spart zstd bei ASTC zwischen 4 und 63 %, je nach Inhalt (verrauschtes Textur-Bombing am wenigsten, glatte Fläche am meisten). Für die 13,3 GB roh bei voller Auflösung heißt das grob **4,9 bis 10,9 GB komprimiert**. Die BC3-Werte (bis 91 %) sind
+  nicht übertragbar: Die Hälfte jedes BC3-Blocks ist ein Alpha-Block, der hier konstant ist; für deckendes Albedo wäre BC1 das richtige Format (nicht gemessen).
+* **Vorbehalt:** Der Witness ist beleuchtet und stark verschneit, kein reines Albedo. Ein echter, unbeleuchteter Bake aus der G-Buffer-Aufnahme ist nicht gemessen; ob er besser oder schlechter komprimiert, weiß ich nicht.
+
+**Render-Zeit, abgeleitet, nicht neu gemessen:** `docs/perf-audit/auto-landscape-material-2-audit-2026-10-21.md` misst den Scene-Pass des Auto-Landscape-Materials mit 11,4 bis 13,2 ms bei 2840 × 1528 (4,34 Mio. Pixel), also **2,6 bis 3,0 ns je Pixel**
+(Vorbehalt der Quelle: bei billigen Frames taktet die GPU herunter und die Zeit ist aufgebläht). Eine Kachel des Plans "voll" hat mit 2 × 2 Überabtastung 350 208 Pixel über alle Stufen: **rund 1 ms GPU je Kachel**, für 38 025 Kacheln rund 40 s reine GPU-Zeit.
+Dazu kommen Aufruf-, Auslese- und Filterkosten je Kachel, die nicht gemessen sind. **Der Engpass ist das Codieren (rund 23 bis 78 Minuten bei ASTC, je nach Aufrufstrategie), nicht das Rendern.**
+Mein eigener Profiler-Lauf (`he_perf_capture.py`, Kopie von Catania, Kamera von oben) hat das Landscape nicht im Bild gehabt (Scene-Pass 0,23 ms, SSAO 5,5 ms) und ist deshalb nicht verwertet.
+
 ## 4. Ablauf beim Export (die Entscheidung "automatisch")
 
 1. Der Export-Dialog baut seine Szenen auf dem Hauptthread (so heute). Dort kommt ein **Bake-Schritt** dazu, der die GPU des Editors benutzt, mit Fortschritt und Abbruch (Auftrag des Hauptthreads, nicht des Export-Threads).
@@ -79,6 +107,7 @@ im Projekt**, und der Editor sollte beim Export sagen, welches Raster er je Stuf
 - **Topic / step:** 228 (Wunsch des Nutzers), Ziel Thema 326 Schritt 2 und 5. Entwurf, kein Laufzeit-Code.
 - **Done:** dieses Dokument; `HE::landscape::planHlodBake` (Header, 4 Testfälle, 74 Prüfungen grün); Hive-Einträge in 228 und 326.
 - **Verified:** die Rechnung des Planers (per Hand nachgerechnet und im Test festgenagelt); das G-Buffer-Layout aus der Codegen-Kopfzeile in `MaterialGraph.cpp`; dass Deferred nur auf Metal und GL existiert (Memory/Plan); dass es heute keine LOD-Stufe mit eigenem Material gibt (`TerrainSystem.cpp`).
-- **Not verified:** alles Zeit- und Qualitätsmäßige (nichts gebacken, nichts gerendert); die tatsächliche Kompression gebackener Landschaft; ob der Renderer-Teil B von Thema 326 schon einen Offscreen-Kachel-Pfad hat (ich habe nur die Dokumente und das Tile-Format gelesen).
+- **Measured (Abschnitt 3a):** Encode-Durchsatz und Pack-Aufruf je Kachelseite (ASTC/BC7/BC3), zstd-Ersparnis auf einem echten Top-down-Render des Auto-Landscape-Materials. **Abgeleitet:** die Render-Zeit je Kachel (aus dem Audit vom 21.10.).
+- **Not verified:** ein echter Bake (es gibt den Pfad nicht); die Kompression eines unbeleuchteten, reinen Albedo-Bakes; die GPU-Zeit je Kachel am echten Aufruf; ob der Renderer-Teil B von Thema 326 schon einen Offscreen-Kachel-Pfad hat (ich habe nur die Dokumente und das Tile-Format gelesen); Windows und Linux.
 - **Decisions taken:** Nutzer: erst Quadtree, automatisch beim Export, Albedo + Normal + Roughness. Von mir: Aufnahme des G-Buffers statt neuer Shader; Inhalts-Hash-Cache; Downscaling-Regeln wie in Abschnitt 3.
 - **Next steps:** 326-Lead liest Abschnitt 6; Zeit/Raster-Messung an einer Kachel; Bake-Funktion im Renderer (Metal und GL zuerst); Windows: MRT-Pfad für D3D/Vulkan.
