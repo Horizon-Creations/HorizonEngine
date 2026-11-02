@@ -1,4 +1,7 @@
-# Landscape-HLOD mit gebackenem Material (Entwurf für Thema 326)
+# Landscape-HLOD mit gebackenem Material (Thema 228, Mac/Metal umgesetzt; Quadtree von Thema 326 später)
+
+**Stand 2026-11-02 (Abschnitt 7):** Das gebackene Fernmaterial ist für die **heutigen Terrain-Chunks** gebaut, im Export automatisch, auf Metal. Abschnitte 1 bis 6 sind der ursprüngliche Entwurf und die Messungen davor; was daraus
+Wirklichkeit wurde, steht in Abschnitt 7 (mit Messwerten und dem, was nicht geprüft ist).
 
 Auftrag (Nutzer, 2026-11-02, im Rahmen von Thema 228): Die fernen Stufen der Landschaft sollen **das Ergebnis des Landscape-Materials gebacken bekommen**, damit dafür zur Laufzeit keine Berechnung anfällt,
 **mit automatischem Downscaling bei zu hoher Auflösung**.
@@ -102,12 +105,51 @@ Mein eigener Profiler-Lauf (`he_perf_capture.py`, Kopie von Catania, Kamera von 
 2. Beim Quadtree-Renderer (Schritt 2) ein **Fernmaterial** vorsehen: ab dem Übergangsradius statt des Landscape-Graphen ein Material, das die drei gebackenen Karten liest (drei Zugriffe, keine Layer-Mischung).
 3. Zuerst die Zeit und das Raster an einer Kachel der Testwelt messen (Abschnitt 5), dann erst den Export-Schritt bauen.
 
+## 7. Umgesetzt (2026-11-02, Metal, die heutigen Terrain-Chunks)
+
+Die Rückfrage "erst Quadtree" hatte ich als "nur entwerfen" gelesen. Das war zu eng: der Bake selbst hängt nicht vom Quadtree ab. Gebaut ist er jetzt für die **Chunks von `TerrainSystem`** (ein Chunk = eine Kachel); die Bilder, der Planer und die
+Ids tragen später unverändert zu den Kacheln von Thema 326 (`HlodBaker::bakeRect` nimmt jedes quadratische Weltrechteck).
+
+**Abweichung vom Entwurf (Abschnitt 2/4):** aufgenommen wird nicht der G-Buffer, sondern drei **unbeleuchtete Ansichtsgraphen** desselben Auto-Landscape (`AutoLandscapeView::BaseColor`, `Normal` = Weltnormale·0,5+0,5, `Surface` = R AO, G Roughness),
+senkrecht von oben, orthografisch, im Vorwärtspfad. Grund: ein unbeleuchteter Ausgang ist bytegenau prüfbar (Konstante rein, Konstante raus), der G-Buffer-Pfad existiert nur auf Metal und GL.
+
+| Baustein | Wo |
+|---|---|
+| Rohausgabe des Renderers: `EditorCameraOverride::rawOutput` (+ `rawSrgb` für das Albedo) in `RenderSceneImage`, nur Metal: kein Tonemap, Bloom, SSAO, AA, DoF, SSR, GI, Vorwärtspfad | `IRenderer.h`, `MetalRenderer.mm` (`kTonemapMSL`, `RenderSceneImage`) |
+| `HlodBaker`: Szenenkopie **einer** Landschaft (ihre Material-Overrides und Static Switches werden auf die Ansichtsgraphen übertragen), Kamera je Chunk, Warten auf die drei Pipelines über `PumpShaderBuilds`, Box-Filter von `side·ss` | `HE_Scene/LandscapeHlodBaker.h/.cpp` |
+| `buildHlodAssets`: drei einstufige RGBA8-Texturen (Albedo sRGB) + **ein** Material, das sie über die Weltposition liest; Ids/Pfade aus (Terrain-Entity-Id, cx, cz) unter `Baked/Landscape/` | `HE_Scene/LandscapeHlod.h/.cpp` |
+| `LODLevel::materialId`; `TerrainSystem` setzt es für die Stufen ab 1, wenn das Material resident ist (Fehlgriff = ein Hash-Lookup); `RenderExtractor` nimmt es für die gewählte Stufe | `LODComponent.h`, `TerrainSystem.cpp`, `RenderExtractor.cpp` (`lodLevelMaterial`) |
+| Export: `bakeWorldLandscapes` (Planer `planHlodBake`, Budget, Abbruch), `PackSettings/ExportSettings::extraAssets` (Ordner = Reach-Wurzel), Export-Dialog "Bake far landscape" + Budget (MB), im Profil gespeichert | `LandscapeHlod.cpp`, `HpakWriter.cpp`, `ExportDialogPanel.cpp`, `ProjectManager.*` |
+
+**Gemessen (Mac, Metal, 2026-11-02):**
+
+* Rohausgabe: eine unbeleuchtete Konstante (0,2 / 0,4 / 0,6) kommt als **51 102 153 in allen 4096 Pixeln** zurück (`HE_DUMP_RAWTEST`), sRGB-kodiert als 124 170 203; derselbe Frame ohne Rohmodus: 29 33 50.
+* Platzierung: vier Chunks einzeln gebacken und zusammengesetzt gegen die ganze Landschaft in einem Bild: mittlere Abweichung 0,32/255 (Albedo), 0,000 (Normal), 0,11 (Surface) (`HE_DUMP_HLODMOSAIC`). Dazu liegen unsymmetrische Texturmuster im Fernbild an denselben Stellen wie im echten Material, also stimmen beide Achsen.
+* Echte Landschaft (Kopie von Catania, 2 km, 256 Chunks à 125 m, Mountains): **alle 256 Chunks in 3,0 bis 3,3 s** headless gebacken, 256 px je Chunk (0,49 m je Texel, vom Planer: "was der Schirm will" ab 750 m, bei der Testeinstellung 150 m "unter dem, was der Schirm will", weil bei 256 gedeckelt). 1024 Assets.
+* Pak (echter Export über `ProjectExporter`, mit Erreichbarkeitsfilter): **95,9 MB → 164,9 MB (+69,0 MB)**, geplant 64 MiB (67,1 MB). Export 23,6 s → 30,1 s.
+* Im exportierten Spiel (aus dem Pak): "256 with a baked far material" im Terrain-Log, 0 Fehler. Mit der Landschaft auf Bodenhöhe ist der Unterschied zum echten Material klein (mittlere Abweichung 0,022/255, höchstens 29), weil alles jenseits von 150 m auf Augenhöhe in einem schmalen Streifen am Horizont liegt.
+* **GPU-Zeit** (Catania-Kopie, Kamera 150 m hoch quer über die Landschaft, ferne Stufen ab 150 m, je drei abwechselnde Läufe, `he_perf_capture.py`, vsync aus): Szenen-Pass p50 **12,03 → 10,61 ms**, GPU-Frame 12,81 → 11,42 ms, **81,6 → 92,2 FPS**; gleiche 220 Draws, gleiche 59 597 Dreiecke; Streuung unter 0,05 ms.
+
+**Fallen, die mich Zeit gekostet haben (alle behoben, je mit Test oder Beleg):**
+
+1. `RenderSceneImage` zeigt ein frisch registriertes Graph-Material nicht, solange seine Pipeline im Hintergrund baut. Der Baker wartet über `IRenderer::PumpShaderBuilds()`; `HE_DUMP_SETTLEMS` ist die Krücke für die Witnesses.
+2. Texturen mit fertiger Mip-Kette werden vom Packer **nicht noch einmal gekocht** (eine 2D-Textur wird nur aus einer einstufigen RGBA8-Quelle gebaut): der erste Export war 270 MB größer statt 69 MB. Jetzt einstufig.
+3. Das Rechteck des Chunks als Konstante im Shader ergab 256 verschiedene Shader und 256 Pipeline-Builds (in den ersten Messläufen fehlten dadurch Chunks im Bild). Jetzt der Parameter `FarMap`; alle Chunks erzeugen **dieselbe** Shader-Quelle (Test).
+4. `resolveEntitySlots` gibt für jedes Mesh, das nicht LOD0 ist, das Material der **Entity** zurück und überschrieb das Stufenmaterial: im echten Spiel 252 getauschte Objekte und ein bitgleicher Frame. Das Stufenmaterial wird nach diesem Schritt noch einmal gesetzt (Test in `test_culling`).
+5. `tests/CMakeLists.txt` band `EditorInputMac.mm` nicht in `he_tests` ein (macOS-Link seit dem Pinch-Commit rot); behoben.
+
 ## Handoff
 
-- **Topic / step:** 228 (Wunsch des Nutzers), Ziel Thema 326 Schritt 2 und 5. Entwurf, kein Laufzeit-Code.
-- **Done:** dieses Dokument; `HE::landscape::planHlodBake` (Header, 4 Testfälle, 74 Prüfungen grün); Hive-Einträge in 228 und 326.
-- **Verified:** die Rechnung des Planers (per Hand nachgerechnet und im Test festgenagelt); das G-Buffer-Layout aus der Codegen-Kopfzeile in `MaterialGraph.cpp`; dass Deferred nur auf Metal und GL existiert (Memory/Plan); dass es heute keine LOD-Stufe mit eigenem Material gibt (`TerrainSystem.cpp`).
-- **Measured (Abschnitt 3a):** Encode-Durchsatz und Pack-Aufruf je Kachelseite (ASTC/BC7/BC3), zstd-Ersparnis auf einem echten Top-down-Render des Auto-Landscape-Materials. **Abgeleitet:** die Render-Zeit je Kachel (aus dem Audit vom 21.10.).
-- **Not verified:** ein echter Bake (es gibt den Pfad nicht); die Kompression eines unbeleuchteten, reinen Albedo-Bakes; die GPU-Zeit je Kachel am echten Aufruf; ob der Renderer-Teil B von Thema 326 schon einen Offscreen-Kachel-Pfad hat (ich habe nur die Dokumente und das Tile-Format gelesen); Windows und Linux.
-- **Decisions taken:** Nutzer: erst Quadtree, automatisch beim Export, Albedo + Normal + Roughness. Von mir: Aufnahme des G-Buffers statt neuer Shader; Inhalts-Hash-Cache; Downscaling-Regeln wie in Abschnitt 3.
-- **Next steps:** 326-Lead liest Abschnitt 6; Zeit/Raster-Messung an einer Kachel; Bake-Funktion im Renderer (Metal und GL zuerst); Windows: MRT-Pfad für D3D/Vulkan.
+- **Topic / step:** 228, "Landscape-HLOD gebacken". Gebaut für Mac/Metal und die heutigen Chunks; Ziel später Thema 326 (Quadtree). Commits auf `release/0.8.0`: 7ac3fffd (BaseColor-Ansicht), ec9dbc04 (Rohausgabe + Baker), 156f74b9 (Assets, LOD-Material), 875b11f0 (Export), c128f03f (Extraktor-Fix, einstufige Texturen), danach "one shared shader".
+- **Verified:** alles unter "Gemessen" in Abschnitt 7. Tests: ganze Suite 362 von 362 grün (danach nur `test_hlod_assets` und der gemeinsame Shader dazugekommen, beide grün).
+- **Not verified:**
+  * **Der Export-Dialog selbst.** Der Lauf ging über `HE_DUMP_HLODEXPORT` (dieselbe Funktion `bakeWorldLandscapes`) und den Export-Bench, nicht über den Knopf. Offen: ob `RenderSceneImage` mitten im ImGui-Frame des Dialogs sauber läuft, und wie der Export-Log aussieht. **Das bitte einmal von Hand ausführen** (Catania-Kopie, Export-Dialog, "Bake far landscape" an) und die Zeilen "Far landscape: ..." lesen.
+  * **Andere Backends.** `rawOutput` gibt es nur auf Metal. GL/D3D/Vulkan: der Export meldet eine Notiz und lässt das echte Material. Das gebackene Material selbst ist ein gewöhnlicher Graph und sollte überall laufen; ungeprüft.
+  * **Gemalte Layer.** Die Szenenkopie baut ihre Gewichtstextur selbst aus `layerWeights` (`TerrainSystem.cpp` um Zeile 669), also kommt Gemaltes wahrscheinlich an; **nicht per Bild geprüft** (Catania hat `layerWeightsB64`, der Vergleich im Spiel zeigt nur den Horizontstreifen).
+  * Die Gruppen Forest, Grassland, Desert (ihre Array-Texturen fehlen in dieser Installation) und eine Landschaft ohne Auto-Landscape-Material (wird übersprungen, mit Notiz).
+  * Wetter, Trails, Schnee in der Ferne: der Bake ist statisch (so entschieden, Abschnitt 2). Eine Landschaft, die das Spiel zur Laufzeit verformt, zeigt in der Ferne den Stand des Exports.
+  * Windows, Linux; eine Landschaft mit Drehung oder Skalierung (wird übersprungen).
+  * Im Editor (und im Play-in-Editor) taucht das gebackene Material nur auf, wenn die Assets als lose Dateien unter `Content/Baked/Landscape/` liegen (so habe ich gemessen); der Editor erzeugt sie nicht selbst.
+  * Der Test `test_culling` für den Extraktor-Fix wurde nach der Reproduktion im echten Spiel geschrieben, nicht gegen den alten Code laufen gelassen.
+- **Decisions taken:** Nutzer: automatisch beim Export, Albedo + Normal + Roughness, automatisches Downscaling. Von mir: gleiche Bilder für alle Fernstufen eines Chunks (die Mips tragen die gröberen), Aufnahme über unbeleuchtete Ansichtsgraphen, ein gemeinsamer Shader mit Parameter, Standardbudget 512 MB (nur ein Vorschlag).
+- **Next steps, in dieser Reihenfolge:** 1. Export-Dialog von Hand (siehe oben). 2. Gemalte Layer prüfen (Gewichtstextur der Szenenkopie). 3. Windows: Rohausgabe für D3D11/D3D12/Vulkan (`EditorCameraOverride::rawOutput` in deren `RenderSceneImage`) und GL. 4. Für Thema 326: `bakeRect` je Quadtree-Kachel, Ids aus der Kachel, Planer mit mehreren Stufen, Inhalts-Hash-Cache (heute backt jeder Export neu; 3 s je 256 Chunks, das reicht noch).
