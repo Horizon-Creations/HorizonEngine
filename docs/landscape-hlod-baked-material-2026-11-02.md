@@ -82,6 +82,10 @@ heruntergefiltert; drei Ausschnitte: gemischt, verrauschte Ebene mit Textur-Bomb
 Dazu kommen Aufruf-, Auslese- und Filterkosten je Kachel, die nicht gemessen sind. **Der Engpass ist das Codieren (rund 23 bis 78 Minuten bei ASTC, je nach Aufrufstrategie), nicht das Rendern.**
 Mein eigener Profiler-Lauf (`he_perf_capture.py`, Kopie von Catania, Kamera von oben) hat das Landscape nicht im Bild gehabt (Scene-Pass 0,23 ms, SSAO 5,5 ms) und ist deshalb nicht verwertet.
 
+**Einschränkung, später gefunden (2026-11-02, Abschnitt 7):** In dieser Installation liegen für Forest, Grassland und Desert **keine Array-Texturen** (`out/deploy/Editor/EngineContent/Textures/Landscape` hat nur `T_Landscape_Mix_*`, der Engine-Cache nur die Mountains-Arrays); ein
+Forest-Render kommt hier grau. Ob die Eingabe der Kachel-Messung oben Texturen hatte, ist nicht belegt. Ein flaches Bild würde die zstd-Ersparnis und die Encode-Zeiten **zu günstig** zeigen; die Zahlen der Kachel-Tabelle sind deshalb nur Größenordnungen. Die Zahlen aus Abschnitt 7
+(Catania, Mountains, echter Export) sind davon nicht betroffen.
+
 ## 4. Ablauf beim Export (die Entscheidung "automatisch")
 
 1. Der Export-Dialog baut seine Szenen auf dem Hauptthread (so heute). Dort kommt ein **Bake-Schritt** dazu, der die GPU des Editors benutzt, mit Fortschritt und Abbruch (Auftrag des Hauptthreads, nicht des Export-Threads).
@@ -150,6 +154,7 @@ senkrecht von oben, orthografisch, im Vorwärtspfad. Grund: ein unbeleuchteter A
   * Wetter, Trails, Schnee in der Ferne: der Bake ist statisch (so entschieden, Abschnitt 2). Eine Landschaft, die das Spiel zur Laufzeit verformt, zeigt in der Ferne den Stand des Exports.
   * Windows, Linux; eine Landschaft mit Drehung oder Skalierung (wird übersprungen).
   * Im Editor (und im Play-in-Editor) taucht das gebackene Material nur auf, wenn die Assets als lose Dateien unter `Content/Baked/Landscape/` liegen (so habe ich gemessen); der Editor erzeugt sie nicht selbst.
-  * Der Test `test_culling` für den Extraktor-Fix wurde nach der Reproduktion im echten Spiel geschrieben, nicht gegen den alten Code laufen gelassen.
+  * Offen, klein: `HlodBaker::begin` registriert je Landschaft drei Ansichtsmaterialien und entfernt sie nie wieder (es gibt keine Unregister-Funktion); bei einem Export über viele Szenen sind das ein paar Dutzend Materialien im ContentManager des Editors bis zum Ende der Sitzung.
+  * Der Test `test_culling` für den Extraktor-Fix **ist** gegen das alte Verhalten geprüft: mit abgeschaltetem Fix vier rote Prüfungen, mit Fix grün.
 - **Decisions taken:** Nutzer: automatisch beim Export, Albedo + Normal + Roughness, automatisches Downscaling. Von mir: gleiche Bilder für alle Fernstufen eines Chunks (die Mips tragen die gröberen), Aufnahme über unbeleuchtete Ansichtsgraphen, ein gemeinsamer Shader mit Parameter, Standardbudget 512 MB (nur ein Vorschlag).
 - **Next steps, in dieser Reihenfolge:** 1. Export-Dialog von Hand (siehe oben). 2. Gemalte Layer prüfen (Gewichtstextur der Szenenkopie). 3. Windows: Rohausgabe für D3D11/D3D12/Vulkan (`EditorCameraOverride::rawOutput` in deren `RenderSceneImage`) und GL. 4. Für Thema 326: `bakeRect` je Quadtree-Kachel, Ids aus der Kachel, Planer mit mehreren Stufen, Inhalts-Hash-Cache (heute backt jeder Export neu; 3 s je 256 Chunks, das reicht noch).
