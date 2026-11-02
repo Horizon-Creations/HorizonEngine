@@ -80,6 +80,7 @@ static bool   s_exportDevTools    = false;
 static std::string s_exportExcludes;               // one glob pattern per line
 static std::string s_exportIncludes;               // always-include globs, one per line
 static bool        s_exportOnlyReferenced = true;  // pack only what the game reaches
+static bool        s_exportBakeMeshTextures = true; // bake textures onto meshes (needs the filter above)
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
@@ -558,6 +559,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 	s_exportOnlyReferenced = p.onlyReferenced;
+	s_exportBakeMeshTextures = p.bakeMeshTextures;
 	s_exportIncludes.clear();
 	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
 }
@@ -573,6 +575,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
 	p.onlyReferenced   = s_exportOnlyReferenced;
+	p.bakeMeshTextures = s_exportBakeMeshTextures;
 	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
@@ -1202,6 +1205,11 @@ void render(AppContext& ctx)
             ImGui::Spacing();
             EditorWidgets::checkbox("Pack only referenced assets", &s_exportOnlyReferenced);
             EditorWidgets::helpForKey("Export/Pack only referenced assets");
+            // The texture bake runs on what the filter keeps, so it needs the filter.
+            ImGui::BeginDisabled(!s_exportOnlyReferenced);
+            EditorWidgets::checkbox("Bake textures onto meshes", &s_exportBakeMeshTextures);
+            ImGui::EndDisabled();
+            EditorWidgets::helpForKey("Export/Bake textures onto meshes");
             if (s_exportOnlyReferenced)
             {
                 ImGui::Text("Always include:");
@@ -1689,6 +1697,7 @@ void startExport(AppContext& ctx)
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
                 es.onlyReferenced   = s_exportOnlyReferenced;
+                es.bakeMeshTextures = s_exportBakeMeshTextures;
                 es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
                 es.onNotice = [](const std::string& msg) { Build::log(0, msg); };
                 es.incremental      = s_exportIncremental;

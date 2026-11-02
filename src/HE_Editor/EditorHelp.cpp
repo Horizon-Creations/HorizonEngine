@@ -8150,6 +8150,17 @@ namespace
 	  "uncompressed pixels. Switch it off to ship the arrays as RGBA8. "
 	  "Needs a texture compression other than None. Saved in the profile.",
 	  "", "export#overview" },
+	{ "Export/Bake textures onto meshes", "Bake textures onto meshes",
+	  "A mesh with several materials that only show textures (a plain PBR set: "
+	  "base color, metal/rough/occlusion, normal map, emissive) is exported on ONE "
+	  "material with atlas textures, so it draws in one call with one set of "
+	  "texture binds, and the source materials and textures leave the pak. Each mesh "
+	  "decides in the Mesh Viewer (Export bake) whether and how: Merge textures "
+	  "copies the texels unchanged, One UV texture resamples and resolves tiling "
+	  "and may make the atlas larger. A mesh with entity-level material slot "
+	  "overrides loses them, because its slots are merged. Needs Pack only "
+	  "referenced assets. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Match the game's backend", "Match the game's backend",
 	  "Bake the precompiled material shaders for the one graphics backend the "
 	  "exported game runs: the one the project's Render Defaults name, else the "

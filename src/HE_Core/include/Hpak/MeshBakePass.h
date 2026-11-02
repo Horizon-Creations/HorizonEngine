@@ -52,6 +52,11 @@ struct PassResult
 	std::vector<std::string>  notices;       // one line per mesh baked or declined, for the export log
 	uint32_t                  baked = 0;
 	uint32_t                  declined = 0;  // switched on and eligible by type, but not bakeable
+	// Why the others were not touched, so an export that bakes nothing can say so.
+	uint32_t                  meshesSeen = 0;
+	uint32_t                  skippedSwitchedOff = 0;   // every bake switch of the mesh is off
+	uint32_t                  skippedOneSection = 0;    // one material slot: nothing to merge
+	uint32_t                  skippedCooked = 0;        // already in the runtime form (no loose geometry)
 };
 
 HE_API PassResult runPass(const std::vector<PassEntry>& entries, const PassOptions& options);

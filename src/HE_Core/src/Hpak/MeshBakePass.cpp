@@ -277,11 +277,15 @@ PassResult runPass(const std::vector<PassEntry>& entries, const PassOptions& opt
 		if (!scratch.stage(*meshEntry)) continue;
 		const HE::UUID meshId = cm.loadAsset(meshEntry->relPath);
 		const StaticMeshAsset* loaded = cm.getStaticMesh(meshId);
-		if (!loaded || loaded->cooked) continue;
+		if (!loaded) continue;
+		++result.meshesSeen;
+		if (loaded->cooked) { ++result.skippedCooked; continue; }
 		const StaticMeshAsset mesh = *loaded;          // the next loadAsset invalidates `loaded`
-		if (!mesh.bake.mergeTextures && !mesh.bake.uvTexture && !mesh.bake.vertexColors) continue;
+		if (!mesh.bake.mergeTextures && !mesh.bake.uvTexture && !mesh.bake.vertexColors)
+		{ ++result.skippedSwitchedOff; continue; }
 		const std::vector<MeshSection> sections = HE::meshSectionsOf(mesh);
-		if (sections.size() < 2 || mesh.uvs.size() != mesh.vertices.size() / 3 * 2) continue;
+		if (sections.size() < 2 || mesh.uvs.size() != mesh.vertices.size() / 3 * 2)
+		{ ++result.skippedOneSection; continue; }
 
 		// Every section's material, classified.
 		MeshInput in;
@@ -451,6 +455,12 @@ PassResult runPass(const std::vector<PassEntry>& entries, const PassOptions& opt
 			note("kept as they are: " + joined);
 		}
 	}
+	result.notices.insert(result.notices.begin(),
+		"summary: " + std::to_string(result.meshesSeen) + " mesh(es) looked at, "
+		+ std::to_string(result.baked) + " baked, " + std::to_string(result.declined) + " declined, "
+		+ std::to_string(result.skippedOneSection) + " with one material slot, "
+		+ std::to_string(result.skippedSwitchedOff) + " switched off, "
+		+ std::to_string(result.skippedCooked) + " already cooked");
 	return result;
 }
 

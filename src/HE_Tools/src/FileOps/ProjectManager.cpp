@@ -676,6 +676,7 @@ static json profileToJson(const ExportProfile& p)
 	j["textureFormat"]      = p.textureFormat;
 	j["textureQuality"]     = p.textureQuality;
 	j["compressTextureArrays"] = p.compressTextureArrays;
+	j["bakeMeshTextures"]      = p.bakeMeshTextures;
 	j["onlyReferenced"]        = p.onlyReferenced;
 	j["alwaysIncludePatterns"] = p.alwaysIncludePatterns;
 	return j;
@@ -712,6 +713,7 @@ static ExportProfile profileFromJson(const json& j)
 	p.textureQuality     = j.contains("textureQuality") && j["textureQuality"].is_number_integer()
 	                     ? std::clamp(j["textureQuality"].get<int>(), 0, 2) : 0;
 	p.compressTextureArrays = jsonBool(j, "compressTextureArrays", true);
+	p.bakeMeshTextures      = jsonBool(j, "bakeMeshTextures", true);
 	p.onlyReferenced        = jsonBool(j, "onlyReferenced", true);
 	if (auto it = j.find("alwaysIncludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)

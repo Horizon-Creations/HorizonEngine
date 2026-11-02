@@ -102,6 +102,7 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 		s.compress = false;                       // Store: the entries stay readable
 		s.textureCompression = 1;                 // ASTC, as the editor picks for Metal
 		s.cookTextureArrays = true;
+		s.bakeMeshTextures = std::getenv("HE_REACH_NOBAKE") == nullptr;   // the mesh texture bake, on unless asked
 		s.onlyReferenced = reached;
 		if (rt && *rt) s.gameRuntimeDir = rt;
 		if (eng && *eng) s.engineContentDir = eng;
