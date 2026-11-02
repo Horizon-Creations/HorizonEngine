@@ -23,6 +23,7 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/CellRuntime.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeWorldProxies.h>
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
@@ -399,6 +400,7 @@ private:
     // (IRenderer::SetLandscapeProvider, bound once, at the first update after the renderer exists).
     void updateLandscape(float dt);
     HE::LandscapeRuntime m_landscape;
+    HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
     bool m_landscapeBound = false;
 };
 

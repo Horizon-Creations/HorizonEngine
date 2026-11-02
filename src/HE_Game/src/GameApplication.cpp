@@ -1624,6 +1624,7 @@ void GameApplication::updateLandscape(float dt)
 		m_landscapeBound = true;
 	}
 	m_landscape.update(*m_world, dt);
+	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
 }
 
 void GameApplication::updateCellStreaming(float dt)
