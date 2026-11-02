@@ -23,6 +23,9 @@ Machine NN-WS03 (RTX 4070), MSVC VS18 Release, tree `C:/h228`, source `C:/hr/228
   (camera straight down, 427 m): max delta D3D11 27, D3D12 32, Vulkan 12, OpenGL 6; images look the same.
   So the baked material (three samples, `FarMap`) runs on every backend, orientation and sRGB/linear reads are right,
   and all chunks sharing one shader works in a game.
+* Pak (BC7, 4 chunks at 256 px): plain 84.31 MB, with the bake 86.16 MB on all four backends (+1.85 MB; planner: ~1 MiB
+  cooked textures + assets). Game log D3D11 baked vs plain: 45 compiles each, no per-chunk shader; both runs deferred by default
+  (RenderPath 1), the far chunks are not black there. Render-pass time with/without was not measured (4 chunks say nothing).
 * `he_tests` full: 6138/6138 (incl. test_hlod_baker, test_hlod_assets, test_culling, test_reach_filter).
 * Synchronous builders need no wait: the bake took 0.3-0.6 s per 4 chunks (GL begin 1.5 s = its first compile).
 
