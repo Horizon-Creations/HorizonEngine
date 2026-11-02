@@ -248,9 +248,9 @@ if(APPLE)
 endif()
 if(WIN32)
     # D3D11 (and D3D12) beside OpenGL: the same offscreen and engine checks on the Windows backends, compared with OpenGL's pictures.
-    target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/D3D11Backend.cpp)
-    target_link_libraries(landscape_gpu_check PRIVATE RendererD3D11 d3d11 dxgi)
-    target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_D3D11)
+    target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/D3D11Backend.cpp src/LandscapeGpuCheck/D3D12Backend.cpp)
+    target_link_libraries(landscape_gpu_check PRIVATE RendererD3D11 RendererD3D12 d3d11 d3d12 dxgi)
+    target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_D3D11 HE_CHECK_D3D12)
     add_custom_command(TARGET landscape_gpu_check POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonCore>  $<TARGET_FILE_DIR:landscape_gpu_check>
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:HorizonScene> $<TARGET_FILE_DIR:landscape_gpu_check>

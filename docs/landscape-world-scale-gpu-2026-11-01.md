@@ -1,10 +1,10 @@
-# Landscape im Weltmaßstab: das Zeichnen auf OpenGL und Metal (Schritt 2, Teil B)
+# Landscape im Weltmaßstab: das Zeichnen auf OpenGL, Metal, D3D11 und D3D12 (Schritt 2, Teil B)
 
-Stand 01.11.2026, Basis `release/0.8.0`, Hive-Topic 326, Schritt 2 von 8 ("Quadtree-Renderer, Vulkan zuerst").
+Stand 02.11.2026, Basis `release/0.8.0`, Hive-Topic 326, Schritt 2 von 8 ("Quadtree-Renderer, Vulkan zuerst").
 Vorher: `landscape-world-scale-renderer-2026-10-31.md` (Teil A: Quadtree, Gitter, Atlas, Laufzeit, Shader-Quelle).
 
-**Teil B ist für OpenGL und Metal gebaut und auf diesem Mac ausgeführt: beide Backends zeichnen die Patches des Quadtrees, im echten Renderer (Forward und Deferred) und in einem eigenen Prüfwerkzeug.
-Vulkan, D3D11 und D3D12 sind nicht gemacht (Reihenfolge laut Plan, Vulkan-SDK und D3D-Rechner nötig).** "Vulkan zuerst" im Schritt-Titel ist eine Reihenfolge, kein Verzicht auf die anderen Backends: der Datenpfad (§2) ist für alle derselbe.
+**Teil B ist für OpenGL und Metal (Mac), D3D11 und D3D12 (NN-WS03, RTX 4070, siehe §8) gebaut und ausgeführt: die Backends zeichnen die Patches des Quadtrees, im echten Renderer (Forward und Deferred) und in einem eigenen Prüfwerkzeug.
+Vulkan ist nicht gemacht (eigene Aufgabe, Vulkan-SDK nötig).** "Vulkan zuerst" im Schritt-Titel ist eine Reihenfolge, kein Verzicht auf die anderen Backends: der Datenpfad (§2) ist für alle derselbe.
 Es wurde nichts gemessen: keine Zeit, kein GPU-Speicher im Betrieb (Stromsparmodus; Plan-§4-Abnahme auf NN-WS03). Schritt 1520 bleibt offen.
 
 ## 1. Was gebaut ist
@@ -98,11 +98,46 @@ Ergebnis dieses Laufs (Mac, Apple-Silikon), **gezählt, nicht gemessen**:
 Verifiziert (Mac, ohne Zeitmessung): `landscape_gpu_check` auf OpenGL und Metal wie in §6 (offscreen und echter Renderer, Forward und Deferred); `he_tests`: `test_landscape_*` 115 Testfälle (darunter der Render-Frame und die MSL-gegen-GLSL-Prüfung), `test_foliage*`, `test_physics*`, `test_world_scale*`, `test_scene_serializer*`, `test_cell_*`, `test_navigation*`, `test_sky*` grün;
 `validate_embedded_shaders.py`: 60 GLSL-Shader übersetzen (der MSL-Teil wird hier übersprungen, weil dem Mac die Metal-Toolchain fehlt; `kLandscapeMSL` ist dafür ergänzt, und die Laufzeit-Übersetzung per `newLibraryWithSource` hat sie bestanden). `HorizonGame` linkt; `EditorApplication.cpp` übersetzt.
 **Nicht verifiziert:** jede Zeit; GPU-Speicher im Betrieb (die Rechnung steht im Teil-A-Dokument: rund 494 KB je Slot); Verhalten mit TAA in Bewegung; ein Editor- oder Spiel-Lauf mit einer echten Szene (der Engine-Modus des Werkzeugs nimmt die Renderer-Schnittstelle, nicht die Anwendung); Windows- und Linux-Lauf des Prüfwerkzeugs (es wird dort nur gebaut); Intel-Macs (Metal `Managed`-Speicher ist vorgesehen, nicht gelaufen);
-Vulkan, D3D11, D3D12.
+Vulkan. (D3D11 und D3D12: §8.)
+
+## 8. D3D11 und D3D12 (Windows)
+
+Ein Shader für beide: `kLandscapeHLSL` in `LandscapeShaderSource.h`, von Hand aus der MSL (SM 5.0, fxc). Vertex-ID statt Vertex-Puffer (`SV_VertexID` ist im Indexed-Draw der Indexwert: `(id % 65, id / 65)`, kein Input-Layout), zwei Konstantenblöcke (`LsGlobals` b12 = 768 Bytes, `LsPatch` b13 = 48 Bytes; `patch` ist in HLSL ein Schlüsselwort, das Mitglied heißt `lsPatch`), neun Bilder `t32`-`t40` nur mit `Load()` (kein Sampler). Die SRVs liegen über `t31`, weil der D3D11-Renderer und die Graph-Materialien `t0`-`t26` belegen und nach dem Landscape-Draw nicht neu binden. Das C++-Spiegelbild beider Blöcke samt `static_assert` und die Füllfunktionen stehen in `D3D_Shared/LandscapeD3D.h` (geteilt).
+
+| Datei | Aufgabe |
+|---|---|
+| `D3D11Landscape.{h,cpp}` | Shader, Zustände, Index-Puffer, Atlas-Bilder (`UpdateSubresource` je Slot), Slot-Tabelle als CPU-Spiegel (ein `UpdateSubresource` je geänderter Tabelle); `draw` setzt alles, was es anfasst (Shader, IA, Raster, Tiefe, Blend, b12-b13, t32-t40), über einen `StateGuard` zurück |
+| `D3D12Landscape.{h,cpp}` | Root-Signatur (b12 Root-CBV, b13 zwölf Root-Konstanten, Tabelle t32-t40), eigener Descriptor-Heap, ein PSO je Farbformat (RGBA16F / RGBA8, Tiefe D32F), Upload-Ring (4 Puffer, Barrieren SRV -> COPY_DEST -> SRV), CBV-Ring (32 Slots); Wechsel von Bildern oder Wachsen des Rings ruft `waitIdle` (= `waitForAllFrames`) |
+| `D3D11Renderer.cpp`, `D3D12Renderer.cpp` | Haken (siehe unten) |
+| `tools: D3D11Backend.cpp, D3D12Backend.cpp` | Offscreen-Backends des Prüfwerkzeugs; `main.cpp` vergleicht jedes Paar (OpenGL ist die Referenz, dazu D3D11 gegen D3D12) |
+
+**Haken, anders als auf GL/Metal:** `DrawScene` zeichnet den Himmel **zuerst** und verlässt die Funktion früh, wenn die Szene keine Objekte hat. Eine Szene nur aus Landschaft würde nie in den Render-Graph kommen. Darum: der Provider wird **direkt nach dem Himmel** gefragt (vor beiden frühen Rückkehren, mit der Matrix, die auch die Objekte bekommen), die Uploads werden sofort ausgeführt (jeder gebaute Frame muss ausgeführt werden), gezeichnet wird im Opaque-Pass nach den Skinned-Meshes und vor TAA-Geschwindigkeit/Decals (Forward und Deferred, nach dem G-Buffer-Resolve), und auf den beiden frühen Rückkehren sofort. D3D12 baut nach dem Draw den Szenen-Zustand wieder auf (`restoreSceneRoot()` + `scenePso`, wie der Skinned-Pass).
+
+**Tiefe und Matrix:** der Szenen-Pass beider D3D-Backends rastert wie Metal die **unkorrigierte GL-Matrix** (`kD3DClipFix` wird dort nicht angewandt, nur in der Welt-Vorschau); die Tiefe im Puffer ist die GL-NDC-Tiefe der nicht abgeschnittenen Hälfte. Der Haken reicht dieselbe Matrix und `zeroToOne = false` durch, die Prüfwerkzeug-Backends melden `depthIsNdc() = true`. Folge wie auf Metal: Geometrie näher als etwa das Doppelte der Near-Ebene wird abgeschnitten.
+
+**Ergebnis** (NN-WS03, Release, RTX 4070 für alle drei APIs, gezählt, nicht gemessen):
+
+| | OpenGL | D3D11 | D3D12 |
+|---|---|---|---|
+| Rampe, erste Position | 180 Patches in 203 Draws; Löcher 0, Zuviel 0; Tiefe schlecht 3 von 80 176; Farbe 0 (max. 1/255) | gleich, Tiefe schlecht **0** | gleich, Tiefe schlecht **0** |
+| Rampe, nach 10 km | 175 in 196; Löcher 1; Tiefe schlecht 2 von 62 608 | gleich, Tiefe schlecht 0 | gleich, Tiefe schlecht 0 |
+| Atlas | 382 Uploads = 382 der Laufzeit | gleich | gleich |
+| Echter Renderer, Forward / Deferred | Boden 100 %, Himmel < 1 % grün | gleich | gleich |
+| gegen OpenGL | | Rampe 0 von 129 600, Hügel 5 von 518 400 Pixeln über 2/255 | dasselbe |
+| D3D12 gegen D3D11 | | | Rampe 0, Hügel 0 Pixel über 2/255 |
+
+D3D12 mit Debug-Layer und `HE_GPU_DEBUG=1` (Werkzeug und echter Renderer, Forward und Deferred): keine Meldung. Dafür liest `RenderSceneImage` die InfoQueue jetzt auch (`drainGpuDebugMessages`, vorher nur `Render()`). Auf D3D11 gibt es nur Bildbelege (kein Debug-Layer im Renderer).
+**Absichtlich eingebaute Fehler** werden auf beiden Backends gefunden (HLSL geändert, nur diese Quelle, dann zurück): ohne `- origin.y` stimmt jede Tiefe nicht mehr (größte Abweichung 2392 m, wie auf GL/Metal), ohne Morph weichen D3D11 und D3D12 von OpenGL bei 14 788 von 518 400 Hügel-Pixeln ab (6287 über 16/255).
+`validate_embedded_shaders.py --hlsl-only` übersetzt `kLandscapeHLSL` (vs_5_0, ps_5_0; es läuft auch im CMake-Build-Schritt); `test_landscape_shader` prüft die HLSL-Fassung gegen die GLSL-Uniforms, Register und die Reihenfolge `ddx` vor `discard`.
 
 ## Handoff
 
-1. **Vulkan, D3D11, D3D12:** `LandscapeRenderFrame` ist der Eingang, `OpenGLLandscape` die kürzeste Vorlage (Bilder, Gitter, Uploads, ein Draw je Patch). Vulkan/D3D bekommen ihr Shader-Vorspiel wie der Himmel (`kLandscapeVulkanPrelude`: Block statt loser Uniforms, `LsGlobals` ist die Vorlage); ihre Clip-Konvention (`kVulkanClipFix`, y gedreht) gehört in den Provider-Aufruf (`zeroToOne = true`) und in die Matrix des Backends.
-2. Schritt 3 an die Anwendung hängen: `setPhysics`, `setNavigation`, `setFoliageLayers`, Foliage- und Wasser-Zeichnung (Draw-Verträge im Foliage/Wasser-Dokument).
-3. Fallen: Metal-Tiefe ist die GL-NDC-Tiefe (§4); die Einheiten und Indizes über den Renderer-eigenen (§3); jeder gebaute Frame muss ausgeführt werden; ein Push bricht die laufende CI ab.
-4. Danach: Material mit Welt-UVs (Teil-A-§8), Schatten und GI (Schritt 4), Messungen auf NN-WS03.
+- **Topic / step:** 326, Schritt 1520 (Quadtree-Renderer), Teil B auf D3D11 und D3D12; Schritt 1520 bleibt **offen** bis Vulkan fertig ist.
+- **Done:** D3D11 und D3D12 zeichnen die Landschaft im echten Renderer (Forward, Deferred, Szene ohne Objekte) und im Prüfwerkzeug, Bild und Tiefe gleich OpenGL (§8).
+- **Files:** `LandscapeShaderSource.h` (kLandscapeHLSL), `D3D_Shared/LandscapeD3D.h`, `D3D11Landscape.*`, `D3D12Landscape.*`, Haken in `D3D11Renderer.cpp`/`D3D12Renderer.cpp` (suche `landscapeFrameLive`), `tools/LandscapeGpuCheck/D3D{11,12}Backend.cpp`, `scripts/validate_embedded_shaders.py`.
+- **Verified:** `landscape_gpu_check` (alle Backends dieser Maschine) wie §8; `he_tests` `landscape*` (140 Fälle); `validate_embedded_shaders.py --hlsl-only`; Build von `HorizonEditor`, `HorizonGame`.
+- **Not verified:** jede Zeit und GPU-Speicher (Stromsparmodus); TAA in Bewegung (die Landschaft schreibt keine Geschwindigkeit); ein Editor- oder Spiel-Lauf mit echter Szene (nur der Engine-Modus des Werkzeugs); D3D11 mit Debug-Layer; Intel/AMD-Treiber (nur NVIDIA); eine Szene mit Objekten **und** Landschaft (Sortierung gegen Objekte ist wie auf Metal durch dieselbe Matrix gedacht, nicht gesehen).
+- **Decisions taken:** ein HLSL für beide D3D-Backends; Provider direkt nach dem Himmel statt im Pass (frühe Rückkehr, §8); eigener Descriptor-Heap und Root-Signatur in D3D12 statt Slots im Szenen-Heap (der Renderer wechselt Heaps ohnehin dauernd); Upload-Ring mit `waitIdle` beim Wachsen statt Fence-Verwaltung in der Klasse.
+- **Pending:** Vulkan (die GLSL-Quelle bleibt, sie bekommt ein Vorspiel wie der Himmel, `kLandscapeVulkanPrelude`: Konstantenblock statt loser Uniforms, `LsGlobals` ist die Vorlage; ob Vulkan die GL-Matrix wie D3D/Metal oder `kVulkanClipFix` (y gedreht) bekommt, zuerst am Szenen-Pass nachsehen, wie in §8 für D3D); Schritt 3 an die Anwendung hängen (`setPhysics`, `setNavigation`, `setFoliageLayers`, Foliage/Wasser zeichnen); Material mit Welt-UVs; Schatten/GI (Schritt 4); Messungen auf NN-WS03 (Schritt 0).
+- **Traps:** Metal und D3D rastern die GL-Matrix ohne Clip-Korrektur (§4, §8); D3D11 hat nur b0-b13, SRVs ab t32; `patch` ist ein HLSL-Schlüsselwort; jeder gebaute Frame muss ausgeführt werden (auch bei Szenen ohne Objekte); die Upload-Jobs in `D3D12Landscape::upload` zeigen in den Frame, dessen Uploads erst am Ende der Funktion geleert werden dürfen; der Worktree-Build braucht `-DDEPLOY_DIR` und einen kurzen `-B`-Pfad; ein Push bricht die laufende CI ab.
+- **Next steps:** 1. Vulkan wie §8 (Vorlage `D3D11Landscape`, Provider-Aufruf an derselben Stelle: nach dem Himmel, vor frühen Rückkehren). 2. Schritt 3 an die Anwendung hängen. 3. Material mit Welt-UVs.

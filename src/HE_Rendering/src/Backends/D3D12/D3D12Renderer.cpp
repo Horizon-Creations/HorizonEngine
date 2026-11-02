@@ -56,6 +56,7 @@
 #include "Backends/D3D_Shared/D3DStartupTiming.h" // [startup] phase/compile timing (Thema 196)
 #include "Backends/D3D_Shared/DxgiAdapterLog.h"   // names the GPU in the log
 #include "Backends/D3D12/D3D12MaterialRootSignature.h" // A4: the material root signature, shared with he_tests (Thema 56)
+#include "Backends/D3D12/D3D12Landscape.h"            // the world-scale landscape (Thema 326)
 #include <SDL3/SDL.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
@@ -4058,6 +4059,13 @@ struct D3D12RendererImpl
     // ImGui editor textures (logo + content-browser icons). Held here so the GPU
     // resources outlive ImGui's use of the SRVs the editor creates over them.
     std::vector<ComPtr<ID3D12Resource>> m_imguiTextures;
+    // ── World-scale landscape (Thema 326, step 2 part B) ──────────────────
+    // DrawScene asks the application's provider (IRenderer::SetLandscapeProvider) once per scene frame, records the frame's uploads at once
+    // and keeps the frame until the opaque pass draws it. Not in the G-buffer: no shadows, SSAO or GI.
+    D3D12Landscape               landscape;
+    bool                         landscapeFailed = false;    // init failed once: not tried again
+    bool                         landscapeFrameLive = false; // landscapeFrame belongs to the scene frame in progress
+    HE::LandscapeRenderFrame     landscapeFrame;
     bool                         skyReady   = false;
     // True when the sky PSOs run the GL sky cross-compiled through he::shaderc
     // (skyCBuf then holds a whole HE::SkyFrameParams); false on the kSkyPSHLSL12
@@ -4918,6 +4926,30 @@ struct D3D12RendererImpl
         }
         // Every slot is now safe up to this value.
         for (UINT i = 0; i < k_frameCount; ++i) fenceValues[i] = val;
+    }
+
+    // The debug layer's validation messages (gpuDebug only) to the Logger. Render() drains them every healthy frame; a frame that does not go
+    // through Render() (RenderSceneImage, the landscape check's engine run) drains them after its own wait.
+    void drainGpuDebugMessages()
+    {
+        if (!gpuDebug || !infoQueue) return;
+        const UINT64 n = infoQueue->GetNumStoredMessages();
+        for (UINT64 i = 0; i < n; ++i)
+        {
+            SIZE_T len = 0;
+            if (FAILED(infoQueue->GetMessage(i, nullptr, &len)) || len == 0) continue;
+            std::vector<char> buf(len);
+            auto* dm = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
+            if (SUCCEEDED(infoQueue->GetMessage(i, dm, &len)) && dm->pDescription)
+            {
+                const bool err = dm->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+                                 dm->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
+                const std::string line = std::string("D3D12 debug layer: ") + dm->pDescription;
+                Logger::LogTo(HE::Log::Cat::RHI, err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
+                            line.c_str());
+            }
+        }
+        infoQueue->ClearStoredMessages();
     }
 
     // Keep the swapchain at the window's client size. Without this the buffers
@@ -11249,6 +11281,9 @@ void D3D12Renderer::Shutdown()
     HE_LOG_INFO(RHI, "%s", "D3D12Renderer: shutdown — waiting for GPU");
     HE::d3dprefetch::drain();   // no prefetch job may outlive the renderer
     m_impl->waitForAllFrames();
+    m_impl->landscape.shutdown();   // its images and buffers, while the fence it waits on is still usable
+    m_impl->landscapeFrame = HE::LandscapeRenderFrame{};
+    m_impl->landscapeFrameLive = false;
     if (m_impl->fenceEvent) { CloseHandle(m_impl->fenceEvent); m_impl->fenceEvent = nullptr; }
 
     m_impl->meshCache.clear();
@@ -11502,9 +11537,48 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                   p.m_renderWorld.camera.position, p.m_wallTime, p.usingHDR);
     }
 
+    // ── World-scale landscape (Thema 326): the provider is asked HERE, before the early returns below, and its uploads recorded at once.
+    // A frame the runtime built has to be executed whether or not the scene has objects: the runtime counts its uploads as done. It is
+    // drawn later (opaque pass, after the G-buffer resolve), or right here on the two paths that leave before the pass.
+    p.landscapeFrameLive = false;
+    if (m_landscapeProvider && !p.landscapeFailed)
+    {
+        p.landscapeFrame = HE::LandscapeRenderFrame{};
+        m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, p.landscapeFrame);   // viewProj is origin-relative, GL clip (the scene pass does not fix the depth)
+        if (p.landscapeFrame.active)
+        {
+            if (!p.landscape.ready())
+            {
+                std::string err;
+                auto* impl = &p;
+                if (!p.landscape.init(p.device.Get(), [impl]() { impl->waitForAllFrames(); }, &err))
+                {
+                    HE_LOG_WARN(RHI, "D3D12Renderer: the world-scale landscape is off: %s", err.c_str());
+                    p.landscapeFailed = true;
+                }
+            }
+            if (p.landscape.ready())
+            {
+                p.landscape.upload(cl, p.landscapeFrame);
+                p.landscapeFrameLive = true;
+            }
+        }
+    }
+    // The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+    auto drawLandscape = [&]()
+    {
+        if (!p.landscapeFrameLive) return;
+        D3D12Landscape::Shading sh;
+        sh.sunDir = glm::normalize(p.m_renderWorld.sunDirection);
+        sh.ambient = p.m_renderWorld.ambient;
+        for (const LightData& l : p.m_renderWorld.lights)
+            if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+        p.landscape.draw(cl, p.landscapeFrame, viewProj, sh, p.usingHDR ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM);
+    };
+
     // Trails live in their own per-frame band list, not in `objects`, so a scene
     // that has nothing BUT a trail still has something to draw past here.
-    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    if (p.m_renderWorld.objects.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
 
     const uint64_t walk = p.m_extractor.fullExtractCount();
     {
@@ -11536,7 +11610,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     }
     p.statTotal   = static_cast<uint32_t>(p.m_renderWorld.objects.size());
     p.statVisible = static_cast<uint32_t>(p.m_sortedIndices.size());
-    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) return;
+    if (p.m_sortedIndices.empty() && p.m_renderWorld.ribbonBatches.empty()) { drawLandscape(); return; }
 
     if (p.m_renderGraph.empty())
     {
@@ -12962,6 +13036,15 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(scenePso);
         }
 
+        // ── World-scale landscape (Thema 326): after the opaque geometry (and, on a deferred frame, the resolve), depth-tested into the same
+        // target. It brings its own root signature, pipeline and descriptor heap, so the scene state is rebuilt the way the skinned pass above does.
+        if (p.landscapeFrameLive)
+        {
+            drawLandscape();
+            restoreSceneRoot();
+            cl->SetPipelineState(scenePso);
+        }
+
         // ── TAA velocity (A2): screen-space motion of the opaque geometry, right
         // after the passes whose depth it tests against and before the decals
         // (which flip that depth to a shader resource). One draw per visible
@@ -13508,26 +13591,8 @@ void D3D12Renderer::Render()
 
     // Drain validation messages every healthy frame, and once on the first device
     // removal (the message explaining the hang is often the last thing queued).
-    if (p.gpuDebug && p.infoQueue && (!FAILED(prHr) || firstRemoval))
-    {
-        const UINT64 n = p.infoQueue->GetNumStoredMessages();
-        for (UINT64 i = 0; i < n; ++i)
-        {
-            SIZE_T len = 0;
-            if (FAILED(p.infoQueue->GetMessage(i, nullptr, &len)) || len == 0) continue;
-            std::vector<char> buf(len);
-            auto* dm = reinterpret_cast<D3D12_MESSAGE*>(buf.data());
-            if (SUCCEEDED(p.infoQueue->GetMessage(i, dm, &len)) && dm->pDescription)
-            {
-                const bool err = dm->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
-                                 dm->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION;
-                const std::string line = std::string("D3D12 debug layer: ") + dm->pDescription;
-                Logger::LogTo(HE::Log::Cat::RHI, err ? Logger::LogLevel::Error : Logger::LogLevel::Warning,
-                            line.c_str());
-            }
-        }
-        p.infoQueue->ClearStoredMessages();
-    }
+    if (!FAILED(prHr) || firstRemoval)
+        p.drainGpuDebugMessages();
 
     // Signal a UNIQUE monotonic value and remember it for THIS slot. Per-slot counters
     // would collide on the shared fence (both reach 1,2,3…), letting waitForFrame return
@@ -13816,6 +13881,7 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     // Nothing of the screenshot may still be in flight when its set goes away
     // (cheap: the capture already flushed; this also covers the failure paths).
     p.waitForAllFrames();
+    p.drainGpuDebugMessages();   // this frame never reaches Render(), which is where they are otherwise logged
     p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
     p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
     p.viewportRT         = std::move(liveRT);
