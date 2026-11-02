@@ -237,7 +237,9 @@ TEST_CASE("Mesh bake pass: switched off, or with a section that cannot be baked,
 		CHECK(r.replaced.empty());
 		CHECK(r.added.empty());
 		CHECK(r.declined == 1);
-		REQUIRE_FALSE(r.notices.empty());
-		CHECK(r.notices[0].find("fewer than two simple sections") != std::string::npos);
+		REQUIRE(r.notices.size() >= 2);
+		CHECK(r.notices[0].find("summary:") == 0);                    // the summary comes first
+		CHECK(r.notices[0].find("1 mesh(es) looked at") != std::string::npos);
+		CHECK(r.notices[1].find("fewer than two simple sections") != std::string::npos);
 	}
 }
