@@ -11,6 +11,7 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <Hpak/SimpleTextureMaterial.h>
 #include <material/MaterialShaderLibrary.h>
 #include <functional>
 #include <algorithm>
@@ -1458,3 +1459,76 @@ TEST_CASE("an imported Unreal-shaped material cross-compiles for Metal and GL")
 	he_test::removeAllQuiet(dir);
 }
 #endif // HE_TESTS_HAVE_SHADERC
+
+// The export bakes only plain PBR texture sets. The classifier must accept what THIS
+// importer writes (base colour, ORM, normal, emissive, tiling), or the bake would skip
+// every imported model; a glTF with blend alpha is not plain and must be refused.
+TEST_CASE("an imported glTF PBR material is a simple texture material for the export bake")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_gltf_simple_texture";
+	he_test::removeAllQuiet(dir);
+	writePng(dir / "rock_basecolor.png");
+	writePng(dir / "rock_orm.png");
+	writePng(dir / "rock_normal.png");
+	writePng(dir / "rock_emissive.png");
+
+	writeGltf(dir, "rock", R"(  "materials": [ {
+    "name": "M_Rock",
+    "pbrMetallicRoughness": {
+      "baseColorTexture": { "index": 0 },
+      "baseColorFactor": [0.5, 0.6, 0.7, 1.0],
+      "metallicRoughnessTexture": { "index": 1 },
+      "metallicFactor": 0.25,
+      "roughnessFactor": 0.75
+    },
+    "normalTexture":    { "index": 2, "scale": 0.5 },
+    "occlusionTexture": { "index": 1 },
+    "emissiveTexture":  { "index": 3 },
+    "emissiveFactor":   [1.0, 0.0, 0.0]
+  } ],
+  "textures": [ { "source": 0 }, { "source": 1 }, { "source": 2 }, { "source": 3 } ],
+  "images": [ { "uri": "rock_basecolor.png" }, { "uri": "rock_orm.png" },
+              { "uri": "rock_normal.png" },    { "uri": "rock_emissive.png" } ])");
+
+	const fs::path contentRoot = dir / "Content";
+	std::error_code ec;
+	fs::create_directories(contentRoot, ec);
+	auto mesh = MeshImporter::import(dir / "rock.gltf", contentRoot, "Imported");
+	REQUIRE(mesh != nullptr);
+	LoadedMaterial loaded(contentRoot, mesh->materialPath);
+	REQUIRE(loaded.mat != nullptr);
+
+	HE::SimpleTextureMaterial r;
+	std::string why;
+	REQUIRE_MESSAGE(HE::classifySimpleTextureMaterial(*loaded.mat, r, &why), why);
+	CHECK(r.baseColor.tex.path == "Imported/rock_basecolor.hasset");
+	CHECK(r.baseColor.factor[0] == doctest::Approx(0.5f));
+	CHECK(r.metallic.tex.path == "Imported/rock_orm.hasset");
+	CHECK(r.metallic.channel  == 2);            // glTF packs metallic in B
+	CHECK(r.metallic.factor   == doctest::Approx(0.25f));
+	CHECK(r.roughness.channel == 1);            // …roughness in G
+	CHECK(r.roughness.factor  == doctest::Approx(0.75f));
+	CHECK(r.ao.tex.path == "Imported/rock_orm.hasset");
+	CHECK(r.ao.channel == 0);                   // …occlusion in R
+	CHECK(r.normal.path == "Imported/rock_normal.hasset");
+	CHECK(r.normalStrength == doctest::Approx(0.5f));
+	CHECK(r.emissive.tex.path == "Imported/rock_emissive.hasset");
+	CHECK(r.metallic.tex.sameSampling(r.ao.tex));   // one ORM read
+	CHECK(r.texturePaths().size() == 4);            // base, ORM (once), normal, emissive
+
+	// Blend alpha needs the texture's alpha: not a bake candidate.
+	HE::SimpleTextureMaterial blended;
+	MaterialAsset translucent = *loaded.mat;
+	{
+		HE::MaterialGraph g;
+		REQUIRE(HE::materialGraphFromJson(translucent.nodeGraphJson, g));
+		for (HE::MatGraphNode& n : g.nodes)
+			if (n.type == HE::MatNodeType::Output)
+				n.p[1] = static_cast<float>(HE::MatBlendMode::Translucent);
+		translucent.nodeGraphJson = HE::materialGraphToJson(g);
+	}
+	CHECK_FALSE(HE::classifySimpleTextureMaterial(translucent, blended, &why));
+	CHECK(why == "its blend mode is not opaque");
+
+	he_test::removeAllQuiet(dir);
+}
