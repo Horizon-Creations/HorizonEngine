@@ -20,6 +20,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <ContentManager/Assets.h>
+#include <ContentManager/ContentManager.h>
 #include <material/MaterialShaderBake.h>
 #include <material/MaterialShaderLibrary.h>
 #include <nlohmann/json.hpp>
@@ -125,4 +126,82 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 		std::printf("BENCH reach=%d assetsPacked=%d pakBytes=%ju seconds=%.1f dir=%s\n", reached ? 1 : 0,
 		            res.assetsPacked, pakBytes, sec, dst.string().c_str());
 	}
+}
+
+// A texture-heavy project for the RAM measurement of the post-upload CPU pixel release, for a
+// machine without the foliage test project: HE_GEN_PROJECT=<empty folder> writes a project of
+// HE_GEN_TEXTURES (default 20) noise textures of HE_GEN_SIZE (default 2048)^2, each on its own
+// uber-shader material on its own cube, plus a camera. Point HE_REACH_PROJECT at it. Not a test.
+TEST_CASE("bench: generate a texture-heavy project (only with HE_GEN_PROJECT)")
+{
+	namespace fs = std::filesystem;
+	const char* dirEnv = std::getenv("HE_GEN_PROJECT");
+	if (!dirEnv || !*dirEnv) return;
+	const int count = std::getenv("HE_GEN_TEXTURES") ? std::atoi(std::getenv("HE_GEN_TEXTURES")) : 20;
+	const int size  = std::getenv("HE_GEN_SIZE") ? std::atoi(std::getenv("HE_GEN_SIZE")) : 2048;
+	const fs::path root(dirEnv), content = root / "Content";
+	fs::create_directories(content);
+
+	using nlohmann::json;
+	auto uuidJ = [](const HE::UUID& id) { return json::array({ id.hi, id.lo }); };
+	json ents = json::array(), kids = json::array();
+	const json rootId = json::array({ 7700228, 1 });
+	uint64_t next = 1000;
+	auto entity = [&](const std::string& name, json comps)
+	{
+		const json id = json::array({ 7700228, ++next });
+		kids.push_back(id);
+		ents.push_back({ { "children", json::array() }, { "components", std::move(comps) }, { "name", name },
+		                 { "parent", rootId }, { "uuid", id } });
+	};
+	{
+		ContentManager cm(content.string());
+		uint32_t rng = 12345;
+		for (int i = 0; i < count; ++i)
+		{
+			TextureAsset t;
+			t.type = HE::AssetType::Texture; t.name = "T" + std::to_string(i);
+			t.path = "Textures/T" + std::to_string(i) + ".hasset";
+			t.width = t.height = size; t.channels = 4; t.srgb = true;
+			t.data.resize(static_cast<size_t>(size) * size * 4);
+			for (int y = 0; y < size; ++y)
+				for (int x = 0; x < size; ++x)
+				{
+					uint8_t* p = &t.data[(static_cast<size_t>(y) * size + x) * 4];
+					rng = rng * 1664525u + 1013904223u;
+					const int n = static_cast<int>(rng >> 29);   // 0..7 of noise on a gradient
+					p[0] = static_cast<uint8_t>((x * 255 / size + i * 20 + n) & 255);
+					p[1] = static_cast<uint8_t>((y * 255 / size + n) & 255);
+					p[2] = static_cast<uint8_t>(((x ^ y) * 255 / size + n) & 255);
+					p[3] = 255;
+				}
+			REQUIRE(cm.saveAsset(t));
+			MaterialAsset m;
+			m.type = HE::AssetType::Material; m.name = "M" + std::to_string(i);
+			m.path = "Materials/M" + std::to_string(i) + ".hasset";
+			m.texturePaths = { t.path };
+			REQUIRE(cm.saveAsset(m));
+			const float gx = static_cast<float>(i % 5) * 3.0f - 6.0f, gz = static_cast<float>(i / 5) * -3.0f;
+			entity("Cube" + std::to_string(i), {
+				{ "mesh", { { "asset", json::array({ 1, 1 }) }, { "castsShadow", true }, { "receivesShadow", true },
+				            { "visible", true }, { "lodBias", 0 } } },
+				{ "material", { { "asset", uuidJ(m.id) } } },
+				{ "transform", { { "position", { gx, 1.0f, gz } }, { "rotation", { 0, 20, 0 } }, { "scale", { 2, 2, 2 } } } } });
+		}
+	}
+	entity("MainCamera", { { "camera", { { "fovDegrees", 60.0 }, { "nearPlane", 0.1 }, { "farPlane", 200.0 },
+	                                     { "isMain", true }, { "orthographic", false } } },
+	                       { "transform", { { "position", { 0, 6, 12 } }, { "rotation", { -20, 0, 0 } }, { "scale", { 1, 1, 1 } } } } });
+	entity("Sky", { { "environment", { { "timeOfDay", 0.38 }, { "sunIntensity", 2.2 }, { "dayNightCycle", false },
+	                                   { "autoAdvance", false }, { "cloudCoverage", 0.3 } } } });
+	ents.push_back({ { "children", kids }, { "name", "World" }, { "parent", nullptr }, { "uuid", rootId } });
+	{
+		std::ofstream f(content / "StartupScene.hescene", std::ios::trunc);
+		f << json({ { "entities", ents }, { "version", "1.1" } }).dump(1);
+	}
+	{
+		std::ofstream f(root / "TexHeavy.heproj", std::ios::trunc);
+		f << json({ { "name", "TexHeavy" }, { "startupScene", "Content/StartupScene.hescene" } }).dump(1);
+	}
+	std::printf("GEN project: %d textures of %dx%d in %s\n", count, size, size, root.string().c_str());
 }
