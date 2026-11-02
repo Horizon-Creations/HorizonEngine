@@ -2302,8 +2302,8 @@ void EditorApplication::OnInit()
 				const Clock::time_point tPreload = Clock::now();
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				const Clock::time_point tWarmup = Clock::now();
-				splashStatus("Compiling material pipelines", 0.95f);
-				warmupWorldMaterials(); // build custom-material pipelines before the first draw
+				splashStatus("Compiling shaders", 0.90f);
+				warmupWorldMaterials(/*waitForBuilds=*/true); // pipelines compile in the background; wait for them behind the splash
 				const Clock::time_point tEnd = Clock::now();
 				// The entity count is on the SceneLoadTiming line just before.
 				HE_LOG_INFO(Editor, "SceneOpenTiming: loadMs=%.2f prefabSyncMs=%.2f "
@@ -14810,7 +14810,7 @@ void EditorApplication::pushEnvironment(float dt)
 	m_editorWorld->syncEnvironmentLights();
 }
 
-void EditorApplication::warmupWorldMaterials()
+void EditorApplication::warmupWorldMaterials(bool waitForBuilds)
 {
 	if (!m_editorWorld || !renderer()) return;
 	HE_PROFILE_SCOPE_N("WarmupWorldMaterials");   // 6.7 s of the editor's cold first frame (Thema 238)
@@ -14823,6 +14823,32 @@ void EditorApplication::warmupWorldMaterials()
 	                              HE::kEditorIconAudioSourceMaterialId })
 		ids.push_back(icon);
 	renderer()->WarmupMaterials(ids);
+	// HE_SHADER_BUILD_NOWAIT=1 opens the window without waiting: the scene then fills in
+	// as its pipelines land, which is what a scene opened mid-session does.
+	if (!waitForBuilds || std::getenv("HE_SHADER_BUILD_NOWAIT")) return;
+
+	// The startup step. Builds run on the backend's own threads, so a window that is
+	// up already would be drawing a scene without its materials; the splash is the
+	// place to wait, and it can say how far along it is. Bounded: a build that never
+	// reports back must not keep the editor from opening.
+	HE_PROFILE_SCOPE_N("WaitForShaderBuilds");
+	using SteadyClock = std::chrono::steady_clock;
+	const SteadyClock::time_point deadline = SteadyClock::now() + std::chrono::seconds(120);
+	for (;;)
+	{
+		const IRenderer::ShaderBuildStatus st = renderer()->PumpShaderBuilds();
+		if (st.pending <= 0) break;
+		if (SteadyClock::now() >= deadline)
+		{
+			HE_LOG_WARN(Editor, "%s", ("EditorApplication: " + std::to_string(st.pending)
+				+ " shader build(s) still running after 120 s, opening anyway").c_str());
+			break;
+		}
+		splashStatus("Compiling shaders  " + std::to_string(st.total - st.pending) + " / "
+		                 + std::to_string(st.total),
+		             0.90f + 0.09f * static_cast<float>(st.total - st.pending) / static_cast<float>(st.total));
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
 }
 
 bool EditorApplication::openScene(const std::string& path)
