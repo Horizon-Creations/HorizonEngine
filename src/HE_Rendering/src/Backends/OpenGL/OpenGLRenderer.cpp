@@ -4680,7 +4680,9 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCloudTex     = glGetUniformLocation(m_skyProgram, "uCloudTex");
 	m_uSkyLowResClouds = glGetUniformLocation(m_skyProgram, "uLowResClouds");
 	m_uSkyCloudPrepass = glGetUniformLocation(m_skyProgram, "uCloudPrepass");
-	m_uSkyRainAmount   = glGetUniformLocation(m_skyProgram, "uRainAmount");
+	m_uSkyCloudGeoPass = glGetUniformLocation(m_skyProgram, "uCloudGeoPass");
+	m_uSkySceneDepth   = glGetUniformLocation(m_skyProgram, "uSceneDepth");
+	m_uSkyRainAmount  = glGetUniformLocation(m_skyProgram, "uRainAmount");
 	m_uSkyGodRays      = glGetUniformLocation(m_skyProgram, "uGodRays");
 	m_uSkyShootingStars = glGetUniformLocation(m_skyProgram, "uShootingStars");
 	m_uSkyFlash       = glGetUniformLocation(m_skyProgram, "uFlash");
@@ -11348,7 +11350,8 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
                                        const glm::vec3& camPos,
                                        const IRenderer::EnvironmentSettings& env,
-                                       bool allowLowResClouds, int pw, int ph)
+                                       bool allowLowResClouds, int pw, int ph,
+                                       unsigned int sceneDepthTex)
 {
 	if (!m_skyProgram || !env.skyEnabled) return;
 
@@ -11456,7 +11459,40 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	glUniform1i(m_uSkyCloudTex, 3);
 	glActiveTexture(GL_TEXTURE0);
 	glBindVertexArray(m_fsVAO);
+	glUniform1f(m_uSkyCloudGeoPass, 0.0f);
+	glUniform1i(m_uSkySceneDepth, 4);       // never sampled outside the geometry draw; keep it off the moon's unit
 	glDrawArrays(GL_TRIANGLES, 0, 3);
+
+	// ── Clouds over the opaque geometry. The sky draw above only fills the pixels the geometry
+	// left at depth 1, so the 3D clouds were a backdrop: terrain was never covered by the clouds
+	// in front of it and could not be seen through them from above. Here the same slab is marched
+	// up to each opaque surface and blended over the lit scene (dst = L + dst * T). Uses the
+	// uniforms DrawSkyFullscreen just set; the shader discards the depth == 1 pixels itself.
+	GLint geoDrawFBO = 0;
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &geoDrawFBO);
+	if (sceneDepthTex && env.cloudMode == 1 && env.cloudCoverage > 0.0f
+	    && m_uSkyCloudGeoPass >= 0 && m_uSkySceneDepth >= 0
+	    && m_hdrFBO != 0 && static_cast<GLuint>(geoDrawFBO) == m_hdrFBO)
+	{
+		// The depth texture is attached to this very frame buffer; sampling it while attached is a
+		// feedback loop, so it leaves the attachment for the draw (nothing is depth-tested or
+		// written meanwhile) and goes back right after.
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+		glActiveTexture(GL_TEXTURE4);
+		glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glBlendFuncSeparate(GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE);   // rgb: L + dst * T; alpha untouched
+		glUniform1f(m_uSkyCloudGeoPass, 1.0f);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+		glUniform1f(m_uSkyCloudGeoPass, 0.0f);
+		glDisable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glActiveTexture(GL_TEXTURE0);
+		glEnable(GL_DEPTH_TEST);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepthTex, 0);
+	}
 	glDepthFunc(GL_LESS);   // restore default for the next pass
 	glDepthMask(GL_TRUE);
 }
@@ -13386,7 +13422,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// objects. With no geometry the whole frame is background → full sky.
 		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
 		DrawSkyFullscreen(invViewProj, sunDir, m_renderWorld.camera.position,
-		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
+		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph, m_hdrDepth);
 		GpuTimerEndPass();                 // end "Sky+Clouds"
 		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
 

@@ -211,10 +211,17 @@ private:
 	// cheaper stand-in for the preview was tried and looked like one.
 	// `allowLowResClouds` is false for previews (the quarter-res pre-pass rebinds
 	// its own FBO/viewport, which an offscreen render must not do mid-pass).
+	// `sceneDepthTex` (the opaque depth of the CURRENTLY BOUND frame buffer, e.g.
+	// m_hdrDepth; 0 = none) turns on the clouds-over-geometry pass for the 3D clouds:
+	// after the sky, the slab is marched up to each opaque surface and blended over
+	// it, so clouds are objects in the world (a peak stands in front of the clouds
+	// behind it, the clouds in front of it cover it, flying over the deck shows the
+	// terrain through them) rather than a backdrop for the sky pixels only.
 	void DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
 	                       const glm::vec3& camPos,
 	                       const IRenderer::EnvironmentSettings& env,
-	                       bool allowLowResClouds, int pw, int ph);
+	                       bool allowLowResClouds, int pw, int ph,
+	                       unsigned int sceneDepthTex = 0);
 
 	// ── Per-frame scene lighting + CSM uniforms (one block, three programs) ──
 	// The unlit, instanced and skinned programs are all linked from the shared
@@ -979,6 +986,8 @@ private:
 	int          m_uSkyCloudTex     = -1;
 	int          m_uSkyLowResClouds = -1;
 	int          m_uSkyCloudPrepass = -1;
+	int          m_uSkyCloudGeoPass = -1;    // 1 = clouds-over-geometry draw (see DrawSkyFullscreen)
+	int          m_uSkySceneDepth   = -1;    // opaque depth sampler (unit 4), read only by that draw
 	int          m_uSkyRainAmount   = -1;
 	int          m_uSkyGodRays      = -1;
 	int          m_uSkyShootingStars = -1;

@@ -28,8 +28,9 @@
 //     kSkyFS uniform the prelude does not map.
 //   * Everything below the //#SKYFUNC# marker must stay valid in BOTH GLSL 4.10
 //     and Vulkan GLSL 4.50: no layout qualifiers, no GL-only built-ins.
-//   * The quarter-res cloud pre-pass (uCloudPrepass / uLowResClouds) and the
-//     cloud-shadow map (uCloudShadowPass) are GL/Metal passes; the prelude pins
+//   * The quarter-res cloud pre-pass (uCloudPrepass / uLowResClouds), the
+//     cloud-shadow map (uCloudShadowPass) and the clouds-over-geometry pass
+//     (uCloudGeoPass / uSceneDepth) are GL/Metal passes; the prelude pins
 //     them to 0, so the Vulkan/D3D sky always raymarches its clouds inline.
 namespace HE::glsl
 {
@@ -67,6 +68,8 @@ uniform sampler3D uNoise;       // tiling 3D value-noise (replaces the hash fbm)
 uniform sampler2D uCloudTex;    // quarter-res cloud buffer (rgb = L, a = T) for low-res clouds
 uniform float     uLowResClouds; // 1 = composite uCloudTex instead of the inline raymarch
 uniform float     uCloudPrepass; // 1 = this draw outputs (L, T) only (the quarter-res cloud pass)
+uniform sampler2D uSceneDepth;   // opaque scene depth (GL main frame; read only behind uCloudGeoPass)
+uniform float     uCloudGeoPass; // 1 = this draw outputs (L, T) of the clouds IN FRONT OF the opaque geometry (blended over it)
 uniform float     uRainAmount;   // rain (0..1) → rainbow arc when the sun is up + low
 uniform float     uGodRays;      // crepuscular sun-shaft strength (0 = off)
 uniform float     uShootingStars; // meteor frequency (0 = none) — night only
@@ -972,6 +975,15 @@ float cloudFieldDensity(vec3 pos, float baseY, float thick, float nscale, float 
 	return pres * vshape * erode;
 }
 
+// Distance from the camera to the opaque surface behind the pixel being marched (world units).
+// 1e30 = nothing in the way (a sky pixel): the march runs the whole slab and the horizon
+// backdrop (overcast band / deck) applies. The clouds-over-geometry pass (uCloudGeoPass) sets
+// it per pixel, so the march stops AT the surface: a mountain stands in front of the clouds
+// behind it, and the clouds in front of it cover it. Cloud-only backdrop fills are skipped
+// then, because they model a deck that continues to infinity. Plain global (not a
+// parameter) so applyClouds3D/Real keep one signature across GL, Vulkan, D3D and the bakes.
+float gCloudSurfaceT = 1.0e30;
+
 // 3D volumetric clouds (cloud mode 1): a WORLD-ANCHORED slab so the clouds parallax /
 // shift as the camera moves through the world. The slab sits `cloudH` world units ABOVE
 // the camera (camera-relative altitude → scale-robust at any world size), but the
@@ -988,9 +1000,15 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	dir    = normalize(dir);
 	sunDir = normalize(sunDir);
 	float ov = overcastAmount(coverage);
-	if (dir.y < 0.02)                             // at/below the horizon → ray misses the slab above
+	const bool surfaceHit = gCloudSurfaceT < 1.0e20;    // marching toward a real surface, not the sky
+	// At/below the horizon the ray misses the slab above — unless the camera is up in or above the
+	// deck, where a downward ray crosses it (flying over the clouds, looking down).
+	if (dir.y < 0.02 && !(camPos.y > max(cloudH, 1.0)))
+	{
+		if (surfaceHit) return baseSky;
 		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
 		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);
+	}
 
 	// Quality (perf knob, uCloudQuality): 0 Low, 1 Med, 2 High. High == original counts.
 	float qStepF  = (uCloudQuality <= 0) ? 0.40 : (uCloudQuality == 1 ? 0.30 : 0.22);
@@ -1004,8 +1022,13 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	float maxDist = cloudH * 60.0;                // fade clouds beyond this (∝ altitude)
 	float tNear, tFar;
 	if (!cloudSlabRange(camPos, dir, baseY, baseY + thick, maxDist, tNear, tFar))
+	{
+		if (surfaceHit) return baseSky;
 		return overcastBand(baseSky, ov, dir, sunDir, sunColor,
 		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
+	}
+	tFar = min(tFar, gCloudSurfaceT);             // the surface ends the ray
+	if (tFar <= tNear) return baseSky;            // the surface lies in front of the whole slab
 
 	// Step count grows with how much slab the ray crosses (much more near the horizon)
 	// so the world-space sample spacing stays roughly constant — undersampling near the
@@ -1159,7 +1182,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	// clouds run on to the horizon rather than ending in a clear band.
 	// At full coverage the deck is also what fills any thin spot the noise left, so "100 %"
 	// really covers the whole background (and what is behind it - stars, moon - cannot show).
-	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
+	float gap = surfaceHit ? 0.0 : max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
 	if (gap > 0.0)
 	{
 		L += T * gap * overcastDeck(dir, sunDir, sunColor, deck3DXZ(camPos, dir, cloudH, wind, time));
@@ -1214,9 +1237,15 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	float baseY = cloudH;                         // ABSOLUTE world altitude of the deck
 	float maxDist = cloudH * 60.0;
 	float tNear, tFar;
+	const bool surfaceHit = gCloudSurfaceT < 1.0e20;    // marching toward a real surface, not the sky
 	if (!cloudSlabRange(camPos, dir, baseY - 0.12 * thick, baseY + thick, maxDist, tNear, tFar))
+	{
+		if (surfaceHit) return baseSky;
 		return overcastBand(baseSky, ov * smoothstep(-0.01, 0.01, dir.y), dir, sunDir, sunColor,
 		                    deck3DXZ(camPos, dir, cloudH, wind, time), outT);   // a missed ray is still under the deck
+	}
+	tFar = min(tFar, gCloudSurfaceT);             // the surface ends the ray
+	if (tFar <= tNear) return baseSky;            // the surface lies in front of the whole slab
 
 	int   N  = int(clamp((tFar - tNear) / (thick * qStepF), qMinN, qMaxN));
 	float ds = (tFar - tNear) / float(N);
@@ -1439,7 +1468,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 	// clouds run on to the horizon rather than ending in a clear band.
 	// At full coverage the deck is also what fills any thin spot the noise left, so "100 %"
 	// really covers the whole background (and what is behind it - stars, moon - cannot show).
-	float gap = max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
+	float gap = surfaceHit ? 0.0 : max((1.0 - horizon) * ov, smoothstep(0.95, 1.0, coverage));
 	if (gap > 0.0)
 	{
 		L += T * gap * overcastDeck(dir, sunDir, sunColor, deck3DXZ(camPos, dir, cloudH, wind, time));
@@ -2354,6 +2383,26 @@ void main()
 	// to frame → stars flicker / jump as the camera turns. (skyColor/applyClouds
 	// normalize internally, so nothing downstream needs the raw vector.)
 	vec3 dir = normalize(wp1.xyz / wp1.w - wp0.xyz / wp0.w);
+	if (uCloudGeoPass > 0.5)
+	{
+		// Clouds in front of the opaque geometry: this draw covers the whole frame, but only the
+		// pixels the sky pass left alone (depth < 1) are ours. March the slab up to the surface
+		// and output (L, T); the blend (ONE, SRC_ALPHA) lays it over the lit scene. Sky pixels
+		// (depth == 1) were already handled, with the whole slab, by the sky pass.
+		float sd = texelFetch(uSceneDepth, ivec2(gl_FragCoord.xy), 0).r;
+		if (sd >= 1.0) discard;
+		vec4 ws = uInvViewProj * vec4(vNDC, sd * 2.0 - 1.0, 1.0);   // same (jittered) matrix the depth was rasterised with
+		gCloudSurfaceT = max(length(ws.xyz / ws.w - uCameraPos), 1.0e-3);
+		vec3  hazeSky = skyColor(dir, uSunDir);                    // aerial-perspective reference, like the pre-pass
+		float T = 1.0;
+		vec3 comp = (uCloudStyle == 1)
+			? applyClouds3DReal(hazeSky, dir, uCameraPos, uSunDir, uTime, uCloudCoverage,
+			                    uSunColor, uWind, uCloudHeight, T)
+			: applyClouds3D(hazeSky, dir, uCameraPos, uSunDir, uTime, uCloudCoverage,
+			                uSunColor, uWind, uCloudHeight, T);
+		FragColor = vec4(comp - hazeSky * T, T);                   // L, T
+		return;
+	}
 	if (uCloudPrepass > 0.5)
 	{
 		// Quarter-res clouds-only pass: output (L, T); the sky pass upsamples + composites.
@@ -2731,6 +2780,8 @@ vec4 heSkyTexture(sampler3D s, vec3 p)  { return textureLod(s, p, 0.0); }
 // instead of costing a binding every backend would have to fill.
 #define uLowResClouds       0.0
 #define uCloudPrepass       0.0
+#define uCloudGeoPass       0.0
+#define uSceneDepth         uMoonTex
 #define uCloudShadowPass    0.0
 #define uCloudShadowRegion  vec4(0.0)
 #define uCloudTex           uMoonTex
