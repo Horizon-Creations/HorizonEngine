@@ -27,8 +27,12 @@ class MaterialShaderLibrary;
 // The last two are optional: a failure leaves the field empty (the runtime then
 // cross-compiles the UI vertex / draws the plain fragment) and appends a line to
 // `warnings`. Vulkan fields carry the SPIR-V words as raw bytes.
+//   fragmentGBuffer     — the deferred twin: `gbufGlsl` (the material's customShaderGBufGlsl)
+//                         for the backends whose deferred path takes it (OpenGL, Metal),
+//                         empty when `gbufGlsl` is. Optional like the two above.
 bool bakeMaterialShaderVariant(MaterialShaderLibrary& lib, RendererBackend backend,
                                const std::string& fragGlsl, const std::string& vertBody,
                                MaterialShaderVariant& out, std::string& error,
-                               std::vector<std::string>& warnings);
+                               std::vector<std::string>& warnings,
+                               const std::string& gbufGlsl = {});
 } // namespace HE
