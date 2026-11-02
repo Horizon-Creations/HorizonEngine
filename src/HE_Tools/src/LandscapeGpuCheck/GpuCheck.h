@@ -76,4 +76,7 @@ std::unique_ptr<Backend> makeD3D11Backend();
 #ifdef HE_CHECK_D3D12
 std::unique_ptr<Backend> makeD3D12Backend();
 #endif
+#ifdef HE_CHECK_VULKAN
+std::unique_ptr<Backend> makeVulkanBackend();
+#endif
 } // namespace gpucheck

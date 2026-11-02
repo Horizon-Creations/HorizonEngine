@@ -1,7 +1,7 @@
 // landscape_gpu_check — the world-scale landscape (Thema 326, step 2, part B) drawn by the real backend code, offscreen, and compared with
 // geometry the checker knows.
 //
-//   landscape_gpu_check [--out <dir>] [--only gl|metal]
+//   landscape_gpu_check [--out <dir>] [--only gl|metal|d3d11|d3d12|vulkan] [--arrays <EngineContent root>] [--measure]
 //
 // Two layers per backend. (1) OFFSCREEN: the backend's landscape class (OpenGLLandscape, MetalLandscape) draws into a target of the tool's own,
 // and colour and depth are compared with the plane, pixel by pixel. (2) ENGINE: the real renderer (RendererFactory, hidden window, the backend's
@@ -598,6 +598,9 @@ int main(int argc, char** argv)
 #ifdef HE_CHECK_METAL
 		if (only.empty() || only == "metal") go(gpucheck::makeMetalBackend());
 #endif
+#ifdef HE_CHECK_VULKAN
+		if (only.empty() || only == "vulkan") go(gpucheck::makeVulkanBackend());
+#endif
 		if (only.empty() || only == "scene") mrc = std::max(mrc, runMeasureScene());
 		std::filesystem::remove(pack);
 		return mrc;
@@ -649,11 +652,18 @@ int main(int argc, char** argv)
 		engine(HE::RendererBackend::D3D12, "D3D12");
 	}
 #endif
+#ifdef HE_CHECK_VULKAN
+	if (only.empty() || only == "vulkan")
+	{
+		start(gpucheck::makeVulkanBackend());
+		engine(HE::RendererBackend::Vulkan, "Vulkan");
+	}
+#endif
 	// One backend against another on the same frames: the same shader maths in two languages must give the same picture. A plane morphs to itself, so the
 	// hills are the only place a wrong morph or a wrong lookup in ONE of the ports shows; a fraction above 0.1 % of the pixels (more than 2/255
 	// apart) is a difference between the ports, not rounding. (Crack-free seams and popping are not judged here: Plan section 4, on NN-WS03.)
 	// OpenGL is the reference of everything it is run beside; D3D12 is also held against D3D11, the two share one HLSL source and the pair should be near-identical.
-	const std::pair<const char*, const char*> pairs[] = { { "OpenGL", "Metal" }, { "OpenGL", "D3D11" }, { "OpenGL", "D3D12" }, { "D3D11", "D3D12" } };
+	const std::pair<const char*, const char*> pairs[] = { { "OpenGL", "Metal" }, { "OpenGL", "D3D11" }, { "OpenGL", "D3D12" }, { "OpenGL", "Vulkan" }, { "D3D11", "D3D12" } };
 	for (const auto& [refName, otherName] : pairs)
 		for (const char* scene : { "ramp", "hills", "worlduv" })
 		{

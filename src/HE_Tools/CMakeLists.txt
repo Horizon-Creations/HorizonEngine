@@ -246,6 +246,13 @@ if(APPLE)
     target_link_libraries(landscape_gpu_check PRIVATE RendererMetal)
     target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_METAL)
 endif()
+if(HE_VULKAN_ENABLED)
+    # Vulkan beside OpenGL (docs/landscape-world-scale-gpu-2026-11-01.md section 9): VulkanLandscape drawn offscreen on a device of the tool's own, and
+    # the real VulkanRenderer through the engine check; compared with OpenGL's pictures. Needs a Vulkan driver (lavapipe will do) to run.
+    target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/VulkanBackend.cpp)
+    target_link_libraries(landscape_gpu_check PRIVATE RendererVulkan Vulkan::Vulkan)
+    target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_VULKAN)
+endif()
 if(WIN32)
     # D3D11 (and D3D12) beside OpenGL: the same offscreen and engine checks on the Windows backends, compared with OpenGL's pictures.
     target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/D3D11Backend.cpp src/LandscapeGpuCheck/D3D12Backend.cpp)
