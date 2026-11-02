@@ -23,6 +23,7 @@ struct D3D11Landscape::Impl
 	ComPtr<ID3D11DepthStencilState> depth;
 	ComPtr<ID3D11RasterizerState>   raster;
 	ComPtr<ID3D11BlendState>        blend;
+	ComPtr<ID3D11SamplerState>      sampler;   // the albedo array's: linear, repeat, mips
 	ComPtr<ID3D11Buffer>            globalsCB, patchCB, indices;
 
 	// the nine images, in the register order of kLandscapeHLSL (t32 ..): tile heights, slot table, coarse heights, 3 x tile weights, 3 x coarse weights
@@ -108,9 +109,13 @@ struct StateGuard
 	UINT                            sampleMask = 0xFFFFFFFF;
 	ComPtr<ID3D11Buffer>            vsCB[2], psCB;
 	ComPtr<ID3D11ShaderResourceView> vsSrv[d3dls::kSrvCount], psSrv[d3dls::kSrvCount];
+	ComPtr<ID3D11SamplerState>       psSampler;
 
 	explicit StateGuard(ID3D11DeviceContext* c) : ctx(c)
 	{
+		ID3D11SamplerState* smp = nullptr;
+		ctx->PSGetSamplers(d3dls::kSamplerReg, 1, &smp);
+		psSampler.Attach(smp);
 		ctx->VSGetShader(vs.GetAddressOf(), nullptr, nullptr);
 		ctx->PSGetShader(ps.GetAddressOf(), nullptr, nullptr);
 		ctx->IAGetInputLayout(layout.GetAddressOf());
@@ -151,6 +156,8 @@ struct StateGuard
 		for (unsigned i = 0; i < d3dls::kSrvCount; ++i) { v[i] = vsSrv[i].Get(); p[i] = psSrv[i].Get(); }
 		ctx->VSSetShaderResources(d3dls::kFirstSrv, d3dls::kSrvCount, v);
 		ctx->PSSetShaderResources(d3dls::kFirstSrv, d3dls::kSrvCount, p);
+		ID3D11SamplerState* smp = psSampler.Get();
+		ctx->PSSetSamplers(d3dls::kSamplerReg, 1, &smp);
 	}
 };
 } // namespace
@@ -196,6 +203,16 @@ bool D3D11Landscape::init(ID3D11Device* device, std::string* error)
 	rs.DepthClipEnable = TRUE;
 	D3D11_BLEND_DESC bs{};
 	bs.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+	D3D11_SAMPLER_DESC sd{};
+	sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+	sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+	sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+	sd.MaxLOD = D3D11_FLOAT32_MAX;
+	if (FAILED(device->CreateSamplerState(&sd, m.sampler.GetAddressOf())))
+	{
+		if (error) *error = "landscape: sampler state";
+		return false;
+	}
 	D3D11_BUFFER_DESC cb{};
 	cb.Usage = D3D11_USAGE_DYNAMIC;
 	cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
@@ -221,7 +238,7 @@ void D3D11Landscape::shutdown()
 {
 	Impl& m = *m_impl;
 	m.destroyImages();
-	m.vs.Reset(); m.ps.Reset(); m.depth.Reset(); m.raster.Reset(); m.blend.Reset(); m.globalsCB.Reset(); m.patchCB.Reset();
+	m.vs.Reset(); m.ps.Reset(); m.depth.Reset(); m.raster.Reset(); m.blend.Reset(); m.sampler.Reset(); m.globalsCB.Reset(); m.patchCB.Reset();
 	m.device = nullptr;
 	m.ok = false;
 }
@@ -316,14 +333,17 @@ void D3D11Landscape::draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFra
 	StateGuard guard(ctx);
 
 	d3dls::Globals g;
-	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient);
+	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr);
 	D3D11_MAPPED_SUBRESOURCE mapped{};
 	if (FAILED(ctx->Map(m.globalsCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
 	std::memcpy(mapped.pData, &g, sizeof(g));
 	ctx->Unmap(m.globalsCB.Get(), 0);
 
 	ID3D11ShaderResourceView* views[d3dls::kSrvCount];
-	for (unsigned i = 0; i < d3dls::kSrvCount; ++i) views[i] = m.srv[i].Get();
+	for (unsigned i = 0; i < d3dls::kImageCount; ++i) views[i] = m.srv[i].Get();
+	views[d3dls::kImageCount] = shading.albedoArray;   // t41: the world-UV albedo array, or nothing (the shader reads it only where tex.y says so)
+	ID3D11SamplerState* smp = m.sampler.Get();
+	ctx->PSSetSamplers(d3dls::kSamplerReg, 1, &smp);
 	ctx->VSSetShader(m.vs.Get(), nullptr, 0);
 	ctx->PSSetShader(m.ps.Get(), nullptr, 0);
 	ctx->IASetInputLayout(nullptr);   // the grid comes from SV_VertexID

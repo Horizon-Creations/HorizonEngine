@@ -130,7 +130,7 @@ TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a me
 	std::set<std::string> uniforms = uniformsOf(HE::glsl::kLandscapeVS);
 	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
 	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
-	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2" };
+	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray" };
 	// `patch` is an HLSL keyword: the per-patch block spells uPatch as lsPatch, everything else as the MSL does
 	int members = 0;
 	for (const std::string& u : uniforms)
@@ -142,16 +142,17 @@ TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a me
 		CHECK((hlsl.find(" " + m + ";") != std::string::npos || hlsl.find(" " + m + "[") != std::string::npos));
 		++members;
 	}
-	CHECK(members == 15);
-	// entry points (D3D11Landscape / D3D12Landscape compile them by name), the two blocks and the nine images: b12/b13, t32-t40, nothing else
+	CHECK(members == 16);
+	// entry points (D3D11Landscape / D3D12Landscape compile them by name), the two blocks and the ten images: b12/b13, t32-t41, nothing else
 	CHECK(hlsl.find("VSMain(uint vid : SV_VertexID)") != std::string::npos);
 	CHECK(hlsl.find("float4 PSMain(") != std::string::npos);
 	CHECK(hlsl.find("cbuffer LsGlobals : register(b12)") != std::string::npos);
 	CHECK(hlsl.find("cbuffer LsPatch : register(b13)") != std::string::npos);
-	for (int t = 32; t <= 40; ++t) CHECK(hlsl.find("register(t" + std::to_string(t) + ")") != std::string::npos);
-	CHECK(hlsl.find("register(t41)") == std::string::npos);
+	for (int t = 32; t <= 41; ++t) CHECK(hlsl.find("register(t" + std::to_string(t) + ")") != std::string::npos);
+	CHECK(hlsl.find("register(t42)") == std::string::npos);
 	CHECK(hlsl.find("register(t31)") == std::string::npos);    // nothing in the range the D3D11 renderer and its graph materials bind
-	CHECK(hlsl.find("register(s") == std::string::npos);        // nothing is sampled
+	CHECK(hlsl.find("register(s13)") != std::string::npos);     // the albedo array's sampler, the only one (D3D11Landscape and D3D12Landscape make it)
+	CHECK(hlsl.find("register(s", hlsl.find("register(s13)") + 1) == std::string::npos);
 	// the same distance for the morph as the GLSL: horizontal plus the slab term, never the vertex's own height
 	const size_t at = hlsl.find("float d = sqrt(");
 	REQUIRE(at != std::string::npos);

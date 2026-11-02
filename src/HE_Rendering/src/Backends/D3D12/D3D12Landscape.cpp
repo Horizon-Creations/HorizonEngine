@@ -21,6 +21,7 @@ namespace
 constexpr D3D12_RESOURCE_STATES kSrvState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 constexpr unsigned kRing = 4;               // upload buffers in the ring: deeper than the renderer's three frames in flight
 constexpr unsigned kGlobalsSlots = 32;      // LsGlobals copies in the constant buffer: a draw takes the next one, so no two live draws share it
+constexpr unsigned kSets = 8;               // descriptor tables in the heap: a draw takes the next one (its albedo descriptor is rewritten), so no two live draws share it
 constexpr UINT64   kMinRingBytes = 4ull * 1024 * 1024;
 
 UINT64 alignUp(UINT64 v, UINT64 a) { return (v + a - 1) / a * a; }
@@ -92,13 +93,14 @@ struct D3D12Landscape::Impl
 	ComPtr<ID3D12DescriptorHeap>     srvHeap;
 	UINT                             srvInc = 0;
 
-	Image                            images[d3dls::kSrvCount];   // tile heights, slot table, coarse heights, 3 x tile weights, 3 x coarse weights
+	Image                            images[d3dls::kImageCount];   // tile heights, slot table, coarse heights, 3 x tile weights, 3 x coarse weights
 	ComPtr<ID3D12Resource>           indices;
 	D3D12_INDEX_BUFFER_VIEW          ibv{};
 	ComPtr<ID3D12Resource>           globals;
 	uint8_t*                         globalsMapped = nullptr;
 	UINT64                           globalsStride = alignUp(sizeof(d3dls::Globals), 256);
 	unsigned                         globalsNext = 0;
+	unsigned                         setNext = 0;
 	Ring                             ring[kRing];
 	unsigned                         ringNext = 0;
 	std::vector<uint16_t>            table;      // CPU mirror of the slot table: a change is one copy of the whole (small) image
@@ -148,10 +150,35 @@ struct D3D12Landscape::Impl
 			sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 			sv.Texture2D.MipLevels = 1;
 		}
-		D3D12_CPU_DESCRIPTOR_HANDLE slot = srvHeap->GetCPUDescriptorHandleForHeapStart();
-		slot.ptr += static_cast<SIZE_T>(i) * srvInc;
-		device->CreateShaderResourceView(im.res.Get(), &sv, slot);
+		for (unsigned s = 0; s < kSets; ++s)   // the image sits at the same place of every table of the ring
+			device->CreateShaderResourceView(im.res.Get(), &sv, cpuSlot(s, i));
 		return true;
+	}
+
+	D3D12_CPU_DESCRIPTOR_HANDLE cpuSlot(unsigned set, unsigned i) const
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE h = srvHeap->GetCPUDescriptorHandleForHeapStart();
+		h.ptr += static_cast<SIZE_T>(set * d3dls::kSrvCount + i) * srvInc;
+		return h;
+	}
+
+	// The borrowed albedo array at the tail of a table (null = a null view: nothing reads it where the shader's tex.y says "flat").
+	void writeAlbedo(unsigned set, ID3D12Resource* res)
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+		sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+		sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		sv.Texture2DArray.MipLevels = 1;
+		sv.Texture2DArray.ArraySize = 1;
+		if (res)
+		{
+			const D3D12_RESOURCE_DESC d = res->GetDesc();
+			sv.Format = d.Format;
+			sv.Texture2DArray.MipLevels = d.MipLevels;
+			sv.Texture2DArray.ArraySize = d.DepthOrArraySize;
+		}
+		device->CreateShaderResourceView(res, &sv, cpuSlot(set, d3dls::kImageCount));
 	}
 
 	ID3D12PipelineState* psoFor(DXGI_FORMAT fmt)
@@ -202,7 +229,8 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 		return false;
 	}
 
-	// root signature: 0 = b12 (the frame's constants, a root CBV), 1 = b13 (the patch, twelve root constants), 2 = t32-t40 (the images)
+	// root signature: 0 = b12 (the frame's constants, a root CBV), 1 = b13 (the patch, twelve root constants), 2 = t32-t41 (the images),
+	// static sampler s13 (the albedo array: linear, repeat, mips)
 	D3D12_DESCRIPTOR_RANGE range{};
 	range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	range.NumDescriptors = d3dls::kSrvCount;
@@ -220,9 +248,18 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 	params[2].DescriptorTable.NumDescriptorRanges = 1;
 	params[2].DescriptorTable.pDescriptorRanges = &range;
 	params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+	D3D12_STATIC_SAMPLER_DESC smp{};
+	smp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+	smp.AddressU = smp.AddressV = smp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+	smp.MaxLOD = D3D12_FLOAT32_MAX;
+	smp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	smp.ShaderRegister = d3dls::kSamplerReg;
+	smp.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 	D3D12_ROOT_SIGNATURE_DESC rsd{};
 	rsd.NumParameters = 3;
 	rsd.pParameters = params;
+	rsd.NumStaticSamplers = 1;
+	rsd.pStaticSamplers = &smp;
 	ComPtr<ID3DBlob> rsBlob, rsErr;
 	if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, rsBlob.GetAddressOf(), rsErr.GetAddressOf()))
 	    || FAILED(device->CreateRootSignature(0, rsBlob->GetBufferPointer(), rsBlob->GetBufferSize(), IID_PPV_ARGS(&m.rootSig))))
@@ -233,7 +270,7 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 
 	D3D12_DESCRIPTOR_HEAP_DESC hd{};
 	hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-	hd.NumDescriptors = d3dls::kSrvCount;
+	hd.NumDescriptors = d3dls::kSrvCount * kSets;
 	hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&m.srvHeap))))
 	{
@@ -241,6 +278,7 @@ bool D3D12Landscape::init(ID3D12Device* device, std::function<void()> waitIdle, 
 		return false;
 	}
 	m.srvInc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	for (unsigned s = 0; s < kSets; ++s) m.writeAlbedo(s, nullptr);   // every descriptor of a table is valid from the start (resource binding tier 1)
 
 	m.globals = makeUploadBuffer(device, m.globalsStride * kGlobalsSlots, &m.globalsMapped);
 	if (!m.globals)
@@ -358,7 +396,7 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 
 	// ── one upload buffer of the ring, big enough for every copy of this call ──
 	UINT64 total = 0;
-	bool touched[d3dls::kSrvCount] = {};
+	bool touched[d3dls::kImageCount] = {};
 	for (const Impl::Job& j : jobs)
 	{
 		total += alignUp(m.images[j.image].total, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
@@ -375,9 +413,9 @@ void D3D12Landscape::upload(ID3D12GraphicsCommandList* cl, HE::LandscapeRenderFr
 		ring.capacity = cap;
 	}
 
-	D3D12_RESOURCE_BARRIER bars[d3dls::kSrvCount];
+	D3D12_RESOURCE_BARRIER bars[d3dls::kImageCount];
 	UINT nb = 0;
-	for (unsigned i = 0; i < d3dls::kSrvCount; ++i)
+	for (unsigned i = 0; i < d3dls::kImageCount; ++i)
 	{
 		if (!touched[i]) continue;
 		D3D12_RESOURCE_BARRIER& b = bars[nb++];
@@ -428,16 +466,20 @@ void D3D12Landscape::draw(ID3D12GraphicsCommandList* cl, const HE::LandscapeRend
 	const LandscapeRenderStatic& w = *m.world;
 
 	d3dls::Globals g;
-	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient);
+	d3dls::fillGlobals(g, f, viewProj, shading.sunDir, shading.sunColor, shading.ambient, shading.albedoArray != nullptr);
 	const unsigned slot = m.globalsNext++ % kGlobalsSlots;
 	std::memcpy(m.globalsMapped + static_cast<size_t>(slot) * m.globalsStride, &g, sizeof(g));
+	const unsigned set = m.setNext++ % kSets;
+	m.writeAlbedo(set, shading.albedoArray);   // a table no frame in flight is reading: the ring is deeper than the draws of the renderer's frames
 
 	ID3D12DescriptorHeap* heaps[] = { m.srvHeap.Get() };
 	cl->SetDescriptorHeaps(1, heaps);
 	cl->SetGraphicsRootSignature(m.rootSig.Get());
 	cl->SetPipelineState(pso);
 	cl->SetGraphicsRootConstantBufferView(0, m.globals->GetGPUVirtualAddress() + static_cast<UINT64>(slot) * m.globalsStride);
-	cl->SetGraphicsRootDescriptorTable(2, m.srvHeap->GetGPUDescriptorHandleForHeapStart());
+	D3D12_GPU_DESCRIPTOR_HANDLE table = m.srvHeap->GetGPUDescriptorHandleForHeapStart();
+	table.ptr += static_cast<UINT64>(set) * d3dls::kSrvCount * m.srvInc;
+	cl->SetGraphicsRootDescriptorTable(2, table);
 	cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	cl->IASetIndexBuffer(&m.ibv);
 

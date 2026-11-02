@@ -2,6 +2,7 @@
 #include <Renderer/LandscapeRenderFrame.h>
 #include <glm/glm.hpp>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 
@@ -12,8 +13,10 @@
 namespace HE::d3dls
 {
 
-constexpr unsigned kFirstSrv = 32;   // t32 .. t40, above everything the D3D11 renderer and its graph materials bind
-constexpr unsigned kSrvCount = 9;    // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages
+constexpr unsigned kFirstSrv = 32;   // t32 .. t41, above everything the D3D11 renderer and its graph materials bind
+constexpr unsigned kSrvCount = 10;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the albedo array (not ours)
+constexpr unsigned kImageCount = 9;  // the images the landscape class owns: the first nine
+constexpr unsigned kSamplerReg = 13; // s13: the albedo array's sampler (linear, repeat, mips)
 constexpr unsigned kGlobalsReg = 12; // b12 (LsGlobals), b13 (LsPatch)
 constexpr unsigned kPatchReg = 13;
 constexpr int      kGridVerts = 65;  // the grid is (cells + 1)^2; the shader derives (i, j) from SV_VertexID with this
@@ -32,6 +35,7 @@ struct alignas(16) Globals
 	float   sunDir[4];
 	float   sunColor[4];
 	float   ambient[4];
+	float   tex[4];          // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
 };
 struct alignas(16) PatchData
 {
@@ -39,7 +43,7 @@ struct alignas(16) PatchData
 	float   patchPos[4];
 	float   morph[4];
 };
-static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 3 * 16, "LsGlobals: the HLSL block and this struct have to be the same size");
+static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 4 * 16, "LsGlobals: the HLSL block and this struct have to be the same size");
 static_assert(sizeof(PatchData) == 48, "LsPatch: the HLSL block and this struct have to be the same size");
 
 // A world these shaders can draw: the grid is the 65 x 65 one the shader's SV_VertexID arithmetic assumes.
@@ -49,8 +53,9 @@ inline bool worldUsable(const HE::LandscapeRenderStatic& w)
 	       && w.heightW > 0 && w.heightH > 0 && w.weightW > 0 && w.weightH > 0 && !w.patchIndices.empty();
 }
 
+// `albedoBound`: the albedo array of the world-UV ground is bound (the renderer resolved LandscapeRenderStatic::albedoArrayPath to something).
 inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm::mat4& viewProj, const glm::vec3& sunDir, const glm::vec3& sunColor,
-                        const glm::vec3& ambient)
+                        const glm::vec3& ambient, bool albedoBound)
 {
 	const HE::LandscapeRenderStatic& w = *f.world;
 	g = Globals{};
@@ -69,6 +74,14 @@ inline void fillGlobals(Globals& g, const HE::LandscapeRenderFrame& f, const glm
 	g.sunDir[0] = sunDir.x; g.sunDir[1] = sunDir.y; g.sunDir[2] = sunDir.z;
 	g.sunColor[0] = sunColor.x; g.sunColor[1] = sunColor.y; g.sunColor[2] = sunColor.z;
 	g.ambient[0] = ambient.x; g.ambient[1] = ambient.y; g.ambient[2] = ambient.z;
+	// World UVs: a texture tile every `textureMeters` of absolute x/z. The shader works origin-relative, so the origin's part of the coordinate comes in
+	// as a fraction formed here in double (a float at 100 km would be 8 mm coarse, a visible shimmer).
+	const bool on = albedoBound && !w.albedoArrayPath.empty() && w.textureMeters > 0.0f;
+	const double k = on ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
+	g.tex[0] = static_cast<float>(k);
+	g.tex[1] = on ? 1.0f : 0.0f;
+	g.tex[2] = static_cast<float>(f.origin.x * k - std::floor(f.origin.x * k));
+	g.tex[3] = static_cast<float>(f.origin.z * k - std::floor(f.origin.z * k));
 }
 
 inline void fillPatch(PatchData& d, const HE::LandscapeRenderPatch& p)

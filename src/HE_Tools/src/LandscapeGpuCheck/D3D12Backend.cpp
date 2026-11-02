@@ -91,6 +91,9 @@ public:
 		sh.sunDir = in.sunDir;
 		sh.sunColor = in.sunColor;
 		sh.ambient = in.ambient;
+		ComPtr<ID3D12Resource> array, arrayUpload;   // alive until the queue has finished this list (waitIdle below)
+		if (in.albedo && in.albedo->size > 0 && in.albedo->layers > 0) array = makeAlbedo(*in.albedo, arrayUpload);
+		sh.albedoArray = array.Get();
 		m_landscape.draw(m_list.Get(), frame, in.viewProj, sh, DXGI_FORMAT_R8G8B8A8_UNORM);
 
 		D3D12_RESOURCE_BARRIER b[2]{};
@@ -159,6 +162,63 @@ private:
 		}
 		m_info->ClearStoredMessages();
 		return errors;
+	}
+
+	// The world-UV ground's albedo array (RGBA8, no mips, like the other backends'): a default-heap texture array copied from an upload buffer by the
+	// open list, left in the pixel-shader-resource state. Null when something fails (the frame then draws flat colours).
+	ComPtr<ID3D12Resource> makeAlbedo(const TexArray& a, ComPtr<ID3D12Resource>& upload)
+	{
+		D3D12_HEAP_PROPERTIES hp{};
+		hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+		D3D12_RESOURCE_DESC rd{};
+		rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		rd.Width = static_cast<UINT64>(a.size);
+		rd.Height = static_cast<UINT>(a.size);
+		rd.DepthOrArraySize = static_cast<UINT16>(a.layers);
+		rd.MipLevels = 1;
+		rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		rd.SampleDesc.Count = 1;
+		ComPtr<ID3D12Resource> tex;
+		if (FAILED(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex)))) return nullptr;
+		std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> fp(static_cast<size_t>(a.layers));
+		std::vector<UINT> rows(static_cast<size_t>(a.layers));
+		std::vector<UINT64> rowBytes(static_cast<size_t>(a.layers));
+		UINT64 total = 0;
+		m_device->GetCopyableFootprints(&rd, 0, static_cast<UINT>(a.layers), 0, fp.data(), rows.data(), rowBytes.data(), &total);
+		D3D12_HEAP_PROPERTIES up{};
+		up.Type = D3D12_HEAP_TYPE_UPLOAD;
+		D3D12_RESOURCE_DESC bd{};
+		bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+		bd.Width = total;
+		bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+		bd.SampleDesc.Count = 1;
+		bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+		if (FAILED(m_device->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)))) return nullptr;
+		uint8_t* dst = nullptr;
+		if (FAILED(upload->Map(0, nullptr, reinterpret_cast<void**>(&dst)))) return nullptr;
+		const size_t slice = static_cast<size_t>(a.size) * static_cast<size_t>(a.size) * 4;
+		for (UINT l = 0; l < static_cast<UINT>(a.layers); ++l)
+		{
+			for (UINT y = 0; y < rows[l]; ++y)
+				std::memcpy(dst + fp[l].Offset + static_cast<size_t>(y) * fp[l].Footprint.RowPitch, a.rgba.data() + l * slice + static_cast<size_t>(y) * rowBytes[l], static_cast<size_t>(rowBytes[l]));
+			D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+			to.pResource = tex.Get();
+			to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+			to.SubresourceIndex = l;
+			from.pResource = upload.Get();
+			from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+			from.PlacedFootprint = fp[l];
+			m_list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+		}
+		upload->Unmap(0, nullptr);
+		D3D12_RESOURCE_BARRIER b{};
+		b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+		b.Transition.pResource = tex.Get();
+		b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+		b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+		b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+		m_list->ResourceBarrier(1, &b);
+		return tex;
 	}
 
 	void waitIdle()

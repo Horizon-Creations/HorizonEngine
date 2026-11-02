@@ -3,8 +3,9 @@
 // ─── The world-scale landscape's shaders (Thema 326, step 2, part A) ─────────
 // One 65 x 65 grid (HE::LandscapePatchMesh) is drawn once per patch of the quadtree (HE::LandscapeFrame::Patch); the vertex
 // shader turns a grid position into a world position and takes the height from the tile atlas or, for the coarse levels, from
-// the coarse world. GLSL 4.10 with loose uniforms, like kSkyFS: a Vulkan / D3D build gets a prelude that maps the uniform names
-// onto a block (part B), the body stays as it is, so it must stay free of layout qualifiers and GL-only built-ins.
+// the coarse world. GLSL 4.10 with loose uniforms, like kSkyFS: a Vulkan build gets a prelude that maps the uniform names
+// onto a block (part B), the body stays as it is, so it must stay free of layout qualifiers and GL-only built-ins. Metal and D3D11/D3D12 have
+// hand ports below (kLandscapeMSL, kLandscapeHLSL): a change to the GLSL is a change in all three.
 //
 // What the contract says (HE::LandscapeGpuLayout.h has the image layouts, HE::LandscapeFrame the numbers):
 //   * Heights are read with texelFetch at integer lattice positions, never filtered: a vertex of a level-L patch sits on the
@@ -368,8 +369,10 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
 //   * the loose uniforms are two constant buffers: LsGlobals (b12, both stages) and LsPatch (b13, vertex stage, 48 bytes, one per patch).
 //     D3D11 only has b0-b13 and the renderer's own passes use the low ones; D3D12 maps the same two registers in a root signature of its own
 //   * images: t32 tile heights, t33 slot table, t34 coarse heights, t35-t37 tile weight pages, t38-t40 coarse weight pages, all
-//     read with Load() (nothing is sampled, so there is no sampler). SRVs above t31 on purpose: the D3D11 renderer and the graph materials
-//     use t0-t26 and do not rebind them after the landscape draw
+//     read with Load(); t41 is the texture group's albedo array of the world-UV ground, the one image that is sampled (s13: linear, repeat,
+//     mips; a D3D12 static sampler, a D3D11 sampler state). The array is sampled unconditionally, before the discard and outside any
+//     branch (a gradient needs uniform flow), and `tex.y` picks between it and the flat colours. SRVs above t31 on purpose: the D3D11
+//     renderer and the graph materials use t0-t26 and do not rebind them after the landscape draw
 //   * `patch` is a keyword in HLSL, the per-patch block's member is lsPatch
 //   * D3D clip depth is 0..1 but the main scene pass rasterises the plain GL view-projection (kD3DClipFix is NOT applied there, like
 //     Metal): the landscape takes the same matrix, so its depth is the GL ndc z, 0..1 for the half of the frustum that is not clipped
@@ -389,6 +392,7 @@ cbuffer LsGlobals : register(b12)
     float4   sunDir;         // xyz = towards the sun
     float4   sunColor;
     float4   ambient;
+    float4   tex;            // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
 };
 
 cbuffer LsPatch : register(b13)
@@ -407,6 +411,8 @@ Texture2DArray<float4> tileW2        : register(t37);
 Texture2D<float4>      coarseW0      : register(t38);
 Texture2D<float4>      coarseW1      : register(t39);
 Texture2D<float4>      coarseW2      : register(t40);
+Texture2DArray<float4> albedoArr     : register(t41);
+SamplerState           albedoSmp     : register(s13);
 
 struct LsVertexOut
 {
@@ -483,6 +489,12 @@ float4 PSMain(LsVertexOut pin) : SV_Target
     // The derivatives first: nothing that follows is allowed to make them divergent.
     float3 dx = ddx(pin.worldRel);
     float3 dy = ddy(pin.worldRel);
+    // Layers 0-3 are the texture group's grass / dirt / rock / snow slices in world coordinates (see the GLSL); sampled here, in uniform flow.
+    float2 uv = pin.worldRel.xz * tex.x + tex.zw;
+    float3 t0 = albedoArr.Sample(albedoSmp, float3(uv, 0.0)).rgb;
+    float3 t1 = albedoArr.Sample(albedoSmp, float3(uv, 1.0)).rgb;
+    float3 t2 = albedoArr.Sample(albedoSmp, float3(uv, 2.0)).rgb;
+    float3 t3 = albedoArr.Sample(albedoSmp, float3(uv, 3.0)).rgb;
     float2 abs2 = pin.worldRel.xz + origin.xz;
     if (abs2.x > world.x || abs2.y > world.y || abs2.x < 0.0 || abs2.y < 0.0) discard;
 
@@ -512,7 +524,12 @@ float4 PSMain(LsVertexOut pin) : SV_Target
         w1 = tileW1.Load(at);
         w2 = tileW2.Load(at);
     }
-    float3 albedo = w0.x * layerColor[0].rgb + w0.y * layerColor[1].rgb + w0.z * layerColor[2].rgb + w0.w * layerColor[3].rgb
+    float3 c0 = layerColor[0].rgb, c1 = layerColor[1].rgb, c2 = layerColor[2].rgb, c3 = layerColor[3].rgb;
+    if (tex.y > 0.5)
+    {
+        c0 = t0; c1 = t1; c2 = t2; c3 = t3;
+    }
+    float3 albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
                   + w1.x * layerColor[4].rgb + w1.y * layerColor[5].rgb + w1.z * layerColor[6].rgb + w1.w * layerColor[7].rgb
                   + w2.x * layerColor[8].rgb + w2.y * layerColor[9].rgb + w2.z * layerColor[10].rgb + w2.w * layerColor[11].rgb;
     float3 n = normalize(cross(dx, dy));

@@ -8,6 +8,7 @@
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
+struct ID3D11ShaderResourceView;
 
 // ─── The world-scale landscape on D3D11 (Thema 326, step 2, part B) ──────────
 // The same job as OpenGLLandscape and MetalLandscape: copies a HE::LandscapeRenderFrame's uploads into the tile atlas and draws its patches
@@ -16,9 +17,10 @@ struct ID3D11DeviceContext;
 // of the renderer. D3D11Renderer calls upload() once per scene frame (as soon as it has the frame, whatever else the frame does) and draw()
 // in the opaque pass; the capture tool (landscape_gpu_check) calls both on a device of its own.
 //
-// Images (SRV registers t32 .. t40, above everything the renderer and its graph materials bind): tile heights R16_UINT array, slot table
-// R16_UINT, coarse heights R16_UINT, three RGBA8 weight arrays, three RGBA8 coarse weight images. All read with Load(), so there is no
-// sampler. The grid has no vertex buffer (SV_VertexID is the index value), only a 16-bit index buffer.
+// Images (SRV registers t32 .. t41, above everything the renderer and its graph materials bind): tile heights R16_UINT array, slot table
+// R16_UINT, coarse heights R16_UINT, three RGBA8 weight arrays, three RGBA8 coarse weight images, all read with Load(), and the borrowed albedo
+// array (t41, sampled through a sampler state of this class at s13). The grid has no vertex buffer (SV_VertexID is the index value), only a
+// 16-bit index buffer.
 //
 // What it does NOT take part in: shadows, SSAO, GI, fog, the material graph. It writes lit colour (flat layer colours, sun and ambient)
 // into whatever target is bound, with depth, so the sky fills what the landscape leaves.
@@ -30,6 +32,9 @@ public:
 		glm::vec3 sunDir{ 0.45f, 0.80f, 0.55f };   // towards the sun
 		glm::vec3 sunColor{ 1.0f, 0.95f, 0.85f };
 		glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
+		// The texture group's albedo array of the world-UV ground (LandscapeRenderStatic::albedoArrayPath, resolved by the renderer; a Texture2DArray
+		// view with its mips, not owned here). Null = flat layer colours.
+		ID3D11ShaderResourceView* albedoArray = nullptr;
 	};
 	struct Stats
 	{
@@ -57,7 +62,7 @@ public:
 
 	// Draws the frame's patches with `viewProj` (the matrix the frame was built for) into the bound render target and depth buffer, depth
 	// test LESS with writes, no culling, no blending. Everything it sets on the context (shaders, input assembler, rasteriser, depth and blend
-	// state, constant buffers b12-b13, SRVs t32-t40) is put back as it was found.
+	// state, constant buffers b12-b13, SRVs t32-t41, sampler s13) is put back as it was found.
 	void draw(ID3D11DeviceContext* ctx, const HE::LandscapeRenderFrame& frame, const glm::mat4& viewProj, const Shading& shading);
 
 	const Stats& stats() const;

@@ -7204,6 +7204,9 @@ void D3D11Renderer::DrawScene(int width, int height)
         sh.ambient = p.m_renderWorld.ambient;
         for (const LightData& l : p.m_renderWorld.lights)
             if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+        if (p.landscapeFrame.world && !p.landscapeFrame.world->albedoArrayPath.empty())
+            // The texture group's albedo array (the world-UV ground), resolved like a material's texture array; not loaded (yet) = null = flat colours.
+            sh.albedoArray = p.resolveGraphTexture(HE::UUID{}, p.landscapeFrame.world->albedoArrayPath, m_contentManager, /*array=*/true);
         p.landscape.draw(p.context.Get(), p.landscapeFrame, viewProj, sh);
     };
 
