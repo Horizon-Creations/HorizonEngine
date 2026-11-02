@@ -26,6 +26,7 @@ public:
 		glm::vec3 sunDir{ 0.45f, 0.80f, 0.55f };
 		glm::vec3 sunColor{ 1.0f, 0.95f, 0.85f };
 		glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
+		void* albedoArray = nullptr;   // id<MTLTexture> (2D array) of the world-UV ground, resolved by the renderer; nullptr = flat colours
 	};
 	struct Stats
 	{

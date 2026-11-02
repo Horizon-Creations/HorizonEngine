@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace HE
@@ -47,7 +48,11 @@ struct LandscapeRenderStatic
 	std::vector<uint16_t>             coarseHeights;     // coarseW * coarseH
 	std::vector<std::vector<uint8_t>> coarseWeights;     // [page], coarseWeightW * coarseWeightH * 4
 
-	float    layerColor[12][4] = {};                     // the flat colour of each layer (the material graph replaces it later)
+	float    layerColor[12][4] = {};                     // the flat colour of each layer (used where the array below is missing)
+	// World-UV ground (the material with world coordinates): layers 0-3 are the first four slices of this albedo texture array (asset path,
+	// resolved by the backend like a material's texture array), repeated every `textureMeters` in absolute world metres. Empty = flat colours.
+	std::string albedoArrayPath;
+	float    textureMeters = 8.0f;
 
 	// The one grid every patch is drawn with: (cells + 1)^2 vertices (i, j), triangles as indices, and the index ranges of the quadrants.
 	int      patchCells = 64;

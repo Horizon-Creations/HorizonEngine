@@ -127,6 +127,7 @@ uniform vec4  uLayerColor[12];       // flat colour of each of the twelve layers
 uniform vec3  uSunDir;               // towards the sun
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
+uniform vec4  uTex;                  // x = 1 / metres of one texture tile, y = 1 when uAlbedoArray is the group's albedo array, zw = fract(origin.xz * x)
 uniform usampler2D      uSlotTable;
 uniform sampler2DArray  uTileWeights0;   // RGBA8, layers 0-3 of every tile's twelve
 uniform sampler2DArray  uTileWeights1;
@@ -134,6 +135,7 @@ uniform sampler2DArray  uTileWeights2;
 uniform sampler2D       uCoarseWeights0; // RGBA8, the finest weight grid of the coarse world (one texel per 128 m), pages as above
 uniform sampler2D       uCoarseWeights1;
 uniform sampler2D       uCoarseWeights2;
+uniform sampler2DArray  uAlbedoArray;    // the texture group's albedo array: slices 0-3 are layers 0-3, repeated in world coordinates
 
 void main()
 {
@@ -145,31 +147,39 @@ void main()
     int mask = int(uHeightInfo.w) - 1;
     uint slot = texelFetch(uSlotTable, ivec2(tile.x & mask, tile.y & mask), 0).r;
 
-    vec3 albedo;
+    vec4 w0, w1, w2;
     if (slot == 65535u)
     {
         // A tile that is not in the atlas (the coarse levels, or one still streaming): the coarse world's weights, one texel per 128 m.
         ivec2 cs = textureSize(uCoarseWeights0, 0);
         ivec2 c = clamp(ivec2(floor(abs2 / uWorld.xy * vec2(cs))), ivec2(0), cs - ivec2(1));
-        vec4 w0 = texelFetch(uCoarseWeights0, c, 0);
-        vec4 w1 = texelFetch(uCoarseWeights1, c, 0);
-        vec4 w2 = texelFetch(uCoarseWeights2, c, 0);
-        albedo = w0.x * uLayerColor[0].rgb + w0.y * uLayerColor[1].rgb + w0.z * uLayerColor[2].rgb + w0.w * uLayerColor[3].rgb
-               + w1.x * uLayerColor[4].rgb + w1.y * uLayerColor[5].rgb + w1.z * uLayerColor[6].rgb + w1.w * uLayerColor[7].rgb
-               + w2.x * uLayerColor[8].rgb + w2.y * uLayerColor[9].rgb + w2.z * uLayerColor[10].rgb + w2.w * uLayerColor[11].rgb;
+        w0 = texelFetch(uCoarseWeights0, c, 0);
+        w1 = texelFetch(uCoarseWeights1, c, 0);
+        w2 = texelFetch(uCoarseWeights2, c, 0);
     }
     else
     {
         float texel = uWorld.z / float(uTile.y);
         ivec2 t = clamp(ivec2(floor((abs2 - vec2(tile) * uWorld.z) / texel)), ivec2(0), ivec2(uTile.y - 1));
         ivec3 at = ivec3(t, int(slot));
-        vec4 w0 = texelFetch(uTileWeights0, at, 0);
-        vec4 w1 = texelFetch(uTileWeights1, at, 0);
-        vec4 w2 = texelFetch(uTileWeights2, at, 0);
-        albedo = w0.x * uLayerColor[0].rgb + w0.y * uLayerColor[1].rgb + w0.z * uLayerColor[2].rgb + w0.w * uLayerColor[3].rgb
-               + w1.x * uLayerColor[4].rgb + w1.y * uLayerColor[5].rgb + w1.z * uLayerColor[6].rgb + w1.w * uLayerColor[7].rgb
-               + w2.x * uLayerColor[8].rgb + w2.y * uLayerColor[9].rgb + w2.z * uLayerColor[10].rgb + w2.w * uLayerColor[11].rgb;
+        w0 = texelFetch(uTileWeights0, at, 0);
+        w1 = texelFetch(uTileWeights1, at, 0);
+        w2 = texelFetch(uTileWeights2, at, 0);
     }
+    // Layers 0-3 are the texture group's grass / dirt / rock / snow slices in world coordinates; the others (and all of them where the
+    // group's array is not here) keep their flat colour. The branch is on a uniform, so the derivatives of texture() stay defined.
+    vec3 c0 = uLayerColor[0].rgb, c1 = uLayerColor[1].rgb, c2 = uLayerColor[2].rgb, c3 = uLayerColor[3].rgb;
+    if (uTex.y > 0.5)
+    {
+        vec2 uv = vWorldRel.xz * uTex.x + uTex.zw;
+        c0 = texture(uAlbedoArray, vec3(uv, 0.0)).rgb;
+        c1 = texture(uAlbedoArray, vec3(uv, 1.0)).rgb;
+        c2 = texture(uAlbedoArray, vec3(uv, 2.0)).rgb;
+        c3 = texture(uAlbedoArray, vec3(uv, 3.0)).rgb;
+    }
+    vec3 albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
+                + w1.x * uLayerColor[4].rgb + w1.y * uLayerColor[5].rgb + w1.z * uLayerColor[6].rgb + w1.w * uLayerColor[7].rgb
+                + w2.x * uLayerColor[8].rgb + w2.y * uLayerColor[9].rgb + w2.z * uLayerColor[10].rgb + w2.w * uLayerColor[11].rgb;
     vec3 n = normalize(cross(dFdx(vWorldRel), dFdy(vWorldRel)));
     if (n.y < 0.0) n = -n;
     float ndl = max(dot(n, normalize(uSunDir)), 0.0);
@@ -205,6 +215,7 @@ struct LsGlobals
     float4   sunDir;         // xyz = towards the sun
     float4   sunColor;
     float4   ambient;
+    float4   tex;            // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
 };
 
 struct LsPatch
@@ -299,7 +310,8 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
                              texture2d_array<float, access::read> w2t [[texture(23)]],
                              texture2d<float, access::read> c0t [[texture(24)]],
                              texture2d<float, access::read> c1t [[texture(25)]],
-                             texture2d<float, access::read> c2t [[texture(26)]])
+                             texture2d<float, access::read> c2t [[texture(26)]],
+                             texture2d_array<float> albedoArr [[texture(27)]])
 {
     float2 abs2 = in.worldRel.xz + G.origin.xz;
     if (abs2.x > G.world.x || abs2.y > G.world.y || abs2.x < 0.0 || abs2.y < 0.0) discard_fragment();
@@ -327,7 +339,18 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
         w1 = w1t.read(uint2(t), slot);
         w2 = w2t.read(uint2(t), slot);
     }
-    float3 albedo = w0.x * G.layerColor[0].rgb + w0.y * G.layerColor[1].rgb + w0.z * G.layerColor[2].rgb + w0.w * G.layerColor[3].rgb
+    // Layers 0-3 are the texture group's grass / dirt / rock / snow slices in world coordinates (see the GLSL).
+    float3 c0 = G.layerColor[0].rgb, c1 = G.layerColor[1].rgb, c2 = G.layerColor[2].rgb, c3 = G.layerColor[3].rgb;
+    if (G.tex.y > 0.5)
+    {
+        constexpr sampler smp(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
+        float2 uv = in.worldRel.xz * G.tex.x + G.tex.zw;
+        c0 = albedoArr.sample(smp, uv, 0).rgb;
+        c1 = albedoArr.sample(smp, uv, 1).rgb;
+        c2 = albedoArr.sample(smp, uv, 2).rgb;
+        c3 = albedoArr.sample(smp, uv, 3).rgb;
+    }
+    float3 albedo = w0.x * c0 + w0.y * c1 + w0.z * c2 + w0.w * c3
                   + w1.x * G.layerColor[4].rgb + w1.y * G.layerColor[5].rgb + w1.z * G.layerColor[6].rgb + w1.w * G.layerColor[7].rgb
                   + w2.x * G.layerColor[8].rgb + w2.y * G.layerColor[9].rgb + w2.z * G.layerColor[10].rgb + w2.w * G.layerColor[11].rgb;
     float3 n = normalize(cross(dfdx(in.worldRel), dfdy(in.worldRel)));

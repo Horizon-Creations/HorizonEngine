@@ -11,6 +11,13 @@
 // compares the result with the geometry it knows. A backend keeps its images between render() calls, like the renderer does.
 namespace gpucheck
 {
+// An albedo texture array for the world-UV ground: `layers` slices of size x size RGBA8, no mips (the same on every backend).
+struct TexArray
+{
+	int size = 0, layers = 0;
+	std::vector<uint8_t> rgba;
+};
+
 struct RenderIn
 {
 	int       width = 0, height = 0;
@@ -21,6 +28,7 @@ struct RenderIn
 	glm::vec3 sunColor{ 1.0f, 0.95f, 0.85f };
 	glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
 	glm::vec4 clear{ 0.5f, 0.7f, 1.0f, 1.0f };
+	const TexArray* albedo = nullptr;     // given: the frame's world-UV ground uses it (when the frame names an array); null: flat colours
 	HE::LandscapeProvider provider;
 };
 

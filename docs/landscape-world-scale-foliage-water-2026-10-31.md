@@ -3,7 +3,7 @@
 Stand 31.10.2026, Basis `release/0.8.0`, Hive-Topic 326, Schritt 3 von 8.
 Vorher: `landscape-world-scale-store-2026-10-31.md` (Store, Kachel-Format), `-renderer-` (Quadtree, Laufzeit, Shader-Quelle), `-physics-` (Boden je Kachel).
 
-**Foliage (3b) und Wasser (3c) sind als CPU-Daten und Laufzeit gebaut und getestet. Gezeichnet wird nichts davon (Renderer-Teil B für alle Backends; die Landschaft selbst zeichnen OpenGL und Metal inzwischen, siehe `landscape-world-scale-gpu-2026-11-01.md`, Foliage und Wasser noch nicht). Die Navigation steht in `landscape-world-scale-navigation-2026-10-31.md`.
+**Foliage (3b) und Wasser (3c) sind als CPU-Daten und Laufzeit gebaut und getestet. Seit 02.11.2026 wird beides gezeichnet, auf allen Backends, als versteckte Entities (`LandscapeWorldProxies`, siehe `landscape-world-scale-gpu-2026-11-01.md` §5b); die Landschaft selbst zeichnen OpenGL und Metal. Die Navigation steht in `landscape-world-scale-navigation-2026-10-31.md`.
 Es wurde nichts gemessen: keine Streuzeit, keine Aufbauzeit der Wasserregion, kein Speicher im Betrieb (Plan-§4-Abnahme auf NN-WS03).** Schritt 1521 bleibt offen.
 
 ## 1. Was gebaut ist
@@ -71,7 +71,7 @@ Gesamt 22 + 87 · count. Der Leser verweigert: falsches Magic oder Version, `byt
 * **Wasser jenseits der Region (2 km):** keine ferne Ebene, keine Wellen, keine Ripples, kein `WaterIndex`, kein Auftrieb, keine `WaterSurface`-Entitäten. `surfaceAt` antwortet ohne Wellen.
 * **Foliage ignoriert Wasser** (Pflanzen können im See stehen), und Masken (§2).
 * **Navigation:** gebaut, siehe das Navigationsdokument (Detour-Kacheln je Landschaftskachel, nicht über das Region-Terrain).
-* **Renderer-Teil B für Foliage und Wasser, auf allen Backends** (OpenGL und Metal hier machbar wie bei der Landschaft, Vulkan und D3D auf NN-WS03): Zeichnen von Foliage und Wasser; dazu die Messungen auf NN-WS03.
+* **Foliage und Wasser werden gezeichnet** (§5b im GPU-Dokument). Offen: das Aussehen auf einer GPU geprüft sehen, tessellierte Fläche, Wellen für Auftrieb und Unterwasserkamera; dazu die Messungen auf NN-WS03.
 * **Editor (Schritt 6):** Masken je Kachel, Pinsel und Seenwerkzeug schreiben Felder.
 
 ## 7. Verifikation
@@ -82,6 +82,6 @@ Mutationsprüfungen früherer Schritte (zu frühes Morphen, Store ohne Verwerfen
 
 ## Handoff
 
-1. Wasser (3c) liegt in `LandscapeRuntime` (`waterRegion()`, `waterSurfaceAt()`); Foliage (3b) in `foliageDraws()`. Beides zeichnet der Renderer in Teil B nach §2 und §4.
+1. Wasser (3c) liegt in `LandscapeRuntime` (`waterRegion()`, `waterSurfaceAt()`); Foliage (3b) in `foliageDraws()`. Beides macht `LandscapeWorldProxies` zu Entities, die die Renderer nach §2 und §4 zeichnen (GPU-Dokument §5b).
 2. `kGroundOwner`, `holdsAt`, die Regionsgrenze n ≤ 4 und `clipToGround` aus dem Feld sind die Stellen, an denen es leicht falsch geht.
 3. Navigation ist gebaut (eigenes Dokument). Alles andere wartet auf NN-WS03.

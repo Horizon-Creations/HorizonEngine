@@ -12,8 +12,8 @@
 // the atlas images, and nothing else of the renderer: OpenGLRenderer calls draw() in the opaque pass, and the capture tool calls it on
 // a context of its own. A GL 4.1 core context must be current and glad loaded.
 //
-// Images (units kFirstUnit .. kFirstUnit + 8, above everything the renderer uses): tile heights R16UI array, slot table R16UI,
-// coarse heights R16UI, three RGBA8 weight arrays, three RGBA8 coarse weight images. Integer formats are read with texelFetch, so there is no filtering to set up and
+// Images (units kFirstUnit .. kFirstUnit + 9, above everything the renderer uses): tile heights R16UI array, slot table R16UI,
+// coarse heights R16UI, three RGBA8 weight arrays, three RGBA8 coarse weight images, and (borrowed from the renderer) the albedo array of the world-UV ground. Integer formats are read with texelFetch, so there is no filtering to set up and
 // no sampler state to leak.
 //
 // What it does NOT take part in: shadows, SSAO, GI, fog, the material graph. It writes lit colour (flat layer colours, sun and ambient)
@@ -28,6 +28,7 @@ public:
 		glm::vec3 sunDir{ 0.45f, 0.80f, 0.55f };   // towards the sun
 		glm::vec3 sunColor{ 1.0f, 0.95f, 0.85f };
 		glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
+		unsigned int albedoArray = 0;   // GL texture array of the world-UV ground (LandscapeRenderStatic::albedoArrayPath, resolved by the renderer); 0 = flat colours
 	};
 	struct Stats
 	{

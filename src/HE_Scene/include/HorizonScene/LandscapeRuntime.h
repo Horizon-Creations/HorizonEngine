@@ -42,6 +42,9 @@ struct LandscapeRuntimeConfig
 	size_t   maxUploadsPerFrame = 8;
 	float    heightMinM = 0.0f;               // metres of a stored height 0 ...
 	float    heightScaleM = 3000.0f;          // ... and of 65535 above it
+	// World-UV ground: the albedo array of this texture group (HE::AutoLandscapeGroupId), one tile per `textureMeters`; -1 = flat colours.
+	int      textureGroup = -1;
+	float    textureMeters = 8.0f;
 	// The quadtree's reach (LandscapeQuadtreeConfig): level L is drawn out to rangeFactor * its patch size. A smaller factor needs a
 	// smaller loadRadius (fitsStore) and shows the coarse levels sooner; rangeFactor * morphStart has to stay >= sqrt(2) for the seams.
 	float    rangeFactor = 6.0f;

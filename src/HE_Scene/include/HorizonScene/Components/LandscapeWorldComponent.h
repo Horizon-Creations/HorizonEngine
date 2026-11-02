@@ -17,4 +17,9 @@ struct LandscapeWorldComponent {
 	// Heights are 16 bit; a stored value v is metres = heightMinM + v / 65535 * heightScaleM. The pack does not carry this yet.
 	float       heightMinM    = 0.0f;
 	float       heightScaleM  = 3000.0f;
+	// The ground is drawn with the albedo texture array of a texture group (HE::AutoLandscapeGroupId: 0 Mountains, 1 Forest, 2 Grassland,
+	// 3 Desert), tiled in world coordinates: one texture tile covers `textureMeters`. -1 = flat layer colours. A group whose array is not
+	// on the machine (yet) is drawn flat until it is. Read when the landscape begins.
+	int         textureGroup  = 0;
+	float       textureMeters = 8.0f;
 };

@@ -24,7 +24,7 @@ constexpr double kSlope = 0.1, kBase = 600.0, kPivot = 3072.0, kWorld = 32 * 512
 constexpr uint32_t kW = 480, kH = 270;
 }
 
-int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath)
+int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot)
 {
 	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : "OpenGL";
 	const char* pname = path == HE::RenderPath::Deferred ? "deferred" : "forward";
@@ -46,6 +46,7 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 		auto window = std::make_unique<HE::Window>(wp);
 		std::unique_ptr<IRenderer> renderer = RendererFactory::Create(backend);
 		ContentManager content;
+		if (!arrayRoot.empty()) content.setEngineContentRoot(arrayRoot);
 		renderer->SetContentManager(&content);
 		renderer->Initialize(window.get());
 		renderer->SetRenderPath(path);
@@ -58,6 +59,7 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 		HE::LandscapeRuntime rt;
 		HE::LandscapeRuntimeConfig cfg;
 		cfg.store.byteBudget = 80ull * 1024 * 1024;
+		if (!arrayRoot.empty()) { cfg.textureGroup = 1; cfg.textureMeters = 8.0f; }   // Forest
 		std::string err;
 		if (!rt.beginFromPack(packPath, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
 		const auto t0 = std::chrono::steady_clock::now();
@@ -93,6 +95,8 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 			const glm::mat4 proj = glm::perspective(glm::radians(70.0f), static_cast<float>(kW) / static_cast<float>(kH), 2.0f, 20000.0f);
 			const glm::dmat4 inv = glm::inverse(glm::dmat4(proj * ov.view));
 			int expectedGround = 0, groundGreen = 0, expectedSky = 0, skyGreen = 0;
+			double contrast = 0.0;   // mean |luminance step| between horizontal neighbours on the nearest ground: a flat lit plane is smooth, a texture is not
+			int contrastN = 0;
 			for (uint32_t py = 0; py < kH; ++py)
 				for (uint32_t px = 0; px < kW; ++px)
 				{
@@ -110,13 +114,29 @@ int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::
 					}
 					const uint8_t* c = &rgba[(static_cast<size_t>(py) * kW + px) * 4];
 					const bool green = c[1] > c[0] + 6 && c[1] > c[2] + 6;
-					if (hit && t < 4000.0) { ++expectedGround; groundGreen += green ? 1 : 0; }
+					if (hit && t < 4000.0)
+					{
+						++expectedGround; groundGreen += green ? 1 : 0;
+						if (px + 1 < kW && py > kH * 85 / 100)   // the nearest ground: farther out one pixel is many texture tiles and the mips average it out
+						{
+							const uint8_t* n = c + 4;
+							const double l0 = 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2], l1 = 0.3 * n[0] + 0.59 * n[1] + 0.11 * n[2];
+							contrast += std::abs(l1 - l0);
+							++contrastN;
+						}
+					}
 					else if (!hit) { ++expectedSky; skyGreen += green ? 1 : 0; }
 				}
 			std::printf("  expected ground px %d, green %d (%.1f %%); expected sky px %d, green %d\n", expectedGround, groundGreen,
 			            100.0 * groundGreen / std::max(expectedGround, 1), expectedSky, skyGreen);
+			if (!arrayRoot.empty())
+			{
+				std::printf("  world-uv ground from the Forest array: green %.1f %%, mean step between neighbours %.2f/255\n", 100.0 * groundGreen / std::max(expectedGround, 1), contrast / std::max(contrastN, 1));
+				if (groundGreen > expectedGround / 5) fail("the ground is no longer the flat green", std::to_string(groundGreen) + " of " + std::to_string(expectedGround));
+				if (contrast / std::max(contrastN, 1) < 0.6) fail("the ground has texture in it");
+			}
 			if (expectedGround < static_cast<int>(kW * kH / 10)) fail("the camera sees the ground");
-			if (groundGreen < expectedGround * 97 / 100) fail("the landscape is drawn where the plane is", std::to_string(groundGreen) + " of " + std::to_string(expectedGround));
+			if (arrayRoot.empty() && groundGreen < expectedGround * 97 / 100) fail("the landscape is drawn where the plane is", std::to_string(groundGreen) + " of " + std::to_string(expectedGround));
 			if (skyGreen > expectedSky * 3 / 100) fail("nothing green above the horizon", std::to_string(skyGreen) + " of " + std::to_string(expectedSky));
 		}
 		renderer->SetLandscapeProvider({});
