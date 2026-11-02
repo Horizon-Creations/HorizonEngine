@@ -654,9 +654,10 @@ TEST_CASE("heApplyFogT on Vulkan: binding 34 is a fragment sampler of the materi
     CHECK(vk::kBindings[vk::kPreClusterBindingCount - 1].binding == vk::kFogVolumeBinding);
 
     // A device that cannot hold the 18th sampler compiles without it (and without the row).
-    HE::MaterialShaderLibrary small;
-    small.setSpirvFogVolume(false);
-    CHECK_FALSE(uses34(small, 0xF06F21ull));
+    // (Not named `small`: rpcndr.h #defines it to `char` on Windows - MSVC C2628, CI run 41529249343.)
+    HE::MaterialShaderLibrary noFogLib;
+    noFogLib.setSpirvFogVolume(false);
+    CHECK_FALSE(uses34(noFogLib, 0xF06F21ull));
 
     // The OPAQUE name never touches the volume on Vulkan (the Apply pass owns the opaque fog).
     const std::string opaque =

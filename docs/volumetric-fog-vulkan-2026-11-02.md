@@ -1,7 +1,6 @@
 # Volumetric fog on Vulkan (Thema 225, step 5), 2026-11-02
 
-Plan: `docs/volumetric-fog-plan.md`. Metal: `docs/volumetric-fog-metal-2026-11-02.md`. The step was **stopped by the queen
-before it was finished**; this is the state at that moment. Nothing here has ever run on a Vulkan device.
+Plan: `docs/volumetric-fog-plan.md`. Metal: `docs/volumetric-fog-metal-2026-11-02.md`. The step was stopped once by the queen and then finished (see Verified).
 
 ## What is in place (all in the working tree commit, see the Hive post)
 
@@ -20,14 +19,16 @@ previous frame the same form; `fogViewProj` for `heApplyFogT` is the plain `kVul
 `supportsVolumetricFog = m_fogReady && m_postFxReady`; `m_fogReady` only if every step of `createFogPipelines` succeeded.
 
 ## Verified
-- `VulkanRenderer.cpp` passes `c++ -fsyntax-only -Wall -Wextra` against MoltenVK 1.4.1 headers (negative control without the include fails on `vulkan/vulkan.h`).
-- The three kernels, assembled from the real preamble text, compile with `glslangValidator -V` and pass `spirv-val` (inject.comp, integrate.comp, apply.frag). spirv-cross reflection lists the 13 preamble samplers + 35/36/37/38 for inject, 37/38/36 for integrate, 15/34/36/39 for apply: the tables match that.
-- `he_tests` build was at 774/1052 with 0 compile errors when stopped.
+- `VulkanRenderer.cpp` passes `c++ -fsyntax-only -Wall -Wextra` against MoltenVK 1.4.1 (negative control without the include fails); MSVC compiled it in the Windows CI job without a Vulkan error.
+- The three kernels (real preamble text) compile with `glslangValidator -V` and pass `spirv-val`.
+- `he_tests` (macOS, full build): `*test_fog_volume.cpp` 15/15 (incl. the 2 new Vulkan cases), `*test_material_graph.cpp` 109/109, `*test_engine_materials.cpp` 15/15 (the Water `samplers <= 16` check still holds).
+- **lavapipe (CI run 41529249343, job "Linux · Vulkan (lavapipe)"): `he_vk_imagetests` 16/16 cases passed, validation layer on.** Case `fog`: m0/m1/m1_parity/m1_def all exit 0, `validation(dump)=0`, log witness "volumetric fog frame (grid 96x54x32 ...)" present at fogMode 1 and absent at 0. m0 vs m1 mean |Δ| 20.15 (99.9 % of pixels changed, max 63), so the volume reaches the frame; m1 vs m1_def (forward vs deferred) mean |Δ| 18.3 and m0 vs m1_parity 8.4: report-only, not judged. All 15 other cases (mode 0) kept their thresholds, which is the mode-0 witness (not a bit-exact A/B).
 
 ## NOT verified
-- The `he_tests` run (`*test_fog_volume.cpp`, `*test_material_graph.cpp`, `*test_engine_materials.cpp`) never ran. Expect to check: `test_engine_materials.cpp:~1245` (`samplers <= 16` for the Water module now has binding 34 as one more sampler; if it fails, assert 16 on a library with `setSpirvFogVolume(false)` and 17 on the default); the exact set of statically used inject bindings (the test requires coverage, not equality).
-- Nothing ran on any Vulkan device (this Mac has none): all barriers, layouts, the Apply render-pass split, validation cleanliness, the shaft look, mode-0 pixel identity. The lavapipe `fog` case is the first execution; its mean-|Δ| floor 0.5 is a guess. CI was not started.
-- `HE_HAVE_SHADERC=OFF` Vulkan builds (the code is `#if`-guarded; not built).
+- Real Vulkan GPU (RTX 4070 / NN-WS03): only lavapipe ran it.
+- The shaft look. I opened fog_m0/m1/m1_def.bmp (artifact `vulkan-lavapipe-shots`): m1 is plainly fogged (sky and wall hazed toward the sun-side glow, horizon band in the right place, not mirrored), but the FOGTEST camera ends up so close to the wall that the slits are only 2-3 thin gaps and no shafts can be read. The scene needs a farther camera / wider slits before this case can show witness (a). m1 vs m1_def differ by 18 steps (deferred is lighter, greyer; the ground colour differs too): I could not tell fog from the forward/deferred lighting difference without an m0_def shot; Metal had 1 LSB, so compare deferred m0 vs m1 before calling the deferred Apply split right.
+- A bit-exact mode-0 A/B against `release/0.8.0`; `HE_HAVE_SHADERC=OFF` Vulkan builds; TAA with fog on.
+- Windows test build was red in run 41529249343 for a test-only reason (`small` is a macro there, fixed in the follow-up commit); the Windows result of the fixed commit and the macOS job are in the newer CI run (see the Hive post).
 
 ## Decisions
 - Binding 34 is always in the layout (translucent SPIR-V uses it statically); a device below 18 fragment samplers drops it (and compiles without `HE_FOG_VOLUME`) before it drops the weightmap row; fog is then off.
@@ -35,6 +36,6 @@ previous frame the same form; `fogViewProj` for `heApplyFogT` is the plain `kVul
 - Dummy 3D lives with the material resources, not with the fog pipelines (else a failed fog build leaves a layout row nothing can bind).
 
 ## Next steps
-1. `cmake --build cmake-build-release --target he_tests -j 8` to the end, then `he_tests --source-file=*test_fog_volume.cpp` and the two material test files; fix the Water sampler bound if needed.
-2. Push, `gh workflow run CI --ref <branch>`; read job `vulkan-lavapipe` case `fog` (validation messages, the four BMPs in the `vulkan-lavapipe-shots` artifact: shafts in m1, m0 unchanged).
+1. Move the FOGTEST camera back / widen the slits in `he_vk_imagetests.py` (case `fog`) so shafts are visible, add an `m0_def` variant, then judge shafts and the forward/deferred gap.
+2. Tighten the `fog` thresholds from the printed numbers (m0 vs m1 20.15 -> a floor near 10; consider a parity bound once m1_parity is understood).
 3. Step 6 (D3D) can copy the table approach; step 7: weather hooks, default `fogMode`.
