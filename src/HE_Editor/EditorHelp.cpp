@@ -8160,9 +8160,11 @@ namespace
 	  "and may make the atlas larger. A mesh that an entity in an exported scene "
 	  "draws with a material of its own (a Material component override, whole mesh "
 	  "or one slot) is left as it is, because the override would read its texture "
-	  "through the atlas UVs. Overrides a script sets at run time, and meshes "
-	  "inside prefab assets, are not seen: switch Export bake off in the Mesh "
-	  "Viewer for those meshes. Needs Pack only referenced assets. Saved in the profile.",
+	  "through the atlas UVs. The scan covers every scene (placed prefabs are "
+	  "plain entities there) and the component body of every HorizonCode class. "
+	  "A material a script assigns at run time is not seen: switch Export bake "
+	  "off in the Mesh Viewer for such a mesh. Needs Pack only referenced "
+	  "assets. Saved in the profile.",
 	  "", "export#overview" },
 	{ "Export/Match the game's backend", "Match the game's backend",
 	  "Bake the precompiled material shaders for the one graphics backend the "

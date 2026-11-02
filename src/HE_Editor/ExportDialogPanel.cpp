@@ -20,6 +20,7 @@
 #include <HorizonCode/HcCompiledLoader.h>  // compiledLibraryName
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
+#include <HorizonScene/EntityHost.h>         // a class's component body, for the same scan
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ParticleGraph/ParticleGraph.h>
@@ -1495,6 +1496,24 @@ void startExport(AppContext& ctx)
                         ec2.clear();
                         sit.increment(ec2);
                     }
+                }
+
+                // Entities that only exist at run time come from HorizonCode classes
+                // (entity.spawnClass): their component body is the template, and a mesh
+                // override in it is as good as one in a scene. Placed prefabs need no
+                // such pass, they are plain entities in the scenes scanned above.
+                for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager,
+                                                              HE::AssetType::HorizonCodeClass))
+                {
+                    const HE::UUID classId = ctx.contentManager->loadAsset(c.path);
+                    const HorizonCodeClassAsset* cls = ctx.contentManager->getHorizonCodeClass(classId);
+                    if (!cls) continue;
+                    const std::vector<uint8_t> body = EntityHost::inheritedComponents(*ctx.contentManager, *cls);
+                    if (body.empty()) continue;
+                    HorizonWorld classWorld;
+                    SceneSerializer classSer;
+                    if (classSer.instantiatePrefab(classWorld, body) != entt::null)
+                        HE::collectMeshesWithMaterialOverrides(classWorld, overriddenMeshes);
                 }
 
                 // App-wide GameInstance graph (project GameInstance.hcode). Packed

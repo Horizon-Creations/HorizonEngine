@@ -77,7 +77,14 @@ Jeder Schritt wird einzeln committet und gepusht.
 **Gemessen:** Foliage-Testprojekt, 63 Meshes, alle mit nur einem Material-Slot: nichts zu verschmelzen, das Pak bleibt bei 216141063 Bytes (gleich mit und ohne Bake).
 Die Zusammenfassung im Export-Log sagt das ("63 with one material slot").
 
-**Bewusste Folgen:** Ein gebackenes Mesh hat nur noch einen Slot (plus die nicht gebackenen); Slot-Overrides einer Entity wirken dort nicht mehr. Der Bake ist der erste
+**Overrides:** Ein gebackenes Mesh hat nur noch einen Slot, und seine UVs liegen auf dem Atlas; ein Override-Material würde seine eigene Textur über diese UVs lesen
+(falscher Ausschnitt). Deshalb backt der Export kein Mesh, das eine Entity mit einem Material-Override zeichnet (`HE::collectMeshesWithMaterialOverrides`,
+`PackSettings::bakeSkipMeshes`). Gescannt werden alle Szenen (platzierte Prefabs sind dort gewöhnliche Entities, eine Kopie, kein Verweis auf das Asset) und der
+Komponenten-Körper jeder HorizonCode-Klasse (`entity.spawnClass` ist der einzige Weg, wie Entities erst zur Laufzeit entstehen). Nicht gesehen: ein Material, das
+ein Skript zur Laufzeit zuweist. Idee, nicht umgesetzt: Slots erhalten, indem jede Sektion eine Instanz des gemeinsamen Masters mit UV-Skalierung und -Offset als Parameter
+bekommt (Original-UVs bleiben; N Sektionen bleiben N Draw-Calls).
+
+**Bewusste Folgen:** Der Bake ist der erste
 Schritt, der die Gestalt eines Pak-Assets verändert; Frames sind nicht bitgleich zum Original (Resample), der Merge-Modus gibt dieselben Texel.
 
 ## Handoff
