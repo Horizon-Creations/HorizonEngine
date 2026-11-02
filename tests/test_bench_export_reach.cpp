@@ -29,6 +29,9 @@
 
 #include <chrono>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -101,9 +104,31 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 		return variants.empty() ? none : HE::encodeMaterialShaderVariants(variants);
 	};
 
+	// HE_REACH_EXTRA=<dir> (the HE_DUMP_HLODEXPORT output of the editor: index.txt + the assets): the baked far landscape
+	// goes into the pak as extra assets, the way the export dialog hands them over. HE_REACH_ONLYREACHED=1 skips the
+	// run without the reachability filter.
+	std::vector<Hpak::PackSettings::ExtraAsset> extras;
+	if (const char* ex = std::getenv("HE_REACH_EXTRA"); ex && *ex)
+	{
+		std::ifstream index(fs::path(ex) / "index.txt");
+		std::string line;
+		while (std::getline(index, line))
+		{
+			unsigned long long hi = 0, lo = 0; unsigned type = 0; char path[512] = {};
+			if (std::sscanf(line.c_str(), "%llx %llx %u %511[^\n]", &hi, &lo, &type, path) != 4) continue;
+			Hpak::PackSettings::ExtraAsset ea;
+			ea.id.hi = hi; ea.id.lo = lo; ea.type = static_cast<uint16_t>(type); ea.relPath = path;
+			std::ifstream f(fs::path(ex) / path, std::ios::binary);
+			ea.bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+			if (!ea.bytes.empty()) extras.push_back(std::move(ea));
+		}
+		std::printf("REACH extra assets: %zu\n", extras.size());
+	}
 	for (const bool reached : { false, true })
 	{
+		if (!reached && std::getenv("HE_REACH_ONLYREACHED")) continue;
 		ExportSettings s;
+		s.extraAssets = extras;
 		s.compress = false;                       // Store: the entries stay readable
 		s.textureCompression = 1;                 // ASTC, as the editor picks for Metal
 		// HE_REACH_TEXCOMP=3 (BC3) for a game that runs on macOS OpenGL, which samples no ASTC.

@@ -52,7 +52,7 @@ TEST_CASE("Baked far-landscape ids are deterministic and distinct per chunk and 
     CHECK(HE::landscape::hlodAssetPath(kTerrainId, 1, 2, HlodAsset::Albedo).rfind(HE::landscape::kHlodAssetFolder, 0) == 0);
 }
 
-TEST_CASE("buildHlodAssets makes three mipped textures and a material that names them")
+TEST_CASE("buildHlodAssets makes three single-level textures and a material that names them")
 {
     HE::landscape::HlodChunkRect rect;
     rect.min = glm::vec2(-32.0f, 0.0f);
@@ -83,10 +83,12 @@ TEST_CASE("buildHlodAssets makes three mipped textures and a material that names
         REQUIRE(t != nullptr);
         CHECK(t->width == 16);
         CHECK(t->height == 16);
-        CHECK(t->mipLevels == 5);                 // 16, 8, 4, 2, 1
+        // Single level on purpose: the pack builds the mip chain and block-compresses it, and does neither for a
+        // texture that arrives with mips already baked (the first real export grew 270 MB that way).
+        CHECK(t->mipLevels == 1);
         CHECK(t->layers == 1);
         CHECK(t->srgb == (w == HlodAsset::Albedo)); // colour is sRGB, the normal and the surface are data
-        CHECK(t->data.size() == HE::textureArraySliceBytes(16, 16, 5));
+        CHECK(t->data.size() == 16u * 16u * 4u);
         CHECK(t->data[0] == (w == HlodAsset::Albedo ? 200 : w == HlodAsset::Normal ? 128 : 90));
     }
 }

@@ -10726,6 +10726,56 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		baker.end();
 	}
+	// HE_DUMP_HLODEXPORT=<dir> (Thema 228): what the export dialog does for the far landscape, on the open project: every
+	// scene under Content/ is loaded into a scratch world and its Auto Landscapes are baked (HE_DUMP_HLODBUDGET = MB,
+	// default 512). The assets go to <dir>/<their addressed path> and <dir>/index.txt lists them ("<hi> <lo> <type> <path>",
+	// ids in hex) for HE_REACH_EXTRA of the export bench; the log has the same lines the export log would have.
+	if (const char* hx = std::getenv("HE_DUMP_HLODEXPORT"); hx && *hx && m_editorWorld && r && m_projectLoaded)
+	{
+		namespace fs = std::filesystem;
+		const fs::path outDir(hx);
+		std::error_code ec;
+		fs::create_directories(outDir, ec);
+		const fs::path root = fs::path(m_projectManager.currentProject().path).parent_path();
+		HE::landscape::HlodExportOptions o;
+		if (const char* hb = std::getenv("HE_DUMP_HLODBUDGET"); hb && *hb)
+			o.budgetBytes = static_cast<uint64_t>(std::max(1, std::atoi(hb))) << 20;
+		std::vector<HE::landscape::HlodAssetBlob> blobs;
+		std::vector<HE::UUID> seen;
+		HE::landscape::HlodExportStats total;
+		fs::recursive_directory_iterator it(root / "Content", fs::directory_options::skip_permission_denied, ec), end;
+		for (; !ec && it != end; it.increment(ec))
+		{
+			if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") continue;
+			HorizonWorld w;
+			SceneSerializer ser;
+			if (!ser.load(w, it->path(), SerializeFormat::JSON)) continue;
+			const std::string label = it->path().filename().string();
+			const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
+				w, m_editorWorld.get(), contentManager(), *r, o, blobs, seen,
+				[&](const std::string& s) { HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODEXPORT %s: %s", label.c_str(), s.c_str()); });
+			total.terrains += st.terrains; total.chunks += st.chunks; total.skipped += st.skipped; total.ms += st.ms;
+			total.downscaled += st.downscaled; total.plannedBytes += st.plannedBytes;
+		}
+		std::ofstream index(outDir / "index.txt");
+		uint64_t bytes = 0;
+		for (const HE::landscape::HlodAssetBlob& b : blobs)
+		{
+			const fs::path file = outDir / b.relPath;
+			fs::create_directories(file.parent_path(), ec);
+			std::ofstream f(file, std::ios::binary);
+			f.write(reinterpret_cast<const char*>(b.bytes.data()), static_cast<std::streamsize>(b.bytes.size()));
+			bytes += b.bytes.size();
+			char line[256];
+			std::snprintf(line, sizeof(line), "%016llx %016llx %u ", static_cast<unsigned long long>(b.id.hi),
+			              static_cast<unsigned long long>(b.id.lo), static_cast<unsigned>(b.type));
+			index << line << b.relPath << "\n";
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODEXPORT %u landscape(s), %u chunk(s) baked, %u skipped, %u below what the screen wants, "
+		            "%zu asset file(s), %.1f MiB raw loose, planned cooked %.1f MiB, %.0f ms",
+		            total.terrains, total.chunks, total.skipped, total.downscaled, blobs.size(),
+		            double(bytes) / (1024.0 * 1024.0), double(total.plannedBytes) / (1024.0 * 1024.0), total.ms);
+	}
 	// HE_DUMP_HLODFAR=<side> (Thema 228): the baked far landscape against the real one. The landscape's LOD distances are
 	// pulled in (HE_DUMP_HLODFARSCALE, default 0.1) so the chunks draw their far levels at the witness camera; the
 	// frame with the real material goes to <dump>.far_real.bmp, then every chunk is baked at <side>, the assets are

@@ -880,8 +880,13 @@ namespace TerrainSystem
                         const auto mm = std::minmax_element(field.begin(), field.end());
                         fMin = *mm.first; fMax = *mm.second;
                     }
+                    // How many chunks found the export's baked far material (HorizonScene/LandscapeHlod.h).
+                    size_t bakedFar = 0;
+                    for (auto [ce, cc, lodc] : reg.view<TerrainChunkComponent, LODComponent>().each())
+                        if (cc.terrain == te && lodc.levels.size() > 1 && lodc.levels[1].materialId != HE::UUID{}) ++bakedFar;
                     HE_LOG_INFO(Terrain, "%s", ("TerrainSystem: rebuilt " + std::to_string(chunksBuilt) +
                         " of " + std::to_string(g.chunksPerSide * g.chunksPerSide) + " chunks (" +
+                        std::to_string(bakedFar) + " with a baked far material) (" +
                         (rebuildAll ? "all" : "region") + "), res " + std::to_string(res) +
                         ", sculptHeights " + std::to_string(tc.sculptHeights.size()) +
                         ", field height " + std::to_string(fMin) + " .. " + std::to_string(fMax)).c_str());

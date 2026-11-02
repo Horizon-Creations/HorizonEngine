@@ -23,6 +23,7 @@
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/EntityActive.h>
+#include <HorizonScene/LODSystem.h>
 #include "TestFsUtil.h"
 #include <HorizonScene/Components/TransformComponent.h>
 #include <HorizonScene/Components/MeshComponent.h>
@@ -408,6 +409,62 @@ TEST_CASE("FrameCull::refine: every object gets the bound the serial walk gives 
 		}
 		CHECK(same);
 		CHECK(fc.holds(a, 5));
+	}
+}
+
+TEST_CASE("RenderExtractor: a LOD level with a material of its own draws with it, the other levels with the entity's")
+{
+	// The baked far landscape: levels 1.. carry a material (LODLevel::materialId). The level-0 mesh is the entity's
+	// own; the far meshes are NOT LOD0, which is the path that asks the slot resolver for the entity's material and
+	// used to hand it back over the level's (found on a real exported game: 252 swapped objects, an identical frame).
+	ContentManager cm;
+	auto mesh = [&](const char* name, bool twoSections) {
+		StaticMeshAsset m; m.type = HE::AssetType::StaticMesh; m.name = name;
+		m.indices = { 0, 1, 2, 3, 4, 5 };
+		if (twoSections)
+		{
+			MeshSection a; a.indexCount = 3; MeshSection b; b.indexOffset = 3; b.indexCount = 3;
+			m.sections = { a, b };
+		}
+		m.boundsMin[0] = m.boundsMin[1] = m.boundsMin[2] = -1.0f;
+		m.boundsMax[0] = m.boundsMax[1] = m.boundsMax[2] =  1.0f;
+		return cm.registerStaticMesh(m);
+	};
+	MaterialAsset ma; ma.type = HE::AssetType::Material; ma.name = "landscape";
+	const HE::UUID land = cm.registerMaterial(ma);
+	ma.name = "far"; const HE::UUID far = cm.registerMaterial(ma);
+
+	for (const bool twoSections : { false, true })
+	{
+		CAPTURE(twoSections);
+		const HE::UUID m0 = mesh("lod0", twoSections), m1 = mesh("lod1", twoSections), m2 = mesh("lod2", twoSections);
+		HorizonWorld world;
+		auto& reg = world.registry();
+		auto e = world.createEntity("Chunk");
+		reg.emplace<TransformComponent>(e, TransformComponent{ .position = glm::vec3(0.f) });
+		MeshComponent mc; mc.meshAssetId = m0;
+		reg.emplace<MeshComponent>(e, mc);
+		MaterialComponent mat; mat.materialAssetId = land;
+		reg.emplace<MaterialComponent>(e, mat);
+		LODComponent lod;
+		lod.levels = { { m0, 10.f }, { m1, 50.f, far }, { m2, 1e9f, far } };
+		reg.emplace<LODComponent>(e, lod);
+
+		RenderExtractor ex; ex.setContentManager(&cm);
+		const std::pair<glm::vec3, HE::UUID> cases[] = {
+			{ glm::vec3(5.f, 0.f, 0.f),   land },    // level 0: the entity's material
+			{ glm::vec3(30.f, 0.f, 0.f),  far },     // level 1
+			{ glm::vec3(500.f, 0.f, 0.f), far },     // level 2
+		};
+		for (const auto& [cam, want] : cases)
+		{
+			LODSystem::update(world, cam);
+			RenderWorld rw;
+			ex.extract(world, rw, 1.0f);
+			REQUIRE(rw.objects.size() == 1);
+			CHECK(rw.objects[0].materialAssetId == want);
+			if (want == far) CHECK(rw.objects[0].sections.empty());   // a level material is a whole-mesh draw
+		}
 	}
 }
 

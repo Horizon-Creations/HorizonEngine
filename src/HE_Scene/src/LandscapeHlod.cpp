@@ -48,23 +48,17 @@ namespace HE::landscape
             return true;
         }
 
-        // The picture as a 2D texture with its whole mip chain (the 2x2 box filter every backend then samples
-        // alike): a one-slice "array" is the engine's builder for that.
+        // The picture as a plain single-level RGBA8 texture, like every loose texture: the pack builds the mip chain
+        // and block-compresses it (a texture that arrives with mips already baked is not cooked again, which cost
+        // 270 MB on the first real export), and the editor's renderer generates mips at upload.
         bool makeTexture(const std::vector<uint8_t>& rgba, uint32_t side, bool srgb, const std::string& name,
-                         const std::string& path, const HE::UUID& id, TextureAsset& out, std::string* why)
+                         const std::string& path, const HE::UUID& id, TextureAsset& out, std::string*)
         {
-            TextureAsset base;
-            base.type = HE::AssetType::Texture;
-            base.name = name; base.path = path; base.id = id;
-            base.width = base.height = side; base.channels = 4; base.mipLevels = 1;
-            base.format = ::TextureFormat::RGBA8; base.srgb = srgb;
-            base.data = rgba;
-            std::vector<const TextureAsset*> slices{ &base };
-            TextureAsset built;
-            if (!buildTextureArray(slices, built, /*bakeMips=*/true, why)) return false;
-            built.type = HE::AssetType::Texture;
-            built.name = name; built.path = path; built.id = id;
-            out = std::move(built);
+            out.type = HE::AssetType::Texture;
+            out.name = name; out.path = path; out.id = id;
+            out.width = out.height = side; out.channels = 4; out.mipLevels = 1;
+            out.format = ::TextureFormat::RGBA8; out.srgb = srgb;
+            out.data = rgba;
             return true;
         }
 
