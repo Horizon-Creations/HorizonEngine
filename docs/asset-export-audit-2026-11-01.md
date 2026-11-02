@@ -349,12 +349,32 @@ grün bis auf den bekannten `scanContentDirectory`-Fehler dieses Rechners.
 Wiederholbar: `HE_REACH_SHADERS=16` (Bit `1u << Metal`) im Bench `tests/test_bench_export_reach.cpp` bäckt wie der Editor-Export.
 
 **Nicht verifiziert:**
-- **OpenGL:** Code kompiliert und die Bake-/Codec-Tests laufen, das Spiel lief nicht mit einem gebackenen GL-Pak.
+- **OpenGL:** inzwischen im Lauf geprüft, siehe Abschnitt 13.
 - **Metal forward instanziert (gebacken):** Der Foliage-Lauf war Deferred, der Forward-Instanz-Pfad mit gebackenem Vertex lief nicht.
 - **Vulkan und D3D11/12:** Das Pak bäckt für sie weiter keine Zwillinge, ihre Renderer lesen sie nicht (G-Buffer wird dort weiter beim Laden übersetzt, ein
   Batch gebackener Materialien zeichnet in der Schleife). Auf dem Mac nicht prüfbar.
 - **Editor-Export und Dialog** (die Bake-Funktion im Editor ist per `-fsyntax-only` geprüft, nicht gebaut), Windows und Linux.
 - Kein Zeitvergleich der Ladezeit oder der Draw-Calls mit und ohne Instanzierung.
+
+## 13. Deferred als Standard, OpenGL mit gebackenem Pak im Lauf
+
+**Deferred als Standard:** `EditorConfig::RenderPath` (`src/HE_Editor/EditorConfig.h`), `ProjectSettings` (`renderPath`, Vorgabe 1) und der
+Rückfall in `GameApplication.cpp` (`getCustomConfigInt("RenderPath", 1)`) stehen auf 1. Ein Backend ohne `supportsDeferredRendering` bleibt bei
+Forward. Gespeicherte Projekte behalten ihren Wert. Das Golden `tests/fixtures/game_build_config/HEGameBuildConfig.h` ist neu erzeugt
+(`"renderPath": 1`, sonst nichts).
+
+**OpenGL mit gebackenem Pak (macOS, GL 4.1, Foliage-Testprojekt, Deferred, `HE_SKY_TIME=30`, 300 Frames, Capture bei Frame 250):**
+Zwei echte Exporte (Kontrolle ohne PSHD, `HE_REACH_SHADERS=1` mit PSHD), beide mit `GameBackend` OpenGL. Die Frames sind byte-gleich
+(md5 gleich), 0 Fehler, `glGetError=0` im ersten Frame. Das Log der gebackenen Variante zeigt "PRECOMPILED variant, plain", "G-buffer" und
+"G-buffer, instanced" aus dem Pak; die Kontrolle nur "canonical GLSL via he::shaderc". Pak 215,10 gegen 215,98 MB (+0,9 MB).
+Die geclusterten Paare (GLSL 4.30) kann macOS nicht benutzen, sie sind hier also nicht gelaufen.
+
+**Falle:** Ein verstecktes Fenster (`HE_HIDDEN_WINDOW`) mit OpenGL und eingeschaltetem VSync blieb nach Frame 1 stehen (0 % CPU, Hauptthread in
+einer SDL-Bedingungsvariable, `SDL_GL_SwapWindow`). Das betraf Kontrolle und gebackene Variante gleich, hat also nichts mit dem Pak zu tun.
+Abhilfe für Bildläufe: `GameVSync` = false in der `config.json` des Exports. Die Ursache im Fenstercode ist nicht behoben.
+
+**Nicht verifiziert:** Der erste Frame der gebackenen Variante zeichnete 19 Draw-Calls, die Kontrolle 18 (der gespeicherte Frame 250 ist
+gleich); den Grund habe ich nicht verfolgt. Kein Lauf mit Forward auf GL. Windows und Linux.
 
 ## Handoff
 
@@ -366,6 +386,6 @@ Wiederholbar: `HE_REACH_SHADERS=16` (Bit `1u << Metal`) im Bench `tests/test_ben
 - **Not verified:** siehe Abschnitt 7.
 - **Decisions taken:** Schalter standardmäßig an, weil die Arrays 94 % des Shipping-Paks sind. Means immer backen, auch bei BC3 (genauer und ohne Dekodieren).
 - **Decisions suggested, not taken:** Kein `kPackPipelineVersion`-Bump (das Flag `cookTextureArrays` steckt schon im Fingerprint, vorher gecookte Arrays gab es nur in Tests).
-- **Pending:** Export aus dem Editor einmal von Hand ansehen (Dialog mit der neuen Checkbox, Log, gebackene Varianten). Punkt 5 geklärt (Abschnitt 11), die drei Arbeiten daraus umgesetzt (Abschnitt 12, Metal geprüft, GL nur kompiliert). Offen: Vulkan/D3D-Zwillinge (nicht auf dem Mac prüfbar), Metal forward instanziert mit gebackenem Vertex im Lauf ansehen. Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
+- **Pending:** Export aus dem Editor einmal von Hand ansehen (Dialog mit der neuen Checkbox, Log, gebackene Varianten). Punkt 5 geklärt (Abschnitt 11), die drei Arbeiten daraus umgesetzt (Abschnitt 12, Metal geprüft, GL nur kompiliert). GL gebacken im Lauf geprüft (Abschnitt 13), Deferred ist Standard. Offen: Vulkan/D3D-Zwillinge (nicht auf dem Mac prüfbar), Metal forward instanziert mit gebackenem Vertex im Lauf ansehen, verstecktes GL-Fenster mit VSync hängt. Startszene nur einmal: erledigt, Abschnitt 9 (`HpakWriter::addAlias`).
 - **Traps:** `grep --include` und zsh-Globs: `/usr/bin/grep -r --include='*.cpp'` mit Anführungszeichen; Ziel `src/HE_Editor/CMakeFiles/...o` baut den EngineSDK-Deploy mit (stört), für einzelne Dateien compdb nutzen; ein leeres `libHorizonImporters.a` nach abgebrochenem Build löschen.
-- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. GL mit einem gebackenen Pak laufen lassen (`GameBackend` OpenGL, Bench mit `HE_REACH_SHADERS=1`), falls das auf einem Rechner mit GL-Display geht.
+- **Next steps:** 1. Catania aus dem Editor exportieren (Profil Shipping) und auf Metal ansehen (die Paketgröße ist schon per `hpak_packer` gemessen). 2. Hängen des versteckten GL-Fensters mit VSync ansehen (`Window::SwapBuffers`, `SDL_GL_SetSwapInterval`), Unterschied 18/19 Draw-Calls im ersten GL-Frame erklären.

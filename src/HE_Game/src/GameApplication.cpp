@@ -3574,9 +3574,11 @@ void GameApplication::OnRender(float deltaTime)
 			r->SetAntiAliasingSettings(aa);
 
 			// Render path — same config.json key the editor's Preferences combo
-			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated.
+			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated. An absent
+			// key is the engine's default, Deferred (EditorConfig::RenderPath); a backend that
+			// cannot do it stays forward.
 			const bool deferredPath =
-				GlobalState::getInstance().getCustomConfigInt("RenderPath", 0) == 1 &&
+				GlobalState::getInstance().getCustomConfigInt("RenderPath", 1) == 1 &&
 				r->GetCapabilities().supportsDeferredRendering;
 			r->SetRenderPath(deferredPath ? HE::RenderPath::Deferred : HE::RenderPath::Forward);
 

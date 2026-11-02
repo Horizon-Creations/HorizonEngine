@@ -4124,8 +4124,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
 			? (clustered
-				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
-				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered, instanced (GLSL 4.30, no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)")
+				: gbuffer
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer (no runtime cross-compile)")
+				: (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)"))
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
