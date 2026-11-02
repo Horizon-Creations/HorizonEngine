@@ -21,6 +21,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
+#include <MaterialGraph/MaterialGraph.h>
 #include <material/MaterialShaderBake.h>
 #include <material/MaterialShaderLibrary.h>
 #include <nlohmann/json.hpp>
@@ -181,6 +182,24 @@ TEST_CASE("bench: generate a texture-heavy project (only with HE_GEN_PROJECT)")
 			m.type = HE::AssetType::Material; m.name = "M" + std::to_string(i);
 			m.path = "Materials/M" + std::to_string(i) + ".hasset";
 			m.texturePaths = { t.path };
+			if (std::getenv("HE_GEN_GRAPH"))
+			{
+				// A node-graph material (a coloured Base Color), so the export bakes per-backend shader
+				// variants for it and the game has to take them from the pak (HE_REACH_SHADERS).
+				HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+				int out = 0;
+				for (auto& n : g.nodes) if (n.type == HE::MatNodeType::Output) out = n.id;
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.2f + 0.8f * static_cast<float>(i % 5) / 4.0f;
+				g.findNode(col)->p[1] = 0.2f + 0.8f * static_cast<float>(i / 5) / 3.0f;
+				g.findNode(col)->p[2] = 0.3f;
+				REQUIRE(g.connect(col, 0, out, 0));
+				m.nodeGraphJson = HE::materialGraphToJson(g);
+				const HE::MatShaderGen gen = HE::generateFragment(g);
+				m.customShaderFragGlsl = gen.glsl;
+				m.customShaderGBufGlsl = gen.glslGBuffer;
+				m.texturePaths.clear();
+			}
 			REQUIRE(cm.saveAsset(m));
 			const float gx = static_cast<float>(i % 5) * 3.0f - 6.0f, gz = static_cast<float>(i / 5) * -3.0f;
 			entity("Cube" + std::to_string(i), {
@@ -205,4 +224,78 @@ TEST_CASE("bench: generate a texture-heavy project (only with HE_GEN_PROJECT)")
 		f << json({ { "name", "TexHeavy" }, { "startupScene", "Content/StartupScene.hescene" } }).dump(1);
 	}
 	std::printf("GEN project: %d textures of %dx%d in %s\n", count, size, size, root.string().c_str());
+}
+
+// One mesh of two quads on two different simple textured materials (the case the exporter's mesh
+// texture bake merges onto one material): HE_GEN_MESHBAKE_PROJECT=<empty folder>. The scene shows it
+// head on. Export it with and without HE_REACH_NOBAKE=1 and compare the game's frames. Not a test.
+TEST_CASE("bench: generate a two-material mesh project (only with HE_GEN_MESHBAKE_PROJECT)")
+{
+	namespace fs = std::filesystem;
+	const char* dirEnv = std::getenv("HE_GEN_MESHBAKE_PROJECT");
+	if (!dirEnv || !*dirEnv) return;
+	const fs::path root(dirEnv), content = root / "Content";
+	fs::create_directories(content);
+	using nlohmann::json;
+	const json rootId = json::array({ 7700229, 1 });
+	json ents = json::array(), kids = json::array();
+	uint64_t next = 1000;
+	auto entity = [&](const std::string& name, json comps)
+	{
+		const json id = json::array({ 7700229, ++next });
+		kids.push_back(id);
+		ents.push_back({ { "children", json::array() }, { "components", std::move(comps) }, { "name", name },
+		                 { "parent", rootId }, { "uuid", id } });
+	};
+	HE::UUID meshId;
+	{
+		ContentManager cm(content.string());
+		const char* names[2] = { "A", "B" };
+		std::vector<MaterialAsset> mats(2);
+		for (int i = 0; i < 2; ++i)
+		{
+			TextureAsset t;
+			t.type = HE::AssetType::Texture; t.name = names[i]; t.path = std::string("Tex/") + names[i] + ".hasset";
+			t.width = t.height = 128; t.channels = 4; t.srgb = true; t.data.resize(128 * 128 * 4);
+			for (int y = 0; y < 128; ++y)
+				for (int x = 0; x < 128; ++x)
+				{
+					uint8_t* p = &t.data[(static_cast<size_t>(y) * 128 + x) * 4];
+					const bool chk = ((x / 16) + (y / 16)) & 1;
+					p[0] = static_cast<uint8_t>(i == 0 ? (chk ? 230 : 40) : (chk ? 30 : 90));
+					p[1] = static_cast<uint8_t>(i == 0 ? (chk ? 120 : 30) : (chk ? 200 : 60));
+					p[2] = static_cast<uint8_t>(i == 0 ? 40 : (chk ? 230 : 120));
+					p[3] = 255;
+				}
+			REQUIRE(cm.saveAsset(t));
+			MaterialAsset& m = mats[static_cast<size_t>(i)];
+			m.type = HE::AssetType::Material; m.name = names[i]; m.path = std::string("Mats/") + names[i] + ".hasset";
+			m.texturePaths = { t.path };
+			REQUIRE(cm.saveAsset(m));
+		}
+		StaticMeshAsset mesh;
+		mesh.type = HE::AssetType::StaticMesh; mesh.name = "Two"; mesh.path = "Meshes/Two.hasset";
+		mesh.vertices = { 0,0,0,  1,0,0,  1,1,0,  0,1,0,   1.1f,0,0,  2.1f,0,0,  2.1f,1,0,  1.1f,1,0 };
+		mesh.normals  = { 0,0,1,  0,0,1,  0,0,1,  0,0,1,   0,0,1,  0,0,1,  0,0,1,  0,0,1 };
+		mesh.uvs      = { 0,0,  1,0,  1,1,  0,1,   0,0,  1,0,  1,1,  0,1 };
+		mesh.indices  = { 0,1,2, 0,2,3,   4,5,6, 4,6,7 };
+		mesh.materialPath = mats[0].path;
+		mesh.sections = { { 0, 6, mats[0].path, {} }, { 6, 6, mats[1].path, {} } };
+		REQUIRE(cm.saveAsset(mesh));
+		meshId = mesh.id;
+	}
+	entity("Two", { { "mesh", { { "asset", json::array({ meshId.hi, meshId.lo }) }, { "castsShadow", true },
+	                            { "receivesShadow", true }, { "visible", true }, { "lodBias", 0 } } },
+	                { "transform", { { "position", { -2.0, 0.0, 0.0 } }, { "rotation", { 0, 0, 0 } }, { "scale", { 2, 2, 2 } } } } });
+	entity("MainCamera", { { "camera", { { "fovDegrees", 60.0 }, { "nearPlane", 0.1 }, { "farPlane", 200.0 },
+	                                     { "isMain", true }, { "orthographic", false } } },
+	                       { "transform", { { "position", { 0, 1, 5 } }, { "rotation", { 0, 0, 0 } }, { "scale", { 1, 1, 1 } } } } });
+	entity("Sky", { { "environment", { { "timeOfDay", 0.38 }, { "sunIntensity", 2.2 }, { "dayNightCycle", false },
+	                                   { "autoAdvance", false }, { "cloudCoverage", 0.3 } } } });
+	ents.push_back({ { "children", kids }, { "name", "World" }, { "parent", nullptr }, { "uuid", rootId } });
+	{ std::ofstream f(content / "StartupScene.hescene", std::ios::trunc);
+	  f << json({ { "entities", ents }, { "version", "1.1" } }).dump(1); }
+	{ std::ofstream f(root / "MeshBake.heproj", std::ios::trunc);
+	  f << json({ { "name", "MeshBake" }, { "startupScene", "Content/StartupScene.hescene" } }).dump(1); }
+	std::printf("GEN mesh bake project in %s\n", root.string().c_str());
 }
