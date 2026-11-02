@@ -237,7 +237,9 @@ TEST_CASE("Mesh bake pass: switched off, or with a section that cannot be baked,
 		CHECK(r.replaced.empty());
 		CHECK(r.added.empty());
 		CHECK(r.declined == 1);
-		REQUIRE_FALSE(r.notices.empty());
-		CHECK(r.notices[0].find("fewer than two simple sections") != std::string::npos);
+		// notices[0] is always the summary line (runPass inserts it in front at the end);
+		// the per-mesh decline reason is notices[1].
+		REQUIRE(r.notices.size() > 1);
+		CHECK(r.notices[1].find("fewer than two simple sections") != std::string::npos);
 	}
 }
