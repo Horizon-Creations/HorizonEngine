@@ -106,7 +106,8 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
-#include <HorizonScene/LandscapeHlodBaker.h>  // HE_DUMP_HLODBAKE witness
+#include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
+#include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -10715,6 +10716,106 @@ void EditorApplication::dumpFrameHeadless()
 			}
 		}
 		baker.end();
+	}
+	// HE_DUMP_HLODFAR=<side> (Thema 228): the baked far landscape against the real one. The landscape's LOD distances are
+	// pulled in (HE_DUMP_HLODFARSCALE, default 0.1) so the chunks draw their far levels at the witness camera; the
+	// frame with the real material goes to <dump>.far_real.bmp, then every chunk is baked at <side>, the assets are
+	// loaded the way a pak mount would give them, the chunks rebuild (they find the baked material by id) and the
+	// frame with it goes to <dump>.far_baked.bmp. The log has the difference between the two and how many far levels
+	// carried the baked material.
+	if (const char* hf = std::getenv("HE_DUMP_HLODFAR"); hf && *hf && m_editorWorld && r)
+	{
+		const unsigned side = static_cast<unsigned>(std::max(8, std::atoi(hf)));
+		const char* hs = std::getenv("HE_DUMP_HLODFARSCALE");
+		const float lodScale = (hs && *hs) ? static_cast<float>(std::atof(hs)) : 0.1f;
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		const glm::vec3 camPos = m_editorCamera.position();
+		auto settleCapture = [&](std::vector<uint8_t>& px, uint32_t& pw, uint32_t& ph) {
+			for (int i = 0; i < 6; ++i)
+			{
+				r->Render();
+				std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			}
+			return r->CaptureViewport(px, pw, ph);
+		};
+		if (land == entt::null)
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: no landscape in the scene");
+		else
+		{
+			wreg.get<TerrainComponent>(land).lodDistanceScale = lodScale;
+			wreg.get<TerrainComponent>(land).dirty = true;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			LODSystem::update(*m_editorWorld, camPos);
+			std::vector<uint8_t> realPx, bakedPx;
+			uint32_t rw = 0, rh = 0, bw = 0, bh = 0;
+			const bool realOk = settleCapture(realPx, rw, rh) && writeBMP(m_dumpPath + ".far_real.bmp", realPx, rw, rh);
+			size_t farLevels = 0, baked = 0;
+			for (auto [ce, cc, lod] : wreg.view<TerrainChunkComponent, LODComponent>().each())
+				if (lod.current > 0) ++farLevels;
+			// The bake: every chunk, the assets loaded into the content manager.
+			{
+				HE::landscape::HlodBaker baker(*m_editorWorld, contentManager(), *r);
+				std::string why;
+				if (!baker.begin(land, &why))
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: bake failed (%s)", why.c_str());
+				else
+				{
+					// The witness landscape is made on the fly and has no saved id; a scene's landscape has one.
+					if (m_editorWorld->entityId(land) == HE::UUID{})
+						m_editorWorld->setEntityId(land, HE::UUID{ 0x48454C4F44ull, 0x1ull });
+					const HE::UUID terrainId = m_editorWorld->entityId(land);
+					const auto t0 = std::chrono::steady_clock::now();
+					for (uint32_t cz = 0; cz < baker.chunksPerSide(); ++cz)
+						for (uint32_t cx = 0; cx < baker.chunksPerSide(); ++cx)
+						{
+							HE::landscape::HlodChunkImages img;
+							HE::landscape::HlodChunkRect rect;
+							std::vector<HE::landscape::HlodAssetBlob> blobs;
+							std::string err;
+							if (baker.bake(cx, cz, side, 2, img) && baker.chunkRect(cx, cz, rect)
+							    && HE::landscape::buildHlodAssets(img, rect, terrainId, cx, cz, blobs, &err))
+							{
+								HE::landscape::loadHlodAssets(contentManager(), blobs);
+								++baked;
+							}
+							else
+								HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: chunk %u,%u failed (%s)", cx, cz, err.c_str());
+						}
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODFAR baked %zu chunk(s) at %u px in %.0f ms",
+					            baked, side, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+				}
+			}
+			// The chunks rebuild and find the baked material by id.
+			wreg.get<TerrainComponent>(land).dirty = true;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			LODSystem::update(*m_editorWorld, camPos);
+			size_t withMat = 0;
+			std::vector<HE::UUID> mats;
+			for (auto [ce, cc, lod] : wreg.view<TerrainChunkComponent, LODComponent>().each())
+				for (const LODLevel& lv : lod.levels)
+					if (lv.materialId != HE::UUID{}) { ++withMat; mats.push_back(lv.materialId); }
+			r->WarmupMaterials(mats);
+			for (int i = 0; i < 4000; ++i)
+			{
+				if (r->PumpShaderBuilds().pending == 0) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+			const bool bakedOk = settleCapture(bakedPx, bw, bh) && writeBMP(m_dumpPath + ".far_baked.bmp", bakedPx, bw, bh);
+			double sum = 0.0; unsigned mx = 0; size_t n = 0;
+			if (realOk && bakedOk && realPx.size() == bakedPx.size())
+				for (size_t i = 0; i < realPx.size(); ++i)
+				{
+					if (i % 4 == 3) continue;
+					const unsigned d = static_cast<unsigned>(std::abs(int(realPx[i]) - int(bakedPx[i])));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODFAR chunks on a far level %zu, far levels with the baked material %zu, "
+			            "frame difference real vs baked: mean %.3f /255, max %u (%zu samples)",
+			            farLevels, withMat, n ? sum / double(n) : -1.0, mx, n);
+		}
 	}
 	for (int i = 0; i < settleFrames; ++i)
 	{
