@@ -7,6 +7,7 @@
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/LandscapeHlod.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TerrainHeightmap.h"
 #include "HorizonScene/TerrainPaint.h"
@@ -523,6 +524,18 @@ namespace TerrainSystem
         // subset of LOD0's grid, so `gridCache` lets generateTerrainChunkMeshLOD downsample the
         // already-computed LOD0 heights/normals instead of resampling the field every level.
         TerrainChunkLODCache gridCache;
+        // The export's baked far material of this chunk, when the pak carries one (a miss is a hash lookup and
+        // says nothing): the far levels draw it instead of the landscape's graph.
+        HE::UUID bakedFarMaterial{};
+        if (g.numLODs > 1 && cc.terrain != entt::null)
+        {
+            const HE::UUID terrainId = world.entityId(cc.terrain);
+            if (terrainId != HE::UUID{})
+            {
+                const HE::UUID mid = HE::landscape::hlodAssetId(terrainId, cx, cz, HE::landscape::HlodAsset::Material);
+                if (cm.ensureResident(mid)) bakedFarMaterial = mid;
+            }
+        }
         for (uint32_t k = 0; k < g.numLODs; ++k)
         {
             const uint32_t verts = (g.lod0Cells >> k) + 1u;   // 65, 33, 17, 9, …
@@ -551,7 +564,7 @@ namespace TerrainSystem
             const float maxDist = (k + 1 == g.numLODs)
                 ? std::numeric_limits<float>::max()
                 : base * static_cast<float>(1u << k);   // base, 2·base, 4·base
-            newLod.levels.push_back({ id, maxDist });
+            newLod.levels.push_back({ id, maxDist, k >= 1 ? bakedFarMaterial : HE::UUID{} });
         }
         reg.emplace_or_replace<LODComponent>(chunkEnt, newLod);
         cc.stitchKey = 0;   // the levels it copied are new; stitchSeams copies again

@@ -284,6 +284,76 @@ TEST_CASE("zstd codec actually shrinks compressible data")
 
 // ─── Encryption (AES-256-GCM, Phase B) ─────────────────────────────────────────
 
+TEST_CASE("addAlias: a second TOC row on the same bytes, written once")
+{
+    // Bytes that do not compress, so the file size says whether they were stored twice.
+    std::vector<uint8_t> data(4096);
+    uint32_t x = 0x1234567u;
+    for (auto& b : data) { x = x * 1664525u + 1013904223u; b = static_cast<uint8_t>(x >> 24); }
+    const std::vector<uint8_t> other = {9, 8, 7};
+
+    // The alias sorts BEFORE and AFTER its owner in the two runs: the writer lays every
+    // owner's bytes out first, so either order must resolve.
+    for (const HE::UUID aliasId : { HE::UUID{1, 1}, HE::UUID{9, 9} })
+    {
+        const HE::UUID ownerId{5, 5}, otherId{3, 3};
+        HpakWriter packer;
+        packer.addEntry(ownerId, data);
+        packer.addEntry(otherId, other);
+        REQUIRE(packer.addAlias(aliasId, ownerId));
+        CHECK_FALSE(packer.addAlias(HE::UUID{7, 7}, HE::UUID{0xDEAD, 0xBEEF}));   // unknown target adds nothing
+        CHECK(packer.entryCount() == 3);
+
+        const auto tmp = std::filesystem::temp_directory_path() / "he_test_alias.hpak";
+        REQUIRE(packer.write(tmp.string()));
+        CHECK(std::filesystem::file_size(tmp) ==
+              sizeof(Hpak::FileHeader) + 3 * sizeof(Hpak::EntryDesc) + data.size() + other.size());
+
+        HpakReader reader; REQUIRE(reader.open(tmp.string()));
+        CHECK(reader.readEntry(ownerId) == data);
+        CHECK(reader.readEntry(aliasId) == data);    // contentHash is verified on the way
+        CHECK(reader.readEntry(otherId) == other);
+        removeQuiet(tmp);
+    }
+}
+
+TEST_CASE("addAlias: an alias of an alias, a compressed owner")
+{
+    std::vector<uint8_t> data(8192, 0x42);
+    Hpak::PackSettings s;
+    s.codec = Hpak::Codec::Zstd;
+    HpakWriter packer;
+    packer.addEntry(HE::UUID{2, 2}, data, s);
+    REQUIRE(packer.addAlias(HE::UUID{3, 3}, HE::UUID{2, 2}));
+    REQUIRE(packer.addAlias(HE::UUID{4, 4}, HE::UUID{3, 3}));
+
+    const auto tmp = std::filesystem::temp_directory_path() / "he_test_alias2.hpak";
+    REQUIRE(packer.write(tmp.string()));
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    for (uint64_t i = 2; i <= 4; ++i)
+        CHECK(reader.readEntry(HE::UUID{i, i}) == data);
+    removeQuiet(tmp);
+}
+
+#ifdef HE_HAVE_CRYPTO
+TEST_CASE("addAlias: an encrypted owner decrypts through the alias")
+{
+    const std::vector<uint8_t> data(256, 0x5A);
+    Hpak::PackSettings s; s.encrypt = true;
+    for (int i = 0; i < 32; ++i) s.key[i] = static_cast<uint8_t>(i + 3);
+    HpakWriter packer;
+    packer.addEntry(HE::UUID{1, 2}, data, s);
+    REQUIRE(packer.addAlias(HE::UUID{1, 3}, HE::UUID{1, 2}));
+
+    const auto tmp = std::filesystem::temp_directory_path() / "he_test_alias_enc.hpak";
+    REQUIRE(packer.write(tmp.string()));
+    HpakReader reader; REQUIRE(reader.open(tmp.string()));
+    CHECK(reader.readEntry(HE::UUID{1, 3}, s.key) == data);
+    CHECK(reader.readEntry(HE::UUID{1, 3}).empty());   // still needs the key
+    removeQuiet(tmp);
+}
+#endif
+
 #ifdef HE_HAVE_CRYPTO
 TEST_CASE("AES-256-GCM round-trip (store + encrypt)")
 {
@@ -1185,7 +1255,13 @@ TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content
     // Before the scan, the UUIDs are unresolvable (the documented limitation).
     CHECK(!cm.ensureResident(matId));
 
-    CHECK(cm.scanContentDirectory() == 2);
+    // The scan also reads the per-user EngineContent download cache (a third tier under the
+    // user's data folder), so a developer machine that has downloaded engine content counts more
+    // than the two assets written here. The baseline is what an EMPTY content root finds on this
+    // machine; the two assets are what this root adds on top.
+    ContentManager emptyRoot((dir / "none").string());
+    const size_t baseline = emptyRoot.scanContentDirectory();
+    CHECK(cm.scanContentDirectory() == baseline + 2);
 
     // Sync resolution (editor preload path).
     REQUIRE(cm.ensureResident(matId));
@@ -1614,7 +1690,7 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
     std::string   seenGlsl;
     uint32_t      seenBackends = 0;
     auto stub = [&](const std::string& glsl, const std::string& /*vertBody*/,
-                    uint32_t backends) -> std::vector<uint8_t> {
+                    const std::string& /*gbufGlsl*/, uint32_t backends) -> std::vector<uint8_t> {
         seenGlsl = glsl; seenBackends = backends;
         std::vector<MaterialShaderVariant> vs;
         MaterialShaderVariant a; a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
@@ -1661,6 +1737,106 @@ TEST_CASE("Pack precompiles node-graph material shaders into CHUNK_PSHD")
 
     removeQuiet(pak);
     he_test::removeAllQuiet(dir);
+}
+
+// The deferred twin rides in PSHD: the packer hands the material's G-buffer tail to the
+// compile callback, and an instance with switch overrides gets no PSHD at all (the
+// runtime regenerates its shader from the parent's graph and drops what it carries).
+TEST_CASE("Pack hands the G-buffer tail to the shader callback and skips switch instances")
+{
+    auto dir = std::filesystem::temp_directory_path() / "he_pshd_gbuf_pack";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+    ContentManager cm(dir.string());
+
+    MaterialAsset parent;
+    parent.type = HE::AssetType::Material; parent.name = "parent"; parent.path = "parent.hasset";
+    parent.customShaderFragGlsl = "// fwd\nvoid main(){ oColor = vec4(1.0); }";
+    parent.customShaderGBufGlsl = "// gbuf\nvoid main(){ oGB0 = vec4(1.0); }";
+    parent.nodeGraphJson        = "{\"nodes\":[]}";
+    REQUIRE(cm.saveAsset(parent));
+
+    MaterialAsset inst;
+    inst.type = HE::AssetType::Material; inst.name = "inst"; inst.path = "inst.hasset";
+    inst.parentMaterialPath      = "parent.hasset";
+    inst.customShaderFragGlsl    = "// permutation\nvoid main(){ oColor = vec4(0.5); }";
+    inst.customShaderGBufGlsl    = "// permutation gbuf\nvoid main(){ oGB0 = vec4(0.5); }";
+    inst.instanceSwitchNames     = { "UseDetail" };
+    inst.instanceSwitchValues    = { 1 };
+    REQUIRE(cm.saveAsset(inst));
+
+    std::vector<std::string> seenFrag, seenGBuf;
+    Hpak::PackSettings s;
+    s.codec          = Hpak::Codec::Store;
+    s.shaderBackends = 1u << static_cast<uint32_t>(HE::RendererBackend::Metal);
+    s.compileShaderVariants = [&](const std::string& frag, const std::string&,
+                                  const std::string& gbuf, uint32_t) {
+        seenFrag.push_back(frag); seenGBuf.push_back(gbuf);
+        MaterialShaderVariant v; v.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
+        v.vertex = "V"; v.fragment = "F"; v.fragmentGBuffer = "GB";
+        v.vertexInstanced = "VI"; v.vertexInstancedClustered = "VIC";
+        return HE::encodeMaterialShaderVariants({ v });
+    };
+    HpakWriter packer;
+    REQUIRE(packer.addDirectory(dir, s) >= 2);
+    const auto pak = dir / "out.hpak";
+    REQUIRE(packer.write(pak.string()));
+
+    REQUIRE(seenFrag.size() == 1);                       // the instance was not offered
+    CHECK(seenFrag[0] == parent.customShaderFragGlsl);
+    CHECK(seenGBuf[0] == parent.customShaderGBufGlsl);
+
+    ContentManager loaded;
+    REQUIRE(loaded.loadPak(pak.string()));
+    const MaterialAsset* pm = loaded.getMaterial(parent.id);
+    REQUIRE(pm != nullptr);
+    REQUIRE(pm->precompiledShaders.size() == 1);
+    CHECK(pm->precompiledShaders[0].fragmentGBuffer == "GB");
+    CHECK(pm->precompiledShaders[0].vertexInstanced == "VI");
+    CHECK(pm->precompiledShaders[0].vertexInstancedClustered == "VIC");
+    he_test::removeAllQuiet(dir);
+}
+
+TEST_CASE("PSHD v4: the G-buffer and instanced tail round-trips; a v3 blob and a torn tail still decode")
+{
+    MaterialShaderVariant a, b;
+    a.backend = static_cast<uint8_t>(HE::RendererBackend::Metal);
+    a.vertex = "MV"; a.fragment = "MF"; a.uiVertex = "MUV";
+    a.fragmentClustered = "MFC"; a.vertexClustered = "MVC";
+    a.fragmentGBuffer = "MGB"; a.vertexInstanced = "MVI"; a.vertexInstancedClustered = "MVIC";
+    b.backend = static_cast<uint8_t>(HE::RendererBackend::OpenGL);
+    b.vertex = "GV"; b.fragment = "GF"; b.uiVertex = "GUV";
+    b.fragmentClustered = "GFC"; b.vertexClustered = "GVC";
+    b.fragmentGBuffer = "GGB"; b.vertexInstanced = "GVI"; b.vertexInstancedClustered = "GVIC";
+    const std::vector<uint8_t> blob = HE::encodeMaterialShaderVariants({ a, b });
+    auto back = HE::decodeMaterialShaderVariants(blob);
+    REQUIRE(back.size() == 2);
+    CHECK(back[1].fragmentGBuffer == "GGB");
+    CHECK(back[0].vertexInstanced == "MVI");
+    CHECK(back[1].vertexInstancedClustered == "GVIC");
+    CHECK(back[1].fragmentClustered == "GFC");
+
+    // The same blob cut inside the G-buffer tail: everything before it survives, the new
+    // fields stay empty (the renderer then cross-compiles the deferred twin).
+    std::vector<uint8_t> torn(blob.begin(), blob.end() - 3);
+    back = HE::decodeMaterialShaderVariants(torn);
+    REQUIRE(back.size() == 2);
+    CHECK(back[1].fragmentClustered == "GFC");
+    CHECK(back[1].vertexInstanced.empty());
+
+    // A v3 blob byte for byte (no G-buffer tail at all).
+    auto str = [](std::vector<uint8_t>& o, const std::string& t) {
+        const uint32_t n = static_cast<uint32_t>(t.size());
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&n);
+        o.insert(o.end(), p, p + sizeof(n)); o.insert(o.end(), t.begin(), t.end());
+    };
+    std::vector<uint8_t> v3 = { 0, 3, 1, static_cast<uint8_t>(HE::RendererBackend::Metal) };
+    str(v3, "V"); str(v3, "F"); str(v3, "UV"); str(v3, "FC"); str(v3, "VC");
+    back = HE::decodeMaterialShaderVariants(v3);
+    REQUIRE(back.size() == 1);
+    CHECK(back[0].fragmentClustered == "FC");
+    CHECK(back[0].fragmentGBuffer.empty());
+    CHECK(back[0].vertexInstanced.empty());
 }
 
 // ─── PSHD wire format: the record grew a field ───────────────────────────────
@@ -1749,7 +1925,7 @@ TEST_CASE("Pack skips PSHD when no backends selected")
     Hpak::PackSettings s;
     s.codec = Hpak::Codec::Store;
     s.shaderBackends = 0; // ← nothing selected
-    s.compileShaderVariants = [&](const std::string&, const std::string&, uint32_t) {
+    s.compileShaderVariants = [&](const std::string&, const std::string&, const std::string&, uint32_t) {
         called = true; return std::vector<uint8_t>{};
     };
 
@@ -1858,6 +2034,53 @@ TEST_CASE("Pak streaming: cancelled loads drop, shared or re-requested ones stil
     pumpUntil(cm, [&] { return cm.isLoaded(a); });
     CHECK(cm.isLoaded(a));
 
+    removeQuiet(pak);
+}
+
+// A pak load is two jobs (read, then decode). Asking for it at a higher priority
+// while it waits must move both: the read is what is queued, the decode follows it.
+TEST_CASE("Pak streaming: a High request promotes a queued Low load past the Low cap")
+{
+    const HE::UUID a{0xCA21, 1};
+    HpakWriter p;
+    p.addEntry(a, makeMaterialBlob(a, "promote_a"), {Hpak::Codec::Zstd});
+    auto pak = std::filesystem::temp_directory_path() / "he_stream_promote.hpak";
+    REQUIRE(p.write(pak.string()));
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string()));
+
+    ThreadPool& pool = globalPool();
+    const size_t lowCap = pool.concurrencyLimit(HE::JobPriority::Low);
+    REQUIRE(lowCap < pool.threadCount());
+
+    std::atomic<bool>   go{ false };
+    std::atomic<size_t> parked{ 0 };
+    std::vector<std::future<void>> blockers;
+    for (size_t i = 0; i < lowCap; ++i)
+        blockers.push_back(pool.submit([&] {
+            parked.fetch_add(1);
+            while (!go.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }, "TestPakLowHold", HE::JobPriority::Low));
+    while (parked.load() < lowCap) std::this_thread::yield();
+
+    bool fired = false;
+    cm.loadAssetAsync(a, [&](HE::UUID) { fired = true; });       // Low, over the cap: waits
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    cm.pollAsyncResults();
+    CHECK_FALSE(fired);
+
+    HE::AsyncLoadOptions urgent;
+    urgent.priority = HE::JobPriority::High;
+    cm.loadAssetAsync(a, {}, urgent);                             // coalesced, promoted
+
+    pumpUntil(cm, [&] { return fired; }, 3000);
+    const bool arrivedWhileHeld = fired;
+    go.store(true);
+    for (auto& b : blockers) b.get();
+
+    CHECK(arrivedWhileHeld);
+    CHECK(cm.isLoaded(a));
     removeQuiet(pak);
 }
 

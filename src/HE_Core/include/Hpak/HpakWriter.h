@@ -62,6 +62,13 @@ public:
     // verbatim from a previous archive) — no compression/encryption happens.
     void addPackedEntry(const HE::UUID& id, const HpakReader::StoredEntry& stored);
 
+    // A second name for an entry already added: `id` gets its own TOC row pointing at the
+    // SAME stored bytes, which are written once (the reader seeks per row, nothing assumes
+    // rows own disjoint ranges). Used where one blob is reachable under two UUIDs, such as
+    // the startup scene that is also a scene.load("<path>") target. Returns false (and adds
+    // nothing) when `target` is not in the archive yet.
+    bool addAlias(const HE::UUID& id, const HE::UUID& target);
+
     // Progress callback for addDirectory: (entriesDone, entriesTotal, currentFile).
     // Called before each file is packed and once more with (total, total, "") at
     // the end. currentFile is the rootDir-relative path being packed.
@@ -138,6 +145,12 @@ public:
     // file whose UUID an asset at a DIFFERENT path already claimed (a real
     // collision, not an override). Each is also passed to PackSettings::onWarning.
     const std::vector<std::string>& warnings() const { return m_warnings; }
+    // After addDirectories with PackSettings::onlyReferenced: the paths of the
+    // PackSettings::reachScenes nothing reached. The caller leaves those out of the pak.
+    const std::vector<std::string>& unreachableScenes() const { return m_unreachableScenes; }
+    // Assets the filter left out, and their size in bytes (0 when it was off).
+    int    unreferencedCount() const { return m_unreferencedCount; }
+    size_t unreferencedBytes() const { return m_unreferencedBytes; }
 
 private:
     struct PendingEntry {
@@ -148,6 +161,9 @@ private:
         uint8_t              codec;        // Hpak::Codec
         uint8_t              flags;        // Hpak::kFlag*
         uint8_t              nonce[12];    // AES-GCM nonce; zero when unencrypted
+        // Index of the entry whose bytes this row shares (addAlias); -1 = owns its bytes.
+        // `data` is empty for an alias; origSize/hash/codec/flags/nonce are copied from it.
+        int64_t              aliasOf = -1;
     };
     std::vector<PendingEntry> m_entries;
     std::vector<std::pair<HE::UUID, uint64_t>> m_srcHashes; // filled by addDirectory
@@ -155,5 +171,8 @@ private:
     std::unordered_map<std::string, HE::UUID>  m_packedPaths; // filled by addDirectory
     std::unordered_map<HE::UUID, uint16_t>     m_packedTypes; // filled by addDirectory
     std::vector<std::string>                   m_warnings;    // filled by addDirectory
+    std::vector<std::string>                   m_unreachableScenes; // onlyReferenced
+    int                                        m_unreferencedCount = 0;
+    size_t                                     m_unreferencedBytes = 0;
     int m_reused = 0;
 };

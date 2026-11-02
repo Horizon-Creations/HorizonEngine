@@ -26,6 +26,9 @@ add_library(HorizonCore SHARED
 	src/Renderer/IRenderer.cpp
 	src/Scripting/ScriptEngine.cpp
 	src/Hpak/HpakWriter.cpp
+	src/Hpak/SimpleTextureMaterial.cpp
+	src/Hpak/MeshTextureBake.cpp
+	src/Hpak/MeshBakePass.cpp
 	src/Hpak/HpakReader.cpp
 	src/Hpak/Aes256Gcm.cpp
 	src/Hpak/KeyDerivation.cpp
@@ -36,6 +39,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/GameBuildConfig.cpp
 	src/Hpak/ProjectExporter.cpp
 	src/Hpak/PackManifest.cpp
+	src/Hpak/ReachFilter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp

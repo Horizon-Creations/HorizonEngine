@@ -19,6 +19,7 @@
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <unordered_map>
+#include <unordered_set>
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -101,6 +102,7 @@ public:
 	                       std::vector<uint8_t>& rgba) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	ShaderBuildStatus PumpShaderBuilds() override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
@@ -745,6 +747,35 @@ private:
 	// shader use the built-in PBR m_scenePipeline. Value may be null (build failed →
 	// cached so we don't retry every frame).
 	std::unordered_map<uint64_t, void*> m_materialPipelineCache; // hash → id<MTLRenderPipelineState>
+	// Builds in flight (key = the final, salted cache key). A key is in the cache OR here,
+	// never both for long: a null in the cache means "failed", this set means "not yet".
+	std::unordered_set<uint64_t>        m_materialPipelinePending;
+	// What Metal's compiler threads hand back. The completion handlers never touch the
+	// renderer, only this box, which they hold by shared_ptr so one that fires after
+	// Shutdown writes into a closed box instead of a freed `this`.
+	struct MatPipelineDone
+	{
+		uint64_t    key = 0;
+		void*       pso = nullptr;        // CFBridgingRetain'ed, null = failed
+		void*       desc = nullptr;       // retained descriptor, only when a binary archive is in use
+		std::string error, warn, info;    // logged on the main thread by the drain
+	};
+	struct MatPipelineMailbox
+	{
+		std::mutex                   mtx;
+		std::vector<MatPipelineDone> done;
+		bool                         closed = false;
+	};
+	std::shared_ptr<MatPipelineMailbox> m_matMailbox;
+	int  m_matBuildScheduled = 0;   // since m_materialPipelinePending was last empty
+	int  m_matBuildFinished  = 0;
+	// Moves finished async builds into m_materialPipelineCache. Main thread, top of every
+	// frame and before anything that reads or clears the cache.
+	void DrainMaterialPipelines();
+	// Starts the Metal-side build of already cross-compiled MSL. Main thread.
+	void StartMaterialPipelineBuild(uint64_t key, const std::string& vertMSL, const std::string& fragMSL,
+	                                const std::string& fragFallbackMSL, bool precompiled, bool bakedClustered,
+	                                bool blend, bool gbuffer);
 	HE::MaterialShaderLibrary           m_matShaderLib;          // shared GLSL→MSL cross-compile + cache
 	// On-disk pipeline cache (MTLBinaryArchive): persists compiled material pipeline
 	// functions across launches so the Metal compiler doesn't re-run every start.
@@ -905,11 +936,18 @@ private:
 	// ({mvp, model} per instance at vertex buffer 5) for one draw per batch; own
 	// salt. Null for a precompiled variant (no baked instanced vertex): the
 	// caller then loops with the plain PSO.
+	// pending != null → the two newLibraryWithSource and the PSO build run on Metal's own
+	// compiler threads (the cross-compile stays on the caller). The call then returns
+	// null with *pending = true while the build runs, and the finished pipeline is in the
+	// cache from the next DrainMaterialPipelines on; a caller that sees *pending skips
+	// the draw instead of falling back to the default material. pending == null (or
+	// HE_MATERIAL_PIPELINE_ASYNC=0) is the blocking build, for callers with no frame to
+	// spare it from (the material preview).
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
 	                                 bool blend = false, bool gbuffer = false,
-	                                 bool instanced = false);
+	                                 bool instanced = false, bool* pending = nullptr);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);
@@ -930,6 +968,7 @@ private:
 	int m_aaMethodRequested = static_cast<int>(HE::AAMethod::FXAA);
 	HE::AAMethod ActiveAAMethod() const
 	{
+		if (m_rawCapture) return HE::AAMethod::Off;   // RenderSceneImage with rawOutput: nothing smoothed
 		return IRenderer::ResolveAAMethod(m_aaMethodRequested, GetCapabilities());
 	}
 	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
@@ -1405,6 +1444,10 @@ private:
 	// overlay, present) is skipped — a still on request must not flash a black
 	// frame on the window it was not asked to touch.
 	bool     m_captureOnly     = false;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// as it is, and the post effects that would change it are off for that one frame.
+	bool     m_rawCapture      = false;
+	bool     m_rawSrgb         = false;   // EditorCameraOverride::rawSrgb
 	// The primary window's drawable, acquired by WaitForFrame before the frame
 	// polled its input and consumed by the swapchain pass of EncodeFrame.
 	// id<CAMetalDrawable> (retained) or null. Outlives EncodeFrame's

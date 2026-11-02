@@ -5200,6 +5200,20 @@ struct D3D11RendererImpl
         return srv;
     }
 
+    // The upload every call site goes through: brings back bytes an earlier upload released,
+    // uploads, and lets the content manager free a block-compressed texture's CPU copy (the
+    // shipped game holds each texture once; see ContentManager::releaseCpuPixels). The
+    // texture is IMMUTABLE and CreateTexture2D copies the initial data before it returns, so
+    // the bytes are dead weight the moment an SRV came back.
+    ComPtr<ID3D11ShaderResourceView> createAlbedoSRVReleasing(ContentManager* cm, const TextureAsset* tex,
+                                                              bool asArray = false, bool honourSrgb = true)
+    {
+        if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(tex, asArray, honourSrgb);
+        if (cm && tex && srv) cm->releaseCpuPixels(tex->id);
+        return srv;
+    }
+
     // Resolve an OVERRIDE material's base-color texture (dc.materialAssetId), cached by material
     // UUID. Returns true iff the material asset is loaded (outSrv is its SRV, or null when the
     // override material has no texture → flat, NOT the baked texture — exactly like GL); false
@@ -5219,7 +5233,7 @@ struct D3D11RendererImpl
         const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
         // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format
         // this device can't sample).
-        entry.srv = createAlbedoSRV(cm->resolveTextureRef(texId0, texPath0));
+        entry.srv = createAlbedoSRVReleasing(cm, cm->resolveTextureRef(texId0, texPath0));
         outSrv = entry.srv.Get(); // null when the override material has no usable texture
         materialTexCache.emplace(materialId, std::move(entry));
         return true;
@@ -5669,7 +5683,7 @@ struct D3D11RendererImpl
         if (textureId == HE::UUID{} || !cm) return nullptr;
         if (auto it = decalTexCache.find(textureId); it != decalTexCache.end())
             return it->second.Get();
-        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(textureId, {}));
+        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRVReleasing(cm, cm->resolveTextureRef(textureId, {}));
         ID3D11ShaderResourceView* raw = srv.Get(); // cached even when null: no per-frame retry
         decalTexCache.emplace(textureId, std::move(srv));
         return raw;
@@ -5696,7 +5710,7 @@ struct D3D11RendererImpl
             return it->second.Get();
         // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain (skips a block format
         // this device can't sample → null → white default).
-        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRV(cm->resolveTextureRef(id, path), array);
+        ComPtr<ID3D11ShaderResourceView> srv = createAlbedoSRVReleasing(cm, cm->resolveTextureRef(id, path), array);
         ID3D11ShaderResourceView* raw = srv.Get();
         graphTexCache.emplace(key, std::move(srv));
         return raw;
@@ -5715,7 +5729,7 @@ struct D3D11RendererImpl
         if (auto it = uiTexCache.find(key); it != uiTexCache.end())
             return it->second.Get();
         ComPtr<ID3D11ShaderResourceView> srv =
-            createAlbedoSRV(cm->resolveTextureRef(id, {}), /*asArray=*/false, /*honourSrgb=*/false);
+            createAlbedoSRVReleasing(cm, cm->resolveTextureRef(id, {}), /*asArray=*/false, /*honourSrgb=*/false);
         ID3D11ShaderResourceView* raw = srv.Get();
         uiTexCache.emplace(key, std::move(srv));
         return raw;
@@ -6131,7 +6145,7 @@ struct D3D11RendererImpl
             const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
             const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
             // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain.
-            mesh.texture = createAlbedoSRV(cm->resolveTextureRef(texId0, texPath0));
+            mesh.texture = createAlbedoSRVReleasing(cm, cm->resolveTextureRef(texId0, texPath0));
         }
         return &meshCache.emplace(assetId, mesh).first->second;
     }
@@ -6893,7 +6907,7 @@ struct D3D11RendererImpl
             const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
             const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
             // RGBA8 + cooked BC7/BC3 with the pre-baked mip chain.
-            mesh.srv = createAlbedoSRV(cm->resolveTextureRef(texId0, texPath0));
+            mesh.srv = createAlbedoSRVReleasing(cm, cm->resolveTextureRef(texId0, texPath0));
         }
 
         return &skeletalMeshCache.emplace(assetId, std::move(mesh)).first->second;

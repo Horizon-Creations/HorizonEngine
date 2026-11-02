@@ -356,7 +356,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // either: it is a function call, which the code generator never moves into a branch (a
     // function body is not branch-pure), so an If around it would only be a mix().
     const bool gated = view == AutoLandscapeView::Lit || view == AutoLandscapeView::Normal
-                    || view == AutoLandscapeView::Surface;
+                    || view == AutoLandscapeView::Surface || view == AutoLandscapeView::BaseColor;
     auto gate = [&](LayerReads& lr, int cond, int col) {
         if (!gated) return;
         const int zeroC = w.node(T::ConstColor, col);
@@ -585,6 +585,11 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(mSplit, 0, r.output, kMatOutputAOPin);
         const int metal = w.constF(0.0f, 8);
         r.graph.connect(metal, 0, r.output, kMatOutputMetallicPin);
+    }
+    else if (view == AutoLandscapeView::BaseColor)
+    {
+        r.graph.findNode(r.output)->p[0] = 0.0f; // unlit: the frame IS the albedo
+        r.graph.connect(albedo, 0, r.output, kMatOutputBaseColorPin);
     }
     else if (view == AutoLandscapeView::Normal || view == AutoLandscapeView::Surface)
     {

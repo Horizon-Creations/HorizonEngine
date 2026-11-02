@@ -8128,6 +8128,76 @@ namespace
 	  "No block compression: RGBA8 with the mip chain baked in. The exact "
 	  "pixels, at roughly four to eight times the size of a compressed texture.",
 	  "", "export#overview" },
+	{ "Export/Pack only referenced assets", "Pack only referenced assets",
+	  "Leave out every asset the game never reaches. The game starts from the "
+	  "startup scene, the scenes something loads, the project manifest, "
+	  "GameInstance and the scripts, and follows what they name: a scene's "
+	  "meshes and their materials and textures, a widget's textures, a "
+	  "graph's classes. Reaching is transitive from those starting points: a "
+	  "mesh that names a material is no reason to keep either when nothing "
+	  "reachable names the mesh. The engine's own needs (input actions, "
+	  "player classes, struct and enum types, weather sounds, layer meshes) "
+	  "always stay. A script that builds a path at run time cannot be "
+	  "followed: list it under Always include. The export log lists what "
+	  "was left out. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Compress texture arrays", "Compress texture arrays",
+	  "Also block-compress texture arrays: the Auto landscape's albedo, normal "
+	  "and mask arrays, about 110 MB each as RGBA8 and by far the largest part "
+	  "of an exported game. They shrink to a quarter, in the pak and in video "
+	  "memory, at the same quality as every other compressed texture. The GI "
+	  "keeps its landscape colours: they are baked into the pak from the "
+	  "uncompressed pixels. Switch it off to ship the arrays as RGBA8. "
+	  "Needs a texture compression other than None. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake textures onto meshes", "Bake textures onto meshes",
+	  "A mesh with several materials that only show textures (a plain PBR set: "
+	  "base color, metal/rough/occlusion, normal map, emissive) is exported on ONE "
+	  "material with atlas textures, so it draws in one call with one set of "
+	  "texture binds, and the source materials and textures leave the pak. Each mesh "
+	  "decides in the Mesh Viewer (Export bake) whether and how: Merge textures "
+	  "copies the texels unchanged, One UV texture resamples and resolves tiling "
+	  "and may make the atlas larger. A mesh that an entity in an exported scene "
+	  "draws with a material of its own (a Material component override, whole mesh "
+	  "or one slot) is left as it is, because the override would read its texture "
+	  "through the atlas UVs. The scan covers every scene (placed prefabs are "
+	  "plain entities there) and the component body of every HorizonCode class. "
+	  "A material a script assigns at run time is not seen: switch Export bake "
+	  "off in the Mesh Viewer for such a mesh. Needs Pack only referenced "
+	  "assets. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake far landscape", "Bake far landscape",
+	  "Far terrain is drawn from a picture instead of from the landscape's material. "
+	  "For every Auto Landscape in an exported scene the export photographs each "
+	  "chunk from above in three views of its own material (albedo, normal, "
+	  "ambient occlusion + roughness) and ships them as three small textures and "
+	  "one simple material per chunk. The chunk's far levels of detail then draw "
+	  "that material: a few texture reads instead of the layer blend, the noise "
+	  "and the texture bombing. Near terrain keeps the real material. The picture "
+	  "is as sharp as the screen needs at the distance where the far level takes "
+	  "over, and coarser when it would not fit the budget below. The landscape's "
+	  "own parameters (a Material Instance's overrides, its static switches, "
+	  "painted layers) are what is photographed. A custom landscape material that "
+	  "is not an Auto Landscape is left as it is. The picture is taken by the "
+	  "Metal renderer, so this runs in the macOS editor only; elsewhere the "
+	  "export says so and the far levels keep the real material. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
+	  "What all baked far-landscape textures of this export may cost once cooked "
+	  "(block-compressed, with mip levels), in megabytes. When the pictures the "
+	  "screen would want do not fit, every chunk's picture is halved in size until "
+	  "they do, down to 16 texels per chunk side; the export log says which "
+	  "landscapes were baked below what the screen wants. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Match the game's backend", "Match the game's backend",
+	  "Bake the precompiled material shaders for the one graphics backend the "
+	  "exported game runs: the one the project's Render Defaults name, else the "
+	  "platform's default (Metal on macOS, OpenGL elsewhere). The other "
+	  "backends' variants would only be dead weight in the pak. Switch it off "
+	  "to pick the backends by hand, for a build that may run on several. A "
+	  "game that ends up on a backend without baked shaders compiles them on "
+	  "first use, as it does with none selected. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Texture quality", "Texture quality",
 	  "How hard the encoder works on each texture. Fast is what every export "
 	  "did before this existed; Balanced tries every block partition; High adds "
@@ -8678,6 +8748,31 @@ namespace
 	  "Material component on an entity "
 	  "overrides all slots for that entity alone. Cmd/Ctrl+Z steps back over "
 	  "slot changes while this tab is hovered.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Vertex colors", "Vertex colors",
+	  "Export bake. For a mesh whose materials only show textures, the export "
+	  "samples each texture at every vertex and stores the color in the mesh, so "
+	  "the material needs no texture lookup at run time and the texture can drop "
+	  "out of the pak. It looks right on a dense mesh or a smooth texture and "
+	  "blurs detail on coarse low-poly. Applied only when the export targets "
+	  "OpenGL and/or Metal; off by default. Does nothing in the editor. At most "
+	  "one bake form is applied per mesh, in the order Vertex colors, Merge "
+	  "textures, One UV texture. Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Merge textures", "Merge textures",
+	  "Export bake. A mesh with several simple texture-only materials gets one "
+	  "material and one atlas texture, so it draws in one call with one texture "
+	  "bind. Lossless: only when every UV lies inside the 0..1 tile, the source "
+	  "texels are copied unchanged. On by default. Does nothing in the editor. "
+	  "Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/One UV texture", "One UV texture",
+	  "Export bake. The textures of all simple texture-only sections are "
+	  "resampled into a single texture over the mesh's own UVs, with tiling "
+	  "baked out. The texture can end up larger than the sources (it is capped "
+	  "at 4096 per side) but the mesh draws in one call. Used when Merge "
+	  "textures does not apply, for example because the UVs tile. On by "
+	  "default. Does nothing in the editor. Saved in the mesh asset.",
 	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Clip:", "Preview Clip",
 	  "An animation clip to pose this skeleton with, dropped from the Content "

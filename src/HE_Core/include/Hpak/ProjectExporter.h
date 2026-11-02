@@ -5,6 +5,7 @@
 #include <Physics/CollisionLayers.h>     // the collision matrix the shipped build simulates with
 #include <Audio/AudioBusConfig.h>        // the mixer buses the shipped build plays through
 #include <Hpak/ProjectConfig.h>          // ExportPlan: the hcfg an export will write
+#include <Hpak/HpakFormat.h>             // PackSettings::ExtraAsset (what an editor-made asset looks like)
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -177,6 +178,17 @@ struct HE_API ExportSettings {
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.
     std::vector<std::string> excludePatterns;
+    // Pack only the assets the game reaches (Hpak/ReachFilter.h): from the startup scene, the
+    // scenes something loads, the manifest, GameInstance and scripts, and the engine's implicit
+    // needs. An asset nothing reachable names is left out, and so is one only another unreached
+    // asset names. `alwaysIncludePatterns` (globs on the addressed path, like excludePatterns)
+    // are roots too, for the assets a script builds a path for at run time.
+    // Off here (a caller that hands over loose assets and no scene wants them all); the editor
+    // passes the export profile's setting, which is on by default.
+    bool onlyReferenced = false;
+    std::vector<std::string> alwaysIncludePatterns;
+    // One line for what the filter left out. Same thread rule as `progress`.
+    std::function<void(const std::string&)> onNotice;
     // Incremental packing: reuse the stored (compressed + encrypted) bytes of
     // unchanged assets from the previous export at the same outputDir, keyed by
     // the hash of each asset's rewritten blob (persisted in a
@@ -196,6 +208,20 @@ struct HE_API ExportSettings {
     // Hpak::PackSettings::textureQuality). Fast is what every export did before
     // the knob existed.
     uint8_t textureQuality = 0;
+    // Also block-compress texture ARRAYS (Hpak::PackSettings::cookTextureArrays). The GI
+    // landscape colours of such an array come from means baked at pack time (CHUNK_TXSM),
+    // so BC7 / ASTC arrays are safe to ship; off keeps them RGBA8.
+    bool cookTextureArrays = true;
+    // Bake textures onto static meshes whose materials are plain PBR texture sets
+    // (Hpak::PackSettings::bakeMeshTextures). Which meshes, and in which form, is each mesh's
+    // own choice (the Export bake switches in the Mesh Viewer). Needs the reachability filter.
+    bool bakeMeshTextures = true;
+    // Meshes the bake must leave alone because an entity overrides their materials (the editor
+    // collects them from the scenes it exports). See Hpak::PackSettings::bakeSkipMeshes.
+    std::vector<HE::UUID> bakeSkipMeshes;
+    // Assets the editor baked for this export that no project file holds (the far landscape): packed as they are,
+    // their folders kept as reach roots. See Hpak::PackSettings::extraAssets.
+    std::vector<Hpak::PackSettings::ExtraAsset> extraAssets;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a
@@ -226,7 +252,7 @@ struct HE_API ExportSettings {
     // `compileShaderVariants` is supplied by the editor (it links the shader compiler):
     // (fragment GLSL, backend bitmask) → PSHD-encoded bytes.
     uint32_t shaderBackends = 0;
-    std::function<std::vector<uint8_t>(const std::string&, const std::string&, uint32_t)> compileShaderVariants;
+    std::function<std::vector<uint8_t>(const std::string&, const std::string&, const std::string&, uint32_t)> compileShaderVariants;
     // Precompile particle color/alpha-over-life shaders (CHUNK_PPSD), reusing
     // shaderBackends above. (nodeGraphJson, backend bitmask) → PPSD-encoded bytes —
     // see Hpak::PackSettings::compileParticleShaderVariants.

@@ -187,6 +187,22 @@ public:
 	// For a texture that is rewritten in place every frame (the landscape's trail clipmap): the caller edits `data` and
 	// tells the renderer with IRenderer::InvalidateTexture, no new asset and no copy.
 	TextureAsset*              getTextureMutable(HE::UUID id);
+
+	// ── CPU pixel copies of uploaded textures (the shipped game's RAM) ──────────────────
+	// A texture asset keeps its bytes (`data`) after the renderer has copied them into a GPU
+	// texture, so a game holds every texture twice. Block-compressed bytes (ASTC/BC) are not
+	// readable on the CPU anyway, so once a backend has uploaded them nothing needs them.
+	// Off by default (the editor, the exporter and the tools read pixels); the game turns it on.
+	void setReleaseCpuPixelsAfterUpload(bool on) { m_releaseCpuPixels = on; }
+	// Called by a backend right after it uploaded `id`. Frees `data` of a block-compressed
+	// texture that came out of a mounted pak (so the bytes can be read back) and that no CPU
+	// code reads: not RGBA8 (terrain weights, trails, widgets read those) and not an array
+	// without baked slice means (the GI landscape colours read those). True when freed.
+	bool releaseCpuPixels(HE::UUID id);
+	// Brings the bytes of a released texture back from the pak, for a second upload (the same
+	// asset used as a UI image and a material texture, a cache that was flushed). Returns the
+	// asset, or null when it is not loaded. A no-op for a texture that still has its bytes.
+	const TextureAsset*        restoreCpuPixels(HE::UUID id);
 	SkeletalMeshAsset*         getSkeletalMeshMutable(HE::UUID id);
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
@@ -582,6 +598,8 @@ public:
 		size_t   lastPollLeft    = 0;   // results it left for the next call (budget)
 	};
 	const AsyncPollStats& asyncPollStats() const { return m_asyncPollStats; }
+	// Decoded bytes of finished async loads that pollAsyncResults has not taken yet.
+	std::uint64_t asyncBacklogBytes() const { return m_asyncSink->backlogBytes.load(std::memory_order_relaxed); }
 	// Live read progress of an in-flight job: bytes read so far and the file's total
 	// size (0 until the worker has opened the file). False when nothing is in flight
 	// for that path — so a caller can drive a real progress bar for a big asset and
@@ -725,6 +743,9 @@ private:
 		// pollAsyncResults checks whether someone asked again meanwhile.
 		bool                           cancelled = false;
 		HE::UUID                       pakId{};       // pak loads: what to relaunch
+		// Size of the decoded asset, counted in AsyncSink::backlogBytes from the
+		// moment the worker queues the result until the main thread takes it.
+		std::uint64_t                  bytes = 0;
 	};
 
 	// Who asked for a load: their cancel tokens, or `pinned` when one of them
@@ -743,6 +764,13 @@ private:
 	struct LoadInterest {
 		mutable std::mutex m;
 		LoadRequester      who;
+		// The queued jobs of this load (set by launchPathLoad/launchPakLoad: one for
+		// a file, the read and the decode for a pak entry), so a requester that asks
+		// for more urgency than the load was queued with can move them up
+		// (join → JobHandle::promote) instead of leaving them in the Low lane behind
+		// the cap. A job holds this interest and this holds the jobs; the cycle ends
+		// when they finish and drop their callables.
+		std::vector<HE::JobHandle> jobs;
 		void          join(const LoadRequester& r);
 		bool          stale() const;
 		LoadRequester snapshot() const;
@@ -806,8 +834,17 @@ private:
 	struct AsyncSink {
 		std::mutex              mutex;
 		std::queue<AsyncResult> results;   // ready to register (drained on main thread)
+		// Bytes of decoded assets sitting in `results`. The workers outrun the main
+		// thread's few milliseconds a frame, so without a bound a jump across the
+		// world queues every requested asset's bytes in RAM at once; a Low job that
+		// would start while this is over kAsyncBacklogBytes waits (awaitBacklogRoom).
+		std::atomic<std::uint64_t> backlogBytes{ 0 };
+		std::condition_variable    drained;   // notified under `mutex` when the main thread takes results
 	};
 	std::shared_ptr<AsyncSink> m_asyncSink = std::make_shared<AsyncSink>();
+
+	static void pushAsyncResult(AsyncSink& sink, AsyncResult&& result);
+	static void awaitBacklogRoom(AsyncSink& sink, const LoadInterest& interest);
 
 	// ── Remote (SFTP-backed) EngineContent assets — see registerRemoteAsset() ──
 	struct RemoteAssetEntry {
@@ -915,6 +952,8 @@ private:
 	};
 	std::vector<MountedPak>                       m_mounts;        // overlay stack (later = higher priority)
 	std::unordered_map<HE::UUID, size_t>          m_pakResidency;  // UUID → index into m_mounts
+	bool                                          m_releaseCpuPixels = false;   // see releaseCpuPixels
+	std::unordered_set<HE::UUID>                  m_pixelsReleased;             // textures whose `data` was freed
 	std::unordered_map<HE::UUID, std::string>     m_diskRegistry;  // UUID → relative path (loose content)
 	// Content-relative path → UUID for assets that live ONLY in a mounted pak,
 	// loaded from each pak's __asset_index__ at mount. Lets loadAsset("<path>")

@@ -1073,6 +1073,13 @@ fragment float4 tonemapFragment(TMOut in [[stage_in]],
 {
 	constexpr sampler s(filter::linear, address::clamp_to_edge);
 	float3 c = hdr.sample(s, in.uv).rgb;
+	if (params.x < 0.0)   // raw capture (EditorCameraOverride::rawOutput): the material's colour, untouched
+	{
+		c = clamp(c, 0.0, 1.0);
+		if (params.x < -1.5)   // rawSrgb: the exact sRGB curve, for a picture that becomes an sRGB texture
+			c = select(1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c * 12.92, c <= 0.0031308);
+		return float4(c, 1.0);
+	}
 	c += bloom.sample(s, in.uv).rgb * params.y;
 	c *= params.x;
 	c = aces(c);
@@ -6867,6 +6874,22 @@ void MetalRenderer::Shutdown()
 	m_giProbeCount        = 0;
 	m_giProbeUpdateCursor = 0;
 	if (m_tonemapPipeline)      { CFBridgingRelease(m_tonemapPipeline);      m_tonemapPipeline = nullptr; }
+	// Builds still running: close the box so a handler that fires from here on releases its
+	// own result, and let go of what already landed in it.
+	if (m_matMailbox)
+	{
+		std::lock_guard<std::mutex> lk(m_matMailbox->mtx);
+		m_matMailbox->closed = true;
+		for (MatPipelineDone& d : m_matMailbox->done)
+		{
+			if (d.pso)  CFBridgingRelease(d.pso);
+			if (d.desc) CFBridgingRelease(d.desc);
+		}
+		m_matMailbox->done.clear();
+	}
+	m_matMailbox.reset();
+	m_materialPipelinePending.clear();
+	m_matBuildScheduled = m_matBuildFinished = 0;
 	for (auto& [k, pso] : m_materialPipelineCache) if (pso) CFBridgingRelease(pso);
 	m_materialPipelineCache.clear();
 	for (auto& [k, pso] : m_particlePipelineCache) if (pso) CFBridgingRelease(pso);
@@ -7325,7 +7348,10 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 						gtexPaths.push_back(i < ma->graphTexturePaths.size() ? ma->graphTexturePaths[i] : std::string{});
 					}
 				}
-				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+				bool pend = false;
+				t.pipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true,
+				                                        false, false, &pend);
+				if (pend) continue; // compiling: the trail appears with its material
 				t.wpo      = !shVert.empty();
 				for (size_t i = 0; i < gtexIds.size(); ++i)
 					t.gtex[t.gtexCount++] = ResolveGraphTexture(gtexIds[i], gtexPaths[i], (gtexArr >> i) & 1u);
@@ -7741,7 +7767,9 @@ void MetalRenderer::CreateScenePipeline()
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
 		// repeat so it tiles seamlessly.
-		constexpr int kNoiseN = 256;
+		// 256³ in Release, 64³ in Debug like every other backend (this one used to bake 256³ even in
+		// Debug, which is what made a Debug probe take half an hour in power-saving mode).
+		const int kNoiseN = HE::SkyNoise3DResolution();
 		const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 		MTLTextureDescriptor* noiseDesc = [[MTLTextureDescriptor alloc] init];
 		noiseDesc.textureType = MTLTextureType3D;
@@ -9490,6 +9518,11 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 // retained id<MTLTexture>, or nullptr when unusable / this GPU can't sample the
 // shipped format. Defined below; forward-declared so the mesh uploads can share it.
 static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb = true);
+// The upload every call site below goes through: brings back bytes an earlier upload released,
+// uploads, and lets the content manager free a block-compressed texture's CPU copy (the shipped
+// game holds each texture once; see ContentManager::releaseCpuPixels). Defined after both uploaders.
+static void* uploadMetalTextureReleasing(ContentManager* cm, id<MTLDevice> device, const TextureAsset* tex,
+                                         bool honourSrgb = true, bool arrayPath = false);
 
 const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId)
 {
@@ -9562,7 +9595,8 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTextureReleasing(m_contentManager, device,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9650,7 +9684,8 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTextureReleasing(m_contentManager, device,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	return &m_skeletalMeshCache.emplace(assetId, mesh).first->second;
@@ -9769,7 +9804,7 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 
 	const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 	const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId0, texPath0));
 
 	m_materialTexCache.emplace(materialId, retained);
@@ -9820,6 +9855,17 @@ static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* t
 	return (void*)CFBridgingRetain(texture);
 }
 
+static void* uploadMetalTextureReleasing(ContentManager* cm, id<MTLDevice> device, const TextureAsset* tex,
+                                         bool honourSrgb, bool arrayPath)
+{
+	// An earlier upload of this asset (another cache, a flushed one) may have freed its bytes.
+	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+	void* uploaded = arrayPath ? uploadMetalTextureArray(device, tex) : uploadMetalTexture(device, tex, honourSrgb);
+	// replaceRegion copied the bytes into the GPU texture, so the CPU copy is dead weight now.
+	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	return uploaded;
+}
+
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a retained id<MTLTexture>, cached by a stable key. nullptr if not loadable.
 //
@@ -9840,8 +9886,8 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
-	void* retained = array ? uploadMetalTextureArray((__bridge id<MTLDevice>)m_device, asset)
-	                       : uploadMetalTexture((__bridge id<MTLDevice>)m_device, asset);
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device, asset,
+	                                             /*honourSrgb=*/true, /*arrayPath=*/array);
 	m_graphTexCache.emplace(key, retained);
 	return retained ? retained : (array ? m_whiteArrayTexture : nullptr);
 }
@@ -9859,7 +9905,7 @@ void* MetalRenderer::ResolveUITexture(const HE::UUID& texId, const std::string& 
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return nullptr;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId, path), /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, retained);
 	return retained;
@@ -9910,6 +9956,7 @@ void MetalRenderer::InvalidateTexture(const HE::UUID& textureId)
 
 void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 {
+	HE_PROFILE_SCOPE_N("Metal::WarmupMaterials");
 	// Build each custom-shader material's pipeline state NOW so the first draw
 	// doesn't stall on cross-compile + PSO creation inside the encoder loop. The
 	// Metal device is always available; cache hits are cheap; built-in-PBR
@@ -9921,31 +9968,35 @@ void MetalRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 		std::string shVert;
 		if (!ResolveMaterialShader(id, shKey, shFrag, shVert)) continue;
 		if (m_materialPipelineCache.find(shKey) != m_materialPipelineCache.end()) continue; // warm
+		if (m_materialPipelinePending.count(shKey)) continue;                               // already building
 		const MaterialShaderVariant* pre = nullptr;
 		if (const MaterialAsset* ma = m_contentManager ? m_contentManager->getMaterial(id) : nullptr)
 			for (const auto& var : ma->precompiledShaders)
 				if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
-		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre)) ++built;
+		// Each build starts in the background and counts as soon as it is started.
+		bool pend = false;
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, false, false, false, &pend) || pend) ++built;
 		// EncodeScene builds the alpha-blended twin of every graph material on its
 		// first draw, whatever the material's opacity (see there): its own MSL
 		// libraries and PSO, ~0.4-0.7 s on an E-core. Without it here the first
 		// two frames after a scene open stalled in Metal::EncodeScene even with
 		// every material warmed (Thema 153 Schritt 5: the editor light icons).
-		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true)) ++built;
+		if (GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true, false, false, &pend) || pend) ++built;
 		// Deferred path active → also warm the G-buffer variant so the first
 		// deferred frame doesn't hitch on its cross-compile.
 		if (m_renderPath == HE::RenderPath::Deferred)
 		{
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (ResolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
-			    && GetOrBuildMaterialPipeline(gbKey, gbFrag, gbVert, nullptr,
-			                                  /*blend=*/false, /*gbuffer=*/true))
+			    && (GetOrBuildMaterialPipeline(gbKey, gbFrag, gbVert, pre,
+			                                   /*blend=*/false, /*gbuffer=*/true, false, &pend) || pend))
 				++built;
 		}
 	}
 	if (built > 0)
 		HE_LOG_INFO(RHI, "%s",
-			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)").c_str());
+			("MetalRenderer: warmed up " + std::to_string(built) + " material pipeline(s)"
+			 + (m_materialPipelinePending.empty() ? "" : ", building in the background")).c_str());
 }
 
 // Encode one material-graph preview primitive into an already-open encoder. Split
@@ -11659,6 +11710,23 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_viewportReqH  = height;
 	m_editorCamera  = camera;
 	m_captureOnly   = true;
+	// A raw capture is the materials' own colour: every effect that would change it is off for this frame
+	// and back afterwards (members the frame reads, saved by value like the camera above).
+	const bool  liveRaw     = m_rawCapture;
+	const bool  liveBloom   = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveDof = m_dofEnabled;
+	const bool  liveMb      = m_mbEnabled, liveSsr = m_ssrEnabled, liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
+	const float liveScale   = m_renderScale;
+	const HE::RenderPath livePath = m_renderPath;
+	const bool liveSrgb = m_rawSrgb;
+	if (camera.rawOutput)
+	{
+		m_rawCapture = true;
+		m_rawSrgb    = camera.rawSrgb;
+		m_bloomEnabled = m_ssaoEnabled = m_dofEnabled = m_mbEnabled = m_ssrEnabled = false;
+		m_giEnabled = m_giReflEnabled = false;
+		m_renderScale = 1.0f;
+		m_renderPath  = HE::RenderPath::Forward;
+	}
 	// TAA history is one camera's past. The screenshot must not blend against
 	// the viewport's (a request at exactly the viewport's size would reuse the
 	// targets, so the resize rule alone does not cover it), and the viewport
@@ -11683,6 +11751,12 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_viewportReqH  = liveReqH;
 	m_editorCamera  = liveCam;
 	m_captureOnly   = false;
+	m_rawCapture    = liveRaw;
+	m_rawSrgb       = liveSrgb;
+	m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_dofEnabled = liveDof;
+	m_mbEnabled = liveMb; m_ssrEnabled = liveSsr; m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
+	m_renderScale = liveScale;
+	m_renderPath  = livePath;
 	m_taaHistoryValid = false;
 
 	if (!ok) rgba.clear();
@@ -13051,18 +13125,83 @@ void* MetalRenderer::EnsureMaterialArchive()
 // buffer lands at [[buffer(0)]] and Uniforms at [[buffer(1)]] — exactly the bind points
 // the opaque draw loop already uses (verts@0, setVertexBytes u@1) — so it needs no
 // changes to the per-draw binds. Deliberately simple hemispheric lighting (no sky/fog/
+// The PSO descriptor of a material pipeline, shared by the blocking build and the
+// background one. Reads no renderer state (the caller passes the deferred tile flag),
+// so it may run on one of Metal's compiler threads.
+static MTLRenderPipelineDescriptor* MakeMaterialPipelineDescriptor(id<MTLLibrary> vLib, id<MTLLibrary> fLib,
+                                                                   bool gbuffer, bool blend, bool tileMode)
+{
+	MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+	desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+	desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
+	if (gbuffer) // deferred variant: the G-buffer targets, never blended
+	{
+		desc.colorAttachments[0].pixelFormat = kGBuf0Format;
+		desc.colorAttachments[1].pixelFormat = kGBufAttrFormat;
+		desc.colorAttachments[2].pixelFormat = kGBufAttrFormat;
+		desc.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float; // NDC depth (P6)
+		if (tileMode)
+		{
+			desc.colorAttachments[4].pixelFormat = kSceneColorFormat;
+			desc.colorAttachments[4].writeMask   = MTLColorWriteMaskNone;
+		}
+	}
+	else
+		desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
+	desc.depthAttachmentPixelFormat      = kDepthFormat;
+	if (blend && !gbuffer) // transparency-pass variant: standard back-to-front alpha blending
+	{
+		desc.colorAttachments[0].blendingEnabled             = YES;
+		desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
+		desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
+		desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+	}
+	return desc;
+}
+
+// HE_MATERIAL_PIPELINE_ASYNC=0 puts every caller back on the blocking build: for
+// comparing the two in one binary, and as the way out if a driver dislikes the
+// completion-handler path.
+static bool materialPipelineAsyncEnabled()
+{
+	static const bool on = [] {
+		const char* e = std::getenv("HE_MATERIAL_PIPELINE_ASYNC");
+		return !e || std::atoi(e) != 0;
+	}();
+	return on;
+}
+
 // Build (or fetch) a Metal pipeline for a material's custom fragment. The shared
 // MaterialShaderLibrary owns the canonical GLSL, the standard drop-in vertex, and the
 // glslang→SPIRV-Cross cross-compile (so every backend shares them); this function only
 // turns the emitted MSL into an MTLRenderPipelineState. Cached by `key` (fragment source
 // hash); a null result is cached too so a broken shader isn't rebuilt every frame.
+// The Metal variant the pak baked for `materialId`, looked up FRESH: ContentManager's getters
+// point into dense vectors the next load invalidates, so a pointer kept across draws dangles.
+static const MaterialShaderVariant* bakedMetalVariant(const ContentManager* cm, const HE::UUID& materialId)
+{
+	const MaterialAsset* ma = cm ? cm->getMaterial(materialId) : nullptr;
+	if (ma)
+		for (const auto& var : ma->precompiledShaders)
+			if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) return &var;
+	return nullptr;
+}
+
+// With `pending` the Metal half runs in the background (see the header): null with
+// *pending = true means "not yet", null with *pending = false means "failed".
 void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
                                                const std::string& vertBody,
                                                const MaterialShaderVariant* precompiled,
-                                               bool blend, bool gbuffer, bool instanced)
+                                               bool blend, bool gbuffer, bool instanced, bool* pending)
 {
-	// The pak bakes no instanced vertex: the caller loops with the plain PSO.
-	if (instanced && precompiled) return nullptr;
+	if (pending) *pending = false;
+	// What the pak baked for the twin asked for (CHUNK_PSHD v4). A twin it did not bake is
+	// not cross-compiled next to a baked plain pair (a packaged build may have no
+	// translator): the G-buffer twin simply cross-compiles, as the deferred path always
+	// could; the instanced one returns null and the caller loops with the plain PSO.
+	if (precompiled && gbuffer && precompiled->fragmentGBuffer.empty()) precompiled = nullptr;
+	if (precompiled && instanced && precompiled->vertexInstanced.empty()) return nullptr;
 	if (blend)   key ^= 0xB1E4DB1E4DB1E4DULL; // blended variant gets its own cache slot
 	if (gbuffer) key ^= 0x6BB0F6BB0F6BB0F6ULL; // deferred G-buffer variant, own cache slot
 	// `key` also keys the fragment cache below: the instanced twin (2e) gets its
@@ -13071,7 +13210,12 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	if (instanced) key ^= 0x1D57A9CEDB0B1E55ULL;
 	if (auto it = m_materialPipelineCache.find(key); it != m_materialPipelineCache.end())
 		return it->second;
+	const bool background = pending && materialPipelineAsyncEnabled();
+	if (background && m_materialPipelinePending.count(key)) { *pending = true; return nullptr; }
 
+	// Only a build is timed, a cache hit returned above. The three phases below are
+	// what a first draw or a warm-up stalls on.
+	HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild");
 	using Backend = HE::MaterialShaderLibrary::Backend;
 	std::string vertMSL, fragMSL, log;
 	std::string fragFallbackMSL; // baked plain fragment, if the baked clustered one is rejected
@@ -13082,13 +13226,15 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		// Baked at export time — no runtime cross-compile. Forward PSOs take the
 		// baked clustered twin under the same rule as the cross-compiled path
 		// below (Thema 117); a pak without it keeps the plain window variant.
-		vertMSL = precompiled->vertex; fragMSL = precompiled->fragment;
+		vertMSL = instanced ? precompiled->vertexInstanced : precompiled->vertex;
+		fragMSL = gbuffer   ? precompiled->fragmentGBuffer : precompiled->fragment;
 		if (m_forwardClustered && !gbuffer && !precompiled->fragmentClustered.empty())
 		{
 			// The exporter never bakes a separate clustered vertex for Metal; honour
-			// one anyway, but then the plain fragment no longer pairs with it and
-			// there is no fallback to offer.
-			if (!precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
+			// one anyway (not for the instanced twin: it has no clustered form), but
+			// then the plain fragment no longer pairs with it and there is no fallback
+			// to offer.
+			if (!instanced && !precompiled->vertexClustered.empty()) vertMSL = precompiled->vertexClustered;
 			else                                       fragFallbackMSL = fragMSL;
 			fragMSL = precompiled->fragmentClustered;
 			bakedClustered = true;
@@ -13097,6 +13243,7 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 	}
 	else
 	{
+		HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::CrossCompile");
 		// WPO materials get the graph-generated vertex; everything else the shared one.
 		// The instanced twin takes the instanced form of either.
 		const uint64_t vh = vertBody.empty() ? 0 : std::hash<std::string>{}(vertBody);
@@ -13122,16 +13269,28 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		ok = v.ok && f->ok;
 	}
 
+	if (ok && background)
+	{
+		StartMaterialPipelineBuild(key, vertMSL, fragMSL, fragFallbackMSL, precompiled != nullptr,
+		                           bakedClustered, blend, gbuffer);
+		*pending = true;
+		return nullptr;
+	}
+
 	void* result = nullptr;
 	if (ok)
 	{
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		NSError* err = nil;
-		id<MTLLibrary> vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
-		                                           options:nil error:&err];
-		id<MTLLibrary> fLib = err ? nil
-			: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
-			                       options:nil error:&err];
+		id<MTLLibrary> vLib = nil, fLib = nil;
+		{
+			HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::Libraries");
+			vLib = [device newLibraryWithSource:[NSString stringWithUTF8String:vertMSL.c_str()]
+			                            options:nil error:&err];
+			fLib = err ? nil
+				: [device newLibraryWithSource:[NSString stringWithUTF8String:fragMSL.c_str()]
+				                       options:nil error:&err];
+		}
 		if (vLib && !fLib && !fragFallbackMSL.empty())
 		{
 			// The baked clustered fragment did not compile: the baked plain one
@@ -13146,36 +13305,17 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 		}
 		if (precompiled && vLib && fLib)
 			HE_LOG_INFO(RHI, "%s", bakedClustered
-				? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered"
-				: "MetalRenderer: material pipeline from a PRECOMPILED variant, plain");
+				? (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered")
+				: gbuffer
+				? (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, G-buffer, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, G-buffer")
+				: (instanced ? "MetalRenderer: material pipeline from a PRECOMPILED variant, plain, instanced"
+				             : "MetalRenderer: material pipeline from a PRECOMPILED variant, plain"));
 		if (vLib && fLib)
 		{
-			MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
-			desc.vertexFunction   = [vLib newFunctionWithName:@"main0"];
-			desc.fragmentFunction = [fLib newFunctionWithName:@"main0"];
-			if (gbuffer) // deferred variant: the G-buffer targets, never blended
-			{
-				desc.colorAttachments[0].pixelFormat = kGBuf0Format;
-				desc.colorAttachments[1].pixelFormat = kGBufAttrFormat;
-				desc.colorAttachments[2].pixelFormat = kGBufAttrFormat;
-				desc.colorAttachments[3].pixelFormat = MTLPixelFormatR32Float; // NDC depth (P6)
-				if (m_deferredTileMode)
-				{
-					desc.colorAttachments[4].pixelFormat = kSceneColorFormat;
-					desc.colorAttachments[4].writeMask   = MTLColorWriteMaskNone;
-				}
-			}
-			else
-				desc.colorAttachments[0].pixelFormat = kSceneColorFormat; // same HDR target as m_scenePipeline
-			desc.depthAttachmentPixelFormat      = kDepthFormat;
-			if (blend && !gbuffer) // transparency-pass variant: standard back-to-front alpha blending
-			{
-				desc.colorAttachments[0].blendingEnabled             = YES;
-				desc.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorSourceAlpha;
-				desc.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorOneMinusSourceAlpha;
-				desc.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorSourceAlpha;
-				desc.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-			}
+			MTLRenderPipelineDescriptor* desc =
+				MakeMaterialPipelineDescriptor(vLib, fLib, gbuffer, blend, m_deferredTileMode);
 			// On-disk pipeline cache: point the descriptor at the binary archive so
 			// Metal reuses previously-compiled functions (fast) when present. Best-
 			// effort — if the function isn't cached, Metal compiles it as usual.
@@ -13185,7 +13325,11 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 				arch = (__bridge id<MTLBinaryArchive>)EnsureMaterialArchive();
 				if (arch) desc.binaryArchives = @[arch];
 			}
-			id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			id<MTLRenderPipelineState> pso = nil;
+			{
+				HE_PROFILE_SCOPE_N("Metal::MaterialPipelineBuild::Pipeline");
+				pso = [device newRenderPipelineStateWithDescriptor:desc error:&err];
+			}
 			if (pso)
 			{
 				result = (void*)CFBridgingRetain(pso);
@@ -13212,6 +13356,141 @@ void* MetalRenderer::GetOrBuildMaterialPipeline(uint64_t key, const std::string&
 
 	m_materialPipelineCache[key] = result; // cache success AND failure (null)
 	return result;
+}
+
+// The Metal half of a material pipeline build, on Metal's own compiler threads: the two
+// libraries (vertex, then fragment, with the baked-plain retry) and the PSO, chained
+// through their completion handlers. A handler touches nothing of the renderer; it posts
+// into the mailbox, which DrainMaterialPipelines empties on the main thread.
+void MetalRenderer::StartMaterialPipelineBuild(uint64_t key, const std::string& vertMSL,
+                                               const std::string& fragMSL, const std::string& fragFallbackMSL,
+                                               bool precompiled, bool bakedClustered, bool blend, bool gbuffer)
+{
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!m_matMailbox) m_matMailbox = std::make_shared<MatPipelineMailbox>();
+	const std::shared_ptr<MatPipelineMailbox> box = m_matMailbox;
+	const bool tileMode = m_deferredTileMode;
+	id<MTLBinaryArchive> arch = nil;
+	if (@available(macOS 11.0, *)) arch = (__bridge id<MTLBinaryArchive>)EnsureMaterialArchive();
+	NSString* vSrc  = [NSString stringWithUTF8String:vertMSL.c_str()];
+	NSString* fSrc  = [NSString stringWithUTF8String:fragMSL.c_str()];
+	NSString* fbSrc = fragFallbackMSL.empty() ? nil : [NSString stringWithUTF8String:fragFallbackMSL.c_str()];
+	m_materialPipelinePending.insert(key);
+	++m_matBuildScheduled;
+
+	const bool hasArchive = arch != nil;
+	auto post = [box, key, hasArchive](id<MTLRenderPipelineState> pso, MTLRenderPipelineDescriptor* desc,
+	                                   std::string error, std::string warn, std::string info)
+	{
+		MatPipelineDone d;
+		d.key = key; d.error = std::move(error); d.warn = std::move(warn); d.info = std::move(info);
+		if (pso) d.pso = (void*)CFBridgingRetain(pso);
+		if (pso && desc && hasArchive) d.desc = (void*)CFBridgingRetain(desc);
+		std::lock_guard<std::mutex> lk(box->mtx);
+		if (box->closed) // the renderer is gone: nobody will drain this
+		{
+			if (d.pso)  CFBridgingRelease(d.pso);
+			if (d.desc) CFBridgingRelease(d.desc);
+			return;
+		}
+		box->done.push_back(std::move(d));
+	};
+	auto describe = [](NSError* e) -> std::string { return e ? e.localizedDescription.UTF8String : "?"; };
+
+	void (^makePso)(id<MTLLibrary>, id<MTLLibrary>, NSError*, std::string, bool) =
+	^(id<MTLLibrary> vLib, id<MTLLibrary> fLib, NSError* err, std::string warn, bool clusteredBaked)
+	{
+		if (!vLib || !fLib)
+		{
+			post(nil, nil, "MetalRenderer: material pipeline build failed: " + describe(err), std::move(warn), {});
+			return;
+		}
+		MTLRenderPipelineDescriptor* desc = MakeMaterialPipelineDescriptor(vLib, fLib, gbuffer, blend, tileMode);
+		if (@available(macOS 11.0, *)) if (arch) desc.binaryArchives = @[arch];
+		[device newRenderPipelineStateWithDescriptor:desc
+		                           completionHandler:^(id<MTLRenderPipelineState> pso, NSError* perr)
+		{
+			std::string info;
+			if (pso && precompiled)
+				info = clusteredBaked
+					? "MetalRenderer: material pipeline from a PRECOMPILED variant, clustered"
+					: "MetalRenderer: material pipeline from a PRECOMPILED variant, plain";
+			post(pso, desc, pso ? std::string{} : "MetalRenderer: material pipeline build failed: " + describe(perr),
+			     warn, std::move(info));
+		}];
+	};
+
+	[device newLibraryWithSource:vSrc options:nil completionHandler:^(id<MTLLibrary> vLib, NSError* e1)
+	{
+		if (!vLib) { makePso(nil, nil, e1, {}, false); return; }
+		[device newLibraryWithSource:fSrc options:nil completionHandler:^(id<MTLLibrary> fLib, NSError* e2)
+		{
+			if (!fLib && fbSrc)
+			{
+				// The baked clustered fragment did not compile: the baked plain one
+				// still draws the material (8-light window, which stays full).
+				std::string warn = "MetalRenderer: baked clustered material variant rejected, "
+				                   "using the 8-light window: " + describe(e2);
+				[device newLibraryWithSource:fbSrc options:nil completionHandler:^(id<MTLLibrary> fLib2, NSError* e3)
+				{
+					makePso(vLib, fLib2, e3, warn, false);
+				}];
+				return;
+			}
+			makePso(vLib, fLib, e2, {}, bakedClustered);
+		}];
+	}];
+}
+
+// Main thread. Moves what Metal's compiler threads finished into the pipeline cache.
+void MetalRenderer::DrainMaterialPipelines()
+{
+	if (!m_matMailbox) return;
+	std::vector<MatPipelineDone> batch;
+	{
+		std::lock_guard<std::mutex> lk(m_matMailbox->mtx);
+		if (m_matMailbox->done.empty()) return;
+		batch.swap(m_matMailbox->done);
+	}
+	for (MatPipelineDone& d : batch)
+	{
+		m_materialPipelinePending.erase(d.key);
+		++m_matBuildFinished;
+		if (!d.warn.empty()) HE_LOG_WARN(RHI, "%s", d.warn.c_str());
+		if (!d.info.empty()) HE_LOG_INFO(RHI, "%s", d.info.c_str());
+		if (!d.pso)          HE_LOG_ERROR(RHI, "%s", d.error.c_str());
+		// A blocking build of the same key (the material preview) may have got there
+		// first; its pipeline stays, the duplicate goes.
+		auto [it, inserted] = m_materialPipelineCache.try_emplace(d.key, d.pso);
+		if (!inserted)
+		{
+			if (!it->second) it->second = d.pso;
+			else if (d.pso)  CFBridgingRelease(d.pso);
+		}
+		if (d.desc)
+		{
+			if (@available(macOS 11.0, *))
+			{
+				id<MTLBinaryArchive> arch = (__bridge id<MTLBinaryArchive>)m_matBinaryArchive;
+				NSError* aerr = nil;
+				if (arch && [arch addRenderPipelineFunctionsWithDescriptor:(__bridge MTLRenderPipelineDescriptor*)d.desc
+				                                                     error:&aerr]
+				    && !m_matArchivePath.empty())
+					[arch serializeToURL:[NSURL fileURLWithPath:@(m_matArchivePath.c_str())] error:nil];
+			}
+			CFBridgingRelease(d.desc);
+		}
+	}
+	if (m_materialPipelinePending.empty()) { m_matBuildScheduled = 0; m_matBuildFinished = 0; }
+}
+
+IRenderer::ShaderBuildStatus MetalRenderer::PumpShaderBuilds()
+{
+	DrainMaterialPipelines();
+	ShaderBuildStatus s;
+	s.pending = static_cast<int>(m_materialPipelinePending.size());
+	s.total   = m_matBuildScheduled;
+	return s;
 }
 
 // Delegate to the shared, backend-agnostic library (reads the MaterialAsset).
@@ -13311,7 +13590,7 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool 
 		? (__bridge id<MTLTexture>)m_bloomResult
 		: (__bridge id<MTLTexture>)hdr;
 	[enc setFragmentTexture:bloomTex atIndex:1];
-	const simd::float2 params = { 1.0f, bloom ? m_bloomStrength : 0.0f };
+	const simd::float2 params = { m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : 1.0f, bloom ? m_bloomStrength : 0.0f };
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
 	static const float kNoFlare[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	[enc setFragmentBytes:(withBloom ? m_lensFlareParams : kNoFlare)
@@ -14829,6 +15108,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// Instanced twin (Thema 182, 2e): built on the material's first batch, not
 		// on sight. The sources are kept for that; a baked variant has no twin.
 		void*     cMaterialPipelineInst  = nullptr; bool cMaterialInstTried = false;
+		// A pipeline of this material is still compiling in the background: the draw is
+		// skipped (not drawn with the default material) until it lands.
+		bool      cMaterialPending       = false;
 		uint64_t  cShKey = 0; std::string cShFrag, cShVert; bool cShBaked = false;
 		bool      cMaterialWpo           = false;   // custom WPO vertex → vertex-stage binds
 		void*     boundPipeline     = defaultPipeline;
@@ -14857,6 +15139,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				cMaterialPipeline = nullptr;
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineInst = nullptr; cMaterialInstTried = false;
+				cMaterialPending  = false;
 				cMaterialWpo      = false;
 				cMaterialParams   = nullptr;
 				cGraphTexCount    = 0;
@@ -14872,7 +15155,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::Metal)) { pre = &var; break; }
 						cMaterialWpo      = !shVert.empty();
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
+						bool pendOpaque = false, pendBlend = false;
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre,
+						                                               false, false, false, &pendOpaque);
 						cShKey = shKey; cShFrag = shFrag; cShVert = shVert; cShBaked = pre != nullptr;
 						// Translucent-routed materials additionally need the alpha-blended
 						// pipeline variant for the transparency pass. Built unconditionally
@@ -14880,9 +15165,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 						// (RenderObject::instanceTint — particle color/alpha-over-life) can
 						// push an otherwise-opaque material's effective alpha below 1 on a
 						// per-draw basis, after this cache-miss-only block has already run.
-						if (cMaterialPipeline)
+						// (Started while the opaque one is still compiling too, so both build side by side.)
+						if (cMaterialPipeline || pendOpaque)
 							cMaterialPipelineBlend =
-								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
+								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true,
+								                           false, false, &pendBlend);
+						cMaterialPending = pendOpaque || pendBlend;
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -14902,6 +15190,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				}
 #endif
 			}
+			if (cMaterialPending) continue; // compiling: appears when its pipeline lands
 			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
 			// Resolve the mesh; entities without one fall back to the default cube.
@@ -15091,17 +15380,24 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			// HE_GRAPH_INSTANCING=0) keeps the per-instance loop below.
 			const bool graphBatch = instCount > 0 && cMaterialPipeline
 			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
-			               && instCount <= k_maxInstances && !cShBaked
+			               && instCount <= k_maxInstances
 			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			bool instPending = false;
 			if (graphBatch && !cMaterialInstTried)
 			{
 				cMaterialInstTried = true;
 #if defined(HE_HAVE_SHADERC)
-				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert, nullptr,
+				// Baked: the pak's instanced vertex (a null build keeps the loop).
+				cMaterialPipelineInst = GetOrBuildMaterialPipeline(cShKey, cShFrag, cShVert,
+				                                                   cShBaked ? bakedMetalVariant(m_contentManager, dc.materialAssetId) : nullptr,
 				                                                   /*blend=*/false, /*gbuffer=*/false,
-				                                                   /*instanced=*/true);
+				                                                   /*instanced=*/true, &instPending);
+				// Still compiling: this batch is not drawn (a per-instance loop would be
+				// thousands of draws for one frame), and the next batch asks again.
+				if (instPending) cMaterialInstTried = false;
 #endif
 			}
+			if (instPending) continue;
 			if (graphBatch && cMaterialPipelineInst)
 			{
 				void*  instBuf = nullptr;
@@ -16684,6 +16980,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		void*     cMaterialPipelineGB    = nullptr; // G-buffer PSO (this pass)
 		// Instanced twin of the G-buffer PSO (2e), built on the first batch.
 		void*     cMaterialPipelineGBInst = nullptr; bool cMaterialGBInstTried = false;
+		bool      cMaterialPending       = false;   // a pipeline of this material is compiling: skip the draw
 		uint64_t  cGbKey = 0; std::string cGbFrag, cGbVert;
 		bool      cMaterialWpo           = false;
 		bool      cMaterialCustom        = false;   // material HAS a custom shader at all
@@ -16708,6 +17005,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				cMaterialPipelineBlend = nullptr;
 				cMaterialPipelineGB = nullptr;
 				cMaterialPipelineGBInst = nullptr; cMaterialGBInstTried = false;
+				cMaterialPending  = false;
 				cMaterialWpo      = false;
 				cMaterialCustom   = false;
 				cMaterialParams   = nullptr;
@@ -16726,19 +17024,23 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 						cMaterialWpo      = !shVert.empty();
 						// Forward PSOs still needed: blended for the transparency
 						// replay, opaque for the forward-routed fallback.
-						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre);
-						if (cMaterialPipeline)
+						bool pendFwd = false, pendBlend = false, pendGB = false;
+						cMaterialPipeline = GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre,
+						                                               false, false, false, &pendFwd);
+						if (cMaterialPipeline || pendFwd)
 							cMaterialPipelineBlend =
-								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true);
-						// G-buffer variant — always runtime cross-compiled (baked
-						// packs carry no G-buffer MSL yet), never blended.
+								GetOrBuildMaterialPipeline(shKey, shFrag, shVert, pre, /*blend=*/true,
+								                           false, false, &pendBlend);
+						// G-buffer variant — the baked one when the pak carries it
+						// (CHUNK_PSHD v4), else cross-compiled at load; never blended.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (ResolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 						{
 							cMaterialPipelineGB = GetOrBuildMaterialPipeline(
-								gbKey, gbFrag, gbVert, nullptr, /*blend=*/false, /*gbuffer=*/true);
+								gbKey, gbFrag, gbVert, pre, /*blend=*/false, /*gbuffer=*/true, false, &pendGB);
 							cGbKey = gbKey; cGbFrag = std::move(gbFrag); cGbVert = std::move(gbVert);
 						}
+						cMaterialPending = pendFwd || pendBlend || pendGB;
 						if (const MaterialAsset* ma = m_contentManager
 							? m_contentManager->getMaterial(dc.materialAssetId) : nullptr)
 						{
@@ -16757,6 +17059,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				}
 #endif
 			}
+			if (cMaterialPending) continue; // compiling: appears when its pipelines land
 			u.pbr = glm::vec4(cMetallic, cRoughness, cOpacity, 0.0f);
 
 			bool meshWasResolved = false;
@@ -16927,20 +17230,25 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 			// ...which since 2e has an instanced twin: a graph-material batch with
 			// a G-buffer PSO draws once through drawInstance's binds. Built on the
 			// first batch; null (failed build, HE_GRAPH_INSTANCING=0) keeps the loop.
-			// The G-buffer PSO is always runtime cross-compiled, so no baked check.
+			// A pak that baked no G-buffer / instanced twin builds none here (null keeps the loop).
 			const bool graphBatch = instCount > 0 && cMaterialPipelineGB
 			               && metalInstancingEnabled() && RenderSorter::graphInstancingEnabled()
 			               && instCount <= k_maxInstances
 			               && u.pbr.z >= RenderSorter::kOpaqueOpacityThreshold;
+			bool instPending = false;
 			if (graphBatch && !cMaterialGBInstTried)
 			{
 				cMaterialGBInstTried = true;
 #if defined(HE_HAVE_SHADERC)
-				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert, nullptr,
+				cMaterialPipelineGBInst = GetOrBuildMaterialPipeline(cGbKey, cGbFrag, cGbVert,
+				                                                     bakedMetalVariant(m_contentManager, dc.materialAssetId),
 				                                                     /*blend=*/false, /*gbuffer=*/true,
-				                                                     /*instanced=*/true);
+				                                                     /*instanced=*/true, &instPending);
+				// Still compiling: this batch is not drawn, the next one asks again.
+				if (instPending) cMaterialGBInstTried = false;
 #endif
 			}
+			if (instPending) continue;
 			if (graphBatch && cMaterialPipelineGBInst)
 			{
 				void*  instBuf = nullptr;
@@ -16999,6 +17307,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 {
 	@autoreleasepool
 	{
+		DrainMaterialPipelines(); // background pipeline builds that finished since the last frame
 		// Every pass below re-extracts (shadow, GI, SSAO, G-buffer, scene) so
 		// their draw sets and cascade fits agree. Inside this scope the world
 		// does not change, so the extractor walks it once and answers the rest
@@ -17894,11 +18203,36 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 
 			// ── In-Game UI ──────────────────────────────────────────────────
 			if (isPrimary && !offscreen)
+			{
+				// Objects whose material pipeline is still compiling are not drawn; say so,
+				// bottom left, until the last build lands. The editor shows its own hint over
+				// the viewport (it renders offscreen), so this is the packaged game only.
+				const size_t uiObjectsBefore = m_renderWorld.uiObjects.size();
+				if (!m_materialPipelinePending.empty())
+				{
+					const int total = m_matBuildScheduled, left = static_cast<int>(m_materialPipelinePending.size());
+					const std::string text = "Compiling shaders  " + std::to_string(total - left) + " / " + std::to_string(total);
+					const float sz = 18.0f;
+					const glm::vec2 textSize = HE::measureUIText(text, sz, 0.0f, HE::UITextLayout{});
+					const glm::vec2 box(textSize.x + 24.0f, sz + 14.0f);
+					const glm::vec2 at(16.0f, static_cast<float>(ph) - box.y - 16.0f);
+					UIRenderObject card;
+					card.position = at; card.size = box;
+					card.color = { 0.05f, 0.04f, 0.04f, 0.75f };
+					card.cornerRadius = { 6.0f, 6.0f, 6.0f, 6.0f };
+					card.layer = 1 << 20;
+					m_renderWorld.uiObjects.push_back(card);
+					HE::emitUITextGlyphs(text, at + glm::vec2(12.0f, 0.0f), glm::vec2(box.x - 12.0f, box.y), sz,
+					                     { 0.95f, 0.93f, 0.88f, 1.0f }, (1 << 20) + 1, /*centerH=*/false,
+					                     m_renderWorld.uiObjects);
+				}
 				// May hand back a SECOND encoder (a Backdrop material cuts the
 				// pass in two) — the overlay below has to use that one.
 				encoder = (__bridge id<MTLRenderCommandEncoder>)
 					EncodeUIPass((__bridge void*)encoder, pw, ph,
 					             (__bridge void*)cmdBuf, (__bridge void*)pass);
+				m_renderWorld.uiObjects.resize(uiObjectsBefore);
+			}
 
 			// ── Overlay (ImGui) ─────────────────────────────────────────────
 			if (isPrimary && m_overlayCallback)

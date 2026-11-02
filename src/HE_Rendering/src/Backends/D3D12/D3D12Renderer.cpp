@@ -3894,7 +3894,7 @@ struct D3D12RendererImpl
         if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
             return it->second.Get();
         ComPtr<ID3D12Resource> res;
-        uploadTexture2D(cl, cm->resolveTextureRef(id, path), res, array); // null stays null
+        uploadTexture2DReleasing(cl, cm, cm->resolveTextureRef(id, path), res, array); // null stays null
         ID3D12Resource* raw = res.Get();
         m_graphTexCache.emplace(key, std::move(res));
         return raw;
@@ -4305,7 +4305,7 @@ struct D3D12RendererImpl
             return it->second.slot;
         UIImage12 entry;
         if (m_uiImageNextSlot < k_maxUIImages &&
-            uploadTexture2D(cmd, cm->resolveTextureRef(id, {}), entry.tex, /*asArray=*/false, /*honourSrgb=*/false))
+            uploadTexture2DReleasing(cmd, cm, cm->resolveTextureRef(id, {}), entry.tex, /*asArray=*/false, /*honourSrgb=*/false))
         {
             entry.slot = static_cast<int>(k_maxUIFontAtlases + m_uiImageNextSlot++);
             srvForTexture(entry.tex.Get(), uiAtlasCpu(static_cast<UINT>(entry.slot)));
@@ -4435,19 +4435,34 @@ struct D3D12RendererImpl
     // tonemap's gamma encode re-curves them. The twins share block/byte layout, so
     // GetCopyableFootprints and the support check are unchanged.
     int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
-                        ComPtr<ID3D12Resource>& outTex)
+                        ComPtr<ID3D12Resource>& outTex, ContentManager* cm = nullptr)
     {
         if (!cl || !sceneSrvHeap || !tex) return -1;
         // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
         if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
             return -1; // heap full → flat
-        if (!uploadTexture2D(cl, tex, outTex)) return -1;
+        if (!uploadTexture2DReleasing(cl, cm, tex, outTex)) return -1;
 
         UINT slot;
         if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
         else                      { slot = meshTexNextSlot++; }
         srvForTexture(outTex.Get(), sceneSrvCpu(slot));
         return static_cast<int>(slot);
+    }
+
+    // The upload every call site goes through: brings back bytes an earlier upload released,
+    // uploads, and lets the content manager free a block-compressed texture's CPU copy (the
+    // shipped game holds each texture once; see ContentManager::releaseCpuPixels). Safe at
+    // this point: uploadTexture2D memcpys every subresource into its own upload buffer before
+    // it returns and the GPU copy reads that buffer (parked in meshTexUploads), never tex->data.
+    bool uploadTexture2DReleasing(ID3D12GraphicsCommandList* cl, ContentManager* cm, const TextureAsset* tex,
+                                  ComPtr<ID3D12Resource>& outTex, bool asArray = false,
+                                  bool honourSrgb = true)
+    {
+        if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+        const bool ok = uploadTexture2D(cl, tex, outTex, asArray, honourSrgb);
+        if (cm && tex && ok) cm->releaseCpuPixels(tex->id);
+        return ok;
     }
 
     // The upload half of allocAlbedoSlot, without a scene-heap slot: creates the DEFAULT
@@ -4576,7 +4591,7 @@ struct D3D12RendererImpl
         const StaticMeshAsset* asset = cm->getStaticMesh(assetId);
         if (!asset) return;
         const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
-        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex, cm);
     }
 
     // Same as ensureMeshAlbedo for a skeletal mesh's baked material.
@@ -4588,7 +4603,7 @@ struct D3D12RendererImpl
         const SkeletalMeshAsset* asset = cm->getSkeletalMesh(assetId);
         if (!asset) return;
         const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
-        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex, cm);
     }
 
     // Resolve + upload an OVERRIDE material's base-color texture (dc.materialAssetId), cached
@@ -4611,7 +4626,7 @@ struct D3D12RendererImpl
         const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
         const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
         MaterialTex entry;
-        entry.slot = allocAlbedoSlot(cl, tex, entry.tex); // -1 if the material has no usable texture
+        entry.slot = allocAlbedoSlot(cl, tex, entry.tex, cm); // -1 if the material has no usable texture
         outSlot = entry.slot;
         m_materialTexCache.emplace(materialId, std::move(entry));
         return true;
@@ -10649,7 +10664,7 @@ int D3D12RendererImpl::resolveDecalTexture(ID3D12GraphicsCommandList* cl,
     if (auto it = decalTexCache.find(textureId); it != decalTexCache.end())
         return it->second.second;
     ComPtr<ID3D12Resource> tex;
-    const int slot = allocAlbedoSlot(cl, cm->resolveTextureRef(textureId, {}), tex);
+    const int slot = allocAlbedoSlot(cl, cm->resolveTextureRef(textureId, {}), tex, cm);
     // Cached even on failure (slot -1, null resource): no per-frame retry.
     decalTexCache.emplace(textureId, std::make_pair(std::move(tex), slot));
     return slot;

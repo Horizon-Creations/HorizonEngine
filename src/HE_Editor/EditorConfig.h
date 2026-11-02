@@ -212,9 +212,10 @@ struct EditorConfig
 	bool  GraphicsFromProject = false;
 
 	// Render path (pushed to the renderer each frame via SetRenderPath): 0 =
-	// Forward (default), 1 = Deferred (G-buffer + fullscreen lighting resolve,
-	// Metal + OpenGL). The backend's supportsDeferredRendering gates it.
-	int   RenderPath = 0;
+	// Forward, 1 = Deferred (default; G-buffer + fullscreen lighting resolve,
+	// Metal + OpenGL). The backend's supportsDeferredRendering gates it: a backend
+	// without one stays forward whatever this says.
+	int   RenderPath = 1;
 
 	// CPU occlusion culling (pushed each frame via SetOcclusionCullingSettings):
 	// objects hidden behind nearer opaque geometry are not drawn. OpenGL + Metal;

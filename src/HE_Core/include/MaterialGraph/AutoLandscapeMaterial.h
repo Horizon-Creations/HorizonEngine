@@ -265,7 +265,9 @@ inline constexpr float kTrailFadeEnd   = 58.0f;
 //   MasksDirtWet        R = dirt, G = wet ground (puddle rim + water), B = flat
 //   Normal              the final world normal × 0.5 + 0.5 (the Normal pin's input)
 //   Surface             R = AO, G = roughness, B = 0 (the AO / Roughness pins' inputs)
-enum class AutoLandscapeView : uint8_t { Lit, MasksRockSnowWater, MasksDirtWet, Normal, Surface };
+//   BaseColor           the final albedo (the BaseColor pin's input), unlit: what the far-landscape
+//                       bake photographs (docs/landscape-hlod-baked-material-2026-11-02.md)
+enum class AutoLandscapeView : uint8_t { Lit, MasksRockSnowWater, MasksDirtWet, Normal, Surface, BaseColor };
 
 struct AutoLandscapeGraph
 {

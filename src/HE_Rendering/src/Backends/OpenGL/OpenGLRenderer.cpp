@@ -3908,8 +3908,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
                                                        bool gbuffer, bool instanced)
 {
 	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
-	// The pak bakes no instanced vertex: the caller loops with the plain program.
-	if (instanced && precompiled) return 0;
+	// What the pak baked for the twin being asked for (CHUNK_PSHD v4). A twin it did not
+	// bake is not cross-compiled next to a baked plain pair: a packaged build may have
+	// no translator. The G-buffer twin simply cross-compiles (the deferred path always
+	// could); the instanced one returns 0 and the caller loops with the plain program.
+	if (precompiled && gbuffer && precompiled->fragmentGBuffer.empty()) precompiled = nullptr;
+	if (precompiled && instanced && precompiled->vertexInstanced.empty()) return 0;
 	// `key` also keys the fragment cache below, so the instanced slot gets its own
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
@@ -3937,7 +3941,8 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// fragmentClustered); otherwise its plain 4.10 pair draws with the window.
 	// The G-buffer variant never shades lights.
 	const bool bakedClustered = precompiled && !precompiled->vertexClustered.empty()
-	                         && !precompiled->fragmentClustered.empty();
+	                         && !precompiled->fragmentClustered.empty()
+	                         && (!instanced || !precompiled->vertexInstancedClustered.empty());
 	bool clustered = m_forwardClustered && !gbuffer && (!precompiled || bakedClustered);
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
@@ -3953,8 +3958,21 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	};
 	auto usePrecompiled = [&](bool cl) {
-		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
-		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		if (gbuffer)   // the deferred twin: the plain vertex stage (or its instanced form), never clustered
+		{
+			vertSrc = instanced ? precompiled->vertexInstanced : precompiled->vertex;
+			fragSrc = precompiled->fragmentGBuffer;
+		}
+		else if (instanced)
+		{
+			vertSrc = cl ? precompiled->vertexInstancedClustered : precompiled->vertexInstanced;
+			fragSrc = cl ? precompiled->fragmentClustered        : precompiled->fragment;
+		}
+		else
+		{
+			vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
+			fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		}
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
 	};
 	// Displacement (Thema 207): the two tessellation stages, at the GLSL version of
@@ -4106,8 +4124,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
 			? (clustered
-				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
-				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered, instanced (GLSL 4.30, no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)")
+				: gbuffer
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer (no runtime cross-compile)")
+				: (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)"))
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -4678,11 +4701,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	// Release: full 256³ tile so sky fBm octaves don't visibly repeat.
 	// Debug: 64³ (64× fewer voxels) so the CPU bake takes < 1s instead of 30min
 	// without SIMD optimisation in MSVC Debug mode.
-#ifdef NDEBUG
-	constexpr int kNoiseN = 256;
-#else
-	constexpr int kNoiseN = 64;
-#endif
+	const int kNoiseN = HE::SkyNoise3DResolution();
 	const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 	glGenTextures(1, &m_noiseTex);
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -9127,6 +9146,20 @@ unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 	return id;
 }
 
+// The upload every call site below goes through: brings back bytes an earlier upload released,
+// uploads, and lets the content manager free a block-compressed texture's CPU copy (the shipped
+// game holds each texture once; see ContentManager::releaseCpuPixels). The glTexImage /
+// glCompressedTexImage calls copy the client memory before they return, so the bytes are dead
+// weight the moment an upload succeeded.
+unsigned int uploadGlTextureReleasing(ContentManager* cm, const TextureAsset* tex,
+                                      bool honourSrgb = true, bool arrayPath = false)
+{
+	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+	const unsigned int uploaded = arrayPath ? uploadTextureArrayGL(tex) : uploadTextureAssetGL(tex, honourSrgb);
+	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	return uploaded;
+}
+
 } // namespace
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -9242,7 +9275,8 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9369,7 +9403,8 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9403,7 +9438,7 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked BC7/BC3 (previously this override path assumed RGBA8 and
 		// would have uploaded a compressed payload as garbage — now handled).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	m_materialTexCache.emplace(materialId, tex);
@@ -9435,12 +9470,13 @@ unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::
 	unsigned int tex = 0;
 	if (array)
 	{
-		tex = uploadTextureArrayGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+		                               /*honourSrgb=*/true, /*arrayPath=*/true);
 		if (tex) m_glArrayTex.insert(tex);
 	}
 	else
 		// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
 	return tex ? tex : (array ? m_whiteArrayTex : 0);
 }
@@ -9465,8 +9501,8 @@ unsigned int OpenGLRenderer::ResolveUITexture(const HE::UUID& id, const std::str
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
 	if (key.empty() || !m_contentManager) return 0;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
-	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path),
-	                                        /*honourSrgb=*/false);
+	unsigned int tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+	                                            /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, tex);
 	return tex;
 }
@@ -9534,7 +9570,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
 			    && !m_materialPrograms.count(gbKey)
-			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true))
+			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true))
 				++built;
 		}
 	}
@@ -12393,17 +12429,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 						matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-						// G-buffer variant — runtime cross-compiled only (baked packs
-						// carry no G-buffer GLSL yet).
+						// G-buffer variant — baked into the pak when it carries one
+						// (CHUNK_PSHD v4), else cross-compiled at load.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 						{
-							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
+							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true);
 							// A batch draws once with the instanced twin (2e); only
 							// built for batches, and 0 sends it back to the loop.
 							if (gbProg && dc.instanceTotal() > 0 && m_instanceVBO
 							    && RenderSorter::graphInstancingEnabled())
-								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
+								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre,
 								                                       /*gbuffer=*/true, /*instanced=*/true);
 						}
 						if (ma)

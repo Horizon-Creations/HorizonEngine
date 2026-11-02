@@ -331,6 +331,20 @@ void commitSlots(AppContext& ctx, State& st, const HE::Ed::MeshMaterialSlots::Ta
 		HE_LOG_WARN(Editor, "%s", ("StaticMeshEditor: could not save '" + st.relPath + "'").c_str());
 }
 
+// The export-bake switches go into the mesh asset and are saved the moment one
+// flips, like a material slot. Nothing is invalidated: the preview never reads them.
+void commitBake(AppContext& ctx, State& st, const MeshBakeSettings& bake)
+{
+	if (!ctx.contentManager) return;
+	StaticMeshAsset* mesh = ctx.contentManager->getStaticMeshMutable(st.meshId);
+	if (!mesh) return;
+	mesh->bake = bake;
+	if (ctx.contentManager->saveAsset(*mesh))
+		HE_LOG_INFO(Editor, "%s", ("StaticMeshEditor: saved export bake switches of '" + st.relPath + "'").c_str());
+	else
+		HE_LOG_WARN(Editor, "%s", ("StaticMeshEditor: could not save '" + st.relPath + "'").c_str());
+}
+
 // The picker for one slot, as the panels draw it. undo = false: the world's undo
 // system snapshots entities, and a mesh asset's slot is not one — the tab's own
 // Session is what Cmd+Z steps through here.
@@ -479,6 +493,21 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 				});
 			if (changed) commitSlots(ctx, st, table);
 			mesh = ctx.contentManager->getStaticMesh(st.meshId);
+		}
+
+		// ── Export bake ──────────────────────────────────────────────────
+		// Which texture bakes the exporter may apply to this mesh. Saved at once
+		// like a slot change; the editor's own view never uses them.
+		ImGui::SeparatorText("Export bake");
+		{
+			MeshBakeSettings bake = mesh->bake;
+			bool touched = false;
+			touched |= EditorWidgets::checkbox("Vertex colors",   &bake.vertexColors);
+			touched |= EditorWidgets::checkbox("Merge textures",  &bake.mergeTextures);
+			touched |= EditorWidgets::checkbox("One UV texture",  &bake.uvTexture);
+			if (touched) commitBake(ctx, st, bake);
+			mesh = ctx.contentManager->getStaticMesh(st.meshId);
+			ImGui::TextDisabled("Applies to simple texture-only\nmaterials at export.");
 		}
 
 		ImGui::SeparatorText("UVs");

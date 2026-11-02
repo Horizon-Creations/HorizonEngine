@@ -517,6 +517,18 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 							windWaterParams(*ma, matComp, windDir, windSpd, obj.paramOverride);
 				}
+				// A far LOD level that carries a material of its own (the baked far landscape) is drawn with it,
+				// whatever the entity's material is, while that level is the chosen one.
+				if (lodPool && lodPool->contains(e))
+				{
+					const LODComponent& lc = lodPool->get(e);
+					if (lc.current != LODComponent::kRefined && lc.current > 0 && lc.current < lc.levels.size()
+					    && lc.levels[lc.current].materialId != HE::UUID{})
+					{
+						matId = lc.levels[lc.current].materialId;
+						obj.paramOverride.clear();
+					}
+				}
 				// Terrain chunk → its parent landscape's painted layer weightmap, so a
 				// Landscape Layer Blend material samples the right terrain's paint. Read
 				// from the PARENT: the weights belong to the landscape, the chunks are

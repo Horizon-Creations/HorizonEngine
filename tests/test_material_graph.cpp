@@ -1959,7 +1959,9 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 	// A torn tail (pak cut short) still yields every record, the clustered pairs
 	// it could not read stay empty — the renderer then draws the plain fragment.
 	{
-		std::vector<uint8_t> torn(bytes.begin(), bytes.end() - 1);
+		// The v4 tail (G-buffer + instanced twins: three empty strings per record, a 4-byte
+		// length each) comes after the clustered one, so cut it whole and one byte more.
+		std::vector<uint8_t> torn(bytes.begin(), bytes.end() - 2 * 3 * sizeof(uint32_t) - 1);
 		const auto t = HE::decodeMaterialShaderVariants(torn);
 		REQUIRE(t.size() == in.size());
 		CHECK(t[1].fragment == in[1].fragment);
