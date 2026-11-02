@@ -828,10 +828,12 @@ void render(AppContext& ctx)
         // is a sliver on a 4K display and most of the screen on a laptop, and
         // resizing it by hand on every open is exactly what this avoids. The
         // clamp keeps the profile row (combo + two buttons + name field) from
-        // being squeezed and the path lines from becoming unreadably long;
+        // being squeezed and the lines from becoming unreadably long;
         // pinDialogToEditorWindow still caps it to the window on tiny screens.
-        const float dlgW = std::clamp(ImGui::GetMainViewport()->WorkSize.x * 0.36f,
-                                      520.0f, 1000.0f);
+        // The floor follows the font as well: the profile row (combo, two buttons,
+        // a name field) is ~40 characters wide whatever the display scale is.
+        const float dlgW = std::clamp(ImGui::GetMainViewport()->WorkSize.x * 0.45f,
+                                      ImGui::GetFontSize() * 42.0f, 1100.0f);
         const float dlgK = dlgW / 560.0f;   // scale for the fixed-width fields below
         ImGui::SetNextWindowSize(ImVec2(dlgW, 0), ImGuiCond_Always);
         EditorWidgets::pinDialogToEditorWindow();
@@ -1056,6 +1058,9 @@ void render(AppContext& ctx)
                 }
                 ImGui::EndDisabled();
                 EditorWidgets::helpForKey("Export/Texture quality");
+                // Wrapped: these notes are longer than the dialog, and a clipped
+                // sentence reads as a complete one.
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 if (s_exportTextureFormat == "None")
                     ImGui::TextDisabled("Uncompressed RGBA8 with baked mips: the exact pixels, "
                                         "and the largest pak.");
@@ -1068,7 +1073,10 @@ void render(AppContext& ctx)
             EditorWidgets::checkbox("Compress assets",       &s_exportCompress);
             EditorWidgets::checkbox("Encrypt assets",        &s_exportEncrypt);
             if (s_exportEncrypt)
+            {
+                EditorWidgets::WrapText wrap(dlgW - 10.0f);
                 ImGui::TextDisabled("Note: encryption key management is the project's responsibility.");
+            }
             // Mods are a game's idea: a .hpak dropped next to the executable that
             // replaces content. An application is not modded from outside, and a
             // switch nobody should touch is worse than no switch.
@@ -1076,7 +1084,10 @@ void render(AppContext& ctx)
             {
                 EditorWidgets::checkbox("Enable mod support",    &s_exportModSupport);
                 if (s_exportModSupport)
+                {
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextDisabled("The game mounts every .hpak in a Mods/ folder next to the executable.");
+                }
             }
             else
                 s_exportModSupport = false;
@@ -1086,7 +1097,10 @@ void render(AppContext& ctx)
             {
                 EditorWidgets::checkbox("Development hotkeys",   &s_exportDevTools);
                 if (s_exportDevTools)
+                {
+                    EditorWidgets::WrapText wrap(dlgW - 10.0f);
                     ImGui::TextDisabled("F10 shows the stats card with per-pass GPU times, V toggles VSync. Leave off for the build players get.");
+                }
             }
             else
                 s_exportDevTools = false;
@@ -1280,8 +1294,27 @@ void render(AppContext& ctx)
 
     if (s_startRequest && !s_exportRunning.load())
     {
-        s_startRequest = false;
-        requestStart(ctx);
+        // The setup in startExport (every scene loaded and serialized, every
+        // HorizonCode asset read) runs on this thread and blocks the editor for
+        // as long as the project is big. Start it one frame later and put the
+        // Build window up first, so the click is answered with "Preparing…"
+        // instead of a window that simply stops. Only when the run is going to
+        // start: a parked or refused one must not leave this run behind.
+        static bool s_announced = false;
+        if (!s_announced && currentExportGate(ctx).state == HE::ExportSdk::GateState::Ready)
+        {
+            s_announced = true;
+            Build::begin({ "Setup" });
+            Build::stepBegin(0);
+            Build::setActivity("Preparing export: reading scenes and assets\xe2\x80\xa6");
+            BuildProgressDialog::requestOpen();
+        }
+        else
+        {
+            s_announced    = false;
+            s_startRequest = false;
+            requestStart(ctx);
+        }
     }
     pumpWaitingExport(ctx);
 #else
