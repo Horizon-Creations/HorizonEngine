@@ -304,6 +304,74 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		writePng((outDir / (std::string("landscape_") + be.name() + "_hills.png")).string(), out);
 		drawn("hills")[be.name()] = out;
 	}
+	// ── scene 3: the ground in world coordinates (the albedo array of a texture group) ──
+	{
+		// the ramp world: every texel is 100 % layer 0, so the ground shows slice 0 and nothing else
+		LandscapeRuntime rt;
+		LandscapeRuntimeConfig cfg;
+		cfg.store.byteBudget = 80ull * 1024 * 1024;
+		cfg.textureGroup = 0;            // the frame then names the group's albedo array; what the backend binds is the tool's own
+		cfg.textureMeters = 8.0f;
+		std::string err;
+		if (!rt.beginFromPack(packPath, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
+		// slices 0-3: stripes (left half / right half of a tile) in colours nothing else in the picture has
+		gpucheck::TexArray tex;
+		tex.size = 64;
+		tex.layers = 4;
+		tex.rgba.resize(static_cast<size_t>(tex.size) * static_cast<size_t>(tex.size) * 4u * 4u);
+		const uint8_t colours[4][2][3] = { { { 255, 0, 0 }, { 255, 255, 0 } }, { { 0, 255, 0 }, { 0, 255, 255 } }, { { 0, 0, 255 }, { 255, 0, 255 } }, { { 255, 255, 255 }, { 0, 0, 0 } } };
+		for (int l = 0; l < 4; ++l)
+			for (int y = 0; y < tex.size; ++y)
+				for (int x = 0; x < tex.size; ++x)
+				{
+					uint8_t* px = &tex.rgba[((static_cast<size_t>(l) * static_cast<size_t>(tex.size) + static_cast<size_t>(y)) * static_cast<size_t>(tex.size) + static_cast<size_t>(x)) * 4u];
+					const uint8_t* c = colours[l][x < tex.size / 2 ? 0 : 1];
+					px[0] = c[0]; px[1] = c[1]; px[2] = c[2]; px[3] = 255;
+				}
+		Camera c{ { 2600.0, 720.0, 3072.0 }, { 1.0, -0.12, 0.2 }, { 2048.0, 100.0, 1024.0 } };
+		if (!settle(rt, c.pos, c.origin)) { std::printf("  the store did not settle (world uv)\n"); return 1; }
+		const auto shot = [&](const Camera& cam, const gpucheck::TexArray* array, gpucheck::RenderOut& out) {
+			gpucheck::RenderIn in = makeInput(cam, be.depthIsNdc(), rt);
+			in.albedo = array;
+			return be.render(in, out);
+		};
+		gpucheck::RenderOut flat, textured, shifted;
+		if (!shot(c, nullptr, flat) || !shot(c, &tex, textured)) { std::printf("  render failed (world uv)\n"); return 1; }
+		size_t ground = 0, changed = 0, red = 0, yellow = 0, flatGreen = 0;
+		for (size_t i = 0; i < flat.depth.size(); ++i)
+		{
+			if (flat.depth[i] >= 1.0f) continue;
+			++ground;
+			int worst = 0;
+			for (int k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(flat.rgba[i * 4 + static_cast<size_t>(k)]) - static_cast<int>(textured.rgba[i * 4 + static_cast<size_t>(k)])));
+			changed += worst > 16 ? 1 : 0;
+			const int r = textured.rgba[i * 4], g = textured.rgba[i * 4 + 1], b = textured.rgba[i * 4 + 2];
+			// slice 0 is red | yellow, lit: no blue at all; the flat layer 0 is green with blue in it
+			if (b < 6 && r > 30) { (g < 6 ? red : yellow) += 1; }
+			if (flat.rgba[i * 4 + 1] > flat.rgba[i * 4] && flat.rgba[i * 4 + 2] > 6) ++flatGreen;
+		}
+		std::printf("  %-26s %zu of %zu ground pixels differ from the flat colours by more than 16/255, red %zu, yellow %zu\n", "world uv, textured", changed, ground, red, yellow);
+		tally.check(ground > flat.depth.size() / 4, "the ramp fills part of the image (world uv)");
+		tally.check(flatGreen * 10 > ground * 9, "without the array the ground is the flat green");
+		tally.check(changed * 10 > ground * 9, "the albedo array changes the ground");
+		tally.check(red * 20 > ground && yellow * 20 > ground, "both halves of the slice's stripe show");
+		// the same absolute view from another floating origin: the texture must stay where it is in the world
+		Camera c2 = c;
+		c2.origin = { 1000.37, 0.0, -512.11 };
+		if (!settle(rt, c2.pos, c2.origin)) { std::printf("  the store did not settle (world uv, shifted origin)\n"); return 1; }
+		if (!shot(c2, &tex, shifted)) { std::printf("  render failed (world uv, shifted origin)\n"); return 1; }
+		size_t differing = 0;
+		for (size_t i = 0; i + 3 < textured.rgba.size(); i += 4)
+		{
+			int worst = 0;
+			for (int k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(textured.rgba[i + static_cast<size_t>(k)]) - static_cast<int>(shifted.rgba[i + static_cast<size_t>(k)])));
+			differing += worst > 16 ? 1 : 0;
+		}
+		std::printf("  %-26s %zu pixels more than 16/255 apart from the same view with the origin moved\n", "world uv, origin moved", differing);
+		tally.check(differing * 500 <= textured.rgba.size() / 4, "the texture stays put when the floating origin moves");
+		writePng((outDir / (std::string("landscape_") + be.name() + "_worlduv.png")).string(), textured);
+		drawn("worlduv")[be.name()] = textured;
+	}
 	std::printf("  %s\n", tally.failures == 0 ? "OK" : "FAILED");
 	return tally.failures == 0 ? 0 : 1;
 }
@@ -318,10 +386,12 @@ int main(int argc, char** argv)
 {
 	std::filesystem::path outDir = ".";
 	std::string only;
+	std::string arrayRoot;   // --arrays <EngineContent root>: also draw the ground from the Forest albedo array found there
 	for (int i = 1; i < argc; ++i)
 	{
 		if (!std::strcmp(argv[i], "--out") && i + 1 < argc) outDir = argv[++i];
 		else if (!std::strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+		else if (!std::strcmp(argv[i], "--arrays") && i + 1 < argc) arrayRoot = argv[++i];
 	}
 	std::filesystem::create_directories(outDir);
 
@@ -354,6 +424,11 @@ int main(int argc, char** argv)
 			++ran;
 			rc = std::max(rc, gpucheck::runEngineCheck(backend, path, pack,
 			                                           (outDir / (std::string("landscape_") + name + "_engine_" + (path == HE::RenderPath::Deferred ? "deferred" : "forward") + ".png")).string()));
+		}
+		if (!arrayRoot.empty())
+		{
+			++ran;
+			rc = std::max(rc, gpucheck::runEngineCheck(backend, HE::RenderPath::Forward, pack, (outDir / (std::string("landscape_") + name + "_engine_worlduv.png")).string(), arrayRoot));
 		}
 	};
 	if (only.empty() || only == "gl")
@@ -388,7 +463,7 @@ int main(int argc, char** argv)
 	// OpenGL is the reference of everything it is run beside; D3D12 is also held against D3D11, the two share one HLSL source and the pair should be near-identical.
 	const std::pair<const char*, const char*> pairs[] = { { "OpenGL", "Metal" }, { "OpenGL", "D3D11" }, { "OpenGL", "D3D12" }, { "D3D11", "D3D12" } };
 	for (const auto& [refName, otherName] : pairs)
-		for (const char* scene : { "ramp", "hills" })
+		for (const char* scene : { "ramp", "hills", "worlduv" })
 		{
 			auto& m = drawn(scene);
 			if (m.count(refName) == 0 || m.count(otherName) == 0) continue;

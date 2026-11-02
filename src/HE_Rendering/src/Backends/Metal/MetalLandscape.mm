@@ -5,6 +5,7 @@
 #import <Metal/Metal.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -27,6 +28,7 @@ struct alignas(16) Globals
 	float   sunDir[4];
 	float   sunColor[4];
 	float   ambient[4];
+	float   tex[4];
 };
 struct alignas(16) PatchData
 {
@@ -34,11 +36,11 @@ struct alignas(16) PatchData
 	float   patchPos[4];
 	float   morph[4];
 };
-static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 3 * 16, "LsGlobals: the MSL struct and this one have to be the same size");
+static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 4 * 16, "LsGlobals: the MSL struct and this one have to be the same size");
 static_assert(sizeof(PatchData) == 48, "LsPatch: the MSL struct and this one have to be the same size");
 
 constexpr NSUInteger kBuf = 20, kPatchBuf = 21;      // constant buffers (vertex: 20, 21; fragment: 20)
-constexpr NSUInteger kTex = 20;                       // first texture index (vertex: 20-22; fragment: 20-26)
+constexpr NSUInteger kTex = 20;                       // first texture index (vertex: 20-22; fragment: 20-27, 27 = the albedo array)
 } // namespace
 
 struct MetalLandscape::Impl
@@ -50,6 +52,7 @@ struct MetalLandscape::Impl
 	id<MTLTexture> tileHeights = nil, slotTable = nil, coarseHeights = nil;
 	id<MTLTexture> weights[3] = { nil, nil, nil };
 	id<MTLTexture> coarseWeights[3] = { nil, nil, nil };
+	id<MTLTexture> noArray = nil;   // bound at 27 when there is no albedo array: the shader does not read it, Metal wants something there
 	std::shared_ptr<const LandscapeRenderStatic> world;
 	Stats stats;
 	bool ok = false;
@@ -114,6 +117,7 @@ bool MetalLandscape::init(void* devicePtr, unsigned long colorFormat, unsigned l
 		dd.depthCompareFunction = MTLCompareFunctionLess;
 		dd.depthWriteEnabled = YES;
 		m.depth = [m.device newDepthStencilStateWithDescriptor:dd];
+		m.noArray = m.make2D(MTLPixelFormatRGBA8Unorm, 1, 1, 1);
 	}
 	m.ok = true;
 	return true;
@@ -211,6 +215,11 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		g.sunDir[0] = shading.sunDir.x; g.sunDir[1] = shading.sunDir.y; g.sunDir[2] = shading.sunDir.z;
 		g.sunColor[0] = shading.sunColor.x; g.sunColor[1] = shading.sunColor.y; g.sunColor[2] = shading.sunColor.z;
 		g.ambient[0] = shading.ambient.x; g.ambient[1] = shading.ambient.y; g.ambient[2] = shading.ambient.z;
+		// World UVs: a texture tile every `textureMeters` of absolute x/z; the origin's share is a fraction made here in double (see OpenGLLandscape).
+		const bool tex = shading.albedoArray != nullptr && !w.albedoArrayPath.empty() && w.textureMeters > 0.0f;
+		const double k = tex ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
+		g.tex[0] = static_cast<float>(k); g.tex[1] = tex ? 1.0f : 0.0f;
+		g.tex[2] = static_cast<float>(f.origin.x * k - std::floor(f.origin.x * k)); g.tex[3] = static_cast<float>(f.origin.z * k - std::floor(f.origin.z * k));
 
 		id<MTLRenderCommandEncoder> enc = (__bridge id<MTLRenderCommandEncoder>)renderEncoder;
 		[enc setRenderPipelineState:m.pipeline];
@@ -226,6 +235,7 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 			[enc setFragmentTexture:m.weights[p] atIndex:kTex + 1 + static_cast<NSUInteger>(p)];
 			[enc setFragmentTexture:m.coarseWeights[p] atIndex:kTex + 4 + static_cast<NSUInteger>(p)];
 		}
+		[enc setFragmentTexture:tex ? (__bridge id<MTLTexture>)shading.albedoArray : m.noArray atIndex:kTex + 7];
 
 		const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
 		for (const LandscapeRenderPatch& p : f.patches)

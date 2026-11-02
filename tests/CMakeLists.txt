@@ -285,6 +285,7 @@ add_executable(he_tests
     test_landscape_foliage.cpp
     test_landscape_navigation.cpp
     test_landscape_water.cpp
+    test_landscape_world_proxies.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp

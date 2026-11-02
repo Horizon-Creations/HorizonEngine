@@ -51,6 +51,7 @@
 #include "EditorCommands.h"
 #include "PlayCellStreaming.h"   // a split scene's cells streamed while playing
 #include <HorizonScene/LandscapeRuntime.h>   // the world-scale tile landscape (Thema 326)
+#include <HorizonScene/LandscapeWorldProxies.h>
 #include <atomic>
 #include <filesystem>
 #include <functional>
@@ -777,6 +778,7 @@ private:
 	// The scene's tile landscape (LandscapeWorldComponent): streamed around the play camera, or around the editor's own while editing, and
 	// drawn by the renderer through IRenderer::SetLandscapeProvider (bound at the first update).
 	HE::LandscapeRuntime m_landscape;
+	HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
 	bool m_landscapeBound = false;
 	// The headless dump's rings (HE_DUMP_WATERRIPPLE): no physics runs there, so the witness
 	// builds the block itself and pushEnvironment hands it to the renderer instead of the

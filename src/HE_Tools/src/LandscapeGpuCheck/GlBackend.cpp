@@ -64,7 +64,20 @@ public:
 		sh.sunDir = in.sunDir;
 		sh.sunColor = in.sunColor;
 		sh.ambient = in.ambient;
+		GLuint array = 0;
+		if (in.albedo && in.albedo->size > 0 && in.albedo->layers > 0)
+		{
+			glGenTextures(1, &array);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, array);
+			glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, in.albedo->size, in.albedo->size, in.albedo->layers, 0, GL_RGBA, GL_UNSIGNED_BYTE, in.albedo->rgba.data());
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+			sh.albedoArray = array;
+		}
 		m_landscape.draw(frame, in.viewProj, sh);
+		if (array) glDeleteTextures(1, &array);
 		glFinish();
 
 		out.width = m_w;

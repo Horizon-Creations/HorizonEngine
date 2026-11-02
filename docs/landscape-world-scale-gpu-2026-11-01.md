@@ -54,7 +54,7 @@ damit der Haken keine Bindung des Renderers überschreibt, die später im Pass n
 * **Position:** im Opaque-Pass nach den Skinned-Meshes, vor dem Himmel (GL: vor `GpuTimerEndPass("Opaque")`, Metal: zwischen `"Skinned"` und `drawSky()`), mit Tiefentest und Tiefenschreiben, ohne Culling, ohne Blending. Der Himmel (`LEQUAL`, z = 1, kein Schreiben) füllt nur, was die Landschaft übrig lässt. Auf beiden Pfaden (Forward, Deferred) läuft derselbe Haken, nach dem Resolve.
 * **Metal-Tiefe (Fund):** der Metal-Szenenpass rastert mit der **unkorrigierten GL-Matrix** (`u.mvp = viewProj * model`, `HE::kMetalClipFix` wird dort nicht angewandt; der G-Buffer legt die GL-NDC-Tiefe ab). Damit Landschaft, Objekte und Himmel sortiert zusammenpassen, nimmt `MetalLandscape::encode` dieselbe Matrix und der Frustum-Aufruf `zeroToOne = false`. Folge, wie für jeden Szenen-Draw: Geometrie näher als etwa das Doppelte der Near-Ebene wird abgeschnitten.
 * **GL-Zustand:** `StateGuard` setzt Programm, VAO, aktive Einheit, Tiefenzustand, Culling, Blending und Unpack-Ausrichtung zurück. Metal setzt Pipeline und Tiefenzustand selbst; jeder folgende Pass des Renderers setzt seine wieder. **Shader und Pipeline entstehen erst beim ersten aktiven Frame**: eine Szene ohne Landschaft (Provider gesetzt, `frame.active` falsch) übersetzt nichts, zeichnet nichts und lässt die Sky-only-Abkürzungen des Metal-Renderers wie sie waren.
-* **Beleuchtung:** erste Richtungslicht-Farbe mal Intensität, `sunDirection`, `ambient` der Render-World; Ebenenfarben flach (Material-Graph später, Welt-UVs nötig, siehe Teil-A-Dokument §8).
+* **Beleuchtung:** erste Richtungslicht-Farbe mal Intensität, `sunDirection`, `ambient` der Render-World; Ebenen 0-3 aus dem Albedo-Array der Texturgruppe in Welt-UVs (§5a), die übrigen Ebenenfarben flach (Material-Graph später, siehe Teil-A-Dokument §8).
 
 ## 5. Bekannte Grenzen (nicht gelöst)
 
@@ -65,10 +65,35 @@ damit der Haken keine Bindung des Renderers überschreibt, die später im Pass n
 | Metal-Uploads per `replaceRegion` | ein noch laufender GPU-Frame könnte einen eben neu belegten Slot lesen; betrifft nur Kacheln, die die geladene Scheibe verlassen haben, also höchstens einen Frame einer fernen Kachel (Ring-Puffer wären die Lösung) |
 | je Patch ein `glUniform`-Block bzw. `setVertexBytes` | rund 180 Patches in 203 Draws im Test; **ob das reicht, ist nicht gemessen** |
 | Draw-Aufrufe je Patch, kein Instancing, kein Frustum-Test auf der GPU | bewusst einfach |
-| GL: 9 Texturen-Einheiten ab 21 | ein Kontext mit weniger als 30 kombinierten Einheiten schaltet die Landschaft ab (Warnung, einmal) |
+| GL: 10 Texturen-Einheiten ab 21 (die zehnte ist das geliehene Albedo-Array) | ein Kontext mit weniger als 31 kombinierten Einheiten schaltet die Landschaft ab (Warnung, einmal) |
 | der Renderer ruft den Provider **zweimal**, wenn Viewport-Frame und Screenshot im selben App-Frame laufen | der zweite bekommt keine Uploads mehr (sie sind beim ersten ausgeführt), die Bilder bleiben im selben Backend; ein Screenshot ohne vorherigen Viewport-Frame liefert die Uploads selbst |
 | `m_landscapeBound` (Spiel, Editor) ist einmalig | ein neu erzeugter Renderer müsste den Provider neu setzen, und die Laufzeit `reset()` (sonst hält sie Uploads für Bilder, die der neue Renderer nicht hat) |
-| Physik, Navigation, Foliage und Wasser (Schritt 3) hängen **nicht** an Spiel und Editor | Spiel und Editor rufen `update` (Store, Atlas), aber `setPhysics`, `setNavigation`, `setFoliageLayers` und die Wasser-Zeichnung sind Aufrufer-Sache und noch nicht verdrahtet |
+| Foliage und Wasser (Schritt 3b/3c) hängen **seit 02.11.2026** an Spiel und Editor (§5b); Physik und Navigation (`setPhysics`, `setNavigation`) weiterhin **nicht** | Spiel und Editor rufen `update` (Store, Atlas) und `LandscapeWorldProxies::sync`; `setPhysics` und `setNavigation` sind Aufrufer-Sache und noch nicht verdrahtet |
+
+## 5a. Material mit Welt-UVs (02.11.2026)
+
+Die Ebenen 0-3 der zwölf Gewichtskanäle (Grass, Dirt, Rock, Snow der Gruppe) lesen die ersten vier Slices des **Albedo-Arrays der Texturgruppe** (`AutoLandscapeGroup::arrayPaths[0]`), kachelnd in **absoluten Weltmetern**: `uv = x,z / textureMeters`. Die übrigen acht Kanäle und jede Ebene ohne Array bleiben flach.
+
+| Stelle | Inhalt |
+|---|---|
+| `LandscapeWorldComponent::textureGroup` (0 Mountains, 1 Forest, 2 Grassland, 3 Desert, -1 flach; Standard 0) und `textureMeters` (8) | gelesen, wenn die Landschaft beginnt (ein Wechsel danach wirkt erst mit einem neuen Pack); **nicht serialisiert**, wie die Komponente |
+| `LandscapeRenderStatic::albedoArrayPath`, `textureMeters` | der Vertrag; leer = flach |
+| Renderer | löst den Pfad wie ein Material-Array auf (`ResolveGraphTexture(.., array = true)`); fehlt das Array (nicht geladen, nicht heruntergeladen), kommt das weiße Array zurück und die Ebene bleibt **flach**, bis es da ist |
+| Shader | `uTex = (1/Meter, Array da, fract(origin.xz / Meter))`: der Anteil des Ursprungs wird in double auf der CPU gebildet (ein Float bei 100 km wäre 8 mm grob und flimmert), der Shader rechnet `vWorldRel.xz * uTex.x + uTex.zw`. Der Zweig ist auf einer Uniform, die Ableitungen von `texture()` bleiben definiert |
+
+Nur Albedo. **Nicht** gebaut: Normal und Maske (Rauheit, AO, Höhe), Höhenblend zwischen Ebenen, Anti-Kachel-Muster (Texture-Bombing), anisotrope Filterung (GL und Metal haben dieselbe lineare Probe, damit sie übereinstimmen), die Kanal-zu-Rolle-Zuordnung über Ebene 3 hinaus, Path und Water.
+
+Geprüft (Mac, `landscape_gpu_check`): Szene 3 (Rampe, 100 % Ebene 0, Slice 0 = rot | gelb): alle 83 153 Bodenpixel weichen von der flachen Farbe ab, rot und gelb zu je etwa der Hälfte; dasselbe Bild mit anderem Floating Origin: 12 Pixel mehr als 16/255 daneben (absichtlich falscher Ursprungsanteil: 9 941 Pixel, der Test schlägt an); OpenGL gegen Metal 55 von 129 600 Pixeln mehr als 2/255. Mit `--arrays <EngineContent-Wurzel>` zeichnen beide echten Renderer den Boden aus dem **echten Forest-Array** (nicht mehr flaches Grün, Textur sichtbar).
+
+## 5b. Foliage und Wasser (02.11.2026)
+
+Foliage und Wasser brauchen keinen Backend-Code: `HE::LandscapeWorldProxies` (HorizonScene) legt sie als **versteckte Entities** in die Welt, und jedes Backend zeichnet sie über die Wege, die es schon hat.
+
+* **Foliage:** je (Kachel, Ebene) eine Entity mit `FoliageComponent` (genau diese Ebene, `store` = der Store der Kachel, ohne `cachedInstances` und Dichtemaske), Position = `centre - world.origin()`. Der Extraktor nimmt sie durch dieselbe Bucket-Logik wie bei der einzelnen Landschaft.
+* **Wasser:** je Fläche der Region eine Entity mit `MeshComponent` (das Netz gehört der Entity) und dem Wassermaterial, Position = `centre + (center.x, level, center.y) - origin`; ohne Schatten.
+* `LandscapeProxyComponent` markiert sie; `isTerrainGenerated` kennt sie (nie gespeichert, nie im Outliner, nie gepickt, nie repliziert). Aufruf: `sync()` einmal je Frame nach `LandscapeRuntime::update` (Spiel: `updateLandscape`, Editor: im Landschaftsblock). Der Ursprung wandert, ohne dass etwas neu gebaut wird.
+* **Nicht dabei:** tessellierte Wasserfläche (es gibt das einfache Wasser), Wellen für Auftrieb und die Unterwasserkamera (die lesen ein `water::Field` eines `TerrainComponent`; `waterSurfaceAt` der Laufzeit antwortet), Wasser außerhalb der Region, Dichtemasken der Foliage.
+* Test: `test_landscape_world_proxies.cpp` (echte Kacheln, echte Streuung, echte Wasserregion). **Nicht geschaut:** wie es gerendert aussieht; es ist als Entities und Daten geprüft, nicht als Bild.
 
 ## 6. Das Prüfwerkzeug `landscape_gpu_check`
 

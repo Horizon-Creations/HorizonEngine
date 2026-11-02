@@ -6,6 +6,7 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -18,12 +19,13 @@ struct OpenGLLandscape::Impl
 	GLuint tileHeights = 0, slotTable = 0, coarseHeights = 0;
 	GLuint weights[3] = { 0, 0, 0 };
 	GLuint coarseWeights[3] = { 0, 0, 0 };
+	GLuint noArray = 0;   // bound where there is no albedo array: the shader does not read it, but an unloadable texture on a sampler is a driver warning
 	std::shared_ptr<const LandscapeRenderStatic> world;   // what the images were made for
 	Stats stats;
 
 	// uniform locations
 	GLint uViewProj = -1, uCameraRel = -1, uWorld = -1, uHeightInfo = -1, uOrigin = -1, uTile = -1, uHeightRect = -1, uCoarseGrid = -1;
-	GLint uPatch = -1, uPatchPos = -1, uMorph = -1, uLayerColor = -1, uSunDir = -1, uSunColor = -1, uAmbient = -1;
+	GLint uPatch = -1, uPatchPos = -1, uMorph = -1, uLayerColor = -1, uSunDir = -1, uSunColor = -1, uAmbient = -1, uTex = -1, uAlbedoArray = -1;
 	GLint uTileHeights = -1, uSlotTable = -1, uCoarseHeights = -1, uTileWeights[3] = { -1, -1, -1 }, uCoarseWeights[3] = { -1, -1, -1 };
 	bool ok = false;
 
@@ -41,7 +43,7 @@ struct OpenGLLandscape::Impl
 
 namespace
 {
-constexpr int kUnits = 9;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages
+constexpr int kUnits = 10;   // tile heights, slot table, coarse heights, three tile weight pages, three coarse weight pages, the albedo array (not ours)
 
 GLuint compile(GLenum type, const char* src, std::string& error)
 {
@@ -153,10 +155,19 @@ bool OpenGLLandscape::init(std::string* error)
 	m.uOrigin = loc("uOrigin");       m.uTile = loc("uTile");           m.uHeightRect = loc("uHeightRect"); m.uCoarseGrid = loc("uCoarseGrid");
 	m.uPatch = loc("uPatch");         m.uPatchPos = loc("uPatchPos");   m.uMorph = loc("uMorph");           m.uLayerColor = loc("uLayerColor");
 	m.uSunDir = loc("uSunDir");       m.uSunColor = loc("uSunColor");   m.uAmbient = loc("uAmbient");
+	m.uTex = loc("uTex");             m.uAlbedoArray = loc("uAlbedoArray");
 	m.uTileHeights = loc("uTileHeights"); m.uSlotTable = loc("uSlotTable"); m.uCoarseHeights = loc("uCoarseHeights");
 	m.uTileWeights[0] = loc("uTileWeights0"); m.uTileWeights[1] = loc("uTileWeights1"); m.uTileWeights[2] = loc("uTileWeights2");
 	m.uCoarseWeights[0] = loc("uCoarseWeights0"); m.uCoarseWeights[1] = loc("uCoarseWeights1"); m.uCoarseWeights[2] = loc("uCoarseWeights2");
 
+	{
+		const uint8_t white[4] = { 255, 255, 255, 255 };
+		glGenTextures(1, &m.noArray);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m.noArray);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 1, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	}
 	glGenVertexArrays(1, &m.vao);
 	glGenBuffers(1, &m.vbo);
 	glGenBuffers(1, &m.ibo);
@@ -168,6 +179,8 @@ void OpenGLLandscape::shutdown()
 {
 	Impl& m = *m_impl;
 	m.destroyImages();
+	if (m.noArray) glDeleteTextures(1, &m.noArray);
+	m.noArray = 0;
 	if (m.vao) glDeleteVertexArrays(1, &m.vao);
 	if (m.vbo) glDeleteBuffers(1, &m.vbo);
 	if (m.ibo) glDeleteBuffers(1, &m.ibo);
@@ -264,8 +277,8 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 	if (f.patches.empty()) return;
 
 	// ── draw ───────────────────────────────────────────────────────────────────
-	const GLuint images[kUnits] = { m.tileHeights, m.slotTable, m.coarseHeights, m.weights[0], m.weights[1], m.weights[2], m.coarseWeights[0], m.coarseWeights[1], m.coarseWeights[2] };
-	const GLenum targets[kUnits] = { GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D };
+	const GLuint images[kUnits] = { m.tileHeights, m.slotTable, m.coarseHeights, m.weights[0], m.weights[1], m.weights[2], m.coarseWeights[0], m.coarseWeights[1], m.coarseWeights[2], shading.albedoArray ? shading.albedoArray : m.noArray };
+	const GLenum targets[kUnits] = { GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY };
 	for (int i = 0; i < kUnits; ++i)
 	{
 		glActiveTexture(GL_TEXTURE0 + kFirstUnit + i);
@@ -277,6 +290,15 @@ void OpenGLLandscape::draw(const LandscapeRenderFrame& f, const glm::mat4& viewP
 	glUniform1i(m.uCoarseHeights, kFirstUnit + 2);
 	for (int p = 0; p < 3; ++p) glUniform1i(m.uTileWeights[p], kFirstUnit + 3 + p);
 	for (int p = 0; p < 3; ++p) glUniform1i(m.uCoarseWeights[p], kFirstUnit + 6 + p);
+	glUniform1i(m.uAlbedoArray, kFirstUnit + 9);
+	// World UVs: a texture tile every `textureMeters` of absolute x/z. The shader works origin-relative, so the origin's part of the
+	// coordinate comes in as a fraction computed here in double (a float at 100 km would be 8 mm coarse, a visible shimmer).
+	{
+		const bool tex = shading.albedoArray != 0 && !w.albedoArrayPath.empty() && w.textureMeters > 0.0f;
+		const double k = tex ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
+		const double fx = f.origin.x * k - std::floor(f.origin.x * k), fz = f.origin.z * k - std::floor(f.origin.z * k);
+		glUniform4f(m.uTex, static_cast<float>(k), tex ? 1.0f : 0.0f, static_cast<float>(fx), static_cast<float>(fz));
+	}
 
 	glUniformMatrix4fv(m.uViewProj, 1, GL_FALSE, glm::value_ptr(viewProj));
 	glUniform4f(m.uCameraRel, f.cameraRel.x, f.cameraRel.y, f.cameraRel.z, f.slabDistance);

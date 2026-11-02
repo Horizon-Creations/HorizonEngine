@@ -17,5 +17,7 @@ struct EngineCamera
 	glm::dvec3 origin;   // the world's floating origin
 };
 
-int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath);
+// `arrayRoot` (optional): an EngineContent folder that holds Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset. Then the renderer draws the ground in
+// world coordinates from that array (texture group Forest) and the check is that the ground is NOT the flat colour any more but has texture in it.
+int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot = {});
 } // namespace gpucheck

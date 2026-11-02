@@ -14,6 +14,7 @@
 #include "HorizonScene/TransformHierarchy.h"
 
 #include <Diagnostics/Log.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>
 
 #include <algorithm>
 #include <cmath>
@@ -168,6 +169,8 @@ void LandscapeRuntime::update(HorizonWorld& world, float dt, double budgetMs, co
 		cfg.store.byteBudget = static_cast<size_t>(comp->budgetMB) * 1024 * 1024;
 		cfg.heightMinM = comp->heightMinM;
 		cfg.heightScaleM = comp->heightScaleM;
+		cfg.textureGroup = comp->textureGroup;
+		cfg.textureMeters = comp->textureMeters;
 		std::string err;
 		++m_beginAttempts;
 		if (!beginFromPack(comp->pack, cfg, &err))
@@ -395,6 +398,11 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 		landscapePackCoarse(*coarse, cl, w->coarseHeights, w->coarseWeights);
 		for (int i = 0; i < 12; ++i)
 			for (int c = 0; c < 4; ++c) w->layerColor[i][c] = m_config.layerColors[static_cast<size_t>(i)][c];
+		if (m_config.textureGroup >= 0 && m_config.textureGroup < kAutoLandscapeGroupCount)
+		{
+			w->albedoArrayPath = autoLandscapeGroup(static_cast<AutoLandscapeGroupId>(m_config.textureGroup)).arrayPaths[0];
+			w->textureMeters = m_config.textureMeters > 0.0f ? m_config.textureMeters : 8.0f;
+		}
 		const LandscapePatchMesh mesh = LandscapePatchMesh::build(64);
 		w->patchCells = mesh.cells;
 		w->patchIndices = mesh.indices;

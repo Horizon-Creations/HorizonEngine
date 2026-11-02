@@ -4102,6 +4102,7 @@ void EditorApplication::OnRender(float dt)
 				const glm::dvec3 eye = glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin();
 				m_landscape.update(*m_editorWorld, gameDt, 1.0, &eye);
 			}
+			m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), renderer());
 		}
 
 		// Keep spatial audio sources and listener in sync each play-mode frame

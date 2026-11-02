@@ -11296,6 +11296,12 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 	sh.ambient = m_renderWorld.ambient;
 	for (const LightData& l : m_renderWorld.lights)
 		if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+	if (frame.world && !frame.world->albedoArrayPath.empty())
+	{
+		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
+		const unsigned int tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
+		sh.albedoArray = (tex != 0 && tex != m_whiteArrayTex) ? tex : 0;
+	}
 	m_landscape.draw(frame, viewProj, sh);
 }
 
