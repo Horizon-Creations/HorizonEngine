@@ -249,8 +249,12 @@ endif()
 if(HE_VULKAN_ENABLED)
     # Vulkan beside OpenGL (docs/landscape-world-scale-gpu-2026-11-01.md section 9): VulkanLandscape drawn offscreen on a device of the tool's own, and
     # the real VulkanRenderer through the engine check; compared with OpenGL's pictures. Needs a Vulkan driver (lavapipe will do) to run.
+    # RendererVulkan's public interface names Vulkan::Vulkan, an imported target that find_package makes visible per directory (HE_Editor does the same).
+    if(NOT TARGET Vulkan::Vulkan)
+        find_package(Vulkan QUIET)
+    endif()
     target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/VulkanBackend.cpp)
-    target_link_libraries(landscape_gpu_check PRIVATE RendererVulkan Vulkan::Vulkan)
+    target_link_libraries(landscape_gpu_check PRIVATE RendererVulkan)
     target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_VULKAN)
 endif()
 if(WIN32)
