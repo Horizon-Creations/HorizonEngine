@@ -234,6 +234,12 @@ public:
     static constexpr int kGlClusterLightsSsboBinding = 4;
     static constexpr int kGlClusterGridSsboBinding   = 5;
     static constexpr int kGlClusterIndexSsboBinding  = 6;
+    // The froxel fog volume (preamble binding 34, heFogVolume) on GL → texture UNIT 21
+    // (glUniform1i by name, GLSL410 has no layout(binding=)). The material fragment's
+    // existing GL units run 0-20 (heTex0/heTexP0-3, GI/CSM/shadow/landscape/sky/AO/DDGI/
+    // reflection/cloud-shadow, see OpenGLRenderer::GetOrBuildMaterialProgram's setupProgram
+    // lambda) — 21 is the next free one.
+    static constexpr int kGlFogVolumeTextureUnit = 21;
 
     struct Compiled
     {
@@ -532,6 +538,11 @@ public:
     // image 5. Integrate: HeFogVol buffer 0, injected volume texture 0, integrated image 1.
     // Apply: HeFogVol buffer 0, integrated volume 0 (+ sampler 0), sky env 1 (+ sampler 1),
     // scene depth texture 2 (fetched, no sampler).
+    // GL (step 4): fragment-shaped siblings, one fullscreen quad per Z slice
+    // instead of one compute dispatch (GL 4.1 core has no compute) — see
+    // FogVolumeShaderSource.h's kInjectMainGL/kIntegrateMainGL/kApplySourceGL.
+    // Resources bind by NAME (OpenGLRenderer), never by the binding numbers the
+    // Vulkan-GLSL parse requires syntactically.
     const Compiled& fogInject(Backend backend);
     const Compiled& fogIntegrate(Backend backend);
     const Compiled& fogApply(Backend backend);
@@ -539,6 +550,9 @@ public:
     static std::string fogInjectGlsl();
     static std::string fogIntegrateGlsl();
     static std::string fogApplyGlsl();
+    static std::string fogInjectGlslGL();
+    static std::string fogIntegrateGlslGL();
+    static std::string fogApplyGlslGL();
 
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();

@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <chrono> // volumetric fog's temporal history clock (Thema 225 step 4)
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <JobSystem/JobSystem.h>
@@ -3421,6 +3422,13 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateSSAOPipeline();
 	CreateDebugLinePipeline();
 	CreateParticlePipeline();
+	// Volumetric fog (Thema 225 step 4): built EAGERLY, unlike the lazy
+	// EnsureDeferredPipelines pattern — MakeFogVolumeData's `enabled` gate
+	// depends on setVolumetricFogCapable below being truthful BEFORE the
+	// first fog-enabled frame ever calls RenderFogVolume (a lazy build would
+	// deadlock: nothing ever asks it to build if `enabled` is never true).
+	EnsureFogVolumePipelines();
+	m_extractor.setVolumetricFogCapable(m_fogPipelinesOk);
 
 	// Profiler GPU timing via GL timer queries. Reliable on desktop GL (Windows /
 	// Linux); left off on Apple GL, where GL_TIMESTAMP / GL_TIME_ELAPSED queries are
@@ -3869,6 +3877,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// Cloud-shadow transmittance map = unit 19 (per-frame bind in DrawScene,
 		// shared with the built-in shaders' uCloudShadowMap).
 		if (GLint l = glGetUniformLocation(prog, "heCloudShadow"); l >= 0) glUniform1i(l, 19);
+		// Froxel fog volume (heFogVolume, Thema 225 step 4) = unit 21
+		// (MaterialShaderLibrary::kGlFogVolumeTextureUnit), DrawScene binds the
+		// integrated volume or a 1x1x1 dummy there every frame. Declared on
+		// every GL material fragment now (injectPreamble's fogVolume gate), but
+		// only heApplyFogT (Translucent materials) ever samples it.
+		if (GLint l = glGetUniformLocation(prog, "heFogVolume"); l >= 0)
+			glUniform1i(l, HE::MaterialShaderLibrary::kGlFogVolumeTextureUnit);
 		glUseProgram(0);
 	};
 
@@ -8149,6 +8164,368 @@ void OpenGLRenderer::DestroyHDRTarget()
 	m_hdrW = m_hdrH = 0;
 }
 
+// ─── Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 4) ──────────
+// GL 4.1 core fragment-path twin of MetalRenderer's EncodeFogVolume/
+// EncodeFogApplyAndReopen (compute). Built once, lazily (like EnsureDeferredPipelines);
+// a link failure leaves supportsVolumetricFog false forever and the analytic
+// fog running, same as if the step had never happened.
+bool OpenGLRenderer::EnsureFogVolumePipelines()
+{
+	if (m_fogPipelinesTried) return m_fogPipelinesOk;
+	m_fogPipelinesTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& vs = m_matShaderLib.fullscreenVertex(Backend::GLSL410);
+	const auto& fi = m_matShaderLib.fogInject(Backend::GLSL410);
+	const auto& fg = m_matShaderLib.fogIntegrate(Backend::GLSL410);
+	const auto& fa = m_matShaderLib.fogApply(Backend::GLSL410);
+	if (!(vs.ok && fi.ok && fg.ok && fa.ok))
+	{
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: volumetric fog shader compile failed\n")
+			+ vs.log + fi.log + fg.log + fa.log).c_str());
+		return false;
+	}
+	auto link = [&](const char* passName, const std::string& fragSrc) -> GLuint
+	{
+		GLuint v = CompileStage(GL_VERTEX_SHADER,   vs.source.c_str());
+		GLuint f = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
+		GLuint prog = 0;
+		if (v && f)
+		{
+			prog = glCreateProgram();
+			glAttachShader(prog, v);
+			glAttachShader(prog, f);
+			glLinkProgram(prog);
+			GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+			if (!linked)
+			{
+				char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+				HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: fog ") + passName
+					+ " program link failed: " + log).c_str());
+				glDeleteProgram(prog);
+				prog = 0;
+			}
+		}
+		if (v) glDeleteShader(v);
+		if (f) glDeleteShader(f);
+		return prog;
+	};
+	m_fogInjectProgram    = link("inject",    fi.source);
+	m_fogIntegrateProgram = link("integrate", fg.source);
+	m_fogApplyProgram     = link("apply",     fa.source);
+	if (!(m_fogInjectProgram && m_fogIntegrateProgram && m_fogApplyProgram))
+	{
+		if (m_fogInjectProgram)    { glDeleteProgram(m_fogInjectProgram);    m_fogInjectProgram = 0; }
+		if (m_fogIntegrateProgram) { glDeleteProgram(m_fogIntegrateProgram); m_fogIntegrateProgram = 0; }
+		if (m_fogApplyProgram)     { glDeleteProgram(m_fogApplyProgram);     m_fogApplyProgram = 0; }
+		return false;
+	}
+
+	// HeLighting (point 0, shared with every other GL program) + HeFogVol (new
+	// point 9 — 0..8 are HeLighting/U/HeParams/HeResolve/HeDecal/reflPrepass/
+	// ssrTrace/ssrBlur/HeUI).
+	auto bindBlock = [&](GLuint prog, const char* name, GLuint point)
+	{
+		if (const GLuint idx = glGetUniformBlockIndex(prog, name); idx != GL_INVALID_INDEX)
+			glUniformBlockBinding(prog, idx, point);
+	};
+	bindBlock(m_fogInjectProgram,    "HeLighting", 0);
+	bindBlock(m_fogInjectProgram,    "HeFogVol",   9);
+	bindBlock(m_fogIntegrateProgram, "HeFogVol",   9);
+	bindBlock(m_fogApplyProgram,     "HeFogVol",   9);
+
+	// Texture units, bound by NAME (GLSL410 has no layout(binding=)) — own little
+	// convention per program, these never run alongside the material pipeline's.
+	glUseProgram(m_fogInjectProgram);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heCsm");          l >= 0) glUniform1i(l, 0);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heLocalShadow");  l >= 0) glUniform1i(l, 1);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heSkyEnv");       l >= 0) glUniform1i(l, 2);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heCloudShadow");  l >= 0) glUniform1i(l, 3);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heFogNoise");    l >= 0) glUniform1i(l, 4);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heFogHistory");  l >= 0) glUniform1i(l, 5);
+	// The shared lighting preamble declares heLitP's OWN inputs too, even though
+	// Inject's main() never calls heLitP (dead declarations) — give every one of
+	// them a harmless, bound unit so a strict driver never sees a sampler with
+	// nothing behind it.
+	for (const char* nm : { "heGIShadow", "heGILocal", "heLandscapeWeights", "heAO",
+	                        "heGIIrradiance", "heGIVisibility", "heSSRFwd", "heGIReflFwd" })
+		if (GLint l = glGetUniformLocation(m_fogInjectProgram, nm); l >= 0) glUniform1i(l, 6);
+
+	glUseProgram(m_fogIntegrateProgram);
+	if (GLint l = glGetUniformLocation(m_fogIntegrateProgram, "heFogInjected");   l >= 0) glUniform1i(l, 0);
+	if (GLint l = glGetUniformLocation(m_fogIntegrateProgram, "heFogAccumPrev"); l >= 0) glUniform1i(l, 1);
+
+	glUseProgram(m_fogApplyProgram);
+	if (GLint l = glGetUniformLocation(m_fogApplyProgram, "heFogIntegrated"); l >= 0) glUniform1i(l, 0);
+	if (GLint l = glGetUniformLocation(m_fogApplyProgram, "heSkyEnv");        l >= 0) glUniform1i(l, 1);
+	if (GLint l = glGetUniformLocation(m_fogApplyProgram, "heFogDepth");      l >= 0) glUniform1i(l, 2);
+	glUseProgram(0);
+
+	glGenBuffers(1, &m_fogVolUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+	glBufferData(GL_UNIFORM_BUFFER, sizeof(HE::FogVolumeConstants), nullptr, GL_DYNAMIC_DRAW);
+	glGenBuffers(1, &m_fogLightUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogLightUBO);
+	glBufferData(GL_UNIFORM_BUFFER, sizeof(HE::MaterialShaderLibrary::Lighting), nullptr, GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+	const float dummy[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	glGenTextures(1, &m_fogDummy3D);
+	glBindTexture(GL_TEXTURE_3D, m_fogDummy3D);
+	glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA16F, 1, 1, 1, 0, GL_RGBA, GL_FLOAT, dummy);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glBindTexture(GL_TEXTURE_3D, 0);
+
+	glGenFramebuffers(1, &m_fogApplyFBO);
+
+	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: volumetric fog programs linked (Inject/Integrate/Apply, GLSL410)");
+	m_fogPipelinesOk = true;
+	return true;
+#endif
+}
+
+void OpenGLRenderer::EnsureFogVolumeTargets(const glm::ivec3& grid)
+{
+	if (m_fogIntegratedTex && grid == m_fogGrid) return;
+	DestroyFogVolumeTargets();
+	m_fogGrid = grid;
+
+	auto make3D = [&](unsigned int& tex)
+	{
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_3D, tex);
+		glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA16F, grid.x, grid.y, grid.z, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	};
+	make3D(m_fogInjectTex[0]);
+	make3D(m_fogInjectTex[1]);
+	make3D(m_fogIntegratedTex);
+	glBindTexture(GL_TEXTURE_3D, 0);
+
+	// RGBA32F, not 16F: T is a running product of exp(-sigT*dz) over up to 96
+	// slices (the High tier) — 16F's ~10-bit mantissa visibly drifts over that
+	// many round trips through a render target, 32F does not.
+	auto make2D = [&](unsigned int& tex)
+	{
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, grid.x, grid.y, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	};
+	make2D(m_fogAccumTex[0]);
+	make2D(m_fogAccumTex[1]);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	glGenFramebuffers(1, &m_fogInjectFBO);
+	glGenFramebuffers(1, &m_fogIntegrateFBO);
+
+	m_fogHistValid = false; // the old history textures (a different size) are gone
+}
+
+void OpenGLRenderer::DestroyFogVolumeTargets()
+{
+	if (m_fogInjectFBO)     { glDeleteFramebuffers(1, &m_fogInjectFBO);     m_fogInjectFBO = 0; }
+	if (m_fogIntegrateFBO)  { glDeleteFramebuffers(1, &m_fogIntegrateFBO);  m_fogIntegrateFBO = 0; }
+	if (m_fogInjectTex[0])  { glDeleteTextures(1, &m_fogInjectTex[0]);      m_fogInjectTex[0] = 0; }
+	if (m_fogInjectTex[1])  { glDeleteTextures(1, &m_fogInjectTex[1]);      m_fogInjectTex[1] = 0; }
+	if (m_fogIntegratedTex) { glDeleteTextures(1, &m_fogIntegratedTex);     m_fogIntegratedTex = 0; }
+	if (m_fogAccumTex[0])   { glDeleteTextures(1, &m_fogAccumTex[0]);       m_fogAccumTex[0] = 0; }
+	if (m_fogAccumTex[1])   { glDeleteTextures(1, &m_fogAccumTex[1]);       m_fogAccumTex[1] = 0; }
+	m_fogGrid = glm::ivec3(0);
+	m_fogHistValid = false;
+}
+
+// Inject + Integrate (analog to MetalRenderer::EncodeFogVolume). Runs BEFORE the
+// opaque pass, right after the shadow maps, cloud shadow and sky env cube are
+// current for this frame (DrawScene, right after UpdateSkyEnvCube).
+//
+// Y convention (GL 4.1's native raster origin is BOTTOM-left, unlike Metal/D3D/
+// Vulkan's top-left — the froxel's shared uv.y=0-at-top convention, baked as a
+// hardcoded `1 - 2*uv.y` into heFogRayDir/kApplyMain, is Metal's for free but
+// needs compensating here): every texel index below (f.xy, Integrate's xy) is
+// the RAW, unflipped gl_FragCoord — no shader-side flip anywhere. Instead
+// fc.invViewProj/prevViewProj carry an extra flipY = scale(1,-1,1) that makes
+// the shared hardcoded formulas land on the texel GL's rasterizer actually
+// wrote. heApplyFogT's forward direction (world → uv, `fogViewProj`) needs the
+// SAME flipY regardless of raster origin — Metal's own m_fogViewProjFlip proves
+// that half is backend-independent; only invViewProj/prevViewProj are new here.
+void OpenGLRenderer::RenderFogVolume(int pw, int ph, const HE::MaterialShaderLibrary::Lighting& lit,
+                                     const glm::vec3& camFwd)
+{
+	(void)pw; (void)ph;
+	m_fogFrameActive = false;
+#if !defined(HE_HAVE_SHADERC)
+	return;
+#else
+	if (!m_renderWorld.fogVolume.enabled) return;
+	if (!EnsureFogVolumePipelines() || !m_skyEnvCube) return;
+	const HE::FogVolumeData fd = m_renderWorld.fogVolume;
+	EnsureFogVolumeTargets(fd.grid);
+	if (!m_fogIntegratedTex) return;
+
+	const bool pinned = [] { const char* v = std::getenv("HE_SKY_TIME"); return v && *v; }();
+	const double now  = pinned ? (m_fogFrameIndex / 60.0)
+	                           : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	float dt = (m_fogLastTime > 0.0 || pinned) ? static_cast<float>(now - m_fogLastTime) : 0.0f;
+	if (pinned && m_fogFrameIndex == 0) dt = 0.0f;
+	m_fogLastTime = now;
+	const CameraData& cam       = m_renderWorld.camera;
+	const glm::mat4   viewProj  = cam.projection * cam.view;
+	const glm::mat4   flipY     = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
+	const glm::mat4   invViewProj = glm::inverse(flipY * viewProj); // see the function comment
+	const float focal = cam.projection[1][1];
+	const bool historyOk = m_fogHistValid && dt > 0.0f && dt < 0.5f
+	             && glm::distance(cam.position, m_fogPrevCam) < 10.0f
+	             && std::abs(focal - m_fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	const float rad = glm::radians(env.windDirection);
+	m_fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+	m_fogNoiseTime   += dt;
+
+	HE::FogVolumeTemporalState ts;
+	ts.jitter01     = HE::fogJitter(m_fogFrameIndex);
+	ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+	ts.historyValid = historyOk;
+	ts.frameIndex   = m_fogFrameIndex;
+	ts.noiseOffset  = m_fogNoiseOffset;
+	ts.noiseTime    = m_fogNoiseTime;
+	HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+		fd, invViewProj, flipY * m_fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogLightUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_fogLightUBO);
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_CULL_FACE);
+	glBindVertexArray(m_fsVAO);
+
+	const int cur = 1 - m_fogHist; // written now; m_fogHist still holds last frame's result
+
+	// ── Inject: one fullscreen quad per Z slice ─────────────────────────────
+	glBindFramebuffer(GL_FRAMEBUFFER, m_fogInjectFBO);
+	glViewport(0, 0, fd.grid.x, fd.grid.y);
+	glUseProgram(m_fogInjectProgram);
+	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex);
+	glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+	glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, m_cloudShadowTex);
+	glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+	glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_3D, m_fogInjectTex[m_fogHist]); // history
+	glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, 0); // dead preamble samplers
+	for (int z = 0; z < fd.grid.z; ++z)
+	{
+		fc.pad.w = static_cast<float>(z);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fc), &fc);
+		glBindBufferBase(GL_UNIFORM_BUFFER, 9, m_fogVolUBO);
+		glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_fogInjectTex[cur], 0, z);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
+
+	// ── Integrate: one fullscreen quad per slice k, front to back, MRT ──────
+	{
+		int srcAcc = 0, dstAcc = 1;
+		glBindFramebuffer(GL_FRAMEBUFFER, m_fogIntegrateFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_fogAccumTex[srcAcc], 0);
+		const float identity[4] = { 0.0f, 0.0f, 0.0f, 1.0f }; // (L, T) before any slice: no light, no extinction
+		const GLenum accumOnly = GL_COLOR_ATTACHMENT0;
+		glDrawBuffers(1, &accumOnly);
+		glClearBufferfv(GL_COLOR, 0, identity);
+
+		glUseProgram(m_fogIntegrateProgram);
+		glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, m_fogInjectTex[cur]);
+		glViewport(0, 0, fd.grid.x, fd.grid.y);
+		const GLenum mrt[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+		for (int k = 0; k < fd.grid.z; ++k)
+		{
+			fc.pad.w = static_cast<float>(k);
+			glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fc), &fc);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 9, m_fogVolUBO);
+			glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, m_fogAccumTex[srcAcc]);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_fogAccumTex[dstAcc], 0);
+			glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, m_fogIntegratedTex, 0, k);
+			glDrawBuffers(2, mrt);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			std::swap(srcAcc, dstAcc);
+		}
+	}
+
+	// Final upload with a harmless pad.w: Apply (later this frame, its own
+	// function) reads this same UBO and never looks at pad.w, but a clean
+	// snapshot beats a stray last-slice-index artefact.
+	fc.pad.w = 0.0f;
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fc), &fc);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glEnable(GL_DEPTH_TEST);
+	glBindVertexArray(0);
+
+	m_fogHist         = cur;
+	m_fogHistValid    = true;
+	m_fogPrevViewProj = viewProj;
+	m_fogPrevCam      = cam.position;
+	m_fogPrevFocal    = focal;
+	++m_fogFrameIndex;
+	m_fogFrame        = fd;
+	m_fogViewProjFlip = flipY * viewProj; // heApplyFogT's forward direction — backend-independent (see Metal)
+	m_fogFrameActive  = true;
+#endif
+}
+
+// Apply: full-screen blit into m_hdrColor (colour only — the depth stays a pure
+// TEXTURE input, never an attachment here, so there is no feedback loop with
+// whatever wrote it). Called between the sky and the translucent tail
+// (DrawScene), gated on m_fogFrameActive — never on the capability flag alone,
+// so a frame where the pipelines exist but Inject/Integrate did not actually
+// run (fog off, camera underwater, ...) leaves the scene exactly as mode 0.
+void OpenGLRenderer::RenderFogApply(int pw, int ph)
+{
+	if (!m_fogFrameActive || !m_fogApplyProgram || !m_fogIntegratedTex || !m_hdrColor || !m_hdrDepth) return;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_fogApplyFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_hdrColor, 0);
+	const GLenum colorOnly = GL_COLOR_ATTACHMENT0;
+	glDrawBuffers(1, &colorOnly);
+	glViewport(0, 0, pw, ph);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
+	glBlendFuncSeparate(GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE); // rgb += Lv + Tv*Lf; a: dst.a untouched (opaque frame)
+
+	glUseProgram(m_fogApplyProgram);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 9, m_fogVolUBO);
+	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, m_fogIntegratedTex);
+	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+	glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glBindVertexArray(m_fsVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glBindVertexArray(0);
+
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+	glViewport(0, 0, pw, ph);
+}
+
 void OpenGLRenderer::EnsureGBufferTargets(int width, int height)
 {
 	if (m_gbFBO && width == m_gbW && height == m_gbH)
@@ -10314,6 +10691,17 @@ void OpenGLRenderer::Shutdown()
 	if (m_resolveLightUBO) { glDeleteBuffers(1, &m_resolveLightUBO); m_resolveLightUBO = 0; }
 	if (m_decalProgram)    { glDeleteProgram(m_decalProgram);        m_decalProgram = 0; }
 	if (m_decalUBO)        { glDeleteBuffers(1, &m_decalUBO);        m_decalUBO = 0; }
+	// Volumetric fog (Thema 225 step 4).
+	DestroyFogVolumeTargets();
+	if (m_fogInjectProgram)    { glDeleteProgram(m_fogInjectProgram);    m_fogInjectProgram = 0; }
+	if (m_fogIntegrateProgram) { glDeleteProgram(m_fogIntegrateProgram); m_fogIntegrateProgram = 0; }
+	if (m_fogApplyProgram)     { glDeleteProgram(m_fogApplyProgram);     m_fogApplyProgram = 0; }
+	if (m_fogVolUBO)           { glDeleteBuffers(1, &m_fogVolUBO);       m_fogVolUBO = 0; }
+	if (m_fogLightUBO)         { glDeleteBuffers(1, &m_fogLightUBO);     m_fogLightUBO = 0; }
+	if (m_fogDummy3D)          { glDeleteTextures(1, &m_fogDummy3D);     m_fogDummy3D = 0; }
+	if (m_fogApplyFBO)         { glDeleteFramebuffers(1, &m_fogApplyFBO); m_fogApplyFBO = 0; }
+	m_fogPipelinesTried = false;
+	m_fogPipelinesOk    = false;
 	// Forward SSR + its reflection pre-pass (the targets go with DestroySSAOTargets
 	// / DestroySSRTargets below; the "tried" flags reset so a re-Initialize()
 	// gets a fresh build attempt instead of a permanently disabled feature).
@@ -11498,9 +11886,42 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glActiveTexture(GL_TEXTURE3);
 		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
 		glUniform1i(m_uSkyEnv, 3);
+
+		// ── Volumetric fog: Inject + Integrate (Thema 225 step 4) ───────────
+		// Shadows, cloud shadow and the sky env cube are all current for this
+		// frame now — the same ordering as MetalRenderer::EncodeFogVolume.
+		// Sets m_fogFrameActive; RenderFogApply (after the sky, before the
+		// translucent tail) and fillMatLight's fog fields both read it.
+		{
+			HE::MaterialShaderLibrary::Lighting fogLit{};
+			fillMatLight(fogLit);
+			// The REAL CSM array: fillMatLight zeroes it for ordinary material
+			// draws (heCsm there aliases the local-atlas unit) — Inject is its
+			// own program and samples the genuine cascade matrices, exactly
+			// like m_resolveLightUBO's fill below.
+			if (shadows && m_shadowDepthTex)
+			{
+				glm::mat4 zRemap(1.0f);
+				zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+				for (int c = 0; c < nCascades; ++c)
+				{
+					const glm::mat4 m = zRemap * sh.cascadeViewProj[c];
+					std::memcpy(fogLit.csmVP[c], &m[0][0], 16 * sizeof(float));
+				}
+				std::memcpy(fogLit.csmSplits, glm::value_ptr(cascadeSplits), 4 * sizeof(float));
+				fogLit.camFwd[0] = camFwd.x; fogLit.camFwd[1] = camFwd.y; fogLit.camFwd[2] = camFwd.z;
+				fogLit.shadowBias[0] = m_shadowSettings.slopeBias;
+				fogLit.shadowBias[1] = m_shadowSettings.minBias;
+			}
+			RenderFogVolume(pw, ph, fogLit, camFwd);
+		}
 		glActiveTexture(GL_TEXTURE0);
 		glUniform3fv(m_uAmbient, 1, glm::value_ptr(m_renderWorld.ambient));
-		glUniform1f(m_uFogDensity,       GetEnvironment().fogDensity);
+		// Volumetric fog owns the opaque fog instead of this analytic uniform
+		// when it actually ran this frame (never gated on the capability alone
+		// — see RenderFogApply's comment): zero density is applyFog()'s own
+		// early-out, so the built-in shader's fog term folds away cleanly.
+		glUniform1f(m_uFogDensity,       m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity);
 		glUniform1f(m_uFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 		glUniform1f(m_uWetness,          GetEnvironment().wetness);
 		glUniform1f(m_uSnow,             GetEnvironment().snowAmount);
@@ -11555,6 +11976,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// didn't run; the strength gate is 0 then anyway.
 		glActiveTexture(GL_TEXTURE19);
 		glBindTexture(GL_TEXTURE_2D, m_cloudShadowTex ? m_cloudShadowTex : m_whiteTex);
+		// Froxel fog volume (heFogVolume, kGlFogVolumeTextureUnit = 21) for every
+		// graph material's heApplyFogT — ALWAYS bound, even in mode 0 (a 1x1x1
+		// dummy then): the sampler stays active in the program regardless of the
+		// runtime gate (heLight.fogVol.x), and GL validates the bound texture's
+		// TYPE on every draw, not just the ones that end up sampling it.
+		glActiveTexture(GL_TEXTURE21);
+		glBindTexture(GL_TEXTURE_3D, (m_fogFrameActive && m_fogIntegratedTex) ? m_fogIntegratedTex : m_fogDummy3D);
 		glActiveTexture(GL_TEXTURE0);
 		const glm::vec4 cloudShA = m_cloudShadowParamsA;
 		const glm::vec4 cloudShB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
@@ -11594,7 +12022,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform3fv(m_uInstSunDir,    1, glm::value_ptr(sunDir));
 			glUniform1i(m_uInstSkyEnv, 3);
 			glUniform3fv(m_uInstAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
-			glUniform1f(m_uInstFogDensity,       GetEnvironment().fogDensity);
+			glUniform1f(m_uInstFogDensity,       m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity);
 			glUniform1f(m_uInstFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 			glUniform1f(m_uInstWetness,          GetEnvironment().wetness);
 			glUniform1f(m_uInstSnow,             GetEnvironment().snowAmount);
@@ -11753,6 +12181,24 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// colour back untouched — graph materials and the deferred resolve
 			// both read this. Scene-pass fill only; previews keep the zero.
 			lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+			// Volumetric fog (v3.6, Thema 225): fogVol.x gates the opaque
+			// heApplyFog (Apply owns it instead) and heApplyFogT (translucent
+			// graph materials, binding 34/texture unit 21). Called AFTER
+			// RenderFogVolume runs for this frame (every caller of this lambda
+			// is further down DrawScene than the UpdateSkyEnvCube point it
+			// runs at), so m_fogFrameActive/m_fogFrame are already this
+			// frame's, never last frame's stale ones.
+			if (m_fogFrameActive)
+			{
+				lit.fogVol[0] = 1.0f;
+				lit.fogVol[1] = m_fogFrame.distance;
+				lit.fogVol[2] = m_fogFrame.sliceC;
+				lit.fogVol[3] = 1.0f;
+				lit.fogVolGrid[0] = static_cast<float>(m_fogFrame.grid.x);
+				lit.fogVolGrid[1] = static_cast<float>(m_fogFrame.grid.y);
+				lit.fogVolGrid[2] = static_cast<float>(m_fogFrame.grid.z);
+				std::memcpy(lit.fogViewProj, glm::value_ptr(m_fogViewProjFlip), sizeof(lit.fogViewProj));
+			}
 		};
 #endif
 
@@ -12607,7 +13053,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uSkinnedTex, 0);
 			glUniform3fv(m_uSkinnedSunDir,    1, glm::value_ptr(sunDir));
 			glUniform3fv(m_uSkinnedAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
-			glUniform1f(m_uSkinnedFogDensity,       GetEnvironment().fogDensity);
+			glUniform1f(m_uSkinnedFogDensity,       m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity);
 			glUniform1f(m_uSkinnedFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 			// Same lights + CSM block as the unlit program.
 			BindSceneLighting({ m_uSkinnedLightCount, m_uSkinnedLightPos, m_uSkinnedLightDir,
@@ -12714,6 +13160,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
 		DrawSkyFullscreen(invViewProj, sunDir, m_renderWorld.camera.position,
 		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
+		// Volumetric fog Apply (Thema 225 step 4): full-screen blit of the
+		// integrated volume onto the now-finished opaque scene + sky, between
+		// it and the translucent tail — the same seam Metal's EncodeScene
+		// splits the encoder at. No-op (m_fogFrameActive false) in mode 0.
+		RenderFogApply(pw, ph);
 		GpuTimerEndPass();                 // end "Sky+Clouds"
 		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
 
@@ -13392,6 +13843,11 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// deferred mode the gate stays 0 and the image is unchanged. Programs come
 	// from the shared cross-compiler, hence the #if.
 	c.supportsScreenSpaceReflections = true;
+	// Thema 225 step 4: true only if the fragment-path Inject/Integrate/Apply
+	// programs actually linked (EnsureFogVolumePipelines, called once at
+	// Initialize) — never a blanket "GL + shaderc means fog", unlike Metal's
+	// capability promise checked lazily at the first fog frame.
+	c.supportsVolumetricFog = m_fogPipelinesOk;
 #endif
 	// TAA (A2/A3): velocity pass + temporal resolve + sharpen, all #version 410
 	// fullscreen/positions-only programs — both render paths, every GL context

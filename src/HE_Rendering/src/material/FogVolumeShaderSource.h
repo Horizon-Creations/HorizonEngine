@@ -253,4 +253,170 @@ void main() {
 }
 )GLSL";
 
+// ─── GL fragment path (Thema 225 step 4) ─────────────────────────────────────
+// macOS/Windows GL 4.1 core has no compute, no image load/store and no
+// layout(binding=N) on samplers (bound by name instead, OpenGLRenderer::
+// EnsureFogVolumePipelines). Inject/Integrate run as ONE fullscreen-quad draw PER Z SLICE instead of one
+// dispatch over the whole volume; the slice index rides fv.pad.w (a scalar
+// written into the SAME HeFogVol UBO the rest of the block already carries,
+// re-uploaded once per slice) rather than a loose non-block uniform — a bare
+// "uniform int" outside a block is illegal under the Vulkan GLSL semantics this
+// source compiles with (glslang -> SPIRV-Cross -> GLSL410), and kFogVolBlock's
+// `pad` field was reserved for exactly this (plan §2.4: "reserved"). Everything
+// here is a fragment-shaped restatement of kInjectMain/kIntegrateMain's own
+// maths (same formulas, same field names) — NOT a re-derivation — so GL stays
+// provably in step with the compute kernels Metal/Vulkan/D3D run.
+//
+// Resources only ever bound BY NAME on GL (OpenGLRenderer::EnsureFogVolumePipelines);
+// the binding numbers below exist only because the Vulkan-semantics glslang parse
+// requires one on every block/opaque type — GL strips them.
+
+// Inject (GL): same density + in-scattering body as kInjectMain, fragment-shaped.
+// heFogOut (a writeonly image3D on every other backend) becomes a plain `out vec4`;
+// gl_GlobalInvocationID becomes (gl_FragCoord.xy, the slice carried in fv.pad.w).
+inline constexpr const char* kInjectBodyGL = R"GLSL(
+layout(set = 0, binding = 35) uniform sampler3D heFogNoise;     // SkyNoise3D bake at 64^3
+layout(set = 0, binding = 37) uniform sampler3D heFogHistory;   // last frame's inject volume
+layout(location = 0) out vec4 oInject;
+)GLSL";
+
+inline constexpr const char* kInjectMainGL = R"GLSL(
+float heFogPhase(float g, float c) {
+    float g2 = g * g;
+    return (1.0 - g2) / pow(max(1.0 + g2 - 2.0 * g * c, 1e-3), 1.5);
+}
+float heFogNoise01(vec3 p) {
+    vec3 q = (p + fv.noise.xyz) * (fv.density.w * 0.0625);
+    float a = textureLod(heFogNoise, q, 0.0).g;
+    float b = textureLod(heFogNoise, q * 2.07 + vec3(0.37, 0.11, -fv.noise.w * 0.006), 0.0).g;
+    return clamp((0.62 * a + 0.38 * b - 0.20) / 0.60, 0.0, 1.0);
+}
+void main() {
+    ivec3 g = ivec3(fv.grid.xyz);
+    ivec3 f = ivec3(ivec2(gl_FragCoord.xy), int(fv.pad.w + 0.5));
+    if (f.x >= g.x || f.y >= g.y || f.z >= g.z) { oInject = vec4(0.0, 0.0, 0.0, 0.0); return; }
+    vec2  uv   = (vec2(f.xy) + 0.5) / fv.grid.xy;
+    vec3  dir  = heFogRayDir(uv);
+    float t    = (float(f.z) + fv.temporal.x) * fv.grid.w;
+    float z    = heFogSliceDepth(t);
+    float cosT = max(dot(dir, fv.camFwd.xyz), 1e-3);
+    vec3  pos  = fv.camPos.xyz + dir * (z / cosT);
+    float seam = 1.0 - smoothstep(0.8 * fv.camPos.w, fv.camPos.w, z);
+
+    float n      = heFogNoise01(pos);
+    float base   = fv.density.x * exp(clamp(-fv.density.y * pos.y, -30.0, 30.0));
+    float height = base * max(0.0, 1.0 + fv.density.z * (2.0 * n - 1.0));
+    float bank   = 0.0;
+    if (fv.bank.x > 0.0 && fv.bank.z > 0.0 && pos.y >= fv.bank.y) {
+        float top = fv.bank.y + fv.bank.z;
+        bank = fv.bank.x * (1.0 - smoothstep(top - 0.5 * fv.bank.z * (0.5 + n), top, pos.y));
+    }
+    float sigT = height + bank + fv.bank.w;
+
+    vec4 cur = vec4(0.0);
+    if (sigT > 1e-6) {
+        vec3 fogCol = (heLight.fog.z > 0.5) ? textureLod(heSkyEnv, dir, 0.0).rgb : heLight.ambient.rgb;
+        vec3 L      = normalize(heLight.sunDir.xyz);
+        bool parity = fv.pad.x > 0.5;
+        float sunVis = 1.0;
+        if (!parity)
+            sunVis = heCsmShadow(pos, L, L) * heCloudShadowFactor(pos, L);
+        vec3 sigS = fv.scatter.rgb * sigT;
+        vec3 S = sigT * fogCol * mix(1.0, sunVis, fv.misc.z * seam);
+        if (!parity) {
+            float cosSun = dot(dir, L);
+            S += sigS * heLight.sunColor.rgb * (heFogPhase(fv.scatter.w, cosSun) * sunVis * seam * fv.pad.y);
+            int count = int(heLight.counts.x);
+            for (int i = 0; i < count && i < 8; ++i) {
+                int type = int(heLight.lightPos[i].w);
+                if (type == 0) continue;
+                vec3  d    = heLight.lightPos[i].xyz - pos;
+                float dist = max(length(d), 1e-4);
+                vec3  Ll   = d / dist;
+                float range = max(heLight.lightParams[i].x, 1e-4);
+                float att = clamp(1.0 - dist / range, 0.0, 1.0);
+                att *= att;
+                if (type == 2) {
+                    float cc = dot(-Ll, normalize(heLight.lightDir[i].xyz));
+                    float cosCone = heLight.lightDir[i].w;
+                    att *= smoothstep(cosCone, mix(cosCone, 1.0, 0.2), cc);
+                }
+                if (att <= 0.0) continue;
+                float vis = heLocalShadowFactor(i, pos, Ll);
+                vec3  lc  = heLight.lightColor[i].rgb * heLight.lightColor[i].a;
+                S += sigS * lc * (att * vis * fv.misc.x * heFogPhase(fv.scatter.w, dot(dir, Ll)) * fv.pad.z);
+            }
+            S += sigS * heLight.ambient.rgb * fv.misc.y;
+        }
+        cur = vec4(S, sigT);
+    }
+
+    if (fv.temporal.z > 0.5) {
+        vec4 pc = fv.prevViewProj * vec4(pos, 1.0);
+        if (pc.w > 1e-3) {
+            vec2  ndc = pc.xy / pc.w;
+            vec3  hu  = vec3(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, heFogDepthSlice(pc.w));
+            if (all(greaterThanEqual(hu, vec3(0.0))) && all(lessThanEqual(hu, vec3(1.0)))) {
+                vec4 h = textureLod(heFogHistory, hu, 0.0);
+                cur = mix(h, cur, fv.temporal.y);
+            }
+        }
+    }
+    oInject = cur;
+}
+)GLSL";
+
+// Integrate (GL): one fullscreen quad per slice k, front-to-back. The running
+// (L, T) state that kIntegrateMain keeps in registers across its loop instead
+// rides a 2D RGBA32F accumulator texture, ping-ponged across the N draws
+// (never read AND written by the same draw — that would be a feedback loop on
+// GL 4.1, which has no texture barrier). MRT: location 0 is the next
+// iteration's accumulator, location 1 is this slice's (L, T), landing in
+// m_fogIntegrated layer k for Apply/heApplyFogT to read afterwards. zPrev/zNext
+// come from the closed-form heFogSliceDepth(k/N), so this is NOT an
+// incremental sum — it agrees with the compute loop's per-slice dz exactly,
+// slice by slice, with no compounding rounding drift from one draw to the next.
+inline constexpr const char* kIntegrateSourceGL = R"GLSL(#version 450
+layout(set = 0, binding = 37) uniform sampler3D heFogInjected;
+layout(set = 0, binding = 38) uniform sampler2D heFogAccumPrev; // (L, T) after k slices (identity at k=0)
+layout(location = 0) out vec4 oAccum;
+layout(location = 1) out vec4 oLayer;
+)GLSL";
+
+inline constexpr const char* kIntegrateMainGL = R"GLSL(
+void main() {
+    ivec2 xy = ivec2(gl_FragCoord.xy);
+    int   k  = int(fv.pad.w + 0.5);
+    vec2  uv   = (vec2(xy) + 0.5) / fv.grid.xy;
+    vec3  dir  = heFogRayDir(uv);
+    float cosT = max(dot(dir, fv.camFwd.xyz), 1e-3);
+    vec4  prev = texelFetch(heFogAccumPrev, xy, 0);
+    vec3  L = prev.rgb;
+    float T = prev.a;
+    float zPrev = heFogSliceDepth(float(k) * fv.grid.w);
+    float zNext = heFogSliceDepth(float(k + 1) * fv.grid.w);
+    float dz    = (zNext - zPrev) / cosT;
+    vec4  s     = texelFetch(heFogInjected, ivec3(xy, k), 0);
+    float ext   = exp(-s.a * dz);
+    vec3  Sint  = (s.rgb - s.rgb * ext) / max(s.a, 1e-5);
+    L += T * Sint;
+    T *= ext;
+    oAccum = vec4(L, T);
+    oLayer = vec4(L, T);
+}
+)GLSL";
+
+// Apply (GL): already fragment-shaped on every backend; only the two SEPARATE
+// (samplerless) `texture2D`/`texture3D` objects change to COMBINED sampler2D/
+// sampler3D — SPIRV-Cross's non-Vulkan GLSL backend (Target::Glsl410) does not
+// call build_combined_image_samplers(), so a separate image/sampler pair here
+// would throw at compile time. texelFetch works identically on a combined
+// sampler, so the maths is untouched.
+inline constexpr const char* kApplySourceGL = R"GLSL(#version 450
+layout(set = 0, binding = 34) uniform sampler3D heFogIntegrated;
+layout(set = 0, binding = 15) uniform samplerCube heSkyEnv;
+layout(set = 0, binding = 39) uniform sampler2D heFogDepth;
+layout(location = 0) out vec4 oColor;
+)GLSL";
+
 } // namespace HE::FogShaderSource

@@ -402,11 +402,57 @@ TEST_CASE("Fog kernels: Inject/Integrate (compute) and Apply (fragment) cross-co
 
     // The other backends keep the analytic fog until their steps: a clear "not yet".
     CHECK_FALSE(lib.fogInject(B::HLSL).ok);
-    CHECK_FALSE(lib.fogApply(B::GLSL410).ok);
+    CHECK_FALSE(lib.fogApply(B::GLSL430).ok);
     CHECK_FALSE(lib.fogIntegrate(B::SpirV).ok);
 }
 
-TEST_CASE("heApplyFogT: texture 17 on Metal, analytic fog everywhere else")
+// ═══ Step 4: the GL fragment-path kernels (one fullscreen quad per Z slice,
+// no compute/image-load-store — GL 4.1 core has neither) ════════════════════
+TEST_CASE("Fog kernels (GL fragment path): Inject/Integrate/Apply cross-compile for GLSL410")
+{
+    HE::MaterialShaderLibrary lib;
+    using B = HE::MaterialShaderLibrary::Backend;
+
+    const auto& inj = lib.fogInject(B::GLSL410);
+    INFO("inject: ", inj.log);
+    REQUIRE(inj.ok);
+    CHECK(inj.source.find("void main") != std::string::npos);
+    // A real fragment shader, unlike Metal's compute kernel: no imageStore, a
+    // plain `out` write; the slice index rides the UBO (fv.pad.w), never a
+    // loose non-block uniform (illegal under the Vulkan GLSL semantics this
+    // source compiles with).
+    CHECK(inj.source.find("imageStore") == std::string::npos);
+    CHECK(inj.source.find("gl_FragCoord") != std::string::npos);
+    // The real shadow functions came along (one set of shadow maths, same as
+    // Metal's inject): the CSM array, HeLighting, history/noise.
+    CHECK(inj.source.find("heCsmShadow") != std::string::npos || inj.source.find("HeLighting") != std::string::npos);
+
+    const auto& integ = lib.fogIntegrate(B::GLSL410);
+    INFO("integrate: ", integ.log);
+    REQUIRE(integ.ok);
+    CHECK(integ.source.find("imageStore") == std::string::npos);
+    CHECK(integ.source.find("imageLoad") == std::string::npos);
+    // MRT: the next accumulator AND this slice's layer of the integrated volume.
+    {
+        const std::string g = HE::MaterialShaderLibrary::fogIntegrateGlslGL();
+        CHECK(g.find("location = 0) out vec4 oAccum") != std::string::npos);
+        CHECK(g.find("location = 1) out vec4 oLayer") != std::string::npos);
+    }
+
+    const auto& apply = lib.fogApply(B::GLSL410);
+    INFO("apply: ", apply.log);
+    REQUIRE(apply.ok);
+    CHECK(apply.source.find("void main") != std::string::npos);
+    CHECK(apply.source.find("heFogIntegrated") != std::string::npos);
+
+    // Vulkan/D3D stay off until steps 5-6: a clear "not yet", same shape as
+    // the Metal test above.
+    CHECK_FALSE(lib.fogInject(B::HLSL).ok);
+    CHECK_FALSE(lib.fogIntegrate(B::SpirV).ok);
+    CHECK_FALSE(lib.fogApply(B::GLSL430).ok);
+}
+
+TEST_CASE("heApplyFogT: texture 17 on Metal, heFogVolume by name on GL, analytic fog elsewhere")
 {
     HE::MaterialShaderLibrary lib;
     using B = HE::MaterialShaderLibrary::Backend;
@@ -422,8 +468,18 @@ TEST_CASE("heApplyFogT: texture 17 on Metal, analytic fog everywhere else")
     CHECK(metal.source.find("[[texture(17)]]") != std::string::npos);
     CHECK(metal.source.find("[[sampler(17)]]") == std::string::npos);
 
-    // Mode 0 must not change what the other backends compile: no binding 34 anywhere.
-    for (B b : { B::GLSL410, B::GLSL430, B::SpirV, B::HLSL })
+    // GL (step 4): heFogVolume declared and bound by NAME (GLSL410 has no
+    // layout(binding=)) — OpenGLRenderer::GetOrBuildMaterialProgram's
+    // setupProgram pins it to texture unit 21 (kGlFogVolumeTextureUnit).
+    const auto& gl = lib.fragment(0xF06F09ull, frag, B::GLSL410);
+    INFO(gl.log);
+    REQUIRE(gl.ok);
+    CHECK(gl.source.find("heFogVolume") != std::string::npos);
+    CHECK(gl.source.find("sampler3D") != std::string::npos);
+
+    // Mode 0 must not change what Vulkan/D3D/the clustered GL variant compile:
+    // no binding 34 anywhere until steps 5-6 bind it there too.
+    for (B b : { B::GLSL430, B::SpirV, B::HLSL })
     {
         const auto& other = lib.fragment(0xF06F07ull, frag, b);
         INFO("backend ", static_cast<int>(b), ": ", other.log);

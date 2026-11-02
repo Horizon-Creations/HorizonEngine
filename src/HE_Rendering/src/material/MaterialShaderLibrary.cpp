@@ -392,6 +392,16 @@ vec3 heApplyFog(vec3 color, vec3 worldPos) {
     if (heLight.fogVol.x > 0.5) return color;
     return heApplyFogAnalytic(color, worldPos);
 }
+)"
+// kLightingPreamble split here into adjacent string literals (MSVC C2026: a
+// single narrow string literal tops out at 16380 chars; this one grew past
+// it across Thema 225 steps 1-3 — a pure build-time limit, found while
+// building step 4). Adjacent literals concatenate at the preprocessor
+// stage, before that per-literal limit is checked, so this is byte-for-byte
+// the SAME GLSL text below — a C++ source-file workaround, not a content
+// change. Pick any line boundary (outside this comment!) if it needs
+// splitting again.
+R"(
 #ifdef HE_FOG_VOLUME
 // Integrated froxel volume (binding 34): rgb = in-scattered radiance L(0 → slice), a = transmittance T.
 // Read with texelFetch only, so a backend whose sampler registers are all taken (D3D, SM 5.0)
@@ -647,6 +657,10 @@ float heFwdClusterShadow(vec4 posType, vec4 params, vec3 worldPos, vec3 n) {
         }
     return vis / 9.0;
 }
+)"
+// Third split of the same literal (kLightingPreamble), same MSVC C2026 reason
+// as the comment a couple hundred lines up.
+R"(
 // The fragment's cluster list with heLitP's per-light model. Takes heLitP's
 // post-weather material terms, so snow/wet apply exactly once. The cell pick
 // uses a TOP-LEFT uv (gl_FragCoord on Vulkan/Metal/D3D); a GL fill site builds
@@ -2634,7 +2648,13 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
                   "GLSL410/GLSLES300 have none (GL 4.3+ uses Backend::GLSL430)";
         return m_fragCache.emplace(key, std::move(out)).first->second;
     }
-    const std::string injected = injectPreamble(glsl, clustered, backend == Backend::Metal); // adds the lighting UBO + heLit()
+    // HE_FOG_VOLUME (heFogVolume binding 34, heApplyFogT): Metal and GL — the two
+    // backends with an Apply/Integrate pass built (Thema 225 steps 3-4). Vulkan/D3D
+    // stay off until their steps bind the volume (HLSL register budget, Vulkan
+    // descriptor set) — flipping this for them without the binding code would
+    // declare heFogVolume with nothing behind it.
+    const bool fogVolume = backend == Backend::Metal || backend == Backend::GLSL410;
+    const std::string injected = injectPreamble(glsl, clustered, fogVolume); // adds the lighting UBO + heLit()
     if (backend == Backend::Metal)
     {
         // ── Fragment sampler budget ──────────────────────────────────────────
@@ -2889,6 +2909,28 @@ std::string MaterialShaderLibrary::fogApplyGlsl()
          + FogShaderSource::kApplyMain;
 }
 
+// ─── GL fragment-path kernels (Thema 225 step 4) ─────────────────────────────
+// A real fragment shader (unlike Metal's compute path), so no compute stubs:
+// gl_FragCoord is legitimately available to the shared heCsmShadow/
+// heCloudShadowFactor/heLocalShadowFactor functions kLightingPreamble brings in.
+std::string MaterialShaderLibrary::fogInjectGlslGL()
+{
+    return std::string("#version 450\n") + kLightingPreamble + FogShaderSource::kFogVolBlock
+         + FogShaderSource::kInjectBodyGL + FogShaderSource::kInjectMainGL;
+}
+
+std::string MaterialShaderLibrary::fogIntegrateGlslGL()
+{
+    return std::string(FogShaderSource::kIntegrateSourceGL) + FogShaderSource::kFogVolBlock
+         + FogShaderSource::kIntegrateMainGL;
+}
+
+std::string MaterialShaderLibrary::fogApplyGlslGL()
+{
+    return std::string(FogShaderSource::kApplySourceGL) + FogShaderSource::kFogVolBlock
+         + FogShaderSource::kApplyMain;
+}
+
 const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogInject(Backend backend)
 {
     const int key = static_cast<int>(backend) * 4;
@@ -2907,8 +2949,13 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogInject(Backend 
               { Stage::Compute, 0, 37, 4 },    // history
               { Stage::Compute, 0, 38, 5 } },  // output image
             kMaterialMslOptions()));
+    else if (backend == Backend::GLSL410)
+        // One fullscreen quad per Z slice (OpenGLRenderer::RenderFogVolume): no
+        // explicit pins needed, GL binds HeLighting/HeFogVol/heFogNoise/heFogHistory
+        // by NAME (glUniformBlockBinding / glUniform1i), like every other GL program.
+        out = toCompiled(compile(fogInjectGlslGL(), Stage::Fragment, Target::Glsl410));
     else
-        out.log = "fogInject: volumetric fog is not implemented for this backend yet (Thema 225 steps 4-6)";
+        out.log = "fogInject: volumetric fog is not implemented for this backend yet (Thema 225 steps 5-6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
 }
 
@@ -2923,8 +2970,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogIntegrate(Backe
             { { Stage::Compute, 0, 36, 0 },    // HeFogVol
               { Stage::Compute, 0, 37, 0 },    // injected volume
               { Stage::Compute, 0, 38, 1 } })); // integrated image
+    else if (backend == Backend::GLSL410)
+        // One fullscreen quad per slice k, MRT (next accumulator + this layer of
+        // the integrated volume) — see FogVolumeShaderSource.h's kIntegrateMainGL.
+        out = toCompiled(compile(fogIntegrateGlslGL(), Stage::Fragment, Target::Glsl410));
     else
-        out.log = "fogIntegrate: volumetric fog is not implemented for this backend yet (Thema 225 steps 4-6)";
+        out.log = "fogIntegrate: volumetric fog is not implemented for this backend yet (Thema 225 steps 5-6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
 }
 
@@ -2940,8 +2991,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogApply(Backend b
               { Stage::Fragment, 0, 34, 0 },   // integrated volume (+ sampler 0)
               { Stage::Fragment, 0, 15, 1 },   // sky env cube (+ sampler 1)
               { Stage::Fragment, 0, 39, 2 } })); // scene depth (fetched)
+    else if (backend == Backend::GLSL410)
+        out = toCompiled(compile(fogApplyGlslGL(), Stage::Fragment, Target::Glsl410));
     else
-        out.log = "fogApply: volumetric fog is not implemented for this backend yet (Thema 225 steps 4-6)";
+        out.log = "fogApply: volumetric fog is not implemented for this backend yet (Thema 225 steps 5-6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
 }
 } // namespace HE
