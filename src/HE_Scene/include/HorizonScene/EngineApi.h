@@ -1485,6 +1485,14 @@ namespace camera {
     X(lensFlare,           LensFlare,           "Lens Flare") \
     X(fogDensity,          FogDensity,          "Fog Density") \
     X(fogHeightFalloff,    FogHeightFalloff,    "Fog Height Falloff") \
+    X(fogVolumeDistance,   FogVolumeDistance,   "Fog Volume Distance") \
+    X(fogAnisotropy,       FogAnisotropy,       "Fog Anisotropy") \
+    X(fogNoiseAmount,      FogNoiseAmount,      "Fog Noise Amount") \
+    X(fogNoiseScale,       FogNoiseScale,       "Fog Noise Scale") \
+    X(fogBankDensity,      FogBankDensity,      "Fog Bank Density") \
+    X(fogBankBaseY,        FogBankBaseY,        "Fog Bank Base Y") \
+    X(fogBankThickness,    FogBankThickness,    "Fog Bank Thickness") \
+    X(fogLocalLightScatter, FogLocalLightScatter, "Fog Local Light Scatter") \
     X(rainAmount,          RainAmount,          "Rain Amount") \
     X(snowAmount,          SnowAmount,          "Snow Amount") \
     X(wetness,             Wetness,             "Wetness") \
@@ -1513,11 +1521,14 @@ namespace camera {
     X(cloudMode,           CloudMode,           "Cloud Mode") \
     X(cloudQuality,        CloudQuality,        "Cloud Quality") \
     X(cloudStyle,          CloudStyle,          "Cloud Style") \
-    X(nebulaQuality,       NebulaQuality,       "Nebula Quality")
+    X(nebulaQuality,       NebulaQuality,       "Nebula Quality") \
+    X(fogMode,             FogMode,             "Fog Mode") \
+    X(fogQuality,          FogQuality,          "Fog Quality")
 #define HE_ENV_FIELDS_COLOR(X) \
     X(sunColor,            SunColor,            "Sun Color") \
     X(moonColor,           MoonColor,           "Moon Color") \
     X(cloudTint,           CloudTint,           "Cloud Tint") \
+    X(fogAlbedo,           FogAlbedo,           "Fog Albedo") \
     X(nebulaColor,         NebulaColor,         "Nebula Color 1") \
     X(nebulaColor2,        NebulaColor2,        "Nebula Color 2") \
     X(nebulaColor3,        NebulaColor3,        "Nebula Color 3") \

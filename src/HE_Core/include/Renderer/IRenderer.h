@@ -276,6 +276,15 @@ public:
         // window that refuses to open. `window.open` refuses in one place from
         // this flag rather than each backend inventing its own excuse.
         bool supportsSecondaryWindows = false;
+        // Volumetric fog (Thema 225, docs/volumetric-fog-plan.md): the froxel-grid
+        // Inject/Integrate/Apply passes, vs. the analytic height-fog formula every
+        // backend already has. False everywhere until a backend implements it
+        // (Metal/OpenGL/Vulkan/D3D11/D3D12 — plan steps 3-6); Software stays false,
+        // it draws no 3D. The extractor (RenderWorld.h's FogVolumeData) gates
+        // `enabled` on this, and the editor greys out fogMode's volumetric choice
+        // when false — a scene authored with fogMode=1 still loads and plays, it
+        // just renders with the analytic fallback on a backend without this.
+        bool supportsVolumetricFog = false;
     };
 
     // Overlay callback: called by the backend at the correct point inside the

@@ -1151,6 +1151,17 @@ namespace
 		CHECK(a.starGlow            == doctest::Approx(b.starGlow));
 		CHECK(a.starTwinkle         == doctest::Approx(b.starTwinkle));
 		CHECK(a.starDensity         == doctest::Approx(b.starDensity));
+		CHECK(a.fogMode              == b.fogMode);
+		CHECK(a.fogQuality           == b.fogQuality);
+		CHECK(a.fogVolumeDistance    == doctest::Approx(b.fogVolumeDistance));
+		CHECK(a.fogAlbedo            == b.fogAlbedo);
+		CHECK(a.fogAnisotropy        == doctest::Approx(b.fogAnisotropy));
+		CHECK(a.fogNoiseAmount       == doctest::Approx(b.fogNoiseAmount));
+		CHECK(a.fogNoiseScale        == doctest::Approx(b.fogNoiseScale));
+		CHECK(a.fogBankDensity       == doctest::Approx(b.fogBankDensity));
+		CHECK(a.fogBankBaseY         == doctest::Approx(b.fogBankBaseY));
+		CHECK(a.fogBankThickness     == doctest::Approx(b.fogBankThickness));
+		CHECK(a.fogLocalLightScatter == doctest::Approx(b.fogLocalLightScatter));
 	}
 }
 
@@ -1186,6 +1197,11 @@ TEST_CASE("A round-tripped Sky pushes identical EnvironmentSettings to the rende
 	env.starBrightness = 1.25f; env.starColor = glm::vec3(0.91f, 0.92f, 0.93f);
 	env.starSize = 1.45f;      env.starSizeVariation = 0.26f;
 	env.starGlow = 1.65f;      env.starTwinkle = 0.47f;       env.starDensity = 0.58f;
+	env.fogMode = 1;           env.fogQuality = 2;            env.fogVolumeDistance = 123.0f;
+	env.fogAlbedo = glm::vec3(0.81f, 0.82f, 0.83f);
+	env.fogAnisotropy = 0.37f; env.fogNoiseAmount = 0.48f;    env.fogNoiseScale = 59.0f;
+	env.fogBankDensity = 0.19f; env.fogBankBaseY = 2.5f;      env.fogBankThickness = 7.0f;
+	env.fogLocalLightScatter = 1.3f;
 
 	const IRenderer::EnvironmentSettings before = HE::makeEnvironmentSettings(env, 0.0f);
 
@@ -1353,6 +1369,121 @@ TEST_CASE("The Environment component's on-disk keys are exactly the persisted fi
 
 	CHECK(actual == expected);
 	CHECK(envJson->count("flash") == 0);   // runtime-only, must never reach the file
+
+	he_test::removeQuiet(file);
+}
+
+TEST_CASE("Volumetric fog (fogMode=1) round-trips all eleven fields")
+{
+	// The generic "fully-populated Environment component" test above already
+	// covers these through the X-lists; this one is the explicit, readable
+	// version plan step 2 asks for — real-looking values, not the generic filler.
+	const fs::path file = fs::temp_directory_path() / "he_test_fogvol.hescene";
+
+	HorizonWorld world;
+	const Entity sky = world.addSky();
+	auto& env = world.registry().get<EnvironmentComponent>(sky);
+	env.fogMode              = 1;
+	env.fogQuality           = 2;
+	env.fogVolumeDistance    = 150.0f;
+	env.fogAlbedo            = glm::vec3(0.9f, 0.85f, 0.8f);
+	env.fogAnisotropy        = 0.62f;
+	env.fogNoiseAmount       = 0.73f;
+	env.fogNoiseScale        = 65.0f;
+	env.fogBankDensity       = 0.31f;
+	env.fogBankBaseY         = 4.0f;
+	env.fogBankThickness     = 9.0f;
+	env.fogLocalLightScatter = 1.4f;
+
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	const Entity lsky = loaded.environmentEntity();
+	REQUIRE((lsky != entt::null));
+	auto& le = loaded.registry().get<EnvironmentComponent>(lsky);
+
+	CHECK(le.fogMode              == 1);
+	CHECK(le.fogQuality           == 2);
+	CHECK(le.fogVolumeDistance    == doctest::Approx(150.0f));
+	CHECK(le.fogAlbedo.x          == doctest::Approx(0.9f));
+	CHECK(le.fogAlbedo.y          == doctest::Approx(0.85f));
+	CHECK(le.fogAlbedo.z          == doctest::Approx(0.8f));
+	CHECK(le.fogAnisotropy        == doctest::Approx(0.62f));
+	CHECK(le.fogNoiseAmount       == doctest::Approx(0.73f));
+	CHECK(le.fogNoiseScale        == doctest::Approx(65.0f));
+	CHECK(le.fogBankDensity       == doctest::Approx(0.31f));
+	CHECK(le.fogBankBaseY         == doctest::Approx(4.0f));
+	CHECK(le.fogBankThickness     == doctest::Approx(9.0f));
+	CHECK(le.fogLocalLightScatter == doctest::Approx(1.4f));
+
+	he_test::removeQuiet(file);
+}
+
+TEST_CASE("A scene saved before volumetric fog existed loads as fogMode 0 with its defaults")
+{
+	// Same recipe as "A camera rig saved before lag existed..." above: strip the
+	// keys back OUT of a freshly saved scene instead of hand-writing old JSON, so
+	// this stays a test about the missing keys and not about the rest of the
+	// format drifting.
+	const fs::path file = fs::temp_directory_path() / "he_test_fogvol_legacy.hescene";
+	constexpr const char* kNewKeys[] = {
+		"fogMode", "fogQuality", "fogVolumeDistance", "fogAlbedo", "fogAnisotropy",
+		"fogNoiseAmount", "fogNoiseScale", "fogBankDensity", "fogBankBaseY",
+		"fogBankThickness", "fogLocalLightScatter",
+	};
+
+	{
+		HorizonWorld world;
+		const Entity sky = world.addSky();
+		auto& env = world.registry().get<EnvironmentComponent>(sky);
+		env.fogDensity = 0.08f;   // a pre-existing field: must survive untouched
+		env.fogMode = 1;          // would prove the strip failed if it survived
+		SceneSerializer ser;
+		REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+	}
+	{
+		std::ifstream in(file);
+		nlohmann::json scene; in >> scene; in.close();
+		REQUIRE(scene.contains("entities"));
+		bool stripped = false;
+		for (auto& e : scene["entities"])
+		{
+			if (!e.contains("components") || !e["components"].contains("environment")) continue;
+			nlohmann::json& c = e["components"]["environment"];
+			for (const char* key : kNewKeys)
+			{
+				REQUIRE(c.contains(key));   // the save path really writes them
+				c.erase(key);
+			}
+			stripped = true;
+		}
+		REQUIRE(stripped);
+		std::ofstream out(file);
+		out << scene.dump(2);
+	}
+
+	HorizonWorld loaded;
+	SceneSerializer ser;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	const Entity lsky = loaded.environmentEntity();
+	REQUIRE((lsky != entt::null));
+	auto& le = loaded.registry().get<EnvironmentComponent>(lsky);
+
+	const EnvironmentComponent fresh;
+	CHECK(le.fogDensity           == doctest::Approx(0.08f));   // what WAS there survives
+	CHECK(le.fogMode              == 0);                         // the whole point: never 1 from a missing key
+	CHECK(le.fogQuality           == fresh.fogQuality);
+	CHECK(le.fogVolumeDistance    == doctest::Approx(fresh.fogVolumeDistance));
+	CHECK(le.fogAlbedo            == fresh.fogAlbedo);
+	CHECK(le.fogAnisotropy        == doctest::Approx(fresh.fogAnisotropy));
+	CHECK(le.fogNoiseAmount       == doctest::Approx(fresh.fogNoiseAmount));
+	CHECK(le.fogNoiseScale        == doctest::Approx(fresh.fogNoiseScale));
+	CHECK(le.fogBankDensity       == doctest::Approx(fresh.fogBankDensity));
+	CHECK(le.fogBankBaseY         == doctest::Approx(fresh.fogBankBaseY));
+	CHECK(le.fogBankThickness     == doctest::Approx(fresh.fogBankThickness));
+	CHECK(le.fogLocalLightScatter == doctest::Approx(fresh.fogLocalLightScatter));
 
 	he_test::removeQuiet(file);
 }

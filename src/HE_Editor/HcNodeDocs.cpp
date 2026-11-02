@@ -2117,7 +2117,7 @@ namespace
 	};
 
 	// ── The sky properties ───────────────────────────────────────────────────
-	// The Environment category is generated from an X-list in EngineApi.h: 58
+	// The Environment category is generated from an X-list in EngineApi.h: 69
 	// fields, each producing an env.get… and an env.set… row. A hand-written
 	// table would be a hundred rows that say the same thing twice and go stale
 	// the moment a field is added — so this is keyed by the FIELD (the part after
@@ -2155,6 +2155,17 @@ namespace
 		{ "LensFlare", "the camera artefact when the sun is in shot" },
 		{ "FogDensity", "how thick the atmospheric haze is; even a very small amount gives a landscape distance", Wx::Driven },
 		{ "FogHeightFalloff", "how much the fog pools near the ground instead of filling the air evenly" },
+		{ "FogMode", "whether fog is the flat analytic blend (0) or a real raymarched volume with light shafts and in-fog shadow (1)" },
+		{ "FogQuality", "the volumetric fog's froxel grid size: 0 low, 1 medium, 2 high — only matters in volumetric mode" },
+		{ "FogVolumeDistance", "how far the volumetric fog reaches before the analytic fog above continues, in metres" },
+		{ "FogAlbedo", "the volumetric fog's scattering tint; white scatters the sky and sun colour unchanged" },
+		{ "FogAnisotropy", "the volumetric fog's scattering phase: negative scatters back toward the camera, positive brightens a shaft toward the sun" },
+		{ "FogNoiseAmount", "how much 3D noise breaks up the volumetric fog's height formula into wisps and patches" },
+		{ "FogNoiseScale", "the world size of one period of the volumetric fog's noise" },
+		{ "FogBankDensity", "a ground-hugging volumetric fog bank layered on top of the height fog" },
+		{ "FogBankBaseY", "the world height of the volumetric fog bank's lower edge" },
+		{ "FogBankThickness", "how tall the volumetric fog bank stands; its top is soft, not a hard line" },
+		{ "FogLocalLightScatter", "how much point and spot lights scatter inside the volumetric fog, 0 switches it off" },
 		{ "RainAmount", "how hard it is raining, 0 to 1", Wx::Driven },
 		{ "SnowAmount", "how hard it is snowing, 0 to 1", Wx::Driven },
 		{ "Wetness", "how wet surfaces look after rain", Wx::Driven },

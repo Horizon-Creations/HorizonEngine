@@ -1209,6 +1209,72 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			ImGui::EndDisabled();
 			hint("Distant objects blend into the horizon (warm at sunset).");
 
+			// Volumetric fog (Thema 225): a froxel-grid volume with light shafts and
+			// shadows instead of the flat per-pixel blend above, past this distance
+			// the analytic formula still takes over. Greyed out on a backend that
+			// has not implemented it yet (IRenderer::Capabilities::supportsVolumetricFog)
+			// — the mode stays whatever the scene authored, it just renders with the
+			// analytic fallback until the backend catches up.
+			const bool fogVolSupported = ctx.renderer && ctx.renderer->GetCapabilities().supportsVolumetricFog;
+			ImGui::BeginDisabled(!fogVolSupported);
+			{
+				const char* fogModes[] = { "Analytic (today)", "Volumetric" };
+				int fogMode = (env->fogMode == 1) ? 1 : 0;
+				if (Row::combo("Mode##fogvol", &fogMode, fogModes, 2)) { env->fogMode = fogMode; trackEdit(); }
+			}
+			ImGui::EndDisabled();
+			if (!fogVolSupported)
+				hint("This backend does not render volumetric fog yet; a scene with it "
+				     "picked still loads and plays, with the Density fog above standing in.");
+			else
+				hint("Froxel-grid fog with sun/light shafts and in-volume shadow, instead "
+				     "of the flat per-pixel blend. Past Volume Distance the Density fog "
+				     "above continues seamlessly.");
+
+			ImGui::BeginDisabled(!fogVolSupported || env->fogMode != 1);
+			{
+				const char* fogQ[] = { "Low", "Medium", "High" };
+				int fogQuality = std::clamp(env->fogQuality, 0, 2);
+				if (Row::combo("Quality##fogvol", &fogQuality, fogQ, 3)) { env->fogQuality = fogQuality; trackEdit(); }
+				hint("Froxel grid size. Higher resolves finer shafts and bank edges; costs more GPU time.");
+
+				Row::sliderFloat("Volume Distance", &env->fogVolumeDistance, 16.0f, 512.0f, "%.0f m"); trackEdit();
+				hint("How far the volume reaches before the Density fog above takes over. "
+				     "Clamped to the directional shadow distance, so the volume is never "
+				     "without a shadow map to sample.");
+
+				Row::colorEdit3("Albedo##fogvol", &env->fogAlbedo.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+				hint("Scattering tint. White scatters the sky/sun colour unchanged; a tint "
+				     "colours the fog itself, like dust or smoke.");
+
+				Row::sliderFloat("Anisotropy", &env->fogAnisotropy, -0.9f, 0.9f, "%.2f"); trackEdit();
+				hint("Henyey-Greenstein phase: negative scatters back toward the camera, "
+				     "positive forms a bright shaft looking toward the sun.");
+
+				Row::sliderFloat("Noise Amount", &env->fogNoiseAmount, 0.0f, 1.0f); trackEdit();
+				hint("0 keeps the pure height formula; higher breaks it up into drifting "
+				     "wisps and clearer patches.");
+				ImGui::BeginDisabled(env->fogNoiseAmount <= 0.0f);
+				Row::sliderFloat("Noise Scale", &env->fogNoiseScale, 5.0f, 200.0f, "%.0f m"); trackEdit();
+				ImGui::EndDisabled();
+				hint("World size of one noise period. Small = fine wisps, large = broad "
+				     "patches of thicker/thinner fog.");
+
+				Row::sliderFloat("Bank Density", &env->fogBankDensity, 0.0f, 1.0f, "%.3f"); trackEdit();
+				hint("A ground-hugging fog bank, on top of the height fog above — valley "
+				     "mist or a lake-bed haze with its own edges.");
+				ImGui::BeginDisabled(env->fogBankDensity <= 0.0f);
+				Row::dragFloat("Bank Base", &env->fogBankBaseY, 0.1f, -1000.0f, 1000.0f, "%.1f m"); trackEdit();
+				hint("World Y of the bank's lower edge.");
+				Row::dragFloat("Bank Thickness", &env->fogBankThickness, 0.1f, 0.1f, 200.0f, "%.1f m"); trackEdit();
+				hint("How tall the bank stands; its top edge is soft and noise-eroded, not a hard line.");
+				ImGui::EndDisabled();
+
+				Row::sliderFloat("Local Light Scatter", &env->fogLocalLightScatter, 0.0f, 2.0f, "%.2f"); trackEdit();
+				hint("How much point/spot lights scatter in the volume, on top of the sun/moon. 0 = off.");
+			}
+			ImGui::EndDisabled();
+
 			ImGui::TreePop(); } // end Atmospheric Fog
 
 			if (ImGui::TreeNodeEx("Precipitation & Ground")) {

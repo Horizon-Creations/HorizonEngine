@@ -1856,7 +1856,7 @@ TEST_CASE("Camera + Environment: registry knobs reach the world's components")
     int envRows = 0;
     for (const auto& fn : HE::api::registry())
         if (std::string(fn.id).rfind("env.", 0) == 0) ++envRows;
-    CHECK(envRows == 2 * (39 + 6 + 4 + 9));   // float + bool + int + colour fields
+    CHECK(envRows == 2 * (47 + 6 + 6 + 10));   // float + bool + int + colour fields (Thema 225: +8 float, +2 int, +1 colour)
 }
 
 // ═══ Spawning a class: the host service contract ══════════════════════════════

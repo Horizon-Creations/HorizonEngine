@@ -1272,6 +1272,21 @@ float fogWaterlineBand(float signedDepth)
 	return 1.0f - t * t * (3.0f - 2.0f * t);
 }
 
+FogVolumeData ExtractFogVolumeData(HorizonWorld& world, bool backendSupportsVolumetricFog,
+                                   bool cameraUnderwater, float aspectWidthOverHeight,
+                                   float shadowDistance)
+{
+	// First Sky entity wins, like the puddleAmount walk above; a world with none
+	// keeps the default (disabled) component, so MakeFogVolumeData sees fogMode 0.
+	EnvironmentComponent ec{};
+	for (auto [ee, e] : world.registry().view<EnvironmentComponent>().each()) { ec = e; break; }
+	// dt = 0: this is a read of the current state, not a tick — must not advance
+	// timeOfDay (see makeWorldPreviewEnvironment's identical reasoning above).
+	const IRenderer::EnvironmentSettings settings = makeEnvironmentSettings(ec, 0.0f);
+	return MakeFogVolumeData(settings, backendSupportsVolumetricFog, cameraUnderwater,
+	                         aspectWidthOverHeight, shadowDistance);
+}
+
 } // namespace HE
 
 // Out-of-line on purpose (see the header): the one definition the DLL exports.

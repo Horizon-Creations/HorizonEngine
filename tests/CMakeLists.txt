@@ -172,6 +172,11 @@ add_executable(he_tests
     # the same WaterIndex the physics immersion detection uses, wired onto
     # RenderWorld by RenderExtractor::extract() for the post-processing stage.
     test_underwater_camera.cpp
+    # Thema 225 step 2: volumetric fog's host side — FogVolume.h's slice math,
+    # the analytic height-fog integral it has to seam with, FogVolumeData/
+    # MakeFogVolumeData/ExtractFogVolumeData gating, and (under HE_TESTS_HAVE_SHADERC)
+    # the §10 feasibility probe: the real shadow preamble through SPIRV-Cross as Compute.
+    test_fog_volume.cpp
     # The ground under a lake: a polygon dug to a floor with a soft bank, the
     # chunks it rebuilds, and the editor's one undo step giving it back exactly.
     test_terrain_excavate.cpp
