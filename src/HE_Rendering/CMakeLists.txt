@@ -107,6 +107,9 @@ if(HE_VULKAN_ENABLED)
     add_library(RendererVulkan STATIC
         src/Backends/Vulkan/VulkanRenderer.cpp
         src/Backends/Vulkan/VulkanShaderManager.cpp
+        src/Backends/Vulkan/VulkanLandscape.cpp
+        include/Backends/Vulkan/VulkanLandscape.h
+        include/Backends/Vulkan/VulkanLandscapeLayout.h
         include/Backends/Vulkan/VulkanShaderManager.h)
     target_include_directories(RendererVulkan PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include

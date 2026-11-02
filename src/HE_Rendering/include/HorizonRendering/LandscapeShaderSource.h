@@ -1,4 +1,6 @@
 #pragma once
+#include <string>
+#include <string_view>
 
 // ─── The world-scale landscape's shaders (Thema 326, step 2, part A) ─────────
 // One 65 x 65 grid (HE::LandscapePatchMesh) is drawn once per patch of the quadtree (HE::LandscapeFrame::Patch); the vertex
@@ -47,6 +49,7 @@ uniform usampler2D      uSlotTable;     // R16UI, window x window, toroidal; 655
 uniform usampler2D      uCoarseHeights; // R16UI, the coarse grids stacked
 
 out vec3 vWorldRel;                  // origin-relative position, height in absolute metres minus the origin's y
+//#LANDSCAPE_BODY#
 
 float heightOfCoarseGrid(ivec2 g, int grid)
 {
@@ -140,6 +143,7 @@ uniform sampler2D       uCoarseWeights2;
 uniform sampler2DArray  uAlbedoArray;    // the texture group's albedo array: slices 0-3 are layers 0-3, repeated in world coordinates
 uniform sampler2DArray  uNormalArray;    // its normal array (tangent space, OpenGL convention: green = +V = +z in the world) and
 uniform sampler2DArray  uMaskArray;      // its mask array (R = AO, G = roughness, B = height; only AO is used yet), the same slices and coordinates
+//#LANDSCAPE_BODY#
 
 void main()
 {
@@ -210,6 +214,106 @@ void main()
     fragColor = vec4(albedo * (uAmbient * ao + uSunColor * ndl), 1.0);
 }
 )GLSL";
+
+// ─── Vulkan ──────────────────────────────────────────────────────────────────
+// Vulkan compiles THE SAME GLSL text (like the sky, kSkyVulkanPrelude): everything above the `//#LANDSCAPE_BODY#` marker of each stage (the GL
+// version line and the loose uniform / in / out declarations) is replaced by the prelude below, the body after it is used as it is. So the
+// maths, the normal/mask arrays and the world-UV ground are the GL ones by construction; only the way the values arrive differs:
+//   * one std140 uniform block (set 0, binding 0, `LsGlobals`, 800 bytes, both stages) with the frame-wide uniforms in the GLSL's order; the
+//     C++ mirror is vkls::Globals in Backends/Vulkan/VulkanLandscape.h (static_assert on the size and on every offset). The block is anonymous,
+//     so the body's names (uViewProj ...) resolve as block members and need no #define.
+//   * the per-patch uniforms (uPatch, uPatchPos, uMorph) are a push-constant block (48 bytes, vertex stage), one vkCmdPushConstants per patch.
+//   * the images are combined image samplers at set 0, bindings 1-12 (kLandscapeVkBinding* below); nothing is filtered but the three texture
+//     group arrays (albedo, normal, mask), whose sampler is the renderer's linear / repeat / mip one.
+//   * the matrix the vertex shader gets is the Vulkan clip one (HE::kVulkanClipFix applied by the caller: y down, depth 0..1), unlike D3D and
+//     Metal, whose scene passes rasterise the GL matrix; so no depth caveat near the camera.
+// Set-0 bindings, as the C++ side (VulkanLandscape.cpp) lays out its descriptor set:
+inline constexpr unsigned kLandscapeVkBindingGlobals = 0;        // uniform block LsGlobals (VS + FS)
+inline constexpr unsigned kLandscapeVkBindingTileHeights = 1;    // VS  usampler2DArray, R16UI
+inline constexpr unsigned kLandscapeVkBindingSlotTable = 2;      // VS + FS usampler2D, R16UI
+inline constexpr unsigned kLandscapeVkBindingCoarseHeights = 3;  // VS  usampler2D, R16UI
+inline constexpr unsigned kLandscapeVkBindingTileWeights = 4;    // FS  sampler2DArray x3 (4, 5, 6)
+inline constexpr unsigned kLandscapeVkBindingCoarseWeights = 7;  // FS  sampler2D x3 (7, 8, 9)
+inline constexpr unsigned kLandscapeVkBindingAlbedo = 10;        // FS  sampler2DArray, the texture group's (not ours)
+inline constexpr unsigned kLandscapeVkBindingNormal = 11;        // FS  sampler2DArray, ditto
+inline constexpr unsigned kLandscapeVkBindingMask = 12;          // FS  sampler2DArray, ditto
+inline constexpr unsigned kLandscapeVkBindingCount = 13;
+
+// Both stages declare the same LsGlobals text, so the two reflect one layout. Every vec3 is followed by a member that starts a new 16-byte row (or
+// by another vec3), so std140 puts nothing where the C++ struct does not. (Raw strings, so scripts/validate_embedded_shaders.py finds them.)
+inline constexpr const char* kLandscapeVulkanVertexPrelude = R"GLSL(#version 450
+layout(location = 0) in vec2 aGrid;
+layout(location = 0) out vec3 vWorldRel;
+layout(std140, set = 0, binding = 0) uniform LsGlobals
+{
+    mat4  uViewProj;
+    vec4  uCameraRel;
+    vec4  uWorld;
+    vec4  uHeightInfo;
+    vec3  uOrigin;
+    ivec4 uTile;
+    ivec4 uHeightRect[8];
+    ivec4 uCoarseGrid[16];
+    vec4  uLayerColor[12];
+    vec3  uSunDir;
+    vec3  uSunColor;
+    vec3  uAmbient;
+    vec4  uTex;
+    vec4  uTexMaps;
+};
+layout(push_constant) uniform LsPatch
+{
+    ivec4 uPatch;
+    vec4  uPatchPos;
+    vec4  uMorph;
+};
+layout(set = 0, binding = 1) uniform usampler2DArray uTileHeights;
+layout(set = 0, binding = 2) uniform usampler2D      uSlotTable;
+layout(set = 0, binding = 3) uniform usampler2D      uCoarseHeights;
+)GLSL";
+
+inline constexpr const char* kLandscapeVulkanFragmentPrelude = R"GLSL(#version 450
+layout(location = 0) in vec3 vWorldRel;
+layout(location = 0) out vec4 fragColor;
+layout(std140, set = 0, binding = 0) uniform LsGlobals
+{
+    mat4  uViewProj;
+    vec4  uCameraRel;
+    vec4  uWorld;
+    vec4  uHeightInfo;
+    vec3  uOrigin;
+    ivec4 uTile;
+    ivec4 uHeightRect[8];
+    ivec4 uCoarseGrid[16];
+    vec4  uLayerColor[12];
+    vec3  uSunDir;
+    vec3  uSunColor;
+    vec3  uAmbient;
+    vec4  uTex;
+    vec4  uTexMaps;
+};
+layout(set = 0, binding = 2)  uniform usampler2D     uSlotTable;
+layout(set = 0, binding = 4)  uniform sampler2DArray uTileWeights0;
+layout(set = 0, binding = 5)  uniform sampler2DArray uTileWeights1;
+layout(set = 0, binding = 6)  uniform sampler2DArray uTileWeights2;
+layout(set = 0, binding = 7)  uniform sampler2D      uCoarseWeights0;
+layout(set = 0, binding = 8)  uniform sampler2D      uCoarseWeights1;
+layout(set = 0, binding = 9)  uniform sampler2D      uCoarseWeights2;
+layout(set = 0, binding = 10) uniform sampler2DArray uAlbedoArray;
+layout(set = 0, binding = 11) uniform sampler2DArray uNormalArray;
+layout(set = 0, binding = 12) uniform sampler2DArray uMaskArray;
+)GLSL";
+
+// prelude + the stage's body after the marker. Empty when the marker is missing (a change to the GLSL that dropped it): the caller refuses to build.
+inline std::string BuildLandscapeStageGLSL450(const char* prelude, const char* glsl)
+{
+	const std::string_view body = glsl, marker = "//#LANDSCAPE_BODY#";
+	const size_t at = body.find(marker);
+	if (at == std::string_view::npos) return {};
+	return std::string(prelude) + std::string(body.substr(at + marker.size()));
+}
+inline std::string BuildLandscapeVertexGLSL450() { return BuildLandscapeStageGLSL450(kLandscapeVulkanVertexPrelude, kLandscapeVS); }
+inline std::string BuildLandscapeFragmentGLSL450() { return BuildLandscapeStageGLSL450(kLandscapeVulkanFragmentPrelude, kLandscapeFS); }
 
 // ─── Metal ───────────────────────────────────────────────────────────────────
 // The same two shaders in MSL, by hand (MetalRenderer's sky is hand-written MSL too). Same maths, line for line: a change to the GLSL
