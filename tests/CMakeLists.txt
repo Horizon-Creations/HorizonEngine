@@ -364,6 +364,7 @@ add_executable(he_tests
     test_bench_landscape_arrays.cpp
     # size / encode time / zstd of ONE baked landscape tile map per side and format; a no-op without HE_BENCH_TILE_PNG (Thema 228, for 326)
     test_bench_hlod_tile.cpp
+    test_hlod_baker.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp

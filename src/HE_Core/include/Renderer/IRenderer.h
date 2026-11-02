@@ -43,6 +43,13 @@ struct EditorCameraOverride
     // because the same override feeds the panel's own pick extract, and the
     // picker must see exactly the quads the frame drew.
     bool      editorIcons  = true;
+    // RenderSceneImage only: the picture is the materials' own output, untouched. An unlit material's colour
+    // comes back byte for byte (no tonemap, gamma, bloom, SSAO, AA, depth of field, reflections or GI), which
+    // is what a baker needs when it photographs a material's albedo or a data view. Forward path only.
+    bool      rawOutput    = false;
+    // With rawOutput: the colour is written sRGB-encoded (the exact curve), for a picture that becomes an sRGB
+    // texture. Without it the 8 bits hold the linear value, which is what data views (normals, roughness) want.
+    bool      rawSrgb      = false;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────

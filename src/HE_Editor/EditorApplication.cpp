@@ -106,6 +106,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
+#include <HorizonScene/LandscapeHlodBaker.h>  // HE_DUMP_HLODBAKE witness
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -7806,13 +7807,19 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		std::string what;
 		if (builtin)
 			what = "default terrain material";
-		else if (mode == "plaingraph")
+		else if (mode == "plaingraph" || mode == "rawconst")
 		{
 			// A lit graph material with nothing but a constant grey: the graph
 			// lighting path (heLitP) without textures or a perturbed normal.
+			// "rawconst": the same UNLIT with the colour (0.2, 0.4, 0.6), the oracle of HE_DUMP_RAWTEST.
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			if (mode == "rawconst")
+			{
+				g.findNode(out)->p[0] = 0.0f;
+				g.findNode(col)->p[0] = 0.2f; g.findNode(col)->p[1] = 0.4f; g.findNode(col)->p[2] = 0.6f;
+			}
 			g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
 			MaterialAsset am;
 			am.type = HE::AssetType::Material;
@@ -10586,6 +10593,129 @@ void EditorApplication::dumpFrameHeadless()
 	// (30, -25) in the capture; a stale cache keeps the red field there.
 	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
 	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
+	// HE_DUMP_RAWTEST=1 (with HE_DUMP_AUTOLAND=rawconst): the oracle of EditorCameraOverride::rawOutput. The
+	// landscape is an unlit constant (0.2, 0.4, 0.6); a raw orthographic capture from above has to give 51 102 153
+	// in every pixel, and the ordinary capture of the same view does not (tonemap).
+	if (const char* rt = std::getenv("HE_DUMP_RAWTEST"); rt && *rt && *rt != '0' && r)
+	{
+		for (int pass = 0; pass < 3; ++pass)
+		{
+			EditorCameraOverride cam;
+			cam.active = true; cam.orthographic = true; cam.rawOutput = (pass >= 1); cam.rawSrgb = (pass == 2);
+			cam.editorIcons = false;
+			cam.orthoHalfHeight = 20.0f;
+			cam.position = glm::vec3(-40.0f, 450.0f, 0.0f);
+			cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0, -1, 0), glm::vec3(0, 0, -1));
+			cam.farPlane = 300.0f;
+			std::vector<uint8_t> img;
+			const bool ok = r->RenderSceneImage(cam, 64, 64, img) && img.size() == 64u * 64u * 4u;
+			unsigned lo[3] = { 255, 255, 255 }, hi[3] = { 0, 0, 0 };
+			for (size_t i = 0; ok && i < 64u * 64u; ++i)
+				for (int c = 0; c < 3; ++c)
+				{
+					lo[c] = std::min<unsigned>(lo[c], img[i * 4 + size_t(c)]);
+					hi[c] = std::max<unsigned>(hi[c], img[i * 4 + size_t(c)]);
+				}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RAWTEST %s: %s r %u..%u g %u..%u b %u..%u (expected %s)",
+			            pass == 0 ? "ordinary" : pass == 1 ? "raw" : "raw sRGB", ok ? "ok" : "FAILED",
+			            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
+			            pass == 2 ? "124 169 203 (the sRGB curve of 0.2 0.4 0.6)" : "51 102 153 when raw");
+		}
+	}
+	// HE_DUMP_HLODBAKE=<side>[,<cx>,<cz>] (Thema 228): the far-landscape bake on the first landscape of the
+	// scene (the HE_DUMP_AUTOLAND witness), one chunk, written as <dump>.hlod_<view>.bmp (albedo, normal,
+	// surface). The log has the timing and the mean colour of each picture.
+	if (const char* hb = std::getenv("HE_DUMP_HLODBAKE"); hb && *hb && m_editorWorld && r)
+	{
+		unsigned side = 64, bcx = 0, bcz = 0;
+		(void)std::sscanf(hb, "%u,%u,%u", &side, &bcx, &bcz);
+		entt::entity land = entt::null;
+		for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+			if (!m_editorWorld->registry().all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		std::string why;
+		HE::landscape::HlodBaker baker(*m_editorWorld, contentManager(), *r);
+		const auto t0 = std::chrono::steady_clock::now();
+		if (land == entt::null || !baker.begin(land, &why))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODBAKE: begin failed (%s)", why.c_str());
+		else
+		{
+			const auto t1 = std::chrono::steady_clock::now();
+			HE::landscape::HlodChunkImages img;
+			const bool ok = baker.bake(bcx, bcz, side, 2, img);
+			const auto t2 = std::chrono::steady_clock::now();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODBAKE %s: %ux%u chunks, chunk %u,%u at %u px, begin %.0f ms, bake %.0f ms",
+			            ok ? "ok" : "FAILED", baker.chunksPerSide(), baker.chunksPerSide(), bcx, bcz, side,
+			            std::chrono::duration<double, std::milli>(t1 - t0).count(),
+			            std::chrono::duration<double, std::milli>(t2 - t1).count());
+			if (ok)
+			{
+				const std::vector<uint8_t>* views[3] = { &img.albedo, &img.normal, &img.surface };
+				const char* names[3] = { "albedo", "normal", "surface" };
+				for (int v = 0; v < 3; ++v)
+				{
+					double mean[3] = { 0, 0, 0 };
+					const size_t n = static_cast<size_t>(img.side) * img.side;
+					for (size_t i = 0; i < n; ++i)
+						for (int c = 0; c < 3; ++c) mean[c] += (*views[v])[i * 4 + static_cast<size_t>(c)];
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODBAKE %s mean rgb %.1f %.1f %.1f", names[v],
+					            mean[0] / double(n), mean[1] / double(n), mean[2] / double(n));
+					writeBMP(m_dumpPath + ".hlod_" + names[v] + ".bmp", *views[v], img.side, img.side);
+				}
+			}
+			// HE_DUMP_HLODMOSAIC=1: every chunk at `side`, stitched, against the whole landscape in one picture of the
+			// same size. The two come from the same renderer and camera maths, so what differs is exactly the
+			// placement and orientation of the chunk rectangles and the seams between them.
+			if (const char* hm = std::getenv("HE_DUMP_HLODMOSAIC"); hm && *hm && *hm != '0' && ok)
+			{
+				const uint32_t cps = baker.chunksPerSide();
+				const uint32_t full = cps * side;
+				HE::landscape::HlodChunkRect first, last, whole;
+				baker.chunkRect(0, 0, first);
+				baker.chunkRect(cps - 1, cps - 1, last);
+				whole.min  = first.min;
+				whole.size = glm::vec2(last.min.x + last.size.x - first.min.x, last.min.y + last.size.y - first.min.y);
+				HE::landscape::HlodChunkImages ref;
+				const bool refOk = baker.bakeRect(whole, full, 2, ref);
+				std::vector<uint8_t> mosaic[3];
+				for (auto& m : mosaic) m.assign(static_cast<size_t>(full) * full * 4, 0);
+				bool allOk = refOk;
+				for (uint32_t cz = 0; cz < cps && allOk; ++cz)
+					for (uint32_t cx = 0; cx < cps && allOk; ++cx)
+					{
+						HE::landscape::HlodChunkImages t;
+						allOk = baker.bake(cx, cz, side, 2, t);
+						if (!allOk) break;
+						const std::vector<uint8_t>* src[3] = { &t.albedo, &t.normal, &t.surface };
+						for (int v = 0; v < 3; ++v)
+							for (uint32_t y = 0; y < side; ++y)
+								std::copy_n(&(*src[v])[static_cast<size_t>(y) * side * 4], static_cast<size_t>(side) * 4,
+								            &mosaic[v][(static_cast<size_t>(cz * side + y) * full + cx * side) * 4]);
+					}
+				if (!allOk)
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODMOSAIC: a bake failed");
+				else
+				{
+					const std::vector<uint8_t>* refv[3] = { &ref.albedo, &ref.normal, &ref.surface };
+					const char* names[3] = { "albedo", "normal", "surface" };
+					for (int v = 0; v < 3; ++v)
+					{
+						double sum = 0; unsigned mx = 0;
+						for (size_t i = 0; i < mosaic[v].size(); ++i)
+						{
+							if (i % 4 == 3) continue;
+							const unsigned d = static_cast<unsigned>(std::abs(int(mosaic[v][i]) - int((*refv[v])[i])));
+							sum += d; mx = std::max(mx, d);
+						}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODMOSAIC %s %ux%u: mean |mosaic - whole| %.3f /255, max %u",
+						            names[v], full, full, sum / double(mosaic[v].size() / 4 * 3), mx);
+						writeBMP(m_dumpPath + ".hlod_mosaic_" + names[v] + ".bmp", mosaic[v], full, full);
+						writeBMP(m_dumpPath + ".hlod_whole_" + names[v] + ".bmp", *refv[v], full, full);
+					}
+				}
+			}
+		}
+		baker.end();
+	}
 	for (int i = 0; i < settleFrames; ++i)
 	{
 		if (arriveWitness && !arriveEarly && i == settleFrames / 2)

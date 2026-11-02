@@ -1073,6 +1073,13 @@ fragment float4 tonemapFragment(TMOut in [[stage_in]],
 {
 	constexpr sampler s(filter::linear, address::clamp_to_edge);
 	float3 c = hdr.sample(s, in.uv).rgb;
+	if (params.x < 0.0)   // raw capture (EditorCameraOverride::rawOutput): the material's colour, untouched
+	{
+		c = clamp(c, 0.0, 1.0);
+		if (params.x < -1.5)   // rawSrgb: the exact sRGB curve, for a picture that becomes an sRGB texture
+			c = select(1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c * 12.92, c <= 0.0031308);
+		return float4(c, 1.0);
+	}
 	c += bloom.sample(s, in.uv).rgb * params.y;
 	c *= params.x;
 	c = aces(c);
@@ -11703,6 +11710,23 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_viewportReqH  = height;
 	m_editorCamera  = camera;
 	m_captureOnly   = true;
+	// A raw capture is the materials' own colour: every effect that would change it is off for this frame
+	// and back afterwards (members the frame reads, saved by value like the camera above).
+	const bool  liveRaw     = m_rawCapture;
+	const bool  liveBloom   = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveDof = m_dofEnabled;
+	const bool  liveMb      = m_mbEnabled, liveSsr = m_ssrEnabled, liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
+	const float liveScale   = m_renderScale;
+	const HE::RenderPath livePath = m_renderPath;
+	const bool liveSrgb = m_rawSrgb;
+	if (camera.rawOutput)
+	{
+		m_rawCapture = true;
+		m_rawSrgb    = camera.rawSrgb;
+		m_bloomEnabled = m_ssaoEnabled = m_dofEnabled = m_mbEnabled = m_ssrEnabled = false;
+		m_giEnabled = m_giReflEnabled = false;
+		m_renderScale = 1.0f;
+		m_renderPath  = HE::RenderPath::Forward;
+	}
 	// TAA history is one camera's past. The screenshot must not blend against
 	// the viewport's (a request at exactly the viewport's size would reuse the
 	// targets, so the resize rule alone does not cover it), and the viewport
@@ -11727,6 +11751,12 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	m_viewportReqH  = liveReqH;
 	m_editorCamera  = liveCam;
 	m_captureOnly   = false;
+	m_rawCapture    = liveRaw;
+	m_rawSrgb       = liveSrgb;
+	m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_dofEnabled = liveDof;
+	m_mbEnabled = liveMb; m_ssrEnabled = liveSsr; m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
+	m_renderScale = liveScale;
+	m_renderPath  = livePath;
 	m_taaHistoryValid = false;
 
 	if (!ok) rgba.clear();
@@ -13560,7 +13590,7 @@ void MetalRenderer::EncodeTonemap(void* renderEncoderPtr, void* sourceHdr, bool 
 		? (__bridge id<MTLTexture>)m_bloomResult
 		: (__bridge id<MTLTexture>)hdr;
 	[enc setFragmentTexture:bloomTex atIndex:1];
-	const simd::float2 params = { 1.0f, bloom ? m_bloomStrength : 0.0f };
+	const simd::float2 params = { m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : 1.0f, bloom ? m_bloomStrength : 0.0f };
 	[enc setFragmentBytes:&params length:sizeof(params) atIndex:0];
 	static const float kNoFlare[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 	[enc setFragmentBytes:(withBloom ? m_lensFlareParams : kNoFlare)
