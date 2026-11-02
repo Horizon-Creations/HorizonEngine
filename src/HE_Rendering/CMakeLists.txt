@@ -225,6 +225,8 @@ if(WIN32)
     add_library(RendererD3D11 STATIC
         src/Backends/D3D11/D3D11Renderer.cpp
         src/Backends/D3D11/D3D11ShaderManager.cpp
+        src/Backends/D3D11/D3D11Landscape.cpp
+        include/Backends/D3D11/D3D11Landscape.h
         include/Backends/D3D11/D3D11ShaderManager.h
         include/Backends/D3D11/D3D11MaterialBindings.h)
     target_include_directories(RendererD3D11 PUBLIC

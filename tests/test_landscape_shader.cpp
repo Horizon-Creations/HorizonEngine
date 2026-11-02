@@ -122,3 +122,43 @@ TEST_CASE("landscape shader source: the MSL port has every GLSL uniform as a mem
 	CHECK(msl.find("discard_fragment") != std::string::npos);   // the world's edge
 	CHECK(msl.find("layout(") == std::string::npos);
 }
+
+TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a member of its two constant buffers, and the registers the D3D classes bind")
+{
+	const std::string hlsl = HE::glsl::kLandscapeHLSL;
+	std::set<std::string> uniforms = uniformsOf(HE::glsl::kLandscapeVS);
+	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
+	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
+	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2" };
+	// `patch` is an HLSL keyword: the per-patch block spells uPatch as lsPatch, everything else as the MSL does
+	int members = 0;
+	for (const std::string& u : uniforms)
+	{
+		if (images.count(u)) continue;
+		std::string m = u == "uPatch" ? std::string("LsPatch") : u.substr(1);
+		m[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(m[0])));
+		INFO("GLSL uniform " << u << " as HLSL member " << m);
+		CHECK((hlsl.find(" " + m + ";") != std::string::npos || hlsl.find(" " + m + "[") != std::string::npos));
+		++members;
+	}
+	CHECK(members == 15);
+	// entry points (D3D11Landscape / D3D12Landscape compile them by name), the two blocks and the nine images: b12/b13, t32-t40, nothing else
+	CHECK(hlsl.find("VSMain(uint vid : SV_VertexID)") != std::string::npos);
+	CHECK(hlsl.find("float4 PSMain(") != std::string::npos);
+	CHECK(hlsl.find("cbuffer LsGlobals : register(b12)") != std::string::npos);
+	CHECK(hlsl.find("cbuffer LsPatch : register(b13)") != std::string::npos);
+	for (int t = 32; t <= 40; ++t) CHECK(hlsl.find("register(t" + std::to_string(t) + ")") != std::string::npos);
+	CHECK(hlsl.find("register(t41)") == std::string::npos);
+	CHECK(hlsl.find("register(t31)") == std::string::npos);    // nothing in the range the D3D11 renderer and its graph materials bind
+	CHECK(hlsl.find("register(s") == std::string::npos);        // nothing is sampled
+	// the same distance for the morph as the GLSL: horizontal plus the slab term, never the vertex's own height
+	const size_t at = hlsl.find("float d = sqrt(");
+	REQUIRE(at != std::string::npos);
+	const std::string line = hlsl.substr(at, hlsl.find(';', at) - at);
+	CHECK(line.find("cameraRel.w") != std::string::npos);
+	CHECK(line.find("d2") != std::string::npos);
+	CHECK(hlsl.find("discard;") != std::string::npos);          // the world's edge
+	// the derivatives are taken before the discard: a divergent discard must not make them undefined
+	CHECK(hlsl.find("ddx(") < hlsl.find("discard;"));
+	CHECK(hlsl.find("layout(") == std::string::npos);
+}

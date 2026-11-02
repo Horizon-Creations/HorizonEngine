@@ -337,4 +337,166 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
 }
 )MSL";
 
+// ─── D3D11 / D3D12 ───────────────────────────────────────────────────────────
+// The same two shaders in HLSL (SM 5.0, fxc), by hand, one source for both D3D backends (the D3D sky is hand-written HLSL too).
+// Same maths, line for line, as the MSL above; what differs is not maths:
+//   * no vertex buffer and no input layout: the grid position comes from SV_VertexID, which in an indexed draw (base vertex 0) is the
+//     index value: (id % 65, id / 65)
+//   * the loose uniforms are two constant buffers: LsGlobals (b12, both stages) and LsPatch (b13, vertex stage, 48 bytes, one per patch).
+//     D3D11 only has b0-b13 and the renderer's own passes use the low ones; D3D12 maps the same two registers in a root signature of its own
+//   * images: t32 tile heights, t33 slot table, t34 coarse heights, t35-t37 tile weight pages, t38-t40 coarse weight pages, all
+//     read with Load() (nothing is sampled, so there is no sampler). SRVs above t31 on purpose: the D3D11 renderer and the graph materials
+//     use t0-t26 and do not rebind them after the landscape draw
+//   * `patch` is a keyword in HLSL, the per-patch block's member is lsPatch
+//   * D3D clip depth is 0..1 but the main scene pass rasterises the plain GL view-projection (kD3DClipFix is NOT applied there, like
+//     Metal): the landscape takes the same matrix, so its depth is the GL ndc z, 0..1 for the half of the frustum that is not clipped
+// The C++ mirror of the two blocks is D3D_Shared/LandscapeD3D.h (a static_assert on their sizes lives there).
+inline constexpr const char* kLandscapeHLSL = R"HLSL(
+cbuffer LsGlobals : register(b12)
+{
+    float4x4 viewProj;       // origin-relative world to clip, the GL-convention matrix of the scene pass (depth -1..1)
+    float4   cameraRel;      // xyz = camera, origin-relative; w = distance of the camera to the height slab
+    float4   world;          // x = world max x, y = world max z (absolute), z = tile size, w = metres of a height of 65535
+    float4   heightInfo;     // x = metres of height 0, y = tiles in x, z = tiles in z, w = slot table window
+    float4   origin;         // xyz = floating origin
+    int4     tile;           // x = height cells of a tile at level 0, y = weight texels, z = tile levels
+    int4     heightRect[8];
+    int4     coarseGrid[16];
+    float4   layerColor[12];
+    float4   sunDir;         // xyz = towards the sun
+    float4   sunColor;
+    float4   ambient;
+};
+
+cbuffer LsPatch : register(b13)
+{
+    int4   lsPatch;          // x = level, y/z = global cell of the node's corner, w = 1 coarse / 0 tiles
+    float4 patchPos;         // x/y = corner, origin-relative, z = node size, w = coarse grid index
+    float4 morph;            // x = morph start distance, y = morph end distance
+};
+
+Texture2DArray<uint>   tileHeights   : register(t32);
+Texture2D<uint>        slotTable     : register(t33);
+Texture2D<uint>        coarseHeights : register(t34);
+Texture2DArray<float4> tileW0        : register(t35);
+Texture2DArray<float4> tileW1        : register(t36);
+Texture2DArray<float4> tileW2        : register(t37);
+Texture2D<float4>      coarseW0      : register(t38);
+Texture2D<float4>      coarseW1      : register(t39);
+Texture2D<float4>      coarseW2      : register(t40);
+
+struct LsVertexOut
+{
+    float4 position : SV_Position;
+    float3 worldRel : TEXCOORD0;
+};
+
+float lsHeightOfCoarseGrid(int2 g, int grid)
+{
+    int4 gr = coarseGrid[grid];
+    int2 c = clamp(g, int2(0, 0), gr.xy - int2(1, 1));
+    uint v = coarseHeights.Load(int3(c.x, gr.z + c.y, 0)).r;
+    return heightInfo.x + float(v) * (world.w / 65535.0);
+}
+
+float lsHeightOfTile(int2 g, int level)
+{
+    int cpt = tile.x >> level;
+    int2 maxTile = int2(int(heightInfo.y), int(heightInfo.z)) - int2(1, 1);
+    int2 t = min(g / cpt, maxTile);
+    int2 l = min(g - t * cpt, int2(cpt, cpt));
+    int mask = int(heightInfo.w) - 1;
+    [loop] for (int k = 0; k < 4; ++k)
+    {
+        int2 stp = int2(k & 1, k >> 1);
+        if ((stp.x != 0 && l.x != 0) || (stp.y != 0 && l.y != 0)) continue;
+        int2 tt = t - stp;
+        if (tt.x < 0 || tt.y < 0) continue;
+        uint slot = slotTable.Load(int3(tt.x & mask, tt.y & mask, 0)).r;
+        if (slot == 65535u) continue;
+        int2 ll = l + stp * cpt;
+        int4 r = heightRect[level];
+        uint v = tileHeights.Load(int4(r.x + ll.x, r.y + ll.y, int(slot), 0)).r;
+        return heightInfo.x + float(v) * (world.w / 65535.0);
+    }
+    return lsHeightOfCoarseGrid(g >> (tile.z + 1 - level), 0);
+}
+
+float lsHeightAt(int2 g)
+{
+    return lsPatch.w == 0 ? lsHeightOfTile(g, lsPatch.x) : lsHeightOfCoarseGrid(g, int(patchPos.w));
+}
+
+LsVertexOut VSMain(uint vid : SV_VertexID)
+{
+    int2 ij = int2(int(vid % 65u), int(vid / 65u));
+    float cell = patchPos.z / 64.0;
+    float2 xz = patchPos.xy + float2(ij) * cell;
+    int2 g = lsPatch.yz + ij;
+    float h = lsHeightAt(g);
+
+    // CDLOD morph. The distance is horizontal plus the slab term, NOT the vertex's own height.
+    float2 d2 = xz - cameraRel.xz;
+    float d = sqrt(dot(d2, d2) + cameraRel.w * cameraRel.w);
+    float m = clamp((d - morph.x) / max(morph.y - morph.x, 1e-3), 0.0, 1.0);
+    bool oi = (ij.x & 1) == 1;
+    bool oj = (ij.y & 1) == 1;
+    if (m > 0.0 && (oi || oj))
+    {
+        int2 a, b;
+        if (oi && !oj)      { a = g + int2(-1, 0);  b = g + int2(1, 0); }
+        else if (!oi && oj) { a = g + int2(0, -1);  b = g + int2(0, 1); }
+        else                { a = g + int2(-1, -1); b = g + int2(1, 1); }   // on the triangulation's diagonal
+        h = lerp(h, 0.5 * (lsHeightAt(a) + lsHeightAt(b)), m);
+    }
+    LsVertexOut o;
+    o.worldRel = float3(xz.x, h - origin.y, xz.y);
+    o.position = mul(viewProj, float4(o.worldRel, 1.0));
+    return o;
+}
+
+float4 PSMain(LsVertexOut pin) : SV_Target
+{
+    // The derivatives first: nothing that follows is allowed to make them divergent.
+    float3 dx = ddx(pin.worldRel);
+    float3 dy = ddy(pin.worldRel);
+    float2 abs2 = pin.worldRel.xz + origin.xz;
+    if (abs2.x > world.x || abs2.y > world.y || abs2.x < 0.0 || abs2.y < 0.0) discard;
+
+    int2 tl = int2(floor(abs2 / world.z));
+    tl = clamp(tl, int2(0, 0), int2(int(heightInfo.y), int(heightInfo.z)) - int2(1, 1));
+    int mask = int(heightInfo.w) - 1;
+    uint slot = slotTable.Load(int3(tl.x & mask, tl.y & mask, 0)).r;
+
+    float4 w0, w1, w2;
+    if (slot == 65535u)
+    {
+        // A tile that is not in the atlas (the coarse levels, or one still streaming): the coarse world's weights, one texel per 128 m.
+        uint cw, ch;
+        coarseW0.GetDimensions(cw, ch);
+        int2 cs = int2(int(cw), int(ch));
+        int2 c = clamp(int2(floor(abs2 / world.xy * float2(cs))), int2(0, 0), cs - int2(1, 1));
+        w0 = coarseW0.Load(int3(c, 0));
+        w1 = coarseW1.Load(int3(c, 0));
+        w2 = coarseW2.Load(int3(c, 0));
+    }
+    else
+    {
+        float texel = world.z / float(tile.y);
+        int2 t = clamp(int2(floor((abs2 - float2(tl) * world.z) / texel)), int2(0, 0), int2(tile.y - 1, tile.y - 1));
+        int4 at = int4(t, int(slot), 0);
+        w0 = tileW0.Load(at);
+        w1 = tileW1.Load(at);
+        w2 = tileW2.Load(at);
+    }
+    float3 albedo = w0.x * layerColor[0].rgb + w0.y * layerColor[1].rgb + w0.z * layerColor[2].rgb + w0.w * layerColor[3].rgb
+                  + w1.x * layerColor[4].rgb + w1.y * layerColor[5].rgb + w1.z * layerColor[6].rgb + w1.w * layerColor[7].rgb
+                  + w2.x * layerColor[8].rgb + w2.y * layerColor[9].rgb + w2.z * layerColor[10].rgb + w2.w * layerColor[11].rgb;
+    float3 n = normalize(cross(dx, dy));
+    if (n.y < 0.0) n = -n;
+    float ndl = max(dot(n, normalize(sunDir.xyz)), 0.0);
+    return float4(albedo * (ambient.xyz + sunColor.xyz * ndl), 1.0);
+}
+)HLSL";
+
 } // namespace HE::glsl

@@ -348,51 +348,66 @@ int main(int argc, char** argv)
 		rc = std::max(rc, runBackend(*be, pack, outDir));
 	};
 	// Each backend in turn, and its offscreen check gone before the real renderer starts: the engine's window owns SDL (it quits it).
-	if (only.empty() || only == "gl")
-	{
-		start(gpucheck::makeGlBackend());
+	const auto engine = [&](HE::RendererBackend backend, const char* name) {
 		for (auto path : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
 		{
 			++ran;
-			rc = std::max(rc, gpucheck::runEngineCheck(HE::RendererBackend::OpenGL, path, pack,
-			                                           (outDir / (std::string("landscape_OpenGL_engine_") + (path == HE::RenderPath::Deferred ? "deferred" : "forward") + ".png")).string()));
+			rc = std::max(rc, gpucheck::runEngineCheck(backend, path, pack,
+			                                           (outDir / (std::string("landscape_") + name + "_engine_" + (path == HE::RenderPath::Deferred ? "deferred" : "forward") + ".png")).string()));
 		}
+	};
+	if (only.empty() || only == "gl")
+	{
+		start(gpucheck::makeGlBackend());
+		engine(HE::RendererBackend::OpenGL, "OpenGL");
 	}
 #ifdef HE_CHECK_METAL
 	if (only.empty() || only == "metal")
 	{
 		start(gpucheck::makeMetalBackend());
-		for (auto path : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
-		{
-			++ran;
-			rc = std::max(rc, gpucheck::runEngineCheck(HE::RendererBackend::Metal, path, pack,
-			                                           (outDir / (std::string("landscape_Metal_engine_") + (path == HE::RenderPath::Deferred ? "deferred" : "forward") + ".png")).string()));
-		}
+		engine(HE::RendererBackend::Metal, "Metal");
 	}
 #endif
-	// OpenGL against Metal on the same frames: the same shader maths in two languages must give the same picture. A plane morphs to itself, so the
+#ifdef HE_CHECK_D3D11
+	if (only.empty() || only == "d3d11")
+	{
+		start(gpucheck::makeD3D11Backend());
+		engine(HE::RendererBackend::D3D11, "D3D11");
+	}
+#endif
+#ifdef HE_CHECK_D3D12
+	if (only.empty() || only == "d3d12")
+	{
+		start(gpucheck::makeD3D12Backend());
+		engine(HE::RendererBackend::D3D12, "D3D12");
+	}
+#endif
+	// One backend against another on the same frames: the same shader maths in two languages must give the same picture. A plane morphs to itself, so the
 	// hills are the only place a wrong morph or a wrong lookup in ONE of the ports shows; a fraction above 0.1 % of the pixels (more than 2/255
 	// apart) is a difference between the ports, not rounding. (Crack-free seams and popping are not judged here: Plan section 4, on NN-WS03.)
-	for (const char* scene : { "ramp", "hills" })
-	{
-		auto& m = drawn(scene);
-		if (m.count("OpenGL") == 0 || m.count("Metal") == 0) continue;
-		const gpucheck::RenderOut& a = m["OpenGL"];
-		const gpucheck::RenderOut& b = m["Metal"];
-		if (a.rgba.size() != b.rgba.size() || a.rgba.empty()) { std::printf("[OpenGL vs Metal] %s: sizes differ\n", scene); rc = std::max(rc, 1); continue; }
-		size_t differing = 0, far = 0;
-		for (size_t i = 0; i + 3 < a.rgba.size(); i += 4)
+	// OpenGL is the reference of everything it is run beside; D3D12 is also held against D3D11, the two share one HLSL source and the pair should be near-identical.
+	const std::pair<const char*, const char*> pairs[] = { { "OpenGL", "Metal" }, { "OpenGL", "D3D11" }, { "OpenGL", "D3D12" }, { "D3D11", "D3D12" } };
+	for (const auto& [refName, otherName] : pairs)
+		for (const char* scene : { "ramp", "hills" })
 		{
-			int worst = 0;
-			for (int k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(a.rgba[i + static_cast<size_t>(k)]) - static_cast<int>(b.rgba[i + static_cast<size_t>(k)])));
-			differing += worst > 2 ? 1 : 0;
-			far += worst > 16 ? 1 : 0;
+			auto& m = drawn(scene);
+			if (m.count(refName) == 0 || m.count(otherName) == 0) continue;
+			const gpucheck::RenderOut& a = m[refName];
+			const gpucheck::RenderOut& b = m[otherName];
+			if (a.rgba.size() != b.rgba.size() || a.rgba.empty()) { std::printf("[%s vs %s] %s: sizes differ\n", refName, otherName, scene); rc = std::max(rc, 1); continue; }
+			size_t differing = 0, far = 0;
+			for (size_t i = 0; i + 3 < a.rgba.size(); i += 4)
+			{
+				int worst = 0;
+				for (int k = 0; k < 3; ++k) worst = std::max(worst, std::abs(static_cast<int>(a.rgba[i + static_cast<size_t>(k)]) - static_cast<int>(b.rgba[i + static_cast<size_t>(k)])));
+				differing += worst > 2 ? 1 : 0;
+				far += worst > 16 ? 1 : 0;
+			}
+			const size_t pixels = a.rgba.size() / 4;
+			const bool ok = differing * 1000 <= pixels;
+			std::printf("[%s vs %s] %-6s %zu of %zu pixels more than 2/255 apart (%zu more than 16/255)  %s\n", refName, otherName, scene, differing, pixels, far, ok ? "OK" : "FAILED");
+			if (!ok) rc = std::max(rc, 1);
 		}
-		const size_t pixels = a.rgba.size() / 4;
-		const bool ok = differing * 1000 <= pixels;
-		std::printf("[OpenGL vs Metal] %-6s %zu of %zu pixels more than 2/255 apart (%zu more than 16/255)  %s\n", scene, differing, pixels, far, ok ? "OK" : "FAILED");
-		if (!ok) rc = std::max(rc, 1);
-	}
 	std::filesystem::remove(pack);
 	if (ran == 0) { std::printf("no backend ran\n"); return 3; }
 	return rc;

@@ -55,4 +55,10 @@ std::unique_ptr<Backend> makeGlBackend();
 #ifdef HE_CHECK_METAL
 std::unique_ptr<Backend> makeMetalBackend();
 #endif
+#ifdef HE_CHECK_D3D11
+std::unique_ptr<Backend> makeD3D11Backend();
+#endif
+#ifdef HE_CHECK_D3D12
+std::unique_ptr<Backend> makeD3D12Backend();
+#endif
 } // namespace gpucheck
