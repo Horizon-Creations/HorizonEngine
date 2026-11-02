@@ -1177,9 +1177,19 @@ namespace
 	  "The world height of the cloud deck's base, in metres. Set it above your "
 	  "highest terrain, or the camera ends up above the weather.",
 	  "", "rendering#sky" },
+	{ "Environment/Dome Cloud Height", "",
+	  "How high the sky-dome clouds look. 1 is the classic look; higher puts the "
+	  "clouds further up, so they read smaller and drift slower against their own "
+	  "size; lower brings them close and large. 3D volumetric clouds use Cloud Altitude instead.",
+	  "", "rendering#sky" },
 	{ "Environment/Cloud Style", "",
 	  "Classic is the original flat, drifting layer. Realistic builds cauliflower "
 	  "shapes that tower and dissolve, at a higher cost.",
+	  "", "rendering#sky" },
+	{ "Environment/Cloud Type", "",
+	  "The kind of cloud the Realistic layer grows: mixed cumulus (default), flat "
+	  "cumulus, towering cumulus, stratocumulus sheets or cumulonimbus. Changes cell size "
+	  "and height; Coverage still decides how much sky they fill.",
 	  "", "rendering#sky" },
 	{ "Environment/Evolution", "",
 	  "How fast clouds change shape as they drift. 0 freezes the formation and "

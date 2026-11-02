@@ -4672,6 +4672,8 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyAuroraHeight   = glGetUniformLocation(m_skyProgram, "uAuroraHeight");
 	m_uSkyAuroraFragment = glGetUniformLocation(m_skyProgram, "uAuroraFragment");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
+	m_uSkyWindDrift   = glGetUniformLocation(m_skyProgram, "uWindDrift");
+	m_uSkyCloudDomeHeight = glGetUniformLocation(m_skyProgram, "uCloudDomeHeight");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
 	m_uSkyCloudShadowPass   = glGetUniformLocation(m_skyProgram, "uCloudShadowPass");
 	m_uSkyCloudShadowRegion = glGetUniformLocation(m_skyProgram, "uCloudShadowRegion");
@@ -4685,6 +4687,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
 	m_uSkyCloudStyle        = glGetUniformLocation(m_skyProgram, "uCloudStyle");
+	m_uSkyCloudType         = glGetUniformLocation(m_skyProgram, "uCloudType");
 	m_uSkyCloudInterShadows = glGetUniformLocation(m_skyProgram, "uCloudInterShadows");
 	m_uSkyCloudEvolution    = glGetUniformLocation(m_skyProgram, "uCloudEvolution");
 	m_uSkyCameraPos   = glGetUniformLocation(m_skyProgram, "uCameraPos");
@@ -5359,6 +5362,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	glUniform4f(m_uSkyCloudShadowRegion, origin.x, origin.y, size,
 	            static_cast<float>(kCloudShadowMapSize));
 	glUniform1i(m_uSkyCloudStyle, env.cloudStyle);
+	glUniform1i(m_uSkyCloudType, std::clamp(env.cloudType, 0, 4));
 	glUniform1f(m_uSkyCloudEvolution, env.cloudEvolution);
 	// Dome vs 3D deck picks the density field. Set it here: the value left over
 	// from the previous frame's sky draw is stale on the first frame and for one
@@ -5378,8 +5382,11 @@ void OpenGLRenderer::RenderCloudShadowMap()
 		skyClock = static_cast<float>(std::atof(ov)); // deterministic headless captures
 	glUniform1f(m_uSkyClock, skyClock);
 	{
-		const glm::vec3 wind = HE::CloudWindVector(env);
+		const glm::vec3 wind  = HE::CloudWindVector(env);
+		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2 (as in the sky pass)
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -11361,6 +11368,7 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	glUniform1i(m_uSkyCloudMode,   env.cloudMode);
 	glUniform1i(m_uSkyCloudQuality, env.cloudQuality);
 	glUniform1i(m_uSkyCloudStyle,        env.cloudStyle);
+	glUniform1i(m_uSkyCloudType,         std::clamp(env.cloudType, 0, 4));
 	glUniform1i(m_uSkyCloudInterShadows, env.cloudInterShadows ? 1 : 0);
 	glUniform1f(m_uSkyCloudEvolution,    env.cloudEvolution);
 	glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(camPos));
@@ -11404,8 +11412,11 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	{
 		// Wind control → horizontal cloud drift vector. Direction 0° drifts
 		// toward -Z (north), increasing clockwise; speed scales the rate.
-		const glm::vec3 wind = HE::CloudWindVector(env);
+		const glm::vec3 wind  = HE::CloudWindVector(env);
+		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
