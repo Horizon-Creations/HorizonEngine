@@ -254,7 +254,7 @@ TEST_CASE("GL and Metal draw a graph-material batch once, with the material's in
 	CHECK(countOf(gl, "DrawGraphBatchInstanced(dc,") == 2);
 	// No baked instanced vertex: a precompiled material must get 0 back, never its
 	// plain vertex under an instanced draw (that would stack every plant on u.model).
-	CHECK(gl.find("if (instanced && precompiled) return 0;") != std::string::npos);
+	CHECK(gl.find("if (precompiled && instanced && precompiled->vertexInstanced.empty()) return 0;") != std::string::npos);
 	// The loops stay as the fallback.
 	CHECK(countOf(gl, "drawGraphInstance(t)") >= 2);
 
@@ -262,9 +262,11 @@ TEST_CASE("GL and Metal draw a graph-material batch once, with the material's in
 	REQUIRE(!mtl.empty());
 	CHECK(countOf(mtl, "/*instanced=*/true)") == 2);
 	CHECK(countOf(mtl, "RenderSorter::graphInstancingEnabled()") == 2);
-	CHECK(mtl.find("if (instanced && precompiled) return nullptr;") != std::string::npos);
-	// The forward PSO may come from the pak (no twin); the G-buffer PSO never does.
-	CHECK(mtl.find("instCount <= k_maxInstances && !cShBaked") != std::string::npos);
+	CHECK(mtl.find("if (precompiled && instanced && precompiled->vertexInstanced.empty()) return nullptr;") != std::string::npos);
+	// PSHD v4 (Thema 228): the forward PSO's baked variant is gated on cShBaked (a pak may
+	// not have baked a twin); the G-buffer PSO this bake added always asks bakedMetalVariant.
+	CHECK(countOf(mtl, "bakedMetalVariant(m_contentManager, dc.materialAssetId)") == 2);
+	CHECK(countOf(mtl, "cShBaked ?") == 1);
 	// Both loops hand the batch to drawInstance, which binds buffer 5 and draws instanceCount.
 	CHECK(countOf(mtl, "drawInstance(dc.firstInstance(), cMaterialPipeline") == 2);
 	CHECK(countOf(mtl, "instanceCount:instCount];") == 2);
