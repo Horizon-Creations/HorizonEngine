@@ -4146,12 +4146,7 @@ void VulkanRenderer::destroyDecalPipelines()
 
 void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
 {
-    m_decalDepthFilled = false;   // set at the end, only when the pass below really recorded
     if (!m_world || m_shadowPipeline == VK_NULL_HANDLE || d.image == VK_NULL_HANDLE) return;
-
-    // The clouds-over-geometry draw samples this very image (drawCloudsOverGeometry), so a frame with
-    // 3D clouds needs it filled even without a decal.
-    const bool wantClouds = cloudsOverGeometryWanted();
 
     // Cheapest possible exit for the overwhelmingly common decal-free frame:
     // EncodeShadowMap ran two lines earlier and left a freshly extracted
@@ -4159,7 +4154,7 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     // walk the world a second time just to find out there is nothing to do. (A
     // decal appearing in a frame where the shadow map did not extract shows up
     // one frame late; that is invisible.)
-    if (m_renderWorld.decals.empty() && !wantClouds) return;
+    if (m_renderWorld.decals.empty()) return;
 
     // Now the extract for this image's aspect. Inside the frame's scope the walk is already in
     // m_renderWorld (EncodeShadowMap's), so this only redoes what depends on the aspect, and only
@@ -4167,7 +4162,7 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
     m_extractor.setContentManager(m_contentManager);
     m_extractor.extract(*m_world, m_renderWorld,
                         static_cast<float>(d.w) / static_cast<float>(d.h), &m_editorCamera);
-    if ((m_renderWorld.decals.empty() && !wantClouds) || m_renderWorld.objects.empty()) return;
+    if (m_renderWorld.decals.empty() || m_renderWorld.objects.empty()) return;
 
     refineObjectBounds();
     // The material asset overrides the component's opacity, and DrawScene
@@ -4255,7 +4250,6 @@ void VulkanRenderer::EncodeDecalDepth(VkCommandBuffer cmd, DecalDepth& d)
         vkCmdDrawIndexed(cmd, m.indexCount, 1, 0, 0, 0);
     }
     vkCmdEndRenderPass(cmd); // final layout SHADER_READ_ONLY (m_shadowPass's own dependency)
-    m_decalDepthFilled = true;
 }
 
 void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, VkImageView depthView,
@@ -10259,21 +10253,18 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         }
 
         // ── 3D clouds over the opaque geometry: the sky was drawn first, so without this the clouds
-        // are only a backdrop. Everything opaque is in the colour target now, the transparent pass
-        // is next and blends over the result. The depth it samples: GB3 on a deferred frame, else
-        // the pre-pass image (filled by EncodeDecalDepth this frame, which also runs on a decal-free
-        // frame while the clouds want it). Both are SHADER_READ_ONLY, so the open pass stays open.
+        // are only a backdrop. Everything opaque (static, skinned, the deferred resolve and its forward
+        // replay) is in the HDR colour and depth now, the transparent pass is next and blends over the
+        // result. It reads the REAL depth attachment, so the open pass is closed for the composite and
+        // reopened (LOAD on both) for the transparent draws and the debug lines.
+        if (cloudsOverGeometryWanted(hdr))
         {
-            const VkImageView cloudDepth = deferred ? m_gbView[3]
-                : (m_decalDepthFilled && m_decalDepthActive ? m_decalDepthActive->view : VK_NULL_HANDLE);
-            if (cloudDepth && cloudsOverGeometryWanted())
-            {
-                drawCloudsOverGeometry(cmd, width, height, hdr, cloudDepth);
-                // It bound the sky's pipeline layout at set 0: back to the scene's, as after the decals.
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
-                                        0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
-            }
+            encodeCloudsOverGeometry(cmd, width, height);
+            // A new pass instance, and the composite bound the sky's pipeline layout at set 0: back to
+            // the scene's, as after the decals.
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
         const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
@@ -10544,7 +10535,7 @@ void VulkanRenderer::createSkyPipeline()
 
     // ── Clouds-over-geometry sets (one per frame slot): the sky UBO of that slot (the sky draw has written
     //    this frame's SkyFrameParams into it by the time this set is used), moon + noise as in the sky
-    //    sets, and binding 3 = the opaque depth, pointed at a placeholder until drawCloudsOverGeometry
+    //    sets, and binding 3 = the opaque depth, pointed at a placeholder until encodeCloudsOverGeometry
     //    rewrites it each frame. NEAREST sampler: filtering depth would invent surfaces between silhouettes.
     {
         static_assert(k_maxFramesInFlight <= 2, "m_skyGeoSet holds two frames");
@@ -10708,11 +10699,65 @@ void VulkanRenderer::createSkyPipeline()
     // Clouds over the opaque geometry: the same GL sky text built as its HE_SKY_GEO_PASS variant (just the
     // (L, T) of the slab marched up to the opaque depth at binding 3), blended over the lit colour as
     // rgb = L + dst * T. Alpha is left alone: the viewport image's alpha is what ImGui composites with.
-    // Needs the full GL sky (the reduced sky.frag fallback has no clouds worth compositing). One
-    // pipeline per pass like the sky; the HDR one also serves m_hdrLoadRP (compatible attachments).
+    // Needs the full GL sky (the reduced sky.frag fallback has no clouds worth compositing). HDR frames
+    // only: it runs in m_cloudGeoRP (m_postFxSceneRP's attachments, depth read-only), the swapchain
+    // frame keeps the clouds a backdrop.
 #if defined(HE_HAVE_SHADERC)
-    if (m_skyFullModel)
+    if (m_skyFullModel && m_postFxSceneRP)
     {
+        // The composite reads the HDR scene's own depth attachment, which cannot be sampled inside the
+        // scene pass: DrawScene closes that pass, flips the depth to DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+        // runs the composite in m_cloudGeoRP (depth attached READ-ONLY, so it is attachment and sampled
+        // texture at once, which that layout allows) and reopens the scene in m_cloudResumeRP (LOAD on
+        // both, what m_hdrLoadRP is for the deferred path, minus the dependence on that path being
+        // built). Both are compatible with m_postFxSceneRP — same formats and samples AND the same
+        // subpass dependency, KEEP IN SYNC with it (createPostFXPipelines): only layouts and load/store
+        // ops differ, which compatibility ignores. Layouts initial == final == the subpass layout, so
+        // the render pass itself transitions nothing; DrawScene's barriers do.
+        auto makeCloudRP = [&](VkImageLayout depthLayout, VkRenderPass& out) {
+            VkAttachmentDescription atts[2]{};
+            atts[0].format         = VK_FORMAT_R16G16B16A16_SFLOAT;
+            atts[0].samples        = VK_SAMPLE_COUNT_1_BIT;
+            atts[0].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+            atts[0].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            atts[0].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[0].initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            atts[0].finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            atts[1].format         = m_depthFormat;
+            atts[1].samples        = VK_SAMPLE_COUNT_1_BIT;
+            atts[1].loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+            atts[1].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;   // never DONT_CARE: the transparent pass tests against it
+            atts[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            atts[1].initialLayout  = depthLayout;
+            atts[1].finalLayout    = depthLayout;
+            VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+            VkAttachmentReference depthRef{ 1, depthLayout };
+            VkSubpassDescription sub{};
+            sub.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            sub.colorAttachmentCount    = 1;
+            sub.pColorAttachments       = &colorRef;
+            sub.pDepthStencilAttachment = &depthRef;
+            VkSubpassDependency dep{};
+            dep.srcSubpass    = VK_SUBPASS_EXTERNAL;
+            dep.dstSubpass    = 0;
+            dep.srcStageMask  = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+            dep.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+            dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+            rpci.attachmentCount = 2;
+            rpci.pAttachments    = atts;
+            rpci.subpassCount    = 1;
+            rpci.pSubpasses      = &sub;
+            rpci.dependencyCount = 1;
+            rpci.pDependencies   = &dep;
+            if (vkCreateRenderPass(m_device, &rpci, nullptr, &out) != VK_SUCCESS)
+                out = VK_NULL_HANDLE;
+        };
+        makeCloudRP(VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, m_cloudGeoRP);
+        makeCloudRP(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, m_cloudResumeRP);
+
         VkShaderModule gfs = VK_NULL_HANDLE;
         const he::shaderc::Result gspv = he::shaderc::compile(HE::glsl::BuildSkyFragmentGLSL450(true),
                                                               he::shaderc::Stage::Fragment,
@@ -10764,9 +10809,8 @@ void VulkanRenderer::createSkyPipeline()
                     HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: clouds-over-geometry pipeline creation failed");
                 }
             };
-            makeGeoPipeline(m_renderPass, m_skyGeoPipeline);
-            if (m_postFxSceneRP)
-                makeGeoPipeline(m_postFxSceneRP, m_skyGeoPipelineHDR);
+            // Against m_postFxSceneRP: compatible with m_cloudGeoRP, where it runs.
+            makeGeoPipeline(m_postFxSceneRP, m_skyGeoPipelineHDR);
             vkDestroyShaderModule(m_device, gfs, nullptr);
         }
         else
@@ -10837,7 +10881,8 @@ void VulkanRenderer::destroySkyPipeline()
     for (VkDescriptorSet& s : m_skyGeoSet) s = VK_NULL_HANDLE;
     if (m_skyDSLayout)      { vkDestroyDescriptorSetLayout(m_device, m_skyDSLayout, nullptr); m_skyDSLayout = VK_NULL_HANDLE; }
     if (m_skyGeoPipelineHDR){ vkDestroyPipeline(m_device, m_skyGeoPipelineHDR, nullptr); m_skyGeoPipelineHDR = VK_NULL_HANDLE; }
-    if (m_skyGeoPipeline)   { vkDestroyPipeline(m_device, m_skyGeoPipeline, nullptr); m_skyGeoPipeline = VK_NULL_HANDLE; }
+    if (m_cloudResumeRP)    { vkDestroyRenderPass(m_device, m_cloudResumeRP, nullptr); m_cloudResumeRP = VK_NULL_HANDLE; }
+    if (m_cloudGeoRP)       { vkDestroyRenderPass(m_device, m_cloudGeoRP, nullptr); m_cloudGeoRP = VK_NULL_HANDLE; }
     if (m_skyGeoDepthSampler){ vkDestroySampler(m_device, m_skyGeoDepthSampler, nullptr); m_skyGeoDepthSampler = VK_NULL_HANDLE; }
     if (m_skyPipelineHDR)   { vkDestroyPipeline(m_device, m_skyPipelineHDR, nullptr); m_skyPipelineHDR = VK_NULL_HANDLE; }
     if (m_skyPipeline)      { vkDestroyPipeline(m_device, m_skyPipeline, nullptr); m_skyPipeline = VK_NULL_HANDLE; }
@@ -10917,32 +10962,61 @@ void VulkanRenderer::drawSkyFrom(VkCommandBuffer cmd, bool hdr, const glm::mat4&
     vkCmdDraw(cmd, 3, 1, 0, 0);  // full-screen triangle, no vertex buffer
 }
 
-// Whether this frame composites the 3D clouds over the opaque geometry (see m_skyGeoPipeline). Read by
-// EncodeDecalDepth too: on a forward frame the opaque depth it fills is what the pass samples.
-bool VulkanRenderer::cloudsOverGeometryWanted() const
+// Whether this frame composites the 3D clouds over the opaque geometry (see m_skyGeoPipelineHDR). HDR
+// frames only: the swapchain frame's depth is not sampleable, there the clouds stay a backdrop.
+bool VulkanRenderer::cloudsOverGeometryWanted(bool hdr) const
 {
     const auto& env = m_environment;
-    return m_skyFullModel && (m_skyGeoPipelineHDR || m_skyGeoPipeline)
+    return hdr && m_skyFullModel && m_skyGeoPipelineHDR && m_cloudGeoRP && m_cloudResumeRP
+        && m_hdrFB && m_viewportDepthImage && m_viewportDepthView
+        && m_skyGeoDepthSampler && m_skyGeoSet[m_currentFrame]
         && env.skyEnabled && env.cloudMode == 1 && env.cloudCoverage > 0.0f;
 }
 
-// Clouds over the opaque geometry: one fullscreen triangle after the opaque draws, blended over the lit
-// colour (rgb = L + dst * T). `depthView` is the opaque depth in SHADER_READ_ONLY_OPTIMAL (the decal
-// pre-pass image, or GB3); it is read with the sky's own SkyFrameParams, which drawSky already wrote
-// into this slot's UBO this frame. Pixels at depth 1 (the sky) are discarded in the shader: the sky draw
-// handled those with the whole slab. Leaves the sky set bound; the caller restores the scene's.
-void VulkanRenderer::drawCloudsOverGeometry(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr,
-                                            VkImageView depthView)
+// Clouds over the opaque geometry, between the opaque draws and the transparent pass of an HDR frame:
+// closes the open scene pass, flips the HDR depth to DEPTH_STENCIL_READ_ONLY_OPTIMAL, draws one
+// fullscreen triangle in m_cloudGeoRP (colour LOAD, depth attached read-only AND sampled at binding 3),
+// blended over the lit colour as rgb = L + dst * T, flips the depth back and reopens the scene pass in
+// m_cloudResumeRP (LOAD on both) for the caller's transparent draws, debug lines and the pass End in
+// Render(). The SkyFrameParams are the sky draw's own, already in this slot's UBO this frame. Pixels at
+// depth 1 (the sky) are discarded in the shader: the sky draw handled those with the whole slab. The
+// caller restores the scene pipeline and set 0 afterwards.
+void VulkanRenderer::encodeCloudsOverGeometry(VkCommandBuffer cmd, uint32_t width, uint32_t height)
 {
-    if (!depthView || !m_skyPipelineLayout || !cloudsOverGeometryWanted()) return;
-    const VkPipeline pipe = hdr && m_skyGeoPipelineHDR ? m_skyGeoPipelineHDR : m_skyGeoPipeline;
-    VkDescriptorSet  set  = m_skyGeoSet[m_currentFrame];
-    if (!pipe || !set || !m_skyGeoDepthSampler) return;
     GpuPassScope _geoTimer(this, "CloudsGeo");
+    const VkPipelineStageFlags depthStages = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                                           | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 
-    // This slot's fence was waited on in Render(), so the set is free to rewrite.
-    VkDescriptorImageInfo depthII{ m_skyGeoDepthSampler, depthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-    VkWriteDescriptorSet  w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    // The scene pass: m_postFxSceneRP on a forward frame, m_hdrLoadRP on a deferred one. Both end with
+    // colour in COLOR_ATTACHMENT_OPTIMAL and depth in DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
+    vkCmdEndRenderPass(cmd);
+
+    // Opaque writes -> the composite: the depth as a sampled texture and read-only attachment (the layout
+    // flip), the colour for its LOAD and blend.
+    {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        b.newLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image               = m_viewportDepthImage;
+        b.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        b.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | depthStages,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | depthStages | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 1, &mb, 0, nullptr, 1, &b);
+    }
+
+    // This slot's fence was waited on in Render(), so the set is free to rewrite. NEAREST sampler: the
+    // depth is read with texelFetch anyway, and filtering it would invent surfaces between silhouettes.
+    VkDescriptorImageInfo depthII{ m_skyGeoDepthSampler, m_viewportDepthView,
+                                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL };
+    VkDescriptorSet set = m_skyGeoSet[m_currentFrame];
+    VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     w.dstSet          = set;
     w.dstBinding      = 3;
     w.descriptorCount = 1;
@@ -10950,15 +11024,49 @@ void VulkanRenderer::drawCloudsOverGeometry(VkCommandBuffer cmd, uint32_t width,
     w.pImageInfo      = &depthII;
     vkUpdateDescriptorSets(m_device, 1, &w, 0, nullptr);
 
-    // Dynamic state: the same full target the sky was drawn into (an earlier draw may have moved it).
     VkViewport vp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
     VkRect2D   sc{ { 0, 0 }, { width, height } };
+
+    VkRenderPassBeginInfo gbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    gbi.renderPass        = m_cloudGeoRP;
+    gbi.framebuffer       = m_hdrFB;    // hdrView + the viewport depth, compatible with m_postFxSceneRP
+    gbi.renderArea.extent = { width, height };
+    vkCmdBeginRenderPass(cmd, &gbi, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyGeoPipelineHDR);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skyPipelineLayout, 0, 1, &set, 0, nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0);  // full-screen triangle, no vertex buffer
     ++m_statDraws;
+    vkCmdEndRenderPass(cmd);
+
+    // Back to what the rest of the frame expects: depth an attachment again (the transparent pass tests
+    // against it, the TAA velocity pass loads it), the composite's colour visible to the next LOAD.
+    {
+        VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        b.oldLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        b.newLayout           = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image               = m_viewportDepthImage;
+        b.subresourceRange    = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        b.srcAccessMask       = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        b.dstAccessMask       = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | depthStages,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | depthStages,
+            0, 1, &mb, 0, nullptr, 1, &b);
+    }
+
+    VkRenderPassBeginInfo rbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rbi.renderPass        = m_cloudResumeRP;
+    rbi.framebuffer       = m_hdrFB;
+    rbi.renderArea.extent = { width, height };
+    vkCmdBeginRenderPass(cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdSetViewport(cmd, 0, 1, &vp);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
 }
 
 // The cube's image, face views, framebuffers and sampler, created on the first frame the reflections run (it costs

@@ -2885,8 +2885,9 @@ struct D3D12RendererImpl
 
 #if defined(HE_HAVE_SHADERC)
     // The clouds-over-geometry variant of the same sky (BuildSkyFragmentGLSL450(true)),
-    // once per process. Built lazily by EnsureSkyGeoPipeline, so a project that never
-    // turns the 3D clouds on pays for neither the cross-compile nor the FXC run.
+    // once per process. The prefetch at the top of Initialize and EnsureSkyGeoPipeline (run
+    // right after createSkyPipeline) need the same text, so the FXC run happens during the
+    // start and not on the first frame that has 3D clouds on.
     // Same pinned registers as the sky plus the opaque depth at t2.
     static const he::shaderc::Result& skyGeoCrossHlsl()
     {
@@ -2930,6 +2931,14 @@ struct D3D12RendererImpl
         const UINT flags = startupCompileFlags() | D3DCOMPILE_PREFER_FLOW_CONTROL;
         HE::d3dprefetch::submit(hlsl.source, "main", "main", "ps_5_0", flags);
         HE::d3dprefetch::submit(HE::glsl::kSkyVSCrossHLSL, "VSSkyCross", "VSSkyCross", "vs_5_0", flags);
+        // The clouds-over-geometry pixel shader (EnsureSkyGeoPipeline), queued behind the sky so
+        // the workers are already busy while the geo variant is cross-compiled on this thread.
+        // Its flags are the sky's (PREFER_FLOW_CONTROL + the debug flags), and its vertex shader
+        // is the sky's, which the request above already covers (the join hands a slot out
+        // again, so both pipelines read the same finished VS).
+        const he::shaderc::Result& geo = skyGeoCrossHlsl();
+        if (geo.ok)
+            HE::d3dprefetch::submit(geo.source, "main", "main", "ps_5_0", flags);
 #endif
     }
 
@@ -4100,7 +4109,8 @@ struct D3D12RendererImpl
     // t2) and lays (L, T) over the lit scene: rgb = L + dst * T.
     // Own root signature (the sky's, with the table at t1..t2) and an own two-slot-per-frame
     // SRV heap, because the depth SRV has to be rewritten for whichever depth the frame
-    // draws into. Built lazily and remembered on failure, like the decal pipeline.
+    // draws into. Built at the start, right after the sky pipeline (the FXC runs are prefetched
+    // with the sky's), and a failure is remembered, like the decal pipeline's.
     ComPtr<ID3D12RootSignature>  skyGeoRootSig;
     ComPtr<ID3D12PipelineState>  skyGeoHdrPso;     // RGBA16F target
     ComPtr<ID3D12PipelineState>  skyGeoLdrPso;     // RGBA8 target (optional)
@@ -5775,6 +5785,12 @@ struct D3D12RendererImpl
         // Each sub-step timed on its own ([startup] D3D12 phase=…, Thema 196).
         using HE::d3dtiming::Phase;
         { Phase t("D3D12", "createSkyPipeline");       createSkyPipeline(); }
+        // The clouds-over-geometry pipeline right behind it (it needs skyReady/skyFullModel, which
+        // createSkyPipeline just settled): its FXC runs were prefetched with the sky's, so this
+        // is root signature + PSO creation, and the first frame with 3D clouds on pays nothing.
+        // Not gated on cloudMode — it is switched on later, in the editor. A miss (no shaderc,
+        // reduced fallback sky) builds nothing; EncodeSkyClouds then simply never draws.
+        { Phase t("D3D12", "createSkyGeoPipeline");    EnsureSkyGeoPipeline(); }
         { Phase t("D3D12", "createDebugLinePipeline"); createDebugLinePipeline(); }
         { Phase t("D3D12", "createSSAOPipeline");      createSSAOPipeline(); }
         { Phase t("D3D12", "createSkinnedPipeline");   createSkinnedPipeline(); }
@@ -10862,8 +10878,10 @@ void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::m
 // terrain is never covered by the clouds in front of it and cannot be seen through the
 // deck from above. This marches the same slab, but only up to each opaque surface (the
 // geo variant of the GL sky, HE_SKY_GEO_PASS: depth at t2, sky pixels discarded) and
-// blends (L, T) over the lit HDR colour. Built lazily, like the decal pipeline, and a
-// failure is remembered so the frame loop does not retry a cross-compile per frame.
+// blends (L, T) over the lit HDR colour. Built at the start (createPipeline, after the sky),
+// not on the first cloud frame: the cross-compile and the FXC run are prefetched with the
+// sky's (prefetchSkyShaders), so this is the root signature and the PSOs only. The frame loop
+// still calls it as a guard, and a failure is remembered so it never retries per frame.
 bool D3D12RendererImpl::EnsureSkyGeoPipeline()
 {
 #if !defined(HE_HAVE_SHADERC)
