@@ -68,12 +68,12 @@ nicht sichtbar; **Half-Float-UV nicht** bei gekachelten UVs, dort unorm16 nur f�
 Wenn überhaupt, dann so: Voreinstellung bleibt die heutige Qualität; ein Export-Voreinsatz "Kompakt" (oder je Textur ein Häkchen) schaltet sie ein; und die Spieler bekommen zur Laufzeit eine
 Grafikoption "Texturqualität", die beim Laden die oberste Mip überspringt (spart RAM und VRAM, **nicht** Platz auf der Platte, der Export bleibt voll).
 
-## 4. Reihenfolge, die ich vorschlage
+## 4. Reihenfolge, die ich vorschlage (Stand nach der Umsetzung siehe 4a)
 
-1. **CPU-Pixel freigeben (A3):** der größte Gewinn ohne Qualitätsverlust (bis rund 200 MB RAM bei diesem Projekt).
-2. **`libphonon` weglassen (A4)** und **GL-Vorwärmen (B1)**: je S, risikoarm, sofort messbar.
-3. **Audiogerät und Sky-Noise nach hinten (B3, B4)**, dann **GL-Programmbau aus dem ersten Frame (B2)**.
-4. meshopt (A5); Skelett-Meshes kochen (A6); Duplikate (A11).
+1. **CPU-Pixel freigeben (A3):** erledigt für Metal und OpenGL, offen für D3D11/D3D12/Vulkan.
+2. **`libphonon` weglassen (A4)**, **GL-Vorwärmen (B1)**, **Audiogerät und Sky-Noise (B3, B4)**: erledigt.
+3. Offen, noch nicht gemessen: Duplikate (A11), Zstd-Schutz gegen unkomprimierbare Einträge (C), Skelett-Meshes (A6, braucht ein Beispielprojekt).
+4. Verworfen nach Messung: meshopt-Reorder, uint16-Indizes, Vertex-Quantisierung und Remap (A5, A7, A8, siehe 4a).
 5. Nur auf ausdrücklichen Wunsch: die Qualitätsstufen aus Abschnitt 3 (A1, A2, A10).
 
 Ehrlich dazu: Auf der Platte ist bei diesem Projekt ohne Qualitätsverlust kaum noch etwas zu holen. 93 % sind 2k-ASTC-Texturen, und ASTC lässt sich mit zstd nur um 3 bis 12 % verkleinern.
@@ -86,6 +86,32 @@ Die verlustfreien Gewinne liegen im RAM (A3), im Laufzeitpaket (A4) und in der S
 | A3 CPU-Pixelkopie nach dem Upload freigeben (`ContentManager::releaseCpuPixels` / `restoreCpuPixels`, Metal an allen Upload-Stellen, das Spiel schaltet es ein, `HE_KEEP_CPU_PIXELS=1` schaltet es ab) | 99fb6682 | Foliage-Export, Metal, 300 Frames: größter RSS **843 → 694 MB (−149 MB)**, Spitze des Footprints **1171 → 1013 MB (−159 MB)**; Bild unverändert (die Läufe mit Behalten sind untereinander nicht bitgleich, wegen asynchroner Pipelines; die drei Läufe mit Freigabe sind es, und ihr Bild ist byte-gleich zu einem der Behalten-Bilder). Frei nur: block-komprimiert, aus einem Pak, kein Array ohne gebackene Mittelwerte. **OpenGL (BC3-Export, macOS GL 4.1, 4 Läufe)**: RSS **1116 → 946 MB (−170 MB)**, Footprint **1476 → 1306 MB (−170 MB)**, alle vier Bilder byte-gleich (md5), 0 Fehler; die Texturen sind im Bild zu sehen. Gleicher Helfer an allen 6 Upload-Stellen in `OpenGLRenderer.cpp` (`uploadGlTextureReleasing`). Nicht umgesetzt: D3D11/12, Vulkan (behalten die Kopie wie bisher) |
 | A4 `libphonon` nur mitliefern, wenn die Audio-Busse Steam Audio wählen | d91bc526 | Test im Exporter (Teilfälle aus/an); spart 22 MB im Paket. Das Backend wird nur über `AudioBusConfig::spatialBackend` gewählt (kein Skript-API), und genau das packt der Export |
 | B1 GL: Render-Pfad schon am Ende von `OnInit` setzen, damit das Vorwärmen die G-Buffer-Programme mitbaut | (dieser Commit) | Vorwärmen baut jetzt 4 statt 2 Programme; erstes Bild OpenGL **rund 450 → 433 ms** (3 Läufe je Seite, ohne den kalten ersten Lauf), also nahe am Rauschen. Die Schätzung von 55 ms war zu hoch: das Vorwärmen läuft weiter auf dem Hauptthread vor dem ersten Bild, die Kompilierzeit wandert nur dorthin. Ein echter Gewinn bräuchte B2 (Programmbau parallel oder in der Splash-Phase) |
+
+### Start (nach "mach beides", gleiche Messung: je 4 Läufe, Foliage, hidden window)
+
+| Punkt | Commit | Messung |
+|---|---|---|
+| B3 Audiogerät in einem Hintergrund-Thread öffnen, schon im `GameApplication`-Konstruktor (`m_audioInit`, `OnInit` sammelt das Ergebnis) | 6b773917 | `OnInit` **57 → 4 ms**; erstes Bild Metal **374 → 327 ms**, OpenGL **508 → 464 ms**; Audio meldet sich weiter, 0 Fehler |
+| B4 Sky-Noise (256³, **61 ms** auf dem Job-Pool, gemessen, vorher nirgends geloggt) parallel zum SDL-Start backen (`PrewarmSkyNoise3D` im Konstruktor, `BuildSkyNoise3D` übernimmt das fertige Volumen, dieselben Bytes: `test_culling` pinnt sie, 78/78) | 3e1e63f8 | Renderer-Phase Metal **110 → 43 ms**, OpenGL **135 → 71 ms**; erstes Bild Metal rund 327 → **299 ms**, OpenGL rund 464 → **450 ms** (der Bake läuft jetzt im Hintergrund 65 bis 78 ms, weil er sich mit dem SDL-Start die Kerne teilt). Metal bäckt im Debug jetzt 64³ wie die anderen Backends |
+| B2 GL-Programmbau aus dem ersten Frame | nicht gebaut | auf macOS-GL gibt es einen Kontext; ein Worker-Kontext für parallelen Build ist dort nicht sicher belegt, und der Gewinn läge nur bei den rund 120 ms der G-Buffer-Programme |
+
+### Gemessen und verworfen: Mesh-Formate (Punkte A5, A7, A8 der Liste oben)
+
+Die 63 Foliage-Meshes sind roh 12,2 MB, **nach zstd Stufe 19 (dem Export-Codec, je Eintrag) nur 6,3 MB**, also rund 3 % des Paks. Ich habe die Varianten an den echten Daten durchgerechnet
+(Wegwerf-Skript `meshstat.py`, komprimiert mit der zstd-CLI):
+
+| Variante | MVBO + INDX komprimiert |
+|---|---|
+| heute | 6,306 MB |
+| uint16-Indizes (Vertexzahl ≤ 65535) | 6,369 MB (**schlechter**) |
+| Vertices nach erster Verwendung ordnen (Dreiecksreihenfolge bleibt) | 6,265 MB (−0,04 MB, 0,6 %) |
+| beides | 6,352 MB |
+
+Die rohen Gewinne verschwinden in der Kompression. Deshalb sind uint16-Indizes auf der Platte, Vertex-Quantisierung (derselbe Mechanismus: zstd findet die Redundanz selbst) und der Vertex-Remap **nicht umgesetzt**.
+Der Dreiecks-Reorder für den Vertex-Cache (meshoptimizer) ist außerdem nicht bildgleich garantiert: Bei tiefengleichen, sich überlappenden Dreiecken (Z-Fighting) und bei Transparenz hängt das Bild von der Zeichenreihenfolge ab,
+und auf einer Apple-GPU (Tile-Renderer) ist der Gewinn ungemessen. Die GPU-Seite (uint16 im VRAM, 2 MB je 63 Meshes) wäre gegen 700 MB RAM vernachlässigbar.
+**Skelett-Meshes** (Bone-Daten packen, A6) bleiben offen: Auf dieser Maschine gibt es keine einzige Skelett-Mesh-Datei, ich kann den komprimierten Gewinn nicht messen, und nach dem Ergebnis oben ist er unsicher.
+Das Ziel für den Aufwand wäre ein Projekt mit Figuren; dort lässt sich dieselbe Messung in einer Viertelstunde wiederholen.
 
 ## 5. Nicht geprüft
 
