@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <Types/Defines.h>
+#include <Types/UUID.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  .hpak  —  Horizon Engine packed asset archive (binary format), version 3
@@ -231,6 +232,10 @@ struct PackSettings {
     // side. Both are part of the pack fingerprint.
     bool     bakeMeshTextures = false;
     uint32_t bakeMaxAtlas     = 4096;
+    // Meshes the bake leaves alone: the ones some entity draws with a material of its own
+    // (HE::collectMeshesWithMaterialOverrides). An override material would read its texture
+    // through the atlas UVs. Part of the pack fingerprint.
+    std::vector<HE::UUID> bakeSkipMeshes;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,

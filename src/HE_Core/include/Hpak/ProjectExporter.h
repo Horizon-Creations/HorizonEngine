@@ -215,6 +215,9 @@ struct HE_API ExportSettings {
     // (Hpak::PackSettings::bakeMeshTextures). Which meshes, and in which form, is each mesh's
     // own choice (the Export bake switches in the Mesh Viewer). Needs the reachability filter.
     bool bakeMeshTextures = true;
+    // Meshes the bake must leave alone because an entity overrides their materials (the editor
+    // collects them from the scenes it exports). See Hpak::PackSettings::bakeSkipMeshes.
+    std::vector<HE::UUID> bakeSkipMeshes;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a

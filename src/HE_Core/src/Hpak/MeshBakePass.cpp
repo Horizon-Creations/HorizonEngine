@@ -283,6 +283,13 @@ PassResult runPass(const std::vector<PassEntry>& entries, const PassOptions& opt
 		const StaticMeshAsset mesh = *loaded;          // the next loadAsset invalidates `loaded`
 		if (!mesh.bake.mergeTextures && !mesh.bake.uvTexture && !mesh.bake.vertexColors)
 		{ ++result.skippedSwitchedOff; continue; }
+		// An override material reads ITS texture through the mesh UVs, which the bake moves.
+		if (std::find(options.skipMeshes.begin(), options.skipMeshes.end(), mesh.id) != options.skipMeshes.end())
+		{
+			++result.skippedOverridden;
+			note("left as it is: an entity draws it with a material of its own");
+			continue;
+		}
 		const std::vector<MeshSection> sections = HE::meshSectionsOf(mesh);
 		if (sections.size() < 2 || mesh.uvs.size() != mesh.vertices.size() / 3 * 2)
 		{ ++result.skippedOneSection; continue; }
@@ -460,6 +467,7 @@ PassResult runPass(const std::vector<PassEntry>& entries, const PassOptions& opt
 		+ std::to_string(result.baked) + " baked, " + std::to_string(result.declined) + " declined, "
 		+ std::to_string(result.skippedOneSection) + " with one material slot, "
 		+ std::to_string(result.skippedSwitchedOff) + " switched off, "
+		+ std::to_string(result.skippedOverridden) + " with a material override, "
 		+ std::to_string(result.skippedCooked) + " already cooked");
 	return result;
 }

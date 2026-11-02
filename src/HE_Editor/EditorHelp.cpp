@@ -8157,9 +8157,12 @@ namespace
 	  "texture binds, and the source materials and textures leave the pak. Each mesh "
 	  "decides in the Mesh Viewer (Export bake) whether and how: Merge textures "
 	  "copies the texels unchanged, One UV texture resamples and resolves tiling "
-	  "and may make the atlas larger. A mesh with entity-level material slot "
-	  "overrides loses them, because its slots are merged. Needs Pack only "
-	  "referenced assets. Saved in the profile.",
+	  "and may make the atlas larger. A mesh that an entity in an exported scene "
+	  "draws with a material of its own (a Material component override, whole mesh "
+	  "or one slot) is left as it is, because the override would read its texture "
+	  "through the atlas UVs. Overrides a script sets at run time, and meshes "
+	  "inside prefab assets, are not seen: switch Export bake off in the Mesh "
+	  "Viewer for those meshes. Needs Pack only referenced assets. Saved in the profile.",
 	  "", "export#overview" },
 	{ "Export/Match the game's backend", "Match the game's backend",
 	  "Bake the precompiled material shaders for the one graphics backend the "

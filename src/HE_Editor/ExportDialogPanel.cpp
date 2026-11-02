@@ -19,6 +19,7 @@
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonCode/HcCompiledLoader.h>  // compiledLibraryName
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ParticleGraph/ParticleGraph.h>
@@ -1425,6 +1426,10 @@ void startExport(AppContext& ctx)
                                       + " placed prefab(s) point at an asset that is gone; "
                                       "shipped as they were last saved");
                 };
+                // Meshes some entity draws with a material of its own: the texture bake
+                // leaves them alone (an override material would read its texture through
+                // the atlas UVs). Collected from every scene the export serializes.
+                std::vector<HE::UUID> overriddenMeshes;
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;
                 if (!scenePath.empty())
@@ -1434,6 +1439,7 @@ void startExport(AppContext& ctx)
                     if (ser.load(sceneWorld, scenePath, SerializeFormat::JSON))
                     {
                         syncPrefabsForExport(sceneWorld, sceneName);
+                        HE::collectMeshesWithMaterialOverrides(sceneWorld, overriddenMeshes);
                         ser.saveToMemory(sceneWorld, sceneBinary);
                     }
                     else
@@ -1466,6 +1472,7 @@ void startExport(AppContext& ctx)
                                 sit->path().lexically_relative(projectRoot).generic_string();
                             const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
                             if (loaded) syncPrefabsForExport(w2, rel);
+                            if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
                             if (loaded && ser2.saveToMemory(w2, bytes))
                             {
                                 // Level script → codegen source, keyed by the scene's
@@ -1698,6 +1705,7 @@ void startExport(AppContext& ctx)
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
                 es.onlyReferenced   = s_exportOnlyReferenced;
                 es.bakeMeshTextures = s_exportBakeMeshTextures;
+                es.bakeSkipMeshes   = overriddenMeshes;
                 es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
                 es.onNotice = [](const std::string& msg) { Build::log(0, msg); };
                 es.incremental      = s_exportIncremental;

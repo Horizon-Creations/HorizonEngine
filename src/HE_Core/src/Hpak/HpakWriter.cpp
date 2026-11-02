@@ -1280,6 +1280,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         }
         HE::MeshBake::PassOptions po;
         po.maxAtlas = settings.bakeMaxAtlas;
+        po.skipMeshes = settings.bakeSkipMeshes;
         HE::MeshBake::PassResult baked = HE::MeshBake::runPass(entries, po);
         entries.clear();
         for (HE::MeshBake::ReplacedMesh& rm : baked.replaced)

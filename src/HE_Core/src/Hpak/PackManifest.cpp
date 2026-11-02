@@ -110,7 +110,7 @@ namespace HE
 {
 uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
 {
-    uint8_t buf[8 + 32 + 1 + 5];
+    uint8_t buf[8 + 32 + 1 + 5 + 8];
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
@@ -127,6 +127,10 @@ uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
     // The mesh texture bake: on/off + the atlas size cap (a change re-packs every mesh it touches).
     buf[8 + 32 + 1] = s.bakeMeshTextures ? 1 : 0;
     std::memcpy(buf + 8 + 32 + 2, &s.bakeMaxAtlas, 3); // low 3 bytes: caps stay far below 16M
+    // The meshes left out of the bake: an order-independent sum, so the same set hashes the same.
+    uint64_t skipSum = 0;
+    for (const HE::UUID& id : s.bakeSkipMeshes) skipSum += id.hi * 0x9E3779B97F4A7C15ull ^ id.lo;
+    std::memcpy(buf + 8 + 32 + 5, &skipSum, 8);
     return Hpak::hash64(buf, sizeof(buf));
 }
 
