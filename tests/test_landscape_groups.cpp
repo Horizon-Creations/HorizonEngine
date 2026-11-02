@@ -190,8 +190,22 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 
 		// Every debug view builds and compiles in a group too.
 		for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet,
-		                                 HE::AutoLandscapeView::Normal, HE::AutoLandscapeView::Surface })
+		                                 HE::AutoLandscapeView::Normal, HE::AutoLandscapeView::Surface,
+		                                 HE::AutoLandscapeView::BaseColor })
 			CHECK_FALSE(HE::generateFragment(HE::buildAutoLandscapeGraph(v, id).graph, HE::weatherFunctionLoader()).glsl.empty());
+
+		// The BaseColor view is what the far-landscape bake photographs: unlit, albedo on the BaseColor pin.
+		{
+			const HE::AutoLandscapeGraph bc = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::BaseColor, id);
+			const HE::MatGraphNode* out = bc.graph.findNode(bc.output);
+			REQUIRE(out != nullptr);
+			CHECK(out->p[0] == 0.0f);
+			bool connected = false;
+			for (const HE::MatGraphLink& l : bc.graph.links)
+				if (l.dstNode == bc.output && l.dstPin == HE::kMatOutputBaseColorPin)
+					connected = true;
+			CHECK(connected);
+		}
 	}
 }
 

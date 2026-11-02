@@ -7779,6 +7779,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		const bool builtin = mode == "builtin";
 		const bool normalV = mode == "normal";
 		const bool surface = mode == "surface";
+		const bool baseCol = mode == "basecolor";   // unlit albedo: what the far-landscape bake photographs
 		// HE_DUMP_AUTOLANDGROUP=Forest|Grassland|Desert (Thema 233): the texture group the witness shows
 		// (default Mountains = the shipped material). Its arrays are its own, so a group without them
 		// in the cache or EngineContent draws the white fallback, like Mountains does without its own.
@@ -7821,11 +7822,12 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			contentManager().regenerateMaterialFromGraph(amId);
 			what = "plain lit graph material";
 		}
-		else if (masks || ground || normalV || surface)
+		else if (masks || ground || normalV || surface || baseCol)
 		{
 			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(
 				masks   ? HE::AutoLandscapeView::MasksRockSnowWater :
 				ground  ? HE::AutoLandscapeView::MasksDirtWet :
+				baseCol ? HE::AutoLandscapeView::BaseColor :
 				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface, group->id);
 			for (HE::MatGraphNode& n : built.graph.nodes)
 				if (n.type == HE::MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamSnowHeight)
@@ -7837,7 +7839,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			amId = contentManager().registerMaterial(std::move(am));
 			contentManager().regenerateMaterialFromGraph(amId);
 			what = masks ? "masks rock/snow/water" : ground ? "masks dirt/wet/flat"
-			     : normalV ? "final normal" : "AO/roughness";
+			     : baseCol ? "unlit albedo" : normalV ? "final normal" : "AO/roughness";
 		}
 		else
 		{
@@ -10617,6 +10619,10 @@ void EditorApplication::dumpFrameHeadless()
 				 + std::to_string(i)).c_str());
 		}
 		r->Render();
+		// HE_DUMP_SETTLEMS: a pause after each settle frame, so material pipelines that build in the
+		// background (a freshly registered graph material) are ready for the captured frame.
+		if (const char* sm = std::getenv("HE_DUMP_SETTLEMS"); sm && *sm)
+			std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(std::atoi(sm), 0, 5000)));
 	}
 
 	std::vector<uint8_t> rgba;
