@@ -481,6 +481,11 @@ void CellStreamer::update(HorizonWorld& world, const std::vector<Anchor>& anchor
 		desc.name     = "CellLoad";
 		// The square the camera stands in is needed now, the rest is ahead of it.
 		desc.priority = d <= 0.0 ? JobPriority::High : JobPriority::Normal;
+		// Nearest first across frames, not only within this batch: a cell that comes
+		// into reach later (the camera turned, a faster anchor) is nearer than ones
+		// queued earlier and must not wait behind them. Millimetres, capped so the
+		// key fits whatever the radius is.
+		desc.order    = static_cast<uint32_t>(std::clamp(d, 0.0, 4.0e6) * 1000.0);
 		desc.cancel   = p->token;
 		globalPool().schedule([p, read = std::move(read), sliceEntities = m_sliceEntities]
 		{
