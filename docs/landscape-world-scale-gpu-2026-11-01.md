@@ -81,7 +81,8 @@ Die Ebenen 0-3 der zwölf Gewichtskanäle (Grass, Dirt, Rock, Snow der Gruppe) l
 | Renderer | löst den Pfad wie ein Material-Array auf (`ResolveGraphTexture(.., array = true)`); fehlt das Array (nicht geladen, nicht heruntergeladen), kommt das weiße Array zurück und die Ebene bleibt **flach**, bis es da ist |
 | Shader | `uTex = (1/Meter, Array da, fract(origin.xz / Meter))`: der Anteil des Ursprungs wird in double auf der CPU gebildet (ein Float bei 100 km wäre 8 mm grob und flimmert), der Shader rechnet `vWorldRel.xz * uTex.x + uTex.zw`. Der Zweig ist auf einer Uniform, die Ableitungen von `texture()` bleiben definiert |
 
-Nur Albedo. **Nicht** gebaut: Normal und Maske (Rauheit, AO, Höhe), Höhenblend zwischen Ebenen, Anti-Kachel-Muster (Texture-Bombing), anisotrope Filterung (GL und Metal haben dieselbe lineare Probe, damit sie übereinstimmen), die Kanal-zu-Rolle-Zuordnung über Ebene 3 hinaus, Path und Water.
+**Normal und Maske (derselbe Tag):** das Normal-Array der Gruppe stört die Flächennormale der Ebenen 0-3 (Tangentialraum wie OpenGL: Rot = +u = +x, Grün = +v = +z; die Ebenen ohne Textur tragen eine flache Normale bei), das Masken-Array liefert **AO** (Rot) und dämpft den Umgebungsanteil. Die Pfade stehen in `LandscapeRenderStatic::normalArrayPath` / `maskArrayPath`, die Uniforms heißen `uTexMaps`, `uNormalArray`, `uMaskArray` (Metal: `LsGlobals.texMaps`, Texturen 28 und 29); fehlt eines, fällt nur dieses weg. GL braucht damit 32 kombinierte Einheiten. Geprüft: ein Normal-Array, das zur Sonne (+x, +z) neigt, hellt den Boden um rund 24 Stufen auf, eines, das abneigt, dunkelt es um rund 66 Stufen ab, flach ändert nichts (GL und Metal, gleiches Vorzeichen); AO 0,5 dunkelt (123,5 auf 113,6). Mit dem echten Forest-Array in beiden echten Renderern kommt mehr Kontrast auf den Boden.
+**Nicht** gebaut: Rauheit und Höhe aus der Maske, Höhenblend zwischen Ebenen, Anti-Kachel-Muster (Texture-Bombing), anisotrope Filterung (GL und Metal haben dieselbe lineare Probe, damit sie übereinstimmen), die Kanal-zu-Rolle-Zuordnung über Ebene 3 hinaus, Path und Water.
 
 Geprüft (Mac, `landscape_gpu_check`): Szene 3 (Rampe, 100 % Ebene 0, Slice 0 = rot | gelb): alle 83 153 Bodenpixel weichen von der flachen Farbe ab, rot und gelb zu je etwa der Hälfte; dasselbe Bild mit anderem Floating Origin: 12 Pixel mehr als 16/255 daneben (absichtlich falscher Ursprungsanteil: 9 941 Pixel, der Test schlägt an); OpenGL gegen Metal 55 von 129 600 Pixeln mehr als 2/255. Mit `--arrays <EngineContent-Wurzel>` zeichnen beide echten Renderer den Boden aus dem **echten Forest-Array** (nicht mehr flaches Grün, Textur sichtbar).
 
@@ -94,6 +95,26 @@ Foliage und Wasser brauchen keinen Backend-Code: `HE::LandscapeWorldProxies` (Ho
 * `LandscapeProxyComponent` markiert sie; `isTerrainGenerated` kennt sie (nie gespeichert, nie im Outliner, nie gepickt, nie repliziert). Aufruf: `sync()` einmal je Frame nach `LandscapeRuntime::update` (Spiel: `updateLandscape`, Editor: im Landschaftsblock). Der Ursprung wandert, ohne dass etwas neu gebaut wird.
 * **Nicht dabei:** tessellierte Wasserfläche (es gibt das einfache Wasser), Wellen für Auftrieb und die Unterwasserkamera (die lesen ein `water::Field` eines `TerrainComponent`; `waterSurfaceAt` der Laufzeit antwortet), Wasser außerhalb der Region, Dichtemasken der Foliage.
 * Test: `test_landscape_world_proxies.cpp` (echte Kacheln, echte Streuung, echte Wasserregion). **Nicht geschaut:** wie es gerendert aussieht; es ist als Entities und Daten geprüft, nicht als Bild.
+
+## 5c. Messungen (02.11.2026, MacBook Air M5, am Netzteil)
+
+`landscape_gpu_check --measure`: eine Kamera fliegt mit 40 m/s über eine 12 km große prozedurale Welt (24 x 24 Kacheln, Standard-Atlas 836 Plätze), 2560 x 1440 offscreen, 600 Bilder, wie ein 60-fps-Spiel getaktet; 407 Kacheln resident, 189 Patches je Bild (höchstens 192), 0,03 Kachel-Uploads je Bild. Der Boden ist flach schattiert (kein Texturlesen).
+
+| Was | Metal p50 / p95 / max | OpenGL p50 / p95 / max |
+|---|---|---|
+| Laufzeit `updateAt` (CPU) | 0,030 / 0,065 / 0,206 ms | 0,059 / 0,103 / 0,487 ms |
+| Frame bauen (CPU) | 0,025 / 0,046 / 2,385 ms | 0,048 / 0,095 / 2,955 ms |
+| Draws aufzeichnen (CPU) | 0,031 / 0,059 / 0,946 ms | **0,985 / 1,948 / 2,185 ms** |
+| **Landschaft CPU gesamt** | **0,088 / 0,165 / 3,369 ms** | **1,097 / 2,133 / 5,092 ms** |
+| Landschafts-Pass GPU | **4,87 / 8,01 / 9,38 ms** (GPU-Zeit des Command Buffers) | 6,99 / 10,20 / 10,95 ms (Wanduhr bis `glFinish`, Obergrenze; Apple-GL hat keine Zeitabfragen) |
+
+Foliage und Wasser (CPU, 8 x 8 Kacheln mit See, zwei Pflanzenebenen, 20 m/s, 600 Bilder; 24 Foliage-Entities, 1 Wasser-Entity, 37 742 Pflanzen gehalten): `updateAt` mit Foliage und Wasser 0,036 / 0,058 / 0,131 ms, `LandscapeWorldProxies::sync` 0,021 / 0,035 / 0,111 ms.
+
+**Lesart gegen Plan §4 (CPU < 0,5 ms, GPU < 1,5 ms auf der 4070 bei 1440p):**
+* **CPU:** Metal ist weit darunter, **OpenGL liegt mit 1,1 ms über dem Ziel**: ein `glUniform`-Satz und ein Draw je Patch (rund 200 Draws). Das ist der Preis der Patch-Uniforms; ein Weg darunter wäre ein Uniform-Puffer je Frame mit Instanzdaten oder Multi-Draw. Nicht gebaut.
+* **GPU:** 4,9 ms auf dem Integrierten der M5 bei 1440p ist **nicht vergleichbar** mit der Abnahme auf der 4070 und kein Urteil darüber. Der Pass schreibt ein 1440p-HDR-Ziel samt Tiefe und liest je Pixel zwölf Gewichte; wie viel davon Bandbreite ist, wurde nicht getrennt. Die Abnahme bleibt NN-WS03.
+* Die Maxima (3 ms) sind Bilder mit Atlas-Uploads.
+* **Nicht gemessen:** GPU-Speicher im Betrieb, Textur-Pfad (Albedo, Normal, Mask) in der Zeit, Last durch Foliage und Wasser auf der GPU, TAA, Windows.
 
 ## 6. Das Prüfwerkzeug `landscape_gpu_check`
 

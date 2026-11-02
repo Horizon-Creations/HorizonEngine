@@ -373,6 +373,49 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 		}
 		std::printf("  %-26s %zu pixels more than 16/255 apart from the same view with the origin moved\n", "world uv, origin moved", differing);
 		tally.check(differing * 500 <= textured.rgba.size() / 4, "the texture stays put when the floating origin moves");
+		// Normal and mask arrays of the group: a normal leaning towards the sun lights the ground more, away from it less; a mask with AO 0.5 darkens the ambient part.
+		const auto solid = [](uint8_t r, uint8_t g, uint8_t b) {
+			gpucheck::TexArray t;
+			t.size = 4;
+			t.layers = 4;
+			t.rgba.resize(4u * 4u * 4u * 4u);
+			for (size_t i = 0; i < t.rgba.size(); i += 4) { t.rgba[i] = r; t.rgba[i + 1] = g; t.rgba[i + 2] = b; t.rgba[i + 3] = 255; }
+			return t;
+		};
+		const auto meanLum = [&](const gpucheck::RenderOut& o) {
+			double sum = 0.0;
+			size_t n = 0;
+			for (size_t i = 0; i < flat.depth.size(); ++i)
+			{
+				if (flat.depth[i] >= 1.0f) continue;
+				sum += 0.3 * o.rgba[i * 4] + 0.59 * o.rgba[i * 4 + 1] + 0.11 * o.rgba[i * 4 + 2];
+				++n;
+			}
+			return n ? sum / static_cast<double>(n) : 0.0;
+		};
+		// the sun is at (+0.45, +0.8, +0.55): +x and +z lean towards it. Tangent space is OpenGL's: red = +u = +x, green = +v = +z.
+		const gpucheck::TexArray nFlat = solid(128, 128, 255), nPlusZ = solid(128, 204, 230), nMinusZ = solid(128, 51, 230), nPlusX = solid(204, 128, 230), nMinusX = solid(51, 128, 230);
+		const gpucheck::TexArray ao1 = solid(255, 128, 128), ao05 = solid(128, 128, 128);
+		const auto lum = [&](const gpucheck::TexArray* normal, const gpucheck::TexArray* mask, double& out) {
+			gpucheck::RenderIn in = makeInput(c, be.depthIsNdc(), rt);
+			in.albedo = &tex;
+			in.normal = normal;
+			in.mask = mask;
+			gpucheck::RenderOut o;
+			if (!be.render(in, o)) return false;
+			out = meanLum(o);
+			return true;
+		};
+		double lFlat = 0, lPz = 0, lMz = 0, lPx = 0, lMx = 0, lNoAo = 0, lAo = 0, lNone = 0;
+		if (!lum(nullptr, nullptr, lNone) || !lum(&nFlat, nullptr, lFlat) || !lum(&nPlusZ, nullptr, lPz) || !lum(&nMinusZ, nullptr, lMz) || !lum(&nPlusX, nullptr, lPx) ||
+		    !lum(&nMinusX, nullptr, lMx) || !lum(nullptr, &ao1, lNoAo) || !lum(nullptr, &ao05, lAo))
+		{ std::printf("  render failed (world uv maps)\n"); return 1; }
+		std::printf("  %-26s mean luminance: no maps %.2f, flat normal %.2f, +z %.2f, -z %.2f, +x %.2f, -x %.2f; AO 1 %.2f, AO 0.5 %.2f\n", "world uv, normal + mask", lNone, lFlat, lPz, lMz, lPx, lMx, lNoAo, lAo);
+		tally.check(std::abs(lFlat - lNone) < 1.0, "a flat normal array changes nothing");
+		tally.check(lPz > lFlat + 3.0 && lMz < lFlat - 3.0, "a normal leaning to +z / -z lights the ground more / less (sun at +z)");
+		tally.check(lPx > lFlat + 3.0 && lMx < lFlat - 3.0, "a normal leaning to +x / -x lights the ground more / less (sun at +x)");
+		tally.check(std::abs(lNoAo - lNone) < 1.0, "an AO of 1 changes nothing");
+		tally.check(lAo < lNone - 1.0, "an AO of 0.5 darkens the ambient light");
 		writePng((outDir / (std::string("landscape_") + be.name() + "_worlduv.png")).string(), textured);
 		drawn("worlduv")[be.name()] = textured;
 	}

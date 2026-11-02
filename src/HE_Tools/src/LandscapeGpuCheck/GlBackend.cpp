@@ -68,21 +68,25 @@ public:
 		sh.sunDir = in.sunDir;
 		sh.sunColor = in.sunColor;
 		sh.ambient = in.ambient;
-		GLuint array = 0;
-		if (in.albedo && in.albedo->size > 0 && in.albedo->layers > 0)
-		{
-			glGenTextures(1, &array);
-			glBindTexture(GL_TEXTURE_2D_ARRAY, array);
-			glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, in.albedo->size, in.albedo->size, in.albedo->layers, 0, GL_RGBA, GL_UNSIGNED_BYTE, in.albedo->rgba.data());
+		const auto upload = [](const TexArray* t) -> GLuint {
+			if (!t || t->size <= 0 || t->layers <= 0) return 0;
+			GLuint id = 0;
+			glGenTextures(1, &id);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, id);
+			glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, t->size, t->size, t->layers, 0, GL_RGBA, GL_UNSIGNED_BYTE, t->rgba.data());
 			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
 			glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
-			sh.albedoArray = array;
-		}
+			return id;
+		};
+		const GLuint array = upload(in.albedo), narray = upload(in.normal), marray = upload(in.mask);
+		sh.albedoArray = array;
+		sh.normalArray = narray;
+		sh.maskArray = marray;
 		m_landscape.draw(frame, in.viewProj, sh);
 		const auto t2 = std::chrono::steady_clock::now();
-		if (array) glDeleteTextures(1, &array);
+		for (GLuint id : { array, narray, marray }) if (id) glDeleteTextures(1, &id);
 		glFinish();
 		const auto t3 = std::chrono::steady_clock::now();
 		const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };

@@ -65,11 +65,11 @@ TEST_CASE("landscape shader source: the uniforms are the ones the frame contract
 		CHECK_MESSAGE(vs.count(u) == 1, "vertex shader lacks " << u);
 	for (const char* u : { "uWorld", "uHeightInfo", "uOrigin", "uTile", "uLayerColor", "uSunDir", "uSunColor", "uAmbient", "uSlotTable",
 	                       "uTileWeights0", "uTileWeights1", "uTileWeights2", "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2",
-	                       "uTex", "uAlbedoArray" })
+	                       "uTex", "uTexMaps", "uAlbedoArray", "uNormalArray", "uMaskArray" })
 		CHECK_MESSAGE(fs.count(u) == 1, "fragment shader lacks " << u);
 	// nothing else sneaks in unannounced: a new uniform needs the frame contract, the doc and this list
 	CHECK(vs.size() == 14);
-	CHECK(fs.size() == 17);
+	CHECK(fs.size() == 20);
 }
 
 TEST_CASE("landscape shader source: the morph distance is horizontal plus the slab term, never the vertex's own height")
@@ -95,7 +95,7 @@ TEST_CASE("landscape shader source: the MSL port has every GLSL uniform as a mem
 	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
 	// the images are textures in MSL, not struct members
 	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
-	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray" };
+	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray", "uNormalArray", "uMaskArray" };
 	int members = 0;
 	for (const std::string& u : uniforms)
 	{
@@ -106,13 +106,13 @@ TEST_CASE("landscape shader source: the MSL port has every GLSL uniform as a mem
 		CHECK((msl.find(" " + m + ";") != std::string::npos || msl.find(" " + m + "[") != std::string::npos));
 		++members;
 	}
-	CHECK(members == 16);                                   // the vertex stage's 11 plus the fragment stage's 5 (layer colours, sun colour and direction, ambient, tex)
-	// entry points (MetalLandscape.mm looks them up by name) and the indices it binds: buffers 20 and 21, vertex textures 20-22, fragment 20-27
+	CHECK(members == 17);                                   // the vertex stage's 11 plus the fragment stage's 5 (layer colours, sun colour and direction, ambient, tex)
+	// entry points (MetalLandscape.mm looks them up by name) and the indices it binds: buffers 20 and 21, vertex textures 20-22, fragment 20-29
 	CHECK(msl.find("vertex LsVertexOut vertexMain") != std::string::npos);
 	CHECK(msl.find("fragment float4 fragmentMain") != std::string::npos);
 	for (const char* b : { "[[buffer(20)]]", "[[buffer(21)]]" }) CHECK(msl.find(b) != std::string::npos);
-	for (int t = 20; t <= 27; ++t) CHECK(msl.find("[[texture(" + std::to_string(t) + ")]]") != std::string::npos);
-	CHECK(msl.find("[[texture(28)]]") == std::string::npos);
+	for (int t = 20; t <= 29; ++t) CHECK(msl.find("[[texture(" + std::to_string(t) + ")]]") != std::string::npos);
+	CHECK(msl.find("[[texture(30)]]") == std::string::npos);
 	CHECK(msl.find("[[texture(19)]]") == std::string::npos);   // nothing below 20: MetalRenderer owns those
 	// the same distance for the morph as the GLSL: horizontal plus the slab term, never the vertex's own height
 	const size_t at = msl.find("float d = sqrt(");

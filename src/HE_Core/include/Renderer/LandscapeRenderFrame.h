@@ -52,6 +52,8 @@ struct LandscapeRenderStatic
 	// World-UV ground (the material with world coordinates): layers 0-3 are the first four slices of this albedo texture array (asset path,
 	// resolved by the backend like a material's texture array), repeated every `textureMeters` in absolute world metres. Empty = flat colours.
 	std::string albedoArrayPath;
+	std::string normalArrayPath;                         // the same group's normal and mask arrays (empty = not used): normals and AO of layers 0-3
+	std::string maskArrayPath;
 	float    textureMeters = 8.0f;
 
 	// The one grid every patch is drawn with: (cells + 1)^2 vertices (i, j), triangles as indices, and the index ranges of the quadrants.

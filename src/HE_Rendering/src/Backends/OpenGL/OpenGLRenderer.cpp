@@ -11301,6 +11301,13 @@ void OpenGLRenderer::DrawLandscape(const glm::mat4& viewProj)
 		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
 		const unsigned int tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
 		sh.albedoArray = (tex != 0 && tex != m_whiteArrayTex) ? tex : 0;
+		const auto optional = [&](const std::string& path) -> unsigned int {
+			if (path.empty()) return 0u;
+			const unsigned int t = ResolveGraphTexture(HE::UUID{}, path, /*array=*/true);
+			return (t != 0 && t != m_whiteArrayTex) ? t : 0u;
+		};
+		sh.normalArray = optional(frame.world->normalArrayPath);
+		sh.maskArray = optional(frame.world->maskArrayPath);
 	}
 	m_landscape.draw(frame, viewProj, sh);
 }

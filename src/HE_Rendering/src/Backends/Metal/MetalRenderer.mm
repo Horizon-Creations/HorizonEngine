@@ -14437,6 +14437,13 @@ void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewPr
 		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
 		void* tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
 		sh.albedoArray = (tex && tex != m_whiteArrayTexture) ? tex : nullptr;
+		const auto optional = [&](const std::string& path) -> void* {
+			if (path.empty()) return nullptr;
+			void* t = ResolveGraphTexture(HE::UUID{}, path, /*array=*/true);
+			return (t && t != m_whiteArrayTexture) ? t : nullptr;
+		};
+		sh.normalArray = optional(frame.world->normalArrayPath);
+		sh.maskArray = optional(frame.world->maskArrayPath);
 	}
 	m_landscape.encode(renderEncoder, frame, viewProj, sh);
 }

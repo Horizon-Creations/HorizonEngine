@@ -29,6 +29,8 @@ struct RenderIn
 	glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
 	glm::vec4 clear{ 0.5f, 0.7f, 1.0f, 1.0f };
 	bool      timing = false;             // fill RenderOut::providerMs / encodeMs / gpuMs (and skip the read-back)
+	const TexArray* normal = nullptr;     // the group's normal and mask arrays, the same way (RGBA8, 4 slices)
+	const TexArray* mask = nullptr;
 	const TexArray* albedo = nullptr;     // given: the frame's world-UV ground uses it (when the frame names an array); null: flat colours
 	HE::LandscapeProvider provider;
 };

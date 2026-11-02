@@ -28,6 +28,7 @@ public:
 		glm::vec3 sunDir{ 0.45f, 0.80f, 0.55f };   // towards the sun
 		glm::vec3 sunColor{ 1.0f, 0.95f, 0.85f };
 		glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
+		unsigned int normalArray = 0, maskArray = 0;   // the same group's normal and mask arrays (0 = not used)
 		unsigned int albedoArray = 0;   // GL texture array of the world-UV ground (LandscapeRenderStatic::albedoArrayPath, resolved by the renderer); 0 = flat colours
 	};
 	struct Stats

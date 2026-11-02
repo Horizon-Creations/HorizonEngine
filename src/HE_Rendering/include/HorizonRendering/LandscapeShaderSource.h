@@ -127,6 +127,7 @@ uniform vec4  uLayerColor[12];       // flat colour of each of the twelve layers
 uniform vec3  uSunDir;               // towards the sun
 uniform vec3  uSunColor;
 uniform vec3  uAmbient;
+uniform vec4  uTexMaps;              // x = 1 when uNormalArray is the group's normal array, y = 1 when uMaskArray is its mask array
 uniform vec4  uTex;                  // x = 1 / metres of one texture tile, y = 1 when uAlbedoArray is the group's albedo array, zw = fract(origin.xz * x)
 uniform usampler2D      uSlotTable;
 uniform sampler2DArray  uTileWeights0;   // RGBA8, layers 0-3 of every tile's twelve
@@ -136,6 +137,8 @@ uniform sampler2D       uCoarseWeights0; // RGBA8, the finest weight grid of the
 uniform sampler2D       uCoarseWeights1;
 uniform sampler2D       uCoarseWeights2;
 uniform sampler2DArray  uAlbedoArray;    // the texture group's albedo array: slices 0-3 are layers 0-3, repeated in world coordinates
+uniform sampler2DArray  uNormalArray;    // its normal array (tangent space, OpenGL convention: green = +V = +z in the world) and
+uniform sampler2DArray  uMaskArray;      // its mask array (R = AO, G = roughness, B = height; only AO is used yet), the same slices and coordinates
 
 void main()
 {
@@ -182,8 +185,28 @@ void main()
                 + w2.x * uLayerColor[8].rgb + w2.y * uLayerColor[9].rgb + w2.z * uLayerColor[10].rgb + w2.w * uLayerColor[11].rgb;
     vec3 n = normalize(cross(dFdx(vWorldRel), dFdy(vWorldRel)));
     if (n.y < 0.0) n = -n;
+    // Normal and AO of layers 0-3 from their maps, in the same world coordinates; the other layers contribute a flat normal and no occlusion.
+    float ao = 1.0;
+    if (uTex.y > 0.5)
+    {
+        vec2 uv = vWorldRel.xz * uTex.x + uTex.zw;
+        float wsum = w0.x + w0.y + w0.z + w0.w;
+        if (uTexMaps.x > 0.5)
+        {
+            vec3 nm = vec3(0.0, 0.0, 1.0) * (1.0 - wsum)
+                    + w0.x * (texture(uNormalArray, vec3(uv, 0.0)).xyz * 2.0 - 1.0) + w0.y * (texture(uNormalArray, vec3(uv, 1.0)).xyz * 2.0 - 1.0)
+                    + w0.z * (texture(uNormalArray, vec3(uv, 2.0)).xyz * 2.0 - 1.0) + w0.w * (texture(uNormalArray, vec3(uv, 3.0)).xyz * 2.0 - 1.0);
+            nm = normalize(nm);
+            vec3 t = normalize(vec3(1.0, 0.0, 0.0) - n * n.x);   // +u is +x, +v is +z
+            vec3 b = cross(t, n);
+            n = normalize(t * nm.x + b * nm.y + n * nm.z);
+        }
+        if (uTexMaps.y > 0.5)
+            ao = (1.0 - wsum) + w0.x * texture(uMaskArray, vec3(uv, 0.0)).r + w0.y * texture(uMaskArray, vec3(uv, 1.0)).r
+               + w0.z * texture(uMaskArray, vec3(uv, 2.0)).r + w0.w * texture(uMaskArray, vec3(uv, 3.0)).r;
+    }
     float ndl = max(dot(n, normalize(uSunDir)), 0.0);
-    fragColor = vec4(albedo * (uAmbient + uSunColor * ndl), 1.0);
+    fragColor = vec4(albedo * (uAmbient * ao + uSunColor * ndl), 1.0);
 }
 )GLSL";
 
@@ -215,6 +238,7 @@ struct LsGlobals
     float4   sunDir;         // xyz = towards the sun
     float4   sunColor;
     float4   ambient;
+    float4   texMaps;        // x = 1 when the normal array is bound, y = 1 when the mask array is
     float4   tex;            // x = 1 / metres of one texture tile, y = 1 when the albedo array is bound, zw = fract(origin.xz * x)
 };
 
@@ -311,7 +335,9 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
                              texture2d<float, access::read> c0t [[texture(24)]],
                              texture2d<float, access::read> c1t [[texture(25)]],
                              texture2d<float, access::read> c2t [[texture(26)]],
-                             texture2d_array<float> albedoArr [[texture(27)]])
+                             texture2d_array<float> albedoArr [[texture(27)]],
+                             texture2d_array<float> normalArr [[texture(28)]],
+                             texture2d_array<float> maskArr [[texture(29)]])
 {
     float2 abs2 = in.worldRel.xz + G.origin.xz;
     if (abs2.x > G.world.x || abs2.y > G.world.y || abs2.x < 0.0 || abs2.y < 0.0) discard_fragment();
@@ -355,8 +381,29 @@ fragment float4 fragmentMain(LsVertexOut in [[stage_in]],
                   + w2.x * G.layerColor[8].rgb + w2.y * G.layerColor[9].rgb + w2.z * G.layerColor[10].rgb + w2.w * G.layerColor[11].rgb;
     float3 n = normalize(cross(dfdx(in.worldRel), dfdy(in.worldRel)));
     if (n.y < 0.0) n = -n;
+    // Normal and AO of layers 0-3 from their maps (see the GLSL).
+    float ao = 1.0;
+    if (G.tex.y > 0.5)
+    {
+        constexpr sampler smp(coord::normalized, address::repeat, filter::linear, mip_filter::linear);
+        float2 uv = in.worldRel.xz * G.tex.x + G.tex.zw;
+        float wsum = w0.x + w0.y + w0.z + w0.w;
+        if (G.texMaps.x > 0.5)
+        {
+            float3 nm = float3(0.0, 0.0, 1.0) * (1.0 - wsum)
+                      + w0.x * (normalArr.sample(smp, uv, 0).xyz * 2.0 - 1.0) + w0.y * (normalArr.sample(smp, uv, 1).xyz * 2.0 - 1.0)
+                      + w0.z * (normalArr.sample(smp, uv, 2).xyz * 2.0 - 1.0) + w0.w * (normalArr.sample(smp, uv, 3).xyz * 2.0 - 1.0);
+            nm = normalize(nm);
+            float3 t = normalize(float3(1.0, 0.0, 0.0) - n * n.x);
+            float3 b = cross(t, n);
+            n = normalize(t * nm.x + b * nm.y + n * nm.z);
+        }
+        if (G.texMaps.y > 0.5)
+            ao = (1.0 - wsum) + w0.x * maskArr.sample(smp, uv, 0).r + w0.y * maskArr.sample(smp, uv, 1).r
+               + w0.z * maskArr.sample(smp, uv, 2).r + w0.w * maskArr.sample(smp, uv, 3).r;
+    }
     float ndl = max(dot(n, normalize(G.sunDir.xyz)), 0.0);
-    return float4(albedo * (G.ambient.xyz + G.sunColor.xyz * ndl), 1.0);
+    return float4(albedo * (G.ambient.xyz * ao + G.sunColor.xyz * ndl), 1.0);
 }
 )MSL";
 

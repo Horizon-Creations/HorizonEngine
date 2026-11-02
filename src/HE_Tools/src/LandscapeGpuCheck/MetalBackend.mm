@@ -76,25 +76,28 @@ public:
 			sh.sunDir = in.sunDir;
 			sh.sunColor = in.sunColor;
 			sh.ambient = in.ambient;
-			id<MTLTexture> array = nil;
-			if (in.albedo && in.albedo->size > 0 && in.albedo->layers > 0)
-			{
+			const auto upload = [&](const TexArray* t) -> id<MTLTexture> {
+				if (!t || t->size <= 0 || t->layers <= 0) return nil;
 				MTLTextureDescriptor* ad = [[MTLTextureDescriptor alloc] init];
 				ad.textureType = MTLTextureType2DArray;
 				ad.pixelFormat = MTLPixelFormatRGBA8Unorm;
-				ad.width = static_cast<NSUInteger>(in.albedo->size);
-				ad.height = static_cast<NSUInteger>(in.albedo->size);
-				ad.arrayLength = static_cast<NSUInteger>(in.albedo->layers);
+				ad.width = static_cast<NSUInteger>(t->size);
+				ad.height = static_cast<NSUInteger>(t->size);
+				ad.arrayLength = static_cast<NSUInteger>(t->layers);
 				ad.usage = MTLTextureUsageShaderRead;
 				ad.storageMode = storage;
-				array = [m_device newTextureWithDescriptor:ad];
-				const NSUInteger row = static_cast<NSUInteger>(in.albedo->size) * 4, slice = row * static_cast<NSUInteger>(in.albedo->size);
-				for (int l = 0; l < in.albedo->layers; ++l)
-					[array replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(in.albedo->size), static_cast<NSUInteger>(in.albedo->size))
-					         mipmapLevel:0 slice:static_cast<NSUInteger>(l) withBytes:in.albedo->rgba.data() + static_cast<size_t>(l) * slice
-					         bytesPerRow:row bytesPerImage:slice];
-				sh.albedoArray = (__bridge void*)array;
-			}
+				id<MTLTexture> tex = [m_device newTextureWithDescriptor:ad];
+				const NSUInteger row = static_cast<NSUInteger>(t->size) * 4, slice = row * static_cast<NSUInteger>(t->size);
+				for (int l = 0; l < t->layers; ++l)
+					[tex replaceRegion:MTLRegionMake2D(0, 0, static_cast<NSUInteger>(t->size), static_cast<NSUInteger>(t->size))
+					       mipmapLevel:0 slice:static_cast<NSUInteger>(l) withBytes:t->rgba.data() + static_cast<size_t>(l) * slice
+					       bytesPerRow:row bytesPerImage:slice];
+				return tex;
+			};
+			id<MTLTexture> array = upload(in.albedo), narray = upload(in.normal), marray = upload(in.mask);
+			sh.albedoArray = array ? (__bridge void*)array : nullptr;
+			sh.normalArray = narray ? (__bridge void*)narray : nullptr;
+			sh.maskArray = marray ? (__bridge void*)marray : nullptr;
 			m_landscape.encode((__bridge void*)enc, frame, in.viewProj, sh);
 			[enc endEncoding];
 			if (storage == MTLStorageModeManaged)

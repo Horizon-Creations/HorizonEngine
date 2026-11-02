@@ -28,6 +28,7 @@ struct alignas(16) Globals
 	float   sunDir[4];
 	float   sunColor[4];
 	float   ambient[4];
+	float   texMaps[4];
 	float   tex[4];
 };
 struct alignas(16) PatchData
@@ -36,11 +37,11 @@ struct alignas(16) PatchData
 	float   patchPos[4];
 	float   morph[4];
 };
-static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 4 * 16, "LsGlobals: the MSL struct and this one have to be the same size");
+static_assert(sizeof(Globals) == 64 + 4 * 16 + 16 + 8 * 16 + 16 * 16 + 12 * 16 + 5 * 16, "LsGlobals: the MSL struct and this one have to be the same size");
 static_assert(sizeof(PatchData) == 48, "LsPatch: the MSL struct and this one have to be the same size");
 
 constexpr NSUInteger kBuf = 20, kPatchBuf = 21;      // constant buffers (vertex: 20, 21; fragment: 20)
-constexpr NSUInteger kTex = 20;                       // first texture index (vertex: 20-22; fragment: 20-27, 27 = the albedo array)
+constexpr NSUInteger kTex = 20;                       // first texture index (vertex: 20-22; fragment: 20-29, 27-29 = the albedo, normal and mask arrays)
 } // namespace
 
 struct MetalLandscape::Impl
@@ -218,6 +219,8 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 		// World UVs: a texture tile every `textureMeters` of absolute x/z; the origin's share is a fraction made here in double (see OpenGLLandscape).
 		const bool tex = shading.albedoArray != nullptr && !w.albedoArrayPath.empty() && w.textureMeters > 0.0f;
 		const double k = tex ? 1.0 / static_cast<double>(w.textureMeters) : 1.0;
+		g.texMaps[0] = tex && shading.normalArray && !w.normalArrayPath.empty() ? 1.0f : 0.0f;
+		g.texMaps[1] = tex && shading.maskArray && !w.maskArrayPath.empty() ? 1.0f : 0.0f;
 		g.tex[0] = static_cast<float>(k); g.tex[1] = tex ? 1.0f : 0.0f;
 		g.tex[2] = static_cast<float>(f.origin.x * k - std::floor(f.origin.x * k)); g.tex[3] = static_cast<float>(f.origin.z * k - std::floor(f.origin.z * k));
 
@@ -236,6 +239,8 @@ void MetalLandscape::encode(void* renderEncoder, const LandscapeRenderFrame& f, 
 			[enc setFragmentTexture:m.coarseWeights[p] atIndex:kTex + 4 + static_cast<NSUInteger>(p)];
 		}
 		[enc setFragmentTexture:tex ? (__bridge id<MTLTexture>)shading.albedoArray : m.noArray atIndex:kTex + 7];
+		[enc setFragmentTexture:g.texMaps[0] > 0.5f ? (__bridge id<MTLTexture>)shading.normalArray : m.noArray atIndex:kTex + 8];
+		[enc setFragmentTexture:g.texMaps[1] > 0.5f ? (__bridge id<MTLTexture>)shading.maskArray : m.noArray atIndex:kTex + 9];
 
 		const uint32_t total = w.quadrantFirst[3] + w.quadrantCount[3];
 		for (const LandscapeRenderPatch& p : f.patches)

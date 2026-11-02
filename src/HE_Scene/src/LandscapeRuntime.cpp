@@ -400,7 +400,10 @@ void LandscapeRuntime::buildRenderFrame(const glm::dmat4& viewProjRelative, cons
 			for (int c = 0; c < 4; ++c) w->layerColor[i][c] = m_config.layerColors[static_cast<size_t>(i)][c];
 		if (m_config.textureGroup >= 0 && m_config.textureGroup < kAutoLandscapeGroupCount)
 		{
-			w->albedoArrayPath = autoLandscapeGroup(static_cast<AutoLandscapeGroupId>(m_config.textureGroup)).arrayPaths[0];
+			const AutoLandscapeGroup& grp = autoLandscapeGroup(static_cast<AutoLandscapeGroupId>(m_config.textureGroup));
+			w->albedoArrayPath = grp.arrayPaths[0];
+			w->normalArrayPath = grp.arrayPaths[1];
+			w->maskArrayPath = grp.arrayPaths[2];
 			w->textureMeters = m_config.textureMeters > 0.0f ? m_config.textureMeters : 8.0f;
 		}
 		const LandscapePatchMesh mesh = LandscapePatchMesh::build(64);
