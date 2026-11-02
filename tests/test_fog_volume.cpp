@@ -13,6 +13,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
 #include <material/MaterialShaderLibrary.h>
+#include <Backends/Vulkan/VulkanMaterialLayout.h> // the fog passes' descriptor tables (Thema 225 step 5)
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -23,6 +24,8 @@
 
 #if defined(HE_TESTS_HAVE_SHADERC)
 #include "ShaderCompiler.h"
+#include <spirv_cross.hpp>   // Vulkan reflection (the same linkage as test_material_graph.cpp)
+#include <vector>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -400,10 +403,10 @@ TEST_CASE("Fog kernels: Inject/Integrate (compute) and Apply (fragment) cross-co
     CHECK(apply.source.find("fragment") != std::string::npos);
     CHECK(apply.source.find("[[texture(2)]]") != std::string::npos); // scene depth
 
-    // The other backends keep the analytic fog until their steps: a clear "not yet".
+    // D3D (step 6) and GL 4.3 keep the analytic fog for now: a clear "not yet".
     CHECK_FALSE(lib.fogInject(B::HLSL).ok);
     CHECK_FALSE(lib.fogApply(B::GLSL430).ok);
-    CHECK_FALSE(lib.fogIntegrate(B::SpirV).ok);
+    CHECK_FALSE(lib.fogIntegrate(B::HLSL).ok);
 }
 
 // ═══ Step 4: the GL fragment-path kernels (one fullscreen quad per Z slice,
@@ -447,10 +450,9 @@ TEST_CASE("Fog kernels (GL fragment path): Inject/Integrate/Apply cross-compile 
     CHECK(apply.source.find("void main") != std::string::npos);
     CHECK(apply.source.find("heFogIntegrated") != std::string::npos);
 
-    // Vulkan/D3D stay off until steps 5-6: a clear "not yet", same shape as
-    // the Metal test above.
+    // D3D stays off until step 6: a clear "not yet", same shape as the Metal test above.
     CHECK_FALSE(lib.fogInject(B::HLSL).ok);
-    CHECK_FALSE(lib.fogIntegrate(B::SpirV).ok);
+    CHECK_FALSE(lib.fogIntegrate(B::HLSL).ok);
     CHECK_FALSE(lib.fogApply(B::GLSL430).ok);
 }
 
@@ -479,14 +481,14 @@ TEST_CASE("heApplyFogT: texture 17 on Metal, heFogVolume by name on GL, analytic
     CHECK(gl.source.find("heFogVolume") != std::string::npos);
     CHECK(gl.source.find("sampler3D") != std::string::npos);
 
-    // Mode 0 must not change what Vulkan/D3D/the clustered GL variant compile:
-    // no binding 34 anywhere until steps 5-6 bind it there too.
-    for (B b : { B::GLSL430, B::SpirV, B::HLSL })
+    // Mode 0 must not change what D3D / the clustered GL variant compile:
+    // no binding 34 there until step 6 binds it too. (Vulkan joined in step 5: see the
+    // "Fog kernels (Vulkan)" case below, which pins binding 34 in the SPIR-V.)
+    for (B b : { B::GLSL430, B::HLSL })
     {
         const auto& other = lib.fragment(0xF06F07ull, frag, b);
         INFO("backend ", static_cast<int>(b), ": ", other.log);
         REQUIRE(other.ok);
-        if (b == B::SpirV) continue; // binary
         CHECK(other.source.find("heFogVolume") == std::string::npos);
     }
 
@@ -499,5 +501,174 @@ TEST_CASE("heApplyFogT: texture 17 on Metal, heFogVolume by name on GL, analytic
     const auto& op = lib.fragment(0xF06F08ull, opaque, B::Metal);
     REQUIRE(op.ok);
     CHECK(op.source.find("[[texture(17)]]") == std::string::npos);
+}
+
+// ═══ Step 5: Vulkan. GLSL 450 -> SPIR-V as it stands (compute for Inject/Integrate), the
+// descriptors each module uses held against the tables the renderer builds its layouts from
+// (the one Vulkan check CI's device-less jobs have; the lavapipe image test is the other) ══════
+namespace
+{
+struct FogUse
+{
+    uint32_t binding = 0;
+    int      kind    = 0; // HE::vkmat::FogDesc
+    bool operator<(const FogUse& o) const { return binding != o.binding ? binding < o.binding : kind < o.kind; }
+    bool operator==(const FogUse& o) const { return binding == o.binding && kind == o.kind; }
+};
+
+// The STATICALLY used descriptors of a module (set must be 0), as the renderer's table kinds.
+std::vector<FogUse> activeFogDescriptors(const std::vector<uint32_t>& spirv, std::string& err)
+{
+    std::vector<FogUse> out;
+    try
+    {
+        spirv_cross::Compiler comp(spirv);
+        const spirv_cross::ShaderResources r = comp.get_shader_resources(comp.get_active_interface_variables());
+        using K = HE::vkmat::FogDesc;
+        auto add = [&](const spirv_cross::SmallVector<spirv_cross::Resource>& list, K kind) {
+            for (const spirv_cross::Resource& res : list)
+            {
+                if (comp.get_decoration(res.id, spv::DecorationDescriptorSet) != 0) err += " set!=0";
+                out.push_back({ comp.get_decoration(res.id, spv::DecorationBinding), static_cast<int>(kind) });
+            }
+        };
+        add(r.uniform_buffers,  K::Ubo);
+        add(r.sampled_images,   K::Cis);
+        add(r.separate_images,  K::SampledImage);
+        add(r.storage_images,   K::StorageImage);
+        if (!r.storage_buffers.empty() || !r.separate_samplers.empty() || !r.push_constant_buffers.empty())
+            err += " unexpected resource kind";
+    }
+    catch (const std::exception& e) { err = e.what(); }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// What `uses` needs that `table` (for `stage`) does not provide, as "binding:kind" text.
+std::string uncoveredFog(const std::vector<FogUse>& uses, const HE::vkmat::FogBinding* table, uint32_t n, uint32_t stage)
+{
+    std::string miss;
+    for (const FogUse& u : uses)
+    {
+        bool ok = false;
+        for (uint32_t i = 0; i < n && !ok; ++i)
+            ok = table[i].binding == u.binding && static_cast<int>(table[i].kind) == u.kind && (table[i].stages & stage);
+        if (!ok) miss += " " + std::to_string(u.binding) + ":" + std::to_string(u.kind);
+    }
+    return miss;
+}
+} // namespace
+
+TEST_CASE("Fog kernels (Vulkan): Inject/Integrate (compute) and Apply (fragment) SPIR-V use only the fog layouts' descriptors (Thema 225 step 5)")
+{
+    HE::MaterialShaderLibrary lib;
+    using B = HE::MaterialShaderLibrary::Backend;
+    namespace vk = HE::vkmat;
+
+    const auto& inj = lib.fogInject(B::SpirV);
+    const auto& integ = lib.fogIntegrate(B::SpirV);
+    const auto& apply = lib.fogApply(B::SpirV);
+    INFO("inject: ", inj.log);
+    INFO("integrate: ", integ.log);
+    INFO("apply: ", apply.log);
+    REQUIRE(inj.ok);
+    REQUIRE(integ.ok);
+    REQUIRE(apply.ok);
+    REQUIRE_FALSE(inj.spirv.empty());
+    CHECK(inj.spirv[0] == 0x07230203u);
+    CHECK(integ.spirv[0] == 0x07230203u);
+    CHECK(apply.spirv[0] == 0x07230203u);
+
+    std::string err;
+    const std::vector<FogUse> ui = activeFogDescriptors(inj.spirv, err);
+    const std::vector<FogUse> ug = activeFogDescriptors(integ.spirv, err);
+    const std::vector<FogUse> ua = activeFogDescriptors(apply.spirv, err);
+    CHECK_MESSAGE(err.empty(), err);
+
+    CHECK_MESSAGE(uncoveredFog(ui, vk::kFogInjectBindings, vk::kFogInjectBindingCount, vk::kStageCompute).empty(),
+                  "inject uses, not in the layout:", uncoveredFog(ui, vk::kFogInjectBindings, vk::kFogInjectBindingCount, vk::kStageCompute));
+    CHECK_MESSAGE(uncoveredFog(ug, vk::kFogIntegrateBindings, vk::kFogIntegrateBindingCount, vk::kStageCompute).empty(),
+                  "integrate uses, not in the layout:", uncoveredFog(ug, vk::kFogIntegrateBindings, vk::kFogIntegrateBindingCount, vk::kStageCompute));
+    CHECK_MESSAGE(uncoveredFog(ua, vk::kFogApplyBindings, vk::kFogApplyBindingCount, vk::kStageFragment).empty(),
+                  "apply uses, not in the layout:", uncoveredFog(ua, vk::kFogApplyBindings, vk::kFogApplyBindingCount, vk::kStageFragment));
+
+    // The kernels' own resources are really in use (the table is not vacuous): the noise and the
+    // history as combined samplers, the output as a storage image, the constants block.
+    auto has = [](const std::vector<FogUse>& u, uint32_t b, vk::FogDesc k) {
+        return std::find(u.begin(), u.end(), FogUse{ b, static_cast<int>(k) }) != u.end();
+    };
+    CHECK(has(ui, 36, vk::FogDesc::Ubo));
+    CHECK(has(ui, 0, vk::FogDesc::Ubo));
+    CHECK(has(ui, 35, vk::FogDesc::Cis));
+    CHECK(has(ui, 37, vk::FogDesc::Cis));
+    CHECK(has(ui, 38, vk::FogDesc::StorageImage));
+    CHECK(has(ui, 12, vk::FogDesc::Cis));   // the real CSM array came along
+    CHECK(has(ug, 37, vk::FogDesc::SampledImage));
+    CHECK(has(ug, 38, vk::FogDesc::StorageImage));
+    CHECK(has(ua, 34, vk::FogDesc::Cis));
+    CHECK(has(ua, 39, vk::FogDesc::SampledImage));
+
+    // Negative control: a table without the history row does NOT cover the inject kernel.
+    {
+        std::vector<vk::FogBinding> cut;
+        for (const vk::FogBinding& b : vk::kFogInjectBindings) if (b.binding != 37) cut.push_back(b);
+        CHECK_FALSE(uncoveredFog(ui, cut.data(), static_cast<uint32_t>(cut.size()), vk::kStageCompute).empty());
+    }
+
+    // Integrate fetches and stores, never loads from the typed image.
+    CHECK(HE::MaterialShaderLibrary::fogIntegrateGlsl().find("imageLoad") == std::string::npos);
+}
+
+TEST_CASE("heApplyFogT on Vulkan: binding 34 is a fragment sampler of the material layout, absent when the layout drops it (Thema 225 step 5)")
+{
+    using B = HE::MaterialShaderLibrary::Backend;
+    namespace vk = HE::vkmat;
+    const std::string frag =
+        "#version 450\n"
+        "layout(location = 0) in vec3 vWorldPos;\n"
+        "layout(location = 0) out vec4 oColor;\n"
+        "void main() { oColor = vec4(heApplyFogT(vec3(1.0), vWorldPos), 1.0); }\n";
+    auto uses34 = [&](HE::MaterialShaderLibrary& lib, uint64_t h) {
+        const auto& f = lib.fragment(h, frag, B::SpirV);
+        REQUIRE_MESSAGE(f.ok, f.log);
+        std::string err;
+        spirv_cross::Compiler comp(f.spirv);
+        const spirv_cross::ShaderResources r = comp.get_shader_resources(comp.get_active_interface_variables());
+        bool found = false;
+        for (const spirv_cross::Resource& res : r.sampled_images)
+            found = found || comp.get_decoration(res.id, spv::DecorationBinding) == vk::kFogVolumeBinding;
+        return found;
+    };
+
+    HE::MaterialShaderLibrary lib;
+    CHECK(lib.spirvFogVolume());
+    CHECK(uses34(lib, 0xF06F20ull));
+    // The row exists in the layout, in the fragment stage, as a combined sampler.
+    bool row = false;
+    for (uint32_t i = 0; i < vk::kBindingCount; ++i)
+        row = row || (vk::kBindings[i].binding == vk::kFogVolumeBinding
+                      && vk::kBindings[i].kind == vk::DescKind::CombinedImageSampler
+                      && (vk::kBindings[i].stages & vk::kStageFragment));
+    CHECK(row);
+    // ... ahead of the cluster lists (they stay the LAST rows).
+    CHECK(vk::kBindings[vk::kPreClusterBindingCount - 1].binding == vk::kFogVolumeBinding);
+
+    // A device that cannot hold the 18th sampler compiles without it (and without the row).
+    HE::MaterialShaderLibrary small;
+    small.setSpirvFogVolume(false);
+    CHECK_FALSE(uses34(small, 0xF06F21ull));
+
+    // The OPAQUE name never touches the volume on Vulkan (the Apply pass owns the opaque fog).
+    const std::string opaque =
+        "#version 450\n"
+        "layout(location = 0) in vec3 vWorldPos;\n"
+        "layout(location = 0) out vec4 oColor;\n"
+        "void main() { oColor = vec4(heApplyFog(vec3(1.0), vWorldPos), 1.0); }\n";
+    const auto& op = lib.fragment(0xF06F22ull, opaque, B::SpirV);
+    REQUIRE_MESSAGE(op.ok, op.log);
+    spirv_cross::Compiler comp(op.spirv);
+    const spirv_cross::ShaderResources r = comp.get_shader_resources(comp.get_active_interface_variables());
+    for (const spirv_cross::Resource& res : r.sampled_images)
+        CHECK(comp.get_decoration(res.id, spv::DecorationBinding) != vk::kFogVolumeBinding);
 }
 #endif // HE_TESTS_HAVE_SHADERC

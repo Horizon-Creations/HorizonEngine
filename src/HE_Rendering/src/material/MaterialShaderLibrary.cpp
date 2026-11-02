@@ -3073,12 +3073,14 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
                   "GLSL410/GLSLES300 have none (GL 4.3+ uses Backend::GLSL430)";
         return m_fragCache.emplace(key, std::move(out)).first->second;
     }
-    // HE_FOG_VOLUME (heFogVolume binding 34, heApplyFogT): Metal and GL — the two
-    // backends with an Apply/Integrate pass built (Thema 225 steps 3-4). Vulkan/D3D
-    // stay off until their steps bind the volume (HLSL register budget, Vulkan
-    // descriptor set) — flipping this for them without the binding code would
-    // declare heFogVolume with nothing behind it.
-    const bool fogVolume = backend == Backend::Metal || backend == Backend::GLSL410;
+    // HE_FOG_VOLUME (heFogVolume binding 34, heApplyFogT): Metal, GL and Vulkan — the
+    // backends with an Apply/Integrate pass built (Thema 225 steps 3-5). D3D stays off
+    // until its step binds the volume (HLSL register budget) — flipping this for it
+    // without the binding code would declare heFogVolume with nothing behind it.
+    // Vulkan's flag is an instance switch (setSpirvFogVolume): a device whose per-stage
+    // sampler limit cannot hold row 34 compiles its materials without it.
+    const bool fogVolume = backend == Backend::Metal || backend == Backend::GLSL410
+                        || (backend == Backend::SpirV && m_spirvFogVolume);
     const std::string injected = injectPreamble(glsl, clustered, fogVolume); // adds the lighting UBO + heLit()
     if (backend == Backend::Metal)
     {
@@ -3383,8 +3385,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogInject(Backend 
         // explicit pins needed, GL binds HeLighting/HeFogVol/heFogNoise/heFogHistory
         // by NAME (glUniformBlockBinding / glUniform1i), like every other GL program.
         out = toCompiled(compile(fogInjectGlslGL(), Stage::Fragment, Target::Glsl410));
+    else if (backend == Backend::SpirV)
+        // Vulkan semantics ARE the source's semantics: canonical set 0 bindings, no pins
+        // (VulkanRenderer::EnsureFogPipelines writes the descriptor layout to match).
+        out = toCompiled(compile(fogInjectGlsl(), Stage::Compute, Target::SpirvBinary));
     else
-        out.log = "fogInject: volumetric fog is not implemented for this backend yet (Thema 225 steps 5-6)";
+        out.log = "fogInject: volumetric fog is not implemented for this backend yet (Thema 225 step 6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
 }
 
@@ -3403,8 +3409,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogIntegrate(Backe
         // One fullscreen quad per slice k, MRT (next accumulator + this layer of
         // the integrated volume) — see FogVolumeShaderSource.h's kIntegrateMainGL.
         out = toCompiled(compile(fogIntegrateGlslGL(), Stage::Fragment, Target::Glsl410));
+    else if (backend == Backend::SpirV)
+        out = toCompiled(compile(fogIntegrateGlsl(), Stage::Compute, Target::SpirvBinary));
     else
-        out.log = "fogIntegrate: volumetric fog is not implemented for this backend yet (Thema 225 steps 5-6)";
+        out.log = "fogIntegrate: volumetric fog is not implemented for this backend yet (Thema 225 step 6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
 }
 
@@ -3422,8 +3430,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogApply(Backend b
               { Stage::Fragment, 0, 39, 2 } })); // scene depth (fetched)
     else if (backend == Backend::GLSL410)
         out = toCompiled(compile(fogApplyGlslGL(), Stage::Fragment, Target::Glsl410));
+    else if (backend == Backend::SpirV)
+        out = toCompiled(compile(fogApplyGlsl(), Stage::Fragment, Target::SpirvBinary));
     else
-        out.log = "fogApply: volumetric fog is not implemented for this backend yet (Thema 225 steps 5-6)";
+        out.log = "fogApply: volumetric fog is not implemented for this backend yet (Thema 225 step 6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
 }
 } // namespace HE

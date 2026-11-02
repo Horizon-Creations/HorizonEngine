@@ -567,7 +567,8 @@ public:
 
     // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
     // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every
-    // other pass here. Metal only so far (the other backends are steps 4-6): any other
+    // other pass here. Metal, GL and Vulkan (Backend::SpirV: compute + fragment, canonical
+    // bindings, no pins; steps 3-5); D3D is step 6: any other
     // backend gets a Compiled with ok == false and a log saying so, which is the cue to
     // keep the analytic fog. fogInject / fogIntegrate are COMPUTE kernels (Metal compute
     // functions named main0), fogApply a fragment shader that pairs with fullscreenVertex().
@@ -592,12 +593,21 @@ public:
     static std::string fogIntegrateGlslGL();
     static std::string fogApplyGlslGL();
 
+    // Vulkan only: does the material descriptor set carry row 34 (heFogVolume)? Default yes.
+    // VulkanRenderer turns it off BEFORE the first compile on a device whose per-stage
+    // sampler limit cannot hold the 18th fragment sampler (HE::vkmat::fogVolumeFit); the
+    // materials then compile without HE_FOG_VOLUME and keep the analytic fog. A pak's
+    // baked blobs come from a default library, i.e. with the row.
+    void setSpirvFogVolume(bool on) { m_spirvFogVolume = on; }
+    bool spirvFogVolume() const { return m_spirvFogVolume; }
+
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
                    m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear();
                    m_reflPrepassCache.clear(); m_fogCache.clear(); m_tessCache.clear(); }
 
 private:
+    bool m_spirvFogVolume = true;
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
                                     bool clustered);
 
