@@ -256,6 +256,13 @@ if(HE_VULKAN_ENABLED)
     target_sources(landscape_gpu_check PRIVATE src/LandscapeGpuCheck/VulkanBackend.cpp)
     target_link_libraries(landscape_gpu_check PRIVATE RendererVulkan)
     target_compile_definitions(landscape_gpu_check PRIVATE HE_CHECK_VULKAN)
+    # VulkanRenderer loads <exe dir>/Shaders/*.spv at runtime (see HE_Rendering/CMakeLists.txt); the editor/game
+    # deploy steps copy it from ${CMAKE_BINARY_DIR}/Shaders, this tool needs the same copy or "Vulkan engine,
+    # forward/deferred" fails with "scene shaders missing" while the offscreen VulkanLandscape check (no IRenderer) is fine.
+    add_custom_command(TARGET landscape_gpu_check POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_BINARY_DIR}/Shaders" "$<TARGET_FILE_DIR:landscape_gpu_check>/Shaders"
+        VERBATIM
+    )
 endif()
 if(WIN32)
     # D3D11 (and D3D12) beside OpenGL: the same offscreen and engine checks on the Windows backends, compared with OpenGL's pictures.
