@@ -28,7 +28,7 @@ previous frame the same form; `fogViewProj` for `heApplyFogT` is the plain `kVul
 - Real Vulkan GPU (RTX 4070 / NN-WS03): only lavapipe ran it.
 - The shaft look. I opened fog_m0/m1/m1_def.bmp (artifact `vulkan-lavapipe-shots`): m1 is plainly fogged (sky and wall hazed toward the sun-side glow, horizon band in the right place, not mirrored), but the FOGTEST camera ends up so close to the wall that the slits are only 2-3 thin gaps and no shafts can be read. The scene needs a farther camera / wider slits before this case can show witness (a). m1 vs m1_def differ by 18 steps (deferred is lighter, greyer; the ground colour differs too): I could not tell fog from the forward/deferred lighting difference without an m0_def shot; Metal had 1 LSB, so compare deferred m0 vs m1 before calling the deferred Apply split right.
 - A bit-exact mode-0 A/B against `release/0.8.0`; `HE_HAVE_SHADERC=OFF` Vulkan builds; TAA with fog on.
-- Windows test build was red in run 41529249343 for a test-only reason (`small` is a macro there, fixed in the follow-up commit); the Windows result of the fixed commit and the macOS job are in the newer CI run (see the Hive post).
+- CI run 41531572019 on the fixed commit: Windows, macOS and the lavapipe job green; the Linux job was still running when I closed (it was green in run 41529249343 before the test-only fix).
 
 ## Decisions
 - Binding 34 is always in the layout (translucent SPIR-V uses it statically); a device below 18 fragment samplers drops it (and compiles without `HE_FOG_VOLUME`) before it drops the weightmap row; fog is then off.
