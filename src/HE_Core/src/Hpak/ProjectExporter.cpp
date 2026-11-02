@@ -617,7 +617,8 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.textureCompression = settings.textureCompression;
     packSettings.textureQuality     = settings.textureQuality;
     packSettings.cookTextureArrays  = settings.cookTextureArrays;
-    packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
+    packSettings.bakeMeshTextures   = settings.bakeMeshTextures;
+    packSettings.shaderBackends       = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
     packSettings.onAsset = settings.onAsset;

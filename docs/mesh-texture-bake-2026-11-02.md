@@ -24,9 +24,18 @@ die Laufzeit weniger zu tun hat. Alle drei Formen, pro Mesh abschaltbar im Mesh 
 3. **(2) und (3) sind ein Packer:** je Sektion die Texturfläche seines UV-Rechtecks in eine gemeinsame Textur legen, UVs des Meshes umrechnen, Sektionen
    zu einer verschmelzen. (2) ist der verlustfreie Fall (alle UV in [0,1], Quelltexel 1:1 kopiert, kein Tiling). (3) löst Tiling auf (Rechteck wird
    mehrfach gebacken, deshalb größer) und skaliert unter eine Grenze (Vorgabe 4096 pro Seite), wenn es sonst zu groß wird.
-4. **"Einfaches Material":** Uber-Shader (`customShaderFragGlsl` leer) mit genau einer Albedo-Textur, oder ein Graph, dessen BaseColor nur aus einem
-   Texture-Sample (mal Tint) besteht; Opaque oder Masked mit gleichem Schwellwert, gleiche `metallic`/`roughness`/`doubleSided`, keine WPO, keine
-   Displacement, kein Switch. Das Prädikat steht neben dem MTRL-Skim im `HpakWriter` und hat einen eigenen Test.
+4. **"Einfaches Material" = ein glatter PBR-Texturensatz** (korrigiert nach Rückfrage des Nutzers: Albedo allein gibt es bei importierten Modellen
+   kaum). Opaque Surface, deren Pins nur in diesen Formen belegt sind: Base Color und Emissive je Konstante oder Texture Sample (mal Faktor),
+   Metallic, Roughness und Ambient Occlusion je Konstante oder ein Kanal einer Textur (Split RGBA, mal Faktor; AO als Lerp(1, Kanal, Stärke)),
+   Specular nur Konstante, Normal nur eine Normal-Map, jedes Sample mit eigenem UV-Knoten (Tiling/Offset). Opacity, WPO und Displacement
+   unverbunden, kein Switch, keine Parameter, keine Berechnung in der UV. Der Standard-Shader zählt als Albedo-Textur mal `baseColor` plus
+   die Skalare. `HE::classifySimpleTextureMaterial` (`SimpleTextureMaterial.h`), getestet gegen ein echtes, vom glTF-Import erzeugtes Material.
+   Ein Texture Sample mit offenem UV-Pin liest den Pin-Standard `vec2(0)` (einen Texel), nicht die Mesh-UV; nur die Normal-Map fällt auf die
+   Mesh-UV zurück. Ersteres ist deshalb kein Kandidat.
+   **Folge für die Bakes:** Jede Rolle (Albedo, Normal, Metallic/Roughness/AO, Emissive) wird mit denselben Rechtecken in eine eigene Atlas-Textur
+   gelegt, Metallic/Roughness/AO aus ihren Kanälen in eine ORM-Textur (R = AO, G = Roughness, B = Metallic). Ein Abschnitt ohne Normal-Map bekommt
+   eine flache Normale (0,5 / 0,5 / 1) im Rechteck, eine Konstante füllt das Rechteck. Vertex-Farben (Form 1) gibt es nur, wenn nichts außer
+   Base Color eine Textur hat und keine Normal-Map da ist (sonst ginge das Detail verloren).
 5. **Abgeleitete Assets:** Der Export legt ein Material (eigene UUID) und eine Textur (eigene UUID) an und biegt `MSEC.materialId` um. Die
    Original-Textur fällt über den Erreichbarkeitsfilter heraus, wenn sonst nichts auf sie zeigt.
 6. **Vertex-Farben ohne Layoutänderung:** ein zweiter, optionaler Puffer (RGBA8 je Vertex, neuer Chunk `MVCL`) neben `interleaved`, den nur GL und Metal als

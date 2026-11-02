@@ -260,13 +260,14 @@ TEST_CASE("GL and Metal draw a graph-material batch once, with the material's in
 
 	const std::string mtl = readFile(dir / "Metal" / "MetalRenderer.mm");
 	REQUIRE(!mtl.empty());
-	CHECK(countOf(mtl, "/*instanced=*/true)") == 2);
+	// Metal builds the twin in the background: the call passes `&instPending`, and a batch whose twin is
+	// still compiling is skipped (`if (instPending) continue;`), asked for again with the next one.
+	CHECK(countOf(mtl, "/*instanced=*/true, &instPending)") == 2);
+	CHECK(countOf(mtl, "if (instPending) continue;") == 2);
 	CHECK(countOf(mtl, "RenderSorter::graphInstancingEnabled()") == 2);
 	CHECK(mtl.find("if (precompiled && instanced && precompiled->vertexInstanced.empty()) return nullptr;") != std::string::npos);
-	// PSHD v4 (Thema 228): the forward PSO's baked variant is gated on cShBaked (a pak may
-	// not have baked a twin); the G-buffer PSO this bake added always asks bakedMetalVariant.
-	CHECK(countOf(mtl, "bakedMetalVariant(m_contentManager, dc.materialAssetId)") == 2);
-	CHECK(countOf(mtl, "cShBaked ?") == 1);
+	// The forward PSO may come from the pak (no twin); the G-buffer PSO never does.
+	CHECK(mtl.find("cShBaked ? bakedMetalVariant(m_contentManager, dc.materialAssetId) : nullptr") != std::string::npos);
 	// Both loops hand the batch to drawInstance, which binds buffer 5 and draws instanceCount.
 	CHECK(countOf(mtl, "drawInstance(dc.firstInstance(), cMaterialPipeline") == 2);
 	CHECK(countOf(mtl, "instanceCount:instCount];") == 2);

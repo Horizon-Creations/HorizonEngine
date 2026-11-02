@@ -224,6 +224,13 @@ struct PackSettings {
     // BC7 or ASTC; a cooked array therefore carries those means baked from its RGBA8 source
     // (CHUNK_TXSM). Part of the pack fingerprint.
     bool cookTextureArrays = false;
+    // Bake textures onto static meshes (Hpak/MeshBakePass.h): a mesh whose materials are plain
+    // PBR texture sets is rewritten onto one merged material with atlas textures, per the
+    // switches stored in the mesh (HE::MeshBakeSettings). Needs `onlyReferenced` (the pass runs
+    // on what the game reaches, then the filter runs again). `bakeMaxAtlas` = longest atlas
+    // side. Both are part of the pack fingerprint.
+    bool     bakeMeshTextures = false;
+    uint32_t bakeMaxAtlas     = 4096;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,

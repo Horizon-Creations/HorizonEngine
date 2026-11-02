@@ -16,7 +16,7 @@ namespace
 // notice a change in the CODE that produced the entry; this is how it is told.
 // "Incremental" off in the export dialog (or no --cache for the packer) is the
 // manual escape hatch.
-constexpr uint8_t kPackPipelineVersion = 4; // 3: hpak v3 hash (manifest hashes changed); 4: PSHD carries the G-buffer fragment
+constexpr uint8_t kPackPipelineVersion = 5; // 3: hpak v3 hash (manifest hashes changed); 4: PSHD carries the G-buffer fragment; 5: the mesh texture bake joins the fingerprint
 
 bool loadPakManifest(const std::filesystem::path& path,
                      uint64_t expectPakTocHash, uint64_t expectSettingsFp,
@@ -110,7 +110,7 @@ namespace HE
 {
 uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
 {
-    uint8_t buf[8 + 32 + 1];
+    uint8_t buf[8 + 32 + 1 + 5];
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
@@ -124,6 +124,9 @@ uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
     std::memcpy(buf + 4, &s.shaderBackends, 4); // precompiled-shader backend set → re-pack materials
     std::memcpy(buf + 8, s.key, 32);  // all-zero when not encrypting
     buf[8 + 32] = kPackPipelineVersion;
+    // The mesh texture bake: on/off + the atlas size cap (a change re-packs every mesh it touches).
+    buf[8 + 32 + 1] = s.bakeMeshTextures ? 1 : 0;
+    std::memcpy(buf + 8 + 32 + 2, &s.bakeMaxAtlas, 3); // low 3 bytes: caps stay far below 16M
     return Hpak::hash64(buf, sizeof(buf));
 }
 

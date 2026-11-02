@@ -238,6 +238,10 @@ struct ExportProfile
 	// each as RGBA8) like every other texture. On by default; off ships them as RGBA8.
 	// See Hpak::PackSettings::cookTextureArrays.
 	bool compressTextureArrays = true;
+	// Bake textures onto static meshes whose materials are plain PBR texture sets (the
+	// per-mesh switches in the Mesh Viewer decide how). On by default; needs onlyReferenced.
+	// See Hpak::PackSettings::bakeMeshTextures.
+	bool bakeMeshTextures = true;
 	// Pack only the assets the game reaches (the startup scene, the scenes something loads,
 	// scripts, the manifest, the engine's own needs) and leave out the rest. On by default.
 	// `alwaysIncludePatterns` are globs on the addressed path (like excludePatterns) that

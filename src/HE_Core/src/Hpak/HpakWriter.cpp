@@ -1,5 +1,6 @@
 #include <Hpak/HpakWriter.h>
 #include <Hpak/ReachFilter.h>
+#include <Hpak/MeshBakePass.h>
 #include <cstdint>
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
@@ -1184,7 +1185,10 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     // Pass 1b: leave out what the game does not reach (Hpak/ReachFilter.h). Every blob is
     // in `pending` and every path is in pathToUuid by now, so this is the one place the whole
     // reference graph is visible. Scenes the game may load are nodes of the same graph.
-    if (settings.onlyReferenced)
+    // A lambda because the texture bake (Pass 1c) rewrites assets and the filter has to run
+    // again over the result: the textures a merged mesh no longer names must stay out.
+    // `first` = also settle the scenes; `announce` = print the "Not packed" notice.
+    const auto applyReach = [&](bool first, bool announce)
     {
         std::vector<HE::reach::Node> nodes;
         nodes.reserve(pending.size() + settings.reachScenes.size());
@@ -1233,11 +1237,12 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 it = (it->second == pe.id) ? pathToUuid.erase(it) : std::next(it);
         }
         pending = std::move(kept);
-        for (size_t i = 0; i < settings.reachScenes.size(); ++i)
-            if (!res.reachable[nAssets + i])
-                m_unreachableScenes.push_back(settings.reachScenes[i].path);
+        if (first)
+            for (size_t i = 0; i < settings.reachScenes.size(); ++i)
+                if (!res.reachable[nAssets + i])
+                    m_unreachableScenes.push_back(settings.reachScenes[i].path);
 
-        if (settings.onNotice)
+        if (announce && settings.onNotice)
         {
             std::sort(dropped.begin(), dropped.end(),
                       [](const Dropped& a, const Dropped& b) { return a.bytes > b.bytes; });
@@ -1251,6 +1256,49 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
                 msg += "; " + std::to_string(m_unreachableScenes.size()) + " scene(s) nothing loads";
             settings.onNotice(msg);
         }
+    };
+    // The bake needs the reach filter's verdict first (only reachable meshes are worth it), so
+    // the notice waits for the second run when a bake is going to happen.
+    const bool bakeMeshes = settings.bakeMeshTextures && settings.onlyReferenced;
+    if (settings.onlyReferenced) applyReach(/*first=*/true, /*announce=*/!bakeMeshes);
+
+    // Pass 1c: bake textures onto meshes (Hpak/MeshBakePass.h). Rewrites the meshes it can,
+    // adds the derived material and atlases, then filters again.
+    if (bakeMeshes)
+    {
+        std::vector<HE::MeshBake::PassEntry> entries;
+        entries.reserve(pending.size());
+        for (const Pending& pe : pending)
+        {
+            HE::MeshBake::PassEntry e;
+            e.id = pe.id; e.relPath = pe.relPath;
+            if (pe.metaPath != pe.relPath) e.metaPath = pe.metaPath;
+            const auto ty = m_packedTypes.find(pe.id);
+            e.type = ty != m_packedTypes.end() ? ty->second : uint16_t(0);
+            e.bytes = &pe.bytes;
+            entries.push_back(std::move(e));
+        }
+        HE::MeshBake::PassOptions po;
+        po.maxAtlas = settings.bakeMaxAtlas;
+        HE::MeshBake::PassResult baked = HE::MeshBake::runPass(entries, po);
+        entries.clear();
+        for (HE::MeshBake::ReplacedMesh& rm : baked.replaced)
+            for (Pending& pe : pending)
+                if (pe.id == rm.id) { pe.bytes = std::move(rm.bytes); break; }
+        for (HE::MeshBake::NewAsset& na : baked.added)
+        {
+            Pending pe;
+            pe.id = na.id; pe.relPath = na.relPath; pe.metaPath = na.relPath;
+            pe.bytes = std::move(na.bytes);
+            pathToUuid[na.relPath] = na.id;
+            m_packedPaths[na.relPath] = na.id;
+            m_packedTypes[na.id] = na.type;
+            pending.push_back(std::move(pe));
+        }
+        if (settings.onNotice)
+            for (const std::string& line : baked.notices)
+                settings.onNotice("Mesh bake - " + line);
+        applyReach(/*first=*/false, /*announce=*/true);
     }
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.

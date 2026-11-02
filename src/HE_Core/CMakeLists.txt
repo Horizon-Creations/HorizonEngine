@@ -26,6 +26,9 @@ add_library(HorizonCore SHARED
 	src/Renderer/IRenderer.cpp
 	src/Scripting/ScriptEngine.cpp
 	src/Hpak/HpakWriter.cpp
+	src/Hpak/SimpleTextureMaterial.cpp
+	src/Hpak/MeshTextureBake.cpp
+	src/Hpak/MeshBakePass.cpp
 	src/Hpak/HpakReader.cpp
 	src/Hpak/Aes256Gcm.cpp
 	src/Hpak/KeyDerivation.cpp

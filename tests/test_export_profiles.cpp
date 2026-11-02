@@ -364,6 +364,7 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].onlyReferenced  = false;
     proj.exportProfiles[1].alwaysIncludePatterns = { "Props/Crate*" };
     proj.exportProfiles[1].compressTextureArrays = false;
+    proj.exportProfiles[1].bakeMeshTextures      = false;
     proj.exportProfiles[1].autoShaderBackends = false;
     proj.exportProfiles[1].shaderBackends     = 1u << 2;
     ExportProfile extra;
@@ -393,6 +394,8 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK_FALSE(p2.exportProfiles[1].onlyReferenced);
     CHECK(p2.exportProfiles[1].alwaysIncludePatterns == std::vector<std::string>{ "Props/Crate*" });
     CHECK_FALSE(p2.exportProfiles[1].compressTextureArrays);
+    CHECK_FALSE(p2.exportProfiles[1].bakeMeshTextures);
+    CHECK(p2.exportProfiles[2].bakeMeshTextures);          // default: on
     CHECK_FALSE(p2.exportProfiles[2].appBundle); // default
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
     CHECK(p2.exportProfiles[2].incremental);              // default true

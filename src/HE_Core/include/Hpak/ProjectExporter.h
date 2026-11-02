@@ -211,6 +211,10 @@ struct HE_API ExportSettings {
     // landscape colours of such an array come from means baked at pack time (CHUNK_TXSM),
     // so BC7 / ASTC arrays are safe to ship; off keeps them RGBA8.
     bool cookTextureArrays = true;
+    // Bake textures onto static meshes whose materials are plain PBR texture sets
+    // (Hpak::PackSettings::bakeMeshTextures). Which meshes, and in which form, is each mesh's
+    // own choice (the Export bake switches in the Mesh Viewer). Needs the reachability filter.
+    bool bakeMeshTextures = true;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a
