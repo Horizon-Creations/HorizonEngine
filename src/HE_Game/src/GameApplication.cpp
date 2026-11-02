@@ -435,6 +435,8 @@ GameApplication::GameApplication(std::string startupPath)
 	: HE::Application(std::move(startupPath))
 {
 	applyShippedConfig();
+	// The audio device opens while SDL, the window and the renderer come up (see m_audioInit).
+	m_audioInit = std::async(std::launch::async, [this] { return m_audioEngine.init(); });
 }
 GameApplication::~GameApplication() = default;
 
@@ -1444,7 +1446,10 @@ void GameApplication::OnInit()
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
-	if (m_audioEngine.init())
+	// The constructor started the device open; this only collects it (init() again if it was
+	// never started, e.g. a subclass that skipped the constructor path).
+	const bool audioOk = m_audioInit.valid() ? m_audioInit.get() : m_audioEngine.init();
+	if (audioOk)
 	{
 		// The project's buses BEFORE the first source starts: a source names
 		// its bus at play time, and one that does not exist yet means master.
