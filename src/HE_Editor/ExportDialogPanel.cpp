@@ -1479,11 +1479,12 @@ void startExport(AppContext& ctx)
                 const auto bakeFarLandscapes = [&](HorizonWorld& w, const std::string& label)
                 {
                     if (!s_exportBakeFarLandscape || !ctx.renderer || !ctx.contentManager) return;
-                    if (ctx.backend != HE::RendererBackend::Metal)
+                    if (!ctx.renderer->GetCapabilities().supportsRawCapture)
                     {
                         if (!farBackendNoted)
-                            Build::log(1, "Far landscape: not baked, the picture comes from the Metal renderer and this "
-                                          "editor runs another one (the far levels keep the landscape's own material)");
+                            Build::log(1, "Far landscape: not baked, the picture needs a renderer that can hand back a "
+                                          "frame without tonemap and post effects and this editor's one cannot (the far "
+                                          "levels keep the landscape's own material)");
                         farBackendNoted = true;
                         return;
                     }

@@ -10726,6 +10726,40 @@ void EditorApplication::dumpFrameHeadless()
 		}
 		baker.end();
 	}
+	// HE_DUMP_AUTOLANDSAVE=<file.hescene> (Thema 228): the HE_DUMP_AUTOLAND witness world written out as a scene, so a
+	// scratch project can hold an Auto Landscape for HE_DUMP_HLODEXPORT and a real export (the water witness has its own
+	// HE_DUMP_SAVESCENE).
+	if (const char* sv = std::getenv("HE_DUMP_AUTOLANDSAVE"); sv && *sv && m_editorWorld)
+	{
+		// The witness's material only exists in memory: it goes into the project's Content (same id) or the saved scene
+		// would name a material the project does not have.
+		for (const auto e : m_editorWorld->registry().view<TerrainComponent, MaterialComponent>())
+		{
+			const HE::UUID mid = m_editorWorld->registry().get<MaterialComponent>(e).materialAssetId;
+			if (const MaterialAsset* ma = contentManager().getMaterial(mid))
+			{
+				MaterialAsset copy = *ma;
+				copy.path = "Materials/AutoLandscapeWitness.hasset";
+				const bool wrote = contentManager().saveAsset(copy);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDSAVE material %s", wrote ? "saved" : "FAILED to save");
+			}
+		}
+		// A game needs a main camera: one at the witness camera's place (HE_DUMP_CAMX/Y/Z, looking along HE_DUMP_PITCH).
+		{
+			auto& reg = m_editorWorld->registry();
+			const auto envF = [](const char* k, float d) { const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
+			const auto cam = m_editorWorld->createEntity("AutoLandscapeCamera");
+			auto& t = reg.emplace_or_replace<TransformComponent>(cam);
+			t.position = glm::vec3(static_cast<float>(envF("HE_DUMP_CAMX", 0.0f)), static_cast<float>(envF("HE_DUMP_CAMY", 2.0f)),
+			                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
+			t.rotation = glm::vec3(static_cast<float>(envF("HE_DUMP_PITCH", 22.0f)), static_cast<float>(envF("HE_DUMP_YAW", 0.0f)), 0.0f);
+			CameraComponent cc; cc.isMain = true; cc.farPlane = 5000.0f;
+			reg.emplace<CameraComponent>(cam, cc);
+		}
+		SceneSerializer saver;
+		const bool saved = saver.save(*m_editorWorld, sv, SerializeFormat::JSON);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDSAVE %s -> %s", saved ? "wrote" : "FAILED to write", sv);
+	}
 	// HE_DUMP_HLODEXPORT=<dir> (Thema 228): what the export dialog does for the far landscape, on the open project: every
 	// scene under Content/ is loaded into a scratch world and its Auto Landscapes are baked (HE_DUMP_HLODBUDGET = MB,
 	// default 512). The assets go to <dir>/<their addressed path> and <dir>/index.txt lists them ("<hi> <lo> <type> <path>",

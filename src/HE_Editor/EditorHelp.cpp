@@ -8179,8 +8179,10 @@ namespace
 	  "own parameters (a Material Instance's overrides, its static switches, "
 	  "painted layers) are what is photographed. A custom landscape material that "
 	  "is not an Auto Landscape is left as it is. The picture is taken by the "
-	  "Metal renderer, so this runs in the macOS editor only; elsewhere the "
-	  "export says so and the far levels keep the real material. Saved in the profile.",
+	  "editor's own renderer (Metal, OpenGL, Vulkan, D3D11 and D3D12 all hand back "
+	  "the material's colour without tonemap or post effects); a renderer that "
+	  "cannot makes the export say so and the far levels keep the real material. "
+	  "Saved in the profile.",
 	  "", "export#overview" },
 	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
 	  "What all baked far-landscape textures of this export may cost once cooked "

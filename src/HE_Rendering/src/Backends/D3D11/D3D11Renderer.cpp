@@ -1800,6 +1800,10 @@ struct D3D11RendererImpl
     float bloomThreshold = 1.0f;
     float bloomKnee      = 0.1f;
     bool  bloomEnabled   = true;
+    // EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+    // clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+    bool  rawCapture     = false;
+    bool  rawSrgb        = false;
     // Anti-aliasing method in force, already resolved against this backend's
     // capabilities (docs/anti-aliasing-plan.md). Off runs aaBlitPS instead of
     // fxaaPS — the pass itself always draws, it is what fills viewportRTV.
@@ -8916,7 +8920,7 @@ void D3D11Renderer::DrawViewportFrame()
 
         // Tonemap: (hdrSRV, bloomSRV) → ldrRTV.
         { D3D11RendererImpl::GpuPassScope _tonemapTimer(&p, "Tonemap");
-          const float cb[4] = { p.exposure,
+          const float cb[4] = { p.rawCapture ? (p.rawSrgb ? -2.0f : -1.0f) : p.exposure,   // x < 0: raw (see kTonemapHLSL)
                                 p.bloomEnabled ? p.bloomStrength : 0.0f, 0, 0 };
           p.updatePostFxCB(cb);
           p.context->OMSetRenderTargets(1, p.ldrRTV.GetAddressOf(), nullptr);
@@ -9158,6 +9162,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // packaged game's swapchain chain); the direct-swapchain branch without an
     // HDR target and the world previews stay forward.
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
+    c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     return c;
 }
 
@@ -9325,6 +9330,24 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     p.createViewportRT(width, height);
     p.taaHistoryValid = false;
 
+    // A raw capture is the materials' own colour: every effect that would change it is off for this frame
+    // and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
+    // the deferred resolve lights the G-buffer.
+    const bool  liveRaw = p.rawCapture, liveSrgb = p.rawSrgb;
+    const bool  liveBloom = p.bloomEnabled, liveSsao = p.ssaoEnabled, liveSsr = p.ssrEnabled;
+    const bool  liveGi = p.giEnabled, liveGiRefl = p.giReflEnabled;
+    const HE::AAMethod   liveAa   = p.aaMethod;
+    const HE::RenderPath livePath = m_renderPath;
+    if (camera.rawOutput)
+    {
+        p.rawCapture = true;
+        p.rawSrgb    = camera.rawSrgb;
+        p.bloomEnabled = p.ssaoEnabled = p.ssrEnabled = false;
+        p.giEnabled = p.giReflEnabled = false;
+        p.aaMethod  = HE::AAMethod::Off;
+        m_renderPath = HE::RenderPath::Forward;
+    }
+
     bool ok = p.viewportRTV && p.viewportDSV;
     if (ok)
     {
@@ -9352,6 +9375,11 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     p.viewportReqH     = liveReqH;
     m_editorCamera     = liveCam;
     p.counters         = liveCounters;
+    p.rawCapture = liveRaw; p.rawSrgb = liveSrgb;
+    p.bloomEnabled = liveBloom; p.ssaoEnabled = liveSsao; p.ssrEnabled = liveSsr;
+    p.giEnabled = liveGi; p.giReflEnabled = liveGiRefl;
+    p.aaMethod = liveAa;
+    m_renderPath = livePath;
     // Intermediates back to the live size (see above). No live viewport (the
     // direct-to-swapchain path) means nothing reads them; leave them.
     if (liveW && liveH && (liveW != width || liveH != height))

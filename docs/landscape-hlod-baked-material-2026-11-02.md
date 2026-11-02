@@ -119,7 +119,7 @@ senkrecht von oben, orthografisch, im Vorwärtspfad. Grund: ein unbeleuchteter A
 
 | Baustein | Wo |
 |---|---|
-| Rohausgabe des Renderers: `EditorCameraOverride::rawOutput` (+ `rawSrgb` für das Albedo) in `RenderSceneImage`, nur Metal: kein Tonemap, Bloom, SSAO, AA, DoF, SSR, GI, Vorwärtspfad | `IRenderer.h`, `MetalRenderer.mm` (`kTonemapMSL`, `RenderSceneImage`) |
+| Rohausgabe des Renderers: `EditorCameraOverride::rawOutput` (+ `rawSrgb` für das Albedo) in `RenderSceneImage`: kein Tonemap, Bloom, SSAO, AA, DoF, SSR, GI, Vorwärtspfad. Seit 2026-11-02 auch D3D11, D3D12, Vulkan und OpenGL (`Capabilities::supportsRawCapture`, der Export-Dialog fragt das statt „Metal“) | `IRenderer.h`, `MetalRenderer.mm` (`kTonemapMSL`), `HlslSources.h` (`kTonemapHLSL`, D3D11/D3D12), `postfx_tonemap.frag`, `OpenGLRenderer.cpp` (`kTonemapFS`), je `RenderSceneImage` |
 | `HlodBaker`: Szenenkopie **einer** Landschaft (ihre Material-Overrides und Static Switches werden auf die Ansichtsgraphen übertragen), Kamera je Chunk, Warten auf die drei Pipelines über `PumpShaderBuilds`, Box-Filter von `side·ss` | `HE_Scene/LandscapeHlodBaker.h/.cpp` |
 | `buildHlodAssets`: drei einstufige RGBA8-Texturen (Albedo sRGB) + **ein** Material, das sie über die Weltposition liest; Ids/Pfade aus (Terrain-Entity-Id, cx, cz) unter `Baked/Landscape/` | `HE_Scene/LandscapeHlod.h/.cpp` |
 | `LODLevel::materialId`; `TerrainSystem` setzt es für die Stufen ab 1, wenn das Material resident ist (Fehlgriff = ein Hash-Lookup); `RenderExtractor` nimmt es für die gewählte Stufe | `LODComponent.h`, `TerrainSystem.cpp`, `RenderExtractor.cpp` (`lodLevelMaterial`) |

@@ -1873,6 +1873,10 @@ struct D3D12RendererImpl
     float bloomThreshold = 1.0f;
     float bloomKnee      = 0.1f;
     bool  bloomEnabled   = true;
+    // EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+    // clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+    bool  rawCapture     = false;
+    bool  rawSrgb        = false;
     // Anti-aliasing method in force, already resolved against this backend's
     // capabilities (docs/anti-aliasing-plan.md). Off swaps the PSO for the
     // passthrough — the pass always draws, it is what fills viewportRT.
@@ -2678,7 +2682,8 @@ struct D3D12RendererImpl
         ldrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         setRTV(ldrRtvHeap); setVP(w, h);
         cl->SetPipelineState(tonemapPSO.Get());
-        { const float cb[4]={exposure, bloomEnabled?bloomStrength:0.0f, 0,0};
+        { const float cb[4]={rawCapture ? (rawSrgb ? -2.0f : -1.0f) : exposure,   // x < 0: raw (see kTonemapHLSL)
+                             bloomEnabled?bloomStrength:0.0f, 0,0};
           cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
         cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(1)); // t0=hdrSRV
         cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(2)); // t1=bloomSRV[0]
@@ -13584,6 +13589,7 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // usingHDR branch); the LDR viewport branch, the direct-swapchain branch
     // and the world previews stay forward.
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
+    c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     return c;
 }
 
@@ -13811,6 +13817,24 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     // Flushes the GPU first, so the slot used below is idle.
     p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
 
+    // A raw capture is the materials' own colour: every effect that would change it is off for this frame
+    // and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
+    // the deferred resolve lights the G-buffer.
+    const bool  liveRaw = p.rawCapture, liveSrgb = p.rawSrgb;
+    const bool  liveBloom = p.bloomEnabled, liveSsao = p.ssaoEnabled, liveSsr = p.ssrEnabled;
+    const bool  liveGi = p.giEnabled, liveGiRefl = p.giReflEnabled;
+    const HE::AAMethod   liveAa   = p.aaMethod;
+    const HE::RenderPath livePath = m_renderPath;
+    if (camera.rawOutput)
+    {
+        p.rawCapture = true;
+        p.rawSrgb    = camera.rawSrgb;
+        p.bloomEnabled = p.ssaoEnabled = p.ssrEnabled = false;
+        p.giEnabled = p.giReflEnabled = false;
+        p.aaMethod  = HE::AAMethod::Off;
+        m_renderPath = HE::RenderPath::Forward;
+    }
+
     bool ok = p.viewportRT && p.viewportDepth && p.viewportReadback
            && p.viewportRtvHeap && p.viewportDsvHeap;
     if (ok)
@@ -13846,6 +13870,11 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     p.viewportResChanged = liveResChanged;
     p.usingHDR           = liveUsingHDR;
     m_editorCamera       = liveCam;
+    p.rawCapture = liveRaw; p.rawSrgb = liveSrgb;
+    p.bloomEnabled = liveBloom; p.ssaoEnabled = liveSsao; p.ssrEnabled = liveSsr;
+    p.giEnabled = liveGi; p.giReflEnabled = liveGiRefl;
+    p.aaMethod = liveAa;
+    m_renderPath = livePath;
     p.statDraws = liveDraws; p.statTris = liveTris;
     p.statVisible = liveVisible; p.statTotal = liveTotal;
     // The decal pass's viewport-depth SRV back to the live depth (null view

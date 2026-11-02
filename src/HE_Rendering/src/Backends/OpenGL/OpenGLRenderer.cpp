@@ -1121,6 +1121,14 @@ vec3 lensFlareOverlay(vec2 uv, vec4 lf)
 void main()
 {
 	vec3 hdr    = texture(uHDR, vUV).rgb;
+	if (uExposure < 0.0)   // raw capture (EditorCameraOverride::rawOutput): the material's colour, untouched
+	{
+		vec3 c = clamp(hdr, 0.0, 1.0);
+		if (uExposure < -1.5)   // rawSrgb: the exact sRGB curve, for a picture that becomes an sRGB texture
+			c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
+		FragColor = vec4(c, 1.0);
+		return;
+	}
 	hdr        += texture(uBloom, vUV).rgb * uBloomStrength;
 	hdr        *= uExposure;
 	vec3 mapped = aces(hdr);
@@ -11136,6 +11144,24 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	// current image only — an unconverged edge for one frame, no ghost.
 	m_taaHistoryValid = false;
 
+	// A raw capture is the materials' own colour: every effect that would change it is off for this frame
+	// and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
+	// the deferred resolve lights the G-buffer.
+	const bool  liveRaw = m_rawCapture, liveSrgb = m_rawSrgb;
+	const bool  liveBloom = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveSsr = m_ssrEnabled;
+	const bool  liveDof = m_dofEnabled, liveMb = m_mbEnabled, liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
+	const HE::AAMethod   liveAa   = m_aaMethod;
+	const HE::RenderPath livePath = m_renderPath;
+	if (camera.rawOutput)
+	{
+		m_rawCapture = true;
+		m_rawSrgb    = camera.rawSrgb;
+		m_bloomEnabled = m_ssaoEnabled = m_ssrEnabled = m_dofEnabled = m_mbEnabled = false;
+		m_giEnabled = m_giReflEnabled = false;
+		m_aaMethod  = HE::AAMethod::Off;
+		m_renderPath = HE::RenderPath::Forward;
+	}
+
 	// Same three lines as the offscreen branch of Render().
 	EnsureViewportTarget();
 	glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
@@ -11162,6 +11188,11 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	m_viewportReqH  = liveReqH;
 	m_editorCamera  = liveCam;
 	m_counters      = liveCounters;
+	m_rawCapture = liveRaw; m_rawSrgb = liveSrgb;
+	m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_ssrEnabled = liveSsr;
+	m_dofEnabled = liveDof; m_mbEnabled = liveMb; m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
+	m_aaMethod = liveAa;
+	m_renderPath = livePath;
 	// DrawScene's TAA resolve marks the history valid again — that history is
 	// the screenshot camera's now, and the next real frame must not use it.
 	m_taaHistoryValid = false;
@@ -11840,7 +11871,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glActiveTexture(GL_TEXTURE1);
 				glBindTexture(GL_TEXTURE_2D, bloomTex);
 				glUniform1i(m_uBloomTex, 1);
-				glUniform1f(m_uExposure, 1.0f);
+				glUniform1f(m_uExposure, m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : 1.0f);   // < 0: raw (kTonemapFS)
 				glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
 				// Camera lens flare: project the sun (a point at infinity, w=0 drops the view
 				// translation) to y-up NDC and fold behind-camera / off-screen / below-horizon
@@ -14021,6 +14052,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Deferred needs only MRT + a runtime-generated resolve shader — GL 4.1 is
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
+	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
 	// Metal's Option-A path. The deferred composite (A6) is not built, so in

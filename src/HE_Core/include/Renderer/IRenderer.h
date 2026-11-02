@@ -252,6 +252,9 @@ public:
         // forward regardless of SetRenderPath. What each backend's deferred
         // frame does and does not run (decals, SSR, AO) is plan §10.3/§10.12.
         bool supportsDeferredRendering = false;
+        // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
+        // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
+        bool supportsRawCapture = false;
         // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
         // plan.md). Metal (in the deferred tile path: lag-free, from the stored
         // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last

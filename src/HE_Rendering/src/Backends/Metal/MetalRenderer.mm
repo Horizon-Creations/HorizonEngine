@@ -18773,6 +18773,7 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// The deferred resolve shader is generated from the shared lighting preamble
 	// at runtime — no cross-compiler, no deferred path.
 	c.supportsDeferredRendering  = true;
+	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapMSL)
 	// SSR: deferred tile mode traces the stored G-buffer lag-free; every other
 	// Metal configuration (forward, or non-Apple GPUs' two-pass deferred falls
 	// back to forward SSR too once the path is forward) runs the Option-A
