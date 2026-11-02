@@ -188,8 +188,31 @@ public:
         float waterRipples[4]     = {};
         float waterRippleA[16][4] = {};
         float waterRippleB[16][4] = {};
+        // Volumetric fog (append-only, v3.6, docs/volumetric-fog-plan.md §2.5, Thema 225):
+        //   fogVol     : x = 1 → the froxel volume owns the fog this frame (heApplyFog and the
+        //                deferred reflection transmittance mirror turn into no-ops: the full-screen
+        //                Apply pass fogs the opaque scene + sky instead), y = D (volume range, m),
+        //                z = c (slice distribution constant, m), w = 1 → heFogVolume (binding 34)
+        //                holds the integrated volume on THIS encoder (heApplyFogT reads it)
+        //   fogVolGrid : xyz = grid size (w unused)
+        //   fogViewProj: world → clip, unjittered, with the y flip pre-baked so that
+        //                uv = clip.xy / clip.w * 0.5 + 0.5 addresses the froxel grid directly;
+        //                clip.w is the planar view depth the slices are distributed over
+        // Every fill site that never calls the Metal volume path (previews, UI, GL, D3D11,
+        // D3D12, Vulkan until their steps) leaves all of it 0: the analytic fog runs unchanged.
+        float fogVol[4]       = {};
+        float fogVolGrid[4]   = {};
+        float fogViewProj[16] = {};
     };
+    // Metal's setFragmentBytes caps at 4 KiB; the lighting block rides it on every material draw.
+    static_assert(sizeof(Lighting) <= 4096, "HeLighting outgrew Metal's setBytes limit");
     static constexpr int kMetalLightingBufferIndex = 1; // fragment [[buffer(1)]]
+    // The froxel fog volume (preamble binding 34, heFogVolume) → fragment TEXTURE 17: the next
+    // free texture index after the cloud-shadow map's 16 (Metal allows 31). Read with texelFetch
+    // through an inline constexpr sampler (kMaterialMslOptions), so it costs no sampler slot.
+    // Bound by MetalRenderer::BindMaterialPreambleSlots on every encoder that draws a
+    // material pipeline (a 3D dummy when the volume is off — Metal validates the texture TYPE).
+    static constexpr int kMetalFogVolumeTextureIndex = 17;
     // Clustered variant's light lists (fragmentClustered): GLSL bindings 24/25/26
     // (light array, grid, index list — the same three the clustered deferred
     // resolve reads) → Metal fragment buffers 4/5/6, HLSL t24/t25/t26.
@@ -498,10 +521,29 @@ public:
     // vNormal = +Z, vWorldPos = (screen px, 0) — sane defaults for UI shading.
     const Compiled& uiVertex(Backend backend);
 
+    // ── Volumetric fog kernels (Thema 225, docs/volumetric-fog-plan.md §10) ──────────────
+    // GLSL-450 sources in src/material/FogVolumeShaderSource.h, cross-compiled like every
+    // other pass here. Metal only so far (the other backends are steps 4-6): any other
+    // backend gets a Compiled with ok == false and a log saying so, which is the cue to
+    // keep the analytic fog. fogInject / fogIntegrate are COMPUTE kernels (Metal compute
+    // functions named main0), fogApply a fragment shader that pairs with fullscreenVertex().
+    // Metal pins — inject: HeLighting buffer 1, HeFogVol buffer 0, CSM 11, local atlas 12,
+    // sky env 14, cloud shadow texture 16 (inline sampler), noise 3, history 4, output
+    // image 5. Integrate: HeFogVol buffer 0, injected volume texture 0, integrated image 1.
+    // Apply: HeFogVol buffer 0, integrated volume 0 (+ sampler 0), sky env 1 (+ sampler 1),
+    // scene depth texture 2 (fetched, no sampler).
+    const Compiled& fogInject(Backend backend);
+    const Compiled& fogIntegrate(Backend backend);
+    const Compiled& fogApply(Backend backend);
+    // The assembled GLSL, for tests that compile it through glslang directly.
+    static std::string fogInjectGlsl();
+    static std::string fogIntegrateGlsl();
+    static std::string fogApplyGlsl();
+
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
                    m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear();
-                   m_reflPrepassCache.clear(); }
+                   m_reflPrepassCache.clear(); m_fogCache.clear(); }
 
 private:
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
@@ -519,6 +561,7 @@ private:
     // Own map, not a fifth slot in m_ssrCache: that key space is backend*4 and
     // full, and a collision there hands a caller someone else's shader while
     // still reporting ok.
+    std::unordered_map<int, Compiled>      m_fogCache;         // key = (int)backend*4 + (0 inject / 1 integrate / 2 apply)
     std::unordered_map<int, Compiled>      m_reflPrepassCache; // key = (int)backend*2 + (0 vertex / 1 fragment); 0x100 + backend = instanced vertex
 };
 } // namespace HE

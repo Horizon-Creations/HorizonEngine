@@ -1941,7 +1941,12 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
         // graph material stayed saturated while everything around it faded into
         // the horizon. UNLIT output is deliberately left alone: there "unlit"
         // means "my colour, verbatim".
-        src += "    oColor = vec4(heApplyFog(heLitP(" + base + ", heN, " + met + ", " + rough
+        // Translucent surfaces are drawn AFTER the volumetric-fog Apply pass (which fogs
+        // the opaque scene + sky), so they read the froxel volume themselves:
+        // heApplyFogT. It is heApplyFog (the analytic fog) wherever no volume is bound.
+        src += std::string("    oColor = vec4(")
+             + (blendMode == (int)MatBlendMode::Translucent ? "heApplyFogT" : "heApplyFog")
+             + "(heLitP(" + base + ", heN, " + met + ", " + rough
              + ", vWorldPos, " + spec + ", " + ao + ") + "
              + emis + ", vWorldPos), " + opacity + ");\n";
     else

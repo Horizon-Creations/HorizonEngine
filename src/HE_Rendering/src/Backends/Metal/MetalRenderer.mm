@@ -12,6 +12,7 @@
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake for the IBL ambient cubemap
 #include <JobSystem/JobSystem.h>              // parallel_for — the bake is per-row parallel
 #include <HorizonRendering/SkyFrameParams.h>  // HE::SkyFrameParams / BuildSkyFrameParams (folds in CloudWindVector)
+#include <chrono>
 #include <HorizonRendering/SkyNoise3D.h>      // HE::BuildSkyNoise3D
 #include <HorizonRendering/SsaoKernel.h>      // HE::BuildSSAOKernel / BuildSSAONoise
 #include <MaterialGraph/MaterialGraph.h> // kMatMaxGraphTextures
@@ -6657,6 +6658,9 @@ void MetalRenderer::Initialize(HE::Window* window)
 		throw std::runtime_error("MetalRenderer: MTLCreateSystemDefaultDevice failed");
 	m_device = (void*)CFBridgingRetain(device);
 	EnsureRaytracingSupport();
+#if defined(HE_HAVE_SHADERC)
+	m_extractor.setVolumetricFogCapable(true); // RenderWorld::fogVolume.enabled may now be true
+#endif
 
 	id<MTLCommandQueue> queue = [device newCommandQueue];
 	if (!queue)
@@ -6916,6 +6920,13 @@ void MetalRenderer::Shutdown()
 	if (m_cloudPipeline)        { CFBridgingRelease(m_cloudPipeline);        m_cloudPipeline = nullptr; }
 	if (m_cloudShadowPipeline)  { CFBridgingRelease(m_cloudShadowPipeline);  m_cloudShadowPipeline = nullptr; }
 	DestroyCloudShadowTarget();
+	DestroyFogTargets();
+	if (m_fogInjectPipe)    { CFBridgingRelease(m_fogInjectPipe);    m_fogInjectPipe = nullptr; }
+	if (m_fogIntegratePipe) { CFBridgingRelease(m_fogIntegratePipe); m_fogIntegratePipe = nullptr; }
+	if (m_fogApplyPipe)     { CFBridgingRelease(m_fogApplyPipe);     m_fogApplyPipe = nullptr; }
+	if (m_fogDummy3D)       { CFBridgingRelease(m_fogDummy3D);       m_fogDummy3D = nullptr; }
+	if (m_fogSceneEncoder)  { CFBridgingRelease(m_fogSceneEncoder);  m_fogSceneEncoder = nullptr; }
+	m_fogTried = false;
 	if (m_skyLutPipeline)       { CFBridgingRelease(m_skyLutPipeline);       m_skyLutPipeline = nullptr; }
 	DestroySkyViewLut();
 	if (m_moonTexture)         { CFBridgingRelease(m_moonTexture);          m_moonTexture = nullptr; }
@@ -7615,6 +7626,22 @@ void MetalRenderer::CreateScenePipeline()
 		[dummyArr replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0
 		              withBytes:&white bytesPerRow:4 bytesPerImage:4];
 		m_whiteArrayTexture = (void*)CFBridgingRetain(dummyArr);
+		// Its texture3d twin for the froxel fog volume's slot (fragment texture 17): Metal
+		// validates the texture TYPE, and heApplyFogT's volume is a 3D texture. (S = 0, T = 1:
+		// "no fog" if anything ever did read it.)
+		{
+			MTLTextureDescriptor* d3 = [[MTLTextureDescriptor alloc] init];
+			d3.textureType = MTLTextureType3D;
+			d3.pixelFormat = MTLPixelFormatRGBA16Float;
+			d3.width = 1; d3.height = 1; d3.depth = 1;
+			d3.usage       = MTLTextureUsageShaderRead;
+			d3.storageMode = MTLStorageModeShared;
+			id<MTLTexture> dummy3 = [device newTextureWithDescriptor:d3];
+			const uint16_t clear[4] = { 0, 0, 0, 0x3C00 }; // half 0, 0, 0, 1.0
+			[dummy3 replaceRegion:MTLRegionMake3D(0, 0, 0, 1, 1, 1) mipmapLevel:0 slice:0
+			            withBytes:clear bytesPerRow:8 bytesPerImage:8];
+			m_fogDummy3D = (void*)CFBridgingRetain(dummy3);
+		}
 
 		MTLSamplerDescriptor* sampDesc = [[MTLSamplerDescriptor alloc] init];
 		sampDesc.minFilter = MTLSamplerMinMagFilterLinear;
@@ -12337,6 +12364,309 @@ void MetalRenderer::SetShadowSettings(const ShadowSettings& s)
 	m_extractor.setShadowSettings(s.distance, s.cascadeCount, s.splitLambda, m_shadowSize);
 }
 
+// ─── Volumetric fog (Thema 225, docs/volumetric-fog-plan.md) ─────────────────
+// Three programs from MaterialShaderLibrary::fogInject / fogIntegrate / fogApply (one GLSL
+// source, FogVolumeShaderSource.h): Inject and Integrate are compute dispatches before the
+// scene encoder, Apply is a full-screen pass between the sky and the translucent draws
+// (EncodeScene splits its encoder there). Everything below runs only while the extractor
+// says RenderWorld::fogVolume.enabled — fogMode 0 never reaches it.
+bool MetalRenderer::EnsureFogPipelines()
+{
+	if (m_fogInjectPipe && m_fogIntegratePipe && m_fogApplyPipe) return true;
+	if (m_fogTried) return false;
+	m_fogTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	@autoreleasepool
+	{
+		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+		if (!device) return false;
+		using Backend = HE::MaterialShaderLibrary::Backend;
+		const auto& inj = m_matShaderLib.fogInject(Backend::Metal);
+		const auto& itg = m_matShaderLib.fogIntegrate(Backend::Metal);
+		const auto& app = m_matShaderLib.fogApply(Backend::Metal);
+		const auto& vs  = m_matShaderLib.fullscreenVertex(Backend::Metal);
+		if (!(inj.ok && itg.ok && app.ok && vs.ok))
+		{
+			HE_LOG_ERROR(RHI, "%s",
+				(std::string("MetalRenderer: volumetric fog shader cross-compile failed — analytic fog stays\n")
+				 + inj.log + itg.log + app.log + vs.log).c_str());
+			return false;
+		}
+		NSError* err = nil;
+		auto lib = [&](const std::string& src) -> id<MTLLibrary> {
+			if (err) return nil;
+			return [device newLibraryWithSource:[NSString stringWithUTF8String:src.c_str()] options:nil error:&err];
+		};
+		id<MTLLibrary> iLib = lib(inj.source);
+		id<MTLLibrary> gLib = lib(itg.source);
+		id<MTLLibrary> aLib = lib(app.source);
+		id<MTLLibrary> vLib = lib(vs.source);
+		if (!(iLib && gLib && aLib && vLib))
+		{
+			HE_LOG_ERROR(RHI, "MetalRenderer: volumetric fog MSL compile failed: %s",
+			             err ? [[err localizedDescription] UTF8String] : "unknown");
+			return false;
+		}
+		id<MTLFunction> iFn = [iLib newFunctionWithName:@"main0"];
+		id<MTLFunction> gFn = [gLib newFunctionWithName:@"main0"];
+		id<MTLComputePipelineState> iPso = iFn ? [device newComputePipelineStateWithFunction:iFn error:&err] : nil;
+		id<MTLComputePipelineState> gPso = gFn ? [device newComputePipelineStateWithFunction:gFn error:&err] : nil;
+		MTLRenderPipelineDescriptor* ad = [[MTLRenderPipelineDescriptor alloc] init];
+		ad.vertexFunction   = [vLib newFunctionWithName:@"main0"];
+		ad.fragmentFunction = [aLib newFunctionWithName:@"main0"];
+		ad.colorAttachments[0].pixelFormat = kSceneColorFormat;
+		// out.rgb = Lv + Tv*Lf (ONE) and dst * Tv*Tf (SRC_ALPHA) — the plan's §6.3 blend. The
+		// alpha channel keeps the destination: Tv*Tf must not land in hdrColor.a.
+		ad.colorAttachments[0].blendingEnabled             = YES;
+		ad.colorAttachments[0].rgbBlendOperation           = MTLBlendOperationAdd;
+		ad.colorAttachments[0].alphaBlendOperation         = MTLBlendOperationAdd;
+		ad.colorAttachments[0].sourceRGBBlendFactor        = MTLBlendFactorOne;
+		ad.colorAttachments[0].destinationRGBBlendFactor   = MTLBlendFactorSourceAlpha;
+		ad.colorAttachments[0].sourceAlphaBlendFactor      = MTLBlendFactorZero;
+		ad.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOne;
+		id<MTLRenderPipelineState> aPso = [device newRenderPipelineStateWithDescriptor:ad error:&err];
+		if (!(iPso && gPso && aPso))
+		{
+			HE_LOG_ERROR(RHI, "MetalRenderer: volumetric fog pipeline creation failed: %s",
+			             err ? [[err localizedDescription] UTF8String] : "unknown");
+			return false;
+		}
+		m_fogInjectPipe    = (void*)CFBridgingRetain(iPso);
+		m_fogIntegratePipe = (void*)CFBridgingRetain(gPso);
+		m_fogApplyPipe     = (void*)CFBridgingRetain(aPso);
+		HE_LOG_INFO(RHI, "MetalRenderer: volumetric fog pipelines ready (inject max %lu threads, integrate max %lu)",
+		            (unsigned long)iPso.maxTotalThreadsPerThreadgroup,
+		            (unsigned long)gPso.maxTotalThreadsPerThreadgroup);
+		return true;
+	}
+#endif
+}
+
+void MetalRenderer::DestroyFogTargets()
+{
+	for (void*& t : m_fogInject) if (t) { CFBridgingRelease(t); t = nullptr; }
+	if (m_fogIntegrated) { CFBridgingRelease(m_fogIntegrated); m_fogIntegrated = nullptr; }
+	m_fogGrid = glm::ivec3(0);
+	m_fogHistValid = false;
+}
+
+void MetalRenderer::EnsureFogTargets(const glm::ivec3& grid)
+{
+	if (grid == m_fogGrid && m_fogInject[0] && m_fogInject[1] && m_fogIntegrated) return;
+	DestroyFogTargets();
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	if (!device) return;
+	auto make3D = [&]() -> void* {
+		MTLTextureDescriptor* d = [[MTLTextureDescriptor alloc] init];
+		d.textureType = MTLTextureType3D;
+		d.pixelFormat = MTLPixelFormatRGBA16Float;
+		d.width = grid.x; d.height = grid.y; d.depth = grid.z;
+		d.usage       = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+		d.storageMode = MTLStorageModePrivate;
+		id<MTLTexture> t = [device newTextureWithDescriptor:d];
+		return t ? (void*)CFBridgingRetain(t) : nullptr;
+	};
+	m_fogInject[0]  = make3D();
+	m_fogInject[1]  = make3D();
+	m_fogIntegrated = make3D();
+	if (!(m_fogInject[0] && m_fogInject[1] && m_fogIntegrated)) { DestroyFogTargets(); return; }
+	m_fogGrid      = grid;
+	m_fogHistValid = false; // a new grid has no history to reproject from
+}
+
+void MetalRenderer::EncodeFogVolume(void* cmdBufPtr, float aspect)
+{
+	(void)aspect; // the grid comes from the extractor's FogVolumeData (it saw the same aspect)
+	m_fogFrameActive = false;
+	if (!m_world || !m_renderWorld.fogVolume.enabled) return;
+	if (!EnsureFogPipelines() || !m_skyEnvCube) return;
+	const HE::FogVolumeData& fd = m_renderWorld.fogVolume;
+	EnsureFogTargets(fd.grid);
+	if (!m_fogIntegrated) return;
+	// Inject samples the sky cube (the fog colour) and the sun's bake of it: bring it up to
+	// this frame's sun now, EncodeScene's own call later finds it done (same dead band).
+	UpdateSkyEnvCube(m_renderWorld.sunDirection);
+
+	// ── Time, history validity, wind drift ──────────────────────────────────
+	// HE_SKY_TIME pins the clock for the headless A/B captures: a fixed 60 Hz step makes
+	// the history weight and the wind offset deterministic frame to frame.
+	const bool pinned = [] { const char* v = std::getenv("HE_SKY_TIME"); return v && *v; }();
+	const double now  = pinned ? (m_fogFrameIndex / 60.0)
+	                           : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	float dt = (m_fogLastTime > 0.0 || pinned) ? static_cast<float>(now - m_fogLastTime) : 0.0f;
+	if (pinned && m_fogFrameIndex == 0) dt = 0.0f;
+	m_fogLastTime = now;
+	const CameraData& cam = m_renderWorld.camera;
+	const glm::mat4 viewProj  = cam.projection * cam.view;
+	const glm::mat4 invViewProj = glm::inverse(viewProj);
+	const glm::vec3 camFwd    = -glm::normalize(glm::vec3(glm::inverse(cam.view)[2]));
+	const float     focal     = cam.projection[1][1];
+	bool historyOk = m_fogHistValid && dt > 0.0f && dt < 0.5f
+	             && glm::distance(cam.position, m_fogPrevCam) < 10.0f
+	             && std::abs(focal - m_fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	const float rad = glm::radians(env.windDirection);
+	m_fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+	m_fogNoiseTime   += dt;
+
+	HE::FogVolumeTemporalState ts;
+	ts.jitter01     = HE::fogJitter(m_fogFrameIndex);
+	ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+	ts.historyValid = historyOk;
+	ts.frameIndex   = m_fogFrameIndex;
+	ts.noiseOffset  = m_fogNoiseOffset;
+	ts.noiseTime    = m_fogNoiseTime;
+	const HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+		fd, invViewProj, m_fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+
+	// HeLighting for the shadow/light functions the kernel shares with the surfaces. Lights
+	// and the CSM matrices are exactly what a surface fragment of this frame sees.
+	float skyClock = static_cast<float>(SDL_GetTicks()) / 1000.0f;
+	if (const char* ov = std::getenv("HE_SKY_TIME"); ov && *ov) skyClock = static_cast<float>(std::atof(ov));
+	HE::MaterialShaderLibrary::Lighting lit;
+	const bool shadows = m_renderWorld.shadow.enabled && m_shadowDepthTex;
+	FillMaterialLighting(lit, std::max(1, fd.grid.x), std::max(1, fd.grid.y), false, false, shadows, skyClock);
+
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	const int cur = 1 - m_fogHist;           // written now; m_fogHist holds last frame's result
+	auto computePass = [&](const char* timerName) -> id<MTLComputeCommandEncoder> {
+		MTLComputePassDescriptor* cpd = [MTLComputePassDescriptor computePassDescriptor];
+		if (m_ft.stage && m_ft.sampleBuf)
+		{
+			if (@available(macOS 11.0, *))
+			{
+				const uint32_t base = ftBeginMulti(timerName);
+				if (base != kInvalidSlot)
+				{
+					MTLComputePassSampleBufferAttachmentDescriptor* a = cpd.sampleBufferAttachments[0];
+					a.sampleBuffer              = (__bridge id<MTLCounterSampleBuffer>)m_ft.sampleBuf;
+					a.startOfEncoderSampleIndex = base;
+					a.endOfEncoderSampleIndex   = base + 1;
+				}
+			}
+		}
+		return [cmdBuf computeCommandEncoderWithDescriptor:cpd];
+	};
+	auto tex = [&](void* t) { return (__bridge id<MTLTexture>)t; };
+	id<MTLSamplerState> lin = (__bridge id<MTLSamplerState>)m_linearSampler;
+
+	// ── Inject ──────────────────────────────────────────────────────────────
+	{
+		id<MTLComputeCommandEncoder> enc = computePass("FogInject");
+		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_fogInjectPipe];
+		[enc setBytes:&fc  length:sizeof(fc)  atIndex:0];
+		[enc setBytes:&lit length:sizeof(lit) atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
+		[enc setTexture:tex(m_shadowDepthTex) atIndex:11];
+		[enc setSamplerState:lin atIndex:11];
+		[enc setTexture:tex(m_localShadowTex ? m_localShadowTex : m_shadowDepthTex) atIndex:12];
+		[enc setSamplerState:lin atIndex:12];
+		[enc setTexture:tex(m_skyEnvCube) atIndex:14];
+		[enc setSamplerState:lin atIndex:14];
+		[enc setTexture:tex(m_cloudShadowTex ? m_cloudShadowTex : m_dummyTexture) atIndex:16];
+		[enc setTexture:tex(m_noiseTexture) atIndex:3];
+		[enc setSamplerState:(__bridge id<MTLSamplerState>)m_noiseSampler atIndex:3];
+		[enc setTexture:tex(m_fogInject[m_fogHist]) atIndex:4];
+		[enc setSamplerState:lin atIndex:4];
+		[enc setTexture:tex(m_fogInject[cur]) atIndex:5];
+		const MTLSize tg = MTLSizeMake(8, 4, 2);
+		const MTLSize groups = MTLSizeMake((fd.grid.x + 7) / 8, (fd.grid.y + 3) / 4, (fd.grid.z + 1) / 2);
+		[enc dispatchThreadgroups:groups threadsPerThreadgroup:tg];
+		[enc endEncoding];
+	}
+	// ── Integrate (one thread per column) ───────────────────────────────────
+	{
+		id<MTLComputeCommandEncoder> enc = computePass("FogIntegrate");
+		[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_fogIntegratePipe];
+		[enc setBytes:&fc length:sizeof(fc) atIndex:0];
+		[enc setTexture:tex(m_fogInject[cur]) atIndex:0];
+		[enc setTexture:tex(m_fogIntegrated)  atIndex:1];
+		const MTLSize tg = MTLSizeMake(8, 8, 1);
+		const MTLSize groups = MTLSizeMake((fd.grid.x + 7) / 8, (fd.grid.y + 7) / 8, 1);
+		[enc dispatchThreadgroups:groups threadsPerThreadgroup:tg];
+		[enc endEncoding];
+	}
+
+	m_fogHist         = cur;
+	m_fogHistValid    = true;
+	m_fogPrevViewProj = viewProj;
+	m_fogPrevCam      = cam.position;
+	m_fogPrevFocal    = focal;
+	++m_fogFrameIndex;
+	m_fogFrame        = fd;
+	m_fogViewProjFlip = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f)) * viewProj;
+	m_fogFrameActive  = true;
+	m_fogApplyConstants = fc;
+}
+
+// Ends the scene encoder, runs the Apply pass over the HDR target and opens the encoder
+// the translucent tail continues in. Returns the new encoder (also kept, retained, in
+// m_fogSceneEncoder for EncodeFrame) or null when nothing was split.
+void* MetalRenderer::EncodeFogApplyAndReopen(void* sceneEncoder, void* cmdBufPtr, void* scenePass,
+                                             int width, int height)
+{
+	(void)width; (void)height;
+	if (!m_fogApplyPipe || !m_fogIntegrated || !m_hdrColor || !m_hdrDepth || !m_skyEnvCube) return nullptr;
+	id<MTLCommandBuffer> cmdBuf = (__bridge id<MTLCommandBuffer>)cmdBufPtr;
+	[(__bridge id<MTLRenderCommandEncoder>)sceneEncoder endEncoding];
+
+	// Apply: full-screen, colour only (the depth is a texture here, never an attachment —
+	// the scene encoder that rendered into it is over).
+	{
+		MTLRenderPassDescriptor* p = [MTLRenderPassDescriptor renderPassDescriptor];
+		p.colorAttachments[0].texture     = (__bridge id<MTLTexture>)m_hdrColor;
+		p.colorAttachments[0].loadAction  = MTLLoadActionLoad;
+		p.colorAttachments[0].storeAction = MTLStoreActionStore;
+		ftAttachPass((__bridge void*)p, "FogApply");
+		id<MTLRenderCommandEncoder> enc = [cmdBuf renderCommandEncoderWithDescriptor:p];
+		[enc setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_fogApplyPipe];
+		[enc setFragmentBytes:&m_fogApplyConstants length:sizeof(m_fogApplyConstants) atIndex:0];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)m_fogIntegrated atIndex:0];
+		[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:1];
+		[enc setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
+		[enc setFragmentTexture:(__bridge id<MTLTexture>)m_hdrDepth atIndex:2];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+		[enc endEncoding];
+		++m_counters.draws;
+	}
+
+	// Reopen the scene pass: colour and depth Load. The descriptor is the caller's hdrPass,
+	// already consumed by the first encoder, so editing it now only shapes this one.
+	MTLRenderPassDescriptor* sp = (__bridge MTLRenderPassDescriptor*)scenePass;
+	sp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+	sp.depthAttachment.loadAction     = MTLLoadActionLoad;
+	// Back to the usual rule for what must reach memory after the translucents: the fog's
+	// own need for the depth ended with the Apply pass above.
+	sp.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive()
+	                                  || underwaterPostWanted(m_renderWorld.underwaterCamera))
+	                                     ? MTLStoreActionStore : MTLStoreActionDontCare;
+	if (m_fogSceneTimerBase != kInvalidSlot)
+		ftAttachEnd((__bridge void*)sp, m_fogSceneTimerBase);   // clears the start sample, keeps the pair's end
+	id<MTLRenderCommandEncoder> reopened = [cmdBuf renderCommandEncoderWithDescriptor:sp];
+	if (m_fogSceneEncoder) CFBridgingRelease(m_fogSceneEncoder);
+	m_fogSceneEncoder = (void*)CFBridgingRetain(reopened);
+	return (__bridge void*)reopened;
+}
+
+// The material lighting block's fog lanes: fogVol.x = 1 turns the opaque heApplyFog (and the
+// deferred reflection transmittance mirror) into no-ops, because the Apply pass owns them;
+// w = 1 says heFogVolume (texture 17) holds this frame's integrated volume, which
+// heApplyFogT (translucent graph materials) reads.
+void MetalRenderer::FillFogLighting(HE::MaterialShaderLibrary::Lighting& lit) const
+{
+	if (!m_fogFrameActive || !m_fogIntegrated) return;
+	lit.fogVol[0] = 1.0f;
+	lit.fogVol[1] = m_fogFrame.distance;
+	lit.fogVol[2] = m_fogFrame.sliceC;
+	lit.fogVol[3] = 1.0f;
+	lit.fogVolGrid[0] = static_cast<float>(m_fogFrame.grid.x);
+	lit.fogVolGrid[1] = static_cast<float>(m_fogFrame.grid.y);
+	lit.fogVolGrid[2] = static_cast<float>(m_fogFrame.grid.z);
+	std::memcpy(lit.fogViewProj, glm::value_ptr(m_fogViewProjFlip), sizeof(lit.fogViewProj));
+}
+
 void MetalRenderer::EnsureSSAOTargets(int width, int height)
 {
 	width  = std::max(1, width);
@@ -13937,6 +14267,13 @@ void MetalRenderer::BindMaterialPreambleSlots(void* renderEncoder, bool frameSta
 	// constexpr sampler; sampler indices stop at 15). White dummy when the
 	// pass didn't run, and the strength gate is 0 then anyway.
 	[encoder setFragmentTexture:pick(m_cloudShadowTex) atIndex:16];
+	// Froxel fog volume at texture 17 (heFogVolume, preamble binding 34) — TEXTURE only, read
+	// with texelFetch through an inline constexpr sampler like the cloud-shadow map. Only
+	// heApplyFogT (translucent graph materials) reads it, and only where fogVol.w = 1; the
+	// 3D dummy everywhere else, because Metal validates the texture TYPE.
+	[encoder setFragmentTexture:(__bridge id<MTLTexture>)(frameState && m_fogFrameActive && m_fogIntegrated
+	                                                       ? m_fogIntegrated : m_fogDummy3D)
+	                    atIndex:HE::MaterialShaderLibrary::kMetalFogVolumeTextureIndex];
 }
 
 void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& viewProj,
@@ -14040,7 +14377,8 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 }
 
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
-                                MetalDeferredFrame* deferred)
+                                MetalDeferredFrame* deferred,
+                                void* fogCmdBuf, void* fogScenePass)
 {
 	if (!m_world || !m_scenePipeline || width <= 0 || height <= 0)
 		return;
@@ -14210,7 +14548,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	scene.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
 	scene.sunDir        = glm::vec4(sunDir, 0.0f);
 	scene.ambient       = glm::vec4(m_renderWorld.ambient, 0.0f);
-	scene.fog           = glm::vec4(GetEnvironment().fogDensity,
+	// Volumetric fog on: the built-in shaders' analytic applyFog() steps aside (density 0)
+	// — the full-screen Apply pass fogs the opaque scene and the sky instead.
+	scene.fog           = glm::vec4(m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity,
 	                                GetEnvironment().fogHeightFalloff, 0.0f, 0.0f);
 	scene.viewport      = glm::vec4(static_cast<float>(width), static_cast<float>(height),
 	                                ssaoActive ? 1.0f : 0.0f, 0.0f);
@@ -14735,6 +15075,20 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	drawSky();
 	SamplePoint(renderEncoder, "Sky+Clouds");
 
+	// Volumetric fog: the seam between "opaque + sky" and "translucent". Metal cannot read
+	// the depth attachment inside the encoder that renders into it, so the scene encoder is
+	// ended here, the full-screen Apply pass runs on the HDR target (depth as a texture),
+	// and a second encoder (colour + depth Load) carries the translucent draws and the
+	// particles. The tail below already rebinds everything it needs per encoder.
+	if (m_fogFrameActive && fogCmdBuf && fogScenePass)
+	{
+		if (void* reopened = EncodeFogApplyAndReopen(renderEncoder, fogCmdBuf, fogScenePass, width, height))
+		{
+			renderEncoder = reopened;
+			encoder = (__bridge id<MTLRenderCommandEncoder>)reopened; // the drawSky / wire lambdas see this too
+		}
+	}
+
 	// Motion trails join the blended list here rather than getting a pass of
 	// their own: same vertex layout, same sort, same state. Collected AFTER the
 	// opaque loop so they cannot influence the shadow fit or the sort of anything
@@ -14941,6 +15295,7 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// untouched — graph materials, the deferred resolve and the SSR composite
 	// all read this. Scene-pass fill only; previews keep the zero.
 	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+	FillFogLighting(matLight);
 }
 
 // ─── Clustered lighting build (plan P7) ──────────────────────────────────────
@@ -16730,6 +17085,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 		// EncodeGIShadowRays further down can reuse the same offscreen-viewport-or-
 		// window sizing without recomputing it — harmless (== pw/ph) when !isPrimary.
 		int shW = pw, shH = ph;
+		m_fogFrameActive = false;   // EncodeFogVolume turns it on for a primary frame that runs the volume
 		if (isPrimary)
 		{
 			// Shadow cascades MUST be fit with the SAME aspect the scene pass uses
@@ -16768,6 +17124,13 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeSkyViewLut");
 				EncodeSkyViewLut((__bridge void*)cmdBuf, m_renderWorld.sunDirection);
+			}
+			// Volumetric fog (Thema 225): Inject + Integrate once the shadow maps, the cloud
+			// shadow and the sky cube of this frame exist. fogMode 0 (the default) costs one
+			// bool read here and nothing else, anywhere.
+			{
+				HE_PROFILE_SCOPE_N("Metal::EncodeFogVolume");
+				EncodeFogVolume((__bridge void*)cmdBuf, shadowAspect);
 			}
 		}
 
@@ -17077,8 +17440,11 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// (Thema 185) samples it as well: without this term a camera under water
 			// with DoF, motion blur and TAA all off (the defaults) read a flat depth
 			// texture, and the pass painted the whole frame as one depth.
+			// The volumetric fog's Apply pass reads it as a texture right after the sky, and
+			// the encoder that holds it ends there: it has to reach memory when the fog runs.
 			hdrPass.depthAttachment.storeAction = (m_dofEnabled || m_mbEnabled || TemporalActive()
-			                                       || underwaterPostWanted(m_renderWorld.underwaterCamera))
+			                                       || underwaterPostWanted(m_renderWorld.underwaterCamera)
+			                                       || m_fogFrameActive)
 			                                          ? MTLStoreActionStore
 			                                          : MTLStoreActionDontCare;
 			hdrPass.depthAttachment.clearDepth  = 1.0;
@@ -17094,7 +17460,16 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			// capture start, the fix is: when m_ft.draw is active, DON'T attach this
 			// "Scene" stage pair — instead derive the Scene total from the first/last
 			// draw-boundary points in the completion handler (it becomes approx too).
-			ftAttachPass((__bridge void*)hdrPass, "Scene");
+			// With the fog on, the scene pass is TWO encoders (split after the sky): the pair
+			// spans both — start on this one, end on the reopened one — so "Scene" stays
+			// comparable to a fog-off capture; the Apply pass is its own "FogApply" row.
+			if (m_fogFrameActive)
+			{
+				m_fogSceneTimerBase = ftBeginMulti("Scene");
+				ftAttachStart((__bridge void*)hdrPass, m_fogSceneTimerBase);
+			}
+			else
+				ftAttachPass((__bridge void*)hdrPass, "Scene");
 
 			// Low-res clouds: raymarch the clouds into the quarter-res buffer BEFORE the
 			// scene encoder (its own pass), rendered from THIS frame's camera (extracted in
@@ -17132,7 +17507,14 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				HE_PROFILE_SCOPE_N("Metal::EncodeScene");
 				EncodeScene((__bridge void*)sceneEncoder, sceneW, sceneH,
-				            deferredActive ? &deferredFrame : nullptr);
+				            deferredActive ? &deferredFrame : nullptr,
+				            m_fogFrameActive ? (__bridge void*)cmdBuf : nullptr,
+				            m_fogFrameActive ? (__bridge void*)hdrPass : nullptr);
+				// The fog split ended the first encoder: the translucent tail and everything
+				// after it (debug lines, endEncoding) belong to the one it reopened.
+				if (m_fogSceneEncoder)
+					sceneEncoder = (id<MTLRenderCommandEncoder>)CFBridgingRelease(m_fogSceneEncoder);
+				m_fogSceneEncoder = nullptr;
 			}
 			// Debug lines on top of the opaque scene, still in the HDR pass.
 			if (!m_debugLines.empty())
@@ -17916,6 +18298,10 @@ IRenderer::Capabilities MetalRenderer::GetCapabilities() const
 	// Ray-traced GI reflections: tile-deferred AND forward (same kernels, fed
 	// from the pre-pass); the SW-BVH kernel covers devices without HW RT.
 	c.supportsGIReflections = true;
+	// Volumetric fog (Thema 225): Inject/Integrate/Apply are cross-compiled from the one
+	// GLSL source at runtime, so like the deferred resolve this needs the shader compiler.
+	// A pipeline that then fails to build keeps the analytic fog (EnsureFogPipelines).
+	c.supportsVolumetricFog = true;
 	// TAA needs a velocity buffer. The velocity pass is material-agnostic and
 	// depth-tests against whichever depth the opaque geometry left — G-buffer
 	// or HDR scene pass — so it runs on BOTH render paths (since 16.09.2026;

@@ -6231,7 +6231,17 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				MaterialComponent{ contentManager().registerMaterial(std::move(m)) });
 		};
 		addBox("FogGround", glm::vec3(0.0f, -0.1f, -10.0f), glm::vec3(60.0f, 0.2f, 60.0f), 0.45f, 0.45f, 0.42f);
-		for (int i = 0; i < 5; ++i)
+		const bool slits = std::string(ft) == "slits";
+		if (slits)
+		{
+			// A 14 m wall 14 m ahead with three 1.2 m slits: the sun behind it throws parallel
+			// shafts through the fog toward the camera (the volumetric-shadow witness).
+			const float edges[4][2] = { { -24.0f, -9.6f }, { -8.4f, -0.6f }, { 0.6f, 8.4f }, { 9.6f, 24.0f } };
+			for (const auto& e : edges)
+				addBox("FogWall", glm::vec3(0.5f * (e[0] + e[1]), 7.0f, -14.0f),
+				       glm::vec3(e[1] - e[0], 14.0f, 0.6f), 0.55f, 0.52f, 0.48f);
+		}
+		for (int i = 0; i < (slits ? 0 : 5); ++i)
 			addBox("FogPillar", glm::vec3(-8.0f + 4.0f * static_cast<float>(i), 4.0f, -12.0f),
 			       glm::vec3(1.2f, 8.0f, 1.2f), 0.7f, 0.65f, 0.55f);
 		addBox("FogCubeA", glm::vec3(-2.0f, 0.6f, -6.0f), glm::vec3(1.2f), 0.8f, 0.3f, 0.25f);

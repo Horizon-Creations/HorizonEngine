@@ -12,6 +12,7 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/EnvironmentComponent.h>
+#include <material/MaterialShaderLibrary.h>
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -560,5 +561,87 @@ TEST_CASE("Feasibility probe: GLSL-450 Compute with the real shadow preamble, th
         CHECK_MESSAGE(SUCCEEDED(hr), "FXC rejected the SPIRV-Cross-emitted compute HLSL");
     }
 #endif
+}
+
+// ═══ Step 3: the production kernels through the pin path (Metal) ═════════════
+TEST_CASE("Fog kernels: Inject/Integrate (compute) and Apply (fragment) cross-compile for Metal")
+{
+    HE::MaterialShaderLibrary lib;
+    using B = HE::MaterialShaderLibrary::Backend;
+
+    const auto& inj = lib.fogInject(B::Metal);
+    INFO("inject: ", inj.log);
+    REQUIRE(inj.ok);
+    CHECK(inj.source.find("kernel void main0") != std::string::npos);
+    // The real shadow functions came along (one set of shadow maths): the CSM array,
+    // the HeLighting buffer at 1, the fog block at 0, the history/noise/output pins.
+    CHECK(inj.source.find("[[buffer(1)]]") != std::string::npos);
+    CHECK(inj.source.find("[[buffer(0)]]") != std::string::npos);
+    CHECK(inj.source.find("[[texture(3)]]") != std::string::npos);  // SkyNoise3D
+    CHECK(inj.source.find("[[texture(4)]]") != std::string::npos);  // history
+    CHECK(inj.source.find("[[texture(5)]]") != std::string::npos);  // output image
+    CHECK(inj.source.find("[[texture(11)]]") != std::string::npos); // CSM array
+
+    const auto& integ = lib.fogIntegrate(B::Metal);
+    INFO("integrate: ", integ.log);
+    REQUIRE(integ.ok);
+    CHECK(integ.source.find("kernel void main0") != std::string::npos);
+    // SRV reads and storage-image stores only: no typed UAV load, so the same source is
+    // legal on D3D11 FL11_0. (MSL spells a read of a write-only image `.read(`; the
+    // integrate source must not declare a read-write image at all.)
+    {
+        const std::string g = HE::MaterialShaderLibrary::fogIntegrateGlsl();
+        CHECK(g.find("imageLoad") == std::string::npos);
+        CHECK(g.find("readonly") == std::string::npos);
+        CHECK(g.find("writeonly image3D") != std::string::npos);
+    }
+
+    const auto& apply = lib.fogApply(B::Metal);
+    INFO("apply: ", apply.log);
+    REQUIRE(apply.ok);
+    CHECK(apply.source.find("fragment") != std::string::npos);
+    CHECK(apply.source.find("[[texture(2)]]") != std::string::npos); // scene depth
+
+    // The other backends keep the analytic fog until their steps: a clear "not yet".
+    CHECK_FALSE(lib.fogInject(B::HLSL).ok);
+    CHECK_FALSE(lib.fogApply(B::GLSL410).ok);
+    CHECK_FALSE(lib.fogIntegrate(B::SpirV).ok);
+}
+
+TEST_CASE("heApplyFogT: texture 17 on Metal, analytic fog everywhere else")
+{
+    HE::MaterialShaderLibrary lib;
+    using B = HE::MaterialShaderLibrary::Backend;
+    const std::string frag =
+        "#version 450\n"
+        "layout(location = 0) in vec3 vWorldPos;\n"
+        "layout(location = 0) out vec4 oColor;\n"
+        "void main() { oColor = vec4(heApplyFogT(vec3(1.0), vWorldPos), 1.0); }\n";
+    const auto& metal = lib.fragment(0xF06F06ull, frag, B::Metal);
+    INFO(metal.log);
+    REQUIRE(metal.ok);
+    // The volume is read with texelFetch -> texture::read through texture 17, no sampler slot.
+    CHECK(metal.source.find("[[texture(17)]]") != std::string::npos);
+    CHECK(metal.source.find("[[sampler(17)]]") == std::string::npos);
+
+    // Mode 0 must not change what the other backends compile: no binding 34 anywhere.
+    for (B b : { B::GLSL410, B::GLSL430, B::SpirV, B::HLSL })
+    {
+        const auto& other = lib.fragment(0xF06F07ull, frag, b);
+        INFO("backend ", static_cast<int>(b), ": ", other.log);
+        REQUIRE(other.ok);
+        if (b == B::SpirV) continue; // binary
+        CHECK(other.source.find("heFogVolume") == std::string::npos);
+    }
+
+    // The same graph with the OPAQUE name compiles unchanged on Metal and leaves 17 unbound.
+    const std::string opaque =
+        "#version 450\n"
+        "layout(location = 0) in vec3 vWorldPos;\n"
+        "layout(location = 0) out vec4 oColor;\n"
+        "void main() { oColor = vec4(heApplyFog(vec3(1.0), vWorldPos), 1.0); }\n";
+    const auto& op = lib.fragment(0xF06F08ull, opaque, B::Metal);
+    REQUIRE(op.ok);
+    CHECK(op.source.find("[[texture(17)]]") == std::string::npos);
 }
 #endif // HE_TESTS_HAVE_SHADERC

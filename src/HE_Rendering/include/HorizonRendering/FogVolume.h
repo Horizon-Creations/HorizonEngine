@@ -2,6 +2,7 @@
 #include <Math/Math.h>
 #include <Renderer/EnvironmentSettings.h>
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -134,6 +135,9 @@ struct FogVolumeData
     float      anisotropy = 0.5f;
     float      localLightScatter = 1.0f;
     float      flash = 0.0f;
+    float      sunGain   = 0.25f; // radiance gain of the sun's in-scatter term (isotropic-normalised phase); HE_FOG_SUNGAIN overrides
+    float      lightGain = 0.25f; // same for the window lights; HE_FOG_LIGHTGAIN overrides
+    bool       parity = false; // HE_FOG_PARITY=1: noise/bank/haze/sun/lights off — the volume must equal the analytic fog (plan §9)
 };
 
 // Builds a FogVolumeData from the frame's pushed EnvironmentSettings (the same
@@ -167,7 +171,24 @@ inline FogVolumeData MakeFogVolumeData(const ::EnvironmentSettings& env,
     out.anisotropy         = std::clamp(env.fogAnisotropy, -0.9f, 0.9f);
     out.localLightScatter  = std::max(env.fogLocalLightScatter, 0.0f);
     out.flash              = env.flash;
-    out.enabled            = (env.fogMode == 1)
+    // Debug switches for the headless witnesses (HE_DUMP scenes carry no fog settings of
+    // their own): HE_FOG_MODE=<0|1> overrides the scene's fogMode, HE_FOG_PARITY=1 is the
+    // parity witness of plan §9 — only the height-fog term is left in the volume, so the
+    // result may be compared against mode 0 on graph-material pixels.
+    if (const char* v = std::getenv("HE_FOG_SUNGAIN"); v && *v)   out.sunGain   = static_cast<float>(std::atof(v));
+    if (const char* v = std::getenv("HE_FOG_LIGHTGAIN"); v && *v) out.lightGain = static_cast<float>(std::atof(v));
+    int mode = env.fogMode;
+    if (const char* v = std::getenv("HE_FOG_MODE"); v && *v) mode = std::atoi(v);
+    if (const char* v = std::getenv("HE_FOG_PARITY"); v && *v && std::atoi(v) != 0)
+    {
+        out.parity            = true;
+        out.noiseAmount       = 0.0f;
+        out.bankDensity       = 0.0f;
+        out.precipExtinction  = 0.0f;
+        out.localLightScatter = 0.0f;
+        out.flash             = 0.0f;
+    }
+    out.enabled            = (mode == 1)
                             && (out.density > 0.0f || out.bankDensity > 0.0f)
                             && backendSupportsVolumetricFog
                             && !cameraUnderwater;
@@ -247,8 +268,8 @@ inline FogVolumeConstants FillFogVolumeConstants(const FogVolumeData& fog,
     c.scatter      = glm::vec4(fog.albedo, fog.anisotropy);
     c.temporal     = glm::vec4(temporal.jitter01, temporal.historyAlpha, temporal.historyValid ? 1.0f : 0.0f,
                                static_cast<float>(temporal.frameIndex));
-    c.misc         = glm::vec4(fog.localLightScatter, fog.flash, kFogSunShare, underwaterGate);
-    c.pad          = glm::vec4(0.0f);
+    c.misc         = glm::vec4(fog.localLightScatter, fog.flash, fog.parity ? 0.0f : kFogSunShare, underwaterGate);
+    c.pad          = glm::vec4(fog.parity ? 1.0f : 0.0f, fog.sunGain, fog.lightGain, 0.0f);
     return c;
 }
 

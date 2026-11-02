@@ -325,6 +325,11 @@ public:
         m_shadowMapRes   = std::max(resolution, 1);
     }
 
+    // Whether the backend implements the volumetric fog passes (IRenderer::Capabilities::
+    // supportsVolumetricFog). The walk's RenderWorld::fogVolume.enabled is gated on it, so a
+    // backend that never calls this (default false) keeps the analytic fog everywhere.
+    void setVolumetricFogCapable(bool capable) { m_fogCapable = capable; }
+
 private:
     // Overwrites the extracted sun/moon directional lights (and out.ambient /
     // out.sunDirection) from the day-night state pushed via setDayNight.
@@ -347,6 +352,7 @@ private:
     uint64_t                        m_sectionMaterialEpoch = 0;
     // setShadowSettings() state; defaults = the historical fit constants.
     float     m_shadowDistance = 250.0f;
+    bool      m_fogCapable     = false; // setVolumetricFogCapable
     int       m_cascadeCount   = 3;
     float     m_splitLambda    = 0.5f;
     int       m_shadowMapRes   = HE::kShadowMapResolution;

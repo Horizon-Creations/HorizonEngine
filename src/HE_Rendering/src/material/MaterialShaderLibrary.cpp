@@ -4,6 +4,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include "ShaderCompiler.h" // he::shaderc
+#include "FogVolumeShaderSource.h"
 
 #include <cstring>
 #include <functional>
@@ -230,6 +231,9 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 waterRipples;   // water rings: x = live count (0 = none), y = ring speed (m/s), z = decay time (s)
     vec4 waterRippleA[16]; // xy = ring centre (world XZ), z = start radius (m), w = strength 0..1
     vec4 waterRippleB[16]; // x = age (s), y = kind (0 impact, 1 trail, 2 script, 3 exit)
+    vec4 fogVol;         // volumetric fog: x = 1 → the froxel volume owns the fog (heApplyFog = no-op), y = D (m), z = c (m), w = 1 → heFogVolume bound
+    vec4 fogVolGrid;     // xyz = froxel grid size
+    mat4 fogViewProj;    // world → clip, unjittered, y flip pre-baked: uv = clip.xy / clip.w * 0.5 + 0.5, clip.w = planar depth
 } heLight;
 // Screen-space ray-traced shadow masks (GI): sun visibility (.r) + local-light
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
@@ -362,7 +366,7 @@ vec3 heGIIrradianceAt(vec3 P, vec3 N) {
 // the ray reproduces the colour without pulling the sky library into every
 // material. Without this, distant custom-material geometry stayed fully
 // saturated while everything around it melted into the horizon.
-vec3 heApplyFog(vec3 color, vec3 worldPos) {
+vec3 heApplyFogAnalytic(vec3 color, vec3 worldPos) {
     if (heLight.viewMode.x > 0.5) return color; // Unlit view: fog is lighting's business
     if (heLight.fog.x <= 0.0 || heLight.fog.z <= 0.5) return color;
     vec3  ray  = worldPos - heLight.camPos.xyz;
@@ -373,6 +377,75 @@ vec3 heApplyFog(vec3 color, vec3 worldPos) {
     float f = 1.0 - exp(-optical);
     vec3 fogCol = texture(heSkyEnv, ray / max(dist, 1e-4)).rgb;
     return mix(color, fogCol, clamp(f, 0.0, 1.0));
+}
+// Opaque and masked surfaces: with the froxel volume on (fogVol.x) the full-screen Apply
+// pass fogs the finished opaque scene and the sky, so this is a no-op there — the same
+// pattern as viewMode.x. fogVol is 0 on every fill site that has no volume (all of them
+// but Metal's scene passes today), so the analytic fog above runs unchanged.
+vec3 heApplyFog(vec3 color, vec3 worldPos) {
+    if (heLight.fogVol.x > 0.5) return color;
+    return heApplyFogAnalytic(color, worldPos);
+}
+#ifdef HE_FOG_VOLUME
+// Integrated froxel volume (binding 34): rgb = in-scattered radiance L(0 → slice), a = transmittance T.
+// Read with texelFetch only, so a backend whose sampler registers are all taken (D3D, SM 5.0)
+// needs no live sampler for it; the trilinear blend is done here.
+layout(set = 0, binding = 34) uniform sampler3D heFogVolume;
+vec4 heFogFetch(vec3 uvw) {
+    ivec3 sz = textureSize(heFogVolume, 0);
+    vec3  p  = uvw * vec3(sz) - 0.5;
+    ivec3 i0 = ivec3(floor(p));
+    vec3  f  = p - vec3(i0);
+    ivec3 lo = clamp(i0, ivec3(0), sz - 1);
+    ivec3 hi = clamp(i0 + 1, ivec3(0), sz - 1);
+    vec4 c000 = texelFetch(heFogVolume, ivec3(lo.x, lo.y, lo.z), 0);
+    vec4 c100 = texelFetch(heFogVolume, ivec3(hi.x, lo.y, lo.z), 0);
+    vec4 c010 = texelFetch(heFogVolume, ivec3(lo.x, hi.y, lo.z), 0);
+    vec4 c110 = texelFetch(heFogVolume, ivec3(hi.x, hi.y, lo.z), 0);
+    vec4 c001 = texelFetch(heFogVolume, ivec3(lo.x, lo.y, hi.z), 0);
+    vec4 c101 = texelFetch(heFogVolume, ivec3(hi.x, lo.y, hi.z), 0);
+    vec4 c011 = texelFetch(heFogVolume, ivec3(lo.x, hi.y, hi.z), 0);
+    vec4 c111 = texelFetch(heFogVolume, ivec3(hi.x, hi.y, hi.z), 0);
+    return mix(mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y),
+               mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y), f.z);
+}
+#endif
+// Translucent surfaces (water, glass, alpha-blended graph materials): they sit BEHIND
+// the Apply pass in the frame, so they read the volume themselves — the same
+// arithmetic as that pass: C * T + L over the ray from the camera to this fragment,
+// plus the analytic far field when the fragment lies beyond the volume's range D.
+// Everything falls back to the analytic fog when the volume is off or not bound, and
+// on every backend that does not define HE_FOG_VOLUME.
+vec3 heApplyFogT(vec3 color, vec3 worldPos) {
+#ifdef HE_FOG_VOLUME
+    if (heLight.fogVol.x > 0.5 && heLight.fogVol.w > 0.5) {
+        if (heLight.viewMode.x > 0.5) return color;
+        vec3  ray  = worldPos - heLight.camPos.xyz;
+        float dist = max(length(ray), 1e-4);
+        vec3  dir  = ray / dist;
+        vec4  clip = heLight.fogViewProj * vec4(worldPos, 1.0);
+        float z    = max(clip.w, 0.0);
+        vec2  uv   = clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5;
+        float D    = heLight.fogVol.y;
+        float c    = heLight.fogVol.z;
+        float N    = heLight.fogVolGrid.z;
+        float t    = log(1.0 + min(z, D) / c) / log(1.0 + D / c);
+        vec4  vol  = heFogFetch(vec3(uv, max(t - 0.5 / N, 0.5 / N)));
+        vol = mix(vec4(0.0, 0.0, 0.0, 1.0), vol, min(t * N, 1.0)); // first slice: fade in from "no fog yet"
+        float Tf = 1.0;
+        vec3  Lf = vec3(0.0);
+        if (z > D && heLight.fog.x > 0.0 && heLight.fog.z > 0.5) {
+            float dv  = D * dist / z;
+            float b0  = heLight.fog.x * exp(clamp(-heLight.fog.y * heLight.camPos.y, -30.0, 30.0));
+            float m   = heLight.fog.y * dir.y;
+            float opt = (abs(m) > 1e-4) ? b0 * (exp(-m * dv) - exp(-m * dist)) / m : b0 * (dist - dv);
+            Tf = exp(-max(opt, 0.0));
+            Lf = texture(heSkyEnv, dir).rgb * (1.0 - Tf);
+        }
+        return color * (vol.a * Tf) + vol.rgb + vol.a * Lf;
+    }
+#endif
+    return heApplyFogAnalytic(color, worldPos);
 }
 // Screen-space GI sun-visibility for the current fragment (1 = fully lit).
 // gl_FragCoord-based, so even the legacy worldPos-less heLit() can use it.
@@ -844,10 +917,15 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
 // #version to be the first token). If the source has none, prepend one.
 // `clustered` defines HE_CLUSTERED ahead of the preamble — the forward
 // clustered-lighting variant (fragmentClustered).
-std::string injectPreamble(const std::string& src, bool clustered = false)
+// `fogVolume` defines HE_FOG_VOLUME: the preamble then declares heFogVolume (binding 34) and
+// heApplyFogT reads the froxel volume. Only the backends that bind it ask for it (Metal today);
+// everywhere else heApplyFogT is the analytic fog and binding 34 does not exist.
+std::string injectPreamble(const std::string& src, bool clustered = false, bool fogVolume = false)
 {
-    const std::string pre = clustered ? std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble
-                                      : std::string(kLightingPreamble);
+    std::string pre;
+    if (clustered) pre += "#define HE_CLUSTERED 1\n";
+    if (fogVolume) pre += "#define HE_FOG_VOLUME 1\n";
+    pre += kLightingPreamble;
     const size_t vpos = src.find("#version");
     if (vpos == std::string::npos)
         return std::string("#version 450\n") + pre + src;
@@ -1337,7 +1415,7 @@ namespace
 he::shaderc::MslOptions kMaterialMslOptions()
 {
     he::shaderc::MslOptions opts;
-    opts.constexprLinearSamplers = { { 0u, 33u } };
+    opts.constexprLinearSamplers = { { 0u, 33u }, { 0u, 34u } }; // cloud shadow, froxel fog volume
     return opts;
 }
 
@@ -1856,7 +1934,7 @@ void main() {
     }
     // Fog transmittance (mirror of heApplyFog's factor): the resolve fogged the
     // rest of the lighting — an additive term must scale by (1 − f) = e^-optical.
-    if (heLight.fog.x > 0.0 && heLight.fog.z > 0.5)
+    if (heLight.fog.x > 0.0 && heLight.fog.z > 0.5 && heLight.fogVol.x <= 0.5)
     {
         vec3  ray  = P - heLight.camPos.xyz;
         float dist = length(ray);
@@ -2550,7 +2628,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
                   "GLSL410/GLSLES300 have none (GL 4.3+ uses Backend::GLSL430)";
         return m_fragCache.emplace(key, std::move(out)).first->second;
     }
-    const std::string injected = injectPreamble(glsl, clustered); // adds the lighting UBO + heLit()
+    const std::string injected = injectPreamble(glsl, clustered, backend == Backend::Metal); // adds the lighting UBO + heLit()
     if (backend == Backend::Metal)
     {
         // ── Fragment sampler budget ──────────────────────────────────────────
@@ -2635,7 +2713,11 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
               // uses an inline constexpr sampler (kMaterialMslOptions below), so
               // the sampler budget stays untouched. Per-frame bind shared with
               // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
-              { Stage::Fragment, 0, 33, 16 } };
+              { Stage::Fragment, 0, 33, 16 },
+              // Froxel fog volume (binding 34, only declared when injectPreamble defines
+              // HE_FOG_VOLUME — Metal's material variants) → MSL TEXTURE 17, the next free
+              // index; texelFetch + the inline constexpr sampler, no sampler slot.
+              { Stage::Fragment, 0, 34, static_cast<uint32_t>(kMetalFogVolumeTextureIndex) } };
         // Clustered variant: the three light lists are BUFFERS, so the sampler
         // budget above is untouched. Fragment buffers 4/5/6 — free in the scene
         // pass (fragmentMain reads 0 and 3), and the slots the clustered
@@ -2764,5 +2846,95 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
     }
     return m_fragCache.emplace(key, std::move(out)).first->second;
+}
+// ─── Volumetric fog kernels (Thema 225) ──────────────────────────────────────
+// Sources: FogVolumeShaderSource.h. The inject kernel includes the REAL lighting
+// preamble (heCsmShadow & co.), which is fragment-flavoured: a few helpers read
+// gl_FragCoord and dFdx/dFdy, and glslang rejects those in a compute shader even
+// when nothing calls them. Three stub macros defined BEFORE the preamble make it
+// compile as compute without touching a line of it (heLitP & friends are never
+// reached from the kernel and are dead-stripped).
+namespace
+{
+constexpr const char* kComputeStubs =
+    "#define gl_FragCoord vec4(0.0)\n"
+    "#define dFdx(x) ((x) * 0.0)\n"
+    "#define dFdy(x) ((x) * 0.0)\n";
+} // namespace
+
+std::string MaterialShaderLibrary::fogInjectGlsl()
+{
+    return std::string("#version 450\n") + kComputeStubs
+         + "layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;\n"
+         + kLightingPreamble + FogShaderSource::kFogVolBlock
+         + FogShaderSource::kInjectBody + FogShaderSource::kInjectMain;
+}
+
+std::string MaterialShaderLibrary::fogIntegrateGlsl()
+{
+    return std::string(FogShaderSource::kIntegrateSource) + FogShaderSource::kFogVolBlock
+         + FogShaderSource::kIntegrateMain;
+}
+
+std::string MaterialShaderLibrary::fogApplyGlsl()
+{
+    return std::string(FogShaderSource::kApplySource) + FogShaderSource::kFogVolBlock
+         + FogShaderSource::kApplyMain;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogInject(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4;
+    if (auto it = m_fogCache.find(key); it != m_fogCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(fogInjectGlsl(), Stage::Compute,
+            { { Stage::Compute, 0, 0,  static_cast<uint32_t>(kMetalLightingBufferIndex) }, // HeLighting
+              { Stage::Compute, 0, 36, 0 },    // HeFogVol
+              { Stage::Compute, 0, 12, 11 },   // CSM array
+              { Stage::Compute, 0, 13, 12 },   // local shadow atlas
+              { Stage::Compute, 0, 15, 14 },   // sky env cube
+              { Stage::Compute, 0, 33, 16 },   // cloud shadow (inline sampler)
+              { Stage::Compute, 0, 35, 3 },    // SkyNoise3D
+              { Stage::Compute, 0, 37, 4 },    // history
+              { Stage::Compute, 0, 38, 5 } },  // output image
+            kMaterialMslOptions()));
+    else
+        out.log = "fogInject: volumetric fog is not implemented for this backend yet (Thema 225 steps 4-6)";
+    return m_fogCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogIntegrate(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4 + 1;
+    if (auto it = m_fogCache.find(key); it != m_fogCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(fogIntegrateGlsl(), Stage::Compute,
+            { { Stage::Compute, 0, 36, 0 },    // HeFogVol
+              { Stage::Compute, 0, 37, 0 },    // injected volume
+              { Stage::Compute, 0, 38, 1 } })); // integrated image
+    else
+        out.log = "fogIntegrate: volumetric fog is not implemented for this backend yet (Thema 225 steps 4-6)";
+    return m_fogCache.emplace(key, std::move(out)).first->second;
+}
+
+const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogApply(Backend backend)
+{
+    const int key = static_cast<int>(backend) * 4 + 2;
+    if (auto it = m_fogCache.find(key); it != m_fogCache.end()) return it->second;
+    using namespace he::shaderc;
+    Compiled out;
+    if (backend == Backend::Metal)
+        out = toCompiled(compileMslPinned(fogApplyGlsl(), Stage::Fragment,
+            { { Stage::Fragment, 0, 36, 0 },   // HeFogVol
+              { Stage::Fragment, 0, 34, 0 },   // integrated volume (+ sampler 0)
+              { Stage::Fragment, 0, 15, 1 },   // sky env cube (+ sampler 1)
+              { Stage::Fragment, 0, 39, 2 } })); // scene depth (fetched)
+    else
+        out.log = "fogApply: volumetric fog is not implemented for this backend yet (Thema 225 steps 4-6)";
+    return m_fogCache.emplace(key, std::move(out)).first->second;
 }
 } // namespace HE
