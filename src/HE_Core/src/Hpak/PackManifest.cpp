@@ -110,7 +110,10 @@ namespace HE
 {
 uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
 {
-    uint8_t buf[8 + 32 + 1 + 5];
+    // Value-initialised: the writes below end at index 44 of 46, and the hashed tail byte must be
+    // deterministic (on Linux the stack garbage made every call's fingerprint differ, so no
+    // manifest ever matched and the incremental cache never reused anything).
+    uint8_t buf[8 + 32 + 1 + 5] = {};
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
     buf[2] = s.encrypt ? 1 : 0;
