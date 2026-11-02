@@ -2,6 +2,8 @@
 
 #include <Backends/OpenGL/OpenGLLandscape.h>
 
+#include <chrono>
+
 #include <glad/glad.h>
 #include <SDL3/SDL.h>
 
@@ -58,8 +60,10 @@ public:
 		glEnable(GL_DEPTH_TEST);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+		const auto t0 = std::chrono::steady_clock::now();
 		HE::LandscapeRenderFrame frame;
 		in.provider(glm::dmat4(in.viewProj), false, frame);
+		const auto t1 = std::chrono::steady_clock::now();
 		OpenGLLandscape::Shading sh;
 		sh.sunDir = in.sunDir;
 		sh.sunColor = in.sunColor;
@@ -77,8 +81,21 @@ public:
 			sh.albedoArray = array;
 		}
 		m_landscape.draw(frame, in.viewProj, sh);
+		const auto t2 = std::chrono::steady_clock::now();
 		if (array) glDeleteTextures(1, &array);
 		glFinish();
+		const auto t3 = std::chrono::steady_clock::now();
+		const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+		out.providerMs = ms(t0, t1);
+		out.encodeMs = ms(t1, t2);
+		out.gpuMs = ms(t1, t3);
+		if (in.timing)
+		{
+			const auto& st = m_landscape.stats();
+			out.uploads = st.uploads; out.patches = st.patches; out.drawCalls = st.drawCalls; out.rejected = st.rejected;
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			return true;
+		}
 
 		out.width = m_w;
 		out.height = m_h;

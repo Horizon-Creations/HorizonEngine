@@ -20,7 +20,11 @@
 #include "EngineCheck.h"
 #include "GpuCheck.h"
 
+#include <ContentManager/ContentManager.h>
+#include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeWater.h>
+#include <HorizonScene/LandscapeWorldProxies.h>
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/LandscapeTile.h>
 
@@ -375,6 +379,133 @@ int runBackend(gpucheck::Backend& be, const std::string& packPath, const std::fi
 	std::printf("  %s\n", tally.failures == 0 ? "OK" : "FAILED");
 	return tally.failures == 0 ? 0 : 1;
 }
+
+// ── --measure ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+struct Series
+{
+	std::vector<double> v;
+	void add(double x) { v.push_back(x); }
+	double pct(double p) const
+	{
+		if (v.empty()) return 0.0;
+		std::vector<double> s = v;
+		std::sort(s.begin(), s.end());
+		return s[std::min(s.size() - 1, static_cast<size_t>(p * static_cast<double>(s.size())))];
+	}
+	double mean() const { double a = 0; for (double x : v) a += x; return v.empty() ? 0.0 : a / static_cast<double>(v.size()); }
+	void print(const char* what) const { std::printf("  %-34s p50 %7.3f ms   p95 %7.3f ms   max %7.3f ms   mean %7.3f ms\n", what, pct(0.5), pct(0.95), pct(1.0 - 1e-9), mean()); }
+};
+
+// One backend, a camera flying over a 12 km procedural world at 40 m/s, 1440p: the CPU side of the landscape (the runtime's update, the frame it builds,
+// recording the draws) and the GPU's time for the landscape pass, per frame. Paced like a 60 fps game, so the store streams at the rate it would.
+int runMeasure(gpucheck::Backend& be)
+{
+	std::printf("[%s, measured]\n", be.name());
+	ProceduralLandscapeParams p;
+	p.tilesX = p.tilesZ = 24;
+	auto src = std::make_shared<ProceduralLandscapeSource>(p);
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;
+	std::string err;
+	if (!rt.begin(src, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
+	glm::dvec3 pos{ 2500.0, 1900.0, 2500.0 };
+	const glm::dvec3 dir = glm::normalize(glm::dvec3(1.0, -0.08, 0.35));
+	const glm::dvec3 step = glm::normalize(glm::dvec3(dir.x, 0.0, dir.z)) * 40.0 / 60.0;
+	if (!settle(rt, pos, glm::dvec3(0.0))) { std::printf("  the store did not settle\n"); return 1; }
+	Series update, provider, encode, gpu, patches, uploads;
+	uint64_t lastUploads = 0;
+	const int warm = 30, frames = 600;
+	for (int f = 0; f < warm + frames; ++f)
+	{
+		const auto frameStart = std::chrono::steady_clock::now();
+		const auto t0 = std::chrono::steady_clock::now();
+		rt.updateAt(pos, glm::vec3(step * 60.0), 1.0, glm::dvec3(0.0));
+		const double upMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		Camera c{ pos, dir, { 0.0, 0.0, 0.0 } };
+		gpucheck::RenderIn in = makeInput(c, be.depthIsNdc(), rt);
+		in.width = 2560;
+		in.height = 1440;
+		in.timing = true;
+		gpucheck::RenderOut out;
+		if (!be.render(in, out)) { std::printf("  render failed: %s\n", out.error.c_str()); return 1; }
+		if (f >= warm)
+		{
+			update.add(upMs); provider.add(out.providerMs); encode.add(out.encodeMs); gpu.add(out.gpuMs);
+			patches.add(static_cast<double>(out.patches)); uploads.add(static_cast<double>(out.uploads - lastUploads));
+		}
+		lastUploads = out.uploads;
+		pos += step;
+		const auto spent = std::chrono::steady_clock::now() - frameStart;
+		if (spent < std::chrono::microseconds(16667)) std::this_thread::sleep_for(std::chrono::microseconds(16667) - std::chrono::duration_cast<std::chrono::microseconds>(spent));
+	}
+	std::printf("  %d frames at 2560 x 1440, %.0f m flown, %zu tiles resident, %.0f patches a frame (max %.0f), %.2f tile uploads a frame\n", frames, 40.0 * frames / 60.0,
+	            rt.store()->residentKeys().size(), patches.mean(), patches.pct(1.0 - 1e-9), uploads.mean());
+	update.print("runtime update (CPU)");
+	provider.print("build the frame (CPU)");
+	encode.print("record the draws (CPU)");
+	Series cpu;
+	for (size_t i = 0; i < update.v.size(); ++i) cpu.add(update.v[i] + provider.v[i] + encode.v[i]);
+	cpu.print("landscape CPU, the three together");
+	gpu.print(std::string(be.name()) == "Metal" ? "landscape GPU pass (Metal GPU time)" : "landscape pass wall time (GL, glFinish)");
+	return 0;
+}
+
+// The CPU side of foliage and water: the runtime streaming them and the proxies that make them entities, on the main thread, per frame.
+int runMeasureScene()
+{
+	std::printf("[foliage and water, CPU]\n");
+	ProceduralLandscapeParams p;
+	p.tilesX = p.tilesZ = 8;
+	p.seaLevelM = 1500.0f;
+	auto src = std::make_shared<ProceduralLandscapeSource>(p);
+	LandscapeRuntime rt;
+	LandscapeRuntimeConfig cfg;
+	std::string err;
+	if (!rt.begin(src, cfg, &err)) { std::printf("  runtime: %s\n", err.c_str()); return 1; }
+	FoliageLayer grass;
+	grass.meshAssetId = HE::UUID{ 1, 0 };
+	grass.density = 0.05f;
+	grass.drawDistance = 120.0f;
+	FoliageLayer trees = grass;
+	trees.density = 0.002f;
+	trees.drawDistance = 1000.0f;
+	trees.seed = 9;
+	rt.setFoliageLayers({ grass, trees });
+	HorizonWorld world;
+	ContentManager content{ "." };
+	LandscapeWorldProxies proxies;
+	glm::dvec3 pos{ 1800.0, 1700.0, 1800.0 };
+	const glm::dvec3 step = glm::normalize(glm::dvec3(1.0, 0.0, 0.35)) * 20.0 / 60.0;
+	const auto t0 = std::chrono::steady_clock::now();
+	for (;;)
+	{
+		rt.updateAt(pos, glm::vec3(0.0f), 5.0, glm::dvec3(0.0));
+		std::vector<LandscapeFoliageDraw> d;
+		rt.foliageDraws(d);
+		if (!d.empty() && rt.waterRegion() && !rt.water().stats().building) break;
+		if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(120)) { std::printf("  no foliage or water in 120 s\n"); return 1; }
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	Series update, sync;
+	for (int f = 0; f < 600; ++f)
+	{
+		const auto frameStart = std::chrono::steady_clock::now();
+		const auto a = std::chrono::steady_clock::now();
+		rt.updateAt(pos, glm::vec3(step * 60.0), 1.0, glm::dvec3(0.0));
+		const auto b = std::chrono::steady_clock::now();
+		proxies.sync(world, rt, content, nullptr);
+		const auto c = std::chrono::steady_clock::now();
+		if (f >= 30) { update.add(std::chrono::duration<double, std::milli>(b - a).count()); sync.add(std::chrono::duration<double, std::milli>(c - b).count()); }
+		pos += step;
+		const auto spent = std::chrono::steady_clock::now() - frameStart;
+		if (spent < std::chrono::microseconds(16667)) std::this_thread::sleep_for(std::chrono::microseconds(16667) - std::chrono::duration_cast<std::chrono::microseconds>(spent));
+	}
+	std::printf("  600 frames, 20 m/s, %zu foliage entities, %zu water entities, %zu entities made over the run, %llu plants held\n", proxies.stats().foliageEntities, proxies.stats().waterEntities,
+	            proxies.stats().created, static_cast<unsigned long long>(rt.foliage().stats().instances));
+	update.print("runtime update with foliage + water");
+	sync.print("LandscapeWorldProxies::sync");
+	return 0;
+}
 } // namespace
 
 namespace gpucheck
@@ -386,12 +517,14 @@ int main(int argc, char** argv)
 {
 	std::filesystem::path outDir = ".";
 	std::string only;
+	bool measure = false;    // --measure: only time the landscape (CPU and GPU) instead of checking pictures
 	std::string arrayRoot;   // --arrays <EngineContent root>: also draw the ground from the Forest albedo array found there
 	for (int i = 1; i < argc; ++i)
 	{
 		if (!std::strcmp(argv[i], "--out") && i + 1 < argc) outDir = argv[++i];
 		else if (!std::strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
 		else if (!std::strcmp(argv[i], "--arrays") && i + 1 < argc) arrayRoot = argv[++i];
+		else if (!std::strcmp(argv[i], "--measure")) measure = true;
 	}
 	std::filesystem::create_directories(outDir);
 
@@ -410,6 +543,22 @@ int main(int argc, char** argv)
 		if (!w.finish()) { std::printf("pack: finish failed\n"); return 2; }
 	}
 
+	if (measure)
+	{
+		int mrc = 0;
+		const auto go = [&](std::unique_ptr<gpucheck::Backend> be) {
+			std::string err;
+			if (!be->init(err)) { std::printf("[%s] cannot start here: %s\n", be->name(), err.c_str()); mrc = std::max(mrc, 3); return; }
+			mrc = std::max(mrc, runMeasure(*be));
+		};
+		if (only.empty() || only == "gl") go(gpucheck::makeGlBackend());
+#ifdef HE_CHECK_METAL
+		if (only.empty() || only == "metal") go(gpucheck::makeMetalBackend());
+#endif
+		if (only.empty() || only == "scene") mrc = std::max(mrc, runMeasureScene());
+		std::filesystem::remove(pack);
+		return mrc;
+	}
 	int rc = 0, ran = 0;
 	const auto start = [&](std::unique_ptr<gpucheck::Backend> be) {
 		std::string err;

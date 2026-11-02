@@ -505,3 +505,28 @@ TEST_CASE("landscape world component: saved with the scene, loaded back, absent 
 	CHECK(old.registry().view<LandscapeWorldComponent>().size() == 0);
 	std::filesystem::remove(file);
 }
+
+TEST_CASE("landscape runtime: the component's texture group and tile size survive a save and a load")
+{
+	HorizonWorld world;
+	const Entity e = world.createEntity("Landscape");
+	auto& c = world.registry().emplace<LandscapeWorldComponent>(e);
+	c.pack = "world.bin";
+	c.textureGroup = 2;
+	c.textureMeters = 12.5f;
+
+	SceneSerializer ser;
+	std::vector<uint8_t> bytes;
+	REQUIRE(ser.saveToMemory(world, bytes));
+	HorizonWorld back;
+	REQUIRE(ser.loadFromMemory(back, bytes));
+	size_t n = 0;
+	for (auto [be, lw] : back.registry().view<LandscapeWorldComponent>().each())
+	{
+		++n;
+		CHECK(lw.pack == "world.bin");
+		CHECK(lw.textureGroup == 2);
+		CHECK(lw.textureMeters == doctest::Approx(12.5f));
+	}
+	CHECK(n == 1);
+}

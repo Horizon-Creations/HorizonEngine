@@ -7,8 +7,8 @@
 // single-landscape case; a scene can have either. The data is a pack file (LandscapeSource.h, written by the editor's
 // import in step 6 or by a tool), streamed around the camera by HE::LandscapeRuntime (LandscapeRuntime.h).
 //
-// Not serialized yet: SceneSerializer, the component key table, the inspector and the editor's import come with
-// the editor step. Until then a scene gets one by code (tests, tools, a game's setup).
+// Serialized as "landscapeWorld" (SceneSerializer.cpp). The inspector and the editor's import come with the editor step; until then
+// a scene gets one by code (tests, tools, a game's setup) or by editing the scene file.
 struct LandscapeWorldComponent {
 	bool        enabled       = true;
 	std::string pack;                    // project-relative or absolute path of the pack file

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 
 namespace gpucheck
@@ -67,8 +68,10 @@ public:
 
 			id<MTLCommandBuffer> cb = [m_queue commandBuffer];
 			id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+			const auto t0 = std::chrono::steady_clock::now();
 			HE::LandscapeRenderFrame frame;
 			in.provider(glm::dmat4(in.viewProj), false, frame);   // the plain GL matrix, like the renderer's scene pass
+			const auto t1 = std::chrono::steady_clock::now();
 			MetalLandscape::Shading sh;
 			sh.sunDir = in.sunDir;
 			sh.sunColor = in.sunColor;
@@ -101,9 +104,19 @@ public:
 				[blit synchronizeResource:depth];
 				[blit endEncoding];
 			}
+			const auto t2 = std::chrono::steady_clock::now();
 			[cb commit];
 			[cb waitUntilCompleted];
 			if (cb.error) { out.error = [[cb.error localizedDescription] UTF8String]; return false; }
+			out.providerMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+			out.encodeMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+			out.gpuMs = (cb.GPUEndTime - cb.GPUStartTime) * 1000.0;
+			if (in.timing)
+			{
+				const auto& st = m_landscape.stats();
+				out.uploads = st.uploads; out.patches = st.patches; out.drawCalls = st.drawCalls; out.rejected = st.rejected;
+				return true;
+			}
 
 			const size_t w = static_cast<size_t>(in.width), h = static_cast<size_t>(in.height);
 			std::vector<uint16_t> half(w * h * 4);

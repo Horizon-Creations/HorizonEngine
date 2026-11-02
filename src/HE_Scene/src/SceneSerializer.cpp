@@ -637,6 +637,8 @@ namespace
 				{ "budgetMB",     lw->budgetMB },
 				{ "heightMinM",   lw->heightMinM },
 				{ "heightScaleM", lw->heightScaleM },
+				{ "textureGroup", lw->textureGroup },
+				{ "textureMeters", lw->textureMeters },
 			};
 		}
 		// Where the entity lives in a split scene (the splitter reads it, CellSplit.cpp).
@@ -1647,6 +1649,8 @@ namespace
 			lw.budgetMB     = c.value("budgetMB",     lw.budgetMB);
 			lw.heightMinM   = c.value("heightMinM",   lw.heightMinM);
 			lw.heightScaleM = c.value("heightScaleM", lw.heightScaleM);
+			lw.textureGroup = c.value("textureGroup", lw.textureGroup);
+			lw.textureMeters = c.value("textureMeters", lw.textureMeters);
 			registry.emplace_or_replace<LandscapeWorldComponent>(entity, lw);
 		}
 		if (comps.contains("streaming"))

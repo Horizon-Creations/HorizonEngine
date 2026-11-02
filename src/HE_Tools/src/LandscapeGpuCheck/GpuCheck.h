@@ -28,6 +28,7 @@ struct RenderIn
 	glm::vec3 sunColor{ 1.0f, 0.95f, 0.85f };
 	glm::vec3 ambient{ 0.12f, 0.14f, 0.18f };
 	glm::vec4 clear{ 0.5f, 0.7f, 1.0f, 1.0f };
+	bool      timing = false;             // fill RenderOut::providerMs / encodeMs / gpuMs (and skip the read-back)
 	const TexArray* albedo = nullptr;     // given: the frame's world-UV ground uses it (when the frame names an array); null: flat colours
 	HE::LandscapeProvider provider;
 };
@@ -41,6 +42,10 @@ struct RenderOut
 	uint64_t patches = 0;                 // drawn in this frame
 	uint64_t drawCalls = 0;
 	uint64_t rejected = 0;
+	// --measure: what the backend spent on this frame. providerMs = the call that builds the frame (CPU), encodeMs = recording the draws (CPU),
+	// gpuMs = the GPU's own time for the landscape pass (Metal), or on OpenGL the wall time of the draw up to glFinish (Apple GL has no timer
+	// queries; it includes the CPU side, so it is an upper bound); -1 = not measured.
+	double providerMs = 0.0, encodeMs = 0.0, gpuMs = -1.0;
 	std::string error;
 };
 
