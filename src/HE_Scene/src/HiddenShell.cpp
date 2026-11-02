@@ -8,11 +8,13 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <fcntl.h>
 #include <io.h>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace HE {
@@ -92,6 +94,36 @@ HANDLE startShell(const std::string& line, HANDLE in, HANDLE out, HANDLE err)
 	return pi.hProcess;
 }
 
+struct TreeProc { DWORD pid; std::string name; };
+
+// The shell's pid plus every descendant, from one process snapshot.
+std::vector<TreeProc> collectTree(DWORD rootPid)
+{
+	std::vector<TreeProc> out;
+	HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE) return out;
+	std::vector<PROCESSENTRY32> all;
+	PROCESSENTRY32 pe{ sizeof(pe) };
+	for (BOOL ok = ::Process32First(snap, &pe); ok; ok = ::Process32Next(snap, &pe))
+		all.push_back(pe);
+	::CloseHandle(snap);
+	out.push_back({ rootPid, std::string() });
+	// Also the cycle guard: a reused pid can make the parent links loop.
+	std::unordered_set<DWORD> seen{ rootPid };
+	for (size_t i = 0; i < out.size(); ++i)
+		for (const PROCESSENTRY32& p : all)
+			if (p.th32ParentProcessID == out[i].pid && seen.insert(p.th32ProcessID).second)
+				out.push_back({ p.th32ProcessID, p.szExeFile });
+	return out;
+}
+
+HANDLE childOf(FILE* stream)
+{
+	std::lock_guard<std::mutex> lock(g_mx);
+	const auto it = g_children.find(stream);
+	return it == g_children.end() ? nullptr : it->second;
+}
+
 int waitExitCode(HANDLE process)
 {
 	::WaitForSingleObject(process, INFINITE);
@@ -161,6 +193,64 @@ int hiddenPclose(FILE* stream)
 	std::fclose(stream);
 	return waitExitCode(proc);
 }
+
+bool hiddenTreeStats(FILE* stream, HiddenTreeStats& out)
+{
+	out = {};
+	const HANDLE proc = childOf(stream);
+	if (!proc) return false;
+	const std::vector<TreeProc> tree = collectTree(::GetProcessId(proc));
+	for (const TreeProc& t : tree)
+	{
+		if (!t.name.empty())
+		{
+			++out.processCount;
+			if (!out.names.empty()) out.names += ", ";
+			out.names += t.name;
+			out.activity += t.pid;               // a process coming or going is activity too
+		}
+		HANDLE h = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, t.pid);
+		if (!h) continue;
+		FILETIME created, exited, kernel, user;
+		if (::GetProcessTimes(h, &created, &exited, &kernel, &user))
+		{
+			ULARGE_INTEGER k, u;
+			k.LowPart = kernel.dwLowDateTime; k.HighPart = kernel.dwHighDateTime;
+			u.LowPart = user.dwLowDateTime;   u.HighPart = user.dwHighDateTime;
+			out.activity += (k.QuadPart + u.QuadPart) / 10000;   // ms of CPU
+		}
+		IO_COUNTERS io{};
+		if (::GetProcessIoCounters(h, &io))
+			out.activity += io.ReadTransferCount + io.WriteTransferCount + io.OtherTransferCount;
+		::CloseHandle(h);
+	}
+	return true;
+}
+
+void hiddenKillTree(FILE* stream)
+{
+	const HANDLE proc = childOf(stream);
+	if (!proc) return;
+	std::vector<TreeProc> tree = collectTree(::GetProcessId(proc));
+	// Leaves first, so a parent cannot start a replacement while it is still alive.
+	for (size_t i = tree.size(); i-- > 0;)
+	{
+		HANDLE h = ::OpenProcess(PROCESS_TERMINATE, FALSE, tree[i].pid);
+		if (!h) continue;
+		::TerminateProcess(h, 1);
+		::CloseHandle(h);
+	}
+}
+
+void* hiddenThreadHandle()
+{
+	HANDLE h = nullptr;
+	::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(),
+	                  &h, 0, FALSE, DUPLICATE_SAME_ACCESS);
+	return h;
+}
+void hiddenInterruptRead(void* thread) { if (thread) ::CancelSynchronousIo(static_cast<HANDLE>(thread)); }
+void hiddenCloseThread(void* thread)   { if (thread) ::CloseHandle(static_cast<HANDLE>(thread)); }
 
 int hiddenSystem(const std::string& line)
 {

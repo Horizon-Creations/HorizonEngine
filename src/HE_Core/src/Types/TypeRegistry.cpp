@@ -339,7 +339,7 @@ Value fieldDefault(const TypeRegistry& reg, const StructField& f,
             }
             else if (f.type == PinType::Struct)
             {
-                it = reg.makeDefaultValue(f.typeName);   // elements use their own defaults
+                it = structDefault(reg, f.typeName, visiting);   // elements use their own defaults
             }
         }
         if (v.container == HorizonCode::ContainerKind::Map)
@@ -454,6 +454,48 @@ json defaultToJson(const StructField& f)
     }
 }
 
+// nlohmann's get<float>() and value() throw type_error on a wrong JSON type,
+// and a text that merely parses is untrusted (hand-edited asset, MCP payload).
+// A vector default whose first n elements are not all numbers is skipped like
+// any other mismatched default; the readers below report a wrong-typed field
+// so the loaders can refuse the document.
+bool isNumberArray(const json& j, size_t n)
+{
+    if (!j.is_array() || j.size() < n) return false;
+    for (size_t i = 0; i < n; ++i)
+        if (!j[i].is_number()) return false;
+    return true;
+}
+
+// A field that is absent leaves `out` as it was; present with the wrong type
+// is a refusal.
+bool readString(const json& e, const char* key, std::string& out)
+{
+    const auto it = e.find(key);
+    if (it == e.end()) return true;
+    if (!it->is_string()) return false;
+    out = it->get<std::string>();
+    return true;
+}
+
+bool readInt(const json& e, const char* key, int& out)
+{
+    const auto it = e.find(key);
+    if (it == e.end()) return true;
+    if (!it->is_number()) return false;
+    out = it->get<int>();
+    return true;
+}
+
+bool readBool(const json& e, const char* key, bool& out)
+{
+    const auto it = e.find(key);
+    if (it == e.end()) return true;
+    if (!it->is_boolean()) return false;
+    out = it->get<bool>();
+    return true;
+}
+
 void defaultFromJson(const json& j, StructField& f)
 {
     Value& v = f.defaultValue;
@@ -466,19 +508,19 @@ void defaultFromJson(const json& j, StructField& f)
     case PinType::String: if (j.is_string())  v.s = j.get<std::string>(); break;
     case PinType::Enum:   if (j.is_string())  v.s = j.get<std::string>(); break;
     case PinType::Vec2:
-        if (j.is_array() && j.size() >= 2)
+        if (isNumberArray(j, 2))
             v.v2 = { j[0].get<float>(), j[1].get<float>() };
         break;
     case PinType::Vec3:
-        if (j.is_array() && j.size() >= 3)
+        if (isNumberArray(j, 3))
             v.v3 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>() };
         break;
     case PinType::Vec4:
-        if (j.is_array() && j.size() >= 4)
+        if (isNumberArray(j, 4))
             v.v4 = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         break;
     case PinType::Color:
-        if (j.is_array() && j.size() >= 4)
+        if (isNumberArray(j, 4))
             v.col = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         break;
     case PinType::Transform:
@@ -487,7 +529,7 @@ void defaultFromJson(const json& j, StructField& f)
             auto vec3 = [&](const char* key, glm::vec3& out, const glm::vec3& def) {
                 out = def;
                 auto it = j.find(key);
-                if (it != j.end() && it->is_array() && it->size() >= 3)
+                if (it != j.end() && isNumberArray(*it, 3))
                     out = { (*it)[0].get<float>(), (*it)[1].get<float>(), (*it)[2].get<float>() };
             };
             vec3("pos", v.tpos, glm::vec3(0.0f));
@@ -544,17 +586,18 @@ bool TypeRegistry::enumFromJson(const std::string& text, EnumDef& out)
 {
     json j = json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) return false;
-    out.entries.clear();
+    // Built aside so a refused document leaves `out` as it was.
+    std::vector<EnumEntry> entries;
     if (auto it = j.find("entries"); it != j.end() && it->is_array())
         for (const json& e : *it)
         {
             if (!e.is_object()) continue;
             EnumEntry en;
-            en.name  = e.value("name", std::string{});
-            en.value = e.value("value", 0);
+            if (!readString(e, "name", en.name) || !readInt(e, "value", en.value)) return false;
             en.formerNames = formerNamesFromJson(e);
-            if (!en.name.empty()) out.entries.push_back(std::move(en));
+            if (!en.name.empty()) entries.push_back(std::move(en));
         }
+    out.entries = std::move(entries);
     return true;
 }
 
@@ -636,24 +679,28 @@ bool TypeRegistry::structFromJson(const std::string& text, StructDef& out)
 {
     json j = json::parse(text, nullptr, /*allow_exceptions=*/false);
     if (j.is_discarded() || !j.is_object()) return false;
-    out.fields.clear();
+    // Built aside so a refused document leaves `out` as it was.
+    std::vector<StructField> fields;
     if (auto it = j.find("fields"); it != j.end() && it->is_array())
         for (const json& e : *it)
         {
             if (!e.is_object()) continue;
             StructField f;
-            f.name     = e.value("name", std::string{});
-            f.type     = static_cast<PinType>(e.value("type", 1));
-            f.isArray  = e.value("isArray", false);
-            f.typeName = e.value("typeName", std::string{});
+            int type = static_cast<int>(PinType::Float);
+            int container = static_cast<int>(HorizonCode::ContainerKind::None);
+            int keyType = static_cast<int>(PinType::String);
+            if (!readString(e, "name", f.name) || !readInt(e, "type", type) ||
+                !readBool(e, "isArray", f.isArray) || !readString(e, "typeName", f.typeName) ||
+                !readInt(e, "container", container) || !readInt(e, "keyType", keyType) ||
+                !readString(e, "keyTypeName", f.keyTypeName))
+                return false;
+            f.type = static_cast<PinType>(type);
             f.formerNames = formerNamesFromJson(e);
-            f.container = static_cast<HorizonCode::ContainerKind>(
-                e.value("container", static_cast<int>(HorizonCode::ContainerKind::None)));
+            f.container = static_cast<HorizonCode::ContainerKind>(container);
             // A kind present means container, full stop — the two-field state
             // "Map but not a container" must not survive a load.
             if (f.container != HorizonCode::ContainerKind::None) f.isArray = true;
-            f.keyType = static_cast<PinType>(e.value("keyType", static_cast<int>(PinType::String)));
-            f.keyTypeName = e.value("keyTypeName", std::string{});
+            f.keyType = static_cast<PinType>(keyType);
             if (auto d = e.find("default"); d != e.end())
             {
                 if (f.isArray)
@@ -701,8 +748,9 @@ bool TypeRegistry::structFromJson(const std::string& text, StructDef& out)
                 f.defaultValue.keyType = f.keyType;
                 f.defaultValue.keyTypeName = f.keyTypeName;
             }
-            if (!f.name.empty()) out.fields.push_back(std::move(f));
+            if (!f.name.empty()) fields.push_back(std::move(f));
         }
+    out.fields = std::move(fields);
     return true;
 }
 

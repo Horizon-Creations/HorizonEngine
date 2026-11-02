@@ -9,6 +9,7 @@ class ContentManager;
 class IRenderer;
 class PhysicsWorld;
 class AnimatorHost;
+struct WeatherComponent;
 namespace HE {
 struct RootMotionContext;
 struct SequenceContext;
@@ -104,6 +105,12 @@ namespace SceneSystems
     //
     // It lives here rather than in the frame loop because HE_Core holds the profiler
     // but must not include HE_Scene, and only this side has the registry.
+    //
+    // `weather` is the scene's WeatherComponent if the caller already looked one up
+    // (tickWorld does, once, for the whole tick) — nullptr means "none", not "unknown";
+    // a caller that has not looked it up gets the same gpuParticles cap as a scene
+    // without a WeatherComponent.
     void pushProfilerSceneCounters(HorizonWorld& world, ContentManager& cm,
-                                   bool gpuParticles = false);
+                                   bool gpuParticles = false,
+                                   const WeatherComponent* weather = nullptr);
 }

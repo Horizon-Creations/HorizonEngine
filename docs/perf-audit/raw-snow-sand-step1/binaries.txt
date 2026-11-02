@@ -1,0 +1,2 @@
+new = copy of out/deploy/Editor of the 329 worktree (step-2 tree, built 29.10. 14:02, before the node-order fix d27fad34; the fix only renumbers function nodes, the baked materials are byte-identical)
+old = the same copy with the four EditorDeps/EngineContent/Materials/M_AutoLandscape*.hasset of cc1b3528 (last commit before step 2) swapped in

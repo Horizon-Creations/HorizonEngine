@@ -16,10 +16,9 @@ either.
 
 The game flavour is the normal build of this repository, so on a dev box it is
 already there — building the editor builds and deploys it — and asking for it
-here would only build it a second time. `--flavor game` exists anyway, for the
-one place where that is not true: a CI job that weighs all three runtimes of a
-platform wants them built the same way, from the same recipe, in one run. Ask
-for it explicitly; it is never a default.
+here would only build it a second time. `--flavor game` exists anyway, for
+whoever wants all three built the same way, from the same recipe, in one run.
+Ask for it explicitly; it is never a default.
 
 Each flavour lands in <deploy>/AppAdvanced resp. <deploy>/AppBasic, next to the
 Game directory the editor already deploys — which is where findRuntimeBundle()
@@ -30,8 +29,6 @@ ci.yml runs it on a push to main, after `Run tests` and before packaging, and
 the two resulting bundles ride INTO the editor package — beside HorizonEditor on
 Windows and Linux, in Contents/Resources on macOS. A downloaded editor therefore
 exports an app runtime; it no longer falls back to the full game runtime.
-.github/workflows/runtime-flavors.yml still calls it for feature branches, but
-only to weigh all three flavours, nothing leaves that runner.
 
 A LOCAL editor build still does not call it, and that is a decision, not a gap
 (docs/app-runtimes-release-pipeline-plan.md §7): a flavour is a whole build tree
@@ -47,9 +44,8 @@ Usage:
                               [--deploy-dir DIR] [--build-root DIR]
                               [--source-tree DIR ...]
                               [--define NAME=VALUE ...]
-                              [--configure-only] [--size]
+                              [--configure-only]
 
-    --size runs scripts/runtime_size.py over each finished tree afterwards.
     --define passes an extra -D straight to cmake (e.g. HE_PREFER_MBEDTLS=ON).
 
 Exit code 0 when every requested flavour built.
@@ -73,12 +69,12 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 # Flavour → the deploy directory name the exporter knows it by. Kept in step with
-# HE_RUNTIME_DIR_NAME in the root CMakeLists.txt, RuntimeFlavor in
-# HE_Core/include/Hpak/ProjectExporter.h and DIR_TO_FLAVOR in runtime_size.py —
-# one spelling in four places. Nothing cross-checks them automatically, so a
-# rename is a rename in four files; get it wrong and the exporter looks in a
-# directory nobody writes, which is why build() below insists on finding the
-# deploy directory rather than trusting a successful compile.
+# HE_RUNTIME_DIR_NAME in the root CMakeLists.txt and RuntimeFlavor in
+# HE_Core/include/Hpak/ProjectExporter.h — one spelling in three places. Nothing
+# cross-checks them automatically, so a rename is a rename in three files; get it
+# wrong and the exporter looks in a directory nobody writes, which is why build()
+# below insists on finding the deploy directory rather than trusting a successful
+# compile.
 FLAVOR_DIRS = {
     "game":         "Game",
     "app-advanced": "AppAdvanced",
@@ -208,8 +204,6 @@ def main(argv):
                         "builds do not re-clone SDL, Jolt and Recast")
     p.add_argument("--define", action="append", default=[])
     p.add_argument("--configure-only", action="store_true")
-    p.add_argument("--size", action="store_true",
-                   help="report scripts/runtime_size.py for each finished flavour")
     args = p.parse_args(argv[1:])
     flavors = args.flavor or ["app-advanced", "app-basic"]
 
@@ -219,13 +213,6 @@ def main(argv):
             ok = False
             break
 
-    if ok and args.size:
-        for flavor in flavors:
-            deploy = os.path.join(args.deploy_dir, FLAVOR_DIRS[flavor])
-            print(flush=True)
-            subprocess.call([sys.executable, os.path.join(REPO, "scripts", "runtime_size.py"),
-                             deploy, f"--flavor={flavor}",
-                             f"--build-type={args.build_type}"])
     return 0 if ok else 1
 
 

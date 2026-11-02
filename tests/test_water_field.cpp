@@ -1028,3 +1028,43 @@ TEST_CASE("Water: clearAll puts a terrain back to no water")
     CHECK(tc.water.res == water::kDefaultRes);
     CHECK(tc.water.dirty);                                         // the surface has to go too
 }
+
+TEST_CASE("Water: the tessellation switch is a landscape setting that defaults off and travels with the scene")
+{
+    TerrainComponent tc = makeTerrain(64.0f, 48);
+    authoredField(tc);
+    SceneSerializer ser;
+    REQUIRE_FALSE(tc.water.tessellation);
+
+    // Off: no key, and a scene from before it reads back off.
+    {
+        HorizonWorld world;
+        makeWorld(world, tc);
+        std::vector<uint8_t> blob;
+        REQUIRE(ser.saveToMemory(world, blob));
+        CHECK(std::string(blob.begin(), blob.end()).find("waterTess") == std::string::npos);
+        HorizonWorld loaded;
+        REQUIRE(ser.loadFromMemory(loaded, blob));
+        REQUIRE(firstTerrain(loaded) != nullptr);
+        CHECK_FALSE(firstTerrain(loaded)->water.tessellation);
+    }
+
+    // On: it is saved, loaded, compared (undo, collaboration) and counts as something to save.
+    tc.water.tessellation = true;
+    HorizonWorld world;
+    makeWorld(world, tc);
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    CHECK(std::string(blob.begin(), blob.end()).find("waterTess") != std::string::npos);
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    REQUIRE(firstTerrain(loaded) != nullptr);
+    CHECK(firstTerrain(loaded)->water.tessellation);
+    CHECK(water::sameContent(firstTerrain(loaded)->water, tc.water));
+
+    water::Field a, b;
+    REQUIRE(a.pristine());
+    b.tessellation = true;
+    CHECK_FALSE(b.pristine());
+    CHECK_FALSE(water::sameContent(a, b));
+}

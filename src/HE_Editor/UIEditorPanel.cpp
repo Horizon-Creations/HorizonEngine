@@ -4028,7 +4028,7 @@ void drawElementPreview(ImDrawList* dl, const UIElement& n, const ImVec2& mn,
 		if (!sp) break;
 		const float len = sp->vertical ? (mx.y - mn.y) : (mx.x - mn.x);
 		const float div = std::min(sp->dividerSize * s, len);
-		const float first = sp->clampedRatio(len) * std::max(0.0f, len - div);
+		const float first = sp->clampedRatio(len, s) * std::max(0.0f, len - div);
 		const ImU32 c = C(themedColor(n, "Divider Color", sp->dividerColor));
 		if (sp->vertical)
 			dl->AddRectFilled(ImVec2(mn.x, mn.y + first), ImVec2(mx.x, mn.y + first + div), c);

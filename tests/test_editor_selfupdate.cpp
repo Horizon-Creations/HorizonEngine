@@ -31,9 +31,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -174,8 +177,8 @@ TEST_CASE("editor self-update: check and download never start the takeover on th
 	CHECK(rig.begins == 0);
 
 	// Nothing staged yet: install() refuses without calling anything.
-	const TakeoverResult early = s.install({ "x.heproj" });
-	CHECK_FALSE(early.ok);
+	CHECK_FALSE(s.install({ "x.heproj" }));
+	s.join();
 	CHECK(rig.begins == 0);
 
 	REQUIRE(s.startDownload());
@@ -196,17 +199,60 @@ TEST_CASE("editor self-update: check and download never start the takeover on th
 	CHECK(staged.version == "9.9.9");
 
 	// The editor's guarded action: only now, and with the open project.
-	const TakeoverResult r = s.install({ "/projects/My Game/My Game.heproj" });
-	CHECK(r.ok);
+	REQUIRE(s.install({ "/projects/My Game/My Game.heproj" }));
+	s.join();
 	CHECK(rig.begins == 1);
 	CHECK(rig.begunWith.stagingRoot == rig.staging.path);
 	REQUIRE(rig.begunWith.relaunchArgs.size() == 1);
 	CHECK(rig.begunWith.relaunchArgs[0] == "/projects/My Game/My Game.heproj");
-	CHECK(s.snapshot().phase == Phase::Installing);
+	CHECK(s.snapshot().phase == Phase::Installed);   // the editor quits on this
 
 	// A second press in the frame that quits does not start a second updater.
-	CHECK_FALSE(s.install({}).ok);
+	CHECK_FALSE(s.install({}));
+	s.join();
 	CHECK(rig.begins == 1);
+}
+
+TEST_CASE("editor self-update: the takeover runs on the worker, not on the caller's thread")
+{
+	// SUP-101: beginTakeover re-hashes and unpacks the staged build, which takes
+	// seconds to minutes. install() must hand it off and return at once, with
+	// the phase at Installing until the takeover answers.
+	Rig rig;
+	std::mutex              gateMutex;
+	std::condition_variable gateCv;
+	bool                    release = false;
+	std::thread::id         beganOn;
+	EditorSelfUpdate::Backend b = rig.backend();
+	b.begin = [&](const TakeoverOptions& opts) {
+		beganOn = std::this_thread::get_id();
+		++rig.begins;
+		rig.begunWith = opts;
+		std::unique_lock<std::mutex> lk(gateMutex);
+		gateCv.wait(lk, [&] { return release; });
+		return TakeoverResult{ true, {} };
+	};
+	EditorSelfUpdate::Session s(b);
+	checkAndDownload(s);
+	REQUIRE(s.snapshot().canInstall());
+
+	REQUIRE(s.install({ "p.heproj" }));   // returns while the takeover is held
+	EditorSelfUpdate::Snapshot snap = s.snapshot();
+	CHECK(snap.phase == Phase::Installing);
+	CHECK(snap.busy());
+	CHECK_FALSE(snap.canInstall());
+	CHECK_FALSE(s.install({ "p.heproj" }));   // no second takeover while one runs
+	CHECK_FALSE(s.startCheck());
+
+	{
+		std::lock_guard<std::mutex> lk(gateMutex);
+		release = true;
+	}
+	gateCv.notify_all();
+	s.join();
+	CHECK(beganOn != std::this_thread::get_id());
+	CHECK(rig.begins == 1);
+	CHECK(s.snapshot().phase == Phase::Installed);
 }
 
 TEST_CASE("editor self-update: a takeover that does not start leaves the editor as it was")
@@ -217,9 +263,8 @@ TEST_CASE("editor self-update: a takeover that does not start leaves the editor 
 	checkAndDownload(s);
 	REQUIRE(s.snapshot().canInstall());
 
-	const TakeoverResult r = s.install({ "p.heproj" });
-	CHECK_FALSE(r.ok);
-	CHECK(r.error.find("simulated") != std::string::npos);
+	REQUIRE(s.install({ "p.heproj" }));   // started; the outcome lands in the snapshot
+	s.join();
 	CHECK(rig.begins == 1);
 
 	// The caller must not quit (EditorUI only quits on ok), the dialog gets the
@@ -234,7 +279,7 @@ TEST_CASE("editor self-update: a takeover that does not start leaves the editor 
 	CHECK(verifyStagedUpdate(staged, err));
 
 	// No retry from the same session state: a press would only fail the same way.
-	CHECK_FALSE(s.install({ "p.heproj" }).ok);
+	CHECK_FALSE(s.install({ "p.heproj" }));
 	CHECK(rig.begins == 1);
 }
 
@@ -249,7 +294,7 @@ TEST_CASE("editor self-update: Restart is not offered when the takeover cannot r
 	CHECK(snap.phase == Phase::Ready);
 	CHECK_FALSE(snap.canInstall());
 	CHECK(snap.installBlocker == "cannot update in place: not writable");
-	CHECK_FALSE(s.install({}).ok);
+	CHECK_FALSE(s.install({}));
 	CHECK(rig.begins == 0);
 }
 
@@ -295,6 +340,6 @@ TEST_CASE("editor self-update: no account, no network, nothing to download")
 	CHECK(snap.phase == Phase::NotConfigured);
 	CHECK(snap.message.find("HE_SELFUPDATE") != std::string::npos);
 	CHECK_FALSE(s.startDownload());
-	CHECK_FALSE(s.install({}).ok);
+	CHECK_FALSE(s.install({}));
 	CHECK(begins == 0);
 }

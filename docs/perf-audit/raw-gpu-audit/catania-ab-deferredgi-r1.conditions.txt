@@ -1,0 +1,15 @@
+== catania-ab-deferredgi-r1 00:12:15
+0:12  up 23 days,  3:33, 1 user, load averages: 2.27 3.52 6.33
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=16
+locked: 1
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 2.27
+0:12  up 23 days,  3:34, 1 user, load averages: 2.14 3.38 6.18
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=81
+locked: 1
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[catania-ab-deferredgi-r1] rc=0 wall=30s fps=39.13327253306288 cpu_p50=25.296374999999998 gpu_p50=19.24929185770452 modes={'detailed': 400} size=2840x1528

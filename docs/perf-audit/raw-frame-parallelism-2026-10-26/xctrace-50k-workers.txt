@@ -1,0 +1,53 @@
+== HorizonEditor: 5208 samples; inclusive by function
+    4755  91.3%  thread_start
+    4755  91.3%  _pthread_start
+    4751  91.2%  void* std::__1::__thread_proxy[abi:nqe220106]<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct>>, Thread
+    4552  87.4%  parallel_for_run_chunks(ParallelForJob&)
+    3562  68.4%  void parallel_for<FrustumCuller::cull(RenderWorld const&, glm::mat<4, 4, float, (glm::qualifier)0> const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned ch
+    3307  63.5%  Frustum::intersects(HE::AABB const&) const
+     981  18.8%  void parallel_for<(anonymous namespace)::extractMeshes(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>>&, RenderWorld&, ContentManager*, std::__1::un
+     921  17.7%  (anonymous namespace)::extractMeshes(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>>&, RenderWorld&, ContentManager*, std::__1::unordered_set<std::_
+     453   8.7%  start_wqthread
+     416   8.0%  _pthread_wqthread
+     416   8.0%  _dispatch_workloop_worker_thread
+     411   7.9%  _dispatch_lane_serial_drain
+     411   7.9%  _dispatch_lane_invoke
+     411   7.9%  _dispatch_root_queue_drain_deferred_wlh
+     365   7.0%  _dispatch_client_callout
+     336   6.5%  _dispatch_source_invoke
+     336   6.5%  _dispatch_continuation_pop
+     336   6.5%  _dispatch_source_latch_and_call
+     336   6.5%  -[_MTLCommandQueue _submitAvailableCommandBuffers]
+     335   6.4%  -[IOGPUMetalCommandQueue submitCommandBuffers:count:]
+     334   6.4%  -[IOGPUMetalCommandQueue _submitCommandBuffers:count:]
+     332   6.4%  iokit_user_client_trap
+     332   6.4%  IOGPUCommandQueueSubmitCommandBuffers
+     263   5.0%  HE::AABB::transformed(glm::mat<4, 4, float, (glm::qualifier)0> const&) const
+     257   4.9%  void std::__1::vector<RenderSection, std::__1::allocator<RenderSection>>::__assign_with_size[abi:nqe220106]<std::__1::_ClassicAlgPolicy, RenderSection*, RenderSection*>(R
+
+== leaf (self) functions
+    3307  63.5%  Frustum::intersects(HE::AABB const&) const
+     332   6.4%  iokit_user_client_trap
+     263   5.0%  HE::AABB::transformed(glm::mat<4, 4, float, (glm::qualifier)0> const&) const
+     256   4.9%  (anonymous namespace)::extractMeshes(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>>&, RenderWorld&, ContentManager*, std::__1::unordered_set<std::_
+     255   4.9%  void parallel_for<FrustumCuller::cull(RenderWorld const&, glm::mat<4, 4, float, (glm::qualifier)0> const&, std::__1::vector<unsigned char, std::__1::allocator<unsigned ch
+     161   3.1%  _platform_memmove
+     149   2.9%  void std::__1::vector<RenderSection, std::__1::allocator<RenderSection>>::__assign_with_size[abi:nqe220106]<std::__1::_ClassicAlgPolicy, RenderSection*, RenderSection*>(R
+     120   2.3%  __psynch_cvwait
+     111   2.1%  <deduplicated_symbol>
+      45   0.9%  void parallel_for<(anonymous namespace)::extractMeshes(entt::basic_registry<entt::entity, std::__1::allocator<entt::entity>>&, RenderWorld&, ContentManager*, std::__1::un
+      37   0.7%  start_wqthread
+      24   0.5%  __psynch_mutexwait
+      13   0.2%  __psynch_mutexdrop
+       9   0.2%  mach_continuous_time
+       8   0.2%  kevent_id
+       7   0.1%  mach_absolute_time
+       6   0.1%  DYLD-STUB$$memmove
+       5   0.1%  void* std::__1::__thread_proxy[abi:nqe220106]<std::__1::tuple<std::__1::unique_ptr<std::__1::__thread_struct, std::__1::default_delete<std::__1::__thread_struct>>, Thread
+       4   0.1%  _dispatch_workloop_worker_thread
+       3   0.1%  pthread_mutex_lock
+       3   0.1%  objc_release
+       3   0.1%  objc_msgSend
+       2   0.0%  CA::Context::retain_context_with_id(unsigned int)
+       2   0.0%  __47+[FPCAMetalLayerState _updateLayerState:block:]_block_invoke
+       2   0.0%  customRR_retain

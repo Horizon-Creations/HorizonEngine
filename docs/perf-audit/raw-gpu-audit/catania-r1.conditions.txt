@@ -1,0 +1,15 @@
+== catania-r1 00:01:36
+0:01  up 23 days,  3:22, 1 user, load averages: 3.52 8.89 10.18
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=13
+locked: 1
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 3.52
+0:02  up 23 days,  3:23, 1 user, load averages: 2.96 8.23 9.90
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=84
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[catania-r1] rc=0 wall=28s fps=36.64198553326779 cpu_p50=25.377416999999998 gpu_p50=20.627792226150632 modes={'detailed': 400} size=2840x1528

@@ -1,0 +1,7 @@
+== after-D3D11-500000-all-r1
+before:
+  cpu 5%  procs:
+  gpu (util, temp, sm clock): 3 %, 35, 2640 MHz
+after (rc=0):
+  cpu 64%  procs: clx8
+  gpu (util, temp, sm clock): 15 %, 36, 2145 MHz

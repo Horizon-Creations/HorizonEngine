@@ -19,11 +19,16 @@ add_library(HorizonCore SHARED
 	src/Diagnostics/CrashHandler.cpp
 	src/JobSystem/JobSystem.cpp
 	src/Platform/DynLib.cpp
+	src/Platform/EngineProfile.cpp
 	src/Platform/Process.cpp
+	src/Platform/ProjectWriteGate.cpp
 	src/Window/Window.cpp
 	src/Renderer/IRenderer.cpp
 	src/Scripting/ScriptEngine.cpp
 	src/Hpak/HpakWriter.cpp
+	src/Hpak/SimpleTextureMaterial.cpp
+	src/Hpak/MeshTextureBake.cpp
+	src/Hpak/MeshBakePass.cpp
 	src/Hpak/HpakReader.cpp
 	src/Hpak/Aes256Gcm.cpp
 	src/Hpak/KeyDerivation.cpp
@@ -31,16 +36,23 @@ add_library(HorizonCore SHARED
 	src/Crypto/Sha256.cpp
 	src/Integrity/IntegrityProbe.cpp
 	src/Hpak/ProjectConfig.cpp
+	src/Hpak/GameBuildConfig.cpp
 	src/Hpak/ProjectExporter.cpp
+	src/Hpak/PackManifest.cpp
+	src/Hpak/ReachFilter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp
 	src/MaterialGraph/WeatherMaterialFunctions.cpp
+	src/MaterialGraph/ProceduralSurfaceFunctions.cpp
+	src/Trails/TrailField.cpp
+	src/Trails/TrailClipmap.cpp
 	src/ParticleGraph/ParticleGraph.cpp
 	src/AnimatorStateMachine/AnimatorStateMachineGraph.cpp
 	src/BoneMask/BoneMask.cpp
 	src/BlendSpace/BlendSpace.cpp
 	src/Sequence/SequenceJson.cpp
+	src/LandscapeFoliage/LandscapeFoliageLayerJson.cpp
 	src/UIWidget/UIWidgetTree.cpp
 	src/UIWidget/UIElement.cpp
 	src/UIWidget/UITheme.cpp
@@ -65,6 +77,7 @@ add_library(HorizonCore SHARED
 	src/ContentManager/AssetRefScan.cpp
 	src/ContentManager/EngineDependencies.cpp
 	src/ContentManager/TextureArrayBuild.cpp
+	src/ContentManager/TextureBlockDecode.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore
@@ -79,6 +92,12 @@ target_compile_definitions(HorizonCore
 	PRIVATE HE_CORE_BUILD_DLL
 	PUBLIC  HE_CORE_DLL
 )
+
+# Build profile (cmake/HorizonBuildProfile.cmake, Platform/BuildProfile.h): the
+# F9 capture, the headless hooks and the HE_* overrides in here exist only in a
+# dev tree. PUBLIC, so everything that links Core compiles its headers with the
+# same profile.
+he_target_build_profile(HorizonCore PUBLIC)
 
 target_link_libraries(HorizonCore
 	PUBLIC  glm::glm

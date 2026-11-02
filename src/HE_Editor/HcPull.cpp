@@ -1,6 +1,7 @@
 #include "HcPull.h"
 
 #include <Types/TypeRegistry.h>
+#include "HcEditorUtil.h"
 
 namespace HcPull
 {
@@ -23,9 +24,7 @@ namespace
 		std::string w = i < sizeof(kNames) / sizeof(kNames[0]) ? kNames[i] : "?";
 		if ((t == PinType::Enum || t == PinType::Struct) && !typeName.empty())
 		{
-			std::string stem = typeName;
-			if (const size_t s = stem.find_last_of("/\\"); s != std::string::npos) stem.erase(0, s + 1);
-			if (const size_t d = stem.rfind('.'); d != std::string::npos) stem.erase(d);
+			std::string stem = HcEditorUtil::pathStem(typeName);
 			w += " " + stem;
 		}
 		switch (k)
@@ -198,9 +197,7 @@ std::string describe(const Variable& v)
 	                HorizonCode::pullSourceLabel(v.pullSource, v.pullRef);
 	if (v.pullSource == HorizonCode::kPullFromCreator && !v.pullClass.empty())
 	{
-		std::string stem = v.pullClass;
-		if (const size_t p = stem.find_last_of("/\\"); p != std::string::npos) stem.erase(0, p + 1);
-		if (const size_t d = stem.rfind('.'); d != std::string::npos) stem.erase(d);
+		std::string stem = HcEditorUtil::pathStem(v.pullClass);
 		s += " (" + stem + ")";
 	}
 	s += kSep + v.pullVar;

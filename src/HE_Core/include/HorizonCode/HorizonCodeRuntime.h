@@ -529,8 +529,20 @@ public:
         // cannot say. 0 means the call came from outside HorizonCode.
         std::function<std::vector<Value>(InstanceId self, const std::string& apiId,
                                          const std::vector<Value>& args)> callApi;
+        // The Ctx callApi builds for `self`, handed out for a direct call from
+        // generated C++ (Context::apiCtx). A host binds both from the ONE place
+        // that fills its Ctx, so a direct call and a dispatched one cannot see
+        // different worlds. Unbound = direct calls get the null Ctx.
+        std::function<void(InstanceId self, HE::api::Ctx& out)> apiCtx;
     };
     void setServices(Services s) { m_services = std::move(s); }
+
+    // Who is creating, for a call that does not go through callApi: generated
+    // C++ calling HE::api directly pushes itself here for as long as its call
+    // runs (HE::api::Scope), so an object it spawns names it as its Creator
+    // exactly like one spawned through an EngineCall node. Pairs strictly.
+    void pushCreator(InstanceId id) { m_creatorStack.push_back(id); }
+    void popCreator() { if (!m_creatorStack.empty()) m_creatorStack.pop_back(); }
 
     // ── Multiplayer: route a runOn ≠ Local call (plan §7.2) ─────────────────
     // Forwarded into every instance's Context as Context::rpcRoute, with `self`

@@ -2,6 +2,7 @@
 #include <Types/UUID.h>
 #include <AnimatorStateMachine/AnimatorStateMachineGraph.h>
 #include <HorizonScene/AnimationPose.h>   // HE::BlendSpaceCache
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,9 +19,21 @@ struct AnimatorStateMachineComponent
     // many entities would be wasteful (same discipline as ParticleSystemComponent::
     // resolvedConfig). Call AnimationStateMachineSystem::markConfigDirty(component)
     // after editing the referenced asset's graph to force a re-resolve.
-    HE::AnimatorStateMachineGraph resolvedGraph;
+    //
+    // The graph is SHARED and immutable: every component resolved from the same
+    // asset text points at one parse (SCN-302), so two hundred characters on one
+    // locomotion machine hold one graph, not two hundred copies of it. Null
+    // until the first resolve, and for an asset that is missing or does not
+    // parse; read it through graph(), which answers an empty graph then.
+    std::shared_ptr<const HE::AnimatorStateMachineGraph> resolvedGraph;
     HE::UUID                     resolvedFromAssetId;
     bool                         configDirty = true;
+
+    const HE::AnimatorStateMachineGraph& graph() const
+    {
+        static const HE::AnimatorStateMachineGraph kEmpty;
+        return resolvedGraph ? *resolvedGraph : kEmpty;
+    }
 
     // ── Runtime state ────────────────────────────────────────────────────────────
     // `params`/`currentStateName` ARE persisted per-entity (see SceneSerializer) even
@@ -28,7 +41,7 @@ struct AnimatorStateMachineComponent
     // machine asset (e.g. two independently moving characters) can be in different
     // states with different live param values.
     std::unordered_map<std::string, float> params; // live values, seeded from
-                                                     // resolvedGraph.defaultParams
+                                                     // graph().defaultParams
                                                      // whenever the graph (re)resolves
     std::string currentStateName;
     // THE OUTGOING PLAYHEAD, IN THE CURRENT STATE'S OWN UNIT — and that unit
@@ -70,7 +83,8 @@ struct AnimatorStateMachineComponent
     bool        clipNotifiesPrimed       = false;
     bool        transitionNotifiesPrimed = false;
 
-    // Blend spaces this entity's states have referenced, parsed once each. Not
+    // Blend spaces this entity's states have referenced, resolved once each (the
+    // parse itself is shared between entities, see HE::BlendSpaceCacheEntry). Not
     // serialized, and cleared whenever the graph re-resolves — a state that just
     // changed which space it points at must not keep posing from the old one.
     HE::BlendSpaceCache blendSpaces;

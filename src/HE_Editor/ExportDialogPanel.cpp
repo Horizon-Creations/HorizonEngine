@@ -9,13 +9,19 @@
 #include "EditorWidgets.h"               // pinDialogToEditorWindow
 #include "HcEditorUtil.h"                // asset enumeration for the codegen source set
 #include "HcFallbackReport.h"            // which classes ship interpreted, and why
+#include "ExportSdkBuild.h"              // the game compiled from an engine SDK (topic 211)
+#include "ExportSdkGateUi.h"             // what the export's game compile will do, or what stops it
 #include "AppMetadataRows.h"             // icon, version, splash — the same rows Project Settings draws
 #include "NotificationStore.h"           // a project write that fails has to say so
 #include "HorizonVersion.h"
 #include <Hpak/ProjectExporter.h>
 #include <HorizonScene/HcCodegen.h>      // HorizonCode → C++ codegen (compile-on-export)
 #include <HorizonCode/HcClassResolve.h>
+#include <HorizonCode/HcCompiledLoader.h>  // compiledLibraryName
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
+#include <HorizonScene/LandscapeHlod.h>      // the far-landscape bake the export runs
+#include <HorizonScene/EntityHost.h>         // a class's component body, for the same scan
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ParticleGraph/ParticleGraph.h>
@@ -24,6 +30,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <HorizonCode/HorizonCode.h>
 #include <Types/Enums.h>
+#include <Application/AppIcon.h>           // heEmbedExeIcon: the exe's own icon on Windows
 #include <Application/GameBackendRules.h>  // shared with the game runtime that reads config.json
 #include <Project/ProjectSettings.h>       // the project's Render Defaults, title, settings file path
 #include <HorizonRendering/ParticleShaderTemplates.h>
@@ -34,6 +41,7 @@
 
 #include <Diagnostics/Logger.h>
 #include <SDL3/SDL.h>
+#include <nlohmann/json.hpp>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -56,6 +64,8 @@
 namespace ExportDialogPanel
 {
 
+using json = nlohmann::json;
+
 // Build > Export Project modal state. Editable fields mirror the selected
 // ExportProfile (persisted in the .heproj); the export itself runs on a worker
 // thread so packing/compression never freezes the UI.
@@ -71,54 +81,58 @@ static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
 static bool   s_exportDevTools    = false;
 static std::string s_exportExcludes;               // one glob pattern per line
+static std::string s_exportIncludes;               // always-include globs, one per line
+static bool        s_exportOnlyReferenced = true;  // pack only what the game reaches
+static bool        s_exportBakeMeshTextures = true; // bake textures onto meshes (needs the filter above)
+static bool        s_exportBakeFarLandscape = true; // bake each Auto Landscape's look for its far LOD levels
+static int         s_exportFarLandscapeMB   = 512;  // what the baked textures may cost, cooked
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
 static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
 static std::string s_exportTextureFormat = "Auto"; // Auto (per target GPU) | None (RGBA8)
 static int    s_exportTextureQuality = 0;          // 0 Fast, 1 Balanced, 2 High
+static bool   s_exportTextureArrays  = true;       // block-compress texture arrays too
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
+static bool     s_exportShaderAuto     = true;     // bake the variants of the backend the game runs, ignore the set above
 // The window + backend the exported game starts in. They are NOT part of the
 // ExportProfile: the profile lives in the .heproj, and these are shipped
 // through config.json instead — so they persist in the editor's own settings
 // under the very keys the game reads them by. Defaults are what a game shipped
 // with before the config could carry them, so an untouched dialog changes
 // nothing about the output.
-static int    s_exportWindowWidth  = 1280;
-static int    s_exportWindowHeight = 720;
-static std::string s_exportWindowMode = "Fullscreen";  // Windowed | Fullscreen | Borderless
-static bool   s_exportGameVSync    = true;
-static std::string s_exportBackend;                    // getRHIName value; empty = the target's default
+// The window and the backend are not asked at export time any more: they are
+// the project's (Project ▸ Game Window page) or, when it defers to the editor,
+// a 1280x720 fullscreen window on the platform's default backend. Nothing is
+// remembered in the editor's settings, so an old "GameBackend" key in
+// config.json cannot ride into a build.
+constexpr int         kDefaultWindowWidth  = 1280;
+constexpr int         kDefaultWindowHeight = 720;
+constexpr const char* kDefaultWindowMode   = "Fullscreen";   // Windowed | Fullscreen | Borderless
 
-// The backend list lives in GameBackendRules.h now, shared with the game
-// runtime that reads what this dialog writes — see the header. ("Host" is
-// resolved there too, by targetPlatformName.)
-static std::vector<const char*> exportBackendChoices(const std::string& platform)
-{
-    return HE::BackendRules::choicesFor(platform);
-}
-
-// Which backend THIS export ships, as opposed to which one the dialog remembers.
-// Asked here, per export, and deliberately NOT written back into s_exportBackend:
-// that static is the GAME's choice, remembered across projects in the editor's
-// own settings under the key "GameBackend" and reloaded whenever the dialog
-// opens. The rule itself, and why writing to it was the bug, is in the header.
+// Which backend THIS export ships. The rule itself is in GameBackendRules.h.
 // The project's Render Defaults page (Config/ProjectSettings.json) when it has
-// switched "Use the editor's settings" OFF — then the window and backend rows
-// are the PROJECT's answer, on every machine, and the dialog's remembered rows
-// are not consulted. nullptr while the project defers to the editor (the
-// default, and every project made before the page existed).
-//
-// The project's values are READ here, never copied into the s_export* statics:
-// those are the editor's memory across projects, and a project that wrote its
-// own numbers into them would have every later export of some other project
-// start from those (see dialog-static-leaks in the Software-backend story).
+// switched "Use the editor's settings" OFF — then the window and backend are
+// the PROJECT's answer, on every machine. nullptr while the project defers to
+// the editor (the default, and every project made before the page existed).
+// Read here, never copied into a dialog static (dialog-static-leaks).
 static const HE::ProjectRenderDefaults* projectRenderDefaults(const AppContext& ctx)
 {
     if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty()) return nullptr;
     const HE::ProjectRenderDefaults& r = ctx.projectManager->currentProject().settings.renderDefaults;
     return r.useEditorSettings ? nullptr : &r;
+}
+
+static std::string effectiveExportBackend(const AppContext& ctx);
+
+// The precompiled-shader set this export bakes: the hand-picked one, or (Auto, the default)
+// the single backend the shipped game runs. An application without Advanced Shader Effects
+// ships the software renderer, which has no variants to bake.
+static uint32_t effectiveShaderBackends(const AppContext& ctx)
+{
+    if (!s_exportShaderAuto) return s_exportShaderBackends;
+    return HE::BackendRules::shaderBackendMaskFor(s_exportPlatform, effectiveExportBackend(ctx));
 }
 
 static std::string effectiveExportBackend(const AppContext& ctx)
@@ -127,12 +141,11 @@ static std::string effectiveExportBackend(const AppContext& ctx)
                          && ctx.projectManager->currentProject().appProject;
     const bool advanced   = ctx.projectManager
                          && ctx.projectManager->currentProject().advancedShaderEffects;
-    // The project's backend goes through the same app rule as the dialog's: an
-    // application still takes the platform default or the software renderer,
-    // whatever the page says.
+    // An application still takes the platform default or the software renderer,
+    // whatever the page says; a game with no project answer takes the default.
     const HE::ProjectRenderDefaults* project = projectRenderDefaults(ctx);
     return HE::BackendRules::forExport(appProject, advanced,
-                                       project ? project->backend : s_exportBackend);
+                                       project ? project->backend : std::string());
 }
 
 // The settings the shipped game boots with, written in config.json's own shape
@@ -209,10 +222,12 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     }
     else
     {
-        put("GameWindowWidth",  s_exportWindowWidth);
-        put("GameWindowHeight", s_exportWindowHeight);
-        put("GameWindowMode",   s_exportWindowMode);
-        put("GameVSync",        s_exportGameVSync);
+        // An application opens as an ordinary window; a game fills the screen.
+        const bool app = ctx.projectManager && ctx.projectManager->currentProject().appProject;
+        put("GameWindowWidth",  kDefaultWindowWidth);
+        put("GameWindowHeight", kDefaultWindowHeight);
+        put("GameWindowMode",   app ? "Windowed" : kDefaultWindowMode);
+        put("GameVSync",        true);
     }
     // Left out entirely when no backend was picked: an absent key is what tells
     // the game to keep its own platform default, and that is a different answer
@@ -262,11 +277,126 @@ static std::thread       s_exportThread;
 // another popup is the current window becomes its child and closes with it, so
 // the Export button only asks and render() does it one level up.
 static bool              s_startRequest = false;
+// An export waiting for the toolchain (topic 222 step 3). Every export compiles
+// its game, so Export pressed without cmake or a compiler does not start a run
+// that must fail: it parks here, Tool Setup opens on the missing row, and the
+// run starts by itself once the probe finds both. Closing Tool Setup with them
+// still missing drops it.
+static bool              s_waitingForTools  = false;
+static bool              s_toolSetupOpened  = false;   // requestShowFor was called for this wait
+static bool              s_toolSetupSeen    = false;   // and the dialog has been on screen since
 
 namespace Build = BuildProgressDialog::Build;
 
 // Defined below render(), which is where a run is started from.
 void startExport(AppContext& ctx);
+
+// What the game compile of an export with the dialog's current settings will
+// find: the SDK of its profile (HE_GAME_SDK_DIR, else beside the editor), the
+// target, the toolchain. Read by the dialog every frame and by every door that
+// starts a run.
+static HE::ExportSdk::ExportGate currentExportGate(AppContext& ctx)
+{
+	const std::filesystem::path base =
+		SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath()) : std::filesystem::path{};
+	const std::string profile = HE::ExportSdk::sdkProfileFor(s_exportDevTools);
+	const char* env = std::getenv("HE_GAME_SDK_DIR");
+	const ExportPlatform platform = exportPlatformFromName(s_exportPlatform);
+	auto gate = HE::ExportSdk::checkExportGate(
+		HE::ExportSdk::findGameSdk(base, profile, env ? std::filesystem::path(env) : std::filesystem::path{}),
+		profile, platform == ExportPlatform::Host, ctx.toolchainProbe, exportPlatformName(platform));
+	// This machine's own platform by name runs on the GameRuntimes/<name> bundle
+	// of a cross export; the compiled game is the Host target's.
+#if defined(__APPLE__)
+	constexpr ExportPlatform kThisPlatform = ExportPlatform::MacOS;
+#elif defined(_WIN32)
+	constexpr ExportPlatform kThisPlatform = ExportPlatform::Windows;
+#else
+	constexpr ExportPlatform kThisPlatform = ExportPlatform::Linux;
+#endif
+	if (platform == kThisPlatform)
+		gate.why = "the game is compiled for this machine as the Host target: pick Host";
+	return gate;
+}
+
+// A run that cannot start, said where runs are watched: the Build window, one
+// failed Setup step, nothing serialized and nothing written.
+static void failBeforeStart(const std::string& why)
+{
+	const std::string m = "Error: export not started: " + why;
+	Build::begin({ "Setup" });
+	Build::stepBegin(0);
+	Build::log(2, m, 0);
+	Build::stepFailed(0);
+	Build::finish(false, m);
+	BuildProgressDialog::requestOpen();
+}
+
+// The doors a human uses (Export, Build Again): start the run when its game can
+// be compiled, park it when only the toolchain is missing (Tool Setup opens on
+// the row, the run continues by itself), refuse it otherwise.
+static void requestStart(AppContext& ctx)
+{
+	const auto gate = currentExportGate(ctx);
+	switch (gate.state)
+	{
+	case HE::ExportSdk::GateState::Ready:
+		s_waitingForTools = false;
+		startExport(ctx);
+		return;
+	case HE::ExportSdk::GateState::Blocked:
+		s_waitingForTools = false;
+		failBeforeStart(gate.why);
+		return;
+	case HE::ExportSdk::GateState::Waiting:
+	case HE::ExportSdk::GateState::NeedTools:
+		// No notification: right after launch the probe is merely still running
+		// and the run starts a moment later; a real gap opens Tool Setup, whose
+		// purpose line says what waits.
+		s_waitingForTools = true;
+		s_toolSetupOpened = s_toolSetupSeen = false;   // render() pumps it from this frame on
+		return;
+	}
+}
+
+// Every frame while an export is parked: start it once the toolchain is there,
+// open Tool Setup when the probe says what is missing, drop it when the dialog
+// is closed with the tools still missing (and nothing installing).
+static void pumpWaitingExport(AppContext& ctx)
+{
+	if (!s_waitingForTools || s_exportRunning.load() || BuildProgressDialog::Build::running()) return;
+	const auto gate = currentExportGate(ctx);
+	switch (gate.state)
+	{
+	case HE::ExportSdk::GateState::Ready:
+		s_waitingForTools = false;
+		startExport(ctx);
+		return;
+	case HE::ExportSdk::GateState::Blocked:
+		s_waitingForTools = false;
+		failBeforeStart(gate.why);
+		return;
+	case HE::ExportSdk::GateState::Waiting:   // a (re)check is running: the answer decides
+		return;
+	case HE::ExportSdk::GateState::NeedTools:
+		if (!s_toolSetupOpened)
+		{
+			ToolSetupDialog::requestShowFor(ExportSdkGateUi::toolFor(gate),
+			                                ExportSdkGateUi::kToolSetupPurpose);
+			s_toolSetupOpened = true;
+		}
+		else if (ToolSetupDialog::isShowing())
+			s_toolSetupSeen = true;
+		else if (s_toolSetupSeen && !ctx.toolchainInstalling)
+		{
+			s_waitingForTools = false;
+			HE::Ed::notify(HE::Ed::NoteLevel::Important, "Export cancelled: " + gate.why,
+			               "Every export compiles its game from the engine SDK. Install cmake and a "
+			               "C++ compiler (Edit > Preferences > Editor > Tool Status) and export again.");
+		}
+		return;
+	}
+}
 
 // Moved to BuildProgressDialog: the game-logic build reports into the same
 // window and reads its rings the same way.
@@ -322,6 +452,7 @@ static std::vector<std::string> parseExcludeLines(const char* buf)
 // simply omits the chunk and the shipped game cross-compiles at load.
 static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fragGlsl,
                                                           const std::string& vertBody,
+                                                          const std::string& gbufGlsl,
                                                           uint32_t backends)
 {
 	if (fragGlsl.empty() || backends == 0) return {};
@@ -335,7 +466,7 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 		std::string error;
 		std::vector<std::string> warnings;
 		const bool ok = HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v),
-		                                              fragGlsl, vertBody, var, error, warnings);
+		                                              fragGlsl, vertBody, var, error, warnings, gbufGlsl);
 		// A half that failed but is optional (UI vertex, clustered twin) still
 		// ships the rest — the runtime cross-compiles / draws the plain fragment.
 		for (const std::string& w : warnings)
@@ -398,15 +529,21 @@ static std::vector<uint8_t> CompileParticleShaderVariants(const std::string& nod
 	return HE::encodeParticleShaderVariants(variants);
 }
 
-// Fill the export dialog fields from a profile. An empty profile outputDir
-// resolves to <projectRoot>/Export/<profile name>. All string fields are
+// Fill the export dialog fields from a profile. The output directory is not a
+// profile choice: it is always <projectRoot>/Export/<profile name> on THIS
+// machine. A stored absolute path travels with the project to another OS (a
+// "C:\\..." path is a relative name on macOS and ends up under the working
+// directory), so any outputDir a profile still carries is ignored. All string fields are
 // std::string — no fixed buffers, so nothing can silently truncate (a cut-off
 // exclude pattern would broaden the glob and change the pak contents).
 static void exportProfileToDialog(const ExportProfile& p, const std::filesystem::path& projectRoot)
 {
-	s_exportOutputDir = p.outputDir.empty()
-		? (projectRoot / "Export" / p.name).string()
-		: p.outputDir;
+	// Only the automation entry (project_build's outputDir, a one-run copy of the
+	// profile that never reaches disk) can name a directory, and only one that is
+	// absolute HERE; a stored path is never read back (ProjectManager).
+	s_exportOutputDir = std::filesystem::path(p.outputDir).is_absolute()
+		? p.outputDir
+		: (projectRoot / "Export" / p.name).string();
 	s_exportCompress     = p.compress;
 	s_exportEncrypt      = p.encrypt;
 	s_exportModSupport   = p.enableModSupport;
@@ -418,55 +555,47 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportHcStop       = p.hcStopOnFailure;
 	s_exportTextureFormat  = p.textureFormat;
 	s_exportTextureQuality = p.textureQuality;
-	// Canonicalize via the enum round-trip: a hand-edited value like "windows"
-	// falls back to Host — showing "Host" in the combo makes that fallback
-	// visible BEFORE exporting host binaries somewhere unexpected.
+	s_exportTextureArrays  = p.compressTextureArrays;
+	// Canonicalize via the enum round-trip. The platform is not read from disk
+	// any more (always Host); only project_build's one-run copy can name another.
 	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
 	s_exportShaderBackends = p.shaderBackends;
+	s_exportShaderAuto     = p.autoShaderBackends;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
-}
-
-// The window/backend rows are not part of the profile — they ride to the game in
-// config.json and live in the editor's own settings under the keys the game
-// reads them by. Reloaded so a run starts on what the last export shipped, from
-// both doors into this panel: the modal (open) and startFromProfile.
-static void reloadGameConfigRows(AppContext& ctx)
-{
-	if (!ctx.globalState) return;
-	GlobalState& gs = *ctx.globalState;
-	s_exportWindowWidth  = gs.getCustomConfigInt("GameWindowWidth",     s_exportWindowWidth);
-	s_exportWindowHeight = gs.getCustomConfigInt("GameWindowHeight",    s_exportWindowHeight);
-	s_exportWindowMode   = gs.getCustomConfigString("GameWindowMode",   s_exportWindowMode);
-	s_exportGameVSync    = gs.getCustomConfigBool("GameVSync",          s_exportGameVSync);
-	s_exportBackend      = gs.getCustomConfigString("GameBackend",      s_exportBackend);
-	// …and only if it is a backend this dialog would offer for SOME target.
-	// A settings file written by an editor that still forced "Software" into
-	// this key while exporting an application carries that word forever
-	// otherwise, and the next game export ships it. Dropping it means "the
-	// platform default", which is what the row shows when nothing was picked.
-	if (!s_exportBackend.empty() && !HE::BackendRules::isOffered(s_exportBackend))
-		s_exportBackend.clear();
+	s_exportOnlyReferenced = p.onlyReferenced;
+	s_exportBakeMeshTextures = p.bakeMeshTextures;
+	s_exportBakeFarLandscape = p.bakeFarLandscape;
+	s_exportFarLandscapeMB   = p.farLandscapeBudgetMB;
+	s_exportIncludes.clear();
+	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
 }
 
 // Read the dialog fields back into a profile (the name stays as-is).
 static void exportDialogToProfile(ExportProfile& p)
 {
-	p.outputDir        = s_exportOutputDir;
+	p.outputDir.clear();   // derived from project root + profile name, never stored
 	p.compress         = s_exportCompress;
 	p.encrypt          = s_exportEncrypt;
 	p.enableModSupport = s_exportModSupport;
 	p.devTools         = s_exportDevTools;
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+	p.onlyReferenced   = s_exportOnlyReferenced;
+	p.bakeMeshTextures = s_exportBakeMeshTextures;
+	p.bakeFarLandscape = s_exportBakeFarLandscape;
+	p.farLandscapeBudgetMB = s_exportFarLandscapeMB;
+	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
 	p.appBundle        = s_exportAppBundle;
 	p.shaderBackends   = s_exportShaderBackends;
+	p.autoShaderBackends = s_exportShaderAuto;
 	p.compileHorizonCode = s_exportCompileHC;
 	p.hcStopOnFailure    = s_exportHcStop;
 	p.textureFormat      = s_exportTextureFormat;
 	p.textureQuality     = s_exportTextureQuality;
+	p.compressTextureArrays = s_exportTextureArrays;
 }
 
 void open(AppContext& ctx)
@@ -502,15 +631,13 @@ void open(AppContext& ctx)
 		it.increment(ec);
 	}
 
-	reloadGameConfigRows(ctx);
-
 	s_exportBundleKey.clear(); // re-stat the runtime bundle on open
 	s_showExportModal = true;
 }
 
 bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string* outError)
 {
-	const auto fail = [outError](const char* why) { if (outError) *outError = why; return false; };
+	const auto fail = [outError](const std::string& why) { if (outError) *outError = why; return false; };
 
 	if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty())
 		return fail("no project is open");
@@ -536,13 +663,181 @@ bool startFromProfile(AppContext& ctx, const ExportProfile& profile, std::string
 	for (int i = 0; i < static_cast<int>(proj.exportProfiles.size()); ++i)
 		if (proj.exportProfiles[i].name == profile.name) { s_exportProfileIdx = i; break; }
 
-	// The window/backend rows are not part of the profile and are read from the
-	// editor config, exactly as opening the dialog does.
-	reloadGameConfigRows(ctx);
 	s_exportBundleKey.clear();
+
+	// Every export compiles its game from the SDK (topic 222 step 3). This door
+	// does not park a run behind Tool Setup the way the button does: nobody is
+	// at the dialog to press Install, so the caller hears why instead.
+	const auto gate = currentExportGate(ctx);
+	if (gate.state == HE::ExportSdk::GateState::Waiting)
+		return fail("the editor is still checking for cmake and a C++ compiler; ask again in a moment");
+	if (gate.state == HE::ExportSdk::GateState::NeedTools)
+		return fail("every export compiles its game from the engine SDK, and " + gate.why +
+		            "; install it through the editor's Tool Setup");
+	if (gate.state == HE::ExportSdk::GateState::Blocked)
+		return fail("every export compiles its game from the engine SDK: " + gate.why);
 
 	startExport(ctx);
 	return true;
+}
+
+// ─── Compile game from SDK (export worker: built first, installed last) ─────
+// The build cache of one project + profile: beside EngineContentCache in the
+// user data dir (TMPDIR only without one; macOS purges it). Its
+// HEGameBuildConfig.h is also where the next incremental export finds the key.
+static std::filesystem::path sdkGameWorkDir(const std::string& projName, const std::string& profile)
+{
+	std::error_code ec;
+	std::filesystem::path cacheRoot = GlobalState::userDataDir();
+	cacheRoot = cacheRoot.empty() ? std::filesystem::temp_directory_path(ec) / "HorizonSdkGame"
+	                              : cacheRoot / "SdkGameBuilds";
+	return HE::ExportSdk::buildWorkDir(cacheRoot, projName, profile);
+}
+
+// The game is the export's first build (topic 222 step 6), not its last step:
+// ProjectExporter::planExport fixes what project.hcfg will say (layout, pak key,
+// startup scene UUID) before anything is packed, the game is compiled from the
+// SDK template with exactly that compiled in, and once the exporter has laid the
+// runtime down, installSdkGame swaps the built game over the runtime's
+// executable as part of Clean up. There is no prebuilt game to fall back on
+// (topic 222 step 3): a compile that fails ends the export before anything is
+// packed, and an install that fails takes the runtime's executable out of the
+// folder, so a folder without its compiled game cannot ship or start as if it
+// had. `text` is appended to the result line when it worked and is the error
+// otherwise.
+struct SdkGameResult
+{
+	bool ok = false;
+	std::string text;
+	std::filesystem::path artifact;   // the built game, for installSdkGame
+	bool cacheHit = false;
+};
+static SdkGameResult compileGameFromSdk(const ProjectConfig& planned, const std::filesystem::path& settingsFile,
+                                        const HE::ExportSdk::GameSdk& sdk, const std::string& toolchain,
+                                        const std::string& projName, int step)
+{
+	namespace fs = std::filesystem;
+	const std::string profile = sdk.profile;
+	const auto fail = [&](const std::string& why)
+	{
+		Build::log(2, "Compile game from the engine SDK: " + why, step);
+		Build::stepFailed(step);
+		return SdkGameResult{ false, "the game could not be compiled from the engine SDK (" + why +
+		                             "); nothing was packed" };
+	};
+	if (!sdk.valid()) return fail(HE::ExportSdk::unavailableReason(sdk, profile, true, true));
+	Build::log(0, "Engine SDK (" + profile + "): " + sdk.root.string(), step);
+
+	// The header holds the pak key: it goes to a private work dir, never into the
+	// export folder. The work dir is the build cache: kept per project and
+	// profile, reused while its key (SDK, profile, toolchain, defines) holds.
+	std::error_code ec;
+	const fs::path workDir = sdkGameWorkDir(projName, profile);
+	fs::create_directories(workDir, ec);
+	const fs::path header = workDir / "HEGameBuildConfig.h";
+	auto spec = HE::ExportSdk::makeBuildSpec(sdk, workDir, header);
+
+	Build::setActivity("Checking the build cache\xe2\x80\xa6");
+	const auto cache = HE::ExportSdk::prepareBuildCache(
+		workDir, HE::ExportSdk::buildCacheKey(sdk, spec, toolchain));
+	if (cache.hit)
+		Build::log(0, "Build cache hit (" + profile + "): reusing " + workDir.string() +
+		              ", only what changed is compiled", step);
+	else
+		Build::log(0, "Build cache miss (" + cache.changed + "): fresh build in " + workDir.string(), step);
+
+	Build::setActivity("Writing the compiled-in configuration\xe2\x80\xa6");
+	if (const std::string why = HE::ExportSdk::writeBuildConfigFromPlan(planned, settingsFile, profile, header);
+	    !why.empty())
+		return fail(why);
+
+	Build::setActivity(cache.hit ? "Compiling what changed against the engine SDK\xe2\x80\xa6"
+	                             : "Compiling the game against the engine SDK\xe2\x80\xa6");
+	Build::stepProgress(0.1f);
+	spec.cancel = Build::cancelFlag();
+	Build::setCancelable(true);
+	const auto built = HE::hccg::buildDylib(spec,
+		[step](const std::string& line)
+		{
+			const int sev = line.find("error") != std::string::npos ? 2
+			              : line.find("warning") != std::string::npos ? 1 : 0;
+			Build::log(sev, line, step);
+			if (const auto p = toolchainProgress(line))
+				Build::stepProgress(0.1f + 0.9f * *p);
+		});
+	Build::setCancelable(false);
+	if (!built.ok)
+	{
+		if (!(spec.cancel && spec.cancel->load())) HE::ExportSdk::forgetBuildCache(workDir);
+		return fail(built.message);
+	}
+	Build::stepProgress(1.0f);
+	Build::log(0, "Built " + built.artifact.filename().string() + " (" + profile + ")", step);
+	return SdkGameResult{ true, {}, built.artifact, cache.hit };
+}
+
+// Clean up's share of the game: the built executable and engine libraries over
+// the runtime's, links to the bundled copies, a fresh signature. `step` is the
+// ring the lines are filed under.
+static SdkGameResult installSdkGame(const ExportResult& res, const HE::ExportSdk::GameSdk& sdk,
+                                    const SdkGameResult& built, int step)
+{
+	namespace fs = std::filesystem;
+	const std::string profile = sdk.profile;
+	const auto fail = [&](const std::string& why)
+	{
+		Build::log(2, "Install the game compiled from the engine SDK: " + why, step);
+		std::error_code ec;
+		if (!res.executablePath.empty() && fs::remove(res.executablePath, ec))
+			Build::log(2, "Removed " + res.executablePath.filename().string() + " from the export: "
+			              "it ships only a game compiled from the SDK", step);
+		Build::setLaunchTarget({}, false);
+		Build::stepFailed(step);
+		return SdkGameResult{ false, "the game compiled from the engine SDK could not be installed (" +
+		                             why + "); the export has no game executable" };
+	};
+	if (res.executablePath.empty()) return fail("the export has no game executable to replace");
+	const fs::path exe = res.executablePath;
+
+	Build::setActivity("Installing the game compiled from the engine SDK\xe2\x80\xa6");
+	std::vector<std::string> copied;
+	if (const std::string why = HE::ExportSdk::installBuiltGame(sdk, built.artifact, exe, &copied);
+	    !why.empty())
+		// A half-done copy is neither game: say it loudly.
+		return fail(why + "; the export folder may be mixed, export again");
+#if defined(_WIN32)
+	// The icon goes into the executable's resources instead of staying a loose
+	// AppIcon.ico beside it (nothing reads that file at run time). The exe was
+	// just replaced by the SDK build, so this is the first point it can be done;
+	// a failure keeps the .ico where it is.
+	{
+		const fs::path ico = exe.parent_path() / "AppIcon.ico";
+		std::error_code icoEc;
+		if (fs::exists(ico, icoEc))
+		{
+			if (HE::heEmbedExeIcon(exe, ico)) fs::remove(ico, icoEc);
+			else Build::log(1, "Could not embed AppIcon.ico into " + exe.filename().string() +
+			                   "; it stays beside the executable", step);
+		}
+	}
+#endif
+	if (const int n = HE::ExportSdk::relinkToBundledDeps(HE::ExportSdk::exportEngineDir(exe), copied); n > 0)
+		Build::log(0, std::to_string(n) + " library link(s) moved to the bundled copies", step);
+#if defined(__APPLE__)
+	// Replacing Contents/MacOS/* broke the bundle's signature; sign it again the
+	// way the exporter does for a local run (ad hoc).
+	if (const fs::path app = exe.parent_path().parent_path().parent_path(); app.extension() == ".app")
+	{
+		Build::setActivity("Signing " + app.filename().string() + "\xe2\x80\xa6");
+		const std::string cmd = "codesign --force --deep --sign - \"" + app.string() + "\" 2>&1";
+		if (std::system(cmd.c_str()) != 0)
+			Build::log(1, "codesign of " + app.filename().string() + " failed", step);
+	}
+#endif
+	Build::log(0, "Game compiled from the SDK (" + profile + "), " + std::to_string(copied.size()) +
+	              " file(s) replaced; configuration and pak key compiled in", step);
+	return SdkGameResult{ true, std::string(" — game compiled from the ") + profile + " SDK" +
+	                            (built.cacheHit ? " (build cache hit)" : "") };
 }
 
 // ─── The modal itself (drawn every frame; also reaps a finished worker) ──────
@@ -650,10 +945,6 @@ void render(AppContext& ctx)
             }
 
             // ── Editable fields (mirror of the selected profile) ──────────────
-            ImGui::Text("Output Directory:");
-            ImGui::SetNextItemWidth(-1.0f);
-            ImGui::InputText("##exportDir", &s_exportOutputDir);
-
             // An application has no scene to start in — its GameInstance builds
             // the UI and that is the whole picture (docs/he-apps-plan.md E5). The
             // field is hidden rather than shown empty, and the value cleared, so a
@@ -683,25 +974,9 @@ void render(AppContext& ctx)
                 }
             }
 
-            ImGui::Text("Target Platform:");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(140.0f);
-            if (ImGui::BeginCombo("##exportPlatform", s_exportPlatform.c_str()))
-            {
-                for (const char* name : { "Host", "Windows", "macOS", "Linux" })
-                    if (ImGui::Selectable(name, s_exportPlatform == name))
-                    {
-                        s_exportPlatform = name;
-                        // A backend the new target does not have would ship as a
-                        // name the game can only fall back from — drop it rather
-                        // than carry it across the switch.
-                        bool stillOffered = s_exportBackend.empty();
-                        for (const char* b : exportBackendChoices(s_exportPlatform))
-                            if (s_exportBackend == b) { stillOffered = true; break; }
-                        if (!stillOffered) s_exportBackend.clear();
-                    }
-                ImGui::EndCombo();
-            }
+            // No target picker: exports build for this machine (the runtime bundle,
+            // the SDK the game is compiled against and the HorizonCode toolchain are
+            // the host's). The platform is not read from the project file.
             {
                 // Live feedback: show the runtime bundle this export would ship,
                 // or a warning when none is found (data-only exports can't run).
@@ -760,152 +1035,15 @@ void render(AppContext& ctx)
                     ImGui::TextDisabled("Output goes to a %s/ sub-folder.", s_exportPlatform.c_str());
             }
 
-            // ── How the game starts ─────────────────────────────────────────
-            // These ride to the player in config.json rather than in the pak, so
-            // they stay editable after the fact — and so the graphics settings
-            // this editor is set to reach the shipped build at all.
-            ImGui::Spacing();
-            // An application does not choose a resolution and a display mode at
-            // export time. It opens as a window the way every other application
-            // does, and the user maximises it or drags it about; a fixed pixel
-            // size baked into the build is a game's idea. The values are still
-            // WRITTEN (config.json carries defaults either way) — they are just
-            // not asked about, and app mode pins them to a sane window.
-            //
-            // A project whose Render Defaults page switched "Use the editor's
-            // settings" off has answered these rows itself: they are shown as
-            // it answered them and cannot be edited here, because an edit here
-            // would be overruled at export time and the person would not know
-            // why. The statics are left alone — they are the editor's memory,
-            // and the next project must not inherit this one's numbers.
-            const HE::ProjectRenderDefaults* projectDefaults = projectRenderDefaults(ctx);
+            // Window size, display mode and backend are the project's (Project >
+            // Game Window); they are not asked again at export time.
             if (exportingApp)
-                s_exportWindowMode = "Windowed";
-            else if (projectDefaults)
-            {
-                ImGui::TextDisabled("Game Window: %d x %d %s, VSync %s",
-                                    projectDefaults->windowWidth, projectDefaults->windowHeight,
-                                    projectDefaults->windowMode.c_str(),
-                                    projectDefaults->vsync ? "on" : "off");
-                ImGui::TextDisabled("Graphics Backend: %s",
-                                    projectDefaults->backend.empty() ? "(platform default)"
-                                                                     : projectDefaults->backend.c_str());
-                ImGui::TextDisabled("Set by the project: Project Settings > Rendering > Defaults. "
-                                    "Switch \"Use the editor's settings\" on there to choose here.");
-            }
-            else
-            {
-                ImGui::Text("Game Window:");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(70.0f);
-                if (ImGui::InputInt("##gameWidth", &s_exportWindowWidth, 0, 0))
-                    s_exportWindowWidth = std::max(320, s_exportWindowWidth);
-                ImGui::SameLine();
-                ImGui::TextUnformatted("x");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(70.0f);
-                if (ImGui::InputInt("##gameHeight", &s_exportWindowHeight, 0, 0))
-                    s_exportWindowHeight = std::max(240, s_exportWindowHeight);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(120.0f);
-                if (ImGui::BeginCombo("##gameWindowMode", s_exportWindowMode.c_str()))
-                {
-                    for (const char* mode : { "Windowed", "Fullscreen", "Borderless" })
-                        if (ImGui::Selectable(mode, s_exportWindowMode == mode))
-                            s_exportWindowMode = mode;
-                    ImGui::EndCombo();
-                }
-                ImGui::SameLine();
-                EditorWidgets::checkbox("VSync", &s_exportGameVSync);
-            }
-
-            // An application does not pick a backend: it takes the platform's
-            // (Metal on macOS, OpenGL elsewhere — docs/he-apps-plan.md A0), and
-            // with Advanced Shader Effects OFF it takes the software renderer,
-            // which is what that switch has meant all along (Block G). This is
-            // the line that makes the checkbox at project creation mean
-            // something in the shipped build: no GPU, no driver, no shader
-            // translation, just the CPU drawing rectangles.
-            if (!exportingApp && !projectDefaults)
-            {
-                ImGui::Text("Graphics Backend:");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(140.0f);
-                if (ImGui::BeginCombo("##gameBackend",
-                                      s_exportBackend.empty() ? "(platform default)"
-                                                              : s_exportBackend.c_str()))
-                {
-                    if (EditorWidgets::selectable("(platform default)", s_exportBackend.empty()))
-                        s_exportBackend.clear();
-                    for (const char* name : exportBackendChoices(s_exportPlatform))
-                        if (ImGui::Selectable(name, s_exportBackend == name))
-                            s_exportBackend = name;
-                    ImGui::EndCombo();
-                }
-                ImGui::TextDisabled("The editor's current graphics settings ship along; a backend "
-                                    "the target runtime lacks falls back to its default.");
-            }
-            else if (exportingApp)
             {
                 // Told, not stored: effectiveExportBackend() answers the same
-                // question at export time. Writing the answer into
-                // s_exportBackend is what leaked "Software" into the next
-                // GAME export (see the comment there).
-                const bool advanced =
-                    ctx.projectManager->currentProject().advancedShaderEffects;
-                if (!advanced)
+                // question at export time.
+                if (!ctx.projectManager->currentProject().advancedShaderEffects)
                     ImGui::TextDisabled("Advanced Shader Effects are off: this application "
                                         "ships the software renderer and needs no GPU.");
-            }
-
-            // ── What the build IS to the person who installs it ────────────
-            // Icon, version and splash live in the project (Project Settings ▸
-            // Application / General); they are shown HERE because this is the
-            // screen somebody is on when they notice the build still says 1.0.
-            // Bound straight to the ProjectData and saved when an edit ends,
-            // never copied into a dialog static (see the note at the top).
-            if (ctx.projectManager && !ctx.projectManager->currentProject().path.empty())
-            {
-                ImGui::Spacing();
-                ProjectData& proj = ctx.projectManager->currentProject();
-                if (ImGui::CollapsingHeader("Application: icon, version, splash"))
-                {
-                    bool heproj = false, settings = false;
-                    // The icon as the export will write it, beside its rows.
-                    const int kPx = 48;
-                    if (const ImTextureID tex = static_cast<ImTextureID>(
-                            AppMetadataRows::iconPreviewTexture(ctx, proj, kPx)))
-                    {
-                        ImGui::Image(tex, ImVec2((float)kPx, (float)kPx));
-                        ImGui::SameLine();
-                    }
-                    ImGui::BeginGroup();
-                    EditorWidgets::Row::inputText("Icon##exporticonname", &proj.appIconName);
-                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
-                    EditorWidgets::helpForLabel("Icon");
-                    heproj |= AppMetadataRows::drawIconFileRow(ctx, proj);
-                    ImGui::EndGroup();
-                    EditorWidgets::Row::inputText("Version##exportversion", &proj.appVersion);
-                    heproj |= ImGui::IsItemDeactivatedAfterEdit();
-                    EditorWidgets::helpForLabel("Version");
-                    ImGui::TextDisabled("Bundle identifier, plate colour and file types: "
-                                        "Project Settings > Application.");
-                    ImGui::Spacing();
-                    settings |= AppMetadataRows::drawSplashRows(ctx, proj, /*compact=*/true);
-
-                    if (heproj && !ctx.projectManager->saveProject(proj.path))
-                        HE::Ed::notify(HE::Ed::NoteLevel::Critical,
-                                       "Could not save the project's application settings",
-                                       proj.path);
-                    if (settings)
-                    {
-                        proj.settings.clamp();
-                        if (!ctx.projectManager->saveProjectSettings())
-                            HE::Ed::notify(HE::Ed::NoteLevel::Critical,
-                                           "Could not save the project's splash settings",
-                                           HE::projectSettingsPath(ctx.projectManager->projectRoot()).string());
-                    }
-                }
             }
 
             // ── Textures ────────────────────────────────────────────────────
@@ -952,6 +1090,10 @@ void render(AppContext& ctx)
                 else
                     ImGui::TextDisabled("Auto: ASTC on Metal, BC3 on macOS OpenGL, BC7 on desktop. "
                                         "High encodes several times slower than Fast.");
+                ImGui::BeginDisabled(s_exportTextureFormat == "None");
+                EditorWidgets::checkbox("Compress texture arrays", &s_exportTextureArrays);
+                ImGui::EndDisabled();
+                EditorWidgets::helpForKey("Export/Compress texture arrays");
             }
 
             ImGui::Spacing();
@@ -985,23 +1127,21 @@ void render(AppContext& ctx)
             // target instead of a two-character mark beside it, and F1 opens it.
             EditorWidgets::checkbox("Incremental packing",   &s_exportIncremental);
 
-            // "Compile HorizonCode" needs cmake + a working compiler; disable it (and
-            // force it off) when the startup probe couldn't find them, so the export
-            // can't try a codegen build that would just fail. Null probe = not finished
-            // yet → leave it enabled. Graphs still ship and run interpreted regardless.
-            const bool hcToolchainOk =
-                !ctx.toolchainProbe ||
-                (ctx.toolchainProbe->cmakeFound && ctx.toolchainProbe->compilerFound);
-            // The same for the codegen SDK (engine headers + HorizonCore's link
-            // library) the build compiles against: the editor's build stages it
-            // into <editor>/SDK, so missing means a broken or hand-assembled
-            // install — and a compile that cannot succeed. Looked up once: it
-            // belongs to the installation, not to the project.
-            static const bool s_hcSdkFound = HE::hccg::resolveSdk(
-                SDL_GetBasePath() ? std::filesystem::path(SDL_GetBasePath())
-                                  : std::filesystem::path{}).valid();
-            const bool hcCompileOk = hcToolchainOk && s_hcSdkFound;
-            if (!hcCompileOk) { s_exportCompileHC = false; ImGui::BeginDisabled(); }
+            // The game itself is compiled from the engine SDK of the export's
+            // profile, every time (topic 222 step 3: no option, no prebuilt game):
+            // Dev Tools = the dev lib set, otherwise release, configuration and
+            // pak key compiled in. The line says what the export will compile
+            // against, or what stops it before anything runs.
+            const HE::ExportSdk::ExportGate sdkGate = currentExportGate(ctx);
+            {
+                EditorWidgets::WrapText wrap(550.0f);
+                ExportSdkGateUi::drawGameCompileStatus(ctx, sdkGate);
+            }
+
+            // Compiled HorizonCode is built with the same toolchain and against the
+            // same SDK as the game, so whatever stops that stops the export as a
+            // whole and is said once, above. Graphs ship and can run interpreted
+            // regardless.
             EditorWidgets::checkbox("Compile HorizonCode",   &s_exportCompileHC);
             // Kept in application projects, but said out loud that it is not the
             // default answer there: an app's graphs run on events — a click, a
@@ -1050,30 +1190,6 @@ void render(AppContext& ctx)
                 }
                 ImGui::Unindent();
             }
-            if (!hcCompileOk) ImGui::EndDisabled();
-            if (!hcCompileOk)
-            {
-                // The dialog's width is pinned (SetNextWindowSize above), so this
-                // conditional line cannot widen it — the only thing it can do when
-                // it does not fit is lose its tail, and the tail is the half that
-                // says the export still works ("will ship interpreted"). Same
-                // absolute column as the rest.
-                EditorWidgets::WrapText wrap(550.0f);
-                if (!hcToolchainOk)
-                {
-                    // The notice carries the way out: "Set Up…" opens the tool
-                    // dialog on the missing row (cmake first, then the compiler).
-                    const ToolSetupDialog::Tool missing =
-                        (ctx.toolchainProbe && !ctx.toolchainProbe->cmakeFound)
-                            ? ToolSetupDialog::Tool::Cmake : ToolSetupDialog::Tool::Compiler;
-                    ToolSetupDialog::drawMissingBanner(ctx, missing,
-                        "Disabled — no cmake/C++ compiler found. HorizonCode will ship interpreted.");
-                }
-                else
-                    ImGui::TextDisabled("Disabled — this editor has no HorizonCode SDK (<editor>/SDK). "
-                                        "HorizonCode will ship interpreted.");
-            }
-
             if (exportAppBundleApplicable(s_exportPlatform))
             {
                 EditorWidgets::checkbox("macOS .app bundle", &s_exportAppBundle);
@@ -1091,6 +1207,39 @@ void render(AppContext& ctx)
                                   "Examples: Debug/*   *_test.hasset   Scenes/Playground*");
             ImGui::InputTextMultiline("##exportExcludes", &s_exportExcludes,
                                       ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
+
+            // Only what the game reaches. On by default: an export used to pack every asset
+            // in Content and in the engine library, used or not. What is left out is listed
+            // in the export log; the patterns below keep what a script loads by a path it builds.
+            ImGui::Spacing();
+            EditorWidgets::checkbox("Pack only referenced assets", &s_exportOnlyReferenced);
+            EditorWidgets::helpForKey("Export/Pack only referenced assets");
+            // The texture bake runs on what the filter keeps, so it needs the filter.
+            ImGui::BeginDisabled(!s_exportOnlyReferenced);
+            EditorWidgets::checkbox("Bake textures onto meshes", &s_exportBakeMeshTextures);
+            ImGui::EndDisabled();
+            EditorWidgets::helpForKey("Export/Bake textures onto meshes");
+            EditorWidgets::checkbox("Bake far landscape", &s_exportBakeFarLandscape);
+            EditorWidgets::helpForKey("Export/Bake far landscape");
+            if (s_exportBakeFarLandscape)
+            {
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::DragInt("Far landscape budget (MB)", &s_exportFarLandscapeMB, 8.0f, 16, 16384);
+                s_exportFarLandscapeMB = std::clamp(s_exportFarLandscapeMB, 16, 16384);
+                EditorWidgets::helpForKey("Export/Far landscape budget (MB)");
+            }
+            if (s_exportOnlyReferenced)
+            {
+                ImGui::Text("Always include:");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("One glob per line, same shape as the exclude patterns.\n"
+                                      "Assets matching one are kept even when nothing names them,\n"
+                                      "e.g. a script loads \"Props/Crate\" + n at run time: Props/Crate*");
+                ImGui::InputTextMultiline("##exportIncludes", &s_exportIncludes,
+                                          ImVec2(-1.0f, ImGui::GetTextLineHeight() * 2.5f));
+            }
 
             // ── Precompiled material shaders ──────────────────────────────────
             // Nothing to precompile without materials, and a project with Advanced
@@ -1112,6 +1261,8 @@ void render(AppContext& ctx)
                                   "selected backends, so the shipped game never cross-compiles at\n"
                                   "load. Ship only the backend(s) the target actually runs.\n"
                                   "None selected \xe2\x86\x92 the game compiles shaders on first use.");
+            EditorWidgets::checkbox("Match the game's backend", &s_exportShaderAuto);
+            EditorWidgets::helpForKey("Export/Match the game's backend");
             {
                 struct Bk { const char* label; HE::RendererBackend rb; };
                 static const Bk kBackends[] = {
@@ -1121,12 +1272,17 @@ void render(AppContext& ctx)
                     { "D3D11",  HE::RendererBackend::D3D11  },
                     { "D3D12",  HE::RendererBackend::D3D12  },
                 };
+                // Auto shows what it will bake, greyed out; the hand-picked set is kept
+                // underneath so switching Auto off again finds it as it was.
+                const uint32_t shown = s_exportShaderAuto ? effectiveShaderBackends(ctx)
+                                                          : s_exportShaderBackends;
+                ImGui::BeginDisabled(s_exportShaderAuto);
                 int col = 0;
                 for (const Bk& b : kBackends)
                 {
                     const uint32_t bit = 1u << static_cast<uint32_t>(b.rb);
-                    bool on = (s_exportShaderBackends & bit) != 0;
-                    if (EditorWidgets::checkbox(b.label, &on))
+                    bool on = (shown & bit) != 0;
+                    if (EditorWidgets::checkbox(b.label, &on) && !s_exportShaderAuto)
                     {
                         if (on) s_exportShaderBackends |=  bit;
                         else    s_exportShaderBackends &= ~bit;
@@ -1134,6 +1290,7 @@ void render(AppContext& ctx)
                     if (++col < 3) ImGui::SameLine();
                     else           col = 0;
                 }
+                ImGui::EndDisabled();
             }
             }
             else
@@ -1153,9 +1310,12 @@ void render(AppContext& ctx)
             // Build::running() as well as our own flag: the game-logic compile
             // is a second worker reporting into the same window, and starting an
             // export on top of it would overwrite the run it is watching.
+            // A Blocked game compile (another target platform, no SDK of the
+            // profile) is nothing Export could fix; the line above says why.
             const bool canExport = !s_exportOutputDir.empty()
                                 && ctx.contentManager && !running
-                                && !BuildProgressDialog::Build::running();
+                                && !BuildProgressDialog::Build::running()
+                                && sdkGate.state != HE::ExportSdk::GateState::Blocked;
             if (!canExport) ImGui::BeginDisabled();
             if (EditorWidgets::primaryButton("Export", ImVec2(110, 0)))
             {
@@ -1194,8 +1354,9 @@ void render(AppContext& ctx)
     if (s_startRequest && !s_exportRunning.load())
     {
         s_startRequest = false;
-        startExport(ctx);
+        requestStart(ctx);
     }
+    pumpWaitingExport(ctx);
 #else
 	(void)ctx;
 #endif // HE_IMGUI_ENABLED
@@ -1217,6 +1378,16 @@ void startExport(AppContext& ctx)
 #ifdef HE_IMGUI_ENABLED
             ProjectManager* pm = ctx.projectManager;
             if (!pm || !ctx.contentManager) return;
+            // Every export compiles its game from the SDK: one that cannot is
+            // refused before a single scene is serialized. The doors decide what
+            // to do about a missing toolchain (requestStart parks, the MCP door
+            // answers); this is the backstop.
+            const HE::ExportSdk::ExportGate gate = currentExportGate(ctx);
+            if (!gate.ready())
+            {
+                failBeforeStart(gate.why);
+                return;
+            }
             const std::filesystem::path projectRoot =
                 std::filesystem::path(pm->currentProject().path).parent_path();
             {
@@ -1272,6 +1443,10 @@ void startExport(AppContext& ctx)
                                       + " placed prefab(s) point at an asset that is gone; "
                                       "shipped as they were last saved");
                 };
+                // Meshes some entity draws with a material of its own: the texture bake
+                // leaves them alone (an override material would read its texture through
+                // the atlas UVs). Collected from every scene the export serializes.
+                std::vector<HE::UUID> overriddenMeshes;
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;
                 if (!scenePath.empty())
@@ -1281,6 +1456,7 @@ void startExport(AppContext& ctx)
                     if (ser.load(sceneWorld, scenePath, SerializeFormat::JSON))
                     {
                         syncPrefabsForExport(sceneWorld, sceneName);
+                        HE::collectMeshesWithMaterialOverrides(sceneWorld, overriddenMeshes);
                         ser.saveToMemory(sceneWorld, sceneBinary);
                     }
                     else
@@ -1294,14 +1470,47 @@ void startExport(AppContext& ctx)
                 // game. A scene that fails to load is skipped with a note rather
                 // than failing the whole export — only the STARTUP scene is
                 // boot-critical.
+                // The far landscape: every Auto Landscape of every scene is photographed into three small textures per
+                // chunk (HorizonScene/LandscapeHlod.h) and packed as extra assets. It renders, so it runs here on the
+                // main thread, before the pack thread starts; a landscape two scenes share is baked once.
+                std::vector<Hpak::PackSettings::ExtraAsset> farAssets;
+                std::vector<HE::UUID> farSeen;
+                bool farBackendNoted = false;
+                const auto bakeFarLandscapes = [&](HorizonWorld& w, const std::string& label)
+                {
+                    if (!s_exportBakeFarLandscape || !ctx.renderer || !ctx.contentManager) return;
+                    if (!ctx.renderer->GetCapabilities().supportsRawCapture)
+                    {
+                        if (!farBackendNoted)
+                            Build::log(1, "Far landscape: not baked, the picture needs a renderer that can hand back a "
+                                          "frame without tonemap and post effects and this editor's one cannot (the far "
+                                          "levels keep the landscape's own material)");
+                        farBackendNoted = true;
+                        return;
+                    }
+                    HE::landscape::HlodExportOptions o;
+                    o.budgetBytes = static_cast<uint64_t>(std::max(16, s_exportFarLandscapeMB)) << 20;
+                    std::vector<HE::landscape::HlodAssetBlob> blobs;
+                    const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
+                        w, ctx.world, *ctx.contentManager, *ctx.renderer, o, blobs, farSeen,
+                        [&](const std::string& s) { Build::log(0, label + ": " + s); });
+                    for (HE::landscape::HlodAssetBlob& b : blobs)
+                    {
+                        Hpak::PackSettings::ExtraAsset ea;
+                        ea.id = b.id; ea.relPath = std::move(b.relPath); ea.type = b.type; ea.bytes = std::move(b.bytes);
+                        farAssets.push_back(std::move(ea));
+                    }
+                    if (st.terrains > 0)
+                        Build::log(0, label + ": far landscape " + std::to_string(st.terrains) + " landscape(s), "
+                                      + std::to_string(st.chunks) + " chunk(s) in " + std::to_string(static_cast<int>(st.ms))
+                                      + " ms");
+                };
                 std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
                 std::vector<HE::hccg::ClassSource> hcSources;   // codegen inputs (hcCompile)
                 {
-                    const std::filesystem::path projectRoot2 =
-                        std::filesystem::path(ctx.projectManager->currentProject().path).parent_path();
                     std::error_code ec2;
                     std::filesystem::recursive_directory_iterator sit(
-                        projectRoot2, std::filesystem::directory_options::skip_permission_denied, ec2);
+                        projectRoot, std::filesystem::directory_options::skip_permission_denied, ec2);
                     const std::filesystem::recursive_directory_iterator send;
                     while (!ec2 && sit != send)
                     {
@@ -1312,9 +1521,11 @@ void startExport(AppContext& ctx)
                             SceneSerializer ser2;
                             std::vector<uint8_t> bytes;
                             const std::string rel =
-                                sit->path().lexically_relative(projectRoot2).generic_string();
+                                sit->path().lexically_relative(projectRoot).generic_string();
                             const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
                             if (loaded) syncPrefabsForExport(w2, rel);
+                            if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
+                            if (loaded) bakeFarLandscapes(w2, rel);
                             if (loaded && ser2.saveToMemory(w2, bytes))
                             {
                                 // Level script → codegen source, keyed by the scene's
@@ -1337,6 +1548,24 @@ void startExport(AppContext& ctx)
                         ec2.clear();
                         sit.increment(ec2);
                     }
+                }
+
+                // Entities that only exist at run time come from HorizonCode classes
+                // (entity.spawnClass): their component body is the template, and a mesh
+                // override in it is as good as one in a scene. Placed prefabs need no
+                // such pass, they are plain entities in the scenes scanned above.
+                for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager,
+                                                              HE::AssetType::HorizonCodeClass))
+                {
+                    const HE::UUID classId = ctx.contentManager->loadAsset(c.path);
+                    const HorizonCodeClassAsset* cls = ctx.contentManager->getHorizonCodeClass(classId);
+                    if (!cls) continue;
+                    const std::vector<uint8_t> body = EntityHost::inheritedComponents(*ctx.contentManager, *cls);
+                    if (body.empty()) continue;
+                    HorizonWorld classWorld;
+                    SceneSerializer classSer;
+                    if (classSer.instantiatePrefab(classWorld, body) != entt::null)
+                        HE::collectMeshesWithMaterialOverrides(classWorld, overriddenMeshes);
                 }
 
                 // App-wide GameInstance graph (project GameInstance.hcode). Packed
@@ -1473,18 +1702,36 @@ void startExport(AppContext& ctx)
                 // Setup is already over by the time anyone sees it — the work above
                 // runs on the UI thread — but it is where a scene that will not
                 // load or a missing runtime is reported, so it is a step and not a
-                // footnote. Build only exists when something is actually compiled:
-                // an export with no HorizonCode to translate would otherwise show a
-                // ring that turns green without ever having done anything.
+                // footnote. The rings are listed in the order the worker runs them,
+                // because Build::stepBegin closes the ones before it and a ring
+                // further up that filled last would read as a step out of turn.
+                // Build game comes first and every run has it: the game is
+                // compiled from the SDK with a configuration planned before the
+                // pack (topic 222 step 6), so the longest build of the export
+                // fails before anything is packed. Build HorizonCode only exists
+                // when something is actually compiled: an export with no
+                // HorizonCode to translate would otherwise show a ring that turns
+                // green without ever having done anything. Clean up stays last
+                // and also installs the built game over the runtime's executable.
                 const bool hasBuild = hcCompile && !hcSources.empty();
-                std::vector<std::string> stepNames{ "Setup" };
-                if (hasBuild) stepNames.emplace_back("Build");
+                std::vector<std::string> stepNames{ "Setup", "Build game" };
+                if (hasBuild) stepNames.emplace_back("Build HorizonCode");
                 stepNames.emplace_back("Package");
                 stepNames.emplace_back("Clean up");
                 const int stepSetup   = 0;
-                const int stepBuild   = hasBuild ? 1 : -1;
-                const int stepPackage = hasBuild ? 2 : 1;
+                const int stepSdkGame = 1;
+                const int stepBuild   = hasBuild ? 2 : -1;
+                const int stepPackage = hasBuild ? 3 : 2;
                 const int stepCleanup = stepPackage + 1;
+                const HE::ExportSdk::GameSdk gameSdk = gate.sdk;
+                const std::string sdkProfile = gate.profile;
+                // Part of the build cache key: another cmake or compiler gets a fresh tree.
+                const std::string sdkToolchain = ctx.toolchainProbe
+                    ? "cmake " + ctx.toolchainProbe->cmakeVersion + ", " + ctx.toolchainProbe->compilerId
+                    : std::string();
+                // Compiled HorizonCode links the engine the game ships with: the
+                // SDK's lib set the game is compiled from, never another library.
+                const HE::hccg::SdkInfo hcSdk = HE::ExportSdk::codegenSdkFor(gameSdk);
 
                 Build::begin(stepNames);
                 Build::stepBegin(stepSetup);
@@ -1527,6 +1774,12 @@ void startExport(AppContext& ctx)
                 es.encrypt          = s_exportEncrypt;
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+                es.onlyReferenced   = s_exportOnlyReferenced;
+                es.bakeMeshTextures = s_exportBakeMeshTextures;
+                es.bakeSkipMeshes   = overriddenMeshes;
+                es.extraAssets      = std::move(farAssets);
+                es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
+                es.onNotice = [](const std::string& msg) { Build::log(0, msg); };
                 es.incremental      = s_exportIncremental;
                 // The project's default SaveGameTemplate rides into project.hcfg
                 // so save.create() in the shipped game finds the same schema.
@@ -1614,19 +1867,12 @@ void startExport(AppContext& ctx)
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
                 es.textureQuality     = static_cast<uint8_t>(std::clamp(s_exportTextureQuality, 0, 2));
+                es.cookTextureArrays  = s_exportTextureArrays;
                 // The settings the game boots with, shipped as a config.json next
                 // to its data. Built HERE, on the UI thread — it reads the editor's
                 // live configuration, which the export worker must not touch — and
-                // the window rows are remembered for the next export.
+                // (the window and backend are the project's, not remembered here).
                 es.gameConfigJson   = buildGameConfigJson(ctx);
-                if (ctx.globalState)
-                {
-                    ctx.globalState->setCustomConfigEntry("GameWindowWidth",  s_exportWindowWidth);
-                    ctx.globalState->setCustomConfigEntry("GameWindowHeight", s_exportWindowHeight);
-                    ctx.globalState->setCustomConfigEntry("GameWindowMode",   s_exportWindowMode);
-                    ctx.globalState->setCustomConfigEntry("GameVSync",        s_exportGameVSync);
-                    ctx.globalState->setCustomConfigEntry("GameBackend",      s_exportBackend);
-                }
                 es.gameRuntimeDir   = runtimeDir;
                 // Engine-wide default content (primitive meshes, default materials)
                 // ships INSIDE the pak under "Engine/…": it lives next to the editor,
@@ -1651,7 +1897,7 @@ void startExport(AppContext& ctx)
                     ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Python;
                 // Precompile node-graph material shaders into the pak for the
                 // selected backends (0 → runtime cross-compiles as before).
-                es.shaderBackends        = s_exportShaderBackends;
+                es.shaderBackends        = effectiveShaderBackends(ctx);
                 es.compileShaderVariants = &CompileMaterialShaderVariants;
                 // Same bitmask + toggle UI as materials — particles only ever bake
                 // OpenGL/Metal variants (see CompileParticleShaderVariants), so
@@ -1712,13 +1958,20 @@ void startExport(AppContext& ctx)
                 const std::string contentDir = ctx.contentManager->contentRoot();
                 const std::string outDir     = effOutDir.string();
                 const bool hostTarget        = platform == ExportPlatform::Host;
+                // The previous SDK-built game has its key compiled in, so an
+                // incremental pack can only reuse it from the header it was built
+                // from; without this every encrypted entry is packed again.
+                if (es.encrypt && es.incremental)
+                    es.previousBuildConfigHeader = sdkGameWorkDir(projName, sdkProfile) / "HEGameBuildConfig.h";
 
                 s_exportRunning.store(true);
                 if (s_exportThread.joinable()) s_exportThread.join(); // defensive; reaped above
                 s_exportThread = std::thread([es, contentDir, projName, sceneName,
                                               outDir, sceneBinary, extraScenes,
                                               gameInstanceJson, hcCompile, hcSources,
-                                              hcBase = base, stepBuild, stepPackage, hostTarget]()
+                                              stepBuild, stepPackage, stepCleanup, hostTarget,
+                                              stepSdkGame, gameSdk, sdkToolchain,
+                                              hcSdk]()
                 {
                     // An exception escaping a std::thread is std::terminate — and
                     // exportProject touches the filesystem (unreadable dirs,
@@ -1726,13 +1979,33 @@ void startExport(AppContext& ctx)
                     std::string msg;
                     try
                     {
+                        ExportSettings esEff = es;
+
+                        // ── The game, compiled from the engine SDK, first. What
+                        // it carries compiled in (pak key, startup scene UUID,
+                        // layout) is planned here and pinned into esEff, so the
+                        // pack below writes exactly that. HorizonCode counts as
+                        // compiled when it is meant to be: should its build fall
+                        // back, the game says so at start instead of trusting it.
+                        Build::stepBegin(stepSdkGame);
+                        const ExportPlan plan = ProjectExporter::planExport(
+                            projName, sceneName, std::filesystem::path(outDir), esEff,
+                            !sceneBinary.empty(), hcCompile && !hcSources.empty());
+                        if (!plan.success)
+                        {
+                            Build::stepFailed(stepSdkGame);
+                            throw std::runtime_error(plan.errorMessage);
+                        }
+                        const SdkGameResult game = compileGameFromSdk(
+                            plan.config, es.projectSettingsFile, gameSdk, sdkToolchain, projName, stepSdkGame);
+                        if (!game.ok) throw std::runtime_error(game.text);
+
                         // ── HorizonCode → C++ (plan §8.1): generate + build the
                         // classes dylib BEFORE packing, so the exporter can ship
                         // it and the result line can report the outcome. Any
                         // failure here falls back to the interpreter loudly —
                         // the export itself never fails because of codegen
                         // (graphs are packed regardless).
-                        ExportSettings esEff = es;
                         std::string hcMsg;
                         std::string hcFatal;   // Stop mode: why the export must not proceed
                         if (hcCompile && !hcSources.empty())
@@ -1844,11 +2117,22 @@ void startExport(AppContext& ctx)
                                 Build::stepFailed(stepBuild);
                                 hcMsg = " — HorizonCode: generation failed, shipped interpreted";
                             }
+                            else if (!hcSdk.valid())
+                            {
+                                // Not reached: a run starts only with an SDK (the gate).
+                                const std::string why = "no engine SDK to compile against";
+                                Build::log(1, "HorizonCode: " + why + " — shipping interpreted");
+                                Build::stepFailed(stepBuild);
+                                hcMsg = " — HorizonCode: shipped interpreted (" + why + ")";
+                                buildLine = "build: SKIPPED — " + why;
+                            }
                             else
                             {
                                 Build::setActivity("Compiling the generated C++\xe2\x80\xa6");
                                 Build::stepProgress(0.4f);
-                                const auto sdk   = HE::hccg::resolveSdk(hcBase);
+                                const auto& sdk = hcSdk;
+                                Build::log(0, "Compiling HorizonCode against the engine SDK (" + sdk.profile
+                                              + "): " + sdk.packageDir.string());
                                 const auto built = HE::hccg::buildDylib(genDir, sdk,
                                     [](const std::string& line)
                                     {
@@ -1976,6 +2260,13 @@ void startExport(AppContext& ctx)
                                 ? " — key embedded in the game binary"
                                 : " — key in project.hcfg (runtime has no key block)";
                         if (res.success) msg += hcMsg;
+                        // Clean up is the exporter's last ring and still running:
+                        // the built game goes over the runtime's executable there.
+                        if (res.success)
+                        {
+                            const SdkGameResult installed = installSdkGame(res, gameSdk, game, stepCleanup);
+                            msg = installed.ok ? msg + installed.text : "Error: " + installed.text;
+                        }
                     }
                     catch (const std::exception& e)
                     {

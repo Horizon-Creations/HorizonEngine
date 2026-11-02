@@ -36,6 +36,49 @@ namespace
 		seen.push_back(key);
 		return false;
 	}
+
+	// An entity over kMaxProperties never gets a table, so update() asks for one
+	// again every frame and for every connection; the warning is said once per
+	// net id. Process-wide on purpose: the header stays as it is.
+	bool firstOversizedReport(std::uint32_t netId)
+	{
+		static std::vector<std::uint32_t> reported;
+		if (std::find(reported.begin(), reported.end(), netId) != reported.end()) return false;
+		reported.push_back(netId);
+		return true;
+	}
+
+	// update()'s per-frame question, "is the declaration still the table's?",
+	// answered against the table's names in place, without collect's copies of
+	// every name and value (SCN-401/501). Same order and same duplicate rule as
+	// collect: HorizonCode variables, then the component's entries minus the
+	// names already listed. While the prefix matches, "already listed" is the
+	// same as "in names[0, k)", so this is true exactly when collect's names
+	// would equal `names`. On true, `rvcValues` holds the component's values
+	// that follow the HorizonCode ones, in index order.
+	bool declarationMatches(const std::vector<std::string>& names,
+	                        const std::vector<HorizonCode::Runtime::ReplicatedVar>& hcVars,
+	                        const ReplicatedVarsComponent* rvc,
+	                        std::vector<const Value*>& rvcValues)
+	{
+		rvcValues.clear();
+		std::size_t k = 0;
+		for (const auto& rv : hcVars)
+		{
+			if (k >= names.size() || names[k] != rv.name) return false;
+			++k;
+		}
+		if (rvc)
+			for (const auto& e : rvc->entries)
+			{
+				const auto listed = names.begin() + static_cast<std::ptrdiff_t>(k);
+				if (std::find(names.begin(), listed, e.name) != listed) continue;
+				if (k >= names.size() || names[k] != e.name) return false;
+				rvcValues.push_back(&e.value);
+				++k;
+			}
+		return k == names.size();
+	}
 }
 
 PropertyReplicator::PropertyReplicator(NetSession* net, NetRole role, GameReplication* replication)
@@ -269,7 +312,14 @@ void PropertyReplicator::sendTableFor(std::uint32_t netId, ConnectionId conn)
 		t.notify.erase(t.notify.begin() + static_cast<long>(i));
 		t.values.erase(t.values.begin() + static_cast<long>(i));
 	}
-	if (t.names.size() > kMaxProperties) return;
+	if (t.names.size() > kMaxProperties)
+	{
+		if (firstOversizedReport(netId))
+			HE_LOG_WARN(Replication,
+			            "Entity with %zu replicated variables exceeds the %u limit — it is not replicated",
+			            t.names.size(), static_cast<unsigned>(kMaxProperties));
+		return;
+	}
 
 	// WHAT GETS RECORDED, and this distinction is the whole of a bug that only
 	// shows when somebody joins at the wrong moment. `m_tables` is the host's
@@ -394,10 +444,12 @@ void PropertyReplicator::update()
 		Table& t = it->second;
 		t.entity = entity;
 
-		std::vector<std::string> names;
-		std::vector<bool>        notify;
-		std::vector<Value>       current;
-		collect(entity, names, notify, current);
+		HorizonCode::InstanceId                          inst = 0;
+		std::vector<HorizonCode::Runtime::ReplicatedVar> hcVars;
+		if (m_runtime && m_instanceOf)
+			if ((inst = m_instanceOf(entity)) != 0)
+				hcVars = m_runtime->replicatedVariablesOf(inst);
+		const auto* rvc = m_world->registry().try_get<ReplicatedVarsComponent>(entity);
 
 		// The DECLARATION changed since the last table — a script declared
 		// another variable in a handler, or a hot reload took one away. Nothing
@@ -407,25 +459,32 @@ void PropertyReplicator::update()
 		// also the only way to do it, because an index is a position in the
 		// list, so a list that grew has to reach every client at once
 		// (sendTableFor does that when it sees the names differ).
-		if (names != t.names)
+		if (!declarationMatches(t.names, hcVars, rvc, m_scratchRvcValues))
 		{
 			broadcastTableFor(nc.netId);
 			continue;
 		}
 		if (t.names.empty()) continue;
 
-		// Which indices changed. Looked up BY NAME rather than by position: a
-		// script may declare another variable mid-session, which appends to its
-		// list and would shift every position after it. A name the table does
-		// not know is simply not replicated until the next table — sending it
-		// under an index the client has never heard of is the failure this whole
-		// design is trying to avoid.
+		// Which indices changed. By position, because the declaration is the
+		// table's (checked above) and its names are unique (the Runtime merges a
+		// re-declared name, collect skips a duplicate), so the name at index i is
+		// where the value for index i lives. A declaration that grew mid-session
+		// never gets here: it was re-tabled above, and a name the client has not
+		// been told about is never sent under an index it does not know.
 		std::vector<std::uint8_t> changed;
+		Value                     hcNow;
 		for (std::size_t i = 0; i < t.names.size() && i < kMaxProperties; ++i)
 		{
-			const auto at = std::find(names.begin(), names.end(), t.names[i]);
-			if (at == names.end()) continue;
-			const Value& now = current[static_cast<std::size_t>(at - names.begin())];
+			const Value* nowPtr = nullptr;
+			if (i < hcVars.size())
+			{
+				hcNow  = m_runtime->getVariable(inst, hcVars[i].name);
+				nowPtr = &hcNow;
+			}
+			else
+				nowPtr = m_scratchRvcValues[i - hcVars.size()];
+			const Value& now = *nowPtr;
 			if (valuesEqual(now, t.values[i])) continue;
 			if (!valueTypesMatch(now, t.values[i]))
 			{

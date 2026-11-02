@@ -97,12 +97,13 @@ void draw()
 
 	// Case-insensitive "does the row mention the filter" — action, category
 	// or the key itself, so "ctrl" finds every chord that carries it.
-	const auto matches = [](const Action& a)
+	std::string needle = s_shortcutFilter;
+	std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char ch){ return (char)std::tolower(ch); });
+	const auto matches = [&needle](const Action& a)
 	{
-		if (s_shortcutFilter[0] == '\0') return true;
-		std::string needle = s_shortcutFilter, hay = std::string(a.label) + ' ' + a.category + ' ' + label(a.id);
-		std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char ch){ return (char)std::tolower(ch); });
-		std::transform(hay.begin(), hay.end(), hay.begin(),         [](unsigned char ch){ return (char)std::tolower(ch); });
+		if (needle.empty()) return true;
+		std::string hay = std::string(a.label) + ' ' + a.category + ' ' + label(a.id);
+		std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char ch){ return (char)std::tolower(ch); });
 		return hay.find(needle) != std::string::npos;
 	};
 

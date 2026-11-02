@@ -82,12 +82,14 @@ struct Member {
         std::error_code ec;
         fs::remove_all(root, ec);
     }
+    // `spelledAs`: the project folder under another name (a symlink to it, a
+    // trailing slash), as an editor may pass it; empty = `root` itself.
     void start(const RelayAddress& at, const std::string& password, const std::string& teamName = "studio",
-               const std::string& project = "game") {
+               const std::string& project = "game", const fs::path& spelledAs = {}) {
         team = TeamClient::connect(at, teamName, name, password);
         REQUIRE(team);
         TeamSyncService::Settings s;
-        s.projectRoot = root;
+        s.projectRoot = spelledAs.empty() ? root : spelledAs;
         s.host        = at.host;
         s.port        = at.port;
         s.team        = teamName;
@@ -372,6 +374,49 @@ TEST_CASE("Team sync: a save goes up and reaches the other member")
     REQUIRE(pumpSync(&server, { &anna }, [&] { return anna.settled(2); }));
     CHECK(anna.st().firstSyncDiffers.empty());
     CHECK(anna.st().waiting == 0);
+}
+
+TEST_CASE("Team sync: a project root spelled through a symlink or with a trailing slash")
+{
+    // SCM-103: scan() cuts the relative path lexically off the root it walks
+    // from instead of asking fs::relative (a stat per path component, per
+    // entry). The paths that go up must stay exactly the project-relative ones
+    // whatever spelling of the root the editor hands over.
+    FakeTeamServer server;
+    FakeScServer   sc(server);
+    Member anna("AnnaSlash"), bob("BobLink");
+    anna.put("Content/Doors/door.txt", "closed\n");
+    anna.put("Config/settings.json", "{}\n");
+    anna.put("Saved/Autosave/Main.hescene", "{}\n");   // ignored folder: never uploaded
+
+    const fs::path link = bob.root.parent_path() / (bob.root.filename().string() + "-link");
+    std::error_code ec;
+    fs::create_directory_symlink(bob.root, link, ec);
+    // Windows without developer mode may not create symlinks; the slash case still runs.
+    const bool linked = !ec;
+    if (!linked) MESSAGE("no symlink here (" << ec.message() << "); Bob uses the plain root");
+
+    anna.start(server.address(), "correct-horse", "studio", "game", fs::path(anna.root.string() + "/"));
+    bob.start(server.address(), "correct-horse", "studio", "game", linked ? link : fs::path{});
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] { return anna.settled(0) && bob.settled(0); }));
+    anna.sync.requestSync();
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] {
+        return anna.settled(1) && bob.settled(1) && bob.file("Content/Doors/door.txt") == "closed\n";
+    }));
+    const auto& tree = sc.treesOf("game").back();
+    std::vector<std::string> paths;
+    for (const auto& [path, file] : tree) paths.push_back(path);
+    CHECK(paths == std::vector<std::string>{ "Config/settings.json", "Content/Doors/door.txt" });
+
+    // And back up from the member behind the symlink.
+    bob.put("Content/Doors/door.txt", "open\n");
+    bob.sync.requestSync();
+    REQUIRE(pumpSync(&server, { &anna, &bob }, [&] {
+        return bob.settled(2) && anna.settled(2) && anna.file("Content/Doors/door.txt") == "open\n";
+    }));
+    CHECK(sc.treesOf("game").back().size() == 2);
+    CHECK(sc.text("game", "Content/Doors/door.txt") == "open\n");
+    fs::remove(link, ec);
 }
 
 TEST_CASE("Team sync: both change one file — the later save wins, the earlier one is kept")

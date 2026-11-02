@@ -59,6 +59,22 @@ std::vector<HE::CellAnchor>& previewPins()
 	return s_pins;
 }
 
+namespace
+{
+// The camera first, then the pins; `eyeAbs` is already in absolute positions.
+std::vector<HE::CellAnchor> anchorsAround(const glm::dvec3& eyeAbs,
+                                          const std::vector<HE::CellAnchor>& pins)
+{
+	std::vector<HE::CellAnchor> anchors;
+	anchors.reserve(1 + pins.size());
+	HE::CellAnchor cam;
+	cam.position = eyeAbs;
+	anchors.push_back(cam);
+	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	return anchors;
+}
+} // namespace
+
 // ── The cells in the Scene window ────────────────────────────────────────────
 void appendCellLines(const HorizonWorld& world, const glm::vec3& eye, DebugDrawBuffer& out)
 {
@@ -80,12 +96,7 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
 	const double range = std::max(static_cast<double>(m->unloadRadius) * 1.5, size * 2.0);
 	// The camera is an anchor like the pins: the nearest of them decides a cell's colour.
 	// A viewpoint has no velocity, so the lookahead does not enter.
-	std::vector<HE::CellAnchor> anchors;
-	anchors.reserve(1 + pins.size());
-	HE::CellAnchor cam;
-	cam.position = eyeAbs;
-	anchors.push_back(cam);
-	anchors.insert(anchors.end(), pins.begin(), pins.end());
+	const std::vector<HE::CellAnchor> anchors = anchorsAround(eyeAbs, pins);
 	const std::vector<HE::CellManifest::View> cells = m->around(anchors, range);
 
 	const glm::vec3 kLoad(0.25f, 0.85f, 0.35f);   // the game builds it from here
@@ -117,10 +128,11 @@ void appendCellLines(const HorizonWorld& world, const glm::vec3& eye,
 	const auto ring = [&](float cx, float cz, float radius, const glm::vec3& col)
 	{
 		constexpr int kSegments = 96;
+		constexpr float kTwoPi = 6.2831853f;
 		for (int i = 0; i < kSegments; ++i)
 		{
-			const float a0 = 6.2831853f * static_cast<float>(i) / kSegments;
-			const float a1 = 6.2831853f * static_cast<float>(i + 1) / kSegments;
+			const float a0 = kTwoPi * static_cast<float>(i) / kSegments;
+			const float a1 = kTwoPi * static_cast<float>(i + 1) / kSegments;
 			out.line({ cx + radius * std::cos(a0), y, cz + radius * std::sin(a0) },
 			         { cx + radius * std::cos(a1), y, cz + radius * std::sin(a1) }, col);
 		}
@@ -261,6 +273,8 @@ struct PoolRates
 {
 	double jobsPerSec[HE::kJobPriorityCount] = {};
 	double poolShare[HE::kJobPriorityCount]  = {};   // busy time / (wall time × workers)
+	double waitAvgMs[HE::kJobPriorityCount]  = {};   // queue wait per job that ran in the window
+	double waitMaxMs[HE::kJobPriorityCount]  = {};   // longest single wait in the window
 };
 
 const PoolRates& poolRates(const HE::ThreadPoolStats& now)
@@ -285,7 +299,12 @@ const PoolRates& poolRates(const HE::ThreadPoolStats& now)
 		const auto& b = now.lanes[p];
 		s_rates.jobsPerSec[p] = static_cast<double>(b.executed - a.executed) / dt;
 		s_rates.poolShare[p]  = static_cast<double>(b.busyNs - a.busyNs) * 1e-9 / (dt * workers);
+		const uint64_t ran = b.executed - a.executed;
+		s_rates.waitAvgMs[p] = ran > 0 ? static_cast<double>(b.waitNs - a.waitNs) * 1e-6 / static_cast<double>(ran) : 0.0;
+		s_rates.waitMaxMs[p] = static_cast<double>(b.waitMaxNs) * 1e-6;
 	}
+	// The peak is per window: without the reset it would show the worst moment since start.
+	globalPool().resetPeaks();
 	s_prev = now; s_prevAt = t;
 	return s_rates;
 }
@@ -309,8 +328,9 @@ void drawJobs()
 	ImGui::Text("%zu workers", s.threads);
 	constexpr ImGuiTableFlags kFlags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV
 	                                 | ImGuiTableFlags_SizingStretchProp;
-	if (!ImGui::BeginTable("##jobs", 8, kFlags)) return;
-	for (const char* h : { "Priority", "Queued", "Running", "Cap", "Jobs/s", "Pool", "Cancelled", "Failed" })
+	if (!ImGui::BeginTable("##jobs", 10, kFlags)) return;
+	for (const char* h : { "Priority", "Queued", "Running", "Cap", "Jobs/s", "Pool", "Wait avg", "Wait max",
+	                       "Cancelled", "Failed" })
 		ImGui::TableSetupColumn(h);
 	ImGui::TableHeadersRow();
 	static const char* kNames[HE::kJobPriorityCount] = { "High", "Normal", "Low" };
@@ -326,15 +346,22 @@ void drawJobs()
 		else                      ImGui::Text("%zu", l.limit);
 		ImGui::TableNextColumn(); ImGui::Text("%.0f", r.jobsPerSec[p]);
 		ImGui::TableNextColumn(); ImGui::Text("%.0f %%", r.poolShare[p] * 100.0);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f ms", r.waitAvgMs[p]);
+		ImGui::TableNextColumn(); ImGui::Text("%.1f ms", r.waitMaxMs[p]);
 		ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(l.cancelled));
 		ImGui::TableNextColumn(); ImGui::Text("%llu", static_cast<unsigned long long>(l.failed));
 	}
 	ImGui::EndTable();
 	EditorWidgets::WrapText wrap;
 	ImGui::TextDisabled("Pool is the share of all workers' time the priority took over the last "
-	                    "half second. Low is background streaming; its cap keeps workers free "
-	                    "for the frame. The Timeline tab names every job on the worker lanes.");
+	                    "half second. Wait is how long jobs stood in the queue before a worker took "
+	                    "them (average and longest over the same window): a Low wait that keeps "
+	                    "growing means streaming is starved or capped. Low is background streaming; "
+	                    "its cap keeps workers free for the frame. The Timeline tab names every job "
+	                    "on the worker lanes.");
 }
+
+constexpr double kBytesPerMB = 1048576.0;
 
 void drawAssets(ContentManager& cm)
 {
@@ -346,6 +373,7 @@ void drawAssets(ContentManager& cm)
 	            static_cast<unsigned long long>(ps.dropped), static_cast<unsigned long long>(ps.restarted));
 	ImGui::Text("Last poll: %.2f ms on the main thread, %zu taken, %zu left for the next frame",
 	            ps.lastPollMs, ps.lastPollHandled, ps.lastPollLeft);
+	ImGui::Text("Decoded, waiting for the main thread: %.1f MB", static_cast<double>(cm.asyncBacklogBytes()) / kBytesPerMB);
 	constexpr size_t kShown = 12;
 	const std::vector<std::string> paths = cm.asyncInFlightPaths(kShown);
 	for (const std::string& p : paths)
@@ -355,7 +383,7 @@ void drawAssets(ContentManager& cm)
 		{
 			char overlay[64];
 			std::snprintf(overlay, sizeof(overlay), "%.1f / %.1f MB",
-			              static_cast<double>(read) / 1048576.0, static_cast<double>(total) / 1048576.0);
+			              static_cast<double>(read) / kBytesPerMB, static_cast<double>(total) / kBytesPerMB);
 			ImGui::ProgressBar(static_cast<float>(static_cast<double>(read) / static_cast<double>(total)),
 			                   ImVec2(160.0f, 0.0f), overlay);
 			ImGui::SameLine();
@@ -393,7 +421,7 @@ void drawScene(AppContext& ctx)
 static void postStreamingMessage(std::string& message)
 {
 	if (message.empty()) return;
-	const bool refused = message.rfind("Not ", 0) == 0;
+	const bool refused = message.starts_with("Not ");
 	HE::Ed::notify(refused ? HE::Ed::NoteLevel::Important : HE::Ed::NoteLevel::Info,
 	               "Streaming cells", message);
 	message.clear();
@@ -479,13 +507,7 @@ void drawCells(AppContext& ctx)
 	if (!pins.empty())
 		ImGui::Text("%zu preview anchor(s) besides the camera.", pins.size());
 
-	std::vector<HE::CellAnchor> anchors;
-	anchors.reserve(1 + pins.size());
-	HE::CellAnchor cam;
-	cam.position = eye;
-	anchors.push_back(cam);
-	anchors.insert(anchors.end(), pins.begin(), pins.end());
-	const std::vector<HE::CellManifest::View> nearby = m->around(anchors, m->unloadRadius);
+	const std::vector<HE::CellManifest::View> nearby = m->around(anchorsAround(eye, pins), m->unloadRadius);
 	size_t   loadCells = 0, keepCells = 0;
 	uint64_t loadEnts = 0, keepEnts = 0;
 	uint32_t mostSlices = 0;

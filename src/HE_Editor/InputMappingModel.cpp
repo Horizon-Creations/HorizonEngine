@@ -10,6 +10,22 @@ void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
 	out.clear();
 	const auto j = nlohmann::json::parse(json, nullptr, /*allow_exceptions=*/false);
 	if (!j.is_object() || !j.contains("entries") || !j["entries"].is_array()) return;
+	auto readAxes = [](const nlohmann::json& arr, std::vector<AxisRow>& into)
+	{
+		for (const auto& a : arr)
+		{
+			if (!a.is_object()) continue;
+			AxisRow r;
+			r.positive       = a.value("positive", "");
+			r.negative       = a.value("negative", "");
+			r.positiveButton = a.value("positiveButton", "");
+			r.negativeButton = a.value("negativeButton", "");
+			r.scale          = a.value("scale", 1.0f);
+			r.source         = HE::axisSourceFromName(a.value("source", "Key"));
+			r.uiPadRow       = !r.positiveButton.empty() || !r.negativeButton.empty();
+			into.push_back(std::move(r));
+		}
+	};
 	for (const auto& e : j["entries"])
 	{
 		if (!e.is_object()) continue;
@@ -24,23 +40,7 @@ void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
 		if (e.contains("mouseButtons") && e["mouseButtons"].is_array())
 			for (const auto& mb : e["mouseButtons"])
 				if (mb.is_string()) me.mouseButtons.push_back(mb.get<std::string>());
-		auto readAxes = [](const nlohmann::json& arr, std::vector<AxisRow>& into)
-		{
-			for (const auto& a : arr)
-			{
-				if (!a.is_object()) continue;
-				AxisRow r;
-				r.positive       = a.value("positive", "");
-				r.negative       = a.value("negative", "");
-				r.positiveButton = a.value("positiveButton", "");
-				r.negativeButton = a.value("negativeButton", "");
-				r.scale          = a.value("scale", 1.0f);
-				r.source         = HE::axisSourceFromName(a.value("source", "Key"));
-				r.uiPadRow       = !r.positiveButton.empty() || !r.negativeButton.empty();
-				into.push_back(std::move(r));
-			}
-		};
-		if (e.contains("axes")  && e["axes"].is_array())  readAxes(e["axes"],  me.axes);
+		if (e.contains("axes") && e["axes"].is_array())  readAxes(e["axes"],  me.axes);
 		if (e.contains("axesX") && e["axesX"].is_array()) readAxes(e["axesX"], me.axes);
 		if (e.contains("axesY") && e["axesY"].is_array()) readAxes(e["axesY"], me.axesY);
 		out.push_back(std::move(me));
@@ -50,27 +50,27 @@ void decodeMapping(const std::string& json, std::vector<MapEntry>& out)
 std::string encodeMapping(const std::vector<MapEntry>& entries)
 {
 	nlohmann::json j; j["entries"] = nlohmann::json::array();
+	auto writeAxes = [](const std::vector<AxisRow>& rows)
+	{
+		nlohmann::json arr = nlohmann::json::array();
+		for (const auto& a : rows)
+		{
+			nlohmann::json ja = { {"positive", a.positive}, {"negative", a.negative},
+			                      {"scale", a.scale},
+			                      {"source", HE::axisSourceName(a.source)} };
+			// Written only when set — old contexts round-trip byte-stable.
+			if (!a.positiveButton.empty()) ja["positiveButton"] = a.positiveButton;
+			if (!a.negativeButton.empty()) ja["negativeButton"] = a.negativeButton;
+			arr.push_back(std::move(ja));
+		}
+		return arr;
+	};
 	for (const auto& e : entries)
 	{
 		nlohmann::json je; je["action"] = e.actionPath;
 		if (!e.keys.empty()) je["keys"] = e.keys;
 		if (!e.gamepadButtons.empty()) je["gamepadButtons"] = e.gamepadButtons;
 		if (!e.mouseButtons.empty())   je["mouseButtons"]   = e.mouseButtons;
-		auto writeAxes = [](const std::vector<AxisRow>& rows)
-		{
-			nlohmann::json arr = nlohmann::json::array();
-			for (const auto& a : rows)
-			{
-				nlohmann::json ja = { {"positive", a.positive}, {"negative", a.negative},
-				                      {"scale", a.scale},
-				                      {"source", HE::axisSourceName(a.source)} };
-				// Written only when set — old contexts round-trip byte-stable.
-				if (!a.positiveButton.empty()) ja["positiveButton"] = a.positiveButton;
-				if (!a.negativeButton.empty()) ja["negativeButton"] = a.negativeButton;
-				arr.push_back(std::move(ja));
-			}
-			return arr;
-		};
 		// An entry is 2D when its ACTION declares Axis2D — or, for an entry
 		// whose action could not be resolved, when a Y list exists (the old
 		// shape rule, kept as the fallback). Writing axesX for a 2D entry even

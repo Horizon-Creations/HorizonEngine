@@ -305,6 +305,8 @@ TEST_CASE("which finds a program on PATH and rejects one that is not there")
 	CHECK(fs::exists(*self));
 
 	CHECK_FALSE(Proc::which("he_definitely_not_a_real_program_9f3a").has_value());
+	// An empty name would otherwise resolve to the first PATH directory itself.
+	CHECK_FALSE(Proc::which("").has_value());
 
 	// Something every supported platform ships, to cover the PATH search itself.
 #ifdef _WIN32

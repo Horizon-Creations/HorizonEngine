@@ -1,0 +1,17 @@
+== detail2x-s128-off-r3  2026-10-21 05:48:48  attempt 1
+before:
+  uptime:    load averages: 1.85 2.15 2.23
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.9% Python; 12.3% clion; 9.6% coreaudiod; 1.8% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.63 2.07 2.20
+  locked:    Yes
+  lowpower:  0
+  gpu:       86
+  power:     Now drawing from 'AC Power'
+  busy:      14.0% Dock; 11.6% coreaudiod; 7.3% clion; 5.6% WindowServer
+  foreign:   none

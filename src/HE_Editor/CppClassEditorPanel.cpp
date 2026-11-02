@@ -72,7 +72,6 @@ namespace
 		FileBuf     source;
 		int         active = 0;          // 0 = header, 1 = source
 		bool        resolved = false;    // sibling paths worked out yet?
-		std::string className;           // stem, shown in the header bar
 	};
 	AssetPanelState<State> s_states;
 
@@ -95,17 +94,16 @@ namespace
 
 		fs::path p(canonical);
 		const fs::path dir = p.parent_path();
-		st.className = p.stem().string();
 
 		if (isHeaderExt(p.extension().string()))
 		{
 			st.header.path = canonical;
-			st.source.path = findSibling(dir, st.className, { ".cpp", ".cc", ".cxx", ".c" });
+			st.source.path = findSibling(dir, p.stem().string(), { ".cpp", ".cc", ".cxx", ".c" });
 		}
 		else // source (or anything else) is the canonical file
 		{
 			st.source.path = canonical;
-			st.header.path = findSibling(dir, st.className, { ".h", ".hpp", ".hh", ".hxx" });
+			st.header.path = findSibling(dir, p.stem().string(), { ".h", ".hpp", ".hh", ".hxx" });
 		}
 
 		loadBuf(st.header);

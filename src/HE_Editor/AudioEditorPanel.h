@@ -40,10 +40,8 @@ namespace AudioEditorPanel
 
 	// Whether the file at `path` is something this panel can open: an Audio
 	// .hasset (HAsset header sniff, cached per path — same convention as the other
-	// asset panels) or a raw source the importer can decode (.wav, .ogg — see
-	// AudioImporter::isSupportedSource). mp3/flac have no decoder linked in and
-	// are NOT claimed here even though the Content Browser draws them with a
-	// speaker icon.
+	// asset panels) or a raw source the importer can decode (.wav, .ogg, .mp3,
+	// .flac — see AudioImporter::isSupportedSource).
 	bool isAudioAsset(const std::string& path);
 
 	// Drop cached editor state for `path` (tab close, content-browser

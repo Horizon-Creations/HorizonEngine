@@ -1,4 +1,5 @@
 #include "HcRename.h"
+#include "HcEditorUtil.h"
 #include "HcExtract.h"
 
 #include <HorizonCode/HorizonCode.h>
@@ -29,11 +30,6 @@ namespace
 		for (const HorizonCode::Link& l : g.links)
 			if (l.dstNode == nodeId && l.dstPin == pin) return g.findNode(l.srcNode);
 		return nullptr;
-	}
-
-	bool contains(const std::vector<std::string>& v, const std::string& s)
-	{
-		return std::find(v.begin(), v.end(), s) != v.end();
 	}
 
 	std::string line(const HorizonCode::Node& n)
@@ -218,7 +214,7 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 					key = graphKey;
 			}
 			const bool proven = !key.empty();
-			const bool ours   = proven && contains(targetKeys, key);
+			const bool ours   = proven && HcEditorUtil::contains(targetKeys, key);
 
 			for (const int pin : pins)
 			{
@@ -269,7 +265,7 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 			// this is reported and left standing.
 			p.unsure.push_back({ n.id, {}, line(n) });
 		}
-		else if (contains(targetKeys, key))
+		else if (HcEditorUtil::contains(targetKeys, key))
 		{
 			p.rename.push_back({ n.id, {}, line(n) });
 			if (n.type == NT::BindEvent) boundHere = true;
@@ -284,7 +280,7 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 	// a new one and drop the value somebody typed into it.
 	if (t.member == Member::Variable)
 		for (const HorizonCode::Node& n : g.nodes)
-			if (n.type == NT::CreateWidget && contains(targetKeys, n.s))
+			if (n.type == NT::CreateWidget && HcEditorUtil::contains(targetKeys, n.s))
 				for (const HorizonCode::FuncParam& prm : n.params)
 					if (prm.name == t.oldName) { p.rename.push_back({ n.id, {}, line(n) }); break; }
 
@@ -310,7 +306,7 @@ Plan planGraph(const HorizonCode::Graph& g, Role role,
 			               v.name + "\" (from " +
 			               HorizonCode::pullSourceLabel(v.pullSource, v.pullRef) + ")" };
 			if (key.empty())                   p.unsure.push_back(hit);
-			else if (contains(targetKeys, key)) p.rename.push_back(hit);
+			else if (HcEditorUtil::contains(targetKeys, key)) p.rename.push_back(hit);
 		}
 
 	// A Bind Event uses ONE name for both ends: when the Target fires event X,

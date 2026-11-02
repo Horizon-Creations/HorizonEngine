@@ -68,17 +68,6 @@ std::uint64_t randomU64() {
     return get64(b);
 }
 
-std::string addressKey(const std::string& host, std::uint16_t port) {
-    return host + "|" + std::to_string(port);
-}
-
-// Link-local IPv6 answers carry a scope ("fe80::1%en0") that recvfrom does not
-// report back, so the two spellings of one peer have to be compared without it.
-std::string stripScope(const std::string& host) {
-    const std::size_t at = host.find('%');
-    return at == std::string::npos ? host : host.substr(0, at);
-}
-
 // Client-side connect retry cadence. The Connect is unreliable by nature (there
 // is no connection to make it reliable yet), so it is simply repeated.
 constexpr std::uint32_t kConnectRetryMs = 250;
@@ -169,7 +158,11 @@ std::unique_ptr<UdpTransport> UdpTransport::connect(const std::string& host,
                                                     std::uint16_t port, Config cfg) {
     std::string numeric;
     bool isV6 = false;
-    if (!socketResolveUdpAddress(host, port, numeric, isV6)) {
+    SocketAddress addr;
+    // Resolved and parsed once, scope included (link-local needs it to send):
+    // every datagram to this host goes out from the parsed form.
+    if (!socketResolveUdpAddress(host, port, numeric, isV6) ||
+        !socketParseAddress(numeric, port, addr)) {
         HE_LOG_ERROR(Net, "UDP connect to %s:%u failed to start (resolve error)",
                      host.c_str(), static_cast<unsigned>(port));
         return nullptr;
@@ -190,14 +183,14 @@ std::unique_ptr<UdpTransport> UdpTransport::connect(const std::string& host,
 
     const ConnectionId id = t->m_nextId++;
     Peer p;
+    p.addr  = addr;
     p.host  = numeric;
-    p.port  = port;
     p.state = PeerState::Connecting;
     p.clientNonce    = randomU64();
     p.connectStartMs = t->m_clock();
     p.lastRecvMs     = p.connectStartMs;
     t->m_peers.emplace(id, std::move(p));
-    t->m_byAddress[addressKey(stripScope(numeric), port)] = id;
+    t->m_byAddress[addr] = id;
 
     HE_LOG_INFO(Net, "UDP connecting to %s:%u (conn %llu, %s)",
                 host.c_str(), static_cast<unsigned>(port),
@@ -255,24 +248,29 @@ std::size_t UdpTransport::maxReliableMessage() const {
 
 // ─── Cookies ─────────────────────────────────────────────────────────────────
 
-std::uint64_t UdpTransport::makeCookie(const std::uint8_t secret[32], const std::string& host,
-                                       std::uint16_t port, std::uint64_t nonce) const {
+std::uint64_t UdpTransport::makeCookie(const std::uint8_t secret[32], const SocketAddress& from,
+                                       std::uint64_t nonce) const {
     // HMAC over (address, port, nonce): only the true owner of the address can
-    // receive the value, and a change of nonce or port invalidates it.
-    std::vector<std::uint8_t> msg(host.begin(), host.end());
-    put16(msg, port);
+    // receive the value, and a change of nonce or port invalidates it. The
+    // address goes in as its bytes, the same identity findPeer uses (no scope).
+    // Only this host ever checks the value, so its input is ours to choose.
+    std::vector<std::uint8_t> msg;
+    msg.reserve(1 + 16 + 2 + 8);
+    msg.push_back(from.family);
+    msg.insert(msg.end(), from.ip, from.ip + (from.family == 4 ? 4 : 16));
+    put16(msg, from.port);
     put64(msg, nonce);
     std::uint8_t digest[32];
     KeyDerivation::hmac(secret, 32, msg.data(), msg.size(), digest);
     return get64(digest);
 }
 
-bool UdpTransport::cookieValid(const std::string& host, std::uint16_t port,
-                               std::uint64_t nonce, std::uint64_t cookie) const {
+bool UdpTransport::cookieValid(const SocketAddress& from, std::uint64_t nonce,
+                               std::uint64_t cookie) const {
     // Both the current and the previous secret count, so a rotation between
     // Challenge and the client's reply does not lock it out.
-    return cookie == makeCookie(m_secret[0], host, port, nonce) ||
-           cookie == makeCookie(m_secret[1], host, port, nonce);
+    return cookie == makeCookie(m_secret[0], from, nonce) ||
+           cookie == makeCookie(m_secret[1], from, nonce);
 }
 
 void UdpTransport::rotateSecretIfDue() {
@@ -286,8 +284,8 @@ void UdpTransport::rotateSecretIfDue() {
 
 // ─── Raw send ────────────────────────────────────────────────────────────────
 
-void UdpTransport::rawSend(const std::string& host, std::uint16_t port,
-                           const std::uint8_t* datagram, std::size_t len) {
+void UdpTransport::rawSend(const SocketAddress& to, const std::uint8_t* datagram,
+                           std::size_t len) {
     if (m_testDrop && m_testDrop(datagram, len)) {
         // Counted as sent: from the reliability layer's point of view it left.
         m_stats.datagramsSent++;
@@ -297,13 +295,13 @@ void UdpTransport::rawSend(const std::string& host, std::uint16_t port,
     const int copies = (m_testDuplicate && m_testDuplicate(datagram, len)) ? 2 : 1;
     for (int i = 0; i < copies; ++i) {
         std::size_t sent = 0;
-        const SocketResult rc = socketSendTo(m_socket, datagram, len, host, port, sent);
+        const SocketResult rc = socketSendTo(m_socket, datagram, len, to, sent);
         if (rc != SocketResult::Ok) {
             // A full send buffer or a transient error loses this datagram
             // exactly as the network would; reliable content is resent.
             HE_LOG_TRACE(Net, "UDP send of %s to %s:%u did not go out (%s)",
-                         detail::logBytes(len).c_str(), host.c_str(),
-                         static_cast<unsigned>(port),
+                         detail::logBytes(len).c_str(), socketAddressText(to).c_str(),
+                         static_cast<unsigned>(to.port),
                          rc == SocketResult::WouldBlock ? "would block" : socketErrorText().c_str());
         }
         m_stats.datagramsSent++;
@@ -344,14 +342,14 @@ std::uint16_t UdpTransport::emitDatagram(Peer& p, std::uint8_t flags, std::uint8
     }
     if (len) out.insert(out.end(), body, body + len);
 
-    rawSend(p.host, p.port, out.data(), out.size());
+    rawSend(p.addr, out.data(), out.size());
     p.lastSendMs = m_clock();
     p.ackPending = false;
     p.datagramsSinceAck = 0;
     return seq;
 }
 
-void UdpTransport::sendControl(const std::string& host, std::uint16_t port, std::uint8_t flags,
+void UdpTransport::sendControl(const SocketAddress& to, std::uint8_t flags,
                                const std::uint8_t* body, std::size_t len) {
     // Stateless: no peer, so no seq and no acks. Used for Challenge and Reject
     // before a peer exists, and for Disconnect repeats after one is gone.
@@ -365,7 +363,7 @@ void UdpTransport::sendControl(const std::string& host, std::uint16_t port, std:
     put16(out, 0);
     put32(out, 0);
     if (len) out.insert(out.end(), body, body + len);
-    rawSend(host, port, out.data(), out.size());
+    rawSend(to, out.data(), out.size());
 }
 
 // ─── Pump ────────────────────────────────────────────────────────────────────
@@ -394,7 +392,7 @@ void UdpTransport::update() {
             if (now - p.connectStartMs >= m_cfg.timeoutMs) {
                 HE_LOG_WARN(Net, "UDP connect to %s:%u timed out after %u ms (conn %llu) — "
                                  "no host there, or blocked en route",
-                            p.host.c_str(), static_cast<unsigned>(p.port),
+                            p.host.c_str(), static_cast<unsigned>(p.addr.port),
                             m_cfg.timeoutMs, static_cast<unsigned long long>(id));
                 dropPeer(id, /*notify=*/true, "connect timed out");
                 continue;
@@ -454,10 +452,8 @@ void UdpTransport::receiveAll() {
     static thread_local std::vector<std::uint8_t> buf(65536);
     for (;;) {
         std::size_t   got = 0;
-        std::string   fromHost;
-        std::uint16_t fromPort = 0;
-        const SocketResult rc = socketRecvFrom(m_socket, buf.data(), buf.size(), got,
-                                               fromHost, fromPort);
+        SocketAddress from;   // no string per datagram: the key is the address bytes
+        const SocketResult rc = socketRecvFrom(m_socket, buf.data(), buf.size(), got, from);
         if (rc == SocketResult::WouldBlock) break;
         if (rc != SocketResult::Ok) {
             // Not the end of the socket. On Windows an ICMP "port unreachable"
@@ -468,19 +464,22 @@ void UdpTransport::receiveAll() {
                          socketErrorText().c_str());
             break;
         }
-        handleDatagram(fromHost, fromPort, buf.data(), got);
+        handleDatagram(from, buf.data(), got);
     }
 }
 
 // ─── Receive ─────────────────────────────────────────────────────────────────
 
-ConnectionId UdpTransport::findPeer(const std::string& host, std::uint16_t port) const {
-    const auto it = m_byAddress.find(addressKey(stripScope(host), port));
+ConnectionId UdpTransport::findPeer(const SocketAddress& from) const {
+    // Link-local IPv6 answers carry a scope ("fe80::1%en0") that recvfrom need
+    // not report back; the key's equality (SocketAddress::samePeer) ignores it,
+    // so the two spellings of one peer still find each other.
+    const auto it = m_byAddress.find(from);
     return it == m_byAddress.end() ? kInvalidConnection : it->second;
 }
 
-void UdpTransport::handleDatagram(const std::string& host, std::uint16_t port,
-                                  const std::uint8_t* data, std::size_t len) {
+void UdpTransport::handleDatagram(const SocketAddress& from, const std::uint8_t* data,
+                                  std::size_t len) {
     if (len < kHeaderSize) return;
     if (get16(data) != kMagic) return;   // not ours: silently ignored, like every stray
     m_stats.datagramsReceived++;
@@ -496,11 +495,11 @@ void UdpTransport::handleDatagram(const std::string& host, std::uint16_t port,
     const std::size_t   blen    = len - kHeaderSize;
 
     if (flags & FlagConnect) {
-        if (m_isHost) handleConnect(host, port, version, body, blen);
+        if (m_isHost) handleConnect(from, version, body, blen);
         return;
     }
 
-    const ConnectionId id = findPeer(host, port);
+    const ConnectionId id = findPeer(from);
     // A datagram from an address without peer state and without Connect is
     // dropped without an answer: a stale client gets no Reject per snapshot
     // to amplify, and runs into its own timeout instead.
@@ -561,16 +560,16 @@ void UdpTransport::handleDatagram(const std::string& host, std::uint16_t port,
     }
 }
 
-void UdpTransport::handleConnect(const std::string& host, std::uint16_t port,
+void UdpTransport::handleConnect(const SocketAddress& from,
                                  std::uint8_t version, const std::uint8_t* body,
                                  std::size_t len) {
     if (version != kProtocolVersion) {
         // Told once per attempt; this is the one datagram a mismatched client
         // needs to stop trying.
         const std::uint8_t reason = static_cast<std::uint8_t>(RejectReason::VersionMismatch);
-        sendControl(host, port, FlagReject, &reason, 1);
+        sendControl(from, FlagReject, &reason, 1);
         HE_LOG_WARN(Net, "UDP connect from %s:%u rejected: protocol v%u, ours is v%u",
-                    host.c_str(), static_cast<unsigned>(port),
+                    socketAddressText(from).c_str(), static_cast<unsigned>(from.port),
                     static_cast<unsigned>(version), static_cast<unsigned>(kProtocolVersion));
         return;
     }
@@ -581,24 +580,24 @@ void UdpTransport::handleConnect(const std::string& host, std::uint16_t port,
         const std::uint64_t nonce = get64(body);
         std::vector<std::uint8_t> reply;
         put64(reply, nonce);
-        put64(reply, makeCookie(m_secret[0], host, port, nonce));
-        sendControl(host, port, FlagChallenge, reply.data(), reply.size());
+        put64(reply, makeCookie(m_secret[0], from, nonce));
+        sendControl(from, FlagChallenge, reply.data(), reply.size());
         return;
     }
     if (len != 16) return;   // malformed
 
     const std::uint64_t nonce  = get64(body);
     const std::uint64_t cookie = get64(body + 8);
-    if (!cookieValid(host, port, nonce, cookie)) {
+    if (!cookieValid(from, nonce, cookie)) {
         m_stats.cookiesRejected++;
         // Debug, not warning: a forged source address is precisely the case
         // this exists for, and it must not be able to fill the log either.
         HE_LOG_DEBUG(Net, "UDP connect from %s:%u carried an invalid cookie — ignored",
-                     host.c_str(), static_cast<unsigned>(port));
+                     socketAddressText(from).c_str(), static_cast<unsigned>(from.port));
         return;
     }
 
-    const ConnectionId existing = findPeer(host, port);
+    const ConnectionId existing = findPeer(from);
     if (existing != kInvalidConnection) {
         Peer& ep = m_peers.at(existing);
         if (ep.clientNonce == nonce) {
@@ -617,22 +616,23 @@ void UdpTransport::handleConnect(const std::string& host, std::uint16_t port,
 
     if (m_peers.size() >= m_cfg.maxPeers) {
         const std::uint8_t reason = static_cast<std::uint8_t>(RejectReason::Full);
-        sendControl(host, port, FlagReject, &reason, 1);
+        sendControl(from, FlagReject, &reason, 1);
         HE_LOG_WARN(Net, "UDP connect from %s:%u rejected: host is full (%u peers)",
-                    host.c_str(), static_cast<unsigned>(port), m_cfg.maxPeers);
+                    socketAddressText(from).c_str(), static_cast<unsigned>(from.port),
+                    m_cfg.maxPeers);
         return;
     }
 
     const ConnectionId id = m_nextId++;
     Peer p;
-    p.host        = host;
-    p.port        = port;
+    p.addr        = from;
+    p.host        = socketAddressText(from);
     p.state       = PeerState::Established;
     p.clientNonce = nonce;
     p.lastRecvMs  = m_clock();
     p.lastSendMs  = p.lastRecvMs;
     m_peers.emplace(id, std::move(p));
-    m_byAddress[addressKey(stripScope(host), port)] = id;
+    m_byAddress[from] = id;
 
     Peer& live = m_peers.at(id);
     std::vector<std::uint8_t> reply;
@@ -641,7 +641,7 @@ void UdpTransport::handleConnect(const std::string& host, std::uint16_t port,
     m_events.push_back(NetEvent{ NetEventType::Connected, id, {} });
     // Info, like TCP's accept: the moment that proves reachability.
     HE_LOG_INFO(Net, "UDP accepted %s:%u (conn %llu, %zu total)",
-                host.c_str(), static_cast<unsigned>(port),
+                socketAddressText(from).c_str(), static_cast<unsigned>(from.port),
                 static_cast<unsigned long long>(id), m_peers.size());
 }
 
@@ -1004,7 +1004,7 @@ void UdpTransport::dropPeer(ConnectionId id, bool notify, const char* why) {
     if (it == m_peers.end()) return;
     HE_LOG_DEBUG(Net, "UDP conn %llu removed: %s", static_cast<unsigned long long>(id),
                  why ? why : "unspecified");
-    m_byAddress.erase(addressKey(stripScope(it->second.host), it->second.port));
+    m_byAddress.erase(it->second.addr);
     m_peers.erase(it);
     if (notify) m_events.push_back(NetEvent{ NetEventType::Disconnected, id, {} });
 }
@@ -1014,7 +1014,7 @@ void UdpTransport::serviceFarewells() {
     const std::uint64_t now = m_clock();
     for (auto it = m_farewells.begin(); it != m_farewells.end();) {
         if (now >= it->nextMs) {
-            sendControl(it->host, it->port, FlagDisconnect, nullptr, 0);
+            sendControl(it->addr, FlagDisconnect, nullptr, 0);
             it->sendsLeft--;
             it->nextMs = now + kFarewellGapMs;
         }
@@ -1081,7 +1081,7 @@ void UdpTransport::disconnect(ConnectionId conn) {
     // Like TCP and loopback: no Disconnected event for the initiator.
     if (p.state == PeerState::Established) {
         emitDatagram(p, FlagDisconnect, ChannelUnreliable, nullptr, 0);
-        m_farewells.push_back(Farewell{ p.host, p.port, kFarewellRepeats - 1,
+        m_farewells.push_back(Farewell{ p.addr, kFarewellRepeats - 1,
                                         m_clock() + kFarewellGapMs });
     }
     dropPeer(conn, /*notify=*/false, "closed locally");

@@ -3673,3 +3673,94 @@ TEST_CASE("Physics charge bench: a slice of bodies through addEntities against a
                 << ms(t0, t1) << " ms, then 60 steps in " << ms(s0, s1) << " ms");
     }
 }
+
+// ─── Write-back of a body at rest (SCN-601) ──────────────────────────────────
+// A body that does not move used to be written back, and marked dirty, on every
+// step, which made every resting body a changed transform for the propagation.
+// The write-back now skips a top-level body whose Jolt pose and transform are
+// both what it wrote last time; everything else behaves as before.
+
+namespace {
+Entity restingFloor(HorizonWorld& world)
+{
+    const Entity floor = world.createEntity("Floor");
+    TransformComponent t;
+    t.position = { 0.0f, -1.0f, 0.0f };
+    t.scale    = { 40.0f, 1.0f, 40.0f };
+    world.addComponent(floor, t);
+    RigidBodyComponent rb;
+    rb.type = RigidBodyType::Static;
+    world.addComponent(floor, rb);
+    return floor;
+}
+Entity crateAt(HorizonWorld& world, const glm::vec3& p)
+{
+    const Entity crate = world.createEntity("Crate");
+    TransformComponent t;
+    t.position = p;
+    t.rotation = { 0.0f, 30.0f, 0.0f };
+    world.addComponent(crate, t);
+    RigidBodyComponent rb;
+    rb.type = RigidBodyType::Dynamic;
+    rb.mass = 1.0f;
+    world.addComponent(crate, rb);
+    return crate;
+}
+} // namespace
+
+TEST_CASE("PhysicsWorld: a body at rest is written once, not marked dirty on every step")
+{
+    HorizonWorld world;
+    restingFloor(world);
+    const Entity crate = crateAt(world, { 0.0f, 0.6f, 0.0f });
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 4 * kSteps2s; ++i) phys.step(world, kDt);   // settles and sleeps
+
+    auto& tc = world.registry().get<TransformComponent>(crate);
+    const glm::vec3 restPos = tc.position;
+    const glm::vec3 restRot = tc.rotation;
+    for (int i = 0; i < 10; ++i)
+    {
+        tc.dirty = false;
+        phys.step(world, kDt);
+        CHECK_FALSE(tc.dirty);
+        CHECK(tc.position == restPos);
+        CHECK(tc.rotation == restRot);
+    }
+
+    // A script writes the transform of the resting body: the next step puts the
+    // Jolt pose back, bit for bit, exactly as the write-back always did.
+    tc.position = restPos + glm::vec3(3.0f, 0.0f, 0.0f);
+    tc.rotation = restRot + glm::vec3(0.0f, 45.0f, 0.0f);
+    tc.dirty    = false;
+    phys.step(world, kDt);
+    CHECK(tc.position == restPos);
+    CHECK(tc.rotation == restRot);
+    CHECK(tc.dirty);
+}
+
+TEST_CASE("PhysicsWorld: a resting child body follows its parent's move in its local pose")
+{
+    // A child's local pose depends on where its parent is, so a child is never
+    // skipped: the parent moving (with no physics of its own) changes what the
+    // child's transform must say even though Jolt's pose stays put.
+    HorizonWorld world;
+    restingFloor(world);
+    const Entity holder = world.createEntity("Holder");
+    world.addComponent(holder, TransformComponent{});
+    const Entity crate = crateAt(world, { 2.0f, 0.6f, 0.0f });
+    REQUIRE(world.reparentEntity(crate, holder));
+
+    PhysicsWorld phys;
+    phys.initialize(world);
+    for (int i = 0; i < 4 * kSteps2s; ++i) phys.step(world, kDt);
+    const float restX = world.registry().get<TransformComponent>(crate).position.x;
+
+    world.registry().get<TransformComponent>(holder).position.x += 5.0f;
+    phys.step(world, kDt);
+    // The world position stays (Jolt has it there), so the local one moves back.
+    CHECK(world.registry().get<TransformComponent>(crate).position.x ==
+          doctest::Approx(restX - 5.0f).epsilon(1e-4));
+    CHECK(HE::worldPositionOf(world, crate).x == doctest::Approx(restX).epsilon(1e-4));
+}

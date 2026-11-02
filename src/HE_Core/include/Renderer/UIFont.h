@@ -2,7 +2,6 @@
 #include <Renderer/UIRenderObject.h>
 #include <Types/Defines.h>
 #include <glm/glm.hpp>
-#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>

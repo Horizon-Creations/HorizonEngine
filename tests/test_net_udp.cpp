@@ -803,3 +803,107 @@ TEST_CASE("UDP sockets: a second host cannot bind the port a host already holds"
     socketClose(first);
 }
 #endif
+
+// ─── Parsed peer addresses (NET-201) ─────────────────────────────────────────
+// The transport keys its peers by SocketAddress instead of a "host|port"
+// string built per datagram. The key has to sort peers exactly as the strings
+// did: same family + address + port is one peer, the IPv6 scope is ignored
+// (the old key stripped "%en0"), and a v4-mapped address is NOT the plain v4
+// one (the strings "::ffff:1.2.3.4" and "1.2.3.4" differed too).
+
+TEST_CASE("SocketAddress: peer identity matches the old string key")
+{
+    const SocketAddressPeerHash hash;
+    auto parse = [](const char* host, std::uint16_t port) {
+        SocketAddress a;
+        REQUIRE(socketParseAddress(host, port, a));
+        return a;
+    };
+
+    const SocketAddress v4a = parse("127.0.0.1", 4000);
+    const SocketAddress v4b = parse("127.0.0.1", 4000);
+    CHECK(v4a.family == 4);
+    CHECK(v4a.port == 4000);
+    CHECK(v4a.samePeer(v4b));
+    CHECK(hash(v4a) == hash(v4b));
+    CHECK_FALSE(v4a.samePeer(parse("127.0.0.1", 4001)));
+    CHECK_FALSE(v4a.samePeer(parse("127.0.0.2", 4000)));
+    CHECK(socketAddressText(v4a) == "127.0.0.1");
+
+    const SocketAddress v6 = parse("::1", 4000);
+    CHECK(v6.family == 6);
+    CHECK(v6.samePeer(parse("::1", 4000)));
+    CHECK_FALSE(v6.samePeer(parse("::2", 4000)));
+    CHECK(socketAddressText(v6) == "::1");
+
+    const SocketAddress mapped = parse("::ffff:127.0.0.1", 4000);
+    CHECK(mapped.family == 6);
+    CHECK_FALSE(mapped.samePeer(v4a));
+    CHECK(socketAddressText(mapped) == "::ffff:127.0.0.1");
+
+    // Scope: built by hand so it does not depend on an interface name existing.
+    SocketAddress scoped = parse("fe80::1", 4000);
+    SocketAddress bare   = scoped;
+    scoped.scope = 7;
+    CHECK(scoped.samePeer(bare));
+    CHECK(hash(scoped) == hash(bare));
+    // A numeric scope parses into the field (sending to link-local needs it).
+    SocketAddress parsedScope;
+    if (socketParseAddress("fe80::1%1", 4000, parsedScope)) {
+        CHECK(parsedScope.scope == 1);
+        CHECK(parsedScope.samePeer(bare));
+    } else {
+        MESSAGE("numeric IPv6 scope not parseable on this platform; skipped");
+    }
+
+    // Unused bytes of a v4 address do not take part.
+    SocketAddress noisy = v4a;
+    noisy.ip[10] = 0xAB;
+    CHECK(noisy.samePeer(v4a));
+    CHECK(hash(noisy) == hash(v4a));
+
+    SocketAddress junk;
+    CHECK_FALSE(socketParseAddress("not an address", 1, junk));
+    CHECK_FALSE(socketParseAddress("localhost", 1, junk));   // numeric only, no DNS
+}
+
+TEST_CASE("SocketAddress: send and receive through the parsed form")
+{
+    SocketHandle a = socketCreateUdp();
+    SocketHandle b = socketCreateUdp();
+    REQUIRE(a != kInvalidSocket);
+    REQUIRE(b != kInvalidSocket);
+    REQUIRE(socketBindUdpTo(a, "127.0.0.1", 0));
+    REQUIRE(socketBindUdpTo(b, "127.0.0.1", 0));
+
+    SocketAddress toB;
+    REQUIRE(socketParseAddress("127.0.0.1", socketBoundPort(b), toB));
+    const std::uint8_t msg[] = { 1, 2, 3, 4, 5 };
+    std::size_t sent = 0;
+    REQUIRE(socketSendTo(a, msg, sizeof(msg), toB, sent) == SocketResult::Ok);
+    CHECK(sent == sizeof(msg));
+
+    REQUIRE(socketWaitReadable(b, 1000));
+    std::uint8_t buf[64] = {};
+    std::size_t got = 0;
+    SocketAddress from;
+    REQUIRE(socketRecvFrom(b, buf, sizeof(buf), got, from) == SocketResult::Ok);
+    CHECK(got == sizeof(msg));
+    CHECK(std::memcmp(buf, msg, sizeof(msg)) == 0);
+    CHECK(from.family == 4);
+    CHECK(from.port == socketBoundPort(a));
+    CHECK(socketAddressText(from) == "127.0.0.1");
+
+    // And straight back to the address recvfrom reported.
+    REQUIRE(socketSendTo(b, msg, 2, from, sent) == SocketResult::Ok);
+    REQUIRE(socketWaitReadable(a, 1000));
+    std::string host;
+    std::uint16_t port = 0;
+    REQUIRE(socketRecvFrom(a, buf, sizeof(buf), got, host, port) == SocketResult::Ok);
+    CHECK(got == 2);
+    CHECK(host == "127.0.0.1");
+    CHECK(port == socketBoundPort(b));
+
+    socketClose(a);
+    socketClose(b);
+}

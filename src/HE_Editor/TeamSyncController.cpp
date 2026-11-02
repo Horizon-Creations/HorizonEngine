@@ -17,6 +17,15 @@ std::string folded(std::string s)
 	return s;
 }
 
+bool caseInsensitiveEqual(const std::string& a, const std::string& b)
+{
+	if (a.size() != b.size()) return false;
+	for (std::size_t i = 0; i < a.size(); ++i)
+		if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+			return false;
+	return true;
+}
+
 std::string plural(std::size_t n, const char* one, const char* many)
 {
 	return std::to_string(n) + " " + (n == 1 ? one : many);
@@ -36,7 +45,7 @@ TeamSyncController::TeamSyncController(TeamController& team, GitController& git,
 		return true;
 	});
 	m_team.setOnScHead([this](const std::string& project, std::uint64_t rev, const std::string&) {
-		if (m_sync.running() && folded(project) == folded(m_project.project)) m_sync.notifyHead(rev);
+		if (m_sync.running() && caseInsensitiveEqual(project, m_project.project)) m_sync.notifyHead(rev);
 	});
 }
 
@@ -112,7 +121,7 @@ std::vector<std::string> TeamSyncController::update(std::uint64_t nowMs, const P
 	const bool haveSignIn = ts == TeamController::Status::SignedIn ||
 	                        ts == TeamController::Status::Reconnecting ||
 	                        (ts == TeamController::Status::Connecting && !m_team.team().empty());
-	if (!haveSignIn || folded(m_team.team()) != folded(project.team))
+	if (!haveSignIn || !caseInsensitiveEqual(m_team.team(), project.team))
 	{
 		m_blocker = haveSignIn ? Blocker::OtherTeam : Blocker::SignedOut;
 		if (m_sync.running()) m_sync.stop();

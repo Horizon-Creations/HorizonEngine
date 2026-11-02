@@ -19,6 +19,24 @@ namespace
 // glslang's process init/teardown is global, not re-entrant — serialise it.
 std::mutex g_glslangMutex;
 
+// glslang initialised ONCE per process, torn down at exit (TLS-201). Every compile
+// used to pair InitializeProcess with FinalizeProcess, and the finalize throws away
+// the built-in symbol tables the next parse then rebuilds from scratch: that rebuild
+// was most of a small compile (~165 ms of it on an M-series Mac, Release). glslang
+// counts its clients (ShInitialize/ShFinalize), so code that brackets its own use
+// with Initialize/Finalize (two tests do) only moves the count and never tears the
+// tables down under us. Caller holds g_glslangMutex, which still serialises the
+// TShader/TProgram use itself.
+void ensureGlslangProcess()
+{
+    struct Process
+    {
+        Process()  { glslang::InitializeProcess(); }
+        ~Process() { glslang::FinalizeProcess(); }
+    };
+    static Process process;
+}
+
 EShLanguage toEsh(Stage s)
 {
     switch (s)
@@ -26,9 +44,31 @@ EShLanguage toEsh(Stage s)
         case Stage::Vertex:   return EShLangVertex;
         case Stage::Fragment: return EShLangFragment;
         case Stage::Compute:  return EShLangCompute;
+        case Stage::TessControl: return EShLangTessControl;
+        case Stage::TessEval:    return EShLangTessEvaluation;
     }
     return EShLangFragment;
 }
+
+spv::ExecutionModel toExecutionModel(Stage s)
+{
+    switch (s)
+    {
+        case Stage::Vertex:      return spv::ExecutionModelVertex;
+        case Stage::Fragment:    return spv::ExecutionModelFragment;
+        case Stage::Compute:     return spv::ExecutionModelGLCompute;
+        case Stage::TessControl: return spv::ExecutionModelTessellationControl;
+        case Stage::TessEval:    return spv::ExecutionModelTessellationEvaluation;
+    }
+    return spv::ExecutionModelFragment;
+}
+
+bool isTessStage(Stage s) { return s == Stage::TessControl || s == Stage::TessEval; }
+
+// SPIRV-Cross throws for HLSL tessellation stages; say what to do instead.
+constexpr const char* kNoHlslTess =
+    "he::shaderc: SPIRV-Cross emits no HLSL for tessellation stages; D3D hull/domain "
+    "shaders are hand-written shells around a compileHlslKernel kernel\n";
 
 // GLSL → SPIR-V. Caller holds g_glslangMutex.
 bool glslToSpirv(const std::string& glsl, Stage stage,
@@ -194,11 +234,16 @@ void reportShaderResult(const char* what, bool ok, const std::string& log, size_
 Result compile(const std::string& glsl, Stage stage, Target target)
 {
     Result r;
+    if (target == Target::HlslSm50 && isTessStage(stage))
+    {
+        r.log = kNoHlslTess;
+        reportShaderResult("Shader compile", false, r.log, glsl.size());
+        return r;
+    }
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
         r.ok = spirvToSource(r.spirv, target, r.source, r.log);
-    glslang::FinalizeProcess();
     reportShaderResult("Shader compile", r.ok, r.log, glsl.size());
     return r;
 }
@@ -209,7 +254,7 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
 {
     Result r;
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
     {
         try
@@ -232,9 +277,7 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
             for (const MslPin& p : pins)
             {
                 spirv_cross::MSLResourceBinding b{};
-                b.stage = (p.stage == Stage::Vertex)   ? spv::ExecutionModelVertex
-                        : (p.stage == Stage::Fragment) ? spv::ExecutionModelFragment
-                                                       : spv::ExecutionModelGLCompute;
+                b.stage = toExecutionModel(p.stage);
                 b.desc_set    = p.set;
                 b.binding     = p.binding;
                 b.msl_buffer  = p.mslBuffer;
@@ -252,17 +295,25 @@ Result compileMslPinned(const std::string& glsl, Stage stage,
             r.log += '\n';
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Pinned-MSL shader compile", r.ok, r.log, glsl.size());
     return r;
 }
 
-Result compileHlslPinned(const std::string& glsl, Stage stage,
-                         const std::vector<HlslPin>& pins)
+namespace
+{
+// compileHlslPinned and compileHlslKernel: one path, the kernel only renames the entry.
+Result compileHlslImpl(const std::string& glsl, Stage stage, const std::vector<HlslPin>& pins,
+                       const std::string& kernelEntry)
 {
     Result r;
+    if (isTessStage(stage))
+    {
+        r.log = kNoHlslTess;
+        reportShaderResult("Pinned-HLSL shader compile", false, r.log, glsl.size());
+        return r;
+    }
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
     {
         try
@@ -270,13 +321,16 @@ Result compileHlslPinned(const std::string& glsl, Stage stage,
             spirv_cross::CompilerHLSL c(r.spirv);
             spirv_cross::CompilerHLSL::Options o;
             o.shader_model = 50;
+            if (!kernelEntry.empty())
+            {
+                c.rename_entry_point("main", kernelEntry, toExecutionModel(stage));
+                o.use_entry_point_name = true;
+            }
             c.set_hlsl_options(o);
             for (const HlslPin& p : pins)
             {
                 spirv_cross::HLSLResourceBinding b{};
-                b.stage = (p.stage == Stage::Vertex)   ? spv::ExecutionModelVertex
-                        : (p.stage == Stage::Fragment) ? spv::ExecutionModelFragment
-                                                       : spv::ExecutionModelGLCompute;
+                b.stage = toExecutionModel(p.stage);
                 b.desc_set = p.set;
                 b.binding  = p.binding;
                 // One binding can be several HLSL resources at once (a GLSL
@@ -298,9 +352,21 @@ Result compileHlslPinned(const std::string& glsl, Stage stage,
             r.log += '\n';
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Pinned-HLSL shader compile", r.ok, r.log, glsl.size());
     return r;
+}
+} // namespace
+
+Result compileHlslPinned(const std::string& glsl, Stage stage,
+                         const std::vector<HlslPin>& pins)
+{
+    return compileHlslImpl(glsl, stage, pins, {});
+}
+
+Result compileHlslKernel(const std::string& glsl, const std::string& entryName,
+                         const std::vector<HlslPin>& pins)
+{
+    return compileHlslImpl(glsl, Stage::Vertex, pins, entryName);
 }
 
 Result compileGlslPinned(const std::string& glsl, Stage stage,
@@ -308,7 +374,7 @@ Result compileGlslPinned(const std::string& glsl, Stage stage,
 {
     Result r;
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, r.spirv, r.log))
     {
         try
@@ -323,7 +389,6 @@ Result compileGlslPinned(const std::string& glsl, Stage stage,
             r.log += '\n';
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Pinned-GLSL430 shader compile", r.ok, r.log, glsl.size());
     return r;
 }
@@ -333,7 +398,7 @@ MultiResult compileMany(const std::string& glsl, Stage stage,
 {
     MultiResult mr;
     std::lock_guard<std::mutex> lock(g_glslangMutex);
-    glslang::InitializeProcess();
+    ensureGlslangProcess();
     if (glslToSpirv(glsl, stage, mr.spirv, mr.log))
     {
         mr.ok = true;
@@ -348,7 +413,6 @@ MultiResult compileMany(const std::string& glsl, Stage stage,
             mr.perTarget.push_back(std::move(r));
         }
     }
-    glslang::FinalizeProcess();
     reportShaderResult("Multi-target shader compile", mr.ok, mr.log, glsl.size());
     return mr;
 }

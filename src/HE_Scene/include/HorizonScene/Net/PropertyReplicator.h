@@ -220,6 +220,9 @@ private:
 	JoinedFn              m_joined;
 
 	std::unordered_map<std::uint32_t, Table> m_tables;
+	// update()'s view of one entity's ReplicatedVarsComponent values in index
+	// order, kept across frames so the per-frame comparison allocates nothing.
+	std::vector<const HorizonCode::Value*> m_scratchRvcValues;
 	std::deque<Notification>                 m_notifications;
 	std::unordered_map<std::string, PropertyCost> m_costs;
 

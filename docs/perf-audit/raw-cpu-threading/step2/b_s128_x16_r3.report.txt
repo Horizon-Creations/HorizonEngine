@@ -1,0 +1,31 @@
+/tmp/cta2/out/b_s128_x16_r3.json
+  window 3456 ms, 1 lane(s), 13500 spans
+
+== lanes (busy = union of depth-0 spans)
+  Main           spans= 13500 busy=   3454.9 ms (100.0% of window)  Render x250 3429.1ms, OnRender x250 14.5ms, PollEvents x250 11.0ms, GameLogicTick x250 0.2ms, SwapBuffers x250 0.1ms
+
+== main thread: busy 3455 ms of 3456 = 100.0%; WaitForFrame 2904 ms (84.0%); work 551 ms (16.0%)
+  depth-0 scopes (total ms, share of work):
+    Render                                 525.5 ms   95.3% of work
+    OnRender                                14.5 ms    2.6% of work
+    PollEvents                              11.0 ms    2.0% of work
+    GameLogicTick                            0.2 ms    0.0% of work
+    SwapBuffers                              0.1 ms    0.0% of work
+  depth-1 scopes (total ms):
+    Metal::NextDrawable                   2903.6 ms
+    Metal::ExtractFrame                    210.3 ms
+    Metal::EncodeScene                     207.7 ms
+    Metal::EncodeShadowMap                  31.0 ms
+    Metal::EncodeSSAO                       19.2 ms
+    SceneSystemsTick                         5.1 ms
+    Metal::Commit                            3.2 ms
+    PhysicsStep                              2.1 ms
+    WeatherAudio                             0.3 ms
+    CellStreaming                            0.1 ms
+    Metal::EncodeSkyViewLut                  0.1 ms
+    Metal::EncodeCloudShadow                 0.0 ms
+    ScriptUpdate                             0.0 ms
+
+== per-frame main-thread WORK (depth-0 scopes minus WaitForFrame / NextDrawable): p50 2.15 p90 2.40 p99 3.01 max 3.91 ms over 250 frames; dump cpuMs p50 10.86
+
+== no worker lane in the dump: no pool task ran a profiler scope during the capture

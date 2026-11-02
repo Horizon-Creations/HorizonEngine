@@ -174,9 +174,7 @@ Result importTexture(TerrainComponent& tc, const TextureAsset& tex, const Option
     Result r;
     if (textureFormatIsBlock4x4(tex.format))
     {
-        r.error = "The texture is block-compressed (" + std::string(
-                      tex.format == TextureFormat::BC7 ? "BC7" :
-                      tex.format == TextureFormat::BC3 ? "BC3" : "ASTC")
+        r.error = "The texture is block-compressed (" + std::string(textureFormatName(tex.format))
                 + "); a heightmap needs an uncompressed greyscale or RGBA texture.";
         return r;
     }

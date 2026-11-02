@@ -2809,7 +2809,11 @@ const std::vector<EngineEventDesc>& engineEvents()
         // "fade it, then hide it" can tell the fade from the slide beside it.
         { "OnAnimationFinished",  "onAnimationFinished",  P::String, true  },
         // A named clip from the widget's timeline ended. String payload: which.
-        { "OnClipFinished",       "onClipFinished",       P::String, true  },
+        // No element: a clip belongs to the widget, and both the hook
+        // (onClipFinished(clip)) and Runtime::fireOnClipFinished say so. This
+        // row once said `true`, so a compiled class handling it would have
+        // emitted an override with an `int elem` the hook does not have.
+        { "OnClipFinished",       "onClipFinished",       P::String, false },
         // A ListView asking to have one row filled in. The argument is the ITEM
         // index, not the row: the list holds no data, so this is the only
         // question it can ask and the answer is whatever the owner keeps.

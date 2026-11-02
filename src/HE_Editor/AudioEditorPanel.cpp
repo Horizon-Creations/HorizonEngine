@@ -1043,7 +1043,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 		{
 			const HE::AudioEnvelope& env = editable->edit.envelope;
 			float lo = env.points.front().gain, hi = lo;
-			for (const HE::AudioEnvelopePoint& p : env.points) { lo = std::min(lo, p.gain); hi = std::max(hi, p.gain); }
+			for (auto it = ++env.points.begin(); it != env.points.end(); ++it) { lo = std::min(lo, it->gain); hi = std::max(hi, it->gain); }
 			ImGui::Text("%zu point%s", env.points.size(), env.points.size() == 1 ? "" : "s");
 			ImGui::Text("Low   %s", AW::formatGain(lo).c_str());
 			ImGui::Text("High  %s", AW::formatGain(hi).c_str());
@@ -1080,7 +1080,7 @@ void render(AppContext& ctx, const std::string& assetPath, const ImVec2& pos, co
 			else if (!buses)
 				ImGui::TextDisabled("Open a project to choose one of its mixer buses.");
 			else if (buses->buses.empty())
-				ImGui::TextDisabled("The project has no buses yet: add them in Window > Audio Mixer.");
+				ImGui::TextDisabled("The project has no buses yet: add them in Project Settings > Audio Buses.");
 			else
 				ImGui::TextDisabled("An Audio Source with a Bus of its own still overrides this.");
 		}

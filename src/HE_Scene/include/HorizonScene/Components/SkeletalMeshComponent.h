@@ -1,6 +1,7 @@
 #pragma once
 #include <Types/UUID.h>
 #include <Math/Math.h>
+#include <cstdint>
 #include <vector>
 
 struct SkeletalMeshComponent {
@@ -17,4 +18,10 @@ struct SkeletalMeshComponent {
     // frame. Set by SequenceSystem::begin, and the clip, blend and state-machine
     // drivers skip the entity while it is — see SequenceSystem.h.
     bool                   sequencePosed  = false;
+    // Runtime, never serialized: what the clip, blend or state-machine driver
+    // posed boneMatrices from, as a hash of its inputs (HE::PoseKey,
+    // PoseFinalize.h). A driver whose inputs hash the same again leaves the bones
+    // standing instead of sampling and composing them anew. 0 = nothing to keep:
+    // every poseFinalize clears it, so any other writer of the bones must too.
+    uint64_t               poseKey        = 0;
 };

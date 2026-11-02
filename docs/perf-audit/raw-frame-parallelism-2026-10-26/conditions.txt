@@ -1,0 +1,9 @@
+== c1.cond
+ 6:40  up 21 days, 10:01, 1 user, load averages: 2.29 1.99 1.78
+"Device Utilization %"=1
+== f3.cond
+ 6:48  up 21 days, 10:09, 1 user, load averages: 38.23 26.06 12.48
+ 6:48  up 21 days, 10:09, 1 user, load averages: 24.18 23.88 12.23
+== r50k.cond
+ 6:42  up 21 days, 10:03, 1 user, load averages: 3.08 2.37 1.95
+"Device Utilization %"=82

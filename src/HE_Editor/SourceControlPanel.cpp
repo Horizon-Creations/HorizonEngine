@@ -417,8 +417,7 @@ enum class RowKind { Conflict, Staged, Unstaged, Untracked };
 // The whole row is a Selectable (hover wash, double-click) and everything on it is
 // drawn over it and hit-tested with InvisibleButtons that overlap it, so a click on
 // the checkbox is a click on the checkbox and not also on the row.
-RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
-                  const std::string& root)
+RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite)
 {
 	namespace T = EditorToolbar;
 	RowResult res;
@@ -479,8 +478,11 @@ RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
 		const char* letter = catLetter(r.cat);
 		const float fs = ImGui::GetFontSize() * 0.74f;
 		const ImVec2 ls = ImGui::GetFont()->CalcTextSizeA(fs, FLT_MAX, 0.0f, letter);
+		// White read 3.0:1 on the mesh amber and 3.4:1 on the texture teal, so
+		// the letter picks white or Ink by its tile.
+		const ImVec4 tile = ImGui::ColorConvertU32ToFloat4(catColour(r.cat));
 		dl->AddText(ImGui::GetFont(), fs, ImVec2(a.x + (s - ls.x) * 0.5f, a.y + (s - ls.y) * 0.5f),
-		            IM_COL32(255, 255, 255, 255), letter);
+		            HE::Ed::Theme::u32(HE::Ed::Theme::textOn(tile, ImVec4(1, 1, 1, 1))), letter);
 		x += s + 6.0f;
 	}
 
@@ -581,7 +583,6 @@ RowResult drawRow(const ChangeRow& r, RowKind kind, bool showDir, bool mayWrite,
 	{
 		s_hoverId = 0;
 	}
-	(void)root;
 
 	// The selectable already moved the cursor on; the buttons moved it around. Put it
 	// back and let one item of the row's size account for the line.
@@ -927,7 +928,7 @@ void drawChangesTab(GitController& git, AppContext& ctx, const HE::Sc::RepoStatu
 			if (!s_sectionOpen[idx]) return;
 			ImGui::PushID(idx);
 			drawRows(idx, rows, m.tree[idx], [&](const ChangeRow& r) {
-				const RowResult res = drawRow(r, kind, showDir, mayWrite, m.root);
+				const RowResult res = drawRow(r, kind, showDir, mayWrite);
 				if (res.toggle)
 				{
 					if (kind == RowKind::Staged) toUnstage.push_back(r.path);
@@ -1283,7 +1284,7 @@ void drawOptionsPopup(GitController& git, const HE::Sc::RepoStatus& st)
 	ImGui::Spacing();
 	ImGui::Separator();
 	if (EditorWidgets::menuItem("Open source-control settings…"))
-		ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
+		EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::SourceControl);
 }
 
 void drawHeaderBar(GitController& git, const HE::Sc::RepoStatus& st)
@@ -1628,7 +1629,7 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			                   "in Project Settings \xe2\x96\xb8 Source Control.");
 			ImGui::Spacing();
 			if (EditorWidgets::button("Set up in Project Settings…", ImVec2(240.0f, 0.0f)))
-				ProjectSettingsPanel::requestOpen(ProjectSettingsPanel::Page::SourceControl);
+				EditorSettingsPanel::requestOpen(EditorSettingsPanel::Page::SourceControl);
 		}
 
 		// Errors are not printed here: GitController posts them to the notifications
@@ -1753,15 +1754,27 @@ void DrawSourceControlWindow(AppContext& ctx, bool& open)
 			                         s_branchName, sizeof(s_branchName));
 
 			// Validate while typing: git's own rules, asked of git, so the answer
-			// cannot drift from what the command will accept.
+			// cannot drift from what the command will accept. Asked on the git
+			// worker once per change of the text (never per frame, never on this
+			// thread); until the answer for exactly this text is in, nothing is
+			// claimed either way and Create waits for it.
+			static std::string s_branchNameAsked;
+			if (ImGui::IsWindowAppearing()) s_branchNameAsked.clear();   // branches may have changed since
 			const bool empty = s_branchName[0] == '\0';
 			bool nameOk = false, taken = false;
+			const HE::Sc::GitService::BranchNameCheck* check = nullptr;
 			if (!empty && !git->projectRoot().empty())
 			{
-				nameOk = HE::Sc::GitCli::isValidBranchName(git->projectRoot(), s_branchName);
-				taken  = nameOk && HE::Sc::GitCli::branchExists(git->projectRoot(), s_branchName);
+				if (s_branchNameAsked != s_branchName)
+				{
+					s_branchNameAsked = s_branchName;
+					git->requestCheckBranchName(s_branchNameAsked);
+				}
+				check = git->branchNameCheck(s_branchName);
+				nameOk = check && check->valid;
+				taken  = check && check->taken;
 			}
-			if (!empty && !nameOk)
+			if (!empty && check && !nameOk)
 				ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.45f, 1.0f),
 				                   "Not a usable branch name.");
 			else if (taken)

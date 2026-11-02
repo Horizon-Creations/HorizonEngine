@@ -20,7 +20,7 @@ namespace
     }
 }
 
-void ensureMask(FoliageComponent& fol)
+void ensureMask(FoliageLayer& fol)
 {
     const uint32_t mr = std::clamp(fol.maskRes, kMinRes, kMaxRes);
     fol.maskRes = mr;
@@ -33,21 +33,21 @@ void ensureMask(FoliageComponent& fol)
     fol.dirty = true;
 }
 
-void clearMask(FoliageComponent& fol)
+void clearMask(FoliageLayer& fol)
 {
     if (fol.densityMask.empty()) return;
     fol.densityMask.clear();
     fol.dirty = true;
 }
 
-void fillMask(FoliageComponent& fol, float value)
+void fillMask(FoliageLayer& fol, float value)
 {
     ensureMask(fol);
     std::fill(fol.densityMask.begin(), fol.densityMask.end(), toByte(value));
     fol.dirty = true;
 }
 
-bool paint(FoliageComponent& fol, const TerrainComponent& tc,
+bool paint(FoliageLayer& fol, const TerrainComponent& tc,
            float localX, float localZ,
            float radius, float falloff, float strength, float target)
 {
@@ -117,7 +117,7 @@ bool paint(FoliageComponent& fol, const TerrainComponent& tc,
     return any;
 }
 
-float sample(const FoliageComponent& fol, const TerrainComponent& tc,
+float sample(const FoliageLayer& fol, const TerrainComponent& tc,
              float localX, float localZ)
 {
     const uint32_t mr = fol.maskRes;
@@ -144,7 +144,7 @@ float sample(const FoliageComponent& fol, const TerrainComponent& tc,
     return std::clamp(v, 0.0f, 1.0f);
 }
 
-float coverage(const FoliageComponent& fol)
+float coverage(const FoliageLayer& fol)
 {
     if (fol.densityMask.empty()) return 1.0f;
     double sum = 0.0;

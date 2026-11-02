@@ -19,6 +19,7 @@
 #pragma once
 
 #include <Types/Defines.h> // HE_API — HorizonCore.dll uses explicit exports on Windows
+#include <Types/UUID.h>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -237,6 +238,25 @@ enum class MatNodeType : uint8_t
     //            times intensity)
     // A zero-filled block (UI pass) gives zeros; both stages declare the prefix.
     Sun,
+
+    // ── v18: FBM with its gradient (Thema 235) ──
+    // The integer-hash FBM (FBM Noise with p[0] = 1) and its analytic gradient, from the
+    // same four hashes per octave: one evaluation where a slope by finite differences took
+    // three (the engine water's chop, twelve FBMs a pixel).
+    //   inputs : UV, Scale
+    //   outputs: Value (as FBM Noise), dX and dY (the derivative of Value along UV·Scale,
+    //            what (FBM(q + h·x) − FBM(q)) / h tends to as h shrinks)
+    FbmGrad,
+
+    // ── v19: the landscape's foliage set (Thema 327, Schritt 3) ──
+    // A METADATA node, like the layer list of a Landscape Layer Blend: no pins, nothing
+    // is emitted. s = the LandscapeFoliageLayer asset the material names for its terrain
+    // (matFoliageSetIdToString; empty = none) → MaterialAsset::foliageSetId, which the
+    // Landscape tool's Apply reads. It shades nothing and spawns nothing, so assigning
+    // or changing the set never changes the shader text (no recompile, same pipeline).
+    // The generator finds it by SCANNING the graph, not by walking from the Output: a
+    // node without outputs is never reached by the demand-driven emit.
+    LandscapeFoliage,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
@@ -271,11 +291,12 @@ inline bool matNodeIsBombing(MatNodeType t)
 }
 
 // Layers a single Landscape Layer Blend node can hold — one RGBA8 weightmap
-// channel each, over two pages of four (TerrainComponent::layerWeights /
-// layerWeights2). Both pages travel in ONE texture, side by side, so the eight
-// layers cost the same single heLandscapeWeights binding and sampler as four
-// did — the SM 5.0 / Metal sampler budget is full (MaterialShaderLibrary).
-inline constexpr int kMatMaxLandscapeLayers = 8;
+// channel each, over three pages of four (TerrainComponent::layerWeights /
+// layerWeights2 / layerWeights3). The pages travel in ONE texture, side by side
+// (1:1, 2:1 or 3:1 by the texture's own size), so the twelve layers cost the same
+// single heLandscapeWeights binding and sampler as four did — the SM 5.0 / Metal
+// sampler budget is full (MaterialShaderLibrary).
+inline constexpr int kMatMaxLandscapeLayers = 12;
 
 // How many per-layer colours the CPU fold persists for the GI bounce
 // (MaterialAsset::approxLayerColor, the MTRL tail, GiLandscape::layerColor).
@@ -287,6 +308,12 @@ inline constexpr int kMatApproxLayerColors = 4;
 // Split a LandscapeLayerBlend node's `s` into its layer names (newline separated,
 // blanks dropped, capped at kMatMaxLandscapeLayers). Empty → one "Layer 1".
 HE_API std::vector<std::string> matLandscapeLayerNames(const std::string& s);
+
+// A Landscape Foliage node keeps its asset as a UUID in `s` (the packer rewrites only the
+// refs it knows, so a path would dangle in a pak): 32 hex digits, hi then lo, "" for none.
+// The parser takes upper or lower case and nothing else; malformed text is {} (= none).
+HE_API std::string matFoliageSetIdToString(const HE::UUID& id);
+HE_API HE::UUID    matFoliageSetIdFromString(const std::string& s);
 
 // Material blend modes (Output node p[1]; → MaterialAsset::blendMode). They change which
 // Output pins are meaningful — see matOutputPins:
@@ -326,7 +353,33 @@ enum : int {
     kMatOutputNormalPin    = 6,
     kMatOutputAOPin        = 7,
     kMatOutputWPOPin       = 8,
+    kMatOutputDisplacementPin = 9, // height along the normal, tessellation stages only
 };
+
+// GPU tessellation of a material whose Displacement pin is connected (Thema 207,
+// docs/material-graph-tessellation-displacement-entwurf-2026-10-15.md). Lives on
+// the Output node (optional JSON object "tess", written only when it differs from
+// these defaults), so collaboration syncs it with the node. The values are baked
+// into the generated displacement text, so a change is a new pipeline.
+struct MatTessSettings
+{
+    float maxFactor       = 8.0f;  // tess factor near the camera, clamped to 1..kMatTessMaxFactor
+    float fadeNear        = 5.0f;  // metres: full maxFactor up to here
+    float fadeFar         = 40.0f; // metres: factor 1 from here on
+    float maxDisplacement = 0.1f;  // metres: the height is clamped to ±this (the bounds contract)
+
+    bool operator==(const MatTessSettings& o) const
+    {
+        return maxFactor == o.maxFactor && fadeNear == o.fadeNear && fadeFar == o.fadeFar
+            && maxDisplacement == o.maxDisplacement;
+    }
+    bool operator!=(const MatTessSettings& o) const { return !(*this == o); }
+};
+// The D3D11 limit; Vulkan guarantees at least 64 (maxTessellationGenerationLevel).
+inline constexpr float kMatTessMaxFactor = 64.0f;
+// What the codegen bakes: maxFactor in 1..kMatTessMaxFactor, fadeNear >= 0,
+// fadeFar > fadeNear, maxDisplacement >= 0; a non-finite field takes its default.
+HE_API MatTessSettings matSanitizeTess(const MatTessSettings& t);
 
 // Serialized graph format version. v2 inserted Specular at pin 2 and Ambient
 // Occlusion at pin 7 of the Output node, shifting everything after them.
@@ -343,6 +396,7 @@ struct MatGraphNode
     // ParamFloat additionally uses p[1]/p[2] as slider min/max (min<max → slider UI).
     std::string group;                 // panel grouping header ("" = ungrouped)
     std::string tooltip;               // hover help shown next to the parameter
+    MatTessSettings tess;              // Output node only (optional JSON key "tess")
 };
 
 // One connection: output pin (srcNode, srcPin) → input pin (dstNode, dstPin).
@@ -520,12 +574,28 @@ struct MatShaderGen
     // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
     // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).
     std::string vertexBody;
+    // Displacement for the tessellation stages (pin kMatOutputDisplacementPin):
+    //   "// heTess <maxFactor> <fadeNear> <fadeFar> <maxDisplacement>\n"
+    //   <declarations the body needs: samplers, HeParams, helpers>
+    //   "// heDispBody\n"
+    //   <statements ending in `float heDisp = ...;`>
+    // Empty when the pin is unconnected (or the domain is User Interface): no
+    // tessellation, and every other output of this struct is byte-identical to a
+    // graph without the pin. Texture slots and parameters are shared with the
+    // fragment. matSplitDisplacement takes it apart; the renderers wrap it into
+    // their domain-stage template (MaterialShaderLibrary::tessEval).
+    // → MaterialAsset::customShaderDispGlsl.
+    std::string displacementBody;
     // Landscape paint layers this material declares, in weightmap-channel order
     // (→ MaterialAsset::graphLayerNames). Non-empty makes it a LANDSCAPE material:
     // the Landscape tool lists exactly these as its paintable layers, so the
     // material — not the terrain — is the single source of truth for what a layer
     // means. Empty for every ordinary material.
     std::vector<std::string> layerNames;
+    // The LandscapeFoliageLayer asset a Landscape Foliage node names (→ MaterialAsset::
+    // foliageSetId); {} = none. Found by a scan of the top-level graph, lowest node id
+    // wins when a graph holds more than one. Never touches the generated GLSL.
+    HE::UUID foliageSetId{};
 };
 
 // Max project textures a single material graph may sample (fixed so the per-backend
@@ -540,6 +610,12 @@ inline constexpr int kMatMaxGraphTextures = 4;
 // packed games, so the MTRL layout needs no new field. O(1): it looks at one
 // fixed position. Hand-written GLSL without the line → 0 (all plain 2D).
 HE_API uint32_t matGlslTextureArrayMask(const std::string& glsl);
+
+// Take MatShaderGen::displacementBody apart: the tessellation settings of its
+// first line, the declaration block and the statements. False for "" and for any
+// text that is not in that form (the caller then draws without tessellation).
+HE_API bool matSplitDisplacement(const std::string& disp, MatTessSettings& tess,
+                                 std::string& declarations, std::string& statements);
 
 // Does this generated GLSL (fragment body, or the WPO vertex body) read the engine
 // clock — heLight.sunDir.w? Every node that moves with time (Time, Panner,

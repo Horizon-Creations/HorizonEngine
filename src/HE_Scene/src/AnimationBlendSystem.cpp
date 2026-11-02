@@ -24,6 +24,9 @@ float wrapTime(float t, float duration)
     if (w < 0.0f) w += duration;
     return w;
 }
+
+// Which driver a PoseKey came from (see AnimationSystem.cpp).
+constexpr uint64_t kPoseKeyBlend = 2;
 } // namespace
 
 void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float dt,
@@ -85,6 +88,11 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
 
         const float t = blend.playbackTime;
 
+        // Each clip's span starts at the wrapped previous playhead; notifies and root
+        // motion below both walk it.
+        const float aPrev = clipA ? wrapTime(tPrev, clipA->duration) : 0.0f;
+        const float bPrev = clipB ? wrapTime(tPrev, clipB->duration) : 0.0f;
+
         // Notifies from ONE clip, on the same wrapped spans the deltas use. The
         // heavier side fires; the lighter side is still walked past, so it cannot
         // hoard its first frame and dump it when the weight tips over. Letting
@@ -98,24 +106,41 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
             const bool bWins = blend.blendAlpha >= HE::kNotifyDominanceAlpha;
             if (clipA)
             {
-                const float aPrev = wrapTime(tPrev, clipA->duration);
                 HE::notifyCollectClip(e, *clipA, aPrev, aPrev + step, /*looping=*/true,
                                       !bWins || !clipB, blend.notifiesPrimedA, notifies);
             }
             if (clipB)
             {
-                const float bPrev = wrapTime(tPrev, clipB->duration);
                 HE::notifyCollectClip(e, *clipB, bPrev, bPrev + step, /*looping=*/true,
                                       bWins || !clipA, blend.notifiesPrimedB, notifies);
             }
         }
 
+        // The gate (SCN-102, PoseFinalize.h). blendAlpha is in the key because a
+        // script may move it while the timeline stands still; the durations are,
+        // because each side is sampled at fmod(t, its own duration).
+        uint64_t key = 0;
+        if (HE::poseMayBeKept(reg, e))
+        {
+            HE::PoseKey k(kPoseKeyBlend);
+            for (const AnimationClipAsset* c : { clipA, clipB })
+                k.ptr(c).ptr(c ? c->channels.data() : nullptr).real(c ? c->duration : 0.0f);
+            key = k.id(blend.clipAId).id(blend.clipBId)
+                   .id(smc.meshAssetId).ptr(mesh).ptr(mesh->skeleton.data()).count(jointCount)
+                   .real(t).real(blend.blendAlpha)
+                   .value();
+            if (key == smc.poseKey) continue;
+        }
+
+        // Per thread and reused across entities and frames (SCN-101).
+        thread_local std::vector<JointTRS> trsA, trsB, blended;
+
         // Sample each clip at its own wrapped time — missing clip leaves defaults (identity TRS)
-        std::vector<JointTRS> trsA(jointCount);
+        trsA.assign(jointCount, JointTRS{});
         if (clipA && clipA->duration > 0.0f)
             sampleClip(*clipA, std::fmod(t, clipA->duration), trsA);
 
-        std::vector<JointTRS> trsB(jointCount);
+        trsB.assign(jointCount, JointTRS{});
         if (clipB && clipB->duration > 0.0f)
             sampleClip(*clipB, std::fmod(t, clipB->duration), trsB);
 
@@ -133,13 +158,11 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
             bool any = false;
             if (clipA)
             {
-                const float aPrev = wrapTime(tPrev, clipA->duration);
                 any |= HE::rootMotionSampleClip(e, *rm, *mesh, *clipA, aPrev, aPrev + step,
                                                 /*looping=*/true, trsA, dA);
             }
             if (clipB)
             {
-                const float bPrev = wrapTime(tPrev, clipB->duration);
                 any |= HE::rootMotionSampleClip(e, *rm, *mesh, *clipB, bPrev, bPrev + step,
                                                 /*looping=*/true, trsB, dB);
             }
@@ -150,10 +173,10 @@ void AnimationBlendSystem::update(HorizonWorld& world, ContentManager& cm, float
                                     HE::blendRootMotion(dA, dB, blend.blendAlpha), dt);
         }
 
-        std::vector<JointTRS> blended;
         blendTRS(trsA, trsB, blend.blendAlpha, blended);
         // Layer stack (if any) → FK → IBM. After rootMotionApply on purpose: a
         // layer must not write back the root translation that was just taken out.
         HE::poseFinalize(world, cm, dt, e, *mesh, blended, smc, rootMotion ? rootMotion->physics : nullptr, notifies);
+        smc.poseKey = key;
     }
 }

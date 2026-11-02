@@ -18,9 +18,12 @@
 //                    same Save / Don't Save / Cancel prompt as Quit, because the
 //                    update quits the editor. Nothing in here asks about unsaved
 //                    work, and nothing in here quits.
-//   install()        beginTakeover() with the open project as the relaunch
-//                    argument. Only on ok does the caller quit; on failure the
-//                    editor keeps running exactly as it was.
+//   install()        worker thread: beginTakeover() with the open project as the
+//                    relaunch argument. It re-hashes and unpacks the staged build
+//                    (seconds to minutes), so it must not run on the frame. Only
+//                    once the phase is Installed does the caller quit; on failure
+//                    the phase goes back to Ready and the editor keeps running
+//                    exactly as it was.
 //
 // The open project survives through the relaunch arguments: the new build gets
 // the .heproj path as its first argument, which EditorApplication's launch pick
@@ -57,8 +60,9 @@ namespace EditorSelfUpdate
 		Available,       // newer and downloadable
 		Downloading,
 		Ready,           // staged + verified; `installBlocker` empty = Restart is possible
-		Installing,      // beginTakeover running (the frame that quits)
-		Failed,          // check or download failed; `message` says why
+		Installing,      // beginTakeover running on the worker
+		Installed,       // HorizonUpdater started and waiting for this process: quit now
+		Failed,         // check or download failed; `message` says why
 	};
 
 	const char* phaseName(Phase p);
@@ -73,7 +77,8 @@ namespace EditorSelfUpdate
 		std::string   installBlocker;   // Ready but preflightTakeover() said no
 		std::uint64_t done  = 0;        // download progress
 		std::uint64_t total = 0;
-		bool busy() const { return phase == Phase::Checking || phase == Phase::Downloading; }
+		bool busy() const { return phase == Phase::Checking || phase == Phase::Downloading ||
+		                           phase == Phase::Installing; }
 		bool canInstall() const { return phase == Phase::Ready && installBlocker.empty(); }
 	};
 
@@ -111,11 +116,14 @@ namespace EditorSelfUpdate
 		void     join();
 
 		// The one-way step. Call it ONLY from the editor's guarded action, after
-		// the unsaved-changes prompt: on ok the caller must quit right away
-		// (HorizonUpdater is already waiting for this process to exit). On failure
-		// the phase goes back to Ready with the error as `installBlocker`, the
-		// staged build stays where it is, and the caller must NOT quit.
-		HE::Su::TakeoverResult install(const std::vector<std::string>& relaunchArgs);
+		// the unsaved-changes prompt. Returns false (and starts nothing) unless a
+		// verified build is Ready and nothing else runs; otherwise the takeover
+		// runs on the worker with the phase at Installing. Phase Installed: the
+		// caller must quit right away (HorizonUpdater is already waiting for this
+		// process to exit). On failure the phase goes back to Ready with the error
+		// as `installBlocker`, the staged build stays where it is, and the caller
+		// must NOT quit.
+		bool install(const std::vector<std::string>& relaunchArgs);
 
 	private:
 		void runWorker(std::function<void()> body);

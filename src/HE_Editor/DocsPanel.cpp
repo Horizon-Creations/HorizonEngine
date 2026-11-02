@@ -28,6 +28,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -398,8 +399,6 @@ namespace
 	// ── Blocks ───────────────────────────────────────────────────────────────
 	void drawBlock(const Ctx& ctx, const docs::Block& b);
 
-	void drawCells(const Ctx& ctx, const docs::Cell& cell) { drawRuns(ctx, cell); }
-
 	void drawTable(const Ctx& ctx, const docs::Block& b)
 	{
 		const int cols = static_cast<int>(
@@ -452,7 +451,7 @@ namespace
 			{
 				ImGui::TableSetColumnIndex(c);
 				ImGui::PushStyleColor(ImGuiCol_Text, HE::Ed::Theme::TextHeading);
-				if (c < static_cast<int>(b.head.size())) drawCells(ctx, b.head[c]);
+				if (c < static_cast<int>(b.head.size())) drawRuns(ctx, b.head[c]);
 				ImGui::PopStyleColor();
 			}
 		}
@@ -462,7 +461,7 @@ namespace
 			for (int c = 0; c < cols; ++c)
 			{
 				ImGui::TableSetColumnIndex(c);
-				if (c < static_cast<int>(row.size())) drawCells(ctx, row[c]);
+				if (c < static_cast<int>(row.size())) drawRuns(ctx, row[c]);
 			}
 		}
 		ImGui::EndTable();
@@ -1232,7 +1231,7 @@ namespace
 	// break every one of them.
 	struct NavGroup { std::string title; std::vector<int> pages; };
 
-	std::vector<NavGroup> navGroups()
+	std::vector<NavGroup> buildNavGroups()
 	{
 		const docs::Library& lib = docs::library();
 		std::vector<NavGroup> out;
@@ -1264,6 +1263,30 @@ namespace
 			if (!ng.pages.empty()) out.push_back(std::move(ng));
 		}
 		return out;
+	}
+
+	// The library only ever grows (ensureLoaded's installs append, load() starts
+	// over), so the sizes below change whenever the result could, and the
+	// per-frame rebuild — a find per listed page — runs once per such change.
+	const std::vector<NavGroup>& navGroups()
+	{
+		const docs::Library& lib = docs::library();
+		struct Key
+		{
+			std::size_t pages, groups, guides;
+			int bundlePages;
+			bool operator==(const Key&) const = default;
+		};
+		const Key key{ lib.pages().size(), lib.groups().size(),
+		               HE::Ed::Guides::pageIds().size(), s_bundlePageCount };
+		static std::vector<NavGroup> cached;
+		static std::optional<Key>    builtFor;
+		if (builtFor != key)
+		{
+			cached   = buildNavGroups();
+			builtFor = key;
+		}
+		return cached;
 	}
 
 	void drawNav()

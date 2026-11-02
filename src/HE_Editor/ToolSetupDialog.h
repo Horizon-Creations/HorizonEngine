@@ -45,6 +45,16 @@ namespace ToolSetupDialog
 	// the line it is about.
 	void requestShow(Tool focus = Tool::None);
 
+	// The same, opened on behalf of something that waits for the tool: `purpose`
+	// is one sentence shown above the rows (the export says it continues by
+	// itself once the compiler is there). It stays until the dialog closes.
+	void requestShowFor(Tool focus, const char* purpose);
+	const char* purpose();   // "" when the dialog was not opened for anything
+
+	// True while the dialog's popup was on screen in the last DrawToolSetupDialog.
+	// A caller that parked work behind requestShowFor watches it go false again.
+	bool isShowing();
+
 	// The rows and the footer, inside whichever window is current. DrawToolSetupDialog
 	// wraps this in its popup; the headless UI test hosts it in a plain window.
 	// `closeRequested` is set when the user pressed Close (or everything is set up).

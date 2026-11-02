@@ -8,6 +8,7 @@
 #include "EditorTransformGizmo.h"        // shared move/rotate/scale gizmo
 #include "EditorMarquee.h"               // which objects a drawn frame encloses
 #include "ViewportPick.h"                // which object a click lands on (mesh before terrain)
+#include "ShaderBuildHint.h"             // "Compiling shaders 3 / 8" while pipelines build
 #include "PreviewPick.h"                 // screenRay — the surface-snap probe's ray
 #include "SplineTool.h"                  // Spline mode: points, handles, the Move gizmo on one
 #include <HorizonScene/TransformHierarchy.h>          // worldPositionOf — fresh, not a frame old
@@ -769,9 +770,15 @@ EntityActionState entityActionState(AppContext& ctx)
 		if (reg.valid(e) && !ctx.world->isBuiltin(e)) { st.groupable = true; break; }
 	st.groupable  = editable && st.groupable;
 	st.canUngroup = editable && ViewportActions::canUngroup(*ctx.world, ctx.selection);
-	st.primaryLocked = primary != entt::null && reg.valid(primary)
-	                && reg.all_of<EditorLockComponent>(primary);
+	st.primaryLocked = primaryLocked(ctx);
 	return st;
+}
+bool primaryLocked(AppContext& ctx)
+{
+	if (!ctx.world) return false;
+	auto& reg = ctx.world->registry();
+	const Entity primary = ctx.selection.primary();
+	return primary != entt::null && reg.valid(primary) && reg.all_of<EditorLockComponent>(primary);
 }
 // (Hide / Isolate / Show All / Group / Ungroup are the functions above.)
 void focusSelected(AppContext& ctx)          { focusSelected(ctx, sceneSnapshot(ctx)); }
@@ -1827,6 +1834,11 @@ void render(AppContext& ctx, float dt)
 				// readable whatever the scene is doing underneath it.
 				if (s_showFlags.stats)
 					drawStatsOverlay(ctx, rectMin, rectMax);
+				if (ctx.renderer)
+				{
+					const IRenderer::ShaderBuildStatus builds = ctx.renderer->PumpShaderBuilds();
+					HE::Ed::drawShaderBuildHint(builds.pending, builds.total, rectMin, rectMax);
+				}
 			}
 			else
 			{

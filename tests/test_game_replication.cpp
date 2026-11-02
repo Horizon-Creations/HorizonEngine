@@ -651,6 +651,73 @@ TEST_CASE("GameReplication: a duplicated snapshot does not restart the interpola
     CHECK(rig->client->stats().snapshotsStale == 0);
 }
 
+// SCN-301: a resting entity, sent every tick with the same sample, used to be
+// rewritten and marked dirty on every frame, which made it a changed subtree for
+// propagateTransforms forever. Once it has arrived it is left alone, but only
+// while its transform still holds what interpolation wrote.
+TEST_CASE("GameReplication: a resting entity is written once, then left alone until something changes")
+{
+    GameReplication::Config cfg;
+    cfg.interpolationDelaySec = 0.1f;   // the default: longer than a 30 Hz tick
+    auto rig = makeRig(cfg);
+    const Entity e = adoptOnly(*rig, "Rest", 9);
+    auto& tc = rig->clientWorld.registry().get<TransformComponent>(e);
+
+    // The server's resting entity, sent tick after tick. With the default delay
+    // the interpolation never reaches t = 1 between two ticks, so this is the
+    // case that has to settle, not only the end of a path.
+    const glm::vec3 rest(4.0f, 1.0f, -2.0f);
+    std::uint32_t tick = 1;
+    for (; tick <= 4; ++tick) { sendRawSnapshot(*rig, tick, 0, 9, rest, cfg); rig->pump(1.0f / 60.0f, 2); }
+    const glm::vec3 placed = tc.position;
+    REQUIRE(placed.x == doctest::Approx(4.0f).epsilon(0.001));
+
+    // Further identical ticks and frames: nothing is written, nothing is dirty.
+    for (int i = 0; i < 6; ++i)
+    {
+        tc.dirty = false;
+        sendRawSnapshot(*rig, tick++, 0, 9, rest, cfg);
+        rig->pump(1.0f / 60.0f, 2);
+        CHECK_FALSE(tc.dirty);
+        CHECK(tc.position == placed);
+    }
+
+    // A script moves it: the server is still the truth, and the next frame puts
+    // it back, bit for bit where it was.
+    tc.position = glm::vec3(100.0f, 0.0f, 0.0f);
+    tc.dirty    = false;
+    rig->pump(1.0f / 60.0f, 1);
+    CHECK(tc.position == placed);
+    CHECK(tc.dirty);
+
+    // A new sample starts a new path: the entity moves again.
+    sendRawSnapshot(*rig, tick++, 0, 9, rest + glm::vec3(10.0f, 0.0f, 0.0f), cfg);
+    rig->pump(0.05f, 1);
+    CHECK(tc.position.x > placed.x + 1.0f);
+    CHECK(tc.position.x < placed.x + 9.0f);
+    for (int i = 0; i < 10; ++i) rig->pump(0.05f, 1);
+    CHECK(tc.position.x == doctest::Approx(14.0f).epsilon(0.001));
+}
+
+TEST_CASE("GameReplication: a net id bound to another entity places that entity too")
+{
+    GameReplication::Config cfg;
+    auto rig = makeRig(cfg);
+    const Entity first = adoptOnly(*rig, "First", 12);
+    for (std::uint32_t tick = 1; tick <= 4; ++tick)
+    {
+        sendRawSnapshot(*rig, tick, 0, 12, glm::vec3(3.0f, 0.0f, 0.0f), cfg);
+        rig->pump(1.0f / 60.0f, 4);
+    }
+    REQUIRE(posOf(rig->clientWorld, first).x == doctest::Approx(3.0f).epsilon(0.001));
+
+    // The settled entry must not carry over to the new holder of the id: it has
+    // never been written, whatever the old one's state was.
+    const Entity second = adoptOnly(*rig, "Second", 12);
+    rig->pump(1.0f / 60.0f, 1);
+    CHECK(posOf(rig->clientWorld, second).x == doctest::Approx(3.0f).epsilon(0.001));
+}
+
 TEST_CASE("GameReplication: a duplicated snapshot reconciles the controlled entity once")
 {
     auto rig = makePredRig();

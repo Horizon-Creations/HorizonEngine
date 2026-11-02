@@ -44,8 +44,7 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 
 	if (!m_lib.load(loadPath))
 	{
-		HE_LOG_ERROR(GameLogic, "%s",
-			("GameLogicLoader: failed to load " + loadPath.string()).c_str());
+		HE_LOG_ERROR(GameLogic, "GameLogicLoader: failed to load %s", loadPath.string().c_str());
 		return false;
 	}
 
@@ -53,9 +52,9 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 	m_destroyFn    = reinterpret_cast<FnDestroyGameLogic>(m_lib.getSymbol("HE_DestroyGameLogic"));
 	if (!createFn || !m_destroyFn)
 	{
-		HE_LOG_ERROR(GameLogic, "%s",
-			("GameLogicLoader: missing HE_CreateGameLogic/HE_DestroyGameLogic exports in "
-			 + loadPath.string()).c_str());
+		HE_LOG_ERROR(GameLogic,
+			"GameLogicLoader: missing HE_CreateGameLogic/HE_DestroyGameLogic exports in %s",
+			loadPath.string().c_str());
 		m_destroyFn = nullptr;
 		m_lib.unload();
 		return false;
@@ -70,8 +69,7 @@ bool GameLogicLoader::load(const std::filesystem::path& dllPath)
 		return false;
 	}
 
-	HE_LOG_INFO(GameLogic, "%s",
-		("GameLogicLoader: loaded " + dllPath.filename().string()).c_str());
+	HE_LOG_INFO(GameLogic, "GameLogicLoader: loaded %s", dllPath.filename().string().c_str());
 	return true;
 }
 

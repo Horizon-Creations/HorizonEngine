@@ -1,9 +1,11 @@
 #include "HorizonScene/TransformHierarchy.h"
+#include <JobSystem/JobSystem.h>
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/Components/HierarchyComponent.h"
 #include <Diagnostics/Log.h>
 #include <Diagnostics/Profiler.h>
+#include <Platform/BuildProfile.h>   // HE_FEATURE_ENV_OVERRIDES: HE_PROPAGATE_FULL/_VERIFY
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -170,18 +172,39 @@ namespace {
         std::vector<entt::entity>& flagged = st.flagged;
         flagged.clear();
         auto& storage = reg.storage<TransformComponent>();
-        if (g_switches.ignoreValueCompare)
+        const bool compare = !g_switches.ignoreValueCompare;
+        // A large world is scanned in blocks on the workers: the check reads one component and
+        // writes only its own `dirty`, and the blocks' lists are joined in the order the serial
+        // walk (storage.each(), last to first) lists them.
+        constexpr size_t kBlock = 4096;
+        const size_t n = storage.size();
+        if (n < 2 * kBlock)
         {
             for (auto [e, t] : storage.each())
-                if (t.dirty) flagged.push_back(e);
+                if (t.dirty || (compare && !cacheKeyHolds(t)))
+                {
+                    t.dirty = true;
+                    flagged.push_back(e);
+                }
             return;
         }
-        for (auto [e, t] : storage.each())
-            if (t.dirty || !cacheKeyHolds(t))
+        const entt::entity* ents = storage.data();   // the dense order each() walks backwards
+        const size_t        nBlocks = (n + kBlock - 1) / kBlock;
+        std::vector<std::vector<entt::entity>> parts(nBlocks);
+        parallel_for(nBlocks, [&](size_t b) {
+            const size_t from = b * kBlock, to = std::min(n, from + kBlock);
+            for (size_t i = to; i-- > from; )
             {
-                t.dirty = true;
-                flagged.push_back(e);
+                TransformComponent& t = storage.get(ents[i]);
+                if (t.dirty || (compare && !cacheKeyHolds(t)))
+                {
+                    t.dirty = true;
+                    parts[b].push_back(ents[i]);
+                }
             }
+        }, "TransformScan", 1);
+        for (size_t b = nBlocks; b-- > 0; )
+            flagged.insert(flagged.end(), parts[b].begin(), parts[b].end());
     }
 
     // How far up a parent chain is followed. The chain is as deep as the hierarchy
@@ -240,19 +263,27 @@ namespace {
     // world calm: scan again from the next call on.
     constexpr size_t kCalmDivisor = 4;      // at most 1/4 rebuilt
 
+    // Both switches below are dev builds only (HE_FEATURE_ENV_OVERRIDES): a release
+    // game always runs the incremental pass, unverified.
+#if HE_FEATURE_ENV_OVERRIDES
     bool envOn(const char* name)
     {
         const char* v = std::getenv(name);
         return v && *v && std::atoi(v) != 0;
     }
+#endif
 
     // HE_PROPAGATE_FULL=1: every pass walks the whole hierarchy, as before the scan
     // existed. The way to tell whether a stale transform is the incremental pass, and a
     // same-binary A/B for the measurements.
     bool alwaysFull()
     {
+#if HE_FEATURE_ENV_OVERRIDES
         static const bool on = envOn("HE_PROPAGATE_FULL");
         return on;
+#else
+        return false;
+#endif
     }
 
     // HE_PROPAGATE_VERIFY=1: after every incremental pass, walk the whole hierarchy as
@@ -262,7 +293,11 @@ namespace {
     // variable set is a check of every call the tests make.
     bool verifyOn()
     {
+#if HE_FEATURE_ENV_OVERRIDES
         static const bool on = envOn("HE_PROPAGATE_VERIFY");
+#else
+        constexpr bool on = false;
+#endif
         // A test that switched a detector off wants the pass to be wrong.
         return on && !g_switches.ignoreStructureEpoch && !g_switches.ignoreInvalidation
                   && !g_switches.ignoreValueCompare && !g_switches.ignoreTransformRemoval

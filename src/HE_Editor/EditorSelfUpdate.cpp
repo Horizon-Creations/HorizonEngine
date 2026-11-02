@@ -31,6 +31,7 @@ const char* phaseName(Phase p)
 	case Phase::Downloading:   return "downloading";
 	case Phase::Ready:         return "ready";
 	case Phase::Installing:    return "installing";
+	case Phase::Installed:     return "installed";
 	case Phase::Failed:        return "failed";
 	}
 	return "?";
@@ -175,32 +176,32 @@ bool Session::startDownload()
 	return true;
 }
 
-Su::TakeoverResult Session::install(const std::vector<std::string>& relaunchArgs)
+bool Session::install(const std::vector<std::string>& relaunchArgs)
 {
-	Su::TakeoverResult r;
 	{
 		std::lock_guard<std::mutex> lk(m_mutex);
-		if (m_running || !m_state.canInstall())
-		{
-			r.error = m_state.installBlocker.empty() ? "no verified update is ready to install"
-			                                         : m_state.installBlocker;
-			return r;
-		}
+		if (m_running || !m_state.canInstall()) return false;
 		m_state.phase = Phase::Installing;
 	}
 	Su::TakeoverOptions o;
 	o.stagingRoot  = m_backend.stagingRoot;
 	o.relaunchArgs = relaunchArgs;
-	r = m_backend.begin ? m_backend.begin(o) : Su::TakeoverResult{};
-	if (r.ok)
-	{
-		HE_LOG_INFO(SelfUpdate, "Editor: HorizonUpdater started (relaunch with %zu argument%s) -- quitting",
-		            relaunchArgs.size(), relaunchArgs.size() == 1 ? "" : "s");
-		return r;
-	}
-	if (r.error.empty()) r.error = "the takeover could not be started";
-	HE_LOG_WARN(SelfUpdate, "Editor: update not started, the editor keeps running: %s", r.error.c_str());
-	set([&](Snapshot& s) { s.phase = Phase::Ready; s.installBlocker = r.error; });
-	return r;
+	// On the worker: beginTakeover re-hashes the staged build and unpacks it
+	// (tar / hdiutil, waited on for up to ten minutes) before it starts
+	// HorizonUpdater. On the frame that froze the editor for the whole time.
+	runWorker([this, o = std::move(o)] {
+		Su::TakeoverResult r = m_backend.begin ? m_backend.begin(o) : Su::TakeoverResult{};
+		if (r.ok)
+		{
+			HE_LOG_INFO(SelfUpdate, "Editor: HorizonUpdater started (relaunch with %zu argument%s) -- quitting",
+			            o.relaunchArgs.size(), o.relaunchArgs.size() == 1 ? "" : "s");
+			set([](Snapshot& s) { s.phase = Phase::Installed; });
+			return;
+		}
+		if (r.error.empty()) r.error = "the takeover could not be started";
+		HE_LOG_WARN(SelfUpdate, "Editor: update not started, the editor keeps running: %s", r.error.c_str());
+		set([&](Snapshot& s) { s.phase = Phase::Ready; s.installBlocker = r.error; });
+	});
+	return true;
 }
 }

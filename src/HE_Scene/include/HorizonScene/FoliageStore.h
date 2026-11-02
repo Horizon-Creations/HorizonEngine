@@ -14,8 +14,8 @@
 // front end unfolds a cluster into a draw (GeometryPass / batchDepthRuns).
 //
 // Derived data, never serialised: it is rebuilt from the scatter parameters and
-// the density mask whenever FoliageComponent::dirty is set, exactly like
-// cachedInstances. It is immutable once built and shared by `shared_ptr`, so a
+// the density mask whenever the layer (FoliageLayer::dirty) or the whole
+// component is dirty, exactly like cachedInstances. It is immutable once built and shared by `shared_ptr`, so a
 // RenderWorld that outlives a re-scatter (a frame copy, a retained world) keeps
 // reading the matrices it was extracted from.
 struct FoliageBucket {

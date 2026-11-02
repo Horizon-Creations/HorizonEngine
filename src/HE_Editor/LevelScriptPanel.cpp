@@ -1747,6 +1747,23 @@ struct ClassState
 	std::string baseClass;
 	HE::UUID    assetId;
 	std::string path;                   // content-relative, the class KEY
+
+	// The class was renamed or moved: its tab is open under a new path now (see
+	// AssetPanelState). The state — graph, edits, undo — stays; what is filed under
+	// the old path does not: the canvas's own view state (zoom, selection) and the
+	// name the tab announces.
+	void onAssetMoved(const std::string& newRel)
+	{
+		if (path.empty() || path == newRel) return;
+		if (auto node = s_graphStates.extract(path); !node.empty())
+		{
+			node.key() = newRel;
+			s_graphStates.insert(std::move(node));
+		}
+		if (g.graphFor == path) g.graphFor = newRel;
+		name = HcEditorUtil::castTargetLabel(newRel);
+		path = newRel;
+	}
 	std::vector<std::string> events;    // event catalog (the base-class chain's)
 	// The project's InputAction assets, offered as their own menu section on a
 	// player class — one entry per action, not two events per action.

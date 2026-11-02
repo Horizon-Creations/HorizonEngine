@@ -758,8 +758,7 @@ void drawStatus(TeamController& team)
 
 bool connectionUp(TeamController::Status s)
 {
-	return s == TeamController::Status::Connecting || s == TeamController::Status::SignedIn ||
-	       s == TeamController::Status::Reconnecting;
+	return s != TeamController::Status::SignedOut && s != TeamController::Status::Failed;
 }
 
 void drawServerField(TeamController& team, const Settings& settings)

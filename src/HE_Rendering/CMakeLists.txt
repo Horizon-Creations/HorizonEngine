@@ -145,6 +145,7 @@ if(HE_VULKAN_ENABLED)
                       gi_gbuf.vert gi_gbuf_instanced.vert gi_gbuf.frag gi_temporal.frag gi_atrous.frag
                       gi_shadow.comp gi_probe.comp
                       gi_shadow_hw.comp gi_probe_hw.comp
+                      gi_refl.comp gi_refl_hw.comp gi_refl_blur.frag gi_refl_mix.frag
                       skinned.vert
                       ui.vert ui.frag
                       world_preview.vert world_preview_skinned.vert world_preview.frag)
@@ -278,7 +279,7 @@ if(WIN32)
         set(HE_D3D12_SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/Shaders")
         file(MAKE_DIRECTORY "${HE_D3D12_SHADER_OUT_DIR}")
         set(HE_D3D12_GI_CSO "")
-        foreach(kernel gi_shadow_hw gi_probe_hw)
+        foreach(kernel gi_shadow_hw gi_probe_hw gi_refl_hw)
             set(src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${kernel}.hlsl")
             set(dst "${HE_D3D12_SHADER_OUT_DIR}/${kernel}.cso")
             add_custom_command(OUTPUT "${dst}"
@@ -302,6 +303,7 @@ add_library(HorizonRendering SHARED
     src/FoliageExtract.cpp
     src/RenderWorld.cpp
     src/FrustumCuller.cpp
+    src/FrameCull.cpp
     src/OcclusionCuller.cpp
     src/RenderSorter.cpp
     src/ScenePick.cpp
@@ -320,6 +322,7 @@ add_library(HorizonRendering SHARED
     src/RenderPass.cpp
     src/CommandBuffer.cpp
     src/GiBvh.cpp
+    src/GiBlasStore.cpp
     src/GiInstanceSurface.cpp
     src/GiAutoLandscape.cpp
     src/MaterialScalars.cpp

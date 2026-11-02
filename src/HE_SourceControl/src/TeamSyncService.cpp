@@ -756,14 +756,27 @@ std::map<std::string, std::string> TeamSyncService::Impl::scan()
 	std::map<std::string, std::string> local;
 	std::map<std::string, Cache> seen;
 	std::error_code ec;
-	fs::recursive_directory_iterator it(settings.projectRoot, fs::directory_options::skip_permission_denied, ec);
+	// The walk starts at `root`, so every entry's path begins with it: the relative
+	// path is a lexical cut, no stat per path component the way fs::relative
+	// (weakly_canonical on both sides) costs for each of tens of thousands of
+	// entries. A trailing separator is dropped so the cut lines up.
+	fs::path root = settings.projectRoot;
+	if (!root.has_filename() && root.has_parent_path() && root != root.root_path())
+		root = root.parent_path();
+	fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec);
 	for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
 	{
 		if (stopping) break;
 		const fs::directory_entry& e = *it;
 		std::error_code ec2;
-		const std::string rel = fs::relative(e.path(), settings.projectRoot, ec2).generic_string();
-		if (ec2 || rel.empty()) continue;
+		std::string rel = e.path().lexically_relative(root).generic_string();
+		if (rel.empty() || rel.compare(0, 2, "..") == 0)
+		{
+			// Not under `root` lexically (cannot happen for entries of this walk,
+			// kept as the old answer for whatever spelling defeats the cut).
+			rel = fs::relative(e.path(), root, ec2).generic_string();
+			if (ec2 || rel.empty()) continue;
+		}
 		if (e.is_symlink(ec2))
 		{
 			if (e.is_directory(ec2)) it.disable_recursion_pending();

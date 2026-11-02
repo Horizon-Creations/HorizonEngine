@@ -249,6 +249,35 @@ inline D3D11_SHADER_RESOURCE_VIEW_DESC SkyEnvCubeSrvDesc()
     return cv;
 }
 
+// ── heGIReflFwd (Thema 191 step 2: GI reflections) ───────────────────────────
+// heGIReflFwd: t32 / s9 (MaterialShaderLibrary's kHlslMaterialPins — the SRV
+// keeps its binding number, the sampler moved below the SM 5.0 cap like the
+// other forward stages above). Unlike heSkyEnv/heAO/heSSRFwd there is no
+// built-in-pass value to hand back afterwards: the built-in PBR shader has no
+// reflection stage and never reads this register, so null is exactly right
+// both before the pass ran and after the draw.
+constexpr UINT kGIReflFwdSrvSlot     = 32;
+constexpr UINT kGIReflFwdSamplerSlot = 9;
+
+// Before a graph-material draw: this frame's ray-traced reflection result (or
+// null when the pass did not run — fillMatLight keeps giRefl.z at 0 then, so
+// the gate is never sampled) and the linear-clamp sampler the trace/blur/mix
+// kernels filter it with.
+inline void BindGIReflFwd(ID3D11DeviceContext* ctx,
+                          ID3D11ShaderResourceView* giRefl,
+                          ID3D11SamplerState* linearClamp)
+{
+    ctx->PSSetShaderResources(kGIReflFwdSrvSlot, 1, &giRefl);
+    ctx->PSSetSamplers(kGIReflFwdSamplerSlot, 1, &linearClamp);
+}
+
+// After the draw: t32 off. Nothing to restore it to.
+inline void RestoreAfterGIReflFwd(ID3D11DeviceContext* ctx)
+{
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    ctx->PSSetShaderResources(kGIReflFwdSrvSlot, 1, &nullSrv);
+}
+
 // The bake (HE::BuildSkyEnvFaceRow, packed to halves) into the cube: faces in
 // the bake's order +X,-X,+Y,-Y,+Z,-Z onto array slices 0..5, each face row 0
 // first (v = -1, SkyEnvFaceDirection's top). D3D's cube convention is GL's,

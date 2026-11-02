@@ -5,12 +5,16 @@
 //   --require-all                            a graph that cannot be compiled is
 //                                            an error, not an interpreted
 //                                            fallback (the export's Stop mode)
+//   hc_codegen --api-direct FILE             write the engine-API parity source:
+//                                            every registry row called directly
+//                                            (HE::api::cpp::directCallsSource)
 //
 // Used at build time to compile the test fixtures into he_tests, and handy for
 // eyeballing emission during development. The editor export worker calls the
 // HE::hccg library in-process instead.
 
 #include <HorizonScene/HcCodegen.h>
+#include <HorizonScene/EngineApiCpp.h>
 #include "fixtures.h"   // tests/fixtures/hcodegen (target include dir)
 #include <filesystem>
 #include <fstream>
@@ -43,18 +47,30 @@ int main(int argc, char** argv)
     std::string outDir;
     bool fixtures = false;
     bool requireAll = false;
+    bool cmake = false;   // also write the export's CMakeLists.txt (generateCMakeLists)
     std::vector<std::string> inputs;
     for (int i = 1; i < argc; ++i)
     {
         const std::string a = argv[i];
         if (a == "--fixtures") fixtures = true;
         else if (a == "--require-all") requireAll = true;
+        else if (a == "--cmake") cmake = true;
         else if (a == "--out" && i + 1 < argc) outDir = argv[++i];
+        else if (a == "--api-direct" && i + 1 < argc)
+        {
+            // A mode of its own: no graphs, just the registry spelled as calls.
+            const fs::path file = argv[++i];
+            std::error_code ec;
+            if (file.has_parent_path()) fs::create_directories(file.parent_path(), ec);
+            if (!writeIfChanged(file, HE::api::cpp::directCallsSource()))
+            { std::fprintf(stderr, "hc_codegen: cannot write %s\n", file.string().c_str()); return 1; }
+            return 0;
+        }
         else inputs.push_back(a);
     }
     if (outDir.empty() || (!fixtures && inputs.empty()))
     {
-        std::fprintf(stderr, "usage: hc_codegen [--fixtures] --out DIR [graph.json...]\n");
+        std::fprintf(stderr, "usage: hc_codegen [--fixtures] [--cmake] --out DIR [graph.json...]\n");
         return 2;
     }
 
@@ -88,8 +104,17 @@ int main(int argc, char** argv)
 
     std::error_code ec;
     fs::create_directories(outDir, ec);
+    std::vector<std::string> cppFiles;
     for (const auto& f : res.files)
+    {
         if (!writeIfChanged(fs::path(outDir) / f.name, f.contents))
         { std::fprintf(stderr, "hc_codegen: cannot write %s\n", f.name.c_str()); return 1; }
+        if (fs::path(f.name).extension() == ".cpp") cppFiles.push_back(f.name);
+    }
+    // The project the export builds the library with (ExportDialogPanel does the
+    // same in-process), so the generated code can be built against an SDK by hand.
+    if (cmake && !writeIfChanged(fs::path(outDir) / "CMakeLists.txt",
+                                 HE::hccg::generateCMakeLists(opt, cppFiles)))
+    { std::fprintf(stderr, "hc_codegen: cannot write CMakeLists.txt\n"); return 1; }
     return 0;
 }

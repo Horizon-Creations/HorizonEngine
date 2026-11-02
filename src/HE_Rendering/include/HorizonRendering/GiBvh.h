@@ -11,8 +11,12 @@
 
 #include "../HE_RENDERING_API.h"
 
+#include <Types/UUID.h>
+
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <glm/glm.hpp>
 
@@ -49,8 +53,48 @@ struct GiBvh
 // consecutive vertices — 8 for the engine's interleaved pos3+normal3+uv2
 // layout (position at offset 0, matching Metal's BLAS vertex descriptor), 3
 // for tightly packed test data. Degenerate input (no triangles) → invalid BVH.
+// `sourceTriangles`, when given, receives for every triangle in leaf order the number of its triangle in the
+// index buffer (indexBuffer[3n .. 3n+2]); refitGiBvh() needs it to redo the vertices of the same topology.
 HE_RENDERING_API GiBvh buildGiBvh(const float* positions, size_t vertexCount, size_t strideFloats,
-                 const uint32_t* indices, size_t indexCount, int leafSize = 4);
+                 const uint32_t* indices, size_t indexCount, int leafSize = 4,
+                 std::vector<uint32_t>* sourceTriangles = nullptr);
+
+// Refit: the SAME tree (`nodes`, from an earlier buildGiBvh of a mesh with this very index buffer) over moved
+// vertices. Triangles are re-read in the old leaf order and every node's bounds are recomputed bottom-up, no
+// split is redone — about a tenth of the cost of a build. The tree gets looser the further the vertices move
+// from where it was built, so callers rebuild now and then (GiBvhRefitCache does). false = the input does not
+// fit the tree (an index out of range, a triangle number past the buffer); `out` is untouched then.
+HE_RENDERING_API bool refitGiBvh(const std::vector<GiBvhNode>& nodes, const std::vector<uint32_t>& sourceTriangles,
+                 const float* positions, size_t vertexCount, size_t strideFloats,
+                 const uint32_t* indices, size_t indexCount, GiBvh& out);
+
+// A mesh that is rebuilt over and over with the same triangles and different vertices — a re-stitched terrain
+// chunk, a sculpted one — only needs its first rebuild to be a build. The cache remembers the tree of meshes
+// that were built a second time (first-time builds are the vast majority and are not worth the memory), checks
+// the index buffer's hash, and refits instead of rebuilding while it matches. One per renderer, main thread only.
+class HE_RENDERING_API GiBvhRefitCache
+{
+public:
+	GiBvh build(const UUID& meshId, const float* positions, size_t vertexCount, size_t strideFloats,
+	            const uint32_t* indices, size_t indexCount, int leafSize = 4);
+	void   clear() { m_entries.clear(); m_seen.clear(); }
+	size_t refits()   const { return m_refits; }     // builds answered by a refit (tests, counters)
+	size_t rebuilds() const { return m_rebuilds; }   // builds answered by a full build
+
+private:
+	struct Entry
+	{
+		uint64_t              topologyKey = 0;
+		std::vector<GiBvhNode>  nodes;
+		std::vector<uint32_t> sourceTriangles;
+		int                   refits  = 0;   // since the last full build
+		uint64_t              lastUse = 0;
+	};
+	std::unordered_map<UUID, Entry> m_entries;
+	std::unordered_set<UUID>        m_seen;      // built once already: its next build is worth remembering
+	uint64_t m_tick = 0;
+	size_t   m_refits = 0, m_rebuilds = 0;
+};
 
 // CPU reference traversal, mirrored 1:1 by the GLSL compute kernels (same slab
 // test, same Möller-Trumbore, same stack bound). Returns whether any triangle

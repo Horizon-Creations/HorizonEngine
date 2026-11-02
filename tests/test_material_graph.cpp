@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -11,6 +13,8 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
+#include <Trails/TrailClipmap.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <MaterialGraph/MaterialGraph.h>
 // he_materialshader is linked into he_tests in every flavour (the stub answers the
@@ -404,10 +408,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// Sun is the LAST enum value today; a node added after it
+	// LandscapeFoliage is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::Sun; ++t)
+	for (int t = 0; t <= (int)MatNodeType::LandscapeFoliage; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -1955,7 +1959,9 @@ TEST_CASE("PSHD encode/decode roundtrip preserves variants")
 	// A torn tail (pak cut short) still yields every record, the clustered pairs
 	// it could not read stay empty — the renderer then draws the plain fragment.
 	{
-		std::vector<uint8_t> torn(bytes.begin(), bytes.end() - 1);
+		// The v4 tail (G-buffer + instanced twins: three empty strings per record, a 4-byte
+		// length each) comes after the clustered one, so cut it whole and one byte more.
+		std::vector<uint8_t> torn(bytes.begin(), bytes.end() - 2 * 3 * sizeof(uint32_t) - 1);
 		const auto t = HE::decodeMaterialShaderVariants(torn);
 		REQUIRE(t.size() == in.size());
 		CHECK(t[1].fragment == in[1].fragment);
@@ -2192,10 +2198,11 @@ TEST_CASE("matLandscapeLayerNames splits, trims and caps the layer list")
 	      == std::vector<std::string>{ "Grass", "Rock" });
 	// Never empty — a node with no names still has one pin.
 	CHECK(HE::matLandscapeLayerNames("").size() == 1);
-	// Two RGBA weightmap pages = eight channels, so the list is capped there.
-	CHECK(HE::kMatMaxLandscapeLayers == 8);
-	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj").size()
+	// Three RGBA weightmap pages = twelve channels, so the list is capped there.
+	CHECK(HE::kMatMaxLandscapeLayers == 12);
+	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn").size()
 	      == static_cast<size_t>(HE::kMatMaxLandscapeLayers));
+	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne\nf\ng\nh\ni\nj").size() == 10);
 	CHECK(HE::matLandscapeLayerNames("a\nb\nc\nd\ne").size() == 5);
 }
 
@@ -2291,12 +2298,15 @@ TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the sa
 	CHECK(count(three.glsl, "textureLod(heLandscapeWeights") == 1);
 	CHECK(count(eight.glsl, "textureLod(heLandscapeWeights") == 2);
 	CHECK(three.glsl.find("_w2.") == std::string::npos);
-	CHECK(eight.glsl.find("_wu + 0.5") != std::string::npos);
+	CHECK(eight.glsl.find("_wu + 1.0 / ") != std::string::npos);
 	// Layers 4..7 are the second page's channels, in order.
 	for (const char* ch : { "_w2.x", "_w2.y", "_w2.z", "_w2.w" })
 		CHECK(eight.glsl.find(ch) != std::string::npos);
 	CHECK(five.glsl.find("_w2.x") != std::string::npos);
 	CHECK(five.glsl.find("_w2.y") == std::string::npos);
+	// Eight layers or fewer never touch a third page.
+	CHECK(eight.glsl.find("_w3") == std::string::npos);
+	CHECK(eight.glsl.find("_wr3") == std::string::npos);
 	// The approximate surface keeps one colour per layer in memory; the asset
 	// format still persists four (kMatApproxLayerColors).
 	HE::MaterialGraph g8;
@@ -2316,6 +2326,61 @@ TEST_CASE("Landscape Layer Blend reads layers 4..7 from the right half of the sa
 	CHECK(ap.layerCount == 6);
 	CHECK(ap.layerColor[5][0] == doctest::Approx(0.6f));
 	CHECK(HE::kMatApproxLayerColors == 4);
+}
+
+TEST_CASE("Landscape Layer Blend reads layers 8..11 from the last third of the same weightmap")
+{
+	// Twelve layers, still ONE sampler: the blend's page count N is the texture's own
+	// width / height (1, 2 or 3), every page offset is a multiple of 1 / N, and the
+	// third page is only read by a blend that names a ninth layer.
+	auto blend = [](int layers) {
+		HE::MaterialGraph g;
+		const int out = g.addNode(HE::MatNodeType::Output);
+		const int lb  = g.addNode(HE::MatNodeType::LandscapeLayerBlend);
+		std::string names;
+		for (int i = 0; i < layers; ++i) names += (i ? "\n" : "") + std::string("L") + std::to_string(i);
+		g.findNode(lb)->s = names;
+		for (int i = 0; i < layers; ++i)
+		{
+			const int c = g.addNode(HE::MatNodeType::ConstColor);
+			g.findNode(c)->p[0] = static_cast<float>(i + 1) / 12.0f;
+			REQUIRE(g.connect(c, 0, lb, i));
+		}
+		REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+		return HE::generateFragment(g);
+	};
+	auto count = [](const std::string& hay, const std::string& needle) {
+		size_t n = 0;
+		for (size_t at = hay.find(needle); at != std::string::npos; at = hay.find(needle, at + 1)) ++n;
+		return n;
+	};
+
+	const HE::MatShaderGen nine = blend(9), twelve = blend(12), eight = blend(8);
+	REQUIRE(twelve.layerNames.size() == 12);
+	REQUIRE(nine.layerNames.size() == 9);
+	for (const HE::MatShaderGen* g : { &eight, &nine, &twelve })
+	{
+		CHECK(count(g->glsl, "uniform sampler2D heLandscapeWeights") == 1);   // never a second map
+		// The page count comes from the size, not from a "2:1" test any more.
+		CHECK(g->glsl.find("_np = max(floor(") != std::string::npos);
+		CHECK(g->glsl.find("> 1.5 *") == std::string::npos);
+	}
+	// 1 + 1 + 1 reads of the atlas page by page, plus the square-map read.
+	CHECK(count(twelve.glsl, "textureLod(heLandscapeWeights") == 3);
+	CHECK(count(nine.glsl,   "textureLod(heLandscapeWeights") == 3);
+	CHECK(count(eight.glsl,  "textureLod(heLandscapeWeights") == 2);
+	CHECK(twelve.glsl.find("_wu + 1.0 / ") != std::string::npos);   // page 1 at 1/N
+	CHECK(twelve.glsl.find("_wu + 2.0 / ") != std::string::npos);   // page 2 at 2/N
+	// Selected by the page count, so a 2:1 map reads nothing there.
+	CHECK(twelve.glsl.find("_np > 2.5 ? ") != std::string::npos);
+	// Layers 8..11 are the third page's channels, in order; a ninth layer is its first.
+	for (const char* ch : { "_w3.x", "_w3.y", "_w3.z", "_w3.w" })
+		CHECK(twelve.glsl.find(ch) != std::string::npos);
+	CHECK(nine.glsl.find("_w3.x") != std::string::npos);
+	CHECK(nine.glsl.find("_w3.y") == std::string::npos);
+	// The weight sum covers the channels of all three pages.
+	for (const char* ch : { "_w.x", "_w.w", "_w2.x", "_w2.w", "_w3.x", "_w3.w" })
+		CHECK(twelve.glsl.find(ch) != std::string::npos);
 }
 
 #if defined(HE_TESTS_HAVE_SHADERC)
@@ -2348,16 +2413,17 @@ TEST_CASE("A wired Landscape Layer Blend cross-compiles for Metal and GL")
 	CHECK_MESSAGE(gl.ok, "GLSL compile failed: ", gl.log);
 }
 
-TEST_CASE("A five- and an eight-layer Landscape Layer Blend cross-compile for all five backends")
+TEST_CASE("A five-, eight-, nine- and twelve-layer Landscape Layer Blend cross-compile for all five backends")
 {
 	// The second page is read through textureSize + textureLod on the SAME
-	// sampler. Every backend's compiler has to take that: MSL (Metal — no
+	// sampler, the third (nine layers and up, Thema 329) through a second textureLod
+	// at 2 / np. Every backend's compiler has to take that: MSL (Metal — no
 	// hardware here, this compile is its evidence), GLSL 4.10 / ES 3.00 / 4.30
 	// (OpenGL), HLSL (D3D11/D3D12; FXC is the Windows-only case further down)
 	// and SPIR-V (Vulkan).
 	using B = HE::MaterialShaderLibrary::Backend;
 	HE::MaterialShaderLibrary lib;
-	for (int layers : { 5, 8 })
+	for (int layers : { 5, 8, 9, 12 })
 	{
 		HE::MaterialGraph g;
 		const int out = g.addNode(HE::MatNodeType::Output);
@@ -2665,12 +2731,17 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	// as a set.
 	std::vector<std::string> tex = gen.textures;
 	std::sort(tex.begin(), tex.end());
+	// The three arrays and, since Thema 328 step 5b, the trail clipmap (a plain 2D texture, kTrailTexturePath).
 	std::vector<std::string> want = { HE::kAutoLandscapeAlbedoArray, HE::kAutoLandscapeNormalArray,
-	                                  HE::kAutoLandscapeMaskArray };
+	                                  HE::kAutoLandscapeMaskArray, HE::kTrailTexturePath };
 	std::sort(want.begin(), want.end());
 	CHECK(tex == want);
-	CHECK(gen.textureArrayMask == 0x7u);
-	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == 0x7u);
+	// The array slots are every slot but the trail's, wherever the emission order put it.
+	uint32_t arrays = 0;
+	for (size_t i = 0; i < gen.textures.size(); ++i)
+		if (gen.textures[i] != HE::kTrailTexturePath) arrays |= 1u << i;
+	CHECK(gen.textureArrayMask == arrays);
+	CHECK(HE::matGlslTextureArrayMask(gen.glsl) == arrays);
 	CHECK(gen.glsl.find("texture(heTex0") == std::string::npos);
 
 	// Every parameter is a real HeParams slot (none baked for being over budget).
@@ -2682,7 +2753,8 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	                          HE::kAutoLandscapeParamDirtAmount, HE::kAutoLandscapeParamDirtSize,
 	                          HE::kAutoLandscapeParamSnowHeight, HE::kAutoLandscapeParamSnowBlend,
 	                          HE::kAutoLandscapeParamSnowMaxSlope, HE::kAutoLandscapeParamPuddleAmount,
-	                          HE::kAutoLandscapeParamPuddleMaxSlope })
+	                          HE::kAutoLandscapeParamPuddleMaxSlope, HE::kAutoLandscapeParamSnowColor,
+	                          HE::kAutoLandscapeParamSnowLook })
 	{
 		const bool found = std::any_of(gen.params.begin(), gen.params.end(),
 		                               [&](const HE::MatParamSlot& s) { return s.name == name; });
@@ -2715,12 +2787,13 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 
 	// Puddles are an OVERLAY on the ground below, not a layer: slice 4 of the arrays
 	// (WetGround) stays in them but no read asks for it — every array read takes its
-	// slice from a constant below it. Positive control: slice 3 (Snow) IS read.
+	// slice from a constant below it. Snow is MF_ProceduralSnow (Thema 329 step 2), so slice 3 is not
+	// read either; positive control: slice 2 (Rock) IS.
 	{
 		using NT = HE::MatNodeType;
 		const int wetSlice = static_cast<int>(HE::AutoLandscapeLayer::WetGround);
 		int reads = 0;
-		bool sawSnow = false;
+		bool sawRock = false;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
 		{
 			if (n.type != NT::TextureArraySample && n.type != NT::NormalMapArraySample &&
@@ -2734,18 +2807,22 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 				REQUIRE(s->type == NT::ConstFloat);
 				++reads;
 				CHECK(static_cast<int>(s->p[0]) != wetSlice);
-				sawSnow = sawSnow || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Snow);
+				CHECK(static_cast<int>(s->p[0]) != static_cast<int>(HE::AutoLandscapeLayer::Snow));
+				sawRock = sawRock || static_cast<int>(s->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Rock);
 			}
 		}
-		CHECK(reads == 24); // 4 bombed layers (Grass, Dirt, Rock, Snow) x 3 maps x (plain + bombed)
-		CHECK(sawSnow);
+		CHECK(reads == 18); // 3 bombed layers (Grass, Dirt, Rock) x 3 maps x (plain + bombed)
+		CHECK(sawRock);
 	}
 
-	// Grass, Dirt, Rock and Snow each read albedo + normal + mask on ONE grid (four
-	// grids in total). The uv here is a coerced
+	// Grass, Dirt and Rock each read albedo + normal + mask on ONE grid (three
+	// grids in total; Snow is procedural now). The uv here is a coerced
 	// expression ("(nK).xy"), so count calls = all occurrences minus the definition.
-	CHECK(countOf(gen.glsl, "void heBombGrid(") == 1u);
-	CHECK(countOf(gen.glsl, "heBombGrid(") - countOf(gen.glsl, "void heBombGrid(") == 4u);
+	// Thema 180 Schritt 3: the layers read through the variant grid (Groups wired), which
+	// is heBombGrid plus the variant numbers; the plain heBombGrid is not emitted at all.
+	CHECK(countOf(gen.glsl, "void heBombGridV(") == 1u);
+	CHECK(countOf(gen.glsl, "heBombGridV(") - countOf(gen.glsl, "void heBombGridV(") == 3u);
+	CHECK(gen.glsl.find("heBombGrid(") == std::string::npos);
 	REQUIRE(gen.switches.size() == 1u);
 	CHECK(gen.switches[0].first == HE::kAutoLandscapeSwitchBombing);
 	CHECK(gen.switches[0].second);
@@ -2754,8 +2831,8 @@ TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex g
 	const std::map<std::string, bool> off{ { HE::kAutoLandscapeSwitchBombing, false } };
 	const HE::MatShaderGen plain = HE::generateFragment(a.graph, HE::weatherFunctionLoader(), &off);
 	CHECK(plain.glsl.find("heBomb") == std::string::npos);
-	CHECK(plain.textureArrayMask == 0x7u);
-	CHECK(plain.textures.size() == 3u);
+	CHECK(plain.textureArrayMask == arrays);
+	CHECK(plain.textures.size() == 4u);
 	CHECK(plain.glsl != gen.glsl);
 
 	// Lit by default; the mask views are unlit, read the same masks and need no
@@ -2820,6 +2897,74 @@ TEST_CASE("Fbm p[0] = 1 hashes on integers; the default keeps the float hash")
 		CHECK(glsl.find("heHash21") == std::string::npos);
 		CHECK(glsl.find("heFbm(") == std::string::npos);
 	}
+}
+
+TEST_CASE("FBM Noise Gradient: the integer fbm and its exact slope in one call")
+{
+	// Thema 235: the engine water took each chop layer's slope by finite differences, three
+	// fbm calls; this node gives the value and the gradient from one.
+	MaterialGraph g;
+	const int out  = g.addNode(MatNodeType::Output);
+	const int uv   = g.addNode(MatNodeType::UV);
+	const int fg   = g.addNode(MatNodeType::FbmGrad);
+	const int comb = g.addNode(MatNodeType::Combine3);
+	CHECK(g.connect(uv, 0, fg, 0));
+	CHECK(g.connect(fg, 0, comb, 0));
+	CHECK(g.connect(fg, 1, comb, 1));
+	CHECK(g.connect(fg, 2, comb, 2));
+	CHECK(g.connect(comb, 0, out, 0));
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	CHECK(glsl.find("heFbmIGrad(") != std::string::npos);
+	CHECK(glsl.find("vec3 heValueNoiseIGrad(vec2 p)") != std::string::npos);
+	CHECK(glsl.find("float heHashI2(ivec2 i)") != std::string::npos);
+	CHECK(glsl.find(".x, ") != std::string::npos);   // the three pins read .x .y .z of one call
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	CHECK(HE::generateFragmentGlsl(back) == glsl);
+
+	// The formula the GLSL carries, in C++: its gradient is the limit of the finite
+	// difference the water used (step 0.04 cells), not an approximation of it.
+	auto hash = [](int x, int y) {
+		uint32_t vx = uint32_t(x) * 1664525u + 1013904223u, vy = uint32_t(y) * 1664525u + 1013904223u;
+		vx += vy * 1664525u; vy += vx * 1664525u; vx ^= vx >> 16u; vy ^= vy >> 16u;
+		vx += vy * 1664525u; vy += vx * 1664525u; vx ^= vx >> 16u; vy ^= vy >> 16u;
+		return float(vx >> 8u) * (1.0f / 16777216.0f);
+	};
+	auto noiseGrad = [&](double px, double py, double& dx, double& dy) {
+		const double fx0 = std::floor(px), fy0 = std::floor(py);
+		const int ix = int(fx0), iy = int(fy0);
+		const double fx = px - fx0, fy = py - fy0;
+		const double ux = fx * fx * (3 - 2 * fx), uy = fy * fy * (3 - 2 * fy);
+		const double dux = 6 * fx * (1 - fx), duy = 6 * fy * (1 - fy);
+		const double a = hash(ix, iy), b = hash(ix + 1, iy), c = hash(ix, iy + 1), d = hash(ix + 1, iy + 1);
+		dx = dux * ((b - a) + (a - b - c + d) * uy);
+		dy = duy * ((c - a) + (a - b - c + d) * ux);
+		return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+	};
+	auto fbm = [&](double px, double py, double& gx, double& gy) {
+		double v = 0, amp = 0.5, s = 1;
+		gx = gy = 0;
+		for (int k = 0; k < 4; ++k)
+		{
+			double dx, dy;
+			v += amp * noiseGrad(px, py, dx, dy);
+			gx += amp * s * dx; gy += amp * s * dy;
+			px *= 2; py *= 2; amp *= 0.5; s *= 2;
+		}
+		return v;
+	};
+	int checked = 0;
+	for (int i = 0; i < 200; ++i)
+	{
+		const double x = 0.137 * i + 3.3, y = 0.071 * i - 7.9, h = 1e-5;
+		double gx, gy, t1, t2;
+		const double v0 = fbm(x, y, gx, gy);
+		const double fdx = (fbm(x + h, y, t1, t2) - v0) / h, fdy = (fbm(x, y + h, t1, t2) - v0) / h;
+		CHECK(gx == doctest::Approx(fdx).epsilon(1e-3).scale(1.0));
+		CHECK(gy == doctest::Approx(fdy).epsilon(1e-3).scale(1.0));
+		++checked;
+	}
+	CHECK(checked == 200);
 }
 
 // ═══ Container semantics shared with the other graph systems ═════════════════
@@ -3542,7 +3687,7 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	REQUIRE(m);
 	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
-	CHECK(m->graphTexturePaths.size() == 3u);
+	CHECK(m->graphTexturePaths.size() == 4u);   // three arrays + the trail clipmap
 	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
 	// The Landscape tool lists these as the paintable layers — Auto first, so an
 	// unpainted terrain reads the automatic distribution.
@@ -3550,21 +3695,59 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	CHECK(m->parentMaterialPath.empty());
 }
 
-TEST_CASE("The shipped weather functions are exactly what the builders make, and the landscape material resolves them")
+TEST_CASE("The baked GLSL in the shipped M_AutoLandscape.hasset is what the codegen makes today")
 {
-	// Generated by matfn_gen (Weather/ sub-folder) and committed — the tripwire for a change
-	// to HE::buildWeather*Function that did not re-run the generator.
+	// The packer (HpakWriter) ships the fragment text stored IN the file and never
+	// regenerates it; only an editor load does. So a codegen change (Thema 237: the
+	// V == 1 branch of heBombGridV) that is not followed by a re-run of the generator
+	// reaches the editor but not an exported game. The tripwire above pins the graph
+	// only. A load always regenerates, so the stored text is read from the file bytes: the
+	// strings of a .hasset chunk are stored verbatim, the fresh text must be inside it.
+	const std::filesystem::path file = std::filesystem::path(HE_EDITOR_DEPS_DIR) /
+		"EngineContent" / "Materials" / "M_AutoLandscape.hasset";
+	REQUIRE(std::filesystem::exists(file));
+	std::ifstream in(file, std::ios::binary);
+	const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	const std::filesystem::path dir = file.parent_path();
+	ContentManager fresh(dir.string());
+	fresh.setEngineContentRoot(dir.parent_path().string());
+	const MaterialAsset* f = fresh.getMaterial(fresh.loadAsset("M_AutoLandscape.hasset"));
+	REQUIRE(f);
+	REQUIRE(!f->customShaderFragGlsl.empty());
+	CHECK_MESSAGE(bytes.find(f->customShaderFragGlsl) != std::string::npos,
+	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
+
+	// What the exporter does with that text (ExportDialogPanel): one variant per backend.
+	// No GPU involved; D3D11/D3D12/Vulkan only get this cross-compile on a Mac.
+	HE::MaterialShaderLibrary lib;
+	for (uint8_t v = 0; v <= static_cast<uint8_t>(HE::RendererBackend::Metal); ++v)
+	{
+		MaterialShaderVariant var;
+		std::string error;
+		std::vector<std::string> warnings;
+		CHECK_MESSAGE(HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v),
+		                                            f->customShaderFragGlsl, "", var, error, warnings),
+		              "backend ", static_cast<int>(v), ": ", error);
+	}
+}
+
+TEST_CASE("The shipped weather and surface functions are exactly what the builders make, and the landscape material resolves them")
+{
+	// Generated by matfn_gen (Weather/ and Surface/ sub-folders) and committed — the tripwire for a
+	// change to HE::buildWeather*Function / HE::buildProcedural*Function that did not re-run the generator.
 	const std::filesystem::path root = std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent";
-	const std::filesystem::path dir  = root / "MaterialFunctions" / "Weather";
-	struct Want { const char* file; HE::UUID id; HE::MaterialGraph g; };
+	struct Want { const char* dir; const char* file; HE::UUID id; HE::MaterialGraph g; };
 	const std::vector<Want> want = {
-		{ "MF_WeatherPuddles.hasset", HE::kWeatherPuddlesFunctionId, HE::buildWeatherPuddlesFunction() },
-		{ "MF_WeatherSnow.hasset",    HE::kWeatherSnowFunctionId,    HE::buildWeatherSnowFunction() } };
-	ContentManager cm(dir.string());
+		{ "Weather", "MF_WeatherPuddles.hasset", HE::kWeatherPuddlesFunctionId, HE::buildWeatherPuddlesFunction() },
+		{ "Weather", "MF_WeatherSnow.hasset",    HE::kWeatherSnowFunctionId,    HE::buildWeatherSnowFunction() },
+		{ "Surface", "MF_ProceduralSnow.hasset", HE::kProceduralSnowFunctionId, HE::buildProceduralSnowFunction() },
+		{ "Surface", "MF_ProceduralSand.hasset", HE::kProceduralSandFunctionId, HE::buildProceduralSandFunction() } };
 	for (const Want& w : want)
 	{
 		CAPTURE(w.file);
+		const std::filesystem::path dir = root / "MaterialFunctions" / w.dir;
 		REQUIRE(std::filesystem::exists(dir / w.file));
+		ContentManager cm(dir.string());
 		const HE::UUID id = cm.loadAsset(w.file);
 		CHECK(id == w.id);
 		const MaterialFunctionAsset* f = cm.getMaterialFunction(id);
@@ -3573,15 +3756,20 @@ TEST_CASE("The shipped weather functions are exactly what the builders make, and
 		              "re-run: matfn_gen EditorDeps/EngineContent/MaterialFunctions");
 	}
 
-	// The landscape material, loaded with the engine root, found both by their Engine/ path
-	// and compiled real code around them.
+	// The landscape materials, loaded with the engine root, found all four functions by their Engine/
+	// path and compiled real code around them.
 	ContentManager mats((root / "Materials").string());
 	mats.setEngineContentRoot(root.string());
-	const MaterialAsset* m = mats.getMaterial(mats.loadAsset("M_AutoLandscape.hasset"));
-	REQUIRE(m);
-	CHECK(m->customShaderFragGlsl.find("missing function") == std::string::npos);
-	CHECK(m->customShaderFragGlsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
-	CHECK(m->customShaderFragGlsl.find("heLight.weather") != std::string::npos);
+	for (const char* file : { "M_AutoLandscape.hasset", "M_AutoLandscape_Desert.hasset" })
+	{
+		CAPTURE(file);
+		const MaterialAsset* m = mats.getMaterial(mats.loadAsset(file));
+		REQUIRE(m);
+		CHECK(m->customShaderFragGlsl.find("missing function") == std::string::npos);
+		CHECK(m->customShaderFragGlsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
+		CHECK(m->customShaderFragGlsl.find("heLight.weather") != std::string::npos);
+		CHECK(m->customShaderFragGlsl.find("heFbmIGrad(") != std::string::npos);   // the procedural surfaces
+	}
 }
 #endif // HE_EDITOR_DEPS_DIR
 
@@ -3687,18 +3875,183 @@ TEST_CASE("Weather functions: an unwired call emits real code that reads the wea
 	CHECK(HE::generateFragment(g).glsl.find("missing function") != std::string::npos);
 }
 
+// ── The procedural surface functions (Thema 329, step 2) ─────────────────────
+
+namespace
+{
+// The names of the FnInput nodes that output `outName` of a function graph depends on.
+std::set<std::string> fnInputsReaching(const MaterialGraph& fn, const char* outName)
+{
+	int outId = -1;
+	for (const HE::MatGraphNode& n : fn.nodes)
+		if (n.type == MatNodeType::FnOutput && n.s == outName) outId = n.id;
+	REQUIRE(outId >= 0);
+	std::set<int> seen;
+	std::vector<int> todo{ outId };
+	std::set<std::string> names;
+	while (!todo.empty())
+	{
+		const int id = todo.back(); todo.pop_back();
+		if (!seen.insert(id).second) continue;
+		const HE::MatGraphNode* n = fn.findNode(id);
+		REQUIRE(n);
+		if (n->type == MatNodeType::FnInput) names.insert(n->s);
+		for (const HE::MatGraphLink& l : fn.links)
+			if (l.dstNode == id) todo.push_back(l.srcNode);
+	}
+	return names;
+}
+
+std::vector<std::string> pinNames(const std::vector<HE::MatPinDesc>& pins)
+{
+	std::vector<std::string> v;
+	for (const HE::MatPinDesc& p : pins) v.push_back(p.name);
+	return v;
+}
+} // namespace
+
+TEST_CASE("Procedural surface functions: the interface callers wire by, flat, defaults authored, ids free")
+{
+	const MaterialGraph snowFn = HE::buildProceduralSnowFunction();
+	const MaterialGraph sandFn = HE::buildProceduralSandFunction();
+	std::vector<HE::MatPinDesc> ins, outs;
+
+	HE::matFunctionPins(snowFn, ins, outs);
+	CHECK(pinNames(ins) == std::vector<std::string>{ "Position", "Cover", "Color", "Grain", "Drift",
+		"Wind Direction", "Glitter", "Softness", "Melt", "Disturbance", "Disturbance Slope", "Disturbance Heap" });
+	REQUIRE(ins.size() == static_cast<size_t>(HE::kSnowInCount));
+	CHECK(std::string(ins[HE::kSnowInCover].name) == "Cover");
+	CHECK(std::string(ins[HE::kSnowInMelt].name) == "Melt");
+	CHECK(std::string(ins[HE::kSnowInDisturbance].name) == "Disturbance");
+	CHECK(std::string(ins[HE::kSnowInDisturbanceSlope].name) == "Disturbance Slope");
+	CHECK(pinNames(outs) == std::vector<std::string>{ "Albedo", "Normal", "Roughness", "AO", "Height" });
+	REQUIRE(outs.size() == static_cast<size_t>(HE::kSurfaceOutCount));
+	CHECK(std::string(outs[HE::kSurfaceOutHeight].name) == "Height");
+
+	HE::matFunctionPins(sandFn, ins, outs);
+	CHECK(pinNames(ins) == std::vector<std::string>{ "Position", "Color", "Grain Size", "Ripple", "Ripple Size",
+		"Wind Direction", "Glitter", "Wetness", "Disturbance", "Disturbance Slope", "Disturbance Heap" });
+	REQUIRE(ins.size() == static_cast<size_t>(HE::kSandInCount));
+	CHECK(std::string(ins[HE::kSandInWetness].name) == "Wetness");
+	CHECK(pinNames(outs) == std::vector<std::string>{ "Albedo", "Normal", "Roughness", "AO", "Height" });
+
+	// Flat, every input declares its default, no Param node (a knob is a function INPUT, or the
+	// call would put a fixed name into the caller's parameter panel), no texture, and no Weather
+	// node: the weather is wired by the caller.
+	for (const MaterialGraph* fn : { &snowFn, &sandFn })
+		for (const HE::MatGraphNode& n : fn->nodes)
+		{
+			if (n.type == MatNodeType::FnInput) CHECK(n.p[2] >= 0.5f);
+			CHECK(n.type != MatNodeType::FunctionCall);
+			CHECK(n.type != MatNodeType::ParamFloat);
+			CHECK(n.type != MatNodeType::ParamColor);
+			CHECK_FALSE(HE::matNodeSamplesTexture(n.type));
+			CHECK(n.type != MatNodeType::Weather);
+		}
+
+	// The trail inputs shape albedo, normal, roughness and AO (a print is darker, glossier, shaded and
+	// leaves a rim) but never Height: the layer-blend masks built from it must not depend on gameplay state.
+	for (const MaterialGraph* fn : { &snowFn, &sandFn })
+		for (const char* in : { "Disturbance", "Disturbance Slope" })
+		{
+			CAPTURE(in);
+			CHECK(fnInputsReaching(*fn, "Height").count(in) == 0u);
+			CHECK(fnInputsReaching(*fn, "Albedo").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
+			// The rim lean is in both normals; the depth itself flattens the sand's ripples only.
+			CHECK(fnInputsReaching(*fn, "Normal").count(in)
+			      == ((std::string(in) == "Disturbance Slope" || fn == &sandFn) ? 1u : 0u));
+			CHECK(fnInputsReaching(*fn, "Roughness").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
+			CHECK(fnInputsReaching(*fn, "AO").count(in) == (std::string(in) == "Disturbance" ? 1u : 0u));
+		}
+	// The heap input only lightens and loosens: albedo and roughness, never the normal, AO or Height.
+	for (const MaterialGraph* fn : { &snowFn, &sandFn })
+	{
+		CHECK(fnInputsReaching(*fn, "Albedo").count("Disturbance Heap") == 1u);
+		CHECK(fnInputsReaching(*fn, "Roughness").count("Disturbance Heap") == 1u);
+		for (const char* out : { "Normal", "AO", "Height" })
+			CHECK(fnInputsReaching(*fn, out).count("Disturbance Heap") == 0u);
+	}
+	// Both interfaces only GREW: every earlier pin keeps its index (callers wire by index).
+	CHECK(HE::kSnowInDisturbance == 9);
+	CHECK(HE::kSandInDisturbance == 8);
+
+	// Height is the STRUCTURE of the surface: it feeds a height blend and the landscape's height-snow
+	// mask, so it must not move with the weather (Cover, Softness, Melt, Wetness) or with the colour.
+	const std::set<std::string> snowH = fnInputsReaching(snowFn, "Height");
+	CHECK(snowH == std::set<std::string>{ "Position", "Grain", "Drift", "Wind Direction" });
+	const std::set<std::string> sandH = fnInputsReaching(sandFn, "Height");
+	CHECK(sandH == std::set<std::string>{ "Position", "Grain Size", "Ripple", "Ripple Size", "Wind Direction" });
+	// Positive controls: the knobs do something.
+	CHECK(fnInputsReaching(snowFn, "Normal").count("Cover") == 1u);
+	CHECK(fnInputsReaching(snowFn, "Albedo").count("Melt") == 1u);
+	CHECK(fnInputsReaching(snowFn, "Roughness").count("Softness") == 1u);
+	CHECK(fnInputsReaching(snowFn, "Albedo").count("Glitter") == 1u);
+	CHECK(fnInputsReaching(sandFn, "Albedo").count("Wetness") == 1u);
+	CHECK(fnInputsReaching(sandFn, "Albedo").count("Color") == 1u);
+	CHECK(fnInputsReaching(sandFn, "Normal").count("Ripple") == 1u);
+
+	// One id, one asset: the ContentManager keeps a single entry per UUID.
+	CHECK(HE::kProceduralSnowFunctionId.hi != HE::kProceduralSandFunctionId.hi);
+	CHECK(HE::kProceduralSnowFunctionId.hi != HE::kWeatherPuddlesFunctionId.hi);
+	CHECK(HE::kProceduralSandFunctionId.hi != HE::kWeatherSnowFunctionId.hi);
+}
+
+TEST_CASE("Procedural surface functions: an unwired call emits real code, reads no weather and no texture")
+{
+	for (const char* path : { HE::kProceduralSnowFunctionPath, HE::kProceduralSandFunctionPath })
+	{
+		CAPTURE(path);
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int call = g.addNode(MatNodeType::FunctionCall);
+		g.findNode(call)->s = path;
+		REQUIRE(g.connect(call, HE::kSurfaceOutAlbedo,    out, HE::kMatOutputBaseColorPin));
+		REQUIRE(g.connect(call, HE::kSurfaceOutNormal,    out, HE::kMatOutputNormalPin));
+		REQUIRE(g.connect(call, HE::kSurfaceOutRoughness, out, HE::kMatOutputRoughnessPin));
+		REQUIRE(g.connect(call, HE::kSurfaceOutAO,        out, HE::kMatOutputAOPin));
+		REQUIRE(g.connect(call, HE::kSurfaceOutHeight,    out, HE::kMatOutputMetallicPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g, HE::weatherFunctionLoader());
+		CHECK(gen.glsl.find("missing function") == std::string::npos);
+		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
+		CHECK(gen.glsl.find("heFbmIGrad(") != std::string::npos);          // the integer-hash noise
+		CHECK(gen.glsl.find("heFbm(") == std::string::npos);               // never the float hash
+		CHECK(gen.glsl.find("heLight.weather") == std::string::npos);      // the caller wires the weather
+		CHECK(gen.glsl.find("normalize(") != std::string::npos);
+		CHECK(gen.params.empty());
+		CHECK(gen.textures.empty());
+	}
+	// Without a loader the call is the magenta placeholder.
+	MaterialGraph g = MaterialGraph::makeDefault();
+	int out = 0;
+	for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+	const int call = g.addNode(MatNodeType::FunctionCall);
+	g.findNode(call)->s = HE::kProceduralSnowFunctionPath;
+	REQUIRE(g.connect(call, 0, out, HE::kMatOutputBaseColorPin));
+	CHECK(HE::generateFragment(g).glsl.find("missing function") != std::string::npos);
+}
+
 TEST_CASE("Auto landscape: puddles and ground snow come from the weather functions, the masks stay weather-free")
 {
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
-	int puddles = 0, snow = 0;
-	for (const HE::MatGraphNode& n : a.graph.nodes)
-		if (n.type == MatNodeType::FunctionCall)
-		{
-			puddles += n.s == HE::kWeatherPuddlesFunctionPath;
-			snow    += n.s == HE::kWeatherSnowFunctionPath;
-		}
-	CHECK(puddles == 1);
-	CHECK(snow == 1);
+	auto callsOf = [](const HE::AutoLandscapeGraph& g, const char* path) {
+		int n = 0;
+		for (const HE::MatGraphNode& node : g.graph.nodes)
+			n += node.type == MatNodeType::FunctionCall && node.s == path;
+		return n;
+	};
+	CHECK(callsOf(a, HE::kWeatherPuddlesFunctionPath) == 1);
+	CHECK(callsOf(a, HE::kWeatherSnowFunctionPath) == 1);
+	// Snow is MF_ProceduralSnow in every group, the sand only in the Desert (Thema 329, step 2).
+	CHECK(callsOf(a, HE::kProceduralSnowFunctionPath) == 1);
+	CHECK(callsOf(a, HE::kProceduralSandFunctionPath) == 0);
+	for (const HE::AutoLandscapeGroup& grp : HE::kAutoLandscapeGroups)
+	{
+		CAPTURE(grp.name);
+		const HE::AutoLandscapeGraph gg = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, grp.id);
+		CHECK(callsOf(gg, HE::kProceduralSnowFunctionPath) == 1);
+		CHECK(callsOf(gg, HE::kProceduralSandFunctionPath) == (grp.proceduralSand ? 1 : 0));
+	}
 	// "Puddle Amount" is now the level AT slider 1, and "Puddle Size" is gone — the size is the
 	// Weather panel's slider (the function's Size output), not a per-material parameter.
 	for (const HE::MatParamSlot& s : HE::generateFragment(a.graph, HE::weatherFunctionLoader()).params)
@@ -3708,19 +4061,108 @@ TEST_CASE("Auto landscape: puddles and ground snow come from the weather functio
 	CHECK(gen.glsl.find("heLight.weather") != std::string::npos);
 	CHECK(gen.glsl.find("missing function") == std::string::npos);
 
-	// The snow mask the views and the witness read is the HEIGHT snow alone: no function call
-	// sits in its cone, so it cannot move with the scene's Snow Cover slider.
+	// The snow mask the views and the witness read is the HEIGHT snow alone: no weather node and no
+	// weather function sits in its cone, so it cannot move with the scene's Snow Cover slider. The one
+	// function in it is MF_ProceduralSnow, whose Height output reads no weather input — so of the
+	// call's input pins only those Height depends on count.
+	const MaterialGraph snowFn = HE::buildProceduralSnowFunction();
+	std::vector<HE::MatPinDesc> fnIns, fnOuts;
+	HE::matFunctionPins(snowFn, fnIns, fnOuts);
+	std::set<int> heightPins;
+	const std::set<std::string> heightNames = fnInputsReaching(snowFn, "Height");
+	for (size_t i = 0; i < fnIns.size(); ++i)
+		if (heightNames.count(fnIns[i].name)) heightPins.insert(static_cast<int>(i));
+	CHECK(heightPins.size() == 4u);
 	std::set<int> cone;
 	std::vector<int> todo{ a.snowMask };
+	bool sawSnowFunction = false;
 	while (!todo.empty())
 	{
 		const int id = todo.back(); todo.pop_back();
 		if (!cone.insert(id).second) continue;
+		const HE::MatGraphNode* node = a.graph.findNode(id);
+		REQUIRE(node);
+		const bool snowCall = node->type == MatNodeType::FunctionCall && node->s == HE::kProceduralSnowFunctionPath;
+		sawSnowFunction = sawSnowFunction || snowCall;
 		for (const HE::MatGraphLink& l : a.graph.links)
-			if (l.dstNode == id) todo.push_back(l.srcNode);
+			if (l.dstNode == id && (!snowCall || heightPins.count(l.dstPin))) todo.push_back(l.srcNode);
 	}
+	CHECK(sawSnowFunction);   // positive control: the snow's height is in the mask
 	for (int id : cone)
-		CHECK(a.graph.findNode(id)->type != MatNodeType::FunctionCall);
+	{
+		const HE::MatGraphNode* node = a.graph.findNode(id);
+		CHECK(node->type != MatNodeType::Weather);
+		if (node->type == MatNodeType::FunctionCall) CHECK(node->s == HE::kProceduralSnowFunctionPath);
+	}
+}
+
+// Thema 180, Schritt 8: a puddle that runs into a bank. The slope used to MULTIPLY the water
+// away (water x flatMask), so every puddle ended on a slope contour, a clean arc wherever the
+// ground tilted. Now the slope only LOWERS THE WATER LEVEL in the noise field (the puddle shrinks
+// into the deepest part of its hollow and ends on a noise contour), the damp film around it
+// fades over twice the slope band, and the water is level (its normal points straight up).
+// The mask views read the same nodes, so the witness (HE_DUMP_AUTOLAND=masks, with
+// HE_DUMP_AUTOLANDHEIGHT / HE_DUMP_AUTOLANDRAMP for a gentle hillside) sees the same thing.
+TEST_CASE("Auto landscape: the slope lowers the puddle's water level, the damp film reaches further, the water is level")
+{
+	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
+	auto coneOf = [&](int root)
+	{
+		std::set<int> cone;
+		std::vector<int> todo{ root };
+		while (!todo.empty())
+		{
+			const int id = todo.back(); todo.pop_back();
+			if (!cone.insert(id).second) continue;
+			for (const HE::MatGraphLink& l : a.graph.links)
+				if (l.dstNode == id) todo.push_back(l.srcNode);
+		}
+		return cone;
+	};
+	auto inputOf = [&](int node, int pin) -> int
+	{
+		for (const HE::MatGraphLink& l : a.graph.links)
+			if (l.dstNode == node && l.dstPin == pin) return l.srcNode;
+		return 0;
+	};
+
+	// The water mask reads the slope, but through the level, not as a factor: the flat mask
+	// (1 - slope step, the GI kernels' reference) is NOT part of it any more.
+	const std::set<int> water = coneOf(a.waterMask);
+	CHECK(water.count(a.slope) == 1);
+	CHECK(water.count(a.flatMask) == 0);
+	// The wet rim fades over a wider band than the water, so it does not end with it.
+	const std::set<int> wet = coneOf(a.wetMask);
+	CHECK(wet.count(a.slope) == 1);
+	CHECK(wet.count(a.flatMask) == 0);
+	int slopeParam = 0;
+	for (const HE::MatGraphNode& n : a.graph.nodes)
+		if (n.type == MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamPuddleMaxSlope) slopeParam = n.id;
+	REQUIRE(slopeParam != 0);
+	int twiceLimit = 0;   // Multiply(Puddle Max Slope, 2): the damp band's far end
+	for (int id : wet)
+	{
+		const HE::MatGraphNode* n = a.graph.findNode(id);
+		if (n->type != MatNodeType::Multiply || inputOf(id, 0) != slopeParam) continue;
+		const HE::MatGraphNode* k = a.graph.findNode(inputOf(id, 1));
+		if (k && k->type == MatNodeType::ConstFloat && k->p[0] == 2.0f) twiceLimit = id;
+	}
+	CHECK(twiceLimit != 0);
+
+	// The lit normal of standing water is the constant up vector: output normal <- Normalize3
+	// <- Lerp(ground normal, up, water). Not the geometric normal of the bank under it.
+	const int normalize = inputOf(a.output, HE::kMatOutputNormalPin);
+	REQUIRE(a.graph.findNode(normalize) != nullptr);
+	REQUIRE(a.graph.findNode(normalize)->type == MatNodeType::Normalize3);
+	const int lerp = inputOf(normalize, 0);
+	REQUIRE(a.graph.findNode(lerp) != nullptr);
+	REQUIRE(a.graph.findNode(lerp)->type == MatNodeType::Lerp);
+	const HE::MatGraphNode* up = a.graph.findNode(inputOf(lerp, 1));
+	REQUIRE(up != nullptr);
+	CHECK(up->type == MatNodeType::ConstColor);
+	CHECK(up->p[0] == 0.0f);
+	CHECK(up->p[1] == 1.0f);
+	CHECK(up->p[2] == 0.0f);
 }
 
 // ── Thema 51, Schritt 2: instances + overrides never cost a second compile ────
@@ -4036,6 +4478,46 @@ std::vector<NodeShaderCase> allNodeShaderCases()
 	// type, so the registry loop never builds it: 33 array taps, two fBm fields
 	// and 14 HeParams slots through FXC, the D3D12 root signature and the GL link.
 	cases.push_back({ "Auto landscape material", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()).glsl, {} });
+	// Thema 233: the texture groups are the same skeleton over their own arrays — the same sweeps.
+	cases.push_back({ "Auto landscape material (Forest)", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, HE::AutoLandscapeGroupId::Forest).graph, HE::weatherFunctionLoader()).glsl, {} });
+	cases.push_back({ "Auto landscape material (Grassland)", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, HE::AutoLandscapeGroupId::Grassland).graph, HE::weatherFunctionLoader()).glsl, {} });
+	// Thema 329 step 2: the Desert's ground is MF_ProceduralSand, and every group's snow MF_ProceduralSnow.
+	cases.push_back({ "Auto landscape material (Desert)", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, HE::AutoLandscapeGroupId::Desert).graph, HE::weatherFunctionLoader()).glsl, {} });
+	// A material that has nothing to do with the landscape calls both functions the way a user would:
+	// world XZ in, the weather's Snow Cover and Wetness wired, every other pin left at its default.
+	{
+		MaterialGraph g = MaterialGraph::makeDefault();
+		int out = 0;
+		for (auto& n : g.nodes) if (n.type == MatNodeType::Output) out = n.id;
+		const int wp   = g.addNode(MatNodeType::WorldPos);
+		const int sp   = g.addNode(MatNodeType::SplitRGBA);
+		const int xz   = g.addNode(MatNodeType::CombineRGBA);
+		const int wx   = g.addNode(MatNodeType::Weather);
+		const int snow = g.addNode(MatNodeType::FunctionCall);
+		const int sand = g.addNode(MatNodeType::FunctionCall);
+		const int mix  = g.addNode(MatNodeType::Lerp);
+		g.findNode(snow)->s = HE::kProceduralSnowFunctionPath;
+		g.findNode(sand)->s = HE::kProceduralSandFunctionPath;
+		REQUIRE(g.connect(wp, 0, sp, 0));
+		REQUIRE(g.connect(sp, 0, xz, 0));
+		REQUIRE(g.connect(sp, 2, xz, 1));
+		REQUIRE(g.connect(xz, 0, snow, HE::kSnowInPosition));
+		REQUIRE(g.connect(wx, 3, snow, HE::kSnowInCover));
+		REQUIRE(g.connect(wx, 0, snow, HE::kSnowInMelt));
+		REQUIRE(g.connect(xz, 0, sand, HE::kSandInPosition));
+		REQUIRE(g.connect(wx, 0, sand, HE::kSandInWetness));
+		REQUIRE(g.connect(sand, HE::kSurfaceOutAlbedo, mix, 0));
+		REQUIRE(g.connect(snow, HE::kSurfaceOutAlbedo, mix, 1));
+		REQUIRE(g.connect(wx, 3, mix, 2));
+		REQUIRE(g.connect(mix,  0, out, HE::kMatOutputBaseColorPin));
+		REQUIRE(g.connect(snow, HE::kSurfaceOutNormal,    out, HE::kMatOutputNormalPin));
+		REQUIRE(g.connect(sand, HE::kSurfaceOutRoughness, out, HE::kMatOutputRoughnessPin));
+		REQUIRE(g.connect(snow, HE::kSurfaceOutAO,        out, HE::kMatOutputAOPin));
+		REQUIRE(g.connect(sand, HE::kSurfaceOutHeight,    out, HE::kMatOutputMetallicPin));
+		const HE::MatShaderGen gen = HE::generateFragment(g, HE::weatherFunctionLoader());
+		REQUIRE(gen.glsl.find("missing function") == std::string::npos);
+		cases.push_back({ "Procedural snow and sand (hand-built graph)", gen.glsl, {} });
+	}
 	return cases;
 }
 
@@ -4580,12 +5062,13 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	HE::MaterialShaderLibrary lib;
 	const VkUse weights{ 0, HE::vkmat::kLandscapeWeightsBinding, static_cast<int>(DescKind::CombinedImageSampler) };
 
-	// The row itself, fragment stage, ahead of the cluster lists.
+	// The row itself, fragment stage (plus the Displacement pin's tessellation
+	// stages, Thema 207 — never the vertex stage), ahead of the cluster lists.
 	bool row = false;
 	for (uint32_t i = 0; i < HE::vkmat::kPreClusterBindingCount; ++i)
 		row = row || (HE::vkmat::kBindings[i].binding == 14
 		              && HE::vkmat::kBindings[i].kind == DescKind::CombinedImageSampler
-		              && HE::vkmat::kBindings[i].stages == HE::vkmat::kStageFragment);
+		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
 	// The device limit: 17 fragment samplers with the row, 16 (the spec
@@ -6561,6 +7044,65 @@ TEST_CASE("D3D11: an eight-layer blend reads layers 4..7 from the right half of 
 	{
 		const Pixel11 px = drawAt(ps8.Get(), nullptr, 0.9f);
 		CHECK_MESSAGE(isLayer(px, 0), "t14 unbound: expected layer 0, got ", int(px.r), ",", int(px.g), ",", int(px.b));
+	}
+
+	// 5. Twelve layers on a 3:1 map (Thema 329): layers 8..11 are the last third. Four
+	//    texel columns per page, one marked column each: layer 1 (page 0, column 0),
+	//    layer 6 (page 1, column 1), layer 10 (page 2, column 2) and layer 3 (page 0,
+	//    column 3). Drawn at the column centres, so no filtering mixes them.
+	{
+		MaterialGraph g12;
+		const int out = g12.addNode(MatNodeType::Output);
+		const int lb  = g12.addNode(MatNodeType::LandscapeLayerBlend);
+		g12.findNode(lb)->s = "L0\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\nL9\nL10\nL11";
+		for (int i = 0; i < 12; ++i)
+		{
+			const int c = g12.addNode(MatNodeType::ConstColor);
+			g12.findNode(c)->p[0] = static_cast<float>(i + 1) / 12.0f;
+			g12.findNode(c)->p[1] = 0.5f;
+			g12.findNode(c)->p[2] = 0.0f;
+			REQUIRE(g12.connect(c, 0, lb, i));
+		}
+		REQUIRE(g12.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+		ComPtr<ID3DBlob> b12;
+		ComPtr<ID3D11PixelShader> ps12 = pixelShader("twelve-layer landscape", g12, b12);
+		{
+			// Still the same two registers: a third page costs no binding.
+			const std::vector<Binding> b = reflectBindings(b12.Get());
+			CHECK(binds(b, D3D_SIT_TEXTURE, HE::d3d11mat::kWeightmapSrvSlot));
+			CHECK(binds(b, D3D_SIT_SAMPLER, HE::d3d11mat::kWeightmapSamplerSlot));
+		}
+		std::vector<uint8_t> row3(12 * 4, 0);            // 3 pages x 4 columns, RGBA8
+		auto mark = [&](int page, int col, int channel) { row3[(page * 4 + col) * 4 + channel] = 255; };
+		mark(0, 0, 1);   // layer 1
+		mark(1, 1, 2);   // layer 6
+		mark(2, 2, 2);   // layer 10
+		mark(0, 3, 3);   // layer 3
+		std::vector<uint8_t> map3;
+		for (int r = 0; r < 4; ++r) map3.insert(map3.end(), row3.begin(), row3.end());
+		ComPtr<ID3D11ShaderResourceView> map3to1 = makeTexture11(dev, 12, map3, 4);
+		REQUIRE(map3to1.Get() != nullptr);
+
+		auto layer12R = [](int i) { return static_cast<int>(std::lround((i + 1) / 12.0 * 255.0)); };
+		const struct { float u; int layer; } want[] = { { 0.125f, 1 }, { 0.375f, 6 }, { 0.625f, 10 }, { 0.875f, 3 } };
+		for (const auto& wn : want)
+		{
+			const Pixel11 px = drawAt(ps12.Get(), map3to1.Get(), wn.u);
+			CHECK_MESSAGE((near8(px.r, layer12R(wn.layer)) && near8(px.g, 128) && near8(px.b, 0)),
+			              "3:1 map, u=", wn.u, ": expected layer ", wn.layer, ", got ",
+			              int(px.r), ",", int(px.g), ",", int(px.b));
+		}
+		// The eight-layer blend on the same 3:1 map reads the thirds as thirds: layer 6
+		// is still on page 1, layer 10 on a page it does not read (column 2 then holds no
+		// weight at all, and falls back to layer 0).
+		const Pixel11 p6 = drawAt(ps8.Get(), map3to1.Get(), 0.375f);
+		CHECK_MESSAGE(isLayer(p6, 6), "8 layers on a 3:1 map, u=0.375: expected layer 6, got ", int(p6.r));
+		const Pixel11 p10 = drawAt(ps8.Get(), map3to1.Get(), 0.625f);
+		CHECK_MESSAGE(isLayer(p10, 0), "8 layers on a 3:1 map, u=0.625: expected the layer-0 fallback, got ", int(p10.r));
+		// And twelve layers on the 2:1 map of a landscape without a third page: page 2 reads nothing.
+		const Pixel11 q6 = drawAt(ps12.Get(), map2to1.Get(), 0.9f);
+		CHECK_MESSAGE((near8(q6.r, layer12R(6)) && near8(q6.g, 128) && near8(q6.b, 0)),
+		              "12 layers on a 2:1 map, u=0.9: expected layer 6, got ", int(q6.r), ",", int(q6.g), ",", int(q6.b));
 	}
 	const std::string why = drainInfoQueue11(w);
 	MESSAGE(why);

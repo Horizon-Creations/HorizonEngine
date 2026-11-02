@@ -1,7 +1,6 @@
 #pragma once
 #include <vector>
 #include <cstdint>
-#include <cassert>
 
 struct SlotHandle {
     uint32_t index;

@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -73,6 +74,8 @@ bool s_sawMissing    = false;   // something was missing while the dialog was op
 Tool   s_flashTool   = Tool::None;
 double s_flashUntil  = 0.0;
 bool   s_flashArmed  = false;   // set by requestShow, started once the dialog draws
+std::string s_purpose;          // requestShowFor: who opened it and what waits
+bool   s_showing     = false;   // the popup was drawn in the last DrawToolSetupDialog
 
 // Pre-filled from whatever git already has, so a user with only one of the two set
 // does not have to retype the other.
@@ -99,6 +102,25 @@ std::string clockText(const Slot& s)
 	return buf;
 }
 
+// "2:05" from milliseconds.
+std::string mmss(long long ms)
+{
+	const long secs = static_cast<long>(std::max(0LL, ms) / 1000);
+	char buf[24];
+	std::snprintf(buf, sizeof(buf), "%ld:%02ld", secs / 60, secs % 60);
+	return buf;
+}
+
+long long steadyNowMs()
+{
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+	    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Past this long without output or a change in the installer's processes the row
+// says so, and asks whether to keep waiting.
+constexpr long long kStallWarnMs = 90 * 1000;
+
 bool isToolchainTool(Tool t) { return t == Tool::Cmake || t == Tool::Compiler; }
 bool isGitInstallTool(Tool t) { return t == Tool::Git || t == Tool::GitLfs; }
 
@@ -120,8 +142,8 @@ const char* toolPurpose(Tool t)
 {
 	switch (t)
 	{
-	case Tool::Cmake:       return "Builds HorizonCode and C++ GameLogic.";
-	case Tool::Compiler:    return "Compiles HorizonCode export and native GameLogic.";
+	case Tool::Cmake:       return "Builds every exported game, HorizonCode and C++ GameLogic.";
+	case Tool::Compiler:    return "Compiles every exported game, HorizonCode and native GameLogic.";
 	case Tool::Git:         return "Source control and cloning.";
 	case Tool::GitLfs:      return "Keeps meshes, textures and audio out of the repository's own history.";
 	case Tool::GitIdentity: return "git records who made each change and refuses to commit without it.";
@@ -212,7 +234,7 @@ Manual manualFor(Tool t)
 		break;
 	case Tool::Compiler:
 #if defined(_WIN32)
-		m.command = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e "
+		m.command = "winget install --id Microsoft.VisualStudio.2022.BuildTools -e --force "
 		            "--override \"--add Microsoft.VisualStudio.Workload.VCTools --quiet\"";
 		m.url = "https://visualstudio.microsoft.com/visual-cpp-build-tools/";
 #elif defined(__APPLE__)
@@ -433,9 +455,17 @@ int installableCount(AppContext& ctx)
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
+// The ground under the row being drawn: the popup, or the popup lifted while the
+// row is the one a banner sent the user to. Every coloured line in a row goes
+// through rowText(), so it clears the theme's contrast floor on either.
+ImVec4 s_rowGround   = Theme::warm(0.13f);
+float  s_flashRowH   = 0.0f;   // the flashed row's height, as last drawn
+
+ImVec4 rowText(const ImVec4& c) { return Theme::readableOn(c, s_rowGround); }
+
 void dimWrapped(const char* text)
 {
-	ImGui::PushStyleColor(ImGuiCol_Text, Theme::TextDim);
+	ImGui::PushStyleColor(ImGuiCol_Text, rowText(Theme::TextDim));
 	ImGui::TextWrapped("%s", text);
 	ImGui::PopStyleColor();
 }
@@ -494,7 +524,7 @@ void drawPhases(int current, const char* middle)
 	for (int i = 0; i < 3; ++i)
 	{
 		if (i > 0) { ImGui::SameLine(0.0f, 6.0f); ImGui::TextDisabled(">"); ImGui::SameLine(0.0f, 6.0f); }
-		const ImVec4 c = i < current ? Theme::Ok : (i == current ? Theme::Text : Theme::TextDim);
+		const ImVec4 c = rowText(i < current ? Theme::Ok : (i == current ? Theme::Text : Theme::TextDim));
 		ImGui::TextColored(c, "%s", labels[i]);
 	}
 }
@@ -542,6 +572,12 @@ void drawIdentityForm(AppContext& ctx)
 	if (applying) { ImGui::EndDisabled(); ImGui::SameLine(); ImGui::TextDisabled("Saving…"); }
 }
 
+std::string installLogFor(const AppContext& ctx, bool gitSlot)
+{
+	const std::function<std::string()>& fetch = gitSlot ? ctx.gitInstallLog : ctx.toolchainInstallLog;
+	return fetch ? fetch() : std::string();
+}
+
 void drawRow(AppContext& ctx, Tool t)
 {
 	HE::Ed::Help::Scope helpScope("Tool Setup");
@@ -552,21 +588,43 @@ void drawRow(AppContext& ctx, Tool t)
 	const Slot& slot   = gitSlot ? s_gitSlot : s_tcSlot;
 
 	ImGui::TableNextRow();
-	if (t == s_flashTool && ImGui::GetTime() < s_flashUntil)
+	// The row a banner sent the user to is marked for 1.6 s. The mark used to be
+	// the accent at 35 % across the whole row, which put this row's amber Warn
+	// line on an amber-brown ground (4.7:1, and reported as unreadable) and its
+	// dim lines at 1.9:1. The accent now goes into a bar at the row's edge, where
+	// no text is; the row itself only lifts a little, and its text is held to the
+	// floor on that lift by rowText().
+	// The popup's ground, not the host window's: the dialog is a modal popup, and
+	// PopupBg is the lighter of the two, so text that clears it clears both.
+	s_rowGround = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
+	const bool flashing = t == s_flashTool && ImGui::GetTime() < s_flashUntil;
+	const float k = flashing ? static_cast<float>((s_flashUntil - ImGui::GetTime()) / 1.6) : 0.0f;
+	if (flashing)
 	{
-		const float k = static_cast<float>((s_flashUntil - ImGui::GetTime()) / 1.6);
-		ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1,
-		                       ImGui::ColorConvertFloat4ToU32(Theme::alpha(Theme::Accent, 0.35f * k)));
+		const ImVec4 lift = Theme::alpha(Theme::Ivory, 0.08f * k);
+		ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, Theme::u32(lift));
+		s_rowGround = Theme::over(lift, s_rowGround);
 	}
+	ImGui::PushStyleColor(ImGuiCol_TextDisabled, rowText(Theme::TextDim));
 	ImGui::PushID(static_cast<int>(t));
 
 	// ── Icon ────────────────────────────────────────────────────────────────
 	ImGui::TableSetColumnIndex(0);
+	const ImVec2 cellPad = ImGui::GetStyle().CellPadding;
+	const ImVec2 rowTop(ImGui::GetCursorScreenPos().x - cellPad.x, ImGui::GetCursorScreenPos().y - cellPad.y);
+	if (flashing)
+	{
+		// The row's height is only known once its tallest column is drawn, so the
+		// bar takes last frame's; the first frame falls back to the icon's.
+		const float h = s_flashRowH > 0.0f ? s_flashRowH : ImGui::GetFrameHeightWithSpacing();
+		ImGui::GetWindowDrawList()->AddRectFilled(rowTop, ImVec2(rowTop.x + 3.0f, rowTop.y + h),
+		                                          Theme::u32(Theme::alpha(Theme::Accent, k)));
+	}
 	drawStateIcon(st);
 
 	// ── Body ────────────────────────────────────────────────────────────────
 	ImGui::TableSetColumnIndex(1);
-	ImGui::TextColored(Theme::TextHeading, "%s", toolName(t));
+	ImGui::TextColored(rowText(Theme::TextHeading), "%s", toolName(t));
 	if (st != RowState::Ok) dimWrapped(toolPurpose(t));
 
 	switch (st)
@@ -614,8 +672,7 @@ void drawRow(AppContext& ctx, Tool t)
 
 	case RowState::Installing:
 	{
-		const std::string log = gitSlot ? (ctx.gitInstallLog ? ctx.gitInstallLog() : std::string())
-		                                : (ctx.toolchainInstallLog ? ctx.toolchainInstallLog() : std::string());
+		const std::string log = installLogFor(ctx, gitSlot);
 		const bool apple = log.find("Apple") != std::string::npos;
 		drawPhases(log.empty() ? 0 : 1,
 		           apple ? "Apple's installer"
@@ -626,7 +683,33 @@ void drawRow(AppContext& ctx, Tool t)
 #else
 		                 : "Package manager");
 #endif
-		ImGui::ProgressBar(-1.0f * static_cast<float>(ImGui::GetTime()), ImVec2(kColBody - 16.0f, 6.0f), "");
+		const HE::hccg::ToolchainInstallControl* ctl = gitSlot ? nullptr : ctx.toolchainInstallControl;
+		const int percent = ctl ? ctl->percent.load() : -1;
+		// A percentage the installer printed fills the bar; without one it keeps sweeping.
+		ImGui::ProgressBar(percent >= 0 ? percent / 100.0f : -1.0f * static_cast<float>(ImGui::GetTime()),
+		                   ImVec2(kColBody - 16.0f, 6.0f), "");
+		if (ctl)
+		{
+			std::string names;
+			{ std::lock_guard<std::mutex> lk(ctl->mx); names = ctl->processNames; }
+			if (ctl->cancel.load())
+				dimWrapped("Cancelling…");
+			else if (!names.empty())
+				dimWrapped(("Running: " + names + (percent >= 0 ? "  ·  " + std::to_string(percent) + " %" : std::string())).c_str());
+			else
+				dimWrapped("Waiting for the package manager to start…");
+			const long long last = ctl->lastActivityMs.load();
+			const long long idle = last > 0 ? steadyNowMs() - last : 0;
+			if (!ctl->cancel.load() && idle >= kStallWarnMs)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+				ImGui::TextWrapped("No change for %s. A large download by an installer that runs with "
+				                   "administrator rights cannot be measured from here; if the processes "
+				                   "above are gone or nothing moves for much longer, cancel and retry.",
+				                   mmss(idle).c_str());
+				ImGui::PopStyleColor();
+			}
+		}
 		const std::string prompt = promptLine(t);
 		if (!prompt.empty()) dimWrapped(prompt.c_str());
 		break;
@@ -634,9 +717,8 @@ void drawRow(AppContext& ctx, Tool t)
 
 	case RowState::Failed:
 	{
-		const std::string log = gitSlot ? (ctx.gitInstallLog ? ctx.gitInstallLog() : std::string())
-		                                : (ctx.toolchainInstallLog ? ctx.toolchainInstallLog() : std::string());
-		ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+		const std::string log = installLogFor(ctx, gitSlot);
+		ImGui::PushStyleColor(ImGuiCol_Text, rowText(Theme::Warn));
 		ImGui::TextWrapped("%s was not installed.", toolName(t));
 		ImGui::PopStyleColor();
 		const std::string why = lastLine(log);
@@ -644,6 +726,8 @@ void drawRow(AppContext& ctx, Tool t)
 		break;
 	}
 	}
+
+	float rowBottom = ImGui::GetCursorScreenPos().y;
 
 	// ── Action ──────────────────────────────────────────────────────────────
 	ImGui::TableSetColumnIndex(2);
@@ -681,13 +765,21 @@ void drawRow(AppContext& ctx, Tool t)
 			if (launch && launch->returnsBeforeInstalled && EditorWidgets::smallButton("Cancel"))
 				ctx.cancelGitInstall();
 		}
+		// The toolchain install can always be ended: the watcher kills the process tree.
+		if (!gitSlot && ctx.cancelToolchainInstall && EditorWidgets::smallButton("Cancel"))
+			ctx.cancelToolchainInstall();
 		break;
 
 	default:
 		break;
 	}
 
+	rowBottom = std::max(rowBottom, ImGui::GetCursorScreenPos().y);
+	if (flashing)
+		s_flashRowH = rowBottom - ImGui::GetStyle().ItemSpacing.y + cellPad.y - rowTop.y;
 	ImGui::PopID();
+	ImGui::PopStyleColor();   // TextDisabled
+	s_rowGround = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
 }
 
 void drawLog(AppContext& ctx)
@@ -779,7 +871,8 @@ void resetStateForTests()
 	s_tcSeen = s_tcConsumed = s_ackTc = s_ackGit = s_logIsGit = s_openLog = false;
 	s_queue.clear();
 	s_openRequested = s_autoOpened = s_dontShowAgain = s_sawMissing = false;
-	s_flashTool = Tool::None; s_flashUntil = 0.0; s_flashArmed = false;
+	s_flashTool = Tool::None; s_flashUntil = 0.0; s_flashArmed = false; s_flashRowH = 0.0f;
+	s_purpose.clear(); s_showing = false;
 	s_name[0] = s_email[0] = '\0';
 	s_identitySeeded = false;
 }
@@ -789,7 +882,18 @@ void requestShow(Tool focus)
 	s_openRequested = true;
 	s_flashTool     = focus;
 	s_flashArmed    = focus != Tool::None;
+	s_purpose.clear();
 }
+
+void requestShowFor(Tool focus, const char* purpose)
+{
+	requestShow(focus);
+	s_purpose = purpose ? purpose : "";
+}
+
+const char* purpose() { return s_purpose.c_str(); }
+
+bool isShowing() { return s_showing; }
 
 void drawToolSetup(AppContext& ctx, bool* closeRequested)
 {
@@ -819,9 +923,19 @@ void drawToolSetup(AppContext& ctx, bool* closeRequested)
 		{
 			ImGui::TextWrapped(
 				"The editor keeps working without these. cmake and a C++ compiler are needed "
-				"to compile HorizonCode and native GameLogic; git, Git LFS and your name are "
+				"to export a game (it is compiled from the engine SDK), HorizonCode and native "
+				"GameLogic; git, Git LFS and your name are "
 				"needed for source control. Installs go through this system's package manager. %s",
 				platformPromptSentence());
+		}
+		// Opened for something that is waiting on a tool (the export): say what
+		// waits and that it carries on by itself.
+		if (!s_purpose.empty())
+		{
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, Theme::Warn);
+			ImGui::TextWrapped("%s", s_purpose.c_str());
+			ImGui::PopStyleColor();
 		}
 		ImGui::Spacing();
 	}
@@ -921,13 +1035,19 @@ void DrawToolSetupDialog(AppContext& ctx)
 
 	ImGui::SetNextWindowSize(ImVec2(kDialogWidth, 0.0f), ImGuiCond_Appearing);
 	EditorWidgets::pinDialogToEditorWindow();
+	s_showing = false;
 	if (!ImGui::BeginPopupModal("##ToolSetup", nullptr,
 	                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		// Closed (or never opened): whatever opened it for a purpose has had its answer.
+		s_purpose.clear();
 		return;
+	}
 
 	bool close = false;
 	drawToolSetup(ctx, &close);
 	if (close) ImGui::CloseCurrentPopup();
+	else s_showing = true;
 	ImGui::EndPopup();
 }
 

@@ -95,15 +95,15 @@ Sortiert nach Impact/Aufwand und Modulabhängigkeit (Basismodule zuerst, weil Er
 - [ ] REN-903/908/401: Cluster-Build ohne Heap, SSAO-Kernel einmalig, Sky-Bake gemeinsam und gedrosselt
 
 **Stufe 3 – Backend-spezifisch (je Backend eigene PRs, unabhängig parallelisierbar)**
-- [ ] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache`
+- [x] Vulkan: REN-802/803 Upload-Pfad (Staging-Ring, kein `vkQueueWaitIdle`, Device-Local + Sub-Allocator), `VkPipelineCache` (Thema 215, `docs/audit-vulkan-backend-2026-10-18.md`: Upload-Batch ohne Wartepunkt, Mesh-Pool, persistenter Pipeline-Cache für alle 34 Create-Stellen + ImGui; RTX 4070: 284 Waits/212 ms → 0, Pipelines bei kaltem Treiber-Cache 1,7 s → 43 ms; offen aus REN-808: Sky-SPIR-V und Rauschvolumen pro Start, Pipeline-Bau im Job; Staging-Ring zu klein für 61 MB im ersten Frame)
 - [ ] Metal: REN-302/402 `FrameUploadRing` benutzen, REN-405/404 TLAS/BLAS-Dirty, REN-406 asynchroner BLAS-Build
 - [ ] D3D12: REN-202 Meshes in DEFAULT-Heap; D3D11/GL: Material-Draw-Zustand (REN-103/601), UI-Batching (REN-603)
 - [ ] Metal-Gottklasse REN-301 auf Pimpl wie D3D (reine Vereinfachung, danach)
 
 **Stufe 4 – Scene-Systeme**
-- [ ] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound`
-- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out)
-- [ ] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung
+- [x] SCN-102/101 Animator-Gate und Vektor-Wiederverwendung; SCN-103 `lower_bound` (Thema 218 Schritt 1, `docs/audit-scene-systeme-2026-10-18.md`; offen aus SCN-102: Sichtbarkeits-/Distanz-LOD und `playing`-Flag der State Machine)
+- [ ] SCN-301/401/501/402/601: Revisions-/Settled-Flags; SCN-801/802 Terrain-Gates (vor Tessellation/Material-Sync den Early-out) (SCN-301/401/501/402/601 und SCN-604 erledigt in Thema 218 Schritt 2, SCN-801/802 in Schritt 3, `docs/audit-scene-systeme-2026-10-18.md`; offen: Welt-Skip des LOD-Systems, Änderungs-Gate des Chunk-Material-Syncs)
+- [x] SCN-302 geteilter Asset-Cache statt Kopie pro Entity; SCN-701/702 Move statt Kopie, Prefab-Sync nur bei Änderung (Thema 218 Schritt 4, `docs/audit-scene-systeme-2026-10-18.md`: State-Machine-Graph und Blend-Spaces pro Asset-Text geteilt, Moves im Serializer, Prefab-Sync parst jedes Asset einmal; offen: Überspringen unveränderter Platzierungen und Asset-Revision statt Textvergleich, Params als Index, LegacyConfig, Partikel-Config)
 
 **Stufe 5 – Netz, Tools, Randmodule**
 - [ ] NET-101 Byte-aligned Fast Path im BitStream (Wire-Format unverändert, Test!), NET-102/103 Frame einmal bauen, NET-201/202 POD-Adresse und Lesekopf

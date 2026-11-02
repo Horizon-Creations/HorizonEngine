@@ -3163,6 +3163,66 @@ inline HE::hccg::ClassSource fxExtractListener()
     return f.done("extract_listener");
 }
 
+// Engine rows against a REAL world (Thema 211 step 7). Generated code calls these
+// directly (HE::api through HorizonEngine/HorizonEngineApi.h), the interpreter
+// through callApi and the registry's invoke — so what they DID is compared in the
+// world each leaves behind, which the null-world parity harness cannot see:
+// world_parity.h runs both on twin worlds (in he_tests, and against the
+// installed SDK in hc_codegen_sdk_parity). Writes first, then the reads that
+// observe them; an entity pin left at 0 is the owner ("0 means me").
+inline HE::hccg::ClassSource fxEngineWorld()
+{
+    Fx f;
+    f.var("spawned", PT::Int);
+    f.var("pos", PT::Vec3);
+    f.var("scale", PT::Vec3);
+    f.var("name", PT::String);
+    f.var("found", PT::Int);
+    f.var("dist", PT::Float);
+
+    const int ev = f.event("Act");
+    const int setPos = f.engineCall("transform.setPosition");
+    f.g.findNode(setPos)->pinDefaults[1] = Value::ofVec3({ 1.0f, 2.0f, 3.0f });
+    f.exec(ev, setPos);
+    const int setScale = f.engineCall("transform.setScale");
+    f.g.findNode(setScale)->pinDefaults[1] = Value::ofVec3({ 2.0f, 2.0f, 2.0f });
+    f.exec(setPos, setScale);
+    const int spawn = f.engineCall("entity.spawn");
+    f.g.findNode(spawn)->pinDefaults[1] = Value::ofString("Spawned");
+    f.exec(setScale, spawn);
+    const int keep = f.setVar("spawned", PT::Int);
+    f.data(spawn, 0, keep, 0);
+    f.exec(spawn, keep);
+    const int moveIt = f.engineCall("transform.setPosition");
+    f.data(spawn, 0, moveIt, 0);
+    f.g.findNode(moveIt)->pinDefaults[1] = Value::ofVec3({ 4.0f, 6.0f, 3.0f });
+    f.exec(keep, moveIt);
+
+    int last = moveIt;
+    auto read = [&](const char* var, PT t, const char* row, int pin0Src)
+    {
+        const int r = f.engineCall(row);
+        if (pin0Src) f.data(pin0Src, 0, r, 0);
+        const int s = f.setVar(var, t);
+        f.data(r, 0, s, 0);
+        f.exec(last, s);
+        last = s;
+        return r;
+    };
+    read("pos", PT::Vec3, "transform.getPosition", 0);
+    read("scale", PT::Vec3, "transform.getScale", 0);
+    read("name", PT::String, "entity.getName", 0);
+    {
+        const int r = read("found", PT::Int, "entity.findByName", 0);
+        f.g.findNode(r)->pinDefaults[0] = Value::ofString("Spawned");
+    }
+    {
+        const int r = read("dist", PT::Float, "entity.distance", 0);
+        f.data(f.getVar("spawned", PT::Int), 0, r, 1);
+    }
+    return f.done("engine_world");
+}
+
 inline std::vector<HE::hccg::ClassSource> all()
 {
     registerTypes();   // the fixtures' Struct/Enum definitions, for both consumers
@@ -3181,6 +3241,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
         fxPullConstruct(), fxPullSpawner(), fxBindTo(),
         fxExtractDestruct(), fxExtractDerived(), fxExtractListener(),
+        fxEngineWorld(),
     };
 }
 

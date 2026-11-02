@@ -6,6 +6,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <vector>
 
 // ── The pose, and what a layer does to it ────────────────────────────────────
@@ -213,18 +214,20 @@ void blendPosesN(const std::vector<std::vector<JointTRS>>& poses,
 // which sample fires its notifies — cannot flicker between two frames.
 void blendSpaceEvalOrder(const std::vector<float>& weights, std::vector<size_t>& outOrder);
 
-// One parsed blend space, cached on whatever component referenced it. The asset
-// carries JSON; parsing it per frame per character wearing the same locomotion
-// set is a cost that would never be found again. Same shape, and the same
-// reason, as AnimatorStateMachineComponent::resolvedGraph.
+// One resolved blend space, cached on whatever component referenced it. The
+// asset carries JSON; parsing it per frame per character wearing the same
+// locomotion set is a cost that would never be found again. Same shape, and the
+// same reason, as AnimatorStateMachineComponent::resolvedGraph — and shared the
+// same way: every entry resolved from the same asset text points at one parse
+// (SCN-302), so the per-component cache holds a pointer, not a copy.
 //
 // `ok == false` records "this id does not resolve" so the miss is not retried
-// (and re-logged) every frame either.
+// (and re-logged) every frame either; `space` is null then.
 struct BlendSpaceCacheEntry
 {
-    HE::UUID   id;
-    BlendSpace space;
-    bool       ok = false;
+    HE::UUID                          id;
+    std::shared_ptr<const BlendSpace> space;
+    bool                              ok = false;
 };
 
 // A deque and NOT a vector, on purpose: a resolved blend space is borrowed by

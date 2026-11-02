@@ -1,0 +1,43 @@
+/tmp/cta/game_s512x4/dumps/profile_20261022_012244.json
+  window 9786 ms, 11 lane(s), 32409 spans
+
+== lanes (busy = union of depth-0 spans)
+  Main           spans= 32399 busy=   9776.4 ms ( 99.9% of window)  Render x600 9394.9ms, OnRender x600 234.6ms, PollEvents x600 145.7ms, GameLogicTick x600 1.0ms, SwapBuffers x600 0.2ms
+  Worker 0       spans=     1 busy=     60.3 ms (  0.6% of window)  SkyEnvBake x1 60.3ms
+  Worker 1       spans=     1 busy=     58.8 ms (  0.6% of window)  SkyEnvBake x1 58.8ms
+  Worker 2       spans=     1 busy=     58.7 ms (  0.6% of window)  SkyEnvBake x1 58.7ms
+  Worker 3       spans=     1 busy=     54.8 ms (  0.6% of window)  SkyEnvBake x1 54.8ms
+  Worker 4       spans=     1 busy=     60.1 ms (  0.6% of window)  SkyEnvBake x1 60.1ms
+  Worker 5       spans=     1 busy=     57.5 ms (  0.6% of window)  SkyEnvBake x1 57.5ms
+  Worker 6       spans=     1 busy=     57.7 ms (  0.6% of window)  SkyEnvBake x1 57.7ms
+  Worker 7       spans=     1 busy=     56.9 ms (  0.6% of window)  SkyEnvBake x1 56.9ms
+  Worker 8       spans=     1 busy=     56.8 ms (  0.6% of window)  SkyEnvBake x1 56.8ms
+  Worker 9       spans=     1 busy=     56.6 ms (  0.6% of window)  SkyEnvBake x1 56.6ms
+
+== main thread: busy 9776 ms of 9786 = 99.9%; WaitForFrame 7606 ms (77.7%); work 2170 ms (22.2%)
+  depth-0 scopes (total ms, share of work):
+    Render                                1788.9 ms   82.4% of work
+    OnRender                               234.6 ms   10.8% of work
+    PollEvents                             145.7 ms    6.7% of work
+    GameLogicTick                            1.0 ms    0.0% of work
+    SwapBuffers                              0.2 ms    0.0% of work
+  depth-1 scopes (total ms):
+    Metal::NextDrawable                   7606.0 ms
+    Metal::ExtractFrame                    694.6 ms
+    Metal::EncodeScene                     511.6 ms
+    SceneSystemsTick                       189.6 ms
+    Metal::EncodeShadowMap                 159.3 ms
+    Metal::EncodeSSAO                      120.6 ms
+    Metal::Commit                           16.0 ms
+    PhysicsStep                             12.3 ms
+    WeatherAudio                             1.5 ms
+    Metal::EncodeSkyViewLut                  0.6 ms
+    CellStreaming                            0.4 ms
+    Metal::EncodeCloudShadow                 0.2 ms
+
+== per-frame main-thread WORK (depth-0 scopes minus WaitForFrame / NextDrawable): p50 2.79 p90 3.34 p99 4.70 max 312.47 ms over 600 frames; dump cpuMs p50 11.35
+  frames with work >= 25.0 ms: 2; worst:
+    frame    0 work  312.47 ms  OnRender(d0) 154.0; SceneSystemsTick(d1) 153.8; PollEvents(d0) 81.9; Render(d0) 79.6
+    frame  137 work  190.39 ms  Render(d0) 189.9; Metal::ExtractFrame(d1) 186.4; Metal::EncodeScene(d1) 1.2; Metal::EncodeSSAO(d1) 1.0
+
+== pool occupancy (1 ms bins; how many non-main lanes had work open): 0:99.4%, 1:0.0%, 5:0.0%, 6:0.0%, 8:0.0%, 9:0.0%, 10:0.5%

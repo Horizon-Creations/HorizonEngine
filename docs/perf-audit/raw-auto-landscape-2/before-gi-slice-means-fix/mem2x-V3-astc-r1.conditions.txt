@@ -1,0 +1,17 @@
+== mem2x-V3-astc-r1  2026-10-21 06:30:46  attempt 1
+before:
+  uptime:    load averages: 1.49 2.12 2.04
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      26.0% gh; 16.5% Python; 9.9% coreaudiod; 7.7% photoanalysisd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.82 2.16 2.06
+  locked:    Yes
+  lowpower:  0
+  gpu:       83
+  power:     Now drawing from 'AC Power'
+  busy:      98.0% calaccessd; 13.8% coreaudiod; 13.7% Dock; 7.8% clion
+  foreign:   none

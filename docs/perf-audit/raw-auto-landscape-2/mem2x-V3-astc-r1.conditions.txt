@@ -1,0 +1,17 @@
+== mem2x-V3-astc-r1  2026-10-21 06:46:14  attempt 1
+before:
+  uptime:    load averages: 2.56 2.80 2.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      91.3% calaccessd; 19.3% (mlhostd); 17.7% Python; 16.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.44 2.77 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      33.6% diagnosticd; 32.6% com.apple.MapKit.SnapshotService; 25.7% diagnosticd; 24.3% Python
+  foreign:   none

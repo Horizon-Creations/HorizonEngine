@@ -1,5 +1,6 @@
 #include "Backends/Vulkan/VulkanShaderManager.h"
 #include <Diagnostics/Logger.h>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -14,7 +15,7 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
 {
     if (!fs::exists(path))
     {
-        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanShaderManager: shader file not found: ") + path).c_str());
+        HE_LOG_ERROR(RHI, "VulkanShaderManager: shader file not found: %s", path);
         return { 0, false };
     }
 
@@ -22,27 +23,33 @@ ShaderHandle VulkanShaderManager::load(const char* path, HE::ShaderType type)
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file.is_open())
     {
-        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanShaderManager: failed to open shader file: ") + path).c_str());
+        HE_LOG_ERROR(RHI, "VulkanShaderManager: failed to open shader file: %s", path);
         return { 0, false };
     }
 
     size_t fileSize = static_cast<size_t>(file.tellg());
-    std::vector<char> buffer(fileSize);
+    // Read straight into a uint32_t-backed buffer: Vulkan wants the SPIR-V
+    // words as uint32_t*, and a vector<char>'s data() has no alignment
+    // guarantee for that — reinterpret_cast-ing it was undefined behaviour.
+    // Round up so a file whose size isn't a multiple of 4 still gets a whole
+    // last word (zero-padded) instead of a partial one.
+    std::vector<uint32_t> buffer((fileSize + sizeof(uint32_t) - 1) / sizeof(uint32_t), 0u);
     file.seekg(0);
-    file.read(buffer.data(), fileSize);
+    file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(fileSize));
     file.close();
 
     ShaderHandle handle;
     handle.type = type;
-    // Generate a unique ID (simple incrementing counter)
-    static unsigned int nextId = 1;
-    handle.id = nextId++;
+    // Generate a unique ID (simple incrementing counter). Atomic: load() can
+    // be called for several managers from different threads at once.
+    static std::atomic<unsigned int> nextId{ 1 };
+    handle.id = nextId.fetch_add(1, std::memory_order_relaxed);
 
     // Create Vulkan shader module
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = buffer.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(buffer.data());
+    createInfo.codeSize = fileSize;
+    createInfo.pCode = buffer.data();
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     if (m_device != VK_NULL_HANDLE)
@@ -93,8 +100,8 @@ ShaderProgramHandle VulkanShaderManager::createProgram(const std::vector<ShaderH
     // Shader stages are bound directly in the pipeline.
     // We'll just store the shader handles for reference.
     ShaderProgramHandle program;
-    static unsigned int nextProgramId = 1;
-    program.id = nextProgramId++;
+    static std::atomic<unsigned int> nextProgramId{ 1 };
+    program.id = nextProgramId.fetch_add(1, std::memory_order_relaxed);
     program.shaders = shaders;
     program.ready = true;
 

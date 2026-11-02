@@ -1,0 +1,41 @@
+/tmp/cta2/out/b_ref10k_r1.json
+  window 3740 ms, 11 lane(s), 28500 spans
+
+== lanes (busy = union of depth-0 spans)
+  Main           spans= 13500 busy=   3739.1 ms (100.0% of window)  Render x250 3712.7ms, OnRender x250 14.0ms, PollEvents x250 12.1ms, GameLogicTick x250 0.3ms, SwapBuffers x250 0.1ms
+  Worker 0       spans=  1598 busy=     23.8 ms (  0.6% of window)  FrustumCull x1328 18.3ms, ExtractMeshes x270 5.6ms
+  Worker 1       spans=  1533 busy=     22.8 ms (  0.6% of window)  FrustumCull x1292 17.9ms, ExtractMeshes x241 4.9ms
+  Worker 2       spans=  1504 busy=     21.7 ms (  0.6% of window)  FrustumCull x1249 16.9ms, ExtractMeshes x255 4.8ms
+  Worker 3       spans=  1335 busy=     21.0 ms (  0.6% of window)  FrustumCull x1078 16.5ms, ExtractMeshes x257 4.5ms
+  Worker 4       spans=  1561 busy=     21.3 ms (  0.6% of window)  FrustumCull x1297 16.6ms, ExtractMeshes x264 4.6ms
+  Worker 5       spans=  1512 busy=     23.7 ms (  0.6% of window)  FrustumCull x1244 18.4ms, ExtractMeshes x268 5.3ms
+  Worker 6       spans=  1532 busy=     21.7 ms (  0.6% of window)  FrustumCull x1287 17.2ms, ExtractMeshes x245 4.5ms
+  Worker 7       spans=  1410 busy=     20.7 ms (  0.6% of window)  FrustumCull x1142 16.6ms, ExtractMeshes x268 4.0ms
+  Worker 8       spans=  1436 busy=     20.8 ms (  0.6% of window)  FrustumCull x1240 16.4ms, ExtractMeshes x196 4.4ms
+  Worker 9       spans=  1579 busy=     22.8 ms (  0.6% of window)  FrustumCull x1343 17.9ms, ExtractMeshes x236 5.0ms
+
+== main thread: busy 3739 ms of 3740 = 100.0%; WaitForFrame 2623 ms (70.1%); work 1116 ms (29.8%)
+  depth-0 scopes (total ms, share of work):
+    Render                                1089.7 ms   97.6% of work
+    OnRender                                14.0 ms    1.3% of work
+    PollEvents                              12.1 ms    1.1% of work
+    GameLogicTick                            0.3 ms    0.0% of work
+    SwapBuffers                              0.1 ms    0.0% of work
+  depth-1 scopes (total ms):
+    Metal::NextDrawable                   2623.0 ms
+    Metal::EncodeShadowMap                 415.5 ms
+    Metal::ExtractFrame                    371.1 ms
+    Metal::EncodeScene                     126.7 ms
+    Metal::EncodeSSAO                      118.4 ms
+    SceneSystemsTick                         4.6 ms
+    Metal::Commit                            3.1 ms
+    PhysicsStep                              2.0 ms
+    WeatherAudio                             0.3 ms
+    CellStreaming                            0.1 ms
+    Metal::EncodeSkyViewLut                  0.1 ms
+    Metal::EncodeCloudShadow                 0.0 ms
+    ScriptUpdate                             0.0 ms
+
+== per-frame main-thread WORK (depth-0 scopes minus WaitForFrame / NextDrawable): p50 4.35 p90 4.90 p99 7.65 max 8.25 ms over 250 frames; dump cpuMs p50 9.67
+
+== pool occupancy (1 ms bins; how many non-main lanes had work open): 0:75.5%, 1:0.1%, 2:0.3%, 3:2.5%, 4:7.8%, 5:8.0%, 6:3.8%, 7:1.7%, 8:0.2%, 9:0.1%, 10:0.0%

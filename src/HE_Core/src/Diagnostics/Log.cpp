@@ -1,4 +1,5 @@
 #include "Diagnostics/Log.h"
+#include "HorizonVersion.h"   // HE_GIT_COMMIT for the banner's Build line
 
 #include <algorithm>
 #include <array>
@@ -471,9 +472,11 @@ bool openLogFile(const std::string& path, int keepBackups)
 		s_file = nullptr;
 	}
 
+	const fs::path p(path);
+	const fs::path dir = p.parent_path();
+
 	{
 		std::error_code ec;
-		const fs::path dir = fs::path(path).parent_path();
 		if (!dir.empty()) fs::create_directories(dir, ec);
 	}
 
@@ -482,8 +485,6 @@ bool openLogFile(const std::string& path, int keepBackups)
 	if (keepBackups > 0)
 	{
 		std::error_code ec;
-		const fs::path p    = fs::path(path);
-		const fs::path dir  = p.parent_path();
 		const std::string stem = p.stem().string();
 		const std::string ext  = p.extension().string();
 		const auto backup = [&](int n) {
@@ -946,8 +947,8 @@ void logStartupBanner(const char* appName, int argc, char** argv)
 	HE_LOG_INFO(Core, "==================== HorizonEngine ====================");
 	HE_LOG_INFO(Core, "Application : %s", appName ? appName : "(unknown)");
 	HE_LOG_INFO(Core, "Started     : %s", dateBuf);
-	HE_LOG_INFO(Core, "Build       : %s | %s | C++%ld | built %s %s",
-	            buildConfigName(), compilerName(), long(__cplusplus), __DATE__, __TIME__);
+	HE_LOG_INFO(Core, "Build       : %s | %s | C++%ld | built %s %s | commit %s",
+	            buildConfigName(), compilerName(), long(__cplusplus), __DATE__, __TIME__, HE_GIT_COMMIT);
 	HE_LOG_INFO(Core, "Platform    : %s — %s", platformName(), osVersionString().c_str());
 	HE_LOG_INFO(Core, "CPU         : %s (%u hardware threads)",
 	            cpuBrandString().c_str(), std::thread::hardware_concurrency());

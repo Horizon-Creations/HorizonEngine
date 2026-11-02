@@ -5,12 +5,9 @@
 #include <filesystem>
 #include <string>
 #include <vector>
-#include <fstream>
 #include <atomic>
 #include <shared_mutex>
 #include <nlohmann/json.hpp>
-
-using json = nlohmann::json;
 
 class HE_API GlobalState
 {
@@ -131,7 +128,7 @@ public:
 	// runs, so no test can reach a real user's settings, while tests that pin a
 	// directory of their own still get theirs.
 	static std::filesystem::path configFilePath();
-	void setCustomConfigEntry(const std::string& key, const json& value);
+	void setCustomConfigEntry(const std::string& key, const nlohmann::json& value);
 
 	int getCustomConfigInt(const std::string& key, int defaultValue = 0) const;
 	float getCustomConfigFloat(const std::string& key, float defaultValue = 0.0f) const;
@@ -147,8 +144,8 @@ public:
 	// pointers by path when it changed.
 	std::atomic<uint64_t> contentFolderVersion{0};
 
-	// Thread-safe read accessor: hält den shared_lock für die Lebensdauer des zurückgegebenen lock-Objekts.
-	// Verwendung: auto [folder, lock] = globalState->lockContentFolder();
+	// Thread-safe read accessor: holds the shared_lock for the lifetime of the returned lock-object.
+	// Usage: auto [folder, lock] = globalState->lockContentFolder();
 	std::pair<const HE::Folder&, std::shared_lock<std::shared_mutex>> lockContentFolder() const
 	{
 		return { m_contentFolder, std::shared_lock<std::shared_mutex>(m_contentFolderMutex) };
@@ -230,5 +227,5 @@ private:
 	mutable std::shared_mutex m_sourceFolderMutex;
 
 	//Custom config entries
-	json m_customConfig;
+	nlohmann::json m_customConfig;
 };

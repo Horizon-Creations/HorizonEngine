@@ -381,10 +381,12 @@ void setStep(const char* step)
 }
 
 // Overwrite before releasing: a token that merely went out of scope is still
-// sitting in freed heap memory for anyone who looks.
+// sitting in freed heap memory for anyone who looks. The volatile pointer keeps
+// the optimizer from dropping the stores as dead once the string is destroyed.
 void wipe(std::string& secret)
 {
-	for (char& c : secret) c = '\0';
+	volatile char* p = secret.data();
+	std::fill(p, p + secret.size(), '\0');
 	secret.clear();
 }
 

@@ -338,20 +338,15 @@ json axisRowJson(const AxisRow& r)
 // and "the binding is in the file" is not the same as "the binding works".
 void collectDeadNames(const AxisRow& r, const char* list, int index, json& into)
 {
-	const auto add = [&](const char* field, const std::string& name) {
-		if (name.empty() || isKnownKey(name)) return;
+	const auto addInvalid = [&](const char* field, const std::string& name, auto isKnown) {
+		if (name.empty() || isKnown(name)) return;
 		into.push_back(json{ { "list", list }, { "index", index },
 		                     { "field", field }, { "name", name } });
 	};
-	const auto addPad = [&](const char* field, const std::string& name) {
-		if (name.empty() || isKnownPadButton(name)) return;
-		into.push_back(json{ { "list", list }, { "index", index },
-		                     { "field", field }, { "name", name } });
-	};
-	add("positive", r.positive);
-	add("negative", r.negative);
-	addPad("positiveButton", r.positiveButton);
-	addPad("negativeButton", r.negativeButton);
+	addInvalid("positive", r.positive, isKnownKey);
+	addInvalid("negative", r.negative, isKnownKey);
+	addInvalid("positiveButton", r.positiveButton, isKnownPadButton);
+	addInvalid("negativeButton", r.negativeButton, isKnownPadButton);
 }
 
 json entryJson(const MapEntry& e)
@@ -365,19 +360,15 @@ json entryJson(const MapEntry& e)
 	if (!e.gamepadButtons.empty()) j["gamepadButtons"] = e.gamepadButtons;
 	if (!e.mouseButtons.empty())   j["mouseButtons"]   = e.mouseButtons;
 
+	const auto buildAxisArray = [&](const auto& src, const char* key) {
+		if (src.empty()) return;
+		json arr = json::array();
+		for (const AxisRow& r : src) arr.push_back(axisRowJson(r));
+		j[key] = std::move(arr);
+	};
 	const char* xList = e.valueType == kVtAxis2D ? "axesX" : "axes";
-	if (!e.axes.empty())
-	{
-		json arr = json::array();
-		for (const AxisRow& r : e.axes) arr.push_back(axisRowJson(r));
-		j[xList] = std::move(arr);
-	}
-	if (!e.axesY.empty())
-	{
-		json arr = json::array();
-		for (const AxisRow& r : e.axesY) arr.push_back(axisRowJson(r));
-		j["axesY"] = std::move(arr);
-	}
+	buildAxisArray(e.axes, xList);
+	buildAxisArray(e.axesY, "axesY");
 
 	json dead = json::array();
 	for (size_t i = 0; i < e.keys.size(); ++i)

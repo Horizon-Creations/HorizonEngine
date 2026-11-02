@@ -140,6 +140,47 @@ TEST_CASE("parseScriptErrorLocation: a clock, a bare colon and no digits are not
     CHECK(loc.line == 4);
 }
 
+TEST_CASE("parseScriptErrorLocation: a line number that does not fit an int is refused")
+{
+    HE::ScriptErrorLocation loc;
+    loc.script = "kept";
+    loc.line   = 7;
+    // error() can put any text into a message; atoi on this was undefined behaviour.
+    CHECK_FALSE(HE::parseScriptErrorLocation("x:99999999999:", loc));
+    CHECK_FALSE(HE::parseScriptErrorLocation("x:99999999999999999999999999:", loc));
+    CHECK(loc.script == "kept");
+    CHECK(loc.line == 7);
+    // The largest int still reads.
+    REQUIRE(HE::parseScriptErrorLocation("x:2147483647: y", loc));
+    CHECK(loc.script == "x");
+    CHECK(loc.line == 2147483647);
+}
+
+TEST_CASE("ScriptEngine: an error() value that is not a string gets a fixed text")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("thrower",
+        "local M = {}\n"
+        "function M.onUpdate(self, dt)\n"
+        "  if self.mode == 1 then error({}) end\n"
+        "  error()\n"
+        "end\n"
+        "return M\n"));
+    const auto id = engine.createInstance("thrower");
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    CHECK_FALSE(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.lastError() == "non-string error");
+    engine.setInstanceField(id, "mode", 1.0);
+    CHECK_FALSE(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.lastError() == "non-string error");
+    // A number is a string to Lua and keeps its text.
+    CHECK_FALSE(engine.exec("error(42)"));
+    CHECK(engine.lastError() == "42");
+    // A chunk that throws a table at load time fails the load the same way.
+    CHECK_FALSE(engine.loadScript("tbl", "error({})"));
+    CHECK(engine.lastError() == "non-string error");
+}
+
 TEST_CASE("ScriptEngine: loading script twice replaces it")
 {
     ScriptEngine engine;
@@ -148,6 +189,104 @@ TEST_CASE("ScriptEngine: loading script twice replaces it")
     engine.loadScript("s", kAccumScript); // reload
     CHECK(engine.loadedScriptCount() == 1);
     CHECK(engine.isScriptLoaded("s"));
+}
+
+TEST_CASE("ScriptEngine: a failed reload keeps the old script and its instances")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("s", kCounterScript));
+    const auto id = engine.createInstance("s");
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(engine.callOnStart(id));
+    REQUIRE(engine.callOnUpdate(id, 0.016f));
+
+    // A syntax error, a runtime error in the chunk and a non-table result all
+    // fail the load without touching what was there.
+    CHECK_FALSE(engine.loadScript("s", "local M = {}\nlocal x = ??? end\nreturn M\n"));
+    CHECK_FALSE(engine.lastError().empty());
+    CHECK_FALSE(engine.loadScript("s", "error('boom')"));
+    CHECK_FALSE(engine.loadScript("s", "return 42"));
+    CHECK(engine.lastError() == "Script 's' must return a table");
+
+    CHECK(engine.isScriptLoaded("s"));
+    CHECK(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.createInstance("s") != ScriptEngine::kInvalidInstance);
+
+    // A good reload still replaces the script and drops the old instances.
+    REQUIRE(engine.loadScript("s", kAccumScript));
+    CHECK_FALSE(engine.callOnUpdate(id, 0.016f));
+    CHECK(engine.lastError() == "Invalid instance id");
+}
+
+TEST_CASE("ScriptEngine: every handler on an unknown instance fails with the same text")
+{
+    ScriptEngine engine;
+    const ScriptEngine::InstanceId bad = 4242;
+    const auto expectInvalid = [&](bool ok) {
+        CHECK_FALSE(ok);
+        CHECK(engine.lastError() == "Invalid instance id");
+        engine.exec("x = 1");   // a successful call clears the error
+        CHECK(engine.lastError().empty());
+    };
+    expectInvalid(engine.callOnStart(bad));
+    expectInvalid(engine.callOnUpdate(bad, 0.016f));
+    expectInvalid(engine.callOnCollisionEnter(bad, 1));
+    expectInvalid(engine.callOnCollisionExit(bad, 1));
+    expectInvalid(engine.callOnBeginOverlap(bad, 1));
+    expectInvalid(engine.callOnEndOverlap(bad, 1));
+    expectInvalid(engine.callOnAnimationNotify(bad, "n"));
+    expectInvalid(engine.callOnInputPressed(bad, "a"));
+    expectInvalid(engine.callOnInputAxis(bad, "a", 1.0f));
+    expectInvalid(engine.callOnInputAxis2D(bad, "a", 1.0f, 2.0f));
+    expectInvalid(engine.callOnTimer(bad, 3));
+    expectInvalid(engine.callOnCheatDetected(bad, 3));
+    expectInvalid(engine.callOnNetEvent(bad, NetScriptEvent::Connected, 0));
+    expectInvalid(engine.callOnUIEvent(bad, UIScriptEvent::Click));
+    expectInvalid(engine.callInstanceMethod(bad, "f", nullptr));
+    // hasInstanceMethod is a question: false, error untouched.
+    CHECK_FALSE(engine.hasInstanceMethod(bad, "f"));
+    CHECK(engine.lastError().empty());
+}
+
+TEST_CASE("ScriptEngine: the one-integer handlers push their argument as an integer")
+{
+    ScriptEngine engine;
+    REQUIRE(engine.loadScript("ints",
+        "local M = {}\n"
+        "local function rec(name) return function(self, v) _G[name] = v; _G[name .. 'T'] = math.type(v) end end\n"
+        "M.onCollisionEnter = rec('ce')\n"
+        "M.onCollisionExit  = rec('cx')\n"
+        "M.onBeginOverlap   = rec('bo')\n"
+        "M.onEndOverlap     = rec('eo')\n"
+        "M.onTimer          = rec('tm')\n"
+        "M.onCheatDetected  = rec('ch')\n"
+        "return M\n"));
+    const auto id = engine.createInstance("ints");
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+
+    // A uint32 above INT_MAX must not turn negative on its way in.
+    CHECK(engine.callOnCollisionEnter(id, 4000000000u));
+    CHECK(engine.callOnCollisionExit(id, 11u));
+    CHECK(engine.callOnBeginOverlap(id, 12u));
+    CHECK(engine.callOnEndOverlap(id, 13u));
+    // An int handle keeps its sign.
+    CHECK(engine.callOnTimer(id, -5));
+    CHECK(engine.callOnCheatDetected(id, 7));
+    CHECK(engine.getGlobalNumber("ce") == 4000000000.0);
+    CHECK(engine.getGlobalNumber("cx") == 11.0);
+    CHECK(engine.getGlobalNumber("bo") == 12.0);
+    CHECK(engine.getGlobalNumber("eo") == 13.0);
+    CHECK(engine.getGlobalNumber("tm") == -5.0);
+    CHECK(engine.getGlobalNumber("ch") == 7.0);
+    for (const char* t : { "ceT", "cxT", "boT", "eoT", "tmT", "chT" })
+        CHECK(engine.getGlobalString(t) == "integer");
+
+    // A script that defines none of them is a silent no-op for each.
+    REQUIRE(engine.loadScript("none", "return {}"));
+    const auto bare = engine.createInstance("none");
+    CHECK(engine.callOnCollisionEnter(bare, 1));
+    CHECK(engine.callOnTimer(bare, 1));
+    CHECK(engine.callOnCheatDetected(bare, 1));
 }
 
 TEST_CASE("ScriptEngine: unload removes script")

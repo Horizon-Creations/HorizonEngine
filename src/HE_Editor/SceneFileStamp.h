@@ -71,7 +71,7 @@ public:
 	static std::uint64_t hashFile(const std::string& path)
 	{
 		std::ifstream in(std::filesystem::path(path), std::ios::binary);
-		std::uint64_t h = 1469598103934665603ull;
+		std::uint64_t h = 14695981039346656037ull;
 		char buf[1 << 16];
 		while (in)
 		{

@@ -59,6 +59,7 @@
 #include "Net/ITransport.h"
 
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -193,7 +194,7 @@ private:
     Config                                      m_cfg;
     bool                                        m_cryptoAvailable = false;
     std::unordered_map<ConnectionId, Peer>      m_peers;
-    std::vector<NetEvent>                       m_events;
+    std::deque<NetEvent>                        m_events;   // poll() takes from the front
 };
 
 } // namespace HE::Net

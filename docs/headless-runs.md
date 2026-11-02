@@ -13,6 +13,13 @@ OnInit, UI. (Belegt ist das bisher über SDLs eigenen Fensterzustand im Log;
 die Kontrolle am entsperrten Bildschirm steht noch aus, siehe Audit
 „Nicht verifiziert" und die Negativkontrolle unten.)
 
+**Nur Dev-Builds.** Alle Schalter dieser Seite gibt es nur in einem Baum mit
+`HE_BUILD_PROFILE=dev` (Vorgabe; Editor, he_tests, die vorkompilierten Runtimes).
+Ein Release-Profil-Build (`-DHE_BUILD_PROFILE=release`, der SDK-Export aus Thema 211)
+hat sie nicht einkompiliert und ignoriert sie still. Welche Variable an welchem
+Schalter hängt: `src/HE_Core/include/Platform/BuildProfile.h`; Nachweis am Binary:
+`scripts/build_profile_strings.py`.
+
 ## Die Schalter
 
 | Variable | Gilt für | Was sie tut | Macht hidden? |
@@ -247,6 +254,15 @@ die Thumbnails laufen auf eigenen Encodern, nur `PREVIEW`/`THUMB` treffen sie.
 - `HE_DUMP_MATTESTPOS=-3.5,2.5,-8` legt die Kugel auf den Boden von `HE_DUMP_SSRTEST`.
 - Gegen GL vergleichen; Dämmerung (`HE_DUMP_TOD=0.26`) für AO an gegen aus.
 - Messwerte und das volle Rezept stehen in `docs/graph-material-skyenv-ao-hardware-acceptance-2026-10-05.md`.
+
+**Displacement-Pin (Thema 207):**
+- `HE_DUMP_MATERIALTEST=displace` ist der Inline-Zeuge (Wertrauschen × `HE_DUMP_DISPHEIGHT`,
+  `HE_DUMP_DISPCONST` = konstante Höhe, `HE_DUMP_DISPFACTOR` = maxFactor).
+- `HE_DUMP_MATTESTASSET=Engine/Materials/DisplacementDemo.hasset` legt statt des Inline-Graphen
+  eine Material-DATEI auf die Kugel (jeder `MATERIALTEST`-Wert). `HE_DUMP_DISPPIN=0` wirft ihren
+  Displacement-Body weg (= Pin unverbunden), `HE_DUMP_SETPARAM=Height,0.3,0,0` setzt ihren Knopf.
+- `HE_TESSELLATION=0` schaltet die Tessellation auf allen Backends ab (Fallback-A/B).
+- Rezept: `scripts/tess-hw/cap207.ps1 [-Asset …]` + `ana207.py` (Python aus Bash, wegen numpy).
 
 **Material-Vorschau läuft in Echtzeit (Thema 176 Schritt 3):** Die Vorschau im Material-Editor
 bekommt jedes Frame die UI-Uhr als `timeSeconds` (`IRenderer::RenderMaterialPreview`, Metal und GL;

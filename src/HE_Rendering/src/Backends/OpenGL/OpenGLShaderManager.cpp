@@ -1,6 +1,7 @@
 #include "Backends/OpenGL/OpenGLShaderManager.h"
 #include <glad/glad.h>
 #include <Diagnostics/Logger.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -43,12 +44,17 @@ ShaderHandle OpenGLShaderManager::load(const char* path, HE::ShaderType type)
 			break;
 	}
 	glShaderSource(handle.id, 1, &src, nullptr);
+	m_loadedShaders.push_back(handle);
 	return handle;
 }
 
 void OpenGLShaderManager::release(ShaderHandle handle)
 {
 	glDeleteShader(handle.id);
+	m_loadedShaders.erase(
+		std::remove_if(m_loadedShaders.begin(), m_loadedShaders.end(),
+			[&](const ShaderHandle& h) { return h.id == handle.id; }),
+		m_loadedShaders.end());
 }
 
 bool OpenGLShaderManager::compile(ShaderHandle& handle)
@@ -85,6 +91,7 @@ ShaderProgramHandle OpenGLShaderManager::createProgram(const std::vector<ShaderH
 	}
 	program.ready = true;
 	program.shaders = shaders;
+	m_loadedPrograms.push_back(program);
 	return program;
 }
 
@@ -93,12 +100,21 @@ void OpenGLShaderManager::releaseProgram(ShaderProgramHandle handle)
 	for (const auto& shader : handle.shaders)
 		glDetachShader(handle.id, shader.id);
 	glDeleteProgram(handle.id);
+	m_loadedPrograms.erase(
+		std::remove_if(m_loadedPrograms.begin(), m_loadedPrograms.end(),
+			[&](const ShaderProgramHandle& p) { return p.id == handle.id; }),
+		m_loadedPrograms.end());
 }
 
 void OpenGLShaderManager::cleanup()
 {
-	for (const auto& program : m_loadedPrograms)
+	// release()/releaseProgram() erase from m_loadedShaders/m_loadedPrograms as they
+	// go, so iterate copies here rather than the members themselves — looping over
+	// a vector while its own erase() shrinks it under the range-for is UB.
+	const auto programs = m_loadedPrograms;
+	for (const auto& program : programs)
 		releaseProgram(program);
-	for (const auto& shader : m_loadedShaders)
+	const auto shaders = m_loadedShaders;
+	for (const auto& shader : shaders)
 		release(shader);
 }

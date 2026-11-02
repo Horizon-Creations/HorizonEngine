@@ -7,7 +7,7 @@ struct TransformCacheFlag {
     bool value = false;
 
     constexpr TransformCacheFlag() = default;
-    constexpr TransformCacheFlag(const TransformCacheFlag&) noexcept {}   // a copy starts out "not valid"
+    constexpr TransformCacheFlag(const TransformCacheFlag&) noexcept : value(false) {}   // a copy starts out "not valid"
     constexpr TransformCacheFlag& operator=(const TransformCacheFlag&) noexcept { value = false; return *this; }
     constexpr TransformCacheFlag(TransformCacheFlag&&) noexcept = default;
     constexpr TransformCacheFlag& operator=(TransformCacheFlag&&) noexcept = default;

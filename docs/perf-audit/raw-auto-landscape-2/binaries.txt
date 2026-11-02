@@ -1,0 +1,2 @@
+before the GI slice-means fix (all raw runs in this folder except after-*): HorizonEditor 23ead1b74880, libHorizonRendering 71f981c7681a, libHorizonCore 9701223c2715
+after the fix: libHorizonRendering 39a6b289cafa, HorizonEditor 23ead1b74880, libHorizonCore 9701223c2715

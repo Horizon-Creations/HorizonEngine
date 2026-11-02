@@ -447,6 +447,109 @@ TEST_CASE("The refined mesh of a chunk that is gone is unloaded")
     CHECK(cm.getStaticMesh(id) == nullptr);
 }
 
+// updateTessellation measures camera distances only for a landscape that
+// refines (SCN-801). Everything else it does per chunk has to happen anyway.
+
+TEST_CASE("With tessellation off, a refined level the chunk does not own is unhooked, not emptied")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    makeLandscape(world, 1, 30.0f);
+    const glm::vec3 cam(-25.0f, 5.0f, -25.0f);
+    tick(world, cm, cam);
+
+    // What a copied world leaves on a chunk: the refined mesh of the world it
+    // was copied from, hooked in, and not in this world's bookkeeping.
+    auto& reg = world.registry();
+    const entt::entity ce = chunkAt(world, 0, 0);
+    REQUIRE((ce != entt::null));
+    StaticMeshAsset foreign;
+    foreign.type = HE::AssetType::StaticMesh;
+    foreign.vertices = { 1.0f, 2.0f, 3.0f };
+    const HE::UUID id = cm.registerStaticMesh(std::move(foreign));
+    auto& cc  = reg.get<TerrainChunkComponent>(ce);
+    auto& lod = reg.get<LODComponent>(ce);
+    cc.tessMeshId = id;
+    cc.tessActive = true;
+    lod.refinedMeshId      = id;
+    lod.refinedMaxDistance = 30.0f;
+
+    TerrainSystem::updateTessellation(world, cm, nullptr, cam);
+    CHECK(cc.tessMeshId == HE::UUID{});
+    CHECK_FALSE(cc.tessActive);
+    CHECK(lod.refinedMeshId == HE::UUID{});
+    // The other world's mesh is not this chunk's to empty.
+    const StaticMeshAsset* m = cm.getStaticMesh(id);
+    REQUIRE(m != nullptr);
+    CHECK(m->vertices.size() == 3);
+}
+
+TEST_CASE("Switching tessellation off without a rebuild gives the refined levels back")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    Entity te = makeLandscape(world, 2, 30.0f);
+    const glm::vec3 cam(-25.0f, 5.0f, -25.0f);
+    tick(world, cm, cam);
+    auto& reg = world.registry();
+    const entt::entity near = chunkAt(world, 0, 0);
+    const HE::UUID id = reg.get<TerrainChunkComponent>(near).tessMeshId;
+    REQUIRE(reg.get<TerrainChunkComponent>(near).tessActive);
+
+    // The Inspector's factor field: the height field is unchanged, nothing dirty.
+    reg.get<TerrainComponent>(te).tessellationFactor = 1;
+    TerrainSystem::updateTessellation(world, cm, nullptr, cam);
+    CHECK(countTess(world).active == 0);
+    CHECK(reg.get<LODComponent>(near).refinedMeshId == HE::UUID{});
+    CHECK(reg.get<MeshComponent>(near).meshAssetId != id);
+    const StaticMeshAsset* m = cm.getStaticMesh(id);
+    REQUIRE(m != nullptr);
+    CHECK(m->vertices.empty());
+}
+
+TEST_CASE("Each landscape is handled by its own state: refining, off, rebuilding or gone")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto& reg = world.registry();
+    // Four landscapes on top of each other, all refining at first.
+    Entity tes[4];
+    for (int i = 0; i < 4; ++i) tes[i] = makeLandscape(world, 2, 30.0f);
+    TerrainSystem::updateTerrains(world, cm);
+    auto nearChunk = [&](int i)
+    {
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+            if (cc.terrain == tes[i] && cc.cx == 0 && cc.cz == 0) return e;
+        return entt::entity{ entt::null };
+    };
+    // One chunk each under the camera: two ticks of two builds.
+    const glm::vec3 cam(-25.0f, 5.0f, -25.0f);
+    TerrainSystem::updateTessellation(world, cm, nullptr, cam);
+    TerrainSystem::updateTessellation(world, cm, nullptr, cam);
+    for (int i = 0; i < 4; ++i)
+    {
+        REQUIRE((nearChunk(i) != entt::null));
+        REQUIRE(reg.get<TerrainChunkComponent>(nearChunk(i)).tessActive);
+    }
+
+    // 0 keeps refining, 1 is switched off, 2 waits for a rebuild that has not
+    // run yet, 3 has lost its TerrainComponent. The camera is far from all.
+    reg.get<TerrainComponent>(tes[1]).tessellationFactor = 1;
+    reg.get<TerrainComponent>(tes[2]).regionDirty = true;
+    reg.remove<TerrainComponent>(tes[3]);
+    TerrainSystem::updateTessellation(world, cm, nullptr, glm::vec3(0.0f, 5000.0f, 0.0f));
+
+    CHECK_FALSE(reg.get<TerrainChunkComponent>(nearChunk(0)).tessActive);   // out of range
+    CHECK_FALSE(reg.get<TerrainChunkComponent>(nearChunk(1)).tessActive);   // off
+    CHECK(reg.get<TerrainChunkComponent>(nearChunk(2)).tessActive);         // updateTerrains' tick
+    CHECK(reg.get<TerrainChunkComponent>(nearChunk(3)).tessActive);         // left as it is
+
+    // Back: only the refining landscape builds again.
+    TerrainSystem::updateTessellation(world, cm, nullptr, cam);
+    CHECK(reg.get<TerrainChunkComponent>(nearChunk(0)).tessActive);
+    CHECK_FALSE(reg.get<TerrainChunkComponent>(nearChunk(1)).tessActive);
+}
+
 TEST_CASE("A displacement texture that is missing or compressed just means no displacement")
 {
     HorizonWorld world;
@@ -933,12 +1036,41 @@ TEST_CASE("Every tick of a camera flight keeps every terrain seam closed")
     }
 }
 
+TEST_CASE("A built landscape keeps the height field its chunks were built from, versioned per rebuild")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    const SweepTerrain t = kSweepTerrains[0];
+    Entity te = makeSweepLandscape(world, t);
+    auto& reg = world.registry();
+    CHECK(reg.get<TerrainComponent>(te).builtField == nullptr);
+
+    tickFull(world, cm, glm::vec3(0.0f), false);
+    const auto& tc = reg.get<TerrainComponent>(te);
+    REQUIRE(tc.builtField != nullptr);
+    CHECK(tc.builtFieldRes == tc.resolution);
+    CHECK(tc.builtField->size() == static_cast<size_t>(tc.resolution) * tc.resolution);
+    const uint64_t v1 = tc.builtFieldVersion;
+    CHECK(v1 > 0);
+    const auto field1 = tc.builtField;
+
+    tickFull(world, cm, glm::vec3(0.0f), false);   // nothing dirty: the same field, the same version
+    CHECK(reg.get<TerrainComponent>(te).builtFieldVersion == v1);
+    CHECK(reg.get<TerrainComponent>(te).builtField == field1);
+
+    reg.get<TerrainComponent>(te).heightScale *= 2.0f;
+    reg.get<TerrainComponent>(te).dirty = true;
+    tickFull(world, cm, glm::vec3(0.0f), false);
+    CHECK(reg.get<TerrainComponent>(te).builtFieldVersion > v1);
+}
+
 TEST_CASE("A camera jittering across a LOD distance keeps the seams closed and reuses the stitched meshes")
 {
     // LOD0 ends at 30 m on these 50 m chunks (lodDistanceScale 0.1). The camera
-    // stands 30 m from chunk (1,1)'s centre and jitters by ±0.5 m across that
-    // line, so the chunk flips LOD0 ↔ LOD1 every tick and its neighbours' seams
-    // change from mixed to plain and back.
+    // stands 30 m from chunk (1,1)'s centre and jitters across that
+    // line. LODSystem holds a level for 5 % of its distance on the way to the finer
+    // one (1.5 m here), so the jitter is ±2.5 m: the chunk still flips LOD0 ↔ LOD1
+    // every tick and its neighbours' seams change from mixed to plain and back.
     HorizonWorld world;
     ContentManager cm(".");
     const SweepTerrain t = kSweepTerrains[0];
@@ -963,7 +1095,7 @@ TEST_CASE("A camera jittering across a LOD distance keeps the seams closed and r
         std::vector<uint64_t> before;
         for (auto [e, cc] : reg.view<TerrainChunkComponent>().each()) before.push_back(cc.stitchKey);
         const uint8_t was = reg.get<LODComponent>(c11).current;
-        tickFull(world, cm, camAt(i % 2 ? 30.5f : 29.5f), true);
+        tickFull(world, cm, camAt(i % 2 ? 32.5f : 27.5f), true);
         if (reg.get<LODComponent>(c11).current != was) ++toggles;
         size_t k = 0;
         for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())

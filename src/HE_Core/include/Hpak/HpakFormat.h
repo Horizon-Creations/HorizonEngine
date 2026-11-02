@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <Types/Defines.h>
+#include <Types/UUID.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  .hpak  —  Horizon Engine packed asset archive (binary format), version 3
@@ -205,8 +206,9 @@ struct PackSettings {
     bool cook = false;
     // Additionally block-compress RGBA8 textures at pack time to this HE::TextureFormat
     // value (kept as a raw uint8_t so this low-level header needn't include Assets.h):
-    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3. Each needs its encoder in the
-    // build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC / HE_HAVE_STB_DXT); on a missing encoder or
+    //   0 = RGBA8 (none), 1 = ASTC_4x4, 2 = BC7, 3 = BC3, 4 = BC1, 5 = BC4 (R only), 6 = BC5
+    // (R and G only). Each needs its encoder in the build (HE_HAVE_ASTCENC / HE_HAVE_BC7ENC /
+    // HE_HAVE_STB_DXT, which covers BC1/BC3/BC4/BC5); on a missing encoder or
     // an encode failure the cook silently keeps RGBA8 + baked mipmaps. The chosen format
     // must match what the target's GPU can sample — the editor picks it per target/backend.
     uint8_t textureCompression = 0;
@@ -217,6 +219,36 @@ struct PackSettings {
     // the incremental-pack fingerprint: changing it re-encodes every texture,
     // which is the whole point of changing it.
     uint8_t textureQuality = 0;
+    // Also cook texture ARRAYS (layers > 1) to `textureCompression`, every slice and level
+    // encoded as it stands. Off: arrays ship RGBA8 as they always did. The only CPU reader of
+    // array pixels, the GI landscape's slice means (giAutoLandscapeSliceMeans), cannot decode
+    // BC7 or ASTC; a cooked array therefore carries those means baked from its RGBA8 source
+    // (CHUNK_TXSM). Part of the pack fingerprint.
+    bool cookTextureArrays = false;
+    // Bake textures onto static meshes (Hpak/MeshBakePass.h): a mesh whose materials are plain
+    // PBR texture sets is rewritten onto one merged material with atlas textures, per the
+    // switches stored in the mesh (HE::MeshBakeSettings). Needs `onlyReferenced` (the pass runs
+    // on what the game reaches, then the filter runs again). `bakeMaxAtlas` = longest atlas
+    // side. Both are part of the pack fingerprint.
+    bool     bakeMeshTextures = false;
+    uint32_t bakeMaxAtlas     = 4096;
+    // Meshes the bake leaves alone: the ones some entity draws with a material of its own
+    // (HE::collectMeshesWithMaterialOverrides). An override material would read its texture
+    // through the atlas UVs. Part of the pack fingerprint.
+    std::vector<HE::UUID> bakeSkipMeshes;
+
+    // Assets the editor made for this export and that no file in the project holds (the baked far landscape,
+    // HorizonScene/LandscapeHlod.h): complete .hasset bytes under an addressed path and a fixed id. They pack like
+    // any other asset, and the folder each one sits in is a reach root (nothing in a scene names them: the runtime
+    // finds them by id). Part of the pack fingerprint through their bytes.
+    struct ExtraAsset
+    {
+        HE::UUID             id;
+        std::string          relPath;
+        uint16_t             type = 0;      // HE::AssetType
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<ExtraAsset> extraAssets;
 
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,
@@ -224,8 +256,9 @@ struct PackSettings {
     // per-backend variants (already PSHD-encoded bytes). Null / 0 backends → no precompile
     // (the shipped game cross-compiles at runtime as before).
     uint32_t shaderBackends = 0;
-    std::function<std::vector<uint8_t>(const std::string& fragGlsl,
-                                       const std::string& vertBody, uint32_t backends)>
+    // `gbufGlsl` is the material's G-buffer tail (customShaderGBufGlsl), empty when it has none.
+    std::function<std::vector<uint8_t>(const std::string& fragGlsl, const std::string& vertBody,
+                                       const std::string& gbufGlsl, uint32_t backends)>
         compileShaderVariants;
 
     // Precompile particle color/alpha-over-life shaders into the pak (CHUNK_PPSD),
@@ -251,6 +284,26 @@ struct PackSettings {
     // a file out. Both used to be silent, and a pak missing the landscape texture
     // arrays looked exactly like a good one. Same thread as the pack call.
     std::function<void(const std::string& message)> onWarning;
+
+    // Pack only what the game reaches (Hpak/ReachFilter.h). Roots: the scenes and blobs below,
+    // the engine's implicit needs, alwaysIncludePatterns. An asset nothing reachable names is
+    // left out, and so is an asset only another unreached asset names. Off = every .hasset in
+    // the roots, as before. Part of the pack fingerprint.
+    bool onlyReferenced = false;
+    // Globs (same shape as excludePatterns, matched against the addressed path) that are
+    // roots too: for what a script builds a path for at run time.
+    std::vector<std::string> alwaysIncludePatterns;
+    // Blobs scanned for references that are always kept and are not assets themselves: the
+    // startup scene, the project manifest, GameInstance.hcode, loose scripts.
+    std::vector<std::vector<uint8_t>> referenceRoots;
+    // Scenes the game MAY load, addressed by project-relative path. Each is a node of the
+    // graph like an asset: kept only when something reachable names it. The startup scene
+    // belongs in referenceRoots instead. HpakWriter::unreachableScenes() names the ones left out.
+    struct ReachScene { std::string path; std::vector<uint8_t> bytes; };
+    std::vector<ReachScene> reachScenes;
+    // One summary line for what the filter left out (count, size, the largest). Same thread
+    // as the pack call.
+    std::function<void(const std::string& message)> onNotice;
 };
 
 // Glob match used by PackSettings::excludePatterns (see semantics there).

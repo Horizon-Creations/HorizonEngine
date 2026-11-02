@@ -1,0 +1,17 @@
+== mem2x-V3-bc3-r2  2026-10-21 06:47:21  attempt 1
+before:
+  uptime:    load averages: 3.73 3.00 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      17.1% Python; 9.3% coreaudiod; 6.8% managedappdistributiond; 5.6% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.36 2.97 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       84
+  power:     Now drawing from 'AC Power'
+  busy:      12.6% coreaudiod; 12.6% Dock; 7.1% WindowServer; 5.8% clion
+  foreign:   none

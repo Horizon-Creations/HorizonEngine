@@ -244,8 +244,8 @@ private:
     };
 
     struct Peer {
-        std::string   host;        // exactly as socketRecvFrom reports it
-        std::uint16_t port  = 0;
+        SocketAddress addr;        // parsed once; what every datagram goes to
+        std::string   host;        // addr as text, for the log lines only
         PeerState     state = PeerState::Connecting;
         std::uint64_t clientNonce = 0;
         std::uint64_t cookie      = 0;
@@ -280,18 +280,16 @@ private:
 
     // A peer that was told goodbye: the remaining Disconnect repeats.
     struct Farewell {
-        std::string   host;
-        std::uint16_t port = 0;
+        SocketAddress addr;
         int           sendsLeft = 0;
         std::uint64_t nextMs = 0;
     };
 
     // Socket / receive.
     void receiveAll();
-    void handleDatagram(const std::string& host, std::uint16_t port,
-                        const std::uint8_t* data, std::size_t len);
-    void handleConnect(const std::string& host, std::uint16_t port,
-                       std::uint8_t version, const std::uint8_t* body, std::size_t len);
+    void handleDatagram(const SocketAddress& from, const std::uint8_t* data, std::size_t len);
+    void handleConnect(const SocketAddress& from, std::uint8_t version,
+                       const std::uint8_t* body, std::size_t len);
     void handleEstablished(ConnectionId id, Peer& p, std::uint8_t flags,
                            std::uint8_t channel, std::uint16_t seq,
                            const std::uint8_t* body, std::size_t len);
@@ -315,21 +313,20 @@ private:
                                const std::uint8_t* body, std::size_t len,
                                const std::uint16_t* msgSeq = nullptr,
                                const Packet* fragment = nullptr);
-    void rawSend(const std::string& host, std::uint16_t port,
-                 const std::uint8_t* datagram, std::size_t len);
-    void sendControl(const std::string& host, std::uint16_t port, std::uint8_t flags,
+    void rawSend(const SocketAddress& to, const std::uint8_t* datagram, std::size_t len);
+    void sendControl(const SocketAddress& to, std::uint8_t flags,
                      const std::uint8_t* body, std::size_t len);
 
     // Lifecycle.
-    ConnectionId findPeer(const std::string& host, std::uint16_t port) const;
+    ConnectionId findPeer(const SocketAddress& from) const;
     void dropPeer(ConnectionId id, bool notify, const char* why);
     void serviceFarewells();
 
     // Cookies.
-    std::uint64_t makeCookie(const std::uint8_t secret[32], const std::string& host,
-                             std::uint16_t port, std::uint64_t nonce) const;
-    bool cookieValid(const std::string& host, std::uint16_t port,
-                     std::uint64_t nonce, std::uint64_t cookie) const;
+    std::uint64_t makeCookie(const std::uint8_t secret[32], const SocketAddress& from,
+                             std::uint64_t nonce) const;
+    bool cookieValid(const SocketAddress& from, std::uint64_t nonce,
+                     std::uint64_t cookie) const;
     void rotateSecretIfDue();
 
     float rtoMs(const Peer& p, std::uint32_t resends) const;
@@ -345,7 +342,9 @@ private:
 
     ConnectionId                            m_nextId = 1;
     std::unordered_map<ConnectionId, Peer>  m_peers;
-    std::unordered_map<std::string, ConnectionId> m_byAddress;   // "host|port"
+    // Keyed by SocketAddress::samePeer: no string built per received datagram.
+    std::unordered_map<SocketAddress, ConnectionId, SocketAddressPeerHash,
+                       SocketAddressPeerEq>  m_byAddress;
     std::vector<Farewell>                   m_farewells;
     std::deque<NetEvent>                    m_events;
 

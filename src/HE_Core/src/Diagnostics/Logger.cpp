@@ -1,6 +1,5 @@
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Log.h"
-#include <atomic>
 #include <mutex>
 
 // The legacy Logger is now a thin adapter over HE::Log — one log, one file, one

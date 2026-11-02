@@ -92,6 +92,31 @@ constexpr MessageId kMsgDocSaved           = kFirstUserMessage + 41;  // client 
 // size of raw floats.
 constexpr int kQuatBits = 16;
 
+// The project fingerprint: the asset count, then the sketch (length-prefixed).
+void writeFingerprint(BitWriter& w, const ProjectFingerprint& f) {
+    const std::size_t n = std::min(f.sketch.size(), ProjectFingerprint::kSketchSize);
+    w.writeUInt32(f.assetCount);
+    w.writeByte(static_cast<std::uint8_t>(n));
+    for (std::size_t i = 0; i < n; ++i) w.writeUInt64(f.sketch[i]);
+}
+
+// Read from the wire, so every length is bounded before anything is allocated, and
+// a sketch that is not strictly ascending is refused: the overlap estimate merges
+// two sorted lists, and an out-of-order one would be a way to fake any answer.
+bool readFingerprint(BitReader& r, ProjectFingerprint& out) {
+    out = ProjectFingerprint{};
+    std::uint8_t n = 0;
+    if (!r.readUInt32(out.assetCount) || !r.readByte(n)) return false;
+    if (n > ProjectFingerprint::kSketchSize || n > out.assetCount) return false;
+    if (r.bitsRemaining() < static_cast<std::size_t>(n) * 64u) return false;
+    out.sketch.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!r.readUInt64(out.sketch[i])) return false;
+        if (i > 0 && out.sketch[i] <= out.sketch[i - 1]) return false;
+    }
+    return true;
+}
+
 // Colours travel as three raw bytes wherever a participant does.
 void writeColor(BitWriter& w, const ParticipantColor& c) {
     w.writeByte(c.r);
@@ -316,6 +341,10 @@ void CollabSession::update(std::uint64_t nowMs) {
         // false — especially when false: it is the "no" that has to reach the
         // host for it to refuse us, and a refusal is what gets the user asked.
         w.writeBool(m_cfg.syncLargeAssets);
+        // What this project contains, so the host can tell a copy of its project from
+        // a different one that happens to carry the same manifest id (and the other
+        // way round). Last, so every earlier field keeps its place.
+        writeFingerprint(w, m_cfg.projectFingerprint);
         m_net->send(m_net->connections().front(), kMsgJoinRequest, w);
         m_joinSent = true;
     }
@@ -419,9 +448,15 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
                     name.c_str());
         return;
     }
+    ProjectFingerprint joinerFingerprint;
     if (!r.readString(clientKey) || !readAvatar(r, avatar, m_cfg.maxAvatarSize) ||
         !readColor(r, wish) || !r.readBool(wantsLargeAssets)) {
         HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (no identity block)",
+                    name.c_str());
+        return;
+    }
+    if (!readFingerprint(r, joinerFingerprint)) {
+        HE_LOG_WARN(Net, "Collab: malformed join request from \"%s\" (bad project fingerprint)",
                     name.c_str());
         return;
     }
@@ -430,6 +465,28 @@ void CollabSession::handleJoinRequest(ConnectionId conn, BitReader& r) {
     if (isBanned(clientKey, name)) {
         HE_LOG_WARN(Net, "Collab: refusing \"%s\" — banned for this session", name.c_str());
         reject(JoinRejectReason::Banned);
+        return;
+    }
+    // The files, not just the id: -1 when either side is too small to say.
+    const double overlap = ProjectFingerprint::overlap(m_cfg.projectFingerprint, joinerFingerprint);
+    if (projectKey == m_cfg.projectKey && overlap >= 0.0 &&
+        overlap < ProjectFingerprint::kDivergedBelow) {
+        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — same project id (%s) but only %.0f%% of "
+                         "the assets are shared (this session: %u assets, joiner: %u)",
+                    name.c_str(),
+                    m_cfg.projectKey.empty() ? "<none>" : m_cfg.projectKey.c_str(),
+                    overlap * 100.0, static_cast<unsigned>(m_cfg.projectFingerprint.assetCount),
+                    static_cast<unsigned>(joinerFingerprint.assetCount));
+        reject(JoinRejectReason::ProjectDiverged, m_cfg.projectLabel);
+        return;
+    }
+    if (projectKey != m_cfg.projectKey && overlap >= ProjectFingerprint::kSameContentAtLeast) {
+        HE_LOG_WARN(Net, "Collab: rejecting \"%s\" — the assets match (%.0f%% shared) but the "
+                         "project ids differ: this session \"%s\", the joiner \"%s\"",
+                    name.c_str(), overlap * 100.0,
+                    m_cfg.projectKey.empty() ? "<none>" : m_cfg.projectKey.c_str(),
+                    projectKey.empty() ? "<none>" : projectKey.c_str());
+        reject(JoinRejectReason::ProjectIdMismatch, m_cfg.projectLabel);
         return;
     }
     if (projectKey != m_cfg.projectKey) {
@@ -1696,7 +1753,7 @@ bool CollabSession::sendAsset(const AssetUpdate& a) {
                 a.intent == AssetIntent::Create ? ", new" : "");
 
     if (m_role == NetRole::Host) {
-        for (const ConnectionId c : m_net->connections()) sendAssetChunks(c, m_localId, a);
+        sendAssetChunks(m_net->connections(), m_localId, a);
         return true;
     }
     if (m_net->connections().empty()) {
@@ -1704,12 +1761,17 @@ bool CollabSession::sendAsset(const AssetUpdate& a) {
         return false;
     }
     // Client → host: no participant id, the host stamps it.
-    sendAssetChunks(m_net->connections().front(), kInvalidParticipant, a);
+    sendAssetChunks({ m_net->connections().front() }, kInvalidParticipant, a);
     return true;
 }
 
-void CollabSession::sendAssetChunks(ConnectionId conn, ParticipantId from,
+void CollabSession::sendAssetChunks(const std::vector<ConnectionId>& to, ParticipantId from,
                                     const AssetUpdate& a) {
+    // Every frame is the same for every target (one `from` stamp), so each is
+    // serialized once and handed to all of them: per peer the order is still
+    // Begin → chunks → End, only the peers' streams interleave. Over a relay
+    // that is also what lets the fan-out send one frame instead of N.
+    if (to.empty()) return;
     const bool stamped = (from != kInvalidParticipant);
     const auto total    = static_cast<std::uint32_t>(a.bytes.size());
     const std::uint32_t chunkSize = std::max<std::uint32_t>(1, m_cfg.chunkBytes);
@@ -1727,21 +1789,22 @@ void CollabSession::sendAssetChunks(ConnectionId conn, ParticipantId from,
     begin.writeUInt32(a.revision);
     begin.writeUInt32(total);
     begin.writeUInt32(chunks);
-    m_net->send(conn, kMsgAssetBegin, begin);
+    m_net->sendTo(to, kMsgAssetBegin, begin);
 
     for (std::uint32_t i = 0; i < chunks; ++i) {
         const std::uint32_t offset = i * chunkSize;
         const std::uint32_t len    = std::min(chunkSize, total - offset);
         BitWriter chunk;
+        chunk.reserveBytes(8 + len);
         if (stamped) chunk.writeUInt32(from);
         chunk.writeUInt32(len);
         chunk.writeBytes(a.bytes.data() + offset, len);
-        m_net->send(conn, kMsgAssetChunk, chunk);
+        m_net->sendTo(to, kMsgAssetChunk, chunk);
     }
 
     BitWriter end;
     if (stamped) end.writeUInt32(from);
-    m_net->send(conn, kMsgAssetEnd, end);
+    m_net->sendTo(to, kMsgAssetEnd, end);
 }
 
 void CollabSession::handleAssetUpdate(ConnectionId conn, BitReader& r) {
@@ -2060,7 +2123,7 @@ bool CollabSession::sendAssetTo(ParticipantId to, const AssetUpdate& a) {
                     detail::logBytes(m_cfg.maxAssetBytes).c_str());
         return false;
     }
-    sendAssetChunks(conn, m_localId, a);
+    sendAssetChunks({ conn }, m_localId, a);
     return true;
 }
 
@@ -2394,9 +2457,12 @@ void CollabSession::installAssetChunkHandlers() {
 
                 // Host also fans it out to everyone else.
                 if (host) {
+                    std::vector<ConnectionId> others;
+                    others.reserve(m_net->connections().size());
                     for (const ConnectionId other : m_net->connections()) {
-                        if (other != conn) sendAssetChunks(other, a.sender, up);
+                        if (other != conn) others.push_back(other);
                     }
+                    sendAssetChunks(others, a.sender, up);
                     // …and tells the creator it went through, so their side can
                     // stop treating the asset as merely local.
                     if (up.intent == AssetIntent::Create) {

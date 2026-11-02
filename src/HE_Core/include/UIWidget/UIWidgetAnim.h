@@ -103,9 +103,10 @@ struct UIAnimTrack
     // (see WidgetManager::resolveScriptOwner).
     int         element = 0;
     std::string prop;          // the property's name, as everywhere else
-    // Sorted by time. Nothing enforces it on load, and evaluation does not
-    // depend on it beyond "the last key at a time wins", so a hand-edited file
-    // with two keys at 0.5 still evaluates the same way twice.
+    // Normally sorted by time, but nothing enforces it on load and evaluation
+    // does not need it: it picks the neighbours by time, and of two keys at one
+    // time the later in the list wins, so a hand-edited file with keys out of
+    // order or two keys at 0.5 still evaluates the same way twice.
     std::vector<UIAnimKey> keys;
 };
 

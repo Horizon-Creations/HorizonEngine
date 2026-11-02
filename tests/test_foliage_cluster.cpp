@@ -93,12 +93,12 @@ namespace
 			tc.seed = heightScale > 0.0f ? 5 : 0;
 			reg.emplace<TerrainComponent>(terrain, tc);
 			FoliageComponent fol;
-			fol.meshAssetId  = HE::kDefaultCubeMeshId;
-			fol.density      = density;
-			fol.seed         = 11;
-			fol.minScale     = 0.5f;
-			fol.maxScale     = 1.5f;
-			fol.drawDistance = drawDistance;
+			fol.layers[0].meshAssetId  = HE::kDefaultCubeMeshId;
+			fol.layers[0].density      = density;
+			fol.layers[0].seed         = 11;
+			fol.layers[0].minScale     = 0.5f;
+			fol.layers[0].maxScale     = 1.5f;
+			fol.layers[0].drawDistance = drawDistance;
 			reg.emplace<FoliageComponent>(terrain, fol);
 			FoliageSystem::update(world);
 		}
@@ -189,9 +189,9 @@ namespace
 	// ground-plane distance to the camera is within the layer's draw distance.
 	std::vector<glm::mat4> cachedInRange(const FoliageComponent& fol, const glm::vec3& cam)
 	{
-		const float dd2 = fol.drawDistance * fol.drawDistance;
+		const float dd2 = fol.layers[0].drawDistance * fol.layers[0].drawDistance;
 		std::vector<glm::mat4> v;
-		for (const glm::mat4& m : fol.cachedInstances)
+		for (const glm::mat4& m : fol.layers[0].cachedInstances)
 		{
 			const float dx = m[3].x - cam.x, dz = m[3].z - cam.z;
 			if (dx * dx + dz * dz <= dd2) v.push_back(m);
@@ -206,9 +206,9 @@ namespace
 	{
 		const FoliageComponent& fol = f.fol();
 		const glm::mat4 W = f.terrainWorld();
-		const float dd2 = fol.drawDistance * fol.drawDistance;
+		const float dd2 = fol.layers[0].drawDistance * fol.layers[0].drawDistance;
 		std::vector<glm::mat4> v;
-		for (const glm::mat4& l : fol.store->local)
+		for (const glm::mat4& l : fol.layers[0].store->local)
 		{
 			const glm::mat4 w = W * l;
 			const float dx = w[3].x - cam.x, dz = w[3].z - cam.z;
@@ -232,10 +232,10 @@ TEST_CASE("FoliageSystem: the store is the scatter, sorted into buckets and terr
 	// 100 m square at an offset, hilly: 4 x 4 buckets of 32 m, instances at varied heights.
 	Field f(100.0f, 0.25f, 1.0e6f, glm::vec3(10.0f, 5.0f, -20.0f), glm::vec3(0.0f), glm::vec3(1.0f), 6.0f);
 	const FoliageComponent& fol = f.fol();
-	REQUIRE(fol.store);
-	const FoliageStore& st = *fol.store;
-	REQUIRE(fol.cachedInstances.size() == 2500u);
-	CHECK(st.local.size() == fol.cachedInstances.size());
+	REQUIRE(fol.layers[0].store);
+	const FoliageStore& st = *fol.layers[0].store;
+	REQUIRE(fol.layers[0].cachedInstances.size() == 2500u);
+	CHECK(st.local.size() == fol.layers[0].cachedInstances.size());
 	CHECK(st.gridX == 4);
 	CHECK(st.gridZ == 4);
 	CHECK(st.buckets.size() > 1u);
@@ -250,7 +250,7 @@ TEST_CASE("FoliageSystem: the store is the scatter, sorted into buckets and terr
 		w[3] = glm::vec4(glm::vec3(l[3]) + origin, 1.0f);
 		fromStore.push_back(w);
 	}
-	std::vector<glm::mat4> cached = fol.cachedInstances;
+	std::vector<glm::mat4> cached = fol.layers[0].cachedInstances;
 	sorted(fromStore);
 	sorted(cached);
 	CHECK(fromStore == cached);
@@ -258,8 +258,8 @@ TEST_CASE("FoliageSystem: the store is the scatter, sorted into buckets and terr
 	// The buckets tile the array, every instance sits in its own cell, the bounds hold
 	// the origins, and inside a bucket the scatter's order survived (a prefix is a thinning).
 	std::map<std::pair<float, float>, size_t> generation;   // (x, z) in scatter order -> index
-	for (size_t i = 0; i < fol.cachedInstances.size(); ++i)
-		generation[{ fol.cachedInstances[i][3].x, fol.cachedInstances[i][3].z }] = i;
+	for (size_t i = 0; i < fol.layers[0].cachedInstances.size(); ++i)
+		generation[{ fol.layers[0].cachedInstances[i][3].x, fol.layers[0].cachedInstances[i][3].z }] = i;
 	uint32_t next = 0;
 	for (const FoliageBucket& b : st.buckets)
 	{
@@ -308,14 +308,14 @@ TEST_CASE("FoliageSystem: the cached layout is the one the scatter always produc
 	const TerrainComponent& tc  = f.world.registry().get<TerrainComponent>(f.terrain);
 
 	std::vector<glm::mat4> expected;
-	const int   count = static_cast<int>(tc.sizeX * tc.sizeZ * fol.density);
-	uint32_t    rng   = static_cast<uint32_t>(fol.seed) ^ 0xABCD1234u;
+	const int   count = static_cast<int>(tc.sizeX * tc.sizeZ * fol.layers[0].density);
+	uint32_t    rng   = static_cast<uint32_t>(fol.layers[0].seed) ^ 0xABCD1234u;
 	for (int i = 0; i < count; ++i)
 	{
 		const float lx = refRand(rng) * tc.sizeX - tc.sizeX * 0.5f;
 		const float lz = refRand(rng) * tc.sizeZ - tc.sizeZ * 0.5f;
 		const float rotY  = refRand(rng) * 6.2831853f;
-		const float scale = fol.minScale + refRand(rng) * (fol.maxScale - fol.minScale);
+		const float scale = fol.layers[0].minScale + refRand(rng) * (fol.layers[0].maxScale - fol.layers[0].minScale);
 		const float ly = terrainHeightAt(tc, lx, lz);
 		const glm::vec3 worldPos = origin + glm::vec3(lx, ly, lz);
 		glm::mat4 m = glm::translate(glm::mat4(1.f), worldPos);
@@ -323,7 +323,7 @@ TEST_CASE("FoliageSystem: the cached layout is the one the scatter always produc
 		m = glm::scale(m, glm::vec3(scale));
 		expected.push_back(m);
 	}
-	REQUIRE(expected.size() == fol.cachedInstances.size());
+	REQUIRE(expected.size() == fol.layers[0].cachedInstances.size());
 	// Same random stream, same formulas: the same plants. Bit for bit on Apple clang (arm64); GCC 13 on x86-64
 	// (the Linux CI) rounds the sin/cos of the rotation, or the height, differently in the library and in this
 	// test's own copy of the loop for about one plant in eight, by an ulp or two. A change to the generator moves
@@ -334,9 +334,9 @@ TEST_CASE("FoliageSystem: the cached layout is the one the scatter always produc
 	{
 		for (int c = 0; c < 3; ++c)
 			for (int r = 0; r < 4; ++r)
-				worst3 = std::max(worst3, std::abs(expected[i][c][r] - fol.cachedInstances[i][c][r]));
+				worst3 = std::max(worst3, std::abs(expected[i][c][r] - fol.layers[0].cachedInstances[i][c][r]));
 		for (int r = 0; r < 4; ++r)
-			worstPos = std::max(worstPos, std::abs(expected[i][3][r] - fol.cachedInstances[i][3][r]));
+			worstPos = std::max(worstPos, std::abs(expected[i][3][r] - fol.layers[0].cachedInstances[i][3][r]));
 	}
 	MESSAGE("largest deviation: orientation/scale ", worst3, ", position ", worstPos);
 	CHECK(worst3 <= 1.0e-5f);
@@ -353,14 +353,14 @@ TEST_CASE("FoliageComponent::revision counts re-scatters and settings the extrac
 	FoliageSystem::update(f.world);       // nothing changed
 	CHECK(fol.revision == r0);
 
-	fol.drawDistance = 120.0f;            // a setting the extraction reads
+	fol.layers[0].drawDistance = 120.0f;            // a setting the extraction reads
 	FoliageSystem::update(f.world);
 	CHECK(fol.revision > r0);
 	const uint32_t r1 = fol.revision;
 	FoliageSystem::update(f.world);
 	CHECK(fol.revision == r1);
 
-	fol.castsShadow = false;
+	fol.layers[0].castsShadow = false;
 	FoliageSystem::update(f.world);
 	CHECK(fol.revision > r1);
 	const uint32_t r2 = fol.revision;
@@ -368,23 +368,23 @@ TEST_CASE("FoliageComponent::revision counts re-scatters and settings the extrac
 	fol.dirty = true;                     // a re-scatter
 	FoliageSystem::update(f.world);
 	CHECK(fol.revision > r2);
-	CHECK(fol.store);
+	CHECK(fol.layers[0].store);
 
 	// A different bucket grid is a different store: asked for, it is rebuilt.
 	const uint32_t r3 = fol.revision;
-	fol.bucketSize = 16.0f;
+	fol.layers[0].bucketSize = 16.0f;
 	FoliageSystem::update(f.world);
 	CHECK(fol.revision > r3);
-	REQUIRE(fol.store);
-	CHECK(fol.store->bucketSize == doctest::Approx(16.0f));
-	CHECK(fol.store->gridX == 4);         // 50 m / 16 m, rounded up
+	REQUIRE(fol.layers[0].store);
+	CHECK(fol.layers[0].store->bucketSize == doctest::Approx(16.0f));
+	CHECK(fol.layers[0].store->gridX == 4);         // 50 m / 16 m, rounded up
 
 	// A layer with no mesh has nothing to extract.
-	fol.meshAssetId = HE::UUID{};
+	fol.layers[0].meshAssetId = HE::UUID{};
 	fol.dirty = true;
 	FoliageSystem::update(f.world);
-	CHECK_FALSE(fol.store);
-	CHECK(fol.cachedInstances.empty());
+	CHECK_FALSE(fol.layers[0].store);
+	CHECK(fol.layers[0].cachedInstances.empty());
 }
 
 // ─── Cluster unfolded == the same single objects ──────────────────────────────
@@ -431,7 +431,7 @@ TEST_CASE("Foliage clusters unfold into exactly the instances the per-instance p
 		const HE::FoliageExtractStats stats = [&] { extractField(f, cam, true); return HE::lastFoliageExtractStats(); }();
 		CHECK(stats.clusters == clustered.objects.size());
 		CHECK(stats.clusterInstances == expected.size());
-		CHECK(stats.totalInstances == f.fol().cachedInstances.size());
+		CHECK(stats.totalInstances == f.fol().layers[0].cachedInstances.size());
 		if (c.drawDistance > 1.0e5f) CHECK(stats.straddlingBuckets == 0u);
 		if (c.drawDistance < 100.0f) CHECK(stats.straddlingBuckets > 0u);   // the instance-by-instance path ran
 	}
@@ -450,7 +450,7 @@ TEST_CASE("Foliage clusters follow a terrain that is rotated, scaled and parente
 	const RenderWorld single    = extractField(f, cam, false);
 	const std::vector<glm::mat4> expected = storeInRange(f, clustered.camera.position);
 	REQUIRE(expected.size() > 0u);
-	REQUIRE(expected.size() < f.fol().store->local.size());   // a real subset: the circle matters
+	REQUIRE(expected.size() < f.fol().layers[0].store->local.size());   // a real subset: the circle matters
 	CHECK(drawnInstances(clustered) == expected);
 	CHECK(drawnInstances(single)    == expected);
 	CHECK(depthInstances(clustered, RenderSorter::DepthFilter::ShadowCasters) == expected);
@@ -707,6 +707,75 @@ TEST_CASE("GeometryPass cuts a run longer than one instanced draw may carry")
 	CHECK(drawnInstances(syntheticRun(100, 3)).size() == 103u);
 }
 
+TEST_CASE("GeometryPass keeps the instance order across its cuts, and a big block unfolds on the workers bit for bit")
+{
+	// Two clusters under a rotated parent (the General product) around an ordinary object, all of
+	// one mesh: one run of 2 * 50 000 + 1 instances, cut at the cap in the middle of the second
+	// cluster. The draws are filled straight from the objects now (frame-parallelism audit, lever
+	// 1), so the order across a cut is the thing to keep: draw by draw it must be the serial
+	// unfolding, world(i) of each block in turn.
+	RenderWorld rw;
+	const HE::UUID mesh{ 7, 7 };
+	const glm::mat4 parent = glm::rotate(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 4.0f, 5.0f)),
+	                                     0.7f, glm::vec3(0.3f, 1.0f, 0.2f));
+	for (int c = 0; c < 2; ++c)
+	{
+		auto mats = std::make_shared<std::vector<glm::mat4>>();
+		for (uint32_t i = 0; i < 50000; ++i)
+			mats->push_back(glm::scale(glm::translate(glm::mat4(1.0f), glm::vec3(float(i) * 0.37f, float(c), 1.0f)),
+			                           glm::vec3(1.0f + float(i % 7) * 0.1f)));
+		InstanceBlock b;
+		b.matrices = mats;
+		b.count    = 50000;
+		b.parent   = parent;
+		b.kind     = InstanceBlock::classify(parent);
+		rw.instanceBlocks.push_back(b);
+		RenderObject o;
+		o.meshAssetId   = mesh;
+		o.transform     = b.world(0);
+		o.instanceBlock = c;
+		rw.objects.push_back(o);
+		if (c == 0)
+		{
+			RenderObject plain;
+			plain.meshAssetId = mesh;
+			plain.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(-9.0f, 0.0f, 0.0f));
+			rw.objects.push_back(plain);
+		}
+	}
+	REQUIRE(rw.instanceBlocks[0].kind == InstanceBlock::Parent::General);
+
+	std::vector<glm::mat4> expected;
+	for (const RenderObject& o : rw.objects) rw.forEachInstance(o, [&](const glm::mat4& m) { expected.push_back(m); });
+
+	std::vector<uint32_t> idx(rw.objects.size());
+	std::iota(idx.begin(), idx.end(), 0u);
+	CommandBuffer cmds;
+	GeometryPass{}.execute(rw, idx, cmds);
+	std::vector<glm::mat4> drawn;
+	for (const DrawCall& dc : cmds.drawCalls())
+	{
+		if (dc.instanceTransforms.empty()) drawn.push_back(dc.transform);
+		else
+		{
+			CHECK(dc.transform == dc.instanceTransforms.front());
+			drawn.insert(drawn.end(), dc.instanceTransforms.begin(), dc.instanceTransforms.end());
+		}
+	}
+	REQUIRE(drawn.size() == expected.size());
+	CHECK(std::memcmp(drawn.data(), expected.data(), drawn.size() * sizeof(glm::mat4)) == 0);
+
+	// A part of a block, as a cut takes it, is the same instances in place.
+	std::vector<glm::mat4> part;
+	rw.appendInstanceRange(rw.objects[2], 1234, 20000, part);
+	REQUIRE(part.size() == 20000u);
+	CHECK(std::memcmp(part.data(), expected.data() + 50001 + 1234, part.size() * sizeof(glm::mat4)) == 0);
+	part.clear();
+	rw.appendInstanceRange(rw.objects[1], 0, 1, part);   // an ordinary object is instance 0 of one
+	REQUIRE(part.size() == 1u);
+	CHECK(part[0] == rw.objects[1].transform);
+}
+
 TEST_CASE("batchDepthRuns unfolds a cluster and cuts the run at the instance cap")
 {
 	const uint32_t cap = HE::kMaxInstancesPerDraw;
@@ -730,6 +799,148 @@ TEST_CASE("batchDepthRuns unfolds a cluster and cuts the run at the instance cap
 	noShadow.objects.back().contributesAO = false;
 	RenderSorter::batchDepthRuns(noShadow, idx, RenderSorter::DepthFilter::AoContributors, kNoOwnerEntity, list);
 	CHECK(list.transforms.size() == 4u);
+}
+
+namespace
+{
+// Two 50 000-plant clusters under a rotated parent (the General product) around an
+// ordinary object, all one mesh: one run cut at the instance cap inside the second cluster.
+RenderWorld twoGeneralClusters()
+{
+	RenderWorld rw;
+	const HE::UUID mesh{ 7, 7 };
+	const glm::mat4 parent = glm::rotate(glm::translate(glm::mat4(1.0f), glm::vec3(3.0f, 4.0f, 5.0f)),
+	                                     0.7f, glm::vec3(0.3f, 1.0f, 0.2f));
+	for (int c = 0; c < 2; ++c)
+	{
+		auto mats = std::make_shared<std::vector<glm::mat4>>();
+		for (uint32_t i = 0; i < 50000; ++i)
+			mats->push_back(glm::translate(glm::mat4(1.0f), glm::vec3(float(i) * 0.37f, float(c), 1.0f)));
+		InstanceBlock b;
+		b.matrices = mats;
+		b.count    = 50000;
+		b.parent   = parent;
+		b.kind     = InstanceBlock::classify(parent);
+		rw.instanceBlocks.push_back(b);
+		RenderObject o;
+		o.meshAssetId   = mesh;
+		o.transform     = b.world(0);
+		o.instanceBlock = c;
+		rw.objects.push_back(o);
+		if (c == 0)
+		{
+			RenderObject plain;
+			plain.meshAssetId = mesh;
+			plain.transform   = glm::translate(glm::mat4(1.0f), glm::vec3(-9.0f, 0.0f, 0.0f));
+			rw.objects.push_back(plain);
+		}
+	}
+	return rw;
+}
+
+std::vector<glm::mat4> flatten(const DrawCall& dc)
+{
+	std::vector<glm::mat4> out;
+	if (dc.instanceTotal() == 0) { out.push_back(dc.transform); return out; }
+	dc.forEachInstance([&](const glm::mat4& m) { out.push_back(m); });
+	return out;
+}
+} // namespace
+
+TEST_CASE("GeometryPass with instance spans draws the same instances, in the same draws, as the copies")
+{
+	// Metal reads a run's instances in place (GeometryPass::setInstanceSpans): the foliage
+	// matrices are unfolded once per block, not once per pass. Draw for draw the instances,
+	// their order and dc.transform must be what the copying path hands every other backend.
+	const RenderWorld rw = twoGeneralClusters();
+	std::vector<uint32_t> idx(rw.objects.size());
+	std::iota(idx.begin(), idx.end(), 0u);
+	CommandBuffer copies, spans;
+	GeometryPass{}.execute(rw, idx, copies);
+	GeometryPass spanPass;
+	spanPass.setInstanceSpans(true);
+	spanPass.execute(rw, idx, spans);
+	REQUIRE(copies.drawCalls().size() == spans.drawCalls().size());
+	REQUIRE(spans.drawCalls().size() == 2u);   // 100 001 instances, one cut
+	for (size_t d = 0; d < copies.drawCalls().size(); ++d)
+	{
+		const DrawCall& a = copies.drawCalls()[d];
+		const DrawCall& b = spans.drawCalls()[d];
+		CAPTURE(d);
+		CHECK(b.instanceTransforms.empty());
+		CHECK(a.instanceCount == b.instanceCount);
+		CHECK(a.instanceTotal() == b.instanceTotal());
+		CHECK(std::memcmp(&a.transform, &b.transform, sizeof(glm::mat4)) == 0);
+		CHECK(std::memcmp(&a.firstInstance(), &b.firstInstance(), sizeof(glm::mat4)) == 0);
+		const std::vector<glm::mat4> fa = flatten(a), fb = flatten(b);
+		REQUIRE(fa.size() == fb.size());
+		CHECK(std::memcmp(fa.data(), fb.data(), fa.size() * sizeof(glm::mat4)) == 0);
+	}
+}
+
+TEST_CASE("batchDepthRuns with spans forms the same runs over the same instances as the copies")
+{
+	for (const RenderWorld& rw : { syntheticRun(150000, 4), twoGeneralClusters() })
+	{
+		std::vector<uint32_t> idx(rw.objects.size());
+		std::iota(idx.begin(), idx.end(), 0u);
+		for (RenderSorter::DepthFilter f : { RenderSorter::DepthFilter::ShadowCasters, RenderSorter::DepthFilter::All })
+		{
+			RenderSorter::DepthBatchList copies, spans;
+			spans.useSpans = true;
+			RenderSorter::batchDepthRuns(rw, idx, f, kNoOwnerEntity, copies);
+			RenderSorter::batchDepthRuns(rw, idx, f, kNoOwnerEntity, spans);
+			CHECK(spans.transforms.empty());
+			CHECK(spans.useSpans);   // clear() keeps the mode
+			REQUIRE(copies.batches.size() == spans.batches.size());
+			for (size_t i = 0; i < copies.batches.size(); ++i)
+			{
+				const auto& a = copies.batches[i];
+				const auto& b = spans.batches[i];
+				CHECK(a.meshAssetId == b.meshAssetId);
+				REQUIRE(a.count == b.count);
+				std::vector<glm::mat4> fb;
+				for (uint32_t s = 0; s < b.spanCount; ++s)
+				{
+					const InstanceSpan& sp = spans.spans[b.spanFirst + s];
+					fb.insert(fb.end(), sp.src, sp.src + sp.n);
+				}
+				REQUIRE(fb.size() == a.count);
+				CHECK(std::memcmp(fb.data(), copies.transforms.data() + a.first, fb.size() * sizeof(glm::mat4)) == 0);
+			}
+		}
+	}
+}
+
+TEST_CASE("instanceWorldMatrices: once per block, in place for an identity parent, released when unused")
+{
+	RenderWorld rw = twoGeneralClusters();
+	const InstanceBlock& g = rw.instanceBlocks[0];
+	const glm::mat4* first = instanceWorldMatrices(g);
+	CHECK(instanceWorldMatrices(g) == first);              // the same array, not a second unfolding
+	for (uint32_t i : { 0u, 1u, 777u, 49999u })
+	{
+		const glm::mat4 w = g.world(i);
+		CHECK(std::memcmp(&first[i], &w, sizeof(glm::mat4)) == 0);
+	}
+
+	InstanceBlock id = g;
+	id.parent = glm::mat4(1.0f);
+	id.kind   = InstanceBlock::Parent::Identity;
+	CHECK(instanceWorldMatrices(id) == id.matrices->data());   // nothing to compute
+
+	// A moved parent is a new entry; one no frame asks for any more ages out.
+	InstanceBlock moved = g;
+	moved.parent = glm::translate(g.parent, glm::vec3(1.0f, 0.0f, 0.0f));
+	CHECK(instanceWorldMatrices(moved) != first);
+	const size_t before = instanceWorldCacheEntries();
+	for (int f = 0; f < 12; ++f)
+	{
+		instanceWorldCacheNextFrame();
+		(void)instanceWorldMatrices(g);   // still in use every frame
+	}
+	CHECK(instanceWorldCacheEntries() < before);
+	CHECK(instanceWorldMatrices(g) == first);              // the one in use survived
 }
 
 TEST_CASE("InstanceBlock::position is exactly world()[3] for every kind of parent")
@@ -790,7 +1001,7 @@ TEST_CASE("A RenderWorld copy keeps the instances it was extracted from across a
 	const std::vector<glm::mat4> first = drawnInstances(kept);
 	REQUIRE(!first.empty());
 
-	f.fol().seed  = 99;               // a different scatter replaces the store
+	f.fol().layers[0].seed  = 99;               // a different scatter replaces the store
 	f.fol().dirty = true;
 	FoliageSystem::update(f.world);
 	const RenderWorld fresh = extractField(f, cam, true);
@@ -813,15 +1024,15 @@ TEST_CASE("Foliage flags: casting, ambient occlusion and the shadow distance rea
 	CHECK(count(rw, [](const RenderObject& o) { return o.castsShadow && o.contributesAO; }) == static_cast<long>(rw.objects.size()));
 
 	// Grass: no ambient occlusion.
-	f.fol().contributesAO = false;
+	f.fol().layers[0].contributesAO = false;
 	rw = extractField(f, cam, true);
 	CHECK(count(rw, [](const RenderObject& o) { return o.contributesAO; }) == 0);
 	CHECK(depthInstances(rw, RenderSorter::DepthFilter::AoContributors).empty());
 	CHECK_FALSE(depthInstances(rw, RenderSorter::DepthFilter::ShadowCasters).empty());
-	f.fol().contributesAO = true;
+	f.fol().layers[0].contributesAO = true;
 
 	// A shadow distance shorter than the draw distance: the near buckets cast, the far ones do not.
-	f.fol().shadowDistance = 40.0f;
+	f.fol().layers[0].shadowDistance = 40.0f;
 	rw = extractField(f, cam, true);
 	const long casters = count(rw, [](const RenderObject& o) { return o.castsShadow; });
 	CHECK(casters > 0);
@@ -837,10 +1048,10 @@ TEST_CASE("Foliage flags: casting, ambient occlusion and the shadow distance rea
 			CHECK(std::sqrt(dx * dx + dz * dz) > 39.99f);
 		});
 	}
-	f.fol().shadowDistance = 0.0f;
+	f.fol().layers[0].shadowDistance = 0.0f;
 
 	// Not a caster at all.
-	f.fol().castsShadow = false;
+	f.fol().layers[0].castsShadow = false;
 	rw = extractField(f, cam, true);
 	CHECK(count(rw, [](const RenderObject& o) { return o.castsShadow; }) == 0);
 	CHECK(depthInstances(rw, RenderSorter::DepthFilter::ShadowCasters).empty());
@@ -1032,7 +1243,8 @@ TEST_CASE("Every backend refreshes bounds through RenderObject::refineWorldBound
 	}
 	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
 	// Metal and Vulkan refine once per walk (Thema 162, step 4): one helper holds the loop and
-	// the five passes that need the bounds call it. The other three still loop in place.
+	// the five passes that need the bounds call it. GL, D3D11, D3D12 and Vulkan hand the loop to
+	// FrameCull::refine (the one place outside Metal that calls refineWorldBounds); Metal keeps its own.
 	struct RefineSite
 	{
 		const char* file;
@@ -1041,9 +1253,14 @@ TEST_CASE("Every backend refreshes bounds through RenderObject::refineWorldBound
 		size_t      helperCalls;
 	};
 	const RefineSite refineSites[] = {
-		{ "Metal/MetalRenderer.mm", 1, "RefineObjectBounds();", 5 }, { "OpenGL/OpenGLRenderer.cpp", 2, nullptr, 0 },
-		{ "D3D11/D3D11Renderer.cpp", 1, nullptr, 0 }, { "D3D12/D3D12Renderer.cpp", 1, nullptr, 0 },
-		{ "Vulkan/VulkanRenderer.cpp", 1, "refineObjectBounds();", 5 } };
+		{ "Metal/MetalRenderer.mm", 1, "RefineObjectBounds();", 5 }, { "OpenGL/OpenGLRenderer.cpp", 0, "RefineObjectBounds();", 2 },
+		{ "D3D11/D3D11Renderer.cpp", 0, "p.m_frameCull.refine(", 1 }, { "D3D12/D3D12Renderer.cpp", 0, "p.m_frameCull.refine(", 1 },
+		{ "Vulkan/VulkanRenderer.cpp", 0, "refineObjectBounds();", 5 } };
+	{
+		const std::string fc = readFile(root / "src" / "HE_Rendering" / "include" / "HorizonRendering" / "FrameCull.h");
+		REQUIRE(!fc.empty());
+		CHECK(countOf(fc, ".refineWorldBounds(") == 1);   // the loop GL, D3D11, D3D12 and Vulkan share
+	}
 	for (const auto& site : refineSites)
 	{
 		const char* rel     = site.file;
@@ -1095,7 +1312,7 @@ TEST_CASE("OpenGL: a graph material keeps its own program, only built-in PBR tak
 	size_t gated = 0;
 	for (size_t i = 0; i < rows.size(); ++i)
 	{
-		if (rows[i].find("dc.instanceTransforms.empty()") == std::string::npos) continue;
+		if (rows[i].find("dc.instanceTotal() > 0") == std::string::npos) continue;   // spans or copies
 		const std::string both = rows[i] + "\n" + (i + 1 < rows.size() ? rows[i + 1] : std::string());
 		const bool builtInInstanced = both.find("m_gbufferInstancedProgram") != std::string::npos
 		                           || both.find("m_instancedProgram") != std::string::npos;
@@ -1107,4 +1324,126 @@ TEST_CASE("OpenGL: a graph material keeps its own program, only built-in PBR tak
 	// Both material branches draw every instance with the material's program.
 	CHECK(countOf(text, "drawGraphInstance(t)") >= 2);
 	CHECK(countOf(text, "pushForward(t)") >= 1);
+}
+
+TEST_CASE("No backend skips a foliage cluster in a per-object pass: velocity, decal depth and pre-passes unfold it")
+{
+	// Thema 182 step 4 (plan 2f). A cluster carries ONE plant's transform for a whole bucket;
+	// a per-object loop that skips it loses the bucket, one that draws `transform` keeps one
+	// plant. Until step 4 D3D11/D3D12/Vulkan skipped clusters in the TAA velocity pass (every
+	// plant then reported "did not move" under a moving camera: measured on the RTX 4070,
+	// motion-vs-static 6.2 % of the ground off by > 24/255 against 2.4-3.0 % unfolded, GL 2.0 %),
+	// and Vulkan also in the decal depth and the SSAO/SSR reflection pre-pass. The only
+	// cluster test left in a backend is the GI/caster exclusion (checked above) or a branch
+	// that unfolds.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - cluster unfold check skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	for (const char* rel : { "Metal/MetalRenderer.mm", "OpenGL/OpenGLRenderer.cpp", "D3D11/D3D11Renderer.cpp",
+	                         "D3D12/D3D12Renderer.cpp", "Vulkan/VulkanRenderer.cpp" })
+	{
+		INFO(rel);
+		const std::string text = readFile(dir / rel);
+		REQUIRE(!text.empty());
+		CHECK(text.find("if (obj.isCluster()) continue;") == std::string::npos);
+	}
+	// The velocity pass of each Windows backend walks the plants, static (prev = now).
+	struct Site { const char* rel; const char* prevPerPlant; };
+	const Site sites[] = {
+		{ "D3D11/D3D11Renderer.cpp",   "c.mvpPrev   = taaPrevViewProj * model;" },
+		{ "D3D12/D3D12Renderer.cpp",   "c.mvpPrev   = p.taaPrevViewProj * model;" },
+		{ "Vulkan/VulkanRenderer.cpp", "const PushConstants pc{ m_taaViewProjJit * model, prevJit * model };" },
+	};
+	for (const Site& s : sites)
+	{
+		INFO(s.rel);
+		const std::string text = readFile(dir / s.rel);
+		CHECK(text.find(s.prevPerPlant) != std::string::npos);
+		CHECK(text.find("forEachInstance(obj") != std::string::npos);
+	}
+	// D3D12's velocity takes per-object ring slots, and the blended pass draws AFTER it from
+	// the same ring: unfolded foliage must leave that pass its slots (100k plants under TAA
+	// otherwise cost the frame its water: "the rest of the frame is not drawn", RTX 4070).
+	const std::string d3d12 = readFile(dir / "D3D12" / "D3D12Renderer.cpp");
+	CHECK(d3d12.find("tail += std::max<size_t>(1, dc->instanceTotal());") != std::string::npos);
+	CHECK(countOf(d3d12, "if (velFull())") == 2); // the object loop and the plant loop
+	// Vulkan's decal depth and reflection pre-pass take the whole cluster, read in place (an
+	// InstanceRun over the block's world matrices, no list).
+	const std::string vk = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
+	CHECK(countOf(vk, "m_renderWorld.instanceRun(obj);") == 2);     // decal depth, the reflection pre-pass
+	CHECK(vk.find("appendInstances(") == std::string::npos);
+	CHECK(vk.find("m_reflPrepassInstPipeline && n > 1 && allocInstances(n") != std::string::npos);
+}
+
+TEST_CASE("D3D11, D3D12 and Vulkan read a run's instances in place and prepare the shadow views together")
+{
+	// Foliage spans (docs/perf-audit/foliage-spans-parallel-shadow-2026-10-26.md, section 4): the
+	// geometry pass hands out InstanceSpans instead of copies, every reader goes through
+	// instanceTotal / forEachInstance / instanceRun, and the shadow pass cuts all its views
+	// side by side (FrameCull::prepareShadowViews) before the first is drawn. The bits are the
+	// copies' (tests above); here the sources are held to it, so a reader that goes back to
+	// DrawCall::instanceTransforms (empty in span mode: the plants would vanish) fails here.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - spans check skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	for (const char* rel : { "D3D11/D3D11Renderer.cpp", "D3D12/D3D12Renderer.cpp", "Vulkan/VulkanRenderer.cpp" })
+	{
+		INFO(rel);
+		const std::string text = readFile(dir / rel);
+		REQUIRE(!text.empty());
+		CHECK(countOf(text, "setInstanceSpans(RenderSorter::instanceSpansEnabled())") == 1);
+		CHECK(text.find("instanceTransforms") == std::string::npos);
+		CHECK(countOf(text, "prepareShadowViews(") == 1);
+		CHECK(text.find("batchDepthCasters(") == std::string::npos);       // FrameCull does it, per view
+		CHECK(countOf(text, "instanceWorldCacheNextFrame();") == 1);      // the unfolded blocks are let go
+	}
+	// Vulkan's two pre-pass batch lists read in place too.
+	const std::string vk = readFile(dir / "Vulkan" / "VulkanRenderer.cpp");
+	CHECK(countOf(vk, "m_preBatches.useSpans = RenderSorter::instanceSpansEnabled();") == 2);
+}
+
+TEST_CASE("The SSAO position pre-pass depth is D32 on D3D11, D3D12 and Vulkan, at every site")
+{
+	// Thema 182 step 6 (decision 110). The pre-pass had its own D16 depth on the three Windows
+	// backends (GL 24 bit, Metal 32): at 50-90 m a plant and the ground rounded to one value
+	// and the draw order decided the position target, so foliage clusters against the ordered
+	// cluster differed in 0.21 % (D3D11/D3D12) and 0.51 % (Vulkan) of the ground; with D32 the
+	// two are pixel-identical (RTX 4070). Texture, view, PSO / render pass must agree on the
+	// format, so each backend keeps one constant and every site names it.
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("backend sources not found - SSAO depth check skipped");
+		return;
+	}
+	const fs::path dir = root / "src" / "HE_Rendering" / "src" / "Backends";
+	struct Site { const char* rel; const char* def; std::vector<std::pair<const char*, size_t>> uses; };
+	const Site sites[] = {
+		{ "D3D11/D3D11Renderer.cpp", "kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT;",
+		  { { "dd.Format = kSsaoPosDepthFormat;", 1 } } },   // the DSV takes the texture's format
+		{ "D3D12/D3D12Renderer.cpp", "kSsaoPosDepthFormat = DXGI_FORMAT_D32_FLOAT;",
+		  { { "makeRT(kSsaoPosDepthFormat,", 1 }, { "dvd.Format        = kSsaoPosDepthFormat;", 1 },
+		    { "pd.DSVFormat             = kSsaoPosDepthFormat;", 2 } } },   // ssaoPosPSO(+Instanced), reflPrepassPSO
+		{ "Vulkan/VulkanRenderer.cpp", "kSsaoPosDepthFormat = VK_FORMAT_D32_SFLOAT;",
+		  { { "ssaoMakeImage(m_device, 0, kSsaoPosDepthFormat,", 1 },
+		    { "atts[1].format         = kSsaoPosDepthFormat;", 1 },     // m_ssaoPosRenderPass
+		    { "atts[3].format         = kSsaoPosDepthFormat;", 1 } } }, // m_reflPrepassRP, same image
+	};
+	for (const Site& s : sites)
+	{
+		INFO(s.rel);
+		const std::string text = readFile(dir / s.rel);
+		REQUIRE(!text.empty());
+		CHECK(countOf(text, s.def) == 1);
+		for (const auto& [use, n] : s.uses)
+			CHECK_MESSAGE(countOf(text, use) == n, std::string(use));
+	}
 }

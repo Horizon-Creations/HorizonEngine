@@ -14,6 +14,14 @@
 
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
+// MP3 and FLAC are only decoded here to prove the file plays and to read its
+// rate/channels; the bytes themselves are stored as they came (like Ogg). The
+// engine decodes them with miniaudio's own embedded copies of these two, which
+// are static there, so nothing clashes.
+#define DR_MP3_IMPLEMENTATION
+#include "dr_mp3.h"
+#define DR_FLAC_IMPLEMENTATION
+#include "dr_flac.h"
 
 // The same stb_vorbis.c the AudioEngine plays with (src/HE_Scene/vendor), here
 // only to prove an .ogg decodes before it becomes an asset. HorizonImporters is
@@ -141,6 +149,110 @@ bool loadOgg(const std::filesystem::path& sourcePath, AudioAsset& out)
 	out.encoding   = AudioEncoding::Vorbis;
 	out.sampleRate = static_cast<int>(info.sample_rate);
 	out.channels   = info.channels;
+	out.audioData  = std::move(bytes);
+	return true;
+}
+
+// Reads a whole source file; false (and a log line) when it cannot be opened or is empty.
+bool readSourceBytes(const std::filesystem::path& sourcePath, std::vector<uint8_t>& bytes)
+{
+	std::ifstream in(sourcePath, std::ios::binary);
+	if (!in)
+	{
+		HE_LOG_ERROR(Tool, "%s", ("AudioImporter: cannot open " + sourcePath.string()).c_str());
+		return false;
+	}
+	bytes.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	if (bytes.empty())
+	{
+		HE_LOG_ERROR(Tool, "AudioImporter: %s is empty", sourcePath.string().c_str());
+		return false;
+	}
+	return true;
+}
+
+// Shared tail of the MP3 / FLAC loaders: a stream that decoded to nothing is not
+// an import; one that came up short of its declared length still plays.
+bool acceptDecoded(const std::filesystem::path& sourcePath, const char* what,
+                   unsigned int channels, unsigned int sampleRate,
+                   uint64_t declared, uint64_t decoded)
+{
+	if (channels == 0 || sampleRate == 0 || decoded == 0)
+	{
+		HE_LOG_ERROR(Tool, "AudioImporter: %s decoded to nothing (%s, %u ch, %u Hz, %llu frames)",
+		             sourcePath.string().c_str(), what, channels, sampleRate,
+		             static_cast<unsigned long long>(decoded));
+		return false;
+	}
+	if (declared != 0 && decoded < declared)
+		HE_LOG_WARN(Tool, "AudioImporter: %s declares %llu frames but only %llu decode — "
+		                  "the file is probably truncated; importing what plays",
+		            sourcePath.string().c_str(), static_cast<unsigned long long>(declared),
+		            static_cast<unsigned long long>(decoded));
+	return true;
+}
+
+bool loadMp3(const std::filesystem::path& sourcePath, AudioAsset& out)
+{
+	std::vector<uint8_t> bytes;
+	if (!readSourceBytes(sourcePath, bytes)) return false;
+
+	drmp3 mp3;
+	if (!drmp3_init_memory(&mp3, bytes.data(), bytes.size(), nullptr))
+	{
+		HE_LOG_ERROR(Tool, "AudioImporter: %s is not an MP3 stream", sourcePath.string().c_str());
+		return false;
+	}
+	const unsigned int channels = mp3.channels, rate = mp3.sampleRate;
+	// Walk every frame once, like the Ogg path: a cut-off or corrupt file shows
+	// up as a short count rather than as a good import.
+	constexpr drmp3_uint64 kScratchFrames = 4096;
+	std::vector<float> scratch(kScratchFrames * (channels ? channels : 1));
+	uint64_t decoded = 0;
+	for (;;)
+	{
+		const drmp3_uint64 n = drmp3_read_pcm_frames_f32(&mp3, kScratchFrames, scratch.data());
+		if (n == 0) break;
+		decoded += n;
+	}
+	drmp3_uninit(&mp3);
+
+	if (!acceptDecoded(sourcePath, "MP3", channels, rate, 0, decoded)) return false;
+	out.encoding   = AudioEncoding::Mp3;
+	out.sampleRate = static_cast<int>(rate);
+	out.channels   = static_cast<int>(channels);
+	out.audioData  = std::move(bytes);
+	return true;
+}
+
+bool loadFlac(const std::filesystem::path& sourcePath, AudioAsset& out)
+{
+	std::vector<uint8_t> bytes;
+	if (!readSourceBytes(sourcePath, bytes)) return false;
+
+	drflac* flac = drflac_open_memory(bytes.data(), bytes.size(), nullptr);
+	if (!flac)
+	{
+		HE_LOG_ERROR(Tool, "AudioImporter: %s is not a FLAC stream", sourcePath.string().c_str());
+		return false;
+	}
+	const unsigned int channels = flac->channels, rate = flac->sampleRate;
+	const uint64_t declared = flac->totalPCMFrameCount;
+	constexpr drflac_uint64 kScratchFrames = 4096;
+	std::vector<float> scratch(kScratchFrames * (channels ? channels : 1));
+	uint64_t decoded = 0;
+	for (;;)
+	{
+		const drflac_uint64 n = drflac_read_pcm_frames_f32(flac, kScratchFrames, scratch.data());
+		if (n == 0) break;
+		decoded += n;
+	}
+	drflac_close(flac);
+
+	if (!acceptDecoded(sourcePath, "FLAC", channels, rate, declared, decoded)) return false;
+	out.encoding   = AudioEncoding::Flac;
+	out.sampleRate = static_cast<int>(rate);
+	out.channels   = static_cast<int>(channels);
 	out.audioData  = std::move(bytes);
 	return true;
 }
@@ -295,7 +407,7 @@ bool AudioImporter::convert(AudioAsset& asset, const ImportSettings& settings)
 bool AudioImporter::isSupportedSource(const std::filesystem::path& sourcePath)
 {
 	const std::string ext = lowerExtension(sourcePath);
-	return ext == ".wav" || ext == ".ogg";
+	return ext == ".wav" || ext == ".ogg" || ext == ".mp3" || ext == ".flac";
 }
 
 bool AudioImporter::decode(const std::filesystem::path& sourcePath, AudioAsset& out)
@@ -304,8 +416,10 @@ bool AudioImporter::decode(const std::filesystem::path& sourcePath, AudioAsset& 
 	bool ok = false;
 	if      (ext == ".wav") ok = decodeWav(sourcePath, out);
 	else if (ext == ".ogg") ok = loadOgg(sourcePath, out);
+	else if (ext == ".mp3") ok = loadMp3(sourcePath, out);
+	else if (ext == ".flac") ok = loadFlac(sourcePath, out);
 	else
-		HE_LOG_ERROR(Tool, "AudioImporter: unsupported audio source '%s' (expected .wav or .ogg)",
+		HE_LOG_ERROR(Tool, "AudioImporter: unsupported audio source '%s' (expected .wav, .ogg, .mp3 or .flac)",
 		             sourcePath.string().c_str());
 	if (!ok) return false;
 
@@ -364,7 +478,9 @@ std::unique_ptr<AudioAsset> AudioImporter::import(
 		                + std::to_string(sourceChannels) + " ch, "
 		              : std::string())
 		 + (asset->encoding == AudioEncoding::Vorbis ? "Ogg Vorbis kept compressed, "
-		                                             : "PCM, ")
+		  : asset->encoding == AudioEncoding::Mp3   ? "MP3 kept compressed, "
+		  : asset->encoding == AudioEncoding::Flac  ? "FLAC kept compressed, "
+		                                            : "PCM, ")
 		 + std::to_string(asset->audioData.size() / 1024) + " KiB)").c_str());
 	return asset;
 }

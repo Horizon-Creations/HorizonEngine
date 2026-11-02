@@ -629,7 +629,7 @@ bool SecureTransport::poll(NetEvent& out) {
     if (m_events.empty()) return false;
 
     out = std::move(m_events.front());
-    m_events.erase(m_events.begin());
+    m_events.pop_front();
     return true;
 }
 

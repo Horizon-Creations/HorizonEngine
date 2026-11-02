@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 namespace HE
@@ -13,6 +14,7 @@ struct BuildTri
 	glm::vec3 v0, v1, v2;
 	glm::vec3 centroid;
 	glm::vec3 bmin, bmax;
+	uint32_t  source = 0;   // triangle number in the index buffer
 };
 
 void growNodeBounds(GiBvhNode& node, const std::vector<BuildTri>& tris,
@@ -82,8 +84,10 @@ void subdivide(std::vector<GiBvhNode>& nodes, uint32_t nodeIdx,
 } // namespace
 
 GiBvh buildGiBvh(const float* positions, size_t vertexCount, size_t strideFloats,
-                 const uint32_t* indices, size_t indexCount, int leafSize)
+                 const uint32_t* indices, size_t indexCount, int leafSize,
+                 std::vector<uint32_t>* sourceTriangles)
 {
+	if (sourceTriangles) sourceTriangles->clear();
 	GiBvh bvh;
 	if (!positions || !indices || vertexCount == 0 || indexCount < 3) return bvh;
 	leafSize = std::max(1, leafSize);
@@ -102,6 +106,7 @@ GiBvh buildGiBvh(const float* positions, size_t vertexCount, size_t strideFloats
 		bt.centroid = (bt.v0 + bt.v1 + bt.v2) * (1.0f / 3.0f);
 		bt.bmin = glm::min(bt.v0, glm::min(bt.v1, bt.v2));
 		bt.bmax = glm::max(bt.v0, glm::max(bt.v1, bt.v2));
+		bt.source = static_cast<uint32_t>(t);
 		tris.push_back(bt);
 	}
 	if (tris.empty()) return bvh;
@@ -119,6 +124,7 @@ GiBvh buildGiBvh(const float* positions, size_t vertexCount, size_t strideFloats
 	// De-index into leaf order: leaves reference [leftFirst, leftFirst+triCount)
 	// directly in this array — no second indirection in the kernel.
 	bvh.triangles.reserve(tris.size());
+	if (sourceTriangles) sourceTriangles->reserve(tris.size());
 	for (uint32_t src : order)
 	{
 		GiBvhTriangle out;
@@ -126,6 +132,131 @@ GiBvh buildGiBvh(const float* positions, size_t vertexCount, size_t strideFloats
 		out.v1 = glm::vec4(tris[src].v1, 0.0f);
 		out.v2 = glm::vec4(tris[src].v2, 0.0f);
 		bvh.triangles.push_back(out);
+		if (sourceTriangles) sourceTriangles->push_back(tris[src].source);
+	}
+	return bvh;
+}
+
+bool refitGiBvh(const std::vector<GiBvhNode>& nodes, const std::vector<uint32_t>& sourceTriangles,
+                const float* positions, size_t vertexCount, size_t strideFloats,
+                const uint32_t* indices, size_t indexCount, GiBvh& out)
+{
+	if (!positions || !indices || nodes.empty() || sourceTriangles.empty()) return false;
+	const size_t triCount = indexCount / 3;
+	std::vector<GiBvhTriangle> tris(sourceTriangles.size());
+	std::vector<glm::vec3>     bmin(sourceTriangles.size()), bmax(sourceTriangles.size());
+	for (size_t i = 0; i < sourceTriangles.size(); ++i)
+	{
+		const size_t t = sourceTriangles[i];
+		if (t >= triCount) return false;
+		const uint32_t i0 = indices[t * 3 + 0], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
+		if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) return false;
+		const glm::vec3 v0(positions[i0 * strideFloats], positions[i0 * strideFloats + 1], positions[i0 * strideFloats + 2]);
+		const glm::vec3 v1(positions[i1 * strideFloats], positions[i1 * strideFloats + 1], positions[i1 * strideFloats + 2]);
+		const glm::vec3 v2(positions[i2 * strideFloats], positions[i2 * strideFloats + 1], positions[i2 * strideFloats + 2]);
+		tris[i].v0 = glm::vec4(v0, 0.0f);
+		tris[i].v1 = glm::vec4(v1, 0.0f);
+		tris[i].v2 = glm::vec4(v2, 0.0f);
+		bmin[i] = glm::min(v0, glm::min(v1, v2));
+		bmax[i] = glm::max(v0, glm::max(v1, v2));
+	}
+	// Nodes are appended depth-first, a parent before both of its children, so one backwards pass sees every
+	// child's bounds before its parent needs them.
+	std::vector<GiBvhNode> fitted = nodes;
+	for (size_t n = fitted.size(); n-- > 0;)
+	{
+		GiBvhNode& node = fitted[n];
+		if (node.triCount > 0)
+		{
+			if (node.leftFirst < 0 || static_cast<size_t>(node.leftFirst) + static_cast<size_t>(node.triCount) > tris.size())
+				return false;
+			glm::vec3 lo(std::numeric_limits<float>::max()), hi(-std::numeric_limits<float>::max());
+			for (int i = node.leftFirst; i < node.leftFirst + node.triCount; ++i)
+			{
+				lo = glm::min(lo, bmin[static_cast<size_t>(i)]);
+				hi = glm::max(hi, bmax[static_cast<size_t>(i)]);
+			}
+			node.boundsMin = lo;
+			node.boundsMax = hi;
+		}
+		else
+		{
+			const size_t l = static_cast<size_t>(node.leftFirst);
+			if (node.leftFirst < 0 || l + 1 >= fitted.size() || l <= n) return false;
+			node.boundsMin = glm::min(fitted[l].boundsMin, fitted[l + 1].boundsMin);
+			node.boundsMax = glm::max(fitted[l].boundsMax, fitted[l + 1].boundsMax);
+		}
+	}
+	out.nodes     = std::move(fitted);
+	out.triangles = std::move(tris);
+	return true;
+}
+
+namespace
+{
+// A rebuilt mesh whose index buffer is unchanged is the refit case; anything else (a different level, a
+// different mesh under the same id) must rebuild. The hash covers every index, so a collision needs two index
+// buffers of the same size and vertex count that agree on a 64-bit FNV.
+uint64_t topologyKey(const uint32_t* indices, size_t indexCount, size_t vertexCount, int leafSize)
+{
+	uint64_t h = 0xcbf29ce484222325ULL;
+	for (size_t i = 0; i < indexCount; ++i) h = (h ^ indices[i]) * 0x100000001b3ULL;
+	h = (h ^ static_cast<uint64_t>(indexCount)) * 0x100000001b3ULL;
+	h = (h ^ static_cast<uint64_t>(vertexCount)) * 0x100000001b3ULL;
+	return (h ^ static_cast<uint64_t>(leafSize)) * 0x100000001b3ULL;
+}
+// A tree older than this many refits is rebuilt: vertices that keep moving (a sculpt drag) leave it loose.
+constexpr int    kMaxRefits  = 24;
+// Memory bound: a re-stitched landscape rebuilds a few dozen chunks at a time, ~170 KB of tree each.
+constexpr size_t kMaxEntries = 192;
+} // namespace
+
+GiBvh GiBvhRefitCache::build(const UUID& meshId, const float* positions, size_t vertexCount, size_t strideFloats,
+                             const uint32_t* indices, size_t indexCount, int leafSize)
+{
+	if (!positions || !indices || vertexCount == 0 || indexCount < 3) return {};
+	++m_tick;
+	// HE_GI_BVH_REFIT=0: every build is a full build (the A/B switch of the pixel check, and a way out).
+	static const bool refitOn = [] { const char* v = std::getenv("HE_GI_BVH_REFIT"); return !(v && v[0] == '0'); }();
+	const uint64_t key = topologyKey(indices, indexCount, vertexCount, std::max(1, leafSize));
+	const auto it = m_entries.find(meshId);
+	if (refitOn && it != m_entries.end() && it->second.topologyKey == key && it->second.refits < kMaxRefits)
+	{
+		GiBvh out;
+		if (refitGiBvh(it->second.nodes, it->second.sourceTriangles, positions, vertexCount, strideFloats,
+		               indices, indexCount, out))
+		{
+			it->second.nodes   = out.nodes;   // the next refit starts from the fitted bounds
+			it->second.lastUse = m_tick;
+			++it->second.refits;
+			++m_refits;
+			return out;
+		}
+	}
+	++m_rebuilds;
+	std::vector<uint32_t> source;
+	GiBvh bvh = buildGiBvh(positions, vertexCount, strideFloats, indices, indexCount, leafSize, &source);
+	if (!bvh.valid()) return bvh;
+	if (it != m_entries.end() || m_seen.count(meshId))
+	{
+		Entry& e = m_entries[meshId];
+		e.topologyKey     = key;
+		e.nodes           = bvh.nodes;
+		e.sourceTriangles = std::move(source);
+		e.refits          = 0;
+		e.lastUse         = m_tick;
+		if (m_entries.size() > kMaxEntries)
+		{
+			auto oldest = m_entries.begin();
+			for (auto i = m_entries.begin(); i != m_entries.end(); ++i)
+				if (i->second.lastUse < oldest->second.lastUse) oldest = i;
+			m_entries.erase(oldest);
+		}
+	}
+	else
+	{
+		if (m_seen.size() > 65536) m_seen.clear();
+		m_seen.insert(meshId);
 	}
 	return bvh;
 }

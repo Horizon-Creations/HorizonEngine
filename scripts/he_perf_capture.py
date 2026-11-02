@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible profiler capture of the real editor loop (Metal).
+"""Reproducible profiler capture of the real editor loop (Metal; --rhi for the others).
 
 Runs the deployed editor of THIS tree with a private config dir (so nobody's
 Preferences leak in), opens one project, lets it warm up, records a profiler
@@ -16,6 +16,12 @@ GPU counter sampling off (HE_PROFILE_COUNTERS=0): whole-frame GPU time only, the
 right setting for an FPS run, since the sampling can perturb a tile GPU. --set writes editor CustomConfig keys
 (bool/int/float/str, parsed as JSON when possible). The editor camera is pinned
 with --cam x,y,z,yaw,pitch so every run looks at the same picture.
+
+Windows (Thema 182 step 5): --rhi OpenGL|Vulkan|D3D11|D3D12 writes the backend into
+the private config.json ("RHI"; HE_DUMP_RHI outside a dump crashes D3D at frame 1),
+the editor is HorizonEditor.exe, the resident memory comes from GetProcessMemoryInfo
+instead of ps, and the run is kept off the network (HE_COLLAB_OFFLINE,
+HE_NET_LOOPBACK_ONLY: no firewall prompt for a new exe path).
 """
 import argparse
 import json
@@ -24,11 +30,43 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-EDITOR = REPO / "out" / "deploy" / "Editor" / "HorizonEditor"
+WINDOWS = sys.platform == "win32"
+EDITOR = REPO / "out" / "deploy" / "Editor" / ("HorizonEditor.exe" if WINDOWS else "HorizonEditor")
+# HE::RendererBackend (Types/Enums.h)
+RHI = {"OpenGL": 0, "Vulkan": 1, "D3D11": 2, "D3D12": 3, "Metal": 4}
+
+
+def rss_kb_of(pid: int):
+    """Resident memory of a running process in KiB, or None."""
+    if not WINDOWS:
+        r = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True)
+        return int(r.stdout.strip()) if r.stdout.strip() else None
+    import ctypes
+    from ctypes import wintypes
+
+    class PMC(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    h = k32.OpenProcess(0x1000 | 0x0010, False, pid)   # QUERY_LIMITED_INFORMATION | VM_READ
+    if not h:
+        return None
+    try:
+        pmc = PMC()
+        pmc.cb = ctypes.sizeof(PMC)
+        ok = ctypes.WinDLL("psapi").GetProcessMemoryInfo(wintypes.HANDLE(h), ctypes.byref(pmc), pmc.cb)
+        return pmc.WorkingSetSize // 1024 if ok else None
+    finally:
+        k32.CloseHandle(wintypes.HANDLE(h))
 
 
 def parse_val(s):
@@ -38,7 +76,7 @@ def parse_val(s):
         return s
 
 
-def write_config(cfg_dir: Path, project: Path, sets, cam):
+def write_config(cfg_dir: Path, project: Path, sets, cam, rhi="Metal"):
     cfg_dir.mkdir(parents=True, exist_ok=True)
     custom = {}
     if cam:
@@ -52,7 +90,7 @@ def write_config(cfg_dir: Path, project: Path, sets, cam):
         "CustomConfig": [{"Key": k, "Value": v} for k, v in sorted(custom.items())],
         "KnownProjects": [str(project)],
         "LastProjectPath": str(project),
-        "RHI": 4,  # HE::RendererBackend::Metal
+        "RHI": RHI[rhi],
     }
     (cfg_dir / "config.json").write_text(json.dumps(cfg, indent=4))
 
@@ -127,7 +165,8 @@ def main():
     ap.add_argument("--project", required=True)
     ap.add_argument("--label", required=True)
     ap.add_argument("--out", default=str(REPO / "docs" / "perf-audit" / "raw"))
-    ap.add_argument("--cfgdir", default="/tmp/he_perf_cfg")
+    ap.add_argument("--cfgdir", default=os.path.join(tempfile.gettempdir(), "he_perf_cfg"))
+    ap.add_argument("--rhi", default="Metal", choices=sorted(RHI))
     ap.add_argument("--scene", help="scene file copied over the project's startup scene")
     ap.add_argument("--set", action="append", default=[], help="CustomConfig KEY=VALUE")
     ap.add_argument("--cam", help="x,y,z,yawRad,pitchRad editor camera")
@@ -151,7 +190,7 @@ def main():
         heproj = json.loads(project.read_text())
         dst = project.parent / heproj["startupScene"]
         shutil.copyfile(a.scene, dst)
-    write_config(Path(a.cfgdir), project, a.set, a.cam)
+    write_config(Path(a.cfgdir), project, a.set, a.cam, a.rhi)
 
     env = dict(os.environ)
     env.update({
@@ -163,6 +202,9 @@ def main():
         "HE_PROFILE_VSYNC": a.vsync,
         "HE_PROFILE_NOTE": a.label,
     })
+    if WINDOWS:
+        env.setdefault("HE_COLLAB_OFFLINE", "1")
+        env.setdefault("HE_NET_LOOPBACK_ONLY", "1")
     for kv in a.env:
         k, v = kv.split("=", 1)
         env[k] = v
@@ -185,10 +227,9 @@ def main():
                 proc.kill()
                 print(f"[{a.label}] TIMEOUT after {a.timeout}s", file=sys.stderr)
                 sys.exit(2)
-            r = subprocess.run(["ps", "-o", "rss=", "-p", str(proc.pid)],
-                               capture_output=True, text=True)
-            if r.stdout.strip():
-                rss_kb.append(int(r.stdout.strip()))
+            kb = rss_kb_of(proc.pid)
+            if kb:
+                rss_kb.append(kb)
     wall = time.time() - t0
     new = sorted(set(dumps.glob("profile_*.json")) - before)
     if not new:
@@ -206,7 +247,7 @@ def main():
     summ["runner"] = {"label": a.label, "rc": rc, "wallSeconds": round(wall, 1), "editor": str(editor),
                       "sets": a.set, "cam": a.cam, "scene": a.scene, "warmup": a.warmup,
                       "frames": a.frames, "detailed": a.detailed, "counters": not a.no_counters,
-                      "vsync": a.vsync}
+                      "vsync": a.vsync, "rhi": a.rhi, "env": a.env}
     (outdir / f"{a.label}.summary.json").write_text(json.dumps(summ, indent=2))
     fps = (summ.get("fps") or {}).get("avg")
     cpu = (summ.get("cpuMs") or {}).get("p50")

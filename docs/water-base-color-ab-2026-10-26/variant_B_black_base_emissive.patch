@@ -1,0 +1,21 @@
+--- /tmp/wm/src/before.cpp	2026-10-26 10:31:02
++++ /tmp/wm/src/B.cpp	2026-10-26 10:31:02
+@@ -1005,7 +1005,7 @@
+     const int farRough = m.op(T::Multiply, m.op3(T::Smoothstep, m.k(10.0f, 41, 1), m.k(160.0f, 41, 1.5f), dist, 42, 1),
+                               m.k(0.25f, 42, 1.5f), 43, 1);
+     const int foamTint = m.op(T::Multiply, foamCol, m.op(T::Add, m.k(0.55f, 42, 8), m.op(T::Multiply, lace, m.k(0.7f, 42, 9), 43, 8), 44, 8), 45, 8);
+-    const int base   = m.op3(T::Lerp, lit, foamTint, foamAll, 46, 7);
++    const int base   = m.op3(T::Lerp, m.k(0.0f, 45, 6), foamTint, foamAll, 46, 7);
+     // Opacity is what clear water still covers looking straight down. Water that is only
+     // centimetres deep covers far less: the floor falls toward kShallowOpacity of itself as
+     // the depth goes to 0, from full at kShallowClearDepth metres (a smoothstep, 1 at e = 0
+@@ -1036,7 +1036,8 @@
+     const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
+     const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
+     const int alphaO = m.op3(T::If, below, under.alpha, alpha, 77, 3);
+-    const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
++    const int emisTop = m.op(T::Multiply, lit, m.un(T::OneMinus, foamAll, 76, 6), 76, 7);
++    const int emisO  = m.op3(T::If, below, under.emissive, emisTop, 77, 4);
+     const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
+     m.comment("Top or underside", 76, 0, 2, 6);
+ 

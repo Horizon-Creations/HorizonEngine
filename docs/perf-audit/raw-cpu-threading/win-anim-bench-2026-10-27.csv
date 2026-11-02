@@ -1,0 +1,6 @@
+scene,backend,date,binary,characters,joints,p50_ms,p95_ms,per_char_us
+he_tests (HE_ANIM_BENCH=1, tests/test_animation_bench.cpp),none (CPU-only crowd bench, no renderer init),2026-10-27,C:/hb/cta5/tests/he_tests.exe (Release, HEAD d09e65ca),1,65,0.004,0.005,4.00
+he_tests (HE_ANIM_BENCH=1, tests/test_animation_bench.cpp),none (CPU-only crowd bench, no renderer init),2026-10-27,C:/hb/cta5/tests/he_tests.exe (Release, HEAD d09e65ca),50,65,0.195,0.206,3.89
+he_tests (HE_ANIM_BENCH=1, tests/test_animation_bench.cpp),none (CPU-only crowd bench, no renderer init),2026-10-27,C:/hb/cta5/tests/he_tests.exe (Release, HEAD d09e65ca),200,65,0.779,0.806,3.90
+he_tests (HE_ANIM_BENCH=1, tests/test_animation_bench.cpp),none (CPU-only crowd bench, no renderer init),2026-10-27,C:/hb/cta5/tests/he_tests.exe (Release, HEAD d09e65ca),500,65,1.930,2.006,3.86
+he_tests (HE_ANIM_BENCH=1, tests/test_animation_bench.cpp),none (CPU-only crowd bench, no renderer init),2026-10-27,C:/hb/cta5/tests/he_tests.exe (Release, HEAD d09e65ca),1000,65,3.853,3.934,3.85

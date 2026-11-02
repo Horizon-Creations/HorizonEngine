@@ -41,6 +41,20 @@ struct MaterialShaderVariant
 	// whose clustered program is GLSL 4.30 on both stages while `vertex` is 4.10.
 	// Empty = pair `fragmentClustered` with `vertex` (Metal / HLSL / SPIR-V).
 	std::string vertexClustered;
+	// The deferred twin of `fragment` (the material's G-buffer tail, customShaderGBufGlsl),
+	// for the backends that take it (OpenGL, Metal): it pairs with `vertex`, the same
+	// vertex the plain draw uses, and never clusters. Empty = the deferred path
+	// cross-compiles the G-buffer fragment at load, as it did before the field existed
+	// (a pak baked earlier, a material without a G-buffer tail, a backend not baked for).
+	std::string fragmentGBuffer;
+	// The instanced twin of `vertex` (Thema 182): the same stage reading each instance's
+	// model matrix from the instance buffer, so a GeometryPass batch draws in ONE call.
+	// It pairs with `fragment`, with `fragmentClustered` (Metal) and with `fragmentGBuffer`.
+	// `vertexInstancedClustered` is the same stage at GLSL 4.30 for the clustered pair on
+	// GL (empty elsewhere). Empty = no baked twin: GL then draws such a batch per instance
+	// with the plain program, Metal cross-compiles the twin at load, as before the fields.
+	std::string vertexInstanced;
+	std::string vertexInstancedClustered;
 };
 
 namespace HE
@@ -118,8 +132,39 @@ struct MeshSection
 	HE::UUID    materialId;       // pack-time baked from materialPath; {} for loose/editor assets
 };
 
+// Which texture bakes the exporter may apply to a static mesh whose materials
+// only show textures (chunk MBKE). The exporter applies at most ONE form per
+// mesh, in this order: vertex colours, merged textures, one UV texture.
+struct MeshBakeSettings
+{
+	bool vertexColors  = false;  // sample the texture into per-vertex colours (OpenGL/Metal exports only)
+	bool mergeTextures = true;   // lossless: pack the section textures into one atlas
+	bool uvTexture     = true;   // resample every section into one UV texture (tiling resolved, may be larger)
+
+	bool operator==(const MeshBakeSettings& o) const
+	{
+		return vertexColors == o.vertexColors && mergeTextures == o.mergeTextures && uvTexture == o.uvTexture;
+	}
+	bool operator!=(const MeshBakeSettings& o) const { return !(*this == o); }
+
+	uint8_t toByte() const
+	{
+		return static_cast<uint8_t>((vertexColors ? 1u : 0u) | (mergeTextures ? 2u : 0u) | (uvTexture ? 4u : 0u));
+	}
+	// Bits above 2 are ignored, so a newer file with more switches still reads.
+	static MeshBakeSettings fromByte(uint8_t b)
+	{
+		MeshBakeSettings s;
+		s.vertexColors  = (b & 1u) != 0;
+		s.mergeTextures = (b & 2u) != 0;
+		s.uvTexture     = (b & 4u) != 0;
+		return s;
+	}
+};
+
 struct StaticMeshAsset : public RuntimeAsset
 {
+	MeshBakeSettings bake;       // chunk MBKE; the defaults when absent
 	// The mesh's own material: what every renderer resolved before sections
 	// existed and what a whole-mesh draw (a one-section asset, an entity under a
 	// whole-mesh override, a section with an empty reference) still resolves.
@@ -296,6 +341,13 @@ struct MaterialAsset : public RuntimeAsset
 	// pipeline on fragment+vertex together.
 	std::string customShaderVertGlsl;
 
+	// Displacement for GPU tessellation (MatShaderGen::displacementBody: settings line,
+	// declarations, statements ending in `float heDisp`), generated when the graph's
+	// Displacement pin is connected. Empty → no tessellation. Regenerated at load like
+	// customShaderVertGlsl and serialized as the LAST MTRL tail field, which the packer
+	// passes on verbatim. Backends without tessellation ignore it (the fallback).
+	std::string customShaderDispGlsl;
+
 	// Deferred G-buffer fragment variant (MatShaderGen::glslGBuffer): the same graph
 	// evaluation with an MRT emit tail instead of heLitP. Regenerated from the graph
 	// at load and on every editor change like customShaderFragGlsl, AND serialized as
@@ -377,6 +429,13 @@ struct MaterialAsset : public RuntimeAsset
 	// so the material is the single source of truth for what a layer means and
 	// the terrain only stores the weights.
 	std::vector<std::string> graphLayerNames;
+
+	// The LandscapeFoliageLayer a Landscape Foliage node names for this material
+	// (Thema 327); {} = none. Generated from the graph with graphLayerNames, and the
+	// LAST MTRL tail field (after customShaderDispGlsl, which the packer passes on
+	// verbatim). A UUID, not a path: the packer bakes only the refs it knows. Carried
+	// by a material instance like graphLayerNames; the Landscape tool's Apply reads it.
+	HE::UUID foliageSetId{};
 
 	// Precompiled per-backend shaders baked into the .hpak at export time (CHUNK_PSHD).
 	// Empty for loose editor assets → the renderer cross-compiles customShaderFragGlsl at
@@ -538,12 +597,17 @@ struct ScriptAsset : public RuntimeAsset
 // they were ~400 MB as PCM, in the pak and in RAM alike. Persisted as an int32
 // in CHUNK_AUMI (absent in old files → PCM16), the bytes in CHUNK_PCMD or
 // CHUNK_OGGD by encoding, so an engine that predates Vorbis sees no PCM chunk
-// and skips the clip instead of playing Ogg pages as samples.
-enum class AudioEncoding : uint8_t { PCM16 = 0, Vorbis = 1 };
+// and skips the clip instead of playing Ogg pages as samples. Mp3 and Flac are
+// the same shape (the source file's bytes verbatim, streamed by the mixer) with
+// their own chunks, CHUNK_MP3D / CHUNK_FLCD, for the same reason.
+enum class AudioEncoding : uint8_t { PCM16 = 0, Vorbis = 1, Mp3 = 2, Flac = 3 };
+
+// True for every encoding the mixer decodes while a voice plays (all but PCM16).
+inline bool audioIsCompressed(AudioEncoding e) { return e != AudioEncoding::PCM16; }
 
 struct AudioAsset : public RuntimeAsset
 {
-	// PCM16: interleaved int16 frames. Vorbis: a complete Ogg Vorbis stream.
+	// PCM16: interleaved int16 frames. Vorbis / Mp3 / Flac: the complete source stream.
 	std::vector<uint8_t> audioData;
 	int                  sampleRate = 0;
 	int                  channels   = 0;
@@ -574,16 +638,56 @@ struct FontAsset : public RuntimeAsset
 //   BC7      — desktop D3D11/D3D12/Vulkan + OpenGL 4.2+ (Windows/Linux); best RGBA quality.
 //   BC3      — DXT5; the universal desktop fallback, incl. macOS OpenGL 4.1 (S3TC),
 //              which samples neither ASTC nor BC7.
-// Every block format here is 16 bytes per 4x4 block, so a level's byte size is
-// ceil(w/4)*ceil(h/4)*16 and the row stride is ceil(w/4)*16 — identical math for
-// all three. Levels are concatenated in `data` exactly like the RGBA8 mip chain
-// (level 0 first), so a backend that can't sample the format just ignores it.
-enum class TextureFormat : uint8_t { RGBA8 = 0, ASTC_4x4 = 1, BC7 = 2, BC3 = 3 };
+//   BC1      — DXT1, opaque RGB at 8 bytes per block (half of BC3). Albedo without alpha.
+//   BC4      — one channel (R), 8 bytes per block. Single-channel data: roughness, height, AO.
+//   BC5      — two channels (R, G), 16 bytes per block. Tangent-space normals as XY: it
+//              stores NO Z, so a normal read as .xyz gets z = 0 (reconstruct it in the
+//              shader). Sampled as (r, g, 0, 1); BC4 as (r, 0, 0, 1).
+// Every block format covers a 4x4 texel block; the block size is
+// textureFormatBlockBytes() (8 for BC1/BC4, 16 for the rest), so a level's byte size is
+// ceil(w/4)*ceil(h/4)*blockBytes (textureLevelBytes) and the row stride is
+// ceil(w/4)*blockBytes. Levels are concatenated in `data` exactly like the RGBA8 mip
+// chain (level 0 first), so a backend that can't sample the format just ignores it.
+// The value is written as the TXMI format byte: new formats are only ever APPENDED.
+enum class TextureFormat : uint8_t { RGBA8 = 0, ASTC_4x4 = 1, BC7 = 2, BC3 = 3,
+                                     BC1 = 4, BC4 = 5, BC5 = 6 };
 
-// True for the block-compressed TextureFormat values (all 16 B / 4x4 block).
+// True for the block-compressed TextureFormat values (all cover a 4x4 texel block).
 inline bool textureFormatIsBlock4x4(TextureFormat f)
 {
-	return f == TextureFormat::ASTC_4x4 || f == TextureFormat::BC7 || f == TextureFormat::BC3;
+	return f == TextureFormat::ASTC_4x4 || f == TextureFormat::BC7 || f == TextureFormat::BC3
+	    || f == TextureFormat::BC1      || f == TextureFormat::BC4 || f == TextureFormat::BC5;
+}
+
+// Bytes per 4x4 block: 8 for BC1/BC4, 16 for ASTC/BC7/BC3/BC5, 0 for RGBA8 (not a block
+// format; four bytes per texel instead).
+inline uint32_t textureFormatBlockBytes(TextureFormat f)
+{
+	if (!textureFormatIsBlock4x4(f)) return 0;
+	return (f == TextureFormat::BC1 || f == TextureFormat::BC4) ? 8u : 16u;
+}
+
+// Bytes of ONE mip level of w x h texels in format `f` (RGBA8: w*h*4).
+inline size_t textureLevelBytes(TextureFormat f, uint32_t w, uint32_t h)
+{
+	const uint32_t bb = textureFormatBlockBytes(f);
+	if (bb == 0) return static_cast<size_t>(w) * h * 4;
+	return static_cast<size_t>((w + 3) / 4) * ((h + 3) / 4) * bb;
+}
+
+inline const char* textureFormatName(TextureFormat f)
+{
+	switch (f)
+	{
+	case TextureFormat::RGBA8:    return "RGBA8";
+	case TextureFormat::ASTC_4x4: return "ASTC 4x4";
+	case TextureFormat::BC7:      return "BC7";
+	case TextureFormat::BC3:      return "BC3";
+	case TextureFormat::BC1:      return "BC1";
+	case TextureFormat::BC4:      return "BC4";
+	case TextureFormat::BC5:      return "BC5";
+	}
+	return "unknown";
 }
 
 struct TextureAsset : public RuntimeAsset
@@ -612,9 +716,15 @@ struct TextureAsset : public RuntimeAsset
 	// the other, EACH with its own full mip chain (slice 0 levels 0..n-1, then
 	// slice 1 …) — D3D's subresource order, and slice 0 stays the leading bytes,
 	// so a consumer that knows nothing of arrays reads slice 0 as a 2D texture.
-	// RGBA8 only for now (HE::buildTextureArray). Written to the TXMI tail only
+	// Built RGBA8 (HE::buildTextureArray); the pack-time cook can turn it into a
+	// block format, every slice and level encoded on its own. Written to the TXMI tail only
 	// when > 1, so every 2D asset keeps its exact bytes.
 	uint32_t             layers    = 1;
+
+	// Mean LINEAR colour of every slice, three floats per slice (CHUNK_TXSM), baked at pack
+	// time when an array is cooked to a format the CPU cannot read (BC7, ASTC). Empty on
+	// every loose asset and every 2D texture: the means are then read from the pixels.
+	std::vector<float>   sliceMeans;
 };
 
 struct ShaderAsset : public RuntimeAsset
@@ -819,4 +929,68 @@ struct SequenceAsset : public RuntimeAsset
     float                        frameRate = 30.0f;   // snapping in the editor only; evaluation is continuous
     std::vector<SequenceBinding> bindings;
     std::vector<SequenceTrack>   tracks;
+};
+
+// ── LandscapeFoliageLayer ────────────────────────────────────────────────────
+// An authored foliage rule set for a landscape (docs/landscape-foliage-layer-
+// entwurf-2026-10-29.md): which meshes grow, how dense, on what slope, at what
+// height, gated by which paint channel. An entry is a FoliageLayer (HE_Scene)
+// minus its per-scene state — seed, density mask, visibility, dirty flag — and
+// "apply" later copies entries into the terrain's FoliageComponent, so the
+// scatter, clusters, LODs and pooling stay the one existing path. The defaults
+// below are FoliageLayer's own, so an entry that says nothing is a default layer.
+// HE_Core cannot see HE_Scene, so the struct is spelled out here; a parity test
+// in step 4 pins the two against each other.
+//
+// Stored as ONE JSON document in CHUNK_LFOL (LandscapeFoliage/LandscapeFoliageLayerJson.h),
+// parsed once at load like the Sequence: every asset it names (meshes, materials)
+// is a {"hi","lo"} UUID, never a path, because the pack writer rewrites paths only
+// inside Mesh/Material/Scene/ParticleSystem blobs and the reference scan only sees
+// UUIDs spelled that way inside a JSON payload chunk.
+struct LandscapeFoliageLod
+{
+    HE::UUID meshAssetId;
+    HE::UUID materialAssetId;
+    float    distance = 50.0f;
+    float    density  = 1.0f;
+};
+
+struct LandscapeFoliageEntry
+{
+    std::string name;                       // the layer's inspector label
+    HE::UUID    meshAssetId;
+    HE::UUID    materialAssetId;            // null = the layer's own default
+    std::vector<LandscapeFoliageLod> lods;  // <= kLandscapeFoliageMaxLods
+
+    // The role channel of the landscape material that gates the entry
+    // (FoliageLayer::weightLayer): -1 ignore the paint, 0..7 a channel.
+    int   paintLayer = -1;
+    float slopeMin   = 0.0f;
+    float slopeMax   = 1.0f;
+    float heightMin  = -10000.0f;
+    float heightMax  =  10000.0f;
+
+    float density        = 0.1f;            // instances per m²
+    float minScale       = 0.8f;
+    float maxScale       = 1.2f;
+    float drawDistance   = 80.0f;
+    float bucketSize     = 32.0f;
+    bool  castsShadow    = true;
+    bool  contributesAO  = true;
+    float shadowDistance = 0.0f;
+    float lodHysteresis  = 2.0f;
+};
+
+inline constexpr size_t kLandscapeFoliageMaxEntries = 32;  // FoliageComponent::kMaxLayers
+inline constexpr size_t kLandscapeFoliageMaxLods    = 7;   // FoliageLayer::kMaxLods
+inline constexpr int    kLandscapeFoliageMaxPaintLayer = 7;
+
+struct LandscapeFoliageLayerAsset : public RuntimeAsset
+{
+    std::string description;
+    // One slider on the whole set ("make this biome sparser"), multiplied into
+    // every entry's density when applied. There is no per-entry weight: a share
+    // between entries on one channel is their density ratio.
+    float densityScale = 1.0f;
+    std::vector<LandscapeFoliageEntry> entries;
 };

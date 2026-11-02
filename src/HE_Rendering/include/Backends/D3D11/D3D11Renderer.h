@@ -61,6 +61,11 @@ public:
     // editor viewport and the packaged game (SetSwapchainPostProcessing) have and
     // the direct swapchain fallback does not.
     void SetSSRSettings(const SSRSettings& settings) override;
+    // GI reflections (Thema 191 step 2): ray-traced specular off the same
+    // software BVH diffuse GI uses, mirrors D3D12/GL. Reaches the image
+    // through graph materials only (heGIReflFwd, t32) — the built-in PBR
+    // shader has no stage for it yet.
+    void SetGIReflectionSettings(const GIReflectionSettings& settings) override;
     // Cascaded shadow maps (project ShadowSettings) + the per-cascade debug
     // tint — the same contract GL and Metal honour.
     void SetShadowSettings(const ShadowSettings& settings) override;
@@ -74,6 +79,7 @@ public:
     // the top of the next DrawScene so the build lands on the render thread with the
     // material resources up) — mirrors GL/Metal; cache hits are free.
     void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+    bool SupportsTessellation() const override;
     // Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
     // next material draw re-uploads it.
     void InvalidateTexture(const HE::UUID& textureId) override;

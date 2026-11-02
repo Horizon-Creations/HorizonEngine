@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 class ContentManager;
@@ -29,6 +30,15 @@ namespace HcEditorUtil
 		std::uint64_t bytes = 0;
 	};
 	std::vector<ClassRef> listAssets(ContentManager* cm, HE::AssetType type);
+
+	// An asset path with its directories and extension stripped, e.g.
+	// "Classes/Spawner.hasset" -> "Spawner". The directory goes first, so a dot in
+	// a folder name ("a.b/c") is not taken for the extension.
+	std::string pathStem(const std::string& path);
+
+	// Is `s` one of the strings in `v`? A linear scan, meant for the short key lists
+	// the rename passes build.
+	bool contains(const std::vector<std::string>& v, const std::string& s);
 
 	// Does this asset match what someone typed into a picker's search box?
 	// Case-insensitive, and every whitespace-separated term has to appear in
@@ -63,7 +73,7 @@ namespace HcEditorUtil
 			const size_t start = i;
 			while (i < q.size() && !std::isspace(static_cast<unsigned char>(q[i]))) ++i;
 			if (i == start) break;   // trailing whitespace, no term left
-			if (hay.find(q.substr(start, i - start)) == std::string::npos) return false;
+			if (hay.find(std::string_view(q.data() + start, i - start)) == std::string::npos) return false;
 		}
 		return true;   // no terms at all (an untouched search box) matches everything
 	}

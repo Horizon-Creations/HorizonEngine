@@ -225,17 +225,23 @@ void PlayerHost::setTextScripts(ScriptContext* scripts, const TextScriptInstance
 	m_scriptInstances = instances;
 }
 
-void PlayerHost::addCharacter(HorizonCode::InstanceId instance)
+// Nothing else ever removes from m_characters, and characters are spawned and
+// destroyed all game long: without this the list would grow for every character
+// the level ever spawned and fire at dead instances. addCharacter() reaps too,
+// because a project WITH controllers never reaches the fallback in
+// fireInputEvent. The runtime may not be up yet: an entity class's BeginPlay can
+// Create Object before begin() ever runs.
+void PlayerHost::pruneDeadCharacters()
 {
-	if (instance == 0) return;
-	// Reap on the way in. A project WITH controllers never reaches the fallback
-	// in fireInputEvent, so pruning only there would let this list grow for every
-	// character the level ever spawned — and characters are spawned and destroyed
-	// all game long now. The runtime may not be up yet: an entity class's
-	// BeginPlay can Create Object before begin() ever runs.
 	if (m_runtime)
 		std::erase_if(m_characters,
 		              [this](HorizonCode::InstanceId i){ return !m_runtime->alive(i); });
+}
+
+void PlayerHost::addCharacter(HorizonCode::InstanceId instance)
+{
+	if (instance == 0) return;
+	pruneDeadCharacters();
 	// A class spawned twice is two characters, but the SAME instance registered
 	// twice would be fired at twice per event.
 	if (std::find(m_characters.begin(), m_characters.end(), instance) != m_characters.end()) return;
@@ -249,14 +255,7 @@ void PlayerHost::fireInputEvent(size_t player, const std::string& event,
 	// whose characters handle their own input keeps working unchanged.
 	if (m_controllers.empty())
 	{
-		// Reap first. This list is fed by begin()'s scan and by addCharacter(),
-		// and nothing else ever removes from it — a level that spawns and
-		// destroys characters would otherwise grow it forever and fire at dead
-		// instances. Guarded like addCharacter's copy: the two must not disagree
-		// about whether a runtime is required to prune.
-		if (m_runtime)
-			std::erase_if(m_characters,
-			              [this](HorizonCode::InstanceId i){ return !m_runtime->alive(i); });
+		pruneDeadCharacters();
 		for (const HorizonCode::InstanceId inst : m_characters)
 			m_runtime->fireEvent(inst, event, 0, arg);
 		return;

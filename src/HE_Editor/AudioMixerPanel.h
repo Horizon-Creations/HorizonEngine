@@ -2,7 +2,7 @@
 
 struct AppContext;
 
-// ── Audio Mixer (Window ▸ Audio Mixer) ─────────────────────────────────────────
+// ── Audio Mixer (Project Settings ▸ Audio Buses) ─────────────────────────────────────────
 // One strip per bus, plus the master: a fader, mute, solo, and how many voices
 // are on it right now. The bus LIST and every fader position belong to the
 // project (ProjectData::audioBuses, saved into the .heproj and carried into
@@ -15,7 +15,7 @@ struct AppContext;
 // not per pixel (the same split the Collision Layers page makes).
 namespace AudioMixerPanel
 {
-	// `open` is the View-menu toggle; the window clears it when closed. Drawn
-	// from the editor's overlay pass like the other tool windows.
-	void DrawAudioMixerWindow(AppContext& ctx, bool& open);
+	// The mixer's contents, drawn into whatever window the caller is inside —
+	// the Audio Buses page of Project Settings. Not a window of its own.
+	void DrawAudioMixer(AppContext& ctx);
 }

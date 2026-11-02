@@ -30,7 +30,15 @@ layout(set = 0, binding = 6) uniform GiShadowUBO {
     vec4 uFrame;        // x = jitter seed, y = tex width, z = tex height, w = instance count
     vec4 uLocalPosRange[4]; // xyz = local (point/spot) light position, w = range
     vec4 uLocalExtra;       // x = local light count, y = sun rays per pixel
+    mat4 uHfWorldToLocal;   // landscape entity inverse world matrix
+    vec4 uHfParams;         // x = 1/sizeX, y = 1/sizeZ, z = res-1, w = enabled
+    vec4 uHfParams2;        // x = top mip level, y = max height, w = max march steps
 };
+
+// The landscape's height field (software kernel only; the ray-query kernel keeps the TLAS): the chunks are left out of
+// the instance list this kernel reads and this answers for them. R32F texture, mips = conservative max pyramid
+// (GiHeightfield.h). Mirrors kGiHeightfieldHLSL / kGiHeightfieldGLSL — keep the three in step.
+layout(set = 0, binding = 9) uniform sampler2D uHf;
 // Per-pixel local-light visibility (1 channel per light, first 4). Binding 8
 // so the HW variant's TLAS keeps binding 7 and both kernels stay layout-parallel.
 layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D uOutLocal;
@@ -92,6 +100,86 @@ bool giBlasAnyHit(int nodeOfs, int triOfs, vec3 o, vec3 d, float tMin, float tMa
     return false;
 }
 
+
+float hfBilinear(vec2 tp)
+{
+	vec2  f  = clamp(tp, vec2(0.0), vec2(uHfParams.z));
+	ivec2 i0 = ivec2(floor(f));
+	ivec2 i1 = min(i0 + ivec2(1), ivec2(int(uHfParams.z)));
+	vec2  w  = f - vec2(i0);
+	float h00 = texelFetch(uHf, ivec2(i0.x, i0.y), 0).r;
+	float h10 = texelFetch(uHf, ivec2(i1.x, i0.y), 0).r;
+	float h01 = texelFetch(uHf, ivec2(i0.x, i1.y), 0).r;
+	float h11 = texelFetch(uHf, ivec2(i1.x, i1.y), 0).r;
+	return mix(mix(h00, h10, w.x), mix(h01, h11, w.x), w.y);
+}
+
+bool hfAnyHit(vec3 o, vec3 d, float tMin, float tMax)
+{
+	if (uHfParams.w < 0.5) return false;
+	vec3 oL = (uHfWorldToLocal * vec4(o, 1.0)).xyz;
+	vec3 dL = mat3(uHfWorldToLocal) * d;
+	vec2 texPerLocal = vec2(uHfParams.x, uHfParams.y) * uHfParams.z;      // local XZ -> texels
+	vec2 tp0 = (oL.xz * vec2(uHfParams.x, uHfParams.y) + 0.5) * uHfParams.z;
+	vec2 tpd = dL.xz * texPerLocal;                                          // texels per unit t
+	float texLen = max(length(tpd), 1e-6);
+
+	// t range inside the terrain's footprint and below its highest point.
+	float t0 = tMin, t1 = tMax;
+	vec2 inv = 1.0 / (abs(tpd) + 1e-9) * sign(tpd + 1e-12);
+	vec2 ta  = (vec2(0.0) - tp0) * inv, tb = (vec2(uHfParams.z) - tp0) * inv;
+	vec2 tlo = min(ta, tb), thi = max(ta, tb);
+	t0 = max(t0, max(tlo.x, tlo.y));
+	t1 = min(t1, min(thi.x, thi.y));
+	float maxH = uHfParams2.y;
+	if (abs(dL.y) > 1e-9)
+	{
+		float tH = (maxH - oL.y) / dL.y;
+		if (dL.y < 0.0) t0 = max(t0, tH); else t1 = min(t1, tH);
+	}
+	else if (oL.y > maxH) return false;
+	if (t0 >= t1) return false;
+
+	// The receiver sits on a (possibly coarser) LOD mesh that can lie a little under the exact field:
+	// lift the start so a point on the ground is not its own occluder.
+	vec2  tpS  = tp0 + tpd * t0;
+	float hS   = hfBilinear(tpS);
+	float yS   = oL.y + dL.y * t0;
+	float lift = max(0.0, hS + 0.15 - yS);
+
+	int   topLvl = int(uHfParams2.x);
+	int   lvl    = min(2, topLvl);
+	float t      = t0;
+	int   steps  = int(uHfParams2.w);
+	for (int it = 0; it < steps; ++it)
+	{
+		if (t >= t1) return false;
+		vec2  tp = tp0 + tpd * t;
+		float y  = oL.y + dL.y * t + lift;
+		ivec2 cell = ivec2(floor(tp)) >> lvl;
+		cell = min(cell, ivec2(max(1, (int(uHfParams.z) + 1) >> lvl) - 1));   // the last texel of this mip
+		float m  = texelFetch(uHf, cell, lvl).r;
+		float cellTex = float(1 << lvl);
+		float dt = 0.5 * cellTex / texLen;
+		float yEnd = y + dL.y * dt;
+		if (min(y, yEnd) > m + 0.02)
+		{
+			t += dt;
+			lvl = min(lvl + 1, topLvl);
+		}
+		else if (lvl > 0)
+		{
+			lvl -= 1;
+		}
+		else
+		{
+			if (y < hfBilinear(tp) - 0.02) return true;
+			t += 0.5 / texLen;
+		}
+	}
+	return false;
+}
+
 // TLAS analogue: linear instance loop; object-space ray with UNNORMALISED
 // direction keeps t world-comparable.
 bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
@@ -106,6 +194,9 @@ bool giSceneAnyHit(vec3 o, vec3 d, float tMin, float tMax)
     }
     return false;
 }
+
+// What counts as an occluder for these rays: the instance walk plus the landscape's height field.
+#define GI_OCCLUDED(o, d, tmin, tmax) (giSceneAnyHit(o, d, tmin, tmax) || hfAnyHit(o, d, tmin, tmax))
 
 // Cone-jitter random numbers: a per-pixel offset from a PCG3D integer hash
 // (Jarzynski & Olano 2020) plus an R2 low-discrepancy step per frame, so each
@@ -166,7 +257,7 @@ void main()
             vec3 dir = giConeSample(L, max(uSunDirRadius.w, 1e-4), xi);
             // Same self-intersection guards as Metal/GL: normal-offset origin + min t.
             vec3 origin = pv.xyz + N * 0.05;
-            sunVis += giSceneAnyHit(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
+            sunVis += GI_OCCLUDED(origin, dir, 0.02, 10000.0) ? 0.0 : 1.0;
         }
         sunVis /= float(spp);
     }
@@ -186,7 +277,7 @@ void main()
         if (distL >= uLocalPosRange[i].w) continue; // outside the attenuation radius -> contributes nothing, skip the ray
         vec3 dirL = toL / distL;
         if (dot(N, dirL) <= 0.0) { localVis[i] = 0.0; continue; }
-        if (giSceneAnyHit(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
+        if (GI_OCCLUDED(pv.xyz + N * 0.05, dirL, 0.02, max(distL - 0.1, 0.02)))
             localVis[i] = 0.0;
     }
     imageStore(uOutLocal, ivec2(gid), localVis);

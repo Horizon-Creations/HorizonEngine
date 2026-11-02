@@ -42,6 +42,7 @@ namespace
 		if (ma->blendMode != 0) return false;                 // Masked discards, Translucent blends
 		if (ma->opacity < RenderSorter::kOpaqueOpacityThreshold) return false;
 		if (!ma->customShaderVertGlsl.empty()) return false;  // WPO moves the surface on the GPU
+		if (!ma->customShaderDispGlsl.empty()) return false;  // so does Displacement (tessellation)
 		return true;
 	}
 

@@ -1,0 +1,97 @@
+[doctest] doctest version is "2.5.0"
+[doctest] run with "--help" for options
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(163):
+TEST CASE:  App preview: OnInit builds a widget hierarchy the Outliner can draw
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(185): MESSAGE: 1: Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+  logged: presetName := Application
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(206): MESSAGE: Application: 2 element(s), 2 reachable from the canvas
+  logged: presetName := Application
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(185): MESSAGE: 1: Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+  logged: presetName := AppSidebar
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(206): MESSAGE: AppSidebar: 20 element(s), 20 reachable from the canvas
+  logged: presetName := AppSidebar
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(185): MESSAGE: 1: Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+  logged: presetName := AppWizard
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(206): MESSAGE: AppWizard: 17 element(s), 17 reachable from the canvas
+  logged: presetName := AppWizard
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(185): MESSAGE: 1: Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+  logged: presetName := AppDashboard
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(206): MESSAGE: AppDashboard: 33 element(s), 33 reachable from the canvas
+  logged: presetName := AppDashboard
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(185): MESSAGE: 1: Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+  logged: presetName := AppForm
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(206): MESSAGE: AppForm: 21 element(s), 21 reachable from the canvas
+  logged: presetName := AppForm
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(185): MESSAGE: 1: Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+  logged: presetName := AppTool
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(206): MESSAGE: AppTool: 48 element(s), 48 reachable from the canvas
+  logged: presetName := AppTool
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(283):
+TEST CASE:  App preview: a restart after an asset edit shows the edited hierarchy
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(329): MESSAGE: after restart: Application project: preview holds 1 widget(s) after OnInit (GameInstance graph: 3 node(s))
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(342): MESSAGE: elements before=21 after=22 edit visible=1
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(353):
+TEST CASE:  App preview: a manifest without the appProject key opens as a game
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_preview_outliner.cpp(371): MESSAGE: hand-written manifest: loaded=true appProject=false
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_todo.cpp(568):
+TEST CASE:  Todo app: it exports as a software build with no scene
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_todo.cpp(636): MESSAGE: software build left at C:\Users\conno\AppData\Local\Temp\he_todo_export_software_p26116
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_todo.cpp(639):
+TEST CASE:  Todo app: the other flavour ships the platform's own renderer
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_todo.cpp(659): MESSAGE: advanced build left at C:\Users\conno\AppData\Local\Temp\he_todo_export_advanced_p26116
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_todo.cpp(856):
+TEST CASE:  Both app flavours actually start
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_app_todo.cpp(895): MESSAGE: no runnable binary for this platform — skipped
+  logged: advanced := false
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_autostart.cpp(57):
+TEST CASE:  The login entry is written, found and taken back again
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_autostart.cpp(60): MESSAGE: the Windows path is the registry; this case checks the file one
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_cell_village.cpp(632):
+TEST CASE:  Village: prefab houses and 50 scripted NPCs keep everything over many cell unloads and loads
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_cell_village.cpp(771): MESSAGE: village: 104 cell loads, 88 unloads, 1752 updates, worst 0.8931 ms
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_contentmanager.cpp(1853):
+TEST CASE:  GlobalState remote EngineContent assets survive an unrelated refreshEngineFolder
+  an already-downloaded asset is a normal node, not a remote placeholder
+
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_contentmanager.cpp(1853): ERROR: test case THREW exception: exception thrown in subcase - will translate later when the whole test case has been exited (cannot translate while there is an active exception)
+
+===============================================================================
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\test_contentmanager.cpp(1853):
+TEST CASE:  GlobalState remote EngineContent asse

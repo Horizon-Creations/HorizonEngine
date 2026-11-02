@@ -1,0 +1,17 @@
+== mem2x-V3-rgba8-r1  2026-10-21 06:45:52  attempt 1
+before:
+  uptime:    load averages: 2.37 2.80 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       44
+  power:     Now drawing from 'AC Power'
+  busy:      61.6% Python; 12.3% Python; 10.0% clion; 9.8% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.56 2.80 2.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       87
+  power:     Now drawing from 'AC Power'
+  busy:      79.2% calaccessd; 53.9% coreaudiod; 18.3% intelligenceflowd; 14.8% mediaremoted
+  foreign:   none

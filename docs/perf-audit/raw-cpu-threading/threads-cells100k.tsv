@@ -1,0 +1,1218 @@
+0.0	39336735	main		44.83
+287.1	39336735	main		239.07
+287.1	39336883	(not created via pthread_create)		31.47
+287.1	39336884	(not created via pthread_create)		1.28
+287.1	39336885	(not created via pthread_create)		0.98
+287.1	39336900	AppKit	com.apple.NSEventThread	0.14
+572.3	39336735	main		463.34
+572.3	39336883	(not created via pthread_create)		35.26
+572.3	39336884	(not created via pthread_create)		2.07
+572.3	39336885	(not created via pthread_create)		8.09
+572.3	39336900	AppKit	com.apple.NSEventThread	0.14
+572.3	39336925	HorizonEngine		50.79
+572.3	39336926	HorizonEngine		53.25
+572.3	39336927	HorizonEngine		56.08
+572.3	39336928	HorizonEngine		54.07
+572.3	39336929	HorizonEngine		53.99
+572.3	39336930	HorizonEngine		52.08
+572.3	39336931	HorizonEngine		54.06
+863.3	39336735	main		651.93
+863.3	39336883	(not created via pthread_create)		35.26
+863.3	39336884	(not created via pthread_create)		2.09
+863.3	39336885	(not created via pthread_create)		8.09
+863.3	39336900	AppKit	com.apple.NSEventThread	0.14
+863.3	39336925	HorizonEngine		232.05
+863.3	39336926	HorizonEngine		236.32
+863.3	39336927	HorizonEngine		244.35
+863.3	39336928	HorizonEngine		237.15
+863.3	39336929	HorizonEngine		242.34
+863.3	39336930	HorizonEngine		244.36
+863.3	39336931	HorizonEngine		236.99
+1004.2	39336735	main		749.55
+1004.2	39336883	(not created via pthread_create)		35.26
+1004.2	39336884	(not created via pthread_create)		2.09
+1004.2	39336885	(not created via pthread_create)		8.09
+1004.2	39336900	AppKit	com.apple.NSEventThread	0.14
+1292.3	39336735	main		985.00
+1292.3	39336883	(not created via pthread_create)		35.26
+1292.3	39336884	(not created via pthread_create)		2.65
+1292.3	39336885	(not created via pthread_create)		8.09
+1292.3	39336900	AppKit	com.apple.NSEventThread	0.14
+1292.3	39336933	HorizonEngine		0.16
+1292.3	39336934	HorizonEngine		0.02
+1292.3	39336935	HorizonEngine		0.01
+1292.3	39336936	HorizonEngine		0.02
+1292.3	39336937	HorizonEngine		0.02
+1292.3	39336938	HorizonEngine		0.02
+1292.3	39336939	HorizonEngine		0.01
+1292.3	39336940	HorizonEngine		0.01
+1292.3	39336941	HorizonEngine		0.02
+1292.3	39336942	HorizonEngine		0.02
+1292.3	39336943	HorizonEngine	Jolt-0	0.03
+1292.3	39336944	HorizonEngine	Jolt-1	0.03
+1292.3	39336945	HorizonEngine	Jolt-2	0.01
+1292.3	39336946	HorizonEngine	Jolt-3	0.02
+1398.2	39336735	main		1010.83
+1398.2	39336883	(not created via pthread_create)		35.26
+1398.2	39336884	(not created via pthread_create)		3.31
+1398.2	39336885	(not created via pthread_create)		8.43
+1398.2	39336900	AppKit	com.apple.NSEventThread	0.14
+1398.2	39336933	HorizonEngine		0.16
+1398.2	39336934	HorizonEngine		0.02
+1398.2	39336935	HorizonEngine		0.01
+1398.2	39336936	HorizonEngine		0.02
+1398.2	39336937	HorizonEngine		0.02
+1398.2	39336938	HorizonEngine		0.02
+1398.2	39336939	HorizonEngine		0.01
+1398.2	39336940	HorizonEngine		0.01
+1398.2	39336941	HorizonEngine		0.02
+1398.2	39336942	HorizonEngine		0.02
+1398.2	39336943	HorizonEngine	Jolt-0	0.03
+1398.2	39336944	HorizonEngine	Jolt-1	0.03
+1398.2	39336945	HorizonEngine	Jolt-2	0.01
+1398.2	39336946	HorizonEngine	Jolt-3	0.02
+1398.2	39336976	HorizonEngine		0.01
+1398.2	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+1398.2	39336992	dispatch	AudioSession - RootQueue	0.42
+1640.9	39336735	main		1011.86
+1640.9	39336883	(not created via pthread_create)		35.26
+1640.9	39336884	(not created via pthread_create)		3.31
+1640.9	39336885	(not created via pthread_create)		8.43
+1640.9	39336900	AppKit	com.apple.NSEventThread	0.14
+1640.9	39336933	HorizonEngine		0.16
+1640.9	39336934	HorizonEngine		0.02
+1640.9	39336935	HorizonEngine		0.01
+1640.9	39336936	HorizonEngine		0.02
+1640.9	39336937	HorizonEngine		0.02
+1640.9	39336938	HorizonEngine		0.02
+1640.9	39336939	HorizonEngine		0.01
+1640.9	39336940	HorizonEngine		0.01
+1640.9	39336941	HorizonEngine		0.02
+1640.9	39336942	HorizonEngine		0.02
+1640.9	39336943	HorizonEngine	Jolt-0	0.03
+1640.9	39336944	HorizonEngine	Jolt-1	0.03
+1640.9	39336945	HorizonEngine	Jolt-2	0.01
+1640.9	39336946	HorizonEngine	Jolt-3	0.02
+1640.9	39336976	HorizonEngine		0.01
+1640.9	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+1640.9	39336992	dispatch	AudioSession - RootQueue	0.42
+1859.3	39336735	main		1121.37
+1859.3	39336883	(not created via pthread_create)		35.26
+1859.3	39336884	(not created via pthread_create)		3.46
+1859.3	39336885	(not created via pthread_create)		10.19
+1859.3	39336900	AppKit	com.apple.NSEventThread	0.14
+1859.3	39336933	HorizonEngine		0.16
+1859.3	39336934	HorizonEngine		0.02
+1859.3	39336935	HorizonEngine		0.01
+1859.3	39336936	HorizonEngine		0.02
+1859.3	39336937	HorizonEngine		0.02
+1859.3	39336938	HorizonEngine		0.02
+1859.3	39336939	HorizonEngine		0.01
+1859.3	39336940	HorizonEngine		0.01
+1859.3	39336941	HorizonEngine		0.02
+1859.3	39336942	HorizonEngine		0.02
+1859.3	39336943	HorizonEngine	Jolt-0	0.03
+1859.3	39336944	HorizonEngine	Jolt-1	0.03
+1859.3	39336945	HorizonEngine	Jolt-2	0.01
+1859.3	39336946	HorizonEngine	Jolt-3	0.02
+1859.3	39336976	HorizonEngine		0.01
+1859.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+1859.3	39336992	dispatch	AudioSession - RootQueue	0.42
+2064.5	39336735	main		1227.41
+2064.5	39336883	(not created via pthread_create)		35.47
+2064.5	39336884	(not created via pthread_create)		8.03
+2064.5	39336885	(not created via pthread_create)		40.18
+2064.5	39336900	AppKit	com.apple.NSEventThread	0.46
+2064.5	39336933	HorizonEngine		44.92
+2064.5	39336934	HorizonEngine		52.96
+2064.5	39336935	HorizonEngine		46.45
+2064.5	39336936	HorizonEngine		45.33
+2064.5	39336937	HorizonEngine		54.78
+2064.5	39336938	HorizonEngine		44.71
+2064.5	39336939	HorizonEngine		44.39
+2064.5	39336940	HorizonEngine		44.34
+2064.5	39336941	HorizonEngine		52.74
+2064.5	39336942	HorizonEngine		45.46
+2064.5	39336943	HorizonEngine	Jolt-0	0.03
+2064.5	39336944	HorizonEngine	Jolt-1	0.03
+2064.5	39336945	HorizonEngine	Jolt-2	0.01
+2064.5	39336946	HorizonEngine	Jolt-3	0.02
+2064.5	39336976	HorizonEngine		0.01
+2064.5	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+2064.5	39336992	dispatch	AudioSession - RootQueue	0.42
+2064.5	39337010	(not created via pthread_create)		5.05
+2064.5	39337011	(not created via pthread_create)		0.01
+2359.8	39336735	main		1423.61
+2359.8	39336883	(not created via pthread_create)		35.47
+2359.8	39336884	(not created via pthread_create)		19.57
+2359.8	39336885	(not created via pthread_create)		48.23
+2359.8	39336900	AppKit	com.apple.NSEventThread	0.46
+2359.8	39336933	HorizonEngine		48.78
+2359.8	39336934	HorizonEngine		60.05
+2359.8	39336935	HorizonEngine		52.05
+2359.8	39336936	HorizonEngine		52.42
+2359.8	39336937	HorizonEngine		60.46
+2359.8	39336938	HorizonEngine		49.52
+2359.8	39336939	HorizonEngine		50.15
+2359.8	39336940	HorizonEngine		49.14
+2359.8	39336941	HorizonEngine		58.16
+2359.8	39336942	HorizonEngine		51.00
+2359.8	39336943	HorizonEngine	Jolt-0	0.03
+2359.8	39336944	HorizonEngine	Jolt-1	0.03
+2359.8	39336945	HorizonEngine	Jolt-2	0.01
+2359.8	39336946	HorizonEngine	Jolt-3	0.02
+2359.8	39336976	HorizonEngine		0.01
+2359.8	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+2359.8	39336992	dispatch	AudioSession - RootQueue	0.42
+2359.8	39337010	(not created via pthread_create)		5.05
+2359.8	39337011	(not created via pthread_create)		0.01
+2655.8	39336735	main		1546.32
+2655.8	39336883	(not created via pthread_create)		39.80
+2655.8	39336884	(not created via pthread_create)		26.57
+2655.8	39336885	(not created via pthread_create)		51.88
+2655.8	39336900	AppKit	com.apple.NSEventThread	0.46
+2655.8	39336933	HorizonEngine		53.36
+2655.8	39336934	HorizonEngine		63.16
+2655.8	39336935	HorizonEngine		55.94
+2655.8	39336936	HorizonEngine		58.16
+2655.8	39336937	HorizonEngine		64.63
+2655.8	39336938	HorizonEngine		52.79
+2655.8	39336939	HorizonEngine		52.67
+2655.8	39336940	HorizonEngine		54.02
+2655.8	39336941	HorizonEngine		61.76
+2655.8	39336942	HorizonEngine		54.00
+2655.8	39336943	HorizonEngine	Jolt-0	0.03
+2655.8	39336944	HorizonEngine	Jolt-1	0.03
+2655.8	39336945	HorizonEngine	Jolt-2	0.01
+2655.8	39336946	HorizonEngine	Jolt-3	0.02
+2655.8	39336976	HorizonEngine		0.01
+2655.8	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+2655.8	39336992	dispatch	AudioSession - RootQueue	0.42
+2655.8	39337010	(not created via pthread_create)		5.05
+2655.8	39337011	(not created via pthread_create)		0.01
+2886.9	39336735	main		1605.71
+2886.9	39336883	(not created via pthread_create)		45.53
+2886.9	39336884	(not created via pthread_create)		28.36
+2886.9	39336885	(not created via pthread_create)		51.88
+2886.9	39336900	AppKit	com.apple.NSEventThread	0.46
+2886.9	39336933	HorizonEngine		55.45
+2886.9	39336934	HorizonEngine		64.73
+2886.9	39336935	HorizonEngine		58.37
+2886.9	39336936	HorizonEngine		61.23
+2886.9	39336937	HorizonEngine		67.14
+2886.9	39336938	HorizonEngine		55.69
+2886.9	39336939	HorizonEngine		54.52
+2886.9	39336940	HorizonEngine		55.79
+2886.9	39336941	HorizonEngine		63.48
+2886.9	39336942	HorizonEngine		56.22
+2886.9	39336943	HorizonEngine	Jolt-0	0.03
+2886.9	39336944	HorizonEngine	Jolt-1	0.03
+2886.9	39336945	HorizonEngine	Jolt-2	0.01
+2886.9	39336946	HorizonEngine	Jolt-3	0.02
+2886.9	39336976	HorizonEngine		0.01
+2886.9	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+2886.9	39336992	dispatch	AudioSession - RootQueue	0.42
+2886.9	39337010	(not created via pthread_create)		5.05
+2886.9	39337011	(not created via pthread_create)		0.01
+3169.5	39336735	main		1692.44
+3169.5	39336883	(not created via pthread_create)		50.83
+3169.5	39336884	(not created via pthread_create)		34.26
+3169.5	39336885	(not created via pthread_create)		51.88
+3169.5	39336900	AppKit	com.apple.NSEventThread	0.46
+3169.5	39336933	HorizonEngine		59.29
+3169.5	39336934	HorizonEngine		67.83
+3169.5	39336935	HorizonEngine		61.03
+3169.5	39336936	HorizonEngine		64.75
+3169.5	39336937	HorizonEngine		69.99
+3169.5	39336938	HorizonEngine		58.98
+3169.5	39336939	HorizonEngine		58.17
+3169.5	39336940	HorizonEngine		58.81
+3169.5	39336941	HorizonEngine		66.90
+3169.5	39336942	HorizonEngine		59.50
+3169.5	39336943	HorizonEngine	Jolt-0	0.03
+3169.5	39336944	HorizonEngine	Jolt-1	0.03
+3169.5	39336945	HorizonEngine	Jolt-2	0.01
+3169.5	39336946	HorizonEngine	Jolt-3	0.02
+3169.5	39336976	HorizonEngine		0.01
+3169.5	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+3169.5	39336992	dispatch	AudioSession - RootQueue	0.42
+3169.5	39337010	(not created via pthread_create)		5.05
+3169.5	39337011	(not created via pthread_create)		0.01
+3467.4	39336735	main		1782.41
+3467.4	39336883	(not created via pthread_create)		56.04
+3467.4	39336884	(not created via pthread_create)		41.77
+3467.4	39336885	(not created via pthread_create)		51.89
+3467.4	39336900	AppKit	com.apple.NSEventThread	0.46
+3467.4	39336933	HorizonEngine		61.87
+3467.4	39336934	HorizonEngine		71.34
+3467.4	39336935	HorizonEngine		66.04
+3467.4	39336936	HorizonEngine		67.52
+3467.4	39336937	HorizonEngine		72.63
+3467.4	39336938	HorizonEngine		62.86
+3467.4	39336939	HorizonEngine		61.57
+3467.4	39336940	HorizonEngine		62.27
+3467.4	39336941	HorizonEngine		70.39
+3467.4	39336942	HorizonEngine		62.88
+3467.4	39336943	HorizonEngine	Jolt-0	0.03
+3467.4	39336944	HorizonEngine	Jolt-1	0.03
+3467.4	39336945	HorizonEngine	Jolt-2	0.01
+3467.4	39336946	HorizonEngine	Jolt-3	0.02
+3467.4	39336976	HorizonEngine		0.01
+3467.4	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+3467.4	39336992	dispatch	AudioSession - RootQueue	0.42
+3467.4	39337010	(not created via pthread_create)		5.05
+3467.4	39337011	(not created via pthread_create)		0.01
+3732.3	39336735	main		1877.70
+3732.3	39336883	(not created via pthread_create)		63.04
+3732.3	39336884	(not created via pthread_create)		47.31
+3732.3	39336885	(not created via pthread_create)		51.92
+3732.3	39336900	AppKit	com.apple.NSEventThread	0.46
+3732.3	39336933	HorizonEngine		65.08
+3732.3	39336934	HorizonEngine		75.13
+3732.3	39336935	HorizonEngine		71.47
+3732.3	39336936	HorizonEngine		70.93
+3732.3	39336937	HorizonEngine		75.87
+3732.3	39336938	HorizonEngine		66.68
+3732.3	39336939	HorizonEngine		65.94
+3732.3	39336940	HorizonEngine		66.58
+3732.3	39336941	HorizonEngine		74.08
+3732.3	39336942	HorizonEngine		66.33
+3732.3	39336943	HorizonEngine	Jolt-0	0.03
+3732.3	39336944	HorizonEngine	Jolt-1	0.03
+3732.3	39336945	HorizonEngine	Jolt-2	0.01
+3732.3	39336946	HorizonEngine	Jolt-3	0.02
+3732.3	39336976	HorizonEngine		0.01
+3732.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+3732.3	39336992	dispatch	AudioSession - RootQueue	0.42
+3732.3	39337010	(not created via pthread_create)		5.05
+3732.3	39337011	(not created via pthread_create)		0.01
+4010.9	39336735	main		1926.53
+4010.9	39336883	(not created via pthread_create)		67.15
+4010.9	39336884	(not created via pthread_create)		50.48
+4010.9	39336885	(not created via pthread_create)		51.92
+4010.9	39336900	AppKit	com.apple.NSEventThread	0.46
+4010.9	39336933	HorizonEngine		66.99
+4010.9	39336934	HorizonEngine		77.27
+4010.9	39336935	HorizonEngine		73.54
+4010.9	39336936	HorizonEngine		73.62
+4010.9	39336937	HorizonEngine		77.94
+4010.9	39336938	HorizonEngine		68.19
+4010.9	39336939	HorizonEngine		67.53
+4010.9	39336940	HorizonEngine		68.03
+4010.9	39336941	HorizonEngine		76.08
+4010.9	39336942	HorizonEngine		67.69
+4010.9	39336943	HorizonEngine	Jolt-0	0.03
+4010.9	39336944	HorizonEngine	Jolt-1	0.03
+4010.9	39336945	HorizonEngine	Jolt-2	0.01
+4010.9	39336946	HorizonEngine	Jolt-3	0.02
+4010.9	39336976	HorizonEngine		0.01
+4010.9	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+4010.9	39336992	dispatch	AudioSession - RootQueue	0.42
+4010.9	39337010	(not created via pthread_create)		5.05
+4010.9	39337011	(not created via pthread_create)		0.01
+4285.7	39336735	main		2002.07
+4285.7	39336883	(not created via pthread_create)		71.36
+4285.7	39336884	(not created via pthread_create)		55.95
+4285.7	39336885	(not created via pthread_create)		51.99
+4285.7	39336900	AppKit	com.apple.NSEventThread	0.50
+4285.7	39336933	HorizonEngine		70.83
+4285.7	39336934	HorizonEngine		80.37
+4285.7	39336935	HorizonEngine		77.14
+4285.7	39336936	HorizonEngine		77.32
+4285.7	39336937	HorizonEngine		80.72
+4285.7	39336938	HorizonEngine		70.83
+4285.7	39336939	HorizonEngine		71.13
+4285.7	39336940	HorizonEngine		70.85
+4285.7	39336941	HorizonEngine		78.31
+4285.7	39336942	HorizonEngine		71.49
+4285.7	39336943	HorizonEngine	Jolt-0	0.03
+4285.7	39336944	HorizonEngine	Jolt-1	0.03
+4285.7	39336945	HorizonEngine	Jolt-2	0.01
+4285.7	39336946	HorizonEngine	Jolt-3	0.02
+4285.7	39336976	HorizonEngine		0.01
+4285.7	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+4285.7	39336992	dispatch	AudioSession - RootQueue	0.42
+4285.7	39337010	(not created via pthread_create)		5.05
+4285.7	39337011	(not created via pthread_create)		0.01
+4581.2	39336735	main		2093.58
+4581.2	39336883	(not created via pthread_create)		79.25
+4581.2	39336884	(not created via pthread_create)		58.26
+4581.2	39336885	(not created via pthread_create)		54.57
+4581.2	39336900	AppKit	com.apple.NSEventThread	0.50
+4581.2	39336933	HorizonEngine		75.06
+4581.2	39336934	HorizonEngine		84.62
+4581.2	39336935	HorizonEngine		80.92
+4581.2	39336936	HorizonEngine		81.00
+4581.2	39336937	HorizonEngine		85.46
+4581.2	39336938	HorizonEngine		73.63
+4581.2	39336939	HorizonEngine		74.09
+4581.2	39336940	HorizonEngine		74.55
+4581.2	39336941	HorizonEngine		81.40
+4581.2	39336942	HorizonEngine		75.14
+4581.2	39336943	HorizonEngine	Jolt-0	0.03
+4581.2	39336944	HorizonEngine	Jolt-1	0.03
+4581.2	39336945	HorizonEngine	Jolt-2	0.01
+4581.2	39336946	HorizonEngine	Jolt-3	0.02
+4581.2	39336976	HorizonEngine		0.01
+4581.2	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+4581.2	39336992	dispatch	AudioSession - RootQueue	0.42
+4581.2	39337010	(not created via pthread_create)		5.05
+4581.2	39337011	(not created via pthread_create)		0.01
+4738.9	39336735	main		2154.46
+4738.9	39336883	(not created via pthread_create)		82.49
+4738.9	39336884	(not created via pthread_create)		63.07
+4738.9	39336885	(not created via pthread_create)		54.57
+4738.9	39336900	AppKit	com.apple.NSEventThread	0.50
+4738.9	39336933	HorizonEngine		77.71
+4738.9	39336934	HorizonEngine		87.46
+4738.9	39336935	HorizonEngine		83.36
+4738.9	39336936	HorizonEngine		83.00
+4738.9	39336937	HorizonEngine		87.15
+4738.9	39336938	HorizonEngine		76.27
+4738.9	39336939	HorizonEngine		76.89
+4738.9	39336940	HorizonEngine		76.89
+4738.9	39336941	HorizonEngine		83.53
+4738.9	39336942	HorizonEngine		77.44
+4738.9	39336943	HorizonEngine	Jolt-0	0.03
+4738.9	39336944	HorizonEngine	Jolt-1	0.03
+4738.9	39336945	HorizonEngine	Jolt-2	0.01
+4738.9	39336946	HorizonEngine	Jolt-3	0.02
+4738.9	39336976	HorizonEngine		0.01
+4738.9	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+4738.9	39336992	dispatch	AudioSession - RootQueue	0.42
+4738.9	39337010	(not created via pthread_create)		5.05
+4738.9	39337011	(not created via pthread_create)		0.01
+5010.2	39336735	main		2241.14
+5010.2	39336883	(not created via pthread_create)		86.72
+5010.2	39336884	(not created via pthread_create)		68.74
+5010.2	39336885	(not created via pthread_create)		56.70
+5010.2	39336900	AppKit	com.apple.NSEventThread	0.50
+5010.2	39336933	HorizonEngine		80.79
+5010.2	39336934	HorizonEngine		90.42
+5010.2	39336935	HorizonEngine		86.56
+5010.2	39336936	HorizonEngine		85.97
+5010.2	39336937	HorizonEngine		90.33
+5010.2	39336938	HorizonEngine		77.94
+5010.2	39336939	HorizonEngine		80.40
+5010.2	39336940	HorizonEngine		80.10
+5010.2	39336941	HorizonEngine		85.38
+5010.2	39336942	HorizonEngine		79.74
+5010.2	39336943	HorizonEngine	Jolt-0	0.03
+5010.2	39336944	HorizonEngine	Jolt-1	0.03
+5010.2	39336945	HorizonEngine	Jolt-2	0.01
+5010.2	39336946	HorizonEngine	Jolt-3	0.02
+5010.2	39336976	HorizonEngine		0.01
+5010.2	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+5010.2	39336992	dispatch	AudioSession - RootQueue	0.42
+5010.2	39337010	(not created via pthread_create)		5.05
+5010.2	39337011	(not created via pthread_create)		0.01
+5290.4	39336735	main		2298.87
+5290.4	39336883	(not created via pthread_create)		86.73
+5290.4	39336884	(not created via pthread_create)		71.22
+5290.4	39336885	(not created via pthread_create)		61.45
+5290.4	39336900	AppKit	com.apple.NSEventThread	0.50
+5290.4	39336933	HorizonEngine		82.93
+5290.4	39336934	HorizonEngine		93.40
+5290.4	39336935	HorizonEngine		89.10
+5290.4	39336936	HorizonEngine		88.08
+5290.4	39336937	HorizonEngine		92.33
+5290.4	39336938	HorizonEngine		80.05
+5290.4	39336939	HorizonEngine		83.07
+5290.4	39336940	HorizonEngine		82.67
+5290.4	39336941	HorizonEngine		87.66
+5290.4	39336942	HorizonEngine		82.29
+5290.4	39336943	HorizonEngine	Jolt-0	0.03
+5290.4	39336944	HorizonEngine	Jolt-1	0.03
+5290.4	39336945	HorizonEngine	Jolt-2	0.01
+5290.4	39336946	HorizonEngine	Jolt-3	0.02
+5290.4	39336976	HorizonEngine		0.01
+5290.4	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+5290.4	39336992	dispatch	AudioSession - RootQueue	0.42
+5290.4	39337010	(not created via pthread_create)		5.05
+5290.4	39337011	(not created via pthread_create)		0.01
+5585.9	39336735	main		2393.07
+5585.9	39336883	(not created via pthread_create)		86.74
+5585.9	39336884	(not created via pthread_create)		77.34
+5585.9	39336885	(not created via pthread_create)		68.19
+5585.9	39336900	AppKit	com.apple.NSEventThread	0.50
+5585.9	39336933	HorizonEngine		87.03
+5585.9	39336934	HorizonEngine		96.87
+5585.9	39336935	HorizonEngine		92.09
+5585.9	39336936	HorizonEngine		92.30
+5585.9	39336937	HorizonEngine		95.20
+5585.9	39336938	HorizonEngine		83.66
+5585.9	39336939	HorizonEngine		86.61
+5585.9	39336940	HorizonEngine		86.42
+5585.9	39336941	HorizonEngine		91.86
+5585.9	39336942	HorizonEngine		86.48
+5585.9	39336943	HorizonEngine	Jolt-0	0.03
+5585.9	39336944	HorizonEngine	Jolt-1	0.03
+5585.9	39336945	HorizonEngine	Jolt-2	0.01
+5585.9	39336946	HorizonEngine	Jolt-3	0.02
+5585.9	39336976	HorizonEngine		0.01
+5585.9	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+5585.9	39336992	dispatch	AudioSession - RootQueue	0.42
+5585.9	39337010	(not created via pthread_create)		5.05
+5585.9	39337011	(not created via pthread_create)		0.01
+5881.3	39336735	main		2453.26
+5881.3	39336883	(not created via pthread_create)		86.74
+5881.3	39336884	(not created via pthread_create)		81.30
+5881.3	39336885	(not created via pthread_create)		72.02
+5881.3	39336900	AppKit	com.apple.NSEventThread	0.50
+5881.3	39336933	HorizonEngine		89.28
+5881.3	39336934	HorizonEngine		99.29
+5881.3	39336935	HorizonEngine		94.99
+5881.3	39336936	HorizonEngine		94.70
+5881.3	39336937	HorizonEngine		97.45
+5881.3	39336938	HorizonEngine		85.96
+5881.3	39336939	HorizonEngine		89.42
+5881.3	39336940	HorizonEngine		88.93
+5881.3	39336941	HorizonEngine		94.80
+5881.3	39336942	HorizonEngine		89.65
+5881.3	39336943	HorizonEngine	Jolt-0	0.03
+5881.3	39336944	HorizonEngine	Jolt-1	0.03
+5881.3	39336945	HorizonEngine	Jolt-2	0.01
+5881.3	39336946	HorizonEngine	Jolt-3	0.02
+5881.3	39336976	HorizonEngine		0.01
+5881.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+5881.3	39336992	dispatch	AudioSession - RootQueue	0.42
+5881.3	39337010	(not created via pthread_create)		5.05
+5881.3	39337011	(not created via pthread_create)		0.01
+6175.7	39336735	main		2508.97
+6175.7	39336883	(not created via pthread_create)		86.74
+6175.7	39336884	(not created via pthread_create)		84.37
+6175.7	39336885	(not created via pthread_create)		77.26
+6175.7	39336900	AppKit	com.apple.NSEventThread	0.50
+6175.7	39336933	HorizonEngine		90.24
+6175.7	39336934	HorizonEngine		102.51
+6175.7	39336935	HorizonEngine		96.20
+6175.7	39336936	HorizonEngine		96.08
+6175.7	39336937	HorizonEngine		99.09
+6175.7	39336938	HorizonEngine		87.32
+6175.7	39336939	HorizonEngine		91.39
+6175.7	39336940	HorizonEngine		91.09
+6175.7	39336941	HorizonEngine		96.55
+6175.7	39336942	HorizonEngine		91.30
+6175.7	39336943	HorizonEngine	Jolt-0	0.03
+6175.7	39336944	HorizonEngine	Jolt-1	0.03
+6175.7	39336945	HorizonEngine	Jolt-2	0.01
+6175.7	39336946	HorizonEngine	Jolt-3	0.02
+6175.7	39336976	HorizonEngine		0.01
+6175.7	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+6175.7	39336992	dispatch	AudioSession - RootQueue	0.42
+6175.7	39337010	(not created via pthread_create)		5.05
+6175.7	39337011	(not created via pthread_create)		0.01
+6424.6	39336735	main		2538.09
+6424.6	39336883	(not created via pthread_create)		86.74
+6424.6	39336884	(not created via pthread_create)		87.61
+6424.6	39336885	(not created via pthread_create)		78.19
+6424.6	39336900	AppKit	com.apple.NSEventThread	0.50
+6424.6	39336933	HorizonEngine		90.83
+6424.6	39336934	HorizonEngine		103.67
+6424.6	39336935	HorizonEngine		97.22
+6424.6	39336936	HorizonEngine		96.79
+6424.6	39336937	HorizonEngine		100.32
+6424.6	39336938	HorizonEngine		88.39
+6424.6	39336939	HorizonEngine		92.24
+6424.6	39336940	HorizonEngine		91.92
+6424.6	39336941	HorizonEngine		97.49
+6424.6	39336942	HorizonEngine		92.28
+6424.6	39336943	HorizonEngine	Jolt-0	0.03
+6424.6	39336944	HorizonEngine	Jolt-1	0.03
+6424.6	39336945	HorizonEngine	Jolt-2	0.01
+6424.6	39336946	HorizonEngine	Jolt-3	0.02
+6424.6	39336976	HorizonEngine		0.01
+6424.6	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+6424.6	39337010	(not created via pthread_create)		5.05
+6424.6	39337011	(not created via pthread_create)		0.01
+6709.3	39336735	main		2585.42
+6709.3	39336883	(not created via pthread_create)		86.74
+6709.3	39336884	(not created via pthread_create)		91.98
+6709.3	39336885	(not created via pthread_create)		81.20
+6709.3	39336900	AppKit	com.apple.NSEventThread	0.50
+6709.3	39336933	HorizonEngine		92.28
+6709.3	39336934	HorizonEngine		105.44
+6709.3	39336935	HorizonEngine		98.90
+6709.3	39336936	HorizonEngine		98.22
+6709.3	39336937	HorizonEngine		102.02
+6709.3	39336938	HorizonEngine		89.84
+6709.3	39336939	HorizonEngine		93.55
+6709.3	39336940	HorizonEngine		93.37
+6709.3	39336941	HorizonEngine		99.20
+6709.3	39336942	HorizonEngine		93.15
+6709.3	39336943	HorizonEngine	Jolt-0	0.03
+6709.3	39336944	HorizonEngine	Jolt-1	0.03
+6709.3	39336945	HorizonEngine	Jolt-2	0.01
+6709.3	39336946	HorizonEngine	Jolt-3	0.02
+6709.3	39336976	HorizonEngine		0.01
+6709.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+6709.3	39337010	(not created via pthread_create)		5.05
+6709.3	39337011	(not created via pthread_create)		0.01
+6980.8	39336735	main		2621.43
+6980.8	39336883	(not created via pthread_create)		86.74
+6980.8	39336884	(not created via pthread_create)		94.89
+6980.8	39336885	(not created via pthread_create)		83.91
+6980.8	39336900	AppKit	com.apple.NSEventThread	0.50
+6980.8	39336933	HorizonEngine		93.11
+6980.8	39336934	HorizonEngine		106.23
+6980.8	39336935	HorizonEngine		100.19
+6980.8	39336936	HorizonEngine		99.12
+6980.8	39336937	HorizonEngine		103.02
+6980.8	39336938	HorizonEngine		91.19
+6980.8	39336939	HorizonEngine		95.07
+6980.8	39336940	HorizonEngine		94.25
+6980.8	39336941	HorizonEngine		100.38
+6980.8	39336942	HorizonEngine		94.28
+6980.8	39336943	HorizonEngine	Jolt-0	0.03
+6980.8	39336944	HorizonEngine	Jolt-1	0.03
+6980.8	39336945	HorizonEngine	Jolt-2	0.01
+6980.8	39336946	HorizonEngine	Jolt-3	0.02
+6980.8	39336976	HorizonEngine		0.01
+6980.8	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+6980.8	39337010	(not created via pthread_create)		5.05
+6980.8	39337011	(not created via pthread_create)		0.01
+7248.0	39336735	main		2663.78
+7248.0	39336883	(not created via pthread_create)		86.74
+7248.0	39336884	(not created via pthread_create)		98.65
+7248.0	39336885	(not created via pthread_create)		87.88
+7248.0	39336900	AppKit	com.apple.NSEventThread	0.50
+7248.0	39336933	HorizonEngine		94.05
+7248.0	39336934	HorizonEngine		107.12
+7248.0	39336935	HorizonEngine		101.53
+7248.0	39336936	HorizonEngine		100.41
+7248.0	39336937	HorizonEngine		104.56
+7248.0	39336938	HorizonEngine		92.53
+7248.0	39336939	HorizonEngine		96.46
+7248.0	39336940	HorizonEngine		95.60
+7248.0	39336941	HorizonEngine		102.05
+7248.0	39336942	HorizonEngine		95.51
+7248.0	39336943	HorizonEngine	Jolt-0	0.03
+7248.0	39336944	HorizonEngine	Jolt-1	0.03
+7248.0	39336945	HorizonEngine	Jolt-2	0.01
+7248.0	39336946	HorizonEngine	Jolt-3	0.02
+7248.0	39336976	HorizonEngine		0.01
+7248.0	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+7248.0	39337010	(not created via pthread_create)		5.05
+7248.0	39337011	(not created via pthread_create)		0.01
+7519.5	39336735	main		2815.26
+7519.5	39336883	(not created via pthread_create)		94.82
+7519.5	39336884	(not created via pthread_create)		102.42
+7519.5	39336885	(not created via pthread_create)		97.20
+7519.5	39336900	AppKit	com.apple.NSEventThread	0.50
+7519.5	39336933	HorizonEngine		98.25
+7519.5	39336934	HorizonEngine		110.75
+7519.5	39336935	HorizonEngine		107.31
+7519.5	39336936	HorizonEngine		106.48
+7519.5	39336937	HorizonEngine		110.08
+7519.5	39336938	HorizonEngine		97.55
+7519.5	39336939	HorizonEngine		101.94
+7519.5	39336940	HorizonEngine		99.96
+7519.5	39336941	HorizonEngine		106.38
+7519.5	39336942	HorizonEngine		100.54
+7519.5	39336943	HorizonEngine	Jolt-0	0.03
+7519.5	39336944	HorizonEngine	Jolt-1	0.03
+7519.5	39336945	HorizonEngine	Jolt-2	0.01
+7519.5	39336946	HorizonEngine	Jolt-3	0.02
+7519.5	39336976	HorizonEngine		0.01
+7519.5	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+7519.5	39337010	(not created via pthread_create)		5.05
+7519.5	39337011	(not created via pthread_create)		0.01
+7712.4	39336735	main		2928.37
+7712.4	39336883	(not created via pthread_create)		101.56
+7712.4	39336884	(not created via pthread_create)		102.44
+7712.4	39336885	(not created via pthread_create)		105.62
+7712.4	39336900	AppKit	com.apple.NSEventThread	0.50
+7712.4	39336933	HorizonEngine		101.91
+7712.4	39336934	HorizonEngine		115.37
+7712.4	39336935	HorizonEngine		111.18
+7712.4	39336936	HorizonEngine		109.00
+7712.4	39336937	HorizonEngine		114.74
+7712.4	39336938	HorizonEngine		101.02
+7712.4	39336939	HorizonEngine		106.36
+7712.4	39336940	HorizonEngine		103.31
+7712.4	39336941	HorizonEngine		109.03
+7712.4	39336942	HorizonEngine		104.37
+7712.4	39336943	HorizonEngine	Jolt-0	0.03
+7712.4	39336944	HorizonEngine	Jolt-1	0.03
+7712.4	39336945	HorizonEngine	Jolt-2	0.01
+7712.4	39336946	HorizonEngine	Jolt-3	0.02
+7712.4	39336976	HorizonEngine		0.01
+7712.4	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+7712.4	39337010	(not created via pthread_create)		5.05
+7712.4	39337011	(not created via pthread_create)		0.01
+7968.9	39336735	main		2990.87
+7968.9	39336883	(not created via pthread_create)		105.59
+7968.9	39336884	(not created via pthread_create)		105.77
+7968.9	39336885	(not created via pthread_create)		105.66
+7968.9	39336900	AppKit	com.apple.NSEventThread	0.50
+7968.9	39336933	HorizonEngine		105.22
+7968.9	39336934	HorizonEngine		117.96
+7968.9	39336935	HorizonEngine		113.97
+7968.9	39336936	HorizonEngine		111.12
+7968.9	39336937	HorizonEngine		117.23
+7968.9	39336938	HorizonEngine		103.04
+7968.9	39336939	HorizonEngine		108.79
+7968.9	39336940	HorizonEngine		105.13
+7968.9	39336941	HorizonEngine		111.80
+7968.9	39336942	HorizonEngine		107.08
+7968.9	39336943	HorizonEngine	Jolt-0	0.03
+7968.9	39336944	HorizonEngine	Jolt-1	0.03
+7968.9	39336945	HorizonEngine	Jolt-2	0.01
+7968.9	39336946	HorizonEngine	Jolt-3	0.02
+7968.9	39336976	HorizonEngine		0.01
+7968.9	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+7968.9	39337010	(not created via pthread_create)		5.05
+7968.9	39337011	(not created via pthread_create)		0.01
+8138.3	39336735	main		3048.32
+8138.3	39336883	(not created via pthread_create)		109.00
+8138.3	39336884	(not created via pthread_create)		110.08
+8138.3	39336885	(not created via pthread_create)		105.66
+8138.3	39336900	AppKit	com.apple.NSEventThread	0.50
+8138.3	39336933	HorizonEngine		108.01
+8138.3	39336934	HorizonEngine		120.03
+8138.3	39336935	HorizonEngine		116.57
+8138.3	39336936	HorizonEngine		113.95
+8138.3	39336937	HorizonEngine		119.73
+8138.3	39336938	HorizonEngine		105.58
+8138.3	39336939	HorizonEngine		110.60
+8138.3	39336940	HorizonEngine		106.95
+8138.3	39336941	HorizonEngine		114.69
+8138.3	39336942	HorizonEngine		109.42
+8138.3	39336943	HorizonEngine	Jolt-0	0.03
+8138.3	39336944	HorizonEngine	Jolt-1	0.03
+8138.3	39336945	HorizonEngine	Jolt-2	0.01
+8138.3	39336946	HorizonEngine	Jolt-3	0.02
+8138.3	39336976	HorizonEngine		0.01
+8138.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+8138.3	39337010	(not created via pthread_create)		5.05
+8138.3	39337011	(not created via pthread_create)		0.01
+8400.6	39336735	main		3128.00
+8400.6	39336883	(not created via pthread_create)		114.30
+8400.6	39336884	(not created via pthread_create)		115.11
+8400.6	39336885	(not created via pthread_create)		105.66
+8400.6	39336900	AppKit	com.apple.NSEventThread	0.50
+8400.6	39336933	HorizonEngine		111.76
+8400.6	39336934	HorizonEngine		122.60
+8400.6	39336935	HorizonEngine		120.48
+8400.6	39336936	HorizonEngine		117.01
+8400.6	39336937	HorizonEngine		122.72
+8400.6	39336938	HorizonEngine		109.22
+8400.6	39336939	HorizonEngine		113.76
+8400.6	39336940	HorizonEngine		110.35
+8400.6	39336941	HorizonEngine		117.79
+8400.6	39336942	HorizonEngine		112.02
+8400.6	39336943	HorizonEngine	Jolt-0	0.03
+8400.6	39336944	HorizonEngine	Jolt-1	0.03
+8400.6	39336945	HorizonEngine	Jolt-2	0.01
+8400.6	39336946	HorizonEngine	Jolt-3	0.02
+8400.6	39336976	HorizonEngine		0.01
+8400.6	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+8400.6	39337010	(not created via pthread_create)		5.05
+8400.6	39337011	(not created via pthread_create)		0.01
+8617.4	39336735	main		3203.67
+8617.4	39336883	(not created via pthread_create)		120.06
+8617.4	39336884	(not created via pthread_create)		119.42
+8617.4	39336885	(not created via pthread_create)		105.66
+8617.4	39336900	AppKit	com.apple.NSEventThread	0.50
+8617.4	39336933	HorizonEngine		115.48
+8617.4	39336934	HorizonEngine		126.48
+8617.4	39336935	HorizonEngine		123.83
+8617.4	39336936	HorizonEngine		119.89
+8617.4	39336937	HorizonEngine		125.24
+8617.4	39336938	HorizonEngine		111.72
+8617.4	39336939	HorizonEngine		117.11
+8617.4	39336940	HorizonEngine		112.88
+8617.4	39336941	HorizonEngine		121.26
+8617.4	39336942	HorizonEngine		115.19
+8617.4	39336943	HorizonEngine	Jolt-0	0.03
+8617.4	39336944	HorizonEngine	Jolt-1	0.03
+8617.4	39336945	HorizonEngine	Jolt-2	0.01
+8617.4	39336946	HorizonEngine	Jolt-3	0.02
+8617.4	39336976	HorizonEngine		0.01
+8617.4	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+8617.4	39337010	(not created via pthread_create)		5.05
+8617.4	39337011	(not created via pthread_create)		0.01
+8880.3	39336735	main		3303.66
+8880.3	39336883	(not created via pthread_create)		124.97
+8880.3	39336884	(not created via pthread_create)		128.15
+8880.3	39336885	(not created via pthread_create)		105.66
+8880.3	39336900	AppKit	com.apple.NSEventThread	0.50
+8880.3	39336933	HorizonEngine		119.42
+8880.3	39336934	HorizonEngine		130.06
+8880.3	39336935	HorizonEngine		128.93
+8880.3	39336936	HorizonEngine		124.38
+8880.3	39336937	HorizonEngine		129.79
+8880.3	39336938	HorizonEngine		115.48
+8880.3	39336939	HorizonEngine		120.61
+8880.3	39336940	HorizonEngine		116.12
+8880.3	39336941	HorizonEngine		125.38
+8880.3	39336942	HorizonEngine		118.93
+8880.3	39336943	HorizonEngine	Jolt-0	0.03
+8880.3	39336944	HorizonEngine	Jolt-1	0.03
+8880.3	39336945	HorizonEngine	Jolt-2	0.01
+8880.3	39336946	HorizonEngine	Jolt-3	0.02
+8880.3	39336976	HorizonEngine		0.01
+8880.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+8880.3	39337010	(not created via pthread_create)		5.05
+8880.3	39337011	(not created via pthread_create)		0.01
+9003.0	39336735	main		3356.19
+9003.0	39336883	(not created via pthread_create)		129.58
+9003.0	39336884	(not created via pthread_create)		128.39
+9003.0	39336885	(not created via pthread_create)		107.71
+9003.0	39336900	AppKit	com.apple.NSEventThread	0.50
+9003.0	39336933	HorizonEngine		122.24
+9003.0	39336934	HorizonEngine		131.58
+9003.0	39336935	HorizonEngine		130.66
+9003.0	39336936	HorizonEngine		126.48
+9003.0	39336937	HorizonEngine		131.33
+9003.0	39336938	HorizonEngine		117.07
+9003.0	39336939	HorizonEngine		121.77
+9003.0	39336940	HorizonEngine		118.67
+9003.0	39336941	HorizonEngine		127.23
+9003.0	39336942	HorizonEngine		120.82
+9003.0	39336943	HorizonEngine	Jolt-0	0.03
+9003.0	39336944	HorizonEngine	Jolt-1	0.03
+9003.0	39336945	HorizonEngine	Jolt-2	0.01
+9003.0	39336946	HorizonEngine	Jolt-3	0.02
+9003.0	39336976	HorizonEngine		0.01
+9003.0	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+9003.0	39337010	(not created via pthread_create)		5.05
+9003.0	39337011	(not created via pthread_create)		0.01
+9296.0	39336735	main		3470.25
+9296.0	39336883	(not created via pthread_create)		138.07
+9296.0	39336884	(not created via pthread_create)		128.40
+9296.0	39336885	(not created via pthread_create)		114.83
+9296.0	39336900	AppKit	com.apple.NSEventThread	0.50
+9296.0	39336933	HorizonEngine		125.03
+9296.0	39336934	HorizonEngine		133.65
+9296.0	39336935	HorizonEngine		134.27
+9296.0	39336936	HorizonEngine		130.33
+9296.0	39336937	HorizonEngine		135.86
+9296.0	39336938	HorizonEngine		123.38
+9296.0	39336939	HorizonEngine		126.01
+9296.0	39336940	HorizonEngine		123.86
+9296.0	39336941	HorizonEngine		130.40
+9296.0	39336942	HorizonEngine		124.62
+9296.0	39336943	HorizonEngine	Jolt-0	0.03
+9296.0	39336944	HorizonEngine	Jolt-1	0.03
+9296.0	39336945	HorizonEngine	Jolt-2	0.01
+9296.0	39336946	HorizonEngine	Jolt-3	0.02
+9296.0	39336976	HorizonEngine		0.01
+9296.0	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+9296.0	39337010	(not created via pthread_create)		5.05
+9296.0	39337011	(not created via pthread_create)		0.01
+9430.1	39336735	main		3546.99
+9430.1	39336883	(not created via pthread_create)		142.63
+9430.1	39336884	(not created via pthread_create)		128.40
+9430.1	39336885	(not created via pthread_create)		120.14
+9430.1	39336900	AppKit	com.apple.NSEventThread	0.50
+9430.1	39336933	HorizonEngine		127.71
+9430.1	39336934	HorizonEngine		138.05
+9430.1	39336935	HorizonEngine		137.84
+9430.1	39336936	HorizonEngine		132.49
+9430.1	39336937	HorizonEngine		138.92
+9430.1	39336938	HorizonEngine		125.17
+9430.1	39336939	HorizonEngine		127.68
+9430.1	39336940	HorizonEngine		126.10
+9430.1	39336941	HorizonEngine		133.08
+9430.1	39336942	HorizonEngine		127.25
+9430.1	39336943	HorizonEngine	Jolt-0	0.03
+9430.1	39336944	HorizonEngine	Jolt-1	0.03
+9430.1	39336945	HorizonEngine	Jolt-2	0.01
+9430.1	39336946	HorizonEngine	Jolt-3	0.02
+9430.1	39336976	HorizonEngine		0.01
+9430.1	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+9430.1	39337010	(not created via pthread_create)		5.05
+9430.1	39337011	(not created via pthread_create)		0.01
+9712.0	39336735	main		3689.03
+9712.0	39336883	(not created via pthread_create)		151.51
+9712.0	39336884	(not created via pthread_create)		128.43
+9712.0	39336885	(not created via pthread_create)		129.50
+9712.0	39336900	AppKit	com.apple.NSEventThread	0.50
+9712.0	39336933	HorizonEngine		132.15
+9712.0	39336934	HorizonEngine		144.97
+9712.0	39336935	HorizonEngine		141.60
+9712.0	39336936	HorizonEngine		136.68
+9712.0	39336937	HorizonEngine		143.38
+9712.0	39336938	HorizonEngine		128.73
+9712.0	39336939	HorizonEngine		133.25
+9712.0	39336940	HorizonEngine		131.00
+9712.0	39336941	HorizonEngine		138.81
+9712.0	39336942	HorizonEngine		133.14
+9712.0	39336943	HorizonEngine	Jolt-0	0.03
+9712.0	39336944	HorizonEngine	Jolt-1	0.03
+9712.0	39336945	HorizonEngine	Jolt-2	0.01
+9712.0	39336946	HorizonEngine	Jolt-3	0.02
+9712.0	39336976	HorizonEngine		0.01
+9712.0	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+9712.0	39337010	(not created via pthread_create)		5.05
+9712.0	39337011	(not created via pthread_create)		0.01
+10012.2	39336735	main		3890.39
+10012.2	39336883	(not created via pthread_create)		157.65
+10012.2	39336884	(not created via pthread_create)		129.66
+10012.2	39336885	(not created via pthread_create)		144.91
+10012.2	39336900	AppKit	com.apple.NSEventThread	0.50
+10012.2	39336933	HorizonEngine		139.12
+10012.2	39336934	HorizonEngine		149.29
+10012.2	39336935	HorizonEngine		145.46
+10012.2	39336936	HorizonEngine		142.03
+10012.2	39336937	HorizonEngine		147.61
+10012.2	39336938	HorizonEngine		132.52
+10012.2	39336939	HorizonEngine		137.94
+10012.2	39336940	HorizonEngine		135.33
+10012.2	39336941	HorizonEngine		142.02
+10012.2	39336942	HorizonEngine		138.67
+10012.2	39336943	HorizonEngine	Jolt-0	0.03
+10012.2	39336944	HorizonEngine	Jolt-1	0.03
+10012.2	39336945	HorizonEngine	Jolt-2	0.01
+10012.2	39336946	HorizonEngine	Jolt-3	0.02
+10012.2	39336976	HorizonEngine		0.01
+10012.2	39336978	CoreAudio	com.apple.audio.IOThread.client	0.17
+10012.2	39337010	(not created via pthread_create)		5.05
+10012.2	39337011	(not created via pthread_create)		0.01
+10298.0	39336735	main		3978.63
+10298.0	39336883	(not created via pthread_create)		163.42
+10298.0	39336884	(not created via pthread_create)		132.48
+10298.0	39336885	(not created via pthread_create)		147.07
+10298.0	39336900	AppKit	com.apple.NSEventThread	0.79
+10298.0	39336933	HorizonEngine		141.85
+10298.0	39336934	HorizonEngine		152.26
+10298.0	39336935	HorizonEngine		147.71
+10298.0	39336936	HorizonEngine		144.18
+10298.0	39336937	HorizonEngine		152.44
+10298.0	39336938	HorizonEngine		134.13
+10298.0	39336939	HorizonEngine		139.81
+10298.0	39336940	HorizonEngine		138.31
+10298.0	39336941	HorizonEngine		144.31
+10298.0	39336942	HorizonEngine		141.49
+10298.0	39336943	HorizonEngine	Jolt-0	0.03
+10298.0	39336944	HorizonEngine	Jolt-1	0.03
+10298.0	39336945	HorizonEngine	Jolt-2	0.01
+10298.0	39336946	HorizonEngine	Jolt-3	0.02
+10298.0	39336976	HorizonEngine		0.01
+10298.0	39336978	CoreAudio	com.apple.audio.IOThread.client	0.29
+10298.0	39337010	(not created via pthread_create)		5.05
+10298.0	39337011	(not created via pthread_create)		0.01
+10451.3	39336735	main		4034.76
+10451.3	39336883	(not created via pthread_create)		165.39
+10451.3	39336884	(not created via pthread_create)		135.05
+10451.3	39336885	(not created via pthread_create)		150.47
+10451.3	39336900	AppKit	com.apple.NSEventThread	0.90
+10451.3	39336933	HorizonEngine		142.91
+10451.3	39336934	HorizonEngine		154.95
+10451.3	39336935	HorizonEngine		149.38
+10451.3	39336936	HorizonEngine		145.27
+10451.3	39336937	HorizonEngine		153.92
+10451.3	39336938	HorizonEngine		135.74
+10451.3	39336939	HorizonEngine		141.06
+10451.3	39336940	HorizonEngine		140.66
+10451.3	39336941	HorizonEngine		145.75
+10451.3	39336942	HorizonEngine		142.24
+10451.3	39336943	HorizonEngine	Jolt-0	0.03
+10451.3	39336944	HorizonEngine	Jolt-1	0.03
+10451.3	39336945	HorizonEngine	Jolt-2	0.01
+10451.3	39336946	HorizonEngine	Jolt-3	0.02
+10451.3	39336976	HorizonEngine		0.01
+10451.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.57
+10451.3	39337010	(not created via pthread_create)		5.05
+10451.3	39337011	(not created via pthread_create)		0.01
+10650.3	39336735	main		4106.53
+10650.3	39336883	(not created via pthread_create)		171.19
+10650.3	39336884	(not created via pthread_create)		137.32
+10650.3	39336885	(not created via pthread_create)		152.05
+10650.3	39336900	AppKit	com.apple.NSEventThread	1.67
+10650.3	39336933	HorizonEngine		144.47
+10650.3	39336934	HorizonEngine		158.40
+10650.3	39336935	HorizonEngine		151.04
+10650.3	39336936	HorizonEngine		147.57
+10650.3	39336937	HorizonEngine		157.42
+10650.3	39336938	HorizonEngine		136.97
+10650.3	39336939	HorizonEngine		142.70
+10650.3	39336940	HorizonEngine		142.37
+10650.3	39336941	HorizonEngine		148.72
+10650.3	39336942	HorizonEngine		144.50
+10650.3	39336943	HorizonEngine	Jolt-0	0.03
+10650.3	39336944	HorizonEngine	Jolt-1	0.03
+10650.3	39336945	HorizonEngine	Jolt-2	0.01
+10650.3	39336946	HorizonEngine	Jolt-3	0.02
+10650.3	39336976	HorizonEngine		0.01
+10650.3	39336978	CoreAudio	com.apple.audio.IOThread.client	0.95
+10650.3	39337010	(not created via pthread_create)		5.05
+10650.3	39337011	(not created via pthread_create)		0.01
+10849.4	39336735	main		4161.57
+10849.4	39336883	(not created via pthread_create)		176.05
+10849.4	39336884	(not created via pthread_create)		138.11
+10849.4	39336885	(not created via pthread_create)		154.12
+10849.4	39336900	AppKit	com.apple.NSEventThread	2.35
+10849.4	39336933	HorizonEngine		146.58
+10849.4	39336934	HorizonEngine		159.72
+10849.4	39336935	HorizonEngine		152.58
+10849.4	39336936	HorizonEngine		149.14
+10849.4	39336937	HorizonEngine		159.80
+10849.4	39336938	HorizonEngine		138.36
+10849.4	39336939	HorizonEngine		144.37
+10849.4	39336940	HorizonEngine		143.74
+10849.4	39336941	HorizonEngine		150.48
+10849.4	39336942	HorizonEngine		145.94
+10849.4	39336943	HorizonEngine	Jolt-0	0.03
+10849.4	39336944	HorizonEngine	Jolt-1	0.03
+10849.4	39336945	HorizonEngine	Jolt-2	0.01
+10849.4	39336946	HorizonEngine	Jolt-3	0.02
+10849.4	39336976	HorizonEngine		0.01
+10849.4	39336978	CoreAudio	com.apple.audio.IOThread.client	1.30
+10849.4	39337010	(not created via pthread_create)		5.05
+10849.4	39337011	(not created via pthread_create)		0.01
+11047.2	39336735	main		4236.25
+11047.2	39336883	(not created via pthread_create)		181.35
+11047.2	39336884	(not created via pthread_create)		138.11
+11047.2	39336885	(not created via pthread_create)		157.67
+11047.2	39336900	AppKit	com.apple.NSEventThread	2.99
+11047.2	39336933	HorizonEngine		148.63
+11047.2	39336934	HorizonEngine		160.78
+11047.2	39336935	HorizonEngine		154.16
+11047.2	39336936	HorizonEngine		153.00
+11047.2	39336937	HorizonEngine		162.79
+11047.2	39336938	HorizonEngine		140.26
+11047.2	39336939	HorizonEngine		147.55
+11047.2	39336940	HorizonEngine		145.38
+11047.2	39336941	HorizonEngine		152.28
+11047.2	39336942	HorizonEngine		147.59
+11047.2	39336943	HorizonEngine	Jolt-0	0.03
+11047.2	39336944	HorizonEngine	Jolt-1	0.03
+11047.2	39336945	HorizonEngine	Jolt-2	0.01
+11047.2	39336946	HorizonEngine	Jolt-3	0.02
+11047.2	39336976	HorizonEngine		0.01
+11047.2	39336978	CoreAudio	com.apple.audio.IOThread.client	1.64
+11047.2	39337010	(not created via pthread_create)		5.05
+11047.2	39337011	(not created via pthread_create)		0.01
+11246.9	39336735	main		4298.22
+11246.9	39336883	(not created via pthread_create)		181.41
+11246.9	39336884	(not created via pthread_create)		141.31
+11246.9	39336885	(not created via pthread_create)		163.30
+11246.9	39336900	AppKit	com.apple.NSEventThread	3.68
+11246.9	39336933	HorizonEngine		151.35
+11246.9	39336934	HorizonEngine		162.70
+11246.9	39336935	HorizonEngine		155.95
+11246.9	39336936	HorizonEngine		155.08
+11246.9	39336937	HorizonEngine		166.03
+11246.9	39336938	HorizonEngine		142.49
+11246.9	39336939	HorizonEngine		149.09
+11246.9	39336940	HorizonEngine		146.76
+11246.9	39336941	HorizonEngine		154.08
+11246.9	39336942	HorizonEngine		149.73
+11246.9	39336943	HorizonEngine	Jolt-0	0.03
+11246.9	39336944	HorizonEngine	Jolt-1	0.03
+11246.9	39336945	HorizonEngine	Jolt-2	0.01
+11246.9	39336946	HorizonEngine	Jolt-3	0.02
+11246.9	39336976	HorizonEngine		0.01
+11246.9	39336978	CoreAudio	com.apple.audio.IOThread.client	1.97
+11246.9	39337010	(not created via pthread_create)		5.05
+11246.9	39337011	(not created via pthread_create)		0.01
+11440.9	39336735	main		4363.21
+11440.9	39336883	(not created via pthread_create)		182.07
+11440.9	39336884	(not created via pthread_create)		146.39
+11440.9	39336885	(not created via pthread_create)		165.57
+11440.9	39336900	AppKit	com.apple.NSEventThread	4.37
+11440.9	39336933	HorizonEngine		154.03
+11440.9	39336934	HorizonEngine		165.98
+11440.9	39336935	HorizonEngine		157.53
+11440.9	39336936	HorizonEngine		156.35
+11440.9	39336937	HorizonEngine		168.24
+11440.9	39336938	HorizonEngine		143.91
+11440.9	39336939	HorizonEngine		149.82
+11440.9	39336940	HorizonEngine		148.33
+11440.9	39336941	HorizonEngine		155.91
+11440.9	39336942	HorizonEngine		151.38
+11440.9	39336943	HorizonEngine	Jolt-0	0.03
+11440.9	39336944	HorizonEngine	Jolt-1	0.03
+11440.9	39336945	HorizonEngine	Jolt-2	0.01
+11440.9	39336946	HorizonEngine	Jolt-3	0.02
+11440.9	39336976	HorizonEngine		0.01
+11440.9	39336978	CoreAudio	com.apple.audio.IOThread.client	2.26
+11440.9	39337010	(not created via pthread_create)		5.05
+11440.9	39337011	(not created via pthread_create)		0.01
+11639.2	39336735	main		4401.14
+11639.2	39336883	(not created via pthread_create)		184.51
+11639.2	39336884	(not created via pthread_create)		149.28
+11639.2	39336885	(not created via pthread_create)		166.56
+11639.2	39336900	AppKit	com.apple.NSEventThread	4.93
+11639.2	39336933	HorizonEngine		156.02
+11639.2	39336934	HorizonEngine		167.34
+11639.2	39336935	HorizonEngine		158.61
+11639.2	39336936	HorizonEngine		157.47
+11639.2	39336937	HorizonEngine		169.44
+11639.2	39336938	HorizonEngine		144.83
+11639.2	39336939	HorizonEngine		150.43
+11639.2	39336940	HorizonEngine		149.14
+11639.2	39336941	HorizonEngine		156.97
+11639.2	39336942	HorizonEngine		152.41
+11639.2	39336943	HorizonEngine	Jolt-0	0.03
+11639.2	39336944	HorizonEngine	Jolt-1	0.03
+11639.2	39336945	HorizonEngine	Jolt-2	0.01
+11639.2	39336946	HorizonEngine	Jolt-3	0.02
+11639.2	39336976	HorizonEngine		0.01
+11639.2	39336978	CoreAudio	com.apple.audio.IOThread.client	2.55
+11639.2	39337010	(not created via pthread_create)		5.05
+11639.2	39337011	(not created via pthread_create)		0.01
+11804.4	39336735	main		4453.14
+11804.4	39336883	(not created via pthread_create)		187.66
+11804.4	39336884	(not created via pthread_create)		149.28
+11804.4	39336885	(not created via pthread_create)		169.70
+11804.4	39336900	AppKit	com.apple.NSEventThread	5.45
+11804.4	39336933	HorizonEngine		158.21
+11804.4	39336934	HorizonEngine		169.41
+11804.4	39336935	HorizonEngine		161.33
+11804.4	39336936	HorizonEngine		158.99
+11804.4	39336937	HorizonEngine		171.01
+11804.4	39336938	HorizonEngine		145.98
+11804.4	39336939	HorizonEngine		151.15
+11804.4	39336940	HorizonEngine		149.87
+11804.4	39336941	HorizonEngine		158.32
+11804.4	39336942	HorizonEngine		154.91
+11804.4	39336943	HorizonEngine	Jolt-0	0.03
+11804.4	39336944	HorizonEngine	Jolt-1	0.03
+11804.4	39336945	HorizonEngine	Jolt-2	0.01
+11804.4	39336946	HorizonEngine	Jolt-3	0.02
+11804.4	39336976	HorizonEngine		0.01
+11804.4	39336978	CoreAudio	com.apple.audio.IOThread.client	2.82
+11804.4	39337010	(not created via pthread_create)		5.05
+11804.4	39337011	(not created via pthread_create)		0.01
+12001.4	39336735	main		4519.37
+12001.4	39336883	(not created via pthread_create)		191.78
+12001.4	39336884	(not created via pthread_create)		149.37
+12001.4	39336885	(not created via pthread_create)		173.70
+12001.4	39336900	AppKit	com.apple.NSEventThread	6.12
+12001.4	39336933	HorizonEngine		159.77
+12001.4	39336934	HorizonEngine		171.28
+12001.4	39336935	HorizonEngine		162.89
+12001.4	39336936	HorizonEngine		160.52
+12001.4	39336937	HorizonEngine		173.48
+12001.4	39336938	HorizonEngine		147.59
+12001.4	39336939	HorizonEngine		154.65
+12001.4	39336940	HorizonEngine		151.38
+12001.4	39336941	HorizonEngine		160.33
+12001.4	39336942	HorizonEngine		157.35
+12001.4	39336943	HorizonEngine	Jolt-0	0.03
+12001.4	39336944	HorizonEngine	Jolt-1	0.03
+12001.4	39336945	HorizonEngine	Jolt-2	0.01
+12001.4	39336946	HorizonEngine	Jolt-3	0.02
+12001.4	39336976	HorizonEngine		0.01
+12001.4	39336978	CoreAudio	com.apple.audio.IOThread.client	3.13
+12001.4	39337010	(not created via pthread_create)		5.05
+12001.4	39337011	(not created via pthread_create)		0.01
+12186.8	39336735	main		4577.82
+12186.8	39336883	(not created via pthread_create)		196.12
+12186.8	39336884	(not created via pthread_create)		150.63
+12186.8	39336885	(not created via pthread_create)		175.38
+12186.8	39336900	AppKit	com.apple.NSEventThread	6.73
+12186.8	39336933	HorizonEngine		161.55
+12186.8	39336934	HorizonEngine		172.23
+12186.8	39336935	HorizonEngine		164.76
+12186.8	39336936	HorizonEngine		162.46
+12186.8	39336937	HorizonEngine		175.18
+12186.8	39336938	HorizonEngine		148.97
+12186.8	39336939	HorizonEngine		156.14
+12186.8	39336940	HorizonEngine		153.80
+12186.8	39336941	HorizonEngine		162.50
+12186.8	39336942	HorizonEngine		159.72
+12186.8	39336943	HorizonEngine	Jolt-0	0.03
+12186.8	39336944	HorizonEngine	Jolt-1	0.03
+12186.8	39336945	HorizonEngine	Jolt-2	0.01
+12186.8	39336946	HorizonEngine	Jolt-3	0.02
+12186.8	39336976	HorizonEngine		0.01
+12186.8	39336978	CoreAudio	com.apple.audio.IOThread.client	3.47
+12186.8	39337010	(not created via pthread_create)		5.05
+12186.8	39337011	(not created via pthread_create)		0.01
+12373.9	39336735	main		4657.43
+12373.9	39336883	(not created via pthread_create)		198.48
+12373.9	39336884	(not created via pthread_create)		154.08
+12373.9	39336885	(not created via pthread_create)		176.38
+12373.9	39336900	AppKit	com.apple.NSEventThread	7.32
+12373.9	39336933	HorizonEngine		161.94
+12373.9	39336934	HorizonEngine		174.30
+12373.9	39336935	HorizonEngine		165.81
+12373.9	39336936	HorizonEngine		163.70
+12373.9	39336937	HorizonEngine		177.86
+12373.9	39336938	HorizonEngine		150.56
+12373.9	39336939	HorizonEngine		156.71
+12373.9	39336940	HorizonEngine		154.69
+12373.9	39336941	HorizonEngine		162.89
+12373.9	39336942	HorizonEngine		162.56
+12373.9	39336943	HorizonEngine	Jolt-0	0.03
+12373.9	39336944	HorizonEngine	Jolt-1	0.03
+12373.9	39336945	HorizonEngine	Jolt-2	0.01
+12373.9	39336946	HorizonEngine	Jolt-3	0.02
+12373.9	39336976	HorizonEngine		0.01
+12373.9	39336978	CoreAudio	com.apple.audio.IOThread.client	3.79
+12373.9	39337010	(not created via pthread_create)		5.05
+12373.9	39337011	(not created via pthread_create)		0.01
+12540.7	39336735	main		4816.64
+12540.7	39336883	(not created via pthread_create)		198.48
+12540.7	39336884	(not created via pthread_create)		154.08
+12540.7	39336885	(not created via pthread_create)		176.38
+12540.7	39336900	AppKit	com.apple.NSEventThread	7.55
+12540.7	39336933	HorizonEngine		161.94
+12540.7	39336934	HorizonEngine		174.30
+12540.7	39336935	HorizonEngine		165.81
+12540.7	39336936	HorizonEngine		163.70
+12540.7	39336937	HorizonEngine		177.86
+12540.7	39336938	HorizonEngine		150.56
+12540.7	39336939	HorizonEngine		156.71
+12540.7	39336940	HorizonEngine		154.69
+12540.7	39336941	HorizonEngine		162.89
+12540.7	39336942	HorizonEngine		162.56
+12540.7	39336943	HorizonEngine	Jolt-0	0.03
+12540.7	39336944	HorizonEngine	Jolt-1	0.03
+12540.7	39336945	HorizonEngine	Jolt-2	0.01
+12540.7	39336946	HorizonEngine	Jolt-3	0.02
+12540.7	39336976	HorizonEngine		0.01
+12540.7	39336978	CoreAudio	com.apple.audio.IOThread.client	4.08
+12540.7	39337010	(not created via pthread_create)		5.05
+12540.7	39337011	(not created via pthread_create)		0.01
+12727.0	39336735	main		4847.00
+12727.0	39336883	(not created via pthread_create)		199.15
+12727.0	39336884	(not created via pthread_create)		160.22
+12727.0	39336885	(not created via pthread_create)		176.38
+12727.0	39336900	AppKit	com.apple.NSEventThread	7.55
+12727.0	39336933	HorizonEngine		162.26
+12727.0	39336934	HorizonEngine		174.41
+12727.0	39336935	HorizonEngine		166.85
+12727.0	39336936	HorizonEngine		164.42
+12727.0	39336937	HorizonEngine		178.39
+12727.0	39336938	HorizonEngine		151.24
+12727.0	39336939	HorizonEngine		156.92
+12727.0	39336940	HorizonEngine		155.69
+12727.0	39336941	HorizonEngine		163.96
+12727.0	39336942	HorizonEngine		163.43
+12727.0	39336943	HorizonEngine	Jolt-0	0.03
+12727.0	39336944	HorizonEngine	Jolt-1	0.03
+12727.0	39336945	HorizonEngine	Jolt-2	0.01
+12727.0	39336946	HorizonEngine	Jolt-3	0.02
+12727.0	39336976	HorizonEngine		0.01
+12727.0	39336978	CoreAudio	com.apple.audio.IOThread.client	4.46
+12727.0	39337010	(not created via pthread_create)		5.05
+12727.0	39337011	(not created via pthread_create)		0.01
+12923.4	39336735	main		4851.22
+12923.4	39336883	(not created via pthread_create)		199.93
+12923.4	39336884	(not created via pthread_create)		160.38
+12923.4	39336885	(not created via pthread_create)		176.38
+12923.4	39336900	AppKit	com.apple.NSEventThread	7.55
+12923.4	39336933	HorizonEngine		162.28
+12923.4	39336934	HorizonEngine		174.53
+12923.4	39336935	HorizonEngine		166.87
+12923.4	39336936	HorizonEngine		164.44
+12923.4	39336937	HorizonEngine		178.81
+12923.4	39336938	HorizonEngine		151.51
+12923.4	39336939	HorizonEngine		157.04
+12923.4	39336940	HorizonEngine		155.72
+12923.4	39336941	HorizonEngine		164.23
+12923.4	39336942	HorizonEngine		163.45
+12923.4	39336943	HorizonEngine	Jolt-0	0.03
+12923.4	39336944	HorizonEngine	Jolt-1	0.03
+12923.4	39336945	HorizonEngine	Jolt-2	0.01
+12923.4	39336946	HorizonEngine	Jolt-3	0.02
+12923.4	39336976	HorizonEngine		0.01
+12923.4	39336978	CoreAudio	com.apple.audio.IOThread.client	5.20
+12923.4	39337010	(not created via pthread_create)		5.05
+12923.4	39337011	(not created via pthread_create)		0.01
+12923.4	39337827	dispatch	AudioSession - RootQueue	0.22

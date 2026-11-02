@@ -92,6 +92,11 @@ private:
         SocketHandle              sock = kInvalidSocket;
         std::vector<std::uint8_t> inBuf;    // bytes received, not yet framed
         std::vector<std::uint8_t> outBuf;   // bytes queued, not yet accepted
+        // Bytes at the front of outBuf the kernel already took. A read head
+        // instead of erasing them: under backpressure only a socket buffer's
+        // worth leaves per tick, and erasing would move the whole remaining
+        // queue (a snapshot can be hundreds of MB) forward every time.
+        std::size_t               outHead = 0;
         bool connecting = false;            // client-side connect still pending
         bool alive      = true;
     };

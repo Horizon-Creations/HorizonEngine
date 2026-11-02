@@ -1,4 +1,5 @@
 #include "HorizonRendering/RenderGraph.h"
+#include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N: what recording the passes costs the CPU
 #include <cstdint>
 
 void RenderGraph::addPass(std::unique_ptr<RenderPass> pass)
@@ -16,7 +17,10 @@ void RenderGraph::execute(const RenderWorld&           world,
 	for (const auto& pass : m_passes)
 	{
 		m_scratch.reset();
-		pass->execute(world, sortedIndices, m_scratch);
+		{
+			HE_PROFILE_SCOPE_N("RenderGraph::record");   // the pass walks the sorted objects into draw calls
+			pass->execute(world, sortedIndices, m_scratch);
+		}
 		if (sink) sink(*pass, pass->describe(), m_scratch);
 	}
 }
@@ -28,6 +32,7 @@ void RenderGraph::execute(const RenderWorld&           world,
 	// Passes run in insertion order, each appending to the shared command
 	// buffer. Reset once up front so the buffer holds exactly this frame.
 	outCmds.reset();
+	HE_PROFILE_SCOPE_N("RenderGraph::record");
 	for (const auto& pass : m_passes)
 		pass->execute(world, sortedIndices, outCmds);
 }

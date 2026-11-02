@@ -16,17 +16,22 @@
 namespace HE
 {
 
-// Bytes of one RGBA8 mip chain of `mips` levels starting at w × h (each level
-// halves, clamped at 1) — the size of ONE slice in TextureAsset::data.
-HE_API size_t textureArraySliceBytes(uint32_t w, uint32_t h, uint32_t mips);
+// Bytes of one mip chain of `mips` levels starting at w × h (each level
+// halves, clamped at 1) — the size of ONE slice in TextureAsset::data. `format`
+// picks the per-level math: RGBA8 is w*h*4; a block format is
+// ceil(w/4)*ceil(h/4)*textureFormatBlockBytes (8 B for BC1/BC4, 16 B otherwise),
+// so the 2×2 and 1×1 tail levels still cost one whole block each.
+HE_API size_t textureArraySliceBytes(uint32_t w, uint32_t h, uint32_t mips,
+                                     ::TextureFormat format = ::TextureFormat::RGBA8);
 
-// Byte offset of (slice, level) in TextureAsset::data for an RGBA8 array.
+// Byte offset of (slice, level) in TextureAsset::data for an array of `format`.
 HE_API size_t textureArrayOffset(uint32_t w, uint32_t h, uint32_t mips,
-                                 uint32_t slice, uint32_t level);
+                                 uint32_t slice, uint32_t level,
+                                 ::TextureFormat format = ::TextureFormat::RGBA8);
 
-// True when `t` is a usable RGBA8 array payload: channels 4, RGBA8, non-zero
-// size, data holding exactly layers × textureArraySliceBytes. The renderers
-// check this before uploading and fall back to white otherwise.
+// True when `t` is a usable array payload: channels 4, RGBA8 or a block format,
+// non-zero size, data holding exactly layers × textureArraySliceBytes in its
+// format. The renderers check this before uploading and fall back to white otherwise.
 HE_API bool textureArrayPayloadValid(const TextureAsset& t);
 
 // Build `out` (pixels, size, layers, mipLevels, format, srgb) from `slices`:

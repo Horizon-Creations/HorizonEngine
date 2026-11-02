@@ -34,35 +34,33 @@ struct TerrainComponent;
 // ERASING (Params::erase, stroke fixed at begin()) takes coverage out of every
 // body under the circle and creates nothing.
 //
-// DIGGING (Params::dig, painting only) lowers the ground under the same circle
-// toward `level − digDepth` (TerrainSculpt::lowerToFloor): a bed of that depth
-// below the surface with a bank that eases back into the old ground. It never
-// raises, and repeating the dab converges instead of digging without end.
-// Capped at `level` itself below half the circle's own weight (Thema 174
-// Schritt 13): the ground never sinks below the water's own level where this
-// SAME dab's own paint (the identical weight, addCircle) would not have turned
-// it wet — a dry ring sunk below the level, around every stroke, is the water
-// brush's share of the bug `WaterLake.cpp`'s outward bank had.
-// And it digs ONLY under the water (Thema 188): after the dab, every vertex it
-// lowered that the body's own sheet does not cover (WaterMesh.h insideSheet: the
-// lattice, marching squares and the shore clipping the mesh is built with) goes
-// back to where it was. The weight alone did not say where the sheet ends — at the
-// Landscape tool's pacing a cell needs several dabs to cross the shoreline while
-// the dig starts with the first, and ground above the level was shaved to it all
-// the way out to the falloff's edge — so the pit used to be wider than the water,
-// a dry crater round the rim. Ground above the level under the sheet goes to the
-// level at once (it would otherwise clip the very water that is to cover it).
-// The pit is therefore never larger than the water; the water can be larger than
-// the pit (shallow water over ground the weight left above the floor).
-// On rising ground that alone leaves a WALL where the pit ends: the ground next
-// to the water as high as it stood above the level, its top a staircase of
-// vertices against the shore of the coarser water cells. So the dig then shapes
-// a BANK (Schritt 4): ground outside the sheet is lowered to a slope that starts
-// just above the water's reach at the shoreline (level + the shore clipping's
-// overshoot, the exact contour, not the nearest vertex) and rises to meet the old
-// ground within the brush's radius + falloff of the shore, steepening as it goes.
-// Dry land, never below the water, so never a pit, and never raised; a function
-// of the shoreline alone, so repeating a dab adds nothing.
+// DIGGING (Params::dig, painting only) shapes a BED under the water (Thema 206
+// Schritt 9) from the SHORE, not from the brush: every vertex the body's sheet
+// covers (WaterMesh.h insideSheet: the lattice, marching squares and shore
+// clipping the mesh is built with) goes down to
+//     level − min(maxDepth, slope · d),   d = the distance to the shoreline,
+// so the bed falls from the bank at `slope` metres per metre and is flat at
+// `maxDepth` (Params::digDepth) from maxDepth / slope metres in. Painting on or
+// moving the shore outward makes d larger and the next dab digs the newly inner
+// ground down the same way, up to kMaxBedReach past the dab. `bedRoughness` (0..1)
+// is a share of that depth that a fixed noise (a function of the position only)
+// adds or takes away: nothing at the shoreline, a little variation on the floor.
+// Ground above the level inside the sheet goes to the level at once (it would
+// otherwise clip the very water that is to cover it). It never raises, digs only
+// under the water, and is a function of the shore: repeating a dab converges
+// instead of digging without end, and no dry ring sinks below the level.
+// On rising ground that alone leaves a WALL where the pit ends, so the dig then
+// shapes a BANK (Thema 188 Schritt 4): ground outside the sheet is lowered to a
+// slope that starts just above the water's reach at the shoreline and rises to meet
+// the old ground within the brush's radius + falloff of the shore. Dry land, never
+// below the water, never raised.
+// The settings the bed was dug with are kept on the body (Body::brushBed, saved), and
+// so is what the digs moved (Body::brushPatch, the sum of every dab's change in
+// height). With Params::closeBed the ERASER uses it: ground under water it has just
+// dried goes back toward where it stood before the brush dug it (by `amount`, weighted
+// by the brush profile), and the patch shrinks by what was given back. Ground the
+// user sculpted afterwards keeps that change; only the brush's own share is returned.
+//
 //
 // PACING is the caller's: Params::amount is the share (0..1) one dab moves each
 // cell toward wet (or dry), the same number addCircle/removeCircle take as their
@@ -87,7 +85,10 @@ namespace HE::water::brush
         float levelOffset = 0.3f;  // above the ground under the first point
 
         bool  dig      = false;
-        float digDepth = 1.0f;     // bed this far below the stroke's level (m)
+        float digDepth = 1.0f;     // Max Depth: the bed never goes deeper below the stroke's level (m)
+        float bedSlope = kDefaultBedSlope;   // Slope: bed sinks this many metres per metre from the shore
+        bool  closeBed = false;    // erasing also gives the ground the brush dug under the erased water back
+        float bedRoughness = 0.0f; // Bed Roughness 0..1: share of the depth a fixed noise adds or takes
     };
 
     struct Stroke

@@ -280,13 +280,12 @@ void TcpTransport::extractFrames(ConnectionId id, Conn& c) {
 }
 
 void TcpTransport::flushOutput(Conn& c) {
-    std::size_t sentTotal = 0;
-    while (sentTotal < c.outBuf.size()) {
+    while (c.outHead < c.outBuf.size()) {
         std::size_t sent = 0;
-        const SocketResult rc = socketSend(c.sock, c.outBuf.data() + sentTotal,
-                                           c.outBuf.size() - sentTotal, sent);
+        const SocketResult rc = socketSend(c.sock, c.outBuf.data() + c.outHead,
+                                           c.outBuf.size() - c.outHead, sent);
         if (rc == SocketResult::Ok) {
-            sentTotal += sent;
+            c.outHead += sent;
             continue;
         }
         if (rc == SocketResult::WouldBlock) {
@@ -295,17 +294,25 @@ void TcpTransport::flushOutput(Conn& c) {
             // that cannot keep up — so the remaining depth is logged, not just
             // the fact that it blocked.
             HE_LOG_TRACE(Net, "TCP send would block, %s still queued",
-                         detail::logBytes(c.outBuf.size() - sentTotal).c_str());
+                         detail::logBytes(c.outBuf.size() - c.outHead).c_str());
             break;
         }
         HE_LOG_WARN(Net, "TCP send failed, marking connection dead (%s unsent)",
-                    detail::logBytes(c.outBuf.size() - sentTotal).c_str());
+                    detail::logBytes(c.outBuf.size() - c.outHead).c_str());
         c.alive = false;                             // dead socket
         break;
     }
-    if (sentTotal > 0) {
+    // Sent bytes stay in front of the head until that is cheap to undo: all of
+    // the buffer gone (clear keeps the capacity for the next burst), or more
+    // than half of it, so each byte is moved at most once on average instead
+    // of once per tick it waited.
+    if (c.outHead == c.outBuf.size()) {
+        c.outBuf.clear();
+        c.outHead = 0;
+    } else if (c.outHead > c.outBuf.size() / 2) {
         c.outBuf.erase(c.outBuf.begin(),
-                       c.outBuf.begin() + static_cast<std::ptrdiff_t>(sentTotal));
+                       c.outBuf.begin() + static_cast<std::ptrdiff_t>(c.outHead));
+        c.outHead = 0;
     }
 }
 
@@ -343,7 +350,8 @@ void TcpTransport::send(ConnectionId conn, const std::uint8_t* data,
     Conn& c = it->second;
     HE_LOG_TRACE(Net, "TCP frame out: %s (conn %llu)",
                  detail::logBytes(len).c_str(), static_cast<unsigned long long>(conn));
-    c.outBuf.reserve(c.outBuf.size() + kFrameHeaderSize + len);
+    // No exact reserve here: it would defeat the vector's geometric growth and
+    // copy the whole waiting queue on every frame appended behind it.
     writeLengthPrefix(c.outBuf, static_cast<std::uint32_t>(len));
     c.outBuf.insert(c.outBuf.end(), data, data + len);
 
@@ -364,9 +372,10 @@ void TcpTransport::disconnect(ConnectionId conn) {
     if (it == m_conns.end()) return;
     HE_LOG_INFO(Net, "TCP closing connection %llu locally",
                 static_cast<unsigned long long>(conn));
-    if (!it->second.outBuf.empty()) {
+    const Conn& c = it->second;
+    if (c.outHead < c.outBuf.size()) {
         HE_LOG_WARN(Net, "  %s was still queued and is discarded",
-                    detail::logBytes(it->second.outBuf.size()).c_str());
+                    detail::logBytes(c.outBuf.size() - c.outHead).c_str());
     }
     // Local close: no Disconnected event for the initiator, matching
     // LoopbackTransport's semantics.

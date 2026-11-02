@@ -1,15 +1,19 @@
 #include "HorizonScene/FoliageSystem.h"
 #include "HorizonScene/FoliagePaint.h"
+#include "HorizonScene/TerrainPaint.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include <Diagnostics/Log.h>
+#include <Diagnostics/Profiler.h>
+#include <JobSystem/JobSystem.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace
 {
@@ -45,13 +49,26 @@ namespace
     {
         uint64_t h = 0xCBF29CE484222325ull;
         h = mix(h, f.visible);
-        h = mix(h, f.meshAssetId.hi);     h = mix(h, f.meshAssetId.lo);
-        h = mix(h, f.materialAssetId.hi); h = mix(h, f.materialAssetId.lo);
-        h = mix(h, f.minScale);           h = mix(h, f.maxScale);
-        h = mix(h, f.drawDistance);
-        h = mix(h, f.bucketSize);
-        h = mix(h, f.castsShadow);        h = mix(h, f.contributesAO);
-        h = mix(h, f.shadowDistance);
+        h = mix(h, f.layers.size());   // adding or removing a layer changes what is drawn
+        for (const FoliageLayer& l : f.layers)
+        {
+            h = mix(h, l.visible);
+            h = mix(h, l.meshAssetId.hi);     h = mix(h, l.meshAssetId.lo);
+            h = mix(h, l.materialAssetId.hi); h = mix(h, l.materialAssetId.lo);
+            h = mix(h, l.minScale);           h = mix(h, l.maxScale);
+            h = mix(h, l.drawDistance);
+            h = mix(h, l.bucketSize);
+            h = mix(h, l.castsShadow);        h = mix(h, l.contributesAO);
+            h = mix(h, l.shadowDistance);
+            h = mix(h, l.lodHysteresis);
+            h = mix(h, l.lods.size());
+            for (const FoliageLod& d : l.lods)
+            {
+                h = mix(h, d.meshAssetId.hi);     h = mix(h, d.meshAssetId.lo);
+                h = mix(h, d.materialAssetId.hi); h = mix(h, d.materialAssetId.lo);
+                h = mix(h, d.distance);           h = mix(h, d.density);
+            }
+        }
         return h;
     }
 
@@ -121,36 +138,58 @@ namespace
         }
         return store;
     }
-}
 
-void FoliageSystem::update(HorizonWorld& world)
-{
-    auto& registry = world.registry();
-
-    auto view = registry.view<FoliageComponent, TerrainComponent>();
-    for (auto [entity, foliage, terrain] : view.each())
+    // Distance between the two height samples a slope is taken from: one terrain
+    // cell, so the slope is that of the surface the mesh actually draws (and not of
+    // the noise between two of its vertices).
+    float terrainSlopeStep(const TerrainComponent& tc)
     {
-        // A setting the extraction reads changed (mesh, distance, flags …): not a
-        // re-scatter, but whoever keeps a RenderWorld across frames must hear of it.
-        const uint64_t key = settingsKeyOf(foliage);
-        if (key != foliage.settingsKey) { foliage.settingsKey = key; ++foliage.revision; }
+        const uint32_t res = std::clamp(tc.resolution, 2u, kTerrainMaxResolution);
+        return std::max(0.1f, std::max(tc.sizeX, tc.sizeZ) / static_cast<float>(res - 1));
+    }
 
-        // The store is sorted into a grid of the layer's bucket size: a different size
-        // asks for a different grid, which only a re-scatter can produce.
-        if (foliage.store && foliage.store->bucketSize != foliage.bucketSize)
-            foliage.dirty = true;
+    // 1 - N.y of the ground at a terrain-local spot (central differences): 0 flat,
+    // ~0.29 for 45 degrees, the landscape material's own steepness measure.
+    float steepnessAt(const TerrainComponent& tc, float lx, float lz, float step)
+    {
+        // The two samples stay on the terrain (terrainHeightAt clamps outside it, which
+        // would halve the slope along the rim): shorter baseline there, same division.
+        const float hx = tc.sizeX * 0.5f, hz = tc.sizeZ * 0.5f;
+        const float x0 = std::max(lx - step, -hx), x1 = std::min(lx + step, hx);
+        const float z0 = std::max(lz - step, -hz), z1 = std::min(lz + step, hz);
+        const float gx = x1 > x0 ? (terrainHeightAt(tc, x1, lz) - terrainHeightAt(tc, x0, lz)) / (x1 - x0) : 0.0f;
+        const float gz = z1 > z0 ? (terrainHeightAt(tc, lx, z1) - terrainHeightAt(tc, lx, z0)) / (z1 - z0) : 0.0f;
+        return 1.0f - 1.0f / std::sqrt(1.0f + gx * gx + gz * gz);
+    }
 
-        if (!foliage.dirty) continue;
-        foliage.dirty = false;
-        foliage.cachedInstances.clear();
-        foliage.store.reset();
-        ++foliage.revision;
+    // The painted weight of paint layer `layer` (0..7) at a terrain-local spot,
+    // 0..1, from the texel it falls in. An unpainted landscape is layer 0 fully:
+    // the same default the shader falls back to.
+    float layerWeightAt(const TerrainComponent& tc, int layer, float lx, float lz)
+    {
+        if (tc.layerWeights.empty()) return layer == 0 ? 1.0f : 0.0f;
+        const uint32_t wr = tc.weightRes;
+        if (wr == 0 || tc.sizeX <= 0.0f || tc.sizeZ <= 0.0f) return 0.0f;
+        const auto texel = [wr](float v, float size) {
+            return static_cast<uint32_t>(std::clamp(static_cast<int>((v / size + 0.5f) * static_cast<float>(wr)),
+                                                    0, static_cast<int>(wr) - 1));
+        };
+        uint8_t w[kTerrainMaxLayers] = {};
+        if (!TerrainPaint::texelWeights(tc, texel(lx, tc.sizeX), texel(lz, tc.sizeZ), w))
+            return layer == 0 ? 1.0f : 0.0f;   // a short blob: as unpainted
+        return static_cast<float>(w[layer]) / 255.0f;
+    }
 
-        if (foliage.meshAssetId == HE::UUID{})
+    // One layer's scatter: the layout every layer always had, from the layer's own
+    // seed, density, scale range and mask. Writes cachedInstances and store.
+    void scatterLayer(entt::registry& registry, entt::entity entity, size_t li,
+                      FoliageLayer& layer, const TerrainComponent& terrain)
+    {
+        if (layer.meshAssetId == HE::UUID{})
         {
-            HE_LOG_WARN(Foliage, "Entity %u: foliage layer has no mesh assigned — "
-                                 "nothing will be scattered", static_cast<uint32_t>(entity));
-            continue;
+            HE_LOG_WARN(Foliage, "Entity %u: foliage layer %zu has no mesh assigned — "
+                                 "nothing will be scattered", static_cast<uint32_t>(entity), li);
+            return;
         }
 
         // Terrain world-space origin from TransformComponent if present
@@ -161,23 +200,23 @@ void FoliageSystem::update(HorizonWorld& world)
         const float sizeX  = terrain.sizeX;
         const float sizeZ  = terrain.sizeZ;
         const float area   = sizeX * sizeZ;
-        const int   count  = static_cast<int>(area * foliage.density);
+        const int   count  = static_cast<int>(area * layer.density);
         if (count <= 0)
         {
-            HE_LOG_WARN(Foliage, "Entity %u: foliage density %.4f over a %.0fx%.0f terrain "
-                                 "yields 0 instances", static_cast<uint32_t>(entity),
-                        foliage.density, sizeX, sizeZ);
-            continue;
+            HE_LOG_WARN(Foliage, "Entity %u: foliage layer %zu density %.4f over a %.0fx%.0f "
+                                 "terrain yields 0 instances", static_cast<uint32_t>(entity), li,
+                        layer.density, sizeX, sizeZ);
+            return;
         }
         // Scattering is O(count) and rebuilt whenever the layer is dirtied; a
         // density typo (0.5/m² over a 1 km terrain) is otherwise felt only as a
         // mysterious multi-second editor freeze.
         if (count > 200000)
-            HE_LOG_WARN(Foliage, "Entity %u: scattering %d foliage instances "
+            HE_LOG_WARN(Foliage, "Entity %u: scattering %d foliage instances in layer %zu "
                                  "(density %.4f over %.0fx%.0f) — this is very expensive",
-                        static_cast<uint32_t>(entity), count, foliage.density, sizeX, sizeZ);
+                        static_cast<uint32_t>(entity), count, li, layer.density, sizeX, sizeZ);
 
-        foliage.cachedInstances.reserve(static_cast<size_t>(count));
+        layer.cachedInstances.reserve(static_cast<size_t>(count));
         // The same instances, terrain-local, in generation order: the input of the
         // bucket sort below. Transient — only the sorted copy lives on in the store.
         std::vector<glm::mat4> local;
@@ -194,21 +233,30 @@ void FoliageSystem::update(HorizonWorld& world)
         // shared stream, so the survivors keep exactly the position, rotation
         // and scale they have in the uniform layout: painting removes and
         // thins, it never reshuffles what stays.
-        const bool     masked   = !foliage.densityMask.empty();
-        const uint32_t keepSalt = static_cast<uint32_t>(foliage.seed) * 0x9E3779B9u;
+        const bool     masked   = !layer.densityMask.empty();
+        const uint32_t keepSalt = static_cast<uint32_t>(layer.seed) * 0x9E3779B9u;
+        // The placement rules (FoliageLayer::slopeMin ..): rejection too, after
+        // the mask, with a hash of their own so the survivors keep their pose.
+        const bool     sloped    = layer.slopeMin > 0.0f || layer.slopeMax < 1.0f;
+        const bool     highRule  = layer.heightMin > -FoliageLayer::kNoHeightLimit
+                                || layer.heightMax <  FoliageLayer::kNoHeightLimit;
+        const bool     weighted  = layer.weightLayer >= 0 && layer.weightLayer < kTerrainMaxLayers;
+        const bool     ruled     = sloped || highRule || weighted;
+        const uint32_t weightSalt = keepSalt ^ 0x68E31DA4u;
+        const float    slopeStep  = terrainSlopeStep(terrain);
         int placed = 0;
 
-        uint32_t rngState = static_cast<uint32_t>(foliage.seed) ^ 0xABCD1234u;
+        uint32_t rngState = static_cast<uint32_t>(layer.seed) ^ 0xABCD1234u;
         for (int i = 0; i < count; ++i)
         {
             const float lx = randFloat(rngState) * sizeX - halfX;
             const float lz = randFloat(rngState) * sizeZ - halfZ;
             const float rotY   = randFloat(rngState) * 6.2831853f; // [0, 2π]
-            const float scale  = foliage.minScale
-                               + randFloat(rngState) * (foliage.maxScale - foliage.minScale);
+            const float scale  = layer.minScale
+                               + randFloat(rngState) * (layer.maxScale - layer.minScale);
             if (masked)
             {
-                const float keep = FoliagePaint::sample(foliage, terrain, lx, lz);
+                const float keep = FoliagePaint::sample(layer, terrain, lx, lz);
                 uint32_t roll = wangHash(static_cast<uint32_t>(i) ^ keepSalt);
                 const float u = randFloat(roll);   // [0, 1)
                 // Strict at both ends: a mask of exactly 0 rejects every
@@ -216,6 +264,25 @@ void FoliageSystem::update(HorizonWorld& world)
                 if (keep <= 0.0f || u >= keep) continue;
             }
             const float ly = terrainHeightAt(terrain, lx, lz);
+            if (ruled)
+            {
+                // Hard limits first: no roll, the same answer for the same ground.
+                if (origin.y + ly < layer.heightMin || origin.y + ly > layer.heightMax) continue;
+                if (sloped)
+                {
+                    const float s = steepnessAt(terrain, lx, lz, slopeStep);
+                    if (s < layer.slopeMin || s > layer.slopeMax) continue;
+                }
+                if (weighted)
+                {
+                    // Own roll (own salt): a mask and a weight on one layer must not
+                    // draw the same number, or the two would only ever overlap.
+                    uint32_t roll = wangHash(static_cast<uint32_t>(i) ^ weightSalt);
+                    const float u = randFloat(roll);
+                    const float keep = layerWeightAt(terrain, layer.weightLayer, lx, lz);
+                    if (keep <= 0.0f || u >= keep) continue;
+                }
+            }
 
             // The terrain-local pose, built exactly as the world one always was:
             // translate, rotate about Y, scale. Rotating and scaling never touch the
@@ -228,15 +295,66 @@ void FoliageSystem::update(HorizonWorld& world)
 
             const glm::vec3 worldPos = origin + glm::vec3(lx, ly, lz);
             m[3] = glm::vec4(worldPos, 1.0f);
-            foliage.cachedInstances.push_back(m);
+            layer.cachedInstances.push_back(m);
             ++placed;
         }
 
-        foliage.store = sortIntoBuckets(local, sizeX, sizeZ, foliage.bucketSize);
+        layer.store = sortIntoBuckets(local, sizeX, sizeZ, layer.bucketSize);
 
-        HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) over %.0fx%.0f%s "
-                              "into %zu bucket(s)",
-                     static_cast<uint32_t>(entity), placed, count, sizeX, sizeZ,
-                     masked ? " (density mask)" : "", foliage.store->buckets.size());
+        HE_LOG_DEBUG(Foliage, "Entity %u: scattered %d of %d foliage instance(s) of layer %zu "
+                              "over %.0fx%.0f%s into %zu bucket(s)",
+                     static_cast<uint32_t>(entity), placed, count, li, sizeX, sizeZ,
+                     masked ? " (density mask)" : "", layer.store->buckets.size());
     }
+}
+
+void FoliageSystem::update(HorizonWorld& world)
+{
+    auto& registry = world.registry();
+
+    // A scatter is a sequential random stream of up to hundreds of thousands of draws, so one
+    // layer cannot be split without changing the layout of every saved scene (seed contract).
+    // Layers, though, never touch each other: each reads the terrain and writes its own
+    // cachedInstances and store. So the dirty layers are collected here, in the order the serial
+    // walk met them, and scattered as pool jobs; the wall time is the biggest layer's, not the sum.
+    struct Job { entt::entity entity; size_t li; FoliageLayer* layer; const TerrainComponent* terrain; };
+    std::vector<Job> jobs;
+
+    auto view = registry.view<FoliageComponent, TerrainComponent>();
+    for (auto [entity, foliage, terrain] : view.each())
+    {
+        // A setting the extraction reads changed (mesh, distance, flags, a layer
+        // added or removed …): not a re-scatter, but whoever keeps a RenderWorld
+        // across frames must hear of it.
+        const uint64_t key = settingsKeyOf(foliage);
+        if (key != foliage.settingsKey) { foliage.settingsKey = key; ++foliage.revision; }
+
+        // The ground moved under every layer (sculpt, Mountain, heightmap import).
+        const bool all = foliage.dirty;
+        foliage.dirty = false;
+
+        for (size_t li = 0; li < foliage.layers.size(); ++li)
+        {
+            FoliageLayer& layer = foliage.layers[li];
+            if (all) layer.dirty = true;
+
+            // The store is sorted into a grid of the layer's bucket size: a different
+            // size asks for a different grid, which only a re-scatter can produce.
+            if (layer.store && layer.store->bucketSize != layer.bucketSize)
+                layer.dirty = true;
+
+            if (!layer.dirty) continue;
+            layer.dirty = false;
+            layer.cachedInstances.clear();
+            layer.store.reset();
+            ++foliage.revision;
+            jobs.push_back({ entity, li, &layer, &terrain });
+        }
+    }
+
+    // One layer is a job of its own: a scatter that large has no use for a grain.
+    parallel_for(jobs.size(), [&](size_t j) {
+        HE_PROFILE_SCOPE_N("FoliageScatterLayer");
+        scatterLayer(registry, jobs[j].entity, jobs[j].li, *jobs[j].layer, *jobs[j].terrain);
+    }, "FoliageScatter", 1);
 }

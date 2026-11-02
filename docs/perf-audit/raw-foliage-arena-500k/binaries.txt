@@ -1,0 +1,6 @@
+before = C:/hw182/deploy_s6/Editor (copy of the step-6 deploy, 653f343a; renderer unchanged until e96e60df)
+after  = C:/hw182/deploy/Editor (e96e60df, built 2026-10-18 11:01)
+merge base = C:/hw182b/deploy/Editor (1e41c2d2, step 5)
+/c/hw182/deploy_s6/Editor HorizonRendering.dll md5 48045285a66f 2026-10-17 18:59:20
+/c/hw182/deploy/Editor HorizonRendering.dll md5 ecb2ea512b30 2026-10-18 11:01:07
+/c/hw182b/deploy/Editor HorizonRendering.dll md5 f99f53f68d3e 2026-10-17 16:23:12

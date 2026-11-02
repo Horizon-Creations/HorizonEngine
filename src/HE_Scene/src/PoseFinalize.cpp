@@ -499,7 +499,9 @@ void poseFinalize(HorizonWorld& world, ContentManager& cm, float dt, entt::entit
     // runs composeModelMatrices and applyInverseBind back to back, which IS
     // composeBoneMatrices: the same numbers, the same bits, no tolerance in the
     // claim that IK you did not ask for costs you nothing.
-    std::vector<glm::mat4> model;
+    // Per thread and reused: one skeleton-sized allocation per posed entity and
+    // frame otherwise (SCN-101). composeModelMatrices overwrites all of it.
+    thread_local std::vector<glm::mat4> model;
     composeModelMatrices(mesh, localTRS, model);
 
     if (auto* ic = reg.try_get<IkComponent>(e))
@@ -519,7 +521,18 @@ void poseFinalize(HorizonWorld& world, ContentManager& cm, float dt, entt::entit
     }
 
     applyInverseBind(mesh, model, smc.boneMatrices);
-    smc.dirty = true;
+    smc.dirty   = true;
+    smc.poseKey = 0;   // the driver that called this stores its own key afterwards
+}
+
+bool poseMayBeKept(const entt::registry& reg, entt::entity e)
+{
+    if (reg.all_of<RootMotionComponent>(e)) return false;
+    if (const auto* lc = reg.try_get<AnimationLayerComponent>(e); lc && !lc->layers.empty())
+        return false;
+    if (const auto* ic = reg.try_get<IkComponent>(e); ic && (!ic->feet.empty() || ic->lookAt.enabled))
+        return false;
+    return true;
 }
 
 void poseEndFrame(HorizonWorld& world)

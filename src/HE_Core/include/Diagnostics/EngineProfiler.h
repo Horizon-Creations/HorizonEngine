@@ -31,6 +31,7 @@
 #include "Types/Defines.h"
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <thread>
 #include <vector>
@@ -104,6 +105,41 @@ struct ProfSceneCounters
 	uint32_t streamingInFlight = 0;   // async asset loads not yet drained
 };
 
+// Mesh-streaming counters: how often a landscape's meshes are rebuilt on the CPU and
+// re-created on the GPU. Producers sit in HE_Scene (TerrainSystem, LODSystem) and in
+// the renderer backends, so the live totals live behind one HE_API function (one
+// instance across the DLLs). Relaxed atomics: the producers are on the main thread
+// today, the atomics only keep a future worker thread honest.
+struct ProfMeshStream
+{
+	uint32_t chunkBuilds = 0, tessBuilds = 0, tessReleases = 0, stitchBuilds = 0;
+	uint32_t lodSwitches = 0;
+	uint64_t meshReplaceBytes = 0;     // CPU-side mesh data replaced by the terrain systems
+	uint32_t meshUploads = 0;          // GPU vertex/index buffer creations
+	uint64_t meshUploadBytes = 0;
+	uint32_t meshInvalidations = 0;    // GPU meshes dropped because their asset changed
+	uint32_t gpuStalls = 0;            // full-GPU waits caused by a drain (Vulkan deviceWaitIdle)
+	uint32_t blasBuilds = 0;           // CPU BVH / BLAS builds
+	uint64_t blasTris = 0;
+	uint32_t giInstances = 0;          // gauge: instances handed to the GI scene last frame
+};
+
+struct HE_API MeshStreamCounters
+{
+	std::atomic<uint32_t> chunkBuilds{0}, tessBuilds{0}, tessReleases{0}, stitchBuilds{0};
+	std::atomic<uint32_t> lodSwitches{0};
+	std::atomic<uint64_t> meshReplaceBytes{0};
+	std::atomic<uint32_t> meshUploads{0};
+	std::atomic<uint64_t> meshUploadBytes{0};
+	std::atomic<uint32_t> meshInvalidations{0}, gpuStalls{0}, blasBuilds{0};
+	std::atomic<uint64_t> blasTris{0};
+	std::atomic<uint32_t> giInstances{0};
+
+	// Read the totals since the last call and zero them (giInstances is a gauge: kept).
+	ProfMeshStream take();
+};
+HE_API MeshStreamCounters& meshStreamCounters();
+
 // Coarse per-frame counters. Cheap to gather; filled from the renderer + scene.
 struct ProfRenderStats
 {
@@ -118,6 +154,7 @@ struct ProfRenderStats
 	// in the frame and by a different producer — see setRenderStats on why the two
 	// are merged rather than assigned wholesale).
 	ProfSceneCounters scene;
+	ProfMeshStream meshStream;   // taken (and reset) by setRenderStats, not pushed
 };
 
 // Everything captured for a single rendered frame.
@@ -207,14 +244,20 @@ public:
 	void setLiveEnabled(bool on) { m_liveEnabled = on; }
 	bool liveEnabled() const     { return m_liveEnabled; }
 	void pushLive(const ProfLiveFrame& f);
-	std::vector<ProfLiveFrame> liveSnapshot() const { return m_live; }
+	std::vector<ProfLiveFrame> liveSnapshot() const { return { m_live.begin(), m_live.end() }; }
 	double lastCpuFrameMs() const { return m_lastCpuFrameMs; }
 
 	// ── Single-frame capture ────────────────────────────────────────────────
 	// Capture exactly ONE frame in full detail (CPU scopes + detailed per-pass GPU,
 	// forced on so the breakdown is exclusive) into an in-memory record for the UI —
 	// no dump. Applied on the next beginFrame; the result is available right after.
-	void requestSingleFrameCapture()       { m_pendingSingle = true; }
+	// `detailed` forces the exclusive per-pass GPU timing for that one frame (a serialized,
+	// slower frame) whatever the checkbox says: the game's stats card asks for it, since its
+	// pass list is empty without it on Metal.
+	void requestSingleFrameCapture(bool detailed = false) { m_pendingSingle = true; m_pendingSingleDetailed = detailed; }
+	// Withdraws a request not applied yet (the stats card going away): left pending, it
+	// would start a capture at the next frame for nobody.
+	void cancelSingleFrameCapture() { m_pendingSingle = false; m_pendingSingleDetailed = false; }
 	const ProfFrameRecord* singleFrame() const { return m_haveSingleFrame ? &m_singleFrame : nullptr; }
 
 	// True for exactly one frame after a dump was written; lets the app log the
@@ -293,12 +336,13 @@ private:
 	// slept through three captures cannot leak stale spans into the fourth.
 	std::atomic<uint64_t> m_generation{ 0 };
 	bool              m_forceDetailed = false; // detailed forced for a single-frame capture (main thread)
+	bool              m_pendingSingleDetailed = false;   // what the pending single-frame request asked
 	std::thread::id   m_captureThread{};
 	Pending         m_pending     = Pending::None;
 
 	// Live overview (always-on when enabled; no scopes).
 	bool                       m_liveEnabled   = false;
-	std::vector<ProfLiveFrame> m_live;
+	std::deque<ProfLiveFrame>  m_live;
 	size_t                     m_liveCap       = 240;
 	double                     m_lastCpuFrameMs = 0.0;
 
@@ -338,7 +382,7 @@ struct HE_API ProfileScope
 	{
 		if (m_opened) EngineProfiler::instance().beginScope(name);
 	}
-	~ProfileScope()
+	~ProfileScope() noexcept
 	{
 		if (m_opened) EngineProfiler::instance().endScope();
 	}

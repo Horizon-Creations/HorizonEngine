@@ -167,13 +167,25 @@ private:
     bool loadChunk(const std::string& name, const std::string& source);
     // Returns false and sets m_lastError on Lua error.
     bool pcall(int nargs, int nresults);
+    // loadChunk + run it: on success the table the chunk returned is on top of
+    // the stack. False (stack unchanged, m_lastError set) on a compile error, a
+    // runtime error or a chunk that returns something else than a table.
+    bool runModuleChunk(const std::string& name, const std::string& source);
 
     // Shared body of the three notify handlers above: they differ only in the
     // Lua method name they look for.
     bool callNotifyMethod(InstanceId id, const char* method, const std::string& name);
+    // Shared body of the handlers whose only argument is one integer (the four
+    // collision / overlap callbacks, onTimer, onCheatDetected); pushed as a
+    // lua_Integer, which is a long long.
+    bool callIntegerMethod(InstanceId id, const char* method, long long arg);
 
     struct ScriptRef  { int luaRef = -1; };   // LUA_NOREF sentinel
     struct InstanceRef { int luaRef = -1; std::string scriptName; };
+
+    // The instance behind `id`; nullptr and m_lastError = "Invalid instance id"
+    // when there is none.
+    InstanceRef* requireInstance(InstanceId id);
 
     lua_State*  m_L = nullptr;
     std::unordered_map<std::string, ScriptRef>   m_scripts;

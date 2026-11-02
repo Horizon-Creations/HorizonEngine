@@ -97,7 +97,7 @@ struct ApplyPlan
 		if (args.empty() || args[0] != "apply") { error = "expected the command 'apply'"; return false; }
 		ApplyPlan p;
 		auto number = [&error](const std::string& flag, const std::string& v, std::uint64_t& n) {
-			if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos || v.size() > 18)
+			if (v.empty() || v.find_first_not_of("0123456789") != std::string::npos || v.size() > 19)
 			{
 				error = flag + " needs a number, got '" + v + "'";
 				return false;

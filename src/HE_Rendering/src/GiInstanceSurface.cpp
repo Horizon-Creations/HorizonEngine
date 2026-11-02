@@ -1,4 +1,5 @@
 #include "HorizonRendering/GiInstanceSurface.h"
+#include "HorizonRendering/GiLandscape.h"
 
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -72,6 +73,20 @@ GiInstanceSurface giInstanceSurface(const RenderObject& obj, const ContentManage
 	}
 	s.albedo   *= slotValue(ma->approxBaseColorSlot, ma->approxBaseColor);
 	s.emissive  = slotValue(ma->approxEmissiveSlot,  ma->approxEmissive);
+	return s;
+}
+
+GiInstanceSurface giInstanceSurface(const RenderObject& obj, const ContentManager* cm,
+                                    const std::vector<GiLandscape>* landscapes)
+{
+	GiInstanceSurface s = giInstanceSurface(obj, cm);
+	if (!landscapes || obj.landscapeIndex < 0 || obj.landscapeIndex >= static_cast<int32_t>(landscapes->size()))
+		return s;
+	const GiLandscape& L = (*landscapes)[static_cast<std::size_t>(obj.landscapeIndex)];
+	if (L.layerCount != kGiLandAuto) return s;   // a painted landscape already blends its layers by the paint's average
+	// Flat ground, no snow (a height far below any Snow Height), as the reference function has it.
+	const glm::vec3 ground = giAutoLandscapeAlbedo(L, glm::vec3(0.0f, -1.0e9f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+	s.albedo = ground * glm::vec3(obj.instanceTint);
 	return s;
 }
 

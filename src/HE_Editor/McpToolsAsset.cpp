@@ -108,7 +108,7 @@ json assetEntry(ContentManager& content, const std::string& rel, const std::stri
 	if (id == HE::UUID{} && !unreadable) id = content.idForPath(rel);
 	j["uuid"]   = uuidJson(id);
 	// Asked about THAT id rather than about the path, for the same reason.
-	j["loaded"] = !(id == HE::UUID{}) && content.isLoaded(id);
+	j["loaded"] = id != HE::UUID{} && content.isLoaded(id);
 	// Stated rather than folded into a null uuid: "this file has no id" and "this
 	// file could not be read" are different answers, and the second one is a
 	// reason to look at the file rather than at the reference.
@@ -122,11 +122,10 @@ json assetEntry(ContentManager& content, const std::string& rel, const std::stri
 
 // ── The collaboration key ────────────────────────────────────────────────────
 
-std::string collabKeyOf(const McpAssetHooks& h, ContentManager& content,
+std::string collabKeyOf(const McpAssetHooks& h,
                         const std::string& abs, const std::string& rel, bool folder)
 {
 	if (h.collabKey) return h.collabKey(abs, folder);
-	(void)content;
 	return rel;
 }
 
@@ -173,7 +172,7 @@ HE::AssetRefs::ScanResult scanReferrers(const McpAssetHooks& h, ContentManager& 
 	targets.paths.push_back(rel);
 	bool unreadable = false;
 	const HE::UUID id = HE::AssetRefs::assetUuidOfFile(abs, &unreadable);
-	if (!(id == HE::UUID{})) targets.uuids.push_back(id);
+	if (id != HE::UUID{}) targets.uuids.push_back(id);
 
 	HE::AssetRefs::ScanRequest req;
 	req.contentRoot    = content.contentRoot();
@@ -302,10 +301,12 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 				std::error_code e;
 				const bool isDir = de.is_directory(e);
 				if (!isDir && !de.is_regular_file(e)) return;
-				// The same rule GlobalState's content scan uses: dotfiles are
-				// VCS/OS bookkeeping, not content anyone put there.
-				if (de.path().filename().string().rfind('.', 0) == 0) return;
 				found.emplace_back(de.path().lexically_normal().string(), isDir);
+			};
+			// The same rule GlobalState's content scan uses: dotfiles are
+			// VCS/OS bookkeeping, not content anyone put there.
+			auto isDotfile = [](const std::filesystem::path& p) {
+				return p.filename().string().rfind('.', 0) == 0;
 			};
 			if (recursive)
 			{
@@ -314,7 +315,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 				const std::filesystem::recursive_directory_iterator end;
 				for (; !ec && it != end; it.increment(ec))
 				{
-					if (it->path().filename().string().rfind('.', 0) == 0)
+					if (isDotfile(it->path()))
 					{
 						std::error_code dirEc;
 						if (it->is_directory(dirEc)) it.disable_recursion_pending();
@@ -328,7 +329,11 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 				std::filesystem::directory_iterator it(
 					dirAbs, std::filesystem::directory_options::skip_permission_denied, ec);
 				const std::filesystem::directory_iterator end;
-				for (; !ec && it != end; it.increment(ec)) take(*it);
+				for (; !ec && it != end; it.increment(ec))
+				{
+					if (isDotfile(it->path())) continue;
+					take(*it);
+				}
 			}
 			std::sort(found.begin(), found.end());
 
@@ -430,7 +435,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"to have meant a different one, so nothing was overwritten. Choose "
 					"another path, or delete that asset first.");
 
-			const std::string key = collabKeyOf(*h, *cm, p.abs, p.rel, /*folder=*/false);
+			const std::string key = collabKeyOf(*h, p.abs, p.rel, /*folder=*/false);
 			if (ToolResult* r = checkLocked(*h, key, p.rel, scratch)) return *r;
 
 			std::filesystem::create_directories(std::filesystem::path(p.abs).parent_path(), ec);
@@ -511,7 +516,7 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"with it, which is not something to do without seeing the list — do "
 					"it in the Content Browser, which shows that list first.");
 
-			const std::string key = collabKeyOf(*h, *cm, p.abs, p.rel, /*folder=*/false);
+			const std::string key = collabKeyOf(*h, p.abs, p.rel, /*folder=*/false);
 			if (ToolResult* r = checkLocked(*h, key, p.rel, scratch)) return *r;
 
 			const bool force = boolArg(args, "force");
@@ -624,8 +629,8 @@ void registerAssetTools(McpToolRegistry& registry, ContentManager& content,
 					"'" + to.rel + "' already exists. Nothing was overwritten — moving "
 					"an asset onto another one would destroy the second without asking.");
 
-			const std::string keyFrom = collabKeyOf(*h, *cm, from.abs, from.rel, false);
-			const std::string keyTo   = collabKeyOf(*h, *cm, to.abs,   to.rel,   false);
+			const std::string keyFrom = collabKeyOf(*h, from.abs, from.rel, false);
+			const std::string keyTo   = collabKeyOf(*h, to.abs,   to.rel,   false);
 			if (ToolResult* r = checkLocked(*h, keyFrom, from.rel, scratch)) return *r;
 
 			// Same reasoning as the delete above: a rename breaks every reference to

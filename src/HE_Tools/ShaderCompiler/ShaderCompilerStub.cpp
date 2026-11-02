@@ -58,6 +58,13 @@ Result compileHlslPinned(const std::string&, Stage, const std::vector<HlslPin>&)
     return failed();
 }
 
+// The D3D domain-shell kernel (Thema 207). Packed games carry no tessellation variants
+// yet, so without the compiler a displacement material simply draws untessellated.
+Result compileHlslKernel(const std::string&, const std::string&, const std::vector<HlslPin>&)
+{
+    return failed();
+}
+
 // GL 4.3's clustered graph-material variant (Thema 117). The GL renderer falls back to
 // the plain GLSL 4.10 program when this fails, which here it always does.
 Result compileGlslPinned(const std::string&, Stage, const std::vector<GlslPin>&)

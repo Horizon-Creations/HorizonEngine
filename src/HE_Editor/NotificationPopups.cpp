@@ -23,18 +23,9 @@ namespace
 {
 	using HE::Ed::NoteLevel;
 	using HE::Ed::Notification;
-
-	ImVec4 levelColor(NoteLevel level)
-	{
-		// The same three the bell and the centre use, so a toast and its row are
-		// recognisably one thing.
-		switch (level)
-		{
-			case NoteLevel::Critical:  return ImVec4(0.95f, 0.36f, 0.33f, 1.0f);
-			case NoteLevel::Important: return ImVec4(1.00f, 0.72f, 0.35f, 1.0f);
-			default:                   return ImVec4(0.55f, 0.70f, 0.95f, 1.0f);
-		}
-	}
+	// levelColor() (NotificationStore.h): the same three the bell and the
+	// centre use, so a toast and its row are recognisably one thing.
+	using HE::Ed::levelColor;
 
 	// ── Toasts ───────────────────────────────────────────────────────────────
 	constexpr float kToastBodyW  = 340.0f;   // text column; the window adds padding + the close button

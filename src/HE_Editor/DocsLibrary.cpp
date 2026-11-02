@@ -182,7 +182,7 @@ namespace
 		};
 		for (unsigned char c : q)
 		{
-			if (std::isalnum(c) || c >= 0x80) cur.push_back(static_cast<char>(std::tolower(c)));
+			if (std::isalnum(c) || c >= 0x80) cur.push_back(c < 0x80 ? static_cast<char>(std::tolower(c)) : static_cast<char>(c));
 			else                              flush();
 		}
 		flush();

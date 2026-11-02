@@ -63,7 +63,6 @@ TEST_CASE("EditorGraphics: apply and capture leave everything that is not graphi
 	EditorConfig cfg;
 	cfg.UiFontScale        = 1.7f;
 	cfg.MaxFps             = 90.0f;
-	cfg.PreviewQualityMode = 1;
 	cfg.QuickSettingsFavorites = "gi,bloom";
 
 	HE::ProjectGraphics g;
@@ -73,7 +72,6 @@ TEST_CASE("EditorGraphics: apply and capture leave everything that is not graphi
 	CHECK_FALSE(cfg.BloomEnabled);
 	CHECK(cfg.UiFontScale == doctest::Approx(1.7f));
 	CHECK(cfg.MaxFps == doctest::Approx(90.0f));
-	CHECK(cfg.PreviewQualityMode == 1);
 	CHECK(cfg.QuickSettingsFavorites == "gi,bloom");
 
 	// capture keeps the project's own switch.

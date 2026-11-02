@@ -494,8 +494,16 @@ bool GitController::mayModify() const
 void GitController::setTeamServer(bool on, const std::string& team, const std::string& project)
 {
 	m_teamServer        = on;
-	m_teamServerTeam    = on ? team : std::string();
-	m_teamServerProject = on ? project : std::string();
+	if (on)
+	{
+		m_teamServerTeam    = team;
+		m_teamServerProject = project;
+	}
+	else
+	{
+		m_teamServerTeam.clear();
+		m_teamServerProject.clear();
+	}
 	// Keys waiting for a server this project no longer uses would be uploaded
 	// to it the moment an upload appears.
 	if (!on) m_teamPending.clear();

@@ -57,6 +57,11 @@ public:
 private:
     RenderHandle nextHandle();
 
+    // Shared body of uploadMesh/uploadTexture/createMaterial: idempotent
+    // register-and-allocate, keyed by assetId. T must provide sizeBytes().
+    template<typename T>
+    RenderHandle uploadImpl(const HE::UUID& assetId, const T& data);
+
     GPUMemoryAllocator& m_allocator;
     std::unordered_map<HE::UUID, RenderHandle> m_assetIndex;
     // Reverse map: encoded handle → UUID (for release by handle)

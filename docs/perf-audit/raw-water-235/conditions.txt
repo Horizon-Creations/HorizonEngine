@@ -1,0 +1,5585 @@
+== base-down3-nowater-r1  2026-10-21 20:03:37  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.84 2.65 4.17
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Python; 9.5% coreaudiod; 4.9% ControlCenter; 4.2% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.41 2.72 4.16
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      12.9% Dock; 12.4% coreaudiod; 9.8% mdworker_shared; 6.4% WindowServer
+  foreign:   none
+
+== base-down3-nowater-r2  2026-10-21 20:05:25  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.93 2.66 3.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       5
+  power:     Now drawing from 'AC Power'
+  busy:      15.0% Python; 9.6% coreaudiod; 8.6% Python; 7.7% dasd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.65 2.61 3.94
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      19.6% (managedappdistri); 14.7% coreaudiod; 12.3% Dock; 5.5% WindowServer
+  foreign:   none
+
+== base-down3-nowater-r3  2026-10-21 20:10:49  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.63 2.55 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.3% Python; 9.7% coreaudiod; 7.0% pairedsyncd; 6.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.30 2.48 3.44
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      14.0% Dock; 13.0% coreaudiod; 6.4% WindowServer; 5.8% Hive
+  foreign:   none
+
+== base-down3-water-r1  2026-10-21 20:03:59  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.41 2.72 4.16
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      15.4% Python; 9.6% coreaudiod; 5.6% clion; 1.4% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.08 2.61 4.08
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      59.8% clion; 14.0% coreaudiod; 11.2% Dock; 5.3% WindowServer
+  foreign:   none
+
+== base-down3-water-r2  2026-10-21 20:05:04  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.77 2.46 3.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.5% Python; 9.6% coreaudiod; 3.8% clion; 1.8% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.84 2.64 3.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       41
+  power:     Now drawing from 'AC Power'
+  busy:      15.3% Dock; 13.4% coreaudiod; 11.3% clion; 6.7% WindowServer
+  foreign:   none
+
+== base-down3-water-r3  2026-10-21 20:11:10  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.30 2.48 3.44
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.1% Python; 9.5% coreaudiod; 4.6% clion; 2.6% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.79 2.59 3.46
+  locked:    Yes
+  lowpower:  0
+  gpu:       36
+  power:     Now drawing from 'AC Power'
+  busy:      26.4% spotlightknowledged.updater; 12.6% Dock; 12.2% coreaudiod; 10.4% Hive
+  foreign:   none
+
+== base-far-nowater-r1  2026-10-21 20:01:05  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.86 2.91 4.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      29.5% Python; 18.8% gh; 12.1% Python; 10.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.12 3.12 4.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      82.2% (pairedsyncd); 15.3% coreaudiod; 13.3% Dock; 6.8% claude
+  foreign:   none
+
+== base-far-nowater-r2  2026-10-21 20:07:56  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.25 2.45 3.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       9
+  power:     Now drawing from 'AC Power'
+  busy:      14.1% Python; 9.6% coreaudiod; 4.5% clion; 4.3% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.14 2.41 3.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      12.8% Dock; 12.3% coreaudiod; 11.1% Hive; 6.5% WindowServer
+  foreign:   none
+
+== base-far-nowater-r3  2026-10-21 20:08:17  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.14 2.41 3.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       5
+  power:     Now drawing from 'AC Power'
+  busy:      42.8% OneDrive File Provider; 22.5% airportd; 21.3% Python; 11.8% runningboardd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.69 2.53 3.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      13.7% Dock; 12.5% coreaudiod; 9.5% Hive; 6.3% WindowServer
+  foreign:   none
+
+== base-far-water-r1  2026-10-21 20:01:26  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.12 3.12 4.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      98.8% clion; 16.0% Python; 9.3% coreaudiod; 3.3% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.93 3.08 4.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      83.0% (pairedsyncd); 11.8% coreaudiod; 11.5% Dock; 6.8% WindowServer
+  foreign:   none
+
+== base-far-water-r2  2026-10-21 20:07:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.25 2.45 3.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Python; 9.7% coreaudiod; 4.2% io.tailscale.ipn.macsys.network-extension; 4.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.25 2.45 3.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      32.1% Hive; 19.5% Hive; 12.3% coreaudiod; 12.0% Dock
+  foreign:   none
+
+== base-far-water-r3  2026-10-21 20:08:40  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.69 2.53 3.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      12.4% Python; 10.0% coreaudiod; 5.3% Python; 4.5% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.34 2.46 3.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       68
+  power:     Now drawing from 'AC Power'
+  busy:      11.7% Dock; 11.4% coreaudiod; 10.1% runningboardd; 5.8% WindowServer
+  foreign:   none
+
+== base-live-down3-nowater-r1  2026-10-21 20:47:58  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.25 2.58 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      11.4% Python; 9.7% coreaudiod; 9.0% Stats; 6.3% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.40 2.59 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       37
+  power:     Now drawing from 'AC Power'
+  busy:      13.3% Dock; 13.0% coreaudiod; 6.4% WindowServer; 3.8% clion
+  foreign:   none
+
+== base-live-down3-nowater-r2  2026-10-21 20:49:43  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.82 2.66 2.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      19.7% Python; 12.0% Python; 10.0% coreaudiod; 5.3% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.33 2.57 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      11.0% coreaudiod; 6.4% Dock; 5.4% WindowServer; 4.4% clion
+  foreign:   none
+
+== base-live-down3-nowater-r3  2026-10-21 20:54:56  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.89 2.29 2.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       6
+  power:     Now drawing from 'AC Power'
+  busy:      16.0% Python; 9.6% coreaudiod; 7.0% claude; 5.1% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.95 2.28 2.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      13.9% Dock; 13.6% coreaudiod; 5.1% WindowServer; 4.3% Python
+  foreign:   none
+
+== base-live-down3-water-r1  2026-10-21 20:48:19  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.40 2.59 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      85.4% clion; 16.0% Python; 8.7% coreaudiod; 4.7% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.24 2.54 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      12.9% Dock; 12.4% coreaudiod; 8.9% MenuBarAgent; 7.5% WindowServer
+  foreign:   none
+
+== base-live-down3-water-r2  2026-10-21 20:49:22  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.03 2.69 2.69
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      13.0% Python; 9.4% coreaudiod; 4.6% clion; 3.3% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.80 2.66 2.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      43.0% Hive; 14.6% Dock; 13.9% coreaudiod; 9.7% WindowServer
+  foreign:   none
+
+== base-live-down3-water-r3  2026-10-21 20:55:17  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.95 2.28 2.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.1% Python; 9.6% coreaudiod; 9.4% mdworker_shared; 7.5% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.21 2.32 2.50
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Dock; 13.5% coreaudiod; 6.9% WindowServer; 4.4% clion
+  foreign:   none
+
+== base-live-far-nowater-r1  2026-10-21 20:45:31  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.78 2.79 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       30
+  power:     Now drawing from 'AC Power'
+  busy:      25.8% Python; 10.8% Python; 9.9% coreaudiod; 6.8% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.51 2.72 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       36
+  power:     Now drawing from 'AC Power'
+  busy:      14.6% Dock; 13.7% coreaudiod; 5.7% WindowServer; 5.5% Stats
+  foreign:   none
+
+== base-live-far-nowater-r2  2026-10-21 20:52:11  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.21 2.44 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Python; 9.6% coreaudiod; 4.9% WindowServer; 4.7% Stats
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.88 2.60 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       36
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Dock; 13.3% coreaudiod; 5.7% WindowServer; 4.8% Stats
+  foreign:   none
+
+== base-live-far-nowater-r3  2026-10-21 20:52:32  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.88 2.60 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.4% Python; 9.6% coreaudiod; 5.6% WindowServer; 4.1% ControlCenter
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.71 2.58 2.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       36
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Dock; 13.9% coreaudiod; 8.9% Python; 8.5% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+
+== base-live-far-water-r1  2026-10-21 20:45:53  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.39 2.69 2.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      26.5% Python; 11.8% Python; 10.2% coreaudiod; 4.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.07 2.60 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      12.4% coreaudiod; 12.0% Dock; 5.8% WindowServer; 5.0% clion
+  foreign:   none
+
+== base-live-far-water-r2  2026-10-21 20:51:50  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.70 2.54 2.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      13.0% Python; 9.6% coreaudiod; 4.0% clion; 3.3% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.21 2.44 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       35
+  power:     Now drawing from 'AC Power'
+  busy:      30.1% (proactiveeventtr); 27.3% (mlhostd); 14.2% Dock; 12.2% coreaudiod
+  foreign:   none
+
+== base-live-far-water-r3  2026-10-21 20:52:53  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.71 2.58 2.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      16.3% Python; 9.9% coreaudiod; 7.6% Python; 5.1% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.48 2.54 2.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       37
+  power:     Now drawing from 'AC Power'
+  busy:      14.8% Dock; 14.1% coreaudiod; 7.1% WindowServer; 6.7% clion
+  foreign:   none
+
+== base-live-mid-nowater-r1  2026-10-21 20:46:13  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.07 2.60 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.8% Python; 14.2% Python; 9.7% coreaudiod; 5.1% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.98 2.54 2.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       34
+  power:     Now drawing from 'AC Power'
+  busy:      13.5% coreaudiod; 13.1% Dock; 7.9% clion; 5.8% Python
+  foreign:   none
+
+== base-live-mid-nowater-r2  2026-10-21 20:51:28  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.55 2.50 2.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       5
+  power:     Now drawing from 'AC Power'
+  busy:      16.5% Python; 9.4% coreaudiod; 4.6% claude; 3.0% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.67 2.53 2.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       36
+  power:     Now drawing from 'AC Power'
+  busy:      12.5% coreaudiod; 12.4% Dock; 8.3% WindowServer; 7.9% Python
+  foreign:   none
+
+== base-live-mid-nowater-r3  2026-10-21 20:53:13  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.44 2.54 2.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      19.9% Python; 16.9% Python; 10.2% coreaudiod; 4.7% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.13 2.46 2.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       37
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Dock; 13.6% coreaudiod; 8.7% WindowServer; 3.7% clion
+  foreign:   none
+
+== base-live-mid-water-r1  2026-10-21 20:46:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.98 2.54 2.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      116.6% clion; 18.4% Python; 14.5% Python; 8.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.49 2.62 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       68
+  power:     Now drawing from 'AC Power'
+  busy:      15.0% Python; 11.9% coreaudiod; 8.8% Dock; 6.6% clion
+  foreign:   none
+
+== base-live-mid-water-r2  2026-10-21 20:51:07  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.89 2.38 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.1% Python; 9.6% coreaudiod; 5.6% clion; 4.0% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.69 2.53 2.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       68
+  power:     Now drawing from 'AC Power'
+  busy:      55.5% clion; 13.5% coreaudiod; 12.6% Dock; 8.7% WindowServer
+  foreign:   none
+
+== base-live-mid-water-r3  2026-10-21 20:53:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.20 2.47 2.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.1% Python; 10.6% Python; 9.9% coreaudiod; 6.1% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.00 2.41 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      21.6% pairedsyncd; 15.2% coreaudiod; 14.6% Dock; 6.0% WindowServer
+  foreign:   none
+
+== base-live-near1-water-r1  2026-10-21 20:47:38  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.53 2.66 2.69
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.0% Python; 9.4% coreaudiod; 5.6% claude; 3.8% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.25 2.58 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      12.8% Dock; 12.5% coreaudiod; 5.8% WindowServer; 5.7% claude
+  foreign:   none
+
+== base-live-near1-water-r2  2026-10-21 20:50:04  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.39 2.57 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.7% Python; 10.1% coreaudiod; 9.9% Python; 5.3% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.10 2.50 2.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      15.4% coreaudiod; 14.3% Dock; 8.2% WindowServer; 5.1% clion
+  foreign:   none
+
+== base-live-near1-water-r3  2026-10-21 20:54:36  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.78 2.29 2.50
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      96.5% clion; 23.8% Python; 17.5% Python; 9.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.89 2.29 2.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      15.1% Dock; 13.4% coreaudiod; 6.6% clion; 6.1% Python
+  foreign:   none
+
+== base-live-near3-nowater-r1  2026-10-21 20:46:55  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.49 2.62 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      17.4% Python; 9.7% coreaudiod; 8.7% Python; 5.3% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.23 2.78 2.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       37
+  power:     Now drawing from 'AC Power'
+  busy:      19.3% Python; 14.6% Dock; 13.6% coreaudiod; 8.9% WindowServer
+  foreign:   none
+
+== base-live-near3-nowater-r2  2026-10-21 20:50:46  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.72 2.39 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      19.8% Hive; 12.6% Python; 10.1% coreaudiod; 5.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.89 2.38 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       35
+  power:     Now drawing from 'AC Power'
+  busy:      12.5% coreaudiod; 11.7% Dock; 9.4% Python; 4.9% WindowServer
+  foreign:   none
+
+== base-live-near3-nowater-r3  2026-10-21 20:53:54  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.92 2.39 2.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.6% Python; 10.2% Python; 9.7% coreaudiod; 5.3% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.87 2.35 2.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       37
+  power:     Now drawing from 'AC Power'
+  busy:      14.8% Dock; 11.9% coreaudiod; 5.8% WindowServer; 3.3% clion
+  foreign:   none
+
+== base-live-near3-water-r1  2026-10-21 20:47:16  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.23 2.78 2.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.0% Python; 9.9% coreaudiod; 4.2% clion; 3.0% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.66 2.68 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      11.3% coreaudiod; 8.8% Dock; 5.2% clion; 4.0% WindowServer
+  foreign:   none
+
+== base-live-near3-water-r2  2026-10-21 20:50:26  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.10 2.50 2.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      11.7% Python; 9.3% coreaudiod; 4.3% clion; 3.6% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.72 2.39 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      12.2% coreaudiod; 10.3% Dock; 6.2% WindowServer; 4.3% clion
+  foreign:   none
+
+== base-live-near3-water-r3  2026-10-21 20:54:15  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.88 2.35 2.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      13.9% Python; 10.0% coreaudiod; 5.9% Python; 5.7% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.78 2.29 2.50
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      12.9% coreaudiod; 12.8% Dock; 8.6% WindowServer; 5.4% clion
+  foreign:   none
+
+== base-live-under-water-r1  2026-10-21 20:48:40  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.24 2.54 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      12.5% Python; 10.0% coreaudiod; 7.1% Python; 6.4% Tailscale
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.31 2.53 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      13.0% coreaudiod; 12.8% Dock; 7.9% WindowServer; 4.8% clion
+  foreign:   none
+
+== base-live-under-water-r2  2026-10-21 20:49:01  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.31 2.53 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.2% Python; 9.8% coreaudiod; 4.7% clion; 2.4% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.03 2.69 2.69
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      14.5% Dock; 14.0% coreaudiod; 9.7% WindowServer; 9.3% loginwindow
+  foreign:   none
+
+== base-live-under-water-r3  2026-10-21 20:55:38  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.21 2.32 2.50
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.3% Python; 10.0% coreaudiod; 8.7% Python; 5.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.43 2.38 2.51
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      16.7% clion; 14.7% Dock; 13.4% coreaudiod; 11.2% Python
+  foreign:   none
+
+== base-mid-nowater-r1  2026-10-21 20:01:48  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.93 3.08 4.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Python; 10.9% claude; 9.4% coreaudiod; 3.7% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.37 2.95 4.43
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      14.3% Dock; 13.9% coreaudiod; 7.9% gh; 7.4% WindowServer
+  foreign:   none
+
+== base-mid-nowater-r2  2026-10-21 20:07:13  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.97 2.41 3.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      17.5% mdworker_shared; 16.2% Python; 12.7% Python; 9.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.25 2.45 3.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      13.9% Dock; 13.3% coreaudiod; 6.3% gh; 5.5% WindowServer
+  foreign:   none
+
+== base-mid-nowater-r3  2026-10-21 20:09:01  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.31 2.45 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.0% Python; 9.4% coreaudiod; 5.0% Stats; 5.0% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.40 2.45 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      97.9% clion; 13.3% coreaudiod; 9.8% Dock; 9.5% loginwindow
+  foreign:   none
+
+== base-mid-water-r1  2026-10-21 20:02:10  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.26 2.91 4.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.3% Python; 13.2% gh; 10.0% coreaudiod; 4.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.33 2.89 4.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       63
+  power:     Now drawing from 'AC Power'
+  busy:      11.5% coreaudiod; 9.0% Dock; 6.1% WindowServer; 6.1% clion
+  foreign:   none
+
+== base-mid-water-r2  2026-10-21 20:06:51  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.96 2.44 3.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      128.6% clion; 22.2% Python; 8.2% coreaudiod; 8.0% airportd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.97 2.41 3.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       65
+  power:     Now drawing from 'AC Power'
+  busy:      12.9% Dock; 12.4% coreaudiod; 6.6% clion; 5.6% WindowServer
+  foreign:   none
+
+== base-mid-water-r3  2026-10-21 20:09:23  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.40 2.45 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      114.9% clion; 19.3% Python; 9.0% coreaudiod; 4.2% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.52 2.49 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       63
+  power:     Now drawing from 'AC Power'
+  busy:      13.0% Python; 12.4% coreaudiod; 12.3% Dock; 8.1% WindowServer
+  foreign:   none
+
+== base-near1-water-r1  2026-10-21 20:03:16  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.00 2.73 4.23
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Python; 9.4% coreaudiod; 7.9% claude; 4.7% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.84 2.65 4.17
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      14.0% Dock; 13.0% coreaudiod; 9.1% claude; 5.1% WindowServer
+  foreign:   none
+
+== base-near1-water-r2  2026-10-21 20:05:47  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.60 2.60 3.93
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.3% Python; 9.7% coreaudiod; 5.2% WindowServer; 4.3% ControlCenter
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.33 2.55 3.88
+  locked:    Yes
+  lowpower:  0
+  gpu:       36
+  power:     Now drawing from 'AC Power'
+  busy:      11.1% coreaudiod; 10.2% Dock; 8.2% Python; 5.4% clion
+  foreign:   none
+
+== base-near1-water-r3  2026-10-21 20:10:28  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.51 2.52 3.50
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.0% Python; 9.6% coreaudiod; 5.0% Stats; 4.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.63 2.55 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       39
+  power:     Now drawing from 'AC Power'
+  busy:      12.1% Dock; 12.0% coreaudiod; 9.2% WindowServer; 6.7% claude
+  foreign:   none
+
+== base-near3-nowater-r1  2026-10-21 20:02:32  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.33 2.89 4.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      15.6% Python; 9.4% coreaudiod; 5.4% Python; 4.7% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.31 2.84 4.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      12.1% coreaudiod; 10.7% Dock; 7.5% io.tailscale.ipn.macsys.network-extension; 6.0% (managedappdistri)
+  foreign:   none
+
+== base-near3-nowater-r2  2026-10-21 20:06:30  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.53 2.59 3.86
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      17.1% Python; 9.4% coreaudiod; 5.3% clion; 4.4% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.95 2.45 3.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      45.8% launchd; 13.2% Dock; 12.6% coreaudiod; 7.0% gh
+  foreign:   none
+
+== base-near3-nowater-r3  2026-10-21 20:09:45  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.52 2.49 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Python; 10.1% coreaudiod; 5.8% clion; 2.4% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.78 2.56 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      12.4% coreaudiod; 12.4% Dock; 6.4% WindowServer; 5.0% Python
+  foreign:   none
+
+== base-near3-water-r1  2026-10-21 20:02:54  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.31 2.84 4.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.3% Python; 9.9% coreaudiod; 5.8% Python; 5.0% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.00 2.74 4.25
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      17.8% Python; 11.8% coreaudiod; 10.5% Dock; 5.5% WindowServer
+  foreign:   none
+
+== base-near3-water-r2  2026-10-21 20:06:08  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.33 2.55 3.88
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.2% Python; 10.0% coreaudiod; 6.8% clion; 4.5% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.53 2.59 3.86
+  locked:    Yes
+  lowpower:  0
+  gpu:       41
+  power:     Now drawing from 'AC Power'
+  busy:      11.3% coreaudiod; 8.7% Dock; 5.8% clion; 4.9% WindowServer
+  foreign:   none
+
+== base-near3-water-r3  2026-10-21 20:10:06  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.78 2.56 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.6% Python; 9.9% coreaudiod; 6.4% Python; 4.1% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.64 2.54 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       39
+  power:     Now drawing from 'AC Power'
+  busy:      14.0% Dock; 13.3% coreaudiod; 7.6% WindowServer; 4.0% clion
+  foreign:   none
+
+== base-under-water-r1  2026-10-21 20:04:21  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.08 2.61 4.08
+  locked:    Yes
+  lowpower:  0
+  gpu:       6
+  power:     Now drawing from 'AC Power'
+  busy:      116.8% clion; 16.0% Python; 9.0% loginwindow; 9.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.69 2.49 4.00
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      15.1% Dock; 13.8% coreaudiod; 12.3% Python; 5.8% WindowServer
+  foreign:   none
+
+== base-under-water-r2  2026-10-21 20:04:43  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.69 2.49 4.00
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.4% Python; 9.7% coreaudiod; 6.1% Python; 5.3% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.77 2.46 3.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       68
+  power:     Now drawing from 'AC Power'
+  busy:      11.5% coreaudiod; 9.2% Dock; 6.3% WindowServer; 5.9% claude
+  foreign:   none
+
+== base-under-water-r3  2026-10-21 20:11:31  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.79 2.59 3.46
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.1% Python; 14.1% Python; 9.9% coreaudiod; 5.7% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.39 3.20 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       68
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Dock; 13.1% coreaudiod; 8.0% WindowServer; 6.0% clion
+  foreign:   none
+
+== live-det-s2-lake-down3-asset-r1  2026-10-21 20:33:56  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.47 2.13 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.7% Python; 9.7% coreaudiod; 4.3% claude; 4.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.08 2.28 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      43.4% Hive; 11.8% coreaudiod; 11.7% Dock; 7.5% WindowServer
+  foreign:   none
+
+== live-det-s2-lake-down3-asset-r2  2026-10-21 20:38:20  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.69 2.71 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.7% Python; 10.2% coreaudiod; 7.1% Python; 5.0% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.84 2.75 2.76
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      12.1% coreaudiod; 10.3% Dock; 6.1% clion; 5.6% WindowServer
+  foreign:   none
+
+== live-det-s2-lake-down3-asset-r3  2026-10-21 20:39:54  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.32 2.64 2.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.3% Python; 9.6% coreaudiod; 3.1% WindowServer; 3.0% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.22 2.60 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      13.8% Dock; 13.0% coreaudiod; 5.3% mdworker_shared; 5.1% WindowServer
+  foreign:   none
+
+== live-det-s2-lake-down3-noasset-r1  2026-10-21 20:34:15  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 3.08 2.28 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.4% Python; 9.7% coreaudiod; 6.2% clion; 5.6% Stats
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.38 2.40 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      14.7% pairedsyncd; 13.5% Dock; 13.0% coreaudiod; 7.6% clion
+  foreign:   none
+
+== live-det-s2-lake-down3-noasset-r2  2026-10-21 20:38:01  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 3.27 2.81 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      108.2% clion; 14.5% Python; 8.7% coreaudiod; 2.0% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.69 2.71 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      13.8% Dock; 13.7% clion; 12.9% coreaudiod; 9.5% loginwindow
+  foreign:   none
+
+== live-det-s2-lake-down3-noasset-r3  2026-10-21 20:40:13  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 2.28 2.61 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      11.5% Python; 9.7% coreaudiod; 3.7% clion; 3.6% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.62 2.67 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      13.2% Dock; 12.4% coreaudiod; 5.4% WindowServer; 5.4% MenuBarAgent
+  foreign:   none
+
+== live-det-s2-lake-near3-asset-r1  2026-10-21 20:33:17  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.90 2.02 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       5
+  power:     Now drawing from 'AC Power'
+  busy:      108.9% clion; 14.0% Python; 9.1% coreaudiod; 7.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.85 2.00 2.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      15.6% Hive; 13.9% claude; 13.5% Dock; 11.5% coreaudiod
+  foreign:   none
+
+== live-det-s2-lake-near3-asset-r2  2026-10-21 20:38:58  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.69 2.72 2.75
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      83.1% clion; 78.4% (pairedsyncd); 20.1% Hive; 16.3% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.66 2.72 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      107.0% clion; 10.1% coreaudiod; 9.8% Dock; 7.6% WindowServer
+  foreign:   none
+
+== live-det-s2-lake-near3-asset-r3  2026-10-21 20:39:16  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.66 2.72 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      106.6% clion; 18.0% Python; 9.0% coreaudiod; 3.0% SpringBoard
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.58 2.70 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      45.1% clion; 11.9% Dock; 11.5% coreaudiod; 5.5% WindowServer
+  foreign:   none
+
+== live-det-s2-lake-near3-noasset-r1  2026-10-21 20:33:36  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 1.85 2.00 2.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      17.3% Python; 16.3% Python; 13.3% (facetimemessages); 8.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.47 2.13 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      11.0% coreaudiod; 10.6% Dock; 4.7% WindowServer; 3.0% clion
+  foreign:   none
+
+== live-det-s2-lake-near3-noasset-r2  2026-10-21 20:38:40  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 2.84 2.75 2.76
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.2% Python; 9.4% coreaudiod; 6.5% clion; 5.6% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.69 2.72 2.75
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      14.6% Dock; 13.6% coreaudiod; 13.6% clion; 8.2% WindowServer
+  foreign:   none
+
+== live-det-s2-lake-near3-noasset-r3  2026-10-21 20:39:35  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 2.58 2.70 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      13.7% Python; 11.5% Python; 9.6% coreaudiod; 6.6% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.32 2.64 2.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      13.4% Dock; 13.1% coreaudiod; 7.5% MenuBarAgent; 6.2% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_lake-down3-asset-r1  2026-10-21 20:35:08  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.54 2.54 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      48.6% mediaanalysisd; 15.0% Python; 12.0% aned; 8.1% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.73 2.62 2.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       83
+  power:     Now drawing from 'AC Power'
+  busy:      42.2% pairedsyncd; 14.5% Dock; 13.5% coreaudiod; 6.7% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_lake-down3-asset-r2  2026-10-21 20:37:07  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.94 2.64 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.0% Python; 9.8% coreaudiod; 4.9% AppleCentauriAlpha; 4.9% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.88 2.64 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      13.2% Dock; 12.8% coreaudiod; 5.2% WindowServer; 5.0% Python
+  foreign:   none
+
+== live-det-s2-plain_lake-down3-asset-r3  2026-10-21 20:41:06  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.22 2.57 2.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.6% Python; 9.8% claude; 9.3% coreaudiod; 5.5% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.17 2.53 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      54.3% clion; 18.7% Python; 12.0% coreaudiod; 11.7% Dock
+  foreign:   none
+
+== live-det-s2-plain_lake-down3-noasset-r1  2026-10-21 20:35:25  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 3.51 2.60 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.8% Python; 9.8% coreaudiod; 4.9% clion; 3.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.48 2.63 2.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      73.5% clion; 26.5% WindowServer; 21.1% OneDrive File Provider; 20.6% coreaudiod
+  foreign:   none
+
+== live-det-s2-plain_lake-down3-noasset-r2  2026-10-21 20:36:49  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 2.50 2.53 2.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.7% Python; 9.9% coreaudiod; 4.8% clion; 1.7% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.93 2.63 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      16.6% MenuBarAgent; 13.7% coreaudiod; 13.1% Dock; 10.4% Python
+  foreign:   none
+
+== live-det-s2-plain_lake-down3-noasset-r3  2026-10-21 20:41:24  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 2.17 2.53 2.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      101.4% clion; 16.0% Python; 9.0% coreaudiod; 4.6% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.15 2.50 2.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Dock; 12.8% coreaudiod; 9.3% Hive; 6.4% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_lake-near3-asset-r1  2026-10-21 20:34:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.38 2.40 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.7% Python; 9.8% coreaudiod; 4.0% clion; 3.5% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.08 2.39 2.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      13.2% Dock; 13.1% coreaudiod; 8.1% claude; 7.5% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_lake-near3-asset-r2  2026-10-21 20:37:43  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.92 2.90 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      15.4% Python; 11.0% replicatord; 9.0% coreaudiod; 8.9% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.27 2.81 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       83
+  power:     Now drawing from 'AC Power'
+  busy:      109.7% clion; 12.6% Dock; 11.2% coreaudiod; 6.1% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_lake-near3-asset-r3  2026-10-21 20:40:31  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.62 2.67 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      20.2% claude; 15.3% Python; 12.8% Python; 10.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.36 2.61 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      109.0% clion; 13.1% coreaudiod; 10.9% Dock; 6.4% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_lake-near3-noasset-r1  2026-10-21 20:34:51  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 3.40 2.46 2.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       6
+  power:     Now drawing from 'AC Power'
+  busy:      12.4% Python; 9.4% coreaudiod; 5.1% clion; 5.1% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.54 2.54 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      32.2% Hive; 14.7% mds_stores; 13.3% Dock; 13.0% coreaudiod
+  foreign:   none
+
+== live-det-s2-plain_lake-near3-noasset-r2  2026-10-21 20:37:24  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 2.88 2.64 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       23
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Python; 9.6% coreaudiod; 4.9% clion; 4.7% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.92 2.90 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      13.7% Dock; 13.0% coreaudiod; 8.4% WindowServer; 4.0% clion
+  foreign:   none
+
+== live-det-s2-plain_lake-near3-noasset-r3  2026-10-21 20:40:49  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant none
+before:
+  uptime:    load averages: 2.36 2.61 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Python; 10.3% clion; 9.3% coreaudiod; 3.1% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.22 2.57 2.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      17.1% MenuBarAgent; 13.7% Dock; 13.1% coreaudiod; 7.2% Stats
+  foreign:   none
+
+== live-det-s2-plain_nowater-down3-r1  2026-10-21 20:35:58  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.35 2.65 2.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      111.1% clion; 19.0% Python; 9.1% coreaudiod; 5.1% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.05 2.62 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      107.6% clion; 14.1% Dock; 12.6% coreaudiod; 4.8% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_nowater-down3-r2  2026-10-21 20:36:15  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.04 2.62 2.72
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      109.4% clion; 15.4% Python; 8.7% coreaudiod; 5.9% MenuBarAgent
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.66 2.56 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      90.7% clion; 12.7% coreaudiod; 12.5% Dock; 6.8% Python
+  foreign:   none
+
+== live-det-s2-plain_nowater-down3-r3  2026-10-21 20:42:00  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.20 2.49 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      113.6% clion; 15.7% Python; 9.2% coreaudiod; 5.0% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.29 2.50 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       83
+  power:     Now drawing from 'AC Power'
+  busy:      17.8% launchd; 15.6% Dock; 14.3% coreaudiod; 11.0% loginwindow
+  foreign:   none
+
+== live-det-s2-plain_nowater-near3-r1  2026-10-21 20:35:41  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.48 2.63 2.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      118.6% clion; 53.5% OneDrive; 13.9% Python; 12.0% OneDrive File Provider
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.35 2.65 2.73
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      136.3% clion; 13.9% Dock; 11.2% coreaudiod; 6.4% facetimemessagestored
+  foreign:   none
+
+== live-det-s2-plain_nowater-near3-r2  2026-10-21 20:36:31  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.66 2.56 2.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      18.3% Python; 10.6% clion; 9.0% coreaudiod; 8.7% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.50 2.53 2.68
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      14.5% Dock; 13.4% coreaudiod; 6.4% clion; 6.0% WindowServer
+  foreign:   none
+
+== live-det-s2-plain_nowater-near3-r3  2026-10-21 20:41:42  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.15 2.50 2.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       2
+  power:     Now drawing from 'AC Power'
+  busy:      12.9% Python; 9.3% coreaudiod; 6.7% claude; 4.6% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.20 2.49 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       83
+  power:     Now drawing from 'AC Power'
+  busy:      151.4% clion; 13.0% coreaudiod; 8.5% Dock; 7.7% WindowServer
+  foreign:   none
+
+== player-down3-nowater-r1  2026-10-21 20:13:11  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.64 3.40 3.69
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      110.4% clion; 17.6% Python; 8.7% coreaudiod; 6.4% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.60 3.49 3.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      10.9% coreaudiod; 7.4% Dock; 5.8% Python; 4.3% WindowServer
+  foreign:   none
+
+== player-down3-nowater-r2  2026-10-21 20:14:20  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.27 3.27 3.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.0% Python; 9.5% coreaudiod; 4.6% WindowServer; 4.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.85 3.19 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      14.1% Dock; 13.5% coreaudiod; 7.1% WindowServer; 3.9% clion
+  foreign:   none
+
+== player-down3-nowater-r3  2026-10-21 20:16:40  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.88 3.15 3.51
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      81.6% clion; 17.0% Python; 9.0% coreaudiod; 3.0% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.79 3.37 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       72
+  power:     Now drawing from 'AC Power'
+  busy:      11.7% coreaudiod; 10.4% Dock; 6.9% clion; 4.4% WindowServer
+  foreign:   none
+
+== player-down3-water-r1  2026-10-21 20:13:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.39 3.46 3.70
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.8% Python; 9.7% coreaudiod; 6.8% WindowServer; 4.7% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.56 3.33 3.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       48
+  power:     Now drawing from 'AC Power'
+  busy:      12.2% Dock; 11.8% coreaudiod; 7.6% WindowServer; 4.1% clion
+  foreign:   none
+
+== player-down3-water-r2  2026-10-21 20:13:57  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.56 3.33 3.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      15.4% Python; 9.7% coreaudiod; 3.6% clion; 3.1% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.11 3.25 3.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       44
+  power:     Now drawing from 'AC Power'
+  busy:      11.4% coreaudiod; 9.8% Dock; 6.6% Stats; 5.1% clion
+  foreign:   none
+
+== player-down3-water-r3  2026-10-21 20:17:03  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.79 3.37 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.6% Python; 9.9% coreaudiod; 8.8% Python; 5.2% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.17 3.25 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       45
+  power:     Now drawing from 'AC Power'
+  busy:      11.8% coreaudiod; 11.1% Dock; 8.0% claude; 7.0% Python
+  foreign:   none
+
+== player-far-nowater-r1  2026-10-21 20:12:04  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.40 3.12 3.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       6
+  power:     Now drawing from 'AC Power'
+  busy:      10.1% Python; 9.9% coreaudiod; 4.3% clion; 4.0% Stats
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.71 3.03 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       76
+  power:     Now drawing from 'AC Power'
+  busy:      16.2% (mlhostd); 15.2% (proactiveeventtr); 12.5% Dock; 12.2% coreaudiod
+  foreign:   none
+
+== player-far-nowater-r2  2026-10-21 20:15:19  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.79 3.15 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      106.3% clion; 19.8% Python; 13.2% Hive; 9.7% Hive
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.77 3.13 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      112.9% clion; 13.4% Dock; 12.5% coreaudiod; 8.3% claude
+  foreign:   none
+
+== player-far-nowater-r3  2026-10-21 20:15:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.77 3.13 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      108.3% clion; 15.9% Python; 9.3% coreaudiod; 5.0% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.18 3.20 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      114.7% clion; 16.9% Hive; 12.4% Dock; 11.1% coreaudiod
+  foreign:   none
+
+== player-far-water-r1  2026-10-21 20:12:19  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.71 3.03 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      56.3% pairedsyncd; 45.9% Python; 13.3% claude; 12.5% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.39 3.22 3.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       76
+  power:     Now drawing from 'AC Power'
+  busy:      106.3% clion; 14.1% Python; 12.8% coreaudiod; 11.7% Dock
+  foreign:   none
+
+== player-far-water-r2  2026-10-21 20:15:04  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.85 3.18 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      107.9% clion; 18.6% Python; 11.6% Hive; 9.1% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.79 3.15 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       75
+  power:     Now drawing from 'AC Power'
+  busy:      110.5% clion; 12.4% coreaudiod; 12.3% Dock; 4.8% WindowServer
+  foreign:   none
+
+== player-far-water-r3  2026-10-21 20:15:49  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.18 3.20 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      110.1% clion; 21.3% Python; 8.6% coreaudiod; 6.3% Hive
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.33 3.24 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      120.7% clion; 31.1% (shellcheck); 12.4% coreaudiod; 11.0% Dock
+  foreign:   none
+
+== player-live-det-down3-nowater-r1  2026-10-21 21:22:15  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.71 2.89 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       19
+  power:     Now drawing from 'AC Power'
+  busy:      27.6% WindowServer; 15.2% Python; 10.4% coreaudiod; 8.6% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.91 2.92 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       64
+  power:     Now drawing from 'AC Power'
+  busy:      30.3% WindowServer; 16.6% Dock; 14.1% coreaudiod; 8.3% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-down3-nowater-r2  2026-10-21 21:23:05  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.96 2.97 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      25.4% WindowServer; 14.5% Python; 10.8% coreaudiod; 6.8% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.73 2.92 2.79
+  locked:    Yes
+  lowpower:  0
+  gpu:       67
+  power:     Now drawing from 'AC Power'
+  busy:      33.3% WindowServer; 15.0% Dock; 13.6% coreaudiod; 7.4% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-down3-nowater-r3  2026-10-21 21:25:48  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.07 3.34 2.97
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      28.2% WindowServer; 15.4% Python; 11.9% MenuBarAgent; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.95 3.35 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       66
+  power:     Now drawing from 'AC Power'
+  busy:      28.3% WindowServer; 13.1% coreaudiod; 11.8% Dock; 6.4% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-down3-water-r1  2026-10-21 21:22:33  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.08 2.96 2.80
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      30.4% WindowServer; 16.4% Python; 11.1% coreaudiod; 7.1% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.37 3.04 2.83
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      27.7% WindowServer; 15.3% Dock; 13.1% coreaudiod; 5.6% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-down3-water-r2  2026-10-21 21:22:51  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.37 3.04 2.83
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      25.3% WindowServer; 15.6% Python; 11.1% coreaudiod; 5.7% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.96 2.97 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      28.6% WindowServer; 15.9% Dock; 12.6% coreaudiod; 7.9% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-down3-water-r3  2026-10-21 21:26:06  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.95 3.35 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      66.0% (pairedsyncd); 51.1% com.apple.MapKit.SnapshotService; 25.5% WindowServer; 17.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.74 3.34 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      28.9% WindowServer; 15.2% Dock; 14.0% coreaudiod; 7.6% Python
+  foreign:   none
+
+== player-live-det-far-nowater-r1  2026-10-21 21:21:03  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.75 2.91 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      25.1% Python; 14.5% Python; 11.6% claude; 9.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.12 2.98 2.79
+  locked:    Yes
+  lowpower:  0
+  gpu:       54
+  power:     Now drawing from 'AC Power'
+  busy:      30.2% WindowServer; 27.9% Python; 16.8% Dock; 14.2% coreaudiod
+  foreign:   none
+
+== player-live-det-far-nowater-r2  2026-10-21 21:24:19  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.06 2.96 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      54.4% pairedsyncd; 28.5% WindowServer; 16.3% Python; 14.5% Hive
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.33 3.03 2.84
+  locked:    Yes
+  lowpower:  0
+  gpu:       52
+  power:     Now drawing from 'AC Power'
+  busy:      27.8% WindowServer; 15.8% Dock; 13.7% coreaudiod; 9.1% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-far-nowater-r3  2026-10-21 21:24:37  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.33 3.03 2.84
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      24.1% WindowServer; 15.1% Python; 10.6% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.74 3.14 2.88
+  locked:    Yes
+  lowpower:  0
+  gpu:       53
+  power:     Now drawing from 'AC Power'
+  busy:      30.1% WindowServer; 15.4% Dock; 13.4% coreaudiod; 7.5% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-far-water-r1  2026-10-21 21:21:23  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.12 2.98 2.79
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      28.6% WindowServer; 16.3% Python; 11.1% coreaudiod; 7.3% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.12 2.98 2.80
+  locked:    Yes
+  lowpower:  0
+  gpu:       54
+  power:     Now drawing from 'AC Power'
+  busy:      87.9% clion; 26.8% WindowServer; 24.8% pairedsyncd; 15.4% coreaudiod
+  foreign:   none
+
+== player-live-det-far-water-r2  2026-10-21 21:24:02  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.02 2.95 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      25.4% WindowServer; 16.0% Python; 11.1% Python; 11.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.06 2.96 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       58
+  power:     Now drawing from 'AC Power'
+  busy:      42.2% WindowServer; 15.0% Dock; 12.5% coreaudiod; 10.8% loginwindow
+  foreign:   none
+
+== player-live-det-far-water-r3  2026-10-21 21:24:56  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.74 3.14 2.88
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      26.2% WindowServer; 14.3% Python; 10.9% coreaudiod; 7.1% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.92 3.21 2.91
+  locked:    Yes
+  lowpower:  0
+  gpu:       56
+  power:     Now drawing from 'AC Power'
+  busy:      30.8% WindowServer; 15.4% Dock; 15.3% pairedsyncd; 14.5% coreaudiod
+  foreign:   none
+
+== player-live-det-near3-nowater-r1  2026-10-21 21:21:40  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.12 2.98 2.80
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      117.1% clion; 19.5% Python; 19.1% WindowServer; 9.2% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.88 2.93 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       59
+  power:     Now drawing from 'AC Power'
+  busy:      28.8% WindowServer; 13.9% Dock; 13.2% coreaudiod; 11.9% runningboardd
+  foreign:   none
+
+== player-live-det-near3-nowater-r2  2026-10-21 21:23:44  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.45 2.84 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      26.5% WindowServer; 15.1% (mlhostd); 13.9% Python; 13.6% (proactiveeventtr)
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.02 2.95 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       55
+  power:     Now drawing from 'AC Power'
+  busy:      49.4% clion; 28.4% WindowServer; 16.6% Python; 15.2% Dock
+  foreign:   none
+
+== player-live-det-near3-nowater-r3  2026-10-21 21:25:12  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.85 3.21 2.91
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      30.8% WindowServer; 25.8% Hive; 14.2% Python; 12.4% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.12 3.30 2.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       57
+  power:     Now drawing from 'AC Power'
+  busy:      106.9% clion; 24.5% WindowServer; 13.1% Dock; 11.0% coreaudiod
+  foreign:   none
+
+== player-live-det-near3-water-r1  2026-10-21 21:22:01  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.80 2.91 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      44.5% Hive; 26.8% WindowServer; 18.4% Python; 12.4% MenuBarAgent
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.71 2.89 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       73
+  power:     Now drawing from 'AC Power'
+  busy:      46.8% WindowServer; 15.9% Dock; 14.8% coreaudiod; 12.0% loginwindow
+  foreign:   none
+
+== player-live-det-near3-water-r2  2026-10-21 21:23:27  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.67 2.90 2.79
+  locked:    Yes
+  lowpower:  0
+  gpu:       19
+  power:     Now drawing from 'AC Power'
+  busy:      26.2% WindowServer; 14.3% Python; 11.1% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.45 2.84 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       74
+  power:     Now drawing from 'AC Power'
+  busy:      30.9% WindowServer; 16.1% Dock; 14.3% coreaudiod; 8.3% WallpaperAerialsExtension
+  foreign:   none
+
+== player-live-det-near3-water-r3  2026-10-21 21:25:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.12 3.30 2.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      106.7% clion; 21.5% WindowServer; 14.0% Python; 9.8% MenuBarAgent
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.07 3.34 2.97
+  locked:    Yes
+  lowpower:  0
+  gpu:       74
+  power:     Now drawing from 'AC Power'
+  busy:      30.7% WindowServer; 14.1% Dock; 12.9% coreaudiod; 7.6% WallpaperAerialsExtension
+  foreign:   none
+
+== player-near3-nowater-r1  2026-10-21 20:12:34  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.39 3.22 3.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      107.3% clion; 17.6% Python; 8.7% coreaudiod; 2.6% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.48 3.31 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       76
+  power:     Now drawing from 'AC Power'
+  busy:      107.5% clion; 10.9% Dock; 9.9% coreaudiod; 4.3% WindowServer
+  foreign:   none
+
+== player-near3-nowater-r2  2026-10-21 20:14:49  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.28 3.27 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      106.7% clion; 15.9% Python; 8.8% coreaudiod; 3.8% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.85 3.18 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      118.7% clion; 11.8% coreaudiod; 10.7% Dock; 4.8% WindowServer
+  foreign:   none
+
+== player-near3-nowater-r3  2026-10-21 20:16:03  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.33 3.24 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      109.1% clion; 18.9% Python; 9.0% coreaudiod; 2.8% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.17 3.21 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      69.3% clion; 11.2% coreaudiod; 10.6% Dock; 7.4% WindowServer
+  foreign:   none
+
+== player-near3-water-r1  2026-10-21 20:12:49  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.48 3.31 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      109.2% clion; 17.8% Python; 16.5% Python; 9.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.64 3.40 3.69
+  locked:    Yes
+  lowpower:  0
+  gpu:       59
+  power:     Now drawing from 'AC Power'
+  busy:      108.6% clion; 12.9% Dock; 12.7% coreaudiod; 7.9% WindowServer
+  foreign:   none
+
+== player-near3-water-r2  2026-10-21 20:14:35  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.85 3.19 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.3% Python; 9.9% coreaudiod; 7.5% mdworker_shared; 7.5% mdworker_shared
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.28 3.27 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       61
+  power:     Now drawing from 'AC Power'
+  busy:      106.8% clion; 13.2% Dock; 13.1% coreaudiod; 4.9% WindowServer
+  foreign:   none
+
+== player-near3-water-r3  2026-10-21 20:16:17  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.17 3.21 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      114.2% clion; 17.2% Python; 9.1% coreaudiod; 1.1% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.05 3.18 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       61
+  power:     Now drawing from 'AC Power'
+  busy:      10.7% coreaudiod; 10.0% Dock; 8.2% WindowServer; 3.7% Python
+  foreign:   none
+
+== player-refl-down3-nowater-r1  2026-10-21 20:18:35  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.13 3.19 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.5% Python; 9.7% coreaudiod; 5.3% Stats; 4.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.86 3.11 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      27.4% Python; 15.6% Dock; 13.9% coreaudiod; 7.1% claude
+  foreign:   none
+
+== player-refl-down3-nowater-r2  2026-10-21 20:19:44  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.66 3.05 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      15.6% Python; 9.7% coreaudiod; 5.0% WindowServer; 4.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.37 2.95 3.36
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      13.8% Dock; 13.0% coreaudiod; 6.9% WindowServer; 5.0% Python
+  foreign:   none
+
+== player-refl-down3-nowater-r3  2026-10-21 20:22:09  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.10 2.94 3.30
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.8% Python; 9.6% coreaudiod; 4.8% clion; 2.5% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.77 2.88 3.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       70
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Dock; 12.3% coreaudiod; 8.3% WindowServer; 6.6% Python
+  foreign:   none
+
+== player-refl-down3-water-r1  2026-10-21 20:18:58  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.86 3.11 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.6% Python; 10.0% clion; 9.4% coreaudiod; 8.6% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.11 3.16 3.46
+  locked:    Yes
+  lowpower:  0
+  gpu:       62
+  power:     Now drawing from 'AC Power'
+  busy:      11.8% coreaudiod; 8.7% Dock; 7.2% WindowServer; 4.5% clion
+  foreign:   none
+
+== player-refl-down3-water-r2  2026-10-21 20:19:22  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.02 3.14 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Python; 9.3% coreaudiod; 4.9% clion; 3.5% SpringBoard
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.66 3.05 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       60
+  power:     Now drawing from 'AC Power'
+  busy:      12.0% coreaudiod; 11.1% Dock; 5.4% WindowServer; 3.6% clion
+  foreign:   none
+
+== player-refl-down3-water-r3  2026-10-21 20:22:32  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.71 2.86 3.26
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Hive; 11.5% Python; 9.9% coreaudiod; 3.9% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.34 2.77 3.22
+  locked:    Yes
+  lowpower:  0
+  gpu:       60
+  power:     Now drawing from 'AC Power'
+  busy:      11.8% Dock; 11.7% coreaudiod; 5.7% WindowServer; 4.9% Python
+  foreign:   none
+
+== player-refl-far-nowater-r1  2026-10-21 20:17:24  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.15 3.25 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      94.2% clion; 16.8% Python; 9.0% coreaudiod; 3.5% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.74 3.15 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      11.6% coreaudiod; 8.2% Dock; 7.8% WindowServer; 7.4% clion
+  foreign:   none
+
+== player-refl-far-nowater-r2  2026-10-21 20:20:46  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.62 2.91 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      25.4% (managedappdistri); 15.5% Python; 9.2% coreaudiod; 5.3% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.77 2.93 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       75
+  power:     Now drawing from 'AC Power'
+  busy:      14.0% Dock; 13.6% coreaudiod; 5.2% Python; 4.8% WindowServer
+  foreign:   none
+
+== player-refl-far-nowater-r3  2026-10-21 20:21:01  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.77 2.93 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      16.0% Python; 10.1% coreaudiod; 6.7% clion; 5.5% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.67 2.90 3.31
+  locked:    Yes
+  lowpower:  0
+  gpu:       74
+  power:     Now drawing from 'AC Power'
+  busy:      11.8% coreaudiod; 11.3% Dock; 9.9% WindowServer; 9.0% loginwindow
+  foreign:   none
+
+== player-refl-far-water-r1  2026-10-21 20:17:40  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.74 3.15 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.3% Python; 9.4% coreaudiod; 5.7% WindowServer; 5.4% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.79 3.14 3.48
+  locked:    Yes
+  lowpower:  0
+  gpu:       75
+  power:     Now drawing from 'AC Power'
+  busy:      13.7% Dock; 11.9% coreaudiod; 7.6% WindowServer; 7.3% clion
+  foreign:   none
+
+== player-refl-far-water-r2  2026-10-21 20:20:30  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.30 2.88 3.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      13.0% Python; 11.7% Python; 9.9% coreaudiod; 4.5% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.62 2.91 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       71
+  power:     Now drawing from 'AC Power'
+  busy:      17.2% launchd; 11.4% coreaudiod; 8.4% Dock; 4.8% clion
+  foreign:   none
+
+== player-refl-far-water-r3  2026-10-21 20:21:17  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.67 2.90 3.31
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.1% Python; 10.0% coreaudiod; 5.5% Python; 4.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.37 2.83 3.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       75
+  power:     Now drawing from 'AC Power'
+  busy:      11.9% coreaudiod; 11.1% Dock; 5.8% WindowServer; 5.3% clion
+  foreign:   none
+
+== player-refl-live-det-down3-nowater-r1  2026-10-21 21:27:37  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.32 3.25 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      26.2% WindowServer; 14.0% Python; 11.2% coreaudiod; 8.0% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.18 3.46 3.06
+  locked:    Yes
+  lowpower:  0
+  gpu:       67
+  power:     Now drawing from 'AC Power'
+  busy:      34.0% WindowServer; 16.1% Dock; 14.2% coreaudiod; 8.2% clion
+  foreign:   none
+
+== player-refl-live-det-down3-nowater-r2  2026-10-21 21:28:29  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 6.08 3.97 3.26
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      87.8% mobileassetd; 65.6% amsondevicestoraged; 52.0% mds; 50.8% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.62 3.97 3.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       65
+  power:     Now drawing from 'AC Power'
+  busy:      105.5% clion; 87.3% logd; 25.5% WindowServer; 12.7% Dock
+  foreign:   none
+
+== player-refl-live-det-down3-nowater-r3  2026-10-21 21:31:18  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.01 4.32 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       19
+  power:     Now drawing from 'AC Power'
+  busy:      26.6% WindowServer; 14.4% Python; 13.0% MenuBarAgent; 10.2% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.63 4.27 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       66
+  power:     Now drawing from 'AC Power'
+  busy:      29.7% WindowServer; 12.8% coreaudiod; 12.8% Dock; 8.3% WallpaperAerialsExtension
+  foreign:   none
+
+== player-refl-live-det-down3-water-r1  2026-10-21 21:27:55  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.18 3.46 3.06
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      25.5% WindowServer; 15.1% Python; 10.8% coreaudiod; 7.4% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.43 3.55 3.10
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      64.3% clion; 27.9% WindowServer; 15.0% coreaudiod; 14.2% Dock
+  foreign:   none
+
+== player-refl-live-det-down3-water-r2  2026-10-21 21:28:14  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.43 3.55 3.10
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      33.6% clion; 26.0% WindowServer; 16.5% Python; 10.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 6.08 3.97 3.26
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      106.9% clion; 89.1% mobileassetd; 59.4% amsengagementd; 50.7% mds
+  foreign:   none
+
+== player-refl-live-det-down3-water-r3  2026-10-21 21:31:36  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.63 4.27 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      23.5% WindowServer; 21.5% gh; 17.9% clion; 15.0% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.47 4.25 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      28.6% WindowServer; 15.0% Dock; 14.1% coreaudiod; 8.2% WallpaperAerialsExtension
+  foreign:   none
+
+== player-refl-live-det-far-nowater-r1  2026-10-21 21:26:24  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.60 3.31 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      94.9% clion; 22.2% WindowServer; 14.2% Python; 9.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.40 3.28 2.97
+  locked:    Yes
+  lowpower:  0
+  gpu:       55
+  power:     Now drawing from 'AC Power'
+  busy:      26.6% WindowServer; 15.3% coreaudiod; 15.2% Dock; 8.4% WallpaperAerialsExtension
+  foreign:   none
+
+== player-refl-live-det-far-nowater-r2  2026-10-21 21:29:47  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.08 4.11 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      26.0% WindowServer; 18.5% launchd; 13.3% Python; 11.1% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.11 4.17 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       57
+  power:     Now drawing from 'AC Power'
+  busy:      29.1% WindowServer; 15.7% Dock; 14.5% coreaudiod; 14.1% Hive
+  foreign:   none
+
+== player-refl-live-det-far-nowater-r3  2026-10-21 21:30:05  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.11 4.17 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      27.1% WindowServer; 13.1% Python; 10.5% coreaudiod; 7.3% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.72 4.13 3.40
+  locked:    Yes
+  lowpower:  0
+  gpu:       59
+  power:     Now drawing from 'AC Power'
+  busy:      30.9% WindowServer; 14.3% MenuBarAgent; 13.6% Dock; 13.4% coreaudiod
+  foreign:   none
+
+== player-refl-live-det-far-water-r1  2026-10-21 21:26:44  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.40 3.28 2.97
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      124.1% clion; 22.5% Python; 22.1% WindowServer; 8.2% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.34 3.28 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       60
+  power:     Now drawing from 'AC Power'
+  busy:      29.3% WindowServer; 20.8% diskimagesiod; 15.7% IntelligencePlatformComputeService; 12.9% coreaudiod
+  foreign:   none
+
+== player-refl-live-det-far-water-r2  2026-10-21 21:29:29  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.07 4.04 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      78.9% clion; 78.5% logd; 24.4% WindowServer; 16.6% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.08 4.11 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       61
+  power:     Now drawing from 'AC Power'
+  busy:      33.4% WindowServer; 16.6% Dock; 14.7% coreaudiod; 7.3% clion
+  foreign:   none
+
+== player-refl-live-det-far-water-r3  2026-10-21 21:30:25  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.72 4.13 3.40
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      24.6% WindowServer; 17.1% Python; 15.1% dasd; 14.8% Hive
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.42 4.10 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       62
+  power:     Now drawing from 'AC Power'
+  busy:      29.8% WindowServer; 15.0% Dock; 14.6% coreaudiod; 6.7% WallpaperAerialsExtension
+  foreign:   none
+
+== player-refl-live-det-near3-nowater-r1  2026-10-21 21:27:00  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.34 3.28 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      24.0% WindowServer; 16.1% Python; 10.5% coreaudiod; 8.2% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.82 3.17 2.94
+  locked:    Yes
+  lowpower:  0
+  gpu:       59
+  power:     Now drawing from 'AC Power'
+  busy:      44.3% WindowServer; 17.3% coreaudiod; 14.2% loginwindow; 12.7% Python
+  foreign:   none
+
+== player-refl-live-det-near3-nowater-r2  2026-10-21 21:29:09  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.38 4.04 3.31
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      94.2% logd; 27.6% WindowServer; 13.1% Python; 10.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.07 4.04 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       62
+  power:     Now drawing from 'AC Power'
+  busy:      56.7% logd; 29.4% WindowServer; 16.5% Dock; 14.4% coreaudiod
+  foreign:   none
+
+== player-refl-live-det-near3-nowater-r3  2026-10-21 21:30:42  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.42 4.10 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      127.2% clion; 20.0% WindowServer; 15.6% Python; 15.4% (shellcheck)
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.81 4.41 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       57
+  power:     Now drawing from 'AC Power'
+  busy:      31.9% WindowServer; 15.4% Dock; 13.5% coreaudiod; 7.2% WallpaperAerialsExtension
+  foreign:   none
+
+== player-refl-live-det-near3-water-r1  2026-10-21 21:27:22  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.92 3.18 2.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       26
+  power:     Now drawing from 'AC Power'
+  busy:      43.3% WindowServer; 15.9% Python; 10.6% loginwindow; 10.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.32 3.25 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       73
+  power:     Now drawing from 'AC Power'
+  busy:      28.1% WindowServer; 16.3% Dock; 13.7% Python; 12.8% coreaudiod
+  foreign:   none
+
+== player-refl-live-det-near3-water-r2  2026-10-21 21:28:51  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.62 3.97 3.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      83.0% logd; 42.1% clion; 30.9% launchd; 26.3% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.38 4.04 3.31
+  locked:    Yes
+  lowpower:  0
+  gpu:       72
+  power:     Now drawing from 'AC Power'
+  busy:      90.6% logd; 31.4% WindowServer; 15.3% Dock; 13.9% coreaudiod
+  foreign:   none
+
+== player-refl-live-det-near3-water-r3  2026-10-21 21:31:04  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.81 4.41 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       20
+  power:     Now drawing from 'AC Power'
+  busy:      27.1% WindowServer; 18.8% Python; 12.9% Python; 10.8% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.01 4.32 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       74
+  power:     Now drawing from 'AC Power'
+  busy:      30.0% WindowServer; 17.2% Dock; 15.1% coreaudiod; 8.1% clion
+  foreign:   none
+
+== player-refl-near3-nowater-r1  2026-10-21 20:17:55  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.79 3.14 3.48
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      21.5% Python; 12.9% Python; 9.5% coreaudiod; 4.9% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.14 3.20 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       74
+  power:     Now drawing from 'AC Power'
+  busy:      26.6% fileproviderd; 18.1% coreaudiod; 12.4% Python; 7.2% WindowServer
+  foreign:   none
+
+== player-refl-near3-nowater-r2  2026-10-21 20:20:15  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.20 2.89 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      39.6% git; 32.7% (managedappdistri); 17.8% clion; 13.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.30 2.88 3.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       75
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% MenuBarAgent; 12.5% Dock; 11.8% coreaudiod; 9.2% WindowServer
+  foreign:   none
+
+== player-refl-near3-nowater-r3  2026-10-21 20:21:32  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.37 2.83 3.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      22.6% pairedsyncd; 18.0% Python; 11.7% Python; 9.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.15 2.75 3.24
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      34.1% (mlhostd); 33.3% (proactiveeventtr); 13.1% Dock; 12.4% coreaudiod
+  foreign:   none
+
+== player-refl-near3-water-r1  2026-10-21 20:18:12  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.14 3.20 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      85.7% (pairedsyncd); 13.2% Python; 9.8% coreaudiod; 6.5% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.13 3.19 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       72
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Dock; 13.3% coreaudiod; 11.5% Python; 8.9% WindowServer
+  foreign:   none
+
+== player-refl-near3-water-r2  2026-10-21 20:20:00  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.37 2.95 3.36
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.1% Python; 9.2% coreaudiod; 7.9% claude; 3.3% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.20 2.89 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       74
+  power:     Now drawing from 'AC Power'
+  busy:      18.7% launchd; 14.7% coreaudiod; 12.5% Dock; 10.9% loginwindow
+  foreign:   none
+
+== player-refl-near3-water-r3  2026-10-21 20:21:47  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.15 2.75 3.24
+  locked:    Yes
+  lowpower:  0
+  gpu:       2
+  power:     Now drawing from 'AC Power'
+  busy:      21.5% gh; 17.0% Python; 10.2% coreaudiod; 4.6% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.10 2.94 3.30
+  locked:    Yes
+  lowpower:  0
+  gpu:       73
+  power:     Now drawing from 'AC Power'
+  busy:      16.5% Python; 15.2% Dock; 13.0% coreaudiod; 9.0% WindowServer
+  foreign:   none
+
+== settings-deferred-r1  2026-10-21 20:22:54  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.34 2.77 3.22
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.3% Python; 9.5% coreaudiod; 7.3% claude; 5.5% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.22 2.72 3.19
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      54.2% pairedsyncd; 51.5% git; 11.6% coreaudiod; 11.0% Dock
+  foreign:   none
+
+== settings-deferred-r2  2026-10-21 20:26:53  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.57 2.59 3.01
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Python; 14.3% Python; 9.6% coreaudiod; 6.4% airportd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.37 2.55 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       41
+  power:     Now drawing from 'AC Power'
+  busy:      15.0% Dock; 13.3% coreaudiod; 13.2% Python; 10.7% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+
+== settings-deferred-r3  2026-10-21 20:27:14  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.37 2.55 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.9% Python; 9.5% coreaudiod; 4.9% WindowServer; 3.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.64 2.61 2.99
+  locked:    Yes
+  lowpower:  0
+  gpu:       39
+  power:     Now drawing from 'AC Power'
+  busy:      15.2% Hive; 13.3% Dock; 13.2% coreaudiod; 10.0% Python
+  foreign:   none
+
+== settings-gi-deferred-r1  2026-10-21 20:23:38  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.20 2.68 3.16
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.8% Python; 9.7% coreaudiod; 4.9% Python; 4.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.99 2.60 3.12
+  locked:    Yes
+  lowpower:  0
+  gpu:       50
+  power:     Now drawing from 'AC Power'
+  busy:      11.8% coreaudiod; 10.2% Dock; 6.0% clion; 5.3% WindowServer
+  foreign:   none
+
+== settings-gi-deferred-r2  2026-10-21 20:26:10  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.40 2.54 3.01
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.7% Python; 9.7% coreaudiod; 6.8% clion; 4.9% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.86 2.64 3.04
+  locked:    Yes
+  lowpower:  0
+  gpu:       49
+  power:     Now drawing from 'AC Power'
+  busy:      51.7% Hive; 11.8% coreaudiod; 9.5% Dock; 6.7% WindowServer
+  foreign:   none
+
+== settings-gi-deferred-r3  2026-10-21 20:27:57  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.57 2.59 2.98
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      15.9% Python; 9.6% coreaudiod; 9.3% claude; 5.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.38 2.55 2.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       53
+  power:     Now drawing from 'AC Power'
+  busy:      47.2% Hive; 11.9% coreaudiod; 11.9% Dock; 7.0% WindowServer
+  foreign:   none
+
+== settings-gi-r1  2026-10-21 20:23:16  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.36 2.74 3.19
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      13.2% Python; 9.9% coreaudiod; 5.0% clion; 3.6% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.20 2.68 3.16
+  locked:    Yes
+  lowpower:  0
+  gpu:       44
+  power:     Now drawing from 'AC Power'
+  busy:      13.0% Dock; 12.4% coreaudiod; 5.1% WindowServer; 2.9% clion
+  foreign:   none
+
+== settings-gi-r2  2026-10-21 20:26:32  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.79 2.63 3.03
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      13.8% Python; 9.8% coreaudiod; 5.6% Stats; 4.6% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.57 2.59 3.01
+  locked:    Yes
+  lowpower:  0
+  gpu:       49
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Dock; 12.1% coreaudiod; 10.6% Hive; 6.0% WindowServer
+  foreign:   none
+
+== settings-gi-r3  2026-10-21 20:27:36  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.64 2.61 2.99
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.1% Python; 9.9% coreaudiod; 6.1% MenuBarAgent; 5.2% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.44 2.57 2.97
+  locked:    Yes
+  lowpower:  0
+  gpu:       50
+  power:     Now drawing from 'AC Power'
+  busy:      13.3% Dock; 12.6% coreaudiod; 8.2% WindowServer; 6.7% claude
+  foreign:   none
+
+== settings-ssao-off-r1  2026-10-21 20:24:43  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.95 2.52 3.06
+  locked:    Yes
+  lowpower:  0
+  gpu:       0
+  power:     Now drawing from 'AC Power'
+  busy:      118.8% clion; 16.9% Python; 9.4% coreaudiod; 4.4% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.79 2.46 3.03
+  locked:    Yes
+  lowpower:  0
+  gpu:       38
+  power:     Now drawing from 'AC Power'
+  busy:      13.8% coreaudiod; 13.8% Dock; 11.9% claude; 6.9% clion
+  foreign:   none
+
+== settings-ssao-off-r2  2026-10-21 20:25:04  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.79 2.46 3.03
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.2% Python; 9.7% coreaudiod; 3.9% clion; 1.7% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.18 2.51 3.03
+  locked:    Yes
+  lowpower:  0
+  gpu:       37
+  power:     Now drawing from 'AC Power'
+  busy:      14.8% Dock; 13.5% coreaudiod; 8.6% WindowServer; 6.2% clion
+  foreign:   none
+
+== settings-ssao-off-r3  2026-10-21 20:29:03  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.09 2.47 2.90
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Python; 9.7% coreaudiod; 6.0% clion; 2.7% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.92 2.40 2.87
+  locked:    Yes
+  lowpower:  0
+  gpu:       37
+  power:     Now drawing from 'AC Power'
+  busy:      11.5% Dock; 11.3% coreaudiod; 8.3% WindowServer; 7.3% Hive
+  foreign:   none
+
+== settings-ssr-deferred-r1  2026-10-21 20:24:00  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 1.99 2.60 3.12
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      25.2% gh; 17.1% Python; 9.6% coreaudiod; 8.5% Stats
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.27 2.62 3.11
+  locked:    Yes
+  lowpower:  0
+  gpu:       52
+  power:     Now drawing from 'AC Power'
+  busy:      51.1% launchd; 13.9% coreaudiod; 13.6% Dock; 11.1% loginwindow
+  foreign:   none
+
+== settings-ssr-deferred-r2  2026-10-21 20:25:48  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.47 2.56 3.03
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      12.9% Python; 9.9% coreaudiod; 5.8% Python; 4.6% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.40 2.54 3.01
+  locked:    Yes
+  lowpower:  0
+  gpu:       58
+  power:     Now drawing from 'AC Power'
+  busy:      14.3% Dock; 13.0% coreaudiod; 6.9% WindowServer; 4.7% clion
+  foreign:   none
+
+== settings-ssr-deferred-r3  2026-10-21 20:28:20  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.38 2.55 2.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      19.1% Python; 9.7% coreaudiod; 6.6% claude; 4.6% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.48 2.56 2.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       51
+  power:     Now drawing from 'AC Power'
+  busy:      14.0% Dock; 13.1% coreaudiod; 7.2% WindowServer; 3.7% Python
+  foreign:   none
+
+== settings-taa-r1  2026-10-21 20:24:21  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.27 2.62 3.11
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.5% Python; 9.8% coreaudiod; 9.3% loginwindow; 6.1% MenuBarAgent
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.95 2.52 3.06
+  locked:    Yes
+  lowpower:  0
+  gpu:       45
+  power:     Now drawing from 'AC Power'
+  busy:      85.8% clion; 14.6% coreaudiod; 11.8% Dock; 6.6% WindowServer
+  foreign:   none
+
+== settings-taa-r2  2026-10-21 20:25:26  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.25 2.51 3.03
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      14.4% Python; 9.4% coreaudiod; 4.5% clion; 3.8% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.47 2.56 3.03
+  locked:    Yes
+  lowpower:  0
+  gpu:       46
+  power:     Now drawing from 'AC Power'
+  busy:      12.8% Dock; 12.0% coreaudiod; 6.5% WindowServer; 5.8% Claude
+  foreign:   none
+
+== settings-taa-r3  2026-10-21 20:28:41  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.48 2.56 2.95
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      14.5% Python; 10.0% coreaudiod; 5.2% Python; 4.7% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.19 2.49 2.91
+  locked:    Yes
+  lowpower:  0
+  gpu:       48
+  power:     Now drawing from 'AC Power'
+  busy:      14.2% Dock; 13.3% coreaudiod; 7.1% WindowServer; 3.8% clion
+  foreign:   none
+
+== variants-live-det-noasset-r1  2026-10-21 21:46:04  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant noasset
+before:
+  uptime:    load averages: 3.71 3.77 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      43.4% Python; 20.3% WindowServer; 12.1% Python; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.63 3.75 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       59
+  power:     Now drawing from 'AC Power'
+  busy:      77.5% clion; 23.8% WindowServer; 14.7% Dock; 11.7% coreaudiod
+  foreign:   none
+
+== variants-live-det-noasset-r2  2026-10-21 21:49:46  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant noasset
+before:
+  uptime:    load averages: 3.27 3.56 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      19.0% WindowServer; 16.3% Python; 9.6% coreaudiod; 8.3% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.46 3.59 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       60
+  power:     Now drawing from 'AC Power'
+  busy:      110.0% clion; 19.5% WindowServer; 12.7% Dock; 12.5% coreaudiod
+  foreign:   none
+
+== variants-live-det-noasset-r3  2026-10-21 21:50:53  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant noasset
+before:
+  uptime:    load averages: 4.05 3.74 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       18
+  power:     Now drawing from 'AC Power'
+  busy:      20.6% WindowServer; 14.9% Hive; 14.2% Python; 10.7% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.41 3.83 3.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       62
+  power:     Now drawing from 'AC Power'
+  busy:      27.2% WindowServer; 15.8% Dock; 13.9% coreaudiod; 7.6% MenuBarAgent
+  foreign:   none
+
+== variants-live-det-nocaus-r1  2026-10-21 21:47:03  attempt 1
+editor md5 2e30aefadb62  water md5 53f9e4600491  variant nocaus
+before:
+  uptime:    load averages: 3.51 3.68 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      32.1% dasd; 23.1% WindowServer; 22.7% clion; 12.7% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.27 3.62 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      64.1% clion; 40.9% dasd; 20.0% WindowServer; 16.2% Dock
+  foreign:   none
+
+== variants-live-det-nocaus-r2  2026-10-21 21:48:50  attempt 1
+editor md5 2e30aefadb62  water md5 53f9e4600491  variant nocaus
+before:
+  uptime:    load averages: 3.60 3.66 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      23.6% WindowServer; 13.9% Python; 13.7% Python; 10.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.72 3.69 3.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      26.4% WindowServer; 15.3% Dock; 13.8% coreaudiod; 7.5% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-nocaus-r3  2026-10-21 21:51:54  attempt 1
+editor md5 2e30aefadb62  water md5 53f9e4600491  variant nocaus
+before:
+  uptime:    load averages: 3.67 3.72 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      24.9% WindowServer; 11.3% Python; 10.8% coreaudiod; 6.5% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.67 3.71 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      23.3% WindowServer; 15.7% Dock; 13.8% coreaudiod; 6.8% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-nochop-r1  2026-10-21 21:46:18  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 3.63 3.75 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      20.0% WindowServer; 15.4% Python; 10.4% coreaudiod; 7.4% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.54 3.72 3.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      107.7% clion; 21.8% WindowServer; 14.3% Dock; 11.4% coreaudiod
+  foreign:   none
+
+== variants-live-det-nochop-r2  2026-10-21 21:49:34  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 3.24 3.57 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      19.9% WindowServer; 12.7% Python; 10.8% coreaudiod; 10.1% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.27 3.56 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       76
+  power:     Now drawing from 'AC Power'
+  busy:      92.0% clion; 74.5% (pairedsyncd); 21.4% WindowServer; 14.8% Dock
+  foreign:   none
+
+== variants-live-det-nochop-r3  2026-10-21 21:51:08  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 4.29 3.82 3.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       18
+  power:     Now drawing from 'AC Power'
+  busy:      24.3% WindowServer; 12.7% Python; 10.6% coreaudiod; 7.8% Hive
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.16 3.81 3.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      22.9% WindowServer; 16.5% Dock; 14.5% coreaudiod; 12.3% clion
+  foreign:   none
+
+== variants-live-det-nofine-r1  2026-10-21 21:46:33  attempt 1
+editor md5 2e30aefadb62  water md5 61cb2b8df6b8  variant nofine
+before:
+  uptime:    load averages: 3.34 3.68 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      24.6% WindowServer; 14.9% clion; 14.7% Python; 9.7% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.31 3.66 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      108.3% clion; 35.9% pairedsyncd; 34.2% dasd; 19.9% WindowServer
+  foreign:   none
+
+== variants-live-det-nofine-r2  2026-10-21 21:49:19  attempt 1
+editor md5 2e30aefadb62  water md5 61cb2b8df6b8  variant nofine
+before:
+  uptime:    load averages: 3.42 3.62 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      20.9% WindowServer; 12.4% Python; 10.8% coreaudiod; 7.9% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.24 3.57 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      33.2% clion; 22.9% WindowServer; 15.0% coreaudiod; 13.8% Dock
+  foreign:   none
+
+== variants-live-det-nofine-r3  2026-10-21 21:51:24  attempt 1
+editor md5 2e30aefadb62  water md5 61cb2b8df6b8  variant nofine
+before:
+  uptime:    load averages: 3.98 3.78 3.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      82.8% (pairedsyncd); 23.0% WindowServer; 12.9% Python; 11.2% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.98 3.78 3.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      24.5% WindowServer; 14.7% Dock; 13.9% coreaudiod; 7.5% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-nofiner-r1  2026-10-21 21:46:48  attempt 1
+editor md5 2e30aefadb62  water md5 d8328f3f33d6  variant nofiner
+before:
+  uptime:    load averages: 3.36 3.66 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      32.8% dasd; 32.5% clion; 19.3% WindowServer; 13.4% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.55 3.69 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      106.4% clion; 32.1% dasd; 21.0% WindowServer; 15.3% Dock
+  foreign:   none
+
+== variants-live-det-nofiner-r2  2026-10-21 21:49:04  attempt 1
+editor md5 2e30aefadb62  water md5 d8328f3f33d6  variant nofiner
+before:
+  uptime:    load averages: 3.72 3.69 3.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      47.8% NewsToday2; 36.9% pairedsyncd; 21.8% WindowServer; 17.6% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.42 3.62 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      24.3% WindowServer; 15.9% coreaudiod; 14.2% clion; 13.3% Dock
+  foreign:   none
+
+== variants-live-det-nofiner-r3  2026-10-21 21:51:39  attempt 1
+editor md5 2e30aefadb62  water md5 d8328f3f33d6  variant nofiner
+before:
+  uptime:    load averages: 3.74 3.74 3.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      20.4% WindowServer; 14.1% Python; 10.9% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.67 3.72 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      24.5% WindowServer; 19.8% Hive; 16.1% MenuBarAgent; 15.4% Dock
+  foreign:   none
+
+== variants-live-det-nofoam-r1  2026-10-21 21:47:19  attempt 1
+editor md5 2e30aefadb62  water md5 3288ed9496ee  variant nofoam
+before:
+  uptime:    load averages: 3.25 3.61 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      42.3% dasd; 23.5% WindowServer; 16.0% Python; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.20 3.58 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      41.3% dasd; 27.8% (shellcheck); 25.2% WindowServer; 24.8% clion
+  foreign:   none
+
+== variants-live-det-nofoam-r2  2026-10-21 21:48:35  attempt 1
+editor md5 2e30aefadb62  water md5 3288ed9496ee  variant nofoam
+before:
+  uptime:    load averages: 3.65 3.67 3.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.8% WindowServer; 12.7% Python; 10.9% coreaudiod; 7.2% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.60 3.66 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      23.8% WindowServer; 16.1% Dock; 14.4% coreaudiod; 7.0% clion
+  foreign:   none
+
+== variants-live-det-nofoam-r3  2026-10-21 21:52:09  attempt 1
+editor md5 2e30aefadb62  water md5 3288ed9496ee  variant nofoam
+before:
+  uptime:    load averages: 3.67 3.71 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      20.6% WindowServer; 15.3% Python; 11.0% coreaudiod; 8.5% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.46 3.66 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      23.7% WindowServer; 12.8% coreaudiod; 12.0% Dock; 8.0% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-noshore-r1  2026-10-21 21:47:34  attempt 1
+editor md5 2e30aefadb62  water md5 97ce8f4bb31f  variant noshore
+before:
+  uptime:    load averages: 3.20 3.58 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      41.0% dasd; 20.2% WindowServer; 16.3% Python; 11.1% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.99 3.73 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      46.4% dasd; 24.0% WindowServer; 15.5% Dock; 13.6% clion
+  foreign:   none
+
+== variants-live-det-noshore-r2  2026-10-21 21:48:20  attempt 1
+editor md5 2e30aefadb62  water md5 97ce8f4bb31f  variant noshore
+before:
+  uptime:    load averages: 3.47 3.64 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       20
+  power:     Now drawing from 'AC Power'
+  busy:      33.3% dasd; 22.8% WindowServer; 13.9% Python; 11.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.65 3.67 3.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      26.7% WindowServer; 16.1% coreaudiod; 14.8% Dock; 11.1% Python
+  foreign:   none
+
+== variants-live-det-noshore-r3  2026-10-21 21:52:25  attempt 1
+editor md5 2e30aefadb62  water md5 97ce8f4bb31f  variant noshore
+before:
+  uptime:    load averages: 3.46 3.66 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      19.7% WindowServer; 11.8% Python; 11.0% coreaudiod; 8.1% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.14 3.58 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      24.0% WindowServer; 14.6% Dock; 13.8% coreaudiod; 9.1% runningboardd
+  foreign:   none
+
+== variants-live-det-nounder-r1  2026-10-21 21:47:50  attempt 1
+editor md5 2e30aefadb62  water md5 e1e35f60d8e2  variant nounder
+before:
+  uptime:    load averages: 3.99 3.73 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      52.8% dasd; 21.5% WindowServer; 13.3% Python; 11.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.82 3.71 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      33.1% dasd; 25.7% WindowServer; 15.2% Dock; 13.4% coreaudiod
+  foreign:   none
+
+== variants-live-det-nounder-r2  2026-10-21 21:48:05  attempt 1
+editor md5 2e30aefadb62  water md5 e1e35f60d8e2  variant nounder
+before:
+  uptime:    load averages: 3.82 3.71 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      34.0% dasd; 25.0% WindowServer; 12.3% Python; 11.2% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.47 3.64 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      30.4% dasd; 24.7% WindowServer; 16.8% Hive; 16.6% Dock
+  foreign:   none
+
+== variants-live-det-nounder-r3  2026-10-21 21:52:39  attempt 1
+editor md5 2e30aefadb62  water md5 e1e35f60d8e2  variant nounder
+before:
+  uptime:    load averages: 3.14 3.58 3.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      25.0% WindowServer; 22.2% airportd; 15.0% Python; 9.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.88 3.50 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      28.6% WindowServer; 16.9% Dock; 14.5% coreaudiod; 8.0% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-nowater-r1  2026-10-21 21:45:36  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.81 3.61 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      13.3% Python; 9.9% coreaudiod; 6.4% Python; 4.9% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.22 3.68 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       65
+  power:     Now drawing from 'AC Power'
+  busy:      39.4% (managedappdistri); 26.6% WindowServer; 22.8% (facetimemessages); 15.4% coreaudiod
+  foreign:   none
+
+== variants-live-det-nowater-r2  2026-10-21 21:50:13  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.13 3.73 3.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       18
+  power:     Now drawing from 'AC Power'
+  busy:      110.5% clion; 36.4% WindowServer; 18.9% Python; 10.1% loginwindow
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.96 3.70 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       64
+  power:     Now drawing from 'AC Power'
+  busy:      28.9% WindowServer; 13.5% Dock; 13.0% coreaudiod; 6.8% claude
+  foreign:   none
+
+== variants-live-det-nowater-r3  2026-10-21 21:50:26  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.04 3.72 3.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      96.7% clion; 18.9% WindowServer; 18.9% Python; 9.1% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.64 3.65 3.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       63
+  power:     Now drawing from 'AC Power'
+  busy:      27.4% WindowServer; 16.9% Dock; 15.7% coreaudiod; 6.6% clion
+  foreign:   none
+
+== variants-live-det-s2-noasset-r1  2026-10-21 21:10:42  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant noasset
+before:
+  uptime:    load averages: 2.69 2.54 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.0% WindowServer; 13.2% Python; 10.9% coreaudiod; 7.5% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.99 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      21.1% WindowServer; 16.2% clion; 15.3% Dock; 14.2% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-noasset-r2  2026-10-21 21:15:48  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant noasset
+before:
+  uptime:    load averages: 3.13 2.73 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       21
+  power:     Now drawing from 'AC Power'
+  busy:      23.7% WindowServer; 14.1% Python; 10.9% coreaudiod; 6.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.12 2.74 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      29.2% WindowServer; 16.4% Dock; 15.2% coreaudiod; 7.2% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-noasset-r3  2026-10-21 21:17:50  attempt 1
+editor md5 2e30aefadb62  water md5 missing  variant noasset
+before:
+  uptime:    load averages: 3.28 3.06 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       6
+  power:     Now drawing from 'AC Power'
+  busy:      12.3% Python; 9.6% coreaudiod; 4.7% clion; 3.9% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.37 3.09 2.80
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      24.7% WindowServer; 16.6% Dock; 14.1% coreaudiod; 9.1% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nocaus-r1  2026-10-21 21:11:54  attempt 1
+editor md5 2e30aefadb62  water md5 53f9e4600491  variant nocaus
+before:
+  uptime:    load averages: 2.77 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      20.4% WindowServer; 13.5% Python; 10.8% coreaudiod; 8.5% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.28 2.73 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      23.1% WindowServer; 16.1% Dock; 14.9% coreaudiod; 8.1% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nocaus-r2  2026-10-21 21:14:40  attempt 1
+editor md5 2e30aefadb62  water md5 53f9e4600491  variant nocaus
+before:
+  uptime:    load averages: 1.99 2.43 2.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      113.0% clion; 22.4% WindowServer; 18.1% Python; 9.1% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.86 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      27.0% WindowServer; 16.3% Dock; 15.0% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nocaus-r3  2026-10-21 21:19:00  attempt 1
+editor md5 2e30aefadb62  water md5 53f9e4600491  variant nocaus
+before:
+  uptime:    load averages: 3.38 3.08 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      103.5% clion; 20.1% WindowServer; 14.4% Python; 9.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.20 3.06 2.80
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      42.2% WindowServer; 13.7% Dock; 12.9% coreaudiod; 11.7% loginwindow
+  foreign:   none
+
+== variants-live-det-s2-nochop-r1  2026-10-21 21:10:59  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 2.99 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      23.4% WindowServer; 15.6% Python; 10.7% coreaudiod; 8.8% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.91 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      24.0% WindowServer; 15.9% Dock; 14.1% coreaudiod; 7.3% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nochop-r2  2026-10-21 21:15:33  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 3.03 2.68 2.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      25.0% WindowServer; 12.5% Python; 10.7% coreaudiod; 8.0% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.13 2.73 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      75.2% pairedsyncd; 28.8% WindowServer; 16.7% Dock; 14.8% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-nochop-r3  2026-10-21 21:18:06  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 3.37 3.09 2.80
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      22.7% WindowServer; 12.0% Python; 10.9% coreaudiod; 8.5% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.93 3.00 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      23.3% WindowServer; 13.4% Dock; 12.9% coreaudiod; 9.2% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nofine-r1  2026-10-21 21:11:16  attempt 1
+editor md5 2e30aefadb62  water md5 61cb2b8df6b8  variant nofine
+before:
+  uptime:    load averages: 3.16 2.67 2.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      42.2% launchd; 22.2% WindowServer; 13.7% Python; 10.6% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.85 2.62 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      23.8% WindowServer; 14.9% Dock; 14.4% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nofine-r2  2026-10-21 21:15:17  attempt 1
+editor md5 2e30aefadb62  water md5 61cb2b8df6b8  variant nofine
+before:
+  uptime:    load averages: 2.89 2.63 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       21
+  power:     Now drawing from 'AC Power'
+  busy:      37.1% WindowServer; 19.8% Python; 12.8% launchd; 9.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.03 2.68 2.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      27.3% WindowServer; 14.5% Dock; 13.3% coreaudiod; 10.6% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nofine-r3  2026-10-21 21:18:23  attempt 1
+editor md5 2e30aefadb62  water md5 61cb2b8df6b8  variant nofine
+before:
+  uptime:    load averages: 2.93 3.00 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      17.6% Python; 15.1% airportd; 11.2% Hive; 10.8% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.92 3.00 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      40.8% clion; 26.1% WindowServer; 19.6% Python; 14.9% Dock
+  foreign:   none
+
+== variants-live-det-s2-nofiner-r1  2026-10-21 21:11:35  attempt 1
+editor md5 2e30aefadb62  water md5 d8328f3f33d6  variant nofiner
+before:
+  uptime:    load averages: 2.85 2.62 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      18.9% WindowServer; 17.7% Python; 12.7% Python; 11.2% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.77 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      25.0% WindowServer; 14.3% Dock; 12.8% coreaudiod; 8.2% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nofiner-r2  2026-10-21 21:14:59  attempt 1
+editor md5 2e30aefadb62  water md5 d8328f3f33d6  variant nofiner
+before:
+  uptime:    load averages: 2.86 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      27.3% WindowServer; 12.3% Python; 10.3% coreaudiod; 8.0% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.80 2.61 2.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      26.3% WindowServer; 14.2% Dock; 13.8% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-nofiner-r3  2026-10-21 21:18:42  attempt 1
+editor md5 2e30aefadb62  water md5 d8328f3f33d6  variant nofiner
+before:
+  uptime:    load averages: 2.92 3.00 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      23.7% WindowServer; 18.0% Python; 10.1% coreaudiod; 9.2% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.38 3.08 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      105.9% clion; 21.4% WindowServer; 12.5% Dock; 11.5% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-nofoam-r1  2026-10-21 21:12:12  attempt 1
+editor md5 2e30aefadb62  water md5 3288ed9496ee  variant nofoam
+before:
+  uptime:    load averages: 3.50 2.78 2.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      19.4% WindowServer; 14.0% Python; 10.8% Python; 10.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.08 2.73 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      50.9% clion; 21.8% WindowServer; 14.4% Dock; 14.1% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-nofoam-r2  2026-10-21 21:14:22  attempt 1
+editor md5 2e30aefadb62  water md5 3288ed9496ee  variant nofoam
+before:
+  uptime:    load averages: 2.28 2.50 2.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      23.8% WindowServer; 16.0% Python; 10.4% coreaudiod; 9.8% MenuBarAgent
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 1.99 2.43 2.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      92.2% clion; 21.2% WindowServer; 13.6% Dock; 12.2% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-nofoam-r3  2026-10-21 21:19:19  attempt 1
+editor md5 2e30aefadb62  water md5 3288ed9496ee  variant nofoam
+before:
+  uptime:    load averages: 3.20 3.06 2.80
+  locked:    Yes
+  lowpower:  0
+  gpu:       22
+  power:     Now drawing from 'AC Power'
+  busy:      41.3% WindowServer; 15.0% Python; 10.3% loginwindow; 10.2% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.01 3.03 2.79
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      28.6% WindowServer; 14.7% Dock; 13.8% coreaudiod; 10.8% Python
+  foreign:   none
+
+== variants-live-det-s2-noshore-r1  2026-10-21 21:12:32  attempt 1
+editor md5 2e30aefadb62  water md5 97ce8f4bb31f  variant noshore
+before:
+  uptime:    load averages: 3.08 2.73 2.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      18.6% WindowServer; 13.6% Python; 10.2% coreaudiod; 8.1% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.49 2.61 2.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      60.3% pairedsyncd; 26.3% WindowServer; 12.6% coreaudiod; 12.4% Dock
+  foreign:   none
+
+== variants-live-det-s2-noshore-r2  2026-10-21 21:14:04  attempt 1
+editor md5 2e30aefadb62  water md5 97ce8f4bb31f  variant noshore
+before:
+  uptime:    load averages: 2.42 2.54 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      19.8% WindowServer; 12.1% Python; 10.6% coreaudiod; 7.8% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.39 2.53 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      24.1% WindowServer; 15.1% Dock; 13.3% coreaudiod; 6.7% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-noshore-r3  2026-10-21 21:19:39  attempt 1
+editor md5 2e30aefadb62  water md5 97ce8f4bb31f  variant noshore
+before:
+  uptime:    load averages: 2.85 2.99 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      27.3% WindowServer; 15.2% Python; 14.7% Hive; 14.1% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.64 2.94 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      25.6% WindowServer; 16.4% coreaudiod; 14.1% Dock; 9.2% Stats
+  foreign:   none
+
+== variants-live-det-s2-nounder-r1  2026-10-21 21:12:51  attempt 1
+editor md5 2e30aefadb62  water md5 e1e35f60d8e2  variant nounder
+before:
+  uptime:    load averages: 2.49 2.61 2.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      20.1% WindowServer; 16.0% Python; 10.8% coreaudiod; 6.8% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.35 2.57 2.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      46.7% Hive; 24.3% WindowServer; 16.1% Dock; 14.5% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-nounder-r2  2026-10-21 21:13:43  attempt 1
+editor md5 2e30aefadb62  water md5 e1e35f60d8e2  variant nounder
+before:
+  uptime:    load averages: 2.28 2.52 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       11
+  power:     Now drawing from 'AC Power'
+  busy:      103.7% clion; 21.0% Python; 14.7% WindowServer; 8.8% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.37 2.53 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      25.2% WindowServer; 15.6% Dock; 14.6% coreaudiod; 8.8% Python
+  foreign:   none
+
+== variants-live-det-s2-nounder-r3  2026-10-21 21:19:57  attempt 1
+editor md5 2e30aefadb62  water md5 e1e35f60d8e2  variant nounder
+before:
+  uptime:    load averages: 2.64 2.94 2.77
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      24.6% WindowServer; 15.2% Python; 12.3% Python; 10.6% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.57 2.91 2.76
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      108.6% clion; 24.3% WindowServer; 14.2% coreaudiod; 13.7% Dock
+  foreign:   none
+
+== variants-live-det-s2-nowater-r1  2026-10-21 21:09:48  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.09 2.43 2.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       4
+  power:     Now drawing from 'AC Power'
+  busy:      16.0% Python; 13.6% Python; 10.0% coreaudiod; 4.7% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.16 2.44 2.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      29.1% WindowServer; 16.4% Dock; 13.7% coreaudiod; 13.1% Python
+  foreign:   none
+
+== variants-live-det-s2-nowater-r2  2026-10-21 21:16:41  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.70 2.94 2.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      23.8% WindowServer; 15.6% Hive; 14.2% Python; 10.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.79 3.01 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      107.8% clion; 25.8% WindowServer; 13.0% Dock; 11.9% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-nowater-r3  2026-10-21 21:16:56  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.79 3.01 2.74
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      106.3% clion; 37.7% (facetimemessages); 20.2% Python; 19.5% WindowServer
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.36 3.18 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      107.2% clion; 22.5% WindowServer; 13.2% Dock; 13.0% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-regen-r1  2026-10-21 21:10:27  attempt 1
+editor md5 2e30aefadb62  water md5 add37f179edc  variant regen
+before:
+  uptime:    load averages: 2.36 2.47 2.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      26.1% claude; 21.8% WindowServer; 13.9% Python; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.69 2.54 2.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      22.5% WindowServer; 15.4% Dock; 13.2% coreaudiod; 9.0% clion
+  foreign:   none
+
+== variants-live-det-s2-regen-r2  2026-10-21 21:16:08  attempt 1
+editor md5 2e30aefadb62  water md5 add37f179edc  variant regen
+before:
+  uptime:    load averages: 3.12 2.74 2.64
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      27.4% WindowServer; 13.6% Python; 12.2% Python; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.37 2.82 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      156.0% clion; 22.9% WindowServer; 12.4% Dock; 11.0% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-regen-r3  2026-10-21 21:17:35  attempt 1
+editor md5 2e30aefadb62  water md5 add37f179edc  variant regen
+before:
+  uptime:    load averages: 3.91 3.15 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      24.9% WindowServer; 14.1% Python; 10.7% coreaudiod; 7.5% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.28 3.06 2.78
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      28.9% WindowServer; 17.7% MenuBarAgent; 13.2% Dock; 12.5% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-shipped-r1  2026-10-21 21:10:07  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.47 2.50 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      51.4% diagnosticd; 39.8% diagnosticd; 27.8% com.apple.MapKit.SnapshotService; 27.3% locationd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.36 2.47 2.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      25.9% WindowServer; 14.6% Dock; 13.4% coreaudiod; 6.4% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-shipped-r2  2026-10-21 21:16:27  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.37 2.82 2.67
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      115.1% clion; 21.4% WindowServer; 18.9% Python; 9.2% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.70 2.94 2.71
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      45.4% Hive; 29.6% WindowServer; 14.4% Dock; 12.4% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-shipped-r3  2026-10-21 21:17:16  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.36 3.18 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      106.4% clion; 23.0% WindowServer; 19.5% Python; 12.6% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.91 3.15 2.81
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      27.6% WindowServer; 14.4% Dock; 12.2% coreaudiod; 8.0% WallpaperAerialsExtension
+  foreign:   none
+
+== variants-live-det-s2-trivial-r1  2026-10-21 21:13:08  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 2.35 2.57 2.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      89.4% clion; 18.4% Python; 17.5% WindowServer; 8.8% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.18 2.53 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      24.7% WindowServer; 15.2% Dock; 13.0% Python; 11.7% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-trivial-r2  2026-10-21 21:13:25  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 2.18 2.53 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      21.2% WindowServer; 19.5% Python; 14.5% Hive; 9.8% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.28 2.52 2.56
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      106.5% clion; 73.0% (pairedsyncd); 18.3% WindowServer; 13.3% coreaudiod
+  foreign:   none
+
+== variants-live-det-s2-trivial-r3  2026-10-21 21:20:14  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 2.57 2.91 2.76
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      106.7% clion; 78.1% (pairedsyncd); 23.0% WindowServer; 14.2% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.67 2.92 2.76
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      93.6% clion; 26.3% WindowServer; 16.0% Dock; 14.2% coreaudiod
+  foreign:   none
+
+== variants-live-det-shipped-r1  2026-10-21 21:45:51  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.22 3.68 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      22.4% WindowServer; 19.0% Python; 12.8% Python; 11.0% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.71 3.77 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      26.3% WindowServer; 18.8% clion; 15.5% coreaudiod; 14.9% Dock
+  foreign:   none
+
+== variants-live-det-shipped-r2  2026-10-21 21:50:01  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.46 3.59 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      109.1% clion; 20.2% Python; 18.0% WindowServer; 12.4% MenuBarAgent
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.13 3.73 3.59
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      164.3% clion; 40.3% WindowServer; 13.1% Dock; 11.7% coreaudiod
+  foreign:   none
+
+== variants-live-det-shipped-r3  2026-10-21 21:50:41  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.64 3.65 3.57
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      78.3% (pairedsyncd); 22.5% WindowServer; 13.2% Python; 11.1% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.05 3.74 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      23.8% WindowServer; 15.9% Dock; 14.0% coreaudiod; 6.5% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-lean-r1  2026-10-21 21:33:46  attempt 1
+editor md5 2e30aefadb62  water md5 95beb81a3494  variant lean
+before:
+  uptime:    load averages: 2.68 3.67 3.39
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.2% WindowServer; 15.1% Python; 13.0% Python; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.82 3.66 3.38
+  locked:    Yes
+  lowpower:  0
+  gpu:       55
+  power:     Now drawing from 'AC Power'
+  busy:      23.9% WindowServer; 15.2% coreaudiod; 15.0% Dock; 14.9% clion
+  foreign:   none
+
+== variants2-live-det-lean-r2  2026-10-21 21:35:35  attempt 1
+editor md5 2e30aefadb62  water md5 95beb81a3494  variant lean
+before:
+  uptime:    load averages: 2.95 3.45 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      57.4% pairedsyncd; 23.2% WindowServer; 17.4% MenuBarAgent; 15.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.19 3.49 3.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       63
+  power:     Now drawing from 'AC Power'
+  busy:      25.4% WindowServer; 16.8% Dock; 13.9% coreaudiod; 10.7% Python
+  foreign:   none
+
+== variants2-live-det-lean-r3  2026-10-21 21:37:36  attempt 1
+editor md5 2e30aefadb62  water md5 95beb81a3494  variant lean
+before:
+  uptime:    load averages: 2.74 3.30 3.29
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      22.4% WindowServer; 15.1% Python; 10.9% coreaudiod; 8.7% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.62 3.26 3.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       61
+  power:     Now drawing from 'AC Power'
+  busy:      25.1% WindowServer; 17.0% Dock; 14.3% coreaudiod; 12.1% gh
+  foreign:   none
+
+== variants2-live-det-nochop-r1  2026-10-21 21:34:37  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 2.93 3.59 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      20.5% Python; 20.4% WindowServer; 12.2% MenuBarAgent; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.71 3.52 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      23.6% WindowServer; 15.4% Dock; 13.9% coreaudiod; 11.2% MenuBarAgent
+  foreign:   none
+
+== variants2-live-det-nochop-r2  2026-10-21 21:34:52  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 2.65 3.49 3.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      22.4% WindowServer; 14.3% Python; 10.8% coreaudiod; 7.6% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.63 3.46 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      28.8% WindowServer; 16.9% Dock; 15.8% coreaudiod; 9.1% Python
+  foreign:   none
+
+== variants2-live-det-nochop-r3  2026-10-21 21:38:20  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 3.66 3.46 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      23.2% WindowServer; 16.7% Python; 10.4% coreaudiod; 7.5% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.45 3.42 3.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      25.7% WindowServer; 15.5% Dock; 15.1% Python; 14.0% coreaudiod
+  foreign:   none
+
+== variants2-live-det-nowater-r1  2026-10-21 21:32:31  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.33 4.00 3.47
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      12.2% Python; 10.2% coreaudiod; 6.0% Python; 5.7% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.20 3.95 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       65
+  power:     Now drawing from 'AC Power'
+  busy:      24.8% WindowServer; 14.6% Dock; 12.8% coreaudiod; 8.9% MenuBarAgent
+  foreign:   none
+
+== variants2-live-det-nowater-r2  2026-10-21 21:36:29  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.20 3.47 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      22.4% WindowServer; 11.8% Python; 11.1% coreaudiod; 5.8% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.94 3.41 3.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       64
+  power:     Now drawing from 'AC Power'
+  busy:      107.7% clion; 69.1% com.apple.MapKit.SnapshotService; 21.2% WindowServer; 14.8% MenuBarAgent
+  foreign:   none
+
+== variants2-live-det-nowater-r3  2026-10-21 21:36:41  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 2.94 3.41 3.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      104.0% clion; 37.3% locationd; 36.6% diagnosticd; 30.1% diagnosticd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.03 3.41 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       63
+  power:     Now drawing from 'AC Power'
+  busy:      28.8% WindowServer; 15.2% airportd; 14.6% Dock; 13.3% coreaudiod
+  foreign:   none
+
+== variants2-live-det-nowaves-r1  2026-10-21 21:33:07  attempt 1
+editor md5 2e30aefadb62  water md5 07bb325ed935  variant nowaves
+before:
+  uptime:    load averages: 3.14 3.88 3.44
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.8% WindowServer; 11.9% Python; 10.4% coreaudiod; 8.6% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.88 3.78 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       56
+  power:     Now drawing from 'AC Power'
+  busy:      28.2% WindowServer; 15.8% Dock; 15.7% MenuBarAgent; 13.7% coreaudiod
+  foreign:   none
+
+== variants2-live-det-nowaves-r2  2026-10-21 21:36:02  attempt 1
+editor md5 2e30aefadb62  water md5 07bb325ed935  variant nowaves
+before:
+  uptime:    load averages: 3.43 3.53 3.36
+  locked:    Yes
+  lowpower:  0
+  gpu:       16
+  power:     Now drawing from 'AC Power'
+  busy:      24.5% WindowServer; 14.4% Python; 10.9% coreaudiod; 9.2% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.66 3.58 3.38
+  locked:    Yes
+  lowpower:  0
+  gpu:       66
+  power:     Now drawing from 'AC Power'
+  busy:      35.5% WindowServer; 15.1% Dock; 13.2% coreaudiod; 9.1% clion
+  foreign:   none
+
+== variants2-live-det-nowaves-r3  2026-10-21 21:37:09  attempt 1
+editor md5 2e30aefadb62  water md5 07bb325ed935  variant nowaves
+before:
+  uptime:    load averages: 3.06 3.41 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      119.5% clion; 19.6% Python; 16.6% WindowServer; 10.7% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.96 3.37 3.31
+  locked:    Yes
+  lowpower:  0
+  gpu:       68
+  power:     Now drawing from 'AC Power'
+  busy:      65.8% pairedsyncd; 26.8% WindowServer; 16.7% Dock; 14.2% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-lean-r1  2026-10-21 21:39:41  attempt 1
+editor md5 2e30aefadb62  water md5 95beb81a3494  variant lean
+before:
+  uptime:    load averages: 4.30 3.65 3.42
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      23.5% WindowServer; 15.0% Python; 14.1% runningboardd; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.01 3.84 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      25.8% WindowServer; 15.7% Dock; 14.3% coreaudiod; 10.5% Python
+  foreign:   none
+
+== variants2-live-det-s2-lean-r2  2026-10-21 21:41:39  attempt 1
+editor md5 2e30aefadb62  water md5 95beb81a3494  variant lean
+before:
+  uptime:    load averages: 6.47 4.24 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      24.4% WindowServer; 15.6% Python; 10.7% coreaudiod; 9.1% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.70 4.18 3.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      23.6% WindowServer; 15.5% Dock; 14.1% coreaudiod; 7.8% clion
+  foreign:   none
+
+== variants2-live-det-s2-lean-r3  2026-10-21 21:44:01  attempt 1
+editor md5 2e30aefadb62  water md5 95beb81a3494  variant lean
+before:
+  uptime:    load averages: 3.44 3.75 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       11
+  power:     Now drawing from 'AC Power'
+  busy:      106.2% clion; 18.2% WindowServer; 15.6% Python; 8.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.32 3.91 3.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      105.8% clion; 37.6% WindowServer; 14.0% Dock; 12.6% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nochop-r1  2026-10-21 21:40:31  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 3.93 3.69 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       11
+  power:     Now drawing from 'AC Power'
+  busy:      109.4% clion; 18.3% WindowServer; 14.9% Python; 9.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.64 3.64 3.44
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      108.7% clion; 20.2% WindowServer; 14.1% Dock; 11.5% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nochop-r2  2026-10-21 21:40:47  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 3.64 3.64 3.44
+  locked:    Yes
+  lowpower:  0
+  gpu:       11
+  power:     Now drawing from 'AC Power'
+  busy:      72.1% clion; 17.6% WindowServer; 17.0% Python; 9.6% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.29 3.56 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      107.0% clion; 22.0% WindowServer; 11.5% Dock; 11.2% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nochop-r3  2026-10-21 21:44:54  attempt 1
+editor md5 2e30aefadb62  water md5 380fcda35898  variant nochop
+before:
+  uptime:    load averages: 4.20 3.94 3.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.8% WindowServer; 12.6% Python; 10.5% coreaudiod; 6.5% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.70 3.84 3.60
+  locked:    Yes
+  lowpower:  0
+  gpu:       84
+  power:     Now drawing from 'AC Power'
+  busy:      23.4% WindowServer; 15.8% Dock; 14.2% coreaudiod; 7.8% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-s2-nowater-r1  2026-10-21 21:38:35  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.45 3.42 3.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      19.9% WindowServer; 12.6% Python; 10.8% coreaudiod; 8.4% MenuBarAgent
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.57 3.45 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      25.9% WindowServer; 17.3% MenuBarAgent; 14.7% Dock; 13.4% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nowater-r2  2026-10-21 21:42:43  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 4.14 4.02 3.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       13
+  power:     Now drawing from 'AC Power'
+  busy:      20.8% WindowServer; 15.4% Python; 10.9% coreaudiod; 10.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.45 3.87 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      134.8% clion; 20.2% WindowServer; 13.7% Dock; 11.7% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nowater-r3  2026-10-21 21:42:58  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.45 3.87 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      111.0% clion; 49.1% claude; 18.8% WindowServer; 14.8% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.62 3.88 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      138.3% clion; 21.9% WindowServer; 12.6% Dock; 12.0% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nowaves-r1  2026-10-21 21:39:10  attempt 1
+editor md5 2e30aefadb62  water md5 07bb325ed935  variant nowaves
+before:
+  uptime:    load averages: 3.34 3.41 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      22.9% WindowServer; 17.1% Python; 10.3% coreaudiod; 7.1% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.80 3.51 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      39.9% Hive; 27.2% WindowServer; 16.4% Dock; 14.1% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nowaves-r2  2026-10-21 21:42:09  attempt 1
+editor md5 2e30aefadb62  water md5 07bb325ed935  variant nowaves
+before:
+  uptime:    load averages: 5.30 4.17 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.3% WindowServer; 14.4% Python; 10.6% coreaudiod; 8.7% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.00 4.16 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      23.7% WindowServer; 15.5% Dock; 15.5% Hive; 15.2% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-nowaves-r3  2026-10-21 21:43:31  attempt 1
+editor md5 2e30aefadb62  water md5 07bb325ed935  variant nowaves
+before:
+  uptime:    load averages: 2.96 3.71 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      45.1% clion; 17.5% WindowServer; 13.6% Python; 9.7% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.14 3.72 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      107.8% clion; 21.9% WindowServer; 18.6% Python; 15.3% Hive
+  foreign:   none
+
+== variants2-live-det-s2-shipped-r1  2026-10-21 21:38:55  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.57 3.45 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.9% WindowServer; 14.2% Python; 10.8% coreaudiod; 8.6% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.34 3.41 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      24.0% WindowServer; 14.3% Dock; 13.7% coreaudiod; 13.0% Python
+  foreign:   none
+
+== variants2-live-det-s2-shipped-r2  2026-10-21 21:42:28  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 5.00 4.16 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       18
+  power:     Now drawing from 'AC Power'
+  busy:      23.3% WindowServer; 15.6% Python; 12.9% Python; 10.7% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.14 4.02 3.62
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      76.3% pairedsyncd; 24.2% WindowServer; 17.0% Python; 16.2% Dock
+  foreign:   none
+
+== variants2-live-det-s2-shipped-r3  2026-10-21 21:43:17  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.62 3.88 3.58
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      110.2% clion; 20.5% Python; 20.4% WindowServer; 8.7% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.05 3.74 3.54
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      105.8% clion; 18.9% WindowServer; 12.3% Dock; 11.3% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-trivial-r1  2026-10-21 21:40:15  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 4.06 3.70 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       17
+  power:     Now drawing from 'AC Power'
+  busy:      25.9% launchd; 23.3% WindowServer; 16.2% Python; 9.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.93 3.69 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       89
+  power:     Now drawing from 'AC Power'
+  busy:      109.6% clion; 22.0% WindowServer; 13.1% coreaudiod; 12.2% Dock
+  foreign:   none
+
+== variants2-live-det-s2-trivial-r2  2026-10-21 21:41:05  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 3.19 3.53 3.40
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      30.3% Hive; 24.9% clion; 19.3% WindowServer; 16.9% (shellcheck)
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.87 3.87 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      23.1% WindowServer; 14.6% Dock; 13.3% coreaudiod; 9.1% Python
+  foreign:   none
+
+== variants2-live-det-s2-trivial-r3  2026-10-21 21:44:38  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 4.17 3.90 3.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      22.5% WindowServer; 13.6% Python; 10.5% coreaudiod; 5.9% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.30 3.95 3.63
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      32.6% Hive; 24.2% WindowServer; 16.0% Dock; 13.0% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-unlit-r1  2026-10-21 21:39:59  attempt 1
+editor md5 2e30aefadb62  water md5 8960cb16db6f  variant unlit
+before:
+  uptime:    load averages: 5.01 3.84 3.49
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      22.4% WindowServer; 14.9% Python; 11.1% coreaudiod; 6.5% io.tailscale.ipn.macsys.network-extension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.06 3.70 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       91
+  power:     Now drawing from 'AC Power'
+  busy:      68.0% pairedsyncd; 26.0% WindowServer; 15.5% Dock; 14.1% coreaudiod
+  foreign:   none
+
+== variants2-live-det-s2-unlit-r2  2026-10-21 21:41:23  attempt 1
+editor md5 2e30aefadb62  water md5 8960cb16db6f  variant unlit
+before:
+  uptime:    load averages: 4.87 3.87 3.52
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      20.0% WindowServer; 12.8% Python; 10.8% coreaudiod; 6.8% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 6.47 4.24 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      24.3% WindowServer; 16.0% Dock; 14.0% coreaudiod; 9.5% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-s2-unlit-r3  2026-10-21 21:44:20  attempt 1
+editor md5 2e30aefadb62  water md5 8960cb16db6f  variant unlit
+before:
+  uptime:    load averages: 4.32 3.91 3.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      106.7% clion; 21.1% WindowServer; 15.3% Python; 9.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.17 3.90 3.61
+  locked:    Yes
+  lowpower:  0
+  gpu:       90
+  power:     Now drawing from 'AC Power'
+  busy:      24.2% clion; 22.9% WindowServer; 15.4% coreaudiod; 13.7% Dock
+  foreign:   none
+
+== variants2-live-det-s2-waves-only-r1  2026-10-21 21:39:25  attempt 1
+editor md5 2e30aefadb62  water md5 87fb075bc002  variant waves-only
+before:
+  uptime:    load averages: 3.80 3.51 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      24.7% WindowServer; 15.9% Python; 10.7% coreaudiod; 7.9% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 4.30 3.65 3.42
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      26.5% WindowServer; 14.8% Dock; 14.0% coreaudiod; 8.3% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-s2-waves-only-r2  2026-10-21 21:41:53  attempt 1
+editor md5 2e30aefadb62  water md5 87fb075bc002  variant waves-only
+before:
+  uptime:    load averages: 5.70 4.18 3.65
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      22.3% WindowServer; 15.1% Python; 10.7% coreaudiod; 8.6% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 5.30 4.17 3.66
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      24.4% WindowServer; 12.7% Dock; 12.4% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-s2-waves-only-r3  2026-10-21 21:43:46  attempt 1
+editor md5 2e30aefadb62  water md5 87fb075bc002  variant waves-only
+before:
+  uptime:    load averages: 3.14 3.72 3.53
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      106.5% clion; 19.3% Python; 16.9% WindowServer; 8.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.44 3.75 3.55
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      108.1% clion; 20.8% WindowServer; 14.3% Dock; 11.8% coreaudiod
+  foreign:   none
+
+== variants2-live-det-shipped-r1  2026-10-21 21:32:46  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.19 3.93 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      24.0% WindowServer; 15.7% Python; 13.4% Python; 10.6% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.16 3.90 3.45
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      29.1% WindowServer; 15.5% Dock; 13.6% coreaudiod; 9.5% Python
+  foreign:   none
+
+== variants2-live-det-shipped-r2  2026-10-21 21:36:17  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.44 3.53 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      20.7% WindowServer; 13.6% Python; 10.9% coreaudiod; 9.3% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.30 3.50 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      36.1% clion; 23.2% WindowServer; 13.9% Dock; 12.7% coreaudiod
+  foreign:   none
+
+== variants2-live-det-shipped-r3  2026-10-21 21:36:56  attempt 1
+editor md5 2e30aefadb62  water md5 934c2a7b1346  variant None
+before:
+  uptime:    load averages: 3.03 3.41 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      137.7% clion; 19.8% WindowServer; 16.9% Python; 8.9% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.06 3.41 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       81
+  power:     Now drawing from 'AC Power'
+  busy:      23.3% WindowServer; 14.9% Dock; 13.8% coreaudiod; 5.9% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-trivial-r1  2026-10-21 21:34:22  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 3.18 3.67 3.40
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      22.5% WindowServer; 16.0% Python; 10.6% coreaudiod; 8.8% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.93 3.59 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      25.0% WindowServer; 16.8% Dock; 13.9% coreaudiod; 7.0% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-trivial-r2  2026-10-21 21:35:07  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 2.58 3.44 3.32
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      20.4% WindowServer; 14.4% Python; 10.7% coreaudiod; 9.0% runningboardd
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.78 3.45 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      28.0% Python; 25.7% WindowServer; 14.1% Dock; 13.0% coreaudiod
+  foreign:   none
+
+== variants2-live-det-trivial-r3  2026-10-21 21:38:05  attempt 1
+editor md5 2e30aefadb62  water md5 0415c3df42fd  variant trivial
+before:
+  uptime:    load averages: 3.65 3.45 3.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       12
+  power:     Now drawing from 'AC Power'
+  busy:      16.3% Python; 9.9% coreaudiod; 6.2% MenuBarAgent; 5.5% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.66 3.46 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      24.1% WindowServer; 13.5% Dock; 12.5% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-unlit-r1  2026-10-21 21:34:07  attempt 1
+editor md5 2e30aefadb62  water md5 8960cb16db6f  variant unlit
+before:
+  uptime:    load averages: 2.67 3.61 3.37
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      46.5% pairedsyncd; 21.3% WindowServer; 13.3% Python; 10.5% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.03 3.65 3.39
+  locked:    Yes
+  lowpower:  0
+  gpu:       78
+  power:     Now drawing from 'AC Power'
+  busy:      24.0% WindowServer; 14.3% Dock; 13.2% coreaudiod; 11.2% runningboardd
+  foreign:   none
+
+== variants2-live-det-unlit-r2  2026-10-21 21:35:22  attempt 1
+editor md5 2e30aefadb62  water md5 8960cb16db6f  variant unlit
+before:
+  uptime:    load averages: 2.88 3.46 3.33
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      25.0% WindowServer; 15.1% Python; 13.6% Python; 11.3% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.12 3.50 3.35
+  locked:    Yes
+  lowpower:  0
+  gpu:       79
+  power:     Now drawing from 'AC Power'
+  busy:      26.0% WindowServer; 15.1% Dock; 13.6% coreaudiod; 9.6% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-unlit-r3  2026-10-21 21:37:50  attempt 1
+editor md5 2e30aefadb62  water md5 8960cb16db6f  variant unlit
+before:
+  uptime:    load averages: 2.62 3.26 3.27
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      22.9% WindowServer; 16.1% Python; 10.6% coreaudiod; 8.8% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.65 3.45 3.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       77
+  power:     Now drawing from 'AC Power'
+  busy:      24.4% WindowServer; 13.0% coreaudiod; 10.5% Dock; 6.2% WallpaperAerialsExtension
+  foreign:   none
+
+== variants2-live-det-waves-only-r1  2026-10-21 21:33:27  attempt 1
+editor md5 2e30aefadb62  water md5 87fb075bc002  variant waves-only
+before:
+  uptime:    load averages: 2.88 3.78 3.41
+  locked:    Yes
+  lowpower:  0
+  gpu:       15
+  power:     Now drawing from 'AC Power'
+  busy:      20.2% WindowServer; 13.7% Python; 10.5% coreaudiod; 6.9% WallpaperAerialsExtension
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.83 3.72 3.40
+  locked:    Yes
+  lowpower:  0
+  gpu:       64
+  power:     Now drawing from 'AC Power'
+  busy:      25.3% WindowServer; 17.6% gh; 12.9% coreaudiod; 11.2% Dock
+  foreign:   none
+
+== variants2-live-det-waves-only-r2  2026-10-21 21:35:48  attempt 1
+editor md5 2e30aefadb62  water md5 87fb075bc002  variant waves-only
+before:
+  uptime:    load averages: 3.19 3.49 3.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      21.7% WindowServer; 17.8% Python; 10.6% coreaudiod; 9.7% Python
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 3.43 3.53 3.36
+  locked:    Yes
+  lowpower:  0
+  gpu:       68
+  power:     Now drawing from 'AC Power'
+  busy:      23.2% WindowServer; 16.6% Dock; 14.2% coreaudiod; 13.1% clion
+  foreign:   none
+
+== variants2-live-det-waves-only-r3  2026-10-21 21:37:23  attempt 1
+editor md5 2e30aefadb62  water md5 87fb075bc002  variant waves-only
+before:
+  uptime:    load averages: 2.96 3.37 3.31
+  locked:    Yes
+  lowpower:  0
+  gpu:       14
+  power:     Now drawing from 'AC Power'
+  busy:      38.5% Hive; 22.0% WindowServer; 15.7% Python; 11.4% coreaudiod
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.74 3.30 3.29
+  locked:    Yes
+  lowpower:  0
+  gpu:       69
+  power:     Now drawing from 'AC Power'
+  busy:      25.7% WindowServer; 16.8% Dock; 14.2% coreaudiod; 8.2% WallpaperAerialsExtension
+  foreign:   none

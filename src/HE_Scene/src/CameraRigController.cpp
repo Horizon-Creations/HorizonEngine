@@ -280,11 +280,12 @@ namespace {
 entt::entity CameraRigController::findRigCamera(entt::registry& reg)
 {
     entt::entity found = entt::null;
-    for (auto [e, t, cam, rig] :
-         reg.view<TransformComponent, CameraComponent, CameraRigComponent>().each())
+    // Transform and rig only filter; the camera is the one component read.
+    auto view = reg.view<TransformComponent, CameraComponent, CameraRigComponent>();
+    for (const entt::entity e : view)
     {
         if (found == entt::null) found = e;
-        if (cam.isMain) return e;
+        if (view.get<CameraComponent>(e).isMain) return e;
     }
     return found;
 }

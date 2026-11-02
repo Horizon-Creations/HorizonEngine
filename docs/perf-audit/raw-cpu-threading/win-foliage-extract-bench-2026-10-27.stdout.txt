@@ -1,0 +1,14 @@
+[doctest] doctest version is "2.5.0"
+[doctest] run with "--help" for options
+[bench] 524285 stored instances
+[bench] CPU per extract (all threads): one thread 0.518 ms, pool 0.295 ms
+[bench] whole extract, moving camera, median of 600: one thread 0.488 ms, pool 0.244 ms
+===============================================================================
+[doctest] test cases: 1 | 1 passed | 0 failed | 5925 skipped
+[doctest] assertions: 3 | 3 passed | 0 failed |
+[doctest] Status: SUCCESS!
+
+Command: ./tests/he_tests.exe --no-skip -tc="*Foliage extract bench*"
+Machine: NN-WS03, AMD Ryzen 9 9950X (16C/32T), Windows, Release build, HEAD d09e65ca, build dir C:/hb/cta5.
+Scene: tests/test_foliage_parallel.cpp "Landscape" fixture, 512x512 terrain, 5 foliage layers, 524285 stored instances, camera walking 600 steps.
+Load: sole bee on the host at run time (hive_devices 1.4% CPU).

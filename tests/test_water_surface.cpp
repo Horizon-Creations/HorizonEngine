@@ -22,7 +22,10 @@
 #include <HorizonScene/Components/NavMeshComponent.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/DefaultAssets.h>
+#include <Physics/WaterWaves.h>
+#include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -1496,4 +1499,474 @@ TEST_CASE("Water shore: the settings are clamped, and a bad one keeps the old")
     tc.water.shoreOvershoot = -1.0f;
     water::sanitize(tc);
     CHECK(tc.water.shoreOvershoot == 0.0f);
+}
+
+// ── Soft shore (Thema 206 Schritt 2): the mesh carries the water's depth ────────────
+namespace
+{
+    // The shore proximity vertex i of a mesh carries (normal.x / gain; see WaterWaves.h).
+    float proximityOf(const StaticMeshAsset& m, uint32_t i)
+    {
+        return m.normals[i * 3] / HE::water::kShoreNormalGain;
+    }
+
+    // The triangles that cover something. The triangulator's ears (and so the pieces a
+    // split cuts them into) can be slivers of no area at all, a corner on the line of
+    // the other two; they draw nothing and a float cannot say which way they face. A run of contour
+    // points that is straight to within a float (a bank that is a plane) leaves them a little over
+    // 1e-5 m² (a corner 10 to 20 µm off the chord of a 3 m edge): a square centimetre is nothing to see.
+    std::vector<uint32_t> solidIndices(const StaticMeshAsset& m, double minArea = 1e-4)
+    {
+        std::vector<uint32_t> out;
+        for (size_t i = 0; i + 2 < m.indices.size(); i += 3)
+        {
+            const float* a = &m.vertices[m.indices[i] * 3];
+            const float* b = &m.vertices[m.indices[i + 1] * 3];
+            const float* c = &m.vertices[m.indices[i + 2] * 3];
+            const double twice = (double(b[2]) - a[2]) * (double(c[0]) - a[0]) - (double(b[0]) - a[0]) * (double(c[2]) - a[2]);
+            if (std::abs(twice) < 2.0 * minArea) continue;
+            out.insert(out.end(), { m.indices[i], m.indices[i + 1], m.indices[i + 2] });
+        }
+        return out;
+    }
+
+    // Is a vertex of the (solid) mesh strictly inside an edge of one of its triangles? That
+    // is a T-junction: the two sides of the edge would be rasterised differently and a pixel
+    // of the blended sheet could drop out or draw twice.
+    bool hasTJunction(const StaticMeshAsset& m)
+    {
+        const std::vector<uint32_t> idx = solidIndices(m);
+        std::vector<uint32_t> used = idx;
+        std::sort(used.begin(), used.end());
+        used.erase(std::unique(used.begin(), used.end()), used.end());
+        auto P = [&](uint32_t i) { return glm::dvec2(m.vertices[i * 3], m.vertices[i * 3 + 2]); };
+        for (size_t t = 0; t + 2 < idx.size(); t += 3)
+            for (int k = 0; k < 3; ++k)
+            {
+                const glm::dvec2 a = P(idx[t + k]), b = P(idx[t + (k + 1) % 3]);
+                const glm::dvec2 ab = b - a;
+                const double len2 = glm::dot(ab, ab);
+                if (len2 < 1e-12) continue;
+                for (const uint32_t v : used)
+                {
+                    const glm::dvec2 p = P(v);
+                    const double u = glm::dot(p - a, ab) / len2;
+                    if (u <= 1e-6 || u >= 1.0 - 1e-6) continue;
+                    const glm::dvec2 q = a + ab * u;
+                    // A float holds a coordinate of 25 m to 3 µm: a vertex that close to the line is on it.
+                    if (glm::length(p - q) < 1e-5) return true;
+                }
+            }
+        return false;
+    }
+
+    // Every covering triangle faces up, and the covering ones overlap nowhere.
+    StaticMeshAsset solidOf(const StaticMeshAsset& m)
+    {
+        StaticMeshAsset s = m;
+        s.indices = solidIndices(m);
+        return s;
+    }
+
+    water::SurfaceOptions softShore(float overshoot = water::kDefaultShoreOvershoot)
+    {
+        water::SurfaceOptions o = clipped(overshoot);
+        o.shoreFade = true;
+        return o;
+    }
+}
+
+TEST_CASE("Water soft shore: off, the mesh is the plain sheet; without the ground it does nothing")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float x, float) { return 0.04f * x; });
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 0.3f);
+    const Built plain = build(tc, id, clipped());
+    REQUIRE_FALSE(plain.s.empty());
+    CHECK(plain.s.shoreVertices == 0);
+    for (size_t i = 0; i < plain.s.mesh.normals.size(); i += 3) CHECK(plain.s.mesh.normals[i] == 0.0f);
+
+    // No ground to read the depth from: shoreFade asks for nothing, the mesh and its hash stay.
+    water::SurfaceOptions noGround;
+    noGround.shoreFade = true;
+    const Built a = build(tc, id, noGround), b = build(tc, id, water::SurfaceOptions{});
+    CHECK(a.s.hash == b.s.hash);
+    CHECK(a.s.mesh.vertices == b.s.mesh.vertices);
+    CHECK(a.s.mesh.indices == b.s.mesh.indices);
+    CHECK(a.s.mesh.normals == b.s.mesh.normals);
+    CHECK(a.s.shoreVertices == 0);
+}
+
+TEST_CASE("Water soft shore: on a plane bank the depth is carried linearly, the sheet is the same sheet")
+{
+    TerrainComponent tc = makeTerrain();                                  // 64 m, a metre per cell
+    shapeGround(tc, 65, [](float x, float) { return 0.04f * x; });       // 4 cm per metre, rising east
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 0.3f);
+    const Built plain = build(tc, id, clipped());
+    const Built soft  = build(tc, id, softShore());
+    REQUIRE_FALSE(soft.s.empty());
+
+    // The same sheet: the area, the outline, nothing overlapping, every triangle up.
+    CHECK(sumArea(soft.tris) == doctest::Approx(sumArea(plain.tris)).epsilon(1e-6));
+    CHECK_FALSE(anyOverlap(soft.tris));
+    CHECK(allFaceUp(soft.s.mesh));
+    CHECK_FALSE(hasTJunction(soft.s.mesh));
+    CHECK(soft.s.hash != plain.s.hash);                                   // another mesh with the same cells
+    // Refined near the shore, and not into a grid: tens of triangles, not a thousand.
+    CHECK(soft.s.triangles > plain.s.triangles);
+    CHECK(soft.s.triangles < 400);
+    CHECK(soft.s.shoreVertices > 0);
+
+    // Every vertex: normal (gain · e, 1, 0), e in 0..1.
+    const StaticMeshAsset& m = soft.s.mesh;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        CHECK(m.normals[i * 3 + 1] == 1.0f);
+        CHECK(m.normals[i * 3 + 2] == 0.0f);
+        const float e = proximityOf(m, i);
+        CHECK(e >= 0.0f);
+        CHECK(e <= 1.0f + 1e-6f);
+    }
+
+    // e = 1 at the waterline, 0 beyond kShoreFadeDepth of water; in between it is
+    // 1 − depth / kShoreFadeDepth, depth being 0.3 − 0.04 x over the drawn sheet.
+    auto expected = [](double x)
+    {
+        return std::clamp(1.0 - (0.3 - 0.04 * x) / double(water::kShoreFadeDepth), 0.0, 1.0);
+    };
+    float seenOne = 0.0f;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        const double x = m.vertices[i * 3] + soft.s.center.x;
+        CHECK(proximityOf(m, i) == doctest::Approx(expected(x)).epsilon(0.04));
+        seenOne = std::max(seenOne, proximityOf(m, i));
+    }
+    CHECK(seenOne == doctest::Approx(1.0f));
+    // And between the vertices: the centre of every triangle carries the mean of its corners,
+    // which is what the rasteriser interpolates to there. It follows the real depth.
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+    {
+        const uint32_t a = m.indices[t], b = m.indices[t + 1], c = m.indices[t + 2];
+        const double x = (m.vertices[a * 3] + m.vertices[b * 3] + m.vertices[c * 3]) / 3.0 + soft.s.center.x;
+        const float e = (proximityOf(m, a) + proximityOf(m, b) + proximityOf(m, c)) / 3.0f;
+        CHECK(e == doctest::Approx(expected(x)).epsilon(0.05));
+    }
+    // The far end of this lake is 1.1 m deep, which the depth range now covers (the test below
+    // has a bank steep enough to leave it): the channel still follows the real depth there.
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+        if (m.vertices[i * 3] + soft.s.center.x < -19.0f)
+            CHECK(proximityOf(m, i) == doctest::Approx(expected(-20.0)).epsilon(0.04));
+
+    // The same field always gives the same mesh.
+    const Built again = build(tc, id, softShore());
+    CHECK(again.s.hash == soft.s.hash);
+    CHECK(again.s.mesh.vertices == soft.s.mesh.vertices);
+    CHECK(again.s.mesh.normals == soft.s.mesh.normals);
+    CHECK(again.s.mesh.indices == soft.s.mesh.indices);
+}
+
+// Thema 320: the material has no scene depth, so the depth the mesh carries is all it knows of the
+// shore. With a range of one metre the water went from clear to its deep colour inside a single
+// contour, which is the hard line where the water meets the landscape; kShoreFadeDepth is wider now,
+// and what the mesh carries has to follow the real depth over the whole range, with no step and no
+// plateau on the way, so the fade the material builds from it has nothing to jump over.
+TEST_CASE("Water soft shore: the depth runs on to kShoreFadeDepth with no plateau on the way (Thema 320)")
+{
+    CHECK(water::kShoreFadeDepth > 1.5f);                                 // deeper than the old one metre
+
+    TerrainComponent tc = makeTerrain();                                  // 64 m, a metre per cell
+    shapeGround(tc, 65, [](float x, float) { return 0.1f * x; });        // 10 cm per metre, rising east
+    const uint16_t id = addLake(tc, rect(-30, -20, 20, 20), 0.3f);        // 0.3 over the origin: waterline at x = 3
+    const Built soft = build(tc, id, softShore());
+    REQUIRE_FALSE(soft.s.empty());
+    const StaticMeshAsset& m = soft.s.mesh;
+
+    // depth(x) = 0.3 - 0.1 x on the drawn sheet, e = 1 - depth / kShoreFadeDepth, clamped.
+    auto expected = [](double x)
+    {
+        return std::clamp(1.0 - (0.3 - 0.1 * x) / double(water::kShoreFadeDepth), 0.0, 1.0);
+    };
+
+    // Every vertex follows the real depth, also where it is deeper than the old range.
+    uint32_t beyondOldRange = 0;
+    float lowestInRange = 1.0f;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        const double x = m.vertices[i * 3] + soft.s.center.x;
+        const float e = proximityOf(m, i);
+        CHECK(e == doctest::Approx(expected(x)).epsilon(0.04));
+        const double depth = 0.3 - 0.1 * x;
+        if (depth > 1.2 && depth < water::kShoreFadeDepth - 0.2)
+        {
+            ++beyondOldRange;
+            CHECK(e > 0.05f);                                             // one metre ago this read 0: open water
+            lowestInRange = std::min(lowestInRange, e);
+        }
+    }
+    CHECK(beyondOldRange > 0);
+    CHECK(lowestInRange < 0.6f);                                          // and it keeps falling out there
+
+    // Between the vertices too: the centre of a triangle carries the mean of its corners (what the
+    // rasteriser interpolates to there) and it follows the real depth, so the ramp has no kink in it.
+    for (size_t t = 0; t + 2 < m.indices.size(); t += 3)
+    {
+        const uint32_t a = m.indices[t], b = m.indices[t + 1], c = m.indices[t + 2];
+        const double x = (m.vertices[a * 3] + m.vertices[b * 3] + m.vertices[c * 3]) / 3.0 + soft.s.center.x;
+        const float e = (proximityOf(m, a) + proximityOf(m, b) + proximityOf(m, c)) / 3.0f;
+        CHECK(e == doctest::Approx(expected(x)).epsilon(0.05));
+    }
+
+    // Deeper than the range there is no shore in it: open water, exactly 0.
+    const double openX = 0.3 / 0.1 - water::kShoreFadeDepth / 0.1;        // where depth = kShoreFadeDepth
+    uint32_t openVertices = 0;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+        if (m.vertices[i * 3] + soft.s.center.x < openX - 1.0)
+        {
+            CHECK(proximityOf(m, i) == 0.0f);
+            ++openVertices;
+        }
+    CHECK(openVertices > 0);
+}
+
+TEST_CASE("Water soft shore: the shore-proximity readback survives a landscape's own Y-rotation (Thema 206 Schritt 8)")
+{
+    // The bake above puts (gain*e, 1, 0) in the mesh normal; the material reads it back from
+    // the WORLD normal mat3(uModel) * n, normalized (vNormal in the vertex shader, NormalWS
+    // normalizes it in MaterialGraph.cpp). A landscape (or its WaterSurface child) rotated
+    // about Y moves that tilt out of x and into z. This reimplements both the OLD decode
+    // (e = n.x / (n.y*gain), MatGen/main.cpp before Schritt 8) and the NEW one
+    // (e = len(n.xz) / (n.y*gain)) in C++ to check the formula itself against a world normal
+    // built the same way the renderer builds it — it does not run the generated shader.
+    const float gain = HE::water::kShoreNormalGain;
+    auto oldDecode = [&](const glm::vec3& n) { return n.x / (n.y * gain); };
+    auto newDecode = [&](const glm::vec3& n) { return std::sqrt(n.x * n.x + n.z * n.z) / (n.y * gain); };
+
+    for (const float e : { 0.0f, 0.25f, 0.6f, 1.0f })
+    {
+        const glm::vec3 local(gain * e, 1.0f, 0.0f);
+        for (const float deg : { 0.0f, 30.0f, 60.0f, 90.0f, 135.0f, 180.0f, 270.0f })
+        {
+            const glm::mat3 r(glm::rotate(glm::mat4(1.0f), glm::radians(deg), glm::vec3(0, 1, 0)));
+            const glm::vec3 world = glm::normalize(r * local);
+            CHECK(newDecode(world) == doctest::Approx(e).epsilon(1e-4));              // holds at every heading
+            if (deg == 0.0f || e == 0.0f)
+                CHECK(oldDecode(world) == doctest::Approx(e).epsilon(1e-4));
+            else
+                CHECK_FALSE(oldDecode(world) == doctest::Approx(e).epsilon(0.02));    // the bug: wrong past 0 deg
+        }
+
+        // A non-uniform scale on the landscape (sx != sy, e.g. 2:1): the SHADER FORMULA
+        // alone has no way to see the object's scale, so both decodes are off by that
+        // ratio here. SurfaceOptions::shoreTiltScale (WaterMesh.h) closes this at bake
+        // time instead — see the end-to-end test below.
+        if (e > 0.0f)
+        {
+            const glm::mat3 s(2.0f, 0, 0,  0, 1.0f, 0,  0, 0, 3.0f);
+            const glm::vec3 scaled = glm::normalize(s * local);
+            CHECK(newDecode(scaled) == doctest::Approx(2.0f * e).epsilon(1e-3));
+        }
+    }
+}
+
+TEST_CASE("Water soft shore: a non-uniform landscape scale is pre-compensated at bake time (Thema 206 Schritt 8)")
+{
+    // End to end: bake with shoreTiltScale set the way WaterSurface.cpp sets it
+    // (shoreTiltScaleOf = sy/sx of the landscape's own world matrix), then put the baked
+    // normal through the SAME transform the renderer's vertex stage applies
+    // (mat3(uModel) * n, normalized) and decode with the new (rotation-robust) formula.
+    // The recovered e matches the UNSCALED e: the bake-time compensation and the shader's
+    // sx/sy error cancel exactly, for any heading.
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 65, [](float x, float) { return 0.04f * x; });
+    const uint16_t id = addLake(tc, rect(-20, -20, 20, 20), 0.3f);
+
+    const float gain = HE::water::kShoreNormalGain;
+    auto newDecode = [&](const glm::vec3& n) { return std::sqrt(n.x * n.x + n.z * n.z) / (n.y * gain); };
+
+    for (const float sx : { 0.5f, 1.0f, 2.0f })
+        for (const float sy : { 0.5f, 1.0f, 3.0f })
+            for (const float deg : { 0.0f, 50.0f, 90.0f, 170.0f })
+            {
+                water::SurfaceOptions opt = softShore();
+                opt.shoreTiltScale = sy / sx;
+                const Built scaled = build(tc, id, opt);
+                REQUIRE(scaled.s.shoreVertices > 0);
+
+                const glm::mat3 r(glm::rotate(glm::mat4(1.0f), glm::radians(deg), glm::vec3(0, 1, 0)));
+                const glm::mat3 s(sx, 0, 0,  0, sy, 0,  0, 0, sx);   // Z follows X: no rotation/Z-scale coupling to track
+                const glm::mat3 m = r * s;
+
+                const StaticMeshAsset& bm = scaled.s.mesh;
+                size_t checked = 0;
+                for (uint32_t i = 0; i < bm.vertices.size() / 3; ++i)
+                {
+                    const glm::vec3 baked(bm.normals[i * 3], bm.normals[i * 3 + 1], bm.normals[i * 3 + 2]);
+                    const float eBaked = proximityOf(scaled.s.mesh, i) / opt.shoreTiltScale;   // what the mesh carries, undone
+                    if (eBaked <= 0.0f) continue;                                               // open water: nothing to recover
+                    const glm::vec3 world = glm::normalize(m * baked);
+                    CHECK(newDecode(world) == doctest::Approx(eBaked).epsilon(0.02));
+                    ++checked;
+                }
+                CHECK(checked > 0);
+            }
+}
+
+TEST_CASE("Water soft shore: an island's bridged hole and a round bank stay watertight")
+{
+    TerrainComponent tc = makeTerrain();
+    shapeGround(tc, 129, [](float x, float z) { return 6.0f - 0.03f * (x * x + z * z); });   // a mound, as above
+    const uint16_t id = addLake(tc, rect(-25, -25, 25, 25), 1.0f);
+    const Built plain = build(tc, id, clipped());
+    const Built soft  = build(tc, id, softShore());
+    REQUIRE_FALSE(soft.s.empty());
+    CHECK(soft.s.contours == 2);                                          // an outer boundary and the island's hole
+    CHECK(sumArea(soft.tris) == doctest::Approx(sumArea(plain.tris)).epsilon(1e-6));
+    const StaticMeshAsset solid = solidOf(soft.s.mesh);
+    CHECK_FALSE(anyOverlap(trisOf(solid, soft.s.center), 1e-7));
+    CHECK_FALSE(hasTJunction(soft.s.mesh));
+    CHECK(allFaceUp(solid));
+    CHECK(soft.s.shoreVertices > 0);
+    // Water over the ground's low rim is shallow, the lake's outer edge (the square) is no shore.
+    const StaticMeshAsset& m = soft.s.mesh;
+    for (uint32_t i = 0; i < m.vertices.size() / 3; ++i)
+    {
+        const float x = m.vertices[i * 3] + soft.s.center.x, z = m.vertices[i * 3 + 2] + soft.s.center.y;
+        if (std::max(std::abs(x), std::abs(z)) > 24.9f) CHECK(proximityOf(m, i) < 1.0f);
+    }
+}
+
+TEST_CASE("Water soft shore: a large lake with a gentle bank is built in good time and stays a shore mesh")
+{
+    TerrainComponent tc = makeTerrain(512.0f, 512);
+    shapeGround(tc, 513, [](float x, float z) { return 4.0f * (x * x + z * z) / (190.0f * 190.0f) - 2.0f; });
+    std::vector<glm::vec2> poly;
+    for (int i = 0; i < 400; ++i)
+    {
+        const double a = 6.28318530717958647692 * i / 400;
+        const double r = 200.0 + 9.0 * std::sin(a * 7.0) + 3.0 * std::cos(a * 19.0);
+        poly.emplace_back(static_cast<float>(r * std::cos(a)), static_cast<float>(r * std::sin(a)));
+    }
+    const uint16_t id = addLake(tc, poly);
+    const Built plain = build(tc, id, clipped());
+    const auto t0 = std::chrono::steady_clock::now();
+    const Built soft = build(tc, id, softShore());
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    REQUIRE_FALSE(soft.s.empty());
+    MESSAGE("soft shore: " << soft.s.triangles << " triangles (plain " << plain.s.triangles << "), " << ms << " ms");
+    CHECK(sumArea(soft.tris) == doctest::Approx(sumArea(plain.tris)).epsilon(1e-6));
+    CHECK(soft.s.triangles < 20000);
+    CHECK(ms < 2000.0);
+}
+
+#ifdef HE_EDITOR_DEPS_DIR
+// ── The material stays bound (Thema 206 Schritt 9c) ──────────────────────────
+// ensureWaterMaterial and the MaterialComponent were only done when a surface was
+// CREATED. A surface that lives on (a scene that is re-opened and adopts one, a
+// brush stroke after the material was unloaded, a component lost to an undo
+// snapshot) drew with the plain fallback until it was rebuilt.
+TEST_CASE("Water surface: a surface that already exists is given its material back, loaded and bound")
+{
+    Rig rig;
+    rig.cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+    const std::vector<glm::vec2> poly = { { -20, -20 }, { 10, -20 }, { 10, 20 }, { -20, 20 } };
+    addLake(rig.tc(), poly, 2.0f);
+    rig.update();
+    auto& reg = rig.world.registry();
+    REQUIRE(rig.surfaces().size() == 1);
+    const Entity e = rig.surfaces()[0];
+    CHECK(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+    CHECK(reg.get<MaterialComponent>(e).materialAssetId == HE::kEngineWaterMaterialId);
+
+    // The material goes away (a project switch, an unload sweep) and nothing was edited.
+    REQUIRE(rig.cm.unloadAsset(HE::kEngineWaterMaterialId));
+    REQUIRE_FALSE(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+    rig.update();
+    CHECK(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+
+    // The binding is lost (a snapshot that did not carry it, a script) and so is the material.
+    reg.remove<MaterialComponent>(e);
+    REQUIRE(rig.cm.unloadAsset(HE::kEngineWaterMaterialId));
+    rig.update();
+    const auto* mat = reg.try_get<MaterialComponent>(e);
+    REQUIRE(mat);
+    CHECK(mat->materialAssetId == HE::kEngineWaterMaterialId);
+    CHECK(rig.cm.isLoaded(HE::kEngineWaterMaterialId));
+
+    // Bound to something else: a scene that was saved with another material on it.
+    reg.get<MaterialComponent>(e).materialAssetId = HE::UUID{};
+    rig.update();
+    CHECK(reg.get<MaterialComponent>(e).materialAssetId == HE::kEngineWaterMaterialId);
+}
+
+// ── The water material has an id of its own (Thema 230 Schritt 2) ────────────
+// The water material was {0x400, 1}, the id of T_Landscape_Grass_Albedo, and the
+// ContentManager keeps ONE entry per id whatever the type. With that texture
+// resident (any project that has the landscape textures) ensureResident(water)
+// said yes, getMaterial(water) said null and the surface drew the white default,
+// with nothing in the log.
+TEST_CASE("Water surface: a landscape texture on the water material's old id does not take the material away")
+{
+    Rig rig;
+    rig.cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+
+    TextureAsset grass;
+    grass.id   = HE::kLegacyEngineWaterMaterialId;   // T_Landscape_Grass_Albedo's real id
+    grass.name = "T_Landscape_Grass_Albedo";
+    REQUIRE(rig.cm.registerTexture(grass) == HE::kLegacyEngineWaterMaterialId);
+
+    const std::vector<glm::vec2> poly = { { -20, -20 }, { 10, -20 }, { 10, 20 }, { -20, 20 } };
+    addLake(rig.tc(), poly, 2.0f);
+    rig.update();
+    REQUIRE(rig.surfaces().size() == 1);
+
+    // A material, not a texture, answers to the water's id ...
+    const MaterialAsset* water = rig.cm.getMaterial(HE::kEngineWaterMaterialId);
+    REQUIRE(water);
+    CHECK_FALSE(water->customShaderFragGlsl.empty());   // what the renderer draws with; empty = the white default
+    CHECK(rig.world.registry().get<MaterialComponent>(rig.surfaces()[0]).materialAssetId == HE::kEngineWaterMaterialId);
+    // ... and the texture keeps its own.
+    CHECK(rig.cm.getTexture(HE::kLegacyEngineWaterMaterialId) != nullptr);
+    CHECK(rig.cm.getMaterial(HE::kLegacyEngineWaterMaterialId) == nullptr);
+}
+#endif
+
+TEST_CASE("Water material id: a scene saved under the old id still gets the water material")
+{
+    CHECK(HE::kEngineWaterMaterialId != HE::kLegacyEngineWaterMaterialId);
+    // 0x400..0x41F is landscape_tex_gen's block (textures, M_AutoLandscape): one id, one asset.
+    CHECK((HE::kEngineWaterMaterialId.hi < 0x400 || HE::kEngineWaterMaterialId.hi > 0x41F));
+
+    HorizonWorld world;
+    auto& reg = world.registry();
+    const HE::UUID other{ 0x1234, 0x5678 };
+    const Entity e = world.createEntity("Plane");
+    MaterialComponent m;
+    m.materialAssetId = HE::kLegacyEngineWaterMaterialId;
+    m.slotOverrides   = { HE::kLegacyEngineWaterMaterialId, other, HE::UUID{} };
+    reg.emplace<MaterialComponent>(e, m);
+    const Entity f = world.createEntity("Other");
+    MaterialComponent mo;
+    mo.materialAssetId = other;
+    reg.emplace<MaterialComponent>(f, mo);
+
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(world, bytes));
+    HorizonWorld world2;
+    REQUIRE(ser.loadFromMemory(world2, bytes));
+
+    int seen = 0;
+    for (auto [en, mat] : world2.registry().view<MaterialComponent>().each())
+    {
+        if (mat.materialAssetId == HE::kEngineWaterMaterialId)
+        {
+            ++seen;
+            REQUIRE(mat.slotOverrides.size() >= 2);
+            CHECK(mat.slotOverrides[0] == HE::kEngineWaterMaterialId);
+            CHECK(mat.slotOverrides[1] == other);   // the negative control: other ids are not touched
+        }
+        else
+            CHECK(mat.materialAssetId == other);
+    }
+    CHECK(seen == 1);
 }

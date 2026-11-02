@@ -132,13 +132,19 @@ std::vector<Entity> showAll(HorizonWorld& world)
 
 bool anyHidden(HorizonWorld& world)
 {
+	// Its own walk, which stops at the first hidden entity: forEachInScene visits all of them,
+	// and the Entity menu asks this every frame it is open.
 	auto& reg = world.registry();
-	bool any = false;
-	forEachInScene(world, [&](Entity e)
+	std::function<bool(Entity)> hiddenUnder = [&](Entity e)
 	{
-		if (!any && HE::entityVisibility(reg, e) == HE::Visibility::Hidden) any = true;
-	});
-	return any;
+		if (!reg.valid(e)) return false;
+		if (e != world.rootEntity() && HE::entityVisibility(reg, e) == HE::Visibility::Hidden) return true;
+		if (const auto* h = reg.try_get<HierarchyComponent>(e))
+			for (const Entity c : h->children)
+				if (hiddenUnder(c)) return true;
+		return false;
+	};
+	return hiddenUnder(world.rootEntity());
 }
 
 std::vector<Entity> selectableEntities(HorizonWorld& world)

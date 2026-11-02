@@ -3,7 +3,6 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
-#include <vector>
 
 // The player's settings (Thema 85, Schritt 5). The store, its persistence and
 // the rows that change it, in one file rather than spread through EngineApi.cpp
@@ -82,11 +81,9 @@ void applyVolume(const std::string& bus)
 // set has to be handed back to the project, not left at the old choice.
 void applyVolumes(const std::map<std::string, float>& before)
 {
-    std::vector<std::string> buses;
-    for (const auto& [bus, v] : before) buses.push_back(bus);
+    for (const auto& [bus, v] : before) applyVolume(bus);
     for (const auto& [bus, v] : state().values.volumes)
-        if (!before.count(bus)) buses.push_back(bus);
-    for (const std::string& bus : buses) applyVolume(bus);
+        if (!before.count(bus)) applyVolume(bus);
 }
 // The camera values have no hook: the rig controller reads values() itself,
 // every frame, so there is nothing to push.

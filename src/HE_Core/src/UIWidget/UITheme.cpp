@@ -3,8 +3,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <array>
-
 namespace HE
 {
 namespace
@@ -30,8 +28,16 @@ namespace
     bool readColor(const nlohmann::json& j, glm::vec4& out)
     {
         if (!j.is_array() || j.size() != 4) return false;
+        for (const auto& c : j)
+            if (!c.is_number()) return false;
         out = { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
         return true;
+    }
+
+    void setRoleColor(UITheme& t, UIThemeRole r, const glm::vec4& light, const glm::vec4& dark)
+    {
+        t.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Light)] = light;
+        t.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Dark)]  = dark;
     }
 }
 
@@ -151,23 +157,18 @@ const UITheme& uiDefaultTheme()
     {
         UITheme d;
         d.name = "Default";
-        auto set = [&](UIThemeRole r, glm::vec4 light, glm::vec4 dark)
-        {
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Light)] = light;
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Dark)]  = dark;
-        };
-        set(UIThemeRole::Background, { 0.96f, 0.96f, 0.97f, 1.0f }, { 0.09f, 0.09f, 0.11f, 1.0f });
-        set(UIThemeRole::Surface,    { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.15f, 0.15f, 0.18f, 1.0f });
-        set(UIThemeRole::Border,     { 0.80f, 0.80f, 0.83f, 1.0f }, { 0.28f, 0.28f, 0.33f, 1.0f });
-        set(UIThemeRole::Text,       { 0.10f, 0.10f, 0.12f, 1.0f }, { 0.93f, 0.93f, 0.95f, 1.0f });
+        setRoleColor(d, UIThemeRole::Background, { 0.96f, 0.96f, 0.97f, 1.0f }, { 0.09f, 0.09f, 0.11f, 1.0f });
+        setRoleColor(d, UIThemeRole::Surface,    { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.15f, 0.15f, 0.18f, 1.0f });
+        setRoleColor(d, UIThemeRole::Border,     { 0.80f, 0.80f, 0.83f, 1.0f }, { 0.28f, 0.28f, 0.33f, 1.0f });
+        setRoleColor(d, UIThemeRole::Text,       { 0.10f, 0.10f, 0.12f, 1.0f }, { 0.93f, 0.93f, 0.95f, 1.0f });
         // Light muted text was 0.45 and did not reach WCAG's 4.5:1 on the
         // BACKGROUND role — 4.30, which is the ratio uiCheckContrast reported
         // for five of the shipped components at once (a hint under a form row,
         // a list's subtitle). It clears 4.5 on Surface (white) either way; the
         // page it usually sits on is the darker of the two, and that is the one
         // that decides. 0.43 is the smallest step that passes both.
-        set(UIThemeRole::MutedText,  { 0.43f, 0.43f, 0.48f, 1.0f }, { 0.60f, 0.60f, 0.66f, 1.0f });
-        set(UIThemeRole::Accent,     { 0.16f, 0.44f, 0.85f, 1.0f }, { 0.36f, 0.60f, 0.96f, 1.0f });
+        setRoleColor(d, UIThemeRole::MutedText,  { 0.43f, 0.43f, 0.48f, 1.0f }, { 0.60f, 0.60f, 0.66f, 1.0f });
+        setRoleColor(d, UIThemeRole::Accent,     { 0.16f, 0.44f, 0.85f, 1.0f }, { 0.36f, 0.60f, 0.96f, 1.0f });
         // The colour to write ON that accent, and the one pair in this palette
         // that goes the OTHER way round from every other: white in light mode,
         // near-black in dark. That is not a slip — it follows from the accent
@@ -179,10 +180,10 @@ const UITheme& uiDefaultTheme()
         //
         // The dark value is the light theme's Text on purpose: the colour to
         // write on a pale blue IS the colour to write on a pale page.
-        set(UIThemeRole::AccentText, { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.10f, 0.10f, 0.12f, 1.0f });
-        set(UIThemeRole::Warning,    { 0.85f, 0.60f, 0.10f, 1.0f }, { 0.95f, 0.72f, 0.24f, 1.0f });
-        set(UIThemeRole::Error,      { 0.80f, 0.22f, 0.20f, 1.0f }, { 0.93f, 0.40f, 0.36f, 1.0f });
-        set(UIThemeRole::Success,    { 0.16f, 0.60f, 0.32f, 1.0f }, { 0.34f, 0.78f, 0.48f, 1.0f });
+        setRoleColor(d, UIThemeRole::AccentText, { 1.00f, 1.00f, 1.00f, 1.0f }, { 0.10f, 0.10f, 0.12f, 1.0f });
+        setRoleColor(d, UIThemeRole::Warning,    { 0.85f, 0.60f, 0.10f, 1.0f }, { 0.95f, 0.72f, 0.24f, 1.0f });
+        setRoleColor(d, UIThemeRole::Error,      { 0.80f, 0.22f, 0.20f, 1.0f }, { 0.93f, 0.40f, 0.36f, 1.0f });
+        setRoleColor(d, UIThemeRole::Success,    { 0.16f, 0.60f, 0.32f, 1.0f }, { 0.34f, 0.78f, 0.48f, 1.0f });
         // A shadow on a light page is a soft grey; on a dark one it is nearly
         // nothing, which is why elevation there is carried by the surface being
         // lighter rather than by the shadow being darker.
@@ -202,23 +203,18 @@ const UITheme& uiAmberTheme()
     {
         UITheme d = uiDefaultTheme();
         d.name = "Amber";
-        auto set = [&](UIThemeRole r, glm::vec4 light, glm::vec4 dark)
-        {
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Light)] = light;
-            d.color[static_cast<int>(r)][static_cast<int>(UIThemeMode::Dark)]  = dark;
-        };
-        set(UIThemeRole::Background, { 0.95f, 0.93f, 0.89f, 1.0f }, { 0.08f, 0.07f, 0.06f, 1.0f });
-        set(UIThemeRole::Surface,    { 1.00f, 0.99f, 0.96f, 1.0f }, { 0.14f, 0.13f, 0.11f, 1.0f });
-        set(UIThemeRole::Border,     { 0.78f, 0.73f, 0.64f, 1.0f }, { 0.30f, 0.27f, 0.22f, 1.0f });
-        set(UIThemeRole::Text,       { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.94f, 0.92f, 0.88f, 1.0f });
-        set(UIThemeRole::MutedText,  { 0.47f, 0.44f, 0.38f, 1.0f }, { 0.62f, 0.59f, 0.52f, 1.0f });
-        set(UIThemeRole::Accent,     { 0.85f, 0.55f, 0.12f, 1.0f }, { 1.00f, 0.67f, 0.16f, 1.0f });
+        setRoleColor(d, UIThemeRole::Background, { 0.95f, 0.93f, 0.89f, 1.0f }, { 0.08f, 0.07f, 0.06f, 1.0f });
+        setRoleColor(d, UIThemeRole::Surface,    { 1.00f, 0.99f, 0.96f, 1.0f }, { 0.14f, 0.13f, 0.11f, 1.0f });
+        setRoleColor(d, UIThemeRole::Border,     { 0.78f, 0.73f, 0.64f, 1.0f }, { 0.30f, 0.27f, 0.22f, 1.0f });
+        setRoleColor(d, UIThemeRole::Text,       { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.94f, 0.92f, 0.88f, 1.0f });
+        setRoleColor(d, UIThemeRole::MutedText,  { 0.47f, 0.44f, 0.38f, 1.0f }, { 0.62f, 0.59f, 0.52f, 1.0f });
+        setRoleColor(d, UIThemeRole::Accent,     { 0.85f, 0.55f, 0.12f, 1.0f }, { 1.00f, 0.67f, 0.16f, 1.0f });
         // Amber is a bright colour in BOTH modes, so what you write on it is
         // dark in both: white on this orange is 2.7:1 in light and 1.9:1 in
         // dark, which is not text, it is a suggestion of text. Nearly the same
         // value twice, and that is the palette being honest rather than a role
         // that was half filled in.
-        set(UIThemeRole::AccentText, { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.10f, 0.09f, 0.07f, 1.0f });
+        setRoleColor(d, UIThemeRole::AccentText, { 0.12f, 0.11f, 0.09f, 1.0f }, { 0.10f, 0.09f, 0.07f, 1.0f });
 
         // ── …and what each KIND of element looks like in it ──────────────────
         // The roles above are the palette; these are the answers. A theme that
@@ -246,6 +242,8 @@ const UITheme& uiAmberTheme()
         const glm::vec4 accentL { 0.85f, 0.55f, 0.12f, 1.0f }, accentD { 1.00f, 0.67f, 0.16f, 1.0f };
         const glm::vec4 borderL { 0.78f, 0.73f, 0.64f, 1.0f }, borderD { 0.30f, 0.27f, 0.22f, 1.0f };
         const glm::vec4 fieldL  { 0.97f, 0.96f, 0.93f, 1.0f }, fieldD  { 0.10f, 0.09f, 0.08f, 1.0f };
+        const UIThemeStyleValue rowHover    = col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f });
+        const UIThemeStyleValue rowSelected = col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f });
 
         UIThemeStyle& button = d.styleMut("Button");
         button.set("Normal Color",  col({ 0.91f, 0.88f, 0.83f, 1.0f }, { 0.22f, 0.20f, 0.17f, 1.0f }));
@@ -329,16 +327,16 @@ const UITheme& uiAmberTheme()
 
         UIThemeStyle& list = d.styleMut("ListView");
         list.set("Back Color",          col(surfaceL, surfaceD));
-        list.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
-        list.set("Row Selected Color",  col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f }));
+        list.set("Row Hover Color",     rowHover);
+        list.set("Row Selected Color",  rowSelected);
 
         // A tree's rows are the list's rows: same surface, same two highlights.
         UIThemeStyle& tree = d.styleMut("TreeView");
         tree.set("Back Color",          col(surfaceL, surfaceD));
         tree.set("Text Color",          col(textL, textD));
         tree.set("Arrow Color",         col(mutedL, mutedD));
-        tree.set("Row Hover Color",     col({ 0.93f, 0.90f, 0.85f, 1.0f }, { 0.20f, 0.19f, 0.16f, 1.0f }));
-        tree.set("Row Selected Color",  col({ 0.95f, 0.82f, 0.58f, 1.0f }, { 0.38f, 0.28f, 0.12f, 1.0f }));
+        tree.set("Row Hover Color",     rowHover);
+        tree.set("Row Selected Color",  rowSelected);
         tree.set("Bar Color",           col(borderL, borderD));
 
         d.styleMut("ScrollBox").set("Bar Color", col(borderL, borderD));
@@ -440,7 +438,7 @@ bool uiThemeFromJson(const std::string& json, UITheme& out)
     // is simply the default's — black everywhere would be a broken application
     // for a missing key.
     UITheme t = uiDefaultTheme();
-    t.name = j.value("name", t.name);
+    if (const auto n = j.find("name"); n != j.end() && n->is_string()) t.name = n->get<std::string>();
 
     if (const auto colors = j.find("colors"); colors != j.end() && colors->is_object())
         for (int r = 0; r < kRoles; ++r)
@@ -471,9 +469,11 @@ bool uiThemeFromJson(const std::string& json, UITheme& out)
             const auto s = o->find(kElevationNames[e]);
             if (s == o->end() || !s->is_object()) continue;
             if (const auto c = s->find("color"); c != s->end()) readColor(*c, t.shadow[e].color);
-            t.shadow[e].blur = s->value("blur", t.shadow[e].blur);
+            if (const auto b = s->find("blur"); b != s->end() && b->is_number())
+                t.shadow[e].blur = b->get<float>();
             if (const auto off = s->find("offset");
-                off != s->end() && off->is_array() && off->size() == 2)
+                off != s->end() && off->is_array() && off->size() == 2 &&
+                (*off)[0].is_number() && (*off)[1].is_number())
             {
                 t.shadow[e].offsetX = (*off)[0].get<float>();
                 t.shadow[e].offsetY = (*off)[1].get<float>();
@@ -489,14 +489,18 @@ bool uiThemeFromJson(const std::string& json, UITheme& out)
         for (const auto& s : *styles)
         {
             if (!s.is_object()) continue;
-            const std::string key = s.value("for", std::string());
+            const auto forKey = s.find("for");
+            if (forKey == s.end() || !forKey->is_string()) continue;
+            const std::string key = forKey->get<std::string>();
             if (key.empty()) continue;
             UIThemeStyle style;
             if (const auto vals = s.find("values"); vals != s.end() && vals->is_array())
                 for (const auto& e : *vals)
                 {
                     if (!e.is_object()) continue;
-                    const std::string prop = e.value("prop", std::string());
+                    const auto propName = e.find("prop");
+                    if (propName == e.end() || !propName->is_string()) continue;
+                    const std::string prop = propName->get<std::string>();
                     if (prop.empty()) continue;
                     UIThemeStyleValue v;
                     if (const auto n = e.find("number"); n != e.end() && n->is_number())

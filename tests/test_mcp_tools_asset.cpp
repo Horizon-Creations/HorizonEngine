@@ -98,7 +98,7 @@ struct Fixture
 		h.creatableTypes = [this]() -> std::vector<HE::AssetType> {
 			if (restrictTypes) return allowedTypes;
 			std::vector<HE::AssetType> all;
-			for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::Sequence); ++i)
+			for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::LandscapeFoliageLayer); ++i)
 			{
 				const auto t = static_cast<HE::AssetType>(i);
 				if (HE::Ed::isCreatableAssetType(t)) all.push_back(t);
@@ -263,6 +263,20 @@ TEST_CASE("asset_list walks a folder, filters by type and can recurse")
 		f.call("asset_list", json{ { "recursive", true } });
 		CHECK(f.content.assetCount() == before);
 	}
+	SUBCASE("dotfiles are skipped, one level and recursive alike")
+	{
+		std::ofstream(f.root / "Materials" / ".DS_Store") << "junk";
+		std::ofstream(f.root / "Materials" / "UI" / ".DS_Store") << "junk";
+
+		const ToolResult flat = f.call("asset_list", json{ { "path", "Materials" } });
+		REQUIRE_FALSE(flat.isError);
+		CHECK(flat.content["entries"].size() == 3);   // unchanged: Rock, Wood, UI
+
+		const ToolResult deep = f.call("asset_list",
+			json{ { "path", "Materials" }, { "recursive", true } });
+		REQUIRE_FALSE(deep.isError);
+		CHECK(deep.content["entries"].size() == 4);   // unchanged: + Menu
+	}
 }
 
 // ─── The boundary ────────────────────────────────────────────────────────────
@@ -337,7 +351,7 @@ TEST_CASE("asset_create covers every authored type it offers")
 {
 	Fixture f("create_all");
 	int made = 0;
-	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::Sequence); ++i)
+	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::LandscapeFoliageLayer); ++i)
 	{
 		const auto t = static_cast<HE::AssetType>(i);
 		if (!HE::Ed::isCreatableAssetType(t)) continue;
@@ -723,7 +737,7 @@ TEST_CASE("assetTypeFromName is the exact inverse of assetTypeName")
 	// The pair these tools' `type` argument rides on. A type the forward
 	// direction cannot name is one no client can ever ask for — which is how
 	// BoneMask and BlendSpace went missing from the switch in Types/Enums.h.
-	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::Sequence); ++i)
+	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::LandscapeFoliageLayer); ++i)
 	{
 		const auto t = static_cast<HE::AssetType>(i);
 		const std::string name = HE::assetTypeName(t);

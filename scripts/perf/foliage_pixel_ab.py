@@ -93,7 +93,7 @@ def main() -> int:
     ap.add_argument("--before", required=True, help="deploy dir of the editor before the change (self-contained copy)")
     ap.add_argument("--after", required=True, help="deploy dir of the editor with the change")
     ap.add_argument("--out", default="/tmp/foliage_ab", help="where the BMPs and logs go")
-    ap.add_argument("--rhi", default="Metal", choices=["Metal", "OpenGL"])
+    ap.add_argument("--rhi", default="Metal", choices=["Metal", "OpenGL", "D3D11", "D3D12", "Vulkan"])
     ap.add_argument("--only", default="", help="comma list of case names (default: all)")
     ap.add_argument("--keep", action="store_true", help="keep the BMPs of cases that are identical too")
     args = ap.parse_args()

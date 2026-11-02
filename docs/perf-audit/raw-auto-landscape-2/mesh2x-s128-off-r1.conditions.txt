@@ -1,0 +1,17 @@
+== mesh2x-s128-off-r1  2026-10-21 05:06:11  attempt 1
+before:
+  uptime:    load averages: 2.71 2.49 2.38
+  locked:    Yes
+  lowpower:  0
+  gpu:       80
+  power:     Now drawing from 'AC Power'
+  busy:      32.2% Python; 13.6% Python; 9.7% coreaudiod; 7.4% claude
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.07 2.36 2.34
+  locked:    Yes
+  lowpower:  0
+  gpu:       83
+  power:     Now drawing from 'AC Power'
+  busy:      17.9% (mlhostd); 11.8% coreaudiod; 11.1% Dock; 4.6% Python
+  foreign:   none

@@ -65,6 +65,18 @@ struct State
 
 static AssetPanelState<State> s_states;
 
+// The reset a reload needs: drop `loaded` so the next frame re-reads the file,
+// clear `dirty` (anything "unsaved" is stale once a peer's change has landed),
+// and clear both collab mirrors so the first diff after the reload compares
+// against the document that is about to replace them, not the old one.
+static void resetStateForReload(State& st)
+{
+	st.loaded = false;
+	st.dirty = false;
+	st.collabMirror = {};
+	st.collabSyncMirror = {};
+}
+
 static State& stateFor(const std::string& path, AppContext& ctx)
 {
 	State& st = s_states[path];
@@ -72,17 +84,18 @@ static State& stateFor(const std::string& path, AppContext& ctx)
 
 	st.assetId = openPanelAsset(ctx, path, st.name, st.relPath);
 
-	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId);
-	    asset && !asset->graphJson.empty())
+	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId))
 	{
-		HE::AnimatorStateMachineGraph parsed;
-		if (HE::animatorStateMachineFromJson(asset->graphJson, parsed)) st.graph = std::move(parsed);
-	}
-	if (const AnimatorStateMachineAsset* asset = ctx.contentManager->getAnimatorStateMachine(st.assetId);
-	    asset && !asset->syncGraphJson.empty())
-	{
-		HorizonCode::Graph parsed;
-		if (HorizonCode::fromJson(asset->syncGraphJson, parsed)) st.syncGraph = std::move(parsed);
+		if (!asset->graphJson.empty())
+		{
+			HE::AnimatorStateMachineGraph parsed;
+			if (HE::animatorStateMachineFromJson(asset->graphJson, parsed)) st.graph = std::move(parsed);
+		}
+		if (!asset->syncGraphJson.empty())
+		{
+			HorizonCode::Graph parsed;
+			if (HorizonCode::fromJson(asset->syncGraphJson, parsed)) st.syncGraph = std::move(parsed);
+		}
 	}
 
 	// A sync graph has exactly one entry point and it is not optional, so it is
@@ -191,13 +204,7 @@ bool reloadFromDisk(const std::string& assetPath)
 	// panel is read-only anyway, so anything "unsaved" here is stale.
 	auto* st = s_states.find(assetPath);
 	if (!st) return false;
-	st->loaded = false;
-	st->dirty = false;
-	// The mirror describes the document that is about to be replaced. Leaving
-	// it would make the first diff after the reload report the difference
-	// between the peer's file and our old graph as OUR edit.
-	st->collabMirror = {};
-	st->collabSyncMirror = {};
+	resetStateForReload(*st);
 	return true;
 }
 
@@ -231,13 +238,10 @@ bool reloadByContentPath(const std::string& contentPath)
 {
 	State* st = stateByContentPath(contentPath);
 	if (!st) return false;
-	// The same three lines reloadFromDisk sets, and safe for the same reason: the
+	// The same reset reloadFromDisk does, and safe for the same reason: the
 	// MCP tools refuse outright when this tab has unsaved edits
 	// (McpAnimatorHooks), so there is never anything precious to clear here.
-	st->loaded = false;
-	st->dirty  = false;
-	st->collabMirror = {};
-	st->collabSyncMirror = {};
+	resetStateForReload(*st);
 	return true;
 }
 

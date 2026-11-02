@@ -5,6 +5,7 @@
 #include <string>
 #include <ContentManager/Assets.h>   // AudioAsset, AudioEncoding
 #include <HorizonScene/AudioAttenuation.h>
+#include <Audio/AudioBusConfig.h>   // AudioSpatialBackend
 
 namespace HE { struct AudioBusConfig; }
 
@@ -94,6 +95,45 @@ public:
     // list). What the asset overloads below route by, and what the Audio
     // Editor's preview asks so it plays where the game will.
     std::string routeFor(const std::string& requestedBus, const std::string& assetBus) const;
+
+    // ─── Spatial backend ─────────────────────────────────────────────────────
+
+    // Who spatialises 3D voices: miniaudio's own pan + distance gain (the
+    // default, always available) or Steam Audio's HRTF (an optional, build-time
+    // included library — see SteamAudio.h). Switchable at any time, also while
+    // sounds play; applyBusConfig() passes the project's choice on.
+    //
+    // Returns whether the REQUESTED backend is now the active one. Asking for
+    // Steam Audio in a build without it, or when libphonon cannot be loaded,
+    // leaves the engine on miniaudio (false) with spatialBackendStatus() saying
+    // why — it never fails a game. requestedSpatialBackend() keeps the ask, so a
+    // settings UI can show "wanted, unavailable" instead of silently resetting.
+    bool setSpatialBackend(HE::AudioSpatialBackend backend);
+    HE::AudioSpatialBackend spatialBackend() const;            // what is active
+    HE::AudioSpatialBackend requestedSpatialBackend() const;   // what was asked for
+    // One line for the UI/log: "Steam Audio 4.8.1 active", "Steam Audio not in
+    // this build", "libphonon could not be loaded: …", or "miniaudio".
+    std::string spatialBackendStatus() const;
+    // The extra Steam Audio features (air absorption, occlusion, reflections, pathing).
+    // Kept as asked even while the backend is off or missing; they act on voices started
+    // while the backend is active. applyBusConfig() passes the project's choice on.
+    // How much of a Steam Audio voice gets through the geometry between it and the listener
+    // (HorizonScene/AudioOcclusion.h): `visibility` 1 = clear, 0 = blocked; `transmission`
+    // the three band gains (low / mid / high) of what a blocker passes. No effect on a voice
+    // that was not started with the occlusion option on, or is not on the Steam Audio backend.
+    void setSoundOcclusion(uint64_t handle, float visibility, const float transmission[3]);
+    // Where a Steam Audio voice is HEARD from while its sound arrives by a detour (round a
+    // corner, through a door: HorizonScene/AudioPath.h): the direction and distance the HRTF and
+    // the falloff use instead of the source's own position. `active` false = hear it where it is.
+    void setSoundPath(uint64_t handle, bool active, float x, float y, float z);
+    // The reverb of the room the listener is in (HorizonScene/AudioRoom.h): RT60 seconds per band
+    // (low / mid / high) and how much of it to mix in, 0..1. Heard on Steam Audio voices started
+    // with the reflections option on.
+    void setRoomReverb(const float reverbTimes[3], float wet);
+    void setSteamOptions(const HE::AudioSteamOptions& options);
+    const HE::AudioSteamOptions& steamOptions() const;
+    // Whether this binary contains the Steam Audio backend at all.
+    static bool steamAudioCompiledIn();
 
     // ─── Playback ────────────────────────────────────────────────────────────
 

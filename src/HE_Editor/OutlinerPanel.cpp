@@ -156,7 +156,11 @@ namespace
                 // Thema 174 Schritt 14's "not a flat list" ask. Parenting alone
                 // has nothing to misalign; a second reparent just moves the
                 // still-bare spline again, same as any other preset.
-                for (auto te : world.registry().view<TerrainComponent>()) { world.reparentEntity(e, te); break; }
+                for (auto te : world.registry().view<TerrainComponent>())
+                {
+                    world.reparentEntity(e, te);
+                    break;
+                }
                 break;
             }
             default: break;
@@ -396,8 +400,15 @@ namespace
         const ImVec2 max(min.x + w, min.y + h);
         dl->AddRectFilled(min, max, fill, h * 0.5f);
         if (edge) dl->AddRect(min, max, edge, h * 0.5f, 0, 1.0f);
+        // A chip's ink is its fill's hue (a collaborator's colour on a 22 % pill
+        // of the same colour was 3.3 to 3.5:1), so it is held to the theme's
+        // floor on the pill as it lands on the window.
+        const ImVec4 ground = HE::Ed::Theme::over(ImGui::ColorConvertU32ToFloat4(fill),
+                                                  ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+        const ImU32 readable = HE::Ed::Theme::u32(
+            HE::Ed::Theme::readableOn(ImGui::ColorConvertU32ToFloat4(ink), ground));
         dl->AddText(ImVec2(std::floor(min.x + 6.0f), std::floor(min.y + (h - ImGui::GetFontSize()) * 0.5f)),
-                    ink, text);
+                    readable, text);
     }
 
     // The two buttons at the right edge of one Outliner row, over the row. They
@@ -1662,7 +1673,9 @@ void render(AppContext& ctx)
                         prefabChanged = inst->overrides.size() + node.structuralChanges;
                         Badge& b = badges[nb];
                         b.text = prefabAsset && !prefabAsset->name.empty() ? prefabAsset->name : "Prefab";
-                        b.fill = ImGui::GetColorU32(HE::Ed::Theme::alpha(accent, prefabChanged ? 0.80f : 0.14f));
+                        // Changed: the full accent, because its dark ink reached
+                        // only 4.2:1 on the accent at 0.80 over the window.
+                        b.fill = ImGui::GetColorU32(HE::Ed::Theme::alpha(accent, prefabChanged ? 1.0f : 0.14f));
                         b.edge = prefabChanged ? 0u : ImGui::GetColorU32(HE::Ed::Theme::alpha(accent, 0.55f));
                         b.ink  = prefabChanged ? ImGui::GetColorU32(ImVec4(0.10f, 0.08f, 0.05f, 1.0f))
                                                : ImGui::GetColorU32(HE::Ed::Theme::AccentHi);

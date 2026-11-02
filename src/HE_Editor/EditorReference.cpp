@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace HE::Ed::EditorReference
@@ -85,8 +86,8 @@ void install(Docs::Library& lib)
 		// Grouped by where the control sits, so the page reads in the order
 		// somebody walks the panel — and so the sidebar can fold it.
 		std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
-			const int g = std::string(a.area->group).compare(b.area->group);
-			return g != 0 ? g < 0 : std::string(a.entry->key) < std::string(b.entry->key);
+			const int g = std::string_view(a.area->group).compare(b.area->group);
+			return g != 0 ? g < 0 : std::string_view(a.entry->key) < std::string_view(b.entry->key);
 		});
 
 		for (const Row& r : rows)

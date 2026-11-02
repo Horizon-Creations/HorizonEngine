@@ -78,6 +78,23 @@ public:
 			if (uuid == id) return path;
 		return {};
 	}
+	// The UUIDs of every loose asset of THIS project — the registry plus what was
+	// loaded or saved since the last scan, without the shipped "Engine/…"
+	// defaults every project has. What a collaboration session compares on join
+	// to tell two copies of one project from two projects that share a manifest
+	// id, and what it resolves a peer's asset id against. Unordered; a pure
+	// lookup that loads nothing.
+	std::vector<HE::UUID> projectAssetIds() const
+	{
+		std::vector<HE::UUID> out;
+		out.reserve(m_diskRegistry.size() + m_pathToUUID.size());
+		const auto own = [](const std::string& p) { return p.rfind("Engine/", 0) != 0; };
+		for (const auto& [id, path] : m_diskRegistry)
+			if (own(path)) out.push_back(id);
+		for (const auto& [path, id] : m_pathToUUID)
+			if (own(path) && !m_diskRegistry.count(id)) out.push_back(id);
+		return out;
+	}
 	bool saveAsset(RuntimeAsset& asset);
 	// The same bytes saveAsset() would write, written to `fullPath` instead —
 	// the editor's crash-recovery copy of an asset tab (AssetAutosave). It is a
@@ -167,6 +184,25 @@ public:
 	// buffer (same reasoning as getMaterialMutable), a slot assigned there is
 	// what the renderer draws next frame, and saveAsset() persists it.
 	StaticMeshAsset*           getStaticMeshMutable(HE::UUID id);
+	// For a texture that is rewritten in place every frame (the landscape's trail clipmap): the caller edits `data` and
+	// tells the renderer with IRenderer::InvalidateTexture, no new asset and no copy.
+	TextureAsset*              getTextureMutable(HE::UUID id);
+
+	// ── CPU pixel copies of uploaded textures (the shipped game's RAM) ──────────────────
+	// A texture asset keeps its bytes (`data`) after the renderer has copied them into a GPU
+	// texture, so a game holds every texture twice. Block-compressed bytes (ASTC/BC) are not
+	// readable on the CPU anyway, so once a backend has uploaded them nothing needs them.
+	// Off by default (the editor, the exporter and the tools read pixels); the game turns it on.
+	void setReleaseCpuPixelsAfterUpload(bool on) { m_releaseCpuPixels = on; }
+	// Called by a backend right after it uploaded `id`. Frees `data` of a block-compressed
+	// texture that came out of a mounted pak (so the bytes can be read back) and that no CPU
+	// code reads: not RGBA8 (terrain weights, trails, widgets read those) and not an array
+	// without baked slice means (the GI landscape colours read those). True when freed.
+	bool releaseCpuPixels(HE::UUID id);
+	// Brings the bytes of a released texture back from the pak, for a second upload (the same
+	// asset used as a UI image and a material texture, a cache that was flushed). Returns the
+	// asset, or null when it is not loaded. A no-op for a texture that still has its bytes.
+	const TextureAsset*        restoreCpuPixels(HE::UUID id);
 	SkeletalMeshAsset*         getSkeletalMeshMutable(HE::UUID id);
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
@@ -208,6 +244,10 @@ public:
 	// reason: the editor edits the loaded asset and persists it with saveAsset().
 	const SequenceAsset*         getSequence(HE::UUID id) const;
 	SequenceAsset*               getSequenceMutable(HE::UUID id);
+	// A foliage rule set for a landscape, parsed once at load. Mutable for the same
+	// reason as the sequence: an editor edits the loaded document in place.
+	const LandscapeFoliageLayerAsset* getLandscapeFoliageLayer(HE::UUID id) const;
+	LandscapeFoliageLayerAsset*       getLandscapeFoliageLayerMutable(HE::UUID id);
 	const ThemeAsset*            getTheme(HE::UUID id) const;
 	ThemeAsset*                  getThemeMutable(HE::UUID id);
 	const BoneMaskAsset*         getBoneMask(HE::UUID id) const;
@@ -286,6 +326,7 @@ public:
 	HE::UUID registerAnimationClip(AnimationClipAsset asset);
 	HE::UUID registerPropertyAnimClip(PropertyAnimClipAsset asset);
 	HE::UUID registerSequence(SequenceAsset asset);
+	HE::UUID registerLandscapeFoliageLayer(LandscapeFoliageLayerAsset asset);
 	HE::UUID registerParticleGraph(ParticleGraphAsset asset);
 	HE::UUID registerAnimatorStateMachine(AnimatorStateMachineAsset asset);
 	HE::UUID registerStructType(StructTypeAsset asset);
@@ -557,6 +598,8 @@ public:
 		size_t   lastPollLeft    = 0;   // results it left for the next call (budget)
 	};
 	const AsyncPollStats& asyncPollStats() const { return m_asyncPollStats; }
+	// Decoded bytes of finished async loads that pollAsyncResults has not taken yet.
+	std::uint64_t asyncBacklogBytes() const { return m_asyncSink->backlogBytes.load(std::memory_order_relaxed); }
 	// Live read progress of an in-flight job: bytes read so far and the file's total
 	// size (0 until the worker has opened the file). False when nothing is in flight
 	// for that path — so a caller can drive a real progress bar for a big asset and
@@ -700,6 +743,9 @@ private:
 		// pollAsyncResults checks whether someone asked again meanwhile.
 		bool                           cancelled = false;
 		HE::UUID                       pakId{};       // pak loads: what to relaunch
+		// Size of the decoded asset, counted in AsyncSink::backlogBytes from the
+		// moment the worker queues the result until the main thread takes it.
+		std::uint64_t                  bytes = 0;
 	};
 
 	// Who asked for a load: their cancel tokens, or `pinned` when one of them
@@ -718,6 +764,13 @@ private:
 	struct LoadInterest {
 		mutable std::mutex m;
 		LoadRequester      who;
+		// The queued jobs of this load (set by launchPathLoad/launchPakLoad: one for
+		// a file, the read and the decode for a pak entry), so a requester that asks
+		// for more urgency than the load was queued with can move them up
+		// (join → JobHandle::promote) instead of leaving them in the Low lane behind
+		// the cap. A job holds this interest and this holds the jobs; the cycle ends
+		// when they finish and drop their callables.
+		std::vector<HE::JobHandle> jobs;
 		void          join(const LoadRequester& r);
 		bool          stale() const;
 		LoadRequester snapshot() const;
@@ -781,8 +834,17 @@ private:
 	struct AsyncSink {
 		std::mutex              mutex;
 		std::queue<AsyncResult> results;   // ready to register (drained on main thread)
+		// Bytes of decoded assets sitting in `results`. The workers outrun the main
+		// thread's few milliseconds a frame, so without a bound a jump across the
+		// world queues every requested asset's bytes in RAM at once; a Low job that
+		// would start while this is over kAsyncBacklogBytes waits (awaitBacklogRoom).
+		std::atomic<std::uint64_t> backlogBytes{ 0 };
+		std::condition_variable    drained;   // notified under `mutex` when the main thread takes results
 	};
 	std::shared_ptr<AsyncSink> m_asyncSink = std::make_shared<AsyncSink>();
+
+	static void pushAsyncResult(AsyncSink& sink, AsyncResult&& result);
+	static void awaitBacklogRoom(AsyncSink& sink, const LoadInterest& interest);
 
 	// ── Remote (SFTP-backed) EngineContent assets — see registerRemoteAsset() ──
 	struct RemoteAssetEntry {
@@ -847,6 +909,7 @@ private:
 	SlotMap<BoneMaskAsset>           m_boneMaskAssets;
 	SlotMap<BlendSpaceAsset>         m_blendSpaceAssets;
 	SlotMap<SequenceAsset>           m_sequenceAssets;
+	SlotMap<LandscapeFoliageLayerAsset> m_landscapeFoliageLayerAssets;
 
 	// The ONE list of every SlotMap above. A new pool goes here as well, nowhere
 	// else: unloadAsset, forgetProjectContent and retargetAssetReferencesInMemory
@@ -872,7 +935,7 @@ private:
 		       f(m_structTypeAssets)       || f(m_enumTypeAssets)      ||
 		       f(m_saveTemplateAssets)     || f(m_themeAssets)         ||
 		       f(m_boneMaskAssets)         || f(m_blendSpaceAssets)    ||
-		       f(m_sequenceAssets);
+		       f(m_sequenceAssets)         || f(m_landscapeFoliageLayerAssets);
 	}
 	template<typename F>
 	void forEachPool(F&& f)
@@ -889,12 +952,25 @@ private:
 	};
 	std::vector<MountedPak>                       m_mounts;        // overlay stack (later = higher priority)
 	std::unordered_map<HE::UUID, size_t>          m_pakResidency;  // UUID → index into m_mounts
+	bool                                          m_releaseCpuPixels = false;   // see releaseCpuPixels
+	std::unordered_set<HE::UUID>                  m_pixelsReleased;             // textures whose `data` was freed
 	std::unordered_map<HE::UUID, std::string>     m_diskRegistry;  // UUID → relative path (loose content)
 	// Content-relative path → UUID for assets that live ONLY in a mounted pak,
 	// loaded from each pak's __asset_index__ at mount. Lets loadAsset("<path>")
 	// resolve a pak asset that no UUID reference closure reached (e.g. a widget a
 	// HorizonCode script creates by path). Later mounts overwrite (overlay).
 	std::unordered_map<std::string, HE::UUID>     m_pakPathIndex;
+	// Reverse of the above (UUID → addressed path), filled from the same
+	// __asset_index__ entries. loadAssetFromMemory() uses it to register a
+	// streamed-by-UUID asset into m_pathToUUID under its ADDRESSED path
+	// ("Engine/Materials/Foo.hasset") instead of its raw embedded META path
+	// ("Materials/Foo.hasset" for an engine default — see HpakWriter's
+	// metaInNamespace comment). Without it, the first UUID-only load of an
+	// engine asset (the normal case: a MaterialComponent/mesh-section reference
+	// in a packed game never names a path) poisoned m_pathToUUID under the bare
+	// name, which could then hijack a project asset addressed by that same
+	// relative path.
+	std::unordered_map<HE::UUID, std::string>     m_pakIdToAddressedPath;
 
 	std::unordered_map<HE::UUID, SlotHandle>                              m_handleToUUID;
 	// UUID → type. Two origins: loading an asset adds its type, and mounting a pak

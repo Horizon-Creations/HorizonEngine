@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 // ─── The procedural sky shader: one source, four backends ────────────────────
 // kSkyFS + kSkyFuncGLSL below are THE sky: the single-scattering atmosphere,
@@ -297,7 +298,12 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float time, float milkyWay)
 		// glow. (Windowed to zero by one cell so a wide glow can't be clipped to a square.)
 		float halo  = exp(-(d * d) / (sigma * sigma * 3.5)) * sz * sz * 0.14 * uStarGlow;
 		float win   = smoothstep(1.0, 0.6, d);                 // fully gone by the cell boundary
-		float shape = (core * 1.8 + halo) * win;              // ×1.8 → centres clip to white (crisp)
+		// Energy-conserving AA floor: when the pixel footprint widens sigma beyond the star's
+		// real radius (low-res targets such as the 128² GI-reflection sky cube), spread the same
+		// energy over the wider disk instead of keeping the peak — otherwise stars come out fat
+		// and bright there. 1.0 whenever radius >= pix*0.6, i.e. the normal full-res view.
+		float aaE   = min(1.0, (radius * radius) / (sigma * sigma));
+		float shape = (core * 1.8 + halo) * win * aaE;        // ×1.8 → centres clip to white (crisp)
 		float mag   = (0.4 + 0.6 * smoothstep(thresh, 1.0, present)) * mix(0.8, 2.6, sz);
 		// Per-star twinkle: own phase + frequency so the field shimmers in real time. The
 		// amount is user-controlled: uStarTwinkle 0 = steady, 0.6 = the classic look,
@@ -2540,11 +2546,11 @@ vec4 heSkyTexture(sampler3D s, vec3 p)  { return textureLod(s, p, 0.0); }
 // missing, which the callers treat like a failed compile.
 inline std::string BuildSkyFragmentGLSL450()
 {
-	const std::string fs     = kSkyFS;
-	const std::string marker = "//#SKYFUNC#";
-	const size_t      at     = fs.find(marker);
+	const std::string_view fs     = kSkyFS; // view, not a copy of the ~2200-line shader
+	const std::string      marker = "//#SKYFUNC#";
+	const size_t           at     = fs.find(marker);
 	if (at == std::string::npos) return {};
-	return std::string(kSkyVulkanPrelude) + kSkyFuncGLSL + fs.substr(at + marker.size());
+	return std::string(kSkyVulkanPrelude) + kSkyFuncGLSL + std::string(fs.substr(at + marker.size()));
 }
 
 // Fullscreen far-plane triangle for the cross-compiled sky pixel shader on

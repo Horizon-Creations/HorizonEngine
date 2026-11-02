@@ -43,6 +43,13 @@ struct EditorCameraOverride
     // because the same override feeds the panel's own pick extract, and the
     // picker must see exactly the quads the frame drew.
     bool      editorIcons  = true;
+    // RenderSceneImage only: the picture is the materials' own output, untouched. An unlit material's colour
+    // comes back byte for byte (no tonemap, gamma, bloom, SSAO, AA, depth of field, reflections or GI), which
+    // is what a baker needs when it photographs a material's albedo or a data view. Forward path only.
+    bool      rawOutput    = false;
+    // With rawOutput: the colour is written sRGB-encoded (the exact curve), for a picture that becomes an sRGB
+    // texture. Without it the 8 bits hold the linear value, which is what data views (normals, roughness) want.
+    bool      rawSrgb      = false;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -245,6 +252,9 @@ public:
         // forward regardless of SetRenderPath. What each backend's deferred
         // frame does and does not run (decals, SSR, AO) is plan §10.3/§10.12.
         bool supportsDeferredRendering = false;
+        // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
+        // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
+        bool supportsRawCapture = false;
         // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
         // plan.md). Metal (in the deferred tile path: lag-free, from the stored
         // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last
@@ -302,6 +312,13 @@ public:
     // Called every frame for the primary window.
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
+
+    // Why GI reflections cannot run although Capabilities::supportsGIReflections says the
+    // backend has them: the pipelines are built on the first GI frame, so a driver that
+    // refuses them (or a package without their shaders) is only known afterwards. Empty
+    // while everything is fine or not yet tried. The settings panel shows it under the
+    // checkbox; before, the switch simply did nothing.
+    virtual std::string GIReflectionsInactiveReason() const { return {}; }
 
     // Blocks until the primary window can take another frame (Metal: acquires
     // the next drawable). Application::Run calls it at the top of the frame,
@@ -734,6 +751,19 @@ public:
     // pipelines are a cheap cache hit. No-op on backends that build eagerly.
     virtual void WarmupMaterials(const std::vector<HE::UUID>& /*materialIds*/) {}
 
+    // ── Background shader builds ───────────────────────────────────────────
+    // A backend that compiles material pipelines off the render thread (Metal)
+    // does not draw an object whose pipeline is still compiling; it appears when
+    // the build lands. `pending` is how many builds are still running, `total`
+    // how many were started since the queue was last empty (so a progress bar
+    // reads total - pending of total). Both 0 on a backend that builds
+    // synchronously, which is the default.
+    struct ShaderBuildStatus { int pending = 0; int total = 0; };
+    // Collects the builds that finished since the last call and reports the
+    // state. Main thread. Cheap enough for once per frame, and the loop of a
+    // startup step ("Compiling shaders 3/8") that waits for pending == 0.
+    virtual ShaderBuildStatus PumpShaderBuilds() { return {}; }
+
     // ── Material preview ───────────────────────────────────────────────────
     // Render a single primitive shaded with material `materialId` into a small
     // dedicated offscreen target and return an ImGui-compatible texture handle
@@ -766,6 +796,13 @@ public:
                                         int /*shape*/ = 0, const HE::UUID& /*meshId*/ = HE::UUID{},
                                         float /*timeSeconds*/ = -1.0f)
     { return nullptr; }
+
+    // Whether this backend draws a graph material's Displacement pin with GPU
+    // tessellation (Thema 207). False = the fallback: the pin has no effect and
+    // the material draws exactly like its unconnected twin. The Material Editor
+    // asks this to say so next to the pin, instead of a flat preview that looks
+    // like a broken graph.
+    virtual bool SupportsTessellation() const { return false; }
 
     // ── Skeletal mesh preview ──────────────────────────────────────────────
     // Render a skeletal mesh (skinned with `boneMatrices`, or the bind pose if

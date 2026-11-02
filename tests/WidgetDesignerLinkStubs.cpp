@@ -49,7 +49,6 @@ namespace EditorSettingsPanel
 	// show their own switch, hint and (greyed) emptiness, which is all the tests
 	// look at.
 	void DrawEngineSettings(AppContext&, SettingsMode, const DrawOptions&) {}
-	void DrawRepositorySection(AppContext&) {}
 }
 
 namespace HcRenameDialog

@@ -1,0 +1,17 @@
+== detail2x-s128-x4ns-r3  2026-10-21 05:50:22  attempt 1
+before:
+  uptime:    load averages: 1.97 2.11 2.21
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      16.8% Python; 9.3% coreaudiod; 9.0% clion; 6.8% managedappdistributiond
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.22 2.15 2.22
+  locked:    Yes
+  lowpower:  0
+  gpu:       85
+  power:     Now drawing from 'AC Power'
+  busy:      78.6% clion; 12.5% Dock; 10.5% coreaudiod; 5.6% WindowServer
+  foreign:   none

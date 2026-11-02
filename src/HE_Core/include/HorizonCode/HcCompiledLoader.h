@@ -12,7 +12,13 @@
 //
 //   extern "C" const CompiledClassEntry* HE_HorizonCodeGenClasses(int*, const char**);
 //
-// checks the baked engineVersion against the running engine's, and serves
+// checks the baked engineVersion against the running engine's and the baked
+// build profile
+//
+//   extern "C" const char* HE_HorizonCodeGenProfile();   // "dev" / "release"
+//
+// against the engine's (Thema 211 step 13: no dev classes on a release engine;
+// a library without it predates the check and is refused too), and serves
 // key → factory lookups to the four hosts (GameInstance, createObject,
 // WidgetManager, level scripts). A missing/rejected library is NOT an error —
 // every lookup then misses and the graphs run interpreted (per-asset hybrid).
@@ -25,9 +31,12 @@ class HE_API CompiledClassTable
 {
 public:
     // Load + validate the manifest. Returns false (and stays empty) when the
-    // file is missing, exports don't resolve, or the version doesn't match —
-    // each with its own log line so a misconfiguration is loud.
-    bool load(const std::filesystem::path& libPath, const std::string& engineVersion);
+    // file is missing, exports don't resolve, the version or the profile doesn't
+    // match — each with its own log line so a misconfiguration is loud.
+    // `profile` = the profile the library must have; null = this engine's own
+    // (HE::kBuildProfileName of the library this loader is compiled into).
+    bool load(const std::filesystem::path& libPath, const std::string& engineVersion,
+              const char* profile = nullptr);
 
     const CompiledClassEntry* find(const std::string& key) const;
     // Instantiate `key`, or a null CompiledPtr when the table has no entry

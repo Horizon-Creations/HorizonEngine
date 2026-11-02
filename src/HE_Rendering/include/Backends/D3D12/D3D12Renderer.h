@@ -72,6 +72,11 @@ public:
     // Ray-traced DDGI (software BVH + CS 5.0 compute) — pushed every frame by
     // the editor prefs / packaged game, mirroring the Metal/GL/D3D11 backends.
     void SetGISettings(const GISettings& settings) override;
+    // Ray-traced GI reflections (docs/gi-reflections-cross-backend-plan-2026-10-20.md):
+    // the GL model on the same software BVH. Graph materials (heLitP) read the
+    // result through heGIReflFwd (t32); the built-in scene shader has no stage
+    // for it yet.
+    void SetGIReflectionSettings(const GIReflectionSettings& settings) override;
     // Forward screen-space reflections (docs/ssr-cross-backend-plan.md checkpoint D).
     // Post-chain only: the trace reads the previous frame's HDR colour, which the
     // editor viewport and the packaged game (SetSwapchainPostProcessing) have and
@@ -90,6 +95,7 @@ public:
     // top of the next DrawScene: render thread, material resources up, and the frame's
     // HDR/LDR target already decided) — mirrors GL/Metal; cache hits are free.
     void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+    bool SupportsTessellation() const override;
     // Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
     // next material draw re-uploads it.
     void InvalidateTexture(const HE::UUID& textureId) override;

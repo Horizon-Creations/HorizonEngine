@@ -1,0 +1,4 @@
+2026-10-22 01:17-03:55, MacBook Air M5, AC power, lowpowermode 0, thermal nominal, CGSSessionScreenIsLocked=Yes (screen locked).
+Load average before runs 2.3-5.0; a second bee (topic 237) ran editor captures in parallel during parts of the session.
+Binaries: worktree claude-auto-landscape-material-2-0-alle- (6479c3d1) editor+game; own build of this branch for own-steady-s512x4.
+Profile dumps (3-6 MB each) are not kept; *.report.txt are thread_timeline_report.py output of them.

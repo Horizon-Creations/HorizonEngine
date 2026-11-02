@@ -1,0 +1,7 @@
+== after-OpenGL-500000-all-r1
+before:
+  cpu 6%  procs:
+  gpu (util, temp, sm clock): 3 %, 36, 2910 MHz
+after (rc=0):
+  cpu 5%  procs:
+  gpu (util, temp, sm clock): 56 %, 38, 2910 MHz

@@ -5,6 +5,7 @@
 #include <Net/LoopbackTransport.h>
 #include <Net/NetSession.h>
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -117,7 +118,8 @@ void writeJoinRequest(BitWriter& w, const std::string& name,
                       const std::string& clientKey  = {},
                       std::uint16_t avatarSize = 0,
                       ParticipantColor wish = {},
-                      bool syncLargeAssets = false) {
+                      bool syncLargeAssets = false,
+                      const ProjectFingerprint& fingerprint = {}) {
     w.writeUInt16(kCollabProtocolVersion);
     w.writeString(name);
     w.writeString(projectKey);
@@ -129,6 +131,11 @@ void writeJoinRequest(BitWriter& w, const std::string& name,
     w.writeByte(wish.g);
     w.writeByte(wish.b);
     w.writeBool(syncLargeAssets);
+    // v18: the project fingerprint closes the request. The default is the empty one an
+    // editor without a project sends: no assets, no sketch.
+    w.writeUInt32(fingerprint.assetCount);
+    w.writeByte(static_cast<std::uint8_t>(fingerprint.sketch.size()));
+    for (const std::uint64_t h : fingerprint.sketch) w.writeUInt64(h);
 }
 
 int colorDistSq(const ParticipantColor& a, const ParticipantColor& b) {
@@ -1278,6 +1285,87 @@ TEST_CASE("CollabSession: the host's asset save reaches clients")
     CHECK(got.bytes == payload);
 }
 
+TEST_CASE("CollabSession: a host's asset is serialized once for all peers, not once per peer")
+{
+    // NET-103. Three peers on a transport that fans out (a relay): every frame
+    // of the transfer — Begin, each chunk, End — must be handed down exactly
+    // once, addressed to all three, instead of three per-peer copies.
+    struct Fan final : ITransport {
+        std::deque<NetEvent> ev{ { NetEventType::Connected, 1, {} },
+                                 { NetEventType::Connected, 2, {} },
+                                 { NetEventType::Connected, 3, {} } };
+        std::vector<std::vector<ConnectionId>> to;
+        std::vector<std::vector<std::uint8_t>> frames;
+        int plainSends = 0;
+        void update() override {}
+        void send(ConnectionId, const std::uint8_t*, std::size_t, SendMode) override {
+            ++plainSends;
+        }
+        bool poll(NetEvent& out) override {
+            if (ev.empty()) return false;
+            out = ev.front();
+            ev.pop_front();
+            return true;
+        }
+        void disconnect(ConnectionId) override {}
+        std::size_t connectionCount() const override { return 3; }
+        bool fansOut() const override { return true; }
+        void sendToMany(const ConnectionId* t, std::size_t n, const std::uint8_t* d,
+                        std::size_t len, SendMode) override {
+            to.emplace_back(t, t + n);
+            frames.emplace_back(d, d + len);
+        }
+    };
+
+    Fan t;
+    NetSession net(&t, NetRole::Host);
+    CollabSession::Config cfg;
+    cfg.chunkBytes = 1000;
+    CollabSession host(&net, NetRole::Host, cfg);
+    net.pump();
+    REQUIRE(net.connections().size() == 3);
+
+    constexpr std::uint64_t kAsset = 0x8000'0000'0000'0103ull;
+    REQUIRE(host.requestLock(kAsset));
+    t.to.clear();
+    t.frames.clear();
+    t.plainSends = 0;
+
+    const auto payload = makeBlob(4500);   // five chunks, the last one short
+    REQUIRE(host.sendAsset(kAsset, "Content/Data/Table.hdata", payload));
+
+    REQUIRE(t.frames.size() == 1 + 5 + 1);
+    CHECK(t.plainSends == 0);
+    for (const auto& who : t.to) CHECK(who == std::vector<ConnectionId>{ 1, 2, 3 });
+
+    auto idOf = [](const std::vector<std::uint8_t>& f) {
+        REQUIRE(f.size() >= 2);
+        return static_cast<MessageId>(f[0] | (f[1] << 8));
+    };
+    const MessageId begin = idOf(t.frames.front());
+    const MessageId chunk = idOf(t.frames[1]);
+    const MessageId end   = idOf(t.frames.back());
+    CHECK(begin != chunk);
+    CHECK(end != chunk);
+    CHECK(begin != end);
+
+    // The chunks, in order, are the asset.
+    std::vector<std::uint8_t> joined;
+    for (std::size_t i = 1; i + 1 < t.frames.size(); ++i) {
+        CHECK(idOf(t.frames[i]) == chunk);
+        const std::vector<std::uint8_t>& f = t.frames[i];
+        BitReader r(f.data() + 2, f.size() - 2);
+        std::uint32_t from = 0, len = 0;
+        REQUIRE(r.readUInt32(from));
+        REQUIRE(r.readUInt32(len));
+        CHECK(from == host.localId());
+        std::vector<std::uint8_t> part(len);
+        REQUIRE(r.readBytes(part.data(), len));
+        joined.insert(joined.end(), part.begin(), part.end());
+    }
+    CHECK(joined == payload);
+}
+
 // ─── Structural changes ──────────────────────────────────────────────────────
 
 TEST_CASE("CollabSession: a created entity reaches the other side with its subtree")
@@ -1725,7 +1813,9 @@ namespace {
 // with a project identity on each side.
 std::unique_ptr<Pair> makeProjectPair(const std::string& hostKey,
                                       const std::string& hostLabel,
-                                      const std::string& clientKey)
+                                      const std::string& clientKey,
+                                      const ProjectFingerprint& hostFp = {},
+                                      const ProjectFingerprint& clientFp = {})
 {
     auto p = std::make_unique<Pair>();
     auto [a, b] = LoopbackTransport::createPair();
@@ -1738,9 +1828,11 @@ std::unique_ptr<Pair> makeProjectPair(const std::string& hostKey,
     hostCfg.displayName  = "Anna";
     hostCfg.projectKey   = hostKey;
     hostCfg.projectLabel = hostLabel;
+    hostCfg.projectFingerprint = hostFp;
     CollabSession::Config clientCfg;
     clientCfg.displayName = "Bob";
     clientCfg.projectKey  = clientKey;
+    clientCfg.projectFingerprint = clientFp;
 
     p->host   = std::make_unique<CollabSession>(p->hostNet.get(),   NetRole::Host,   hostCfg);
     p->client = std::make_unique<CollabSession>(p->clientNet.get(), NetRole::Client, clientCfg);
@@ -3553,4 +3645,128 @@ TEST_CASE("CollabSession: a cleared grid is a patch with no bytes, and an oversi
     p->pump(4);
     CHECK(arrived == 1);
     CHECK(emptyArrived);
+}
+
+
+// ─── Project fingerprint ─────────────────────────────────────────────────────
+// The manifest id says two editors MEAN the same project; the fingerprint says
+// whether their files agree. Two failures it exists for: a copy of a project that
+// kept the id but is another project (a template, a "Save As"), and the same
+// project whose id was minted separately on one machine.
+
+namespace {
+// A project of `count` assets whose ids are `firstId`, `firstId + 1`, …
+ProjectFingerprint projectOf(std::uint64_t firstId, std::uint32_t count)
+{
+    std::vector<std::uint64_t> hashes;
+    for (std::uint32_t i = 0; i < count; ++i)
+        hashes.push_back(ProjectFingerprint::fold(0xABCD0000u, firstId + i));
+    return ProjectFingerprint::fromHashes(std::move(hashes));
+}
+} // namespace
+
+TEST_CASE("ProjectFingerprint: the overlap estimate follows the real overlap")
+{
+    // The same set of 500 assets is the same project.
+    CHECK(ProjectFingerprint::overlap(projectOf(0, 500), projectOf(0, 500)) == doctest::Approx(1.0));
+    // Two projects with nothing in common.
+    CHECK(ProjectFingerprint::overlap(projectOf(0, 500), projectOf(10000, 500)) == doctest::Approx(0.0));
+    // 90% shared (450 of 500 in common, 50 each on the sides): Jaccard 450/550 = 0.82.
+    const double mostly = ProjectFingerprint::overlap(projectOf(0, 500), projectOf(50, 500));
+    CHECK(mostly > 0.6);
+    CHECK(mostly < 1.0);
+    // Half shared: Jaccard 250/750 = 0.33 — clearly between the two thresholds.
+    const double half = ProjectFingerprint::overlap(projectOf(0, 500), projectOf(250, 500));
+    CHECK(half > ProjectFingerprint::kDivergedBelow);
+    CHECK(half < ProjectFingerprint::kSameContentAtLeast);
+    // A project too small to say anything about itself is not compared at all.
+    CHECK(ProjectFingerprint::overlap(projectOf(0, 3), projectOf(0, 3)) == doctest::Approx(-1.0));
+    CHECK(ProjectFingerprint::overlap(projectOf(0, 500), ProjectFingerprint{}) == doctest::Approx(-1.0));
+    // A sketch is bounded however large the project is.
+    CHECK(projectOf(0, 5000).sketch.size() == ProjectFingerprint::kSketchSize);
+    CHECK(projectOf(0, 5000).assetCount == 5000);
+}
+
+TEST_CASE("CollabSession: the same id with a different set of assets is refused as a diverged project")
+{
+    auto p = makeProjectPair("proj-aaa", "Template", "proj-aaa",
+                             projectOf(0, 400), projectOf(100000, 400));
+    p->hostState.data = makeBlob(64);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    std::string      detail;
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string& d) { reason = r; detail = d; });
+    p->pump();
+
+    CHECK_FALSE(p->client->isJoined());
+    CHECK(reason == JoinRejectReason::ProjectDiverged);
+    CHECK(detail == "Template");
+    CHECK(p->clientState.applyCalls == 0);   // the scene never went over
+}
+
+TEST_CASE("CollabSession: different ids but the same assets is told apart from a different project")
+{
+    auto p = makeProjectPair("proj-aaa", "Shooter", "proj-minted-here",
+                             projectOf(0, 400), projectOf(0, 400));
+    p->hostState.data = makeBlob(64);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
+    p->pump();
+
+    CHECK_FALSE(p->client->isJoined());
+    // Not ProjectMismatch: "open another project" is the wrong advice, the user has the right one.
+    CHECK(reason == JoinRejectReason::ProjectIdMismatch);
+}
+
+TEST_CASE("CollabSession: different ids and different assets is still a plain project mismatch")
+{
+    auto p = makeProjectPair("proj-aaa", "Shooter", "proj-bbb",
+                             projectOf(0, 400), projectOf(100000, 400));
+    p->hostState.data = makeBlob(64);
+
+    JoinRejectReason reason = JoinRejectReason::None;
+    p->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
+    p->pump();
+    CHECK(reason == JoinRejectReason::ProjectMismatch);
+}
+
+TEST_CASE("CollabSession: a collaborator who is a few assets ahead is not a different project")
+{
+    // The ordinary state of two people on one project: one has made a few things
+    // the other has not pulled yet.
+    auto p = makeProjectPair("proj-aaa", "Shooter", "proj-aaa",
+                             projectOf(0, 400), projectOf(30, 400));
+    p->hostState.data = makeBlob(64);
+
+    bool rejected = false;
+    p->client->onJoinRejected([&](JoinRejectReason, const std::string&) { rejected = true; });
+    p->pump();
+
+    CHECK_FALSE(rejected);
+    CHECK(p->client->isJoined());
+}
+
+TEST_CASE("CollabSession: a project too small to fingerprint is judged by its id alone")
+{
+    // A fresh project has a handful of assets; its content says nothing yet.
+    auto same = makeProjectPair("proj-aaa", "New", "proj-aaa", projectOf(0, 5), projectOf(900, 5));
+    same->hostState.data = makeBlob(64);
+    same->pump();
+    CHECK(same->client->isJoined());
+
+    auto other = makeProjectPair("proj-aaa", "New", "proj-bbb", projectOf(0, 5), projectOf(0, 5));
+    other->hostState.data = makeBlob(64);
+    JoinRejectReason reason = JoinRejectReason::None;
+    other->client->onJoinRejected([&](JoinRejectReason r, const std::string&) { reason = r; });
+    other->pump();
+    CHECK(reason == JoinRejectReason::ProjectMismatch);
+}
+
+TEST_CASE("assetUuidSubject: stable, asset-space, and not tied to a path")
+{
+    const std::uint64_t a = assetUuidSubject(1, 2);
+    CHECK(a == assetUuidSubject(1, 2));
+    CHECK(a != assetUuidSubject(1, 3));
+    CHECK((a >> 63) == 1);   // never an entity handle
 }

@@ -1,0 +1,15 @@
+== land512-ab-nobloom-r2 00:10:17
+0:10  up 23 days,  3:31, 1 user, load averages: 3.04 4.07 6.92
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=24
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+load before start (1 min): 3.04
+0:10  up 23 days,  3:31, 1 user, load averages: 2.94 4.00 6.84
+Now drawing from 'AC Power'
+lowpowermode 0
+"Device Utilization %"=88
+locked: 0
+foreign: 1 /Applications/CLion.app/Contents/bin/clang/mac/aarch64/bin/clangd
+[land512-ab-nobloom-r2] rc=0 wall=16s fps=52.977936697963315 cpu_p50=18.561291999999998 gpu_p50=15.069457702338696 modes={'detailed': 400} size=2840x1528

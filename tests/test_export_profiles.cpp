@@ -361,6 +361,12 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     proj.exportProfiles[1].appBundle       = true;
     proj.exportProfiles[1].textureFormat   = "None";
     proj.exportProfiles[1].textureQuality  = 2;
+    proj.exportProfiles[1].onlyReferenced  = false;
+    proj.exportProfiles[1].alwaysIncludePatterns = { "Props/Crate*" };
+    proj.exportProfiles[1].compressTextureArrays = false;
+    proj.exportProfiles[1].bakeMeshTextures      = false;
+    proj.exportProfiles[1].autoShaderBackends = false;
+    proj.exportProfiles[1].shaderBackends     = 1u << 2;
     ExportProfile extra;
     extra.name = "DemoDisk";
     extra.compress = true;
@@ -377,18 +383,31 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
     CHECK(p2.exportProfiles[1].excludePatterns
           == std::vector<std::string>{ "Debug/*", "*_wip.hasset" });
     CHECK(p2.exportProfiles[1].startupScene == "Content/Menu.hescene");
-    CHECK(p2.exportProfiles[1].outputDir == "/tmp/ship_out");
+    // The output directory and the target are derived/fixed, never read back: a
+    // path saved on one OS is foreign on another (a "C:\..." name is relative on macOS).
+    CHECK(p2.exportProfiles[1].outputDir.empty());
     CHECK_FALSE(p2.exportProfiles[1].incremental);
-    CHECK(p2.exportProfiles[1].targetPlatform == "Windows");
+    CHECK(p2.exportProfiles[1].targetPlatform == "Host");
     CHECK(p2.exportProfiles[1].appBundle);
     CHECK(p2.exportProfiles[1].textureFormat == "None");
     CHECK(p2.exportProfiles[1].textureQuality == 2);
+    CHECK_FALSE(p2.exportProfiles[1].onlyReferenced);
+    CHECK(p2.exportProfiles[1].alwaysIncludePatterns == std::vector<std::string>{ "Props/Crate*" });
+    CHECK_FALSE(p2.exportProfiles[1].compressTextureArrays);
+    CHECK_FALSE(p2.exportProfiles[1].bakeMeshTextures);
+    CHECK(p2.exportProfiles[2].bakeMeshTextures);          // default: on
     CHECK_FALSE(p2.exportProfiles[2].appBundle); // default
     CHECK(p2.exportProfiles[2].name == "DemoDisk");
     CHECK(p2.exportProfiles[2].incremental);              // default true
     CHECK(p2.exportProfiles[2].targetPlatform == "Host"); // default
     CHECK(p2.exportProfiles[2].textureFormat == "Auto");  // default: what every export did
     CHECK(p2.exportProfiles[2].textureQuality == 0);
+    CHECK(p2.exportProfiles[2].onlyReferenced);           // default: pack only what the game reaches
+    CHECK(p2.exportProfiles[2].alwaysIncludePatterns.empty());
+    CHECK(p2.exportProfiles[2].compressTextureArrays);    // default
+    CHECK_FALSE(p2.exportProfiles[1].autoShaderBackends);
+    CHECK(p2.exportProfiles[1].shaderBackends == (1u << 2));
+    CHECK(p2.exportProfiles[2].autoShaderBackends);       // default: the backend the game runs
     // startupScene survives the read-modify-write save (old saveProject lost it).
     CHECK_FALSE(p2.startupScene.empty());
 
@@ -398,6 +417,42 @@ TEST_CASE("ProjectManager: profiles round-trip and unknown manifest keys survive
         nlohmann::json j = nlohmann::json::parse(in);
         CHECK(j.value("futureField", 0) == 42);
         CHECK(j.contains("preset"));
+    }
+    he_test::removeAllQuiet(dir);
+}
+
+// Topic 222 step 3: "Compile game from SDK" is no option any more, every export
+// compiles its game. A project saved while it was one still loads, and the key
+// goes with the next save instead of lingering as a switch nothing reads.
+TEST_CASE("Export profile: the old compileGameFromSdk key loads and is dropped on save")
+{
+    const auto dir = fs::temp_directory_path() / "he_prof_sdkgame";
+    he_test::removeAllQuiet(dir);
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "SdkGame", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        in.close();
+        REQUIRE(j.contains("exportProfiles"));
+        REQUIRE(j["exportProfiles"].is_array());
+        REQUIRE_FALSE(j["exportProfiles"].empty());
+        for (auto& prof : j["exportProfiles"]) prof["compileGameFromSdk"] = true;
+        std::ofstream out(heproj);
+        out << j.dump(4);
+    }
+    ProjectManager pm2;
+    REQUIRE(pm2.loadProject(heproj));
+    const size_t profiles = pm2.currentProject().exportProfiles.size();
+    CHECK(profiles >= 1);
+    REQUIRE(pm2.saveProject(heproj));
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        REQUIRE(j["exportProfiles"].size() == profiles);
+        for (const auto& prof : j["exportProfiles"])
+            CHECK_FALSE(prof.contains("compileGameFromSdk"));
     }
     he_test::removeAllQuiet(dir);
 }
@@ -915,11 +970,10 @@ TEST_CASE("findRuntimeBundle: deploy layout, build-tree layout, cross-platform")
 // ─── Runtime flavours (docs/he-apps-plan.md A3b) ──────────────────────────────
 //
 // Three runtimes per platform, told apart by one word. That word is spelled in
-// four places — this enum, HE_RUNTIME_DIR_NAME in the root CMakeLists.txt,
-// FLAVOR_DIRS in scripts/build_runtimes.py and DIR_TO_FLAVOR in
-// scripts/runtime_size.py — so the first thing worth pinning is the spelling
-// itself: a rename in one place and not the others produces an exporter that
-// looks in a directory nobody writes, and nothing else notices.
+// three places — this enum, HE_RUNTIME_DIR_NAME in the root CMakeLists.txt and
+// FLAVOR_DIRS in scripts/build_runtimes.py — so the first thing worth pinning
+// is the spelling itself: a rename in one place and not the others produces an
+// exporter that looks in a directory nobody writes, and nothing else notices.
 
 TEST_CASE("runtimeFlavorName: the directory spelling is the enum's name")
 {
@@ -1240,6 +1294,36 @@ TEST_CASE("ExportPlatform: name mapping and runtime-dir resolution")
 }
 
 // ─── Review-fix regressions ───────────────────────────────────────────────────
+
+TEST_CASE("ProjectManager: a profile saved before autoShaderBackends keeps a deliberate backend set")
+{
+    // The old default (Metal | OpenGL) was never a choice, so it becomes Auto; anything else
+    // somebody ticked by hand stays exactly as it was.
+    const auto dir = fs::temp_directory_path() / "he_prof_autoshader";
+    he_test::removeAllQuiet(dir);
+    fs::create_directories(dir);
+    ProjectManager pm;
+    REQUIRE(pm.createNewProject(dir.string(), "AS", ProjectPreset::Empty));
+    const std::string heproj = pm.currentProject().path;
+    {
+        std::ifstream in(heproj);
+        nlohmann::json j = nlohmann::json::parse(in);
+        in.close();
+        REQUIRE(j["exportProfiles"].size() >= 2);
+        for (auto& pr : j["exportProfiles"]) pr.erase("autoShaderBackends");
+        j["exportProfiles"][0]["shaderBackends"] = (1u << 4) | (1u << 0);
+        j["exportProfiles"][1]["shaderBackends"] = (1u << 3);   // D3D12, ticked by hand
+        std::ofstream out(heproj);
+        out << j.dump(4);
+    }
+    ProjectManager pm2;
+    REQUIRE(pm2.loadProject(heproj));
+    const auto& pr = pm2.currentProject().exportProfiles;
+    CHECK(pr[0].autoShaderBackends);
+    CHECK_FALSE(pr[1].autoShaderBackends);
+    CHECK(pr[1].shaderBackends == (1u << 3));
+    he_test::removeAllQuiet(dir);
+}
 
 TEST_CASE("ProjectManager: type-malformed profile values load without throwing")
 {

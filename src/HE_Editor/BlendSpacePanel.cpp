@@ -287,11 +287,11 @@ void BlendSpacePanel::appendSnapshots(AppContext& ctx, std::vector<HE::Ed::Asset
 	if (!cm) return;
 	s_states.forEach([&](const std::string&, PanelState& st) {
 		if (!st.dirty || st.relPath.empty()) return;
-		out.push_back({ cm->resolveSavePath(st.relPath), [cm, &st](const std::string& dest) {
-			const BlendSpaceAsset* a = cm->getBlendSpace(st.assetId);
+		out.push_back({ cm->resolveSavePath(st.relPath), [cm, assetId = st.assetId, space = st.space](const std::string& dest) {
+			const BlendSpaceAsset* a = cm->getBlendSpace(assetId);
 			if (!a) return false;
 			BlendSpaceAsset copy = *a;
-			copy.json = HE::blendSpaceToJson(st.space);
+			copy.json = HE::blendSpaceToJson(space);
 			return cm->writeAssetTo(copy, dest);
 		} });
 	});

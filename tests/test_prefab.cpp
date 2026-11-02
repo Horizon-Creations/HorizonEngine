@@ -1637,6 +1637,53 @@ TEST_CASE("PrefabSync: the whole-world pass reads each asset from the content ma
     CHECK(reg.get<LightComponent>(orphan.bulb).intensity == doctest::Approx(1.0f));
 }
 
+// The whole-world pass parses each asset once and hands the tree to every
+// placement (SCN-702). What a placement makes of an asset that is there but
+// does not parse is still that placement's own refusal: not synced, not
+// counted as unresolved, and the placements beside it on a good asset sync.
+TEST_CASE("PrefabSync: the whole-world pass refuses an unreadable asset per placement and still syncs the rest")
+{
+    Template t;
+    ContentManager cm;
+    PrefabAsset good;
+    good.name = "Lamp";
+    good.data = t.capture();
+    const HE::UUID goodId = cm.registerPrefab(std::move(good));
+    PrefabAsset bad;
+    bad.name = "Broken";
+    bad.data = { 0xFF, 0x00, 0x13 };
+    const HE::UUID badId = cm.registerPrefab(std::move(bad));
+
+    HorizonWorld scene;
+    auto& reg = scene.registry();
+    const Placed a = place(scene, t.capture(), goodId);
+    const Placed b = place(scene, t.capture(), badId);
+    const Placed c = place(scene, t.capture(), badId);
+    const Placed d = place(scene, t.capture(), goodId);
+
+    t.world.registry().get<LightComponent>(t.bulb).intensity = 7.0f;
+    PrefabAsset changed;
+    changed.id   = goodId;
+    changed.name = "Lamp";
+    changed.data = t.capture();
+    cm.registerPrefab(std::move(changed));
+
+    SceneSerializer ser;
+    SceneSerializer::PrefabSyncReport rep;
+    CHECK(ser.syncPrefabInstances(scene, cm, &rep) == 2);
+    CHECK(rep.unresolvedAssets == 0);
+    CHECK(rep.instances == 2);
+    CHECK(reg.get<LightComponent>(a.bulb).intensity == doctest::Approx(7.0f));
+    CHECK(reg.get<LightComponent>(d.bulb).intensity == doctest::Approx(7.0f));
+    CHECK(reg.get<LightComponent>(b.bulb).intensity == doctest::Approx(1.0f));
+    CHECK(reg.get<LightComponent>(c.bulb).intensity == doctest::Approx(1.0f));
+
+    // And a second pass over an unchanged world applies nothing.
+    SceneSerializer::PrefabSyncReport again;
+    CHECK(ser.syncPrefabInstances(scene, cm, &again) == 2);
+    CHECK(again.componentsApplied == 0);
+}
+
 // ─── Override recording, revert, push-to-prefab ──────────────────────────────
 // What puts entries on the override list the sync reads, what takes them off
 // again, and the way back into the asset.

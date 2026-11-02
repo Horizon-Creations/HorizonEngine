@@ -31,4 +31,19 @@ namespace HE
 // Clang). n = 256 took ~10.7 s serially at renderer start (perf audit B7).
 HE_RENDERING_API std::vector<uint16_t> BuildSkyNoise3D(int n);
 
+// The edge length every backend bakes: the full 256³ tile in a Release build, 64³ in Debug (64×
+// fewer voxels: without SIMD a Debug bake took half an hour). One answer, so a prewarm below
+// can be taken by whichever backend starts.
+HE_RENDERING_API int SkyNoise3DResolution();
+
+// Starts the bake of an n³ volume on a background thread (it runs on the job pool) and returns
+// at once. The next BuildSkyNoise3D(n) with the same n hands over that result, so a game can
+// bake the noise while SDL, the window and the renderer come up (61 ms off the first frame on
+// the foliage test project). A call while one is pending, or for a different n, does nothing.
+HE_RENDERING_API void PrewarmSkyNoise3D(int n);
+
+// Throws away a prewarm nobody took (a backend that has no sky), so 33 MB do not sit until exit.
+// Waits for the bake to end; a no-op when there is none or it was taken.
+HE_RENDERING_API void DiscardSkyNoise3DPrewarm();
+
 } // namespace HE

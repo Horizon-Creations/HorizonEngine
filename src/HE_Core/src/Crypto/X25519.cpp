@@ -1,7 +1,5 @@
 #include <Crypto/X25519.h>
 
-#include <cstring>
-
 // ─────────────────────────────────────────────────────────────────────────────
 //  Backend selection mirrors Hpak/Aes256Gcm.cpp: system OpenSSL first, fetched
 //  mbedTLS otherwise, and a hard-failing stub when neither is present.

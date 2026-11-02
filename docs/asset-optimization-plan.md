@@ -64,6 +64,25 @@ der Packaged-Build die gekochte.
   pro Backend). Uncooked-Assets bekommen die AABB beim Parse (cooked tragen sie eh); Fallback auf
   Unit-Cube wenn ein Mesh (noch) nicht resident ist. Unit-getestet.
 
+- ✅ **Texture ARRAYS komprimiert** (2026-11-01, Thema 228): `cookTextureArrays` ist im Export an
+  (Profilfeld `compressTextureArrays`). Die GI-Slice-Mittelwerte werden pack-time aus dem RGBA8 in den
+  Chunk `TXSM` gebacken, damit BC7/ASTC lesbar bleiben. Auto-Landscape-Arrays 335 MB → 84 MB;
+  Details und Messung in `docs/asset-export-audit-2026-11-01.md` Abschnitt 7.
+
+- ✅ **Nur Erreichbares packen** (2026-11-01, Thema 228): `PackSettings::onlyReferenced` (Profil, Standard an),
+  Wurzeln aus Startszene/Manifest/Skripten/Engine-Implizitem, transitiv. Details und Beweis in
+  `docs/asset-export-audit-2026-11-01.md` Abschnitt 8.
+
+- ✅ **Startszene nur einmal im Pak** (2026-11-01, Thema 228): `HpakWriter::addAlias`, zweite TOC-Zeile auf
+  dieselben Bytes. Catania −7,03 MB im Store-Pak. `docs/asset-export-audit-2026-11-01.md` Abschnitt 9.
+
+- ✅ **Shader-Backends folgen dem Spiel** (2026-11-01, Thema 228): Profilfeld `autoShaderBackends` (Standard an), der Export
+  backt die PSHD-Varianten des einen Backends, auf dem das Spiel startet (`GameBackendRules.h`). Abschnitt 10 des Audits.
+
+- ✅ **PSHD v4: G-Buffer, instanzierter Vertex** (2026-11-02, Thema 228): das Pak trägt für OpenGL und Metal das
+  G-Buffer-Fragment und den instanzierten Vertex; ein Deferred-Spiel übersetzt nichts mehr beim Laden, gebackene Materialien
+  zeichnen auf Metal instanziert; Switch-Instanzen bekommen kein PSHD mehr. Abschnitt 12 des Audits.
+
 **Bewusst noch NICHT umgesetzt (jeweils mit echtem Blocker — brauchen einen eigenen, verifizierbaren
 Durchgang):**
 - **sRGB-Aktivierung**: ändert sichtbare Farben (Albedo sRGB→linear) → braucht visuelle Abnahme +

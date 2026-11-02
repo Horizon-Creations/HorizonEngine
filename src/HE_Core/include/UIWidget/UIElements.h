@@ -1585,8 +1585,12 @@ public:
 
     // The ratio this splitter actually lays out with: what was authored, pulled
     // inside the minimums for a length of `lengthPx`. One function so the slot
-    // rect, the drag and the designer all get the same number.
-    float clampedRatio(float lengthPx) const;
+    // rect, the drag and the designer all get the same number. `dividerScale`
+    // is the factor the caller multiplies dividerSize by to get the divider in
+    // the same units as `lengthPx`: the minimums are applied to the length that
+    // is left after THAT divider, which is the length the caller multiplies the
+    // ratio by.
+    float clampedRatio(float lengthPx, float dividerScale) const;
 
     const UIPropTable& propTable() const override;
     std::vector<UIEventDesc> events() const override

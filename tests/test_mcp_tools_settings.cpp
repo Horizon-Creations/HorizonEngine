@@ -587,3 +587,35 @@ TEST_CASE("settings_get: every row a client is told it may write, it may write")
 		CHECK(w.content["changed"] == false);
 	}
 }
+
+TEST_CASE("writeEditorSetting: a Config row without its member pointer is refused, not dereferenced")
+{
+	// A descriptor whose type names a member the row never set. Reading such a row
+	// already returns false; a write must refuse it with a message instead of
+	// going through a null pointer-to-member.
+	const std::pair<SettingType, json> cases[] = {
+		{ SettingType::Bool,   json(true) },
+		{ SettingType::Int,    json(1) },
+		{ SettingType::Float,  json(1.0) },
+		{ SettingType::String, json("x") },
+		{ SettingType::Enum,   json(0) },
+	};
+	for (const auto& [type, value] : cases)
+	{
+		HE::Ed::SettingDesc d;
+		d.key = "test.unwired";
+		d.storage = SettingStorage::Config;
+		d.writable = true;
+		d.type = type;
+		d.options = { "a", "b" };
+
+		EditorConfig cfg;
+		const EditorConfig before = cfg;
+		std::string error;
+		bool changed = true;
+		CHECK_FALSE(HE::Ed::writeEditorSetting(cfg, d, value, error, changed));
+		CHECK_FALSE(changed);
+		CHECK_FALSE(error.empty());
+		CHECK(cfg.QuickSettingsFavorites == before.QuickSettingsFavorites);
+	}
+}

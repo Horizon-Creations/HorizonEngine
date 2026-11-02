@@ -1,0 +1,7 @@
+== after-D3D12-500000-d100-r1
+before:
+  cpu 7%  procs:
+  gpu (util, temp, sm clock): 4 %, 34, 1410 MHz
+after (rc=0):
+  cpu 0%  procs:
+  gpu (util, temp, sm clock): 30 %, 41, 2910 MHz

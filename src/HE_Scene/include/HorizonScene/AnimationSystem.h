@@ -27,4 +27,11 @@ namespace AnimationSystem
     void update(HorizonWorld& world, ContentManager& cm, float dt,
                 HE::RootMotionContext* rootMotion = nullptr,
                 HE::NotifyQueue* notifies = nullptr);
+
+    // -1 (default): entities with no RootMotionComponent, no non-empty animation layer stack and
+    // no active IK (HE::poseMayBeKept's own test, see PoseFinalize.h) run on the pool, since that
+    // combination touches nothing but the entity's own components and thread_local scratch.
+    // Everything else keeps running on the calling thread, in view order, as before. 0: every
+    // entity runs on the calling thread (HE_ANIM_PARALLEL=0 or a test).
+    void setParallelOverride(int parallel);
 }

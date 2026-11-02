@@ -16,6 +16,16 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iterator>
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
 
 namespace HE {
 
@@ -291,6 +301,61 @@ bool heLoadPngRGBA(const std::filesystem::path& png,
     height = h;
     stbi_image_free(pixels);
     return true;
+}
+
+bool heEmbedExeIcon(const std::filesystem::path& exe, const std::filesystem::path& ico)
+{
+#ifdef _WIN32
+    std::vector<std::uint8_t> d;
+    {
+        std::ifstream f(ico, std::ios::binary);
+        if (!f) return false;
+        d.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    // ICONDIR: reserved, type (1), count; then count x 16-byte ICONDIRENTRY.
+    const auto u16 = [&d](size_t o) { return (std::uint16_t)(d[o] | (d[o + 1] << 8)); };
+    const auto u32 = [&d](size_t o)
+    { return (std::uint32_t)(d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | ((std::uint32_t)d[o + 3] << 24)); };
+    if (d.size() < 6 || u16(0) != 0 || u16(2) != 1) return false;
+    const std::uint16_t count = u16(4);
+    if (count == 0 || d.size() < 6 + 16u * count) return false;
+
+    // RT_GROUP_ICON names the images by resource id (GRPICONDIRENTRY is 14 bytes:
+    // the ICONDIRENTRY with the file offset replaced by a 16-bit id).
+    std::vector<std::uint8_t> group;
+    const auto put16 = [&group](std::uint16_t v) { group.push_back(v & 0xFF); group.push_back(v >> 8); };
+    const auto put32 = [&group](std::uint32_t v)
+    { for (int i = 0; i < 4; ++i) group.push_back((v >> (8 * i)) & 0xFF); };
+    put16(0); put16(1); put16(count);
+    for (std::uint16_t i = 0; i < count; ++i)
+    {
+        const size_t e = 6 + 16u * i;
+        const std::uint32_t size = u32(e + 8), off = u32(e + 12);
+        if ((std::uint64_t)off + size > d.size()) return false;
+        for (size_t k = 0; k < 8; ++k) group.push_back(d[e + k]);   // w, h, colours, reserved, planes, bpp
+        put32(size);
+        put16((std::uint16_t)(i + 1));
+    }
+
+    HANDLE h = BeginUpdateResourceW(exe.c_str(), FALSE);
+    if (!h) return false;
+    bool ok = true;
+    for (std::uint16_t i = 0; i < count && ok; ++i)
+    {
+        const size_t e = 6 + 16u * i;
+        ok = UpdateResourceW(h, MAKEINTRESOURCEW(3), MAKEINTRESOURCEW(i + 1), MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+                             d.data() + u32(e + 12), u32(e + 8)) != FALSE;
+    }
+    // Id 1: the lowest group id is the icon Explorer shows for the executable.
+    ok = ok && UpdateResourceW(h, MAKEINTRESOURCEW(14), MAKEINTRESOURCEW(1),
+                               MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL),
+                               group.data(), (DWORD)group.size()) != FALSE;
+    // FALSE = write; discard = !ok leaves the executable untouched on a failure.
+    return EndUpdateResourceW(h, ok ? FALSE : TRUE) != FALSE && ok;
+#else
+    (void)exe; (void)ico;
+    return false;
+#endif
 }
 
 bool heSetWindowIcon(SDL_Window* window, const std::filesystem::path& png)

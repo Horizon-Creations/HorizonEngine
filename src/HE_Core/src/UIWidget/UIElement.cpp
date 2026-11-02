@@ -78,7 +78,7 @@ float uiScrollOffsetForThumbTop(const UIElement& e, const UIWidgetRect& px, floa
     const float travel = t.len - t.thumb;
     // A thumb that fills its track cannot say anything about where it is, so a
     // drag on one means "stay" rather than "jump to the top".
-    if (travel <= 0.0f) return std::clamp(0.0f, 0.0f, t.maxOff);
+    if (travel <= 0.0f) return 0.0f;
     const float f = std::clamp((thumbTopPx - t.top) / travel, 0.0f, 1.0f);
     return f * t.maxOff;
 }
@@ -1362,10 +1362,7 @@ void UIImage::renderUnflipped(const UIWidgetRect& px, const UIElementRenderState
 
 // ── Text ─────────────────────────────────────────────────────────────────────
 
-// Resize the element to its own content. Height always tracks the line count ×
-// font size; the width tracks the widest line unless WordWrap owns it (then the
-// authored width IS the wrap column). A small padding keeps descenders and the
-// last glyph's side bearing off the edge.
+// Parsed again only when the text changed since the last call.
 const HE::UIRichText& UIText::parsed() const
 {
     if (!m_parsedOnce || m_parsedFrom != text)
@@ -1403,6 +1400,10 @@ std::string UIText::linkAt(const UIWidgetRect& px, float pxScaleY, float x, floa
     return HE::uiRichLinkAt(parsed(), richLayoutOf(*this, px, pxScaleY, fontScale), x, y);
 }
 
+// Resize the element to its own content. Height always tracks the line count ×
+// font size; the width tracks the widest line unless WordWrap owns it (then the
+// authored width IS the wrap column). A small padding keeps descenders and the
+// last glyph's side bearing off the edge.
 void UIText::applyAutoSize(float resolvedWidth, float fontScale)
 {
     if (!autoSize) return;
@@ -1610,12 +1611,15 @@ size_t UIText::byteAtRowX(const HE::UITextVisualLine& row, float x) const
     // The same midpoint rule the pointer follows, so an arrow key and a click
     // land on the same character when they are aimed at the same column.
     size_t best = row.begin;
+    float left = 0.0f;   // caretXInRow at row.begin
     for (size_t i = row.begin; i < row.end; )
     {
         const size_t nx = HE::uiUtf8Next(text, i);
-        if (x < (caretXInRow(row, i) + caretXInRow(row, nx)) * 0.5f) return i;
+        const float right = caretXInRow(row, nx);
+        if (x < (left + right) * 0.5f) return i;
         best = nx;
         i = nx;
+        left = right;   // this boundary is the next step's left one
     }
     return best;
 }
@@ -1703,12 +1707,15 @@ size_t UIText::caretAtPoint(const UIWidgetRect& px, float pxScaleY, float x, flo
     // Walk the boundaries and take the one whose midpoint the point passed —
     // aiming at the left half of a character puts the caret in front of it.
     size_t best = r.begin;
+    float left = 0.0f;   // widthTo(r.begin)
     for (size_t i = r.begin; i < r.end; )
     {
         const size_t nx = HE::uiUtf8Next(text, i);
-        if (local < (widthTo(i) + widthTo(nx)) * 0.5f) return i;
+        const float right = widthTo(nx);
+        if (local < (left + right) * 0.5f) return i;
         best = nx;
         i = nx;
+        left = right;   // this boundary is the next step's left one
     }
     return best;
 }
@@ -1732,6 +1739,32 @@ void UIButton::render(const UIWidgetRect& px, const UIElementRenderState& st,
 
 // ── CheckBox ─────────────────────────────────────────────────────────────────
 
+namespace
+{
+    // The size of a row made of a control and its label, shared by the checkbox
+    // and the radio button (the radio's row IS the checkbox's with a circle in
+    // it). Both axes are always computed; the caller writes the ones auto-size
+    // owns.
+    glm::vec2 labelledRowSize(const UICheckBox::BoxMetrics& m, const std::string& label,
+                              uint32_t fontAtlasKey, float fs)
+    {
+        HE::UITextLayout opts;
+        const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
+        const glm::vec2 lm = label.empty()
+            ? glm::vec2(0.0f)
+            : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
+                 : HE::measureUIText(label, fs, 0.0f, opts));
+        // The same slack a label gets, and for the same reason: a run measured to
+        // the last pixel of its last glyph has no room for the one that overhangs.
+        const float width = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
+        // The row is as tall as the taller of the two things in it. The box is
+        // 1.15 of the font and the line is a touch over one, so in practice the box
+        // wins — but a font whose line box is taller than that must not be clipped
+        // by a row sized for a square nobody looks at.
+        return { width, std::max(m.box, lm.y + fs * 0.35f) };
+    }
+}
+
 void UICheckBox::applyAutoSize(float resolvedWidth, float fontScale)
 {
     (void)resolvedWidth;   // nothing here wraps, so the laid-out width says nothing
@@ -1744,23 +1777,10 @@ void UICheckBox::applyAutoSize(float resolvedWidth, float fontScale)
     // No height cap while measuring: the height is what is being computed here,
     // and capping the box against the size the element happens to carry would
     // measure the row against yesterday's answer.
-    const BoxMetrics m = metricsFor(fs, 0.0f, switchStyle);
-    HE::UITextLayout opts;
-    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    const glm::vec2 lm = label.empty()
-        ? glm::vec2(0.0f)
-        : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
-             : HE::measureUIText(label, fs, 0.0f, opts));
-    // The same slack a label gets, and for the same reason: a run measured to
-    // the last pixel of its last glyph has no room for the one that overhangs.
-    if (axes & kAxisX)
-        sizeX = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
-    // The row is as tall as the taller of the two things in it. The box is
-    // 1.15 of the font and the line is a touch over one, so in practice the box
-    // wins — but a font whose line box is taller than that must not be clipped
-    // by a row sized for a square nobody looks at.
-    if (axes & kAxisY)
-        sizeY = std::max(m.box, lm.y + fs * 0.35f);
+    const glm::vec2 size = labelledRowSize(metricsFor(fs, 0.0f, switchStyle), label,
+                                           fontAtlasKey, fs);
+    if (axes & kAxisX) sizeX = size.x;
+    if (axes & kAxisY) sizeY = size.y;
 }
 
 void UICheckBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
@@ -2084,6 +2104,16 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     };
     auto widthTo = [&](size_t byteEnd)
     { return runWidth(shownFor(text.substr(0, std::min(byteEnd, text.size())))); };
+    // Where the IME's own caret sits inside its unfinished text, as an offset
+    // from the field's caret.
+    auto compositionCaretOffset = [&]()
+    {
+        // -1 = the IME did not say; the end of its own text is the sane place.
+        const size_t upTo = compositionCursor < 0
+            ? composition.size()
+            : std::min(static_cast<size_t>(compositionCursor), composition.size());
+        return runWidth(composition.substr(0, upTo));
+    };
 
     // ── More than one line ───────────────────────────────────────────────────
     // Its own path rather than a handful of conditionals in the one below: a
@@ -2183,13 +2213,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
         if (st.editing)
         {
             float cx = caretX;
-            if (!composition.empty())
-            {
-                const size_t upTo = compositionCursor < 0
-                    ? composition.size()
-                    : std::min(static_cast<size_t>(compositionCursor), composition.size());
-                cx += runWidth(composition.substr(0, upTo));
-            }
+            if (!composition.empty()) cx += compositionCaretOffset();
             quad(out, x0 + cx, caretY, std::max(1.0f, sizePx * 0.08f), sizePx, textColor);
         }
         return;
@@ -2257,19 +2281,7 @@ void UITextInput::render(const UIWidgetRect& px, const UIElementRenderState& st,
     {
         const float h = std::min(px.h - 4.0f, sizePx * 1.25f);
         float caretX = widthTo(caret);
-        if (!composition.empty())
-        {
-            // -1 = the IME did not say; the end of its own text is the sane place.
-            const size_t upTo = compositionCursor < 0
-                ? composition.size()
-                : std::min(static_cast<size_t>(compositionCursor), composition.size());
-            HE::UITextLayout copts;
-            const std::string run = composition.substr(0, upTo);
-            const float inner = run.empty() ? 0.0f
-                : (f ? HE::measureUIText(*f, run, sizePx, 0.0f, copts)
-                     : HE::measureUIText(run, sizePx, 0.0f, copts)).x;
-            caretX += inner;
-        }
+        if (!composition.empty()) caretX += compositionCaretOffset();
         quad(out, sp.x + caretX, px.y + (px.h - h) * 0.5f,
              std::max(1.0f, sizePx * 0.08f), h, textColor);
     }
@@ -2345,14 +2357,15 @@ size_t UITextInput::caretAtPoint(float localX, float localY, float pxScaleY,
     // Walk the boundaries and take the one whose midpoint the click passed —
     // clicking the left half of a character puts the caret before it.
     size_t best = lo;
+    float a = 0.0f;   // the width of nothing: runWidth of the empty run at lo
     for (size_t i = lo; i < hi; )
     {
         const size_t next = uiUtf8Next(text, i);
-        const float a = runWidth(text.substr(lo, i - lo));
         const float b = runWidth(text.substr(lo, next - lo));
         if (localX < (a + b) * 0.5f) return i;
         best = next;
         i = next;
+        a = b;   // this boundary is the next step's left one
     }
     return best;
 }
@@ -2423,9 +2436,19 @@ void UIComboBox::render(const UIWidgetRect& px, const UIElementRenderState& st,
 namespace
 {
     nlohmann::json colJson(const glm::vec4& c) { return { c.x, c.y, c.z, c.w }; }
+    // What a colour or a slice has to be before get<float>() is safe on it: a
+    // thrown type_error would leave uiWidgetTreeFromJson, which reports failure
+    // by its return value and not by an exception.
+    bool startsWithFourNumbers(const nlohmann::json& j)
+    {
+        if (!j.is_array() || j.size() < 4) return false;
+        for (int i = 0; i < 4; ++i)
+            if (!j[i].is_number()) return false;
+        return true;
+    }
     glm::vec4 colFrom(const nlohmann::json& j, const glm::vec4& def)
     {
-        if (!j.is_array() || j.size() < 4) return def;
+        if (!startsWithFourNumbers(j)) return def;
         return { j[0].get<float>(), j[1].get<float>(), j[2].get<float>(), j[3].get<float>() };
     }
 }
@@ -2834,7 +2857,7 @@ void UIImage::writeJson(nlohmann::json& j) const
 void UIImage::readJson(const nlohmann::json& j)
 {
     tint = colFrom(j.value("tint", nlohmann::json()), tint);
-    if (const auto& s = j.value("slice", nlohmann::json::array()); s.size() >= 4)
+    if (const auto& s = j.value("slice", nlohmann::json::array()); startsWithFourNumbers(s))
     {
         sliceLeft   = s[0].get<float>(); sliceTop    = s[1].get<float>();
         sliceRight  = s[2].get<float>(); sliceBottom = s[3].get<float>();
@@ -3149,10 +3172,10 @@ bool UISplitter::hidesChild(const UIWidgetTree& tree, const UIElement& child) co
     return uiChildIndexOf(tree, id, child.id) >= 2;
 }
 
-float UISplitter::clampedRatio(float lengthPx) const
+float UISplitter::clampedRatio(float lengthPx, float dividerScale) const
 {
     if (lengthPx <= 0.0f) return 0.5f;
-    const float div = std::min(dividerSize, lengthPx);
+    const float div = std::min(dividerSize * dividerScale, lengthPx);
     const float usable = std::max(0.0f, lengthPx - div);
     if (usable <= 0.0f) return 0.5f;
     float first = ratio * usable;
@@ -3186,7 +3209,7 @@ void UISplitter::render(const UIWidgetRect& px, const UIElementRenderState& st,
 {
     const float len = vertical ? px.h : px.w;
     const float div = std::min(dividerSize * pxScaleY, len);
-    const float first = clampedRatio(len) * std::max(0.0f, len - div);
+    const float first = clampedRatio(len, pxScaleY) * std::max(0.0f, len - div);
     // A little brighter while the pointer is on it, so a divider you can grab
     // says so before you try.
     const glm::vec4 c = st.hovered
@@ -3217,6 +3240,16 @@ void UISplitter::readJson(const nlohmann::json& j)
 }
 
 // ── Accordion ────────────────────────────────────────────────────────────────
+
+namespace
+{
+    // Past the last mask bit there is nothing to read, so the section is closed.
+    bool isSectionOpen(uint32_t mask, std::size_t section)
+    {
+        return section < static_cast<std::size_t>(UIAccordion::kMaxSections) &&
+               (mask & (1u << static_cast<unsigned>(section))) != 0u;
+    }
+}
 
 uint32_t UIAccordion::normalizedMask(uint32_t mask, int sections, bool allowMultiple)
 {
@@ -3257,11 +3290,9 @@ void UIAccordion::sectionLayout(float top, float headerH, float gap,
         s.headerY = y;
         y += h;
         s.bodyY = y;
-        // Past the 32nd there is no bit to read, so the section is closed —
-        // which is also what hidesChild answers for the same child.
-        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
-                          (mask & (1u << static_cast<unsigned>(i))) != 0u;
-        s.bodyH = open ? std::max(0.0f, bodyHeights[i]) : 0.0f;
+        // Closed past the 32nd, which is also what hidesChild answers for the
+        // same child.
+        s.bodyH = isSectionOpen(mask, i) ? std::max(0.0f, bodyHeights[i]) : 0.0f;
         y += s.bodyH;
         if (i + 1 < bodyHeights.size()) y += std::max(0.0f, gap);
         out.push_back(s);
@@ -3293,9 +3324,8 @@ bool UIAccordion::hidesChild(const UIWidgetTree& tree, const UIElement& child) c
 {
     const int idx = uiChildIndexOf(tree, id, child.id);
     if (idx < 0) return false;                 // not one of my children
-    if (idx >= kMaxSections) return true;      // no bit to read: always folded
-    const uint32_t m = effectiveMask(uiChildCountOf(tree, id));
-    return (m & (1u << static_cast<unsigned>(idx))) == 0u;
+    return !isSectionOpen(effectiveMask(uiChildCountOf(tree, id)),
+                          static_cast<std::size_t>(idx));
 }
 
 const UIPropTable& UIAccordion::propTable() const
@@ -3359,8 +3389,7 @@ void UIAccordion::render(const UIWidgetRect& px, const UIElementRenderState& st,
     const uint32_t m = effectiveMask(static_cast<int>(bodies.size()));
     for (std::size_t i = 0; i < slots.size(); ++i)
     {
-        const bool open = i < static_cast<std::size_t>(kMaxSections) &&
-                          (m & (1u << static_cast<unsigned>(i))) != 0u;
+        const bool open = isSectionOpen(m, i);
         band(slots[i].bodyY, slots[i].bodyH, bodyColor, false);
         band(slots[i].headerY, headPx, open ? openHeaderColor : headerColor, true);
         // The label only where the band is actually on screen: a glyph run is
@@ -3961,20 +3990,12 @@ void UIRadioButton::applyAutoSize(float resolvedWidth, float fontScale)
     (void)resolvedWidth;
     const int axes = autoSizedAxes();
     if (axes == 0) return;
-    // Word for word the checkbox's sum, because the row IS the checkbox's row
-    // with a circle in it — see UICheckBox::applyAutoSize for why each term.
+    // The checkbox's sum, because the row IS the checkbox's row with a circle
+    // in it (labelledRowSize).
     const float fs = fontSize * fontScale;
-    const UICheckBox::BoxMetrics m = metricsFor(fs, 0.0f);
-    HE::UITextLayout opts;
-    const HE::BakedUIFont* f = HE::UIFontCache::find(fontAtlasKey);
-    const glm::vec2 lm = label.empty()
-        ? glm::vec2(0.0f)
-        : (f ? HE::measureUIText(*f, label, fs, 0.0f, opts)
-             : HE::measureUIText(label, fs, 0.0f, opts));
-    if (axes & kAxisX)
-        sizeX = m.ctrl + (label.empty() ? 0.0f : m.gap + lm.x + fs * 0.25f);
-    if (axes & kAxisY)
-        sizeY = std::max(m.box, lm.y + fs * 0.35f);
+    const glm::vec2 size = labelledRowSize(metricsFor(fs, 0.0f), label, fontAtlasKey, fs);
+    if (axes & kAxisX) sizeX = size.x;
+    if (axes & kAxisY) sizeY = size.y;
 }
 
 void UIRadioButton::render(const UIWidgetRect& px, const UIElementRenderState& st,

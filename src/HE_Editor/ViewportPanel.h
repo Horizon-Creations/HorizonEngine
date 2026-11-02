@@ -70,6 +70,9 @@ namespace ViewportPanel
 		bool primaryLocked = false;  // the verb the Lock row shows
 	};
 	EntityActionState entityActionState(AppContext& ctx);
+	// Only the Lock row's verb: the macOS menu bar sets it every frame, and the whole state
+	// also asks anyHidden(), a walk over every entity (2.1 ms a frame at 50k).
+	bool primaryLocked(AppContext& ctx);
 	void focusSelected(AppContext& ctx);
 	void snapSelectionToGround(AppContext& ctx);
 	void hideSelected(AppContext& ctx);

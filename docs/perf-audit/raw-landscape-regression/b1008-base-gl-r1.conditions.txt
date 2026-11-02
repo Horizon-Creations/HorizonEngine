@@ -1,0 +1,21 @@
+label: b1008-base-gl-r1
+attempt: 1
+editor: /tmp/he237/b1008/Editor/HorizonEditor
+rhi: OpenGL
+sets: ['ViewportGroundGrid=false', 'BloomEnabled=true', 'BloomThreshold=1.0', 'BloomIntensity=0.6000000238418579', 'SSAOEnabled=true', 'SSAORadius=0.5', 'SSAOIntensity=1.0', 'SSAOMethod=0', 'DoFEnabled=false', 'DoFFocusDistance=10.0', 'DoFFocusRange=4.0', 'DoFAperture=2.799999952316284', 'MotionBlurEnabled=false', 'MotionBlurIntensity=0.5', 'MotionBlurMax=24.0', 'AntiAliasing=1', 'AASharpness=0.3499999940395355', 'RenderScale=1.0', 'SpecularAA=true', 'SpecularAAStrength=1.0', 'RenderPath=1', 'GlobalIlluminationEnabled=true', 'GIIndirectIntensity=1.0', 'GILightRadius=0.5', 'GIShadowQuality=1', 'OcclusionCulling=true', 'SSREnabled=false', 'SSRIntensity=1.0', 'SSRMaxRoughness=0.6000000238418579', 'SSRQuality=1', 'GIReflectionsEnabled=false', 'GIReflIntensity=1.0', 'GIReflMaxRoughness=0.6000000238418579', 'GIReflQuality=1', 'GIReflBounces=1', 'GIReflBlur=false', 'RenderScale=1.86']
+before:
+  uptime:    load averages: 3.35 3.50 3.16
+  locked:    Yes
+  lowpower:  0
+  gpu:       19
+  power:     Now drawing from 'Battery Power'
+  busy:      83.3% (pairedsyncd); 33.7% Hive; 24.8% WindowServer; 23.7% Python
+  foreign:   none
+after:
+  uptime:    load averages: 3.44 3.48 3.17
+  locked:    Yes
+  lowpower:  0
+  gpu:       86
+  power:     Now drawing from 'Battery Power'
+  busy:      33.1% Hive; 23.6% WindowServer; 16.7% Dock; 14.5% coreaudiod
+  foreign:   none

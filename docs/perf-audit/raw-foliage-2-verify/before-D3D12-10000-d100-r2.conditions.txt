@@ -1,0 +1,7 @@
+== before-D3D12-10000-d100-r2
+before:
+  cpu 3%  procs: he_testsx1
+  gpu (util, temp, sm clock): 2 %, 35, 2910 MHz
+after (rc=0):
+  cpu 1%  procs: he_testsx1
+  gpu (util, temp, sm clock): 98 %, 37, 2895 MHz

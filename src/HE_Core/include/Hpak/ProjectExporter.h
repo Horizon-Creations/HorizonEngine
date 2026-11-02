@@ -4,6 +4,8 @@
 #include <Application/DocumentTypes.h>   // AppDocumentType (what the export declares)
 #include <Physics/CollisionLayers.h>     // the collision matrix the shipped build simulates with
 #include <Audio/AudioBusConfig.h>        // the mixer buses the shipped build plays through
+#include <Hpak/ProjectConfig.h>          // ExportPlan: the hcfg an export will write
+#include <Hpak/HpakFormat.h>             // PackSettings::ExtraAsset (what an editor-made asset looks like)
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -36,7 +38,7 @@ enum class RuntimeFlavor : uint8_t { Game = 0, AppAdvanced, AppBasic };
 struct HE_API ExportSettings {
     bool    compress = true;
     bool    encrypt  = false;
-    // When set, the shipped game scans a Mods/ folder next to the executable and
+    // When set, the shipped game scans a Mods/ folder in its data folder (data/Mods) and
     // mounts every .hpak there as an overlay on the base pak (same UUID replaces,
     // new UUID adds — including the packed startup scene).
     bool    enableModSupport = false;
@@ -176,6 +178,17 @@ struct HE_API ExportSettings {
     // when packing — e.g. "Debug/*", "*_test.hasset". Engine defaults are matched
     // with their "Engine/" prefix. See Hpak::PackSettings.
     std::vector<std::string> excludePatterns;
+    // Pack only the assets the game reaches (Hpak/ReachFilter.h): from the startup scene, the
+    // scenes something loads, the manifest, GameInstance and scripts, and the engine's implicit
+    // needs. An asset nothing reachable names is left out, and so is one only another unreached
+    // asset names. `alwaysIncludePatterns` (globs on the addressed path, like excludePatterns)
+    // are roots too, for the assets a script builds a path for at run time.
+    // Off here (a caller that hands over loose assets and no scene wants them all); the editor
+    // passes the export profile's setting, which is on by default.
+    bool onlyReferenced = false;
+    std::vector<std::string> alwaysIncludePatterns;
+    // One line for what the filter left out. Same thread rule as `progress`.
+    std::function<void(const std::string&)> onNotice;
     // Incremental packing: reuse the stored (compressed + encrypted) bytes of
     // unchanged assets from the previous export at the same outputDir, keyed by
     // the hash of each asset's rewritten blob (persisted in a
@@ -195,6 +208,20 @@ struct HE_API ExportSettings {
     // Hpak::PackSettings::textureQuality). Fast is what every export did before
     // the knob existed.
     uint8_t textureQuality = 0;
+    // Also block-compress texture ARRAYS (Hpak::PackSettings::cookTextureArrays). The GI
+    // landscape colours of such an array come from means baked at pack time (CHUNK_TXSM),
+    // so BC7 / ASTC arrays are safe to ship; off keeps them RGBA8.
+    bool cookTextureArrays = true;
+    // Bake textures onto static meshes whose materials are plain PBR texture sets
+    // (Hpak::PackSettings::bakeMeshTextures). Which meshes, and in which form, is each mesh's
+    // own choice (the Export bake switches in the Mesh Viewer). Needs the reachability filter.
+    bool bakeMeshTextures = true;
+    // Meshes the bake must leave alone because an entity overrides their materials (the editor
+    // collects them from the scenes it exports). See Hpak::PackSettings::bakeSkipMeshes.
+    std::vector<HE::UUID> bakeSkipMeshes;
+    // Assets the editor baked for this export that no project file holds (the far landscape): packed as they are,
+    // their folders kept as reach roots. See Hpak::PackSettings::extraAssets.
+    std::vector<Hpak::PackSettings::ExtraAsset> extraAssets;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a
@@ -225,7 +252,7 @@ struct HE_API ExportSettings {
     // `compileShaderVariants` is supplied by the editor (it links the shader compiler):
     // (fragment GLSL, backend bitmask) → PSHD-encoded bytes.
     uint32_t shaderBackends = 0;
-    std::function<std::vector<uint8_t>(const std::string&, const std::string&, uint32_t)> compileShaderVariants;
+    std::function<std::vector<uint8_t>(const std::string&, const std::string&, const std::string&, uint32_t)> compileShaderVariants;
     // Precompile particle color/alpha-over-life shaders (CHUNK_PPSD), reusing
     // shaderBackends above. (nodeGraphJson, backend bitmask) → PPSD-encoded bytes —
     // see Hpak::PackSettings::compileParticleShaderVariants.
@@ -244,6 +271,34 @@ struct HE_API ExportSettings {
     // the canonical loader name and project.hcfg records horizonCodeCompiled.
     // Empty = interpreted export (the default and the fallback).
     std::filesystem::path horizonCodeGenLib;
+    // Incremental + encrypt: the HEGameBuildConfig.h of the previous game build
+    // from the engine SDK for this project and profile (Thema 211). That game
+    // carries its key compiled in, neither in project.hcfg nor in a patched
+    // block, so without this the previous key is unreadable, a fresh one is
+    // drawn and every entry is packed again. Tried after both of those; a key
+    // that does not match the previous pak only costs the reuse (the manifest's
+    // settings fingerprint includes the key). Empty = not asked.
+    std::filesystem::path previousBuildConfigHeader;
+    // Set by ProjectExporter::planExport, never by hand: the pak key and the
+    // startup scene's pak UUID the export was planned with. The game compiled
+    // from the engine SDK carries both compiled in and is built BEFORE the pack
+    // (topic 222 step 6), so the pack must use exactly these instead of drawing
+    // its own — a different key or UUID would be a game that cannot open its
+    // pak or does not find its first scene.
+    bool          planned = false;
+    std::uint8_t  plannedPakKey[32] = {};
+    HE::UUID      plannedSceneUuid{};
+};
+
+// What project.hcfg of an export will say, known before anything is packed
+// (ProjectExporter::planExport). The pak key is in config.encKey whenever the
+// export encrypts, also where the written hcfg will leave it zero because the
+// key went into the runtime's executable instead: this is the configuration a
+// game compiled from the engine SDK takes in, and that game needs its key.
+struct HE_API ExportPlan {
+    bool          success = false;
+    std::string   errorMessage;
+    ProjectConfig config;
 };
 
 struct HE_API ExportResult {
@@ -257,7 +312,7 @@ struct HE_API ExportResult {
     // block (legacy runtime) — then the key ships in the hcfg as before.
     bool        keyEmbedded      = false;
     // The game executable this export produced, for a caller that wants to run
-    // it. Inside the .app it is the binary itself (Contents/MacOS/HorizonGame),
+    // it. Inside the .app it is the binary itself (Contents/MacOS/<name>),
     // not the bundle directory — a bundle cannot be exec'd. Empty when no
     // runtime was shipped, and, for a cross-platform target, a binary this
     // machine cannot run: the caller decides whether launching makes sense.
@@ -297,6 +352,19 @@ HE_API std::filesystem::path findRuntimeBundle(const std::filesystem::path& edit
                                                ExportPlatform p,
                                                RuntimeFlavor  f = RuntimeFlavor::Game,
                                                RuntimeFlavor* outFlavor = nullptr);
+
+// ─── Export layout (Platform/GameLayout.h) ────────────────────────────────────
+// A runtime bundle with the engine in HorizonEngine/ (the HorizonEngine library,
+// Thema 211 step 10) exports as <ProjectName>(.exe) + data/ + HorizonEngine/.
+// A runtime without that folder (built before it, e.g. a GameRuntimes/<platform>
+// bundle from another machine) keeps the flat layout and the name HorizonGame:
+// its executable looks for the pak beside itself.
+HE_API bool runtimeHasEngineDir(const std::filesystem::path& runtimeDir);
+// The executable's file name in that layout: the project name without the
+// characters no file system takes (/ \ : * ? " < > | and control characters,
+// trailing dots and spaces), "Game" when nothing is left, plus ".exe" for a
+// Windows runtime.
+HE_API std::string exportedExecutableName(const std::string& projectName, bool windowsExe);
 
 // ─── Embedded pak key ─────────────────────────────────────────────────────────
 // The game executable carries a 64-byte patchable key block (see
@@ -395,4 +463,22 @@ public:
         // lifecycle (and whatever UI it creates). Empty → no GameInstance shipped.
         const std::string&           gameInstanceJson = {}
     );
+
+    // The part of an export that decides what project.hcfg will say, run on its
+    // own and before it: the output layout (created), the pak key (an
+    // incremental export's previous key, else a fresh one) and the startup
+    // scene's pak UUID. Pins key and UUID into `settings` (planned*), so an
+    // exportProject with the same arguments and these settings writes exactly
+    // the returned configuration. This is what lets the editor compile the
+    // game, which carries that configuration compiled in, before it packs.
+    // `packedScene` = a startup scene binary will be passed to exportProject;
+    // `horizonCodeCompiled` = the export intends to ship a HorizonCode library
+    // (the flag only makes the game warn when the library is missing).
+    static ExportPlan planExport(
+        const std::string&           projectName,
+        const std::string&           startupSceneName,
+        const std::filesystem::path& outputDir,
+        ExportSettings&              settings,
+        bool                         packedScene,
+        bool                         horizonCodeCompiled);
 };

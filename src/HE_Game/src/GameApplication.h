@@ -1,7 +1,11 @@
 #pragma once
 #include <Application/Application.h>
+#include <Platform/BuildProfile.h>     // HE_FEATURE_DEV_HOTKEYS: V/F10 exist only in dev
+#if HE_FEATURE_DEV_HOTKEYS
 #include <Diagnostics/DevStatsTile.h>
+#endif
 #include <Hpak/ProjectConfig.h>
+#include <Hpak/GameBuildConfig.h>      // HE::ProjectConfigSource
 #include <Project/ProjectSettings.h>   // Config/ProjectSettings.json, shipped beside project.hcfg
 #include <Scripting/ScriptEngine.h>
 #include <memory>
@@ -21,6 +25,7 @@
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
+#include <future>
 #include <HorizonScene/WeatherAudio.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + frame-end responses
@@ -142,6 +147,9 @@ private:
                              const std::vector<uint32_t>* onlyEntities = nullptr);
 
     ProjectConfig                 m_config;
+    // Where m_config came from: compiled in (HEGameBuildConfig.h) or project.hcfg.
+    // The pak key's precedence depends on it (HE::selectPakKey).
+    HE::ProjectConfigSource       m_configSource = HE::ProjectConfigSource::None;
     // The project's settings file, read from <exeDir>/Config/ProjectSettings.json
     // — the exporter copies it there VERBATIM (ProjectSettings.h explains why
     // it is not folded into project.hcfg). Missing = default-constructed =
@@ -181,12 +189,15 @@ private:
     // m_gameInstance so it is destroyed BEFORE the runtime it references.
     WidgetManager m_widgets;
 
+#if HE_FEATURE_DEV_HOTKEYS
     // F10: the stats card with the extended GPU numbers (Diagnostics/DevStatsTile.h).
     // Only answers while m_devHotkeys is set - a development build, or an export
     // profile that asked for it - and it sits after m_widgets so it is destroyed
-    // before it. Costs nothing while hidden.
+    // before it. Costs nothing while hidden. A release build has neither.
     HE::DevStatsTile m_devStats;
+    bool             m_devStatsEnvChecked = false;   // HE_GAME_STATS read once, on the first frame
     bool             m_devHotkeys = false;   // V and F10; set in OnInit
+#endif
 
     // C++ GameLogic services (HorizonGameServices.h): the tables + their binding
     // must outlive the loaded library, so they live here. Filled + injected
@@ -308,6 +319,11 @@ private:
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
     UIInputSystem::InputState m_uiInput;   // frame-to-frame UI pointer tracking
     AudioEngine m_audioEngine;             // game-runtime audio (playOnStart + audio.* API)
+    // Opening the output device (ma_engine_init) takes 50-90 ms warm and over a second cold, and
+    // nothing needs it until OnInit hands out the first sounds. It starts in the constructor, in
+    // parallel with SDL, the window and the renderer, and OnInit collects the result. Declared
+    // AFTER the engine: members die in reverse, so the thread is done before the engine goes.
+    std::future<bool> m_audioInit;
     WeatherAudio::State m_weatherAudio;    // rain/wind/snow/storm beds + thunder, driven by the weather
 
     // ── Scene transitions (HE::api::scene requests, executed at frame start) ──

@@ -257,6 +257,9 @@ private:
 	// possesses (no controller at all: to the fallback characters).
 	void fireInputEvent(size_t player, const std::string& event, const HorizonCode::Value& arg);
 
+	// Drop fallback characters whose instance the runtime no longer has.
+	void pruneDeadCharacters();
+
 	// base + layer, then one tick against this frame's input so whatever is
 	// held reads as held, not as just pressed.
 	void rebuildMapping(LocalPlayer& p, const Input& input, const MouseFrame& mouse);

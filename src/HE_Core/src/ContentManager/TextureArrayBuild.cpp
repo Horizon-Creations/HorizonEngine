@@ -5,30 +5,34 @@
 namespace HE
 {
 
-size_t textureArraySliceBytes(uint32_t w, uint32_t h, uint32_t mips)
+size_t textureArraySliceBytes(uint32_t w, uint32_t h, uint32_t mips, ::TextureFormat format)
 {
     size_t bytes = 0;
     for (uint32_t l = 0; l < mips; ++l)
     {
-        bytes += static_cast<size_t>(w) * h * 4;
+        bytes += textureLevelBytes(format, w, h);
         w = std::max<uint32_t>(1, w >> 1);
         h = std::max<uint32_t>(1, h >> 1);
     }
     return bytes;
 }
 
-size_t textureArrayOffset(uint32_t w, uint32_t h, uint32_t mips, uint32_t slice, uint32_t level)
+size_t textureArrayOffset(uint32_t w, uint32_t h, uint32_t mips, uint32_t slice, uint32_t level,
+                          ::TextureFormat format)
 {
-    return static_cast<size_t>(slice) * textureArraySliceBytes(w, h, mips)
-         + textureArraySliceBytes(w, h, std::min(level, mips));
+    return static_cast<size_t>(slice) * textureArraySliceBytes(w, h, mips, format)
+         + textureArraySliceBytes(w, h, std::min(level, mips), format);
 }
 
 bool textureArrayPayloadValid(const TextureAsset& t)
 {
-    if (t.channels != 4 || t.format != ::TextureFormat::RGBA8) return false;
+    if (t.channels != 4) return false;
+    // ASTC and the BC formats are all legitimate payloads here; a value this build
+    // doesn't know is not (its byte math would be a guess).
+    if (t.format != ::TextureFormat::RGBA8 && !textureFormatIsBlock4x4(t.format)) return false;
     if (t.width == 0 || t.height == 0 || t.layers == 0 || t.mipLevels == 0) return false;
     return t.data.size() == static_cast<size_t>(t.layers)
-                          * textureArraySliceBytes(t.width, t.height, t.mipLevels);
+                          * textureArraySliceBytes(t.width, t.height, t.mipLevels, t.format);
 }
 
 namespace

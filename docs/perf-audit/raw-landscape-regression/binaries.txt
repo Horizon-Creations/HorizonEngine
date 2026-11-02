@@ -1,0 +1,18 @@
+# Binaries of the landscape regression runs (Thema 237)
+# name editor-sha12 rendering-dylib-sha12 (of the self-contained COPY, after selfcontain_deploy_copy.sh re-signed it) | M_AutoLandscape.hasset sha8 | source deploy (worktree, HEAD of that worktree, original build time of its libHorizonRendering)
+# The commit of a deploy is INFERRED from the worktree HEAD at the build time; uncommitted work of that worktree is unknown. Material swap cells: b1019w_newmat = b1019w with cur's M_AutoLandscape.hasset, cur_oldmat = cur with b1019w's.
+
+b1008 a4252c1cbfc2 effcc050324f | f09b153f | claude-gi-reflexionen-himmel-und-auto-la 587a910d, built 10-08 13:14
+b1008b 9595460871a7 7fe67afb45d9 | b2185815 | claude-auto-landscape-material-texturen- 0af31ea0, built 10-08 19:03
+b1008c a0dc67f7d71f 8185a1499c3b | f09b153f | claude-editor-bugfixes-hc-canvas-materia 978ac7e1, built 10-08 17:40
+b1009 fb2cf51ff2db cab6320a93bf | b2185815 | claude-editorui-footer-strg-cmd-z-l-st-w dba63453, built 10-09 01:20
+b1010 bdf9391e2c8d 957cda77d9c1 | ac7fe5e4 | claude-instanced-foliage-und-lod-imposto 7692ad97, built 10-10 19:56
+b1010a 17aca741da5c 733614434331 | ac7fe5e4 | claude-entities-pro-zelle-streamen-nur-d f6e7452f, built 10-10 14:29
+b1012 7a1043db9a5a 3ca4941549c4 | ac7fe5e4 | claude-unterwasser-post-processing 5ffb60b5, built 10-12 15:23
+b1013 1486f0491e58 ad965cc598d6 | ac7fe5e4 | claude-gi-landscape-tile-seams a2f83932, built 10-13 21:10
+b1015 fcd493bd4759 7ab4e4185e5b | ac7fe5e4 | claude-team-server-als-source-control-mi 58dee122, built 10-15 14:17
+b1017 60205af9fbfe 8ff92d74c0a3 | ac7fe5e4 | claude-unterwasser-postfx-wirkt-billig-c 9a24cda8, built 10-17 19:33
+b1018 e93f620df3aa 33c4b524fe9d | ac7fe5e4 | claude-landscape-sechseckige-muster-nach 40c68ec7, built 10-18 16:00
+b1019w c916c9ece5c3 c7b58bb4ee61 | ac7fe5e4 | claude-realistischerer-wasser-shader-wel (branch tip 4e6e5eb4 is LATER than the build), built 10-19 23:32
+b1021a f77c899346aa 49d557f5502e | dd4d265d | claude-auto-landscape-material-2-0-alle- 6479c3d1, built 10-21 07:34
+cur a46fbce77bac 498f7ce1972e | dd4d265d | main checkout out/deploy/Editor 12be6adc, libHorizonRendering built 10-21 10:35

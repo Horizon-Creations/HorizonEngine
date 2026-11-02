@@ -115,11 +115,14 @@ struct MaterialRootSignature
 
 // Fills `out`. rangeCount / samplerCount / paramCount default to the full
 // signature; the legacy / pre-cluster counts reproduce the older ones (test
-// negative controls only).
+// negative controls only). `visibility` of the SRV table and the static
+// samplers: ALL; PIXEL is the pre-Thema-207 signature (negative control for
+// the domain shader).
 inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
                                           UINT rangeCount   = kRangeCount,
                                           UINT samplerCount = kSamplerCount,
-                                          UINT paramCount   = kParamCount)
+                                          UINT paramCount   = kParamCount,
+                                          D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL)
 {
     out = MaterialRootSignature{};
     auto cbv = [&](UINT i, UINT reg) {
@@ -156,7 +159,11 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     out.params[kRootSrvTable].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     out.params[kRootSrvTable].DescriptorTable.NumDescriptorRanges = rangeCount;
     out.params[kRootSrvTable].DescriptorTable.pDescriptorRanges   = out.ranges;
-    out.params[kRootSrvTable].ShaderVisibility                    = D3D12_SHADER_VISIBILITY_PIXEL;
+    // ALL, not PIXEL: the Displacement pin's domain shader (Thema 207,
+    // MaterialShaderLibrary::tessEval) samples t2/t4..t7/t14 through s0/s2/s4..s7
+    // on the fragment's registers, and a PSO whose DS names a register the
+    // signature hides from that stage is rejected (E_INVALIDARG).
+    out.params[kRootSrvTable].ShaderVisibility                    = visibility;
 
     // Root SRVs t24..t26 for fragmentClustered's ByteAddressBuffers. Root
     // descriptors carry no view, so raw vs. structured does not matter here
@@ -207,7 +214,7 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
         s.Filter           = kSamplers[i].filter;
         s.AddressU = s.AddressV = s.AddressW = kSamplers[i].addr;
         s.ShaderRegister   = kSamplers[i].reg;
-        s.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        s.ShaderVisibility = visibility; // the domain shader samples too (see the table)
         s.MaxLOD           = D3D12_FLOAT32_MAX;
     }
 
@@ -257,8 +264,9 @@ struct ResolveRootSignature
 
 inline void DescribeResolveRootSignature(ResolveRootSignature& out)
 {
+    // PIXEL: the resolve has no domain stage (the material's ALL is for Thema 207's).
     MaterialRootSignature mat;
-    DescribeMaterialRootSignature(mat);
+    DescribeMaterialRootSignature(mat, kRangeCount, kSamplerCount, kParamCount, D3D12_SHADER_VISIBILITY_PIXEL);
     out = ResolveRootSignature{};
     for (UINT i = 0; i < kParamCount; ++i)  out.params[i]   = mat.params[i];
     for (UINT i = 0; i < kRangeCount; ++i)  out.ranges[i]   = mat.ranges[i];

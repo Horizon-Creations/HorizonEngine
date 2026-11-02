@@ -176,6 +176,20 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 			{ "description",
 			  "How hard the texture encoder works: 0 Fast, 1 Balanced, 2 High. "
 			  "Changing it re-encodes every texture on the next export." } } },
+		{ "compressTextureArrays", json{ { "type", "boolean" },
+			{ "description",
+			  "Also block-compress texture arrays (the Auto landscape arrays, ~110 MB each "
+			  "as RGBA8). On by default. Changing it re-encodes the arrays on the next export." } } },
+		{ "onlyReferenced", json{ { "type", "boolean" },
+			{ "description",
+			  "Pack only the assets the game reaches from its startup scene, loadable scenes, "
+			  "scripts and manifest (plus the engine's own needs); on by default." } } },
+		{ "alwaysIncludePatterns", json{
+			{ "type", "array" },
+			{ "items", json{ { "type", "string" } } },
+			{ "description",
+			  "Globs on the Content-relative path that count as reached even when nothing names them, "
+			  "for assets a script loads by a path it builds. Replaces the profile's list for this run." } } },
 		{ "excludePatterns", json{
 			{ "type", "array" },
 			{ "items", json{ { "type", "string" } } },
@@ -269,6 +283,16 @@ void addPackage(McpToolRegistry& registry, const McpBuildHooks& h)
 			p.textureFormat = strArg(args, "textureFormat") == "None" ? "None" : "Auto";
 		if (hasArg(args, "textureQuality"))
 			p.textureQuality = std::clamp(intArg(args, "textureQuality", p.textureQuality), 0, 2);
+		if (hasArg(args, "onlyReferenced"))
+			p.onlyReferenced = boolArg(args, "onlyReferenced", p.onlyReferenced);
+		if (args.contains("alwaysIncludePatterns") && args["alwaysIncludePatterns"].is_array())
+		{
+			p.alwaysIncludePatterns.clear();
+			for (const json& e : args["alwaysIncludePatterns"])
+				if (e.is_string()) p.alwaysIncludePatterns.push_back(e.get<std::string>());
+		}
+		if (hasArg(args, "compressTextureArrays"))
+			p.compressTextureArrays = boolArg(args, "compressTextureArrays", p.compressTextureArrays);
 		if (args.contains("excludePatterns") && args["excludePatterns"].is_array())
 		{
 			p.excludePatterns.clear();

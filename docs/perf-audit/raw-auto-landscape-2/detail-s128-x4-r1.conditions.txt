@@ -1,0 +1,17 @@
+== detail-s128-x4-r1  2026-10-21 05:54:03  attempt 1
+before:
+  uptime:    load averages: 2.31 2.55 2.39
+  locked:    Yes
+  lowpower:  0
+  gpu:       3
+  power:     Now drawing from 'AC Power'
+  busy:      18.9% Hive; 16.1% Python; 9.9% coreaudiod; 9.4% clion
+  foreign:   none
+after (rc=0):
+  uptime:    load averages: 2.15 2.49 2.38
+  locked:    Yes
+  lowpower:  0
+  gpu:       82
+  power:     Now drawing from 'AC Power'
+  busy:      13.1% Dock; 12.3% coreaudiod; 11.6% Python; 8.3% clion
+  foreign:   none

@@ -41,7 +41,14 @@ namespace
 	std::string elide(std::string s)
 	{
 		if (static_cast<int>(s.size()) > kMaxLabelChars)
-			s = s.substr(0, kMaxLabelChars - 1) + "\xE2\x80\xA6";  // U+2026
+		{
+			// Back up off a UTF-8 continuation byte (10xxxxxx) so the cut never
+			// splits a multi-byte character.
+			std::size_t cut = kMaxLabelChars - 1;
+			while (cut > 0 && (static_cast<unsigned char>(s[cut]) & 0xC0) == 0x80)
+				--cut;
+			s = s.substr(0, cut) + "\xE2\x80\xA6";  // U+2026
+		}
 		return s;
 	}
 

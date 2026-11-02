@@ -5,6 +5,7 @@
 #include "Types/Enums.h"
 #include "ProjectManager.h"
 #include "EditorUndo.h"
+#include "EditorWindowPlacement.h"
 #include "EditorSelection.h"
 #include "EditorCamera.h"
 #include "CollabController.h"
@@ -56,6 +57,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -376,6 +378,10 @@ struct AppContext
 	bool toolchainInstalling  = false; // an install is currently running
 	bool toolchainInstallDone = false; // the last install finished (success or failure)
 	bool toolchainInstallOk   = false; // finished, launched an installer, and it exited 0
+	// What the running install's process tree is doing, and the way to end it. Null /
+	// empty where the editor has no install to watch.
+	const HE::hccg::ToolchainInstallControl* toolchainInstallControl = nullptr;
+	std::function<void()> cancelToolchainInstall; // ends winget and the installers below it
 
 	// Build ▸ Build and Reload Game Logic: hot-swap the module that was just
 	// compiled into the RUNNING play session (onStop the old image, load the new
@@ -875,6 +881,13 @@ private:
 	// only to keep McpBridge.h out of this header; it stays in this slot for
 	// the destruction order above.
 	std::unique_ptr<HE::Ed::McpBridge> m_mcp;
+	// The context the Planner tools hand to PlannerPanel::workspace(): the Tasks database keeps
+	// a pointer to it (to reach the Task Board), so it has to outlive the tool call.
+	std::unique_ptr<AppContext> m_mcpPlannerCtx;
+	// The primary window's size/position/maximized, watched every frame and
+	// written to config.json by writeEditorConfig (EditorWindowPlacement.h).
+	HE::Ed::WindowPlacementTracker m_windowPlacement;
+	bool m_windowPlacementSeeded = false;
 	// HE_MCP=1 / HE_MCP_PORT, read once at startup. Separate from EditorConfig
 	// because the config is persisted and these must not be: a headless run must
 	// not leave the bridge switched on for the next interactive one.
@@ -994,6 +1007,13 @@ private:
 	std::string collabSyncKey(const std::string& tabPath, bool isFolder = false);
 	// Where a key lives locally; empty for a document that has no file of its own.
 	std::string collabLocalPath(const std::string& key);
+	// A collaboration frame names an asset by its subject (derived from the UUID in
+	// its file). This machine's current key for it — wherever the file lives now —
+	// or empty when we do not have that asset. The index behind it is rebuilt when
+	// the content changes, never per frame.
+	std::string keyForCollabSubject(std::uint64_t subject);
+	// What this project contains, for the join's content check.
+	HE::Net::ProjectFingerprint collabProjectFingerprint();
 	// The project directory (currentProject().path may name the .heproj itself).
 	std::string projectRoot();
 	// Bindings for a tab, including the two documents the editor owns rather than
@@ -1059,6 +1079,12 @@ private:
 	// Syncable asset tabs that were open last pass, so the ones that closed can
 	// drop what the host told them about their lock.
 	std::unordered_set<std::string> m_docMirrorPaths;
+	// collaboration subject → the asset's UUID, for keyForCollabSubject. The PATH is
+	// not stored: it is asked of the ContentManager each time, so a rename needs no
+	// invalidation here.
+	std::unordered_map<std::uint64_t, HE::UUID> m_collabSubjectIndex;
+	std::uint64_t                               m_collabSubjectEpoch = ~0ull;
+	std::chrono::steady_clock::time_point       m_collabSubjectRebuilt{};
 	// Last transform we recorded for the held subject, so an undo entry spans a
 	// whole edit rather than one entry per frame of a drag.
 	std::uint64_t    m_undoBaselineSubject = 0;
@@ -1240,7 +1266,10 @@ private:
 	// Build the node-graph material pipelines referenced by the current world ahead
 	// of the first draw (no first-frame cross-compile hitch). Materials are resident
 	// by call time (preloadAssetRefs ran); a no-op for backends that build eagerly.
-	void warmupWorldMaterials();
+	// waitForBuilds: block (repainting the splash) until the background shader builds are
+	// done. Only the startup scene does; openScene returns at once and the viewport shows
+	// "Compiling shaders" until the last build lands.
+	void warmupWorldMaterials(bool waitForBuilds = false);
 	// Auto-advances (dt > 0) and pushes the World root's EnvironmentComponent to
 	// the renderer via SetEnvironmentSettings. The environment is scene data now,
 	// not an editor preference.
@@ -1361,6 +1390,7 @@ private:
 	std::atomic<bool> m_installAttempted{false};
 	std::mutex        m_installLogMutex;
 	std::string       m_installLog;
+	HE::hccg::ToolchainInstallControl m_installCtl;
 	void startToolchainInstall(bool needCmake, bool needCompiler);
 
 	// Hot-reload: disk-asset change detection

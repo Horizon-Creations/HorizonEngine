@@ -16,6 +16,8 @@
 #include <HorizonRendering/RenderWorld.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <MaterialGraph/AutoLandscapeMaterial.h>   // texture groups (Thema 233)
+#include <HorizonScene/LayerMeshPresets.h>        // the group's layer meshes (Thema 233 step 4)
 #include <Types/Enums.h>
 #include <Diagnostics/Logger.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -27,9 +29,11 @@
 #include <cstdarg>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <random>                        // Mountain's "New Seed"
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef HE_IMGUI_ENABLED
@@ -47,12 +51,18 @@ static TerrainTool s_terrainTool     = TerrainTool::Raise;
 // node (MaterialAsset::graphLayerNames) — the material defines what a layer is.
 static bool        s_landscapePaint  = false;
 static int         s_paintLayer      = 0;
-// Landscape FOLIAGE mode: the same brush paints the foliage layer's density
-// mask (FoliageComponent::densityMask) — Grow raises it toward the target
+// Which group a Paint stroke leans the texel toward (Thema 233 step 7): 0 = the
+// terrain's own group, 1/2 = TerrainComponent::mixGroup[0]/[1]. Only meaningful
+// once a mix group is set (Setup "Mix Groups"); a terrain with none ignores it
+// (TerrainPaint::paintInGroup is a no-op on the share when reservedLayers() == 0).
+static int         s_activeGroupSlot = 0;
+// Landscape FOLIAGE mode: the same brush paints a foliage layer's density
+// mask (FoliageLayer::densityMask) — Grow raises it toward the target
 // density, Erase pulls it to 0, which is how an exclusion area (a yard, a
-// road, a lake) is made. The terrain entity's own FoliageComponent is the
-// layer; FoliageSystem re-scatters it on the next tick, so a stroke shows up
-// under the cursor straight away.
+// road, a lake) is made. The layers live in the terrain entity's own
+// FoliageComponent; the brush paints the active one (activeLayer, shared with
+// Details), and FoliageSystem re-scatters it on the next tick, so a stroke
+// shows up under the cursor straight away.
 static bool        s_landscapeFoliage = false;
 // The Setup tab: material, heightmap, resolutions, resets. While it is open the brush is
 // off - a click in the viewport must not sculpt just because the user is reading a form.
@@ -69,8 +79,11 @@ static bool        s_waterErase       = false;  // the tab's Paint | Erase; Ctrl
 static bool        s_waterFromGround  = true;   // level = the ground under the first point + offset
 static float       s_waterLevel       = 0.0f;   // ... or this number (terrain-local Y)
 static float       s_waterOffset      = 0.3f;   // above the ground at the first point
-static bool        s_waterDig         = false;  // also dig a bed under the water
-static float       s_waterDigDepth    = 1.0f;   // bed this far below the level
+static bool        s_waterDig         = true;   // also dig a bed under the water (a pond without one is all shore, see the help)
+static float       s_waterDigDepth    = 2.0f;   // Max Depth: the bed never goes deeper below the level
+static float       s_waterBedSlope    = HE::water::kDefaultBedSlope;   // metres of depth per metre from the shore
+static float       s_waterBedRough    = 0.2f;   // Bed Roughness, 0..1
+static bool        s_waterCloseBed    = true;   // the eraser gives the dug ground back under the water it dries
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
 static bool        s_waterResEditing  = false;
@@ -121,6 +134,7 @@ namespace
 	ImU32 layerColour(const std::string& name)
 	{
 		std::string n;
+		n.reserve(name.size());
 		for (char c : name) n += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 		auto has = [&](const char* s) { return n.find(s) != std::string::npos; };
 		if (has("auto"))                                 return IM_COL32(120, 150, 110, 255);
@@ -149,6 +163,7 @@ namespace
 	std::string upperCase(const char* s)
 	{
 		std::string out;
+		out.reserve(std::strlen(s));
 		for (; *s; ++s) out += static_cast<char>(std::toupper(static_cast<unsigned char>(*s)));
 		return out;
 	}
@@ -224,6 +239,207 @@ namespace
 		ImGui::SetCursorScreenPos(p0);
 		ImGui::Dummy(ImVec2(w, wellH));
 		return clicked;
+	}
+
+	// Bind the terrain to texture group `g`: its landscape material goes into the
+	// terrain's MaterialComponent, nothing else is touched (the weightmap is shared by
+	// every group). The engine material is loaded first, by path, because the Content
+	// Browser is not the only way to reach it. No-op on the group the terrain already has.
+	void assignTextureGroup(AppContext& ctx, MaterialComponent& tmat, const HE::AutoLandscapeGroup& g)
+	{
+		if (tmat.materialAssetId == g.materialId) return;
+		if (ctx.contentManager) ctx.contentManager->loadAsset(g.materialPath);
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Texture Group");
+		tmat.materialAssetId = g.materialId;
+		tmat.dirty = true;   // TerrainSystem pushes it to the chunks
+		if (ctx.renderer) ctx.renderer->InvalidateMaterial(g.materialId);
+	}
+
+	// Give the terrain a foliage layer for every mesh kind of group `g` it does not scatter yet
+	// (a layer counts as having the kind when its level-0 mesh is the kind's). Only ever adds:
+	// the layers the author made or tuned stay as they are, and a layer without a mesh (the one
+	// a new component starts with) is filled first, since it scatters nothing. The layers come
+	// from the preset with the group's row, so rock stands where THAT group's material shows it.
+	// Returns how many kinds were added.
+	int applyGroupMeshes(AppContext& ctx, entt::registry& reg, entt::entity terrain, const HE::AutoLandscapeGroup& g)
+	{
+		const HE::LayerMeshSet set = HE::layerMeshKindsOfGroup(g.id);
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+		const auto has = [&](HE::LayerMeshKind k) {
+			if (!folc) return false;
+			for (const FoliageLayer& l : folc->layers) if (l.meshAssetId == HE::layerMeshLevel0(k)) return true;
+			return false;
+		};
+		int missing = 0;
+		for (int i = 0; i < set.count; ++i) missing += has(set.kinds[i]) ? 0 : 1;
+		if (missing == 0) return 0;
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Group Meshes");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+		int added = 0;
+		for (int i = 0; i < set.count; ++i)
+		{
+			const HE::LayerMeshKind kind = set.kinds[i];
+			if (has(kind)) continue;
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers) if (l.meshAssetId == HE::UUID{}) { layer = &l; break; }
+			if (!layer) layer = folc->addLayer();
+			if (!layer) break;                                  // kMaxLayers: the rest stays unadded
+			HE::applyLayerMeshPreset(*layer, kind, g.id);
+			// The meshes are engine FILES that nothing loads on its own (see the Inspector's preset).
+			for (int lv = 0; lv < HE::layerMeshLevelCount(kind) && ctx.contentManager; ++lv)
+				if (!ctx.contentManager->ensureResident(HE::layerMeshLevelId(kind, lv))
+				    && ctx.contentManager->loadAsset(HE::layerMeshLevelPath(kind, lv)) != HE::layerMeshLevelId(kind, lv))
+					HE_LOG_WARN(Editor, "Foliage: the engine mesh %s is not available \xe2\x80\x94 the layer draws the fallback mesh",
+					            HE::layerMeshLevelPath(kind, lv).c_str());
+			++added;
+		}
+		return added;
+	}
+
+	// Materialize the LandscapeFoliageLayerAsset `set` (UUID `setId`) into the terrain's
+	// foliage layers (design doc §4, Thema 327): one `FoliageLayer` per entry, tagged with
+	// {setId, entry index} so a re-apply finds its own layers again. A tagged layer's
+	// asset-owned fields (mesh, material, LODs, rules, density, scale, flags) are refreshed
+	// every call; `seed`, `densityMask` and `visible` are the editor's own and are never
+	// touched. A layer nobody tagged — hand-added, or from a different asset/entry — is
+	// never read or written, so this never clobbers what the author tuned (the same
+	// add-only promise `applyGroupMeshes` makes, plus update). Spawning itself stays
+	// FoliageSystem's: this only sets the fields it already scatters from and flags the
+	// layer dirty, so the next `FoliageSystem::update()` (not this call) does the actual
+	// per-frame work — no placement work happens here. Returns how many entries were
+	// added or refreshed.
+	int applyFoliageSet(AppContext& ctx, entt::registry& reg, entt::entity terrain,
+	                     HE::UUID setId, const LandscapeFoliageLayerAsset& set)
+	{
+		if (set.entries.empty()) return 0;
+		auto* folc = reg.try_get<FoliageComponent>(terrain);
+
+		if (ctx.undoSys) ctx.undoSys->snapshotNow("Apply Foliage");
+		if (!folc) folc = &reg.emplace<FoliageComponent>(terrain, FoliageComponent{});
+
+		int touched = 0;
+		for (size_t i = 0; i < set.entries.size(); ++i)
+		{
+			const LandscapeFoliageEntry& e = set.entries[i];
+			FoliageLayer* layer = nullptr;
+			for (FoliageLayer& l : folc->layers)
+				if (l.sourceAssetId == setId && l.sourceEntry == static_cast<int>(i)) { layer = &l; break; }
+			if (!layer)
+			{
+				// Reuse an empty, untagged layer first (the one a fresh component starts
+				// with), same precedent as applyGroupMeshes; otherwise grow the list. A
+				// layer only qualifies as that pristine starter, never one the author
+				// began hand-tuning (named it, painted a mask, set a rule, added a LOD)
+				// before picking a mesh — meshAssetId=={} alone is not proof of that,
+				// so every other sign of hand-tuning is checked too: the slope and
+				// height rules, density, seed, scale range, draw/shadow distances,
+				// bucket size, the shadow/AO switches, LOD hysteresis and visibility.
+				// All compared bit for bit against FoliageLayer{}: this starter has
+				// never been written, so there is nothing to be "close" to. This runs
+				// before the write block below, which sets density/scale itself.
+				const FoliageLayer pristine{};
+				for (FoliageLayer& l : folc->layers)
+					if (l.meshAssetId == HE::UUID{} && l.materialAssetId == HE::UUID{} &&
+					    l.sourceAssetId == HE::UUID{} && l.name.empty() && l.densityMask.empty() &&
+					    l.lods.empty() && l.weightLayer == -1 &&
+					    l.slopeMin == pristine.slopeMin && l.slopeMax == pristine.slopeMax &&
+					    l.heightMin == pristine.heightMin && l.heightMax == pristine.heightMax &&
+					    l.density == pristine.density && l.seed == pristine.seed &&
+					    l.minScale == pristine.minScale && l.maxScale == pristine.maxScale &&
+					    l.drawDistance == pristine.drawDistance && l.bucketSize == pristine.bucketSize &&
+					    l.castsShadow == pristine.castsShadow && l.contributesAO == pristine.contributesAO &&
+					    l.shadowDistance == pristine.shadowDistance && l.lodHysteresis == pristine.lodHysteresis &&
+					    l.visible == pristine.visible) { layer = &l; break; }
+				if (!layer) layer = folc->addLayer();
+				if (!layer) break;                                  // kMaxLayers: the rest stays unapplied
+				layer->sourceAssetId = setId;
+				layer->sourceEntry   = static_cast<int>(i);
+			}
+
+			// The asset is loaded leniently (ContentManager only logs
+			// validateLandscapeFoliageLayer's problems, it never rejects or fixes them —
+			// LandscapeFoliageLayerJson.cpp), so a hand-edited or stale file can still
+			// carry a negative density, an inverted min/max or slope range, or an
+			// unordered LOD list. Clamp every numeric field to what FoliageSystem and the
+			// scatter actually expect instead of handing it garbage.
+			auto positive = [](float v, float fallback) { return (std::isfinite(v) && v > 0.0f) ? v : fallback; };
+			auto nonNeg    = [](float v, float fallback) { return (std::isfinite(v) && v >= 0.0f) ? v : fallback; };
+
+			layer->name            = e.name;
+			layer->meshAssetId     = e.meshAssetId;
+			layer->materialAssetId = e.materialAssetId;
+			{
+				const float density = e.density * set.densityScale;   // a product: validate it, not the factors
+				layer->density = (std::isfinite(density) && density > 0.0f) ? density : 0.0f;
+			}
+			{
+				float minS = positive(e.minScale, FoliageLayer{}.minScale);
+				float maxS = positive(e.maxScale, FoliageLayer{}.maxScale);
+				if (minS > maxS) std::swap(minS, maxS);
+				layer->minScale = minS;
+				layer->maxScale = maxS;
+			}
+			layer->drawDistance    = positive(e.drawDistance, FoliageLayer{}.drawDistance);
+			layer->bucketSize      = positive(e.bucketSize, FoliageLayer{}.bucketSize);
+			layer->castsShadow     = e.castsShadow;
+			layer->contributesAO   = e.contributesAO;
+			layer->shadowDistance  = nonNeg(e.shadowDistance, 0.0f);
+			layer->lodHysteresis   = nonNeg(e.lodHysteresis, 0.0f);
+			{
+				float slopeMin = std::isfinite(e.slopeMin) ? std::clamp(e.slopeMin, 0.0f, 1.0f) : 0.0f;
+				float slopeMax = std::isfinite(e.slopeMax) ? std::clamp(e.slopeMax, 0.0f, 1.0f) : 1.0f;
+				if (slopeMin > slopeMax) std::swap(slopeMin, slopeMax);
+				layer->slopeMin = slopeMin;
+				layer->slopeMax = slopeMax;
+			}
+			{
+				float heightMin = std::isfinite(e.heightMin) ? e.heightMin : -FoliageLayer::kNoHeightLimit;
+				float heightMax = std::isfinite(e.heightMax) ? e.heightMax :  FoliageLayer::kNoHeightLimit;
+				if (heightMin > heightMax) std::swap(heightMin, heightMax);
+				layer->heightMin = heightMin;
+				layer->heightMax = heightMax;
+			}
+			// Out of range = no paint rule, the same leniency SceneSerializer gives a
+			// hand-edited scene (a set authored against more terrain channels than this
+			// landscape has).
+			layer->weightLayer     = (e.paintLayer >= 0 && e.paintLayer < kTerrainMaxLayers) ? e.paintLayer : -1;
+			layer->lods.clear();
+			for (const LandscapeFoliageLod& lod : e.lods)
+			{
+				FoliageLod fl;
+				fl.meshAssetId     = lod.meshAssetId;
+				fl.materialAssetId = lod.materialAssetId;
+				fl.distance        = nonNeg(lod.distance, 0.0f);
+				fl.density         = std::isfinite(lod.density) ? std::clamp(lod.density, 0.0f, 1.0f) : 1.0f;
+				layer->lods.push_back(fl);
+			}
+			// A level boundary only makes sense as a staircase out from the camera
+			// (FoliageComponent.h's own description of what a LOD level is); an asset
+			// entry's list is not guaranteed to arrive in that order.
+			std::sort(layer->lods.begin(), layer->lods.end(),
+			          [](const FoliageLod& a, const FoliageLod& b) { return a.distance < b.distance; });
+			layer->dirty = true;   // mesh/density/rules changed → re-scatter
+
+			// The entry's meshes and materials are project or EngineContent FILES like the
+			// group presets' (§7: only fetched on Apply, not a streamed material dependency).
+			if (ctx.contentManager)
+			{
+				if (e.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.meshAssetId))
+					ctx.contentManager->loadAssetAsync(e.meshAssetId);
+				if (e.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(e.materialAssetId))
+					ctx.contentManager->loadAssetAsync(e.materialAssetId);
+				for (const LandscapeFoliageLod& lod : e.lods)
+				{
+					if (lod.meshAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.meshAssetId))
+						ctx.contentManager->loadAssetAsync(lod.meshAssetId);
+					if (lod.materialAssetId != HE::UUID{} && !ctx.contentManager->ensureResident(lod.materialAssetId))
+						ctx.contentManager->loadAssetAsync(lod.materialAssetId);
+				}
+			}
+			++touched;
+		}
+		return touched;
 	}
 
 	// The name on the left, the control filling the rest - ImGui itself puts a label to
@@ -501,6 +717,9 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			waterParams.levelOffset     = s_waterOffset;
 			waterParams.dig             = s_waterDig;
 			waterParams.digDepth        = s_waterDigDepth;
+			waterParams.bedSlope        = s_waterBedSlope;
+			waterParams.bedRoughness    = s_waterBedRough;
+			waterParams.closeBed        = s_waterCloseBed;
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -727,20 +946,26 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					const float s01    = std::clamp(s_paintStrength, 0.0f, 1.0f);
 					const float amount = s01 >= 1.0f ? 1.0f
 						: 1.0f - std::pow(1.0f - s01, static_cast<float>(dt) * 60.0f);
-					TerrainPaint::paint(tc, lx, lz, invert ? 0 : s_paintLayer,
-					                    s_brushRadius, s_falloffRadius, amount);
+					// Ctrl+drag restores the base layer AND hands the texel back to the
+					// terrain's own group (slot 0) regardless of the Active Group picked —
+					// "paint the auto choice back" always means the terrain's own ground.
+					// paintInGroup's group write is a no-op without a mix group set.
+					TerrainPaint::paintInGroup(tc, lx, lz, invert ? 0 : s_paintLayer,
+					                           invert ? 0 : s_activeGroupSlot,
+					                           s_brushRadius, s_falloffRadius, amount);
 				}
 			}
 			// ── Foliage mode: the layer's density mask ────────────
 			// Same brush, same hit, a third target: the mask of the
-			// terrain entity's FoliageComponent. FoliagePaint dirties
-			// the layer, and FoliageSystem re-scatters it on the next
-			// tick — the instances under the brush appear or vanish
-			// while dragging. Without a layer there is nothing to
-			// paint; the panel offers to add one.
+			// active layer of the terrain entity's FoliageComponent.
+			// FoliagePaint dirties that layer, and FoliageSystem
+			// re-scatters it on the next tick — the instances under the
+			// brush appear or vanish while dragging. Without a layer
+			// there is nothing to paint; the panel offers to add one.
 			else if (s_landscapeFoliage)
 			{
-				if (auto* fol = terrainReg.try_get<FoliageComponent>(terrainEnt))
+				auto* folc = terrainReg.try_get<FoliageComponent>(terrainEnt);
+				if (FoliageLayer* fol = folc ? folc->active() : nullptr)
 				{
 					if (lmbDown && !s_brushWasDown && ctx.undoSys)
 						ctx.undoSys->snapshotNow("Paint Foliage");   // one undo entry per stroke
@@ -1297,7 +1522,9 @@ void renderPanel(AppContext& ctx)
         const std::vector<std::string> layers =
             lmat ? lmat->graphLayerNames : std::vector<std::string>{};
         if (layers.empty()) s_landscapePaint = false;
-        auto* fol = reg.try_get<FoliageComponent>(terrainEnt);
+        // The foliage component and the layer the tab and the brush work on.
+        auto*         folc = reg.try_get<FoliageComponent>(terrainEnt);
+        FoliageLayer* fol  = folc ? folc->active() : nullptr;
 
         // ── The card ─────────────────────────────────────────────────────
         {
@@ -1395,6 +1622,116 @@ void renderPanel(AppContext& ctx)
                 else
                     dimText("Drag a material from the Content Browser.");
 
+                // ── Texture group ────────────────────────────────────────
+                // The group IS the landscape material (Thema 233): picking one assigns that
+                // group's material and nothing else. The weightmap is one set per terrain whose
+                // channel k means the same role in every group, so every painted weight survives
+                // the switch; only what the channels look like (and are called) changes.
+                sectionLabel("Texture Group");
+                {
+                    SegCell cells[HE::kAutoLandscapeGroupCount];
+                    std::string ids[HE::kAutoLandscapeGroupCount];
+                    for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+                    {
+                        ids[i]   = std::string("##lsGroup") + HE::kAutoLandscapeGroups[i].name;
+                        cells[i] = { ids[i].c_str(), HE::kAutoLandscapeGroups[i].name,
+                                     "Landscape/Texture Group", nullptr, true };
+                    }
+                    const int pick = segmented(cells, HE::kAutoLandscapeGroupCount,
+                                               HE::kAutoLandscapeGroupCount,
+                                               HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId));
+                    if (pick >= 0)
+                        assignTextureGroup(ctx, *tmat, HE::kAutoLandscapeGroups[pick]);
+
+                    // The group's procedural layer meshes (ferns in the Forest, tall grass in the
+                    // Grassland, ...). Switching the group never touches the foliage layers; this
+                    // adds the ones the group offers and the landscape lacks.
+                    const int cur = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId);
+                    ImGui::BeginDisabled(cur < 0);
+                    if (EditorWidgets::button("Apply Group Meshes", ImVec2(-FLT_MIN, 0.0f)) && cur >= 0)
+                    {
+                        const int added = applyGroupMeshes(ctx, reg, terrainEnt, HE::kAutoLandscapeGroups[cur]);
+                        if (added > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Group Meshes");
+
+                    // ── Mix groups (Thema 233 step 7) ───────────────────────
+                    // A second and third group whose SHARE of each texel is kept in paint
+                    // channels 6/7 (TerrainComponent::mixGroup); the group above is what is
+                    // left over. No renderer reads a mix yet (that needs a fat-array material,
+                    // not built this step) — this only stores where a future one would blend;
+                    // the Paint tab's Active Group lets a stroke mark a spot for one now.
+                    sectionLabel("Mix Groups");
+                    for (int slot = 0; slot < 2; ++slot)
+                    {
+                        SegCell mcells[HE::kAutoLandscapeGroupCount + 1];
+                        std::string mids[HE::kAutoLandscapeGroupCount + 1];
+                        mids[0] = std::string("##lsMixNone") + std::to_string(slot);
+                        mcells[0] = { mids[0].c_str(), "None", "Landscape/Mix Group", nullptr, true };
+                        for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+                        {
+                            mids[i + 1] = std::string("##lsMix") + std::to_string(slot)
+                                        + HE::kAutoLandscapeGroups[i].name;
+                            const bool taken = i == cur || i == tc.mixGroup[1 - slot];
+                            mcells[i + 1] = { mids[i + 1].c_str(), HE::kAutoLandscapeGroups[i].name,
+                                               "Landscape/Mix Group",
+                                               taken ? "Already this terrain's own group or the other mix slot" : nullptr,
+                                               !taken };
+                        }
+                        const int active = tc.mixGroup[slot] < 0 ? 0 : tc.mixGroup[slot] + 1;
+                        const int mpick = segmented(mcells, HE::kAutoLandscapeGroupCount + 1,
+                                                    HE::kAutoLandscapeGroupCount + 1, active);
+                        if (mpick >= 0 && mcells[mpick].enabled)
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Mix Group");
+                            TerrainPaint::setMixGroup(tc, slot, mpick - 1);
+                        }
+                    }
+                }
+
+                // ── Foliage set ──────────────────────────────────────────
+                // The material names its LandscapeFoliageLayer by UUID (the Landscape
+                // Foliage node, Thema 327 step 3, MaterialAsset::foliageSetId); this is
+                // the one place that materializes it onto the terrain, same button
+                // precedent as "Apply Group Meshes" above (one undo snapshot, add +
+                // update, never deletes). Only custom materials carry the field today —
+                // the three engine materials still rely on "Apply Group Meshes".
+                if (lmat && lmat->foliageSetId != HE::UUID{})
+                {
+                    const HE::UUID setId = lmat->foliageSetId;
+                    const LandscapeFoliageLayerAsset* foliageSet =
+                        ctx.contentManager ? ctx.contentManager->getLandscapeFoliageLayer(setId) : nullptr;
+                    if (!foliageSet && ctx.contentManager)
+                    {
+                        // Passive pull (design §7): ask once per content epoch, not once
+                        // per process — a set that EngineContent has not pulled yet still
+                        // bumps contentEpoch() when it arrives (noteContentChanged()), and
+                        // that must trigger a retry instead of leaving Apply Foliage
+                        // disabled until the editor restarts. Never ensureResident here —
+                        // it is synchronous and does not start a download of a set that
+                        // still sits on the EngineContent server.
+                        static std::unordered_map<HE::UUID, uint64_t> s_askedAt;
+                        const uint64_t epoch = ctx.contentManager->contentEpoch();
+                        auto it = s_askedAt.find(setId);
+                        if (it == s_askedAt.end() || it->second < epoch)
+                        {
+                            s_askedAt[setId] = epoch;
+                            ctx.contentManager->loadAssetAsync(setId);
+                        }
+                    }
+                    sectionLabel("Foliage Set");
+                    dimText("%s", foliageSet ? foliageSet->name.c_str() : "(fetching the foliage set\xe2\x80\xa6)");
+                    ImGui::BeginDisabled(foliageSet == nullptr);
+                    if (EditorWidgets::button("Apply Foliage", ImVec2(-FLT_MIN, 0.0f)) && foliageSet)
+                    {
+                        const int touched = applyFoliageSet(ctx, reg, terrainEnt, setId, *foliageSet);
+                        if (touched > 0) ctx.world->markHierarchyDirty();
+                    }
+                    ImGui::EndDisabled();
+                    EditorWidgets::helpForLabel("Apply Foliage");
+                }
+
                 // ── Heightmap ────────────────────────────────────────────
                 drawHeightmapBlock(ctx, terrainEnt);
 
@@ -1446,7 +1783,9 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
+                    tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }
                 if (fol)
@@ -1469,7 +1808,43 @@ void renderPanel(AppContext& ctx)
             else if (s_landscapePaint)
             {
                 sectionLabel("Layer");
+                if (const int grp = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId); grp >= 0)
+                    dimText("%s group: Auto picks by slope and height, the others paint over it.",
+                            HE::kAutoLandscapeGroups[grp].name);
+                // The list is the material's, so a group switch (or a material with fewer
+                // layers) changes its length: the index is clamped every frame, never kept.
                 s_paintLayer = std::clamp(s_paintLayer, 0, static_cast<int>(layers.size()) - 1);
+
+                // ── Active group (Thema 233 step 7) ─────────────────────────
+                // Shown only once a Mix Group is set (Setup); the own group alone has
+                // nothing to distinguish. Picking a mix slot makes the stroke ALSO mark
+                // the texel as that group's — the group share painted here is what a
+                // future mixed material would blend by; today only the data is kept.
+                if (TerrainPaint::reservedLayers(tc) != 0)
+                {
+                    const int ownGroup = HE::autoLandscapeGroupOfMaterial(tmat->materialAssetId);
+                    SegCell gcells[3];
+                    std::string gids[3];
+                    gids[0] = "##lsActiveOwn";
+                    gcells[0] = { gids[0].c_str(),
+                                  ownGroup >= 0 ? HE::kAutoLandscapeGroups[ownGroup].name : "Own",
+                                  "Landscape/Active Group", nullptr, true };
+                    for (int slot = 0; slot < 2; ++slot)
+                    {
+                        gids[slot + 1] = std::string("##lsActiveMix") + std::to_string(slot);
+                        const bool has = tc.mixGroup[slot] >= 0;
+                        gcells[slot + 1] = { gids[slot + 1].c_str(),
+                                              has ? HE::kAutoLandscapeGroups[tc.mixGroup[slot]].name : "\xe2\x80\x94",
+                                              "Landscape/Active Group",
+                                              has ? nullptr : "No mix group in this slot (Setup)", has };
+                    }
+                    if (!gcells[s_activeGroupSlot].enabled) s_activeGroupSlot = 0;
+                    sectionLabel("Active Group");
+                    const int gpick = segmented(gcells, 3, 3, s_activeGroupSlot);
+                    if (gpick >= 0 && gcells[gpick].enabled) s_activeGroupSlot = gpick;
+                }
+                else
+                    s_activeGroupSlot = 0;
                 {
                     // One row per layer: a swatch, the name, the share of the landscape it
                     // covers right now (the mean weight, refreshed with every weightmap upload)
@@ -1525,7 +1900,9 @@ void renderPanel(AppContext& ctx)
                 {
                     if (ctx.undoSys) ctx.undoSys->snapshotNow();
                     tc.layerWeights.clear();   // back to "everything is layer 0"
-                    tc.layerWeights2.clear();  // layers 4..7 go with it
+                    tc.layerWeights2.clear();  // layers 4..7 (and any group share) go with it
+                    tc.layerWeights3.clear();  // and layers 8..11
+                    tc.mixGroup[0] = tc.mixGroup[1] = -1;  // the shares they lived in are gone
                     tc.weightsDirty = true;
                 }
                 EditorWidgets::helpForLabel("Clear Paint");
@@ -1535,9 +1912,9 @@ void renderPanel(AppContext& ctx)
             // ═════════════════════════ FOLIAGE ═══════════════════════════
             else if (s_landscapeFoliage)
             {
-                if (!fol)
+                if (!folc)
                 {
-                    // The layer is the terrain entity's own FoliageComponent - the same one
+                    // The layers are the terrain entity's own FoliageComponent - the same one
                     // "Add Component" in Details would put there.
                     dimText("This landscape has no foliage layer yet.");
                     if (EditorWidgets::primaryButton("Add Foliage Layer", ImVec2(-FLT_MIN, 0.0f)))
@@ -1550,6 +1927,56 @@ void renderPanel(AppContext& ctx)
                 }
                 else
                 {
+                    // Which layer the brush paints: one row per kind of plant, the same
+                    // list as the Foliage component's in Details, sharing its choice
+                    // (FoliageComponent::activeLayer). The number is what it scattered.
+                    sectionLabel("Layers");
+                    {
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        const float rowH = ImGui::GetFrameHeight() * 1.2f;
+                        const int   on   = static_cast<int>(folc->activeIndex());
+                        for (int i = 0; i < static_cast<int>(folc->layers.size()); ++i)
+                        {
+                            const FoliageLayer& l = folc->layers[static_cast<size_t>(i)];
+                            ImGui::PushID(i);
+                            const ImVec2 p = ImGui::GetCursorScreenPos();
+                            const float  w = ImGui::GetContentRegionAvail().x;
+                            if (ImGui::InvisibleButton("##follayer", ImVec2(w, rowH))) folc->activeLayer = i;
+                            const bool hov = ImGui::IsItemHovered();
+                            // The label is the layer's own name, so it is looked up by key.
+                            EditorWidgets::helpForKey("Landscape/Foliage Layer");
+                            if (i == on)
+                            {
+                                dl->AddRectFilled(p, ImVec2(p.x + w, p.y + rowH),
+                                                  (ImGui::GetColorU32(ImGuiCol_ButtonActive) & 0x00FFFFFFu) | 0x30000000u, 5.0f);
+                                dl->AddRect(p, ImVec2(p.x + w, p.y + rowH), ImGui::GetColorU32(ImGuiCol_ButtonActive), 5.0f);
+                            }
+                            else if (hov)
+                                dl->AddRectFilled(p, ImVec2(p.x + w, p.y + rowH), ImGui::GetColorU32(ImGuiCol_FrameBgHovered), 5.0f);
+                            const float ty = p.y + (rowH - ImGui::GetTextLineHeight()) * 0.5f;
+                            const std::string name = foliageLayerLabel(l, static_cast<size_t>(i));
+                            // A hidden layer reads dimmed, as it is in the viewport.
+                            dl->AddText(ImVec2(p.x + 8.0f, ty),
+                                        ImGui::GetColorU32(l.visible ? ImGuiCol_Text : ImGuiCol_TextDisabled), name.c_str());
+                            char count[24];
+                            std::snprintf(count, sizeof(count), "%zu", l.cachedInstances.size());
+                            const float countW = ImGui::CalcTextSize(count).x;
+                            dl->AddText(ImVec2(p.x + w - countW - 8.0f, ty), ImGui::GetColorU32(ImGuiCol_TextDisabled), count);
+                            ImGui::PopID();
+                        }
+                    }
+                    if (folc->layers.size() < FoliageComponent::kMaxLayers)
+                    {
+                        if (EditorWidgets::button("Add Foliage Layer##more"))
+                        {
+                            if (ctx.undoSys) ctx.undoSys->snapshotNow("Add Foliage Layer");
+                            folc->addLayer();
+                        }
+                        EditorWidgets::helpForLabel("Add Foliage Layer##more");
+                    }
+                    // The choice may have changed and the list may have grown (moving it).
+                    fol = folc->active();
+
                     // What grows: the mesh and material live on the layer, and without a
                     // mesh the brush paints a mask nobody can see.
                     sectionLabel("Layer");
@@ -1646,11 +2073,22 @@ void renderPanel(AppContext& ctx)
                 EditorWidgets::checkbox("Dig Bed##water", &s_waterDig);
                 EditorWidgets::helpForLabel("Dig Bed##water");
                 ImGui::BeginDisabled(!s_waterDig);
-                rowLabel("Depth");
+                rowLabel("Max Depth");
                 ImGui::DragFloat("##water_depth", &s_waterDigDepth, 0.05f, 0.0f, 200.0f, "%.2f m");
-                EditorWidgets::helpForLabel("Depth##water");
-                ImGui::EndDisabled();
+                EditorWidgets::helpForLabel("Max Depth##water");
+                rowLabel("Slope");
+                ImGui::DragFloat("##water_slope", &s_waterBedSlope, 0.005f, HE::water::kMinBedSlope, HE::water::kMaxBedSlope, "%.3f");
+                EditorWidgets::helpForLabel("Slope##water");
+                rowLabel("Bed Roughness");
+                ImGui::SliderFloat("##water_rough", &s_waterBedRough, 0.0f, 1.0f, "%.2f");
+                EditorWidgets::helpForLabel("Bed Roughness##water");
                 s_waterDigDepth = std::max(0.0f, s_waterDigDepth);
+                s_waterBedSlope = std::clamp(s_waterBedSlope, HE::water::kMinBedSlope, HE::water::kMaxBedSlope);
+                s_waterBedRough = std::clamp(s_waterBedRough, 0.0f, 1.0f);
+                dimText("Full depth %.1f m from the shore", s_waterDigDepth / s_waterBedSlope);
+                ImGui::EndDisabled();
+                EditorWidgets::checkbox("Close Bed on Erase##water", &s_waterCloseBed);
+                EditorWidgets::helpForLabel("Close Bed on Erase##water");
 
                 // The grid the water lives on: cells per side over the whole
                 // landscape. A typed field, like the weightmap's (32..2048 on a few
@@ -1679,6 +2117,20 @@ void renderPanel(AppContext& ctx)
                     }
                 }
                 dimText("%.1f m per cell", tc.sizeX / static_cast<float>(std::max(1u, tc.water.res)));
+
+                // The water's waves as real geometry (GPU tessellation of the engine water material's
+                // Static Switch "Tessellation"): a landscape-wide switch, like the shore clipping.
+                {
+                    bool tess = tc.water.tessellation;
+                    if (EditorWidgets::checkbox("Tessellation##water", &tess))
+                    {
+                        if (ctx.undoSys) ctx.undoSys->snapshotNow("Water Tessellation");
+                        tc.water.tessellation = tess;
+                    }
+                    EditorWidgets::helpForLabel("Tessellation##water");
+                    ImGui::SameLine();
+                    dimText("(per-body height and coast fade: Tessellated Waves, below)");
+                }
 
                 ImGui::Spacing();
                 dimText("LMB drag in the viewport to paint water. Ctrl+drag does the opposite.");
@@ -1891,6 +2343,45 @@ void renderPanel(AppContext& ctx)
 
                             if (fogEdited && fog != b.underwaterFog)
                                 WF::setUnderwaterFog(tc, b.id, fog);
+                            ImGui::TreePop();
+                        }
+
+                        // ── Tessellated waves of this body ───────────────────────────────
+                        // HE::water::TessellationParams: how high the real waves stand and how
+                        // far from the coast they grow in. A river wants a fraction of what a
+                        // sea does, so it is per body. Only acts while the landscape's
+                        // Tessellation switch (above) is on, so the rows grey out otherwise.
+                        const bool tessOpen = ImGui::TreeNodeEx("Tessellated Waves##wtess", physFlags);
+                        EditorWidgets::helpForLabel("Tessellated Waves##wtess");
+                        if (tessOpen)
+                        {
+                            WF::TessellationParams tp = b.tessellation;
+                            bool tpEdited = false;
+                            const auto trackTess = [&]
+                            {
+                                if (!ctx.undoSys) return;
+                                if (ImGui::IsItemActivated())
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Tessellated Waves");
+                                }
+                                if (ImGui::IsItemDeactivatedAfterEdit()) ctx.undoSys->commitPending();
+                            };
+                            ImGui::BeginDisabled(!tc.water.tessellation);
+                            rowLabel("Wave Height");
+                            if (ImGui::DragFloat("##wtess_height", &tp.height, 0.01f, 0.0f, HE::water::kMaxTessHeight, "%.2f x"))
+                                tpEdited = true;
+                            trackTess();
+                            EditorWidgets::helpForLabel("Wave Height##wtess");
+                            rowLabel("Coast Fade");
+                            if (ImGui::DragFloat("##wtess_shore", &tp.shoreWidth, 0.02f, HE::water::kMinTessShore,
+                                                 HE::water::kMaxTessShore, "%.2f m"))
+                                tpEdited = true;
+                            trackTess();
+                            EditorWidgets::helpForLabel("Coast Fade##wtess");
+                            ImGui::EndDisabled();
+                            if (tpEdited && tp != b.tessellation)
+                                WF::setTessellation(tc, b.id, tp);
                             ImGui::TreePop();
                         }
 

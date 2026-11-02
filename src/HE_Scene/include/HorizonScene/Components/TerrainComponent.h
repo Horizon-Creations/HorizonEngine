@@ -2,9 +2,10 @@
 #include <Types/UUID.h>
 #include "HorizonScene/WaterField.h"
 #include <cstdint>
+#include <memory>
 #include <vector>
 
-// Paintable landscape layers: two RGBA8 weightmap pages of four channels each.
+// Paintable landscape layers: three RGBA8 weightmap pages of four channels each.
 // Must equal HE::kMatMaxLandscapeLayers (MaterialGraph.h) — test_terrain pins it.
 // The largest resolution a landscape can have: 1025 = 2^10 + 1, the top of the 2ⁿ+1
 // ladder every landscape is snapped to (TerrainSystem / TerrainSculpt::ensureHeights).
@@ -14,7 +15,7 @@
 // read as flat, and the "snap" ran again every frame (dirty → all 256 chunks rebuilt
 // and re-uploaded per frame).
 inline constexpr uint32_t kTerrainMaxResolution = 1025;
-inline constexpr int kTerrainWeightPages = 2;
+inline constexpr int kTerrainWeightPages = 3;
 inline constexpr int kTerrainMaxLayers   = 4 * kTerrainWeightPages;
 
 struct TerrainComponent {
@@ -61,6 +62,12 @@ struct TerrainComponent {
     bool     dirty = true;        // set to regenerate ALL chunks; not serialised
     // Per-vertex sculpted heights (size == res*res overrides fBm); serialised.
     std::vector<float> sculptHeights;
+    // The height field the chunks were last built from (resolution x resolution, row-major,
+    // the same one the chunk meshes sample), kept for the renderer's GI height-field tracing.
+    // Not serialised; TerrainSystem replaces it (and bumps the version) on every rebuild.
+    std::shared_ptr<const std::vector<float>> builtField;
+    uint32_t builtFieldRes     = 0;
+    uint64_t builtFieldVersion = 0;
 
     // ── Material layers (paint) ──────────────────────────────────────────────
     // Per-texel layer weights, RGBA8 = layers 0..3 (R=0 … A=3), row-major over
@@ -78,10 +85,29 @@ struct TerrainComponent {
     // zero, which is every landscape painted before there were eight layers —
     // they load without it and render exactly as before. Allocated by the first
     // stroke on layer 4+, never without layerWeights; the weights of one texel
-    // sum to 255 across BOTH pages. Uploaded as the right half of a 2:1
-    // weightmap in the same texture (TerrainPaint::buildWeightTexture), so the
-    // shader needs no second sampler or binding on any backend.
+    // sum to 255 across ALL pages. Uploaded as the right half of a 2:1 weightmap
+    // (the middle third of a 3:1 one) in the same texture (TerrainPaint::
+    // buildWeightTexture), so the shader needs no second sampler or binding on
+    // any backend.
     std::vector<uint8_t>  layerWeights2;
+    // Layers 8..11 (R=8 … A=11), same layout again. Empty = all four zero, which
+    // is every landscape painted before there were twelve layers: it saves and
+    // uploads exactly as it did, and loads without the key. Allocated by the
+    // first stroke on layer 8+, never without layerWeights2 beside it. Uploaded
+    // as the right third of a 3:1 weightmap, and only once a byte in it is set.
+    std::vector<uint8_t>  layerWeights3;
+
+    // ── Mixed texture groups (Thema 233, step 7) ─────────────────────────────
+    // A terrain's own group is its landscape material (MaterialComponent::materialAssetId).
+    // mixGroup[k] names a SECOND group whose share of every texel lives in weight layer
+    // 6 + k (k = 0, 1): the AutoLandscapeGroupId's int, -1 = none. The terrain's own group
+    // is the remainder (1 - share6 - share7), so a texel nobody painted is the own group
+    // alone, exactly what every landscape was before this field. A reserved layer is a
+    // GROUP SHARE and not a paint layer: it is left out of the 255-sum of layers 0..5
+    // (TerrainPaint), and the material must not use layers 6/7 as its own paint layers
+    // (the engine's group materials declare six). Saved only once one is set.
+    // Order matters nowhere else: -1 on both is the legacy, one-group terrain.
+    int mixGroup[2] = { -1, -1 };
 
     // ── Water ────────────────────────────────────────────────────────────────
     // The water bodies on this landscape and the raster that says where they are

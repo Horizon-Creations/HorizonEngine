@@ -2,11 +2,8 @@
 #include <Diagnostics/Logger.h>
 #include <d3dcompiler.h>
 #include <algorithm>
-#include <filesystem>
 #include <fstream>
 #include <sstream>
-
-namespace fs = std::filesystem;
 
 namespace
 {
@@ -17,18 +14,13 @@ const char* profileFor(HE::ShaderType type)
         case HE::ShaderType::Vertex:   return "vs_5_0";
         case HE::ShaderType::Fragment: return "ps_5_0";
         case HE::ShaderType::Compute:  return "cs_5_0";
+        default:                       return "vs_5_0";
     }
-    return "vs_5_0";
 }
 } // namespace
 
 ShaderHandle D3D11ShaderManager::load(const char* path, HE::ShaderType type)
 {
-    if (!fs::exists(path))
-    {
-        HE_LOG_ERROR(RHI, "%s", (std::string("D3D11ShaderManager: shader file not found: ") + path).c_str());
-        return { 0, false };
-    }
     std::ifstream file(path);
     if (!file.is_open())
     {

@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -53,14 +54,33 @@ namespace
 
     // Everything that is the same for all bodies of a landscape and moves their
     // mesh without moving a cell (the shore clipping settings included).
-    uint64_t paramsKeyOf(const TerrainComponent& tc, const glm::vec2& uvOrigin)
+    uint64_t paramsKeyOf(const TerrainComponent& tc, const glm::vec2& uvOrigin, float shoreTiltScale)
     {
         uint64_t h = 1469598103934665603ull;
         h = mix(h, tc.sizeX); h = mix(h, tc.sizeZ); h = mix(h, tc.water.res);
         h = mix(h, uvOrigin.x); h = mix(h, uvOrigin.y);
         h = mix(h, WaterSurface::kUvMetersPerTile);
         h = mix(h, tc.water.clipToGround); h = mix(h, tc.water.shoreOvershoot);
+        h = mix(h, shoreTiltScale);
         return h;
+    }
+
+    // sy/sx of the landscape's own world scale (Thema 206 Schritt 8): the water
+    // material's vertex stage always reads the normal through mat3(uModel) (every
+    // backend, MaterialShaderLibrary.cpp), never an inverse-transpose normal matrix, so
+    // a non-uniform X-vs-Y world scale on the landscape (or one of ITS ancestors) scales
+    // the baked shore tilt by sx/sy before the shader sees it. Baking in the inverse
+    // ratio cancels that; a rotation needs no such term (SurfaceMesh's tilt survives any
+    // heading, see MatGen/main.cpp shoreE). Column length, not t.scale: a parent chain's
+    // combined rotation+scale is exactly what mat3(uModel) multiplies, and TRS composition
+    // (T * R * S per node) keeps each column's length equal to that node's own scale
+    // factor regardless of rotation — this only breaks under shear, which this engine's
+    // transform system does not otherwise produce.
+    float shoreTiltScaleOf(HorizonWorld& world, entt::entity te)
+    {
+        const glm::mat3 m(HE::worldMatrixOf(world, te));
+        const float sx = glm::length(m[0]), sy = glm::length(m[1]);
+        return sy / std::max(sx, 1e-6f);
     }
 
     // The mesh asset behind a surface goes with it: out of the renderer's cache,
@@ -85,6 +105,70 @@ namespace
             w->second.erase(static_cast<uint32_t>(e));
         world.destroyEntity(e);
         giveBackMesh(cm, renderer, mesh);
+    }
+
+    // The material a landscape's water draws with: the engine water, or — when its
+    // "tessellation" switch is on — the same water as a Material Instance with the
+    // material's Static Switch "Tessellation" set (the swell as real geometry). The instance
+    // is made here, in memory, on first use. A build that cannot make it (a packed game
+    // whose water has no graph to regenerate from, no shader compiler) falls back to the
+    // plain water, once and for good: a surface must never turn into the grey fallback.
+    HE::UUID waterMaterialFor(ContentManager& cm, bool tessellation)
+    {
+        if (!tessellation) return HE::kEngineWaterMaterialId;
+        static std::unordered_set<const ContentManager*> failed;
+        if (failed.count(&cm)) return HE::kEngineWaterMaterialId;
+        auto ready = [&] {
+            const MaterialAsset* m = cm.getMaterial(HE::kEngineWaterTessellatedMaterialId);
+            return m && !m->customShaderFragGlsl.empty();
+        };
+        if (ready()) return HE::kEngineWaterTessellatedMaterialId;
+        if (!cm.isLoaded(HE::kEngineWaterMaterialId)) return HE::kEngineWaterMaterialId;   // parent not here yet: retry next tick
+        if (!cm.getMaterial(HE::kEngineWaterTessellatedMaterialId))
+        {
+            MaterialAsset a;
+            a.id   = HE::kEngineWaterTessellatedMaterialId;
+            a.name = "WaterTessellated";
+            a.path = "mem://Engine/Materials/WaterTessellated.hasset";
+            a.parentMaterialPath   = WaterSurface::kMaterialPath;
+            a.instanceSwitchNames  = { "Tessellation" };
+            a.instanceSwitchValues = { 1 };
+            cm.registerMaterial(std::move(a));
+        }
+        cm.syncMaterialInstance(HE::kEngineWaterTessellatedMaterialId);
+        if (ready()) return HE::kEngineWaterTessellatedMaterialId;
+        failed.insert(&cm);
+        HE_LOG_WARN(Asset, "%s", "Water surface: tessellation needs the water material's graph and a shader "
+                                 "compiler; drawing without it");
+        return HE::kEngineWaterMaterialId;
+    }
+
+    // The tessellated surface's numbers for a body, on the surface entity's material as the
+    // per-entity override of the material's "TessWaves" knob (the instance carries only the
+    // switch; the numbers are per body: a river and a sea on one landscape differ). Off or no
+    // body: the override is removed again, so the plain water carries nothing extra.
+    void applyTessParams(MaterialComponent& mat, const Field& f, uint16_t bodyId)
+    {
+        static const char* kKnob = "TessWaves";
+        const Body* body = f.tessellation ? f.findBody(bodyId) : nullptr;
+        auto it = std::find_if(mat.paramOverrides.begin(), mat.paramOverrides.end(),
+                               [](const MaterialParamOverride& o) { return o.name == kKnob; });
+        if (!body)
+        {
+            if (it != mat.paramOverrides.end()) { mat.paramOverrides.erase(it); mat.dirty = true; }
+            return;
+        }
+        const float v[4] = { body->tessellation.height, body->tessellation.shoreWidth, 0.0f, 0.0f };
+        if (it == mat.paramOverrides.end())
+        {
+            MaterialParamOverride o;
+            o.name = kKnob;
+            mat.paramOverrides.push_back(o);
+            it = mat.paramOverrides.end() - 1;
+        }
+        if (std::equal(v, v + 4, it->value)) return;
+        std::copy(v, v + 4, it->value);
+        mat.dirty = true;
     }
 
     // Material first: with it not resident the renderer would draw the surface
@@ -114,7 +198,7 @@ namespace
         entt::registry& reg() { return world.registry(); }
 
         void apply(entt::entity te, uint16_t bodyId, entt::entity existing,
-                   SurfaceMesh& s, uint64_t paramsKey, WaterSurface::Stats& stats)
+                   SurfaceMesh& s, uint64_t paramsKey, WaterSurface::Stats& stats, bool tessellation)
         {
             auto& r = reg();
             HE::UUID meshId{};
@@ -142,7 +226,8 @@ namespace
                 e = world.createEntity("WaterSurface");
                 world.reparentEntity(e, te);
                 MaterialComponent mat;
-                mat.materialAssetId = HE::kEngineWaterMaterialId;
+                mat.materialAssetId = waterMaterialFor(cm, tessellation);
+                if (const Field* fld = &reg().get<TerrainComponent>(te).water) applyTessParams(mat, *fld, bodyId);
                 r.emplace_or_replace<MaterialComponent>(e, mat);
                 ++stats.created;
             }
@@ -209,7 +294,40 @@ namespace
             opt.uvMetersPerTile = WaterSurface::kUvMetersPerTile;
             opt.clipToGround    = f.clipToGround;
             opt.shoreOvershoot  = f.shoreOvershoot;
-            const uint64_t paramsKey = paramsKeyOf(tc, opt.uvOrigin);
+            opt.shoreFade       = true;     // the engine water material softens the shore from it
+            opt.shoreTiltScale  = shoreTiltScaleOf(world, te);
+            const uint64_t paramsKey = paramsKeyOf(tc, opt.uvOrigin, opt.shoreTiltScale);
+
+            // The material stays with the surface, not only with its creation: a scene
+            // that was re-opened, an unload sweep or a snapshot that did not carry the
+            // component leaves a surface that lives on and draws the plain fallback.
+            // One look at the residency per tick (a map lookup), a retry at most once
+            // a second when the file is missing.
+            if (!byBody.empty())
+            {
+                if (!cm.isLoaded(HE::kEngineWaterMaterialId))
+                {
+                    if (f.materialWait > 0) --f.materialWait;
+                    else
+                    {
+                        ensureWaterMaterial(cm);
+                        if (!cm.isLoaded(HE::kEngineWaterMaterialId)) f.materialWait = 60;
+                    }
+                }
+                const HE::UUID wanted = waterMaterialFor(cm, f.tessellation);
+                for (auto& kv : byBody)
+                {
+                    auto* mat = reg().try_get<MaterialComponent>(kv.second);
+                    if (!mat)
+                        mat = &reg().emplace<MaterialComponent>(kv.second), mat->materialAssetId = wanted;
+                    else if (mat->materialAssetId != wanted)
+                    {
+                        mat->materialAssetId = wanted;
+                        mat->dirty = true;
+                    }
+                    applyTessParams(*mat, f, kv.first);
+                }
+            }
 
             // Steady state: nothing was edited, every surface still belongs to a
             // body, was built with today's parameters and stands at its body's
@@ -286,7 +404,7 @@ namespace
                     if (existing != entt::null) { removeSurface(world, cm, renderer, existing); ++stats.removed; }
                     continue;
                 }
-                apply(te, body.id, existing, s, paramsKey, stats);
+                apply(te, body.id, existing, s, paramsKey, stats, f.tessellation);
             }
 
             // What is left in the map belongs to a body that no longer exists.

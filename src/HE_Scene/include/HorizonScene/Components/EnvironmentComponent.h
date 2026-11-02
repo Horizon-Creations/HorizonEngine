@@ -74,9 +74,10 @@ struct EnvironmentComponent
     float cloudEvolution = 1.0f;
     // Low-resolution cloud pass (performance): raymarch the clouds at quarter resolution
     // into an offscreen buffer, then bilinear-upsample + composite. Big win in open-sky
-    // views (clouds are the dominant per-pixel sky cost). Default OFF = the proven inline
-    // path (so it can never regress); turn ON and A/B with F9 to measure the win. Metal first.
-    bool  lowResClouds = false;
+    // views (clouds are the dominant per-pixel sky cost: 10.7 -> 3.4 ms Scene pass at
+    // 3200x1800 on the M5). Default ON; turn OFF for the full-resolution inline raymarch
+    // (cloud edges differ by up to ~34/255, mean < 1/255). Scenes store the flag explicitly.
+    bool  lowResClouds = true;
     // Cloud appearance knobs (so the look can be tweaked without re-rolling the
     // pattern): density scales opacity/thickness, fluffiness drives the cauliflower
     // erosion (higher = puffier, more broken-up billows), tint colours the clouds.

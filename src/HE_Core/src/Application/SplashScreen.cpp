@@ -1,6 +1,7 @@
 #include "Application/SplashScreen.h"
 #include "Diagnostics/Log.h"
 #include "Window/Window.h"   // hiddenWindowRequested
+#include "Platform/BuildProfile.h"   // HE_FEATURE_TEST_HOOKS: HE_NO_SPLASH, HE_SPLASH_DUMP
 
 // PNG only, and this is HorizonCore's ONE copy of the decoder: AppIcon.cpp reads
 // the generated window icon back through the same symbols, so it must not be
@@ -70,12 +71,15 @@ bool SplashScreen::open(const SplashConfig& cfg)
 	// The escape hatch. The splash also decides whether the primary window is
 	// held back until startup finishes, and that is the part that could go
 	// wrong on a platform nobody has run this on yet — so there has to be a way
-	// to get the old behaviour back without a new build.
+	// to get the old behaviour back without a new build. Dev builds only
+	// (HE_FEATURE_TEST_HOOKS): a release game's splash is the project's choice.
+#if HE_FEATURE_TEST_HOOKS
 	if (const char* off = SDL_getenv("HE_NO_SPLASH"); off && *off && *off != '0')
 	{
 		HE_LOG_INFO(Core, "%s", "Splash: disabled by HE_NO_SPLASH");
 		return false;
 	}
+#endif
 	// Hidden mode: the splash is its own always-on-top window, the one piece
 	// of startup that would still pop up with the primary window held back.
 	// Checked here and not by each application's config, so the editor and a
@@ -388,7 +392,8 @@ void SplashScreen::draw()
 	// the one piece of UI you cannot check by looking. HE_SPLASH_DUMP=<file.bmp>
 	// writes every frame it draws (…0.bmp, …1.bmp, …) so the layout and each
 	// status line can be inspected after the fact. BMP because SDL writes it
-	// without an encoder.
+	// without an encoder. A test hook, so dev builds only.
+#if HE_FEATURE_TEST_HOOKS
 	if (const char* dump = SDL_getenv("HE_SPLASH_DUMP"); dump && *dump)
 	{
 		if (SDL_Surface* shot = SDL_RenderReadPixels(m_renderer, nullptr))
@@ -402,6 +407,9 @@ void SplashScreen::draw()
 			SDL_DestroySurface(shot);
 		}
 	}
+#else
+	(void)m_dumpIndex;   // kept so the class has one layout in both profiles
+#endif
 
 	SDL_RenderPresent(m_renderer);
 }

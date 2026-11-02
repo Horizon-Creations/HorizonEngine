@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #include <cstdint>
 #include <Renderer/IRenderer.h>
 #include <Renderer/GpuPassAccumulator.h>
@@ -19,6 +20,7 @@
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <unordered_map>
+#include <unordered_set>
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -101,6 +103,7 @@ public:
 	                       std::vector<uint8_t>& rgba) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	ShaderBuildStatus PumpShaderBuilds() override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
@@ -223,6 +226,7 @@ private:
 	void EncodeScene(void* renderEncoder, int width, int height,
 	                 MetalDeferredFrame* deferred = nullptr,
 	                 void* fogCmdBuf = nullptr, void* fogScenePass = nullptr);
+	bool EncodeWaterReflPrepass(void* cmdBuf, int width, int height, const std::vector<TPDraw>& draws);
 
 	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
 	// docs/deferred-renderer-plan.md. Active when SetRenderPath(Deferred) and the
@@ -351,12 +355,8 @@ private:
 	// by both composites — see kSSRRoughMixFS.
 	float m_giReflBlurFloor    = 0.0f;
 	bool  m_giReflBlurEnabled  = true;  // IRenderer::GIReflectionSettings::blur
-	// How far, in SCREEN pixels, the widest allowed lobe (roughness =
-	// GIReflMaxRoughness) scatters when ONE ray samples it. Divided by the tier's
-	// ray count at use: the filter only stands in for the part of the lobe the
-	// rays missed. Absent entirely, every higher tier was noisier than the one
-	// below; held constant across tiers, every higher tier was blurrier.
-	static constexpr float kGIReflLobeScreenPx = 24.0f;
+	// Tier rays / resolution / blur floor and the lobe reach (kGIReflLobeScreenPx)
+	// come from HorizonRendering/GIReflectionTier.h, shared with every backend.
 	// Forward-path glossy mix (quality High): bakes the narrow/wide roughness
 	// lerp the DEFERRED composite does per pixel into the half-res texture the
 	// forward scene shader samples — it only gets one. Optional; null just means
@@ -380,6 +380,7 @@ private:
 	bool  m_giReflHistValid  = false;
 	glm::mat4 m_giReflPrevViewProj = glm::mat4(1.0f);
 	float m_giReflFrameSeed  = 0.0f;
+	bool  m_reflWaterPass    = false;  // the GI / SSR traces run over EncodeWaterReflPrepass' pair (deferred frame, translucent tail)
 	int   m_giReflW = 0, m_giReflH = 0;
 	// P4 (HW only): per-unique-BLAS vertex/index buffer GPU addresses (tier-2
 	// argument buffer, macOS 13+) + per-TLAS-instance BLAS index, rebuilt with
@@ -478,7 +479,18 @@ private:
 	void* m_skyReflPipeline = nullptr; // id<MTLRenderPipelineState> skyFragment, RGBA16F, no depth
 	void* m_skyReflCube     = nullptr; // id<MTLTexture> cube RGBA16F, kSkyReflCubeSize²
 	bool  m_skyReflValid    = false;   // the cube holds THIS frame's sky
+	// Two of the six faces per frame after the first full bake (see OpenGLRenderer.h); an undrawn face keeps its picture.
+	static constexpr int kSkyReflFacesPerFrame = 2;
+	bool  m_skyReflBaked    = false;
+	int   m_skyReflPhase    = 0;
 	void  EncodeSkyReflCube(void* cmdBuf);
+	// The cube graph materials bind as heSkyEnv (slot 14). Transparent surfaces (water) never reach the
+	// GI-reflection trace, so their specular lookup is the only place the real sky (aurora, stars,
+	// clouds) can show in them; m_skyEnvCube is the CPU bake without any of it.
+	void* MaterialSkyCube() const
+	{
+		return (m_giReflEnabled && m_skyReflValid && m_skyReflCube) ? m_skyReflCube : m_skyEnvCube;
+	}
 	// Sky-View LUT (perf audit A4): atmoScatter for the current sun baked into
 	// two 256×128 RGBA16F targets (skyViewLutFragment in kSkyMSL: Rayleigh +
 	// multiple-scatter fill, and the phase-free Mie term), so the sky pass reads
@@ -603,6 +615,7 @@ private:
 	// ANDed onto the fresh frustum result, never copied over it. The shadow
 	// pass culls into its own list against the light and stays out of this.
 	void  CullCameraObjects();
+	void  CullCameraObjectsFresh();   // the cull itself, without the frame's cache (m_cameraCull)
 	OcclusionCuller       m_occlusionCuller;
 	std::vector<uint8_t>  m_occlusionCacheVisible;
 	uint64_t              m_occlusionCacheStamp = ~0ull;
@@ -610,6 +623,25 @@ private:
 	glm::mat4             m_occlusionCacheViewProj = glm::mat4(1.0f);
 	uint32_t              m_occlusionCacheCulled = 0;
 	uint64_t              m_frameStamp = 0;      // bumped once per primary EncodeFrame
+	// The whole answer (visible flags and draw order) of the last cull, for the next pass of the
+	// same frame that asks with the same walk, the same refined bounds and the same camera: the
+	// SSAO pre-pass and the scene pass cull and sort the same 50k objects with the same view
+	// (4.8 ms a frame for the two, docs/perf-audit/frame-parallelism-audit-2026-10-26.md, lever 4).
+	// Bounds change only in RefineObjectBounds, once per walk, which every pass runs before this;
+	// a pass at another aspect (SSAO at half size, RENDERSCALE) has another projection and misses.
+	struct CameraCullCache
+	{
+		uint64_t              stamp   = ~0ull;
+		uint64_t              walk    = ~0ull;
+		const RenderObject*   objects = nullptr;
+		size_t                count   = 0;
+		glm::mat4             viewProj{ 1.0f };
+		glm::vec3             camPos{ 0.0f };
+		bool                  occlusion = false;
+		uint32_t              occlusionCulled = 0;
+		std::vector<uint8_t>  visible;
+		std::vector<uint32_t> sorted;
+	} m_cameraCull;
 
 	// Unlit pipeline. All id<MTL…>, retained.
 	void* m_scenePipeline        = nullptr; // id<MTLRenderPipelineState>
@@ -643,7 +675,24 @@ private:
 	// Instanced twin (vertexShadowInstanced: one lightVP*model per instance at
 	// buffer 5). Optional — null sends every same-mesh run through the loop.
 	void* m_shadowInstancedPipeline = nullptr; // id<MTLRenderPipelineState>
-	RenderSorter::DepthBatchList m_shadowBatches; // same-mesh caster runs per depth layer
+	// One depth layer of the shadow pass (a cascade or a local light's view), prepared
+	// before any layer is encoded (EncodeShadowMap): its own cull, sort and runs, so the
+	// layers prepare side by side, then per run the mesh and the ring slice its products
+	// went into (mvp null = the per-caster loop, mesh null = skipped).
+	struct ShadowView
+	{
+		void*      target = nullptr;
+		int        layer = 0, size = 0;
+		glm::mat4  viewProj{ 1.0f }, lightClip{ 1.0f };
+		uint32_t   skip = 0;
+		std::vector<uint8_t>         visible;
+		std::vector<uint32_t>        sorted;
+		RenderSorter                 sorter;
+		RenderSorter::DepthBatchList batches;
+		struct Draw { const GpuMesh* mesh = nullptr; glm::mat4* mvp = nullptr; void* instBuf = nullptr; size_t instOff = 0; };
+		std::vector<Draw>            draws;
+	};
+	std::vector<ShadowView> m_shadowViews;
 	int   m_shadowSize     = HE::kShadowMapResolution;
 	// The project's directional-shadow settings (SetShadowSettings). Distance /
 	// count / lambda go to m_extractor as they arrive; a resolution change
@@ -677,6 +726,18 @@ private:
 	uint64_t            m_refinedWalk    = ~uint64_t(0); // RenderExtractor::fullExtractCount() it last ran for
 	const RenderObject* m_refinedObjects = nullptr;      // the object array and size it ran over
 	size_t              m_refinedCount   = 0;
+	// The union of every object's refined bound, gathered in the same loop: EncodeCloudShadow
+	// needs it for its ground height and used to walk all objects again for it (1.9 ms at 50k).
+	HE::AABB            m_refinedSceneBox{};
+	// Every object's refined bound, in object order, from the same loop: what the frustum
+	// culls read (FrustumCuller's compact overload) instead of the ~280-byte RenderObjects.
+	std::vector<HE::AABB> m_refinedBounds;
+	// The frustum cull of every pass (cascades, local layers, the camera): over m_refinedBounds
+	// when they belong to the walk in m_renderWorld, otherwise over the objects themselves.
+	void  CullObjects(const glm::mat4& viewProj, std::vector<uint8_t>& outVisible);
+	// The scene box of the walk m_renderWorld holds: the one RefineObjectBounds gathered when it
+	// ran for this walk, otherwise a loop of its own (a frame whose passes never refined).
+	HE::AABB FrameSceneBox() const;
 	void  EncodeShadowMap(void* cmdBuf, float aspect); // CSM depth maps; aspect MUST match the scene extract
 
 	// ── HDR scene color + tonemap (PostProcessPass) ─────────────────────────
@@ -692,6 +753,35 @@ private:
 	// shader use the built-in PBR m_scenePipeline. Value may be null (build failed →
 	// cached so we don't retry every frame).
 	std::unordered_map<uint64_t, void*> m_materialPipelineCache; // hash → id<MTLRenderPipelineState>
+	// Builds in flight (key = the final, salted cache key). A key is in the cache OR here,
+	// never both for long: a null in the cache means "failed", this set means "not yet".
+	std::unordered_set<uint64_t>        m_materialPipelinePending;
+	// What Metal's compiler threads hand back. The completion handlers never touch the
+	// renderer, only this box, which they hold by shared_ptr so one that fires after
+	// Shutdown writes into a closed box instead of a freed `this`.
+	struct MatPipelineDone
+	{
+		uint64_t    key = 0;
+		void*       pso = nullptr;        // CFBridgingRetain'ed, null = failed
+		void*       desc = nullptr;       // retained descriptor, only when a binary archive is in use
+		std::string error, warn, info;    // logged on the main thread by the drain
+	};
+	struct MatPipelineMailbox
+	{
+		std::mutex                   mtx;
+		std::vector<MatPipelineDone> done;
+		bool                         closed = false;
+	};
+	std::shared_ptr<MatPipelineMailbox> m_matMailbox;
+	int  m_matBuildScheduled = 0;   // since m_materialPipelinePending was last empty
+	int  m_matBuildFinished  = 0;
+	// Moves finished async builds into m_materialPipelineCache. Main thread, top of every
+	// frame and before anything that reads or clears the cache.
+	void DrainMaterialPipelines();
+	// Starts the Metal-side build of already cross-compiled MSL. Main thread.
+	void StartMaterialPipelineBuild(uint64_t key, const std::string& vertMSL, const std::string& fragMSL,
+	                                const std::string& fragFallbackMSL, bool precompiled, bool bakedClustered,
+	                                bool blend, bool gbuffer);
 	HE::MaterialShaderLibrary           m_matShaderLib;          // shared GLSL→MSL cross-compile + cache
 	// On-disk pipeline cache (MTLBinaryArchive): persists compiled material pipeline
 	// functions across launches so the Metal compiler doesn't re-run every start.
@@ -848,10 +938,22 @@ private:
 	// gbuffer = MRT G-buffer variant for the deferred path: fragGlsl is then the
 	// material's customShaderGBufGlsl and the PSO targets the three G-buffer
 	// formats (never blended). Own key space via a salt, like blend.
+	// instanced (Thema 182, 2e) = the same fragment over the instanced vertex
+	// ({mvp, model} per instance at vertex buffer 5) for one draw per batch; own
+	// salt. Null for a precompiled variant (no baked instanced vertex): the
+	// caller then loops with the plain PSO.
+	// pending != null → the two newLibraryWithSource and the PSO build run on Metal's own
+	// compiler threads (the cross-compile stays on the caller). The call then returns
+	// null with *pending = true while the build runs, and the finished pipeline is in the
+	// cache from the next DrainMaterialPipelines on; a caller that sees *pending skips
+	// the draw instead of falling back to the default material. pending == null (or
+	// HE_MATERIAL_PIPELINE_ASYNC=0) is the blocking build, for callers with no frame to
+	// spare it from (the material preview).
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
-	                                 bool blend = false, bool gbuffer = false);
+	                                 bool blend = false, bool gbuffer = false,
+	                                 bool instanced = false, bool* pending = nullptr);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);
@@ -872,6 +974,7 @@ private:
 	int m_aaMethodRequested = static_cast<int>(HE::AAMethod::FXAA);
 	HE::AAMethod ActiveAAMethod() const
 	{
+		if (m_rawCapture) return HE::AAMethod::Off;   // RenderSceneImage with rawOutput: nothing smoothed
 		return IRenderer::ResolveAAMethod(m_aaMethodRequested, GetCapabilities());
 	}
 	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
@@ -1373,6 +1476,7 @@ private:
 	// InvalidateMaterial retires the texture and drops the entry.
 	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
 	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
+	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its nullptr misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_map<std::string, void*> m_uiTexCache;    // UI quad images, same keys, never sRGB
 
 	// ── Offscreen viewport (editor scene view) ──────────────────────────────
@@ -1385,6 +1489,10 @@ private:
 	// overlay, present) is skipped — a still on request must not flash a black
 	// frame on the window it was not asked to touch.
 	bool     m_captureOnly     = false;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// as it is, and the post effects that would change it are off for that one frame.
+	bool     m_rawCapture      = false;
+	bool     m_rawSrgb         = false;   // EditorCameraOverride::rawSrgb
 	// The primary window's drawable, acquired by WaitForFrame before the frame
 	// polled its input and consumed by the swapchain pass of EncodeFrame.
 	// id<CAMetalDrawable> (retained) or null. Outlives EncodeFrame's
@@ -1435,6 +1543,11 @@ private:
 	void* UploadTransient(size_t len, void*& outBuf, size_t& outOffset);
 	// Same, filled with a copy of `data`; false (nothing bound) only on failure.
 	bool  UploadTransientBytes(const void* data, size_t len, void*& outBuf, size_t& outOffset);
+	// {viewProj * model, model} per instance, written into the ring (in parallel for a big run).
+	bool  UploadMvpModel(const std::vector<glm::mat4>& models, const glm::mat4& viewProj,
+	                     void*& outBuf, size_t& outOffset);
+	// The same for a GeometryPass batch, read from its spans in place when it has them.
+	bool  UploadMvpModel(const DrawCall& dc, const glm::mat4& viewProj, void*& outBuf, size_t& outOffset);
 	void  ReleaseUploadRing();
 
 	// ── GPU weather particles (compute simulation + vertex-pull billboards) ──

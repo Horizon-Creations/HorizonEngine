@@ -73,9 +73,10 @@ struct UITimelineView
 		// Deliberately NOT tOf(): the anchor may sit outside the clip (the lane
 		// is wider than the visible span at zoom 1), and clamping it here would
 		// drag the view sideways instead of leaving it alone.
-		const float t = scroll + (anchorX - laneX) / pixelsPerSecond();
+		const float anchorOffset = anchorX - laneX;
+		const float t = scroll + anchorOffset / pixelsPerSecond();
 		zoom   = std::clamp(newZoom, 1.0f, kMaxZoom);
-		scroll = t - (anchorX - laneX) / pixelsPerSecond();
+		scroll = t - anchorOffset / pixelsPerSecond();
 		clampScroll();
 	}
 

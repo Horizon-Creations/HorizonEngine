@@ -1,0 +1,60 @@
+﻿[0/2] Re-checking globbed directories...
+[1/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_docs_library.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[2/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_hc_function_rename.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[3/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_preview_pick.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[4/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_hc_pull_editor.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[5/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_hc_node_docs.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[6/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_horizoncode_shortcuts.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[7/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_widget_expose_on_spawn.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[8/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_mcp_tools_settings.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[9/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_ui_shot.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[10/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_engine_weather_sounds.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[11/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\GitController.cpp.obj
+[12/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\CollabUndo.cpp.obj
+[13/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\EditorSettingsCatalog.cpp.obj
+[14/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\McpToolsApi.cpp.obj
+[15/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\EditorHelp.cpp.obj
+[16/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_editor_rewards.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[17/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcNodeDocs.cpp.obj
+[18/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\DocsPanel.cpp.obj
+[19/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcNodeReference.cpp.obj
+[20/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\ConsoleView.cpp.obj
+[21/36] Building CXX object tests\CMakeFiles\he_tests.dir\test_inspector_ui.cpp.obj
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): warning C5285: Eine Spezialisierung für „std::tuple“ kann nicht deklariert werden: Specializing this standard library template is forbidden by N5014 [tuple.tuple.general]/1
+C:\Users\conno\source\repos\Horizon-Creations\HorizonEngine\.claude\worktrees\opt-src-he-editor-2\tests\vendor\doctest.h(686): note: Siehe Deklaration von "std::tuple"
+[22/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\InputMappingModel.cpp.obj
+[23/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\DocsLibrary.cpp.obj
+[24/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcPull.cpp.obj
+[25/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcRename.cpp.obj
+[26/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcEditorUtil.cpp.obj
+[27/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\GraphEditor.cpp.obj
+[28/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcPullUi.cpp.obj
+[29/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcExtractUi.cpp.obj
+[30/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\HcGraphHost.cpp.obj
+[31/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\EditorWidgets.cpp.obj
+[32/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\UIEditorPanel.cpp.obj
+[33/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\MaterialEditorPanel.cpp.obj
+[34/36] Building CXX object tests\CMakeFiles\he_tests.dir\__\src\HE_Editor\InspectorPanel.cpp.obj
+[35/36] Linking CXX executable tests\he_tests.exe
