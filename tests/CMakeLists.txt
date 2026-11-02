@@ -347,6 +347,8 @@ add_executable(he_tests
     test_simple_texture_material.cpp
     # The atlas bake itself: lossless merge, resampling, groups, kept sections (Schritt C1)
     test_mesh_texture_bake.cpp
+    # The export pass on real files: mesh + materials + textures in, derived assets out (Schritt C2)
+    test_mesh_bake_pass.cpp
     # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
