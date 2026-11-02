@@ -80,6 +80,20 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// ── The render path the game's config asks for ───────────────────────────────
+// The same config.json key the editor's Preferences combo writes ("RenderPath": 0 Forward,
+// 1 Deferred), capability-gated: a backend that cannot do deferred stays forward. An absent key
+// is the engine's default, Deferred (EditorConfig::RenderPath). One function because it is asked
+// twice: at the end of OnInit, BEFORE the first material warm-up (which builds the G-buffer
+// variants only on a deferred path and used to run a frame ahead of the per-frame push), and
+// in that push.
+static HE::RenderPath configuredRenderPath(IRenderer& r)
+{
+	const bool deferred = GlobalState::getInstance().getCustomConfigInt("RenderPath", 1) == 1
+	                   && r.GetCapabilities().supportsDeferredRendering;
+	return deferred ? HE::RenderPath::Deferred : HE::RenderPath::Forward;
+}
+
 // ── The frame of a borderless window (docs/he-apps-plan.md F3) ──────────────
 // The grab band along the edges, in window POINTS, so it is the same physical
 // thickness on a Retina screen as on a plain one. Six is what the desktops
@@ -1448,6 +1462,13 @@ void GameApplication::OnInit()
 	// runtime, for the whole life of the application — before the first script runs,
 	// so a pin set in BeginPlay lands.
 	HE::api::streaming::install(&m_cellRuntime);
+
+	// The material warm-up of the first frame builds the G-buffer variants only when the renderer
+	// is already on the deferred path; the per-frame push that sets it comes later in that frame.
+	// Say it now (a world game only: an app is forward and says so itself).
+	if (!m_appMode)
+		if (IRenderer* const rr = renderer())
+			rr->SetRenderPath(configuredRenderPath(*rr));
 
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
@@ -3583,10 +3604,7 @@ void GameApplication::OnRender(float deltaTime)
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated. An absent
 			// key is the engine's default, Deferred (EditorConfig::RenderPath); a backend that
 			// cannot do it stays forward.
-			const bool deferredPath =
-				GlobalState::getInstance().getCustomConfigInt("RenderPath", 1) == 1 &&
-				r->GetCapabilities().supportsDeferredRendering;
-			r->SetRenderPath(deferredPath ? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+			r->SetRenderPath(configuredRenderPath(*r));
 
 			// Push the scene environment to the renderer. The base Application renders the
 			// world but never pushes EnvironmentSettings (that lived only in the editor), so

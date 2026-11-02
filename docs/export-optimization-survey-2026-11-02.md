@@ -79,6 +79,14 @@ Grafikoption "Texturqualität", die beim Laden die oberste Mip überspringt (spa
 Ehrlich dazu: Auf der Platte ist bei diesem Projekt ohne Qualitätsverlust kaum noch etwas zu holen. 93 % sind 2k-ASTC-Texturen, und ASTC lässt sich mit zstd nur um 3 bis 12 % verkleinern.
 Die verlustfreien Gewinne liegen im RAM (A3), im Laufzeitpaket (A4) und in der Startzeit.
 
+## 4a. Umgesetzt und gemessen (2026-11-02, nach "verlustfrei zuerst")
+
+| Punkt | Commit | Messung |
+|---|---|---|
+| A3 CPU-Pixelkopie nach dem Upload freigeben (`ContentManager::releaseCpuPixels` / `restoreCpuPixels`, Metal an allen Upload-Stellen, das Spiel schaltet es ein, `HE_KEEP_CPU_PIXELS=1` schaltet es ab) | 99fb6682 | Foliage-Export, Metal, 300 Frames: größter RSS **843 → 694 MB (−149 MB)**, Spitze des Footprints **1171 → 1013 MB (−159 MB)**; Bild unverändert (die Läufe mit Behalten sind untereinander nicht bitgleich, wegen asynchroner Pipelines; die drei Läufe mit Freigabe sind es, und ihr Bild ist byte-gleich zu einem der Behalten-Bilder). Frei nur: block-komprimiert, aus einem Pak, kein Array ohne gebackene Mittelwerte. Nicht umgesetzt: OpenGL, D3D11/12, Vulkan (behalten die Kopie wie bisher) |
+| A4 `libphonon` nur mitliefern, wenn die Audio-Busse Steam Audio wählen | d91bc526 | Test im Exporter (Teilfälle aus/an); spart 22 MB im Paket. Das Backend wird nur über `AudioBusConfig::spatialBackend` gewählt (kein Skript-API), und genau das packt der Export |
+| B1 GL: Render-Pfad schon am Ende von `OnInit` setzen, damit das Vorwärmen die G-Buffer-Programme mitbaut | (dieser Commit) | Vorwärmen baut jetzt 4 statt 2 Programme; erstes Bild OpenGL **rund 450 → 433 ms** (3 Läufe je Seite, ohne den kalten ersten Lauf), also nahe am Rauschen. Die Schätzung von 55 ms war zu hoch: das Vorwärmen läuft weiter auf dem Hauptthread vor dem ersten Bild, die Kompilierzeit wandert nur dorthin. Ein echter Gewinn bräuchte B2 (Programmbau parallel oder in der Splash-Phase) |
+
 ## 5. Nicht geprüft
 
 Nichts von A und B wurde umgesetzt oder an einem zweiten Projekt gemessen. Das Foliage-Projekt ist texturlastig (alle Texturen 2k) und hat 63 Ein-Slot-Meshes; ein Spiel mit vielen Meshes, Audio oder Skeletten gewichtet anders. Die Startwerte stammen von einem Rechner (Apple M5), zwei Läufen (Metal) und einem (GL); es gibt keinen Timer pro Phase im Renderer-Init. Die Speicher-Schätzungen von A3 und A9 sind aus dem Code gelesen, nicht gemessen; der gemessene RSS (731 MB) ist nur damit verträglich.
