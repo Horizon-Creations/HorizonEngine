@@ -1634,6 +1634,51 @@ TEST_CASE("ProjectExporter's scene index is valid JSON for awkward scene paths")
     he_test::removeAllQuiet(outputDir);
 }
 
+TEST_CASE("ProjectExporter packs the startup scene once when it is also a scene.load target")
+{
+    // The editor hands the startup scene over twice: as sceneBinary (compiled-in UUID) and as
+    // an entry of the scene list (path-derived UUID, for scene.load). Same bytes, so the pak
+    // holds them once and both names resolve.
+    auto contentDir = std::filesystem::temp_directory_path() / "he_scene_dedupe_content";
+    auto outputDir  = std::filesystem::temp_directory_path() / "he_scene_dedupe_out";
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+    std::filesystem::create_directories(contentDir);
+
+    std::vector<uint8_t> level(64 * 1024);          // does not compress, Store mode anyway
+    uint32_t x = 0xC0FFEEu;
+    for (auto& b : level) { x = x * 1664525u + 1013904223u; b = static_cast<uint8_t>(x >> 24); }
+    std::vector<uint8_t> menu = level;
+    menu[0] ^= 0xFF;                                // a different scene stays its own entry
+
+    const std::vector<std::pair<std::string, std::vector<uint8_t>>> scenes = {
+        { "Scenes/Level.hescene", level },
+        { "Scenes/Menu.hescene",  menu },
+    };
+    ExportSettings settings; settings.compress = false;
+    const auto result = ProjectExporter::exportProject(
+        contentDir, "DedupeGame", "", outputDir, settings, level, scenes);
+    REQUIRE(result.success);
+
+    ProjectConfig cfg;
+    REQUIRE(ProjectConfigLoader::load(outputDir, cfg));
+    const auto pak = outputDir / cfg.hpakFilename;
+    // Two scenes of 64 KiB, not three (plus a few KiB of indices and the TOC).
+    CHECK(std::filesystem::file_size(pak) < 3 * level.size() - 16 * 1024);
+
+    ContentManager cm;
+    REQUIRE(cm.mountPak(pak.string(), cfg.encrypted ? cfg.encKey : nullptr));
+    HE::UUID startupId{};
+    std::memcpy(&startupId.hi, cfg.startupSceneUuid,     8);
+    std::memcpy(&startupId.lo, cfg.startupSceneUuid + 8, 8);
+    CHECK(cm.readMountedEntry(startupId) == level);
+    CHECK(cm.readMountedEntry(sceneUuidForPath("Scenes/Level.hescene")) == level);
+    CHECK(cm.readMountedEntry(sceneUuidForPath("Scenes/Menu.hescene")) == menu);
+
+    he_test::removeAllQuiet(contentDir);
+    he_test::removeAllQuiet(outputDir);
+}
+
 #ifdef HE_HAVE_CRYPTO
 // End-to-end: exporting with encryption generates a random key, ships it in
 // project.hcfg, and the runtime path (loadPak with that key) decrypts correctly.

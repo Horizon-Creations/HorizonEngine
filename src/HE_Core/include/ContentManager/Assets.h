@@ -41,6 +41,20 @@ struct MaterialShaderVariant
 	// whose clustered program is GLSL 4.30 on both stages while `vertex` is 4.10.
 	// Empty = pair `fragmentClustered` with `vertex` (Metal / HLSL / SPIR-V).
 	std::string vertexClustered;
+	// The deferred twin of `fragment` (the material's G-buffer tail, customShaderGBufGlsl),
+	// for the backends that take it (OpenGL, Metal): it pairs with `vertex`, the same
+	// vertex the plain draw uses, and never clusters. Empty = the deferred path
+	// cross-compiles the G-buffer fragment at load, as it did before the field existed
+	// (a pak baked earlier, a material without a G-buffer tail, a backend not baked for).
+	std::string fragmentGBuffer;
+	// The instanced twin of `vertex` (Thema 182): the same stage reading each instance's
+	// model matrix from the instance buffer, so a GeometryPass batch draws in ONE call.
+	// It pairs with `fragment`, with `fragmentClustered` (Metal) and with `fragmentGBuffer`.
+	// `vertexInstancedClustered` is the same stage at GLSL 4.30 for the clustered pair on
+	// GL (empty elsewhere). Empty = no baked twin: GL then draws such a batch per instance
+	// with the plain program, Metal cross-compiles the twin at load, as before the fields.
+	std::string vertexInstanced;
+	std::string vertexInstancedClustered;
 };
 
 namespace HE
@@ -118,8 +132,39 @@ struct MeshSection
 	HE::UUID    materialId;       // pack-time baked from materialPath; {} for loose/editor assets
 };
 
+// Which texture bakes the exporter may apply to a static mesh whose materials
+// only show textures (chunk MBKE). The exporter applies at most ONE form per
+// mesh, in this order: vertex colours, merged textures, one UV texture.
+struct MeshBakeSettings
+{
+	bool vertexColors  = false;  // sample the texture into per-vertex colours (OpenGL/Metal exports only)
+	bool mergeTextures = true;   // lossless: pack the section textures into one atlas
+	bool uvTexture     = true;   // resample every section into one UV texture (tiling resolved, may be larger)
+
+	bool operator==(const MeshBakeSettings& o) const
+	{
+		return vertexColors == o.vertexColors && mergeTextures == o.mergeTextures && uvTexture == o.uvTexture;
+	}
+	bool operator!=(const MeshBakeSettings& o) const { return !(*this == o); }
+
+	uint8_t toByte() const
+	{
+		return static_cast<uint8_t>((vertexColors ? 1u : 0u) | (mergeTextures ? 2u : 0u) | (uvTexture ? 4u : 0u));
+	}
+	// Bits above 2 are ignored, so a newer file with more switches still reads.
+	static MeshBakeSettings fromByte(uint8_t b)
+	{
+		MeshBakeSettings s;
+		s.vertexColors  = (b & 1u) != 0;
+		s.mergeTextures = (b & 2u) != 0;
+		s.uvTexture     = (b & 4u) != 0;
+		return s;
+	}
+};
+
 struct StaticMeshAsset : public RuntimeAsset
 {
+	MeshBakeSettings bake;       // chunk MBKE; the defaults when absent
 	// The mesh's own material: what every renderer resolved before sections
 	// existed and what a whole-mesh draw (a one-section asset, an entity under a
 	// whole-mesh override, a section with an empty reference) still resolves.
@@ -675,6 +720,11 @@ struct TextureAsset : public RuntimeAsset
 	// block format, every slice and level encoded on its own. Written to the TXMI tail only
 	// when > 1, so every 2D asset keeps its exact bytes.
 	uint32_t             layers    = 1;
+
+	// Mean LINEAR colour of every slice, three floats per slice (CHUNK_TXSM), baked at pack
+	// time when an array is cooked to a format the CPU cannot read (BC7, ASTC). Empty on
+	// every loose asset and every 2D texture: the means are then read from the pixels.
+	std::vector<float>   sliceMeans;
 };
 
 struct ShaderAsset : public RuntimeAsset

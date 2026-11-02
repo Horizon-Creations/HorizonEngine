@@ -3908,8 +3908,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
                                                        bool gbuffer, bool instanced)
 {
 	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
-	// The pak bakes no instanced vertex: the caller loops with the plain program.
-	if (instanced && precompiled) return 0;
+	// What the pak baked for the twin being asked for (CHUNK_PSHD v4). A twin it did not
+	// bake is not cross-compiled next to a baked plain pair: a packaged build may have
+	// no translator. The G-buffer twin simply cross-compiles (the deferred path always
+	// could); the instanced one returns 0 and the caller loops with the plain program.
+	if (precompiled && gbuffer && precompiled->fragmentGBuffer.empty()) precompiled = nullptr;
+	if (precompiled && instanced && precompiled->vertexInstanced.empty()) return 0;
 	// `key` also keys the fragment cache below, so the instanced slot gets its own
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
@@ -3937,7 +3941,8 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// fragmentClustered); otherwise its plain 4.10 pair draws with the window.
 	// The G-buffer variant never shades lights.
 	const bool bakedClustered = precompiled && !precompiled->vertexClustered.empty()
-	                         && !precompiled->fragmentClustered.empty();
+	                         && !precompiled->fragmentClustered.empty()
+	                         && (!instanced || !precompiled->vertexInstancedClustered.empty());
 	bool clustered = m_forwardClustered && !gbuffer && (!precompiled || bakedClustered);
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
@@ -3953,8 +3958,21 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	};
 	auto usePrecompiled = [&](bool cl) {
-		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
-		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		if (gbuffer)   // the deferred twin: the plain vertex stage (or its instanced form), never clustered
+		{
+			vertSrc = instanced ? precompiled->vertexInstanced : precompiled->vertex;
+			fragSrc = precompiled->fragmentGBuffer;
+		}
+		else if (instanced)
+		{
+			vertSrc = cl ? precompiled->vertexInstancedClustered : precompiled->vertexInstanced;
+			fragSrc = cl ? precompiled->fragmentClustered        : precompiled->fragment;
+		}
+		else
+		{
+			vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
+			fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		}
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
 	};
 	// Displacement (Thema 207): the two tessellation stages, at the GLSL version of
@@ -4106,8 +4124,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
 			? (clustered
-				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
-				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered, instanced (GLSL 4.30, no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)")
+				: gbuffer
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer (no runtime cross-compile)")
+				: (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)"))
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -9541,7 +9564,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
 			    && !m_materialPrograms.count(gbKey)
-			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true))
+			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true))
 				++built;
 		}
 	}
@@ -12404,17 +12427,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 						matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-						// G-buffer variant — runtime cross-compiled only (baked packs
-						// carry no G-buffer GLSL yet).
+						// G-buffer variant — baked into the pak when it carries one
+						// (CHUNK_PSHD v4), else cross-compiled at load.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 						{
-							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
+							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true);
 							// A batch draws once with the instanced twin (2e); only
 							// built for batches, and 0 sends it back to the loop.
 							if (gbProg && dc.instanceTotal() > 0 && m_instanceVBO
 							    && RenderSorter::graphInstancingEnabled())
-								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
+								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre,
 								                                       /*gbuffer=*/true, /*instanced=*/true);
 						}
 						if (ma)

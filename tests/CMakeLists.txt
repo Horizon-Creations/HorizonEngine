@@ -341,6 +341,16 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # Pack only what the game reaches (Thema 228)
+    test_reach_filter.cpp
+    # Which materials the export may bake onto a mesh (Thema 228, Punkt 6, Schritt B)
+    test_simple_texture_material.cpp
+    # The atlas bake itself: lossless merge, resampling, groups, kept sections (Schritt C1)
+    test_mesh_texture_bake.cpp
+    # The export pass on real files: mesh + materials + textures in, derived assets out (Schritt C2)
+    test_mesh_bake_pass.cpp
+    # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
+    test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
     test_texture_bcn.cpp
     # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)

@@ -11,6 +11,7 @@
 #include <Hpak/HpakWriter.h>
 #include <Hpak/HpakReader.h>
 #include <Hpak/HpakFormat.h>
+#include <Hpak/ReachFilter.h>
 #include <Hpak/PackManifest.h>
 #include <Hpak/Aes256Gcm.h>
 #include <Types/UUID.h>
@@ -615,11 +616,16 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.cook = true; // always cook exports into the runtime-optimal form
     packSettings.textureCompression = settings.textureCompression;
     packSettings.textureQuality     = settings.textureQuality;
-    packSettings.shaderBackends        = settings.shaderBackends;        // precompile material shaders
+    packSettings.cookTextureArrays  = settings.cookTextureArrays;
+    packSettings.bakeMeshTextures   = settings.bakeMeshTextures;
+    packSettings.shaderBackends       = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
     packSettings.onAsset = settings.onAsset;
     packSettings.onWarning = settings.onWarning;
+    packSettings.onlyReferenced = settings.onlyReferenced;
+    packSettings.alwaysIncludePatterns = settings.alwaysIncludePatterns;
+    packSettings.onNotice = settings.onNotice;
     return std::nullopt;
 }
 
@@ -648,9 +654,23 @@ static void addSceneEntries(
     // Every other project scene rides along under a path-derived UUID so the
     // game runtime can scene.load("<project-relative path>") for level
     // transitions. Same codec + encryption as the assets.
+    //
+    // A scene whose bytes equal one already packed (the startup scene is also a
+    // scene.load target, and nothing stops two copies of a level) becomes a second TOC row on
+    // those bytes instead of a second copy: on a big map that was another 7 MB.
+    std::vector<std::pair<const std::vector<uint8_t>*, HE::UUID>> packedScenes;
+    if (!startupSceneBinary.empty()) packedScenes.emplace_back(&startupSceneBinary, ctx.sceneUuid);
     for (const auto& [relPath, bytes] : extraScenes)
-        if (!bytes.empty())
-            packer.addEntry(sceneUuidForPath(relPath), bytes, packSettings);
+    {
+        if (bytes.empty()) continue;
+        const HE::UUID id = sceneUuidForPath(relPath);
+        bool aliased = false;
+        for (const auto& [other, otherId] : packedScenes)
+            if (*other == bytes && packer.addAlias(id, otherId)) { aliased = true; break; }
+        if (aliased) continue;
+        packer.addEntry(id, bytes, packSettings);
+        packedScenes.emplace_back(&bytes, id);
+    }
     // …plus a scene INDEX (a JSON string array of those paths) under a
     // well-known name, so scene.available() can enumerate scenes in shipped
     // builds (pak entries are UUID-keyed — paths aren't recoverable from them).
@@ -786,13 +806,44 @@ static std::optional<ExportResult> packContent(
             roots.push_back({ settings.engineContentCacheDir, "Engine/", /*fallbackOnly*/ true });
     }
 
+    // The reference roots of the "pack only what is reached" filter. The startup scene and
+    // every blob of project text are always kept (and scanned); any OTHER scene is a node of the
+    // graph, kept only when something reachable names it (the startup scene's own entry among the
+    // extra scenes stays: scene.load of the startup level must keep working). With no packed
+    // startup scene (a loose one) nothing can be told apart, so every scene stays.
+    std::vector<std::pair<std::string, std::vector<uint8_t>>> sceneEntries;
+    if (ctx.packSettings.onlyReferenced)
+    {
+        Hpak::PackSettings& ps = ctx.packSettings;
+        ps.referenceRoots.clear();
+        ps.reachScenes.clear();
+        if (!startupSceneBinary.empty()) ps.referenceRoots.push_back(startupSceneBinary);
+        if (!gameInstanceJson.empty())
+            ps.referenceRoots.emplace_back(gameInstanceJson.begin(), gameInstanceJson.end());
+        HE::reach::collectProjectTextRoots(contentDir, ps.referenceRoots);
+        for (const auto& [rel, bytes] : extraScenes)
+        {
+            if (startupSceneBinary.empty())
+                ps.referenceRoots.push_back(bytes);
+            else if (bytes != startupSceneBinary)   // the startup scene is already a root
+                ps.reachScenes.push_back({ rel, bytes });
+        }
+    }
+
     HpakWriter packer;
     ctx.assetsPacked = packer.addDirectories(roots, ctx.packSettings, settings.progress,
                                              haveCache ? &cache : nullptr);
     ctx.assetsReused = packer.reusedCount();
     prevPak.reset(); // release the read handle BEFORE write() replaces the file
+    // The scenes nothing loads stay out of the pak and out of the scene index.
+    const std::vector<std::string>& dropScenes = packer.unreachableScenes();
+    for (const auto& sc : extraScenes)
+        if (std::find(dropScenes.begin(), dropScenes.end(), sc.first) == dropScenes.end())
+            sceneEntries.push_back(sc);
+    ctx.packSettings.referenceRoots.clear();
+    ctx.packSettings.reachScenes.clear();
 
-    addSceneEntries(packer, startupSceneBinary, extraScenes, gameInstanceJson, ctx);
+    addSceneEntries(packer, startupSceneBinary, sceneEntries, gameInstanceJson, ctx);
     addAssetPathIndex(packer, ctx);
     addAssetTypeIndex(packer, ctx);
     addTypeIndex(packer, ctx);

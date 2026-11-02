@@ -213,6 +213,11 @@ struct ExportProfile
 	// (bitmask of 1u << HE::RendererBackend). Default = Metal | OpenGL (the runtime-
 	// consumed backends). 0 → shaders cross-compile at runtime as before.
 	uint32_t shaderBackends = (1u << 4) | (1u << 0); // Metal | OpenGL
+	// true (default): the backends above are ignored and the pak carries the variants of the
+	// ONE backend the shipped game runs (the project's Render Defaults backend, else the
+	// platform default; GameBackendRules.h shaderBackendMaskFor). A profile saved before this
+	// field existed keeps its explicit set unless that set is the old Metal | OpenGL default.
+	bool autoShaderBackends = true;
 	// Compile HorizonCode graphs to native C++ in the packaged build (needs
 	// cmake + a C++ toolchain on the exporting machine).
 	bool compileHorizonCode = false;
@@ -229,6 +234,20 @@ struct ExportProfile
 	// 0 Fast (what every export did), 1 Balanced, 2 High — how hard the encoder
 	// works, whichever format Auto chose. See Hpak::PackSettings::textureQuality.
 	int textureQuality = 0;
+	// Block-compress texture ARRAYS (the Auto landscape albedo/normal/mask arrays, ~110 MB
+	// each as RGBA8) like every other texture. On by default; off ships them as RGBA8.
+	// See Hpak::PackSettings::cookTextureArrays.
+	bool compressTextureArrays = true;
+	// Bake textures onto static meshes whose materials are plain PBR texture sets (the
+	// per-mesh switches in the Mesh Viewer decide how). On by default; needs onlyReferenced.
+	// See Hpak::PackSettings::bakeMeshTextures.
+	bool bakeMeshTextures = true;
+	// Pack only the assets the game reaches (the startup scene, the scenes something loads,
+	// scripts, the manifest, the engine's own needs) and leave out the rest. On by default.
+	// `alwaysIncludePatterns` are globs on the addressed path (like excludePatterns) that
+	// count as reached: for what a script builds a path for at run time.
+	bool onlyReferenced = true;
+	std::vector<std::string> alwaysIncludePatterns;
 };
 
 // The two seeded defaults for projects that have no profiles yet (also used by

@@ -582,6 +582,8 @@ public:
 		size_t   lastPollLeft    = 0;   // results it left for the next call (budget)
 	};
 	const AsyncPollStats& asyncPollStats() const { return m_asyncPollStats; }
+	// Decoded bytes of finished async loads that pollAsyncResults has not taken yet.
+	std::uint64_t asyncBacklogBytes() const { return m_asyncSink->backlogBytes.load(std::memory_order_relaxed); }
 	// Live read progress of an in-flight job: bytes read so far and the file's total
 	// size (0 until the worker has opened the file). False when nothing is in flight
 	// for that path — so a caller can drive a real progress bar for a big asset and
@@ -725,6 +727,9 @@ private:
 		// pollAsyncResults checks whether someone asked again meanwhile.
 		bool                           cancelled = false;
 		HE::UUID                       pakId{};       // pak loads: what to relaunch
+		// Size of the decoded asset, counted in AsyncSink::backlogBytes from the
+		// moment the worker queues the result until the main thread takes it.
+		std::uint64_t                  bytes = 0;
 	};
 
 	// Who asked for a load: their cancel tokens, or `pinned` when one of them
@@ -743,6 +748,13 @@ private:
 	struct LoadInterest {
 		mutable std::mutex m;
 		LoadRequester      who;
+		// The queued jobs of this load (set by launchPathLoad/launchPakLoad: one for
+		// a file, the read and the decode for a pak entry), so a requester that asks
+		// for more urgency than the load was queued with can move them up
+		// (join → JobHandle::promote) instead of leaving them in the Low lane behind
+		// the cap. A job holds this interest and this holds the jobs; the cycle ends
+		// when they finish and drop their callables.
+		std::vector<HE::JobHandle> jobs;
 		void          join(const LoadRequester& r);
 		bool          stale() const;
 		LoadRequester snapshot() const;
@@ -806,8 +818,17 @@ private:
 	struct AsyncSink {
 		std::mutex              mutex;
 		std::queue<AsyncResult> results;   // ready to register (drained on main thread)
+		// Bytes of decoded assets sitting in `results`. The workers outrun the main
+		// thread's few milliseconds a frame, so without a bound a jump across the
+		// world queues every requested asset's bytes in RAM at once; a Low job that
+		// would start while this is over kAsyncBacklogBytes waits (awaitBacklogRoom).
+		std::atomic<std::uint64_t> backlogBytes{ 0 };
+		std::condition_variable    drained;   // notified under `mutex` when the main thread takes results
 	};
 	std::shared_ptr<AsyncSink> m_asyncSink = std::make_shared<AsyncSink>();
+
+	static void pushAsyncResult(AsyncSink& sink, AsyncResult&& result);
+	static void awaitBacklogRoom(AsyncSink& sink, const LoadInterest& interest);
 
 	// ── Remote (SFTP-backed) EngineContent assets — see registerRemoteAsset() ──
 	struct RemoteAssetEntry {
