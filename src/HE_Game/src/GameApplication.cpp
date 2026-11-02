@@ -10,6 +10,7 @@
 #include <Application/AppIcon.h>       // the window icon the export generated
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
 #include <Application/GameBackendRules.h> // shared with the export dialog that writes config.json
+#include <HorizonRendering/SkyNoise3D.h>   // the sky noise bake the constructor starts early
 #ifdef __APPLE__
 #include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
 #include "AppNotify.h"                 // …and the notification centre
@@ -437,6 +438,11 @@ GameApplication::GameApplication(std::string startupPath)
 	applyShippedConfig();
 	// The audio device opens while SDL, the window and the renderer come up (see m_audioInit).
 	m_audioInit = std::async(std::launch::async, [this] { return m_audioEngine.init(); });
+	// So does the 256³ sky/cloud noise every backend bakes at renderer start (61 ms on the job
+	// pool): the renderer takes the finished volume instead of baking it on the frame's path.
+	// The software rasteriser has no sky; it would only hold 33 MB.
+	if (m_backend != HE::RendererBackend::Software)
+		HE::PrewarmSkyNoise3D(HE::SkyNoise3DResolution());
 }
 GameApplication::~GameApplication() = default;
 
@@ -1467,6 +1473,10 @@ void GameApplication::OnInit()
 	// runtime, for the whole life of the application — before the first script runs,
 	// so a pin set in BeginPlay lands.
 	HE::api::streaming::install(&m_cellRuntime);
+
+	// The renderer is up: a prewarmed sky noise it did not take (a backend with no sky) is dead
+	// weight from here on.
+	HE::DiscardSkyNoise3DPrewarm();
 
 	// The material warm-up of the first frame builds the G-buffer variants only when the renderer
 	// is already on the deferred path; the per-frame push that sets it comes later in that frame.

@@ -4701,11 +4701,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	// Release: full 256³ tile so sky fBm octaves don't visibly repeat.
 	// Debug: 64³ (64× fewer voxels) so the CPU bake takes < 1s instead of 30min
 	// without SIMD optimisation in MSVC Debug mode.
-#ifdef NDEBUG
-	constexpr int kNoiseN = 256;
-#else
-	constexpr int kNoiseN = 64;
-#endif
+	const int kNoiseN = HE::SkyNoise3DResolution();
 	const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 	glGenTextures(1, &m_noiseTex);
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);

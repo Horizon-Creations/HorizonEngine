@@ -1,13 +1,74 @@
 #include "HorizonRendering/SkyNoise3D.h"
+#include <Diagnostics/Log.h>
 #include <JobSystem/JobSystem.h>
 #include <Math/Math.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <future>
+#include <mutex>
 
 namespace HE
 {
 
+namespace
+{
+std::vector<uint16_t> bakeSkyNoise3D(int n);
+
+// The one background bake a game may have started (PrewarmSkyNoise3D).
+struct Prewarm
+{
+	std::mutex                          mutex;
+	int                                 n = 0;
+	std::future<std::vector<uint16_t>>  result;   // valid while a bake is pending or ready to take
+};
+Prewarm& prewarm() { static Prewarm p; return p; }
+} // namespace
+
+int SkyNoise3DResolution()
+{
+#ifdef NDEBUG
+	return 256;
+#else
+	return 64;
+#endif
+}
+
+void PrewarmSkyNoise3D(int n)
+{
+	Prewarm& p = prewarm();
+	std::lock_guard<std::mutex> lock(p.mutex);
+	if (p.result.valid()) return;
+	p.n = n;
+	p.result = std::async(std::launch::async, [n] { return bakeSkyNoise3D(n); });
+}
+
+void DiscardSkyNoise3DPrewarm()
+{
+	Prewarm& p = prewarm();
+	std::future<std::vector<uint16_t>> mine;
+	{
+		std::lock_guard<std::mutex> lock(p.mutex);
+		mine = std::move(p.result);
+	}
+	if (mine.valid()) mine.wait();   // the future's destructor would wait anyway; say so
+}
+
 std::vector<uint16_t> BuildSkyNoise3D(int n)
+{
+	Prewarm& p = prewarm();
+	std::future<std::vector<uint16_t>> taken;
+	{
+		std::lock_guard<std::mutex> lock(p.mutex);
+		if (p.result.valid() && p.n == n) taken = std::move(p.result);
+	}
+	if (taken.valid()) return taken.get();   // moved out, not copied: 33 MB at n = 256
+	return bakeSkyNoise3D(n);
+}
+
+namespace
+{
+std::vector<uint16_t> bakeSkyNoise3D(int n)
 {
 	auto hash = [](glm::vec3 p) {
 		p = glm::fract(p * 0.1031f);
@@ -75,8 +136,13 @@ std::vector<uint16_t> BuildSkyNoise3D(int n)
 			}
 	};
 	const size_t slabs = static_cast<size_t>(n);
+	const auto bakeStart = std::chrono::steady_clock::now();
 	parallel_for(slabs, fillSlab, "SkyNoise3D", n < 32 ? slabs : 1);
+	// A startup phase nobody timed: the line says what the bake costs on this machine.
+	HE_LOG_INFO(RHI, "SkyNoise3D: baked %d^3 in %.1f ms",
+	            n, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - bakeStart).count());
 	return d;
 }
+} // namespace
 
 } // namespace HE

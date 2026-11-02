@@ -7760,7 +7760,9 @@ void MetalRenderer::CreateScenePipeline()
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
 		// repeat so it tiles seamlessly.
-		constexpr int kNoiseN = 256;
+		// 256³ in Release, 64³ in Debug like every other backend (this one used to bake 256³ even in
+		// Debug, which is what made a Debug probe take half an hour in power-saving mode).
+		const int kNoiseN = HE::SkyNoise3DResolution();
 		const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 		MTLTextureDescriptor* noiseDesc = [[MTLTextureDescriptor alloc] init];
 		noiseDesc.textureType = MTLTextureType3D;
