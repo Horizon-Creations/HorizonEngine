@@ -131,11 +131,16 @@ TEST_CASE("landscape shader source: the HLSL port has every GLSL uniform as a me
 	for (const std::string& u : uniformsOf(HE::glsl::kLandscapeFS)) uniforms.insert(u);
 	const std::set<std::string> images = { "uTileHeights", "uSlotTable", "uCoarseHeights", "uTileWeights0", "uTileWeights1", "uTileWeights2",
 	                                       "uCoarseWeights0", "uCoarseWeights1", "uCoarseWeights2", "uAlbedoArray" };
+	// The GLSL and the MSL read the group's NORMAL and MASK arrays too (02.11.2026); the D3D port does not yet: its ground is lit with the
+	// geometric normal and no AO. This list is the known gap (Windows work order, docs/landscape-world-scale-windows-auftrag-2026-11-02.md §1):
+	// when the port has them, they come out of this list and into the checks above.
+	const std::set<std::string> notPortedYet = { "uTexMaps", "uNormalArray", "uMaskArray" };
+	for (const std::string& u : notPortedYet) CHECK_MESSAGE(uniforms.count(u) == 1, "the GLSL no longer has " << u << ": take it off the list");
 	// `patch` is an HLSL keyword: the per-patch block spells uPatch as lsPatch, everything else as the MSL does
 	int members = 0;
 	for (const std::string& u : uniforms)
 	{
-		if (images.count(u)) continue;
+		if (images.count(u) || notPortedYet.count(u)) continue;
 		std::string m = u == "uPatch" ? std::string("LsPatch") : u.substr(1);
 		m[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(m[0])));
 		INFO("GLSL uniform " << u << " as HLSL member " << m);
