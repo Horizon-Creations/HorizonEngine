@@ -22,6 +22,7 @@ namespace HE::landscape
 {
     namespace
     {
+        constexpr char kHlodMapParam[] = "FarMap";   // x, y = the chunk's world min, z = uv scale, w = uv offset
         constexpr uint16_t kTypeMaterial = static_cast<uint16_t>(HE::AssetType::Material);
         constexpr uint16_t kTypeTexture  = static_cast<uint16_t>(HE::AssetType::Texture);
 
@@ -76,22 +77,35 @@ namespace HE::landscape
             auto op2 = [&](MatNodeType t, int a, int aPin, int b, int bPin) {
                 const int n = g.addNode(t); g.connect(a, aPin, n, 0); g.connect(b, bPin, n, 1); return n; };
 
-            // uv = (world.xz - rect.min) / rect.size, kept half a texel inside [0, 1] so a bilinear tap at the chunk's
-            // border never reaches the other side of the (repeating) texture.
+            // uv = (world.xz - rect.min) * scale + offset, with scale = (1 - 1/side) / size and offset = 0.5/side: kept half
+            // a texel inside [0, 1] so a bilinear tap at the chunk's border never reaches the other side of the
+            // (repeating) texture. The four numbers are a PARAMETER ("FarMap", the material's own default), not
+            // constants in the shader: every chunk then generates the same shader source, so the 256 chunks of a
+            // landscape share one pipeline instead of compiling 256 (the first measurement showed the others
+            // missing from the frame for seconds while they built).
             const int wpos   = g.addNode(MatNodeType::WorldPos);
             const int wsplit = g.addNode(MatNodeType::SplitRGBA);
             g.connect(wpos, 0, wsplit, 0);
             const int zero = constF(0.0f);
             const int xz = g.addNode(MatNodeType::CombineRGBA);
             g.connect(wsplit, 0, xz, 0); g.connect(wsplit, 2, xz, 1); g.connect(zero, 0, xz, 2); g.connect(zero, 0, xz, 3);
+            const int map = g.addNode(MatNodeType::ParamVec4);
+            {
+                MatGraphNode* n = g.findNode(map);
+                n->s = kHlodMapParam;
+                const float s = static_cast<float>(side);
+                n->p[0] = rect.min.x; n->p[1] = rect.min.y;
+                n->p[2] = (1.0f - 1.0f / s) / std::max(rect.size.x, 1e-3f);
+                n->p[3] = 0.5f / s;
+            }
+            const int msplit = g.addNode(MatNodeType::SplitRGBA);
+            g.connect(map, 0, msplit, 0);
             const int minC = g.addNode(MatNodeType::CombineRGBA);
-            g.connect(constF(rect.min.x), 0, minC, 0); g.connect(constF(rect.min.y), 0, minC, 1);
+            g.connect(msplit, 0, minC, 0); g.connect(msplit, 1, minC, 1);
             g.connect(zero, 0, minC, 2); g.connect(zero, 0, minC, 3);
             const int d  = op2(MatNodeType::Subtract, xz, 0, minC, 0);
-            const float s = static_cast<float>(side);
-            const float scale = (1.0f - 1.0f / s) / std::max(rect.size.x, 1e-3f);
-            const int sc = op2(MatNodeType::Multiply, d, 0, constF(scale), 0);
-            const int uv = op2(MatNodeType::Add, sc, 0, constF(0.5f / s), 0);
+            const int sc = op2(MatNodeType::Multiply, d, 0, msplit, 2);
+            const int uv = op2(MatNodeType::Add, sc, 0, msplit, 3);
 
             auto sample = [&](const std::string& path) {
                 const int n = g.addNode(MatNodeType::TextureSample);

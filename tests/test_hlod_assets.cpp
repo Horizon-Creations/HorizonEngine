@@ -93,6 +93,41 @@ TEST_CASE("buildHlodAssets makes three single-level textures and a material that
     }
 }
 
+TEST_CASE("Every chunk's far material generates the same shader, so a landscape compiles one pipeline, not one per chunk")
+{
+    // The first measurement on a 256-chunk landscape: the chunk rectangle was a constant in the shader, 256 different
+    // sources, 256 background compiles, and most chunks missing from the frame for seconds.
+    HE::landscape::HlodChunkRect a, b;
+    a.min = glm::vec2(-1000.0f, -1000.0f); a.size = glm::vec2(125.0f);
+    b.min = glm::vec2(375.0f, 250.0f);     b.size = glm::vec2(125.0f);
+    std::vector<HE::landscape::HlodAssetBlob> blobsA, blobsB;
+    REQUIRE(HE::landscape::buildHlodAssets(syntheticImages(16), a, kTerrainId, 0, 0, blobsA));
+    REQUIRE(HE::landscape::buildHlodAssets(syntheticImages(32), b, kTerrainId, 9, 11, blobsB));
+
+    ContentManager cm(".");
+    REQUIRE(HE::landscape::loadHlodAssets(cm, blobsA) == 4);
+    REQUIRE(HE::landscape::loadHlodAssets(cm, blobsB) == 4);
+    const MaterialAsset* ma = cm.getMaterial(HE::landscape::hlodAssetId(kTerrainId, 0, 0, HE::landscape::HlodAsset::Material));
+    const MaterialAsset* mb = cm.getMaterial(HE::landscape::hlodAssetId(kTerrainId, 9, 11, HE::landscape::HlodAsset::Material));
+    REQUIRE(ma != nullptr);
+    REQUIRE(mb != nullptr);
+    CHECK(ma->customShaderFragGlsl == mb->customShaderFragGlsl);
+    CHECK(ma->customShaderGBufGlsl == mb->customShaderGBufGlsl);
+    CHECK_FALSE(ma->customShaderFragGlsl.empty());
+    // What differs is the data: the map parameter (min.x, min.y, uv scale, uv offset) and the textures.
+    REQUIRE(ma->graphParamNames.size() == 1);
+    CHECK(ma->graphParamNames[0] == "FarMap");
+    REQUIRE(ma->shaderParamData.size() >= 4);
+    REQUIRE(mb->shaderParamData.size() >= 4);
+    CHECK(ma->shaderParamData[0] == doctest::Approx(-1000.0f));
+    CHECK(ma->shaderParamData[1] == doctest::Approx(-1000.0f));
+    CHECK(mb->shaderParamData[0] == doctest::Approx(375.0f));
+    CHECK(mb->shaderParamData[1] == doctest::Approx(250.0f));
+    CHECK(ma->shaderParamData[2] == doctest::Approx((1.0f - 1.0f / 16.0f) / 125.0f));
+    CHECK(mb->shaderParamData[3] == doctest::Approx(0.5f / 32.0f));
+    CHECK(ma->graphTexturePaths != mb->graphTexturePaths);
+}
+
 TEST_CASE("buildHlodAssets refuses pictures that do not match their side")
 {
     HE::landscape::HlodChunkImages img = syntheticImages(16);
