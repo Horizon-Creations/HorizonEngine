@@ -1295,7 +1295,16 @@ void EditorApplication::OnInit()
 		// macOS is capped at OpenGL 4.1 / GLSL 410
 		ImGui_ImplOpenGL3_Init("#version 410");
 #else
-		ImGui_ImplOpenGL3_Init("#version 460");
+		{
+			// Window descends 4.6 -> 4.1 until the driver accepts a context (Mesa/WSLg
+			// stops at 4.5), so ask for the GLSL that context really speaks.
+			int major = 4, minor = 6;
+			SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
+			SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
+			char glsl[24];
+			std::snprintf(glsl, sizeof glsl, "#version %d", major * 100 + minor * 10);
+			ImGui_ImplOpenGL3_Init(glsl);
+		}
 #endif
 		m_imguiReady = true;
 		HE_LOG_INFO(Editor, "%s", "Initialized ImGui OpenGL backend");
