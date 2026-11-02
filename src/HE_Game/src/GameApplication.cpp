@@ -1615,6 +1615,9 @@ void GameApplication::cellUnloading(HorizonWorld& world, entt::entity root)
 void GameApplication::updateLandscape(float dt)
 {
 	HE_PROFILE_SCOPE_N("Landscape");
+	// Every call, not just the first: a scene swap replaces m_world (RenderExtractor reads this to
+	// build the GI shadow kernel's height clipmap, step 4).
+	if (m_world) m_world->setLandscapeRuntime(&m_landscape);
 	if (!m_landscapeBound && renderer())
 	{
 		// Reads m_world at each call: a scene swap replaces the world, and the runtime keeps its own state.

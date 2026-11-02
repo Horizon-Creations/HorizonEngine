@@ -2,6 +2,7 @@
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/LandscapeAtlas.h"
 #include "HorizonScene/LandscapeFoliage.h"
+#include "HorizonScene/LandscapeGi.h"
 #include "HorizonScene/LandscapeNavigation.h"
 #include "HorizonScene/LandscapePhysics.h"
 #include "HorizonScene/LandscapeQuadtree.h"
@@ -131,6 +132,12 @@ public:
 	const LandscapeWater& water() const { return m_water; }
 	void foliageDraws(std::vector<LandscapeFoliageDraw>& out) const { m_foliage.draws(out); }
 
+	// GI (step 4). The height clipmap around the camera (LandscapeGi.h), kept in step by update()/updateAt(); RenderExtractor
+	// reads it (HorizonWorld::landscapeRuntime()) and turns it into the GI shadow kernel's HE::GiHeightfield. Inactive
+	// (LandscapeGiHeightfield::active() == false) until the first window finishes building.
+	const LandscapeGiHeightfield& giHeightfield() const { return m_gi.heightfield(); }
+	const LandscapeGiStats&       giStats() const { return m_gi.stats(); }
+
 	// Navigation (step 3). With a config the runtime builds a tiled navmesh around the anchors (LandscapeNavigation.h); null takes it away. Anchors
 	// are absolute positions of whatever walks. update(world, ...) uses the scene's nav agents (where they stand and, while they move, where they
 	// are going) and puts the mesh into the scene's NavMeshComponent, which is what NavigationSystem reads; updateAt takes `setNavigationAnchors`.
@@ -178,6 +185,7 @@ private:
 	LandscapePhysics                         m_ground;
 	LandscapeFoliage                         m_foliage;
 	LandscapeWater                           m_water;
+	LandscapeGi                              m_gi;
 	std::unique_ptr<LandscapeNavigation>     m_nav;
 	std::vector<glm::dvec3>                  m_navAnchors;
 	uint64_t                                 m_foliageKey = 0;   // of the layer settings last given to m_foliage; 0 = none

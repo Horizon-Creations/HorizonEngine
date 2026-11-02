@@ -138,6 +138,7 @@ void LandscapeRuntime::reset()
 	if (m_physics) m_ground.clear(*m_physics);
 	m_foliage.clear();
 	m_water.clear();
+	m_gi.clear();
 	if (m_nav) m_nav->clear();
 	m_foliageKey = 0;
 	m_store.reset();
@@ -244,6 +245,7 @@ void LandscapeRuntime::updateAt(const glm::dvec3& cameraAbsolute, const glm::vec
 
 	m_foliage.update(*m_store, { cameraAbsolute }, m_config.heightMinM, m_config.heightScaleM);
 	m_water.update(*m_store, cameraAbsolute, { m_config.heightMinM, m_config.heightScaleM }, m_source->water());
+	m_gi.update(*m_store, cameraAbsolute, { m_config.heightMinM, m_config.heightScaleM });
 	if (m_nav) m_nav->update(*m_store, m_navAnchors, m_config.heightMinM, m_config.heightScaleM);
 
 	if (m_physics)

@@ -4089,6 +4089,9 @@ void EditorApplication::OnRender(float dt)
 		if (m_editorWorld)
 		{
 			HE_PROFILE_SCOPE_N("Landscape");
+			// Every call, not just the first bind below: RenderExtractor reads this to build the GI
+			// shadow kernel's height clipmap (step 4).
+			m_editorWorld->setLandscapeRuntime(&m_landscape);
 			if (!m_landscapeBound && renderer())
 			{
 				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
