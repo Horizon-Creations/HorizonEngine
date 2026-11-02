@@ -33,6 +33,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
+#include <HorizonRendering/CloudDeck.h>      // which transparent draws lie behind the 3D cloud deck
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
 #include <JobSystem/JobSystem.h>              // parallel_for for that bake
@@ -4119,6 +4120,18 @@ struct D3D12RendererImpl
     bool                         skyGeoReady  = false;
     bool                         skyGeoFailed = false;
     bool EnsureSkyGeoPipeline();
+    // Where the clouds-over-geometry draw goes: the target the scene is drawing into (the same
+    // three-way EncodeDecals / rebindSceneTarget use) and the PSO built for its format.
+    struct SkyCloudTarget
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv{}, dsv{};
+        ID3D12Resource*             depthRes = nullptr;
+        ID3D12PipelineState*        pso      = nullptr;
+    };
+    // The whole gate of EncodeSkyClouds on its own (3D clouds on, the full cross-compiled sky in
+    // use, pipeline + target available), so DrawScene can ask the very same question before it
+    // splits the transparent draws around the composite: they cannot disagree.
+    bool SkyCloudsReady(const IRenderer::EnvironmentSettings& env, SkyCloudTarget& target);
     // Records the pass when this frame wants it (3D clouds on, the full cross-compiled sky
     // in use) and returns whether it did — the caller then rebuilds the scene root state,
     // which the root-signature switch wiped. `invViewProj` etc. are the main sky's.
@@ -11020,6 +11033,44 @@ bool D3D12RendererImpl::EnsureSkyGeoPipeline()
 // state: the root-signature switch below wiped it). Same order as EncodeDecals: the depth
 // comes off the output merger FIRST, THEN it becomes a shader resource; and back the other
 // way round afterwards.
+bool D3D12RendererImpl::SkyCloudsReady(const IRenderer::EnvironmentSettings& env, SkyCloudTarget& target)
+{
+#if !defined(HE_HAVE_SHADERC)
+    (void)env; (void)target;
+    return false;
+#else
+    // Only the cross-compiled GL sky has the 3D clouds (the reduced fallback sky has none).
+    if (!skyReady || !skyFullModel || !skyCBufPtr[frameIndex]) return false;
+    if (!HE::cloudDeckActive(env)) return false;          // sky on, cloudMode 1, coverage > 0
+    if (!EnsureSkyGeoPipeline()) return false;
+
+    // The target the scene is drawing into, rebuilt from the same three-way EncodeDecals and
+    // rebindSceneTarget use (a D3D12 command list cannot be asked what is bound).
+    bool hdr = false;
+    if (usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)
+    {
+        target.rtv = hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.depthRes = viewportDepth.Get(); hdr = true;
+    }
+    else if (viewportRtvHeap && viewportDsvHeap && viewportDepth)
+    {
+        target.rtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.depthRes = viewportDepth.Get();
+    }
+    else if (dsvHeap && depthBuffer)
+    {
+        target.rtv = rtvHandle(frameIndex);
+        target.dsv = dsvHandle(0);
+        target.depthRes = depthBuffer.Get();
+    }
+    else return false;
+    target.pso = hdr ? skyGeoHdrPso.Get() : skyGeoLdrPso.Get();
+    return target.pso != nullptr;
+#endif
+}
+
 bool D3D12RendererImpl::EncodeSkyClouds(ID3D12GraphicsCommandList* cl, const glm::mat4& invViewProj,
                                         const glm::vec3& sunDir,
                                         const IRenderer::EnvironmentSettings& env,
@@ -11029,37 +11080,11 @@ bool D3D12RendererImpl::EncodeSkyClouds(ID3D12GraphicsCommandList* cl, const glm
     (void)cl; (void)invViewProj; (void)sunDir; (void)env; (void)cameraPos; (void)time;
     return false;
 #else
-    // Only the cross-compiled GL sky has the 3D clouds (the reduced fallback sky has none).
-    if (!cl || !skyReady || !skyFullModel || !skyCBufPtr[frameIndex]) return false;
-    if (!env.skyEnabled || env.cloudMode != 1 || env.cloudCoverage <= 0.0f) return false;
-    if (!EnsureSkyGeoPipeline()) return false;
-
-    // The target the scene is drawing into, rebuilt from the same three-way EncodeDecals and
-    // rebindSceneTarget use (a D3D12 command list cannot be asked what is bound).
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv{}, dsv{};
-    ID3D12Resource*             depthRes = nullptr;
-    bool                        hdr = false;
-    if (usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)
-    {
-        rtv = hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
-        dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-        depthRes = viewportDepth.Get(); hdr = true;
-    }
-    else if (viewportRtvHeap && viewportDsvHeap && viewportDepth)
-    {
-        rtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
-        dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
-        depthRes = viewportDepth.Get();
-    }
-    else if (dsvHeap && depthBuffer)
-    {
-        rtv = rtvHandle(frameIndex);
-        dsv = dsvHandle(0);
-        depthRes = depthBuffer.Get();
-    }
-    else return false;
-    ID3D12PipelineState* pso = hdr ? skyGeoHdrPso.Get() : skyGeoLdrPso.Get();
-    if (!pso) return false;
+    SkyCloudTarget target;
+    if (!cl || !SkyCloudsReady(env, target)) return false;
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = target.rtv, dsv = target.dsv;
+    ID3D12Resource* const             depthRes = target.depthRes;
+    ID3D12PipelineState* const        pso      = target.pso;
 
     GpuPassScope _passTimer(this, "Clouds");
 
@@ -12555,6 +12580,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         std::vector<DrawCall> ribbonDCs;
         std::vector<GpuMesh>  ribbonMeshes;
         std::unordered_map<const DrawCall*, GpuMesh*> ribbonMeshByDC;
+        // World-space bounds of each trail (its mesh is rebased around a pivot, so the GpuMesh bounds are
+        // not world bounds): the cloud-deck classification of the transparent draws asks for them.
+        std::unordered_map<const DrawCall*, HE::AABB> ribbonBoundsByDC;
         if (!p.m_renderWorld.ribbonBatches.empty())
         {
             // Reserve BOTH before taking any address: transparentDCs below holds
@@ -12600,6 +12628,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 ribbonMeshes.push_back(rmesh);
                 ribbonDCs.push_back(std::move(dc));
                 ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                ribbonBoundsByDC.emplace(&ribbonDCs.back(), rb.worldBounds);
                 transparentDCs.push_back(&ribbonDCs.back());
             }
         }
@@ -13453,24 +13482,63 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             restoreSceneRootAfterPass();
         }
 
+        // One run of the sorted transparent list through the blended PSO. Called once, or twice
+        // around the cloud composite below; each call sets the pass state up and puts it back.
+        auto drawTransparentRange = [&](std::vector<const DrawCall*>::const_iterator first,
+                                        std::vector<const DrawCall*>::const_iterator last)
+        {
+            if (first == last || !transePso) return;
+            allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
+            activeScenePso = transePso; // A4: graph-material draws in the transparent pass restore THIS
+            cl->SetPipelineState(transePso);
+            for (; first != last; ++first) drawDC12(**first);
+            cl->SetPipelineState(scenePso); // restore for next draw
+        };
+
         // ── Clouds over the opaque geometry (cloudMode 1) ────────────────────
         // The sky above was drawn before any geometry, so its clouds are a backdrop
         // only. With every opaque surface in the depth buffer (forward AND deferred
         // frames both arrive here, the G-buffer resolve is long done) the same slab is
-        // marched up to each surface and blended over the lit colour; before the
-        // transparent draws, which depth-test against the opaque depth and so sit in
-        // front of / behind the clouds the way the sky pass always had them.
-        if (p.EncodeSkyClouds(cl, glm::inverse(viewProj), p.m_renderWorld.sunDirection, m_environment,
-                              p.m_renderWorld.camera.position, p.m_wallTime))
+        // marched up to each surface and blended over the lit colour.
+        // The transparent draws do not write depth, so the composite cannot know where they
+        // are; what it can be told is which of them lie wholly behind the cloud deck
+        // (HE::transparentBehindClouds: camera on one side of the slab, the draw on the other).
+        // Those are drawn BEFORE it and get covered; the rest after it, in front of the
+        // clouds, as before. Each group keeps its back-to-front order. A frame whose composite
+        // does not run keeps the single transparent pass.
+        D3D12RendererImpl::SkyCloudTarget cloudTarget;
+        const bool cloudsOn = p.SkyCloudsReady(m_environment, cloudTarget);   // the composite's own gate
+        auto behindEnd = transparentDCs.begin();
+        if (cloudsOn && transePso && !transparentDCs.empty())
+        {
+            const glm::vec3& cloudCam = p.m_renderWorld.camera.position;
+            auto behindClouds = [&](const DrawCall* dc) -> bool
+            {
+                // A trail: its world bounds, kept when the batch was uploaded.
+                if (auto rb = ribbonBoundsByDC.find(dc); rb != ribbonBoundsByDC.end())
+                    return rb->second.isValid()
+                        && HE::transparentBehindClouds(m_environment, cloudCam.y, rb->second.min.y, rb->second.max.y);
+                // A mesh: its object-space bounds under every instance's transform — a batch is behind
+                // only when ALL its instances are. No usable bounds (no mesh yet) -> not behind.
+                const GpuMesh* mesh = p.resolveMesh(dc->meshAssetId, m_contentManager);
+                if (!mesh || !mesh->localBounds.isValid()) return false;
+                bool behind = true;
+                auto test = [&](const glm::mat4& t) {
+                    behind = behind && HE::transparentBehindClouds(m_environment, cloudCam, mesh->localBounds, t);
+                };
+                if (dc->instanceTotal() > 0) dc->forEachInstance(test);
+                else                         test(dc->transform);
+                return behind;
+            };
+            behindEnd = std::stable_partition(transparentDCs.begin(), transparentDCs.end(), behindClouds);
+        }
+        drawTransparentRange(transparentDCs.cbegin(), behindEnd);
+
+        if (cloudsOn && p.EncodeSkyClouds(cl, glm::inverse(viewProj), p.m_renderWorld.sunDirection, m_environment,
+                                          p.m_renderWorld.camera.position, p.m_wallTime))
             restoreSceneRootAfterPass();
 
-        if (!transparentDCs.empty() && transePso) {
-            allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
-            activeScenePso = transePso; // A4: graph-material draws in the transparent pass restore THIS
-            cl->SetPipelineState(transePso);
-            for (const DrawCall* dc : transparentDCs) drawDC12(*dc);
-            cl->SetPipelineState(scenePso); // restore for next draw
-        }
+        drawTransparentRange(behindEnd, transparentDCs.cend());
 
         // Debug lines on top of geometry but before PostFX tonemap.
         if (!p.m_debugLines.empty()) {
@@ -14712,6 +14780,13 @@ void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)
 bool D3D12Renderer::SupportsTessellation() const
 {
     return m_impl && m_impl->m_tessSupported;
+}
+
+bool D3D12Renderer::Supports3DClouds() const
+{
+    // Built at startup (createSkyGeoPipeline), so this is settled before the first frame; a failed build
+    // (skyGeoFailed) leaves the dome.
+    return m_impl && m_impl->skyReady && m_impl->skyFullModel && m_impl->skyGeoReady;
 }
 
 void D3D12Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)

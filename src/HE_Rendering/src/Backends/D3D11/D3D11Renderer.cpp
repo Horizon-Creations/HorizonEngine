@@ -37,6 +37,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
+#include <HorizonRendering/CloudDeck.h>      // which transparent draws lie behind the 3D cloud deck
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
 #include <JobSystem/JobSystem.h>              // parallel_for for that bake
@@ -6552,22 +6553,41 @@ struct D3D11RendererImpl
     // b0 are saved around the draw, since the sky resources sit on the same registers.
     // Self-restoring, mid-scene: the transparent draws follow. A no-op unless the geo variant
     // exists, the frame's depth has an SRV, and the clouds are the 3D ones.
-    void drawCloudsOverGeometry(ID3D11DeviceContext* ctx, const glm::mat4& invVP,
-                                const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env,
-                                const glm::vec3& cameraPos, float time)
+    //
+    // cloudCompositeReady is that whole gate, shared with the frame: the transparent draws that lie
+    // wholly behind the cloud deck are recorded BEFORE this draw (so it covers them), and only when it
+    // will really run, or they would be drawn in front of clouds that never get composited.
+    bool cloudCompositeReady(ID3D11DeviceContext* ctx, const IRenderer::EnvironmentSettings& env,
+                             ComPtr<ID3D11RenderTargetView>* outRTV = nullptr,
+                             ComPtr<ID3D11DepthStencilView>* outDSV = nullptr,
+                             ID3D11ShaderResourceView** outDepthRead = nullptr) const
     {
-        if (!skyReady || !skyFullModel || !skyGeoPS || !skyGeoBlend) return;
-        if (!env.skyEnabled || env.cloudMode != 1 || !(env.cloudCoverage > 0.0f)) return;
+        if (!skyReady || !skyFullModel || !skyGeoPS || !skyGeoBlend) return false;
+        if (!HE::cloudDeckActive(env)) return false;
 
         ComPtr<ID3D11RenderTargetView> curRTV;
         ComPtr<ID3D11DepthStencilView> curDSV;
         ctx->OMGetRenderTargets(1, curRTV.GetAddressOf(), curDSV.GetAddressOf());
-        if (!curRTV || !curDSV) return; // not inside a scene pass
+        if (!curRTV || !curDSV) return false; // not inside a scene pass
         ID3D11ShaderResourceView* depthRead =
               (curDSV.Get() == dsv.Get())         ? depthSRV.Get()
             : (curDSV.Get() == viewportDSV.Get()) ? viewportDepthSRV.Get()
                                                   : nullptr;
-        if (!depthRead) return;
+        if (!depthRead) return false;
+        if (outRTV)       *outRTV       = curRTV;
+        if (outDSV)       *outDSV       = curDSV;
+        if (outDepthRead) *outDepthRead = depthRead;
+        return true;
+    }
+
+    void drawCloudsOverGeometry(ID3D11DeviceContext* ctx, const glm::mat4& invVP,
+                                const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env,
+                                const glm::vec3& cameraPos, float time)
+    {
+        ComPtr<ID3D11RenderTargetView> curRTV;
+        ComPtr<ID3D11DepthStencilView> curDSV;
+        ID3D11ShaderResourceView*      depthRead = nullptr;
+        if (!cloudCompositeReady(ctx, env, &curRTV, &curDSV, &depthRead)) return;
 
         GpuPassScope _passTimer(this, "Clouds");
         uploadSkyConstants(ctx, invVP, sunDir, env, cameraPos, time);
@@ -8046,6 +8066,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         std::vector<DrawCall> ribbonDCs;
         std::vector<GpuMesh>  ribbonMeshes;
         std::unordered_map<const DrawCall*, const GpuMesh*> ribbonMeshByDC;
+        std::unordered_map<const DrawCall*, HE::AABB>       ribbonBoundsByDC;   // world bounds, for the cloud-deck sort
         if (!p.m_renderWorld.ribbonBatches.empty())
         {
             // Reserve BOTH before taking any address: transparentDCs below holds
@@ -8091,6 +8112,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                 ribbonMeshes.push_back(rmesh);
                 ribbonDCs.push_back(std::move(dc));
                 ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                ribbonBoundsByDC.emplace(&ribbonDCs.back(), rb.worldBounds);
                 transparentDCs.push_back(&ribbonDCs.back());
             }
         }
@@ -8841,17 +8863,54 @@ void D3D11Renderer::DrawScene(int width, int height)
         // slab is marched up to each surface and blended over the lit scene — before the
         // transparent draws, which belong in front of the clouds' own surface only where they
         // are. Same jittered matrix and clock as the sky draw. Self-restoring.
-        p.drawCloudsOverGeometry(ctx, glm::inverse(viewProj), p.m_renderWorld.sunDirection,
-                                 m_environment, p.m_renderWorld.camera.position, p.m_wallTime);
-
-        if (!transparentDCs.empty()) {
+        //
+        // The transparent draws write no depth, so the composite cannot see them. What it can be
+        // told is a per-draw fact (HE::transparentBehindClouds): a draw wholly on the far side of the
+        // deck from the camera has ALL of the clouds in front of it. Those are drawn FIRST, so the
+        // composite covers them; the rest follow it, in front of the clouds, as before. Each group
+        // keeps its back-to-front order (stable partition of the sorted list). Only on a frame whose
+        // composite really runs: every other frame has the single pass it always had.
+        const bool cloudsRun = p.cloudCompositeReady(ctx, m_environment);
+        auto drawBehindClouds = [&](const DrawCall& dc) -> bool
+        {
+            // A trail: its own bounds. Anything else: the mesh's bounds under each instance's transform
+            // (a batch is one draw, so it is "behind" only if EVERY instance is).
+            if (auto rb = ribbonBoundsByDC.find(&dc); rb != ribbonBoundsByDC.end())
+                return rb->second.isValid()
+                    && HE::transparentBehindClouds(m_environment, camPos.y, rb->second.min.y, rb->second.max.y);
+            const GpuMesh* mesh = p.resolveMesh(dc.meshAssetId, m_contentManager);
+            if (!mesh) return false;
+            bool any = false, all = true;
+            auto test = [&](const glm::mat4& t)
+            {
+                if (!all) return;
+                any = true;
+                if (!HE::transparentBehindClouds(m_environment, camPos, mesh->localBounds, t)) all = false;
+            };
+            if (dc.instanceTotal() > 0) dc.forEachInstance(test); else test(dc.transform);
+            return any && all;
+        };
+        auto behindEnd = transparentDCs.end();
+        if (cloudsRun && !transparentDCs.empty())
+            behindEnd = std::stable_partition(transparentDCs.begin(), transparentDCs.end(),
+                                              [&](const DrawCall* dc) { return drawBehindClouds(*dc); });
+        // One group of the sorted list, with the blend + depth state the transparent pass has always
+        // used. Set per group: the composite between them restores its own state, not this one.
+        auto drawTransparentGroup = [&](std::vector<const DrawCall*>::iterator first,
+                                        std::vector<const DrawCall*>::iterator last)
+        {
+            if (first == last) return;
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             ctx->OMSetBlendState(p.alphaBlendState.Get(), nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthReadOnlyState.Get(), 0);
-            for (const DrawCall* dc : transparentDCs) drawDC(*dc);
+            for (; first != last; ++first) drawDC(**first);
             ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
             ctx->OMSetDepthStencilState(p.depthState.Get(), 0);
-        }
+        };
+        drawTransparentGroup(transparentDCs.begin(), behindEnd);   // behind the deck (empty unless the composite runs)
+        p.drawCloudsOverGeometry(ctx, glm::inverse(viewProj), p.m_renderWorld.sunDirection,
+                                 m_environment, p.m_renderWorld.camera.position, p.m_wallTime);
+        drawTransparentGroup(behindEnd, transparentDCs.end());     // everything else, in front of the clouds
         // Debug lines on top of geometry, before post-process
         if (!p.m_debugLines.empty())
             p.drawDebugLines(ctx, viewProj, p.m_debugLines);
@@ -9882,6 +9941,11 @@ void D3D11Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 bool D3D11Renderer::SupportsTessellation() const
 {
     return m_impl && m_impl->m_tessSupported;
+}
+
+bool D3D11Renderer::Supports3DClouds() const
+{
+    return m_impl && m_impl->skyReady && m_impl->skyFullModel && m_impl->skyGeoPS;
 }
 
 void D3D11Renderer::InvalidateMesh(const HE::UUID& meshId)

@@ -40,6 +40,7 @@
 #include <Backends/Vulkan/VulkanPipelineCacheFile.h> // on-disk VkPipelineCache (REN-808)
 #include <HorizonRendering/MaterialScalars.h>
 #include <HorizonRendering/RenderConstants.h>
+#include <HorizonRendering/CloudDeck.h>      // which transparent draws lie behind the 3D cloud deck
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyNoise3D.h>
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, compiled to SPIR-V for the sky pass
@@ -8841,6 +8842,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
 {
     if (!m_world || m_scenePipeline == VK_NULL_HANDLE || width == 0 || height == 0) return;
 
+    // A frame that goes straight to the swapchain has no HDR target to run the clouds-over-geometry pass in,
+    // so the 3D clouds would only be a backdrop there: draw the sky dome instead, for this frame only.
+    struct CloudModeRestore { int& mode; int saved; ~CloudModeRestore() { mode = saved; } }
+        cloudModeRestore{ m_environment.cloudMode, m_environment.cloudMode };
+    if (!hdr) m_environment.cloudMode = 0;
+
     // Graph-material pipelines queued by WarmupMaterials, built against THIS frame's pass
     // before any draw below can stall on them.
     drainMaterialWarmup(hdr);
@@ -9210,6 +9217,9 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         std::vector<DrawCall> ribbonDCs;
         std::vector<GpuMesh>  ribbonMeshes;
         std::unordered_map<const DrawCall*, const GpuMesh*> ribbonMeshByDC;
+        // A trail's world-space vertical extent (its band's bounds), for the cloud-deck classification of
+        // the blended draws below; a trail without valid bounds is simply not "behind the deck".
+        std::unordered_map<const DrawCall*, std::pair<float, float>> ribbonYByDC;
         if (!m_renderWorld.ribbonBatches.empty())
         {
             // Reserve BOTH before taking any address: transparentDCs below holds
@@ -9255,6 +9265,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 ribbonMeshes.push_back(rmesh);
                 ribbonDCs.push_back(std::move(dc));
                 ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                if (rb.worldBounds.isValid())
+                    ribbonYByDC.emplace(&ribbonDCs.back(), std::make_pair(rb.worldBounds.min.y, rb.worldBounds.max.y));
                 transparentDCs.push_back(&ribbonDCs.back());
             }
         }
@@ -10257,24 +10269,64 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         // replay) is in the HDR colour and depth now, the transparent pass is next and blends over the
         // result. It reads the REAL depth attachment, so the open pass is closed for the composite and
         // reopened (LOAD on both) for the transparent draws and the debug lines.
-        if (cloudsOverGeometryWanted(hdr))
+        //
+        // Transparent draws write no depth, so the composite cannot tell where they are. The ones that lie
+        // wholly behind the cloud deck (HE::transparentBehindClouds: water seen from above the clouds,
+        // say) are drawn first, in the still-open scene pass, so the composite covers them; the rest are
+        // drawn after it, in front of the clouds, exactly as before. Both groups keep the back-to-front
+        // order of the sorted list.
+        const bool cloudComposite = cloudsOverGeometryWanted(hdr);
+        const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
+            ? m_sceneTransparentPipelineHDR : m_sceneTransparentPipeline;
+        size_t behindDeckCount = 0;
+        if (cloudComposite && transPipe && !transparentDCs.empty())
+        {
+            const auto behindDeck = [&](const DrawCall* dc) -> bool
+            {
+                if (auto r = ribbonYByDC.find(dc); r != ribbonYByDC.end())
+                    return HE::transparentBehindClouds(m_environment, camPos.y, r->second.first, r->second.second);
+                const GpuMesh* mesh = resolveMesh(dc->meshAssetId);
+                if (!mesh || !mesh->localBounds.isValid()) return false;   // no bounds: in front, as before
+                if (dc->instanceTotal() > 0)                              // a batch is behind only if every instance is
+                {
+                    bool all = true;
+                    dc->forEachInstance([&](const glm::mat4& t) {
+                        all = all && HE::transparentBehindClouds(m_environment, camPos, mesh->localBounds, t);
+                    });
+                    return all;
+                }
+                return HE::transparentBehindClouds(m_environment, camPos, mesh->localBounds, dc->transform);
+            };
+            behindDeckCount = static_cast<size_t>(
+                std::stable_partition(transparentDCs.begin(), transparentDCs.end(), behindDeck) - transparentDCs.begin());
+        }
+        if (behindDeckCount > 0)
+        {
+            allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
+            GpuPassScope _transTimer(this, "Transparent");
+            activeMatScenePipe = transPipe; // A4: graph-material draws restore THIS in the transparent pass
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, transPipe);
+            for (size_t i = 0; i < behindDeckCount; ++i) drawDCVk(*transparentDCs[i]);
+        }
+
+        if (cloudComposite)
         {
             encodeCloudsOverGeometry(cmd, width, height);
             // A new pass instance, and the composite bound the sky's pipeline layout at set 0: back to
-            // the scene's, as after the decals.
+            // the scene's, as after the decals. (activeMatScenePipe is transPipe if the draws behind the
+            // deck ran above, else still the opaque one; the transparent pass below binds its own pipeline
+            // again either way.)
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
                                     0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
-        const VkPipeline transPipe = hdr && m_sceneTransparentPipelineHDR
-            ? m_sceneTransparentPipelineHDR : m_sceneTransparentPipeline;
-        if (!transparentDCs.empty() && transPipe) {
+        if (transparentDCs.size() > behindDeckCount && transPipe) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             GpuPassScope _transTimer(this, "Transparent");
             activeMatScenePipe = transPipe; // A4: graph-material draws restore THIS in the transparent pass
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, transPipe);
-            for (const DrawCall* dc : transparentDCs) drawDCVk(*dc);
+            for (size_t i = behindDeckCount; i < transparentDCs.size(); ++i) drawDCVk(*transparentDCs[i]);
         }
 
         // Debug lines on top of opaque+transparent geometry, before post-process.

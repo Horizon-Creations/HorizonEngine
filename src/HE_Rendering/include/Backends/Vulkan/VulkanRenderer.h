@@ -79,6 +79,14 @@ public:
 	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
 	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	bool SupportsTessellation() const override { return m_tessSupported; }
+	// The 3D clouds need the full cross-compiled sky AND the clouds-over-geometry pass (its pipeline and the two
+	// render passes around it); without them the sky dome is all this backend draws. A frame that goes straight to
+	// the swapchain (no HDR target) draws the dome too, see DrawScene.
+	bool Supports3DClouds() const override
+	{
+		return m_skyFullModel && m_skyGeoPipelineHDR != VK_NULL_HANDLE
+		    && m_cloudGeoRP != VK_NULL_HANDLE && m_cloudResumeRP != VK_NULL_HANDLE;
+	}
 	std::string GIReflectionsInactiveReason() const override { return m_giReflWhyNot; }
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.

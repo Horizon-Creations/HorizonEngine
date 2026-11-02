@@ -13,6 +13,7 @@
 #include <HorizonRendering/GIReflectionTier.h> // GI reflections: rays / resolution / blur per tier (all backends)
 #include <HorizonRendering/SkyNoise3D.h>     // shared procedural sky/cloud noise volume
 #include <HorizonRendering/SkyFrameParams.h> // shared cloud wind vector
+#include <HorizonRendering/CloudDeck.h>      // which transparent draws lie behind the 3D cloud deck
 #include <HorizonRendering/SkyShaderSource.h> // kSkyFS + kSkyFuncGLSL, shared with Vulkan/D3D
 #include <HorizonRendering/LightPacking.h>   // shared GPU light packing
 #include <HorizonRendering/GiInstanceSurface.h> // shared flat surface for a GI/reflection hit
@@ -11350,8 +11351,7 @@ void OpenGLRenderer::BindSceneLighting(const SceneLightingLocs& L, const SceneSh
 void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::vec3& sunDir,
                                        const glm::vec3& camPos,
                                        const IRenderer::EnvironmentSettings& env,
-                                       bool allowLowResClouds, int pw, int ph,
-                                       unsigned int sceneDepthTex)
+                                       bool allowLowResClouds, int pw, int ph)
 {
 	if (!m_skyProgram || !env.skyEnabled) return;
 
@@ -11462,39 +11462,55 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	glUniform1f(m_uSkyCloudGeoPass, 0.0f);
 	glUniform1i(m_uSkySceneDepth, 4);       // never sampled outside the geometry draw; keep it off the moon's unit
 	glDrawArrays(GL_TRIANGLES, 0, 3);
-
-	// ── Clouds over the opaque geometry. The sky draw above only fills the pixels the geometry
-	// left at depth 1, so the 3D clouds were a backdrop: terrain was never covered by the clouds
-	// in front of it and could not be seen through them from above. Here the same slab is marched
-	// up to each opaque surface and blended over the lit scene (dst = L + dst * T). Uses the
-	// uniforms DrawSkyFullscreen just set; the shader discards the depth == 1 pixels itself.
-	GLint geoDrawFBO = 0;
-	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &geoDrawFBO);
-	if (sceneDepthTex && env.cloudMode == 1 && env.cloudCoverage > 0.0f
-	    && m_uSkyCloudGeoPass >= 0 && m_uSkySceneDepth >= 0
-	    && m_hdrFBO != 0 && static_cast<GLuint>(geoDrawFBO) == m_hdrFBO)
-	{
-		// The depth texture is attached to this very frame buffer; sampling it while attached is a
-		// feedback loop, so it leaves the attachment for the draw (nothing is depth-tested or
-		// written meanwhile) and goes back right after.
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
-		glActiveTexture(GL_TEXTURE4);
-		glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
-		glDisable(GL_DEPTH_TEST);
-		glEnable(GL_BLEND);
-		glBlendFuncSeparate(GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE);   // rgb: L + dst * T; alpha untouched
-		glUniform1f(m_uSkyCloudGeoPass, 1.0f);
-		glDrawArrays(GL_TRIANGLES, 0, 3);
-		glUniform1f(m_uSkyCloudGeoPass, 0.0f);
-		glDisable(GL_BLEND);
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		glBindTexture(GL_TEXTURE_2D, 0);
-		glActiveTexture(GL_TEXTURE0);
-		glEnable(GL_DEPTH_TEST);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepthTex, 0);
-	}
 	glDepthFunc(GL_LESS);   // restore default for the next pass
 	glDepthMask(GL_TRUE);
+}
+
+// The sky draw above only fills the pixels the geometry left at depth 1, so the 3D clouds were a
+// backdrop: terrain was never covered by the clouds in front of it and could not be seen through
+// them from above. Here the same slab is marched up to each opaque surface and blended over the
+// lit scene (dst = L + dst * T); the shader discards the depth == 1 pixels itself.
+void OpenGLRenderer::DrawCloudsOverGeometry(const IRenderer::EnvironmentSettings& env, unsigned int sceneDepthTex)
+{
+	GLint geoDrawFBO = 0;
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &geoDrawFBO);
+	if (!m_skyProgram || !sceneDepthTex || !HE::cloudDeckActive(env)
+	    || m_uSkyCloudGeoPass < 0 || m_uSkySceneDepth < 0
+	    || m_hdrFBO == 0 || static_cast<GLuint>(geoDrawFBO) != m_hdrFBO)
+		return;
+
+	glUseProgram(m_skyProgram);   // its uniforms are what DrawSkyFullscreen set this frame
+	// Whatever was drawn since may have moved the texture units the sky's samplers read.
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, m_moonTex);
+	glUniform1i(m_uSkyMoonTex, 0);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+	glUniform1i(m_uSkyNoise, 2);
+	glActiveTexture(GL_TEXTURE3);
+	glBindTexture(GL_TEXTURE_2D, m_cloudTex);
+	glUniform1i(m_uSkyCloudTex, 3);
+	glActiveTexture(GL_TEXTURE4);
+	glBindTexture(GL_TEXTURE_2D, sceneDepthTex);
+	glUniform1i(m_uSkySceneDepth, 4);
+	// The depth texture is attached to this very frame buffer; sampling it while attached is a
+	// feedback loop, so it leaves the attachment for the draw (nothing is depth-tested or
+	// written meanwhile) and goes back right after.
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
+	glDisable(GL_DEPTH_TEST);
+	glEnable(GL_BLEND);
+	glBlendFuncSeparate(GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE);   // rgb: L + dst * T; alpha untouched
+	glUniform1f(m_uSkyCloudGeoPass, 1.0f);
+	glBindVertexArray(m_fsVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glUniform1f(m_uSkyCloudGeoPass, 0.0f);
+	glDisable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glActiveTexture(GL_TEXTURE4);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glEnable(GL_DEPTH_TEST);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepthTex, 0);
 }
 
 void OpenGLRenderer::DrawScene(int pw, int ph)
@@ -12325,7 +12341,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		                // Section draw: byte offset into the EBO (nullptr = from the
 		                // start, which is every whole-mesh draw). Trailing + defaulted
 		                // so the positional initialisers above stay as they are.
-		                const void* indexOffset = nullptr; };
+		                const void* indexOffset = nullptr;
+		                // Wholly behind the 3D cloud deck (HE::transparentBehindClouds): drawn before
+		                // the cloud composite so the clouds cover it, not after it.
+		                bool behindClouds = false; };
 		std::vector<TPDraw> transparent;
 		// Deferred: opaque draws whose custom material has no G-buffer variant —
 		// replayed forward right after the lighting resolve.
@@ -12553,6 +12572,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						for (int i = 0; i < mGtexCount; ++i) tp.gtex[i] = mGtex[i];
 						tp.gtexCount = mGtexCount;
 						tp.wmTex     = wm;
+						tp.behindClouds = mesh && HE::transparentBehindClouds(GetEnvironment(), camPos, mesh->localBounds, t);
 						transparent.push_back(std::move(tp));
 					};
 					if (dc.instanceTotal() > 0)
@@ -12807,6 +12827,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					for (int i = 0; i < tpGtexCount; ++i) tp.gtex[i] = tpGtex[i];
 					tp.gtexCount = tpGtexCount;
 					tp.wmTex     = tpWm;
+					tp.behindClouds = mesh && HE::transparentBehindClouds(GetEnvironment(), camPos, mesh->localBounds, t);
 					transparent.push_back(std::move(tp));
 				};
 				if (dc.instanceTotal() > 0)
@@ -13422,8 +13443,10 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// objects. With no geometry the whole frame is background → full sky.
 		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
 		DrawSkyFullscreen(invViewProj, sunDir, m_renderWorld.camera.position,
-		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph, m_hdrDepth);
+		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
 		GpuTimerEndPass();                 // end "Sky+Clouds"
+		// (The 3D clouds over the opaque geometry follow below, inside the transparency pass: the
+		// transparent draws that lie behind the cloud deck have to be drawn first, to be covered.)
 		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
 
 		// ── Motion trails join the blended list ─────────────────────────────
@@ -13494,6 +13517,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			tp.params  = std::move(rbParams);
 			for (int i = 0; i < rbGtexCount; ++i) tp.gtex[i] = rbGtex[i];
 			tp.gtexCount = rbGtexCount;
+			tp.behindClouds = rb.worldBounds.isValid()
+				&& HE::transparentBehindClouds(GetEnvironment(), camPos.y, rb.worldBounds.min.y, rb.worldBounds.max.y);
 			transparent.push_back(std::move(tp));
 		}
 
@@ -13503,17 +13528,15 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// but no depth write (so they don't occlude each other). The scene program's
 		// per-frame uniforms (lights, ambient, shadow, AO) persist from the opaque
 		// pass; only the per-draw material + alpha change.
-		if (!transparent.empty())
+		//
+		// The 3D clouds are composited over the opaque scene in the middle of this list: the draws
+		// that lie wholly behind the cloud deck (HE::transparentBehindClouds — water seen from above
+		// the clouds, say) come first, so the composite covers them; the rest come after it, in front
+		// of the clouds, exactly as before. Each group keeps its back-to-front order.
+		std::sort(transparent.begin(), transparent.end(),
+		          [](const TPDraw& a, const TPDraw& b) { return a.distSq > b.distSq; });
+		const auto drawTP = [&](const TPDraw& t)
 		{
-			std::sort(transparent.begin(), transparent.end(),
-			          [](const TPDraw& a, const TPDraw& b) { return a.distSq > b.distSq; });
-			glUseProgram(m_unlitProgram); // sky switched the active program
-			glEnable(GL_BLEND);
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-			glDepthMask(GL_FALSE);
-			glActiveTexture(GL_TEXTURE0);
-			GLWireScope _tpWire(WireframeViewActive());
-			for (const TPDraw& t : transparent)
 			{
 				if (t.matProg)
 				{
@@ -13586,7 +13609,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glUseProgram(m_unlitProgram); // restore the built-in blend program
 					++m_counters.draws;
 					m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
-					continue;
+					return;
 				}
 				glUniformMatrix4fv(m_uMVP,   1, GL_FALSE, glm::value_ptr(t.mvp));
 				glUniformMatrix4fv(m_uModel, 1, GL_FALSE, glm::value_ptr(t.model));
@@ -13602,9 +13625,32 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				++m_counters.draws;
 				m_counters.tris += static_cast<uint32_t>(t.indexCount / 3);
 			}
+		};
+		// One group of the sorted list, drawn with the blend state the transparency pass has always used:
+		// alpha-blended, depth-tested against the opaque geometry, no depth write.
+		const auto drawGroup = [&](std::vector<TPDraw>::const_iterator first, std::vector<TPDraw>::const_iterator last)
+		{
+			if (first == last) return;
+			glUseProgram(m_unlitProgram); // sky (or the cloud composite) switched the active program
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDepthMask(GL_FALSE);
+			glActiveTexture(GL_TEXTURE0);
+			GLWireScope _tpWire(WireframeViewActive());
+			for (; first != last; ++first) drawTP(*first);
 			glDepthMask(GL_TRUE);
 			glDisable(GL_BLEND);
-		}
+		};
+		const auto behindEnd = std::stable_partition(transparent.begin(), transparent.end(),
+		                                             [](const TPDraw& t) { return t.behindClouds; });
+		drawGroup(transparent.cbegin(), behindEnd);
+		// The clouds, over the opaque scene and over everything drawn above (the draws behind the deck).
+		GpuTimerEndPass();                 // end "Transparent" (GL cannot nest timers)
+		GpuTimerBeginPass("Sky+Clouds");
+		DrawCloudsOverGeometry(GetEnvironment(), m_hdrDepth);
+		GpuTimerEndPass();
+		GpuTimerBeginPass("Transparent");
+		drawGroup(behindEnd, transparent.cend());
 
 		// ── GPU weather particles: simulated by transform feedback (once per
 		// frame in Render), drawn here as alpha-blended billboards over the scene.

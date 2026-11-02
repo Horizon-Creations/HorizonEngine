@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include <HorizonRendering/CloudDeck.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyShaderSource.h>
 
@@ -186,6 +187,106 @@ TEST_CASE("BuildSkyFragmentGLSL450(true) is the clouds-over-geometry variant of 
 	// The depth value goes through ONE conversion, which the prelude pins to Vulkan/D3D's 0..1.
 	CHECK(geo.find("#define heSceneDepthToNdc(d) (d)") != std::string::npos);
 	CHECK(std::string(HE::glsl::kSkyFS).find("#define heSceneDepthToNdc(d) ((d) * 2.0 - 1.0)") != std::string::npos);
+}
+
+TEST_CASE("The CPU cloud deck is the slab the shader marches")
+{
+	// transparentBehindClouds() classifies draws against these numbers; if the shader's slab moves they
+	// have to move with it, or draws get sorted against a deck the clouds are not in.
+	const std::string fs = HE::glsl::kSkyFS;
+	CHECK(fs.find("const float kCloudRefAltitude = 200.0;") != std::string::npos);
+	CHECK(HE::kCloudDeckRefAltitude == 200.0f);
+	CHECK(fs.find("float thick = kCloudRefAltitude * 1.5;") != std::string::npos);        // classic and Realistic
+	CHECK(HE::kCloudDeckThickness == 300.0f);
+	CHECK(fs.find("baseY - 0.12 * thick") != std::string::npos);                        // Realistic reaches below the base
+	CHECK(HE::kCloudDeckBelowBase == doctest::Approx(36.0f));
+	CHECK(fs.find("float baseY = cloudH;") != std::string::npos);                       // the base IS cloudHeight
+	const HE::CloudDeck d = HE::cloudDeckOf(200.0f);
+	CHECK(d.bottom < 200.0f - 36.0f);                                                    // margin on both sides
+	CHECK(d.top    > 200.0f + 300.0f);
+	CHECK(HE::cloudDeckOf(-5.0f).bottom == HE::cloudDeckOf(1.0f).bottom);               // the shader clamps cloudH to >= 1
+}
+
+TEST_CASE("Transparent draws behind the cloud deck are the ones wholly on its far side")
+{
+	IRenderer::EnvironmentSettings env;
+	env.cloudMode = 1; env.cloudCoverage = 0.5f; env.cloudHeight = 200.0f;   // deck ~164 .. 500 (plus margin)
+
+	// Camera above the deck: below it is behind, above or on the camera's side is not.
+	CHECK(HE::transparentBehindClouds(env, 900.0f, 0.0f, 50.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 900.0f, 600.0f, 650.0f));    // same side as the camera
+	// Camera below the deck: above it is behind.
+	CHECK(HE::transparentBehindClouds(env, 20.0f, 700.0f, 720.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 20.0f, 30.0f, 60.0f));       // same side as the camera
+	// Straddling the deck (either side of it), touching it, or a camera inside it: unchanged behaviour.
+	CHECK_FALSE(HE::transparentBehindClouds(env, 900.0f, 100.0f, 300.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 20.0f, 300.0f, 800.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 900.0f, 0.0f, 170.0f));      // inside the margin under the base
+	CHECK_FALSE(HE::transparentBehindClouds(env, 300.0f, 0.0f, 50.0f));       // camera inside the deck
+	// No 3D clouds -> nothing is "behind" anything: dome mode, clear sky, no sky at all.
+	{ auto e = env; e.cloudMode = 0;       CHECK_FALSE(HE::transparentBehindClouds(e, 900.0f, 0.0f, 50.0f)); }
+	{ auto e = env; e.cloudCoverage = 0.f; CHECK_FALSE(HE::transparentBehindClouds(e, 900.0f, 0.0f, 50.0f)); }
+	{ auto e = env; e.skyEnabled = false;  CHECK_FALSE(HE::transparentBehindClouds(e, 900.0f, 0.0f, 50.0f)); }
+	// The deck follows cloudHeight.
+	{ auto e = env; e.cloudHeight = 1000.0f; CHECK(HE::transparentBehindClouds(e, 2000.0f, 500.0f, 600.0f)); }
+
+	// From object-space bounds + model matrix: a unit cube moved to y = 10 is behind from above, an
+	// invalid box never is.
+	HE::AABB cube; cube.expand(glm::vec3(-0.5f)); cube.expand(glm::vec3(0.5f));
+	const glm::mat4 low  = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 10.0f, 0.0f));
+	const glm::mat4 high = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 900.0f, 0.0f));
+	CHECK(HE::transparentBehindClouds(env, glm::vec3(0.0f, 900.0f, 0.0f), cube, low));
+	CHECK_FALSE(HE::transparentBehindClouds(env, glm::vec3(0.0f, 900.0f, 0.0f), cube, high));
+	CHECK_FALSE(HE::transparentBehindClouds(env, glm::vec3(0.0f, 900.0f, 0.0f), HE::AABB{}, low));
+}
+
+namespace
+{
+// The smallest IRenderer that can answer "do you draw 3D clouds": only the pure virtuals, plus the
+// capability a backend overrides.
+class CloudCapRenderer final : public IRenderer
+{
+public:
+	explicit CloudCapRenderer(bool clouds3D) : m_clouds3D(clouds3D) {}
+	void Initialize(HE::Window*) override {}
+	void Shutdown() override {}
+	void Render() override {}
+	Capabilities GetCapabilities() const override { return {}; }
+	void* CreateImGuiTexture(const void*, int, int) override { return nullptr; }
+	void  DestroyImGuiTexture(void*) override {}
+	void* RenderMaterialPreview(ContentManager&, const HE::UUID&, uint32_t, float, float, float,
+	                            int, const HE::UUID&, float) override { return nullptr; }
+	bool Supports3DClouds() const override { return m_clouds3D; }
+private:
+	bool m_clouds3D;
+};
+} // namespace
+
+TEST_CASE("A renderer without 3D clouds keeps the sky dome whatever the scene says")
+{
+	IRenderer::EnvironmentSettings env;
+	env.cloudMode = 1;
+	env.cloudHeight = 321.0f;
+
+	// A renderer that draws them: the scene's mode goes through untouched.
+	CloudCapRenderer has(true);
+	has.SetEnvironmentSettings(env);
+	CHECK(has.GetEnvironment().cloudMode == 1);
+
+	// One that does not (reduced fallback sky, no clouds-over-geometry pass): dome, every frame it is
+	// pushed, and nothing else about the environment changes.
+	CloudCapRenderer lacks(false);
+	lacks.SetEnvironmentSettings(env);
+	CHECK(lacks.GetEnvironment().cloudMode == 0);
+	CHECK(lacks.GetEnvironment().cloudHeight == 321.0f);
+	env.cloudMode = 0;
+	lacks.SetEnvironmentSettings(env);
+	CHECK(lacks.GetEnvironment().cloudMode == 0);
+	// The scene value is the caller's: the push takes a const reference, so it keeps its 1 for a
+	// renderer that does have them.
+	env.cloudMode = 1;
+	lacks.SetEnvironmentSettings(env);
+	CHECK(env.cloudMode == 1);
 }
 
 TEST_CASE("BuildSkyFragmentGLSL450 swaps the GL header for the prelude and keeps the body")

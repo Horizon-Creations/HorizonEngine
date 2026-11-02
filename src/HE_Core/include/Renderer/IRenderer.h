@@ -658,8 +658,20 @@ public:
     // own header (Renderer/EnvironmentSettings.h) because of its size; the alias
     // keeps every existing `IRenderer::EnvironmentSettings` spelling valid.
     using EnvironmentSettings = ::EnvironmentSettings;
-    virtual void SetEnvironmentSettings(const EnvironmentSettings& e) { m_environment = e; }
+    // A backend that cannot draw the 3D volumetric clouds (cloudMode 1) correctly — no full cross-compiled
+    // sky, or no clouds-over-geometry pass to composite them — keeps the sky dome: the scene's cloudMode is
+    // clamped to 0 here, every frame it is pushed, and the editor greys the Render Mode switch out
+    // (Supports3DClouds). The scene data keeps its 1, so the same scene still gets 3D clouds on a backend
+    // that has them.
+    virtual void SetEnvironmentSettings(const EnvironmentSettings& e)
+    {
+        m_environment = e;
+        if (m_environment.cloudMode == 1 && !Supports3DClouds()) m_environment.cloudMode = 0;
+    }
     const EnvironmentSettings& GetEnvironment() const { return m_environment; }
+    // Whether this backend draws the 3D volumetric clouds (cloudMode 1). Only knowable after the sky
+    // pipeline is built, so it reads false-until-ready on backends that compile it at startup.
+    virtual bool Supports3DClouds() const { return true; }
 
     // ── GPU weather particles (transform-feedback precipitation) ────────────
     // Pushed every frame by the scene tick. When `enabled`, the backend owns the
