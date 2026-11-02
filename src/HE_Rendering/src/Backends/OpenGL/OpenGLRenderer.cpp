@@ -9150,6 +9150,20 @@ unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 	return id;
 }
 
+// The upload every call site below goes through: brings back bytes an earlier upload released,
+// uploads, and lets the content manager free a block-compressed texture's CPU copy (the shipped
+// game holds each texture once; see ContentManager::releaseCpuPixels). The glTexImage /
+// glCompressedTexImage calls copy the client memory before they return, so the bytes are dead
+// weight the moment an upload succeeded.
+unsigned int uploadGlTextureReleasing(ContentManager* cm, const TextureAsset* tex,
+                                      bool honourSrgb = true, bool arrayPath = false)
+{
+	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+	const unsigned int uploaded = arrayPath ? uploadTextureArrayGL(tex) : uploadTextureAssetGL(tex, honourSrgb);
+	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	return uploaded;
+}
+
 } // namespace
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -9265,7 +9279,8 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9392,7 +9407,8 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9426,7 +9442,7 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked BC7/BC3 (previously this override path assumed RGBA8 and
 		// would have uploaded a compressed payload as garbage — now handled).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	m_materialTexCache.emplace(materialId, tex);
@@ -9458,12 +9474,13 @@ unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::
 	unsigned int tex = 0;
 	if (array)
 	{
-		tex = uploadTextureArrayGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+		                               /*honourSrgb=*/true, /*arrayPath=*/true);
 		if (tex) m_glArrayTex.insert(tex);
 	}
 	else
 		// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
 	return tex ? tex : (array ? m_whiteArrayTex : 0);
 }
@@ -9488,8 +9505,8 @@ unsigned int OpenGLRenderer::ResolveUITexture(const HE::UUID& id, const std::str
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
 	if (key.empty() || !m_contentManager) return 0;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
-	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path),
-	                                        /*honourSrgb=*/false);
+	unsigned int tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+	                                            /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, tex);
 	return tex;
 }

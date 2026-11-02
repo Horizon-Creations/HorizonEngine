@@ -101,6 +101,8 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 		ExportSettings s;
 		s.compress = false;                       // Store: the entries stay readable
 		s.textureCompression = 1;                 // ASTC, as the editor picks for Metal
+		// HE_REACH_TEXCOMP=3 (BC3) for a game that runs on macOS OpenGL, which samples no ASTC.
+		if (const char* tc = std::getenv("HE_REACH_TEXCOMP")) s.textureCompression = static_cast<uint8_t>(std::atoi(tc));
 		s.cookTextureArrays = true;
 		s.bakeMeshTextures = std::getenv("HE_REACH_NOBAKE") == nullptr;   // the mesh texture bake, on unless asked
 		s.onlyReferenced = reached;
