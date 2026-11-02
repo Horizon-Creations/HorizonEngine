@@ -19,6 +19,7 @@
 #include <Hpak/HpakReader.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/MaterialOverrides.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
@@ -58,6 +59,7 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 	REQUIRE_FALSE(startupRel.empty());
 
 	std::vector<uint8_t> startup;
+	std::vector<HE::UUID> overriddenMeshes;   // what the export dialog collects, kept out of the mesh bake
 	std::vector<std::pair<std::string, std::vector<uint8_t>>> scenes;
 	for (const auto& e : fs::recursive_directory_iterator(content))
 	{
@@ -66,6 +68,7 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 		SceneSerializer ser;
 		std::vector<uint8_t> bytes;
 		REQUIRE(ser.load(w, e.path(), SerializeFormat::JSON));
+		HE::collectMeshesWithMaterialOverrides(w, overriddenMeshes);
 		REQUIRE(ser.saveToMemory(w, bytes));
 		const std::string rel = e.path().lexically_relative(root).generic_string();
 		if (rel == startupRel) startup = bytes;
@@ -108,6 +111,7 @@ TEST_CASE("bench: export a project with and without the reachability filter (onl
 		s.cookTextureArrays = true;
 		s.bakeMeshTextures = std::getenv("HE_REACH_NOBAKE") == nullptr;   // the mesh texture bake, on unless asked
 		s.onlyReferenced = reached;
+		s.bakeSkipMeshes = overriddenMeshes;
 		if (std::getenv("HE_REACH_STEAMAUDIO")) s.audioBuses.spatialBackend = HE::AudioSpatialBackend::SteamAudio;
 		if (rt && *rt) s.gameRuntimeDir = rt;
 		if (eng && *eng) s.engineContentDir = eng;
@@ -247,7 +251,7 @@ TEST_CASE("bench: generate a two-material mesh project (only with HE_GEN_MESHBAK
 		ents.push_back({ { "children", json::array() }, { "components", std::move(comps) }, { "name", name },
 		                 { "parent", rootId }, { "uuid", id } });
 	};
-	HE::UUID meshId;
+	HE::UUID meshId, materialAId;
 	{
 		ContentManager cm(content.string());
 		const char* names[2] = { "A", "B" };
@@ -272,6 +276,7 @@ TEST_CASE("bench: generate a two-material mesh project (only with HE_GEN_MESHBAK
 			m.type = HE::AssetType::Material; m.name = names[i]; m.path = std::string("Mats/") + names[i] + ".hasset";
 			m.texturePaths = { t.path };
 			REQUIRE(cm.saveAsset(m));
+			if (i == 0) materialAId = m.id;
 		}
 		StaticMeshAsset mesh;
 		mesh.type = HE::AssetType::StaticMesh; mesh.name = "Two"; mesh.path = "Meshes/Two.hasset";
@@ -284,9 +289,14 @@ TEST_CASE("bench: generate a two-material mesh project (only with HE_GEN_MESHBAK
 		REQUIRE(cm.saveAsset(mesh));
 		meshId = mesh.id;
 	}
-	entity("Two", { { "mesh", { { "asset", json::array({ meshId.hi, meshId.lo }) }, { "castsShadow", true },
-	                            { "receivesShadow", true }, { "visible", true }, { "lodBias", 0 } } },
-	                { "transform", { { "position", { -2.0, 0.0, 0.0 } }, { "rotation", { 0, 0, 0 } }, { "scale", { 2, 2, 2 } } } } });
+	// HE_GEN_MESHBAKE_OVERRIDE=1: the entity carries a material override (material A over the whole mesh),
+	// which the export dialog keeps out of the mesh bake: the picture must not change.
+	json two = { { "mesh", { { "asset", json::array({ meshId.hi, meshId.lo }) }, { "castsShadow", true },
+	                         { "receivesShadow", true }, { "visible", true }, { "lodBias", 0 } } },
+	             { "transform", { { "position", { -2.0, 0.0, 0.0 } }, { "rotation", { 0, 0, 0 } }, { "scale", { 2, 2, 2 } } } } };
+	if (std::getenv("HE_GEN_MESHBAKE_OVERRIDE"))
+		two["material"] = { { "asset", json::array({ materialAId.hi, materialAId.lo }) } };
+	entity("Two", std::move(two));
 	entity("MainCamera", { { "camera", { { "fovDegrees", 60.0 }, { "nearPlane", 0.1 }, { "farPlane", 200.0 },
 	                                     { "isMain", true }, { "orthographic", false } } },
 	                       { "transform", { { "position", { 0, 1, 5 } }, { "rotation", { 0, 0, 0 } }, { "scale", { 1, 1, 1 } } } } });

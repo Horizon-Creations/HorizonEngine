@@ -153,6 +153,7 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    test_static_mesh_editor_ui.cpp
     # The Material Editor tab, driven the same way: the Tessellation cell and its
     # popup while the Displacement pin is wired, on a renderer that tessellates
     # and on one that does not (Thema 207).
@@ -999,6 +1000,11 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    # The Mesh Viewer tab (Export bake column), for test_static_mesh_editor_ui.cpp: same per-file
+    # HE_IMGUI_ENABLED; EditorViewportNav is what its 3D view navigates with.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StaticMeshEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorViewportNav.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInput.cpp
     # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
     # same AppContext, same per-file HE_IMGUI_ENABLED.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
@@ -1095,6 +1101,10 @@ set_source_files_properties(
     test_tool_setup_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
+    test_static_mesh_editor_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StaticMeshEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorViewportNav.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInput.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationPopups.cpp
