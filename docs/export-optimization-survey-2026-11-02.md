@@ -113,6 +113,24 @@ und auf einer Apple-GPU (Tile-Renderer) ist der Gewinn ungemessen. Die GPU-Seite
 **Skelett-Meshes** (Bone-Daten packen, A6) bleiben offen: Auf dieser Maschine gibt es keine einzige Skelett-Mesh-Datei, ich kann den komprimierten Gewinn nicht messen, und nach dem Ergebnis oben ist er unsicher.
 Das Ziel für den Aufwand wäre ein Projekt mit Figuren; dort lässt sich dieselbe Messung in einer Viertelstunde wiederholen.
 
+### Korrektur: das echte Pak ist komprimiert 116,6 MB, nicht 216 MB (gemessen, 2026-11-02)
+
+Die 216 MB sind das Pak im Store-Codec (so exportiert der Bench, damit die Einträge lesbar bleiben). Der Export komprimiert jeden Eintrag mit zstd Stufe 19, und **ASTC komprimiert hier um 40 bis 63 %**, nicht um 3 bis 12 %, wie die
+Untersuchung des Containers angenommen hatte (die Pflanzentexturen haben große leere oder gleichförmige Flächen). Jeden der 136 Einträge einzeln mit der zstd-CLI Stufe 19 gepackt:
+
+| Typ | roh | zstd 19 | gespart |
+|---|---|---|---|
+| Texturen (36) | 201,3 MB | **109,1 MB** | 45,8 % |
+| Static Meshes (63) | 12,2 MB | 6,4 MB | 48,0 % |
+| Materialien (13) | 1,4 MB | 0,15 MB | 89,1 % |
+| Audio (5, PCM16) | 1,1 MB | 1,0 MB | 7,4 % |
+| **Gesamt** | **216,1 MB** | **116,6 MB** | **46,0 %** |
+
+Folgen: Alle MB-Ersparnisse "auf der Platte" aus Abschnitt 2 gelten **roh**; auf der Platte ist rund die Hälfte davon zu erwarten (die Texturen sind weiterhin 93 % des Paks). Der Gewinn im RAM und VRAM ist davon
+nicht betroffen (dort liegen die entpackten Bytes). Die beiden kleinen Punkte, die ich messen sollte: **Duplikate:** 36 Texturen, 36 verschieden, 0 Gruppen, 0 MB. **zstd-Schutz** (roh speichern, wenn unter 3 % gespart):
+kein Eintrag über 1 KB komprimiert schlechter als 96 %, der Schutz würde hier nichts auslösen (Entpacken einer 5,6-MB-Textur: rund 13 bis 18 ms, Packen 0,3 bis 0,7 s). Beides ist nicht gebaut; es lohnt sich erst bei Projekten
+mit Material, das schlecht komprimiert (verrauschte Fotos, schon komprimierte Medien).
+
 ## 5. Nicht geprüft
 
 Nichts von A und B wurde umgesetzt oder an einem zweiten Projekt gemessen. Das Foliage-Projekt ist texturlastig (alle Texturen 2k) und hat 63 Ein-Slot-Meshes; ein Spiel mit vielen Meshes, Audio oder Skeletten gewichtet anders. Die Startwerte stammen von einem Rechner (Apple M5), zwei Läufen (Metal) und einem (GL); es gibt keinen Timer pro Phase im Renderer-Init. Die Speicher-Schätzungen von A3 und A9 sind aus dem Code gelesen, nicht gemessen; der gemessene RSS (731 MB) ist nur damit verträglich.
