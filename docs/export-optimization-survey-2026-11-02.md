@@ -54,14 +54,32 @@ Nichts Großes mehr bei: Pak-Hash und Schlüsselableitung (billig), Laden (schon
 - zstd Stufe 19 wird immer behalten, auch wenn das Ergebnis nicht kleiner ist; ASTC schrumpft nur um 3 bis 12 %. Ein Schutz "unter 3 % gespart, dann roh speichern" spart Entpackzeit und eine Heap-Kopie je Eintrag beim Laden (und viel Exportzeit), nicht Größe. **S**.
 - Lesen: `seekg` + `read` in einen frischen Vektor, kein mmap; Entpacken braucht einen zweiten Puffer. mmap spart je Lesen eine Kopie. M.
 
-## 3. Reihenfolge, die ich vorschlage
+## 3. Kostet es Bildqualität? (Korrektur nach Rückfrage des Nutzers)
 
-1. **Texturgröße kappen (A1)** und **CPU-Pixel freigeben (A3)**: zusammen der Großteil von Platte, RAM und VRAM; der Export bleibt einstellbar.
+Die Rangliste oben mischte Maßnahmen, die nichts kosten, mit solchen, die Qualität gegen Platz tauschen. Getrennt:
+
+**Ohne Qualitätsverlust** (bit- oder bildgleich): A3 CPU-Pixel freigeben (nur RAM), A4 `libphonon`, A5 meshopt-Reorder, A8 uint16-Indizes auf Disk, A9 CPU-Kopie der Meshes,
+A11 Duplikate zusammenlegen, A12 Mono-Downmix nur für Clips, die ohnehin räumlich als Mono gespielt werden, alle Punkte unter B (Startzeit) und C (Container).
+
+**Praktisch ohne Verlust, aber mit Rundung:** A6 Bone-Ids als uint8 (verlustfrei) und Gewichte als unorm8 (Rundung unter 1/255), A7 Vertex-Quantisierung (Oktaeder-Normale 16 Bit ist
+nicht sichtbar; **Half-Float-UV nicht** bei gekachelten UVs, dort unorm16 nur für Werte in 0..1).
+
+**Tauschen Qualität gegen Platz:** A1 Texturgröße kappen, A2 größere ASTC-Blöcke, A10 BC1 statt BC7/ASTC 4×4 (4 statt 8 Bit je Texel). Das sind keine Standardeinstellungen, sondern Wahlmöglichkeiten.
+Wenn überhaupt, dann so: Voreinstellung bleibt die heutige Qualität; ein Export-Voreinsatz "Kompakt" (oder je Textur ein Häkchen) schaltet sie ein; und die Spieler bekommen zur Laufzeit eine
+Grafikoption "Texturqualität", die beim Laden die oberste Mip überspringt (spart RAM und VRAM, **nicht** Platz auf der Platte, der Export bleibt voll).
+
+## 4. Reihenfolge, die ich vorschlage
+
+1. **CPU-Pixel freigeben (A3):** der größte Gewinn ohne Qualitätsverlust (bis rund 200 MB RAM bei diesem Projekt).
 2. **`libphonon` weglassen (A4)** und **GL-Vorwärmen (B1)**: je S, risikoarm, sofort messbar.
 3. **Audiogerät und Sky-Noise nach hinten (B3, B4)**, dann **GL-Programmbau aus dem ersten Frame (B2)**.
-4. ASTC 6×6 (A2) als Qualitätsstufe; meshopt (A5); Skelett-Meshes kochen (A6).
+4. meshopt (A5); Skelett-Meshes kochen (A6); Duplikate (A11).
+5. Nur auf ausdrücklichen Wunsch: die Qualitätsstufen aus Abschnitt 3 (A1, A2, A10).
 
-## 4. Nicht geprüft
+Ehrlich dazu: Auf der Platte ist bei diesem Projekt ohne Qualitätsverlust kaum noch etwas zu holen. 93 % sind 2k-ASTC-Texturen, und ASTC lässt sich mit zstd nur um 3 bis 12 % verkleinern.
+Die verlustfreien Gewinne liegen im RAM (A3), im Laufzeitpaket (A4) und in der Startzeit.
+
+## 5. Nicht geprüft
 
 Nichts von A und B wurde umgesetzt oder an einem zweiten Projekt gemessen. Das Foliage-Projekt ist texturlastig (alle Texturen 2k) und hat 63 Ein-Slot-Meshes; ein Spiel mit vielen Meshes, Audio oder Skeletten gewichtet anders. Die Startwerte stammen von einem Rechner (Apple M5), zwei Läufen (Metal) und einem (GL); es gibt keinen Timer pro Phase im Renderer-Init. Die Speicher-Schätzungen von A3 und A9 sind aus dem Code gelesen, nicht gemessen; der gemessene RSS (731 MB) ist nur damit verträglich.
 Ob der Linux- oder Windows-Start dieselben Posten hat, ist offen.
@@ -71,6 +89,6 @@ Ob der Linux- oder Windows-Start dieselben Posten hat, ist offen.
 - **Topic / step:** 228, neue Untersuchung (kein Code).
 - **Done:** diese Auswertung; Wegwerf-Skript `pakstat.py` (Scratchpad, nicht im Repo) schlüsselt ein Store-Pak nach Typ und Chunk auf.
 - **Verified:** Pak- und Bündelgrößen, Startzeiten, `libphonon` ohne Filter, kein Freigeben von `TextureAsset::data`, zstd Stufe 19.
-- **Not verified:** siehe Abschnitt 4.
-- **Decisions taken:** keine; die Reihenfolge in Abschnitt 3 ist ein Vorschlag.
+- **Not verified:** siehe Abschnitt 5.
+- **Decisions taken:** Qualitätsverlust ist keine Standardeinstellung (Nutzer: die Texturkappe kostet Spielqualität); die Reihenfolge in Abschnitt 4 ist ein Vorschlag.
 - **Next steps:** Auswahl durch den Nutzer; danach je Punkt ein eigener Schritt im Thema.
