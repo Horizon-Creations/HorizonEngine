@@ -8245,6 +8245,8 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
                                         bool asArray, bool honourSrgb)
 {
     image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
+    // Bytes an earlier upload released come back from the pak (see releaseCpuPixels below).
+    if (tex && tex->data.empty() && m_contentManager) tex = m_contentManager->restoreCpuPixels(tex->id);
     if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
         return false;
     const uint32_t width  = static_cast<uint32_t>(tex->width);
@@ -8401,6 +8403,10 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
     noteUpload(false, total, t0);
+    // stageUpload memcpy'd the whole chain into the staging ring (or a staging buffer of its
+    // own) before it returned, and the recorded copy reads that, never tex->data: the CPU copy
+    // of a block-compressed texture is dead weight now (ContentManager::releaseCpuPixels).
+    if (m_contentManager) m_contentManager->releaseCpuPixels(tex->id);
     return true;
 }
 
