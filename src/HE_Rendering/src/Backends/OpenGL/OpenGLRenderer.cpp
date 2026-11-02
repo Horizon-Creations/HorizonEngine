@@ -8353,15 +8353,21 @@ void OpenGLRenderer::DestroyFogVolumeTargets()
 // current for this frame (DrawScene, right after UpdateSkyEnvCube).
 //
 // Y convention (GL 4.1's native raster origin is BOTTOM-left, unlike Metal/D3D/
-// Vulkan's top-left — the froxel's shared uv.y=0-at-top convention, baked as a
-// hardcoded `1 - 2*uv.y` into heFogRayDir/kApplyMain, is Metal's for free but
-// needs compensating here): every texel index below (f.xy, Integrate's xy) is
-// the RAW, unflipped gl_FragCoord — no shader-side flip anywhere. Instead
-// fc.invViewProj/prevViewProj carry an extra flipY = scale(1,-1,1) that makes
-// the shared hardcoded formulas land on the texel GL's rasterizer actually
-// wrote. heApplyFogT's forward direction (world → uv, `fogViewProj`) needs the
-// SAME flipY regardless of raster origin — Metal's own m_fogViewProjFlip proves
-// that half is backend-independent; only invViewProj/prevViewProj are new here.
+// Vulkan's top-left): every texel index below (f.xy, Integrate's xy) is the RAW,
+// unflipped gl_FragCoord — no shader-side flip anywhere. heFogRayDir and
+// kApplyMain (shared, unchanged) both derive their uv from THAT raw coordinate
+// and feed it through a hardcoded `1 - 2*uv.y` — correct for Metal's top-left
+// origin for free, mirrored here unless compensated. fc.invViewProj/prevViewProj
+// carry an extra flipY = scale(1,-1,1) to compensate (both Inject's heFogRayDir
+// and Apply's reconstruction read raw-gl_FragCoord uv, so both need it).
+// heApplyFogT (material code) is DIFFERENT: its uv = clip.xy/clip.w*0.5+0.5 has
+// no such mirroring built in, and the rows it reads were written at the SAME
+// raw-gl_FragCoord addressing Inject used — so m_fogViewProjFlip must stay a
+// PLAIN viewProj for GL, not flipY*viewProj like Metal (Metal needs the flip
+// there because ITS rows run the other way). Mixing these two up was a bug an
+// advisor review caught: every GL witness would have read the volume mirrored
+// vertically. Apply's depth also needs its own fix — see depthRemap below:
+// GL's depth-buffer value is (ndc.z+1)/2, not NDC z directly like Metal.
 void OpenGLRenderer::RenderFogVolume(int pw, int ph, bool shadows, bool localShadows,
                                      int nCascades, const glm::vec4& cascadeSplits, const glm::vec3& camFwd)
 {
@@ -8443,7 +8449,20 @@ void OpenGLRenderer::RenderFogVolume(int pw, int ph, bool shadows, bool localSha
 	const CameraData& cam       = m_renderWorld.camera;
 	const glm::mat4   viewProj  = cam.projection * cam.view;
 	const glm::mat4   flipY     = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
-	const glm::mat4   invViewProj = glm::inverse(flipY * viewProj); // see the function comment
+	// kApplyMain (shared, unchanged) feeds the RAW depth-buffer texel straight into
+	// fv.invViewProj's z component. Metal's depth buffer already stores NDC z in
+	// [0,1] == Metal's own clip convention, so that is correct there unmodified.
+	// GL's NDC z is [-1,1]; the depth-buffer value is the viewport-mapped
+	// (ndc.z+1)/2, same as the underwater pass' depthParams (scale 2, bias -1).
+	// depthRemap undoes that mapping (z' = 2*d - 1) before the point reaches
+	// inverse(viewProj) — harmless for heFogRayDir's fixed z=0.5 probe too: for a
+	// fixed (ndc.x, ndc.y), every ndc.z maps to a point on the SAME camera ray, so
+	// remapping the probe depth still gives a point on the right ray, just not at
+	// the same distance along it (direction-only use, as heFogRayDir takes it).
+	glm::mat4 depthRemap(1.0f);
+	depthRemap[2][2] = 2.0f;
+	depthRemap[3][2] = -1.0f;
+	const glm::mat4   invViewProj = glm::inverse(flipY * viewProj) * depthRemap; // see the function comment
 	const float focal = cam.projection[1][1];
 	const bool historyOk = m_fogHistValid && dt > 0.0f && dt < 0.5f
 	             && glm::distance(cam.position, m_fogPrevCam) < 10.0f
@@ -8462,6 +8481,15 @@ void OpenGLRenderer::RenderFogVolume(int pw, int ph, bool shadows, bool localSha
 	ts.noiseTime    = m_fogNoiseTime;
 	HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
 		fd, invViewProj, flipY * m_fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+
+	// Saved BEFORE the rebind below, and restored at the end: UBO point 0 is
+	// "HeLighting" for every GL program, including graph materials — leaving it
+	// on m_fogLightUBO (fogVol.x == 0 there) would have a later material draw
+	// read the wrong lighting block and double-apply the analytic fog on top of
+	// Apply. Caught by an advisor review: the deferred G-buffer pre-fill only
+	// calls glBufferSubData, it never rebinds point 0 itself.
+	GLint prevUBO0 = 0; glGetIntegeri_v(GL_UNIFORM_BUFFER_BINDING, 0, &prevUBO0);
+	const GLboolean prevCullFace = glIsEnabled(GL_CULL_FACE);
 
 	glBindBuffer(GL_UNIFORM_BUFFER, m_fogLightUBO);
 	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
@@ -8552,6 +8580,8 @@ void OpenGLRenderer::RenderFogVolume(int pw, int ph, bool shadows, bool localSha
 	// program and the active unit selector need restoring, not the bindings.
 	glUseProgram(static_cast<GLuint>(prevProgram));
 	glActiveTexture(static_cast<GLenum>(prevActiveTex));
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, static_cast<GLuint>(prevUBO0));
+	if (prevCullFace) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
 
 	m_fogHist         = cur;
 	m_fogHistValid    = true;
@@ -8560,7 +8590,16 @@ void OpenGLRenderer::RenderFogVolume(int pw, int ph, bool shadows, bool localSha
 	m_fogPrevFocal    = focal;
 	++m_fogFrameIndex;
 	m_fogFrame        = fd;
-	m_fogViewProjFlip = flipY * viewProj; // heApplyFogT's forward direction — backend-independent (see Metal)
+	// heApplyFogT (material code, shared): `uv = clip.xy/clip.w*0.5+0.5` — a PLAIN
+	// NDC-to-UV map, no 1-2*uv.y mirroring anywhere in that formula (unlike
+	// heFogRayDir/kApplyMain, which both read raw gl_FragCoord-derived uv and so
+	// DO need the flip above). The texel rows this volume was actually written at
+	// (Inject's raw, unflipped gl_FragCoord) already line up with a PLAIN
+	// viewProj's uv = (ndc+1)/2 — Metal needs the flip only because ITS rows run
+	// top-to-bottom; GL's run bottom-to-top, matching the identity here. Do not
+	// copy Metal's flipY onto this one: that was the bug an advisor review caught
+	// (every GL witness read the volume mirrored vertically).
+	m_fogViewProjFlip = viewProj;
 	m_fogFrameActive  = true;
 #endif
 }
