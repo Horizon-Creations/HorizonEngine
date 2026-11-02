@@ -771,6 +771,12 @@ void GameApplication::OnInit()
 		std::memcpy(&sceneUuid.lo, m_config.startupSceneUuid + 8, 8);
 	}
 
+	// A shipped game holds each block-compressed texture once, in the GPU: the backend frees the
+	// CPU copy after its upload and the pak gives it back if a second upload needs it. Set before
+	// the mount so no texture streams in without the rule. HE_KEEP_CPU_PIXELS=1 turns it off for
+	// an A/B memory comparison.
+	contentManager().setReleaseCpuPixelsAfterUpload(std::getenv("HE_KEEP_CPU_PIXELS") == nullptr);
+
 	if (contentManager().mountPak(pakPath, pakKey))
 	{
 		HE_LOG_INFO(Core, "%s",

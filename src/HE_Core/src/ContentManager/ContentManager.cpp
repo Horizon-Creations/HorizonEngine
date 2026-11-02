@@ -3771,6 +3771,36 @@ ContentManager::AssetFileList ContentManager::sceneFiles() const
 	return ix.scenes;
 }
 
+bool ContentManager::releaseCpuPixels(HE::UUID id)
+{
+	if (!m_releaseCpuPixels) return false;
+	TextureAsset* t = getTextureMutable(id);
+	if (!t || t->data.empty()) return false;
+	if (t->format == TextureFormat::RGBA8) return false;               // raw pixels: CPU code reads them
+	if (t->layers > 1 && t->sliceMeans.empty()) return false;          // the GI means come from the pixels
+	const auto it = m_pakResidency.find(id);                           // only what a pak can give back
+	if (it == m_pakResidency.end() || !m_mounts[it->second].reader) return false;
+	std::vector<uint8_t>().swap(t->data);                              // really free it, not just clear()
+	m_pixelsReleased.insert(id);
+	return true;
+}
+
+const TextureAsset* ContentManager::restoreCpuPixels(HE::UUID id)
+{
+	TextureAsset* t = getTextureMutable(id);
+	if (!t || !t->data.empty() || m_pixelsReleased.count(id) == 0) return t;
+	const auto it = m_pakResidency.find(id);
+	if (it == m_pakResidency.end()) return t;
+	MountedPak& mount = m_mounts[it->second];
+	if (!mount.reader) return t;
+	const std::vector<uint8_t> bytes = mount.reader->readEntry(id, mount.encrypted ? mount.key.data() : nullptr);
+	HAsset::Reader reader;
+	if (bytes.empty() || !reader.openData(bytes)) return t;
+	reader.takeChunkData(HAsset::CHUNK_PIXL, t->data);
+	m_pixelsReleased.erase(id);
+	return t;
+}
+
 bool ContentManager::ensureResident(HE::UUID id)
 {
 	if (isLoaded(id)) return true;

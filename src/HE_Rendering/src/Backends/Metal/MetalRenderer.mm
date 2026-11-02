@@ -9509,6 +9509,11 @@ void MetalRenderer::EncodeGIProbeUpdate(void* cmdBufPtr)
 // retained id<MTLTexture>, or nullptr when unusable / this GPU can't sample the
 // shipped format. Defined below; forward-declared so the mesh uploads can share it.
 static void* uploadMetalTexture(id<MTLDevice> device, const TextureAsset* tex, bool honourSrgb = true);
+// The upload every call site below goes through: brings back bytes an earlier upload released,
+// uploads, and lets the content manager free a block-compressed texture's CPU copy (the shipped
+// game holds each texture once; see ContentManager::releaseCpuPixels). Defined after both uploaders.
+static void* uploadMetalTextureReleasing(ContentManager* cm, id<MTLDevice> device, const TextureAsset* tex,
+                                         bool honourSrgb = true, bool arrayPath = false);
 
 const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId)
 {
@@ -9581,7 +9586,8 @@ const MetalRenderer::GpuMesh* MetalRenderer::ResolveMesh(const HE::UUID& assetId
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTextureReleasing(m_contentManager, device,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9669,7 +9675,8 @@ MetalRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked ASTC/BC7/BC3 via the shared uploader (skips a block format
 		// this GPU can't sample — e.g. BC on Apple Silicon, ASTC on Intel).
-		mesh.texture = uploadMetalTexture(device, m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadMetalTextureReleasing(m_contentManager, device,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	return &m_skeletalMeshCache.emplace(assetId, mesh).first->second;
@@ -9788,7 +9795,7 @@ bool MetalRenderer::ResolveMaterialTexture(const HE::UUID& materialId, void*& ou
 
 	const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 	const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId0, texPath0));
 
 	m_materialTexCache.emplace(materialId, retained);
@@ -9839,6 +9846,17 @@ static void* uploadMetalTextureArray(id<MTLDevice> device, const TextureAsset* t
 	return (void*)CFBridgingRetain(texture);
 }
 
+static void* uploadMetalTextureReleasing(ContentManager* cm, id<MTLDevice> device, const TextureAsset* tex,
+                                         bool honourSrgb, bool arrayPath)
+{
+	// An earlier upload of this asset (another cache, a flushed one) may have freed its bytes.
+	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+	void* uploaded = arrayPath ? uploadMetalTextureArray(device, tex) : uploadMetalTexture(device, tex, honourSrgb);
+	// replaceRegion copied the bytes into the GPU texture, so the CPU copy is dead weight now.
+	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	return uploaded;
+}
+
 // Resolve a node-graph project texture (UUID for packed assets, path for loose editor
 // assets) to a retained id<MTLTexture>, cached by a stable key. nullptr if not loadable.
 //
@@ -9859,8 +9877,8 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
-	void* retained = array ? uploadMetalTextureArray((__bridge id<MTLDevice>)m_device, asset)
-	                       : uploadMetalTexture((__bridge id<MTLDevice>)m_device, asset);
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device, asset,
+	                                             /*honourSrgb=*/true, /*arrayPath=*/array);
 	m_graphTexCache.emplace(key, retained);
 	return retained ? retained : (array ? m_whiteArrayTexture : nullptr);
 }
@@ -9878,7 +9896,7 @@ void* MetalRenderer::ResolveUITexture(const HE::UUID& texId, const std::string& 
 		? (std::to_string(texId.hi) + ":" + std::to_string(texId.lo)) : path;
 	if (key.empty() || !m_contentManager) return nullptr;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
-	void* retained = uploadMetalTexture((__bridge id<MTLDevice>)m_device,
+	void* retained = uploadMetalTextureReleasing(m_contentManager, (__bridge id<MTLDevice>)m_device,
 		m_contentManager->resolveTextureRef(texId, path), /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, retained);
 	return retained;
