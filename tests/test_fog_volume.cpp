@@ -425,7 +425,9 @@ TEST_CASE("Fog kernels (GL fragment path): Inject/Integrate/Apply cross-compile 
     CHECK(inj.source.find("gl_FragCoord") != std::string::npos);
     // The real shadow functions came along (one set of shadow maths, same as
     // Metal's inject): the CSM array, HeLighting, history/noise.
-    CHECK(inj.source.find("heCsmShadow") != std::string::npos || inj.source.find("HeLighting") != std::string::npos);
+    const bool hasShadowFns = inj.source.find("heCsmShadow") != std::string::npos
+                            || inj.source.find("HeLighting") != std::string::npos;
+    CHECK(hasShadowFns);
 
     const auto& integ = lib.fogIntegrate(B::GLSL410);
     INFO("integrate: ", integ.log);

@@ -392,16 +392,6 @@ vec3 heApplyFog(vec3 color, vec3 worldPos) {
     if (heLight.fogVol.x > 0.5) return color;
     return heApplyFogAnalytic(color, worldPos);
 }
-)"
-// kLightingPreamble split here into adjacent string literals (MSVC C2026: a
-// single narrow string literal tops out at 16380 chars; this one grew past
-// it across Thema 225 steps 1-3 — a pure build-time limit, found while
-// building step 4). Adjacent literals concatenate at the preprocessor
-// stage, before that per-literal limit is checked, so this is byte-for-byte
-// the SAME GLSL text below — a C++ source-file workaround, not a content
-// change. Pick any line boundary (outside this comment!) if it needs
-// splitting again.
-R"(
 #ifdef HE_FOG_VOLUME
 // Integrated froxel volume (binding 34): rgb = in-scattered radiance L(0 → slice), a = transmittance T.
 // Read with texelFetch only, so a backend whose sampler registers are all taken (D3D, SM 5.0)
@@ -657,10 +647,6 @@ float heFwdClusterShadow(vec4 posType, vec4 params, vec3 worldPos, vec3 n) {
         }
     return vis / 9.0;
 }
-)"
-// Third split of the same literal (kLightingPreamble), same MSVC C2026 reason
-// as the comment a couple hundred lines up.
-R"(
 // The fragment's cluster list with heLitP's per-light model. Takes heLitP's
 // post-weather material terms, so snow/wet apply exactly once. The cell pick
 // uses a TOP-LEFT uv (gl_FragCoord on Vulkan/Metal/D3D); a GL fill site builds

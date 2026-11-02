@@ -827,11 +827,16 @@ private:
 	// Inject + Integrate: analog to MetalRenderer::EncodeFogVolume. Sets
 	// m_fogFrameActive and m_fogFrame; no-ops (leaving both false/default) when
 	// the scene's fog isn't in volumetric mode or the pipelines never linked.
-	// `lit` is the caller's fillMatLight() fill, with the REAL CSM matrices
-	// overlaid (DrawScene, right after UpdateSkyEnvCube — fillMatLight is a
-	// local lambda there and cannot be reached from this member function).
-	void RenderFogVolume(int pw, int ph, const HE::MaterialShaderLibrary::Lighting& lit,
-	                     const glm::vec3& camFwd);
+	// Builds its OWN HeLighting fill internally (mirrors Metal's
+	// FillMaterialLighting, a real member function) rather than reusing
+	// DrawScene's fillMatLight lambda — that lambda needs matClustered/
+	// frameClusters/aoActive, all declared later than where this must run
+	// (right after UpdateSkyEnvCube, before the opaque draws), and Inject's
+	// kernel never reads any of the clustered/AO/DDGI fields anyway.
+	// shadows/localShadows/nCascades/cascadeSplits/camFwd are the same values
+	// DrawScene already computed for BindSceneLighting.
+	void RenderFogVolume(int pw, int ph, bool shadows, bool localShadows,
+	                     int nCascades, const glm::vec4& cascadeSplits, const glm::vec3& camFwd);
 	// Apply: full-screen, colour-only blit into m_hdrColor between the sky and
 	// the translucent tail. No-op unless m_fogFrameActive.
 	void RenderFogApply(int pw, int ph);
