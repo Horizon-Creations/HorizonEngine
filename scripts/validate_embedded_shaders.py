@@ -66,6 +66,8 @@ HLSL_SOURCES = {
     "D3D12Renderer.cpp": RENDER / "D3D12" / "D3D12Renderer.cpp",
     # kSkyVSCrossHLSL, the VS in front of the cross-compiled sky PS.
     "SkyShaderSource.h": SKY_SOURCE,
+    # kLandscapeHLSL (Thema 326): the hand port of the landscape shaders, one source for D3D11 and D3D12 (VSMain, PSMain).
+    "LandscapeShaderSource.h": LANDSCAPE_SOURCE,
 }
 # kSkyFS + kSkyFuncGLSL moved to SkyShaderSource.h (Thema 78, Schritt 3): the
 # GL sky is also what Vulkan/D3D11/D3D12 compile, behind kSkyVulkanPrelude.

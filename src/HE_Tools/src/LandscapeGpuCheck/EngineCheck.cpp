@@ -26,7 +26,8 @@ constexpr uint32_t kW = 480, kH = 270;
 
 int runEngineCheck(HE::RendererBackend backend, HE::RenderPath path, const std::string& packPath, const std::string& pngPath, const std::string& arrayRoot)
 {
-	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : "OpenGL";
+	const char* bname = backend == HE::RendererBackend::Metal ? "Metal" : backend == HE::RendererBackend::D3D11 ? "D3D11"
+	                  : backend == HE::RendererBackend::D3D12 ? "D3D12" : backend == HE::RendererBackend::Vulkan ? "Vulkan" : "OpenGL";
 	const char* pname = path == HE::RenderPath::Deferred ? "deferred" : "forward";
 	std::printf("[%s engine, %s]\n", bname, pname);
 	if (!RendererFactory::Available(backend)) { std::printf("  not in this binary\n"); return 0; }

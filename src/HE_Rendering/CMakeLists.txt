@@ -225,6 +225,8 @@ if(WIN32)
     add_library(RendererD3D11 STATIC
         src/Backends/D3D11/D3D11Renderer.cpp
         src/Backends/D3D11/D3D11ShaderManager.cpp
+        src/Backends/D3D11/D3D11Landscape.cpp
+        include/Backends/D3D11/D3D11Landscape.h
         include/Backends/D3D11/D3D11ShaderManager.h
         include/Backends/D3D11/D3D11MaterialBindings.h)
     target_include_directories(RendererD3D11 PUBLIC
@@ -249,6 +251,8 @@ if(WIN32)
     add_library(RendererD3D12 STATIC
         src/Backends/D3D12/D3D12Renderer.cpp
         src/Backends/D3D12/D3D12ShaderManager.cpp
+        src/Backends/D3D12/D3D12Landscape.cpp
+        include/Backends/D3D12/D3D12Landscape.h
         include/Backends/D3D12/D3D12ShaderManager.h)
     target_include_directories(RendererD3D12 PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
