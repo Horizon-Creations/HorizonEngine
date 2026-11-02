@@ -1136,31 +1136,29 @@ TEST_CASE("TerrainPaint::fillLayer on the third page, and back down again")
     CHECK_FALSE(TerrainPaint::fillLayer(tc, kTerrainMaxLayers));
 }
 
-TEST_CASE("fillLayer on the third page keeps a mixed terrain's group shares")
+TEST_CASE("fillLayer keeps a mixed terrain's group shares and refuses a share layer")
 {
-    // The group shares sit in layers 6/7 (second page); a fill starts the PAINT over
-    // and must neither wipe them nor leave stale bytes on the third page.
+    // The group shares sit in layers 8..11 (third page); a fill starts the PAINT over
+    // and must neither wipe them nor refuse a paint layer.
     TerrainComponent tc;
     tc.sizeX = tc.sizeZ = 32.0f;
     tc.weightRes = 16;
     TerrainPaint::ensureWeightmap(tc);
-    REQUIRE(TerrainPaint::setMixGroup(tc, 0, 1));
+    REQUIRE(TerrainPaint::enableGroupMix(tc, 0));
     REQUIRE(TerrainPaint::paintGroup(tc, 0.0f, 0.0f, 1, 40.0f, 0.0f, 1.0f));
-    float s[3];
+    float s[4];
     REQUIRE(TerrainPaint::groupShares(tc, 8, 8, s));
     REQUIRE(s[1] == doctest::Approx(1.0f));
 
-    REQUIRE(TerrainPaint::fillLayer(tc, 9));
+    CHECK_FALSE(TerrainPaint::fillLayer(tc, 9));   // a share layer is no paint layer
+    REQUIRE(TerrainPaint::fillLayer(tc, 6));
     uint8_t w[kTerrainMaxLayers];
     REQUIRE(TerrainPaint::texelWeights(tc, 8, 8, w));
-    CHECK(w[9] == 255);
-    CHECK(w[6] == 255);                           // the share byte survived
+    CHECK(w[6] == 255);
+    CHECK(w[9] == 255);                           // the share byte survived
     for (int k : { 0, 1, 2, 3, 4, 5, 7, 8, 10, 11 }) CHECK(w[k] == 0);
-    REQUIRE(TerrainPaint::groupShares(tc, 8, 8, s));
-    CHECK(s[1] == doctest::Approx(1.0f));
-    // A fill back on the first page drops the third again, shares still kept.
+    // A fill back on the first page keeps the shares too.
     REQUIRE(TerrainPaint::fillLayer(tc, 2));
-    CHECK(tc.layerWeights3.empty());
     REQUIRE(TerrainPaint::groupShares(tc, 8, 8, s));
     CHECK(s[1] == doctest::Approx(1.0f));
 }

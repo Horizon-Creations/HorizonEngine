@@ -686,6 +686,7 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::FbmGrad:             return "FbmGrad";
 	case T::LandscapeLayerBlend: return "LandscapeLayerBlend";
 	case T::LandscapeFoliage:    return "LandscapeFoliage";
+	case T::LandscapeGroupPick:  return "LandscapeGroupPick";
 	case T::ElementSize:         return "ElementSize";
 	case T::ElementUV:           return "ElementUV";
 	case T::RoundedRectSDF:      return "RoundedRectSDF";
