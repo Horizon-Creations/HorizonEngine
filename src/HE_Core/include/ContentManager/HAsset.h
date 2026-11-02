@@ -103,6 +103,15 @@ inline constexpr uint32_t CHUNK_MRFU = makeChunkId('M','R','F','U'); // material
 // exactly how those meshes always drew; no file-version bump, see k_version.
 inline constexpr uint32_t CHUNK_MSEC = makeChunkId('M','S','E','C'); // material sections
 
+// Static mesh export-bake switches (HE::MeshBakeSettings): one flags byte, bit 0
+// vertex colours, bit 1 merge textures, bit 2 one UV texture. The exporter reads
+// it to decide which texture bake a mesh may get (docs/mesh-texture-bake-*.md).
+// OPTIONAL tail chunk written ONLY when a switch differs from its default: ABSENT
+// (every mesh written before it existed, every mesh nobody touched) = the
+// defaults, so those files stay byte-identical and no version bump is needed,
+// see k_version.
+inline constexpr uint32_t CHUNK_MBKE = makeChunkId('M','B','K','E');
+
 // Texture
 inline constexpr uint32_t CHUNK_TXMI = makeChunkId('T','X','M','I'); // texture meta
 inline constexpr uint32_t CHUNK_PIXL = makeChunkId('P','I','X','L'); // pixel data

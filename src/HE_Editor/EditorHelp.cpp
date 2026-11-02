@@ -8710,6 +8710,31 @@ namespace
 	  "overrides all slots for that entity alone. Cmd/Ctrl+Z steps back over "
 	  "slot changes while this tab is hovered.",
 	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Vertex colors", "Vertex colors",
+	  "Export bake. For a mesh whose materials only show textures, the export "
+	  "samples each texture at every vertex and stores the color in the mesh, so "
+	  "the material needs no texture lookup at run time and the texture can drop "
+	  "out of the pak. It looks right on a dense mesh or a smooth texture and "
+	  "blurs detail on coarse low-poly. Applied only when the export targets "
+	  "OpenGL and/or Metal; off by default. Does nothing in the editor. At most "
+	  "one bake form is applied per mesh, in the order Vertex colors, Merge "
+	  "textures, One UV texture. Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Merge textures", "Merge textures",
+	  "Export bake. A mesh with several simple texture-only materials gets one "
+	  "material and one atlas texture, so it draws in one call with one texture "
+	  "bind. Lossless: only when every UV lies inside the 0..1 tile, the source "
+	  "texels are copied unchanged. On by default. Does nothing in the editor. "
+	  "Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/One UV texture", "One UV texture",
+	  "Export bake. The textures of all simple texture-only sections are "
+	  "resampled into a single texture over the mesh's own UVs, with tiling "
+	  "baked out. The texture can end up larger than the sources (it is capped "
+	  "at 4096 per side) but the mesh draws in one call. Used when Merge "
+	  "textures does not apply, for example because the UVs tile. On by "
+	  "default. Does nothing in the editor. Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Clip:", "Preview Clip",
 	  "An animation clip to pose this skeleton with, dropped from the Content "
 	  "Browser. Empty leaves it in its bind pose. Choosing one is preview state on "

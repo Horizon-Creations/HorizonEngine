@@ -261,6 +261,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			ensureMeshUVs(a); // loose meshes with no TEXC chunk get box-projected UVs
 		}
 		readMeshSections(reader, a, relativePath);
+		if (const auto* c = reader.findChunk(HAsset::CHUNK_MBKE))
+			if (!c->data.empty()) a.bake = MeshBakeSettings::fromByte(c->data[0]);
 		handle = m_staticMeshAssets.insert(std::move(a)); break;
 	}
 	case HE::AssetType::SkeletalMesh:
@@ -2078,6 +2080,10 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		// one section it always was.
 		if (!a.sections.empty())
 		{ auto b = HE::encodeMeshSections(a.sections); w.addChunk(HAsset::CHUNK_MSEC,b.data(),b.size()); }
+		// MBKE only when a switch differs from its default, so an untouched mesh
+		// saves byte-for-byte as before the bake switches existed.
+		if (a.bake != MeshBakeSettings{})
+		{ const uint8_t b = a.bake.toByte(); w.addChunk(HAsset::CHUNK_MBKE,&b,1); }
 		{ std::vector<uint8_t> b; HAsset::Writer::appendVec(b,a.indices);    w.addChunk(HAsset::CHUNK_INDX,b.data(),b.size()); }
 		if (a.cooked)
 		{

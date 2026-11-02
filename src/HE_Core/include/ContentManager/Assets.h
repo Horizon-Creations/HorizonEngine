@@ -132,8 +132,39 @@ struct MeshSection
 	HE::UUID    materialId;       // pack-time baked from materialPath; {} for loose/editor assets
 };
 
+// Which texture bakes the exporter may apply to a static mesh whose materials
+// only show textures (chunk MBKE). The exporter applies at most ONE form per
+// mesh, in this order: vertex colours, merged textures, one UV texture.
+struct MeshBakeSettings
+{
+	bool vertexColors  = false;  // sample the texture into per-vertex colours (OpenGL/Metal exports only)
+	bool mergeTextures = true;   // lossless: pack the section textures into one atlas
+	bool uvTexture     = true;   // resample every section into one UV texture (tiling resolved, may be larger)
+
+	bool operator==(const MeshBakeSettings& o) const
+	{
+		return vertexColors == o.vertexColors && mergeTextures == o.mergeTextures && uvTexture == o.uvTexture;
+	}
+	bool operator!=(const MeshBakeSettings& o) const { return !(*this == o); }
+
+	uint8_t toByte() const
+	{
+		return static_cast<uint8_t>((vertexColors ? 1u : 0u) | (mergeTextures ? 2u : 0u) | (uvTexture ? 4u : 0u));
+	}
+	// Bits above 2 are ignored, so a newer file with more switches still reads.
+	static MeshBakeSettings fromByte(uint8_t b)
+	{
+		MeshBakeSettings s;
+		s.vertexColors  = (b & 1u) != 0;
+		s.mergeTextures = (b & 2u) != 0;
+		s.uvTexture     = (b & 4u) != 0;
+		return s;
+	}
+};
+
 struct StaticMeshAsset : public RuntimeAsset
 {
+	MeshBakeSettings bake;       // chunk MBKE; the defaults when absent
 	// The mesh's own material: what every renderer resolved before sections
 	// existed and what a whole-mesh draw (a one-section asset, an entity under a
 	// whole-mesh override, a section with an empty reference) still resolves.
