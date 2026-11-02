@@ -20,6 +20,7 @@
 #include <HorizonCode/HcCompiledLoader.h>  // compiledLibraryName
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
+#include <HorizonScene/LandscapeHlod.h>      // the far-landscape bake the export runs
 #include <HorizonScene/EntityHost.h>         // a class's component body, for the same scan
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -83,6 +84,8 @@ static std::string s_exportExcludes;               // one glob pattern per line
 static std::string s_exportIncludes;               // always-include globs, one per line
 static bool        s_exportOnlyReferenced = true;  // pack only what the game reaches
 static bool        s_exportBakeMeshTextures = true; // bake textures onto meshes (needs the filter above)
+static bool        s_exportBakeFarLandscape = true; // bake each Auto Landscape's look for its far LOD levels
+static int         s_exportFarLandscapeMB   = 512;  // what the baked textures may cost, cooked
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
@@ -562,6 +565,8 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
 	s_exportOnlyReferenced = p.onlyReferenced;
 	s_exportBakeMeshTextures = p.bakeMeshTextures;
+	s_exportBakeFarLandscape = p.bakeFarLandscape;
+	s_exportFarLandscapeMB   = p.farLandscapeBudgetMB;
 	s_exportIncludes.clear();
 	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
 }
@@ -578,6 +583,8 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
 	p.onlyReferenced   = s_exportOnlyReferenced;
 	p.bakeMeshTextures = s_exportBakeMeshTextures;
+	p.bakeFarLandscape = s_exportBakeFarLandscape;
+	p.farLandscapeBudgetMB = s_exportFarLandscapeMB;
 	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
@@ -1212,6 +1219,15 @@ void render(AppContext& ctx)
             EditorWidgets::checkbox("Bake textures onto meshes", &s_exportBakeMeshTextures);
             ImGui::EndDisabled();
             EditorWidgets::helpForKey("Export/Bake textures onto meshes");
+            EditorWidgets::checkbox("Bake far landscape", &s_exportBakeFarLandscape);
+            EditorWidgets::helpForKey("Export/Bake far landscape");
+            if (s_exportBakeFarLandscape)
+            {
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::DragInt("Far landscape budget (MB)", &s_exportFarLandscapeMB, 8.0f, 16, 16384);
+                s_exportFarLandscapeMB = std::clamp(s_exportFarLandscapeMB, 16, 16384);
+                EditorWidgets::helpForKey("Export/Far landscape budget (MB)");
+            }
             if (s_exportOnlyReferenced)
             {
                 ImGui::Text("Always include:");
@@ -1454,6 +1470,40 @@ void startExport(AppContext& ctx)
                 // game. A scene that fails to load is skipped with a note rather
                 // than failing the whole export — only the STARTUP scene is
                 // boot-critical.
+                // The far landscape: every Auto Landscape of every scene is photographed into three small textures per
+                // chunk (HorizonScene/LandscapeHlod.h) and packed as extra assets. It renders, so it runs here on the
+                // main thread, before the pack thread starts; a landscape two scenes share is baked once.
+                std::vector<Hpak::PackSettings::ExtraAsset> farAssets;
+                std::vector<HE::UUID> farSeen;
+                bool farBackendNoted = false;
+                const auto bakeFarLandscapes = [&](HorizonWorld& w, const std::string& label)
+                {
+                    if (!s_exportBakeFarLandscape || !ctx.renderer || !ctx.contentManager) return;
+                    if (ctx.backend != HE::RendererBackend::Metal)
+                    {
+                        if (!farBackendNoted)
+                            Build::log(1, "Far landscape: not baked, the picture comes from the Metal renderer and this "
+                                          "editor runs another one (the far levels keep the landscape's own material)");
+                        farBackendNoted = true;
+                        return;
+                    }
+                    HE::landscape::HlodExportOptions o;
+                    o.budgetBytes = static_cast<uint64_t>(std::max(16, s_exportFarLandscapeMB)) << 20;
+                    std::vector<HE::landscape::HlodAssetBlob> blobs;
+                    const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
+                        w, ctx.world, *ctx.contentManager, *ctx.renderer, o, blobs, farSeen,
+                        [&](const std::string& s) { Build::log(0, label + ": " + s); });
+                    for (HE::landscape::HlodAssetBlob& b : blobs)
+                    {
+                        Hpak::PackSettings::ExtraAsset ea;
+                        ea.id = b.id; ea.relPath = std::move(b.relPath); ea.type = b.type; ea.bytes = std::move(b.bytes);
+                        farAssets.push_back(std::move(ea));
+                    }
+                    if (st.terrains > 0)
+                        Build::log(0, label + ": far landscape " + std::to_string(st.terrains) + " landscape(s), "
+                                      + std::to_string(st.chunks) + " chunk(s) in " + std::to_string(static_cast<int>(st.ms))
+                                      + " ms");
+                };
                 std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
                 std::vector<HE::hccg::ClassSource> hcSources;   // codegen inputs (hcCompile)
                 {
@@ -1474,6 +1524,7 @@ void startExport(AppContext& ctx)
                             const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
                             if (loaded) syncPrefabsForExport(w2, rel);
                             if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
+                            if (loaded) bakeFarLandscapes(w2, rel);
                             if (loaded && ser2.saveToMemory(w2, bytes))
                             {
                                 // Level script → codegen source, keyed by the scene's
@@ -1725,6 +1776,7 @@ void startExport(AppContext& ctx)
                 es.onlyReferenced   = s_exportOnlyReferenced;
                 es.bakeMeshTextures = s_exportBakeMeshTextures;
                 es.bakeSkipMeshes   = overriddenMeshes;
+                es.extraAssets      = std::move(farAssets);
                 es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
                 es.onNotice = [](const std::string& msg) { Build::log(0, msg); };
                 es.incremental      = s_exportIncremental;

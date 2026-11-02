@@ -42,7 +42,9 @@ namespace HE::landscape
     class HlodBaker
     {
     public:
-        HlodBaker(HorizonWorld& live, ContentManager& cm, IRenderer& renderer);
+        // `source` holds the landscape (the open scene, or a scene loaded for the export); `restoreTo` is the world
+        // the renderer draws when the baker is done (the editor's own; null = `source`).
+        HlodBaker(HorizonWorld& source, ContentManager& cm, IRenderer& renderer, HorizonWorld* restoreTo = nullptr);
         ~HlodBaker();
         HlodBaker(const HlodBaker&) = delete;
         HlodBaker& operator=(const HlodBaker&) = delete;
@@ -72,7 +74,8 @@ namespace HE::landscape
         bool renderView(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, bool srgb,
                         std::vector<uint8_t>& rgba);
 
-        HorizonWorld&   m_live;
+        HorizonWorld&   m_live;      // the landscape is read from here
+        HorizonWorld&   m_restore;   // and the renderer goes back to this one
         ContentManager& m_cm;
         IRenderer&      m_renderer;
         std::unique_ptr<HorizonWorld> m_scratch;

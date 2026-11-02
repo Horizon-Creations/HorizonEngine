@@ -1,10 +1,15 @@
 #include "HorizonScene/LandscapeHlod.h"
+#include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/LandscapeHlodPlan.h"
+#include "HorizonScene/Components/TerrainChunkComponent.h"
+#include "HorizonScene/Components/TerrainComponent.h"
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/TextureArrayBuild.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <Types/Enums.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -209,6 +214,86 @@ namespace HE::landscape
 
         for (HlodAssetBlob& b : blobs) out.push_back(std::move(b));
         return true;
+    }
+
+    HlodExportStats bakeWorldLandscapes(HorizonWorld& source, HorizonWorld* restoreTo, ContentManager& cm, IRenderer& renderer,
+                                        const HlodExportOptions& options, std::vector<HlodAssetBlob>& out,
+                                        std::vector<HE::UUID>& seen,
+                                        const std::function<void(const std::string&)>& log,
+                                        const std::function<bool()>& cancelled)
+    {
+        HlodExportStats stats;
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto say = [&](const std::string& s) { if (log) log(s); };
+        auto& reg = source.registry();
+        std::vector<entt::entity> lands;
+        for (auto [e, tc] : reg.view<TerrainComponent>().each())
+            if (!reg.all_of<TerrainChunkComponent>(e)) lands.push_back(e);
+
+        uint64_t spent = 0;
+        for (const entt::entity land : lands)
+        {
+            if (cancelled && cancelled()) break;
+            const HE::UUID terrainId = source.entityId(land);
+            if (terrainId == HE::UUID{}) { ++stats.skipped; say("Far landscape: a landscape without an id was left as it is"); continue; }
+            if (std::find(seen.begin(), seen.end(), terrainId) != seen.end()) continue;   // an earlier scene had it
+
+            HlodBaker baker(source, cm, renderer, restoreTo);
+            std::string why;
+            if (!baker.begin(land, &why))
+            {
+                ++stats.skipped;
+                say("Far landscape: left as it is (" + why + ")");
+                continue;
+            }
+            seen.push_back(terrainId);
+
+            // The size of the pictures: what the screen wants where the first far level takes over, capped, and
+            // halved until the whole export's share of the budget holds (HlodBakePlan, the same planner the design
+            // doc measured).
+            const TerrainComponent& tc = reg.get<TerrainComponent>(land);
+            const uint32_t cps = baker.chunksPerSide();
+            const float chunkM = tc.sizeX / static_cast<float>(cps);
+            HlodBakeInput in;
+            in.tileM          = chunkM;
+            in.levels         = 1;
+            in.nearM          = chunkM * 6.0f * std::max(0.1f, tc.lodDistanceScale);   // where TerrainSystem's LOD 1 starts
+            in.fovYDeg        = options.fovYDeg;
+            in.screenHeightPx = options.screenHeightPx;
+            in.maxTexels      = options.maxTexels;
+            in.minTexels      = options.minTexels;
+            in.tileCount      = static_cast<uint64_t>(cps) * cps;
+            in.budgetBytes    = options.budgetBytes > spent ? options.budgetBytes - spent : (options.budgetBytes ? 1 : 0);
+            const HlodBakePlan plan = planHlodBake(in);
+            const uint32_t side = static_cast<uint32_t>(plan.levels[0].texels);
+            stats.plannedBytes += plan.totalBytes;
+            spent += plan.totalBytes;
+            if (plan.levels[0].downscaled || !plan.withinBudget) ++stats.downscaled;
+
+            uint32_t baked = 0;
+            for (uint32_t cz = 0; cz < cps; ++cz)
+                for (uint32_t cx = 0; cx < cps; ++cx)
+                {
+                    if (cancelled && cancelled()) break;
+                    HlodChunkImages img;
+                    HlodChunkRect rect;
+                    std::string err;
+                    if (baker.bake(cx, cz, side, static_cast<uint32_t>(std::max(1, options.supersample)), img)
+                        && baker.chunkRect(cx, cz, rect)
+                        && buildHlodAssets(img, rect, terrainId, cx, cz, out, &err))
+                        ++baked;
+                    else
+                        say("Far landscape: chunk " + std::to_string(cx) + "," + std::to_string(cz) + " not baked (" + err + ")");
+                }
+            stats.chunks += baked;
+            ++stats.terrains;
+            say("Far landscape: " + std::to_string(baked) + " of " + std::to_string(cps * cps) + " chunk(s) baked at "
+                + std::to_string(side) + " px (" + std::to_string(plan.levels[0].rasterM).substr(0, 5) + " m per texel, "
+                + (plan.levels[0].downscaled ? "below what the screen would want" : "what the screen wants")
+                + "), about " + std::to_string(plan.totalBytes >> 10) + " KiB cooked");
+        }
+        stats.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        return stats;
     }
 
     size_t loadHlodAssets(ContentManager& cm, const std::vector<HlodAssetBlob>& blobs)

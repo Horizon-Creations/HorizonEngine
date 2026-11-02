@@ -237,6 +237,19 @@ struct PackSettings {
     // through the atlas UVs. Part of the pack fingerprint.
     std::vector<HE::UUID> bakeSkipMeshes;
 
+    // Assets the editor made for this export and that no file in the project holds (the baked far landscape,
+    // HorizonScene/LandscapeHlod.h): complete .hasset bytes under an addressed path and a fixed id. They pack like
+    // any other asset, and the folder each one sits in is a reach root (nothing in a scene names them: the runtime
+    // finds them by id). Part of the pack fingerprint through their bytes.
+    struct ExtraAsset
+    {
+        HE::UUID             id;
+        std::string          relPath;
+        uint16_t             type = 0;      // HE::AssetType
+        std::vector<uint8_t> bytes;
+    };
+    std::vector<ExtraAsset> extraAssets;
+
     // Precompile node-graph material shaders into the pak (CHUNK_PSHD). `shaderBackends`
     // is a bitmask of (1u << HE::RendererBackend). The callback — supplied by the editor,
     // which links the shader cross-compiler — turns a material's fragment GLSL into the

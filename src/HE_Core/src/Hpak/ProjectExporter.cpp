@@ -619,6 +619,7 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.cookTextureArrays  = settings.cookTextureArrays;
     packSettings.bakeMeshTextures   = settings.bakeMeshTextures;
     packSettings.bakeSkipMeshes     = settings.bakeSkipMeshes;
+    packSettings.extraAssets        = settings.extraAssets;
     packSettings.shaderBackends       = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;

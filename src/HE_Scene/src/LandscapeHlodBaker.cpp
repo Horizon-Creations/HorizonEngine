@@ -90,8 +90,8 @@ namespace HE::landscape
         return out;
     }
 
-    HlodBaker::HlodBaker(HorizonWorld& live, ContentManager& cm, IRenderer& renderer)
-        : m_live(live), m_cm(cm), m_renderer(renderer) {}
+    HlodBaker::HlodBaker(HorizonWorld& source, ContentManager& cm, IRenderer& renderer, HorizonWorld* restoreTo)
+        : m_live(source), m_restore(restoreTo ? *restoreTo : source), m_cm(cm), m_renderer(renderer) {}
 
     HlodBaker::~HlodBaker() { end(); }
 
@@ -111,6 +111,7 @@ namespace HE::landscape
 
         // Everything read off the live material BEFORE any loadAsset (the next load invalidates getter pointers).
         const HE::UUID matId = mc->materialAssetId;
+        m_cm.ensureResident(matId);   // a scene loaded for the export has not pulled its materials in
         std::string parentPath;
         std::vector<std::string> names, overridden, swNames;
         std::vector<float> data;
@@ -205,7 +206,7 @@ namespace HE::landscape
 
     void HlodBaker::end()
     {
-        if (m_active) m_renderer.SetWorld(&m_live);
+        if (m_active) m_renderer.SetWorld(&m_restore);
         m_active = false;
         m_scratch.reset();
         m_terrain = entt::null;

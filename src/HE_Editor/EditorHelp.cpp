@@ -8166,6 +8166,29 @@ namespace
 	  "off in the Mesh Viewer for such a mesh. Needs Pack only referenced "
 	  "assets. Saved in the profile.",
 	  "", "export#overview" },
+	{ "Export/Bake far landscape", "Bake far landscape",
+	  "Far terrain is drawn from a picture instead of from the landscape's material. "
+	  "For every Auto Landscape in an exported scene the export photographs each "
+	  "chunk from above in three views of its own material (albedo, normal, "
+	  "ambient occlusion + roughness) and ships them as three small textures and "
+	  "one simple material per chunk. The chunk's far levels of detail then draw "
+	  "that material: a few texture reads instead of the layer blend, the noise "
+	  "and the texture bombing. Near terrain keeps the real material. The picture "
+	  "is as sharp as the screen needs at the distance where the far level takes "
+	  "over, and coarser when it would not fit the budget below. The landscape's "
+	  "own parameters (a Material Instance's overrides, its static switches, "
+	  "painted layers) are what is photographed. A custom landscape material that "
+	  "is not an Auto Landscape is left as it is. The picture is taken by the "
+	  "Metal renderer, so this runs in the macOS editor only; elsewhere the "
+	  "export says so and the far levels keep the real material. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
+	  "What all baked far-landscape textures of this export may cost once cooked "
+	  "(block-compressed, with mip levels), in megabytes. When the pictures the "
+	  "screen would want do not fit, every chunk's picture is halved in size until "
+	  "they do, down to 16 texels per chunk side; the export log says which "
+	  "landscapes were baked below what the screen wants. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Match the game's backend", "Match the game's backend",
 	  "Bake the precompiled material shaders for the one graphics backend the "
 	  "exported game runs: the one the project's Render Defaults name, else the "

@@ -242,6 +242,12 @@ struct ExportProfile
 	// per-mesh switches in the Mesh Viewer decide how). On by default; needs onlyReferenced.
 	// See Hpak::PackSettings::bakeMeshTextures.
 	bool bakeMeshTextures = true;
+	// Bake the look of every Auto Landscape for its far LOD levels (HorizonScene/LandscapeHlod.h): the export
+	// photographs each chunk in three small textures, so far terrain draws a plain texture lookup instead of the
+	// landscape's material graph. On by default; farLandscapeBudgetMB caps what the textures may cost cooked
+	// (the pictures get coarser, down to 16 px a chunk, until they fit). Needs the Metal renderer for now.
+	bool bakeFarLandscape = true;
+	int  farLandscapeBudgetMB = 512;
 	// Pack only the assets the game reaches (the startup scene, the scenes something loads,
 	// scripts, the manifest, the engine's own needs) and leave out the rest. On by default.
 	// `alwaysIncludePatterns` are globs on the addressed path (like excludePatterns) that

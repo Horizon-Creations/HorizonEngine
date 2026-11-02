@@ -16,6 +16,7 @@
 #include <Hpak/HpakReader.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <HorizonScene/LandscapeHlod.h>
 
 #include <algorithm>
 #include <cstring>
@@ -247,6 +248,52 @@ TEST_CASE("Reach: the exporter roots the filter at the startup scene, leaves out
 	CHECK(all.hasEntry(p.meshB));
 	CHECK(all.hasEntry(sceneUuidForPath("Content/Level2.hescene")));
 	he_test::removeAllQuiet(out); he_test::removeAllQuiet(out2);
+}
+
+TEST_CASE("Reach: assets the editor made for the export are packed and their folder is a root")
+{
+	Project p("extras");
+	const auto out = std::filesystem::temp_directory_path() / "he_reach_extras_out";
+	he_test::removeAllQuiet(out);
+
+	// Four real .hasset blobs under Baked/Landscape/, no scene names any of them.
+	const HE::UUID terrain{ 0xABCDEF0123456789ull, 0x1122334455667788ull };
+	HE::landscape::HlodChunkImages img;
+	img.side = 8;
+	img.albedo.assign(8 * 8 * 4, 120); img.normal.assign(8 * 8 * 4, 128); img.surface.assign(8 * 8 * 4, 60);
+	HE::landscape::HlodChunkRect rect;
+	rect.size = glm::vec2(16.0f);
+	std::vector<HE::landscape::HlodAssetBlob> blobs;
+	REQUIRE(HE::landscape::buildHlodAssets(img, rect, terrain, 2, 3, blobs));
+	REQUIRE(blobs.size() == 4);
+
+	const std::vector<uint8_t> startup = bytesOf("{\"entities\":[{\"mesh\":" + jsonPair(p.meshA) + "}]}");
+	std::vector<std::pair<std::string, std::vector<uint8_t>>> scenes = { { "Content/Startup.hescene", startup } };
+	ExportSettings settings;
+	settings.compress = false;
+	settings.onlyReferenced = true;
+	for (const auto& b : blobs)
+	{
+		Hpak::PackSettings::ExtraAsset ea;
+		ea.id = b.id; ea.relPath = b.relPath; ea.type = b.type; ea.bytes = b.bytes;
+		settings.extraAssets.push_back(std::move(ea));
+	}
+	REQUIRE(ProjectExporter::exportProject(p.dir, "Extras", "", out, settings, startup, scenes).success);
+
+	HpakReader reader;
+	REQUIRE(reader.open((out / "Extras.hpak").string()));
+	for (const auto& b : blobs) CHECK(reader.hasEntry(b.id));          // kept although nothing names them
+	CHECK_FALSE(reader.hasEntry(p.meshB));                             // an ordinary unreached asset is still left out
+	CHECK(reader.hasEntry(p.meshA));
+
+	// Mounted the way the game does: the material resolves by id, and its textures with it.
+	ContentManager game(".");
+	REQUIRE(game.mountPak((out / "Extras.hpak").string()));
+	const HE::UUID mat = HE::landscape::hlodAssetId(terrain, 2, 3, HE::landscape::HlodAsset::Material);
+	CHECK(game.ensureResident(mat));
+	CHECK(game.getMaterial(mat) != nullptr);
+	CHECK_FALSE(game.ensureResident(HE::landscape::hlodAssetId(terrain, 0, 0, HE::landscape::HlodAsset::Material)));
+	he_test::removeAllQuiet(out);
 }
 
 TEST_CASE("Reach: an engine asset with a small id is found in a CBOR scene")
