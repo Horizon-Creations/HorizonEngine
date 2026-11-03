@@ -404,7 +404,7 @@ Handkopien (GLSL/HLSL/MSL wie die GI-Kernel) mit String-Vergleichstest der Konst
 4. **OpenGL** (Fragment-Pfad), Zeugen per Headless-Dump auf dem Mac.
 5. **Vulkan** (MoltenVK-Syntaxcheck lokal, lavapipe-CI-Bildtest).
 6. **D3D11 + D3D12** — Hardware-Abnahme auf NN-WS03 (bleibt offen, bis der Rechner da ist).
-7. Wetter-Hooks (§11), Default für neue Szenen (`fogMode = 1`?), In-Engine-Handbuch, Perf-Abnahme aller Backends.
+7. ~~Wetter-Hooks (§11), Default für neue Szenen (`fogMode = 1`?), In-Engine-Handbuch, Perf-Abnahme aller Backends.~~ Erledigt bis auf D3D/GL/Vulkan-HW-Messung, siehe `volumetric-fog-weather-default-2026-11-03.md` (Default 1 nur über `addSky()`/Projektvorlage).
 8. Phase 2: lokale Nebelvolumen, Partikel, Cluster-Lichter.
 
 ## Handoff
