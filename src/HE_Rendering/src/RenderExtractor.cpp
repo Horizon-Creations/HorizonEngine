@@ -364,7 +364,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			HE::GiLandscape ls;
 			ls.worldToLocal = glm::inverse(ttf.worldMatrix);
 			ls.invSize      = { 1.0f / std::max(tc.sizeX, 1e-4f), 1.0f / std::max(tc.sizeZ, 1e-4f) };
-			ls.uvTiling     = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
+			ls.uvTiling     = tc.effectiveUvTiling();   // what the chunk meshes carry (TerrainComponent::uvTilingBuilt)
 			ls.weightmapId  = tc.weightmapTextureId;
 			HE::UUID    autoTexId{};   // auto material's albedo array, resolved below
 			std::string autoTexPath;

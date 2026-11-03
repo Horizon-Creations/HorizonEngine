@@ -1810,3 +1810,69 @@ TEST_CASE("Texture groups: the weightmap does not depend on the group, a pre-gro
         CHECK(HE::autoLandscapeGroupOfMaterial(w3.registry().get<MaterialComponent>(ent).materialAssetId)
               == static_cast<int>(HE::AutoLandscapeGroupId::Forest));
 }
+
+// ── UV tiling under a landscape material ───────────────────────────────────────
+// A Landscape Layer Blend material samples the painted weights at the raw UV and
+// needs it to run 0..1 over the whole landscape. The generator makes it run
+// 0..uvTiling, so a terrain with uvTiling 500 repeated its weightmap 500 times and
+// no stroke of paint showed (Catania). The chunks of such a terrain carry 1; any
+// other material keeps uvTiling, and a swap rebuilds them either way.
+TEST_CASE("TerrainSystem: a landscape material gets UVs over 0..1, other materials keep uvTiling")
+{
+    HorizonWorld world;
+    ContentManager cm(".");
+    auto& reg = world.registry();
+
+    MaterialAsset layered;
+    layered.type = HE::AssetType::Material;
+    layered.name = "LayeredTest";
+    layered.graphLayerNames = { "Auto", "Grass", "Dirt" };
+    const HE::UUID layeredId = cm.registerMaterial(std::move(layered));
+    MaterialAsset plain;
+    plain.type = HE::AssetType::Material;
+    plain.name = "PlainTest";
+    const HE::UUID plainId = cm.registerMaterial(std::move(plain));
+
+    Entity te = world.createEntity("Landscape");
+    reg.emplace<TransformComponent>(te);
+    TerrainComponent tc;
+    tc.resolution = 9;
+    tc.sizeX = tc.sizeZ = 16.0f;
+    tc.uvTiling = 500.0f;
+    tc.dirty = true;
+    reg.emplace<TerrainComponent>(te, tc);
+    MaterialComponent mc;
+    mc.materialAssetId = layeredId;
+    reg.emplace<MaterialComponent>(te, mc);
+
+    auto maxUv = [&]
+    {
+        float m = 0.0f;
+        size_t chunks = 0;
+        for (auto [ce, cc, mesh] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+        {
+            const StaticMeshAsset* sm = cm.getStaticMesh(mesh.meshAssetId);
+            REQUIRE(sm != nullptr);
+            for (float uv : sm->uvs) m = std::max(m, uv);
+            ++chunks;
+        }
+        REQUIRE(chunks > 0);
+        return m;
+    };
+
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(maxUv() == doctest::Approx(1.0f));
+    CHECK(reg.get<TerrainComponent>(te).effectiveUvTiling() == doctest::Approx(1.0f));
+    CHECK(reg.get<TerrainComponent>(te).uvTiling == doctest::Approx(500.0f));   // the author's value is untouched
+
+    // Another material: the chunks are rebuilt with uvTiling, without anyone marking the terrain dirty.
+    reg.get<MaterialComponent>(te).materialAssetId = plainId;
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(maxUv() == doctest::Approx(500.0f));
+    CHECK(reg.get<TerrainComponent>(te).effectiveUvTiling() == doctest::Approx(500.0f));
+
+    // And back.
+    reg.get<MaterialComponent>(te).materialAssetId = layeredId;
+    TerrainSystem::updateTerrains(world, cm);
+    CHECK(maxUv() == doctest::Approx(1.0f));
+}

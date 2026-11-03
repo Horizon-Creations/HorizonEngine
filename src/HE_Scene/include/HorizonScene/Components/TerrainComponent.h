@@ -139,4 +139,11 @@ struct TerrainComponent {
     // Chunk grid the chunk entities were last built for — a change (resolution/size)
     // forces a full rebuild of the chunk set.
     uint32_t builtRes = 0, builtChunksPerSide = 0;
+    // The UV tiling the chunk meshes were built with: uvTiling, but 1 under a material with a
+    // Landscape Layer Blend node, which samples the painted weights at the raw UV and so needs
+    // it to run 0..1 over the whole landscape (TerrainSystem decides, every tick). 0 = not
+    // decided yet; consumers that must agree with the meshes (GI) read effectiveUvTiling().
+    float    uvTilingBuilt = 0.0f;
+    float    effectiveUvTiling() const
+    { return uvTilingBuilt > 0.0f ? uvTilingBuilt : (uvTiling > 0.0f ? uvTiling : 1.0f); }
 };

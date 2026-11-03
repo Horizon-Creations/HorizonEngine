@@ -222,7 +222,7 @@ namespace
             field, res, tc.sizeX, tc.sizeZ,
             static_cast<float>(cx) / cps, static_cast<float>(cz) / cps,
             static_cast<float>(cx + 1) / cps, static_cast<float>(cz + 1) / cps,
-            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp, extra);
+            g.lod0Cells * tessFactorOf(tc) + 1u, tc.effectiveUvTiling(), disp, extra);
     }
 
     // ── Trails in the refined ground (Thema 328) ─────────────────────────────
@@ -285,7 +285,7 @@ namespace
             field, res, tc.sizeX, tc.sizeZ,
             static_cast<float>(cx) / cps, static_cast<float>(cz) / cps,
             static_cast<float>(cx + 1) / cps, static_cast<float>(cz + 1) / cps,
-            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp, extra, cache);
+            g.lod0Cells * tessFactorOf(tc) + 1u, tc.effectiveUvTiling(), disp, extra, cache);
     }
 
     // The offset of `win` as the mesh generator wants it (world rectangle of the terrain at `pos`).
@@ -534,7 +534,7 @@ namespace TerrainSystem
         {
             const uint32_t verts = (g.lod0Cells >> k) + 1u;   // 65, 33, 17, 9, …
             StaticMeshAsset m = generateTerrainChunkMeshLOD(field, res, tc.sizeX, tc.sizeZ,
-                                                            u0, v0, u1, v1, verts, tc.uvTiling,
+                                                            u0, v0, u1, v1, verts, tc.effectiveUvTiling(),
                                                             gridCache);
             meshStreamCounters().chunkBuilds.fetch_add(1, std::memory_order_relaxed);
             countMeshReplace(m);
@@ -746,6 +746,26 @@ namespace TerrainSystem
         for (entt::entity te : terrains)
         {
             auto& tc = reg.get<TerrainComponent>(te);
+
+            // The UVs the chunks carry. A Landscape Layer Blend material reads the painted
+            // weights at the RAW UV and means it to run 0..1 over the whole landscape, but the
+            // generator makes it run 0..uvTiling: at 500 the weightmap repeated 500 times and
+            // no stroke of paint showed anywhere. Such a material gets 1 (its layers tile in
+            // world space or on their own UV nodes); every other material keeps uvTiling. A
+            // change (the material swapped, or arriving after the first tick) rebuilds the
+            // chunks, which is the only way their UVs follow.
+            {
+                float uvT = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
+                if (const auto* tm = reg.try_get<MaterialComponent>(te); tm && tm->materialAssetId != HE::UUID{})
+                    if (const MaterialAsset* ma = cm.getMaterial(tm->materialAssetId); ma && !ma->graphLayerNames.empty())
+                        uvT = 1.0f;
+                if (tc.uvTilingBuilt != uvT)
+                {
+                    if (tc.uvTilingBuilt > 0.0f) tc.dirty = true;   // meshes exist with the old UVs
+                    tc.uvTilingBuilt = uvT;
+                }
+            }
+
             if (!tc.dirty && !tc.regionDirty) continue;
 
             // Snap to a 2ⁿ+1 resolution ONCE so chunk LOD0 vertices land EXACTLY on
