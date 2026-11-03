@@ -348,6 +348,19 @@ TEST_CASE("ExtractFogVolumeData reads the Sky entity's EnvironmentComponent")
         CHECK(fog.albedo == glm::vec3(0.5f, 0.6f, 0.7f));
         CHECK(fog.anisotropy == doctest::Approx(0.4f));
     }
+    SUBCASE("a Sky added today starts volumetric, the struct default stays analytic (step 7)")
+    {
+        HorizonWorld world;
+        const Entity sky = world.addSky();
+        CHECK(world.registry().get<EnvironmentComponent>(sky).fogMode == 1);
+        CHECK(EnvironmentComponent{}.fogMode == 0);        // what a scene without the key loads as
+        // On, but nothing to draw yet: no density, no bank -> no volume, no cost.
+        CHECK_FALSE(HE::ExtractFogVolumeData(world, true, false, 16.0f / 9.0f, 250.0f).enabled);
+        // A backend without the volume (D3D11/D3D12) keeps the analytic fog under mode 1.
+        world.registry().get<EnvironmentComponent>(sky).fogDensity = 0.03f;
+        CHECK_FALSE(HE::ExtractFogVolumeData(world, false, false, 16.0f / 9.0f, 250.0f).enabled);
+        CHECK(HE::ExtractFogVolumeData(world, true, false, 16.0f / 9.0f, 250.0f).enabled);
+    }
     SUBCASE("camera underwater overrides an otherwise-enabled volume")
     {
         HorizonWorld world;

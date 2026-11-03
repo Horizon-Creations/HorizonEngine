@@ -1252,8 +1252,11 @@ namespace
 	{ "Environment/Mode##fogvol", "Volumetric Fog Mode",
 	  "Analytic keeps today's flat per-pixel blend toward the horizon. Volumetric "
 	  "raymarches a real 3D fog volume with sun/light shafts and in-fog shadow, past "
-	  "Volume Distance the analytic fog still takes over. Greyed out on a backend "
-	  "that has not implemented it yet; a scene with it chosen still loads and plays.",
+	  "Volume Distance the analytic fog still takes over. A Sky you add today starts "
+	  "on Volumetric (it draws nothing until Density or Bank Density is above 0); a "
+	  "scene saved before this existed stays Analytic. Greyed out on a backend that "
+	  "has not implemented it yet (Direct3D 11/12 for now): a scene with Volumetric "
+	  "chosen still loads and plays there, with the Density fog standing in.",
 	  "", "rendering#sky" },
 	{ "Environment/Quality##fogvol", "Volumetric Fog Quality",
 	  "Size of the froxel grid the volume is computed on. Higher resolves finer "
@@ -1274,7 +1277,8 @@ namespace
 	  "", "rendering#sky" },
 	{ "Environment/Noise Amount", "",
 	  "How much 3D noise breaks up the volume's height formula. 0 keeps a smooth "
-	  "layer; higher gives drifting wisps and clearer patches.",
+	  "layer; higher gives drifting wisps and clearer patches. Foggy weather raises "
+	  "it; once you move it the weather leaves it alone until the next preset pick.",
 	  "", "rendering#sky" },
 	{ "Environment/Noise Scale", "",
 	  "World size of one noise period. Small values give fine wisps, large values "
@@ -1282,7 +1286,9 @@ namespace
 	  "", "rendering#sky" },
 	{ "Environment/Bank Density", "",
 	  "A ground-hugging fog bank layered on top of the height fog, with its own "
-	  "edges — valley mist or haze sitting over a lake bed.",
+	  "edges — valley mist or haze sitting over a lake bed. A Weather preset drives "
+	  "it (Foggy a thick bank, Rain a faint one); once you move it the weather leaves "
+	  "it alone until the next preset pick.",
 	  "", "rendering#sky" },
 	{ "Environment/Bank Base", "",
 	  "World Y of the fog bank's lower edge.", "", "rendering#sky" },
@@ -1391,7 +1397,8 @@ namespace
 	  "", "rendering#weather" },
 	{ "Weather/Fog Density##wx", "",
 	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
-	  "preset until the next pick.",
+	  "preset until the next pick. With the Sky's Fog Mode on Volumetric the preset "
+	  "also sets the ground bank and its noise (Bank Density, Noise Amount).",
 	  "", "rendering#weather" },
 	{ "Weather/Wind Speed##wx", "",
 	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",

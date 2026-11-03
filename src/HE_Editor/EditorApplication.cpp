@@ -5506,7 +5506,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// Otherwise make sure there IS a Sky entity to configure — the world/scene may
 		// have started empty (only the Game/Simulation templates seed a sky).
 		else if (m_editorWorld->environmentEntity() == entt::null)
+		{
 			m_editorWorld->addSky();
+			// addSky() starts new skies on the volumetric fog (step 7); a witness dump keeps
+			// the analytic default so HE_DUMP_FOGDENSITY alone stays the pre-existing A/B
+			// baseline — HE_DUMP_FOGMODE=1 below opts into the volume.
+			if (auto* fresh = m_editorWorld->registry().try_get<EnvironmentComponent>(
+			        m_editorWorld->environmentEntity()))
+				fresh->fogMode = 0;
+		}
 		Entity dumpSky = m_editorWorld->environmentEntity();
 		if (auto* e = dumpSky == entt::null ? nullptr
 		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
