@@ -30,6 +30,7 @@ add_library(HorizonScene SHARED
     src/LandscapeWater.cpp
     src/LandscapeGi.cpp
     src/LandscapeHlod.cpp
+    src/LandscapePackBuild.cpp
     src/LandscapeWorldProxies.cpp
     src/LandscapeFoliage.cpp
     src/LandscapeNavigation.cpp

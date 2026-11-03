@@ -36,6 +36,7 @@
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
 #include <HorizonScene/CellSplit.h>    // the HE_DUMP_PLAYCELLS witness splits its own scene
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
+#include "LandscapeWorldTools.h"   // a finished tile-landscape pack build is taken in here
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -4092,6 +4093,7 @@ void EditorApplication::OnRender(float dt)
 			// Every call, not just the first bind below: RenderExtractor reads this to build the GI
 			// shadow kernel's height clipmap (step 4).
 			m_editorWorld->setLandscapeRuntime(&m_landscape);
+			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
 			if (!m_landscapeBound && renderer())
 			{
 				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
