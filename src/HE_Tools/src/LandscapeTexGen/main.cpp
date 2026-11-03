@@ -50,6 +50,14 @@
 //   tints, other bump strength) so the mechanism can be seen without real photographs. The
 //   default N = 1 writes byte for byte what this tool always wrote.
 //
+//          landscape_tex_gen <output-dir> --pack-group <png-dir> --group G [--size N] [--compress bc7|astc]
+//   the group-array form of --pack for every group INCLUDING Mountains (packGroupReal): the slices go
+//   straight into the group's three arrays and no per-layer .hasset is written. Variants come from
+//   <RoleLabel>_<Map>_v2.png, _v3.png ... exactly like --pack's (a role without that file repeats its
+//   variant 1). --compress bc7|astc cooks each finished array like an export with cookTextureArrays does
+//   (Hpak::cookTextureBlob): BC7, every slice and level encoded as it stands, the slice means the
+//   GI landscape needs baked into CHUNK_TXSM. --mix then copies the (compressed) slices and means.
+//
 //          landscape_tex_gen <output-dir> --material
 //   writes the auto landscape material M_AutoLandscape.hasset instead (Schritt 5,
 //   HE::buildAutoLandscapeGraph) — run it on EditorDeps/EngineContent/Materials.
@@ -77,6 +85,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/TextureArrayBuild.h>
+#include <Hpak/HpakWriter.h>   // cookTextureBlob: --compress
 #include "TextureImporter.h"   // HorizonImporters — decodes the PNGs the way the editor's import does
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
@@ -347,6 +356,21 @@ const uint8_t kGroupTones[HE::kAutoLandscapeGroupCount][HE::kAutoLandscapeRoleCo
     { { 214, 184, 126 }, { 170, 140, 104 }, { 176, 112,  78 }, { 225, 230, 238 } },   // Desert
 };
 
+// --compress <fmt>: the group arrays leave this tool already block-compressed (an HE::TextureFormat
+// value, 0 = RGBA8 as it always was). The slice means the GI landscape needs are baked in the same
+// step (Hpak::cookTextureBlob), exactly like an export that cooks arrays.
+uint8_t gCompressFormat = 0;
+
+// Id of a group's array `map`: the group's block (material id + 1 + map), except Mountains whose
+// arrays are the original 0x40F.. ones (writeArrays), not behind its material id.
+HE::UUID groupArrayId(const HE::AutoLandscapeGroup& group, int map)
+{
+    const uint64_t hi = group.id == HE::AutoLandscapeGroupId::Mountains
+        ? kTexBaseHi + static_cast<uint64_t>(std::size(kLayers) * MapCount + map)
+        : group.materialId.hi + 1 + static_cast<uint64_t>(map);
+    return HE::UUID{ hi, 0x0000000000000001ULL };
+}
+
 // Builds and saves one of a group's three arrays from already-assembled slices (one per role 0..4,
 // in HE::autoLandscapeSliceSource order), with the readback check every array in this tool gets.
 // Shared by the placeholder path (writeGroupArrays) and the real-texture one (packGroupReal).
@@ -364,23 +388,44 @@ bool saveGroupArray(const std::string& outDir, const HE::AutoLandscapeGroup& gro
     a.type = HE::AssetType::Texture;
     a.name = leaf;
     a.path = leaf + ".hasset";
-    a.id   = HE::UUID{ group.materialId.hi + 1 + static_cast<uint64_t>(map), 0x0000000000000001ULL };
+    a.id   = groupArrayId(group, map);
     ContentManager cm(outDir);
     if (!cm.saveAsset(a))
     {
         std::fprintf(stderr, "  FAILED to write %s.hasset\n", leaf.c_str());
         return false;
     }
+    if (gCompressFormat != 0)
+    {
+        namespace fs = std::filesystem;
+        const fs::path file = fs::path(outDir) / a.path;
+        std::vector<uint8_t> blob;
+        { std::ifstream in(file, std::ios::binary); blob.assign(std::istreambuf_iterator<char>(in), {}); }
+        const std::vector<uint8_t> cooked = Hpak::cookTextureBlob(blob, gCompressFormat, /*quality=*/1);
+        if (cooked == blob)
+        {
+            std::fprintf(stderr, "  %s: this build cannot encode format %u\n", leaf.c_str(), gCompressFormat);
+            return false;
+        }
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(cooked.data()), static_cast<std::streamsize>(cooked.size()));
+        if (!out) { std::fprintf(stderr, "  FAILED to write %s.hasset\n", leaf.c_str()); return false; }
+    }
     ContentManager check(outDir);
     const TextureAsset* t = check.getTexture(check.loadAsset(a.path));
+    const bool compressed = gCompressFormat != 0;
+    const bool same = t && (compressed
+        ? (static_cast<uint8_t>(t->format) == gCompressFormat &&
+           t->sliceMeans.size() == static_cast<size_t>(depth) * 3 && t->mipLevels == a.mipLevels)
+        : t->data == a.data);
     if (!t || t->id != a.id || t->layers != static_cast<uint32_t>(depth) || t->srgb != a.srgb ||
-        t->data != a.data || !HE::textureArrayPayloadValid(*t))
+        !same || !HE::textureArrayPayloadValid(*t))
     {
         std::fprintf(stderr, "  %s.hasset does NOT read back as written\n", leaf.c_str());
         return false;
     }
-    std::printf("  %-34s %ux%u x%u slices, %u mips %s\n", leaf.c_str(), a.width, a.height,
-                a.layers, a.mipLevels, a.srgb ? "sRGB" : "linear");
+    std::printf("  %-34s %ux%u x%u slices, %u mips %s%s\n", leaf.c_str(), a.width, a.height,
+                a.layers, a.mipLevels, a.srgb ? "sRGB" : "linear", compressed ? ", block-compressed" : "");
     return true;
 }
 
@@ -787,23 +832,47 @@ int packGroupReal(const std::string& outDir, const std::string& pngDir, int requ
                      roleNames[0].c_str(), roleNames[1].c_str(), roleNames[2].c_str(), roleNames[3].c_str());
         return 1;
     }
-    std::printf("landscape_tex_gen: packing %s at %dx%d\n", group.name, size, size);
+    // Variants 2..: <RoleLabel>_<Map>_v2.png ... like Mountains' packReal; N = the highest v any of
+    // the four roles has a file for. A role without that variant repeats its first one (so a role
+    // that is procedural in the group, like Snow, simply keeps its placeholder in every variant).
+    int variants = 1;
+    std::vector<std::vector<Found>> extra;   // [variant - 2][role]
+    for (int v = 2; v <= kMaxVariants; ++v)
+    {
+        std::vector<Found> set(HE::kAutoLandscapeRoleCount);
+        bool any = false;
+        for (int role = 0; role < HE::kAutoLandscapeRoleCount; ++role)
+        {
+            set[role] = findLayerFiles(files, roleNames[role].c_str(), "_v" + std::to_string(v), true, size);
+            any = any || set[role].any;
+        }
+        if (!any) continue;
+        while (static_cast<int>(extra.size()) < v - 2) extra.push_back(found);   // a gap repeats variant 1
+        extra.push_back(std::move(set));
+        variants = v;
+    }
+    std::printf("landscape_tex_gen: packing %s at %dx%d, %d variant%s per role\n", group.name, size, size,
+                variants, variants == 1 ? "" : "s");
 
     // Each slice's three maps, built ONCE (buildLayerMaps resizes/reports per role, not per map it
     // feeds into) and consumed by exactly one of the three arrays below.
-    const int depth = HE::autoLandscapeArrayDepth(1);   // groups: no --variants yet, like --loose
+    const int depth = HE::autoLandscapeArrayDepth(variants);
     std::vector<std::array<std::vector<uint8_t>, MapCount>> slotMaps(static_cast<size_t>(depth));
     for (int slice = 0; slice < depth; ++slice)
     {
         int role = 0, variant = 0;
-        HE::autoLandscapeSliceSource(slice, 1, role, variant);
+        HE::autoLandscapeSliceSource(slice, variants, role, variant);
         Layer L = kLayers[role];            // role 4 = WetGround, never retoned, never packed
         auto& [albedo, normal, mask] = slotMaps[static_cast<size_t>(slice)];
         if (role < HE::kAutoLandscapeRoleCount)
         {
-            for (int c = 0; c < 3; ++c) L.albedo[c] = kGroupTones[gi][role][c];
+            // Mountains' tones are kLayers' own (its kGroupTones row is empty).
+            if (gi != 0) for (int c = 0; c < 3; ++c) L.albedo[c] = kGroupTones[gi][role][c];
             L.name = roleNames[role].c_str();   // the group's own role label in the "missing" prints below
-            buildLayerMaps(L, found[role], 0, size, albedo, normal, mask);
+            const bool own = variant > 0 && extra[variant - 1][role].any;
+            const std::string tag = variant > 0 ? " (variant " + std::to_string(variant + 1) + ")" : "";
+            if (variant > 0) std::printf("  %s%s%s\n", roleNames[role].c_str(), tag.c_str(), own ? "" : ": repeats variant 1");
+            buildLayerMaps(L, own ? extra[variant - 1][role] : found[role], own ? variant : 0, size, albedo, normal, mask);
         }
         else
         {
@@ -1020,6 +1089,11 @@ int writeMixArrays(const std::string& outDir, const std::string& fromDir)
                 const size_t at = HE::textureArrayOffset(t.width, t.height, t.mipLevels,
                                                          static_cast<uint32_t>(role * variants), 0, t.format);
                 a.data.insert(a.data.end(), t.data.begin() + at, t.data.begin() + at + sliceBytes);
+                // A block-compressed array carries its slice means (CHUNK_TXSM): the mix's come from the
+                // same slices, so the GI landscape colours do not need the pixels back.
+                const size_t m = static_cast<size_t>(role * variants) * 3;
+                if (ref.format != TextureFormat::RGBA8 && m + 3 <= t.sliceMeans.size())
+                    a.sliceMeans.insert(a.sliceMeans.end(), t.sliceMeans.begin() + m, t.sliceMeans.begin() + m + 3);
             }
         }
         const std::string name = std::string("T_Landscape_Mix_") + kMapNames[map] + "_Array";
@@ -1030,12 +1104,14 @@ int writeMixArrays(const std::string& outDir, const std::string& fromDir)
         if (!cm.saveAsset(a)) { std::fprintf(stderr, "  FAILED to write %s.hasset\n", name.c_str()); continue; }
         ContentManager check(outDir);
         const TextureAsset* t = check.getTexture(check.loadAsset(a.path));
-        if (!t || t->id != a.id || t->layers != a.layers || t->data != a.data || !HE::textureArrayPayloadValid(*t))
+        if (!t || t->id != a.id || t->layers != a.layers || t->data != a.data || t->sliceMeans != a.sliceMeans ||
+            !HE::textureArrayPayloadValid(*t))
         {
             std::fprintf(stderr, "  %s.hasset does NOT read back as written\n", name.c_str());
             continue;
         }
-        std::printf("  %-34s %ux%u x%u slices, %u mips\n", name.c_str(), a.width, a.height, a.layers, a.mipLevels);
+        std::printf("  %-34s %ux%u x%u slices, %u mips%s\n", name.c_str(), a.width, a.height, a.layers, a.mipLevels,
+                    ref.format == TextureFormat::RGBA8 ? "" : ", block-compressed");
         ++ok;
     }
     return ok;
@@ -1060,6 +1136,10 @@ int main(int argc, char** argv)
                              "                 Forest / Grassland / Desert write M_AutoLandscape_<G>.hasset (--material), their own\n"
                              "                 placeholder arrays (no mode), or pack/split real <RoleLabel>_<Map>.png files with\n"
                              "                 --pack/--loose, <RoleLabel> = the group's own role name with no space (see the header)\n"
+                             "  --pack-group   like --pack for ANY group (Mountains too), straight into its three arrays: reads\n"
+                             "                 <RoleLabel>_<Map>.png plus <RoleLabel>_<Map>_v2.png, _v3.png ... (N variants per role)\n"
+                             "                 and writes no loose per-layer files; a mode flag, goes with --group\n"
+                             "  --compress bc7|astc write the group arrays block-compressed (BC7 desktop / ASTC 4x4 Apple, slice means baked), not RGBA8; platform-specific, NOT for shared EngineContent\n"
                              "  the mode flag (--arrays-only/--material/--pack/--loose) must come right after <output-dir>; given\n"
                              "  later (e.g. after --group) it is not recognised and the tool refuses rather than silently falling\n"
                              "  back to regenerating placeholders over real data\n");
@@ -1073,7 +1153,7 @@ int main(int argc, char** argv)
     for (int i = 3; i < argc; ++i)
     {
         const std::string a = argv[i];
-        if (a == "--arrays-only" || a == "--material" || a == "--pack" || a == "--loose" || a == "--mix")
+        if (a == "--arrays-only" || a == "--material" || a == "--pack" || a == "--loose" || a == "--mix" || a == "--pack-group")
         {
             std::fprintf(stderr, "landscape_tex_gen: %s must be the first flag after <output-dir> (argv[2]), not later\n", a.c_str());
             return 2;
@@ -1119,6 +1199,25 @@ int main(int argc, char** argv)
             }
         }
     const HE::AutoLandscapeGroup& group = HE::kAutoLandscapeGroups[groupIndex];
+    // --compress bc7: the group arrays are written block-compressed (see gCompressFormat).
+    for (int i = 2; i + 1 < argc; ++i)
+        if (std::string(argv[i]) == "--compress")
+        {
+            if (std::string(argv[i + 1]) == "bc7") gCompressFormat = 2;
+            else if (std::string(argv[i + 1]) == "astc") gCompressFormat = 1;
+            else { std::fprintf(stderr, "landscape_tex_gen: --compress takes bc7 or astc\n"); return 2; }
+        }
+    // --pack-group <png-dir> [--size N] --group G [--compress bc7|astc]: every group INCLUDING Mountains,
+    // straight into its three arrays with the variants of the _v2.. files (packGroupReal). Mountains'
+    // own --pack also writes its per-layer loose files; this does not, so the shipped loose set stays.
+    if (argc > 2 && std::string(argv[2]) == "--pack-group")
+    {
+        if (argc <= 3) { std::fprintf(stderr, "landscape_tex_gen: --pack-group needs a <png-dir>\n"); return 2; }
+        int size = 0;
+        for (int i = 4; i + 1 < argc; ++i)
+            if (std::string(argv[i]) == "--size") size = std::atoi(argv[i + 1]);
+        return packGroupReal(outDir, argv[3], size, group);
+    }
     if (groupIndex != 0)
     {
         const std::string mode = argc > 2 ? argv[2] : "";

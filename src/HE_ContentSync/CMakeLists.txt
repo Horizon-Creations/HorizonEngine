@@ -152,3 +152,14 @@ endif()
 unset(_hecs_local_credentials)
 
 he_deploy_dll(HorizonContentSync)
+
+# content_sync_put: upload/verify a handful of files with a MERGE into the remote manifest (the editor's
+# full publish replaces it with a scan of its local root). Its DLLs sit beside it (Windows loads those).
+add_executable(content_sync_put tools/content_sync_put.cpp)
+target_link_libraries(content_sync_put PRIVATE HorizonContentSync HorizonCore)
+if(WIN32)
+	add_custom_command(TARGET content_sync_put POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different
+			$<TARGET_FILE:HorizonContentSync> $<TARGET_FILE:HorizonCore> $<TARGET_FILE:HorizonNet>
+			$<TARGET_FILE_DIR:content_sync_put>)
+endif()
