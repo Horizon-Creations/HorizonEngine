@@ -94,6 +94,11 @@ static float       s_brushStrength   = 5.0f;
 // per stroke step at 60 Hz. 1 = the layer is taken over completely at once.
 static float       s_paintStrength   = 1.0f;
 static bool        s_brushWasDown    = false;   // tracks LMB edge for undo
+// Layer painting: where the last dab of the running stroke landed (terrain-local), so a
+// frame can fill the way from there to the pointer.
+static float       s_paintLastX      = 0.0f;
+static float       s_paintLastZ      = 0.0f;
+static bool        s_paintHaveLast   = false;
 // Stroke-scoped state, captured on the LMB-down edge (see the sculpt block):
 static float       s_flattenTarget   = 0.0f;    // Flatten: height to pull toward
 static glm::vec3   s_rampStartWS{};             // Ramp: world-space start of the gradient
@@ -977,10 +982,37 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 					int ownGroup = -1;
 					if (const auto* mc = terrainReg.try_get<MaterialComponent>(terrainEnt))
 						ownGroup = terrainGroup(tc, *mc);
-					TerrainPaint::paintInGroup(tc, lx, lz, invert ? 0 : s_paintLayer,
-					                           invert ? ownGroup : s_activeGroup,
+					const int layer = invert ? 0 : s_paintLayer;
+					const int group = invert ? ownGroup : s_activeGroup;
+					// One dab per frame leaves dots once the pointer moves further than the brush
+					// is wide between two frames (a quick drag at editor frame rates, on a big
+					// landscape a few metres of mouse are tens of metres of ground). So the
+					// path from the last frame's hit to this one is filled with dabs a half
+					// radius apart. They share the frame's strength: a point the brush crosses
+					// is met by about 2 * outer / spacing of them, so each takes the share of
+					// it that adds up to roughly two frames' worth, the way a held brush does.
+					const float outer   = s_brushRadius + s_falloffRadius;
+					const float spacing = std::max(0.5f * s_brushRadius, 0.25f);
+					if (s_paintHaveLast && outer > 0.0f)
+					{
+						const float dx = lx - s_paintLastX, dz = lz - s_paintLastZ;
+						const float dist = std::sqrt(dx * dx + dz * dz);
+						const int   n    = std::min(static_cast<int>(dist / spacing), 256);
+						const float dabAmount = amount >= 1.0f ? 1.0f
+							: 1.0f - std::pow(1.0f - amount, std::min(1.0f, spacing / outer));
+						for (int i = 1; i <= n; ++i)
+						{
+							const float t = static_cast<float>(i) / static_cast<float>(n + 1);
+							TerrainPaint::paintInGroup(tc, s_paintLastX + dx * t, s_paintLastZ + dz * t,
+							                           layer, group, s_brushRadius, s_falloffRadius, dabAmount);
+						}
+					}
+					TerrainPaint::paintInGroup(tc, lx, lz, layer, group,
 					                           s_brushRadius, s_falloffRadius, amount);
+					s_paintLastX = lx; s_paintLastZ = lz; s_paintHaveLast = true;
 				}
+				else
+					s_paintHaveLast = false;   // released, or off the ground: the next press starts a new stroke
 			}
 			// ── Foliage mode: the layer's density mask ────────────
 			// Same brush, same hit, a third target: the mask of the
