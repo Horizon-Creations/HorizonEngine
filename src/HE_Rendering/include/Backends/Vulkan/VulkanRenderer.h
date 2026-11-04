@@ -23,6 +23,7 @@
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer
 #include <vulkan/vulkan.h>
 #include <deque>
+#include <functional>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -106,6 +107,15 @@ public:
 	// below is the part of Render() this borrows, the swapchain half stays behind.
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md): the page pool, one page table per consumer
+	// material, the per-landscape material swap. A page is RenderSceneImage's raw frame copied into a pool slice.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	// An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
 	// viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
 	// recorded into a one-shot command buffer and waited for. Returns the
@@ -493,6 +503,22 @@ private:
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
+	// Runtime Virtual Texture (Thema 333): bindings 40..43 are in m_matSetLayout (VulkanMaterialLayout.h, rvtFit).
+	bool        m_matRvt = false;
+	struct RvtImage { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
+	RvtImage    m_rvtPool[3];                 // RGBA8 arrays, one slice per pool slot; SHADER_READ_ONLY between copies
+	uint32_t    m_rvtSlots = 0, m_rvtPagePx = 0;
+	VkSampler   m_rvtSampler = VK_NULL_HANDLE; // nearest/clamp: the lookup is texelFetch, the descriptor is combined
+	struct RvtTable { RvtImage img; uint32_t side = 0, mips = 0; };
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
+	bool rvtOneShot(const std::function<void(VkCommandBuffer)>& record);
+	bool rvtMakeImage(VkFormat format, uint32_t w, uint32_t h, uint32_t layers, uint32_t mips, VkImageUsageFlags usage,
+	                  VkImageCreateFlags flags, RvtImage& out);
+	bool rvtMakeView(RvtImage& img, VkFormat format, VkImageViewType type, uint32_t layers, uint32_t mips);
+	void rvtDestroyImage(RvtImage& img);
+	bool rvtMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buf, VkDeviceMemory& mem);
 	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
 	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
 	// the material's displacement body into the shader hash right after resolveShaders

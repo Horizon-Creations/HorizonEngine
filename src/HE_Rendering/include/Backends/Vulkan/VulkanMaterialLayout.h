@@ -35,6 +35,12 @@
 // and draws a layer-blend material through the built-in path instead: losing
 // the paint there beats losing every graph material.
 //
+// Runtime Virtual Textures (Thema 333, docs/rvt-design-2026-11-04.md): bindings 40..43 are the page table and the three
+// pool arrays (MaterialGraph/RvtLookup.h), AFTER the cluster lists. They are fragment samplers too: four more over the 17,
+// so a device at the spec minimum cannot hold them (rvtFit) and the renderer builds the layout without these rows and reports
+// no RVT support. Bound per draw only for a material that owns a page table (the consumer), never written for the rest: a
+// descriptor no pipeline statically uses need not be valid.
+//
 // Displacement (Thema 207): MaterialShaderLibrary::tessControl/tessEval (SpirV)
 // read the FRAGMENT's bindings — HeLighting 0 (both stages), U 1, heTex0 2,
 // HeParams 3, heTexP0..3 4..7, heLandscapeWeights 14 (evaluation). Those rows
@@ -68,6 +74,8 @@ constexpr uint32_t kClusterLightsBinding = 24; // HeClusterLights { vec4 clLight
 constexpr uint32_t kClusterGridBinding   = 25; // HeClusterGrid   { uvec2 clGrid[]; }
 constexpr uint32_t kClusterIdxBinding    = 26; // HeClusterIdx    { uint clIdx[]; }
 constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (MaterialGraph.cpp)
+constexpr uint32_t kRvtFirstBinding = 40;         // heRvtTable; 41..43 the pool (== HE::kRvtTableBinding in RvtLookup.h)
+constexpr uint32_t kRvtBindingCount = 4;
 
 inline constexpr Binding kBindings[] = {
 	{  0, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeLighting
@@ -115,14 +123,19 @@ inline constexpr Binding kBindings[] = {
 	{ 18, DescKind::CombinedImageSampler, kStageFragment }, // heGIVisibility
 	{ 32, DescKind::CombinedImageSampler, kStageFragment }, // heGIReflFwd
 	{ 33, DescKind::CombinedImageSampler, kStageFragment }, // heCloudShadow
-	// ── Thema 117: fragmentClustered's light lists (keep these LAST) ──
+	// ── Thema 117: fragmentClustered's light lists ──
 	{ kClusterLightsBinding, DescKind::StorageBuffer, kStageFragment },
 	{ kClusterGridBinding,   DescKind::StorageBuffer, kStageFragment },
 	{ kClusterIdxBinding,    DescKind::StorageBuffer, kStageFragment },
+	// ── Thema 333: the Runtime Virtual Texture (keep these LAST, after the cluster lists) ──
+	{ 40, DescKind::CombinedImageSampler, kStageFragment }, // heRvtTable  (usampler2D, texelFetch only)
+	{ 41, DescKind::CombinedImageSampler, kStageFragment }, // heRvtAlbedo (sampler2DArray, sRGB view)
+	{ 42, DescKind::CombinedImageSampler, kStageFragment }, // heRvtNormal
+	{ 43, DescKind::CombinedImageSampler, kStageFragment }, // heRvtSurface
 };
 
 constexpr uint32_t kBindingCount           = sizeof(kBindings) / sizeof(kBindings[0]);
-constexpr uint32_t kPreClusterBindingCount = kBindingCount - 3;
+constexpr uint32_t kPreClusterBindingCount = kBindingCount - 3 - kRvtBindingCount;
 
 // Descriptors of one kind in one set — what the per-frame pool must hold per
 // allocated set (times the sets it serves).
@@ -148,12 +161,17 @@ constexpr uint32_t kDynamicOffsetCount = 3;
 // Combined image samplers the FRAGMENT stage sees — what the device's
 // per-stage sampler and sampled-image limits are held against (a combined
 // descriptor counts against both).
-constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true)
+constexpr bool isRvtBinding(uint32_t binding)
+{
+	return binding >= kRvtFirstBinding && binding < kRvtFirstBinding + kRvtBindingCount;
+}
+constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true, bool withRvt = false)
 {
 	uint32_t n = 0;
 	for (uint32_t i = 0; i < kBindingCount; ++i)
 		if (kBindings[i].kind == DescKind::CombinedImageSampler && (kBindings[i].stages & kStageFragment)
-		    && (withLandscapeWeights || kBindings[i].binding != kLandscapeWeightsBinding))
+		    && (withLandscapeWeights || kBindings[i].binding != kLandscapeWeightsBinding)
+		    && (withRvt || !isRvtBinding(kBindings[i].binding)))
 			++n;
 	return n;
 }
@@ -167,15 +185,24 @@ constexpr bool landscapeWeightsFit(uint32_t maxPerStageSamplers, uint32_t maxPer
 	    && fragmentSamplerCount(true) <= maxPerStageSampledImages;
 }
 
-static_assert(kBindingCount == 25, "material set 0: 22 canonical bindings + 3 cluster lists");
+// Do the four RVT rows fit on top of the layout `withLandscapeWeights` decided on? If not, the renderer builds the layout
+// without them and the backend reports no RVT support.
+constexpr bool rvtFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages, bool withLandscapeWeights)
+{
+	return fragmentSamplerCount(withLandscapeWeights, true) <= maxPerStageSamplers
+	    && fragmentSamplerCount(withLandscapeWeights, true) <= maxPerStageSampledImages;
+}
+
+static_assert(kBindingCount == 29, "material set 0: 22 canonical bindings + 3 cluster lists + 4 RVT rows");
 static_assert(countOf(DescKind::UniformBuffer) == 5);        // b0, b1, b3, b8, b9
-static_assert(countOf(DescKind::CombinedImageSampler) == 17); // b2, b4-b7, b10-b18, b31-b33
+static_assert(countOf(DescKind::CombinedImageSampler) == 21); // b2, b4-b7, b10-b18, b31-b33, b40-b43
 static_assert(countOf(DescKind::StorageBuffer) == 3);         // b24-b26
 static_assert(fragmentSamplerCount(true) == 17 && fragmentSamplerCount(false) == 16,
               "without heLandscapeWeights the layout must fit the spec minimum of 16");
 static_assert(!landscapeWeightsFit(16, 16) && landscapeWeightsFit(17, 17));
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
-              "the cluster lists must be the last rows (negative control slices them off)");
+              "the cluster lists come right after the canonical rows (negative control slices them off)");
+static_assert(rvtFit(21, 21, true) && !rvtFit(20, 21, true) && !rvtFit(21, 20, true) && rvtFit(20, 20, false) && !rvtFit(16, 16, false));
 
 // ── Deferred lighting resolve, set 0 (Thema 150, docs/deferred-renderer-plan.md
 // §10.3/§10.5) ─────────────────────────────────────────────────────────────────

@@ -5080,9 +5080,19 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
 	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
 	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	// The RVT rows (Thema 333) are four more on top: 21 with the weights row, 20 without; a device that fits neither
+	// keeps the layout it had (no RVT).
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 21);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, true) == 20);
+	CHECK(HE::vkmat::rvtFit(21, 21, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(20, 21, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(21, 20, true));
+	CHECK(HE::vkmat::rvtFit(20, 20, false));
+	CHECK_FALSE(HE::vkmat::rvtFit(16, 16, false));
+	CHECK(HE::vkmat::rvtFit(1u << 20, 1u << 20, true));
 
 	int landscapeCases = 0;
-	std::set<VkUse> rvtUses;           // the RVT node's (Thema 333) own bindings: D3D11-only for now, fenced off below
+	std::set<VkUse> rvtUses;           // the RVT node's (Thema 333) own bindings, 40..43: layout rows since the Vulkan port
 	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
 	std::set<std::string> fragGapCases;
 	for (const NodeShaderCase& c : allNodeShaderCases())
@@ -5095,13 +5105,15 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 			std::string err;
 			const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
 			REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
-			// The Runtime Virtual Texture read (Thema 333) binds 40..43, which the Vulkan layout has no rows for: only a
-			// backend with Capabilities::supportsRvt draws a material that has the node (D3D11 today). It is fenced off
-			// here and held to exactly those four bindings, so it cannot reach any other.
+			// The Runtime Virtual Texture read (Thema 333) binds 40..43: the last four rows of the layout, which the renderer
+			// leaves out on a device that cannot hold them (rvtFit) and then reports no RVT. Everything the node uses is
+			// served, and the layout WITHOUT row 40 is its negative control.
 			if (c.name.find("RVT Sample") == 0)
 			{
+				CHECK_MESSAGE(uncoveredVkFragment(uses).empty(), c.name, ": uses beyond the layout:", uncoveredVkFragment(uses));
+				CHECK_MESSAGE(!uncoveredVkFragment(uses, HE::vkmat::kRvtFirstBinding).empty(), c.name, ": row 40 is what serves the table");
 				for (const VkUse& u : uses)
-					if (!uncoveredVkFragment({ u }).empty()) rvtUses.insert(u);   // what the layout does not serve
+					if (HE::vkmat::isRvtBinding(u.binding)) rvtUses.insert(u);
 				continue;
 			}
 			const bool usesWeights = std::find(uses.begin(), uses.end(), weights) != uses.end();
@@ -5128,7 +5140,7 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	}
 	// The sweep did reach the Landscape Layer Blend node (plain + clustered).
 	CHECK(landscapeCases >= 2);
-	// The RVT node was swept, and the only thing of it the layout does not serve is its own table and pool (set 0, 40..43).
+	// The RVT node was swept, and its own bindings are the table and pool rows (set 0, 40..43).
 	CHECK_FALSE(rvtUses.empty());
 	for (const VkUse& u : rvtUses)
 		CHECK_MESSAGE((u.binding >= 40 && u.binding <= 43), "the RVT node uses binding ", u.binding, " beyond 40..43");
@@ -5263,13 +5275,6 @@ TEST_CASE("Vulkan: the deferred resolve's set layout covers both resolve variant
 		const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
 		REQUIRE_MESSAGE(err.empty(), d.name, ": ", err);
 		++tails;
-		if (d.type == MatNodeType::RvtSample)   // fenced like the material-layout sweep above: bindings 40..43 only
-		{
-			for (const VkUse& u : uses)
-				if (!uncoveredVkFragment({ u }).empty())
-					CHECK_MESSAGE((u.binding >= 40 && u.binding <= 43), "the RVT node's G-buffer tail uses binding ", u.binding, " outside the layout");
-			continue;
-		}
 		for (const VkUse& u : uses)
 			if (!uncoveredVkFragment({ u }).empty()) gbGap.insert(u);
 	}

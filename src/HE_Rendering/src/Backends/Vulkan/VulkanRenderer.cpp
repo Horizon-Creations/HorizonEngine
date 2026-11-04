@@ -1,4 +1,5 @@
 #include "Backends/Vulkan/VulkanRenderer.h"
+#include <MaterialGraph/RvtLookup.h>   // kRvtTableBinding (40..43)
 #include <chrono>
 #include <cstdint>
 #include <Window/Window.h>
@@ -239,6 +240,8 @@ void VulkanRenderer::Shutdown()
 {
     HE_LOG_INFO(RHI, "%s", "VulkanRenderer: shutdown — waiting for GPU");
     if (m_device) deviceWaitIdle();
+    DestroyRvtPool();
+    if (m_rvtSampler) { vkDestroySampler(m_device, m_rvtSampler, nullptr); m_rvtSampler = VK_NULL_HANDLE; }
     // ImGui editor textures (logo + content-browser icons): destroy the GPU
     // resources we retained for them. The ImGui descriptor sets are freed by
     // ImGui's own shutdown, which the editor runs before tearing down the renderer.
@@ -1358,6 +1361,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // direct swapchain fallback and the world previews stay forward.
     c.supportsDeferredRendering = m_postFxReady && m_deferredReady;
     c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
+    c.supportsRvt               = m_postFxReady && m_matReady && m_matRvt;   // a page is that raw capture copied into the pool
     return c;
 }
 
@@ -2965,6 +2969,13 @@ void VulkanRenderer::createMaterialResources()
             maxImages   = std::min(maxImages, n);
         }
         m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
+        // The Runtime Virtual Texture's four rows (Thema 333) on top of that: left out when the device cannot hold them.
+        m_matRvt = HE::vkmat::rvtFit(maxSamplers, maxImages, m_matLandscapeWeights);
+        static_assert(HE::vkmat::kRvtFirstBinding == HE::kRvtTableBinding && HE::vkmat::kRvtBindingCount == 4,
+                      "the layout's RVT rows are the lookup's bindings");
+        if (!m_matRvt)
+            HE_LOG_INFO(RHI, "VulkanRenderer: Runtime Virtual Textures off: the material layout with their %u samplers does not fit "
+                        "maxPerStageDescriptorSamplers %u / SampledImages %u", HE::vkmat::kRvtBindingCount, maxSamplers, maxImages);
         char line[384];
         std::snprintf(line, sizeof line,
             "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
@@ -2980,6 +2991,8 @@ void VulkanRenderer::createMaterialResources()
     for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
     {
         if (!m_matLandscapeWeights && HE::vkmat::kBindings[i].binding == HE::vkmat::kLandscapeWeightsBinding)
+            continue;
+        if (!m_matRvt && HE::vkmat::isRvtBinding(HE::vkmat::kBindings[i].binding))
             continue;
         b[nb].binding         = HE::vkmat::kBindings[i].binding;
         b[nb].descriptorType  = HE::vkmat::kBindings[i].dynamic ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
@@ -6310,6 +6323,321 @@ bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW,
     return true;
 }
 
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). Everything here runs between frames on the
+// CaptureViewport pattern: a one-shot command buffer between two full waits, so what it touches is idle on both sides.
+bool VulkanRenderer::rvtOneShot(const std::function<void(VkCommandBuffer)>& record)
+{
+    deviceWaitIdle();
+    VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool        = m_cmdPool;
+    cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(m_device, &cbai, &cmd) != VK_SUCCESS || !cmd) return false;
+    VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &cbbi);
+    record(cmd);
+    vkEndCommandBuffer(cmd);
+    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers    = &cmd;
+    const VkResult r = submitGraphics(si, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_graphicsQueue);
+    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+    return r == VK_SUCCESS;
+}
+
+bool VulkanRenderer::rvtMakeImage(VkFormat format, uint32_t w, uint32_t h, uint32_t layers, uint32_t mips,
+                                  VkImageUsageFlags usage, VkImageCreateFlags flags, RvtImage& out)
+{
+    VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.flags         = flags;
+    ici.imageType     = VK_IMAGE_TYPE_2D;
+    ici.format        = format;
+    ici.extent        = { w, h, 1 };
+    ici.mipLevels     = mips;
+    ici.arrayLayers   = layers;
+    ici.samples       = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage         = usage;
+    ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(m_device, &ici, nullptr, &out.image) != VK_SUCCESS) return false;
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(m_device, out.image, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &out.memory) != VK_SUCCESS || vkBindImageMemory(m_device, out.image, out.memory, 0) != VK_SUCCESS)
+    {
+        rvtDestroyImage(out);
+        return false;
+    }
+    return true;
+}
+
+bool VulkanRenderer::rvtMakeView(RvtImage& img, VkFormat format, VkImageViewType type, uint32_t layers, uint32_t mips)
+{
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image            = img.image;
+    vci.viewType         = type;
+    vci.format           = format;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
+    return vkCreateImageView(m_device, &vci, nullptr, &img.view) == VK_SUCCESS;
+}
+
+void VulkanRenderer::rvtDestroyImage(RvtImage& img)
+{
+    if (img.view)   vkDestroyImageView(m_device, img.view, nullptr);
+    if (img.image)  vkDestroyImage(m_device, img.image, nullptr);
+    if (img.memory) vkFreeMemory(m_device, img.memory, nullptr);
+    img = {};
+}
+
+bool VulkanRenderer::rvtMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buf, VkDeviceMemory& mem)
+{
+    VkBufferCreateInfo bci{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+    bci.size  = size;
+    bci.usage = usage;
+    if (vkCreateBuffer(m_device, &bci, nullptr, &buf) != VK_SUCCESS) return false;
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(m_device, buf, &req);
+    VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize  = req.size;
+    mai.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(m_device, &mai, nullptr, &mem) != VK_SUCCESS)
+    {
+        vkDestroyBuffer(m_device, buf, nullptr); buf = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindBufferMemory(m_device, buf, mem, 0);
+    return true;
+}
+
+namespace
+{
+// One whole-image layout change (all of `layers` x `mips`), the barrier every RVT copy is wrapped in.
+void rvtLayout(VkCommandBuffer c, VkImage image, uint32_t layers, uint32_t mips, VkImageLayout from, VkImageLayout to,
+               VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage)
+{
+    VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.oldLayout = from; b.newLayout = to;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+    b.srcAccessMask = srcAccess; b.dstAccessMask = dstAccess;
+    b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, layers };
+    vkCmdPipelineBarrier(c, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+}
+} // namespace
+
+bool VulkanRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+    DestroyRvtPool();
+    if (!m_device || !m_matReady || !m_matRvt || !m_postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+    if (!m_rvtSampler)
+    {
+        VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+        sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+        sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        sci.maxLod = 0.0f;
+        if (vkCreateSampler(m_device, &sci, nullptr, &m_rvtSampler) != VK_SUCCESS) return false;
+    }
+    for (uint32_t layer = 0; layer < 3; ++layer)
+    {
+        // BaseColor is created UNORM (raw copies of the sRGB-encoded page) and read through an SRGB view.
+        const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (!rvtMakeImage(VK_FORMAT_R8G8B8A8_UNORM, pagePx, pagePx, slots, 1, use,
+                          layer == 0 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, m_rvtPool[layer])
+            || !rvtMakeView(m_rvtPool[layer], layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_IMAGE_VIEW_TYPE_2D_ARRAY, slots, 1))
+        {
+            DestroyRvtPool();
+            return false;
+        }
+    }
+    const bool ok = rvtOneShot([&](VkCommandBuffer c) {
+        for (const RvtImage& im : m_rvtPool)
+            rvtLayout(c, im.image, slots, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                      0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    if (!ok) { DestroyRvtPool(); return false; }
+    m_rvtSlots  = slots;
+    m_rvtPagePx = pagePx;
+    return true;
+}
+
+void VulkanRenderer::DestroyRvtPool()
+{
+    if (!m_device) return;
+    const bool any = m_rvtPool[0].image || m_rvtPool[1].image || m_rvtPool[2].image || !m_rvtTables.empty() || !m_rvtSwaps.empty();
+    if (any) deviceWaitIdle();         // frames in flight read the pool and the tables
+    m_rvtSwaps.clear();                // the pool the consumers read is gone: draw the landscapes themselves again
+    for (auto& kv : m_rvtTables) rvtDestroyImage(kv.second.img);
+    m_rvtTables.clear();
+    for (RvtImage& im : m_rvtPool) rvtDestroyImage(im);
+    m_rvtSlots = m_rvtPagePx = 0;
+}
+
+void VulkanRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+    if (consumerMaterial == HE::UUID{}) m_rvtSwaps.erase(terrainEntity);
+    else                               m_rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void VulkanRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+    for (auto it = m_rvtSwaps.begin(); it != m_rvtSwaps.end();)
+        it = it->second.consumerMat == consumerMaterial ? m_rvtSwaps.erase(it) : std::next(it);
+    const auto t = m_rvtTables.find(consumerMaterial);
+    if (t == m_rvtTables.end()) return;
+    deviceWaitIdle();                  // a recorded frame may still read this table
+    rvtDestroyImage(t->second.img);
+    m_rvtTables.erase(t);
+}
+
+bool VulkanRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+    if (!m_device || !m_rvtSlots || mips.empty() || mips.size() > 12) return false;
+    uint32_t side = 1;
+    while (uint64_t(side) * side < mips[0].size()) ++side;
+    if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+    VkDeviceSize total = 0;
+    for (size_t m = 0; m < mips.size(); ++m)
+    {
+        const uint32_t ms = side >> m;
+        if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+        total += VkDeviceSize(mips[m].size()) * sizeof(uint32_t);
+    }
+    const uint32_t nMips = static_cast<uint32_t>(mips.size());
+    deviceWaitIdle();                  // a recorded frame may still read the old table
+    RvtTable& t = m_rvtTables[consumerMaterial];
+    const bool fresh = !t.img.image || t.side != side || t.mips != nMips;
+    if (fresh)
+    {
+        rvtDestroyImage(t.img);
+        if (!rvtMakeImage(VK_FORMAT_R32_UINT, side, side, 1, nMips,
+                          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, t.img)
+            || !rvtMakeView(t.img, VK_FORMAT_R32_UINT, VK_IMAGE_VIEW_TYPE_2D, 1, nMips))
+        {
+            rvtDestroyImage(t.img);
+            m_rvtTables.erase(consumerMaterial);
+            return false;
+        }
+        t.side = side;
+        t.mips = nMips;
+    }
+    VkBuffer stage = VK_NULL_HANDLE; VkDeviceMemory stageMem = VK_NULL_HANDLE;
+    if (!rvtMakeBuffer(total, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stage, stageMem)) return false;
+    void* mapped = nullptr;
+    vkMapMemory(m_device, stageMem, 0, total, 0, &mapped);
+    std::vector<VkBufferImageCopy> regions(nMips);
+    VkDeviceSize off = 0;
+    for (uint32_t m = 0; m < nMips; ++m)
+    {
+        const uint32_t ms = side >> m;
+        std::memcpy(static_cast<uint8_t*>(mapped) + off, mips[m].data(), mips[m].size() * sizeof(uint32_t));
+        regions[m] = {};
+        regions[m].bufferOffset = off;
+        regions[m].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1 };
+        regions[m].imageExtent = { ms, ms, 1 };
+        off += VkDeviceSize(mips[m].size()) * sizeof(uint32_t);
+    }
+    vkUnmapMemory(m_device, stageMem);
+    const VkImage img = t.img.image;
+    const bool ok = rvtOneShot([&](VkCommandBuffer c) {
+        rvtLayout(c, img, 1, nMips, fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, fresh ? 0 : VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyBufferToImage(c, stage, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, nMips, regions.data());
+        rvtLayout(c, img, 1, nMips, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    vkDestroyBuffer(m_device, stage, nullptr);
+    vkFreeMemory(m_device, stageMem, nullptr);
+    return ok;
+}
+
+bool VulkanRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+    const auto found = m_rvtTables.find(consumerMaterial);
+    if (found == m_rvtTables.end() || !found->second.img.image) return false;
+    const RvtTable& t = found->second;
+    VkDeviceSize total = 0;
+    for (uint32_t m = 0; m < t.mips; ++m) total += VkDeviceSize(t.side >> m) * (t.side >> m) * sizeof(uint32_t);
+    VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (!rvtMakeBuffer(total, VK_BUFFER_USAGE_TRANSFER_DST_BIT, buf, mem)) return false;
+    std::vector<VkBufferImageCopy> regions(t.mips);
+    VkDeviceSize off = 0;
+    for (uint32_t m = 0; m < t.mips; ++m)
+    {
+        const uint32_t ms = t.side >> m;
+        regions[m] = {};
+        regions[m].bufferOffset = off;
+        regions[m].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 1 };
+        regions[m].imageExtent = { ms, ms, 1 };
+        off += VkDeviceSize(ms) * ms * sizeof(uint32_t);
+    }
+    const VkImage img = t.img.image;
+    const uint32_t nMips = t.mips;
+    bool ok = rvtOneShot([&](VkCommandBuffer c) {
+        rvtLayout(c, img, 1, nMips, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyImageToBuffer(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, nMips, regions.data());
+        rvtLayout(c, img, 1, nMips, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    if (ok)
+    {
+        void* mapped = nullptr;
+        vkMapMemory(m_device, mem, 0, total, 0, &mapped);
+        mips.assign(nMips, {});
+        for (uint32_t m = 0; m < nMips; ++m)
+        {
+            const size_t n = size_t(t.side >> m) * (t.side >> m);
+            mips[m].resize(n);
+            std::memcpy(mips[m].data(), static_cast<const uint8_t*>(mapped) + regions[m].bufferOffset, n * sizeof(uint32_t));
+        }
+        vkUnmapMemory(m_device, mem);
+    }
+    vkDestroyBuffer(m_device, buf, nullptr);
+    vkFreeMemory(m_device, mem, nullptr);
+    return ok;
+}
+
+bool VulkanRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+    if (layer < 0 || layer >= 3 || !m_rvtPool[layer].image || slot >= m_rvtSlots) return false;
+    const VkDeviceSize bytes = VkDeviceSize(m_rvtPagePx) * m_rvtPagePx * 4;
+    VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
+    if (!rvtMakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, buf, mem)) return false;
+    const VkImage img = m_rvtPool[layer].image;
+    const uint32_t slots = m_rvtSlots, px = m_rvtPagePx;
+    const bool ok = rvtOneShot([&](VkCommandBuffer c) {
+        rvtLayout(c, img, slots, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                  VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkBufferImageCopy region{};
+        region.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, slot, 1 };
+        region.imageExtent = { px, px, 1 };
+        vkCmdCopyImageToBuffer(c, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf, 1, &region);
+        rvtLayout(c, img, slots, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                  VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    });
+    if (ok)
+    {
+        void* mapped = nullptr;
+        vkMapMemory(m_device, mem, 0, bytes, 0, &mapped);
+        rgba.resize(static_cast<size_t>(bytes));
+        std::memcpy(rgba.data(), mapped, static_cast<size_t>(bytes));
+        vkUnmapMemory(m_device, mem);
+    }
+    vkDestroyBuffer(m_device, buf, nullptr);
+    vkFreeMemory(m_device, mem, nullptr);
+    return ok;
+}
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h; the shape is D3D11's/D3D12's, which is Metal's
 // without the capture flag: the live viewport set is SET ASIDE (the members are
@@ -6485,7 +6813,49 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                 // world → the cleared target, honestly black, which is what the
                 // viewport would show too.
                 uint32_t gotW = 0, gotH = 0;
-                ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+                if (camera.rvtSlot >= 0)
+                {
+                    // A virtual texture page (Thema 333): the picture goes into its pool slice on the GPU, nothing is read back.
+                    rgba.clear();
+                    ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer].image
+                      && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx;
+                    if (ok)
+                    {
+                        const VkImage dst = m_rvtPool[camera.rvtLayer].image;
+                        const uint32_t slot = static_cast<uint32_t>(camera.rvtSlot);
+                        ok = rvtOneShot([&](VkCommandBuffer c) {
+                            VkImageMemoryBarrier b[2]{};
+                            for (VkImageMemoryBarrier& x : b)
+                            {
+                                x.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                                x.srcQueueFamilyIndex = x.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                            }
+                            b[0].image = m_viewportImage;
+                            b[0].oldLayout = m_viewportLayout; b[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                            b[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                            b[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                            b[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                            b[1].image = dst;
+                            b[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                            b[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; b[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                            b[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, m_rvtSlots };
+                            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+                            VkImageCopy region{};
+                            region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                            region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, slot, 1 };
+                            region.extent = { width, height, 1 };
+                            vkCmdCopyImage(c, m_viewportImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                            b[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                            b[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                            b[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                            b[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+                        });
+                        m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    }
+                }
+                else
+                    ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
             }
         }
     }
@@ -8857,7 +9227,25 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     // call every UI pass below sees an empty list and draws nothing.
     m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
                           m_renderWorld);
-
+    // A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+    // after the walk. Section lists would override it; terrain has none.
+    if (m_editorCamera.rvtMaterial != HE::UUID{})
+        for (RenderObject& o : m_renderWorld.objects)
+        {
+            o.materialAssetId = m_editorCamera.rvtMaterial;
+            o.sections.clear();
+        }
+    // The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material, and not
+    // the object's own parameter block (laid out for the old material; it would overwrite RvtVolumeA/B).
+    else if (!m_rvtSwaps.empty() && m_rvtPool[0].view)
+        for (RenderObject& o : m_renderWorld.objects)
+            if (o.terrainChunk)
+                if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+                {
+                    o.materialAssetId = sw->second.consumerMat;
+                    o.paramOverride.clear();
+                    o.sections.clear();
+                }
 
     // Sky is independent of scene geometry — draw it before any early returns so it
     // always renders even when the scene is empty or fully culled (otherwise the
@@ -9657,6 +10045,19 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             if (m_matLandscapeWeights)
                                 wr(static_cast<int>(nWrites++), HE::vkmat::kLandscapeWeightsBinding,
                                    VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &weightsII);
+                            // The consumer's page table and the pool (Thema 333, bindings 40..43): only a draw whose material
+                            // owns a table writes them — no other pipeline statically uses these rows.
+                            VkDescriptorImageInfo rvtII[HE::vkmat::kRvtBindingCount]{};
+                            if (m_matRvt && m_rvtPool[0].view && !m_rvtTables.empty())
+                                if (const auto tb = m_rvtTables.find(dc.materialAssetId); tb != m_rvtTables.end() && tb->second.img.view)
+                                {
+                                    rvtII[0] = { m_rvtSampler, tb->second.img.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                    for (uint32_t k = 0; k < 3; ++k)
+                                        rvtII[1 + k] = { m_rvtSampler, m_rvtPool[k].view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                    for (uint32_t k = 0; k < HE::vkmat::kRvtBindingCount; ++k)
+                                        wr(static_cast<int>(nWrites++), HE::vkmat::kRvtFirstBinding + k,
+                                           VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &rvtII[k]);
+                                }
                             VkDescriptorBufferInfo clusterBI[3]{};
                             if (m_clusterReady)
                             {
