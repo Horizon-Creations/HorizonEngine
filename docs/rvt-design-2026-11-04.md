@@ -275,7 +275,7 @@ Geprüft (RTX 4070, echte Geräte, Release-Editor, dieselben Zeugen wie bei D3D1
 
 | | D3D11 | D3D12 | Vulkan | OpenGL |
 |---|---|---|---|---|
-| Scheiben gegen Rücklesen | 27/27 | 27/27 | 27/27 | 27/27 |
+| Scheiben gegen Rücklesen (`bakeRect`) | 0/27, größte Abweichung 1/255 (so seit 2b: der schlanke Pfad schreibt direkt in 8 Bit, der Positionstest ist das Orakel) | 27/27 | 27/27 | 27/27 |
 | Positionsebenen 0..2, falsch > 3/255 | 0 | 0 | 0 | 0 |
 | Negativkontrollen `half`/`flipz`/`swapxz` | gefangen | gefangen | gefangen | gefangen |
 | Verbraucher (3 Sichten) + Feinmuster, falsch | 0 | 0 | 0 | 0 |
@@ -290,10 +290,32 @@ Tests: die Sweeps in `test_material_graph.cpp` sind **streng** geworden. Der RVT
 
 Nicht geprüft / bekannte Grenzen:
 * **Metal ist nicht portiert** (`supportsRvt` bleibt falsch, die Landschaft zeichnet wie bisher). Ich habe es nicht blind geschrieben: es lässt sich hier weder übersetzen noch laufen lassen (nur im CI-Schritt nach ctest), und `MetalRenderer.mm` hat seine eigene Bindungs- und Shader-Spiegelung. Nötig: Pool als `MTLTexture` 2D-Array, Tabelle je Consumer, Bindung an Fragment-Texturen, Tausch nach der Extraktion, Seite per Blit in die Scheibe; die MSL kommt aus derselben Querübersetzung (`RvtLookup.h`).
-* **Der Seiten-Pass ist in D3D12, Vulkan und OpenGL der allgemeine Weg**: je Seite ein neuer Ansichtssatz, Flush(es) und danach die Reparatur der Zwischenziele auf die Größe des echten Viewports. Im Zeugenlauf 17 / 24 / 3,4 ms je Seite, im Editor mit lebendem Viewport vermutlich mehr (nicht gemessen). Für einen Strich oder die erste Füllung ist das ein Ruckler, kein Dauerzustand; ein schlanker Pass (persistentes Seitenziel, kein Post-Chain, wie D3D11) ist der nächste Schritt, vor allem für D3D12/Vulkan.
+* **Der Seiten-Pass ist in D3D12, Vulkan und OpenGL der allgemeine Weg** (siehe 6b unten für die Klammer, die ihn im Editor um eine Größenordnung billiger macht); ein wirklich schlanker Pass wie der von D3D11 (persistentes Seitenziel, kein Post-Chain) ist es nicht.
 * Der Editor-Loop und das Spiel wurden nur auf D3D11 gelaufen (Schritt 4); auf den anderen drei läuft nur der Zeugen-Aufruf des Treibers (`updateTerrains`, dann `tick`).
 * OpenGL ohne 25 Textureinheiten (macOS) und Vulkan-Geräte am Sampler-Minimum: nur über die Schalter nachgestellt (`HE_VK_MAX_STAGE_SAMPLERS`), nicht auf echter Hardware.
 * CI (Linux/macOS/Windows) für Schritt 6 steht aus.
+
+## Schritt 6b: eine Seitenklammer je Tick (2026-11-04)
+
+**Befund (gemessen, vor der Änderung).** Die Zeugenläufe des Schritts 6 hatten keinen lebenden Viewport; im echten Editor (MCP-Brücke, `HE_RVT=1`, Release, RTX 4070, 256-m-Landschaft, `RHI` in der Konfiguration) kostet eine Seite im allgemeinen Pfad weit mehr, weil `RenderSceneImage` je Aufruf den lebenden Viewport beiseitelegt, einen Satz in Seitengröße baut (GPU-Flush, Post-FX-Ziele) und danach die Zwischenziele auf die Größe des Viewports zurückbaut. Der Treiber meldet jetzt `FrameStats::paintMs` (Wanduhr um das ganze Malen eines Ticks, in der Aktivitätszeile `painting took`):
+
+| 8 Seiten je Tick (Füllung), 7 Seiten (Sculpt) | D3D11 | D3D12 | Vulkan | OpenGL |
+|---|---|---|---|---|
+| vorher: Füllung | 3,0 bis 3,7 ms | 263 bis 283 ms (34 ms je Seite) | 241 bis 259 ms (31 ms je Seite) | 31 bis 43 ms |
+| vorher: Sculpt (8 + 3 Seiten, dann 7) | 2,4 + 0,7, 2,1 | 318 + 119, 199 | 428 + 143, 397 | 32 + 17, 32 |
+
+**Änderung.** `IRenderer::BeginRvtPages(px)` / `EndRvtPages()` (Standard: nichts). `RvtLandscape::tick` ruft sie **einmal je Tick** um das ganze Malen aller Volumen (RAII, schließt auf jedem Weg). D3D12 und Vulkan halten dazwischen **einen** Seitensatz: die Aufrufe mit `rvtSlot >= 0` und passender Größe bauen ihn nicht neu, die Kopie in die Pool-Scheibe liegt in der Befehlsliste des Frames selbst (ein Submit, ein Warten; die Upload-Ringe verlangen das Warten), und der lebende Viewport kommt **einmal** am Ende zurück samt Reparatur der Zwischenziele (D3D12 `rvtStillEnter/Leave`, Vulkan `stillEnter/Leave`; der Einzelaufruf-Pfad ist dieselbe Funktion mit Enter und Leave um einen Aufruf und bleibt Rückfall und Referenz). `Render()` und `CaptureViewport()` von außen holen einen gehaltenen Satz zuerst zurück. D3D11 (schlanker Pass) und OpenGL (der Satz bleibt ohnehin in Seitengröße, Reparatur beim nächsten Frame) behalten die leeren Standardfunktionen.
+
+**Der entscheidende Test** (`HE_DUMP_RVTTEST`, Teil 1b): dieselben Seiten werden einmal im Einzelpfad und dann in einer Klammer gemalt, in Slots +100 (vorher leer, damit eine Klammer, die nichts malt, nicht durch alte Seiten besteht); alle drei Layer **byte-identisch**: D3D12 27 von 27, Vulkan 27 von 27, 0 abweichend, 0 leer (auf D3D11/OpenGL trivial identisch, derselbe Pfad). Alle Zeugen wie in Schritt 6 danach unverändert (Negativkontrollen, Lit 1,51 / 1,50, Treiber, 2 x 2 Kacheln). Im Zeugenlauf (warm): D3D12 10,4 -> 1,1 ms je Seite, Vulkan 11,4 -> 0,8 ms.
+
+| Editor, nachher | D3D12 | Vulkan |
+|---|---|---|
+| Füllung (8 Seiten) | 19 bis 24 ms im ruhigen Lauf | 21 bis 31 ms |
+| Sculpt (8 + 3 Seiten, dann 7) | 39 + 12 ms, 47 | 47 + 28 ms, 68 |
+
+Das sind rund **10x** weniger (D3D12 ~3 ms je Seite, Vulkan ~3 ms; D3D11 0,45 ms). **Die Messung ist verrauscht:** während der Läufe lief auf derselben GPU ein Spiel (VALORANT), die Läufe streuten für dieselbe Arbeit zwischen 20 ms und 350 ms; angegeben ist der ruhigste Lauf, die vorherigen Werte waren stets mindestens so hoch (ein Lauf je Backend, ebenfalls unter Last). Für eine belastbare Zahl bräuchte es eine freie GPU und mehrere Läufe.
+
+Nicht gemacht: ein wirklich schlanker Pass (kein Post-Chain, ein persistentes Seitenziel, wie D3D11) und das Zusammenfassen der drei Layer einer Seite in einen Submit; dort liegt der Rest (~3 ms je Seite gegen 0,45).
 
 ## Handoff
 
@@ -302,6 +324,6 @@ Nicht geprüft / bekannte Grenzen:
 - **Done:** CPU-Kern, Renderer-Vertrag + D3D11-Page-Pass, Consumer (Knoten, Lookup, Bindung), Treiber mit Journal und Tausch (echter Loop mit einer Landschaft geprüft), mehrere Landschaften in einem Pool (Zeuge `HE_DUMP_RVTTILES`), D3D12/Vulkan/OpenGL mit allen Zeugen grün (Schritt 6, Commits c2c9cd11, ab34291a, 09817cc1 und der Wächter in den Zeugen).
 - **Files (neu in 5):** `HE_Scene/{include/HorizonScene,src}/RuntimeVirtualTexture.*` (`updateAll`, `missing`), `RvtLandscape.*` (Segmente), `HE_Core/include/Renderer/IRenderer.h` (Tabelle je Consumer, `SetRvtLandscape(entity, ...)`, `ReleaseRvtConsumer`), `HE_Rendering/.../D3D11Renderer.*` (`rvtTables`, `rvtSwaps`), `RenderObject::terrainEntity` + `RenderExtractor.cpp`, `MaterialGraph/RvtLookup.h` (Kantenklemmung), `HE_Editor/EditorApplication.cpp` (Zeuge `HE_DUMP_RVTTILES`, mit `HE_DUMP_AUTOLAND=1 HE_DUMP_AUTOLANDSIZE=128`), `tests/test_rvt_core.cpp` (+3 Fälle).
 - **Zeugen-Schalter:** `HE_DUMP_AUTOLAND=1 HE_DUMP_HLODBAKE=128 HE_DUMP_RVTTEST=1` / `HE_DUMP_RVTDRIVER=1` / `HE_DUMP_RVTTILES=1` plus `HE_DUMP_AUTOLANDSIZE`, `HE_DUMP_RVTTEST_TEXEL`, `_PERF=<reps>`, `_FAULT=half|flipz|swapxz`, `_LIT=1`. Immer `HE_HIDDEN_WINDOW=1`, eigenes `APPDATA`, `HE_DUMP_RHI=D3D11`; Warnungen stehen auf stderr, Infos auf stdout.
-- **Not verified:** CI für Schritt 3-6, Release-GPU-Zeit im großen Maßstab, das Spiel im Loop, der Editor-Loop mit mehreren Landschaften und auf D3D12/Vulkan/OpenGL, Metal (nicht portiert), echte Tiles.
+- **Not verified:** CI für Schritt 3-6, Release-GPU-Zeit im großen Maßstab auf freier GPU (die Editor-Zahlen aus 6b sind unter Last entstanden), das Spiel im Loop, der Editor-Loop mit mehreren Landschaften, Metal (nicht portiert), echte Tiles.
 - **Traps:** zweiter Build-Baum mit `-DDEPLOY_DIR` UND `-DHE_ENGINE_SDK_DIR` umlenken, Release-Baum zusätzlich `-DHE_SDK_RELEASE_SET=OFF`; `he_tests` mit **eigenem APPDATA**; `small` ist unter Windows ein Makro (`rpcndr.h`); vor einem Push auf fremde Commits achten (`git log origin/release/0.8.0..HEAD`); `tests/CMakeLists.txt` und `docs/img*` werden von der zweiten Session angefasst: nur eigene Hunks committen.
-- **Next steps:** 1. Ein schlanker Seiten-Pass für D3D12 und Vulkan (persistentes Seitenziel, kein Post-Chain; OpenGL hat 3,4 ms und kann warten), gemessen im Editor mit lebendem Viewport. 2. Metal portieren (auf einem Mac laufen lassen, nicht blind). 3. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 5. Wetter in die Scratch-Kopie; echte GPU-Zeit und Speicher (Schritt 8).
+- **Next steps:** 1. Einen wirklich schlanken Seiten-Pass für D3D12 und Vulkan, falls ~3 ms je Seite im Editor zu viel sind (die drei Layer einer Seite in einen Submit; Seitenziel ohne Post-Chain; für D3D12 braucht das eine sRGB-PSO-Variante im Schlüssel und kein Himmel), gemessen auf freier GPU. 2. Metal portieren (auf einem Mac laufen lassen, nicht blind). 3. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 5. Wetter in die Scratch-Kopie; echte GPU-Zeit und Speicher (Schritt 8).

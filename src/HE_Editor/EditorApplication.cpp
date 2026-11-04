@@ -10835,6 +10835,43 @@ void EditorApplication::dumpFrameHeadless()
 					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST slice vs readback: %u of %u slices byte-identical, worst difference %u /255",
 					            exact, checked, worst);
 
+					// 1b) the same pages inside an RVT bracket (one page set kept across the calls, the live viewport given back
+					// once): byte-identical to the per-call path above. They are painted into slots +100 (empty until now), so a
+					// bracket that painted nothing cannot pass by leaving the old pages in place.
+					{
+						std::vector<std::vector<uint8_t>> before;
+						for (const PageRender& pr : pages)
+							for (int layer = 0; layer < 3; ++layer)
+							{
+								std::vector<uint8_t> g;
+								r->ReadbackRvtSlot(layer, pr.slot, g);
+								before.push_back(std::move(g));
+							}
+						std::vector<PageRender> moved = pages;
+						for (PageRender& pr : moved) pr.slot += 100;
+						const auto b0 = std::chrono::steady_clock::now();
+						r->BeginRvtPages(px);
+						const uint32_t again = paintPages(baker, moved, px);
+						r->EndRvtPages();
+						const auto b1 = std::chrono::steady_clock::now();
+						unsigned n = 0, same = 0, differ = 0, blank = 0;
+						for (size_t k = 0; k < pages.size(); ++k)
+							for (int layer = 0; layer < 3; ++layer)
+							{
+								std::vector<uint8_t> g;
+								if (!r->ReadbackRvtSlot(layer, moved[k].slot, g)) continue;
+								const std::vector<uint8_t>& w = before[k * 3 + size_t(layer)];
+								++n;
+								if (g == w) ++same; else ++differ;
+								if (std::all_of(g.begin(), g.end(), [](uint8_t v) { return v == 0; })) ++blank;
+							}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST bracket: %u pages in %.1f ms (%.1f ms/page; per call above %.1f), %u of %u slices byte-identical to the per-call path, %u differ, %u blank",
+						            again, std::chrono::duration<double, std::milli>(b1 - b0).count(),
+						            moved.empty() ? 0.0 : std::chrono::duration<double, std::milli>(b1 - b0).count() / double(moved.size()),
+						            pages.empty() ? 0.0 : std::chrono::duration<double, std::milli>(t1r - t0r).count() / double(pages.size()),
+						            same, n, differ, blank);
+					}
+
 					// 2) border == neighbour's payload: page (x,y) texel columns 128..135 are page (x+1,y) columns 0..7
 					for (const PageRender& a : pages)
 					{

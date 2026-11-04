@@ -63,6 +63,7 @@ namespace HE::landscape
             uint32_t segments      = 0;    // landscapes known (attached or not)
             uint32_t activeSegments = 0;   // drawn from the pages now
             bool     rescanned     = false; // a segment was rebuilt from scratch (a parameter change)
+            double   paintMs       = 0.0;   // wall clock of the whole painting of this frame (what the user feels, on every backend)
         };
 
         RvtLandscape(ContentManager& cm, IRenderer& renderer);

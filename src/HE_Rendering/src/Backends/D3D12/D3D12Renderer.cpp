@@ -3858,6 +3858,25 @@ struct D3D12RendererImpl
     static constexpr UINT                  kRvtMaxTables = 256;
     struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
     std::unordered_map<uint32_t, RvtSwap>  rvtSwaps;         // per landscape entity
+    // The live state a still sets aside (RenderSceneImage): everything its frame reads that the request changes.
+    struct RvtStill
+    {
+        bool active = false;     // a still's set is in place, the live one is in the members below
+        bool kept   = false;     // ... and it is held ACROSS calls by an RVT bracket (BeginRvtPages)
+        UINT w = 0, h = 0;       // the still's size
+        ComPtr<ID3D12Resource>       liveRT, liveDepth, liveReadback;
+        ComPtr<ID3D12DescriptorHeap> liveRtvHeap, liveDsvHeap;
+        UINT liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+        D3D12_RESOURCE_STATES liveState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        bool liveResChanged = false, liveUsingHDR = false;
+        EditorCameraOverride liveCam;
+        uint32_t liveDraws = 0, liveTris = 0, liveVisible = 0, liveTotal = 0;
+        bool liveRaw = false, liveSrgb = false, liveBloom = false, liveSsao = false, liveSsr = false, liveGi = false, liveGiRefl = false;
+        HE::AAMethod   liveAa   = HE::AAMethod::Off;
+        HE::RenderPath livePath = HE::RenderPath::Forward;
+    };
+    RvtStill rvtStill;
+    UINT     rvtBracketPx = 0;       // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
     D3D12_CPU_DESCRIPTOR_HANDLE rvtTableCpu(UINT i) const
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = rvtTableHeap->GetCPUDescriptorHandleForHeapStart();
@@ -13389,6 +13408,7 @@ static void reapExpired(std::vector<std::pair<T, int>>& items)
 void D3D12Renderer::Render()
 {
     auto& p = *m_impl;
+    if (p.rvtStill.kept) rvtStillLeave();   // a bracket nobody closed: the live viewport comes back before it is drawn
     p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
 
     // Free retired viewport RTs once enough frames have passed that the GPU is done
@@ -13774,6 +13794,7 @@ void D3D12Renderer::SetSwapchainPostProcessing(bool enabled)
 bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
 {
     auto& p = *m_impl;
+    if (p.rvtStill.kept) rvtStillLeave();   // an outside caller wants the LIVE viewport, not a bracket's page set
     if (!p.viewportRT || !p.viewportReadback || p.viewportW == 0 || p.viewportH == 0)
         return false;
 
@@ -14118,6 +14139,102 @@ bool D3D12Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_
 //
 // Not run: the retire sweeps, the timestamp query pair, the counter reset, the
 // overlay, Present — those belong to REAL frames. Per-request path, not per-frame.
+void D3D12Renderer::rvtStillEnter(uint32_t width, uint32_t height)
+{
+    auto& p = *m_impl;
+    auto& st = p.rvtStill;
+    st = D3D12RendererImpl::RvtStill{};
+    // Everything the frame reads that the request changes, saved by value.
+    st.liveRT         = std::move(p.viewportRT);
+    st.liveDepth      = std::move(p.viewportDepth);
+    st.liveReadback   = std::move(p.viewportReadback);
+    st.liveRtvHeap    = std::move(p.viewportRtvHeap);
+    st.liveDsvHeap    = std::move(p.viewportDsvHeap);
+    st.liveW          = p.viewportW;
+    st.liveH          = p.viewportH;
+    st.liveReqW       = p.viewportReqW;
+    st.liveReqH       = p.viewportReqH;
+    st.liveState      = p.viewportState;
+    st.liveResChanged = p.viewportResChanged;
+    st.liveUsingHDR   = p.usingHDR;
+    st.liveCam        = m_editorCamera;
+    // The counters are the profiler's picture of the last real frame; the
+    // screenshot's draws would sit there until the next Render() otherwise.
+    st.liveDraws = p.statDraws; st.liveTris = p.statTris; st.liveVisible = p.statVisible; st.liveTotal = p.statTotal;
+    // A raw capture is the materials' own colour: every effect that would change it is off for the frame
+    // and back afterwards (members the frame reads, saved by value like the camera above).
+    st.liveRaw = p.rawCapture; st.liveSrgb = p.rawSrgb;
+    st.liveBloom = p.bloomEnabled; st.liveSsao = p.ssaoEnabled; st.liveSsr = p.ssrEnabled;
+    st.liveGi = p.giEnabled; st.liveGiRefl = p.giReflEnabled;
+    st.liveAa = p.aaMethod;
+    st.livePath = m_renderPath;
+    st.active = true;
+    st.w = width; st.h = height;
+
+    p.viewportW    = 0;
+    p.viewportH    = 0;
+    p.viewportReqW = static_cast<UINT>(width);
+    p.viewportReqH = static_cast<UINT>(height);
+    // Fresh set at the request (plus HDR & co. at that size; SSR history gone).
+    // Flushes the GPU first, so the slot used below is idle.
+    p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
+}
+
+void D3D12Renderer::rvtStillLeave()
+{
+    auto& p = *m_impl;
+    auto& st = p.rvtStill;
+    if (!st.active) return;
+    // Nothing of the screenshot may still be in flight when its set goes away.
+    p.waitForAllFrames();
+    p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
+    p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
+    p.viewportRT         = std::move(st.liveRT);
+    p.viewportDepth      = std::move(st.liveDepth);
+    p.viewportReadback   = std::move(st.liveReadback);
+    p.viewportRtvHeap    = std::move(st.liveRtvHeap);
+    p.viewportDsvHeap    = std::move(st.liveDsvHeap);
+    p.viewportW          = st.liveW;
+    p.viewportH          = st.liveH;
+    p.viewportReqW       = st.liveReqW;
+    p.viewportReqH       = st.liveReqH;
+    p.viewportState      = st.liveState;
+    p.viewportResChanged = st.liveResChanged;
+    p.usingHDR           = st.liveUsingHDR;
+    m_editorCamera       = st.liveCam;
+    p.rawCapture = st.liveRaw; p.rawSrgb = st.liveSrgb;
+    p.bloomEnabled = st.liveBloom; p.ssaoEnabled = st.liveSsao; p.ssrEnabled = st.liveSsr;
+    p.giEnabled = st.liveGi; p.giReflEnabled = st.liveGiRefl;
+    p.aaMethod = st.liveAa;
+    m_renderPath = st.livePath;
+    p.statDraws = st.liveDraws; p.statTris = st.liveTris;
+    p.statVisible = st.liveVisible; p.statTotal = st.liveTotal;
+    // The decal pass's viewport-depth SRV back to the live depth (null view
+    // when there is no live viewport; the table is bound regardless).
+    p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
+    // Intermediates back to the live size (see above). No live viewport (the
+    // direct-to-swapchain path) means nothing reads them; leave them.
+    if (st.liveW && st.liveH && (st.liveW != st.w || st.liveH != st.h))
+        p.createPostFXResources(st.liveW, st.liveH);
+    // The SSR history is the screenshot camera's now (a same-size request kept
+    // the targets, and the frame just captured into them). So is TAA's: the
+    // still's resolve marked it valid.
+    p.ssrColorHistValid = false;
+    p.ssrHistValid      = false;
+    p.taaHistoryValid   = false;
+    st.active = false;
+    st.kept   = false;
+}
+
+void D3D12Renderer::BeginRvtPages(uint32_t pagePx) { m_impl->rvtBracketPx = pagePx; }
+
+void D3D12Renderer::EndRvtPages()
+{
+    auto& p = *m_impl;
+    p.rvtBracketPx = 0;
+    if (p.rvtStill.kept) rvtStillLeave();
+}
+
 bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
                                      uint32_t height, std::vector<uint8_t>& rgba)
 {
@@ -14125,45 +14242,18 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     if (!p.device || !p.cmdQueue || !p.cmdList) return false;
     if (width == 0 || height == 0) return false;
 
-    // Everything the frame reads that the request changes, saved by value.
-    ComPtr<ID3D12Resource>       liveRT         = std::move(p.viewportRT);
-    ComPtr<ID3D12Resource>       liveDepth      = std::move(p.viewportDepth);
-    ComPtr<ID3D12Resource>       liveReadback   = std::move(p.viewportReadback);
-    ComPtr<ID3D12DescriptorHeap> liveRtvHeap    = std::move(p.viewportRtvHeap);
-    ComPtr<ID3D12DescriptorHeap> liveDsvHeap    = std::move(p.viewportDsvHeap);
-    const UINT                   liveW          = p.viewportW;
-    const UINT                   liveH          = p.viewportH;
-    const UINT                   liveReqW       = p.viewportReqW;
-    const UINT                   liveReqH       = p.viewportReqH;
-    const D3D12_RESOURCE_STATES  liveState      = p.viewportState;
-    const bool                   liveResChanged = p.viewportResChanged;
-    const bool                   liveUsingHDR   = p.usingHDR;
-    const EditorCameraOverride   liveCam        = m_editorCamera;
-    // The counters are the profiler's picture of the last real frame; the
-    // screenshot's draws would sit there until the next Render() otherwise.
-    const uint32_t liveDraws = p.statDraws, liveTris = p.statTris,
-                   liveVisible = p.statVisible, liveTotal = p.statTotal;
-
-    p.viewportW    = 0;
-    p.viewportH    = 0;
-    p.viewportReqW = static_cast<UINT>(width);
-    p.viewportReqH = static_cast<UINT>(height);
+    // Inside an RVT bracket (BeginRvtPages) the page-size set is built once and kept from one page to the next: it is the
+    // creation (a GPU flush plus the post-FX targets) and the repair at the live size afterwards that cost milliseconds
+    // per page in the editor. Anything else closes a kept set first and runs the one-call path.
+    const bool page = camera.rvtSlot >= 0;
+    const bool keep = page && p.rvtBracketPx != 0 && width == p.rvtBracketPx && height == p.rvtBracketPx;
+    if (p.rvtStill.active && !(keep && p.rvtStill.w == width && p.rvtStill.h == height)) rvtStillLeave();
+    if (!p.rvtStill.active) rvtStillEnter(width, height);
+    p.rvtStill.kept = keep;
     m_editorCamera = camera;
-
-    // Fresh set at the request (plus HDR & co. at that size; SSR history gone).
-    // Flushes the GPU first, so the slot used below is idle.
-    p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
-
-    // A raw capture is the materials' own colour: every effect that would change it is off for this frame
-    // and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
-    // the deferred resolve lights the G-buffer.
-    const bool  liveRaw = p.rawCapture, liveSrgb = p.rawSrgb;
-    const bool  liveBloom = p.bloomEnabled, liveSsao = p.ssaoEnabled, liveSsr = p.ssrEnabled;
-    const bool  liveGi = p.giEnabled, liveGiRefl = p.giReflEnabled;
-    const HE::AAMethod   liveAa   = p.aaMethod;
-    const HE::RenderPath livePath = m_renderPath;
     if (camera.rawOutput)
     {
+        // Forward, because the deferred resolve lights the G-buffer.
         p.rawCapture = true;
         p.rawSrgb    = camera.rawSrgb;
         p.bloomEnabled = p.ssaoEnabled = p.ssrEnabled = false;
@@ -14176,81 +14266,47 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
            && p.viewportRtvHeap && p.viewportDsvHeap;
     if (ok)
     {
+        // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
+        const bool pageOk = page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
+                         && uint32_t(camera.rvtSlot) < p.rvtSlots && width == p.rvtPagePx && height == p.rvtPagePx;
         p.cmdAllocators[p.frameIndex]->Reset();
         p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
         DrawViewportFrame();
+        if (pageOk)
+        {
+            // The copy rides in the frame's own list: one submit, one wait.
+            ID3D12GraphicsCommandList* cl = p.cmdList.Get();
+            ID3D12Resource* dstRes = p.rvtPool[camera.rvtLayer].Get();
+            p.barrier12(cl, p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+            D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+            src.pResource = p.viewportRT.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
+            dst.pResource = dstRes;             dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = UINT(camera.rvtSlot);
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+            p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            p.barrier12(cl, p.viewportRT.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        }
         p.cmdList->Close();
         ID3D12CommandList* lists[] = { p.cmdList.Get() };
         p.cmdQueue->ExecuteCommandLists(1, lists);
-        // CaptureViewport flushes, copies to the readback buffer, flushes again
-        // and maps; no world → the cleared target, honestly black, which is what
-        // the viewport would show too.
-        uint32_t gotW = 0, gotH = 0;
-        if (camera.rvtSlot >= 0)
+        if (page)
         {
-            // A virtual texture page (Thema 333): the picture goes into its pool slice on the GPU and nothing is read back.
             rgba.clear();
-            ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
-              && uint32_t(camera.rvtSlot) < p.rvtSlots && width == p.rvtPagePx && height == p.rvtPagePx;
-            if (ok)
-            {
-                ID3D12GraphicsCommandList* cl = p.rvtBegin();
-                ID3D12Resource* dstRes = p.rvtPool[camera.rvtLayer].Get();
-                p.barrier12(cl, p.viewportRT.Get(), p.viewportState, D3D12_RESOURCE_STATE_COPY_SOURCE);
-                p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
-                src.pResource = p.viewportRT.Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = 0;
-                dst.pResource = dstRes;             dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = UINT(camera.rvtSlot);
-                cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-                p.barrier12(cl, dstRes, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                p.barrier12(cl, p.viewportRT.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-                p.viewportState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-                p.rvtEnd();
-            }
+            p.waitForAllFrames();     // the upload rings are rewritten by the next page: it must have run
+            ok = pageOk;
         }
         else
+        {
+            // CaptureViewport flushes, copies to the readback buffer, flushes again
+            // and maps; no world → the cleared target, honestly black, which is what
+            // the viewport would show too.
+            uint32_t gotW = 0, gotH = 0;
             ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+        }
     }
 
-    // Nothing of the screenshot may still be in flight when its set goes away
-    // (cheap: the capture already flushed; this also covers the failure paths).
-    p.waitForAllFrames();
-    p.viewportRT.Reset(); p.viewportDepth.Reset(); p.viewportReadback.Reset();
-    p.viewportRtvHeap.Reset(); p.viewportDsvHeap.Reset();
-    p.viewportRT         = std::move(liveRT);
-    p.viewportDepth      = std::move(liveDepth);
-    p.viewportReadback   = std::move(liveReadback);
-    p.viewportRtvHeap    = std::move(liveRtvHeap);
-    p.viewportDsvHeap    = std::move(liveDsvHeap);
-    p.viewportW          = liveW;
-    p.viewportH          = liveH;
-    p.viewportReqW       = liveReqW;
-    p.viewportReqH       = liveReqH;
-    p.viewportState      = liveState;
-    p.viewportResChanged = liveResChanged;
-    p.usingHDR           = liveUsingHDR;
-    m_editorCamera       = liveCam;
-    p.rawCapture = liveRaw; p.rawSrgb = liveSrgb;
-    p.bloomEnabled = liveBloom; p.ssaoEnabled = liveSsao; p.ssrEnabled = liveSsr;
-    p.giEnabled = liveGi; p.giReflEnabled = liveGiRefl;
-    p.aaMethod = liveAa;
-    m_renderPath = livePath;
-    p.statDraws = liveDraws; p.statTris = liveTris;
-    p.statVisible = liveVisible; p.statTotal = liveTotal;
-    // The decal pass's viewport-depth SRV back to the live depth (null view
-    // when there is no live viewport; the table is bound regardless).
-    p.createDepthSrv(p.viewportDepth.Get(), D3D12RendererImpl::k_decalViewportDepthSlot);
-    // Intermediates back to the live size (see above). No live viewport (the
-    // direct-to-swapchain path) means nothing reads them; leave them.
-    if (liveW && liveH && (liveW != width || liveH != height))
-        p.createPostFXResources(liveW, liveH);
-    // The SSR history is the screenshot camera's now (a same-size request kept
-    // the targets, and the frame just captured into them). So is TAA's: the
-    // still's resolve marked it valid.
-    p.ssrColorHistValid = false;
-    p.ssrHistValid      = false;
-    p.taaHistoryValid   = false;
-
+    if (!keep || !ok) rvtStillLeave();
     if (!ok) rgba.clear();
     return ok;
 }

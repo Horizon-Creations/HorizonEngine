@@ -458,6 +458,7 @@ void VulkanRenderer::Shutdown()
 
 void VulkanRenderer::Render()
 {
+    if (m_still.kept) stillLeave();   // a bracket nobody closed: the live viewport comes back before it is drawn
     // Every pass below that needs the scene (cascades, decal depth pre-pass, GI, SSAO, the scene
     // itself) extracts on its own so its draw set and cascade fit agree with the others — five
     // full walks of the registry a frame, ~26 ms each at 50k entities. Inside this scope the world
@@ -6235,6 +6236,7 @@ void VulkanRenderer::SetSwapchainPostProcessing(bool enabled)
 
 bool VulkanRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, uint32_t& outH)
 {
+    if (m_still.kept) stillLeave();   // an outside caller wants the LIVE viewport, not a bracket's page set
     if (!m_viewportImage || m_viewportW == 0 || m_viewportH == 0) return false;
 
     const uint32_t w = m_viewportW;
@@ -6693,37 +6695,32 @@ bool VulkanRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8
 //
 // Not run: the retired-viewport ageing sweep, the timestamp pair, the overlay,
 // the present — those count in REAL frames. Per-request path, not per-frame.
-bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
-                                      uint32_t height, std::vector<uint8_t>& rgba)
+void VulkanRenderer::stillEnter(uint32_t width, uint32_t height)
 {
-    if (!m_device || !m_graphicsQueue || !m_cmdPool) return false;
-    if (width == 0 || height == 0) return false;
-
-    // Everything the frame reads that the request changes, saved by value. The
-    // handles go into locals and the members are nulled BEFORE
-    // createViewportResources runs: it opens by pushing the old colour image onto
-    // m_retiredViewports and then destroying the rest of the set, and the live
-    // one must survive both untouched.
-    VkImage        liveImage   = m_viewportImage;
-    VkDeviceMemory liveMemory  = m_viewportMemory;
-    VkImageView    liveView    = m_viewportView;
-    VkImage        liveDepthImage  = m_viewportDepthImage;
-    VkDeviceMemory liveDepthMemory = m_viewportDepthMemory;
-    VkImageView    liveDepthView   = m_viewportDepthView;
-    VkRenderPass   liveRenderPass  = m_viewportRenderPass;
-    VkFramebuffer  liveFramebuffer = m_viewportFramebuffer;
-    VkSampler      liveSampler     = m_viewportSampler;
-    const uint32_t      liveW          = m_viewportW;
-    const uint32_t      liveH          = m_viewportH;
-    const uint32_t      liveReqW       = m_viewportReqW;
-    const uint32_t      liveReqH       = m_viewportReqH;
-    const VkImageLayout liveLayout     = m_viewportLayout;
-    const bool          liveResChanged = m_viewportResChanged;
-    const EditorCameraOverride liveCam = m_editorCamera;
+    // Everything the frame reads that the request changes, saved by value. The handles go into the struct and the members
+    // are nulled BEFORE createViewportResources runs: it opens by pushing the old colour image onto m_retiredViewports and
+    // then destroying the rest of the set, and the live one must survive both untouched.
+    StillSet& st = m_still;
+    st = StillSet{};
+    st.liveImage = m_viewportImage; st.liveMemory = m_viewportMemory; st.liveView = m_viewportView;
+    st.liveDepthImage = m_viewportDepthImage; st.liveDepthMemory = m_viewportDepthMemory; st.liveDepthView = m_viewportDepthView;
+    st.liveRenderPass = m_viewportRenderPass; st.liveFramebuffer = m_viewportFramebuffer; st.liveSampler = m_viewportSampler;
+    st.liveW = m_viewportW; st.liveH = m_viewportH; st.liveReqW = m_viewportReqW; st.liveReqH = m_viewportReqH;
+    st.liveLayout = m_viewportLayout;
+    st.liveResChanged = m_viewportResChanged;
+    st.liveCam = m_editorCamera;
     // The counters are the profiler's picture of the last real frame; the
     // screenshot's draws would sit there until the next Render() otherwise.
-    const uint32_t liveDraws = m_statDraws, liveTris = m_statTris,
-                   liveVisible = m_statVisible, liveTotal = m_statTotal;
+    st.liveDraws = m_statDraws; st.liveTris = m_statTris; st.liveVisible = m_statVisible; st.liveTotal = m_statTotal;
+    // A raw capture is the materials' own colour: every effect that would change it is off for the frame and back
+    // afterwards (members the frame reads, saved by value like the camera above).
+    st.liveRaw = m_rawCapture; st.liveSrgb = m_rawSrgb;
+    st.liveBloom = m_bloomEnabled; st.liveSsao = m_ssaoEnabled; st.liveSsr = m_ssrEnabled;
+    st.liveGi = m_giEnabled; st.liveGiRefl = m_giReflEnabled;
+    st.liveAa = m_aaMethod;
+    st.livePath = m_renderPath;
+    st.active = true;
+    st.w = width; st.h = height;
 
     m_viewportImage   = VK_NULL_HANDLE;
     m_viewportMemory  = VK_NULL_HANDLE;
@@ -6739,134 +6736,16 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     m_viewportReqW = width;
     m_viewportReqH = height;
     m_viewportLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    m_editorCamera   = camera;
 
-    // A raw capture is the materials' own colour: every effect that would change it is off for this frame
-    // and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
-    // the deferred resolve lights the G-buffer.
-    const bool  liveRaw = m_rawCapture, liveSrgb = m_rawSrgb;
-    const bool  liveBloom = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveSsr = m_ssrEnabled;
-    const bool  liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
-    const HE::AAMethod   liveAa   = m_aaMethod;
-    const HE::RenderPath livePath = m_renderPath;
-    if (camera.rawOutput)
-    {
-        m_rawCapture = true;
-        m_rawSrgb    = camera.rawSrgb;
-        m_bloomEnabled = m_ssaoEnabled = m_ssrEnabled = false;
-        m_giEnabled = m_giReflEnabled = false;
-        m_aaMethod  = HE::AAMethod::Off;
-        m_renderPath = HE::RenderPath::Forward;
-    }
+    // Nothing may be in flight while the live set's siblings (PostFX, SSAO, decal depth) are torn down and rebuilt.
+    deviceWaitIdle();
+    createViewportResources(width, height);
+}
 
-    bool ok = false;
-    try
-    {
-        // Same order as the top of Render(): drop the caches for assets edited
-        // since the last frame (own device idle inside), then start the frame's
-        // per-pass flags from zero — m_giRanThisFrame left over from the live
-        // frame would decide this frame's aoWanted.
-        m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
-        processPendingInvalidations();
-        m_ssaoRanThisFrame = false;
-        m_giRanThisFrame   = false;
-        m_ssrRanThisFrame  = false;
-        m_ssrResultView    = VK_NULL_HANDLE;
-        m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
-        // This frame's sun before DrawViewportFrame's first extraction, as in Render().
-        m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
-                                m_environment.sunColor, m_environment.sunIntensity,
-                                m_environment.moonColor, m_environment.moonIntensity,
-                                m_environment.cloudCoverage);
-        // The same one-walk scope as Render(): DrawViewportFrame's passes extract on their own.
-        RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
-
-        // Nothing may be in flight while the live set's siblings (PostFX, SSAO,
-        // decal depth) are torn down and rebuilt, and the one-shot buffer below
-        // records on m_currentFrame's rings.
-        deviceWaitIdle();
-        createViewportResources(width, height);
-
-        if (m_viewportImage && m_viewportFramebuffer && m_viewportW == width && m_viewportH == height)
-        {
-            VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-            cbai.commandPool        = m_cmdPool;
-            cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            cbai.commandBufferCount = 1;
-            VkCommandBuffer cmd = VK_NULL_HANDLE;
-            if (vkAllocateCommandBuffers(m_device, &cbai, &cmd) == VK_SUCCESS && cmd)
-            {
-                VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-                cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-                vkBeginCommandBuffer(cmd, &cbbi);
-                DrawViewportFrame(cmd);
-                vkEndCommandBuffer(cmd);
-
-                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
-                si.commandBufferCount = 1;
-                si.pCommandBuffers    = &cmd;
-                submitGraphics(si, VK_NULL_HANDLE);
-                vkQueueWaitIdle(m_graphicsQueue);
-                vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
-
-                // CaptureViewport waits for the GPU and maps a staging buffer; no
-                // world → the cleared target, honestly black, which is what the
-                // viewport would show too.
-                uint32_t gotW = 0, gotH = 0;
-                if (camera.rvtSlot >= 0)
-                {
-                    // A virtual texture page (Thema 333): the picture goes into its pool slice on the GPU, nothing is read back.
-                    rgba.clear();
-                    ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer].image
-                      && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx;
-                    if (ok)
-                    {
-                        const VkImage dst = m_rvtPool[camera.rvtLayer].image;
-                        const uint32_t slot = static_cast<uint32_t>(camera.rvtSlot);
-                        ok = rvtOneShot([&](VkCommandBuffer c) {
-                            VkImageMemoryBarrier b[2]{};
-                            for (VkImageMemoryBarrier& x : b)
-                            {
-                                x.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-                                x.srcQueueFamilyIndex = x.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                            }
-                            b[0].image = m_viewportImage;
-                            b[0].oldLayout = m_viewportLayout; b[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-                            b[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-                            b[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                            b[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-                            b[1].image = dst;
-                            b[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-                            b[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; b[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                            b[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, m_rvtSlots };
-                            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
-                            VkImageCopy region{};
-                            region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-                            region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, slot, 1 };
-                            region.extent = { width, height, 1 };
-                            vkCmdCopyImage(c, m_viewportImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-                            b[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                            b[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                            b[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                            b[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-                            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
-                        });
-                        m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    }
-                }
-                else
-                    ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        // vkCheck throws; a request too large to allocate must not take the live
-        // viewport down with it — fall through to the give-back below.
-        HE_LOG_ERROR(RHI, "VulkanRenderer::RenderSceneImage failed: %s", e.what());
-        ok = false;
-    }
-
+void VulkanRenderer::stillLeave()
+{
+    StillSet& st = m_still;
+    if (!st.active) return;
     // ── Give the live viewport back ─────────────────────────────────────────
     // The screenshot's set goes away whole (its colour image is NOT retired: the
     // editor's descriptor never pointed at it, and the device is idle). The live
@@ -6874,30 +6753,33 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     // createPostFXResources builds m_hdrFB/m_fxaaFB/m_uiViewportFB on them.
     deviceWaitIdle();
     destroyViewportResources();
-    m_viewportImage       = liveImage;
-    m_viewportMemory      = liveMemory;
-    m_viewportView        = liveView;
-    m_viewportDepthImage  = liveDepthImage;
-    m_viewportDepthMemory = liveDepthMemory;
-    m_viewportDepthView   = liveDepthView;
-    m_viewportRenderPass  = liveRenderPass;
-    m_viewportFramebuffer = liveFramebuffer;
-    m_viewportSampler     = liveSampler;
-    m_viewportW          = liveW;
-    m_viewportH          = liveH;
-    m_viewportReqW       = liveReqW;
-    m_viewportReqH       = liveReqH;
-    m_viewportLayout     = liveLayout;
-    m_viewportResChanged = liveResChanged;
-    m_editorCamera       = liveCam;
-    m_rawCapture = liveRaw; m_rawSrgb = liveSrgb;
-    m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_ssrEnabled = liveSsr;
-    m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
-    m_aaMethod = liveAa;
-    m_renderPath = livePath;
-    m_statDraws = liveDraws; m_statTris = liveTris;
-    m_statVisible = liveVisible; m_statTotal = liveTotal;
+    m_viewportImage       = st.liveImage;
+    m_viewportMemory      = st.liveMemory;
+    m_viewportView        = st.liveView;
+    m_viewportDepthImage  = st.liveDepthImage;
+    m_viewportDepthMemory = st.liveDepthMemory;
+    m_viewportDepthView   = st.liveDepthView;
+    m_viewportRenderPass  = st.liveRenderPass;
+    m_viewportFramebuffer = st.liveFramebuffer;
+    m_viewportSampler     = st.liveSampler;
+    m_viewportW          = st.liveW;
+    m_viewportH          = st.liveH;
+    m_viewportReqW       = st.liveReqW;
+    m_viewportReqH       = st.liveReqH;
+    m_viewportLayout     = st.liveLayout;
+    m_viewportResChanged = st.liveResChanged;
+    m_editorCamera       = st.liveCam;
+    m_rawCapture = st.liveRaw; m_rawSrgb = st.liveSrgb;
+    m_bloomEnabled = st.liveBloom; m_ssaoEnabled = st.liveSsao; m_ssrEnabled = st.liveSsr;
+    m_giEnabled = st.liveGi; m_giReflEnabled = st.liveGiRefl;
+    m_aaMethod = st.liveAa;
+    m_renderPath = st.livePath;
+    m_statDraws = st.liveDraws; m_statTris = st.liveTris;
+    m_statVisible = st.liveVisible; m_statTotal = st.liveTotal;
 
+    const uint32_t liveW = st.liveW, liveH = st.liveH;
+    st.active = false;
+    st.kept   = false;
     if (liveW && liveH)
     {
         // The tail of createViewportResources, at the live size — unconditionally,
@@ -6920,7 +6802,148 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     m_ssrColorHistValid = false;
     m_ssrHistValid      = false;
     m_taaHistoryValid   = false;
+}
 
+void VulkanRenderer::BeginRvtPages(uint32_t pagePx) { m_rvtBracketPx = pagePx; }
+
+void VulkanRenderer::EndRvtPages()
+{
+    m_rvtBracketPx = 0;
+    if (m_still.kept) stillLeave();
+}
+
+bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_t width,
+                                      uint32_t height, std::vector<uint8_t>& rgba)
+{
+    if (!m_device || !m_graphicsQueue || !m_cmdPool) return false;
+    if (width == 0 || height == 0) return false;
+
+    // Inside an RVT bracket (BeginRvtPages) the page-size set is built once and kept from one page to the next: building
+    // it (a device idle plus the post-FX targets) and repairing the live viewport's afterwards is what cost tens of
+    // milliseconds per page in the editor. Anything else closes a kept set first and runs the one-call path.
+    const bool page = camera.rvtSlot >= 0;
+    const bool keep = page && m_rvtBracketPx != 0 && width == m_rvtBracketPx && height == m_rvtBracketPx;
+    if (m_still.active && !(keep && m_still.w == width && m_still.h == height)) stillLeave();
+
+    bool ok = false;
+    try
+    {
+        if (!m_still.active) stillEnter(width, height);
+        m_still.kept = keep;
+        m_editorCamera = camera;
+        if (camera.rawOutput)
+        {
+            // Forward, because the deferred resolve lights the G-buffer.
+            m_rawCapture = true;
+            m_rawSrgb    = camera.rawSrgb;
+            m_bloomEnabled = m_ssaoEnabled = m_ssrEnabled = false;
+            m_giEnabled = m_giReflEnabled = false;
+            m_aaMethod  = HE::AAMethod::Off;
+            m_renderPath = HE::RenderPath::Forward;
+        }
+
+        // Same order as the top of Render(): drop the caches for assets edited
+        // since the last frame (own device idle inside), then start the frame's
+        // per-pass flags from zero — m_giRanThisFrame left over from the live
+        // frame would decide this frame's aoWanted.
+        m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
+        processPendingInvalidations();
+        m_ssaoRanThisFrame = false;
+        m_giRanThisFrame   = false;
+        m_ssrRanThisFrame  = false;
+        m_ssrResultView    = VK_NULL_HANDLE;
+        m_statDraws = m_statTris = m_statVisible = m_statTotal = 0;
+        // This frame's sun before DrawViewportFrame's first extraction, as in Render().
+        m_extractor.setDayNight(m_environment.dayNightCycle, m_environment.timeOfDay,
+                                m_environment.sunColor, m_environment.sunIntensity,
+                                m_environment.moonColor, m_environment.moonIntensity,
+                                m_environment.cloudCoverage);
+        // The same one-walk scope as Render(): DrawViewportFrame's passes extract on their own.
+        RenderExtractor::FrameScope extractOncePerFrame(m_extractor);
+
+        if (m_viewportImage && m_viewportFramebuffer && m_viewportW == width && m_viewportH == height)
+        {
+            VkCommandBufferAllocateInfo cbai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+            cbai.commandPool        = m_cmdPool;
+            cbai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            cbai.commandBufferCount = 1;
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            if (vkAllocateCommandBuffers(m_device, &cbai, &cmd) == VK_SUCCESS && cmd)
+            {
+                // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
+                const bool pageOk = page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer].image
+                                 && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx;
+                VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+                cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(cmd, &cbbi);
+                DrawViewportFrame(cmd);
+                if (pageOk)
+                {
+                    // The copy rides in the frame's own buffer: one submit, one wait.
+                    const VkImage dst = m_rvtPool[camera.rvtLayer].image;
+                    const uint32_t slot = static_cast<uint32_t>(camera.rvtSlot);
+                    VkImageMemoryBarrier b[2]{};
+                    for (VkImageMemoryBarrier& x : b)
+                    {
+                        x.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                        x.srcQueueFamilyIndex = x.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    }
+                    b[0].image = m_viewportImage;
+                    b[0].oldLayout = m_viewportLayout; b[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    b[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                    b[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    b[0].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                    b[1].image = dst;
+                    b[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    b[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; b[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    b[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, m_rvtSlots };
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+                    VkImageCopy region{};
+                    region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+                    region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, slot, 1 };
+                    region.extent = { width, height, 1 };
+                    vkCmdCopyImage(cmd, m_viewportImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                    b[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; b[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    b[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; b[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    b[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    b[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
+                    m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                }
+                vkEndCommandBuffer(cmd);
+
+                VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+                si.commandBufferCount = 1;
+                si.pCommandBuffers    = &cmd;
+                submitGraphics(si, VK_NULL_HANDLE);
+                vkQueueWaitIdle(m_graphicsQueue);
+                vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+
+                if (page)
+                {
+                    rgba.clear();
+                    ok = pageOk;
+                }
+                else
+                {
+                    // CaptureViewport waits for the GPU and maps a staging buffer; no
+                    // world → the cleared target, honestly black, which is what the
+                    // viewport would show too.
+                    uint32_t gotW = 0, gotH = 0;
+                    ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+                }
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        // vkCheck throws; a request too large to allocate must not take the live
+        // viewport down with it — fall through to the give-back below.
+        HE_LOG_ERROR(RHI, "VulkanRenderer::RenderSceneImage failed: %s", e.what());
+        ok = false;
+    }
+
+    if (!keep || !ok) stillLeave();
     if (!ok) rgba.clear();
     return ok;
 }

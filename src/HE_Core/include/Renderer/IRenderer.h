@@ -768,6 +768,13 @@ public:
     virtual void SetRvtLandscape(uint32_t /*terrainEntity*/, const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
     // Takes one volume out: its table and its swap go, the pool and the other volumes stay (DestroyRvtPool drops everything).
     virtual void ReleaseRvtConsumer(const HE::UUID& /*consumerMaterial*/) {}
+    // The pages of one tick are painted between BeginRvtPages(pagePx) and EndRvtPages(): a backend whose page is the general
+    // RenderSceneImage frame (a viewport-sized set set aside and rebuilt around every call, post-FX repaired at the live size
+    // afterwards) keeps ONE page-size set across the whole bracket and gives the live viewport back once, at the end. The
+    // result of every page is the same inside or outside a bracket (witness: HE_DUMP_RVTTEST part 1b). No-ops
+    // by default (D3D11 has a lean page pass of its own, OpenGL's per-call set is cheap).
+    virtual void BeginRvtPages(uint32_t /*pagePx*/) {}
+    virtual void EndRvtPages() {}
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded

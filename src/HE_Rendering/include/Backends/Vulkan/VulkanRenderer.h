@@ -116,6 +116,8 @@ public:
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
 	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+	void  BeginRvtPages(uint32_t pagePx) override;
+	void  EndRvtPages() override;
 	// An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
 	// viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
 	// recorded into a one-shot command buffer and waited for. Returns the
@@ -519,6 +521,29 @@ private:
 	bool rvtMakeView(RvtImage& img, VkFormat format, VkImageViewType type, uint32_t layers, uint32_t mips);
 	void rvtDestroyImage(RvtImage& img);
 	bool rvtMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buf, VkDeviceMemory& mem);
+	// A still's set (RenderSceneImage): the live viewport set aside and a fresh one built at the request's size, then given
+	// back. Normally per call; a bracket (BeginRvtPages) keeps ONE page-size set across the pages of a tick.
+	struct StillSet
+	{
+		bool active = false;     // the still's set is in place and the live one is in the members below
+		bool kept   = false;     // ... and held ACROSS calls by a bracket
+		uint32_t w = 0, h = 0;
+		VkImage        liveImage = VK_NULL_HANDLE;      VkDeviceMemory liveMemory = VK_NULL_HANDLE;    VkImageView liveView = VK_NULL_HANDLE;
+		VkImage        liveDepthImage = VK_NULL_HANDLE; VkDeviceMemory liveDepthMemory = VK_NULL_HANDLE; VkImageView liveDepthView = VK_NULL_HANDLE;
+		VkRenderPass   liveRenderPass = VK_NULL_HANDLE; VkFramebuffer liveFramebuffer = VK_NULL_HANDLE; VkSampler liveSampler = VK_NULL_HANDLE;
+		uint32_t liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+		VkImageLayout liveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		bool liveResChanged = false;
+		EditorCameraOverride liveCam;
+		uint32_t liveDraws = 0, liveTris = 0, liveVisible = 0, liveTotal = 0;
+		bool liveRaw = false, liveSrgb = false, liveBloom = false, liveSsao = false, liveSsr = false, liveGi = false, liveGiRefl = false;
+		HE::AAMethod   liveAa   = HE::AAMethod::Off;
+		HE::RenderPath livePath = HE::RenderPath::Forward;
+	};
+	StillSet m_still;
+	uint32_t m_rvtBracketPx = 0;   // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
+	void stillEnter(uint32_t w, uint32_t h);
+	void stillLeave();
 	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
 	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
 	// the material's displacement body into the shader hash right after resolveShaders

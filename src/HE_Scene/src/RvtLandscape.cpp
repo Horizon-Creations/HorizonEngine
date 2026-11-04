@@ -331,9 +331,18 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         views.push_back({ kv.first, view });
     }
     m_manager->beginFrame();
+    const auto paintT0 = std::chrono::steady_clock::now();
     if (!views.empty())
     {
         const std::vector<rvt::PageRender> renders = m_manager->updateAll(views);
+        // All the pages of this tick between one Begin and one End: a backend whose page is the general still frame keeps one
+        // page-size set across them instead of building and repairing it around every page. Closed on every way out.
+        struct PageBracket
+        {
+            IRenderer& r; bool open = false;
+            PageBracket(IRenderer& rr, bool on, uint32_t px) : r(rr), open(on) { if (open) r.BeginRvtPages(px); }
+            ~PageBracket() { if (open) r.EndRvtPages(); }
+        } bracket(m_renderer, !renders.empty(), static_cast<uint32_t>(m_pagePx));
         std::unordered_map<uint16_t, std::vector<rvt::PageRender>> perVolume;
         for (const rvt::PageRender& r : renders) perVolume[r.key.volume].push_back(r);
         for (auto& kv : perVolume)
@@ -345,6 +354,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         }
         m_paintedTotal += st.pagesPainted;
     }
+    st.paintMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - paintT0).count();
 
     // The page tables (one per volume, when a page came or went), the first-fill latch and the swap.
     for (auto& kv : m_segments)
@@ -387,8 +397,8 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     // Activity only: an idle frame says nothing, so a log of a quiet scene is quiet and a stroke, a camera move or a tile
     // coming into range shows up.
     if (st.pagesPainted || st.pagesStale || st.tablesUploaded || st.rescanned || st.attaches || st.detaches)
-        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale, %u table(s) uploaded, %u attached, %u released, %u/%u segment(s) drawn from pages, %u resident, %u stale",
-                    st.pagesPainted, st.pagesStale, st.tablesUploaded, st.attaches, st.detaches, st.activeSegments, st.segments, ms.resident, ms.dirty);
+        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale, %u table(s) uploaded, %u attached, %u released, %u/%u segment(s) drawn from pages, %u resident, %u stale, painting took %.1f ms",
+                    st.pagesPainted, st.pagesStale, st.tablesUploaded, st.attaches, st.detaches, st.activeSegments, st.segments, ms.resident, ms.dirty, st.paintMs);
     return st;
 }
 

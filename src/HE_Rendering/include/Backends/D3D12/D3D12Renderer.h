@@ -50,6 +50,8 @@ public:
     bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
     void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
     void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+    void  BeginRvtPages(uint32_t pagePx) override;
+    void  EndRvtPages() override;
     // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
     // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
     // recorded into its own command list and waited for. Returns the ImGui SRV
@@ -121,6 +123,9 @@ public:
     void  DestroyImGuiTexture(void* handle) override;
 
 private:
+    // A still's set (RenderSceneImage): the live viewport set aside and a fresh one built, then given back (see the .cpp).
+    void  rvtStillEnter(uint32_t w, uint32_t h);
+    void  rvtStillLeave();
     // Extract → cull → sort → RenderGraph → replay into the bound command list.
     void DrawScene(void* cmdList, int width, int height);
     // The offscreen viewport frame, recorded into the open m_impl->cmdList: scene
