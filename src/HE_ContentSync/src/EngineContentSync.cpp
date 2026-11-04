@@ -1,4 +1,5 @@
 #include "ContentSync/EngineContentSync.h"
+#include "ContentSync/CacheFreshness.h"
 #include "ContentSync/CsLog.h"
 #include "ContentSync/SftpClient.h"
 #include "ContentSync/SftpCredentials.h"
@@ -155,6 +156,28 @@ bool EngineContentSync::refreshManifestWith(const ManifestFetchFn& fetch)
 		reportFailure({ SyncFailureKind::ManifestCache, {},
 		                "The catalogue could not be written to the cache folder." });
 	HE_LOG_INFO(ContentSync, "EngineContent manifest refreshed (%zu entries)", entryCount);
+
+	// A cached file the server has replaced since (same name, new content) is dropped so the on-demand
+	// download fetches the current one; without this the cache kept the old copy for ever.
+	{
+		EngineContentManifest snapshot;
+		{
+			std::lock_guard<std::mutex> lock(m_manifestMutex);
+			snapshot = m_manifest;
+		}
+		const std::size_t dropped = discardStaleCachedFiles(
+			GlobalState::engineContentCacheDir(), snapshot,
+			[this](const std::string& rel)
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+				if (m_current.relativePath == rel) return true;
+				for (const Job& j : m_pending)
+					if (j.relativePath == rel) return true;
+				return false;
+			},
+			[](const std::string& line) { HE_LOG_INFO(ContentSync, "%s", line.c_str()); });
+		if (dropped) HE_LOG_INFO(ContentSync, "%zu out-of-date cached EngineContent file(s) removed", dropped);
+	}
 	return true;
 }
 
@@ -319,6 +342,17 @@ void EngineContentSync::drainQueue()
 			// m_current is only ever touched by this thread between here and the
 			// swap below, so reading its trigger without the queue lock is safe.
 			reportFailure({ SyncFailureKind::Download, relativePath, why, m_current.trigger });
+		}
+		else
+		{
+			// What the catalogue promised for this file: the next refresh then needs no hash pass over it.
+			std::uint64_t promised = 0;
+			{
+				std::lock_guard<std::mutex> lock(m_manifestMutex);
+				for (const auto& e : m_manifest.entries)
+					if (e.relativePath == relativePath) { promised = e.contentHash; break; }
+			}
+			if (promised) recordCachedFile(GlobalState::engineContentCacheDir(), relativePath, promised);
 		}
 
 		// Take the callbacks and settle the status under ONE lock, before firing
