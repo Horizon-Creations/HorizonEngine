@@ -118,6 +118,28 @@ Nicht gemessen / Grenzen:
 * Nur D3D11. Debug-Zahlen (7,9 ms je Page) waren irreführend: Release ist 13x schneller, und die gemessene Verteilung stammt aus Release.
 * Build-Falle (zusätzlich zu `HE_ENGINE_SDK_DIR`): ein zweiter Baum mit `DEPLOY_DIR`-Override scheitert an `HorizonSDKRelease` (Prüfung des `dev`-Lib-Satzes: MISMATCH), sobald SDK-Header sich ändern und der Editor noch nicht gelinkt hat. Mit `-DHE_SDK_RELEASE_SET=OFF` im Release-Baum umgangen.
 
+## Schritt 2c: eine Szenen-Extraktion je Page statt drei (2026-11-04)
+
+Nach 2b war `extract` mit 66 % der größte Rest: die drei Layer-Ansichten einer Page extrahierten dieselbe Szene dreimal, weil der Baker das Ansichtsmaterial in die Komponenten der Landschaft schrieb.
+
+Geändert:
+* `EditorCameraOverride::rvtMaterial` (neu, `IRenderer.h`): mit `rvtSlot >= 0` zeichnet der Renderer jedes Objekt mit diesem Material. `HlodBaker::renderView` schreibt für Pages **nichts** mehr in die Welt (die Lesepfad-Ansichten tun es weiter).
+* D3D11: das Material wird nach dem Extrahieren auf die Objekte gesetzt (`DrawScene`, hinter `extractUI`); `RenderRvtPage` öffnet bei Layer 0 den Frame-Cache des Extraktors (`beginFrame`) und schließt ihn bei Layer 2 (`endFrame`). Layer 1 und 2 finden die Szene dort, wo Layer 0 sie ließ. Der Vertrag des Extraktors (Welt ändert sich nicht, Kamera gleich) hält, weil die Layer sich nur in `rvtMaterial` unterscheiden, das erst nach dem Extrahieren angewandt wird.
+* Sicherung gegen ein offen gebliebenes `beginFrame` (ein Layer scheitert): der erste normale `DrawScene` ruft `endFrame()`; sonst könnte ein normaler Frame eine fremde Szene wiederverwenden (der Extraktor erlaubt Reuse nur zwischen `beginFrame` und `endFrame`, D3D11 öffnet ihn sonst nie).
+* Nebenwirkung, gewollt: ein Stellvertretermaterial für ferne LOD-Stufen (das gebackene Fernmaterial aus Thema 228) kann nicht mehr in eine Page geraten; sie zeigt immer das Ansichtsmaterial.
+
+Gemessen (D3D11, RTX 4070, Release, ms je Page = drei Ansichten, 10 bis 20 Wiederholungen, Texel 0,25 m; "gesamt" enthält das Warten auf die GPU):
+
+| Landschaft (Chunks) | Pages im Lauf | vor 2c gesamt | nach 2c gesamt | nach 2c nur CPU |
+|---|---|---|---|---|
+| 128 m (4) | 9 | 0,139 | **0,052** | 0,029 |
+| 512 m (64) | 17 | 0,314 | **0,095** | 0,068 |
+| 1024 m (256) | 21 | 0,436 | **0,211** | 0,191 |
+
+Gegenüber dem allerersten Stand (0,597 ms bei 128 m) ist die Page jetzt rund **11x** schneller. Bei der großen Landschaft bleibt die CPU der Engpass (0,19 ms): sie wächst mit der Chunk-Zahl, weil jede Page die ganze Szenenkopie extrahiert, sortiert und beschneidet, obwohl sie nur einen Ausschnitt sieht. Nächster Hebel dafür: den Baker die Chunks der Szenenkopie auf das Page-Rechteck beschränken lassen (nur die berührten Chunks sichtbar), oder grobe Mips aus gröberen LOD-Chunks zeichnen. Nicht gebaut.
+
+Geprüft: Positionstest jetzt auch bei **512 m und 1024 m** (vorher lief er dort leer, weil der Test den Mip-0-Bereich nicht ins Budget bekam; Fehler im Zeugen, behoben: 73 984 Texel, 0 falsch, schlimmster Wert 1 / 0 / 0 /255). 128 m: 68 644 Texel, 0 falsch. Fehlerinjektion `half` / `flipz` / `swapxz` schlägt weiter an (8 / 120 / 127 /255). Rand gegen Nachbar unverändert, zweites `update()` 0 Pages, das normale Editor-Bild byte-identisch zum Stand vor der RVT-Arbeit. Neue Zeugen-Schalter: `HE_DUMP_AUTOLANDSIZE=<m>` (128 bis 2048) und `HE_DUMP_RVTTEST_TEXEL=<m>`.
+
 ## Handoff
 
 - **Topic / step:** 333, Schritt 1 von 8 (Entwurf + CPU-Kern)

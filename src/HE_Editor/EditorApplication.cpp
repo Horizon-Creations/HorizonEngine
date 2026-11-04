@@ -7913,15 +7913,20 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		ltf.position = glm::vec3(0.0f, kBaseY, 0.0f);
 		reg.emplace<TransformComponent>(land, ltf);
 		TerrainComponent ltc;
-		ltc.sizeX = ltc.sizeZ = 128.0f;
-		ltc.resolution = 129;      // 2^n + 1: no resample, one vertex per metre
+		// HE_DUMP_AUTOLANDSIZE=<m>: a power of two, 128 (default) up to 2048: 4 .. 1024 chunks, for the cost of a page against
+		// the size of the landscape the scratch world holds (Thema 333).
+		float landSize = 128.0f;
+		if (const char* ls = std::getenv("HE_DUMP_AUTOLANDSIZE"); ls && *ls)
+			landSize = std::clamp(static_cast<float>(std::atof(ls)), 128.0f, 2048.0f);
+		ltc.sizeX = ltc.sizeZ = landSize;
+		ltc.resolution = static_cast<uint32_t>(landSize) + 1;   // 2^n + 1: no resample, one vertex per metre
 		ltc.heightScale = 0.0f;
 		ltc.seed = 0;
 		ltc.sculptHeights.resize(static_cast<size_t>(ltc.resolution) * ltc.resolution);
 		for (uint32_t zi = 0; zi < ltc.resolution; ++zi)
 			for (uint32_t xi = 0; xi < ltc.resolution; ++xi)
 			{
-				const float x = -64.0f + static_cast<float>(xi);
+				const float x = -0.5f * landSize + static_cast<float>(xi);
 				const float t = std::clamp((x + 24.0f) / kRamp, 0.0f, 1.0f);
 				ltc.sculptHeights[static_cast<size_t>(zi) * ltc.resolution + xi] =
 					kPlateau * t * t * (3.0f - 2.0f * t);
@@ -10777,6 +10782,8 @@ void EditorApplication::dumpFrameHeadless()
 				vd.origin = first.min;
 				vd.sizeM  = last.min.x + last.size.x - first.min.x;
 				vd.finestMetersPerTexel = vd.sizeM / (4.0f * float(vd.pageSize));   // 4 x 4 pages at mip 0
+				if (const char* tx = std::getenv("HE_DUMP_RVTTEST_TEXEL"); tx && *tx)   // metres per texel at mip 0, e.g. 0.25 (32 m pages)
+					vd.finestMetersPerTexel = std::max(0.01f, static_cast<float>(std::atof(tx)));
 				RvtManager mgr(64, 64, 2);
 				const uint16_t vol = mgr.addVolume(vd);
 				const uint32_t px = static_cast<uint32_t>(mgr.layout(vol).physicalPageSize());
@@ -10884,7 +10891,7 @@ void EditorApplication::dumpFrameHeadless()
 						baker.viewMaterials(saved);
 						baker.setViewMaterials(mats);
 
-						RvtManager pm(8, 8, 0);
+						RvtManager pm(64, 64, 0);   // every mip of the volume fits one update, mip 0 included
 						VolumeDesc pd = vd;
 						pd.finestMetersPerTexel = 0.5f;                   // an exact binary fraction: the texel centres are exact in float
 						const uint16_t pv = pm.addVolume(pd);

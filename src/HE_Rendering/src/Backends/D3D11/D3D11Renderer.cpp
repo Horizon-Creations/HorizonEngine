@@ -7154,6 +7154,9 @@ void D3D11Renderer::DrawScene(int width, int height)
     HE_PROFILE_SCOPE_N("DrawScene");
     auto& p = *m_impl;
     ++p.drawSceneSerial;   // matKeyCache: an entry made earlier than this call is not trusted by it
+    // The extractor's walk reuse is armed only by RenderRvtPage, for the three layers of one page. If a page left it armed
+    // (a layer failed), the first ordinary draw closes it, so no frame ever reuses a walk it did not make.
+    if (!p.rvtPagePass) p.m_extractor.endFrame();
 
     // Drop caches for materials/meshes edited since last frame; they re-resolve this frame.
     p.processPendingInvalidations();
@@ -7189,6 +7192,14 @@ void D3D11Renderer::DrawScene(int width, int height)
     // call every UI pass below sees an empty list and draws nothing.
     p.m_extractor.extractUI(*m_world, static_cast<float>(width), static_cast<float>(height),
                             p.m_renderWorld);
+    // A virtual texture page (RenderRvtPage): the layer's view material replaces every object's own, after the walk, so
+    // the three layer views of a page can share one walk. Section lists would override it; terrain has none.
+    if (m_editorCamera.rvtMaterial != HE::UUID{})
+        for (RenderObject& o : p.m_renderWorld.objects)
+        {
+            o.materialAssetId = m_editorCamera.rvtMaterial;
+            o.sections.clear();
+        }
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
@@ -9412,6 +9423,10 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
     m_editorCamera = camera;
     p.ssaoEnabled = p.ssrEnabled = p.giEnabled = p.giReflEnabled = p.taaFrame = false;
     m_renderPath = HE::RenderPath::Forward;
+    // The three layers of a page are painted one after the other from the same camera over the same world: the first one
+    // walks the scene, the other two find the walk where it was left (RenderExtractor::beginFrame). The world is not
+    // edited in between (the layers differ only in rvtMaterial, which is applied after the walk).
+    if (camera.rvtLayer == 0) p.m_extractor.beginFrame();
 
     ID3D11RenderTargetView* rtv = p.rvtPageRTV[camera.rvtLayer == 0 ? 1 : 0].Get();
     const float bg[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
@@ -9423,6 +9438,7 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
     p.rvtPagePass = true;
     DrawScene(static_cast<int>(px), static_cast<int>(px));
     p.rvtPagePass = false;
+    if (camera.rvtLayer == 2) p.m_extractor.endFrame();
     { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
     p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
                                      p.rvtPageTex.Get(), 0, nullptr);

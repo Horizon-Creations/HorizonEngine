@@ -224,10 +224,15 @@ namespace HE::landscape
     bool HlodBaker::renderView(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, bool srgb,
                                std::vector<uint8_t>& rgba, int rvtSlot, int rvtLayer, bool invalidate)
     {
-        auto& reg = m_scratch->registry();
-        reg.get<MaterialComponent>(m_terrain).materialAssetId = material;
-        for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
-            mc.materialAssetId = material;
+        // A page (rvtSlot >= 0) names the material in the camera and leaves the world alone, so its three views extract one
+        // identical scene; the readback views put the material into the landscape's components.
+        if (rvtSlot < 0)
+        {
+            auto& reg = m_scratch->registry();
+            reg.get<MaterialComponent>(m_terrain).materialAssetId = material;
+            for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
+                mc.materialAssetId = material;
+        }
         if (invalidate) m_renderer.InvalidateMaterial(material);
 
         EditorCameraOverride cam;
@@ -243,6 +248,7 @@ namespace HE::landscape
         cam.nearPlane = 0.1f;
         cam.farPlane  = (m_topY - m_bottomY) + 30.0f;
         cam.rvtSlot   = rvtSlot;
+        if (rvtSlot >= 0) cam.rvtMaterial = material;
         cam.rvtLayer  = rvtLayer;
         if (rvtSlot >= 0) return m_renderer.RenderSceneImage(cam, px, px, rgba);   // the picture went into the pool
         return m_renderer.RenderSceneImage(cam, px, px, rgba) && rgba.size() == static_cast<size_t>(px) * px * 4;

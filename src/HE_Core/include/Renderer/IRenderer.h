@@ -56,6 +56,11 @@ struct EditorCameraOverride
     // layers 1 and 2 as plain data.
     int       rvtSlot      = -1;
     int       rvtLayer     = 0;
+    // With rvtSlot >= 0: draw every object of the world with this material (null = the objects' own). The page of a virtual
+    // texture is one world seen three times, once per layer view; with the material here instead of written into the
+    // world's components, the three views extract the same scene and the renderer walks it once (the extractor's
+    // beginFrame reuse). It also keeps a far-LOD stand-in material (the baked far landscape) out of a page.
+    HE::UUID  rvtMaterial;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
