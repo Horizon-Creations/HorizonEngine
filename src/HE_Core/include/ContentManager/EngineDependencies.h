@@ -33,7 +33,10 @@
 //      its bytes (a path stored as a string — .hasset chunks, node-graph JSON,
 //      widget trees, HorizonCode, scripts, the .heproj);
 //    • a .hescene (JSON): additionally an asset id, [hi, lo] or {"hi":…,"lo":…},
-//      that the catalogue knows — scenes address assets by UUID.
+//      that the catalogue knows — scenes address assets by UUID — or that a library
+//      file already on this machine carries (the editor ships assets the server never
+//      published, e.g. the terrain's mix material; the id is read from the file's META
+//      chunk, and the asset's own references are then followed like any other).
 //  Texture / audio / font assets are not read (they point at nothing); every other
 //  .hasset only up to maxAssetBytes (references sit in its leading chunks, a mesh's
 //  vertex data behind them is the bulk).

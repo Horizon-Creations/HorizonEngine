@@ -1748,8 +1748,16 @@ void ContentManager::loadUuidAsync(HE::UUID id, std::function<void(HE::UUID)> ca
 		// registry (async path-based load; coalesced by path).
 		if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
 		{
-			loadPathAsync(d->second, std::move(callback), requester);
-			return;
+			// The file this entry names may have been removed since it was indexed (a stale cached
+			// copy the sync dropped). When the manifest can bring it back, forget the entry and take
+			// the remote route below instead of failing a load that can never succeed.
+			std::error_code ec;
+			if (!m_remoteAssets.count(id) || std::filesystem::exists(resolveAbsolutePath(d->second), ec))
+			{
+				loadPathAsync(d->second, std::move(callback), requester);
+				return;
+			}
+			m_diskRegistry.erase(d);
 		}
 		// A remote-only EngineContent asset (see registerRemoteAsset): materialize
 		// it first, then load it the normal way. Coalesced by the same synthetic-key
@@ -1929,7 +1937,19 @@ void ContentManager::registerRemoteAsset(HE::UUID id, std::string relativePath,
 {
 	// Already resolvable some other way — a real local/override/mounted file
 	// always wins, and there is nothing for a materializer to add.
-	if (isLoaded(id) || m_diskRegistry.count(id)) return;
+	if (isLoaded(id)) return;
+	if (const auto d = m_diskRegistry.find(id); d != m_diskRegistry.end())
+	{
+		// The index only says what the folders held WHEN THEY WERE SCANNED. The EngineContent sync
+		// removes a cached file the server has a newer copy of ("downloads again when it is used"),
+		// often right after the startup scan: the id then still maps to a file that is gone, and
+		// skipping the registration here left that asset with no way to ever be fetched — every
+		// load of it ended in "Cannot load asset … no readable .hasset". Only a file that is really
+		// there counts as resolvable.
+		std::error_code ec;
+		if (std::filesystem::exists(resolveAbsolutePath(d->second), ec)) return;
+		m_diskRegistry.erase(d);
+	}
 
 	RemoteAssetEntry entry;
 	m_remoteByPath[relativePath] = id;
