@@ -41,6 +41,15 @@ public:
     // presented and the live set comes back untouched.
     bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
                            std::vector<uint8_t>& rgba) override;
+    // Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md): the page pool, one page table per consumer
+    // material, the per-landscape material swap. A page is RenderSceneImage's frame (raw output) copied into a pool slice.
+    bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+    void  DestroyRvtPool() override;
+    bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+    bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+    bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+    void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+    void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
     // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
     // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
     // recorded into its own command list and waited for. Returns the ImGui SRV

@@ -5806,8 +5806,8 @@ HRESULT makeMaterialPso(ID3D12Device* dev, ID3D12RootSignature* rs, ID3DBlob* vs
 	return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
 }
 
-// The D3D12 material root signature has no rows for the RVT node's table and pool (t40..t43, Thema 333): the node is
-// D3D11-only until D3D12 gets its port, and its uncovered list must name nothing else.
+// The RVT node's table and pool (t40..t43, Thema 333) are the last range of the D3D12 material root signature. The signature
+// WITHOUT that range (the one before the D3D12 port) is the negative control: it must leave exactly these four uncovered.
 bool onlyRvtBindings(std::string miss)
 {
 	for (const char* n : { "heRvtTable(2:40)", "heRvtAlbedo(2:41)", "heRvtNormal(2:42)", "heRvtSurface(2:43)" })
@@ -6328,7 +6328,11 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		// GL bind heBackdrop — so its t9 is outside the signature by design. It
 		// must stay the ONLY thing uncovered there, though.
 		if (c.name.find("RVT Sample") == 0)
-			CHECK_MESSAGE(onlyRvtBindings(miss), "'", c.name, "' binds registers beyond the RVT table and pool (t40..t43): ", miss);
+		{
+			CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover (t40..t43 are its last range): ", miss);
+			const std::string without = uncovered(b, HE::d3d12mat::kRangeCount - 1, HE::d3d12mat::kSamplerCount);
+			CHECK_MESSAGE((!without.empty() && onlyRvtBindings(without)), "'", c.name, "' without the RVT range: ", without);
+		}
 		else if (c.name.find("(UI domain)") != std::string::npos)
 		{
 			const bool onlyBackdrop = miss.empty() || miss == "heBackdrop(2:9)";
@@ -6349,7 +6353,7 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 			const std::vector<Binding> cb = reflectBindings(cps.Get());
 			const std::string cmiss = uncovered(cb, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
 			if (c.name.find("RVT Sample") == 0)
-				CHECK_MESSAGE(onlyRvtBindings(cmiss), "'", c.name, "' (clustered) binds registers beyond the RVT table and pool: ", cmiss);
+				CHECK_MESSAGE(cmiss.empty(), "'", c.name, "' (clustered) binds registers the material root signature does not cover: ", cmiss);
 			else if (c.name.find("(UI domain)") != std::string::npos)
 				CHECK_MESSAGE((cmiss.empty() || cmiss == "heBackdrop(2:9)"), "'", c.name,
 				              "' (clustered) binds registers beyond heBackdrop the signature does not cover: ", cmiss);
