@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <Renderer/IRenderer.h>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "VulkanShaderManager.h"
 #include "VulkanUploadAlloc.h"
 #include <HorizonRendering/RenderConstants.h>
@@ -502,7 +503,7 @@ private:
 	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
 	void        foldDisplacement(const HE::UUID& materialId, uint64_t& hash);
 	static constexpr uint32_t k_matMaxDraws   = 1024;
-	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
+	static constexpr uint32_t k_matSlotStride = HE::kMatParamBytes; // stride/slot for U + HeParams (HeParams fills it)
 
 	// ── Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10) ──
 	// The D3D11/D3D12 structure on Vulkan's render-pass model. A deferred frame

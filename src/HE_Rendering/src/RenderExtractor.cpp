@@ -1,5 +1,6 @@
 #include "HorizonRendering/RenderExtractor.h"
 #include <cstdint>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats
 #include <cstdlib>
 #include "HorizonRendering/RenderWorld.h"
 #include "HorizonRendering/RenderConstants.h"   // kShadowMapResolution
@@ -79,8 +80,8 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 {
 	if (block.empty())
 	{
-		block.assign(64, 0.0f);
-		const size_t n = std::min(ma.shaderParamData.size(), size_t(64));
+		block.assign(HE::kMatParamFloats, 0.0f);
+		const size_t n = std::min(ma.shaderParamData.size(), size_t(HE::kMatParamFloats));
 		std::copy(ma.shaderParamData.begin(), ma.shaderParamData.begin() + n, block.begin());
 	}
 	static const char* const kKnobs[3] = { "WaveA", "WaveB", "WaveC" };
@@ -506,8 +507,8 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 					if (!matComp->paramOverrides.empty() && contentManager)
 						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 						{
-							std::vector<float> block(64, 0.0f); // 16 vec4 slots
-							const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+							std::vector<float> block(HE::kMatParamFloats, 0.0f); // kMatMaxParams vec4 slots
+							const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 							std::copy(ma->shaderParamData.begin(), ma->shaderParamData.begin() + n, block.begin());
 							for (const auto& ov : matComp->paramOverrides)
 								for (size_t k = 0; k < ma->graphParamNames.size() && k < 16; ++k)

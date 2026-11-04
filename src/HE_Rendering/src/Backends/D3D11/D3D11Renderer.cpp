@@ -5299,7 +5299,7 @@ struct D3D11RendererImpl
         // allocation ever since the v2 8-light window landed.
         const bool cbLight = makeCB(sizeof(HE::MaterialShaderLibrary::Lighting), m_matLightCB);
         const bool cbObj   = makeCB(176, m_matObjCB);   // U
-        const bool cbParam = makeCB(256, m_matParamCB); // HeParams
+        const bool cbParam = makeCB(HE::kMatParamBytes, m_matParamCB); // HeParams
         D3D11_SAMPLER_DESC sd{};
         sd.Filter   = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
@@ -8275,10 +8275,10 @@ void D3D11Renderer::DrawScene(int width, int height)
                                 ctx->Unmap(p.m_matObjCB.Get(), 0);
                             }
                             // HeParams (16 vec4 = 64 floats = 256 B) at b3 PS / b9 WPO VS, zero-padded.
-                            float padded[64] = { 0.0f };
+                            float padded[HE::kMatParamFloats] = { 0.0f };
                             if (params)
                                 std::memcpy(padded, params->data(),
-                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                                            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
                             D3D11_MAPPED_SUBRESOURCE mp{};
                             if (SUCCEEDED(ctx->Map(p.m_matParamCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
                             {

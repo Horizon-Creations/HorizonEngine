@@ -10317,18 +10317,18 @@ bool MetalRenderer::EncodeMaterialPreview(void* renderEncoder, const HE::UUID& m
 	if (!shVert.empty())
 	{
 		[enc setVertexBytes:&lit length:sizeof(lit) atIndex:2];
-		float vpad[64] = { 0 };
+		float vpad[HE::kMatParamFloats] = { 0 };
 		if (ma && !ma->shaderParamData.empty())
 			std::memcpy(vpad, ma->shaderParamData.data(),
-			            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+			            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		[enc setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 	}
 
 	if (ma && !ma->shaderParamData.empty())
 	{
-		float padded[64] = { 0 };
+		float padded[HE::kMatParamFloats] = { 0 };
 		std::memcpy(padded, ma->shaderParamData.data(),
-		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 	}
 	// The scene's material PSO declares the whole lighting preamble (GI masks,
@@ -14428,8 +14428,8 @@ void* MetalRenderer::EncodeUIPass(void* renderEncoderPtr, int width, int height,
 			if (const MaterialAsset* ma = m_contentManager
 				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
 			{
-				float padded[64] = { 0 };
-				const size_t n = std::min(ma->shaderParamData.size(), size_t(64));
+				float padded[HE::kMatParamFloats] = { 0 };
+				const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats));
 				std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				[enc setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				const uint32_t arrMask = HE::matGlslTextureArrayMask(ma->customShaderFragGlsl);
@@ -15226,9 +15226,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				{
 					[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 					                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 					for (int i = 0; i < t.gtexCount; ++i)
 						if (t.gtex[i])
@@ -15487,9 +15487,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 					// material's shared shaderParamData — never batched, so per-draw.
 					const std::vector<float>& src =
 						!dc.paramOverride.empty() ? dc.paramOverride : *cMaterialParams;
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, src.data(),
-					            std::min(src.size(), size_t(64)) * sizeof(float));
+					            std::min(src.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				// Node-graph project textures at fragment texture units 1..4 (+ linear
@@ -15525,12 +15525,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				if (cMaterialPipeline && cMaterialWpo)
 				{
 					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-					float vpad[64] = { 0 };
+					float vpad[HE::kMatParamFloats] = { 0 };
 					const std::vector<float>* vsrc =
 						!dc.paramOverride.empty() ? &dc.paramOverride : cMaterialParams;
 					if (vsrc)
 						std::memcpy(vpad, vsrc->data(),
-						            std::min(vsrc->size(), size_t(64)) * sizeof(float));
+						            std::min(vsrc->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 				[encoder setFragmentTexture:texture atIndex:0];
@@ -15701,9 +15701,9 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 			{
 				[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 				                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];
-				float padded[64] = { 0 };
+				float padded[HE::kMatParamFloats] = { 0 };
 				std::memcpy(padded, t.params.data(),
-				            std::min(t.params.size(), size_t(64)) * sizeof(float));
+				            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 				[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				for (int i = 0; i < t.gtexCount; ++i)
 					if (t.gtex[i])
@@ -17346,9 +17346,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				{
 					const std::vector<float>& src =
 						!dc.paramOverride.empty() ? dc.paramOverride : *cMaterialParams;
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, src.data(),
-					            std::min(src.size(), size_t(64)) * sizeof(float));
+					            std::min(src.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setFragmentBytes:padded length:sizeof(padded) atIndex:2];
 				}
 				if (cMaterialPipelineGB)
@@ -17377,12 +17377,12 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				if (cMaterialPipelineGB && cMaterialWpo)
 				{
 					[encoder setVertexBytes:&matLight length:sizeof(matLight) atIndex:2];
-					float vpad[64] = { 0 };
+					float vpad[HE::kMatParamFloats] = { 0 };
 					const std::vector<float>* vsrc =
 						!dc.paramOverride.empty() ? &dc.paramOverride : cMaterialParams;
 					if (vsrc)
 						std::memcpy(vpad, vsrc->data(),
-						            std::min(vsrc->size(), size_t(64)) * sizeof(float));
+						            std::min(vsrc->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					[encoder setVertexBytes:vpad length:sizeof(vpad) atIndex:3];
 				}
 #endif

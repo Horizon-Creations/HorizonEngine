@@ -864,27 +864,28 @@ std::string kindSwizzle(MatParamKind k)
 }
 } // namespace
 
-TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, each slot read as its knob's kind")
+TEST_CASE("Engine water material: HeParams is kMatMaxParams std140 vec4 on every backend, each slot read as its knob's kind")
 {
 	// One contract, four views of it. The CPU side: every renderer copies
-	// min(shaderParamData.size(), 64) floats into a zero-padded 256-byte block
-	// (Metal/GL/D3D11/D3D12/Vulkan alike, "float padded[64]"). The shader side
-	// must therefore declare exactly 16 vec4 at stride 16 from offset 0, on the
+	// min(shaderParamData.size(), kMatParamFloats) floats into a zero-padded kMatParamBytes block
+	// (Metal/GL/D3D11/D3D12/Vulkan alike, "float padded[kMatParamFloats]"). The shader side
+	// must therefore declare exactly kMatMaxParams vec4 at stride 16 from offset 0, on the
 	// slot each backend binds: Vulkan set 0 binding 3, HLSL b3 (D3D12 root CBV
 	// kRootParamsCB), Metal fragment buffer 2, GL by block NAME "HeParams"
 	// (glUniformBlockBinding → point 2). Slot order is compiler-dependent, so
 	// nothing here looks a slot up by position — only by name or by kind.
-	static_assert(HE::kMatMaxParams == 16, "the renderers hard-code a 64-float / 256-byte HeParams upload");
+	static_assert(HE::kMatParamFloats == HE::kMatMaxParams * 4 && HE::kMatParamBytes == HE::kMatMaxParams * 16,
+	              "the renderers size their HeParams upload from kMatParamFloats / kMatParamBytes");
 	constexpr int kBlockBytes = HE::kMatMaxParams * 16;
 	const WaterSources w = loadWaterSources("ubo");
 	REQUIRE(w.ok);
 
-	SUBCASE("CPU: sixteen knobs pack into the 64-float block the renderers upload")
+	SUBCASE("CPU: sixteen knobs pack into the HeParams block the renderers upload")
 	{
 		REQUIRE(static_cast<int>(w.paramNames.size()) == kWaterKnobCount);
 		REQUIRE(w.paramTypes.size() == w.paramNames.size());
 		CHECK(w.paramData.size() == w.paramNames.size() * 4);
-		CHECK(w.paramData.size() <= static_cast<size_t>(HE::kMatMaxParams) * 4); // nothing cut by min(size, 64)
+		CHECK(w.paramData.size() <= static_cast<size_t>(HE::kMatMaxParams) * 4); // nothing cut by min(size, kMatParamFloats)
 		// Each knob's authored default sits in ITS slot's components, zeros after.
 		for (const Knob& k : kWaterKnobs)
 		{
@@ -934,7 +935,7 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 	HE::MaterialShaderLibrary lib;
 	const uint64_t h = srcHash(w.frag);
 
-	SUBCASE("SPIR-V (Vulkan): set 0 binding 3, 256 bytes, v[16] at offset 0 stride 16 — plain and clustered")
+	SUBCASE("SPIR-V (Vulkan): set 0 binding 3, kMatParamBytes, v[kMatMaxParams] at offset 0 stride 16 — plain and clustered")
 	{
 		for (const bool clustered : { false, true })
 		{
@@ -982,13 +983,14 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 		CHECK(row);
 	}
 
-	SUBCASE("GL 4.1 / ES 3.0 / GL 4.3: bound by name, 256 bytes in the LINKED program")
+	SUBCASE("GL 4.1 / ES 3.0 / GL 4.3: bound by name, kMatParamBytes in the LINKED program")
 	{
 		struct Prog { const char* what; LB vb; LB fb; bool clustered; };
 		const Prog progs[] = { { "GL 4.1", LB::GLSL410, LB::GLSL410, false },
 		                       { "ES 3.0", LB::GLSLES300, LB::GLSLES300, false },
 		                       { "GL 4.3 clustered", LB::GLSL430, LB::GLSL430, true } };
-		const std::regex block(R"(layout\(std140\)\s+uniform\s+HeParams\s*\{\s*(highp\s+)?vec4\s+v\[16\];\s*\}\s*heParams;)");
+		const std::regex block(R"(layout\(std140\)\s+uniform\s+HeParams\s*\{\s*(highp\s+)?vec4\s+v\[)" +
+		                       std::to_string(HE::kMatMaxParams) + R"(\];\s*\}\s*heParams;)");
 		for (const Prog& pr : progs)
 		{
 			CAPTURE(std::string(pr.what));
@@ -1021,9 +1023,9 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 		}
 	}
 
-	SUBCASE("Metal: struct of float4 v[16], HeLighting on buffer 1, HeParams on buffer 2")
+	SUBCASE("Metal: struct of float4 v[kMatMaxParams], HeLighting on buffer 1, HeParams on buffer 2")
 	{
-		const std::regex st(R"(struct\s+HeParams\s*\{\s*float4\s+v\[16\];\s*\};)");
+		const std::regex st(R"(struct\s+HeParams\s*\{\s*float4\s+v\[)" + std::to_string(HE::kMatMaxParams) + R"(\];\s*\};)");
 		const std::regex arg(R"(constant\s+HeParams&\s+heParams\s+\[\[buffer\((\d+)\)\]\])");
 		const std::regex lit(R"(constant\s+HeLighting&\s+heLight\s+\[\[buffer\((\d+)\)\]\])");
 		for (const bool clustered : { false, true })
@@ -1041,7 +1043,7 @@ TEST_CASE("Engine water material: HeParams is 16 std140 vec4 on every backend, e
 	}
 
 #if defined(_WIN32)
-	SUBCASE("HLSL (D3D11/D3D12): FXC's own reflection — cbuffer HeParams on b3, 256 bytes, float4[16]")
+	SUBCASE("HLSL (D3D11/D3D12): FXC's own reflection — cbuffer HeParams on b3, kMatParamBytes, float4[kMatMaxParams]")
 	{
 		HE::d3d12mat::MaterialRootSignature rs;
 		HE::d3d12mat::DescribeMaterialRootSignature(rs);

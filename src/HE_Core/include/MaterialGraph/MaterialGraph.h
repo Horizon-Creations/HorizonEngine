@@ -18,6 +18,7 @@
 // model, tests exercise codegen headlessly.
 #pragma once
 
+#include <MaterialGraph/MaterialParamLimits.h>   // kMatMaxParams, kMatParamFloats, kMatParamBytes
 #include <Types/Defines.h> // HE_API — HorizonCore.dll uses explicit exports on Windows
 #include <Types/UUID.h>
 #include <cstdint>
@@ -635,14 +636,6 @@ HE_API bool matSplitDisplacement(const std::string& disp, MatTessSettings& tess,
 // edited.
 HE_API bool matGlslUsesTime(const std::string& glsl);
 
-// Exposed parameters a single material graph may declare — the length of the
-// HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by
-// generateFragment and mirrored in MaterialShaderLibrary's WPO preamble).
-// A graph with MORE distinct parameter names bakes the surplus ones as literal
-// constants instead of indexing the UBO: the layout used to be clamped only
-// AFTER emission, so the generated shader kept reading heParams.v[16] and up —
-// out of bounds in the declared array.
-inline constexpr int kMatMaxParams = 16;
 
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function
