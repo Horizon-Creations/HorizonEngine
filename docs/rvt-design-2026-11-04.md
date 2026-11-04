@@ -189,13 +189,50 @@ Offen / nicht gebaut (bewusst, Schritt 4 ff.):
 * Kein trilineares Filtern zwischen Mips (die Mip-Grenze springt sichtbar), Tabelleneintrag `0xFFFFFFFF` zeigt neutrales Grau, `Valid` ist am Knoten abrufbar.
 * Vulkan, D3D12, OpenGL, Metal: Zeilen für 40..43, Pool, Pass (Schritt 6). Der Tile-Quadtree-Shader (Thema 326): Lookup-Funktion einbinden.
 
+## Schritt 4: der Treiber, Invalidierung, Materialtausch (2026-11-04)
+
+`HE::landscape::RvtLandscape` (`HE_Scene/RvtLandscape.h/.cpp`) fährt **eine** Landschaft. Pro Frame, nach dem Terrain-Update des Ticks: Journal leeren, Scratch-Kopie nachziehen, die Pages unter der Änderung als veraltet markieren, vom Seitenmanager holen, was die Kamera braucht (neue und veraltete, im Budget), genau das malen, die Tabelle hochladen, wenn sie sich geändert hat, und dem Renderer sagen, dass er das Landschaftsmaterial durch das Consumer-Material ersetzt (`IRenderer::SetRvtLandscape`), sobald die erste Füllung fertig ist. Ohne Änderung kostet ein Frame nichts: keine Page, kein Upload.
+
+| Teil | Entscheidung |
+|---|---|
+| Wer sieht die Änderungen | ein **Journal** auf `TerrainComponent` (`rvtJournal`, nicht serialisiert): Sculpt-Pinsel (`markRegionDirty`) und Mal-Pinsel (`paint`) tragen ihr terrain-lokales Rechteck ein, `TerrainSystem` trägt "alles" ein bei einem Vollaufbau, einem Rückfall auf ungemalt und einem Gewichts-Upload, den kein Strich angekündigt hat (Füllen, Laden, Undo). `TerrainSystem` löscht es **nicht**: Strich, Neuaufbau und Treiber sind drei Zeitpunkte, und `updateTerrains` wird auch direkt von den Pinsel-Werkzeugen gerufen. Der Treiber leert es. Test `test_rvt_journal`. |
+| Scratch-Kopie | `HlodBaker::syncTerrain`: bei "alles" eine volle Kopie + Neuaufbau; bei einem Rechteck werden nur die Höhen kopiert und nur die Chunks darunter neu gebaut (die Gewichtstextur teilt sich die Kopie mit der echten Landschaft, Malen braucht dort nichts). Der Höhenbereich der Page-Kamera wächst mit. `paintBegin/End` schalten den Renderer nur für den Moment des Malens auf die Kopie. |
+| Parameter/Schalter des Materials | lassen sich nicht in die Pages flicken (die Ansichtsgraphen werden daraus gebaut): ein Hash über Parameterblock, überschriebene Parameter und Schalter, je Frame, bei Änderung wird neu angehängt (neue Kopie, alle Pages). |
+| Tausch im Renderer | nach dem Extrahieren: `terrainChunk && materialAssetId == Landschaftsmaterial` bekommt das Consumer-Material **und leeren `paramOverride`** (der Block ist im Layout des alten Materials und würde `RvtVolumeA/B` überschreiben). Die Welt wird nie angefasst, `SceneSerializer` speichert nichts davon. Ferne LOD-Stufen mit gebackenem Fernmaterial tragen schon eine andere Id und bleiben dabei. |
+| Einschalten | nur `HE_RVT=1` in Editor und Spiel (`EditorApplication`/`GameApplication`, ein Aufruf nach `tickWorld`), bis die Einstellung aus Schritt 7 da ist. Standard aus. |
+
+Geprüft (D3D11, RTX 4070, Release-Editor, Zeuge `HE_DUMP_AUTOLAND=1 HE_DUMP_RVTDRIVER=1`; so wie die Anwendung es tut: `updateTerrains`, dann `tick`):
+
+| | 128 m (21 Pages) | 512 m (Ring um die Kamera) |
+|---|---|---|
+| erste Füllung | aktiv nach 3 Frames, 21 Pages (höchstens 8 je Frame) | 7 Frames, 53 Pages |
+| 10 Leerlauf-Frames | **0 Pages, 0 Uploads** | **0 / 0** |
+| Sculpt-Strich (Beule 8 m) | **7 Pages als veraltet markiert, unabhängig gezählt 7**, 7 neu gemalt, 0 bleiben veraltet, Journal geleert | **13 = 13** |
+| Bild im Strich: eigenes Material gegen die Pages | veraltet **4,19**, neu gemalt **1,39** (Kontrolle klar schlechter) | gleiche Werte |
+| Mal-Strich (Ebene 2, 10 m) | 6 markiert (unabhängig ~6), 6 neu gemalt | 9 = 9 |
+| Bild im Strich | veraltet **8,50**, neu gemalt **2,95** | gleiche Werte |
+| Kamera +30 m (Ring 40/48 m) | nicht prüfbar: alle 21 Pages sind schon da | **4 Pages gemalt** (Budget 8), 0 veraltet |
+| Materialparameter (Schneegrenze) | neu angehängt: ja | ja, 53 Pages in 6 Frames |
+| Renderpfad | vorwärts 1,51, aufgeschoben (deferred) 1,55, Ausgangswert 1,55 /255 gegen das eigene Material | |
+
+(Mittelwerte des größten Kanalunterschieds in /255.) Der Zähler allein beweist keinen Scratch-Abgleich: eine veraltete Kopie besteht jeden Zähler und fällt nur am Bild durch, deshalb die Kontrolle "Pages vor dem Nachziehen".
+
+Nicht geprüft / bekannte Grenzen:
+* **Der echte Editor-/Spiel-Loop mit Landschaft.** Der Zeuge läuft im Dump-Modus (ein Frame). Der Aufruf in der Anwendung ist übersetzt und läuft mit `HE_RVT=1` 60 Frames ohne Landschaft fehlerfrei (der Treiber tut dann nichts); mit einer Landschaft im laufenden Loop ist er **nicht** gelaufen (dafür braucht es ein Projekt, etwa über die MCP-Brücke).
+* **Wetter eingefroren auf trocken.** Der Auto-Landscape-Graph liest `Weather` (Nässe, Schneebedeckung); die Scratch-Kopie hat keine Umgebung, die Pages sind trocken, auch in einer nassen Szene. Stehendes Wasser (`waterF`) kommt aus Höhe/Regel und den gemalten Gewichten, nicht aus dem Wasserfeld, ist also vom Journal gedeckt. Die Umgebung in die Kopie zu spiegeln und bei einer Schwelle alles zu invalidieren ist nicht gebaut.
+* **Tile-Laden/-Entladen** (der vierte Auslöser aus der Planung) gehört zu `LandscapeStore` von PR 214 (Thema 326), das auf diesem Branch nicht existiert: Schritt 5.
+* Nur **eine** Landschaft, eine Tabelle, ein Pool (`CreateRvtPool` ersetzt den Pool). Mehrere Landschaften: Schritt 5.
+* Kein Hysterese-/Zeitbudget (nur Seitenzahl je Frame), das Material der veralteten Pages bleibt bis zum Neumalen sichtbar.
+* Ein erneutes Anhängen registriert drei Ansichtsmaterialien und ein Consumer-Material und entfernt die alten nicht (es gibt keine Unregister-Funktion), wie schon beim Export-Bake.
+
 ## Handoff
 
-- **Topic / step:** 333, Schritte 1 bis 3 von 8 gebaut (3 mit vier Unterschritten 3a-3d); Schritt 4 folgt.
+- **Topic / step:** 333, Schritte 1 bis 4 von 8 gebaut (3 mit 3a-3d, 4 mit Journal, Treiber, Tausch, Verdrahtung).
 - **Branch / commit:** `claude/runtime-virtual-textures`, gepusht (Stand vor 3b: 66fdc301; 3a 07fda632, 3b ae5e01ec, 3c 3561b01f, 3d siehe `git log`). Der Branch enthält auch lokale Commits der zweiten Session und zwei unveröffentlichte von `release/0.8.0` (1d57f608, db9afd77).
 - **Done:** CPU-Kern (S1), Renderer-Vertrag und D3D11-Page-Pass 11x schneller (S2), Page Table, Knoten, D3D11-Bindung, Consumer-Test und Lit-Vergleich (S3).
 - **Files:** `src/HE_Scene/{include/HorizonScene,src}/RuntimeVirtualTexture.*`, `RvtProducer.*`, `LandscapeHlodBaker.*` (renderRvtPage, renderMaterialImage, setViewMaterials); `src/HE_Core/include/MaterialGraph/RvtLookup.h`, `MaterialGraph.{h,cpp}` (RvtSample); `src/HE_Core/include/Renderer/IRenderer.h` (rvtSlot/rvtLayer/rvtMaterial, Pool, SetRvtPageTable); `src/HE_Rendering/src/Backends/D3D11/D3D11Renderer.cpp` (RenderRvtPage, matKeyCache, t40..t43); `src/HE_Rendering/src/material/MaterialShaderLibrary.cpp` (Pins); `src/HE_Editor/EditorApplication.cpp` (Zeuge `HE_DUMP_RVTTEST` mit Teilen 1-7); `tests/test_rvt_core.cpp`, `tests/test_rvt_shader.cpp`, Zäune in `tests/test_material_graph.cpp`.
+- **Neu in Schritt 4:** `HE_Scene/RvtLandscape.*`, `HlodBaker::syncTerrain/paintBegin/paintEnd`, `TerrainComponent::rvtJournal` (+ `TerrainSculpt/Paint/System`), `IRenderer::SetRvtLandscape` (D3D11: Tausch nach dem Extrahieren), Zeuge `HE_DUMP_RVTDRIVER=1`, Tests `test_rvt_journal`.
 - **Zeugen-Schalter:** `HE_DUMP_AUTOLAND=1 HE_DUMP_HLODBAKE=128 HE_DUMP_RVTTEST=1` plus `HE_DUMP_AUTOLANDSIZE`, `HE_DUMP_RVTTEST_TEXEL`, `_PERF=<reps>`, `_FAULT=half|flipz|swapxz`, `_LIT=1` (`_LIT_REPS`). Immer `HE_HIDDEN_WINDOW=1`, eigenes `APPDATA`, `HE_DUMP_RHI=D3D11`.
 - **Not verified:** Linux/macOS/Windows-CI für 3a-3d (gepusht sind nur S1/S2: Linux grün, macOS rot durch fremden Code `GpuArrayCook.cpp:170`, Windows lief noch), Release-GPU-Zeit im großen Maßstab, alle anderen Backends.
 - **Traps:** zweiter Build-Baum mit `-DDEPLOY_DIR` UND `-DHE_ENGINE_SDK_DIR` umlenken, Release-Baum zusätzlich `-DHE_SDK_RELEASE_SET=OFF`; `he_tests` mit **eigenem APPDATA** starten (sonst wird die echte Konfiguration überschrieben); vor einem Push auf fremde Commits im Branch achten (`git log origin/release/0.8.0..HEAD`); `tests/CMakeLists.txt` hatte einen nie committeten Scratch-Test eingetragen (66fdc301).
-- **Next steps:** 1. Schritt 4: Treiber je Frame + Tausch des Consumer-Materials in Renderer/Extraktor, Invalidierung (Pinsel, Parameter, Streaming). 2. Echte GPU-Zeit-Messung des Szenen-Pass (große Landschaft, 1440p). 3. Schritt 5: Tabelle je Objekt (Segmentierung), Absprache mit Thema 326 über `kLandscapeFS`.
+- **Next steps:** 1. Den Treiber im echten Loop mit einer Landschaft laufen sehen (Projekt, MCP-Brücke) und die echte GPU-Zeit des Szenen-Pass messen (große Landschaft, 1440p). 2. Schritt 5: eine Tabelle je Objekt (Segmentierung), Tile-Laden/-Entladen, Absprache mit Thema 326 über `kLandscapeFS`. 3. Schritt 7: die Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Wetter in die Scratch-Kopie.

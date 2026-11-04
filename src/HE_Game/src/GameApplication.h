@@ -37,6 +37,7 @@ class ScriptContext;
 
 // Game-specific Application: handles the packaged-shipping bootstrap
 // (project.hcfg, encrypted hpak, key derivation, GameLogic.dll loading).
+namespace HE::landscape { class RvtLandscape; }
 class GameApplication : public HE::Application, private HE::ICellHost
 {
 public:
@@ -182,6 +183,8 @@ private:
     // in an exported game while they worked in PIE. Rebuilt on every scene
     // switch, because the bodies belong to the world that is going away.
     std::unique_ptr<PhysicsWorld> m_physicsWorld;
+    // The Runtime Virtual Texture driver of the landscape (Thema 333 step 4). Off unless HE_RVT=1 (step 7 brings the setting).
+    std::shared_ptr<HE::landscape::RvtLandscape> m_rvtLandscape;
     float m_physicsAccum = 0.0f;
     // App-level UI: the GameInstance's widgets live here (not in any world), so a
     // HUD created in OnInit exists before the first scene and survives scene

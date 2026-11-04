@@ -26,6 +26,7 @@
 #include <HorizonScene/UICursorSDL.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
+#include <HorizonScene/RvtLandscape.h>
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AudioSystem.h>
@@ -3425,6 +3426,13 @@ void GameApplication::OnRender(float deltaTime)
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
+		// The virtual texture of the landscape, after the terrain update of the tick (HE_RVT=1).
+		static const bool rvtOn = [] { const char* v = std::getenv("HE_RVT"); return v && *v && *v != '0'; }();
+		if (rvtOn && r)
+		{
+			if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *r);
+			m_rvtLandscape->tick(*m_world, camPos);
+		}
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead
 		// of extraction, which consumes the bone matrices.

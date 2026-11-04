@@ -1,5 +1,6 @@
 #include "HorizonScene/LandscapeHlodBaker.h"
 #include "HorizonScene/HorizonWorld.h"
+#include "HorizonScene/TerrainSculpt.h"
 #include "HorizonScene/TerrainSystem.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/Components/LODComponent.h"
@@ -95,7 +96,7 @@ namespace HE::landscape
 
     HlodBaker::~HlodBaker() { end(); }
 
-    bool HlodBaker::begin(entt::entity terrain, std::string* why)
+    bool HlodBaker::begin(entt::entity terrain, std::string* why, bool switchRenderer)
     {
         auto fail = [&](const char* msg) { if (why) *why = msg; return false; };
         end();
@@ -199,7 +200,8 @@ namespace HE::landscape
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
 
-        m_renderer.SetWorld(m_scratch.get());
+        m_pos = stf.position;
+        if (switchRenderer) m_renderer.SetWorld(m_scratch.get());
         m_active = true;
         return true;
     }
@@ -259,6 +261,58 @@ namespace HE::landscape
         HlodChunkRect rect;
         if (!chunkRect(cx, cz, rect)) return false;
         return bakeRect(rect, side, supersample, out);
+    }
+
+    void HlodBaker::paintBegin()
+    {
+        if (m_active) m_renderer.SetWorld(m_scratch.get());
+    }
+
+    void HlodBaker::paintEnd()
+    {
+        if (m_active) m_renderer.SetWorld(&m_restore);
+    }
+
+    void HlodBaker::syncTerrain(const TerrainComponent& live, bool all, glm::vec2 mn, glm::vec2 mx)
+    {
+        if (!m_active) return;
+        auto& sreg = m_scratch->registry();
+        auto& tc = sreg.get<TerrainComponent>(m_terrain);
+        if (all)
+        {
+            TerrainComponent copy = live;
+            copy.dirty = true;
+            copy.regionDirty = false;
+            copy.rvtJournal.clear();
+            tc = std::move(copy);
+        }
+        else
+        {
+            tc.sculptHeights = live.sculptHeights;
+            TerrainSculpt::markRegionDirty(tc, mn.x, mn.y, mx.x, mx.y);
+        }
+        TerrainSystem::updateTerrains(*m_scratch, m_cm, &m_renderer);
+        tc.rvtJournal.clear();
+
+        // The page camera looks from above the highest ground to below the lowest: widen it by what the rebuilt chunks hold
+        // (a full rebuild measures them all again).
+        float bot = all ? std::numeric_limits<float>::max() : m_bottomY - m_pos.y;
+        float top = all ? std::numeric_limits<float>::lowest() : m_topY - m_pos.y;
+        for (auto [ce, cc, mesh] : sreg.view<TerrainChunkComponent, MeshComponent>().each())
+        {
+            if (!all)
+            {
+                const size_t at = static_cast<size_t>(cc.cz) * m_chunksPerSide + cc.cx;
+                if (at >= m_rects.size()) continue;
+                const HlodChunkRect& r = m_rects[at];
+                const glm::vec2 lo(r.min.x - m_pos.x, r.min.y - m_pos.z), hi = lo + r.size;
+                if (hi.x < mn.x || lo.x > mx.x || hi.y < mn.y || lo.y > mx.y) continue;
+            }
+            float lo = std::numeric_limits<float>::max(), hi = std::numeric_limits<float>::lowest();
+            meshHeightRange(m_cm, mesh.meshAssetId, lo, hi);
+            if (lo <= hi) { bot = std::min(bot, lo); top = std::max(top, hi); }
+        }
+        if (bot <= top) { m_bottomY = m_pos.y + bot; m_topY = m_pos.y + top; }
     }
 
     bool HlodBaker::renderMaterialImage(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, std::vector<uint8_t>& rgba)

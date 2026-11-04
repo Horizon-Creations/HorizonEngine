@@ -1669,6 +1669,9 @@ struct D3D11RendererImpl
     ComPtr<ID3D11ShaderResourceView> rvtTableSRV;
     uint32_t                         rvtTableSide = 0;
     uint32_t                         rvtTableMips = 0;
+    // SetRvtLandscape: the landscape's chunks are drawn with the consumer material (null consumer = off)
+    HE::UUID                         rvtLandscapeMat{};
+    HE::UUID                         rvtConsumerMat{};
     ComPtr<ID3D11DepthStencilView>   rvtPageDSV;
     ComPtr<ID3D11ShaderResourceView> rvtPageDepthSRV;
     ComPtr<ID3D11RenderTargetView>   viewportRTV;
@@ -7207,6 +7210,17 @@ void D3D11Renderer::DrawScene(int width, int height)
             o.materialAssetId = m_editorCamera.rvtMaterial;
             o.sections.clear();
         }
+    // The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material. The
+    // object's parameter block is the landscape material's, in ITS order: left in place it would overwrite the consumer's
+    // volume parameters (RvtVolumeA/B), so it goes (a far LOD stand-in material cleared it for the same reason).
+    else if (p.rvtConsumerMat != HE::UUID{} && p.rvtPageTex)
+        for (RenderObject& o : p.m_renderWorld.objects)
+            if (o.terrainChunk && o.materialAssetId == p.rvtLandscapeMat)
+            {
+                o.materialAssetId = p.rvtConsumerMat;
+                o.paramOverride.clear();
+                o.sections.clear();
+            }
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
@@ -9416,6 +9430,7 @@ void D3D11Renderer::DestroyRvtPool()
     auto& p = *m_impl;
     for (int layer = 0; layer < 3; ++layer) { p.rvtPoolSRV[layer].Reset(); p.rvtPool[layer].Reset(); }
     p.rvtTableSRV.Reset(); p.rvtTableTex.Reset(); p.rvtTableSide = p.rvtTableMips = 0;
+    p.rvtLandscapeMat = p.rvtConsumerMat = HE::UUID{};   // the pool the consumer reads is gone: draw the landscape itself again
     p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset();
     p.rvtPageDepth.Reset(); p.rvtPageDSV.Reset(); p.rvtPageDepthSRV.Reset();
     p.rvtSlots = p.rvtPagePx = 0;
@@ -9473,6 +9488,12 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
     p.counters = liveCounters;
 
     return true;
+}
+
+void D3D11Renderer::SetRvtLandscape(const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+    m_impl->rvtLandscapeMat = landscapeMaterial;
+    m_impl->rvtConsumerMat  = consumerMaterial;
 }
 
 bool D3D11Renderer::SetRvtPageTable(const std::vector<std::vector<uint32_t>>& mips)

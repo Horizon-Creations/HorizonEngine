@@ -110,6 +110,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
 #include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/RvtProducer.h>
+#include <HorizonScene/RvtLandscape.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -4084,6 +4085,14 @@ void EditorApplication::OnRender(float dt)
 			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
+			// The virtual texture of the landscape, after the terrain update of the tick (HE_RVT=1).
+			static const bool rvtOn = [] { const char* v = std::getenv("HE_RVT"); return v && *v && *v != '0'; }();
+			if (rvtOn && renderer())
+			{
+				if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
+				HE_PROFILE_SCOPE_N("RvtLandscape");
+				m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
+			}
 		}
 
 		// Step physics at a fixed rate during play mode
@@ -11300,6 +11309,236 @@ void EditorApplication::dumpFrameHeadless()
 			setMaterial(directMat);
 		}
 		r->DestroyRvtPool();
+	}
+	// HE_DUMP_RVTDRIVER=1 (Thema 333 step 4): the per-frame driver on the live AUTOLAND landscape, the way the application
+	// runs it (terrain update, then RvtLandscape::tick). Checks, in order: the first fill; an idle frame paints nothing and
+	// uploads nothing; a sculpt stroke marks exactly the resident pages its bordered rect touches and repaints exactly those;
+	// a paint stroke the same; a camera move paints only new pages; a change of the landscape material's parameters re-attaches.
+	// After each edit the landscape is drawn lit from the pages and from its own material, and the picture of the pages BEFORE
+	// the driver caught up is the control: a stale scratch copy or stale pages passes every counter and fails only there.
+	if (const char* dv = std::getenv("HE_DUMP_RVTDRIVER"); dv && *dv && *dv != '0' && m_editorWorld && r)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTDRIVER: no landscape with a material");
+		else
+		{
+			HE::landscape::RvtLandscape drv(contentManager(), *r);
+			HE::landscape::RvtLandscape::Settings cfg;
+			// every mip-0 page of the 128 m landscape is wanted; on a bigger one the ring is a part of it (the camera test needs that)
+			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			drv.setSettings(cfg);
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const auto sceneTick = [&]() {
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);       // the world tick's terrain update
+				return drv.tick(*m_editorWorld, camPos);
+			};
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 2000.0f;
+				cam.position = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			constexpr uint32_t W = 1280, H = 720;
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+			// the landscape drawn from its own material: the swap off for one capture, then on again
+			const auto captureDirect = [&](std::vector<uint8_t>& img) {
+				r->SetRvtLandscape(HE::UUID{}, HE::UUID{});
+				const bool ok = capture(img);
+				if (drv.active()) r->SetRvtLandscape(directMat, drv.consumerMaterial());
+				return ok;
+			};
+			// mean |a - b| over the whole picture and over the pixels where the control differs from the reference (the stroke)
+			const auto diffStats = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, double& mean, unsigned& mx) {
+				double sum = 0; mx = 0; size_t n = 0;
+				for (size_t i = 0; i < a.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+				mean = sum / double(n);
+			};
+			// the same, only over the box of a stroke (terrain-local centre and radius), where a stale page shows
+			const auto regionMean = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, float lx, float lz, float rad) {
+				const float mpp = 2.0f * 110.0f * std::tan(glm::radians(30.0f)) / float(H);   // metres per pixel of lookDown()
+				const int x0 = std::clamp(int(float(W) * 0.5f + (lx - rad) / mpp), 0, int(W) - 1), x1 = std::clamp(int(float(W) * 0.5f + (lx + rad) / mpp), 0, int(W) - 1);
+				const int y0 = std::clamp(int(float(H) * 0.5f + (lz - rad) / mpp), 0, int(H) - 1), y1 = std::clamp(int(float(H) * 0.5f + (lz + rad) / mpp), 0, int(H) - 1);
+				double sum = 0; size_t n = 0;
+				for (int y = y0; y <= y1; ++y)
+					for (int x = x0; x <= x1; ++x)
+					{
+						const size_t i = (size_t(y) * W + size_t(x)) * 4;
+						unsigned d = 0;
+						for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+						sum += d; ++n;
+					}
+				return n ? sum / double(n) : 0.0;
+			};
+			// how many resident pages' bordered rect touches a world rect: the independent count the journal path must match
+			const auto residentTouching = [&](glm::vec2 mn, glm::vec2 mx) {
+				uint32_t n = 0;
+				const HE::rvt::RvtManager& m = *drv.manager();
+				const HE::rvt::VolumeLayout& L = m.layout(drv.volume());
+				for (int mip = 0; mip < L.mipCount(); ++mip)
+					for (int y = 0; y < L.pagesPerSide(mip); ++y)
+						for (int x = 0; x < L.pagesPerSide(mip); ++x)
+						{
+							glm::vec2 a, b;
+							L.pageRect(mip, x, y, a, b, true);
+							if (m.isResident(HE::rvt::PageKey{ drv.volume(), uint8_t(mip), uint16_t(x), uint16_t(y) }) &&
+							    !(b.x <= mn.x || a.x >= mx.x || b.y <= mn.y || a.y >= mx.y)) ++n;
+						}
+				return n;
+			};
+
+			// A) the first fill
+			HE::landscape::RvtLandscape::FrameStats st;
+			int frames = 0; uint32_t filled = 0;
+			for (; frames < 300 && !drv.active(); ++frames) { st = sceneTick(); filled += st.pagesPainted; }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER fill: active after %d frames, %u pages painted (%u at most per frame)", frames, filled, cfg.maxPagesPerFrame);
+
+			// B) idle
+			uint32_t idlePainted = 0; int idleUploads = 0;
+			for (int i = 0; i < 10; ++i) { st = sceneTick(); idlePainted += st.pagesPainted; idleUploads += st.tableUploaded ? 1 : 0; }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER idle: 10 frames, %u pages painted, %d table uploads (expected 0, 0)", idlePainted, idleUploads);
+
+			std::vector<uint8_t> direct, pages, stale, ref;
+			bool ok = capture(ref);
+			double meanBase = 0; unsigned maxBase = 0;
+			ok = ok && captureDirect(direct) && capture(pages);
+			if (ok) diffStats(direct, pages, meanBase, maxBase);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER baseline pages vs own material: mean %.2f /255, max %u", meanBase, maxBase);
+
+			// The same comparison on the OTHER render path (the game defaults to deferred): the consumer's G-buffer tail binds the
+			// same table and pool, and a draw in the G-buffer pass skips the shader-key fast path.
+			{
+				const HE::RenderPath livePath = r->GetRenderPath();
+				for (const HE::RenderPath rp : { HE::RenderPath::Forward, HE::RenderPath::Deferred })
+				{
+					r->SetRenderPath(rp);
+					std::vector<uint8_t> d2, p2;
+					double m2 = 0; unsigned x2 = 0;
+					const bool ok2 = captureDirect(d2) && capture(p2) && capture(p2);
+					if (ok2) diffStats(d2, p2, m2, x2);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER render path %s: pages vs own material mean %.2f /255, max %u (%s)",
+					            rp == HE::RenderPath::Forward ? "forward" : "deferred", m2, x2, ok2 ? "ok" : "capture FAILED");
+					if (ok2 && rp == HE::RenderPath::Deferred) writeBMP(m_dumpPath + ".rvt_drv_deferred_pages.bmp", p2, W, H);
+				}
+				r->SetRenderPath(livePath);
+			}
+
+			// C) a sculpt stroke: a bump of 8 m, 14 m wide, the way a brush edits (heights, then the dirty rect, then the tick)
+			{
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainSculpt::ensureHeights(tc);
+				const float cx = 20.0f, cz = -15.0f, rad = 14.0f;
+				const float step = tc.sizeX / float(tc.resolution - 1);
+				for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+					for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+					{
+						const float x = -tc.sizeX * 0.5f + float(xi) * step, z = -tc.sizeZ * 0.5f + float(zi) * step;
+						const float d = std::sqrt((x - cx) * (x - cx) + (z - cz) * (z - cz)) / rad;
+						if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 8.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+					}
+				TerrainSculpt::markRegionDirty(tc, cx - rad - step, cz - rad - step, cx + rad + step, cz + rad + step);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);       // the tool's own immediate update
+				const uint32_t expect = residentTouching(glm::vec2(centre.x + cx - rad - step, centre.z + cz - rad - step),
+				                                         glm::vec2(centre.x + cx + rad + step, centre.z + cz + rad + step));
+				ok = capture(stale);                                                         // the pages BEFORE the driver ran: the control
+				st = drv.tick(*m_editorWorld, camPos);                                       // (the tick after the terrain update)
+				uint32_t painted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) painted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke: %u pages marked stale (independent count %u), %u repainted, %u still dirty, journal %s",
+				            st.pagesStale, expect, painted, drv.manager()->stats().dirty, wreg.get<TerrainComponent>(land).rvtJournal.any ? "NOT drained" : "drained");
+				std::vector<uint8_t> after, afterDirect;
+				ok = ok && capture(after) && captureDirect(afterDirect);
+				double mStale = 0, mFresh = 0; unsigned xs = 0, xf = 0;
+				if (ok) { diffStats(afterDirect, stale, mStale, xs); diffStats(afterDirect, after, mFresh, xf); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER sculpt stroke picture: own material vs stale pages mean %.2f (max %u), vs repainted pages mean %.2f (max %u); inside the stroke: stale %.2f, repainted %.2f  [the control must be clearly worse]",
+				            mStale, xs, mFresh, xf, ok ? regionMean(afterDirect, stale, 20.0f, -15.0f, 14.0f) : 0.0, ok ? regionMean(afterDirect, after, 20.0f, -15.0f, 14.0f) : 0.0);
+				writeBMP(m_dumpPath + ".rvt_drv_sculpt_stale.bmp", stale, W, H);
+				writeBMP(m_dumpPath + ".rvt_drv_sculpt_after.bmp", after, W, H);
+			}
+
+			// D) a paint stroke on layer 2, 10 m radius
+			{
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainPaint::ensureWeightmap(tc);
+				for (int i = 0; i < 3; ++i) sceneTick();      // the allocation of a weightmap is itself a change (all): let it settle
+				for (int i = 0; i < 60 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				const float px_ = -25.0f, pz_ = 20.0f, prad = 10.0f, pfall = 4.0f;
+				TerrainPaint::paint(tc, px_, pz_, 2, prad, pfall, 1.0f);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				const float reach = prad + pfall + tc.sizeX / float(tc.weightRes) * 2.0f;
+				const uint32_t expect = residentTouching(glm::vec2(centre.x + px_ - reach, centre.z + pz_ - reach), glm::vec2(centre.x + px_ + reach, centre.z + pz_ + reach));
+				std::vector<uint8_t> staleP, afterP, afterDirectP;
+				bool okP = capture(staleP);
+				st = drv.tick(*m_editorWorld, camPos);
+				uint32_t painted = st.pagesPainted;
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) painted += sceneTick().pagesPainted;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER paint stroke: %u pages marked stale (independent count about %u), %u repainted, %u still dirty",
+				            st.pagesStale, expect, painted, drv.manager()->stats().dirty);
+				okP = okP && capture(afterP) && captureDirect(afterDirectP);
+				double mStale = 0, mFresh = 0; unsigned xs = 0, xf = 0;
+				if (okP) { diffStats(afterDirectP, staleP, mStale, xs); diffStats(afterDirectP, afterP, mFresh, xf); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER paint stroke picture: own material vs stale pages mean %.2f (max %u), vs repainted pages mean %.2f (max %u); inside the stroke: stale %.2f, repainted %.2f",
+				            mStale, xs, mFresh, xf, okP ? regionMean(afterDirectP, staleP, -25.0f, 20.0f, 14.0f) : 0.0, okP ? regionMean(afterDirectP, afterP, -25.0f, 20.0f, 14.0f) : 0.0);
+			}
+
+			// E) the camera moves 30 m with a 40 m near radius: only pages that came into view are painted, none are stale, never more
+			// than the budget in one frame
+			{
+				cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 40.0f;
+				drv.setSettings(cfg);
+				uint32_t settle = 0;
+				for (int i = 0; i < 30; ++i) settle += sceneTick().pagesPainted;      // the ring around the start position
+				const uint32_t resident0 = drv.manager()->stats().resident;
+				camPos.x += 30.0f;
+				uint32_t painted = 0, stale0 = 0, perFrame = 0;
+				for (int i = 0; i < 30; ++i) { st = sceneTick(); painted += st.pagesPainted; stale0 += st.pagesStale; perFrame = std::max(perFrame, st.pagesPainted); }
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER camera +30 m (near radius 40 m): %u pages to settle the start, then %u painted for the move (at most %u in one frame, budget %u), %u marked stale (expected 0), resident %u -> %u",
+				            settle, painted, perFrame, cfg.maxPagesPerFrame, stale0, resident0, drv.manager()->stats().resident);
+			}
+
+			// F) a change of the landscape material's parameters: the view graphs cannot be patched, the driver starts over
+			{
+				// the snow line: the slot of the parameter by NAME (a sync lays the block out like the parent's, slot 0 is not it)
+				MaterialAsset* ma = contentManager().getMaterialMutable(directMat);
+				size_t snowSlot = ~size_t(0);
+				if (ma)
+					for (size_t i = 0; i < ma->graphParamNames.size(); ++i)
+						if (ma->graphParamNames[i] == HE::kAutoLandscapeParamSnowHeight) snowSlot = i * 4;
+				if (ma && snowSlot < ma->shaderParamData.size())
+				{
+					const float before = ma->shaderParamData[snowSlot];
+					ma->shaderParamData[snowSlot] += 15.0f;
+					contentManager().syncMaterialInstance(directMat);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material: snow line %.1f -> %.1f, after sync %.1f (slot %zu of %zu floats, parent '%s')", before, before + 15.0f, ma->shaderParamData[snowSlot], snowSlot, ma->shaderParamData.size(), ma->parentMaterialPath.c_str());
+					r->InvalidateMaterial(directMat);
+					bool rescanned = false; uint32_t painted = 0; int refill = 0;
+					for (; refill < 300; ++refill)
+					{
+						st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+						if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+					}
+					std::vector<uint8_t> a, b;
+					bool okF = captureDirect(a) && capture(b);
+					double mF = 0; unsigned xF = 0;
+					if (okF) diffStats(a, b, mF, xF);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change: re-attached %s, %u pages painted over %d frames, pages vs own material mean %.2f (max %u)",
+					            rescanned ? "yes" : "NO", painted, refill, mF, xF);
+				}
+			}
+			drv.detach();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER done: %llu pages painted in total, detached", static_cast<unsigned long long>(drv.pagesPaintedTotal()));
+		}
 	}
 	// HE_DUMP_AUTOLANDSAVE=<file.hescene> (Thema 228): the HE_DUMP_AUTOLAND witness world written out as a scene, so a
 	// scratch project can hold an Auto Landscape for HE_DUMP_HLODEXPORT and a real export (the water witness has its own

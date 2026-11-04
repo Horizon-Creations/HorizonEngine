@@ -10,6 +10,7 @@
 // EditorCameraOverride::rawOutput, so an unlit view's colour is returned unchanged.
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -17,6 +18,7 @@
 #include <Types/UUID.h>
 
 class HorizonWorld;
+struct TerrainComponent;
 class ContentManager;
 class IRenderer;
 
@@ -53,7 +55,9 @@ namespace HE::landscape
         // material with the terrain's own parameter overrides and switches, builds the chunks and waits for
         // the three pipelines. False with the reason in `why`: not an Auto Landscape material, a rotated or
         // scaled landscape, a renderer without RenderSceneImage.
-        bool begin(entt::entity terrain, std::string* why = nullptr);
+        // `switchRenderer` false (the Runtime Virtual Texture driver, every frame): the renderer keeps drawing `restoreTo`;
+        // paintBegin()/paintEnd() move it to the scratch world and back around each batch of pages.
+        bool begin(entt::entity terrain, std::string* why = nullptr, bool switchRenderer = true);
         // Switches the renderer back to the live world and drops the scratch world. Also called by the destructor.
         void end();
 
@@ -68,6 +72,14 @@ namespace HE::landscape
         // Runtime Virtual Textures (Thema 333): the same three views of `rect`, `px` x `px`, but each goes straight into
         // slice `slot` of the renderer's RVT pool (layer 0 BaseColor, 1 Normal, 2 Surface), no readback, no filter.
         bool renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot);
+        void paintBegin();   // the renderer draws the scratch world ...
+        void paintEnd();     // ... and the live one again
+        // Brings the scratch landscape up to date with the live one after an edit of its ground: `all` = a full copy and
+        // rebuild, otherwise only the heights are copied and the chunks under the terrain-local rect (mn..mx) rebuilt (the
+        // weight texture is shared with the live landscape, so paint needs nothing). The height range the page camera has to
+        // cover is widened to what the rebuilt chunks hold.
+        void syncTerrain(const TerrainComponent& live, bool all, glm::vec2 mn, glm::vec2 mx);
+        bool active() const { return m_active; }
         // The scratch landscape drawn top-down with ANY material (a witness: the RVT consumer against the analytic
         // ramp), `px` x `px` RGBA8 read back, linear (no sRGB encode).
         bool renderMaterialImage(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, std::vector<uint8_t>& rgba);
@@ -95,6 +107,7 @@ namespace HE::landscape
         uint32_t        m_chunksPerSide = 0;
         float           m_topY = 0.0f, m_bottomY = 0.0f;   // world heights the camera has to cover
         std::vector<HlodChunkRect> m_rects;          // [cz * chunksPerSide + cx]
+        glm::vec3       m_pos{ 0.0f };               // the landscape's world position (terrain-local XZ is relative to it)
         int             m_group = -1;
         bool            m_rvtSeen[3] = { false, false, false };   // a view material the renderer has already resolved for pages
         bool            m_active = false;

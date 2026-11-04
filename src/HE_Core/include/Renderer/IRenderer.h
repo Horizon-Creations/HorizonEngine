@@ -758,6 +758,11 @@ public:
     virtual bool SetRvtPageTable(const std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
     // Reads the table back the same way (a witness).
     virtual bool ReadbackRvtPageTable(std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // From now on the terrain chunks drawn with `landscapeMaterial` are drawn with `consumerMaterial` instead (the material
+    // with the RvtSample node, which reads the pool and the table above), and with none of the landscape object's own
+    // parameter block (it is laid out for the old material). Null `consumerMaterial` = off. A swap done here, in the
+    // renderer's own view of the frame, never touches the world: the scene stays as authored and saved.
+    virtual void SetRvtLandscape(const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded

@@ -70,6 +70,7 @@
 // do not parse McpBridge.h and the tool registry behind it (EDT-1209). Who
 // calls into the bridge includes McpBridge.h itself.
 namespace HE::Ed { class McpBridge; }
+namespace HE::landscape { class RvtLandscape; }
 
 // Stable userdata struct for SDL async dialog callbacks.
 // Lives as a member of EditorApplication — never on the stack.
@@ -768,6 +769,9 @@ private:
 
 	// Physics simulation — active only while in play mode.
 	std::unique_ptr<PhysicsWorld> m_physicsWorld;
+	// The Runtime Virtual Texture driver of the open landscape (Thema 333 step 4). Off unless HE_RVT=1 until the project
+	// setting of step 7 exists; shared_ptr so the type may stay incomplete here.
+	std::shared_ptr<HE::landscape::RvtLandscape> m_rvtLandscape;
 	float m_physicsAccum = 0.0f;
 	// A split scene's cells, streamed around the play camera — the game's
 	// CellRuntime with the editor as its host (PlayCellStreaming.h). Made at the
