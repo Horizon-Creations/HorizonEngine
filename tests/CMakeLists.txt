@@ -136,7 +136,6 @@ add_executable(he_tests
     # title typed into a cell, links dropped on it and chips that jump, a pull under
     # it, assignees from a team), a header sort, a card dragged to another lane.
     test_planner_ui.cpp
-    test_zz_adshots.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -1099,7 +1098,6 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     test_planner_ui.cpp
-    test_zz_adshots.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
