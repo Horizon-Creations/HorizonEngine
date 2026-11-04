@@ -130,7 +130,12 @@ namespace HE::landscape
             return fail("material not resident");
         HE::UUID baseId = matId;
         if (!parentPath.empty()) baseId = m_cm.loadAsset(parentPath);
-        m_group = autoLandscapeGroupOfMaterial(baseId);
+        // The mix material (Thema 233) names no group of its own: the terrain's baseGroup gives the parameter
+        // defaults, and the three views are built "mixed", so they read the same shares (weight layers 8..11,
+        // copied with the TerrainComponent into the scratch world) and the same fat arrays as the live material.
+        // Without this a mixed landscape was refused here and kept its full per-pixel shader (Thema 333 step 8b).
+        const bool mixed = isAutoLandscapeMixMaterial(baseId);
+        m_group = mixed ? std::clamp(tc->baseGroup, 0, kAutoLandscapeGroupCount - 1) : autoLandscapeGroupOfMaterial(baseId);
         if (m_group < 0) return fail("the landscape material is not an Auto Landscape material");
 
         // The three views, with this landscape's parameters.
@@ -138,7 +143,7 @@ namespace HE::landscape
         const char* viewNames[3] = { "HlodBakeBaseColor", "HlodBakeNormal", "HlodBakeSurface" };
         for (int v = 0; v < 3; ++v)
         {
-            AutoLandscapeGraph built = buildAutoLandscapeGraph(views[v], static_cast<AutoLandscapeGroupId>(m_group));
+            AutoLandscapeGraph built = buildAutoLandscapeGraph(views[v], static_cast<AutoLandscapeGroupId>(m_group), mixed);
             applyInstanceOverrides(built.graph, names, data, overridden, swNames, swValues);
             MaterialAsset am;
             am.type = HE::AssetType::Material;

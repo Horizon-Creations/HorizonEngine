@@ -1,7 +1,7 @@
 param([string]$Backend = "D3D11", [string]$Rvt = "", [string]$Tag = "g", [int]$Warmup = 900, [int]$Capture = 600, [int]$W = 1920, [int]$H = 1080,
        [int]$Detailed = 1, [int]$ExitFrames = 0, [string]$Settings = "")
 $s=$PSScriptRoot   # scratch files (logs, dumps, mcp_drv.py) live beside the scripts
-$dir='C:\hw333\export'
+$dir = if ($env:HW_DIR) { $env:HW_DIR } else { 'C:\hw333\export' }   # the exported game to run
 Get-Process Rvt -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 $cfgPath = "$dir\data\config.json"

@@ -1,4 +1,4 @@
-param([string]$Out = "C:\hw333\export", [string]$Profile = "Release", [string]$Scene = "Content/Scenes/Main.hescene")
+param([string]$Out = "C:\hw333\export", [string]$Profile = "Development", [string]$Scene = "Content/Scenes/Main.hescene", [string]$OpenScene = "Scenes/Big.hescene")
 $s=$PSScriptRoot   # scratch files (logs, dumps, mcp_drv.py) live beside the scripts
 $r=(Resolve-Path "$PSScriptRoot\..\..").Path   # the repository root
 Get-Process HorizonEditor -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*deploy-rvt*' } | Stop-Process -Force
@@ -23,7 +23,7 @@ PROFILE = '$Profile'
 def call(n, a):
     r = mcp_drv.call(n, a)
     return r
-print('open', str(call('scene_open', {'path': 'Scenes/Big.hescene'}))[:160])
+print('open', str(call('scene_open', {'path': '$OpenScene'}))[:160])
 time.sleep(3)
 print('package', str(call('project_package', {'outputDir': r'$Out', 'targetPlatform': 'Host', 'incremental': False, 'profile': PROFILE, 'startupScene': r'$Scene'}))[:400])
 for i in range(120):
