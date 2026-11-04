@@ -288,8 +288,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int sandColor = w.node(T::ConstColor, 2);
         {
             MatGraphNode* c = r.graph.findNode(sandColor);
-            // linear 0.311 / 0.151 / 0.070 = sRGB ~150/108/76; about the luminance of the old 0.221/0.168/0.104.
-            c->p[0] = 0.311f; c->p[1] = 0.151f; c->p[2] = 0.070f;
+            // linear 0.275 / 0.158 / 0.078 = sRGB ~142/110/80, between the old 129/114/91 and the textures' red; about the old luminance.
+            c->p[0] = 0.275f; c->p[1] = 0.158f; c->p[2] = 0.078f;
         }
         const int look = w.op(T::SplitRGBA, 2, { { pSandLook } });
         r.graph.connect(xz, 0, sand, kSandInPosition);
