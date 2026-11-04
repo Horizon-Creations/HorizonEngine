@@ -136,6 +136,7 @@ add_executable(he_tests
     # title typed into a cell, links dropped on it and chips that jump, a pull under
     # it, assignees from a team), a header sort, a card dragged to another lane.
     test_planner_ui.cpp
+    test_zz_adshots.cpp
     test_project_settings_ui.cpp
     # The recovery dialog, driven the same way: three answers, three callbacks,
     # and no dialog at all without an offer.
@@ -1098,6 +1099,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerFontText.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/PlannerPanel.cpp
     test_planner_ui.cpp
+    test_zz_adshots.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SceneRecoveryDialog.cpp
     test_scene_recovery_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/AssetRecoveryDialog.cpp
@@ -1502,6 +1504,8 @@ if(TARGET HorizonContentSync)
     target_sources(he_tests PRIVATE test_engine_content_manifest_refresh.cpp test_sftp_connection.cpp)
     # LandscapeFoliageLayer through publish scan / manifest / passive pull, no server (Thema 327)
     target_sources(he_tests PRIVATE test_landscape_foliage_sync.cpp)
+    # a cached EngineContent file the server replaced is dropped (CacheFreshness.h)
+    target_sources(he_tests PRIVATE test_content_cache_freshness.cpp)
     target_link_libraries(he_tests PRIVATE HorizonContentSync)
     target_include_directories(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_ContentSync/src)
     if(WIN32)
