@@ -276,7 +276,9 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     }
 
     // Role 0, the ground: the group's own texture, or in the Desert the procedural sand. Its colour
-    // is the mean of the human's reference (coast_sand_01, 4k diffuse: sRGB 129/114/91); the grain,
+    // started as the mean of the human's reference (coast_sand_01, 4k diffuse: sRGB 129/114/91) and is now
+    // pulled toward the red of the Desert's own Hardpan and Sandstone textures (127/85/51 .. 154/115/82), so
+    // dunes and rock no longer differ as hard; the grain,
     // the ripples and the glitter keep the function's defaults. The weather's wetness darkens it
     // (the generic wet response of the lit shader comes on top, sand just darkens more).
     LayerReads grass;
@@ -286,7 +288,8 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         const int sandColor = w.node(T::ConstColor, 2);
         {
             MatGraphNode* c = r.graph.findNode(sandColor);
-            c->p[0] = 0.221f; c->p[1] = 0.168f; c->p[2] = 0.104f;
+            // linear 0.311 / 0.151 / 0.070 = sRGB ~150/108/76; about the luminance of the old 0.221/0.168/0.104.
+            c->p[0] = 0.311f; c->p[1] = 0.151f; c->p[2] = 0.070f;
         }
         const int look = w.op(T::SplitRGBA, 2, { { pSandLook } });
         r.graph.connect(xz, 0, sand, kSandInPosition);
