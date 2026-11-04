@@ -10990,6 +10990,18 @@ void EditorApplication::dumpFrameHeadless()
 							{
 								std::vector<uint8_t> got;
 								if (!r->ReadbackRvtSlot(layer, pr.slot, got)) continue;
+								// HE_DUMP_RVTTEST_SLICES=<dir>: every position page as a PPM (a look at what a backend drew, when the numbers are wrong).
+								if (const char* sd = std::getenv("HE_DUMP_RVTTEST_SLICES"); sd && *sd)
+								{
+									char name[512];
+									std::snprintf(name, sizeof(name), "%s/pos_l%d_slot%u.ppm", sd, layer, pr.slot);
+									if (FILE* f = std::fopen(name, "wb"))
+									{
+										std::fprintf(f, "P6\n%u %u\n255\n", ppx, ppx);
+										for (size_t k = 0; k < size_t(ppx) * ppx; ++k) std::fwrite(&got[k * 4], 1, 3, f);
+										std::fclose(f);
+									}
+								}
 								for (uint32_t j = 0; j < ppx; ++j)
 									for (uint32_t i = 0; i < ppx; ++i)
 									{
@@ -11134,6 +11146,12 @@ void EditorApplication::dumpFrameHeadless()
 						HE::landscape::HlodChunkRect shot;
 						shot.size = glm::vec2(shotM);
 						shot.min  = cd.origin + glm::vec2((cd.sizeM - shotM) * 0.5f);
+
+						// The consumers' pipelines build in the background on Metal and a draw whose pipeline is not ready is skipped:
+						// warm them and wait, or the first scenario would photograph an empty frame.
+						r->WarmupMaterials({ consumer[0], consumer[1], consumer[2], rampId, fineId });
+						for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+							std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
 						// scenarios: 0 = every page resident, ramp; 1 = only the top page, ramp; 2 = every page, the fine pattern
 						for (int scenario = 0; scenario < 3; ++scenario)
@@ -11315,11 +11333,31 @@ void EditorApplication::dumpFrameHeadless()
 			constexpr uint32_t W = 1280, H = 720;
 			std::vector<uint8_t> direct, rvt;
 			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(cam, W, H, img) && img.size() == size_t(W) * H * 4; };
-			bool ok = capture(direct);                      // first: builds the pipelines, uploads the textures
+			// A backend that builds material pipelines in the background (Metal) skips a draw whose pipeline is not ready: warm
+			// both materials and wait, or both pictures would be the empty frame and the comparison a perfect 0.
+			r->WarmupMaterials({ directMat, rvtLive.consumer });
+			for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			// A material's instanced twin and its textures arrive a few frames after the first draw (Metal): capture until two
+			// pictures in a row are identical (at most 60), and keep pumping the builds in between.
+			const auto settle = [&](std::vector<uint8_t>& img)
+			{
+				std::vector<uint8_t> prev;
+				for (int k = 0; k < 60; ++k)
+				{
+					if (!capture(img)) return false;
+					if (k > 0 && img == prev) return true;
+					prev = img;
+					r->PumpShaderBuilds();
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+				return true;
+			};
+			bool ok = settle(direct);                       // first: builds the pipelines, uploads the textures
 			setMaterial(rvtLive.consumer);
-			ok = ok && capture(rvt) && capture(rvt);
+			ok = ok && settle(rvt);
 			setMaterial(directMat);
-			ok = ok && capture(direct);
+			ok = ok && settle(direct);
 			if (!ok) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: a capture failed");
 			else
 			{

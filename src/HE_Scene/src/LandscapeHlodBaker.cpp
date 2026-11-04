@@ -211,6 +211,16 @@ namespace HE::landscape
         return true;
     }
 
+    void HlodBaker::setViewMaterials(const HE::UUID (&mats)[3])
+    {
+        for (int i = 0; i < 3; ++i) { m_viewMat[i] = mats[i]; m_rvtSeen[i] = false; }
+        if (!m_active) return;
+        m_renderer.WarmupMaterials({ m_viewMat[0], m_viewMat[1], m_viewMat[2] });
+        const auto t0 = std::chrono::steady_clock::now();
+        while (m_renderer.PumpShaderBuilds().pending != 0 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
     void HlodBaker::end()
     {
         if (m_active) m_renderer.SetWorld(&m_restore);

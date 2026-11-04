@@ -2,6 +2,7 @@
 #include <MaterialGraph/MaterialGraph.h>
 #include <MaterialGraph/RvtLookup.h>
 #include <material/MaterialShaderLibrary.h>
+#include <cstdlib>
 #include <string>
 
 #if defined(_WIN32)
@@ -87,4 +88,28 @@ TEST_CASE("RVT node: the HLSL keeps t40..t43, spends no live sampler, and the re
 
 	// Out of the fragment's other stage: the displacement (domain) stage has no derivatives, so it never gets the function.
 	CHECK(glsl.find("dFdx(wxz)") != std::string::npos);
+}
+
+TEST_CASE("RVT node: the MSL reads the table and the pool as textures 17..20 and spends no sampler (Metal's cap is 16)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::string glsl = HE::generateFragment(rvtGraph()).glsl;
+	const auto& ms = lib.fragment(std::hash<std::string>{}("rvt-node-msl"), glsl, B::Metal);
+	REQUIRE_MESSAGE(ms.ok, ms.log);
+	const std::string& msl = ms.source;
+	CHECK_MESSAGE(msl.find("heRvtTable [[texture(17)]]") != std::string::npos, msl);
+	CHECK(msl.find("heRvtAlbedo [[texture(18)]]") != std::string::npos);
+	CHECK(msl.find("heRvtNormal [[texture(19)]]") != std::string::npos);
+	CHECK(msl.find("heRvtSurface [[texture(20)]]") != std::string::npos);
+	// Fetch only (.read), and no [[sampler(n)]] with n >= 16 anywhere: an inline constexpr sampler stands in for the four.
+	CHECK(msl.find("heRvtTable.read(") != std::string::npos);
+	CHECK(msl.find("heRvtAlbedo.read(") != std::string::npos);
+	size_t at = 0;
+	while ((at = msl.find("[[sampler(", at)) != std::string::npos)
+	{
+		at += 10;
+		CHECK_MESSAGE(std::atoi(msl.c_str() + at) < 16, "a sampler argument past Metal's 16");
+	}
+	CHECK(msl.find("constexpr sampler heRvtAlbedoSmplr") != std::string::npos);   // inline, not an argument
 }

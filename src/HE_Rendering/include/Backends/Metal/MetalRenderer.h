@@ -100,6 +100,16 @@ public:
 	bool  CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width, uint32_t& height) override;
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md). The contract is IRenderer.h's, D3D11's the reference.
+	// The pool is three BGRA8 texture2d_array (the format of the viewport target a page is drawn into, so the page goes in with
+	// a plain blit; BaseColor is read through an sRGB view), the tables one R32Uint mipmapped texture per consumer material.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	ShaderBuildStatus PumpShaderBuilds() override;
@@ -650,6 +660,21 @@ private:
 	void* m_skyDepthState   = nullptr; // id<MTLDepthStencilState> (sky: LessEqual, no write)
 	void* m_dummyTexture    = nullptr; // id<MTLTexture>, 1×1 white — bound when shadow/AO/moon texture is absent
 	void* m_whiteArrayTexture = nullptr; // id<MTLTexture>, 1×1×1 white texture2d_array (empty array slot)
+	// Runtime Virtual Texture (Thema 333): the page pool (BGRA8 arrays; [0] is read through the sRGB view below), the page
+	// tables per consumer material, the per-landscape material swap, and the inert defaults bound while a draw has no table.
+	void*    m_rvtPool[3]        = { nullptr, nullptr, nullptr };   // id<MTLTexture> 2D array, BGRA8Unorm, PixelFormatView
+	void*    m_rvtPoolAlbedoSrgb = nullptr;                         // id<MTLTexture> view of m_rvtPool[0] as BGRA8Unorm_sRGB
+	uint32_t m_rvtSlots = 0, m_rvtPagePx = 0;
+	struct RvtTable { void* tex = nullptr; uint32_t side = 0, mips = 0; };   // id<MTLTexture> R32Uint with mips
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;                   // per landscape entity
+	void*    m_rvtDummyTable     = nullptr;                         // id<MTLTexture> 1x1 R32Uint (0xFFFFFFFF = no page)
+	// Binds the consumer's table and the pool at fragment textures 17..20 (the pins of MaterialShaderLibrary) for a draw whose
+	// material owns a table; the defaults otherwise. Called at the opaque material draw sites.
+	void     BindRvtForDraw(void* renderEncoder, const HE::UUID& material);
+	// After a walk (ExtractFrame and the passes that extract on their own): the swapped landscapes' chunks take the consumer.
+	void     ApplyRvtSwaps();
 	void* m_linearSampler   = nullptr; // id<MTLSamplerState>
 	// Graph-material project textures (heTexP0..3, MSL texture/sampler 1..4):
 	// linear + mips like m_linearSampler, but REPEAT. Every other backend tiles

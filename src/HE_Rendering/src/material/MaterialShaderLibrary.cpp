@@ -1740,7 +1740,7 @@ namespace
 he::shaderc::MslOptions kMaterialMslOptions()
 {
     he::shaderc::MslOptions opts;
-    opts.constexprLinearSamplers = { { 0u, 33u } };
+    opts.constexprLinearSamplers = { { 0u, 33u }, { 0u, 40u }, { 0u, 41u }, { 0u, 42u }, { 0u, 43u } };
     return opts;
 }
 
@@ -3073,7 +3073,16 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
               // uses an inline constexpr sampler (kMaterialMslOptions below), so
               // the sampler budget stays untouched. Per-frame bind shared with
               // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
-              { Stage::Fragment, 0, 33, 16 } });
+              { Stage::Fragment, 0, 33, 16 },
+              // Runtime Virtual Textures (RvtLookup.h, Thema 333): the page table (40) and the three pool arrays (41..43)
+              // → MSL TEXTURES 17..20, read with texelFetch (.read) only. Like the cloud-shadow map they take an inline
+              // constexpr sampler (kMaterialMslOptions), because SPIRV-Cross declares a sampler for a fetch-only combined
+              // sampler too and the stage is AT the 16-sampler cap. Bound per draw for a material that owns a table
+              // (MetalRenderer::BindRvtForDraw), inert 1x1 defaults otherwise (BindMaterialPreambleSlots).
+              { Stage::Fragment, 0, 40, 17 },
+              { Stage::Fragment, 0, 41, 18 },
+              { Stage::Fragment, 0, 42, 19 },
+              { Stage::Fragment, 0, 43, 20 } });
         // Clustered variant: the three light lists are BUFFERS, so the sampler
         // budget above is untouched. Fragment buffers 4/5/6 — free in the scene
         // pass (fragmentMain reads 0 and 3), and the slots the clustered

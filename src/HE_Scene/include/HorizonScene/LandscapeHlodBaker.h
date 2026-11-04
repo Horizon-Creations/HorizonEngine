@@ -90,7 +90,10 @@ namespace HE::landscape
 
         // A witness hook (HE_DUMP_RVTTEST): the three view materials the baker draws (BaseColor, Normal, Surface),
         // replaced by materials of the caller's, e.g. one whose colour is a function of the world position.
-        void setViewMaterials(const HE::UUID (&mats)[3]) { for (int i = 0; i < 3; ++i) { m_viewMat[i] = mats[i]; m_rvtSeen[i] = false; } }
+        // On a backend that builds material pipelines in the background (Metal) the new views are warmed here and waited for,
+        // like begin() does for the originals: a view whose pipeline is still building is not drawn, and the first page of
+        // the new material would come out blank.
+        void setViewMaterials(const HE::UUID (&mats)[3]);
         void viewMaterials(HE::UUID (&mats)[3]) const { for (int i = 0; i < 3; ++i) mats[i] = m_viewMat[i]; }
 
     private:
