@@ -167,7 +167,7 @@ bool readGpuCookedArray(const std::string& sourcePath, std::vector<uint8_t>& out
     }();
     const fs::path dir = fs::path(s.cacheDir) / ("f" + std::to_string(s.format) + "q" + std::to_string(s.quality));
     const fs::path cached = dir / (key + "_" + std::to_string(size) + "_" +
-                                   std::to_string(mtime.time_since_epoch().count()) + ".hasset");
+                                   std::to_string(static_cast<long long>(mtime.time_since_epoch().count())) + ".hasset");
 
     // Cache hit: the cooked file stands in for the source.
     if (fs::exists(cached, ec))
