@@ -751,6 +751,13 @@ public:
     // Reads one slice back (a witness or a debug view; not for per-frame use). `rgba` = pagePx * pagePx * 4 bytes,
     // row 0 first. False when there is no pool or the slice is out of range.
     virtual bool ReadbackRvtSlot(int /*layer*/, uint32_t /*slot*/, std::vector<uint8_t>& /*rgba*/) { return false; }
+    // The page table the landscape shader reads (Thema 333 step 3): one R32_UINT texture with a mip chain, mip m being
+    // (side >> m)^2 entries row-major (y * side + x), exactly what rvt::RvtManager::pageTable() returns per mip, each entry
+    // `slot | effectiveMip << 24` or 0xFFFFFFFF. `mips[0]` is the finest, its side a power of two. Upload again whenever
+    // RvtManager::tableVersion changes; a different shape recreates the texture. False without a pool or on a bad shape.
+    virtual bool SetRvtPageTable(const std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // Reads the table back the same way (a witness).
+    virtual bool ReadbackRvtPageTable(std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded

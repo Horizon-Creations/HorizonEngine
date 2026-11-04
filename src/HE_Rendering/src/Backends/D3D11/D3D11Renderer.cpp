@@ -1662,6 +1662,11 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Texture2D>          rvtPageTex;
     ComPtr<ID3D11RenderTargetView>   rvtPageRTV[2];     // [0] UNORM, [1] UNORM_SRGB
     ComPtr<ID3D11Texture2D>          rvtPageDepth;
+    // The page table the landscape shader reads: R32_UINT, mip m = (side >> m)^2 entries (SetRvtPageTable).
+    ComPtr<ID3D11Texture2D>          rvtTableTex;
+    ComPtr<ID3D11ShaderResourceView> rvtTableSRV;
+    uint32_t                         rvtTableSide = 0;
+    uint32_t                         rvtTableMips = 0;
     ComPtr<ID3D11DepthStencilView>   rvtPageDSV;
     ComPtr<ID3D11ShaderResourceView> rvtPageDepthSRV;
     ComPtr<ID3D11RenderTargetView>   viewportRTV;
@@ -9394,6 +9399,7 @@ void D3D11Renderer::DestroyRvtPool()
 {
     auto& p = *m_impl;
     for (int layer = 0; layer < 3; ++layer) { p.rvtPoolSRV[layer].Reset(); p.rvtPool[layer].Reset(); }
+    p.rvtTableSRV.Reset(); p.rvtTableTex.Reset(); p.rvtTableSide = p.rvtTableMips = 0;
     p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset();
     p.rvtPageDepth.Reset(); p.rvtPageDSV.Reset(); p.rvtPageDepthSRV.Reset();
     p.rvtSlots = p.rvtPagePx = 0;
@@ -9450,6 +9456,70 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
     m_renderPath = livePath;
     p.counters = liveCounters;
 
+    return true;
+}
+
+bool D3D11Renderer::SetRvtPageTable(const std::vector<std::vector<uint32_t>>& mips)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.context || !p.rvtSlots || mips.empty() || mips.size() > 12) return false;
+    uint32_t side = 1;
+    while (uint64_t(side) * side < mips[0].size()) ++side;
+    if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+    for (size_t m = 0; m < mips.size(); ++m)
+    {
+        const uint32_t ms = side >> m;
+        if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+    }
+    if (!p.rvtTableTex || p.rvtTableSide != side || p.rvtTableMips != mips.size())
+    {
+        p.rvtTableSRV.Reset(); p.rvtTableTex.Reset();
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = side;
+        td.MipLevels = static_cast<UINT>(mips.size());
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R32_UINT;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(p.device->CreateTexture2D(&td, nullptr, &p.rvtTableTex)) ||
+            FAILED(p.device->CreateShaderResourceView(p.rvtTableTex.Get(), nullptr, &p.rvtTableSRV)))
+        {
+            p.rvtTableSRV.Reset(); p.rvtTableTex.Reset(); p.rvtTableSide = p.rvtTableMips = 0;
+            return false;
+        }
+        p.rvtTableSide = side;
+        p.rvtTableMips = static_cast<uint32_t>(mips.size());
+    }
+    for (size_t m = 0; m < mips.size(); ++m)
+        p.context->UpdateSubresource(p.rvtTableTex.Get(), static_cast<UINT>(m), nullptr, mips[m].data(),
+                                     (side >> m) * sizeof(uint32_t), 0);
+    return true;
+}
+
+bool D3D11Renderer::ReadbackRvtPageTable(std::vector<std::vector<uint32_t>>& mips)
+{
+    auto& p = *m_impl;
+    if (!p.rvtTableTex) return false;
+    D3D11_TEXTURE2D_DESC desc{};
+    p.rvtTableTex->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(p.device->CreateTexture2D(&desc, nullptr, &staging))) return false;
+    p.context->CopyResource(staging.Get(), p.rvtTableTex.Get());
+    mips.assign(p.rvtTableMips, {});
+    for (uint32_t m = 0; m < p.rvtTableMips; ++m)
+    {
+        D3D11_MAPPED_SUBRESOURCE mp{};
+        if (FAILED(p.context->Map(staging.Get(), m, D3D11_MAP_READ, 0, &mp))) return false;
+        const uint32_t ms = p.rvtTableSide >> m;
+        mips[m].resize(size_t(ms) * ms);
+        for (uint32_t y = 0; y < ms; ++y)
+            std::memcpy(&mips[m][size_t(y) * ms], static_cast<const uint8_t*>(mp.pData) + size_t(y) * mp.RowPitch, size_t(ms) * sizeof(uint32_t));
+        p.context->Unmap(staging.Get(), m);
+    }
     return true;
 }
 

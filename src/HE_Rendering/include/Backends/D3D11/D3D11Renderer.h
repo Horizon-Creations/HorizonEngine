@@ -37,6 +37,8 @@ public:
     bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
     void  DestroyRvtPool() override;
     bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+    bool  SetRvtPageTable(const std::vector<std::vector<uint32_t>>& mips) override;
+    bool  ReadbackRvtPageTable(std::vector<std::vector<uint32_t>>& mips) override;
     // One page through the lean page pass (RenderSceneImage routes camera.rvtSlot >= 0 here).
     bool  RenderRvtPage(const EditorCameraOverride& camera, uint32_t px);
     // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh

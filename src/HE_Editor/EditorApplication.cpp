@@ -10856,6 +10856,23 @@ void EditorApplication::dumpFrameHeadless()
 					mgr.beginFrame();
 					const size_t again = mgr.update(vol, view).size();
 					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST second update: %zu pages (expected 0)", again);
+
+					// 3b) the page table the landscape shader reads: upload every mip, read it back, compare entry for entry
+					{
+						std::vector<std::vector<uint32_t>> up, back;
+						for (int m = 0; m < mgr.layout(vol).mipCount(); ++m) up.push_back(mgr.pageTable(vol, m));
+						const bool upOk = r->SetRvtPageTable(up);
+						const bool rbOk = upOk && r->ReadbackRvtPageTable(back);
+						size_t entries = 0, wrong = 0, valid = 0;
+						if (rbOk && back.size() == up.size())
+							for (size_t m = 0; m < up.size(); ++m)
+								for (size_t i = 0; i < up[m].size() && i < back[m].size(); ++i)
+								{
+									++entries; wrong += up[m][i] != back[m][i] ? 1u : 0u; valid += up[m][i] != HE::rvt::kPageTableInvalid ? 1u : 0u;
+								}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST page table: upload %s, readback %s, %zu mips, %zu entries (%zu valid), %zu differ",
+						            upOk ? "ok" : "FAILED", rbOk ? "ok" : "FAILED", up.size(), entries, valid, wrong);
+					}
 					{
 						std::vector<uint8_t> dbg;
 						if (!pages.empty() && r->ReadbackRvtSlot(0, pages.front().slot, dbg))
