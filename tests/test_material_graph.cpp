@@ -3023,16 +3023,16 @@ TEST_CASE("MaterialGraph never reuses a node id after removeNode")
 TEST_CASE("More than kMatMaxParams parameters never index past the HeParams array")
 {
 	// REGRESSION: the layout used to be clamped only AFTER the shader text was
-	// built, so an over-budget graph emitted heParams.v[16] (and up) against a
-	// `vec4 v[16]` declaration — an out-of-bounds read in the generated shader.
+	// built, so an over-budget graph emitted heParams.v[kMatMaxParams] (and up) against a
+	// `vec4 v[kMatMaxParams]` declaration — an out-of-bounds read in the generated shader.
 	// The budget is now enforced before emission: surplus params bake their
 	// authored default as a literal instead.
-	// 20 distinct named float params, chained through Adds so every one of them
+	// kMatMaxParams + 4 distinct named float params, chained through Adds so every one of them
 	// is actually reached (and therefore slotted) during emission.
 	MaterialGraph g;
 	const int out = g.addNode(MatNodeType::Output);
 	int acc = -1;
-	for (int i = 0; i < 20; ++i)
+	for (int i = 0; i < HE::kMatMaxParams + 4; ++i)
 	{
 		const int p = g.addNode(MatNodeType::ParamFloat);
 		g.findNode(p)->s    = "P" + std::to_string(i);
@@ -3049,7 +3049,7 @@ TEST_CASE("More than kMatMaxParams parameters never index past the HeParams arra
 	CHECK((int)gen.params.size() == HE::kMatMaxParams);
 
 	// No slot index at or beyond the array length appears in the emitted GLSL.
-	for (int i = HE::kMatMaxParams; i < 32; ++i)
+	for (int i = HE::kMatMaxParams; i < HE::kMatMaxParams + 8; ++i)
 	{
 		const std::string oob = "heParams.v[" + std::to_string(i) + "]";
 		CHECK(gen.glsl.find(oob) == std::string::npos);
@@ -3061,7 +3061,7 @@ TEST_CASE("More than kMatMaxParams parameters never index past the HeParams arra
 	CHECK(gen.glsl.find("vec4 v[" + std::to_string(HE::kMatMaxParams) + "]")
 	      != std::string::npos);
 	// Surplus params are baked: their node comment survives without a UBO read.
-	CHECK(gen.glsl.find("// param: P19") != std::string::npos);
+	CHECK(gen.glsl.find("// param: P" + std::to_string(HE::kMatMaxParams + 3)) != std::string::npos);
 }
 
 TEST_CASE("Exactly kMatMaxParams parameters still all get real UBO slots")

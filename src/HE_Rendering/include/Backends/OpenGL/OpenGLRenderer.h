@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cstdint>
 #include <Renderer/IRenderer.h>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "OpenGLShaderManager.h"
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
@@ -325,7 +326,7 @@ private:
 	// frame), and HeParams rarely changes (upload only when its 64 floats differ from
 	// what the UBO already holds — still correct for per-entity param overrides).
 	bool         m_matLightUploadedThisFrame = false;
-	float        m_lastMatParams[64] = { 0 };
+	float        m_lastMatParams[HE::kMatParamFloats] = { 0 };
 	bool         m_haveMatParams = false;
 
 	// Skeletal-mesh-preview target (RenderSkeletalPreview) — own dedicated FBO,

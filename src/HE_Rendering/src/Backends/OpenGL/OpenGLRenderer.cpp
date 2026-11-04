@@ -3851,7 +3851,7 @@ void OpenGLRenderer::EnsureMaterialUBOs()
 		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
 	glGenBuffers(1, &m_matParamUBO);
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
-	glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
+	glBufferData(GL_UNIFORM_BUFFER, HE::kMatParamBytes, nullptr, GL_DYNAMIC_DRAW); // vec4 v[kMatMaxParams]
 	// HeUI (D5 Schicht 1): rect, corner radii, interaction state — per QUAD, so
 	// unlike HeParams it is re-uploaded inside the UI loop rather than per draw
 	// call's material.
@@ -8446,8 +8446,8 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			if (const MaterialAsset* ma = m_contentManager
 				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
 			{
-				float padded[64] = { 0 };
-				if (const size_t n = std::min(ma->shaderParamData.size(), size_t(64)))
+				float padded[HE::kMatParamFloats] = { 0 };
+				if (const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)))
 					std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
@@ -9712,9 +9712,9 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 
 	if (ma && !ma->shaderParamData.empty())
 	{
-		float padded[64] = { 0 };
+		float padded[HE::kMatParamFloats] = { 0 };
 		std::memcpy(padded, ma->shaderParamData.data(),
-		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 		m_haveMatParams = false; // invalidate the main loop's content-skip
@@ -12593,9 +12593,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting" (Time)
 					if (!mParams.empty())
 					{
-						float padded[64] = { 0 };
+						float padded[HE::kMatParamFloats] = { 0 };
 						std::memcpy(padded, mParams.data(),
-						            std::min(mParams.size(), size_t(64)) * sizeof(float));
+						            std::min(mParams.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 						if (!m_haveMatParams || std::memcmp(padded, m_lastMatParams, sizeof(padded)) != 0)
 						{
 							std::memcpy(m_lastMatParams, padded, sizeof(padded));
@@ -12866,9 +12866,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						: (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 					if (params)
 					{
-						float padded[64] = { 0 };
+						float padded[HE::kMatParamFloats] = { 0 };
 						std::memcpy(padded, params->data(),
-						            std::min(params->size(), size_t(64)) * sizeof(float));
+						            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 						// Skip the upload when the UBO already holds these exact params
 						// (the common case: many draws of the same material). Still correct
 						// for per-entity overrides — their block differs, so it re-uploads.
@@ -13223,9 +13223,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
@@ -13492,9 +13492,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);

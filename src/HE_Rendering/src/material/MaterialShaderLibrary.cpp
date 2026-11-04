@@ -920,8 +920,9 @@ namespace
 // sunColor/ambient/camPos, params). Vertex-stage bindings 8/9 avoid the fragment
 // slots; Metal pins them to vertex buffers 2/3. HeLighting is not written here:
 // see wpoLightingBlock.
-constexpr const char* kWpoParams =
-    "layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[16]; } heParams;\n";
+// The array length is kMatMaxParams, like the fragment stage's block (MaterialGraph.cpp).
+const std::string kWpoParams =
+    "layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[" + std::to_string(kMatMaxParams) + "]; } heParams;\n";
 
 // The vertex stage's HeLighting is the fragment preamble's block, cut out of
 // kLightingPreamble and moved to binding 8 — never a shorter copy. OpenGL links

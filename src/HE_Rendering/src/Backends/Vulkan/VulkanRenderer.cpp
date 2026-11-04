@@ -9491,10 +9491,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                         + static_cast<size_t>(i) * k_matSlotStride, &ub, sizeof(ub));
 
                             // HeParams (16 vec4 = 64 floats = 256 B) into ring slot i, zero-padded.
-                            float padded[64] = { 0.0f };
+                            float padded[HE::kMatParamFloats] = { 0.0f };
                             if (params)
                                 std::memcpy(padded, params->data(),
-                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                                            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
                             std::memcpy(static_cast<uint8_t*>(m_matParBuf[m_currentFrame].mapped)
                                         + static_cast<size_t>(i) * k_matSlotStride, padded, sizeof(padded));
 
@@ -9508,7 +9508,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorBufferInfo lightBI{ m_matLightBuf[m_currentFrame].buf, 0,
                                                             sizeof(HE::MaterialShaderLibrary::Lighting) };
                             VkDescriptorBufferInfo objBI  { m_matObjBuf[m_currentFrame].buf, 0, 176 };
-                            VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, 0, 256 };
+                            VkDescriptorBufferInfo parBI  { m_matParBuf[m_currentFrame].buf, 0, HE::kMatParamBytes };
                             // heTex0 = the material's base texture: an override material's texture
                             // wins (A2), else the mesh's baked texture (A1), else the white default —
                             // matching the built-in path's texture selection + matTextured flag.

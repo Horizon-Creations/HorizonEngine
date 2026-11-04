@@ -3925,7 +3925,7 @@ struct D3D12RendererImpl
     bool                         m_matReady      = false;            // true once createMaterialResources() succeeded
     bool                         m_matHlslLogged = false;            // one-time dump of generated HLSL for HW verify
     static constexpr UINT        k_matMaxDraws   = 1024;             // U/HeParams ring slots per frame
-    static constexpr UINT        k_matSlot       = 256;              // 256-B stride/slot (U=176, HeParams=256)
+    static constexpr UINT        k_matSlot       = HE::kMatParamBytes; // stride/slot of the U and HeParams rings (U=176, HeParams=kMatParamBytes)
 
     // Image-based-ambient sky cube for graph materials (heSkyEnv, t15 = SRV block
     // slot kSlotSkyEnv, static sampler s15) — Thema 126. The SAME
@@ -12533,10 +12533,10 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                 std::memcpy(p.m_matObjPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
                                             &u, sizeof(u));
                             // HeParams (16 vec4 = 64 floats = 256 B) into param-ring slot i, zero-padded.
-                            float padded[64] = { 0.0f };
+                            float padded[HE::kMatParamFloats] = { 0.0f };
                             if (params)
                                 std::memcpy(padded, params->data(),
-                                            std::min(params->size(), size_t(64)) * sizeof(float));
+                                            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
                             if (p.m_matParamPtr[p.frameIndex])
                                 std::memcpy(p.m_matParamPtr[p.frameIndex] + static_cast<size_t>(i) * D3D12RendererImpl::k_matSlot,
                                             padded, sizeof(padded));

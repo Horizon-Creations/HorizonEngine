@@ -78,3 +78,31 @@ Not done / for the real version:
 * **Next steps:** 1. rebuild and restart your editor (cache refresh + new Mask arrays arrive); 2. decide where the
   displacement strength lives (Vec4 slot) and look at it close up on a real project; 3. LOD-crack check on a chunked
   terrain; 4. Metal/GL frames.
+
+## 4. Parameter limit 16 -> 32 (`kMatMaxParams`)
+
+`MaterialGraph/MaterialParamLimits.h` (new, light header): `kMatMaxParams = 32`, `kMatParamFloats = 128`,
+`kMatParamBytes = 512`. Every place that hard-coded the 16-vec4 / 64-float / 256-byte HeParams block now uses them:
+the generated `vec4 v[N]` (fragment and WPO preamble), the per-draw staging arrays in D3D11, D3D12, Vulkan, OpenGL,
+Metal and `RenderExtractor`, the GL UBO, the D3D11 constant buffer, the Vulkan and D3D12 per-draw rings (stride and
+descriptor range = `kMatParamBytes`, still a multiple of 256) and the OpenGL change cache. The shipped baked materials
+carry the GLSL text, so `M_AutoLandscape{,_Forest,_Grassland,_Desert,_Mix}`, `Water` and `DisplacementDemo` were
+regenerated (`landscape_tex_gen --material [--group G]`, `--mix`, `mat_gen`); assets baked earlier keep declaring
+`v[16]` and still work (a bigger buffer behind a smaller declared block). Parameter slots: Mountains 15/32, Desert 16/32.
+
+Verified: `test_material_graph` 123/123, `test_engine_materials` 15/15 (SPIR-V, GLSL 4.1/ES/4.3, HLSL/FXC and WARP
+D3D11/D3D12 reflect `HeParams` at `kMatMaxParams` x 16 B), `test_landscape_groups`, `test_auto_landscape_variants`,
+`test_material_tessellation`; Desert witness on D3D11, D3D12, Vulkan and OpenGL: **byte-identical (MD5) frames** between
+the old 16-slot editor and the new 32-slot one. Not verified: Metal (the same mechanical edit, no Mac), and a material
+that actually USES a slot >= 16 on a GPU (the generator test covers the text, the Desert uses slots 0..15).
+
+## 5. End to end on a copy of HEProject (private APPDATA, the editor built from this tree, real server)
+
+* Seeded the cache with the stale Mix arrays: after the manifest refresh the editor logged
+  `Cached '...Mix_*_Array.hasset' is out of date (the server has a newer one): removed` for all three, then downloaded
+  them when the landscape needed them (about 4 minutes for ~1 GB), no manual cache cleaning.
+* The terrain (groupMix, Mountains base) renders with the textures; `terrain_paint` on layers 2 (Dirt) and 3 (Rock)
+  changes the ground (`docs/img-landscape-slope-variants/heproject-e2e-paint-layers.jpg`: before, after, close).
+* **Group shares (layers 8..11, Forest / Grassland / Desert) are not painted with `terrain_paint`**: it refuses them
+  by design (`TerrainPaint::paint`, `isReservedLayer`), the Landscape tool's group brush (`paintGroup`) writes them.
+  That brush was not driven here (no MCP tool for it); `test_terrain_tools_ui` / the group paint tests cover it.
