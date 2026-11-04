@@ -334,6 +334,23 @@ Was gebaut ist: der Schlüssel des Materials (Hash, Fragment-Quelltext, Vertex-R
 
 Der Rest (~0,9 ms je Seite im Zeugenlauf, ~3 ms im Editor unter Last) ist das Aufzeichnen und Absenden von `DrawScene` je Layer und das Warten der Upload-Ringe wegen; was ihn senken würde, ist die Walk-Wiederverwendung des Extraktors über die drei Layer einer Seite (D3D11 macht das in `RenderRvtPage`) oder ein Submit für die drei Layer, beides braucht Ring-Offsets je Layer. Im Editor kommt dazu, dass das erste Warten eines Ticks auch die noch laufenden echten Frames der GPU abwartet.
 
+## Schritt 6d: die Layer einer Seite ohne Warten, je auf einem eigenen Frame-Slot (2026-11-04)
+
+Aus 6c blieb: je Layer ein Abschicken **und ein Warten** (0,13 ms GPU-Wartezeit je Layer im Zeugenlauf, im Editor zusätzlich die noch laufenden echten Frames). Ein Befehlslisten-Submit für alle drei Layer geht nicht, weil jeder `DrawScene`-Aufruf die Ring-Zähler der Frame-Slots wieder auf 0 setzt und der zweite Layer die Slots überschriebe, die der erste noch nicht gelesen hat. Die vorhandene Lösung für genau dieses Problem ist der Frame-Slot: alle Ringe, Deskriptorblöcke, Beleuchtungspuffer und Pools sind je Slot angelegt, damit echte Frames überlappen dürfen (D3D12 `kFramesInFlight` 3, Vulkan `k_maxFramesInFlight` 2).
+
+Gebaut (in der Klammer aus 6b, nur dort): der k-te Layer ohne Warten läuft auf Slot `(Basis + k) % Slots`, wird **abgeschickt, ohne zu warten** und gibt sofort zurück; gewartet wird, wenn alle Slots benutzt sind, und beim Schließen der Klammer (`stillLeave` wartet ohnehin). Der gemeinsame Zielsatz braucht nichts: eine Queue führt die Listen in der Reihenfolge aus, in der sie aufgezeichnet wurden, und die CPU-Zustände (Layouts, Ressourcenzustände) laufen in derselben Reihenfolge weiter. Vulkan hebt die Befehlspuffer bis zum Warten auf (`m_rvtPendingCmds`) und gibt sie dann frei. Schalter `HE_RVT_PIPELINE=0` wartet wieder nach jedem Layer (A/B und Referenz).
+
+Geprüft: dieselben Seiten im Einzelpfad und in der pipelinierten Klammer (Teil 1b): **27 von 27 byte-identisch** in 10 von 10 Läufen je Backend (die Prüfung wäre bei einem Hazard nichtdeterministisch rot geworden), alle Zeugen danach unverändert (Negativkontrollen, Lit 1,51 / 1,50, Treiber, Kacheln).
+
+| Seite in der Klammer, Zeugenlauf (5 abwechselnde Läufe, Rechner unter Last) | wartend | pipeliniert |
+|---|---|---|
+| D3D12 | 4,2 ms | **1,9 ms** (2,2x) |
+| Vulkan | 2,4 ms | **1,55 ms** (1,6x) |
+
+Editor (`RHI` in der Konfiguration, 256-m-Landschaft, 8 Seiten je Tick, ein Lauf je Modus, Rechner unter Last, verrauscht): D3D12 Füllung 44 -> **29 ms** je Tick (-32 %), Sculpt 63 -> 31 ms und 21 -> 10 ms; Vulkan Füllung 35 bis 41 -> **31 bis 34 ms** (-15 %), Sculpt 64 und 68 -> 68 und 60 ms, also **kein messbarer Gewinn** beim Sculpt (ein Lauf je Modus, Streuung größer als der Unterschied). Im Editor bleibt Vulkan damit bei ~4 ms je Seite.
+
+Nicht gemacht: mehrere Seiten ohne Wartepunkt (mit 3 Slots passen genau drei Layer, also eine Seite), und die Walk-Wiederverwendung des Extraktors über die drei Layer.
+
 ## Handoff
 
 - **Topic / step:** 333, Schritte 1 bis 6 von 8 gebaut (5: Segmentierung als Stand-in für Tiles; 6: D3D12, Vulkan, OpenGL, **ohne Metal**).
@@ -343,4 +360,4 @@ Der Rest (~0,9 ms je Seite im Zeugenlauf, ~3 ms im Editor unter Last) ist das Au
 - **Zeugen-Schalter:** `HE_DUMP_AUTOLAND=1 HE_DUMP_HLODBAKE=128 HE_DUMP_RVTTEST=1` / `HE_DUMP_RVTDRIVER=1` / `HE_DUMP_RVTTILES=1` plus `HE_DUMP_AUTOLANDSIZE`, `HE_DUMP_RVTTEST_TEXEL`, `_PERF=<reps>`, `_FAULT=half|flipz|swapxz`, `_LIT=1`. Immer `HE_HIDDEN_WINDOW=1`, eigenes `APPDATA`, `HE_DUMP_RHI=D3D11`; Warnungen stehen auf stderr, Infos auf stdout.
 - **Not verified:** CI für Schritt 3-6, Release-GPU-Zeit im großen Maßstab auf freier GPU (die Editor-Zahlen aus 6b sind unter Last entstanden), das Spiel im Loop, der Editor-Loop mit mehreren Landschaften, Metal (nicht portiert), echte Tiles.
 - **Traps:** zweiter Build-Baum mit `-DDEPLOY_DIR` UND `-DHE_ENGINE_SDK_DIR` umlenken, Release-Baum zusätzlich `-DHE_SDK_RELEASE_SET=OFF`; `he_tests` mit **eigenem APPDATA**; `small` ist unter Windows ein Makro (`rpcndr.h`); vor einem Push auf fremde Commits achten (`git log origin/release/0.8.0..HEAD`); `tests/CMakeLists.txt` und `docs/img*` werden von der zweiten Session angefasst: nur eigene Hunks committen.
-- **Next steps:** 1. Falls ~3 ms je Seite im Editor zu viel sind: Walk-Wiederverwendung des Extraktors über die drei Layer einer Seite oder ein Submit für drei Layer (Ring-Offsets je Layer); ein Seiten-Pass ohne Post-Kette bringt nichts (6c), gemessen auf freier GPU. 2. Metal portieren (auf einem Mac laufen lassen, nicht blind). 3. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 5. Wetter in die Scratch-Kopie; echte GPU-Zeit und Speicher (Schritt 8).
+- **Next steps:** 1. Falls die Seiten im Editor noch zu teuer sind: die Walk-Wiederverwendung des Extraktors über die drei Layer einer Seite; ein Seiten-Pass ohne Post-Kette bringt nichts (6c), die Layer ohne Warten sind gebaut (6d); gemessen auf freier GPU. 2. Metal portieren (auf einem Mac laufen lassen, nicht blind). 3. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 5. Wetter in die Scratch-Kopie; echte GPU-Zeit und Speicher (Schritt 8).

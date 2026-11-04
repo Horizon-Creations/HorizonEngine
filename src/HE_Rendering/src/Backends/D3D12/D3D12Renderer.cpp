@@ -3896,6 +3896,12 @@ struct D3D12RendererImpl
     };
     RvtStill rvtStill;
     UINT     rvtBracketPx = 0;       // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
+    // Inside a bracket the page layers are submitted WITHOUT waiting, each on its own frame slot (the per-frame rings, the
+    // descriptor blocks, the lighting buffer are all indexed by frameIndex, which is what lets the real frames overlap): the
+    // k-th unwaited layer runs on slot (rvtBaseFrame + k) % kFramesInFlight, and the GPU is waited for once the slots are used
+    // up or the bracket closes. The shared target set needs nothing: one queue executes the lists in the order they were made.
+    UINT     rvtPending   = 0;       // layers submitted since the last wait
+    UINT     rvtBaseFrame = 0;       // the frame slot the first of them used
     D3D12_CPU_DESCRIPTOR_HANDLE rvtTableCpu(UINT i) const
     {
         D3D12_CPU_DESCRIPTOR_HANDLE h = rvtTableHeap->GetCPUDescriptorHandleForHeapStart();
@@ -14242,6 +14248,7 @@ void D3D12Renderer::rvtStillLeave()
     p.ssrColorHistValid = false;
     p.ssrHistValid      = false;
     p.taaHistoryValid   = false;
+    p.rvtPending = 0;        // the wait at the top of this function covered every layer still in flight
     st.active = false;
     st.kept   = false;
 }
@@ -14284,6 +14291,18 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 
     bool ok = p.viewportRT && p.viewportDepth && p.viewportReadback
            && p.viewportRtvHeap && p.viewportDsvHeap;
+    // A kept page layer is not waited for: the next one rotates to the next frame slot (see rvtPending).
+    // HE_RVT_PIPELINE=0 waits after every layer again (the A/B guard and the reference of the cross-check).
+    static const bool s_pipeline = []() { const char* e = std::getenv("HE_RVT_PIPELINE"); return !(e && *e == '0'); }();
+    const bool pipelined = ok && keep && s_pipeline;
+    UINT baseFrame = p.frameIndex;
+    if (pipelined)
+    {
+        if (p.rvtPending >= k_frameCount) { p.waitForAllFrames(); p.rvtPending = 0; }
+        if (p.rvtPending == 0) p.rvtBaseFrame = p.frameIndex;
+        baseFrame = p.rvtBaseFrame;
+        p.frameIndex = (p.rvtBaseFrame + p.rvtPending) % k_frameCount;
+    }
     if (ok)
     {
         // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
@@ -14310,7 +14329,13 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
         p.cmdList->Close();
         ID3D12CommandList* lists[] = { p.cmdList.Get() };
         p.cmdQueue->ExecuteCommandLists(1, lists);
-        if (page)
+        if (pipelined)
+        {
+            rgba.clear();
+            ++p.rvtPending;           // the next layer rotates to the next frame slot; the wait comes with the slots used up or the close
+            ok = pageOk;
+        }
+        else if (page)
         {
             rgba.clear();
             p.waitForAllFrames();     // the upload rings are rewritten by the next page: it must have run
@@ -14326,6 +14351,7 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
         }
     }
 
+    if (pipelined) p.frameIndex = baseFrame;   // the real frames and the next call see the slot they expect
     if (!keep || !ok) rvtStillLeave();
     if (!ok) rgba.clear();
     return ok;

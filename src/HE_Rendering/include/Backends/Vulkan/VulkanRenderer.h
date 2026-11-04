@@ -542,6 +542,14 @@ private:
 	};
 	StillSet m_still;
 	uint32_t m_rvtBracketPx = 0;   // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
+	// Inside a bracket the page layers are submitted WITHOUT waiting, each on its own frame slot (the per-frame rings, the
+	// descriptor pools and the lighting buffers are all indexed by m_currentFrame, which is what lets the real frames overlap):
+	// the k-th unwaited layer runs on slot (m_rvtBaseFrame + k) % 2, the device is waited for once the slots are used up or
+	// the bracket closes, and the command buffers are freed then. One queue runs the lists in the order they were made, so
+	// the shared target set needs nothing.
+	uint32_t m_rvtPending = 0, m_rvtBaseFrame = 0;
+	std::vector<VkCommandBuffer> m_rvtPendingCmds;
+	void rvtDrainPending();
 	void stillEnter(uint32_t w, uint32_t h);
 	void stillLeave();
 	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader

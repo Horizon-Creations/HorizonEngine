@@ -6752,6 +6752,7 @@ void VulkanRenderer::stillLeave()
     // handles go back into the members BEFORE the intermediates are rebuilt —
     // createPostFXResources builds m_hdrFB/m_fxaaFB/m_uiViewportFB on them.
     deviceWaitIdle();
+    rvtDrainPending();   // nothing is in flight any more: the page layers' buffers can go
     destroyViewportResources();
     m_viewportImage       = st.liveImage;
     m_viewportMemory      = st.liveMemory;
@@ -6804,6 +6805,13 @@ void VulkanRenderer::stillLeave()
     m_taaHistoryValid   = false;
 }
 
+void VulkanRenderer::rvtDrainPending()
+{
+    for (VkCommandBuffer c : m_rvtPendingCmds) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &c);
+    m_rvtPendingCmds.clear();
+    m_rvtPending = 0;
+}
+
 void VulkanRenderer::BeginRvtPages(uint32_t pagePx) { m_rvtBracketPx = pagePx; }
 
 void VulkanRenderer::EndRvtPages()
@@ -6826,6 +6834,10 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     if (m_still.active && !(keep && m_still.w == width && m_still.h == height)) stillLeave();
 
     bool ok = false;
+    bool rotated = false;
+    // HE_RVT_PIPELINE=0 waits after every layer again (the A/B guard and the reference of the cross-check).
+    static const bool s_pipeline = []() { const char* e = std::getenv("HE_RVT_PIPELINE"); return !(e && *e == '0'); }();
+    const bool pipe = keep && s_pipeline;
     try
     {
         if (!m_still.active) stillEnter(width, height);
@@ -6842,6 +6854,14 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
             m_renderPath = HE::RenderPath::Forward;
         }
 
+        // A kept page layer is not waited for: it rotates to the next frame slot (see m_rvtPending).
+        if (pipe)
+        {
+            if (m_rvtPending >= k_maxFramesInFlight) { deviceWaitIdle(); rvtDrainPending(); }
+            if (m_rvtPending == 0) m_rvtBaseFrame = m_currentFrame;
+            m_currentFrame = (m_rvtBaseFrame + m_rvtPending) % k_maxFramesInFlight;
+            rotated = true;
+        }
         // Same order as the top of Render(): drop the caches for assets edited
         // since the last frame (own device idle inside), then start the frame's
         // per-pass flags from zero — m_giRanThisFrame left over from the live
@@ -6916,8 +6936,17 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                 si.commandBufferCount = 1;
                 si.pCommandBuffers    = &cmd;
                 submitGraphics(si, VK_NULL_HANDLE);
-                vkQueueWaitIdle(m_graphicsQueue);
-                vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+                if (pipe)
+                {
+                    // Not waited for: the buffer is freed with the slots used up or the close.
+                    m_rvtPendingCmds.push_back(cmd);
+                    ++m_rvtPending;
+                }
+                else
+                {
+                    vkQueueWaitIdle(m_graphicsQueue);
+                    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cmd);
+                }
 
                 if (page)
                 {
@@ -6943,6 +6972,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
         ok = false;
     }
 
+    if (rotated) m_currentFrame = m_rvtBaseFrame;   // the real frames and the next call see the slot they expect
     if (!keep || !ok) stillLeave();
     if (!ok) rgba.clear();
     return ok;
