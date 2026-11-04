@@ -157,15 +157,45 @@ Konsequenz: nicht eingebaut (Patch nur im Scratchpad, nicht im Repo). Der Rest e
 
 Messrauschen: derselbe Aufbau gab in zwei Läufen 0,211 und 0,273 ms je Page (Takt, GPU-Auslastung). Unterschiede unter etwa 25 % sind nur mit Wiederholung im Wechsel belastbar, wie oben.
 
+## Schritt 3: der Consumer, die Landschaft liest Page Table + Pool (2026-11-04)
+
+Entscheidung (nach Rücksprache über die Beschränkungen): der Consumer ist ein **Graph-Knoten** `RvtSample` plus **eine** gemeinsame Lookup-Funktion, nicht ein eigener Shader. So behält das Material die ganze Beleuchtung (Schatten, GI, Fog, Deferred), und `kLandscapeFS` (Thema 326) kann denselben Funktionstext später einbinden. Die Funktion steht in `src/HE_Core/include/MaterialGraph/RvtLookup.h`.
+
+| Teil | Entscheidung |
+|---|---|
+| Lesen | **nur `texelFetch`**: das D3D11-Sampler-Budget ist voll (`kHlslMaterialPins`), also kein Sampler, bilinear von Hand (4 Taps je Layer). Die vier toten SamplerStates, die SPIRV-Cross trotzdem deklariert, liegen auf s0 neben dem toten `heAO`, die Form, die FXC akzeptiert. |
+| Page Table | eine R32_UINT-Textur mit Mip-Kette, Mip m = (Seite >> m)² Einträge, `slot | effektiverMip << 24`, `0xFFFFFFFF` = nichts; Upload `IRenderer::SetRvtPageTable` bei Änderung von `tableVersion` |
+| Bindungen | 40 Tabelle, 41 Albedo (sRGB-Ansicht, `Load` liefert linear), 42 Normal, 43 Surface; D3D11 t40..t43 (frei, geprüft), nur für Draws, deren Fragment `heRvtTable` liest, danach wieder ab |
+| Volumenparameter | zwei vec4 als Eingänge des Knotens (A = Ursprung, Ausdehnung, Meter/Texel; B = Seitengröße, Rand, Seiten, Mips), normalerweise `Param Vector4` |
+| Mip-Wahl | aus `dFdx/dFdy` der Weltposition (ein Texel je Pixel); die Seitenzelle wird beim **effektiven** Mip der gefundenen Seite neu berechnet (Fallback auf eine gröbere Seite) |
+| Sichtbarkeit | Knoten nicht in der Editor-Palette; Vulkan-Layout, Vulkan-G-Buffer-Tails und D3D12-Root-Signatur haben keine Zeilen für 40..43: die Abdeckungstests für alle Knoten zäunen ihn ein und halten ihn auf genau diese vier Bindungen |
+
+Geprüft (Debug `he_tests`, Release-Editor auf D3D11/RTX 4070):
+* `test_rvt_shader`: Codegen-Text, t40..t43, nur `Load`, **echter FXC ps_5_0** kompiliert; die bestehenden Sweeps (Material-Graph, Landschaft, Engine-Materialien: 196 Fälle) grün.
+* Page Table: Upload + Readback, jeder Eintrag gleich (21 Einträge bei 128 m, 1365 bei 1024 m).
+* **Analytischer Consumer-Test** (`HE_DUMP_RVTTEST`, Teil 6): alle Pages mit einer Rampe (u, v, 0) bemalt, die Landschaft durch `RvtSample` gezeichnet, jeder Pixel gegen den CPU-Wert: alle Pages da, nur die oberste Page da (Fallback, effektives Mip), und ein feines Muster `fract(Welt/8 m)` (eine Rampe sieht einen Halb-Texel-Versatz nicht). Drei Ansichten (AO/Rauheit/gültig, sRGB-Basisfarbe, Normal). 128 m: 62 500 Pixel je Ansicht, **0 falsch, schlimmster Wert 2/255**; 512 m und 1024 m je rund 1,0 Mio. Pixel, ebenso. Fehlerinjektion: halbes Texel nur vom feinen Muster erkannt (9/255), Z gespiegelt und X/Z vertauscht von allen.
+* **Lit gegen direktes Material** (`HE_DUMP_RVTTEST_LIT=1`, 128 m, 1280x720, Kamera 110 m darüber, Sonne/Himmel des Zeugen): mittlere Abweichung **1,55/255**, größte 116, 0,92 % der Pixel weichen um mehr als 16 ab (Bilder: `<dump>.rvt_lit_{direct,rvt,diffx4}.bmp`; die Muster liegen an denselben Stellen, die Abweichung sitzt im Feinkorn). Die 21 Pages der echten Landschaft in 1,8 ms bemalt.
+* **Kosten** (15 abwechselnde Voll-Captures, Readback in beiden enthalten): direktes Material Median 3,60 ms (min 1,77), RVT Median 2,98 ms (min 1,14), also ~0,6 ms je Frame weniger. **Das ist eine grobe Zahl**: 720p auf einer 4070 mit einem 128-m-Ausschnitt, und je Capture kommen Zielanlage und Readback dazu. Eine echte Messung (GPU-Zeit des Szenen-Pass, große Landschaft, 1440p) steht aus.
+
+Was der Consumer gegenüber dem direkten Auto-Landscape **verliert** (jedes ist eine Eigenschaft der Pages, nicht des Knotens):
+* Displacement-Pin / Tessellations-Relief (die Seiten tragen keine Höhe; die Geometrie bleibt, das Relief der Textur nicht).
+* Wetter (Nässe, Schnee-Bedeckung) und alles, was sich zur Laufzeit ändert, ist auf dem Stand der letzten Bemalung eingefroren (Entscheidung aus Schritt 1: statisch; Schritt 4 entscheidet über Dirty-Gründe).
+* Normalen-Detail unterhalb der Seitenauflösung (0,25 m je Texel am Rand der Sicht), Metallic 0, Foliage-Metadaten (`LandscapeFoliage` ist ein Knoten ohne Ausgang im direkten Material: der Consumer **ersetzt das gespeicherte Material nie**, er ist ein Laufzeit-Stellvertreter).
+
+Offen / nicht gebaut (bewusst, Schritt 4 ff.):
+* **Wer ihn einsetzt.** Der Zeuge schreibt das Consumer-Material in die Komponenten der Live-Landschaft. Das darf nie im Spiel passieren (`SceneSerializer` würde es speichern): der Tausch gehört in Renderer/Extraktor, neben `rvtMaterial` und `LODLevel::materialId`. **Vorschlag, nicht entschieden:** der Consumer gilt für Chunks im aufgelösten Bereich des Volumes; ferne LOD-Stufen mit gebackenem Fernmaterial (Thema 228) behalten es.
+* **Der Treiber je Frame**: `RvtManager::update` → `paintPages` → `SetRvtPageTable` bei neuer `tableVersion`; der Manager fragt nach Abstandsringen, der Shader wählt das Mip nach Ableitungen: das kostet höchstens Unschärfe oder überflüssige Pages, nicht Richtigkeit.
+* Ein **globaler** Tabelle/Pool (t40..t43): mehrere Volumes (Segmentierung, Schritt 5) brauchen eine Tabelle je Objekt, wie die Gewichtstextur je Chunk.
+* Kein trilineares Filtern zwischen Mips (die Mip-Grenze springt sichtbar), Tabelleneintrag `0xFFFFFFFF` zeigt neutrales Grau, `Valid` ist am Knoten abrufbar.
+* Vulkan, D3D12, OpenGL, Metal: Zeilen für 40..43, Pool, Pass (Schritt 6). Der Tile-Quadtree-Shader (Thema 326): Lookup-Funktion einbinden.
+
 ## Handoff
 
-- **Topic / step:** 333, Schritt 1 von 8 (Entwurf + CPU-Kern)
-- **Branch / commit:** `claude/runtime-virtual-textures` (von `release/0.8.0`), d3c8d86e, nicht gepusht
-- **Done:** Entwurf mit Entscheidungen und rein CPU-seitiger Kern (Layout, Seitenbedarf, Budget, Dirty-Rects, gemeinsamer Pool mit LRU, Page-Table-Daten mit Fallback), getestet.
-- **Files touched:** `src/HE_Scene/include/HorizonScene/RuntimeVirtualTexture.h`, `src/HE_Scene/src/RuntimeVirtualTexture.cpp` (neu); `src/HE_Scene/CMakeLists.txt` (+1 Quelle); `tests/test_rvt_core.cpp` (neu), `tests/CMakeLists.txt` (+1); dieses Doc.
-- **Verified:** Eigenständiger MSVC-Build + doctest, 9/9, Negativkontrolle (§5); voller `he_tests`-Debug-Build, `--source-file=*test_rvt_core.cpp`: 9/9, 1002 Prüfungen. Build nur mit `-DDEPLOY_DIR=<repo>/out/deploy-rvt`, sonst scheitert/klobbert der Deploy-Schritt den laufenden Editor.
-- **Not verified:** Linux/macOS-Compiler und CI (kein Push). Kein GPU-Code, nichts im Editor gesehen.
-- **Decisions taken:** alles in §2 mit „Entscheidung“; Wetter/Schnee/Trails statisch ist **nur vorgeschlagen**.
-- **Pending (Reihenfolge):** Schritt 2 Producer-Pass auf D3D11 (NN-WS03), 3 Consumer-Shader, 4 Invalidierungs-Hooks, 5 Segmentierung (Pinned-Mips-Problem, §4), 6 übrige Backends, 7 Editor/Serialisierung, 8 Abnahme.
-- **Traps:** Hive-Deadline war abgelaufen, `hive_dispatch` lehnt ab (nur der Mensch setzt sie), Schritt 1 lief deshalb in der Session des Menschen. Ein `cmd /c`-Build vom Bash-Tool aus baut nichts (Memory `build-test-cli-workflow`); `HE_API` gehört nicht an HE_Scene-Klassen.
-- **Next steps:** 1. `cmake --build out/build/x64-debug --target he_tests` (PowerShell + vcvars) und `he_tests --source-file=*test_rvt_core.cpp`. 2. Schritt 2: `IRenderer`-Vertrag für Pool + Page Table + `RenderRvtPage`, D3D11 zuerst; Material-Shader mit Page-Rechteck als Uniform. 3. An 326 posten, bevor `kLandscapeFS` angefasst wird.
+- **Topic / step:** 333, Schritte 1 bis 3 von 8 gebaut (3 mit vier Unterschritten 3a-3d); Schritt 4 folgt.
+- **Branch / commit:** `claude/runtime-virtual-textures`, gepusht (Stand vor 3b: 66fdc301; 3a 07fda632, 3b ae5e01ec, 3c 3561b01f, 3d siehe `git log`). Der Branch enthält auch lokale Commits der zweiten Session und zwei unveröffentlichte von `release/0.8.0` (1d57f608, db9afd77).
+- **Done:** CPU-Kern (S1), Renderer-Vertrag und D3D11-Page-Pass 11x schneller (S2), Page Table, Knoten, D3D11-Bindung, Consumer-Test und Lit-Vergleich (S3).
+- **Files:** `src/HE_Scene/{include/HorizonScene,src}/RuntimeVirtualTexture.*`, `RvtProducer.*`, `LandscapeHlodBaker.*` (renderRvtPage, renderMaterialImage, setViewMaterials); `src/HE_Core/include/MaterialGraph/RvtLookup.h`, `MaterialGraph.{h,cpp}` (RvtSample); `src/HE_Core/include/Renderer/IRenderer.h` (rvtSlot/rvtLayer/rvtMaterial, Pool, SetRvtPageTable); `src/HE_Rendering/src/Backends/D3D11/D3D11Renderer.cpp` (RenderRvtPage, matKeyCache, t40..t43); `src/HE_Rendering/src/material/MaterialShaderLibrary.cpp` (Pins); `src/HE_Editor/EditorApplication.cpp` (Zeuge `HE_DUMP_RVTTEST` mit Teilen 1-7); `tests/test_rvt_core.cpp`, `tests/test_rvt_shader.cpp`, Zäune in `tests/test_material_graph.cpp`.
+- **Zeugen-Schalter:** `HE_DUMP_AUTOLAND=1 HE_DUMP_HLODBAKE=128 HE_DUMP_RVTTEST=1` plus `HE_DUMP_AUTOLANDSIZE`, `HE_DUMP_RVTTEST_TEXEL`, `_PERF=<reps>`, `_FAULT=half|flipz|swapxz`, `_LIT=1` (`_LIT_REPS`). Immer `HE_HIDDEN_WINDOW=1`, eigenes `APPDATA`, `HE_DUMP_RHI=D3D11`.
+- **Not verified:** Linux/macOS/Windows-CI für 3a-3d (gepusht sind nur S1/S2: Linux grün, macOS rot durch fremden Code `GpuArrayCook.cpp:170`, Windows lief noch), Release-GPU-Zeit im großen Maßstab, alle anderen Backends.
+- **Traps:** zweiter Build-Baum mit `-DDEPLOY_DIR` UND `-DHE_ENGINE_SDK_DIR` umlenken, Release-Baum zusätzlich `-DHE_SDK_RELEASE_SET=OFF`; `he_tests` mit **eigenem APPDATA** starten (sonst wird die echte Konfiguration überschrieben); vor einem Push auf fremde Commits im Branch achten (`git log origin/release/0.8.0..HEAD`); `tests/CMakeLists.txt` hatte einen nie committeten Scratch-Test eingetragen (66fdc301).
+- **Next steps:** 1. Schritt 4: Treiber je Frame + Tausch des Consumer-Materials in Renderer/Extraktor, Invalidierung (Pinsel, Parameter, Streaming). 2. Echte GPU-Zeit-Messung des Szenen-Pass (große Landschaft, 1440p). 3. Schritt 5: Tabelle je Objekt (Segmentierung), Absprache mit Thema 326 über `kLandscapeFS`.

@@ -10677,6 +10677,8 @@ void EditorApplication::dumpFrameHeadless()
 	// HE_DUMP_HLODBAKE=<side>[,<cx>,<cz>] (Thema 228): the far-landscape bake on the first landscape of the
 	// scene (the HE_DUMP_AUTOLAND witness), one chunk, written as <dump>.hlod_<view>.bmp (albedo, normal,
 	// surface). The log has the timing and the mean colour of each picture.
+	// HE_DUMP_RVTTEST_LIT (Thema 333 step 3d): what the HLODBAKE block leaves for the live-world comparison after it.
+	struct { bool ready = false; HE::UUID consumer; } rvtLive;
 	if (const char* hb = std::getenv("HE_DUMP_HLODBAKE"); hb && *hb && m_editorWorld && r)
 	{
 		unsigned side = 64, bcx = 0, bcz = 0;
@@ -11167,11 +11169,137 @@ void EditorApplication::dumpFrameHeadless()
 						            reps, pages.size(), px, std::chrono::duration<double, std::milli>(b - a).count() / n,
 						            std::chrono::duration<double, std::milli>(c - a).count() / n, std::chrono::duration<double, std::milli>(c - b).count());
 					}
-					r->DestroyRvtPool();
+					// 7a) HE_DUMP_RVTTEST_LIT=1: the REAL landscape's three views painted into every page of its volume (0.25 m per
+					// texel), the table uploaded, and a LIT consumer material (RvtSample -> base colour, normal, AO, roughness) made.
+					// The comparison with the direct material happens after baker.end(), in the live world (sun, sky, camera).
+					if (const char* lit = std::getenv("HE_DUMP_RVTTEST_LIT"); lit && *lit && *lit != '0')
+					{
+						RvtManager lm(512, 512, 0);
+						VolumeDesc ld = vd;
+						ld.finestMetersPerTexel = 0.25f;
+						const uint16_t lv = lm.addVolume(ld);
+						const VolumeLayout& ll = lm.layout(lv);
+						const uint32_t lpx = static_cast<uint32_t>(ll.physicalPageSize());
+						if (lpx != px) r->CreateRvtPool(512, lpx);
+						ViewDesc lw;
+						lw.cameraXZ = ld.origin + glm::vec2(ld.sizeM * 0.5f);
+						lw.nearRadiusM = ld.sizeM;
+						lm.beginFrame();
+						const auto lpg = lm.update(lv, lw);
+						const auto l0 = std::chrono::steady_clock::now();
+						const uint32_t lpainted = paintPages(baker, lpg, lpx);
+						std::vector<uint8_t> lsink;
+						r->ReadbackRvtSlot(0, lpg.back().slot, lsink);   // wait for the GPU
+						const auto l1 = std::chrono::steady_clock::now();
+						std::vector<std::vector<uint32_t>> ltbl;
+						for (int m = 0; m < ll.mipCount(); ++m) ltbl.push_back(lm.pageTable(lv, m));
+						const bool lok = lpainted == lpg.size() && r->SetRvtPageTable(ltbl);
+
+						using HE::MatNodeType;
+						HE::MaterialGraph g;
+						const int out = g.addNode(MatNodeType::Output);              // lit
+						const int pa  = g.addNode(MatNodeType::ParamVec4); g.findNode(pa)->s = "RvtVolumeA";
+						const int pb  = g.addNode(MatNodeType::ParamVec4); g.findNode(pb)->s = "RvtVolumeB";
+						const int rv  = g.addNode(MatNodeType::RvtSample);
+						g.findNode(pa)->p[0] = ld.origin.x; g.findNode(pa)->p[1] = ld.origin.y;
+						g.findNode(pa)->p[2] = ll.extentM(); g.findNode(pa)->p[3] = ll.texelMeters(0);
+						g.findNode(pb)->p[0] = float(ld.pageSize); g.findNode(pb)->p[1] = float(ld.border);
+						g.findNode(pb)->p[2] = float(ll.pagesPerSide(0)); g.findNode(pb)->p[3] = float(ll.mipCount());
+						g.connect(pa, 0, rv, 0); g.connect(pb, 0, rv, 1);
+						g.connect(rv, 0, out, HE::kMatOutputBaseColorPin);
+						g.connect(rv, 1, out, HE::kMatOutputNormalPin);
+						g.connect(rv, 2, out, HE::kMatOutputAOPin);
+						g.connect(rv, 3, out, HE::kMatOutputRoughnessPin);
+						MaterialAsset ca;
+						ca.type = HE::AssetType::Material;
+						ca.name = "RvtLitConsumer";
+						ca.nodeGraphJson = HE::materialGraphToJson(g);
+						rvtLive.consumer = contentManager().registerMaterial(std::move(ca));
+						contentManager().regenerateMaterialFromGraph(rvtLive.consumer);
+						rvtLive.ready = lok;
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: %zu pages of the real landscape painted in %.1f ms (%u painted), table %s",
+						            lpg.size(), std::chrono::duration<double, std::milli>(l1 - l0).count(), lpainted, lok ? "ok" : "FAILED");
+					}
+					if (!rvtLive.ready) r->DestroyRvtPool();
 				}
 			}
 		}
 		baker.end();
+	}
+	// 7b) the live world, back after baker.end(): the landscape drawn lit with its direct material and with the RVT consumer,
+	// from one camera above it. Differences are expected (the pages hold the view graphs at 0.25 m, the direct material
+	// computes per pixel): the numbers say how big, the pictures where. Then the cost: alternating full-frame captures
+	// (each waits for the GPU through its readback, the same in both), median of N.
+	if (rvtLive.ready && m_editorWorld && r)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land != entt::null && wreg.all_of<MaterialComponent>(land))
+		{
+			const HE::UUID directMat = wreg.get<MaterialComponent>(land).materialAssetId;
+			const auto setMaterial = [&](const HE::UUID& id) {
+				wreg.get<MaterialComponent>(land).materialAssetId = id;
+				for (auto [ce, cc, mc] : wreg.view<TerrainChunkComponent, MaterialComponent>().each()) mc.materialAssetId = id;
+				r->InvalidateMaterial(id);
+			};
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			EditorCameraOverride cam;
+			cam.active = true;
+			cam.editorIcons = false;
+			cam.fovDegrees = 60.0f;
+			cam.nearPlane = 0.1f;
+			cam.farPlane = 2000.0f;
+			const glm::vec3 eye = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			cam.position = eye;
+			cam.view = glm::lookAt(eye, eye + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+			constexpr uint32_t W = 1280, H = 720;
+			std::vector<uint8_t> direct, rvt;
+			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(cam, W, H, img) && img.size() == size_t(W) * H * 4; };
+			bool ok = capture(direct);                      // first: builds the pipelines, uploads the textures
+			setMaterial(rvtLive.consumer);
+			ok = ok && capture(rvt) && capture(rvt);
+			setMaterial(directMat);
+			ok = ok && capture(direct);
+			if (!ok) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: a capture failed");
+			else
+			{
+				std::vector<uint8_t> diff(direct.size(), 255);
+				double sum = 0; size_t big = 0, n = 0; unsigned mx = 0;
+				for (size_t i = 0; i < direct.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(direct[i + c]) - int(rvt[i + c]))));
+					sum += d; mx = std::max(mx, d); big += d > 16 ? 1u : 0u; ++n;
+					for (size_t c = 0; c < 3; ++c) diff[i + c] = static_cast<uint8_t>(std::min(255u, d * 4u));
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit compare %ux%u: mean |direct - rvt| %.2f /255, max %u, %.2f %% of the pixels differ by more than 16",
+				            W, H, sum / double(n), mx, 100.0 * double(big) / double(n));
+				writeBMP(m_dumpPath + ".rvt_lit_direct.bmp", direct, W, H);
+				writeBMP(m_dumpPath + ".rvt_lit_rvt.bmp", rvt, W, H);
+				writeBMP(m_dumpPath + ".rvt_lit_diffx4.bmp", diff, W, H);
+
+				// the cost: alternate, median
+				const int N = std::max(5, std::atoi(std::getenv("HE_DUMP_RVTTEST_LIT_REPS") ? std::getenv("HE_DUMP_RVTTEST_LIT_REPS") : "15"));
+				std::vector<double> td, tr;
+				std::vector<uint8_t> sink;
+				for (int k = 0; k < N; ++k)
+				{
+					setMaterial(directMat);
+					const auto a = std::chrono::steady_clock::now(); capture(sink); const auto b = std::chrono::steady_clock::now();
+					setMaterial(rvtLive.consumer);
+					capture(sink); const auto c = std::chrono::steady_clock::now();
+					td.push_back(std::chrono::duration<double, std::milli>(b - a).count());
+					tr.push_back(std::chrono::duration<double, std::milli>(c - b).count());
+				}
+				std::sort(td.begin(), td.end()); std::sort(tr.begin(), tr.end());
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit cost (%d alternating full-frame captures, readback included in both): direct median %.2f ms (min %.2f), rvt median %.2f ms (min %.2f)",
+				            N, td[td.size() / 2], td.front(), tr[tr.size() / 2], tr.front());
+			}
+			setMaterial(directMat);
+		}
+		r->DestroyRvtPool();
 	}
 	// HE_DUMP_AUTOLANDSAVE=<file.hescene> (Thema 228): the HE_DUMP_AUTOLAND witness world written out as a scene, so a
 	// scratch project can hold an Auto Landscape for HE_DUMP_HLODEXPORT and a real export (the water witness has its own
