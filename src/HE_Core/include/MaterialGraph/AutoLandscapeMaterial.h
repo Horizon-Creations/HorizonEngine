@@ -302,7 +302,13 @@ struct AutoLandscapeGraph
 // parameters; the default (Mountains) builds exactly the graph this material always had.
 // `mixed` builds the mix material above instead (the group then only names the parameter defaults,
 // Mountains).
+// `displacement` (Lit view only) wires the Displacement pin: the final blended texture height (the arrays'
+// mask B, painted weights and puddles included) minus 0.5, times kAutoLandscapeDisplacementMetres, so the
+// terrain's chunk meshes are tessellated near the camera and pushed along their normal by the texture's
+// own relief (Thema 207's GPU tessellation; the shipped materials are built without it, byte for byte as before).
 HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit,
                                                   AutoLandscapeGroupId group = AutoLandscapeGroupId::Mountains,
-                                                  bool mixed = false);
+                                                  bool mixed = false, bool displacement = false);
+// Metres a full height range (0..1) of the texture moves the surface; the tessellation clamps to half of it.
+inline constexpr float kAutoLandscapeDisplacementMetres = 0.5f;
 } // namespace HE

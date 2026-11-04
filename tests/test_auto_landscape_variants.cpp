@@ -398,3 +398,35 @@ TEST_CASE("The arrays assemble in that order: variants of a layer next to each o
 	TextureAsset out;
 	CHECK_FALSE(HE::buildTextureArray(ptrs, out, true));
 }
+
+TEST_CASE("Auto landscape: the Displacement pin is optional, off it is the graph it always was")
+{
+	using namespace HE;
+	const auto displacementLinks = [](const AutoLandscapeGraph& g) {
+		int n = 0;
+		for (const auto& l : g.graph.links)
+			if (l.dstNode == g.output && l.dstPin == kMatOutputDisplacementPin) ++n;
+		return n; };
+
+	const AutoLandscapeGraph plain = buildAutoLandscapeGraph();
+	CHECK(displacementLinks(plain) == 0);
+	CHECK(plain.graph.findNode(plain.output)->tess == MatTessSettings{});
+	// The default argument builds the very same graph as an explicit "no displacement".
+	CHECK(materialGraphToJson(plain.graph) ==
+	      materialGraphToJson(buildAutoLandscapeGraph(AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains, false, false).graph));
+
+	for (const AutoLandscapeGroupId id : { AutoLandscapeGroupId::Mountains, AutoLandscapeGroupId::Desert })
+	{
+		const AutoLandscapeGraph on = buildAutoLandscapeGraph(AutoLandscapeView::Lit, id, false, true);
+		CHECK(displacementLinks(on) == 1);
+		const MatTessSettings t = on.graph.findNode(on.output)->tess;
+		CHECK(t.maxDisplacement == doctest::Approx(kAutoLandscapeDisplacementMetres * 0.5f));
+		CHECK(t.maxFactor > 1.0f);
+		// Same parameters, so a project's overrides carry over; only the Displacement chain is added.
+		const AutoLandscapeGraph off = buildAutoLandscapeGraph(AutoLandscapeView::Lit, id, false, false);
+		CHECK(on.graph.nodes.size() == off.graph.nodes.size() + 4);
+		CHECK(on.graph.links.size() == off.graph.links.size() + 5);   // Subtract and Multiply take two inputs each, plus the pin
+	}
+	// Only the lit view carries it: the debug views stay untouched.
+	CHECK(displacementLinks(buildAutoLandscapeGraph(AutoLandscapeView::Surface, AutoLandscapeGroupId::Mountains, false, true)) == 0);
+}
