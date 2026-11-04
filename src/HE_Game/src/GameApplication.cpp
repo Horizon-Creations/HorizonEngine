@@ -3759,6 +3759,8 @@ void GameApplication::installPlayerSettings()
 
 void GameApplication::OnShutdown()
 {
+	// The virtual texture driver hands its pool back to the renderer: while it still exists, not from the destructor.
+	m_rvtLandscape.reset();
 	// The session FIRST, and said out loud: leave() writes a goodbye and drops
 	// every peer, so the others learn the seat is free now rather than waiting
 	// out the transport timeout. A quitting host that simply vanished would

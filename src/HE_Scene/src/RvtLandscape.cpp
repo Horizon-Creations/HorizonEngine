@@ -138,16 +138,30 @@ void RvtLandscape::detach()
 RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3& cameraPos)
 {
     FrameStats st;
-    if (!m_renderer.GetCapabilities().supportsRvt) return st;
+    // Says once per change why the driver is idle (a silent driver is indistinguishable from a broken one).
+    // (and every 600th call, so a log shows the driver is being called at all)
+    ++m_ticks;
+    const auto note = [this](const char* why) {
+        if (m_lastNote != why || m_ticks % 600 == 0) { m_lastNote = why; HE_LOG_INFO(Scene, "RvtLandscape: %s (tick %llu)", why, static_cast<unsigned long long>(m_ticks)); }
+    };
+    if (!m_renderer.GetCapabilities().supportsRvt) { note("idle: the renderer cannot hold a virtual texture (Capabilities::supportsRvt)"); return st; }
 
     // The landscape: the first terrain (not a chunk) with a material.
     entt::entity land = entt::null;
     auto& reg = live.registry();
+    size_t terrains = 0, withMaterial = 0;
     for (auto [e, tc] : reg.view<TerrainComponent>().each())
-        if (!reg.all_of<TerrainChunkComponent>(e) && reg.all_of<MaterialComponent>(e)) { land = e; break; }
+    {
+        if (reg.all_of<TerrainChunkComponent>(e)) continue;
+        ++terrains;
+        if (reg.all_of<MaterialComponent>(e)) { ++withMaterial; if (land == entt::null) land = e; }
+    }
     if (land == entt::null)
     {
         if (m_attached) detach();
+        const std::string why = "idle: no landscape with a material in the world (" + std::to_string(terrains) + " landscape(s), "
+                              + std::to_string(withMaterial) + " with a material)";
+        note(why.c_str());
         return st;
     }
     if (m_attached && (land != m_terrain || !reg.valid(m_terrain))) detach();
@@ -160,12 +174,13 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     }
     if (!m_attached)
     {
-        if (land == m_failedTerrain && mh == m_failedHash) return st;     // it failed for exactly this: not again every frame
+        if (land == m_failedTerrain && mh == m_failedHash) { note("idle: the last attach failed and nothing it depends on has changed"); return st; }
         if (!attach(live, land)) { m_failedTerrain = land; m_failedHash = mh; return st; }
         m_materialHash = mh;
         m_failedTerrain = entt::null;
     }
     st.attached = true;
+    note("running");
 
     // 2. the journal: scratch copy up to date, the pages under the change stale
     TerrainComponent& tc = reg.get<TerrainComponent>(land);
@@ -219,6 +234,11 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         m_active = m_filled;
     }
     st.active = m_active;
+    // Activity only: an idle frame says nothing, so a log of a quiet scene is quiet and a stroke or a camera move shows up.
+    if (st.pagesPainted || st.pagesStale || st.tableUploaded || st.rescanned)
+        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale%s%s, %u resident, %u stale, %s",
+                    st.pagesPainted, st.pagesStale, st.tableUploaded ? ", table uploaded" : "", st.rescanned ? ", re-attached" : "",
+                    m_manager->stats().resident, m_manager->stats().dirty, m_active ? "drawn from the pages" : "filling");
     return st;
 }
 

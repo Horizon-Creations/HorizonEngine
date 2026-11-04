@@ -93,6 +93,8 @@ namespace HE::landscape
         bool            m_attached = false;
         bool            m_filled   = false;     // the first fill is complete: the renderer may draw from the pages
         bool            m_active   = false;
+        uint64_t       m_ticks = 0;
+        std::string    m_lastNote;             // the last reason logged for being idle (logged again only when it changes)
         uint64_t        m_failedHash = 0;       // an attach that failed is not retried until something it depends on changes
         entt::entity    m_failedTerrain = entt::null;
     };

@@ -16219,6 +16219,9 @@ bool EditorApplication::reloadGameLogic()
 
 void EditorApplication::OnShutdown()
 {
+	// The virtual texture driver gives its pool back to the renderer, so it must go while the renderer still exists: left to
+	// the destructor it would call into a renderer that has been shut down and crash on the way out.
+	m_rvtLandscape.reset();
 	ProjectPreflight::shutdown();   // joins a still-running engine-content check
 	// Give the network back what a session took, FIRST and synchronously: the
 	// UPnP port forward, the IPv6 pinhole, the directory entry. A user who quits
