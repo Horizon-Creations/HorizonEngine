@@ -3426,12 +3426,18 @@ void GameApplication::OnRender(float deltaTime)
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
-		// The virtual texture of the landscape, after the terrain update of the tick (HE_RVT=1).
-		static const bool rvtOn = [] { const char* v = std::getenv("HE_RVT"); return v && *v && *v != '0'; }();
-		if (rvtOn && r)
+		// The virtual texture of the landscape, after the terrain update of the tick: the project's setting (the exported
+		// Config/ProjectSettings.json), or HE_RVT=1 / 0 over it.
+		if (r && HE::landscape::RvtLandscape::wanted(m_projectSettings.rvt))
 		{
 			if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *r);
+			m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectSettings.rvt));
 			m_rvtLandscape->tick(*m_world, camPos);
+		}
+		else if (m_rvtLandscape)
+		{
+			m_rvtLandscape->detach();
+			m_rvtLandscape.reset();
 		}
 		// Animation last, after every system that could have moved something this
 		// frame — a state machine reads what gameplay just produced. Still ahead

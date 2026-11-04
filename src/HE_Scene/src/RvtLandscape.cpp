@@ -13,6 +13,7 @@
 #include <Renderer/IRenderer.h>
 #include <algorithm>
 #include <chrono>
+#include <Project/ProjectSettings.h>   // ProjectRvtSettings
 #include <cmath>
 #include <functional>
 #include <set>
@@ -216,6 +217,62 @@ void RvtLandscape::pauseSwap(bool paused)
     }
 }
 
+RvtLandscape::Settings RvtLandscape::settingsFromProject(const HE::ProjectRvtSettings& p)
+{
+    Settings s;
+    s.poolSlots         = static_cast<uint32_t>(p.poolPages);
+    s.maxPagesPerFrame  = static_cast<uint32_t>(p.maxPagesPerFrame);
+    s.metersPerTexel    = p.metersPerTexel;
+    s.nearRadiusM       = p.nearRadiusM;
+    s.activationRadiusM = p.activationRadiusM;
+    return s;
+}
+
+bool RvtLandscape::wanted(const HE::ProjectRvtSettings& p)
+{
+    static const int env = [] { const char* v = std::getenv("HE_RVT"); return (v && *v) ? (*v == '0' ? 0 : 1) : -1; }();
+    return env >= 0 ? env == 1 : p.enabled;
+}
+
+void RvtLandscape::setSettings(const Settings& s)
+{
+    const bool rebuild = m_poolMade && (s.poolSlots != m_settings.poolSlots || s.metersPerTexel != m_settings.metersPerTexel);
+    m_settings = s;
+    if (rebuild) detach();   // the next tick attaches again with the new pool and texel size
+    if (m_manager) m_manager->setMaxRendersPerFrame(s.maxPagesPerFrame);
+}
+
+RvtLandscape::DebugInfo RvtLandscape::debugInfo() const
+{
+    DebugInfo d;
+    d.running = m_poolMade && m_manager;
+    d.segments = static_cast<uint32_t>(m_segments.size());
+    for (const auto& kv : m_segments) if (kv.second.swapOn) ++d.activeSegments;
+    d.lastPaintMs = m_lastPainting.paintMs;
+    d.lastPagesPainted = m_lastPainting.pagesPainted;
+    d.pagesPaintedTotal = m_paintedTotal;
+    d.materialsRegistered = m_materialsRegistered;
+    if (!d.running) return d;
+    const rvt::Stats ms = m_manager->stats();
+    d.poolSlots = ms.poolSlots; d.resident = ms.resident; d.stale = ms.dirty; d.starved = ms.starved;
+    const auto it = m_segments.find(m_debugEntity);
+    if (it != m_segments.end() && it->second.volumeLive && m_manager->hasVolume(it->second.volume))
+    {
+        const uint16_t vol = it->second.volume;
+        const rvt::VolumeLayout& L = m_manager->layout(vol);
+        d.gridSide = L.pagesPerSide(0);
+        d.metersPerPage = L.pageMeters(0);
+        d.grid.assign(size_t(d.gridSide) * size_t(d.gridSide), 0);
+        for (int y = 0; y < d.gridSide; ++y)
+            for (int x = 0; x < d.gridSide; ++x)
+            {
+                const rvt::PageKey k{ vol, uint8_t(0), uint16_t(x), uint16_t(y) };
+                if (m_manager->isResident(k)) d.grid[size_t(y) * size_t(d.gridSide) + size_t(x)] = m_manager->isDirty(k) ? 2 : 1;
+            }
+    }
+    return d;
+}
+
 void RvtLandscape::detach()
 {
     for (auto& kv : m_segments) remove(kv.first, kv.second);
@@ -355,6 +412,10 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         m_paintedTotal += st.pagesPainted;
     }
     st.paintMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - paintT0).count();
+    if (st.pagesPainted) m_lastPainting = st;
+    m_debugEntity = entt::null;
+    for (const Land& l : lands)                      // nearest first
+        if (const auto f = m_segments.find(l.e); f != m_segments.end() && f->second.volumeLive) { m_debugEntity = l.e; break; }
 
     // The page tables (one per volume, when a page came or went), the first-fill latch and the swap.
     for (auto& kv : m_segments)

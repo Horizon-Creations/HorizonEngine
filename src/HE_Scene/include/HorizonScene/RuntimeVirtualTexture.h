@@ -140,6 +140,7 @@ public:
 	// Pages the last updateAll/update wanted for this volume that are still not resident (the budget, or a full pool).
 	uint32_t missing(uint16_t volume) const { return volume < m_missing.size() ? m_missing[volume] : 0; }
 	void beginFrame() { ++m_frame; m_stats.renderedLastUpdate = 0; }
+	void setMaxRendersPerFrame(uint32_t n) { m_maxRenders = n; }   // the paint budget; takes effect with the next update
 
 	// A content change in a world rect (paint stroke, sculpt, parameter): resident pages that overlap it
 	// (border included) become dirty. Returns how many.

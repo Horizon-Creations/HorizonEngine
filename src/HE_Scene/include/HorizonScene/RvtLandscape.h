@@ -33,10 +33,12 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class HorizonWorld;
 class ContentManager;
 class IRenderer;
+namespace HE { struct ProjectRvtSettings; }
 namespace HE::landscape { class HlodBaker; }
 
 namespace HE::landscape
@@ -71,7 +73,15 @@ namespace HE::landscape
         RvtLandscape(const RvtLandscape&) = delete;
         RvtLandscape& operator=(const RvtLandscape&) = delete;
 
-        void             setSettings(const Settings& s) { m_settings = s; }
+        // The project's settings as the driver's (editor + game), and whether the driver is wanted at all: HE_RVT=1 / HE_RVT=0 in
+        // the environment force it on / off (the witnesses and the MCP loop rely on that), otherwise the project's `enabled`.
+        static Settings settingsFromProject(const HE::ProjectRvtSettings& p);
+        static bool     wanted(const HE::ProjectRvtSettings& p);
+
+        // The pool size and the texel size shape the pool and every volume: a change of either gives every landscape back and
+        // starts over with the next tick (one rebuild, never one per frame: the editor changes them only on commit). The
+        // radii and the paint budget are read every tick and change live.
+        void             setSettings(const Settings& s);
         const Settings&  settings() const { return m_settings; }
 
         // Once per frame, after the terrain update. `live` is the world the renderer draws.
@@ -80,6 +90,23 @@ namespace HE::landscape
         void detach();
         // Draws the landscapes from their own material for a moment (a comparison) and back, without touching anything else.
         void pauseSwap(bool paused);
+
+        // What a debug view shows (editor: Project Settings ▸ Virtual Texture): the driver's state as of the last tick, and the
+        // mip-0 page map of the nearest landscape that has a volume. A snapshot, copied: nothing in it points into the driver.
+        struct DebugInfo
+        {
+            bool     running = false;       // the pool exists
+            uint32_t segments = 0, activeSegments = 0;
+            uint32_t poolSlots = 0, resident = 0, stale = 0, starved = 0;
+            double   lastPaintMs = 0.0;     // painting of the last tick that painted anything
+            uint32_t lastPagesPainted = 0;
+            uint64_t pagesPaintedTotal = 0;
+            uint32_t materialsRegistered = 0;
+            int      gridSide = 0;          // mip-0 pages per side of the shown volume (0 = none)
+            std::vector<uint8_t> grid;      // gridSide^2 cells, row-major: 0 missing, 1 resident, 2 resident but stale
+            float    metersPerPage = 0.0f;  // mip-0 page edge in metres
+        };
+        DebugInfo debugInfo() const;
 
         bool active() const;                                  // at least one landscape is drawn from pages
         size_t segmentCount() const { return m_segments.size(); }
@@ -123,6 +150,8 @@ namespace HE::landscape
         uint32_t        m_pagePx = 0;
         bool            m_poolMade = false;
         bool            m_paused = false;
+        FrameStats      m_lastPainting;              // the last tick that painted a page (for the debug view)
+        entt::entity    m_debugEntity = entt::null;  // the nearest landscape with a volume, as of the last tick
         std::map<entt::entity, Segment>   m_segments;
         uint64_t        m_paintedTotal = 0;
         uint64_t        m_ticks = 0;

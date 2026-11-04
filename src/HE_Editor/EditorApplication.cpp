@@ -4085,13 +4085,22 @@ void EditorApplication::OnRender(float dt)
 			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
-			// The virtual texture of the landscape, after the terrain update of the tick (HE_RVT=1).
-			static const bool rvtOn = [] { const char* v = std::getenv("HE_RVT"); return v && *v && *v != '0'; }();
-			if (rvtOn && renderer())
+			// The virtual texture of the landscape, after the terrain update of the tick: the project's setting (Project
+			// Settings ▸ Virtual Texture), or HE_RVT=1 / 0 over it. Switched off, the landscapes go back to their own material.
 			{
-				if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
-				HE_PROFILE_SCOPE_N("RvtLandscape");
-				m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
+				const HE::ProjectRvtSettings& rs = m_projectManager.currentProject().settings.rvt;
+				if (renderer() && HE::landscape::RvtLandscape::wanted(rs))
+				{
+					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
+					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(rs));
+					HE_PROFILE_SCOPE_N("RvtLandscape");
+					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
+				}
+				else if (m_rvtLandscape)
+				{
+					m_rvtLandscape->detach();
+					m_rvtLandscape.reset();
+				}
 			}
 		}
 
@@ -14426,6 +14435,9 @@ AppContext EditorApplication::makeContext()
 				m_physicsWorld->setThreadCount(physics.threads);
 				m_physicsWorld->setBudget({ physics.budgetMs, static_cast<uint32_t>(physics.eventsPerPoll) });
 			}
+		},
+		.rvtDebugInfo = [this]() -> HE::landscape::RvtLandscape::DebugInfo {
+			return m_rvtLandscape ? m_rvtLandscape->debugInfo() : HE::landscape::RvtLandscape::DebugInfo{};
 		},
 		.propScriptEngine    = m_propScriptEngine.get(),
 		.editorCamera        = &m_editorCamera,

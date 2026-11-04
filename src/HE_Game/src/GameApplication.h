@@ -183,7 +183,7 @@ private:
     // in an exported game while they worked in PIE. Rebuilt on every scene
     // switch, because the bodies belong to the world that is going away.
     std::unique_ptr<PhysicsWorld> m_physicsWorld;
-    // The Runtime Virtual Texture driver of the landscape (Thema 333 step 4). Off unless HE_RVT=1 (step 7 brings the setting).
+    // The Runtime Virtual Texture driver of the landscape (Thema 333 step 4). Made while the project setting (or HE_RVT=1) asks for it.
     std::shared_ptr<HE::landscape::RvtLandscape> m_rvtLandscape;
     float m_physicsAccum = 0.0f;
     // App-level UI: the GameInstance's widgets live here (not in any world), so a
