@@ -79,6 +79,13 @@ struct ViewDesc
 	float     nearRadiusM = 64.0f;
 };
 
+// One volume and the view it is looked at through, for updateAll().
+struct VolumeView
+{
+	uint16_t volume = 0;
+	ViewDesc view;
+};
+
 // One page the producer has to paint now.
 struct PageRender
 {
@@ -124,6 +131,14 @@ public:
 	// no fallback chain first, then dirty/missing nearest the camera). Resident, clean, in-view pages cost nothing:
 	// a frame in which nothing changed returns an empty list. The pages are assumed painted by the caller.
 	std::vector<PageRender> update(uint16_t volume, const ViewDesc& view);
+	// The same for SEVERAL volumes in one pool (a landscape cut into tiles, one volume each). Two phases, which one-by-one
+	// update() calls cannot do: first every wanted page of every volume is touched (so no volume's allocation evicts a page
+	// another volume needs this frame), then the wants of all of them are ranked together (pages with nothing to fall back
+	// on first, coarsest first, then by distance to the camera) and paid for from ONE per-frame budget. Call it once per
+	// frame instead of update().
+	std::vector<PageRender> updateAll(const std::vector<VolumeView>& views);
+	// Pages the last updateAll/update wanted for this volume that are still not resident (the budget, or a full pool).
+	uint32_t missing(uint16_t volume) const { return volume < m_missing.size() ? m_missing[volume] : 0; }
 	void beginFrame() { ++m_frame; m_stats.renderedLastUpdate = 0; }
 
 	// A content change in a world rect (paint stroke, sculpt, parameter): resident pages that overlap it
@@ -154,6 +169,7 @@ private:
 	std::vector<Volume>                     m_volumes;
 	std::unordered_map<uint64_t, Page>      m_pages;
 	std::vector<uint32_t>                   m_freeSlots;
+	std::vector<uint32_t>                   m_missing;           // per volume, from the last update
 	uint32_t m_poolSlots, m_maxRenders;
 	int      m_pinnedMips;
 	uint64_t m_frame = 1;

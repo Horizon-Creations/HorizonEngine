@@ -108,67 +108,83 @@ bool RvtManager::acquireSlot(uint32_t& slot)
 
 std::vector<PageRender> RvtManager::update(uint16_t volume, const ViewDesc& view)
 {
-	std::vector<PageRender> out;
-	if (!hasVolume(volume)) return out;
-	Volume& v = m_volumes[volume];
-	const VolumeLayout& L = v.layout;
-	const glm::vec2 vmin = L.desc().origin, vmax = vmin + glm::vec2(L.extentM());
+	return updateAll({ VolumeView{ volume, view } });
+}
 
+std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& views)
+{
+	std::vector<PageRender> out;
 	struct Want { PageKey key; int group; float dist; };
 	std::vector<Want> wants;
+	m_missing.assign(m_volumes.size(), 0);
 
-	for (int mip = 0; mip < L.mipCount(); ++mip)
+	// Phase 1: every volume's wanted pages are touched BEFORE anything is allocated, so a page one volume still needs this
+	// frame can never be the victim of another volume's allocation.
+	for (const VolumeView& vv : views)
 	{
-		const bool pin = isPinnedMip(v, mip);
-		const float h = view.nearRadiusM * float(1 << std::min(mip, 30));
-		int x0 = 0, y0 = 0, x1 = L.pagesPerSide(mip) - 1, y1 = x1;
-		if (!pin)
+		const uint16_t volume = vv.volume;
+		if (!hasVolume(volume)) continue;
+		const ViewDesc& view = vv.view;
+		Volume& v = m_volumes[volume];
+		const VolumeLayout& L = v.layout;
+		const glm::vec2 vmin = L.desc().origin, vmax = vmin + glm::vec2(L.extentM());
+
+		for (int mip = 0; mip < L.mipCount(); ++mip)
 		{
-			// The camera square of this mip, clipped to the volume; a volume the square does not touch needs nothing here.
-			if (view.cameraXZ.x + h < vmin.x || view.cameraXZ.x - h > vmax.x ||
-			    view.cameraXZ.y + h < vmin.y || view.cameraXZ.y - h > vmax.y) continue;
-			L.pageAt(mip, view.cameraXZ - glm::vec2(h), x0, y0);
-			L.pageAt(mip, view.cameraXZ + glm::vec2(h), x1, y1);
-		}
-		for (int y = y0; y <= y1; ++y)
-			for (int x = x0; x <= x1; ++x)
+			const bool pin = isPinnedMip(v, mip);
+			const float h = view.nearRadiusM * float(1 << std::min(mip, 30));
+			int x0 = 0, y0 = 0, x1 = L.pagesPerSide(mip) - 1, y1 = x1;
+			if (!pin)
 			{
-				PageKey k{ volume, uint8_t(mip), uint16_t(x), uint16_t(y) };
-				glm::vec2 mn, mx;
-				L.pageRect(mip, x, y, mn, mx, false);
-				const glm::vec2 c = (mn + mx) * 0.5f;
-				const float dist = std::max(std::abs(c.x - view.cameraXZ.x), std::abs(c.y - view.cameraXZ.y));
-				auto it = m_pages.find(k.pack());
-				if (it != m_pages.end())
-				{
-					it->second.lastUsed = m_frame;                      // needed: not evictable this frame
-					it->second.pinned = pin;
-					if (it->second.dirty) wants.push_back({ k, 1, dist });
-				}
-				else
-				{
-					// Nothing coarser to show in its place yet: these come first, coarsest first, so the whole view is covered at once.
-					const bool bare = resolve(volume, mip, x, y) == kPageTableInvalid;
-					wants.push_back({ k, bare ? 0 : 1, bare ? float(-mip) : dist });
-				}
+				// The camera square of this mip, clipped to the volume; a volume the square does not touch needs nothing here.
+				if (view.cameraXZ.x + h < vmin.x || view.cameraXZ.x - h > vmax.x ||
+				    view.cameraXZ.y + h < vmin.y || view.cameraXZ.y - h > vmax.y) continue;
+				L.pageAt(mip, view.cameraXZ - glm::vec2(h), x0, y0);
+				L.pageAt(mip, view.cameraXZ + glm::vec2(h), x1, y1);
 			}
+			for (int y = y0; y <= y1; ++y)
+				for (int x = x0; x <= x1; ++x)
+				{
+					PageKey k{ volume, uint8_t(mip), uint16_t(x), uint16_t(y) };
+					glm::vec2 mn, mx;
+					L.pageRect(mip, x, y, mn, mx, false);
+					const glm::vec2 c = (mn + mx) * 0.5f;
+					const float dist = std::max(std::abs(c.x - view.cameraXZ.x), std::abs(c.y - view.cameraXZ.y));
+					auto it = m_pages.find(k.pack());
+					if (it != m_pages.end())
+					{
+						it->second.lastUsed = m_frame;                      // needed: not evictable this frame
+						it->second.pinned = pin;
+						if (it->second.dirty) wants.push_back({ k, 1, dist });
+					}
+					else
+					{
+						// Nothing coarser to show in its place yet: these come first, coarsest first, so the whole view is covered at once.
+						const bool bare = resolve(volume, mip, x, y) == kPageTableInvalid;
+						wants.push_back({ k, bare ? 0 : 1, bare ? float(-mip) : dist });
+					}
+				}
+		}
 	}
 
+	// Phase 2: one ranking over all volumes, one budget.
 	std::sort(wants.begin(), wants.end(), [](const Want& a, const Want& b) {
-		return std::tie(a.group, a.dist, a.key.mip) < std::tie(b.group, b.dist, b.key.mip); });
+		return std::tie(a.group, a.dist, a.key.mip, a.key.volume) < std::tie(b.group, b.dist, b.key.mip, b.key.volume); });
 
 	uint32_t budget = m_maxRenders > m_stats.renderedLastUpdate ? m_maxRenders - m_stats.renderedLastUpdate : 0;
 	uint32_t missing = 0;
 	for (const Want& w : wants)
 	{
+		Volume& v = m_volumes[w.key.volume];
+		const VolumeLayout& L = v.layout;
 		auto it = m_pages.find(w.key.pack());
 		const bool repaint = it != m_pages.end();
-		if (budget == 0) { if (!repaint) ++missing; continue; }
+		if (budget == 0) { if (!repaint) { ++missing; ++m_missing[w.key.volume]; } continue; }
 		uint32_t slot = 0;
 		if (repaint) { slot = it->second.slot; it->second.dirty = false; }
 		else
 		{
-			if (!acquireSlot(slot)) { ++m_stats.starved; ++missing; continue; }
+			if (!acquireSlot(slot)) { ++m_stats.starved; ++missing; ++m_missing[w.key.volume]; continue; }
 			Page p; p.slot = slot; p.lastUsed = m_frame; p.pinned = isPinnedMip(v, w.key.mip);
 			m_pages[w.key.pack()] = p;
 			++v.tableVersion;

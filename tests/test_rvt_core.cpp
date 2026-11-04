@@ -255,3 +255,92 @@ TEST_CASE("RVT segmentation: volumes share one pool, a dropped tile gives its sl
 	CHECK(m.addVolume(b) == vb);                      // the id is reused, the new tile starts empty
 	CHECK(m.pageTable(vb, 4)[0] == kPageTableInvalid);
 }
+
+TEST_CASE("RVT segmentation: updateAll gives every volume its coverage first and pays one budget")
+{
+	RvtManager m(1000, 10);                           // ten pages a frame for BOTH volumes
+	VolumeDesc a = square512();
+	VolumeDesc b = square512();
+	b.origin = { 512.0f, 0.0f };
+	const uint16_t va = m.addVolume(a), vb = m.addVolume(b);
+	m.beginFrame();
+	const auto r = m.updateAll({ { va, viewAt(500, 256) }, { vb, viewAt(500, 256) } });
+	REQUIRE(r.size() == 10);
+	// Each volume has 71 wanted pages; the first ten are the coverage of BOTH (top mip first), not ten of the first volume.
+	size_t topA = 0, topB = 0;
+	for (const PageRender& p : r)
+	{
+		CHECK(p.key.mip >= 3);                        // nothing finer before every volume is covered
+		if (p.key.mip == 4 && p.key.volume == va) ++topA;
+		if (p.key.mip == 4 && p.key.volume == vb) ++topB;
+	}
+	CHECK(topA == 1);
+	CHECK(topB == 1);
+	CHECK(m.missing(va) + m.missing(vb) == m.stats().wantedMissing);
+	CHECK(m.missing(va) > 0);
+	CHECK(m.missing(vb) > 0);
+
+	// The control: one update() per volume. The first volume spends the whole budget, the second has no coverage at all.
+	RvtManager c(1000, 10);
+	const uint16_t ca = c.addVolume(a), cb = c.addVolume(b);
+	c.beginFrame();
+	const auto ra = c.update(ca, viewAt(500, 256));
+	const auto rb = c.update(cb, viewAt(500, 256));
+	CHECK(ra.size() == 10);
+	CHECK(rb.empty());
+}
+
+TEST_CASE("RVT segmentation: volumes that do not fit one pool settle instead of evicting each other forever")
+{
+	// The camera at the border of two volumes wants W pages in all; the pool holds 20 fewer. One-by-one updates would let A
+	// evict the pages B still needs (not yet touched this frame) and B take them back next frame, for ever. updateAll protects
+	// every wanted page first, so after the pool has filled a static view paints nothing and evicts nothing.
+	uint32_t wanted = 0;
+	{
+		RvtManager big(10000, 10000);
+		VolumeDesc a = square512(), b = square512();
+		b.origin = { 512.0f, 0.0f };
+		const uint16_t va = big.addVolume(a), vb = big.addVolume(b);
+		big.beginFrame();
+		big.updateAll({ { va, viewAt(500, 256) }, { vb, viewAt(500, 256) } });
+		wanted = big.stats().resident;
+	}
+	REQUIRE(wanted > 60);
+	RvtManager m(wanted - 20, 1000);
+	VolumeDesc a = square512();
+	VolumeDesc b = square512();
+	b.origin = { 512.0f, 0.0f };
+	const uint16_t va = m.addVolume(a), vb = m.addVolume(b);
+	for (int f = 0; f < 3; ++f) { m.beginFrame(); m.updateAll({ { va, viewAt(500, 256) }, { vb, viewAt(500, 256) } }); }
+	const uint32_t evictions = m.stats().evictions;
+	CHECK(m.stats().resident == wanted - 20);         // the pool is full
+	CHECK(m.stats().starved > 0);                     // and says so
+	CHECK(m.missing(va) + m.missing(vb) == 20);
+	uint32_t painted = 0;
+	for (int f = 0; f < 10; ++f)
+	{
+		m.beginFrame();
+		painted += uint32_t(m.updateAll({ { va, viewAt(500, 256) }, { vb, viewAt(500, 256) } }).size());
+	}
+	CHECK(painted == 0);                              // no ping-pong
+	CHECK(m.stats().evictions == evictions);
+}
+
+TEST_CASE("RVT segmentation: dropping one volume frees exactly its slots and leaves the others")
+{
+	RvtManager m(1000, 1000);
+	VolumeDesc a = square512();
+	VolumeDesc b = square512();
+	b.origin = { 512.0f, 0.0f };
+	const uint16_t va = m.addVolume(a), vb = m.addVolume(b);
+	m.beginFrame();
+	m.updateAll({ { va, viewAt(500, 256) }, { vb, viewAt(500, 256) } });
+	const uint32_t both = m.stats().resident;
+	std::vector<uint32_t> tableB;
+	for (uint32_t e : m.pageTable(vb, 0)) tableB.push_back(e);
+	m.dropVolumePages(va);
+	CHECK(m.stats().resident < both);
+	CHECK(m.freeSlots() == 1000 - m.stats().resident);
+	CHECK(m.pageTable(vb, 0) == tableB);              // the other volume's table is untouched
+	for (uint32_t e : m.pageTable(va, 0)) CHECK(e == kPageTableInvalid);
+}
