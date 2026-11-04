@@ -69,3 +69,17 @@ the one holding this doc.
   (a stale one made two baked-material tests fail); `HE_ENGINE_SDK_DIR` is separate from `DEPLOY_DIR`; the Mix arrays are
   3 GB for three maps (48 slices); the editor cooks them to BC7 on load (`GpuArrayCook`).
 * **Next steps:** run the mix witness / look at it in the real project; tune `Boulder Slope`; decide Bare Soil confusion.
+
+## Hexagon patterns (added later the same day)
+
+The hexes are the **texture bombing** (`Bombing Cell`, 0.5 texture repeats): the ground is read on a hex grid, each hex
+rotated and offset to hide the tiling, and since Thema 180 each hex also draws one of the role's variants. With V = 1
+they only show as faint seams; with three variants of different brightness or hue every hex reads as a patch. That got
+stronger with the 3-variant packs (most in Grassland Meadow, Bare Soil and the Forest floor). The Rock role is NOT
+affected (its variants are chosen by slope, not per hex).
+
+`landscape_tex_gen --match-variants F` (shipped arrays: 0.85) pulls the Grass and Dirt roles' later variants toward
+variant 1 (brightness at strength F, hue at F/2), `docs/img-landscape-slope-variants/hex-variant-colour-match.jpg`
+(Grassland and Forest, left unmatched, right matched). Left over knobs without re-packing: the material parameter
+`Bombing Cell` (larger = bigger, fewer hexes) and the static switch `Texture Bombing` (off = one variant, visible
+tiling instead of hexes).
