@@ -3789,6 +3789,25 @@ struct D3D12RendererImpl
     bool m_tessSupported = false;
     std::unordered_map<uint64_t, std::string> m_tessDispByKey;
     std::unordered_set<ID3D12PipelineState*>  m_tessPSOs;
+    // The graph material's resolved key (hash with the displacement folded in, fragment source, vertex body), made ONCE per
+    // DrawScene call per material: resolveShaders copies the whole fragment source and hashes it, and a landscape drawn as
+    // dozens of chunk draws paid that for every one of them (D3D11 found the same, see matKeyCache there). Trusted only within
+    // one DrawScene (drawSceneSerial): the Material Editor assigns an edited source into the same string without telling the
+    // renderer, so nothing longer-lived may be assumed. Null = the material has no graph shader.
+    struct MatKey { uint64_t serial = 0; bool ok = false; uint64_t hash = 0; uint32_t texArrays = 0; std::string frag, vert; };
+    std::unordered_map<HE::UUID, MatKey> m_matKeys;
+    uint64_t drawSceneSerial = 0;
+    const MatKey* resolveMatKey(const ContentManager& cm, const HE::UUID& materialId)
+    {
+        MatKey& k = m_matKeys[materialId];
+        if (k.serial != drawSceneSerial)
+        {
+            k.serial = drawSceneSerial;
+            k.ok = m_matShaderLib.resolveShaders(cm, materialId, k.hash, k.frag, k.vert);
+            if (k.ok) { foldDisplacement(cm, materialId, k.hash); k.texArrays = HE::matGlslTextureArrayMask(k.frag); }
+        }
+        return k.ok ? &k : nullptr;
+    }
     void foldDisplacement(const ContentManager& cm, const HE::UUID& materialId, uint64_t& hash)
     {
         if (!m_tessSupported) return;
@@ -11552,6 +11571,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
     if (!m_world || !m_impl->pso || width <= 0 || height <= 0) return;
     auto& p = *m_impl;
     auto* cl = static_cast<ID3D12GraphicsCommandList*>(cmdListPtr);
+    ++p.drawSceneSerial;   // the material keys made by an earlier call are not trusted by this one
 
     // Drop caches for materials/meshes edited since last frame (before the mesh-resolve
     // pre-pass below re-creates them fresh). Safe here: render thread, no draws recorded yet.
@@ -12430,11 +12450,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             // through unchanged when the material has no graph shader OR resources are down.
             if (p.m_matReady && m_contentManager)
             {
-                uint64_t matHash = 0; std::string matFrag, matVertBody;
-                if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                    matHash, matFrag, matVertBody))
+                if (const D3D12RendererImpl::MatKey* matKey = p.resolveMatKey(*m_contentManager, dc.materialAssetId))
                 {
-                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
+                    const uint64_t     matHash     = matKey->hash;
+                    const std::string& matFrag     = matKey->frag;
+                    const std::string& matVertBody = matKey->vert;
                     // Transparent graph materials get a blend-on / depth-write-off PSO
                     // variant. MUST use the same predicate the opaque/blended partition
                     // above used, or a draw lands in the blended pass with a
@@ -12535,7 +12555,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                             size_t nTex = 0;
                             if (const MaterialAsset* ma0 = m_contentManager->getMaterial(dc.materialAssetId))
                             {
-                                heTexPArrays = HE::matGlslTextureArrayMask(ma0->customShaderFragGlsl);
+                                heTexPArrays = matKey->texArrays;   // the mask of this very source, scanned once per DrawScene
                                 nTex = std::min<size_t>(HE::kMatMaxGraphTextures,
                                     std::max(ma0->graphTexturePaths.size(), ma0->graphTextureIds.size()));
                                 for (size_t i = 0; i < nTex; ++i)

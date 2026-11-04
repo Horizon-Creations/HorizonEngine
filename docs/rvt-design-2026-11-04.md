@@ -317,6 +317,23 @@ Das sind rund **10x** weniger (D3D12 ~3 ms je Seite, Vulkan ~3 ms; D3D11 0,45 ms
 
 Nicht gemacht: ein wirklich schlanker Pass (kein Post-Chain, ein persistentes Seitenziel, wie D3D11) und das Zusammenfassen der drei Layer einer Seite in einen Submit; dort liegt der Rest (~3 ms je Seite gegen 0,45).
 
+## Schritt 6c: der schlanke Seiten-Pass für D3D12/Vulkan: gemessen und nicht gebaut (2026-11-04)
+
+Vor dem Bau gemessen, wo die Zeit einer Seite nach der Klammer (6b) liegt (D3D12, Zeugenlauf ohne Last, je Layer einer Seite, vorübergehende Zeitnahme, nicht im Code):
+
+| | je Layer |
+|---|---|
+| `DrawViewportFrame` aufzeichnen, davon `DrawScene` | 0,31 ms, davon **0,25 ms** |
+| davon die Post-Kette (`runPostFX`) | **0,011 ms** |
+| Kopie in die Scheibe + Schließen + Submit | 0,03 ms |
+| Warten auf die GPU | 0,13 ms |
+
+Ein Seiten-Pass ohne Post-Kette und ohne HDR-Ziel spart also **nicht die Kosten, die da sind**: die Kette ist fast gratis, die Zeit steckt im Aufzeichnen von `DrawScene` selbst. Dafür müsste D3D12 eine sRGB-Variante der Material-PSOs (RTV-Format steckt im PSO und im Schlüssel, an mehreren Stellen berechnet), einen Verzicht auf den Himmel und einen eigenen Seitenpfad bekommen, für bestenfalls ein Drittel von 0,5 ms je Layer. Nicht gebaut. Vulkan hat keinen Grund für einen anderen Schluss (0,8 ms je Seite im Zeugenlauf, dieselbe Aufteilung ist dort nicht eigens gemessen).
+
+Was gebaut ist: der Schlüssel des Materials (Hash, Fragment-Quelltext, Vertex-Rumpf, Maske der Textur-Arrays) wird in D3D12 wie schon bei D3D11 (`matKeyCache`) **einmal je `DrawScene`-Aufruf je Material** gebildet (`MatKey`, `drawSceneSerial`), nicht je Draw: `resolveShaders` kopiert den ganzen Quelltext und hasht ihn, `matGlslTextureArrayMask` durchsucht ihn, bei jedem Chunk-Draw. Gilt für jedes Graph-Material, nicht nur RVT. Wirkung klein, aber real: 1,1 -> 0,9 ms je Seite im Klammer-Lauf. Vulkan memoisiert schon (`matFwdMemo`). Unverändert danach: alle D3D12-Zeugen (Scheiben 27/27 und Klammer 27/27, Positionsebenen 0 falsch, Verbraucher 0 falsch, Lit 1,51, Treiber, Kacheln), 300 Fälle `he_tests` (Culling, Material-Graph, Engine-Materials, RVT, D3D*, Deferred, Render) grün.
+
+Der Rest (~0,9 ms je Seite im Zeugenlauf, ~3 ms im Editor unter Last) ist das Aufzeichnen und Absenden von `DrawScene` je Layer und das Warten der Upload-Ringe wegen; was ihn senken würde, ist die Walk-Wiederverwendung des Extraktors über die drei Layer einer Seite (D3D11 macht das in `RenderRvtPage`) oder ein Submit für die drei Layer, beides braucht Ring-Offsets je Layer. Im Editor kommt dazu, dass das erste Warten eines Ticks auch die noch laufenden echten Frames der GPU abwartet.
+
 ## Handoff
 
 - **Topic / step:** 333, Schritte 1 bis 6 von 8 gebaut (5: Segmentierung als Stand-in für Tiles; 6: D3D12, Vulkan, OpenGL, **ohne Metal**).
@@ -326,4 +343,4 @@ Nicht gemacht: ein wirklich schlanker Pass (kein Post-Chain, ein persistentes Se
 - **Zeugen-Schalter:** `HE_DUMP_AUTOLAND=1 HE_DUMP_HLODBAKE=128 HE_DUMP_RVTTEST=1` / `HE_DUMP_RVTDRIVER=1` / `HE_DUMP_RVTTILES=1` plus `HE_DUMP_AUTOLANDSIZE`, `HE_DUMP_RVTTEST_TEXEL`, `_PERF=<reps>`, `_FAULT=half|flipz|swapxz`, `_LIT=1`. Immer `HE_HIDDEN_WINDOW=1`, eigenes `APPDATA`, `HE_DUMP_RHI=D3D11`; Warnungen stehen auf stderr, Infos auf stdout.
 - **Not verified:** CI für Schritt 3-6, Release-GPU-Zeit im großen Maßstab auf freier GPU (die Editor-Zahlen aus 6b sind unter Last entstanden), das Spiel im Loop, der Editor-Loop mit mehreren Landschaften, Metal (nicht portiert), echte Tiles.
 - **Traps:** zweiter Build-Baum mit `-DDEPLOY_DIR` UND `-DHE_ENGINE_SDK_DIR` umlenken, Release-Baum zusätzlich `-DHE_SDK_RELEASE_SET=OFF`; `he_tests` mit **eigenem APPDATA**; `small` ist unter Windows ein Makro (`rpcndr.h`); vor einem Push auf fremde Commits achten (`git log origin/release/0.8.0..HEAD`); `tests/CMakeLists.txt` und `docs/img*` werden von der zweiten Session angefasst: nur eigene Hunks committen.
-- **Next steps:** 1. Einen wirklich schlanken Seiten-Pass für D3D12 und Vulkan, falls ~3 ms je Seite im Editor zu viel sind (die drei Layer einer Seite in einen Submit; Seitenziel ohne Post-Chain; für D3D12 braucht das eine sRGB-PSO-Variante im Schlüssel und kein Himmel), gemessen auf freier GPU. 2. Metal portieren (auf einem Mac laufen lassen, nicht blind). 3. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 5. Wetter in die Scratch-Kopie; echte GPU-Zeit und Speicher (Schritt 8).
+- **Next steps:** 1. Falls ~3 ms je Seite im Editor zu viel sind: Walk-Wiederverwendung des Extraktors über die drei Layer einer Seite oder ein Submit für drei Layer (Ring-Offsets je Layer); ein Seiten-Pass ohne Post-Kette bringt nichts (6c), gemessen auf freier GPU. 2. Metal portieren (auf einem Mac laufen lassen, nicht blind). 3. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 5. Wetter in die Scratch-Kopie; echte GPU-Zeit und Speicher (Schritt 8).
