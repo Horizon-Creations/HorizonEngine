@@ -109,6 +109,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
 #include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
 #include <HorizonScene/LandscapeHlodBaker.h>
+#include <HorizonScene/RvtProducer.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -10757,6 +10758,203 @@ void EditorApplication::dumpFrameHeadless()
 						writeBMP(m_dumpPath + ".hlod_mosaic_" + names[v] + ".bmp", mosaic[v], full, full);
 						writeBMP(m_dumpPath + ".hlod_whole_" + names[v] + ".bmp", *refv[v], full, full);
 					}
+				}
+			}
+
+			// HE_DUMP_RVTTEST=1 (Thema 333, step 2): the page producer against the readback path. Pages around the camera are
+			// painted into the renderer's RVT pool; each slice must equal bakeRect() of the same rectangle and size byte for
+			// byte (same renderer, same camera maths: what differs is only the GPU copy), a page's border texels must equal the
+			// neighbour's payload texels (same world positions, so the texel grid and the Y flip agree), and a second update
+			// with the camera where it was must ask for nothing.
+			if (const char* rv = std::getenv("HE_DUMP_RVTTEST"); rv && *rv && *rv != '0' && ok)
+			{
+				using namespace HE::rvt;
+				const uint32_t cps = baker.chunksPerSide();
+				HE::landscape::HlodChunkRect first, last;
+				baker.chunkRect(0, 0, first);
+				baker.chunkRect(cps - 1, cps - 1, last);
+				VolumeDesc vd;
+				vd.origin = first.min;
+				vd.sizeM  = last.min.x + last.size.x - first.min.x;
+				vd.finestMetersPerTexel = vd.sizeM / (4.0f * float(vd.pageSize));   // 4 x 4 pages at mip 0
+				RvtManager mgr(64, 64, 2);
+				const uint16_t vol = mgr.addVolume(vd);
+				const uint32_t px = static_cast<uint32_t>(mgr.layout(vol).physicalPageSize());
+				if (!r->CreateRvtPool(64, px))
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST: CreateRvtPool failed on this backend");
+				else
+				{
+					ViewDesc view;
+					view.cameraXZ    = vd.origin + glm::vec2(vd.sizeM * 0.5f);
+					view.nearRadiusM = mgr.layout(vol).pageMeters(0) * 0.6f;
+					mgr.beginFrame();
+					const auto pages = mgr.update(vol, view);
+					const auto t0r = std::chrono::steady_clock::now();
+					const uint32_t painted = paintPages(baker, pages, px);
+					const auto t1r = std::chrono::steady_clock::now();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST: %zu pages asked, %u painted, %.1f ms (%.1f ms/page), %u px pages",
+					            pages.size(), painted, std::chrono::duration<double, std::milli>(t1r - t0r).count(),
+					            pages.empty() ? 0.0 : std::chrono::duration<double, std::milli>(t1r - t0r).count() / double(pages.size()), px);
+
+					// 1) slice == readback path
+					unsigned checked = 0, exact = 0, worst = 0;
+					for (const PageRender& pr : pages)
+					{
+						HE::landscape::HlodChunkRect rect; rect.min = pr.rectMin; rect.size = pr.rectMax - pr.rectMin;
+						HE::landscape::HlodChunkImages ref;
+						if (!baker.bakeRect(rect, px, 1, ref)) continue;
+						const std::vector<uint8_t>* want[3] = { &ref.albedo, &ref.normal, &ref.surface };
+						for (int layer = 0; layer < 3; ++layer)
+						{
+							std::vector<uint8_t> got;
+							if (!r->ReadbackRvtSlot(layer, pr.slot, got) || got.size() != want[layer]->size()) continue;
+							unsigned d = 0;
+							for (size_t i = 0; i < got.size(); ++i)
+								d = std::max(d, static_cast<unsigned>(std::abs(int(got[i]) - int((*want[layer])[i]))));
+							++checked; exact += d == 0 ? 1u : 0u; worst = std::max(worst, d);
+						}
+					}
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST slice vs readback: %u of %u slices byte-identical, worst difference %u /255",
+					            exact, checked, worst);
+
+					// 2) border == neighbour's payload: page (x,y) texel columns 128..135 are page (x+1,y) columns 0..7
+					for (const PageRender& a : pages)
+					{
+						if (a.key.mip != 0) continue;
+						for (const PageRender& b : pages)
+						{
+							if (b.key.mip != 0 || b.key.y != a.key.y || b.key.x != a.key.x + 1) continue;
+							const uint32_t ps = static_cast<uint32_t>(vd.pageSize);
+							for (int layer = 0; layer < 2; ++layer)
+							{
+								std::vector<uint8_t> ga, gb;
+								if (!r->ReadbackRvtSlot(layer, a.slot, ga) || !r->ReadbackRvtSlot(layer, b.slot, gb)) continue;
+								double sum = 0; unsigned mx = 0, n = 0;
+								for (uint32_t y = 0; y < px; ++y)
+									for (uint32_t i = ps; i < px; ++i)
+										for (int c = 0; c < 3; ++c)
+										{
+											const unsigned d = static_cast<unsigned>(std::abs(
+												int(ga[(size_t(y) * px + i) * 4 + size_t(c)]) - int(gb[(size_t(y) * px + (i - ps)) * 4 + size_t(c)])));
+											sum += d; mx = std::max(mx, d); ++n;
+										}
+								HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST border seam page(%u,%u)|(%u,%u) layer %d: mean %.3f /255, max %u",
+								            a.key.x, a.key.y, b.key.x, b.key.y, layer, n ? sum / double(n) : 0.0, mx);
+							}
+							break;
+						}
+					}
+
+					// 3) nothing changed: nothing to paint
+					mgr.beginFrame();
+					const size_t again = mgr.update(vol, view).size();
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST second update: %zu pages (expected 0)", again);
+					{
+						std::vector<uint8_t> dbg;
+						if (!pages.empty() && r->ReadbackRvtSlot(0, pages.front().slot, dbg))
+							writeBMP(m_dumpPath + ".rvt_page0.bmp", dbg, px, px);
+					}
+
+					// 4) position test (analytic): the three views are replaced by an unlit material whose colour is
+					// fract(worldPos * 1/period) and every texel of a page is compared with that value computed on the CPU at
+					// the texel's centre, rectMin + (i + 0.5) * texelM, row 0 = the min-Z edge. A flipped axis, the D3D Y flip,
+					// a half-texel offset or a misplaced border all show up as errors of many /255 (period 8 m, texel 0.5 m:
+					// one texel is 16/255, half a texel 8/255). R holds x, B holds z (G would be the terrain height).
+					{
+						constexpr float kPeriod = 8.0f;
+						HE::MaterialGraph g;
+						const int out = g.addNode(HE::MatNodeType::Output);
+						const int wp  = g.addNode(HE::MatNodeType::WorldPos);
+						const int sc  = g.addNode(HE::MatNodeType::ConstFloat);
+						const int mul = g.addNode(HE::MatNodeType::Multiply);
+						const int fr  = g.addNode(HE::MatNodeType::Fract);
+						g.findNode(out)->p[0] = 0.0f;                    // unlit
+						g.findNode(sc)->p[0]  = 1.0f / kPeriod;
+						g.connect(wp, 0, mul, 0);
+						g.connect(sc, 0, mul, 1);
+						g.connect(mul, 0, fr, 0);
+						g.connect(fr, 0, out, HE::kMatOutputBaseColorPin);
+						MaterialAsset am;
+						am.type = HE::AssetType::Material;
+						am.name = "RvtPositionWitness";
+						am.nodeGraphJson = HE::materialGraphToJson(g);
+						const HE::UUID mid = contentManager().registerMaterial(std::move(am));
+						contentManager().regenerateMaterialFromGraph(mid);
+						HE::UUID saved[3], mats[3] = { mid, mid, mid };
+						baker.viewMaterials(saved);
+						baker.setViewMaterials(mats);
+
+						RvtManager pm(8, 8, 0);
+						VolumeDesc pd = vd;
+						pd.finestMetersPerTexel = 0.5f;                   // an exact binary fraction: the texel centres are exact in float
+						const uint16_t pv = pm.addVolume(pd);
+						const uint32_t ppx = static_cast<uint32_t>(pm.layout(pv).physicalPageSize());
+						if (ppx != px) r->CreateRvtPool(8, ppx);
+						ViewDesc pview;
+						pview.cameraXZ = vd.origin + glm::vec2(vd.sizeM * 0.5f);
+						pview.nearRadiusM = 1.0f;
+						pm.beginFrame();
+						std::vector<PageRender> ppages = pm.update(pv, pview);
+						ppages.erase(std::remove_if(ppages.begin(), ppages.end(), [](const PageRender& pr) { return pr.key.mip != 0; }), ppages.end());
+						paintPages(baker, ppages, ppx);
+						const float tm = pm.layout(pv).texelMeters(0);
+						const auto srgbEnc = [](float v) { return v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f; };
+						const std::string fault = [] { const char* f = std::getenv("HE_DUMP_RVTTEST_FAULT"); return f ? std::string(f) : std::string(); }();
+						const auto circ = [](float a, float b) { float d = std::fabs(a - b); return std::min(d, 1.0f - d); };
+						for (int layer = 0; layer < 3; ++layer)
+						{
+							unsigned n = 0, bad = 0, worst = 0, skipped = 0;
+							for (const PageRender& pr : ppages)
+							{
+								std::vector<uint8_t> got;
+								if (!r->ReadbackRvtSlot(layer, pr.slot, got)) continue;
+								for (uint32_t j = 0; j < ppx; ++j)
+									for (uint32_t i = 0; i < ppx; ++i)
+									{
+										// HE_DUMP_RVTTEST_FAULT=half|flipz|swapxz: the negative control, the expectation itself made wrong on purpose
+										// (the test must then report errors, or it would not see a real half-texel / flip / swap).
+										float wx = pr.rectMin.x + (float(i) + 0.5f) * tm, wz = pr.rectMin.y + (float(j) + 0.5f) * tm;
+										if (fault == "half") wx += 0.5f * tm;
+										else if (fault == "flipz") wz = pr.rectMin.y + (float(ppx - 1 - j) + 0.5f) * tm;
+										else if (fault == "swapxz") std::swap(wx, wz);
+										if (wx < vd.origin.x + 0.5f || wz < vd.origin.y + 0.5f ||
+										    wx > vd.origin.x + vd.sizeM - 0.5f || wz > vd.origin.y + vd.sizeM - 0.5f) { ++skipped; continue; }   // outside the landscape
+										float ex = wx / kPeriod, ez = wz / kPeriod;
+										ex -= std::floor(ex); ez -= std::floor(ez);
+										if (layer == 0) { ex = srgbEnc(ex); ez = srgbEnc(ez); }
+										const uint8_t* px4 = &got[(size_t(j) * ppx + i) * 4];
+										// 8 bit of the value; right at the wrap (0 / 1) the neighbouring texel decides, so compare circularly
+										const float gx = float(px4[0]) / 255.0f, gz = float(px4[2]) / 255.0f;
+										const unsigned d = static_cast<unsigned>(std::lround(std::max(circ(gx, ex), circ(gz, ez)) * 255.0f));
+										++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
+									}
+							}
+							HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST position layer %d: %u texels on %zu pages, %u wrong by > 3/255, worst %u /255 (%u outside the landscape skipped)",
+							            layer, n, ppages.size(), bad, worst, skipped);
+						}
+						baker.setViewMaterials(saved);
+					}
+
+					// 5) HE_DUMP_RVTTEST_PERF=<reps>: the cost of painting a page. The pages of step 1 are painted again `reps`
+					// times (a stroke's repaint looks the same: the same slots, new content); CPU = until paintPages returns,
+					// total = until the GPU has finished (a readback of the last slice).
+					if (const char* pf = std::getenv("HE_DUMP_RVTTEST_PERF"); pf && *pf && !pages.empty())
+					{
+						const int reps = std::max(1, std::atoi(pf));
+						std::vector<uint8_t> sink;
+						paintPages(baker, pages, px);
+						r->ReadbackRvtSlot(0, pages.back().slot, sink);   // warm-up: pipelines built, GPU idle
+						const auto a = std::chrono::steady_clock::now();
+						for (int k = 0; k < reps; ++k) paintPages(baker, pages, px);
+						const auto b = std::chrono::steady_clock::now();
+						r->ReadbackRvtSlot(0, pages.back().slot, sink);
+						const auto c = std::chrono::steady_clock::now();
+						const double n = double(reps) * double(pages.size());
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST perf: %d x %zu pages of %u px: CPU %.3f ms/page, total %.3f ms/page (GPU wait after the CPU: %.2f ms)",
+						            reps, pages.size(), px, std::chrono::duration<double, std::milli>(b - a).count() / n,
+						            std::chrono::duration<double, std::milli>(c - a).count() / n, std::chrono::duration<double, std::milli>(c - b).count());
+					}
+					r->DestroyRvtPool();
 				}
 			}
 		}

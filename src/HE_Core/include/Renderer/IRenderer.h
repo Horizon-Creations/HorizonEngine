@@ -50,6 +50,12 @@ struct EditorCameraOverride
     // With rawOutput: the colour is written sRGB-encoded (the exact curve), for a picture that becomes an sRGB
     // texture. Without it the 8 bits hold the linear value, which is what data views (normals, roughness) want.
     bool      rawSrgb      = false;
+    // RenderSceneImage only (Runtime Virtual Textures, Thema 333): >= 0 sends the finished picture, on the GPU and
+    // without a readback, into slice `rvtSlot` of layer `rvtLayer` of the pool CreateRvtPool made. The picture must be
+    // exactly the pool's page size; `rgba` stays empty and the call returns true. Layer 0 is read as sRGB (use rawSrgb),
+    // layers 1 and 2 as plain data.
+    int       rvtSlot      = -1;
+    int       rvtLayer     = 0;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -255,6 +261,10 @@ public:
         // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
         // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
         bool supportsRawCapture = false;
+        // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
+        // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
+        // running its material directly.
+        bool supportsRvt = false;
         // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
         // plan.md). Metal (in the deferred tile path: lag-free, from the stored
         // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last
@@ -725,6 +735,17 @@ public:
     virtual bool  RenderSceneImage(const EditorCameraOverride& /*camera*/,
                                    uint32_t /*width*/, uint32_t /*height*/,
                                    std::vector<uint8_t>& /*rgba*/) { return false; }
+
+    // ── Runtime Virtual Texture page pool (Thema 333, docs/rvt-design-2026-11-04.md) ──
+    // Three texture arrays of `slots` slices, each pagePx x pagePx RGBA8: layer 0 BaseColor (sRGB), layer 1 world
+    // normal x 0.5 + 0.5, layer 2 R = AO, G = roughness: the three unlit views of the Auto Landscape material.
+    // Slices are filled with RenderSceneImage and EditorCameraOverride::rvtSlot. Creating again replaces the pool.
+    // False (and nothing created) when the backend cannot (Capabilities::supportsRvt).
+    virtual bool CreateRvtPool(uint32_t /*slots*/, uint32_t /*pagePx*/) { return false; }
+    virtual void DestroyRvtPool() {}
+    // Reads one slice back (a witness or a debug view; not for per-frame use). `rgba` = pagePx * pagePx * 4 bytes,
+    // row 0 first. False when there is no pool or the slice is out of range.
+    virtual bool ReadbackRvtSlot(int /*layer*/, uint32_t /*slot*/, std::vector<uint8_t>& /*rgba*/) { return false; }
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded

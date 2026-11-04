@@ -65,14 +65,22 @@ namespace HE::landscape
         bool bake(uint32_t cx, uint32_t cz, uint32_t side, uint32_t supersample, HlodChunkImages& out);
         // Same for any square world rectangle (the whole landscape in one picture is the test's reference).
         bool bakeRect(const HlodChunkRect& rect, uint32_t side, uint32_t supersample, HlodChunkImages& out);
+        // Runtime Virtual Textures (Thema 333): the same three views of `rect`, `px` x `px`, but each goes straight into
+        // slice `slot` of the renderer's RVT pool (layer 0 BaseColor, 1 Normal, 2 Surface), no readback, no filter.
+        bool renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot);
 
         // The material graph groups the parameters of the landscape's material came from (index into
         // kAutoLandscapeGroups), for the caller's log line.
         int group() const { return m_group; }
 
+        // A witness hook (HE_DUMP_RVTTEST): the three view materials the baker draws (BaseColor, Normal, Surface),
+        // replaced by materials of the caller's, e.g. one whose colour is a function of the world position.
+        void setViewMaterials(const HE::UUID (&mats)[3]) { for (int i = 0; i < 3; ++i) { m_viewMat[i] = mats[i]; m_rvtSeen[i] = false; } }
+        void viewMaterials(HE::UUID (&mats)[3]) const { for (int i = 0; i < 3; ++i) mats[i] = m_viewMat[i]; }
+
     private:
         bool renderView(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, bool srgb,
-                        std::vector<uint8_t>& rgba);
+                        std::vector<uint8_t>& rgba, int rvtSlot = -1, int rvtLayer = 0, bool invalidate = true);
 
         HorizonWorld&   m_live;      // the landscape is read from here
         HorizonWorld&   m_restore;   // and the renderer goes back to this one
@@ -85,6 +93,7 @@ namespace HE::landscape
         float           m_topY = 0.0f, m_bottomY = 0.0f;   // world heights the camera has to cover
         std::vector<HlodChunkRect> m_rects;          // [cz * chunksPerSide + cx]
         int             m_group = -1;
+        bool            m_rvtSeen[3] = { false, false, false };   // a view material the renderer has already resolved for pages
         bool            m_active = false;
     };
 

@@ -1429,6 +1429,25 @@ struct D3D11RendererImpl
         m_tessDispByKey.try_emplace(hash, ma->customShaderDispGlsl);
     }
     std::unordered_map<uint64_t, MatShaders> m_materialShaders; // key = shader hash (opaque + blended share one entry)
+    // The shader key of a graph material, remembered per material (Thema 333): resolveShaders copies the material's whole
+    // fragment source and hashes it, per draw. For the Auto Landscape graph that is the bulk of a chunk's draw cost
+    // (0.087 ms of 0.22 ms for four chunks in an RVT page view), to learn a number that only changes when the source does.
+    // The source CAN change under a stable address and size (the Material Editor assigns the new text into the same string
+    // and does not call InvalidateMaterial), so an entry is trusted only
+    //  * within the DrawScene call that made it (`serial`): a material is hashed once per frame instead of once per draw, or
+    //  * for the page pass (`longLived`), whose view materials belong to the baker and are never edited in place.
+    // On top of that the strings must still sit where and as long as they did, and InvalidateMaterial drops the entry.
+    struct MatKeyEntry { uint64_t hash = 0; const char* f = nullptr; size_t fn = 0; const char* v = nullptr; size_t vn = 0;
+                         const char* d = nullptr; size_t dn = 0; uint64_t serial = 0; bool longLived = false; };
+    uint64_t drawSceneSerial = 0;
+    bool     rvtPagePass = false;
+    std::unordered_map<HE::UUID, MatKeyEntry> matKeyCache;
+    static bool matKeyMatches(const MatKeyEntry& e, const MaterialAsset& m)
+    {
+        return e.f == m.customShaderFragGlsl.data() && e.fn == m.customShaderFragGlsl.size()
+            && e.v == m.customShaderVertGlsl.data() && e.vn == m.customShaderVertGlsl.size()
+            && e.d == m.customShaderDispGlsl.data() && e.dn == m.customShaderDispGlsl.size();
+    }
     // The model matrix per instance (64 B, vertex buffer 1, TEXCOORD4..7) for a graph
     // material's instanced twin (Thema 182, 2f). Its own buffer: instanceSB is a
     // structured buffer, which D3D11 does not let double as a vertex buffer. Dynamic,
@@ -1631,6 +1650,20 @@ struct D3D11RendererImpl
 
     // ── Viewport offscreen render target ────────────────────────────────────
     ComPtr<ID3D11Texture2D>          viewportTex;
+    // Runtime Virtual Texture page pool (Thema 333): three RGBA8 arrays, one per view of the landscape material
+    // (BaseColor sRGB, normal, AO + roughness). Typeless, so a UNORM viewport picture copies in and the sampling
+    // view decides sRGB or not.
+    ComPtr<ID3D11Texture2D>          rvtPool[3];
+    ComPtr<ID3D11ShaderResourceView> rvtPoolSRV[3];
+    uint32_t                         rvtSlots = 0;
+    uint32_t                         rvtPagePx = 0;
+    // The one target every page is drawn into (made with the pool, page-sized, kept): colour typeless with a linear and
+    // an sRGB view (layer 0 is sRGB, so the hardware encodes), and its depth.
+    ComPtr<ID3D11Texture2D>          rvtPageTex;
+    ComPtr<ID3D11RenderTargetView>   rvtPageRTV[2];     // [0] UNORM, [1] UNORM_SRGB
+    ComPtr<ID3D11Texture2D>          rvtPageDepth;
+    ComPtr<ID3D11DepthStencilView>   rvtPageDSV;
+    ComPtr<ID3D11ShaderResourceView> rvtPageDepthSRV;
     ComPtr<ID3D11RenderTargetView>   viewportRTV;
     ComPtr<ID3D11ShaderResourceView> viewportSRV;
     ComPtr<ID3D11Texture2D>          viewportDepth;
@@ -6032,7 +6065,10 @@ struct D3D11RendererImpl
     void processPendingInvalidations()
     {
         for (const HE::UUID& id : pendingMatInval)
+        {
             materialTexCache.erase(id);
+            matKeyCache.erase(id);
+        }
         pendingMatInval.clear();
         for (const HE::UUID& id : pendingTexInval)
         {
@@ -7117,6 +7153,7 @@ void D3D11Renderer::DrawScene(int width, int height)
     if (!m_world || !m_impl->vs || width <= 0 || height <= 0) return;
     HE_PROFILE_SCOPE_N("DrawScene");
     auto& p = *m_impl;
+    ++p.drawSceneSerial;   // matKeyCache: an entry made earlier than this call is not trusted by it
 
     // Drop caches for materials/meshes edited since last frame; they re-resolve this frame.
     p.processPendingInvalidations();
@@ -7991,10 +8028,30 @@ void D3D11Renderer::DrawScene(int width, int height)
             if (p.m_matReady && m_contentManager)
             {
                 uint64_t matHash = 0; std::string matFrag, matVertBody;
-                if (p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
-                                                    matHash, matFrag, matVertBody))
+                bool _resolved = false, _fastKey = false;
+                // Fast path: the key is remembered and its shaders are built. Not for a G-buffer or an instanced draw,
+                // which may still have to BUILD a variant from the source this path leaves empty.
+                if (!gbufferPass && !(dc.instanceTotal() > 1 && allowInstancing))
+                    if (const MaterialAsset* fm = m_contentManager->getMaterial(dc.materialAssetId))
+                        if (auto ke = p.matKeyCache.find(dc.materialAssetId);
+                            ke != p.matKeyCache.end() && D3D11RendererImpl::matKeyMatches(ke->second, *fm)
+                            && ((ke->second.longLived && p.rvtPagePass) || ke->second.serial == p.drawSceneSerial)
+                            && p.m_materialShaders.count(ke->second.hash))
+                        { matHash = ke->second.hash; _resolved = _fastKey = true; }
+                if (!_resolved)
+                    _resolved = p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
+                                                    matHash, matFrag, matVertBody);
+                if (_resolved)
                 {
-                    p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
+                    if (!_fastKey)
+                    {
+                        p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
+                        if (const MaterialAsset* fm = m_contentManager->getMaterial(dc.materialAssetId))
+                            p.matKeyCache[dc.materialAssetId] = { matHash, fm->customShaderFragGlsl.data(), fm->customShaderFragGlsl.size(),
+                                                                  fm->customShaderVertGlsl.data(), fm->customShaderVertGlsl.size(),
+                                                                  fm->customShaderDispGlsl.data(), fm->customShaderDispGlsl.size(),
+                                                                  p.drawSceneSerial, p.rvtPagePass };
+                    }
                     // Transparent graph materials get a blend-on / depth-write-off
                     // shader variant. MUST use the same predicate the opaque/blended
                     // partition above used, or a draw lands in the blended pass with a
@@ -9163,6 +9220,7 @@ IRenderer::Capabilities D3D11Renderer::GetCapabilities() const
     // HDR target and the world previews stay forward.
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
+    c.supportsRvt               = m_impl->postFxReady;   // the page is a raw capture copied into the pool
     return c;
 }
 
@@ -9268,6 +9326,143 @@ bool D3D11Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
     return true;
 }
 
+// ─── Runtime Virtual Texture page pool (Thema 333) ────────────────────────────
+bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+    auto& p = *m_impl;
+    DestroyRvtPool();
+    if (!p.device || !p.postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+    for (int layer = 0; layer < 3; ++layer)
+    {
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = td.Height = pagePx;
+        td.MipLevels  = 1;
+        td.ArraySize  = slots;
+        td.Format     = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        td.SampleDesc.Count = 1;
+        td.Usage      = D3D11_USAGE_DEFAULT;
+        td.BindFlags  = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+        sd.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+        sd.Texture2DArray.MipLevels = 1;
+        sd.Texture2DArray.ArraySize = slots;
+        if (FAILED(p.device->CreateTexture2D(&td, nullptr, &p.rvtPool[layer])) ||
+            FAILED(p.device->CreateShaderResourceView(p.rvtPool[layer].Get(), &sd, &p.rvtPoolSRV[layer])))
+        {
+            DestroyRvtPool();
+            return false;
+        }
+    }
+    {
+        D3D11_TEXTURE2D_DESC cd{};
+        cd.Width = cd.Height = pagePx;
+        cd.MipLevels = cd.ArraySize = 1;
+        cd.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        cd.SampleDesc.Count = 1;
+        cd.Usage = D3D11_USAGE_DEFAULT;
+        cd.BindFlags = D3D11_BIND_RENDER_TARGET;
+        D3D11_TEXTURE2D_DESC dd = cd;
+        dd.Format = DXGI_FORMAT_R24G8_TYPELESS;
+        dd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
+        D3D11_RENDER_TARGET_VIEW_DESC rd{};
+        rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
+        bool ok = SUCCEEDED(p.device->CreateTexture2D(&cd, nullptr, &p.rvtPageTex))
+               && SUCCEEDED(p.device->CreateTexture2D(&dd, nullptr, &p.rvtPageDepth));
+        if (ok) { rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;      ok = SUCCEEDED(p.device->CreateRenderTargetView(p.rvtPageTex.Get(), &rd, &p.rvtPageRTV[0])); }
+        if (ok) { rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; ok = SUCCEEDED(p.device->CreateRenderTargetView(p.rvtPageTex.Get(), &rd, &p.rvtPageRTV[1])); }
+        if (ok) p.createDepthViews(p.rvtPageDepth.Get(), p.rvtPageDSV, p.rvtPageDepthSRV);
+        if (!ok || !p.rvtPageDSV) { DestroyRvtPool(); return false; }
+    }
+    p.rvtSlots  = slots;
+    p.rvtPagePx = pagePx;
+    return true;
+}
+
+void D3D11Renderer::DestroyRvtPool()
+{
+    auto& p = *m_impl;
+    for (int layer = 0; layer < 3; ++layer) { p.rvtPoolSRV[layer].Reset(); p.rvtPool[layer].Reset(); }
+    p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset();
+    p.rvtPageDepth.Reset(); p.rvtPageDSV.Reset(); p.rvtPageDepthSRV.Reset();
+    p.rvtSlots = p.rvtPagePx = 0;
+}
+
+// One virtual texture page (Thema 333): the scene, as it stands, drawn through ONE camera into the page-sized target and
+// copied into the pool. Not RenderSceneImage's frame: no viewport pair and no HDR/post set made and released per call,
+// no post chain (the target is UNORM, so the output merger clamps, and the sRGB view encodes layer 0). The draw is
+// DrawScene itself, so the landscape material binds exactly as it does on screen.
+bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t px)
+{
+    auto& p = *m_impl;
+    if (!p.device || !p.context || !p.rvtPageTex || px != p.rvtPagePx) return false;
+    if (camera.rvtLayer < 0 || camera.rvtLayer > 2 || camera.rvtSlot < 0 || uint32_t(camera.rvtSlot) >= p.rvtSlots) return false;
+
+    // What the frame reads that this changes, put back afterwards (RenderSceneImage's list, minus the viewport pair).
+    const EditorCameraOverride liveCam = m_editorCamera;
+    const bool  liveSsao = p.ssaoEnabled, liveSsr = p.ssrEnabled, liveGi = p.giEnabled, liveGiRefl = p.giReflEnabled, liveTaa = p.taaFrame;
+    const HE::RenderPath livePath = m_renderPath;
+    const D3D11RendererImpl::FrameCounters liveCounters = p.counters;
+    ComPtr<ID3D11RenderTargetView> prevRTV;
+    ComPtr<ID3D11DepthStencilView> prevDSV;
+    p.context->OMGetRenderTargets(1, prevRTV.GetAddressOf(), prevDSV.GetAddressOf());
+    UINT nvp = 1; D3D11_VIEWPORT prevVP{};
+    p.context->RSGetViewports(&nvp, &prevVP);
+
+    m_editorCamera = camera;
+    p.ssaoEnabled = p.ssrEnabled = p.giEnabled = p.giReflEnabled = p.taaFrame = false;
+    m_renderPath = HE::RenderPath::Forward;
+
+    ID3D11RenderTargetView* rtv = p.rvtPageRTV[camera.rvtLayer == 0 ? 1 : 0].Get();
+    const float bg[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    D3D11_VIEWPORT vp{}; vp.Width = vp.Height = static_cast<float>(px); vp.MaxDepth = 1.0f;
+    p.context->OMSetRenderTargets(1, &rtv, p.rvtPageDSV.Get());
+    p.context->ClearRenderTargetView(rtv, bg);
+    p.context->ClearDepthStencilView(p.rvtPageDSV.Get(), D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+    p.context->RSSetViewports(1, &vp);
+    p.rvtPagePass = true;
+    DrawScene(static_cast<int>(px), static_cast<int>(px));
+    p.rvtPagePass = false;
+    { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
+    p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
+                                     p.rvtPageTex.Get(), 0, nullptr);
+
+    p.context->OMSetRenderTargets(1, prevRTV.GetAddressOf(), prevDSV.Get());
+    if (nvp) p.context->RSSetViewports(1, &prevVP);
+    m_editorCamera = liveCam;
+    p.ssaoEnabled = liveSsao; p.ssrEnabled = liveSsr; p.giEnabled = liveGi; p.giReflEnabled = liveGiRefl; p.taaFrame = liveTaa;
+    m_renderPath = livePath;
+    p.counters = liveCounters;
+
+    return true;
+}
+
+bool D3D11Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+    auto& p = *m_impl;
+    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtSlots) return false;
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = desc.Height = p.rvtPagePx;
+    desc.MipLevels = desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    ComPtr<ID3D11Texture2D> staging;
+    if (FAILED(p.device->CreateTexture2D(&desc, nullptr, &staging))) return false;
+    p.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, p.rvtPool[layer].Get(),
+                                     D3D11CalcSubresource(0, slot, 1), nullptr);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(p.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
+    rgba.resize(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4);
+    const uint8_t* src = static_cast<const uint8_t*>(mapped.pData);
+    for (uint32_t y = 0; y < p.rvtPagePx; ++y)
+        std::memcpy(rgba.data() + static_cast<size_t>(y) * p.rvtPagePx * 4, src + static_cast<size_t>(y) * mapped.RowPitch,
+                    static_cast<size_t>(p.rvtPagePx) * 4);
+    p.context->Unmap(staging.Get(), 0);
+    return true;
+}
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h; the shape is Metal's (MetalRenderer.mm,
 // RenderSceneImage): the live viewport pair is SET ASIDE (moved out of the
@@ -9303,6 +9498,12 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     auto& p = *m_impl;
     if (!p.device || !p.context) return false;
     if (width == 0 || height == 0) return false;
+    // A virtual texture page has its own lean pass (the general path below stays the fallback and the reference).
+    if (camera.rvtSlot >= 0 && p.rvtPageTex && width == p.rvtPagePx && height == p.rvtPagePx)
+    {
+        rgba.clear();
+        return RenderRvtPage(camera, width);
+    }
 
     // Everything the frame reads that the request changes, saved by value.
     ComPtr<ID3D11Texture2D>          liveTex      = std::move(p.viewportTex);
@@ -9355,7 +9556,19 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
         // The staging Map waits for the GPU; no world → the cleared target,
         // honestly black, which is what the viewport would show too.
         uint32_t gotW = 0, gotH = 0;
-        ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+        if (camera.rvtSlot >= 0)
+        {
+            // A virtual texture page: the picture never leaves the GPU (Thema 333).
+            ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
+              && uint32_t(camera.rvtSlot) < p.rvtSlots && width == p.rvtPagePx && height == p.rvtPagePx;
+            if (ok)
+                p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(),
+                                                 D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
+                                                 p.viewportTex.Get(), 0, nullptr);
+            rgba.clear();
+        }
+        else
+            ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
     }
 
     // The screenshot pair is released the way createViewportRT releases every

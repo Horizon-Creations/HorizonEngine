@@ -21,8 +21,8 @@ Dieses Doc ist Schritt 1 (Entwurf + CPU-Kern, kein GPU-Code). Schritte: Hive-The
 |---|---|---|
 | Page-Größe | 128 Nutztexel + 4 Rand je Seite = 136² physisch | Rand hält Bilinear/Aniso auf der Page; 136 ist durch 4 teilbar (Block-Kompression später). |
 | Feinste Auflösung | 0,25 m/Texel (4 Texel/m) → mip-0-Page = 32 m | Entspricht dem, was `planHlodBake` für die Nähe liefert (0,49 m/Texel gedeckelt bei 256). Je Volume einstellbar (`finestMetersPerTexel`). |
-| Layer | Layer 0 RGBA8 sRGB: BaseColor.rgb, A frei (Höhe/Blend). Layer 1 RGBA8: Normal.xy, Roughness, AO (z rekonstruiert) | Zwei Texturen wie UE (BaseColor / Normal+Rough+AO). Genau die drei Ansichtsgraphen aus 228, ein Draw in zwei Render-Targets. |
-| Pool-Größe | 136²·8 B = 148 KB je Page unkomprimiert; 256 MB ≈ 1770 Pages. Kompression (BC7/BC3 auf der GPU) erst in Schritt 6 | Erst Korrektheit, dann Speicher. Schalter `poolSlots` ist das Budget. |
+| Layer | **Revidiert in Schritt 2:** drei RGBA8-Arrays, eins je Ansicht: 0 BaseColor (sRGB), 1 Normal (Weltnormale·0,5+0,5), 2 Surface (R AO, G Roughness) | Die drei Ansichtsgraphen aus 228 haben je **einen** Ausgang; ein Draw in zwei gepackte Ziele bräuchte MRT im Material-Codegenerator, und eine Schreibmaske kann AO/Roughness nicht von RG nach BA schieben. Also drei Draws je Page. Das ursprüngliche Packing (BaseColor+A / Normal.xy+Rough+AO) bleibt eine spätere Optimierung (Schritt 6, mit Kompression). |
+| Pool-Größe | 136²·12 B = 222 KB je Page unkomprimiert (3 Layer); 256 MB ≈ 1180 Pages. Kompression (BC7/BC3 auf der GPU) erst in Schritt 6 | Erst Korrektheit, dann Speicher. Schalter `poolSlots` ist das Budget. |
 | Mip-Kette | Seitenzahl wird auf 2er-Potenz aufgerundet, Mips bis **eine** Page für das ganze Volume | Page-Table-Mips halbieren sauber; Fallback-Kette endet immer. |
 | Welche Pages werden gebraucht | Mip m deckt das Quadrat mit Halbkante `nearRadius·2^m` um die Kamera (Kanten inklusive). Alle Quadrate sind ineinander geschachtelt | Jeder Mip braucht ungefähr gleich viele Pages (bei 64 m / 32 m-Pages: 25), also ~125 Pages je Volume in Sicht. Die Fallback-Kette hat keine Lücken, weil jede Page einen Vorfahren im größeren Quadrat hat. |
 | Reihenfolge beim Füllen | Zuerst Pages ohne irgendeinen Vorfahren (grobe zuerst), dann der Rest nach Abstand zur Kamera; Budget `maxRendersPerFrame` | Die Sicht ist sofort grob abgedeckt, Detail rückt von der Kamera nach außen nach. |
@@ -57,6 +57,66 @@ Dieses Doc ist Schritt 1 (Entwurf + CPU-Kern, kein GPU-Code). Schritte: Hive-The
 * `tests/test_rvt_core.cpp` (9 Fälle, 1002 Prüfungen), eingetragen in `tests/CMakeLists.txt`, `RuntimeVirtualTexture.cpp` in `src/HE_Scene/CMakeLists.txt`.
 * Gebaut und gelaufen **eigenständig** (MSVC `cl`, doctest-Main, nur `RuntimeVirtualTexture.cpp` + Test): 9/9 grün.
 * Negativkontrolle: ohne das „Page ist in Sicht, also anfassen“ in `update()` schlägt der Eviction-Fall fehl (5 Prüfungen rot). Der erste Anlauf dieses Tests hat die Mutation **nicht** gefangen und wurde deshalb verschärft (geteilte Pages beider Ansichten, `evictions == 15`).
+
+## Schritt 2: Producer-Vertrag und D3D11 (2026-11-04)
+
+Entscheidung: **kein neuer Render-Pfad.** Die D3D11-Zeichenschleife für Graph-Material (Per-Objekt-Konstanten, Gewichtstextur, Overrides, Switches) steckt als Lambda mitten in `DrawScene`;
+sie nachzubauen würde still falsche Gewichte oder fehlende Overrides erzeugen. Eine Page ist deshalb ein `RenderSceneImage` mit Rohausgabe (der Weg von `HlodBaker`), dessen fertiges Bild die GPU **ohne Readback** in die Pool-Slice kopiert.
+Ein schlanker eigener Pass bleibt eine Optimierung, wenn die Messung (Schritt 8) ihn braucht.
+
+| Baustein | Wo |
+|---|---|
+| `EditorCameraOverride::rvtSlot/rvtLayer`, `Capabilities::supportsRvt`, `IRenderer::CreateRvtPool / DestroyRvtPool / ReadbackRvtSlot` (Default: false/no-op, andere Backends unverändert) | `src/HE_Core/include/Renderer/IRenderer.h` |
+| D3D11: drei `R8G8B8A8_TYPELESS`-Arrays (SRV sRGB für Layer 0), `CopySubresourceRegion` aus dem Viewport-Bild statt `CaptureViewport` | `D3D11Renderer.cpp` (`RenderSceneImage`, `CreateRvtPool`, `ReadbackRvtSlot`), `D3D11Renderer.h` |
+| `HlodBaker::renderRvtPage(rect, px, slot)`: die drei Ansichten einer Page in die drei Layer | `LandscapeHlodBaker.h/.cpp` |
+| `HE::rvt::paintPages(baker, vector<PageRender>, pagePx)` | `HE_Scene/RvtProducer.h/.cpp` |
+| Zeuge `HE_DUMP_RVTTEST=1` (mit `HE_DUMP_AUTOLAND=1 HE_DUMP_HLODBAKE=128`), nur Editor, nicht in `he_tests` (CI hat keine GPU) | `EditorApplication.cpp`, hinter dem HLODMOSAIC-Block |
+
+Gemessen (D3D11, RTX 4070, Debug-Build, Witness-Landschaft 256 m, 136-px-Pages):
+* 9 Pages gefragt, 9 gemalt, **7,9 ms je Page** (Debug, drei volle Szenen-Frames je Page; Release und ein schlanker Pass sind offen).
+* Slice gegen den Lesepfad (`bakeRect` desselben Rechtecks): **27 von 27 Slices byte-identisch**, größte Abweichung 0.
+* Rand gegen Nachbar-Nutztexel (Spalten 128..135 von Page (x,y) = 0..7 von (x+1,y)): Albedo mittlere Abweichung 0,11-0,13 /255, max 2; Normal 0,000. Das prüft Texelraster und Y-Ausrichtung zwischen Pages.
+* Stillstand: zweites `update()` mit gleicher Kamera: 0 Pages.
+* Kontrolle, dass der Zeuge nicht leer ist: Mitte der Page 0 hell (`f5efeb`), schwarz sind genau die 2112 Randtexel (136² − 128²) außerhalb der Landschaft.
+* **Analytischer Positionstest** (`HE_DUMP_RVTTEST`, Teil 4): die drei Ansichten werden durch ein unlit Material `fract(Weltposition / 8 m)` ersetzt (`HlodBaker::setViewMaterials`); jedes Texel von 4 Mip-0-Pages (2 x 2, also mit allen Rändern und Nähten) wird gegen den auf der CPU berechneten Wert am Texelmittelpunkt `rectMin + (i+0,5)·texelM` verglichen, Zeile 0 = min-Z. R trägt x, B trägt z (G wäre die Geländehöhe).
+  * Ohne Fehlerinjektion, alle drei Layer: **68 644 Texel, 0 falsch (> 3/255), schlimmster Wert 1/255** (Layer 0 sRGB) bzw. 0 (Layer 1, 2); 5 340 Texel außerhalb der Landschaft ausgelassen.
+  * Negativkontrolle `HE_DUMP_RVTTEST_FAULT` (macht die Erwartung absichtlich falsch): `half` (halbes Texel) Layer 1/2 **alle 68 906 Texel falsch, schlimmster 8/255**, Layer 0 64 452; `flipz` (Z gespiegelt) alle falsch, bis 127/255; `swapxz` 64 350 falsch, bis 127/255. Der Test sieht also schon ein halbes Texel.
+  * Damit sind Achsen, Zeilenrichtung (Zeile 0 = min-Z), Texelmitte und Randplatzierung für D3D11 belegt (nicht mehr nur über den Vergleich mit Thema 228).
+* Schwäche, die bleibt: nur D3D11, nur eine flache Witness-Landschaft (256 m), Debug-Build. Pages in der Ferne (Mip ≥ 1) und andere Texeldichten sind nicht positionsgeprüft.
+* **Build-Falle:** `cmake/HorizonSDK.cmake` installiert das Engine-SDK nach `HE_ENGINE_SDK_DIR` (Cache, Standard `<DEPLOY_DIR>/Editor/EngineSDK`), unabhängig vom `DEPLOY_DIR`-Override. Wer `DEPLOY_DIR` umlenkt, muss `-DHE_ENGINE_SDK_DIR=<repo>/out/deploy-rvt/Editor/EngineSDK` mit umlenken; sonst schreibt `HorizonSDKRelease` die neuen Header in den SDK-Ordner des laufenden Editors und der `dev`-Lib-Satz zeigt MISMATCH (der Build bricht ab).
+
+Nicht in diesem Schritt: Page-Table-Textur und ihr Upload (kommt mit dem Consumer in Schritt 3, braucht dessen Format), Hysterese, andere Backends (Schritt 6), Pool-Kompression.
+## Schritt 2b: Page-Rendering beschleunigt (gemessen vorher/nachher, 2026-11-04)
+
+Frage des Menschen: nicht das ganze Szenenbild je Page, sondern nur der eine Shader in einen eigenen Framebuffer. Erst gemessen, wo die Zeit hingeht (D3D11, RTX 4070, **Release**, Witness-Landschaft, 9 Pages x 20 Wiederholungen, drei Ansichten je Page, CPU-Zeit mit Timern im Renderer):
+
+| je Ansicht (ms) | vorher | nachher |
+|---|---|---|
+| Ziel-/HDR-Satz anlegen und freigeben (`createViewportRT`) | 0,067 (31 %) | 0 (ein Page-Ziel, einmal mit dem Pool angelegt) |
+| `extract` der Szene | 0,042 (19 %) | 0,035 |
+| Szenen-Pass | 0,103 (47 %) | 0,014 |
+| davon `resolveShaders` (Quelle kopieren + hashen, je Draw) | **0,087 (40 % der Ansicht)** | 0,000 |
+| Schatten, Himmel, Post-Kette | ~0 | entfällt |
+| **gesamt je Ansicht** | **0,219** | **0,053** |
+| **je Page (3 Ansichten, ohne Timer gemessen)** | **0,597 ms** | **0,106 ms (5,6x)** |
+
+Befund: Schatten, Himmel und Post waren **schon vorher fast gratis**, weil der Baker in einer Szenenkopie mit nur einer Landschaft rendert. Die Idee "nur der eine Shader" war dort im Kern erfüllt; teuer waren das Anlegen der Ziele je Aufruf und `resolveShaders`, das bei **jedem Draw** den ganzen Fragment-Quelltext des Auto-Landscape-Graphen kopiert und hasht. Letzteres trifft jeden Graph-Material-Draw auf D3D11, nicht nur RVT.
+
+Geändert (alles in `D3D11Renderer.cpp`, hinter `RenderSceneImage` mit `camera.rvtSlot >= 0`):
+* `RenderRvtPage`: eigenes Page-Ziel (RGBA8 typeless mit UNORM- und sRGB-Ansicht, plus Tiefe), `DrawScene` direkt hinein, ohne Viewport-/HDR-Satz und ohne Post-Kette; Ausgabe per `CopySubresourceRegion` in den Pool. Der allgemeine Pfad bleibt Rückfall und Referenz.
+* Schlüssel-Cache je Material (`matKeyCache`): gültig **innerhalb eines `DrawScene`-Aufrufs** (ein Hash je Material und Frame statt je Draw) oder, nur im Page-Pass, dauerhaft, weil dessen Ansichtsmaterialien dem Baker gehören. Warum nicht einfach über Zeiger und Größe: der Material-Editor weist den neuen Quelltext in denselben String zu und ruft `InvalidateMaterial` nicht auf, ein gleich langer Edit bliebe sonst unsichtbar. Greift nur ohne G-Buffer-/Instanz-Draw (die müssten sonst aus dem leer gelassenen Quelltext bauen).
+* `HlodBaker::renderRvtPage` meldet ein Ansichtsmaterial dem Renderer nur einmal (`InvalidateMaterial`), nicht je Page (das hätte jedes Mal Cache und Texturen verworfen).
+
+Geprüft nach der Änderung (Release): Positionstest unverändert **0 falsch, schlimmster Wert 1 / 0 / 0 /255**; die Fehlerinjektionen (`half`, `flipz`, `swapxz`) schlagen weiter an (8 / 120 / 127 /255); Rand gegen Nachbar wie vorher (0,11 /255, max 2); zweites `update()` 0 Pages; das normale Frame-Bild des Editors (`HE_DUMP_PATH`) **byte-identisch** zum Stand davor (belegt, dass der Cache das normale Zeichnen nicht ändert). Debug-`he_tests` (RVT, HLOD, Culling, Render): 144 Fälle grün.
+Neu: die Pool-Slices sind jetzt **nicht** mehr byte-gleich zum alten Lesepfad (0 von 27, größte Abweichung 1/255). Der alte Pfad ging über ein RGBA16F-HDR-Bild und den Tonemap; der neue schreibt das Material direkt in 8 Bit und ist laut Positionstest auf den linearen Layern **exakter** als der alte. Der Positionstest ist damit das maßgebliche Orakel, nicht mehr der Vergleich mit dem Lesepfad.
+
+Nicht gemessen / Grenzen:
+* Der Gewinn im echten Spiel dürfte **größer** sein: dort lief der alte Pfad mit einem Live-Viewport und legte nach jedem Aufruf die HDR-Ziele in voller Größe neu an; die Witness hat keinen Live-Viewport. Nicht gemessen.
+* Die Witness-Szene hat keine Lichter, daher keine Schatten; in einer Szenenkopie mit Lichtern käme der Schattenpass dazu (er ließe sich im Page-Pass abschalten, ist es noch nicht).
+* Der Schlüssel-Cache im normalen Frame ist (bis auf Bildgleichheit) nicht auf Frame-Zeit gemessen.
+* Übrig bleibt `extract` mit 66 % der Ansicht (0,035 ms): die drei Ansichten einer Page extrahieren dieselbe Szene dreimal. Nächster Hebel: einmal je Page extrahieren und nur das Material tauschen, oder mehrere Pages je Pass.
+* Nur D3D11. Debug-Zahlen (7,9 ms je Page) waren irreführend: Release ist 13x schneller, und die gemessene Verteilung stammt aus Release.
+* Build-Falle (zusätzlich zu `HE_ENGINE_SDK_DIR`): ein zweiter Baum mit `DEPLOY_DIR`-Override scheitert an `HorizonSDKRelease` (Prüfung des `dev`-Lib-Satzes: MISMATCH), sobald SDK-Header sich ändern und der Editor noch nicht gelinkt hat. Mit `-DHE_SDK_RELEASE_SET=OFF` im Release-Baum umgangen.
 
 ## Handoff
 

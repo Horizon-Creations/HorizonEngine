@@ -222,13 +222,13 @@ namespace HE::landscape
     }
 
     bool HlodBaker::renderView(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, bool srgb,
-                               std::vector<uint8_t>& rgba)
+                               std::vector<uint8_t>& rgba, int rvtSlot, int rvtLayer, bool invalidate)
     {
         auto& reg = m_scratch->registry();
         reg.get<MaterialComponent>(m_terrain).materialAssetId = material;
         for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MaterialComponent>().each())
             mc.materialAssetId = material;
-        m_renderer.InvalidateMaterial(material);
+        if (invalidate) m_renderer.InvalidateMaterial(material);
 
         EditorCameraOverride cam;
         cam.active          = true;
@@ -242,6 +242,9 @@ namespace HE::landscape
         cam.view      = glm::lookAt(eye, eye + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
         cam.nearPlane = 0.1f;
         cam.farPlane  = (m_topY - m_bottomY) + 30.0f;
+        cam.rvtSlot   = rvtSlot;
+        cam.rvtLayer  = rvtLayer;
+        if (rvtSlot >= 0) return m_renderer.RenderSceneImage(cam, px, px, rgba);   // the picture went into the pool
         return m_renderer.RenderSceneImage(cam, px, px, rgba) && rgba.size() == static_cast<size_t>(px) * px * 4;
     }
 
@@ -250,6 +253,20 @@ namespace HE::landscape
         HlodChunkRect rect;
         if (!chunkRect(cx, cz, rect)) return false;
         return bakeRect(rect, side, supersample, out);
+    }
+
+    bool HlodBaker::renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot)
+    {
+        if (!m_active || px == 0 || std::fabs(rect.size.x - rect.size.y) > 1e-3f) return false;
+        // The renderer is told about a view material once; asking again for every page would drop what it remembers of it
+        // (its shader key, its textures) and make the next page start from scratch.
+        std::vector<uint8_t> none;
+        for (int v = 0; v < 3; ++v)
+        {
+            if (!renderView(m_viewMat[v], rect, px, /*srgb=*/v == 0, none, int(slot), v, /*invalidate=*/!m_rvtSeen[v])) return false;
+            m_rvtSeen[v] = true;
+        }
+        return true;
     }
 
     bool HlodBaker::bakeRect(const HlodChunkRect& rect, uint32_t side, uint32_t supersample, HlodChunkImages& out)
