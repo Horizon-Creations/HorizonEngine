@@ -140,6 +140,23 @@ Gegenüber dem allerersten Stand (0,597 ms bei 128 m) ist die Page jetzt rund **
 
 Geprüft: Positionstest jetzt auch bei **512 m und 1024 m** (vorher lief er dort leer, weil der Test den Mip-0-Bereich nicht ins Budget bekam; Fehler im Zeugen, behoben: 73 984 Texel, 0 falsch, schlimmster Wert 1 / 0 / 0 /255). 128 m: 68 644 Texel, 0 falsch. Fehlerinjektion `half` / `flipz` / `swapxz` schlägt weiter an (8 / 120 / 127 /255). Rand gegen Nachbar unverändert, zweites `update()` 0 Pages, das normale Editor-Bild byte-identisch zum Stand vor der RVT-Arbeit. Neue Zeugen-Schalter: `HE_DUMP_AUTOLANDSIZE=<m>` (128 bis 2048) und `HE_DUMP_RVTTEST_TEXEL=<m>`.
 
+## Schritt 2d: Chunks der Szenenkopie auf das Page-Rechteck begrenzen: gemessen, verworfen (2026-11-04)
+
+Annahme nach 2c: bei großen Landschaften wächst die CPU-Zeit mit der Chunk-Zahl, weil jede Page die ganze Szenenkopie extrahiert, sortiert und beschneidet. Versuch: der Baker setzt vor Layer 0 `MeshComponent::visible` nur für die Chunks, deren Rechteck das Page-Rechteck berührt (Rand 0,5 m), der Lesepfad `bakeRect` schaltet vorher alle wieder ein.
+
+Messung (D3D11, RTX 4070, Release, 1024 m / 256 Chunks, Texel 0,25 m, 30 Wiederholungen, je dreimal im Wechsel; `DrawScene`-Phasen je Ansicht in ms, Mittel über die drei Ansichten einer Page, von denen zwei die Extraktion wiederverwenden):
+
+| | extract | prep (Material setzen, Sortieren, Culling bis zum Graphen) | graph (Pässe) | Ansicht gesamt | Page gesamt (mit GPU-Warten) |
+|---|---|---|---|---|---|
+| alle Chunks sichtbar | 0,007 | 0,012-0,014 | 0,049-0,051 | 0,069-0,072 | 0,208-0,213 |
+| nur berührte Chunks | 0,003-0,004 | 0,005 | **0,060-0,061** | 0,068-0,070 | 0,210-0,218 |
+
+Ergebnis: extract und prep sinken zusammen um rund 0,011 ms je Ansicht, der Graph-Teil steigt um rund 0,010 ms. **Netto null.** Die Annahme war falsch: die Extraktion ist schon parallel (`parallel_for`), versteckte Chunks fallen früh heraus, und 256 Chunks kosten sie nur ~0,03 ms für den vollen Lauf. Dass der Graph-Teil mit weniger sichtbaren Chunks teurer wird, habe ich nicht erklärt (Verdacht: etwas im Pass hängt an der Änderung der Objektmenge von Page zu Page; nicht untersucht).
+
+Konsequenz: nicht eingebaut (Patch nur im Scratchpad, nicht im Repo). Der Rest einer Page auf großen Landschaften (~0,07 ms je Ansicht) liegt im Graph-Teil (Pässe, Frame-Konstanten, Draws), nicht in der Szenenarbeit. Weiter beschleunigen würde nur noch ein Profil dieses Teils; bei 8 Pages je Frame sind es ~1,7 ms CPU, für Schritt 3 reicht das.
+
+Messrauschen: derselbe Aufbau gab in zwei Läufen 0,211 und 0,273 ms je Page (Takt, GPU-Auslastung). Unterschiede unter etwa 25 % sind nur mit Wiederholung im Wechsel belastbar, wie oben.
+
 ## Handoff
 
 - **Topic / step:** 333, Schritt 1 von 8 (Entwurf + CPU-Kern)
