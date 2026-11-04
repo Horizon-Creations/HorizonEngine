@@ -2,6 +2,7 @@
 #include "EditorGraphics.h"   // the project's copy of the graphics fields
 #include <Window/Window.h>           // hiddenWindowRequested — no OS windows of ImGui's own
 #include <ContentManager/HAsset.h>   // asset type of a just-saved file
+#include <ContentManager/GpuArrayCook.h>   // texture arrays cooked for the GPU on load
 #include <cstring>
 #include <Diagnostics/EngineProfiler.h> // HE_DUMP_GPUTIME turns live GPU timing on
 #include "AssetThumbnailCache.h" // renderer-owned Content-Browser tiles (freed on shutdown)
@@ -1284,6 +1285,21 @@ void EditorApplication::OnInit()
 		std::string engineContentPath = std::string(basePath ? basePath : "") + "EngineContent";
 		contentManager().setEngineContentRoot(engineContentPath);
 		m_globalState->refreshEngineFolder(engineContentPath);
+	}
+
+	// ── Texture arrays go to the GPU block-compressed (GpuArrayCook.h) ──────────
+	// Shared EngineContent holds the landscape's texture arrays as platform-neutral RGBA8 (291 MB each).
+	// Like an export does for its target, cook them for the GPU this editor runs on when they are read:
+	// BC7 on D3D/Vulkan/GL, ASTC on Metal, BC3 on macOS GL, cached beside the EngineContent download
+	// cache so the encoder runs once per download. HE_EDITOR_ARRAY_COMPRESS=none turns it off.
+	{
+		HE::GpuArrayCookSettings cook;
+		cook.format   = HE::gpuArrayCookFormatFor(static_cast<int>(m_backend));
+		cook.quality  = cook.format == 2 ? 1 : 0;   // BC7 balanced; ASTC and BC3 fast
+		cook.cacheDir = (GlobalState::userDataDir() / "EngineContentCookCache").string();
+		HE::setGpuArrayCook(cook);
+		HE_LOG_INFO(Editor, "Texture arrays for the GPU: %s",
+		            cook.format == 2 ? "BC7" : cook.format == 1 ? "ASTC 4x4" : cook.format == 3 ? "BC3" : "RGBA8 (not compressed)");
 	}
 
 	switch (m_backend)

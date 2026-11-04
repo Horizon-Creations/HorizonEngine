@@ -360,6 +360,8 @@ add_executable(he_tests
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
     test_texture_bcn.cpp
+    # editor: big RGBA8 texture arrays are read cooked for the GPU, cached by source path/size/mtime (GpuArrayCook.h)
+    test_gpu_array_cook.cpp
     # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
     test_bench_landscape_arrays.cpp
     # size / encode time / zstd of ONE baked landscape tile map per side and format; a no-op without HE_BENCH_TILE_PNG (Thema 228, for 326)
