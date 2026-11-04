@@ -259,13 +259,49 @@ Nicht geprüft / bekannte Grenzen:
 * Die Tabelle je Consumer lädt die **ganze** Tabelle neu, wenn sich eine Seite ändert (kleine Mips, ein paar KB); kein Teil-Update.
 * Das Spiel (`GameApplication`) ist übersetzt, nicht gelaufen. Nur D3D11. Das Wetter bleibt trocken (Schritt 4).
 
+## Schritt 6: D3D12, Vulkan und OpenGL (2026-11-04)
+
+Dieselbe Aufgabe in drei Backends, alle nach dem D3D11-Vertrag (`IRenderer.h`): Pool, Tabelle je Consumer, Tausch je Landschaft, `supportsRvt` zuletzt. Eine Seite ist in allen dreien der **allgemeine** `RenderSceneImage`-Weg (rohe Ausgabe) und wird danach in ihre Scheibe kopiert, ohne Rücklesen; der schlanke Seiten-Pass von D3D11 (0,05 ms) ist nicht nachgebaut.
+
+| | D3D12 | Vulkan | OpenGL |
+|---|---|---|---|
+| Bindung | Root-Tabelle +4 Slots (`kSrvPerDraw` 17 -> 21, Bereich t40..t43), Pool-Views in der Material-Schablone, die Tabelle des Consumers wird je Draw in den Block kopiert | vier Zeilen (40..43) hinter den Cluster-Listen in Set 0; nur ein Draw mit Tabelle schreibt sie (kein anderer Pipeline-Pfad benutzt sie) | Einheiten 21..24, nach Namen zugewiesen (`setupProgram`), je Draw an den zwei opaken Stellen (vorwärts, G-Buffer) |
+| Pool | 3 Arrays, BaseColor `R8G8B8A8_TYPELESS` + sRGB-View | 3 Bildarrays, BaseColor UNORM mit SRGB-View (veränderliches Format) | 3 `GL_TEXTURE_2D_ARRAY`, BaseColor `SRGB8_ALPHA8` |
+| Kopie | `CopyTextureRegion` | `vkCmdCopyImage` | `glBlitFramebuffer`, **vertikal gespiegelt** (GL speichert unten zuerst, der Pool oben zuerst), `FRAMEBUFFER_SRGB` aus |
+| Tabelle | `R32_UINT` mit Mips, SRV in CPU-Heap | `R32_UINT` mit Mips, nearest-Sampler | `R32UI` mit Mips, nearest (sonst unvollständig) |
+| Grenze | keine | Gerät muss 21 Fragment-Sampler tragen (`rvtFit`), sonst Layout ohne die Zeilen, `supportsRvt` aus; `HE_VK_MAX_STAGE_SAMPLERS` läuft den Fall ab | 25 Fragment-Textureinheiten (macOS-GL hat 16: aus, geloggt) |
+
+Geprüft (RTX 4070, echte Geräte, Release-Editor, dieselben Zeugen wie bei D3D11, `HE_DUMP_RHI=D3D12|Vulkan|OpenGL`):
+
+| | D3D11 | D3D12 | Vulkan | OpenGL |
+|---|---|---|---|---|
+| Scheiben gegen Rücklesen | 27/27 | 27/27 | 27/27 | 27/27 |
+| Positionsebenen 0..2, falsch > 3/255 | 0 | 0 | 0 | 0 |
+| Negativkontrollen `half`/`flipz`/`swapxz` | gefangen | gefangen | gefangen | gefangen |
+| Verbraucher (3 Sichten) + Feinmuster, falsch | 0 | 0 | 0 | 0 |
+| Lit-Vergleich gegen das eigene Material, Mittel /255 | 1,5 | 1,51 | 1,50 | 1,52 |
+| Treiber: Füllung / Leerlauf / Sculpt / Mal / Pfade | 3 Fr., 21 Pages / 0 / 7=7 / 6~6 / 1,47 und 1,51 | gleich | gleich | gleich |
+| 2 x 2 Kacheln: Naht-Streifen / Inneres | 2,60 / 3,36 | 2,60 / 3,36 | 2,39 / 3,25 | 2,43 / 3,30 |
+| Seite im Zeugenlauf (ms je Seite) | 0,6 allgemein, 0,05 schlank | 17 | 24 | 3,4 |
+
+Der Zählerstand der Kacheln (4/4 nach 11 Frames, Striche 6 = 6 und 10 = 10, Kachel zerstört 84 -> 63, hin und zurück 16 -> 16 Materialien, Pool von 40: 0 Verdrängungen) ist in allen vier Backends gleich. Die Negativkontrolle zum Vulkan-Fall: mit `HE_VK_MAX_STAGE_SAMPLERS` 18 und 20 steht "Runtime Virtual Textures off" im Log und die Zeugen überspringen (`supportsRvt` aus), mit 21 läuft es. Der Software-Renderer meldet `supportsRvt` nicht; Treiber und Zeugen laufen sauber leer (der Treiber-Zeuge hat dabei einen Absturz gezeigt, den es nur bei diesem Aufruf ohne Fähigkeit gab: er prüft jetzt `supportsRvt` und sagt, dass er übersprungen wird).
+
+Tests: die Sweeps in `test_material_graph.cpp` sind **streng** geworden. Der RVT-Knoten muss von der D3D12-Root-Signatur und vom Vulkan-Layout ganz bedient werden; die Signatur ohne den neuen Bereich und das Layout ohne Zeile 40 sind die Negativkontrollen; `rvtFit` und die Sampler-Zahlen (21/20) sind geprüft. `he_tests` (Debug, eigenes `APPDATA`): 535 Fälle der renderernahen Dateien grün, darunter die D3D12-WARP-PSO-Tests gegen die größere Signatur.
+
+Nicht geprüft / bekannte Grenzen:
+* **Metal ist nicht portiert** (`supportsRvt` bleibt falsch, die Landschaft zeichnet wie bisher). Ich habe es nicht blind geschrieben: es lässt sich hier weder übersetzen noch laufen lassen (nur im CI-Schritt nach ctest), und `MetalRenderer.mm` hat seine eigene Bindungs- und Shader-Spiegelung. Nötig: Pool als `MTLTexture` 2D-Array, Tabelle je Consumer, Bindung an Fragment-Texturen, Tausch nach der Extraktion, Seite per Blit in die Scheibe; die MSL kommt aus derselben Querübersetzung (`RvtLookup.h`).
+* **Der Seiten-Pass ist in D3D12, Vulkan und OpenGL der allgemeine Weg**: je Seite ein neuer Ansichtssatz, Flush(es) und danach die Reparatur der Zwischenziele auf die Größe des echten Viewports. Im Zeugenlauf 17 / 24 / 3,4 ms je Seite, im Editor mit lebendem Viewport vermutlich mehr (nicht gemessen). Für einen Strich oder die erste Füllung ist das ein Ruckler, kein Dauerzustand; ein schlanker Pass (persistentes Seitenziel, kein Post-Chain, wie D3D11) ist der nächste Schritt, vor allem für D3D12/Vulkan.
+* Der Editor-Loop und das Spiel wurden nur auf D3D11 gelaufen (Schritt 4); auf den anderen drei läuft nur der Zeugen-Aufruf des Treibers (`updateTerrains`, dann `tick`).
+* OpenGL ohne 25 Textureinheiten (macOS) und Vulkan-Geräte am Sampler-Minimum: nur über die Schalter nachgestellt (`HE_VK_MAX_STAGE_SAMPLERS`), nicht auf echter Hardware.
+* CI (Linux/macOS/Windows) für Schritt 6 steht aus.
+
 ## Handoff
 
-- **Topic / step:** 333, Schritte 1 bis 5 von 8 gebaut (5: Segmentierung als Stand-in für Tiles, siehe oben).
+- **Topic / step:** 333, Schritte 1 bis 6 von 8 gebaut (5: Segmentierung als Stand-in für Tiles; 6: D3D12, Vulkan, OpenGL, **ohne Metal**).
 - **Branch / commit:** `claude/runtime-virtual-textures` (Stand der Schritte 1-4: siehe `git log`; Schritt 5: 5a 50707eb6, 5b-5d und Zeuge in den Commits danach). Der Branch enthält auch lokale Commits der zweiten Session.
-- **Done:** CPU-Kern, Renderer-Vertrag + D3D11-Page-Pass, Consumer (Knoten, Lookup, Bindung), Treiber mit Journal und Tausch (echter Loop mit einer Landschaft geprüft), mehrere Landschaften in einem Pool (Zeuge `HE_DUMP_RVTTILES`).
+- **Done:** CPU-Kern, Renderer-Vertrag + D3D11-Page-Pass, Consumer (Knoten, Lookup, Bindung), Treiber mit Journal und Tausch (echter Loop mit einer Landschaft geprüft), mehrere Landschaften in einem Pool (Zeuge `HE_DUMP_RVTTILES`), D3D12/Vulkan/OpenGL mit allen Zeugen grün (Schritt 6, Commits c2c9cd11, ab34291a, 09817cc1 und der Wächter in den Zeugen).
 - **Files (neu in 5):** `HE_Scene/{include/HorizonScene,src}/RuntimeVirtualTexture.*` (`updateAll`, `missing`), `RvtLandscape.*` (Segmente), `HE_Core/include/Renderer/IRenderer.h` (Tabelle je Consumer, `SetRvtLandscape(entity, ...)`, `ReleaseRvtConsumer`), `HE_Rendering/.../D3D11Renderer.*` (`rvtTables`, `rvtSwaps`), `RenderObject::terrainEntity` + `RenderExtractor.cpp`, `MaterialGraph/RvtLookup.h` (Kantenklemmung), `HE_Editor/EditorApplication.cpp` (Zeuge `HE_DUMP_RVTTILES`, mit `HE_DUMP_AUTOLAND=1 HE_DUMP_AUTOLANDSIZE=128`), `tests/test_rvt_core.cpp` (+3 Fälle).
 - **Zeugen-Schalter:** `HE_DUMP_AUTOLAND=1 HE_DUMP_HLODBAKE=128 HE_DUMP_RVTTEST=1` / `HE_DUMP_RVTDRIVER=1` / `HE_DUMP_RVTTILES=1` plus `HE_DUMP_AUTOLANDSIZE`, `HE_DUMP_RVTTEST_TEXEL`, `_PERF=<reps>`, `_FAULT=half|flipz|swapxz`, `_LIT=1`. Immer `HE_HIDDEN_WINDOW=1`, eigenes `APPDATA`, `HE_DUMP_RHI=D3D11`; Warnungen stehen auf stderr, Infos auf stdout.
-- **Not verified:** CI für Schritt 3-5, Release-GPU-Zeit im großen Maßstab, das Spiel im Loop, der Editor-Loop mit mehreren Landschaften, alle anderen Backends, echte Tiles.
+- **Not verified:** CI für Schritt 3-6, Release-GPU-Zeit im großen Maßstab, das Spiel im Loop, der Editor-Loop mit mehreren Landschaften und auf D3D12/Vulkan/OpenGL, Metal (nicht portiert), echte Tiles.
 - **Traps:** zweiter Build-Baum mit `-DDEPLOY_DIR` UND `-DHE_ENGINE_SDK_DIR` umlenken, Release-Baum zusätzlich `-DHE_SDK_RELEASE_SET=OFF`; `he_tests` mit **eigenem APPDATA**; `small` ist unter Windows ein Makro (`rpcndr.h`); vor einem Push auf fremde Commits achten (`git log origin/release/0.8.0..HEAD`); `tests/CMakeLists.txt` und `docs/img*` werden von der zweiten Session angefasst: nur eigene Hunks committen.
-- **Next steps:** 1. Schritt 6: die anderen Backends (Vulkan, D3D12, OpenGL, Metal, Software) nach dem D3D11-Vertrag; Vulkan/D3D12 haben Bindings 40..43 bisher gezäunt. 2. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 3. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 4. Wetter in die Scratch-Kopie; echte GPU-Zeit (Schritt 8).
+- **Next steps:** 1. Ein schlanker Seiten-Pass für D3D12 und Vulkan (persistentes Seitenziel, kein Post-Chain; OpenGL hat 3,4 ms und kann warten), gemessen im Editor mit lebendem Viewport. 2. Metal portieren (auf einem Mac laufen lassen, nicht blind). 3. Schritt 7: Einstellung statt `HE_RVT=1`, Serialisierung, Debug-Ansicht. 4. Absprache mit Thema 326: `heRvtSample` in `kLandscapeFS`, je Tile ein Volumen; Tile-Laden/-Entladen als vierter Auslöser. 5. Wetter in die Scratch-Kopie; echte GPU-Zeit und Speicher (Schritt 8).

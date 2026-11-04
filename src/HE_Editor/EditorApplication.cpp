@@ -11319,7 +11319,13 @@ void EditorApplication::dumpFrameHeadless()
 	// a paint stroke the same; a camera move paints only new pages; a change of the landscape material's parameters re-attaches.
 	// After each edit the landscape is drawn lit from the pages and from its own material, and the picture of the pages BEFORE
 	// the driver caught up is the control: a stale scratch copy or stale pages passes every counter and fails only there.
-	if (const char* dv = std::getenv("HE_DUMP_RVTDRIVER"); dv && *dv && *dv != '0' && m_editorWorld && r)
+	// A backend without Runtime Virtual Textures (Software, Metal until it is ported, a GL context with too few texture units,
+	// a Vulkan device at the sampler minimum) has nothing to witness: say so instead of driving a pool that cannot exist.
+	if (r && !r->GetCapabilities().supportsRvt)
+		for (const char* name : { "HE_DUMP_RVTDRIVER", "HE_DUMP_RVTTILES" })
+			if (const char* v = std::getenv(name); v && *v && *v != '0')
+				HE_LOG_WARN(Editor, "EditorApplication: %s: this backend has no Runtime Virtual Textures (Capabilities::supportsRvt), witness skipped", name);
+	if (const char* dv = std::getenv("HE_DUMP_RVTDRIVER"); dv && *dv && *dv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
 	{
 		auto& wreg = m_editorWorld->registry();
 		entt::entity land = entt::null;
@@ -11549,7 +11555,7 @@ void EditorApplication::dumpFrameHeadless()
 	// one pool, one attach per frame; the lit picture against the landscapes' own material, seam strips against the interior;
 	// a stroke inside one tile repaints only that tile's pages, a stroke across a border both tiles'; destroying one tile frees
 	// exactly its volume; walking away and back registers no material; a pool that is too small settles instead of thrashing.
-	if (const char* tv = std::getenv("HE_DUMP_RVTTILES"); tv && *tv && *tv != '0' && m_editorWorld && r)
+	if (const char* tv = std::getenv("HE_DUMP_RVTTILES"); tv && *tv && *tv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
 	{
 		auto& wreg = m_editorWorld->registry();
 		entt::entity land = entt::null;
