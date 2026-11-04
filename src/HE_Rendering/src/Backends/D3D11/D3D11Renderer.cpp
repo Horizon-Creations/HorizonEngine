@@ -1664,14 +1664,18 @@ struct D3D11RendererImpl
     ComPtr<ID3D11Texture2D>          rvtPageTex;
     ComPtr<ID3D11RenderTargetView>   rvtPageRTV[2];     // [0] UNORM, [1] UNORM_SRGB
     ComPtr<ID3D11Texture2D>          rvtPageDepth;
-    // The page table the landscape shader reads: R32_UINT, mip m = (side >> m)^2 entries (SetRvtPageTable).
-    ComPtr<ID3D11Texture2D>          rvtTableTex;
-    ComPtr<ID3D11ShaderResourceView> rvtTableSRV;
-    uint32_t                         rvtTableSide = 0;
-    uint32_t                         rvtTableMips = 0;
-    // SetRvtLandscape: the landscape's chunks are drawn with the consumer material (null consumer = off)
-    HE::UUID                         rvtLandscapeMat{};
-    HE::UUID                         rvtConsumerMat{};
+    // The page tables the landscape shader reads, one per volume, keyed by the consumer material that reads it: R32_UINT,
+    // mip m = (side >> m)^2 entries (SetRvtPageTable).
+    struct RvtTable
+    {
+        ComPtr<ID3D11Texture2D>          tex;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        uint32_t                         side = 0, mips = 0;
+    };
+    std::unordered_map<HE::UUID, RvtTable> rvtTables;
+    // SetRvtLandscape: per landscape entity, the material its chunks are drawn with now and the consumer that replaces it
+    struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+    std::unordered_map<uint32_t, RvtSwap> rvtSwaps;
     ComPtr<ID3D11DepthStencilView>   rvtPageDSV;
     ComPtr<ID3D11ShaderResourceView> rvtPageDepthSRV;
     ComPtr<ID3D11RenderTargetView>   viewportRTV;
@@ -7213,14 +7217,15 @@ void D3D11Renderer::DrawScene(int width, int height)
     // The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material. The
     // object's parameter block is the landscape material's, in ITS order: left in place it would overwrite the consumer's
     // volume parameters (RvtVolumeA/B), so it goes (a far LOD stand-in material cleared it for the same reason).
-    else if (p.rvtConsumerMat != HE::UUID{} && p.rvtPageTex)
+    else if (!p.rvtSwaps.empty() && p.rvtPageTex)
         for (RenderObject& o : p.m_renderWorld.objects)
-            if (o.terrainChunk && o.materialAssetId == p.rvtLandscapeMat)
-            {
-                o.materialAssetId = p.rvtConsumerMat;
-                o.paramOverride.clear();
-                o.sections.clear();
-            }
+            if (o.terrainChunk)
+                if (const auto sw = p.rvtSwaps.find(o.terrainEntity); sw != p.rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+                {
+                    o.materialAssetId = sw->second.consumerMat;
+                    o.paramOverride.clear();
+                    o.sections.clear();
+                }
 
     // ── TAA: this frame's jitter (A2) ───────────────────────────────────────
     // Chosen BEFORE anything builds a matrix, because every rasterising pass of
@@ -8240,7 +8245,10 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // the slots are null and every Load answers 0.
                         if (_usesRvt)
                         {
-                            ID3D11ShaderResourceView* rvtSrv[4] = { p.rvtTableSRV.Get(), p.rvtPoolSRV[0].Get(), p.rvtPoolSRV[1].Get(), p.rvtPoolSRV[2].Get() };
+                            // The table of THIS volume: the draw's material is its consumer (the swap already happened).
+                            const auto tb = p.rvtTables.find(dc.materialAssetId);
+                            ID3D11ShaderResourceView* rvtSrv[4] = { tb != p.rvtTables.end() ? tb->second.srv.Get() : nullptr,
+                                                                    p.rvtPoolSRV[0].Get(), p.rvtPoolSRV[1].Get(), p.rvtPoolSRV[2].Get() };
                             ctx->PSSetShaderResources(HE::kRvtTableBinding, 4, rvtSrv);
                         }
                         // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
@@ -9429,8 +9437,8 @@ void D3D11Renderer::DestroyRvtPool()
 {
     auto& p = *m_impl;
     for (int layer = 0; layer < 3; ++layer) { p.rvtPoolSRV[layer].Reset(); p.rvtPool[layer].Reset(); }
-    p.rvtTableSRV.Reset(); p.rvtTableTex.Reset(); p.rvtTableSide = p.rvtTableMips = 0;
-    p.rvtLandscapeMat = p.rvtConsumerMat = HE::UUID{};   // the pool the consumer reads is gone: draw the landscape itself again
+    p.rvtTables.clear();
+    p.rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
     p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset();
     p.rvtPageDepth.Reset(); p.rvtPageDSV.Reset(); p.rvtPageDepthSRV.Reset();
     p.rvtSlots = p.rvtPagePx = 0;
@@ -9490,13 +9498,21 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
     return true;
 }
 
-void D3D11Renderer::SetRvtLandscape(const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+void D3D11Renderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
 {
-    m_impl->rvtLandscapeMat = landscapeMaterial;
-    m_impl->rvtConsumerMat  = consumerMaterial;
+    if (consumerMaterial == HE::UUID{}) m_impl->rvtSwaps.erase(terrainEntity);
+    else                               m_impl->rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
 }
 
-bool D3D11Renderer::SetRvtPageTable(const std::vector<std::vector<uint32_t>>& mips)
+void D3D11Renderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+    auto& p = *m_impl;
+    p.rvtTables.erase(consumerMaterial);
+    for (auto it = p.rvtSwaps.begin(); it != p.rvtSwaps.end();)
+        it = it->second.consumerMat == consumerMaterial ? p.rvtSwaps.erase(it) : std::next(it);
+}
+
+bool D3D11Renderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
 {
     auto& p = *m_impl;
     if (!p.device || !p.context || !p.rvtSlots || mips.empty() || mips.size() > 12) return false;
@@ -9508,9 +9524,10 @@ bool D3D11Renderer::SetRvtPageTable(const std::vector<std::vector<uint32_t>>& mi
         const uint32_t ms = side >> m;
         if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
     }
-    if (!p.rvtTableTex || p.rvtTableSide != side || p.rvtTableMips != mips.size())
+    D3D11RendererImpl::RvtTable& t = p.rvtTables[consumerMaterial];
+    if (!t.tex || t.side != side || t.mips != mips.size())
     {
-        p.rvtTableSRV.Reset(); p.rvtTableTex.Reset();
+        t.srv.Reset(); t.tex.Reset();
         D3D11_TEXTURE2D_DESC td{};
         td.Width = td.Height = side;
         td.MipLevels = static_cast<UINT>(mips.size());
@@ -9519,39 +9536,41 @@ bool D3D11Renderer::SetRvtPageTable(const std::vector<std::vector<uint32_t>>& mi
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(p.device->CreateTexture2D(&td, nullptr, &p.rvtTableTex)) ||
-            FAILED(p.device->CreateShaderResourceView(p.rvtTableTex.Get(), nullptr, &p.rvtTableSRV)))
+        if (FAILED(p.device->CreateTexture2D(&td, nullptr, &t.tex)) ||
+            FAILED(p.device->CreateShaderResourceView(t.tex.Get(), nullptr, &t.srv)))
         {
-            p.rvtTableSRV.Reset(); p.rvtTableTex.Reset(); p.rvtTableSide = p.rvtTableMips = 0;
+            p.rvtTables.erase(consumerMaterial);
             return false;
         }
-        p.rvtTableSide = side;
-        p.rvtTableMips = static_cast<uint32_t>(mips.size());
+        t.side = side;
+        t.mips = static_cast<uint32_t>(mips.size());
     }
     for (size_t m = 0; m < mips.size(); ++m)
-        p.context->UpdateSubresource(p.rvtTableTex.Get(), static_cast<UINT>(m), nullptr, mips[m].data(),
+        p.context->UpdateSubresource(t.tex.Get(), static_cast<UINT>(m), nullptr, mips[m].data(),
                                      (side >> m) * sizeof(uint32_t), 0);
     return true;
 }
 
-bool D3D11Renderer::ReadbackRvtPageTable(std::vector<std::vector<uint32_t>>& mips)
+bool D3D11Renderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
 {
     auto& p = *m_impl;
-    if (!p.rvtTableTex) return false;
+    const auto found = p.rvtTables.find(consumerMaterial);
+    if (found == p.rvtTables.end() || !found->second.tex) return false;
+    const D3D11RendererImpl::RvtTable& t = found->second;
     D3D11_TEXTURE2D_DESC desc{};
-    p.rvtTableTex->GetDesc(&desc);
+    t.tex->GetDesc(&desc);
     desc.Usage = D3D11_USAGE_STAGING;
     desc.BindFlags = 0;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     ComPtr<ID3D11Texture2D> staging;
     if (FAILED(p.device->CreateTexture2D(&desc, nullptr, &staging))) return false;
-    p.context->CopyResource(staging.Get(), p.rvtTableTex.Get());
-    mips.assign(p.rvtTableMips, {});
-    for (uint32_t m = 0; m < p.rvtTableMips; ++m)
+    p.context->CopyResource(staging.Get(), t.tex.Get());
+    mips.assign(t.mips, {});
+    for (uint32_t m = 0; m < t.mips; ++m)
     {
         D3D11_MAPPED_SUBRESOURCE mp{};
         if (FAILED(p.context->Map(staging.Get(), m, D3D11_MAP_READ, 0, &mp))) return false;
-        const uint32_t ms = p.rvtTableSide >> m;
+        const uint32_t ms = t.side >> m;
         mips[m].resize(size_t(ms) * ms);
         for (uint32_t y = 0; y < ms; ++y)
             std::memcpy(&mips[m][size_t(y) * ms], static_cast<const uint8_t*>(mp.pData) + size_t(y) * mp.RowPitch, size_t(ms) * sizeof(uint32_t));

@@ -755,14 +755,19 @@ public:
     // (side >> m)^2 entries row-major (y * side + x), exactly what rvt::RvtManager::pageTable() returns per mip, each entry
     // `slot | effectiveMip << 24` or 0xFFFFFFFF. `mips[0]` is the finest, its side a power of two. Upload again whenever
     // RvtManager::tableVersion changes; a different shape recreates the texture. False without a pool or on a bad shape.
-    virtual bool SetRvtPageTable(const std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // One table per VOLUME, named by the consumer material that reads it: a draw whose material is that consumer gets that
+    // table bound, so a landscape cut into tiles (one volume each, all in the one pool) draws every tile from its own.
+    virtual bool SetRvtPageTable(const HE::UUID& /*consumerMaterial*/, const std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
     // Reads the table back the same way (a witness).
-    virtual bool ReadbackRvtPageTable(std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
-    // From now on the terrain chunks drawn with `landscapeMaterial` are drawn with `consumerMaterial` instead (the material
-    // with the RvtSample node, which reads the pool and the table above), and with none of the landscape object's own
-    // parameter block (it is laid out for the old material). Null `consumerMaterial` = off. A swap done here, in the
-    // renderer's own view of the frame, never touches the world: the scene stays as authored and saved.
-    virtual void SetRvtLandscape(const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
+    virtual bool ReadbackRvtPageTable(const HE::UUID& /*consumerMaterial*/, std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // From now on the terrain chunks of landscape entity `terrainEntity` that are drawn with `landscapeMaterial` are drawn with
+    // `consumerMaterial` instead (the material with the RvtSample node, which reads the pool and the table above), and with
+    // none of the object's own parameter block (it is laid out for the old material). Null `consumerMaterial` = off for that
+    // landscape. Keyed by the landscape AND its material: a far LOD level that already carries another material (the baked far
+    // landscape) stays as it is. Done in the renderer's own view of the frame, never in the world: the scene stays as authored.
+    virtual void SetRvtLandscape(uint32_t /*terrainEntity*/, const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
+    // Takes one volume out: its table and its swap go, the pool and the other volumes stay (DestroyRvtPool drops everything).
+    virtual void ReleaseRvtConsumer(const HE::UUID& /*consumerMaterial*/) {}
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded

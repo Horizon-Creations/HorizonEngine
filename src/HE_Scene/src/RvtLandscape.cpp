@@ -11,7 +11,12 @@
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
 #include <Renderer/IRenderer.h>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <functional>
+#include <set>
+#include <vector>
 
 namespace HE::landscape
 {
@@ -44,16 +49,36 @@ namespace
     template <typename T> void mix(uint64_t& h, const T& v) { h ^= std::hash<T>{}(v) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2); }
     void mixFloats(uint64_t& h, const std::vector<float>& v) { for (float f : v) mix(h, f); mix(h, v.size()); }
     void mixStrings(uint64_t& h, const std::vector<std::string>& v) { for (const std::string& s : v) mix(h, s); mix(h, v.size()); }
+
+    // Distance from a point to a rectangle (0 inside).
+    float distToRect(glm::vec2 p, glm::vec2 mn, glm::vec2 mx)
+    {
+        const float dx = std::max({ mn.x - p.x, 0.0f, p.x - mx.x });
+        const float dz = std::max({ mn.y - p.y, 0.0f, p.y - mx.y });
+        return std::sqrt(dx * dx + dz * dz);
+    }
 }
 
 RvtLandscape::RvtLandscape(ContentManager& cm, IRenderer& renderer) : m_cm(cm), m_renderer(renderer) {}
 
 RvtLandscape::~RvtLandscape() { detach(); }
 
-uint64_t RvtLandscape::materialStateHash(HorizonWorld& live, entt::entity terrain) const
+void RvtLandscape::note(const std::string& why)
 {
-    // Everything the three view graphs are built from at attach time (HlodBaker::begin): the landscape material instance's
-    // parameter block, which parameters it overrides and its static switches, plus the entity's own overrides.
+    // Says once per change why the driver is idle (a silent driver is indistinguishable from a broken one), and every 600th
+    // call as a sign of life.
+    if (m_lastNote != why || m_ticks % 600 == 0)
+    {
+        m_lastNote = why;
+        HE_LOG_INFO(Scene, "RvtLandscape: %s (tick %llu)", why.c_str(), static_cast<unsigned long long>(m_ticks));
+    }
+}
+
+uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain) const
+{
+    // Everything the three view graphs and the volume's place are built from at attach time (HlodBaker::begin): the landscape
+    // material instance's parameter block, which parameters it overrides and its static switches, and the landscape's size and
+    // position.
     uint64_t h = 0xCBF29CE484222325ull;
     const auto* mc = live.registry().try_get<MaterialComponent>(terrain);
     if (!mc) return h;
@@ -68,177 +93,302 @@ uint64_t RvtLandscape::materialStateHash(HorizonWorld& live, entt::entity terrai
         for (float f : ma->instanceSwitchValues) mix(h, f);
         mix(h, ma->customShaderFragGlsl.size());
     }
+    if (const auto* tc = live.registry().try_get<TerrainComponent>(terrain))
+    {
+        const glm::vec3 pos = HE::worldPositionOf(live, terrain);
+        mix(h, tc->sizeX); mix(h, tc->sizeZ); mix(h, pos.x); mix(h, pos.z);
+    }
     return h;
 }
 
-bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain)
+bool RvtLandscape::ensurePool()
 {
-    auto baker = std::make_unique<HlodBaker>(live, m_cm, m_renderer);
-    std::string why;
-    if (!baker->begin(terrain, &why, /*switchRenderer=*/false))
+    if (m_poolMade) return true;
+    m_pagePx = static_cast<uint32_t>(rvt::VolumeLayout(rvt::VolumeDesc{}).physicalPageSize());
+    if (!m_renderer.CreateRvtPool(m_settings.poolSlots, m_pagePx))
     {
-        HE_LOG_INFO(Scene, "RvtLandscape: not attached (%s)", why.c_str());
+        HE_LOG_WARN(Scene, "RvtLandscape: the renderer could not make a pool of %u pages", m_settings.poolSlots);
         return false;
+    }
+    m_manager = std::make_unique<rvt::RvtManager>(m_settings.poolSlots, m_settings.maxPagesPerFrame, /*pinnedMips=*/1);
+    m_poolMade = true;
+    HE_LOG_INFO(Scene, "RvtLandscape: pool of %u pages of %u px (%.0f MB), %u painted per frame", m_settings.poolSlots, m_pagePx,
+                double(m_settings.poolSlots) * m_pagePx * m_pagePx * 12.0 / (1024.0 * 1024.0), m_settings.maxPagesPerFrame);
+    return true;
+}
+
+bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg)
+{
+    if (!ensurePool()) return false;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!seg.baker || !seg.attached)
+    {
+        auto baker = std::make_unique<HlodBaker>(live, m_cm, m_renderer);
+        std::string why;
+        if (!baker->begin(terrain, &why, /*switchRenderer=*/false))
+        {
+            HE_LOG_INFO(Scene, "RvtLandscape: not attached (%s)", why.c_str());
+            return false;
+        }
+        seg.baker = std::move(baker);
+        m_materialsRegistered += 3;                // the three view materials HlodBaker::begin registers (never unregistered)
     }
     const TerrainComponent& tc = live.registry().get<TerrainComponent>(terrain);
     HlodChunkRect r0;
-    baker->chunkRect(0, 0, r0);
+    seg.baker->chunkRect(0, 0, r0);
 
     rvt::VolumeDesc vd;
     vd.origin = r0.min;
     vd.sizeM = tc.sizeX;
     vd.finestMetersPerTexel = m_settings.metersPerTexel;
-    auto manager = std::make_unique<rvt::RvtManager>(m_settings.poolSlots, m_settings.maxPagesPerFrame, /*pinnedMips=*/1);
-    const uint16_t vol = manager->addVolume(vd);
-    const uint32_t px = static_cast<uint32_t>(manager->layout(vol).physicalPageSize());
-    if (!m_renderer.CreateRvtPool(m_settings.poolSlots, px))
+    seg.volume = m_manager->addVolume(vd);
+    seg.volumeLive = true;
+    if (static_cast<uint32_t>(m_manager->layout(seg.volume).physicalPageSize()) != m_pagePx)
     {
-        HE_LOG_WARN(Scene, "RvtLandscape: the renderer could not make a pool of %u pages", m_settings.poolSlots);
+        HE_LOG_WARN(Scene, "RvtLandscape: a volume with another page size than the pool's is not supported");
+        m_manager->removeVolume(seg.volume);
+        seg.volumeLive = false;
         return false;
     }
 
-    MaterialAsset ca;
-    ca.type = HE::AssetType::Material;
-    ca.name = "RvtLandscapeConsumer";
-    ca.nodeGraphJson = consumerGraphJson(manager->layout(vol));
-    const HE::UUID consumer = m_cm.registerMaterial(std::move(ca));
-    m_cm.regenerateMaterialFromGraph(consumer);
-    m_renderer.WarmupMaterials({ consumer });
-
-    m_baker = std::move(baker);
-    m_manager = std::move(manager);
-    m_volume = vol;
-    m_pagePx = px;
-    m_terrain = terrain;
-    m_consumer = consumer;
-    m_landscapeMaterial = live.registry().get<MaterialComponent>(terrain).materialAssetId;
-    m_uploadedVersion = ~0ull;
-    m_filled = false;
-    m_attached = true;
+    if (seg.consumer == HE::UUID{})
+    {
+        MaterialAsset ca;
+        ca.type = HE::AssetType::Material;
+        ca.name = "RvtLandscapeConsumer";
+        ca.nodeGraphJson = consumerGraphJson(m_manager->layout(seg.volume));
+        seg.consumer = m_cm.registerMaterial(std::move(ca));
+        m_cm.regenerateMaterialFromGraph(seg.consumer);
+        m_renderer.WarmupMaterials({ seg.consumer });
+        ++m_materialsRegistered;
+    }
+    seg.landscapeMaterial = live.registry().get<MaterialComponent>(terrain).materialAssetId;
+    seg.uploadedVersion = ~0ull;
+    seg.filled = false;
+    seg.attached = true;
     live.registry().get<TerrainComponent>(terrain).rvtJournal.clear();   // the scratch copy was made from the ground as it is now
-    HE_LOG_INFO(Scene, "RvtLandscape: attached, %u pages of %u px, %d mips over %.0f m", m_settings.poolSlots, px,
-                m_manager->layout(vol).mipCount(), vd.sizeM);
+    HE_LOG_INFO(Scene, "RvtLandscape: segment %u attached in %.0f ms: %.0f m landscape, %d mips, %zu segment(s)",
+                static_cast<unsigned>(entt::to_integral(terrain)),
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                vd.sizeM, m_manager->layout(seg.volume).mipCount(), m_segments.size());
     return true;
+}
+
+void RvtLandscape::deactivate(entt::entity terrain, Segment& seg)
+{
+    // Out of range: the pages and the table go (they are the memory); the scratch copy and the materials stay, so a camera that
+    // walks over the border back and forth builds nothing and registers nothing.
+    m_renderer.SetRvtLandscape(static_cast<uint32_t>(entt::to_integral(terrain)), HE::UUID{}, HE::UUID{});
+    if (seg.consumer != HE::UUID{}) m_renderer.ReleaseRvtConsumer(seg.consumer);
+    if (seg.volumeLive && m_manager) m_manager->removeVolume(seg.volume);
+    seg.volumeLive = false;
+    seg.filled = false;
+    seg.swapOn = false;
+    seg.uploadedVersion = ~0ull;
+}
+
+void RvtLandscape::remove(entt::entity terrain, Segment& seg)
+{
+    deactivate(terrain, seg);
+    seg.baker.reset();
+    seg.attached = false;
+}
+
+bool RvtLandscape::active() const
+{
+    for (const auto& kv : m_segments) if (kv.second.swapOn) return true;
+    return false;
+}
+bool RvtLandscape::active(entt::entity e) const { const auto it = m_segments.find(e); return it != m_segments.end() && it->second.swapOn; }
+bool RvtLandscape::attached(entt::entity e) const { const auto it = m_segments.find(e); return it != m_segments.end() && it->second.attached; }
+uint16_t RvtLandscape::volumeOf(entt::entity e) const { const auto it = m_segments.find(e); return it != m_segments.end() ? it->second.volume : uint16_t(0); }
+HE::UUID RvtLandscape::consumerOf(entt::entity e) const { const auto it = m_segments.find(e); return it != m_segments.end() ? it->second.consumer : HE::UUID{}; }
+
+void RvtLandscape::pauseSwap(bool paused)
+{
+    m_paused = paused;
+    for (auto& kv : m_segments)
+    {
+        Segment& s = kv.second;
+        if (!s.swapOn) continue;
+        m_renderer.SetRvtLandscape(static_cast<uint32_t>(entt::to_integral(kv.first)),
+                                   paused ? HE::UUID{} : s.landscapeMaterial, paused ? HE::UUID{} : s.consumer);
+    }
 }
 
 void RvtLandscape::detach()
 {
-    if (m_active) m_renderer.SetRvtLandscape(HE::UUID{}, HE::UUID{});
-    if (m_attached) m_renderer.DestroyRvtPool();
-    m_active = false;
-    m_attached = false;
-    m_filled = false;
+    for (auto& kv : m_segments) remove(kv.first, kv.second);
+    m_segments.clear();
+    if (m_poolMade) m_renderer.DestroyRvtPool();
+    m_poolMade = false;
     m_manager.reset();
-    m_baker.reset();
-    m_terrain = entt::null;
-    m_consumer = HE::UUID{};
-    m_landscapeMaterial = HE::UUID{};
+    m_lastStarved = 0;
+    m_starvedWarned = false;
 }
 
 RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3& cameraPos)
 {
     FrameStats st;
-    // Says once per change why the driver is idle (a silent driver is indistinguishable from a broken one).
-    // (and every 600th call, so a log shows the driver is being called at all)
     ++m_ticks;
-    const auto note = [this](const char* why) {
-        if (m_lastNote != why || m_ticks % 600 == 0) { m_lastNote = why; HE_LOG_INFO(Scene, "RvtLandscape: %s (tick %llu)", why, static_cast<unsigned long long>(m_ticks)); }
-    };
     if (!m_renderer.GetCapabilities().supportsRvt) { note("idle: the renderer cannot hold a virtual texture (Capabilities::supportsRvt)"); return st; }
-
-    // The landscape: the first terrain (not a chunk) with a material.
-    entt::entity land = entt::null;
     auto& reg = live.registry();
-    size_t terrains = 0, withMaterial = 0;
+    const glm::vec2 cam(cameraPos.x, cameraPos.z);
+
+    // The landscapes: terrains (not chunks) with a material, nearest first.
+    struct Land { entt::entity e; float dist; };
+    std::vector<Land> lands;
+    std::set<entt::entity> present;
+    size_t terrains = 0;
     for (auto [e, tc] : reg.view<TerrainComponent>().each())
     {
         if (reg.all_of<TerrainChunkComponent>(e)) continue;
         ++terrains;
-        if (reg.all_of<MaterialComponent>(e)) { ++withMaterial; if (land == entt::null) land = e; }
+        if (!reg.all_of<MaterialComponent>(e)) continue;
+        const glm::vec3 pos = HE::worldPositionOf(live, e);
+        const glm::vec2 mn(pos.x - tc.sizeX * 0.5f, pos.z - tc.sizeZ * 0.5f), mx(pos.x + tc.sizeX * 0.5f, pos.z + tc.sizeZ * 0.5f);
+        lands.push_back({ e, distToRect(cam, mn, mx) });
+        present.insert(e);
     }
-    if (land == entt::null)
+    std::sort(lands.begin(), lands.end(), [](const Land& a, const Land& b) { return a.dist < b.dist; });
+
+    // Landscapes that are gone free their volume.
+    for (auto it = m_segments.begin(); it != m_segments.end();)
     {
-        if (m_attached) detach();
-        const std::string why = "idle: no landscape with a material in the world (" + std::to_string(terrains) + " landscape(s), "
-                              + std::to_string(withMaterial) + " with a material)";
-        note(why.c_str());
+        if (present.count(it->first)) { ++it; continue; }
+        remove(it->first, it->second);
+        ++st.detaches;
+        it = m_segments.erase(it);
+    }
+    if (lands.empty())
+    {
+        if (m_poolMade) { m_renderer.DestroyRvtPool(); m_poolMade = false; m_manager.reset(); m_lastStarved = 0; m_starvedWarned = false; }
+        note("idle: no landscape with a material in the world (" + std::to_string(terrains) + " landscape(s), 0 with a material)");
         return st;
     }
-    if (m_attached && (land != m_terrain || !reg.valid(m_terrain))) detach();
-    const uint64_t mh = materialStateHash(live, land);
-    if (m_attached && mh != m_materialHash)
-    {
-        // The view graphs were built from the old values: nothing to patch, start over.
-        detach();
-        st.rescanned = true;
-    }
-    if (!m_attached)
-    {
-        if (land == m_failedTerrain && mh == m_failedHash) { note("idle: the last attach failed and nothing it depends on has changed"); return st; }
-        if (!attach(live, land)) { m_failedTerrain = land; m_failedHash = mh; return st; }
-        m_materialHash = mh;
-        m_failedTerrain = entt::null;
-    }
-    st.attached = true;
-    note("running");
 
-    // 2. the journal: scratch copy up to date, the pages under the change stale
-    TerrainComponent& tc = reg.get<TerrainComponent>(land);
-    if (tc.rvtJournal.any)
+    // Activation: near ones are attached (one build per frame, nearest first), far ones give their pages back.
+    for (const Land& l : lands)
     {
+        Segment& seg = m_segments[l.e];
+        const uint64_t h = stateHash(live, l.e);
+        if (seg.attached && h != seg.stateHash)
+        {
+            // The view graphs were built from the old values: nothing to patch, start over.
+            remove(l.e, seg);
+            ++st.detaches;
+            st.rescanned = true;
+        }
+        const bool near = l.dist <= m_settings.activationRadiusM * (seg.volumeLive ? 1.2f : 1.0f);
+        if (!near)
+        {
+            if (seg.volumeLive) { deactivate(l.e, seg); ++st.detaches; }
+            continue;
+        }
+        if (seg.volumeLive) continue;
+        if (seg.failed && seg.failedHash == h) continue;                  // it failed for exactly this: not again every frame
+        if (st.attaches >= m_settings.maxAttachesPerFrame) continue;
+        if (!attach(live, l.e, seg)) { seg.failed = true; seg.failedHash = h; continue; }
+        seg.failed = false;
+        seg.stateHash = h;
+        ++st.attaches;
+    }
+    st.segments = static_cast<uint32_t>(m_segments.size());
+    if (!m_manager) { note("idle: no landscape near enough (activation radius " + std::to_string(static_cast<int>(m_settings.activationRadiusM)) + " m)"); return st; }
+
+    // The journals: scratch copies up to date, the pages under each change stale.
+    std::unordered_map<uint16_t, entt::entity> byVolume;
+    for (auto& kv : m_segments)
+    {
+        Segment& seg = kv.second;
+        if (!seg.volumeLive) continue;
+        byVolume[seg.volume] = kv.first;
+        TerrainComponent& tc = reg.get<TerrainComponent>(kv.first);
+        if (!tc.rvtJournal.any) continue;
         const TerrainComponent::RvtJournal j = tc.rvtJournal;
-        const glm::vec3 pos = HE::worldPositionOf(live, land);
+        const glm::vec3 pos = HE::worldPositionOf(live, kv.first);
         if (j.all)
         {
-            m_baker->syncTerrain(tc, true, glm::vec2(0.0f), glm::vec2(0.0f));
-            st.pagesStale = m_manager->invalidateVolume(m_volume);
+            seg.baker->syncTerrain(tc, true, glm::vec2(0.0f), glm::vec2(0.0f));
+            st.pagesStale += m_manager->invalidateVolume(seg.volume);
         }
         else
         {
-            m_baker->syncTerrain(tc, false, glm::vec2(j.minX, j.minZ), glm::vec2(j.maxX, j.maxZ));
-            st.pagesStale = m_manager->invalidateRect(m_volume, glm::vec2(pos.x + j.minX, pos.z + j.minZ),
-                                                      glm::vec2(pos.x + j.maxX, pos.z + j.maxZ));
+            seg.baker->syncTerrain(tc, false, glm::vec2(j.minX, j.minZ), glm::vec2(j.maxX, j.maxZ));
+            st.pagesStale += m_manager->invalidateRect(seg.volume, glm::vec2(pos.x + j.minX, pos.z + j.minZ),
+                                                       glm::vec2(pos.x + j.maxX, pos.z + j.maxZ));
         }
         tc.rvtJournal.clear();
     }
 
-    // 3. what the camera needs, stale first among equals; exactly that is painted
-    rvt::ViewDesc view;
-    view.cameraXZ = glm::vec2(cameraPos.x, cameraPos.z);
-    view.nearRadiusM = m_settings.nearRadiusM;
-    m_manager->beginFrame();
-    const std::vector<rvt::PageRender> renders = m_manager->update(m_volume, view);
-    if (!renders.empty())
+    // What the camera needs across all active volumes, ranked together, one budget; exactly that is painted.
+    std::vector<rvt::VolumeView> views;
+    for (const auto& kv : byVolume)
     {
-        m_baker->paintBegin();
-        st.pagesPainted = rvt::paintPages(*m_baker, renders, m_pagePx);
-        m_baker->paintEnd();
+        rvt::ViewDesc view;
+        view.cameraXZ = cam;
+        view.nearRadiusM = m_settings.nearRadiusM;
+        views.push_back({ kv.first, view });
+    }
+    m_manager->beginFrame();
+    if (!views.empty())
+    {
+        const std::vector<rvt::PageRender> renders = m_manager->updateAll(views);
+        std::unordered_map<uint16_t, std::vector<rvt::PageRender>> perVolume;
+        for (const rvt::PageRender& r : renders) perVolume[r.key.volume].push_back(r);
+        for (auto& kv : perVolume)
+        {
+            Segment& seg = m_segments[byVolume[kv.first]];
+            seg.baker->paintBegin();
+            st.pagesPainted += rvt::paintPages(*seg.baker, kv.second, m_pagePx);
+            seg.baker->paintEnd();
+        }
         m_paintedTotal += st.pagesPainted;
     }
 
-    // 4. the page table, when a page came or went
-    const uint64_t tv = m_manager->tableVersion(m_volume);
-    if (tv != m_uploadedVersion)
+    // The page tables (one per volume, when a page came or went), the first-fill latch and the swap.
+    for (auto& kv : m_segments)
     {
-        std::vector<std::vector<uint32_t>> mips;
-        for (int m = 0; m < m_manager->layout(m_volume).mipCount(); ++m) mips.push_back(m_manager->pageTable(m_volume, m));
-        if (m_renderer.SetRvtPageTable(mips)) { m_uploadedVersion = tv; st.tableUploaded = true; }
+        Segment& seg = kv.second;
+        if (!seg.volumeLive) continue;
+        const uint64_t tv = m_manager->tableVersion(seg.volume);
+        if (tv != seg.uploadedVersion)
+        {
+            std::vector<std::vector<uint32_t>> mips;
+            for (int m = 0; m < m_manager->layout(seg.volume).mipCount(); ++m) mips.push_back(m_manager->pageTable(seg.volume, m));
+            if (m_renderer.SetRvtPageTable(seg.consumer, mips)) { seg.uploadedVersion = tv; ++st.tablesUploaded; }
+        }
+        // Drawn from the pages once the first fill is complete (before that the coarse fallback would show a blurry landscape
+        // for a few frames), and it stays on afterwards: a stale or missing page degrades, it does not switch back.
+        if (!seg.filled && seg.uploadedVersion == tv && m_manager->missing(seg.volume) == 0) seg.filled = true;
+        const bool want = seg.filled && !m_paused;
+        if (want != seg.swapOn)
+        {
+            m_renderer.SetRvtLandscape(static_cast<uint32_t>(entt::to_integral(kv.first)),
+                                       want ? seg.landscapeMaterial : HE::UUID{}, want ? seg.consumer : HE::UUID{});
+            seg.swapOn = want;
+        }
+        if (seg.swapOn) ++st.activeSegments;
     }
 
-    // 5. the renderer draws from the pages once the first fill is complete (before that the coarse fallback would show a
-    // blurry landscape for a few frames), and stays on afterwards: a stale or missing page degrades, it does not switch back
-    if (!m_filled && m_uploadedVersion == tv && m_manager->stats().wantedMissing == 0) m_filled = true;
-    if (m_filled != m_active)
+    const rvt::Stats ms = m_manager->stats();
+    // One warning per episode: a pool that is too small starves every frame, and the number alone changes the text each time.
+    if (ms.starved > m_lastStarved)
     {
-        m_renderer.SetRvtLandscape(m_filled ? m_landscapeMaterial : HE::UUID{}, m_filled ? m_consumer : HE::UUID{});
-        m_active = m_filled;
+        if (!m_starvedWarned)
+            HE_LOG_WARN(Scene, "RvtLandscape: the pool is full (%u of %u pages): %u request(s) found no slot; raise poolSlots or lower the activation radius",
+                        ms.resident, ms.poolSlots, ms.starved - m_lastStarved);
+        m_starvedWarned = true;
+        m_lastStarved = ms.starved;
     }
-    st.active = m_active;
-    // Activity only: an idle frame says nothing, so a log of a quiet scene is quiet and a stroke or a camera move shows up.
-    if (st.pagesPainted || st.pagesStale || st.tableUploaded || st.rescanned)
-        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale%s%s, %u resident, %u stale, %s",
-                    st.pagesPainted, st.pagesStale, st.tableUploaded ? ", table uploaded" : "", st.rescanned ? ", re-attached" : "",
-                    m_manager->stats().resident, m_manager->stats().dirty, m_active ? "drawn from the pages" : "filling");
+    else m_starvedWarned = false;
+    note("running");
+
+    // Activity only: an idle frame says nothing, so a log of a quiet scene is quiet and a stroke, a camera move or a tile
+    // coming into range shows up.
+    if (st.pagesPainted || st.pagesStale || st.tablesUploaded || st.rescanned || st.attaches || st.detaches)
+        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale, %u table(s) uploaded, %u attached, %u released, %u/%u segment(s) drawn from pages, %u resident, %u stale",
+                    st.pagesPainted, st.pagesStale, st.tablesUploaded, st.attaches, st.detaches, st.activeSegments, st.segments, ms.resident, ms.dirty);
     return st;
 }
 

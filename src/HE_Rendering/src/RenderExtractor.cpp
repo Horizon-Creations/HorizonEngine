@@ -543,6 +543,7 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 				if (const auto* chunk = (anyChunk && chunkPool->contains(e)) ? &chunkPool->get(e) : nullptr)
 				{
 					obj.terrainChunk = true;
+					obj.terrainEntity = static_cast<uint32_t>(chunk->terrain);
 					if (creg.valid(chunk->terrain) && terrainPool && terrainPool->contains(chunk->terrain))
 					{
 						const TerrainComponent& pt = terrainPool->get(chunk->terrain);
