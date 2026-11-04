@@ -361,6 +361,14 @@ const uint8_t kGroupTones[HE::kAutoLandscapeGroupCount][HE::kAutoLandscapeRoleCo
 // step (Hpak::cookTextureBlob), exactly like an export that cooks arrays.
 uint8_t gCompressFormat = 0;
 
+// --min-roughness F: a floor for the roughness of REAL texture files (mask G). Wet-mud style maps average
+// 0.5 and read as a mirror under the sun and sky on a landscape that has no wetness to explain it (the
+// puddles are their own overlay); 0 = the maps as they are.
+uint8_t gMinRoughnessByte = 0;
+
+// --displacement: --material writes the material with its Displacement pin wired (buildAutoLandscapeGraph).
+bool gDisplacement = false;
+
 // Id of a group's array `map`: the group's block (material id + 1 + map), except Mountains whose
 // arrays are the original 0x40F.. ones (writeArrays), not behind its material id.
 HE::UUID groupArrayId(const HE::AutoLandscapeGroup& group, int map)
@@ -644,7 +652,7 @@ void buildLayerMaps(const Layer& L, const Found& f, int variant, int size,
         else            { normal[i] = 128; normal[i + 1] = 128; normal[i + 2] = 255; }   // flat
         normal[i + 3] = 255;
         mask[i]     = ao.valid() ? ao.px[i] : 255;                      // R = AO (white = unoccluded)
-        mask[i + 1] = r.valid()  ? r.px[i]  : toByte(L.roughness);      // G = roughness
+        mask[i + 1] = r.valid()  ? std::max(r.px[i], gMinRoughnessByte) : toByte(L.roughness);   // G = roughness
         mask[i + 2] = hg.valid() ? hg.px[i] : 128;                      // B = height
         mask[i + 3] = 255;
     }
@@ -990,7 +998,7 @@ static void registerWeatherFunctions(ContentManager& cm)
     }
 }
 
-bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& group, bool mixed = false)
+bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& group, bool mixed = false, bool displacement = false)
 {
     // Mountains: "M_AutoLandscape.hasset", {0x412,1} — the shipped bytes. Forest / Grassland: the
     // group row's own path and id.
@@ -999,7 +1007,7 @@ bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& grou
     const HE::UUID matId = mixed ? HE::kAutoLandscapeMixMaterialId : group.materialId;
     const std::string fileName = std::filesystem::path(matPath).filename().string();
     const char* kFile = fileName.c_str();
-    const HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, group.id, mixed);
+    const HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, group.id, mixed, displacement);
     MaterialAsset am;
     am.type          = HE::AssetType::Material;
     am.name          = std::filesystem::path(matPath).stem().string();
@@ -1140,12 +1148,15 @@ int main(int argc, char** argv)
                              "                 <RoleLabel>_<Map>.png plus <RoleLabel>_<Map>_v2.png, _v3.png ... (N variants per role)\n"
                              "                 and writes no loose per-layer files; a mode flag, goes with --group\n"
                              "  --compress bc7|astc write the group arrays block-compressed (BC7 desktop / ASTC 4x4 Apple, slice means baked), not RGBA8; platform-specific, NOT for shared EngineContent\n"
+                             "  --min-roughness F  floor (0..1) for the roughness of real texture files; wet-mud maps average 0.5 and look like mirrors\n"
                              "  the mode flag (--arrays-only/--material/--pack/--loose) must come right after <output-dir>; given\n"
                              "  later (e.g. after --group) it is not recognised and the tool refuses rather than silently falling\n"
                              "  back to regenerating placeholders over real data\n");
         return 2;
     }
     const std::string outDir = argv[1];
+    for (int i = 2; i < argc; ++i)
+        if (std::string(argv[i]) == "--displacement") gDisplacement = true;
     // The mode flag is positional (argv[2]): given anywhere else it would be silently ignored and
     // the tool would fall through to regenerating placeholders — a correctness trap once real
     // textures exist (e.g. `<dir> --group Forest --pack x` without this check overwrites Forest's
@@ -1169,7 +1180,7 @@ int main(int argc, char** argv)
         std::error_code mec;
         std::filesystem::create_directories(outDir, mec);
         const int arrays = writeMixArrays(outDir, from);
-        const bool mat = writeMaterial(outDir, HE::kAutoLandscapeGroups[0], /*mixed=*/true);
+        const bool mat = writeMaterial(outDir, HE::kAutoLandscapeGroups[0], /*mixed=*/true, gDisplacement);
         std::printf("landscape_tex_gen: mix material %s, %d/%d fat arrays in %s\n", mat ? "written" : "FAILED", arrays, MapCount, outDir.c_str());
         return mat && arrays == MapCount ? 0 : 1;
     }
@@ -1199,6 +1210,10 @@ int main(int argc, char** argv)
             }
         }
     const HE::AutoLandscapeGroup& group = HE::kAutoLandscapeGroups[groupIndex];
+    // --min-roughness F (0..1): see gMinRoughnessByte.
+    for (int i = 2; i + 1 < argc; ++i)
+        if (std::string(argv[i]) == "--min-roughness")
+            gMinRoughnessByte = toByte(std::clamp(static_cast<float>(std::atof(argv[i + 1])), 0.0f, 1.0f));
     // --compress bc7: the group arrays are written block-compressed (see gCompressFormat).
     for (int i = 2; i + 1 < argc; ++i)
         if (std::string(argv[i]) == "--compress")
@@ -1247,7 +1262,7 @@ int main(int argc, char** argv)
         }
         if (mode == "--material")
         {
-            const bool ok = writeMaterial(outDir, group);
+            const bool ok = writeMaterial(outDir, group, false, gDisplacement);
             std::printf("landscape_tex_gen: %s the %s landscape material to %s\n",
                         ok ? "wrote" : "FAILED to write", group.name, outDir.c_str());
             return ok ? 0 : 1;
@@ -1294,7 +1309,7 @@ int main(int argc, char** argv)
 
     if (argc > 2 && std::string(argv[2]) == "--material")
     {
-        const bool ok = writeMaterial(outDir, group);
+        const bool ok = writeMaterial(outDir, group, false, gDisplacement);
         std::printf("landscape_tex_gen: %s the auto landscape material to %s\n",
                     ok ? "wrote" : "FAILED to write", outDir.c_str());
         return ok ? 0 : 1;
