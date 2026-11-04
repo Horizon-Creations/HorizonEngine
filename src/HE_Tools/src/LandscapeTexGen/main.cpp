@@ -366,6 +366,9 @@ uint8_t gCompressFormat = 0;
 // puddles are their own overlay); 0 = the maps as they are.
 uint8_t gMinRoughnessByte = 0;
 
+// --match-variants F: pack-time colour matching of the per-hex variants (see packGroupReal).
+float gMatchVariants = 0.0f;
+
 // --displacement: --material writes the material with its Displacement pin wired (buildAutoLandscapeGraph).
 bool gDisplacement = false;
 
@@ -891,6 +894,54 @@ int packGroupReal(const std::string& outDir, const std::string& pngDir, int requ
         }
     }
 
+    // --match-variants F: the roles whose variants are drawn PER HEX (Grass and Dirt; the Rock role is by slope,
+    // Snow and the Desert's sand are procedural) show every hex of the texture bombing as a patch when the
+    // variants differ in colour. Pull each later variant's mean albedo colour toward variant 1's: a per-channel
+    // gain in linear light, strength F (0 = as photographed, 1 = the same mean). The detail stays.
+    if (gMatchVariants > 0.0f && variants > 1)
+    {
+        static float lin[256];
+        for (int i = 0; i < 256; ++i) lin[i] = std::pow(static_cast<float>(i) / 255.0f, 2.2f);
+        const auto meanLin = [&](const std::vector<uint8_t>& px, double m[3]) {
+            m[0] = m[1] = m[2] = 0.0;
+            const size_t n = px.size() / 4;
+            for (size_t i = 0; i < n; i += 7)   // a sample is plenty for a mean
+                for (int c = 0; c < 3; ++c) m[c] += lin[px[i * 4 + static_cast<size_t>(c)]];
+            const double cnt = static_cast<double>((n + 6) / 7);
+            for (int c = 0; c < 3; ++c) m[c] /= cnt;
+        };
+        for (int role = 0; role < 2; ++role)
+        {
+            if (role == 0 && group.proceduralSand) continue;
+            double m0[3];
+            meanLin(slotMaps[static_cast<size_t>(role * variants)][Albedo], m0);
+            for (int v = 1; v < variants; ++v)
+            {
+                auto& px = slotMaps[static_cast<size_t>(role * variants + v)][Albedo];
+                double mv[3];
+                meanLin(px, mv);
+                // Brightness is matched at full strength F, the hue (the colour relative to the brightness) at
+                // half of it: enough that the hexes do not read as patches, not a recolouring of the photograph.
+                const auto lum = [](const double m[3]) { return 0.2126 * m[0] + 0.7152 * m[1] + 0.0722 * m[2]; };
+                const double l0 = std::max(lum(m0), 1e-4), lv = std::max(lum(mv), 1e-4);
+                const double kL = gMatchVariants, kC = 0.5 * gMatchVariants;
+                float gain[3];
+                for (int c = 0; c < 3; ++c)
+                    gain[c] = static_cast<float>(std::pow(l0 / lv, kL) *
+                                                 std::pow((m0[c] / l0) / std::max(mv[c] / lv, 1e-4), kC));
+                if (std::abs(gain[0] - 1.0f) + std::abs(gain[1] - 1.0f) + std::abs(gain[2] - 1.0f) < 0.01f) continue;
+                std::printf("  %s variant %d: colour gain %.2f %.2f %.2f toward variant 1\n", roleNames[role].c_str(), v + 1,
+                            gain[0], gain[1], gain[2]);
+                for (size_t i = 0; i + 3 < px.size(); i += 4)
+                    for (int c = 0; c < 3; ++c)
+                    {
+                        const float l = std::min(1.0f, lin[px[i + static_cast<size_t>(c)]] * gain[c]);
+                        px[i + static_cast<size_t>(c)] = static_cast<uint8_t>(std::lround(std::pow(l, 1.0f / 2.2f) * 255.0f));
+                    }
+            }
+        }
+    }
+
     int ok = 0;
     for (int map = 0; map < MapCount; ++map)
     {
@@ -1153,6 +1204,7 @@ int main(int argc, char** argv)
                              "                 and writes no loose per-layer files; a mode flag, goes with --group\n"
                              "  --compress bc7|astc write the group arrays block-compressed (BC7 desktop / ASTC 4x4 Apple, slice means baked), not RGBA8; platform-specific, NOT for shared EngineContent\n"
                              "  --min-roughness F  floor (0..1) for the roughness of real texture files; wet-mud maps average 0.5 and look like mirrors\n"
+                             "  --match-variants F pull the colour of the per-hex variants (Grass, Dirt roles) toward variant 1 (0..1): the texture bombing otherwise shows every hex as a patch\n"
                              "  the mode flag (--arrays-only/--material/--pack/--loose) must come right after <output-dir>; given\n"
                              "  later (e.g. after --group) it is not recognised and the tool refuses rather than silently falling\n"
                              "  back to regenerating placeholders over real data\n");
@@ -1216,8 +1268,12 @@ int main(int argc, char** argv)
     const HE::AutoLandscapeGroup& group = HE::kAutoLandscapeGroups[groupIndex];
     // --min-roughness F (0..1): see gMinRoughnessByte.
     for (int i = 2; i + 1 < argc; ++i)
+    {
+        if (std::string(argv[i]) == "--match-variants")
+            gMatchVariants = std::clamp(static_cast<float>(std::atof(argv[i + 1])), 0.0f, 1.0f);
         if (std::string(argv[i]) == "--min-roughness")
             gMinRoughnessByte = toByte(std::clamp(static_cast<float>(std::atof(argv[i + 1])), 0.0f, 1.0f));
+    }
     // --compress bc7: the group arrays are written block-compressed (see gCompressFormat).
     for (int i = 2; i + 1 < argc; ++i)
         if (std::string(argv[i]) == "--compress")
