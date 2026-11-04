@@ -30,6 +30,7 @@
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
+#include <MaterialGraph/RvtLookup.h>        // kRvtTableBinding (t40..t43)
 // ── Cross-backend renderer helpers (audit 1a) ────────────────────────────────
 // Each of these replaced a private copy that every backend carried; the copies
 // were byte-identical by contract (the GPU reads the packed bytes positionally),
@@ -1438,7 +1439,8 @@ struct D3D11RendererImpl
     //  * for the page pass (`longLived`), whose view materials belong to the baker and are never edited in place.
     // On top of that the strings must still sit where and as long as they did, and InvalidateMaterial drops the entry.
     struct MatKeyEntry { uint64_t hash = 0; const char* f = nullptr; size_t fn = 0; const char* v = nullptr; size_t vn = 0;
-                         const char* d = nullptr; size_t dn = 0; uint64_t serial = 0; bool longLived = false; };
+                         const char* d = nullptr; size_t dn = 0; uint64_t serial = 0; bool longLived = false;
+                         bool usesRvt = false; };   // the fragment reads the RVT table/pool (heRvtTable): t40..t43 are bound for it
     uint64_t drawSceneSerial = 0;
     bool     rvtPagePass = false;
     std::unordered_map<HE::UUID, MatKeyEntry> matKeyCache;
@@ -8044,7 +8046,7 @@ void D3D11Renderer::DrawScene(int width, int height)
             if (p.m_matReady && m_contentManager)
             {
                 uint64_t matHash = 0; std::string matFrag, matVertBody;
-                bool _resolved = false, _fastKey = false;
+                bool _resolved = false, _fastKey = false, _usesRvt = false;
                 // Fast path: the key is remembered and its shaders are built. Not for a G-buffer or an instanced draw,
                 // which may still have to BUILD a variant from the source this path leaves empty.
                 if (!gbufferPass && !(dc.instanceTotal() > 1 && allowInstancing))
@@ -8053,7 +8055,7 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ke != p.matKeyCache.end() && D3D11RendererImpl::matKeyMatches(ke->second, *fm)
                             && ((ke->second.longLived && p.rvtPagePass) || ke->second.serial == p.drawSceneSerial)
                             && p.m_materialShaders.count(ke->second.hash))
-                        { matHash = ke->second.hash; _resolved = _fastKey = true; }
+                        { matHash = ke->second.hash; _resolved = _fastKey = true; _usesRvt = ke->second.usesRvt; }
                 if (!_resolved)
                     _resolved = p.m_matShaderLib.resolveShaders(*m_contentManager, dc.materialAssetId,
                                                     matHash, matFrag, matVertBody);
@@ -8061,12 +8063,13 @@ void D3D11Renderer::DrawScene(int width, int height)
                 {
                     if (!_fastKey)
                     {
+                        _usesRvt = matFrag.find("heRvtTable") != std::string::npos;
                         p.foldDisplacement(*m_contentManager, dc.materialAssetId, matHash);
                         if (const MaterialAsset* fm = m_contentManager->getMaterial(dc.materialAssetId))
                             p.matKeyCache[dc.materialAssetId] = { matHash, fm->customShaderFragGlsl.data(), fm->customShaderFragGlsl.size(),
                                                                   fm->customShaderVertGlsl.data(), fm->customShaderVertGlsl.size(),
                                                                   fm->customShaderDispGlsl.data(), fm->customShaderDispGlsl.size(),
-                                                                  p.drawSceneSerial, p.rvtPagePass };
+                                                                  p.drawSceneSerial, p.rvtPagePass, _usesRvt };
                     }
                     // Transparent graph materials get a blend-on / depth-write-off
                     // shader variant. MUST use the same predicate the opaque/blended
@@ -8218,6 +8221,14 @@ void D3D11Renderer::DrawScene(int width, int height)
                         // weightmap is filtered with whatever the last built-in pass left
                         // on s0. Restored below. (D3D11MaterialBindings.h, Thema 57)
                         HE::d3d11mat::BindLandscapeWeights(ctx, heWeights, p.m_matWeightSampler.Get());
+                        // The Runtime Virtual Texture read (RvtLookup.h): the page table and the three pool arrays on
+                        // t40..t43, read with Load only, so no sampler. Off again after the draw. Without an uploaded table
+                        // the slots are null and every Load answers 0.
+                        if (_usesRvt)
+                        {
+                            ID3D11ShaderResourceView* rvtSrv[4] = { p.rvtTableSRV.Get(), p.rvtPoolSRV[0].Get(), p.rvtPoolSRV[1].Get(), p.rvtPoolSRV[2].Get() };
+                            ctx->PSSetShaderResources(HE::kRvtTableBinding, 4, rvtSrv);
+                        }
                         // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
                         // (Thema 120): the live probe atlases while GI shades — the gate
                         // fillMatLight raised — the white dummy otherwise, so the 2D slots
@@ -8364,6 +8375,11 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
                         }
                         HE::d3d11mat::RestoreAfterMaterialDraw(ctx, p.sampler.Get());
+                        if (_usesRvt)
+                        {
+                            ID3D11ShaderResourceView* noRvt[4] = {};
+                            ctx->PSSetShaderResources(HE::kRvtTableBinding, 4, noRvt);
+                        }
                         HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
                         HE::d3d11mat::RestoreAfterGIReflFwd(ctx); // t32 off; the built-in shader never reads it
                         {

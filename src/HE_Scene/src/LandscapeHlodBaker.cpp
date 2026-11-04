@@ -261,6 +261,12 @@ namespace HE::landscape
         return bakeRect(rect, side, supersample, out);
     }
 
+    bool HlodBaker::renderMaterialImage(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, std::vector<uint8_t>& rgba)
+    {
+        if (!m_active || px == 0 || std::fabs(rect.size.x - rect.size.y) > 1e-3f) return false;
+        return renderView(material, rect, px, /*srgb=*/false, rgba);
+    }
+
     bool HlodBaker::renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot)
     {
         if (!m_active || px == 0 || std::fabs(rect.size.x - rect.size.y) > 1e-3f) return false;

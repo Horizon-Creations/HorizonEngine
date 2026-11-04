@@ -68,6 +68,9 @@ namespace HE::landscape
         // Runtime Virtual Textures (Thema 333): the same three views of `rect`, `px` x `px`, but each goes straight into
         // slice `slot` of the renderer's RVT pool (layer 0 BaseColor, 1 Normal, 2 Surface), no readback, no filter.
         bool renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot);
+        // The scratch landscape drawn top-down with ANY material (a witness: the RVT consumer against the analytic
+        // ramp), `px` x `px` RGBA8 read back, linear (no sRGB encode).
+        bool renderMaterialImage(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, std::vector<uint8_t>& rgba);
 
         // The material graph groups the parameters of the landscape's material came from (index into
         // kAutoLandscapeGroups), for the caller's log line.

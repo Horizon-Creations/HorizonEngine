@@ -10787,7 +10787,7 @@ void EditorApplication::dumpFrameHeadless()
 				RvtManager mgr(64, 64, 2);
 				const uint16_t vol = mgr.addVolume(vd);
 				const uint32_t px = static_cast<uint32_t>(mgr.layout(vol).physicalPageSize());
-				if (!r->CreateRvtPool(64, px))
+				if (!r->CreateRvtPool(512, px))
 					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST: CreateRvtPool failed on this backend");
 				else
 				{
@@ -10957,6 +10957,195 @@ void EditorApplication::dumpFrameHeadless()
 							            layer, n, ppages.size(), bad, worst, skipped);
 						}
 						baker.setViewMaterials(saved);
+					}
+
+					// 6) the consumer (Thema 333 step 3c): the landscape drawn from the page pool through the RvtSample node.
+					// Every page of a volume is painted with an analytic ramp, (u, v, 0) = ((x - ox) / ext, (z - oz) / ext, 0), in all
+					// three layers. A ramp is linear, so bilinear filtering of it is EXACT at any mip: the consumer must reproduce
+					// it at every pixel (within 8-bit rounding), through the page table, the effective-mip page cell, the border
+					// and the page seams. Two cases: every page resident (mip 0 is read), and only the top page resident (the
+					// table sends every lookup to a coarser page: the effective-mip math is the likeliest bug). Layers: 2 =
+					// (AO, roughness) carries u and v; 0 = the sRGB Load path; 1 = the normal, normalize(2 * (u, v, 0) - 1).
+					{
+						using HE::MatNodeType;
+						const std::string cfault = [] { const char* f = std::getenv("HE_DUMP_RVTTEST_FAULT"); return f ? std::string(f) : std::string(); }();
+						RvtManager cm(512, 512, 1);
+						VolumeDesc cd = vd;
+						cd.finestMetersPerTexel = 0.5f;
+						const uint16_t cvol = cm.addVolume(cd);
+						const VolumeLayout& cl = cm.layout(cvol);
+						const uint32_t cpx = static_cast<uint32_t>(cl.physicalPageSize());
+						const float ext = cl.extentM();
+						if (cpx != px) r->CreateRvtPool(512, cpx);
+
+						// the ramp view material: (u, 0, v) = WorldPos * K + C, then (u, v, 0)
+						HE::MaterialGraph rg;
+						{
+							const int out = rg.addNode(MatNodeType::Output);
+							const int wp  = rg.addNode(MatNodeType::WorldPos);
+							const int kk  = rg.addNode(MatNodeType::ConstColor);
+							const int cc  = rg.addNode(MatNodeType::ConstColor);
+							const int mul = rg.addNode(MatNodeType::Multiply);
+							const int add = rg.addNode(MatNodeType::Add);
+							const int spl = rg.addNode(MatNodeType::SplitRGBA);
+							const int zer = rg.addNode(MatNodeType::ConstFloat);
+							const int c3  = rg.addNode(MatNodeType::Combine3);
+							rg.findNode(out)->p[0] = 0.0f;
+							rg.findNode(kk)->p[0] = 1.0f / ext; rg.findNode(kk)->p[1] = 0.0f; rg.findNode(kk)->p[2] = 1.0f / ext;
+							rg.findNode(cc)->p[0] = -cd.origin.x / ext; rg.findNode(cc)->p[1] = 0.0f; rg.findNode(cc)->p[2] = -cd.origin.y / ext;
+							rg.findNode(zer)->p[0] = 0.0f;
+							rg.connect(wp, 0, mul, 0); rg.connect(kk, 0, mul, 1);
+							rg.connect(mul, 0, add, 0); rg.connect(cc, 0, add, 1);
+							rg.connect(add, 0, spl, 0);
+							rg.connect(spl, 0, c3, 0); rg.connect(spl, 2, c3, 1); rg.connect(zer, 0, c3, 2);
+							rg.connect(c3, 0, out, HE::kMatOutputBaseColorPin);
+						}
+						MaterialAsset ram;
+						ram.type = HE::AssetType::Material;
+						ram.name = "RvtRampWitness";
+						ram.nodeGraphJson = HE::materialGraphToJson(rg);
+						const HE::UUID rampId = contentManager().registerMaterial(std::move(ram));
+						contentManager().regenerateMaterialFromGraph(rampId);
+
+						// the consumers: kind 0 -> (AO, roughness, valid), 1 -> base colour, 2 -> normal * 0.5 + 0.5
+						HE::UUID consumer[3];
+						for (int kind = 0; kind < 3; ++kind)
+						{
+							HE::MaterialGraph g;
+							const int out = g.addNode(MatNodeType::Output);
+							const int pa  = g.addNode(MatNodeType::ParamVec4); g.findNode(pa)->s = "RvtVolumeA";
+							const int pb  = g.addNode(MatNodeType::ParamVec4); g.findNode(pb)->s = "RvtVolumeB";
+							const int rv  = g.addNode(MatNodeType::RvtSample);
+							g.findNode(out)->p[0] = 0.0f;
+							g.findNode(pa)->p[0] = cd.origin.x; g.findNode(pa)->p[1] = cd.origin.y;
+							g.findNode(pa)->p[2] = ext;         g.findNode(pa)->p[3] = cl.texelMeters(0);
+							g.findNode(pb)->p[0] = float(cd.pageSize); g.findNode(pb)->p[1] = float(cd.border);
+							g.findNode(pb)->p[2] = float(cl.pagesPerSide(0)); g.findNode(pb)->p[3] = float(cl.mipCount());
+							g.connect(pa, 0, rv, 0); g.connect(pb, 0, rv, 1);
+							if (kind == 0)
+							{
+								const int c3 = g.addNode(MatNodeType::Combine3);
+								g.connect(rv, 2, c3, 0); g.connect(rv, 3, c3, 1); g.connect(rv, 4, c3, 2);
+								g.connect(c3, 0, out, HE::kMatOutputBaseColorPin);
+							}
+							else if (kind == 1)
+								g.connect(rv, 0, out, HE::kMatOutputBaseColorPin);
+							else
+							{
+								const int h = g.addNode(MatNodeType::ConstFloat); g.findNode(h)->p[0] = 0.5f;
+								const int m = g.addNode(MatNodeType::Multiply);
+								const int a = g.addNode(MatNodeType::Add);
+								g.connect(rv, 1, m, 0); g.connect(h, 0, m, 1); g.connect(m, 0, a, 0); g.connect(h, 0, a, 1);
+								g.connect(a, 0, out, HE::kMatOutputBaseColorPin);
+							}
+							MaterialAsset ca;
+							ca.type = HE::AssetType::Material;
+							ca.name = "RvtConsumerWitness" + std::to_string(kind);
+							ca.nodeGraphJson = HE::materialGraphToJson(g);
+							consumer[kind] = contentManager().registerMaterial(std::move(ca));
+							contentManager().regenerateMaterialFromGraph(consumer[kind]);
+						}
+
+						// the fine pattern for the third case: fract(worldPos / 8 m), 16 texels per period at 0.5 m. A ramp is blind to
+						// a sub-texel shift (half a texel moves it by < 1/255); this one moves 8/255 for it.
+						HE::MaterialGraph fg;
+						{
+							const int out = fg.addNode(MatNodeType::Output);
+							const int wp  = fg.addNode(MatNodeType::WorldPos);
+							const int sc  = fg.addNode(MatNodeType::ConstFloat);
+							const int mul = fg.addNode(MatNodeType::Multiply);
+							const int fr  = fg.addNode(MatNodeType::Fract);
+							fg.findNode(out)->p[0] = 0.0f;
+							fg.findNode(sc)->p[0] = 1.0f / 8.0f;
+							fg.connect(wp, 0, mul, 0); fg.connect(sc, 0, mul, 1); fg.connect(mul, 0, fr, 0);
+							fg.connect(fr, 0, out, HE::kMatOutputBaseColorPin);
+						}
+						MaterialAsset fma;
+						fma.type = HE::AssetType::Material;
+						fma.name = "RvtFineWitness";
+						fma.nodeGraphJson = HE::materialGraphToJson(fg);
+						const HE::UUID fineId = contentManager().registerMaterial(std::move(fma));
+						contentManager().regenerateMaterialFromGraph(fineId);
+
+						HE::UUID savedC[3], rampMats[3] = { rampId, rampId, rampId }, fineMats[3] = { fineId, fineId, fineId };
+						baker.viewMaterials(savedC);
+
+						// the picture: the central part of the landscape, 0.5 m per pixel, at most 1024 px
+						const float shotM = std::min(cd.sizeM, 512.0f);
+						const uint32_t shotPx = static_cast<uint32_t>(shotM / 0.5f);
+						HE::landscape::HlodChunkRect shot;
+						shot.size = glm::vec2(shotM);
+						shot.min  = cd.origin + glm::vec2((cd.sizeM - shotM) * 0.5f);
+
+						// scenarios: 0 = every page resident, ramp; 1 = only the top page, ramp; 2 = every page, the fine pattern
+						for (int scenario = 0; scenario < 3; ++scenario)
+						{
+							baker.setViewMaterials(scenario == 2 ? fineMats : rampMats);
+							RvtManager sm(512, 512, scenario == 1 ? 1 : 0);
+							const uint16_t sv = sm.addVolume(cd);
+							ViewDesc vw;
+							if (scenario != 1) { vw.cameraXZ = cd.origin + glm::vec2(cd.sizeM * 0.5f); vw.nearRadiusM = cd.sizeM; }   // every mip-0 page
+							else               { vw.cameraXZ = cd.origin - glm::vec2(1.0e6f); vw.nearRadiusM = 1.0f; }                  // only the pinned top page
+							sm.beginFrame();
+							const auto pg = sm.update(sv, vw);
+							paintPages(baker, pg, cpx);
+							std::vector<std::vector<uint32_t>> tbl;
+							for (int m = 0; m < sm.layout(sv).mipCount(); ++m) tbl.push_back(sm.pageTable(sv, m));
+							const bool tblOk = r->SetRvtPageTable(tbl);
+							const int topMip = sm.layout(sv).mipCount() - 1;
+							const float edge = (scenario != 1 ? 1.5f : 1.5f * sm.layout(sv).texelMeters(topMip));   // the first coarse texel at the volume edge mixes in the unpainted border
+
+							for (int kind = 0; kind < 3; ++kind)
+							{
+								if (scenario == 2 && kind != 1) continue;   // the fine pattern is read through the sRGB layer only
+								std::vector<uint8_t> img;
+								const bool imgOk = tblOk && baker.renderMaterialImage(consumer[kind], shot, shotPx, img) && img.size() == size_t(shotPx) * shotPx * 4;
+								unsigned n = 0, bad = 0, worst = 0;
+								if (imgOk)
+									for (uint32_t j = 0; j < shotPx; ++j)
+										for (uint32_t i = 0; i < shotPx; ++i)
+										{
+											float wx = shot.min.x + (float(i) + 0.5f) * (shotM / float(shotPx));
+											float wz = shot.min.y + (float(j) + 0.5f) * (shotM / float(shotPx));
+											if (cfault == "half") wx += 0.25f;
+											else if (cfault == "flipz") wz = shot.min.y + (float(shotPx - 1 - j) + 0.5f) * (shotM / float(shotPx));
+											else if (cfault == "swapxz") std::swap(wx, wz);
+											if (wx < cd.origin.x + edge || wz < cd.origin.y + edge ||
+											    wx > cd.origin.x + cd.sizeM - edge || wz > cd.origin.y + cd.sizeM - edge) continue;
+											const float u = (wx - cd.origin.x) / ext, v = (wz - cd.origin.y) / ext;
+											float ex[3];
+											if (scenario == 2)
+											{
+												// fract(x / 8), fract(z / 8) in R and B (G is the terrain height); the pixels next to a wrap of the
+												// sawtooth are skipped, where a texel pair straddles the jump and bilinear is not the analytic value
+												ex[0] = wx / 8.0f - std::floor(wx / 8.0f); ex[1] = 0.0f; ex[2] = wz / 8.0f - std::floor(wz / 8.0f);
+												if (ex[0] < 0.1f || ex[0] > 0.9f || ex[2] < 0.1f || ex[2] > 0.9f) continue;
+											}
+											else if (kind == 0) { ex[0] = u; ex[1] = v; ex[2] = 1.0f; }
+											else if (kind == 1) { ex[0] = u; ex[1] = v; ex[2] = 0.0f; }
+											else
+											{
+												const float nx = 2.0f * u - 1.0f, ny = 2.0f * v - 1.0f, nz = -1.0f;
+												const float il = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
+												ex[0] = nx * il * 0.5f + 0.5f; ex[1] = ny * il * 0.5f + 0.5f; ex[2] = nz * il * 0.5f + 0.5f;
+											}
+											const uint8_t* px4 = &img[(size_t(j) * shotPx + i) * 4];
+											unsigned d = 0;
+											for (int c = 0; c < 3; ++c)
+											{
+												if (scenario == 2 && c == 1) continue;
+												d = std::max(d, static_cast<unsigned>(std::lround(std::fabs(float(px4[c]) / 255.0f - ex[c]) * 255.0f)));
+											}
+											++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
+										}
+								HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST consumer %s, view %s: %u pixels, %u wrong by > 3/255, worst %u /255 (%zu pages, table %s, image %s)",
+								            scenario == 0 ? "all pages" : scenario == 1 ? "top page only" : "all pages, fine pattern", kind == 0 ? "AO/rough/valid" : kind == 1 ? "base colour" : "normal",
+								            n, bad, worst, pg.size(), tblOk ? "ok" : "FAILED", imgOk ? "ok" : "FAILED");
+								if (imgOk && scenario == 1 && kind == 1) writeBMP(m_dumpPath + ".rvt_consumer_top.bmp", img, shotPx, shotPx);
+								if (imgOk && scenario == 0 && kind == 1) writeBMP(m_dumpPath + ".rvt_consumer_all.bmp", img, shotPx, shotPx);
+							}
+						}
+						baker.setViewMaterials(savedC);
 					}
 
 					// 5) HE_DUMP_RVTTEST_PERF=<reps>: the cost of painting a page. The pages of step 1 are painted again `reps`
