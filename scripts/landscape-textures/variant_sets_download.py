@@ -18,16 +18,19 @@ import urllib.request
 
 PLAN = {   # variant_sets_plan
  "Desert":    {"Hardpan":   ["sandy_gravel_02","dry_ground_01","dirt_floor"],
-               "Sandstone": ["cliff_side","rock_06","dry_riverbed_rock"]},
+               "Sandstone": ["rock_06","cliff_side","dry_riverbed_rock"]},
+ # The Rock role (Mountains Rock, Forest MossyRock, Grassland Stones, Desert Sandstone) is by SLOPE, not
+ # random: variant 1 medium, 2 large (steep faces), 3 small (stones on gentle slopes), see
+ # AutoLandscapeGroup::rockBySize. A role with fewer sets than variants repeats its first (Bare Soil).
  "Mountains": {"Grass": ["grass_path_3","grass_ground"],
                "Dirt":  ["brown_mud_dry","park_dirt"],
                "Rock":  ["rock_face_03","rock_05"]},
  "Forest":    {"ForestFloor": ["forest_ground_04","brown_mud_leaves_01","brown_mud_rocks_01"],
                "Roots":       ["forrest_ground_01","forrest_ground_03","forest_leaves_02"],
-               "MossyRock":   ["mossy_rock","rock_3","rock_face_03"]},
+               "MossyRock":   ["mossy_rock","lichen_rock","rock_3"]},
  "Grassland": {"Meadow":   ["grass_path_2","grass_ground","grass_path_3"],
-               "BareSoil": ["brown_mud_03","brown_mud_02","brown_mud_dry"],
-               "Stones":   ["rocks_ground_03","pebble_ground_01","rock_ground_02"]},
+               "BareSoil": ["forest_ground_05","dry_ground_rocks"],
+               "Stones":   ["rocks_ground_03","rock_boulder_dry","pebble_ground_01"]},
 }
 
 UA = {"User-Agent": "curl/8"}

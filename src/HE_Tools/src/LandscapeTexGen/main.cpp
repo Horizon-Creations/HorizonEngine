@@ -1045,8 +1045,8 @@ bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& grou
     return true;
 }
 
-// The three FAT arrays of the mix material (Thema 233): slice (group * 4 + role) is role `role`'s
-// variant 0 of group `group`, copied from that group's own arrays in `fromDir` (the files the groups
+// The three FAT arrays of the mix material (Thema 233): slice (group * 4 + role) * V + variant is variant `variant` of role `role`'s
+// slices of group `group`, copied from that group's own arrays in `fromDir` (the files the groups
 // ship as, Mountains' without a group name). All twelve must agree in size, mips, format and colour
 // space. With real textures this is 4x one group's memory; `fromDir` may hold smaller ones.
 int writeMixArrays(const std::string& outDir, const std::string& fromDir)
@@ -1072,7 +1072,10 @@ int writeMixArrays(const std::string& outDir, const std::string& fromDir)
         a.type = HE::AssetType::Texture;
         a.width = ref.width; a.height = ref.height; a.channels = ref.channels;
         a.mipLevels = ref.mipLevels; a.format = ref.format; a.srgb = ref.srgb;
-        a.layers = static_cast<uint32_t>(HE::kAutoLandscapeMixDepth);
+        // V variants of every group's role, the same V in all four (the shader divides the depth by 16 to
+        // get it): slice (group * 4 + role) * V + variant, the order the loops below append in.
+        const int V = HE::autoLandscapeVariantCount(static_cast<int>(ref.layers));
+        a.layers = static_cast<uint32_t>(HE::kAutoLandscapeMixDepth * V);
         const size_t sliceBytes = HE::textureArraySliceBytes(ref.width, ref.height, ref.mipLevels, ref.format);
         bool fits = sliceBytes != 0;
         for (int g = 0; g < HE::kAutoLandscapeGroupCount && fits; ++g)
@@ -1080,29 +1083,30 @@ int writeMixArrays(const std::string& outDir, const std::string& fromDir)
             const TextureAsset& t = *groupArrays[g];
             fits = t.width == ref.width && t.height == ref.height && t.channels == ref.channels &&
                    t.mipLevels == ref.mipLevels && t.format == ref.format && t.srgb == ref.srgb &&
+                   HE::autoLandscapeVariantCount(static_cast<int>(t.layers)) == V &&
                    t.layers >= static_cast<uint32_t>(HE::kAutoLandscapeRoleCount) && HE::textureArrayPayloadValid(t);
         }
         if (!fits)
         {
-            std::fprintf(stderr, "  %s maps: the four groups' arrays differ in size, mips or format\n", kMapNames[map]);
+            std::fprintf(stderr, "  %s maps: the four groups' arrays differ in size, mips, format or variant count\n", kMapNames[map]);
             continue;
         }
         a.data.reserve(sliceBytes * a.layers);
         for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
         {
             const TextureAsset& t = *groupArrays[g];
-            const int variants = HE::autoLandscapeVariantCount(static_cast<int>(t.layers));
             for (int role = 0; role < HE::kAutoLandscapeRoleCount; ++role)
-            {
-                const size_t at = HE::textureArrayOffset(t.width, t.height, t.mipLevels,
-                                                         static_cast<uint32_t>(role * variants), 0, t.format);
-                a.data.insert(a.data.end(), t.data.begin() + at, t.data.begin() + at + sliceBytes);
-                // A block-compressed array carries its slice means (CHUNK_TXSM): the mix's come from the
-                // same slices, so the GI landscape colours do not need the pixels back.
-                const size_t m = static_cast<size_t>(role * variants) * 3;
-                if (ref.format != TextureFormat::RGBA8 && m + 3 <= t.sliceMeans.size())
-                    a.sliceMeans.insert(a.sliceMeans.end(), t.sliceMeans.begin() + m, t.sliceMeans.begin() + m + 3);
-            }
+                for (int v = 0; v < V; ++v)
+                {
+                    const size_t at = HE::textureArrayOffset(t.width, t.height, t.mipLevels,
+                                                             static_cast<uint32_t>(role * V + v), 0, t.format);
+                    a.data.insert(a.data.end(), t.data.begin() + at, t.data.begin() + at + sliceBytes);
+                    // A block-compressed array carries its slice means (CHUNK_TXSM): the mix's come from the
+                    // same slices, so the GI landscape colours do not need the pixels back.
+                    const size_t m = static_cast<size_t>(role * V + v) * 3;
+                    if (ref.format != TextureFormat::RGBA8 && m + 3 <= t.sliceMeans.size())
+                        a.sliceMeans.insert(a.sliceMeans.end(), t.sliceMeans.begin() + m, t.sliceMeans.begin() + m + 3);
+                }
         }
         const std::string name = std::string("T_Landscape_Mix_") + kMapNames[map] + "_Array";
         a.name = name;
