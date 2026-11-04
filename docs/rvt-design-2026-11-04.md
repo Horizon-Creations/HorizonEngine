@@ -61,11 +61,11 @@ Dieses Doc ist Schritt 1 (Entwurf + CPU-Kern, kein GPU-Code). Schritte: Hive-The
 ## Handoff
 
 - **Topic / step:** 333, Schritt 1 von 8 (Entwurf + CPU-Kern)
-- **Branch / commit:** `claude/runtime-virtual-textures` (von `release/0.8.0`), **nicht committet, nicht gepusht** (der Mensch hat nicht um einen Commit gebeten)
+- **Branch / commit:** `claude/runtime-virtual-textures` (von `release/0.8.0`), d3c8d86e, nicht gepusht
 - **Done:** Entwurf mit Entscheidungen und rein CPU-seitiger Kern (Layout, Seitenbedarf, Budget, Dirty-Rects, gemeinsamer Pool mit LRU, Page-Table-Daten mit Fallback), getestet.
 - **Files touched:** `src/HE_Scene/include/HorizonScene/RuntimeVirtualTexture.h`, `src/HE_Scene/src/RuntimeVirtualTexture.cpp` (neu); `src/HE_Scene/CMakeLists.txt` (+1 Quelle); `tests/test_rvt_core.cpp` (neu), `tests/CMakeLists.txt` (+1); dieses Doc.
-- **Verified:** Eigenständiger MSVC-Build + doctest, 9/9, Negativkontrolle (siehe §5).
-- **Not verified:** voller `he_tests`-/HorizonScene-DLL-Build und Linux/macOS-Compiler/CI. (Der DLL-Export ist über `WINDOWS_EXPORT_ALL_SYMBOLS` in `src/HE_Scene/CMakeLists.txt:148` abgedeckt, nicht gelinkt gesehen.) Kein GPU-Code, nichts im Editor gesehen.
+- **Verified:** Eigenständiger MSVC-Build + doctest, 9/9, Negativkontrolle (§5); voller `he_tests`-Debug-Build, `--source-file=*test_rvt_core.cpp`: 9/9, 1002 Prüfungen. Build nur mit `-DDEPLOY_DIR=<repo>/out/deploy-rvt`, sonst scheitert/klobbert der Deploy-Schritt den laufenden Editor.
+- **Not verified:** Linux/macOS-Compiler und CI (kein Push). Kein GPU-Code, nichts im Editor gesehen.
 - **Decisions taken:** alles in §2 mit „Entscheidung“; Wetter/Schnee/Trails statisch ist **nur vorgeschlagen**.
 - **Pending (Reihenfolge):** Schritt 2 Producer-Pass auf D3D11 (NN-WS03), 3 Consumer-Shader, 4 Invalidierungs-Hooks, 5 Segmentierung (Pinned-Mips-Problem, §4), 6 übrige Backends, 7 Editor/Serialisierung, 8 Abnahme.
 - **Traps:** Hive-Deadline war abgelaufen, `hive_dispatch` lehnt ab (nur der Mensch setzt sie), Schritt 1 lief deshalb in der Session des Menschen. Ein `cmd /c`-Build vom Bash-Tool aus baut nichts (Memory `build-test-cli-workflow`); `HE_API` gehört nicht an HE_Scene-Klassen.
