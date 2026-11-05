@@ -12020,6 +12020,9 @@ bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 	m_rvtPoolAlbedoSrgb = (void*)CFBridgingRetain(srgb);
 	m_rvtSlots  = slots;
 	m_rvtPagePx = pagePx;
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool %u pages of %u px, 3 arrays (%.0f MB); device now holds %.0f MB",
+	            slots, pagePx, double(slots) * pagePx * pagePx * 4.0 * 3.0 / (1024.0 * 1024.0),
+	            double(device.currentAllocatedSize) / (1024.0 * 1024.0));
 	return true;
 }
 
@@ -12076,6 +12079,8 @@ bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std:
 		t.tex  = (void*)CFBridgingRetain(nt);
 		t.side = side;
 		t.mips = static_cast<uint32_t>(mips.size());
+		HE_LOG_INFO(RHI, "MetalRenderer: RVT page table %ux%u, %zu mips; device now holds %.0f MB",
+		            side, side, mips.size(), double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
 	}
 	id<MTLTexture> tex = (__bridge id<MTLTexture>)t.tex;
 	for (size_t m = 0; m < mips.size(); ++m)

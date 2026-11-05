@@ -11378,20 +11378,25 @@ void EditorApplication::dumpFrameHeadless()
 
 				// the cost: alternate, median
 				const int N = std::max(5, std::atoi(std::getenv("HE_DUMP_RVTTEST_LIT_REPS") ? std::getenv("HE_DUMP_RVTTEST_LIT_REPS") : "15"));
-				std::vector<double> td, tr;
+				std::vector<double> td, tr, gd, gr;   // wall ms per capture, and the GPU's own frame ms where the backend measures it
 				std::vector<uint8_t> sink;
 				for (int k = 0; k < N; ++k)
 				{
 					setMaterial(directMat);
 					const auto a = std::chrono::steady_clock::now(); capture(sink); const auto b = std::chrono::steady_clock::now();
+					gd.push_back(r->GetFrameGpuStats().gpuFrameMs);
 					setMaterial(rvtLive.consumer);
 					capture(sink); const auto c = std::chrono::steady_clock::now();
+					gr.push_back(r->GetFrameGpuStats().gpuFrameMs);
 					td.push_back(std::chrono::duration<double, std::milli>(b - a).count());
 					tr.push_back(std::chrono::duration<double, std::milli>(c - b).count());
 				}
 				std::sort(td.begin(), td.end()); std::sort(tr.begin(), tr.end());
+				std::sort(gd.begin(), gd.end()); std::sort(gr.begin(), gr.end());
 				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit cost (%d alternating full-frame captures, readback included in both): direct median %.2f ms (min %.2f), rvt median %.2f ms (min %.2f)",
 				            N, td[td.size() / 2], td.front(), tr[tr.size() / 2], tr.front());
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit GPU frame ms (the backend's own timestamps, -1 = not measured): direct median %.2f (min %.2f), rvt median %.2f (min %.2f)",
+				            gd[gd.size() / 2], gd.front(), gr[gr.size() / 2], gr.front());
 			}
 			setMaterial(directMat);
 		}
