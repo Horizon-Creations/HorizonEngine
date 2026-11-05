@@ -11496,6 +11496,25 @@ void EditorApplication::dumpFrameHeadless()
 				return n;
 			};
 
+			// HE_DUMP_RVTDRIVER_FRAMES=<n>: n NORMAL frames (driver tick + Render, 50 ms apart), the live loop the other steps skip:
+			// what only real frames do (the idle release of big texture arrays on Metal, the ageing of retired textures) happens here.
+			// Run before the sculpt stroke (so the strokes after it repaint pages whose arrays had to be reloaded) and again at the end.
+			const auto normalFrames = [&](const char* when) {
+				const char* nf = std::getenv("HE_DUMP_RVTDRIVER_FRAMES");
+				if (!nf || !*nf) return;
+				const int n = std::clamp(std::atoi(nf), 1, 5000);
+				double worst = 0.0, sum = 0.0;
+				for (int i = 0; i < n; ++i)
+				{
+					const auto f0 = std::chrono::steady_clock::now();
+					sceneTick();
+					r->Render();
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+					worst = std::max(worst, ms); sum += ms;
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render)", when, n, sum / n, worst);
+			};
 			// A) the first fill
 			HE::landscape::RvtLandscape::FrameStats st;
 			int frames = 0; uint32_t filled = 0;
@@ -11532,6 +11551,7 @@ void EditorApplication::dumpFrameHeadless()
 				r->SetRenderPath(livePath);
 			}
 
+			normalFrames("after the idle step");
 			// C) a sculpt stroke: a bump of 8 m, 14 m wide, the way a brush edits (heights, then the dirty rect, then the tick)
 			{
 				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
@@ -11635,6 +11655,7 @@ void EditorApplication::dumpFrameHeadless()
 				}
 			}
 			drv.detach();
+			normalFrames("end");
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER done: %llu pages painted in total, detached", static_cast<unsigned long long>(drv.pagesPaintedTotal()));
 		}
 	}

@@ -1456,6 +1456,15 @@ private:
 	// InvalidateMaterial retires the texture and drops the entry.
 	std::unordered_map<HE::UUID, void*>    m_materialTexCache;
 	std::unordered_map<std::string, void*> m_graphTexCache; // node-graph textures by UUID/path key
+	// Runtime Virtual Texture (Thema 333): the big texture arrays of a landscape material are read by the page pass only once its
+	// landscape is drawn from the pool, so they sit idle in VRAM (~770 MB for the Mix material). When no normal frame and no
+	// page frame has touched an array of >= 64 MB for HE_RVT_ARRAY_IDLE_S seconds (default 20, 0 = never) it is released
+	// and reloaded on its next use (the first page after a long pause pays the reload). Keyed like m_graphTexCache.
+	struct GraphTexUse { double normal = 0.0, page = 0.0; };
+	std::unordered_map<std::string, GraphTexUse> m_graphTexUse;
+	double m_graphTexEvictAt = 0.0;
+	bool   m_logAfterArrayRelease = false;   // log the device's size once the retired arrays are really gone
+	void   EvictIdleGraphArrays();
 	uint64_t m_graphTexMissEpoch = 0; // contentEpoch its nullptr misses were taken at (HE::forgetGraphTextureMisses)
 	std::unordered_map<std::string, void*> m_uiTexCache;    // UI quad images, same keys, never sRGB
 

@@ -1,3 +1,4 @@
+#include <chrono>
 #include "Backends/Metal/MetalRenderer.h"
 #include <Window/Window.h>
 #include <ContentManager/ContentManager.h>
@@ -10083,6 +10084,12 @@ void* MetalRenderer::ResolveGraphTexture(const HE::UUID& texId, const std::strin
 	// EngineContent download landing after this first ask (Thema 210).
 	HE::forgetGraphTextureMisses(m_graphTexCache, m_graphTexMissEpoch, m_contentManager->contentEpoch(),
 	                             [](void* tex) { return tex == nullptr; });
+	if (array)   // the idle release of big arrays (EvictIdleGraphArrays): who used it last, a normal frame or a page frame
+	{
+		const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		GraphTexUse& u = m_graphTexUse[key];
+		(m_editorCamera.rvtMaterial != HE::UUID{} ? u.page : u.normal) = now;
+	}
 	if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
 		return it->second ? it->second : (array ? m_whiteArrayTexture : nullptr);
 	const TextureAsset* asset = m_contentManager->resolveTextureRef(texId, path);
@@ -12041,6 +12048,8 @@ void MetalRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& land
 {
 	if (consumerMaterial == HE::UUID{}) m_rvtSwaps.erase(terrainEntity);
 	else                               m_rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT swap %s; device now holds %.0f MB", consumerMaterial == HE::UUID{} ? "off" : "on",
+	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
 }
 
 void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
@@ -12051,6 +12060,8 @@ void MetalRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
 	if (t == m_rvtTables.end()) return;
 	RetireTexture(t->second.tex);
 	m_rvtTables.erase(t);
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT consumer released; device now holds %.0f MB",
+	            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
 }
 
 bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
@@ -12064,30 +12075,30 @@ bool MetalRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std:
 		const uint32_t ms = side >> m;
 		if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
 	}
-	RvtTable& t = m_rvtTables[consumerMaterial];
-	if (!t.tex || t.side != side || t.mips != mips.size())
-	{
-		RetireTexture(t.tex);   // a frame in flight may still read the old shape
-		t.tex = nullptr;
-		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
-		                                                                             width:side height:side mipmapped:NO];
-		d.mipmapLevelCount = mips.size();
-		d.usage            = MTLTextureUsageShaderRead;
-		d.storageMode      = MTLStorageModeShared;   // unified memory: the CPU writes the entries in place
-		id<MTLTexture> nt = [(__bridge id<MTLDevice>)m_device newTextureWithDescriptor:d];
-		if (!nt) { m_rvtTables.erase(consumerMaterial); return false; }
-		t.tex  = (void*)CFBridgingRetain(nt);
-		t.side = side;
-		t.mips = static_cast<uint32_t>(mips.size());
-		HE_LOG_INFO(RHI, "MetalRenderer: RVT page table %ux%u, %zu mips; device now holds %.0f MB",
-		            side, side, mips.size(), double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
-	}
-	id<MTLTexture> tex = (__bridge id<MTLTexture>)t.tex;
+	// A NEW texture per upload, the old one retired (kept three frames): a frame in flight may still be reading the table it was
+	// encoded with, and a replaceRegion into that texture would show it half old, half new. The table is a few KB and an upload
+	// happens only when a page came or went, so the allocation is cheap next to the tear it prevents.
+	MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+	                                                                             width:side height:side mipmapped:NO];
+	d.mipmapLevelCount = mips.size();
+	d.usage            = MTLTextureUsageShaderRead;
+	d.storageMode      = MTLStorageModeShared;   // unified memory: the CPU writes the entries in place
+	id<MTLTexture> nt = [(__bridge id<MTLDevice>)m_device newTextureWithDescriptor:d];
+	if (!nt) return false;
 	for (size_t m = 0; m < mips.size(); ++m)
 	{
 		const NSUInteger ms = side >> m;
-		[tex replaceRegion:MTLRegionMake2D(0, 0, ms, ms) mipmapLevel:m withBytes:mips[m].data() bytesPerRow:ms * 4];
+		[nt replaceRegion:MTLRegionMake2D(0, 0, ms, ms) mipmapLevel:m withBytes:mips[m].data() bytesPerRow:ms * 4];
 	}
+	RvtTable& t = m_rvtTables[consumerMaterial];
+	const bool reshaped = !t.tex || t.side != side || t.mips != mips.size();
+	RetireTexture(t.tex);
+	t.tex  = (void*)CFBridgingRetain(nt);
+	t.side = side;
+	t.mips = static_cast<uint32_t>(mips.size());
+	if (reshaped)
+		HE_LOG_INFO(RHI, "MetalRenderer: RVT page table %ux%u, %zu mips; device now holds %.0f MB",
+		            side, side, mips.size(), double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
 	return true;
 }
 
@@ -12192,6 +12203,32 @@ void MetalRenderer::RetireTexture(void* texture)
 	m_retiredTextures.push_back({ texture, 3 });
 }
 
+void MetalRenderer::EvictIdleGraphArrays()
+{
+	static const double idleS = [] { const char* e = std::getenv("HE_RVT_ARRAY_IDLE_S"); return e && *e ? std::atof(e) : 20.0; }();
+	if (idleS <= 0.0 || m_graphTexUse.empty() || !m_rvtPool[0]) return;   // only while a virtual texture pool exists
+	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	if (now < m_graphTexEvictAt) return;
+	m_graphTexEvictAt = now + 1.0;
+	for (auto it = m_graphTexUse.begin(); it != m_graphTexUse.end();)
+	{
+		const auto c = m_graphTexCache.find(it->first);
+		void* tex = c != m_graphTexCache.end() ? c->second : nullptr;
+		const bool idle = now - std::max(it->second.normal, it->second.page) > idleS;
+		if (tex && idle && ((__bridge id<MTLTexture>)tex).allocatedSize >= (64u << 20))
+		{
+			HE_LOG_INFO(RHI, "MetalRenderer: texture array %s idle for %.0f s, released (%.0f MB)", it->first.c_str(), idleS,
+			            double(((__bridge id<MTLTexture>)tex).allocatedSize) / (1024.0 * 1024.0));
+			RetireTexture(tex);
+			m_logAfterArrayRelease = true;
+			m_graphTexCache.erase(c);
+			it = m_graphTexUse.erase(it);
+		}
+		else if (!tex && idle) it = m_graphTexUse.erase(it);
+		else ++it;
+	}
+}
+
 void MetalRenderer::AgeRetiredTextures()
 {
 	for (auto it = m_retiredTextures.begin(); it != m_retiredTextures.end(); )
@@ -12200,6 +12237,12 @@ void MetalRenderer::AgeRetiredTextures()
 		{
 			CFBridgingRelease(it->texture);
 			it = m_retiredTextures.erase(it);
+			if (m_logAfterArrayRelease && m_retiredTextures.empty())
+			{
+				m_logAfterArrayRelease = false;
+				HE_LOG_INFO(RHI, "MetalRenderer: released texture arrays are gone; device now holds %.0f MB",
+				            double(((__bridge id<MTLDevice>)m_device).currentAllocatedSize) / (1024.0 * 1024.0));
+			}
 		}
 		else
 			++it;
@@ -17766,6 +17809,7 @@ void MetalRenderer::EncodeFrame(SDL_Window* sdlWin, WindowTarget& target, bool i
 			{
 				AgeRetiredTextures();
 				AgeRetiredGIObjects();
+				EvictIdleGraphArrays();
 			}
 
 			// Project shadow resolution changed (SetShadowSettings): swap the

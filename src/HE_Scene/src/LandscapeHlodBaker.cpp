@@ -225,6 +225,7 @@ namespace HE::landscape
     {
         if (m_active) m_renderer.SetWorld(&m_restore);
         m_active = false;
+        if (m_scratch) TerrainSystem::releaseWorld(*m_scratch, m_cm, &m_renderer);   // its chunk meshes go back (renderer + content)
         m_scratch.reset();
         m_terrain = entt::null;
         m_rects.clear();
