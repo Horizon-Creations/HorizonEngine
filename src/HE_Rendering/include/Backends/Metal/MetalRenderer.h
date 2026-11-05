@@ -665,6 +665,8 @@ private:
 	void*    m_rvtPool[3]        = { nullptr, nullptr, nullptr };   // id<MTLTexture> 2D array, BGRA8Unorm, PixelFormatView
 	void*    m_rvtPoolAlbedoSrgb = nullptr;                         // id<MTLTexture> view of m_rvtPool[0] as BGRA8Unorm_sRGB
 	uint32_t m_rvtSlots = 0, m_rvtPagePx = 0;
+	uint32_t m_rvtAllocSlots = 0;   // slices the three arrays hold right now: they start small and grow with the pages in use, up to m_rvtSlots
+	bool     GrowRvtPool(uint32_t needSlots);
 	struct RvtTable { void* tex = nullptr; uint32_t side = 0, mips = 0; };   // id<MTLTexture> R32Uint with mips
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };

@@ -128,6 +128,18 @@ namespace HE::landscape
         }
         else
             return fail("material not resident");
+        // The landscape's OWN parameter overrides (MaterialComponent::paramOverrides, what the Inspector writes per entity):
+        // the live draw merges them into the object's block (RenderExtractor), so the pages must be painted with them too, or a
+        // landscape with an override (a raised snow line, say) shows another picture from its pages than from its material.
+        for (const MaterialParamOverride& ov : mc->paramOverrides)
+        {
+            const auto it = std::find(names.begin(), names.end(), ov.name);
+            if (it == names.end()) continue;
+            const size_t slot = static_cast<size_t>(it - names.begin());
+            if (data.size() < slot * 4 + 4) data.resize(slot * 4 + 4, 0.0f);
+            for (int c = 0; c < 4; ++c) data[slot * 4 + static_cast<size_t>(c)] = ov.value[c];
+            if (std::find(overridden.begin(), overridden.end(), ov.name) == overridden.end()) overridden.push_back(ov.name);
+        }
         HE::UUID baseId = matId;
         if (!parentPath.empty()) baseId = m_cm.loadAsset(parentPath);
         // The mix material (Thema 233) names no group of its own: the terrain's baseGroup gives the parameter

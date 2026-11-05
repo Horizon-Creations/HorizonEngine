@@ -11954,7 +11954,8 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 		// The copy rides the queue behind the frame that drew the picture, so nothing waits here.
 		rgba.clear();
 		ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer]
-		  && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx && m_viewportColor;
+		  && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx && m_viewportColor
+		  && GrowRvtPool(uint32_t(camera.rvtSlot) + 1);
 		if (ok)
 		{
 			id<MTLTexture> src = (__bridge id<MTLTexture>)m_viewportColor;
@@ -11975,6 +11976,9 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 	}
 	else
 		ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+	if (camera.rvtSlot >= 0 && !ok)
+		HE_LOG_WARN(RHI, "MetalRenderer: RVT page for slot %d layer %d failed (pool %u of %u slices, page %u px, picture %ux%u)",
+		            camera.rvtSlot, camera.rvtLayer, m_rvtAllocSlots, m_rvtSlots, m_rvtPagePx, width, height);
 
 	// The screenshot pair goes the retired way (the command buffer that drew it
 	// is complete — CaptureViewport waited — but the convention is one release
@@ -12005,31 +12009,71 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 //  * the fragment stage is at the 16-sampler cap: the four resources are textures 17..20 with no sampler (MaterialShaderLibrary
 //    pins them and gives them inline constexpr samplers);
 //  * Metal is top-row-first like the pool, so no flip (GL's blit flips).
-bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+// The arrays start with a few slices and grow (new arrays, a GPU copy of what is in them, the old ones retired) as pages come
+// into use, up to the pool size the settings asked for: a 512-page pool in which the view needs 70 would otherwise hold 440
+// empty slices (~93 MB) for nothing. Slot numbers do not change, so the page tables stay valid across a growth.
+static bool AllocRvtArrays(id<MTLDevice> device, uint32_t slices, uint32_t pagePx, void* out[3], void** outSrgb)
 {
-	DestroyRvtPool();
-	if (!m_device || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
-	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	for (int layer = 0; layer < 3; ++layer)
 	{
 		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
 		                                                                             width:pagePx height:pagePx mipmapped:NO];
 		d.textureType = MTLTextureType2DArray;
-		d.arrayLength = slots;
+		d.arrayLength = slices;
 		d.usage       = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
 		d.storageMode = MTLStorageModePrivate;
 		id<MTLTexture> t = [device newTextureWithDescriptor:d];
-		if (!t) { DestroyRvtPool(); return false; }
-		m_rvtPool[layer] = (void*)CFBridgingRetain(t);
+		if (!t) { for (int k = 0; k < layer; ++k) { CFBridgingRelease(out[k]); out[k] = nullptr; } return false; }
+		out[layer] = (void*)CFBridgingRetain(t);
 	}
-	id<MTLTexture> srgb = [(__bridge id<MTLTexture>)m_rvtPool[0] newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB];
-	if (!srgb) { DestroyRvtPool(); return false; }
-	m_rvtPoolAlbedoSrgb = (void*)CFBridgingRetain(srgb);
-	m_rvtSlots  = slots;
-	m_rvtPagePx = pagePx;
-	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool %u pages of %u px, 3 arrays (%.0f MB); device now holds %.0f MB",
-	            slots, pagePx, double(slots) * pagePx * pagePx * 4.0 * 3.0 / (1024.0 * 1024.0),
-	            double(device.currentAllocatedSize) / (1024.0 * 1024.0));
+	id<MTLTexture> srgb = [(__bridge id<MTLTexture>)out[0] newTextureViewWithPixelFormat:MTLPixelFormatBGRA8Unorm_sRGB];
+	if (!srgb) { for (int k = 0; k < 3; ++k) { CFBridgingRelease(out[k]); out[k] = nullptr; } return false; }
+	*outSrgb = (void*)CFBridgingRetain(srgb);
+	return true;
+}
+
+bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+	DestroyRvtPool();
+	if (!m_device || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	static const uint32_t startSlots = [] { const char* e = std::getenv("HE_RVT_POOL_START"); return e && *e ? uint32_t(std::max(1, std::atoi(e))) : 64u; }();
+	const uint32_t alloc = std::min(slots, startSlots);
+	if (!AllocRvtArrays(device, alloc, pagePx, m_rvtPool, &m_rvtPoolAlbedoSrgb)) { DestroyRvtPool(); return false; }
+	m_rvtSlots      = slots;
+	m_rvtAllocSlots = alloc;
+	m_rvtPagePx     = pagePx;
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool up to %u pages of %u px, %u allocated now (%.0f MB of %.0f MB at full size); device now holds %.0f MB of %.0f MB recommended",
+	            slots, pagePx, alloc, double(alloc) * pagePx * pagePx * 4.0 * 3.0 / (1024.0 * 1024.0),
+	            double(slots) * pagePx * pagePx * 4.0 * 3.0 / (1024.0 * 1024.0),
+	            double(device.currentAllocatedSize) / (1024.0 * 1024.0),
+	            double(device.recommendedMaxWorkingSetSize) / (1024.0 * 1024.0));
+	return true;
+}
+
+bool MetalRenderer::GrowRvtPool(uint32_t needSlots)
+{
+	if (needSlots <= m_rvtAllocSlots) return true;
+	if (needSlots > m_rvtSlots || !m_device || !m_commandQueue) return false;
+	const uint32_t grown = std::min(m_rvtSlots, std::max((needSlots + 31u) & ~31u, m_rvtAllocSlots + m_rvtAllocSlots / 2));
+	void* nt[3] = { nullptr, nullptr, nullptr };
+	void* nSrgb = nullptr;
+	if (!AllocRvtArrays((__bridge id<MTLDevice>)m_device, grown, m_rvtPagePx, nt, &nSrgb)) return false;
+	// What the old arrays hold goes across on the GPU, queued ahead of the page copy that asked for the growth.
+	id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	for (int layer = 0; layer < 3; ++layer)
+		[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:0 sourceLevel:0
+		            toTexture:(__bridge id<MTLTexture>)nt[layer] destinationSlice:0 destinationLevel:0
+		           sliceCount:m_rvtAllocSlots levelCount:1];
+	[blit endEncoding];
+	[cb commit];
+	RetireTexture(m_rvtPoolAlbedoSrgb);
+	for (int layer = 0; layer < 3; ++layer) { RetireTexture(m_rvtPool[layer]); m_rvtPool[layer] = nt[layer]; }
+	m_rvtPoolAlbedoSrgb = nSrgb;
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAllocSlots, grown, m_rvtSlots,
+	            double(grown) * m_rvtPagePx * m_rvtPagePx * 4.0 * 3.0 / (1024.0 * 1024.0));
+	m_rvtAllocSlots = grown;
 	return true;
 }
 
@@ -12041,7 +12085,7 @@ void MetalRenderer::DestroyRvtPool()
 	m_rvtTables.clear();
 	RetireTexture(m_rvtPoolAlbedoSrgb); m_rvtPoolAlbedoSrgb = nullptr;
 	for (void*& t : m_rvtPool) { RetireTexture(t); t = nullptr; }
-	m_rvtSlots = m_rvtPagePx = 0;
+	m_rvtSlots = m_rvtAllocSlots = m_rvtPagePx = 0;
 }
 
 void MetalRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
@@ -12120,7 +12164,7 @@ bool MetalRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::
 
 bool MetalRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
 {
-	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtSlots || !m_device || !m_commandQueue) return false;
+	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtAllocSlots || !m_device || !m_commandQueue) return false;
 	@autoreleasepool
 	{
 		const NSUInteger px = m_rvtPagePx;
@@ -12206,10 +12250,20 @@ void MetalRenderer::RetireTexture(void* texture)
 void MetalRenderer::EvictIdleGraphArrays()
 {
 	static const double idleS = [] { const char* e = std::getenv("HE_RVT_ARRAY_IDLE_S"); return e && *e ? std::atof(e) : 20.0; }();
+	// Memory pressure gate: the release costs a reload (~90 ms for the three Mix arrays, one frame, measured) the next time a
+	// page is painted, which in a game is when the player starts to move after standing still. So the arrays go only when the
+	// device is actually short: allocated > HE_RVT_ARRAY_PRESSURE (default 0.6) of recommendedMaxWorkingSetSize. 0 = no gate.
+	static const double pressure = [] { const char* e = std::getenv("HE_RVT_ARRAY_PRESSURE"); return e && *e ? std::atof(e) : 0.6; }();
 	if (idleS <= 0.0 || m_graphTexUse.empty() || !m_rvtPool[0]) return;   // only while a virtual texture pool exists
 	const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 	if (now < m_graphTexEvictAt) return;
 	m_graphTexEvictAt = now + 1.0;
+	if (pressure > 0.0)
+	{
+		id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+		const double budget = double(dev.recommendedMaxWorkingSetSize);
+		if (budget > 0.0 && double(dev.currentAllocatedSize) < pressure * budget) return;
+	}
 	for (auto it = m_graphTexUse.begin(); it != m_graphTexUse.end();)
 	{
 		const auto c = m_graphTexCache.find(it->first);
