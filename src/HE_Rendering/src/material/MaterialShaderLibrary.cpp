@@ -7,6 +7,7 @@
 #include <MaterialGraph/MaterialGraph.h> // matSplitDisplacement
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 
@@ -1740,7 +1741,7 @@ namespace
 he::shaderc::MslOptions kMaterialMslOptions()
 {
     he::shaderc::MslOptions opts;
-    opts.constexprLinearSamplers = { { 0u, 33u } };
+    opts.constexprLinearSamplers = { { 0u, 33u }, { 0u, 40u }, { 0u, 41u }, { 0u, 42u }, { 0u, 43u }, { 0u, 44u }, { 0u, 45u }, { 0u, 46u } };
     return opts;
 }
 
@@ -3073,7 +3074,20 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
               // uses an inline constexpr sampler (kMaterialMslOptions below), so
               // the sampler budget stays untouched. Per-frame bind shared with
               // the built-in shaders (fragmentMain's cloudShadowTex, slot 16).
-              { Stage::Fragment, 0, 33, 16 } });
+              { Stage::Fragment, 0, 33, 16 },
+              // Runtime Virtual Textures (RvtLookup.h, Thema 333): the page table (40) and the three pool arrays (41..43)
+              // → MSL TEXTURES 17..20, read with texelFetch (.read) only. Like the cloud-shadow map they take an inline
+              // constexpr sampler (kMaterialMslOptions), because SPIRV-Cross declares a sampler for a fetch-only combined
+              // sampler too and the stage is AT the 16-sampler cap. Bound per draw for a material that owns a table
+              // (MetalRenderer::BindRvtForDraw), inert 1x1 defaults otherwise (BindMaterialPreambleSlots).
+              { Stage::Fragment, 0, 40, 17 },
+              { Stage::Fragment, 0, 41, 18 },
+              { Stage::Fragment, 0, 42, 19 },
+              { Stage::Fragment, 0, 43, 20 },
+              // The cold pool's three block-compressed arrays (step 6j): textures 21..23, inline samplers like the four above.
+              { Stage::Fragment, 0, 44, 21 },
+              { Stage::Fragment, 0, 45, 22 },
+              { Stage::Fragment, 0, 46, 23 } });
         // Clustered variant: the three light lists are BUFFERS, so the sampler
         // budget above is untouched. Fragment buffers 4/5/6 — free in the scene
         // pass (fragmentMain reads 0 and 3), and the slots the clustered
@@ -3084,7 +3098,24 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 25, static_cast<uint32_t>(kMetalClusterGridBufferIndex) });
             pins.push_back({ Stage::Fragment, 0, 26, static_cast<uint32_t>(kMetalClusterIndexBufferIndex) });
         }
-        out = toCompiled(compileMslPinned(injected, Stage::Fragment, pins, kMaterialMslOptions()));
+        // The RVT lookup may read cold (block-compressed) pages on Metal: HE_RVT_COLD declares the three cold arrays and the branch
+        // (RvtLookup.h). HE_RVT_COLD=0 leaves it out of the shader (the hot-only A/B, and a Mac without ASTC sampling).
+        static const bool rvtCold = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+        // HE_RVT_RGNORMAL: the pool keeps the normal as x and z in two channels (step 6k); HE_RVT_PACK=0 keeps the three-channel pool.
+        static const bool rvtPack = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+        if ((rvtCold || rvtPack) && injected.find("heRvtSample(") != std::string::npos)
+        {
+            std::string withCold = injected;
+            const size_t vpos = withCold.find("#version");
+            const size_t eol  = vpos == std::string::npos ? std::string::npos : withCold.find('\n', vpos);
+            std::string defs;
+            if (rvtCold) defs += "#define HE_RVT_COLD 1\n";
+            if (rvtPack) defs += "#define HE_RVT_RGNORMAL 1\n";
+            if (eol != std::string::npos) withCold.insert(eol + 1, defs);
+            out = toCompiled(compileMslPinned(withCold, Stage::Fragment, pins, kMaterialMslOptions()));
+        }
+        else
+            out = toCompiled(compileMslPinned(injected, Stage::Fragment, pins, kMaterialMslOptions()));
     }
     else if (backend == Backend::HLSL)
     {

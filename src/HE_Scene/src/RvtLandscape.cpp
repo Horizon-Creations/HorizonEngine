@@ -84,6 +84,11 @@ uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain) const
     const auto* mc = live.registry().try_get<MaterialComponent>(terrain);
     if (!mc) return h;
     mix(h, mc->materialAssetId.hi); mix(h, mc->materialAssetId.lo);
+    for (const MaterialParamOverride& ov : mc->paramOverrides)   // the landscape's own overrides are part of the picture
+    {
+        mix(h, std::hash<std::string>{}(ov.name));
+        for (float f : ov.value) mix(h, f);
+    }
     if (const MaterialAsset* ma = m_cm.getMaterial(mc->materialAssetId))
     {
         mix(h, ma->parentMaterialPath);

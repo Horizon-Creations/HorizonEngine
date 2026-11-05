@@ -90,7 +90,10 @@ namespace HE::landscape
 
         // A witness hook (HE_DUMP_RVTTEST): the three view materials the baker draws (BaseColor, Normal, Surface),
         // replaced by materials of the caller's, e.g. one whose colour is a function of the world position.
-        void setViewMaterials(const HE::UUID (&mats)[3]) { for (int i = 0; i < 3; ++i) { m_viewMat[i] = mats[i]; m_rvtSeen[i] = false; } }
+        // On a backend that builds material pipelines in the background (Metal) the new views are warmed here and waited for,
+        // like begin() does for the originals: a view whose pipeline is still building is not drawn, and the first page of
+        // the new material would come out blank.
+        void setViewMaterials(const HE::UUID (&mats)[3]);
         void viewMaterials(HE::UUID (&mats)[3]) const { for (int i = 0; i < 3; ++i) mats[i] = m_viewMat[i]; }
 
     private:
@@ -111,6 +114,14 @@ namespace HE::landscape
         int             m_group = -1;
         bool            m_rvtSeen[3] = { false, false, false };   // a view material the renderer has already resolved for pages
         bool            m_active = false;
+        // Shared chunk meshes (Thema 333, step 6i): the scratch landscape's chunk entities point at the LIVE landscape's LOD0
+        // meshes instead of generating a second copy of the whole landscape's geometry (CPU and GPU). Only when every live
+        // chunk has its LOD0 mesh resident; otherwise (an export that has not built the live chunks, HE_RVT_SHARE_MESHES=0)
+        // the scratch world builds its own as before.
+        bool            m_shared = false;
+        entt::entity    m_liveTerrain = entt::null;
+        bool addSharedChunks();                 // (re)creates the scratch chunk entities from the live ones; false = not possible
+        void refreshSharedMeshes();             // the live chunks' current LOD0 ids into the scratch chunks
     };
 
     // Box filter: `src` is (side*ss) x (side*ss) RGBA8, the result side x side.
