@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 
@@ -157,13 +158,130 @@ namespace
 {
 bool graphicsEqual(const ProjectGraphics& a, const ProjectGraphics& b)
 {
-    if (a.enabled != b.enabled) return false;
+    if (a.enabled != b.enabled || a.preset != b.preset) return false;
 #define HE_X(T, name, def, editorName, lo, hi) if (!fieldEqual(a.name, b.name)) return false;
     HE_PROJECT_GRAPHICS_FIELDS(HE_X)
 #undef HE_X
     return true;
 }
 } // namespace
+
+// ─── Quality presets ──────────────────────────────────────────────────────────
+// One row per named preset, Low..Ultra in enum order. Every field here is written
+// by applyQualityPreset() and compared by detectQualityPreset(), so a preset is
+// exactly this table and nothing else. Tuned for "each step up costs visibly
+// more and looks visibly better", not measured: the hardware benchmark that
+// would pick one per machine is a later step (docs/engine-quality-settings-
+// 2026-11-05.md), and it only needs setPreset to act on the answer.
+namespace
+{
+struct PresetRow
+{
+    int   antiAliasing;      // AAMethod: 1 FXAA, 2 SMAA, 3 TAA
+    float renderScale;
+    bool  ssaoEnabled;
+    bool  ssrEnabled;
+    int   ssrQuality;
+    bool  giEnabled;
+    int   giShadowQuality;
+    bool  giReflectionsEnabled;
+    int   giReflQuality;
+    int   giReflBounces;
+    int   textureQuality;
+    int   materialQuality;
+    float shadowDistance;
+    int   shadowCascades;
+    int   shadowResolution;
+};
+
+constexpr PresetRow kPresetRows[4] = {
+    // Low
+    { 1, 0.75f, false, false, 0, false, 0, false, 0, 1, 0, 0, 100.0f, 2, 1024 },
+    // Medium
+    { 2, 1.00f, true,  false, 1, false, 1, false, 1, 1, 1, 1, 200.0f, 3, 2048 },
+    // High
+    { 2, 1.00f, true,  true,  1, true,  1, false, 1, 1, 2, 2, 250.0f, 3, 2048 },
+    // Ultra
+    { 3, 1.00f, true,  true,  2, true,  2, true,  2, 2, 2, 2, 500.0f, 3, 4096 },
+};
+} // namespace
+
+const char* qualityPresetName(QualityPreset p)
+{
+    switch (p)
+    {
+        case QualityPreset::Low:    return "Low";
+        case QualityPreset::Medium: return "Medium";
+        case QualityPreset::High:   return "High";
+        case QualityPreset::Ultra:  return "Ultra";
+        case QualityPreset::Custom: return "Custom";
+    }
+    return "Custom";
+}
+
+bool qualityPresetFromName(const std::string& name, QualityPreset& out)
+{
+    const auto lower = [](std::string s)
+    {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string n = lower(name);
+    for (int i = 0; i < kQualityPresetCount; ++i)
+    {
+        const auto p = static_cast<QualityPreset>(i);
+        if (n == lower(qualityPresetName(p))) { out = p; return true; }
+    }
+    return false;
+}
+
+void applyQualityPreset(QualityPreset p, ProjectGraphics& g, ProjectShadowSettings& shadows)
+{
+    if (p == QualityPreset::Custom) return;
+    const PresetRow& r = kPresetRows[static_cast<int>(p)];
+    g.antiAliasing         = r.antiAliasing;
+    g.renderScale          = r.renderScale;
+    g.ssaoEnabled          = r.ssaoEnabled;
+    g.ssrEnabled           = r.ssrEnabled;
+    g.ssrQuality           = r.ssrQuality;
+    g.giEnabled            = r.giEnabled;
+    g.giShadowQuality      = r.giShadowQuality;
+    g.giReflectionsEnabled = r.giReflectionsEnabled;
+    g.giReflQuality        = r.giReflQuality;
+    g.giReflBounces        = r.giReflBounces;
+    g.textureQuality       = r.textureQuality;
+    g.materialQuality      = r.materialQuality;
+    shadows.distance       = r.shadowDistance;
+    shadows.cascadeCount   = r.shadowCascades;
+    shadows.resolution     = r.shadowResolution;
+    g.enabled = true;
+    g.preset  = p;
+}
+
+QualityPreset detectQualityPreset(const ProjectGraphics& g, const ProjectShadowSettings& shadows)
+{
+    for (int i = 0; i < 4; ++i)
+    {
+        const PresetRow& r = kPresetRows[i];
+        if (g.antiAliasing == r.antiAliasing
+            && nearlyEqual(g.renderScale, r.renderScale)
+            && g.ssaoEnabled == r.ssaoEnabled
+            && g.ssrEnabled == r.ssrEnabled
+            && g.ssrQuality == r.ssrQuality
+            && g.giEnabled == r.giEnabled
+            && g.giShadowQuality == r.giShadowQuality
+            && g.giReflectionsEnabled == r.giReflectionsEnabled
+            && g.giReflQuality == r.giReflQuality
+            && g.giReflBounces == r.giReflBounces
+            && g.textureQuality == r.textureQuality
+            && g.materialQuality == r.materialQuality
+            && nearlyEqual(shadows.distance, r.shadowDistance)
+            && shadows.cascadeCount == r.shadowCascades
+            && shadows.resolution == r.shadowResolution)
+            return static_cast<QualityPreset>(i);
+    }
+    return QualityPreset::Custom;
+}
 
 bool ProjectSettings::operator==(const ProjectSettings& o) const
 {
@@ -268,6 +386,10 @@ void ProjectSettings::clamp()
 #define HE_X(T, name, def, editorName, lo, hi) clampFieldFor(g.name, lo, hi, defaults.name);
         HE_PROJECT_GRAPHICS_FIELDS(HE_X)
 #undef HE_X
+        // The tag is a label for the values (see QualityPreset): once they no
+        // longer match its table — a hand edit, one slider moved — it is Custom.
+        if (g.preset != QualityPreset::Custom && detectQualityPreset(g, shadows) != g.preset)
+            g.preset = QualityPreset::Custom;
         input.stickDeadzone   = std::clamp(finiteOr(input.stickDeadzone, ProjectInputSettings{}.stickDeadzone),
                                            0.0f, ProjectInputSettings::kMaxDeadzone);
         input.triggerDeadzone = std::clamp(finiteOr(input.triggerDeadzone, ProjectInputSettings{}.triggerDeadzone),
@@ -368,6 +490,7 @@ void ProjectSettings::toJson(json& out) const
 #define HE_X(T, name, def, editorName, lo, hi) g[#name] = graphics.name;
         HE_PROJECT_GRAPHICS_FIELDS(HE_X)
 #undef HE_X
+        g["qualityPreset"] = qualityPresetName(graphics.preset);
         out["graphics"] = std::move(g);
     }
     out["input"] = { { "enabled",         input.enabled },
@@ -491,6 +614,11 @@ void ProjectSettings::fromJson(const json& in)
 #define HE_X(T, name, def, editorName, lo, hi) readField(g, #name, graphics.name);
         HE_PROJECT_GRAPHICS_FIELDS(HE_X)
 #undef HE_X
+        // A missing or unknown name stays Custom — the tag a file written before
+        // presets existed implicitly carries.
+        std::string presetName;
+        readString(g, "qualityPreset", presetName);
+        qualityPresetFromName(presetName, graphics.preset);
         const json& i = section(in, "input");
         readBool  (i, "enabled",         input.enabled);
         readNumber(i, "stickDeadzone",   input.stickDeadzone);

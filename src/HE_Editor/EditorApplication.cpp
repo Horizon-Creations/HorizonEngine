@@ -1731,6 +1731,8 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflBlur                  = globalstate.getCustomConfigBool("GIReflBlur",                m_editorConfig.GIReflBlur);
 	m_editorConfig.GIReflQuality               = globalstate.getCustomConfigInt("GIReflQuality",              m_editorConfig.GIReflQuality);
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
+	m_editorConfig.TextureQuality              = globalstate.getCustomConfigInt("TextureQuality",             m_editorConfig.TextureQuality);
+	m_editorConfig.MaterialQuality             = globalstate.getCustomConfigInt("MaterialQuality",            m_editorConfig.MaterialQuality);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
@@ -15785,6 +15787,8 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflBlur",                m_editorConfig.GIReflBlur);
 	globalstate.setCustomConfigEntry("GIReflQuality",             m_editorConfig.GIReflQuality);
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
+	globalstate.setCustomConfigEntry("TextureQuality",            m_editorConfig.TextureQuality);
+	globalstate.setCustomConfigEntry("MaterialQuality",           m_editorConfig.MaterialQuality);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);

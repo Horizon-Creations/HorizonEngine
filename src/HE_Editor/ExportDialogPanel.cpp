@@ -209,6 +209,8 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GIReflQuality",             cfg.GIReflQuality);
     put("GIReflBounces",             cfg.GIReflBounces);
     put("GIReflBlur",                cfg.GIReflBlur);
+    put("TextureQuality",            cfg.TextureQuality);
+    put("MaterialQuality",           cfg.MaterialQuality);
 
     // The window half: the project's Render Defaults when it claims them, else
     // this dialog's rows. The graphics half above is the project's own when its
