@@ -7950,6 +7950,7 @@ void MetalRenderer::CreateScenePipeline()
 		sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
 		sampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
 		m_materialSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
+		m_materialSamplerMinLod = 0.0f;   // built with every level; SetQualitySettings narrows it
 
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
@@ -12486,6 +12487,35 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 	m_aaSharpness       = s.sharpness;
 	m_specularAA        = s.specularAA;
 	m_specularAAStrength = s.specularAAStrength;
+}
+
+// Texture quality: Low / Medium keep the material samplers off the finest one or
+// two mip levels, so a cooked chain reads blurrier and costs less bandwidth.
+// A sampler, not a re-upload, so a change at run time lands on the next frame
+// and nothing is invalidated. Only the material sampler: the UI, post and sky
+// samplers must not soften. A texture with a single level is unaffected (the
+// clamp lands on its only level). materialQuality is kept (base class) and not
+// acted on yet.
+void MetalRenderer::SetQualitySettings(const QualitySettings& s)
+{
+	IRenderer::SetQualitySettings(s);
+	const float minLod = TextureMinLodForQuality(s.textureQuality);
+	if (!m_device || !m_materialSampler || minLod == m_materialSamplerMinLod)
+		return;
+	MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
+	d.minFilter    = MTLSamplerMinMagFilterLinear;
+	d.magFilter    = MTLSamplerMinMagFilterLinear;
+	d.mipFilter    = MTLSamplerMipFilterLinear;
+	d.sAddressMode = MTLSamplerAddressModeRepeat;
+	d.tAddressMode = MTLSamplerAddressModeRepeat;
+	d.rAddressMode = MTLSamplerAddressModeRepeat;
+	d.lodMinClamp  = minLod;
+	id<MTLSamplerState> fresh = [(__bridge id<MTLDevice>)m_device newSamplerStateWithDescriptor:d];
+	if (!fresh) return;   // keep the old one; the next frame tries again
+	// In-flight encoders hold their own reference to the old state.
+	CFBridgingRelease(m_materialSampler);
+	m_materialSampler = (void*)CFBridgingRetain(fresh);
+	m_materialSamplerMinLod = minLod;
 }
 
 // Bright-pass the HDR color then ping-pong blur (even pass count ends in

@@ -8,6 +8,8 @@
 #include "TestFsUtil.h"
 
 #include <Project/ProjectSettings.h>
+#include <Diagnostics/GlobalState.h>
+#include <Renderer/IRenderer.h>
 #include <HorizonScene/PhysicsTuning.h>   // kMaxThreads, pinned against the project's
 #include "ProjectManager.h"
 
@@ -1158,4 +1160,74 @@ TEST_CASE("QualityPreset: toJson/fromJson keeps the tag and the new fields; name
 	c.fromJson(json{ { "graphics", { { "textureQuality", 9 }, { "materialQuality", -3 } } } });
 	CHECK(c.graphics.textureQuality == 2);
 	CHECK(c.graphics.materialQuality == 0);
+}
+
+// ── Quality: the game's live source and the renderer's levels ────────────────
+// The packaged game fills ProjectSettings::graphics from config.json once and
+// pushes the struct every frame (GameApplication). The fill must read exactly the
+// keys the export writes, one per type, and a missing key must be today's default.
+
+TEST_CASE("readGraphicsFromConfig: reads each field from its config key, missing keys are the defaults")
+{
+	GlobalState& gs = GlobalState::getInstance();
+
+	// Nothing set: every field is its default (and `enabled` / `preset` untouched).
+	HE::ProjectGraphics g;
+	g.enabled = true;
+	g.preset  = HE::QualityPreset::High;
+	g.renderScale = 0.5f;   // a stale value: a missing key must NOT keep it
+	HE::readGraphicsFromConfig(g, gs);
+	const HE::ProjectGraphics def;
+	CHECK(g.enabled);
+	CHECK(g.preset == HE::QualityPreset::High);
+	CHECK(g.renderScale == doctest::Approx(def.renderScale));
+	CHECK(g.bloomEnabled == def.bloomEnabled);
+	CHECK(g.textureQuality == 2);
+
+	// One key per type, under the names the export dialog writes.
+	gs.setCustomConfigEntry("AntiAliasing", 3);                    // int
+	gs.setCustomConfigEntry("RenderScale", 0.75);                  // float
+	gs.setCustomConfigEntry("GlobalIlluminationEnabled", true);    // bool, key != member name
+	gs.setCustomConfigEntry("TextureQuality", 0);                  // the new ones
+	gs.setCustomConfigEntry("MaterialQuality", 1);
+	HE::readGraphicsFromConfig(g, gs);
+	CHECK(g.antiAliasing == 3);
+	CHECK(g.renderScale == doctest::Approx(0.75f));
+	CHECK(g.giEnabled);
+	CHECK(g.textureQuality == 0);
+	CHECK(g.materialQuality == 1);
+
+	// Put the process-wide state back for the tests after this one.
+	gs.setCustomConfigEntry("AntiAliasing", def.antiAliasing);
+	gs.setCustomConfigEntry("RenderScale", def.renderScale);
+	gs.setCustomConfigEntry("GlobalIlluminationEnabled", def.giEnabled);
+	gs.setCustomConfigEntry("TextureQuality", def.textureQuality);
+	gs.setCustomConfigEntry("MaterialQuality", def.materialQuality);
+}
+
+TEST_CASE("readGraphicsFromConfig + applyQualityPreset: a preset on the live struct is what the next push reads")
+{
+	GlobalState& gs = GlobalState::getInstance();
+	HE::ProjectSettings s;
+	HE::readGraphicsFromConfig(s.graphics, gs);
+	s.clamp();
+	CHECK(s.graphics.preset == HE::QualityPreset::Custom);
+
+	HE::applyQualityPreset(HE::QualityPreset::Low, s.graphics, s.shadows);
+	const IRenderer::QualitySettings q{ s.graphics.textureQuality, s.graphics.materialQuality };
+	CHECK(q.textureQuality == 0);
+	CHECK(IRenderer::TextureMinLodForQuality(q.textureQuality) == doctest::Approx(2.0f));
+}
+
+TEST_CASE("IRenderer::TextureMinLodForQuality: Low and Medium drop mip levels, High and anything unknown keep them all")
+{
+	CHECK(IRenderer::TextureMinLodForQuality(0) == doctest::Approx(2.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(1) == doctest::Approx(1.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(2) == doctest::Approx(0.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(7) == doctest::Approx(0.0f));
+	CHECK(IRenderer::TextureMinLodForQuality(-1) == doctest::Approx(0.0f));
+	// The defaults are today's behaviour.
+	const IRenderer::QualitySettings d;
+	CHECK(d.textureQuality == 2);
+	CHECK(d.materialQuality == 2);
 }

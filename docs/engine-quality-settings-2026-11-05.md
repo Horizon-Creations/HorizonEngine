@@ -62,15 +62,32 @@ Left out on purpose (equal cost, a look decision): bloom, DoF, motion blur, SSAO
 and radius, shadow biases and split lambda, render path, occlusion culling, GPU particles.
 The numbers are tuned by reasoning, not measured.
 
-## 3. Backend support (from the code comments, not re-verified on hardware)
+## 3. What acts on what (step 2)
 
-* Cascaded shadows: Metal + OpenGL; D3D11/D3D12/Vulkan keep one whole-scene map and ignore
-  the shadow push (`ProjectShadowSettings` comment).
-* Anti-aliasing: methods a backend cannot do fall back at push time (TAA Metal + GL,
-  MetalFX Metal only).
-* SSR, GI, GI reflections: capability-gated per backend in the push code.
-* D3D and Vulkan hardware acceptance is out of scope for the topic (not checkable on the
-  Mac); a level a backend lacks is ignored silently.
+How a preset change reaches the screen:
+
+* **Editor:** `syncGraphicsSource` copies `settings.graphics` into `EditorConfig` while
+  `graphics.enabled`; the per-frame pushes read `EditorConfig`. New: `SetQualitySettings`
+  pushed next to `SetAntiAliasingSettings` (`EditorApplication.cpp` ~3722 live frame, ~9130 dump
+  path, where `HE_DUMP_TEXQUALITY=<0|1|2>` overrides texture quality for one capture).
+* **Game:** the per-frame push in `GameApplication.cpp` (~3480-3640) now reads
+  `m_projectSettings.graphics` (`gfx`), not 34 config keys. The struct is filled once at start
+  by `HE::readGraphicsFromConfig` (config.json keys = the macro's `EditorConfig` column, missing
+  key = today's default), so startup behaviour is unchanged, and `applyQualityPreset(p,
+  m_projectSettings.graphics, m_projectSettings.shadows)` is what the next frame draws.
+  Shadows were already read from the struct. Not moved: render path (`configuredRenderPath`
+  reads its key, not in presets) and `GpuParticles` (~3420).
+
+| Level | Metal | OpenGL | D3D11 / D3D12 / Vulkan |
+|---|---|---|---|
+| AA, render scale, SSAO, SSR, GI, GI reflections | as before (backend gates, fallbacks at push) | as before | as before, capability-gated |
+| shadow resolution/cascades/distance | acts | acts | ignored (one whole-scene map) |
+| `textureQuality` | **acts**: material sampler `lodMinClamp` 2/1/0 (Low/Med/High), live, no re-upload | ignored (per-texture `glTexParameter`, no sampler objects) | ignored |
+| `materialQuality` | stored (`GetQualitySettings`), no feature gated on it | same | same |
+
+`textureQuality` only changes textures that carry a mip chain; a single-level texture (what the
+packer cooks, and most loose imports) has no coarser level and looks the same.
+UI, post and sky samplers are untouched on purpose.
 
 ## 4. Open question from the human, out of scope here
 
@@ -81,34 +98,39 @@ benchmark, to pick the best settings for a PC. Not built. The hook it needs is e
 
 ## Handoff
 
-- **Topic / step:** 324 Engine quality settings, step 1 of 5 (global step id 1508)
-- **Branch / commit:** `claude/engine-quality-settings`, off `release/0.8.0` @ 17815c9bf (pushed: see Hive artifact)
-- **Done:** `QualityPreset` + apply/detect/name functions, stored tag `graphics.qualityPreset`
-  (default Custom, reconciled in `clamp()`), `textureQuality`/`materialQuality` fields; old files load unchanged.
-- **Files touched:** `ProjectSettings.h` (enum, field-list rows, `preset` member, 4 functions),
-  `ProjectSettings.cpp` (`kPresetRows`, functions, equality/toJson/fromJson/clamp),
-  `EditorConfig.h` (`TextureQuality`, `MaterialQuality`), `EditorApplication.cpp` (load/save of the two keys),
-  `ExportDialogPanel.cpp` (config.json carries them), `tests/test_project_settings.cpp` (6 new cases at the end).
-- **Verified:** `he_tests` Release build in `out/build/release` (RC 0); `test_project_settings` 38/38,
-  `test_editor_graphics` 5/5, `test_export_profiles` 52/52, `test_mcp_tools_settings` 21/21 (run from
-  the build dir); `EditorApplication.cpp.o` and `ExportDialogPanel.cpp.o` compile;
-  `editor_help_audit.py --check` passes (no UI added).
-- **Not verified:** no preset reaches a renderer yet (step 2); `HorizonEditor` and `HorizonGame` not
-  fully linked or run; no backend other than the macOS build compiled here; table values are not measured.
-- **Decisions taken:** presets are a function over `ProjectGraphics` + `ProjectShadowSettings`, no second
-  struct; default tag Custom so "default-constructed = today" holds; Low..Ultra set `graphics.enabled = true`
-  (otherwise the viewport and export ignore them), Custom never does; only cost-driving fields are in a preset;
-  new levels 0 Low / 1 Medium / 2 High with 2 = today.
-- **Decisions suggested, not taken:** whether High should switch GI on (it does now; GI is capability-gated);
-  whether the preset table should move out of the .cpp into data later for the benchmark.
-- **Pending:** step 2 consumers for texture/material quality and per-backend gaps; step 3 API; step 4 UI; step 5.
-- **Traps:** `EditorGraphics::capture` copies values without touching `preset`, so callers that capture
-  must call `ProjectSettings::clamp()` (or `detectQualityPreset`) afterwards to refresh the tag. A new
-  graphics field needs 4 sites: macro row, `EditorConfig` member, load/save in `EditorApplication.cpp`
-  (~1731 / ~15785), `put` in `ExportDialogPanel.cpp`, and the game's read in `GameApplication.cpp` once consumed.
-  Worktree configure recipe: shared `_deps` of the main checkout via `FETCHCONTENT_SOURCE_DIR_*`, ccache,
-  Ninja from CLion; a full he_tests build took well under 30 min with ccache.
-- **Next steps:** 1. Step 2: add `TextureQuality`/`MaterialQuality` reads in `GameApplication.cpp` (~3600) and wire
-  them into texture upload and material feature gating, per backend, documenting ignores here.
-  2. Step 3: `HE::api` rows `getPreset/setPreset` plus per-field get/set (see memory "four places" rule).
-  3. Step 4: quality page in `ProjectSettingsPanel.cpp` (~1349) with a preset combo; call `clamp()` after edits.
+- **Topic / step:** 324 Engine quality settings, step 2 of 5 (global step id 1509). Step 1 (id 1508,
+  commit 523bcac24): `QualityPreset` model, tag, `textureQuality`/`materialQuality` fields.
+- **Branch / commit:** `claude/engine-quality-settings` (pushed: see Hive artifact for the sha)
+- **Done:** the game's graphics push is struct-driven (`m_projectSettings.graphics`), so a script can
+  change it at run time; `IRenderer::SetQualitySettings` + `TextureMinLodForQuality`; Metal acts on
+  texture quality; editor pushes the same.
+- **Files touched:** `IRenderer.h` (~640, `QualitySettings`), `MetalRenderer.h/.mm`
+  (`SetQualitySettings`, `m_materialSamplerMinLod`), `GameApplication.cpp` (init fill ~716, push block
+  ~3480-3640), `EditorApplication.cpp` (~3722, ~9130), `ProjectSettings.h/.cpp`
+  (`readGraphicsFromConfig`), `tests/test_project_settings.cpp` (3 new cases).
+- **Verified:** `he_tests` Release build RC 0; `test_project_settings` 41/41, `test_editor_graphics`
+  5/5, `test_export_profiles` 52/52; `MetalRenderer.mm.o`, `GameApplication.cpp.o`,
+  `EditorApplication.cpp.o`, `ExportDialogPanel.cpp.o` compile. Python check: every macro row's
+  `put("Key", cfg.Key)` in `ExportDialogPanel.cpp` equals its `EditorConfig` column (38/38), and all 34
+  `getCustomConfig*` defaults in the game block equalled the macro defaults before they were replaced.
+- **Not verified:** nothing run at runtime. No editor/game link, no screenshot: a Low vs High A/B
+  (`HE_DUMP_TEXQUALITY`) would show nothing on single-level textures, so it needs a scene with a
+  mipped texture. GL, D3D11/12 and Vulkan not compiled or touched.
+- **Decisions taken:** texture quality = sampler min-LOD, not skip-at-upload (switches live, no cache
+  invalidation); Metal only, others documented as ignored; `materialQuality` plumbed, no consumer;
+  game struct filled from config keys at start so startup is byte-for-byte the old behaviour.
+- **Decisions suggested, not taken:** GL texture quality via `GL_TEXTURE_MIN_LOD` over its texture caches;
+  a material-graph "quality level" input as the first real `materialQuality` consumer.
+- **Pending:** step 3 API, step 4 UI, step 5 verification incl. a visible A/B.
+- **Traps:** (1) PIE: nothing snapshots `currentProject().settings`, so a script that applies a preset
+  during play dirties the project; step 3 must snapshot/restore `graphics` + `shadows` around PIE
+  (find start/stop near `startPlayNetSession`, `EditorApplication.cpp` ~5354) or route runtime changes
+  to a PIE-local copy. (2) `Ctx` (EngineApi.h): new members go at the END, both apps build it by
+  positional aggregate init. (3) An `api::settings::Host` (player's settings menu) already exists in the
+  game, see `GameApplication.cpp` near the gamepad deadzones; check whether quality rows belong there.
+  (4) `EditorGraphics::capture` leaves `preset` alone: call `ProjectSettings::clamp()` after it.
+  (5) Do not edit a file while `ninja` compiles it (stale object).
+- **Next steps:** 1. Step 3: `HE::api::quality` rows (get/setPreset by name, per-field get/set for
+  texture, shadow, AA...), applying to the host's `ProjectSettings` through a Ctx callback or pointer
+  added at the end of `Ctx`; four-places rule for new rows (see memory). 2. PIE snapshot (trap 1).
+  3. Step 4: quality page in `ProjectSettingsPanel.cpp` (~1349).

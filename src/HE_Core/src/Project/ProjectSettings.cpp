@@ -1,4 +1,5 @@
 #include "Project/ProjectSettings.h"
+#include "Diagnostics/GlobalState.h"
 #include "Diagnostics/Log.h"
 
 #include <nlohmann/json.hpp>
@@ -233,6 +234,26 @@ bool qualityPresetFromName(const std::string& name, QualityPreset& out)
         if (n == lower(qualityPresetName(p))) { out = p; return true; }
     }
     return false;
+}
+
+namespace
+{
+// The three config.json readers behind one name, so the field list can expand
+// to a single line per row.
+bool readConfigValue(const GlobalState& c, const char* key, bool d)  { return c.getCustomConfigBool(key, d); }
+int  readConfigValue(const GlobalState& c, const char* key, int d)   { return c.getCustomConfigInt(key, d); }
+float readConfigValue(const GlobalState& c, const char* key, float d) { return c.getCustomConfigFloat(key, d); }
+} // namespace
+
+void readGraphicsFromConfig(ProjectGraphics& g, const GlobalState& cfg)
+{
+    // The default of a missing key is the struct's own (today's behaviour), not
+    // whatever `g` holds: a project block may hold different numbers, and the
+    // file the game was exported with is what it has always been drawn from.
+    const ProjectGraphics defaults;
+#define HE_X(T, name, def, editorName, lo, hi) g.name = readConfigValue(cfg, #editorName, defaults.name);
+    HE_PROJECT_GRAPHICS_FIELDS(HE_X)
+#undef HE_X
 }
 
 void applyQualityPreset(QualityPreset p, ProjectGraphics& g, ProjectShadowSettings& shadows)

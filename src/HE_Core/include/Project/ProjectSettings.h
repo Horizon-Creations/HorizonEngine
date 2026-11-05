@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+class GlobalState;   // Diagnostics/GlobalState.h; only readGraphicsFromConfig names it
+
 namespace HE {
 
 // ─── Project settings ─────────────────────────────────────────────────────────
@@ -297,6 +299,15 @@ struct HE_API ProjectGraphics
     // list on purpose: it has no EditorConfig twin, it is project data only.
     QualityPreset preset = QualityPreset::Custom;
 };
+
+// Fills every graphics field from the config.json keys the editor's Preferences
+// write and the export dialog carries into a build (the field list's `EditorConfig`
+// column IS the key), a missing key reading as the field's default. `enabled` and
+// `preset` are left alone. The packaged game does this once at start and then
+// pushes `ProjectSettings::graphics` to the renderer every frame, so a script that
+// changes the struct (applyQualityPreset) is what the next frame draws — where
+// until now every frame re-read the keys and there was nothing to change.
+HE_API void readGraphicsFromConfig(ProjectGraphics& g, const GlobalState& cfg);
 
 // Writes the preset's values into `g` and `shadows`. A named preset also turns
 // `g.enabled` on — the project's graphics block only reaches the viewport and

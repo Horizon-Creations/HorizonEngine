@@ -629,6 +629,32 @@ public:
     };
     virtual void SetGIReflectionSettings(const GIReflectionSettings& /*settings*/) {}
 
+    // ── Quality levels for asset detail (HE::QualityPreset, ProjectSettings.h) ─
+    // The levels the presets carry that no single effect above owns: 0 Low,
+    // 1 Medium, 2 High, and High is the full detail every backend drew before this
+    // existed. Pushed every frame from the same place as the other settings, so a
+    // preset change at run time lands on the next frame. The base class keeps the
+    // value (GetQualitySettings); a backend that acts on a level overrides this and
+    // calls the base. One that does not simply ignores it — see
+    // docs/engine-quality-settings-2026-11-05.md for which acts on what.
+    struct QualitySettings
+    {
+        // Low/Medium clamp the sampler's most detailed mip level (see
+        // TextureMinLodForQuality). A texture cooked with a single level has no
+        // coarser one to fall back to and does not change.
+        int textureQuality  = 2;
+        // Reserved: no backend gates a material feature on it yet.
+        int materialQuality = 2;
+    };
+    virtual void SetQualitySettings(const QualitySettings& s) { m_quality = s; }
+    const QualitySettings& GetQualitySettings() const { return m_quality; }
+    // The finest mip level a sampler may use at this texture quality: 2 / 1 / 0
+    // for Low / Medium / High, anything else counts as High.
+    static float TextureMinLodForQuality(int textureQuality)
+    {
+        return textureQuality == 0 ? 2.0f : textureQuality == 1 ? 1.0f : 0.0f;
+    }
+
     // ── Render path (Forward | Deferred) ────────────────────────────────────
     // Pushed by the editor's preferences / the packaged game's GlobalState read,
     // like SetGISettings. Backends without deferred support (Capabilities::
@@ -1013,6 +1039,7 @@ public:
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
+    QualitySettings      m_quality;
     HE::ViewMode         m_viewMode             = HE::ViewMode::Lit;
     HorizonWorld*        m_world                = nullptr;
     ContentManager*      m_contentManager       = nullptr;

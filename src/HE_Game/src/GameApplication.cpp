@@ -716,6 +716,14 @@ void GameApplication::OnInit()
 		input().stickDeadzone   = m_projectSettings.input.stickDeadzone;
 		input().triggerDeadzone = m_projectSettings.input.triggerDeadzone;
 	}
+	// The graphics block the renderer is pushed from, every frame (the push below
+	// reads m_projectSettings.graphics, not the config keys). It starts as what
+	// those keys hold, which is what the game has always drawn — when the project
+	// owns its graphics the export wrote its values into them — so nothing changes
+	// until something changes the struct: HE::applyQualityPreset, a script's
+	// quality row. clamp() also drops a preset tag the keys no longer match.
+	HE::readGraphicsFromConfig(m_projectSettings.graphics, GlobalState::getInstance());
+	m_projectSettings.clamp();
 	// Application build (docs/he-apps-plan.md A1): everything below that belongs
 	// to a GAME is skipped. Latched into a member because half a dozen places
 	// downstream ask, and reaching into m_config at each of them invites one of
@@ -3469,10 +3477,11 @@ void GameApplication::OnRender(float deltaTime)
 	// for the whole chain over an empty world. Found by capturing a frame and
 	// asking why the fix that was supposedly already there had changed nothing.
 	{
-		// Post-process + lighting settings, all read from the same config.json
-		// keys the editor's Preferences write, so a shipped game looks like the
-		// editor preview it was authored in. Capability-gated where a backend can
-		// be unable to do it at all.
+		// Post-process + lighting settings: the values the editor's Preferences
+		// wrote to config.json (read into m_projectSettings.graphics at start), so
+		// a shipped game looks like the editor preview it was authored in.
+		// Capability-gated where a backend can be unable to do it at all.
+		const HE::ProjectGraphics& gfx = m_projectSettings.graphics;
 		// ── An application draws quads, not a world ──────────────────────────
 		// Everything below is a WORLD effect: bloom over emissive surfaces, ambient
 		// occlusion between them, anti-aliasing of their edges, global illumination
@@ -3522,27 +3531,27 @@ void GameApplication::OnRender(float deltaTime)
 			// meant a shipped build ran on the renderer's built-in defaults no
 			// matter what the project was set to.
 			r->SetBloomSettings(IRenderer::BloomSettings{
-				GlobalState::getInstance().getCustomConfigBool("BloomEnabled", true),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("BloomThreshold", 1.0f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("BloomIntensity", 0.6f))});
+				gfx.bloomEnabled,
+				gfx.bloomThreshold,
+				gfx.bloomIntensity});
 			r->SetSSAOSettings(IRenderer::SSAOSettings{
-				GlobalState::getInstance().getCustomConfigBool("SSAOEnabled", true),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAORadius", 0.5f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSAOIntensity", 1.0f)),
-				GlobalState::getInstance().getCustomConfigInt("SSAOMethod", 0)});
+				gfx.ssaoEnabled,
+				gfx.ssaoRadius,
+				gfx.ssaoIntensity,
+				gfx.ssaoMethod});
 			// Depth of field — the editor's Preferences values, carried over by the
 			// export dialog. Off by default; a backend without the pass ignores it.
 			r->SetDepthOfFieldSettings(IRenderer::DepthOfFieldSettings{
-				GlobalState::getInstance().getCustomConfigBool("DoFEnabled", false),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusDistance", 10.0f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFFocusRange", 4.0f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("DoFAperture", 2.8f))});
+				gfx.dofEnabled,
+				gfx.dofFocusDistance,
+				gfx.dofFocusRange,
+				gfx.dofAperture});
 			// Motion blur — likewise the editor's Preferences values via the export
 			// dialog. Camera motion only; off by default.
 			r->SetMotionBlurSettings(IRenderer::MotionBlurSettings{
-				GlobalState::getInstance().getCustomConfigBool("MotionBlurEnabled", false),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurIntensity", 0.5f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("MotionBlurMax", 24.0f))});
+				gfx.motionBlurEnabled,
+				gfx.motionBlurIntensity,
+				gfx.motionBlurMax});
 			// Directional shadows are the PROJECT's (Config/ProjectSettings.json
 			// next to project.hcfg), not config.json's: the same cascades the
 			// editor's viewport showed. Defaults = the historical constants.
@@ -3560,46 +3569,46 @@ void GameApplication::OnRender(float deltaTime)
 
 			// Global Illumination — GlobalIlluminationEnabled/GIIndirectIntensity/
 			// GILightRadius/GIShadowQuality, capability-gated so non-Metal/non-raytracing builds no-op.
-			const bool giEnabled = GlobalState::getInstance().getCustomConfigBool("GlobalIlluminationEnabled", false) &&
+			const bool giEnabled = gfx.giEnabled &&
 			                       r->GetCapabilities().supportsGlobalIllumination;
 			IRenderer::GISettings gi{
 				giEnabled,
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIIndirectIntensity", 1.0f)),
-				static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GILightRadius", 0.5f))};
+				gfx.giIndirectIntensity,
+				gfx.giLightRadius};
 			gi.shadowRays = IRenderer::GISettings::shadowRaysForQuality(
-				GlobalState::getInstance().getCustomConfigInt("GIShadowQuality", 1));
+				gfx.giShadowQuality);
 			r->SetGISettings(gi);
 
 			// SSR — same config.json keys the editor writes, capability-gated
 			// (Metal deferred tile mode only in v1).
 			const bool ssrEnabled =
-				GlobalState::getInstance().getCustomConfigBool("SSREnabled", false) &&
+				gfx.ssrEnabled &&
 				r->GetCapabilities().supportsScreenSpaceReflections;
 			IRenderer::SSRSettings ssr;
 			ssr.enabled      = ssrEnabled;
-			ssr.intensity    = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRIntensity", 1.0f));
-			ssr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SSRMaxRoughness", 0.6f));
-			ssr.quality      = GlobalState::getInstance().getCustomConfigInt("SSRQuality", 1);
+			ssr.intensity    = gfx.ssrIntensity;
+			ssr.maxRoughness = gfx.ssrMaxRoughness;
+			ssr.quality      = gfx.ssrQuality;
 			r->SetSSRSettings(ssr);
 
 			// CPU occlusion culling — the editor's Preferences toggle, carried
 			// over by the export dialog. No capability gate: a backend without it
 			// ignores the call.
 			r->SetOcclusionCullingSettings(IRenderer::OcclusionCullingSettings{
-				GlobalState::getInstance().getCustomConfigBool("OcclusionCulling", false) });
+				gfx.occlusionCulling });
 
 			// Ray-traced GI reflections — same config.json keys the editor
 			// writes, capability-gated (Metal tile deferred + HW RT in v1).
 			const bool giReflEnabled =
-				GlobalState::getInstance().getCustomConfigBool("GIReflectionsEnabled", false) &&
+				gfx.giReflectionsEnabled &&
 				r->GetCapabilities().supportsGIReflections;
 			IRenderer::GIReflectionSettings gr;
 			gr.enabled      = giReflEnabled;
-			gr.intensity    = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflIntensity", 1.0f));
-			gr.maxRoughness = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("GIReflMaxRoughness", 0.6f));
-			gr.quality      = GlobalState::getInstance().getCustomConfigInt("GIReflQuality", 1);
-			gr.bounces      = GlobalState::getInstance().getCustomConfigInt("GIReflBounces", 1);
-			gr.blur         = GlobalState::getInstance().getCustomConfigBool("GIReflBlur", false);
+			gr.intensity    = gfx.giReflIntensity;
+			gr.maxRoughness = gfx.giReflMaxRoughness;
+			gr.quality      = gfx.giReflQuality;
+			gr.bounces      = gfx.giReflBounces;
+			gr.blur         = gfx.giReflBlur;
 			r->SetGIReflectionSettings(gr);
 
 			// Anti-aliasing — same config.json keys the editor's Preferences write
@@ -3608,12 +3617,15 @@ void GameApplication::OnRender(float deltaTime)
 			// IRenderer::ResolveAAMethod fallback itself, so a config authored on a
 			// Metal machine opens sanely in a D3D11 build of the same game.
 			IRenderer::AntiAliasingSettings aa;
-			aa.method             = GlobalState::getInstance().getCustomConfigInt("AntiAliasing", 1);
-			aa.sharpness          = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("AASharpness", 0.35f));
-			aa.renderScale        = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("RenderScale", 1.0f));
-			aa.specularAA         = GlobalState::getInstance().getCustomConfigBool("SpecularAA", true);
-			aa.specularAAStrength = static_cast<float>(GlobalState::getInstance().getCustomConfigFloat("SpecularAAStrength", 1.0f));
+			aa.method             = gfx.antiAliasing;
+			aa.sharpness          = gfx.aaSharpness;
+			aa.renderScale        = gfx.renderScale;
+			aa.specularAA         = gfx.specularAA;
+			aa.specularAAStrength = gfx.specularAAStrength;
 			r->SetAntiAliasingSettings(aa);
+
+			// Asset-detail levels of the quality presets (texture / material).
+			r->SetQualitySettings(IRenderer::QualitySettings{ gfx.textureQuality, gfx.materialQuality });
 
 			// Render path — same config.json key the editor's Preferences combo
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated. An absent

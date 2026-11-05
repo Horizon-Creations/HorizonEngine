@@ -3720,6 +3720,10 @@ void EditorApplication::OnRender(float dt)
 				if (s > 0.0f) aa.specularAAStrength = s;   // doubles as the strength
 			}
 			renderer()->SetAntiAliasingSettings(aa);
+			// Texture / material levels of the quality presets, from the same
+			// config the project's block was copied into (syncGraphicsSource).
+			renderer()->SetQualitySettings(IRenderer::QualitySettings{
+				m_editorConfig.TextureQuality, m_editorConfig.MaterialQuality });
 		}
 		{
 			IRenderer::GISettings gi{
@@ -9128,6 +9132,11 @@ void EditorApplication::dumpFrameHeadless()
 			aa.specularAAStrength = s > 0.0f ? s : aa.specularAAStrength;
 		}
 		r->SetAntiAliasingSettings(aa);
+		// HE_DUMP_TEXQUALITY=<0|1|2>: texture quality for this capture only, the
+		// A/B knob for he_shot.py (0 Low = two mip levels off, 2 High = all).
+		IRenderer::QualitySettings qs{ m_editorConfig.TextureQuality, m_editorConfig.MaterialQuality };
+		if (const char* v = std::getenv("HE_DUMP_TEXQUALITY"); v && *v) qs.textureQuality = std::atoi(v);
+		r->SetQualitySettings(qs);
 	}
 	{
 		// HE_DUMP_GI: override the persisted GI toggle for this capture only (does
