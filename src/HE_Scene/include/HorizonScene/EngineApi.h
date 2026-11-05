@@ -2463,6 +2463,28 @@ namespace settings {
     // 0 for an unknown field (logged). Without a host, the field's default.
     float qualityValue(const std::string& field);
     std::vector<std::string> qualityFields();
+
+    // ── The same settings as levels: Low … Ultra per area ──
+    // `setting` is a QualitySetting (the built-in enum), `level` a QualityLevel
+    // (Low 0, Medium 1, High 2, Ultra 3, Custom 4); both travel as ints. A graph
+    // switches on the answer with Switch on Enum.
+    //   qualityLevel  what the area reads as: the preset row its values equal,
+    //                 else Custom (tie-break: see HE::qualityLevelOf).
+    //   setQualityLevel  writes that area from the level's preset row, over the
+    //                 player's other choices; Overall is the preset. Custom keeps
+    //                 what is there and answers true. False (logged) for a setting
+    //                 or level out of range.
+    int  qualityLevel(int setting);
+    bool setQualityLevel(int setting, int level);
+    // The engine's settings as an OBJECT: engineSettings() hands out one fixed
+    // reference (kEngineSettingsRef, never an id a HorizonCode instance can have),
+    // and qualityOf / setQualityOf are the two rows above taking it first, so a
+    // graph can pass "the settings" around and ask it. The value of the reference
+    // is not looked at (0 works too); there is only one set of settings.
+    inline constexpr uint32_t kEngineSettingsRef = 0xE5000001u;
+    uint32_t engineSettings();
+    int      qualityOf(uint32_t engine, int setting);
+    bool     setQualityOf(uint32_t engine, int setting, int level);
     // Persist everything above (NOT the bindings — input.saveBindings) and
     // answer whether the prefs file took it. Nothing chosen removes the key.
     bool  save();
@@ -3136,7 +3158,27 @@ struct ApiParam
     // "Self" instead of a zero, and the generated node reference says so in
     // words. Both ask this flag rather than keeping their own list.
     bool        selfDefault = false;
+    // Enum pins: the registry key of the enum (HE::TypeRegistry, e.g.
+    // HE::kQualityLevelEnum). Empty for every other pin. A row's C++ signature
+    // takes an `int` for it, and the Value carries the entry's number; the key is
+    // what lets the graph editor draw the pin in the enum's name, offer its
+    // entries on an unwired pin, and connect it to a Switch on Enum.
+    const char* typeName = "";
 };
+
+// The node pin an engine-row parameter becomes. One function for every place that
+// mirrors a row's pins onto a node (the add menu, a pasted graph, the MCP tools,
+// the node reference, the code generator), because a copy that forgets the
+// enum's key draws the pin as a plain Int and silently breaks the Switch behind it.
+inline HorizonCode::FuncParam toFuncParam(const ApiParam& p)
+{
+    HorizonCode::FuncParam f;
+    f.name    = p.name ? p.name : "";
+    f.type    = p.type;
+    f.isArray = p.isArray;
+    f.typeName = p.typeName ? p.typeName : "";
+    return f;
+}
 
 // How generated C++ reaches a row WITHOUT the registry (HorizonEngine/
 // HorizonEngineApi.h). The registry's params/results say what the node carries;

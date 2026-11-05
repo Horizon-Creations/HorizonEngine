@@ -397,6 +397,118 @@ bool setQualityField(ProjectGraphics& g, ProjectShadowSettings& shadows,
     return true;
 }
 
+// ─── One level per area ───────────────────────────────────────────────────────
+const char* qualitySettingName(QualitySetting s)
+{
+    switch (s)
+    {
+        case QualitySetting::Overall:              return "Overall";
+        case QualitySetting::Shadows:              return "Shadows";
+        case QualitySetting::AntiAliasing:         return "AntiAliasing";
+        case QualitySetting::RenderResolution:     return "RenderResolution";
+        case QualitySetting::AmbientOcclusion:     return "AmbientOcclusion";
+        case QualitySetting::Reflections:          return "Reflections";
+        case QualitySetting::GlobalIllumination:   return "GlobalIllumination";
+        case QualitySetting::RayTracedReflections: return "RayTracedReflections";
+        case QualitySetting::Textures:             return "Textures";
+        case QualitySetting::Materials:            return "Materials";
+    }
+    return "Overall";
+}
+
+std::vector<std::string> qualityAreaFields(QualitySetting s)
+{
+    switch (s)
+    {
+        case QualitySetting::Overall:              return {};
+        case QualitySetting::Shadows:              return { "shadowDistance", "shadowCascades", "shadowResolution" };
+        case QualitySetting::AntiAliasing:         return { "antiAliasing" };
+        case QualitySetting::RenderResolution:     return { "renderScale" };
+        case QualitySetting::AmbientOcclusion:     return { "ssaoEnabled" };
+        case QualitySetting::Reflections:          return { "ssrEnabled", "ssrQuality" };
+        case QualitySetting::GlobalIllumination:   return { "giEnabled", "giShadowQuality" };
+        case QualitySetting::RayTracedReflections: return { "giReflectionsEnabled", "giReflQuality", "giReflBounces" };
+        case QualitySetting::Textures:             return { "textureQuality" };
+        case QualitySetting::Materials:            return { "materialQuality" };
+    }
+    return {};
+}
+
+namespace
+{
+bool validArea(QualitySetting s) { return static_cast<int>(s) >= 0 && static_cast<int>(s) < kQualitySettingCount; }
+
+// Do ALL of an area's fields equal this preset row's?
+bool areaMatches(const PresetRow& r, QualitySetting a, const ProjectGraphics& g,
+                 const ProjectShadowSettings& sh)
+{
+    switch (a)
+    {
+        case QualitySetting::Shadows:
+            return nearlyEqual(sh.distance, r.shadowDistance) && sh.cascadeCount == r.shadowCascades
+                && sh.resolution == r.shadowResolution;
+        case QualitySetting::AntiAliasing:         return g.antiAliasing == r.antiAliasing;
+        case QualitySetting::RenderResolution:     return nearlyEqual(g.renderScale, r.renderScale);
+        case QualitySetting::AmbientOcclusion:     return g.ssaoEnabled == r.ssaoEnabled;
+        case QualitySetting::Reflections:          return g.ssrEnabled == r.ssrEnabled && g.ssrQuality == r.ssrQuality;
+        case QualitySetting::GlobalIllumination:   return g.giEnabled == r.giEnabled && g.giShadowQuality == r.giShadowQuality;
+        case QualitySetting::RayTracedReflections: return g.giReflectionsEnabled == r.giReflectionsEnabled
+                                                       && g.giReflQuality == r.giReflQuality
+                                                       && g.giReflBounces == r.giReflBounces;
+        case QualitySetting::Textures:             return g.textureQuality == r.textureQuality;
+        case QualitySetting::Materials:            return g.materialQuality == r.materialQuality;
+        case QualitySetting::Overall:              break;
+    }
+    return false;
+}
+} // namespace
+
+QualityLevel qualityLevelOf(QualitySetting s, const ProjectGraphics& g, const ProjectShadowSettings& sh)
+{
+    const QualityPreset overall = detectQualityPreset(g, sh);
+    if (s == QualitySetting::Overall || !validArea(s)) return static_cast<QualityLevel>(overall);
+
+    int lowest = -1;
+    for (int i = 0; i < 4; ++i)
+    {
+        if (!areaMatches(kPresetRows[i], s, g, sh)) continue;
+        // The whole configuration reads as this very preset: that row wins a tie.
+        if (static_cast<int>(overall) == i) return static_cast<QualityLevel>(i);
+        if (lowest < 0) lowest = i;
+    }
+    return lowest < 0 ? QualityLevel::Custom : static_cast<QualityLevel>(lowest);
+}
+
+bool setQualityLevelOf(QualitySetting s, QualityLevel level, ProjectGraphics& g, ProjectShadowSettings& sh)
+{
+    if (!validArea(s) || static_cast<int>(level) < 0 || static_cast<int>(level) >= kQualityPresetCount)
+        return false;
+    if (level == QualityLevel::Custom) return true;
+    if (s == QualitySetting::Overall)
+    {
+        applyQualityPreset(static_cast<QualityPreset>(level), g, sh);
+        return true;
+    }
+    const PresetRow& r = kPresetRows[static_cast<int>(level)];
+    switch (s)
+    {
+        case QualitySetting::Shadows:
+            sh.distance = r.shadowDistance; sh.cascadeCount = r.shadowCascades; sh.resolution = r.shadowResolution; break;
+        case QualitySetting::AntiAliasing:         g.antiAliasing = r.antiAliasing; break;
+        case QualitySetting::RenderResolution:     g.renderScale = r.renderScale; break;
+        case QualitySetting::AmbientOcclusion:     g.ssaoEnabled = r.ssaoEnabled; break;
+        case QualitySetting::Reflections:          g.ssrEnabled = r.ssrEnabled; g.ssrQuality = r.ssrQuality; break;
+        case QualitySetting::GlobalIllumination:   g.giEnabled = r.giEnabled; g.giShadowQuality = r.giShadowQuality; break;
+        case QualitySetting::RayTracedReflections:
+            g.giReflectionsEnabled = r.giReflectionsEnabled; g.giReflQuality = r.giReflQuality;
+            g.giReflBounces = r.giReflBounces; break;
+        case QualitySetting::Textures:             g.textureQuality = r.textureQuality; break;
+        case QualitySetting::Materials:            g.materialQuality = r.materialQuality; break;
+        case QualitySetting::Overall:              break;
+    }
+    return true;
+}
+
 bool ProjectSettings::operator==(const ProjectSettings& o) const
 {
     return game.title == o.game.title

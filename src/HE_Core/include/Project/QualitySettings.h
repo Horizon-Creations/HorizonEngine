@@ -2,6 +2,7 @@
 #include <Types/Defines.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 class GlobalState;   // Diagnostics/GlobalState.h; only readGraphicsFromConfig names it
 
@@ -189,5 +190,46 @@ HE_API bool        getQualityField(const ProjectGraphics& g, const ProjectShadow
 // tag is touched. False for an unknown name or a value that is not a number.
 HE_API bool        setQualityField(ProjectGraphics& g, ProjectShadowSettings& shadows,
                                    const std::string& name, float value);
+
+// ── One level per area ────────────────────────────────────────────────────────
+// What a HorizonCode graph, a script or a menu works with: not "shadow resolution
+// 2048" but "Shadows: Medium", and a Switch on Enum over the answer. The numbers
+// are the registry's built-in enums (Types/TypeRegistry.h, kQualityLevelEnum and
+// kQualitySettingEnum), entry for entry — QualityLevel equals QualityPreset.
+enum class QualityLevel : std::uint8_t { Low, Medium, High, Ultra, Custom };
+enum class QualitySetting : std::uint8_t
+{
+    Overall,               // every area at once: the preset
+    Shadows,               // resolution, cascades, distance
+    AntiAliasing,          // the method
+    RenderResolution,      // render scale
+    AmbientOcclusion,      // on/off
+    Reflections,           // screen-space reflections: on/off + quality
+    GlobalIllumination,    // on/off + shadow quality
+    RayTracedReflections,  // GI reflections: on/off + quality + bounces
+    Textures,              // texture quality
+    Materials,             // material quality
+};
+inline constexpr int kQualitySettingCount = 10;
+
+HE_API const char* qualitySettingName(QualitySetting s);   // "Shadows", "Textures" …
+// The quality-field names (see above) one area is made of; empty for Overall.
+HE_API std::vector<std::string> qualityAreaFields(QualitySetting s);
+
+// The level an area's values read as: the preset rows are the definition, so an
+// area is Low when ALL of its fields equal Low's row, and Custom when no row
+// matches (a hand-tuned value). Presets share values — Medium and High both use
+// SMAA, High and Ultra both use High textures — so an area can match several rows;
+// the tie goes to the row the whole configuration reads as (detectQualityPreset)
+// when that is one of them, else to the LOWEST matching row. Overall is exactly
+// detectQualityPreset.
+HE_API QualityLevel qualityLevelOf(QualitySetting s, const ProjectGraphics& g,
+                                   const ProjectShadowSettings& shadows);
+
+// Writes one area's fields from the level's preset row, leaving every other field
+// alone (Overall = applyQualityPreset). Custom writes nothing and answers true:
+// "keep what is there", as for a preset. False for a level or area out of range.
+HE_API bool setQualityLevelOf(QualitySetting s, QualityLevel level, ProjectGraphics& g,
+                              ProjectShadowSettings& shadows);
 
 } // namespace HE

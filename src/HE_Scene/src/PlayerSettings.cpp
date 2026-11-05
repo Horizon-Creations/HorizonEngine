@@ -368,6 +368,54 @@ std::vector<std::string> qualityFields()
     for (int i = 0; i < HE::qualityFieldCount(); ++i) names.push_back(HE::qualityFieldName(i));
     return names;
 }
+
+int qualityLevel(int setting)
+{
+    if (setting < 0 || setting >= HE::kQualitySettingCount)
+    {
+        HE_LOG_WARN(Script, "settings.qualityLevel: %d is not a QualitySetting (0..%d)",
+                    setting, HE::kQualitySettingCount - 1);
+        return static_cast<int>(HE::QualityLevel::Custom);
+    }
+    const EffectiveQuality e = effectiveQuality();
+    return static_cast<int>(HE::qualityLevelOf(static_cast<HE::QualitySetting>(setting), e.graphics, e.shadows));
+}
+
+bool setQualityLevel(int setting, int level)
+{
+    if (setting < 0 || setting >= HE::kQualitySettingCount)
+    {
+        HE_LOG_WARN(Script, "settings.setQualityLevel: %d is not a QualitySetting (0..%d)",
+                    setting, HE::kQualitySettingCount - 1);
+        return false;
+    }
+    if (level < 0 || level >= HE::kQualityPresetCount)
+    {
+        HE_LOG_WARN(Script, "settings.setQualityLevel: %d is not a QualityLevel (0 Low … 4 Custom)", level);
+        return false;
+    }
+    const auto area = static_cast<HE::QualitySetting>(setting);
+    if (level == static_cast<int>(HE::QualityLevel::Custom)) return true;   // keep what is there
+    if (area == HE::QualitySetting::Overall)
+        return setQualityPreset(HE::qualityPresetName(static_cast<HE::QualityPreset>(level)));
+
+    // Start from what is in effect, move this one area to the level's row, and keep
+    // exactly that area's fields as the player's single values (over any preset).
+    EffectiveQuality e = effectiveQuality();
+    HE::setQualityLevelOf(area, static_cast<HE::QualityLevel>(level), e.graphics, e.shadows);
+    State& s = state();
+    for (const std::string& field : HE::qualityAreaFields(area))
+    {
+        float v = 0.0f;
+        if (HE::getQualityField(e.graphics, e.shadows, field, v)) s.values.quality[field] = v;
+    }
+    applyQuality();
+    return true;
+}
+
+uint32_t engineSettings() { return kEngineSettingsRef; }
+int  qualityOf(uint32_t, int setting) { return qualityLevel(setting); }
+bool setQualityOf(uint32_t, int setting, int level) { return setQualityLevel(setting, level); }
 } // namespace settings
 
 // ── The rows filed under their own groups ────────────────────────────────────

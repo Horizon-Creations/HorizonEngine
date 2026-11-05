@@ -198,6 +198,42 @@ TEST_CASE("ScriptContext: horizon.settings quality rows reach the player's setti
     HE::api::settings::resetToDefaults();
 }
 
+TEST_CASE("ScriptContext: the engine's quality enums and level rows from Lua")
+{
+    // horizon.enums lists every registered enum, the engine's own among them, so a
+    // script names levels and areas instead of counting them.
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+    HE::ProjectGraphics seen;
+    HE::api::settings::Host host;
+    host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings&) { seen = g; };
+    HE::api::settings::install(std::move(host));
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "local L, S = horizon.enums.QualityLevel, horizon.enums.QualitySetting\n"
+        "_G._medium = L.Medium\n"
+        "_G._ultra  = L.Ultra\n"
+        "_G._tex    = S.Textures\n"
+        "local obj = horizon.settings.engine()\n"
+        "_G._ok    = horizon.settings.setQualityOf(obj, S.Textures, L.Low) and 1 or 0\n"
+        "_G._level = horizon.settings.qualityOf(obj, S.Textures)\n"
+        "_G._plain = horizon.settings.qualityLevel(S.Textures)\n"
+        "_G._lowOk = (horizon.settings.qualityLevel(S.Textures) == L.Low) and 1 or 0\n"));
+    CHECK(engine.getGlobalNumber("_medium") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_ultra") == doctest::Approx(3.0));
+    CHECK(engine.getGlobalNumber("_tex") == doctest::Approx(8.0));
+    CHECK(engine.getGlobalNumber("_ok") == doctest::Approx(1.0));
+    CHECK(engine.getGlobalNumber("_level") == doctest::Approx(0.0));   // Low
+    CHECK(engine.getGlobalNumber("_plain") == doctest::Approx(0.0));
+    CHECK(engine.getGlobalNumber("_lowOk") == doctest::Approx(1.0));
+    CHECK(seen.textureQuality == 0);
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+}
+
 TEST_CASE("ScriptContext: bitwise — Lua 5.4's native operators AND the registry rows (Lua)")
 {
     // Two halves of one audit. First: the embedded Lua is 5.4 (not 5.1/5.2),

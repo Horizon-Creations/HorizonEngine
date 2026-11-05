@@ -1013,10 +1013,15 @@ const HE::api::ApiFn* directRow(const std::string& id)
 {
     const HE::api::ApiFn* fn = HE::api::find(id);
     if (!fn || fn->cppForm == HE::api::CppForm::Thunk) return nullptr;
+    // A pin of an engine-defined enum (QualityLevel, …) stays on the Value path
+    // too, like a Struct pin: the generated code holds it as its own `enum class`,
+    // the row takes and returns an `int`, and hc::callApi is what converts.
+    const auto typedEnum = [](const HE::api::ApiParam& p)
+    { return p.type == PT::Enum && p.typeName && *p.typeName; };
     for (const HE::api::ApiParam& p : fn->params)
-        if (p.type == PT::Struct) return nullptr;
+        if (p.type == PT::Struct || typedEnum(p)) return nullptr;
     for (const HE::api::ApiParam& r : fn->results)
-        if (r.type == PT::Struct) return nullptr;
+        if (r.type == PT::Struct || typedEnum(r)) return nullptr;
     return fn;
 }
 
@@ -1427,9 +1432,9 @@ private:
                 warn("engine call '" + n.s + "' re-mirrored from the registry (stale asset)");
                 n.hasArg = fn->isExec;
                 n.params.clear();
-                for (const auto& p : fn->params)  n.params.push_back({ p.name, p.type, p.isArray });
+                for (const auto& p : fn->params)  n.params.push_back(HE::api::toFuncParam(p));
                 n.results.clear();
-                for (const auto& r : fn->results) n.results.push_back({ r.name, r.type, r.isArray });
+                for (const auto& r : fn->results) n.results.push_back(HE::api::toFuncParam(r));
             }
         }
 

@@ -1093,8 +1093,8 @@ int drawAddMenuTail(const Host& h, const std::string& q)
 		nn->s = fn->id;
 		nn->hasArg = fn->isExec;             // exec node vs pure data node
 		nn->params.clear(); nn->results.clear();
-		for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
-		for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
+		for (const auto& p : fn->params)  nn->params.push_back(HE::api::toFuncParam(p));
+		for (const auto& r : fn->results) nn->results.push_back(HE::api::toFuncParam(r));
 		created = nid;
 	};
 
@@ -1477,8 +1477,8 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				HC::Node* nn = graph.findNode(id);
 				nn->s = m.apiId;
 				nn->hasArg = fn->isExec;
-				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray });
-				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray });
+				for (const auto& p : fn->params)  nn->params.push_back(HE::api::toFuncParam(p));
+				for (const auto& r : fn->results) nn->results.push_back(HE::api::toFuncParam(r));
 				// Wire this reference into the parameter that takes the target,
 				// so the node arrives usable rather than as one more thing to
 				// connect.
@@ -1608,8 +1608,8 @@ int drawPinDragMenu(const Host& h, int srcNode, int srcPin, bool srcInput, const
 				HC::Node* nn = graph.findNode(id);
 				nn->s = fn.id; nn->hasArg = fn.isExec;
 				nn->params.clear(); nn->results.clear();
-				for (const auto& p : fn.params)  nn->params.push_back({ p.name, p.type, p.isArray });
-				for (const auto& r : fn.results) nn->results.push_back({ r.name, r.type, r.isArray });
+				for (const auto& p : fn.params)  nn->params.push_back(HE::api::toFuncParam(p));
+				for (const auto& r : fn.results) nn->results.push_back(HE::api::toFuncParam(r));
 				wireAt(id, pin); created = id; ImGui::CloseCurrentPopup();
 			}
 		}
@@ -2340,8 +2340,8 @@ void drawQuickPickPopup(const Host& h)
 				nn->s = fn->id;
 				nn->hasArg = fn->isExec;             // exec node vs pure data node
 				nn->params.clear(); nn->results.clear();
-				for (const auto& p : fn->params)  nn->params.push_back({ p.name, p.type, p.isArray, {} });
-				for (const auto& r : fn->results) nn->results.push_back({ r.name, r.type, r.isArray, {} });
+				for (const auto& p : fn->params)  nn->params.push_back(HE::api::toFuncParam(p));
+				for (const auto& r : fn->results) nn->results.push_back(HE::api::toFuncParam(r));
 				selectNode(h, id);
 				h.onEdit(true);
 			}

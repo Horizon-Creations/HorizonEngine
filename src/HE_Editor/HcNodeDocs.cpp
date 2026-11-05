@@ -1065,6 +1065,31 @@ namespace
 	{ "settings.qualityValue",
 	  "The current value of one graphics regulator by name (yes/no fields are 0 or 1). "
 	  "What a quality slider starts at. 0 for an unknown name." },
+	{ "settings.engine",
+	  "The engine's settings as an object: one fixed reference you can keep in a "
+	  "variable or hand to a function, and ask with Get Quality Of or change with "
+	  "Set Quality Of. There is only one set of settings, so every call returns the "
+	  "same reference." },
+	{ "settings.qualityLevel",
+	  "How good one area of the game is set, as a level: Low, Medium, High, Ultra, "
+	  "or Custom when the values match none of them. Pick the area with the Setting "
+	  "pin (Overall, Shadows, Anti Aliasing, Render Resolution, Ambient Occlusion, "
+	  "Reflections, Global Illumination, Ray Traced Reflections, Textures, "
+	  "Materials) and feed the result into a Switch on Enum to react per level." },
+	{ "settings.setQualityLevel",
+	  "Set one area to a level (Low, Medium, High or Ultra), leaving every other "
+	  "area as it is. Overall sets everything at once, like Set Quality Preset. "
+	  "Custom changes nothing. Applied at once; Save Settings keeps it. False for a "
+	  "setting or level that does not exist." },
+	{ "settings.qualityOf",
+	  "Get Quality Level, asked of the engine-settings object from Get Engine "
+	  "Settings: how good one area is set, as a level from Low to Ultra, or Custom "
+	  "when the values match none of them. Use it with a Switch on Enum." },
+	{ "settings.setQualityOf",
+	  "Set Quality Level, told to the engine-settings object from Get Engine "
+	  "Settings: move one area to Low, Medium, High or Ultra, or everything with "
+	  "Overall. Custom changes nothing. False for a setting or level that does not "
+	  "exist." },
 	{ "settings.qualityFields",
 	  "The names of every graphics regulator Set Quality Value and Get Quality Value "
 	  "accept: anti-aliasing, render scale, SSAO, SSR, global illumination, texture and "

@@ -1,5 +1,6 @@
 #include "HorizonScene/EngineApi.h"
 #include <cstdint>
+#include <Types/TypeRegistry.h>   // kQualityLevelEnum / kQualitySettingEnum on the settings rows
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/TrailSystem.h"
@@ -6142,6 +6143,22 @@ int         aI (const VV& a, size_t k) { return k < a.size() ? a[k].i   : 0; }
 // int would silently hand every object reference through as 0.
 uint32_t    aR (const VV& a, size_t k) { return k < a.size() ? a[k].ref : 0u; }
 std::string aS (const VV& a, size_t k) { return k < a.size() ? a[k].s   : std::string(); }
+// An Enum pin of an engine-defined enum (the registry key travels with the pin, so
+// the editor draws it in the enum's name and a Switch on Enum can follow it).
+ApiParam    enumP(const char* name, const char* typeName)
+{
+    ApiParam p{ name, P::Enum };
+    p.typeName = typeName;
+    return p;
+}
+// The matching result Value: the entry's number, typed as the enum.
+Value       ofEnum(int entryValue, const char* typeName)
+{
+    Value v = Value::ofInt(entryValue);
+    v.type     = P::Enum;
+    v.typeName = typeName;
+    return v;
+}
 glm::vec2   aV2(const VV& a, size_t k) { return k < a.size() ? a[k].v2  : glm::vec2(0.0f); }
 // Vector reads go by the value's OWN type, not by one hard-coded field. These
 // rows used to be Color-typed (Color doubled as the vec3 type), so a caller may
@@ -7203,6 +7220,30 @@ const std::vector<ApiFn>& registry()
                 Value arr; arr.isArray = true; arr.type = P::String;
                 for (auto& n : settings::qualityFields()) arr.items.push_back(Value::ofString(std::move(n)));
                 return VV{ std::move(arr) }; } });
+
+        // The same settings as LEVELS, per area, over the engine's own enums
+        // (QualitySetting in, QualityLevel out), so a graph asks "how good are the
+        // shadows?" and switches on the answer. Two shapes: plain get/set, and the
+        // same two taking the engine-settings OBJECT (a Ref) from settings.engine —
+        // one fixed reference, there is only one set of settings.
+        t.push_back({ "settings.engine", "Settings", false, {}, {{"settings", P::Ref}}, "HE::api::settings::engineSettings",
+            [](Ctx&, const VV&){ return VV{ Value::ofRef(settings::engineSettings()) }; } });
+        t.push_back({ "settings.qualityLevel", "Settings", false,
+            { enumP("setting", HE::kQualitySettingEnum) }, { enumP("level", HE::kQualityLevelEnum) },
+            "HE::api::settings::qualityLevel",
+            [](Ctx&, const VV& a){ return VV{ ofEnum(settings::qualityLevel(aI(a, 0)), HE::kQualityLevelEnum) }; } });
+        t.push_back({ "settings.setQualityLevel", "Settings", true,
+            { enumP("setting", HE::kQualitySettingEnum), enumP("level", HE::kQualityLevelEnum) },
+            {{"ok", P::Bool}}, "HE::api::settings::setQualityLevel",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(settings::setQualityLevel(aI(a, 0), aI(a, 1))) }; } });
+        t.push_back({ "settings.qualityOf", "Settings", false,
+            { {"settings", P::Ref}, enumP("setting", HE::kQualitySettingEnum) }, { enumP("level", HE::kQualityLevelEnum) },
+            "HE::api::settings::qualityOf",
+            [](Ctx&, const VV& a){ return VV{ ofEnum(settings::qualityOf(aR(a, 0), aI(a, 1)), HE::kQualityLevelEnum) }; } });
+        t.push_back({ "settings.setQualityOf", "Settings", true,
+            { {"settings", P::Ref}, enumP("setting", HE::kQualitySettingEnum), enumP("level", HE::kQualityLevelEnum) },
+            {{"ok", P::Bool}}, "HE::api::settings::setQualityOf",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(settings::setQualityOf(aR(a, 0), aI(a, 1), aI(a, 2))) }; } });
 
         // Date and time — the WALL clock, unlike the time group. Double pins:
         // at today's epoch a float steps in 128 s, so on a Float pin `now` read
@@ -8458,6 +8499,9 @@ const std::vector<ApiFn>& registry()
             { "settings.qualityPresetNames", "Quality Preset Names" },
             { "settings.setQualityValue", "Set Quality Value" }, { "settings.qualityValue", "Get Quality Value" },
             { "settings.qualityFields", "Quality Fields" },
+            { "settings.engine", "Get Engine Settings" },
+            { "settings.qualityLevel", "Get Quality Level" }, { "settings.setQualityLevel", "Set Quality Level" },
+            { "settings.qualityOf", "Get Quality Of" },       { "settings.setQualityOf", "Set Quality Of" },
             { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
             { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
             { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },

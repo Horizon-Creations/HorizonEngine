@@ -127,12 +127,28 @@ struct HE_API StructDef
 HE_API void noteFieldRename(StructDef& def, size_t index, const std::string& oldName);
 HE_API void noteEntryRename(EnumDef& def, size_t index, const std::string& oldName);
 
+// ── The engine's own types ───────────────────────────────────────────────────
+// A key that starts with kBuiltinTypePrefix is not a project-relative asset path:
+// it names a type the engine defines (so a graph can switch on it and a script can
+// read it as horizon.enums.<Name>) and that no project can change, overwrite or
+// delete. The registry holds them from its first use and again after clear().
+//   QualityLevel    Low 0, Medium 1, High 2, Ultra 3, Custom 4 — the values of
+//                   HE::QualityPreset; Custom = "matches no level".
+//   QualitySetting  which area a quality row means: Overall, Shadows, AntiAliasing,
+//                   RenderResolution, AmbientOcclusion, Reflections,
+//                   GlobalIllumination, RayTracedReflections, Textures, Materials.
+inline constexpr const char* kBuiltinTypePrefix   = "engine:";
+inline constexpr const char* kQualityLevelEnum    = "engine:QualityLevel";
+inline constexpr const char* kQualitySettingEnum  = "engine:QualitySetting";
+
 // Process-global registry of every loaded struct/enum definition. Thread-safe
 // (script bootstrap and codegen run off the main thread).
 class HE_API TypeRegistry
 {
 public:
     static TypeRegistry& instance();
+    // True for a key the engine owns (see kBuiltinTypePrefix).
+    static bool isBuiltin(const std::string& assetPath);
 
     // Upserts keyed by def.assetPath — always accepted, in any order (the
     // registry is dumb storage; a def that exists on disk is never invisible).
