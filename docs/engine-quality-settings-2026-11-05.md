@@ -156,34 +156,68 @@ as the Shadows and Post-Processing / Reflections & GI pages, so there is one mod
 * 16 help entries (`Quality/<label>`, `EditorHelp.cpp` ~5088) and a "Project: quality" Settings Reference section;
   docs-site anchors are left empty (step 5 writes the page).
 
+## 7. Comparison on the Catania project (step 5, live editor)
+
+Setup: the real `HorizonEditor` built from this branch (Release, Metal), one headless frame per preset
+(`HE_DUMP_QUALITYPRESET=<Low|Medium|High|Ultra>`, the same play-local road a script's preset takes), 1280x720, noon
+(`HE_DUMP_TOD=0.5`; the scene is set to midnight), one fixed camera over the lakes (0, 35, 40), `HE_SKY_TIME=30`,
+`HE_DUMP_TERRAINTICK=1` (builds the terrain chunks), 8 settle frames. Run on a COPY of Catania (without Export/Exports,
+15 MB, the user's uncommitted state) with a private `HE_CONFIG_DIR`; the real project's git status and files were checked
+identical before and after. Images: `docs/engine-quality-settings-2026-11-05/catania-*.png`.
+
+| Pair | mean abs pixel diff (0-255) | pixels differing by > 8 |
+|---|---|---|
+| noise floor: High vs High again | 0.03 | 0.0 % |
+| noise floor: default vs default again | 0.00 | 0.0 % |
+| default (project's own values) vs Low | 1.84 | 3.3 % |
+| default vs Medium | 0.28 | 0.6 % |
+| default vs High | 2.85 | 10.1 % |
+| default vs Ultra | 3.71 | 12.4 % |
+| Low vs Medium / Medium vs High / High vs Ultra | 1.89 / 2.71 / 2.22 | 3.6 / 9.6 / 4.6 % |
+| Low vs Ultra | 3.56 | 12.1 % |
+
+What the frames show: Low is crisper and darker (render scale 0.75 and no ambient occlusion or global illumination give hard
+contrast on the mountains); Medium is almost the project's current look (0.28); High and Ultra light the mountains softly
+(global illumination bounce, ambient occlusion), Ultra adds temporal smoothing (TAA) and reflections on the lakes. Every
+preset step is visible and the repeat runs are bit-stable, so the differences are the presets and not noise.
+
+**Findings:**
+1. **Texture quality does nothing on Catania** (High with texture quality 0 vs 2: mean 0.04 and 0.05, no pixel > 8, also with
+   the camera 3 m above the ground). Cause found in code, not guessed: step 2 clamps `m_materialSampler` only (the
+   graph-material `heTexP` slots, six `setFragmentSamplerState:...m_materialSampler` sites in `MetalRenderer.mm`), while the
+   landscape layers and base textures bind `m_linearSampler` (e.g. ~14452 `atIndex:5`, ~15548 `atIndex:13`), which the UI,
+   post and sky passes share and which therefore cannot be clamped globally. A dedicated world-texture sampler for those binds
+   is the fix; whether the landscape textures carry mip chains at all was not checked.
+2. **The first dump of a session is not comparable:** the very first run had no terrain drawn (5 draws instead of 89, mean diff
+   14.9 against the later runs). Throw it away or warm up once; from the second run on, runs are identical.
+3. **Ultra, far lake:** the far lake shows horizontal banding in the GI-reflection image (visible in
+   `catania-low-vs-ultra-crop.png`). Not investigated, not part of this topic; mentioned so it is not mistaken for the preset.
+4. Not measured: frame time per preset (no perf capture on this machine's load).
+
+Dump override added for this: `HE_DUMP_QUALITYPRESET` in `dumpFrameHeadless` (`EditorApplication.cpp`).
+
 ## Handoff
 
-- **Topic / step:** 324 Engine quality settings, step 4 of 5 (global step id 1511). Earlier: step 1 (1508) model,
-  step 2 (1509) renderer/game wiring, step 3 (1510) script API.
-- **Branch / commit:** `claude/engine-quality-settings` (pushed: see the Hive artifact for the sha)
-- **Done:** Project settings ▸ World ▸ Quality page: preset combo + the regulators the presets are made of, help for
-  every control, rail entry, headless screenshots.
-- **Files touched:** `ProjectSettingsPanel.cpp` (`drawQualityPage` ~795, page table), `ProjectSettingsPanel.h` (`Page::Quality`),
-  `EditorSettingsPanel.h/.cpp` (`WorldQuality`: enum, rail, two mappings), `EditorHelp.cpp` (~5088 entries, ~10170 reference),
-  `tests/test_project_settings_ui.cpp` (page in the loop + 2 cases at the end).
-- **Verified:** he_tests build RC 0; `test_project_settings_ui` 8/8 (page draws over a real project and writes nothing by being
-  looked at; an Ultra project reads Ultra; a click on Ambient occlusion with the editor at SMAA / 0.8 render scale turns
-  the block on, keeps those values, reads Custom, and survives a reload through a fresh ProjectManager); full `ctest -j4`
-  362/362; `editor_help_audit.py --check` passes (1273/1273, was 1257 before the topic); screenshots looked at.
-- **Not verified:** the combo popup was not clicked (the preset combo is exercised only through its model);
-  no live editor was launched, so the viewport following a preset change on screen is unseen; no hover tooltips looked at;
-  Windows/Linux.
-- **Decisions taken:** the page lives under World next to Shadows (project data, not a Preferences page); shadows appear
-  on both pages and edit the same members; bloom, DoF, motion blur stay on their own pages; picking Custom is a no-op.
-- **Decisions suggested, not taken:** a "Reset to project defaults" button; showing the backend that ignores a level next to the
-  row (e.g. a greyed "Metal only" tag on Texture quality).
-- **Pending:** step 5 only: user documentation (docs site page `rendering#quality` and the anchors in the help entries),
-  a visible Low vs High A/B in the live editor (`HE_DUMP_TEXQUALITY`, `scripts/he_shot.py`, a scene with a mipped texture),
-  a PIE run that calls the quality rows from a script, and the final topic summary/PR.
-- **Traps:** (1) the UI tests' display is 900x620 and the page is taller: scroll with `ImGui::SetScrollY` in the body lambda
-  (see `showQualityPage`). (2) A new `ProjectSettingsPanel::Page` needs `pageTitle`, `drawPage`, `requestOpenProjectPage`,
-  `projectPageOf`, the rail table and `EditorSettingsPanel::Page` — all six, or a page is reachable but not listed.
-  (3) `EditorGraphics::capture` copies the editor's values but not `enabled`/`preset`.
-- **Next steps:** 1. Step 5: live-editor witness (open a project in the editor with `HE_HIDDEN_WINDOW=1` per
-  `docs/headless-runs.md`, set a preset through the page or `HE_DUMP_TEXQUALITY`, compare frames); never leave a
-  HorizonEditor running afterwards. 2. Write the docs page and fill the anchors. 3. Open the PR into `release/0.8.0`.
+- **Topic / step:** 324 Engine quality settings, step 5 of 5 (global step id 1512): live comparison on Catania; no PR (the human
+  asked for none). Earlier: 1508 model, 1509 renderer/game, 1510 script API, 1511 editor page.
+- **Branch / commit:** `claude/engine-quality-settings` (pushed: see the Hive artifact). No pull request opened.
+- **Done:** Low/Medium/High/Ultra rendered on the user's Catania project in the real editor, numbers and images in section 7.
+- **Files touched:** `EditorApplication.cpp` (~9060 `HE_DUMP_QUALITYPRESET`), this doc, `docs/engine-quality-settings-2026-11-05/catania-*.png`.
+- **Verified:** editor builds and runs (Release, Metal) on the branch; five presets + two baselines + two High repeats + two
+  texture-quality pairs rendered; noise floor 0.00-0.03; real Catania untouched (git status and mtimes checked).
+- **Not verified:** frame time per preset; D3D11/D3D12/Vulkan/OpenGL; the documentation page (`rendering#quality`) is not
+  written, so the help entries still have empty anchors; a script calling the quality rows during play in the live editor;
+  the preset combo clicked in the live editor.
+- **Decisions taken:** compare on a copy with a private config dir; noon and a fixed camera instead of the scene's own midnight
+  and default view; the first run discarded as a cold-start artifact.
+- **Decisions suggested, not taken:** give world textures (landscape layers, base textures) their own sampler so texture quality
+  reaches them (finding 1); investigate the Ultra far-lake banding; write the docs page.
+- **Pending:** the texture-quality fix above, the docs page, a perf measurement per preset (`he_perf_capture.py`), and when the human
+  wants it, the PR into `release/0.8.0`.
+- **Traps:** (1) `ninja HorizonEditor` can fail "dev MISMATCH": `HorizonVersion.h` bakes the git commit at configure time and the
+  dev tree and `out/build/release/sdk-release` configured at different commits; run `cmake out/build/release` and
+  `cmake out/build/release/sdk-release` once, then build. (2) The first dump of a session has no terrain: always discard it.
+  (3) Dumps need `HE_DUMP_SKYTEST=1` for the camera variables and `HE_DUMP_TERRAINTICK=1` for terrain chunks; the project is
+  passed as the `.heproj` argument. (4) Run on a copy; opening a project in the editor can write to it.
+- **Next steps:** 1. Decide with the human: fix texture quality for the landscape (new sampler for the world-texture binds in
+  `MetalRenderer.mm`, then re-run the ground-level pair with texture quality 0 and 2). 2. Docs page + anchors. 3. PR only on the human's word.

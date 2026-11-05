@@ -9064,6 +9064,34 @@ void EditorApplication::dumpFrameHeadless()
 	// loop-driven capture never fires.
 	r->SetOverlayCallback(nullptr);
 	{
+		// HE_DUMP_QUALITYPRESET=Low|Medium|High|Ultra: the quality preset for this
+		// capture only, taken the way a script's Set Quality Preset takes it while
+		// the preview plays — into the play-local copy that syncGraphicsSource and
+		// projectShadowSettings follow, so the project's file is never touched. It
+		// comes first: every override below (HE_DUMP_AA, HE_DUMP_GI, …) still wins
+		// over the preset's value.
+		if (const char* v = std::getenv("HE_DUMP_QUALITYPRESET"); v && *v)
+		{
+			HE::QualityPreset preset = HE::QualityPreset::Custom;
+			if (!HE::qualityPresetFromName(v, preset) || preset == HE::QualityPreset::Custom)
+				HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_QUALITYPRESET '%s' is not a preset "
+				                    "(Low, Medium, High, Ultra) — ignored", v);
+			else
+			{
+				m_playGraphics = m_projectLoaded ? m_projectManager.currentProject().settings.graphics
+				                                 : HE::ProjectGraphics{};
+				m_playShadows  = m_projectLoaded ? m_projectManager.currentProject().settings.shadows
+				                                 : HE::ProjectShadowSettings{};
+				if (!m_playGraphics.enabled) EditorGraphics::capture(m_editorConfig, m_playGraphics);
+				HE::applyQualityPreset(preset, m_playGraphics, m_playShadows);
+				m_playQualityActive = true;
+				syncGraphicsSource();   // m_editorConfig now holds the preset's values
+				HE_LOG_INFO(Editor, "EditorApplication: frame dump at quality preset %s",
+				            HE::qualityPresetName(preset));
+			}
+		}
+	}
+	{
 		// HE_DUMP_BLOOM=0|1: the bloom toggle for this capture only — the control
 		// shot that proves a bloom A/B has any bloom in it to compare.
 		IRenderer::BloomSettings bloom{
