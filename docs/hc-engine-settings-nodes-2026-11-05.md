@@ -47,20 +47,36 @@ With only 8 frames the terrain was sometimes still missing (async terrain genera
 * `tests/fixtures/game_build_config/HEGameBuildConfig.h` regenerated (new `autoQuality` JSON
   block); `test_project_settings_ui` bottom-of-page index moved by one.
 
+**Seen in the editor (headless UI shots, `HE_UI_DUMP_DIR`)**
+* Quality page with Automatic quality on (checkbox, target frame rate, lowest/highest level),
+  `test_project_settings_ui` "automatic quality switch" case; nodes on the real HC canvas
+  (`test_ui_shot.cpp` "engine-settings nodes": Get Engine Settings -> Set Quality Of, Get Quality
+  Level -> Switch on Enum with one exec pin per level + Default, enum pins green); the add menu
+  searched for "quality" lists all Settings rows and "Switch on QualityLevel" under Enums.
+
+**Governor in a running game (Metal, exported with `ProjectExporter`)**
+Target 1000 fps, unthrottled hidden run: `level 2 -> 1` at frame 181 (~2 s), `1 -> 0` 5 s later
+(3 s cooldown + 2 s), then it holds the floor. Log line "Automatic quality: level A -> B (...)" is
+new (`PlayerSettings.cpp` `tickAutoQuality`). Found on the way: a throttled background window
+(15 fps) would have counted as a miss, so `GameApplication` skips the tick while
+`IsInBackground()` and the throttle is on. The export did not carry `Config/ProjectSettings.json`
+unless `ExportSettings::projectSettingsFile` is set; copied by hand for the run.
+
+**Manual:** Website `rendering.html` has "Material quality", "Quality by area, with enums" (image
+`hc_engine_settings_nodes.png`) and "Automatic quality"; `docs-index.json` rebuilt. Committed in
+the Website repo (b35661a), NOT pushed, NOT deployed.
+
 **Not verified**
-* Nodes in the real editor UI (add menu, enum pin drawing, Switch pins); the new Quality page
-  section was only built, not looked at.
-* The governor in a running game (only unit-tested on numbers). No hardware run.
-* Material lane on D3D11/D3D12/Vulkan/OpenGL at runtime (shared fill helper, no backend file
-  touched; Metal only seen).
-* No per-feature pixel A/B of the octave reduction.
+* D3D11/D3D12/Vulkan/OpenGL: see Hive steps 7-10 of topic 336 (hardware or CI).
+* A pixel A/B of the material lane alone; the Catania shots show the whole Low preset.
+* The scripting-reference page for the new rows (generated page, not touched).
+* A player's menu flow (pick preset in the game turns auto off) beyond the unit tests.
 
 **Decisions taken:** enums are built-in registry types, not project assets; `Custom` is
 returned for mixed areas; governor stays out of the editor viewport.
 
 **Next steps, in order**
-1. Look at the Quality page section and the new nodes in the editor (`he_uishot.py`/live).
-2. Manual: website `rendering.html` and the scripting reference for the new nodes, enum and
-   automatic quality (the "Material quality" text there still says no consumer).
+1. Push and deploy the Website docs commit once the human approves (docs files only).
+2. Backends: Hive steps 7-10 (D3D, Vulkan, OpenGL, real display).
 3. Pixel A/B of material quality alone (a project copy with only `materialQuality` changed).
-4. Run a built game on Catania with automatic quality on and a slow machine/throttle.
+4. Decide the target-above-refresh-rate question (cap the target or warn in the dialog).

@@ -484,7 +484,14 @@ void tickAutoQuality(float realFrameSeconds)
 {
     State& s = state();
     if (!s.governorOn || !autoActive(s)) return;
-    if (s.governor.update(realFrameSeconds)) applyQuality();
+    const int before = s.governor.level();
+    if (s.governor.update(realFrameSeconds))
+    {
+        HE_LOG_INFO(Script, "Automatic quality: level %d -> %d (smoothed frame time %.1f ms, target %.0f fps)",
+                    before, s.governor.level(), s.governor.smoothedFrameTime() * 1000.0f,
+                    s.governor.config().targetFps);
+        applyQuality();
+    }
 }
 } // namespace settings
 

@@ -580,3 +580,48 @@ TEST_CASE("project settings ui: Quality - the first edit starts from the editor'
 	g_qualityScroll = -1.0f;
 	he_test::removeAllQuiet(dir);
 }
+
+TEST_CASE("project settings ui: Quality - the automatic quality switch is the last control, and turns its rows on")
+{
+	Harness harness;
+
+	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_quality_auto";
+	he_test::removeAllQuiet(dir);
+	ProjectManager pm;
+	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
+	REQUIRE_FALSE(pm.currentProject().settings.autoQuality.enabled);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(pm);
+	showQualityPage();
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	g_qualityScroll = 100000.0f;
+	for (int i = 0; i < 4; ++i) frame(ctx, false);
+
+	// Off: the checkbox is the last control on the page, nothing below it.
+	std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 4.0f);
+	REQUIRE(!items.empty());
+	clickAt(ctx, kPageX + 8.0f, items.back().mid);
+	const HE::ProjectAutoQuality& aq = pm.currentProject().settings.autoQuality;
+	CHECK(aq.enabled);
+	CHECK(aq.targetFps == doctest::Approx(60.0f));
+	CHECK_FALSE(pm.currentProject().settings.graphics.enabled);   // the preset block is not touched
+	REQUIRE(std::filesystem::exists(HE::projectSettingsPath(pm.projectRoot())));
+
+	// On: the checkbox plus three rows (frame rate, lowest, highest) end the page.
+	g_qualityScroll = 100000.0f;
+	he_ui::Image img;
+	for (int i = 0; i < 4; ++i) frame(ctx, false, i == 3 ? &img : nullptr);
+	REQUIRE(img.valid());
+	if (const char* dump = std::getenv("HE_UI_DUMP_DIR"); dump && *dump)
+		he_ui::writeBmp(img, std::string(dump) + "/quality-auto-on-bottom.bmp");
+	const std::vector<Item> on = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 4.0f);
+	CHECK(on.size() >= 4);
+
+	ProjectManager again;
+	REQUIRE(again.loadProject(pm.currentProject().path));
+	CHECK(again.currentProject().settings.autoQuality.enabled);
+
+	g_qualityScroll = -1.0f;
+	he_test::removeAllQuiet(dir);
+}
