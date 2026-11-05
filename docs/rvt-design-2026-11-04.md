@@ -589,7 +589,31 @@ Die Arrays starten mit **64 Scheiben** und wachsen mit den belegten Seiten: ein 
 | D3D12 | 140 MB | **31 MB** | 4,33 -> 4,27 |
 | Vulkan | 196 MB | **63 MB** | 3,13 -> 3,06 |
 
-Die Frame-Zeit ändert sich nicht (der Pool wächst in den ersten Frames, danach nichts mehr; ein Wachstumsschritt kostet im Bracket-Zeugen bis 4 ms auf D3D12). Was auf D3D11 noch bleibt (97 MB bei 20 MB Pool): nicht untersucht, auf D3D12 sind es 31 MB insgesamt.
+Die Frame-Zeit ändert sich nicht (der Pool wächst in den ersten Frames, danach nichts mehr; ein Wachstumsschritt kostet im Bracket-Zeugen bis 4 ms auf D3D12). Was auf D3D11 noch bleibt (97 MB bei 20 MB Pool, auf D3D12 sind es 31 MB insgesamt): siehe 9c.
+
+### 9c: der D3D11-Aufschlag aufgeschlüsselt (2026-11-05)
+
+**Messung.** `nvidia-smi` ist systemweit und eine Spitze; für die Aufschlüsselung habe ich `IDXGIAdapter3::QueryVideoMemoryInfo` (`CurrentUsage`, der Speicher **dieses Prozesses**) in den D3D11-Renderer gelegt, hinter `HE_RVT_MEMLOG=1` (eine Zeile in den Frames 2, 120, 240 ... 600, `D3D11Renderer: VRAM of this process at ...`). Die Zahl stimmt mit `nvidia-smi` überein (aus 411,7 MB, an 508,7 MB = die 97 MB). Die Arrays des Pools belegen ihren Speicher erst beim ersten Kopieren in sie (je Layer 5,6 MB bei 64 Scheiben). Dazu Marken in `DrawScene` während der ersten Seite (nur für die Suche, wieder entfernt) und eine Verzögerung des Treibers um 6 Frames, damit die Seiten erst nach den normalen Frames laufen.
+
+**Die 97 MB, aufgeschlüsselt (Mix-Szene schräg, Standardeinstellungen):**
+
+| Posten | MB | |
+|---|---|---|
+| Pool, 96 Scheiben | 25 | **0,263 MB je Seite** (gemessen als Steigung zwischen den Läufen mit 128 und 512 Seiten), nicht die rechnerischen 0,212: eine 136 x 136-Scheibe belegt mit Auffüllung des Treibers rund 24 % mehr |
+| **GPU-Kopie der Geometrie der ganzen Landschaft** | **53** | siehe unten |
+| **alte Pool-Arrays nach dem Wachsen (Fehler)** | **17** | siehe unten, **behoben** |
+| Rest (die drei Ansichts-Shader des Bakers ~1, Tabellen, Seitenziel, Tiefe) | ~2 | |
+
+**1. Fehler, behoben: ein freigegebenes Array blieb in D3D11 im Speicher.** Das Wachsen (9b) legt neue Arrays an und gibt die alten frei; auf D3D11 verließ der Speicher den Prozess nie (500 Frames lang unverändert, auch nach `Flush` und `ClearState`). Sichtbar wurde es mit einem kleinen Start (16 Scheiben): 16 -> 24 -> 36 -> 54 -> 81 kosteten **6 + 10 + 14 + 21 MB**, also jeweils die volle neue Größe, nicht den Zuwachs (der Treiber behält die freigegebenen Blöcke im Cache, und ein größeres Array passt nicht hinein). `IDXGIDevice3::Trim()` nach dem Wachsen (neben dem Lösen der Bindungen und `Flush`) gibt sie zurück: der Gesamtstand liegt danach genau bei der Summe der aktuellen Arrays. **D3D11-Aufschlag 97 -> 80 MB.** Kosten: ein Wachstumsschritt dauert rund 16 ms länger (`HE_DUMP_RVTTEST`-Bracket 0,8 -> 16,9 ms mit dem Schritt 64 -> 128); es gibt nur wenige Schritte je Lauf (1,5-fach, höchstens 2048 Seiten). D3D12 und Vulkan trifft das nicht (die Messung dort zeigt keinen Rest).
+
+**2. Befund, nicht behoben: 53 MB sind die Geometrie der ganzen Landschaft, ein zweites Mal auf der GPU.** Die Marken zeigen den Sprung (+53,2 MB) genau um `RefineBounds` im ersten Seiten-Draw (`m_frameCull.refine` ruft `resolveMesh`, das ein noch nicht hochgeladenes Mesh **hochlädt**, nur um seine Grenzen zu lesen), und er ist derselbe, wenn die Seiten erst nach sechs normalen Frames beginnen (also kein Reihenfolge- oder Größeneffekt). Die Scratch-Welt zeigt (6i) auf die **LOD0**-Meshes aller 256 Chunks; die echte Landschaft lädt nur die LODs hoch, die die Kamera braucht, in der Ferne grobe. 1 025 x 1 025 Eckpunkte zu je 32 Byte plus Indizes sind die 53 MB. Sie bleiben, solange die Landschaft aus Seiten gezeichnet wird, obwohl sie dann nur zum Neumalen gebraucht werden. Auf Metal gab 6i -64 MB; dort lagen diese Meshes bereits, hier nicht.
+
+Möglichkeiten, **nicht gebaut** (jede ändert etwas, das ich ohne Rückfrage nicht anfassen will):
+* **Nach Leerlauf freigeben:** die GPU-Kopien der Scratch-Chunks per `InvalidateMesh` loslassen, wenn die Seiten eine Weile nichts malen; der nächste Strich lädt sie wieder hoch (rund 50 MB, einige ms bis zehn ms Rucken beim ersten Strich nach der Pause, im Spiel meist nie). Die echte Landschaft lädt ihre nahen Chunks beim nächsten Frame selbst wieder.
+* **Grobe LODs für grobe Seiten:** die Scratch-Chunks nach Mip der Seite wählen. Ohne Nahtverbindung (die LOD-Stitch-Meshes) reißen die Kanten auf; das ist der Grund, warum 6i nur LOD0 teilt.
+* **Grenzen ohne Upload:** `RefineBounds` soll die Grenzen aus dem CPU-Asset lesen (`StaticMeshAsset`) statt ein Mesh hochzuladen; das spart die Zwischenspitze und nebenbei bei jeder Szene die Meshes, die nie sichtbar werden. Es ändert den allgemeinen Culling-Pfad, also nicht nebenbei.
+
+**Stand D3D11 nach 9c** (Mix-Szene schräg, 3 Läufe, Median): RVT-Aufschlag **80 MB** (vorher 190 mit 512-Scheiben-Pool, 97 mit dem wachsenden Pool), Frame-Zeit 7,47 -> 3,69 ms (unverändert).
 
 ## Handoff
 

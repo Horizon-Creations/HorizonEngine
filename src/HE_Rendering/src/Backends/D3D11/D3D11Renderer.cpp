@@ -62,6 +62,7 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi.h>
+#include <dxgi1_4.h>   // IDXGIAdapter3::QueryVideoMemoryInfo (HE_RVT_MEMLOG)
 #include <wrl/client.h>
 #include <glm/glm.hpp>
 #include <glm/gtc/type_ptr.hpp>
@@ -9111,8 +9112,32 @@ void D3D11Renderer::DrawViewportFrame()
     { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
 }
 
+// HE_RVT_MEMLOG=1: this process's own video memory (DXGI's CurrentUsage, not the whole machine's) at named points, for the RVT
+// memory work (Thema 333). Off by default; one query is a few microseconds.
+static void rvtMemLog(ID3D11Device* dev, const char* tag)
+{
+    static const bool on = [] { const char* e = std::getenv("HE_RVT_MEMLOG"); return e && *e && *e != '0'; }();
+    if (!on || !dev) return;
+    Microsoft::WRL::ComPtr<IDXGIDevice> dd;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> ad;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> ad3;
+    if (FAILED(dev->QueryInterface(IID_PPV_ARGS(&dd))) || FAILED(dd->GetAdapter(&ad)) || FAILED(ad.As(&ad3))) return;
+    DXGI_QUERY_VIDEO_MEMORY_INFO mi{};
+    if (FAILED(ad3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mi))) return;
+    HE_LOG_INFO(RHI, "D3D11Renderer: VRAM of this process at %s: %.1f MB", tag, double(mi.CurrentUsage) / (1024.0 * 1024.0));
+}
+
 void D3D11Renderer::Render()
 {
+    {
+        static unsigned s_memFrame = 0;
+        ++s_memFrame;
+        if (s_memFrame == 2 || (s_memFrame % 120 == 0 && s_memFrame <= 600))
+        {
+            char tag[48]; std::snprintf(tag, sizeof(tag), "render frame %u", s_memFrame);
+            rvtMemLog(m_impl->device.Get(), tag);
+        }
+    }
     auto& p = *m_impl;
     // Last frame's draw list was the last to name these; this frame's names the live SRV.
     p.retiredViewportSRVs.clear();
@@ -9422,6 +9447,15 @@ static bool ensureRvtSlot(D3D11RendererImpl& p, uint32_t slot)
                                              p.rvtPool[layer].Get(), D3D11CalcSubresource(0, i, 1), nullptr);
         p.rvtPool[layer] = std::move(tex);
         p.rvtPoolSRV[layer] = std::move(srv);
+    }
+    // A released texture does NOT leave video memory on D3D11 (measured, Thema 333): the old array stays in the driver's cache for good,
+    // and every later growth adds its full size on top (16 -> 24 -> 36 -> 54 -> 81 pages cost 6 + 10 + 14 + 21 MB, not the net 17).
+    // Unbind it (the context may hold the view), submit what touched it, and have the driver give its cached allocations back.
+    { ID3D11ShaderResourceView* none[4] = {}; p.context->PSSetShaderResources(HE::kRvtTableBinding, 4, none); }
+    p.context->Flush();
+    {
+        ComPtr<IDXGIDevice3> dxgi3;
+        if (SUCCEEDED(p.device.As(&dxgi3))) dxgi3->Trim();
     }
     HE_LOG_INFO(RHI, "D3D11Renderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", p.rvtAlloc, grown, p.rvtSlots,
                 double(grown) * p.rvtPagePx * p.rvtPagePx * 12.0 / (1024.0 * 1024.0));
