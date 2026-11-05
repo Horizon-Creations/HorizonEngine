@@ -231,31 +231,60 @@ So the shapes are patches of cloud, stretched flat by the grazing angle. The oth
 only because the non-ray-traced reflection path does not contain the cloud layer. Nothing to fix; it could be called a
 feature of the GI-reflection pass.
 
+## 9. Docs page
+
+The manual section **Quality Settings** (`rendering.html#quality`, between Weather and Performance Features): the presets table,
+what a preset leaves alone, texture quality (what it reaches, mip chain and distance caveats, Metal only), material quality,
+backends, and the script rows with a Lua and a Python example. Screenshot of how the editor's reader shows it:
+`manual-quality-settings-section.png`.
+
+Where it lives and how it got into the editor (this took a decision):
+* Source: `Website/HorizonEngineDocs/rendering.html` plus a sidebar link, and `docs-index.json` regenerated with
+  `build_docs_index.py` (diff checked: exactly one added section). Committed in the Website repo on `main` (`cf6a8c5`),
+  **local only: not pushed, not deployed** (publishing the site is a separate step that wants the human's word).
+* The editor's offline manual (`EditorDeps/Docs/he-docs.json`) was NOT regenerated: no Website checkout reproduces the committed
+  bundle (it already holds water, sequencer and settings sections that exist on other Website branches only, so a
+  regeneration from `main` deleted 10 sections and changed 20). Instead exactly one converted section, `quality`, was spliced into
+  the `rendering.html` page of the committed bundle (843 added lines, 0 removed, same JSON formatting). `build_docs_bundle.py --check`
+  would have reported the bundle stale before this change as well; the next regeneration from the branch that carries every docs
+  change will produce the same section.
+* The 16 help entries of the Quality page point at `rendering#quality` now (they were empty).
+* Tests: `test_docs_library` asks for the section itself (not the stale-anchor fallback), its two tables and listings, and a
+  search hit for "quality preset"; `test_ui_shot` has a scene for it.
+
 ## Handoff
 
-- **Topic / step:** 324 Engine quality settings, after step 5 (ids 1508 to 1512 done): texture quality on every world sampler and
-  the lake-banding investigation, both asked for after the Catania comparison. No PR (the human asked for none).
-- **Branch / commit:** `claude/engine-quality-settings` (pushed: see the Hive artifact). No pull request opened.
+- **Topic / step:** 324 Engine quality settings, after step 5 (ids 1508 to 1512 done): follow-ups asked for after the Catania
+  comparison (texture quality on every world sampler, banding) and now the docs page. No PR (the human asked for none).
+- **Branch / commit:** `claude/engine-quality-settings` (pushed: see the Hive artifact). No pull request opened. Website repo:
+  `main` `cf6a8c5`, local only.
 - **Done:** texture quality reaches mesh base colours as well as the landscape/graph-material textures on Metal; the banding is
-  explained; section 7's wrong finding is corrected in sections 7 and 8.
+  explained; section 7's wrong finding is corrected in sections 7 and 8; the manual has a Quality Settings section (section 9).
 - **Files touched:** `MetalRenderer.h` (`m_worldSampler`, `m_textureMinLod`, `ApplyTextureQuality`), `MetalRenderer.mm`
-  (`ApplyTextureQuality` ~12500, creation in `CreateScenePipeline` ~7950, five slot-0 binds), this doc, `catania-*.png`.
+  (`ApplyTextureQuality` ~12500, creation in `CreateScenePipeline` ~7950, five slot-0 binds), `EditorHelp.cpp` (16 anchors),
+  `EditorDeps/Docs/he-docs.json` (one spliced section), `tests/test_docs_library.cpp`, `tests/test_ui_shot.cpp`, this doc, `*.png`;
+  Website: `HorizonEngineDocs/rendering.html`, `docs-index.json`.
 - **Verified:** editor builds and runs; texture-quality 2/1/0 pairs at 3 m and 1.7 m; the log line "texture quality N — material and
-  world samplers start at mip level M" shows the rebuild; High/Ultra/Low unchanged by the change; full `ctest -j4` 362/362;
+  world samplers start at mip level M" shows the rebuild; High/Ultra/Low unchanged by the change; full `ctest -j4` 362/362 (twice, before
+  and after the docs work); `editor_help_audit.py --check` passes; the manual section renders in the reader (screenshot looked at);
   no editor process left; the real Catania untouched.
 - **Not verified:** the world sampler's visible effect (no mesh in Catania has a base-colour texture with mips); the live (per-frame)
   push path with a script during play; frame time per preset; D3D11/D3D12/Vulkan/OpenGL (texture quality is ignored there: no sampler
-  objects on GL, per-texture `glTexParameter`); the documentation page `rendering#quality` (help anchors still empty).
+  objects on GL, per-texture `glTexParameter`); the website page in a browser (only the editor reader was looked at); the bundle
+  against a full regeneration (see section 9).
 - **Decisions taken:** clamp a CLONE of the shared sampler for slot 0 instead of the shared sampler itself (slots 1 to 3 and the
-  UI/post/sky passes use it); particles, asset previews and the landscape weightmap keep full detail.
+  UI/post/sky passes use it); particles, asset previews and the landscape weightmap keep full detail; splice one section into the
+  committed manual bundle rather than regenerate it from an incomplete Website checkout; Website commit local only.
 - **Decisions suggested, not taken:** GL texture quality via `GL_TEXTURE_MIN_LOD` over its texture caches; a texture-quality line in the
-  Quality page that says "Metal only, textures with mip chains"; the docs page.
-- **Pending:** docs page + anchors; perf per preset (`he_perf_capture.py`); the PR into `release/0.8.0` when the human says so.
+  Quality page that says "Metal only, textures with mip chains"; pushing and deploying the Website docs.
+- **Pending:** push + deploy of the Website docs (human's word); perf per preset (`he_perf_capture.py`); the PR into `release/0.8.0`
+  when the human says so.
 - **Traps:** (1) `ninja HorizonEditor` can fail "dev MISMATCH": `HorizonVersion.h` bakes the git commit at configure time and the
   dev tree and `out/build/release/sdk-release` configured at different commits; run `cmake out/build/release` and
   `cmake out/build/release/sdk-release` once, then build. (2) The first dump of a session has no terrain: always discard it.
   (3) Dumps need `HE_DUMP_SKYTEST=1` for the camera variables and `HE_DUMP_TERRAINTICK=1` for terrain chunks; the project is
   passed as the `.heproj` argument. (4) Run on a copy; opening a project in the editor can write to it. (5) A texture-quality test
   needs the camera within about 2 m of the ground; farther away every mip is above the clamp and nothing changes.
-- **Next steps:** 1. Docs page + anchors. 2. A textured mesh with a mipped base-colour texture as the witness for `m_worldSampler`.
-  3. PR only on the human's word.
+- **Next steps:** 1. A textured mesh with a mipped base-colour texture as the witness for `m_worldSampler`. 2. Website push + deploy and
+  a regeneration of the manual bundle from the branch that has every docs change (`build_docs_bundle.py`; the spliced section must
+  come out identical). 3. PR only on the human's word.

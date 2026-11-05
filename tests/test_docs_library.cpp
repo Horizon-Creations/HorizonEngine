@@ -647,3 +647,34 @@ TEST_CASE("docs library: bundle paths follow the deploy layout")
 	CHECK(imageDir("/opt/HorizonEditor/") == "/opt/HorizonEditor/Docs/img/");
 	CHECK(bundlePath("") == "Docs/he-docs.json");
 }
+
+TEST_CASE("docs bundle: the Quality Settings section exists, is the exact target of the help anchors, and is found by search")
+{
+	// The 16 help entries of Project Settings ▸ World ▸ Quality all point at
+	// "rendering#quality". A stale anchor still lands on its page (resolve falls
+	// back), which would hide a missing section; so this asks for the section itself.
+	const Library lib = loadShipped();
+	if (!lib.loaded()) return;   // no bundle path in this build (see loadShipped)
+	int page = -1, section = -1;
+	REQUIRE(lib.resolve("rendering#quality", page, section));
+	REQUIRE(page >= 0);
+	REQUIRE(section >= 0);
+	const Section& s = lib.pages()[page].sections[section];
+	CHECK(s.id == "quality");
+	CHECK(s.title == "Quality Settings");
+	// The presets table and the script rows are reference tables, not flattened text.
+	int tables = 0, code = 0;
+	for (const Block& b : s.blocks)
+	{
+		tables += b.kind == BlockKind::Table;
+		code   += b.kind == BlockKind::Code;
+	}
+	CHECK(tables >= 2);
+	CHECK(code >= 2);
+	// What a person would type into the manual's search box.
+	bool found = false;
+	for (const Hit& h : lib.search("quality preset"))
+		found |= lib.pages()[h.page].sections[h.section].id == "quality";
+	CHECK(found);
+	CHECK(s.text.find("setQualityPreset") != std::string::npos);
+}

@@ -17565,6 +17565,849 @@
     {
      "blocks": [
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "One word instead of a dozen sliders. A "
+        },
+        {
+         "s": "b",
+         "t": "quality preset"
+        },
+        {
+         "s": "",
+         "t": " — "
+        },
+        {
+         "s": "b",
+         "t": "Low, Medium, High, Ultra"
+        },
+        {
+         "s": "",
+         "t": " or "
+        },
+        {
+         "s": "b",
+         "t": "Custom"
+        },
+        {
+         "s": "",
+         "t": " — sets shadows, anti-aliasing, render resolution, ambient occlusion, reflections, global illumination and texture detail together. It lives in "
+        },
+        {
+         "s": "c",
+         "t": "Project Settings » World » Quality"
+        },
+        {
+         "s": "",
+         "t": ", is saved in "
+        },
+        {
+         "s": "c",
+         "t": "Config/ProjectSettings.json"
+        },
+        {
+         "s": "",
+         "t": " beside the project, and is what both the editor viewport and the exported build draw with. A project that never opens the page keeps drawing exactly what it drew before: presets are opt-in, and a project without a choice reads as "
+        },
+        {
+         "s": "i",
+         "t": "Custom"
+        },
+        {
+         "s": "",
+         "t": "."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Setting"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Low"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Medium"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "High"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Ultra"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Anti-aliasing"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "FXAA"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "SMAA"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "SMAA"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "TAA"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Render scale"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "0.75"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1.0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1.0"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1.0"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Ambient occlusion"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Screen-space reflections"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · High"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Global illumination"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · High"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "GI reflections"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "off"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "on · High · 2 bounces"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Shadows"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "1024 px · 2 cascades · 100 m"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2048 px · 3 cascades · 200 m"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2048 px · 3 cascades · 250 m"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "4096 px · 3 cascades · 500 m"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Texture quality"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Material quality"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Medium"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "High"
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "The numbers are tuned by hand for “each step up looks visibly better and costs visibly more”; they are not benchmarked per machine. A preset leaves everything that is a matter of "
+        },
+        {
+         "s": "i",
+         "t": "look"
+        },
+        {
+         "s": "",
+         "t": " at equal cost alone — bloom, depth of field, motion blur, shadow bias, the render path — those stay on their own pages. Change any single value afterwards and the preset reads "
+        },
+        {
+         "s": "b",
+         "t": "Custom"
+        },
+        {
+         "s": "",
+         "t": "; picking Custom keeps the values as they are. While a project does not set its own graphics, the page shows what your editor draws with, and the first preset or change makes those values the project's."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Texture quality"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "b",
+         "t": "Low"
+        },
+        {
+         "s": "",
+         "t": " and "
+        },
+        {
+         "s": "b",
+         "t": "Medium"
+        },
+        {
+         "s": "",
+         "t": " keep textures off their finest two and one mip levels, so they read softer and take less memory bandwidth; "
+        },
+        {
+         "s": "b",
+         "t": "High"
+        },
+        {
+         "s": "",
+         "t": " uses every level, as the engine always did. It is a sampler setting, not a reload: a change at run time shows on the next frame. It reaches the landscape layers, material texture slots and the base colour of meshes, skinned meshes, decals and blended draws, but never the shadow map, the sky environment, ambient occlusion or the interface."
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "Two things to know. It only changes textures that carry a mip chain (cooked textures and the engine's landscape arrays do; a plain imported image has one level and looks the same), and it only shows where a pixel covers less ground than a texel of the clamped level — in practice within a metre or two of the camera. It acts on "
+        },
+        {
+         "s": "b",
+         "t": "Metal"
+        },
+        {
+         "s": "",
+         "t": " today; the other backends ignore the setting. "
+        },
+        {
+         "s": "b",
+         "t": "Material quality"
+        },
+        {
+         "s": "",
+         "t": " is stored with the preset and handed to the renderer, but no material feature switches on it yet."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "Backends"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A level a backend does not have is ignored silently. Cascaded shadows are drawn on Metal and OpenGL; Direct3D and Vulkan keep one whole-scene shadow map. Anti-aliasing methods a backend cannot do fall back to a simpler one (TAA -> SMAA, MetalFX -> TAA), and screen-space reflections, global illumination and GI reflections are used only where the backend can do them."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "From scripts"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A game's graphics menu is a "
+        },
+        {
+         "s": "b",
+         "t": "player setting"
+        },
+        {
+         "s": "",
+         "t": ": it sits in the same store as VSync, fullscreen and volume, so "
+        },
+        {
+         "s": "c",
+         "t": "settings.save"
+        },
+        {
+         "s": "",
+         "t": " keeps it and "
+        },
+        {
+         "s": "c",
+         "t": "settings.resetToDefaults"
+        },
+        {
+         "s": "",
+         "t": " hands back the project's own values. It never edits the project file, in the exported game or in the editor preview. The same six rows exist in HorizonCode ("
+        },
+        {
+         "s": "i",
+         "t": "Set Quality Preset"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Get Quality Preset"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Quality Preset Names"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Set Quality Value"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Get Quality Value"
+        },
+        {
+         "s": "",
+         "t": ", "
+        },
+        {
+         "s": "i",
+         "t": "Quality Fields"
+        },
+        {
+         "s": "",
+         "t": "), Lua, Python and C++:"
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Row"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "What it does"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.setQualityPreset(name)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low, Medium, High or Ultra, case-insensitive; “Custom” is accepted and changes nothing; anything else returns false. Replaces single values chosen before."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityPreset()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "What the values read as now: a preset name, or “Custom” once a single value moved off a preset."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityPresetNames()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Low, Medium, High, Ultra, Custom — to fill a drop-down."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.setQualityValue(field, value)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "One regulator by name. Yes/no fields take 0 or 1; values are clamped to the field's range; an unknown name returns false."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityValue(field)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The current value, 0 for an unknown name."
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "c",
+           "t": "settings.qualityFields()"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "The field names: "
+          },
+          {
+           "s": "c",
+           "t": "antiAliasing"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "renderScale"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "ssaoEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "ssrEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "ssrQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giShadowQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giReflectionsEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giReflQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "giReflBounces"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "textureQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "materialQuality"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "bloomEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "dofEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "motionBlurEnabled"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "shadowDistance"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "shadowCascades"
+          },
+          {
+           "s": "",
+           "t": ", "
+          },
+          {
+           "s": "c",
+           "t": "shadowResolution"
+          },
+          {
+           "s": "",
+           "t": "."
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "code",
+       "text": "-- A graphics menu: pick a preset, then nudge one value\nhorizon.settings.setQualityPreset(\"High\")\nhorizon.settings.setQualityValue(\"textureQuality\", 1)\n\n-- the preset now reads \"Custom\"; save it for the next start\nlocal name = horizon.settings.qualityPreset()\nhorizon.settings.save()",
+       "title": "graphics_menu.lua"
+      },
+      {
+       "k": "code",
+       "text": "import horizon\n\nhorizon.settings.setQualityPreset(\"Ultra\")\nfor field in horizon.settings.qualityFields():\n    print(field, horizon.settings.qualityValue(field))",
+       "title": "graphics_menu.py"
+      }
+     ],
+     "eyebrow": "Settings",
+     "id": "quality",
+     "text": "One word instead of a dozen sliders. A quality preset — Low, Medium, High, Ultra or Custom — sets shadows, anti-aliasing, render resolution, ambient occlusion, reflections, global illumination and texture detail together. It lives in Project Settings » World » Quality, is saved in Config/ProjectSettings.json beside the project, and is what both the editor viewport and the exported build draw with. A project that never opens the page keeps drawing exactly what it drew before: presets are opt-in, and a project without a choice reads as Custom. Setting Low Medium High Ultra Anti-aliasing FXAA SMAA SMAA TAA Render scale 0.75 1.0 1.0 1.0 Ambient occlusion off on on on Screen-space reflections off off on · Medium on · High Global illumination off off on · Medium on · High GI reflections off off off on · High · 2 bounces Shadows 1024 px · 2 cascades · 100 m 2048 px · 3 cascades · 200 m 2048 px · 3 cascades · 250 m 4096 px · 3 cascades · 500 m Texture quality Low Medium High High Material quality Low Medium High High The numbers are tuned by hand for “each step up looks visibly better and costs visibly more”; they are not benchmarked per machine. A preset leaves everything that is a matter of look at equal cost alone — bloom, depth of field, motion blur, shadow bias, the render path — those stay on their own pages. Change any single value afterwards and the preset reads Custom; picking Custom keeps the values as they are. While a project does not set its own graphics, the page shows what your editor draws with, and the first preset or change makes those values the project's. Texture quality Low and Medium keep textures off their finest two and one mip levels, so they read softer and take less memory bandwidth; High uses every level, as the engine always did. It is a sampler setting, not a reload: a change at run time shows on the next frame. It reaches the landscape layers, material texture slots and the base colour of meshes, skinned meshes, decals and blended draws, but never the shadow map, the sky environment, ambient occlusion or the interface. Two things to know. It only changes textures that carry a mip chain (cooked textures and the engine's landscape arrays do; a plain imported image has one level and looks the same), and it only shows where a pixel covers less ground than a texel of the clamped level — in practice within a metre or two of the camera. It acts on Metal today; the other backends ignore the setting. Material quality is stored with the preset and handed to the renderer, but no material feature switches on it yet. Backends A level a backend does not have is ignored silently. Cascaded shadows are drawn on Metal and OpenGL; Direct3D and Vulkan keep one whole-scene shadow map. Anti-aliasing methods a backend cannot do fall back to a simpler one (TAA -> SMAA, MetalFX -> TAA), and screen-space reflections, global illumination and GI reflections are used only where the backend can do them. From scripts A game's graphics menu is a player setting: it sits in the same store as VSync, fullscreen and volume, so settings.save keeps it and settings.resetToDefaults hands back the project's own values. It never edits the project file, in the exported game or in the editor preview. The same six rows exist in HorizonCode (Set Quality Preset, Get Quality Preset, Quality Preset Names, Set Quality Value, Get Quality Value, Quality Fields), Lua, Python and C++: Row What it does settings.setQualityPreset(name) Low, Medium, High or Ultra, case-insensitive; “Custom” is accepted and changes nothing; anything else returns false. Replaces single values chosen before. settings.qualityPreset() What the values read as now: a preset name, or “Custom” once a single value moved off a preset. settings.qualityPresetNames() Low, Medium, High, Ultra, Custom — to fill a drop-down. settings.setQualityValue(field, value) One regulator by name. Yes/no fields take 0 or 1; values are clamped to the field's range; an unknown name returns false. settings.qualityValue(field) The current value, 0 for an unknown name. settings.qualityFields() The field names: antiAliasing, renderScale, ssaoEnabled, ssrEnabled, ssrQuality, giEnabled, giShadowQuality, giReflectionsEnabled, giReflQuality, giReflBounces, textureQuality, materialQuality, bloomEnabled, dofEnabled, motionBlurEnabled, shadowDistance, shadowCascades, shadowResolution. graphics_menu.lua -- A graphics menu: pick a preset, then nudge one value\nhorizon.settings.setQualityPreset(\"High\")\nhorizon.settings.setQualityValue(\"textureQuality\", 1)\n\n-- the preset now reads \"Custom\"; save it for the next start\nlocal name = horizon.settings.qualityPreset()\nhorizon.settings.save() graphics_menu.py import horizon\n\nhorizon.settings.setQualityPreset(\"Ultra\")\nfor field in horizon.settings.qualityFields():\n    print(field, horizon.settings.qualityValue(field))",
+     "title": "Quality Settings"
+    },
+    {
+     "blocks": [
+      {
        "head": [
         [
          {

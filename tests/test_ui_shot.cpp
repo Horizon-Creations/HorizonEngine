@@ -1134,6 +1134,29 @@ TEST_CASE("ui shot: a page of tables and a diagram")
 	DocsPanel::close();
 }
 
+TEST_CASE("ui shot: the Quality Settings section of the manual")
+{
+	// The newest section of the rendering page: a five-column presets table, three
+	// sub-headings, a script-rows table and two listings. Taller than the other
+	// shots so the table and the first sub-heading are both in frame.
+	constexpr int W = 1000, H = 900;
+	Harness harness(W, H);
+	const DocsPanel::Host host = hostOf(harness);
+
+	HE::Ed::Docs::Library& lib = HE::Ed::Docs::library();
+#ifdef HE_DOCS_BUNDLE_PATH
+	REQUIRE(lib.load(HE_DOCS_BUNDLE_PATH));
+#endif
+	HE::Ed::NodeReference::install(lib);
+
+	DocsPanel::openTopic("rendering#quality");
+	const he_ui::Image img = shoot("docs-quality", W, H, 4,
+	                               [&](int) { DocsPanel::draw(host); });
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 60000);
+	DocsPanel::close();
+}
+
 TEST_CASE("ui shot: searching the manual from the reader")
 {
 	constexpr int W = 1000, H = 640;
