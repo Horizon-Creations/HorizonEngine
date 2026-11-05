@@ -628,6 +628,16 @@ Möglichkeiten, **nicht gebaut** (jede ändert etwas, das ich ohne Rückfrage ni
 
 **Nicht gemessen:** der Ruckler beim Hochladen nach der Pause. Der erste Mal-Tick (alles hochladen, Shader, Pipelines) braucht 175 ms; das ist die Obergrenze, der Anteil der Geometrie ist nicht getrennt gemessen. D3D12, Vulkan und OpenGL: der Aufruf ist in der Szene gemeinsam, sie lassen die GPU-Kopien über ihr eigenes `InvalidateMesh` los; ob dort der Speicher zurückkommt, ist nicht gemessen (D3D12 hat im Gesamtaufschlag nur 31 MB, der Fall war dort nie groß).
 
+**Die anderen drei Backends gemessen (2026-11-05, Mix schräg, `nvidia-smi` systemweit, gleiche Szene, 204 Meshes jeweils freigegeben):** keine messbare Wirkung. Gleicher Lauf mit `HE_RVT_IDLE_RELEASE=0` (nie) gegen `0.3`, Stand nach dem Einschwingen, jeweils minus der Messung vor dem Start; die Läufe streuen um etwa 20 MB:
+
+| Backend | ohne RVT | RVT, nie freigeben | RVT, Freigabe 0,3 s |
+|---|---|---|---|
+| D3D12 | 529 | 534 | 561 |
+| Vulkan | 692 | 755 | 755 |
+| OpenGL | 540 | 675 | 674 |
+
+D3D12 und Vulkan geben die Puffer über ihre Retire-Listen korrekt frei, der Aufschlag war dort aber nie groß (5 bis 63 MB), es gibt nichts, was die Freigabe zurückholen könnte. **OpenGL kostet 135 MB mehr mit RVT, und die Freigabe ändert daran nichts**: dort steckt der Aufschlag woanders (nicht untersucht; der Treiber gibt gelöschte Puffer vielleicht nicht zurück, es gibt kein `Trim` wie in D3D11). Die Freigabe bleibt für alle Backends an (sie schadet nicht), wirkt aber nur auf D3D11.
+
 ## Handoff
 
 - **Topic / step:** 333, Schritte 1 bis 8 gebaut und abgenommen **mit Einschränkungen** (5: Segmentierung als Stand-in für Tiles; 6: D3D12, Vulkan, OpenGL und (Schritt 6f, Branch `claude/rvt-metal`) **Metal**; 7: Projekteinstellung, Seite, Statusansicht; 8: Abnahme am exportierten Spiel; 8b: mit dem Mix-Material und einer Landschaft im Bild **25 bis 53 % weniger Frame-Zeit auf D3D11/D3D12/Vulkan, 140 bis 240 MB VRAM Preis**; die Szene aus Schritt 8 allein (billiges Material, Landschaft kaum im Bild) war kein Test).
