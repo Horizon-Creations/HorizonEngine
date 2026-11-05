@@ -14127,6 +14127,21 @@ void EditorApplication::setPlayMode(bool play)
 				return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
 				                                         : m_audioEngine.getBusVolume(bus);
 			};
+			// Graphics quality: the base is the project's own values; the player's
+			// choice lands in the play-local copy (see m_playGraphics), never in the
+			// project, and the viewport follows it until play stops.
+			m_playQualityActive = false;
+			if (m_projectLoaded)
+			{
+				host.baseGraphics = m_projectManager.currentProject().settings.graphics;
+				host.baseShadows  = m_projectManager.currentProject().settings.shadows;
+			}
+			host.applyQuality = [this](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+			{
+				m_playGraphics      = g;
+				m_playShadows       = s;
+				m_playQualityActive = true;
+			};
 			HE::api::settings::install(std::move(host));
 		}
 
@@ -14281,6 +14296,7 @@ void EditorApplication::setPlayMode(bool play)
 		if (HE::api::settings::installed())
 		{
 			HE::api::settings::uninstall();
+			m_playQualityActive = false;   // the viewport goes back to the project's graphics
 			input().stickDeadzone   = m_editorConfig.GamepadStickDeadzone;
 			input().triggerDeadzone = m_editorConfig.GamepadTriggerDeadzone;
 			if (m_audioEngine.isInitialized())
@@ -14482,7 +14498,8 @@ std::string EditorApplication::gameInstancePath()
 void EditorApplication::syncGraphicsSource()
 {
 	const HE::ProjectGraphics* project =
-		m_projectLoaded ? &m_projectManager.currentProject().settings.graphics : nullptr;
+		m_playQualityActive ? &m_playGraphics
+		: m_projectLoaded   ? &m_projectManager.currentProject().settings.graphics : nullptr;
 	// One set of graphics rows (Preferences ▸ Graphics): when the project sets its
 	// own, the viewport shows them — what you see is what ships.
 	const bool follow = project && project->enabled;
@@ -14519,9 +14536,10 @@ float EditorApplication::playTriggerDeadzone()
 IRenderer::ShadowSettings EditorApplication::projectShadowSettings()
 {
 	IRenderer::ShadowSettings out;
-	if (m_projectLoaded)
+	if (m_projectLoaded || m_playQualityActive)
 	{
-		const HE::ProjectShadowSettings& s = m_projectManager.currentProject().settings.shadows;
+		const HE::ProjectShadowSettings& s = m_playQualityActive
+			? m_playShadows : m_projectManager.currentProject().settings.shadows;
 		out.distance     = s.distance;
 		out.cascadeCount = s.cascadeCount;
 		out.resolution   = s.resolution;

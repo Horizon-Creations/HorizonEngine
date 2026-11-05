@@ -451,6 +451,45 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Python)")
     CHECK(t.position.z == doctest::Approx(9.0f));   // max(2, 9)
 }
 
+// The graphics quality rows, from a Python menu: asserted inside the script.
+static const char* kPyQuality = R"py(
+import horizon
+
+class QualityUser(horizon.Behavior):
+    def on_start(self):
+        assert horizon.settings.setQualityPreset("Ultra") is True
+        assert horizon.settings.qualityPreset() == "Ultra"
+        assert horizon.settings.setQualityValue("shadowResolution", 1024) is True
+        assert horizon.settings.qualityPreset() == "Custom"
+        assert horizon.settings.qualityValue("shadowResolution") == 1024
+        assert "textureQuality" in horizon.settings.qualityFields()
+        assert horizon.settings.qualityPresetNames()[0] == "Low"
+        horizon.setPosition(self.entity_id, 1, 2, 3)
+)py";
+
+TEST_CASE("ScriptContext: horizon.settings quality rows reach the player's settings store (Python)")
+{
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+    HE::api::settings::Host host;
+    host.applyQuality = [](const HE::ProjectGraphics&, const HE::ProjectShadowSettings&) {};
+    HE::api::settings::install(std::move(host));
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    REQUIRE(ctx.loadScript("pyquality", kPyQuality, HE::ScriptLanguage::Python));
+    auto e  = makeEntity(world, "QualityHero");
+    auto id = ctx.createInstance("pyquality", e);
+    REQUIRE(id != ScriptEngine::kInvalidInstance);
+    REQUIRE(ctx.callOnStart(id));
+    // The script's asserts ran: the position is its last statement.
+    const auto& t = world.registry().get<TransformComponent>(e);
+    CHECK(t.position.z == doctest::Approx(3.0f));
+
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+}
+
 // Bitwise, both ways: Python's own operators (a language feature, nothing the
 // engine adds) and the six registry rows. Asserted INSIDE the script, so the
 // values never leave Python's exact ints — the position detour the math case

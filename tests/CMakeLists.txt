@@ -1253,7 +1253,7 @@ set(HCGEN_CLASSES
     LatentFlow Enums Structs GameInstance GiCaller EngineEvents
     CastTarget Casts InheritBase InheritDerived
     InheritNovarsBase InheritNovars InputActions Containers Reroutes
-    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings PlayerSlots
+    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings QualitySettings PlayerSlots
     PullConstruct PullSpawner BindTo
     ExtractDestruct ExtractDerived ExtractListener
     EngineWorld

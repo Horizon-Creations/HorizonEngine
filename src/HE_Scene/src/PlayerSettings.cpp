@@ -85,21 +85,67 @@ void applyVolumes(const std::map<std::string, float>& before)
     for (const auto& [bus, v] : state().values.volumes)
         if (!before.count(bus)) applyVolume(bus);
 }
+bool hasQuality(const Values& v) { return v.qualityPreset.has_value() || !v.quality.empty(); }
+
+// What the player's graphics choice comes to: the project's values (the host's
+// base), the preset over them, the single values over that. `enabled` is on
+// whenever the player chose anything, because the project's graphics block is
+// only followed while it is; `preset` says what the numbers read as now.
+struct EffectiveQuality
+{
+    HE::ProjectGraphics       graphics;
+    HE::ProjectShadowSettings shadows;
+};
+EffectiveQuality effectiveQuality()
+{
+    const State& s = state();
+    EffectiveQuality e{ s.host.baseGraphics, s.host.baseShadows };
+    if (s.values.qualityPreset)
+        if (HE::QualityPreset p; HE::qualityPresetFromName(*s.values.qualityPreset, p))
+            HE::applyQualityPreset(p, e.graphics, e.shadows);
+    for (const auto& [name, v] : s.values.quality)
+        HE::setQualityField(e.graphics, e.shadows, name, v);
+    if (hasQuality(s.values)) e.graphics.enabled = true;
+    e.graphics.preset = HE::detectQualityPreset(e.graphics, e.shadows);
+    return e;
+}
+void applyQuality()
+{
+    const State& s = state();
+    if (!s.host.applyQuality) return;
+    const EffectiveQuality e = effectiveQuality();
+    s.host.applyQuality(e.graphics, e.shadows);
+}
+
 // The camera values have no hook: the rig controller reads values() itself,
 // every frame, so there is nothing to push.
-void applyAll(const std::map<std::string, float>& volumesBefore)
+// Graphics are pushed only when the player has a choice now or had one a moment
+// ago (so a reset hands the project's values back); a player who never touched
+// them leaves the application's own graphics exactly as they were.
+void applyAll(const std::map<std::string, float>& volumesBefore, bool hadQuality)
 {
     applyDeadzone();
     applyVSync();
     applyFullscreen();
     applyVolumes(volumesBefore);
+    if (hadQuality || hasQuality(state().values)) applyQuality();
 }
 // Replace the held values and apply the difference.
 void replace(Values v)
 {
     const std::map<std::string, float> before = std::move(state().values.volumes);
+    const bool hadQuality = hasQuality(state().values);
     state().values = std::move(v);
-    applyAll(before);
+    applyAll(before, hadQuality);
+}
+
+// A quality value in the form the store keeps it: the field's own clamp and
+// rounding, so a hand-edited 1.4 for a three-level field cannot reach the row.
+bool normalisedQuality(const std::string& field, float value, float& out)
+{
+    HE::ProjectGraphics g;
+    HE::ProjectShadowSettings sh;
+    return HE::setQualityField(g, sh, field, value) && HE::getQualityField(g, sh, field, out);
 }
 
 Values sanitized(Values v)
@@ -107,13 +153,29 @@ Values sanitized(Values v)
     if (v.stickDeadzone)         v.stickDeadzone         = clampDeadzone(*v.stickDeadzone);
     if (v.stickSensitivityScale) v.stickSensitivityScale = clampScale(*v.stickSensitivityScale);
     for (auto& [bus, vol] : v.volumes) vol = clampVolume(vol);
+    // Graphics: a preset name the engine knows (never "Custom"), canonical spelling;
+    // single values only for fields that exist, in range.
+    if (v.qualityPreset)
+    {
+        HE::QualityPreset p;
+        if (HE::qualityPresetFromName(*v.qualityPreset, p) && p != HE::QualityPreset::Custom)
+            v.qualityPreset = HE::qualityPresetName(p);
+        else
+            v.qualityPreset.reset();
+    }
+    for (auto it = v.quality.begin(); it != v.quality.end();)
+    {
+        float n = 0.0f;
+        if (normalisedQuality(it->first, it->second, n)) { it->second = n; ++it; }
+        else it = v.quality.erase(it);
+    }
     return v;
 }
 
 bool isEmpty(const Values& v)
 {
     return !v.stickDeadzone && !v.stickSensitivityScale && !v.stickInvertY
-        && !v.vsync && !v.fullscreen && v.volumes.empty();
+        && !v.vsync && !v.fullscreen && v.volumes.empty() && !hasQuality(v);
 }
 } // namespace
 
@@ -122,7 +184,7 @@ void install(Host host)
     State& s = state();
     s.host      = std::move(host);
     s.installed = true;
-    applyAll({});   // buses the player never set are the project's already
+    applyAll({}, false);   // buses the player never set are the project's already
 }
 
 void uninstall()
@@ -151,6 +213,13 @@ std::string toJson(const Values& v)
         nlohmann::json vol = nlohmann::json::object();
         for (const auto& [bus, gain] : v.volumes) vol[bus] = gain;
         j["volumes"] = std::move(vol);
+    }
+    if (v.qualityPreset) j["qualityPreset"] = *v.qualityPreset;
+    if (!v.quality.empty())
+    {
+        nlohmann::json q = nlohmann::json::object();
+        for (const auto& [field, value] : v.quality) q[field] = value;
+        j["quality"] = std::move(q);
     }
     return j.dump();
 }
@@ -182,6 +251,14 @@ bool fromJson(const std::string& json, Values& out)
         for (const auto& [bus, gain] : it->items())
             if (!bus.empty() && gain.is_number())
                 if (const float f = gain.get<float>(); std::isfinite(f)) out.volumes[bus] = f;
+    // The graphics choice: sanitized() below drops a name or field the engine
+    // does not know, so a file from a newer build loses only what it cannot read.
+    if (auto it = j.find("qualityPreset"); it != j.end() && it->is_string())
+        out.qualityPreset = it->get<std::string>();
+    if (auto it = j.find("quality"); it != j.end() && it->is_object())
+        for (const auto& [field, value] : it->items())
+            if (value.is_number())
+                if (const float f = value.get<float>(); std::isfinite(f)) out.quality[field] = f;
     out = sanitized(std::move(out));
     return true;
 }
@@ -227,6 +304,69 @@ float volume(const std::string& bus)
     const State& s = state();
     if (auto it = s.values.volumes.find(name); it != s.values.volumes.end()) return it->second;
     return s.host.currentVolume ? s.host.currentVolume(name) : 1.0f;
+}
+
+bool setQualityPreset(const std::string& name)
+{
+    HE::QualityPreset p;
+    if (!HE::qualityPresetFromName(name, p))
+    {
+        HE_LOG_WARN(Script, "settings.setQualityPreset: \"%s\" is not a preset (Low, Medium, High, Ultra)",
+                    name.c_str());
+        return false;
+    }
+    // Custom is what single values read as; choosing it keeps the values as they are.
+    if (p == HE::QualityPreset::Custom) return true;
+    State& s = state();
+    s.values.qualityPreset = HE::qualityPresetName(p);
+    s.values.quality.clear();   // a preset chosen after single values replaces them
+    applyQuality();
+    return true;
+}
+
+std::string qualityPreset()
+{
+    return HE::qualityPresetName(effectiveQuality().graphics.preset);
+}
+
+std::vector<std::string> qualityPresetNames()
+{
+    std::vector<std::string> names;
+    for (int i = 0; i < HE::kQualityPresetCount; ++i)
+        names.push_back(HE::qualityPresetName(static_cast<HE::QualityPreset>(i)));
+    return names;
+}
+
+bool setQualityValue(const std::string& field, float value)
+{
+    if (!usable(value, "settings.setQualityValue")) return false;
+    float n = 0.0f;
+    if (!normalisedQuality(field, value, n))
+    {
+        HE_LOG_WARN(Script, "settings.setQualityValue: \"%s\" is not a quality field (see qualityFields)",
+                    field.c_str());
+        return false;
+    }
+    state().values.quality[field] = n;
+    applyQuality();
+    return true;
+}
+
+float qualityValue(const std::string& field)
+{
+    const EffectiveQuality e = effectiveQuality();
+    float v = 0.0f;
+    if (!HE::getQualityField(e.graphics, e.shadows, field, v))
+        HE_LOG_WARN(Script, "settings.qualityValue: \"%s\" is not a quality field (see qualityFields)",
+                    field.c_str());
+    return v;
+}
+
+std::vector<std::string> qualityFields()
+{
+    std::vector<std::string> names;
+    for (int i = 0; i < HE::qualityFieldCount(); ++i) names.push_back(HE::qualityFieldName(i));
+    return names;
 }
 } // namespace settings
 

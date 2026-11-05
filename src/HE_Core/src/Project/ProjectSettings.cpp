@@ -8,6 +8,8 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <iterator>
+#include <type_traits>
 
 namespace HE {
 
@@ -302,6 +304,97 @@ QualityPreset detectQualityPreset(const ProjectGraphics& g, const ProjectShadowS
             return static_cast<QualityPreset>(i);
     }
     return QualityPreset::Custom;
+}
+
+namespace
+{
+struct QualityField
+{
+    const char* name;
+    float lo, hi;
+    float (*get)(const ProjectGraphics&, const ProjectShadowSettings&);
+    void  (*set)(ProjectGraphics&, ProjectShadowSettings&, float);   // already clamped
+};
+
+// A graphics member: range from the field list's own column, so the table
+// cannot disagree with what ProjectSettings::clamp() enforces.
+#define HE_QF_GFX(member, lo, hi) \
+    { #member, static_cast<float>(lo), static_cast<float>(hi), \
+      [](const ProjectGraphics& g, const ProjectShadowSettings&) { return static_cast<float>(g.member); }, \
+      [](ProjectGraphics& g, ProjectShadowSettings&, float v) \
+      { \
+          if constexpr (std::is_same_v<decltype(g.member), bool>) g.member = v >= 0.5f; \
+          else if constexpr (std::is_same_v<decltype(g.member), int>) g.member = static_cast<int>(std::lround(v)); \
+          else g.member = v; \
+      } }
+
+const QualityField kQualityFields[] = {
+    HE_QF_GFX(antiAliasing,          0.0, 4.0),
+    HE_QF_GFX(renderScale,           0.25, 2.0),
+    HE_QF_GFX(ssaoEnabled,           0.0, 1.0),
+    HE_QF_GFX(ssrEnabled,            0.0, 1.0),
+    HE_QF_GFX(ssrQuality,            0.0, 2.0),
+    HE_QF_GFX(giEnabled,             0.0, 1.0),
+    HE_QF_GFX(giShadowQuality,       0.0, 2.0),
+    HE_QF_GFX(giReflectionsEnabled,  0.0, 1.0),
+    HE_QF_GFX(giReflQuality,         0.0, 2.0),
+    HE_QF_GFX(giReflBounces,         1.0, 4.0),
+    HE_QF_GFX(textureQuality,        0.0, 2.0),
+    HE_QF_GFX(materialQuality,       0.0, 2.0),
+    HE_QF_GFX(bloomEnabled,          0.0, 1.0),
+    HE_QF_GFX(dofEnabled,            0.0, 1.0),
+    HE_QF_GFX(motionBlurEnabled,     0.0, 1.0),
+    { "shadowDistance", 1.0f, ProjectShadowSettings::kMaxDistance,
+      [](const ProjectGraphics&, const ProjectShadowSettings& s) { return s.distance; },
+      [](ProjectGraphics&, ProjectShadowSettings& s, float v) { s.distance = v; } },
+    { "shadowCascades", 1.0f, static_cast<float>(ProjectShadowSettings::kMaxCascades),
+      [](const ProjectGraphics&, const ProjectShadowSettings& s) { return static_cast<float>(s.cascadeCount); },
+      [](ProjectGraphics&, ProjectShadowSettings& s, float v) { s.cascadeCount = static_cast<int>(std::lround(v)); } },
+    { "shadowResolution", static_cast<float>(ProjectShadowSettings::kMinResolution),
+      static_cast<float>(ProjectShadowSettings::kMaxResolution),
+      [](const ProjectGraphics&, const ProjectShadowSettings& s) { return static_cast<float>(s.resolution); },
+      [](ProjectGraphics&, ProjectShadowSettings& s, float v)
+      {
+          int p = ProjectShadowSettings::kMinResolution;
+          while (p < v && p < ProjectShadowSettings::kMaxResolution) p <<= 1;
+          // The nearer power of two, not always the next one up.
+          if (p > ProjectShadowSettings::kMinResolution && (p - v) > (v - p / 2)) p >>= 1;
+          s.resolution = p;
+      } },
+};
+#undef HE_QF_GFX
+
+const QualityField* findQualityField(const std::string& name)
+{
+    for (const QualityField& f : kQualityFields)
+        if (name == f.name) return &f;
+    return nullptr;
+}
+} // namespace
+
+int qualityFieldCount() { return static_cast<int>(std::size(kQualityFields)); }
+
+const char* qualityFieldName(int index)
+{
+    return (index >= 0 && index < qualityFieldCount()) ? kQualityFields[index].name : nullptr;
+}
+
+bool getQualityField(const ProjectGraphics& g, const ProjectShadowSettings& shadows,
+                     const std::string& name, float& out)
+{
+    const QualityField* f = findQualityField(name);
+    if (!f) return false;
+    out = f->get(g, shadows);
+    return true;
+}
+
+bool setQualityField(ProjectGraphics& g, ProjectShadowSettings& shadows,
+                     const std::string& name, float value)
+{
+    const QualityField* f = findQualityField(name);
+    if (!f || !std::isfinite(value)) return false;
+    f->set(g, shadows, std::clamp(value, f->lo, f->hi));
+    return true;
 }
 
 bool ProjectSettings::operator==(const ProjectSettings& o) const

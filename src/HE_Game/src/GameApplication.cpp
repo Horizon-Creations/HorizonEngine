@@ -3758,6 +3758,17 @@ void GameApplication::installPlayerSettings()
 		return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
 		                                         : m_audioEngine.getBusVolume(bus);
 	};
+	// Graphics quality: the base is the live struct as OnInit filled it from the
+	// export's config (readGraphicsFromConfig), the project's shadows beside it.
+	// The player's choice lands back in the same two members, which the per-frame
+	// renderer push reads, so the next frame draws it.
+	host.baseGraphics = m_projectSettings.graphics;
+	host.baseShadows  = m_projectSettings.shadows;
+	host.applyQuality = [this](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+	{
+		m_projectSettings.graphics = g;
+		m_projectSettings.shadows  = s;
+	};
 	HE::api::settings::install(std::move(host));
 }
 

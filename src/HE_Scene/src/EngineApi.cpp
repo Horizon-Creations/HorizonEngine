@@ -7181,6 +7181,28 @@ const std::vector<ApiFn>& registry()
             [](Ctx&, const VV&){ return VV{ Value::ofBool(settings::save()) }; } });
         t.push_back({ "settings.resetToDefaults", "Settings", true, {}, {}, "HE::api::settings::resetToDefaults",
             [](Ctx&, const VV&){ settings::resetToDefaults(); return VV{}; } });
+        // Graphics quality as a player setting (HE::QualityPreset): a menu picks a
+        // preset, or moves single values; Save Settings keeps the choice. Free
+        // functions over the settings store, like the volume rows. Single values
+        // are addressed by name (qualityFields) so five rows cover every regulator.
+        t.push_back({ "settings.setQualityPreset", "Settings", true, {{"preset", P::String}}, {{"ok", P::Bool}}, "HE::api::settings::setQualityPreset",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(settings::setQualityPreset(aS(a, 0))) }; } });
+        t.push_back({ "settings.qualityPreset", "Settings", false, {}, {{"preset", P::String}}, "HE::api::settings::qualityPreset",
+            [](Ctx&, const VV&){ return VV{ Value::ofString(settings::qualityPreset()) }; } });
+        t.push_back({ "settings.qualityPresetNames", "Settings", false, {}, {{"presets", P::String, /*isArray=*/true}}, "HE::api::settings::qualityPresetNames",
+            [](Ctx&, const VV&){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (auto& n : settings::qualityPresetNames()) arr.items.push_back(Value::ofString(std::move(n)));
+                return VV{ std::move(arr) }; } });
+        t.push_back({ "settings.setQualityValue", "Settings", true, {{"field", P::String}, {"value", P::Float}}, {{"ok", P::Bool}}, "HE::api::settings::setQualityValue",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(settings::setQualityValue(aS(a, 0), aF(a, 1))) }; } });
+        t.push_back({ "settings.qualityValue", "Settings", false, {{"field", P::String}}, {{"value", P::Float}}, "HE::api::settings::qualityValue",
+            [](Ctx&, const VV& a){ return VV{ Value::ofFloat(settings::qualityValue(aS(a, 0))) }; } });
+        t.push_back({ "settings.qualityFields", "Settings", false, {}, {{"fields", P::String, /*isArray=*/true}}, "HE::api::settings::qualityFields",
+            [](Ctx&, const VV&){
+                Value arr; arr.isArray = true; arr.type = P::String;
+                for (auto& n : settings::qualityFields()) arr.items.push_back(Value::ofString(std::move(n)));
+                return VV{ std::move(arr) }; } });
 
         // Date and time — the WALL clock, unlike the time group. Double pins:
         // at today's epoch a float steps in 128 s, so on a Float pin `now` read
@@ -8432,6 +8454,10 @@ const std::vector<ApiFn>& registry()
             { "prefs.clear", "Clear Prefs" },
             { "settings.setVolume", "Set Volume Setting" }, { "settings.volume", "Get Volume Setting" },
             { "settings.save", "Save Settings" },        { "settings.resetToDefaults", "Reset Settings" },
+            { "settings.setQualityPreset", "Set Quality Preset" }, { "settings.qualityPreset", "Get Quality Preset" },
+            { "settings.qualityPresetNames", "Quality Preset Names" },
+            { "settings.setQualityValue", "Set Quality Value" }, { "settings.qualityValue", "Get Quality Value" },
+            { "settings.qualityFields", "Quality Fields" },
             { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
             { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
             { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },

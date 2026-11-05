@@ -1045,6 +1045,30 @@ namespace
 	  "Forget the player's settings and go back to the project's, applied at "
 	  "once. Use Save Settings to make that stick; bindings have their own "
 	  "Reset Input Bindings." },
+	{ "settings.setQualityPreset",
+	  "Set the player's graphics quality to a preset: Low, Medium, High or Ultra "
+	  "(\"Custom\" changes nothing). Applied at once to shadows, anti-aliasing, "
+	  "reflections, global illumination and texture detail, and replaces any single "
+	  "values chosen before. Save Settings keeps it. False for a name that is not a preset." },
+	{ "settings.qualityPreset",
+	  "The graphics preset the settings read as now: Low, Medium, High, Ultra, or "
+	  "Custom once a single quality value has moved off a preset. What a quality "
+	  "drop-down shows." },
+	{ "settings.qualityPresetNames",
+	  "The preset names in order, Low to Ultra and then Custom. Fills a graphics "
+	  "quality drop-down without spelling them in the graph." },
+	{ "settings.setQualityValue",
+	  "Set one graphics regulator by name, for example textureQuality, shadowResolution, "
+	  "antiAliasing, renderScale or giEnabled (Quality Fields lists them all). Yes/no "
+	  "fields take 0 or 1; values are clamped into the field's range. Applied at once, "
+	  "and the preset then reads as Custom. False for an unknown name." },
+	{ "settings.qualityValue",
+	  "The current value of one graphics regulator by name (yes/no fields are 0 or 1). "
+	  "What a quality slider starts at. 0 for an unknown name." },
+	{ "settings.qualityFields",
+	  "The names of every graphics regulator Set Quality Value and Get Quality Value "
+	  "accept: anti-aliasing, render scale, SSAO, SSR, global illumination, texture and "
+	  "material quality, shadows and post-processing switches." },
 
 	// ── Date and time ────────────────────────────────────────────────────────
 	{ "datetime.now",

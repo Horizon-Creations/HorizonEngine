@@ -1427,6 +1427,45 @@ TEST_CASE("codegen parity: player_settings (the settings rows reach one store id
 	HE::api::settings::uninstall();
 }
 
+TEST_CASE("codegen parity: quality_settings (the quality rows reach one store identically)")
+{
+	HE::api::settings::resetToDefaults();
+	// A recording host: what the application would be told to draw with.
+	std::vector<std::string> calls;
+	HE::api::settings::Host host;
+	host.baseGraphics.textureQuality = 2;
+	host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+	{
+		calls.push_back(std::string(HE::qualityPresetName(g.preset)) + " tex " + std::to_string(g.textureQuality)
+		                + " shadow " + std::to_string(s.resolution) + (g.enabled ? " on" : " off"));
+	};
+	HE::api::settings::install(std::move(host));
+	calls.clear();
+
+	ParityPair p("fix/quality_settings");
+	p.fire("Apply");
+
+	// Low, then textureQuality 1 over it: no longer a preset, so Custom, and the
+	// value reads back as set.
+	CHECK(p.var("preset").s == "Custom");
+	CHECK(p.var("tex").f == doctest::Approx(1.0f));
+
+	const std::vector<std::string> one = {
+		"Low tex 0 shadow 1024 on",       // setQualityPreset("Low")
+		"Custom tex 1 shadow 1024 on",    // setQualityValue("textureQuality", 1)
+		"Custom tex 2 shadow 2048 off",   // resetToDefaults: the base, as it was handed over
+	};
+	REQUIRE(calls.size() == one.size() * 2);
+	for (size_t i = 0; i < one.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == one[i]);                  // interpreter
+		CHECK(calls[one.size() + i] == one[i]);     // compiled
+	}
+	HE::api::settings::uninstall();
+	HE::api::settings::resetToDefaults();
+}
+
 TEST_CASE("codegen parity: player_slots (the local-player rows read one table identically)")
 {
 	// Three local players, as PlayerHost would register them.

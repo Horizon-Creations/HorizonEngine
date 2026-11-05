@@ -89,7 +89,47 @@ How a preset change reaches the screen:
 packer cooks, and most loose imports) has no coarser level and looks the same.
 UI, post and sky samplers are untouched on purpose.
 
-## 4. Open question from the human, out of scope here
+## 4. Script API (step 3)
+
+The player's graphics choice is a **player setting**, not a project edit: it lives in
+`HE::api::settings` next to VSync, fullscreen and volume (`PlayerSettings.cpp`), persisted by
+`settings.save`, handed back to the project's values by `settings.resetToDefaults`. Nothing ever
+writes `currentProject().settings`, which is also why play-in-editor needs no snapshot.
+
+Six rows in group `settings` (Free C++ form, so `HE::api::settings::...` directly; Lua and Python
+get `horizon.settings.*` because `settings` was already a script group):
+
+| Row | Meaning |
+|---|---|
+| `settings.setQualityPreset(preset)` -> ok | Low/Medium/High/Ultra, case-insensitive; "Custom" is accepted and changes nothing; unknown = false. Drops earlier single values. |
+| `settings.qualityPreset()` -> String | what the effective values read as, so "Custom" once a value moved off a preset |
+| `settings.qualityPresetNames()` -> String[] | Low, Medium, High, Ultra, Custom |
+| `settings.setQualityValue(field, value)` -> ok | one regulator by name; bools 0/1, ints rounded, clamped to range; unknown name = false |
+| `settings.qualityValue(field)` -> Float | current value, 0 for an unknown name |
+| `settings.qualityFields()` -> String[] | the 18 names (`HE::qualityFieldName`): antiAliasing, renderScale, ssaoEnabled, ssrEnabled, ssrQuality, giEnabled, giShadowQuality, giReflectionsEnabled, giReflQuality, giReflBounces, textureQuality, materialQuality, bloomEnabled, dofEnabled, motionBlurEnabled, shadowDistance, shadowCascades, shadowResolution |
+
+How it reaches the screen: effective values = `Host::baseGraphics/baseShadows` (the project's,
+captured at install) -> preset (`applyQualityPreset`) -> single values; `enabled` is on once the
+player chose anything; `preset` = `detectQualityPreset`. `Host::applyQuality(graphics, shadows)`
+puts them where the renderer push reads them:
+
+* **Game:** writes `m_projectSettings.graphics/shadows` (step 2's push reads them), base =
+  the struct as `OnInit` filled it. Installed once in `installPlayerSettings`.
+* **Editor (play):** writes `m_playGraphics/m_playShadows` (`EditorApplication.h`), active only
+  while playing; `syncGraphicsSource` and `projectShadowSettings` read them, so the viewport shows
+  the player's choice and goes back to the project's when play stops.
+
+Persistence: `Values::qualityPreset` / `Values::quality` in the prefs JSON (`qualityPreset`,
+`quality`); unknown names and fields are dropped on load, "Custom" is never stored.
+
+`HE::qualityFieldCount/Name`, `getQualityField`, `setQualityField` (HE_Core, `ProjectSettings.h`)
+are the one list the API, the step-4 page and a hardware benchmark share.
+
+Not built: typed per-area rows (a name-keyed pair covers every regulator), a `HeSettingsServices`
+table for the C++ GameLogic ABI (none exists for `settings`; the direct `HE::api::settings` calls
+cover C++).
+
+## 5. Open question from the human, out of scope here
 
 The human's note on the topic asks for hardware detection as an extension of the hardware
 benchmark, to pick the best settings for a PC. Not built. The hook it needs is exactly
@@ -98,39 +138,51 @@ benchmark, to pick the best settings for a PC. Not built. The hook it needs is e
 
 ## Handoff
 
-- **Topic / step:** 324 Engine quality settings, step 2 of 5 (global step id 1509). Step 1 (id 1508,
-  commit 523bcac24): `QualityPreset` model, tag, `textureQuality`/`materialQuality` fields.
-- **Branch / commit:** `claude/engine-quality-settings` (pushed: see Hive artifact for the sha)
-- **Done:** the game's graphics push is struct-driven (`m_projectSettings.graphics`), so a script can
-  change it at run time; `IRenderer::SetQualitySettings` + `TextureMinLodForQuality`; Metal acts on
-  texture quality; editor pushes the same.
-- **Files touched:** `IRenderer.h` (~640, `QualitySettings`), `MetalRenderer.h/.mm`
-  (`SetQualitySettings`, `m_materialSamplerMinLod`), `GameApplication.cpp` (init fill ~716, push block
-  ~3480-3640), `EditorApplication.cpp` (~3722, ~9130), `ProjectSettings.h/.cpp`
-  (`readGraphicsFromConfig`), `tests/test_project_settings.cpp` (3 new cases).
-- **Verified:** `he_tests` Release build RC 0; `test_project_settings` 41/41, `test_editor_graphics`
-  5/5, `test_export_profiles` 52/52; `MetalRenderer.mm.o`, `GameApplication.cpp.o`,
-  `EditorApplication.cpp.o`, `ExportDialogPanel.cpp.o` compile. Python check: every macro row's
-  `put("Key", cfg.Key)` in `ExportDialogPanel.cpp` equals its `EditorConfig` column (38/38), and all 34
-  `getCustomConfig*` defaults in the game block equalled the macro defaults before they were replaced.
-- **Not verified:** nothing run at runtime. No editor/game link, no screenshot: a Low vs High A/B
-  (`HE_DUMP_TEXQUALITY`) would show nothing on single-level textures, so it needs a scene with a
-  mipped texture. GL, D3D11/12 and Vulkan not compiled or touched.
-- **Decisions taken:** texture quality = sampler min-LOD, not skip-at-upload (switches live, no cache
-  invalidation); Metal only, others documented as ignored; `materialQuality` plumbed, no consumer;
-  game struct filled from config keys at start so startup is byte-for-byte the old behaviour.
-- **Decisions suggested, not taken:** GL texture quality via `GL_TEXTURE_MIN_LOD` over its texture caches;
-  a material-graph "quality level" input as the first real `materialQuality` consumer.
-- **Pending:** step 3 API, step 4 UI, step 5 verification incl. a visible A/B.
-- **Traps:** (1) PIE: nothing snapshots `currentProject().settings`, so a script that applies a preset
-  during play dirties the project; step 3 must snapshot/restore `graphics` + `shadows` around PIE
-  (find start/stop near `startPlayNetSession`, `EditorApplication.cpp` ~5354) or route runtime changes
-  to a PIE-local copy. (2) `Ctx` (EngineApi.h): new members go at the END, both apps build it by
-  positional aggregate init. (3) An `api::settings::Host` (player's settings menu) already exists in the
-  game, see `GameApplication.cpp` near the gamepad deadzones; check whether quality rows belong there.
-  (4) `EditorGraphics::capture` leaves `preset` alone: call `ProjectSettings::clamp()` after it.
-  (5) Do not edit a file while `ninja` compiles it (stale object).
-- **Next steps:** 1. Step 3: `HE::api::quality` rows (get/setPreset by name, per-field get/set for
-  texture, shadow, AA...), applying to the host's `ProjectSettings` through a Ctx callback or pointer
-  added at the end of `Ctx`; four-places rule for new rows (see memory). 2. PIE snapshot (trap 1).
-  3. Step 4: quality page in `ProjectSettingsPanel.cpp` (~1349).
+- **Topic / step:** 324 Engine quality settings, step 3 of 5 (global step id 1510). Earlier: step 1
+  (id 1508, 523bcac24) model + presets, step 2 (id 1509, 20938d347) renderer/game wiring.
+- **Branch / commit:** `claude/engine-quality-settings` (pushed: see the Hive artifact for the sha)
+- **Done:** a game or HorizonCode/Lua/Python/C++ script can set and read the quality preset and 18
+  single regulators at run time, save them, and reset them; the editor preview shows them while
+  playing and drops them at stop.
+- **Files touched:** `Project/QualitySettings.h` (NEW, json-free: `ProjectShadowSettings`, the graphics field list,
+  `ProjectGraphics`, presets, field table; `ProjectSettings.h` includes it, so nothing else changed), `EngineApi.h` (`settings::Values/Host`, row declarations ~2380-2470),
+  `PlayerSettings.cpp` (effective values, rows, JSON), `EngineApi.cpp` (rows ~7190, display names
+  ~8450), `HcNodeDocs.cpp` (~1048), `ProjectSettings.h/.cpp` (field table), `GameApplication.cpp`
+  (`installPlayerSettings`), `EditorApplication.h/.cpp` (`m_playGraphics`, host hook, sync),
+  `tests/fixtures/hcodegen/fixtures.h` (`fxQualitySettings`), `tests/CMakeLists.txt` (`QualitySettings`
+  in `HCGEN_CLASSES`), tests in `test_player_settings`, `test_horizoncode_codegen`,
+  `test_scripting_binding`, `test_python_scripting`.
+- **Verified:** `he_tests` Release build RC 0. Passing: `test_player_settings` 12/12 (6 new),
+  `test_project_settings` 41/41, `test_horizoncode_codegen` 54/54 (incl. interpreted == compiled for the
+  new rows), `test_engine_api_direct` 9/9, `test_engine_api` 130/130, `test_hc_node_docs` 6/6,
+  `test_scripting_binding` 33/33 and `test_python_scripting` 42/42 (one new case each). `GameApplication.cpp.o`
+  built by ninja; `EditorApplication.cpp.o` compiled with its recorded command. Full `ctest -j4`: 362/362 (the first run had 2 failures, both mine and fixed: the
+  checked-in `tests/fixtures/game_build_config/HEGameBuildConfig.h` embeds the graphics JSON and was regenerated with
+  `HE_UPDATE_GAME_BUILD_CONFIG_FIXTURE=1`; `test_hc_codegen_export_build` failed because `EngineApi.h` pulled in
+  `ProjectSettings.h` and its `nlohmann/json_fwd.hpp`, see the split below). `MetalRenderer.mm.o`, `GameApplication.cpp.o`,
+  `EditorApplication.cpp.o` recompiled after the split.
+- **Not verified:** nothing run at runtime (no editor/game launch, no menu, no screenshot); a preset set from
+  a script during play in the editor and the viewport following it is untested; Windows/Linux not built.
+- **Decisions taken:** quality is a player setting in the existing `settings` store (not a new group, not a
+  project edit); name-keyed value rows instead of 18 typed pairs; "Custom" accepted as a no-op; a preset
+  replaces earlier single values; the base is the application's graphics at install.
+- **Decisions suggested, not taken:** typed per-area HorizonCode nodes; surfacing preset names/labels for
+  localisation; exposing `qualityFields` ranges (min/max) to menus.
+- **Pending:** step 4 editor UI (preset combo + single regulators in `ProjectSettingsPanel.cpp` ~1349,
+  `clamp()` after edits, help entries for every control: `editor_help_audit.py --check`); step 5 verification
+  (visible Low vs High in the editor and via script) and the doc for users; the hardware-benchmark idea
+  from the human's note only needs `settings::setQualityPreset` / `HE::applyQualityPreset`.
+- **Traps:** (0) `EngineApi.h` is SDK-facing and generated game code compiles against it without `nlohmann`: it may include
+  `Project/QualitySettings.h` but never `Project/ProjectSettings.h`. Any change to the graphics JSON also needs the
+  game-build-config fixture regenerated (`HE_UPDATE_GAME_BUILD_CONFIG_FIXTURE=1 he_tests --source-file=*test_game_build_config.cpp`,
+  then rebuild he_tests); steps 1 and 2 left it stale and only the full ctest shows it. (1) `ninja <HorizonEditor/HorizonGame object>` runs the `HorizonSDKRelease` custom target
+  first and it FAILS with "dev MISMATCH" after any public header change (stale `lib/dev` stamp), so the
+  object is silently not rebuilt: compile it with `ninja -t commands <obj> | tail -1` instead, or build the
+  whole editor. (2) New `Host` fields go at the END and are optional; both apps fill what they know.
+  (3) `Values::quality` stores normalised numbers; read them back with `qualityValue`, not from the map.
+  (4) A new graphics field means: macro row, `EditorConfig` member + load/save, export `put`, an entry in
+  `kQualityFields` if scripts should reach it, and a preset-table column if presets should set it.
+- **Next steps:** 1. Step 4: add a "Quality" page (preset combo from `qualityPresetNames`, regulators from
+  `qualityFieldName`) bound to `ProjectGraphics` + `ProjectShadowSettings` with `applyQualityPreset` /
+  `setQualityField`, then `ProjectSettings::clamp()`. 2. Step 5: headless A/B (`HE_DUMP_TEXQUALITY`,
+  `scripts/he_shot.py`) on a scene with a mipped texture; a PIE run that calls the rows from a script.

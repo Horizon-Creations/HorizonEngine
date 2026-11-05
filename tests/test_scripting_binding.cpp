@@ -169,6 +169,35 @@ TEST_CASE("ScriptContext: registry-driven horizon.math.* (Lua)")
     CHECK(engine.getGlobalNumber("_d") == doctest::Approx(5.0));
 }
 
+TEST_CASE("ScriptContext: horizon.settings quality rows reach the player's settings store (Lua)")
+{
+    // A graphics menu written in Lua: pick a preset, nudge one value, read both back.
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+    HE::ProjectGraphics seen;
+    HE::api::settings::Host host;
+    host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings&) { seen = g; };
+    HE::api::settings::install(std::move(host));
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "_G._ok  = horizon.settings.setQualityPreset('High')\n"
+        "_G._bad = horizon.settings.setQualityPreset('Insane')\n"
+        "_G._ok2 = horizon.settings.setQualityValue('textureQuality', 0)\n"
+        "_G._tex = horizon.settings.qualityValue('textureQuality')\n"
+        "_G._n   = #horizon.settings.qualityPresetNames()\n"
+        "_G._is_custom = (horizon.settings.qualityPreset() == 'Custom') and 1 or 0\n"));
+    CHECK(engine.getGlobalNumber("_tex") == doctest::Approx(0.0));
+    CHECK(engine.getGlobalNumber("_n") == doctest::Approx(5.0));
+    CHECK(engine.getGlobalNumber("_is_custom") == doctest::Approx(1.0));
+    CHECK(seen.textureQuality == 0);
+    CHECK(seen.ssrEnabled);   // the rest is High's
+    HE::api::settings::uninstall();
+    HE::api::settings::resetToDefaults();
+}
+
 TEST_CASE("ScriptContext: bitwise — Lua 5.4's native operators AND the registry rows (Lua)")
 {
     // Two halves of one audit. First: the embedded Lua is 5.4 (not 5.1/5.2),

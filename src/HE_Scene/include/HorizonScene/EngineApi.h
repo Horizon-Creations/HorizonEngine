@@ -2,6 +2,7 @@
 #include <HorizonCode/HorizonCode.h>          // HorizonCode::Value, PinType
 #include <HorizonCode/HorizonCodeRuntime.h>   // Ctx::runtime (who is calling)
 #include <Types/UUID.h>                       // HE::UUID (content::*Id asset handles)
+#include <Project/QualitySettings.h>            // settings::Host carries the project's graphics + shadows
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <functional>
@@ -2379,6 +2380,13 @@ namespace settings {
         std::optional<bool>  vsync;
         std::optional<bool>  fullscreen;
         std::map<std::string, float> volumes;          // bus → 0..2, kMaster = master
+        // The player's graphics choice (HE::QualityPreset, ProjectSettings.h): a
+        // named preset, then single values over it (HE::qualityFieldName). Both
+        // empty = the project's own graphics, untouched. A preset chosen after
+        // single values replaces them. "Custom" is never stored: it is what the
+        // values read as once a single value has moved off a preset.
+        std::optional<std::string>   qualityPreset;     // "Low" … "Ultra"
+        std::map<std::string, float> quality;           // field name → value
     };
     inline constexpr const char* kMaster   = "Master";
     inline constexpr const char* kPrefsKey = "settings";
@@ -2402,6 +2410,16 @@ namespace settings {
         std::function<void(const std::string& bus, std::optional<float> volume)> applyVolume;
         // What a bus is at now, for volume() when the player never set it.
         std::function<float(const std::string& bus)> currentVolume;
+        // The project's graphics and shadows, as the application holds them when it
+        // installs: what the quality rows fall back to and what reset() returns to.
+        HE::ProjectGraphics       baseGraphics;
+        HE::ProjectShadowSettings baseShadows;
+        // The graphics + shadows the player's choice comes to (base, then preset,
+        // then single values; `enabled` on, `preset` = what the values read as).
+        // Called at install when the player chose anything, after every change to
+        // the quality values, and when reset() takes them back (with the base).
+        // The application puts them where its renderer push reads them.
+        std::function<void(const HE::ProjectGraphics&, const HE::ProjectShadowSettings&)> applyQuality;
     };
     // install applies every value once (the start-up apply); uninstall only
     // drops the hooks. The values stay — the camera rig keeps reading them.
@@ -2429,6 +2447,22 @@ namespace settings {
     // current one (1 when neither is known).
     void  setVolume(const std::string& bus, float volume);
     float volume(const std::string& bus);
+    // ── Graphics quality (HE::QualityPreset) ──
+    // The player's choice, applied through Host::applyQuality and kept by save().
+    // A preset name is case-insensitive ("Low", "Medium", "High", "Ultra");
+    // "Custom" is accepted and changes nothing (the values stay as they are),
+    // anything else logs and answers false. A single value is one of
+    // qualityFields() — bools as 0/1, ints as numbers, clamped into the field's
+    // range; an unknown name logs and answers false. Choosing a preset drops the
+    // single values chosen before it.
+    bool setQualityPreset(const std::string& name);
+    // What the effective values read as: a preset name, or "Custom".
+    std::string qualityPreset();
+    std::vector<std::string> qualityPresetNames();   // Low … Ultra, Custom
+    bool  setQualityValue(const std::string& field, float value);
+    // 0 for an unknown field (logged). Without a host, the field's default.
+    float qualityValue(const std::string& field);
+    std::vector<std::string> qualityFields();
     // Persist everything above (NOT the bindings — input.saveBindings) and
     // answer whether the prefs file took it. Nothing chosen removes the key.
     bool  save();

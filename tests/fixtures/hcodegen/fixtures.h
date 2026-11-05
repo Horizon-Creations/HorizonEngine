@@ -2939,6 +2939,42 @@ inline HE::hccg::ClassSource fxInputRebind()
     return f.done("input_rebind");
 }
 
+// quality_settings: the graphics-quality rows of the settings store — a preset,
+// one single value over it, then the preset and the value read back, and a reset.
+// Same store for both halves; the parity test records what the host was handed.
+inline HE::hccg::ClassSource fxQualitySettings()
+{
+    Fx f;
+    f.var("preset", PT::String);
+    f.var("tex", PT::Float);
+
+    const int ev = f.event("Apply");
+    const int sp = f.engineCall("settings.setQualityPreset");
+    f.g.findNode(sp)->pinDefaults[0] = Value::ofString("Low");
+    const int sv = f.engineCall("settings.setQualityValue");
+    { Node* n = f.g.findNode(sv);
+      n->pinDefaults[0] = Value::ofString("textureQuality");
+      n->pinDefaults[1] = Value::ofFloat(1.0f); }
+    f.exec(ev, sp); f.exec(sp, sv);
+
+    int last = sv;
+    auto read = [&](const char* id, const char* var, PT type)
+    {
+        const int g = f.engineCall(id);
+        const int s = f.setVar(var, type);
+        f.data(g, 0, s, 0);
+        f.exec(last, s);
+        last = s;
+        return g;
+    };
+    read("settings.qualityPreset", "preset", PT::String);
+    const int tv = read("settings.qualityValue", "tex", PT::Float);
+    f.g.findNode(tv)->pinDefaults[0] = Value::ofString("textureQuality");
+    const int reset = f.engineCall("settings.resetToDefaults");
+    f.exec(last, reset);
+    return f.done("quality_settings");
+}
+
 // player_settings: the settings rows — setters filed under input, camera, app
 // and settings, then every getter read back into a variable. They share one
 // store (PlayerSettings.cpp), so the compiled half starts from what the
@@ -3238,7 +3274,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxPlayerSlots(),
+        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxQualitySettings(), fxPlayerSlots(),
         fxPullConstruct(), fxPullSpawner(), fxBindTo(),
         fxExtractDestruct(), fxExtractDerived(), fxExtractListener(),
         fxEngineWorld(),
