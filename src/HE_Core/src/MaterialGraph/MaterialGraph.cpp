@@ -290,6 +290,10 @@ const std::vector<MatNodeDesc>& registry()
         // ── v20: mixed texture groups — the two strongest groups of the painted shares ──
         { MatNodeType::LandscapeGroupPick, "Landscape Group Pick", "Landscape", {},
           { { "A", F::Float, 0 }, { "B", F::Float, 0 }, { "Mix", F::Float, 0 } }, 0 },
+
+        // ── v21: the engine's material quality, 0 Low .. 2 High (Thema 336) ──
+        { MatNodeType::QualityLevel, "Quality Level", "Input",
+          {}, { { "Level", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -691,6 +695,7 @@ bool branchPure(MatNodeType t)
         case MatNodeType::FbmGrad: case MatNodeType::Panner: case MatNodeType::ValueNoise: case MatNodeType::Fbm:
         case MatNodeType::Checker: case MatNodeType::StaticSwitch: case MatNodeType::Reroute:
         case MatNodeType::LandscapeGroupPick:   // textureLod only: defined in non-uniform flow
+        case MatNodeType::QualityLevel:         // one uniform read
             return true;
         // The bombed reads sample with textureGrad from gradients taken ahead of the
         // branch (the grid's dx/dy, and dFdx(vWorldPos) for the normal frame), so only
@@ -1083,6 +1088,10 @@ HE_MG_NOINLINE bool emitLeafNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             break;
         case MatNodeType::Time:
             decl = "float " + v + " = heLight.sunDir.w;"; break;
+        case MatNodeType::QualityLevel:
+            // counts.y = material quality + 1, 0 = nobody filled it (previews, UI, a
+            // backend not taught yet) → High, the full quality every material had before.
+            decl = "float " + v + " = heLight.counts.y > 0.5 ? heLight.counts.y - 1.0 : 2.0;"; break;
         case MatNodeType::Fresnel:
             decl = "float " + v + " = pow(1.0 - max(dot(normalize(vNormal), "
                    "normalize(heLight.camPos.xyz - vWorldPos)), 0.0), "
@@ -2287,6 +2296,15 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             "    c += heBd(uv + vec2(-d.x,  d.y), lod) * 0.09;\n"
             "    return c;\n"
             "}\n";
+    // Material quality for the noise helpers below (Thema 336): Low drops two octaves
+    // and Medium one, High — and any pass that never fills the lane, previews and UI
+    // among them — keeps the four every fbm always had. heLight.counts.y is the
+    // material quality + 1 (0 = not filled), written by HE::FillMaterialWind. The
+    // helpers branch on this UNIFORM, and keep their original fixed-4 loop for the
+    // full-quality path so its code and its cost are what they were before.
+    if (c.usesNoise || c.usesNoise3 || c.usesNoiseI || c.usesNoiseIGrad)
+        src += "int heQualityOct() { float q = heLight.counts.y;"
+               " return q < 0.5 ? 4 : 1 + int(q + 0.5); }\n";
     if (c.usesNoise)
         src +=
             "float heHash21(vec2 p) { p = fract(p * vec2(123.34, 456.21));"
@@ -2296,7 +2314,8 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             " float a = heHash21(i); float b = heHash21(i + vec2(1.0, 0.0));"
             " float cc = heHash21(i + vec2(0.0, 1.0)); float d = heHash21(i + vec2(1.0, 1.0));"
             " return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y); }\n"
-            "float heFbm(vec2 p) { float v = 0.0; float a = 0.5;"
+            "float heFbm(vec2 p) { float v = 0.0; float a = 0.5; int n = heQualityOct();"
+            " if (n < 4) { for (int i = 0; i < n; i++) { v += a * heValueNoise(p); p *= 2.0; a *= 0.5; } return v; }"
             " for (int i = 0; i < 4; i++) { v += a * heValueNoise(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
     if (c.usesNoise3)
@@ -2312,7 +2331,8 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             " float x00 = mix(n000, n100, u.x); float x10 = mix(n010, n110, u.x);"
             " float x01 = mix(n001, n101, u.x); float x11 = mix(n011, n111, u.x);"
             " return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z); }\n"
-            "float heFbm3(vec3 p) { float v = 0.0; float a = 0.5;"
+            "float heFbm3(vec3 p) { float v = 0.0; float a = 0.5; int n = heQualityOct();"
+            " if (n < 4) { for (int i = 0; i < n; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; } return v; }"
             " for (int i = 0; i < 4; i++) { v += a * heValueNoise3(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
     if (c.usesNoiseI)
@@ -2334,7 +2354,8 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             " float a = heHashI2(i); float b = heHashI2(i + ivec2(1, 0));"
             " float cc = heHashI2(i + ivec2(0, 1)); float d = heHashI2(i + ivec2(1, 1));"
             " return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y); }\n"
-            "float heFbmI(vec2 p) { float v = 0.0; float a = 0.5;"
+            "float heFbmI(vec2 p) { float v = 0.0; float a = 0.5; int n = heQualityOct();"
+            " if (n < 4) { for (int k = 0; k < n; k++) { v += a * heValueNoiseI(p); p *= 2.0; a *= 0.5; } return v; }"
             " for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p); p *= 2.0; a *= 0.5; }"
             " return v; }\n";
     if (c.usesNoiseIGrad)
@@ -2351,7 +2372,9 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
             " float cc = heHashI2(i + ivec2(0, 1)); float d = heHashI2(i + ivec2(1, 1));"
             " float val = mix(mix(a, b, u.x), mix(cc, d, u.x), u.y);"
             " return vec3(val, du.x * ((b - a) + (a - b - cc + d) * u.y), du.y * ((cc - a) + (a - b - cc + d) * u.x)); }\n"
-            "vec3 heFbmIGrad(vec2 p) { vec3 v = vec3(0.0); float a = 0.5; float s = 1.0;"
+            "vec3 heFbmIGrad(vec2 p) { vec3 v = vec3(0.0); float a = 0.5; float s = 1.0; int oct = heQualityOct();"
+            " if (oct < 4) { for (int k = 0; k < oct; k++) { vec3 n = heValueNoiseIGrad(p);"
+            " v += vec3(a * n.x, a * s * n.y, a * s * n.z); p *= 2.0; a *= 0.5; s *= 2.0; } return v; }"
             " for (int k = 0; k < 4; k++) { vec3 n = heValueNoiseIGrad(p);"
             " v += vec3(a * n.x, a * s * n.y, a * s * n.z); p *= 2.0; a *= 0.5; s *= 2.0; }"
             " return v; }\n";

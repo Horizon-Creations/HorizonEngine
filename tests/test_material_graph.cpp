@@ -23,6 +23,7 @@
 #include <material/MaterialShaderBake.h>
 #include <Renderer/IRenderer.h>
 #include <HorizonRendering/LightPacking.h>   // FillMaterialWind
+#include <Renderer/IRenderer.h>              // IRenderer::SetQualitySettings publishes the quality lane
 #include <HorizonRendering/SkyFrameParams.h> // CloudWindVector (the compass it must share)
 #include <cmath>
 
@@ -408,10 +409,10 @@ TEST_CASE("Every node type has a registry entry and its emit matches its pins")
 {
 	// The registry (pins) drives both the editor UI and codegen; a type missing from
 	// it, or an emit case reading a pin the registry doesn't declare, is a bug.
-	// LandscapeFoliage is the LAST enum value today; a node added after it
+	// QualityLevel is the LAST enum value today; a node added after it
 	// must move this bound, or it silently drops out of the loop (which is how
 	// v10/v11 — and the v13 array nodes — went unchecked for a while).
-	for (int t = 0; t <= (int)MatNodeType::LandscapeFoliage; ++t)
+	for (int t = 0; t <= (int)MatNodeType::QualityLevel; ++t)
 	{
 		const auto type = static_cast<MatNodeType>(t);
 		const HE::MatNodeDesc& d = HE::matNodeDesc(type);
@@ -9102,4 +9103,109 @@ TEST_CASE("Material codegen fits a small thread stack: auto landscape views and 
 	for (size_t p = 0; (p = glsl.find(" + vec3(0.000000);\n", p)) != std::string::npos; ++p) ++adds;
 	CHECK(adds == 256);
 	CHECK(glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos); // no cycle magenta
+}
+
+// ── Material quality (Thema 336) ─────────────────────────────────────────────
+
+TEST_CASE("Quality Level node: one uniform read, 0 Low .. 2 High, High when nobody filled the lane")
+{
+	REQUIRE(HE::matNodeDesc(MatNodeType::QualityLevel).outputs.size() == 1u);
+	CHECK(HE::matNodeDesc(MatNodeType::QualityLevel).inputs.empty());
+	REQUIRE(HE::matNodeDescByName("Quality Level") != nullptr);
+
+	MaterialGraph g;
+	const int out = g.addNode(MatNodeType::Output);
+	const int q   = g.addNode(MatNodeType::QualityLevel);
+	const int mul = g.addNode(MatNodeType::Multiply);
+	CHECK(g.connect(q, 0, mul, 0));
+	CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+	const std::string glsl = HE::generateFragmentGlsl(g);
+	// counts.y = material quality + 1; 0 (a pass that never filled it) reads as High.
+	CHECK(glsl.find("heLight.counts.y > 0.5 ? heLight.counts.y - 1.0 : 2.0") != std::string::npos);
+
+	MaterialGraph back;
+	REQUIRE(HE::materialGraphFromJson(HE::materialGraphToJson(g), back));
+	CHECK(HE::generateFragmentGlsl(back) == glsl);
+}
+
+TEST_CASE("Noise helpers: octaves follow the quality lane, and the full-quality path is the fixed loop it always was")
+{
+	// A graph with no noise does not carry the quality function at all.
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int t   = g.addNode(MatNodeType::Time);
+		const int mul = g.addNode(MatNodeType::Multiply);
+		CHECK(g.connect(t, 0, mul, 0));
+		CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+		CHECK(HE::generateFragmentGlsl(g).find("heQualityOct") == std::string::npos);
+	}
+	// Each fbm flavour: the count comes from the lane (2 / 3 / 4 octaves for Low / Medium
+	// / High, 4 when the lane is 0), the short loop runs only below 4, and the original
+	// `< 4` loop is still there verbatim for the full-quality path.
+	struct Flavour { MatNodeType type; float p0; const char* fixedLoop; const char* shortLoop; };
+	for (const Flavour& f : { Flavour{ MatNodeType::Fbm, 0.0f,
+	                                   "for (int i = 0; i < 4; i++) { v += a * heValueNoise(p);",
+	                                   "for (int i = 0; i < n; i++) { v += a * heValueNoise(p);" },
+	                          Flavour{ MatNodeType::Fbm, 1.0f,
+	                                   "for (int k = 0; k < 4; k++) { v += a * heValueNoiseI(p);",
+	                                   "for (int k = 0; k < n; k++) { v += a * heValueNoiseI(p);" },
+	                          Flavour{ MatNodeType::FbmGrad, 0.0f,
+	                                   "for (int k = 0; k < 4; k++) { vec3 n = heValueNoiseIGrad(p);",
+	                                   "for (int k = 0; k < oct; k++) { vec3 n = heValueNoiseIGrad(p);" } })
+	{
+		MaterialGraph g;
+		const int out = g.addNode(MatNodeType::Output);
+		const int uv  = g.addNode(MatNodeType::UV);
+		const int fb  = g.addNode(f.type);
+		g.findNode(fb)->p[0] = f.p0;
+		const int mul = g.addNode(MatNodeType::Multiply);
+		CHECK(g.connect(uv, 0, fb, 0));
+		CHECK(g.connect(fb, 0, mul, 0));
+		CHECK(g.connect(mul, 0, out, HE::kMatOutputBaseColorPin));
+		const std::string glsl = HE::generateFragmentGlsl(g);
+		INFO("node ", (int)f.type, " p0 ", f.p0);
+		CHECK(glsl.find("int heQualityOct() { float q = heLight.counts.y; return q < 0.5 ? 4 : 1 + int(q + 0.5); }")
+		      != std::string::npos);
+		CHECK(glsl.find(f.fixedLoop) != std::string::npos);
+		CHECK(glsl.find(f.shortLoop) != std::string::npos);
+	}
+}
+
+TEST_CASE("FillMaterialWind: the quality lane is the material quality + 1, and 0 stays 'not filled'")
+{
+	HE::MaterialShaderLibrary::Lighting lit;
+	lit.counts[0] = 5.0f;                  // the light count: the lane must not touch it
+	EnvironmentSettings env;
+	// The smallest concrete IRenderer: the quality push is the base class's, and nothing
+	// else of a renderer is needed to see what it publishes.
+	struct StubRenderer final : IRenderer
+	{
+		void Initialize(HE::Window*) override {}
+		void Shutdown() override {}
+		void Render() override {}
+		Capabilities GetCapabilities() const override { return {}; }
+	} r;
+
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 0 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(1.0f));   // Low
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 1 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(2.0f));   // Medium
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 2 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(3.0f));   // High: the shader reads level 2, 4 octaves
+	CHECK(lit.counts[0] == doctest::Approx(5.0f));
+
+	// Out of range is clamped, never 0 (which the shader reads as "nobody filled it").
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, -7 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(1.0f));
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 9 });
+	HE::FillMaterialWind(env, lit);
+	CHECK(lit.counts[1] == doctest::Approx(3.0f));
+	CHECK(IRenderer::MaterialQualityLevel() == 2);
+
+	r.SetQualitySettings(IRenderer::QualitySettings{ 2, 2 });   // leave the process at full quality
 }
