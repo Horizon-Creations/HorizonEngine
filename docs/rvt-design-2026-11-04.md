@@ -565,6 +565,32 @@ Die Streuung zwischen den drei Läufen ist klein (D3D11 schräg: aus 7,25 bis 7,
 
 Nicht geprüft: echte Mix-Texturen im Export, schwächere GPU, OpenGL im Spiel, Metal.
 
+## Schritt 9: Windows nachgeholt (2026-11-05, Hive 1615, 1614, 1608)
+
+Die Metal-Schritte 6g bis 6k haben gemeinsamen Code (HE_Scene, HE_Core) und eine Reihe von Speichergewinnen gebracht; hier stehen die Windows-Gegenstücke, auf dem Zweig `claude/rvt-windows` (aufgesetzt auf `claude/rvt-metal`, Release-Baum `out/build/rvt-rel`, RTX 4070, eigenes `APPDATA`).
+
+### 9a: die gemeinsamen Änderungen auf Windows verifiziert (Hive 1615)
+
+`he_tests`: 344 Fälle (`test_rvt*`, `test_hlod*`, `test_block_encode`, `test_material_graph`, `test_terrain*`, `test_landscape*`), 534 177 Assertions, 0 Fehler. Die Zeugen `HE_DUMP_RVTTEST`, `_RVTDRIVER`, `_RVTTILES` auf **D3D11, D3D12, Vulkan und OpenGL** mit den Metal-Änderungen (geteilte Chunk-Meshes der Scratch-Welt `addSharedChunks`, `TerrainSystem::releaseWorld`, Parameter-Overrides im Baker, `RvtLayerChannels`): **alle Zahlen wie vorher** (27 von 27 Scheiben im Bracket-Vergleich identisch, Positionsebenen 0 falsch, Consumer 0 falsch, Treiber Füllung 21 Seiten in 3 Frames, Leerlauf 0/0, Sculpt 7 = 7, Mal 6 ~ 6, Lit/Treiber-Vergleich 1,50 bis 1,52 /255, Kacheln 84 Seiten, 3 von 4 nach dem Löschen, Weg und zurück). Die Scratch-Welt teilt die Meshes überall (`HlodBaker: the scratch landscape draws the live landscape's chunk meshes`).
+
+**Speicher im Spiel, gemessen (Mix-Szene schräg, 3 Läufe, Median, `nvidia-smi` Spitze minus Start):** die geteilten Meshes sparen auf Windows **fast nichts**: RVT-Aufschlag D3D11 198 -> 190 MB, D3D12 141 -> 140 MB, Vulkan 239 -> 196 MB (Vulkan streut +-40 MB). Die Vermutung aus Schritt 8b ("die Chunk-Meshes liegen doppelt") war für Windows **falsch** (auf Metal waren es 64 MB). Was stattdessen zählt, zeigt ein Lauf mit `poolPages` 128 statt 512 (neu exportiert, die Datei beim Export ist die gebackene): der Aufschlag sinkt um **85 bis 100 MB**. Der Pool selbst (512 x 0,222 = 114 MB, in der Szene sind nur 67 Seiten belegt) war also der Löwenanteil.
+
+### 9b: der wachsende Pool auf D3D11, D3D12, Vulkan und OpenGL (gleiche Idee wie Metal 6h, einfachere Form)
+
+Die Arrays starten mit **64 Scheiben** und wachsen mit den belegten Seiten: ein Bild für eine Scheibe jenseits der angelegten legt neue Arrays an (um die Hälfte oder auf den Bedarf, auf 32 aufgerundet, höchstens `poolPages`), kopiert die alten Scheiben auf der GPU hinüber und gibt die alten frei. Anders als bei Metal bleibt **Scheibe = Slot des Verwalters**, die Tabelle wird nicht umgeschrieben: der Verwalter vergibt die Slots von 0 aufwärts und nimmt freigegebene wieder (`RvtManager::acquireSlot`, LIFO-Freiliste), der höchste belegte Slot übersteigt also nie die Spitze der gleichzeitig belegten Seiten. Sie müssen nur nicht entkoppelt werden, solange es keine kalten Seiten gibt (Hive 1608 braucht die Entkopplung dann ohnehin).
+* D3D11: `ensureRvtSlot` vor dem Kopieren der Seite (und im allgemeinen Pfad), `CopySubresourceRegion` je Scheibe. D3D12: `growRvtPool12` **vor** der Befehlsliste der Seite (`rvtBegin`/`rvtEnd` warten auf alle Frames), die SRV-Deskriptoren werden neu geschrieben. Vulkan: `rvtGrowPool` (Geräte-Leerlauf, ausstehende Layer entleert, `vkCmdCopyImage`, alte Bilder zerstört; die Deskriptoren werden je Draw aus `m_rvtPool[k].view` geschrieben, folgen also). OpenGL: `rvtGrowPool` mit `glCopyImageSubData` (GL 4.3; darunter wird wie bisher alles auf einmal angelegt).
+* `HE_RVT_GROW=0` legt den ganzen Pool sofort an (A/B und Referenz). Die `ReadbackRvtSlot` fragt die angelegte Zahl, nicht die Decke.
+
+**Gemessen.** Zeugen auf allen vier Backends mit Wachstum (die Zeugen erzwingen es: der Bracket-Vergleich malt in Slots +100, `HE_DUMP_RVTTILES` braucht 84 Seiten: "RVT pool grew 64 -> 128 of 512" und "64 -> 96"): **alle Zahlen unverändert** wie in 9a. Im exportierten Spiel (Mix-Szene schräg, 3 Läufe, Median), **RVT-Aufschlag an gegen aus** und Frame-Zeit:
+
+| | Aufschlag vorher | **jetzt** | Frame ms an (vorher -> jetzt) |
+|---|---|---|---|
+| D3D11 | 190 MB | **97 MB** | 3,90 -> 3,84 |
+| D3D12 | 140 MB | **31 MB** | 4,33 -> 4,27 |
+| Vulkan | 196 MB | **63 MB** | 3,13 -> 3,06 |
+
+Die Frame-Zeit ändert sich nicht (der Pool wächst in den ersten Frames, danach nichts mehr; ein Wachstumsschritt kostet im Bracket-Zeugen bis 4 ms auf D3D12). Was auf D3D11 noch bleibt (97 MB bei 20 MB Pool): nicht untersucht, auf D3D12 sind es 31 MB insgesamt.
+
 ## Handoff
 
 - **Topic / step:** 333, Schritte 1 bis 8 gebaut und abgenommen **mit Einschränkungen** (5: Segmentierung als Stand-in für Tiles; 6: D3D12, Vulkan, OpenGL und (Schritt 6f, Branch `claude/rvt-metal`) **Metal**; 7: Projekteinstellung, Seite, Statusansicht; 8: Abnahme am exportierten Spiel; 8b: mit dem Mix-Material und einer Landschaft im Bild **25 bis 53 % weniger Frame-Zeit auf D3D11/D3D12/Vulkan, 140 bis 240 MB VRAM Preis**; die Szene aus Schritt 8 allein (billiges Material, Landschaft kaum im Bild) war kein Test).

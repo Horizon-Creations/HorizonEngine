@@ -3869,7 +3869,8 @@ struct D3D12RendererImpl
     // that consumer. A page is RenderSceneImage's raw frame copied into a slice (RenderSceneImage, rvtSlot >= 0).
     static_assert(HE::kRvtTableBinding == 40 && HE::kRvtSurfaceBinding == 43, "the root table's t40..t43 are the RVT registers");
     ComPtr<ID3D12Resource> rvtPool[3];
-    uint32_t               rvtSlots = 0, rvtPagePx = 0;
+    uint32_t               rvtSlots = 0, rvtPagePx = 0;   // rvtSlots: the manager's ceiling
+    uint32_t               rvtAlloc = 0;                  // slices the arrays hold now (they start small and grow with the pages in use)
     struct RvtTable { ComPtr<ID3D12Resource> tex; uint32_t side = 0, mips = 0; UINT heapIndex = 0; };
     std::unordered_map<HE::UUID, RvtTable> rvtTables;
     ComPtr<ID3D12DescriptorHeap>           rvtTableHeap;     // CPU-only, one SRV per table
@@ -13884,38 +13885,89 @@ bool D3D12Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 // ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
 // The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). Everything here runs between frames, on the
 // CaptureViewport pattern (one-shot command list between two flushes): tables change when a page comes or goes, a few KB.
+// One layer of the pool as `count` slices (Thema 333): the resource (made in `state`) and the staging descriptor the material draws copy from.
+static bool makeRvtPoolLayer12(D3D12RendererImpl& p, UINT layer, UINT count, UINT pagePx, D3D12_RESOURCE_STATES state, ComPtr<ID3D12Resource>& out)
+{
+    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = rd.Height = pagePx;
+    rd.DepthOrArraySize = static_cast<UINT16>(count);
+    rd.MipLevels = 1;
+    rd.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM;   // BaseColor is read through an sRGB view
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    return SUCCEEDED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, state, nullptr, IID_PPV_ARGS(&out)));
+}
+
+static void writeRvtPoolSrv12(D3D12RendererImpl& p, UINT layer, UINT count)
+{
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Texture2DArray.MipLevels = 1;
+    sv.Texture2DArray.ArraySize = count;
+    p.device->CreateShaderResourceView(p.rvtPool[layer].Get(), &sv, p.matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedo + layer));
+}
+
+// The arrays hold `rvtAlloc` slices; a page for a slot beyond that grows them: a new array, the old slices copied across on the GPU,
+// the old array dropped once the GPU is idle (rvtBegin/rvtEnd wait for every frame, so nothing in flight still reads it). Called
+// BEFORE the page's own command list is recorded. The manager hands out slots from 0 upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that needs 70 pages
+// holds ~100 instead of the configured 512. HE_RVT_GROW=0 allocates the whole pool at once.
+static bool growRvtPool12(D3D12RendererImpl& p, uint32_t slot)
+{
+    if (slot < p.rvtAlloc) return true;
+    if (slot >= p.rvtSlots) return false;
+    const uint32_t grown = std::min(p.rvtSlots, std::max((slot + 32u) & ~31u, p.rvtAlloc + p.rvtAlloc / 2));
+    ComPtr<ID3D12Resource> fresh[3];
+    for (UINT layer = 0; layer < 3; ++layer)
+        if (!makeRvtPoolLayer12(p, layer, grown, p.rvtPagePx, D3D12_RESOURCE_STATE_COPY_DEST, fresh[layer])) return false;
+    ID3D12GraphicsCommandList* cl = p.rvtBegin();
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.barrier12(cl, p.rvtPool[layer].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        for (UINT i = 0; i < p.rvtAlloc; ++i)
+        {
+            D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+            src.pResource = p.rvtPool[layer].Get(); src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; src.SubresourceIndex = i;
+            dst.pResource = fresh[layer].Get();     dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = i;
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+        p.barrier12(cl, fresh[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
+    p.rvtEnd();
+    p.rvtPending = 0;   // rvtEnd waited for every frame, the pipelined layers included
+    for (UINT layer = 0; layer < 3; ++layer)
+    {
+        p.rvtPool[layer] = std::move(fresh[layer]);
+        writeRvtPoolSrv12(p, layer, grown);
+    }
+    HE_LOG_INFO(RHI, "D3D12Renderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", p.rvtAlloc, grown, p.rvtSlots,
+                double(grown) * p.rvtPagePx * p.rvtPagePx * 12.0 / (1024.0 * 1024.0));
+    p.rvtAlloc = grown;
+    return true;
+}
+
 bool D3D12Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 {
     auto& p = *m_impl;
     DestroyRvtPool();
     if (!p.device || !p.m_matReady || !p.postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
     p.waitForAllFrames();
-    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+    static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+    const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
     for (UINT layer = 0; layer < 3; ++layer)
     {
-        D3D12_RESOURCE_DESC rd{};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        rd.Width = rd.Height = pagePx;
-        rd.DepthOrArraySize = static_cast<UINT16>(slots);
-        rd.MipLevels = 1;
-        rd.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM;   // BaseColor is read through an sRGB view
-        rd.SampleDesc.Count = 1;
-        rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        if (FAILED(p.device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                                                     nullptr, IID_PPV_ARGS(&p.rvtPool[layer]))))
+        if (!makeRvtPoolLayer12(p, layer, first, pagePx, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, p.rvtPool[layer]))
         {
             DestroyRvtPool();
             return false;
         }
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
-        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Texture2DArray.MipLevels = 1;
-        sv.Texture2DArray.ArraySize = slots;
-        p.device->CreateShaderResourceView(p.rvtPool[layer].Get(), &sv, p.matSrvStagingCpu(HE::d3d12mat::kSlotRvtAlbedo + layer));
+        writeRvtPoolSrv12(p, layer, first);
     }
     p.rvtSlots  = slots;
+    p.rvtAlloc  = first;
     p.rvtPagePx = pagePx;
     return true;
 }
@@ -13930,7 +13982,7 @@ void D3D12Renderer::DestroyRvtPool()
     for (auto& kv : p.rvtTables) p.rvtTableFree.push_back(kv.second.heapIndex);
     p.rvtTables.clear();
     for (auto& r : p.rvtPool) r.Reset();
-    p.rvtSlots = p.rvtPagePx = 0;
+    p.rvtSlots = p.rvtAlloc = p.rvtPagePx = 0;
     p.writeRvtNullViews();
 }
 
@@ -14088,7 +14140,7 @@ bool D3D12Renderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::
 bool D3D12Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
 {
     auto& p = *m_impl;
-    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtSlots) return false;
+    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtAlloc) return false;
     const UINT rowPitch = alignUp(p.rvtPagePx * 4u, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
     ComPtr<ID3D12Resource> rb = p.rvtReadbackBuffer(static_cast<UINT64>(rowPitch) * p.rvtPagePx);
     if (!rb) return false;
@@ -14291,6 +14343,10 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 
     bool ok = p.viewportRT && p.viewportDepth && p.viewportReadback
            && p.viewportRtvHeap && p.viewportDsvHeap;
+    // A page beyond the slices the pool holds grows it first (before the page's own command list is recorded).
+    if (ok && page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer] && camera.rvtSlot >= 0
+        && width == p.rvtPagePx && height == p.rvtPagePx && uint32_t(camera.rvtSlot) >= p.rvtAlloc)
+        growRvtPool12(p, uint32_t(camera.rvtSlot));
     // A kept page layer is not waited for: the next one rotates to the next frame slot (see rvtPending).
     // HE_RVT_PIPELINE=0 waits after every layer again (the A/B guard and the reference of the cross-check).
     static const bool s_pipeline = []() { const char* e = std::getenv("HE_RVT_PIPELINE"); return !(e && *e == '0'); }();
@@ -14307,7 +14363,7 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     {
         // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
         const bool pageOk = page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
-                         && uint32_t(camera.rvtSlot) < p.rvtSlots && width == p.rvtPagePx && height == p.rvtPagePx;
+                         && uint32_t(camera.rvtSlot) < p.rvtAlloc && width == p.rvtPagePx && height == p.rvtPagePx;
         p.cmdAllocators[p.frameIndex]->Reset();
         p.cmdList->Reset(p.cmdAllocators[p.frameIndex].Get(), nullptr);
         DrawViewportFrame();

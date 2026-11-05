@@ -478,7 +478,9 @@ private:
 	// heRvtTable/Albedo/Normal/Surface), so a context needs 25 fragment texture units; macOS GL (16) does not have them.
 	bool         m_rvtSupported = false;
 	unsigned int m_rvtPool[3] = { 0, 0, 0 };   // GL_TEXTURE_2D_ARRAY: BaseColor SRGB8_ALPHA8, Normal / Surface RGBA8
-	uint32_t     m_rvtSlots = 0, m_rvtPagePx = 0;
+	uint32_t     m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
+	uint32_t     m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
+	bool         rvtGrowPool(uint32_t slot);
 	struct RvtTable { unsigned int tex = 0; uint32_t side = 0, mips = 0; };
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };

@@ -1657,7 +1657,8 @@ struct D3D11RendererImpl
     // view decides sRGB or not.
     ComPtr<ID3D11Texture2D>          rvtPool[3];
     ComPtr<ID3D11ShaderResourceView> rvtPoolSRV[3];
-    uint32_t                         rvtSlots = 0;
+    uint32_t                         rvtSlots = 0;       // the pool the manager hands slots out of (the ceiling)
+    uint32_t                         rvtAlloc = 0;       // slices the arrays hold now: they start small and grow with the pages in use
     uint32_t                         rvtPagePx = 0;
     // The one target every page is drawn into (made with the pool, page-sized, kept): colour typeless with a linear and
     // an sRGB view (layer 0 is sRGB, so the hardware encodes), and its depth.
@@ -9381,33 +9382,69 @@ bool D3D11Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 }
 
 // ─── Runtime Virtual Texture page pool (Thema 333) ────────────────────────────
+// One layer of the pool as `count` slices (Thema 333). Typeless RGBA8, so a UNORM page copies in and the view decides sRGB or not.
+static bool makeRvtPoolLayer(D3D11RendererImpl& p, int layer, uint32_t count, uint32_t pagePx,
+                             ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11ShaderResourceView>& srv)
+{
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = pagePx;
+    td.MipLevels  = 1;
+    td.ArraySize  = count;
+    td.Format     = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    td.SampleDesc.Count = 1;
+    td.Usage      = D3D11_USAGE_DEFAULT;
+    td.BindFlags  = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+    sd.Texture2DArray.MipLevels = 1;
+    sd.Texture2DArray.ArraySize = count;
+    return SUCCEEDED(p.device->CreateTexture2D(&td, nullptr, &tex)) &&
+           SUCCEEDED(p.device->CreateShaderResourceView(tex.Get(), &sd, &srv));
+}
+
+// The arrays hold `rvtAlloc` slices; a page for a slot beyond that grows them (a new array, the old slices copied across on the GPU,
+// the old array dropped: D3D11 keeps a resource alive while a queued command still uses it). The manager hands out slots from 0
+// upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that needs 70 pages holds ~100
+// instead of the configured 512.
+// HE_RVT_GROW=0 allocates the whole pool at once (the A/B and the reference of the old behaviour).
+static bool ensureRvtSlot(D3D11RendererImpl& p, uint32_t slot)
+{
+    if (slot < p.rvtAlloc) return true;
+    if (slot >= p.rvtSlots) return false;
+    const uint32_t grown = std::min(p.rvtSlots, std::max((slot + 32u) & ~31u, p.rvtAlloc + p.rvtAlloc / 2));
+    for (int layer = 0; layer < 3; ++layer)
+    {
+        ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv;
+        if (!makeRvtPoolLayer(p, layer, grown, p.rvtPagePx, tex, srv)) return false;
+        for (uint32_t i = 0; i < p.rvtAlloc; ++i)
+            p.context->CopySubresourceRegion(tex.Get(), D3D11CalcSubresource(0, i, 1), 0, 0, 0,
+                                             p.rvtPool[layer].Get(), D3D11CalcSubresource(0, i, 1), nullptr);
+        p.rvtPool[layer] = std::move(tex);
+        p.rvtPoolSRV[layer] = std::move(srv);
+    }
+    HE_LOG_INFO(RHI, "D3D11Renderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", p.rvtAlloc, grown, p.rvtSlots,
+                double(grown) * p.rvtPagePx * p.rvtPagePx * 12.0 / (1024.0 * 1024.0));
+    p.rvtAlloc = grown;
+    return true;
+}
+
 bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 {
     auto& p = *m_impl;
     DestroyRvtPool();
     if (!p.device || !p.postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+    static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+    const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
     for (int layer = 0; layer < 3; ++layer)
     {
-        D3D11_TEXTURE2D_DESC td{};
-        td.Width = td.Height = pagePx;
-        td.MipLevels  = 1;
-        td.ArraySize  = slots;
-        td.Format     = DXGI_FORMAT_R8G8B8A8_TYPELESS;
-        td.SampleDesc.Count = 1;
-        td.Usage      = D3D11_USAGE_DEFAULT;
-        td.BindFlags  = D3D11_BIND_SHADER_RESOURCE;
-        D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-        sd.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
-        sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
-        sd.Texture2DArray.MipLevels = 1;
-        sd.Texture2DArray.ArraySize = slots;
-        if (FAILED(p.device->CreateTexture2D(&td, nullptr, &p.rvtPool[layer])) ||
-            FAILED(p.device->CreateShaderResourceView(p.rvtPool[layer].Get(), &sd, &p.rvtPoolSRV[layer])))
+        if (!makeRvtPoolLayer(p, layer, first, pagePx, p.rvtPool[layer], p.rvtPoolSRV[layer]))
         {
             DestroyRvtPool();
             return false;
         }
     }
+    p.rvtAlloc = first;
     {
         D3D11_TEXTURE2D_DESC cd{};
         cd.Width = cd.Height = pagePx;
@@ -9441,7 +9478,7 @@ void D3D11Renderer::DestroyRvtPool()
     p.rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
     p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset();
     p.rvtPageDepth.Reset(); p.rvtPageDSV.Reset(); p.rvtPageDepthSRV.Reset();
-    p.rvtSlots = p.rvtPagePx = 0;
+    p.rvtSlots = p.rvtAlloc = p.rvtPagePx = 0;
 }
 
 // One virtual texture page (Thema 333): the scene, as it stands, drawn through ONE camera into the page-sized target and
@@ -9485,8 +9522,9 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
     p.rvtPagePass = false;
     if (camera.rvtLayer == 2) p.m_extractor.endFrame();
     { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
-    p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
-                                     p.rvtPageTex.Get(), 0, nullptr);
+    if (ensureRvtSlot(p, uint32_t(camera.rvtSlot)))
+        p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
+                                         p.rvtPageTex.Get(), 0, nullptr);
 
     p.context->OMSetRenderTargets(1, prevRTV.GetAddressOf(), prevDSV.Get());
     if (nvp) p.context->RSSetViewports(1, &prevVP);
@@ -9582,7 +9620,7 @@ bool D3D11Renderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::
 bool D3D11Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
 {
     auto& p = *m_impl;
-    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtSlots) return false;
+    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtAlloc) return false;
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = desc.Height = p.rvtPagePx;
     desc.MipLevels = desc.ArraySize = 1;
@@ -9702,7 +9740,7 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
         {
             // A virtual texture page: the picture never leaves the GPU (Thema 333).
             ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
-              && uint32_t(camera.rvtSlot) < p.rvtSlots && width == p.rvtPagePx && height == p.rvtPagePx;
+              && width == p.rvtPagePx && height == p.rvtPagePx && ensureRvtSlot(p, uint32_t(camera.rvtSlot));
             if (ok)
                 p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(),
                                                  D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
