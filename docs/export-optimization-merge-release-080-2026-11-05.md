@@ -35,6 +35,7 @@ actually conflicted.
     `test_landscape_*` 38/38, `test_hlod_*` 7/7. Zero failures.
   - `git diff origin/release/0.8.0` of the merge result: only `PackManifest.cpp` (4 insertions,
     1 deletion: the zero-init and its comment). Every other file equals the release.
+  - Full `he_tests` run: 6136 cases passed, 0 failed, 20 skipped (2140959 assertions).
   - No test compares the pack fingerprint against a stored constant (the export tests above
     pass with the new fingerprint).
 - **Not verified:** Linux and Windows (CI is the source). The Linux incremental-cache fix
