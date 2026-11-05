@@ -215,6 +215,15 @@ private:
 	                       const glm::vec3& camPos,
 	                       const IRenderer::EnvironmentSettings& env,
 	                       bool allowLowResClouds, int pw, int ph);
+	// The 3D clouds over the opaque geometry: the slab is marched up to each opaque surface
+	// and blended over the lit scene, so clouds are objects in the world (a peak stands in
+	// front of the clouds behind it, the clouds in front of it cover it, flying over the deck
+	// shows the terrain through them) rather than a backdrop for the sky pixels only.
+	// `sceneDepthTex` is the opaque depth of the CURRENTLY BOUND frame buffer (m_hdrDepth).
+	// Runs on the sky program's uniforms as DrawSkyFullscreen left them THIS frame, so it must
+	// follow that call; anything drawn in between (the transparent draws that lie behind the
+	// deck) is covered by it.
+	void DrawCloudsOverGeometry(const IRenderer::EnvironmentSettings& env, unsigned int sceneDepthTex);
 
 	// ── Per-frame scene lighting + CSM uniforms (one block, three programs) ──
 	// The unlit, instanced and skinned programs are all linked from the shared
@@ -979,6 +988,8 @@ private:
 	int          m_uSkyCloudTex     = -1;
 	int          m_uSkyLowResClouds = -1;
 	int          m_uSkyCloudPrepass = -1;
+	int          m_uSkyCloudGeoPass = -1;    // 1 = clouds-over-geometry draw (see DrawSkyFullscreen)
+	int          m_uSkySceneDepth   = -1;    // opaque depth sampler (unit 4), read only by that draw
 	int          m_uSkyRainAmount   = -1;
 	int          m_uSkyGodRays      = -1;
 	int          m_uSkyShootingStars = -1;

@@ -33,6 +33,7 @@
 #include <HorizonRendering/SkyNoise3D.h>      // CPU sky/cloud noise volume bake
 #include <HorizonRendering/SsaoKernel.h>      // SSAO sample kernel + rotation noise
 #include <HorizonRendering/SkyFrameParams.h>  // HE::BuildSkyFrameParams (folds in the cloud wind vector)
+#include <HorizonRendering/CloudDeck.h>      // which transparent draws lie behind the 3D cloud deck
 #include <HorizonRendering/SkyShaderSource.h> // the GL sky, cross-compiled for the sky pass
 #include <HorizonRendering/SkyEnvBake.h>      // shared CPU sky bake (graph materials' heSkyEnv)
 #include <JobSystem/JobSystem.h>              // parallel_for for that bake
@@ -2883,6 +2884,29 @@ struct D3D12RendererImpl
     }
 #endif
 
+#if defined(HE_HAVE_SHADERC)
+    // The clouds-over-geometry variant of the same sky (BuildSkyFragmentGLSL450(true)),
+    // once per process. The prefetch at the top of Initialize and EnsureSkyGeoPipeline (run
+    // right after createSkyPipeline) need the same text, so the FXC run happens during the
+    // start and not on the first frame that has 3D clouds on.
+    // Same pinned registers as the sky plus the opaque depth at t2.
+    static const he::shaderc::Result& skyGeoCrossHlsl()
+    {
+        static const he::shaderc::Result r = [] {
+            using he::shaderc::Stage;
+            using namespace HE::glsl;
+            return he::shaderc::compileHlslPinned(
+                BuildSkyFragmentGLSL450(true), Stage::Fragment, {
+                    { Stage::Fragment, 0, kSkySlotEnv.binding,        kSkySlotEnv.hlslReg        },
+                    { Stage::Fragment, 0, kSkySlotMoon.binding,       kSkySlotMoon.hlslReg       },
+                    { Stage::Fragment, 0, kSkySlotNoise.binding,      kSkySlotNoise.hlslReg      },
+                    { Stage::Fragment, 0, kSkySlotSceneDepth.binding, kSkySlotSceneDepth.hlslReg },
+                });
+        }();
+        return r;
+    }
+#endif
+
     // ─── Startup shader prefetch (Thema 200, D3DShaderPrefetch.h) ───────────
     // As in D3D11Renderer: the compiles Initialize makes eagerly, queued on the
     // job pool before the first of them is needed (8.1 s back to back on a cold
@@ -2908,6 +2932,14 @@ struct D3D12RendererImpl
         const UINT flags = startupCompileFlags() | D3DCOMPILE_PREFER_FLOW_CONTROL;
         HE::d3dprefetch::submit(hlsl.source, "main", "main", "ps_5_0", flags);
         HE::d3dprefetch::submit(HE::glsl::kSkyVSCrossHLSL, "VSSkyCross", "VSSkyCross", "vs_5_0", flags);
+        // The clouds-over-geometry pixel shader (EnsureSkyGeoPipeline), queued behind the sky so
+        // the workers are already busy while the geo variant is cross-compiled on this thread.
+        // Its flags are the sky's (PREFER_FLOW_CONTROL + the debug flags), and its vertex shader
+        // is the sky's, which the request above already covers (the join hands a slot out
+        // again, so both pipelines read the same finished VS).
+        const he::shaderc::Result& geo = skyGeoCrossHlsl();
+        if (geo.ok)
+            HE::d3dprefetch::submit(geo.source, "main", "main", "ps_5_0", flags);
 #endif
     }
 
@@ -3104,9 +3136,9 @@ struct D3D12RendererImpl
         for (UINT f = 0; f < k_frameCount; ++f)
         {
             // Sized for the larger of the two layouts, so either shader fits.
-            // Seven slots: the main sky and the six faces of the GI-reflection sky cube (each draw needs its own constants,
-            // the CPU writes them at record time).
-            skyCBuf[f] = createUploadBuffer(7ull * skyCbStride(), reinterpret_cast<void**>(&skyCBufPtr[f]));
+            // Eight slots: the main sky, the six faces of the GI-reflection sky cube and the clouds-over-geometry
+            // draw (slot 7) — each draw needs its own constants, the CPU writes them at record time.
+            skyCBuf[f] = createUploadBuffer(8ull * skyCbStride(), reinterpret_cast<void**>(&skyCBufPtr[f]));
         }
 
         // Helper: make a sky PSO for a given RT format.
@@ -4069,6 +4101,43 @@ struct D3D12RendererImpl
     // fallback (SkyCB).
     bool                         skyFullModel = false;
     bool                         usingHDR   = false;  // set by Render() before DrawScene()
+
+    // ── Clouds over the opaque geometry (cloudMode 1) ────────────────────────
+    // The sky is drawn FIRST in this backend, so the 3D clouds were only ever a backdrop:
+    // terrain was never covered by the clouds in front of it, and could not be seen
+    // through the deck from above. After the opaque geometry a second, blended draw marches
+    // the same slab up to each opaque surface (the geo variant of the sky shader, depth at
+    // t2) and lays (L, T) over the lit scene: rgb = L + dst * T.
+    // Own root signature (the sky's, with the table at t1..t2) and an own two-slot-per-frame
+    // SRV heap, because the depth SRV has to be rewritten for whichever depth the frame
+    // draws into. Built at the start, right after the sky pipeline (the FXC runs are prefetched
+    // with the sky's), and a failure is remembered, like the decal pipeline's.
+    ComPtr<ID3D12RootSignature>  skyGeoRootSig;
+    ComPtr<ID3D12PipelineState>  skyGeoHdrPso;     // RGBA16F target
+    ComPtr<ID3D12PipelineState>  skyGeoLdrPso;     // RGBA8 target (optional)
+    static constexpr UINT        k_skyGeoSlotsPerFrame = 3;
+    ComPtr<ID3D12DescriptorHeap> skyGeoHeap;       // per frame slot: null moon (t0), 3D noise (t1), opaque depth (t2)
+    bool                         skyGeoReady  = false;
+    bool                         skyGeoFailed = false;
+    bool EnsureSkyGeoPipeline();
+    // Where the clouds-over-geometry draw goes: the target the scene is drawing into (the same
+    // three-way EncodeDecals / rebindSceneTarget use) and the PSO built for its format.
+    struct SkyCloudTarget
+    {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv{}, dsv{};
+        ID3D12Resource*             depthRes = nullptr;
+        ID3D12PipelineState*        pso      = nullptr;
+    };
+    // The whole gate of EncodeSkyClouds on its own (3D clouds on, the full cross-compiled sky in
+    // use, pipeline + target available), so DrawScene can ask the very same question before it
+    // splits the transparent draws around the composite: they cannot disagree.
+    bool SkyCloudsReady(const IRenderer::EnvironmentSettings& env, SkyCloudTarget& target);
+    // Records the pass when this frame wants it (3D clouds on, the full cross-compiled sky
+    // in use) and returns whether it did — the caller then rebuilds the scene root state,
+    // which the root-signature switch wiped. `invViewProj` etc. are the main sky's.
+    bool EncodeSkyClouds(ID3D12GraphicsCommandList* cl, const glm::mat4& invViewProj,
+                         const glm::vec3& sunDir, const IRenderer::EnvironmentSettings& env,
+                         const glm::vec3& cameraPos, float time);
 
     // ── Debug line pipeline ───────────────────────────────────────────────────
     ComPtr<ID3D12RootSignature>  debugRootSig;
@@ -5729,6 +5798,12 @@ struct D3D12RendererImpl
         // Each sub-step timed on its own ([startup] D3D12 phase=…, Thema 196).
         using HE::d3dtiming::Phase;
         { Phase t("D3D12", "createSkyPipeline");       createSkyPipeline(); }
+        // The clouds-over-geometry pipeline right behind it (it needs skyReady/skyFullModel, which
+        // createSkyPipeline just settled): its FXC runs were prefetched with the sky's, so this
+        // is root signature + PSO creation, and the first frame with 3D clouds on pays nothing.
+        // Not gated on cloudMode — it is switched on later, in the editor. A miss (no shaderc,
+        // reduced fallback sky) builds nothing; EncodeSkyClouds then simply never draws.
+        { Phase t("D3D12", "createSkyGeoPipeline");    EnsureSkyGeoPipeline(); }
         { Phase t("D3D12", "createDebugLinePipeline"); createDebugLinePipeline(); }
         { Phase t("D3D12", "createSSAOPipeline");      createSSAOPipeline(); }
         { Phase t("D3D12", "createSkinnedPipeline");   createSkinnedPipeline(); }
@@ -10810,6 +10885,278 @@ void D3D12RendererImpl::EncodeDecals(ID3D12GraphicsCommandList* cl, const glm::m
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Clouds over the opaque geometry (cloudMode 1)
+// ─────────────────────────────────────────────────────────────────────────────
+// The sky is drawn first here, so without this pass the 3D clouds are a backdrop only:
+// terrain is never covered by the clouds in front of it and cannot be seen through the
+// deck from above. This marches the same slab, but only up to each opaque surface (the
+// geo variant of the GL sky, HE_SKY_GEO_PASS: depth at t2, sky pixels discarded) and
+// blends (L, T) over the lit HDR colour. Built at the start (createPipeline, after the sky),
+// not on the first cloud frame: the cross-compile and the FXC run are prefetched with the
+// sky's (prefetchSkyShaders), so this is the root signature and the PSOs only. The frame loop
+// still calls it as a guard, and a failure is remembered so it never retries per frame.
+bool D3D12RendererImpl::EnsureSkyGeoPipeline()
+{
+#if !defined(HE_HAVE_SHADERC)
+    return false;
+#else
+    if (skyGeoReady)  return true;
+    if (skyGeoFailed) return false;
+    skyGeoFailed = true; // cleared only on full success below
+    if (!device || !skyReady || !skyFullModel) return false;
+
+    const he::shaderc::Result& hlsl = skyGeoCrossHlsl();
+    if (!hlsl.ok)
+    {
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: clouds-over-geometry shader cross-compile failed");
+        return false;
+    }
+
+    // Root signature: the sky's ([0] CBV b0, [1] SRV table, the same static samplers) with the
+    // table extended by t2, the opaque depth. t0 (moon) is not read by this variant — the
+    // geometry branch returns before it — but stays in the table as a null view, so a moon
+    // fetch FXC did not strip from the dead code can never name a register the signature
+    // lacks. s2 is declared for the depth's texelFetch even though a Load needs no sampler.
+    {
+        D3D12_DESCRIPTOR_RANGE r{};
+        r.RangeType          = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        r.NumDescriptors     = 3;
+        r.BaseShaderRegister = 0; // t0 moon (null), t1 noise, t2 opaque depth
+        D3D12_ROOT_PARAMETER params[2]{};
+        params[0].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        params[0].Descriptor       = { 0, 0 };
+        params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        params[1].ParameterType    = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[1].DescriptorTable  = { 1, &r };
+        params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_STATIC_SAMPLER_DESC samps[3]{};
+        samps[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samps[0].AddressU = samps[0].AddressV = samps[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samps[0].ShaderRegister = 0; samps[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samps[1].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        samps[1].AddressU = samps[1].AddressV = samps[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+        samps[1].ShaderRegister = 1; samps[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        samps[2].Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+        samps[2].AddressU = samps[2].AddressV = samps[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        samps[2].ShaderRegister = 2; samps[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters     = 2; rsd.pParameters   = params;
+        rsd.NumStaticSamplers = 3; rsd.pStaticSamplers = samps;
+        ComPtr<ID3DBlob> sig, err;
+        if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)) ||
+            FAILED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                   IID_PPV_ARGS(&skyGeoRootSig))))
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: clouds-over-geometry root signature failed");
+            skyGeoRootSig.Reset();
+            return false;
+        }
+    }
+
+    // Same flags as the sky's own compile: the cloud march exits on transmittance, so FXC is
+    // asked for real loops instead of unrolling them.
+    UINT flags = D3DCOMPILE_PREFER_FLOW_CONTROL;
+#ifdef _DEBUG
+    flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
+#endif
+    ComPtr<ID3DBlob> vsB, psB, cerr;
+    if (FAILED(timedD3DCompile(HE::glsl::kSkyVSCrossHLSL, strlen(HE::glsl::kSkyVSCrossHLSL),
+                          "VSSkyCross", nullptr, nullptr, "VSSkyCross", "vs_5_0", flags, 0, &vsB, &cerr)))
+    {
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: clouds-over-geometry VS compile failed: ")
+            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    if (FAILED(timedD3DCompile(hlsl.source.c_str(), hlsl.source.size(),
+                          "main", nullptr, nullptr, "main", "ps_5_0", flags, 0, &psB, &cerr)))
+    {
+        HE_LOG_WARN(RHI, "%s", (std::string("D3D12Renderer: clouds-over-geometry PS compile failed: ")
+            + (cerr ? static_cast<const char*>(cerr->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+
+    // One PSO per colour format the scene can be drawing into (HDR viewport RT / RGBA8).
+    // Blend rgb: out = L * 1 + dst * T (the shader writes (L, T)); alpha untouched. No depth
+    // test or write — the depth is being READ as a texture and is not on the output merger.
+    auto buildPso = [&](DXGI_FORMAT fmt, ComPtr<ID3D12PipelineState>& out) -> bool
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = skyGeoRootSig.Get();
+        pd.VS = { vsB->GetBufferPointer(), vsB->GetBufferSize() };
+        pd.PS = { psB->GetBufferPointer(), psB->GetBufferSize() };
+        D3D12_RENDER_TARGET_BLEND_DESC& bl = pd.BlendState.RenderTarget[0];
+        bl.BlendEnable           = TRUE;
+        bl.SrcBlend              = D3D12_BLEND_ONE;
+        bl.DestBlend             = D3D12_BLEND_SRC_ALPHA;
+        bl.BlendOp               = D3D12_BLEND_OP_ADD;
+        bl.SrcBlendAlpha         = D3D12_BLEND_ZERO;
+        bl.DestBlendAlpha        = D3D12_BLEND_ONE;
+        bl.BlendOpAlpha          = D3D12_BLEND_OP_ADD;
+        bl.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.SampleMask = UINT_MAX;
+        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pd.DepthStencilState.DepthEnable = FALSE;
+        pd.DSVFormat = DXGI_FORMAT_UNKNOWN;
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets = 1; pd.RTVFormats[0] = fmt;
+        pd.SampleDesc.Count = 1;
+        return SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out)));
+    };
+    if (!buildPso(DXGI_FORMAT_R16G16B16A16_FLOAT, skyGeoHdrPso))
+    {
+        HE_LOG_WARN(RHI, "%s", "D3D12Renderer: clouds-over-geometry PSO failed");
+        return false;
+    }
+    buildPso(DXGI_FORMAT_R8G8B8A8_UNORM, skyGeoLdrPso); // best-effort, like skyLdrPso
+
+    // Three descriptors per frame slot (null moon t0, noise t1, opaque depth t2). Rewritten at
+    // record time, which is safe because a frame slot's descriptors are only touched after
+    // that slot's fence.
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};
+    hd.NumDescriptors = k_skyGeoSlotsPerFrame * k_frameCount;
+    hd.Type  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&skyGeoHeap))))
+    {
+        skyGeoHeap.Reset();
+        return false;
+    }
+
+    skyGeoFailed = false;
+    skyGeoReady  = true;
+    return true;
+#endif
+}
+
+// Records the pass and returns true when it drew (the caller then rebuilds the scene root
+// state: the root-signature switch below wiped it). Same order as EncodeDecals: the depth
+// comes off the output merger FIRST, THEN it becomes a shader resource; and back the other
+// way round afterwards.
+bool D3D12RendererImpl::SkyCloudsReady(const IRenderer::EnvironmentSettings& env, SkyCloudTarget& target)
+{
+#if !defined(HE_HAVE_SHADERC)
+    (void)env; (void)target;
+    return false;
+#else
+    // Only the cross-compiled GL sky has the 3D clouds (the reduced fallback sky has none).
+    if (!skyReady || !skyFullModel || !skyCBufPtr[frameIndex]) return false;
+    if (!HE::cloudDeckActive(env)) return false;          // sky on, cloudMode 1, coverage > 0
+    if (!EnsureSkyGeoPipeline()) return false;
+
+    // The target the scene is drawing into, rebuilt from the same three-way EncodeDecals and
+    // rebindSceneTarget use (a D3D12 command list cannot be asked what is bound).
+    bool hdr = false;
+    if (usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)
+    {
+        target.rtv = hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.depthRes = viewportDepth.Get(); hdr = true;
+    }
+    else if (viewportRtvHeap && viewportDsvHeap && viewportDepth)
+    {
+        target.rtv = viewportRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+        target.depthRes = viewportDepth.Get();
+    }
+    else if (dsvHeap && depthBuffer)
+    {
+        target.rtv = rtvHandle(frameIndex);
+        target.dsv = dsvHandle(0);
+        target.depthRes = depthBuffer.Get();
+    }
+    else return false;
+    target.pso = hdr ? skyGeoHdrPso.Get() : skyGeoLdrPso.Get();
+    return target.pso != nullptr;
+#endif
+}
+
+bool D3D12RendererImpl::EncodeSkyClouds(ID3D12GraphicsCommandList* cl, const glm::mat4& invViewProj,
+                                        const glm::vec3& sunDir,
+                                        const IRenderer::EnvironmentSettings& env,
+                                        const glm::vec3& cameraPos, float time)
+{
+#if !defined(HE_HAVE_SHADERC)
+    (void)cl; (void)invViewProj; (void)sunDir; (void)env; (void)cameraPos; (void)time;
+    return false;
+#else
+    SkyCloudTarget target;
+    if (!cl || !SkyCloudsReady(env, target)) return false;
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = target.rtv, dsv = target.dsv;
+    ID3D12Resource* const             depthRes = target.depthRes;
+    ID3D12PipelineState* const        pso      = target.pso;
+
+    GpuPassScope _passTimer(this, "Clouds");
+
+    // The same SkyFrameParams the main sky draw uploaded (jittered invViewProj, camera, env),
+    // in a constants slot of its own: slot 0 is the sky's, 1..6 the reflection cube's.
+    constexpr UINT kGeoCbSlot = 7;
+    HE::SkyFrameInputs skyIn;
+    skyIn.invViewProj    = invViewProj;
+    skyIn.sunDir         = sunDir;
+    skyIn.cameraPos      = cameraPos;
+    skyIn.time           = time;
+    skyIn.hasMoonTexture = moonTex12 ? true : false;
+    const HE::SkyFrameParams sp = HE::BuildSkyFrameParams(env, skyIn);
+    const UINT64 cbOffset = static_cast<UINT64>(kGeoCbSlot) * skyCbStride();
+    std::memcpy(skyCBufPtr[frameIndex] + cbOffset, &sp, sizeof(sp));
+
+    // This frame slot's descriptors: a null moon view (t0), the noise volume (t1), then the
+    // depth the scene drew into as an R32_FLOAT view of its R32_TYPELESS resource (depth in
+    // .r, already 0..1).
+    const UINT inc = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    D3D12_CPU_DESCRIPTOR_HANDLE cpu = skyGeoHeap->GetCPUDescriptorHandleForHeapStart();
+    cpu.ptr += static_cast<SIZE_T>(frameIndex) * k_skyGeoSlotsPerFrame * inc;
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = skyGeoHeap->GetGPUDescriptorHandleForHeapStart();
+    gpu.ptr += static_cast<UINT64>(frameIndex) * k_skyGeoSlotsPerFrame * inc;
+    {
+        D3D12_SHADER_RESOURCE_VIEW_DESC msv{};
+        msv.Format                  = DXGI_FORMAT_R8G8B8A8_UNORM;
+        msv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        msv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        msv.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(nullptr, &msv, cpu);
+        cpu.ptr += inc;
+        D3D12_SHADER_RESOURCE_VIEW_DESC nsv{};
+        nsv.Format                  = DXGI_FORMAT_R16G16_UNORM;
+        nsv.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE3D;
+        nsv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        nsv.Texture3D.MipLevels     = 1;
+        // A null resource (failed noise upload) writes a null view: the clouds just read as 0.
+        device->CreateShaderResourceView(skyNoiseTex12.Get(), &nsv, cpu);
+        cpu.ptr += inc;
+        D3D12_SHADER_RESOURCE_VIEW_DESC dsvDesc{};
+        dsvDesc.Format                  = DXGI_FORMAT_R32_FLOAT;
+        dsvDesc.ViewDimension           = D3D12_SRV_DIMENSION_TEXTURE2D;
+        dsvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        dsvDesc.Texture2D.MipLevels     = 1;
+        device->CreateShaderResourceView(depthRes, &dsvDesc, cpu);
+    }
+
+    cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);         // release the depth FIRST
+    barrier12(cl, depthRes, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+              D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);   // then make it readable
+
+    cl->SetGraphicsRootSignature(skyGeoRootSig.Get());
+    cl->SetPipelineState(pso);
+    ID3D12DescriptorHeap* heaps[] = { skyGeoHeap.Get() };
+    cl->SetDescriptorHeaps(1, heaps);
+    cl->SetGraphicsRootConstantBufferView(0, skyCBuf[frameIndex]->GetGPUVirtualAddress() + cbOffset);
+    cl->SetGraphicsRootDescriptorTable(1, gpu);
+    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    cl->IASetVertexBuffers(0, 0, nullptr);
+    cl->IASetIndexBuffer(nullptr);
+    cl->DrawInstanced(3, 1, 0, 0);
+    ++statDraws; ++statTris;
+
+    barrier12(cl, depthRes, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+              D3D12_RESOURCE_STATE_DEPTH_WRITE);             // depth writable again …
+    cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv);            // … only THEN back on the OM
+    return true;
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Deferred render path (Thema 150): pipelines + G-buffer targets
 // ─────────────────────────────────────────────────────────────────────────────
 bool D3D12RendererImpl::createDeferredPipelines()
@@ -11303,6 +11650,13 @@ void D3D12Renderer::Shutdown()
     }
     m_impl->decalReady  = false;
     m_impl->decalFailed = false;
+    // Clouds over the opaque geometry: rebuilt lazily after a re-Initialize.
+    m_impl->skyGeoRootSig.Reset();
+    m_impl->skyGeoHdrPso.Reset();
+    m_impl->skyGeoLdrPso.Reset();
+    m_impl->skyGeoHeap.Reset();
+    m_impl->skyGeoReady  = false;
+    m_impl->skyGeoFailed = false;
     // Motion-trail staging pools (one per frame in flight).
     for (UINT f = 0; f < k_frameCount; ++f) m_impl->ribbonPool[f].clear();
     // Forward SSR: the trace/blur pipelines, the half-res ping-pong, the colour
@@ -12226,6 +12580,9 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         std::vector<DrawCall> ribbonDCs;
         std::vector<GpuMesh>  ribbonMeshes;
         std::unordered_map<const DrawCall*, GpuMesh*> ribbonMeshByDC;
+        // World-space bounds of each trail (its mesh is rebased around a pivot, so the GpuMesh bounds are
+        // not world bounds): the cloud-deck classification of the transparent draws asks for them.
+        std::unordered_map<const DrawCall*, HE::AABB> ribbonBoundsByDC;
         if (!p.m_renderWorld.ribbonBatches.empty())
         {
             // Reserve BOTH before taking any address: transparentDCs below holds
@@ -12271,6 +12628,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 ribbonMeshes.push_back(rmesh);
                 ribbonDCs.push_back(std::move(dc));
                 ribbonMeshByDC.emplace(&ribbonDCs.back(), &ribbonMeshes.back());
+                ribbonBoundsByDC.emplace(&ribbonDCs.back(), rb.worldBounds);
                 transparentDCs.push_back(&ribbonDCs.back());
             }
         }
@@ -13094,16 +13452,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(scenePso);
         }
 
-        // ── Screen-space decals ──────────────────────────────────────────────
-        // After all opaque + skinned geometry (its depth is what the decal projects
-        // onto) and before the transparent draws — the slot Metal and GL use for
-        // their G-buffer decals. A frame without decals costs one empty() check.
-        // A deferred frame put them into GB0 already (gbDecals).
-        if (!p.m_renderWorld.decals.empty() && !gbDecals)
+        // A root-signature switch wipes every root argument, so after a pass that brought
+        // its own signature (decals, clouds) the scene state is rebuilt exactly as the
+        // skinned pass rebuilds it above.
+        auto restoreSceneRootAfterPass = [&]()
         {
-            p.EncodeDecals(cl, viewProj, width, height, m_contentManager);
-            // A root-signature switch wipes every root argument, so the scene state
-            // is rebuilt exactly as the skinned pass rebuilds it above.
             cl->SetGraphicsRootSignature(p.rootSig.Get());
             p.bindClusterRoots(cl);
             cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -13116,15 +13469,76 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                 cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
             }
             cl->SetPipelineState(scenePso);
+        };
+
+        // ── Screen-space decals ──────────────────────────────────────────────
+        // After all opaque + skinned geometry (its depth is what the decal projects
+        // onto) and before the transparent draws — the slot Metal and GL use for
+        // their G-buffer decals. A frame without decals costs one empty() check.
+        // A deferred frame put them into GB0 already (gbDecals).
+        if (!p.m_renderWorld.decals.empty() && !gbDecals)
+        {
+            p.EncodeDecals(cl, viewProj, width, height, m_contentManager);
+            restoreSceneRootAfterPass();
         }
 
-        if (!transparentDCs.empty() && transePso) {
+        // One run of the sorted transparent list through the blended PSO. Called once, or twice
+        // around the cloud composite below; each call sets the pass state up and puts it back.
+        auto drawTransparentRange = [&](std::vector<const DrawCall*>::const_iterator first,
+                                        std::vector<const DrawCall*>::const_iterator last)
+        {
+            if (first == last || !transePso) return;
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             activeScenePso = transePso; // A4: graph-material draws in the transparent pass restore THIS
             cl->SetPipelineState(transePso);
-            for (const DrawCall* dc : transparentDCs) drawDC12(*dc);
+            for (; first != last; ++first) drawDC12(**first);
             cl->SetPipelineState(scenePso); // restore for next draw
+        };
+
+        // ── Clouds over the opaque geometry (cloudMode 1) ────────────────────
+        // The sky above was drawn before any geometry, so its clouds are a backdrop
+        // only. With every opaque surface in the depth buffer (forward AND deferred
+        // frames both arrive here, the G-buffer resolve is long done) the same slab is
+        // marched up to each surface and blended over the lit colour.
+        // The transparent draws do not write depth, so the composite cannot know where they
+        // are; what it can be told is which of them lie wholly behind the cloud deck
+        // (HE::transparentBehindClouds: camera on one side of the slab, the draw on the other).
+        // Those are drawn BEFORE it and get covered; the rest after it, in front of the
+        // clouds, as before. Each group keeps its back-to-front order. A frame whose composite
+        // does not run keeps the single transparent pass.
+        D3D12RendererImpl::SkyCloudTarget cloudTarget;
+        const bool cloudsOn = p.SkyCloudsReady(m_environment, cloudTarget);   // the composite's own gate
+        auto behindEnd = transparentDCs.begin();
+        if (cloudsOn && transePso && !transparentDCs.empty())
+        {
+            const glm::vec3& cloudCam = p.m_renderWorld.camera.position;
+            auto behindClouds = [&](const DrawCall* dc) -> bool
+            {
+                // A trail: its world bounds, kept when the batch was uploaded.
+                if (auto rb = ribbonBoundsByDC.find(dc); rb != ribbonBoundsByDC.end())
+                    return rb->second.isValid()
+                        && HE::transparentBehindClouds(m_environment, cloudCam.y, rb->second.min.y, rb->second.max.y);
+                // A mesh: its object-space bounds under every instance's transform — a batch is behind
+                // only when ALL its instances are. No usable bounds (no mesh yet) -> not behind.
+                const GpuMesh* mesh = p.resolveMesh(dc->meshAssetId, m_contentManager);
+                if (!mesh || !mesh->localBounds.isValid()) return false;
+                bool behind = true;
+                auto test = [&](const glm::mat4& t) {
+                    behind = behind && HE::transparentBehindClouds(m_environment, cloudCam, mesh->localBounds, t);
+                };
+                if (dc->instanceTotal() > 0) dc->forEachInstance(test);
+                else                         test(dc->transform);
+                return behind;
+            };
+            behindEnd = std::stable_partition(transparentDCs.begin(), transparentDCs.end(), behindClouds);
         }
+        drawTransparentRange(transparentDCs.cbegin(), behindEnd);
+
+        if (cloudsOn && p.EncodeSkyClouds(cl, glm::inverse(viewProj), p.m_renderWorld.sunDirection, m_environment,
+                                          p.m_renderWorld.camera.position, p.m_wallTime))
+            restoreSceneRootAfterPass();
+
+        drawTransparentRange(behindEnd, transparentDCs.cend());
 
         // Debug lines on top of geometry but before PostFX tonemap.
         if (!p.m_debugLines.empty()) {
@@ -14366,6 +14780,13 @@ void D3D12Renderer::InvalidateMaterial(const HE::UUID& materialId)
 bool D3D12Renderer::SupportsTessellation() const
 {
     return m_impl && m_impl->m_tessSupported;
+}
+
+bool D3D12Renderer::Supports3DClouds() const
+{
+    // Built at startup (createSkyGeoPipeline), so this is settled before the first frame; a failed build
+    // (skyGeoFailed) leaves the dome.
+    return m_impl && m_impl->skyReady && m_impl->skyFullModel && m_impl->skyGeoReady;
 }
 
 void D3D12Renderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)

@@ -1180,15 +1180,25 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// scene). 3D exposes a height slider to match the world's unit scale.
 			{
 				const char* cloudModes[] = { "Sky-dome (default)", "3D volumetric (parallax)" };
-				int cmode = (env->cloudMode == 1) ? 1 : 0;
+				// A renderer that cannot draw the 3D clouds correctly (no full sky, no clouds-over-geometry
+				// pass) shows the dome whatever the scene says: the switch is greyed out on the dome, and
+				// the scene keeps its own value for a renderer that has them.
+				const bool clouds3D = !ctx.renderer || ctx.renderer->Supports3DClouds();
+				const int  effMode  = (clouds3D && env->cloudMode == 1) ? 1 : 0;
+				int cmode = effMode;
+				ImGui::BeginDisabled(!clouds3D);
 				if (Row::combo("Render Mode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
-				if (env->cloudMode != 1)
+				ImGui::EndDisabled();
+				if (!clouds3D)
+					hint("3D clouds are not available on this renderer; the sky dome is used. "
+					     "The scene keeps its setting for renderers that support them.");
+				if (effMode != 1)
 				{
 					Row::sliderFloat("Dome Cloud Height", &env->cloudDomeHeight, 0.25f, 3.0f, "%.2fx"); trackEdit();
 					hint("How high the dome clouds look. 1 is the classic look; raise it and they "
 					     "sit further up, smaller and slower against their size; lower it and they come close.");
 				}
-				if (env->cloudMode == 1)
+				if (effMode == 1)
 				{
 					Row::sliderFloat("Cloud Altitude", &env->cloudHeight, 20.0f, 2000.0f, "%.0f m"); trackEdit();
 					hint("World altitude of the cloud deck — an absolute height, not a "

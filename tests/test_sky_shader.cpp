@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include <HorizonRendering/CloudDeck.h>
 #include <HorizonRendering/SkyFrameParams.h>
 #include <HorizonRendering/SkyShaderSource.h>
 
@@ -174,6 +175,120 @@ TEST_CASE("The sky shaders no longer position clouds with wind * time")
 	CHECK(fs.find("uWindDrift") != std::string::npos);
 }
 
+TEST_CASE("BuildSkyFragmentGLSL450(true) is the clouds-over-geometry variant of the same text")
+{
+	const std::string sky = HE::glsl::BuildSkyFragmentGLSL450();
+	const std::string geo = HE::glsl::BuildSkyFragmentGLSL450(true);
+	REQUIRE_FALSE(geo.empty());
+	CHECK(geo.rfind("#version 450\n#define HE_SKY_GEO_PASS 1\n", 0) == 0);   // #version stays the first line
+	CHECK(geo.size() == sky.size() + std::string("#define HE_SKY_GEO_PASS 1\n").size());
+	CHECK(sky.find("HE_SKY_GEO_PASS 1") == std::string::npos);                // the plain sky never defines it
+	CHECK(geo.find("layout(set = 0, binding = 3) uniform sampler2D uSceneDepth;") != std::string::npos);
+	// The depth value goes through ONE conversion, which the prelude pins to Vulkan/D3D's 0..1.
+	CHECK(geo.find("#define heSceneDepthToNdc(d) (d)") != std::string::npos);
+	CHECK(std::string(HE::glsl::kSkyFS).find("#define heSceneDepthToNdc(d) ((d) * 2.0 - 1.0)") != std::string::npos);
+}
+
+TEST_CASE("The CPU cloud deck is the slab the shader marches")
+{
+	// transparentBehindClouds() classifies draws against these numbers; if the shader's slab moves they
+	// have to move with it, or draws get sorted against a deck the clouds are not in.
+	const std::string fs = HE::glsl::kSkyFS;
+	CHECK(fs.find("const float kCloudRefAltitude = 200.0;") != std::string::npos);
+	CHECK(HE::kCloudDeckRefAltitude == 200.0f);
+	CHECK(fs.find("float thick = kCloudRefAltitude * 1.5;") != std::string::npos);        // classic and Realistic
+	CHECK(HE::kCloudDeckThickness == 300.0f);
+	CHECK(fs.find("baseY - 0.12 * thick") != std::string::npos);                        // Realistic reaches below the base
+	CHECK(HE::kCloudDeckBelowBase == doctest::Approx(36.0f));
+	CHECK(fs.find("float baseY = cloudH;") != std::string::npos);                       // the base IS cloudHeight
+	const HE::CloudDeck d = HE::cloudDeckOf(200.0f);
+	CHECK(d.bottom < 200.0f - 36.0f);                                                    // margin on both sides
+	CHECK(d.top    > 200.0f + 300.0f);
+	CHECK(HE::cloudDeckOf(-5.0f).bottom == HE::cloudDeckOf(1.0f).bottom);               // the shader clamps cloudH to >= 1
+}
+
+TEST_CASE("Transparent draws behind the cloud deck are the ones wholly on its far side")
+{
+	IRenderer::EnvironmentSettings env;
+	env.cloudMode = 1; env.cloudCoverage = 0.5f; env.cloudHeight = 200.0f;   // deck ~164 .. 500 (plus margin)
+
+	// Camera above the deck: below it is behind, above or on the camera's side is not.
+	CHECK(HE::transparentBehindClouds(env, 900.0f, 0.0f, 50.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 900.0f, 600.0f, 650.0f));    // same side as the camera
+	// Camera below the deck: above it is behind.
+	CHECK(HE::transparentBehindClouds(env, 20.0f, 700.0f, 720.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 20.0f, 30.0f, 60.0f));       // same side as the camera
+	// Straddling the deck (either side of it), touching it, or a camera inside it: unchanged behaviour.
+	CHECK_FALSE(HE::transparentBehindClouds(env, 900.0f, 100.0f, 300.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 20.0f, 300.0f, 800.0f));
+	CHECK_FALSE(HE::transparentBehindClouds(env, 900.0f, 0.0f, 170.0f));      // inside the margin under the base
+	CHECK_FALSE(HE::transparentBehindClouds(env, 300.0f, 0.0f, 50.0f));       // camera inside the deck
+	// No 3D clouds -> nothing is "behind" anything: dome mode, clear sky, no sky at all.
+	{ auto e = env; e.cloudMode = 0;       CHECK_FALSE(HE::transparentBehindClouds(e, 900.0f, 0.0f, 50.0f)); }
+	{ auto e = env; e.cloudCoverage = 0.f; CHECK_FALSE(HE::transparentBehindClouds(e, 900.0f, 0.0f, 50.0f)); }
+	{ auto e = env; e.skyEnabled = false;  CHECK_FALSE(HE::transparentBehindClouds(e, 900.0f, 0.0f, 50.0f)); }
+	// The deck follows cloudHeight.
+	{ auto e = env; e.cloudHeight = 1000.0f; CHECK(HE::transparentBehindClouds(e, 2000.0f, 500.0f, 600.0f)); }
+
+	// From object-space bounds + model matrix: a unit cube moved to y = 10 is behind from above, an
+	// invalid box never is.
+	HE::AABB cube; cube.expand(glm::vec3(-0.5f)); cube.expand(glm::vec3(0.5f));
+	const glm::mat4 low  = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 10.0f, 0.0f));
+	const glm::mat4 high = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 900.0f, 0.0f));
+	CHECK(HE::transparentBehindClouds(env, glm::vec3(0.0f, 900.0f, 0.0f), cube, low));
+	CHECK_FALSE(HE::transparentBehindClouds(env, glm::vec3(0.0f, 900.0f, 0.0f), cube, high));
+	CHECK_FALSE(HE::transparentBehindClouds(env, glm::vec3(0.0f, 900.0f, 0.0f), HE::AABB{}, low));
+}
+
+namespace
+{
+// The smallest IRenderer that can answer "do you draw 3D clouds": only the pure virtuals, plus the
+// capability a backend overrides.
+class CloudCapRenderer final : public IRenderer
+{
+public:
+	explicit CloudCapRenderer(bool clouds3D) : m_clouds3D(clouds3D) {}
+	void Initialize(HE::Window*) override {}
+	void Shutdown() override {}
+	void Render() override {}
+	Capabilities GetCapabilities() const override { return {}; }
+	void* CreateImGuiTexture(const void*, int, int) override { return nullptr; }
+	void  DestroyImGuiTexture(void*) override {}
+	void* RenderMaterialPreview(ContentManager&, const HE::UUID&, uint32_t, float, float, float,
+	                            int, const HE::UUID&, float) override { return nullptr; }
+	bool Supports3DClouds() const override { return m_clouds3D; }
+private:
+	bool m_clouds3D;
+};
+} // namespace
+
+TEST_CASE("A renderer without 3D clouds keeps the sky dome whatever the scene says")
+{
+	IRenderer::EnvironmentSettings env;
+	env.cloudMode = 1;
+	env.cloudHeight = 321.0f;
+
+	// A renderer that draws them: the scene's mode goes through untouched.
+	CloudCapRenderer has(true);
+	has.SetEnvironmentSettings(env);
+	CHECK(has.GetEnvironment().cloudMode == 1);
+
+	// One that does not (reduced fallback sky, no clouds-over-geometry pass): dome, every frame it is
+	// pushed, and nothing else about the environment changes.
+	CloudCapRenderer lacks(false);
+	lacks.SetEnvironmentSettings(env);
+	CHECK(lacks.GetEnvironment().cloudMode == 0);
+	CHECK(lacks.GetEnvironment().cloudHeight == 321.0f);
+	env.cloudMode = 0;
+	lacks.SetEnvironmentSettings(env);
+	CHECK(lacks.GetEnvironment().cloudMode == 0);
+	// The scene value is the caller's: the push takes a const reference, so it keeps its 1 for a
+	// renderer that does have them.
+	env.cloudMode = 1;
+	lacks.SetEnvironmentSettings(env);
+	CHECK(env.cloudMode == 1);
+}
+
 TEST_CASE("BuildSkyFragmentGLSL450 swaps the GL header for the prelude and keeps the body")
 {
 	const std::string src = HE::glsl::BuildSkyFragmentGLSL450();
@@ -239,6 +354,25 @@ he::shaderc::Result compileSkyHlsl(const std::string& glsl)
 	});
 }
 } // namespace
+
+TEST_CASE("The clouds-over-geometry variant cross-compiles to SPIR-V and pinned HLSL (depth at t2)")
+{
+	const std::string glsl = HE::glsl::BuildSkyFragmentGLSL450(true);
+	const he::shaderc::Result spv = he::shaderc::compile(glsl, he::shaderc::Stage::Fragment,
+	                                                     he::shaderc::Target::SpirvBinary);
+	REQUIRE_MESSAGE(spv.ok, spv.log);
+	using he::shaderc::Stage;
+	using namespace HE::glsl;
+	const he::shaderc::Result hlsl = he::shaderc::compileHlslPinned(glsl, Stage::Fragment, {
+		{ Stage::Fragment, 0, kSkySlotEnv.binding,        kSkySlotEnv.hlslReg        },
+		{ Stage::Fragment, 0, kSkySlotMoon.binding,       kSkySlotMoon.hlslReg       },
+		{ Stage::Fragment, 0, kSkySlotNoise.binding,      kSkySlotNoise.hlslReg      },
+		{ Stage::Fragment, 0, kSkySlotSceneDepth.binding, kSkySlotSceneDepth.hlslReg },
+	});
+	REQUIRE_MESSAGE(hlsl.ok, hlsl.log);
+	CHECK(hlsl.source.find("uSceneDepth : register(t2)") != std::string::npos);
+	CHECK(hlsl.source.find("cbuffer SkyEnv : register(b0)") != std::string::npos);
+}
 
 TEST_CASE("The GL sky cross-compiles to SPIR-V (Vulkan) and pinned HLSL SM 5.0 (D3D11/D3D12)")
 {
@@ -600,6 +734,95 @@ struct D3D11SkyRig
 	}
 };
 
+// The clouds-over-geometry variant (BuildSkyFragmentGLSL450(true)) through the same rig: the
+// opaque depth is an n x n R32_FLOAT texture at t2 holding one value, and the target gets the
+// shader's raw (L, T) (no blend here) so the test can read the transmittance off alpha.
+ComPtr<ID3DBlob> skyGeoPixelShader()
+{
+	static ComPtr<ID3DBlob> ps = []
+	{
+		using he::shaderc::Stage;
+		using namespace HE::glsl;
+		const he::shaderc::Result hlsl = he::shaderc::compileHlslPinned(
+			BuildSkyFragmentGLSL450(true), Stage::Fragment, {
+				{ Stage::Fragment, 0, kSkySlotEnv.binding,        kSkySlotEnv.hlslReg        },
+				{ Stage::Fragment, 0, kSkySlotMoon.binding,       kSkySlotMoon.hlslReg       },
+				{ Stage::Fragment, 0, kSkySlotNoise.binding,      kSkySlotNoise.hlslReg      },
+				{ Stage::Fragment, 0, kSkySlotSceneDepth.binding, kSkySlotSceneDepth.hlslReg },
+			});
+		REQUIRE_MESSAGE(hlsl.ok, hlsl.log);
+		ComPtr<ID3DBlob> blob;
+		std::string err;
+		REQUIRE_MESSAGE(fxcCompile(hlsl.source, "main", "ps_5_0", blob, err), err);
+		return blob;
+	}();
+	return ps;
+}
+
+Image drawSkyGeoD3D11(D3D11SkyRig& rig, const HE::SkyFrameParams& p, UINT n, float depthValue)
+{
+	ComPtr<ID3D11PixelShader> geoPs;
+	const ComPtr<ID3DBlob> blob = skyGeoPixelShader();
+	REQUIRE(SUCCEEDED(rig.dev->CreatePixelShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &geoPs)));
+	ComPtr<ID3D11ShaderResourceView> depthSrv;
+	{
+		const std::vector<float> texels(static_cast<size_t>(n) * n, depthValue);
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = n; td.MipLevels = 1; td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R32_FLOAT; td.SampleDesc.Count = 1;
+		td.Usage = D3D11_USAGE_IMMUTABLE; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+		D3D11_SUBRESOURCE_DATA init{ texels.data(), n * 4u, 0 };
+		ComPtr<ID3D11Texture2D> tex;
+		REQUIRE(SUCCEEDED(rig.dev->CreateTexture2D(&td, &init, &tex)));
+		REQUIRE(SUCCEEDED(rig.dev->CreateShaderResourceView(tex.Get(), nullptr, &depthSrv)));
+	}
+	ComPtr<ID3D11Texture2D> target, staging;
+	ComPtr<ID3D11RenderTargetView> rtv;
+	{
+		D3D11_TEXTURE2D_DESC td{};
+		td.Width = td.Height = n; td.MipLevels = 1; td.ArraySize = 1;
+		td.Format = DXGI_FORMAT_R32G32B32A32_FLOAT; td.SampleDesc.Count = 1;
+		td.BindFlags = D3D11_BIND_RENDER_TARGET;
+		REQUIRE(SUCCEEDED(rig.dev->CreateTexture2D(&td, nullptr, &target)));
+		REQUIRE(SUCCEEDED(rig.dev->CreateRenderTargetView(target.Get(), nullptr, &rtv)));
+		td.BindFlags = 0; td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+		REQUIRE(SUCCEEDED(rig.dev->CreateTexture2D(&td, nullptr, &staging)));
+	}
+	D3D11_MAPPED_SUBRESOURCE m{};
+	REQUIRE(SUCCEEDED(rig.ctx->Map(rig.cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &m)));
+	std::memcpy(m.pData, &p, sizeof(p));
+	rig.ctx->Unmap(rig.cb.Get(), 0);
+	const float clear[4] = { -1.0f, -1.0f, -1.0f, -1.0f };   // a pixel the shader discards stays at -1
+	rig.ctx->ClearRenderTargetView(rtv.Get(), clear);
+	ID3D11RenderTargetView* rtvs[] = { rtv.Get() };
+	rig.ctx->OMSetRenderTargets(1, rtvs, nullptr);
+	D3D11_VIEWPORT vp{}; vp.Width = static_cast<float>(n); vp.Height = static_cast<float>(n); vp.MaxDepth = 1.0f;
+	rig.ctx->RSSetViewports(1, &vp);
+	rig.ctx->RSSetState(rig.rs.Get());
+	rig.ctx->IASetInputLayout(nullptr);
+	rig.ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	rig.ctx->VSSetShader(rig.vs.Get(), nullptr, 0);
+	rig.ctx->PSSetShader(geoPs.Get(), nullptr, 0);
+	rig.ctx->PSSetConstantBuffers(0, 1, rig.cb.GetAddressOf());
+	ID3D11ShaderResourceView* srvs[] = { rig.moonSrv.Get(), rig.noiseSrv.Get(), depthSrv.Get() };
+	rig.ctx->PSSetShaderResources(0, 3, srvs);
+	ID3D11SamplerState* samps[] = { rig.clampS.Get(), rig.wrapS.Get() };
+	rig.ctx->PSSetSamplers(0, 2, samps);
+	rig.ctx->Draw(3, 0);
+	ID3D11RenderTargetView* none[] = { nullptr };
+	rig.ctx->OMSetRenderTargets(1, none, nullptr);
+	ID3D11ShaderResourceView* noSrvs[3] = {};
+	rig.ctx->PSSetShaderResources(0, 3, noSrvs);
+	rig.ctx->CopyResource(staging.Get(), target.Get());
+	Image img(static_cast<size_t>(n) * n);
+	REQUIRE(SUCCEEDED(rig.ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m)));
+	for (UINT y = 0; y < n; ++y)
+		std::memcpy(&img[static_cast<size_t>(y) * n], static_cast<const uint8_t*>(m.pData) + static_cast<size_t>(y) * m.RowPitch,
+		            n * sizeof(glm::vec4));
+	rig.ctx->Unmap(staging.Get(), 0);
+	return img;
+}
+
 // The night-sky images the D3D12 case compares itself against: drawn once.
 constexpr UINT kNebulaImageN = 32;
 const glm::vec3 kNebulaBlue(0.0f, 0.0f, 1.0f);
@@ -637,6 +860,74 @@ TEST_CASE("D3D11: the cross-compiled sky draws a blue zenith by day and a dark o
 	// ...and dark in absolute terms: GL draws ~0.09 here, so a night layer
 	// leaking into the "atmosphere alone" setup shows up on its own.
 	CHECK(night.r + night.g + night.b < 0.2f);
+}
+
+// Clouds over geometry: the camera hangs above the deck and looks straight down, so every ray
+// crosses the whole slab. A horizontal "surface" at a chosen height (the depth texture holds the
+// clip z of that plane) decides how much of the slab is IN FRONT of it: none above the deck, part
+// of it inside, all of it below. That pins the depth convention (Vulkan/D3D clip z is 0..1, read
+// straight back through invViewProj) and the march stopping at the surface, for both cloud styles.
+TEST_CASE("D3D11: clouds over geometry — the march stops at the opaque surface (WARP)")
+{
+	D3D11SkyRig rig;
+	rig.init(skyBytecode());
+
+	const glm::vec3 eye(0.0f, 700.0f, 0.0f);                       // deck: base 200, ~300 thick, so 200..500
+	const glm::mat4 view = glm::lookAt(eye, glm::vec3(0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+	const glm::mat4 proj = glm::perspectiveZO(glm::radians(60.0f), 1.0f, 1.0f, 5000.0f);   // 0..1 depth, as D3D/Vulkan
+	auto depthOfPlane = [&](float y) {
+		const glm::vec4 c = proj * view * glm::vec4(0.0f, y, 0.0f, 1.0f);
+		return c.z / c.w;
+	};
+
+	for (int style = 0; style <= 1; ++style)
+	{
+		IRenderer::EnvironmentSettings env;
+		env.cloudMode     = 1;
+		env.cloudStyle    = style;
+		env.cloudCoverage = 1.0f;
+		env.cloudHeight   = 200.0f;
+		env.timeOfDay     = 0.5f;
+		HE::SkyFrameInputs in;
+		in.invViewProj = glm::inverse(proj * view);
+		in.sunDir      = glm::normalize(glm::vec3(0.3f, 0.8f, 0.2f));
+		in.cameraPos   = eye;
+		in.time        = 10.0f;
+		const HE::SkyFrameParams p = HE::BuildSkyFrameParams(env, in);
+
+		constexpr UINT n = 2;
+		const Image sky    = drawSkyGeoD3D11(rig, p, n, 1.0f);                  // no surface: not ours
+		const Image above  = drawSkyGeoD3D11(rig, p, n, depthOfPlane(600.0f)); // surface above the deck
+		const Image inside = drawSkyGeoD3D11(rig, p, n, depthOfPlane(350.0f)); // surface inside it
+		const Image below  = drawSkyGeoD3D11(rig, p, n, depthOfPlane(0.0f));   // ground under the deck
+		const std::string log = rig.drain();
+		INFO("cloud style ", style, "; D3D11 debug layer: ", log);
+
+		for (size_t i = 0; i < sky.size(); ++i)
+		{
+			CHECK_MESSAGE((sky[i].r == -1.0f && sky[i].a == -1.0f), "depth 1.0 is a sky pixel: the shader must discard it");
+			// In front of the whole slab: nothing to add, the surface keeps its colour.
+			CHECK(above[i].a  > 0.999f);
+			CHECK((std::fabs(above[i].r) + std::fabs(above[i].g) + std::fabs(above[i].b) < 1e-3f));
+			// The deeper the surface, the more cloud is in front of it.
+			CHECK_MESSAGE(inside[i].a < 0.999f, "a surface inside the deck has cloud in front of it");
+			CHECK_MESSAGE(below[i].a < 0.9f,    "a full overcast deck hides the ground under it");
+			CHECK(std::isfinite(below[i].r + below[i].g + below[i].b + below[i].a));
+		}
+		// ...compared on the mean of the image: the march jitters its samples per pixel (and the
+		// two surfaces change the step count), so single pixels carry noise.
+		auto mean = [](const Image& img, int c) {
+			double s = 0.0;
+			for (const glm::vec4& v : img) s += v[c];
+			return s / static_cast<double>(img.size());
+		};
+		const double tIn = mean(inside, 3), tBelow = mean(below, 3);
+		const double lIn = mean(inside, 0) + mean(inside, 1) + mean(inside, 2);
+		const double lBelow = mean(below, 0) + mean(below, 1) + mean(below, 2);
+		MESSAGE("cloud style ", style, ": T inside ", tIn, ", T below ", tBelow, "; L inside ", lIn, ", L below ", lBelow);
+		CHECK((tBelow <= tIn + 0.05));
+		CHECK((lBelow >= lIn * 0.9));
+	}
 }
 
 // Schritt 2 of "Nebula-Paritaet": the nebula v3 in kSkyFS reaches D3D11/D3D12

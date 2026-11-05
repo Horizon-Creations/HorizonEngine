@@ -79,6 +79,14 @@ public:
 	// this frame renders into — HDR offscreen or swapchain — known) — mirrors GL/Metal.
 	void WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
 	bool SupportsTessellation() const override { return m_tessSupported; }
+	// The 3D clouds need the full cross-compiled sky AND the clouds-over-geometry pass (its pipeline and the two
+	// render passes around it); without them the sky dome is all this backend draws. A frame that goes straight to
+	// the swapchain (no HDR target) draws the dome too, see DrawScene.
+	bool Supports3DClouds() const override
+	{
+		return m_skyFullModel && m_skyGeoPipelineHDR != VK_NULL_HANDLE
+		    && m_cloudGeoRP != VK_NULL_HANDLE && m_cloudResumeRP != VK_NULL_HANDLE;
+	}
 	std::string GIReflectionsInactiveReason() const override { return m_giReflWhyNot; }
 	// Editor texture hot-reload: drop a graph project texture (heTexP slot) so the
 	// next material draw re-uploads it.
@@ -1140,6 +1148,29 @@ private:
 	// (HorizonRendering/SkyShaderSource.h; the UBO then holds a whole
 	// HE::SkyFrameParams); false on the reduced sky.frag.spv fallback (SkyUBOData).
 	bool                  m_skyFullModel       = false;
+
+	// ── Clouds over the opaque geometry ─────────────────────────────────────
+	// The sky is drawn FIRST here, so the 3D clouds (cloudMode 1) would only ever be a backdrop: terrain
+	// is drawn over them and the deck cannot be seen from above. After the opaque geometry a second
+	// fullscreen draw (the GL sky compiled as its HE_SKY_GEO_PASS variant, BuildSkyFragmentGLSL450(true))
+	// marches the slab up to each opaque surface and blends (L, T) over the lit colour:
+	// rgb = L + dst * T, no depth test. It reads the HDR scene's REAL depth attachment (m_viewportDepthView,
+	// everything opaque: static, skinned, the deferred resolve and its forward replay) as binding 3 of the
+	// sky set layout (the plain sky never uses that binding). A depth attachment cannot be sampled inside
+	// its own pass, so DrawScene closes the scene pass after the opaque work, runs the composite in
+	// m_cloudGeoRP (depth attached read-only AND sampled, DEPTH_STENCIL_READ_ONLY_OPTIMAL) and reopens the
+	// scene in m_cloudResumeRP (LOAD on both) for the transparent draws; a frame without 3D clouds
+	// records none of it. HDR frames only: the swapchain frame's depth is not sampleable, its clouds stay
+	// a backdrop.
+	bool                  cloudsOverGeometryWanted(bool hdr) const;
+	void                  encodeCloudsOverGeometry(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+	VkPipeline            m_skyGeoPipelineHDR  = VK_NULL_HANDLE;   // m_postFxSceneRP, runs in m_cloudGeoRP
+	VkRenderPass          m_cloudGeoRP         = VK_NULL_HANDLE;   // colour LOAD, depth LOAD read-only; compatible with m_postFxSceneRP
+	VkRenderPass          m_cloudResumeRP      = VK_NULL_HANDLE;   // the scene pass again: LOAD on colour and depth
+	VkSampler             m_skyGeoDepthSampler = VK_NULL_HANDLE;   // NEAREST: filtering depth invents surfaces
+	// Per frame slot: sky UBO (shared with the sky draw, same SkyFrameParams) + moon + noise + the depth,
+	// whose view is rewritten each frame before the draw (this slot's fence was waited on in Render()).
+	VkDescriptorSet       m_skyGeoSet[2]       = {};
 
 	// Moon texture (uploaded once via SetMoonTexture).
 	VkImage        m_moonImage   = VK_NULL_HANDLE;
