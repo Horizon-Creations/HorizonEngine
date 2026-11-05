@@ -82,12 +82,16 @@ How a preset change reaches the screen:
 |---|---|---|---|
 | AA, render scale, SSAO, SSR, GI, GI reflections | as before (backend gates, fallbacks at push) | as before | as before, capability-gated |
 | shadow resolution/cascades/distance | acts | acts | ignored (one whole-scene map) |
-| `textureQuality` | **acts**: material sampler `lodMinClamp` 2/1/0 (Low/Med/High), live, no re-upload | ignored (per-texture `glTexParameter`, no sampler objects) | ignored |
+| `textureQuality` | **acts**: `lodMinClamp` 2/1/0 (Low/Med/High) on two samplers, live, no re-upload: `m_materialSampler` (landscape layers, graph-material texture slots) and `m_worldSampler` (base colour of mesh, skinned mesh, decal and blended draws) | ignored (per-texture `glTexParameter`, no sampler objects) | ignored |
 | `materialQuality` | stored (`GetQualitySettings`), no feature gated on it | same | same |
 
 `textureQuality` only changes textures that carry a mip chain; a single-level texture (what the
-packer cooks, and most loose imports) has no coarser level and looks the same.
-UI, post and sky samplers are untouched on purpose.
+packer cooks, and most loose imports) has no coarser level and looks the same. The landscape
+arrays of Catania are 2048 x 2048 with 12 mip levels and 13 layers, so there it does act.
+The shared `m_linearSampler` is untouched on purpose: the shadow map, sky environment, AO, UI and
+post passes bind it (scene-pass slots 1 to 3), and a mip clamp there would soften lighting.
+The scene shaders sample through their slot-0 sampler for the base colour only, which is why a
+clone of it (`m_worldSampler`) is safe for slot 0.
 
 ## 4. Script API (step 3)
 
@@ -182,42 +186,76 @@ contrast on the mountains); Medium is almost the project's current look (0.28); 
 preset step is visible and the repeat runs are bit-stable, so the differences are the presets and not noise.
 
 **Findings:**
-1. **Texture quality does nothing on Catania** (High with texture quality 0 vs 2: mean 0.04 and 0.05, no pixel > 8, also with
-   the camera 3 m above the ground). Cause found in code, not guessed: step 2 clamps `m_materialSampler` only (the
-   graph-material `heTexP` slots, six `setFragmentSamplerState:...m_materialSampler` sites in `MetalRenderer.mm`), while the
-   landscape layers and base textures bind `m_linearSampler` (e.g. ~14452 `atIndex:5`, ~15548 `atIndex:13`), which the UI,
-   post and sky passes share and which therefore cannot be clamped globally. A dedicated world-texture sampler for those binds
-   is the fix; whether the landscape textures carry mip chains at all was not checked.
+1. **Texture quality on Catania: first reading was wrong, corrected in section 8.** The first pair (camera 35 m and 3 m up)
+   showed no change (mean 0.04 / 0.05) and I blamed the sampler binds. Both the conclusion and the cause I gave (lines
+   ~14452 and ~15548 are the UI pass and the landscape weightmap, not the landscape textures) were wrong: the effect only
+   appears where the ground is sampled below the clamped mip level, i.e. within about a metre or two of the camera.
 2. **The first dump of a session is not comparable:** the very first run had no terrain drawn (5 draws instead of 89, mean diff
    14.9 against the later runs). Throw it away or warm up once; from the second run on, runs are identical.
-3. **Ultra, far lake:** the far lake shows horizontal banding in the GI-reflection image (visible in
-   `catania-low-vs-ultra-crop.png`). Not investigated, not part of this topic; mentioned so it is not mistaken for the preset.
+3. **Ultra, far lake "banding": investigated, not a defect, see section 8.**
 4. Not measured: frame time per preset (no perf capture on this machine's load).
 
 Dump override added for this: `HE_DUMP_QUALITYPRESET` in `dumpFrameHeadless` (`EditorApplication.cpp`).
 
+## 8. Follow-up: texture quality on every world sampler, and the Ultra lake "banding"
+
+**Texture quality.** What was found, in order:
+* A temporary upload log showed Catania's landscape textures are 2048 x 2048 arrays with 12 mip levels and 13 layers
+  (Albedo, Normal, Mask), so a mip clamp can act on them. The scene's base-colour sampler was the shared `m_linearSampler`.
+* Section 7's "does nothing" was a measurement artefact: the clamp (mip level 2 for Low) only matters where a pixel covers
+  less ground than a mip-2 texel. With 4 m tiles of 2048 texels that is within roughly one to two metres of the camera.
+  At a camera 1.7 m above the ground, High vs Low differs clearly (whole frame mean abs 0.85, lower half 1.66, 1.97 % of
+  pixels by more than 8; the pebbles go soft, `catania-texture-quality-player-height.png`). High vs Medium differs by 0.02
+  there: Medium (level 1) only bites closer than that. At 3 m and 35 m the same pair measured 0.05, so the first test was
+  simply too far away.
+* The old build (clamp on `m_materialSampler` only) already acted on the landscape: the 3 m pair gives 0.052 old vs 0.066 new.
+* Built now (`MetalRenderer.mm`, `ApplyTextureQuality`): a second sampler `m_worldSampler`, a clone of the shared clamp+linear
+  one, bound at slot 0 of the four world passes (`EncodeScene`, `EncodeSkinnedObjects`, `EncodeGBuffer`, the blended pass) and
+  the decals; texture quality narrows it together with `m_materialSampler`. The shared `m_linearSampler` is NOT clamped: scene
+  slots 1 to 3 (shadow map, sky environment, AO) and every UI, post and sky pass bind it, and a mip clamp there would soften
+  lighting and the IBL. `ApplyTextureQuality` also runs when the samplers are created, so a quality pushed before the first
+  frame (the dump path, a game's first frame) is not lost.
+* Effect of the change on Catania: High, Ultra and Low frames are unchanged by it (mean abs 0.08 / 0.01 / 0.00 against the
+  frames from before, no pixel > 8), and no sampler is rebuilt at High. Mesh base-colour textures with a mip chain are the
+  case the new sampler is for; Catania has none, so that path is verified only for "nothing else changes", not for a visible
+  effect.
+
+**Ultra far-lake "banding": not a defect.** The GI-reflection pass produces it, and it is the cloud layer mirrored in the
+rippled water:
+* gone with GI reflections off (also with SSR off too); unchanged with SSR off, TAA off or GI off alone
+  (`catania-ultra-lake-banding-toggles.png`);
+* identical for every GI-reflection quality tier (raw / blur / glossy), one bounce vs two, blur on, and render scale 2;
+* gone at cloud coverage 0 and at coverage 1 (an overcast, uniform reflection), present at the scene's 0.31
+  (`catania-ultra-lake-banding-clouds.png`).
+So the shapes are patches of cloud, stretched flat by the grazing angle. The other lakes and the lower presets look "cleaner"
+only because the non-ray-traced reflection path does not contain the cloud layer. Nothing to fix; it could be called a
+feature of the GI-reflection pass.
+
 ## Handoff
 
-- **Topic / step:** 324 Engine quality settings, step 5 of 5 (global step id 1512): live comparison on Catania; no PR (the human
-  asked for none). Earlier: 1508 model, 1509 renderer/game, 1510 script API, 1511 editor page.
+- **Topic / step:** 324 Engine quality settings, after step 5 (ids 1508 to 1512 done): texture quality on every world sampler and
+  the lake-banding investigation, both asked for after the Catania comparison. No PR (the human asked for none).
 - **Branch / commit:** `claude/engine-quality-settings` (pushed: see the Hive artifact). No pull request opened.
-- **Done:** Low/Medium/High/Ultra rendered on the user's Catania project in the real editor, numbers and images in section 7.
-- **Files touched:** `EditorApplication.cpp` (~9060 `HE_DUMP_QUALITYPRESET`), this doc, `docs/engine-quality-settings-2026-11-05/catania-*.png`.
-- **Verified:** editor builds and runs (Release, Metal) on the branch; five presets + two baselines + two High repeats + two
-  texture-quality pairs rendered; noise floor 0.00-0.03; real Catania untouched (git status and mtimes checked).
-- **Not verified:** frame time per preset; D3D11/D3D12/Vulkan/OpenGL; the documentation page (`rendering#quality`) is not
-  written, so the help entries still have empty anchors; a script calling the quality rows during play in the live editor;
-  the preset combo clicked in the live editor.
-- **Decisions taken:** compare on a copy with a private config dir; noon and a fixed camera instead of the scene's own midnight
-  and default view; the first run discarded as a cold-start artifact.
-- **Decisions suggested, not taken:** give world textures (landscape layers, base textures) their own sampler so texture quality
-  reaches them (finding 1); investigate the Ultra far-lake banding; write the docs page.
-- **Pending:** the texture-quality fix above, the docs page, a perf measurement per preset (`he_perf_capture.py`), and when the human
-  wants it, the PR into `release/0.8.0`.
+- **Done:** texture quality reaches mesh base colours as well as the landscape/graph-material textures on Metal; the banding is
+  explained; section 7's wrong finding is corrected in sections 7 and 8.
+- **Files touched:** `MetalRenderer.h` (`m_worldSampler`, `m_textureMinLod`, `ApplyTextureQuality`), `MetalRenderer.mm`
+  (`ApplyTextureQuality` ~12500, creation in `CreateScenePipeline` ~7950, five slot-0 binds), this doc, `catania-*.png`.
+- **Verified:** editor builds and runs; texture-quality 2/1/0 pairs at 3 m and 1.7 m; the log line "texture quality N — material and
+  world samplers start at mip level M" shows the rebuild; High/Ultra/Low unchanged by the change; full `ctest -j4` 362/362;
+  no editor process left; the real Catania untouched.
+- **Not verified:** the world sampler's visible effect (no mesh in Catania has a base-colour texture with mips); the live (per-frame)
+  push path with a script during play; frame time per preset; D3D11/D3D12/Vulkan/OpenGL (texture quality is ignored there: no sampler
+  objects on GL, per-texture `glTexParameter`); the documentation page `rendering#quality` (help anchors still empty).
+- **Decisions taken:** clamp a CLONE of the shared sampler for slot 0 instead of the shared sampler itself (slots 1 to 3 and the
+  UI/post/sky passes use it); particles, asset previews and the landscape weightmap keep full detail.
+- **Decisions suggested, not taken:** GL texture quality via `GL_TEXTURE_MIN_LOD` over its texture caches; a texture-quality line in the
+  Quality page that says "Metal only, textures with mip chains"; the docs page.
+- **Pending:** docs page + anchors; perf per preset (`he_perf_capture.py`); the PR into `release/0.8.0` when the human says so.
 - **Traps:** (1) `ninja HorizonEditor` can fail "dev MISMATCH": `HorizonVersion.h` bakes the git commit at configure time and the
   dev tree and `out/build/release/sdk-release` configured at different commits; run `cmake out/build/release` and
   `cmake out/build/release/sdk-release` once, then build. (2) The first dump of a session has no terrain: always discard it.
   (3) Dumps need `HE_DUMP_SKYTEST=1` for the camera variables and `HE_DUMP_TERRAINTICK=1` for terrain chunks; the project is
-  passed as the `.heproj` argument. (4) Run on a copy; opening a project in the editor can write to it.
-- **Next steps:** 1. Decide with the human: fix texture quality for the landscape (new sampler for the world-texture binds in
-  `MetalRenderer.mm`, then re-run the ground-level pair with texture quality 0 and 2). 2. Docs page + anchors. 3. PR only on the human's word.
+  passed as the `.heproj` argument. (4) Run on a copy; opening a project in the editor can write to it. (5) A texture-quality test
+  needs the camera within about 2 m of the ground; farther away every mip is above the clamp and nothing changes.
+- **Next steps:** 1. Docs page + anchors. 2. A textured mesh with a mipped base-colour texture as the witness for `m_worldSampler`.
+  3. PR only on the human's word.

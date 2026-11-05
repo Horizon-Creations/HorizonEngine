@@ -657,9 +657,16 @@ private:
 	// these (GL default wrap, D3D WRAP, Vulkan REPEAT); with the clamping sampler
 	// a material uv past 0..1 smeared the edge texel on Metal only (Thema 158 S5).
 	void* m_materialSampler = nullptr; // id<MTLSamplerState>
-	// The finest mip level m_materialSampler lets through (texture quality, see
-	// IRenderer::TextureMinLodForQuality). 0 = all levels, as it was built at start.
-	float m_materialSamplerMinLod = 0.0f;
+	// The same clamp+linear sampler as m_linearSampler, for the base colour of the
+	// world's own draws (mesh, skinned mesh, decal, blended). Texture quality narrows
+	// THIS one and m_materialSampler; m_linearSampler is shared with the shadow map,
+	// the sky environment, AO, UI and post, which must never soften.
+	void* m_worldSampler = nullptr;    // id<MTLSamplerState>
+	// The finest mip level m_materialSampler and m_worldSampler let through (texture
+	// quality, see IRenderer::TextureMinLodForQuality). 0 = all levels, as built.
+	float m_textureMinLod = 0.0f;
+	// Rebuilds both samplers when the pushed texture quality changes their clamp.
+	void  ApplyTextureQuality();
 	void* m_noiseTexture    = nullptr; // id<MTLTexture>, 3D R16 value noise (sky)
 	void* m_noiseSampler    = nullptr; // id<MTLSamplerState>, linear + repeat
 	void* m_skyEnvCube      = nullptr; // id<MTLTexture>, baked skyColor IBL cubemap

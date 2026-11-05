@@ -7143,6 +7143,7 @@ void MetalRenderer::Shutdown()
 	if (m_whiteArrayTexture) { CFBridgingRelease(m_whiteArrayTexture); m_whiteArrayTexture = nullptr; }
 	if (m_linearSampler)   { CFBridgingRelease(m_linearSampler);   m_linearSampler = nullptr; }
 	if (m_materialSampler) { CFBridgingRelease(m_materialSampler); m_materialSampler = nullptr; }
+	if (m_worldSampler)    { CFBridgingRelease(m_worldSampler);    m_worldSampler = nullptr; }
 	if (m_noiseTexture)    { CFBridgingRelease(m_noiseTexture);    m_noiseTexture = nullptr; }
 	if (m_noiseSampler)    { CFBridgingRelease(m_noiseSampler);    m_noiseSampler = nullptr; }
 	if (m_skyEnvCube)      { CFBridgingRelease(m_skyEnvCube);      m_skyEnvCube = nullptr; }
@@ -7945,12 +7946,16 @@ void MetalRenderer::CreateScenePipeline()
 		sampDesc.magFilter = MTLSamplerMinMagFilterLinear;
 		sampDesc.mipFilter = MTLSamplerMipFilterLinear; // use baked mip chains (else level 0 only)
 		m_linearSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
+		// The same sampler for the world's own textures (base colour of a mesh): the one
+		// texture quality may narrow without touching the shadow, sky or post samplers.
+		m_worldSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
 		// The graph-material slots tile, as on every other backend (see the header).
 		sampDesc.sAddressMode = MTLSamplerAddressModeRepeat;
 		sampDesc.tAddressMode = MTLSamplerAddressModeRepeat;
 		sampDesc.rAddressMode = MTLSamplerAddressModeRepeat;
 		m_materialSampler = (void*)CFBridgingRetain([device newSamplerStateWithDescriptor:sampDesc]);
-		m_materialSamplerMinLod = 0.0f;   // built with every level; SetQualitySettings narrows it
+		m_textureMinLod = 0.0f;   // both built with every level …
+		ApplyTextureQuality();    // … and narrowed at once if a quality was pushed before this ran
 
 		// 3D noise volume the sky's starFbm3/worleyFbm sample (clouds + nebula), built
 		// once on the CPU. RG16Unorm (R=value noise, G=Worley billows) + linear +
@@ -12489,33 +12494,56 @@ void MetalRenderer::SetAntiAliasingSettings(const AntiAliasingSettings& s)
 	m_specularAAStrength = s.specularAAStrength;
 }
 
-// Texture quality: Low / Medium keep the material samplers off the finest one or
-// two mip levels, so a cooked chain reads blurrier and costs less bandwidth.
-// A sampler, not a re-upload, so a change at run time lands on the next frame
-// and nothing is invalidated. Only the material sampler: the UI, post and sky
-// samplers must not soften. A texture with a single level is unaffected (the
-// clamp lands on its only level). materialQuality is kept (base class) and not
-// acted on yet.
+// Texture quality: Low / Medium keep the world's texture samplers off the finest one
+// or two mip levels, so a cooked chain reads blurrier and costs less bandwidth.
+// A sampler, not a re-upload, so a change at run time lands on the next frame and
+// nothing is invalidated. Two samplers carry it: the graph-material one
+// (m_materialSampler: landscape layers, material texture slots) and the world one
+// (m_worldSampler: the base colour of a mesh, skinned mesh, decal and blended
+// draw). The shared m_linearSampler stays as it is — the shadow map, sky
+// environment, AO, UI and post passes bind it and must not soften. A texture with a
+// single level is unaffected (the clamp lands on its only level). materialQuality is
+// kept (base class) and not acted on yet.
 void MetalRenderer::SetQualitySettings(const QualitySettings& s)
 {
 	IRenderer::SetQualitySettings(s);
-	const float minLod = TextureMinLodForQuality(s.textureQuality);
-	if (!m_device || !m_materialSampler || minLod == m_materialSamplerMinLod)
+	ApplyTextureQuality();
+}
+
+void MetalRenderer::ApplyTextureQuality()
+{
+	const float minLod = TextureMinLodForQuality(m_quality.textureQuality);
+	// Before CreateScenePipeline there is nothing to narrow; it calls this once the
+	// samplers exist, so a quality pushed first is not lost.
+	if (!m_device || !m_materialSampler || !m_worldSampler || minLod == m_textureMinLod)
 		return;
-	MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
-	d.minFilter    = MTLSamplerMinMagFilterLinear;
-	d.magFilter    = MTLSamplerMinMagFilterLinear;
-	d.mipFilter    = MTLSamplerMipFilterLinear;
-	d.sAddressMode = MTLSamplerAddressModeRepeat;
-	d.tAddressMode = MTLSamplerAddressModeRepeat;
-	d.rAddressMode = MTLSamplerAddressModeRepeat;
-	d.lodMinClamp  = minLod;
-	id<MTLSamplerState> fresh = [(__bridge id<MTLDevice>)m_device newSamplerStateWithDescriptor:d];
-	if (!fresh) return;   // keep the old one; the next frame tries again
-	// In-flight encoders hold their own reference to the old state.
+	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
+	auto build = [&](bool repeat) -> id<MTLSamplerState>
+	{
+		MTLSamplerDescriptor* d = [[MTLSamplerDescriptor alloc] init];
+		d.minFilter = MTLSamplerMinMagFilterLinear;
+		d.magFilter = MTLSamplerMinMagFilterLinear;
+		d.mipFilter = MTLSamplerMipFilterLinear;
+		if (repeat)
+		{
+			d.sAddressMode = MTLSamplerAddressModeRepeat;
+			d.tAddressMode = MTLSamplerAddressModeRepeat;
+			d.rAddressMode = MTLSamplerAddressModeRepeat;
+		}
+		d.lodMinClamp = minLod;
+		return [device newSamplerStateWithDescriptor:d];
+	};
+	id<MTLSamplerState> material = build(true);
+	id<MTLSamplerState> world    = build(false);
+	if (!material || !world) return;   // keep the old ones; the next push tries again
+	// In-flight encoders hold their own reference to the old states.
 	CFBridgingRelease(m_materialSampler);
-	m_materialSampler = (void*)CFBridgingRetain(fresh);
-	m_materialSamplerMinLod = minLod;
+	CFBridgingRelease(m_worldSampler);
+	m_materialSampler = (void*)CFBridgingRetain(material);
+	m_worldSampler    = (void*)CFBridgingRetain(world);
+	m_textureMinLod   = minLod;
+	HE_LOG_INFO(RHI, "MetalRenderer: texture quality %d — material and world samplers start at mip level %.0f",
+	            m_quality.textureQuality, minLod);
 }
 
 // Bright-pass the HDR color then ping-pong blur (even pass count ends in
@@ -14835,7 +14863,7 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	                                        m_giGridCounts, m_giProbesPerRow, m_giIndirectIntensity);
 	[encoder setFragmentBytes:&giUniforms length:sizeof(giUniforms) atIndex:3];
 	BindMaterialPreambleSlots(renderEncoder, /*frameState=*/true);
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_worldSampler atIndex:0];
 
 	constexpr int kMaxBones = 128;
 	std::vector<glm::mat4> boneScratch(kMaxBones, glm::mat4(1.0f));
@@ -15003,7 +15031,8 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	void* const defaultPipeline = m_scenePipeline;
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)defaultPipeline];
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	// Slot 0 is the draw's base colour: the world sampler, which texture quality narrows.
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_worldSampler atIndex:0];
 
 	// CSM shadow-map array on slot 1 (filled by EncodeShadowMap). Always bound (the
 	// shader expects a texture2d_array); sampling is gated by scene.shadowEnabled.
@@ -15706,7 +15735,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline];
 		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_worldSampler atIndex:0];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_shadowDepthTex atIndex:1]; // CSM array; sampling gated by shadowEnabled
 		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:1];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)m_skyEnvCube atIndex:2];
@@ -16184,7 +16213,7 @@ void MetalRenderer::EncodeDecals(void* renderEncoder, int width, int height)
 		[encoder setVertexBytes:&du length:sizeof(du) atIndex:0];
 		[encoder setFragmentBytes:&du length:sizeof(du) atIndex:0];
 		[encoder setFragmentTexture:(__bridge id<MTLTexture>)(tex ? tex : m_dummyTexture) atIndex:0];
-		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+		[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_worldSampler atIndex:0];
 		[encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:36];
 		++m_counters.draws;
 	}
@@ -17124,7 +17153,8 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 	void* const defaultPipeline = m_gbufferPipeline;
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)defaultPipeline];
 	[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_sceneDepthState];
-	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_linearSampler atIndex:0];
+	// Slot 0 is the draw's base colour: the world sampler, which texture quality narrows.
+	[encoder setFragmentSamplerState:(__bridge id<MTLSamplerState>)m_worldSampler atIndex:0];
 
 #if defined(HE_HAVE_SHADERC)
 	// Minimal lighting ABI for the G-buffer stage: graph bodies may read the
