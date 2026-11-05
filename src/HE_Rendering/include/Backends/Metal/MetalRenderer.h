@@ -666,6 +666,9 @@ private:
 	void*    m_rvtPoolAlbedoSrgb = nullptr;                         // id<MTLTexture> view of m_rvtPool[0] as BGRA8Unorm_sRGB
 	uint32_t m_rvtSlots = 0, m_rvtPagePx = 0;   // the manager's slot count (the most pages that can be resident) and the page size
 	uint32_t m_rvtAllocSlots = 0;               // HOT slices the three BGRA arrays hold: they start small and grow with the pages in use
+	bool     m_rvtPack = false;              // layers 1 and 2 are RG8 (normal x and z, surface R and G): a compute copy writes the page, 8 bytes per texel instead of 12
+	void*    m_rvtPackPso = nullptr;         // id<MTLComputePipelineState> of that copy, built on first use
+	uint32_t RvtLayerChannels(int layer) const override;
 	bool     GrowRvtPool(uint32_t needHot);
 	// A page's slot (what the manager hands out) is NOT its slice any more (step 6j): a page that has not been painted for a
 	// while is block-compressed (ASTC 4x4) into the COLD arrays, slice = slot, and its hot slice goes back to a small free list;

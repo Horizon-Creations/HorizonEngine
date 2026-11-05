@@ -3101,12 +3101,17 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // The RVT lookup may read cold (block-compressed) pages on Metal: HE_RVT_COLD declares the three cold arrays and the branch
         // (RvtLookup.h). HE_RVT_COLD=0 leaves it out of the shader (the hot-only A/B, and a Mac without ASTC sampling).
         static const bool rvtCold = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
-        if (rvtCold && injected.find("heRvtSample(") != std::string::npos)
+        // HE_RVT_RGNORMAL: the pool keeps the normal as x and z in two channels (step 6k); HE_RVT_PACK=0 keeps the three-channel pool.
+        static const bool rvtPack = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+        if ((rvtCold || rvtPack) && injected.find("heRvtSample(") != std::string::npos)
         {
             std::string withCold = injected;
             const size_t vpos = withCold.find("#version");
             const size_t eol  = vpos == std::string::npos ? std::string::npos : withCold.find('\n', vpos);
-            if (eol != std::string::npos) withCold.insert(eol + 1, "#define HE_RVT_COLD 1\n");
+            std::string defs;
+            if (rvtCold) defs += "#define HE_RVT_COLD 1\n";
+            if (rvtPack) defs += "#define HE_RVT_RGNORMAL 1\n";
+            if (eol != std::string::npos) withCold.insert(eol + 1, defs);
             out = toCompiled(compileMslPinned(withCold, Stage::Fragment, pins, kMaterialMslOptions()));
         }
         else

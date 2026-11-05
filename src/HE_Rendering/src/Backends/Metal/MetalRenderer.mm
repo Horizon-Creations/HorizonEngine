@@ -11891,6 +11891,23 @@ bool MetalRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width,
 	}
 }
 
+// The copy of a finished page into a two-channel layer: the viewport target is BGRA8 and a blit cannot change the format.
+// mode 1 = normal (x, z), mode 2 = surface (R, G). Exact: an 8-bit value goes through a float and back unchanged.
+static const char* kRvtPackMSL = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+kernel void rvtPack(texture2d<float, access::read> src [[texture(0)]],
+                    texture2d_array<float, access::write> dst [[texture(1)]],
+                    constant uint4& p [[buffer(0)]],
+                    uint2 gid [[thread_position_in_grid]])
+{
+	if (gid.x >= p.x || gid.y >= p.x) return;
+	const float4 c = src.read(gid);
+	dst.write(float4(p.z == 1u ? float2(c.x, c.z) : float2(c.x, c.y), 0.0, 1.0), gid, p.y);
+}
+)MSL";
+
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h. How it is kept here: the live viewport's two
 // textures are SET ASIDE (not retired — they are handed straight back), so
@@ -11980,8 +11997,36 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 		{
 			id<MTLTexture> src = (__bridge id<MTLTexture>)m_viewportColor;
 			id<MTLTexture> dst = (__bridge id<MTLTexture>)m_rvtPool[camera.rvtLayer];
-			ok = src.width == width && src.height == height && src.pixelFormat == dst.pixelFormat;
-			if (ok)
+			const bool packed = m_rvtPack && camera.rvtLayer > 0;
+			ok = src.width == width && src.height == height && (packed || src.pixelFormat == dst.pixelFormat);
+			if (ok && packed)
+			{
+				if (!m_rvtPackPso)
+				{
+					NSError* err = nil;
+					id<MTLDevice> dev = (__bridge id<MTLDevice>)m_device;
+					id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kRvtPackMSL] options:nil error:&err];
+					id<MTLFunction> fn = lib ? [lib newFunctionWithName:@"rvtPack"] : nil;
+					id<MTLComputePipelineState> pso = fn ? [dev newComputePipelineStateWithFunction:fn error:&err] : nil;
+					if (pso) m_rvtPackPso = (void*)CFBridgingRetain(pso);
+					else     HE_LOG_ERROR(RHI, "%s", "MetalRenderer: the RVT page pack kernel failed to build");
+				}
+				ok = m_rvtPackPso != nullptr;
+				if (ok)
+				{
+					id<MTLCommandBuffer>         cb  = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
+					id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+					const uint32_t args[4] = { width, hotSlice, uint32_t(camera.rvtLayer == 1 ? 1 : 2), 0 };
+					[enc setComputePipelineState:(__bridge id<MTLComputePipelineState>)m_rvtPackPso];
+					[enc setTexture:src atIndex:0];
+					[enc setTexture:dst atIndex:1];
+					[enc setBytes:args length:sizeof(args) atIndex:0];
+					[enc dispatchThreadgroups:MTLSizeMake((width + 7) / 8, (height + 7) / 8, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+					[enc endEncoding];
+					[cb commit];
+				}
+			}
+			else if (ok)
 			{
 				id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
 				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -12033,15 +12078,16 @@ bool MetalRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
 //    a page that has not been painted for HE_RVT_COLD_AFTER real frames (default 120) is read back, encoded to ASTC 4x4 on a
 //    worker thread and kept in the COLD arrays (a quarter of the bytes), its hot slice freed; the table entry then carries bit 23.
 //    A page painted again goes back to a hot slice. The hot arrays shrink when most of their slices are free.
-static bool AllocRvtArrays(id<MTLDevice> device, uint32_t slices, uint32_t pagePx, void* out[3], void** outSrgb)
+static bool AllocRvtArrays(id<MTLDevice> device, uint32_t slices, uint32_t pagePx, bool pack, void* out[3], void** outSrgb)
 {
 	for (int layer = 0; layer < 3; ++layer)
 	{
-		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+		const bool rg = pack && layer > 0;   // normal (x, z) and surface (R, G) in two channels
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(rg ? MTLPixelFormatRG8Unorm : kSwapchainFormat)
 		                                                                             width:pagePx height:pagePx mipmapped:NO];
 		d.textureType = MTLTextureType2DArray;
 		d.arrayLength = slices;
-		d.usage       = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+		d.usage       = MTLTextureUsageShaderRead | (rg ? MTLTextureUsageShaderWrite : MTLTextureUsagePixelFormatView);
 		d.storageMode = MTLStorageModePrivate;
 		id<MTLTexture> t = [device newTextureWithDescriptor:d];
 		if (!t) { for (int k = 0; k < layer; ++k) { CFBridgingRelease(out[k]); out[k] = nullptr; } return false; }
@@ -12109,6 +12155,12 @@ struct MetalRenderer::RvtColdWork
 	}
 };
 
+uint32_t MetalRenderer::RvtLayerChannels(int layer) const
+{
+	if (!m_rvtPack) return 0xFu;
+	return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
+}
+
 bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 {
 	DestroyRvtPool();
@@ -12116,7 +12168,9 @@ bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 	id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 	static const uint32_t startSlots = [] { const char* e = std::getenv("HE_RVT_POOL_START"); return e && *e ? uint32_t(std::max(1, std::atoi(e))) : 64u; }();
 	const uint32_t alloc = std::min(slots, startSlots);
-	if (!AllocRvtArrays(device, alloc, pagePx, m_rvtPool, &m_rvtPoolAlbedoSrgb)) { DestroyRvtPool(); return false; }
+	static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+	m_rvtPack = packWanted;
+	if (!AllocRvtArrays(device, alloc, pagePx, m_rvtPack, m_rvtPool, &m_rvtPoolAlbedoSrgb)) { DestroyRvtPool(); return false; }
 	m_rvtSlots      = slots;
 	m_rvtAllocSlots = alloc;
 	m_rvtPagePx     = pagePx;
@@ -12135,9 +12189,9 @@ bool MetalRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 		std::vector<uint8_t> probe(16 * 16 * 4, 128), blocks;
 		m_rvtColdOn = HE::encodeBlocks(HE::BlockFormat::Astc4x4, probe.data(), 16, 16, false, 0, blocks);
 	}
-	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool up to %u pages of %u px, %u hot slices allocated now (%.0f MB of %.0f MB at full size), cold ASTC pool %s (starts at %s hot pages in use); device now holds %.0f MB of %.0f MB recommended",
-	            slots, pagePx, alloc, double(alloc) * pagePx * pagePx * 4.0 * 3.0 / (1024.0 * 1024.0),
-	            double(slots) * pagePx * pagePx * 4.0 * 3.0 / (1024.0 * 1024.0), m_rvtColdOn ? "on" : "off", std::getenv("HE_RVT_COLD_MIN") ? std::getenv("HE_RVT_COLD_MIN") : "256",
+	HE_LOG_INFO(RHI, "MetalRenderer: RVT pool up to %u pages of %u px, %u hot slices allocated now (%.0f MB of %.0f MB at full size), cold ASTC pool %s (starts at %s hot pages in use), layers %s; device now holds %.0f MB of %.0f MB recommended",
+	            slots, pagePx, alloc, double(alloc) * pagePx * pagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+	            double(slots) * pagePx * pagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0), m_rvtColdOn ? "on" : "off", std::getenv("HE_RVT_COLD_MIN") ? std::getenv("HE_RVT_COLD_MIN") : "256", m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3",
 	            double(device.currentAllocatedSize) / (1024.0 * 1024.0),
 	            double(device.recommendedMaxWorkingSetSize) / (1024.0 * 1024.0));
 	return true;
@@ -12150,7 +12204,7 @@ bool MetalRenderer::GrowRvtPool(uint32_t needHot)
 	const uint32_t grown = std::min(m_rvtSlots, std::max((needHot + 31u) & ~31u, m_rvtAllocSlots + m_rvtAllocSlots / 2));
 	void* nt[3] = { nullptr, nullptr, nullptr };
 	void* nSrgb = nullptr;
-	if (!AllocRvtArrays((__bridge id<MTLDevice>)m_device, grown, m_rvtPagePx, nt, &nSrgb)) return false;
+	if (!AllocRvtArrays((__bridge id<MTLDevice>)m_device, grown, m_rvtPagePx, m_rvtPack, nt, &nSrgb)) return false;
 	// What the old arrays hold goes across on the GPU, queued ahead of the page copy that asked for the growth.
 	id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
 	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -12165,7 +12219,7 @@ bool MetalRenderer::GrowRvtPool(uint32_t needHot)
 	m_rvtPoolAlbedoSrgb = nSrgb;
 	for (uint32_t i = grown; i-- > m_rvtAllocSlots;) m_rvtHotFree.push_back(i);
 	HE_LOG_INFO(RHI, "MetalRenderer: RVT hot pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAllocSlots, grown, m_rvtSlots,
-	            double(grown) * m_rvtPagePx * m_rvtPagePx * 4.0 * 3.0 / (1024.0 * 1024.0));
+	            double(grown) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0));
 	m_rvtAllocSlots = grown;
 	return true;
 }
@@ -12236,6 +12290,7 @@ void MetalRenderer::DestroyRvtPool()
 	for (void*& t : m_rvtCold) { RetireTexture(t); t = nullptr; }
 	m_rvtColdAlloc = 0;
 	m_rvtColdOn = false;
+	if (m_rvtPackPso) { CFBridgingRelease(m_rvtPackPso); m_rvtPackPso = nullptr; }
 	m_rvtSlots = m_rvtAllocSlots = m_rvtPagePx = 0;
 	m_rvtSlotHot.clear(); m_rvtSlotCold.clear(); m_rvtSlotBusy.clear(); m_rvtSlotVer.clear(); m_rvtSlotPainted.clear(); m_rvtHotFree.clear();
 }
@@ -12339,7 +12394,8 @@ bool MetalRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_
 		const NSUInteger px = m_rvtPagePx;
 		id<MTLDevice> device = (__bridge id<MTLDevice>)m_device;
 		// A private pool cannot be read on the CPU: blit the slice into a managed staging texture (CaptureViewport's way).
-		MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kSwapchainFormat
+		const bool rg = m_rvtPack && layer > 0;
+		MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:(rg ? MTLPixelFormatRG8Unorm : kSwapchainFormat)
 		                                                                                width:px height:px mipmapped:NO];
 		desc.storageMode = MTLStorageModeManaged;
 		desc.usage       = MTLTextureUsageShaderRead;
@@ -12354,6 +12410,20 @@ bool MetalRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_
 		[blit endEncoding];
 		[cb commit];
 		[cb waitUntilCompleted];
+		if (rg)
+		{
+			// Two channels in the pool: normal (x, z) comes back as R and B, the surface as R and G, the rest zero (RvtLayerChannels).
+			std::vector<uint8_t> two(size_t(px) * px * 2);
+			[staging getBytes:two.data() bytesPerRow:px * 2 fromRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0];
+			rgba.assign(size_t(px) * px * 4, 0);
+			for (size_t i = 0; i < size_t(px) * px; ++i)
+			{
+				rgba[i * 4 + 0] = two[i * 2 + 0];
+				rgba[i * 4 + (layer == 1 ? 2 : 1)] = two[i * 2 + 1];
+				rgba[i * 4 + 3] = 255;
+			}
+			return true;
+		}
 		std::vector<uint8_t> bgra(size_t(px) * px * 4);
 		[staging getBytes:bgra.data() bytesPerRow:px * 4 fromRegion:MTLRegionMake2D(0, 0, px, px) mipmapLevel:0];
 		rgba.resize(bgra.size());
@@ -12390,6 +12460,10 @@ void MetalRenderer::UpdateRvtCold(bool realFrame)
 		static const uint64_t coldAfter = [] { const char* e = std::getenv("HE_RVT_COLD_AFTER"); return e && *e ? uint64_t(std::max(1, std::atoi(e))) : 120ull; }();
 		RvtColdWork& w = *m_rvtWork;
 		const size_t px = m_rvtPagePx, pageBytes = px * px * 4;
+		// What a page's three layers are in the readback buffer: BGRA (4 B per texel) each, or BGRA + two RG8 (the packed pool).
+		const size_t layerBytes[3] = { px * px * 4, px * px * (m_rvtPack ? 2u : 4u), px * px * (m_rvtPack ? 2u : 4u) };
+		const size_t layerOffset[3] = { 0, layerBytes[0], layerBytes[0] + layerBytes[1] };
+		const size_t bufferBytes = layerOffset[2] + layerBytes[2];
 
 		// 1. Encodes that came back: the page goes cold if it was not painted again meanwhile.
 		std::deque<RvtColdWork::Done> finished;
@@ -12418,14 +12492,23 @@ void MetalRenderer::UpdateRvtCold(bool realFrame)
 			for (int layer = 0; layer < 3; ++layer)
 			{
 				job.rgba[layer].resize(pageBytes);
-				const uint8_t* src = bgra + size_t(layer) * pageBytes;
-				for (size_t i = 0; i < px * px; ++i)
-				{
-					job.rgba[layer][i * 4 + 0] = src[i * 4 + 2];
-					job.rgba[layer][i * 4 + 1] = src[i * 4 + 1];
-					job.rgba[layer][i * 4 + 2] = src[i * 4 + 0];
-					job.rgba[layer][i * 4 + 3] = src[i * 4 + 3];
-				}
+				const uint8_t* src = bgra + layerOffset[layer];
+				if (m_rvtPack && layer > 0)   // (x, z) or (R, G) in the first two channels, as the shader's cold branch reads them
+					for (size_t i = 0; i < px * px; ++i)
+					{
+						job.rgba[layer][i * 4 + 0] = src[i * 2 + 0];
+						job.rgba[layer][i * 4 + 1] = src[i * 2 + 1];
+						job.rgba[layer][i * 4 + 2] = 0;
+						job.rgba[layer][i * 4 + 3] = 255;
+					}
+				else
+					for (size_t i = 0; i < px * px; ++i)
+					{
+						job.rgba[layer][i * 4 + 0] = src[i * 4 + 2];
+						job.rgba[layer][i * 4 + 1] = src[i * 4 + 1];
+						job.rgba[layer][i * 4 + 2] = src[i * 4 + 0];
+						job.rgba[layer][i * 4 + 3] = src[i * 4 + 3];
+					}
 			}
 			CFBridgingRelease(it->buffer);
 			{ std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); }
@@ -12439,14 +12522,14 @@ void MetalRenderer::UpdateRvtCold(bool realFrame)
 		{
 			if (m_rvtSlotHot[slot] < 0 || m_rvtSlotCold[slot] || m_rvtSlotBusy[slot]) continue;
 			if (m_rvtRealFrames - m_rvtSlotPainted[slot] < coldAfter) continue;
-			id<MTLBuffer> buf = [device newBufferWithLength:pageBytes * 3 options:MTLResourceStorageModeShared];
+			id<MTLBuffer> buf = [device newBufferWithLength:bufferBytes options:MTLResourceStorageModeShared];
 			if (!buf) break;
 			id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
 			id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
 			for (int layer = 0; layer < 3; ++layer)
 				[blit copyFromTexture:(__bridge id<MTLTexture>)m_rvtPool[layer] sourceSlice:NSUInteger(m_rvtSlotHot[slot]) sourceLevel:0
 				         sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(px, px, 1)
-				             toBuffer:buf destinationOffset:size_t(layer) * pageBytes destinationBytesPerRow:px * 4 destinationBytesPerImage:pageBytes];
+				             toBuffer:buf destinationOffset:layerOffset[layer] destinationBytesPerRow:layerBytes[layer] / px destinationBytesPerImage:layerBytes[layer]];
 			[blit endEncoding];
 			auto ready = std::make_shared<std::atomic<bool>>(false);
 			[cb addCompletedHandler:^(id<MTLCommandBuffer>) { ready->store(true); }];
@@ -12471,7 +12554,7 @@ void MetalRenderer::UpdateRvtCold(bool realFrame)
 		{
 			void* nt[3] = { nullptr, nullptr, nullptr };
 			void* nSrgb = nullptr;
-			if (AllocRvtArrays(device, want, m_rvtPagePx, nt, &nSrgb))
+			if (AllocRvtArrays(device, want, m_rvtPagePx, m_rvtPack, nt, &nSrgb))
 			{
 				id<MTLCommandBuffer>      cb   = [(__bridge id<MTLCommandQueue>)m_commandQueue commandBuffer];
 				id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
@@ -12511,7 +12594,7 @@ void MetalRenderer::UpdateRvtCold(bool realFrame)
 		{
 			lastCold = cold; lastHot = hot;
 			m_rvtNextColdLogAt = now + 3.0;
-			const double page = double(m_rvtPagePx) * m_rvtPagePx * 4.0 * 3.0, blockPage = double((m_rvtPagePx + 3) / 4) * ((m_rvtPagePx + 3) / 4) * 16.0 * 3.0;
+			const double page = double(m_rvtPagePx) * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0), blockPage = double((m_rvtPagePx + 3) / 4) * ((m_rvtPagePx + 3) / 4) * 16.0 * 3.0;
 			HE_LOG_INFO(RHI, "MetalRenderer: RVT pages: %u cold (ASTC, %.1f MB allocated), %u hot in %u slices (%.1f MB), a page is %.0f KB hot / %.0f KB cold; device now holds %.0f MB",
 			            cold, double(m_rvtColdAlloc) * blockPage / (1024.0 * 1024.0), hot, m_rvtAllocSlots,
 			            double(m_rvtAllocSlots) * page / (1024.0 * 1024.0), page / 1024.0, blockPage / 1024.0,

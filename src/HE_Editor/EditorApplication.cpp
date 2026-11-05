@@ -10836,8 +10836,10 @@ void EditorApplication::dumpFrameHeadless()
 							std::vector<uint8_t> got;
 							if (!r->ReadbackRvtSlot(layer, pr.slot, got) || got.size() != want[layer]->size()) continue;
 							unsigned d = 0;
+							const uint32_t keep = r->RvtLayerChannels(layer);   // a packed layer holds fewer channels: compare those
 							for (size_t i = 0; i < got.size(); ++i)
-								d = std::max(d, static_cast<unsigned>(std::abs(int(got[i]) - int((*want[layer])[i]))));
+								if ((keep >> (i % 4)) & 1u)
+									d = std::max(d, static_cast<unsigned>(std::abs(int(got[i]) - int((*want[layer])[i]))));
 							++checked; exact += d == 0 ? 1u : 0u; worst = std::max(worst, d);
 						}
 					}
@@ -11019,7 +11021,9 @@ void EditorApplication::dumpFrameHeadless()
 										const uint8_t* px4 = &got[(size_t(j) * ppx + i) * 4];
 										// 8 bit of the value; right at the wrap (0 / 1) the neighbouring texel decides, so compare circularly
 										const float gx = float(px4[0]) / 255.0f, gz = float(px4[2]) / 255.0f;
-										const unsigned d = static_cast<unsigned>(std::lround(std::max(circ(gx, ex), circ(gz, ez)) * 255.0f));
+										// A layer that keeps no blue (the packed surface: R and G) cannot show z; x still checks the columns.
+										const bool hasZ = (r->RvtLayerChannels(layer) & 4u) != 0;
+										const unsigned d = static_cast<unsigned>(std::lround((hasZ ? std::max(circ(gx, ex), circ(gz, ez)) : circ(gx, ex)) * 255.0f));
 										++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
 									}
 							}
@@ -11202,7 +11206,9 @@ void EditorApplication::dumpFrameHeadless()
 											else if (kind == 1) { ex[0] = u; ex[1] = v; ex[2] = 0.0f; }
 											else
 											{
-												const float nx = 2.0f * u - 1.0f, ny = 2.0f * v - 1.0f, nz = -1.0f;
+												const float nx = 2.0f * u - 1.0f, nz = -1.0f;
+												// A backend that packs the normal as x and z rebuilds y from the unit length (RvtLookup.h).
+												const float ny = r->RvtLayerChannels(1) != 0xFu ? std::sqrt(std::max(0.0f, 1.0f - nx * nx - nz * nz)) : 2.0f * v - 1.0f;
 												const float il = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
 												ex[0] = nx * il * 0.5f + 0.5f; ex[1] = ny * il * 0.5f + 0.5f; ex[2] = nz * il * 0.5f + 0.5f;
 											}
