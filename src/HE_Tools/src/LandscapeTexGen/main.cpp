@@ -921,18 +921,21 @@ static void registerWeatherFunctions(ContentManager& cm)
     }
 }
 
-bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& group)
+bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& group, bool mixed = false)
 {
     // Mountains: "M_AutoLandscape.hasset", {0x412,1} — the shipped bytes. Forest / Grassland: the
     // group row's own path and id.
-    const std::string fileName = std::filesystem::path(group.materialPath).filename().string();
+    // The mix material (--mix) is the graph of Mountains' tuning over the fat arrays, under its own id.
+    const char* matPath = mixed ? HE::kAutoLandscapeMixMaterialPath : group.materialPath;
+    const HE::UUID matId = mixed ? HE::kAutoLandscapeMixMaterialId : group.materialId;
+    const std::string fileName = std::filesystem::path(matPath).filename().string();
     const char* kFile = fileName.c_str();
-    const HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, group.id);
+    const HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, group.id, mixed);
     MaterialAsset am;
     am.type          = HE::AssetType::Material;
-    am.name          = std::filesystem::path(group.materialPath).stem().string();
+    am.name          = std::filesystem::path(matPath).stem().string();
     am.path          = kFile;
-    am.id            = group.materialId;
+    am.id            = matId;
     am.nodeGraphJson = HE::materialGraphToJson(built.graph);
 
     ContentManager cm(outDir);
@@ -953,7 +956,7 @@ bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& grou
     ContentManager check(outDir);
     registerWeatherFunctions(check);   // a load regenerates the GLSL from the graph
     const MaterialAsset* t = check.getMaterial(check.loadAsset(kFile));
-    if (!t || t->id != group.materialId || t->nodeGraphJson != m->nodeGraphJson ||
+    if (!t || t->id != matId || t->nodeGraphJson != m->nodeGraphJson ||
         t->customShaderFragGlsl != m->customShaderFragGlsl || t->graphParamNames != m->graphParamNames)
     {
         std::fprintf(stderr, "  %s does NOT read back as written\n", kFile);
@@ -963,6 +966,79 @@ bool writeMaterial(const std::string& outDir, const HE::AutoLandscapeGroup& grou
                 built.graph.nodes.size(), t->graphParamNames.size(), t->graphTexturePaths.size(),
                 HE::matGlslTextureArrayMask(t->customShaderFragGlsl));
     return true;
+}
+
+// The three FAT arrays of the mix material (Thema 233): slice (group * 4 + role) is role `role`'s
+// variant 0 of group `group`, copied from that group's own arrays in `fromDir` (the files the groups
+// ship as, Mountains' without a group name). All twelve must agree in size, mips, format and colour
+// space. With real textures this is 4x one group's memory; `fromDir` may hold smaller ones.
+int writeMixArrays(const std::string& outDir, const std::string& fromDir)
+{
+    int ok = 0;
+    for (int map = 0; map < MapCount; ++map)
+    {
+        ContentManager src(fromDir);
+        std::vector<const TextureAsset*> groupArrays;
+        std::vector<decltype(src.loadAsset(std::string()))> ids;
+        bool have = true;
+        for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
+        {
+            const std::string file = std::filesystem::path(HE::kAutoLandscapeGroups[g].arrayPaths[map]).filename().string();
+            ids.push_back(src.loadAsset(file));
+            if (!src.getTexture(ids.back())) { std::fprintf(stderr, "  %s missing in %s\n", file.c_str(), fromDir.c_str()); have = false; }
+        }
+        if (!have) continue;
+        for (const auto& id : ids) groupArrays.push_back(src.getTexture(id));
+
+        const TextureAsset& ref = *groupArrays[0];
+        TextureAsset a;
+        a.type = HE::AssetType::Texture;
+        a.width = ref.width; a.height = ref.height; a.channels = ref.channels;
+        a.mipLevels = ref.mipLevels; a.format = ref.format; a.srgb = ref.srgb;
+        a.layers = static_cast<uint32_t>(HE::kAutoLandscapeMixDepth);
+        const size_t sliceBytes = HE::textureArraySliceBytes(ref.width, ref.height, ref.mipLevels, ref.format);
+        bool fits = sliceBytes != 0;
+        for (int g = 0; g < HE::kAutoLandscapeGroupCount && fits; ++g)
+        {
+            const TextureAsset& t = *groupArrays[g];
+            fits = t.width == ref.width && t.height == ref.height && t.channels == ref.channels &&
+                   t.mipLevels == ref.mipLevels && t.format == ref.format && t.srgb == ref.srgb &&
+                   t.layers >= static_cast<uint32_t>(HE::kAutoLandscapeRoleCount) && HE::textureArrayPayloadValid(t);
+        }
+        if (!fits)
+        {
+            std::fprintf(stderr, "  %s maps: the four groups' arrays differ in size, mips or format\n", kMapNames[map]);
+            continue;
+        }
+        a.data.reserve(sliceBytes * a.layers);
+        for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
+        {
+            const TextureAsset& t = *groupArrays[g];
+            const int variants = HE::autoLandscapeVariantCount(static_cast<int>(t.layers));
+            for (int role = 0; role < HE::kAutoLandscapeRoleCount; ++role)
+            {
+                const size_t at = HE::textureArrayOffset(t.width, t.height, t.mipLevels,
+                                                         static_cast<uint32_t>(role * variants), 0, t.format);
+                a.data.insert(a.data.end(), t.data.begin() + at, t.data.begin() + at + sliceBytes);
+            }
+        }
+        const std::string name = std::string("T_Landscape_Mix_") + kMapNames[map] + "_Array";
+        a.name = name;
+        a.path = name + ".hasset";
+        a.id   = HE::UUID{ HE::kAutoLandscapeMixMaterialId.hi + 1 + static_cast<uint64_t>(map), 0x0000000000000001ULL };
+        ContentManager cm(outDir);
+        if (!cm.saveAsset(a)) { std::fprintf(stderr, "  FAILED to write %s.hasset\n", name.c_str()); continue; }
+        ContentManager check(outDir);
+        const TextureAsset* t = check.getTexture(check.loadAsset(a.path));
+        if (!t || t->id != a.id || t->layers != a.layers || t->data != a.data || !HE::textureArrayPayloadValid(*t))
+        {
+            std::fprintf(stderr, "  %s.hasset does NOT read back as written\n", name.c_str());
+            continue;
+        }
+        std::printf("  %-34s %ux%u x%u slices, %u mips\n", name.c_str(), a.width, a.height, a.layers, a.mipLevels);
+        ++ok;
+    }
+    return ok;
 }
 } // namespace
 
@@ -997,11 +1073,25 @@ int main(int argc, char** argv)
     for (int i = 3; i < argc; ++i)
     {
         const std::string a = argv[i];
-        if (a == "--arrays-only" || a == "--material" || a == "--pack" || a == "--loose")
+        if (a == "--arrays-only" || a == "--material" || a == "--pack" || a == "--loose" || a == "--mix")
         {
             std::fprintf(stderr, "landscape_tex_gen: %s must be the first flag after <output-dir> (argv[2]), not later\n", a.c_str());
             return 2;
         }
+    }
+    // --mix [--from <dir>]: the mix material and its three fat arrays (Thema 233), the arrays cut from the
+    // four groups' own, which `--from` names (default: <output-dir> itself).
+    if (argc > 2 && std::string(argv[2]) == "--mix")
+    {
+        std::string from = outDir;
+        for (int i = 3; i + 1 < argc; ++i)
+            if (std::string(argv[i]) == "--from") from = argv[i + 1];
+        std::error_code mec;
+        std::filesystem::create_directories(outDir, mec);
+        const int arrays = writeMixArrays(outDir, from);
+        const bool mat = writeMaterial(outDir, HE::kAutoLandscapeGroups[0], /*mixed=*/true);
+        std::printf("landscape_tex_gen: mix material %s, %d/%d fat arrays in %s\n", mat ? "written" : "FAILED", arrays, MapCount, outDir.c_str());
+        return mat && arrays == MapCount ? 0 : 1;
     }
     const bool arraysOnly = argc > 2 && std::string(argv[2]) == "--arrays-only";
     // --variants N (anywhere after the output folder): variants per layer for the placeholder and

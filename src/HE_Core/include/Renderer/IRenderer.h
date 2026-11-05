@@ -43,6 +43,13 @@ struct EditorCameraOverride
     // because the same override feeds the panel's own pick extract, and the
     // picker must see exactly the quads the frame drew.
     bool      editorIcons  = true;
+    // RenderSceneImage only: the picture is the materials' own output, untouched. An unlit material's colour
+    // comes back byte for byte (no tonemap, gamma, bloom, SSAO, AA, depth of field, reflections or GI), which
+    // is what a baker needs when it photographs a material's albedo or a data view. Forward path only.
+    bool      rawOutput    = false;
+    // With rawOutput: the colour is written sRGB-encoded (the exact curve), for a picture that becomes an sRGB
+    // texture. Without it the 8 bits hold the linear value, which is what data views (normals, roughness) want.
+    bool      rawSrgb      = false;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -245,6 +252,9 @@ public:
         // forward regardless of SetRenderPath. What each backend's deferred
         // frame does and does not run (decals, SSR, AO) is plan §10.3/§10.12.
         bool supportsDeferredRendering = false;
+        // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
+        // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
+        bool supportsRawCapture = false;
         // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
         // plan.md). Metal (in the deferred tile path: lag-free, from the stored
         // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last

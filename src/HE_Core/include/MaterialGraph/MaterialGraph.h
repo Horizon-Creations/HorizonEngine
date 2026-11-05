@@ -257,6 +257,15 @@ enum class MatNodeType : uint8_t
     // The generator finds it by SCANNING the graph, not by walking from the Output: a
     // node without outputs is never reached by the demand-driven emit.
     LandscapeFoliage,
+
+    // ── v20: mixed texture groups (Thema 233) ──
+    // No inputs. Reads the landscape weightmap's third page (layers 8..11 = the shares of
+    // texture group 0..3, TerrainPaint::enableGroupMix) at the fragment's terrain UV and
+    // picks the TWO strongest groups: A = index of the strongest (0..3), B = index of the
+    // second, Mix = A's weight in the pair (sA / (sA + sB), 1 where only one group has any).
+    // The indices feed a texture array's Slice pin, so the material reads two groups' slices
+    // per fragment instead of four. A map with no third page, or no shares at all, is group 0.
+    LandscapeGroupPick,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

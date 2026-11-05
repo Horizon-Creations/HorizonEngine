@@ -677,6 +677,8 @@ static json profileToJson(const ExportProfile& p)
 	j["textureQuality"]     = p.textureQuality;
 	j["compressTextureArrays"] = p.compressTextureArrays;
 	j["bakeMeshTextures"]      = p.bakeMeshTextures;
+	j["bakeFarLandscape"]      = p.bakeFarLandscape;
+	j["farLandscapeBudgetMB"]  = p.farLandscapeBudgetMB;
 	j["onlyReferenced"]        = p.onlyReferenced;
 	j["alwaysIncludePatterns"] = p.alwaysIncludePatterns;
 	return j;
@@ -714,6 +716,9 @@ static ExportProfile profileFromJson(const json& j)
 	                     ? std::clamp(j["textureQuality"].get<int>(), 0, 2) : 0;
 	p.compressTextureArrays = jsonBool(j, "compressTextureArrays", true);
 	p.bakeMeshTextures      = jsonBool(j, "bakeMeshTextures", true);
+	p.bakeFarLandscape      = jsonBool(j, "bakeFarLandscape", true);
+	p.farLandscapeBudgetMB  = (j.contains("farLandscapeBudgetMB") && j["farLandscapeBudgetMB"].is_number_integer())
+	                              ? std::clamp(j["farLandscapeBudgetMB"].get<int>(), 16, 16384) : 512;
 	p.onlyReferenced        = jsonBool(j, "onlyReferenced", true);
 	if (auto it = j.find("alwaysIncludePatterns"); it != j.end() && it->is_array())
 		for (const auto& e : *it)

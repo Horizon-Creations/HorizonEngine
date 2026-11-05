@@ -7,6 +7,7 @@
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/FoliageComponent.h"
 #include "HorizonScene/Components/TransformComponent.h"
+#include "HorizonScene/LandscapeHlod.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
 #include "HorizonScene/TerrainHeightmap.h"
 #include "HorizonScene/TerrainPaint.h"
@@ -97,16 +98,12 @@ namespace
     {
         constexpr int L = kTerrainMaxLayers;
         double acc[L] = {};
-        double shareAcc[2] = {};
         size_t texels = 0;
         const bool second = tc.layerWeights2.size() == tc.layerWeights.size();
         const bool third  = tc.layerWeights3.size() == tc.layerWeights.size();
-        // A reserved layer (TerrainComponent::mixGroup, Thema 233 step 7) holds a group's
-        // SHARE, not a paint weight: it sits outside the 255-sum TerrainPaint::paint
-        // normalises layers 0..5 over, so it is left out of `s` and of the paint average
-        // below and averaged on its own, clamped the same way TerrainPaint's group brush
-        // clamps a texel's two shares to sum <= 1. 0 (no reservation) reproduces the old
-        // loop exactly — every bit test below is then always false.
+        // Reserved layers (TerrainComponent::groupMix) hold a group's SHARE, not a paint weight:
+        // they sit outside the 255-sum the paint layers are normalised over, so they are left
+        // out of `s` and averaged on their own (the share is already a fraction of 255).
         const int reserved = TerrainPaint::reservedLayers(tc);
         for (size_t i = 0; i + 3 < tc.layerWeights.size(); i += 4)
         {
@@ -119,24 +116,22 @@ namespace
                 w[k + 8] = third  ? tc.layerWeights3[i + k] / 255.0 : 0.0;
             }
             for (int k = 0; k < L; ++k)
-                if (!(k >= 6 && (reserved >> (k - 6) & 1))) s += w[k];
+                if (!TerrainPaint::isReservedLayer(tc, k)) s += w[k];
             if (s <= 1e-4) continue;                       // blank texel: the shader's
             for (int k = 0; k < L; ++k)                     // 1e-4 floor, same skip
-                if (!(k >= 6 && (reserved >> (k - 6) & 1))) acc[k] += w[k] / s;
+                if (!TerrainPaint::isReservedLayer(tc, k)) acc[k] += w[k] / s;
             if (reserved)
             {
-                double s1 = (reserved & 1) ? w[6] : 0.0, s2 = (reserved & 2) ? w[7] : 0.0;
-                const double t = s1 + s2;
-                if (t > 1.0) { s1 /= t; s2 /= t; }
-                shareAcc[0] += s1; shareAcc[1] += s2;
+                double t = 0.0;
+                for (int g = 0; g < TerrainPaint::kGroupCount; ++g) t += w[TerrainPaint::kGroupShareFirstLayer + g];
+                for (int g = 0; g < TerrainPaint::kGroupCount; ++g)
+                    acc[TerrainPaint::kGroupShareFirstLayer + g] += t > 1e-5 ? w[TerrainPaint::kGroupShareFirstLayer + g] / t : (g == 0 ? 1.0 : 0.0);
             }
             ++texels;
         }
         if (texels == 0) { setUnpaintedLayerAverage(tc); return; }
         for (int k = 0; k < L; ++k)
             tc.avgLayerWeights[k] = static_cast<float>(acc[k] / static_cast<double>(texels));
-        if (reserved & 1) tc.avgLayerWeights[6] = static_cast<float>(shareAcc[0] / static_cast<double>(texels));
-        if (reserved & 2) tc.avgLayerWeights[7] = static_cast<float>(shareAcc[1] / static_cast<double>(texels));
     }
 
     // ── Terrains whose collider still has to catch up ────────────────────────
@@ -227,7 +222,7 @@ namespace
             field, res, tc.sizeX, tc.sizeZ,
             static_cast<float>(cx) / cps, static_cast<float>(cz) / cps,
             static_cast<float>(cx + 1) / cps, static_cast<float>(cz + 1) / cps,
-            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp, extra);
+            g.lod0Cells * tessFactorOf(tc) + 1u, tc.effectiveUvTiling(), disp, extra);
     }
 
     // ── Trails in the refined ground (Thema 328) ─────────────────────────────
@@ -290,7 +285,7 @@ namespace
             field, res, tc.sizeX, tc.sizeZ,
             static_cast<float>(cx) / cps, static_cast<float>(cz) / cps,
             static_cast<float>(cx + 1) / cps, static_cast<float>(cz + 1) / cps,
-            g.lod0Cells * tessFactorOf(tc) + 1u, tc.uvTiling, disp, extra, cache);
+            g.lod0Cells * tessFactorOf(tc) + 1u, tc.effectiveUvTiling(), disp, extra, cache);
     }
 
     // The offset of `win` as the mesh generator wants it (world rectangle of the terrain at `pos`).
@@ -523,11 +518,23 @@ namespace TerrainSystem
         // subset of LOD0's grid, so `gridCache` lets generateTerrainChunkMeshLOD downsample the
         // already-computed LOD0 heights/normals instead of resampling the field every level.
         TerrainChunkLODCache gridCache;
+        // The export's baked far material of this chunk, when the pak carries one (a miss is a hash lookup and
+        // says nothing): the far levels draw it instead of the landscape's graph.
+        HE::UUID bakedFarMaterial{};
+        if (g.numLODs > 1 && cc.terrain != entt::null)
+        {
+            const HE::UUID terrainId = world.entityId(cc.terrain);
+            if (terrainId != HE::UUID{})
+            {
+                const HE::UUID mid = HE::landscape::hlodAssetId(terrainId, cx, cz, HE::landscape::HlodAsset::Material);
+                if (cm.ensureResident(mid)) bakedFarMaterial = mid;
+            }
+        }
         for (uint32_t k = 0; k < g.numLODs; ++k)
         {
             const uint32_t verts = (g.lod0Cells >> k) + 1u;   // 65, 33, 17, 9, …
             StaticMeshAsset m = generateTerrainChunkMeshLOD(field, res, tc.sizeX, tc.sizeZ,
-                                                            u0, v0, u1, v1, verts, tc.uvTiling,
+                                                            u0, v0, u1, v1, verts, tc.effectiveUvTiling(),
                                                             gridCache);
             meshStreamCounters().chunkBuilds.fetch_add(1, std::memory_order_relaxed);
             countMeshReplace(m);
@@ -551,7 +558,7 @@ namespace TerrainSystem
             const float maxDist = (k + 1 == g.numLODs)
                 ? std::numeric_limits<float>::max()
                 : base * static_cast<float>(1u << k);   // base, 2·base, 4·base
-            newLod.levels.push_back({ id, maxDist });
+            newLod.levels.push_back({ id, maxDist, k >= 1 ? bakedFarMaterial : HE::UUID{} });
         }
         reg.emplace_or_replace<LODComponent>(chunkEnt, newLod);
         cc.stitchKey = 0;   // the levels it copied are new; stitchSeams copies again
@@ -739,6 +746,26 @@ namespace TerrainSystem
         for (entt::entity te : terrains)
         {
             auto& tc = reg.get<TerrainComponent>(te);
+
+            // The UVs the chunks carry. A Landscape Layer Blend material reads the painted
+            // weights at the RAW UV and means it to run 0..1 over the whole landscape, but the
+            // generator makes it run 0..uvTiling: at 500 the weightmap repeated 500 times and
+            // no stroke of paint showed anywhere. Such a material gets 1 (its layers tile in
+            // world space or on their own UV nodes); every other material keeps uvTiling. A
+            // change (the material swapped, or arriving after the first tick) rebuilds the
+            // chunks, which is the only way their UVs follow.
+            {
+                float uvT = tc.uvTiling > 0.0f ? tc.uvTiling : 1.0f;
+                if (const auto* tm = reg.try_get<MaterialComponent>(te); tm && tm->materialAssetId != HE::UUID{})
+                    if (const MaterialAsset* ma = cm.getMaterial(tm->materialAssetId); ma && !ma->graphLayerNames.empty())
+                        uvT = 1.0f;
+                if (tc.uvTilingBuilt != uvT)
+                {
+                    if (tc.uvTilingBuilt > 0.0f) tc.dirty = true;   // meshes exist with the old UVs
+                    tc.uvTilingBuilt = uvT;
+                }
+            }
+
             if (!tc.dirty && !tc.regionDirty) continue;
 
             // Snap to a 2ⁿ+1 resolution ONCE so chunk LOD0 vertices land EXACTLY on
@@ -867,8 +894,13 @@ namespace TerrainSystem
                         const auto mm = std::minmax_element(field.begin(), field.end());
                         fMin = *mm.first; fMax = *mm.second;
                     }
+                    // How many chunks found the export's baked far material (HorizonScene/LandscapeHlod.h).
+                    size_t bakedFar = 0;
+                    for (auto [ce, cc, lodc] : reg.view<TerrainChunkComponent, LODComponent>().each())
+                        if (cc.terrain == te && lodc.levels.size() > 1 && lodc.levels[1].materialId != HE::UUID{}) ++bakedFar;
                     HE_LOG_INFO(Terrain, "%s", ("TerrainSystem: rebuilt " + std::to_string(chunksBuilt) +
                         " of " + std::to_string(g.chunksPerSide * g.chunksPerSide) + " chunks (" +
+                        std::to_string(bakedFar) + " with a baked far material) (" +
                         (rebuildAll ? "all" : "region") + "), res " + std::to_string(res) +
                         ", sculptHeights " + std::to_string(tc.sculptHeights.size()) +
                         ", field height " + std::to_string(fMin) + " .. " + std::to_string(fMax)).c_str());

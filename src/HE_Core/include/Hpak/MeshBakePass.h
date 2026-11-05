@@ -43,6 +43,9 @@ struct ReplacedMesh
 struct PassOptions
 {
 	uint32_t maxAtlas = 4096;
+	// Meshes to leave alone (an entity overrides their materials, see
+	// Hpak::PackSettings::bakeSkipMeshes).
+	std::vector<HE::UUID> skipMeshes;
 };
 
 struct PassResult
@@ -57,6 +60,7 @@ struct PassResult
 	uint32_t                  skippedSwitchedOff = 0;   // every bake switch of the mesh is off
 	uint32_t                  skippedOneSection = 0;    // one material slot: nothing to merge
 	uint32_t                  skippedCooked = 0;        // already in the runtime form (no loose geometry)
+	uint32_t                  skippedOverridden = 0;    // an entity draws it with a material of its own
 };
 
 HE_API PassResult runPass(const std::vector<PassEntry>& entries, const PassOptions& options);

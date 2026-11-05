@@ -29,7 +29,6 @@
 #include "HorizonScene/Components/EnvironmentLightComponent.h"
 #include "HorizonScene/Components/TerrainChunkComponent.h"
 #include <ContentManager/DefaultAssets.h>   // kLegacyEngineWaterMaterialId
-#include <MaterialGraph/AutoLandscapeMaterial.h>   // kAutoLandscapeGroupCount, for mixGroups
 #include "HorizonScene/Components/WeatherComponent.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/AudioSourceComponent.h"
@@ -762,12 +761,11 @@ namespace
 						                                      t->layerWeights3.size());
 				}
 			}
-			// Mixed texture groups (Thema 233, step 7): the second/third group whose
-			// share sits in weight layer 6/7. Written only when one is set, so a
-			// one-group terrain (every scene before this field, and every terrain that
-			// never used it) saves byte for byte as before.
-			if (t->mixGroup[0] >= 0 || t->mixGroup[1] >= 0)
-				tc["mixGroups"] = { t->mixGroup[0], t->mixGroup[1] };
+			// Mixed texture groups (Thema 233): layers 8..11 are the four groups' shares.
+			// Written only when on, so a one-group terrain (every scene before this field)
+			// saves byte for byte as before. The first build kept two shares in layers 6/7
+			// under "mixGroups"; that was never rendered and is not read any more.
+			if (t->groupMix) { tc["groupMix"] = true; tc["baseGroup"] = t->baseGroup; }
 			if (!t->sculptHeights.empty())
 			{
 				// As a base64 blob, NOT a JSON array of N floats — the array form
@@ -1797,16 +1795,9 @@ namespace
 			// every one-group terrain written by this build → both slots stay -1, which is
 			// the legacy, single-group look. Out-of-range or duplicate entries are dropped
 			// rather than carried, same as a truncated weightmap above.
-			t.mixGroup[0] = t.mixGroup[1] = -1;
-			if (c.contains("mixGroups") && c["mixGroups"].is_array() && c["mixGroups"].size() == 2)
-			{
-				int g0 = c["mixGroups"][0].get<int>();
-				int g1 = c["mixGroups"][1].get<int>();
-				if (g0 < 0 || g0 >= HE::kAutoLandscapeGroupCount) g0 = -1;
-				if (g1 < 0 || g1 >= HE::kAutoLandscapeGroupCount || g1 == g0) g1 = -1;
-				t.mixGroup[0] = g0;
-				t.mixGroup[1] = g1;
-			}
+			t.groupMix = c.value("groupMix", false)
+			             && !t.layerWeights.empty() && t.layerWeights3.size() == t.layerWeights.size();
+			t.baseGroup = t.groupMix ? std::clamp(c.value("baseGroup", 0), 0, 3) : -1;
 			if (c.contains("sculptHeightsB64") && c["sculptHeightsB64"].is_string())
 			{
 				const std::vector<uint8_t> bytes =

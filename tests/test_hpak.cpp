@@ -1255,7 +1255,13 @@ TEST_CASE("Disk registry: scanContentDirectory resolves UUIDs from loose content
     // Before the scan, the UUIDs are unresolvable (the documented limitation).
     CHECK(!cm.ensureResident(matId));
 
-    CHECK(cm.scanContentDirectory() == 2);
+    // The scan also reads the per-user EngineContent download cache (a third tier under the
+    // user's data folder), so a developer machine that has downloaded engine content counts more
+    // than the two assets written here. The baseline is what an EMPTY content root finds on this
+    // machine; the two assets are what this root adds on top.
+    ContentManager emptyRoot((dir / "none").string());
+    const size_t baseline = emptyRoot.scanContentDirectory();
+    CHECK(cm.scanContentDirectory() == baseline + 2);
 
     // Sync resolution (editor preload path).
     REQUIRE(cm.ensureResident(matId));

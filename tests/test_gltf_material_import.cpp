@@ -11,6 +11,8 @@
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <ContentManager/HAsset.h>
+#include <Hpak/MeshBakePass.h>
 #include <Hpak/SimpleTextureMaterial.h>
 #include <material/MaterialShaderLibrary.h>
 #include <functional>
@@ -1530,5 +1532,90 @@ TEST_CASE("an imported glTF PBR material is a simple texture material for the ex
 	CHECK_FALSE(HE::classifySimpleTextureMaterial(translucent, blended, &why));
 	CHECK(why == "its blend mode is not opaque");
 
+	he_test::removeAllQuiet(dir);
+}
+
+// The export bake on what the real importer writes: two opaque materials, each a base-colour
+// texture plus a normal map, on two primitives of one mesh. The pass must merge them into one
+// section on one material that still reads as a plain PBR set.
+TEST_CASE("an imported two-material glTF is baked onto one material by the export pass")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_gltf_bake";
+	he_test::removeAllQuiet(dir);
+	writeTriangleBin(dir);
+	for (const char* t : { "a_base", "a_normal", "b_base", "b_normal" }) writePng(dir / (std::string(t) + ".png"));
+
+	std::ofstream f(dir / "pair.gltf");
+	f << R"({
+  "asset": { "version": "2.0" },
+  "scene": 0,
+  "scenes": [ { "nodes": [0] } ],
+  "nodes":  [ { "mesh": 0 } ],
+  "meshes": [ { "primitives": [
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2, "material": 0 },
+      { "attributes": { "POSITION": 0, "TEXCOORD_0": 1 }, "indices": 2, "material": 1 } ] } ],
+  "materials": [
+    { "name": "M_A", "pbrMetallicRoughness": { "baseColorTexture": { "index": 0 } },
+      "normalTexture": { "index": 1 } },
+    { "name": "M_B", "pbrMetallicRoughness": { "baseColorTexture": { "index": 2 } },
+      "normalTexture": { "index": 3 } } ],
+  "textures": [ { "source": 0 }, { "source": 1 }, { "source": 2 }, { "source": 3 } ],
+  "images": [ { "uri": "a_base.png" }, { "uri": "a_normal.png" }, { "uri": "b_base.png" }, { "uri": "b_normal.png" } ],
+)" << kGeometryJson << "\n}\n";
+	f.close();
+
+	const fs::path contentRoot = dir / "Content";
+	std::error_code ec;
+	fs::create_directories(contentRoot, ec);
+	auto mesh = MeshImporter::import(dir / "pair.gltf", contentRoot, "Imported");
+	REQUIRE(mesh != nullptr);
+	REQUIRE(mesh->sections.size() == 2);
+
+	// Everything the import wrote, as the exporter would see it.
+	ContentManager cm(contentRoot.string());
+	std::vector<std::vector<uint8_t>> storage;
+	std::vector<HE::MeshBake::PassEntry> entries;
+	for (const auto& e : fs::recursive_directory_iterator(contentRoot))
+	{
+		if (!e.is_regular_file() || e.path().extension() != ".hasset") continue;
+		const std::string rel = fs::relative(e.path(), contentRoot).generic_string();
+		std::ifstream in(e.path(), std::ios::binary);
+		storage.emplace_back((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		HE::MeshBake::PassEntry pe;
+		pe.relPath = rel;
+		pe.id = cm.loadAsset(rel);
+		uint16_t type = 0;
+		HAsset::readAssetTypeFromFile(e.path().string(), type);
+		pe.type = type;
+		entries.push_back(pe);
+	}
+	for (size_t i = 0; i < entries.size(); ++i) entries[i].bytes = &storage[i];
+
+	const HE::MeshBake::PassResult r = HE::MeshBake::runPass(entries, {});
+	std::string noticeText;
+	for (const std::string& n : r.notices) noticeText += n + " | ";
+	INFO(noticeText);
+	REQUIRE(r.baked == 1);
+	REQUIRE(r.replaced.size() == 1);
+	CHECK(r.added.size() == 3);                     // the material, a base atlas and a normal atlas
+
+	// The merged material is a plain PBR set again, with the normal map kept.
+	for (const HE::MeshBake::NewAsset& a : r.added)
+	{
+		if (a.type != static_cast<uint16_t>(HE::AssetType::Material)) continue;
+		const fs::path out = dir / "Out" / a.relPath;
+		fs::create_directories(out.parent_path(), ec);
+		std::ofstream o(out, std::ios::binary);
+		o.write(reinterpret_cast<const char*>(a.bytes.data()), static_cast<std::streamsize>(a.bytes.size()));
+		o.close();
+		ContentManager cm2((dir / "Out").string());
+		const MaterialAsset* mat = cm2.getMaterial(cm2.loadAsset(a.relPath));
+		REQUIRE(mat != nullptr);
+		HE::SimpleTextureMaterial simple;
+		std::string why;
+		REQUIRE_MESSAGE(HE::classifySimpleTextureMaterial(*mat, simple, &why), why);
+		CHECK_FALSE(simple.baseColor.tex.empty());
+		CHECK_FALSE(simple.normal.empty());
+	}
 	he_test::removeAllQuiet(dir);
 }

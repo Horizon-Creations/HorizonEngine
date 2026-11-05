@@ -1342,6 +1342,7 @@ std::filesystem::path makeEngineDirRuntime(const std::filesystem::path& runtimeD
     { std::ofstream f(runtimeDir / "HorizonEngine" / "libSDL3.0.dylib"); f << "SDL"; }
     { std::ofstream f(runtimeDir / "HorizonEngine" / "libHorizonPython.dylib"); f << "PLUGIN"; }
     { std::ofstream f(runtimeDir / "HorizonEngine" / "libpython3.14.dylib"); f << "CPYTHON"; }
+    { std::ofstream f(runtimeDir / "HorizonEngine" / "libphonon.dylib"); f << "STEAMAUDIO"; }
     { std::ofstream f(runtimeDir / "HorizonEngine" / "Shaders" / "ui.vert.spv"); f << "SPV"; }
     return runtimeDir;
 }
@@ -1385,6 +1386,22 @@ TEST_CASE("ProjectExporter: a HorizonEngine/ runtime exports as <ProjectName>, d
         CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine" / "libpython3.14.dylib"));
         CHECK_FALSE(std::filesystem::exists(outputDir / "python314.zip"));
         CHECK_FALSE(std::filesystem::exists(outputDir / "Space Game._pth"));
+    }
+    SUBCASE("Steam Audio off (the default): libphonon, 22 MB, is not shipped")
+    {
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK_FALSE(std::filesystem::exists(outputDir / "HorizonEngine" / "libphonon.dylib"));
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libSDL3.0.dylib"));
+    }
+    SUBCASE("Steam Audio chosen in the project's audio buses: libphonon ships beside the engine")
+    {
+        settings.audioBuses.spatialBackend = HE::AudioSpatialBackend::SteamAudio;
+        const auto result = ProjectExporter::exportProject(
+            contentDir, "Space Game", "", outputDir, settings);
+        REQUIRE(result.success);
+        CHECK(std::filesystem::is_regular_file(outputDir / "HorizonEngine" / "libphonon.dylib"));
     }
     SUBCASE("Python: plugin and interpreter beside the engine, the _pth renamed with the executable")
     {

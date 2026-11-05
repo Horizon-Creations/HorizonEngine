@@ -1177,9 +1177,19 @@ namespace
 	  "The world height of the cloud deck's base, in metres. Set it above your "
 	  "highest terrain, or the camera ends up above the weather.",
 	  "", "rendering#sky" },
+	{ "Environment/Dome Cloud Height", "",
+	  "How high the sky-dome clouds look. 1 is the classic look; higher puts the "
+	  "clouds further up, so they read smaller and drift slower against their own "
+	  "size; lower brings them close and large. 3D volumetric clouds use Cloud Altitude instead.",
+	  "", "rendering#sky" },
 	{ "Environment/Cloud Style", "",
 	  "Classic is the original flat, drifting layer. Realistic builds cauliflower "
 	  "shapes that tower and dissolve, at a higher cost.",
+	  "", "rendering#sky" },
+	{ "Environment/Cloud Type", "",
+	  "The kind of cloud the Realistic layer grows: mixed cumulus (default), flat "
+	  "cumulus, towering cumulus, stratocumulus sheets or cumulonimbus. Changes cell size "
+	  "and height; Coverage still decides how much sky they fill.",
 	  "", "rendering#sky" },
 	{ "Environment/Evolution", "",
 	  "How fast clouds change shape as they drift. 0 freezes the formation and "
@@ -7440,13 +7450,13 @@ namespace
 	  "(layer 0) picks the texture by slope and height; painting a layer on top "
 	  "chooses one by hand.",
 	  "", "scenes#terrain" },
-	{ "Landscape/Mix Group", "Mix Group",
-	  "A second (and third) group whose share of this landscape is kept apart from "
-	  "the one above — None leaves the slot unused. Picking one does not change how "
-	  "the landscape looks by itself: it reserves paint channels 6 and 7 for that "
-	  "group's share, which the Paint tab's Active Group then lets you set by hand. "
-	  "A group already used by the terrain's own slot or the other Mix Group slot is "
-	  "greyed out.",
+	{ "Landscape/Mix Texture Groups", "",
+	  "Lets this landscape show all four texture groups at once. The group chosen above "
+	  "stays what every spot starts as; the Paint tab's Group row then paints any other "
+	  "group onto it, with that group's own layers underneath. It uses the paint channels "
+	  "8 to 11 for the groups' shares, so a custom material that paints there loses that "
+	  "paint when this is switched on (it is folded into layer 0). Switching it off drops "
+	  "the groups' shares and the landscape is its one group again.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Apply Group Meshes", "",
 	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
@@ -7493,11 +7503,12 @@ namespace
 	  "was painted. A starting point for a landscape built by hand: fill with the "
 	  "base layer, then paint the rest over it. One undo step.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Active Group", "Active Group",
-	  "Only shown once a Mix Group is set up (Setup tab). Which group this stroke "
-	  "marks the ground as, beside painting the layer below: the terrain's own group, "
-	  "or one of the Mix Groups. A dash is a slot with no group in it yet. Ctrl+drag "
-	  "always hands the spot back to the terrain's own group, whichever is active.",
+	{ "Landscape/Active Group", "Group",
+	  "Which texture group this stroke paints, beside the layer below: the terrain's "
+	  "own group or any other, all on the same landscape. Picking a group other than the "
+	  "terrain's own switches Mix Texture Groups on (Setup tab); the layer list below "
+	  "then shows that group's own layers. Ctrl+drag always hands the spot back to the "
+	  "terrain's own group, whichever is picked.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
@@ -8157,9 +8168,39 @@ namespace
 	  "texture binds, and the source materials and textures leave the pak. Each mesh "
 	  "decides in the Mesh Viewer (Export bake) whether and how: Merge textures "
 	  "copies the texels unchanged, One UV texture resamples and resolves tiling "
-	  "and may make the atlas larger. A mesh with entity-level material slot "
-	  "overrides loses them, because its slots are merged. Needs Pack only "
-	  "referenced assets. Saved in the profile.",
+	  "and may make the atlas larger. A mesh that an entity in an exported scene "
+	  "draws with a material of its own (a Material component override, whole mesh "
+	  "or one slot) is left as it is, because the override would read its texture "
+	  "through the atlas UVs. The scan covers every scene (placed prefabs are "
+	  "plain entities there) and the component body of every HorizonCode class. "
+	  "A material a script assigns at run time is not seen: switch Export bake "
+	  "off in the Mesh Viewer for such a mesh. Needs Pack only referenced "
+	  "assets. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake far landscape", "Bake far landscape",
+	  "Far terrain is drawn from a picture instead of from the landscape's material. "
+	  "For every Auto Landscape in an exported scene the export photographs each "
+	  "chunk from above in three views of its own material (albedo, normal, "
+	  "ambient occlusion + roughness) and ships them as three small textures and "
+	  "one simple material per chunk. The chunk's far levels of detail then draw "
+	  "that material: a few texture reads instead of the layer blend, the noise "
+	  "and the texture bombing. Near terrain keeps the real material. The picture "
+	  "is as sharp as the screen needs at the distance where the far level takes "
+	  "over, and coarser when it would not fit the budget below. The landscape's "
+	  "own parameters (a Material Instance's overrides, its static switches, "
+	  "painted layers) are what is photographed. A custom landscape material that "
+	  "is not an Auto Landscape is left as it is. The picture is taken by the "
+	  "editor's own renderer (Metal, OpenGL, Vulkan, D3D11 and D3D12 all hand back "
+	  "the material's colour without tonemap or post effects); a renderer that "
+	  "cannot makes the export say so and the far levels keep the real material. "
+	  "Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
+	  "What all baked far-landscape textures of this export may cost once cooked "
+	  "(block-compressed, with mip levels), in megabytes. When the pictures the "
+	  "screen would want do not fit, every chunk's picture is halved in size until "
+	  "they do, down to 16 texels per chunk side; the export log says which "
+	  "landscapes were baked below what the screen wants. Saved in the profile.",
 	  "", "export#overview" },
 	{ "Export/Match the game's backend", "Match the game's backend",
 	  "Bake the precompiled material shaders for the one graphics backend the "

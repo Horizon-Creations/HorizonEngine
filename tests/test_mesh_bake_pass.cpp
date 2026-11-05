@@ -7,6 +7,7 @@
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/ContentManager.h>
+#include <HorizonScene/MaterialOverrides.h>
 #include <Hpak/HpakWriter.h>
 #include <Hpak/MeshBakePass.h>
 #include <set>
@@ -219,6 +220,52 @@ TEST_CASE("Mesh bake in the pack: the sources drop out of the pak, the baked ass
 	CHECK(baked.size() == 3);                  // mesh + 2: three assets instead of five
 }
 
+TEST_CASE("Mesh bake pass: a mesh an entity overrides is left alone")
+{
+	Project pr("he_test_meshbake_override");
+	buildProject(pr);
+	HE::MeshBake::PassOptions o;
+	o.skipMeshes.push_back(pr.entries[4].id);
+	const HE::MeshBake::PassResult r = HE::MeshBake::runPass(pr.entries, o);
+	CHECK(r.baked == 0);
+	CHECK(r.skippedOverridden == 1);
+	CHECK(r.replaced.empty());
+	CHECK(r.added.empty());
+	REQUIRE(r.notices.size() >= 2);
+	CHECK(r.notices[0].find("1 with a material override") != std::string::npos);
+
+	// Another mesh's id in the list changes nothing.
+	HE::MeshBake::PassOptions other;
+	other.skipMeshes.push_back(HE::UUID{ 1, 2 });
+	CHECK(HE::MeshBake::runPass(pr.entries, other).baked == 1);
+}
+
+TEST_CASE("Material overrides: the scene scan finds whole-mesh and per-slot overrides, and only those")
+{
+	HorizonWorld world;
+	auto& reg = world.registry();
+	const HE::UUID plain{ 10, 1 }, whole{ 10, 2 }, slot{ 10, 3 }, nulls{ 10, 4 }, noMesh{ 0, 0 };
+	const auto spawn = [&](const HE::UUID& mesh, bool withMaterial) {
+		const auto e = reg.create();
+		reg.emplace<MeshComponent>(e).meshAssetId = mesh;
+		if (withMaterial) reg.emplace<MaterialComponent>(e);
+		return e;
+	};
+	spawn(plain, false);                                            // no Material component at all
+	reg.get<MeshComponent>(spawn(plain, true));                     // a Material component that overrides nothing
+	reg.get<MaterialComponent>(spawn(whole, true)).materialAssetId = HE::UUID{ 99, 1 };
+	reg.get<MaterialComponent>(spawn(slot, true)).slotOverrides = { HE::UUID{}, HE::UUID{ 99, 2 } };
+	reg.get<MaterialComponent>(spawn(nulls, true)).slotOverrides = { HE::UUID{}, HE::UUID{} };   // all null: no override
+	reg.get<MaterialComponent>(spawn(noMesh, true)).materialAssetId = HE::UUID{ 99, 3 };          // overrides, but no mesh
+
+	std::vector<HE::UUID> found;
+	HE::collectMeshesWithMaterialOverrides(world, found);
+	HE::collectMeshesWithMaterialOverrides(world, found);           // twice: no duplicates
+	REQUIRE(found.size() == 2);
+	CHECK(std::find(found.begin(), found.end(), whole) != found.end());
+	CHECK(std::find(found.begin(), found.end(), slot) != found.end());
+}
+
 TEST_CASE("Mesh bake pass: switched off, or with a section that cannot be baked, the mesh is left alone")
 {
 	{   // both bake forms off
@@ -237,9 +284,9 @@ TEST_CASE("Mesh bake pass: switched off, or with a section that cannot be baked,
 		CHECK(r.replaced.empty());
 		CHECK(r.added.empty());
 		CHECK(r.declined == 1);
-		// notices[0] is always the summary line (runPass inserts it in front at the end);
-		// the per-mesh decline reason is notices[1].
-		REQUIRE(r.notices.size() > 1);
+		REQUIRE(r.notices.size() >= 2);
+		CHECK(r.notices[0].find("summary:") == 0);                    // the summary comes first
+		CHECK(r.notices[0].find("1 mesh(es) looked at") != std::string::npos);
 		CHECK(r.notices[1].find("fewer than two simple sections") != std::string::npos);
 	}
 }

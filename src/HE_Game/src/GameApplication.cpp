@@ -10,6 +10,7 @@
 #include <Application/AppIcon.h>       // the window icon the export generated
 #include <Application/Autostart.h>     // …and the login entry app.setAutostart writes
 #include <Application/GameBackendRules.h> // shared with the export dialog that writes config.json
+#include <HorizonRendering/SkyNoise3D.h>   // the sky noise bake the constructor starts early
 #ifdef __APPLE__
 #include "AppMacMenu.h"                // the menu bar in the system bar (macOS)
 #include "AppNotify.h"                 // …and the notification centre
@@ -80,6 +81,20 @@ namespace fs = std::filesystem;
 
 namespace
 {
+// ── The render path the game's config asks for ───────────────────────────────
+// The same config.json key the editor's Preferences combo writes ("RenderPath": 0 Forward,
+// 1 Deferred), capability-gated: a backend that cannot do deferred stays forward. An absent key
+// is the engine's default, Deferred (EditorConfig::RenderPath). One function because it is asked
+// twice: at the end of OnInit, BEFORE the first material warm-up (which builds the G-buffer
+// variants only on a deferred path and used to run a frame ahead of the per-frame push), and
+// in that push.
+static HE::RenderPath configuredRenderPath(IRenderer& r)
+{
+	const bool deferred = GlobalState::getInstance().getCustomConfigInt("RenderPath", 1) == 1
+	                   && r.GetCapabilities().supportsDeferredRendering;
+	return deferred ? HE::RenderPath::Deferred : HE::RenderPath::Forward;
+}
+
 // ── The frame of a borderless window (docs/he-apps-plan.md F3) ──────────────
 // The grab band along the edges, in window POINTS, so it is the same physical
 // thickness on a Retina screen as on a plain one. Six is what the desktops
@@ -421,6 +436,13 @@ GameApplication::GameApplication(std::string startupPath)
 	: HE::Application(std::move(startupPath))
 {
 	applyShippedConfig();
+	// The audio device opens while SDL, the window and the renderer come up (see m_audioInit).
+	m_audioInit = std::async(std::launch::async, [this] { return m_audioEngine.init(); });
+	// So does the 256³ sky/cloud noise every backend bakes at renderer start (61 ms on the job
+	// pool): the renderer takes the finished volume instead of baking it on the frame's path.
+	// The software rasteriser has no sky; it would only hold 33 MB.
+	if (m_backend != HE::RendererBackend::Software)
+		HE::PrewarmSkyNoise3D(HE::SkyNoise3DResolution());
 }
 GameApplication::~GameApplication() = default;
 
@@ -770,6 +792,12 @@ void GameApplication::OnInit()
 		std::memcpy(&sceneUuid.hi, m_config.startupSceneUuid,     8);
 		std::memcpy(&sceneUuid.lo, m_config.startupSceneUuid + 8, 8);
 	}
+
+	// A shipped game holds each block-compressed texture once, in the GPU: the backend frees the
+	// CPU copy after its upload and the pak gives it back if a second upload needs it. Set before
+	// the mount so no texture streams in without the rule. HE_KEEP_CPU_PIXELS=1 turns it off for
+	// an A/B memory comparison.
+	contentManager().setReleaseCpuPixelsAfterUpload(std::getenv("HE_KEEP_CPU_PIXELS") == nullptr);
 
 	if (contentManager().mountPak(pakPath, pakKey))
 	{
@@ -1424,7 +1452,10 @@ void GameApplication::OnInit()
 
 	// Audio: init the engine and start playOnStart sources, mirroring the editor's
 	// play mode — packaged games get sound too (HC/script audio.* routes here).
-	if (m_audioEngine.init())
+	// The constructor started the device open; this only collects it (init() again if it was
+	// never started, e.g. a subclass that skipped the constructor path).
+	const bool audioOk = m_audioInit.valid() ? m_audioInit.get() : m_audioEngine.init();
+	if (audioOk)
 	{
 		// The project's buses BEFORE the first source starts: a source names
 		// its bus at play time, and one that does not exist yet means master.
@@ -1442,6 +1473,17 @@ void GameApplication::OnInit()
 	// runtime, for the whole life of the application — before the first script runs,
 	// so a pin set in BeginPlay lands.
 	HE::api::streaming::install(&m_cellRuntime);
+
+	// The renderer is up: a prewarmed sky noise it did not take (a backend with no sky) is dead
+	// weight from here on.
+	HE::DiscardSkyNoise3DPrewarm();
+
+	// The material warm-up of the first frame builds the G-buffer variants only when the renderer
+	// is already on the deferred path; the per-frame push that sets it comes later in that frame.
+	// Say it now (a world game only: an app is forward and says so itself).
+	if (!m_appMode)
+		if (IRenderer* const rr = renderer())
+			rr->SetRenderPath(configuredRenderPath(*rr));
 
 	// Nothing to stream without a scene: an app's assets are reached through its
 	// widgets, which load on demand.
@@ -3577,10 +3619,7 @@ void GameApplication::OnRender(float deltaTime)
 			// writes ("RenderPath": 0 = Forward, 1 = Deferred), capability-gated. An absent
 			// key is the engine's default, Deferred (EditorConfig::RenderPath); a backend that
 			// cannot do it stays forward.
-			const bool deferredPath =
-				GlobalState::getInstance().getCustomConfigInt("RenderPath", 1) == 1 &&
-				r->GetCapabilities().supportsDeferredRendering;
-			r->SetRenderPath(deferredPath ? HE::RenderPath::Deferred : HE::RenderPath::Forward);
+			r->SetRenderPath(configuredRenderPath(*r));
 
 			// Push the scene environment to the renderer. The base Application renders the
 			// world but never pushes EnvironmentSettings (that lived only in the editor), so

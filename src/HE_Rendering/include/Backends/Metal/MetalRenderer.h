@@ -968,6 +968,7 @@ private:
 	int m_aaMethodRequested = static_cast<int>(HE::AAMethod::FXAA);
 	HE::AAMethod ActiveAAMethod() const
 	{
+		if (m_rawCapture) return HE::AAMethod::Off;   // RenderSceneImage with rawOutput: nothing smoothed
 		return IRenderer::ResolveAAMethod(m_aaMethodRequested, GetCapabilities());
 	}
 	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
@@ -1443,6 +1444,10 @@ private:
 	// overlay, present) is skipped — a still on request must not flash a black
 	// frame on the window it was not asked to touch.
 	bool     m_captureOnly     = false;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// as it is, and the post effects that would change it are off for that one frame.
+	bool     m_rawCapture      = false;
+	bool     m_rawSrgb         = false;   // EditorCameraOverride::rawSrgb
 	// The primary window's drawable, acquired by WaitForFrame before the frame
 	// polled its input and consumed by the swapchain pass of EncodeFrame.
 	// id<CAMetalDrawable> (retained) or null. Outlives EncodeFrame's

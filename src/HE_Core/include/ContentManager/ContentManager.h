@@ -187,6 +187,22 @@ public:
 	// For a texture that is rewritten in place every frame (the landscape's trail clipmap): the caller edits `data` and
 	// tells the renderer with IRenderer::InvalidateTexture, no new asset and no copy.
 	TextureAsset*              getTextureMutable(HE::UUID id);
+
+	// ── CPU pixel copies of uploaded textures (the shipped game's RAM) ──────────────────
+	// A texture asset keeps its bytes (`data`) after the renderer has copied them into a GPU
+	// texture, so a game holds every texture twice. Block-compressed bytes (ASTC/BC) are not
+	// readable on the CPU anyway, so once a backend has uploaded them nothing needs them.
+	// Off by default (the editor, the exporter and the tools read pixels); the game turns it on.
+	void setReleaseCpuPixelsAfterUpload(bool on) { m_releaseCpuPixels = on; }
+	// Called by a backend right after it uploaded `id`. Frees `data` of a block-compressed
+	// texture that came out of a mounted pak (so the bytes can be read back) and that no CPU
+	// code reads: not RGBA8 (terrain weights, trails, widgets read those) and not an array
+	// without baked slice means (the GI landscape colours read those). True when freed.
+	bool releaseCpuPixels(HE::UUID id);
+	// Brings the bytes of a released texture back from the pak, for a second upload (the same
+	// asset used as a UI image and a material texture, a cache that was flushed). Returns the
+	// asset, or null when it is not loaded. A no-op for a texture that still has its bytes.
+	const TextureAsset*        restoreCpuPixels(HE::UUID id);
 	SkeletalMeshAsset*         getSkeletalMeshMutable(HE::UUID id);
 	const TextureAsset*        getTexture(HE::UUID id) const;
 	const MaterialAsset*       getMaterial(HE::UUID id) const;
@@ -936,6 +952,8 @@ private:
 	};
 	std::vector<MountedPak>                       m_mounts;        // overlay stack (later = higher priority)
 	std::unordered_map<HE::UUID, size_t>          m_pakResidency;  // UUID → index into m_mounts
+	bool                                          m_releaseCpuPixels = false;   // see releaseCpuPixels
+	std::unordered_set<HE::UUID>                  m_pixelsReleased;             // textures whose `data` was freed
 	std::unordered_map<HE::UUID, std::string>     m_diskRegistry;  // UUID → relative path (loose content)
 	// Content-relative path → UUID for assets that live ONLY in a mounted pak,
 	// loaded from each pak's __asset_index__ at mount. Lets loadAsset("<path>")

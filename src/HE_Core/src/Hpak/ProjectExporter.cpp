@@ -618,6 +618,8 @@ static std::optional<ExportResult> resolvePackSettings(const ExportSettings& set
     packSettings.textureQuality     = settings.textureQuality;
     packSettings.cookTextureArrays  = settings.cookTextureArrays;
     packSettings.bakeMeshTextures   = settings.bakeMeshTextures;
+    packSettings.bakeSkipMeshes     = settings.bakeSkipMeshes;
+    packSettings.extraAssets        = settings.extraAssets;
     packSettings.shaderBackends       = settings.shaderBackends;        // precompile material shaders
     packSettings.compileShaderVariants = settings.compileShaderVariants;
     packSettings.compileParticleShaderVariants = settings.compileParticleShaderVariants;
@@ -951,6 +953,15 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
             return isZip || isPth || isPyLib || isPlugin;
         };
 
+        // Steam Audio (libphonon / phonon.dll, ~22 MB) is opened by name only when the project's
+        // audio buses name it as the spatialiser (SteamAudio.cpp), and nothing else switches it:
+        // the mixer window writes AudioBusConfig::spatialBackend, which is what this export
+        // packs. A project that stayed on the built-in spatialiser never loads it.
+        const auto skippedPhonon = [&settings](const std::string& fname) {
+            if (settings.audioBuses.spatialBackend == HE::AudioSpatialBackend::SteamAudio) return false;
+            return fname.find("phonon") != std::string::npos;
+        };
+
         // Clear STALE code before copying fresh binaries. Re-signing over a
         // previous export's leftovers is the classic codesign failure ("bundle
         // format unrecognized" / "code object is not signed"): an old
@@ -1055,7 +1066,8 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
                 // along. The game's loader never looks at it.
                 const bool strayEngineDll = ctx.engineLayout && fname.rfind("Horizon", 0) == 0
                     && fname.size() > 4 && fname.compare(fname.size() - 4, 4, ".dll") == 0;
-                if (runLog || strayEngineDll || skippedPython(fname)) { dit.increment(ec); continue; }
+                if (runLog || strayEngineDll || skippedPython(fname) || skippedPhonon(fname))
+                { dit.increment(ec); continue; }
                 if (auto fail = shipFile(dit->path(), routeRuntime(fname))) return fail;
             }
             dit.increment(ec);
@@ -1098,7 +1110,7 @@ static std::optional<ExportResult> copyRuntimeBinaries(const ExportSettings& set
                                                        + fname + ": " + fec.message(),
                                                 ctx.assetsPacked};
                     }
-                    else if (!skippedPython(fname))
+                    else if (!skippedPython(fname) && !skippedPhonon(fname))
                     {
                         if (auto fail = shipFile(rit->path(), dst)) return fail;
                     }

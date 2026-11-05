@@ -5,6 +5,7 @@
 #include <Physics/CollisionLayers.h>     // the collision matrix the shipped build simulates with
 #include <Audio/AudioBusConfig.h>        // the mixer buses the shipped build plays through
 #include <Hpak/ProjectConfig.h>          // ExportPlan: the hcfg an export will write
+#include <Hpak/HpakFormat.h>             // PackSettings::ExtraAsset (what an editor-made asset looks like)
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -215,6 +216,12 @@ struct HE_API ExportSettings {
     // (Hpak::PackSettings::bakeMeshTextures). Which meshes, and in which form, is each mesh's
     // own choice (the Export bake switches in the Mesh Viewer). Needs the reachability filter.
     bool bakeMeshTextures = true;
+    // Meshes the bake must leave alone because an entity overrides their materials (the editor
+    // collects them from the scenes it exports). See Hpak::PackSettings::bakeSkipMeshes.
+    std::vector<HE::UUID> bakeSkipMeshes;
+    // Assets the editor baked for this export that no project file holds (the far landscape): packed as they are,
+    // their folders kept as reach roots. See Hpak::PackSettings::extraAssets.
+    std::vector<Hpak::PackSettings::ExtraAsset> extraAssets;
     // macOS only: emit a <projectName>.app bundle instead of a flat folder —
     // executable + engine dylibs in Contents/MacOS, pak/hcfg/GameLogic in
     // Contents/Resources (where SDL_GetBasePath resolves inside a bundle), a

@@ -59,13 +59,47 @@ C. Packer (2)/(3) im Export, Test auf Texel-Genauigkeit, Lauf auf Metal mit dem 
 D. Vertex-Farben: `MVCL`-Chunk, Bake, GL- und Metal-Bindung, Gate über die Backend-Maske.
 Jeder Schritt wird einzeln committet und gepusht.
 
+## 5. Umgesetzt (Stand 2026-11-02)
+
+- **A** `MeshBakeSettings` / Chunk `MBKE` (`Assets.h`, `HAsset.h`, `ContentManager.cpp`), drei Checkboxen "Export bake" im Mesh Viewer (`StaticMeshEditorPanel.cpp`).
+- **B** `HE::classifySimpleTextureMaterial` (`Hpak/SimpleTextureMaterial.*`): ein glatter PBR-Satz, geprüft gegen ein echtes, vom glTF-Import
+  erzeugtes Material. Ein Texture Sample mit offenem UV-Pin liest `vec2(0)` und ist deshalb kein Kandidat.
+- **C1** `HE::MeshBake::bake` (`Hpak/MeshTextureBake.*`): Merge (verlustfrei, Texel byte-gleich, sRGB-Rundreise getestet) und Resample (Tiling aufgelöst,
+  Faktoren eingerechnet, fehlende Rollen flach gefüllt); Atlanten Base / ORM / Normal / Emissive; Sektionen mit anderem Shading oder nicht einfach bleiben.
+- **C2** `HE::MeshBake::runPass` (`Hpak/MeshBakePass.*`) und Pass 1c in `HpakWriter::addDirectories`: zwischen Erreichbarkeitsfilter und Packen; danach läuft der
+  Filter noch einmal, damit Quell-Materialien und -Texturen aus dem Pak fallen. Abgeleitete Assets (`Baked/<mesh-uuid>_*.hasset`) haben Ids, die nur von der Mesh-Id
+  abhängen (der Inkrementalcache braucht gleiche Bytes). Das Material läuft durch Laden/Speichern des ContentManagers, so wie der Editor es speichern würde
+  (GLSL, G-Buffer-Variante, GI-Näherung). `PackSettings::bakeMeshTextures`, `ExportSettings::bakeMeshTextures` (Vorgabe an), Profilfeld, Dialog-Checkbox
+  "Bake textures onto meshes", `kPackPipelineVersion` 5.
+- **Tests:** `test_mesh_texture_bake.cpp` (11), `test_simple_texture_material.cpp` (6), `test_mesh_bake_pass.cpp` (4, einschließlich Pak: 5 Assets ohne Bake, 3 mit),
+  zwei Importer-Tests in `test_gltf_material_import.cpp` (ein glTF mit zwei Materialien wird zu einer Sektion mit Base- und Normal-Atlas).
+
+**Gemessen:** Foliage-Testprojekt, 63 Meshes, alle mit nur einem Material-Slot: nichts zu verschmelzen, das Pak bleibt bei 216141063 Bytes (gleich mit und ohne Bake).
+Die Zusammenfassung im Export-Log sagt das ("63 with one material slot").
+
+**Overrides:** Ein gebackenes Mesh hat nur noch einen Slot, und seine UVs liegen auf dem Atlas; ein Override-Material würde seine eigene Textur über diese UVs lesen
+(falscher Ausschnitt). Deshalb backt der Export kein Mesh, das eine Entity mit einem Material-Override zeichnet (`HE::collectMeshesWithMaterialOverrides`,
+`PackSettings::bakeSkipMeshes`). Gescannt werden alle Szenen (platzierte Prefabs sind dort gewöhnliche Entities, eine Kopie, kein Verweis auf das Asset) und der
+Komponenten-Körper jeder HorizonCode-Klasse (`entity.spawnClass` ist der einzige Weg, wie Entities erst zur Laufzeit entstehen). Nicht gesehen: ein Material, das
+ein Skript zur Laufzeit zuweist. Idee, nicht umgesetzt: Slots erhalten, indem jede Sektion eine Instanz des gemeinsamen Masters mit UV-Skalierung und -Offset als Parameter
+bekommt (Original-UVs bleiben; N Sektionen bleiben N Draw-Calls).
+
+**Bewusste Folgen:** Der Bake ist der erste
+Schritt, der die Gestalt eines Pak-Assets verändert; Frames sind nicht bitgleich zum Original (Resample), der Merge-Modus gibt dieselben Texel.
+
 ## Handoff
 
-- **Topic / step:** 228, Punkt 6 (neu).
-- **Done:** Bestandsaufnahme und Entwurf (dieses Dokument). Kein Code.
-- **Verified:** Layout, `vColor`, fehlender Import von `COLOR_0`, fehlender Entfalter per grep; Verbraucher von `interleaved` gezählt.
-- **Not verified:** Wie ein Material seine Albedo-Textur benennt (Slot-Konvention des Uber-Shaders und der Graph-Knoten), ob Texturen mit Wrap-Modus
-  ungleich Repeat vorkommen, wie der Reach-Filter abgeleitete UUIDs behandelt.
-- **Decisions taken:** Abschnitt 2 (mit Nutzer abgesprochen: alle drei Formen, abschaltbar pro Mesh, größer ist erlaubt).
-- **Decisions suggested, not taken:** Vorgaben der Flags, Grenze 4096, Reihenfolge der Formen.
-- **Next steps:** Schritt A bis D wie oben.
+- **Topic / step:** 228, Punkt 6, Schritte A bis C2 fertig und gepusht; D (Vertex-Farben) offen.
+- **Done:** Abschnitt 5. Alles auf `release/0.8.0`.
+- **Verified:** Tests auf dem Mac (Mesh-Bake, Pass, Pak-Ende-zu-Ende, Importer, Profil, Exporter, ContentManager grün; bekannter Fehler `scanContentDirectory` in
+  `test_hpak`). Ein echter Export des Foliage-Projekts (Metal-Shader, Store): läuft durch, bäckt nichts (Ein-Slot-Meshes).
+- **Not verified:** Ein gebackenes Pak im Spiel (Metal, GL, Windows): noch nie gelaufen, kein Bildvergleich. Ein Projekt mit Meshes aus mehreren einfachen Materialien
+  am echten Export. Der Editor-Dialog ist nur per `-fsyntax-only` geprüft, HorizonEditor ist nicht gebaut. Mesh-Viewer-Schalter nie in der Oberfläche gesehen.
+  Wrap-Modi ungleich Repeat (der Bake nimmt Repeat an). Texturen mit Mips/Block-Kompression im Quellprojekt werden nicht gebacken (nur RGBA8 level 0).
+- **Decisions taken:** Reihenfolge Merge, dann Resample, nie zwei Formen auf einem Mesh; Atlas bis 4096, Detail nicht unter 1/4; Vorgabe der Schalter (Vertex-Farben aus,
+  Zusammenlegen und UV-Textur an); Bake an, wenn die Filter-Option an ist.
+- **Decisions suggested, not taken:** Slot-Overrides erkennen und solche Meshes auslassen (der Pass sieht die Szenen nicht); Reimport setzt die Schalter zurück.
+- **Traps:** `ContentManager::saveAsset` wird während eines Exports von `ProjectWriteGate` verweigert, deshalb schreibt der Pass mit `writeAssetTo`; es gibt zwei
+  `TextureFormat`-Typen (`::TextureFormat` in `Assets.h`, `HE::TextureFormat`); `HE::MaterialGraph` liegt in `HE`, die Assets global.
+- **Next steps:** 1. Ein Projekt mit Mehr-Material-Meshes exportieren und im Spiel auf Metal ansehen (Bildvergleich mit `HE_REACH_NOBAKE=1`).
+  2. Schritt D: Vertex-Farben (`MVCL`), nur GL/Metal, nur wenn außer Base Color nichts texturiert ist. 3. Windows: bauen und die Tests laufen lassen.

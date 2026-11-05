@@ -1182,6 +1182,26 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         ec.clear();
     }
 
+    // Assets the editor made for this export (PackSettings::extraAssets). They are pending entries like the files
+    // above, and the folder each sits in is a reach root: the runtime finds them by id, no scene names them.
+    std::vector<std::string> extraRootPrefixes;
+    for (const Hpak::PackSettings::ExtraAsset& ea : settings.extraAssets)
+    {
+        if (ea.bytes.empty() || ea.id == HE::UUID{} || claimed.count(ea.id)) continue;
+        claimed.insert(ea.id);
+        m_packedTypes[ea.id] = ea.type;
+        pathToUuid[ea.relPath] = ea.id;
+        m_packedPaths[ea.relPath] = ea.id;
+        pending.push_back({ ea.bytes, ea.id, ea.relPath, ea.relPath });
+        const size_t slash = ea.relPath.find_last_of('/');
+        if (slash != std::string::npos)
+        {
+            const std::string folder = ea.relPath.substr(0, slash + 1);
+            if (std::find(extraRootPrefixes.begin(), extraRootPrefixes.end(), folder) == extraRootPrefixes.end())
+                extraRootPrefixes.push_back(folder);
+        }
+    }
+
     // Pass 1b: leave out what the game does not reach (Hpak/ReachFilter.h). Every blob is
     // in `pending` and every path is in pathToUuid by now, so this is the one place the whole
     // reference graph is visible. Scenes the game may load are nodes of the same graph.
@@ -1212,6 +1232,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         }
         HE::reach::Roots roots = HE::reach::engineImplicitRoots();
         roots.globs = settings.alwaysIncludePatterns;
+        roots.pathPrefixes.insert(roots.pathPrefixes.end(), extraRootPrefixes.begin(), extraRootPrefixes.end());
         for (const auto& b : settings.referenceRoots) roots.blobs.emplace_back(b.data(), b.size());
         const HE::reach::Result res = HE::reach::computeReachable(nodes, roots);
 
@@ -1280,6 +1301,7 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
         }
         HE::MeshBake::PassOptions po;
         po.maxAtlas = settings.bakeMaxAtlas;
+        po.skipMeshes = settings.bakeSkipMeshes;
         HE::MeshBake::PassResult baked = HE::MeshBake::runPass(entries, po);
         entries.clear();
         for (HE::MeshBake::ReplacedMesh& rm : baked.replaced)
