@@ -136,53 +136,54 @@ benchmark, to pick the best settings for a PC. Not built. The hook it needs is e
 `setPreset` (step 3) plus `detectQualityPreset`; a benchmark only has to choose a
 `QualityPreset` and apply it.
 
+## 6. Editor page (step 4)
+
+**Project settings ▸ World ▸ Quality** (`ProjectSettingsPanel::Page::Quality`, `drawQualityPage` in
+`ProjectSettingsPanel.cpp`; rail entry in `EditorSettingsPanel.cpp`, `Page::WorldQuality`). It edits the same members
+as the Shadows and Post-Processing / Reflections & GI pages, so there is one model:
+
+* **Preset** combo: Low, Medium, High, Ultra, Custom. It always shows `detectQualityPreset` of the values, so a moved
+  slider reads Custom at once. Picking a named preset runs `applyQualityPreset` (graphics block on); picking Custom
+  changes nothing.
+* **Resolution and edges:** anti-aliasing method, render scale. **Shadows:** resolution, distance, cascades.
+  **Screen effects:** ambient occlusion, SSR (+ quality), global illumination (+ shadow quality), GI reflections (+ quality,
+  bounces); the sub-rows appear only while their effect is on. **Asset detail:** texture quality, material quality.
+* While the project does not set its own graphics, the controls show what the editor draws with (an amber line says so);
+  the first preset or edit starts from those values and turns the project's graphics on, so nothing jumps.
+* The model follows every change; the file is written once when no control is held (same split as the other pages).
+* Screenshots (headless, `test_project_settings_ui`): `docs/engine-quality-settings-2026-11-05/quality-page-*.png`
+  (`ultra-top`, `ultra-bottom`, `no-project-graphics`).
+* 16 help entries (`Quality/<label>`, `EditorHelp.cpp` ~5088) and a "Project: quality" Settings Reference section;
+  docs-site anchors are left empty (step 5 writes the page).
+
 ## Handoff
 
-- **Topic / step:** 324 Engine quality settings, step 3 of 5 (global step id 1510). Earlier: step 1
-  (id 1508, 523bcac24) model + presets, step 2 (id 1509, 20938d347) renderer/game wiring.
+- **Topic / step:** 324 Engine quality settings, step 4 of 5 (global step id 1511). Earlier: step 1 (1508) model,
+  step 2 (1509) renderer/game wiring, step 3 (1510) script API.
 - **Branch / commit:** `claude/engine-quality-settings` (pushed: see the Hive artifact for the sha)
-- **Done:** a game or HorizonCode/Lua/Python/C++ script can set and read the quality preset and 18
-  single regulators at run time, save them, and reset them; the editor preview shows them while
-  playing and drops them at stop.
-- **Files touched:** `Project/QualitySettings.h` (NEW, json-free: `ProjectShadowSettings`, the graphics field list,
-  `ProjectGraphics`, presets, field table; `ProjectSettings.h` includes it, so nothing else changed), `EngineApi.h` (`settings::Values/Host`, row declarations ~2380-2470),
-  `PlayerSettings.cpp` (effective values, rows, JSON), `EngineApi.cpp` (rows ~7190, display names
-  ~8450), `HcNodeDocs.cpp` (~1048), `ProjectSettings.h/.cpp` (field table), `GameApplication.cpp`
-  (`installPlayerSettings`), `EditorApplication.h/.cpp` (`m_playGraphics`, host hook, sync),
-  `tests/fixtures/hcodegen/fixtures.h` (`fxQualitySettings`), `tests/CMakeLists.txt` (`QualitySettings`
-  in `HCGEN_CLASSES`), tests in `test_player_settings`, `test_horizoncode_codegen`,
-  `test_scripting_binding`, `test_python_scripting`.
-- **Verified:** `he_tests` Release build RC 0. Passing: `test_player_settings` 12/12 (6 new),
-  `test_project_settings` 41/41, `test_horizoncode_codegen` 54/54 (incl. interpreted == compiled for the
-  new rows), `test_engine_api_direct` 9/9, `test_engine_api` 130/130, `test_hc_node_docs` 6/6,
-  `test_scripting_binding` 33/33 and `test_python_scripting` 42/42 (one new case each). `GameApplication.cpp.o`
-  built by ninja; `EditorApplication.cpp.o` compiled with its recorded command. Full `ctest -j4`: 362/362 (the first run had 2 failures, both mine and fixed: the
-  checked-in `tests/fixtures/game_build_config/HEGameBuildConfig.h` embeds the graphics JSON and was regenerated with
-  `HE_UPDATE_GAME_BUILD_CONFIG_FIXTURE=1`; `test_hc_codegen_export_build` failed because `EngineApi.h` pulled in
-  `ProjectSettings.h` and its `nlohmann/json_fwd.hpp`, see the split below). `MetalRenderer.mm.o`, `GameApplication.cpp.o`,
-  `EditorApplication.cpp.o` recompiled after the split.
-- **Not verified:** nothing run at runtime (no editor/game launch, no menu, no screenshot); a preset set from
-  a script during play in the editor and the viewport following it is untested; Windows/Linux not built.
-- **Decisions taken:** quality is a player setting in the existing `settings` store (not a new group, not a
-  project edit); name-keyed value rows instead of 18 typed pairs; "Custom" accepted as a no-op; a preset
-  replaces earlier single values; the base is the application's graphics at install.
-- **Decisions suggested, not taken:** typed per-area HorizonCode nodes; surfacing preset names/labels for
-  localisation; exposing `qualityFields` ranges (min/max) to menus.
-- **Pending:** step 4 editor UI (preset combo + single regulators in `ProjectSettingsPanel.cpp` ~1349,
-  `clamp()` after edits, help entries for every control: `editor_help_audit.py --check`); step 5 verification
-  (visible Low vs High in the editor and via script) and the doc for users; the hardware-benchmark idea
-  from the human's note only needs `settings::setQualityPreset` / `HE::applyQualityPreset`.
-- **Traps:** (0) `EngineApi.h` is SDK-facing and generated game code compiles against it without `nlohmann`: it may include
-  `Project/QualitySettings.h` but never `Project/ProjectSettings.h`. Any change to the graphics JSON also needs the
-  game-build-config fixture regenerated (`HE_UPDATE_GAME_BUILD_CONFIG_FIXTURE=1 he_tests --source-file=*test_game_build_config.cpp`,
-  then rebuild he_tests); steps 1 and 2 left it stale and only the full ctest shows it. (1) `ninja <HorizonEditor/HorizonGame object>` runs the `HorizonSDKRelease` custom target
-  first and it FAILS with "dev MISMATCH" after any public header change (stale `lib/dev` stamp), so the
-  object is silently not rebuilt: compile it with `ninja -t commands <obj> | tail -1` instead, or build the
-  whole editor. (2) New `Host` fields go at the END and are optional; both apps fill what they know.
-  (3) `Values::quality` stores normalised numbers; read them back with `qualityValue`, not from the map.
-  (4) A new graphics field means: macro row, `EditorConfig` member + load/save, export `put`, an entry in
-  `kQualityFields` if scripts should reach it, and a preset-table column if presets should set it.
-- **Next steps:** 1. Step 4: add a "Quality" page (preset combo from `qualityPresetNames`, regulators from
-  `qualityFieldName`) bound to `ProjectGraphics` + `ProjectShadowSettings` with `applyQualityPreset` /
-  `setQualityField`, then `ProjectSettings::clamp()`. 2. Step 5: headless A/B (`HE_DUMP_TEXQUALITY`,
-  `scripts/he_shot.py`) on a scene with a mipped texture; a PIE run that calls the rows from a script.
+- **Done:** Project settings ▸ World ▸ Quality page: preset combo + the regulators the presets are made of, help for
+  every control, rail entry, headless screenshots.
+- **Files touched:** `ProjectSettingsPanel.cpp` (`drawQualityPage` ~795, page table), `ProjectSettingsPanel.h` (`Page::Quality`),
+  `EditorSettingsPanel.h/.cpp` (`WorldQuality`: enum, rail, two mappings), `EditorHelp.cpp` (~5088 entries, ~10170 reference),
+  `tests/test_project_settings_ui.cpp` (page in the loop + 2 cases at the end).
+- **Verified:** he_tests build RC 0; `test_project_settings_ui` 8/8 (page draws over a real project and writes nothing by being
+  looked at; an Ultra project reads Ultra; a click on Ambient occlusion with the editor at SMAA / 0.8 render scale turns
+  the block on, keeps those values, reads Custom, and survives a reload through a fresh ProjectManager); full `ctest -j4`
+  362/362; `editor_help_audit.py --check` passes (1273/1273, was 1257 before the topic); screenshots looked at.
+- **Not verified:** the combo popup was not clicked (the preset combo is exercised only through its model);
+  no live editor was launched, so the viewport following a preset change on screen is unseen; no hover tooltips looked at;
+  Windows/Linux.
+- **Decisions taken:** the page lives under World next to Shadows (project data, not a Preferences page); shadows appear
+  on both pages and edit the same members; bloom, DoF, motion blur stay on their own pages; picking Custom is a no-op.
+- **Decisions suggested, not taken:** a "Reset to project defaults" button; showing the backend that ignores a level next to the
+  row (e.g. a greyed "Metal only" tag on Texture quality).
+- **Pending:** step 5 only: user documentation (docs site page `rendering#quality` and the anchors in the help entries),
+  a visible Low vs High A/B in the live editor (`HE_DUMP_TEXQUALITY`, `scripts/he_shot.py`, a scene with a mipped texture),
+  a PIE run that calls the quality rows from a script, and the final topic summary/PR.
+- **Traps:** (1) the UI tests' display is 900x620 and the page is taller: scroll with `ImGui::SetScrollY` in the body lambda
+  (see `showQualityPage`). (2) A new `ProjectSettingsPanel::Page` needs `pageTitle`, `drawPage`, `requestOpenProjectPage`,
+  `projectPageOf`, the rail table and `EditorSettingsPanel::Page` — all six, or a page is reachable but not listed.
+  (3) `EditorGraphics::capture` copies the editor's values but not `enabled`/`preset`.
+- **Next steps:** 1. Step 5: live-editor witness (open a project in the editor with `HE_HIDDEN_WINDOW=1` per
+  `docs/headless-runs.md`, set a preset through the page or `HE_DUMP_TEXQUALITY`, compare frames); never leave a
+  HorizonEditor running afterwards. 2. Write the docs page and fill the anchors. 3. Open the PR into `release/0.8.0`.
