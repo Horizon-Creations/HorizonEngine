@@ -64,7 +64,8 @@ unless `ExportSettings::projectSettingsFile` is set; copied by hand for the run.
 
 **Manual:** Website `rendering.html` has "Material quality", "Quality by area, with enums" (image
 `hc_engine_settings_nodes.png`) and "Automatic quality"; `docs-index.json` rebuilt. Committed in
-the Website repo (b35661a), NOT pushed, NOT deployed.
+the Website repo, rebased onto origin/main as 04ea9fd, pushed and deployed on 2026-11-05 (only the
+three docs files, uploaded by hand because the local Website checkout carries unrelated edits).
 
 **Not verified**
 * D3D11/D3D12/Vulkan/OpenGL: see Hive steps 7-10 of topic 336 (hardware or CI).
@@ -76,7 +77,6 @@ the Website repo (b35661a), NOT pushed, NOT deployed.
 returned for mixed areas; governor stays out of the editor viewport.
 
 **Next steps, in order**
-1. Push and deploy the Website docs commit once the human approves (docs files only).
-2. Backends: Hive steps 7-10 (D3D, Vulkan, OpenGL, real display).
-3. Pixel A/B of material quality alone (a project copy with only `materialQuality` changed).
-4. Decide the target-above-refresh-rate question (cap the target or warn in the dialog).
+1. Backends: Hive steps 7-10 (D3D, Vulkan, OpenGL, real display).
+2. Pixel A/B of material quality alone (a project copy with only `materialQuality` changed).
+3. Decide the target-above-refresh-rate question (cap the target or warn in the dialog).
