@@ -114,6 +114,14 @@ namespace HE::landscape
         int             m_group = -1;
         bool            m_rvtSeen[3] = { false, false, false };   // a view material the renderer has already resolved for pages
         bool            m_active = false;
+        // Shared chunk meshes (Thema 333, step 6i): the scratch landscape's chunk entities point at the LIVE landscape's LOD0
+        // meshes instead of generating a second copy of the whole landscape's geometry (CPU and GPU). Only when every live
+        // chunk has its LOD0 mesh resident; otherwise (an export that has not built the live chunks, HE_RVT_SHARE_MESHES=0)
+        // the scratch world builds its own as before.
+        bool            m_shared = false;
+        entt::entity    m_liveTerrain = entt::null;
+        bool addSharedChunks();                 // (re)creates the scratch chunk entities from the live ones; false = not possible
+        void refreshSharedMeshes();             // the live chunks' current LOD0 ids into the scratch chunks
     };
 
     // Box filter: `src` is (side*ss) x (side*ss) RGBA8, the result side x side.

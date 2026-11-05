@@ -20,6 +20,8 @@
 #include <cmath>
 #include <limits>
 #include <thread>
+#include <unordered_map>
+#include <cstdlib>
 
 namespace HE::landscape
 {
@@ -95,6 +97,70 @@ namespace HE::landscape
         : m_live(source), m_restore(restoreTo ? *restoreTo : source), m_cm(cm), m_renderer(renderer) {}
 
     HlodBaker::~HlodBaker() { end(); }
+
+    bool HlodBaker::addSharedChunks()
+    {
+        auto& reg  = m_live.registry();
+        auto& sreg = m_scratch->registry();
+        // Drop what an earlier call made.
+        std::vector<entt::entity> old;
+        for (auto [ce, cc] : sreg.view<TerrainChunkComponent>().each()) old.push_back(ce);
+        for (entt::entity e : old) m_scratch->destroyEntity(e);
+
+        struct Live { TerrainChunkComponent cc; TransformComponent tf; HE::UUID mesh; };
+        std::vector<Live> live;
+        uint32_t maxC = 0;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+        {
+            if (cc.terrain != m_liveTerrain) continue;
+            const auto* lod = reg.try_get<LODComponent>(e);
+            const auto* tf  = reg.try_get<TransformComponent>(e);
+            if (!lod || lod->levels.empty() || !tf || lod->levels.front().meshId == HE::UUID{}) return false;
+            if (m_cm.getStaticMesh(lod->levels.front().meshId) == nullptr) return false;   // not resident: build our own
+            Live l; l.cc = cc; l.tf = *tf; l.mesh = lod->levels.front().meshId;
+            live.push_back(std::move(l));
+            maxC = std::max(maxC, std::max(cc.cx, cc.cz));
+        }
+        const size_t side = static_cast<size_t>(maxC) + 1;
+        if (live.empty() || live.size() != side * side) return false;   // a partial grid
+
+        for (const Live& l : live)
+        {
+            const entt::entity ce = m_scratch->createEntity("TerrainChunk");
+            m_scratch->reparentEntity(ce, m_terrain);
+            TerrainChunkComponent tcc;                  // fresh: none of the live chunk's tessellation or stitch state
+            tcc.terrain = m_terrain; tcc.cx = l.cc.cx; tcc.cz = l.cc.cz;
+            sreg.emplace<TerrainChunkComponent>(ce, tcc);
+            TransformComponent tf = l.tf;
+            tf.dirty = true;
+            sreg.emplace_or_replace<TransformComponent>(ce, tf);
+            sreg.emplace_or_replace<MaterialComponent>(ce, MaterialComponent{ m_viewMat[0] });
+            MeshComponent mc;
+            mc.meshAssetId = l.mesh;
+            mc.dirty       = true;
+            sreg.emplace_or_replace<MeshComponent>(ce, mc);
+        }
+        return true;
+    }
+
+    void HlodBaker::refreshSharedMeshes()
+    {
+        auto& reg  = m_live.registry();
+        auto& sreg = m_scratch->registry();
+        std::unordered_map<uint64_t, HE::UUID> byCoord;
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+        {
+            if (cc.terrain != m_liveTerrain) continue;
+            if (const auto* lod = reg.try_get<LODComponent>(e); lod && !lod->levels.empty())
+                byCoord[(static_cast<uint64_t>(cc.cz) << 32) | cc.cx] = lod->levels.front().meshId;
+        }
+        for (auto [ce, cc, mesh] : sreg.view<TerrainChunkComponent, MeshComponent>().each())
+            if (const auto it = byCoord.find((static_cast<uint64_t>(cc.cz) << 32) | cc.cx); it != byCoord.end() && it->second != mesh.meshAssetId)
+            {
+                mesh.meshAssetId = it->second;   // a rebuild that kept no id: follow it
+                mesh.dirty = true;
+            }
+    }
 
     bool HlodBaker::begin(entt::entity terrain, std::string* why, bool switchRenderer)
     {
@@ -177,6 +243,19 @@ namespace HE::landscape
         copy.dirty = true;
         sreg.emplace<TerrainComponent>(m_terrain, std::move(copy));
         sreg.emplace<MaterialComponent>(m_terrain, MaterialComponent{ m_viewMat[0] });
+        m_liveTerrain = terrain;
+        static const bool shareWanted = [] { const char* e = std::getenv("HE_RVT_SHARE_MESHES"); return !(e && *e == '0'); }();
+        m_shared = shareWanted && addSharedChunks();
+        HE_LOG_INFO(Scene, "HlodBaker: the scratch landscape %s", m_shared ? "draws the live landscape's chunk meshes (no second copy)"
+                                                                          : (shareWanted ? "builds its own chunk meshes (the live chunks are not all resident)" : "builds its own chunk meshes (HE_RVT_SHARE_MESHES=0)"));
+        if (m_shared)
+        {
+            // Nothing to build: the chunks exist and draw the live meshes. updateTerrains below only keeps the weight texture
+            // and the material of the chunks in step, so the landscape must not look dirty to it.
+            auto& stc0 = sreg.get<TerrainComponent>(m_terrain);
+            stc0.dirty = false; stc0.regionDirty = false;
+            stc0.sculptHeights.clear(); stc0.sculptHeights.shrink_to_fit();   // geometry comes from the live meshes
+        }
         TerrainSystem::updateTerrains(*m_scratch, m_cm, &m_renderer);
         HE::propagateTransformsFull(*m_scratch);
 
@@ -306,7 +385,29 @@ namespace HE::landscape
         if (!m_active) return;
         auto& sreg = m_scratch->registry();
         auto& tc = sreg.get<TerrainComponent>(m_terrain);
-        if (all)
+        if (m_shared)
+        {
+            // The live landscape already rebuilt its chunk meshes this tick (same ids, replaced in place): the scratch chunks
+            // draw them as they are. A full change may have made new chunks, so those are taken again; and if that cannot be
+            // done any more, the scratch world carries on with meshes of its own.
+            if (all)
+            {
+                TerrainComponent copy = live;
+                copy.dirty = false; copy.regionDirty = false;
+                copy.rvtJournal.clear();
+                copy.sculptHeights.clear(); copy.sculptHeights.shrink_to_fit();
+                tc = std::move(copy);
+                if (!addSharedChunks())
+                {
+                    m_shared = false;
+                    tc = TerrainComponent(live);
+                    tc.dirty = true; tc.regionDirty = false; tc.rvtJournal.clear();
+                }
+            }
+            else
+                refreshSharedMeshes();
+        }
+        else if (all)
         {
             TerrainComponent copy = live;
             copy.dirty = true;
