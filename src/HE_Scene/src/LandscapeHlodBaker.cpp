@@ -380,6 +380,32 @@ namespace HE::landscape
         if (m_active) m_renderer.SetWorld(&m_restore);
     }
 
+    uint32_t HlodBaker::releaseIdleMeshes()
+    {
+        if (!m_active || !m_scratch) return 0;
+        auto& reg  = m_live.registry();
+        auto& sreg = m_scratch->registry();
+        // The chunks the live landscape draws at LOD0 itself keep their mesh: dropping it would only make the main draw upload it again.
+        std::unordered_map<uint64_t, bool> liveDrawsLod0;
+        if (m_shared)
+            for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+            {
+                if (cc.terrain != m_liveTerrain) continue;
+                const auto* lod = reg.try_get<LODComponent>(e);
+                liveDrawsLod0[(static_cast<uint64_t>(cc.cz) << 32) | cc.cx] = !lod || lod->levels.empty() || lod->current == 0;
+            }
+        uint32_t dropped = 0;
+        for (auto [ce, cc, mesh] : sreg.view<TerrainChunkComponent, MeshComponent>().each())
+        {
+            if (mesh.meshAssetId == HE::UUID{}) continue;
+            if (m_shared)
+                if (const auto it = liveDrawsLod0.find((static_cast<uint64_t>(cc.cz) << 32) | cc.cx); it == liveDrawsLod0.end() || it->second) continue;
+            m_renderer.InvalidateMesh(mesh.meshAssetId);
+            ++dropped;
+        }
+        return dropped;
+    }
+
     void HlodBaker::syncTerrain(const TerrainComponent& live, bool all, glm::vec2 mn, glm::vec2 mx)
     {
         if (!m_active) return;

@@ -418,6 +418,26 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     }
     st.paintMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - paintT0).count();
     if (st.pagesPainted) m_lastPainting = st;
+    // The pages went quiet: let go of the scratch landscape's chunk meshes on the GPU (HE_RVT_IDLE_RELEASE = seconds, 0 = never).
+    // The next page draw uploads them again, which is one hitch of the size of the geometry, so not at the first quiet frame.
+    {
+        static const double idleS = [] { const char* v = std::getenv("HE_RVT_IDLE_RELEASE"); return (v && *v) ? std::atof(v) : 5.0; }();
+        const auto now = std::chrono::steady_clock::now();
+        if (st.pagesPainted)
+        {
+            m_lastPaintAt = now;
+            for (auto& kv : m_segments) kv.second.meshesReleased = false;
+        }
+        else if (idleS > 0.0 && std::chrono::duration<double>(now - m_lastPaintAt).count() >= idleS)
+            for (auto& kv : m_segments)
+            {
+                Segment& seg = kv.second;
+                if (!seg.baker || !seg.volumeLive || seg.meshesReleased) continue;
+                const uint32_t n = seg.baker->releaseIdleMeshes();
+                seg.meshesReleased = true;
+                HE_LOG_INFO(Scene, "RvtLandscape: %u scratch chunk mesh(es) released from the GPU after %.0f s without a page", n, idleS);
+            }
+    }
     m_debugEntity = entt::null;
     for (const Land& l : lands)                      // nearest first
         if (const auto f = m_segments.find(l.e); f != m_segments.end() && f->second.volumeLive) { m_debugEntity = l.e; break; }

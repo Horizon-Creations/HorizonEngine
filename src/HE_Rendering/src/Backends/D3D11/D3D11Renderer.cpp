@@ -6108,7 +6108,17 @@ struct D3D11RendererImpl
         // A rebuilt mesh (sculpt, terrain LOD/tessellation) can change the scene
         // box without changing which objects exist → re-check the probe grid fit.
         if (!pendingMeshInval.empty()) giGridTrack.meshRebuilt = true;
+        // A freed buffer stays in the driver's cache on D3D11 (see the RVT pool growth): a batch of dropped meshes, e.g. the RVT scratch
+        // landscape letting go of its chunks (Thema 333), only returns its video memory after a Trim. A single sculpted chunk is not worth
+        // the ~16 ms it takes.
+        const bool bigBatch = pendingMeshInval.size() >= 32;
         pendingMeshInval.clear();
+        if (bigBatch)
+        {
+            context->Flush();
+            ComPtr<IDXGIDevice3> dxgi3;
+            if (SUCCEEDED(device.As(&dxgi3))) dxgi3->Trim();
+        }
     }
 
     // Build the queued materials' VS/PS ahead of their first draw (WarmupMaterials).

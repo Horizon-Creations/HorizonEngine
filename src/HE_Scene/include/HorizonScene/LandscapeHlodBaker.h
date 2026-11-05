@@ -74,6 +74,10 @@ namespace HE::landscape
         bool renderRvtPage(const HlodChunkRect& rect, uint32_t px, uint32_t slot);
         void paintBegin();   // the renderer draws the scratch world ...
         void paintEnd();     // ... and the live one again
+        // Lets the renderer drop the GPU copies of the scratch landscape's chunk meshes (InvalidateMesh) that the live landscape is not
+        // drawing itself: with the shared meshes (6i) the LOD0 of every chunk, which the page draws put on the GPU all at once (53 MB on
+        // D3D11) and which nothing needs while no page is painted. They come back on the next page draw. Returns how many were dropped.
+        uint32_t releaseIdleMeshes();
         // Brings the scratch landscape up to date with the live one after an edit of its ground: `all` = a full copy and
         // rebuild, otherwise only the heights are copied and the chunks under the terrain-local rect (mn..mx) rebuilt (the
         // weight texture is shared with the live landscape, so paint needs nothing). The height range the page camera has to

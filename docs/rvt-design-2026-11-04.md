@@ -615,6 +615,19 @@ Möglichkeiten, **nicht gebaut** (jede ändert etwas, das ich ohne Rückfrage ni
 
 **Stand D3D11 nach 9c** (Mix-Szene schräg, 3 Läufe, Median): RVT-Aufschlag **80 MB** (vorher 190 mit 512-Scheiben-Pool, 97 mit dem wachsenden Pool), Frame-Zeit 7,47 -> 3,69 ms (unverändert).
 
+### 9d: die 53 MB Geometrie nach Leerlauf freigegeben (2026-11-05)
+
+**Versuch 1, verworfen: Grenzen aus dem CPU-Asset lesen.** `RefineBounds` bekam in D3D11 die Grenzen eines noch nicht hochgeladenen Meshes aus dem CPU-Asset (dieselbe Box, die `resolveMesh` berechnet), ohne es hochzuladen. Gemessen (Mix-Szene schräg, D3D11, `HE_RVT_MEMLOG`): Aufschlag unverändert **80 MB**. Der Grund: die gröbsten Seiten (oberste Mips) decken die ganze Landschaft ab, ihr Draw zeichnet alle 256 LOD0-Chunks und lädt sie dann ohnehin hoch. Es hätte nur bei Szenen geholfen, in denen die Seiten nie die ganze Landschaft sehen; als allgemeine Änderung am Culling-Pfad ohne Gewinn hier zurückgenommen.
+
+**Gebaut: Freigabe nach Leerlauf.**
+* `HlodBaker::releaseIdleMeshes()` ruft `InvalidateMesh` für die Meshes der Scratch-Chunks, **außer** für Chunks, die die echte Landschaft selbst gerade in LOD0 zeichnet (`LODComponent::current == 0`): die würde der Haupt-Draw sofort wieder hochladen. In der Mix-Szene sind das 204 von 256 Chunks.
+* `RvtLandscape::tick` ruft es einmal je Segment, wenn seit `HE_RVT_IDLE_RELEASE` Sekunden (Standard 5, `0` = nie) keine Seite mehr gemalt wurde; die nächste gemalte Seite setzt es zurück.
+* D3D11: ein Schwung von mindestens 32 ungültig gemachten Meshes löst `Flush` + `IDXGIDevice3::Trim()` aus, sonst gibt der Treiber die Puffer nicht zurück (ohne Trim: 491,7 -> 491,8 MB, nichts). Ein einzelner geschnittener Chunk (Sculpt) löst es nicht aus.
+
+**Messung (D3D11, Mix schräg, Idle-Zeit 0,3 s, Aufschlag = Prozess-VRAM mit RVT minus ohne):** vorher **80 MB**, danach **31 MB** (491,8 -> 442,4 MB nach der Freigabe; ohne RVT 411,7 MB).
+
+**Nicht gemessen:** der Ruckler beim Hochladen nach der Pause. Der erste Mal-Tick (alles hochladen, Shader, Pipelines) braucht 175 ms; das ist die Obergrenze, der Anteil der Geometrie ist nicht getrennt gemessen. D3D12, Vulkan und OpenGL: der Aufruf ist in der Szene gemeinsam, sie lassen die GPU-Kopien über ihr eigenes `InvalidateMesh` los; ob dort der Speicher zurückkommt, ist nicht gemessen (D3D12 hat im Gesamtaufschlag nur 31 MB, der Fall war dort nie groß).
+
 ## Handoff
 
 - **Topic / step:** 333, Schritte 1 bis 8 gebaut und abgenommen **mit Einschränkungen** (5: Segmentierung als Stand-in für Tiles; 6: D3D12, Vulkan, OpenGL und (Schritt 6f, Branch `claude/rvt-metal`) **Metal**; 7: Projekteinstellung, Seite, Statusansicht; 8: Abnahme am exportierten Spiel; 8b: mit dem Mix-Material und einer Landschaft im Bild **25 bis 53 % weniger Frame-Zeit auf D3D11/D3D12/Vulkan, 140 bis 240 MB VRAM Preis**; die Szene aus Schritt 8 allein (billiges Material, Landschaft kaum im Bild) war kein Test).

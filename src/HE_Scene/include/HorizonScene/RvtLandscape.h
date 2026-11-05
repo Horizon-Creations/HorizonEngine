@@ -28,6 +28,7 @@
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -131,6 +132,7 @@ namespace HE::landscape
             bool       volumeLive = false;        // the volume is in the manager (pages may exist)
             bool       filled = false;            // the first fill is complete
             bool       swapOn = false;            // the renderer draws this landscape from the pages
+            bool       meshesReleased = false;    // the scratch chunks' GPU meshes were dropped after the pages went idle (HlodBaker::releaseIdleMeshes)
             uint64_t   failedHash = 0;            // an attach that failed is not retried until something it depends on changes
             bool       failed = false;
         };
@@ -154,6 +156,7 @@ namespace HE::landscape
         entt::entity    m_debugEntity = entt::null;  // the nearest landscape with a volume, as of the last tick
         std::map<entt::entity, Segment>   m_segments;
         uint64_t        m_paintedTotal = 0;
+        std::chrono::steady_clock::time_point m_lastPaintAt = std::chrono::steady_clock::now();   // the last tick that painted a page
         uint64_t        m_ticks = 0;
         uint32_t        m_materialsRegistered = 0;
         std::string     m_lastNote;
