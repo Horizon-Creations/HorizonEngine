@@ -191,6 +191,24 @@ HE_API bool        getQualityField(const ProjectGraphics& g, const ProjectShadow
 HE_API bool        setQualityField(ProjectGraphics& g, ProjectShadowSettings& shadows,
                                    const std::string& name, float value);
 
+// ── Automatic quality (the project's side) ────────────────────────────────────
+// Whether the exported game moves its OVERALL quality by itself to hold a target
+// frame rate (HE::QualityGovernor), and within which levels. Off by default: a
+// project written before this existed keeps the fixed quality it always had. The
+// player can still switch it on or off from a menu (settings.setAutoQuality); this
+// is only what a game starts with. Not applied in the editor, whose frames are what
+// every comparison in the project depends on.
+struct HE_API ProjectAutoQuality
+{
+    bool  enabled   = false;
+    float targetFps = 60.0f;   // 10..1000
+    int   minLevel  = 0;       // QualityLevel numbers: 0 Low … 3 Ultra
+    int   maxLevel  = 3;
+
+    static constexpr float kMinFps = 10.0f;
+    static constexpr float kMaxFps = 1000.0f;
+};
+
 // ── One level per area ────────────────────────────────────────────────────────
 // What a HorizonCode graph, a script or a menu works with: not "shadow resolution
 // 2048" but "Shadows: Medium", and a Switch on Enum over the answer. The numbers

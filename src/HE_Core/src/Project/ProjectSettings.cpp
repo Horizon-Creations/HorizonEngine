@@ -536,6 +536,10 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && renderDefaults.vsync == o.renderDefaults.vsync
         && renderDefaults.backend == o.renderDefaults.backend
         && graphicsEqual(graphics, o.graphics)
+        && autoQuality.enabled == o.autoQuality.enabled
+        && nearlyEqual(autoQuality.targetFps, o.autoQuality.targetFps)
+        && autoQuality.minLevel == o.autoQuality.minLevel
+        && autoQuality.maxLevel == o.autoQuality.maxLevel
         && input.enabled == o.input.enabled
         && nearlyEqual(input.stickDeadzone, o.input.stickDeadzone)
         && nearlyEqual(input.triggerDeadzone, o.input.triggerDeadzone)
@@ -612,6 +616,10 @@ void ProjectSettings::clamp()
 #define HE_X(T, name, def, editorName, lo, hi) clampFieldFor(g.name, lo, hi, defaults.name);
         HE_PROJECT_GRAPHICS_FIELDS(HE_X)
 #undef HE_X
+        autoQuality.targetFps = std::clamp(finiteOr(autoQuality.targetFps, ProjectAutoQuality{}.targetFps),
+                                           ProjectAutoQuality::kMinFps, ProjectAutoQuality::kMaxFps);
+        autoQuality.minLevel  = std::clamp(autoQuality.minLevel, 0, 3);
+        autoQuality.maxLevel  = std::clamp(autoQuality.maxLevel, autoQuality.minLevel, 3);
         // The tag is a label for the values (see QualityPreset): once they no
         // longer match its table — a hand edit, one slider moved — it is Custom.
         if (g.preset != QualityPreset::Custom && detectQualityPreset(g, shadows) != g.preset)
@@ -719,6 +727,10 @@ void ProjectSettings::toJson(json& out) const
         g["qualityPreset"] = qualityPresetName(graphics.preset);
         out["graphics"] = std::move(g);
     }
+    out["autoQuality"] = { { "enabled",   autoQuality.enabled },
+                           { "targetFps", autoQuality.targetFps },
+                           { "minLevel",  autoQuality.minLevel },
+                           { "maxLevel",  autoQuality.maxLevel } };
     out["input"] = { { "enabled",         input.enabled },
                      { "stickDeadzone",   input.stickDeadzone },
                      { "triggerDeadzone", input.triggerDeadzone } };
@@ -845,6 +857,11 @@ void ProjectSettings::fromJson(const json& in)
         std::string presetName;
         readString(g, "qualityPreset", presetName);
         qualityPresetFromName(presetName, graphics.preset);
+        const json& aq = section(in, "autoQuality");
+        readBool  (aq, "enabled",   autoQuality.enabled);
+        readNumber(aq, "targetFps", autoQuality.targetFps);
+        readNumber(aq, "minLevel",  autoQuality.minLevel);
+        readNumber(aq, "maxLevel",  autoQuality.maxLevel);
         const json& i = section(in, "input");
         readBool  (i, "enabled",         input.enabled);
         readNumber(i, "stickDeadzone",   input.stickDeadzone);

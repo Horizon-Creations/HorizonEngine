@@ -257,6 +257,7 @@ add_executable(he_tests
     test_input_rebind.cpp
     test_player_settings.cpp
     test_quality_enums.cpp
+    test_quality_governor.cpp
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp

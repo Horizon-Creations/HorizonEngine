@@ -2387,6 +2387,10 @@ namespace settings {
         // values read as once a single value has moved off a preset.
         std::optional<std::string>   qualityPreset;     // "Low" … "Ultra"
         std::map<std::string, float> quality;           // field name → value
+        // Automatic quality (HE::QualityGovernor): the player's own switch. Unset = what
+        // the project says (ProjectAutoQuality::enabled). Choosing a preset sets it to
+        // false — a fixed preset and automation exclude each other.
+        std::optional<bool>          autoQuality;
     };
     inline constexpr const char* kMaster   = "Master";
     inline constexpr const char* kPrefsKey = "settings";
@@ -2420,6 +2424,13 @@ namespace settings {
         // the quality values, and when reset() takes them back (with the base).
         // The application puts them where its renderer push reads them.
         std::function<void(const HE::ProjectGraphics&, const HE::ProjectShadowSettings&)> applyQuality;
+        // Automatic quality: what the project says, and whether this application can run
+        // it at all. Only the exported game says yes: a controller that moves quality by
+        // the frame time must not run in the editor, whose frames every comparison there
+        // depends on. Where it is false the auto rows answer "off" and setAutoQuality
+        // refuses (logged).
+        HE::ProjectAutoQuality baseAuto;
+        bool                   autoQualityAvailable = false;
     };
     // install applies every value once (the start-up apply); uninstall only
     // drops the hooks. The values stay — the camera rig keeps reading them.
@@ -2485,6 +2496,25 @@ namespace settings {
     uint32_t engineSettings();
     int      qualityOf(uint32_t engine, int setting);
     bool     setQualityOf(uint32_t engine, int setting, int level);
+
+    // ── Automatic quality ──
+    // The game moves its OVERALL level by itself to hold the project's target frame
+    // rate (HE::QualityGovernor: smoothed frame time, a step per few seconds, no
+    // pumping). Layers over the preset: project values → the governor's level →
+    // the player's preset (which ends automation) → the player's single values, so
+    // an area the player pinned stays pinned. The governor's level is never saved.
+    //   autoQuality         is it running now
+    //   setAutoQuality      switch it on or off (saved by Save Settings). On, it starts
+    //                       from the project's overall preset; the player's own preset
+    //                       is dropped, their single values stay. False and logged where
+    //                       the application cannot run it (the editor).
+    //   autoQualityLevel    the governor's level as a QualityLevel (Low … Ultra), Custom
+    //                       when automation is off
+    //   tickAutoQuality     the game calls this once a frame with the real frame time
+    bool autoQuality();
+    bool setAutoQuality(bool on);
+    int  autoQualityLevel();
+    void tickAutoQuality(float realFrameSeconds);
     // Persist everything above (NOT the bindings — input.saveBindings) and
     // answer whether the prefs file took it. Nothing chosen removes the key.
     bool  save();

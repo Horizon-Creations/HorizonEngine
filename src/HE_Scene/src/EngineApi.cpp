@@ -7245,6 +7245,18 @@ const std::vector<ApiFn>& registry()
             {{"ok", P::Bool}}, "HE::api::settings::setQualityOf",
             [](Ctx&, const VV& a){ return VV{ Value::ofBool(settings::setQualityOf(aR(a, 0), aI(a, 1), aI(a, 2))) }; } });
 
+        // Automatic quality: the game holds its target frame rate by moving the overall level
+        // (HE::QualityGovernor). The player's switch, saved with the rest of the settings.
+        t.push_back({ "settings.autoQuality", "Settings", false, {}, {{"enabled", P::Bool}},
+            "HE::api::settings::autoQuality",
+            [](Ctx&, const VV&){ return VV{ Value::ofBool(settings::autoQuality()) }; } });
+        t.push_back({ "settings.setAutoQuality", "Settings", true, {{"enabled", P::Bool}}, {{"ok", P::Bool}},
+            "HE::api::settings::setAutoQuality",
+            [](Ctx&, const VV& a){ return VV{ Value::ofBool(settings::setAutoQuality(aB(a, 0))) }; } });
+        t.push_back({ "settings.autoQualityLevel", "Settings", false, {}, { enumP("level", HE::kQualityLevelEnum) },
+            "HE::api::settings::autoQualityLevel",
+            [](Ctx&, const VV&){ return VV{ ofEnum(settings::autoQualityLevel(), HE::kQualityLevelEnum) }; } });
+
         // Date and time — the WALL clock, unlike the time group. Double pins:
         // at today's epoch a float steps in 128 s, so on a Float pin `now` read
         // up to a minute wrong and `second(now())` was noise.
@@ -8502,6 +8514,8 @@ const std::vector<ApiFn>& registry()
             { "settings.engine", "Get Engine Settings" },
             { "settings.qualityLevel", "Get Quality Level" }, { "settings.setQualityLevel", "Set Quality Level" },
             { "settings.qualityOf", "Get Quality Of" },       { "settings.setQualityOf", "Set Quality Of" },
+            { "settings.autoQuality", "Get Auto Quality" },   { "settings.setAutoQuality", "Set Auto Quality" },
+            { "settings.autoQualityLevel", "Get Auto Quality Level" },
             { "datetime.now", "Now" }, { "datetime.format", "Format Time" },
             { "datetime.year", "Year" }, { "datetime.month", "Month" }, { "datetime.day", "Day" },
             { "datetime.hour", "Hour" }, { "datetime.minute", "Minute" },

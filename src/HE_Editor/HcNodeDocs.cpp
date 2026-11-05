@@ -1090,6 +1090,21 @@ namespace
 	  "Settings: move one area to Low, Medium, High or Ultra, or everything with "
 	  "Overall. Custom changes nothing. False for a setting or level that does not "
 	  "exist." },
+	{ "settings.autoQuality",
+	  "Whether the game is moving its quality by itself right now to hold the target "
+	  "frame rate. Off in the editor, and off in a game unless the project or the player "
+	  "turned it on." },
+	{ "settings.setAutoQuality",
+	  "Turn automatic quality on or off. On, the game steps its overall level down when "
+	  "it misses the project's target frame rate for a few seconds and up again after it "
+	  "has been meeting it for a good while, starting from the project's own preset. The "
+	  "player's own preset is dropped (their single values stay); choosing a preset later "
+	  "turns it off again. Save Settings keeps the switch. False in the editor, where it "
+	  "does not run." },
+	{ "settings.autoQualityLevel",
+	  "The level automatic quality has reached, from Low to Ultra, or Custom when it is "
+	  "off. Use it with a Switch on Enum, for example to show the player what the game "
+	  "chose." },
 	{ "settings.qualityFields",
 	  "The names of every graphics regulator Set Quality Value and Get Quality Value "
 	  "accept: anti-aliasing, render scale, SSAO, SSR, global illumination, texture and "

@@ -554,10 +554,10 @@ TEST_CASE("project settings ui: Quality - the first edit starts from the editor'
 	REQUIRE_FALSE(pm.currentProject().settings.graphics.enabled);
 	// With every effect off the bottom of the page is, top to bottom: ambient
 	// occlusion, screen-space reflections, global illumination, GI reflections,
-	// texture quality, material quality.
+	// texture quality, material quality, automatic quality (off: no rows below it).
 	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 4.0f, float(H) - 4.0f);
-	REQUIRE_MESSAGE(items.size() >= 6, "controls found at the end of the Quality page: " << items.size());
-	const Item& ssao = items[items.size() - 6];
+	REQUIRE_MESSAGE(items.size() >= 7, "controls found at the end of the Quality page: " << items.size());
+	const Item& ssao = items[items.size() - 7];
 	REQUIRE(bits.config.SSAOEnabled);       // on by default: the click turns it off
 
 	clickAt(ctx, kPageX + 8.0f, ssao.mid);
