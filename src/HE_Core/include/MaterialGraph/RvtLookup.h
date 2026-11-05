@@ -11,6 +11,7 @@
 //   41 heRvtAlbedo   RGBA8 array, one slice per pool slot, sRGB view (the Load returns linear)
 //   42 heRvtNormal   RGBA8 array, world normal * 0.5 + 0.5
 //   43 heRvtSurface  RGBA8 array, R = AO, G = roughness
+//   44..46 heRvtAlbedoC/NormalC/SurfaceC  the same three as block-compressed arrays (Metal only, HE_RVT_COLD), see the entry's bit 23
 //
 // Volume parameters, two vec4 (the node takes them as inputs, normally from Param Vector4 nodes):
 //   A = (originX, originZ, extentM, metersPerTexel at mip 0)
@@ -29,7 +30,14 @@ inline constexpr char kRvtDeclarationsGLSL[] =
     "layout(set = 0, binding = 40) uniform usampler2D heRvtTable;\n"
     "layout(set = 0, binding = 41) uniform sampler2DArray heRvtAlbedo;\n"
     "layout(set = 0, binding = 42) uniform sampler2DArray heRvtNormal;\n"
-    "layout(set = 0, binding = 43) uniform sampler2DArray heRvtSurface;\n";
+    "layout(set = 0, binding = 43) uniform sampler2DArray heRvtSurface;\n"
+    // The cold pool (Thema 333 step 6j): pages that have not changed for a while, block-compressed (ASTC on Metal), read with the
+    // sampler's own bilinear. Declared only where a backend defines HE_RVT_COLD (Metal); the table entry's bit 23 says "cold".
+    "#ifdef HE_RVT_COLD\n"
+    "layout(set = 0, binding = 44) uniform sampler2DArray heRvtAlbedoC;\n"
+    "layout(set = 0, binding = 45) uniform sampler2DArray heRvtNormalC;\n"
+    "layout(set = 0, binding = 46) uniform sampler2DArray heRvtSurfaceC;\n"
+    "#endif\n";
 
 // Needs derivatives (dFdx/dFdy): a fragment function. `valid` is 0 where nothing can be shown (outside the volume, no page
 // table yet); the outputs are then neutral and the caller decides what to do (the node exposes `valid`).
@@ -51,7 +59,7 @@ inline constexpr char kRvtLookupGLSL[] =
     "    ivec2 pg = clamp(ivec2(uv * float(pps)), ivec2(0), ivec2(pps - 1));\n"
     "    uint e = texelFetch(heRvtTable, pg, mip).r;\n"
     "    if (e == 0xFFFFFFFFu) return;\n"
-    "    int slot = int(e & 0xFFFFFFu);\n"
+    "    int slot = int(e & 0x7FFFFFu);   // bit 23: the page is in the cold pool (HE_RVT_COLD backends only)\n"
     "    int eff  = int(e >> 24);\n"
     "    // The page that actually holds the picture may be a coarser one (the table's fallback): redo the page cell at ITS mip.\n"
     "    int ppsE = max(pps0 >> eff, 1);\n"
@@ -70,6 +78,19 @@ inline constexpr char kRvtLookupGLSL[] =
     "    vec2 f = p - vec2(i0);\n"
     "    int hi = int(ps + 2.0 * bd + 0.5) - 1;\n"
     "    ivec2 a = clamp(i0, ivec2(0), ivec2(hi)), b = clamp(i0 + ivec2(1), ivec2(0), ivec2(hi));\n"
+    "#ifdef HE_RVT_COLD\n"
+    "    if ((e & 0x800000u) != 0u)\n"
+    "    {\n"
+    "        // The cold page: same position p (texel centres at whole numbers, already clamped to the payload), three bilinear samples.\n"
+    "        vec3 cuv = vec3((p + 0.5) / float(hi + 1), float(slot));\n"
+    "        base = textureLod(heRvtAlbedoC, cuv, 0.0).rgb;\n"
+    "        vec3 cn = textureLod(heRvtNormalC, cuv, 0.0).xyz * 2.0 - 1.0;\n"
+    "        nrm = cn / max(length(cn), 1e-4);\n"
+    "        vec2 cs = textureLod(heRvtSurfaceC, cuv, 0.0).rg;\n"
+    "        ao = cs.x; rough = cs.y; valid = 1.0;\n"
+    "        return;\n"
+    "    }\n"
+    "#endif\n"
     "    vec4 c00 = texelFetch(heRvtAlbedo, ivec3(a.x, a.y, slot), 0), c10 = texelFetch(heRvtAlbedo, ivec3(b.x, a.y, slot), 0);\n"
     "    vec4 c01 = texelFetch(heRvtAlbedo, ivec3(a.x, b.y, slot), 0), c11 = texelFetch(heRvtAlbedo, ivec3(b.x, b.y, slot), 0);\n"
     "    base = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y).rgb;\n"

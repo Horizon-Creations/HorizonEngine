@@ -102,6 +102,15 @@ TEST_CASE("RVT node: the MSL reads the table and the pool as textures 17..20 and
 	CHECK(msl.find("heRvtAlbedo [[texture(18)]]") != std::string::npos);
 	CHECK(msl.find("heRvtNormal [[texture(19)]]") != std::string::npos);
 	CHECK(msl.find("heRvtSurface [[texture(20)]]") != std::string::npos);
+	// The cold pool's block-compressed arrays (step 6j): textures 21..23, sampled (inline sampler), selected by the table entry's bit 23.
+	const char* coldEnv = std::getenv("HE_RVT_COLD");
+	if (!(coldEnv && *coldEnv == '0'))
+	{
+		CHECK(msl.find("heRvtAlbedoC [[texture(21)]]") != std::string::npos);
+		CHECK(msl.find("heRvtNormalC [[texture(22)]]") != std::string::npos);
+		CHECK(msl.find("heRvtSurfaceC [[texture(23)]]") != std::string::npos);
+		CHECK(msl.find("heRvtAlbedoC.sample(") != std::string::npos);
+	}
 	// Fetch only (.read), and no [[sampler(n)]] with n >= 16 anywhere: an inline constexpr sampler stands in for the four.
 	CHECK(msl.find("heRvtTable.read(") != std::string::npos);
 	CHECK(msl.find("heRvtAlbedo.read(") != std::string::npos);
