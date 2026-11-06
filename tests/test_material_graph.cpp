@@ -4904,8 +4904,8 @@ std::vector<VkUse> activeVkDescriptors(const std::vector<uint32_t>& spirv, std::
 		add(r.uniform_buffers, static_cast<int>(K::UniformBuffer));
 		add(r.sampled_images,  static_cast<int>(K::CombinedImageSampler));
 		add(r.storage_buffers, static_cast<int>(K::StorageBuffer));
-		add(r.separate_images,   -1);
-		add(r.separate_samplers, -1);
+		add(r.separate_images,   static_cast<int>(K::SampledImage));
+		add(r.separate_samplers, static_cast<int>(K::Sampler));
 		add(r.storage_images,    -1);
 	}
 	catch (const std::exception& e)
@@ -5072,20 +5072,29 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
-	// The device limit: 16 fragment samplers WITH the row — the spec minimum, and MoltenVK's hard
-	// per-stage limit (a Mac reported 16 and lost the row to the fallback while heCloudShadow, binding
-	// 33, still counted: every layer-blend terrain drew white). 15 without it, the fallback for a
-	// device below the minimum. The reflection loop below is what keeps binding 33 out of the
-	// SPIR-V: a shader still declaring it would be a use outside this layout.
-	CHECK(HE::vkmat::fragmentSamplerCount(true) == 16);
-	CHECK(HE::vkmat::fragmentSamplerCount(false) == 15);
-	CHECK(HE::vkmat::landscapeWeightsFit(16, 16));
-	CHECK(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
-	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(15, 15));
+	// The device limits. The fixed textures are plain sampled images read through TWO shared
+	// samplers (Unreal's "Shared: Clamp"), so the fragment stage holds 8 SAMPLERS with the row
+	// (heTex0, heTexP0..3, heLandscapeWeights, the two shared ones) and 17 images. As combined
+	// descriptors it was 17 samplers: one over the spec minimum and MoltenVK's hard limit of 16,
+	// where a Mac lost the row to the fallback and every layer-blend terrain drew white.
+	CHECK(HE::vkmat::fragmentSamplerCount(true) == 8);
+	CHECK(HE::vkmat::fragmentSamplerCount(false) == 7);
+	CHECK(HE::vkmat::fragmentImageCount(true) == 17);
+	CHECK(HE::vkmat::fragmentImageCount(false) == 16);
+	CHECK(HE::vkmat::landscapeWeightsFit(16, 256));          // MoltenVK
+	CHECK(HE::vkmat::landscapeWeightsFit(8, 17));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));      // a device at the image minimum: fallback
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(7, 256));
 	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	// The SPIR-V flavour reads the fixed textures through the shared samplers and no combined
+	// sampler stands in for them: the reflection loop below fails on a shader that declares one.
 	for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
-		CHECK(HE::vkmat::kBindings[i].binding != 33);
+	{
+		const auto& r = HE::vkmat::kBindings[i];
+		if (r.binding == 10 || r.binding == 11 || r.binding == 12 || r.binding == 13 || r.binding == 15
+		    || r.binding == 16 || r.binding == 17 || r.binding == 18 || (r.binding >= 31 && r.binding <= 33))
+			CHECK(r.kind == DescKind::SampledImage);
+	}
 
 	int landscapeCases = 0;
 	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
@@ -5190,8 +5199,9 @@ TEST_CASE("Vulkan: the deferred resolve's set layout covers both resolve variant
 		if (vm::kResolveBindings[i].kind == DescKind::CombinedImageSampler
 		    && (vm::kResolveBindings[i].stages & vm::kStageFragment))
 			++fragSamplers;
-	CHECK(fragSamplers == 14);
-	CHECK(fragSamplers <= 16);
+	CHECK(fragSamplers == 4);   // the G-buffer; the fixed textures are images behind two shared samplers
+	CHECK(vm::resolveCountOf(DescKind::Sampler) + fragSamplers <= 16);
+	CHECK(fragSamplers + vm::resolveCountOf(DescKind::SampledImage) <= 16); // images: inside the spec minimum too
 
 	// Both variants, reflected.
 	const auto& plain = lib.deferredResolve(B::SpirV);

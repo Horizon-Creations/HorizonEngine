@@ -280,22 +280,58 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
 // visibility (one channel per the first 4 point/spot lights). Bindings 10/11 —
 // 8/9 belong to the WPO custom vertex's UBOs (wpoDeclarations). Bound to 1x1
 // white when GI is off; heLight.giParams.z additionally gates the samples.
+// Vulkan (Backend::SpirV) declares the fixed textures below as plain sampled images and
+// reads them through TWO shared samplers, the way an Unreal material's "Shared: Clamp"
+// sampler source works: the per-stage limit is 16 SAMPLERS (all MoltenVK allows, and the
+// spec minimum) but 128-256 sampled images, so eleven textures cost two sampler slots instead
+// of eleven. The #define keeps every call site (texture/texelFetch/textureSize) unchanged.
+// Other backends keep the combined declarations: Metal inlines its samplers, D3D has its
+// own pin tables.
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 34) uniform sampler heSampLinear; // linear, clamp-to-edge
+layout(set = 0, binding = 35) uniform sampler heSampShadow; // nearest, clamp-to-border (white = lit)
+#endif
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 10) uniform texture2D heGIShadow_t;
+#define heGIShadow sampler2D(heGIShadow_t, heSampLinear)
+#else
 layout(set = 0, binding = 10) uniform sampler2D heGIShadow;
+#endif
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 11) uniform texture2D heGILocal_t;
+#define heGILocal sampler2D(heGILocal_t, heSampLinear)
+#else
 layout(set = 0, binding = 11) uniform sampler2D heGILocal;
+#endif
 // CSM depth array (binding 12): the SAME cascade shadow map the built-in PBR
 // shaders sample, so graph materials are shadowed identically when GI is off.
 // Backends without a cascade array bind a dummy and keep csmSplits.w = 0.
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 12) uniform texture2DArray heCsm_t;
+#define heCsm sampler2DArray(heCsm_t, heSampShadow)
+#else
 layout(set = 0, binding = 12) uniform sampler2DArray heCsm;
+#endif
 // Local (point/spot) shadow atlas (binding 13): the SAME 16-layer depth array
 // the built-in PBR shaders sample. A light's base layer is lightParams[i].y-1
 // (0 = no shadow), so unfilled Lighting blocks never sample this.
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 13) uniform texture2DArray heLocalShadow_t;
+#define heLocalShadow sampler2DArray(heLocalShadow_t, heSampShadow)
+#else
 layout(set = 0, binding = 13) uniform sampler2DArray heLocalShadow;
+#endif
 // Procedural sky environment cubemap (binding 15 — 14 is the landscape
 // weightmap): the SAME prefiltered sky the built-in PBR shaders use for
 // image-based ambient. Graph materials had only a flat ambient constant, so
 // they never picked up sky colour or reflections and read visibly "deader"
 // than a built-in material beside them. heLight.fog.z gates the samples.
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 15) uniform textureCube heSkyEnv_t;
+#define heSkyEnv samplerCube(heSkyEnv_t, heSampLinear)
+#else
 layout(set = 0, binding = 15) uniform samplerCube heSkyEnv;
+#endif
 // Screen-space ambient occlusion result (binding 16), the same SSAO/HBAO/GTAO
 // buffer the built-in shaders read. Gated by heLight.fog.w. Read with
 // texelFetch, NOT texture(): the buffer is viewport-sized on every backend and
@@ -303,22 +339,47 @@ layout(set = 0, binding = 15) uniform samplerCube heSkyEnv;
 // fragment is the same value either way — but a fetch needs no sampler, and
 // that is what frees the SM 5.0 sampler register heLandscapeWeights sits on
 // (see the HLSL pin table in MaterialShaderLibrary::fragment).
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 16) uniform texture2D heAO_t;
+#define heAO sampler2D(heAO_t, heSampLinear)
+#else
 layout(set = 0, binding = 16) uniform sampler2D heAO;
+#endif
 // ── DDGI probe irradiance ─────────────────────────────────────────────────────
 // Octahedral probe atlases (bindings 17/18): the SAME two textures the built-in
 // PBR shaders sample. Graph materials previously had no probe lookup at all — the
 // ray-traced GI SHADOW reached them, but the indirect BOUNCE (colour bleeding off
 // nearby lit surfaces) did not, so a custom material sat in flat ambient while a
 // built-in one beside it picked up the room.
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 17) uniform texture2D heGIIrradiance_t;
+#define heGIIrradiance sampler2D(heGIIrradiance_t, heSampLinear)
+#else
 layout(set = 0, binding = 17) uniform sampler2D heGIIrradiance;
+#endif
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 18) uniform texture2D heGIVisibility_t;
+#define heGIVisibility sampler2D(heGIVisibility_t, heSampLinear)
+#else
 layout(set = 0, binding = 18) uniform sampler2D heGIVisibility;
+#endif
 // FORWARD-path reflection results (bindings 31/32, Metal material slots 9/10 —
 // the last two free sampler slots after the P0 slot consolidation). The
 // deferred path composites reflections in its own fullscreen pass instead and
 // never sets the gates (ssr.x / giRefl.z); every backend without the feature
 // binds a dummy and the branches fold dead. Sampled per gl_FragCoord like heAO.
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 31) uniform texture2D heSSRFwd_t;
+#define heSSRFwd sampler2D(heSSRFwd_t, heSampLinear)
+#else
 layout(set = 0, binding = 31) uniform sampler2D heSSRFwd;    // rgb radiance, a confidence
+#endif
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 32) uniform texture2D heGIReflFwd_t;
+#define heGIReflFwd sampler2D(heGIReflFwd_t, heSampLinear)
+#else
 layout(set = 0, binding = 32) uniform sampler2D heGIReflFwd; // rgb radiance, a confidence
+#endif
 // Cloud-shadow transmittance map (binding 33): the sky's procedural cloud layer
 // evaluated once per frame over a world-space XZ region around the camera (its
 // own tiny pass in each backend, using the SAME cloud density the sky shader
@@ -326,12 +387,10 @@ layout(set = 0, binding = 32) uniform sampler2D heGIReflFwd; // rgb radiance, a 
 // fragment stage sits at Metal's 16-sampler cap, so this texture deliberately
 // consumes no sampler slot (ShaderCompiler MslOptions::constexprLinearSamplers).
 // GL assigns unit 19 by name. Gated by heLight.cloudShadowB.x (0 = off).
-// Backend::SpirV (Vulkan) injects HE_NO_CLOUD_SHADOW_MAP: it never fills this map (the gate
-// stays 0), and the sampler it would declare is the 17th of the fragment stage, one over the
-// 16 that MoltenVK (and any spec-minimum device) allows per stage. Without the declaration the
-// landscape weightmap fits, and heCloudShadowFactor folds to 1.0, which is what the dead
-// gate gave anyway.
-#ifndef HE_NO_CLOUD_SHADOW_MAP
+#ifdef HE_VK_SHARED_SAMPLERS
+layout(set = 0, binding = 33) uniform texture2D heCloudShadow_t;
+#define heCloudShadow sampler2D(heCloudShadow_t, heSampLinear)
+#else
 layout(set = 0, binding = 33) uniform sampler2D heCloudShadow;
 #endif
 // Signed-octahedral mapping (Meyer et al. 2010), direction -> texel UV. Mirror of
@@ -506,9 +565,6 @@ float heLocalShadowFactor(int i, vec3 worldPos, vec3 n) {
 // SYNC: the same three lines live in the built-in shaders (Metal fragmentMain's
 // cloudShadowFactor, GL kUnlitFS's cloudShadowFactor) — change one, change all.
 float heCloudShadowFactor(vec3 worldPos, vec3 L) {
-#ifdef HE_NO_CLOUD_SHADOW_MAP
-    return 1.0;
-#else
     float s = heLight.cloudShadowB.x;
     if (s <= 0.0 || L.y <= 0.05) return 1.0;
     float t = (heLight.cloudShadowA.w - worldPos.y) / L.y;
@@ -519,7 +575,6 @@ float heCloudShadowFactor(vec3 worldPos, vec3 L) {
     if (edge <= 0.0) return 1.0;
     float T = texture(heCloudShadow, uv).r;
     return mix(1.0, T, s * edge);
-#endif
 }
 // Legacy sun-only shading — kept so precompiled material blobs and hand-written
 // escape-hatch fragments that call heLit() keep working unchanged. Has no
@@ -911,15 +966,15 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
 // #version to be the first token). If the source has none, prepend one.
 // `clustered` defines HE_CLUSTERED ahead of the preamble — the forward
 // clustered-lighting variant (fragmentClustered).
-std::string injectPreamble(const std::string& src, bool clustered = false, bool noCloudShadowMap = false)
+std::string injectPreamble(const std::string& src, bool clustered = false, bool vkSharedSamplers = false)
 {
-    // Four fixed prefixes (clustered x cloud-shadow map), built once.
+    // Four fixed prefixes (clustered x Vulkan shared samplers), built once.
     static const std::string kPres[4] = {
         std::string(kLightingPreamble),
         std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble,
-        std::string("#define HE_NO_CLOUD_SHADOW_MAP 1\n") + kLightingPreamble,
-        std::string("#define HE_CLUSTERED 1\n#define HE_NO_CLOUD_SHADOW_MAP 1\n") + kLightingPreamble };
-    const std::string& pre = kPres[(clustered ? 1 : 0) + (noCloudShadowMap ? 2 : 0)];
+        std::string("#define HE_VK_SHARED_SAMPLERS 1\n") + kLightingPreamble,
+        std::string("#define HE_CLUSTERED 1\n#define HE_VK_SHARED_SAMPLERS 1\n") + kLightingPreamble };
+    const std::string& pre = kPres[(clustered ? 1 : 0) + (vkSharedSamplers ? 2 : 0)];
     const size_t vpos = src.find("#version");
     if (vpos == std::string::npos)
         return std::string("#version 450\n") + pre + src;

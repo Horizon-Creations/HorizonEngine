@@ -3000,6 +3000,8 @@ void VulkanRenderer::createMaterialResources()
         case HE::vkmat::DescKind::UniformBuffer:        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         case HE::vkmat::DescKind::CombinedImageSampler: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         case HE::vkmat::DescKind::StorageBuffer:        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case HE::vkmat::DescKind::SampledImage:         return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case HE::vkmat::DescKind::Sampler:              return VK_DESCRIPTOR_TYPE_SAMPLER;
         }
         return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     };
@@ -3022,11 +3024,12 @@ void VulkanRenderer::createMaterialResources()
             maxImages   = std::min(maxImages, n);
         }
         m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
-        char line[384];
+        char line[448];
         std::snprintf(line, sizeof line,
-            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
+            "VulkanRenderer: material set 0 needs %u fragment samplers + %u sampled images (%u + %u without heLandscapeWeights); "
             "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s",
-            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
+            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentImageCount(true),
+            HE::vkmat::fragmentSamplerCount(false), HE::vkmat::fragmentImageCount(false),
             maxSamplers, maxImages, (cap && *cap) ? " (capped by HE_VK_MAX_STAGE_SAMPLERS)" : "",
             m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
         if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
@@ -3092,15 +3095,17 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::DescKind;
         using HE::vkmat::countOf;
         static_assert(HE::vkmat::dynamicCount() == HE::vkmat::kDynamicOffsetCount, "bindings 1, 3, 9");
-        VkDescriptorPoolSize ps[4] = {
+        VkDescriptorPoolSize ps[6] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         (countOf(DescKind::UniformBuffer) - HE::vkmat::dynamicCount()) * k_matMaxDraws }, // b0,b8
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, HE::vkmat::dynamicCount()                       * k_matMaxDraws }, // b1,b3,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b14
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          countOf(DescKind::SampledImage)         * k_matMaxDraws }, // b10-b13,b15-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_SAMPLER,                countOf(DescKind::Sampler)              * k_matMaxDraws }, // b34,b35 (the shared samplers)
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
-        dpci.poolSizeCount = 4;
+        dpci.poolSizeCount = 6;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
@@ -4741,6 +4746,8 @@ bool VulkanRenderer::createDeferredPipelines()
             case HE::vkmat::DescKind::UniformBuffer:        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             case HE::vkmat::DescKind::CombinedImageSampler: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             case HE::vkmat::DescKind::StorageBuffer:        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case HE::vkmat::DescKind::SampledImage:         return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case HE::vkmat::DescKind::Sampler:              return VK_DESCRIPTOR_TYPE_SAMPLER;
             }
             return VK_DESCRIPTOR_TYPE_MAX_ENUM;
         };
@@ -4764,14 +4771,16 @@ bool VulkanRenderer::createDeferredPipelines()
             return fail("resolve pipeline layout failed");
         using HE::vkmat::DescKind;
         using HE::vkmat::resolveCountOf;
-        const VkDescriptorPoolSize ps[3] = {
+        const VkDescriptorPoolSize ps[5] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         resolveCountOf(DescKind::UniformBuffer)        * k_maxFramesInFlight },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, resolveCountOf(DescKind::CombinedImageSampler) * k_maxFramesInFlight },
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          resolveCountOf(DescKind::SampledImage)         * k_maxFramesInFlight },
+            { VK_DESCRIPTOR_TYPE_SAMPLER,                resolveCountOf(DescKind::Sampler)              * k_maxFramesInFlight },
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         resolveCountOf(DescKind::StorageBuffer)        * k_maxFramesInFlight },
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_maxFramesInFlight;
-        dpci.poolSizeCount = 3;
+        dpci.poolSizeCount = 5;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_resolvePool) != VK_SUCCESS)
             return fail("resolve descriptor pool failed");
@@ -9609,12 +9618,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo giSunII{ m_albedoSampler,
                                 (m_giRanThisFrame && m_giResult.view) ? m_giResult.view : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giSunII);
+                            wr(10, 10, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giSunII);
                             VkDescriptorImageInfo giLocalII{ m_albedoSampler,
                                 (m_giRanThisFrame && m_giLocalMask.view) ? m_giLocalMask.view : m_whiteAlbedoView,
                                 (m_giRanThisFrame && m_giLocalMask.view) ? VK_IMAGE_LAYOUT_GENERAL
                                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giLocalII);
+                            wr(11, 11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giLocalII);
                             // heCsm (binding 12, sampler2DArray): the cascade shadow array
                             // the built-in scene shader samples at binding 1, through the
                             // same nearest/clamp sampler (PCF taps compare single texels).
@@ -9625,7 +9634,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 (m_shadowView && m_shadowLayoutValid) ? m_shadowSampler : m_albedoSampler,
                                 (m_shadowView && m_shadowLayoutValid) ? m_shadowView    : m_whiteArrayView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
+                            wr(12, 12, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &csmII);
                             // heSSRFwd (binding 31): the SAME image the built-in
                             // shaders read at scene binding 8, so a graph
                             // material and a built-in one next to each other
@@ -9636,7 +9645,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 (m_ssrRanThisFrame && m_ssrResultView) ? m_ssrResultView
                                     : (m_ssrBlackRT.view ? m_ssrBlackRT.view : m_whiteAlbedoView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(13, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &ssrII);
+                            wr(13, 31, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &ssrII);
                             // heLocalShadow (binding 13, sampler2DArray): the local
                             // (point/spot) atlas, same nearest/clamp sampler as heCsm.
                             // The white ARRAY view stands in until the atlas was
@@ -9645,7 +9654,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 localShadows ? m_shadowSampler   : m_albedoSampler,
                                 localShadows ? m_localShadowView : m_whiteArrayView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &localII);
+                            wr(14, 13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &localII);
                             // heSkyEnv (15): the baked sky cube once updateSkyEnvCube
                             // filled it (fog.z = 1 exactly then), the white cube before.
                             // Linear-CLAMP like GL/Metal's cube sampler; the repeat
@@ -9659,7 +9668,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                         : (m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler),
                                 realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
+                            wr(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &skyII);
                             // heAO (16): this frame's blurred SSAO — the image the
                             // built-in shader reads at scene binding 3, parked in
                             // SHADER_READ_ONLY by the blur pass's finalLayout. White
@@ -9669,7 +9678,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 m_ssaoRanThisFrame ? m_ssaoSampler      : m_albedoSampler,
                                 m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &aoII);
                             // heGIIrradiance / heGIVisibility (17/18): the probe atlases
                             // under matGiProbes (the gate FillMaterialGIProbe raised), in
                             // GENERAL like everywhere else they are sampled; white
@@ -9682,8 +9691,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo giVisII{ giAtlasSampler,
                                 matGiProbes ? m_giVisAtlas.view : m_whiteAlbedoView,
                                 matGiProbes ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giIrrII);
-                            wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giVisII);
+                            wr(17, 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giIrrII);
+                            wr(18, 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giVisII);
                             // heGIReflFwd (32): this frame's reflection result (frameMatLight
                             // carries giRefl.z from the same m_giReflReady), white otherwise —
                             // mirrors heSSRFwd's binding-8 pattern above. (heCloudShadow, 33,
@@ -9691,7 +9700,21 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo giReflII{ giAtlasSampler,
                                 m_giReflReady ? m_giReflFinal.view : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(19, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giReflII);
+                            wr(19, 32, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giReflII);
+                            // heCloudShadow (33): white, its gate (cloudShadowB.x) stays 0 here.
+                            const VkDescriptorImageInfo cloudII{ VK_NULL_HANDLE, m_whiteAlbedoView,
+                                                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(20, 33, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &cloudII);
+                            // The two shared samplers every SampledImage above is read through
+                            // (VulkanMaterialLayout.h): linear/clamp (the SSAO sampler) and
+                            // nearest/clamp-to-white-border (the shadow sampler). A sampler
+                            // descriptor carries no view.
+                            const VkDescriptorImageInfo sampLinII{
+                                m_ssaoSampler ? m_ssaoSampler : m_albedoSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                            const VkDescriptorImageInfo sampShII{
+                                m_shadowSampler ? m_shadowSampler : m_albedoSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                            wr(21, HE::vkmat::kSamplerLinearBinding, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampLinII);
+                            wr(22, HE::vkmat::kSamplerShadowBinding, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampShII);
                             // fragmentClustered's light lists (bindings 24..26, Thema
                             // 117): this frame slot's cluster SSBOs, the very buffers
                             // the built-in shader reads at scene bindings 10..12. Written
@@ -9703,8 +9726,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
                             // repeating sampler would bleed the far edge's paint in).
                             // Only when the layout has the row (m_matLandscapeWeights).
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 21,
-                                          "fixed writes w[0..19] + w[20] heLandscapeWeights, one per non-cluster row");
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 24,
+                                          "fixed writes w[0..22] + w[23] heLandscapeWeights, one per non-cluster row");
                             uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
                             VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
                                                              heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -10117,23 +10140,33 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 };
                 constexpr VkDescriptorType kUbo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                 constexpr VkDescriptorType kCis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                constexpr VkDescriptorType kImg = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                constexpr VkDescriptorType kSmp = VK_DESCRIPTOR_TYPE_SAMPLER;
                 wr( 0, kUbo, &lightBI, nullptr);
-                wr(10, kCis, nullptr, &giSunII);
-                wr(11, kCis, nullptr, &giLocalII);
-                wr(12, kCis, nullptr, &csmII);
-                wr(13, kCis, nullptr, &localII);
-                wr(15, kCis, nullptr, &skyII);
-                wr(16, kCis, nullptr, &aoII);
-                wr(17, kCis, nullptr, &giIrrII);
-                wr(18, kCis, nullptr, &giVisII);
+                wr(10, kImg, nullptr, &giSunII);
+                wr(11, kImg, nullptr, &giLocalII);
+                wr(12, kImg, nullptr, &csmII);
+                wr(13, kImg, nullptr, &localII);
+                wr(15, kImg, nullptr, &skyII);
+                wr(16, kImg, nullptr, &aoII);
+                wr(17, kImg, nullptr, &giIrrII);
+                wr(18, kImg, nullptr, &giVisII);
                 wr(HE::vkmat::kResolveGB0Binding,   kCis, nullptr, &gbII[0]);
                 wr(HE::vkmat::kResolveGB1Binding,   kCis, nullptr, &gbII[1]);
                 wr(HE::vkmat::kResolveGB2Binding,   kCis, nullptr, &gbII[2]);
                 wr(HE::vkmat::kResolveDepthBinding, kCis, nullptr, &gbII[3]);
                 wr(HE::vkmat::kResolveUboBinding,   kUbo, &uboBI, nullptr);
-                wr(31, kCis, nullptr, &ssrII);
-                wr(32, kCis, nullptr, &giReflII); // heGIReflFwd (frameMatLight carries giRefl.z)
-                static_assert(HE::vkmat::kResolvePreClusterBindingCount == 16,
+                wr(31, kImg, nullptr, &ssrII);
+                wr(32, kImg, nullptr, &giReflII); // heGIReflFwd (frameMatLight carries giRefl.z)
+                const VkDescriptorImageInfo cloudII{ VK_NULL_HANDLE, m_whiteAlbedoView,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                wr(33, kImg, nullptr, &cloudII); // heCloudShadow: cloudShadowB.x stays 0
+                const VkDescriptorImageInfo sampLinII{ clampSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                const VkDescriptorImageInfo sampShII{ m_shadowSampler ? m_shadowSampler : m_albedoSampler,
+                                                      VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                wr(HE::vkmat::kSamplerLinearBinding, kSmp, nullptr, &sampLinII);
+                wr(HE::vkmat::kSamplerShadowBinding, kSmp, nullptr, &sampShII);
+                static_assert(HE::vkmat::kResolvePreClusterBindingCount == 19,
                               "one fixed write per non-cluster row of kResolveBindings");
                 // The lists whenever they exist — the clustered resolve uses them
                 // statically, the 8-light one ignores them.

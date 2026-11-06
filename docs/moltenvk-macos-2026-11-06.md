@@ -44,24 +44,37 @@ cmake -S . -B out/build/release -DHE_ENABLE_MOLTENVK=ON      # -DHE_MOLTENVK_ROO
   against 7.7 on Metal, so the material quality lane and the other Low settings reach Vulkan.
 * Full `ctest`: 365/365.
 
-## The 17th sampler (fixed)
+## The 17th sampler: shared samplers (fixed)
 
 MoltenVK reports `maxPerStageDescriptorSamplers = 16` (`sampledImages 256`), with or without
 `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS` (probed; `updateAfterBindSamplers` is 500000). The material set
-needed 17, so `heLandscapeWeights` was left out ("layer-blend materials draw built-in") and the Catania terrain
-drew white. Any 16-sampler GPU would have shown this.
+needed 17 combined image samplers, so `heLandscapeWeights` was left out ("layer-blend materials draw
+built-in") and the Catania terrain drew white. Any 16-sampler GPU would have shown this.
 
-Fix: the 17th was `heCloudShadow` (binding 33), a sampler Vulkan never reads: nothing fills the cloud-shadow
-map there (only Metal and OpenGL have the 512² pass; D3D11/D3D12/Vulkan bind white and the gate
-`cloudShadowB.x` stays 0). The `Backend::SpirV` flavour of the lighting preamble now defines
-`HE_NO_CLOUD_SHADOW_MAP`: no declaration, `heCloudShadowFactor` returns 1.0. Binding 33 is gone from
-`kBindings` and `kResolveBindings` (`VulkanMaterialLayout.h`), the two white writes are gone from
-`VulkanRenderer.cpp`, the material set has 16 fragment samplers with `heLandscapeWeights`. Metal, GL and D3D
-read the same preamble without the define: unchanged. Tests: `test_material_graph` counts (16/15, resolve 14)
-and "binding 33 is not in the table"; the reflection loop fails on any SPIR-V that still declares it.
+Fix, the way an Unreal material's "Shared: Clamp" sampler source works: texture and sampler are separate
+descriptors, so the limit that bites (samplers, 16) only counts the distinct samplers, not the textures
+(images, 128-256).
 
-**Cost of this:** the material set is now at 16 of 16 on Vulkan. Cloud shadows on Vulkan need a sampler
-again, so adding them means freeing another one (or moving the maps to a different set).
+* The `Backend::SpirV` flavour of the lighting preamble (`HE_VK_SHARED_SAMPLERS`, `injectPreamble`) declares the
+  eleven fixed textures (bindings 10-13, 15-18, 31-33: GI masks, CSM, local shadows, sky cube, AO, DDGI atlases,
+  SSR, GI reflections, cloud shadow) as `texture2D` / `texture2DArray` / `textureCube` plus two samplers,
+  `heSampLinear` (34: linear, clamp-to-edge) and `heSampShadow` (35: nearest, clamp-to-white-border), and
+  `#define heAO sampler2D(heAO_t, heSampLinear)` etc., so no call site changes. Metal, GL and D3D read the
+  same preamble without the define.
+* `VulkanMaterialLayout.h`: `DescKind::SampledImage` / `Sampler`; the fixed rows are images, 34/35 are the
+  samplers (both set tables). Fragment stage of the material set: 8 samplers (heTex0, heTexP0..3,
+  heLandscapeWeights, the two shared ones) and 17 images; resolve set 6 and 15. `landscapeWeightsFit` now
+  checks images and samplers separately (a device at the image minimum of 16 still gets the fallback).
+* `VulkanRenderer.cpp`: pools and layouts take the two new types, the fixed writes are SAMPLED_IMAGE, two
+  SAMPLER writes (SSAO sampler, shadow sampler) per set. heCloudShadow is back (a white image).
+* heTex0 / heTexP0..3 / heLandscapeWeights stay combined: their sampler is the texture's own (wrap mode).
+  A per-texture "Sampler Source" option on the Texture Sample node (Texture / Shared Wrap / Shared Clamp)
+  would be the user-facing half of this; not built.
+
+Verified: Catania on Vulkan before vs after the change: mean pixel difference 0.10 of 255 (High) and 0.09
+(Low preset), 0.001% of pixels over 40; against Metal still 4.4. Game run 240 frames, 0 errors. Tests:
+`test_material_graph` / `test_engine_materials` / `test_material_tessellation` reflect separate images and
+samplers now (the reflection loops fail on any shader that declares a fixed texture combined).
 
 ## Handoff
 
