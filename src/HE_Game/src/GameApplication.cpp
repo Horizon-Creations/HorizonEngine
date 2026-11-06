@@ -52,6 +52,7 @@
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
 #include <HorizonScene/FloatingOrigin.h>
 #include <HorizonScene/LandscapeExport.h>      // resolveLandscapePacks: the exported pack path is relative to the data folder
+#include <HorizonScene/LandscapeCellRegions.h> // the region gate for the entity cells of a tile landscape
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -1685,6 +1686,15 @@ void GameApplication::updateLandscape(float dt)
 	// An exported scene names its pack relative to the data folder (LandscapeExport.h); the runtime opens a path as it is.
 	if (m_world) HE::resolveLandscapePacks(*m_world, HE::GameLayout::dataDir());
 	m_landscape.update(*m_world, dt);
+	// The entity cells follow the landscape's residency: their region gate takes the tile size and the store's radii, and is off again for a
+	// scene without a tile landscape (the streamer keeps its config across scenes).
+	{
+		HE::CellRegionConfig want;
+		if (m_landscape.active() && m_cellRuntime.active())
+			want = HE::cellRegionConfigForLandscape(m_cellRuntime.streamer().manifest(), m_landscape.quadtree().tileM,
+			                                        m_landscape.config().store.loadRadius, m_landscape.config().store.keepFactor);
+		if (!HE::sameRegionConfig(want, m_cellRuntime.streamer().regionConfig())) m_cellRuntime.streamer().setRegionConfig(want);
+	}
 	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
 	// Entity cells that are not built yet (or any more) stand in as their baked proxy while the pack has one; the cell streamer ran
 	// the frame before, so this reads what it holds.

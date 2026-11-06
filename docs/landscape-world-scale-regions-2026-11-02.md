@@ -182,7 +182,9 @@ Tests: `test_landscape_export.cpp` (scene renamed, proxies in the copy and the p
 
 **Not verified:** a real export from the editor GUI (the editor and game were built, the path was only driven through the functions above); the exported game opening the shipped pack and drawing proxies on a screen; macOS `.app` bundle layout (data dir = `Contents/Resources`, covered by the same `ctx.dataDir` as the other loose files, not run). Cells are found as the scene's manifest `dir` under the project root, as the editor writes them.
 
-**Not done (rest):** (2) `CellRegionConfig` is still not set from the landscape's region size. (3) The table pass costs O(table cells) every 4th frame, fine for thousands, not measured for a 100 km world with tens of thousands. (4) Proxies have no colour (default material) and no tree impostors. (5) Nothing was looked at on a screen.
+**Region gate wired (06.11.2026):** `LandscapeCellRegions.h` `cellRegionConfigForLandscape` (region = 4 tiles a side rounded to whole cells, i.e. 2000 m for 512 m tiles and 100 m cells; load radius and keep factor are the landscape store's). `GameApplication::updateLandscape` sets it when a landscape and cell streaming are both active and switches it off for a scene without one. It is a **cap**: a manifest whose radii lie inside the landscape's loads exactly as before; it only bites for a manifest or a pin that reaches farther than the landscape holds tiles. Test: `test_landscape_cell_regions.cpp`. The editor does not stream cells, so it is not wired there.
+
+**Not done (rest):** (3) The table pass costs O(table cells) every 4th frame, fine for thousands, not measured for a 100 km world with tens of thousands. (4) Proxies have no colour (default material) and no tree impostors. (5) Nothing was looked at on a screen.
 
 ## Handoff
 
