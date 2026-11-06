@@ -23,6 +23,7 @@
 #include <memory>
 #include <functional>
 #include <Diagnostics/Logger.h>
+#include <Backends/Vulkan/VulkanLandscape.h> // the world-scale landscape (Thema 326)
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
 #include <HorizonRendering/ClipSpace.h>
 #include <HorizonRendering/GiCasterRange.h>
@@ -252,6 +253,9 @@ void VulkanRenderer::Shutdown()
     m_imguiTextures.clear();
     // Before the render passes its framebuffers were made against go.
     destroyWorldPreview();
+    if (m_landscape) { m_landscape->shutdown(); m_landscape.reset(); }   // its images and pipelines, before the device and the passes go
+    m_landscapeFrame = HE::LandscapeRenderFrame{};
+    m_landscapeFrameLive = false;
     destroySkyPipeline();
     destroyDebugLinePipeline();
     destroyRibbonMeshes();
@@ -1462,12 +1466,33 @@ void VulkanRenderer::createInstance()
     m_instanceApiVersion = loaderVersion >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2
                                                                : VK_API_VERSION_1_0;
 
+    // MoltenVK (macOS) is a "portability" driver: a Khronos loader >= 1.3.216 hides such a driver
+    // (vkCreateInstance -> VK_ERROR_INCOMPATIBLE_DRIVER, no device) unless the instance asks for
+    // enumeration of them. Only when the loader offers the extension, so Windows/Linux are untouched.
+    VkInstanceCreateFlags instanceFlags = 0;
+    {
+        uint32_t en = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+        std::vector<VkExtensionProperties> eprops(en);
+        if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, eprops.data());
+        for (const auto& e : eprops)
+            if (std::strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
+            {
+                const bool listed = std::any_of(exts.begin(), exts.end(), [](const char* n) {
+                    return std::strcmp(n, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; });
+                if (!listed) exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                break;
+            }
+    }
+
     VkApplicationInfo appInfo{};
     appInfo.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "HorizonEngine";
     appInfo.apiVersion       = m_instanceApiVersion;
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.flags                   = instanceFlags;
     ci.pApplicationInfo        = &appInfo;
     ci.enabledExtensionCount   = static_cast<uint32_t>(exts.size());
     ci.ppEnabledExtensionNames = exts.data();
@@ -1644,6 +1669,17 @@ void VulkanRenderer::createDevice()
             ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
             : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "
               "displacement materials draw untessellated");
+    }
+
+    // A portability device (MoltenVK) must have VK_KHR_portability_subset enabled when it advertises it.
+    {
+        uint32_t n = 0;
+        vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> props(n);
+        if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, props.data());
+        for (const auto& e : props)
+            if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
+            { devExts.push_back("VK_KHR_portability_subset"); break; }
     }
 
     VkDeviceCreateInfo dci{};
@@ -8837,6 +8873,74 @@ uint32_t VulkanRenderer::pushSceneMaterial(const void* data, size_t bytes)
     return m_sceneMatOffset;
 }
 
+// ── World-scale landscape (Thema 326, step 2 part B) ────────────────────────────────────────────────
+// Asks the application's provider for the frame of the camera this scene pass rasterises, starts the landscape on first use and has the frame's
+// uploads recorded into the upload batch (a command buffer of its own, submitted before the frame's: a copy cannot be recorded inside the scene's
+// render pass). A frame the runtime built has to be executed whether or not the scene has objects: the runtime counts its uploads as done.
+void VulkanRenderer::landscapeBegin(uint32_t /*width*/, uint32_t /*height*/)
+{
+    m_landscapeFrameLive = false;
+    if (!m_landscapeProvider || m_landscapeFailed) return;
+    m_landscapeFrame = HE::LandscapeRenderFrame{};
+    // The matrix the scene draws are rasterised with: Vulkan clip space (y down, depth 0..1), jittered on a TAA frame. Unlike D3D and Metal, whose scene
+    // passes rasterise the plain GL matrix, this backend's depth is the real 0..1 depth, so the landscape needs no near-plane caveat.
+    m_landscapeViewProj = taaJittered(HE::kVulkanClipFix * m_renderWorld.camera.projection * m_renderWorld.camera.view);
+    m_landscapeProvider(glm::dmat4(m_landscapeViewProj), /*zeroToOne=*/true, m_landscapeFrame);
+    if (!m_landscapeFrame.active) return;
+    if (!m_landscape) m_landscape = std::make_unique<HE::VulkanLandscape>();
+    if (!m_landscape->ready())
+    {
+        HE::VulkanLandscape::Env env;
+        env.device = m_device;
+        env.framesInFlight = k_maxFramesInFlight;
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physDevice, &props);
+        env.maxImageArrayLayers = props.limits.maxImageArrayLayers;
+        env.arraySampler = m_albedoSampler;
+        env.whiteArray = m_whiteArrayView;
+        env.findMemoryType = [this](uint32_t bits, VkMemoryPropertyFlags f) { return findMemoryType(bits, f); };
+        env.uploadCmd = [this]() { return uploadCmd(); };
+        env.stage = [this](const void* d, VkDeviceSize n, VkBuffer& b, VkDeviceSize& o) { return stageUpload(d, n, b, o); };
+        env.flush = [this]() { flushUploads(); };
+        env.waitIdle = [this]() { deviceWaitIdle(); };
+        env.createPipeline = [this](const VkGraphicsPipelineCreateInfo& ci, VkPipeline& out) { return createGraphicsPipelines(1, &ci, nullptr, &out); };
+        std::string err;
+        if (!m_landscape->init(env, &err))
+        {
+            HE_LOG_WARN(RHI, "VulkanRenderer: the world-scale landscape is off: %s", err.c_str());
+            m_landscapeFailed = true;
+            m_landscape.reset();
+            return;
+        }
+    }
+    m_landscape->upload(m_landscapeFrame);
+    m_landscapeFrameLive = true;
+}
+
+// Records the patches into the scene pass that is open on `cmd`. The caller restores whatever pipeline and set it needs afterwards.
+void VulkanRenderer::landscapeDraw(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr)
+{
+    if (!m_landscapeFrameLive || !m_landscape || !m_landscape->ready() || !m_landscapeFrame.world) return;
+    HE::VulkanLandscape::Shading sh;
+    // The sun the lit shaders use: the scene's dominant directional light (colour x intensity), else a neutral one.
+    sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+    sh.ambient = m_renderWorld.ambient;
+    for (const LightData& l : m_renderWorld.lights)
+        if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+    // The texture group's arrays (the world-UV ground), resolved like a material's texture array (resolveGraphTexture forgets a miss per content
+    // epoch, so one that arrives after the first frame is picked up); not loaded (yet) = null = flat colours.
+    const HE::LandscapeRenderStatic& w = *m_landscapeFrame.world;
+    if (!w.albedoArrayPath.empty())
+    {
+        sh.albedoArray = resolveGraphTexture(HE::UUID{}, w.albedoArrayPath, true);
+        if (sh.albedoArray && !w.normalArrayPath.empty()) sh.normalArray = resolveGraphTexture(HE::UUID{}, w.normalArrayPath, true);
+        if (sh.albedoArray && !w.maskArrayPath.empty())   sh.maskArray   = resolveGraphTexture(HE::UUID{}, w.maskArrayPath, true);
+    }
+    const VkRenderPass pass = hdr && m_postFxSceneRP ? m_postFxSceneRP : m_renderPass;
+    m_landscape->draw(cmd, pass, VkExtent2D{ width, height }, m_currentFrame, m_landscapeFrame, m_landscapeViewProj, sh);
+    m_statDraws += static_cast<uint32_t>(m_landscape->stats().drawCalls);
+}
+
 void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr)
 {
     if (!m_world || m_scenePipeline == VK_NULL_HANDLE || width == 0 || height == 0) return;
@@ -8872,9 +8976,13 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         drawSky(cmd, width, height, hdr);
     }
 
+    // World-scale landscape (Thema 326): asked HERE, before the early returns below, and its uploads recorded at once; drawn in the scene pass
+    // (below), or right here on the two paths that leave before it.
+    landscapeBegin(width, height);
+
     // Trails live in their own per-frame band list, not in `objects`, so a scene
     // that has nothing BUT a trail still has something to draw past here.
-    if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty()) return;
+    if (m_renderWorld.objects.empty() && m_renderWorld.ribbonBatches.empty()) { landscapeDraw(cmd, width, height, hdr); return; }
 
     refineObjectBounds();
     // PBR scalars per object, per material slot and per skinned object, each from
@@ -8885,7 +8993,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
     cullCameraObjects();
     m_statTotal   = static_cast<uint32_t>(m_renderWorld.objects.size());
     m_statVisible = static_cast<uint32_t>(m_sortedIndices.size());
-    if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) return;
+    if (m_sortedIndices.empty() && m_renderWorld.ribbonBatches.empty()) { landscapeDraw(cmd, width, height, hdr); return; }
 
     if (m_renderGraph.empty())
     {
@@ -10123,6 +10231,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             // Forward replay: graph materials without a G-buffer variant, lit by
             // their own forward shader against the G-buffer depth (test + write).
             for (const DrawCall* dc : deferredForwardDCs) drawDCVk(*dc);
+        }
+
+        // World-scale landscape (Thema 326): opaque, depth-tested and depth-writing into the open scene pass: after the forward opaque draws, or on a
+        // deferred frame after the lighting resolve and the forward replay (the pass is m_hdrLoadRP, compatible with the HDR scene pass the pipeline
+        // was made for). Binds its own pipeline and set 0, so the scene state is restored right after.
+        if (m_landscapeFrameLive)
+        {
+            landscapeDraw(cmd, width, height, hdr);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeMatScenePipe);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_scenePipelineLayout,
+                                    0, 1, &m_frameUBO[m_currentFrame].set, 1, &m_sceneMatOffset);
         }
 
         // Screen-space decals: after the opaque geometry (which is what the depth

@@ -21,6 +21,7 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
 #include <HorizonScene/LandscapeHlod.h>      // the far-landscape bake the export runs
+#include <HorizonScene/LandscapeExport.h>    // a tile landscape's pack ships beside the pak, with its cell proxies
 #include <HorizonScene/EntityHost.h>         // a class's component body, for the same scan
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -85,6 +86,7 @@ static std::string s_exportIncludes;               // always-include globs, one 
 static bool        s_exportOnlyReferenced = true;  // pack only what the game reaches
 static bool        s_exportBakeMeshTextures = true; // bake textures onto meshes (needs the filter above)
 static bool        s_exportBakeFarLandscape = true; // bake each Auto Landscape's look for its far LOD levels
+static bool        s_exportBakeCellHlod     = true; // bake the streaming cells' static meshes into distant proxies in the shipped landscape pack
 static int         s_exportFarLandscapeMB   = 512;  // what the baked textures may cost, cooked
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
@@ -566,6 +568,7 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportOnlyReferenced = p.onlyReferenced;
 	s_exportBakeMeshTextures = p.bakeMeshTextures;
 	s_exportBakeFarLandscape = p.bakeFarLandscape;
+	s_exportBakeCellHlod     = p.bakeCellHlod;
 	s_exportFarLandscapeMB   = p.farLandscapeBudgetMB;
 	s_exportIncludes.clear();
 	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
@@ -584,6 +587,7 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.onlyReferenced   = s_exportOnlyReferenced;
 	p.bakeMeshTextures = s_exportBakeMeshTextures;
 	p.bakeFarLandscape = s_exportBakeFarLandscape;
+	p.bakeCellHlod     = s_exportBakeCellHlod;
 	p.farLandscapeBudgetMB = s_exportFarLandscapeMB;
 	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
@@ -1228,6 +1232,8 @@ void render(AppContext& ctx)
                 s_exportFarLandscapeMB = std::clamp(s_exportFarLandscapeMB, 16, 16384);
                 EditorWidgets::helpForKey("Export/Far landscape budget (MB)");
             }
+            EditorWidgets::checkbox("Bake streaming cell proxies", &s_exportBakeCellHlod);
+            EditorWidgets::helpForKey("Export/Bake streaming cell proxies");
             if (s_exportOnlyReferenced)
             {
                 ImGui::Text("Always include:");
@@ -1447,6 +1453,19 @@ void startExport(AppContext& ctx)
                 // leaves them alone (an override material would read its texture through
                 // the atlas UVs). Collected from every scene the export serializes.
                 std::vector<HE::UUID> overriddenMeshes;
+                // A tile landscape's pack is a loose file in the data folder, not an asset of the pak: every scene that names one is
+                // pointed at the shipped copy before it is serialized, and the cell proxies are baked here, on the main thread (they
+                // load mesh assets). The project's own pack is never touched; the copy is made, and the proxies written into it, by the
+                // exporter (ExportSettings::dataFiles). A pack two scenes share is shipped and baked once.
+                HE::LandscapeExportPlan landscapePlan;
+                const auto shipLandscapePack = [&](HorizonWorld& w, const std::string& label)
+                {
+                    if (!ctx.contentManager) return;
+                    HE::LandscapeExportOptions lo;
+                    lo.bakeHlod = s_exportBakeCellHlod;
+                    HE::prepareLandscapePacksForExport(w, projectRoot, *ctx.contentManager, lo, landscapePlan,
+                        [&](int level, const std::string& text) { Build::log(level, label + ": " + text); });
+                };
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;
                 if (!scenePath.empty())
@@ -1457,6 +1476,7 @@ void startExport(AppContext& ctx)
                     {
                         syncPrefabsForExport(sceneWorld, sceneName);
                         HE::collectMeshesWithMaterialOverrides(sceneWorld, overriddenMeshes);
+                        shipLandscapePack(sceneWorld, sceneName);
                         ser.saveToMemory(sceneWorld, sceneBinary);
                     }
                     else
@@ -1526,6 +1546,7 @@ void startExport(AppContext& ctx)
                             if (loaded) syncPrefabsForExport(w2, rel);
                             if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
                             if (loaded) bakeFarLandscapes(w2, rel);
+                            if (loaded) shipLandscapePack(w2, rel);
                             if (loaded && ser2.saveToMemory(w2, bytes))
                             {
                                 // Level script → codegen source, keyed by the scene's
@@ -1777,6 +1798,17 @@ void startExport(AppContext& ctx)
                 es.onlyReferenced   = s_exportOnlyReferenced;
                 es.bakeMeshTextures = s_exportBakeMeshTextures;
                 es.bakeSkipMeshes   = overriddenMeshes;
+                for (const HE::LandscapeExportPack& lp : landscapePlan.packs)
+                {
+                    ExportSettings::DataFile df;
+                    df.source = lp.source;
+                    df.dest = lp.dest;
+                    df.afterCopy = [lp](const std::filesystem::path& copied, std::string& error)
+                    {
+                        return HE::finishExportedPack(lp, copied, &error);
+                    };
+                    es.dataFiles.push_back(std::move(df));
+                }
                 es.extraAssets      = std::move(farAssets);
                 es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
                 es.onNotice = [](const std::string& msg) { Build::log(0, msg); };

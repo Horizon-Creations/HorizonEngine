@@ -27,6 +27,7 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/LandscapeRuntime.h>                  // GI height clipmap of a tile landscape
 #include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
@@ -627,6 +628,35 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 						obj.paramOverride.clear();
 					}
 			}
+	}
+
+	// ── GI height clipmap of a tile landscape (Thema 326, step 4) ─────────────
+	// The TerrainComponent loop above pushes AT MOST one entry already (a scene is documented to carry
+	// either a TerrainComponent or a tile landscape, never both as GI casters); every GI-heightfield
+	// backend (GL, Vulkan, D3D11) turns its whole shadow-heightfield path off the moment
+	// RenderWorld::heightfields holds more than one, so this never adds a second.
+	constexpr uint64_t kLandscapeGiHeightfieldKey = ~0ull;
+	void extractLandscapeGiHeightfield(HorizonWorld& world, RenderWorld& out)
+	{
+		if (!out.heightfields.empty()) return;
+		const HE::LandscapeRuntime* lr = world.landscapeRuntime();
+		if (!lr) return;
+		const HE::LandscapeGiHeightfield& g = lr->giHeightfield();
+		if (!g.active()) return;
+		GiHeightfield hf;
+		hf.data    = g.data;
+		hf.res     = g.res;
+		hf.version = g.version;
+		hf.key     = kLandscapeGiHeightfieldKey;
+		// The clipmap's local space is centred on its window, same as a TerrainComponent's (see
+		// LandscapeTileTerrain.h): a pure translation to the window's centre, origin-relative.
+		const glm::vec3 centreRel(static_cast<float>(g.centreAbsolute.x - world.origin().x), 0.0f,
+		                          static_cast<float>(g.centreAbsolute.z - world.origin().z));
+		glm::mat4 worldMatrix(1.0f);
+		worldMatrix[3] = glm::vec4(centreRel, 1.0f);
+		hf.worldToLocal = glm::inverse(worldMatrix);
+		hf.size = { g.sizeX, g.sizeZ };
+		out.heightfields.push_back(std::move(hf));
 	}
 
 	// ── ParticleGraph particles ────────────────────────────────────────────────
@@ -1635,6 +1665,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing); }
+	extractLandscapeGiHeightfield(world, out);
 	extractParticleBatches(reg, out);
 	extractPrecipitation(reg, out);
 	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();

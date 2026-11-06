@@ -27,6 +27,7 @@
 #include <unordered_map>
 
 struct SDL_Window;
+namespace HE { class VulkanLandscape; }
 struct TextureAsset; // ContentManager/Assets.h (full def included in the .cpp)
 
 class VulkanRenderer : public IRenderer
@@ -1926,4 +1927,16 @@ private:
 	FrameGpuStats m_lastGpuStats;                   // newest reaped GPU time
 	// CPU-side per-frame counters (reset in Render, merged by GetFrameGpuStats).
 	uint32_t m_statDraws = 0, m_statTris = 0, m_statVisible = 0, m_statTotal = 0;
+
+	// ── World-scale landscape (Thema 326, step 2 part B) ─────────────────────
+	// DrawScene asks the application's provider (IRenderer::SetLandscapeProvider) once per scene frame, right after the sky and before its early
+	// returns, and has the frame's uploads recorded into the upload batch at once (the runtime counts them as done); the patches are drawn in the
+	// scene pass (forward: after the opaque draws; deferred: after the lighting resolve; and on the early returns).
+	std::unique_ptr<HE::VulkanLandscape> m_landscape;
+	bool                     m_landscapeFailed = false;    // init failed once: not tried again
+	bool                     m_landscapeFrameLive = false; // m_landscapeFrame belongs to the scene frame in progress
+	HE::LandscapeRenderFrame m_landscapeFrame;
+	glm::mat4                m_landscapeViewProj{ 1.0f };  // the matrix the scene rasterises with (kVulkanClipFix, TAA jitter), for the draw
+	void landscapeBegin(uint32_t width, uint32_t height);                                       // ask the provider, init on first use, run the uploads
+	void landscapeDraw(VkCommandBuffer cmd, uint32_t width, uint32_t height, bool hdr);         // inside the scene pass
 };

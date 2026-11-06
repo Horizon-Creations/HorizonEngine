@@ -6,6 +6,7 @@
 #include "Renderer/EnvironmentSettings.h" // IRenderer::EnvironmentSettings (aliased below)
 #include "Renderer/UIRenderObject.h"     // RenderWidgetThumbnail takes UI draw quads
 #include "Renderer/WaterRipples.h"       // SetWaterRipples: the rings the water material reads
+#include "Renderer/LandscapeRenderFrame.h" // SetLandscapeProvider: the world-scale landscape's per-frame data
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>   // worldPreviewProjection (below)
 #include <cmath>
@@ -1010,6 +1011,19 @@ public:
     void SetWaterRipples(const WaterRippleBlock& w) { m_waterRipples = w; }
     const WaterRippleBlock& GetWaterRipples() const { return m_waterRipples; }
 
+    // ── World-scale landscape (Thema 326) ──────────────────────────────────
+    // The application's LandscapeRuntime, as a callback: once per main scene frame
+    // the backend calls it with the view-projection it is about to use (origin-
+    // relative world to ITS clip space) and whether its clip depth is 0..1, and
+    // gets the patches to draw plus the image uploads
+    // to execute BEFORE drawing (LandscapeRenderFrame.h). Executing a frame it
+    // asked for is the backend's duty: the runtime counts uploads as done. Empty
+    // (the default) = no landscape. Only the main scene pass asks, never a preview
+    // or a thumbnail. Plain storage, not virtual, for the reason SetWaterRipples
+    // gives; the member sits after every other one.
+    void SetLandscapeProvider(HE::LandscapeProvider p) { m_landscapeProvider = std::move(p); }
+    const HE::LandscapeProvider& GetLandscapeProvider() const { return m_landscapeProvider; }
+
 protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
@@ -1028,4 +1042,5 @@ protected:
     std::function<void*(void*, void*)> m_imguiTexRegistrar;
     // Last: appended after every older member so their offsets stay where they were.
     WaterRippleBlock     m_waterRipples;
+    HE::LandscapeProvider m_landscapeProvider;
 };

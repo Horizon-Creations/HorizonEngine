@@ -57,6 +57,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 RENDER = REPO / "src" / "HE_Rendering" / "src" / "Backends"
 SKY_SOURCE = REPO / "src" / "HE_Rendering" / "include" / "HorizonRendering" / "SkyShaderSource.h"
+# The world-scale landscape (Thema 326): kLandscapeVS / kLandscapeFS, GLSL 4.10 like the sky.
+LANDSCAPE_SOURCE = REPO / "src" / "HE_Rendering" / "include" / "HorizonRendering" / "LandscapeShaderSource.h"
 
 HLSL_SOURCES = {
     "HlslSources.h": RENDER / "D3D_Shared" / "HlslSources.h",
@@ -64,10 +66,12 @@ HLSL_SOURCES = {
     "D3D12Renderer.cpp": RENDER / "D3D12" / "D3D12Renderer.cpp",
     # kSkyVSCrossHLSL, the VS in front of the cross-compiled sky PS.
     "SkyShaderSource.h": SKY_SOURCE,
+    # kLandscapeHLSL (Thema 326): the hand port of the landscape shaders, one source for D3D11 and D3D12 (VSMain, PSMain).
+    "LandscapeShaderSource.h": LANDSCAPE_SOURCE,
 }
 # kSkyFS + kSkyFuncGLSL moved to SkyShaderSource.h (Thema 78, Schritt 3): the
 # GL sky is also what Vulkan/D3D11/D3D12 compile, behind kSkyVulkanPrelude.
-GLSL_SOURCES = [RENDER / "OpenGL" / "OpenGLRenderer.cpp", SKY_SOURCE]
+GLSL_SOURCES = [RENDER / "OpenGL" / "OpenGLRenderer.cpp", SKY_SOURCE, LANDSCAPE_SOURCE]
 MSL_SOURCE = RENDER / "Metal" / "MetalRenderer.mm"
 # kGlCluster*SsboBinding — the SSBO bindings the clustered kUnlitFS build defines.
 MATERIAL_LIB_H = REPO / "src" / "HE_Rendering" / "include" / "material" / "MaterialShaderLibrary.h"
@@ -80,7 +84,8 @@ MATERIAL_LIB_H = REPO / "src" / "HE_Rendering" / "include" / "material" / "Mater
 # of a compile job entirely (just marking them "covered") would be the same mistake
 # this script exists to catch.
 PRELUDES = {"kGiTraversalHLSL", "kSkyFuncHLSL", "kGiTraversalGLSL", "kSkyFuncGLSL",
-            "kSkyVulkanPrelude", "kSkyFuncMSL", "kGiHeightfieldHLSL", "kGiHeightfieldGLSL"}
+            "kSkyVulkanPrelude", "kSkyFuncMSL", "kGiHeightfieldHLSL", "kGiHeightfieldGLSL",
+            "kLandscapeVulkanVertexPrelude", "kLandscapeVulkanFragmentPrelude"}
 
 # What each call site prepends before compiling. Mirrors the C++ verbatim:
 #   D3D11Renderer.cpp:2309  std::string(kSkyFuncHLSL) + kSceneHLSL
@@ -344,6 +349,41 @@ def check_glsl(tmp: Path, verbose: bool) -> tuple[int, int, list[str]]:
             failures.append("kSkyFS (Vulkan build):\n      " + "\n      ".join(errs[:3]))
             print(f"  FAIL {'kSkyFS (Vulkan build)':44s} frag")
 
+    # The Vulkan build of the world-scale landscape (Thema 326): each stage's prelude replaces the GL declarations above the
+    # //#LANDSCAPE_BODY# marker, assembled like BuildLandscapeVertexGLSL450() / BuildLandscapeFragmentGLSL450()
+    # (LandscapeShaderSource.h) and checked with Vulkan semantics (-V). Both stages are LINKED as a pair (-l), so a block or
+    # interface that differs between the two fails here and not on a driver.
+    ls_marker = "//#LANDSCAPE_BODY#"
+    ls_parts = {}
+    for stage, pre_name, body_name in (("vert", "kLandscapeVulkanVertexPrelude", "kLandscapeVS"),
+                                       ("frag", "kLandscapeVulkanFragmentPrelude", "kLandscapeFS")):
+        pre, body = strings.get(pre_name), strings.get(body_name)
+        if pre is None or body is None or ls_marker not in body:
+            failures.append(f"{body_name} (Vulkan build): {pre_name} / {body_name} / marker not found")
+            continue
+        f = tmp / f"gl__{body_name}_vulkan.{stage}"
+        f.write_text(pre + body.split(ls_marker, 1)[1], encoding="utf-8")
+        ls_parts[stage] = f
+        ok, out = run([gv, "-V", "-S", stage, "-o", os.devnull, str(f)])
+        if ok:
+            ok_n += 1
+            if verbose:
+                print(f"  ok   {body_name + ' (Vulkan build)':44s} {stage}")
+        else:
+            errs = [l.strip() for l in out.splitlines() if "ERROR:" in l]
+            failures.append(f"{body_name} (Vulkan build):\n      " + "\n      ".join(errs[:3]))
+            print(f"  FAIL {body_name + ' (Vulkan build)':44s} {stage}")
+    if len(ls_parts) == 2:
+        ok, out = run([gv, "-V", "-l", str(ls_parts["vert"]), str(ls_parts["frag"])])
+        if ok:
+            ok_n += 1
+            if verbose:
+                print(f"  ok   {'kLandscapeVS+FS (Vulkan build)':44s} link")
+        else:
+            errs = [l.strip() for l in out.splitlines() if "ERROR:" in l]
+            failures.append("kLandscapeVS+FS (Vulkan build, linked):\n      " + "\n      ".join(errs[:3]))
+            print(f"  FAIL {'kLandscapeVS+FS (Vulkan build)':44s} link")
+
     # The clustered GL 4.3 build of the three scene programs (Thema 117
     # Nachzug), assembled like SceneStageSource() in OpenGLRenderer.cpp: the
     # "#version 410 core" line of BOTH stages becomes 4.30 + HE_CLUSTERED + the
@@ -454,6 +494,7 @@ def check_msl(tmp: Path, verbose: bool, require: bool) -> tuple[int, int, list[s
     print("  negative control rejected, as it must be")
 
     strings = extract(MSL_SOURCE, "MSL")
+    strings.update(extract(LANDSCAPE_SOURCE, "MSL"))     # kLandscapeMSL, the hand port of the landscape GLSL
     skyfunc = strings.get("kSkyFuncMSL")
     marker = "//#SKYFUNC#"
     ok_n, failures = 0, unhandled_placeholders(strings)

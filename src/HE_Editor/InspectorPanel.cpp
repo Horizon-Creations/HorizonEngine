@@ -8,7 +8,9 @@
 #include "EditorMultiEdit.h"             // one edit, every selected entity
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
+#include "LandscapeWorldTools.h"         // the Tile Landscape section
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/Components/LandscapeWorldComponent.h> // not in HorizonScene.h: the Tile Landscape section
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
 #include <HorizonScene/FoliagePaint.h>   // density-mask coverage + reset
@@ -3478,6 +3480,14 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TerrainComponent>(entity); }
 	}
 
+	// ── Tile Landscape (the world-scale landscape, Thema 326) ───────────────
+	if (registry.try_get<LandscapeWorldComponent>(entity))
+	{
+		if (componentHeader("Tile Landscape", true, removed))
+			LandscapeWorldTools::drawSection(ctx, entity, trackEdit);
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<LandscapeWorldComponent>(entity); }
+	}
+
 	// ── Audio Source ────────────────────────────────────────────────────────
 	if (auto* a = registry.try_get<AudioSourceComponent>(entity))
 	{
@@ -4052,6 +4062,7 @@ constexpr AddRow kRenderingRows[] = {
 	addRow<DecalComponent>("Decal"),
 	addRow<ParticleSystemComponent>("Particle System"),
 	addRow<FoliageComponent>("Foliage"),
+	addRow<LandscapeWorldComponent>("Tile Landscape"),
 	addRow<LODComponent>("LOD"),
 	addRow<RopeComponent>("Rope"),
 	addRow<SplineComponent>("Spline"),

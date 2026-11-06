@@ -277,6 +277,23 @@ add_executable(he_tests
     test_cell_scripts.cpp
     test_cell_state.cpp
     test_cell_village.cpp
+    test_landscape_hlod.cpp
+    test_landscape_cell_hlod_bake.cpp
+    test_landscape_export.cpp
+    test_landscape_cell_regions.cpp
+    test_landscape_pack_build.cpp
+    test_landscape_region_streaming.cpp
+    test_landscape_store.cpp
+    test_landscape_quadtree.cpp
+    test_landscape_render.cpp
+    test_landscape_runtime.cpp
+    test_landscape_shader.cpp
+    test_landscape_physics.cpp
+    test_landscape_foliage.cpp
+    test_landscape_navigation.cpp
+    test_landscape_water.cpp
+    test_landscape_gi.cpp
+    test_landscape_world_proxies.cpp
     test_collision_system.cpp
     test_entity_host.cpp
     test_player_host.cpp
@@ -407,6 +424,7 @@ add_executable(he_tests
     test_widget_designer_ui.cpp
     test_texture_viewer.cpp
     test_streaming_view.cpp
+    test_landscape_world_ui.cpp
     ImGuiSoftwareRaster.cpp
     test_lod.cpp
     test_rope_trail.cpp
@@ -960,6 +978,7 @@ add_executable(he_tests
     # per-file HE_IMGUI_ENABLED. Everything they call (TerrainPaint/FoliagePaint
     # in HorizonScene, RenderWorld, the toolbar, the widgets) is already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/LandscapeWorldTools.cpp
     # The Spline mode's tool, for test_spline_tool_ui.cpp: same AppContext, same
     # per-file HE_IMGUI_ENABLED; SplineEdit and the point gizmo are already here.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineTool.cpp
@@ -1075,6 +1094,8 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/InspectorPanel.cpp
     test_inspector_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TerrainTools.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/LandscapeWorldTools.cpp
+    test_landscape_world_ui.cpp
     test_terrain_tools_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/SplineTool.cpp
     test_spline_tool_ui.cpp

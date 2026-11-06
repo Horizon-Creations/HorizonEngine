@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <Renderer/IRenderer.h>
 #include "OpenGLShaderManager.h"
+#include "OpenGLLandscape.h"   // the world-scale landscape (Thema 326)
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
 #include <HorizonRendering/FrameCull.h>
@@ -1457,4 +1458,11 @@ private:
 	struct RetiredTexture { unsigned int texture; int framesLeft; };
 	std::vector<RetiredTexture> m_retiredTextures;
 	void AgeRetiredTextures();
+
+	// ── World-scale landscape (Thema 326, step 2 part B) ────────────────────
+	// DrawLandscape asks the application's provider (IRenderer::SetLandscapeProvider) for the frame of the camera it is about to render
+	// with and draws it into the bound HDR target, in the opaque pass before the sky. Not in the G-buffer: no shadows, SSAO or GI.
+	void DrawLandscape(const glm::mat4& viewProj);
+	OpenGLLandscape m_landscape;
+	bool            m_landscapeFailed = false;   // init failed once: not tried again
 };

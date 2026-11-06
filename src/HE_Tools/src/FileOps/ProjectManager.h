@@ -248,6 +248,9 @@ struct ExportProfile
 	// (the pictures get coarser, down to 16 px a chunk, until they fit). Needs the Metal renderer for now.
 	bool bakeFarLandscape = true;
 	int  farLandscapeBudgetMB = 512;
+	// A tile landscape's pack ships beside the pak; with this on, the static meshes of the scene's streaming cells are baked into
+	// distant proxies and appended to the shipped copy (HorizonScene/LandscapeExport.h). The project's own pack is never changed.
+	bool bakeCellHlod = true;
 	// Pack only the assets the game reaches (the startup scene, the scenes something loads,
 	// scripts, the manifest, the engine's own needs) and leave out the rest. On by default.
 	// `alwaysIncludePatterns` are globs on the addressed path (like excludePatterns) that

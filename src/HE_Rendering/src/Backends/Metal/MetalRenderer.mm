@@ -7129,6 +7129,7 @@ void MetalRenderer::Shutdown()
 	if (m_mbVelocityPipeline)   { CFBridgingRelease(m_mbVelocityPipeline);   m_mbVelocityPipeline = nullptr; }
 	if (m_mbBlurPipeline)       { CFBridgingRelease(m_mbBlurPipeline);       m_mbBlurPipeline = nullptr; }
 	m_mbHasPrev = false;
+	m_landscape.shutdown();
 	if (m_skyPipeline)          { CFBridgingRelease(m_skyPipeline);          m_skyPipeline = nullptr; }
 	if (m_skyReflPipeline)      { CFBridgingRelease(m_skyReflPipeline);      m_skyReflPipeline = nullptr; }
 	if (m_skyReflCube)          { CFBridgingRelease(m_skyReflCube);          m_skyReflCube = nullptr; }
@@ -14878,6 +14879,41 @@ void MetalRenderer::EncodeSkinnedObjects(void* renderEncoder, const glm::mat4& v
 	[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_scenePipeline];
 }
 
+void MetalRenderer::EncodeLandscape(void* renderEncoder, const glm::mat4& viewProj, const HE::LandscapeRenderFrame& frame)
+{
+	if (!frame.active || m_landscapeFailed) return;   // asked for at the top of EncodeScene; no landscape in this scene: nothing compiled, nothing drawn
+	if (!m_landscape.ready())
+	{
+		std::string err;
+		if (!m_landscape.init(m_device, static_cast<unsigned long>(kSceneColorFormat), static_cast<unsigned long>(kDepthFormat), &err))
+		{
+			HE_LOG_WARN(RHI, "MetalRenderer: the world-scale landscape is off: %s", err.c_str());
+			m_landscapeFailed = true;
+			return;
+		}
+	}
+
+	MetalLandscape::Shading sh;
+	sh.sunDir = glm::normalize(m_renderWorld.sunDirection);
+	sh.ambient = m_renderWorld.ambient;
+	for (const LightData& l : m_renderWorld.lights)
+		if (l.type == static_cast<uint8_t>(HE::LightType::Directional)) { sh.sunColor = l.color * l.intensity; break; }
+	if (frame.world && !frame.world->albedoArrayPath.empty())
+	{
+		// The texture group's albedo array (World-UV ground). A missing one resolves to the white array: flat colours then.
+		void* tex = ResolveGraphTexture(HE::UUID{}, frame.world->albedoArrayPath, /*array=*/true);
+		sh.albedoArray = (tex && tex != m_whiteArrayTexture) ? tex : nullptr;
+		const auto optional = [&](const std::string& path) -> void* {
+			if (path.empty()) return nullptr;
+			void* t = ResolveGraphTexture(HE::UUID{}, path, /*array=*/true);
+			return (t && t != m_whiteArrayTexture) ? t : nullptr;
+		};
+		sh.normalArray = optional(frame.world->normalArrayPath);
+		sh.maskArray = optional(frame.world->maskArrayPath);
+	}
+	m_landscape.encode(renderEncoder, frame, viewProj, sh);
+}
+
 void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
                                 MetalDeferredFrame* deferred)
 {
@@ -14942,7 +14978,12 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	// are skinned meshes (RenderWorld::skinnedObjects, drawn by
 	// EncodeSkinnedObjects below): a scene of nothing but a character used to
 	// take this sky-only exit and never draw it.
-	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty();
+	// A world-scale landscape is drawn by this function too, so a scene of nothing but a landscape is not sky-only. Asked for once, here, with
+	// the matrix the scene pass rasterises with (the plain GL-convention one, see MetalLandscape::encode), so the frustum is a GL one too; a
+	// scene without a landscape gets an inactive frame and the sky-only exits below stay as they were.
+	HE::LandscapeRenderFrame landscapeFrame;
+	if (m_landscapeProvider && !m_landscapeFailed) m_landscapeProvider(glm::dmat4(viewProj), /*zeroToOne=*/false, landscapeFrame);
+	const bool onlySky = m_renderWorld.ribbonBatches.empty() && m_renderWorld.skinnedObjects.empty() && !landscapeFrame.active;
 	if (m_renderWorld.objects.empty() && onlySky)
 	{
 		SamplePoint(renderEncoder, "(scene)");   // anchor
@@ -15652,6 +15693,10 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 	EncodeSkinnedObjects(renderEncoder, viewProj, shadows, &scene);
 	wire(false);
 	SamplePoint(renderEncoder, "Skinned");
+
+	// World-scale landscape (Thema 326): forward patches into the same target and depth, before the sky fills what they leave.
+	EncodeLandscape(renderEncoder, viewProj, landscapeFrame);
+	SamplePoint(renderEncoder, "Landscape");
 
 	// Sky LAST — fills the background pixels the geometry didn't cover.
 	drawSky();

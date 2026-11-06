@@ -281,4 +281,61 @@ Result importFile(TerrainComponent& tc, const std::string& path, const Options& 
     return r;
 }
 
+bool readGrey16(const std::string& path, std::vector<uint16_t>& out, uint32_t& width, uint32_t& height, std::string& error)
+{
+    out.clear();
+    width = height = 0;
+    const std::string ext = lowerExt(path);
+    if (ext == "r16" || ext == "raw")
+    {
+        std::ifstream in(path, std::ios::binary | std::ios::ate);
+        if (!in) { error = "Could not open \"" + path + "\"."; return false; }
+        const std::streamoff size = in.tellg();
+        if (size <= 0 || (size % 2) != 0) { error = "A .r16/.raw heightmap must be whole 16-bit values."; return false; }
+        const uint64_t count = static_cast<uint64_t>(size) / 2;
+        const uint32_t side  = static_cast<uint32_t>(std::llround(std::sqrt(static_cast<double>(count))));
+        if (static_cast<uint64_t>(side) * side != count || side == 0)
+        {
+            error = "A .r16/.raw heightmap must be square: " + std::to_string(count) + " values is not a square number.";
+            return false;
+        }
+        out.resize(static_cast<size_t>(count));
+        in.seekg(0);
+        if (!in.read(reinterpret_cast<char*>(out.data()), size)) { out.clear(); error = "Could not read \"" + path + "\"."; return false; }
+        width = height = side;   // little-endian, which is the native order everywhere we run
+        return true;
+    }
+
+    int w = 0, h = 0, ch = 0;
+    const bool is16 = stbi_is_16_bit(path.c_str()) != 0;
+    void* pixels = is16 ? static_cast<void*>(stbi_load_16(path.c_str(), &w, &h, &ch, 0)) : static_cast<void*>(stbi_load(path.c_str(), &w, &h, &ch, 0));
+    if (!pixels)
+    {
+        const char* why = stbi_failure_reason();
+        error = "Could not read \"" + path + "\"" + (why ? std::string(": ") + why : "") + ".";
+        return false;
+    }
+    if (is16 && (ext == "pgm" || ext == "ppm" || ext == "pnm"))   // see importFile: PNM is big-endian
+    {
+        uint8_t* p = static_cast<uint8_t*>(pixels);
+        const size_t n = static_cast<size_t>(w) * h * ch;
+        for (size_t i = 0; i < n; ++i) std::swap(p[i * 2], p[i * 2 + 1]);
+    }
+    Source src;
+    src.pixels = static_cast<const uint8_t*>(pixels);
+    src.width = static_cast<uint32_t>(w);
+    src.height = static_cast<uint32_t>(h);
+    src.channels = static_cast<uint32_t>(ch);
+    src.bytesPerChannel = is16 ? 2u : 1u;
+    const GreyReader grey{ src };
+    out.resize(static_cast<size_t>(w) * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            out[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>(std::lround(std::clamp(grey(static_cast<uint32_t>(x), static_cast<uint32_t>(y)), 0.0f, 1.0f) * 65535.0f));
+    width = static_cast<uint32_t>(w);
+    height = static_cast<uint32_t>(h);
+    stbi_image_free(pixels);
+    return true;
+}
+
 } // namespace TerrainHeightmap

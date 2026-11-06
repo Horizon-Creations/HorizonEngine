@@ -36,6 +36,7 @@
 #include <HorizonScene/CellPhysics.h>  // cellHolds: the play physics world waits for unbuilt cells
 #include <HorizonScene/CellSplit.h>    // the HE_DUMP_PLAYCELLS witness splits its own scene
 #include "StreamingDebugView.h"    // a split scene's streaming cells in the scene view
+#include "LandscapeWorldTools.h"   // a finished tile-landscape pack build is taken in here
 #include "CameraBookmarks.h"       // the digit-key views, persisted with the camera
 #include "EditorShortcuts.h"       // the rebound keys, persisted the same way
 #include "ShortcutsPage.h"         // …under the key the Preferences page writes them to
@@ -4094,6 +4095,43 @@ void EditorApplication::OnRender(float dt)
 		{
 			HE_PROFILE_SCOPE_N("CellStreaming");
 			m_playCells->update(*m_editorWorld, gameDt);
+		}
+
+		// The tile landscape of the scene, if it has one: around the play camera, or around the editor's while editing (it is not an entity).
+		if (m_editorWorld)
+		{
+			HE_PROFILE_SCOPE_N("Landscape");
+			// Every call, not just the first bind below: RenderExtractor reads this to build the GI
+			// shadow kernel's height clipmap (step 4).
+			m_editorWorld->setLandscapeRuntime(&m_landscape);
+			LandscapeWorldTools::pump(*m_editorWorld);   // before the update: a rebuilt pack is opened again this frame
+			if (!m_landscapeBound && renderer())
+			{
+				renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+					if (m_editorWorld) m_landscape.buildRenderFrame(vp, m_editorWorld->origin(), zeroToOne, out);
+				});
+				m_landscapeBound = true;
+			}
+			if (m_landscapePhysics != m_physicsWorld.get())
+			{
+				m_landscape.setPhysics(m_physicsWorld.get());   // ground for the play session's bodies; none while editing
+				m_landscapePhysics = m_physicsWorld.get();
+			}
+			if (m_isPlaying != m_landscapeNavigation)
+			{
+				// Only while playing: the runtime swaps the scene's NavMeshComponent over to its tiled mesh, which an editor
+				// that is just looking at the scene must not do to a navmesh somebody baked.
+				const HE::LandscapeNavConfig nav;
+				m_landscape.setNavigation(m_isPlaying ? &nav : nullptr);
+				m_landscapeNavigation = m_isPlaying;
+			}
+			if (m_isPlaying) m_landscape.update(*m_editorWorld, gameDt);
+			else
+			{
+				const glm::dvec3 eye = glm::dvec3(m_editorCamera.makeOverride().position) + m_editorWorld->origin();
+				m_landscape.update(*m_editorWorld, gameDt, 1.0, &eye);
+			}
+			m_landscapeProxies.sync(*m_editorWorld, m_landscape, contentManager(), renderer());
 		}
 
 		// Keep spatial audio sources and listener in sync each play-mode frame
@@ -14373,6 +14411,8 @@ void EditorApplication::setPlayMode(bool play)
 		// the play world and the snapshot restored the scene as it was authored.
 		// So a play session leaves neither a body without an entity nor an entity
 		// with a body it should not have.
+		m_landscape.setPhysics(nullptr);   // its ground lives in that world: give it back first
+		m_landscapePhysics = nullptr;
 		m_physicsWorld.reset();
 		m_physicsAccum = 0.0f;
 

@@ -51,6 +51,8 @@
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
 #include <HorizonScene/FloatingOrigin.h>
+#include <HorizonScene/LandscapeExport.h>      // resolveLandscapePacks: the exported pack path is relative to the data folder
+#include <HorizonScene/LandscapeCellRegions.h> // the region gate for the entity cells of a tile landscape
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -1652,6 +1654,54 @@ void GameApplication::cellLoaded(HorizonWorld& world, entt::entity, const std::v
 void GameApplication::cellUnloading(HorizonWorld& world, entt::entity root)
 {
 	HE::stopCellScripts(cellScriptHosts(), world, root);
+}
+
+void GameApplication::updateLandscape(float dt)
+{
+	HE_PROFILE_SCOPE_N("Landscape");
+	// Every call, not just the first: a scene swap replaces m_world (RenderExtractor reads this to
+	// build the GI shadow kernel's height clipmap, step 4).
+	if (m_world) m_world->setLandscapeRuntime(&m_landscape);
+	if (!m_landscapeBound && renderer())
+	{
+		// Reads m_world at each call: a scene swap replaces the world, and the runtime keeps its own state.
+		renderer()->SetLandscapeProvider([this](const glm::dmat4& vp, bool zeroToOne, HE::LandscapeRenderFrame& out) {
+			if (m_world) m_landscape.buildRenderFrame(vp, m_world->origin(), zeroToOne, out);
+		});
+		m_landscapeBound = true;
+	}
+	// Ground for the physics world and a navmesh for the agents, both around the camera and the things that move. The physics world is
+	// rebuilt with every scene, so it is attached when it changes; the runtime builds nothing for a scene without a landscape.
+	if (m_landscapePhysics != m_physicsWorld.get())
+	{
+		m_landscape.setPhysics(m_physicsWorld.get());
+		m_landscapePhysics = m_physicsWorld.get();
+	}
+	if (!m_landscapeNavigation)
+	{
+		const HE::LandscapeNavConfig nav;
+		m_landscape.setNavigation(&nav);
+		m_landscapeNavigation = true;
+	}
+	// An exported scene names its pack relative to the data folder (LandscapeExport.h); the runtime opens a path as it is.
+	if (m_world) HE::resolveLandscapePacks(*m_world, HE::GameLayout::dataDir());
+	m_landscape.update(*m_world, dt);
+	// The entity cells follow the landscape's residency: their region gate takes the tile size and the store's radii, and is off again for a
+	// scene without a tile landscape (the streamer keeps its config across scenes).
+	{
+		HE::CellRegionConfig want;
+		if (m_landscape.active() && m_cellRuntime.active())
+			want = HE::cellRegionConfigForLandscape(m_cellRuntime.streamer().manifest(), m_landscape.quadtree().tileM,
+			                                        m_landscape.config().store.loadRadius, m_landscape.config().store.keepFactor);
+		if (!HE::sameRegionConfig(want, m_cellRuntime.streamer().regionConfig())) m_cellRuntime.streamer().setRegionConfig(want);
+	}
+	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
+	// Entity cells that are not built yet (or any more) stand in as their baked proxy while the pack has one; the cell streamer ran
+	// the frame before, so this reads what it holds.
+	if (const HE::LandscapeHlodTable* hlod = m_landscape.active() ? m_landscape.hlod() : nullptr)
+		m_hlodProxies.sync(*m_world, *hlod, m_cellRuntime.streamer(), m_landscape.cameraAbsolute(), contentManager(), renderer());
+	else
+		m_hlodProxies.clear(*m_world, contentManager(), renderer());
 }
 
 void GameApplication::updateCellStreaming(float dt)
@@ -3337,6 +3387,8 @@ void GameApplication::OnRender(float deltaTime)
 	}
 	// Then the cells of a split scene, against the camera where it now stands.
 	if (m_world && !m_appMode) updateCellStreaming(gameDt);
+	// The tile landscape of the scene, if it has one: tiles around the camera, before anything draws.
+	if (m_world && !m_appMode) updateLandscape(gameDt);
 
 	// Keep the audio listener + spatial sources tracking their entities.
 	if (m_world && m_audioEngine.isInitialized())
@@ -3814,6 +3866,8 @@ void GameApplication::OnShutdown()
 	// that (the apps set it before begin()), so it is dropped here — before the
 	// world it points at goes away.
 	m_entityHost.setPhysicsWorld(nullptr);
+	m_landscape.setPhysics(nullptr);   // its ground lives in that world: give it back first
+	m_landscapePhysics = nullptr;
 	m_physicsWorld.reset();
 
 	// GameInstance OnShutdown fires last (symmetric to OnInit firing first).
