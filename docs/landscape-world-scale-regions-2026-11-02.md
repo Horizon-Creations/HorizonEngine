@@ -155,6 +155,22 @@ by `hlodCellsToDraw`.
   `he_tests`, with tiny synthetic manifests (2 cells) chosen to make the region arithmetic
   checkable by hand — not a measurement of the real cost at landscape scale.
 
+## Update 06.11.2026: HLOD pack section, baker, proxy drawing (Thema 326, step 6 continued)
+
+Built on top of the data model above; all of it CPU-side and tested, nothing drawn on a real GPU yet.
+
+| Part | Where | What |
+|---|---|---|
+| Pack section | `LandscapeSource.h/.cpp` | The cell HLOD table is a **tail section behind a 20-byte trailer** (`u64 offset, u64 size, u32 'HLDF'`, `kLandscapePackHlodMagic`); the pack version stays 2. A pack without the trailer reads as before, an older reader never looks past the sections its header names. `LandscapePackWriter::setHlodTable`, `LandscapeTileSource::hlod()` |
+| Baker | `LandscapeCellHlodBake.h/.cpp` | `bakeCellProxies(manifest, reader, content, options, stats)`: per cell file, the static meshes (visible `MeshComponent`; no skeleton, no animator, no moving body) in absolute metres through `HE::worldMatrixOf`, merged with `bakeCellHlod`. Budgets (20 000 triangles, 4 000 instances a cell) cut the **small** instances first. No material, no decimation: the proxy is a silhouette |
+| Append | same | `landscapePackSetHlod(pack, table)` appends the section to an existing pack or replaces/removes it (write to a sibling, rename over) |
+| Drawing | `LandscapeHlodProxies.h/.cpp`, `LandscapeProxyComponent::Kind::Hlod` | one hidden entity per cell for which `hlodCellsToDraw` says "not built", **only within `drawRadius` (6 km) of the camera** and re-evaluated every 4th frame; mesh registered when the entity is made and given back with it; entity at `-world.origin()` (the mesh is absolute) |
+| Wiring | `GameApplication.cpp` (`updateLandscape`) | after `m_landscapeProxies.sync`, from `m_landscape.hlod()` and `m_cellRuntime.streamer()`. `LandscapeRuntime::hlod()` and `cameraAbsolute()` are new accessors. The **editor is not wired** (it does not stream cells) |
+
+Tests: `test_landscape_hlod.cpp` (pack round trip with and without water, damaged trailer/table refused, proxies appear/disappear with the draw radius and with the cell loading), `test_landscape_cell_hlod_bake.cpp` (merge in absolute metres, dynamic body left out, missing/empty cells counted, budgets keep the big instances, append/replace/remove in a pack, non-pack refused).
+
+**Not done:** (1) the export does not run the baker: `splitSceneIntoCells` has **no caller in the editor or the export** (only tests and `scripts/split_scene_cells.py`), so there is no place yet that knows the cell files of a scene next to its landscape pack; the next worker should add a "bake cell proxies" step where cells are produced, calling `bakeCellProxies` and `landscapePackSetHlod`. (2) `CellRegionConfig` is still not set from the landscape's region size. (3) The table pass costs O(table cells) every 4th frame, fine for thousands, not measured for a 100 km world with tens of thousands. (4) Proxies have no colour (default material) and no tree impostors. (5) Nothing was looked at on a screen.
+
 ## Handoff
 
 - **Topic / step:** 326, Hive step 6 of the plan ("Entladen ganzer Regionen, Entity-Zellen und
