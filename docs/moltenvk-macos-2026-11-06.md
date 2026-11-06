@@ -87,17 +87,37 @@ Verified: Catania on Vulkan before vs after the change: mean pixel difference 0.
 `test_material_graph` / `test_engine_materials` / `test_material_tessellation` reflect separate images and
 samplers now (the reflection loops fail on any shader that declares a fixed texture combined).
 
+## Validation layer on the Mac (2026-11-06)
+
+`brew install vulkan-validationlayers` (pulls `vulkan-loader`). The engine links `libMoltenVK` directly, and MoltenVK
+has no layer support, so `HE_GPU_DEBUG=1` alone finds no layer. Recipe without touching the build: in a *copy* of an
+exported game, replace `HorizonEngine/libMoltenVK.dylib` with `cp -L /opt/homebrew/opt/vulkan-loader/lib/libvulkan.1.dylib`
+(the engine dylib binds the `vk*` symbols by name from that install name) and run with
+
+```
+HE_GPU_DEBUG=1 HE_HIDDEN_WINDOW=1 \
+DYLD_LIBRARY_PATH=/opt/homebrew/opt/vulkan-validationlayers/lib \
+VK_LAYER_PATH=/opt/homebrew/opt/vulkan-validationlayers/share/vulkan/explicit_layer.d \
+VK_ICD_FILENAMES=/opt/homebrew/opt/molten-vk/etc/vulkan/icd.d/MoltenVK_icd.json ./<Game>
+```
+
+`DYLD_LIBRARY_PATH` is needed because the layer json's `library_path` is a bare file name (without it
+`vkCreateInstance` fails with -6, layer not present). Result, 1500 frames with the governor stepping 2 -> 1 -> 0
+(sampler rebuild, descriptor rewrite, shadow cascade rebuild): 0 errors, two messages only, both older than this
+work: "vertex attribute at location 2 not consumed by vertex shader" (one `vkCreateGraphicsPipelines`) and
+MoltenVK's "Metal does not support disabling primitive restart".
+
 ## Handoff
 
 **Verified:** as above. **Not verified:** a visible (non-hidden) window and VSync on the Vulkan path,
-`HE_GPU_DEBUG` validation layer (not installed), the editor's ImGui Vulkan bridge under interaction (only
-one dumped frame), Texture Quality on Vulkan, per-feature pixel parity with Metal (only the whole frame was compared). **Decided:** direct link to MoltenVK, opt-in, no Khronos loader on macOS.
+the editor's ImGui Vulkan bridge under interaction (only one dumped frame), per-feature pixel parity with Metal
+(only the whole frame was compared); which pipeline owns the location-2 attribute warning. **Decided:** direct link to MoltenVK, no Khronos loader in the product build on macOS.
 **Done since (2026-11-06, same branch):** MoltenVK on by default (above); Texture Quality on Vulkan; shadow presets
 confirmed on Vulkan; material quality alone A/B against Metal; the governor run on Vulkan. Numbers and files:
 `docs/engine-quality-settings-2026-11-05.md` section 10.
 **Next steps, in order**
 1. CI: let the macOS job run once with the `Install MoltenVK + shaderc` step; check `HE_VULKAN_ENABLED` in its CMakeCache
    and `otool -L` of the packaged editor (libMoltenVK `@rpath`-relative, inside the DMG's Frameworks).
-2. Hive topic 336 step 8 (Vulkan): a Windows/Linux driver run, a visible window with VSync, validation layers
-   (`brew install vulkan-validationlayers`, then `HE_GPU_DEBUG=1`).
+2. Hive topic 336 step 8 (Vulkan): a Windows/Linux driver run and a visible window with VSync (the validation
+   layer run is done on the Mac, above).
 3. Per-node "Sampler Source" (Texture / Shared Wrap / Shared Clamp) on the Texture Sample node, only if wanted.
