@@ -601,6 +601,14 @@ public:
     void setSpirvFogVolume(bool on) { m_spirvFogVolume = on; }
     bool spirvFogVolume() const { return m_spirvFogVolume; }
 
+    // D3D11/D3D12 only (Thema 225 step 8): does the material preamble carry row 34
+    // (heFogVolume) for Backend::HLSL? Default off — a backend turns it on only once
+    // its Inject/Integrate/Apply dispatch and t34 binding are wired (D3D11Renderer::
+    // EnsureFogVolumePipelines); D3D11 and D3D12 each own their own MaterialShaderLibrary
+    // instance, so one backend's switch never affects the other's HLSL compiles.
+    void setHlslFogVolume(bool on) { m_hlslFogVolume = on; }
+    bool hlslFogVolume() const { return m_hlslFogVolume; }
+
     void clear() { m_vertCache.clear(); m_fragCache.clear(); m_cvertCache.clear();
                    m_uiVertCache.clear(); m_resolveCache.clear(); m_resolveTileCache.clear();
                    m_ssrCache.clear(); m_decalCache.clear(); m_fsVertCache.clear();
@@ -608,6 +616,7 @@ public:
 
 private:
     bool m_spirvFogVolume = true;
+    bool m_hlslFogVolume  = false;
     const Compiled& fragmentVariant(uint64_t sourceHash, const std::string& glsl, Backend backend,
                                     bool clustered);
 

@@ -3074,13 +3074,15 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         return m_fragCache.emplace(key, std::move(out)).first->second;
     }
     // HE_FOG_VOLUME (heFogVolume binding 34, heApplyFogT): Metal, GL and Vulkan — the
-    // backends with an Apply/Integrate pass built (Thema 225 steps 3-5). D3D stays off
-    // until its step binds the volume (HLSL register budget) — flipping this for it
-    // without the binding code would declare heFogVolume with nothing behind it.
-    // Vulkan's flag is an instance switch (setSpirvFogVolume): a device whose per-stage
-    // sampler limit cannot hold row 34 compiles its materials without it.
+    // backends with an Apply/Integrate pass built (Thema 225 steps 3-5), and now HLSL
+    // once its own renderer has wired the dispatch + t34 binding (step 8's
+    // setHlslFogVolume — D3D11 turns it on at Initialize once EnsureFogVolumePipelines
+    // succeeds; D3D12 stays off until its own step). Vulkan's flag is an instance
+    // switch (setSpirvFogVolume) for the same reason: a device whose per-stage sampler
+    // limit cannot hold row 34 compiles its materials without it.
     const bool fogVolume = backend == Backend::Metal || backend == Backend::GLSL410
-                        || (backend == Backend::SpirV && m_spirvFogVolume);
+                        || (backend == Backend::SpirV && m_spirvFogVolume)
+                        || (backend == Backend::HLSL  && m_hlslFogVolume);
     const std::string injected = injectPreamble(glsl, clustered, fogVolume); // adds the lighting UBO + heLit()
     if (backend == Backend::Metal)
     {
@@ -3268,6 +3270,12 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             { Stage::Fragment, 0, 31, 31,  8 }, // heSSRFwd       → s8
             { Stage::Fragment, 0, 32, 32,  9 }, // heGIReflFwd    → s9
             { Stage::Fragment, 0, 33, 33, 14 }, // heCloudShadow  → s14
+            // heFogVolume (Thema 225 step 8): t34, no sampler (heFogFetch reads it with
+            // texelFetch only, like heAO's t16) — a pin SPIRV-Cross ignores on every
+            // compile where HE_FOG_VOLUME is undefined and the shader never declares
+            // binding 34 (m_hlslFogVolume false), so this line is harmless everywhere
+            // until a backend turns the flag on.
+            { Stage::Fragment, 0, 34, 34 },     // heFogVolume
         };
         // Clustered variant: three SRVs and NO sampler, so the table above is
         // untouched. Pinned to their binding numbers (what SPIRV-Cross would
