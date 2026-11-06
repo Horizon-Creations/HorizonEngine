@@ -416,10 +416,9 @@ TEST_CASE("Fog kernels: Inject/Integrate (compute) and Apply (fragment) cross-co
     CHECK(apply.source.find("fragment") != std::string::npos);
     CHECK(apply.source.find("[[texture(2)]]") != std::string::npos); // scene depth
 
-    // D3D (step 6) and GL 4.3 keep the analytic fog for now: a clear "not yet".
-    CHECK_FALSE(lib.fogInject(B::HLSL).ok);
+    // GL 4.3 keeps the analytic fog for now: a clear "not yet" (D3D joined in step 6,
+    // see the HLSL test case below).
     CHECK_FALSE(lib.fogApply(B::GLSL430).ok);
-    CHECK_FALSE(lib.fogIntegrate(B::HLSL).ok);
 }
 
 // ═══ Step 4: the GL fragment-path kernels (one fullscreen quad per Z slice,
@@ -463,9 +462,46 @@ TEST_CASE("Fog kernels (GL fragment path): Inject/Integrate/Apply cross-compile 
     CHECK(apply.source.find("void main") != std::string::npos);
     CHECK(apply.source.find("heFogIntegrated") != std::string::npos);
 
-    // D3D stays off until step 6: a clear "not yet", same shape as the Metal test above.
-    CHECK_FALSE(lib.fogInject(B::HLSL).ok);
-    CHECK_FALSE(lib.fogIntegrate(B::HLSL).ok);
+    CHECK_FALSE(lib.fogApply(B::GLSL430).ok);
+}
+
+// ═══ Step 6: D3D11/D3D12 (compute, SM 5.0) — same canonical GLSL-450 kernels as
+// Metal and Vulkan, cross-compiled through the HlslPin path every other D3D-only
+// pass already uses (kDecalHlslPins/kSSRHlslPins). Only the shader text is proven
+// here; the renderer-side dispatch (PSO/root signature, resource creation, the
+// Apply splice at the decals->transparent seam) is NOT wired yet — see the step 6
+// handoff. ═════════════════════════════════════════════════════════════════════
+TEST_CASE("Fog kernels (D3D11/D3D12 compute): Inject/Integrate/Apply cross-compile for HLSL SM 5.0 (Thema 225 step 6)")
+{
+    HE::MaterialShaderLibrary lib;
+    using B = HE::MaterialShaderLibrary::Backend;
+
+    const auto& inj = lib.fogInject(B::HLSL);
+    INFO("inject: ", inj.log);
+    REQUIRE(inj.ok);
+    CHECK(inj.source.find("numthreads") != std::string::npos);
+    // The real shadow functions came along (one set of shadow maths, same as
+    // Metal/Vulkan/GL's inject): HeLighting at b0, HeFogVol at b1, the CSM array
+    // at t0, the output volume as a UAV.
+    CHECK(inj.source.find("register(b0)") != std::string::npos);
+    CHECK(inj.source.find("register(b1)") != std::string::npos);
+    CHECK(inj.source.find("register(t0)") != std::string::npos);
+    CHECK(inj.source.find("register(u0)") != std::string::npos);
+
+    const auto& integ = lib.fogIntegrate(B::HLSL);
+    INFO("integrate: ", integ.log);
+    REQUIRE(integ.ok);
+    CHECK(integ.source.find("numthreads") != std::string::npos);
+    CHECK(integ.source.find("register(u0)") != std::string::npos);
+
+    const auto& apply = lib.fogApply(B::HLSL);
+    INFO("apply: ", apply.log);
+    REQUIRE(apply.ok);
+    CHECK(apply.source.find("register(t0)") != std::string::npos); // integrated volume
+    CHECK(apply.source.find("register(t1)") != std::string::npos); // sky env cube
+    CHECK(apply.source.find("register(t2)") != std::string::npos); // scene depth
+
+    // GL 4.3 (the clustered-forward-only variant) stays off: a clear "not yet".
     CHECK_FALSE(lib.fogApply(B::GLSL430).ok);
 }
 

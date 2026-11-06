@@ -3389,6 +3389,24 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogInject(Backend 
         // Vulkan semantics ARE the source's semantics: canonical set 0 bindings, no pins
         // (VulkanRenderer::EnsureFogPipelines writes the descriptor layout to match).
         out = toCompiled(compile(fogInjectGlsl(), Stage::Compute, Target::SpirvBinary));
+    else if (backend == Backend::HLSL)
+        // D3D11/D3D12 share Backend::HLSL and both run this as an SM 5.0 compute
+        // shader (Thema 225 step 6; D3D12MaterialRootSignature.h/D3D11MaterialBindings.h
+        // still need the matching dispatch-side wiring — not done by this pin, see the
+        // step 6 handoff). Registers chosen fresh (this dispatch binds nothing else at
+        // the same time, so there is no existing range to avoid, unlike kDecalHlslPins/
+        // kSSRHlslPins): b0 HeLighting, b1 HeFogVol, t0 CSM array, t1 local shadow atlas,
+        // t2 sky env cube, t3 cloud shadow, t4 SkyNoise3D, t5 history, u0 output volume.
+        out = toCompiled(compileHlslPinned(fogInjectGlsl(), Stage::Compute,
+            { { Stage::Compute, 0, 0,  0 },   // HeLighting
+              { Stage::Compute, 0, 36, 1 },   // HeFogVol
+              { Stage::Compute, 0, 12, 0 },   // CSM array
+              { Stage::Compute, 0, 13, 1 },   // local shadow atlas
+              { Stage::Compute, 0, 15, 2 },   // sky env cube
+              { Stage::Compute, 0, 33, 3 },   // cloud shadow
+              { Stage::Compute, 0, 35, 4 },   // SkyNoise3D
+              { Stage::Compute, 0, 37, 5 },   // history
+              { Stage::Compute, 0, 38, 0 } }));// output volume (UAV u0)
     else
         out.log = "fogInject: volumetric fog is not implemented for this backend yet (Thema 225 step 6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
@@ -3411,6 +3429,13 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogIntegrate(Backe
         out = toCompiled(compile(fogIntegrateGlslGL(), Stage::Fragment, Target::Glsl410));
     else if (backend == Backend::SpirV)
         out = toCompiled(compile(fogIntegrateGlsl(), Stage::Compute, Target::SpirvBinary));
+    else if (backend == Backend::HLSL)
+        // Self-contained (no lighting preamble): b0 HeFogVol, t0 injected volume
+        // (texture3D SRV, texelFetch only), u0 output volume.
+        out = toCompiled(compileHlslPinned(fogIntegrateGlsl(), Stage::Compute,
+            { { Stage::Compute, 0, 36, 0 },   // HeFogVol
+              { Stage::Compute, 0, 37, 0 },   // injected volume
+              { Stage::Compute, 0, 38, 0 } }));// output volume (UAV u0)
     else
         out.log = "fogIntegrate: volumetric fog is not implemented for this backend yet (Thema 225 step 6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
@@ -3432,6 +3457,14 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fogApply(Backend b
         out = toCompiled(compile(fogApplyGlslGL(), Stage::Fragment, Target::Glsl410));
     else if (backend == Backend::SpirV)
         out = toCompiled(compile(fogApplyGlsl(), Stage::Fragment, Target::SpirvBinary));
+    else if (backend == Backend::HLSL)
+        // Fullscreen fragment pass: b0 HeFogVol, t0 integrated volume, t1 sky env
+        // cube, t2 scene depth.
+        out = toCompiled(compileHlslPinned(fogApplyGlsl(), Stage::Fragment,
+            { { Stage::Fragment, 0, 36, 0 },   // HeFogVol
+              { Stage::Fragment, 0, 34, 0 },   // integrated volume
+              { Stage::Fragment, 0, 15, 1 },   // sky env cube
+              { Stage::Fragment, 0, 39, 2 } }));// scene depth
     else
         out.log = "fogApply: volumetric fog is not implemented for this backend yet (Thema 225 step 6)";
     return m_fogCache.emplace(key, std::move(out)).first->second;
