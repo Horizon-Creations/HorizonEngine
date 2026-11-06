@@ -326,7 +326,14 @@ layout(set = 0, binding = 32) uniform sampler2D heGIReflFwd; // rgb radiance, a 
 // fragment stage sits at Metal's 16-sampler cap, so this texture deliberately
 // consumes no sampler slot (ShaderCompiler MslOptions::constexprLinearSamplers).
 // GL assigns unit 19 by name. Gated by heLight.cloudShadowB.x (0 = off).
+// Backend::SpirV (Vulkan) injects HE_NO_CLOUD_SHADOW_MAP: it never fills this map (the gate
+// stays 0), and the sampler it would declare is the 17th of the fragment stage, one over the
+// 16 that MoltenVK (and any spec-minimum device) allows per stage. Without the declaration the
+// landscape weightmap fits, and heCloudShadowFactor folds to 1.0, which is what the dead
+// gate gave anyway.
+#ifndef HE_NO_CLOUD_SHADOW_MAP
 layout(set = 0, binding = 33) uniform sampler2D heCloudShadow;
+#endif
 // Signed-octahedral mapping (Meyer et al. 2010), direction -> texel UV. Mirror of
 // the backends' octEncode; kept a copy here for the same reason they keep theirs:
 // each shader string is its own compilation unit.
@@ -499,6 +506,9 @@ float heLocalShadowFactor(int i, vec3 worldPos, vec3 n) {
 // SYNC: the same three lines live in the built-in shaders (Metal fragmentMain's
 // cloudShadowFactor, GL kUnlitFS's cloudShadowFactor) — change one, change all.
 float heCloudShadowFactor(vec3 worldPos, vec3 L) {
+#ifdef HE_NO_CLOUD_SHADOW_MAP
+    return 1.0;
+#else
     float s = heLight.cloudShadowB.x;
     if (s <= 0.0 || L.y <= 0.05) return 1.0;
     float t = (heLight.cloudShadowA.w - worldPos.y) / L.y;
@@ -509,6 +519,7 @@ float heCloudShadowFactor(vec3 worldPos, vec3 L) {
     if (edge <= 0.0) return 1.0;
     float T = texture(heCloudShadow, uv).r;
     return mix(1.0, T, s * edge);
+#endif
 }
 // Legacy sun-only shading — kept so precompiled material blobs and hand-written
 // escape-hatch fragments that call heLit() keep working unchanged. Has no
@@ -900,11 +911,15 @@ vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldP
 // #version to be the first token). If the source has none, prepend one.
 // `clustered` defines HE_CLUSTERED ahead of the preamble — the forward
 // clustered-lighting variant (fragmentClustered).
-std::string injectPreamble(const std::string& src, bool clustered = false)
+std::string injectPreamble(const std::string& src, bool clustered = false, bool noCloudShadowMap = false)
 {
-    static const std::string kPre(kLightingPreamble);
-    static const std::string kPreClustered = std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble;
-    const std::string& pre = clustered ? kPreClustered : kPre;
+    // Four fixed prefixes (clustered x cloud-shadow map), built once.
+    static const std::string kPres[4] = {
+        std::string(kLightingPreamble),
+        std::string("#define HE_CLUSTERED 1\n") + kLightingPreamble,
+        std::string("#define HE_NO_CLOUD_SHADOW_MAP 1\n") + kLightingPreamble,
+        std::string("#define HE_CLUSTERED 1\n#define HE_NO_CLOUD_SHADOW_MAP 1\n") + kLightingPreamble };
+    const std::string& pre = kPres[(clustered ? 1 : 0) + (noCloudShadowMap ? 2 : 0)];
     const size_t vpos = src.find("#version");
     if (vpos == std::string::npos)
         return std::string("#version 450\n") + pre + src;
@@ -1879,7 +1894,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolve(Ba
     return cachedCompile(m_resolveCache, static_cast<int>(backend), [&]
     {
         return compileResolveVariant(
-            injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/false)),
+            injectPreamble(buildDeferredResolveSource(/*tile=*/false, /*clustered=*/false), false, backend == Backend::SpirV),
             backend, false, false);
     });
 }
@@ -1890,7 +1905,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveClu
     {
         std::string src = buildDeferredResolveSource(/*tile=*/false, /*clustered=*/true);
         if (backend != Backend::Metal) src = explicitLodClusterSamples(std::move(src));
-        return compileResolveVariant(injectPreamble(src), backend, false, true);
+        return compileResolveVariant(injectPreamble(src, false, backend == Backend::SpirV), backend, false, true);
     });
 }
 
@@ -1899,7 +1914,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTil
     return cachedCompile(m_resolveTileCache, static_cast<int>(backend), [&]
     {
         return compileResolveVariant(
-            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/false)),
+            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/false), false, backend == Backend::SpirV),
             backend, true, false);
     });
 }
@@ -1909,7 +1924,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::deferredResolveTil
     return cachedCompile(m_resolveTileCache, static_cast<int>(backend) + 64, [&]
     {
         return compileResolveVariant(
-            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true)),
+            injectPreamble(buildDeferredResolveSource(/*tile=*/true, /*clustered=*/true), false, backend == Backend::SpirV),
             backend, true, true);
     });
 }
@@ -2449,7 +2464,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::ssrComposite(Backe
     return cachedCompile(m_ssrCache, static_cast<int>(backend) * 4 + 1, [&]
     {
         using namespace he::shaderc;
-        const std::string injected = injectPreamble(kSSRCompositeFS);
+        const std::string injected = injectPreamble(kSSRCompositeFS, false, backend == Backend::SpirV);
         Compiled out;
         if (backend == Backend::Metal)
             out = toCompiled(compileMslPinned(injected, Stage::Fragment,
@@ -2985,7 +3000,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
                   "GLSL410/GLSLES300 have none (GL 4.3+ uses Backend::GLSL430)";
         return m_fragCache.emplace(key, std::move(out)).first->second;
     }
-    const std::string injected = injectPreamble(glsl, clustered); // adds the lighting UBO + heLit()
+    const std::string injected = injectPreamble(glsl, clustered, backend == Backend::SpirV); // adds the lighting UBO + heLit()
     if (backend == Backend::Metal)
     {
         // ── Fragment sampler budget ──────────────────────────────────────────

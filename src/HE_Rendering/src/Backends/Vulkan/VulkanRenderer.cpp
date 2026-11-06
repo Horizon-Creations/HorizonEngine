@@ -9665,8 +9665,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // SHADER_READ_ONLY by the blur pass's finalLayout. White
                             // otherwise; fog.w is 0 then. heLitP texelFetches it, so the
                             // sampler is only there because the descriptor is combined.
-                            VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
-                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             VkDescriptorImageInfo aoII{
                                 m_ssaoRanThisFrame ? m_ssaoSampler      : m_albedoSampler,
                                 m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView,
@@ -9688,13 +9686,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giVisII);
                             // heGIReflFwd (32): this frame's reflection result (frameMatLight
                             // carries giRefl.z from the same m_giReflReady), white otherwise —
-                            // mirrors heSSRFwd's binding-8 pattern above. heCloudShadow (33):
-                            // white, its gate (cloudShadowB.x) stays 0.
+                            // mirrors heSSRFwd's binding-8 pattern above. (heCloudShadow, 33,
+                            // is not declared by the SpirV preamble: its gate never opens here.)
                             VkDescriptorImageInfo giReflII{ giAtlasSampler,
                                 m_giReflReady ? m_giReflFinal.view : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             wr(19, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giReflII);
-                            wr(20, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
                             // fragmentClustered's light lists (bindings 24..26, Thema
                             // 117): this frame slot's cluster SSBOs, the very buffers
                             // the built-in shader reads at scene bindings 10..12. Written
@@ -9706,8 +9703,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
                             // repeating sampler would bleed the far edge's paint in).
                             // Only when the layout has the row (m_matLandscapeWeights).
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 22,
-                                          "fixed writes w[0..20] + w[21] heLandscapeWeights, one per non-cluster row");
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 21,
+                                          "fixed writes w[0..19] + w[20] heLandscapeWeights, one per non-cluster row");
                             uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
                             VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
                                                              heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -10057,8 +10054,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 VkDescriptorBufferInfo lightBI{ m_resolveLightBuf[f].buf, 0, sizeof(MSL::Lighting) };
                 VkDescriptorBufferInfo uboBI  { m_resolveUboBuf[f].buf,   0, sizeof(MSL::ResolveUniforms) };
                 const VkSampler clampSampler = m_ssaoSampler ? m_ssaoSampler : m_albedoSampler;
-                const VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
-                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                 const VkDescriptorImageInfo giSunII{ m_albedoSampler,
                     (m_giRanThisFrame && m_giResult.view) ? m_giResult.view : m_whiteAlbedoView,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -10138,8 +10133,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 wr(HE::vkmat::kResolveUboBinding,   kUbo, &uboBI, nullptr);
                 wr(31, kCis, nullptr, &ssrII);
                 wr(32, kCis, nullptr, &giReflII); // heGIReflFwd (frameMatLight carries giRefl.z)
-                wr(33, kCis, nullptr, &whiteII); // heCloudShadow: cloudShadowB.x stays 0
-                static_assert(HE::vkmat::kResolvePreClusterBindingCount == 17,
+                static_assert(HE::vkmat::kResolvePreClusterBindingCount == 16,
                               "one fixed write per non-cluster row of kResolveBindings");
                 // The lists whenever they exist — the clustered resolve uses them
                 // statically, the 8-light one ignores them.

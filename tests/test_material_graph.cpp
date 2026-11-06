@@ -5072,15 +5072,20 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 		              && (HE::vkmat::kBindings[i].stages & ~HE::vkmat::kStageTess) == HE::vkmat::kStageFragment);
 	CHECK(row);
 
-	// The device limit: 17 fragment samplers with the row, 16 (the spec
-	// minimum, which every device meets) without it — the renderer's fallback.
-	CHECK(HE::vkmat::fragmentSamplerCount(true) == 17);
-	CHECK(HE::vkmat::fragmentSamplerCount(false) == 16);
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 16));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
-	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
-	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
+	// The device limit: 16 fragment samplers WITH the row — the spec minimum, and MoltenVK's hard
+	// per-stage limit (a Mac reported 16 and lost the row to the fallback while heCloudShadow, binding
+	// 33, still counted: every layer-blend terrain drew white). 15 without it, the fallback for a
+	// device below the minimum. The reflection loop below is what keeps binding 33 out of the
+	// SPIR-V: a shader still declaring it would be a use outside this layout.
+	CHECK(HE::vkmat::fragmentSamplerCount(true) == 16);
+	CHECK(HE::vkmat::fragmentSamplerCount(false) == 15);
+	CHECK(HE::vkmat::landscapeWeightsFit(16, 16));
+	CHECK(HE::vkmat::landscapeWeightsFit(16, 1u << 20));
+	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
+	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(15, 15));
 	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	for (uint32_t i = 0; i < HE::vkmat::kBindingCount; ++i)
+		CHECK(HE::vkmat::kBindings[i].binding != 33);
 
 	int landscapeCases = 0;
 	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
@@ -5185,7 +5190,7 @@ TEST_CASE("Vulkan: the deferred resolve's set layout covers both resolve variant
 		if (vm::kResolveBindings[i].kind == DescKind::CombinedImageSampler
 		    && (vm::kResolveBindings[i].stages & vm::kStageFragment))
 			++fragSamplers;
-	CHECK(fragSamplers == 15);
+	CHECK(fragSamplers == 14);
 	CHECK(fragSamplers <= 16);
 
 	// Both variants, reflected.

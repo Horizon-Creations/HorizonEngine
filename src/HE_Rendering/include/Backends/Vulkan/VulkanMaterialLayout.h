@@ -28,12 +28,18 @@
 // as it was before — the test's negative control.
 //
 // heLandscapeWeights (Thema 143): binding 14, the painted terrain's weightmap
-// (Landscape Layer Blend). Its row brings the fragment stage to 17 combined
-// image samplers, one over the spec minimum of maxPerStageDescriptorSamplers /
-// …SampledImages (16). A device at that minimum cannot create the full layout
-// at all, so the renderer then builds it WITHOUT this one row (landscapeWeightsFit)
-// and draws a layer-blend material through the built-in path instead: losing
-// the paint there beats losing every graph material.
+// (Landscape Layer Blend). The fragment stage holds 16 combined image samplers
+// with it: exactly the spec minimum of maxPerStageDescriptorSamplers /
+// …SampledImages, and what MoltenVK reports (16, hard: argument buffers do not
+// raise it). That works because heCloudShadow (binding 33) is NOT in this table:
+// the Backend::SpirV preamble leaves it out (HE_NO_CLOUD_SHADOW_MAP), Vulkan never
+// fills the cloud-shadow map and its gate stays 0. Before that the row made it 17,
+// a MoltenVK Mac lost heLandscapeWeights to the fallback (landscapeWeightsFit) and
+// every layer-blend terrain drew white. Anything that adds another fragment sampler
+// here must take one out, or move that device to the fallback again. A device
+// below the minimum still builds the layout WITHOUT the heLandscapeWeights row and
+// draws a layer-blend material through the built-in path: losing the paint there
+// beats losing every graph material.
 //
 // Displacement (Thema 207): MaterialShaderLibrary::tessControl/tessEval (SpirV)
 // read the FRAGMENT's bindings — HeLighting 0 (both stages), U 1, heTex0 2,
@@ -108,13 +114,12 @@ inline constexpr Binding kBindings[] = {
 	//   17 heGIIrradiance    — giProbe.y (FillMaterialGIProbe): the DDGI atlases,
 	//   18 heGIVisibility      the SAME two images scene bindings 5/6 sample
 	//   32 heGIReflFwd       — giRefl.z, no RT reflections here: white
-	//   33 heCloudShadow     — cloudShadowB.x, never set here: white
+	//   (33 heCloudShadow    — not declared by the SpirV preamble, see the header)
 	{ 15, DescKind::CombinedImageSampler, kStageFragment }, // heSkyEnv
 	{ 16, DescKind::CombinedImageSampler, kStageFragment }, // heAO
 	{ 17, DescKind::CombinedImageSampler, kStageFragment }, // heGIIrradiance
 	{ 18, DescKind::CombinedImageSampler, kStageFragment }, // heGIVisibility
 	{ 32, DescKind::CombinedImageSampler, kStageFragment }, // heGIReflFwd
-	{ 33, DescKind::CombinedImageSampler, kStageFragment }, // heCloudShadow
 	// ── Thema 117: fragmentClustered's light lists (keep these LAST) ──
 	{ kClusterLightsBinding, DescKind::StorageBuffer, kStageFragment },
 	{ kClusterGridBinding,   DescKind::StorageBuffer, kStageFragment },
@@ -159,21 +164,22 @@ constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true)
 }
 
 // Does the full layout (heLandscapeWeights included) fit the device's
-// maxPerStageDescriptorSamplers / maxPerStageDescriptorSampledImages? If not,
-// the renderer leaves the heLandscapeWeights row out of the layout.
+// maxPerStageDescriptorSamplers / maxPerStageDescriptorSampledImages? If not
+// (a device below the spec minimum), the renderer leaves the heLandscapeWeights
+// row out of the layout.
 constexpr bool landscapeWeightsFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages)
 {
 	return fragmentSamplerCount(true) <= maxPerStageSamplers
 	    && fragmentSamplerCount(true) <= maxPerStageSampledImages;
 }
 
-static_assert(kBindingCount == 25, "material set 0: 22 canonical bindings + 3 cluster lists");
+static_assert(kBindingCount == 24, "material set 0: 21 canonical bindings + 3 cluster lists");
 static_assert(countOf(DescKind::UniformBuffer) == 5);        // b0, b1, b3, b8, b9
-static_assert(countOf(DescKind::CombinedImageSampler) == 17); // b2, b4-b7, b10-b18, b31-b33
+static_assert(countOf(DescKind::CombinedImageSampler) == 16); // b2, b4-b7, b10-b18, b31, b32
 static_assert(countOf(DescKind::StorageBuffer) == 3);         // b24-b26
-static_assert(fragmentSamplerCount(true) == 17 && fragmentSamplerCount(false) == 16,
-              "without heLandscapeWeights the layout must fit the spec minimum of 16");
-static_assert(!landscapeWeightsFit(16, 16) && landscapeWeightsFit(17, 17));
+static_assert(fragmentSamplerCount(true) == 16 && fragmentSamplerCount(false) == 15,
+              "with heLandscapeWeights the layout must still fit the spec minimum of 16 (MoltenVK's hard limit)");
+static_assert(landscapeWeightsFit(16, 16) && !landscapeWeightsFit(15, 15));
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
               "the cluster lists must be the last rows (negative control slices them off)");
 
@@ -188,7 +194,7 @@ static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
 // heTexP0..3 / heLandscapeWeights, so it gets a layout of its own: the renderer
 // builds VulkanRenderer::m_resolveSetLayout from this table and he_tests
 // reflects both resolve variants against it (set, binding, kind AND stage).
-// 15 combined samplers in the fragment stage — inside the spec minimum of 16,
+// 14 combined samplers in the fragment stage — inside the spec minimum of 16,
 // so no device needs a fallback here.
 constexpr uint32_t kResolveGB0Binding   = 19; // heGB0: rgb BaseColor, a Metallic   (R8G8B8A8_SRGB)
 constexpr uint32_t kResolveGB1Binding   = 20; // heGB1: rg oct normal, b Rough, a Spec (RGBA16F)
@@ -213,7 +219,6 @@ inline constexpr Binding kResolveBindings[] = {
 	{ kResolveUboBinding,   DescKind::UniformBuffer,        kStageFragment },
 	{ 31, DescKind::CombinedImageSampler, kStageFragment }, // heSSRFwd
 	{ 32, DescKind::CombinedImageSampler, kStageFragment }, // heGIReflFwd
-	{ 33, DescKind::CombinedImageSampler, kStageFragment }, // heCloudShadow
 	// ── the clustered resolve's light lists (keep these LAST, as above) ──
 	{ kClusterLightsBinding, DescKind::StorageBuffer, kStageFragment },
 	{ kClusterGridBinding,   DescKind::StorageBuffer, kStageFragment },
@@ -231,9 +236,9 @@ constexpr uint32_t resolveCountOf(DescKind kind, uint32_t bindingCount = kResolv
 	return n;
 }
 
-static_assert(kResolveBindingCount == 20, "resolve set 0: 17 canonical bindings + 3 cluster lists");
+static_assert(kResolveBindingCount == 19, "resolve set 0: 16 canonical bindings + 3 cluster lists");
 static_assert(resolveCountOf(DescKind::UniformBuffer) == 2);          // b0, b23
-static_assert(resolveCountOf(DescKind::CombinedImageSampler) == 15);  // b10-b13, b15-b22, b31-b33
+static_assert(resolveCountOf(DescKind::CombinedImageSampler) == 14);  // b10-b13, b15-b22, b31, b32
 static_assert(resolveCountOf(DescKind::StorageBuffer) == 3);          // b24-b26
 static_assert(resolveCountOf(DescKind::StorageBuffer, kResolvePreClusterBindingCount) == 0,
               "the cluster lists must be the last rows (the 8-light resolve uses none of them)");
