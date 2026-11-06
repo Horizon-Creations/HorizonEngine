@@ -7,12 +7,16 @@
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeCellHlod.h>
+#include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/SceneJsonParse.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/MeshComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <random>
 #include <map>
 #include <string>
 #include <thread>
@@ -200,4 +204,91 @@ TEST_CASE("hlodCellsToDraw: only the cell that is NOT fully loaded is selected")
 	CHECK(drawn[0].z == 0);
 
 	streamer.clear(world);
+}
+
+// ── pack: the HLOD table is a tail section after the water table ─────────────
+namespace
+{
+std::filesystem::path hlodPackPath(const char* name)
+{
+	return std::filesystem::temp_directory_path() / (std::string("he_landscape_hlod_") + name + "_" + std::to_string(std::random_device{}()) + ".bin");
+}
+
+void writeSmallPack(const std::filesystem::path& path, const HE::LandscapeHlodTable* hlod, bool sea)
+{
+	HE::ProceduralLandscapeParams p;
+	p.geometry.hCells = 32;
+	p.geometry.wTexels = 16;
+	p.geometry.channels = 4;
+	p.tilesX = p.tilesZ = 2;
+	if (sea) p.seaLevelM = 1500.0f;
+	const HE::ProceduralLandscapeSource src(p);
+	HE::LandscapePackWriter w;
+	REQUIRE(w.begin(path.string(), src.geometry(), 2, 2, 3));
+	if (sea) w.setWaterTable(*src.water());
+	if (hlod) w.setHlodTable(*hlod);
+	for (int z = 0; z < 2; ++z)
+		for (int x = 0; x < 2; ++x) REQUIRE(w.add({ x, z }, HE::encodeLandscapeTile(src.generate({ x, z }))));
+	REQUIRE(w.finish());
+}
+} // namespace
+
+TEST_CASE("pack HLOD: the table round-trips through the pack, with and without water, and a pack without one reads as before")
+{
+	HE::LandscapeHlodTable table;
+	table.set(3, -2, oneTriangle());
+	table.set(0, 0, oneTriangle());
+
+	for (const bool sea : { false, true })
+	{
+		const auto with = hlodPackPath("with"), without = hlodPackPath("without");
+		writeSmallPack(with, &table, sea);
+		writeSmallPack(without, nullptr, sea);
+		std::string err;
+		auto a = HE::LandscapePackSource::open(with.string(), &err);
+		REQUIRE_MESSAGE(a, err);
+		REQUIRE(a->hlod());
+		CHECK(a->hlod()->cellCount() == 2);
+		REQUIRE(a->hlod()->find(3, -2));
+		CHECK(a->hlod()->find(3, -2)->vertices.size() == 3);
+		CHECK(a->hlod()->find(0, 0)->indices.size() == 3);
+		CHECK((a->water() != nullptr) == sea);   // the water table is where it was
+		CHECK(a->coarse() != nullptr);
+		HE::LandscapeTile t;
+		CHECK(a->load({ 1, 1 }, -1, t));         // and the tiles still decode
+		auto b = HE::LandscapePackSource::open(without.string(), &err);
+		REQUIRE_MESSAGE(b, err);
+		CHECK(b->hlod() == nullptr);
+		std::filesystem::remove(with);
+		std::filesystem::remove(without);
+	}
+}
+
+TEST_CASE("pack HLOD: a trailer pointing outside the file, or a damaged table, refuses the pack")
+{
+	HE::LandscapeHlodTable table;
+	table.set(1, 1, oneTriangle());
+	const auto path = hlodPackPath("damaged");
+	writeSmallPack(path, &table, false);
+	std::vector<char> bytes;
+	{
+		std::ifstream in(path, std::ios::binary);
+		bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+	}
+	const auto openWith = [&](const std::vector<char>& b) {
+		const auto q = hlodPackPath("variant");
+		{ std::ofstream o(q, std::ios::binary); o.write(b.data(), static_cast<std::streamsize>(b.size())); }
+		auto src = HE::LandscapePackSource::open(q.string());
+		std::filesystem::remove(q);
+		return src;
+	};
+	REQUIRE(openWith(bytes));
+	std::vector<char> badOffset = bytes;                         // trailer offset 0: before the index
+	for (int i = 0; i < 8; ++i) badOffset[bytes.size() - HE::kLandscapePackHlodTrailerBytes + static_cast<size_t>(i)] = 0;
+	CHECK_FALSE(openWith(badOffset));
+	std::vector<char> badTable = bytes;                          // table magic broken
+	const size_t tableAt = bytes.size() - HE::kLandscapePackHlodTrailerBytes - table.encode().size();
+	badTable[tableAt] = 'X';
+	CHECK_FALSE(openWith(badTable));
+	std::filesystem::remove(path);
 }

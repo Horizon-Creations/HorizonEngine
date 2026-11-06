@@ -1,4 +1,5 @@
 #pragma once
+#include "HorizonScene/LandscapeCellHlod.h"
 #include "HorizonScene/LandscapeTile.h"
 #include "HorizonScene/LandscapeWaterData.h"
 
@@ -105,6 +106,8 @@ public:
 	virtual const LandscapeCoarseWorld* coarse() const { return nullptr; }
 	// The bodies of water the tiles' owner ids name, or null when the world has no water (then its tiles carry none).
 	virtual const LandscapeWaterTable* water() const { return nullptr; }
+	// The baked HLOD proxies of the world's entity cells (LandscapeCellHlod.h), or null when the world has none.
+	virtual const LandscapeHlodTable* hlod() const { return nullptr; }
 };
 
 // ── Procedural world ─────────────────────────────────────────────────────────
@@ -160,7 +163,11 @@ private:
 //   index: tilesX * tilesZ entries, row-major (z * tilesX + x), each  u64 offset  u32 size   (size 0: no tile)  -> right after the header
 //   then the tile blobs (LandscapeTile container, see LandscapeTile.h), back to back,
 //   then the coarse world: a height grid blob and a weight grid blob (LandscapeTile.h, "Grids"), at coarseOffset,
-//   then the water table (LandscapeWaterData.h) at waterTableOffset.
+//   then the water table (LandscapeWaterData.h) at waterTableOffset,
+//   then, optionally, the cell HLOD table (LandscapeCellHlod.h, LandscapeHlodTable::encode) followed by a 20-byte TRAILER at the very end of
+//   the file: u64 hlodOffset  u64 hlodSize  u32 magic 'HLDF' (kLandscapePackHlodMagic). A tail section, not a version bump: a pack without it
+//   ends in the water table or the coarse world, which a reader finds by the magic not being there, and an older reader never looks past
+//   the sections its header names, so it reads a pack with a trailer as before.
 // coarseHeightLevel 255 = the pack has no coarse world. Grid sizes: heights (tilesX * (hCells >> level) + 1) x (tilesZ * ...),
 // weights (tilesX * (wTexels >> level)) x (tilesZ * ...).
 constexpr uint32_t kLandscapePackMagic   = 0x31504c48u;
@@ -168,6 +175,8 @@ constexpr uint32_t kLandscapePackVersion = 2;
 constexpr size_t   kLandscapePackHeaderBytesV1 = 32;
 constexpr size_t   kLandscapePackHeaderBytes   = 64;   // version 2
 constexpr size_t   kLandscapePackIndexEntryBytes = 12;
+constexpr uint32_t kLandscapePackHlodMagic = 0x46444c48u;   // 'HLDF'
+constexpr size_t   kLandscapePackHlodTrailerBytes = 20;
 
 // Writes a pack: tiles are appended in the order add() is called (any order, each key once), the index
 // is written by finish(). Streams to disk, so a 4 GB world needs no 4 GB of memory.
@@ -185,6 +194,8 @@ public:
 	bool add(LandscapeTileKey key, const std::vector<uint8_t>& blob, const LandscapeCoarseSample* coarse = nullptr);
 	// The bodies of water the tiles' owner ids name. Before finish(); none = no table, and a reader sees a world without water.
 	void setWaterTable(const LandscapeWaterTable& table) { m_water = table; m_hasWater = true; }
+	// The baked HLOD proxies of the entity cells. Before finish(); an empty table writes nothing.
+	void setHlodTable(const LandscapeHlodTable& table) { m_hlod = table; }
 	bool finish();
 	size_t tilesWritten() const { return m_written; }
 
@@ -202,6 +213,7 @@ private:
 	bool                  m_withCoarse = false;
 	LandscapeWaterTable   m_water;
 	bool                  m_hasWater = false;
+	LandscapeHlodTable    m_hlod;
 	LandscapeCoarseWorld  m_coarse;     // grid 0 and the weights; the point-sampled grids are made when it is read
 	std::vector<uint8_t>  m_coarseSeen; // per tile
 };
@@ -220,6 +232,7 @@ public:
 	bool load(LandscapeTileKey key, int maxLevels, LandscapeTile& out) const override;
 	const LandscapeCoarseWorld* coarse() const override { return m_coarse.valid() ? &m_coarse : nullptr; }
 	const LandscapeWaterTable* water() const override { return m_hasWater ? &m_water : nullptr; }
+	const LandscapeHlodTable* hlod() const override { return m_hlod.cellCount() > 0 ? &m_hlod : nullptr; }
 	int  version() const { return m_version; }
 	bool heightRange(float& minM, float& scaleM) const override { minM = m_heightMinM; scaleM = m_heightScaleM; return m_heightScaleM > 0.0f; }
 	bool has(LandscapeTileKey key) const;
@@ -238,6 +251,7 @@ private:
 	LandscapeCoarseWorld  m_coarse;
 	LandscapeWaterTable   m_water;
 	bool                  m_hasWater = false;
+	LandscapeHlodTable    m_hlod;
 	std::vector<uint64_t> m_offset;
 	std::vector<uint32_t> m_size;
 	uint64_t              m_fileSize = 0;

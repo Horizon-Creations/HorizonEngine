@@ -308,6 +308,17 @@ bool LandscapePackWriter::finish()
 		m_out.write(reinterpret_cast<const char*>(tb.data()), static_cast<std::streamsize>(tb.size()));
 		m_pos += tb.size();
 	}
+	if (m_hlod.cellCount() > 0)
+	{
+		const std::vector<uint8_t> hb = m_hlod.encode();
+		uint8_t trailer[kLandscapePackHlodTrailerBytes];
+		put64(trailer, m_pos);
+		put64(trailer + 8, hb.size());
+		put32(trailer + 16, kLandscapePackHlodMagic);
+		m_out.write(reinterpret_cast<const char*>(hb.data()), static_cast<std::streamsize>(hb.size()));
+		m_out.write(reinterpret_cast<const char*>(trailer), sizeof(trailer));
+		m_pos += hb.size() + sizeof(trailer);
+	}
 	std::vector<uint8_t> head(kLandscapePackHeaderBytes + m_offset.size() * kLandscapePackIndexEntryBytes, 0);
 	put64(&head[56], waterOffset);
 	put32(&head[0], kLandscapePackMagic);
@@ -447,6 +458,19 @@ std::shared_ptr<LandscapePackSource> LandscapePackSource::open(const std::string
 			std::string err;
 			if (!decodeLandscapeWaterTable(tb.data(), tb.size(), src->m_water, &err)) return fail("pack water table is damaged");
 			src->m_hasWater = true;
+		}
+	}
+	// The cell HLOD table: a trailer at the end of the file names it (LandscapeSource.h, "Pack file"). No magic: a pack without one.
+	if (version == 2 && fileSize >= indexEnd + kLandscapePackHlodTrailerBytes)
+	{
+		uint8_t tr[kLandscapePackHlodTrailerBytes];
+		if (src->readAt(fileSize - sizeof(tr), tr, sizeof(tr)) && get32(tr + 16) == kLandscapePackHlodMagic)
+		{
+			const uint64_t off = get64(tr), size = get64(tr + 8);
+			if (off < indexEnd || size == 0 || off + size + sizeof(tr) != fileSize) return fail("pack HLOD table points outside the file");
+			std::vector<uint8_t> hb(static_cast<size_t>(size));
+			if (!src->readAt(off, hb.data(), hb.size())) return fail("pack HLOD table cannot be read");
+			if (!LandscapeHlodTable::decode(hb, src->m_hlod)) return fail("pack HLOD table is damaged");
 		}
 	}
 	// The coarse world (version 2): both grids are decoded now and stay in memory.
