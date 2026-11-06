@@ -53,6 +53,26 @@ std::string lp(const std::string& s)
 	return std::string(reinterpret_cast<const char*>(&n), 4) + s;
 }
 
+// A .hasset with a v2 META chunk (u16 type, u64 hi, u64 lo, name, path) — what ContentManager's
+// own index reads an asset's id from — followed by a payload the scan reads for paths.
+std::string hassetWithId(HE::AssetType type, HE::UUID id, const std::string& payload)
+{
+	std::string meta;
+	const uint16_t t = static_cast<uint16_t>(type);
+	meta.append(reinterpret_cast<const char*>(&t), 2);
+	meta.append(reinterpret_cast<const char*>(&id.hi), 8);
+	meta.append(reinterpret_cast<const char*>(&id.lo), 8);
+	meta += lp("Name") + lp("");
+	HAsset::FileHeader h{};
+	std::memcpy(h.magic, HAsset::k_magic, 4);
+	h.version = HAsset::k_version;
+	h.asset_type = t;
+	h.chunk_count = 1;
+	HAsset::ChunkHeader ch{ HAsset::CHUNK_META, meta.size() };
+	return std::string(reinterpret_cast<const char*>(&h), sizeof(h)) +
+	       std::string(reinterpret_cast<const char*>(&ch), sizeof(ch)) + meta + payload;
+}
+
 struct Fixture
 {
 	Dir project{ "he_dep_project" }, engine{ "he_dep_engine" }, cache{ "he_dep_cache" }, server{ "he_dep_server" };
@@ -176,6 +196,41 @@ TEST_CASE("resolve: a scene's asset ids are matched against the catalogue")
 	CHECK(f.fetchCalls.count("Meshes/Cube.hasset") == 1u);
 	CHECK(f.fetchCalls.count("Materials/Grey.hasset") == 1u);
 	CHECK(f.fetchCalls.count("Meshes/Unused.hasset") == 0u);
+}
+
+TEST_CASE("resolve: a scene's id for a library asset the server does not list is found in the library on disk")
+{
+	// The terrain's mix material ships with the editor ("Engine/Materials/M_AutoLandscape_Mix") and is not
+	// in the server's catalogue, but the three texture arrays it names are. The scene only holds the
+	// material's id, so without an index of the shipped files the walk never reached the arrays: the
+	// preflight said "1 referenced, nothing missing" and the arrays were never downloaded.
+	Fixture f;
+	write(f.project.path / "Content" / "Scenes" / "Main.hescene",
+	      "{\"entities\":[{\"components\":{\"material\":{\"asset\":[1188,1]},\"terrain\":{\"groupMix\":true}}}]}");
+	write(f.engine.path / "Materials" / "M_Mix.hasset",
+	      hassetWithId(HE::AssetType::Material, HE::UUID{ 1188, 1 },
+	                   lp("Engine/Textures/Landscape/Mix_Albedo_Array.hasset") + lp("Engine/Textures/Landscape/Mix_Mask_Array.hasset")));
+	f.serve("Textures/Landscape/Mix_Albedo_Array.hasset", hasset(HE::AssetType::Texture, ""));
+	f.serve("Textures/Landscape/Mix_Mask_Array.hasset", hasset(HE::AssetType::Texture, ""));
+
+	const Result r = resolve(f.opt);
+	CHECK(r.ok());
+	CHECK(r.referenced == 3u);      // the material and its two arrays
+	CHECK(r.alreadyHere == 1u);     // the material
+	CHECK(r.downloaded == 2u);
+	CHECK(f.fetchCalls.count("Textures/Landscape/Mix_Albedo_Array.hasset") == 1u);
+	CHECK(f.fetchCalls.count("Textures/Landscape/Mix_Mask_Array.hasset") == 1u);
+}
+
+TEST_CASE("resolve: a library id that nothing on disk or on the server knows stays unreported")
+{
+	// An id that is not an asset (a pair of numbers that happen to sit in a scene) is not a reference.
+	Fixture f;
+	write(f.project.path / "Content" / "Scenes" / "Main.hescene", "{\"a\":[1188,1],\"b\":{\"hi\":9,\"lo\":9}}");
+	write(f.engine.path / "Materials" / "M_Other.hasset", hassetWithId(HE::AssetType::Material, HE::UUID{ 5, 5 }, ""));
+	const Result r = resolve(f.opt);
+	CHECK(r.ok());
+	CHECK(r.referenced == 0u);
 }
 
 TEST_CASE("resolve: what cannot be had is reported with its reason and who asked for it")

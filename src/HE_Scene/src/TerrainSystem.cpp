@@ -625,7 +625,7 @@ namespace TerrainSystem
             if (tc.layerWeights.empty())
             {
                 tc.weightmapTextureId = HE::UUID{};   // unpainted → shader uses layer 0
-                if (tc.weightsDirty) markWeightGatedFoliage(reg, te);   // painted -> cleared (undo, reset)
+                if (tc.weightsDirty) { markWeightGatedFoliage(reg, te); tc.rvtJournal.noteAll(); }   // painted -> cleared (undo, reset)
                 tc.weightsDirty = false;
                 setUnpaintedLayerAverage(tc);
                 continue;
@@ -636,12 +636,14 @@ namespace TerrainSystem
                 tc.layerWeights.clear();              // defensive: never upload a short blob
                 tc.weightmapTextureId = HE::UUID{};
                 tc.weightsDirty = false;
+                tc.rvtJournal.noteAll();
                 setUnpaintedLayerAverage(tc);
                 continue;
             }
             const bool have = tc.weightmapTextureId != HE::UUID{}
                            && cm.getTexture(tc.weightmapTextureId) != nullptr;
             if (have && !tc.weightsDirty) continue;
+            if (!tc.rvtJournal.any) tc.rvtJournal.noteAll();   // weights changed and no stroke said where (a fill, a load, an undo)
             computeAverageLayerWeights(tc);           // paint changed → refresh the mean
             markWeightGatedFoliage(reg, te);
 
@@ -909,6 +911,9 @@ namespace TerrainSystem
 
             tc.builtRes           = res;
             tc.builtChunksPerSide = g.chunksPerSide;
+            // The ground picture changed under the Runtime Virtual Texture: all of it for a full rebuild, the brush rect for a region.
+            if (rebuildAll) tc.rvtJournal.noteAll();
+            else if (tc.regionDirty) tc.rvtJournal.noteRect(tc.dirtyMinX, tc.dirtyMinZ, tc.dirtyMaxX, tc.dirtyMaxZ);
             tc.dirty              = false;
             tc.regionDirty        = false;
 

@@ -3023,16 +3023,16 @@ TEST_CASE("MaterialGraph never reuses a node id after removeNode")
 TEST_CASE("More than kMatMaxParams parameters never index past the HeParams array")
 {
 	// REGRESSION: the layout used to be clamped only AFTER the shader text was
-	// built, so an over-budget graph emitted heParams.v[16] (and up) against a
-	// `vec4 v[16]` declaration — an out-of-bounds read in the generated shader.
+	// built, so an over-budget graph emitted heParams.v[kMatMaxParams] (and up) against a
+	// `vec4 v[kMatMaxParams]` declaration — an out-of-bounds read in the generated shader.
 	// The budget is now enforced before emission: surplus params bake their
 	// authored default as a literal instead.
-	// 20 distinct named float params, chained through Adds so every one of them
+	// kMatMaxParams + 4 distinct named float params, chained through Adds so every one of them
 	// is actually reached (and therefore slotted) during emission.
 	MaterialGraph g;
 	const int out = g.addNode(MatNodeType::Output);
 	int acc = -1;
-	for (int i = 0; i < 20; ++i)
+	for (int i = 0; i < HE::kMatMaxParams + 4; ++i)
 	{
 		const int p = g.addNode(MatNodeType::ParamFloat);
 		g.findNode(p)->s    = "P" + std::to_string(i);
@@ -3049,7 +3049,7 @@ TEST_CASE("More than kMatMaxParams parameters never index past the HeParams arra
 	CHECK((int)gen.params.size() == HE::kMatMaxParams);
 
 	// No slot index at or beyond the array length appears in the emitted GLSL.
-	for (int i = HE::kMatMaxParams; i < 32; ++i)
+	for (int i = HE::kMatMaxParams; i < HE::kMatMaxParams + 8; ++i)
 	{
 		const std::string oob = "heParams.v[" + std::to_string(i) + "]";
 		CHECK(gen.glsl.find(oob) == std::string::npos);
@@ -3061,7 +3061,7 @@ TEST_CASE("More than kMatMaxParams parameters never index past the HeParams arra
 	CHECK(gen.glsl.find("vec4 v[" + std::to_string(HE::kMatMaxParams) + "]")
 	      != std::string::npos);
 	// Surplus params are baked: their node comment survives without a UBO read.
-	CHECK(gen.glsl.find("// param: P19") != std::string::npos);
+	CHECK(gen.glsl.find("// param: P" + std::to_string(HE::kMatMaxParams + 3)) != std::string::npos);
 }
 
 TEST_CASE("Exactly kMatMaxParams parameters still all get real UBO slots")
@@ -5080,8 +5080,19 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	CHECK_FALSE(HE::vkmat::landscapeWeightsFit(1u << 20, 16));
 	CHECK(HE::vkmat::landscapeWeightsFit(17, 17));
 	CHECK(HE::vkmat::landscapeWeightsFit(1u << 20, 1u << 20)); // NVIDIA / lavapipe class
+	// The RVT rows (Thema 333) are four more on top: 21 with the weights row, 20 without; a device that fits neither
+	// keeps the layout it had (no RVT).
+	CHECK(HE::vkmat::fragmentSamplerCount(true, true) == 21);
+	CHECK(HE::vkmat::fragmentSamplerCount(false, true) == 20);
+	CHECK(HE::vkmat::rvtFit(21, 21, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(20, 21, true));
+	CHECK_FALSE(HE::vkmat::rvtFit(21, 20, true));
+	CHECK(HE::vkmat::rvtFit(20, 20, false));
+	CHECK_FALSE(HE::vkmat::rvtFit(16, 16, false));
+	CHECK(HE::vkmat::rvtFit(1u << 20, 1u << 20, true));
 
 	int landscapeCases = 0;
+	std::set<VkUse> rvtUses;           // the RVT node's (Thema 333) own bindings, 40..43: layout rows since the Vulkan port
 	std::set<VkUse> fragGap;           // stage-aware: what no fragment row serves
 	std::set<std::string> fragGapCases;
 	for (const NodeShaderCase& c : allNodeShaderCases())
@@ -5094,6 +5105,17 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 			std::string err;
 			const std::vector<VkUse> uses = activeVkDescriptors(sv.spirv, err);
 			REQUIRE_MESSAGE(err.empty(), c.name, ": ", err);
+			// The Runtime Virtual Texture read (Thema 333) binds 40..43: the last four rows of the layout, which the renderer
+			// leaves out on a device that cannot hold them (rvtFit) and then reports no RVT. Everything the node uses is
+			// served, and the layout WITHOUT row 40 is its negative control.
+			if (c.name.find("RVT Sample") == 0)
+			{
+				CHECK_MESSAGE(uncoveredVkFragment(uses).empty(), c.name, ": uses beyond the layout:", uncoveredVkFragment(uses));
+				CHECK_MESSAGE(!uncoveredVkFragment(uses, HE::vkmat::kRvtFirstBinding).empty(), c.name, ": row 40 is what serves the table");
+				for (const VkUse& u : uses)
+					if (HE::vkmat::isRvtBinding(u.binding)) rvtUses.insert(u);
+				continue;
+			}
 			const bool usesWeights = std::find(uses.begin(), uses.end(), weights) != uses.end();
 			const bool declares    = c.glsl.find("heLandscapeWeights") != std::string::npos;
 			// Only a layer-blend graph reaches binding 14 — what lets the renderer
@@ -5118,6 +5140,10 @@ TEST_CASE("Vulkan: heLandscapeWeights (binding 14) is in the material layout, an
 	}
 	// The sweep did reach the Landscape Layer Blend node (plain + clustered).
 	CHECK(landscapeCases >= 2);
+	// The RVT node was swept, and its own bindings are the table and pool rows (set 0, 40..43).
+	CHECK_FALSE(rvtUses.empty());
+	for (const VkUse& u : rvtUses)
+		CHECK_MESSAGE((u.binding >= 40 && u.binding <= 43), "the RVT node uses binding ", u.binding, " beyond 40..43");
 
 	// What is left is the UI domain alone, and it is two uses no layout row can
 	// fix: HeUI (binding 8) is a FRAGMENT uniform block where the layout has the
@@ -5785,6 +5811,15 @@ HRESULT makeMaterialPso(ID3D12Device* dev, ID3D12RootSignature* rs, ID3DBlob* vs
 	return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
 }
 
+// The RVT node's table and pool (t40..t43, Thema 333) are the last range of the D3D12 material root signature. The signature
+// WITHOUT that range (the one before the D3D12 port) is the negative control: it must leave exactly these four uncovered.
+bool onlyRvtBindings(std::string miss)
+{
+	for (const char* n : { "heRvtTable(2:40)", "heRvtAlbedo(2:41)", "heRvtNormal(2:42)", "heRvtSurface(2:43)" })
+		for (size_t at; (at = miss.find(n)) != std::string::npos;) miss.erase(at, std::strlen(n));
+	return miss.find_first_not_of(", ") == std::string::npos;
+}
+
 Microsoft::WRL::ComPtr<ID3DBlob> fxcBlob(const std::string& src, const char* profile, std::string& err)
 {
 	Microsoft::WRL::ComPtr<ID3DBlob> blob, cerr;
@@ -6297,7 +6332,13 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 		// (like D3D11/Vulkan) has no UI-domain material path yet, only Metal and
 		// GL bind heBackdrop — so its t9 is outside the signature by design. It
 		// must stay the ONLY thing uncovered there, though.
-		if (c.name.find("(UI domain)") != std::string::npos)
+		if (c.name.find("RVT Sample") == 0)
+		{
+			CHECK_MESSAGE(miss.empty(), "'", c.name, "' binds registers the material root signature does not cover (t40..t43 are its last range): ", miss);
+			const std::string without = uncovered(b, HE::d3d12mat::kRangeCount - 1, HE::d3d12mat::kSamplerCount);
+			CHECK_MESSAGE((!without.empty() && onlyRvtBindings(without)), "'", c.name, "' without the RVT range: ", without);
+		}
+		else if (c.name.find("(UI domain)") != std::string::npos)
 		{
 			const bool onlyBackdrop = miss.empty() || miss == "heBackdrop(2:9)";
 			CHECK_MESSAGE(onlyBackdrop, "'", c.name,
@@ -6316,7 +6357,9 @@ TEST_CASE("D3D12: every node's bytecode binds only registers the material root s
 			REQUIRE_MESSAGE(cps.Get() != nullptr, "'", c.name, "' (clustered): ", err);
 			const std::vector<Binding> cb = reflectBindings(cps.Get());
 			const std::string cmiss = uncovered(cb, HE::d3d12mat::kRangeCount, HE::d3d12mat::kSamplerCount);
-			if (c.name.find("(UI domain)") != std::string::npos)
+			if (c.name.find("RVT Sample") == 0)
+				CHECK_MESSAGE(cmiss.empty(), "'", c.name, "' (clustered) binds registers the material root signature does not cover: ", cmiss);
+			else if (c.name.find("(UI domain)") != std::string::npos)
 				CHECK_MESSAGE((cmiss.empty() || cmiss == "heBackdrop(2:9)"), "'", c.name,
 				              "' (clustered) binds registers beyond heBackdrop the signature does not cover: ", cmiss);
 			else

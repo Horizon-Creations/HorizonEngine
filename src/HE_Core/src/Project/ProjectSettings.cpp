@@ -195,6 +195,12 @@ bool ProjectSettings::operator==(const ProjectSettings& o) const
         && input.enabled == o.input.enabled
         && nearlyEqual(input.stickDeadzone, o.input.stickDeadzone)
         && nearlyEqual(input.triggerDeadzone, o.input.triggerDeadzone)
+        && rvt.enabled == o.rvt.enabled
+        && rvt.poolPages == o.rvt.poolPages
+        && nearlyEqual(rvt.metersPerTexel, o.rvt.metersPerTexel)
+        && nearlyEqual(rvt.nearRadiusM, o.rvt.nearRadiusM)
+        && nearlyEqual(rvt.activationRadiusM, o.rvt.activationRadiusM)
+        && rvt.maxPagesPerFrame == o.rvt.maxPagesPerFrame
         && antiCheat.enabled == o.antiCheat.enabled
         && antiCheat.integrityCheck == o.antiCheat.integrityCheck
         && nearlyEqual(antiCheat.tolerance, o.antiCheat.tolerance)
@@ -272,6 +278,15 @@ void ProjectSettings::clamp()
                                            0.0f, ProjectInputSettings::kMaxDeadzone);
         input.triggerDeadzone = std::clamp(finiteOr(input.triggerDeadzone, ProjectInputSettings{}.triggerDeadzone),
                                            0.0f, ProjectInputSettings::kMaxDeadzone);
+    }
+
+    {
+        using R = ProjectRvtSettings;
+        rvt.poolPages         = std::clamp(rvt.poolPages, R::kMinPoolPages, R::kMaxPoolPages);
+        rvt.metersPerTexel    = std::clamp(finiteOr(rvt.metersPerTexel, R{}.metersPerTexel), R::kMinTexel, R::kMaxTexel);
+        rvt.nearRadiusM       = std::clamp(finiteOr(rvt.nearRadiusM, R{}.nearRadiusM), R::kMinRadius, R::kMaxRadius);
+        rvt.activationRadiusM = std::clamp(finiteOr(rvt.activationRadiusM, R{}.activationRadiusM), R::kMinRadius, R::kMaxRadius);
+        rvt.maxPagesPerFrame  = std::clamp(rvt.maxPagesPerFrame, R::kMinPagesPerFrame, R::kMaxPagesPerFrame);
     }
 
     using AC = ProjectAntiCheatSettings;
@@ -373,6 +388,12 @@ void ProjectSettings::toJson(json& out) const
     out["input"] = { { "enabled",         input.enabled },
                      { "stickDeadzone",   input.stickDeadzone },
                      { "triggerDeadzone", input.triggerDeadzone } };
+    out["rvt"] = { { "enabled",           rvt.enabled },
+                   { "poolPages",         rvt.poolPages },
+                   { "metersPerTexel",    rvt.metersPerTexel },
+                   { "nearRadiusM",       rvt.nearRadiusM },
+                   { "activationRadiusM", rvt.activationRadiusM },
+                   { "maxPagesPerFrame",  rvt.maxPagesPerFrame } };
 
     out["renderDefaults"] = {
         { "useEditorSettings", renderDefaults.useEditorSettings },
@@ -495,6 +516,15 @@ void ProjectSettings::fromJson(const json& in)
         readBool  (i, "enabled",         input.enabled);
         readNumber(i, "stickDeadzone",   input.stickDeadzone);
         readNumber(i, "triggerDeadzone", input.triggerDeadzone);
+    }
+    {
+        const json& r = section(in, "rvt");
+        readBool  (r, "enabled",           rvt.enabled);
+        readNumber(r, "poolPages",         rvt.poolPages);
+        readNumber(r, "metersPerTexel",    rvt.metersPerTexel);
+        readNumber(r, "nearRadiusM",       rvt.nearRadiusM);
+        readNumber(r, "activationRadiusM", rvt.activationRadiusM);
+        readNumber(r, "maxPagesPerFrame",  rvt.maxPagesPerFrame);
     }
     {
         const json& a = section(in, "anticheat");

@@ -920,8 +920,9 @@ namespace
 // sunColor/ambient/camPos, params). Vertex-stage bindings 8/9 avoid the fragment
 // slots; Metal pins them to vertex buffers 2/3. HeLighting is not written here:
 // see wpoLightingBlock.
-constexpr const char* kWpoParams =
-    "layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[16]; } heParams;\n";
+// The array length is kMatMaxParams, like the fragment stage's block (MaterialGraph.cpp).
+const std::string kWpoParams =
+    "layout(std140, set = 0, binding = 9) uniform HeParams { vec4 v[" + std::to_string(kMatMaxParams) + "]; } heParams;\n";
 
 // The vertex stage's HeLighting is the fragment preamble's block, cut out of
 // kLightingPreamble and moved to binding 8 — never a shorter copy. OpenGL links
@@ -3168,6 +3169,13 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             { Stage::Fragment, 0, 31, 31,  8 }, // heSSRFwd       → s8
             { Stage::Fragment, 0, 32, 32,  9 }, // heGIReflFwd    → s9
             { Stage::Fragment, 0, 33, 33, 14 }, // heCloudShadow  → s14
+            // Runtime Virtual Textures (RvtLookup.h): the page table and the three pool arrays, read with texelFetch only.
+            // SPIRV-Cross still declares a SamplerState for each (a GLSL sampler2D is a pair), so the four dead ones go
+            // on s0 beside heAO's, exactly the shape FXC accepts; no live sampler, no new register below s16.
+            { Stage::Fragment, 0, 40, 40,  0 }, // heRvtTable
+            { Stage::Fragment, 0, 41, 41,  0 }, // heRvtAlbedo
+            { Stage::Fragment, 0, 42, 42,  0 }, // heRvtNormal
+            { Stage::Fragment, 0, 43, 43,  0 }, // heRvtSurface
         };
         // Clustered variant: three SRVs and NO sampler, so the table above is
         // untouched. Pinned to their binding numbers (what SPIRV-Cross would

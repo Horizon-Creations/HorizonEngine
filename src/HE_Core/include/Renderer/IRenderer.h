@@ -50,6 +50,17 @@ struct EditorCameraOverride
     // With rawOutput: the colour is written sRGB-encoded (the exact curve), for a picture that becomes an sRGB
     // texture. Without it the 8 bits hold the linear value, which is what data views (normals, roughness) want.
     bool      rawSrgb      = false;
+    // RenderSceneImage only (Runtime Virtual Textures, Thema 333): >= 0 sends the finished picture, on the GPU and
+    // without a readback, into slice `rvtSlot` of layer `rvtLayer` of the pool CreateRvtPool made. The picture must be
+    // exactly the pool's page size; `rgba` stays empty and the call returns true. Layer 0 is read as sRGB (use rawSrgb),
+    // layers 1 and 2 as plain data.
+    int       rvtSlot      = -1;
+    int       rvtLayer     = 0;
+    // With rvtSlot >= 0: draw every object of the world with this material (null = the objects' own). The page of a virtual
+    // texture is one world seen three times, once per layer view; with the material here instead of written into the
+    // world's components, the three views extract the same scene and the renderer walks it once (the extractor's
+    // beginFrame reuse). It also keeps a far-LOD stand-in material (the baked far landscape) out of a page.
+    HE::UUID  rvtMaterial;
 };
 
 // ─── WorldPreviewEnv ────────────────────────────────────────────────────────
@@ -255,6 +266,10 @@ public:
         // RenderSceneImage honours EditorCameraOverride::rawOutput / rawSrgb: the picture is the materials' own
         // colour, no tonemap, bloom, AA or other post. The far-landscape bake needs it (Thema 228).
         bool supportsRawCapture = false;
+        // CreateRvtPool / EditorCameraOverride::rvtSlot work: the backend can hold the page pool of the Runtime
+        // Virtual Textures and fill a slice of it from RenderSceneImage (Thema 333). False = the landscape keeps
+        // running its material directly.
+        bool supportsRvt = false;
         // Screen-space reflections (docs/ssr-plan.md, docs/ssr-cross-backend-
         // plan.md). Metal (in the deferred tile path: lag-free, from the stored
         // G-buffer), OpenGL and D3D11/D3D12/Vulkan (forward trace against last
@@ -725,6 +740,41 @@ public:
     virtual bool  RenderSceneImage(const EditorCameraOverride& /*camera*/,
                                    uint32_t /*width*/, uint32_t /*height*/,
                                    std::vector<uint8_t>& /*rgba*/) { return false; }
+
+    // ── Runtime Virtual Texture page pool (Thema 333, docs/rvt-design-2026-11-04.md) ──
+    // Three texture arrays of `slots` slices, each pagePx x pagePx RGBA8: layer 0 BaseColor (sRGB), layer 1 world
+    // normal x 0.5 + 0.5, layer 2 R = AO, G = roughness: the three unlit views of the Auto Landscape material.
+    // Slices are filled with RenderSceneImage and EditorCameraOverride::rvtSlot. Creating again replaces the pool.
+    // False (and nothing created) when the backend cannot (Capabilities::supportsRvt).
+    virtual bool CreateRvtPool(uint32_t /*slots*/, uint32_t /*pagePx*/) { return false; }
+    virtual void DestroyRvtPool() {}
+    // Reads one slice back (a witness or a debug view; not for per-frame use). `rgba` = pagePx * pagePx * 4 bytes,
+    // row 0 first. False when there is no pool or the slice is out of range.
+    virtual bool ReadbackRvtSlot(int /*layer*/, uint32_t /*slot*/, std::vector<uint8_t>& /*rgba*/) { return false; }
+    // The page table the landscape shader reads (Thema 333 step 3): one R32_UINT texture with a mip chain, mip m being
+    // (side >> m)^2 entries row-major (y * side + x), exactly what rvt::RvtManager::pageTable() returns per mip, each entry
+    // `slot | effectiveMip << 24` or 0xFFFFFFFF. `mips[0]` is the finest, its side a power of two. Upload again whenever
+    // RvtManager::tableVersion changes; a different shape recreates the texture. False without a pool or on a bad shape.
+    // One table per VOLUME, named by the consumer material that reads it: a draw whose material is that consumer gets that
+    // table bound, so a landscape cut into tiles (one volume each, all in the one pool) draws every tile from its own.
+    virtual bool SetRvtPageTable(const HE::UUID& /*consumerMaterial*/, const std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // Reads the table back the same way (a witness).
+    virtual bool ReadbackRvtPageTable(const HE::UUID& /*consumerMaterial*/, std::vector<std::vector<uint32_t>>& /*mips*/) { return false; }
+    // From now on the terrain chunks of landscape entity `terrainEntity` that are drawn with `landscapeMaterial` are drawn with
+    // `consumerMaterial` instead (the material with the RvtSample node, which reads the pool and the table above), and with
+    // none of the object's own parameter block (it is laid out for the old material). Null `consumerMaterial` = off for that
+    // landscape. Keyed by the landscape AND its material: a far LOD level that already carries another material (the baked far
+    // landscape) stays as it is. Done in the renderer's own view of the frame, never in the world: the scene stays as authored.
+    virtual void SetRvtLandscape(uint32_t /*terrainEntity*/, const HE::UUID& /*landscapeMaterial*/, const HE::UUID& /*consumerMaterial*/) {}
+    // Takes one volume out: its table and its swap go, the pool and the other volumes stay (DestroyRvtPool drops everything).
+    virtual void ReleaseRvtConsumer(const HE::UUID& /*consumerMaterial*/) {}
+    // The pages of one tick are painted between BeginRvtPages(pagePx) and EndRvtPages(): a backend whose page is the general
+    // RenderSceneImage frame (a viewport-sized set set aside and rebuilt around every call, post-FX repaired at the live size
+    // afterwards) keeps ONE page-size set across the whole bracket and gives the live viewport back once, at the end. The
+    // result of every page is the same inside or outside a bracket (witness: HE_DUMP_RVTTEST part 1b). No-ops
+    // by default (D3D11 has a lean page pass of its own, OpenGL's per-call set is cheap).
+    virtual void BeginRvtPages(uint32_t /*pagePx*/) {}
+    virtual void EndRvtPages() {}
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded

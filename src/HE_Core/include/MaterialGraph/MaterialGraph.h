@@ -18,6 +18,7 @@
 // model, tests exercise codegen headlessly.
 #pragma once
 
+#include <MaterialGraph/MaterialParamLimits.h>   // kMatMaxParams, kMatParamFloats, kMatParamBytes
 #include <Types/Defines.h> // HE_API — HorizonCore.dll uses explicit exports on Windows
 #include <Types/UUID.h>
 #include <cstdint>
@@ -266,6 +267,15 @@ enum class MatNodeType : uint8_t
     // The indices feed a texture array's Slice pin, so the material reads two groups' slices
     // per fragment instead of four. A map with no third page, or no shares at all, is group 0.
     LandscapeGroupPick,
+
+    // ── v21: Runtime Virtual Texture read (Thema 333, MaterialGraph/RvtLookup.h) ──
+    // The painted landscape material, read back from the page pool instead of being computed:
+    // looks the fragment's world XZ up in the volume's page table and filters the three layers by
+    // hand (texelFetch only, no sampler). Inputs: the volume's two parameter vectors A and B (see
+    // RvtLookup.h; normally Param Vector4 nodes the engine fills). Outputs: Base Color, world Normal,
+    // AO, Roughness, and Valid (0 where there is nothing to show). Engine-internal: the editor palette
+    // does not list it, and only a backend with Capabilities::supportsRvt can draw a material that has it.
+    RvtSample,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
@@ -635,14 +645,6 @@ HE_API bool matSplitDisplacement(const std::string& disp, MatTessSettings& tess,
 // edited.
 HE_API bool matGlslUsesTime(const std::string& glsl);
 
-// Exposed parameters a single material graph may declare — the length of the
-// HeParams UBO array (`uniform HeParams { vec4 v[kMatMaxParams]; }`, emitted by
-// generateFragment and mirrored in MaterialShaderLibrary's WPO preamble).
-// A graph with MORE distinct parameter names bakes the surplus ones as literal
-// constants instead of indexing the UBO: the layout used to be clamped only
-// AFTER emission, so the generated shader kept reading heParams.v[16] and up —
-// out of bounds in the declared array.
-inline constexpr int kMatMaxParams = 16;
 
 // Generate shader + parameter layout. Always succeeds (unconnected inputs fall back to
 // pin defaults; a missing Output node yields a magenta error shader; recursive function

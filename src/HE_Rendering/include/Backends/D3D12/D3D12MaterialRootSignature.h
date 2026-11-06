@@ -34,6 +34,9 @@
 //   [14]     heSSRFwd        t31   forward SSR result
 //   [15]     heGIReflFwd     t32   forward GI-reflection result
 //   [16]     heCloudShadow   t33   cloud-shadow transmittance
+//   [17]     heRvtTable      t40   Runtime Virtual Texture page table (R32_UINT, mips), one per consumer material, per draw
+//   [18..20] heRvtAlbedo/Normal/Surface t41..t43  the RVT page pool (Texture2DArray each), shared, in the template
+// ([17..20] are Thema 333: docs/rvt-design-2026-11-04.md. A material without the RvtSample node never names them.)
 // [9] has no gate (a Landscape Layer Blend samples it unconditionally): every
 // draw block gets the chunk's weightmap — or the 1x1 layer-0 default for
 // anything that is not a landscape chunk — written over the template's null
@@ -62,7 +65,7 @@
 
 namespace HE::d3d12mat
 {
-constexpr UINT kSrvPerDraw          = 17;
+constexpr UINT kSrvPerDraw          = 21;
 constexpr UINT kSlotTex0            = 0;  // t2
 constexpr UINT kSlotTexP0           = 1;  // t4..t7 → slots 1..4
 constexpr UINT kSlotGIShadow        = 5;  // t10
@@ -77,6 +80,10 @@ constexpr UINT kSlotGIVisibility    = 13; // t18
 constexpr UINT kSlotSSRFwd          = 14; // t31
 constexpr UINT kSlotGIReflFwd       = 15; // t32
 constexpr UINT kSlotCloudShadow     = 16; // t33
+constexpr UINT kSlotRvtTable        = 17; // t40 (Texture2D<uint>, the consumer's page table)
+constexpr UINT kSlotRvtAlbedo       = 18; // t41 (Texture2DArray, sRGB view)
+constexpr UINT kSlotRvtNormal       = 19; // t42
+constexpr UINT kSlotRvtSurface      = 20; // t43
 
 // Root parameter indices (SetGraphicsRootConstantBufferView / DescriptorTable).
 constexpr UINT kRootLightCB   = 0; // b0 HeLighting (FS)
@@ -94,7 +101,7 @@ constexpr UINT kParamCount    = 9;
 // as the negative control for t24..t26 — a clustered PSO against it must be
 // rejected, a plain one must still build.
 constexpr UINT kPreClusterParamCount = 6;
-constexpr UINT kRangeCount    = 7;
+constexpr UINT kRangeCount    = 8;
 constexpr UINT kSamplerCount  = 16;
 // What the signature covered BEFORE Thema 56 (t2, t4..t7, t10..t11, t12, t13 /
 // s2, s4..s7, s10..s13): the first five ranges and nine samplers. he_tests
@@ -155,6 +162,7 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     srv(4, 13, 1, kSlotLocalShadow);      // t13      heLocalShadow (Texture2DArray)
     srv(5, 14, 5, kSlotLandscapeWeights); // t14..t18 landscape weights, sky cube, AO, DDGI atlases
     srv(6, 31, 3, kSlotSSRFwd);           // t31..t33 forward SSR / GI-refl, cloud shadow
+    srv(7, 40, 4, kSlotRvtTable);         // t40..t43 Runtime Virtual Texture: page table + three pool arrays
 
     out.params[kRootSrvTable].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     out.params[kRootSrvTable].DescriptorTable.NumDescriptorRanges = rangeCount;
@@ -232,7 +240,7 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
 // material one plus what only the resolve reads — the kHlslResolve* contract:
 //   b4        HeResolve (invViewProj, depthParams, cluster params)  → param 9
 //   t27..t30  heGB0, heGB1, heGB2, heGBDepth                        → 4 more
-//             slots in the SAME table, right after the 17-slot block
+//             slots in the SAME table, right after the 21-slot block
 //   s2/s4/s5/s6  their samplers — POINT-clamp here. The material signature
 //             puts linear-WRAP on those registers (heTex0 / heTexP0..2 tile),
 //             and a static sampler is fixed per register, so the resolve
@@ -246,7 +254,7 @@ constexpr UINT kResolveSlotGB0     = kSrvPerDraw;      // t27 heGB0  (BaseColor 
 constexpr UINT kResolveSlotGB1     = kSrvPerDraw + 1;  // t28 heGB1  (oct normal, roughness, specular)
 constexpr UINT kResolveSlotGB2     = kSrvPerDraw + 2;  // t29 heGB2  (emissive, material AO)
 constexpr UINT kResolveSlotDepth   = kSrvPerDraw + 3;  // t30 heGBDepth (R32_FLOAT view of the scene depth)
-constexpr UINT kResolveSrvCount    = kSrvPerDraw + 4;  // one table: 17 material slots + 4 G-buffer inputs
+constexpr UINT kResolveSrvCount    = kSrvPerDraw + 4;  // one table: 21 material slots + 4 G-buffer inputs
 constexpr UINT kResolveGBufferReg  = 27;               // == MaterialShaderLibrary::kHlslResolveGB0Reg
 constexpr UINT kResolveUboReg      = 4;                // == MaterialShaderLibrary::kHlslResolveUboReg
 constexpr UINT kRootResolveCB      = kParamCount;      // 9: b4 HeResolve

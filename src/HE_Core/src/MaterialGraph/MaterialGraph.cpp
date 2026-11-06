@@ -1,4 +1,5 @@
 #include "MaterialGraph/MaterialGraph.h"
+#include "MaterialGraph/RvtLookup.h"
 #include <cstdint>
 
 #include <GraphCommon/GraphJson.h>
@@ -290,6 +291,12 @@ const std::vector<MatNodeDesc>& registry()
         // ── v20: mixed texture groups — the two strongest groups of the painted shares ──
         { MatNodeType::LandscapeGroupPick, "Landscape Group Pick", "Landscape", {},
           { { "A", F::Float, 0 }, { "B", F::Float, 0 }, { "Mix", F::Float, 0 } }, 0 },
+
+        // ── v21: the Runtime Virtual Texture read (RvtLookup.h) ──
+        { MatNodeType::RvtSample, "RVT Sample", "Landscape",
+          { { "Volume A", F::Vec4, 0 }, { "Volume B", F::Vec4, 0 } },
+          { { "Base Color", F::Vec3, 0 }, { "Normal", F::Vec3, 0 }, { "AO", F::Float, 0 }, { "Roughness", F::Float, 0 },
+            { "Valid", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -615,6 +622,7 @@ struct EmitCtx
     // Landscape layer blending: the fragment declares heLandscapeWeights and the
     // material advertises its layer names (order = weightmap channel order).
     bool usesLandscapeWeights = false;
+    bool usesRvt = false;                                // heRvtSample + the four pool/table bindings (RvtLookup.h)
     std::vector<std::string> layerNames;
     // UI element inputs (D5 Schicht 1): the HeUI block, and the rounded-box SDF
     // helper the two distance nodes share.
@@ -1564,6 +1572,16 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
                  + layer0 + ";";
             break;
         }
+        case MatNodeType::RvtSample:
+        {
+            c.usesRvt = true;
+            const std::string va = inputExpr(c, sc, n, 0, F::Vec4), vb = inputExpr(c, sc, n, 1, F::Vec4);
+            decl = "vec3 " + v + "_b; vec3 " + v + "_n; float " + v + "_ao; float " + v + "_r; float " + v + "_ok; "
+                 + "heRvtSample(vWorldPos.xz, " + va + ", " + vb + ", " + v + "_b, " + v + "_n, " + v + "_ao, " + v + "_r, " + v + "_ok); "
+                 + "vec3 " + v + " = " + v + "_b;";
+            pinExpr = { v + "_b", v + "_n", v + "_ao", v + "_r", v + "_ok" };
+            break;
+        }
         case MatNodeType::LandscapeGroupPick:
         {
             c.usesLandscapeWeights = true;
@@ -2204,6 +2222,13 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
         // sampler is pinned to s0, the register heAO leaves dead (texelFetch);
         // the SM 5.0 budget has no other room (MaterialShaderLibrary, HLSL pins).
         src += "layout(set = 0, binding = 14) uniform sampler2D heLandscapeWeights;\n";
+    // The Runtime Virtual Texture read: its table and pool arrays, and the one function that reads them. The function
+    // needs derivatives, so the displacement (domain) stage, which has none, never gets it.
+    if (c.usesRvt && !domainStage)
+    {
+        src += kRvtDeclarationsGLSL;
+        src += kRvtLookupGLSL;
+    }
     // Project textures (binding 4 + slot). An array slot keeps the SAME binding and
     // register as a 2D one — only the declared type differs — so no backend's pin
     // table, descriptor layout or root signature changes for it.

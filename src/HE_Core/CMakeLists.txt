@@ -78,6 +78,7 @@ add_library(HorizonCore SHARED
 	src/ContentManager/EngineDependencies.cpp
 	src/ContentManager/TextureArrayBuild.cpp
 	src/ContentManager/TextureBlockDecode.cpp
+	src/ContentManager/GpuArrayCook.cpp
  "include/ContentManager/ContentManager.h" "src/ContentManager/ContentManager.cpp" "include/ContentManager/Assets.h")
 
 target_include_directories(HorizonCore

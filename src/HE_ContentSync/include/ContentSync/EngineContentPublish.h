@@ -12,6 +12,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace HE::Cs {
 
@@ -27,6 +28,22 @@ struct PublishResult
 // progress lines ("Uploaded Materials/Foo.hasset", …) for a UI to display live.
 HE_CS_API PublishResult publishEngineContentBlocking(const std::string& engineContentRoot,
                                                        std::function<void(const std::string&)> onLog = {});
+
+// Uploads exactly `relPaths` (".hasset" files, relative to `engineContentRoot`) and MERGES their
+// manifest entries into the remote manifest.json (an entry with the same path is replaced, every other
+// entry is kept). publishEngineContentBlocking uploads the manifest of the LOCAL scan, so run on a root
+// that holds only part of the library it would delist everything else; this is the call for adding or
+// replacing a few files. Refuses (uploads nothing) when the remote manifest cannot be read, rather than
+// treating it as empty. The manifest goes up last, like in the full publish.
+HE_CS_API PublishResult publishEngineContentFilesBlocking(const std::string& engineContentRoot,
+                                                            const std::vector<std::string>& relPaths,
+                                                            std::function<void(const std::string&)> onLog = {});
+
+// Checks that every `relPaths` file is on the server: remote size == local size and the remote manifest
+// entry carries the local content hash. One line per file through onLog; ok only when all agree.
+HE_CS_API PublishResult verifyEngineContentFilesBlocking(const std::string& engineContentRoot,
+                                                           const std::vector<std::string>& relPaths,
+                                                           std::function<void(const std::string&)> onLog = {});
 
 struct RebuildManifestResult
 {

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <Renderer/IRenderer.h>
+#include <MaterialGraph/MaterialParamLimits.h> // kMatParamFloats / kMatParamBytes
 #include "VulkanShaderManager.h"
 #include "VulkanUploadAlloc.h"
 #include <HorizonRendering/RenderConstants.h>
@@ -22,6 +23,7 @@
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer
 #include <vulkan/vulkan.h>
 #include <deque>
+#include <functional>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -105,6 +107,17 @@ public:
 	// below is the part of Render() this borrows, the swapchain half stays behind.
 	bool  RenderSceneImage(const EditorCameraOverride& camera, uint32_t width, uint32_t height,
 	                       std::vector<uint8_t>& rgba) override;
+	// Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md): the page pool, one page table per consumer
+	// material, the per-landscape material swap. A page is RenderSceneImage's raw frame copied into a pool slice.
+	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
+	void  DestroyRvtPool() override;
+	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
+	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
+	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
+	void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
+	void  BeginRvtPages(uint32_t pagePx) override;
+	void  EndRvtPages() override;
 	// An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
 	// viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
 	// recorded into a one-shot command buffer and waited for. Returns the
@@ -492,6 +505,53 @@ private:
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
+	// Runtime Virtual Texture (Thema 333): bindings 40..43 are in m_matSetLayout (VulkanMaterialLayout.h, rvtFit).
+	bool        m_matRvt = false;
+	struct RvtImage { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
+	RvtImage    m_rvtPool[3];                 // RGBA8 arrays, one slice per pool slot; SHADER_READ_ONLY between copies
+	uint32_t    m_rvtSlots = 0, m_rvtPagePx = 0;
+	VkSampler   m_rvtSampler = VK_NULL_HANDLE; // nearest/clamp: the lookup is texelFetch, the descriptor is combined
+	struct RvtTable { RvtImage img; uint32_t side = 0, mips = 0; };
+	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
+	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
+	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
+	bool rvtOneShot(const std::function<void(VkCommandBuffer)>& record);
+	bool rvtMakeImage(VkFormat format, uint32_t w, uint32_t h, uint32_t layers, uint32_t mips, VkImageUsageFlags usage,
+	                  VkImageCreateFlags flags, RvtImage& out);
+	bool rvtMakeView(RvtImage& img, VkFormat format, VkImageViewType type, uint32_t layers, uint32_t mips);
+	void rvtDestroyImage(RvtImage& img);
+	bool rvtMakeBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buf, VkDeviceMemory& mem);
+	// A still's set (RenderSceneImage): the live viewport set aside and a fresh one built at the request's size, then given
+	// back. Normally per call; a bracket (BeginRvtPages) keeps ONE page-size set across the pages of a tick.
+	struct StillSet
+	{
+		bool active = false;     // the still's set is in place and the live one is in the members below
+		bool kept   = false;     // ... and held ACROSS calls by a bracket
+		uint32_t w = 0, h = 0;
+		VkImage        liveImage = VK_NULL_HANDLE;      VkDeviceMemory liveMemory = VK_NULL_HANDLE;    VkImageView liveView = VK_NULL_HANDLE;
+		VkImage        liveDepthImage = VK_NULL_HANDLE; VkDeviceMemory liveDepthMemory = VK_NULL_HANDLE; VkImageView liveDepthView = VK_NULL_HANDLE;
+		VkRenderPass   liveRenderPass = VK_NULL_HANDLE; VkFramebuffer liveFramebuffer = VK_NULL_HANDLE; VkSampler liveSampler = VK_NULL_HANDLE;
+		uint32_t liveW = 0, liveH = 0, liveReqW = 0, liveReqH = 0;
+		VkImageLayout liveLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		bool liveResChanged = false;
+		EditorCameraOverride liveCam;
+		uint32_t liveDraws = 0, liveTris = 0, liveVisible = 0, liveTotal = 0;
+		bool liveRaw = false, liveSrgb = false, liveBloom = false, liveSsao = false, liveSsr = false, liveGi = false, liveGiRefl = false;
+		HE::AAMethod   liveAa   = HE::AAMethod::Off;
+		HE::RenderPath livePath = HE::RenderPath::Forward;
+	};
+	StillSet m_still;
+	uint32_t m_rvtBracketPx = 0;   // BeginRvtPages: the page size whose set is kept across calls (0 = no bracket open)
+	// Inside a bracket the page layers are submitted WITHOUT waiting, each on its own frame slot (the per-frame rings, the
+	// descriptor pools and the lighting buffers are all indexed by m_currentFrame, which is what lets the real frames overlap):
+	// the k-th unwaited layer runs on slot (m_rvtBaseFrame + k) % 2, the device is waited for once the slots are used up or
+	// the bracket closes, and the command buffers are freed then. One queue runs the lists in the order they were made, so
+	// the shared target set needs nothing.
+	uint32_t m_rvtPending = 0, m_rvtBaseFrame = 0;
+	std::vector<VkCommandBuffer> m_rvtPendingCmds;
+	void rvtDrainPending();
+	void stillEnter(uint32_t w, uint32_t h);
+	void stillLeave();
 	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
 	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
 	// the material's displacement body into the shader hash right after resolveShaders
@@ -502,7 +562,7 @@ private:
 	std::unordered_map<uint64_t, std::string> m_tessDispByKey;
 	void        foldDisplacement(const HE::UUID& materialId, uint64_t& hash);
 	static constexpr uint32_t k_matMaxDraws   = 1024;
-	static constexpr uint32_t k_matSlotStride = 256; // 256-B stride/slot for U + HeParams
+	static constexpr uint32_t k_matSlotStride = HE::kMatParamBytes; // stride/slot for U + HeParams (HeParams fills it)
 
 	// ── Deferred render path (Thema 150, docs/deferred-renderer-plan.md §10) ──
 	// The D3D11/D3D12 structure on Vulkan's render-pass model. A deferred frame

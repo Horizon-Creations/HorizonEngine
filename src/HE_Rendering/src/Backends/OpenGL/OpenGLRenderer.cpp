@@ -5,6 +5,7 @@
 #include <ContentManager/TextureArrayBuild.h> // texture-array payload layout (Thema 158)
 #include <ContentManager/TextureBlockDecode.h> // CPU BC1/BC3/BC4/BC5 expand when the context cannot sample them
 #include <MaterialGraph/MaterialGraph.h>         // matGlslTextureArrayMask
+#include <MaterialGraph/RvtLookup.h>           // kRvtTableBinding (the RVT units)
 #include <HorizonRendering/ParticleShaderTemplates.h>
 #include <HorizonRendering/GiCasterRange.h>
 #include <HorizonRendering/GiHeightfield.h>
@@ -3487,6 +3488,14 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	m_forwardClustered = GLAD_GL_VERSION_4_3 != 0;
 	if (const char* cl = std::getenv("HE_FORWARD_CLUSTER"); cl && *cl && std::atoi(cl) == 0)
 		m_forwardClustered = false;
+	{
+		// The Runtime Virtual Texture's table and pool take units 21..24 (Thema 333).
+		GLint units = 0;
+		glGetIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &units);
+		m_rvtSupported = units >= 25;
+		if (!m_rvtSupported)
+			HE_LOG_INFO(RHI, "OpenGLRenderer: Runtime Virtual Textures off: %d fragment texture units, the lookup needs 25", static_cast<int>(units));
+	}
 	if (m_forwardClustered)
 		CreateClusterSSBOs();
 	HE_LOG_INFO(RHI, "%s", m_forwardClustered
@@ -3851,7 +3860,7 @@ void OpenGLRenderer::EnsureMaterialUBOs()
 		static_cast<GLsizeiptr>(sizeof(HE::MaterialShaderLibrary::Lighting)), nullptr, GL_DYNAMIC_DRAW);
 	glGenBuffers(1, &m_matParamUBO);
 	glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
-	glBufferData(GL_UNIFORM_BUFFER, 256, nullptr, GL_DYNAMIC_DRAW); // vec4 v[16]
+	glBufferData(GL_UNIFORM_BUFFER, HE::kMatParamBytes, nullptr, GL_DYNAMIC_DRAW); // vec4 v[kMatMaxParams]
 	// HeUI (D5 Schicht 1): rect, corner radii, interaction state — per QUAD, so
 	// unlike HeParams it is re-uploaded inside the UI loop rather than per draw
 	// call's material.
@@ -4069,6 +4078,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// Cloud-shadow transmittance map = unit 19 (per-frame bind in DrawScene,
 		// shared with the built-in shaders' uCloudShadowMap).
 		if (GLint l = glGetUniformLocation(prog, "heCloudShadow"); l >= 0) glUniform1i(l, 19);
+		// The Runtime Virtual Texture's page table and pool (Thema 333, RvtLookup.h): units 21..24, bound per draw.
+		static_assert(HE::kRvtTableBinding == 40 && HE::kRvtSurfaceBinding == 43, "four RVT samplers, units 21..24");
+		if (GLint l = glGetUniformLocation(prog, "heRvtTable");   l >= 0) glUniform1i(l, 21);
+		if (GLint l = glGetUniformLocation(prog, "heRvtAlbedo");  l >= 0) glUniform1i(l, 22);
+		if (GLint l = glGetUniformLocation(prog, "heRvtNormal");  l >= 0) glUniform1i(l, 23);
+		if (GLint l = glGetUniformLocation(prog, "heRvtSurface"); l >= 0) glUniform1i(l, 24);
 		glUseProgram(0);
 	};
 
@@ -8446,8 +8461,8 @@ void OpenGLRenderer::RenderUIPass(int pw, int ph)
 			if (const MaterialAsset* ma = m_contentManager
 				? m_contentManager->getMaterial(obj.materialAssetId) : nullptr)
 			{
-				float padded[64] = { 0 };
-				if (const size_t n = std::min(ma->shaderParamData.size(), size_t(64)))
+				float padded[HE::kMatParamFloats] = { 0 };
+				if (const size_t n = std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)))
 					std::memcpy(padded, ma->shaderParamData.data(), n * sizeof(float));
 				glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 				glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
@@ -9712,9 +9727,9 @@ bool OpenGLRenderer::DrawMaterialPreviewGeometry(const HE::UUID& materialId, flo
 
 	if (ma && !ma->shaderParamData.empty())
 	{
-		float padded[64] = { 0 };
+		float padded[HE::kMatParamFloats] = { 0 };
 		std::memcpy(padded, ma->shaderParamData.data(),
-		            std::min(ma->shaderParamData.size(), size_t(64)) * sizeof(float));
+		            std::min(ma->shaderParamData.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 		glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 		m_haveMatParams = false; // invalidate the main loop's content-skip
@@ -10881,6 +10896,7 @@ void OpenGLRenderer::Shutdown()
 
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	DestroyRvtPool();
 
 	for (auto& [id, mesh] : m_meshCache)
 	{
@@ -11091,6 +11107,170 @@ bool OpenGLRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width
 	return true;
 }
 
+// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
+// The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). The pool slices are TOP-row-first (what the
+// shader's texelFetch(y = 0) and every other backend see): GL renders bottom-row-first, so RenderSceneImage flips on the blit.
+bool OpenGLRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
+{
+	DestroyRvtPool();
+	if (!m_rvtSupported || !m_primarySdlWindow || !m_glContext || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	glGenTextures(3, m_rvtPool);
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[layer]);
+		// A complete texture for texelFetch: no mips, nearest (the default min filter would need a chain).
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, int(pagePx), int(pagePx), int(slots), 0,
+		             GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+	}
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	if (glGetError() != GL_NO_ERROR) { DestroyRvtPool(); return false; }
+	m_rvtSlots  = slots;
+	m_rvtPagePx = pagePx;
+	return true;
+}
+
+void OpenGLRenderer::DestroyRvtPool()
+{
+	if (m_primarySdlWindow && m_glContext)
+		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	else if (m_rvtPool[0] || !m_rvtTables.empty()) return;
+	m_rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
+	for (auto& kv : m_rvtTables) if (kv.second.tex) glDeleteTextures(1, &kv.second.tex);
+	m_rvtTables.clear();
+	for (unsigned int& t : m_rvtPool) { if (t) glDeleteTextures(1, &t); t = 0; }
+	m_rvtSlots = m_rvtPagePx = 0;
+}
+
+void OpenGLRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
+{
+	if (consumerMaterial == HE::UUID{}) m_rvtSwaps.erase(terrainEntity);
+	else                               m_rvtSwaps[terrainEntity] = { landscapeMaterial, consumerMaterial };
+}
+
+void OpenGLRenderer::ReleaseRvtConsumer(const HE::UUID& consumerMaterial)
+{
+	for (auto it = m_rvtSwaps.begin(); it != m_rvtSwaps.end();)
+		it = it->second.consumerMat == consumerMaterial ? m_rvtSwaps.erase(it) : std::next(it);
+	const auto t = m_rvtTables.find(consumerMaterial);
+	if (t == m_rvtTables.end()) return;
+	if (m_primarySdlWindow && m_glContext) SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	if (t->second.tex) glDeleteTextures(1, &t->second.tex);
+	m_rvtTables.erase(t);
+}
+
+bool OpenGLRenderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips)
+{
+	if (!m_rvtSlots || !m_primarySdlWindow || !m_glContext || mips.empty() || mips.size() > 12) return false;
+	uint32_t side = 1;
+	while (uint64_t(side) * side < mips[0].size()) ++side;
+	if (uint64_t(side) * side != mips[0].size() || (side & (side - 1)) != 0 || side > 4096) return false;   // a power of two
+	for (size_t m = 0; m < mips.size(); ++m)
+	{
+		const uint32_t ms = side >> m;
+		if (ms == 0 || mips[m].size() != size_t(ms) * ms) return false;
+	}
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	RvtTable& t = m_rvtTables[consumerMaterial];
+	const bool fresh = !t.tex || t.side != side || t.mips != mips.size();
+	if (fresh)
+	{
+		if (t.tex) glDeleteTextures(1, &t.tex);
+		glGenTextures(1, &t.tex);
+		glBindTexture(GL_TEXTURE_2D, t.tex);
+		// An integer texture is complete only with a nearest filter; the mip chain ends where the table's does.
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, int(mips.size()) - 1);
+		t.side = side;
+		t.mips = static_cast<uint32_t>(mips.size());
+	}
+	else
+		glBindTexture(GL_TEXTURE_2D, t.tex);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	for (size_t m = 0; m < mips.size(); ++m)
+	{
+		const int ms = int(side >> m);
+		if (fresh) glTexImage2D(GL_TEXTURE_2D, int(m), GL_R32UI, ms, ms, 0, GL_RED_INTEGER, GL_UNSIGNED_INT, mips[m].data());
+		else       glTexSubImage2D(GL_TEXTURE_2D, int(m), 0, 0, ms, ms, GL_RED_INTEGER, GL_UNSIGNED_INT, mips[m].data());
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+	if (glGetError() != GL_NO_ERROR)
+	{
+		glDeleteTextures(1, &t.tex);
+		m_rvtTables.erase(consumerMaterial);
+		return false;
+	}
+	return true;
+}
+
+bool OpenGLRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips)
+{
+	const auto found = m_rvtTables.find(consumerMaterial);
+	if (found == m_rvtTables.end() || !found->second.tex || !m_primarySdlWindow || !m_glContext) return false;
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	const RvtTable& t = found->second;
+	mips.assign(t.mips, {});
+	glBindTexture(GL_TEXTURE_2D, t.tex);
+	glPixelStorei(GL_PACK_ALIGNMENT, 4);
+	for (uint32_t m = 0; m < t.mips; ++m)
+	{
+		const uint32_t ms = t.side >> m;
+		mips[m].resize(size_t(ms) * ms);
+		glGetTexImage(GL_TEXTURE_2D, int(m), GL_RED_INTEGER, GL_UNSIGNED_INT, mips[m].data());
+	}
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return glGetError() == GL_NO_ERROR;
+}
+
+bool OpenGLRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
+{
+	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtSlots || !m_primarySdlWindow || !m_glContext) return false;
+	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	GLuint fbo = 0;
+	glGenFramebuffers(1, &fbo);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+	glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_rvtPool[layer], 0, int(slot));
+	bool ok = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	if (ok)
+	{
+		rgba.resize(size_t(m_rvtPagePx) * m_rvtPagePx * 4);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadBuffer(GL_COLOR_ATTACHMENT0);
+		const GLboolean srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+		glDisable(GL_FRAMEBUFFER_SRGB);       // the stored bytes, whatever the attachment's format
+		glReadPixels(0, 0, int(m_rvtPagePx), int(m_rvtPagePx), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+		if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
+		ok = glGetError() == GL_NO_ERROR;
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	glDeleteFramebuffers(1, &fbo);
+	return ok;
+}
+
+// The consumer's page table and the pool on units 21..24, for a draw whose material owns a table; every other material's
+// program has no such sampler and never looks.
+void OpenGLRenderer::BindRvtForDraw(const HE::UUID& material)
+{
+	if (m_rvtTables.empty() || !m_rvtPool[0]) return;
+	const auto t = m_rvtTables.find(material);
+	if (t == m_rvtTables.end() || !t->second.tex) return;
+	glActiveTexture(GL_TEXTURE21); glBindTexture(GL_TEXTURE_2D,       t->second.tex);
+	glActiveTexture(GL_TEXTURE22); glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[0]);
+	glActiveTexture(GL_TEXTURE23); glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[1]);
+	glActiveTexture(GL_TEXTURE24); glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[2]);
+	glActiveTexture(GL_TEXTURE0);
+}
+
 // ─── One still from somebody else's camera ────────────────────────────────────
 // The contract is in IRenderer.h; the shape is Metal's (MetalRenderer.mm,
 // RenderSceneImage). GL is the simpler case: Render() is the only thing that
@@ -11180,7 +11360,36 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	// glReadPixels waits for the GPU; no world → the cleared target, honestly
 	// black, which is what the viewport would show too.
 	uint32_t   gotW = 0, gotH = 0;
-	const bool ok   = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
+	bool       ok   = false;
+	if (camera.rvtSlot >= 0)
+	{
+		// A virtual texture page (Thema 333): the picture goes into its pool slice, flipped to top-row-first, nothing read back.
+		rgba.clear();
+		ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer]
+		  && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx
+		  && m_viewportFBO && m_viewportW == int(width) && m_viewportH == int(height);
+		if (ok)
+		{
+			GLuint dst = 0;
+			glGenFramebuffers(1, &dst);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, m_viewportFBO);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
+			glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_rvtPool[camera.rvtLayer], 0, camera.rvtSlot);
+			ok = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+			if (ok)
+			{
+				// Raw bytes in, raw bytes out: the albedo slice is SRGB8_ALPHA8 and must not be encoded a second time.
+				const GLboolean srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+				glDisable(GL_FRAMEBUFFER_SRGB);
+				glBlitFramebuffer(0, 0, int(width), int(height), 0, int(height), int(width), 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+				if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
+			}
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glDeleteFramebuffers(1, &dst);
+		}
+	}
+	else
+		ok = CaptureViewport(rgba, gotW, gotH) && gotW == width && gotH == height;
 
 	// The screenshot pair goes the way every viewport target goes (the colour
 	// texture is retired, not deleted — one release path, not two). The live
@@ -11548,6 +11757,25 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	                    &m_editorCamera);
 	m_extractor.extractUI(*m_world, static_cast<float>(pw), static_cast<float>(ph),
 	                      m_renderWorld);
+	// A virtual texture page (RenderSceneImage with rvtSlot >= 0): the layer's view material replaces every object's own,
+	// after the walk. Section lists would override it; terrain has none.
+	if (m_editorCamera.rvtMaterial != HE::UUID{})
+		for (RenderObject& o : m_renderWorld.objects)
+		{
+			o.materialAssetId = m_editorCamera.rvtMaterial;
+			o.sections.clear();
+		}
+	// The landscape drawn from the virtual texture (SetRvtLandscape): its terrain chunks take the consumer material, and not
+	// the object's own parameter block (laid out for the old material; it would overwrite RvtVolumeA/B).
+	else if (!m_rvtSwaps.empty() && m_rvtPool[0])
+		for (RenderObject& o : m_renderWorld.objects)
+			if (o.terrainChunk)
+				if (const auto sw = m_rvtSwaps.find(o.terrainEntity); sw != m_rvtSwaps.end() && o.materialAssetId == sw->second.landscapeMat)
+				{
+					o.materialAssetId = sw->second.consumerMat;
+					o.paramOverride.clear();
+					o.sections.clear();
+				}
 
 	// GI acceleration structures (GL 4.3 compute port, Checkpoint GL-A): CPU
 	// BLAS build + SSBO upload from THIS extraction — no-op unless GI is on and
@@ -12593,9 +12821,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_matLightUBO); // block "HeLighting" (Time)
 					if (!mParams.empty())
 					{
-						float padded[64] = { 0 };
+						float padded[HE::kMatParamFloats] = { 0 };
 						std::memcpy(padded, mParams.data(),
-						            std::min(mParams.size(), size_t(64)) * sizeof(float));
+						            std::min(mParams.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 						if (!m_haveMatParams || std::memcmp(padded, m_lastMatParams, sizeof(padded)) != 0)
 						{
 							std::memcpy(m_lastMatParams, padded, sizeof(padded));
@@ -12621,6 +12849,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glActiveTexture(GL_TEXTURE13);
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 					}
+					BindRvtForDraw(dc.materialAssetId);
 					glActiveTexture(GL_TEXTURE0);
 					if (gbInstProg)
 					{
@@ -12866,9 +13095,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						: (ma && !ma->shaderParamData.empty() ? &ma->shaderParamData : nullptr);
 					if (params)
 					{
-						float padded[64] = { 0 };
+						float padded[HE::kMatParamFloats] = { 0 };
 						std::memcpy(padded, params->data(),
-						            std::min(params->size(), size_t(64)) * sizeof(float));
+						            std::min(params->size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 						// Skip the upload when the UBO already holds these exact params
 						// (the common case: many draws of the same material). Still correct
 						// for per-entity overrides — their block differs, so it re-uploads.
@@ -12928,6 +13157,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, ResolveGraphTexture(wid, {}));
 						glActiveTexture(GL_TEXTURE0);
 					}
+					BindRvtForDraw(dc.materialAssetId);
 					if (matInstProg)
 					{
 						// The whole batch in one draw (the binds above are context
@@ -13223,9 +13453,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
@@ -13492,9 +13722,9 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					obj.pbr   = glm::vec4(t.metallic, t.roughness, t.opacity, 0.0f);
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matObjUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(obj), &obj);
-					float padded[64] = { 0 };
+					float padded[HE::kMatParamFloats] = { 0 };
 					std::memcpy(padded, t.params.data(),
-					            std::min(t.params.size(), size_t(64)) * sizeof(float));
+					            std::min(t.params.size(), size_t(HE::kMatParamFloats)) * sizeof(float));
 					glBindBuffer(GL_UNIFORM_BUFFER, m_matParamUBO);
 					glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(padded), padded);
 					glBindBuffer(GL_UNIFORM_BUFFER, 0);
@@ -14064,6 +14294,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
 	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
+	c.supportsRvt                = m_rvtSupported;   // a page is that raw capture blitted into the pool (the programs come from the cross-compiler)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
 	// Metal's Option-A path. The deferred composite (A6) is not built, so in
