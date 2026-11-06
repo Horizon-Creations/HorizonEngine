@@ -76,7 +76,7 @@ Behaviour worth knowing:
 2. Project-relative pack paths (resolve against the project root in `LandscapeRuntime::update`, which
    needs the root passed in; `LandscapeRuntime.h` is included by `HorizonWorld.h`, so touching it
    rebuilds everything).
-3. Export: the pack is a file beside the project, not part of the pak.
+3. ~~Export: the pack is a file beside the project, not part of the pak.~~ Done 06.11.2026: the export ships it as `Landscape/<name>.pack` in the data folder (see `landscape-world-scale-regions-2026-11-02.md`, "Export").
 4. Water for migrated terrains (`water::Field` -> coverage/owner rasters + a water table).
 5. A per-key "failed" state on `LandscapeStore` so the tile map can show it (only the count exists).
 

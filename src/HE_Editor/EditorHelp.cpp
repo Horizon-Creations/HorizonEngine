@@ -8283,6 +8283,17 @@ namespace
 	  "cannot makes the export say so and the far levels keep the real material. "
 	  "Saved in the profile.",
 	  "", "export#overview" },
+	{ "Export/Bake streaming cell proxies", "Bake streaming cell proxies",
+	  "A scene with a Tile Landscape and streaming cells (Streaming tab, Split into Cells) ships the "
+	  "landscape's pack as a loose file in the game's data folder (Landscape/<name>.pack), and the "
+	  "exported scene names that copy. With this on, the export also merges the static meshes of every "
+	  "cell (visible, no skeleton, no animator, no moving body) into one distant proxy per cell and "
+	  "appends them to the shipped copy of the pack: while a cell is not built yet, or has been unloaded, "
+	  "its proxy stands in as a plain silhouette in the right place and size, drawn with the default "
+	  "material. A cell is capped at 20 000 triangles and 4 000 instances, the biggest first. Your "
+	  "project's own pack is never changed. Off: the pack is still shipped, without proxies. Saved in "
+	  "the profile.",
+	  "", "export#overview" },
 	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
 	  "What all baked far-landscape textures of this export may cost once cooked "
 	  "(block-compressed, with mip levels), in megabytes. When the pictures the "

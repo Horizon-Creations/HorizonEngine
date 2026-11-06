@@ -169,7 +169,20 @@ Built on top of the data model above; all of it CPU-side and tested, nothing dra
 
 Tests: `test_landscape_hlod.cpp` (pack round trip with and without water, damaged trailer/table refused, proxies appear/disappear with the draw radius and with the cell loading), `test_landscape_cell_hlod_bake.cpp` (merge in absolute metres, dynamic body left out, missing/empty cells counted, budgets keep the big instances, append/replace/remove in a pack, non-pack refused).
 
-**Not done:** (1) the export does not run the baker: `splitSceneIntoCells` has **no caller in the editor or the export** (only tests and `scripts/split_scene_cells.py`), so there is no place yet that knows the cell files of a scene next to its landscape pack; the next worker should add a "bake cell proxies" step where cells are produced, calling `bakeCellProxies` and `landscapePackSetHlod`. (2) `CellRegionConfig` is still not set from the landscape's region size. (3) The table pass costs O(table cells) every 4th frame, fine for thousands, not measured for a 100 km world with tens of thousands. (4) Proxies have no colour (default material) and no tree impostors. (5) Nothing was looked at on a screen.
+**Export (06.11.2026, done):** the first version of this section said the export did not run the baker. It does now, and it also ships the pack, which the export did not do at all (the editor doc listed "the pack is a file beside the project, not part of the pak" as open).
+
+| Part | Where | What |
+|---|---|---|
+| Plan per scene | `LandscapeExport.h/.cpp` `prepareLandscapePacksForExport` | For every enabled `LandscapeWorldComponent` of a scene the export loads: finds the pack (absolute, else under the project, else as written), adds it to the plan **once per file** (two scenes, or one scene written two ways, ship it once; two files with one name get `_1`), **rewrites the component's path to `Landscape/<name>.pack`** before the scene is serialized, and, with a cell manifest and the switch on, runs `bakeCellProxies` over the cell files under the project root. A pack that cannot be found is left as written with a warning; nothing here fails the export |
+| Copy | `ProjectExporter.h/.cpp` `ExportSettings::dataFiles` / `copyDataFiles` | Generic "loose file into the data folder": `{source, dest, afterCopy}`. `dest` must stay inside the data folder (refused otherwise). `afterCopy` runs on the **copy**, so the project's own pack is never changed; the landscape's one is `finishExportedPack` → `landscapePackSetHlod`. One copy of a possibly multi-GB file, not two |
+| Editor | `ExportDialogPanel.cpp`, `ProjectManager.*` (`bakeCellHlod`, default on), `EditorHelp.cpp` | checkbox "Bake streaming cell proxies" in the profile; the bake runs on the main thread (it loads mesh assets through the editor's `ContentManager`), the copy on the export thread. Off: the pack still ships, without proxies |
+| Game | `GameApplication.cpp` + `resolveLandscapePacks` | a relative pack path that names a file in the data folder becomes its absolute path before `m_landscape.update` (the runtime opens a path as it is) |
+
+Tests: `test_landscape_export.cpp` (scene renamed, proxies in the copy and the project pack byte-identical, shared pack once, switched off, missing pack, name clash, `resolveLandscapePacks`), `test_project_exporter.cpp` (dataFiles copied, `afterCopy` on the copy only, failing `afterCopy` fails the export, `../` refused).
+
+**Not verified:** a real export from the editor GUI (the editor and game were built, the path was only driven through the functions above); the exported game opening the shipped pack and drawing proxies on a screen; macOS `.app` bundle layout (data dir = `Contents/Resources`, covered by the same `ctx.dataDir` as the other loose files, not run). Cells are found as the scene's manifest `dir` under the project root, as the editor writes them.
+
+**Not done (rest):** (2) `CellRegionConfig` is still not set from the landscape's region size. (3) The table pass costs O(table cells) every 4th frame, fine for thousands, not measured for a 100 km world with tens of thousands. (4) Proxies have no colour (default material) and no tree impostors. (5) Nothing was looked at on a screen.
 
 ## Handoff
 

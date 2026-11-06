@@ -32,6 +32,7 @@ add_library(HorizonScene SHARED
     src/LandscapeCellHlod.cpp
     src/LandscapeHlodProxies.cpp
     src/LandscapeCellHlodBake.cpp
+    src/LandscapeExport.cpp
     src/LandscapePackBuild.cpp
     src/LandscapeWorldProxies.cpp
     src/LandscapeFoliage.cpp

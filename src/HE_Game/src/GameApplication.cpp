@@ -51,6 +51,7 @@
 #include <HorizonScene/CameraRigController.h>  // first/third person rig (shared with the editor's PIE)
 #include <HorizonScene/TransformHierarchy.h>   // worldPositionOf — the camera position fed to tickWorld
 #include <HorizonScene/FloatingOrigin.h>
+#include <HorizonScene/LandscapeExport.h>      // resolveLandscapePacks: the exported pack path is relative to the data folder
 #include <Scripting/ScriptTypes.h>
 #include <HorizonScene/Components/CameraComponent.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -1681,6 +1682,8 @@ void GameApplication::updateLandscape(float dt)
 		m_landscape.setNavigation(&nav);
 		m_landscapeNavigation = true;
 	}
+	// An exported scene names its pack relative to the data folder (LandscapeExport.h); the runtime opens a path as it is.
+	if (m_world) HE::resolveLandscapePacks(*m_world, HE::GameLayout::dataDir());
 	m_landscape.update(*m_world, dt);
 	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
 	// Entity cells that are not built yet (or any more) stand in as their baked proxy while the pack has one; the cell streamer ran

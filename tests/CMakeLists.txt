@@ -279,6 +279,7 @@ add_executable(he_tests
     test_cell_village.cpp
     test_landscape_hlod.cpp
     test_landscape_cell_hlod_bake.cpp
+    test_landscape_export.cpp
     test_landscape_pack_build.cpp
     test_landscape_region_streaming.cpp
     test_landscape_store.cpp
