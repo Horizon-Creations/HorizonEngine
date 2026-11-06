@@ -1,17 +1,28 @@
-# Vulkan on macOS through MoltenVK (opt-in)
+# Vulkan on macOS through MoltenVK (on by default)
 
 Branch `claude/hc-engine-settings-nodes`, no PR. Done on request, because it makes the
 Vulkan backend something a Mac can build, start and shoot, not only syntax-check.
 
 ## What it is
 
-`-DHE_ENABLE_MOLTENVK=ON` (macOS, default OFF) builds `RendererVulkan`, the ImGui Vulkan bridge
-and the SPIR-V scene shaders on top of MoltenVK (Vulkan -> Metal).
+`HE_ENABLE_MOLTENVK` (macOS, **default ON** since 2026-11-06, was opt-in) builds `RendererVulkan`, the ImGui
+Vulkan bridge and the SPIR-V scene shaders on top of MoltenVK (Vulkan -> Metal). Metal stays the default
+backend; Vulkan is selected per project / game (`GameBackend`).
 
 ```
-brew install molten-vk                      # headers + libMoltenVK.dylib, glslc from brew shaderc
-cmake -S . -B out/build/release -DHE_ENABLE_MOLTENVK=ON      # -DHE_MOLTENVK_ROOT=<prefix> to override
+brew install molten-vk shaderc              # headers + libMoltenVK.dylib, glslc from shaderc
+cmake -S . -B out/build/release             # -DHE_MOLTENVK_ROOT=<prefix> to override, -DHE_ENABLE_MOLTENVK=OFF to leave out
 ```
+
+* **Not installed is fine:** the module only prints "MoltenVK: not found ... Vulkan backend off on macOS"
+  (a warning only when an explicit `HE_MOLTENVK_ROOT` finds nothing). A missing `glslc` leaves the SPIR-V shaders out
+  with the existing warning.
+* **Shipped with the package:** `libMoltenVK.dylib` is a link-time dependency of `libHorizonEngine.dylib`, so
+  `scripts/bundle_native_deps.sh` copies and relocates it (`@rpath`) like every other bundled dylib; it was already
+  in the exported game dir (`HorizonEngine/libMoltenVK.dylib`, minos 11.0). CI installs `molten-vk shaderc` before
+  "Configure (macOS)" (`brew install ... || warning`, so a failed brew call does not fail the job).
+* Not verified: a CI run of the macOS job with the new step, and the DMG with MoltenVK inside (`package_macos.sh`,
+  `otool -L` check there) - both need CI.
 
 * `cmake/HEMoltenVK.cmake` finds the dylib and headers (`HE_MOLTENVK_ROOT`, then the LunarG
   SDK's `macOS/` layout, then Homebrew) and presets the cache entries `Vulkan_INCLUDE_DIR` /
@@ -81,8 +92,12 @@ samplers now (the reflection loops fail on any shader that declares a fixed text
 **Verified:** as above. **Not verified:** a visible (non-hidden) window and VSync on the Vulkan path,
 `HE_GPU_DEBUG` validation layer (not installed), the editor's ImGui Vulkan bridge under interaction (only
 one dumped frame), Texture Quality on Vulkan, per-feature pixel parity with Metal (only the whole frame was compared). **Decided:** direct link to MoltenVK, opt-in, no Khronos loader on macOS.
+**Done since (2026-11-06, same branch):** MoltenVK on by default (above); Texture Quality on Vulkan; shadow presets
+confirmed on Vulkan; material quality alone A/B against Metal; the governor run on Vulkan. Numbers and files:
+`docs/engine-quality-settings-2026-11-05.md` section 10.
 **Next steps, in order**
-1. Hive topic 336 step 8 (Vulkan) can now be partly checked on the Mac: the quality lane reaches Vulkan (see
-   above); Texture Quality on Vulkan and a Windows/Linux run stay open.
-2. Try `HE_GPU_DEBUG=1` once the Vulkan SDK validation layer is installed (`brew install vulkan-validationlayers`).
-3. Decide whether the Mac release package should ever carry MoltenVK (today: dev option only).
+1. CI: let the macOS job run once with the `Install MoltenVK + shaderc` step; check `HE_VULKAN_ENABLED` in its CMakeCache
+   and `otool -L` of the packaged editor (libMoltenVK `@rpath`-relative, inside the DMG's Frameworks).
+2. Hive topic 336 step 8 (Vulkan): a Windows/Linux driver run, a visible window with VSync, validation layers
+   (`brew install vulkan-validationlayers`, then `HE_GPU_DEBUG=1`).
+3. Per-node "Sampler Source" (Texture / Shared Wrap / Shared Clamp) on the Texture Sample node, only if wanted.

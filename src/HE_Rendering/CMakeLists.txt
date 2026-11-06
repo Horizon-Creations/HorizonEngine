@@ -84,7 +84,7 @@ target_compile_definitions(RendererSoftware PRIVATE HE_RENDERING_BUILD_DLL)
 # symbols at link time.
 set(HE_VULKAN_ENABLED FALSE CACHE INTERNAL "Vulkan backend available")
 if(APPLE)
-    # macOS: only through MoltenVK, and only when asked for. cmake/HEMoltenVK.cmake has
+    # macOS: only through MoltenVK, and when MoltenVK was found. cmake/HEMoltenVK.cmake has
     # already preset the two cache variables FindVulkan reads.
     if(HE_MOLTENVK_LIBRARY)
         find_package(Vulkan QUIET)

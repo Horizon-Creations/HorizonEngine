@@ -625,6 +625,8 @@ void VulkanRenderer::Render()
         createShadowImages();
         writeShadowDescriptors();
         m_shadowSizeDirty = false;
+        HE_LOG_INFO(RHI, "VulkanRenderer: shadow cascades rebuilt at %ux%u (%d cascades, distance %.0f)",
+                    m_shadowSize, m_shadowSize, m_shadowSettings.cascadeCount, m_shadowSettings.distance);
     }
 
     // The game frame needs the full HDR set: without it DrawViewportFrame takes
@@ -2567,6 +2569,12 @@ void VulkanRenderer::createScenePipeline()
         sci.maxLod       = VK_LOD_CLAMP_NONE;
         vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_albedoSampler), "albedo sampler");
 
+        // The world/material twin with the texture-quality mip floor; a quality pushed
+        // before this ran is honoured here, later ones go through applyTextureQuality().
+        m_textureMinLod = TextureMinLodForQuality(m_quality.textureQuality);
+        sci.minLod      = m_textureMinLod;
+        vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_worldSampler), "world sampler");
+
         // One combined-image-sampler set per unique textured mesh + override material
         // (+1 for the white default). FREE bit so hot-reload can recycle invalidated sets.
         VkDescriptorPoolSize aps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxMeshTextures + 1 };
@@ -2859,6 +2867,7 @@ void VulkanRenderer::destroyScenePipeline()
     if (m_whiteAlbedoImage)    { vkDestroyImage(m_device, m_whiteAlbedoImage, nullptr);             m_whiteAlbedoImage = VK_NULL_HANDLE; }
     if (m_whiteAlbedoMem)      { vkFreeMemory(m_device, m_whiteAlbedoMem, nullptr);                 m_whiteAlbedoMem = VK_NULL_HANDLE; }
     if (m_albedoSampler)       { vkDestroySampler(m_device, m_albedoSampler, nullptr);              m_albedoSampler = VK_NULL_HANDLE; }
+    if (m_worldSampler)        { vkDestroySampler(m_device, m_worldSampler, nullptr);               m_worldSampler = VK_NULL_HANDLE; }
     if (m_albedoSetLayout)     { vkDestroyDescriptorSetLayout(m_device, m_albedoSetLayout, nullptr); m_albedoSetLayout = VK_NULL_HANDLE; }
     if (m_emptySetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_emptySetLayout, nullptr);  m_emptySetLayout = VK_NULL_HANDLE; }
     if (m_shadowPipeline)                { vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);                m_shadowPipeline = VK_NULL_HANDLE; }
@@ -4398,7 +4407,7 @@ void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, VkImageView depthView,
 
         // heDecalTex must be bound even when the decal is untextured — the shader
         // statically references the sampler; the white default makes it a no-op.
-        VkDescriptorImageInfo texInfo{ m_albedoSampler,
+        VkDescriptorImageInfo texInfo{ worldSampler(),
             texView ? *texView : m_whiteAlbedoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo depthInfo{ m_decalDepthSampler, depthView,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -8631,7 +8640,7 @@ bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const st
         set = VK_NULL_HANDLE;
         return false;
     }
-    VkDescriptorImageInfo dii{ m_albedoSampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo dii{ worldSampler(), view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     ww.dstSet          = set;
     ww.dstBinding      = 0;
@@ -9581,7 +9590,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkImageView tex0View = m_whiteAlbedoView;
                             if (matOvr) { if (matOvr->view) tex0View = matOvr->view; }
                             else if (m.albedoView) tex0View = m.albedoView;
-                            VkDescriptorImageInfo tex0II{ m_albedoSampler, tex0View,
+                            VkDescriptorImageInfo tex0II{ worldSampler(), tex0View,
                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             // heTexP0..3 (bindings 4..7): the graph's project textures resolved
                             // above, sampled linear-wrap like heTex0 (the white default where
@@ -9589,7 +9598,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy bindings 4..7");
                             VkDescriptorImageInfo texPII[HE::kMatMaxGraphTextures];
                             for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
-                                texPII[k] = { m_albedoSampler, heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                texPII[k] = { worldSampler(), heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             VkWriteDescriptorSet w[HE::vkmat::kBindingCount]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
@@ -11410,6 +11419,62 @@ void VulkanRenderer::DestroyImGuiTexture(void* /*handle*/)
     // images/views/memory/samplers are destroyed (after vkDeviceWaitIdle). The
     // ImGui VkDescriptorSet is owned by ImGui's internal pool and freed on ImGui
     // shutdown, so there is nothing to free here.
+}
+
+void VulkanRenderer::SetQualitySettings(const QualitySettings& s)
+{
+    IRenderer::SetQualitySettings(s);
+    applyTextureQuality();
+}
+
+// Texture quality: Low / Medium keep the world's texture sampler off the finest one or
+// two mip levels (see MetalRenderer::ApplyTextureQuality). A sampler is baked into the
+// cached base-colour sets, so a change rebuilds it and rewrites those sets once; the
+// per-draw material sets pick the new one up on their next write. A quality change is
+// a settings event, not a per-frame one, so the vkDeviceWaitIdle that makes the
+// rewrite legal is acceptable. A texture with a single level is unaffected.
+void VulkanRenderer::applyTextureQuality()
+{
+    const float minLod = TextureMinLodForQuality(m_quality.textureQuality);
+    // Before the scene pipeline there is nothing to rewrite; it creates the sampler
+    // with the quality current at that point.
+    if (!m_device || !m_worldSampler || minLod == m_textureMinLod)
+        return;
+    VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter    = VK_FILTER_LINEAR;
+    sci.minFilter    = VK_FILTER_LINEAR;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.minLod       = minLod;
+    sci.maxLod       = VK_LOD_CLAMP_NONE;
+    VkSampler next = VK_NULL_HANDLE;
+    if (vkCreateSampler(m_device, &sci, nullptr, &next) != VK_SUCCESS)
+        return;   // keep the old one; the next push tries again
+    vkDeviceWaitIdle(m_device);
+
+    auto rewrite = [&](VkDescriptorSet set, VkImageView view)
+    {
+        if (!set || !view) return;
+        VkDescriptorImageInfo dii{ next, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        ww.dstSet          = set;
+        ww.dstBinding      = 0;
+        ww.descriptorCount = 1;
+        ww.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ww.pImageInfo      = &dii;
+        vkUpdateDescriptorSets(m_device, 1, &ww, 0, nullptr);
+    };
+    for (auto& kv : m_meshCache)         rewrite(kv.second.albedoSet, kv.second.albedoView);
+    for (auto& kv : m_skeletalMeshCache) rewrite(kv.second.albedoSet, kv.second.texView);
+    for (auto& kv : m_materialTexCache)  rewrite(kv.second.set, kv.second.view);
+
+    vkDestroySampler(m_device, m_worldSampler, nullptr);
+    m_worldSampler  = next;
+    m_textureMinLod = minLod;
+    HE_LOG_INFO(RHI, "VulkanRenderer: texture quality %d - world and material samplers start at mip level %.0f",
+                m_quality.textureQuality, minLod);
 }
 
 void VulkanRenderer::SetSSAOSettings(const SSAOSettings& s)

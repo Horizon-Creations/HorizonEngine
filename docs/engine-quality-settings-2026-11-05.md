@@ -81,9 +81,9 @@ How a preset change reaches the screen:
 | Level | Metal | OpenGL | D3D11 / D3D12 / Vulkan |
 |---|---|---|---|
 | AA, render scale, SSAO, SSR, GI, GI reflections | as before (backend gates, fallbacks at push) | as before | as before, capability-gated |
-| shadow resolution/cascades/distance | acts | acts | ignored (one whole-scene map) |
-| `textureQuality` | **acts**: `lodMinClamp` 2/1/0 (Low/Med/High) on two samplers, live, no re-upload: `m_materialSampler` (landscape layers, graph-material texture slots) and `m_worldSampler` (base colour of mesh, skinned mesh, decal and blended draws) | ignored (per-texture `glTexParameter`, no sampler objects) | ignored |
-| `materialQuality` | stored (`GetQualitySettings`), no feature gated on it | same | same |
+| shadow resolution/cascades/distance | acts | acts | **Vulkan acts** (cascade array rebuilt at the preset's size, log "shadow cascades rebuilt at 1024x1024 (2 cascades, distance 100)" at Low, 4096 / 3 / 500 at Ultra; seen on MoltenVK, 2026-11-06); D3D11/D3D12 not re-checked (this line said "ignored", which is stale for Vulkan) |
+| `textureQuality` | **acts**: `lodMinClamp` 2/1/0 (Low/Med/High) on two samplers, live, no re-upload: `m_materialSampler` (landscape layers, graph-material texture slots) and `m_worldSampler` (base colour of mesh, skinned mesh, decal and blended draws) | ignored (per-texture `glTexParameter`, no sampler objects) | **Vulkan acts** (`m_worldSampler`, same floor, see section 10); D3D11/D3D12 ignored |
+| `materialQuality` | the material quality lane (`heLight.counts.y`), see `hc-engine-settings-nodes-2026-11-05.md`; the "stored, nothing gated" wording of this step is superseded | same | same; Vulkan A/B against Metal in section 10 |
 
 `textureQuality` only changes textures that carry a mip chain; a single-level texture (what the
 packer cooks, and most loose imports) has no coarser level and looks the same. The landscape
@@ -251,6 +251,28 @@ Where it lives and how it got into the editor (this took a decision):
 * The 16 help entries of the Quality page point at `rendering#quality` now (they were empty).
 * Tests: `test_docs_library` asks for the section itself (not the stale-anchor fallback), its two tables and listings, and a
   search hit for "quality preset"; `test_ui_shot` has a scene for it.
+
+## 10. Vulkan (through MoltenVK on the Mac, 2026-11-06)
+
+Done on the Mac with the MoltenVK build (`docs/moltenvk-macos-2026-11-06.md`), Catania copy, hidden window.
+
+* **Texture quality now acts on Vulkan** (`VulkanRenderer::applyTextureQuality`). A second sampler `m_worldSampler`
+  (linear, repeat, `minLod` 2/1/0) serves the mesh / skinned / decal base colour and the graph-material texture slots
+  (`heTex0`, `heTexP0..3`); `m_albedoSampler` stays unclamped for every fallback (GI, sky, AO, post). The base-colour
+  sets are cached with their sampler baked in, so a change creates the new sampler, waits for the device and rewrites binding 0
+  of the cached sets (mesh, skinned, material override), then destroys the old sampler. A settings event, so the idle wait is fine.
+  Witness: `HE_DUMP_TEXQUALITY=2` vs `0`, camera 4 to 5 m under the starting height (about 1.5 m above ground):
+  mean abs 0.037 / 0.024 of 255 (0.07 / 0.05 % of pixels over 8) on Vulkan, 0.008 on Metal at the same camera. Small, as in
+  section 8 (only the nearest ground is affected); before the change the pair was identical by construction.
+* **Shadow settings act on Vulkan.** The old table said "ignored (one whole-scene map)"; Vulkan has had the cascade array and the
+  extractor settings for a while. New log line at the rebuild: Low 1024x1024, 2 cascades, 100 m; Ultra 4096x4096, 3, 500.
+* **Material quality alone, Vulkan against Metal** (`HE_DUMP_MATQUALITY=2` vs `0`, new dump knob, High preset otherwise):
+  Vulkan mean abs 4.990 (15.36 % of pixels over 8), Metal 4.975 (15.37 %). Same effect on both. Vulkan vs Metal for the same
+  level: 7.07 at material quality 2, 6.89 at 0 (the usual sky/cloud/water gap, unchanged by the level).
+* **Automatic quality on Vulkan:** exported game, target 1000 fps, hidden: "level 2 -> 1" at frame 256 (2 s), "level 1 -> 0" at
+  frame 855 (5 s later); each step logs the texture quality rebuild, the second one the shadow rebuild; 2500 frames, 0 errors.
+  The two warnings are the stub project's (no GameInstance, no player controller).
+* Not done: a visible window with VSync, validation layers, any D3D/native-Vulkan driver.
 
 ## Handoff
 

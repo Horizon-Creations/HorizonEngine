@@ -1,4 +1,5 @@
-# MoltenVK as the Vulkan implementation on macOS (opt-in, -DHE_ENABLE_MOLTENVK=ON).
+# MoltenVK as the Vulkan implementation on macOS (on by default when found,
+# -DHE_ENABLE_MOLTENVK=OFF to leave it out).
 #
 # macOS has no Vulkan loader of its own: Vulkan runs through MoltenVK, which maps it
 # onto Metal. The engine's Vulkan backend (RendererVulkan, the ImGui bridge, the SPIR-V
@@ -48,9 +49,14 @@ if(APPLE AND HE_ENABLE_MOLTENVK)
         set(Vulkan_LIBRARY     "${_he_mvk_lib}" CACHE FILEPATH "Vulkan library (MoltenVK)"     FORCE)
         message(STATUS "MoltenVK: ${HE_MOLTENVK_LIBRARY} (headers ${HE_MOLTENVK_INCLUDE_DIR})")
     else()
-        message(WARNING "HE_ENABLE_MOLTENVK=ON but MoltenVK was not found "
-                        "(brew install molten-vk, or pass -DHE_MOLTENVK_ROOT=<prefix>). "
-                        "The Vulkan backend stays off.")
+        # The default is ON, so a Mac without MoltenVK is the normal case, not a mistake:
+        # only an explicit -DHE_MOLTENVK_ROOT that finds nothing is worth a warning.
+        if(HE_MOLTENVK_ROOT)
+            message(WARNING "MoltenVK not found under HE_MOLTENVK_ROOT=${HE_MOLTENVK_ROOT}. "
+                            "The Vulkan backend stays off.")
+        else()
+            message(STATUS "MoltenVK: not found (brew install molten-vk) - Vulkan backend off on macOS")
+        endif()
     endif()
     unset(_he_mvk_lib CACHE)
     unset(_he_mvk_inc CACHE)

@@ -69,7 +69,8 @@ three docs files, uploaded by hand because the local Website checkout carries un
 
 **Not verified**
 * D3D11/D3D12/Vulkan/OpenGL: see Hive steps 7-10 of topic 336 (hardware or CI).
-* A pixel A/B of the material lane alone; the Catania shots show the whole Low preset.
+* (Done 2026-11-06 on the Mac, see engine-quality-settings section 10: pixel A/B of the material lane alone,
+  Vulkan 4.990 vs Metal 4.975 mean abs; texture quality + shadow presets + governor on Vulkan via MoltenVK.)
 * The scripting-reference page for the new rows (generated page, not touched).
 * A player's menu flow (pick preset in the game turns auto off) beyond the unit tests.
 
@@ -78,5 +79,5 @@ returned for mixed areas; governor stays out of the editor viewport.
 
 **Next steps, in order**
 1. Backends: Hive steps 7-10 (D3D, Vulkan, OpenGL, real display).
-2. Pixel A/B of material quality alone (a project copy with only `materialQuality` changed).
+2. (done, see above) Pixel A/B of material quality alone.
 3. Decide the target-above-refresh-rate question (cap the target or warn in the dialog).
