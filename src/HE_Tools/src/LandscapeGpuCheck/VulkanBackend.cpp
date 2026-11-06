@@ -47,6 +47,23 @@ public:
 		app.apiVersion = VK_API_VERSION_1_1;
 		VkInstanceCreateInfo ici{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 		ici.pApplicationInfo = &app;
+		// MoltenVK (macOS) is a portability driver the loader hides unless asked (same as VulkanRenderer::createInstance).
+		std::vector<const char*> instExts;
+		{
+			uint32_t en = 0;
+			vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+			std::vector<VkExtensionProperties> props(en);
+			if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, props.data());
+			for (const auto& e : props)
+				if (std::strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
+				{
+					instExts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+					ici.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+					break;
+				}
+		}
+		ici.enabledExtensionCount = static_cast<uint32_t>(instExts.size());
+		ici.ppEnabledExtensionNames = instExts.empty() ? nullptr : instExts.data();
 		if (vkCreateInstance(&ici, nullptr, &m_instance) != VK_SUCCESS) { error = "vkCreateInstance failed (no Vulkan loader or driver)"; return false; }
 		uint32_t n = 0;
 		vkEnumeratePhysicalDevices(m_instance, &n, nullptr);
@@ -76,6 +93,17 @@ public:
 		qci.queueFamilyIndex = m_family; qci.queueCount = 1; qci.pQueuePriorities = &prio;
 		VkDeviceCreateInfo dci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
 		dci.queueCreateInfoCount = 1; dci.pQueueCreateInfos = &qci;
+		std::vector<const char*> devExts;   // a portability device (MoltenVK) must enable VK_KHR_portability_subset
+		{
+			uint32_t dn = 0;
+			vkEnumerateDeviceExtensionProperties(m_phys, nullptr, &dn, nullptr);
+			std::vector<VkExtensionProperties> props(dn);
+			if (dn) vkEnumerateDeviceExtensionProperties(m_phys, nullptr, &dn, props.data());
+			for (const auto& e : props)
+				if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0) { devExts.push_back("VK_KHR_portability_subset"); break; }
+		}
+		dci.enabledExtensionCount = static_cast<uint32_t>(devExts.size());
+		dci.ppEnabledExtensionNames = devExts.empty() ? nullptr : devExts.data();
 		if (vkCreateDevice(m_phys, &dci, nullptr, &m_device) != VK_SUCCESS) { error = "vkCreateDevice failed"; return false; }
 		vkGetDeviceQueue(m_device, m_family, 0, &m_queue);
 		VkCommandPoolCreateInfo pci{ VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };

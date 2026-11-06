@@ -179,7 +179,7 @@ D3D12 mit Debug-Layer und `HE_GPU_DEBUG=1` (Werkzeug und echter Renderer, Forwar
 
 ## 9. Vulkan (02.11.2026, gebaut auf dem Mac)
 
-**Gebaut, übersetzt und als Quelltext geprüft, damals nie ausgeführt** (seit §9a jetzt doch). Die Mac-Maschine hat keinen Vulkan-Lader (nur `libMoltenVK`, `HE_VULKAN_ENABLED` ist dort aus), und der CI-Job `vulkan-lavapipe` baut nur den Editor und zeichnet keine Landschaft.
+**Gebaut, übersetzt und als Quelltext geprüft, damals nie ausgeführt** (seit §9a auf der 4070, seit §9b auch auf dem Mac über MoltenVK). Die Mac-Maschine hatte damals keinen Vulkan-Lader (nur `libMoltenVK`, `HE_VULKAN_ENABLED` war dort aus), und der CI-Job `vulkan-lavapipe` baut nur den Editor und zeichnet keine Landschaft.
 
 | Datei | Aufgabe |
 |---|---|
@@ -236,6 +236,30 @@ Alle drei klar unter der 0,1-%-Grenze aus dem Werkzeug-Header — Vulkan und Ope
 **Neuer Fund, nicht behoben (Schritt 1521+, nicht dieser Schritt):** `landscape_gpu_check` **ohne** `--only` (alle vier Backends GL→D3D11→D3D12→Vulkan in einem Prozess) stürzt zuverlässig ab — Ausnahme `0x87d` in `KERNELBASE.dll`, mitten in Vulkans Initialisierung (nach `swapchain created`, vor `render pass created`) der ENGINE-Prüfung, direkt nachdem D3D11 und D3D12 im selben Prozess schon gelaufen und abgebaut waren. Jedes Backend **allein** (`--only vulkan`, `--only gl`, …) ist in jedem hier gelaufenen Versuch sauber (exit 0). Deshalb oben der externe, isolierte Pixel-Diff statt des Werkzeug-eigenen Vergleichspasses. Vermutung: Zustand/Treiber-Konflikt beim API-Wechsel auf demselben Adapter innerhalb eines Prozesses, nicht spezifisch an `VulkanLandscape`. Lesson 613 im Hive, Dateien `src/HE_Tools/src/LandscapeGpuCheck/*`.
 
 **Nicht geprüft:** `--arrays` (echtes Forest/Grassland/Desert-Array) — auf NN-WS03 ist kein lokaler EngineContent-Cache mit den gestagten Texturen vorhanden (560 MiB, nicht in git, siehe `scripts/landscape-textures/stage_polyhaven.py`); TAA in Bewegung; Validierungsschichten (kein `VK_LAYER_KHRONOS_validation` angefordert); Intel/AMD; ein Editor- oder Spiel-Lauf mit echter Szene statt des Prüfwerkzeugs.
+
+## 9b. Vulkan auf dem Mac über MoltenVK (06.11.2026, MacBook Air M5, Release)
+
+Homebrew liefert jetzt `vulkan-loader` 1.4.363 und `molten-vk` 1.4.1 (ICD `/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`); `cmake -DCMAKE_PREFIX_PATH=/opt/homebrew` findet `libvulkan.dylib` und schaltet `HE_VULKAN_ENABLED` an, `RendererVulkan` baut und linkt auf dem Mac.
+
+**Erster Lauf scheiterte erwartungsgemäß:** `vkCreateInstance failed` im Werkzeug, `Vulkan: vkCreateInstance` im Renderer. Grund: MoltenVK ist ein *Portability*-Treiber, und ein Khronos-Lader ab 1.3.216 versteckt ihn, solange die Instanz ihn nicht anfordert. Fix (in beiden Pfaden, nur aktiv, wenn der Lader die Erweiterung anbietet, also ohne Wirkung auf Windows, Linux und lavapipe):
+* Instanz: `VK_KHR_portability_enumeration` einschalten und `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` in `ci.flags` setzen: `VulkanRenderer::createInstance()` und `VulkanBackend.cpp::init`.
+* Gerät: `VK_KHR_portability_subset` einschalten, wenn das Gerät es meldet (Pflicht laut Spezifikation): `VulkanRenderer::createDevice()` und `VulkanBackend.cpp::init`.
+
+**Gelaufen** (`landscape_gpu_check --only vulkan`, `--only gl`, `--only metal`, je ein eigener Prozess wegen Lesson 613): Gerät `Apple M5 (Vulkan 1.2.334, driver 0x28a1)`, Offscreen `OK`, Engine Forward `OK` (Boden 100 % grün, 80176/80176), Engine Deferred `OK` (80176/80176), `rejected == 0`.
+
+**Bild, Vulkan gegen Metal gegen OpenGL (alle drei auf derselben M5, Pixel > 2/255 von 129 600 bzw. 518 400):**
+
+| Szene | Vulkan - OpenGL | Vulkan - Metal | OpenGL - Metal |
+|---|---|---|---|
+| ramp | 0 | 0 | 0 |
+| hills | 15 (0,003 %) | 7 (0,001 %) | 18 (0,004 %) |
+| worlduv | 55 (0,042 %) | 0 | 55 (0,042 %) |
+
+Die Landschaft liegt also auf allen drei Backends auf dem Pixel gleich (Vulkan und Metal sind bei worlduv bitgleich). Die beiden Engine-Szenen (`engine_forward`, `engine_deferred`) weichen zwischen allen Backends um 4 bis 20 % der Pixel um mehr als 2/255 ab (auch OpenGL gegen Metal), das ist Himmel/Tonemapping/Postfx der Backends und kein Landschaftsfehler; das Werkzeug prüft dort nur den Boden-Anteil.
+
+**Neu auf MoltenVK, nicht behoben:** `material set 0 needs 17 fragment samplers (16 without heLandscapeWeights); device maxPerStageDescriptorSamplers 16 -> heLandscapeWeights LEFT OUT (layer-blend materials draw built-in)`. MoltenVK ohne Argument Buffers meldet 16 Sampler je Stufe; das trifft den Material-Pfad von `VulkanRenderer` (Layer-Blend-Material der alten Terrain-Chunks), **nicht** den Quadtree (`VulkanLandscape` hat eigene Bindungen und zeichnet voll, siehe oben). Mit `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1` (Umgebung) würde der Lader mehr melden; nicht probiert.
+
+**Nicht gemessen:** keine `--measure`-Zahlen als Abnahme (die Plan-§4-Zahlen gelten für die 4070, §9a); Validierungsschichten; ein Editor-/Spiel-Lauf mit echter Szene unter MoltenVK; `--arrays`.
 
 ## Handoff
 

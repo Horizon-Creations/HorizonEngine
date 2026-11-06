@@ -1464,12 +1464,33 @@ void VulkanRenderer::createInstance()
     m_instanceApiVersion = loaderVersion >= VK_API_VERSION_1_2 ? VK_API_VERSION_1_2
                                                                : VK_API_VERSION_1_0;
 
+    // MoltenVK (macOS) is a "portability" driver: a Khronos loader >= 1.3.216 hides such a driver
+    // (vkCreateInstance -> VK_ERROR_INCOMPATIBLE_DRIVER, no device) unless the instance asks for
+    // enumeration of them. Only when the loader offers the extension, so Windows/Linux are untouched.
+    VkInstanceCreateFlags instanceFlags = 0;
+    {
+        uint32_t en = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+        std::vector<VkExtensionProperties> eprops(en);
+        if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, eprops.data());
+        for (const auto& e : eprops)
+            if (std::strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
+            {
+                const bool listed = std::any_of(exts.begin(), exts.end(), [](const char* n) {
+                    return std::strcmp(n, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; });
+                if (!listed) exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+                instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+                break;
+            }
+    }
+
     VkApplicationInfo appInfo{};
     appInfo.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "HorizonEngine";
     appInfo.apiVersion       = m_instanceApiVersion;
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.flags                   = instanceFlags;
     ci.pApplicationInfo        = &appInfo;
     ci.enabledExtensionCount   = static_cast<uint32_t>(exts.size());
     ci.ppEnabledExtensionNames = exts.data();
@@ -1646,6 +1667,17 @@ void VulkanRenderer::createDevice()
             ? "VulkanRenderer: tessellationShader enabled (material Displacement pin)"
             : "VulkanRenderer: no tessellation (feature missing or HE_TESSELLATION=0), "
               "displacement materials draw untessellated");
+    }
+
+    // A portability device (MoltenVK) must have VK_KHR_portability_subset enabled when it advertises it.
+    {
+        uint32_t n = 0;
+        vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> props(n);
+        if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, props.data());
+        for (const auto& e : props)
+            if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
+            { devExts.push_back("VK_KHR_portability_subset"); break; }
     }
 
     VkDeviceCreateInfo dci{};
