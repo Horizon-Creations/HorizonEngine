@@ -58,7 +58,7 @@ static constexpr uint32_t k_maxFramesInFlight = 2;
 static void vkCheck(VkResult r, const char* msg)
 {
     if (r != VK_SUCCESS)
-        throw std::runtime_error(std::string("Vulkan: ") + msg);
+        throw std::runtime_error(std::string("Vulkan: ") + msg + " (VkResult " + std::to_string(static_cast<int>(r)) + ")");
 }
 
 namespace
@@ -1450,6 +1450,40 @@ void VulkanRenderer::createInstance()
                        : "VulkanRenderer: validation layer requested but NOT available");
     }
 
+    // Portability implementations (MoltenVK on macOS) only show up in
+    // vkEnumeratePhysicalDevices when the instance opts in: the extension plus the
+    // create flag. SDL asks for the extension on Apple platforms whether or not
+    // the Vulkan library behind it has it, and linked straight to libMoltenVK (no
+    // Khronos loader) it does not: vkCreateInstance then fails with
+    // VK_ERROR_EXTENSION_NOT_PRESENT. So the request is checked against what this
+    // instance lists, and only a listed extension gets the flag. A native driver
+    // lists none of this and goes through exactly the path it did before.
+    VkInstanceCreateFlags instanceFlags = 0;
+    {
+        uint32_t en = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+        std::vector<VkExtensionProperties> eprops(en);
+        if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, eprops.data());
+        const auto listed = [&](const char* name) {
+            for (const auto& e : eprops)
+                if (std::strcmp(e.extensionName, name) == 0) return true;
+            return false;
+        };
+        if (listed(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+        {
+            bool asked = false;
+            for (const char* x : exts)
+                if (std::strcmp(x, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) asked = true;
+            if (!asked) exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+            instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        }
+        else
+        {
+            std::erase_if(exts, [](const char* x) {
+                return std::strcmp(x, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; });
+        }
+    }
+
     // Vulkan 1.2 is required for the HW ray-query GI path (SPIR-V 1.4+,
     // buffer-device-address core). A 1.0 loader has no
     // vkEnumerateInstanceVersion — fetch it dynamically; if the loader can't
@@ -1468,11 +1502,18 @@ void VulkanRenderer::createInstance()
     appInfo.apiVersion       = m_instanceApiVersion;
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.flags                   = instanceFlags;
     ci.pApplicationInfo        = &appInfo;
     ci.enabledExtensionCount   = static_cast<uint32_t>(exts.size());
     ci.ppEnabledExtensionNames = exts.data();
     ci.enabledLayerCount       = static_cast<uint32_t>(layers.size());
     ci.ppEnabledLayerNames     = layers.empty() ? nullptr : layers.data();
+    {
+        std::string names;
+        for (const char* x : exts) { names += x; names += ' '; }
+        HE_LOG_INFO(RHI, "VulkanRenderer: instance extensions: %s(flags 0x%x)", names.c_str(),
+                    static_cast<unsigned>(instanceFlags));
+    }
     vkCheck(vkCreateInstance(&ci, nullptr, &m_instance), "vkCreateInstance");
 
     if (gpuDebug && haveDebugUtils)
@@ -1559,6 +1600,22 @@ void VulkanRenderer::createDevice()
     // miss → SW GI only (no behaviour change); HE_GI_FORCE_SW=1 skips the
     // probe entirely, mirroring the Metal backend's override.
     std::vector<const char*> devExts = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    // A portability device (MoltenVK) lists VK_KHR_portability_subset, and the spec
+    // makes enabling it mandatory for such a device. Spelled as a string: the macro
+    // lives in vulkan_beta.h, behind VK_ENABLE_BETA_EXTENSIONS.
+    {
+        uint32_t n = 0;
+        vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> eprops(n);
+        if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, eprops.data());
+        for (const auto& e : eprops)
+            if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
+            {
+                devExts.push_back("VK_KHR_portability_subset");
+                HE_LOG_INFO(RHI, "%s", "VulkanRenderer: portability device (MoltenVK), VK_KHR_portability_subset enabled");
+                break;
+            }
+    }
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
     VkPhysicalDeviceRayQueryFeaturesKHR rqFeat{

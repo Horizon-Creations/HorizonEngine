@@ -83,7 +83,16 @@ target_compile_definitions(RendererSoftware PRIVATE HE_RENDERING_BUILD_DLL)
 # leaving HE_Editor with an empty HE_VULKAN_ENABLED → unresolved VulkanRenderer
 # symbols at link time.
 set(HE_VULKAN_ENABLED FALSE CACHE INTERNAL "Vulkan backend available")
-if(DEFINED ENV{VULKAN_SDK})
+if(APPLE)
+    # macOS: only through MoltenVK, and only when asked for. cmake/HEMoltenVK.cmake has
+    # already preset the two cache variables FindVulkan reads.
+    if(HE_MOLTENVK_LIBRARY)
+        find_package(Vulkan QUIET)
+        if(Vulkan_FOUND)
+            set(HE_VULKAN_ENABLED TRUE CACHE INTERNAL "Vulkan backend available")
+        endif()
+    endif()
+elseif(DEFINED ENV{VULKAN_SDK})
     set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include")
     if(WIN32)
         set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/Lib/vulkan-1.lib")

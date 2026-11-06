@@ -68,6 +68,13 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Clang's default (on) fuses only within one expression.
 add_compile_options($<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>)
 
+# ─── MoltenVK (macOS, opt-in) ──────────────────────────────────────────────────
+# Runs the Vulkan backend on a Mac through MoltenVK (Vulkan -> Metal), so the Vulkan
+# path can be built and tried without a Windows/Linux machine. Off by default: Metal is
+# the native backend there, and a release build has no reason to carry MoltenVK.
+option(HE_ENABLE_MOLTENVK "macOS: build the Vulkan backend on top of MoltenVK (brew install molten-vk)" OFF)
+include("${CMAKE_SOURCE_DIR}/cmake/HEMoltenVK.cmake")
+
 # ─── SDL3 ──────────────────────────────────────────────────────────────────────
 include(FetchContent)
 FetchContent_Declare(
