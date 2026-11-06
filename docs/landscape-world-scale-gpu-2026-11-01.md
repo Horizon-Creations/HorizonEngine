@@ -259,7 +259,10 @@ Die Landschaft liegt also auf allen drei Backends auf dem Pixel gleich (Vulkan u
 
 **Neu auf MoltenVK, nicht behoben:** `material set 0 needs 17 fragment samplers (16 without heLandscapeWeights); device maxPerStageDescriptorSamplers 16 -> heLandscapeWeights LEFT OUT (layer-blend materials draw built-in)`. MoltenVK ohne Argument Buffers meldet 16 Sampler je Stufe; das trifft den Material-Pfad von `VulkanRenderer` (Layer-Blend-Material der alten Terrain-Chunks), **nicht** den Quadtree (`VulkanLandscape` hat eigene Bindungen und zeichnet voll, siehe oben). Mit `MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1` (Umgebung) würde der Lader mehr melden; nicht probiert.
 
-**Nicht gemessen:** keine `--measure`-Zahlen als Abnahme (die Plan-§4-Zahlen gelten für die 4070, §9a); Validierungsschichten; ein Editor-/Spiel-Lauf mit echter Szene unter MoltenVK; `--arrays`.
+**`--arrays` (Forest-Texturarrays, 06.11.2026):** auf Vulkan, Metal und OpenGL je ein Lauf mit `--arrays <EngineContent-Root> --only <backend>`; die drei `T_Landscape_Forest_{Albedo,Normal,Mask}_Array.hasset` (je 111 MB) lagen nicht im Deploy-Ordner (`out/deploy/Editor/EngineContent/Textures/Landscape` ist leer) und nicht im `EngineContentCache` (dort nur Mountains/Mix), sondern als Dateien im Scratchpad einer früheren Session (`.../scratchpad/srv/Textures/Landscape`); ein Root mit Symlinks darauf genügte. Ergebnis auf allen drei gleich: `OK`, Boden nicht mehr das flache Grün (0,0 % grün), mittlerer Schritt zwischen Nachbarpixeln 1,45/255 (also Textur im Boden); das Vulkan-Bild zeigt den dunklen Waldboden. Pixel gegen die anderen Backends (Engine-Bild mit Himmel): Vulkan-OpenGL 17,8 %, Vulkan-Metal 10,3 %, OpenGL-Metal 12,7 % über 2/255, wie bei den Engine-Szenen ohne Arrays (Himmel/Tonemapping, §9b oben).
+**Falle:** `landscape_gpu_check` muss nach jeder Änderung an `LandscapeSource.h` (Klassengröße von `LandscapePackWriter`) neu gebaut werden; ein nur über `he_tests` aufgefrischtes `libHorizonScene.dylib` lässt das alte Werkzeug in `initCoarse` mit EXC_BAD_ACCESS sterben.
+
+**Nicht gemessen:** keine `--measure`-Zahlen als Abnahme (die Plan-§4-Zahlen gelten für die 4070, §9a); Validierungsschichten; ein Editor-/Spiel-Lauf mit echter Szene unter MoltenVK.
 
 ## Handoff
 
