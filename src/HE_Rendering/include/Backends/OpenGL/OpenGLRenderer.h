@@ -743,6 +743,8 @@ private:
 	int          m_uSkyAuroraHeight   = -1; // aurora band elevation
 	int          m_uSkyAuroraFragment = -1; // aurora streak fragmentation
 	int          m_uSkyWind        = -1;  // cloud drift vector
+	int          m_uSkyWindDrift   = -1;  // where the wind has carried the clouds (HE::CloudDriftOffset)
+	int          m_uSkyCloudDomeHeight = -1; // how high the sky-dome clouds look (1 = classic)
 	int          m_uSkyNoise       = -1;  // 3D value-noise sampler
 	int          m_uSkyCloudShadowPass   = -1; // 1 = render the cloud-shadow map (transmittance only)
 	int          m_uSkyCloudShadowRegion = -1; // vec4: origin XZ, region size, map size px
@@ -750,6 +752,7 @@ private:
 	int          m_uSkyCloudMode   = -1;  // 0 = sky-dome clouds, 1 = 3D volumetric
 	int          m_uSkyCloudQuality = -1; // cloud raymarch quality: 0 Low, 1 Med, 2 High
 	int          m_uSkyCloudStyle       = -1; // 3D clouds: 0 Classic, 1 Realistic
+	int          m_uSkyCloudType        = -1; // Realistic clouds: 0..4 cell size / height profile
 	int          m_uSkyCloudInterShadows = -1; // 1 = towers darken clouds behind them
 	int          m_uSkyCloudEvolution   = -1; // shape-evolution speed (0 frozen … 2 time-lapse)
 	int          m_uSkyCameraPos   = -1;  // camera world position (3D-cloud parallax)
@@ -1005,6 +1008,10 @@ private:
 	bool         m_specularAA        = true;   // A6 — roughness regularization
 	float        m_specularAAStrength = 1.0f;
 	bool         m_bloomEnabled   = true;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+	bool         m_rawCapture     = false;
+	bool         m_rawSrgb        = false;
 	float        m_bloomThreshold = 1.0f;
 	float        m_bloomKnee      = 0.5f;
 	float        m_bloomStrength  = 0.6f;

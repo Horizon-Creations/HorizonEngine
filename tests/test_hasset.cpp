@@ -542,3 +542,26 @@ TEST_CASE("packing blanks the import source path out of META")
     he_test::removeAllQuiet(dir);
     he_test::removeQuiet(pak);
 }
+
+TEST_CASE("HAsset reader: takeChunkData hands the bytes over and leaves the chunk empty")
+{
+	const std::vector<uint8_t> payload = { 1, 2, 3, 4, 5, 6, 7, 8 };
+	HAsset::Writer w;
+	w.addChunk(HAsset::CHUNK_META, payload.data(), 3);
+	w.addChunk(HAsset::CHUNK_PIXL, payload.data(), payload.size());
+	HAsset::Reader r;
+	REQUIRE(r.openData(w.toBytes(1)));
+
+	std::vector<uint8_t> out{ 9, 9 };           // overwritten, not appended to
+	CHECK(r.takeChunkData(HAsset::CHUNK_PIXL, out));
+	CHECK(out == payload);
+	const auto* pixl = r.findChunk(HAsset::CHUNK_PIXL);
+	REQUIRE(pixl != nullptr);
+	CHECK(pixl->data.empty());                   // moved out
+	const auto* meta = r.findChunk(HAsset::CHUNK_META);
+	REQUIRE(meta != nullptr);
+	CHECK(meta->data.size() == 3);               // other chunks untouched
+
+	CHECK_FALSE(r.takeChunkData(HAsset::CHUNK_PFAB, out));   // absent: false …
+	CHECK(out == payload);                                    // … and `out` left alone
+}

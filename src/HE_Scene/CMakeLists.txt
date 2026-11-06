@@ -29,7 +29,7 @@ add_library(HorizonScene SHARED
     src/LandscapeWaterData.cpp
     src/LandscapeWater.cpp
     src/LandscapeGi.cpp
-    src/LandscapeHlod.cpp
+    src/LandscapeCellHlod.cpp
     src/LandscapePackBuild.cpp
     src/LandscapeWorldProxies.cpp
     src/LandscapeFoliage.cpp
@@ -46,6 +46,8 @@ add_library(HorizonScene SHARED
     src/Components/TransformComponent.cpp
     src/TerrainMeshGenerator.cpp
     src/TerrainSystem.cpp
+    src/LandscapeHlodBaker.cpp
+    src/LandscapeHlod.cpp
     src/TrailSystem.cpp
     src/TerrainPaint.cpp
     src/TerrainSculpt.cpp

@@ -90,7 +90,7 @@ comments for the arithmetic):
 
 ### 2. `LandscapeHlod` — the proxy data model and CPU selector (new)
 
-`src/HE_Scene/include/HorizonScene/LandscapeHlod.h` / `src/HE_Scene/src/LandscapeHlod.cpp`,
+`src/HE_Scene/include/HorizonScene/LandscapeCellHlod.h` / `src/HE_Scene/src/LandscapeCellHlod.cpp`,
 `tests/test_landscape_hlod.cpp` (5 cases). Deliberately data-and-selector only; see "Not done"
 below for the baker source, the pak format and the drawing.
 
@@ -145,7 +145,7 @@ by `hlodCellsToDraw`.
   carry an HLOD chunk, versioned so v1/v2 paks keep loading.
 - **Drawing.** No `LandscapeHlodProxies` class exists; `LandscapeWorldProxies.h` (hidden
   entity + `MeshComponent`, the same pattern foliage/water already use on every backend with
-  zero backend code) is the intended shape, named in `LandscapeHlod.h`'s file comment, not
+  zero backend code) is the intended shape, named in `LandscapeCellHlod.h`'s file comment, not
   built.
 - **Tree impostors.** Explicitly out of scope for cell HLOD (trees are procedural foliage).
 - **Editor UI**, a baking button/panel, `editor_help_audit.py` entries: none needed yet since
@@ -167,7 +167,7 @@ by `hlodCellsToDraw`.
   for which cell's proxy should draw).
 - **Files touched:** `src/HE_Scene/include/HorizonScene/CellStreamer.h`,
   `src/HE_Scene/src/CellStreamer.cpp` (region gate), `src/HE_Scene/include/HorizonScene/
-  LandscapeHlod.h`, `src/HE_Scene/src/LandscapeHlod.cpp` (new), `src/HE_Scene/CMakeLists.txt`,
+  LandscapeCellHlod.h`, `src/HE_Scene/src/LandscapeCellHlod.cpp` (new), `src/HE_Scene/CMakeLists.txt`,
   `tests/test_landscape_region_streaming.cpp` (new), `tests/test_landscape_hlod.cpp` (new),
   `tests/CMakeLists.txt`.
 - **Verified:** see "Verified" above — 214/214 on the landscape+cell suite; a full

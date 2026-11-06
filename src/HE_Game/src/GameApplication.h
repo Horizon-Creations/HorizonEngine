@@ -27,6 +27,7 @@
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
 #include <HorizonScene/AudioEngine.h>
+#include <future>
 #include <HorizonScene/WeatherAudio.h>
 #include <HorizonScene/EngineApi.h>   // GameServicesBinding (C++ GameLogic services)
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + frame-end responses
@@ -320,6 +321,11 @@ private:
     std::unordered_map<uint32_t, ScriptEngine::InstanceId> m_scriptInstances; // entity → instance
     UIInputSystem::InputState m_uiInput;   // frame-to-frame UI pointer tracking
     AudioEngine m_audioEngine;             // game-runtime audio (playOnStart + audio.* API)
+    // Opening the output device (ma_engine_init) takes 50-90 ms warm and over a second cold, and
+    // nothing needs it until OnInit hands out the first sounds. It starts in the constructor, in
+    // parallel with SDL, the window and the renderer, and OnInit collects the result. Declared
+    // AFTER the engine: members die in reverse, so the thread is done before the engine goes.
+    std::future<bool> m_audioInit;
     WeatherAudio::State m_weatherAudio;    // rain/wind/snow/storm beds + thunder, driven by the weather
 
     // ── Scene transitions (HE::api::scene requests, executed at frame start) ──

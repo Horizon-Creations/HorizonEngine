@@ -2055,4 +2055,90 @@ TEST_CASE("landscape ui: Apply Foliage reuses only a starter layer whose hand-tu
 	}
 }
 
+// A quick drag moves the pointer further than the brush is wide between two frames (editor frame
+// rates, a big landscape: a few metres of mouse are tens of metres of ground). One dab per frame left
+// a row of dots, and "the paint tool cannot paint" was the report. The way between two frames is
+// filled with dabs now. Here the pointer jumps 80 m in one frame under a 30 m brush: the middle of
+// the way has to be painted, the ground off to the side not.
+TEST_CASE("landscape ui: a quick paint drag leaves no gap between two frames")
+{
+	Harness harness;
+	HorizonWorld world;
+	EditorUndo   undo;
+	undo.setWorld(&world);
+	auto& reg = world.registry();
+
+	ContentManager cm(".");
+	cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+	REQUIRE(cm.loadAsset(HE::kAutoLandscapeMaterialPath) == HE::kAutoLandscapeMaterialId);
+
+	const Entity terrain = world.createEntity("Terrain");
+	reg.emplace<TransformComponent>(terrain);
+	TerrainComponent tc;
+	tc.sizeX = 200.0f; tc.sizeZ = 200.0f; tc.seed = 0; tc.weightRes = 128;
+	TerrainPaint::ensureWeightmap(tc);
+	reg.emplace<TerrainComponent>(terrain, tc);
+	MaterialComponent mc;
+	mc.materialAssetId = HE::kAutoLandscapeMaterialId;
+	reg.emplace<MaterialComponent>(terrain, mc);
+
+	ContextBits bits;
+	AppContext ctx = bits.make(world, undo);
+	ctx.contentManager = &cm;
+
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	float sx = 0.0f, sy = 0.0f;
+	REQUIRE(locate(ctx, panelId("##lsPaint"), sx, sy));
+	clickAt(ctx, sx, sy);
+
+	auto layerRow = [&](int i, float& x, float& y)
+	{
+		ImGuiWindow* w = ImGui::FindWindowByName(kPanelWindow);
+		REQUIRE(w != nullptr);
+		for (float py = 14.0f; py < float(PH) - 14.0f; py += 4.0f)
+			for (float px = 14.0f; px < float(W) - 14.0f; px += 12.0f)
+			{
+				const ImGuiID hov = idAt(ctx, px, py);
+				for (ImGuiWindow* c : w->DC.ChildWindows)
+					if (c && hov == ImHashStr("##layer", 0, ImHashData(&i, sizeof(i), c->ID)))
+					{ x = px; y = py; return true; }
+			}
+		return false;
+	};
+	float rx = 0.0f, ry = 0.0f;
+	REQUIRE(layerRow(2, rx, ry));
+	clickAt(ctx, rx, ry);
+
+	// Top down at 120 m: a pixel is ~0.27 m. 300 px left to right is ~80 m, the middle is the origin.
+	const RenderWorld snap = topDownSnapshot(120.0f);
+	const float cy = float(H) * 0.5f, xa = float(W) * 0.5f - 150.0f, xb = float(W) * 0.5f + 150.0f;
+	viewportFrame(ctx, snap, xa, cy, false);
+	viewportFrame(ctx, snap, xa, cy, false);
+	viewportFrame(ctx, snap, xa, cy, true);     // the press: one dab at the left end
+	viewportFrame(ctx, snap, xb, cy, true);     // one frame later the pointer is 80 m further
+	viewportFrame(ctx, snap, xb, cy, false);
+
+	const TerrainComponent& painted = reg.get<TerrainComponent>(terrain);
+	auto texel = [&](float lx, float lz, uint8_t* out)
+	{
+		const uint32_t n = painted.weightRes;
+		const uint32_t tx = static_cast<uint32_t>(std::lround((lx / painted.sizeX + 0.5f) * float(n - 1)));
+		const uint32_t tz = static_cast<uint32_t>(std::lround((lz / painted.sizeZ + 0.5f) * float(n - 1)));
+		REQUIRE(TerrainPaint::texelWeights(painted, tx, tz, out));
+	};
+	uint8_t at[kTerrainMaxLayers];
+	texel(-40.0f, 0.0f, at);  CHECK(at[2] == 255);   // the press
+	texel( 40.0f, 0.0f, at);  CHECK(at[2] == 255);   // where the pointer is now
+	texel(  0.0f, 0.0f, at);  CHECK(at[2] == 255);   // the way between them
+	texel(-20.0f, 0.0f, at);  CHECK(at[2] == 255);
+	texel(  0.0f, 30.0f, at); CHECK(at[2] == 0);     // off the line: nothing
+	texel( 60.0f, 0.0f, at);  CHECK(at[2] == 0);     // past the end: nothing
+
+	// Back to Sculpt, so the file-static mode does not leak into another test.
+	for (int i = 0; i < 4; ++i) panelFrame(ctx, false);
+	REQUIRE(locate(ctx, panelId("##lsSculpt"), sx, sy));
+	clickAt(ctx, sx, sy);
+}
+
 #endif // HE_EDITOR_DEPS_DIR

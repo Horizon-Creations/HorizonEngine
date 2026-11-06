@@ -1874,6 +1874,10 @@ struct D3D12RendererImpl
     float bloomThreshold = 1.0f;
     float bloomKnee      = 0.1f;
     bool  bloomEnabled   = true;
+    // EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+    // clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+    bool  rawCapture     = false;
+    bool  rawSrgb        = false;
     // Anti-aliasing method in force, already resolved against this backend's
     // capabilities (docs/anti-aliasing-plan.md). Off swaps the PSO for the
     // passthrough — the pass always draws, it is what fills viewportRT.
@@ -2679,7 +2683,8 @@ struct D3D12RendererImpl
         ldrState = D3D12_RESOURCE_STATE_RENDER_TARGET;
         setRTV(ldrRtvHeap); setVP(w, h);
         cl->SetPipelineState(tonemapPSO.Get());
-        { const float cb[4]={exposure, bloomEnabled?bloomStrength:0.0f, 0,0};
+        { const float cb[4]={rawCapture ? (rawSrgb ? -2.0f : -1.0f) : exposure,   // x < 0: raw (see kTonemapHLSL)
+                             bloomEnabled?bloomStrength:0.0f, 0,0};
           cl->SetGraphicsRoot32BitConstants(0,4,cb,0); }
         cl->SetGraphicsRootDescriptorTable(1, srvGpuHandle(1)); // t0=hdrSRV
         cl->SetGraphicsRootDescriptorTable(2, srvGpuHandle(2)); // t1=bloomSRV[0]
@@ -3895,7 +3900,7 @@ struct D3D12RendererImpl
         if (auto it = m_graphTexCache.find(key); it != m_graphTexCache.end())
             return it->second.Get();
         ComPtr<ID3D12Resource> res;
-        uploadTexture2D(cl, cm->resolveTextureRef(id, path), res, array); // null stays null
+        uploadTexture2DReleasing(cl, cm, cm->resolveTextureRef(id, path), res, array); // null stays null
         ID3D12Resource* raw = res.Get();
         m_graphTexCache.emplace(key, std::move(res));
         return raw;
@@ -4313,7 +4318,7 @@ struct D3D12RendererImpl
             return it->second.slot;
         UIImage12 entry;
         if (m_uiImageNextSlot < k_maxUIImages &&
-            uploadTexture2D(cmd, cm->resolveTextureRef(id, {}), entry.tex, /*asArray=*/false, /*honourSrgb=*/false))
+            uploadTexture2DReleasing(cmd, cm, cm->resolveTextureRef(id, {}), entry.tex, /*asArray=*/false, /*honourSrgb=*/false))
         {
             entry.slot = static_cast<int>(k_maxUIFontAtlases + m_uiImageNextSlot++);
             srvForTexture(entry.tex.Get(), uiAtlasCpu(static_cast<UINT>(entry.slot)));
@@ -4443,19 +4448,34 @@ struct D3D12RendererImpl
     // tonemap's gamma encode re-curves them. The twins share block/byte layout, so
     // GetCopyableFootprints and the support check are unchanged.
     int allocAlbedoSlot(ID3D12GraphicsCommandList* cl, const TextureAsset* tex,
-                        ComPtr<ID3D12Resource>& outTex)
+                        ComPtr<ID3D12Resource>& outTex, ContentManager* cm = nullptr)
     {
         if (!cl || !sceneSrvHeap || !tex) return -1;
         // A recycled slot (freed by invalidation, past frames in flight) or the next fresh one.
         if (m_freeSlots.empty() && meshTexNextSlot >= k_sceneStaticSrvs + k_maxMeshTextures)
             return -1; // heap full → flat
-        if (!uploadTexture2D(cl, tex, outTex)) return -1;
+        if (!uploadTexture2DReleasing(cl, cm, tex, outTex)) return -1;
 
         UINT slot;
         if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
         else                      { slot = meshTexNextSlot++; }
         srvForTexture(outTex.Get(), sceneSrvCpu(slot));
         return static_cast<int>(slot);
+    }
+
+    // The upload every call site goes through: brings back bytes an earlier upload released,
+    // uploads, and lets the content manager free a block-compressed texture's CPU copy (the
+    // shipped game holds each texture once; see ContentManager::releaseCpuPixels). Safe at
+    // this point: uploadTexture2D memcpys every subresource into its own upload buffer before
+    // it returns and the GPU copy reads that buffer (parked in meshTexUploads), never tex->data.
+    bool uploadTexture2DReleasing(ID3D12GraphicsCommandList* cl, ContentManager* cm, const TextureAsset* tex,
+                                  ComPtr<ID3D12Resource>& outTex, bool asArray = false,
+                                  bool honourSrgb = true)
+    {
+        if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+        const bool ok = uploadTexture2D(cl, tex, outTex, asArray, honourSrgb);
+        if (cm && tex && ok) cm->releaseCpuPixels(tex->id);
+        return ok;
     }
 
     // The upload half of allocAlbedoSlot, without a scene-heap slot: creates the DEFAULT
@@ -4584,7 +4604,7 @@ struct D3D12RendererImpl
         const StaticMeshAsset* asset = cm->getStaticMesh(assetId);
         if (!asset) return;
         const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
-        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex, cm);
     }
 
     // Same as ensureMeshAlbedo for a skeletal mesh's baked material.
@@ -4596,7 +4616,7 @@ struct D3D12RendererImpl
         const SkeletalMeshAsset* asset = cm->getSkeletalMesh(assetId);
         if (!asset) return;
         const TextureAsset* tex = resolveAlbedoAsset(asset->materialId, asset->materialPath, cm);
-        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex);
+        mesh.albedoSlot = allocAlbedoSlot(cl, tex, mesh.albedoTex, cm);
     }
 
     // Resolve + upload an OVERRIDE material's base-color texture (dc.materialAssetId), cached
@@ -4619,7 +4639,7 @@ struct D3D12RendererImpl
         const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
         const TextureAsset* tex = cm->resolveTextureRef(texId0, texPath0);
         MaterialTex entry;
-        entry.slot = allocAlbedoSlot(cl, tex, entry.tex); // -1 if the material has no usable texture
+        entry.slot = allocAlbedoSlot(cl, tex, entry.tex, cm); // -1 if the material has no usable texture
         outSlot = entry.slot;
         m_materialTexCache.emplace(materialId, std::move(entry));
         return true;
@@ -10681,7 +10701,7 @@ int D3D12RendererImpl::resolveDecalTexture(ID3D12GraphicsCommandList* cl,
     if (auto it = decalTexCache.find(textureId); it != decalTexCache.end())
         return it->second.second;
     ComPtr<ID3D12Resource> tex;
-    const int slot = allocAlbedoSlot(cl, cm->resolveTextureRef(textureId, {}), tex);
+    const int slot = allocAlbedoSlot(cl, cm->resolveTextureRef(textureId, {}), tex, cm);
     // Cached even on failure (slot -1, null resource): no per-frame retry.
     decalTexCache.emplace(textureId, std::make_pair(std::move(tex), slot));
     return slot;
@@ -13637,6 +13657,7 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // usingHDR branch); the LDR viewport branch, the direct-swapchain branch
     // and the world previews stay forward.
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
+    c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     return c;
 }
 
@@ -13864,6 +13885,24 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     // Flushes the GPU first, so the slot used below is idle.
     p.createViewportRT(static_cast<UINT>(width), static_cast<UINT>(height));
 
+    // A raw capture is the materials' own colour: every effect that would change it is off for this frame
+    // and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
+    // the deferred resolve lights the G-buffer.
+    const bool  liveRaw = p.rawCapture, liveSrgb = p.rawSrgb;
+    const bool  liveBloom = p.bloomEnabled, liveSsao = p.ssaoEnabled, liveSsr = p.ssrEnabled;
+    const bool  liveGi = p.giEnabled, liveGiRefl = p.giReflEnabled;
+    const HE::AAMethod   liveAa   = p.aaMethod;
+    const HE::RenderPath livePath = m_renderPath;
+    if (camera.rawOutput)
+    {
+        p.rawCapture = true;
+        p.rawSrgb    = camera.rawSrgb;
+        p.bloomEnabled = p.ssaoEnabled = p.ssrEnabled = false;
+        p.giEnabled = p.giReflEnabled = false;
+        p.aaMethod  = HE::AAMethod::Off;
+        m_renderPath = HE::RenderPath::Forward;
+    }
+
     bool ok = p.viewportRT && p.viewportDepth && p.viewportReadback
            && p.viewportRtvHeap && p.viewportDsvHeap;
     if (ok)
@@ -13900,6 +13939,11 @@ bool D3D12Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
     p.viewportResChanged = liveResChanged;
     p.usingHDR           = liveUsingHDR;
     m_editorCamera       = liveCam;
+    p.rawCapture = liveRaw; p.rawSrgb = liveSrgb;
+    p.bloomEnabled = liveBloom; p.ssaoEnabled = liveSsao; p.ssrEnabled = liveSsr;
+    p.giEnabled = liveGi; p.giReflEnabled = liveGiRefl;
+    p.aaMethod = liveAa;
+    m_renderPath = livePath;
     p.statDraws = liveDraws; p.statTris = liveTris;
     p.statVisible = liveVisible; p.statTotal = liveTotal;
     // The decal pass's viewport-depth SRV back to the live depth (null view

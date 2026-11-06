@@ -1159,7 +1159,8 @@ void VulkanRenderer::DrawViewportFrame(VkCommandBuffer cmd)
 
         _frame.next("Tonemap");
         // ── Tonemap: hdr+bloom[0] → ldrFB ─────────────────────────────
-        { const float p[4]={m_exposure, m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
+        { const float p[4]={m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : m_exposure,   // x < 0: raw (postfx_tonemap.frag)
+                            m_bloomEnabled ? m_bloomStrength : 0.0f, 0, 0};
           blitPass(m_postFxBlitF8, m_ldrFB, m_viewportW, m_viewportH, m_tonemapPipe, m_postFxDS[3], p); }
         m_ldrLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
@@ -1360,6 +1361,7 @@ IRenderer::Capabilities VulkanRenderer::GetCapabilities() const
     // branch), which the editor viewport and the packaged game both run; the
     // direct swapchain fallback and the world previews stay forward.
     c.supportsDeferredRendering = m_postFxReady && m_deferredReady;
+    c.supportsRawCapture        = m_postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
     return c;
 }
 
@@ -6447,6 +6449,24 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     m_viewportLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     m_editorCamera   = camera;
 
+    // A raw capture is the materials' own colour: every effect that would change it is off for this frame
+    // and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
+    // the deferred resolve lights the G-buffer.
+    const bool  liveRaw = m_rawCapture, liveSrgb = m_rawSrgb;
+    const bool  liveBloom = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveSsr = m_ssrEnabled;
+    const bool  liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
+    const HE::AAMethod   liveAa   = m_aaMethod;
+    const HE::RenderPath livePath = m_renderPath;
+    if (camera.rawOutput)
+    {
+        m_rawCapture = true;
+        m_rawSrgb    = camera.rawSrgb;
+        m_bloomEnabled = m_ssaoEnabled = m_ssrEnabled = false;
+        m_giEnabled = m_giReflEnabled = false;
+        m_aaMethod  = HE::AAMethod::Off;
+        m_renderPath = HE::RenderPath::Forward;
+    }
+
     bool ok = false;
     try
     {
@@ -6536,6 +6556,11 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
     m_viewportLayout     = liveLayout;
     m_viewportResChanged = liveResChanged;
     m_editorCamera       = liveCam;
+    m_rawCapture = liveRaw; m_rawSrgb = liveSrgb;
+    m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_ssrEnabled = liveSsr;
+    m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
+    m_aaMethod = liveAa;
+    m_renderPath = livePath;
     m_statDraws = liveDraws; m_statTris = liveTris;
     m_statVisible = liveVisible; m_statTotal = liveTotal;
 
@@ -8281,6 +8306,8 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
                                         bool asArray, bool honourSrgb)
 {
     image = VK_NULL_HANDLE; memory = VK_NULL_HANDLE; view = VK_NULL_HANDLE;
+    // Bytes an earlier upload released come back from the pak (see releaseCpuPixels below).
+    if (tex && tex->data.empty() && m_contentManager) tex = m_contentManager->restoreCpuPixels(tex->id);
     if (!tex || tex->data.empty() || tex->channels != 4 || tex->width == 0 || tex->height == 0)
         return false;
     const uint32_t width  = static_cast<uint32_t>(tex->width);
@@ -8437,6 +8464,10 @@ bool VulkanRenderer::uploadTextureImage(const TextureAsset* tex,
                              0, 0, nullptr, 0, nullptr, 1, &bar);
     }
     noteUpload(false, total, t0);
+    // stageUpload memcpy'd the whole chain into the staging ring (or a staging buffer of its
+    // own) before it returned, and the recorded copy reads that, never tex->data: the CPU copy
+    // of a block-compressed texture is dead weight now (ContentManager::releaseCpuPixels).
+    if (m_contentManager) m_contentManager->releaseCpuPixels(tex->id);
     return true;
 }
 

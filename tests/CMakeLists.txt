@@ -153,6 +153,7 @@ add_executable(he_tests
     # The texture colour-space dialog, driven the same way: Apply rewrites the
     # rows that change, a tick changed in the dialog is the flag the import writes.
     test_texture_colour_space_ui.cpp
+    test_static_mesh_editor_ui.cpp
     # The Material Editor tab, driven the same way: the Tessellation cell and its
     # popup while the Displacement pin is wired, on a renderer that tessellates
     # and on one that does not (Thema 207).
@@ -355,10 +356,30 @@ add_executable(he_tests
     test_hc_dispatch.cpp
     test_postfx.cpp
     test_hpak.cpp
+    # Pack only what the game reaches (Thema 228)
+    test_reach_filter.cpp
+    # Which materials the export may bake onto a mesh (Thema 228, Punkt 6, Schritt B)
+    test_simple_texture_material.cpp
+    # The atlas bake itself: lossless merge, resampling, groups, kept sections (Schritt C1)
+    test_mesh_texture_bake.cpp
+    # The export pass on real files: mesh + materials + textures in, derived assets out (Schritt C2)
+    test_mesh_bake_pass.cpp
+    # The shipped game frees a compressed texture's CPU bytes after the GPU upload (RAM) and gets them back on request
+    test_cpu_pixel_release.cpp
+    # The game bakes the sky noise in the background while SDL starts (Thema 228)
+    test_sky_noise_prewarm.cpp
+    # The planner for the baked far-landscape material: needed resolution and the downscaling to a byte budget (Thema 228 request, for 326)
+    test_landscape_hlod_plan.cpp
+    # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
+    test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)
     test_texture_bcn.cpp
     # size / encode time / load time of the Auto Landscape arrays per format; a no-op without HE_BENCH_ARRAYS_IN (Thema 180, Schritt 6)
     test_bench_landscape_arrays.cpp
+    # size / encode time / zstd of ONE baked landscape tile map per side and format; a no-op without HE_BENCH_TILE_PNG (Thema 228, for 326)
+    test_bench_hlod_tile.cpp
+    test_hlod_baker.cpp
+    test_hlod_assets.cpp
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp
@@ -999,6 +1020,11 @@ add_executable(he_tests
     # AppContext, same per-file HE_IMGUI_ENABLED. It calls the importers
     # (HorizonImporters, linked below) and CollabController (already here).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
+    # The Mesh Viewer tab (Export bake column), for test_static_mesh_editor_ui.cpp: same per-file
+    # HE_IMGUI_ENABLED; EditorViewportNav is what its 3D view navigates with.
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StaticMeshEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorViewportNav.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInput.cpp
     # The reward moments it fires (EditorRewards.h), and test_editor_rewards.cpp:
     # same AppContext, same per-file HE_IMGUI_ENABLED.
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
@@ -1097,6 +1123,10 @@ set_source_files_properties(
     test_tool_setup_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/TextureColourSpaceDialog.cpp
     test_texture_colour_space_ui.cpp
+    test_static_mesh_editor_ui.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/StaticMeshEditorPanel.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorViewportNav.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInput.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorRewards.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationBar.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/NotificationPopups.cpp
@@ -1339,6 +1369,15 @@ target_sources(he_tests PRIVATE test_game_build_config.cpp)
 set_source_files_properties(test_game_build_config.cpp PROPERTIES
     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config
     COMPILE_DEFINITIONS HE_TEST_GAME_BUILD_CONFIG_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/game_build_config/HEGameBuildConfig.h")
+
+# EditorInput.cpp (compiled above) calls the Mac pinch hook, which is ObjC++ on APPLE only
+# (the other platforms get the empty one inside EditorInput.cpp).
+if(APPLE)
+    target_sources(he_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInputMac.mm)
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorInputMac.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(he_tests PRIVATE "-framework Cocoa")
+endif()
 
 # ─── Process-runner fixture ────────────────────────────────────────────────────
 # A real child process, because every bug HE::Proc exists to avoid is invisible

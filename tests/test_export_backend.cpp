@@ -404,3 +404,32 @@ TEST_CASE("he_tests: the config file is a scratch file, never the user's own")
     REQUIRE(gs.writeConfig());
     CHECK(fs::exists(scratch));
 }
+
+TEST_CASE("shader precompile follows the backend the shipped game runs")
+{
+    using namespace HE;
+    auto bit = [](RendererBackend b) { return 1u << static_cast<uint32_t>(b); };
+
+    // No backend named: the platform default of the shipped runtime.
+    CHECK(BackendRules::shaderBackendMaskFor("macOS",   "") == bit(RendererBackend::Metal));
+    CHECK(BackendRules::shaderBackendMaskFor("Windows", "") == bit(RendererBackend::OpenGL));
+    CHECK(BackendRules::shaderBackendMaskFor("Linux",   "") == bit(RendererBackend::OpenGL));
+
+    // Named: exactly that one, whatever the platform default is.
+    CHECK(BackendRules::shaderBackendMaskFor("Windows", "D3D12")  == bit(RendererBackend::D3D12));
+    CHECK(BackendRules::shaderBackendMaskFor("Windows", "Vulkan") == bit(RendererBackend::Vulkan));
+    CHECK(BackendRules::shaderBackendMaskFor("macOS",   "OpenGL") == bit(RendererBackend::OpenGL));
+
+    // An application without Advanced Shader Effects ships the software renderer: nothing to bake.
+    CHECK(BackendRules::shaderBackendMaskFor("macOS", BackendRules::forExport(true, false, "")) == 0u);
+    // With them it takes the platform default.
+    CHECK(BackendRules::shaderBackendMaskFor("macOS", BackendRules::forExport(true, true, "")) ==
+          bit(RendererBackend::Metal));
+
+    // "Host" resolves against this build, like the dialog's other rules.
+    CHECK(BackendRules::shaderBackendMaskFor("Host", "") ==
+          BackendRules::shaderBackendMaskFor(BackendRules::targetPlatformName("Host"), ""));
+
+    // A name no backend has: the game keeps its default, so does the mask (OpenGL).
+    CHECK(BackendRules::shaderBackendMaskFor("Linux", "Banana") == bit(RendererBackend::OpenGL));
+}

@@ -107,6 +107,8 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
+#include <HorizonScene/LandscapeHlod.h>        // HE_DUMP_HLODBAKE / HE_DUMP_HLODFAR witnesses
+#include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -1296,7 +1298,16 @@ void EditorApplication::OnInit()
 		// macOS is capped at OpenGL 4.1 / GLSL 410
 		ImGui_ImplOpenGL3_Init("#version 410");
 #else
-		ImGui_ImplOpenGL3_Init("#version 460");
+		{
+			// Window descends 4.6 -> 4.1 until the driver accepts a context (Mesa/WSLg
+			// stops at 4.5), so ask for the GLSL that context really speaks.
+			int major = 4, minor = 6;
+			SDL_GL_GetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, &major);
+			SDL_GL_GetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, &minor);
+			char glsl[24];
+			std::snprintf(glsl, sizeof glsl, "#version %d", major * 100 + minor * 10);
+			ImGui_ImplOpenGL3_Init(glsl);
+		}
 #endif
 		m_imguiReady = true;
 		HE_LOG_INFO(Editor, "%s", "Initialized ImGui OpenGL backend");
@@ -2303,8 +2314,8 @@ void EditorApplication::OnInit()
 				const Clock::time_point tPreload = Clock::now();
 				SceneSystems::preloadAssetRefs(*m_editorWorld, contentManager());
 				const Clock::time_point tWarmup = Clock::now();
-				splashStatus("Compiling material pipelines", 0.95f);
-				warmupWorldMaterials(); // build custom-material pipelines before the first draw
+				splashStatus("Compiling shaders", 0.90f);
+				warmupWorldMaterials(/*waitForBuilds=*/true); // pipelines compile in the background; wait for them behind the splash
 				const Clock::time_point tEnd = Clock::now();
 				// The entity count is on the SceneLoadTiming line just before.
 				HE_LOG_INFO(Editor, "SceneOpenTiming: loadMs=%.2f prefabSyncMs=%.2f "
@@ -5549,9 +5560,12 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			e->cirrusAmount   = static_cast<float>(envF("HE_DUMP_CIRRUS", 0.0f));
 			e->cirrusSeed     = static_cast<float>(envF("HE_DUMP_CIRRUSSEED", 0.0f));
 			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
+			e->cloudDomeHeight = static_cast<float>(envF("HE_DUMP_CLOUDDOMEHEIGHT", 1.0f));
+			e->cloudQuality    = static_cast<int>(envF("HE_DUMP_CLOUDQUALITY", static_cast<float>(e->cloudQuality)));   // 0 Low, 1 Medium, 2 High
 			e->cloudShadows        = envF("HE_DUMP_CLOUDSHADOWS", e->cloudShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudShadowStrength = static_cast<float>(envF("HE_DUMP_CLOUDSHADOWSTR", e->cloudShadowStrength));
 			e->cloudStyle          = static_cast<int>(envF("HE_DUMP_CLOUDSTYLE", static_cast<float>(e->cloudStyle)));
+			e->cloudType           = static_cast<int>(envF("HE_DUMP_CLOUDTYPE", static_cast<float>(e->cloudType)));
 			e->cloudInterShadows   = envF("HE_DUMP_INTERSHADOWS", e->cloudInterShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudEvolution      = static_cast<float>(envF("HE_DUMP_CLOUDEVOLUTION", e->cloudEvolution));
 			e->windSpeed           = static_cast<float>(envF("HE_DUMP_WINDSPEED", e->windSpeed));
@@ -7817,6 +7831,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		const bool builtin = mode == "builtin";
 		const bool normalV = mode == "normal";
 		const bool surface = mode == "surface";
+		const bool baseCol = mode == "basecolor";   // unlit albedo: what the far-landscape bake photographs
 		// HE_DUMP_AUTOLANDGROUP=Forest|Grassland|Desert (Thema 233): the texture group the witness shows
 		// (default Mountains = the shipped material). Its arrays are its own, so a group without them
 		// in the cache or EngineContent draws the white fallback, like Mountains does without its own.
@@ -7837,19 +7852,30 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		};
 		const float kPlateau = envMetres("HE_DUMP_AUTOLANDHEIGHT", 40.0f);
 		const float kRamp    = envMetres("HE_DUMP_AUTOLANDRAMP", 32.0f);
-		const float snowHeight = kBaseY + 20.0f;
+		const bool mixWitnessSnow = [] { const char* v = std::getenv("HE_DUMP_AUTOLANDMIX"); return v && *v && *v != '0'; }();
+		const float snowHeight = kBaseY + (mixWitnessSnow ? 400.0f : 20.0f);   // the mix witness shows ground, not snow
 
+		// HE_DUMP_AUTOLANDMIX=1 (Thema 233): the mix material on a terrain with groupMix on, Mountains in the
+		// middle, Forest painted on the left and Desert on the right (placeholder fat arrays unless real ones
+		// are in EngineContent). Needs the fat arrays: landscape_tex_gen <dir> --mix --from <group arrays>.
+		const bool mixWitness = [] { const char* v = std::getenv("HE_DUMP_AUTOLANDMIX"); return v && *v && *v != '0'; }();
 		HE::UUID amId{};
 		std::string what;
 		if (builtin)
 			what = "default terrain material";
-		else if (mode == "plaingraph")
+		else if (mode == "plaingraph" || mode == "rawconst")
 		{
 			// A lit graph material with nothing but a constant grey: the graph
 			// lighting path (heLitP) without textures or a perturbed normal.
+			// "rawconst": the same UNLIT with the colour (0.2, 0.4, 0.6), the oracle of HE_DUMP_RAWTEST.
 			HE::MaterialGraph g;
 			const int out = g.addNode(HE::MatNodeType::Output);
 			const int col = g.addNode(HE::MatNodeType::ConstColor);
+			if (mode == "rawconst")
+			{
+				g.findNode(out)->p[0] = 0.0f;
+				g.findNode(col)->p[0] = 0.2f; g.findNode(col)->p[1] = 0.4f; g.findNode(col)->p[2] = 0.6f;
+			}
 			g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
 			MaterialAsset am;
 			am.type = HE::AssetType::Material;
@@ -7859,11 +7885,12 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			contentManager().regenerateMaterialFromGraph(amId);
 			what = "plain lit graph material";
 		}
-		else if (masks || ground || normalV || surface)
+		else if (masks || ground || normalV || surface || baseCol)
 		{
 			HE::AutoLandscapeGraph built = HE::buildAutoLandscapeGraph(
 				masks   ? HE::AutoLandscapeView::MasksRockSnowWater :
 				ground  ? HE::AutoLandscapeView::MasksDirtWet :
+				baseCol ? HE::AutoLandscapeView::BaseColor :
 				normalV ? HE::AutoLandscapeView::Normal : HE::AutoLandscapeView::Surface, group->id);
 			for (HE::MatGraphNode& n : built.graph.nodes)
 				if (n.type == HE::MatNodeType::ParamFloat && n.s == HE::kAutoLandscapeParamSnowHeight)
@@ -7875,15 +7902,18 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			amId = contentManager().registerMaterial(std::move(am));
 			contentManager().regenerateMaterialFromGraph(amId);
 			what = masks ? "masks rock/snow/water" : ground ? "masks dirt/wet/flat"
-			     : normalV ? "final normal" : "AO/roughness";
+			     : baseCol ? "unlit albedo" : normalV ? "final normal" : "AO/roughness";
 		}
 		else
 		{
-			const HE::UUID parent = contentManager().loadAsset(group->materialPath);
+			// The mix witness is an instance of the mix material (Snow Height moved like the group ones).
+			const char* parentPath = mixWitness ? HE::kAutoLandscapeMixMaterialPath : group->materialPath;
+			const HE::UUID parentId = mixWitness ? HE::kAutoLandscapeMixMaterialId : group->materialId;
+			const HE::UUID parent = contentManager().loadAsset(parentPath);
 			MaterialAsset inst;
 			inst.type = HE::AssetType::Material;
 			inst.name = "AutoLandscapeWitness";
-			inst.parentMaterialPath       = group->materialPath;
+			inst.parentMaterialPath       = parentPath;
 			inst.graphParamNames          = { HE::kAutoLandscapeParamSnowHeight };
 			inst.shaderParamData          = { snowHeight, 0.0f, 0.0f, 0.0f };
 			inst.instanceOverriddenParams = { HE::kAutoLandscapeParamSnowHeight };
@@ -7894,8 +7924,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			}
 			amId = contentManager().registerMaterial(std::move(inst));
 			contentManager().syncMaterialInstance(amId);
-			what = std::string(parent == group->materialId ? "shipped asset" : "ASSET NOT FOUND")
-			     + " (" + group->name + ")"
+			what = std::string(parent == parentId ? "shipped asset" : "ASSET NOT FOUND")
+			     + (mixWitness ? " (mix)" : std::string(" (") + group->name + ")")
 			     + (noBomb ? ", bombing off" : ", bombing on");
 		}
 
@@ -7929,6 +7959,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			const char* tf = std::getenv("HE_DUMP_TRAILTESS");
 			ltc.tessellationFactor   = (tf && *tf) ? std::atoi(tf) : 4;
 			ltc.tessellationDistance = 80.0f;
+		}
+		if (mixWitness)
+		{
+			ltc.weightRes = 256;
+			TerrainPaint::ensureWeightmap(ltc);
+			TerrainPaint::enableGroupMix(ltc, static_cast<int>(HE::AutoLandscapeGroupId::Mountains));
+			TerrainPaint::paintGroup(ltc, -34.0f, 0.0f, static_cast<int>(HE::AutoLandscapeGroupId::Forest),    26.0f, 8.0f, 1.0f);
+			TerrainPaint::paintGroup(ltc,  34.0f, 0.0f, static_cast<int>(HE::AutoLandscapeGroupId::Desert),    26.0f, 8.0f, 1.0f);
+			TerrainPaint::paintGroup(ltc,   0.0f, 44.0f, static_cast<int>(HE::AutoLandscapeGroupId::Grassland), 16.0f, 8.0f, 1.0f);
 		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId
@@ -10622,6 +10661,313 @@ void EditorApplication::dumpFrameHeadless()
 	// (30, -25) in the capture; a stale cache keeps the red field there.
 	const char* repaintMid = std::getenv("HE_DUMP_LAYERREPAINT");
 	const bool  repaintMidWitness = repaintMid && std::string(repaintMid) == "mid" && m_editorWorld;
+	// HE_DUMP_RAWTEST=1 (with HE_DUMP_AUTOLAND=rawconst): the oracle of EditorCameraOverride::rawOutput. The
+	// landscape is an unlit constant (0.2, 0.4, 0.6); a raw orthographic capture from above has to give 51 102 153
+	// in every pixel, and the ordinary capture of the same view does not (tonemap).
+	if (const char* rt = std::getenv("HE_DUMP_RAWTEST"); rt && *rt && *rt != '0' && r)
+	{
+		for (int pass = 0; pass < 3; ++pass)
+		{
+			EditorCameraOverride cam;
+			cam.active = true; cam.orthographic = true; cam.rawOutput = (pass >= 1); cam.rawSrgb = (pass == 2);
+			cam.editorIcons = false;
+			cam.orthoHalfHeight = 20.0f;
+			cam.position = glm::vec3(-40.0f, 450.0f, 0.0f);
+			cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0, -1, 0), glm::vec3(0, 0, -1));
+			cam.farPlane = 300.0f;
+			std::vector<uint8_t> img;
+			const bool ok = r->RenderSceneImage(cam, 64, 64, img) && img.size() == 64u * 64u * 4u;
+			unsigned lo[3] = { 255, 255, 255 }, hi[3] = { 0, 0, 0 };
+			for (size_t i = 0; ok && i < 64u * 64u; ++i)
+				for (int c = 0; c < 3; ++c)
+				{
+					lo[c] = std::min<unsigned>(lo[c], img[i * 4 + size_t(c)]);
+					hi[c] = std::max<unsigned>(hi[c], img[i * 4 + size_t(c)]);
+				}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RAWTEST %s: %s r %u..%u g %u..%u b %u..%u (expected %s)",
+			            pass == 0 ? "ordinary" : pass == 1 ? "raw" : "raw sRGB", ok ? "ok" : "FAILED",
+			            lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
+			            pass == 2 ? "124 169 203 (the sRGB curve of 0.2 0.4 0.6)" : "51 102 153 when raw");
+		}
+	}
+	// HE_DUMP_HLODBAKE=<side>[,<cx>,<cz>] (Thema 228): the far-landscape bake on the first landscape of the
+	// scene (the HE_DUMP_AUTOLAND witness), one chunk, written as <dump>.hlod_<view>.bmp (albedo, normal,
+	// surface). The log has the timing and the mean colour of each picture.
+	if (const char* hb = std::getenv("HE_DUMP_HLODBAKE"); hb && *hb && m_editorWorld && r)
+	{
+		unsigned side = 64, bcx = 0, bcz = 0;
+		(void)std::sscanf(hb, "%u,%u,%u", &side, &bcx, &bcz);
+		entt::entity land = entt::null;
+		for (auto [e, tc] : m_editorWorld->registry().view<TerrainComponent>().each())
+			if (!m_editorWorld->registry().all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		std::string why;
+		HE::landscape::HlodBaker baker(*m_editorWorld, contentManager(), *r);
+		const auto t0 = std::chrono::steady_clock::now();
+		if (land == entt::null || !baker.begin(land, &why))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODBAKE: begin failed (%s)", why.c_str());
+		else
+		{
+			const auto t1 = std::chrono::steady_clock::now();
+			HE::landscape::HlodChunkImages img;
+			const bool ok = baker.bake(bcx, bcz, side, 2, img);
+			const auto t2 = std::chrono::steady_clock::now();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODBAKE %s: %ux%u chunks, chunk %u,%u at %u px, begin %.0f ms, bake %.0f ms",
+			            ok ? "ok" : "FAILED", baker.chunksPerSide(), baker.chunksPerSide(), bcx, bcz, side,
+			            std::chrono::duration<double, std::milli>(t1 - t0).count(),
+			            std::chrono::duration<double, std::milli>(t2 - t1).count());
+			if (ok)
+			{
+				const std::vector<uint8_t>* views[3] = { &img.albedo, &img.normal, &img.surface };
+				const char* names[3] = { "albedo", "normal", "surface" };
+				for (int v = 0; v < 3; ++v)
+				{
+					double mean[3] = { 0, 0, 0 };
+					const size_t n = static_cast<size_t>(img.side) * img.side;
+					for (size_t i = 0; i < n; ++i)
+						for (int c = 0; c < 3; ++c) mean[c] += (*views[v])[i * 4 + static_cast<size_t>(c)];
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODBAKE %s mean rgb %.1f %.1f %.1f", names[v],
+					            mean[0] / double(n), mean[1] / double(n), mean[2] / double(n));
+					writeBMP(m_dumpPath + ".hlod_" + names[v] + ".bmp", *views[v], img.side, img.side);
+				}
+			}
+			// HE_DUMP_HLODMOSAIC=1: every chunk at `side`, stitched, against the whole landscape in one picture of the
+			// same size. The two come from the same renderer and camera maths, so what differs is exactly the
+			// placement and orientation of the chunk rectangles and the seams between them.
+			if (const char* hm = std::getenv("HE_DUMP_HLODMOSAIC"); hm && *hm && *hm != '0' && ok)
+			{
+				const uint32_t cps = baker.chunksPerSide();
+				const uint32_t full = cps * side;
+				HE::landscape::HlodChunkRect first, last, whole;
+				baker.chunkRect(0, 0, first);
+				baker.chunkRect(cps - 1, cps - 1, last);
+				whole.min  = first.min;
+				whole.size = glm::vec2(last.min.x + last.size.x - first.min.x, last.min.y + last.size.y - first.min.y);
+				HE::landscape::HlodChunkImages ref;
+				const bool refOk = baker.bakeRect(whole, full, 2, ref);
+				std::vector<uint8_t> mosaic[3];
+				for (auto& m : mosaic) m.assign(static_cast<size_t>(full) * full * 4, 0);
+				bool allOk = refOk;
+				for (uint32_t cz = 0; cz < cps && allOk; ++cz)
+					for (uint32_t cx = 0; cx < cps && allOk; ++cx)
+					{
+						HE::landscape::HlodChunkImages t;
+						allOk = baker.bake(cx, cz, side, 2, t);
+						if (!allOk) break;
+						const std::vector<uint8_t>* src[3] = { &t.albedo, &t.normal, &t.surface };
+						for (int v = 0; v < 3; ++v)
+							for (uint32_t y = 0; y < side; ++y)
+								std::copy_n(&(*src[v])[static_cast<size_t>(y) * side * 4], static_cast<size_t>(side) * 4,
+								            &mosaic[v][(static_cast<size_t>(cz * side + y) * full + cx * side) * 4]);
+					}
+				if (!allOk)
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODMOSAIC: a bake failed");
+				else
+				{
+					const std::vector<uint8_t>* refv[3] = { &ref.albedo, &ref.normal, &ref.surface };
+					const char* names[3] = { "albedo", "normal", "surface" };
+					for (int v = 0; v < 3; ++v)
+					{
+						double sum = 0; unsigned mx = 0;
+						for (size_t i = 0; i < mosaic[v].size(); ++i)
+						{
+							if (i % 4 == 3) continue;
+							const unsigned d = static_cast<unsigned>(std::abs(int(mosaic[v][i]) - int((*refv[v])[i])));
+							sum += d; mx = std::max(mx, d);
+						}
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODMOSAIC %s %ux%u: mean |mosaic - whole| %.3f /255, max %u",
+						            names[v], full, full, sum / double(mosaic[v].size() / 4 * 3), mx);
+						writeBMP(m_dumpPath + ".hlod_mosaic_" + names[v] + ".bmp", mosaic[v], full, full);
+						writeBMP(m_dumpPath + ".hlod_whole_" + names[v] + ".bmp", *refv[v], full, full);
+					}
+				}
+			}
+		}
+		baker.end();
+	}
+	// HE_DUMP_AUTOLANDSAVE=<file.hescene> (Thema 228): the HE_DUMP_AUTOLAND witness world written out as a scene, so a
+	// scratch project can hold an Auto Landscape for HE_DUMP_HLODEXPORT and a real export (the water witness has its own
+	// HE_DUMP_SAVESCENE).
+	if (const char* sv = std::getenv("HE_DUMP_AUTOLANDSAVE"); sv && *sv && m_editorWorld)
+	{
+		// The witness's material only exists in memory: it goes into the project's Content (same id) or the saved scene
+		// would name a material the project does not have.
+		for (const auto e : m_editorWorld->registry().view<TerrainComponent, MaterialComponent>())
+		{
+			const HE::UUID mid = m_editorWorld->registry().get<MaterialComponent>(e).materialAssetId;
+			if (const MaterialAsset* ma = contentManager().getMaterial(mid))
+			{
+				MaterialAsset copy = *ma;
+				copy.path = "Materials/AutoLandscapeWitness.hasset";
+				const bool wrote = contentManager().saveAsset(copy);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDSAVE material %s", wrote ? "saved" : "FAILED to save");
+			}
+		}
+		// A game needs a main camera: one at the witness camera's place (HE_DUMP_CAMX/Y/Z, looking along HE_DUMP_PITCH).
+		{
+			auto& reg = m_editorWorld->registry();
+			const auto envF = [](const char* k, float d) { const char* v = std::getenv(k); return v && *v ? static_cast<float>(std::atof(v)) : d; };
+			const auto cam = m_editorWorld->createEntity("AutoLandscapeCamera");
+			auto& t = reg.emplace_or_replace<TransformComponent>(cam);
+			t.position = glm::vec3(static_cast<float>(envF("HE_DUMP_CAMX", 0.0f)), static_cast<float>(envF("HE_DUMP_CAMY", 2.0f)),
+			                       static_cast<float>(envF("HE_DUMP_CAMZ", 0.0f)));
+			t.rotation = glm::vec3(static_cast<float>(envF("HE_DUMP_PITCH", 22.0f)), static_cast<float>(envF("HE_DUMP_YAW", 0.0f)), 0.0f);
+			CameraComponent cc; cc.isMain = true; cc.farPlane = 5000.0f;
+			reg.emplace<CameraComponent>(cam, cc);
+		}
+		SceneSerializer saver;
+		const bool saved = saver.save(*m_editorWorld, sv, SerializeFormat::JSON);
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_AUTOLANDSAVE %s -> %s", saved ? "wrote" : "FAILED to write", sv);
+	}
+	// HE_DUMP_HLODEXPORT=<dir> (Thema 228): what the export dialog does for the far landscape, on the open project: every
+	// scene under Content/ is loaded into a scratch world and its Auto Landscapes are baked (HE_DUMP_HLODBUDGET = MB,
+	// default 512). The assets go to <dir>/<their addressed path> and <dir>/index.txt lists them ("<hi> <lo> <type> <path>",
+	// ids in hex) for HE_REACH_EXTRA of the export bench; the log has the same lines the export log would have.
+	if (const char* hx = std::getenv("HE_DUMP_HLODEXPORT"); hx && *hx && m_editorWorld && r && m_projectLoaded)
+	{
+		namespace fs = std::filesystem;
+		const fs::path outDir(hx);
+		std::error_code ec;
+		fs::create_directories(outDir, ec);
+		const fs::path root = fs::path(m_projectManager.currentProject().path).parent_path();
+		HE::landscape::HlodExportOptions o;
+		if (const char* hb = std::getenv("HE_DUMP_HLODBUDGET"); hb && *hb)
+			o.budgetBytes = static_cast<uint64_t>(std::max(1, std::atoi(hb))) << 20;
+		std::vector<HE::landscape::HlodAssetBlob> blobs;
+		std::vector<HE::UUID> seen;
+		HE::landscape::HlodExportStats total;
+		fs::recursive_directory_iterator it(root / "Content", fs::directory_options::skip_permission_denied, ec), end;
+		for (; !ec && it != end; it.increment(ec))
+		{
+			if (!it->is_regular_file(ec) || it->path().extension() != ".hescene") continue;
+			HorizonWorld w;
+			SceneSerializer ser;
+			if (!ser.load(w, it->path(), SerializeFormat::JSON)) continue;
+			const std::string label = it->path().filename().string();
+			const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
+				w, m_editorWorld.get(), contentManager(), *r, o, blobs, seen,
+				[&](const std::string& s) { HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODEXPORT %s: %s", label.c_str(), s.c_str()); });
+			total.terrains += st.terrains; total.chunks += st.chunks; total.skipped += st.skipped; total.ms += st.ms;
+			total.downscaled += st.downscaled; total.plannedBytes += st.plannedBytes;
+		}
+		std::ofstream index(outDir / "index.txt");
+		uint64_t bytes = 0;
+		for (const HE::landscape::HlodAssetBlob& b : blobs)
+		{
+			const fs::path file = outDir / b.relPath;
+			fs::create_directories(file.parent_path(), ec);
+			std::ofstream f(file, std::ios::binary);
+			f.write(reinterpret_cast<const char*>(b.bytes.data()), static_cast<std::streamsize>(b.bytes.size()));
+			bytes += b.bytes.size();
+			char line[256];
+			std::snprintf(line, sizeof(line), "%016llx %016llx %u ", static_cast<unsigned long long>(b.id.hi),
+			              static_cast<unsigned long long>(b.id.lo), static_cast<unsigned>(b.type));
+			index << line << b.relPath << "\n";
+		}
+		HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODEXPORT %u landscape(s), %u chunk(s) baked, %u skipped, %u below what the screen wants, "
+		            "%zu asset file(s), %.1f MiB raw loose, planned cooked %.1f MiB, %.0f ms",
+		            total.terrains, total.chunks, total.skipped, total.downscaled, blobs.size(),
+		            double(bytes) / (1024.0 * 1024.0), double(total.plannedBytes) / (1024.0 * 1024.0), total.ms);
+	}
+	// HE_DUMP_HLODFAR=<side> (Thema 228): the baked far landscape against the real one. The landscape's LOD distances are
+	// pulled in (HE_DUMP_HLODFARSCALE, default 0.1) so the chunks draw their far levels at the witness camera; the
+	// frame with the real material goes to <dump>.far_real.bmp, then every chunk is baked at <side>, the assets are
+	// loaded the way a pak mount would give them, the chunks rebuild (they find the baked material by id) and the
+	// frame with it goes to <dump>.far_baked.bmp. The log has the difference between the two and how many far levels
+	// carried the baked material.
+	if (const char* hf = std::getenv("HE_DUMP_HLODFAR"); hf && *hf && m_editorWorld && r)
+	{
+		const unsigned side = static_cast<unsigned>(std::max(8, std::atoi(hf)));
+		const char* hs = std::getenv("HE_DUMP_HLODFARSCALE");
+		const float lodScale = (hs && *hs) ? static_cast<float>(std::atof(hs)) : 0.1f;
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		const glm::vec3 camPos = m_editorCamera.position();
+		auto settleCapture = [&](std::vector<uint8_t>& px, uint32_t& pw, uint32_t& ph) {
+			for (int i = 0; i < 6; ++i)
+			{
+				r->Render();
+				std::this_thread::sleep_for(std::chrono::milliseconds(150));
+			}
+			return r->CaptureViewport(px, pw, ph);
+		};
+		if (land == entt::null)
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: no landscape in the scene");
+		else
+		{
+			wreg.get<TerrainComponent>(land).lodDistanceScale = lodScale;
+			wreg.get<TerrainComponent>(land).dirty = true;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			LODSystem::update(*m_editorWorld, camPos);
+			std::vector<uint8_t> realPx, bakedPx;
+			uint32_t rw = 0, rh = 0, bw = 0, bh = 0;
+			const bool realOk = settleCapture(realPx, rw, rh) && writeBMP(m_dumpPath + ".far_real.bmp", realPx, rw, rh);
+			size_t farLevels = 0, baked = 0;
+			for (auto [ce, cc, lod] : wreg.view<TerrainChunkComponent, LODComponent>().each())
+				if (lod.current > 0) ++farLevels;
+			// The bake: every chunk, the assets loaded into the content manager.
+			{
+				HE::landscape::HlodBaker baker(*m_editorWorld, contentManager(), *r);
+				std::string why;
+				if (!baker.begin(land, &why))
+					HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: bake failed (%s)", why.c_str());
+				else
+				{
+					// The witness landscape is made on the fly and has no saved id; a scene's landscape has one.
+					if (m_editorWorld->entityId(land) == HE::UUID{})
+						m_editorWorld->setEntityId(land, HE::UUID{ 0x48454C4F44ull, 0x1ull });
+					const HE::UUID terrainId = m_editorWorld->entityId(land);
+					const auto t0 = std::chrono::steady_clock::now();
+					for (uint32_t cz = 0; cz < baker.chunksPerSide(); ++cz)
+						for (uint32_t cx = 0; cx < baker.chunksPerSide(); ++cx)
+						{
+							HE::landscape::HlodChunkImages img;
+							HE::landscape::HlodChunkRect rect;
+							std::vector<HE::landscape::HlodAssetBlob> blobs;
+							std::string err;
+							if (baker.bake(cx, cz, side, 2, img) && baker.chunkRect(cx, cz, rect)
+							    && HE::landscape::buildHlodAssets(img, rect, terrainId, cx, cz, blobs, &err))
+							{
+								HE::landscape::loadHlodAssets(contentManager(), blobs);
+								++baked;
+							}
+							else
+								HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_HLODFAR: chunk %u,%u failed (%s)", cx, cz, err.c_str());
+						}
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODFAR baked %zu chunk(s) at %u px in %.0f ms",
+					            baked, side, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+				}
+			}
+			// The chunks rebuild and find the baked material by id.
+			wreg.get<TerrainComponent>(land).dirty = true;
+			TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+			LODSystem::update(*m_editorWorld, camPos);
+			size_t withMat = 0;
+			std::vector<HE::UUID> mats;
+			for (auto [ce, cc, lod] : wreg.view<TerrainChunkComponent, LODComponent>().each())
+				for (const LODLevel& lv : lod.levels)
+					if (lv.materialId != HE::UUID{}) { ++withMat; mats.push_back(lv.materialId); }
+			r->WarmupMaterials(mats);
+			for (int i = 0; i < 4000; ++i)
+			{
+				if (r->PumpShaderBuilds().pending == 0) break;
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+			const bool bakedOk = settleCapture(bakedPx, bw, bh) && writeBMP(m_dumpPath + ".far_baked.bmp", bakedPx, bw, bh);
+			double sum = 0.0; unsigned mx = 0; size_t n = 0;
+			if (realOk && bakedOk && realPx.size() == bakedPx.size())
+				for (size_t i = 0; i < realPx.size(); ++i)
+				{
+					if (i % 4 == 3) continue;
+					const unsigned d = static_cast<unsigned>(std::abs(int(realPx[i]) - int(bakedPx[i])));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_HLODFAR chunks on a far level %zu, far levels with the baked material %zu, "
+			            "frame difference real vs baked: mean %.3f /255, max %u (%zu samples)",
+			            farLevels, withMat, n ? sum / double(n) : -1.0, mx, n);
+		}
+	}
 	for (int i = 0; i < settleFrames; ++i)
 	{
 		if (arriveWitness && !arriveEarly && i == settleFrames / 2)
@@ -10655,6 +11001,10 @@ void EditorApplication::dumpFrameHeadless()
 				 + std::to_string(i)).c_str());
 		}
 		r->Render();
+		// HE_DUMP_SETTLEMS: a pause after each settle frame, so material pipelines that build in the
+		// background (a freshly registered graph material) are ready for the captured frame.
+		if (const char* sm = std::getenv("HE_DUMP_SETTLEMS"); sm && *sm)
+			std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp(std::atoi(sm), 0, 5000)));
 	}
 
 	std::vector<uint8_t> rgba;
@@ -14850,7 +15200,7 @@ void EditorApplication::pushEnvironment(float dt)
 	m_editorWorld->syncEnvironmentLights();
 }
 
-void EditorApplication::warmupWorldMaterials()
+void EditorApplication::warmupWorldMaterials(bool waitForBuilds)
 {
 	if (!m_editorWorld || !renderer()) return;
 	HE_PROFILE_SCOPE_N("WarmupWorldMaterials");   // 6.7 s of the editor's cold first frame (Thema 238)
@@ -14863,6 +15213,32 @@ void EditorApplication::warmupWorldMaterials()
 	                              HE::kEditorIconAudioSourceMaterialId })
 		ids.push_back(icon);
 	renderer()->WarmupMaterials(ids);
+	// HE_SHADER_BUILD_NOWAIT=1 opens the window without waiting: the scene then fills in
+	// as its pipelines land, which is what a scene opened mid-session does.
+	if (!waitForBuilds || std::getenv("HE_SHADER_BUILD_NOWAIT")) return;
+
+	// The startup step. Builds run on the backend's own threads, so a window that is
+	// up already would be drawing a scene without its materials; the splash is the
+	// place to wait, and it can say how far along it is. Bounded: a build that never
+	// reports back must not keep the editor from opening.
+	HE_PROFILE_SCOPE_N("WaitForShaderBuilds");
+	using SteadyClock = std::chrono::steady_clock;
+	const SteadyClock::time_point deadline = SteadyClock::now() + std::chrono::seconds(120);
+	for (;;)
+	{
+		const IRenderer::ShaderBuildStatus st = renderer()->PumpShaderBuilds();
+		if (st.pending <= 0) break;
+		if (SteadyClock::now() >= deadline)
+		{
+			HE_LOG_WARN(Editor, "%s", ("EditorApplication: " + std::to_string(st.pending)
+				+ " shader build(s) still running after 120 s, opening anyway").c_str());
+			break;
+		}
+		splashStatus("Compiling shaders  " + std::to_string(st.total - st.pending) + " / "
+		                 + std::to_string(st.total),
+		             0.90f + 0.09f * static_cast<float>(st.total - st.pending) / static_cast<float>(st.total));
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
 }
 
 bool EditorApplication::openScene(const std::string& path)

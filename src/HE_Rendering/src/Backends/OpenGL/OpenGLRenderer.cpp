@@ -1121,6 +1121,14 @@ vec3 lensFlareOverlay(vec2 uv, vec4 lf)
 void main()
 {
 	vec3 hdr    = texture(uHDR, vUV).rgb;
+	if (uExposure < 0.0)   // raw capture (EditorCameraOverride::rawOutput): the material's colour, untouched
+	{
+		vec3 c = clamp(hdr, 0.0, 1.0);
+		if (uExposure < -1.5)   // rawSrgb: the exact sRGB curve, for a picture that becomes an sRGB texture
+			c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
+		FragColor = vec4(c, 1.0);
+		return;
+	}
 	hdr        += texture(uBloom, vUV).rgb * uBloomStrength;
 	hdr        *= uExposure;
 	vec3 mapped = aces(hdr);
@@ -3908,8 +3916,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
                                                        bool gbuffer, bool instanced)
 {
 	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
-	// The pak bakes no instanced vertex: the caller loops with the plain program.
-	if (instanced && precompiled) return 0;
+	// What the pak baked for the twin being asked for (CHUNK_PSHD v4). A twin it did not
+	// bake is not cross-compiled next to a baked plain pair: a packaged build may have
+	// no translator. The G-buffer twin simply cross-compiles (the deferred path always
+	// could); the instanced one returns 0 and the caller loops with the plain program.
+	if (precompiled && gbuffer && precompiled->fragmentGBuffer.empty()) precompiled = nullptr;
+	if (precompiled && instanced && precompiled->vertexInstanced.empty()) return 0;
 	// `key` also keys the fragment cache below, so the instanced slot gets its own
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
@@ -3937,7 +3949,8 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// fragmentClustered); otherwise its plain 4.10 pair draws with the window.
 	// The G-buffer variant never shades lights.
 	const bool bakedClustered = precompiled && !precompiled->vertexClustered.empty()
-	                         && !precompiled->fragmentClustered.empty();
+	                         && !precompiled->fragmentClustered.empty()
+	                         && (!instanced || !precompiled->vertexInstancedClustered.empty());
 	bool clustered = m_forwardClustered && !gbuffer && (!precompiled || bakedClustered);
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
@@ -3953,8 +3966,21 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	};
 	auto usePrecompiled = [&](bool cl) {
-		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
-		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		if (gbuffer)   // the deferred twin: the plain vertex stage (or its instanced form), never clustered
+		{
+			vertSrc = instanced ? precompiled->vertexInstanced : precompiled->vertex;
+			fragSrc = precompiled->fragmentGBuffer;
+		}
+		else if (instanced)
+		{
+			vertSrc = cl ? precompiled->vertexInstancedClustered : precompiled->vertexInstanced;
+			fragSrc = cl ? precompiled->fragmentClustered        : precompiled->fragment;
+		}
+		else
+		{
+			vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
+			fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		}
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
 	};
 	// Displacement (Thema 207): the two tessellation stages, at the GLSL version of
@@ -4106,8 +4132,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
 			? (clustered
-				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
-				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered, instanced (GLSL 4.30, no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)")
+				: gbuffer
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer (no runtime cross-compile)")
+				: (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)"))
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -4641,6 +4672,8 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyAuroraHeight   = glGetUniformLocation(m_skyProgram, "uAuroraHeight");
 	m_uSkyAuroraFragment = glGetUniformLocation(m_skyProgram, "uAuroraFragment");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
+	m_uSkyWindDrift   = glGetUniformLocation(m_skyProgram, "uWindDrift");
+	m_uSkyCloudDomeHeight = glGetUniformLocation(m_skyProgram, "uCloudDomeHeight");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
 	m_uSkyCloudShadowPass   = glGetUniformLocation(m_skyProgram, "uCloudShadowPass");
 	m_uSkyCloudShadowRegion = glGetUniformLocation(m_skyProgram, "uCloudShadowRegion");
@@ -4654,6 +4687,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
 	m_uSkyCloudStyle        = glGetUniformLocation(m_skyProgram, "uCloudStyle");
+	m_uSkyCloudType         = glGetUniformLocation(m_skyProgram, "uCloudType");
 	m_uSkyCloudInterShadows = glGetUniformLocation(m_skyProgram, "uCloudInterShadows");
 	m_uSkyCloudEvolution    = glGetUniformLocation(m_skyProgram, "uCloudEvolution");
 	m_uSkyCameraPos   = glGetUniformLocation(m_skyProgram, "uCameraPos");
@@ -4678,11 +4712,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	// Release: full 256³ tile so sky fBm octaves don't visibly repeat.
 	// Debug: 64³ (64× fewer voxels) so the CPU bake takes < 1s instead of 30min
 	// without SIMD optimisation in MSVC Debug mode.
-#ifdef NDEBUG
-	constexpr int kNoiseN = 256;
-#else
-	constexpr int kNoiseN = 64;
-#endif
+	const int kNoiseN = HE::SkyNoise3DResolution();
 	const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 	glGenTextures(1, &m_noiseTex);
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -5332,6 +5362,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	glUniform4f(m_uSkyCloudShadowRegion, origin.x, origin.y, size,
 	            static_cast<float>(kCloudShadowMapSize));
 	glUniform1i(m_uSkyCloudStyle, env.cloudStyle);
+	glUniform1i(m_uSkyCloudType, std::clamp(env.cloudType, 0, 4));
 	glUniform1f(m_uSkyCloudEvolution, env.cloudEvolution);
 	// Dome vs 3D deck picks the density field. Set it here: the value left over
 	// from the previous frame's sky draw is stale on the first frame and for one
@@ -5351,8 +5382,11 @@ void OpenGLRenderer::RenderCloudShadowMap()
 		skyClock = static_cast<float>(std::atof(ov)); // deterministic headless captures
 	glUniform1f(m_uSkyClock, skyClock);
 	{
-		const glm::vec3 wind = HE::CloudWindVector(env);
+		const glm::vec3 wind  = HE::CloudWindVector(env);
+		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2 (as in the sky pass)
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -9127,6 +9161,20 @@ unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 	return id;
 }
 
+// The upload every call site below goes through: brings back bytes an earlier upload released,
+// uploads, and lets the content manager free a block-compressed texture's CPU copy (the shipped
+// game holds each texture once; see ContentManager::releaseCpuPixels). The glTexImage /
+// glCompressedTexImage calls copy the client memory before they return, so the bytes are dead
+// weight the moment an upload succeeded.
+unsigned int uploadGlTextureReleasing(ContentManager* cm, const TextureAsset* tex,
+                                      bool honourSrgb = true, bool arrayPath = false)
+{
+	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+	const unsigned int uploaded = arrayPath ? uploadTextureArrayGL(tex) : uploadTextureAssetGL(tex, honourSrgb);
+	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	return uploaded;
+}
+
 } // namespace
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -9242,7 +9290,8 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9369,7 +9418,8 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9403,7 +9453,7 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked BC7/BC3 (previously this override path assumed RGBA8 and
 		// would have uploaded a compressed payload as garbage — now handled).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	m_materialTexCache.emplace(materialId, tex);
@@ -9435,12 +9485,13 @@ unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::
 	unsigned int tex = 0;
 	if (array)
 	{
-		tex = uploadTextureArrayGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+		                               /*honourSrgb=*/true, /*arrayPath=*/true);
 		if (tex) m_glArrayTex.insert(tex);
 	}
 	else
 		// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
 	return tex ? tex : (array ? m_whiteArrayTex : 0);
 }
@@ -9465,8 +9516,8 @@ unsigned int OpenGLRenderer::ResolveUITexture(const HE::UUID& id, const std::str
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
 	if (key.empty() || !m_contentManager) return 0;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
-	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path),
-	                                        /*honourSrgb=*/false);
+	unsigned int tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+	                                            /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, tex);
 	return tex;
 }
@@ -9534,7 +9585,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
 			    && !m_materialPrograms.count(gbKey)
-			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true))
+			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true))
 				++built;
 		}
 	}
@@ -11102,6 +11153,24 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	// current image only — an unconverged edge for one frame, no ghost.
 	m_taaHistoryValid = false;
 
+	// A raw capture is the materials' own colour: every effect that would change it is off for this frame
+	// and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
+	// the deferred resolve lights the G-buffer.
+	const bool  liveRaw = m_rawCapture, liveSrgb = m_rawSrgb;
+	const bool  liveBloom = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveSsr = m_ssrEnabled;
+	const bool  liveDof = m_dofEnabled, liveMb = m_mbEnabled, liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
+	const HE::AAMethod   liveAa   = m_aaMethod;
+	const HE::RenderPath livePath = m_renderPath;
+	if (camera.rawOutput)
+	{
+		m_rawCapture = true;
+		m_rawSrgb    = camera.rawSrgb;
+		m_bloomEnabled = m_ssaoEnabled = m_ssrEnabled = m_dofEnabled = m_mbEnabled = false;
+		m_giEnabled = m_giReflEnabled = false;
+		m_aaMethod  = HE::AAMethod::Off;
+		m_renderPath = HE::RenderPath::Forward;
+	}
+
 	// Same three lines as the offscreen branch of Render().
 	EnsureViewportTarget();
 	glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
@@ -11128,6 +11197,11 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	m_viewportReqH  = liveReqH;
 	m_editorCamera  = liveCam;
 	m_counters      = liveCounters;
+	m_rawCapture = liveRaw; m_rawSrgb = liveSrgb;
+	m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_ssrEnabled = liveSsr;
+	m_dofEnabled = liveDof; m_mbEnabled = liveMb; m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
+	m_aaMethod = liveAa;
+	m_renderPath = livePath;
 	// DrawScene's TAA resolve marks the history valid again — that history is
 	// the screenshot camera's now, and the next real frame must not use it.
 	m_taaHistoryValid = false;
@@ -11335,6 +11409,7 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	glUniform1i(m_uSkyCloudMode,   env.cloudMode);
 	glUniform1i(m_uSkyCloudQuality, env.cloudQuality);
 	glUniform1i(m_uSkyCloudStyle,        env.cloudStyle);
+	glUniform1i(m_uSkyCloudType,         std::clamp(env.cloudType, 0, 4));
 	glUniform1i(m_uSkyCloudInterShadows, env.cloudInterShadows ? 1 : 0);
 	glUniform1f(m_uSkyCloudEvolution,    env.cloudEvolution);
 	glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(camPos));
@@ -11378,8 +11453,11 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	{
 		// Wind control → horizontal cloud drift vector. Direction 0° drifts
 		// toward -Z (north), increasing clockwise; speed scales the rate.
-		const glm::vec3 wind = HE::CloudWindVector(env);
+		const glm::vec3 wind  = HE::CloudWindVector(env);
+		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -11845,7 +11923,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glActiveTexture(GL_TEXTURE1);
 				glBindTexture(GL_TEXTURE_2D, bloomTex);
 				glUniform1i(m_uBloomTex, 1);
-				glUniform1f(m_uExposure, 1.0f);
+				glUniform1f(m_uExposure, m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : 1.0f);   // < 0: raw (kTonemapFS)
 				glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
 				// Camera lens flare: project the sun (a point at infinity, w=0 drops the view
 				// translation) to y-up NDC and fold behind-camera / off-screen / below-horizon
@@ -12434,17 +12512,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 						matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-						// G-buffer variant — runtime cross-compiled only (baked packs
-						// carry no G-buffer GLSL yet).
+						// G-buffer variant — baked into the pak when it carries one
+						// (CHUNK_PSHD v4), else cross-compiled at load.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 						{
-							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
+							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true);
 							// A batch draws once with the instanced twin (2e); only
 							// built for batches, and 0 sends it back to the loop.
 							if (gbProg && dc.instanceTotal() > 0 && m_instanceVBO
 							    && RenderSorter::graphInstancingEnabled())
-								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
+								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre,
 								                                       /*gbuffer=*/true, /*instanced=*/true);
 						}
 						if (ma)
@@ -14028,6 +14106,7 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Deferred needs only MRT + a runtime-generated resolve shader — GL 4.1 is
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
+	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
 	// Metal's Option-A path. The deferred composite (A6) is not built, so in

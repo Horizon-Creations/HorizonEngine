@@ -1,12 +1,12 @@
 // LandscapeHlod (Thema 326, step 6): the data model and CPU selector for entity-
 // cell HLOD proxies. What the baker actually reads from (a cell's placed static
 // meshes) and what draws the proxy (a hidden MeshComponent entity, mirroring
-// LandscapeWorldProxies) are both future work — see LandscapeHlod.h's file
+// LandscapeWorldProxies) are both future work — see LandscapeCellHlod.h's file
 // comment; this pins the merge, the round-trip and the selector's rule.
 #include "doctest.h"
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
-#include <HorizonScene/LandscapeHlod.h>
+#include <HorizonScene/LandscapeCellHlod.h>
 #include <HorizonScene/SceneJsonParse.h>
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/Components/MeshComponent.h>

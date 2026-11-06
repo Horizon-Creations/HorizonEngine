@@ -1275,7 +1275,10 @@ private:
 	// Build the node-graph material pipelines referenced by the current world ahead
 	// of the first draw (no first-frame cross-compile hitch). Materials are resident
 	// by call time (preloadAssetRefs ran); a no-op for backends that build eagerly.
-	void warmupWorldMaterials();
+	// waitForBuilds: block (repainting the splash) until the background shader builds are
+	// done. Only the startup scene does; openScene returns at once and the viewport shows
+	// "Compiling shaders" until the last build lands.
+	void warmupWorldMaterials(bool waitForBuilds = false);
 	// Auto-advances (dt > 0) and pushes the World root's EnvironmentComponent to
 	// the renderer via SetEnvironmentSettings. The environment is scene data now,
 	// not an editor preference.

@@ -410,6 +410,13 @@ float3 aces(float3 x) {
 }
 float4 main(In i) : SV_Target {
     float3 h = uHDR.Sample(uSamp, i.uv).rgb;
+    if (uExposure < 0.0)   // raw capture (EditorCameraOverride::rawOutput): the material's colour, untouched
+    {
+        float3 c = saturate(h);
+        if (uExposure < -1.5)   // rawSrgb: the exact sRGB curve, for a picture that becomes an sRGB texture
+            c = (c <= 0.0031308) ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+        return float4(c, 1.0);
+    }
     h += uBloom.Sample(uSamp, i.uv).rgb * uBloomStrength;
     h *= uExposure;
     return float4(pow(max(aces(h), 0.0001), 1.0/2.2), 1.0);

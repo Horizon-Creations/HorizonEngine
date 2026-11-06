@@ -372,7 +372,9 @@ TEST_CASE("Engine content: no two shipped assets share a UUID")
 		// texture claims 0x41F but is never a shipped file.
 		bool groupMaterial = false;
 		for (const HE::AutoLandscapeGroup& g : HE::kAutoLandscapeGroups) groupMaterial = groupMaterial || id == g.materialId;
+		// The mix material (Thema 233, 0x4A4; its fat arrays 0x4A5..0x4A7 are textures, not shipped) is one too.
 		const bool knownOccupant = id == HE::kAutoLandscapeMaterialId || groupMaterial
+		                        || id == HE::kAutoLandscapeMixMaterialId
 		                        || id == HE::kWeatherPuddlesFunctionId || id == HE::kWeatherSnowFunctionId
 		                        || id == HE::kProceduralSnowFunctionId || id == HE::kProceduralSandFunctionId
 		                        || rel.rfind("Engine/Textures/", 0) == 0;

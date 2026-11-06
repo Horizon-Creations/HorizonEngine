@@ -1042,6 +1042,10 @@ private:
 	bool   m_postFxReady     = false;
 	float  m_exposure        = 1.0f;
 	bool   m_bloomEnabled    = true;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+	bool   m_rawCapture      = false;
+	bool   m_rawSrgb         = false;
 	float  m_bloomStrength   = 0.25f;
 	float  m_bloomThreshold  = 1.0f;
 	float  m_bloomKnee       = 0.1f;
