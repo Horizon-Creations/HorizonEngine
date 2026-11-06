@@ -7,6 +7,9 @@
 #include <HorizonScene/CellStreamer.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeCellHlod.h>
+#include <HorizonScene/LandscapeHlodProxies.h>
+#include <HorizonScene/Components/LandscapeProxyComponent.h>
+#include <ContentManager/ContentManager.h>
 #include <HorizonScene/LandscapeSource.h>
 #include <HorizonScene/SceneJsonParse.h>
 #include <HorizonScene/SceneSerializer.h>
@@ -291,4 +294,71 @@ TEST_CASE("pack HLOD: a trailer pointing outside the file, or a damaged table, r
 	badTable[tableAt] = 'X';
 	CHECK_FALSE(openWith(badTable));
 	std::filesystem::remove(path);
+}
+
+// ── LandscapeHlodProxies: the entity of a cell that is not built ─────────────
+TEST_CASE("LandscapeHlodProxies: a cell without content gets an entity inside the draw radius, loses it when the cell loads or the camera leaves")
+{
+	HorizonWorld world;
+	HE::CellStreamer streamer;
+	Files files;
+	files["H.cells/cell_0_0.hescene"] = cellBytes(0.0f, 0.0f);
+	files["H.cells/cell_1_0.hescene"] = cellBytes(100.0f, 0.0f);
+	HE::CellManifest m;
+	REQUIRE(HE::CellManifest::parse(kManifest, m));
+	streamer.begin(m, readerOver(files), {});
+	streamer.setRegionConfig({});
+
+	HE::LandscapeHlodTable table;
+	table.set(0, 0, oneTriangle());
+	table.set(1, 0, oneTriangle());
+	streamAt(streamer, world, { 50.0, 0.0, 50.0 }, [&] { return streamer.isLoaded(0, 0); });
+	REQUIRE(streamer.isLoaded(0, 0));
+	REQUIRE_FALSE(streamer.isLoaded(1, 0));
+
+	ContentManager cm{ "." };
+	HE::LandscapeHlodProxies proxies;
+	HE::LandscapeHlodProxyConfig cfg;
+	cfg.drawRadius = 500.0;
+	cfg.everyFrames = 1;
+	proxies.setConfig(cfg);
+
+	const auto countProxies = [&] {
+		size_t n = 0;
+		for (auto e : world.registry().view<LandscapeProxyComponent>())
+			if (world.registry().get<LandscapeProxyComponent>(e).kind == LandscapeProxyComponent::Kind::Hlod) ++n;
+		return n;
+	};
+
+	// camera in cell (0,0): its content is built, only (1,0) stands in as a proxy
+	proxies.sync(world, table, streamer, { 50.0, 0.0, 50.0 }, cm, nullptr);
+	CHECK(proxies.stats().entities == 1);
+	CHECK(countProxies() == 1);
+	// the entity stands at -origin and carries the cell's mesh
+	for (auto e : world.registry().view<LandscapeProxyComponent>())
+	{
+		const auto& p = world.registry().get<LandscapeProxyComponent>(e);
+		CHECK(p.meshId != HE::UUID{});
+		CHECK(world.registry().all_of<MeshComponent>(e));
+	}
+	// the same sync again changes nothing
+	proxies.sync(world, table, streamer, { 50.0, 0.0, 50.0 }, cm, nullptr);
+	CHECK(proxies.stats().created == 1);
+
+	// the camera far away: the proxy is out of the draw radius
+	proxies.sync(world, table, streamer, { 50000.0, 0.0, 50.0 }, cm, nullptr);
+	CHECK(proxies.stats().entities == 0);
+	CHECK(countProxies() == 0);
+	CHECK(proxies.stats().destroyed == 1);
+
+	// back, and then cell (1,0) loads: the real content takes over, the proxy goes
+	proxies.sync(world, table, streamer, { 50.0, 0.0, 50.0 }, cm, nullptr);
+	CHECK(countProxies() == 1);
+	streamAt(streamer, world, { 100.0, 0.0, 50.0 }, [&] { return streamer.isLoaded(1, 0); });
+	REQUIRE(streamer.isLoaded(1, 0));
+	proxies.sync(world, table, streamer, { 100.0, 0.0, 50.0 }, cm, nullptr);
+	CHECK(countProxies() == 0);
+
+	proxies.clear(world, cm, nullptr);
+	streamer.clear(world);
 }

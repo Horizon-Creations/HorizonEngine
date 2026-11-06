@@ -100,6 +100,9 @@ public:
 	bool beginFromPack(const std::string& path, const LandscapeRuntimeConfig& config, std::string* error = nullptr);
 	void reset();
 	bool active() const { return m_store != nullptr; }
+	// The source's baked HLOD proxies of the entity cells (LandscapeCellHlod.h), null when it has none; and the camera the last update streamed around.
+	const LandscapeHlodTable* hlod() const { return m_source ? m_source->hlod() : nullptr; }
+	const glm::dvec3& cameraAbsolute() const { return m_camera; }
 
 	// The scene's tile landscape (the first entity with a LandscapeWorldComponent) drives the runtime: it begins when the
 	// component appears or changes its pack, resets when it goes. Then the camera moves the store. Main thread.

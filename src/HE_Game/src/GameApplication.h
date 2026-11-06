@@ -23,6 +23,7 @@
 #include <HorizonScene/PhysicsWorld.h>
 #include <HorizonScene/CellRuntime.h>
 #include <HorizonScene/LandscapeRuntime.h>
+#include <HorizonScene/LandscapeHlodProxies.h>
 #include <HorizonScene/LandscapeWorldProxies.h>
 #include <HorizonScene/CellScripts.h>
 #include <HorizonScene/FixedStep.h>
@@ -408,6 +409,7 @@ private:
     HE::LandscapeRuntime m_landscape;
     PhysicsWorld* m_landscapePhysics = nullptr;   // the physics world the landscape gives its ground to (detached BEFORE that world is destroyed)
     bool m_landscapeNavigation = false;
+    HE::LandscapeHlodProxies m_hlodProxies;         // the baked stand-ins of entity cells that are not built (the pack's HLOD table)
     HE::LandscapeWorldProxies m_landscapeProxies;   // its foliage and water as entities the renderers draw already
     bool m_landscapeBound = false;
 };

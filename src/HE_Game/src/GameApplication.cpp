@@ -1683,6 +1683,12 @@ void GameApplication::updateLandscape(float dt)
 	}
 	m_landscape.update(*m_world, dt);
 	m_landscapeProxies.sync(*m_world, m_landscape, contentManager(), renderer());
+	// Entity cells that are not built yet (or any more) stand in as their baked proxy while the pack has one; the cell streamer ran
+	// the frame before, so this reads what it holds.
+	if (const HE::LandscapeHlodTable* hlod = m_landscape.active() ? m_landscape.hlod() : nullptr)
+		m_hlodProxies.sync(*m_world, *hlod, m_cellRuntime.streamer(), m_landscape.cameraAbsolute(), contentManager(), renderer());
+	else
+		m_hlodProxies.clear(*m_world, contentManager(), renderer());
 }
 
 void GameApplication::updateCellStreaming(float dt)
