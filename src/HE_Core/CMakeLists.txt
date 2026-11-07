@@ -12,6 +12,7 @@ add_library(HorizonCore SHARED
 	src/Application/InputRebind.cpp
 	src/Diagnostics/GlobalState.cpp
 	src/Diagnostics/Log.cpp
+	src/Diagnostics/HardwareInfo.cpp
 	src/Diagnostics/Logger.cpp
 	src/Diagnostics/EngineProfiler.cpp
 	src/Diagnostics/DevStatsTile.cpp

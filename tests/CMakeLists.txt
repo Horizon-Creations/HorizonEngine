@@ -371,6 +371,7 @@ add_executable(he_tests
     test_async_streaming.cpp
     test_crash_handler.cpp
     test_logging.cpp
+    test_hardware_info.cpp
     test_project_exporter.cpp
     test_export_profiles.cpp
     test_export_sdk_build.cpp
