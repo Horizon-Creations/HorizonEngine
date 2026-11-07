@@ -10555,6 +10555,14 @@ void D3D12RendererImpl::createMaterialResources()
                 nv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURECUBE;
                 nv.TextureCube.MipLevels = 1;
             }
+            else if (slot == HE::d3d12mat::kSlotFogVolume)
+            {
+                // heFogVolume (t34) is a sampler3D: a null view of that dimension. The draw
+                // writes the live integrated volume over it when fogVol.w is raised.
+                nv.Format              = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                nv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURE3D;
+                nv.Texture3D.MipLevels = 1;
+            }
             device->CreateShaderResourceView(nullptr, &nv, h); h.ptr += inc;
         }
     }
@@ -11759,7 +11767,14 @@ void D3D12Renderer::Initialize(HE::Window* window)
     // Volumetric fog (Thema 225 step 9): built eagerly, like the GI pipelines —
     // MakeFogVolumeData's `enabled` gate needs the extractor capability flag truthful
     // BEFORE the first fog-enabled frame. Needs postFxReady's HDR path at draw time only.
-    m_impl->m_extractor.setVolumetricFogCapable(m_impl->EnsureFogVolumePipelines());
+    {
+        const bool fogOk = m_impl->EnsureFogVolumePipelines();
+        m_impl->m_extractor.setVolumetricFogCapable(fogOk);
+        // HE_FOG_VOLUME for HLSL graph materials (heFogVolume t34, heApplyFogT): only once the
+        // dispatch above and the t34 slot in the material root signature are real, and before
+        // the first material fragment ever compiles (the shader cache is keyed by source hash).
+        m_impl->m_matShaderLib.setHlslFogVolume(fogOk);
+    }
     laps.mark("EnsureFogVolumePipelines");
     m_impl->createCube();
     laps.mark("createCube");
@@ -12360,14 +12375,14 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.fog[3] = aoActive    ? 1.0f : 0.0f;
         // Volumetric fog (HeLighting v3.6, Thema 225 step 9): fogVol.x gates the opaque
         // heApplyFog (Apply owns it instead). fogVol.w (heFogVolume bound) stays 0 and
-        // HE_FOG_VOLUME is NOT defined for D3D12 graph materials yet, so translucent graph
-        // materials keep the analytic fog (heApplyFogT's fallback) until step t34 lands.
+        // fogVol.w: heFogVolume (t34) is bound in every forward material block this frame, so
+        // translucent graph materials read the volume themselves (heApplyFogT).
         if (p.m_fogFrameActive)
         {
             lit.fogVol[0] = 1.0f;
             lit.fogVol[1] = p.m_fogFrame.distance;
             lit.fogVol[2] = p.m_fogFrame.sliceC;
-            lit.fogVol[3] = 0.0f;
+            lit.fogVol[3] = 1.0f;
             lit.fogVolGrid[0] = static_cast<float>(p.m_fogFrame.grid.x);
             lit.fogVolGrid[1] = static_cast<float>(p.m_fogFrame.grid.y);
             lit.fogVolGrid[2] = static_cast<float>(p.m_fogFrame.grid.z);
@@ -13038,6 +13053,19 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                         if (matAOActive)
                             p.srvIntoHeapSlot(p.ssaoBlurRT.Get(), DXGI_FORMAT_R8_UNORM,
                                               p.matSrvCpu(blk + HE::d3d12mat::kSlotAO));
+                        // heFogVolume (t34, Thema 225 step 9): this frame's integrated volume,
+                        // in PIXEL_SHADER_RESOURCE after RenderFogVolume; the template's null 3D
+                        // view stays where fogVol.w is 0 (read with texelFetch only).
+                        if (p.m_fogFrameActive && p.fogIntegratedTex)
+                        {
+                            D3D12_SHADER_RESOURCE_VIEW_DESC fv{};
+                            fv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+                            fv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+                            fv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                            fv.Texture3D.MipLevels = 1;
+                            p.device->CreateShaderResourceView(p.fogIntegratedTex.Get(), &fv,
+                                                               p.matSrvCpu(blk + HE::d3d12mat::kSlotFogVolume));
+                        }
 
                         // Switch to the material root sig + ring SRV heap + material PSO.
                         ID3D12DescriptorHeap* mheaps[] = { p.m_matSrvHeap.Get() };

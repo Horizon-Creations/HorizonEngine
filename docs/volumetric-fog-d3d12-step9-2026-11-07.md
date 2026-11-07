@@ -46,25 +46,43 @@ Stand 07.11.2026, NN-WS03 (RTX 4070, Debug-Layer + DRED an), aufbauend auf Schri
 - Deferred-Modus-1-Bild ist byte-gleich zum Forward-Bild (0 Bytes Unterschied); die Test-Szene
   beleuchtet beide Pfade offenbar gleich, das beweist also den Apply-Platz, nicht mehr.
 
+## Material-Pin t34 (Folge-Commit am selben Tag)
+
+`D3D12MaterialRootSignature.h`: `kSrvPerDraw` 17 → 18, neuer Slot `kSlotFogVolume` = 17 (t34,
+Texture3D, kein Sampler), `kRangeCount` 7 → 8 (Range t34). Die Resolve-Signatur zieht
+`kResolveSlotGB0` usw. über `kSrvPerDraw` automatisch mit. `D3D12Renderer.cpp`: Template-Block
+bekommt für Slot 17 eine Null-Ansicht der Dimension Texture3D; der Forward-Draw-Block schreibt das
+integrierte Volumen über den Slot, solange `m_fogFrameActive`; `fillMatLight` hebt `fogVol.w` auf 1;
+`Initialize` ruft `setHlslFogVolume(fogOk)` vor dem ersten Material-Compile.
+
+Verifiziert (RTX 4070, Debug-Layer): Wasser-Szene (`HE_DUMP_WATERTEST=floor`, transluzentes
+Graph-Material über `heApplyFogT`) + Nebel Modus 1: D3D12 vs D3D11 14 von 3 686 454 Bytes
+(Modus 0: 6); Schattenstrahlen-Szene `HE_DUMP_FOGTEST=slits` 15 Bytes (Sonnen-CSM-Schatten im
+Volumen stimmen); Deferred-Pfad mit Wasser 14 Bytes. Keine Fehler, kein neuer Debug-Layer-Eintrag
+durch den Nebel. `he_tests`: test_fog_volume 16/16, test_engine_materials 15/15 und
+test_material_graph 123/123 (enthalten die D3D12-Root-Signatur-PSO-Tests auf WARP).
+Hinweis: die D3D12-Läufe mit der Wasser-Szene haben eine zusätzliche Debug-Layer-Warnung
+("Pixel Shader expects a Render Target View bound to slot 3") bei Nebel Modus 0 UND 1; ob sie vor
+dieser Änderung schon da war, ist nicht gegengeprüft (kein Basislauf mit der Wasser-Szene).
+
 ## Nicht gemacht / offen
 
-1. **Material-Pin t34 für D3D12:** `HE_FOG_VOLUME` ist für D3D12-Graph-Materialien NICHT an
-   (`setHlslFogVolume` wird für D3D12 nicht aufgerufen), `fogVol.w` bleibt 0. Transparente
-   Graph-Materialien (Wasser, Glas) behalten daher `heApplyFogT`s analytischen Fallback, opake
-   Materialien sind über `fogVol.x` ausgenommen (kein Doppelnebel). Für den Pin braucht
-   `m_matRootSig` (D3D12MaterialRootSignature.h) einen SRV-Eintrag t34 plus Descriptor im
-   Material-Block; fehlt eine Bindestelle, lehnt D3D12 die PSO komplett ab (Warnung aus dem
-   Schritt-6-Doc) — deshalb bewusst nicht halb gemacht. Die Pin-Zeile in `kHlslMaterialPins` ist
-   aus Schritt 8 schon da und wirkt erst, wenn `HE_FOG_VOLUME` für HLSL an ist.
-2. **Keine echten Schatten-/Dichte-Zeugen** (Schattenstrahlen im Nebel, Lichthalo, Boden-Bank wie
-   bei Metal/GL/Vulkan) — nur das Gesamtbild und die Parität zu D3D11.
+1. **Punktlicht im Nebel weicht ab:** mit `HE_DUMP_FOGTEST=point` (Modus 1) unterscheiden sich D3D12
+   und D3D11 in ~2,4 Mio Bytes (mittlere Helligkeit ~2 Stufen, max. 18,7; D3D12 heller, stärkerer
+   Lichthof um die Lampe). Ohne Nebel (Modus 0) sind beide Bilder gleich (1 Byte), Sonne allein
+   (`slits`, `1`) ebenfalls — es ist also der Punktlicht-Term des Inject-Kernels, nicht t34 (tritt
+   auch ohne Wasser auf). Ein temporäres Abschalten des lokalen Schatten-Atlas im Nebel-Pass änderte
+   das D3D12-Bild nur um max. 2,7 Stufen: der Atlas erklärt den Unterschied nicht. Nicht geklärt,
+   welches der beiden Backends näher an Metal/Vulkan liegt (kein Referenzlauf); nächster Schritt:
+   `docs/volumetric-fog-metal-2026-11-02.md` Zeuge c (Punktlicht-Halo) als Referenz, dann
+   Inject-Samplerzuordnung (s0..s5) gegen den erzeugten HLSL prüfen.
+2. **Keine Dichte-/Boden-Bank-Zeugen** und kein `HE_FOG_PARITY`-Lauf, keine Leistungsmessung.
 3. **Ohne Schatten** (`shadows == false`): CSM-/Lokal-Array-Slot ist eine Null-Ansicht (liest 0, nicht 1);
    nur geprüft, dass der Frame läuft, nicht, dass das Bild dann stimmt. D3D11 bindet dort eine weiße Textur.
 4. **Wolkenschatten (t3)** ist die weiße R8-Textur, kein echtes Wolkenschatten-Bild (wie D3D11).
-5. **`HE_FOG_PARITY=1`-Pixeltoleranz** gegen Modus 0 und die Leistungsmessung nicht gelaufen.
-6. **LDR-/Swapchain-Pfad** bekommt keinen volumetrischen Nebel (analytischer Nebel bleibt).
+5. **LDR-/Swapchain-Pfad** bekommt keinen volumetrischen Nebel (analytischer Nebel bleibt).
 
 ## Handoff
 
-Nächste Schritte: (a) t34 für D3D12-Materialien (Root-Signatur + `setHlslFogVolume(true)` vor dem
-ersten Material-Compile), (b) Schatten-/Dichte-Zeugen und Parität, (c) Leistungsmessung D3D11/D3D12.
+Nächste Schritte: (a) die Punktlicht-Abweichung D3D12 vs D3D11 klären (Punkt 1 oben), (b) Dichte-/
+Boden-Bank-Zeugen und `HE_FOG_PARITY`-Lauf, (c) Leistungsmessung D3D11/D3D12.
