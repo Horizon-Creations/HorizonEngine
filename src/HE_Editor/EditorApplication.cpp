@@ -5530,9 +5530,12 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			e->cirrusAmount   = static_cast<float>(envF("HE_DUMP_CIRRUS", 0.0f));
 			e->cirrusSeed     = static_cast<float>(envF("HE_DUMP_CIRRUSSEED", 0.0f));
 			e->cloudHeight    = static_cast<float>(envF("HE_DUMP_CLOUDHEIGHT", 200.0f));
+			e->cloudDomeHeight = static_cast<float>(envF("HE_DUMP_CLOUDDOMEHEIGHT", 1.0f));
+			e->cloudQuality    = static_cast<int>(envF("HE_DUMP_CLOUDQUALITY", static_cast<float>(e->cloudQuality)));   // 0 Low, 1 Medium, 2 High
 			e->cloudShadows        = envF("HE_DUMP_CLOUDSHADOWS", e->cloudShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudShadowStrength = static_cast<float>(envF("HE_DUMP_CLOUDSHADOWSTR", e->cloudShadowStrength));
 			e->cloudStyle          = static_cast<int>(envF("HE_DUMP_CLOUDSTYLE", static_cast<float>(e->cloudStyle)));
+			e->cloudType           = static_cast<int>(envF("HE_DUMP_CLOUDTYPE", static_cast<float>(e->cloudType)));
 			e->cloudInterShadows   = envF("HE_DUMP_INTERSHADOWS", e->cloudInterShadows ? 1.0f : 0.0f) > 0.5f;
 			e->cloudEvolution      = static_cast<float>(envF("HE_DUMP_CLOUDEVOLUTION", e->cloudEvolution));
 			e->windSpeed           = static_cast<float>(envF("HE_DUMP_WINDSPEED", e->windSpeed));
@@ -7893,8 +7896,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		};
 		const float kPlateau = envMetres("HE_DUMP_AUTOLANDHEIGHT", 40.0f);
 		const float kRamp    = envMetres("HE_DUMP_AUTOLANDRAMP", 32.0f);
-		const float snowHeight = kBaseY + 20.0f;
+		const bool mixWitnessSnow = [] { const char* v = std::getenv("HE_DUMP_AUTOLANDMIX"); return v && *v && *v != '0'; }();
+		const float snowHeight = kBaseY + (mixWitnessSnow ? 400.0f : 20.0f);   // the mix witness shows ground, not snow
 
+		// HE_DUMP_AUTOLANDMIX=1 (Thema 233): the mix material on a terrain with groupMix on, Mountains in the
+		// middle, Forest painted on the left and Desert on the right (placeholder fat arrays unless real ones
+		// are in EngineContent). Needs the fat arrays: landscape_tex_gen <dir> --mix --from <group arrays>.
+		const bool mixWitness = [] { const char* v = std::getenv("HE_DUMP_AUTOLANDMIX"); return v && *v && *v != '0'; }();
 		HE::UUID amId{};
 		std::string what;
 		if (builtin)
@@ -7942,11 +7950,14 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		}
 		else
 		{
-			const HE::UUID parent = contentManager().loadAsset(group->materialPath);
+			// The mix witness is an instance of the mix material (Snow Height moved like the group ones).
+			const char* parentPath = mixWitness ? HE::kAutoLandscapeMixMaterialPath : group->materialPath;
+			const HE::UUID parentId = mixWitness ? HE::kAutoLandscapeMixMaterialId : group->materialId;
+			const HE::UUID parent = contentManager().loadAsset(parentPath);
 			MaterialAsset inst;
 			inst.type = HE::AssetType::Material;
 			inst.name = "AutoLandscapeWitness";
-			inst.parentMaterialPath       = group->materialPath;
+			inst.parentMaterialPath       = parentPath;
 			inst.graphParamNames          = { HE::kAutoLandscapeParamSnowHeight };
 			inst.shaderParamData          = { snowHeight, 0.0f, 0.0f, 0.0f };
 			inst.instanceOverriddenParams = { HE::kAutoLandscapeParamSnowHeight };
@@ -7957,8 +7968,8 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			}
 			amId = contentManager().registerMaterial(std::move(inst));
 			contentManager().syncMaterialInstance(amId);
-			what = std::string(parent == group->materialId ? "shipped asset" : "ASSET NOT FOUND")
-			     + " (" + group->name + ")"
+			what = std::string(parent == parentId ? "shipped asset" : "ASSET NOT FOUND")
+			     + (mixWitness ? " (mix)" : std::string(" (") + group->name + ")")
 			     + (noBomb ? ", bombing off" : ", bombing on");
 		}
 
@@ -7992,6 +8003,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			const char* tf = std::getenv("HE_DUMP_TRAILTESS");
 			ltc.tessellationFactor   = (tf && *tf) ? std::atoi(tf) : 4;
 			ltc.tessellationDistance = 80.0f;
+		}
+		if (mixWitness)
+		{
+			ltc.weightRes = 256;
+			TerrainPaint::ensureWeightmap(ltc);
+			TerrainPaint::enableGroupMix(ltc, static_cast<int>(HE::AutoLandscapeGroupId::Mountains));
+			TerrainPaint::paintGroup(ltc, -34.0f, 0.0f, static_cast<int>(HE::AutoLandscapeGroupId::Forest),    26.0f, 8.0f, 1.0f);
+			TerrainPaint::paintGroup(ltc,  34.0f, 0.0f, static_cast<int>(HE::AutoLandscapeGroupId::Desert),    26.0f, 8.0f, 1.0f);
+			TerrainPaint::paintGroup(ltc,   0.0f, 44.0f, static_cast<int>(HE::AutoLandscapeGroupId::Grassland), 16.0f, 8.0f, 1.0f);
 		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		if (!builtin) // without one, TerrainSystem attaches kDefaultTerrainMaterialId

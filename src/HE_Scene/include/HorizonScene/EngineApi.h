@@ -1473,6 +1473,7 @@ namespace camera {
     X(windDirection,       WindDirection,       "Wind Direction") \
     X(windSpeed,           WindSpeed,           "Wind Speed") \
     X(cloudHeight,         CloudHeight,         "Cloud Height") \
+    X(cloudDomeHeight,     CloudDomeHeight,     "Cloud Dome Height") \
     X(cloudShadowStrength, CloudShadowStrength, "Cloud Shadow Strength") \
     X(cloudEvolution,      CloudEvolution,      "Cloud Evolution") \
     X(cloudDensity,        CloudDensity,        "Cloud Density") \
@@ -1521,6 +1522,7 @@ namespace camera {
     X(cloudMode,           CloudMode,           "Cloud Mode") \
     X(cloudQuality,        CloudQuality,        "Cloud Quality") \
     X(cloudStyle,          CloudStyle,          "Cloud Style") \
+    X(cloudType,           CloudType,           "Cloud Type") \
     X(nebulaQuality,       NebulaQuality,       "Nebula Quality") \
     X(fogMode,             FogMode,             "Fog Mode") \
     X(fogQuality,          FogQuality,          "Fog Quality")

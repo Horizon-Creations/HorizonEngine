@@ -2036,7 +2036,7 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 {
 	// The constant buffer is memcpy'd straight to the GPU — the size is a contract
 	// with the MSL/GLSL/HLSL struct.
-	CHECK(sizeof(HE::SkyFrameParams) == 64 + 17 * 16);
+	CHECK(sizeof(HE::SkyFrameParams) == 64 + 19 * 16);
 
 	IRenderer::EnvironmentSettings env;
 	env.windDirection    = 90.0f;
@@ -2071,6 +2071,28 @@ TEST_CASE("SkyFrameParams: one EnvironmentSettings translation for every backend
 	CHECK(p.wind.x == doctest::Approx(w.x));
 	CHECK(p.wind.z == doctest::Approx(w.z));
 	CHECK(p.wind.w == doctest::Approx(0.5f));
+	// drift.xyz is the wind integrated over time (CloudDrift, process-wide state, so only its
+	// shape is checked here; test_sky_shader covers the values); drift.w is the dome cloud height.
+	CHECK(std::isfinite(p.drift.x));
+	CHECK(std::isfinite(p.drift.z));
+	{
+		IRenderer::EnvironmentSettings tall = env;
+		tall.cloudDomeHeight = 2.5f;
+		CHECK(HE::BuildSkyFrameParams(tall, in).drift.w == doctest::Approx(2.5f));
+		tall.cloudDomeHeight = 0.0f;                  // a broken value must not collapse the dome
+		CHECK(HE::BuildSkyFrameParams(tall, in).drift.w >= 0.1f);
+	}
+	CHECK(p.drift.w == doctest::Approx(1.0f));      // cloudDomeHeight, the classic look by default
+	{
+		CHECK(p.shape.x == doctest::Approx(0.0f));    // cloudType 0: the look before cloud types existed
+		IRenderer::EnvironmentSettings typed = env;
+		typed.cloudType = 4;
+		CHECK(HE::BuildSkyFrameParams(typed, in).shape.x == doctest::Approx(4.0f));
+		typed.cloudType = 99;                         // a broken value must not index past the table
+		CHECK(HE::BuildSkyFrameParams(typed, in).shape.x == doctest::Approx(4.0f));
+		typed.cloudType = -3;
+		CHECK(HE::BuildSkyFrameParams(typed, in).shape.x == doctest::Approx(0.0f));
+	}
 
 	CHECK(p.sunDir.w   == doctest::Approx(1.0f));    // has-moon flag
 	CHECK(p.sunColor.w == doctest::Approx(0.3f));    // lunar phase
@@ -3545,6 +3567,143 @@ inline std::vector<std::string> splitArgs(const std::string& list)
 	return out;
 }
 } // namespace nebuladrift
+
+TEST_CASE("Realistic clouds: the blue-noise dither tile is one permutation, identical in GL and MSL")
+{
+	// skyBlueDither replaces skyIgn as the ray-start jitter of the Realistic march (the diagonal hatching).
+	// The 16x16 void-and-cluster table is pasted into both dialects; a one-sided edit would give one backend
+	// another dither. Every entry must be a distinct rank (k + 0.5) / 256, so the tile is a permutation.
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - dither table comparison skipped");
+		return;
+	}
+	const std::string glFile  = readFile(root / "src" / "HE_Rendering" / "include" /
+	                                     "HorizonRendering" / "SkyShaderSource.h");
+	const std::string mtlFile = readFile(root / "src" / "HE_Rendering" / "src" /
+	                                     "Backends" / "Metal" / "MetalRenderer.mm");
+	const auto table = [](const std::string& src, const std::string& open, const std::string& close)
+	{
+		std::vector<double> v;
+		const size_t a = src.find(open);
+		if (a == std::string::npos) return v;
+		const size_t b = src.find(close, a);
+		if (b == std::string::npos) return v;
+		std::stringstream ss(src.substr(a + open.size(), b - a - open.size()));
+		for (std::string tok; std::getline(ss, tok, ',');)
+			if (tok.find_first_of("0123456789") != std::string::npos) v.push_back(std::atof(tok.c_str()));
+		return v;
+	};
+	const std::vector<double> gl  = table(glFile,  "kSkyBlue16[256] = float[256](", ");");
+	const std::vector<double> mtl = table(mtlFile, "kSkyBlue16[256] = {", "};");
+	REQUIRE(gl.size() == 256);
+	REQUIRE(mtl.size() == 256);
+	CHECK(gl == mtl);
+	std::vector<int> rank;
+	for (double x : gl) rank.push_back(static_cast<int>(std::lround(x * 256.0 - 0.5)));
+	std::sort(rank.begin(), rank.end());
+	for (int k = 0; k < 256; ++k) CHECK(rank[k] == k);
+	// The Realistic march uses it, the classic march and the aurora keep the structured one.
+	CHECK(glFile.find("float jitter = skyBlueDither(gl_FragCoord.xy);") != std::string::npos);
+	CHECK(mtlFile.find("float jitter = skyBlueDither(fragCoord);") != std::string::npos);
+}
+
+TEST_CASE("Realistic clouds: the quality constants of the march (weather-map cadence, sun-march skip) are the same numbers in GL and MSL")
+{
+	// The Realistic march evaluates the weather map on every qColEvery-th step (Low / Medium / High). The two dialects spell the quality test differently; the numbers must match, and High stays exact.
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - march constants comparison skipped");
+		return;
+	}
+	const std::string glFile  = readFile(root / "src" / "HE_Rendering" / "include" /
+	                                     "HorizonRendering" / "SkyShaderSource.h");
+	const std::string mtlFile = readFile(root / "src" / "HE_Rendering" / "src" /
+	                                     "Backends" / "Metal" / "MetalRenderer.mm");
+	const auto numbers = [](const std::string& src, const std::string& type, const std::string& name)
+	{
+		std::vector<double> v;
+		const size_t a = src.find(type + " " + name + " = ");
+		if (a == std::string::npos) return v;
+		const std::string line = src.substr(a, src.find(';', a) - a);
+		for (size_t i = line.find('?'); i != std::string::npos && i < line.size(); ++i)
+			if (line[i] == '?' || line[i] == ':')
+			{
+				const size_t j = line.find_first_not_of(" (", i + 1);
+				if (j == std::string::npos || !std::isdigit(static_cast<unsigned char>(line[j]))) continue;
+				char* endp = nullptr;
+				const double d = std::strtod(line.c_str() + j, &endp);
+				if (*endp == ' ' || *endp == ')' || *endp == '\0') v.push_back(d);
+			}
+		return v;
+	};
+	const std::vector<double> gl = numbers(glFile, "int", "qColEvery"), mtl = numbers(mtlFile, "int", "qColEvery");
+	REQUIRE(gl.size() == 3);
+	CHECK(gl == mtl);
+	CHECK(gl.back() == 1.0);                        // High stays exact: every step, no interpolation
+	// The opacity under which a step skips the sun march: 0 for High (never), the same threshold in both dialects.
+	const std::vector<double> sGl = numbers(glFile, "float", "qSkipA"), sMtl = numbers(mtlFile, "float", "qSkipA");
+	REQUIRE(sGl.size() == 2);
+	CHECK(sGl == sMtl);
+	CHECK(sGl.front() == 0.0);
+	// The adaptive march: the fine step as a fraction of the coarse one (Low / Medium / High), and the distance and the
+	// opacity limits of the fine mode. Same numbers in both dialects; the fine step only ever gets finer with quality.
+	const std::vector<double> fGl = numbers(glFile, "float", "qFineF"), fMtl = numbers(mtlFile, "float", "qFineF");
+	REQUIRE(fGl.size() == 3);
+	CHECK(fGl == fMtl);
+	CHECK(fGl[0] > fGl[1]);
+	CHECK(fGl[1] > fGl[2]);
+	for (const std::string* src : { &glFile, &mtlFile })
+	{
+		CHECK(src->find("float tFineMax = maxDist * 0.12;") != std::string::npos);
+		CHECK(src->find("if (!fine && dens > 0.01 && t < tFineMax && T > 0.4)") != std::string::npos);
+		CHECK(src->find("bool fineNext = fine && emptyRun < 2 && T > 0.4;") != std::string::npos);
+	}
+}
+
+TEST_CASE("Realistic clouds: the cloud-type table (cell size, tower profile) is the same numbers in GL and MSL")
+{
+	using namespace nebuladrift;
+	const fs::path root = findRepoRoot();
+	if (root.empty())
+	{
+		MESSAGE("sky shader sources not found - cloud type table comparison skipped");
+		return;
+	}
+	const std::string glFile  = readFile(root / "src" / "HE_Rendering" / "include" /
+	                                     "HorizonRendering" / "SkyShaderSource.h");
+	const std::string mtlFile = readFile(root / "src" / "HE_Rendering" / "src" /
+	                                     "Backends" / "Metal" / "MetalRenderer.mm");
+	// Every "return vecN(a, b, c, d);" of cloudShapeParams, as one flat list of numbers.
+	const auto table = [](const std::string& src, const std::string& head, const std::string& ctor)
+	{
+		std::vector<double> v;
+		const size_t a = src.find(head);
+		if (a == std::string::npos) return v;
+		const size_t end = src.find("\n}\n", a);
+		for (size_t i = src.find(ctor + "(", a); i != std::string::npos && i < end; i = src.find(ctor + "(", i + 1))
+		{
+			const size_t close = src.find(')', i);
+			std::string args = src.substr(i + ctor.size() + 1, close - i - ctor.size() - 1);
+			for (char& c : args) if (c == ',') c = ' ';
+			const char* p = args.c_str();
+			char* endp = nullptr;
+			for (double d = std::strtod(p, &endp); endp != p; d = std::strtod(p, &endp)) { v.push_back(d); p = endp; }
+		}
+		return v;
+	};
+	const std::vector<double> gl  = table(glFile,  "vec4 cloudShapeParams()", "vec4");
+	const std::vector<double> mtl = table(mtlFile, "float4 cloudShapeParams(float4 drift)", "float4");
+	REQUIRE(gl.size() == 5 * 4);                    // types 1..4 and the default: four numbers each
+	CHECK(gl == mtl);
+	// The default type multiplies by one and caps nothing: the picture before cloud types existed.
+	CHECK(gl[16] == 1.0);
+	CHECK(gl[18] == 1.0);
+}
 
 TEST_CASE("Nebula: Metal's kSkyMSL copy matches the GL sky shader after normalisation")
 {

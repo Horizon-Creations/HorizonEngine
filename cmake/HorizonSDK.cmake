@@ -234,6 +234,11 @@ install(CODE [[
     # SDL's generated revision string depends on the git state of each tree's
     # SDL fetch ("HEAD-HASH-NOTFOUND" in one, "release-3.2.14" in the other); no ABI.
     list(REMOVE_ITEM _he_files "SDL3/SDL_revision.h")
+    # HorizonVersion.h carries HE_GIT_COMMIT, fixed when each tree was configured.
+    # The release tree is configured only when its command line changes, so after
+    # any new commit the two trees disagree on it and the dev and release sets
+    # reported a MISMATCH. The commit is a string macro; no ABI.
+    list(REMOVE_ITEM _he_files "HorizonVersion.h")
     set(_he_all "")
     foreach(_he_f IN LISTS _he_files)
         file(SHA256 "${_he_root}/include/${_he_f}" _he_h)

@@ -660,6 +660,8 @@ TEST_CASE("makeEnvironmentSettings maps every EnvironmentComponent field")
     env.rainAmount         = 0.66f;
     env.cloudMode          = 1;
     env.cloudHeight        = 321.0f;
+    env.cloudDomeHeight    = 1.9f;
+    env.cloudType          = 4;
     env.cloudQuality       = 2;
     env.lowResClouds       = true;
     env.cloudDensity       = 1.7f;
@@ -718,6 +720,8 @@ TEST_CASE("makeEnvironmentSettings maps every EnvironmentComponent field")
     CHECK(s.rainAmount        == doctest::Approx(0.66f));
     CHECK(s.cloudMode         == 1);
     CHECK(s.cloudHeight       == doctest::Approx(321.0f));
+    CHECK(s.cloudDomeHeight   == doctest::Approx(1.9f));
+    CHECK(s.cloudType         == 4);
     CHECK(s.cloudQuality      == 2);
     CHECK(s.lowResClouds);
     CHECK(s.cloudDensity      == doctest::Approx(1.7f));

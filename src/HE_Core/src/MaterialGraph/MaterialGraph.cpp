@@ -286,6 +286,10 @@ const std::vector<MatNodeDesc>& registry()
 
         // ── v19: the landscape's foliage set — metadata only, no pins, s = asset UUID ──
         { MatNodeType::LandscapeFoliage, "Landscape Foliage", "Landscape", {}, {}, 0 },
+
+        // ── v20: mixed texture groups — the two strongest groups of the painted shares ──
+        { MatNodeType::LandscapeGroupPick, "Landscape Group Pick", "Landscape", {},
+          { { "A", F::Float, 0 }, { "B", F::Float, 0 }, { "Mix", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -686,6 +690,7 @@ bool branchPure(MatNodeType t)
         case MatNodeType::And: case MatNodeType::Or: case MatNodeType::Not:
         case MatNodeType::FbmGrad: case MatNodeType::Panner: case MatNodeType::ValueNoise: case MatNodeType::Fbm:
         case MatNodeType::Checker: case MatNodeType::StaticSwitch: case MatNodeType::Reroute:
+        case MatNodeType::LandscapeGroupPick:   // textureLod only: defined in non-uniform flow
             return true;
         // The bombed reads sample with textureGrad from gradients taken ahead of the
         // branch (the grid's dx/dy, and dFdx(vWorldPos) for the normal frame), so only
@@ -1460,7 +1465,6 @@ HE_MG_NOINLINE bool emitBombNode(EmitCtx& c, const Scope& sc, const MatGraphNode
 HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGraphNode& n, const std::string& v,
                                        std::string& decl, std::vector<std::string>& pinExpr)
 {
-    (void)pinExpr;
     switch (n.type)
     {
         case MatNodeType::LandscapeLayerBlend:
@@ -1558,6 +1562,41 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
             decl += " float " + v + "_s = " + wsum + ";"
                  + " vec3 " + v + " = " + v + "_s > 1e-4 ? (" + sum + ") / " + v + "_s : "
                  + layer0 + ";";
+            break;
+        }
+        case MatNodeType::LandscapeGroupPick:
+        {
+            c.usesLandscapeWeights = true;
+            // The third page of the weightmap, read the way the layer blend reads its pages
+            // (same smoothed coordinate, mip 0, clamped half a texel inside the page). A map
+            // without a third page (the 1x1 default, 1:1 or 2:1) means group 0 alone.
+            const std::string ts = v + "_ts", np = v + "_np", wsz = v + "_wsz", wuv = v + "_wuv", wu = v + "_wu",
+                              sh = v + "_sh", ia = v + "_ia", sa = v + "_sa", ib = v + "_ib", sb = v + "_sb",
+                              rest = v + "_r", ix = v + "_ix";
+            decl = "vec2 " + ts + " = vec2(textureSize(heLandscapeWeights, 0));"
+                 + " float " + np + " = max(floor(" + ts + ".x / max(" + ts + ".y, 1.0) + 0.5), 1.0);"
+                 + " vec2 " + wsz + " = vec2(" + ts + ".x / " + np + ", " + ts + ".y);"
+                 + " vec2 " + v + "_wt = vUV * " + wsz + " - 0.5;"
+                 + " vec2 " + v + "_wi = floor(" + v + "_wt);"
+                 + " vec2 " + v + "_wq = " + v + "_wt - " + v + "_wi;"
+                 + " vec2 " + wuv + " = clamp((" + v + "_wi + 0.5 + " + v + "_wq * " + v + "_wq * (3.0 - 2.0 * " + v + "_wq)) / " + wsz
+                 + ", 0.5 / " + wsz + ", 1.0 - 0.5 / " + wsz + ");"
+                 + " float " + wu + " = clamp(" + wuv + ".x / " + np + ", 0.5 / " + ts + ".x, 1.0 / " + np + " - 0.5 / " + ts + ".x);"
+                 + " vec4 " + sh + " = " + np + " > 2.5 ? textureLod(heLandscapeWeights, vec2(" + wu + " + 2.0 / " + np + ", " + wuv
+                 + ".y), 0.0) : vec4(1.0, 0.0, 0.0, 0.0);"
+                 + " vec4 " + ix + " = vec4(0.0, 1.0, 2.0, 3.0);"
+                 + " float " + ia + " = 0.0; float " + sa + " = " + sh + ".x;"
+                 + " float " + v + "_c1 = float(" + sh + ".y > " + sa + "); " + ia + " = mix(" + ia + ", 1.0, " + v + "_c1); " + sa + " = max(" + sa + ", " + sh + ".y);"
+                 + " float " + v + "_c2 = float(" + sh + ".z > " + sa + "); " + ia + " = mix(" + ia + ", 2.0, " + v + "_c2); " + sa + " = max(" + sa + ", " + sh + ".z);"
+                 + " float " + v + "_c3 = float(" + sh + ".w > " + sa + "); " + ia + " = mix(" + ia + ", 3.0, " + v + "_c3); " + sa + " = max(" + sa + ", " + sh + ".w);"
+                 + " vec4 " + rest + " = " + sh + " * (vec4(1.0) - step(abs(" + ix + " - vec4(" + ia + ")), vec4(0.5)));"
+                 + " float " + ib + " = 0.0; float " + sb + " = " + rest + ".x;"
+                 + " float " + v + "_d1 = float(" + rest + ".y > " + sb + "); " + ib + " = mix(" + ib + ", 1.0, " + v + "_d1); " + sb + " = max(" + sb + ", " + rest + ".y);"
+                 + " float " + v + "_d2 = float(" + rest + ".z > " + sb + "); " + ib + " = mix(" + ib + ", 2.0, " + v + "_d2); " + sb + " = max(" + sb + ", " + rest + ".z);"
+                 + " float " + v + "_d3 = float(" + rest + ".w > " + sb + "); " + ib + " = mix(" + ib + ", 3.0, " + v + "_d3); " + sb + " = max(" + sb + ", " + rest + ".w);"
+                 + " bool " + v + "_none = " + sa + " + " + sb + " < 1e-5;"
+                 + " vec3 " + v + " = vec3(" + v + "_none ? 0.0 : " + ia + ", " + ib + ", " + v + "_none ? 1.0 : " + sa + " / (" + sa + " + " + sb + "));";
+            pinExpr = { v + ".x", v + ".y", v + ".z" };
             break;
         }
         default: return false;
