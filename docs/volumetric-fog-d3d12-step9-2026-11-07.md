@@ -67,15 +67,17 @@ dieser Änderung schon da war, ist nicht gegengeprüft (kein Basislauf mit der W
 
 ## Nicht gemacht / offen
 
-1. **Punktlicht im Nebel weicht ab:** mit `HE_DUMP_FOGTEST=point` (Modus 1) unterscheiden sich D3D12
-   und D3D11 in ~2,4 Mio Bytes (mittlere Helligkeit ~2 Stufen, max. 18,7; D3D12 heller, stärkerer
-   Lichthof um die Lampe). Ohne Nebel (Modus 0) sind beide Bilder gleich (1 Byte), Sonne allein
-   (`slits`, `1`) ebenfalls — es ist also der Punktlicht-Term des Inject-Kernels, nicht t34 (tritt
-   auch ohne Wasser auf). Ein temporäres Abschalten des lokalen Schatten-Atlas im Nebel-Pass änderte
-   das D3D12-Bild nur um max. 2,7 Stufen: der Atlas erklärt den Unterschied nicht. Nicht geklärt,
-   welches der beiden Backends näher an Metal/Vulkan liegt (kein Referenzlauf); nächster Schritt:
-   `docs/volumetric-fog-metal-2026-11-02.md` Zeuge c (Punktlicht-Halo) als Referenz, dann
-   Inject-Samplerzuordnung (s0..s5) gegen den erzeugten HLSL prüfen.
+1. ~~Punktlicht im Nebel weicht ab~~ — **geklärt und behoben (Fehler lag in D3D11).** Mit
+   `HE_DUMP_FOGTEST=point` (Modus 1) lag D3D12 gleichauf mit Vulkan auf der echten GPU (Referenz:
+   Unterschied wie in der Sonnen-Szene, Helligkeit im Mittel identisch), D3D11 war dunkler (bis 29
+   Stufen). Ursache: `D3D11RendererImpl::RenderFogVolume` lief VOR `m_renderGraph.execute`, also vor
+   dem Schatten-Pass, und las die CSM-/Lokal-Atlas-Schatten des Vorframes (beim ersten Frame leere
+   Atlanten) — der Kommentar sagte "after shadows", der Code nicht. Fix (`D3D11Renderer.cpp`): der
+   Aufruf sitzt jetzt im Szenen-Körper direkt vor dem finalen `fillPerFrame`/`fillMatLight`, wie bei
+   D3D12. Danach: D3D11 vs D3D12 im Punktlicht-Szenario 10 Bytes (vorher ~2,4 Mio), mit Wasser 18,
+   Sonne (`slits`) 15, Wasser 14, Deferred 14; D3D11 Modus 0 unverändert (6). Die Sonne-Szenen waren
+   vorher nur deshalb gleich, weil die Szene statisch ist (Vorframe-Schatten = aktuelle). Nicht
+   gemessen: ob bewegte Schatten vorher sichtbar nachliefen (nur der statische Dump).
 2. **Keine Dichte-/Boden-Bank-Zeugen** und kein `HE_FOG_PARITY`-Lauf, keine Leistungsmessung.
 3. **Ohne Schatten** (`shadows == false`): CSM-/Lokal-Array-Slot ist eine Null-Ansicht (liest 0, nicht 1);
    nur geprüft, dass der Frame läuft, nicht, dass das Bild dann stimmt. D3D11 bindet dort eine weiße Textur.
@@ -84,5 +86,8 @@ dieser Änderung schon da war, ist nicht gegengeprüft (kein Basislauf mit der W
 
 ## Handoff
 
-Nächste Schritte: (a) die Punktlicht-Abweichung D3D12 vs D3D11 klären (Punkt 1 oben), (b) Dichte-/
-Boden-Bank-Zeugen und `HE_FOG_PARITY`-Lauf, (c) Leistungsmessung D3D11/D3D12.
+Nächste Schritte: (a) Dichte-/Boden-Bank-Zeugen und `HE_FOG_PARITY`-Lauf, (b) Leistungsmessung
+D3D11/D3D12, (c) Frames ohne Schatten (weiße Fallback-Arrays statt Null-Ansicht).
+Vulkan lief auf dieser Maschine auf der echten RTX 4070 (Validierungs-Layer an, keine ERROR-Zeilen im Log) und diente
+als Referenz — das war der offene Punkt "Real-GPU-Lauf" aus Schritt 5, zumindest für die
+Witness-Szenen `1` und `point`.

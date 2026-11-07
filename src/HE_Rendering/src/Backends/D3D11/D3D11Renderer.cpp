@@ -7967,12 +7967,8 @@ void D3D11Renderer::DrawScene(int width, int height)
     // material of the frame samples what this uploads.
     if (p.m_matReady)
         p.updateSkyEnvCube(ctx, p.m_renderWorld.sunDirection);
-    // Volumetric fog (Thema 225 step 8): after shadows + the sky cube bake (Inject
-    // reads both), before the opaque draw loop and both fillMatLight calls below —
-    // their lit.fogVol fill and fillPerFrame's analytic-fog zeroing both read
-    // p.m_fogFrameActive/p.m_fogFrame, set here.
-    p.RenderFogVolume(ctx, m_environment, shadows, nCascades, cascadeClip, cascadeSplits,
-                      localShadows, nLocalLayers, localClip, camFwd);
+    // (Volumetric fog Inject/Integrate runs inside the scene body, after the shadow pass —
+    // see the call above the final fillPerFrame.)
     fillMatLight(false, false);
 
     const UINT stride = 8 * sizeof(float);
@@ -8293,6 +8289,13 @@ void D3D11Renderer::DrawScene(int width, int height)
             // through s2 (linear clamp). Nothing is bound when the trace did not
             // run; uSSRParams.x is 0 then and the branch is never taken.
             ctx->PSSetShaderResources(16, 1, &ssrSRV);
+            // Volumetric fog Inject + Integrate (Thema 225): HERE, after the shadow pass in
+            // the graph callback above has written this frame's cascades and local atlas
+            // (Inject reads both). It used to run before p.m_renderGraph.execute and so read
+            // the PREVIOUS frame's shadows (nothing on the first frame). The fills below read
+            // m_fogFrameActive: fillPerFrame zeroes the analytic fog, fillMatLight raises fogVol.
+            p.RenderFogVolume(ctx, m_environment, shadows, nCascades, cascadeClip, cascadeSplits,
+                              localShadows, nLocalLayers, localClip, camFwd);
             fillPerFrame(giShadingActive,
                          aoWanted && aoSRV != p.whiteSRV.Get(), ssrActive);
             fillMatLight(giShadingActive, aoWanted && aoSRV != p.whiteSRV.Get());
