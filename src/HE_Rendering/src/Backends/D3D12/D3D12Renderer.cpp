@@ -4048,6 +4048,518 @@ struct D3D12RendererImpl
                       int width, int height, ContentManager* cm,
                       const D3D12_CPU_DESCRIPTOR_HANDLE* gb0Rtv = nullptr);
 
+    // ── Volumetric fog (Thema 225 step 9; D3D11's step 8 is the template) ───────
+    // Inject/Integrate (compute) + Apply (fullscreen, between Decals and the transparent
+    // draws) on the HLSL kernels step 6 cross-compiled. Register contract:
+    // docs/volumetric-fog-d3d-acceptance-2026-11-06.md. HDR viewport frames only (the Apply
+    // PSO's RTV is R16G16B16A16_FLOAT); every other frame keeps the analytic fog.
+    // Own shader-visible heap, one k_fogSlots range per frame slot (written on the CPU at
+    // record time, so a range is never rewritten while its frame is in flight).
+    static constexpr UINT k_fogSlots      = 16;
+    static constexpr UINT k_fogInjectSrv0 = 0;   // t0..t5
+    static constexpr UINT k_fogInjectUav  = 6;   // u0
+    static constexpr UINT k_fogIntSrv     = 7;   // t0
+    static constexpr UINT k_fogIntUav     = 8;   // u0
+    static constexpr UINT k_fogApplySrv0  = 9;   // t0..t2
+    ComPtr<ID3D12RootSignature>  fogInjectRS, fogIntegrateRS, fogApplyRS;
+    ComPtr<ID3D12PipelineState>  fogInjectPSO, fogIntegratePSO, fogApplyPSO;
+    ComPtr<ID3D12DescriptorHeap> fogHeap;
+    UINT                         fogDescSize = 0;
+    ComPtr<ID3D12Resource>       fogVolCB[k_frameCount];   uint8_t* fogVolCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       fogLightCB[k_frameCount]; uint8_t* fogLightCBPtr[k_frameCount]{};
+    ComPtr<ID3D12Resource>       fogInjectTex[2];          // ping-pong: [cur] = Inject output, [1-cur] = history
+    ComPtr<ID3D12Resource>       fogIntegratedTex;
+    D3D12_RESOURCE_STATES        fogInjectState[2] = { D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
+    D3D12_RESOURCE_STATES        fogIntegratedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    bool        fogPipelinesTried = false;
+    bool        fogPipelinesOk    = false;
+    glm::ivec3  fogGridAlloc      = glm::ivec3(0);
+    int         fogHist           = 0;
+    bool        fogHistValid      = false;
+    double      fogLastTime       = 0.0;
+    uint32_t    fogFrameIndex     = 0;
+    glm::vec3   fogNoiseOffset    = glm::vec3(0.0f);
+    float       fogNoiseTime      = 0.0f;
+    glm::mat4   fogPrevViewProj   { 1.0f };
+    glm::vec3   fogPrevCam        { 0.0f };
+    float       fogPrevFocal      = 0.0f;
+    bool        m_fogFrameActive  = false;   // this frame's Apply is valid (fillPerFrame zeroes the analytic fog)
+    HE::FogVolumeData m_fogFrame{};
+    glm::mat4   m_fogViewProj     { 1.0f };  // unjittered world->clip, y-flip pre-baked (lit.fogViewProj)
+
+    bool EnsureFogVolumePipelines()
+    {
+        if (fogPipelinesTried) return fogPipelinesOk;
+        fogPipelinesTried = true;
+#if !defined(HE_HAVE_SHADERC)
+        return false;
+#else
+        using Backend = HE::MaterialShaderLibrary::Backend;
+        const HE::MaterialShaderLibrary::Compiled& fi = m_matShaderLib.fogInject(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fg = m_matShaderLib.fogIntegrate(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& fa = m_matShaderLib.fogApply(Backend::HLSL);
+        const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.fullscreenVertex(Backend::HLSL);
+        if (!fi.ok || !fg.ok || !fa.ok || !vc.ok)
+        {
+            HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: volumetric fog HLSL cross-compile failed: ")
+                + (!fi.ok ? fi.log : !fg.ok ? fg.log : !fa.ok ? fa.log : vc.log)).c_str());
+            return false;
+        }
+        auto compile = [&](const std::string& src, const char* entry, const char* profile,
+                           ComPtr<ID3DBlob>& b) -> bool
+        {
+            ComPtr<ID3DBlob> err;
+            if (FAILED(timedD3DCompile(src.c_str(), src.size(), "fog", nullptr, nullptr,
+                                       entry, profile, startupCompileFlags(), 0, &b, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s",
+                    (std::string("D3D12Renderer: fog shader compile failed (") + profile + "): "
+                     + (err ? static_cast<const char*>(err->GetBufferPointer()) : "unknown")).c_str());
+                return false;
+            }
+            return true;
+        };
+        ComPtr<ID3DBlob> csI, csG, psA, vsF;
+        bool ok = compile(fi.source, "main", "cs_5_0", csI)
+               && compile(fg.source, "main", "cs_5_0", csG)
+               && compile(fa.source, "main", "ps_5_0", psA)
+               && compile(vc.source, "main", "vs_5_0", vsF);
+
+        auto makeRS = [&](const D3D12_ROOT_PARAMETER* params, UINT n,
+                          const D3D12_STATIC_SAMPLER_DESC* samplers, UINT ns,
+                          ComPtr<ID3D12RootSignature>& out) -> bool
+        {
+            D3D12_ROOT_SIGNATURE_DESC rsd{};
+            rsd.NumParameters = n; rsd.pParameters = params;
+            rsd.NumStaticSamplers = ns; rsd.pStaticSamplers = samplers;
+            ComPtr<ID3DBlob> sig, err;
+            if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err)))
+            {
+                HE_LOG_ERROR(RHI, "%s", (std::string("D3D12Renderer: fog root signature: ")
+                    + (err ? static_cast<const char*>(err->GetBufferPointer()) : "?")).c_str());
+                return false;
+            }
+            return SUCCEEDED(device->CreateRootSignature(0, sig->GetBufferPointer(), sig->GetBufferSize(),
+                                                         IID_PPV_ARGS(&out)));
+        };
+        auto range = [](D3D12_DESCRIPTOR_RANGE_TYPE type, UINT n) {
+            D3D12_DESCRIPTOR_RANGE r{};
+            r.RangeType = type; r.NumDescriptors = n; r.BaseShaderRegister = 0;
+            r.OffsetInDescriptorsFromTableStart = 0;
+            return r;
+        };
+        auto sampler = [](UINT reg, D3D12_FILTER f, D3D12_TEXTURE_ADDRESS_MODE m, D3D12_SHADER_VISIBILITY vis) {
+            D3D12_STATIC_SAMPLER_DESC s{};
+            s.Filter = f; s.AddressU = s.AddressV = s.AddressW = m;
+            s.ComparisonFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+            s.MaxLOD = D3D12_FLOAT32_MAX;
+            s.ShaderRegister = reg; s.ShaderVisibility = vis;
+            return s;
+        };
+        const D3D12_DESCRIPTOR_RANGE srv6 = range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6);
+        const D3D12_DESCRIPTOR_RANGE srv3 = range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 3);
+        const D3D12_DESCRIPTOR_RANGE srv1 = range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1);
+        const D3D12_DESCRIPTOR_RANGE uav1 = range(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1);
+        auto cbv = [](UINT reg, D3D12_SHADER_VISIBILITY vis) {
+            D3D12_ROOT_PARAMETER p{};
+            p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; p.Descriptor = { reg, 0 }; p.ShaderVisibility = vis;
+            return p;
+        };
+        auto table = [](const D3D12_DESCRIPTOR_RANGE* r, D3D12_SHADER_VISIBILITY vis) {
+            D3D12_ROOT_PARAMETER p{};
+            p.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            p.DescriptorTable = { 1, r }; p.ShaderVisibility = vis;
+            return p;
+        };
+        const D3D12_SHADER_VISIBILITY all = D3D12_SHADER_VISIBILITY_ALL;
+        if (ok)
+        {
+            // Inject: b0 HeLighting, b1 HeFogVol, t0..t5, u0, s0..s5 in the order D3D11 binds them.
+            const D3D12_ROOT_PARAMETER pr[4] = { cbv(0, all), cbv(1, all), table(&srv6, all), table(&uav1, all) };
+            const D3D12_STATIC_SAMPLER_DESC ss[6] = {
+                sampler(0, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // CSM taps
+                sampler(1, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // local atlas taps
+                sampler(2, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // sky cube
+                sampler(3, D3D12_FILTER_MIN_MAG_MIP_POINT,  D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // cloud shadow
+                sampler(4, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP,  all), // sky noise 3D
+                sampler(5, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, all), // history
+            };
+            ok = makeRS(pr, 4, ss, 6, fogInjectRS);
+        }
+        if (ok)
+        {
+            // Integrate: b0 HeFogVol, t0 (the injected volume, texelFetch), u0.
+            const D3D12_ROOT_PARAMETER pr[3] = { cbv(0, all), table(&srv1, all), table(&uav1, all) };
+            ok = makeRS(pr, 3, nullptr, 0, fogIntegrateRS);
+        }
+        if (ok)
+        {
+            // Apply: b0 HeFogVol, t0 integrated volume, t1 sky cube, t2 scene depth, s0/s1 linear clamp.
+            const D3D12_SHADER_VISIBILITY ps = D3D12_SHADER_VISIBILITY_PIXEL;
+            const D3D12_ROOT_PARAMETER pr[2] = { cbv(0, ps), table(&srv3, ps) };
+            const D3D12_STATIC_SAMPLER_DESC ss[2] = {
+                sampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, ps),
+                sampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP, ps),
+            };
+            ok = makeRS(pr, 2, ss, 2, fogApplyRS);
+        }
+        if (ok)
+        {
+            D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
+            cd.pRootSignature = fogInjectRS.Get();
+            cd.CS = { csI->GetBufferPointer(), csI->GetBufferSize() };
+            ok = SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&fogInjectPSO)));
+            cd.pRootSignature = fogIntegrateRS.Get();
+            cd.CS = { csG->GetBufferPointer(), csG->GetBufferSize() };
+            ok = ok && SUCCEEDED(device->CreateComputePipelineState(&cd, IID_PPV_ARGS(&fogIntegratePSO)));
+        }
+        if (ok)
+        {
+            // Shader output is rgb = radiance to ADD, a = transmittance of the scene behind:
+            // dst' = src*1 + dst*a (plan §6), the same blend as D3D11's fogApplyBlendState.
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
+            pd.pRootSignature = fogApplyRS.Get();
+            pd.VS = { vsF->GetBufferPointer(), vsF->GetBufferSize() };
+            pd.PS = { psA->GetBufferPointer(), psA->GetBufferSize() };
+            D3D12_RENDER_TARGET_BLEND_DESC& rt = pd.BlendState.RenderTarget[0];
+            rt.BlendEnable = TRUE;
+            rt.SrcBlend = D3D12_BLEND_ONE;       rt.DestBlend = D3D12_BLEND_SRC_ALPHA;
+            rt.SrcBlendAlpha = D3D12_BLEND_ONE;  rt.DestBlendAlpha = D3D12_BLEND_SRC_ALPHA;
+            rt.BlendOp = rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            rt.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+            pd.SampleMask = UINT_MAX;
+            pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+            pd.DepthStencilState.DepthEnable = FALSE;
+            pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            pd.NumRenderTargets = 1; pd.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            pd.SampleDesc.Count = 1;
+            ok = SUCCEEDED(device->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&fogApplyPSO)));
+        }
+        if (ok)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC hd{};
+            hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            hd.NumDescriptors = k_frameCount * k_fogSlots;
+            hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            ok = SUCCEEDED(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&fogHeap)));
+            fogDescSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        }
+        for (UINT f = 0; ok && f < k_frameCount; ++f)
+        {
+            fogVolCB[f]   = createUploadBuffer(alignUp(static_cast<UINT>(sizeof(HE::FogVolumeConstants)), k_cbSlot),
+                                               reinterpret_cast<void**>(&fogVolCBPtr[f]));
+            fogLightCB[f] = createUploadBuffer(alignUp(static_cast<UINT>(sizeof(HE::MaterialShaderLibrary::Lighting)), k_cbSlot),
+                                               reinterpret_cast<void**>(&fogLightCBPtr[f]));
+            ok = fogVolCB[f] && fogLightCB[f] && fogVolCBPtr[f] && fogLightCBPtr[f];
+        }
+        if (!ok)
+        {
+            HE_LOG_ERROR(RHI, "%s", "D3D12Renderer: volumetric fog pipeline build failed — analytic fog stays active");
+            fogInjectRS.Reset(); fogIntegrateRS.Reset(); fogApplyRS.Reset();
+            fogInjectPSO.Reset(); fogIntegratePSO.Reset(); fogApplyPSO.Reset();
+            fogHeap.Reset();
+            for (UINT f = 0; f < k_frameCount; ++f) { fogVolCB[f].Reset(); fogLightCB[f].Reset(); }
+            return false;
+        }
+        fogPipelinesOk = true;
+        HE_LOG_INFO(RHI, "%s", "D3D12Renderer: volumetric fog pipelines built (Inject/Integrate/Apply, HLSL SM 5.0)");
+        return true;
+#endif
+    }
+
+    void destroyFogVolumeTargets()
+    {
+        fogInjectTex[0].Reset(); fogInjectTex[1].Reset(); fogIntegratedTex.Reset();
+        fogInjectState[0] = fogInjectState[1] = fogIntegratedState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        fogGridAlloc = glm::ivec3(0);
+        fogHistValid = false;
+    }
+
+    bool ensureFogVolumeTargets(const glm::ivec3& grid)
+    {
+        if (fogIntegratedTex && grid == fogGridAlloc) return true;
+        if (fogIntegratedTex) waitForAllFrames(); // a grid-tier change: the old volumes may still be in flight
+        destroyFogVolumeTargets();
+        auto make3D = [&](ComPtr<ID3D12Resource>& tex) -> bool
+        {
+            D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+            rd.Width            = static_cast<UINT64>(grid.x);
+            rd.Height           = static_cast<UINT>(grid.y);
+            rd.DepthOrArraySize = static_cast<UINT16>(grid.z);
+            rd.MipLevels        = 1;
+            rd.Format           = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            return SUCCEEDED(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&tex)));
+        };
+        if (!(make3D(fogInjectTex[0]) && make3D(fogInjectTex[1]) && make3D(fogIntegratedTex)))
+        {
+            destroyFogVolumeTargets();
+            return false;
+        }
+        fogGridAlloc = grid;
+        fogHistValid = false; // fresh textures: no usable history
+        return true;
+    }
+
+    // Inject + Integrate, recorded after the shadow passes and the sky cube bake, before
+    // the geometry pass (so fillPerFrame / fillMatLight see m_fogFrameActive). Mirrors
+    // D3D11RendererImpl::RenderFogVolume; builds its OWN HeLighting fill (fogLightCB[f])
+    // because the scene's fill zeroes the CSM on GI frames and fog wants real sun shadows.
+    void RenderFogVolume(ID3D12GraphicsCommandList* cl, const IRenderer::EnvironmentSettings& env,
+                         bool shadows, int nCascades, const glm::mat4* cascadeClip,
+                         const glm::vec4& cascadeSplits, bool localShadows, int nLocalLayers,
+                         const glm::mat4* localClip, const glm::vec3& camFwd)
+    {
+        m_fogFrameActive = false;
+#if defined(HE_HAVE_SHADERC)
+        if (!cl || !fogPipelinesOk || !m_renderWorld.fogVolume.enabled) return;
+        if (!(usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)) return; // Apply is HDR-viewport only
+        const HE::FogVolumeData fd = m_renderWorld.fogVolume;
+        if (!ensureFogVolumeTargets(fd.grid)) return;
+
+        static const char* s_pinned = std::getenv("HE_SKY_TIME");
+        const bool   pinned = s_pinned && *s_pinned;
+        const double now    = pinned ? (fogFrameIndex / 60.0) : static_cast<double>(SDL_GetTicks()) / 1000.0;
+        float dt = (fogLastTime > 0.0 || pinned) ? static_cast<float>(now - fogLastTime) : 0.0f;
+        if (pinned && fogFrameIndex == 0) dt = 0.0f;
+        fogLastTime = now;
+        const CameraData& cam = m_renderWorld.camera;
+        const glm::mat4 viewProj    = cam.projection * cam.view;
+        const glm::mat4 invViewProj = glm::inverse(viewProj);
+        const float focal = cam.projection[1][1];
+        const bool historyOk = fogHistValid && dt > 0.0f && dt < 0.5f
+                            && glm::distance(cam.position, fogPrevCam) < 10.0f
+                            && std::abs(focal - fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+        const float rad = glm::radians(env.windDirection);
+        fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+        fogNoiseTime   += dt;
+
+        HE::FogVolumeTemporalState ts;
+        ts.jitter01     = HE::fogJitter(fogFrameIndex);
+        ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+        ts.historyValid = historyOk;
+        ts.frameIndex   = fogFrameIndex;
+        ts.noiseOffset  = fogNoiseOffset;
+        ts.noiseTime    = fogNoiseTime;
+        const HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+            fd, invViewProj, fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+        std::memcpy(fogVolCBPtr[frameIndex], &fc, sizeof(fc));
+
+        {
+            HE::MaterialShaderLibrary::Lighting lit{};
+            glm::vec3 sunDir, sunColor;
+            m_renderWorld.dominantDirectionalLight(sunDir, sunColor);
+            lit.sunDir[0] = sunDir.x; lit.sunDir[1] = sunDir.y; lit.sunDir[2] = sunDir.z;
+            lit.sunColor[0] = sunColor.r; lit.sunColor[1] = sunColor.g; lit.sunColor[2] = sunColor.b;
+            HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
+            if (localShadows)
+            {
+                glm::mat4 lsFlipY(1.0f); lsFlipY[1][1] = -1.0f;
+                for (int v = 0; v < nLocalLayers; ++v)
+                {
+                    const glm::mat4 m = lsFlipY * localClip[v];
+                    std::memcpy(lit.localShadowVP[v], &m[0][0], 16 * sizeof(float));
+                }
+            }
+            if (shadows)
+            {
+                glm::mat4 uvFlipY(1.0f); uvFlipY[1][1] = -1.0f;
+                for (int c = 0; c < nCascades; ++c)
+                {
+                    const glm::mat4 m = uvFlipY * cascadeClip[c];
+                    std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+                }
+                lit.csmSplits[0] = cascadeSplits.x; lit.csmSplits[1] = cascadeSplits.y;
+                lit.csmSplits[2] = cascadeSplits.z; lit.csmSplits[3] = cascadeSplits.w;
+                lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+                lit.shadowBias[0] = shadowSettings.slopeBias;
+                lit.shadowBias[1] = shadowSettings.minBias;
+            }
+            lit.fog[2] = m_skyEnvValid ? 1.0f : 0.0f;
+            lit.ambient[0] = m_renderWorld.ambient.r; lit.ambient[1] = m_renderWorld.ambient.g; lit.ambient[2] = m_renderWorld.ambient.b;
+            lit.camPos[0] = cam.position.x; lit.camPos[1] = cam.position.y; lit.camPos[2] = cam.position.z;
+            std::memcpy(fogLightCBPtr[frameIndex], &lit, sizeof(lit));
+        }
+
+        // This frame slot's descriptors (CPU-written: the slot's previous use has retired).
+        const UINT base = frameIndex * k_fogSlots;
+        auto cpuAt = [&](UINT s) {
+            D3D12_CPU_DESCRIPTOR_HANDLE h = fogHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(base + s) * fogDescSize; return h; };
+        auto gpuAt = [&](UINT s) {
+            D3D12_GPU_DESCRIPTOR_HANDLE h = fogHeap->GetGPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<UINT64>(base + s) * fogDescSize; return h; };
+        auto srv3D = [&](ID3D12Resource* r, DXGI_FORMAT fmt, D3D12_CPU_DESCRIPTOR_HANDLE h) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = fmt; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture3D.MipLevels = 1;
+            device->CreateShaderResourceView(r, &sv, h); };
+        auto uav3D = [&](ID3D12Resource* r, D3D12_CPU_DESCRIPTOR_HANDLE h) {
+            D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
+            uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+            uv.Texture3D.WSize = static_cast<UINT>(fd.grid.z);
+            device->CreateUnorderedAccessView(r, nullptr, &uv, h); };
+        auto skyCube = [&](D3D12_CPU_DESCRIPTOR_HANDLE h) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.TextureCube.MipLevels = 1;
+            device->CreateShaderResourceView(m_skyEnvValid ? m_skyEnvCube.Get() : nullptr, &sv, h); };
+
+        const int cur = 1 - fogHist;
+        const D3D12_RESOURCE_STATES kNPSR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        const D3D12_RESOURCE_STATES kBoth = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | kNPSR;
+
+        // Inject's sources are pixel-shader-readable everywhere else: allow the compute read, restore after.
+        ID3D12Resource* srcRes[5]; int nSrc = 0;
+        if (shadows && shadowDepth)           srcRes[nSrc++] = shadowDepth.Get();
+        if (localShadows && localShadowDepth) srcRes[nSrc++] = localShadowDepth.Get();
+        if (m_skyEnvValid && m_skyEnvCube)    srcRes[nSrc++] = m_skyEnvCube.Get();
+        if (skyNoiseTex12)                    srcRes[nSrc++] = skyNoiseTex12.Get();
+        if (ssaoWhiteTex)                     srcRes[nSrc++] = ssaoWhiteTex.Get();
+        for (int i = 0; i < nSrc; ++i)
+            barrier12(cl, srcRes[i], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, kBoth);
+
+        writeShadowArraySrv(shadows ? shadowDepth.Get() : nullptr, cpuAt(k_fogInjectSrv0 + 0));
+        writeShadowArraySrv(localShadows ? localShadowDepth.Get() : nullptr, cpuAt(k_fogInjectSrv0 + 1), kLocalShadowLayers);
+        skyCube(cpuAt(k_fogInjectSrv0 + 2));
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R8_UNORM; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(ssaoWhiteTex.Get(), &sv, cpuAt(k_fogInjectSrv0 + 3)); // cloud shadow: white = none
+        }
+        srv3D(skyNoiseTex12.Get(), DXGI_FORMAT_R16G16_UNORM, cpuAt(k_fogInjectSrv0 + 4));
+        srv3D(fogInjectTex[fogHist].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, cpuAt(k_fogInjectSrv0 + 5)); // history
+        uav3D(fogInjectTex[cur].Get(), cpuAt(k_fogInjectUav));
+        srv3D(fogInjectTex[cur].Get(), DXGI_FORMAT_R16G16B16A16_FLOAT, cpuAt(k_fogIntSrv));
+        uav3D(fogIntegratedTex.Get(), cpuAt(k_fogIntUav));
+
+        auto toState = [&](ID3D12Resource* r, D3D12_RESOURCE_STATES& st, D3D12_RESOURCE_STATES to) {
+            if (st != to) { barrier12(cl, r, st, to); st = to; } };
+
+        ID3D12DescriptorHeap* heaps[] = { fogHeap.Get() };
+        cl->SetDescriptorHeaps(1, heaps);
+
+        toState(fogInjectTex[cur].Get(),  fogInjectState[cur],  D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        toState(fogInjectTex[fogHist].Get(), fogInjectState[fogHist], kNPSR);
+        cl->SetComputeRootSignature(fogInjectRS.Get());
+        cl->SetPipelineState(fogInjectPSO.Get());
+        cl->SetComputeRootConstantBufferView(0, fogLightCB[frameIndex]->GetGPUVirtualAddress());
+        cl->SetComputeRootConstantBufferView(1, fogVolCB[frameIndex]->GetGPUVirtualAddress());
+        cl->SetComputeRootDescriptorTable(2, gpuAt(k_fogInjectSrv0));
+        cl->SetComputeRootDescriptorTable(3, gpuAt(k_fogInjectUav));
+        cl->Dispatch((static_cast<UINT>(fd.grid.x) + 7u) / 8u, (static_cast<UINT>(fd.grid.y) + 7u) / 8u,
+                     (static_cast<UINT>(fd.grid.z) + 3u) / 4u);
+
+        // Inject's UAV write -> Integrate's texelFetch read (the transition is the sync point).
+        toState(fogInjectTex[cur].Get(), fogInjectState[cur], kNPSR);
+        toState(fogIntegratedTex.Get(), fogIntegratedState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cl->SetComputeRootSignature(fogIntegrateRS.Get());
+        cl->SetPipelineState(fogIntegratePSO.Get());
+        cl->SetComputeRootConstantBufferView(0, fogVolCB[frameIndex]->GetGPUVirtualAddress());
+        cl->SetComputeRootDescriptorTable(1, gpuAt(k_fogIntSrv));
+        cl->SetComputeRootDescriptorTable(2, gpuAt(k_fogIntUav));
+        cl->Dispatch((static_cast<UINT>(fd.grid.x) + 7u) / 8u, (static_cast<UINT>(fd.grid.y) + 7u) / 8u, 1u);
+        // Integrated volume: written by compute, read by Apply (and later the materials) in pixel shaders.
+        toState(fogIntegratedTex.Get(), fogIntegratedState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        for (int i = 0; i < nSrc; ++i)
+            barrier12(cl, srcRes[i], kBoth, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+        fogHist         = cur;
+        fogHistValid    = true;
+        fogPrevViewProj = viewProj;
+        fogPrevCam      = cam.position;
+        fogPrevFocal    = focal;
+        ++fogFrameIndex;
+        m_fogFrame        = fd;
+        glm::mat4 flipY(1.0f); flipY[1][1] = -1.0f;
+        m_fogViewProj      = flipY * viewProj;
+        m_fogFrameActive   = true;
+        static bool s_fogLogged = false; // the runtime witness (HE_DUMP_FOGTEST: required at fogMode 1, forbidden at 0)
+        if (!s_fogLogged)
+        {
+            s_fogLogged = true;
+            HE_LOG_INFO(RHI, "D3D12Renderer: volumetric fog frame (grid %dx%dx%d, range %.0f m, %s)",
+                        fd.grid.x, fd.grid.y, fd.grid.z, fd.distance, fd.parity ? "parity" : "full");
+        }
+#else
+        (void)cl; (void)env; (void)shadows; (void)nCascades; (void)cascadeClip; (void)cascadeSplits;
+        (void)localShadows; (void)nLocalLayers; (void)localClip; (void)camFwd;
+#endif
+    }
+
+    // Apply: full-screen pass onto the HDR scene colour between Decals and the transparent
+    // draws. Same depth dance as EncodeDecals / the underwater pass: the DSV leaves the OM
+    // before the depth is readable as an SRV. The CALLER rebuilds the scene root state.
+    void RenderFogApply(ID3D12GraphicsCommandList* cl, int width, int height)
+    {
+#if defined(HE_HAVE_SHADERC)
+        if (!cl || !m_fogFrameActive || !fogApplyPSO || !fogIntegratedTex) return;
+        if (!(usingHDR && hdrRtvHeap && viewportDsvHeap && viewportDepth)) return;
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = hdrRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = viewportDsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+        const UINT base = frameIndex * k_fogSlots;
+        auto cpuAt = [&](UINT s) {
+            D3D12_CPU_DESCRIPTOR_HANDLE h = fogHeap->GetCPUDescriptorHandleForHeapStart();
+            h.ptr += static_cast<SIZE_T>(base + s) * fogDescSize; return h; };
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture3D.MipLevels = 1;
+            device->CreateShaderResourceView(fogIntegratedTex.Get(), &sv, cpuAt(k_fogApplySrv0 + 0));
+        }
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.TextureCube.MipLevels = 1;
+            device->CreateShaderResourceView(m_skyEnvValid ? m_skyEnvCube.Get() : nullptr, &sv, cpuAt(k_fogApplySrv0 + 1));
+        }
+        {
+            D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+            sv.Format = DXGI_FORMAT_R32_FLOAT; sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            sv.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(viewportDepth.Get(), &sv, cpuAt(k_fogApplySrv0 + 2));
+        }
+
+        cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);                  // release the depth FIRST
+        barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);            // then make it readable
+        ID3D12DescriptorHeap* heaps[] = { fogHeap.Get() };
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->SetGraphicsRootSignature(fogApplyRS.Get());
+        cl->SetPipelineState(fogApplyPSO.Get());
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        const D3D12_VIEWPORT vp{ 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
+        const D3D12_RECT     sc{ 0, 0, width, height };
+        cl->RSSetViewports(1, &vp);
+        cl->RSSetScissorRects(1, &sc);
+        cl->SetGraphicsRootConstantBufferView(0, fogVolCB[frameIndex]->GetGPUVirtualAddress());
+        D3D12_GPU_DESCRIPTOR_HANDLE tbl = fogHeap->GetGPUDescriptorHandleForHeapStart();
+        tbl.ptr += static_cast<UINT64>(base + k_fogApplySrv0) * fogDescSize;
+        cl->SetGraphicsRootDescriptorTable(1, tbl);
+        cl->DrawInstanced(3, 1, 0, 0);
+        barrier12(cl, viewportDepth.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                  D3D12_RESOURCE_STATE_DEPTH_WRITE);                      // depth writable again …
+        cl->OMSetRenderTargets(1, &rtv, FALSE, &dsv);                     // … only THEN back on the OM
+#else
+        (void)cl; (void)width; (void)height;
+#endif
+    }
+
     GpuMesh cube;
 
     // ── Sky pipeline ─────────────────────────────────────────────────────────
@@ -11244,6 +11756,11 @@ void D3D12Renderer::Initialize(HE::Window* window)
     // it feeds is read together with postFxReady (GetCapabilities).
     m_impl->createDeferredPipelines();
     laps.mark("createDeferredPipelines");
+    // Volumetric fog (Thema 225 step 9): built eagerly, like the GI pipelines —
+    // MakeFogVolumeData's `enabled` gate needs the extractor capability flag truthful
+    // BEFORE the first fog-enabled frame. Needs postFxReady's HDR path at draw time only.
+    m_impl->m_extractor.setVolumetricFogCapable(m_impl->EnsureFogVolumePipelines());
+    laps.mark("EnsureFogVolumePipelines");
     m_impl->createCube();
     laps.mark("createCube");
     // Deferred-path debug/headless knobs, GL's, Metal's and D3D11's:
@@ -11340,6 +11857,13 @@ void D3D12Renderer::Shutdown()
     m_impl->destroyGiAccel();
     m_impl->destroyGiTargets();
     m_impl->m_retiredTextures.clear(); // includes GI buffers just retired above
+    // Volumetric fog (Thema 225 step 9): the GPU is idle here (waitForAllFrames above).
+    m_impl->destroyFogVolumeTargets();
+    m_impl->fogInjectRS.Reset(); m_impl->fogIntegrateRS.Reset(); m_impl->fogApplyRS.Reset();
+    m_impl->fogInjectPSO.Reset(); m_impl->fogIntegratePSO.Reset(); m_impl->fogApplyPSO.Reset();
+    m_impl->fogHeap.Reset();
+    for (UINT i = 0; i < k_frameCount; ++i) { m_impl->fogVolCB[i].Reset(); m_impl->fogLightCB[i].Reset(); }
+    m_impl->fogPipelinesTried = false; m_impl->fogPipelinesOk = false;
     m_impl->giGBufRS.Reset(); m_impl->giComputeRS.Reset(); m_impl->giFsRS.Reset();
     m_impl->giGBufPSO.Reset(); m_impl->giGBufPSOInstanced.Reset(); m_impl->giShadowPSO.Reset(); m_impl->giProbePSO.Reset();
     m_impl->giTemporalPSO.Reset(); m_impl->giAtrousPSO.Reset();
@@ -11682,7 +12206,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         f.shadowBias    = glm::vec4(p.shadowSettings.slopeBias, p.shadowSettings.minBias, 0.0f, 0.0f);
         f.shadowEnabled = glm::ivec4(shadows ? 1 : 0, p.debugShadowCascades ? 1 : 0, 0, 0);
         f.sunDir = glm::vec4(p.m_renderWorld.sunDirection, 0.0f);
-        f.fog    = glm::vec4(m_environment.fogDensity, m_environment.fogHeightFalloff, 0, 0);
+        // Volumetric fog owns the opaque fog this frame (Thema 225 step 9): the full-screen
+        // Apply pass fogs the finished opaque scene + sky instead; the analytic term on top
+        // would fog twice.
+        f.fog    = glm::vec4(p.m_fogFrameActive ? 0.0f : m_environment.fogDensity,
+                             m_environment.fogHeightFalloff, 0, 0);
         f.viewport = glm::vec4(float(width), float(height), aoActive ? 1.0f : 0.0f, 0.0f);
         f.giParams     = glm::vec4(giActive ? 1.0f : 0.0f, p.giIndirectIntensity, 0.0f, 0.0f);
         f.ambient      = glm::vec4(p.m_renderWorld.ambient, 0.0f); // GI-branch floor only
@@ -11830,6 +12358,21 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         lit.fog[1] = m_environment.fogHeightFalloff;
         lit.fog[2] = skyEnvBound ? 1.0f : 0.0f;
         lit.fog[3] = aoActive    ? 1.0f : 0.0f;
+        // Volumetric fog (HeLighting v3.6, Thema 225 step 9): fogVol.x gates the opaque
+        // heApplyFog (Apply owns it instead). fogVol.w (heFogVolume bound) stays 0 and
+        // HE_FOG_VOLUME is NOT defined for D3D12 graph materials yet, so translucent graph
+        // materials keep the analytic fog (heApplyFogT's fallback) until step t34 lands.
+        if (p.m_fogFrameActive)
+        {
+            lit.fogVol[0] = 1.0f;
+            lit.fogVol[1] = p.m_fogFrame.distance;
+            lit.fogVol[2] = p.m_fogFrame.sliceC;
+            lit.fogVol[3] = 0.0f;
+            lit.fogVolGrid[0] = static_cast<float>(p.m_fogFrame.grid.x);
+            lit.fogVolGrid[1] = static_cast<float>(p.m_fogFrame.grid.y);
+            lit.fogVolGrid[2] = static_cast<float>(p.m_fogFrame.grid.z);
+            std::memcpy(lit.fogViewProj, &p.m_fogViewProj[0][0], 16 * sizeof(float));
+        }
         frameMatLight = lit;
         std::memcpy(p.m_matLightPtr[p.frameIndex], &lit, sizeof(lit));
     };
@@ -12198,6 +12741,12 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         // Same gate shape as GL's and D3D11's: a real trace result AND a
         // non-zero intensity. Off → t16 names the null descriptor and the
         // cascade folds away on uSSRParams.x.
+        // Volumetric fog Inject + Integrate (Thema 225 step 9): after the shadow passes and the
+        // sky cube bake (it reads both), before the fills below — they read m_fogFrameActive
+        // (fillPerFrame zeroes the analytic fog, fillMatLight raises fogVol.x). Compute only; the
+        // geometry-pass block right after rebinds the scene heap and tables.
+        p.RenderFogVolume(cl, m_environment, shadows, nCascades, cascadeClip, cascadeSplits,
+                          localShadows, nLocalLayers, localClip, camFwd);
         fillPerFrame(giShadingActive, aoWanted, ssrResult != nullptr);
         const bool matAOActive = aoWanted && p.ssaoBlurRT != nullptr; // heAO = the built-in's t2 image
         fillMatLight(giShadingActive, matAOActive);
@@ -13118,6 +13667,28 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             cl->SetPipelineState(scenePso);
         }
 
+        // ── Volumetric fog Apply (Thema 225 step 9) ──────────────────────────
+        // Full-screen blend of the integrated volume onto the finished opaque scene + decals +
+        // sky, at the Decals -> Transparent seam. No-op unless RenderFogVolume ran this frame.
+        if (p.m_fogFrameActive)
+        {
+            p.RenderFogApply(cl, width, height);
+            // The Apply pass switched root signature, heap and PSO: rebuild the scene state
+            // exactly as the decals block above does.
+            cl->SetGraphicsRootSignature(p.rootSig.Get());
+            p.bindClusterRoots(cl);
+            cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            cl->SetGraphicsRootConstantBufferView(1, p.perFrameCB[p.frameIndex]->GetGPUVirtualAddress());
+            if (p.sceneSrvHeap)
+            {
+                ID3D12DescriptorHeap* fheaps[] = { p.sceneSrvHeap.Get() };
+                cl->SetDescriptorHeaps(1, fheaps);
+                cl->SetGraphicsRootDescriptorTable(2, p.sceneSrvHeap->GetGPUDescriptorHandleForHeapStart());
+                cl->SetGraphicsRootDescriptorTable(5, p.sceneSrvGpu(ssrFwdSlot));
+            }
+            cl->SetPipelineState(scenePso);
+        }
+
         if (!transparentDCs.empty() && transePso) {
             allowInstancing = false; // transparent batches keep the per-instance loop (blend + depth sort)
             activeScenePso = transePso; // A4: graph-material draws in the transparent pass restore THIS
@@ -13590,6 +14161,9 @@ IRenderer::Capabilities D3D12Renderer::GetCapabilities() const
     // and the world previews stay forward.
     c.supportsDeferredRendering = m_impl->postFxReady && m_impl->deferredReady;
     c.supportsRawCapture        = m_impl->postFxReady;   // RenderSceneImage's rawOutput rides the tonemap pass
+    // Froxel volumetric fog (Thema 225 step 9): Inject/Integrate/Apply built at Initialize. It
+    // draws on the HDR viewport frame only; every other frame keeps the analytic height fog.
+    c.supportsVolumetricFog     = m_impl->fogPipelinesOk;
     return c;
 }
 
