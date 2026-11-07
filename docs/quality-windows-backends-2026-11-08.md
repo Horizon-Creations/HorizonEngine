@@ -17,6 +17,7 @@ editor dumps, no debug layers unless said (section 8). Harness: `scripts/he_qual
 | Texture quality, before this work | **ignored** (0.00) | **ignored** (0.00) | **ignored** (0.04) | acts (10.66) |
 | Texture quality, now (section 2) | acts (10.67) | acts (10.67) | acts (10.57) | acts (10.66) |
 | Quality change DURING a run reaches the live renderer (section 6) | same frame as a direct run | same | same | same |
+| Automatic quality (governor) in a real exported game (section 11) | 2 drops, renderer follows | 2 drops, renderer follows | 2 drops, renderer follows | 2 drops, renderer follows |
 
 Numbers in the texture row are the mean absolute pixel difference (0-255) of High (2) against Low (0), camera 0.5 m above the
 ground; the noise floor of a repeated run is 0.00-0.09.
@@ -127,19 +128,47 @@ Reading it:
 
 ## 9. Not done
 
-* **The governor in a real exported game on Windows** (step 10's real-display part). This machine has no export path ready: the
-  editor's export builds the game from the SDK and needs an export profile and a project from the editor (the live export scripts
-  expect `~/Documents/HorizonEngine/HorizonTutorial`, absent here), and a game folder assembled by hand starts without a scene (it loads
-  the startup scene from the pak config). What IS covered: the governor's logic (17 unit tests), its renderer-side effects through
-  section 6 (the same `SetQualitySettings` / `SetShadowSettings` calls it makes), and the tick wiring is the Metal-verified one in
-  `GameApplication.cpp`. A windowed, vsynced run is also not done.
 * **Hardware detection / benchmark** (the human's note on topic 324, 28 Oct): not built; the hook is `setPreset` plus
   `detectQualityPreset`, and the timings above are the kind of input a benchmark would use.
 * **D3D11 GPU timer plateaus** (section 7) and a locked-clock run.
+* **Vulkan frame capture inside the game** returns a black frame (HE_CAPTURE_FRAME on the exported game), so the governor's before/after
+  frames exist for D3D11, D3D12 and OpenGL only; the Vulkan evidence is the log (section 11). Not looked into.
 * OpenGL texture quality clamps by texture parameter, so a texture shared between a world use and a UI use would be clamped for both;
   UI images are separate uploads (`m_uiTexCache`), so this does not happen today.
+
+## 11. The governor in a real exported game (all four backends)
+
+Found the export path: `scripts/he_quality_export_live.py` starts the editor hidden over its Remote Control bridge and calls
+`project_package` (Development profile), exactly what Build > Export Project does; the game is compiled from the editor's SDK dev lib
+set with the machine's MSVC (about 30 s, 82 assets packed). Project: the foliage test project `C:\hb\proj` (a 2000 m landscape
+with 2 million scattered plants, so frames take about 4 ms), `autoQuality` on at target 1000 fps (the maximum; the governor can only
+see a miss on a fast machine when the target is above what the scene reaches), levels 0-2. The exported `HEProject.exe` runs from
+the export folder with a private `HE_CONFIG_DIR` choosing the backend (`GameBackend`) and the window.
+
+Result, all four backends, hidden window and again in a **visible 1280x720 window with VSync on**: the governor drops 2 -> 1 about
+2 s after the scene is up (smoothed frame time 3.5-3.9 ms against the 1 ms target), and 1 -> 0 five seconds later (3 s cooldown
+plus 2 s), then holds the floor. In the same frame the renderer logs what it did:
+
+| | first drop | second drop | renderer lines |
+|---|---|---|---|
+| D3D11 | frame 188 | frame 758 | "texture quality ... mip level 1", then "... level 2" and "shadow cascades rebuilt at 1024x1024 (2 cascades, distance 100)" |
+| D3D12 | frame 164 | frame 733 | same three lines |
+| OpenGL | frame 138 | frame 525 | same three lines |
+| Vulkan | frame 487 | frame 2023 | same three lines |
+
+(Frame numbers differ between backends because the frame rate does; the 2 s / 5 s cadence is the same. Visible window, vsync on: first
+drops at frames 103 / 104 / 145 / 108, second at 402 / 403 / 489 / 408, same lines, 0 errors.) The 4 warnings per run are the project's
+(foliage scatter "very expensive", tickWorld over budget). Exit 0 everywhere.
+
+Frame at 2400, governor off (a second export with `--no-auto-quality`, level 2 throughout) against governor on (level 0 after the two
+drops): mean abs difference 0.41 (D3D11), 1.20 (D3D12), 0.13 (OpenGL); images `governor-game-<backend>.png` (off | on). The difference
+is small because this scene is a flat plain seen from a distance: the mip floor and the shadow map size barely show there.
+Total run time of 2500 frames, off / on: D3D11 25.4 / 24.8 s, D3D12 26.3 / 24.3 s, OpenGL 34.5 / 32.0 s, Vulkan 11.0 / 10.6 s
+(includes start-up and the foliage scatter; Low is 2-7 % faster here, the scene's cost is the plants, not the quality levels).
+The smoothed frame time at the second drop (4.0 ms) is the same as at the first (3.9 ms): the quality levels do not buy frame time in
+this scene, which is what the numbers in section 7 also say.
 
 ## 10. Files
 
 `D3D11Renderer.{h,cpp}`, `D3D12Renderer.{h,cpp}`, `OpenGLRenderer.{h,cpp}` (texture quality, shadow log line), `EditorApplication.cpp`
-(`HE_DUMP_QUALITYSWITCH`), `scripts/he_quality_windows_matrix.ps1`, this doc and its images.
+(`HE_DUMP_QUALITYSWITCH`), `scripts/he_quality_windows_matrix.ps1`, `scripts/he_quality_export_live.py` (export a project with the governor on or off), this doc and its images.
