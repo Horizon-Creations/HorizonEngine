@@ -6244,6 +6244,41 @@ void OpenGLRenderer::CreateSSAOPipeline()
 	}
 }
 
+// The pushed mip floor for new uploads (see uploadGlTextureReleasing, further down).
+static float g_glTexMinLod = 0.0f;
+
+void OpenGLRenderer::SetQualitySettings(const QualitySettings& s)
+{
+	IRenderer::SetQualitySettings(s);
+	g_glTexMinLod = TextureMinLodForQuality(m_quality.textureQuality);
+	m_textureMinLodDirty = true;   // applied at the top of the next DrawScene, where the GL context is current
+}
+
+// Rewrites GL_TEXTURE_MIN_LOD on every world colour texture already uploaded (mesh, skinned,
+// material-override and graph/landscape textures); later uploads take g_glTexMinLod at upload.
+// A texture with a single mip level is unaffected.
+void OpenGLRenderer::ApplyTextureQuality()
+{
+	m_textureMinLodDirty = false;
+	if (g_glTexMinLod == m_textureMinLodApplied) return;
+	const float lod = g_glTexMinLod;
+	auto set = [lod](unsigned int tex, GLenum target)
+	{
+		if (!tex) return;
+		glBindTexture(target, tex);
+		glTexParameterf(target, GL_TEXTURE_MIN_LOD, lod);
+	};
+	for (auto& kv : m_meshCache)         set(kv.second.texture, GL_TEXTURE_2D);
+	for (auto& kv : m_skeletalMeshCache) set(kv.second.texture, GL_TEXTURE_2D);
+	for (auto& kv : m_materialTexCache)  set(kv.second, GL_TEXTURE_2D);
+	for (auto& kv : m_graphTexCache)
+		set(kv.second, m_glArrayTex.count(kv.second) ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	m_textureMinLodApplied = lod;
+	HE_LOG_INFO(RHI, "OpenGLRenderer: texture quality - world and material textures start at mip level %.0f", lod);
+}
+
 void OpenGLRenderer::SetSSAOSettings(const SSAOSettings& s)
 {
 	m_ssaoEnabled   = s.enabled;
@@ -9166,12 +9201,24 @@ unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 // game holds each texture once; see ContentManager::releaseCpuPixels). The glTexImage /
 // glCompressedTexImage calls copy the client memory before they return, so the bytes are dead
 // weight the moment an upload succeeded.
+// Texture quality (Thema 324/336): the finest mip level the world's colour textures may use
+// (IRenderer::TextureMinLodForQuality). GL has no per-use sampler state here (the filters are
+// texture parameters), so the clamp is GL_TEXTURE_MIN_LOD on each texture: set at upload below
+// for every world texture (honourSrgb is false only for UI images, which keep full detail) and
+// rewritten on the live ones by OpenGLRenderer::ApplyTextureQuality.
 unsigned int uploadGlTextureReleasing(ContentManager* cm, const TextureAsset* tex,
                                       bool honourSrgb = true, bool arrayPath = false)
 {
 	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
 	const unsigned int uploaded = arrayPath ? uploadTextureArrayGL(tex) : uploadTextureAssetGL(tex, honourSrgb);
 	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	if (uploaded && honourSrgb && g_glTexMinLod > 0.0f)
+	{
+		const GLenum target = arrayPath ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D;
+		glBindTexture(target, uploaded);
+		glTexParameterf(target, GL_TEXTURE_MIN_LOD, g_glTexMinLod);
+		glBindTexture(target, 0);
+	}
 	return uploaded;
 }
 
@@ -11471,6 +11518,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 	if (!m_world) return;
 	if (pw <= 0 || ph <= 0) return;
 	glViewport(0, 0, pw, ph);
+	if (m_textureMinLodDirty) ApplyTextureQuality();
 
 	// Drop GPU textures for materials edited/re-assigned since last frame so the
 	// loop below re-resolves them (deferred here where the GL context is current).
@@ -11539,6 +11587,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		             0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
 		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 		m_shadowSizeDirty = false;
+		HE_LOG_INFO(RHI, "OpenGLRenderer: shadow cascades rebuilt at %dx%d (%d cascades, distance %.0f)",
+		            m_shadowSize, m_shadowSize, m_shadowSettings.cascadeCount, m_shadowSettings.distance);
 	}
 	m_extractor.setShadowSettings(m_shadowSettings.distance, m_shadowSettings.cascadeCount,
 	                              m_shadowSettings.splitLambda, m_shadowSize);
