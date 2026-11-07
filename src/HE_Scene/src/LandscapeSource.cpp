@@ -10,6 +10,8 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <unistd.h>
+#else
+#include <windows.h>
 #endif
 
 namespace HE
@@ -357,6 +359,8 @@ LandscapePackSource::~LandscapePackSource()
 {
 #ifndef _WIN32
 	if (m_fd >= 0) ::close(m_fd);
+#else
+	if (m_handle) ::CloseHandle(reinterpret_cast<HANDLE>(m_handle));
 #endif
 }
 
@@ -373,9 +377,18 @@ bool LandscapePackSource::readAt(uint64_t offset, uint8_t* dst, size_t n) const
 	return true;
 #else
 	std::lock_guard<std::mutex> lock(m_mutex);
-	m_in.clear();
-	m_in.seekg(static_cast<std::streamoff>(offset));
-	return static_cast<bool>(m_in.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(n)));
+	const HANDLE h = reinterpret_cast<HANDLE>(m_handle);
+	LARGE_INTEGER pos;
+	pos.QuadPart = static_cast<LONGLONG>(offset);
+	if (!::SetFilePointerEx(h, pos, nullptr, FILE_BEGIN)) return false;
+	size_t done = 0;
+	while (done < n)
+	{
+		DWORD got = 0;
+		if (!::ReadFile(h, dst + done, static_cast<DWORD>(n - done), &got, nullptr) || got == 0) return false;
+		done += static_cast<size_t>(got);
+	}
+	return true;
 #endif
 }
 
@@ -396,8 +409,16 @@ std::shared_ptr<LandscapePackSource> LandscapePackSource::open(const std::string
 	src->m_fd = ::open(path.c_str(), O_RDONLY);
 	if (src->m_fd < 0) return fail("pack file cannot be opened");
 #else
-	src->m_in.open(path, std::ios::binary);
-	if (!src->m_in) return fail("pack file cannot be opened");
+	// FILE_SHARE_DELETE: a rebuild of this pack (LandscapePackBuild.cpp) removes/renames the target
+	// while a reader may still have it open, same as the POSIX fd above surviving an unlink.
+	src->m_handle = ::CreateFileW(std::filesystem::path(path).c_str(), GENERIC_READ,
+	                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+	                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (src->m_handle == INVALID_HANDLE_VALUE)
+	{
+		src->m_handle = nullptr;
+		return fail("pack file cannot be opened");
+	}
 #endif
 	uint8_t head[kLandscapePackHeaderBytes] = {};
 	if (!src->readAt(0, head, kLandscapePackHeaderBytesV1)) return fail("pack header cannot be read");

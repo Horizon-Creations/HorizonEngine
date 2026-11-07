@@ -256,8 +256,8 @@ private:
 	std::vector<uint32_t> m_size;
 	uint64_t              m_fileSize = 0;
 	int                   m_fd = -1;                 // POSIX pread: no lock between workers
-	mutable std::mutex    m_mutex;                   // other platforms: one stream, one reader at a time
-	mutable std::ifstream m_in;
+	mutable std::mutex    m_mutex;                   // Windows: one HANDLE, one reader at a time
+	void*                 m_handle = nullptr;         // Windows HANDLE opened with FILE_SHARE_DELETE (see .cpp)
 };
 
 } // namespace HE
