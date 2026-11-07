@@ -34,6 +34,7 @@
 //   [14]     heSSRFwd        t31   forward SSR result
 //   [15]     heGIReflFwd     t32   forward GI-reflection result
 //   [16]     heCloudShadow   t33   cloud-shadow transmittance
+//   [17]     heFogVolume     t34   integrated volumetric-fog volume (Texture3D; Thema 225 step 9)
 // [9] has no gate (a Landscape Layer Blend samples it unconditionally): every
 // draw block gets the chunk's weightmap — or the 1x1 layer-0 default for
 // anything that is not a landscape chunk — written over the template's null
@@ -62,7 +63,7 @@
 
 namespace HE::d3d12mat
 {
-constexpr UINT kSrvPerDraw          = 17;
+constexpr UINT kSrvPerDraw          = 18;
 constexpr UINT kSlotTex0            = 0;  // t2
 constexpr UINT kSlotTexP0           = 1;  // t4..t7 → slots 1..4
 constexpr UINT kSlotGIShadow        = 5;  // t10
@@ -77,6 +78,7 @@ constexpr UINT kSlotGIVisibility    = 13; // t18
 constexpr UINT kSlotSSRFwd          = 14; // t31
 constexpr UINT kSlotGIReflFwd       = 15; // t32
 constexpr UINT kSlotCloudShadow     = 16; // t33
+constexpr UINT kSlotFogVolume       = 17; // t34 heFogVolume (Texture3D, Thema 225 step 9; texelFetch, no sampler)
 
 // Root parameter indices (SetGraphicsRootConstantBufferView / DescriptorTable).
 constexpr UINT kRootLightCB   = 0; // b0 HeLighting (FS)
@@ -94,7 +96,7 @@ constexpr UINT kParamCount    = 9;
 // as the negative control for t24..t26 — a clustered PSO against it must be
 // rejected, a plain one must still build.
 constexpr UINT kPreClusterParamCount = 6;
-constexpr UINT kRangeCount    = 7;
+constexpr UINT kRangeCount    = 8;
 constexpr UINT kSamplerCount  = 16;
 // What the signature covered BEFORE Thema 56 (t2, t4..t7, t10..t11, t12, t13 /
 // s2, s4..s7, s10..s13): the first five ranges and nine samplers. he_tests
@@ -155,6 +157,7 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     srv(4, 13, 1, kSlotLocalShadow);      // t13      heLocalShadow (Texture2DArray)
     srv(5, 14, 5, kSlotLandscapeWeights); // t14..t18 landscape weights, sky cube, AO, DDGI atlases
     srv(6, 31, 3, kSlotSSRFwd);           // t31..t33 forward SSR / GI-refl, cloud shadow
+    srv(7, 34, 1, kSlotFogVolume);        // t34      heFogVolume (Texture3D; declared when HE_FOG_VOLUME is on)
 
     out.params[kRootSrvTable].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     out.params[kRootSrvTable].DescriptorTable.NumDescriptorRanges = rangeCount;

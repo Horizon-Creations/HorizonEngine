@@ -5506,7 +5506,15 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// Otherwise make sure there IS a Sky entity to configure — the world/scene may
 		// have started empty (only the Game/Simulation templates seed a sky).
 		else if (m_editorWorld->environmentEntity() == entt::null)
+		{
 			m_editorWorld->addSky();
+			// addSky() starts new skies on the volumetric fog (step 7); a witness dump keeps
+			// the analytic default so HE_DUMP_FOGDENSITY alone stays the pre-existing A/B
+			// baseline — HE_DUMP_FOGMODE=1 below opts into the volume.
+			if (auto* fresh = m_editorWorld->registry().try_get<EnvironmentComponent>(
+			        m_editorWorld->environmentEntity()))
+				fresh->fogMode = 0;
+		}
 		Entity dumpSky = m_editorWorld->environmentEntity();
 		if (auto* e = dumpSky == entt::null ? nullptr
 		            : m_editorWorld->registry().try_get<EnvironmentComponent>(dumpSky))
@@ -5560,6 +5568,21 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			e->godRays           = static_cast<float>(envF("HE_DUMP_GODRAYS", e->godRays));
 			e->shootingStars     = static_cast<float>(envF("HE_DUMP_METEORS", e->shootingStars));
 			e->lensFlare         = static_cast<float>(envF("HE_DUMP_LENSFLARE", e->lensFlare));
+			// Fog (docs/volumetric-fog-plan.md): the analytic knobs plus the volume's, so a
+			// mode-0 / mode-1 pair of dumps differs only by FOGMODE. The loaded scene
+			// carries serialized values, hence the explicit overrides.
+			e->fogDensity        = static_cast<float>(envF("HE_DUMP_FOGDENSITY", e->fogDensity));
+			e->fogHeightFalloff  = static_cast<float>(envF("HE_DUMP_FOGFALLOFF", e->fogHeightFalloff));
+			e->fogMode           = static_cast<int>(envF("HE_DUMP_FOGMODE", static_cast<float>(e->fogMode)));
+			e->fogQuality        = static_cast<int>(envF("HE_DUMP_FOGQUALITY", static_cast<float>(e->fogQuality)));
+			e->fogVolumeDistance = static_cast<float>(envF("HE_DUMP_FOGDIST", e->fogVolumeDistance));
+			e->fogAnisotropy     = static_cast<float>(envF("HE_DUMP_FOGANISO", e->fogAnisotropy));
+			e->fogNoiseAmount    = static_cast<float>(envF("HE_DUMP_FOGNOISE", e->fogNoiseAmount));
+			e->fogNoiseScale     = static_cast<float>(envF("HE_DUMP_FOGNOISESCALE", e->fogNoiseScale));
+			e->fogBankDensity    = static_cast<float>(envF("HE_DUMP_FOGBANK", e->fogBankDensity));
+			e->fogBankBaseY      = static_cast<float>(envF("HE_DUMP_FOGBANKY", e->fogBankBaseY));
+			e->fogBankThickness  = static_cast<float>(envF("HE_DUMP_FOGBANKH", e->fogBankThickness));
+			e->fogLocalLightScatter = static_cast<float>(envF("HE_DUMP_FOGLIGHTS", e->fogLocalLightScatter));
 		}
 		// Look slightly up toward the sky from a low vantage. HE_DUMP_YAW rotates the
 		// heading (0 = toward -Z, 180 = toward +Z) so e.g. the aurora band can be framed.
@@ -6391,6 +6414,65 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		}
 		HE_LOG_INFO(Editor, "%s",
 			"EditorApplication: HE_DUMP_SSRTEST witness scene added");
+	}
+
+	// ── Volumetric fog witness (HE_DUMP_FOGTEST, Thema 225): a grey ground slab with a
+	// row of tall pillars 12 m ahead of the default dump camera (a shadow caster for the
+	// shafts) and a few cubes nearer. =point additionally hangs a shadow-casting point
+	// light between the cubes. Pair with SKYTEST (sun position via TOD/YAW), the FOG*
+	// keys and HE_DUMP_WATERTEST=floor for the bank-over-water shot. Fixed world
+	// coordinates near the origin, like the other witnesses.
+	if (const char* ft = std::getenv("HE_DUMP_FOGTEST"); ft && *ft && m_editorWorld)
+	{
+		auto& reg = m_editorWorld->registry();
+		auto addBox = [&](const char* name, const glm::vec3& pos, const glm::vec3& scale,
+		                  float r, float g, float b)
+		{
+			MaterialAsset m;
+			m.type = HE::AssetType::Material;
+			m.name = name;
+			m.baseColor[0] = r; m.baseColor[1] = g; m.baseColor[2] = b;
+			m.roughness = 0.85f;
+			auto e = m_editorWorld->createEntity(name);
+			TransformComponent tc;
+			tc.position = pos;
+			tc.scale    = scale;
+			reg.emplace<TransformComponent>(e, tc);
+			reg.emplace<MeshComponent>(e, MeshComponent{ HE::kDefaultCubeMeshId });
+			reg.emplace<MaterialComponent>(e,
+				MaterialComponent{ contentManager().registerMaterial(std::move(m)) });
+		};
+		addBox("FogGround", glm::vec3(0.0f, -0.1f, -10.0f), glm::vec3(60.0f, 0.2f, 60.0f), 0.45f, 0.45f, 0.42f);
+		const bool slits = std::string(ft) == "slits";
+		if (slits)
+		{
+			// A 14 m wall 14 m ahead with three 1.2 m slits: the sun behind it throws parallel
+			// shafts through the fog toward the camera (the volumetric-shadow witness).
+			const float edges[4][2] = { { -24.0f, -9.6f }, { -8.4f, -0.6f }, { 0.6f, 8.4f }, { 9.6f, 24.0f } };
+			for (const auto& e : edges)
+				addBox("FogWall", glm::vec3(0.5f * (e[0] + e[1]), 7.0f, -14.0f),
+				       glm::vec3(e[1] - e[0], 14.0f, 0.6f), 0.55f, 0.52f, 0.48f);
+		}
+		for (int i = 0; i < (slits ? 0 : 5); ++i)
+			addBox("FogPillar", glm::vec3(-8.0f + 4.0f * static_cast<float>(i), 4.0f, -12.0f),
+			       glm::vec3(1.2f, 8.0f, 1.2f), 0.7f, 0.65f, 0.55f);
+		addBox("FogCubeA", glm::vec3(-2.0f, 0.6f, -6.0f), glm::vec3(1.2f), 0.8f, 0.3f, 0.25f);
+		addBox("FogCubeB", glm::vec3( 2.5f, 0.6f, -7.5f), glm::vec3(1.2f), 0.25f, 0.45f, 0.8f);
+		if (std::string(ft) == "point")
+		{
+			auto le = m_editorWorld->createEntity("FogLamp");
+			TransformComponent ltc;
+			ltc.position = glm::vec3(0.0f, 2.0f, -7.0f);
+			reg.emplace<TransformComponent>(le, ltc);
+			LightComponent lc;
+			lc.type        = HE::LightType::Point;
+			lc.color       = glm::vec3(1.0f, 0.75f, 0.45f);
+			lc.intensity   = 8.0f;
+			lc.range       = 14.0f;
+			lc.castsShadow = true;
+			reg.emplace<LightComponent>(le, lc);
+		}
+		HE_LOG_INFO(Editor, "%s", "EditorApplication: HE_DUMP_FOGTEST witness scene added");
 	}
 
 	// ── Engine water witness (HE_DUMP_WATERTEST, Thema 152): the SHIPPED

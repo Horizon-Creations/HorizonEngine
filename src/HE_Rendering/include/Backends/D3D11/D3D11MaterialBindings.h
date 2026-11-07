@@ -278,6 +278,27 @@ inline void RestoreAfterGIReflFwd(ID3D11DeviceContext* ctx)
     ctx->PSSetShaderResources(kGIReflFwdSrvSlot, 1, &nullSrv);
 }
 
+// ── heFogVolume (Thema 225 step 8: volumetric fog) ───────────────────────────
+// heFogVolume: t34, read with texelFetch only (heFogFetch does its own trilinear
+// blend in the shader), so — like heAO's t16 — no sampler register is spent. Must
+// match the pin in kHlslMaterialPins (MaterialShaderLibrary.cpp): { Fragment, 0, 34, 34 }.
+constexpr UINT kFogVolumeSrvSlot = 34;
+
+// Before a graph-material draw: this frame's integrated fog volume, or the
+// 1x1x1 black dummy when the pass did not run (fillMatLight keeps fogVol.x at 0
+// then, so heApplyFog/heApplyFogT never actually sample it).
+inline void BindFogVolume(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* fogVolume)
+{
+    ctx->PSSetShaderResources(kFogVolumeSrvSlot, 1, &fogVolume);
+}
+
+// After the draw: t34 off. Nothing else in the renderer binds it.
+inline void RestoreAfterFogVolume(ID3D11DeviceContext* ctx)
+{
+    ID3D11ShaderResourceView* nullSrv = nullptr;
+    ctx->PSSetShaderResources(kFogVolumeSrvSlot, 1, &nullSrv);
+}
+
 // The bake (HE::BuildSkyEnvFaceRow, packed to halves) into the cube: faces in
 // the bake's order +X,-X,+Y,-Y,+Z,-Z onto array slices 0..5, each face row 0
 // first (v = -1, SkyEnvFaceDirection's top). D3D's cube convention is GL's,

@@ -1259,6 +1259,57 @@ namespace
 	  "How much the fog pools near the ground instead of filling the air evenly. "
 	  "High values give valley mist.",
 	  "", "rendering#sky" },
+	{ "Environment/Mode##fogvol", "Volumetric Fog Mode",
+	  "Analytic keeps today's flat per-pixel blend toward the horizon. Volumetric "
+	  "raymarches a real 3D fog volume with sun/light shafts and in-fog shadow, past "
+	  "Volume Distance the analytic fog still takes over. A Sky you add today starts "
+	  "on Volumetric (it draws nothing until Density or Bank Density is above 0); a "
+	  "scene saved before this existed stays Analytic. Greyed out on a backend that "
+	  "has not implemented it yet (Direct3D 11/12 for now): a scene with Volumetric "
+	  "chosen still loads and plays there, with the Density fog standing in.",
+	  "", "rendering#sky" },
+	{ "Environment/Quality##fogvol", "Volumetric Fog Quality",
+	  "Size of the froxel grid the volume is computed on. Higher resolves finer "
+	  "light shafts and sharper bank edges, at a higher GPU cost.",
+	  "", "rendering#performance" },
+	{ "Environment/Volume Distance", "",
+	  "How far the volumetric fog reaches before the Density fog above continues "
+	  "seamlessly. Clamped to the directional shadow distance, so the volume is "
+	  "never asked to shade past where it has a shadow map to sample.",
+	  "", "rendering#sky" },
+	{ "Environment/Albedo##fogvol", "Volumetric Fog Albedo",
+	  "Scattering tint of the volume. White scatters the sky and sun colour "
+	  "unchanged; a tint colours the fog itself, the way dust or smoke would.",
+	  "", "rendering#sky" },
+	{ "Environment/Anisotropy", "",
+	  "Henyey-Greenstein scattering phase. Negative scatters light back toward the "
+	  "camera; positive forms a brighter shaft when looking toward the sun.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Amount", "",
+	  "How much 3D noise breaks up the volume's height formula. 0 keeps a smooth "
+	  "layer; higher gives drifting wisps and clearer patches. Foggy weather raises "
+	  "it; once you move it the weather leaves it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Scale", "",
+	  "World size of one noise period. Small values give fine wisps, large values "
+	  "broad patches of thicker and thinner fog.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Density", "",
+	  "A ground-hugging fog bank layered on top of the height fog, with its own "
+	  "edges — valley mist or haze sitting over a lake bed. A Weather preset drives "
+	  "it (Foggy a thick bank, Rain a faint one); once you move it the weather leaves "
+	  "it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Base", "",
+	  "World Y of the fog bank's lower edge.", "", "rendering#sky" },
+	{ "Environment/Bank Thickness", "",
+	  "How tall the fog bank stands. Its top edge is soft and eroded by noise, "
+	  "never a hard line.",
+	  "", "rendering#sky" },
+	{ "Environment/Local Light Scatter", "",
+	  "How much point and spot lights scatter inside the volume, on top of the "
+	  "sun or moon. 0 switches it off.",
+	  "", "rendering#sky" },
 	{ "Environment/Star Brightness", "",
 	  "How bright the star field is. Stars fade out by themselves as the sky "
 	  "lightens.",
@@ -1356,7 +1407,8 @@ namespace
 	  "", "rendering#weather" },
 	{ "Weather/Fog Density##wx", "",
 	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
-	  "preset until the next pick.",
+	  "preset until the next pick. With the Sky's Fog Mode on Volumetric the preset "
+	  "also sets the ground bank and its noise (Bank Density, Noise Amount).",
 	  "", "rendering#weather" },
 	{ "Weather/Wind Speed##wx", "",
 	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",

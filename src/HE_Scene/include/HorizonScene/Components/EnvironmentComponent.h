@@ -122,6 +122,23 @@ struct EnvironmentComponent
     float fogDensity      = 0.0f;
     float fogHeightFalloff = 0.1f;
 
+    // Volumetric fog (Thema 225): fogMode switches the whole feature, the rest only
+    // matters once it is on. 0 = analytic (today, pixel-identical), 1 = the froxel
+    // volume (docs/volumetric-fog-plan.md). A backend without supportsVolumetricFog,
+    // or a scene saved before this field existed, stays on 0 — see FogVolumeData's
+    // comment (HorizonRendering/RenderWorld.h) for how `enabled` is actually decided.
+    int       fogMode             = 0;      // 0 analytic, 1 volumetric
+    int       fogQuality          = 1;      // 0 Low, 1 Medium, 2 High — froxel grid size (plan §4.1)
+    float     fogVolumeDistance   = 96.0f;  // metres the volume reaches (planar depth); the analytic formula covers the rest
+    glm::vec3 fogAlbedo           = glm::vec3(1.0f); // scattering tint: sigma_s = albedo * sigma_t
+    float     fogAnisotropy       = 0.5f;   // Henyey-Greenstein g, -0.9..0.9 (forward scattering toward the sun)
+    float     fogNoiseAmount      = 0.5f;   // 0 = pure height formula .. 1 = full 3D-noise modulation
+    float     fogNoiseScale       = 40.0f;  // metres per noise period
+    float     fogBankDensity      = 0.0f;   // ground-hugging fog bank, extinction 1/m
+    float     fogBankBaseY        = 0.0f;   // world Y of the bank's lower edge
+    float     fogBankThickness    = 4.0f;   // bank thickness (top edge soft, noise-eroded)
+    float     fogLocalLightScatter = 1.0f;  // point/spot in-scattering strength (0 = off)
+
     // Precipitation + ground response (0..1). The single source of truth for both
     // the weather-particle systems and the terrain shading — set by a WeatherPreset
     // when one is applied, or dialled in by hand (the sliders are always live). The
