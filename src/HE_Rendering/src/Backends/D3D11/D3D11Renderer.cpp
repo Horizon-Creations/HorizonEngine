@@ -7011,7 +7011,7 @@ void D3D11Renderer::Initialize(HE::Window* window)
         ComPtr<IDXGIDevice> dxgiDev;
         ComPtr<IDXGIAdapter> adapter;
         if (SUCCEEDED(m_impl->device.As(&dxgiDev))) dxgiDev->GetAdapter(&adapter);
-        HE::d3d::logAdapter("D3D11Renderer", adapter.Get());
+        m_adapterInfo = HE::d3d::logAdapter("D3D11Renderer", adapter.Get(), "D3D11");
     }
     // Hull/domain shaders are a feature level 11_0 feature: the Displacement pin
     // (Thema 207) tessellates from there on; HE_TESSELLATION=0 is GL's A/B switch.

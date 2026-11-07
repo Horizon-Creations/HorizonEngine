@@ -80,6 +80,11 @@ HE_API HardwareInfo hardwareInfo();
 HE_API uint64_t freeMemoryMB();   // RAM currently available to a process; 0 = unknown
 HE_API bool     onBattery();      // true only when a battery exists AND the machine runs on it
 
+// A GPU vendor's name from its PCI vendor id (what DXGI and Vulkan report) or from the text an API
+// returns (GL_VENDOR / GL_RENDERER). "" when it is none of the known ones.
+HE_API std::string gpuVendorFromPciId(uint32_t vendorId);
+HE_API std::string gpuVendorFromText(const std::string& text);
+
 // Hand-over from the renderer / window system (see the header comment).
 HE_API void setGpuInfo(const GpuInfo& gpu);
 HE_API void setDisplayInfo(const DisplayInfo& display);

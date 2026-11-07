@@ -153,3 +153,18 @@ TEST_CASE("hardware info: the startup log's system block still carries CPU, OS a
     CHECK(block.find("CPU      : Test CPU 9000 (16 hardware threads)") != std::string::npos);
     CHECK(block.find("Memory   : 32768 MB physical") != std::string::npos);
 }
+
+TEST_CASE("hardware info: GPU vendor names from PCI ids and from API text")
+{
+    CHECK(HE::gpuVendorFromPciId(0x10de) == "NVIDIA");
+    CHECK(HE::gpuVendorFromPciId(0x1002) == "AMD");
+    CHECK(HE::gpuVendorFromPciId(0x8086) == "Intel");
+    CHECK(HE::gpuVendorFromPciId(0x106b) == "Apple");
+    CHECK(HE::gpuVendorFromPciId(0x1414) == "Microsoft");   // WARP
+    CHECK(HE::gpuVendorFromPciId(0xdead).empty());
+    CHECK(HE::gpuVendorFromText("NVIDIA Corporation NVIDIA GeForce RTX 4070") == "NVIDIA");
+    CHECK(HE::gpuVendorFromText("ATI Technologies Inc. AMD Radeon RX 7900") == "AMD");
+    CHECK(HE::gpuVendorFromText("Intel Intel(R) UHD Graphics 770") == "Intel");
+    CHECK(HE::gpuVendorFromText("Apple Apple M5") == "Apple");
+    CHECK(HE::gpuVendorFromText("something else").empty());
+}

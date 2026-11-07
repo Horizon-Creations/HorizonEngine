@@ -1,6 +1,7 @@
 #include "Diagnostics/HardwareInfo.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -394,6 +395,37 @@ bool onBattery()
     State& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     return s.prov().onBattery();
+}
+
+std::string gpuVendorFromPciId(uint32_t id)
+{
+    switch (id)
+    {
+        case 0x10de: return "NVIDIA";
+        case 0x1002: case 0x1022: return "AMD";
+        case 0x8086: case 0x8087: return "Intel";
+        case 0x106b: return "Apple";
+        case 0x13b5: return "ARM";
+        case 0x5143: return "Qualcomm";
+        case 0x1414: return "Microsoft";   // WARP, the D3D software adapter
+        case 0x1010: return "Imagination";
+        default:     return {};
+    }
+}
+
+std::string gpuVendorFromText(const std::string& text)
+{
+    std::string t = text;
+    for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    auto has = [&](const char* k) { return t.find(k) != std::string::npos; };
+    if (has("nvidia"))                            return "NVIDIA";
+    if (has("amd") || has("ati ") || has("radeon")) return "AMD";
+    if (has("intel"))                             return "Intel";
+    if (has("apple"))                             return "Apple";
+    if (has("qualcomm") || has("adreno"))         return "Qualcomm";
+    if (has("arm") || has("mali"))                return "ARM";
+    if (has("microsoft") || has("llvmpipe") || has("mesa")) return has("microsoft") ? "Microsoft" : std::string{};
+    return {};
 }
 
 void setGpuInfo(const GpuInfo& gpu)

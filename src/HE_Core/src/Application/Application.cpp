@@ -4,6 +4,7 @@
 #include "Diagnostics/Logger.h"
 #include "Diagnostics/Profiler.h"
 #include "Diagnostics/EngineProfiler.h"
+#include "Diagnostics/HardwareInfo.h"    // the GPU and the display go to HE::setGpuInfo / setDisplayInfo (Thema 337)
 #include "Platform/BuildProfile.h"   // HE_FEATURE_PROFILER_CAPTURE / _TEST_HOOKS
 #include <SDL3/SDL.h>
 #include <algorithm>
@@ -386,6 +387,34 @@ namespace HE
 				// the right present mode.
 				m_renderer->SetVSync(cfg.windowprops.vsync);
 				HE_LOG_INFO(Core, "%s", "Renderer initialized");
+				// Hardware info (Thema 337): the renderer knows which GPU it runs on, the window system
+				// which display the window is on. Scripts and the editor's Hardware page read both.
+				HE::setGpuInfo(m_renderer->GetAdapterInfo());
+				if (SDL_Window* hw = m_window->GetNativeWindow())
+				{
+					HE::DisplayInfo di;
+					if (const SDL_DisplayID id = SDL_GetDisplayForWindow(hw))
+					{
+						if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(id))
+						{
+							di.width = mode->w; di.height = mode->h; di.refreshHz = mode->refresh_rate;
+						}
+						di.scale = SDL_GetDisplayContentScale(id);
+						if (const char* n = SDL_GetDisplayName(id)) di.name = n;
+					}
+					HE::setDisplayInfo(di);
+				}
+				{   // One log line per group, so a bug report's log names the machine completely.
+					const std::string summary = HE::hardwareSummary();
+					size_t from = 0;
+					while (from < summary.size())
+					{
+						size_t to = summary.find('\n', from);
+						if (to == std::string::npos) to = summary.size();
+						HE_LOG_INFO(Core, "Hardware    : %s", summary.substr(from, to - from).c_str());
+						from = to + 1;
+					}
+				}
 				HE_LOG_INFO(Core, "[startup] app phase=renderer backend=%s ms=%.1f",
 				            rhiName(cfg.backend), startupMs(rendererT0));
 			}

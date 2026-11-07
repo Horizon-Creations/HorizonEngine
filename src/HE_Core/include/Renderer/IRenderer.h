@@ -1,4 +1,5 @@
 #pragma once
+#include <Diagnostics/HardwareInfo.h>   // HE::GpuInfo (GetAdapterInfo)
 #include "Types/Defines.h"
 #include "Types/Enums.h" // HE::RenderPath
 #include "Types/UUID.h"
@@ -303,6 +304,10 @@ public:
     // Called every frame for the primary window.
     virtual void Render()                        = 0;
     virtual Capabilities GetCapabilities() const = 0;
+    // The GPU this renderer runs on (name, vendor, driver, video memory, API), filled by Initialize().
+    // Empty before that. The application hands it to HE::setGpuInfo so scripts and the editor's
+    // Hardware page can show it (Thema 337).
+    HE::GpuInfo GetAdapterInfo() const { return m_adapterInfo; }
 
     // Why GI reflections cannot run although Capabilities::supportsGIReflections says the
     // backend has them: the pipelines are built on the first GI frame, so a driver that
@@ -1049,6 +1054,7 @@ protected:
     OverlayCallback      m_overlayCallback;
     HE::RenderPath       m_renderPath           = HE::RenderPath::Forward;
     QualitySettings      m_quality;
+    HE::GpuInfo          m_adapterInfo;   // set by each backend's Initialize
     HE::ViewMode         m_viewMode             = HE::ViewMode::Lit;
     HorizonWorld*        m_world                = nullptr;
     ContentManager*      m_contentManager       = nullptr;

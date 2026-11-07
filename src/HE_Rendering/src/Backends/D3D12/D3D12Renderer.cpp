@@ -11151,7 +11151,7 @@ void D3D12Renderer::Initialize(HE::Window* window)
         Microsoft::WRL::ComPtr<IDXGIAdapter>  adapter;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
             factory->EnumAdapterByLuid(m_impl->device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
-        HE::d3d::logAdapter("D3D12Renderer", adapter.Get());
+        m_adapterInfo = HE::d3d::logAdapter("D3D12Renderer", adapter.Get(), "D3D12");
     }
     {   // Hull/domain shaders come with feature level 11_0, the floor above.
         const char* tessEnv = std::getenv("HE_TESSELLATION");

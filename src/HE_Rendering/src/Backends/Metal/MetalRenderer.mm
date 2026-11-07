@@ -6934,6 +6934,15 @@ void MetalRenderer::Initialize(HE::Window* window)
 
 	HE_LOG_INFO(RHI, "%s",
 		(std::string("MetalRenderer: initialized on ") + [[device name] UTF8String]).c_str());
+
+	// The same facts for HE::GpuInfo (Thema 337). Apple GPUs share the system memory: the working-set
+	// limit macOS recommends for this device is the closest thing to a video memory size.
+	m_adapterInfo = HE::GpuInfo{};
+	m_adapterInfo.name   = [[device name] UTF8String];
+	m_adapterInfo.vendor = HE::gpuVendorFromText(m_adapterInfo.name);
+	if (m_adapterInfo.vendor.empty()) m_adapterInfo.vendor = "Apple";
+	m_adapterInfo.api    = "Metal";
+	m_adapterInfo.vramMB = static_cast<uint64_t>([device recommendedMaxWorkingSetSize]) / (1024ull * 1024ull);
 }
 
 void MetalRenderer::Shutdown()

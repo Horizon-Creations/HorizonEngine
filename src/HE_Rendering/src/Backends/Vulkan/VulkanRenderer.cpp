@@ -1574,6 +1574,40 @@ void VulkanRenderer::pickPhysicalDevice()
         VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion),
         props.driverVersion);
     HE_LOG_INFO(RHI, "%s", line);
+
+    // The same facts for HE::GpuInfo (Thema 337). The driver version is vendor-specific: NVIDIA packs
+    // major.minor.secondary.tertiary into 10/8/8/6 bits, Intel on Windows major(18).minor(14), the rest
+    // follow the Vulkan version packing.
+    m_adapterInfo = HE::GpuInfo{};
+    m_adapterInfo.name   = props.deviceName;
+    m_adapterInfo.vendor = HE::gpuVendorFromPciId(props.vendorID);
+    m_adapterInfo.api    = "Vulkan";
+    {
+        const uint32_t v = props.driverVersion;
+        char drv[48];
+        if (props.vendorID == 0x10de)
+        {
+            const uint32_t major = (v >> 22) & 0x3ff, minor = (v >> 14) & 0xff, sec = (v >> 6) & 0xff, ter = v & 0x3f;
+            if (sec || ter) std::snprintf(drv, sizeof drv, "%u.%u.%u.%u", major, minor, sec, ter);
+            else            std::snprintf(drv, sizeof drv, "%u.%02u", major, minor);
+        }
+#ifdef _WIN32
+        else if (props.vendorID == 0x8086)
+            std::snprintf(drv, sizeof drv, "%u.%u", v >> 14, v & 0x3fff);
+#endif
+        else
+            std::snprintf(drv, sizeof drv, "%u.%u.%u", VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v), VK_API_VERSION_PATCH(v));
+        m_adapterInfo.driver = drv;
+    }
+    {
+        VkPhysicalDeviceMemoryProperties mem{};
+        vkGetPhysicalDeviceMemoryProperties(m_physDevice, &mem);
+        VkDeviceSize best = 0;
+        for (uint32_t i = 0; i < mem.memoryHeapCount; ++i)
+            if ((mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mem.memoryHeaps[i].size > best)
+                best = mem.memoryHeaps[i].size;
+        m_adapterInfo.vramMB = best / (1024ull * 1024ull);
+    }
 }
 
 void VulkanRenderer::createDevice()

@@ -3495,6 +3495,35 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	{   // Name the GPU like the Vulkan backend does (vendor / renderer / driver version).
 		auto str = [](GLenum e) { const GLubyte* p = glGetString(e); return p ? reinterpret_cast<const char*>(p) : "?"; };
 		HE_LOG_INFO(RHI, "OpenGLRenderer: GPU %s %s (OpenGL %s)", str(GL_VENDOR), str(GL_RENDERER), str(GL_VERSION));
+		// The same facts for HE::GpuInfo (Thema 337). GL_RENDERER carries driver noise after the name
+		// ("NVIDIA GeForce RTX 4070/PCIe/SSE2"), the part before the first slash is the GPU.
+		std::string name = str(GL_RENDERER);
+		if (const size_t slash = name.find('/'); slash != std::string::npos) name.resize(slash);
+		m_adapterInfo.name   = name;
+		m_adapterInfo.vendor = HE::gpuVendorFromText(std::string(str(GL_VENDOR)) + " " + name);
+		{   // "4.6.0 NVIDIA 621.01": the driver's own version is what follows the vendor name.
+			std::string ver = str(GL_VERSION);
+			const std::string vendorName = m_adapterInfo.vendor;
+			if (!vendorName.empty())
+				if (const size_t at = ver.find(vendorName + " "); at != std::string::npos)
+					ver = ver.substr(at + vendorName.size() + 1);
+			m_adapterInfo.driver = ver;
+		}
+		m_adapterInfo.api    = "OpenGL";
+		m_adapterInfo.vramMB = 0;   // GL has no portable query; NVIDIA answers through GL_NVX_gpu_memory_info
+		GLint extCount = 0;
+		glGetIntegerv(GL_NUM_EXTENSIONS, &extCount);
+		for (GLint i = 0; i < extCount; ++i)
+		{
+			const GLubyte* e = glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i));
+			if (e && std::strcmp(reinterpret_cast<const char*>(e), "GL_NVX_gpu_memory_info") == 0)
+			{
+				GLint kb = 0;
+				glGetIntegerv(0x9047 /* GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX */, &kb);
+				if (kb > 0) m_adapterInfo.vramMB = static_cast<uint64_t>(kb) / 1024u;
+				break;
+			}
+		}
 	}
 	// Displacement tessellation (Thema 207): core since GL 4.0, so macOS (4.1)
 	// has it too. HE_TESSELLATION=0 turns it off for an A/B against the fallback,
