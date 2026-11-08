@@ -10836,8 +10836,10 @@ void EditorApplication::dumpFrameHeadless()
 							std::vector<uint8_t> got;
 							if (!r->ReadbackRvtSlot(layer, pr.slot, got) || got.size() != want[layer]->size()) continue;
 							unsigned d = 0;
+							const uint32_t keep = r->RvtLayerChannels(layer);   // a packed layer holds fewer channels: compare those
 							for (size_t i = 0; i < got.size(); ++i)
-								d = std::max(d, static_cast<unsigned>(std::abs(int(got[i]) - int((*want[layer])[i]))));
+								if ((keep >> (i % 4)) & 1u)
+									d = std::max(d, static_cast<unsigned>(std::abs(int(got[i]) - int((*want[layer])[i]))));
 							++checked; exact += d == 0 ? 1u : 0u; worst = std::max(worst, d);
 						}
 					}
@@ -10990,6 +10992,18 @@ void EditorApplication::dumpFrameHeadless()
 							{
 								std::vector<uint8_t> got;
 								if (!r->ReadbackRvtSlot(layer, pr.slot, got)) continue;
+								// HE_DUMP_RVTTEST_SLICES=<dir>: every position page as a PPM (a look at what a backend drew, when the numbers are wrong).
+								if (const char* sd = std::getenv("HE_DUMP_RVTTEST_SLICES"); sd && *sd)
+								{
+									char name[512];
+									std::snprintf(name, sizeof(name), "%s/pos_l%d_slot%u.ppm", sd, layer, pr.slot);
+									if (FILE* f = std::fopen(name, "wb"))
+									{
+										std::fprintf(f, "P6\n%u %u\n255\n", ppx, ppx);
+										for (size_t k = 0; k < size_t(ppx) * ppx; ++k) std::fwrite(&got[k * 4], 1, 3, f);
+										std::fclose(f);
+									}
+								}
 								for (uint32_t j = 0; j < ppx; ++j)
 									for (uint32_t i = 0; i < ppx; ++i)
 									{
@@ -11007,7 +11021,9 @@ void EditorApplication::dumpFrameHeadless()
 										const uint8_t* px4 = &got[(size_t(j) * ppx + i) * 4];
 										// 8 bit of the value; right at the wrap (0 / 1) the neighbouring texel decides, so compare circularly
 										const float gx = float(px4[0]) / 255.0f, gz = float(px4[2]) / 255.0f;
-										const unsigned d = static_cast<unsigned>(std::lround(std::max(circ(gx, ex), circ(gz, ez)) * 255.0f));
+										// A layer that keeps no blue (the packed surface: R and G) cannot show z; x still checks the columns.
+										const bool hasZ = (r->RvtLayerChannels(layer) & 4u) != 0;
+										const unsigned d = static_cast<unsigned>(std::lround((hasZ ? std::max(circ(gx, ex), circ(gz, ez)) : circ(gx, ex)) * 255.0f));
 										++n; worst = std::max(worst, d); bad += d > 3 ? 1u : 0u;
 									}
 							}
@@ -11135,6 +11151,12 @@ void EditorApplication::dumpFrameHeadless()
 						shot.size = glm::vec2(shotM);
 						shot.min  = cd.origin + glm::vec2((cd.sizeM - shotM) * 0.5f);
 
+						// The consumers' pipelines build in the background on Metal and a draw whose pipeline is not ready is skipped:
+						// warm them and wait, or the first scenario would photograph an empty frame.
+						r->WarmupMaterials({ consumer[0], consumer[1], consumer[2], rampId, fineId });
+						for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+							std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
 						// scenarios: 0 = every page resident, ramp; 1 = only the top page, ramp; 2 = every page, the fine pattern
 						for (int scenario = 0; scenario < 3; ++scenario)
 						{
@@ -11184,7 +11206,9 @@ void EditorApplication::dumpFrameHeadless()
 											else if (kind == 1) { ex[0] = u; ex[1] = v; ex[2] = 0.0f; }
 											else
 											{
-												const float nx = 2.0f * u - 1.0f, ny = 2.0f * v - 1.0f, nz = -1.0f;
+												const float nx = 2.0f * u - 1.0f, nz = -1.0f;
+												// A backend that packs the normal as x and z rebuilds y from the unit length (RvtLookup.h).
+												const float ny = r->RvtLayerChannels(1) != 0xFu ? std::sqrt(std::max(0.0f, 1.0f - nx * nx - nz * nz)) : 2.0f * v - 1.0f;
 												const float il = 1.0f / std::sqrt(nx * nx + ny * ny + nz * nz);
 												ex[0] = nx * il * 0.5f + 0.5f; ex[1] = ny * il * 0.5f + 0.5f; ex[2] = nz * il * 0.5f + 0.5f;
 											}
@@ -11315,11 +11339,31 @@ void EditorApplication::dumpFrameHeadless()
 			constexpr uint32_t W = 1280, H = 720;
 			std::vector<uint8_t> direct, rvt;
 			const auto capture = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(cam, W, H, img) && img.size() == size_t(W) * H * 4; };
-			bool ok = capture(direct);                      // first: builds the pipelines, uploads the textures
+			// A backend that builds material pipelines in the background (Metal) skips a draw whose pipeline is not ready: warm
+			// both materials and wait, or both pictures would be the empty frame and the comparison a perfect 0.
+			r->WarmupMaterials({ directMat, rvtLive.consumer });
+			for (int i = 0; i < 4000 && r->PumpShaderBuilds().pending != 0; ++i)
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			// A material's instanced twin and its textures arrive a few frames after the first draw (Metal): capture until two
+			// pictures in a row are identical (at most 60), and keep pumping the builds in between.
+			const auto settle = [&](std::vector<uint8_t>& img)
+			{
+				std::vector<uint8_t> prev;
+				for (int k = 0; k < 60; ++k)
+				{
+					if (!capture(img)) return false;
+					if (k > 0 && img == prev) return true;
+					prev = img;
+					r->PumpShaderBuilds();
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+				return true;
+			};
+			bool ok = settle(direct);                       // first: builds the pipelines, uploads the textures
 			setMaterial(rvtLive.consumer);
-			ok = ok && capture(rvt) && capture(rvt);
+			ok = ok && settle(rvt);
 			setMaterial(directMat);
-			ok = ok && capture(direct);
+			ok = ok && settle(direct);
 			if (!ok) HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTTEST lit: a capture failed");
 			else
 			{
@@ -11340,20 +11384,25 @@ void EditorApplication::dumpFrameHeadless()
 
 				// the cost: alternate, median
 				const int N = std::max(5, std::atoi(std::getenv("HE_DUMP_RVTTEST_LIT_REPS") ? std::getenv("HE_DUMP_RVTTEST_LIT_REPS") : "15"));
-				std::vector<double> td, tr;
+				std::vector<double> td, tr, gd, gr;   // wall ms per capture, and the GPU's own frame ms where the backend measures it
 				std::vector<uint8_t> sink;
 				for (int k = 0; k < N; ++k)
 				{
 					setMaterial(directMat);
 					const auto a = std::chrono::steady_clock::now(); capture(sink); const auto b = std::chrono::steady_clock::now();
+					gd.push_back(r->GetFrameGpuStats().gpuFrameMs);
 					setMaterial(rvtLive.consumer);
 					capture(sink); const auto c = std::chrono::steady_clock::now();
+					gr.push_back(r->GetFrameGpuStats().gpuFrameMs);
 					td.push_back(std::chrono::duration<double, std::milli>(b - a).count());
 					tr.push_back(std::chrono::duration<double, std::milli>(c - b).count());
 				}
 				std::sort(td.begin(), td.end()); std::sort(tr.begin(), tr.end());
+				std::sort(gd.begin(), gd.end()); std::sort(gr.begin(), gr.end());
 				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit cost (%d alternating full-frame captures, readback included in both): direct median %.2f ms (min %.2f), rvt median %.2f ms (min %.2f)",
 				            N, td[td.size() / 2], td.front(), tr[tr.size() / 2], tr.front());
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTTEST lit GPU frame ms (the backend's own timestamps, -1 = not measured): direct median %.2f (min %.2f), rvt median %.2f (min %.2f)",
+				            gd[gd.size() / 2], gd.front(), gr[gr.size() / 2], gr.front());
 			}
 			setMaterial(directMat);
 		}
@@ -11453,6 +11502,25 @@ void EditorApplication::dumpFrameHeadless()
 				return n;
 			};
 
+			// HE_DUMP_RVTDRIVER_FRAMES=<n>: n NORMAL frames (driver tick + Render, 50 ms apart), the live loop the other steps skip:
+			// what only real frames do (the idle release of big texture arrays on Metal, the ageing of retired textures) happens here.
+			// Run before the sculpt stroke (so the strokes after it repaint pages whose arrays had to be reloaded) and again at the end.
+			const auto normalFrames = [&](const char* when) {
+				const char* nf = std::getenv("HE_DUMP_RVTDRIVER_FRAMES");
+				if (!nf || !*nf) return;
+				const int n = std::clamp(std::atoi(nf), 1, 5000);
+				double worst = 0.0, sum = 0.0;
+				for (int i = 0; i < n; ++i)
+				{
+					const auto f0 = std::chrono::steady_clock::now();
+					sceneTick();
+					r->Render();
+					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
+					worst = std::max(worst, ms); sum += ms;
+					std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render)", when, n, sum / n, worst);
+			};
 			// A) the first fill
 			HE::landscape::RvtLandscape::FrameStats st;
 			int frames = 0; uint32_t filled = 0;
@@ -11489,6 +11557,7 @@ void EditorApplication::dumpFrameHeadless()
 				r->SetRenderPath(livePath);
 			}
 
+			normalFrames("after the idle step");
 			// C) a sculpt stroke: a bump of 8 m, 14 m wide, the way a brush edits (heights, then the dirty rect, then the tick)
 			{
 				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
@@ -11592,6 +11661,7 @@ void EditorApplication::dumpFrameHeadless()
 				}
 			}
 			drv.detach();
+			normalFrames("end");
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER done: %llu pages painted in total, detached", static_cast<unsigned long long>(drv.pagesPaintedTotal()));
 		}
 	}

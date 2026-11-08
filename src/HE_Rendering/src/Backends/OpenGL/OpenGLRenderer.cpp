@@ -11115,6 +11115,10 @@ bool OpenGLRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 	DestroyRvtPool();
 	if (!m_rvtSupported || !m_primarySdlWindow || !m_glContext || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
 	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
+	// The arrays start small and grow with the pages in use (rvtGrowPool, needs glCopyImageSubData = GL 4.3); HE_RVT_GROW=0 allocates
+	// the whole pool at once, as does a driver without 4.3.
+	static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+	const uint32_t first = (s_grow && GLAD_GL_VERSION_4_3) ? std::min(slots, 64u) : slots;
 	glGenTextures(3, m_rvtPool);
 	for (int layer = 0; layer < 3; ++layer)
 	{
@@ -11126,13 +11130,56 @@ bool OpenGLRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
-		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, int(pagePx), int(pagePx), int(slots), 0,
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, int(pagePx), int(pagePx), int(first), 0,
 		             GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 	}
 	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 	if (glGetError() != GL_NO_ERROR) { DestroyRvtPool(); return false; }
 	m_rvtSlots  = slots;
+	m_rvtAlloc  = first;
 	m_rvtPagePx = pagePx;
+	return true;
+}
+
+// A page for a slot beyond the slices the arrays hold grows them: new arrays, the old slices copied across on the GPU
+// (glCopyImageSubData copies the raw bytes, so the sRGB albedo is not decoded), the old ones deleted (GL keeps a texture alive
+// while a queued command uses it). The manager hands out slots from 0 upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that needs 70 pages holds ~100
+// instead of the configured 512.
+bool OpenGLRenderer::rvtGrowPool(uint32_t slot)
+{
+	if (slot < m_rvtAlloc) return true;
+	if (slot >= m_rvtSlots || !m_rvtPool[0] || !GLAD_GL_VERSION_4_3) return false;
+	const uint32_t grown = std::min(m_rvtSlots, std::max((slot + 32u) & ~31u, m_rvtAlloc + m_rvtAlloc / 2));
+	GLuint fresh[3] = {};
+	glGenTextures(3, fresh);
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		glBindTexture(GL_TEXTURE_2D_ARRAY, fresh[layer]);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, int(m_rvtPagePx), int(m_rvtPagePx), int(grown), 0,
+		             GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glCopyImageSubData(m_rvtPool[layer], GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, fresh[layer], GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0,
+		                   int(m_rvtPagePx), int(m_rvtPagePx), int(m_rvtAlloc));
+	}
+	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	if (glGetError() != GL_NO_ERROR)
+	{
+		glDeleteTextures(3, fresh);
+		return false;
+	}
+	for (int layer = 0; layer < 3; ++layer)
+	{
+		glDeleteTextures(1, &m_rvtPool[layer]);
+		m_rvtPool[layer] = fresh[layer];
+	}
+	HE_LOG_INFO(RHI, "OpenGLRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAlloc, grown, m_rvtSlots,
+	            double(grown) * m_rvtPagePx * m_rvtPagePx * 12.0 / (1024.0 * 1024.0));
+	m_rvtAlloc = grown;
 	return true;
 }
 
@@ -11145,7 +11192,7 @@ void OpenGLRenderer::DestroyRvtPool()
 	for (auto& kv : m_rvtTables) if (kv.second.tex) glDeleteTextures(1, &kv.second.tex);
 	m_rvtTables.clear();
 	for (unsigned int& t : m_rvtPool) { if (t) glDeleteTextures(1, &t); t = 0; }
-	m_rvtSlots = m_rvtPagePx = 0;
+	m_rvtSlots = m_rvtAlloc = m_rvtPagePx = 0;
 }
 
 void OpenGLRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
@@ -11234,7 +11281,7 @@ bool OpenGLRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std:
 
 bool OpenGLRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
 {
-	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtSlots || !m_primarySdlWindow || !m_glContext) return false;
+	if (layer < 0 || layer >= 3 || !m_rvtPool[layer] || slot >= m_rvtAlloc || !m_primarySdlWindow || !m_glContext) return false;
 	SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
 	GLuint fbo = 0;
 	glGenFramebuffers(1, &fbo);
@@ -11366,7 +11413,7 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 		// A virtual texture page (Thema 333): the picture goes into its pool slice, flipped to top-row-first, nothing read back.
 		rgba.clear();
 		ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer]
-		  && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx
+		  && width == m_rvtPagePx && height == m_rvtPagePx && rvtGrowPool(uint32_t(camera.rvtSlot))
 		  && m_viewportFBO && m_viewportW == int(width) && m_viewportH == int(height);
 		if (ok)
 		{

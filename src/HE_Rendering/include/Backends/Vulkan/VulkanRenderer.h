@@ -509,7 +509,9 @@ private:
 	bool        m_matRvt = false;
 	struct RvtImage { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
 	RvtImage    m_rvtPool[3];                 // RGBA8 arrays, one slice per pool slot; SHADER_READ_ONLY between copies
-	uint32_t    m_rvtSlots = 0, m_rvtPagePx = 0;
+	uint32_t    m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
+	uint32_t    m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
+	bool        rvtGrowPool(uint32_t slot);
 	VkSampler   m_rvtSampler = VK_NULL_HANDLE; // nearest/clamp: the lookup is texelFetch, the descriptor is combined
 	struct RvtTable { RvtImage img; uint32_t side = 0, mips = 0; };
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material

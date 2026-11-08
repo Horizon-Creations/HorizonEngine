@@ -2227,6 +2227,7 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
     if (c.usesRvt && !domainStage)
     {
         src += kRvtDeclarationsGLSL;
+        src += kRvtNormalGLSL;
         src += kRvtLookupGLSL;
     }
     // Project textures (binding 4 + slot). An array slot keeps the SAME binding and

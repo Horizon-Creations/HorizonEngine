@@ -6447,14 +6447,17 @@ bool VulkanRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
         sci.maxLod = 0.0f;
         if (vkCreateSampler(m_device, &sci, nullptr, &m_rvtSampler) != VK_SUCCESS) return false;
     }
+    // The arrays start small and grow with the pages in use (rvtGrowPool); HE_RVT_GROW=0 allocates the whole pool at once.
+    static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
+    const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
+    // BaseColor is created UNORM (raw copies of the sRGB-encoded page) and read through an SRGB view.
+    const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     for (uint32_t layer = 0; layer < 3; ++layer)
     {
-        // BaseColor is created UNORM (raw copies of the sRGB-encoded page) and read through an SRGB view.
-        const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        if (!rvtMakeImage(VK_FORMAT_R8G8B8A8_UNORM, pagePx, pagePx, slots, 1, use,
+        if (!rvtMakeImage(VK_FORMAT_R8G8B8A8_UNORM, pagePx, pagePx, first, 1, use,
                           layer == 0 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, m_rvtPool[layer])
             || !rvtMakeView(m_rvtPool[layer], layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
-                            VK_IMAGE_VIEW_TYPE_2D_ARRAY, slots, 1))
+                            VK_IMAGE_VIEW_TYPE_2D_ARRAY, first, 1))
         {
             DestroyRvtPool();
             return false;
@@ -6462,12 +6465,65 @@ bool VulkanRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
     }
     const bool ok = rvtOneShot([&](VkCommandBuffer c) {
         for (const RvtImage& im : m_rvtPool)
-            rvtLayout(c, im.image, slots, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            rvtLayout(c, im.image, first, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                       0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     });
     if (!ok) { DestroyRvtPool(); return false; }
     m_rvtSlots  = slots;
+    m_rvtAlloc  = first;
     m_rvtPagePx = pagePx;
+    return true;
+}
+
+// A page for a slot beyond the slices the arrays hold grows them: new arrays, the old slices copied across on the GPU,
+// the old arrays destroyed once the device is idle (the descriptors are written per draw from m_rvtPool[k].view, so they follow).
+// Called BEFORE the page's own command buffer is recorded. The manager hands out slots from 0 upwards and reuses freed ones (the highest slot in use never exceeds the peak page count), so a scene that
+// needs 70 pages holds ~100 instead of the configured 512.
+bool VulkanRenderer::rvtGrowPool(uint32_t slot)
+{
+    if (slot < m_rvtAlloc) return true;
+    if (slot >= m_rvtSlots || !m_rvtPool[0].image) return false;
+    const uint32_t grown = std::min(m_rvtSlots, std::max((slot + 32u) & ~31u, m_rvtAlloc + m_rvtAlloc / 2));
+    deviceWaitIdle();           // frames in flight read the pool
+    rvtDrainPending();          // and the layers kept by the page pipeline are done with
+    RvtImage fresh[3];
+    const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    bool ok = true;
+    for (uint32_t layer = 0; layer < 3 && ok; ++layer)
+        ok = rvtMakeImage(VK_FORMAT_R8G8B8A8_UNORM, m_rvtPagePx, m_rvtPagePx, grown, 1, use,
+                          layer == 0 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, fresh[layer])
+          && rvtMakeView(fresh[layer], layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_VIEW_TYPE_2D_ARRAY, grown, 1);
+    if (ok)
+        ok = rvtOneShot([&](VkCommandBuffer c) {
+            for (uint32_t layer = 0; layer < 3; ++layer)
+            {
+                rvtLayout(c, m_rvtPool[layer].image, m_rvtAlloc, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                          VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                rvtLayout(c, fresh[layer].image, grown, 1, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                VkImageCopy region{};
+                region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, m_rvtAlloc };
+                region.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, m_rvtAlloc };
+                region.extent = { m_rvtPagePx, m_rvtPagePx, 1 };
+                vkCmdCopyImage(c, m_rvtPool[layer].image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               fresh[layer].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+                rvtLayout(c, fresh[layer].image, grown, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+            }
+        });
+    if (!ok)
+    {
+        for (RvtImage& im : fresh) rvtDestroyImage(im);
+        return false;
+    }
+    for (uint32_t layer = 0; layer < 3; ++layer)
+    {
+        rvtDestroyImage(m_rvtPool[layer]);
+        m_rvtPool[layer] = fresh[layer];
+    }
+    HE_LOG_INFO(RHI, "VulkanRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAlloc, grown, m_rvtSlots,
+                double(grown) * m_rvtPagePx * m_rvtPagePx * 12.0 / (1024.0 * 1024.0));
+    m_rvtAlloc = grown;
     return true;
 }
 
@@ -6480,7 +6536,7 @@ void VulkanRenderer::DestroyRvtPool()
     for (auto& kv : m_rvtTables) rvtDestroyImage(kv.second.img);
     m_rvtTables.clear();
     for (RvtImage& im : m_rvtPool) rvtDestroyImage(im);
-    m_rvtSlots = m_rvtPagePx = 0;
+    m_rvtSlots = m_rvtAlloc = m_rvtPagePx = 0;
 }
 
 void VulkanRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
@@ -6611,12 +6667,12 @@ bool VulkanRenderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std:
 
 bool VulkanRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
 {
-    if (layer < 0 || layer >= 3 || !m_rvtPool[layer].image || slot >= m_rvtSlots) return false;
+    if (layer < 0 || layer >= 3 || !m_rvtPool[layer].image || slot >= m_rvtAlloc) return false;
     const VkDeviceSize bytes = VkDeviceSize(m_rvtPagePx) * m_rvtPagePx * 4;
     VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
     if (!rvtMakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, buf, mem)) return false;
     const VkImage img = m_rvtPool[layer].image;
-    const uint32_t slots = m_rvtSlots, px = m_rvtPagePx;
+    const uint32_t slots = m_rvtAlloc, px = m_rvtPagePx;
     const bool ok = rvtOneShot([&](VkCommandBuffer c) {
         rvtLayout(c, img, slots, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                   VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -6854,6 +6910,10 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
             m_renderPath = HE::RenderPath::Forward;
         }
 
+        // A page beyond the slices the pool holds grows it first (before the page's own command buffer is recorded).
+        if (page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer].image && camera.rvtSlot >= 0
+            && width == m_rvtPagePx && height == m_rvtPagePx && uint32_t(camera.rvtSlot) >= m_rvtAlloc)
+            rvtGrowPool(uint32_t(camera.rvtSlot));
         // A kept page layer is not waited for: it rotates to the next frame slot (see m_rvtPending).
         if (pipe)
         {
@@ -6892,7 +6952,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
             {
                 // A virtual texture page (Thema 333) goes into its pool slice on the GPU and nothing is read back.
                 const bool pageOk = page && camera.rvtLayer >= 0 && camera.rvtLayer < 3 && m_rvtPool[camera.rvtLayer].image
-                                 && uint32_t(camera.rvtSlot) < m_rvtSlots && width == m_rvtPagePx && height == m_rvtPagePx;
+                                 && uint32_t(camera.rvtSlot) < m_rvtAlloc && width == m_rvtPagePx && height == m_rvtPagePx;
                 VkCommandBufferBeginInfo cbbi{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
                 cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 vkBeginCommandBuffer(cmd, &cbbi);
@@ -6916,7 +6976,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                     b[1].image = dst;
                     b[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                     b[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT; b[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                    b[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, m_rvtSlots };
+                    b[1].subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, m_rvtAlloc };
                     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
                     VkImageCopy region{};
                     region.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };

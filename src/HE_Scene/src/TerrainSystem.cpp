@@ -1406,4 +1406,33 @@ namespace TerrainSystem
                 }
         }
     }
+
+    void releaseWorld(HorizonWorld& world, ContentManager& cm, IRenderer* renderer)
+    {
+        auto& reg = world.registry();
+        std::vector<HE::UUID> ids;
+        const auto take = [&](const HE::UUID& id) { if (id != HE::UUID{}) ids.push_back(id); };
+        for (auto [e, cc] : reg.view<TerrainChunkComponent>().each())
+        {
+            take(cc.tessMeshId);
+            take(cc.stitchMeshId);
+            if (const auto* lod = reg.try_get<LODComponent>(e))
+            {
+                for (const LODLevel& lv : lod->levels) take(lv.meshId);
+                take(lod->refinedMeshId);
+                take(lod->stitchedMeshId);
+            }
+        }
+        std::sort(ids.begin(), ids.end(), [](const HE::UUID& a, const HE::UUID& b) { return a.hi != b.hi ? a.hi < b.hi : a.lo < b.lo; });
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        for (const HE::UUID& id : ids)
+        {
+            if (renderer) renderer->InvalidateMesh(id);
+            cm.unloadAsset(id);
+        }
+        g_pendingTerrainColliders.erase(&world);
+        g_tessMeshes.erase(&world);
+        g_stitchMeshes.erase(&world);
+        g_tessCaches.erase(&reg);
+    }
 }

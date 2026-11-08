@@ -775,6 +775,10 @@ public:
     // by default (D3D11 has a lean page pass of its own, OpenGL's per-call set is cheap).
     virtual void BeginRvtPages(uint32_t /*pagePx*/) {}
     virtual void EndRvtPages() {}
+    // Which of the four channels (bit 0 R .. bit 3 A) of pool layer `layer` the backend keeps. A backend that packs a layer into fewer
+    // channels (Metal: normal as x and z in RG8, the surface as R and G; the shader rebuilds the rest) says so, ReadbackRvtSlot returns
+    // those channels in their place and zero elsewhere, and a witness compares only what exists. Default: all four.
+    virtual uint32_t RvtLayerChannels(int /*layer*/) const { return 0xFu; }
 
     // ── Material hot-reload ────────────────────────────────────────────────
     // Drop any GPU state the backend cached for this material (e.g. uploaded
