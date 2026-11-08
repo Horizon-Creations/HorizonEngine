@@ -76,7 +76,7 @@ Baked bake(const StaticMeshAsset& mesh, const std::vector<SectionSource>& sectio
 // (16 vertices, 8 triangles), the same shape as the engine's CrossCard (mesh_gen) but
 // sized to the plant. Plane A (axis X) maps the left half of the atlas, plane B (axis Z)
 // the right half; v = 1 at the top. One section, no material of its own.
-StaticMeshAsset makeCard(float halfWidth, float y0, float y1);
+StaticMeshAsset makeCard(float halfWidth, float y0, float y1, bool doubleFaced = true);
 
 struct Result
 {

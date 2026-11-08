@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 #include <glm/glm.hpp>
@@ -351,7 +352,7 @@ Baked bake(const StaticMeshAsset& mesh, const std::vector<SectionSource>& source
     return out;
 }
 
-StaticMeshAsset makeCard(float halfWidth, float y0, float y1)
+StaticMeshAsset makeCard(float halfWidth, float y0, float y1, bool doubleFaced)
 {
     StaticMeshAsset m;
     m.type = HE::AssetType::StaticMesh;
@@ -359,7 +360,7 @@ StaticMeshAsset makeCard(float halfWidth, float y0, float y1)
     struct Plane { float ax, az, u0, u1; };               // the quad's horizontal axis, its atlas half
     const Plane planes[2] = { { 1.0f, 0.0f, 0.0f, 0.5f }, { 0.0f, 1.0f, 0.5f, 1.0f } };
     for (const Plane& p : planes)
-        for (int side = 0; side < 2; ++side)
+        for (int side = doubleFaced ? 0 : 1; side < 2; ++side)
         {
             const float s  = side == 0 ? 1.0f : -1.0f;
             // The face's normal tilted towards the sky: a card is lit as a bush canopy, not as a
@@ -413,7 +414,7 @@ Result write(const Baked& baked, const std::string& plantPath, const std::filesy
                                                    std::filesystem::path(folder), &r.material);
     if (r.materialPath.empty()) { r.error = "Failed to write the impostor material."; return r; }
 
-    StaticMeshAsset card = makeCard(baked.halfWidth, baked.y0, baked.y1);
+    StaticMeshAsset card = makeCard(baked.halfWidth, baked.y0, baked.y1, std::getenv("HE_IMPOSTOR_SINGLE") == nullptr);
     card.name = stem + "_ImpostorCard";
     card.path = pathFor(plantPath, "Card");
     if (!Importer::writeAsset(card, contentRoot)) { r.error = "Failed to write " + card.path; return r; }
