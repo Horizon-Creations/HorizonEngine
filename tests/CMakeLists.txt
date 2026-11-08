@@ -366,6 +366,8 @@ add_executable(he_tests
     test_block_encode.cpp
     # The RVT change journal on TerrainComponent: strokes leave a rect, rebuilds leave all (Thema 333 step 4)
     test_rvt_journal.cpp
+    # RVT 2.0 step 3: what makes a page stale, derived from the page subgraphs (Thema 335)
+    test_rvt_page_invalidation.cpp
     # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)

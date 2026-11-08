@@ -111,3 +111,64 @@ TEST_CASE("RVT journal: a paint stroke leaves its texel rect, a fill or an unann
 	l.tick();
 	CHECK(l.tc_().rvtJournal.all);
 }
+
+TEST_CASE("RVT journal: every note says what kind of ground changed, so a page reads only the kinds it depends on")
+{
+	using J = TerrainComponent::RvtJournal;
+	Land l;
+	TerrainPaint::ensureWeightmap(l.tc_());
+	l.tick();
+	l.tc_().rvtJournal.clear();
+
+	// A sculpt stroke: a height rect, no weights.
+	TerrainSculpt::markRegionDirty(l.tc_(), -6.0f, 4.0f, -2.0f, 9.0f);
+	l.tick();
+	{
+		const J& j = l.tc_().rvtJournal;
+		REQUIRE(j.height.any);
+		CHECK_FALSE(j.height.all);
+		CHECK(j.height.minX == doctest::Approx(-6.0f));
+		CHECK_FALSE(j.weights.any);
+		CHECK_FALSE(j.selected(J::kWeights).any);      // a page that only reads the weights sees nothing of it
+		CHECK(j.selected(J::kHeight).any);
+		CHECK(j.selected(J::kBoth).maxZ == doctest::Approx(9.0f));
+	}
+	l.tc_().rvtJournal.clear();
+
+	// A paint stroke: a weights rect, no height.
+	REQUIRE(TerrainPaint::paint(l.tc_(), 10.0f, -8.0f, 1, 3.0f, 2.0f, 1.0f));
+	l.tick();
+	{
+		const J& j = l.tc_().rvtJournal;
+		REQUIRE(j.weights.any);
+		CHECK_FALSE(j.weights.all);
+		CHECK_FALSE(j.height.any);
+		CHECK_FALSE(j.selected(J::kHeight).any);
+		CHECK(j.selected(J::kWeights).any);
+	}
+
+	// Both before the driver drains: the union spans both, each kind keeps its own extent.
+	TerrainSculpt::markRegionDirty(l.tc_(), -30.0f, -30.0f, -28.0f, -28.0f);
+	l.tick();
+	{
+		const J& j = l.tc_().rvtJournal;
+		CHECK(j.height.maxX == doctest::Approx(-28.0f));
+		CHECK(j.weights.minX >= 4.0f);
+		CHECK(j.minX == doctest::Approx(-30.0f));
+		const J::Part both = j.selected(J::kBoth);
+		CHECK(both.minX == doctest::Approx(-30.0f));
+		CHECK(both.maxX >= 15.0f);
+	}
+
+	// A full rebuild is everything; a fill or an unannounced weight upload is weights only.
+	l.tc_().rvtJournal.clear();
+	l.tc_().dirty = true;
+	l.tick();
+	CHECK(l.tc_().rvtJournal.height.all);
+	CHECK(l.tc_().rvtJournal.weights.all);
+	l.tc_().rvtJournal.clear();
+	REQUIRE(TerrainPaint::fillLayer(l.tc_(), 2));
+	l.tick();
+	CHECK(l.tc_().rvtJournal.weights.all);
+	CHECK_FALSE(l.tc_().rvtJournal.height.any);
+}

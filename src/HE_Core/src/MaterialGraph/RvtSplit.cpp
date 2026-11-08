@@ -185,6 +185,151 @@ MaterialGraph matInlineRvt(const MaterialGraph& graph)
     return g;
 }
 
+namespace
+{
+int paramComponents(MatNodeType t)
+{
+    switch (t)
+    {
+        case T::ParamFloat: case T::ParamBool: return 1;
+        case T::ParamVec2:  return 2;
+        case T::ParamColor: return 3;
+        case T::ParamVec4:  return 4;
+        default: return 0;
+    }
+}
+
+// What a node reads of the ground, by its type.
+uint32_t groundReadsOf(MatNodeType t)
+{
+    switch (t)
+    {
+        // World Position carries the ground's height in Y (the page is flat in XZ, the height comes from the mesh).
+        case T::WorldPos: return kRvtReadsHeight;
+        // The normal, and the normal-map nodes (their frame is the screen-space derivative of the world position).
+        case T::NormalWS: case T::NormalMapSample: case T::NormalMapArraySample:
+        case T::NormalMapBombSample: case T::NormalMapArrayBombSample: return kRvtReadsNormal | kRvtReadsHeight;
+        case T::LandscapeLayerBlend: case T::LandscapeGroupPick: return kRvtReadsWeights;
+        default: return 0;
+    }
+}
+
+bool isFrozenInput(MatNodeType t)
+{
+    switch (t)
+    {
+        case T::Time: case T::Panner: case T::Fresnel: case T::ViewDir: case T::CameraPos: case T::CameraDistance:
+        case T::ScreenPos: case T::Weather: case T::WaterRipple: case T::Sun: case T::Wind: case T::WindSway: return true;
+        default: return false;
+    }
+}
+
+bool switchValue(const MatGraphNode& n, const MatRvtEnv& env, std::string& name)
+{
+    name = n.s.empty() ? "switch_" + std::to_string(n.id) : n.s;
+    const auto it = env.switches.find(name);
+    return it != env.switches.end() ? it->second : n.p[0] > 0.5f;
+}
+} // namespace
+
+uint32_t matRvtNodeGroundReads(MatNodeType type) { return groundReadsOf(type); }
+
+MatRvtPageDeps matRvtPageDeps(const MaterialGraph& g, const MatRvtPage& page, const MatRvtEnv& env)
+{
+    MatRvtPageDeps d;
+    const MatGraphLink* src = inputLink(g, page.writeNode, page.writePin);
+    if (!src) return d;
+    std::set<int> seen{ src->srcNode };
+    std::vector<int> work{ src->srcNode };
+    std::set<std::string> params, switches, assets, frozen;
+    while (!work.empty())
+    {
+        const int id = work.back(); work.pop_back();
+        const MatGraphNode* n = g.findNode(id);
+        if (!n) continue;
+        int onlyPin = -1;
+        if (n->type == T::StaticSwitch)
+        {
+            std::string name;
+            onlyPin = switchValue(*n, env, name) ? 0 : 1;
+            switches.insert(name);
+        }
+        d.reads |= groundReadsOf(n->type);
+        if (paramComponents(n->type) > 0) params.insert(n->s);
+        if (matNodeSamplesTexture(n->type) && !n->s.empty()) assets.insert(n->s);
+        if (n->type == T::FunctionCall)
+        {
+            assets.insert(n->s);
+            const auto it = env.functionReads.find(n->s);
+            d.reads |= it != env.functionReads.end() ? it->second : kRvtReadsGround;
+        }
+        if (isFrozenInput(n->type)) frozen.insert(matNodeDesc(n->type).name);
+        for (const MatGraphLink& l : g.links)
+            if (l.dstNode == id && (onlyPin < 0 || l.dstPin == onlyPin) && seen.insert(l.srcNode).second)
+                work.push_back(l.srcNode);
+    }
+    d.nodes.assign(seen.begin(), seen.end());
+    d.params.assign(params.begin(), params.end());
+    d.switches.assign(switches.begin(), switches.end());
+    d.assets.assign(assets.begin(), assets.end());
+    d.frozen.assign(frozen.begin(), frozen.end());
+    return d;
+}
+
+uint64_t matRvtPageStateHash(const MaterialGraph& g, const MatRvtPage& page, const MatRvtEnv& env)
+{
+    const MatGraphLink* src = inputLink(g, page.writeNode, page.writePin);
+    const MatGraphNode* write = g.findNode(page.writeNode);
+    if (!src || !write) return page.hash;
+    const MatRvtPageDeps d = matRvtPageDeps(g, page, env);
+    Fnv f;
+    f.str("rvt-state-v1");
+    // The structure and the node constants of the live nodes; the untaken side of a Static Switch is not in d.nodes.
+    const uint64_t base = pageHash(g, *write, page.writePin, *src, d.nodes);
+    f.bytes(&base, sizeof base);
+    // The value each parameter takes: the effective one if the material resolves one, else the node's own default.
+    for (int id : d.nodes)
+    {
+        const MatGraphNode* n = g.findNode(id);
+        const int nc = n ? paramComponents(n->type) : 0;
+        if (nc == 0) continue;
+        f.str(n->s);
+        const auto it = env.params.find(n->s);
+        for (int c = 0; c < nc; ++c) f.f32(it != env.params.end() ? it->second[static_cast<size_t>(c)] : n->p[c]);
+    }
+    for (const std::string& sw : d.switches)
+    {
+        const auto it = env.switches.find(sw);
+        f.str(sw);
+        f.i32(it != env.switches.end() ? (it->second ? 1 : 0) : -1);   // -1: the node's own default, already part of `base`
+    }
+    for (const std::string& a : d.assets)
+    {
+        const auto it = env.assetRevision.find(a);
+        const uint64_t rev = it != env.assetRevision.end() ? it->second : 0;
+        f.str(a);
+        f.bytes(&rev, sizeof rev);
+    }
+    return f.h ? f.h : 1;
+}
+
+MatRvtMaterialState matRvtMaterialState(const MaterialGraph& g, const MatRvtSplit& split, const MatRvtEnv& env)
+{
+    MatRvtMaterialState r;
+    Fnv f;
+    f.str("rvt-material-v1");
+    for (const MatRvtPage& pg : split.pages)
+    {
+        r.pageDeps.push_back(matRvtPageDeps(g, pg, env));
+        r.pageHashes.push_back(matRvtPageStateHash(g, pg, env));
+        r.reads |= r.pageDeps.back().reads;
+        f.i32(pg.writeNode); f.i32(pg.writePin);
+        f.bytes(&r.pageHashes.back(), sizeof(uint64_t));
+    }
+    r.state = f.h ? f.h : 1;
+    return r;
+}
+
 MatRvtSplit matSplitRvt(const MaterialGraph& graph)
 {
     MatRvtSplit r;

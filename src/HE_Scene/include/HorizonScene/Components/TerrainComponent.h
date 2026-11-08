@@ -143,16 +143,55 @@ struct TerrainComponent {
     // the world tick call updateTerrains too (the editor's brush tools do). Edits with a known extent note a rect
     // (terrain-local XZ), everything else notes "all"; TerrainSystem notes "all" itself for a rebuild or a weight upload
     // no edit announced, so a writer that never heard of this still gets its pages repainted.
+    // RVT 2.0 step 3: every note also says WHAT changed (kHeight: sculpt, rebuild; kWeights: paint, weight upload), because a
+    // page repaints only when its subgraph reads that kind of ground (RvtSplit.h matRvtEditReaches). `any/all/min..max` stay the
+    // union of both kinds (the scratch copy and older readers); `height` and `weights` are the same record per kind.
     struct RvtJournal
     {
+        enum : uint8_t { kHeight = 1, kWeights = 2, kBoth = kHeight | kWeights };
+        struct Part
+        {
+            bool  any = false, all = false;
+            float minX = 0.0f, minZ = 0.0f, maxX = 0.0f, maxZ = 0.0f;
+            void noteAll() { any = all = true; }
+            void noteRect(float mnX, float mnZ, float mxX, float mxZ)
+            {
+                if (all) return;
+                if (!any) { minX = mnX; minZ = mnZ; maxX = mxX; maxZ = mxZ; any = true; return; }
+                minX = std::min(minX, mnX); minZ = std::min(minZ, mnZ); maxX = std::max(maxX, mxX); maxZ = std::max(maxZ, mxZ);
+            }
+            void merge(const Part& o)
+            {
+                if (!o.any) return;
+                if (o.all) { noteAll(); return; }
+                noteRect(o.minX, o.minZ, o.maxX, o.maxZ);
+            }
+        };
         bool  any = false, all = false;
         float minX = 0.0f, minZ = 0.0f, maxX = 0.0f, maxZ = 0.0f;
-        void noteAll() { any = all = true; }
-        void noteRect(float mnX, float mnZ, float mxX, float mxZ)
+        Part  height, weights;
+
+        void noteAll(uint8_t kinds = kBoth)
         {
+            any = all = true;
+            if (kinds & kHeight)  height.noteAll();
+            if (kinds & kWeights) weights.noteAll();
+        }
+        void noteRect(float mnX, float mnZ, float mxX, float mxZ, uint8_t kinds = kBoth)
+        {
+            if (kinds & kHeight)  height.noteRect(mnX, mnZ, mxX, mxZ);
+            if (kinds & kWeights) weights.noteRect(mnX, mnZ, mxX, mxZ);
             if (all) return;
             if (!any) { minX = mnX; minZ = mnZ; maxX = mxX; maxZ = mxZ; any = true; return; }
             minX = std::min(minX, mnX); minZ = std::min(minZ, mnZ); maxX = std::max(maxX, mxX); maxZ = std::max(maxZ, mxZ);
+        }
+        // What changed in the kinds in `kinds`, as one record (none: any == false).
+        Part selected(uint8_t kinds) const
+        {
+            Part p;
+            if (kinds & kHeight)  p.merge(height);
+            if (kinds & kWeights) p.merge(weights);
+            return p;
         }
         void clear() { *this = RvtJournal{}; }
     } rvtJournal;

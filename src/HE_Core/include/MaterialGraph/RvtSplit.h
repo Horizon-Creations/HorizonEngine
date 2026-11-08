@@ -14,7 +14,9 @@
 // Function Call (the called graph is not loaded here): a changed function asset needs the caller to fold the asset's own
 // revision in.
 #include "MaterialGraph/MaterialGraph.h"
+#include <array>
 #include <cstdint>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -93,4 +95,75 @@ HE_API std::set<int> matRvtDownstreamOfRead(const MaterialGraph& graph);
 
 // Ids of the nodes `pinSource` depends on (itself included), following every input link. Ascending.
 HE_API std::vector<int> matGraphDependencies(const MaterialGraph& graph, int pinSource);
+
+// ---------------------------------------------------------------------------------------------------------------------------
+// RVT 2.0 step 3: what makes a page stale (Thema 335). The engine derives it from the page subgraph, nothing is declared:
+//   (a) the node parameters, material parameters, static switches and assets (textures, functions) BEFORE the Write node,
+//   (b) the ground the subgraph reads (terrain height / normal / painted weights), so a sculpt stroke repaints the pages only
+//       when a page reads the height, and a paint stroke only when it reads the weights,
+//   (c) the entity's parameter overrides (they are part of the parameter values below).
+// Whatever sits AFTER the matching Read node (snow height, sand, weather, tracks, time of day) is not in a page subgraph and
+// so can never be in a page hash: changing it paints no page.
+enum : uint32_t {
+    kRvtReadsHeight  = 1u << 0,   // the ground's height: World Position (its Y), and everything cut from it
+    kRvtReadsNormal  = 1u << 1,   // the ground's normal: Normal WS, the normal-map nodes (screen-space frame of the position)
+    kRvtReadsWeights = 1u << 2,   // the painted layer weights: Landscape Layer Blend, Landscape Group Pick
+    kRvtReadsGround  = kRvtReadsHeight | kRvtReadsNormal | kRvtReadsWeights,
+};
+// What a terrain edit changes, in the same flag space: a sculpt stroke changes height and (so) normal, a paint stroke the weights.
+inline constexpr uint32_t kRvtEditSculpt = kRvtReadsHeight | kRvtReadsNormal;
+inline constexpr uint32_t kRvtEditPaint  = kRvtReadsWeights;
+
+// The values the graph's parameters and switches take for one landscape, as the material system resolves them: the material
+// instance's own, then the entity's overrides on top. A name that is not in the map takes the node's own default.
+struct MatRvtEnv
+{
+    std::map<std::string, std::array<float, 4>> params;   // Param* node name -> effective value (x, y, z, w)
+    std::map<std::string, bool>                 switches; // Static Switch name -> effective on/off
+    // Revision of an asset a page subgraph names (a texture path, a function path): anything that changes when the asset's
+    // content does. A name missing from the map counts as revision 0.
+    std::map<std::string, uint64_t>             assetRevision;
+    // What a Function Call reads of the ground, by function path (the caller loaded the function and ran
+    // matRvtPageDeps over it); a call that is not listed is assumed to read everything.
+    std::map<std::string, uint32_t>             functionReads;
+};
+
+struct MatRvtPageDeps
+{
+    uint32_t reads = 0;                          // kRvtReads* the page subgraph needs from the ground
+    std::vector<int> nodes;                      // the dependency nodes that are LIVE for these switch values, ascending
+    std::vector<std::string> params;             // Param* names the page reads, sorted
+    std::vector<std::string> switches;           // Static Switch names the page reads, sorted
+    std::vector<std::string> assets;             // texture and function paths the page reads, sorted
+    // Nodes whose value changes per frame (Time, Camera, Weather, Panner ...): the page is painted once, so they are frozen
+    // at the moment of painting and never repaint it. Listed (node type names, sorted) so the editor can warn about them.
+    std::vector<std::string> frozen;
+};
+
+// What one node type reads of the ground (kRvtReads*), without looking at its inputs. A Function Call is not decided here.
+HE_API uint32_t matRvtNodeGroundReads(MatNodeType type);
+
+// The live dependency set of one page: like page.sourceNodes, but a Static Switch follows only its taken input, so a parameter
+// or texture behind the untaken side is not a dependency of this permutation.
+HE_API MatRvtPageDeps matRvtPageDeps(const MaterialGraph& source, const MatRvtPage& page, const MatRvtEnv& env);
+
+// The hash of one page's inputs: page.hash's content for the live nodes plus the parameter, switch and asset values of `env`
+// that those nodes read. Equal hash = the page would be painted identically. A parameter of a node that is not a page
+// dependency, in particular anything after the Read node, is never mixed in. 0 is never a valid hash.
+HE_API uint64_t matRvtPageStateHash(const MaterialGraph& source, const MatRvtPage& page, const MatRvtEnv& env);
+
+// One material's answer to "what do my pages depend on, right now": the split (computed by the caller once per graph edit) under
+// the current parameter values. `pages` is parallel to split.pages; `state` folds all of them, and is what a driver compares from
+// tick to tick: unchanged = no page is stale, whatever else moved. `reads` is the union of what the pages read of the ground.
+struct MatRvtMaterialState
+{
+    std::vector<uint64_t>       pageHashes;
+    std::vector<MatRvtPageDeps> pageDeps;
+    uint64_t                    state = 0;
+    uint32_t                    reads = 0;
+};
+HE_API MatRvtMaterialState matRvtMaterialState(const MaterialGraph& source, const MatRvtSplit& split, const MatRvtEnv& env);
+
+// Whether a terrain edit (kRvtEditSculpt / kRvtEditPaint, or both) can change a page that reads `reads`.
+inline bool matRvtEditReaches(uint32_t reads, uint32_t editKinds) { return (reads & editKinds) != 0; }
 } // namespace HE

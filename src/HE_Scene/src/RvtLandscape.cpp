@@ -10,8 +10,10 @@
 #include <Diagnostics/Log.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/RvtSplit.h>
 #include <Renderer/IRenderer.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -74,12 +76,132 @@ void RvtLandscape::note(const std::string& why)
     }
 }
 
-uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain) const
+namespace
+{
+    uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull)
+    {
+        const unsigned char* b = static_cast<const unsigned char*>(p);
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+        return h;
+    }
+
+    // A revision for an asset a page names: moves when its content does. A texture: shape plus a strided sample of the pixels
+    // (a re-import with other pixels moves it, a full hash of a 4k texture every epoch would not be cheap); a function: its graph.
+    uint64_t assetRevision(ContentManager& cm, const std::string& path)
+    {
+        const HE::UUID id = cm.loadAsset(path);
+        uint64_t h = fnv(&id.hi, sizeof id.hi);
+        h = fnv(&id.lo, sizeof id.lo, h);
+        if (const TextureAsset* tex = cm.getTexture(id))
+        {
+            const uint32_t shape[5] = { tex->width, tex->height, tex->channels, tex->layers, tex->mipLevels };
+            h = fnv(shape, sizeof shape, h);
+            const size_t n = tex->data.size();
+            h = fnv(&n, sizeof n, h);
+            const size_t step = std::max<size_t>(1, n / 4096);
+            for (size_t i = 0; i < n; i += step) h = fnv(&tex->data[i], 1, h);
+        }
+        else if (const MaterialFunctionAsset* fn = cm.getMaterialFunction(id))
+            h = fnv(fn->nodeGraphJson.data(), fn->nodeGraphJson.size(), h);
+        return h;
+    }
+}
+
+void RvtLandscape::refreshAnalysis(HorizonWorld& live, entt::entity terrain, Segment& seg)
+{
+    // The graph the landscape's material (or its parent, for an instance) is made of, cut at its RVT nodes. Re-cut only when
+    // the graph text changed (one hash of the text per tick); the asset revisions are re-read when the content epoch moves.
+    const auto* mc = live.registry().try_get<MaterialComponent>(terrain);
+    const MaterialAsset* ma = mc ? m_cm.getMaterial(mc->materialAssetId) : nullptr;
+    if (!ma) { seg.analysis.reset(); seg.reads = kRvtReadsGround; return; }
+    const MaterialAsset* base = ma;
+    if (!ma->parentMaterialPath.empty())
+    {
+        const HE::UUID pid = m_cm.loadAsset(ma->parentMaterialPath);
+        if (const MaterialAsset* pm = m_cm.getMaterial(pid)) base = pm;
+    }
+    const std::string& json = base->nodeGraphJson;
+    const uint64_t key = json.empty() ? 0 : fnv(json.data(), json.size());
+    if (!seg.analysis || seg.analysis->graphKey != key)
+    {
+        auto an = std::make_shared<Segment::Analysis>();
+        an->graphKey = key;
+        if (!json.empty() && materialGraphFromJson(json, an->graph))
+        {
+            an->split = matSplitRvt(an->graph);
+            for (const std::string& p : an->split.problems)
+                HE_LOG_WARN(Scene, "RvtLandscape: material graph: %s", p.c_str());
+        }
+        seg.analysis = an;
+    }
+    Segment::Analysis& an = *seg.analysis;
+    if (!an.split.hasRvtNodes)
+    {
+        // No RVT node: the pages are built from the whole material (the Thema 333 views) and read all of the ground. The
+        // (empty) analysis stays so the graph text is not parsed again every tick.
+        seg.reads = kRvtReadsGround;
+        return;
+    }
+
+    // Parameter values as the material system resolves them: the asset's slots, the entity's overrides on top.
+    MatRvtEnv env;
+    env.assetRevision = an.env.assetRevision;
+    env.functionReads = an.env.functionReads;
+    for (size_t i = 0; i < ma->graphParamNames.size(); ++i)
+    {
+        std::array<float, 4> v{ 0, 0, 0, 0 };
+        for (size_t c = 0; c < 4; ++c) if (i * 4 + c < ma->shaderParamData.size()) v[c] = ma->shaderParamData[i * 4 + c];
+        env.params[ma->graphParamNames[i]] = v;
+    }
+    if (mc)
+        for (const MaterialParamOverride& ov : mc->paramOverrides)
+            env.params[ov.name] = { ov.value[0], ov.value[1], ov.value[2], ov.value[3] };
+    for (size_t i = 0; i < ma->instanceSwitchNames.size() && i < ma->instanceSwitchValues.size(); ++i)
+        env.switches[ma->instanceSwitchNames[i]] = ma->instanceSwitchValues[i] != 0;
+
+    if (an.epoch != m_cm.contentEpoch())
+    {
+        an.epoch = m_cm.contentEpoch();
+        env.assetRevision.clear();
+        env.functionReads.clear();
+        std::set<std::string> done;
+        for (const MatRvtPage& pg : an.split.pages)
+            for (const std::string& a : matRvtPageDeps(an.graph, pg, env).assets)
+            {
+                if (!done.insert(a).second) continue;
+                env.assetRevision[a] = assetRevision(m_cm, a);
+                // What a called function reads of the ground: one level (its own nodes); a call inside it reads everything.
+                const HE::UUID fid = m_cm.loadAsset(a);
+                if (const MaterialFunctionAsset* fn = m_cm.getMaterialFunction(fid))
+                {
+                    MaterialGraph fg;
+                    uint32_t r = kRvtReadsGround;
+                    if (materialGraphFromJson(fn->nodeGraphJson, fg))
+                    {
+                        r = 0;
+                        for (const MatGraphNode& n : fg.nodes)
+                            r |= n.type == MatNodeType::FunctionCall ? kRvtReadsGround : matRvtNodeGroundReads(n.type);
+                    }
+                    env.functionReads[a] = r;
+                }
+            }
+        an.env.assetRevision = env.assetRevision;
+        an.env.functionReads = env.functionReads;
+    }
+    an.env.params = std::move(env.params);
+    an.env.switches = std::move(env.switches);
+    const MatRvtMaterialState ms = matRvtMaterialState(an.graph, an.split, an.env);
+    an.state = ms.state;
+    seg.reads = ms.reads;
+}
+
+uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t& fullHash)
 {
     // Everything the three view graphs and the volume's place are built from at attach time (HlodBaker::begin): the landscape
     // material instance's parameter block, which parameters it overrides and its static switches, and the landscape's size and
     // position.
     uint64_t h = 0xCBF29CE484222325ull;
+    fullHash = h;
     const auto* mc = live.registry().try_get<MaterialComponent>(terrain);
     if (!mc) return h;
     mix(h, mc->materialAssetId.hi); mix(h, mc->materialAssetId.lo);
@@ -98,12 +220,22 @@ uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain) const
         for (float f : ma->instanceSwitchValues) mix(h, f);
         mix(h, ma->customShaderFragGlsl.size());
     }
+    uint64_t geo = 0x9E3779B97F4A7C15ull;
     if (const auto* tc = live.registry().try_get<TerrainComponent>(terrain))
     {
         const glm::vec3 pos = HE::worldPositionOf(live, terrain);
         mix(h, tc->sizeX); mix(h, tc->sizeZ); mix(h, pos.x); mix(h, pos.z);
+        mix(geo, tc->sizeX); mix(geo, tc->sizeZ); mix(geo, pos.x); mix(geo, pos.z);
     }
-    return h;
+    fullHash = h;
+
+    // RVT 2.0: a material with an RVT Write/Read pair is two programs. The pages depend on the page subgraphs' inputs and on
+    // nothing else, so only those are hashed; a parameter that sits after the Read node moves `fullHash` and not this.
+    refreshAnalysis(live, terrain, seg);
+    if (!seg.analysis || !seg.analysis->split.hasRvtNodes) return h;
+    // (not the graph text: an edit after the Read node changes the text and no page)
+    mix(geo, seg.analysis->state);
+    return geo ? geo : 1;
 }
 
 bool RvtLandscape::ensurePool()
@@ -322,7 +454,8 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     for (const Land& l : lands)
     {
         Segment& seg = m_segments[l.e];
-        const uint64_t h = stateHash(live, l.e);
+        uint64_t full = 0;
+        const uint64_t h = stateHash(live, l.e, seg, full);
         if (seg.attached && h != seg.stateHash)
         {
             // The view graphs were built from the old values: nothing to patch, start over.
@@ -330,6 +463,9 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
             ++st.detaches;
             st.rescanned = true;
         }
+        else if (seg.attached && full != seg.liveHash)
+            ++st.liveOnlyChanges;   // the material changed, but only after the Read node: the live shader follows, no page does
+        seg.liveHash = full;
         const bool near = l.dist <= m_settings.activationRadiusM * (seg.volumeLive ? 1.2f : 1.0f);
         if (!near)
         {
@@ -356,7 +492,18 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         byVolume[seg.volume] = kv.first;
         TerrainComponent& tc = reg.get<TerrainComponent>(kv.first);
         if (!tc.rvtJournal.any) continue;
-        const TerrainComponent::RvtJournal j = tc.rvtJournal;
+        // Only the kinds of edit a page reads count (RVT 2.0): a sculpt stroke under pages that read nothing of the height is
+        // not a reason to paint anything, nor to bring the scratch copy up to date (nothing in it is read).
+        using J = TerrainComponent::RvtJournal;
+        const uint8_t kinds = static_cast<uint8_t>((matRvtEditReaches(seg.reads, kRvtEditSculpt) ? J::kHeight : 0)
+                                                 | (matRvtEditReaches(seg.reads, kRvtEditPaint) ? J::kWeights : 0));
+        const J::Part j = tc.rvtJournal.selected(kinds);
+        if (!j.any)
+        {
+            ++st.journalIgnored;
+            tc.rvtJournal.clear();
+            continue;
+        }
         const glm::vec3 pos = HE::worldPositionOf(live, kv.first);
         if (j.all)
         {

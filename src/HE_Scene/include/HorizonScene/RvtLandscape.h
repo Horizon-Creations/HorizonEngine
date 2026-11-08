@@ -24,6 +24,7 @@
 // material's parameters or switches cannot be patched into the pages (the view graphs are built from them): the segment
 // re-attaches.
 #include <HorizonScene/RuntimeVirtualTexture.h>
+#include <MaterialGraph/RvtSplit.h>
 #include <Types/UUID.h>
 #include <entt/entt.hpp>
 #include <glm/vec2.hpp>
@@ -65,6 +66,9 @@ namespace HE::landscape
             uint32_t segments      = 0;    // landscapes known (attached or not)
             uint32_t activeSegments = 0;   // drawn from the pages now
             bool     rescanned     = false; // a segment was rebuilt from scratch (a parameter change)
+            // RVT 2.0 step 3 (RvtSplit.h): what the tick did NOT repaint, and why.
+            uint32_t journalIgnored = 0;   // terrain edits no page reads (a paint stroke under pages that only read the height, ...)
+            uint32_t liveOnlyChanges = 0;  // material changes that sit after the RVT Read node: the live shader follows, no page is touched
             double   paintMs       = 0.0;   // wall clock of the whole painting of this frame (what the user feels, on every backend)
         };
 
@@ -128,6 +132,19 @@ namespace HE::landscape
             HE::UUID   landscapeMaterial;         // what the chunks are drawn with without the swap
             HE::UUID   consumer;                  // registered once per segment, kept across deactivations
             uint64_t   stateHash = 0;             // what the view graphs and the volume were built from
+            uint64_t   liveHash = 0;              // the whole material (RVT 2.0): moves with a change after the Read node too
+            // RVT 2.0 step 3: the material graph cut at its RVT nodes, and what the pages read of the ground.
+            struct Analysis
+            {
+                uint64_t         graphKey = 0;    // hash of the graph text the split was made from
+                uint64_t         epoch = ~0ull;   // ContentManager::contentEpoch() the asset revisions were read at
+                MaterialGraph    graph;
+                MatRvtSplit      split;
+                uint64_t         state = 0;       // matRvtMaterialState().state under the current values
+                MatRvtEnv        env;             // asset revisions, function reads (parameters are refilled every tick)
+            };
+            std::shared_ptr<Analysis> analysis;   // null: not an RVT-node material (the Thema 333 path: the whole material is the page input)
+            uint32_t   reads = 0xFFFFFFFFu;       // kRvtReads* the pages need from the ground; everything for a legacy material
             uint64_t   uploadedVersion = ~0ull;
             bool       attached = false;          // scratch copy + volume exist
             bool       volumeLive = false;        // the volume is in the manager (pages may exist)
@@ -141,7 +158,11 @@ namespace HE::landscape
         bool attach(HorizonWorld& live, entt::entity terrain, Segment& seg);
         void deactivate(entt::entity terrain, Segment& seg);       // out of range: pages and table go, materials stay
         void remove(entt::entity terrain, Segment& seg);           // the landscape is gone: the volume goes too
-        uint64_t stateHash(HorizonWorld& live, entt::entity terrain) const;
+        // Returns the hash of what the PAGES are built from. For a material with RVT nodes that is the page subgraphs' inputs
+        // (matRvtPageStateHash) and nothing after the Read node; otherwise the whole material. `fullHash` is always the whole
+        // material, so the caller can tell "a live-only change" from "a page change".
+        uint64_t stateHash(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t& fullHash);
+        void refreshAnalysis(HorizonWorld& live, entt::entity terrain, Segment& seg);
         bool ensurePool();
         void note(const std::string& why);
 
