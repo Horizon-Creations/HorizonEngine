@@ -353,3 +353,141 @@ TEST_CASE("hardware rows: with the real detection the rows and the module agree"
     // The summary is what the startup log prints, line for line.
     CHECK(callRow("hardware.summary")[0].s == HE::hardwareSummary());
 }
+
+// ── More than one GPU (Thema 337 step 7) ─────────────────────────────────────────────────────────
+
+namespace
+{
+HE::GpuInfo listed(const char* name, uint32_t vendor, uint32_t device, int ordinal, uint64_t vramMB, const char* driver, bool software = false)
+{
+    HE::GpuInfo g;
+    g.name = name; g.vendorId = vendor; g.deviceId = device; g.vramMB = vramMB; g.driver = driver; g.software = software;
+    g.vendor = HE::gpuVendorFromPciId(vendor);
+    g.id = HE::makeGpuId(vendor, device, ordinal);
+    return g;
+}
+
+std::shared_ptr<FakeProvider> twoGpuMachine()
+{
+    auto f = makeFake();
+    f->info.gpus = {
+        listed("AMD Radeon(TM) Graphics", 0x1002, 0x13c0, 0, 512, "32.0.21034.41"),
+        listed("NVIDIA GeForce RTX 4070", 0x10de, 0x2786, 0, 12010, "621.01"),
+        listed("Microsoft Basic Render Driver", 0x1414, 0x008c, 0, 0, "10.0", true),
+    };
+    return f;
+}
+}
+
+TEST_CASE("gpu list: ids are vendor:device:ordinal in lower-case hex")
+{
+    CHECK(HE::makeGpuId(0x10de, 0x2786, 0) == "10de:2786:0");
+    CHECK(HE::makeGpuId(0x1002, 0x13C0, 1) == "1002:13c0:1");
+    CHECK(HE::makeGpuId(0x1, 0x2, 0) == "0001:0002:0");
+}
+
+TEST_CASE("gpu list: the renderer's card is marked active by PCI ids, by id, or by name")
+{
+    RestoreProvider restore;
+    HE::setHardwareProvider(twoGpuMachine());
+    {
+        const HE::HardwareInfo h = HE::hardwareInfo();
+        REQUIRE(h.gpus.size() == 3);
+        for (const auto& g : h.gpus) CHECK_FALSE(g.active);      // no renderer yet: none active
+        CHECK_FALSE(h.gpu.valid());
+    }
+    // D3D / Vulkan: the PCI ids
+    HE::GpuInfo gpu; gpu.name = "NVIDIA GeForce RTX 4070"; gpu.vendorId = 0x10de; gpu.deviceId = 0x2786; gpu.api = "D3D12"; gpu.vramMB = 12010;
+    HE::setGpuInfo(gpu);
+    {
+        const HE::HardwareInfo h = HE::hardwareInfo();
+        CHECK(h.gpu.id == "10de:2786:0");                       // learned from the list
+        CHECK(h.gpu.active);
+        REQUIRE(h.gpus.size() == 3);
+        CHECK_FALSE(h.gpus[0].active);
+        CHECK(h.gpus[1].active);
+        CHECK_FALSE(h.gpus[2].active);
+    }
+    // The other card
+    HE::GpuInfo igpu; igpu.name = "AMD Radeon(TM) Graphics"; igpu.vendorId = 0x1002; igpu.deviceId = 0x13c0; igpu.api = "Vulkan";
+    HE::setGpuInfo(igpu);
+    CHECK(HE::hardwareInfo().gpus[0].active);
+    CHECK_FALSE(HE::hardwareInfo().gpus[1].active);
+    CHECK(HE::hardwareInfo().gpu.vendor == "AMD");              // the list fills what the API left out
+
+    // OpenGL cannot read ids: by name; the memory is whatever the API said, the ids come from the list
+    HE::GpuInfo gl; gl.name = "NVIDIA GeForce RTX 4070"; gl.api = "OpenGL";
+    HE::setGpuInfo(gl);
+    {
+        const HE::HardwareInfo h = HE::hardwareInfo();
+        CHECK(h.gpus[1].active);
+        CHECK(h.gpu.id == "10de:2786:0");
+        CHECK(h.gpu.vendorId == 0x10de);
+    }
+}
+
+TEST_CASE("gpu list: two identical cards are told apart by the id the renderer gives")
+{
+    RestoreProvider restore;
+    auto f = makeFake();
+    f->info.gpus = { listed("Twin GPU", 0x10de, 0x2786, 0, 12010, "1"), listed("Twin GPU", 0x10de, 0x2786, 1, 12010, "1") };
+    HE::setHardwareProvider(f);
+    HE::GpuInfo gpu; gpu.name = "Twin GPU"; gpu.vendorId = 0x10de; gpu.deviceId = 0x2786; gpu.id = "10de:2786:1";
+    HE::setGpuInfo(gpu);
+    const HE::HardwareInfo h = HE::hardwareInfo();
+    REQUIRE(h.gpus.size() == 2);
+    CHECK_FALSE(h.gpus[0].active);
+    CHECK(h.gpus[1].active);
+    CHECK(h.gpu.id == "10de:2786:1");
+}
+
+TEST_CASE("gpu list: the renderer's list is used where the platform lists none, the active card is never missing")
+{
+    RestoreProvider restore;
+    HE::setHardwareProvider(makeFake());                       // the fake lists no adapters (a Linux without DXGI)
+    CHECK(HE::hardwareInfo().gpus.empty());
+    HE::setGpuList({ listed("Vulkan GPU A", 0x10de, 0x1111, 0, 8192, "1"), listed("Vulkan GPU B", 0x1002, 0x2222, 0, 4096, "2") });
+    CHECK(HE::hardwareInfo().gpus.size() == 2);
+    HE::GpuInfo gpu; gpu.name = "Vulkan GPU B"; gpu.vendorId = 0x1002; gpu.deviceId = 0x2222;
+    HE::setGpuInfo(gpu);
+    CHECK(HE::hardwareInfo().gpus[1].active);
+
+    // A card the list does not know (a listing that failed): it is added, so the active one is always there.
+    HE::setHardwareProvider(makeFake());
+    HE::GpuInfo lone; lone.name = "Lone GPU"; lone.vendorId = 0x8086; lone.deviceId = 0x9a49;
+    HE::setGpuInfo(lone);
+    const HE::HardwareInfo h = HE::hardwareInfo();
+    REQUIRE(h.gpus.size() == 1);
+    CHECK(h.gpus[0].active);
+    CHECK(h.gpus[0].name == "Lone GPU");
+    CHECK(h.gpus[0].id == "8086:9a49:0");
+}
+
+TEST_CASE("gpu list: the summary names the other adapters, the rows describe all of them")
+{
+    RestoreProvider restore;
+    HE::setHardwareProvider(twoGpuMachine());
+    HE::GpuInfo gpu; gpu.name = "NVIDIA GeForce RTX 4070"; gpu.vendorId = 0x10de; gpu.deviceId = 0x2786; gpu.api = "D3D12"; gpu.vramMB = 12010; gpu.driver = "621.01";
+    HE::setGpuInfo(gpu);
+    const std::string s = HE::hardwareSummary();
+    CHECK(s.find("GPU: NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01, D3D12)") != std::string::npos);
+    CHECK(s.find("Other GPU: AMD Radeon(TM) Graphics (512 MB, driver 32.0.21034.41)") != std::string::npos);
+    CHECK(s.find("Other GPU: Microsoft Basic Render Driver (driver 10.0, software)") != std::string::npos);
+    CHECK(s.find("Other GPU: NVIDIA") == std::string::npos);    // the active card is not listed twice
+
+    using HorizonCode::Value;
+    CHECK(callRow("hardware.gpuCount")[0].i == 3);
+    CHECK(callRow("hardware.activeGpuId")[0].s == "10de:2786:0");
+    const auto names = callRow("hardware.gpuNames")[0];
+    REQUIRE(names.items.size() == 3);
+    CHECK(names.items[0].s == "AMD Radeon(TM) Graphics");
+    CHECK(names.items[1].s == "NVIDIA GeForce RTX 4070");
+    const auto ids = callRow("hardware.gpuIds")[0];
+    REQUIRE(ids.items.size() == 3);
+    CHECK(ids.items[0].s == "1002:13c0:0");
+    CHECK(ids.items[1].s == "10de:2786:0");
+    CHECK(callRow("hardware.gpuAt", { Value::ofInt(1) })[0].s == "NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01)");
+    CHECK(callRow("hardware.gpuAt", { Value::ofInt(2) })[0].s == "Microsoft Basic Render Driver (driver 10.0, software)");
+    CHECK(callRow("hardware.gpuAt", { Value::ofInt(3) })[0].s.empty());
+    CHECK(callRow("hardware.gpuAt", { Value::ofInt(-1) })[0].s.empty());
+}

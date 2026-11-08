@@ -64,6 +64,9 @@ inline HE::GpuInfo logAdapter(const char* backend, IDXGIAdapter* adapter, const 
         if (s.size() == 5) info.driver = s.substr(0, 3) + "." + s.substr(3);
     }
     info.api    = api;
+    info.vendorId = d.VendorId;
+    info.deviceId = d.DeviceId;
+    info.software = d.VendorId == 0x1414;
     info.vramMB = d.DedicatedVideoMemory / (1024ull * 1024ull);
     return info;
 }

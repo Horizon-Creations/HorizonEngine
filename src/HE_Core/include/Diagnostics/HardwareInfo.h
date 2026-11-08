@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Hardware information (Thema 337)
@@ -33,6 +34,14 @@ namespace HE
 
 struct GpuInfo
 {
+    // A stable name for one adapter, the same on every API and across restarts: "vvvv:dddd:n" = PCI vendor
+    // id : device id (lower-case hex) : the adapter's number among adapters with the same two ids (0 for the
+    // usual single card). What the GPU choice is saved as. "" when the ids are unknown (some OpenGL drivers).
+    std::string id;
+    uint32_t    vendorId = 0;    // PCI ids as DXGI / Vulkan report them; 0 = unknown
+    uint32_t    deviceId = 0;
+    bool        software = false;// a software adapter (WARP, llvmpipe), not a card
+    bool        active   = false;// the one the renderer runs on (set in HardwareInfo::gpus)
     std::string name;            // "NVIDIA GeForce RTX 4070"
     std::string vendor;          // "NVIDIA", "AMD", "Intel", "Apple", ... ("" when unknown)
     std::string driver;          // driver version as the API reports it ("32.0.16.2101")
@@ -67,8 +76,11 @@ struct HardwareInfo
     // Power
     bool        hasBattery = false;
     // Filled in by the renderer / window system after start-up
-    GpuInfo     gpu;
-    DisplayInfo display;
+    GpuInfo     gpu;             // the adapter the renderer runs on
+    DisplayInfo display;         // the display the window is on (follows the window)
+    // Every adapter the machine has, the active one marked (GpuInfo::active). Windows lists them through DXGI
+    // before any renderer exists; elsewhere the running renderer reports its own list (Vulkan, Metal).
+    std::vector<GpuInfo> gpus;
 };
 
 // The machine's detection, run once on first use (thread-safe), as a copy: a reader never sees a
@@ -87,6 +99,11 @@ HE_API std::string gpuVendorFromText(const std::string& text);
 
 // Hand-over from the renderer / window system (see the header comment).
 HE_API void setGpuInfo(const GpuInfo& gpu);
+// The renderer's own list of adapters. Used only where the platform detection found none (macOS, Linux);
+// on Windows the DXGI list wins. The active one is marked from setGpuInfo.
+HE_API void setGpuList(const std::vector<GpuInfo>& gpus);
+// "10de:2786:0": the stable id of an adapter (see GpuInfo::id).
+HE_API std::string makeGpuId(uint32_t vendorId, uint32_t deviceId, int ordinal);
 HE_API void setDisplayInfo(const DisplayInfo& display);
 
 // The main facts as text, one line per group, for a settings page or a bug report:

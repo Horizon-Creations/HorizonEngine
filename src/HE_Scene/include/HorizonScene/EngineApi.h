@@ -2554,6 +2554,15 @@ namespace hardware {
     // the numbers it came from. A suggestion for a settings screen: nothing applies it by itself.
     std::string recommendedPreset();
     std::string recommendedPresetReason();
+    // Every graphics adapter of the machine (hardware.gpu* above describes the one in use). gpuIds() are the
+    // stable ids a GPU choice is saved with ("10de:2786:0"), gpuNames() the display names in the same order,
+    // gpuAt(i) one adapter as a text line ("NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01)", "" past the
+    // end), activeGpuId() the id of the one the renderer runs on ("" before a renderer exists).
+    int                       gpuCount();
+    std::vector<std::string>  gpuNames();
+    std::vector<std::string>  gpuIds();
+    std::string               gpuAt(int index);
+    std::string               activeGpuId();
     // By name, for a settings screen that lists them all: fields() are the HardwareProperty names in
     // order (CpuName ... OnBattery), value(name) is the text of one ("" for none; the name is
     // case-insensitive and an unknown name reads "" too).

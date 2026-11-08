@@ -27,6 +27,7 @@
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — CPU split of Render()
 #include <SDL3/SDL.h>
 #include <stdexcept>
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <fstream> // HE_DUMP_* headless capture writes PNG/PPM dumps straight to disk
@@ -6943,6 +6944,29 @@ void MetalRenderer::Initialize(HE::Window* window)
 	if (m_adapterInfo.vendor.empty()) m_adapterInfo.vendor = "Apple";
 	m_adapterInfo.api    = "Metal";
 	m_adapterInfo.vramMB = static_cast<uint64_t>([device recommendedMaxWorkingSetSize]) / (1024ull * 1024ull);
+	{
+		// Every Metal device of this Mac (a MacBook Pro with two GPUs, an eGPU): the list a GPU choice is made from.
+		// Metal exposes no PCI ids, so the vendor's id stands in and the ordinal counts devices of that vendor.
+		auto vendorIdOf = [](const std::string& v) -> uint32_t {
+			return v == "Apple" ? 0x106bu : v == "AMD" ? 0x1002u : v == "Intel" ? 0x8086u : v == "NVIDIA" ? 0x10deu : 0u; };
+		m_adapterInfo.vendorId = vendorIdOf(m_adapterInfo.vendor);
+		std::vector<HE::GpuInfo> all;
+		std::map<uint32_t, int> seen;
+		NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
+		for (id<MTLDevice> dev in devices)
+		{
+			HE::GpuInfo g;
+			g.name   = [[dev name] UTF8String];
+			g.vendor = HE::gpuVendorFromText(g.name);
+			if (g.vendor.empty()) g.vendor = "Apple";
+			g.api      = "Metal";
+			g.vendorId = vendorIdOf(g.vendor);
+			g.id       = HE::makeGpuId(g.vendorId, 0, seen[g.vendorId]++);
+			g.vramMB   = static_cast<uint64_t>([dev recommendedMaxWorkingSetSize]) / (1024ull * 1024ull);
+			all.push_back(std::move(g));
+		}
+		HE::setGpuList(all);
+	}
 }
 
 void MetalRenderer::Shutdown()

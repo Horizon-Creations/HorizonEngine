@@ -12,6 +12,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/packing.hpp>
 #include <stdexcept>
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <filesystem>
@@ -1582,6 +1583,9 @@ void VulkanRenderer::pickPhysicalDevice()
     m_adapterInfo.name   = props.deviceName;
     m_adapterInfo.vendor = HE::gpuVendorFromPciId(props.vendorID);
     m_adapterInfo.api    = "Vulkan";
+    m_adapterInfo.vendorId = props.vendorID;
+    m_adapterInfo.deviceId = props.deviceID;
+    m_adapterInfo.software = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
     {
         const uint32_t v = props.driverVersion;
         char drv[48];
@@ -1607,6 +1611,32 @@ void VulkanRenderer::pickPhysicalDevice()
             if ((mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mem.memoryHeaps[i].size > best)
                 best = mem.memoryHeaps[i].size;
         m_adapterInfo.vramMB = best / (1024ull * 1024ull);
+    }
+
+    // The whole device list, for platforms whose own detection cannot list adapters (Linux; Windows lists
+    // through DXGI and ignores this). Same order Vulkan numbers them in, ordinals among identical ids.
+    {
+        std::vector<HE::GpuInfo> all;
+        std::map<std::pair<uint32_t, uint32_t>, int> seen;
+        for (VkPhysicalDevice dev : devs)
+        {
+            VkPhysicalDeviceProperties dp{};
+            vkGetPhysicalDeviceProperties(dev, &dp);
+            HE::GpuInfo g;
+            g.name = dp.deviceName; g.vendor = HE::gpuVendorFromPciId(dp.vendorID); g.api = "Vulkan";
+            g.vendorId = dp.vendorID; g.deviceId = dp.deviceID;
+            g.software = dp.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            g.id = HE::makeGpuId(dp.vendorID, dp.deviceID, seen[{ dp.vendorID, dp.deviceID }]++);
+            VkPhysicalDeviceMemoryProperties mp{};
+            vkGetPhysicalDeviceMemoryProperties(dev, &mp);
+            VkDeviceSize best = 0;
+            for (uint32_t i = 0; i < mp.memoryHeapCount; ++i)
+                if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[i].size > best)
+                    best = mp.memoryHeaps[i].size;
+            g.vramMB = best / (1024ull * 1024ull);
+            all.push_back(std::move(g));
+        }
+        HE::setGpuList(all);
     }
 }
 

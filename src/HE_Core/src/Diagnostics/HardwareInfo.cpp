@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #ifdef _WIN32
+  #include <dxgi.h>      // adapter list (loaded at run time, no import library)
   #ifndef WIN32_LEAN_AND_MEAN
     #define WIN32_LEAN_AND_MEAN
   #endif
@@ -315,6 +317,71 @@ bool runningOnBattery()
 #endif
 }
 
+// ── Adapters ────────────────────────────────────────────────────────────────
+
+#ifdef _WIN32
+// Every DXGI adapter, in enumeration order, as GpuInfo. dxgi.dll is loaded here so HE_Core needs no import
+// library; a machine without it (never on a supported Windows) just lists nothing.
+std::vector<GpuInfo> enumerateDxgiAdapters()
+{
+    std::vector<GpuInfo> out;
+    HMODULE dll = ::LoadLibraryW(L"dxgi.dll");
+    if (!dll) return out;
+    using CreateFactory1Fn = HRESULT(WINAPI*)(REFIID, void**);
+    auto create = reinterpret_cast<CreateFactory1Fn>(::GetProcAddress(dll, "CreateDXGIFactory1"));
+    IDXGIFactory1* factory = nullptr;
+    if (create && SUCCEEDED(create(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))) && factory)
+    {
+        std::map<std::pair<uint32_t, uint32_t>, int> seen;   // ordinal among identical (vendor, device)
+        for (UINT i = 0;; ++i)
+        {
+            IDXGIAdapter1* adapter = nullptr;
+            if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND || !adapter) break;
+            DXGI_ADAPTER_DESC1 d{};
+            if (SUCCEEDED(adapter->GetDesc1(&d)))
+            {
+                GpuInfo g;
+                char name[256] = {};
+                ::WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, name, static_cast<int>(sizeof name) - 1, nullptr, nullptr);
+                g.name     = name;
+                g.vendorId = d.VendorId;
+                g.deviceId = d.DeviceId;
+                g.vendor   = gpuVendorFromPciId(d.VendorId);
+                g.vramMB   = d.DedicatedVideoMemory / (1024ull * 1024ull);
+                g.software = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0 || d.VendorId == 0x1414;
+                const int ordinal = seen[{ d.VendorId, d.DeviceId }]++;
+                g.id = makeGpuId(d.VendorId, d.DeviceId, ordinal);
+                // The Windows driver version of the D3D user-mode driver; NVIDIA's own number is built from it
+                // (32.0.16.2101 -> 621.01), the others keep the four parts.
+                LARGE_INTEGER umd{};
+                if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd)))
+                {
+                    char buf[48];
+                    if (d.VendorId == 0x10de)
+                    {
+                        char digits[16];
+                        std::snprintf(digits, sizeof digits, "%u%04u", unsigned(HIWORD(umd.LowPart)) % 10u, unsigned(LOWORD(umd.LowPart)));
+                        const std::string s = digits;
+                        if (s.size() == 5) g.driver = s.substr(0, 3) + "." + s.substr(3);
+                    }
+                    if (g.driver.empty())
+                    {
+                        std::snprintf(buf, sizeof buf, "%u.%u.%u.%u", unsigned(HIWORD(umd.HighPart)), unsigned(LOWORD(umd.HighPart)),
+                                      unsigned(HIWORD(umd.LowPart)), unsigned(LOWORD(umd.LowPart)));
+                        g.driver = buf;
+                    }
+                }
+                out.push_back(std::move(g));
+            }
+            adapter->Release();
+        }
+        factory->Release();
+    }
+    ::FreeLibrary(dll);
+    return out;
+}
+#endif
+
 // ── The platform provider ───────────────────────────────────────────────────
 
 class PlatformProvider final : public HardwareProvider
@@ -333,6 +400,9 @@ public:
         h.osName     = os.name;
         h.osVersion  = os.version;
         h.hasBattery = machineHasBattery();
+#ifdef _WIN32
+        h.gpus = enumerateDxgiAdapters();
+#endif
         return h;
     }
     uint64_t freeMemoryMB() override { return availableMemoryMB(); }
@@ -347,7 +417,9 @@ struct State
     std::shared_ptr<HardwareProvider> provider;            // never null after first use
     bool                              detected = false;
     HardwareInfo                      info;
+    std::vector<GpuInfo>              detectedGpus;        // from the provider's detect()
     GpuInfo                           gpu;                 // handed over by the renderer
+    std::vector<GpuInfo>              rendererGpus;        // the renderer's own list, used where the platform found none
     DisplayInfo                       display;             // handed over by the window system
 
     HardwareProvider& prov()
@@ -357,8 +429,45 @@ struct State
     }
     void merge()
     {
-        info.gpu     = gpu;
         info.display = display;
+        info.gpu     = gpu;
+        // The list: the platform's own when it found any, else what the renderer reported.
+        const std::vector<GpuInfo>& listed = detectedGpus.empty() ? rendererGpus : detectedGpus;
+        info.gpus = listed;
+        for (GpuInfo& g : info.gpus) g.active = false;
+        if (!gpu.valid()) return;
+
+        // Which listed adapter is the one the renderer runs on: by its id when it gave one (it knows its
+        // ordinal), else by the PCI ids, else by name (OpenGL cannot read the ids).
+        int idx = -1;
+        if (!gpu.id.empty())
+            for (size_t i = 0; i < info.gpus.size() && idx < 0; ++i)
+                if (info.gpus[i].id == gpu.id) idx = static_cast<int>(i);
+        if (idx < 0 && (gpu.vendorId || gpu.deviceId))
+            for (size_t i = 0; i < info.gpus.size() && idx < 0; ++i)
+                if (info.gpus[i].vendorId == gpu.vendorId && info.gpus[i].deviceId == gpu.deviceId) idx = static_cast<int>(i);
+        if (idx < 0)
+            for (size_t i = 0; i < info.gpus.size() && idx < 0; ++i)
+                if (info.gpus[i].name == gpu.name) idx = static_cast<int>(i);
+        if (idx >= 0)
+        {
+            info.gpus[idx].active = true;
+            // The list knows the ids and the memory the API could not read (OpenGL).
+            if (info.gpu.id.empty())     info.gpu.id = info.gpus[idx].id;
+            if (!info.gpu.vendorId)      info.gpu.vendorId = info.gpus[idx].vendorId;
+            if (!info.gpu.deviceId)      info.gpu.deviceId = info.gpus[idx].deviceId;
+            if (info.gpu.vendor.empty()) info.gpu.vendor = info.gpus[idx].vendor;
+            info.gpu.software = info.gpus[idx].software;
+        }
+        else
+        {
+            // Not in the list (listing failed, or a backend the platform cannot enumerate): the active card at least.
+            GpuInfo g = gpu;
+            g.active = true;
+            if (g.id.empty() && (g.vendorId || g.deviceId)) g.id = makeGpuId(g.vendorId, g.deviceId, 0);
+            info.gpus.push_back(g);
+        }
+        info.gpu.active = true;
     }
 };
 
@@ -377,6 +486,7 @@ HardwareInfo hardwareInfo()
     if (!s.detected)
     {
         s.info = s.prov().detect();
+        s.detectedGpus = s.info.gpus;
         s.detected = true;
     }
     s.merge();
@@ -452,7 +562,24 @@ void setHardwareProvider(std::shared_ptr<HardwareProvider> provider)
     s.detected = false;
     s.info     = HardwareInfo{};
     s.gpu      = GpuInfo{};
+    s.detectedGpus.clear();
+    s.rendererGpus.clear();
     s.display  = DisplayInfo{};
+}
+
+void setGpuList(const std::vector<GpuInfo>& gpus)
+{
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.rendererGpus = gpus;
+    s.merge();
+}
+
+std::string makeGpuId(uint32_t vendorId, uint32_t deviceId, int ordinal)
+{
+    char buf[48];
+    std::snprintf(buf, sizeof buf, "%04x:%04x:%d", vendorId & 0xffffu, deviceId & 0xffffu, ordinal);
+    return buf;
 }
 
 const char* hardwarePropertyName(int p)
@@ -545,6 +672,18 @@ std::string hardwareSummary()
         if (h.gpu.vramMB) { std::snprintf(buf, sizeof(buf), "%llu MB", static_cast<unsigned long long>(h.gpu.vramMB)); part(buf); }
         if (!h.gpu.driver.empty()) part("driver " + h.gpu.driver);
         part(h.gpu.api);
+        out += ")";
+    }
+
+    for (const GpuInfo& g : h.gpus)
+    {
+        if (g.active) continue;
+        out += "\nOther GPU: " + g.name + " (";
+        bool first = true;
+        auto part = [&](const std::string& p) { if (p.empty()) return; if (!first) out += ", "; out += p; first = false; };
+        if (g.vramMB) { std::snprintf(buf, sizeof(buf), "%llu MB", static_cast<unsigned long long>(g.vramMB)); part(buf); }
+        if (!g.driver.empty()) part("driver " + g.driver);
+        if (g.software) part("software");
         out += ")";
     }
 

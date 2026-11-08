@@ -4909,6 +4909,27 @@ std::string displayName()   { return HE::hardwareInfo().display.name; }
 bool        hasBattery()    { return HE::hardwareInfo().hasBattery; }
 bool        onBattery()     { return HE::onBattery(); }
 std::string summary()       { return HE::hardwareSummary(); }
+namespace {
+std::string gpuLine(const HE::GpuInfo& g)
+{
+    std::string out = g.name + " (";
+    bool first = true;
+    auto part = [&](const std::string& p) { if (p.empty()) return; if (!first) out += ", "; out += p; first = false; };
+    if (g.vramMB) part(std::to_string(g.vramMB) + " MB");
+    if (!g.driver.empty()) part("driver " + g.driver);
+    if (g.software) part("software");
+    return out + ")";
+}
+}
+int                      gpuCount()   { return static_cast<int>(HE::hardwareInfo().gpus.size()); }
+std::vector<std::string> gpuNames()   { std::vector<std::string> o; for (auto& g : HE::hardwareInfo().gpus) o.push_back(g.name); return o; }
+std::vector<std::string> gpuIds()     { std::vector<std::string> o; for (auto& g : HE::hardwareInfo().gpus) o.push_back(g.id); return o; }
+std::string gpuAt(int index)
+{
+    const auto h = HE::hardwareInfo();
+    return index >= 0 && index < static_cast<int>(h.gpus.size()) ? gpuLine(h.gpus[static_cast<size_t>(index)]) : std::string{};
+}
+std::string activeGpuId()  { return HE::hardwareInfo().gpu.id; }
 std::string recommendedPreset()       { return HE::qualityPresetName(HE::recommendQualityPreset(HE::hardwareInfo())); }
 std::string recommendedPresetReason() { return HE::recommendQualityReason(HE::hardwareInfo()); }
 std::vector<std::string> fields()
@@ -7333,6 +7354,20 @@ const std::vector<ApiFn>& registry()
                 [](Ctx&, const VV&){ return VV{ Value::ofBool(hardware::hasBattery()) }; } });
             t.push_back({ "hardware.onBattery", "Hardware", false, {}, {{"yes", P::Bool}}, "HE::api::hardware::onBattery",
                 [](Ctx&, const VV&){ return VV{ Value::ofBool(hardware::onBattery()) }; } });
+            num("hardware.gpuCount", "count", hardware::gpuCount, "HE::api::hardware::gpuCount");
+            str("hardware.activeGpuId", "id", hardware::activeGpuId, "HE::api::hardware::activeGpuId");
+            t.push_back({ "hardware.gpuNames", "Hardware", false, {}, {{"names", P::String, /*isArray=*/true}}, "HE::api::hardware::gpuNames",
+                [](Ctx&, const VV&){
+                    Value arr; arr.isArray = true; arr.type = P::String;
+                    for (auto& n : hardware::gpuNames()) arr.items.push_back(Value::ofString(std::move(n)));
+                    return VV{ std::move(arr) }; } });
+            t.push_back({ "hardware.gpuIds", "Hardware", false, {}, {{"ids", P::String, /*isArray=*/true}}, "HE::api::hardware::gpuIds",
+                [](Ctx&, const VV&){
+                    Value arr; arr.isArray = true; arr.type = P::String;
+                    for (auto& n : hardware::gpuIds()) arr.items.push_back(Value::ofString(std::move(n)));
+                    return VV{ std::move(arr) }; } });
+            t.push_back({ "hardware.gpuAt", "Hardware", false, {{"index", P::Int}}, {{"text", P::String}}, "HE::api::hardware::gpuAt",
+                [](Ctx&, const VV& a){ return VV{ Value::ofString(hardware::gpuAt(aI(a, 0))) }; } });
             t.push_back({ "hardware.fields", "Hardware", false, {}, {{"fields", P::String, /*isArray=*/true}}, "HE::api::hardware::fields",
                 [](Ctx&, const VV&){
                     Value arr; arr.isArray = true; arr.type = P::String;
@@ -8619,6 +8654,8 @@ const std::vector<ApiFn>& registry()
             { "hardware.hasBattery", "Has Battery" },
             { "hardware.onBattery", "Is On Battery" },
             { "hardware.summary", "Get Hardware Summary" },
+            { "hardware.gpuCount", "Get GPU Count" }, { "hardware.activeGpuId", "Get Active GPU Id" },
+            { "hardware.gpuNames", "GPU Names" }, { "hardware.gpuIds", "GPU Ids" }, { "hardware.gpuAt", "Get GPU At" },
             { "hardware.recommendedPreset", "Get Recommended Quality Preset" },
             { "hardware.recommendedPresetReason", "Get Recommended Preset Reason" },
             { "hardware.fields", "Hardware Fields" },

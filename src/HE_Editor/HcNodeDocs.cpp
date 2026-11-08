@@ -1159,6 +1159,20 @@ namespace
 	{ "hardware.recommendedPresetReason",
 	  "The numbers the recommended preset came from, as one line, for example \"12010 MB video memory, 31859 MB RAM, "
 	  "32 threads\". Shown next to the suggestion so the player can see why." },
+	{ "hardware.gpuCount",
+	  "How many graphics adapters the machine has (a laptop with an integrated and a dedicated card reads 2; the software "
+	  "adapter Windows always lists counts too). GPU Names, GPU Ids and Get GPU At describe them." },
+	{ "hardware.activeGpuId",
+	  "The id of the graphics adapter the game renders on, in the form GPU Ids lists (vendor:device:number, for example "
+	  "10de:2786:0). Empty until a renderer is running." },
+	{ "hardware.gpuNames",
+	  "The names of every graphics adapter, in the same order as GPU Ids. Fills a graphics-card drop-down." },
+	{ "hardware.gpuIds",
+	  "The stable ids of every graphics adapter (vendor:device:number, lower-case hex), in the order of GPU Names. The id "
+	  "is what a graphics-card choice is saved as; it stays the same across restarts." },
+	{ "hardware.gpuAt",
+	  "One graphics adapter as a text line, for example \"NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01)\", by its "
+	  "position in GPU Names (0 is the first). Empty past the end." },
 	{ "hardware.fields",
 	  "The names of every hardware value Get Hardware Value accepts, in order (CpuName, CpuCores, ... OnBattery). Fills a list on a settings screen without spelling the names in the graph." },
 	{ "hardware.value",
