@@ -360,6 +360,8 @@ add_executable(he_tests
     test_rvt_core.cpp
     # The RVT read as a graph node: shared lookup, t40..t43 pins, no live sampler, FXC (Thema 333 step 3)
     test_rvt_shader.cpp
+    # BC7 block encode for RVT cold pages, Windows counterpart of the Metal ASTC path (Thema 333 step 9)
+    test_block_encode.cpp
     # The RVT change journal on TerrainComponent: strokes leave a rect, rebuilds leave all (Thema 333 step 4)
     test_rvt_journal.cpp
     # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
