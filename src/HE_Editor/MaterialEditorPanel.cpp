@@ -1515,6 +1515,9 @@ void drawMaterialCanvas(State& st, AppContext& ctx, bool assetOk,
 			const bool fnInterface = d.type == MatNodeType::FnInput || d.type == MatNodeType::FnOutput;
 			if (fnInterface && !st.isFunction) return false;
 			if (d.type == MatNodeType::RvtSample) return false;   // engine-internal (Thema 333): the runtime fills its inputs
+			// RVT 2.0 (Thema 335): the graph cut exists, the page driver and the global RVT switch do not yet, so a
+			// placed pair would only draw an empty pool. Listed once those steps land.
+			if (d.type == MatNodeType::RvtWrite || d.type == MatNodeType::RvtRead) return false;
 			return matches(d.name, d.category);
 		};
 		const char* lastCat = "";

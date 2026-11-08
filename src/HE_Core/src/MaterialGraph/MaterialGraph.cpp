@@ -1,5 +1,6 @@
 #include "MaterialGraph/MaterialGraph.h"
 #include "MaterialGraph/RvtLookup.h"
+#include "MaterialGraph/RvtSplit.h"
 #include <cstdint>
 
 #include <GraphCommon/GraphJson.h>
@@ -297,6 +298,15 @@ const std::vector<MatNodeDesc>& registry()
           { { "Volume A", F::Vec4, 0 }, { "Volume B", F::Vec4, 0 } },
           { { "Base Color", F::Vec3, 0 }, { "Normal", F::Vec3, 0 }, { "AO", F::Float, 0 }, { "Roughness", F::Float, 0 },
             { "Valid", F::Float, 0 } }, 0 },
+
+        // ── v22: RVT 2.0 — the Write/Read pair (RvtSplit.h). Pin ORDER is on disk: never reorder. ──
+        { MatNodeType::RvtWrite, "RVT Write", "Landscape",
+          { { "Base Color", F::Vec3, 0.5f }, { "Normal", F::Vec3, 0 }, { "Roughness", F::Float, 0.5f }, { "AO", F::Float, 1 },
+            { "Specular", F::Float, 0.5f }, { "Height", F::Float, 0 }, { "Mask", F::Float, 0 } },
+          {}, 2 },
+        { MatNodeType::RvtRead, "RVT Read", "Landscape", {},
+          { { "Base Color", F::Vec3, 0 }, { "Normal", F::Vec3, 0 }, { "Roughness", F::Float, 0 }, { "AO", F::Float, 0 },
+            { "Valid", F::Float, 0 } }, 0 },
     };
     return kReg;
 }
@@ -524,6 +534,8 @@ int MaterialGraph::addNode(MatNodeType type, float x, float y)
     if (matNodeIsBombing(type)) { n.p[0] = 1.0f; n.p[1] = kMatBombDefaultSharpness; n.p[2] = 0.0f; }
     if (type == MatNodeType::NormalMapBombSample || type == MatNodeType::NormalMapArrayBombSample)
         n.p[3] = 1.0f;
+    // v22: a fresh RVT Write/Read pair names the same virtual texture out of the box.
+    if (type == MatNodeType::RvtWrite || type == MatNodeType::RvtRead) n.s = "RVT";
     // v10: a fresh layer-blend node starts with two named layers.
     if (type == MatNodeType::LandscapeLayerBlend) n.s = "Layer 1\nLayer 2";
     if (type == MatNodeType::Output) n.p[2] = 0.5f;
@@ -1580,6 +1592,28 @@ HE_MG_NOINLINE bool emitLayerBlendNode(EmitCtx& c, const Scope& sc, const MatGra
                  + "heRvtSample(vWorldPos.xz, " + va + ", " + vb + ", " + v + "_b, " + v + "_n, " + v + "_ao, " + v + "_r, " + v + "_ok); "
                  + "vec3 " + v + " = " + v + "_b;";
             pinExpr = { v + "_b", v + "_n", v + "_ao", v + "_r", v + "_ok" };
+            break;
+        }
+        case MatNodeType::RvtWrite:
+            // A sink: the page shaders are cut from the pins that feed it (RvtSplit.h), the live
+            // shader never evaluates it. Reached only through a function graph or a stray link.
+            decl = "float " + v + " = 0.0;";
+            break;
+        case MatNodeType::RvtRead:
+        {
+            // The same lookup as RvtSample. Its two volume vectors are parameters the engine fills,
+            // named after the RVT so two Read nodes of one RVT share the slots.
+            c.usesRvt = true;
+            MatGraphNode pa; pa.id = n.id; pa.s = matRvtVolumeParamName(n.s, 'A');
+            MatGraphNode pb; pb.id = n.id; pb.s = matRvtVolumeParamName(n.s, 'B');
+            pa.group = pb.group = "RVT";
+            const int sa = paramSlot(c, pa, MatParamKind::Vec4), sb = paramSlot(c, pb, MatParamKind::Vec4);
+            const std::string va = sa < 0 ? std::string("vec4(0.0)") : "heParams.v[" + std::to_string(sa) + "]";
+            const std::string vb = sb < 0 ? std::string("vec4(0.0)") : "heParams.v[" + std::to_string(sb) + "]";
+            decl = "vec3 " + v + "_b; vec3 " + v + "_n; float " + v + "_ao; float " + v + "_r; float " + v + "_ok; "
+                 + "heRvtSample(vWorldPos.xz, " + va + ", " + vb + ", " + v + "_b, " + v + "_n, " + v + "_ao, " + v + "_r, " + v + "_ok); "
+                 + "vec3 " + v + " = " + v + "_b;";
+            pinExpr = { v + "_b", v + "_n", v + "_r", v + "_ao", v + "_ok" };
             break;
         }
         case MatNodeType::LandscapeGroupPick:

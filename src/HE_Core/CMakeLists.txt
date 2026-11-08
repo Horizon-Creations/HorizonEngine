@@ -42,6 +42,7 @@ add_library(HorizonCore SHARED
 	src/Hpak/ReachFilter.cpp
 	src/Events/EventBus.cpp
 	src/MaterialGraph/MaterialGraph.cpp
+	src/MaterialGraph/RvtSplit.cpp
 	src/MaterialGraph/AutoLandscapeMaterial.cpp
 	src/MaterialGraph/WeatherMaterialFunctions.cpp
 	src/MaterialGraph/ProceduralSurfaceFunctions.cpp

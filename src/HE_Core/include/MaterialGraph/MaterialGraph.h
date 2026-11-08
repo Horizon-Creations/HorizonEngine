@@ -276,6 +276,24 @@ enum class MatNodeType : uint8_t
     // AO, Roughness, and Valid (0 where there is nothing to show). Engine-internal: the editor palette
     // does not list it, and only a backend with Capabilities::supportsRvt can draw a material that has it.
     RvtSample,
+
+    // ── v22: RVT 2.0, the Runtime Virtual Texture as a material feature (Thema 335) ──
+    // A pair of nodes that name one virtual texture (`s` = its name) and cut the material in two:
+    // everything BEFORE the Write node is painted once into the page pool, everything AFTER the Read
+    // node runs live per pixel. MaterialGraph/RvtSplit.h cuts the graph (one unlit page shader per
+    // connected Write input) and hashes what a page depends on. Engine-internal until the global RVT
+    // switch and the page driver exist (the editor palette does not list them yet).
+    //
+    // RvtWrite: a sink with no outputs, so the demand-driven emit never reaches it (like Landscape
+    // Foliage); the split finds it by scanning. Inputs Base Color, Normal, Roughness, AO, and the
+    // optional Specular, Height, Mask. p[0] = texels per metre of mip 0 (0 = the volume's own
+    // setting), p[1] = layer occupancy bitmask for the page driver (bit k = input k is stored;
+    // 0 = every connected input).
+    RvtWrite,
+    // RvtRead: no inputs. Outputs Base Color, Normal, Roughness, AO and Valid (0 where no page is
+    // resident yet). Emits the shared heRvtSample lookup of RvtLookup.h, whose two volume vectors
+    // are engine-filled parameters named by matRvtVolumeParamName.
+    RvtRead,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot

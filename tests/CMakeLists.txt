@@ -360,6 +360,8 @@ add_executable(he_tests
     test_rvt_core.cpp
     # The RVT read as a graph node: shared lookup, t40..t43 pins, no live sampler, FXC (Thema 333 step 3)
     test_rvt_shader.cpp
+    # RVT 2.0 step 1: RVT Write / RVT Read nodes and the page/live graph cut (Thema 335)
+    test_rvt_material_split.cpp
     # Block encoder for RVT cold pages: ASTC (Metal, step 6j) and BC7 (Windows, step 9)
     test_block_encode.cpp
     # The RVT change journal on TerrainComponent: strokes leave a rect, rebuilds leave all (Thema 333 step 4)
