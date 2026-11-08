@@ -11508,9 +11508,11 @@ void EditorApplication::dumpFrameHeadless()
 				drive(drv, baked, 300);
 				double mLive = 0, mDirect = 0; unsigned xLive = 0, xDirect = 0;
 				diff(live.pages, baked.pages, mLive, xLive); diff(baked.direct, baked.pages, mDirect, xDirect);
-				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE baked: filled %d, from the baked base %d (%u attach(es)), %u pages painted, %u view materials (reference %u: the page graphs were %s); vs reference pages mean %.2f /255 max %u; vs whole material mean %.2f max %u",
+				// (the material counters are equal on purpose: three baked texture-sampling views stand where the three page graphs were; the
+				// proof that the page graphs are not built is the driver's "baked base" attach line and bakedBase())
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE baked: filled %d, from the baked base %d (%u attach(es)), %u pages painted, %u view materials (reference %u); vs reference pages mean %.2f /255 max %u; vs whole material mean %.2f max %u",
 				            baked.filled, baked.baked, baked.bakedAttaches, baked.painted, baked.materials, live.materials,
-				            baked.materials < live.materials ? "not built" : "BUILT", mLive, xLive, mDirect, xDirect);
+				            mLive, xLive, mDirect, xDirect);
 				writeBMP(m_dumpPath + ".rvt_base_baked.bmp", baked.pages, W, H);
 
 				// A ground edit ends it for good: the journal says the pages' ground changed, the landscape starts over from the graphs.

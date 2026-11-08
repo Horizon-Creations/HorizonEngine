@@ -17,6 +17,7 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <HorizonScene/LandscapeHlod.h>
+#include <HorizonScene/RvtBaseBake.h>
 
 #include <algorithm>
 #include <cstring>
@@ -293,6 +294,53 @@ TEST_CASE("Reach: assets the editor made for the export are packed and their fol
 	CHECK(game.ensureResident(mat));
 	CHECK(game.getMaterial(mat) != nullptr);
 	CHECK_FALSE(game.ensureResident(HE::landscape::hlodAssetId(terrain, 0, 0, HE::landscape::HlodAsset::Material)));
+	he_test::removeAllQuiet(out);
+}
+
+TEST_CASE("Reach: the RVT base pictures of a landscape are packed, kept by the reach root, and resolve by id in a mounted pak")
+{
+	Project p("rvtbase");
+	const auto out = std::filesystem::temp_directory_path() / "he_reach_rvtbase_out";
+	he_test::removeAllQuiet(out);
+
+	const HE::UUID terrain{ 0xABCDEF0123456789ull, 0x1122334455667788ull };
+	const uint64_t key = 0x1234567890ABCDEFull;
+	HE::landscape::HlodChunkImages img;
+	img.side = 16;
+	img.albedo.assign(16 * 16 * 4, 120); img.normal.assign(16 * 16 * 4, 128); img.surface.assign(16 * 16 * 4, 60);
+	std::vector<HE::landscape::HlodAssetBlob> blobs;
+	REQUIRE(HE::landscape::buildRvtBaseAssets(img, terrain, key, blobs));
+	REQUIRE(blobs.size() == 3);
+
+	const std::vector<uint8_t> startup = bytesOf("{\"entities\":[{\"mesh\":" + jsonPair(p.meshA) + "}]}");
+	std::vector<std::pair<std::string, std::vector<uint8_t>>> scenes = { { "Content/Startup.hescene", startup } };
+	ExportSettings settings;
+	settings.compress = false;
+	settings.onlyReferenced = true;
+	for (const auto& b : blobs)
+	{
+		Hpak::PackSettings::ExtraAsset ea;
+		ea.id = b.id; ea.relPath = b.relPath; ea.type = b.type; ea.bytes = b.bytes;
+		settings.extraAssets.push_back(std::move(ea));
+	}
+	REQUIRE(ProjectExporter::exportProject(p.dir, "RvtBase", "", out, settings, startup, scenes).success);
+
+	HpakReader reader;
+	REQUIRE(reader.open((out / "RvtBase.hpak").string()));
+	for (const auto& b : blobs) CHECK(reader.hasEntry(b.id));
+
+	// What the game does: mount the pak, ask for the pictures by the ids the key derives. Found for the key, not for another.
+	ContentManager game(".");
+	REQUIRE(game.mountPak((out / "RvtBase.hpak").string()));
+	for (HE::landscape::RvtBaseAsset w : { HE::landscape::RvtBaseAsset::Albedo, HE::landscape::RvtBaseAsset::Normal, HE::landscape::RvtBaseAsset::Surface })
+	{
+		const HE::UUID id = HE::landscape::rvtBaseAssetId(terrain, key, w);
+		CHECK(game.ensureResident(id));
+		const TextureAsset* t = game.getTexture(id);
+		REQUIRE(t != nullptr);
+		CHECK(t->width == 16);
+		CHECK_FALSE(game.ensureResident(HE::landscape::rvtBaseAssetId(terrain, key + 1, w)));
+	}
 	he_test::removeAllQuiet(out);
 }
 
