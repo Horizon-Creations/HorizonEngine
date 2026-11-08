@@ -349,13 +349,17 @@ StaticMeshAsset makeCard(float halfWidth, float y0, float y1)
 {
     StaticMeshAsset m;
     m.type = HE::AssetType::StaticMesh;
+    constexpr float kSide = 0.45f, kUp = 0.893f;   // unit length: 0.45^2 + 0.893^2 = 1.0
     struct Plane { float ax, az, u0, u1; };               // the quad's horizontal axis, its atlas half
     const Plane planes[2] = { { 1.0f, 0.0f, 0.0f, 0.5f }, { 0.0f, 1.0f, 0.5f, 1.0f } };
     for (const Plane& p : planes)
         for (int side = 0; side < 2; ++side)
         {
             const float s  = side == 0 ? 1.0f : -1.0f;
-            const float nx = -p.az * s, nz = p.ax * s;    // the axis turned a quarter about Y, per side
+            // The face's normal tilted towards the sky: a card is lit as a bush canopy, not as a
+            // wall, so its two sides do not go dark or glare with the sun's side (what a
+            // foliage impostor does everywhere). The winding below still follows the face.
+            const float nx = -p.az * s * kSide, nz = p.ax * s * kSide;
             const uint32_t base = static_cast<uint32_t>(m.vertices.size() / 3);
             const float px[4] = { -halfWidth * p.ax,  halfWidth * p.ax,  halfWidth * p.ax, -halfWidth * p.ax };
             const float py[4] = { y0, y0, y1, y1 };
@@ -365,7 +369,7 @@ StaticMeshAsset makeCard(float halfWidth, float y0, float y1)
             for (int k = 0; k < 4; ++k)
             {
                 m.vertices.insert(m.vertices.end(), { px[k], py[k], pz[k] });
-                m.normals.insert(m.normals.end(), { nx, 0.0f, nz });
+                m.normals.insert(m.normals.end(), { nx, kUp, nz });
                 m.uvs.insert(m.uvs.end(), { pu[k], pv[k] });
             }
             // a, b, c, d counter-clockwise seen along the normal (side 0), reversed for side 1.

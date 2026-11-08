@@ -37,7 +37,21 @@ struct FoliageOptions
     // (a picture of this plant) replaces the layer's. Null = the engine card.
     HE::UUID impostorMesh;
     HE::UUID impostorMaterial;
+    // Height of the baked plant in metres (card height x instanceScale), 0 = unknown.
+    // The card does not take over before the plant is down to kImpostorPixels tall.
+    float    impostorHeight = 0.0f;
 };
+
+// A card replaces geometry only once the whole plant is this many pixels tall or less
+// (1080 p, 60 degrees): above it the card's flat, two-view look shows.
+constexpr float kImpostorPixels = 128.0f;
+
+inline float impostorStartDistance(float plantHeight)
+{
+    LodScreenMetrics m;
+    m.tolerancePx = kImpostorPixels;
+    return lodDistanceForError(plantHeight, m);
+}
 
 // Share of the layer's plants a level still draws: the first two extra levels draw
 // all of them (the plant is still large), every one beyond thins by a quarter, to a
@@ -80,8 +94,10 @@ inline size_t fillFoliageLayer(FoliageLayer& layer, const std::vector<Level>& ch
             d.meshAssetId     = opt.impostorMesh == HE::UUID{} ? HE::kEngineCrossCardMeshId : opt.impostorMesh;
             d.materialAssetId = opt.impostorMesh == HE::UUID{} ? layer.materialAssetId : opt.impostorMaterial;
             d.distance        = std::min(last * 1.8f, 0.5f * (last + layer.drawDistance));
+            if (opt.impostorMesh != HE::UUID{} && opt.impostorHeight > 0.0f)
+                d.distance = std::max(d.distance, impostorStartDistance(opt.impostorHeight));
             d.density         = lodDensityFor(layer.lods.size());
-            layer.lods.push_back(d);
+            if (d.distance < layer.drawDistance) layer.lods.push_back(d);
         }
     }
 
@@ -101,9 +117,11 @@ inline size_t fillFoliageLayer(FoliageLayer& layer, const std::vector<Level>& ch
 // of an earlier bake) is replaced in place, keeping its distance and density, so baking
 // again changes the picture and nothing else. Otherwise a level is appended: it starts
 // where the nearest-but-one would (past the last level by 1.8x, or half-way to
-// `drawDistance`), and thins like any level of its index. Returns false when the layer
+// `drawDistance`), but never before the plant is kImpostorPixels tall (`plantHeight`, metres
+// with the instance scale; 0 = unknown), and thins like any level of its index. Returns false when the layer
 // has no room (kMaxLods) or the impostor starts past `drawDistance`.
-inline bool applyImpostorLevel(FoliageLayer& layer, HE::UUID card, HE::UUID material, HE::UUID previousCard = {})
+inline bool applyImpostorLevel(FoliageLayer& layer, HE::UUID card, HE::UUID material, float plantHeight = 0.0f,
+                               HE::UUID previousCard = {})
 {
     if (!layer.lods.empty())
     {
@@ -126,6 +144,7 @@ inline bool applyImpostorLevel(FoliageLayer& layer, HE::UUID card, HE::UUID mate
     d.distance        = layer.lods.empty() ? 0.5f * layer.drawDistance
                                            : std::min(layer.lods.back().distance * 1.8f,
                                                       0.5f * (layer.lods.back().distance + layer.drawDistance));
+    if (plantHeight > 0.0f) d.distance = std::max(d.distance, impostorStartDistance(plantHeight));
     if (d.distance >= layer.drawDistance) return false;
     d.density = lodDensityFor(layer.lods.size());
     layer.lods.push_back(d);

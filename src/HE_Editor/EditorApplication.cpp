@@ -7765,6 +7765,31 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			}
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGELOD %zu level(s) from '%s'", fl.lods.size(), fd);
 		}
+		// HE_DUMP_FOLIAGEIMPOSTOR=<from>:<card path>:<material path> adds a baked impostor level
+		// (Thema 331 S4): the card and its cut-out material are project files, loaded by
+		// path, so the dump needs the project in the config (LastProjectPath). The log line
+		// says whether the three assets (card, material, its atlas) resolved; this is how
+		// the far level is seen on a backend the editor loop cannot drive headless (GL).
+		if (const char* ip = std::getenv("HE_DUMP_FOLIAGEIMPOSTOR"); ip && *ip && fl.lods.size() < FoliageLayer::kMaxLods)
+		{
+			const std::string spec(ip);
+			const size_t c1 = spec.find(':'), c2 = c1 == std::string::npos ? c1 : spec.find(':', c1 + 1);
+			if (c2 != std::string::npos)
+			{
+				FoliageLod d;
+				d.distance = static_cast<float>(std::atof(spec.c_str()));
+				d.meshAssetId     = contentManager().loadAsset(spec.substr(c1 + 1, c2 - c1 - 1));
+				d.materialAssetId = contentManager().loadAsset(spec.substr(c2 + 1));
+				const MaterialAsset* im = contentManager().getMaterial(d.materialAssetId);
+				const std::string atlas = im && !im->texturePaths.empty() ? im->texturePaths[0] : std::string{};
+				const HE::UUID atlasId = atlas.empty() ? HE::UUID{} : contentManager().loadAsset(atlas);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_FOLIAGEIMPOSTOR card %s, material %s, atlas '%s' %s",
+				            d.meshAssetId == HE::UUID{} ? "NOT loaded" : "loaded",
+				            d.materialAssetId == HE::UUID{} ? "NOT loaded" : "loaded", atlas.c_str(),
+				            atlasId == HE::UUID{} ? "NOT loaded" : "loaded");
+				fl.lods.push_back(d);
+			}
+		}
 		reg.emplace<FoliageComponent>(land, fol);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		const auto t0 = std::chrono::steady_clock::now();

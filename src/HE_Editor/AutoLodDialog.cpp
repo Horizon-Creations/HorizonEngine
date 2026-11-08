@@ -133,7 +133,8 @@ namespace
 	// with: a layer material replaces the mesh's own on every slot. The written assets
 	// are loaded so their ids are the ones a scene will name.
 	Outcome bakeImpostorFiles(AppContext& /*ctx*/, ContentManager& cm, const StaticMeshAsset& src,
-	                          const FoliageLayer* layer, const Options& o, HE::UUID& cardOut, HE::UUID& materialOut)
+	                          const FoliageLayer* layer, const Options& o, HE::UUID& cardOut, HE::UUID& materialOut,
+	                          float& heightOut)
 	{
 		if (src.path.empty()) return fail("The mesh has no asset path to put the impostor next to.");
 		if (src.cooked) return fail("A packed mesh cannot be baked.");
@@ -170,6 +171,7 @@ namespace
 		if (materialOut == HE::UUID{}) materialOut = written.material;
 		if (cardOut == HE::UUID{} || materialOut == HE::UUID{}) return fail("The impostor was written but could not be loaded.");
 
+		heightOut = (baked.y1 - baked.y0) * (layer ? 0.5f * (layer->minScale + layer->maxScale) : 1.0f);
 		Outcome out;
 		out.ok = true;
 		char buf[200];
@@ -316,7 +318,7 @@ Outcome run(AppContext& ctx, const Request& req, const Options& o)
 		std::string impostorNote;
 		if (o.bakeImpostor)
 		{
-			const Outcome baked = bakeImpostorFiles(ctx, cm, src, layer, o, fo.impostorMesh, fo.impostorMaterial);
+			const Outcome baked = bakeImpostorFiles(ctx, cm, src, layer, o, fo.impostorMesh, fo.impostorMaterial, fo.impostorHeight);
 			if (!baked.ok) impostorNote = " Impostor not baked: " + baked.message;
 			else impostorNote = " " + baked.message;
 		}
@@ -370,10 +372,11 @@ Outcome bakeImpostor(AppContext& ctx, const Request& req, const Options& o)
 	if (src.path.empty()) src.path = path;
 
 	HE::UUID card, material;
-	Outcome out = bakeImpostorFiles(ctx, cm, src, &layer, o, card, material);
+	float height = 0.0f;
+	Outcome out = bakeImpostorFiles(ctx, cm, src, &layer, o, card, material, height);
 	if (!out.ok) return out;
 	if (ctx.undoSys) ctx.undoSys->snapshotNow("Bake Impostor");
-	if (!HE::AutoLodApply::applyImpostorLevel(layer, card, material))
+	if (!HE::AutoLodApply::applyImpostorLevel(layer, card, material, height))
 	{
 		out.ok = false;
 		out.message += " The layer has no room for another level (or it would start past the Draw Distance), so it was not added.";

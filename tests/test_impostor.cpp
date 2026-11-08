@@ -193,6 +193,7 @@ TEST_CASE("Impostor: the card is two crossed double-faced quads, sized to the pl
 		auto N = [&](size_t k) { return glm::vec3(card.normals[card.indices[t + k] * 3], card.normals[card.indices[t + k] * 3 + 1], card.normals[card.indices[t + k] * 3 + 2]); };
 		const glm::vec3 geometric = glm::cross(P(1) - P(0), P(2) - P(0));
 		CHECK(glm::dot(geometric, N(0)) > 0.0f);   // counter-clockwise seen along the normal
+		CHECK(glm::length(N(0)) == doctest::Approx(1.0f).epsilon(0.01));
 	}
 	// Plane A (vertices 0..7) maps the left half of the atlas, plane B the right half.
 	for (size_t v = 0; v < 8; ++v)  CHECK(card.uvs[v * 2] <= 0.5f);
@@ -280,6 +281,19 @@ TEST_CASE("Impostor: the level goes on the far end of a layer, and baking again 
 	CHECK(layer.lods.size() == 2u);
 	CHECK(layer.lods[1].materialAssetId == HE::UUID{ 7, 7 });
 	CHECK(layer.lods[1].distance == doctest::Approx(d));
+
+	// A tall plant keeps its card back until the plant is small on screen.
+	FoliageLayer tall;
+	tall.drawDistance = 200.0f;
+	FoliageLod tallNear; tallNear.meshAssetId = HE::UUID{ 9, 9 }; tallNear.distance = 2.0f;
+	tall.lods = { tallNear };
+	REQUIRE(HE::AutoLodApply::applyImpostorLevel(tall, card, mat, 5.0f));
+	CHECK(tall.lods.back().distance == doctest::Approx(HE::AutoLodApply::impostorStartDistance(5.0f)));
+	CHECK(HE::AutoLodApply::impostorStartDistance(5.0f) > 30.0f);
+	FoliageLayer tooFar;
+	tooFar.drawDistance = 20.0f;
+	CHECK_FALSE(HE::AutoLodApply::applyImpostorLevel(tooFar, card, mat, 5.0f));   // would start past the draw distance
+	CHECK(tooFar.lods.empty());
 
 	// A chain that ends on the ENGINE card gets the impostor in place of it.
 	FoliageLayer withEngineCard;
