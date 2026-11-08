@@ -112,6 +112,9 @@ public:
 	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
 	void  DestroyRvtPool() override;
 	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	// HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+	// CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+	uint32_t RvtLayerChannels(int layer) const override;
 	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
@@ -516,6 +519,29 @@ private:
 	uint32_t    m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
 	bool        rvtGrowPool(uint32_t slot);
 	VkSampler   m_rvtSampler = VK_NULL_HANDLE; // nearest/clamp: the lookup is texelFetch, the descriptor is combined
+	// HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k / D3D11/D3D12's step 10): layers 1/2 hold two channels
+	// (VK_FORMAT_R8G8_UNORM) instead of four. A page can't get there with vkCmdCopyImage (the format changes), so a
+	// tiny fullscreen draw reads the just-drawn page (a transient sampled view of the viewport image) and writes the
+	// two kept channels into a transient single-layer view/framebuffer of the destination array's hot slice. Packed
+	// draws always wait synchronously (not through the m_rvtPendingCmds pipeline) — the transient view/framebuffer/
+	// descriptor set this needs must outlive the GPU work, and reusing them across overlapping frames in flight is
+	// not worth the bookkeeping for an admin-rate pass.
+	bool                  m_rvtPack = false;
+	bool                  m_rvtPackTried = false;
+	VkRenderPass          m_rvtPackRP = VK_NULL_HANDLE;
+	VkPipelineLayout      m_rvtPackPipeLayout = VK_NULL_HANDLE;
+	VkPipeline            m_rvtPackPipeline = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_rvtPackSetLayout = VK_NULL_HANDLE;
+	VkDescriptorPool      m_rvtPackDescPool = VK_NULL_HANDLE;
+	// The previous call's transient destination view/framebuffer (rvtPackPage): destroying them is only safe once the
+	// command buffer that used them has finished on the GPU, which is guaranteed by the time rvtPackPage runs AGAIN
+	// (every packed page waits synchronously before the next one — see rvtPackPage's definition) or DestroyRvtPool
+	// runs (which waits for the device first).
+	VkImageView           m_rvtPackLastView = VK_NULL_HANDLE;
+	VkFramebuffer         m_rvtPackLastFb   = VK_NULL_HANDLE;
+	void rvtPackReleaseTransient();
+	bool ensureRvtPackPipeline();
+	void rvtPackPage(VkCommandBuffer cmd, VkImage srcImage, int layer, VkImage dstImage, uint32_t hotSlice, uint32_t px);
 	struct RvtTable
 	{
 		RvtImage img; uint32_t side = 0, mips = 0;

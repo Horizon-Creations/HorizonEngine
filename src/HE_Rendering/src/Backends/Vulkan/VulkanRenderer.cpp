@@ -247,6 +247,11 @@ void VulkanRenderer::Shutdown()
     if (m_device) deviceWaitIdle();
     DestroyRvtPool();
     if (m_rvtSampler) { vkDestroySampler(m_device, m_rvtSampler, nullptr); m_rvtSampler = VK_NULL_HANDLE; }
+    if (m_rvtPackPipeline)   { vkDestroyPipeline(m_device, m_rvtPackPipeline, nullptr); m_rvtPackPipeline = VK_NULL_HANDLE; }
+    if (m_rvtPackRP)         { vkDestroyRenderPass(m_device, m_rvtPackRP, nullptr); m_rvtPackRP = VK_NULL_HANDLE; }
+    if (m_rvtPackPipeLayout) { vkDestroyPipelineLayout(m_device, m_rvtPackPipeLayout, nullptr); m_rvtPackPipeLayout = VK_NULL_HANDLE; }
+    if (m_rvtPackSetLayout)  { vkDestroyDescriptorSetLayout(m_device, m_rvtPackSetLayout, nullptr); m_rvtPackSetLayout = VK_NULL_HANDLE; }
+    if (m_rvtPackDescPool)   { vkDestroyDescriptorPool(m_device, m_rvtPackDescPool, nullptr); m_rvtPackDescPool = VK_NULL_HANDLE; }
     // ImGui editor textures (logo + content-browser icons): destroy the GPU
     // resources we retained for them. The ImGui descriptor sets are freed by
     // ImGui's own shutdown, which the editor runs before tearing down the renderer.
@@ -6621,6 +6626,216 @@ struct VulkanRenderer::RvtColdWork
 
 VulkanRenderer::~VulkanRenderer() { delete m_rvtWork; }
 
+// mode 1 = normal (x, z = R, B of the page), mode 2 = surface (AO, roughness = R, G of the page) — same convention
+// as D3D11's kRvtPackHLSL / D3D12's kRvtPackHLSL12. texelFetch at gl_FragCoord: exact, an 8-bit value round-trips
+// through float unchanged. The vertex stage is m_matShaderLib.fullscreenVertex (no varyings, same trick as D3D's
+// kFSTriangleVS: gl_FragCoord carries the pixel position).
+static const char* kRvtPackFragGLSL = R"(#version 450
+layout(set = 0, binding = 0) uniform sampler2D rvtPackSrc;
+layout(push_constant) uniform RvtPackPC { uint mode; } pc;
+layout(location = 0) out vec2 outColor;
+void main()
+{
+    vec4 c = texelFetch(rvtPackSrc, ivec2(gl_FragCoord.xy), 0);
+    outColor = pc.mode == 1u ? c.rb : c.rg;
+}
+)";
+
+// Built lazily, once (a failure sticks — RenderSceneImage's page copy falls back to "page not packed, not written"
+// rather than retrying every page). Packed draws always wait synchronously (see the member comment in the header),
+// so ONE descriptor set is safe to update and reuse for every page: by the time the next one runs, the GPU is done
+// reading the last one's binding.
+bool VulkanRenderer::ensureRvtPackPipeline()
+{
+    if (m_rvtPackPipeline) return true;
+    if (m_rvtPackTried) return false;
+    m_rvtPackTried = true;
+#if !defined(HE_HAVE_SHADERC)
+    HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: RVT page pack needs the shader cross-compiler, not built into this binary");
+    return false;
+#else
+    const HE::MaterialShaderLibrary::Compiled& vc = m_matShaderLib.fullscreenVertex(HE::MaterialShaderLibrary::Backend::SpirV);
+    const he::shaderc::Result fc = he::shaderc::compile(kRvtPackFragGLSL, he::shaderc::Stage::Fragment, he::shaderc::Target::SpirvBinary);
+    if (!vc.ok || vc.spirv.empty() || !fc.ok || fc.spirv.empty())
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("VulkanRenderer: RVT page pack shader compile failed: ") + vc.log + " " + fc.log).c_str());
+        return false;
+    }
+    auto makeModule = [&](const std::vector<uint32_t>& spv) -> VkShaderModule {
+        VkShaderModuleCreateInfo ci{ VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        ci.codeSize = spv.size() * sizeof(uint32_t);
+        ci.pCode    = spv.data();
+        VkShaderModule mod = VK_NULL_HANDLE;
+        vkCreateShaderModule(m_device, &ci, nullptr, &mod);
+        return mod;
+    };
+    VkShaderModule vs = makeModule(vc.spirv);
+    VkShaderModule fs = makeModule(fc.spirv);
+    if (!vs || !fs)
+    {
+        if (vs) vkDestroyShaderModule(m_device, vs, nullptr);
+        if (fs) vkDestroyShaderModule(m_device, fs, nullptr);
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: RVT page pack shader module creation failed");
+        return false;
+    }
+
+    VkDescriptorSetLayoutBinding bind{};
+    bind.binding = 0; bind.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bind.descriptorCount = 1; bind.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo slci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    slci.bindingCount = 1; slci.pBindings = &bind;
+    bool ok = vkCreateDescriptorSetLayout(m_device, &slci, nullptr, &m_rvtPackSetLayout) == VK_SUCCESS;
+
+    VkPushConstantRange pc{}; pc.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT; pc.size = 4;
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.setLayoutCount = 1; plci.pSetLayouts = &m_rvtPackSetLayout;
+    plci.pushConstantRangeCount = 1; plci.pPushConstantRanges = &pc;
+    if (ok) ok = vkCreatePipelineLayout(m_device, &plci, nullptr, &m_rvtPackPipeLayout) == VK_SUCCESS;
+
+    VkAttachmentDescription att{};
+    att.format = VK_FORMAT_R8G8_UNORM; att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    // The caller transitions the slice to COLOR_ATTACHMENT_OPTIMAL before BeginRenderPass and back to
+    // SHADER_READ_ONLY_OPTIMAL after EndRenderPass (explicit barriers, this file's convention throughout RVT);
+    // the render pass itself makes no layout change.
+    att.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    att.finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sub{}; sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1; sub.pColorAttachments = &ref;
+    VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    rpci.attachmentCount = 1; rpci.pAttachments = &att;
+    rpci.subpassCount = 1; rpci.pSubpasses = &sub;
+    if (ok) ok = vkCreateRenderPass(m_device, &rpci, nullptr, &m_rvtPackRP) == VK_SUCCESS;
+
+    if (ok)
+    {
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vs, "main", nullptr };
+        stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fs, "main", nullptr };
+        VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        vp.viewportCount = 1; vp.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState cba{}; cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dsci{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dsci.dynamicStateCount = 2; dsci.pDynamicStates = dyn;
+        VkGraphicsPipelineCreateInfo gp{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gp.stageCount = 2; gp.pStages = stages;
+        gp.pVertexInputState = &vi; gp.pInputAssemblyState = &ia; gp.pViewportState = &vp;
+        gp.pRasterizationState = &rs; gp.pMultisampleState = &ms; gp.pColorBlendState = &cb; gp.pDynamicState = &dsci;
+        gp.layout = m_rvtPackPipeLayout; gp.renderPass = m_rvtPackRP; gp.subpass = 0;
+        ok = vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &gp, nullptr, &m_rvtPackPipeline) == VK_SUCCESS;
+    }
+    if (ok)
+    {
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+        dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &ps;
+        ok = vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_rvtPackDescPool) == VK_SUCCESS;
+    }
+    vkDestroyShaderModule(m_device, vs, nullptr);
+    vkDestroyShaderModule(m_device, fs, nullptr);
+    if (!ok)
+    {
+        HE_LOG_ERROR(RHI, "%s", "VulkanRenderer: RVT page pack pipeline creation failed");
+        if (m_rvtPackPipeline)     { vkDestroyPipeline(m_device, m_rvtPackPipeline, nullptr); m_rvtPackPipeline = VK_NULL_HANDLE; }
+        if (m_rvtPackRP)           { vkDestroyRenderPass(m_device, m_rvtPackRP, nullptr); m_rvtPackRP = VK_NULL_HANDLE; }
+        if (m_rvtPackPipeLayout)   { vkDestroyPipelineLayout(m_device, m_rvtPackPipeLayout, nullptr); m_rvtPackPipeLayout = VK_NULL_HANDLE; }
+        if (m_rvtPackSetLayout)    { vkDestroyDescriptorSetLayout(m_device, m_rvtPackSetLayout, nullptr); m_rvtPackSetLayout = VK_NULL_HANDLE; }
+        if (m_rvtPackDescPool)     { vkDestroyDescriptorPool(m_device, m_rvtPackDescPool, nullptr); m_rvtPackDescPool = VK_NULL_HANDLE; }
+        return false;
+    }
+    return true;
+#endif
+}
+
+// Destroys the PREVIOUS packed page's transient view/framebuffer. Called at the start of rvtPackPage (safe: that
+// page's command buffer has already been waited on synchronously by the time this one starts) and from
+// DestroyRvtPool (which waits for the device first).
+void VulkanRenderer::rvtPackReleaseTransient()
+{
+    if (m_rvtPackLastFb)   { vkDestroyFramebuffer(m_device, m_rvtPackLastFb, nullptr); m_rvtPackLastFb = VK_NULL_HANDLE; }
+    if (m_rvtPackLastView) { vkDestroyImageView(m_device, m_rvtPackLastView, nullptr); m_rvtPackLastView = VK_NULL_HANDLE; }
+}
+
+// The pack draw itself, recorded into `cmd` — the same command buffer RenderSceneImage's page copy uses. `srcImage`
+// is the just-drawn page (viewport image, already transitioned to SHADER_READ_ONLY_OPTIMAL by the caller — its
+// persistent m_viewportView is read directly, no transient source view needed); `dstImage` is the pool array for
+// this layer, slice `hotSlice`. The destination view/framebuffer this call creates are NOT destroyed here — the
+// command buffer that reads them has not even been submitted yet at this point, only recorded; they outlive the
+// call in m_rvtPackLastView/Fb and are freed by rvtPackReleaseTransient on the NEXT packed page (RenderSceneImage
+// forces a synchronous wait after every packed page's submission, so "next call" means "GPU already done").
+void VulkanRenderer::rvtPackPage(VkCommandBuffer cmd, VkImage srcImage, int layer, VkImage dstImage, uint32_t hotSlice, uint32_t px)
+{
+    rvtPackReleaseTransient();
+    VkImageView dstView = VK_NULL_HANDLE;
+    VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    vci.image = dstImage; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = VK_FORMAT_R8G8_UNORM;
+    vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, hotSlice, 1 };
+    if (vkCreateImageView(m_device, &vci, nullptr, &dstView) != VK_SUCCESS) return;
+
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    VkFramebufferCreateInfo fci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    fci.renderPass = m_rvtPackRP; fci.attachmentCount = 1; fci.pAttachments = &dstView;
+    fci.width = px; fci.height = px; fci.layers = 1;
+    if (vkCreateFramebuffer(m_device, &fci, nullptr, &fb) != VK_SUCCESS) { vkDestroyImageView(m_device, dstView, nullptr); return; }
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    dsai.descriptorPool = m_rvtPackDescPool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &m_rvtPackSetLayout;
+    // One set, allocated fresh each call and reset with the pool: packed draws always wait synchronously (the GPU is
+    // never still reading an older binding when this runs), so there is no overlap to race.
+    vkResetDescriptorPool(m_device, m_rvtPackDescPool, 0);
+    if (vkAllocateDescriptorSets(m_device, &dsai, &set) != VK_SUCCESS) { vkDestroyFramebuffer(m_device, fb, nullptr); vkDestroyImageView(m_device, dstView, nullptr); return; }
+    VkDescriptorImageInfo dii{ m_rvtSampler, m_viewportView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    write.dstSet = set; write.dstBinding = 0; write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &dii;
+    vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+
+    VkImageMemoryBarrier toAtt{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    toAtt.srcQueueFamilyIndex = toAtt.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toAtt.image = dstImage; toAtt.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; toAtt.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    toAtt.srcAccessMask = VK_ACCESS_SHADER_READ_BIT; toAtt.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    toAtt.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, hotSlice, 1 };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &toAtt);
+
+    VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+    rpbi.renderPass = m_rvtPackRP; rpbi.framebuffer = fb; rpbi.renderArea = { {0, 0}, {px, px} };
+    vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport v{ 0, 0, float(px), float(px), 0, 1 };
+    VkRect2D sc{ {0, 0}, {px, px} };
+    vkCmdSetViewport(cmd, 0, 1, &v);
+    vkCmdSetScissor(cmd, 0, 1, &sc);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rvtPackPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_rvtPackPipeLayout, 0, 1, &set, 0, nullptr);
+    const uint32_t mode = layer == 1 ? 1u : 2u;
+    vkCmdPushConstants(cmd, m_rvtPackPipeLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4, &mode);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
+
+    VkImageMemoryBarrier toShader = toAtt;
+    toShader.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toShader.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShader);
+
+    // NOT destroyed here — this command buffer is only recorded, not yet submitted. Kept until the next packed page
+    // (rvtPackReleaseTransient, above) or DestroyRvtPool.
+    m_rvtPackLastFb   = fb;
+    m_rvtPackLastView = dstView;
+    (void)srcImage;
+}
+
 bool VulkanRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 {
     DestroyRvtPool();
@@ -6637,13 +6852,20 @@ bool VulkanRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
     // The arrays start small and grow with the pages in use (rvtGrowPool); HE_RVT_GROW=0 allocates the whole pool at once.
     static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
     const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
-    // BaseColor is created UNORM (raw copies of the sRGB-encoded page) and read through an SRGB view.
+    static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+    m_rvtPack = packWanted;
+    // BaseColor is created UNORM (raw copies of the sRGB-encoded page) and read through an SRGB view. Layers 1/2
+    // (Thema 333 step 10, HE_RVT_PACK): two channels, COLOR_ATTACHMENT too (the pack pass is the only way data gets
+    // into them; a format change rules out vkCmdCopyImage).
     const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     for (uint32_t layer = 0; layer < 3; ++layer)
     {
-        if (!rvtMakeImage(VK_FORMAT_R8G8B8A8_UNORM, pagePx, pagePx, first, 1, use,
+        const bool rg = m_rvtPack && layer > 0;
+        const VkImageUsageFlags layerUse = rg ? (use | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) : use;
+        const VkFormat layerFmt = rg ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        if (!rvtMakeImage(layerFmt, pagePx, pagePx, first, 1, layerUse,
                           layer == 0 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, m_rvtPool[layer])
-            || !rvtMakeView(m_rvtPool[layer], layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+            || !rvtMakeView(m_rvtPool[layer], rg ? VK_FORMAT_R8G8_UNORM : (layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM),
                             VK_IMAGE_VIEW_TYPE_2D_ARRAY, first, 1))
         {
             DestroyRvtPool();
@@ -6703,9 +6925,14 @@ bool VulkanRenderer::rvtGrowPool(uint32_t slot)
     const VkImageUsageFlags use = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     bool ok = true;
     for (uint32_t layer = 0; layer < 3 && ok; ++layer)
-        ok = rvtMakeImage(VK_FORMAT_R8G8B8A8_UNORM, m_rvtPagePx, m_rvtPagePx, grown, 1, use,
+    {
+        const bool rg = m_rvtPack && layer > 0;
+        const VkImageUsageFlags layerUse = rg ? (use | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) : use;
+        const VkFormat layerFmt = rg ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        ok = rvtMakeImage(layerFmt, m_rvtPagePx, m_rvtPagePx, grown, 1, layerUse,
                           layer == 0 ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0, fresh[layer])
-          && rvtMakeView(fresh[layer], layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_VIEW_TYPE_2D_ARRAY, grown, 1);
+          && rvtMakeView(fresh[layer], rg ? VK_FORMAT_R8G8_UNORM : (layer == 0 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM), VK_IMAGE_VIEW_TYPE_2D_ARRAY, grown, 1);
+    }
     if (ok)
         ok = rvtOneShot([&](VkCommandBuffer c) {
             for (uint32_t layer = 0; layer < 3; ++layer)
@@ -6734,8 +6961,9 @@ bool VulkanRenderer::rvtGrowPool(uint32_t slot)
         rvtDestroyImage(m_rvtPool[layer]);
         m_rvtPool[layer] = fresh[layer];
     }
-    HE_LOG_INFO(RHI, "VulkanRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAlloc, grown, m_rvtSlots,
-                double(grown) * m_rvtPagePx * m_rvtPagePx * 12.0 / (1024.0 * 1024.0));
+    HE_LOG_INFO(RHI, "VulkanRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB, %s)", m_rvtAlloc, grown, m_rvtSlots,
+                double(grown) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+                m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3");
     m_rvtAlloc = grown;
     return true;
 }
@@ -6743,8 +6971,10 @@ bool VulkanRenderer::rvtGrowPool(uint32_t slot)
 void VulkanRenderer::DestroyRvtPool()
 {
     if (!m_device) return;
-    const bool any = m_rvtPool[0].image || m_rvtPool[1].image || m_rvtPool[2].image || !m_rvtTables.empty() || !m_rvtSwaps.empty();
+    const bool any = m_rvtPool[0].image || m_rvtPool[1].image || m_rvtPool[2].image || !m_rvtTables.empty() || !m_rvtSwaps.empty()
+                   || m_rvtPackLastView || m_rvtPackLastFb;
     if (any) deviceWaitIdle();         // frames in flight read the pool and the tables
+    rvtPackReleaseTransient();         // the pack pipeline itself (PSO/RenderPass/layouts/pool) is renderer-lifetime, kept
     if (m_rvtWork) { m_rvtWork->stop(); delete m_rvtWork; m_rvtWork = nullptr; }
     m_rvtSwaps.clear();                // the pool the consumers read is gone: draw the landscapes themselves again
     for (auto& kv : m_rvtTables) rvtDestroyImage(kv.second.img);
@@ -6753,6 +6983,7 @@ void VulkanRenderer::DestroyRvtPool()
     for (RvtImage& im : m_rvtCold) rvtDestroyImage(im);
     m_rvtSlots = m_rvtAlloc = m_rvtPagePx = m_rvtColdAlloc = 0;
     m_rvtColdOn = false;
+    m_rvtPack = false;
     m_rvtStateVer = 1;
     m_rvtRealFrames = 0;
     m_rvtSlotHot.clear(); m_rvtSlotCold.clear(); m_rvtSlotVer.clear(); m_rvtSlotPainted.clear(); m_rvtHotFree.clear();
@@ -6823,7 +7054,8 @@ bool VulkanRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8
     if (layer < 0 || layer >= 3 || !m_rvtPool[layer].image || slot >= m_rvtSlots || slot >= m_rvtSlotHot.size() || m_rvtSlotHot[slot] < 0)
         return false;
     const uint32_t hotSlice = uint32_t(m_rvtSlotHot[slot]);
-    const VkDeviceSize bytes = VkDeviceSize(m_rvtPagePx) * m_rvtPagePx * 4;
+    const bool rg = m_rvtPack && layer > 0;
+    const VkDeviceSize bytes = VkDeviceSize(m_rvtPagePx) * m_rvtPagePx * (rg ? 2 : 4);
     VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
     if (!rvtMakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, buf, mem)) return false;
     const VkImage img = m_rvtPool[layer].image;
@@ -6842,13 +7074,37 @@ bool VulkanRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8
     {
         void* mapped = nullptr;
         vkMapMemory(m_device, mem, 0, bytes, 0, &mapped);
-        rgba.resize(static_cast<size_t>(bytes));
-        std::memcpy(rgba.data(), mapped, static_cast<size_t>(bytes));
+        const uint8_t* src = static_cast<const uint8_t*>(mapped);
+        if (rg)
+        {
+            // Two channels in the pool, tightly packed (no row-pitch padding on Vulkan buffer-image copies): normal
+            // (x, z) comes back as R and B, the surface as R and G, the rest zero (RvtLayerChannels: layer 1 = 0x5,
+            // layer 2 = 0x3).
+            rgba.assign(static_cast<size_t>(px) * px * 4, 0);
+            const int gDst = layer == 1 ? 2 : 1;
+            for (size_t i = 0; i < size_t(px) * px; ++i)
+            {
+                rgba[i * 4 + 0] = src[i * 2 + 0];
+                rgba[i * 4 + gDst] = src[i * 2 + 1];
+                rgba[i * 4 + 3] = 255;
+            }
+        }
+        else
+        {
+            rgba.resize(static_cast<size_t>(bytes));
+            std::memcpy(rgba.data(), src, static_cast<size_t>(bytes));
+        }
         vkUnmapMemory(m_device, mem);
     }
     vkDestroyBuffer(m_device, buf, nullptr);
     vkFreeMemory(m_device, mem, nullptr);
     return ok;
+}
+
+uint32_t VulkanRenderer::RvtLayerChannels(int layer) const
+{
+    if (!m_rvtPack) return 0xFu;
+    return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
 }
 
 // Once per real frame (Render(), never RenderSceneImage): ages pages, harvests finished BC7 encodes, synchronously
@@ -6932,13 +7188,22 @@ void VulkanRenderer::UpdateRvtCold()
             if (m_rvtSlotHot[slot] < 0 || m_rvtSlotCold[slot]) continue;
             if (m_rvtRealFrames - m_rvtSlotPainted[slot] < coldAfter) continue;
             const uint32_t hotSlice = uint32_t(m_rvtSlotHot[slot]);
-            const VkDeviceSize bytes = VkDeviceSize(pageBytes) * 3;
+            // Per-layer byte size (Thema 333 step 10): layers 1/2 are RG8 when packed, half the bytes of RGBA8 — a
+            // shared pageBytes offset (the pre-step-10 shape) would misread them. Tightly packed either way (Vulkan
+            // buffer-image copies need no row-pitch padding, unlike D3D12's).
+            VkDeviceSize layerBytes[3], offset[3] = {}, bytes = 0;
+            for (int layer = 0; layer < 3; ++layer)
+            {
+                layerBytes[layer] = VkDeviceSize(px) * px * ((m_rvtPack && layer > 0) ? 2 : 4);
+                offset[layer] = bytes;
+                bytes += layerBytes[layer];
+            }
             VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory mem = VK_NULL_HANDLE;
             if (!rvtMakeBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, buf, mem)) break;
             VkBufferImageCopy regions[3]{};
             for (int layer = 0; layer < 3; ++layer)
             {
-                regions[layer].bufferOffset = VkDeviceSize(layer) * pageBytes;
+                regions[layer].bufferOffset = offset[layer];
                 regions[layer].imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, hotSlice, 1 };
                 regions[layer].imageExtent = { px, px, 1 };
             }
@@ -6960,7 +7225,21 @@ void VulkanRenderer::UpdateRvtCold()
             for (int layer = 0; layer < 3; ++layer)
             {
                 job.rgba[layer].resize(pageBytes);
-                std::memcpy(job.rgba[layer].data(), static_cast<const uint8_t*>(mapped) + regions[layer].bufferOffset, pageBytes);
+                const uint8_t* base = static_cast<const uint8_t*>(mapped) + offset[layer];
+                if (m_rvtPack && layer > 0)
+                {
+                    // RG8: expand to RGBA for the BC7 encoder input (R, G; B, A fixed) — matches RvtLookup.h's cold
+                    // branch, which reads t.xy under HE_RVT_RGNORMAL regardless of hot or cold.
+                    for (size_t i = 0; i < size_t(px) * px; ++i)
+                    {
+                        job.rgba[layer][i * 4 + 0] = base[i * 2 + 0];
+                        job.rgba[layer][i * 4 + 1] = base[i * 2 + 1];
+                        job.rgba[layer][i * 4 + 2] = 0;
+                        job.rgba[layer][i * 4 + 3] = 255;
+                    }
+                }
+                else
+                    std::memcpy(job.rgba[layer].data(), base, pageBytes);
             }
             vkUnmapMemory(m_device, mem);
             vkDestroyBuffer(m_device, buf, nullptr);
@@ -7249,7 +7528,11 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                 cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
                 vkBeginCommandBuffer(cmd, &cbbi);
                 DrawViewportFrame(cmd);
-                if (pageOk)
+                // A packed layer (Thema 333 step 10, HE_RVT_PACK) cannot take vkCmdCopyImage — the format changes — so
+                // a tiny fullscreen draw (rvtPackPage) takes its place. It always waits synchronously (see the header's
+                // member comment), so a packed page never joins the m_rvtPendingCmds pipeline below.
+                const bool packed = pageOk && m_rvtPack && camera.rvtLayer > 0;
+                if (pageOk && !packed)
                 {
                     // The copy rides in the frame's own buffer: one submit, one wait.
                     const VkImage dst = m_rvtPool[camera.rvtLayer].image;
@@ -7282,13 +7565,31 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 2, b);
                     m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 }
+                else if (packed && ensureRvtPackPipeline())
+                {
+                    const VkImage dst = m_rvtPool[camera.rvtLayer].image;
+                    if (m_viewportLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                    {
+                        VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        b.image = m_viewportImage; b.oldLayout = m_viewportLayout; b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT; b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                        b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+                        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &b);
+                        m_viewportLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    }
+                    rvtPackPage(cmd, m_viewportImage, camera.rvtLayer, dst, hotSlice, width);
+                }
+                else if (packed)
+                    HE_LOG_WARN(RHI, "VulkanRenderer: RVT page pack unavailable, slot %u layer %d not written this paint",
+                                uint32_t(camera.rvtSlot), camera.rvtLayer);
                 vkEndCommandBuffer(cmd);
 
                 VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
                 si.commandBufferCount = 1;
                 si.pCommandBuffers    = &cmd;
                 submitGraphics(si, VK_NULL_HANDLE);
-                if (pipe)
+                if (pipe && !packed)
                 {
                     // Not waited for: the buffer is freed with the slots used up or the close.
                     m_rvtPendingCmds.push_back(cmd);

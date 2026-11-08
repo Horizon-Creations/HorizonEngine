@@ -37,6 +37,9 @@ public:
     bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
     void  DestroyRvtPool() override;
     bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+    // HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+    // CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+    uint32_t RvtLayerChannels(int layer) const override;
     bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
     bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
     void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;

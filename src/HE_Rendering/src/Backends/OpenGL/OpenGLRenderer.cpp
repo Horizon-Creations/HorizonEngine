@@ -10897,6 +10897,7 @@ void OpenGLRenderer::Shutdown()
 	if (m_primarySdlWindow && m_glContext)
 		SDL_GL_MakeCurrent(m_primarySdlWindow, static_cast<SDL_GLContext>(m_glContext));
 	DestroyRvtPool();
+	if (m_rvtPackProgram) { glDeleteProgram(m_rvtPackProgram); m_rvtPackProgram = 0; }
 
 	for (auto& [id, mesh] : m_meshCache)
 	{
@@ -11110,6 +11111,75 @@ bool OpenGLRenderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& width
 // ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────────
 // The contract is in IRenderer.h; D3D11's is the reference (D3D11Renderer.cpp). The pool slices are TOP-row-first (what the
 // shader's texelFetch(y = 0) and every other backend see): GL renders bottom-row-first, so RenderSceneImage flips on the blit.
+
+// mode 1 = normal (x, z = R, B of the page), mode 2 = surface (AO, roughness = R, G of the page) — same convention as
+// D3D11's kRvtPackHLSL / Vulkan's kRvtPackFragGLSL. The same vertical flip the (unpacked) blit does (dst Y0=height,
+// Y1=0): the page is bottom-row-first like every GL framebuffer, the pool array is read top-row-first everywhere
+// else, so the fragment reads the SOURCE at the mirrored row instead of flipping the destination geometry.
+static const char* kRvtPackVS = R"GLSL(
+#version 410 core
+void main()
+{
+	vec2 p = vec2(float((gl_VertexID & 1) << 2) - 1.0,
+	              float((gl_VertexID & 2) << 1) - 1.0);
+	gl_Position = vec4(p, 0.0, 1.0);
+}
+)GLSL";
+static const char* kRvtPackFS = R"GLSL(
+#version 410 core
+uniform sampler2D uRvtPackSrc;
+uniform int       uRvtPackMode;
+uniform int       uRvtPackSize;
+out vec2 outColor;
+void main()
+{
+	ivec2 p = ivec2(int(gl_FragCoord.x), (uRvtPackSize - 1) - int(gl_FragCoord.y));
+	vec4 c = texelFetch(uRvtPackSrc, p, 0);
+	outColor = uRvtPackMode == 1 ? c.rb : c.rg;
+}
+)GLSL";
+
+// Built lazily, once (a failure sticks — RenderSceneImage's page copy falls back to "page not packed, not written"
+// rather than retrying every page). CompileStage throws on a compile failure (this file's convention), so this is
+// wrapped rather than left to propagate into RenderSceneImage.
+bool OpenGLRenderer::ensureRvtPackPipeline()
+{
+	if (m_rvtPackProgram) return true;
+	if (m_rvtPackTried) return false;
+	m_rvtPackTried = true;
+	try
+	{
+		GLuint vs = CompileStage(GL_VERTEX_SHADER, kRvtPackVS);
+		GLuint fs = CompileStage(GL_FRAGMENT_SHADER, kRvtPackFS);
+		GLuint prog = glCreateProgram();
+		glAttachShader(prog, vs);
+		glAttachShader(prog, fs);
+		glLinkProgram(prog);
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		GLint ok = 0;
+		glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+		if (!ok)
+		{
+			GLchar log[512];
+			glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+			glDeleteProgram(prog);
+			HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: RVT page pack link failed: ") + log).c_str());
+			return false;
+		}
+		m_rvtPackProgram = prog;
+		m_uRvtPackTex  = glGetUniformLocation(prog, "uRvtPackSrc");
+		m_uRvtPackMode = glGetUniformLocation(prog, "uRvtPackMode");
+		m_uRvtPackSize = glGetUniformLocation(prog, "uRvtPackSize");
+		return true;
+	}
+	catch (const std::exception& e)
+	{
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: RVT page pack compile failed: ") + e.what()).c_str());
+		return false;
+	}
+}
+
 bool OpenGLRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 {
 	DestroyRvtPool();
@@ -11119,9 +11189,12 @@ bool OpenGLRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 	// the whole pool at once, as does a driver without 4.3.
 	static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
 	const uint32_t first = (s_grow && GLAD_GL_VERSION_4_3) ? std::min(slots, 64u) : slots;
+	static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+	m_rvtPack = packWanted;
 	glGenTextures(3, m_rvtPool);
 	for (int layer = 0; layer < 3; ++layer)
 	{
+		const bool rg = m_rvtPack && layer > 0;
 		glBindTexture(GL_TEXTURE_2D_ARRAY, m_rvtPool[layer]);
 		// A complete texture for texelFetch: no mips, nearest (the default min filter would need a chain).
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -11130,8 +11203,8 @@ bool OpenGLRenderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
-		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, int(pagePx), int(pagePx), int(first), 0,
-		             GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, rg ? GL_RG8 : (layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8), int(pagePx), int(pagePx), int(first), 0,
+		             rg ? GL_RG : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 	}
 	glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
 	if (glGetError() != GL_NO_ERROR) { DestroyRvtPool(); return false; }
@@ -11154,6 +11227,7 @@ bool OpenGLRenderer::rvtGrowPool(uint32_t slot)
 	glGenTextures(3, fresh);
 	for (int layer = 0; layer < 3; ++layer)
 	{
+		const bool rg = m_rvtPack && layer > 0;
 		glBindTexture(GL_TEXTURE_2D_ARRAY, fresh[layer]);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -11161,8 +11235,8 @@ bool OpenGLRenderer::rvtGrowPool(uint32_t slot)
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
 		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0);
-		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8, int(m_rvtPagePx), int(m_rvtPagePx), int(grown), 0,
-		             GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, rg ? GL_RG8 : (layer == 0 ? GL_SRGB8_ALPHA8 : GL_RGBA8), int(m_rvtPagePx), int(m_rvtPagePx), int(grown), 0,
+		             rg ? GL_RG : GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 		glCopyImageSubData(m_rvtPool[layer], GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, fresh[layer], GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0,
 		                   int(m_rvtPagePx), int(m_rvtPagePx), int(m_rvtAlloc));
 	}
@@ -11177,8 +11251,9 @@ bool OpenGLRenderer::rvtGrowPool(uint32_t slot)
 		glDeleteTextures(1, &m_rvtPool[layer]);
 		m_rvtPool[layer] = fresh[layer];
 	}
-	HE_LOG_INFO(RHI, "OpenGLRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", m_rvtAlloc, grown, m_rvtSlots,
-	            double(grown) * m_rvtPagePx * m_rvtPagePx * 12.0 / (1024.0 * 1024.0));
+	HE_LOG_INFO(RHI, "OpenGLRenderer: RVT pool grew %u -> %u of %u pages (%.0f MB, %s)", m_rvtAlloc, grown, m_rvtSlots,
+	            double(grown) * m_rvtPagePx * m_rvtPagePx * (m_rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+	            m_rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3");
 	m_rvtAlloc = grown;
 	return true;
 }
@@ -11193,6 +11268,7 @@ void OpenGLRenderer::DestroyRvtPool()
 	m_rvtTables.clear();
 	for (unsigned int& t : m_rvtPool) { if (t) glDeleteTextures(1, &t); t = 0; }
 	m_rvtSlots = m_rvtAlloc = m_rvtPagePx = 0;
+	m_rvtPack = false;   // the pack program itself is renderer-lifetime, not pool-lifetime
 }
 
 void OpenGLRenderer::SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial)
@@ -11288,20 +11364,50 @@ bool OpenGLRenderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
 	glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_rvtPool[layer], 0, int(slot));
 	bool ok = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	const bool rg = m_rvtPack && layer > 0;
 	if (ok)
 	{
-		rgba.resize(size_t(m_rvtPagePx) * m_rvtPagePx * 4);
 		glPixelStorei(GL_PACK_ALIGNMENT, 1);
 		glReadBuffer(GL_COLOR_ATTACHMENT0);
 		const GLboolean srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
 		glDisable(GL_FRAMEBUFFER_SRGB);       // the stored bytes, whatever the attachment's format
-		glReadPixels(0, 0, int(m_rvtPagePx), int(m_rvtPagePx), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+		if (rg)
+		{
+			// Two channels in the pool: read GL_RG explicitly (a GL_RGBA read would auto-fill B=0, A=1 at the WRONG
+			// indices for this convention) and expand by hand — normal (x, z) to R and B, surface to R and G, the
+			// rest zero (RvtLayerChannels: layer 1 = 0x5, layer 2 = 0x3), same as every other backend.
+			std::vector<uint8_t> two(size_t(m_rvtPagePx) * m_rvtPagePx * 2);
+			glReadPixels(0, 0, int(m_rvtPagePx), int(m_rvtPagePx), GL_RG, GL_UNSIGNED_BYTE, two.data());
+			ok = glGetError() == GL_NO_ERROR;
+			if (ok)
+			{
+				rgba.assign(size_t(m_rvtPagePx) * m_rvtPagePx * 4, 0);
+				const int gDst = layer == 1 ? 2 : 1;
+				for (size_t i = 0; i < size_t(m_rvtPagePx) * m_rvtPagePx; ++i)
+				{
+					rgba[i * 4 + 0] = two[i * 2 + 0];
+					rgba[i * 4 + gDst] = two[i * 2 + 1];
+					rgba[i * 4 + 3] = 255;
+				}
+			}
+		}
+		else
+		{
+			rgba.resize(size_t(m_rvtPagePx) * m_rvtPagePx * 4);
+			glReadPixels(0, 0, int(m_rvtPagePx), int(m_rvtPagePx), GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+			ok = glGetError() == GL_NO_ERROR;
+		}
 		if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
-		ok = glGetError() == GL_NO_ERROR;
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glDeleteFramebuffers(1, &fbo);
 	return ok;
+}
+
+uint32_t OpenGLRenderer::RvtLayerChannels(int layer) const
+{
+	if (!m_rvtPack) return 0xFu;
+	return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
 }
 
 // The consumer's page table and the pool on units 21..24, for a draw whose material owns a table; every other material's
@@ -11417,19 +11523,45 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 		  && m_viewportFBO && m_viewportW == int(width) && m_viewportH == int(height);
 		if (ok)
 		{
+			const bool packed = m_rvtPack && camera.rvtLayer > 0;
 			GLuint dst = 0;
 			glGenFramebuffers(1, &dst);
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, m_viewportFBO);
 			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst);
 			glFramebufferTextureLayer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_rvtPool[camera.rvtLayer], 0, camera.rvtSlot);
 			ok = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-			if (ok)
+			if (ok && !packed)
 			{
 				// Raw bytes in, raw bytes out: the albedo slice is SRGB8_ALPHA8 and must not be encoded a second time.
 				const GLboolean srgb = glIsEnabled(GL_FRAMEBUFFER_SRGB);
 				glDisable(GL_FRAMEBUFFER_SRGB);
 				glBlitFramebuffer(0, 0, int(width), int(height), 0, int(height), int(width), 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 				if (srgb) glEnable(GL_FRAMEBUFFER_SRGB);
+			}
+			else if (ok && packed && ensureRvtPackPipeline())
+			{
+				// A packed layer (Thema 333 step 10, HE_RVT_PACK) cannot take glBlitFramebuffer — RGBA8 -> RG8 is a
+				// different component count, not a legal blit conversion — so a tiny fullscreen draw takes its place.
+				glViewport(0, 0, int(width), int(height));
+				glDisable(GL_DEPTH_TEST);
+				glDisable(GL_BLEND);
+				glUseProgram(m_rvtPackProgram);
+				glBindVertexArray(m_fsVAO);
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, m_viewportColor);
+				glUniform1i(m_uRvtPackTex, 0);
+				glUniform1i(m_uRvtPackMode, camera.rvtLayer == 1 ? 1 : 2);
+				glUniform1i(m_uRvtPackSize, int(width));
+				glDrawArrays(GL_TRIANGLES, 0, 3);
+				glBindTexture(GL_TEXTURE_2D, 0);
+				glUseProgram(0);
+				ok = glGetError() == GL_NO_ERROR;
+			}
+			else if (packed)
+			{
+				HE_LOG_WARN(RHI, "OpenGLRenderer: RVT page pack unavailable, slot %d layer %d not written this paint",
+				            camera.rvtSlot, camera.rvtLayer);
+				ok = false;
 			}
 			glBindFramebuffer(GL_FRAMEBUFFER, 0);
 			glDeleteFramebuffers(1, &dst);

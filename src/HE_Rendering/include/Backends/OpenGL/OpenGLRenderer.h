@@ -56,6 +56,9 @@ public:
 	bool  CreateRvtPool(uint32_t slots, uint32_t pagePx) override;
 	void  DestroyRvtPool() override;
 	bool  ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba) override;
+	// HE_RVT_PACK (Thema 333 step 10): the hot pool's normal/surface layers hold two channels, not four. 0xFu once
+	// CreateRvtPool never set it (A/B switch HE_RVT_PACK=0, or before the pool exists).
+	uint32_t RvtLayerChannels(int layer) const override;
 	bool  SetRvtPageTable(const HE::UUID& consumerMaterial, const std::vector<std::vector<uint32_t>>& mips) override;
 	bool  ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::vector<std::vector<uint32_t>>& mips) override;
 	void  SetRvtLandscape(uint32_t terrainEntity, const HE::UUID& landscapeMaterial, const HE::UUID& consumerMaterial) override;
@@ -481,6 +484,15 @@ private:
 	uint32_t     m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
 	uint32_t     m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
 	bool         rvtGrowPool(uint32_t slot);
+	// HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k / D3D11/D3D12/Vulkan's step 10): layers 1/2 hold two
+	// channels (GL_RG8) instead of four. A page can't get there with glBlitFramebuffer (RGBA8 -> RG8 is a different
+	// component count, not a legal blit conversion), so a tiny fullscreen draw takes its place — the same transient
+	// FBO RenderSceneImage already builds for the (unpacked) blit, just drawn into instead of blitted into.
+	bool         m_rvtPack = false;
+	bool         m_rvtPackTried = false;
+	unsigned int m_rvtPackProgram = 0;
+	int          m_uRvtPackTex = -1, m_uRvtPackMode = -1, m_uRvtPackSize = -1;
+	bool         ensureRvtPackPipeline();
 	struct RvtTable { unsigned int tex = 0; uint32_t side = 0, mips = 0; };
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };

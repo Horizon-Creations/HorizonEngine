@@ -2994,17 +2994,27 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     // off here: it has no renderer-side cold pool/arrays from this step, so defining HE_RVT_COLD for it would statically
     // reference three unbound sampler units it never binds.
     static const bool rvtColdWin = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
-    const auto withRvtColdFetch = [&](const std::string& src) -> std::string {
-        if (!rvtColdWin || src.find("heRvtSample(") == std::string::npos) return src;
+    // RG8 hot pool on D3D11/D3D12/Vulkan/OpenGL (Thema 333 step 10, counterpart of Metal step 6k above): the normal layer
+    // keeps x and z, the surface layer keeps AO and roughness, in two channels instead of four (RvtLookup.h's
+    // heRvtNormalOf rebuilds y under HE_RVT_RGNORMAL). Same env switch as Metal's, and unconditional per backend (not
+    // gated on a device capability): RG8 is a mandatory render-target format on every one of these four backends, so
+    // CreateRvtPool's pool format and this define can never disagree about what the pool actually holds.
+    static const bool rvtPackWin = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+    const auto withRvtWin = [&](const std::string& src, bool allowCold) -> std::string {
+        if (src.find("heRvtSample(") == std::string::npos) return src;
         // Vulkan only: a sampler2DArray is one combined-image-sampler descriptor there regardless of texelFetch vs
         // Sample, so the three cold rows need the device to actually fit them (SetRvtColdVulkanFits, VulkanRenderer).
         // D3D11/D3D12 never set this (texelFetch/Load costs no live sampler there) and always take the branch below.
-        if (backend == Backend::SpirV && !s_rvtColdVulkanFits) return src;
+        const bool cold = allowCold && rvtColdWin && !(backend == Backend::SpirV && !s_rvtColdVulkanFits);
+        if (!cold && !rvtPackWin) return src;
         std::string out2 = src;
         const size_t vpos = out2.find("#version");
         const size_t eol  = vpos == std::string::npos ? std::string::npos : out2.find('\n', vpos);
         if (eol == std::string::npos) return src;
-        out2.insert(eol + 1, "#define HE_RVT_COLD 1\n#define HE_RVT_COLD_FETCH 1\n");
+        std::string defs;
+        if (cold) defs += "#define HE_RVT_COLD 1\n#define HE_RVT_COLD_FETCH 1\n";
+        if (rvtPackWin) defs += "#define HE_RVT_RGNORMAL 1\n";
+        out2.insert(eol + 1, defs);
         return out2;
     };
     if (backend == Backend::Metal)
@@ -3248,7 +3258,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 25, 25 }); // HeClusterGrid   → t25
             pins.push_back({ Stage::Fragment, 0, 26, 26 }); // HeClusterIdx    → t26
         }
-        out = toCompiled(compileHlslPinned(withRvtColdFetch(injected), Stage::Fragment, pins));
+        out = toCompiled(compileHlslPinned(withRvtWin(injected, /*allowCold=*/true), Stage::Fragment, pins));
     }
     else if (backend == Backend::GLSL430 && clustered)
     {
@@ -3256,7 +3266,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         // would be a compile error on a driver at GL 4.3's guaranteed 8
         // bindings. Uniform blocks and samplers lose their binding (the GL
         // renderer binds them by name, exactly as for GLSL410).
-        out = toCompiled(compileGlslPinned(injected, Stage::Fragment,
+        out = toCompiled(compileGlslPinned(withRvtWin(injected, /*allowCold=*/false), Stage::Fragment,
             { { Stage::Fragment, 0, 24, static_cast<uint32_t>(kGlClusterLightsSsboBinding) },
               { Stage::Fragment, 0, 25, static_cast<uint32_t>(kGlClusterGridSsboBinding) },
               { Stage::Fragment, 0, 26, static_cast<uint32_t>(kGlClusterIndexSsboBinding) } }));
@@ -3264,9 +3274,10 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     else
     {
         // Vulkan: the cold BC7 arrays (step 9), same texelFetch branch as HLSL above (rvtFit: the Vulkan descriptor-count
-        // sweep in test_material_graph grows from 21 to 24 bindings with HE_RVT_COLD on). OpenGL (GLSL410/430/ES300) is
-        // left out: no cold pool/arrays exist on that backend, so leaving the define off keeps its shader unchanged.
-        const std::string& src = backend == Backend::SpirV ? withRvtColdFetch(injected) : injected;
+        // sweep in test_material_graph grows from 21 to 24 bindings with HE_RVT_COLD on). OpenGL (GLSL410/430/ES300) gets
+        // no HE_RVT_COLD (no cold pool/arrays on that backend), but DOES get HE_RVT_RGNORMAL (step 10): the GL hot pool
+        // packs normal/surface the same way as the other three.
+        const std::string src = withRvtWin(injected, /*allowCold=*/backend == Backend::SpirV);
         out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
     }
     return m_fragCache.emplace(key, std::move(out)).first->second;

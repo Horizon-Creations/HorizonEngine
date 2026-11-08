@@ -1676,7 +1676,17 @@ struct D3D11RendererImpl
     // an sRGB view (layer 0 is sRGB, so the hardware encodes), and its depth.
     ComPtr<ID3D11Texture2D>          rvtPageTex;
     ComPtr<ID3D11RenderTargetView>   rvtPageRTV[2];     // [0] UNORM, [1] UNORM_SRGB
+    ComPtr<ID3D11ShaderResourceView> rvtPageSRV;        // UNORM view of rvtPageTex, read by the RG8 pack pass only
     ComPtr<ID3D11Texture2D>          rvtPageDepth;
+    // HE_RVT_PACK (Thema 333 step 10, counterpart of Metal 6k): the normal and surface layers hold x/z resp. AO/roughness
+    // in two channels (R8G8_UNORM) instead of four — a page can't get there with CopySubresourceRegion (the format
+    // changes), so a tiny fullscreen pass reads rvtPageSRV and writes the two kept channels into the pool slice.
+    bool                             rvtPack = false;
+    bool                             rvtPackTried = false;  // the pack pipeline failed to build once: do not retry every page
+    ComPtr<ID3D11VertexShader>       rvtPackVS;
+    ComPtr<ID3D11PixelShader>        rvtPackPS;
+    ComPtr<ID3D11Buffer>             rvtPackCB;             // { uint mode; } 1 = normal (R,B), 2 = surface (R,G)
+    ComPtr<ID3D11RasterizerState>    rvtPackRS;             // cull none (triangle winding not asserted either way)
     // The page tables the landscape shader reads, one per volume, keyed by the consumer material that reads it: R32_UINT,
     // mip m = (side >> m)^2 entries (SetRvtPageTable). `src` is the manager's own form (what ReadbackRvtPageTable hands
     // back to the witness); `tex`/`srv` are rewritten per slot (uploadRvtTable, Thema 333 step 9) to say hot slice or
@@ -9457,25 +9467,135 @@ bool D3D11Renderer::CaptureViewport(std::vector<uint8_t>& rgba, uint32_t& outW, 
 }
 
 // ─── Runtime Virtual Texture page pool (Thema 333) ────────────────────────────
-// One layer of the pool as `count` slices (Thema 333). Typeless RGBA8, so a UNORM page copies in and the view decides sRGB or not.
-static bool makeRvtPoolLayer(D3D11RendererImpl& p, int layer, uint32_t count, uint32_t pagePx,
+// One layer of the pool as `count` slices (Thema 333). Typeless RGBA8, so a UNORM page copies in and the view decides
+// sRGB or not. `rg` (Thema 333 step 10, layer 1/2 only, HE_RVT_PACK): two channels instead of four — RENDER_TARGET
+// as well, because the pack pass (below) is the only way data gets into it (a format change rules out a plain copy).
+static bool makeRvtPoolLayer(D3D11RendererImpl& p, int layer, uint32_t count, uint32_t pagePx, bool rg,
                              ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11ShaderResourceView>& srv)
 {
     D3D11_TEXTURE2D_DESC td{};
     td.Width = td.Height = pagePx;
     td.MipLevels  = 1;
     td.ArraySize  = count;
-    td.Format     = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    td.Format     = rg ? DXGI_FORMAT_R8G8_TYPELESS : DXGI_FORMAT_R8G8B8A8_TYPELESS;
     td.SampleDesc.Count = 1;
     td.Usage      = D3D11_USAGE_DEFAULT;
-    td.BindFlags  = D3D11_BIND_SHADER_RESOURCE;
+    td.BindFlags  = D3D11_BIND_SHADER_RESOURCE | (rg ? D3D11_BIND_RENDER_TARGET : 0);
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
-    sd.Format = layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.Format = rg ? DXGI_FORMAT_R8G8_UNORM : (layer == 0 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM);
     sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
     sd.Texture2DArray.MipLevels = 1;
     sd.Texture2DArray.ArraySize = count;
     return SUCCEEDED(p.device->CreateTexture2D(&td, nullptr, &tex)) &&
            SUCCEEDED(p.device->CreateShaderResourceView(tex.Get(), &sd, &srv));
+}
+
+// The copy of a finished page into a two-channel layer: rvtPageTex (RGBA8) cannot land in an RG8 slice with
+// CopySubresourceRegion (the format changes), so a fullscreen triangle reads it with Load (exact: an 8-bit value
+// round-trips through float unchanged, like Metal's rvtPack compute kernel) and writes the two kept channels.
+// mode 1 = normal (x, z = R, B of the page), mode 2 = surface (AO, roughness = R, G of the page).
+static const char* kRvtPackHLSL = R"(
+struct VSOut { float4 pos : SV_Position; };
+VSOut VSMain(uint id : SV_VertexID)
+{
+    VSOut o;
+    o.pos.x = float((id << 1) & 2) * 2.0 - 1.0;
+    o.pos.y = 1.0 - float(id & 2) * 2.0;
+    o.pos.z = 0.0;
+    o.pos.w = 1.0;
+    return o;
+}
+Texture2D rvtPackSrc : register(t0);
+cbuffer RvtPackCB : register(b0) { uint rvtPackMode; uint3 rvtPackPad; }
+float2 PSMain(VSOut i) : SV_Target
+{
+    float4 c = rvtPackSrc.Load(int3(i.pos.xy, 0));
+    return rvtPackMode == 1u ? c.rb : c.rg;
+}
+)";
+
+// Built lazily, once (a failure sticks for the renderer's lifetime — RenderRvtPage falls back to "page not packed,
+// not written" rather than retrying every page).
+static bool ensureRvtPackPipeline(D3D11RendererImpl& p)
+{
+    if (p.rvtPackVS && p.rvtPackPS) return true;
+    if (p.rvtPackTried) return false;
+    p.rvtPackTried = true;
+    ComPtr<ID3DBlob> vsBlob, psBlob, err;
+    if (FAILED(timedD3DCompile(kRvtPackHLSL, strlen(kRvtPackHLSL), "rvtPackVS", nullptr, nullptr,
+                          "VSMain", "vs_5_0", 0, 0, &vsBlob, &err)))
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: RVT page pack VS compile failed: ")
+            + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    if (FAILED(timedD3DCompile(kRvtPackHLSL, strlen(kRvtPackHLSL), "rvtPackPS", nullptr, nullptr,
+                          "PSMain", "ps_5_0", 0, 0, &psBlob, &err)))
+    {
+        HE_LOG_ERROR(RHI, "%s", (std::string("D3D11Renderer: RVT page pack PS compile failed: ")
+            + (err ? static_cast<const char*>(err->GetBufferPointer()) : "")).c_str());
+        return false;
+    }
+    if (FAILED(p.device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &p.rvtPackVS))
+        || FAILED(p.device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &p.rvtPackPS)))
+    {
+        p.rvtPackVS.Reset(); p.rvtPackPS.Reset();
+        HE_LOG_ERROR(RHI, "%s", "D3D11Renderer: RVT page pack shader-object creation failed");
+        return false;
+    }
+    D3D11_BUFFER_DESC cbd{}; cbd.ByteWidth = 16; cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(p.device->CreateBuffer(&cbd, nullptr, &p.rvtPackCB))) { p.rvtPackVS.Reset(); p.rvtPackPS.Reset(); return false; }
+    D3D11_RASTERIZER_DESC rd{}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE; rd.DepthClipEnable = TRUE;
+    if (FAILED(p.device->CreateRasterizerState(&rd, &p.rvtPackRS)))
+    { p.rvtPackVS.Reset(); p.rvtPackPS.Reset(); p.rvtPackCB.Reset(); return false; }
+    return true;
+}
+
+// The pack draw itself: rvtPageSRV (the just-finished page, RGBA8) into one slice of the RG8 pool array. Caller
+// (RenderRvtPage) has already set rvtPagePass = false and still owns the saved previous RTV/viewport — it restores
+// those; this only has to restore what IT touches that the caller does not already save (raster/blend/depth state).
+static void packRvtPage(D3D11RendererImpl& p, int layer, uint32_t hotSlice, uint32_t px)
+{
+    D3D11_RENDER_TARGET_VIEW_DESC rd{};
+    rd.Format = DXGI_FORMAT_R8G8_UNORM;
+    rd.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2DARRAY;
+    rd.Texture2DArray.MipSlice = 0;
+    rd.Texture2DArray.FirstArraySlice = hotSlice;
+    rd.Texture2DArray.ArraySize = 1;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    if (FAILED(p.device->CreateRenderTargetView(p.rvtPool[layer].Get(), &rd, &rtv))) return;
+
+    D3D11_MAPPED_SUBRESOURCE mp{};
+    if (SUCCEEDED(p.context->Map(p.rvtPackCB.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mp)))
+    {
+        const uint32_t mode[4] = { layer == 1 ? 1u : 2u, 0, 0, 0 };
+        std::memcpy(mp.pData, mode, sizeof(mode));
+        p.context->Unmap(p.rvtPackCB.Get(), 0);
+    }
+
+    ComPtr<ID3D11RasterizerState> prevRS;
+    p.context->RSGetState(&prevRS);
+
+    ID3D11RenderTargetView* rtvRaw = rtv.Get();
+    p.context->OMSetRenderTargets(1, &rtvRaw, nullptr);
+    D3D11_VIEWPORT vp{}; vp.Width = vp.Height = static_cast<float>(px); vp.MaxDepth = 1.0f;
+    p.context->RSSetViewports(1, &vp);
+    p.context->RSSetState(p.rvtPackRS.Get());
+    p.context->IASetInputLayout(nullptr);
+    p.context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    p.context->VSSetShader(p.rvtPackVS.Get(), nullptr, 0);
+    p.context->PSSetShader(p.rvtPackPS.Get(), nullptr, 0);
+    ID3D11ShaderResourceView* srvRaw = p.rvtPageSRV.Get();
+    p.context->PSSetShaderResources(0, 1, &srvRaw);
+    ID3D11Buffer* cbRaw = p.rvtPackCB.Get();
+    p.context->PSSetConstantBuffers(0, 1, &cbRaw);
+    p.context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    p.context->OMSetDepthStencilState(nullptr, 0);
+    p.context->Draw(3, 0);
+
+    { ID3D11ShaderResourceView* none = nullptr; p.context->PSSetShaderResources(0, 1, &none); }
+    p.context->RSSetState(prevRS.Get());
 }
 
 // The arrays hold `rvtAlloc` slices; a page for a slot beyond that grows them (a new array, the old slices copied across on the GPU,
@@ -9491,7 +9611,7 @@ static bool ensureRvtSlot(D3D11RendererImpl& p, uint32_t slot)
     for (int layer = 0; layer < 3; ++layer)
     {
         ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv;
-        if (!makeRvtPoolLayer(p, layer, grown, p.rvtPagePx, tex, srv)) return false;
+        if (!makeRvtPoolLayer(p, layer, grown, p.rvtPagePx, p.rvtPack && layer > 0, tex, srv)) return false;
         for (uint32_t i = 0; i < p.rvtAlloc; ++i)
             p.context->CopySubresourceRegion(tex.Get(), D3D11CalcSubresource(0, i, 1), 0, 0, 0,
                                              p.rvtPool[layer].Get(), D3D11CalcSubresource(0, i, 1), nullptr);
@@ -9507,8 +9627,9 @@ static bool ensureRvtSlot(D3D11RendererImpl& p, uint32_t slot)
         ComPtr<IDXGIDevice3> dxgi3;
         if (SUCCEEDED(p.device.As(&dxgi3))) dxgi3->Trim();
     }
-    HE_LOG_INFO(RHI, "D3D11Renderer: RVT pool grew %u -> %u of %u pages (%.0f MB)", p.rvtAlloc, grown, p.rvtSlots,
-                double(grown) * p.rvtPagePx * p.rvtPagePx * 12.0 / (1024.0 * 1024.0));
+    HE_LOG_INFO(RHI, "D3D11Renderer: RVT pool grew %u -> %u of %u pages (%.0f MB, %s)", p.rvtAlloc, grown, p.rvtSlots,
+                double(grown) * p.rvtPagePx * p.rvtPagePx * (p.rvtPack ? 8.0 : 12.0) / (1024.0 * 1024.0),
+                p.rvtPack ? "RGBA8 + RG8 + RG8" : "RGBA8 x 3");
     p.rvtAlloc = grown;
     return true;
 }
@@ -9674,9 +9795,11 @@ bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
     if (!p.device || !p.postFxReady || slots == 0 || slots > 2048 || pagePx < 8 || pagePx > 1024) return false;
     static const bool s_grow = [] { const char* e = std::getenv("HE_RVT_GROW"); return !(e && *e == '0'); }();
     const uint32_t first = s_grow ? std::min(slots, 64u) : slots;
+    static const bool packWanted = [] { const char* e = std::getenv("HE_RVT_PACK"); return !(e && *e == '0'); }();
+    p.rvtPack = packWanted;
     for (int layer = 0; layer < 3; ++layer)
     {
-        if (!makeRvtPoolLayer(p, layer, first, pagePx, p.rvtPool[layer], p.rvtPoolSRV[layer]))
+        if (!makeRvtPoolLayer(p, layer, first, pagePx, p.rvtPack && layer > 0, p.rvtPool[layer], p.rvtPoolSRV[layer]))
         {
             DestroyRvtPool();
             return false;
@@ -9698,7 +9821,9 @@ bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
         cd.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
         cd.SampleDesc.Count = 1;
         cd.Usage = D3D11_USAGE_DEFAULT;
-        cd.BindFlags = D3D11_BIND_RENDER_TARGET;
+        // SHADER_RESOURCE too (Thema 333 step 10): the RG8 pack pass reads the just-finished page back with this SRV
+        // (rvtPageSRV) — unused while HE_RVT_PACK=0, harmless to declare either way.
+        cd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         D3D11_TEXTURE2D_DESC dd = cd;
         dd.Format = DXGI_FORMAT_R24G8_TYPELESS;
         dd.BindFlags = D3D11_BIND_DEPTH_STENCIL | D3D11_BIND_SHADER_RESOURCE;
@@ -9708,6 +9833,14 @@ bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
                && SUCCEEDED(p.device->CreateTexture2D(&dd, nullptr, &p.rvtPageDepth));
         if (ok) { rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;      ok = SUCCEEDED(p.device->CreateRenderTargetView(p.rvtPageTex.Get(), &rd, &p.rvtPageRTV[0])); }
         if (ok) { rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB; ok = SUCCEEDED(p.device->CreateRenderTargetView(p.rvtPageTex.Get(), &rd, &p.rvtPageRTV[1])); }
+        if (ok)
+        {
+            D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+            sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;   // the pack pass reads layer>0's page, always drawn via rvtPageRTV[0] (UNORM, not sRGB)
+            sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            sd.Texture2D.MipLevels = 1;
+            ok = SUCCEEDED(p.device->CreateShaderResourceView(p.rvtPageTex.Get(), &sd, &p.rvtPageSRV));
+        }
         if (ok) p.createDepthViews(p.rvtPageDepth.Get(), p.rvtPageDSV, p.rvtPageDepthSRV);
         if (!ok || !p.rvtPageDSV) { DestroyRvtPool(); return false; }
     }
@@ -9724,10 +9857,11 @@ void D3D11Renderer::DestroyRvtPool()
     for (int layer = 0; layer < 3; ++layer) { p.rvtColdSRV[layer].Reset(); p.rvtCold[layer].Reset(); }
     p.rvtTables.clear();
     p.rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
-    p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset();
+    p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset(); p.rvtPageSRV.Reset();
     p.rvtPageDepth.Reset(); p.rvtPageDSV.Reset(); p.rvtPageDepthSRV.Reset();
     p.rvtSlots = p.rvtAlloc = p.rvtPagePx = p.rvtColdAlloc = 0;
     p.rvtColdOn = false;
+    p.rvtPack = false;   // the pack pipeline itself (rvtPackVS/PS/CB/RS) is renderer-lifetime, not pool-lifetime
     p.rvtStateVer = 1;
     p.rvtRealFrames = 0;
     p.rvtSlotHot.clear(); p.rvtSlotCold.clear(); p.rvtSlotBusy.clear(); p.rvtSlotVer.clear(); p.rvtSlotPainted.clear();
@@ -9786,8 +9920,17 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
         }
         const uint32_t hotSlice = rvtHotFor(p, slot);
         if (hotSlice != 0xFFFFFFFFu)
-            p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, hotSlice, 1), 0, 0, 0,
-                                             p.rvtPageTex.Get(), 0, nullptr);
+        {
+            const bool packed = p.rvtPack && camera.rvtLayer > 0;
+            if (!packed)
+                p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, hotSlice, 1), 0, 0, 0,
+                                                 p.rvtPageTex.Get(), 0, nullptr);
+            else if (ensureRvtPackPipeline(p) && p.rvtPageSRV)
+                packRvtPage(p, camera.rvtLayer, hotSlice, px);
+            else
+                HE_LOG_WARN(RHI, "D3D11Renderer: RVT page pack unavailable, slot %u layer %d not written this paint",
+                            slot, camera.rvtLayer);
+        }
     }
 
     p.context->OMSetRenderTargets(1, prevRTV.GetAddressOf(), prevDSV.Get());
@@ -9867,10 +10010,11 @@ bool D3D11Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_
     // A cold page lives as BC7 blocks only: the witnesses read pages straight after painting them, hot.
     if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtSlots || slot >= p.rvtSlotHot.size() || p.rvtSlotHot[slot] < 0)
         return false;
+    const bool rg = p.rvtPack && layer > 0;
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = desc.Height = p.rvtPagePx;
     desc.MipLevels = desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.Format = rg ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_STAGING;
     desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
@@ -9880,13 +10024,41 @@ bool D3D11Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_
                                      D3D11CalcSubresource(0, UINT(p.rvtSlotHot[slot]), 1), nullptr);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(p.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
-    rgba.resize(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4);
     const uint8_t* src = static_cast<const uint8_t*>(mapped.pData);
-    for (uint32_t y = 0; y < p.rvtPagePx; ++y)
-        std::memcpy(rgba.data() + static_cast<size_t>(y) * p.rvtPagePx * 4, src + static_cast<size_t>(y) * mapped.RowPitch,
-                    static_cast<size_t>(p.rvtPagePx) * 4);
+    if (rg)
+    {
+        // Two channels in the pool: normal (x, z) comes back as R and B, the surface as R and G, the rest zero
+        // (RvtLayerChannels: layer 1 = 0x5, layer 2 = 0x3).
+        rgba.assign(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4, 0);
+        const int gDst = layer == 1 ? 2 : 1;
+        for (uint32_t y = 0; y < p.rvtPagePx; ++y)
+        {
+            const uint8_t* row = src + static_cast<size_t>(y) * mapped.RowPitch;
+            for (uint32_t x = 0; x < p.rvtPagePx; ++x)
+            {
+                const size_t di = (static_cast<size_t>(y) * p.rvtPagePx + x) * 4;
+                rgba[di + 0] = row[x * 2 + 0];
+                rgba[di + gDst] = row[x * 2 + 1];
+                rgba[di + 3] = 255;
+            }
+        }
+    }
+    else
+    {
+        rgba.resize(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4);
+        for (uint32_t y = 0; y < p.rvtPagePx; ++y)
+            std::memcpy(rgba.data() + static_cast<size_t>(y) * p.rvtPagePx * 4, src + static_cast<size_t>(y) * mapped.RowPitch,
+                        static_cast<size_t>(p.rvtPagePx) * 4);
+    }
     p.context->Unmap(staging.Get(), 0);
     return true;
+}
+
+uint32_t D3D11Renderer::RvtLayerChannels(int layer) const
+{
+    auto& p = *m_impl;
+    if (!p.rvtPack) return 0xFu;
+    return layer == 1 ? 0x5u : layer == 2 ? 0x3u : 0xFu;   // normal: R and B (x, z); surface: R and G; albedo: all
 }
 
 // Once per real frame (Render(), not RenderSceneImage/RenderRvtPage: those never call this): ages pages, harvests
@@ -9953,9 +10125,27 @@ void D3D11Renderer::UpdateRvtCold()
                 ok = SUCCEEDED(p.context->Map(it->staging[layer].Get(), 0, D3D11_MAP_READ, 0, &mp));
                 if (!ok) break;
                 job.rgba[layer].resize(pageBytes);
-                for (uint32_t y = 0; y < px; ++y)
-                    std::memcpy(job.rgba[layer].data() + size_t(y) * px * 4,
-                                static_cast<const uint8_t*>(mp.pData) + size_t(y) * mp.RowPitch, size_t(px) * 4);
+                const uint8_t* s = static_cast<const uint8_t*>(mp.pData);
+                if (p.rvtPack && layer > 0)
+                {
+                    // RG8 staging: expand to RGBA for the BC7 encoder input (R, G; B, A fixed) — matches RvtLookup.h's
+                    // cold branch, which reads t.xy under HE_RVT_RGNORMAL regardless of hot or cold.
+                    for (uint32_t y = 0; y < px; ++y)
+                    {
+                        const uint8_t* row = s + size_t(y) * mp.RowPitch;
+                        uint8_t* dst = job.rgba[layer].data() + size_t(y) * px * 4;
+                        for (uint32_t x = 0; x < px; ++x)
+                        {
+                            dst[x * 4 + 0] = row[x * 2 + 0];
+                            dst[x * 4 + 1] = row[x * 2 + 1];
+                            dst[x * 4 + 2] = 0;
+                            dst[x * 4 + 3] = 255;
+                        }
+                    }
+                }
+                else
+                    for (uint32_t y = 0; y < px; ++y)
+                        std::memcpy(job.rgba[layer].data() + size_t(y) * px * 4, s + size_t(y) * mp.RowPitch, size_t(px) * 4);
                 p.context->Unmap(it->staging[layer].Get(), 0);
             }
             if (ok) { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); w.cv.notify_one(); }
@@ -9976,7 +10166,11 @@ void D3D11Renderer::UpdateRvtCold()
             desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
             bool ok = true;
             for (int layer = 0; layer < 3 && ok; ++layer)
-                ok = SUCCEEDED(p.device->CreateTexture2D(&desc, nullptr, &f.staging[layer]));
+            {
+                D3D11_TEXTURE2D_DESC d2 = desc;
+                if (p.rvtPack && layer > 0) d2.Format = DXGI_FORMAT_R8G8_UNORM;
+                ok = SUCCEEDED(p.device->CreateTexture2D(&d2, nullptr, &f.staging[layer]));
+            }
             D3D11_QUERY_DESC qd{}; qd.Query = D3D11_QUERY_EVENT;
             if (ok) ok = SUCCEEDED(p.device->CreateQuery(&qd, &f.query));
             if (!ok) break;
@@ -10090,9 +10284,13 @@ bool D3D11Renderer::RenderSceneImage(const EditorCameraOverride& camera, uint32_
         uint32_t gotW = 0, gotH = 0;
         if (camera.rvtSlot >= 0)
         {
-            // A virtual texture page: the picture never leaves the GPU (Thema 333).
+            // A virtual texture page: the picture never leaves the GPU (Thema 333). This branch predates RenderRvtPage
+            // (the early return above takes every real call once a pool exists at the pool's own page size) and does a
+            // format-identical copy — which a packed layer (RG8) cannot take; refuse rather than write a garbled slice
+            // (Thema 333 step 10).
             ok = camera.rvtLayer >= 0 && camera.rvtLayer < 3 && p.rvtPool[camera.rvtLayer]
-              && width == p.rvtPagePx && height == p.rvtPagePx && ensureRvtSlot(p, uint32_t(camera.rvtSlot));
+              && width == p.rvtPagePx && height == p.rvtPagePx && ensureRvtSlot(p, uint32_t(camera.rvtSlot))
+              && !(p.rvtPack && camera.rvtLayer > 0);
             if (ok)
                 p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(),
                                                  D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
