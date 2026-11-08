@@ -4,6 +4,7 @@
 #include "EditorWidgets.h"
 
 #include <Diagnostics/HardwareInfo.h>
+#include <Project/QualitySettings.h>   // the suggested preset
 
 #include <imgui.h>
 
@@ -68,6 +69,9 @@ std::vector<Row> rows()
 
     add("System", "Operating system", orDash(h.osVersion));
     add("System", "Battery", !h.hasBattery ? "none" : (HE::onBattery() ? "running on battery" : "plugged in"));
+
+    add("Suggestion", "Graphics preset", std::string(HE::qualityPresetName(HE::recommendQualityPreset(h))));
+    add("Suggestion", "Based on", HE::recommendQualityReason(h));
     return out;
 }
 

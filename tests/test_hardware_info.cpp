@@ -273,3 +273,70 @@ TEST_CASE("hardware rows: the built-in HorizonCode enum carries the property nam
     CHECK(HE::hardwarePropertyFromName("OnBattery") == static_cast<int>(HE::HardwareProperty::OnBattery));
     CHECK(HE::hardwarePropertyFromName("nope") == -1);
 }
+
+// ── The suggested preset (Thema 337 step 5) ─────────────────────────────────────────────────────
+
+#include <Project/QualitySettings.h>
+
+namespace
+{
+HE::HardwareInfo machine(uint64_t vramMB, uint64_t ramMB, int threads, const char* vendor = "NVIDIA", const char* api = "D3D12")
+{
+    HE::HardwareInfo h;
+    h.cpuThreads = threads;
+    h.ramTotalMB = ramMB;
+    h.gpu.name   = "Test GPU";
+    h.gpu.vendor = vendor;
+    h.gpu.api    = api;
+    h.gpu.vramMB = vramMB;
+    return h;
+}
+using HE::QualityPreset;
+}
+
+TEST_CASE("recommended preset: the video memory sets the ceiling, the host can lower it")
+{
+    // 12 GB card on a big PC: Ultra. Smaller cards step down.
+    CHECK(HE::recommendQualityPreset(machine(12010, 31859, 32)) == QualityPreset::Ultra);
+    CHECK(HE::recommendQualityPreset(machine(10000, 16384, 8))  == QualityPreset::Ultra);
+    CHECK(HE::recommendQualityPreset(machine(8192, 31859, 32))  == QualityPreset::High);
+    CHECK(HE::recommendQualityPreset(machine(6000, 31859, 32))  == QualityPreset::High);
+    CHECK(HE::recommendQualityPreset(machine(4096, 31859, 32))  == QualityPreset::Medium);
+    CHECK(HE::recommendQualityPreset(machine(3000, 31859, 32))  == QualityPreset::Medium);
+    CHECK(HE::recommendQualityPreset(machine(2048, 31859, 32))  == QualityPreset::Low);
+    CHECK(HE::recommendQualityPreset(machine(128, 16384, 8, "Intel")) == QualityPreset::Low);   // an iGPU's dedicated slice
+
+    // The host's memory and threads cap it: a strong card in a small machine.
+    CHECK(HE::recommendQualityPreset(machine(12010, 16384, 4))  == QualityPreset::Medium);   // too few threads for Ultra/High
+    CHECK(HE::recommendQualityPreset(machine(12010, 12288, 6))  == QualityPreset::High);
+    CHECK(HE::recommendQualityPreset(machine(12010, 8192, 4))   == QualityPreset::Medium);
+    CHECK(HE::recommendQualityPreset(machine(12010, 4096, 8))   == QualityPreset::Low);
+}
+
+TEST_CASE("recommended preset: no GPU, the software rasterizer, unknown memory, Apple's shared memory")
+{
+    HE::HardwareInfo none;                                   // nothing handed over yet
+    none.ramTotalMB = 65536; none.cpuThreads = 32;
+    CHECK(HE::recommendQualityPreset(none) == QualityPreset::Low);
+    CHECK(HE::recommendQualityPreset(machine(0, 65536, 32, "", "Software")) == QualityPreset::Low);
+    CHECK(HE::recommendQualityPreset(machine(0, 65536, 32, "AMD", "OpenGL")) == QualityPreset::Medium);   // vram unknown: never more than Medium
+    // Apple: unified memory, so RAM decides.
+    CHECK(HE::recommendQualityPreset(machine(12000, 16384, 10, "Apple", "Metal")) == QualityPreset::High);
+    CHECK(HE::recommendQualityPreset(machine(24000, 32768, 12, "Apple", "Metal")) == QualityPreset::Ultra);
+    CHECK(HE::recommendQualityPreset(machine(5000, 8192, 8, "Apple", "Metal"))    == QualityPreset::Medium);
+    // Never Custom.
+    CHECK(HE::recommendQualityPreset(machine(12010, 31859, 32)) != QualityPreset::Custom);
+}
+
+TEST_CASE("recommended preset: the reason line names the numbers, and the script rows answer")
+{
+    RestoreProvider restore;
+    CHECK(HE::recommendQualityReason(machine(12010, 31859, 32)) == "12010 MB video memory, 31859 MB RAM, 32 threads");
+    CHECK(HE::recommendQualityReason(machine(0, 8192, 4)) == "video memory unknown, 8192 MB RAM, 4 threads");
+    HE::HardwareInfo none; none.ramTotalMB = 4096; none.cpuThreads = 2;
+    CHECK(HE::recommendQualityReason(none) == "no graphics card reported, 4096 MB RAM, 2 threads");
+
+    installFullFake();                                       // 12010 MB GPU, 32768 MB RAM, 16 threads
+    CHECK(callRow("hardware.recommendedPreset")[0].s == "Ultra");
+    CHECK(callRow("hardware.recommendedPresetReason")[0].s == "12010 MB video memory, 32768 MB RAM, 16 threads");
+}

@@ -1,4 +1,5 @@
 #include "ProjectSettingsPanel.h"
+#include <Diagnostics/HardwareInfo.h>   // the machine's suggested preset (Thema 337)
 #include "EditorApplication.h"           // AppContext, ProjectManager
 #include "EditorTheme.h"                 // rail accent bar
 #include "EditorWidgets.h"               // Row:: label-above widgets + wrapped hint()
@@ -837,6 +838,12 @@ void drawQualityPage(AppContext& ctx)
 	hint("Low and Medium save frame time for slower machines, High is the everyday setting, "
 	     "Ultra turns every effect up. Scripts can change the player's choice at run time "
 	     "(Set Quality Preset).");
+	{
+		// A suggestion from the hardware (Thema 337), not a setting: nothing is applied from it.
+		const HE::HardwareInfo hw = HE::hardwareInfo();
+		hint(("This machine suggests " + std::string(HE::qualityPresetName(HE::recommendQualityPreset(hw))) + " ("
+		      + HE::recommendQualityReason(hw) + "). Only a suggestion; Preferences \xC2\xBB Hardware lists the machine.").c_str());
+	}
 	ImGui::Spacing();
 
 	static const char* const kLevel[] = { "Low", "Medium", "High" };

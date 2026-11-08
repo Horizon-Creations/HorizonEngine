@@ -2550,6 +2550,10 @@ namespace hardware {
     bool        hasBattery();
     bool        onBattery();         // a battery exists AND the machine runs on it
     std::string summary();           // the main facts, one line per group
+    // What preset this machine can probably carry ("Low" ... "Ultra"), from the numbers above, and
+    // the numbers it came from. A suggestion for a settings screen: nothing applies it by itself.
+    std::string recommendedPreset();
+    std::string recommendedPresetReason();
     // By name, for a settings screen that lists them all: fields() are the HardwareProperty names in
     // order (CpuName ... OnBattery), value(name) is the text of one ("" for none; the name is
     // case-insensitive and an unknown name reads "" too).

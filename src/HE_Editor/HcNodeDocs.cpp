@@ -1152,6 +1152,13 @@ namespace
 	  "Yes when the machine has a battery AND is running on it right now. Read fresh every time." },
 	{ "hardware.summary",
 	  "The main facts as text, one line each for CPU, RAM, GPU, display and operating system. A line says \"unknown\" when the machine could not tell. Ready to show in an about box." },
+	{ "hardware.recommendedPreset",
+	  "The graphics preset this machine can probably carry: Low, Medium, High or Ultra, a coarse guess from the video "
+	  "memory, RAM and processor threads. A suggestion for a settings screen - nothing applies it by itself; "
+	  "pass it to Set Quality Preset if the player agrees." },
+	{ "hardware.recommendedPresetReason",
+	  "The numbers the recommended preset came from, as one line, for example \"12010 MB video memory, 31859 MB RAM, "
+	  "32 threads\". Shown next to the suggestion so the player can see why." },
 	{ "hardware.fields",
 	  "The names of every hardware value Get Hardware Value accepts, in order (CpuName, CpuCores, ... OnBattery). Fills a list on a settings screen without spelling the names in the graph." },
 	{ "hardware.value",

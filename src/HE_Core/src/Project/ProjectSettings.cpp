@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdio>
 #include <cctype>
 #include <cmath>
 #include <fstream>
@@ -279,6 +280,48 @@ void applyQualityPreset(QualityPreset p, ProjectGraphics& g, ProjectShadowSettin
     shadows.resolution     = r.shadowResolution;
     g.enabled = true;
     g.preset  = p;
+}
+
+QualityPreset recommendQualityPreset(const HardwareInfo& hw)
+{
+    if (!hw.gpu.valid() || hw.gpu.api == "Software") return QualityPreset::Low;
+
+    const uint64_t vram = hw.gpu.vramMB;
+    const uint64_t ram  = hw.ramTotalMB;
+    const int      threads = hw.cpuThreads;
+
+    QualityPreset byGpu;
+    if (hw.gpu.vendor == "Apple")                     // unified memory: the host's RAM is the budget
+        byGpu = ram >= 32000 ? QualityPreset::Ultra : ram >= 16000 ? QualityPreset::High : QualityPreset::Medium;
+    else if (vram == 0)       byGpu = QualityPreset::Medium;   // unknown: not enough to promise more
+    else if (vram >= 10000)   byGpu = QualityPreset::Ultra;
+    else if (vram >= 6000)    byGpu = QualityPreset::High;
+    else if (vram >= 3000)    byGpu = QualityPreset::Medium;
+    else                      byGpu = QualityPreset::Low;
+
+    QualityPreset byHost;
+    if      (ram >= 16000 && threads >= 8) byHost = QualityPreset::Ultra;
+    else if (ram >= 12000 && threads >= 6) byHost = QualityPreset::High;
+    else if (ram >= 8000  && threads >= 4) byHost = QualityPreset::Medium;
+    else                                   byHost = QualityPreset::Low;
+
+    return static_cast<QualityPreset>(std::min(static_cast<int>(byGpu), static_cast<int>(byHost)));
+}
+
+std::string recommendQualityReason(const HardwareInfo& hw)
+{
+    std::string out;
+    char buf[96];
+    if (!hw.gpu.valid()) out += "no graphics card reported, ";
+    else if (hw.gpu.vramMB)
+    {
+        std::snprintf(buf, sizeof buf, "%llu MB video memory, ", static_cast<unsigned long long>(hw.gpu.vramMB));
+        out += buf;
+    }
+    else out += "video memory unknown, ";
+    std::snprintf(buf, sizeof buf, "%llu MB RAM, %d threads", static_cast<unsigned long long>(hw.ramTotalMB), hw.cpuThreads);
+    out += buf;
+    return out;
 }
 
 QualityPreset detectQualityPreset(const ProjectGraphics& g, const ProjectShadowSettings& shadows)

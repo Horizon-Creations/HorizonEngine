@@ -4909,6 +4909,8 @@ std::string displayName()   { return HE::hardwareInfo().display.name; }
 bool        hasBattery()    { return HE::hardwareInfo().hasBattery; }
 bool        onBattery()     { return HE::onBattery(); }
 std::string summary()       { return HE::hardwareSummary(); }
+std::string recommendedPreset()       { return HE::qualityPresetName(HE::recommendQualityPreset(HE::hardwareInfo())); }
+std::string recommendedPresetReason() { return HE::recommendQualityReason(HE::hardwareInfo()); }
 std::vector<std::string> fields()
 {
     std::vector<std::string> out;
@@ -7321,6 +7323,8 @@ const std::vector<ApiFn>& registry()
             num("hardware.displayHeight","pixels",   hardware::displayHeight,"HE::api::hardware::displayHeight");
             str("hardware.displayName",  "name",     hardware::displayName,  "HE::api::hardware::displayName");
             str("hardware.summary",      "text",     hardware::summary,      "HE::api::hardware::summary");
+            str("hardware.recommendedPreset", "preset", hardware::recommendedPreset, "HE::api::hardware::recommendedPreset");
+            str("hardware.recommendedPresetReason", "text", hardware::recommendedPresetReason, "HE::api::hardware::recommendedPresetReason");
             t.push_back({ "hardware.displayRefreshHz", "Hardware", false, {}, {{"hz", P::Float}}, "HE::api::hardware::displayRefreshHz",
                 [](Ctx&, const VV&){ return VV{ Value::ofFloat(hardware::displayRefreshHz()) }; } });
             t.push_back({ "hardware.displayScale", "Hardware", false, {}, {{"scale", P::Float}}, "HE::api::hardware::displayScale",
@@ -8615,6 +8619,8 @@ const std::vector<ApiFn>& registry()
             { "hardware.hasBattery", "Has Battery" },
             { "hardware.onBattery", "Is On Battery" },
             { "hardware.summary", "Get Hardware Summary" },
+            { "hardware.recommendedPreset", "Get Recommended Quality Preset" },
+            { "hardware.recommendedPresetReason", "Get Recommended Preset Reason" },
             { "hardware.fields", "Hardware Fields" },
             { "hardware.value", "Get Hardware Value" },
             { "hardware.info", "Get Hardware Info" },
