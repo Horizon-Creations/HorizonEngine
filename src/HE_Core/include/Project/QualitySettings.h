@@ -1,5 +1,6 @@
 #pragma once
 #include <Types/Defines.h>
+#include <Diagnostics/HardwareInfo.h>   // recommendQualityPreset reads a HardwareInfo
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -171,6 +172,21 @@ HE_API void          applyQualityPreset(QualityPreset p, ProjectGraphics& g, Pro
 // The preset whose values `g` and `shadows` hold right now, Custom when none.
 // `g.enabled` and `g.preset` are not looked at.
 HE_API QualityPreset detectQualityPreset(const ProjectGraphics& g, const ProjectShadowSettings& shadows);
+
+// Which preset a machine can probably carry (Thema 337): a deliberately coarse guess from the hardware
+// numbers, shown as a suggestion and NEVER applied by itself. Never Custom.
+//   no usable GPU (none handed over, or the software rasterizer)   -> Low
+//   video memory: unknown -> at most Medium; < 3000 MB -> Low; < 6000 -> Medium; < 10000 -> High;
+//                 10000 MB and up -> Ultra            (Apple GPUs share memory: by RAM instead,
+//                 32 GB and up -> Ultra, 16 GB -> High, less -> Medium)
+//   the host caps it: RAM and threads must reach 16 GB / 8 for Ultra, 12 GB / 6 for High,
+//                 8 GB / 4 for Medium, otherwise Low
+// The answer is the lower of the GPU's and the host's. A measured recommendation (a benchmark that
+// times the presets) is a separate topic and would replace this one.
+HE_API QualityPreset recommendQualityPreset(const HardwareInfo& hw);
+// The numbers the answer came from, as one line for a settings screen:
+// "12010 MB video memory, 31859 MB RAM, 32 threads".
+HE_API std::string   recommendQualityReason(const HardwareInfo& hw);
 
 // ── The quality fields by name ────────────────────────────────────────────────
 // The single regulators the presets are made of (and a few more of the same

@@ -17,6 +17,8 @@
 #include <HorizonCode/HorizonCodeRuntime.h>
 #include <HorizonScene/EngineApi.h>
 #include <Diagnostics/Log.h>   // addSink — the divide-by-zero case reads what reached the log
+#include <Diagnostics/HardwareInfo.h>   // the hardware parity case installs a fake machine
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <climits>   // INT_MIN: the bitwise rows' edge operand
@@ -1425,6 +1427,39 @@ TEST_CASE("codegen parity: player_settings (the settings rows reach one store id
 	HE::api::Ctx ctx;
 	HE::api::prefs::remove(ctx, HE::api::settings::kPrefsKey);
 	HE::api::settings::uninstall();
+}
+
+TEST_CASE("codegen parity: hardware_rows (the hardware rows read one module identically)")
+{
+    struct Restore { ~Restore() { HE::setHardwareProvider(nullptr); } } restore;
+    struct Fake final : HE::HardwareProvider
+    {
+        HE::HardwareInfo detect() override
+        {
+            HE::HardwareInfo h;
+            h.cpuName = "Parity CPU"; h.cpuCores = 8; h.cpuThreads = 16; h.ramTotalMB = 32768; h.osName = "Parity OS";
+            return h;
+        }
+        uint64_t freeMemoryMB() override { return 1; }
+        bool     onBattery() override    { return false; }
+    };
+    HE::setHardwareProvider(std::make_shared<Fake>());
+    HE::GpuInfo gpu; gpu.name = "Parity GPU"; gpu.vramMB = 12010; gpu.api = "Vulkan";
+    HE::setGpuInfo(gpu);
+    HE::DisplayInfo disp; disp.width = 1920; disp.height = 1080; disp.refreshHz = 144.0f; disp.scale = 1.0f;
+    HE::setDisplayInfo(disp);
+
+    ParityPair p("fix/hardware_rows");
+    p.fire("Apply");
+
+    CHECK(p.var("cpu").s == "Parity CPU");
+    CHECK(p.var("threads").i == 16);
+    CHECK(p.var("ram").i == 32768);
+    CHECK(p.var("gpu").s == "Parity GPU");
+    CHECK(p.var("vram").i == 12010);
+    CHECK(p.var("hz").f == doctest::Approx(144.0f));
+    CHECK(p.var("api").s == "Vulkan");
+    CHECK(p.var("byName").s == "Parity OS");
 }
 
 TEST_CASE("codegen parity: quality_settings (the quality rows reach one store identically)")

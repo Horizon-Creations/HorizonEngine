@@ -12,6 +12,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/packing.hpp>
 #include <stdexcept>
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <filesystem>
@@ -1562,18 +1563,136 @@ void VulkanRenderer::pickPhysicalDevice()
     if (count == 0) throw std::runtime_error("Vulkan: no GPU found");
     std::vector<VkPhysicalDevice> devs(count);
     vkEnumeratePhysicalDevices(m_instance, &count, devs.data());
-    m_physDevice = devs[0];
+    // The GPU choice (Thema 337): the device whose id (vendor:device:number, numbered in Vulkan's order) the
+    // settings named, provided it can draw to the window; else Vulkan's first device, as before.
+    uint32_t pick = 0;
+    {
+        const std::string want = HE::preferredGpuId();
+        HE::GpuSelection sel;
+        sel.requested = want;
+        if (want.empty())
+        {
+            sel.note = "the system's default graphics card";
+        }
+        else
+        {
+            std::vector<HE::GpuInfo> ids;
+            std::map<std::pair<uint32_t, uint32_t>, int> seen;
+            for (VkPhysicalDevice dev : devs)
+            {
+                VkPhysicalDeviceProperties dp{};
+                vkGetPhysicalDeviceProperties(dev, &dp);
+                HE::GpuInfo g;
+                g.id = HE::makeGpuId(dp.vendorID, dp.deviceID, seen[{ dp.vendorID, dp.deviceID }]++);
+                ids.push_back(std::move(g));
+            }
+            const int idx = HE::findGpuIndex(ids, want);
+            bool canPresent = false;
+            if (idx >= 0)
+            {
+                uint32_t qn = 0;
+                vkGetPhysicalDeviceQueueFamilyProperties(devs[static_cast<size_t>(idx)], &qn, nullptr);
+                std::vector<VkQueueFamilyProperties> qp(qn);
+                vkGetPhysicalDeviceQueueFamilyProperties(devs[static_cast<size_t>(idx)], &qn, qp.data());
+                for (uint32_t q = 0; q < qn && !canPresent; ++q)
+                {
+                    VkBool32 present = VK_FALSE;
+                    vkGetPhysicalDeviceSurfaceSupportKHR(devs[static_cast<size_t>(idx)], q, m_surface, &present);
+                    canPresent = (qp[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present;
+                }
+            }
+            if (idx >= 0 && canPresent)
+            {
+                pick = static_cast<uint32_t>(idx);
+                sel.note = "the chosen graphics card (" + want + ")";
+                HE_LOG_INFO(RHI, "VulkanRenderer: running on the chosen adapter %s (device %u)", want.c_str(), pick);
+            }
+            else
+            {
+                sel.honored = false;
+                sel.note = idx < 0
+                    ? "the chosen graphics card (" + want + ") was not found; the system's default graphics card runs instead"
+                    : "the chosen graphics card (" + want + ") cannot draw to this window; the system's default graphics card runs instead";
+                HE_LOG_WARN(RHI, "VulkanRenderer: %s", sel.note.c_str());
+            }
+        }
+        HE::setGpuSelection(sel);
+    }
+    m_physDevice = devs[pick];
     // Name the device: a CI image test on a software ICD (lavapipe) must be able
     // to show in its log that "llvmpipe" — and not some other ICD — drew it.
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(m_physDevice, &props);
     char line[384];
     std::snprintf(line, sizeof line,
-        "VulkanRenderer: device 0 of %u: %s (Vulkan %u.%u.%u, driver 0x%x)",
-        count, props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
+        "VulkanRenderer: device %u of %u: %s (Vulkan %u.%u.%u, driver 0x%x)",
+        pick, count, props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
         VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion),
         props.driverVersion);
     HE_LOG_INFO(RHI, "%s", line);
+
+    // The same facts for HE::GpuInfo (Thema 337). The driver version is vendor-specific: NVIDIA packs
+    // major.minor.secondary.tertiary into 10/8/8/6 bits, Intel on Windows major(18).minor(14), the rest
+    // follow the Vulkan version packing.
+    m_adapterInfo = HE::GpuInfo{};
+    m_adapterInfo.name   = props.deviceName;
+    m_adapterInfo.vendor = HE::gpuVendorFromPciId(props.vendorID);
+    m_adapterInfo.api    = "Vulkan";
+    m_adapterInfo.vendorId = props.vendorID;
+    m_adapterInfo.deviceId = props.deviceID;
+    m_adapterInfo.software = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+    {
+        const uint32_t v = props.driverVersion;
+        char drv[48];
+        if (props.vendorID == 0x10de)
+        {
+            const uint32_t major = (v >> 22) & 0x3ff, minor = (v >> 14) & 0xff, sec = (v >> 6) & 0xff, ter = v & 0x3f;
+            if (sec || ter) std::snprintf(drv, sizeof drv, "%u.%u.%u.%u", major, minor, sec, ter);
+            else            std::snprintf(drv, sizeof drv, "%u.%02u", major, minor);
+        }
+#ifdef _WIN32
+        else if (props.vendorID == 0x8086)
+            std::snprintf(drv, sizeof drv, "%u.%u", v >> 14, v & 0x3fff);
+#endif
+        else
+            std::snprintf(drv, sizeof drv, "%u.%u.%u", VK_API_VERSION_MAJOR(v), VK_API_VERSION_MINOR(v), VK_API_VERSION_PATCH(v));
+        m_adapterInfo.driver = drv;
+    }
+    {
+        VkPhysicalDeviceMemoryProperties mem{};
+        vkGetPhysicalDeviceMemoryProperties(m_physDevice, &mem);
+        VkDeviceSize best = 0;
+        for (uint32_t i = 0; i < mem.memoryHeapCount; ++i)
+            if ((mem.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mem.memoryHeaps[i].size > best)
+                best = mem.memoryHeaps[i].size;
+        m_adapterInfo.vramMB = best / (1024ull * 1024ull);
+    }
+
+    // The whole device list, for platforms whose own detection cannot list adapters (Linux; Windows lists
+    // through DXGI and ignores this). Same order Vulkan numbers them in, ordinals among identical ids.
+    {
+        std::vector<HE::GpuInfo> all;
+        std::map<std::pair<uint32_t, uint32_t>, int> seen;
+        for (VkPhysicalDevice dev : devs)
+        {
+            VkPhysicalDeviceProperties dp{};
+            vkGetPhysicalDeviceProperties(dev, &dp);
+            HE::GpuInfo g;
+            g.name = dp.deviceName; g.vendor = HE::gpuVendorFromPciId(dp.vendorID); g.api = "Vulkan";
+            g.vendorId = dp.vendorID; g.deviceId = dp.deviceID;
+            g.software = dp.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            g.id = HE::makeGpuId(dp.vendorID, dp.deviceID, seen[{ dp.vendorID, dp.deviceID }]++);
+            VkPhysicalDeviceMemoryProperties mp{};
+            vkGetPhysicalDeviceMemoryProperties(dev, &mp);
+            VkDeviceSize best = 0;
+            for (uint32_t i = 0; i < mp.memoryHeapCount; ++i)
+                if ((mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) && mp.memoryHeaps[i].size > best)
+                    best = mp.memoryHeaps[i].size;
+            g.vramMB = best / (1024ull * 1024ull);
+            all.push_back(std::move(g));
+        }
+        HE::setGpuList(all);
+    }
 }
 
 void VulkanRenderer::createDevice()

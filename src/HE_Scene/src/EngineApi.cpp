@@ -1,6 +1,7 @@
 #include "HorizonScene/EngineApi.h"
 #include <cstdint>
 #include <Types/TypeRegistry.h>   // kQualityLevelEnum / kQualitySettingEnum on the settings rows
+#include <Diagnostics/HardwareInfo.h>   // hardware.* rows
 #include "HorizonScene/ScriptApi.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/TrailSystem.h"
@@ -4885,6 +4886,87 @@ bool remove   (Ctx&, const std::string& key)
 void clear(Ctx&) { doc() = nlohmann::json::object(); store(); }
 } // namespace prefs
 
+// ── Hardware (Thema 337) ─────────────────────────────────────────────────────
+namespace hardware {
+std::string cpuName()       { return HE::hardwareInfo().cpuName; }
+int         cpuCores()      { return HE::hardwareInfo().cpuCores; }
+int         cpuThreads()    { return HE::hardwareInfo().cpuThreads; }
+std::string cpuArch()       { return HE::hardwareInfo().cpuArch; }
+int         ramTotalMB()    { return static_cast<int>(HE::hardwareInfo().ramTotalMB); }
+int         ramFreeMB()     { return static_cast<int>(HE::freeMemoryMB()); }
+std::string gpuName()       { return HE::hardwareInfo().gpu.name; }
+std::string gpuVendor()     { return HE::hardwareInfo().gpu.vendor; }
+std::string gpuDriver()     { return HE::hardwareInfo().gpu.driver; }
+int         gpuVramMB()     { return static_cast<int>(HE::hardwareInfo().gpu.vramMB); }
+std::string graphicsApi()   { return HE::hardwareInfo().gpu.api; }
+std::string osName()        { return HE::hardwareInfo().osName; }
+std::string osVersion()     { return HE::hardwareInfo().osVersion; }
+int         displayWidth()  { return HE::hardwareInfo().display.width; }
+int         displayHeight() { return HE::hardwareInfo().display.height; }
+float       displayRefreshHz() { return HE::hardwareInfo().display.refreshHz; }
+float       displayScale()  { const HE::HardwareInfo h = HE::hardwareInfo(); return h.display.valid() ? h.display.scale : 0.0f; }
+std::string displayName()   { return HE::hardwareInfo().display.name; }
+bool        hasBattery()    { return HE::hardwareInfo().hasBattery; }
+bool        onBattery()     { return HE::onBattery(); }
+std::string summary()       { return HE::hardwareSummary(); }
+namespace {
+std::string gpuLine(const HE::GpuInfo& g) { return HE::describeGpu(g); }
+}
+int displayCount()   { return static_cast<int>(HE::hardwareInfo().displays.size()); }
+std::vector<std::string> displayNames()
+{
+    std::vector<std::string> o;
+    for (auto& d : HE::hardwareInfo().displays) o.push_back(d.name.empty() ? "Display " + std::to_string(d.id) : d.name);
+    return o;
+}
+std::string displayAt(int index)
+{
+    const auto h = HE::hardwareInfo();
+    return index >= 0 && index < static_cast<int>(h.displays.size()) ? HE::describeDisplay(h.displays[static_cast<size_t>(index)]) : std::string{};
+}
+int currentDisplayIndex()
+{
+    const auto h = HE::hardwareInfo();
+    for (size_t i = 0; i < h.displays.size(); ++i)
+        if (h.displays[i].current) return static_cast<int>(i);
+    return -1;
+}
+int                      gpuCount()   { return static_cast<int>(HE::hardwareInfo().gpus.size()); }
+std::vector<std::string> gpuNames()   { std::vector<std::string> o; for (auto& g : HE::hardwareInfo().gpus) o.push_back(g.name); return o; }
+std::vector<std::string> gpuIds()     { std::vector<std::string> o; for (auto& g : HE::hardwareInfo().gpus) o.push_back(g.id); return o; }
+std::string gpuAt(int index)
+{
+    const auto h = HE::hardwareInfo();
+    return index >= 0 && index < static_cast<int>(h.gpus.size()) ? gpuLine(h.gpus[static_cast<size_t>(index)]) : std::string{};
+}
+std::string activeGpuId()  { return HE::hardwareInfo().gpu.id; }
+std::string preferredGpu() { return HE::loadPreferredGpu(); }
+bool setPreferredGpu(const std::string& id)
+{
+    if (!id.empty() && HE::findGpuIndex(HE::hardwareInfo().gpus, id) < 0) return false;
+    return HE::savePreferredGpu(id);
+}
+std::string gpuChoiceNote()
+{
+    const HE::GpuSelection s = HE::gpuSelection();
+    return s.note;
+}
+std::string recommendedPreset()       { return HE::qualityPresetName(HE::recommendQualityPreset(HE::hardwareInfo())); }
+std::string recommendedPresetReason() { return HE::recommendQualityReason(HE::hardwareInfo()); }
+std::vector<std::string> fields()
+{
+    std::vector<std::string> out;
+    for (int i = 0; i < static_cast<int>(HE::HardwareProperty::Count); ++i) out.push_back(HE::hardwarePropertyName(i));
+    return out;
+}
+std::string value(const std::string& field)
+{
+    const int p = HE::hardwarePropertyFromName(field);
+    return p < 0 ? std::string{} : HE::hardwarePropertyText(p);
+}
+std::string info(int property) { return HE::hardwarePropertyText(property); }
+} // namespace hardware
+
 // ── Date and time ────────────────────────────────────────────────────────────
 namespace datetime {
 namespace {
@@ -7257,6 +7339,80 @@ const std::vector<ApiFn>& registry()
             "HE::api::settings::autoQualityLevel",
             [](Ctx&, const VV&){ return VV{ ofEnum(settings::autoQualityLevel(), HE::kQualityLevelEnum) }; } });
 
+        // Hardware (Thema 337): what the machine is, read-only. Typed rows for the common values, the summary
+        // as text, and the by-name / by-enum pair for a screen that lists every field.
+        {
+            auto str = [&](const char* id, const char* out, std::string(*fn)(), const char* cpp) {
+                t.push_back({ id, "Hardware", false, {}, {{out, P::String}}, cpp,
+                    [fn](Ctx&, const VV&){ return VV{ Value::ofString(fn()) }; } }); };
+            auto num = [&](const char* id, const char* out, int(*fn)(), const char* cpp) {
+                t.push_back({ id, "Hardware", false, {}, {{out, P::Int}}, cpp,
+                    [fn](Ctx&, const VV&){ return VV{ Value::ofInt(fn()) }; } }); };
+            str("hardware.cpuName",      "name",     hardware::cpuName,      "HE::api::hardware::cpuName");
+            num("hardware.cpuCores",     "cores",    hardware::cpuCores,     "HE::api::hardware::cpuCores");
+            num("hardware.cpuThreads",   "threads",  hardware::cpuThreads,   "HE::api::hardware::cpuThreads");
+            str("hardware.cpuArch",      "arch",     hardware::cpuArch,      "HE::api::hardware::cpuArch");
+            num("hardware.ramTotalMB",   "mb",       hardware::ramTotalMB,   "HE::api::hardware::ramTotalMB");
+            num("hardware.ramFreeMB",    "mb",       hardware::ramFreeMB,    "HE::api::hardware::ramFreeMB");
+            str("hardware.gpuName",      "name",     hardware::gpuName,      "HE::api::hardware::gpuName");
+            str("hardware.gpuVendor",    "vendor",   hardware::gpuVendor,    "HE::api::hardware::gpuVendor");
+            str("hardware.gpuDriver",    "driver",   hardware::gpuDriver,    "HE::api::hardware::gpuDriver");
+            num("hardware.gpuVramMB",    "mb",       hardware::gpuVramMB,    "HE::api::hardware::gpuVramMB");
+            str("hardware.graphicsApi",  "api",      hardware::graphicsApi,  "HE::api::hardware::graphicsApi");
+            str("hardware.osName",       "name",     hardware::osName,       "HE::api::hardware::osName");
+            str("hardware.osVersion",    "version",  hardware::osVersion,    "HE::api::hardware::osVersion");
+            num("hardware.displayWidth", "pixels",   hardware::displayWidth, "HE::api::hardware::displayWidth");
+            num("hardware.displayHeight","pixels",   hardware::displayHeight,"HE::api::hardware::displayHeight");
+            str("hardware.displayName",  "name",     hardware::displayName,  "HE::api::hardware::displayName");
+            str("hardware.summary",      "text",     hardware::summary,      "HE::api::hardware::summary");
+            str("hardware.recommendedPreset", "preset", hardware::recommendedPreset, "HE::api::hardware::recommendedPreset");
+            str("hardware.recommendedPresetReason", "text", hardware::recommendedPresetReason, "HE::api::hardware::recommendedPresetReason");
+            t.push_back({ "hardware.displayRefreshHz", "Hardware", false, {}, {{"hz", P::Float}}, "HE::api::hardware::displayRefreshHz",
+                [](Ctx&, const VV&){ return VV{ Value::ofFloat(hardware::displayRefreshHz()) }; } });
+            t.push_back({ "hardware.displayScale", "Hardware", false, {}, {{"scale", P::Float}}, "HE::api::hardware::displayScale",
+                [](Ctx&, const VV&){ return VV{ Value::ofFloat(hardware::displayScale()) }; } });
+            t.push_back({ "hardware.hasBattery", "Hardware", false, {}, {{"yes", P::Bool}}, "HE::api::hardware::hasBattery",
+                [](Ctx&, const VV&){ return VV{ Value::ofBool(hardware::hasBattery()) }; } });
+            t.push_back({ "hardware.onBattery", "Hardware", false, {}, {{"yes", P::Bool}}, "HE::api::hardware::onBattery",
+                [](Ctx&, const VV&){ return VV{ Value::ofBool(hardware::onBattery()) }; } });
+            num("hardware.gpuCount", "count", hardware::gpuCount, "HE::api::hardware::gpuCount");
+            str("hardware.activeGpuId", "id", hardware::activeGpuId, "HE::api::hardware::activeGpuId");
+            num("hardware.displayCount", "count", hardware::displayCount, "HE::api::hardware::displayCount");
+            num("hardware.currentDisplayIndex", "index", hardware::currentDisplayIndex, "HE::api::hardware::currentDisplayIndex");
+            t.push_back({ "hardware.displayNames", "Hardware", false, {}, {{"names", P::String, /*isArray=*/true}}, "HE::api::hardware::displayNames",
+                [](Ctx&, const VV&){
+                    Value arr; arr.isArray = true; arr.type = P::String;
+                    for (auto& n : hardware::displayNames()) arr.items.push_back(Value::ofString(std::move(n)));
+                    return VV{ std::move(arr) }; } });
+            t.push_back({ "hardware.displayAt", "Hardware", false, {{"index", P::Int}}, {{"text", P::String}}, "HE::api::hardware::displayAt",
+                [](Ctx&, const VV& a){ return VV{ Value::ofString(hardware::displayAt(aI(a, 0))) }; } });
+            str("hardware.preferredGpu", "id", hardware::preferredGpu, "HE::api::hardware::preferredGpu");
+            str("hardware.gpuChoiceNote", "text", hardware::gpuChoiceNote, "HE::api::hardware::gpuChoiceNote");
+            t.push_back({ "hardware.setPreferredGpu", "Hardware", true, {{"id", P::String}}, {{"ok", P::Bool}}, "HE::api::hardware::setPreferredGpu",
+                [](Ctx&, const VV& a){ return VV{ Value::ofBool(hardware::setPreferredGpu(aS(a, 0))) }; } });
+            t.push_back({ "hardware.gpuNames", "Hardware", false, {}, {{"names", P::String, /*isArray=*/true}}, "HE::api::hardware::gpuNames",
+                [](Ctx&, const VV&){
+                    Value arr; arr.isArray = true; arr.type = P::String;
+                    for (auto& n : hardware::gpuNames()) arr.items.push_back(Value::ofString(std::move(n)));
+                    return VV{ std::move(arr) }; } });
+            t.push_back({ "hardware.gpuIds", "Hardware", false, {}, {{"ids", P::String, /*isArray=*/true}}, "HE::api::hardware::gpuIds",
+                [](Ctx&, const VV&){
+                    Value arr; arr.isArray = true; arr.type = P::String;
+                    for (auto& n : hardware::gpuIds()) arr.items.push_back(Value::ofString(std::move(n)));
+                    return VV{ std::move(arr) }; } });
+            t.push_back({ "hardware.gpuAt", "Hardware", false, {{"index", P::Int}}, {{"text", P::String}}, "HE::api::hardware::gpuAt",
+                [](Ctx&, const VV& a){ return VV{ Value::ofString(hardware::gpuAt(aI(a, 0))) }; } });
+            t.push_back({ "hardware.fields", "Hardware", false, {}, {{"fields", P::String, /*isArray=*/true}}, "HE::api::hardware::fields",
+                [](Ctx&, const VV&){
+                    Value arr; arr.isArray = true; arr.type = P::String;
+                    for (auto& n : hardware::fields()) arr.items.push_back(Value::ofString(std::move(n)));
+                    return VV{ std::move(arr) }; } });
+            t.push_back({ "hardware.value", "Hardware", false, {{"field", P::String}}, {{"text", P::String}}, "HE::api::hardware::value",
+                [](Ctx&, const VV& a){ return VV{ Value::ofString(hardware::value(aS(a, 0))) }; } });
+            t.push_back({ "hardware.info", "Hardware", false, { enumP("property", HE::kHardwarePropertyEnum) }, {{"text", P::String}}, "HE::api::hardware::info",
+                [](Ctx&, const VV& a){ return VV{ Value::ofString(hardware::info(aI(a, 0))) }; } });
+        }
+
         // Date and time — the WALL clock, unlike the time group. Double pins:
         // at today's epoch a float steps in 128 s, so on a Float pin `now` read
         // up to a minute wrong and `second(now())` was noise.
@@ -8511,6 +8667,38 @@ const std::vector<ApiFn>& registry()
             { "settings.qualityPresetNames", "Quality Preset Names" },
             { "settings.setQualityValue", "Set Quality Value" }, { "settings.qualityValue", "Get Quality Value" },
             { "settings.qualityFields", "Quality Fields" },
+            { "hardware.cpuName", "Get CPU Name" },
+            { "hardware.cpuCores", "Get CPU Cores" },
+            { "hardware.cpuThreads", "Get CPU Threads" },
+            { "hardware.cpuArch", "Get CPU Architecture" },
+            { "hardware.ramTotalMB", "Get RAM Total" },
+            { "hardware.ramFreeMB", "Get RAM Free" },
+            { "hardware.gpuName", "Get GPU Name" },
+            { "hardware.gpuVendor", "Get GPU Vendor" },
+            { "hardware.gpuDriver", "Get GPU Driver" },
+            { "hardware.gpuVramMB", "Get GPU Memory" },
+            { "hardware.graphicsApi", "Get Graphics API" },
+            { "hardware.osName", "Get OS Name" },
+            { "hardware.osVersion", "Get OS Version" },
+            { "hardware.displayWidth", "Get Display Width" },
+            { "hardware.displayHeight", "Get Display Height" },
+            { "hardware.displayRefreshHz", "Get Display Refresh Rate" },
+            { "hardware.displayScale", "Get Display Scale" },
+            { "hardware.displayName", "Get Display Name" },
+            { "hardware.hasBattery", "Has Battery" },
+            { "hardware.onBattery", "Is On Battery" },
+            { "hardware.summary", "Get Hardware Summary" },
+            { "hardware.gpuCount", "Get GPU Count" }, { "hardware.activeGpuId", "Get Active GPU Id" },
+            { "hardware.preferredGpu", "Get Preferred GPU" }, { "hardware.setPreferredGpu", "Set Preferred GPU" },
+            { "hardware.gpuChoiceNote", "Get GPU Choice Note" },
+            { "hardware.displayCount", "Get Display Count" }, { "hardware.currentDisplayIndex", "Get Current Display Index" },
+            { "hardware.displayNames", "Display Names" }, { "hardware.displayAt", "Get Display At" },
+            { "hardware.gpuNames", "GPU Names" }, { "hardware.gpuIds", "GPU Ids" }, { "hardware.gpuAt", "Get GPU At" },
+            { "hardware.recommendedPreset", "Get Recommended Quality Preset" },
+            { "hardware.recommendedPresetReason", "Get Recommended Preset Reason" },
+            { "hardware.fields", "Hardware Fields" },
+            { "hardware.value", "Get Hardware Value" },
+            { "hardware.info", "Get Hardware Info" },
             { "settings.engine", "Get Engine Settings" },
             { "settings.qualityLevel", "Get Quality Level" }, { "settings.setQualityLevel", "Set Quality Level" },
             { "settings.qualityOf", "Get Quality Of" },       { "settings.setQualityOf", "Set Quality Of" },
@@ -8869,7 +9057,7 @@ const std::vector<ApiFn>& registry()
         // here, so it stops compiling.
         static constexpr const char* kFreeGroups[] = {
             "debug", "fs", "input", "math", "player", "random", "save",
-            "settings", "string", "time", "timer",
+            "settings", "string", "time", "timer", "hardware",
         };
         static constexpr const char* kFreeRows[] = {
             "app.setVSync", "app.vsync", "app.setFullscreen", "app.isFullscreen",
@@ -9017,6 +9205,8 @@ bool isScriptGroup(std::string_view group)
                                                     // menu: volume, save and reset. Its other
                                                     // rows are filed under input, camera and app.
                                                     "settings",
+                                                    // "hardware": what a settings or about screen shows about the machine
+                                                    "hardware",
                                                     // "datetime" has no flat twin at all: without
                                                     // it a text script can read the clock as a
                                                     // number of seconds and never say what day

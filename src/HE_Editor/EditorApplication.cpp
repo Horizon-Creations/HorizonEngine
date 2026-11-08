@@ -10560,6 +10560,35 @@ void EditorApplication::dumpFrameHeadless()
 			settleFrames = atTod;
 		}
 	}
+	// HE_DUMP_QUALITYSWITCH="tex,mat[,shadowResolution]": a quality change DURING a run, the path
+	// the automatic-quality governor and a script's Set Quality Level take in a game (a renderer
+	// that already has its textures, samplers and shadow array built). The capture's own knobs
+	// (HE_DUMP_TEXQUALITY / MATQUALITY / SHADOW) are the START state: the settle frames render
+	// there, then the new values are pushed and a few more frames render before the capture. The
+	// oracle: the frame must equal a plain run started at the NEW values (same camera, GI off).
+	if (const char* sw = std::getenv("HE_DUMP_QUALITYSWITCH"); sw && *sw)
+	{
+		int tex = 2, mat = 2, res = 0;
+		const int got = std::sscanf(sw, "%d,%d,%d", &tex, &mat, &res);
+		if (got >= 2)
+		{
+			for (int i = 0; i < settleFrames; ++i)
+				r->Render();
+			IRenderer::QualitySettings qs = r->GetQualitySettings();
+			qs.textureQuality  = std::clamp(tex, 0, 2);
+			qs.materialQuality = std::clamp(mat, 0, 2);
+			r->SetQualitySettings(qs);
+			if (got >= 3 && res > 0)
+			{
+				IRenderer::ShadowSettings ss = projectShadowSettings();
+				ss.resolution = res;
+				r->SetShadowSettings(ss);
+			}
+			settleFrames = std::max(settleFrames, 4);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_QUALITYSWITCH to texture %d, material %d%s after the first frames",
+			            qs.textureQuality, qs.materialQuality, got >= 3 ? ", shadow resolution changed" : "");
+		}
+	}
 	// HE_DUMP_PLAYCELLS=1 (with HE_DUMP_SKYTEST, e.g. CAMY=90 PITCH=-89): the witness
 	// that Play streams a split scene's cells (Thema 164 step 2c). A 13 x 13 grid of
 	// cubes, 10 m apart around the origin, is split into 40 m cells written to a temp

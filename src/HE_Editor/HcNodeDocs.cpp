@@ -1110,6 +1110,96 @@ namespace
 	  "accept: anti-aliasing, render scale, SSAO, SSR, global illumination, texture and "
 	  "material quality, shadows and post-processing switches." },
 
+	{ "hardware.cpuName",
+	  "The processor's model name, for example \"AMD Ryzen 9 9950X 16-Core Processor\". Empty when the system does not say." },
+	{ "hardware.cpuCores",
+	  "How many physical cores the processor has. 0 when the system cannot tell (some ARM boards)." },
+	{ "hardware.cpuThreads",
+	  "How many logical processors the machine runs threads on (cores times hyper-threading)." },
+	{ "hardware.cpuArch",
+	  "The processor family the game runs as: x64, arm64 or x86." },
+	{ "hardware.ramTotalMB",
+	  "The machine's installed working memory in megabytes." },
+	{ "hardware.ramFreeMB",
+	  "The working memory currently available to programs, in megabytes. Read fresh every time, so it moves while the game runs." },
+	{ "hardware.gpuName",
+	  "The graphics card the game renders on, for example \"NVIDIA GeForce RTX 4070\". Empty only when no renderer is running." },
+	{ "hardware.gpuVendor",
+	  "Who makes the graphics card: NVIDIA, AMD, Intel, Apple, ... Empty when the vendor is not one the engine knows." },
+	{ "hardware.gpuDriver",
+	  "The graphics driver's version as the manufacturer prints it (NVIDIA: 621.01). Empty when the API does not tell." },
+	{ "hardware.gpuVramMB",
+	  "The graphics card's own memory in megabytes. 0 when unknown. Cards that share the system's memory (Apple, many laptops) report the share the system gives them." },
+	{ "hardware.graphicsApi",
+	  "Which graphics API the game renders with: D3D11, D3D12, OpenGL, Vulkan, Metal or Software." },
+	{ "hardware.osName",
+	  "The operating system, for example \"Windows 11\" or \"macOS 15.1\"." },
+	{ "hardware.osVersion",
+	  "The operating system with its build, as the log prints it, for example \"Windows 11 (10.0 build 26300)\"." },
+	{ "hardware.displayWidth",
+	  "The width in pixels of the display the game window is on." },
+	{ "hardware.displayHeight",
+	  "The height in pixels of the display the game window is on." },
+	{ "hardware.displayRefreshHz",
+	  "The refresh rate of that display in hertz (59.94 reads as 59.94). 0 when unknown." },
+	{ "hardware.displayScale",
+	  "The operating system's interface scale for that display: 1 is 100 %, 1.25 is 125 %." },
+	{ "hardware.displayName",
+	  "The display's name as the operating system gives it." },
+	{ "hardware.hasBattery",
+	  "Yes when the machine has a battery (a laptop or tablet)." },
+	{ "hardware.onBattery",
+	  "Yes when the machine has a battery AND is running on it right now. Read fresh every time." },
+	{ "hardware.summary",
+	  "The main facts as text, one line each for CPU, RAM, GPU, display and operating system. A line says \"unknown\" when the machine could not tell. Ready to show in an about box." },
+	{ "hardware.recommendedPreset",
+	  "The graphics preset this machine can probably carry: Low, Medium, High or Ultra, a coarse guess from the video "
+	  "memory, RAM and processor threads. A suggestion for a settings screen - nothing applies it by itself; "
+	  "pass it to Set Quality Preset if the player agrees." },
+	{ "hardware.recommendedPresetReason",
+	  "The numbers the recommended preset came from, as one line, for example \"12010 MB video memory, 31859 MB RAM, "
+	  "32 threads\". Shown next to the suggestion so the player can see why." },
+	{ "hardware.gpuCount",
+	  "How many graphics adapters the machine has (a laptop with an integrated and a dedicated card reads 2; the software "
+	  "adapter Windows always lists counts too). GPU Names, GPU Ids and Get GPU At describe them." },
+	{ "hardware.activeGpuId",
+	  "The id of the graphics adapter the game renders on, in the form GPU Ids lists (vendor:device:number, for example "
+	  "10de:2786:0). Empty until a renderer is running." },
+	{ "hardware.displayCount",
+	  "How many displays are connected right now. Follows monitors being plugged in or taken out while the game runs." },
+	{ "hardware.currentDisplayIndex",
+	  "Which display the window is on, as a position in Display Names (0 is the first); -1 when it is not known. "
+	  "Changes when the window is dragged to another monitor." },
+	{ "hardware.displayNames",
+	  "The names of every connected display, as the system gives them. Fills a display drop-down." },
+	{ "hardware.displayAt",
+	  "One display as a text line, for example \"DELL U2723QE (3840x2160 @ 60 Hz, scale 1.50, primary, current)\", by its "
+	  "position in Display Names (0 is the first). Empty past the end." },
+	{ "hardware.preferredGpu",
+	  "The graphics card the game will start on next time, as an id from GPU Ids; empty means the system's default card. "
+	  "This is the saved choice, not necessarily the card running now (that is Get Active GPU Id)." },
+	{ "hardware.setPreferredGpu",
+	  "Chooses the graphics card for the next start. Pass an id from GPU Ids, or an empty text to go back to the default card. "
+	  "The running game keeps its card; a card that is gone at the next start falls back to the default with a warning. "
+	  "Returns false for an id that is not in GPU Ids, or when the choice could not be saved. OpenGL cannot choose a card." },
+	{ "hardware.gpuChoiceNote",
+	  "One sentence on what came of the graphics-card choice at this start: which card was asked for, that it runs, or why "
+	  "the default card runs instead (card gone, backend cannot choose). Empty before the renderer is up." },
+	{ "hardware.gpuNames",
+	  "The names of every graphics adapter, in the same order as GPU Ids. Fills a graphics-card drop-down." },
+	{ "hardware.gpuIds",
+	  "The stable ids of every graphics adapter (vendor:device:number, lower-case hex), in the order of GPU Names. The id "
+	  "is what a graphics-card choice is saved as; it stays the same across restarts." },
+	{ "hardware.gpuAt",
+	  "One graphics adapter as a text line, for example \"NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01)\", by its "
+	  "position in GPU Names (0 is the first). Empty past the end." },
+	{ "hardware.fields",
+	  "The names of every hardware value Get Hardware Value accepts, in order (CpuName, CpuCores, ... OnBattery). Fills a list on a settings screen without spelling the names in the graph." },
+	{ "hardware.value",
+	  "One hardware value as text by its field name (Hardware Fields lists them). The name is not case sensitive. Empty when the machine could not tell, or for an unknown name." },
+	{ "hardware.info",
+	  "One hardware value as text, picked with the HardwareProperty enum (CPU name, GPU name, RAM, display size, battery, ...). Empty when the machine could not tell. Switch on the enum, or pass the same pin to several nodes." },
+
 	// ── Date and time ────────────────────────────────────────────────────────
 	{ "datetime.now",
 	  "The current wall-clock time as seconds since 1970. This is the clock the "

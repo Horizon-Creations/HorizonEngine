@@ -27,6 +27,7 @@
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — CPU split of Render()
 #include <SDL3/SDL.h>
 #include <stdexcept>
+#include <map>
 #include <vector>
 #include <algorithm>
 #include <fstream> // HE_DUMP_* headless capture writes PNG/PPM dumps straight to disk
@@ -6857,6 +6858,46 @@ void MetalRenderer::Initialize(HE::Window* window)
 	m_primarySdlWindow = window->GetNativeWindow();
 
 	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+	{
+		// The GPU choice (Thema 337): the Metal device whose id the settings named. The ids are the same ones the
+		// device list below builds (vendor stand-in : 0 : number among that vendor's devices), so what the settings
+		// page showed is what is found here. No match: the system's default device, as before.
+		const std::string want = HE::preferredGpuId();
+		HE::GpuSelection sel;
+		sel.requested = want;
+		sel.note = "the system's default graphics card";
+		if (!want.empty())
+		{
+			auto vendorIdOf = [](const std::string& v) -> uint32_t {
+				return v == "Apple" ? 0x106bu : v == "AMD" ? 0x1002u : v == "Intel" ? 0x8086u : v == "NVIDIA" ? 0x10deu : 0u; };
+			std::map<uint32_t, int> seen;
+			std::vector<HE::GpuInfo> ids;
+			NSArray<id<MTLDevice>>* all = MTLCopyAllDevices();
+			for (id<MTLDevice> dev in all)
+			{
+				std::string v = HE::gpuVendorFromText([[dev name] UTF8String]);
+				if (v.empty()) v = "Apple";
+				HE::GpuInfo g;
+				const uint32_t vid = vendorIdOf(v);
+				g.id = HE::makeGpuId(vid, 0, seen[vid]++);
+				ids.push_back(std::move(g));
+			}
+			const int idx = HE::findGpuIndex(ids, want);
+			if (idx >= 0)
+			{
+				device = all[static_cast<NSUInteger>(idx)];
+				sel.note = "the chosen graphics card (" + want + ")";
+				HE_LOG_INFO(RHI, "MetalRenderer: running on the chosen device %s", want.c_str());
+			}
+			else
+			{
+				sel.honored = false;
+				sel.note = "the chosen graphics card (" + want + ") was not found; the system's default graphics card runs instead";
+				HE_LOG_WARN(RHI, "MetalRenderer: %s", sel.note.c_str());
+			}
+		}
+		HE::setGpuSelection(sel);
+	}
 	if (!device)
 		throw std::runtime_error("MetalRenderer: MTLCreateSystemDefaultDevice failed");
 	m_device = (void*)CFBridgingRetain(device);
@@ -6934,6 +6975,38 @@ void MetalRenderer::Initialize(HE::Window* window)
 
 	HE_LOG_INFO(RHI, "%s",
 		(std::string("MetalRenderer: initialized on ") + [[device name] UTF8String]).c_str());
+
+	// The same facts for HE::GpuInfo (Thema 337). Apple GPUs share the system memory: the working-set
+	// limit macOS recommends for this device is the closest thing to a video memory size.
+	m_adapterInfo = HE::GpuInfo{};
+	m_adapterInfo.name   = [[device name] UTF8String];
+	m_adapterInfo.vendor = HE::gpuVendorFromText(m_adapterInfo.name);
+	if (m_adapterInfo.vendor.empty()) m_adapterInfo.vendor = "Apple";
+	m_adapterInfo.api    = "Metal";
+	m_adapterInfo.vramMB = static_cast<uint64_t>([device recommendedMaxWorkingSetSize]) / (1024ull * 1024ull);
+	{
+		// Every Metal device of this Mac (a MacBook Pro with two GPUs, an eGPU): the list a GPU choice is made from.
+		// Metal exposes no PCI ids, so the vendor's id stands in and the ordinal counts devices of that vendor.
+		auto vendorIdOf = [](const std::string& v) -> uint32_t {
+			return v == "Apple" ? 0x106bu : v == "AMD" ? 0x1002u : v == "Intel" ? 0x8086u : v == "NVIDIA" ? 0x10deu : 0u; };
+		m_adapterInfo.vendorId = vendorIdOf(m_adapterInfo.vendor);
+		std::vector<HE::GpuInfo> all;
+		std::map<uint32_t, int> seen;
+		NSArray<id<MTLDevice>>* devices = MTLCopyAllDevices();
+		for (id<MTLDevice> dev in devices)
+		{
+			HE::GpuInfo g;
+			g.name   = [[dev name] UTF8String];
+			g.vendor = HE::gpuVendorFromText(g.name);
+			if (g.vendor.empty()) g.vendor = "Apple";
+			g.api      = "Metal";
+			g.vendorId = vendorIdOf(g.vendor);
+			g.id       = HE::makeGpuId(g.vendorId, 0, seen[g.vendorId]++);
+			g.vramMB   = static_cast<uint64_t>([dev recommendedMaxWorkingSetSize]) / (1024ull * 1024ull);
+			all.push_back(std::move(g));
+		}
+		HE::setGpuList(all);
+	}
 }
 
 void MetalRenderer::Shutdown()

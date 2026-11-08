@@ -1,4 +1,5 @@
 #include "GameApplication.h"
+#include <Diagnostics/HardwareInfo.h>   // the player's graphics-card choice (Thema 337)
 #include <chrono>
 #include <cstdint>
 #include "EmbeddedPakKey.h"
@@ -494,6 +495,17 @@ void GameApplication::applyShippedConfig()
 		{
 			m_appMode    = true;
 			m_windowMode = HE::WindowMode::Windowed;
+		}
+		// The player's graphics-card choice (Thema 337) is a file of its own in the game's per-user folder: the
+		// shipped config.json is read-only, and the choice has to be known before the renderer exists. The folder
+		// is the one OnInit's sandbox sits in.
+		{
+			const std::string app = peek.projectName.empty() ? std::string("HorizonGame") : peek.projectName;
+			if (char* pref = SDL_GetPrefPath("HorizonCreations", app.c_str()))
+			{
+				HE::setGpuChoiceDirectory(pref);
+				SDL_free(pref);
+			}
 		}
 
 		// Config/ProjectSettings.json, the project's own word on its title,

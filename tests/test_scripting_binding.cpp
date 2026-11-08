@@ -3,6 +3,8 @@
 #include <HorizonScene/EngineApi.h>
 #include <HorizonScene/AntiCheat/AntiCheatHost.h>   // OnCheatDetected + horizon.anticheat.*
 #include <Types/TypeRegistry.h>
+#include <Diagnostics/HardwareInfo.h>
+#include <memory>
 #include <cstdint>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/TransformComponent.h>
@@ -1315,4 +1317,50 @@ TEST_CASE("ScriptContext: horizon.water makes a lake over a landscape and reads 
 	CHECK(ctx.engine().getGlobalNumber("_cells") > 250.0);
 	CHECK(ctx.engine().getGlobalNumber("_painted") > 0.0);
 	CHECK(world.registry().get<TerrainComponent>(land).water.bodies.size() == 2u);
+}
+
+TEST_CASE("ScriptContext: horizon.hardware rows read the machine's facts (Lua)")
+{
+    // An about box written in Lua: the typed values, the summary and the by-name list.
+    struct Restore { ~Restore() { HE::setHardwareProvider(nullptr); } } restore;
+    struct Fake final : HE::HardwareProvider
+    {
+        HE::HardwareInfo detect() override
+        {
+            HE::HardwareInfo h;
+            h.cpuName = "Lua CPU"; h.cpuCores = 4; h.cpuThreads = 8; h.ramTotalMB = 16384;
+            h.osName = "Test OS"; h.osVersion = "Test OS 1.0"; h.platform = "Windows";
+            return h;
+        }
+        uint64_t freeMemoryMB() override { return 4096; }
+        bool     onBattery() override    { return false; }
+    };
+    HE::setHardwareProvider(std::make_shared<Fake>());
+    HE::GpuInfo gpu; gpu.name = "Lua GPU"; gpu.vendor = "NVIDIA"; gpu.vramMB = 8192; gpu.api = "Vulkan";
+    HE::setGpuInfo(gpu);
+
+    HorizonWorld world;
+    ScriptContext ctx(world);
+    auto& engine = ctx.engine();
+    REQUIRE(engine.exec(
+        "_G._cpu   = horizon.hardware.cpuName()\n"
+        "_G._cores = horizon.hardware.cpuCores()\n"
+        "_G._ram   = horizon.hardware.ramTotalMB()\n"
+        "_G._gpu   = horizon.hardware.gpuName()\n"
+        "_G._vram  = horizon.hardware.gpuVramMB()\n"
+        "_G._api   = horizon.hardware.graphicsApi()\n"
+        "_G._val   = horizon.hardware.value('GpuVendor')\n"
+        "_G._n     = #horizon.hardware.fields()\n"
+        "_G._first = horizon.hardware.fields()[1]\n"
+        "_G._sum   = horizon.hardware.summary()\n"));
+    CHECK(engine.getGlobalString("_cpu") == "Lua CPU");
+    CHECK(engine.getGlobalNumber("_cores") == doctest::Approx(4.0));
+    CHECK(engine.getGlobalNumber("_ram") == doctest::Approx(16384.0));
+    CHECK(engine.getGlobalString("_gpu") == "Lua GPU");
+    CHECK(engine.getGlobalNumber("_vram") == doctest::Approx(8192.0));
+    CHECK(engine.getGlobalString("_api") == "Vulkan");
+    CHECK(engine.getGlobalString("_val") == "NVIDIA");
+    CHECK(engine.getGlobalNumber("_n") == doctest::Approx(static_cast<double>(HE::HardwareProperty::Count)));
+    CHECK(engine.getGlobalString("_first") == "CpuName");
+    CHECK(engine.getGlobalString("_sum").find("CPU: Lua CPU (4 cores, 8 threads)") != std::string::npos);
 }

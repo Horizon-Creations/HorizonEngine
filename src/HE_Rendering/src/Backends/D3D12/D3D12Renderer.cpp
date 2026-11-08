@@ -3845,7 +3845,12 @@ struct D3D12RendererImpl
     // (the _SRGB twin included) and its whole mip chain.
     // asArray (Thema 158) = a Texture2DArray view over every slice, for a
     // sampler2DArray heTexP slot.
-    void srvForTexture(ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE h, bool asArray = false)
+    // minLod (Thema 324/336 texture quality): the SRV's ResourceMinLODClamp - the finest mip
+    // level this view reads. D3D12's samplers are static (baked into the root signatures), so the
+    // clamp lives on the view instead; callers pass m_textureMinLod for the world's colour
+    // textures and leave UI, GI and weightmap views at 0.
+    void srvForTexture(ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE h, bool asArray = false,
+                       float minLod = 0.0f)
     {
         const D3D12_RESOURCE_DESC rd = res->GetDesc();
         D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -3856,11 +3861,13 @@ struct D3D12RendererImpl
             sv.ViewDimension                  = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             sv.Texture2DArray.MipLevels       = rd.MipLevels;
             sv.Texture2DArray.ArraySize       = rd.DepthOrArraySize;
+            sv.Texture2DArray.ResourceMinLODClamp = minLod;
         }
         else
         {
             sv.ViewDimension       = D3D12_SRV_DIMENSION_TEXTURE2D;
             sv.Texture2D.MipLevels = rd.MipLevels;
+            sv.Texture2D.ResourceMinLODClamp = minLod;
         }
         device->CreateShaderResourceView(res, &sv, h);
     }
@@ -4451,7 +4458,7 @@ struct D3D12RendererImpl
         UINT slot;
         if (!m_freeSlots.empty()) { slot = m_freeSlots.back(); m_freeSlots.pop_back(); }
         else                      { slot = meshTexNextSlot++; }
-        srvForTexture(outTex.Get(), sceneSrvCpu(slot));
+        srvForTexture(outTex.Get(), sceneSrvCpu(slot), false, m_textureMinLod);
         return static_cast<int>(slot);
     }
 
@@ -4926,6 +4933,30 @@ struct D3D12RendererImpl
             WaitForSingleObject(fenceEvent, INFINITE);
         }
     }
+    // Texture quality (Thema 324/336): Low / Medium keep the world's colour textures off the
+    // finest one or two mip levels (MetalRenderer::ApplyTextureQuality). Every view built from
+    // now on carries the clamp (srvForTexture callers above); the views that already sit in the
+    // scene heap (mesh / skinned / material-override / decal base colours) are rewritten here,
+    // after the GPU has drained - a settings event, not a per-frame one. A texture with a
+    // single mip level is unaffected.
+    float m_textureMinLod = 0.0f;
+    void applyTextureQuality(float minLod)
+    {
+        const float before = m_textureMinLod;
+        m_textureMinLod = minLod;
+        if (!device || !sceneSrvHeap || before == minLod) return;
+        waitForAllFrames();
+        auto rewrite = [&](const ComPtr<ID3D12Resource>& tex, int slot)
+        {
+            if (tex && slot >= 0) srvForTexture(tex.Get(), sceneSrvCpu(static_cast<UINT>(slot)), false, minLod);
+        };
+        for (auto& kv : meshCache)           rewrite(kv.second.albedoTex, kv.second.albedoSlot);
+        for (auto& kv : m_skeletalMeshCache) rewrite(kv.second.albedoTex, kv.second.albedoSlot);
+        for (auto& kv : m_materialTexCache)  rewrite(kv.second.tex, kv.second.slot);
+        for (auto& kv : decalTexCache)       rewrite(kv.second.first, kv.second.second);
+        HE_LOG_INFO(RHI, "D3D12Renderer: texture quality - world and material textures start at mip level %.0f", minLod);
+    }
+
     void waitForAllFrames()
     {
         // Flush ALL submitted GPU work: signal one new monotonic value and wait for it.
@@ -11112,15 +11143,28 @@ void D3D12Renderer::Initialize(HE::Window* window)
                 (m_impl->gpuDebug && std::getenv("HE_GPU_GBV")) ? 1 : 0);
     laps.mark("debugLayerSetup");
 
-    if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device))))
-        throw std::runtime_error("D3D12Renderer: D3D12CreateDevice failed");
+    {
+        // The GPU choice (Thema 337); a failure on the chosen adapter falls back to the default one.
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> chosen = HE::d3d::chooseAdapter();
+        HRESULT dhr = E_FAIL;
+        if (chosen)
+        {
+            dhr = D3D12CreateDevice(chosen.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device));
+            if (FAILED(dhr)) chosen.Reset();
+        }
+        if (FAILED(dhr))
+            dhr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device));
+        if (FAILED(dhr))
+            throw std::runtime_error("D3D12Renderer: D3D12CreateDevice failed");
+        HE::d3d::noteSelection("D3D12Renderer", chosen != nullptr);
+    }
     laps.mark("D3D12CreateDevice");
     {   // Which adapter the default device landed on (a laptop's iGPU vs its dGPU, WARP).
         Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
         Microsoft::WRL::ComPtr<IDXGIAdapter>  adapter;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
             factory->EnumAdapterByLuid(m_impl->device->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
-        HE::d3d::logAdapter("D3D12Renderer", adapter.Get());
+        m_adapterInfo = HE::d3d::logAdapter("D3D12Renderer", adapter.Get(), "D3D12");
     }
     {   // Hull/domain shaders come with feature level 11_0, the floor above.
         const char* tessEnv = std::getenv("HE_TESSELLATION");
@@ -11487,6 +11531,8 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
         p.shadowSize = std::clamp(p.shadowSettings.resolution, 256, 8192);
         p.createShadowArray();
         p.shadowSizeDirty = false;
+        HE_LOG_INFO(RHI, "D3D12Renderer: shadow cascades rebuilt at %dx%d (%d cascades, distance %.0f)",
+                    p.shadowSize, p.shadowSize, p.shadowSettings.cascadeCount, p.shadowSettings.distance);
     }
     p.m_extractor.setShadowSettings(p.shadowSettings.distance, p.shadowSettings.cascadeCount,
                                     p.shadowSettings.splitLambda, p.shadowSize);
@@ -12472,11 +12518,11 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
                                           + p.m_matSrvCursor[p.frameIndex]++) * D3D12RendererImpl::k_matSrvPerDraw;
                         p.device->CopyDescriptorsSimple(D3D12RendererImpl::k_matSrvPerDraw, p.matSrvCpu(blk),
                                                         p.matSrvStagingCpu(0), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-                        if (heTex0) p.srvForTexture(heTex0, p.matSrvCpu(blk));
+                        if (heTex0) p.srvForTexture(heTex0, p.matSrvCpu(blk), false, p.m_textureMinLod);
                         static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy block slots 1..4 (t4..t7)");
                         for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
                             if (heTexP[k]) p.srvForTexture(heTexP[k], p.matSrvCpu(blk + 1 + static_cast<UINT>(k)),
-                                                           (heTexPArrays >> k) & 1u);
+                                                           (heTexPArrays >> k) & 1u, p.m_textureMinLod);
                         if (heWeights)
                             p.srvForTexture(heWeights, p.matSrvCpu(blk + HE::d3d12mat::kSlotLandscapeWeights));
                         // heSkyEnv (t15) + heAO (t16) (Thema 126): the baked sky cube and
@@ -14328,6 +14374,12 @@ void D3D12Renderer::DestroyImGuiTexture(void* /*handle*/)
     // ComPtrs in m_impl->m_imguiTextures release the GPU resources. The ImGui SRV
     // descriptor is owned by the editor's heap allocator and freed on ImGui
     // shutdown, so there is nothing to free here.
+}
+
+void D3D12Renderer::SetQualitySettings(const QualitySettings& s)
+{
+    IRenderer::SetQualitySettings(s);
+    m_impl->applyTextureQuality(TextureMinLodForQuality(m_quality.textureQuality));
 }
 
 void D3D12Renderer::SetSSAOSettings(const SSAOSettings& s)

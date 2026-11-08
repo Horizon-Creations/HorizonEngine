@@ -2522,6 +2522,73 @@ namespace settings {
     void  resetToDefaults();
 }
 
+// ── Hardware (Thema 337) ─────────────────────────────────────────────────────
+// What machine the game runs on, for a settings screen or an "about" box. All reads: the values come
+// from HE::hardwareInfo (Diagnostics/HardwareInfo.h) - detected once at start-up, the GPU from the
+// renderer, the display from the window system. Type and model names and sizes only; nothing here
+// identifies the machine or the person, and nothing is sent anywhere. A value the machine could not
+// tell reads as "" (text) or 0 (numbers), never as a guess.
+namespace hardware {
+    std::string cpuName();
+    int         cpuCores();          // physical cores; 0 = unknown
+    int         cpuThreads();        // logical processors
+    std::string cpuArch();           // "x64", "arm64", "x86"
+    int         ramTotalMB();
+    int         ramFreeMB();         // available right now
+    std::string gpuName();
+    std::string gpuVendor();
+    std::string gpuDriver();
+    int         gpuVramMB();         // dedicated video memory; 0 = unknown
+    std::string graphicsApi();       // the API the renderer runs on: D3D11, D3D12, OpenGL, Vulkan, Metal, Software
+    std::string osName();
+    std::string osVersion();
+    int         displayWidth();      // the display the window is on
+    int         displayHeight();
+    float       displayRefreshHz();
+    float       displayScale();      // OS content scale, 1.25 = 125 %
+    std::string displayName();
+    bool        hasBattery();
+    bool        onBattery();         // a battery exists AND the machine runs on it
+    std::string summary();           // the main facts, one line per group
+    // What preset this machine can probably carry ("Low" ... "Ultra"), from the numbers above, and
+    // the numbers it came from. A suggestion for a settings screen: nothing applies it by itself.
+    std::string recommendedPreset();
+    std::string recommendedPresetReason();
+    // Every graphics adapter of the machine (hardware.gpu* above describes the one in use). gpuIds() are the
+    // stable ids a GPU choice is saved with ("10de:2786:0"), gpuNames() the display names in the same order,
+    // gpuAt(i) one adapter as a text line ("NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01)", "" past the
+    // end), activeGpuId() the id of the one the renderer runs on ("" before a renderer exists).
+    int                       gpuCount();
+    std::vector<std::string>  gpuNames();
+    std::vector<std::string>  gpuIds();
+    std::string               gpuAt(int index);
+    std::string               activeGpuId();
+    // Which graphics card the game starts on. The choice is an id from gpuIds() ("" = the system's default
+    // card), kept for the NEXT start: the card a running game uses never changes under it. setPreferredGpu
+    // answers false for an id that is not in gpuIds(), and for a choice that could not be saved.
+    // gpuChoiceNote() says in a sentence what came of the choice at this start ("the chosen graphics card
+    // (10de:2786:0)", "... was not found; the system's default graphics card runs instead", "OpenGL cannot
+    // choose the graphics card"). A backend or a platform that cannot choose is told there, not hidden.
+    std::string               preferredGpu();
+    bool                      setPreferredGpu(const std::string& id);
+    std::string               gpuChoiceNote();
+    // The displays that are connected right now. displayCount() and displayNames() list them, displayAt(i)
+    // describes one ("DELL U2723QE (3840x2160 @ 60 Hz, scale 1.50, primary, current)", "" past the end),
+    // currentDisplayIndex() is the one the window is on (-1 when unknown) and follows the window as it is dragged
+    // to another monitor. displayWidth/Height/Name above always describe the current one.
+    int                       displayCount();
+    std::vector<std::string>  displayNames();
+    std::string               displayAt(int index);
+    int                       currentDisplayIndex();
+    // By name, for a settings screen that lists them all: fields() are the HardwareProperty names in
+    // order (CpuName ... OnBattery), value(name) is the text of one ("" for none; the name is
+    // case-insensitive and an unknown name reads "" too).
+    std::vector<std::string> fields();
+    std::string              value(const std::string& field);
+    // The same by HardwareProperty (a HorizonCode enum pin), as text.
+    std::string              info(int property);
+}
+
 // ── Date and time ────────────────────────────────────────────────────────────
 // The WALL clock, unlike the time group, which is the game's. An application
 // showing "last saved 14:32" needs the one that keeps running when the game is
