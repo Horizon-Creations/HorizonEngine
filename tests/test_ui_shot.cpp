@@ -26,6 +26,7 @@
 #include <Diagnostics/Log.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
+#include <Types/TypeRegistry.h>
 
 #include <imgui.h>
 #include <imgui_internal.h>      // DockBuilder*, FindWindowByName
@@ -2071,6 +2072,107 @@ TEST_CASE("ui shot: a pin's dropdown fits inside its node")
 	     << " wide, default is " << int(GraphEditor::kNodeW) << "), slot ends at " << slotRight);
 	CHECK(nodeRight - nodeLeft > int(GraphEditor::kNodeW));
 	CHECK(slotRight < nodeRight - 2);
+}
+
+// ── An Enum pin is a dropdown too ────────────────────────────────────────────
+// Bool/Int/Float/Double/String pins get a default right on the node (the test
+// above); an Enum pin used to fall through pinSupportsInlineDefault to nothing
+// at all — no text box, no combo, just a wire-only slot, so the only way to set
+// one without a wire was to drop a separate "Enum Value" literal node and wire
+// it in. It is a closed, named set exactly like the String-with-choices case,
+// so it gets the same inline combo (drawLiteralNodeBody already draws it for
+// the literal node's OWN body; this is the same list, anchored to a pin).
+TEST_CASE("ui shot: an enum pin becomes a dropdown right on the node")
+{
+	using HE::EnumDef;
+	using HE::EnumEntry;
+	using HE::TypeRegistry;
+	using P = HorizonCode::PinType;
+
+	// The registry is process-global; every path registered here is removed
+	// again so other suites in this binary still see an empty one.
+	struct RegistryCleanup
+	{
+		std::vector<std::string> paths;
+		~RegistryCleanup()
+		{ for (const auto& p : paths) TypeRegistry::instance().removeType(p); }
+	} cleanup;
+
+	const std::string kPresetPath = "Test/HiveQualityPreset.hasset";
+	{
+		EnumDef def;
+		def.name = "HiveQualityPreset"; def.assetPath = kPresetPath;
+		def.entries = { { "Low", 0 }, { "Medium", 1 }, { "High", 2 }, { "Ultra", 3 } };
+		TypeRegistry::instance().registerEnum(def);
+		cleanup.paths.push_back(kPresetPath);
+	}
+
+	constexpr int W = 300, H = 140;
+	Harness harness(W, H);
+
+	// Shaped like an engine call with one Enum parameter (the layout an actual
+	// quality-preset node would have, had the row taken Enum over String) — the
+	// pin mechanics below only look at the TYPE, so this stands in for any node
+	// with an Enum data-in.
+	HorizonCode::Node node;
+	node.type   = HorizonCode::NodeType::EngineCall;
+	node.s      = "test.setPreset";
+	node.hasArg = true;
+	node.params = { { "preset", P::Enum, false, kPresetPath } };
+	const int presetPin = 2;   // [exec in][exec out][preset]
+
+	CHECK(HcEditorUtil::pinSupportsInlineDefault(node, presetPin));
+	const float slotW = HcEditorUtil::pinInlineEditorWidth(node, presetPin);
+	CHECK(slotW > GraphEditor::kPinEditorW);   // a name needs the same room a string does
+
+	const he_ui::Image img = shoot("graph-enum-pin-dropdown", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##enumpin", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		ImGui::SetNextItemWidth(slotW);
+		bool committed = false;
+		HcEditorUtil::drawPinDefaultEditor(node, presetPin, committed);
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	// Drawn at all (the combo preview, "Low", plus its arrow) — the coarse bar
+	// the rest of this file holds controls to.
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 40);
+
+	// The pin's stored default followed the pin, not whatever it happened to
+	// hold before: type Enum, typeName the PIN's definition (not empty — a
+	// value that forgot which enum it belongs to can't look its name up again),
+	// and the registry's first entry (value 0, "Low") as the seeded default.
+	auto it = node.pinDefaults.find(0);   // data-in 0 = the only data-in
+	REQUIRE(it != node.pinDefaults.end());
+	CHECK(it->second.type == P::Enum);
+	CHECK(it->second.typeName == kPresetPath);
+	CHECK(it->second.i == 0);
+
+	// An Enum pin whose definition asset is gone (renamed out from under it, or
+	// never resolved) still supports the inline slot — it just says so instead
+	// of crashing or silently falling back to a text box the value can never
+	// round-trip through.
+	HorizonCode::Node orphan;
+	orphan.type   = HorizonCode::NodeType::EngineCall;
+	orphan.s      = "test.setPreset";
+	orphan.hasArg = true;
+	orphan.params = { { "preset", P::Enum, false, "Test/Gone.hasset" } };
+	CHECK(HcEditorUtil::pinSupportsInlineDefault(orphan, presetPin));
+	const he_ui::Image img2 = shoot("graph-enum-pin-no-definition", W, H, 3, [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2((float)W, (float)H));
+		ImGui::Begin("##enumpin2", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+		bool committed = false;
+		HcEditorUtil::drawPinDefaultEditor(orphan, presetPin, committed);
+		ImGui::End();
+	});
+	REQUIRE(img2.valid());
+	CHECK(img2.inkedPixels(kBgR, kBgG, kBgB) > 20);   // "(no definition)" still drew something
 }
 
 // ── Mesh material slots ──────────────────────────────────────────────────────

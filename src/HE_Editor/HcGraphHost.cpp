@@ -890,8 +890,8 @@ GraphEditor::Model buildModel(const Host& h)
 		bool committed = false;
 		if (HcEditorUtil::drawLiteralNodeBody(*n, committed)) h.onEdit(false);
 		if (committed) h.onEdit(true); };
-	// Unwired simple inputs (Bool/Int/Float/String) edit their default right on
-	// the pin — no literal node needed for a constant.
+	// Unwired simple inputs (Bool/Int/Float/String/Enum) edit their default right
+	// on the pin — no literal node needed for a constant.
 	m.pinHasInlineEditor = [&graph](int nid, int pin){
 		const HC::Node* n = graph.findNode(nid);
 		return n && HcEditorUtil::pinSupportsInlineDefault(*n, pin); };
