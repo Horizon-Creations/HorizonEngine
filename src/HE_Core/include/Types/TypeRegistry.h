@@ -140,6 +140,8 @@ HE_API void noteEntryRename(EnumDef& def, size_t index, const std::string& oldNa
 inline constexpr const char* kBuiltinTypePrefix   = "engine:";
 inline constexpr const char* kQualityLevelEnum    = "engine:QualityLevel";
 inline constexpr const char* kQualitySettingEnum  = "engine:QualitySetting";
+// HardwareProperty: which value a hardware row means (Diagnostics/HardwareInfo.h: CpuName, CpuCores, ... OnBattery).
+inline constexpr const char* kHardwarePropertyEnum = "engine:HardwareProperty";
 
 // Process-global registry of every loaded struct/enum definition. Thread-safe
 // (script bootstrap and codegen run off the main thread).

@@ -2522,6 +2522,43 @@ namespace settings {
     void  resetToDefaults();
 }
 
+// ── Hardware (Thema 337) ─────────────────────────────────────────────────────
+// What machine the game runs on, for a settings screen or an "about" box. All reads: the values come
+// from HE::hardwareInfo (Diagnostics/HardwareInfo.h) - detected once at start-up, the GPU from the
+// renderer, the display from the window system. Type and model names and sizes only; nothing here
+// identifies the machine or the person, and nothing is sent anywhere. A value the machine could not
+// tell reads as "" (text) or 0 (numbers), never as a guess.
+namespace hardware {
+    std::string cpuName();
+    int         cpuCores();          // physical cores; 0 = unknown
+    int         cpuThreads();        // logical processors
+    std::string cpuArch();           // "x64", "arm64", "x86"
+    int         ramTotalMB();
+    int         ramFreeMB();         // available right now
+    std::string gpuName();
+    std::string gpuVendor();
+    std::string gpuDriver();
+    int         gpuVramMB();         // dedicated video memory; 0 = unknown
+    std::string graphicsApi();       // the API the renderer runs on: D3D11, D3D12, OpenGL, Vulkan, Metal, Software
+    std::string osName();
+    std::string osVersion();
+    int         displayWidth();      // the display the window is on
+    int         displayHeight();
+    float       displayRefreshHz();
+    float       displayScale();      // OS content scale, 1.25 = 125 %
+    std::string displayName();
+    bool        hasBattery();
+    bool        onBattery();         // a battery exists AND the machine runs on it
+    std::string summary();           // the main facts, one line per group
+    // By name, for a settings screen that lists them all: fields() are the HardwareProperty names in
+    // order (CpuName ... OnBattery), value(name) is the text of one ("" for none; the name is
+    // case-insensitive and an unknown name reads "" too).
+    std::vector<std::string> fields();
+    std::string              value(const std::string& field);
+    // The same by HardwareProperty (a HorizonCode enum pin), as text.
+    std::string              info(int property);
+}
+
 // ── Date and time ────────────────────────────────────────────────────────────
 // The WALL clock, unlike the time group, which is the game's. An application
 // showing "last saved 14:32" needs the one that keeps running when the game is

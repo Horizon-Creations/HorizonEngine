@@ -1,4 +1,5 @@
 #include <Types/TypeRegistry.h>
+#include "Diagnostics/HardwareInfo.h"   // HardwareProperty names for the built-in enum
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ContentManager/HAsset.h>
@@ -137,6 +138,16 @@ EnumDef builtinQualitySetting()
     return d;
 }
 
+EnumDef builtinHardwareProperty()
+{
+    EnumDef d;
+    d.name      = "HardwareProperty";
+    d.assetPath = kHardwarePropertyEnum;
+    for (int i = 0; i < static_cast<int>(HardwareProperty::Count); ++i)
+        d.entries.push_back({ hardwarePropertyName(i), i, {} });
+    return d;
+}
+
 } // namespace
 
 struct TypeRegistry::Impl
@@ -150,7 +161,7 @@ struct TypeRegistry::Impl
     // Caller holds the lock (or is the constructor).
     void seedBuiltins()
     {
-        for (EnumDef d : { builtinQualityLevel(), builtinQualitySetting() })
+        for (EnumDef d : { builtinQualityLevel(), builtinQualitySetting(), builtinHardwareProperty() })
             enums[d.assetPath] = std::move(d);
     }
 };

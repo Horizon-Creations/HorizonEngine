@@ -3020,6 +3020,43 @@ inline HE::hccg::ClassSource fxQualitySettings()
     return f.done("quality_settings");
 }
 
+// hardware_rows: the hardware rows read into variables - typed numbers and text, the by-name row and the
+// enum row. Same module for both halves; the parity test installs a fake machine first.
+inline HE::hccg::ClassSource fxHardwareRows()
+{
+    Fx f;
+    f.var("cpu", PT::String);
+    f.var("threads", PT::Int);
+    f.var("ram", PT::Int);
+    f.var("gpu", PT::String);
+    f.var("vram", PT::Int);
+    f.var("hz", PT::Float);
+    f.var("api", PT::String);
+    f.var("byName", PT::String);
+
+    const int ev = f.event("Apply");
+    int last = ev;
+    auto read = [&](const char* id, const char* var, PT type)
+    {
+        const int g = f.engineCall(id);
+        const int s = f.setVar(var, type);
+        f.data(g, 0, s, 0);
+        f.exec(last, s);
+        last = s;
+        return g;
+    };
+    read("hardware.cpuName", "cpu", PT::String);
+    read("hardware.cpuThreads", "threads", PT::Int);
+    read("hardware.ramTotalMB", "ram", PT::Int);
+    read("hardware.gpuName", "gpu", PT::String);
+    read("hardware.gpuVramMB", "vram", PT::Int);
+    read("hardware.displayRefreshHz", "hz", PT::Float);
+    read("hardware.graphicsApi", "api", PT::String);
+    const int bn = read("hardware.value", "byName", PT::String);
+    f.g.findNode(bn)->pinDefaults[0] = Value::ofString("OsName");
+    return f.done("hardware_rows");
+}
+
 // player_settings: the settings rows — setters filed under input, camera, app
 // and settings, then every getter read back into a variable. They share one
 // store (PlayerSettings.cpp), so the compiled half starts from what the
@@ -3319,7 +3356,7 @@ inline std::vector<HE::hccg::ClassSource> all()
         fxInheritBase(), fxInheritDerived(),
         fxInheritNovarsBase(), fxInheritNovars(),
         fxInputActions(), fxContainers(), fxReroutes(), fxCheatEvent(),
-        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxQualitySettings(), fxQualityLevels(), fxPlayerSlots(),
+        fxDatetimeDouble(), fxInputRumble(), fxInputRebind(), fxPlayerSettings(), fxHardwareRows(), fxQualitySettings(), fxQualityLevels(), fxPlayerSlots(),
         fxPullConstruct(), fxPullSpawner(), fxBindTo(),
         fxExtractDestruct(), fxExtractDerived(), fxExtractListener(),
         fxEngineWorld(),

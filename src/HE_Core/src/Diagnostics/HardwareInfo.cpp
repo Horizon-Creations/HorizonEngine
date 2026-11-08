@@ -455,6 +455,68 @@ void setHardwareProvider(std::shared_ptr<HardwareProvider> provider)
     s.display  = DisplayInfo{};
 }
 
+const char* hardwarePropertyName(int p)
+{
+    static const char* const kNames[] = {
+        "CpuName", "CpuCores", "CpuThreads", "CpuArchitecture",
+        "RamTotalMB", "RamFreeMB",
+        "GpuName", "GpuVendor", "GpuDriver", "GpuVramMB", "GraphicsApi",
+        "OsName", "OsVersion",
+        "DisplayWidth", "DisplayHeight", "DisplayRefreshHz", "DisplayScale", "DisplayName",
+        "HasBattery", "OnBattery" };
+    static_assert(sizeof(kNames) / sizeof(kNames[0]) == static_cast<size_t>(HardwareProperty::Count),
+                  "one name per HardwareProperty");
+    return p >= 0 && p < static_cast<int>(HardwareProperty::Count) ? kNames[p] : "";
+}
+
+int hardwarePropertyFromName(const std::string& name)
+{
+    auto lower = [](std::string s) { for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+    const std::string want = lower(name);
+    for (int i = 0; i < static_cast<int>(HardwareProperty::Count); ++i)
+        if (lower(hardwarePropertyName(i)) == want) return i;
+    return -1;
+}
+
+std::string hardwarePropertyText(int p)
+{
+    const HardwareInfo h = hardwareInfo();
+    auto num = [](uint64_t v) { return v ? std::to_string(v) : std::string{}; };
+    auto flt = [](float v) {
+        if (v <= 0.0f) return std::string{};
+        char buf[32];
+        std::snprintf(buf, sizeof buf, "%.2f", static_cast<double>(v));
+        std::string s = buf;
+        while (!s.empty() && s.back() == '0') s.pop_back();
+        if (!s.empty() && s.back() == '.') s.pop_back();
+        return s;
+    };
+    switch (static_cast<HardwareProperty>(p))
+    {
+        case HardwareProperty::CpuName:          return h.cpuName;
+        case HardwareProperty::CpuCores:         return num(static_cast<uint64_t>(std::max(h.cpuCores, 0)));
+        case HardwareProperty::CpuThreads:       return num(static_cast<uint64_t>(std::max(h.cpuThreads, 0)));
+        case HardwareProperty::CpuArchitecture:  return h.cpuArch;
+        case HardwareProperty::RamTotalMB:       return num(h.ramTotalMB);
+        case HardwareProperty::RamFreeMB:        return num(freeMemoryMB());
+        case HardwareProperty::GpuName:          return h.gpu.name;
+        case HardwareProperty::GpuVendor:        return h.gpu.vendor;
+        case HardwareProperty::GpuDriver:        return h.gpu.driver;
+        case HardwareProperty::GpuVramMB:        return num(h.gpu.vramMB);
+        case HardwareProperty::GraphicsApi:      return h.gpu.api;
+        case HardwareProperty::OsName:           return h.osName;
+        case HardwareProperty::OsVersion:        return h.osVersion;
+        case HardwareProperty::DisplayWidth:     return num(static_cast<uint64_t>(std::max(h.display.width, 0)));
+        case HardwareProperty::DisplayHeight:    return num(static_cast<uint64_t>(std::max(h.display.height, 0)));
+        case HardwareProperty::DisplayRefreshHz: return flt(h.display.refreshHz);
+        case HardwareProperty::DisplayScale:     return h.display.valid() ? flt(h.display.scale) : std::string{};
+        case HardwareProperty::DisplayName:      return h.display.name;
+        case HardwareProperty::HasBattery:       return h.hasBattery ? "true" : "false";
+        case HardwareProperty::OnBattery:        return onBattery() ? "true" : "false";
+        default:                                 return {};
+    }
+}
+
 std::string hardwareSummary()
 {
     const HardwareInfo h = hardwareInfo();

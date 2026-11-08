@@ -98,6 +98,25 @@ HE_API void setDisplayInfo(const DisplayInfo& display);
 // A group with no data says "unknown".
 HE_API std::string hardwareSummary();
 
+// ── Properties by name (scripts, the editor page) ───────────────────────────
+// Every value as one entry of an enum: the built-in HorizonCode enum "HardwareProperty" has these entries,
+// in this order, with these names; Lua and Python ask by name (hardware.fields / hardware.value).
+enum class HardwareProperty : int
+{
+    CpuName = 0, CpuCores, CpuThreads, CpuArchitecture,
+    RamTotalMB, RamFreeMB,
+    GpuName, GpuVendor, GpuDriver, GpuVramMB, GraphicsApi,
+    OsName, OsVersion,
+    DisplayWidth, DisplayHeight, DisplayRefreshHz, DisplayScale, DisplayName,
+    HasBattery, OnBattery,
+    Count
+};
+HE_API const char* hardwarePropertyName(int property);                  // "GpuName"; "" past the end
+HE_API int          hardwarePropertyFromName(const std::string& name);  // case-insensitive; -1 = none
+// The value as text. "" when the machine could not tell (0 cores, no GPU handed over, ...), so a UI shows a
+// dash instead of a made-up number; booleans are "true"/"false"; floats print without trailing zeros.
+HE_API std::string  hardwarePropertyText(int property);
+
 // ── Test seam ───────────────────────────────────────────────────────────────
 // The probes the engine runs. A test installs one that answers with fixed values.
 class HardwareProvider

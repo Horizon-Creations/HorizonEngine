@@ -168,3 +168,108 @@ TEST_CASE("hardware info: GPU vendor names from PCI ids and from API text")
     CHECK(HE::gpuVendorFromText("Apple Apple M5") == "Apple");
     CHECK(HE::gpuVendorFromText("something else").empty());
 }
+
+// ── The hardware.* rows of the engine API (Thema 337 step 3) ────────────────────────────────────
+
+#include <HorizonScene/EngineApi.h>
+#include <Types/TypeRegistry.h>
+
+namespace
+{
+std::vector<HorizonCode::Value> callRow(const char* id, const std::vector<HorizonCode::Value>& args = {})
+{
+    const HE::api::ApiFn* fn = HE::api::find(id);
+    REQUIRE_MESSAGE(fn != nullptr, id);
+    HE::api::Ctx ctx;
+    return fn->invoke(ctx, args);
+}
+
+void installFullFake()
+{
+    auto fake = makeFake();
+    HE::setHardwareProvider(fake);
+    HE::GpuInfo gpu;
+    gpu.name = "Test GPU 4070"; gpu.vendor = "NVIDIA"; gpu.driver = "621.01"; gpu.api = "D3D12"; gpu.vramMB = 12010;
+    HE::setGpuInfo(gpu);
+    HE::DisplayInfo disp;
+    disp.width = 2560; disp.height = 1440; disp.refreshHz = 59.94f; disp.scale = 1.25f; disp.name = "Test Monitor";
+    HE::setDisplayInfo(disp);
+}
+}
+
+TEST_CASE("hardware rows: every value reads what the module holds")
+{
+    RestoreProvider restore;
+    installFullFake();
+    using HorizonCode::Value;
+    CHECK(callRow("hardware.cpuName")[0].s == "Test CPU 9000");
+    CHECK(callRow("hardware.cpuCores")[0].i == 8);
+    CHECK(callRow("hardware.cpuThreads")[0].i == 16);
+    CHECK(callRow("hardware.cpuArch")[0].s == "x64");
+    CHECK(callRow("hardware.ramTotalMB")[0].i == 32768);
+    CHECK(callRow("hardware.ramFreeMB")[0].i == 12000);
+    CHECK(callRow("hardware.gpuName")[0].s == "Test GPU 4070");
+    CHECK(callRow("hardware.gpuVendor")[0].s == "NVIDIA");
+    CHECK(callRow("hardware.gpuDriver")[0].s == "621.01");
+    CHECK(callRow("hardware.gpuVramMB")[0].i == 12010);
+    CHECK(callRow("hardware.graphicsApi")[0].s == "D3D12");
+    CHECK(callRow("hardware.osName")[0].s == "Windows 11");
+    CHECK(callRow("hardware.osVersion")[0].s == "Windows 11 (10.0 build 26300)");
+    CHECK(callRow("hardware.displayWidth")[0].i == 2560);
+    CHECK(callRow("hardware.displayHeight")[0].i == 1440);
+    CHECK(callRow("hardware.displayRefreshHz")[0].f == doctest::Approx(59.94f));
+    CHECK(callRow("hardware.displayScale")[0].f == doctest::Approx(1.25f));
+    CHECK(callRow("hardware.displayName")[0].s == "Test Monitor");
+    CHECK(callRow("hardware.hasBattery")[0].b);
+    CHECK_FALSE(callRow("hardware.onBattery")[0].b);
+    CHECK(callRow("hardware.summary")[0].s.find("GPU: Test GPU 4070") != std::string::npos);
+}
+
+TEST_CASE("hardware rows: by name and by enum, unknown values read empty")
+{
+    RestoreProvider restore;
+    installFullFake();
+    using HorizonCode::Value;
+
+    const auto fields = callRow("hardware.fields");
+    REQUIRE(fields.size() == 1);
+    CHECK(fields[0].isArray);
+    REQUIRE(fields[0].items.size() == static_cast<size_t>(HE::HardwareProperty::Count));
+    CHECK(fields[0].items.front().s == "CpuName");
+    CHECK(fields[0].items.back().s == "OnBattery");
+
+    CHECK(callRow("hardware.value", { Value::ofString("GpuName") })[0].s == "Test GPU 4070");
+    CHECK(callRow("hardware.value", { Value::ofString("gpuvramMB") })[0].s == "12010");   // not case sensitive
+    CHECK(callRow("hardware.value", { Value::ofString("DisplayRefreshHz") })[0].s == "59.94");
+    CHECK(callRow("hardware.value", { Value::ofString("DisplayScale") })[0].s == "1.25");
+    CHECK(callRow("hardware.value", { Value::ofString("HasBattery") })[0].s == "true");
+    CHECK(callRow("hardware.value", { Value::ofString("Nonsense") })[0].s.empty());
+
+    // The enum pin: ordinal -> text, the same strings.
+    CHECK(callRow("hardware.info", { Value::ofInt(static_cast<int>(HE::HardwareProperty::CpuName)) })[0].s == "Test CPU 9000");
+    CHECK(callRow("hardware.info", { Value::ofInt(static_cast<int>(HE::HardwareProperty::RamTotalMB)) })[0].s == "32768");
+    CHECK(callRow("hardware.info", { Value::ofInt(999) })[0].s.empty());
+
+    // Nothing handed over yet = empty, not a made-up zero.
+    HE::setHardwareProvider(makeFake());
+    CHECK(callRow("hardware.gpuName")[0].s.empty());
+    CHECK(callRow("hardware.gpuVramMB")[0].i == 0);
+    CHECK(callRow("hardware.displayWidth")[0].i == 0);
+    CHECK(callRow("hardware.displayScale")[0].f == doctest::Approx(0.0f));
+    CHECK(callRow("hardware.value", { Value::ofString("DisplayRefreshHz") })[0].s.empty());
+}
+
+TEST_CASE("hardware rows: the built-in HorizonCode enum carries the property names in order")
+{
+    HE::EnumDef def;
+    REQUIRE(HE::TypeRegistry::instance().getEnum(HE::kHardwarePropertyEnum, def));
+    REQUIRE(def.entries.size() == static_cast<size_t>(HE::HardwareProperty::Count));
+    for (size_t i = 0; i < def.entries.size(); ++i)
+    {
+        CHECK(def.entries[i].name == HE::hardwarePropertyName(static_cast<int>(i)));
+        CHECK(def.entries[i].value == static_cast<int>(i));
+    }
+    CHECK(HE::hardwarePropertyFromName("cpuname") == 0);
+    CHECK(HE::hardwarePropertyFromName("OnBattery") == static_cast<int>(HE::HardwareProperty::OnBattery));
+    CHECK(HE::hardwarePropertyFromName("nope") == -1);
+}
