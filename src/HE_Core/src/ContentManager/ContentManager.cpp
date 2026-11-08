@@ -1038,6 +1038,22 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 	s_depth--;
 }
 
+size_t ContentManager::regenerateRvtMaterials()
+{
+	size_t n = 0;
+	for (const HE::UUID& id : enumerateIds(HE::AssetType::Material))
+	{
+		const MaterialAsset* m = getMaterial(id);
+		if (!m || !m->parentMaterialPath.empty() || m->nodeGraphJson.empty() || !m->precompiledShaders.empty()) continue;
+		if (m->nodeGraphJson.find("RVT Write") == std::string::npos && m->nodeGraphJson.find("RVT Read") == std::string::npos) continue;
+		const std::string path = m->path;
+		regenerateMaterialFromGraph(id);
+		syncMaterialInstancesOf(path);
+		++n;
+	}
+	return n;
+}
+
 void ContentManager::syncMaterialInstancesOf(const std::string& parentRelPath)
 {
 	for (const HE::UUID& id : enumerateIds(HE::AssetType::Material))

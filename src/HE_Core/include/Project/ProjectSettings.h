@@ -53,8 +53,8 @@ namespace HE {
 //   graphics        the graphics half of that config.json, and the editor viewport's
 //                   look, when `graphics.enabled` (see ProjectGraphics).
 //   input           the game's gamepad deadzones when `input.enabled`.
-//   rvt             the Runtime Virtual Texture of the landscape (Thema 333): on or
-//                   off and the size of its page pool, read by editor + game.
+//   (rvt            was here until RVT 2.0, Thema 335: the switch is global now, an old
+//                   file's "rvt" section is read past, not loaded.)
 //   anticheat       the host's AntiCheatService (HorizonScene) — thresholds,
 //                   what happens per level, the game's value rules.
 //   multiplayer     NetGameSession::setProjectDefaults — the port, the seats,
@@ -272,37 +272,6 @@ struct HE_API ProjectInputSettings
     float triggerDeadzone = 0.05f;
 
     static constexpr float kMaxDeadzone = 0.9f;
-};
-
-// ─── Runtime Virtual Texture (Thema 333, docs/rvt-design-2026-11-04.md) ───────────────────────────────────
-// The landscape material rendered once into pages of a shared pool, then only read; the shader that paints it runs
-// when something changes. OFF by default: default-constructed IS today's behaviour (the landscape draws its own
-// material). HE_RVT=1 / HE_RVT=0 in the environment force it on / off whatever this says (every witness script and
-// the MCP loop rely on it).
-struct HE_API ProjectRvtSettings
-{
-    bool  enabled           = false;
-    // The pool: pages of 136 px, three layers each (BaseColor, Normal, Surface), 222 KB a page. Changing it rebuilds the
-    // pool and repaints every page.
-    int   poolPages         = 512;       // 108 MB
-    // The finest level: metres of ground per texel of a page. Changing it rebuilds the pool.
-    float metersPerTexel    = 0.25f;
-    // Pages at the finest level are kept within this radius of the camera (metres); a landscape within the activation
-    // radius is drawn from pages, a farther one from its own material. Both change live, without a rebuild.
-    float nearRadiusM       = 64.0f;
-    float activationRadiusM = 600.0f;
-    // How many pages one frame may paint: the budget that spreads a fill or a stroke's repaint over frames.
-    int   maxPagesPerFrame  = 8;
-
-    // One declaration a line: MSVC refuses a second name after a comma in a dllexport class (C2487).
-    static constexpr int   kMinPoolPages     = 64;
-    static constexpr int   kMaxPoolPages     = 2048;
-    static constexpr float kMinTexel         = 0.05f;
-    static constexpr float kMaxTexel         = 4.0f;
-    static constexpr float kMinRadius        = 8.0f;
-    static constexpr float kMaxRadius        = 5000.0f;
-    static constexpr int   kMinPagesPerFrame = 1;
-    static constexpr int   kMaxPagesPerFrame = 64;
 };
 
 // ─── Anti-cheat ───────────────────────────────────────────────────────────────
@@ -544,7 +513,6 @@ struct HE_API ProjectSettings
     ProjectRenderDefaults        renderDefaults;
     ProjectGraphics              graphics;
     ProjectInputSettings         input;
-    ProjectRvtSettings           rvt;
     ProjectAntiCheatSettings     antiCheat;
     ProjectMultiplayerSettings   multiplayer;
     ProjectSourceControlSettings sourceControl;

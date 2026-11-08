@@ -892,12 +892,6 @@ TEST_CASE("ProjectSettings: operator== and isDefault see every field")
 	HE_FIELD(input.enabled);
 	HE_FIELD(input.stickDeadzone);
 	HE_FIELD(input.triggerDeadzone);
-	HE_FIELD(rvt.enabled);
-	HE_FIELD(rvt.poolPages);
-	HE_FIELD(rvt.metersPerTexel);
-	HE_FIELD(rvt.nearRadiusM);
-	HE_FIELD(rvt.activationRadiusM);
-	HE_FIELD(rvt.maxPagesPerFrame);
 
 	HE_FIELD(antiCheat.enabled);
 	HE_FIELD(antiCheat.integrityCheck);
@@ -1027,64 +1021,27 @@ TEST_CASE("ProjectSettings::clamp: a NaN or infinite float falls back, field by 
 	}
 }
 
-TEST_CASE("ProjectRvtSettings: off by default, in the file, and a file from before it existed loads as off (Thema 333)")
+TEST_CASE("ProjectSettings: a file from before RVT 2.0 with an \"rvt\" section still loads, and the section is not written back (Thema 335)")
 {
-	// Default-constructed is today's behaviour: the landscape draws its own material.
-	const HE::ProjectSettings d;
-	CHECK_FALSE(d.rvt.enabled);
-	CHECK(d.rvt.poolPages == 512);
-	CHECK(d.rvt.metersPerTexel == doctest::Approx(0.25f));
-	CHECK(d.rvt.nearRadiusM == doctest::Approx(64.0f));
-	CHECK(d.rvt.activationRadiusM == doctest::Approx(600.0f));
-	CHECK(d.rvt.maxPagesPerFrame == 8);
-	CHECK(d.isDefault());
-
-	// Turning it on is a change the saver must see: a project whose ONLY edit is "RVT on" would otherwise count as default,
-	// never get a file, and lose the setting on the next open.
-	HE::ProjectSettings a;
-	a.rvt.enabled = true;
-	CHECK_FALSE(a.isDefault());
-	a.rvt.poolPages         = 1024;
-	a.rvt.metersPerTexel    = 0.5f;
-	a.rvt.nearRadiusM       = 96.0f;
-	a.rvt.activationRadiusM = 1200.0f;
-	a.rvt.maxPagesPerFrame  = 16;
-
+	// RVT was a project setting (pool, texel size, radii) until the global switch replaced it. Such a file must load, with every
+	// other section intact, and the section simply does not come back out.
 	json j;
+	HE::ProjectSettings a;
+	a.shadows.resolution = 4096;
 	a.toJson(j);
-	CHECK(j["rvt"]["enabled"] == true);
-	CHECK(j["rvt"]["poolPages"] == 1024);
-	CHECK(j["rvt"]["maxPagesPerFrame"] == 16);
+	j["rvt"] = { { "enabled", true }, { "poolPages", 1024 }, { "metersPerTexel", 0.5 }, { "nearRadiusM", 96.0 },
+	             { "activationRadiusM", 1200.0 }, { "maxPagesPerFrame", 16 } };
 	HE::ProjectSettings b;
 	b.fromJson(j);
-	CHECK(a == b);
-	CHECK(b.rvt.activationRadiusM == doctest::Approx(1200.0f));
+	CHECK(b.shadows.resolution == 4096);
+	CHECK(b == a);
 
-	// A file written before the section existed (or by an engine that does not know it) is the default: off.
-	json old = j;
-	old.erase("rvt");
+	json out;
+	b.toJson(out);
+	CHECK_FALSE(out.contains("rvt"));
+
+	// Garbage in the old section is as harmless as a valid one.
 	HE::ProjectSettings c;
-	c.rvt.enabled = true;     // fromJson is a full reset, not a merge: a missing section must not keep this
-	c.fromJson(old);
-	CHECK_FALSE(c.rvt.enabled);
+	c.fromJson(json{ { "rvt", { { "enabled", "yes" }, { "poolPages", "many" } } } });
 	CHECK(c.isDefault());
-}
-
-TEST_CASE("ProjectRvtSettings: out-of-range and wrong-type values are corrected, never trusted (Thema 333)")
-{
-	HE::ProjectSettings s;
-	s.fromJson(json{ { "rvt", { { "enabled", true }, { "poolPages", 1 }, { "metersPerTexel", 1000.0 },
-	                            { "nearRadiusM", -5.0 }, { "activationRadiusM", 1.0e9 }, { "maxPagesPerFrame", 9999 } } } });
-	CHECK(s.rvt.enabled);
-	CHECK(s.rvt.poolPages == HE::ProjectRvtSettings::kMinPoolPages);
-	CHECK(s.rvt.metersPerTexel == doctest::Approx(HE::ProjectRvtSettings::kMaxTexel));
-	CHECK(s.rvt.nearRadiusM == doctest::Approx(HE::ProjectRvtSettings::kMinRadius));
-	CHECK(s.rvt.activationRadiusM == doctest::Approx(HE::ProjectRvtSettings::kMaxRadius));
-	CHECK(s.rvt.maxPagesPerFrame == HE::ProjectRvtSettings::kMaxPagesPerFrame);
-
-	HE::ProjectSettings t;
-	t.fromJson(json{ { "rvt", { { "enabled", "yes" }, { "poolPages", "many" }, { "metersPerTexel", "fine" } } } });
-	CHECK_FALSE(t.rvt.enabled);
-	CHECK(t.rvt.poolPages == 512);
-	CHECK(t.rvt.metersPerTexel == doctest::Approx(0.25f));
 }

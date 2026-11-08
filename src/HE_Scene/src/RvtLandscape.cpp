@@ -13,7 +13,6 @@
 #include <Renderer/IRenderer.h>
 #include <algorithm>
 #include <chrono>
-#include <Project/ProjectSettings.h>   // ProjectRvtSettings
 #include <cmath>
 #include <functional>
 #include <set>
@@ -222,21 +221,11 @@ void RvtLandscape::pauseSwap(bool paused)
     }
 }
 
-RvtLandscape::Settings RvtLandscape::settingsFromProject(const HE::ProjectRvtSettings& p)
+bool RvtLandscape::wanted(bool userSwitch, bool backendCan)
 {
-    Settings s;
-    s.poolSlots         = static_cast<uint32_t>(p.poolPages);
-    s.maxPagesPerFrame  = static_cast<uint32_t>(p.maxPagesPerFrame);
-    s.metersPerTexel    = p.metersPerTexel;
-    s.nearRadiusM       = p.nearRadiusM;
-    s.activationRadiusM = p.activationRadiusM;
-    return s;
-}
-
-bool RvtLandscape::wanted(const HE::ProjectRvtSettings& p)
-{
+    // Read here and not cached with the switch: only the environment is constant for the process, the switch is not.
     static const int env = [] { const char* v = std::getenv("HE_RVT"); return (v && *v) ? (*v == '0' ? 0 : 1) : -1; }();
-    return env >= 0 ? env == 1 : p.enabled;
+    return backendCan && (env >= 0 ? env == 1 : userSwitch);
 }
 
 void RvtLandscape::setSettings(const Settings& s)

@@ -250,7 +250,6 @@ TEST_CASE("project settings ui: every page draws over a real project, and lookin
 		{ P::Multiplayer,     "multiplayer" },
 		{ P::RenderDefaults,  "render-defaults" },
 		{ P::Shadows,         "shadows" },
-		{ P::VirtualTexture,  "virtual-texture" },
 		{ P::Simulation,      "physics" },
 		{ P::CollisionLayers, "collision-layers" },
 		{ P::AudioBuses,      "audio-buses" },
@@ -469,96 +468,3 @@ TEST_CASE("project settings ui: Input - switching the project's deadzones on sta
 }
 
 
-TEST_CASE("project settings ui: ticking Runtime Virtual Texture lands in Config/ProjectSettings.json (Thema 333)")
-{
-	Harness harness;
-
-	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_rvt";
-	he_test::removeAllQuiet(dir);
-	ProjectManager pm;
-	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
-	const auto settingsFile = HE::projectSettingsPath(pm.projectRoot());
-
-	ContextBits bits;
-	AppContext ctx = bits.make(pm);
-	showPage(ProjectSettingsPanel::Page::VirtualTexture);
-	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
-	for (int i = 0; i < 3; ++i) frame(ctx, false);
-
-	// Down the page's left edge: the first control is the "Runtime Virtual Texture" checkbox.
-	const std::vector<Item> items = itemsDown(ctx, kPageX + 8.0f, 40.0f, float(H) - 40.0f);
-	REQUIRE_MESSAGE(!items.empty(), "no control found down the Virtual Texture page");
-	REQUIRE_FALSE(pm.currentProject().settings.rvt.enabled);
-	REQUIRE_FALSE(std::filesystem::exists(settingsFile));
-
-	clickAt(ctx, kPageX + 8.0f, items[0].mid);
-	CHECK(pm.currentProject().settings.rvt.enabled);
-	REQUIRE(std::filesystem::exists(settingsFile));
-
-	// The file, read back through a fresh manager, says so — and the rest of the section is what it was.
-	ProjectManager again;
-	REQUIRE(again.loadProject(pm.currentProject().path));
-	CHECK(again.currentProject().settings.rvt.enabled);
-	CHECK(again.currentProject().settings.rvt.poolPages == 512);
-
-	he_test::removeAllQuiet(dir);
-}
-
-TEST_CASE("project settings ui: the Virtual Texture page draws the driver's status and page map (Thema 333)")
-{
-	Harness harness;
-
-	const auto dir = std::filesystem::temp_directory_path() / "he_project_settings_ui_rvt_status";
-	he_test::removeAllQuiet(dir);
-	ProjectManager pm;
-	REQUIRE(pm.createNewProject(dir.string(), "Settings", ProjectPreset::Game));
-
-	ContextBits bits;
-	AppContext ctx = bits.make(pm);
-	showPage(ProjectSettingsPanel::Page::VirtualTexture);
-	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
-
-	// Off / no driver: the status line says so and no map is drawn.
-	he_ui::Image off;
-	for (int i = 0; i < 4; ++i) frame(ctx, false, i == 3 ? &off : nullptr);
-	REQUIRE(off.valid());
-
-	// A running driver with an 8 x 8 map: a green block (resident), an orange one (stale), the rest dark.
-	int asked = 0;
-	ctx.rvtDebugInfo = [&asked]() {
-		++asked;
-		HE::landscape::RvtLandscape::DebugInfo d;
-		d.running = true; d.segments = 2; d.activeSegments = 1;
-		d.poolSlots = 512; d.resident = 46; d.stale = 3; d.starved = 0;
-		d.lastPaintMs = 3.4; d.lastPagesPainted = 8; d.pagesPaintedTotal = 72; d.materialsRegistered = 8;
-		d.gridSide = 8; d.metersPerPage = 34.0f;
-		d.grid.assign(64, 0);
-		for (int y = 2; y < 6; ++y) for (int x = 2; x < 6; ++x) d.grid[size_t(y) * 8 + size_t(x)] = 1;
-		d.grid[size_t(3) * 8 + 3] = 2;
-		return d;
-	};
-	he_ui::Image on;
-	for (int i = 0; i < 3; ++i) frame(ctx, false);
-	// The status is below the fold at this height: scroll the page window to its end (found by name).
-	for (ImGuiWindow* w : GImGui->Windows)
-		if (w->Name && std::strstr(w->Name, "##projectpage"))
-			ImGui::SetScrollY(w, w->ScrollMax.y);
-	for (int i = 0; i < 3; ++i) frame(ctx, false, i == 2 ? &on : nullptr);
-	REQUIRE(on.valid());
-	CHECK(asked > 0);
-
-	// The map is ink the off page does not have: count the green cells' colour (70, 190, 110).
-	auto count = [](const he_ui::Image& img, std::uint8_t r, std::uint8_t g, std::uint8_t b) {
-		size_t n = 0;
-		for (size_t i = 0; i + 3 < img.rgba.size(); i += 4)
-			n += (std::abs(int(img.rgba[i]) - r) < 8 && std::abs(int(img.rgba[i + 1]) - g) < 8 && std::abs(int(img.rgba[i + 2]) - b) < 8) ? 1u : 0u;
-		return n;
-	};
-	CHECK(count(off, 70, 190, 110) == 0);
-	CHECK(count(on, 70, 190, 110) > 100);     // 15 resident cells, a cell is a few dozen pixels
-	CHECK(count(on, 236, 150, 50) > 20);      // the one stale cell
-	if (const char* dump = std::getenv("HE_UI_DUMP_DIR"); dump && *dump)
-		he_ui::writeBmp(on, std::string(dump) + "/project-settings-virtual-texture-running.bmp");
-
-	he_test::removeAllQuiet(dir);
-}

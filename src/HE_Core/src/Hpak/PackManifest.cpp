@@ -1,6 +1,7 @@
 #include <Hpak/PackManifest.h>
 #include <Hpak/HpakFormat.h>
 #include <Hpak/HpakReader.h>
+#include <MaterialGraph/RvtSplit.h>
 #include <nlohmann/json.hpp>
 #include <cstring>
 #include <fstream>
@@ -113,7 +114,7 @@ uint64_t packSettingsFingerprint(const Hpak::PackSettings& s)
     uint8_t buf[8 + 32 + 1 + 5 + 8];
     buf[0] = static_cast<uint8_t>(s.codec);
     buf[1] = static_cast<uint8_t>(s.level);
-    buf[2] = s.encrypt ? 1 : 0;
+    buf[2] = static_cast<uint8_t>((s.encrypt ? 1 : 0) | (matRvtEnabled() ? 2 : 0));  // the RVT switch shapes every RVT material's cooked shader (HpakWriter rebakeRvtMaterial)
     // cook toggle (bit0) + texture-compression target (bits1-3) + its quality
     // (bits4-5) + cook-the-arrays (bit6) → changing any of them re-packs; a quality change that did not
     // would leave the previous export's blocks in the pak, encoded at the old one.

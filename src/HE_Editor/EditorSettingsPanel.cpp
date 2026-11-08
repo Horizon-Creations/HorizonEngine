@@ -346,6 +346,17 @@ void DrawEngineSettings(AppContext& ctx, SettingsMode mode, const DrawOptions& o
 		EditorWidgets::checkbox("Occlusion Culling", &cfg.OcclusionCulling);
 		hint("Skip drawing objects hidden behind nearer opaque geometry (OpenGL, Metal).");
 	});
+	row("rvt", "Display", [&]{
+		const bool supported = ctx.renderer && ctx.renderer->GetCapabilities().supportsRvt;
+		ImGui::BeginDisabled(!supported);
+		EditorWidgets::checkbox("Runtime Virtual Texture", &cfg.RuntimeVirtualTextures);
+		ImGui::EndDisabled();
+		if (!supported && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("This backend cannot hold a virtual texture (needs Capabilities::supportsRvt): "
+			                  "RVT Write nodes are skipped and RVT Read nodes compute directly.");
+		else if (supported)
+			hint("On: RVT Write paints pages, RVT Read reads them. Off: the graph computes directly.");
+	});
 	row("vsync", "Display", [&]{ if (EditorWidgets::checkbox("VSync", &ctx.vsync)) ApplyVSync(ctx); });
 	row("maxfps", "Display", [&]{
 		// VSync-off frame cap. 0 = unlimited (default — full FPS). A cap paces the loop so
@@ -1133,7 +1144,6 @@ void requestOpenProjectPage(ProjectSettingsPanel::Page page)
 	case P::Fonts:           target = Page::ProjectFonts;        break;
 	case P::Permissions:     target = Page::ProjectPermissions;  break;
 	case P::Shadows:         target = Page::WorldShadows;        break;
-	case P::VirtualTexture:  target = Page::WorldVirtualTexture; break;
 	case P::Simulation:      target = Page::WorldSimulation;     break;
 	case P::CollisionLayers: target = Page::WorldCollisionLayers; break;
 	case P::AudioBuses:      target = Page::WorldAudioBuses;     break;
@@ -2228,7 +2238,6 @@ constexpr NavItem kProjectItems[] = {
 };
 constexpr NavItem kWorldItems[] = {
 	{ Page::WorldShadows,        "Shadows" },
-	{ Page::WorldVirtualTexture, "Virtual Texture" },
 	{ Page::WorldSimulation,     "Simulation" },
 	{ Page::WorldCollisionLayers, "Collision Layers" },
 	{ Page::WorldAudioBuses,     "Audio Buses" },
@@ -2259,7 +2268,6 @@ bool projectPageOf(Page p, ProjectSettingsPanel::Page& out)
 	case Page::ProjectFonts:        out = P::Fonts;           return true;
 	case Page::ProjectPermissions:  out = P::Permissions;     return true;
 	case Page::WorldShadows:        out = P::Shadows;         return true;
-	case Page::WorldVirtualTexture: out = P::VirtualTexture;  return true;
 	case Page::WorldSimulation:     out = P::Simulation;      return true;
 	case Page::WorldCollisionLayers: out = P::CollisionLayers; return true;
 	case Page::WorldAudioBuses:     out = P::AudioBuses;      return true;
@@ -2295,7 +2303,7 @@ constexpr const char* kInputRows[]          = { "pointerinput" };
 constexpr const char* kProjectDataRows[]    = { "cpucache", "cbrefresh", "autosave" };
 constexpr const char* kEditorRendererRows[] = { "backend", "vsync", "maxfps" };
 constexpr const char* kViewportQualityRows[] = {
-	"renderpath", "occlusion", "aa", "gpuparticles",
+	"renderpath", "occlusion", "rvt", "aa", "gpuparticles",
 	"bloom", "ssao", "dof", "motionblur",
 	"ssr", "gi", "girefl",
 };

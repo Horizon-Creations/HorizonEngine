@@ -8,6 +8,8 @@
 #include <ContentManager/TextureArrayBuild.h> // slice math for cooked texture arrays
 #include <ContentManager/TextureBlockDecode.h> // baked per-slice means (CHUNK_TXSM)
 #include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
+#include <MaterialGraph/RvtSplit.h>   // matRvtEnabled: the RVT switch the cook follows
+#include <ContentManager/ContentManager.h> // rebakeRvtMaterial: a scratch manager regenerates the shader
 #include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
 #  include <lz4.h>
@@ -33,6 +35,7 @@
 #include <thread>
 #include <iterator>
 #include <fstream>
+#include <filesystem>
 #include <string>
 #include <map>
 #include <unordered_map>
@@ -352,6 +355,47 @@ static bool mtrlGraphAndParent(const std::vector<uint8_t>& blob,
 // A ref whose target isn't in the pack becomes a null UUID placeholder so the
 // vectors stay index-parallel; the streaming frontier skips nulls. Assets of any
 // other type are returned unchanged.
+// RVT 2.0 (Thema 335): a material with an RVT Write / RVT Read node carries GLSL that was generated under whatever the RVT switch
+// said when the file was last saved; the cook copies those bytes. So the cook asks the code generator again under the switch of THIS
+// export (matRvtEnabled: off = the inline graph, the same shader a graph without the pair makes), by loading the blob into a scratch
+// ContentManager (load-time regeneration is where the shader is made) and writing it back the way a save would. Returns false, and
+// leaves `out` alone, for everything else: no RVT node in the blob, an asset that is not a material, or a material that calls a
+// function (the scratch manager has none to give, so it keeps the GLSL it came with).
+static bool rebakeRvtMaterial(const std::vector<uint8_t>& blob, std::vector<uint8_t>& out)
+{
+    auto has = [&](const char* needle) {
+        const size_t n = std::strlen(needle);
+        return std::search(blob.begin(), blob.end(), needle, needle + n) != blob.end();
+    };
+    if (!has("RVT Write") && !has("RVT Read")) return false;
+    HAsset::Reader r;
+    if (!r.openData(blob) || static_cast<HE::AssetType>(r.assetType()) != HE::AssetType::Material) return false;
+
+    ContentManager scratch;
+    const HE::UUID id = scratch.loadAssetFromMemory(blob);
+    MaterialAsset* m = id != HE::UUID{} ? scratch.getMaterialMutable(id) : nullptr;
+    if (!m || m->nodeGraphJson.empty() || !m->parentMaterialPath.empty()) return false;
+    HE::MaterialGraph g;
+    if (!HE::materialGraphFromJson(m->nodeGraphJson, g)) return false;
+    for (const HE::MatGraphNode& n : g.nodes)
+        if (n.type == HE::MatNodeType::FunctionCall) return false;
+
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path tmp = fs::temp_directory_path(ec) / ("he_rvt_rebake_" + std::to_string(reinterpret_cast<uintptr_t>(&scratch)) + ".hasset");
+    if (ec) return false;
+    const bool wrote = scratch.writeAssetTo(*m, tmp.string());
+    bool ok = false;
+    if (wrote)
+    {
+        std::ifstream f(tmp, std::ios::binary);
+        std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        if (!bytes.empty()) { out = std::move(bytes); ok = true; }
+    }
+    fs::remove(tmp, ec);
+    return ok;
+}
+
 static std::vector<uint8_t> rewriteRefsForPack(
     const std::vector<uint8_t>& blob,
     const std::unordered_map<std::string, HE::UUID>& pathToUuid,
@@ -1456,7 +1500,9 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
 
         // ── The pipeline, recording what it looked at ───────────────────────────
         Hpak::PackDeps deps;
-        std::vector<uint8_t> blob = rewriteRefsForPack(pe.bytes, pathToUuid, settings, &blobByPath, &deps);
+        std::vector<uint8_t> rvtRebaked;
+        const std::vector<uint8_t>& packSrc = rebakeRvtMaterial(pe.bytes, rvtRebaked) ? rvtRebaked : pe.bytes;
+        std::vector<uint8_t> blob = rewriteRefsForPack(packSrc, pathToUuid, settings, &blobByPath, &deps);
         if (settings.cook) blob = cookForPack(blob, settings.textureCompression, settings.textureQuality,
                                                  settings.cookTextureArrays);
         // After every rewrite above (each of which copies META through verbatim)

@@ -39,7 +39,6 @@
 class HorizonWorld;
 class ContentManager;
 class IRenderer;
-namespace HE { struct ProjectRvtSettings; }
 namespace HE::landscape { class HlodBaker; }
 
 namespace HE::landscape
@@ -74,10 +73,12 @@ namespace HE::landscape
         RvtLandscape(const RvtLandscape&) = delete;
         RvtLandscape& operator=(const RvtLandscape&) = delete;
 
-        // The project's settings as the driver's (editor + game), and whether the driver is wanted at all: HE_RVT=1 / HE_RVT=0 in
-        // the environment force it on / off (the witnesses and the MCP loop rely on that), otherwise the project's `enabled`.
-        static Settings settingsFromProject(const HE::ProjectRvtSettings& p);
-        static bool     wanted(const HE::ProjectRvtSettings& p);
+        // Whether RVT is wanted at all (editor + game): the global switch (Preferences > Rendering in the editor, the exported
+        // config.json in the game) on a backend that can hold a virtual texture (Capabilities::supportsRvt, which also covers GL
+        // without enough texture units and Vulkan at the sampler minimum). HE_RVT=1 / HE_RVT=0 in the environment force it on / off
+        // (the witnesses and the MCP loop rely on that). Callers hand the answer to matSetRvtEnabled too, so a material generated
+        // with RVT off is the inline graph (RvtSplit.h). Pool, texel and radii are the Settings defaults until the Write node owns them.
+        static bool     wanted(bool userSwitch, bool backendCan);
 
         // The pool size and the texel size shape the pool and every volume: a change of either gives every landscape back and
         // starts over with the next tick (one rebuild, never one per frame: the editor changes them only on commit). The
@@ -92,7 +93,7 @@ namespace HE::landscape
         // Draws the landscapes from their own material for a moment (a comparison) and back, without touching anything else.
         void pauseSwap(bool paused);
 
-        // What a debug view shows (editor: Project Settings ▸ Virtual Texture): the driver's state as of the last tick, and the
+        // What a debug view shows (editor: the RVT debug view, step 5): the driver's state as of the last tick, and the
         // mip-0 page map of the nearest landscape that has a volume. A snapshot, copied: nothing in it points into the driver.
         struct DebugInfo
         {

@@ -28,7 +28,7 @@ namespace ProjectSettingsPanel
 		// Source Control, next to git itself and the GitHub account.)
 		General, Application, RenderDefaults, Fonts, Permissions,
 		// World — how it simulates and sounds.
-		Shadows, VirtualTexture, Simulation, CollisionLayers, AudioBuses,
+		Shadows, Simulation, CollisionLayers, AudioBuses,
 		// Online — what a session of it is: AntiCheat is what its host refuses to
 		// believe from a client ("anticheat"), Multiplayer the port, seats and
 		// tick rate ("multiplayer").

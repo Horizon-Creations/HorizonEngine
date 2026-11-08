@@ -111,6 +111,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/RvtProducer.h>
 #include <HorizonScene/RvtLandscape.h>
+#include <MaterialGraph/RvtSplit.h>   // matSetRvtEnabled
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -1751,6 +1752,9 @@ void EditorApplication::OnInit()
 	m_editorConfig.GIReflBounces               = globalstate.getCustomConfigInt("GIReflBounces",              m_editorConfig.GIReflBounces);
 	m_editorConfig.RenderPath                  = globalstate.getCustomConfigInt("RenderPath",           m_editorConfig.RenderPath);
 	m_editorConfig.OcclusionCulling            = globalstate.getCustomConfigBool("OcclusionCulling",    m_editorConfig.OcclusionCulling);
+	m_editorConfig.RuntimeVirtualTextures      = globalstate.getCustomConfigBool("RuntimeVirtualTextures", m_editorConfig.RuntimeVirtualTextures);
+	// Before any material is generated: the capability of the backend corrects it on the first tick (the renderer is not up yet).
+	HE::matSetRvtEnabled(HE::landscape::RvtLandscape::wanted(m_editorConfig.RuntimeVirtualTextures, true));
 	m_editorConfig.SSREnabled                  = globalstate.getCustomConfigBool("SSREnabled",          m_editorConfig.SSREnabled);
 	m_editorConfig.SSRIntensity                = globalstate.getCustomConfigFloat("SSRIntensity",       m_editorConfig.SSRIntensity);
 	m_editorConfig.SSRQuality                  = globalstate.getCustomConfigInt("SSRQuality",           m_editorConfig.SSRQuality);
@@ -4085,14 +4089,21 @@ void EditorApplication::OnRender(float dt)
 			                        m_editorCamera.position(), gameDt,
 			                        (m_isPlaying && m_physicsWorld) ? m_physicsWorld.get() : nullptr,
 			                        gpuParticles);
-			// The virtual texture of the landscape, after the terrain update of the tick: the project's setting (Project
-			// Settings ▸ Virtual Texture), or HE_RVT=1 / 0 over it. Switched off, the landscapes go back to their own material.
+			// The virtual texture of the landscape, after the terrain update of the tick: the global switch (Preferences ▸
+			// Rendering ▸ Runtime Virtual Texture) on a backend that can hold one, or HE_RVT=1 / 0 over it. Switched off, the
+			// landscapes go back to their own material and the RVT nodes of every material are inlined (matSetRvtEnabled).
 			{
-				const HE::ProjectRvtSettings& rs = m_projectManager.currentProject().settings.rvt;
-				if (renderer() && HE::landscape::RvtLandscape::wanted(rs))
+				const bool rvtOn = HE::landscape::RvtLandscape::wanted(
+					m_editorConfig.RuntimeVirtualTextures, renderer() && renderer()->GetCapabilities().supportsRvt);
+				if (rvtOn != HE::matRvtEnabled())
+				{
+					HE::matSetRvtEnabled(rvtOn);
+					const size_t n = contentManager().regenerateRvtMaterials();
+					HE_LOG_INFO(Editor, "EditorApplication: Runtime Virtual Texture %s, %zu RVT material(s) regenerated", rvtOn ? "on" : "off", n);
+				}
+				if (renderer() && rvtOn)
 				{
 					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
-					m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(rs));
 					HE_PROFILE_SCOPE_N("RvtLandscape");
 					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
 				}
@@ -16935,6 +16946,7 @@ void EditorApplication::writeEditorConfig()
 	globalstate.setCustomConfigEntry("GIReflBounces",             m_editorConfig.GIReflBounces);
 	globalstate.setCustomConfigEntry("RenderPath",                m_editorConfig.RenderPath);
 	globalstate.setCustomConfigEntry("OcclusionCulling",          m_editorConfig.OcclusionCulling);
+	globalstate.setCustomConfigEntry("RuntimeVirtualTextures",    m_editorConfig.RuntimeVirtualTextures);
 	globalstate.setCustomConfigEntry("SSREnabled",                m_editorConfig.SSREnabled);
 	globalstate.setCustomConfigEntry("SSRIntensity",              m_editorConfig.SSRIntensity);
 	globalstate.setCustomConfigEntry("SSRQuality",                m_editorConfig.SSRQuality);

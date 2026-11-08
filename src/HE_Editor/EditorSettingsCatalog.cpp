@@ -343,6 +343,13 @@ std::vector<SettingDesc> buildCatalog()
 	                    "behind nearer opaque geometry are not drawn. OpenGL and "
 	                    "Metal; the image does not change, only the draw count."));
 
+	t.push_back(boolRow("display.runtimeVirtualTextures", "Runtime Virtual Texture", "Display",
+	                    "rvt", &EditorConfig::RuntimeVirtualTextures,
+	                    "RVT Write / RVT Read material nodes: on = the Write node paints pages "
+	                    "and the Read node reads them; off = the Write node is skipped and the "
+	                    "graph computes directly. Stays off on a backend that cannot hold a "
+	                    "virtual texture. The export follows it; HE_RVT=1/0 overrides."));
+
 	// ── Rendering ▸ Post-Processing ─────────────────────────────────────────
 	t.push_back(enumRow("postProcess.antiAliasing", "Anti-Aliasing",
 	                    "Post-Processing", "aa", &EditorConfig::AntiAliasing,

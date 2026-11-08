@@ -73,6 +73,20 @@ struct MatRvtSplit
 //   skipped), and a second Write node of an RVT name (ignored, the lowest id wins).
 HE_API MatRvtSplit matSplitRvt(const MaterialGraph& graph);
 
+// RVT OFF (the global switch, or a backend that cannot hold a virtual texture): the graph without its RVT nodes. Every RVT Read
+// output is replaced by the expression that feeds the matching Write input (same RVT name, lowest Write id), the Valid output by
+// a constant 1 (0 without a matching Write), and the Write and Read nodes are dropped. A Write input nobody connected leaves the
+// consumer on its own pin default. Node ids are kept, so the generated shader is the one a graph that never had the pair makes.
+// Without RVT nodes the graph is returned as it is.
+HE_API MaterialGraph matInlineRvt(const MaterialGraph& graph);
+
+// The one global answer to "do RVT nodes page, or does the graph compute directly". The application sets it every tick from its
+// switch AND the renderer's capability AND the HE_RVT override (RvtLandscape::wanted); generateFragment and the export cook read
+// it, so the editor, the game and the export agree. Default: enabled (a process that never sets it, like hpak_packer, keeps the
+// nodes). An atomic read on every call, never cached: the switch changes while the editor runs.
+HE_API void matSetRvtEnabled(bool enabled);
+HE_API bool matRvtEnabled();
+
 // Ids of every node that is downstream of an RVT Read (reachable by following links from a Read's outputs forward), Read
 // nodes included. A page may never depend on one of them.
 HE_API std::set<int> matRvtDownstreamOfRead(const MaterialGraph& graph);

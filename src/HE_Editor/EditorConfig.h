@@ -224,6 +224,12 @@ struct EditorConfig
 	// things vanish, and that is the worse failure).
 	bool  OcclusionCulling = false;
 
+	// Runtime Virtual Textures (RVT 2.0, Thema 335): the ONE global switch. On: an RVT Write node paints its inputs into
+	// pages and the RVT Read node reads them. Off (or a backend that cannot hold a virtual texture): the Write node is
+	// skipped and the Read node is replaced by the expressions that feed the Write node, the graph computes directly. The
+	// export follows it. HE_RVT=1/0 in the environment overrides it (RvtLandscape::wanted).
+	bool  RuntimeVirtualTextures = false;
+
 	// Screen-space reflections (pushed each frame via SetSSRSettings). v1 only
 	// effective on Metal in the deferred render path; supportsScreenSpaceReflections
 	// gates the toggle. Off by default (like GI).

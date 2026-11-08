@@ -313,3 +313,106 @@ TEST_CASE("RVT split: a graph without RVT nodes is returned as it is and compile
 	CHECK(HE::generateFragmentGlsl(s.live) == HE::generateFragmentGlsl(g));
 	CHECK_FALSE(has(HE::generateFragmentGlsl(g), "heRvt"));
 }
+
+// ── RVT 2.0 step 2 (Thema 335): RVT off = the Write node is skipped, the Read node is replaced by what feeds the Write ──
+namespace
+{
+	// Switches the global RVT answer for one scope, and puts it back.
+	struct RvtSwitch
+	{
+		bool before = HE::matRvtEnabled();
+		explicit RvtSwitch(bool on) { HE::matSetRvtEnabled(on); }
+		~RvtSwitch() { HE::matSetRvtEnabled(before); }
+	};
+
+	// The fixture's graph as a material author would have drawn it without the pair: the Write's sources go straight to the
+	// consumers of the Read's matching outputs. Same node ids, so the generated variable names are the same.
+	HE::MaterialGraph withoutRvt(const Fixture& f)
+	{
+		HE::MaterialGraph g = f.g;
+		g.links.erase(std::remove_if(g.links.begin(), g.links.end(), [&](const HE::MatGraphLink& l) {
+			return l.dstNode == f.write || l.srcNode == f.read; }), g.links.end());
+		g.nodes.erase(std::remove_if(g.nodes.begin(), g.nodes.end(), [&](const HE::MatGraphNode& n) {
+			return n.id == f.write || n.id == f.read; }), g.nodes.end());
+		g.connect(f.mulBase, 0, f.mulPost, 0);                                   // Write.BaseColor -> Read.BaseColor
+		g.connect(f.preRough, 0, f.out, HE::kMatOutputRoughnessPin);              // Write.Roughness -> Read.Roughness
+		return g;                                                                // Read.Normal: the Write's Normal was unconnected
+	}
+}
+
+TEST_CASE("RVT off: matInlineRvt gives the graph a material without the pair would have, and generateFragment makes the same text")
+{
+	const Fixture f = build();
+	const HE::MaterialGraph plain = withoutRvt(f);
+
+	const HE::MaterialGraph inl = HE::matInlineRvt(f.g);
+	CHECK(inl.findNode(f.write) == nullptr);
+	CHECK(inl.findNode(f.read) == nullptr);
+	CHECK(inl.nodes.size() == plain.nodes.size());
+	CHECK(inl.links.size() == plain.links.size());
+
+	std::string onGlsl;
+	{ RvtSwitch on(true);  onGlsl = HE::generateFragmentGlsl(f.g); }
+	CHECK(has(onGlsl, "heRvtSample"));                                           // with RVT on the Read node is the lookup
+	std::string offGlsl;
+	{ RvtSwitch off(false); offGlsl = HE::generateFragmentGlsl(f.g); }
+	CHECK_FALSE(has(offGlsl, "heRvt"));                                          // off: no lookup, no pool, no volume parameters
+	std::string plainGlsl;
+	{ RvtSwitch off(false); plainGlsl = HE::generateFragmentGlsl(plain); }
+	CHECK(offGlsl == plainGlsl);                                                 // the same shader as a graph that never had the pair
+	CHECK(offGlsl != onGlsl);
+}
+
+TEST_CASE("RVT off: the Read's Valid output is 1, an unconnected Write input leaves the consumer on its own default, a chain settles")
+{
+	Fixture f = build();
+	f.g.connect(f.read, HE::kRvtReadValidPin, f.out, HE::kMatOutputAOPin);
+	const HE::MaterialGraph inl = HE::matInlineRvt(f.g);
+	int constNode = 0;
+	for (const HE::MatGraphLink& l : inl.links)
+		if (l.dstNode == f.out && l.dstPin == HE::kMatOutputAOPin) constNode = l.srcNode;
+	REQUIRE(constNode != 0);
+	const HE::MatGraphNode* c = inl.findNode(constNode);
+	REQUIRE(c != nullptr);
+	CHECK(c->type == T::ConstFloat);
+	CHECK(c->p[0] == doctest::Approx(1.0f));
+	// The Write's Normal input was never connected: the Output's Normal pin has no link after the inline.
+	for (const HE::MatGraphLink& l : inl.links) CHECK_FALSE((l.dstNode == f.out && l.dstPin == HE::kMatOutputNormalPin));
+
+	// A Read of an RVT nobody writes: Valid is 0 and the other outputs are unconnected.
+	HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+	const int out = [&] { for (const HE::MatGraphNode& n : g.nodes) if (n.type == T::Output) return n.id; return 0; }();
+	const int rd = g.addNode(T::RvtRead); g.findNode(rd)->s = "Nowhere";
+	g.connect(rd, HE::kRvtReadValidPin, out, HE::kMatOutputAOPin);
+	const HE::MaterialGraph lone = HE::matInlineRvt(g);
+	CHECK(lone.findNode(rd) == nullptr);
+	for (const HE::MatGraphLink& l : lone.links)
+		if (l.dstNode == out && l.dstPin == HE::kMatOutputAOPin) CHECK(lone.findNode(l.srcNode)->p[0] == doctest::Approx(0.0f));
+
+	// Read A feeds Write B, Read B feeds the Output: the chain resolves to A's source.
+	HE::MaterialGraph ch = HE::MaterialGraph::makeDefault();
+	int o2 = 0; for (const HE::MatGraphNode& n : ch.nodes) if (n.type == T::Output) o2 = n.id;
+	const int src = ch.addNode(T::ParamColor); ch.findNode(src)->s = "Src";
+	const int wa = ch.addNode(T::RvtWrite); ch.findNode(wa)->s = "A";
+	const int ra = ch.addNode(T::RvtRead);  ch.findNode(ra)->s = "A";
+	const int wb = ch.addNode(T::RvtWrite); ch.findNode(wb)->s = "B";
+	const int rb = ch.addNode(T::RvtRead);  ch.findNode(rb)->s = "B";
+	ch.connect(src, 0, wa, HE::kRvtWriteBaseColorPin);
+	ch.connect(ra, HE::kRvtReadBaseColorPin, wb, HE::kRvtWriteBaseColorPin);
+	ch.connect(rb, HE::kRvtReadBaseColorPin, o2, HE::kMatOutputBaseColorPin);
+	const HE::MaterialGraph settled = HE::matInlineRvt(ch);
+	bool direct = false;
+	for (const HE::MatGraphLink& l : settled.links)
+		if (l.dstNode == o2 && l.dstPin == HE::kMatOutputBaseColorPin) direct = l.srcNode == src;
+	CHECK(direct);
+}
+
+TEST_CASE("RVT off: a graph without RVT nodes is untouched, and the switch reads fresh on every call")
+{
+	const HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+	const HE::MaterialGraph same = HE::matInlineRvt(g);
+	CHECK(same.nodes.size() == g.nodes.size());
+	CHECK(same.links.size() == g.links.size());
+	{ RvtSwitch off(false); CHECK_FALSE(HE::matRvtEnabled()); CHECK(HE::generateFragmentGlsl(g) == [&] { RvtSwitch on(true); return HE::generateFragmentGlsl(g); }()); }
+	{ RvtSwitch on(true);   CHECK(HE::matRvtEnabled()); }
+}

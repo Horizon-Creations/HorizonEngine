@@ -199,6 +199,7 @@ static std::string buildGameConfigJson(const AppContext& ctx)
     put("GILightRadius",             cfg.GILightRadius);
     put("GIShadowQuality",           cfg.GIShadowQuality);
     put("OcclusionCulling",          cfg.OcclusionCulling);
+    put("RuntimeVirtualTextures",    cfg.RuntimeVirtualTextures);
     put("SSREnabled",                cfg.SSREnabled);
     put("SSRIntensity",              cfg.SSRIntensity);
     put("SSRMaxRoughness",           cfg.SSRMaxRoughness);

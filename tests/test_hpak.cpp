@@ -8,6 +8,8 @@
 #include <ContentManager/HAsset.h>
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
+#include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/RvtSplit.h>
 #ifdef HE_HAVE_ASTCENC
 #  include <astcenc.h>
 #endif
@@ -2690,4 +2692,70 @@ TEST_CASE("Hash bench: fnv1a64Bytes vs hash64 over 256 MiB" * doctest::skip())
                 << " | hash64 " << (data.size() / s2 / 1e9) << " GB/s"
                 << " | (" << (a ^ b) << ")");
     }
+}
+
+// ─── RVT 2.0 (Thema 335): the cook follows the RVT switch of the export ─────────────────────────────────────
+// A material with an RVT Write / Read node carries the GLSL it was saved with; the cook regenerates it under the switch of the
+// export, so a game exported with RVT off ships the inline graph even when the file was saved with RVT on, and the other way round.
+TEST_CASE("HpakWriter: an RVT material is cooked under the export's RVT switch, not the one it was saved under")
+{
+    struct Switch { bool before = HE::matRvtEnabled(); ~Switch() { HE::matSetRvtEnabled(before); } } restore;
+
+    auto dir = std::filesystem::temp_directory_path() / "he_rvt_cook";
+    he_test::removeAllQuiet(dir);
+    std::filesystem::create_directories(dir);
+
+    HE::MaterialGraph g;
+    const int out = g.addNode(HE::MatNodeType::Output);
+    const int tint = g.addNode(HE::MatNodeType::ParamColor); g.findNode(tint)->s = "Tint";
+    const int wr = g.addNode(HE::MatNodeType::RvtWrite); g.findNode(wr)->s = "Ground";
+    const int rd = g.addNode(HE::MatNodeType::RvtRead);  g.findNode(rd)->s = "Ground";
+    g.connect(tint, 0, wr, HE::kRvtWriteBaseColorPin);
+    g.connect(rd, HE::kRvtReadBaseColorPin, out, HE::kMatOutputBaseColorPin);
+
+    HE::UUID matId;
+    {
+        HE::matSetRvtEnabled(true);
+        ContentManager cm(dir.string());
+        MaterialAsset mat; mat.type = HE::AssetType::Material; mat.name = "rvtmat"; mat.path = "rvtmat.hasset";
+        mat.nodeGraphJson = HE::materialGraphToJson(g);
+        const HE::MatShaderGen gen = HE::generateFragment(g);
+        mat.customShaderFragGlsl = gen.glsl;
+        mat.customShaderGBufGlsl = gen.glslGBuffer;
+        REQUIRE(gen.glsl.find("heRvtSample") != std::string::npos);
+        REQUIRE(cm.saveAsset(mat));
+        matId = mat.id;
+    }
+
+    auto packedHas = [&](bool rvtOn) {
+        HE::matSetRvtEnabled(rvtOn);
+        Hpak::PackSettings s; s.codec = Hpak::Codec::Store;
+        HpakWriter packer;
+        REQUIRE(packer.addDirectory(dir, s) == 1);
+        const auto pak = dir / (rvtOn ? "on.hpak" : "off.hpak");
+        REQUIRE(packer.write(pak.string()));
+        HpakReader reader;
+        REQUIRE(reader.open(pak.string()));
+        const std::vector<uint8_t> bytes = reader.readEntry(matId);
+        REQUIRE_FALSE(bytes.empty());
+        const char needle[] = "heRvtSample";
+        return std::search(bytes.begin(), bytes.end(), needle, needle + sizeof(needle) - 1) != bytes.end();
+    };
+    CHECK(packedHas(true));        // saved with RVT on, exported with it on: the lookup ships
+    CHECK_FALSE(packedHas(false)); // exported with it off: the inline graph ships, whatever the file holds
+
+    // And the other way round: a file saved while the switch was off still ships the RVT shader when the export has it on.
+    {
+        HE::matSetRvtEnabled(false);
+        ContentManager cm(dir.string());
+        const HE::MatShaderGen gen = HE::generateFragment(g);
+        REQUIRE(gen.glsl.find("heRvt") == std::string::npos);
+        MaterialAsset mat; mat.type = HE::AssetType::Material; mat.id = matId; mat.name = "rvtmat"; mat.path = "rvtmat.hasset";
+        mat.nodeGraphJson = HE::materialGraphToJson(g);
+        mat.customShaderFragGlsl = gen.glsl;
+        mat.customShaderGBufGlsl = gen.glslGBuffer;
+        REQUIRE(cm.saveAsset(mat));
+    }
+    CHECK(packedHas(true));
+    he_test::removeAllQuiet(dir);
 }

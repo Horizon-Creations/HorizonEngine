@@ -58,7 +58,7 @@ namespace EditorSettingsPanel
 		// Project / World / Online — one page per ProjectSettingsPanel::Page.
 		ProjectGeneral, ProjectApplication, ProjectWindow, ProjectFonts,
 		ProjectPermissions,
-		WorldShadows, WorldVirtualTexture, WorldSimulation, WorldCollisionLayers, WorldAudioBuses,
+		WorldShadows, WorldSimulation, WorldCollisionLayers, WorldAudioBuses,
 		OnlineAntiCheat, OnlineMultiplayer,
 	};
 

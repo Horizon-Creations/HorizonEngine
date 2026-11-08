@@ -1,6 +1,8 @@
 #include "MaterialGraph/RvtSplit.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 
@@ -106,6 +108,81 @@ std::set<int> matRvtDownstreamOfRead(const MaterialGraph& graph)
     for (const MatGraphNode& n : graph.nodes)
         if (n.type == T::RvtRead) reads.insert(n.id);
     return forward(graph, reads);
+}
+
+namespace
+{
+std::atomic<bool> g_rvtEnabled{ true };
+}
+
+void matSetRvtEnabled(bool enabled) { g_rvtEnabled.store(enabled, std::memory_order_relaxed); }
+
+bool matRvtEnabled() { return g_rvtEnabled.load(std::memory_order_relaxed); }
+
+MaterialGraph matInlineRvt(const MaterialGraph& graph)
+{
+    bool any = false;
+    for (const MatGraphNode& n : graph.nodes) any = any || n.type == T::RvtRead || n.type == T::RvtWrite;
+    if (!any) return graph;
+
+    MaterialGraph g = graph;
+    std::map<std::string, int> writeOf; // RVT name -> lowest Write id
+    for (const MatGraphNode& n : g.nodes)
+        if (n.type == T::RvtWrite)
+        {
+            auto it = writeOf.find(n.s);
+            if (it == writeOf.end() || n.id < it->second) writeOf[n.s] = n.id;
+        }
+    auto isRead = [&](int id) { const MatGraphNode* n = g.findNode(id); return n && n->type == T::RvtRead; };
+    int constOne = 0, constZero = 0;
+    auto constant = [&](bool one) {
+        int& id = one ? constOne : constZero;
+        if (!id) { id = g.addNode(T::ConstFloat); g.findNode(id)->p[0] = one ? 1.0f : 0.0f; }
+        return id;
+    };
+
+    // A Write input may itself be fed by another Read: a pass resolves one level, so repeat. A loop of Reads and Writes would never
+    // settle; the pass count bounds it and the leftover links die with their Read nodes below.
+    for (size_t pass = 0; pass <= g.nodes.size(); ++pass)
+    {
+        bool changed = false;
+        std::vector<MatGraphLink> next;
+        next.reserve(g.links.size());
+        const std::vector<MatGraphLink> before = g.links;
+        for (const MatGraphLink& l : before)
+        {
+            if (!isRead(l.srcNode)) { next.push_back(l); continue; }
+            changed = true;
+            const MatGraphNode* rd = g.findNode(l.srcNode);
+            const auto w = writeOf.find(rd->s);
+            if (l.srcPin == kRvtReadValidPin)
+            {
+                MatGraphLink n = l; n.srcNode = constant(w != writeOf.end()); n.srcPin = 0;
+                next.push_back(n);
+            }
+            else if (w != writeOf.end() && l.srcPin >= 0 && l.srcPin <= kRvtReadAOPin)
+            {
+                // Read pins 0..3 are Write pins 0..3 (Base Color, Normal, Roughness, AO).
+                for (const MatGraphLink& s : before)
+                    if (s.dstNode == w->second && s.dstPin == l.srcPin)
+                    {
+                        MatGraphLink n = l; n.srcNode = s.srcNode; n.srcPin = s.srcPin;
+                        next.push_back(n);
+                        break;
+                    }
+            }
+        }
+        g.links = std::move(next);
+        if (!changed) break;
+    }
+
+    g.links.erase(std::remove_if(g.links.begin(), g.links.end(), [&](const MatGraphLink& l) {
+        const MatGraphNode* a = g.findNode(l.srcNode); const MatGraphNode* b = g.findNode(l.dstNode);
+        return (a && (a->type == T::RvtRead || a->type == T::RvtWrite)) || (b && (b->type == T::RvtRead || b->type == T::RvtWrite));
+    }), g.links.end());
+    g.nodes.erase(std::remove_if(g.nodes.begin(), g.nodes.end(), [](const MatGraphNode& n) {
+        return n.type == T::RvtRead || n.type == T::RvtWrite; }), g.nodes.end());
+    return g;
 }
 
 MatRvtSplit matSplitRvt(const MaterialGraph& graph)

@@ -2589,9 +2589,30 @@ std::string emitDeclarations(const EmitCtx& c, bool uiDomain, bool domainStage, 
 }
 } // namespace
 
-MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoader& loader,
+MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoader& loaderIn,
                               const std::map<std::string, bool>* switchOverrides)
 {
+    // RVT off (the global switch, or a backend without virtual textures): the RVT Write is skipped and the RVT Read is replaced by
+    // the expressions that feed the Write, in this graph and in every function graph it calls. From here on the generator sees the
+    // graph a material without the pair would be, so the shader is the same one (matRvtEnabled in RvtSplit.h).
+    const bool rvtInline = !matRvtEnabled();
+    MaterialGraph inlined;
+    std::map<std::string, MaterialGraph> inlinedFns; // node-based: pointers stay valid while the loader hands them out
+    MatFunctionLoader inlineLoader;
+    if (rvtInline)
+    {
+        inlined = matInlineRvt(graphIn);
+        if (loaderIn)
+            inlineLoader = [&](const std::string& path) -> const MaterialGraph* {
+                const MaterialGraph* fn = loaderIn(path);
+                if (!fn) return nullptr;
+                auto it = inlinedFns.find(path);
+                if (it == inlinedFns.end()) it = inlinedFns.emplace(path, matInlineRvt(*fn)).first;
+                return &it->second;
+            };
+    }
+    const MaterialGraph&     graph  = rvtInline ? inlined : graphIn;
+    const MatFunctionLoader& loader = rvtInline ? inlineLoader : loaderIn;
     const MatGraphNode* out = firstOutputNode(graph);
 
     const std::string headerCommon =

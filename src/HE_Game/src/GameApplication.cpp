@@ -27,6 +27,7 @@
 #include <HorizonScene/SceneSerializer.h>
 #include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/RvtLandscape.h>
+#include <MaterialGraph/RvtSplit.h>   // matSetRvtEnabled
 #include <HorizonScene/RootMotion.h>
 #include <HorizonScene/SequenceSystem.h>
 #include <HorizonScene/AudioSystem.h>
@@ -3426,12 +3427,19 @@ void GameApplication::OnRender(float deltaTime)
 		HE_PROFILE_SCOPE_N("SceneSystemsTick");
 		SceneSystems::tickWorld(*m_world, contentManager(), r, camPos, gameDt,
 		                        m_physicsWorld.get(), gpuParticles);
-		// The virtual texture of the landscape, after the terrain update of the tick: the project's setting (the exported
-		// Config/ProjectSettings.json), or HE_RVT=1 / 0 over it.
-		if (r && HE::landscape::RvtLandscape::wanted(m_projectSettings.rvt))
+		// The virtual texture of the landscape, after the terrain update of the tick: the exported config.json's switch on a
+		// backend that can hold one, or HE_RVT=1 / 0 over it.
+		const bool rvtOn = HE::landscape::RvtLandscape::wanted(
+			GlobalState::getInstance().getCustomConfigBool("RuntimeVirtualTextures", false),
+			r && r->GetCapabilities().supportsRvt);
+		if (rvtOn != HE::matRvtEnabled())
+		{
+			HE::matSetRvtEnabled(rvtOn);
+			contentManager().regenerateRvtMaterials();
+		}
+		if (r && rvtOn)
 		{
 			if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *r);
-			m_rvtLandscape->setSettings(HE::landscape::RvtLandscape::settingsFromProject(m_projectSettings.rvt));
 			m_rvtLandscape->tick(*m_world, camPos);
 		}
 		else if (m_rvtLandscape)
