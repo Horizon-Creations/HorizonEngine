@@ -603,3 +603,100 @@ TEST_CASE("gpu choice: the rows save a known id for the next start and refuse an
     CHECK(callRow("hardware.setPreferredGpu", { Value::ofString("") })[0].b);   // back to the default
     CHECK(callRow("hardware.preferredGpu")[0].s.empty());
 }
+
+// ── More than one display (Thema 337 step 9) ─────────────────────────────────────────────────────
+
+namespace
+{
+HE::DisplayInfo monitor(int id, const char* name, int x, int y, int w, int h, float hz, float scale, bool primary)
+{
+    HE::DisplayInfo d;
+    d.id = id; d.name = name; d.x = x; d.y = y; d.width = w; d.height = h; d.refreshHz = hz; d.scale = scale; d.primary = primary;
+    return d;
+}
+// A laptop panel in the middle, a monitor to the left (negative coordinates) and one to the right.
+std::vector<HE::DisplayInfo> threeMonitors()
+{
+    return { monitor(1, "Laptop panel", 0, 0, 1920, 1080, 60.0f, 1.25f, true),
+             monitor(2, "DELL U2723QE", -2560, -200, 2560, 1440, 59.94f, 1.0f, false),
+             monitor(3, "LG 27GL850", 1920, 0, 2560, 1440, 144.0f, 1.0f, false) };
+}
+}
+
+TEST_CASE("displays: the window is on the display it overlaps most")
+{
+    const auto d = threeMonitors();
+    CHECK(HE::displayForRect(d, 100, 100, 800, 600) == 0);          // fully on the laptop panel
+    CHECK(HE::displayForRect(d, -2000, 0, 1280, 720) == 1);         // on the left monitor (negative x)
+    CHECK(HE::displayForRect(d, 2000, 100, 1280, 720) == 2);
+    CHECK(HE::displayForRect(d, 1400, 100, 800, 600) == 0);         // straddling: 520 px on the panel, 280 on the right
+    CHECK(HE::displayForRect(d, 1700, 100, 800, 600) == 2);         // 220 / 580
+    CHECK(HE::displayForRect(d, 0, 0, 1920, 1080) == 0);            // fullscreen exactly on a display
+    CHECK(HE::displayForRect(d, 9000, 9000, 400, 300) == 2);        // dragged off the desktop: the nearest one
+    CHECK(HE::displayForRect(d, -9000, 100, 400, 300) == 1);
+    CHECK(HE::displayForRect({}, 0, 0, 100, 100) == -1);
+}
+
+TEST_CASE("displays: the list follows the window and the current one is marked")
+{
+    RestoreProvider restore;
+    HE::setHardwareProvider(makeFake());
+    CHECK(HE::hardwareInfo().displays.empty());
+
+    HE::setDisplays(threeMonitors(), 0);
+    {
+        const HE::HardwareInfo h = HE::hardwareInfo();
+        REQUIRE(h.displays.size() == 3);
+        CHECK(h.displays[0].current);
+        CHECK_FALSE(h.displays[1].current);
+        CHECK(h.display.name == "Laptop panel");                    // `display` is the current one
+        CHECK(h.display.width == 1920);
+        CHECK(h.display.scale == doctest::Approx(1.25f));
+    }
+    HE::setDisplays(threeMonitors(), 2);                            // the window was dragged to the right monitor
+    {
+        const HE::HardwareInfo h = HE::hardwareInfo();
+        CHECK_FALSE(h.displays[0].current);
+        CHECK(h.displays[2].current);
+        CHECK(h.display.name == "LG 27GL850");
+        CHECK(h.display.refreshHz == doctest::Approx(144.0f));
+    }
+    // A monitor is unplugged: the list shrinks; a window that is nowhere (-1) keeps the last current display.
+    auto two = threeMonitors(); two.pop_back();
+    HE::setDisplays(two, 0);
+    CHECK(HE::hardwareInfo().displays.size() == 2);
+    CHECK(HE::hardwareInfo().display.name == "Laptop panel");
+    HE::setDisplays(two, -1);
+    CHECK(HE::hardwareInfo().displays.size() == 2);
+    CHECK(HE::hardwareInfo().display.name == "Laptop panel");
+    for (const auto& d : HE::hardwareInfo().displays) CHECK_FALSE(d.current);
+}
+
+TEST_CASE("displays: lines for the summary and the rows")
+{
+    RestoreProvider restore;
+    HE::setHardwareProvider(makeFake());
+    HE::setDisplays(threeMonitors(), 0);
+    CHECK(HE::describeDisplay(threeMonitors()[0]) == "Laptop panel (1920x1080 @ 60 Hz, scale 1.25, primary)");
+    CHECK(HE::describeDisplay(threeMonitors()[2]) == "LG 27GL850 (2560x1440 @ 144 Hz, scale 1.00)");
+    HE::DisplayInfo unnamed; unnamed.id = 7; unnamed.width = 800; unnamed.height = 600;
+    CHECK(HE::describeDisplay(unnamed).rfind("Display 7 (800x600", 0) == 0);
+
+    const std::string s = HE::hardwareSummary();
+    CHECK(s.find("Display: 1920x1080 @ 60 Hz (scale 1.25)") != std::string::npos);
+    CHECK(s.find("Other display: DELL U2723QE (2560x1440 @ 60 Hz, scale 1.00)") != std::string::npos);
+    CHECK(s.find("Other display: LG 27GL850 (2560x1440 @ 144 Hz, scale 1.00)") != std::string::npos);
+    CHECK(s.find("Other display: Laptop") == std::string::npos);    // the current one is not listed twice
+
+    using HorizonCode::Value;
+    CHECK(callRow("hardware.displayCount")[0].i == 3);
+    CHECK(callRow("hardware.currentDisplayIndex")[0].i == 0);
+    const auto names = callRow("hardware.displayNames")[0];
+    REQUIRE(names.items.size() == 3);
+    CHECK(names.items[1].s == "DELL U2723QE");
+    CHECK(callRow("hardware.displayAt", { Value::ofInt(0) })[0].s == "Laptop panel (1920x1080 @ 60 Hz, scale 1.25, primary, current)");
+    CHECK(callRow("hardware.displayAt", { Value::ofInt(3) })[0].s.empty());
+    HE::setDisplays(threeMonitors(), 1);
+    CHECK(callRow("hardware.currentDisplayIndex")[0].i == 1);
+    CHECK(callRow("hardware.displayName")[0].s == "DELL U2723QE");   // the single-display rows follow the window
+}

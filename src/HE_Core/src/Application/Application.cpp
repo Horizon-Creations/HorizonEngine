@@ -241,6 +241,63 @@ namespace HE
 		}
 	}
 
+	namespace
+	{
+		// Hardware info (Thema 337): every connected display and the one the window is on, handed to
+		// HE::setDisplays. Called when the renderer is up and again on every display event, so a window dragged to
+		// another monitor, a monitor plugged in or taken out, or a resolution / scale change shows in the hardware
+		// rows and the editor's Hardware page without a restart. The current display is the one the window overlaps
+		// most (HE::displayForRect), with SDL's own answer as the fallback while no rectangle is known yet.
+		void publishDisplays(SDL_Window* window)
+		{
+			static std::string lastCurrent;
+			std::vector<HE::DisplayInfo> list;
+			int n = 0;
+			SDL_DisplayID* ids = SDL_GetDisplays(&n);
+			const SDL_DisplayID primary = SDL_GetPrimaryDisplay();
+			for (int i = 0; ids && i < n; ++i)
+			{
+				HE::DisplayInfo di;
+				di.id = static_cast<int>(ids[i]);
+				if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(ids[i]))
+				{
+					di.width = mode->w; di.height = mode->h; di.refreshHz = mode->refresh_rate;
+				}
+				di.scale = SDL_GetDisplayContentScale(ids[i]);
+				if (const char* name = SDL_GetDisplayName(ids[i])) di.name = name;
+				SDL_Rect bounds{};
+				if (SDL_GetDisplayBounds(ids[i], &bounds)) { di.x = bounds.x; di.y = bounds.y; }
+				di.primary = ids[i] == primary;
+				list.push_back(std::move(di));
+			}
+			if (ids) SDL_free(ids);
+
+			int current = -1;
+			if (window)
+			{
+				int wx = 0, wy = 0, ww = 0, wh = 0;
+				SDL_GetWindowPosition(window, &wx, &wy);
+				SDL_GetWindowSize(window, &ww, &wh);
+				// A display's bounds are in the same coordinates as the window, so the overlap is meaningful.
+				if (ww > 0 && wh > 0) current = HE::displayForRect(list, wx, wy, ww, wh);
+				if (current < 0)
+				{
+					const SDL_DisplayID did = SDL_GetDisplayForWindow(window);
+					for (size_t i = 0; i < list.size(); ++i)
+						if (static_cast<SDL_DisplayID>(list[i].id) == did) current = static_cast<int>(i);
+				}
+			}
+			HE::setDisplays(list, current);
+			const std::string now = current >= 0 ? HE::describeDisplay(list[static_cast<size_t>(current)]) : std::string{};
+			if (now != lastCurrent)
+			{
+				if (!lastCurrent.empty() && !now.empty())
+					HE_LOG_INFO(Core, "Hardware    : window is now on display %s (%d display(s) connected)", now.c_str(), static_cast<int>(list.size()));
+				lastCurrent = now;
+			}
+		}
+	}
+
 	int Application::Run(int argc, char** argv)
 	{
 		if (argc > 1 && argv)
@@ -325,6 +382,21 @@ namespace HE
 				return;
 			}
 #endif
+			// Hardware info: a display came, went or changed, or the window changed display.
+			switch (e.type)
+			{
+			case SDL_EVENT_DISPLAY_ADDED:
+			case SDL_EVENT_DISPLAY_REMOVED:
+			case SDL_EVENT_DISPLAY_MOVED:
+			case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
+			case SDL_EVENT_DISPLAY_DESKTOP_MODE_CHANGED:
+			case SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED:
+			case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
+			case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
+				if (m_window) publishDisplays(m_window->GetNativeWindow());
+				break;
+			default: break;
+			}
 			// Forward window-close events for secondary windows
 			if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
 			{
@@ -397,20 +469,7 @@ namespace HE
 				// Hardware info (Thema 337): the renderer knows which GPU it runs on, the window system
 				// which display the window is on. Scripts and the editor's Hardware page read both.
 				HE::setGpuInfo(m_renderer->GetAdapterInfo());
-				if (SDL_Window* hw = m_window->GetNativeWindow())
-				{
-					HE::DisplayInfo di;
-					if (const SDL_DisplayID id = SDL_GetDisplayForWindow(hw))
-					{
-						if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(id))
-						{
-							di.width = mode->w; di.height = mode->h; di.refreshHz = mode->refresh_rate;
-						}
-						di.scale = SDL_GetDisplayContentScale(id);
-						if (const char* n = SDL_GetDisplayName(id)) di.name = n;
-					}
-					HE::setDisplayInfo(di);
-				}
+				publishDisplays(m_window->GetNativeWindow());
 				{   // One log line per group, so a bug report's log names the machine completely.
 					const std::string summary = HE::hardwareSummary();
 					size_t from = 0;

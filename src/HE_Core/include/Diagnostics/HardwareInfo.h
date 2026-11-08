@@ -57,6 +57,11 @@ struct DisplayInfo
     float       refreshHz = 0.0f;
     float       scale   = 1.0f;  // OS content scale (1.25 = 125 %)
     std::string name;            // the monitor's name as the OS gives it
+    int         id      = 0;     // the window system's id for it (SDL display id); 0 = unknown
+    int         x       = 0;     // top-left of the display on the desktop, in the window system's coordinates
+    int         y       = 0;
+    bool        primary = false; // the OS's main display
+    bool        current = false; // the one the window is on (set in HardwareInfo::displays)
     bool        valid() const { return width > 0 && height > 0; }
 };
 
@@ -81,6 +86,10 @@ struct HardwareInfo
     // Every adapter the machine has, the active one marked (GpuInfo::active). Windows lists them through DXGI
     // before any renderer exists; elsewhere the running renderer reports its own list (Vulkan, Metal).
     std::vector<GpuInfo> gpus;
+    // Every display that is connected right now, the one the window is on marked (DisplayInfo::current). Follows
+    // the window and a monitor being plugged in or taken out: the application hands over a fresh list on every
+    // display event. `display` above is the current one.
+    std::vector<DisplayInfo> displays;
 };
 
 // The machine's detection, run once on first use (thread-safe), as a copy: a reader never sees a
@@ -145,6 +154,17 @@ struct GpuSelection
 HE_API void         setGpuSelection(const GpuSelection& selection);
 HE_API GpuSelection gpuSelection();
 HE_API void setDisplayInfo(const DisplayInfo& display);
+// The window system's list of displays and which of them the window is on (an index into `displays`, -1 = none /
+// unknown). Replaces the list, sets `display` to the current one. Called again whenever a display or the window's
+// display changes.
+HE_API void setDisplays(const std::vector<DisplayInfo>& displays, int currentIndex);
+// Which display a window at this rectangle is on: the one it overlaps most; a window off every display goes to the
+// nearest one; -1 for an empty list. Coordinates are the window system's, like DisplayInfo::x/y/width/height.
+HE_API int displayForRect(const std::vector<DisplayInfo>& displays, int x, int y, int width, int height);
+// One adapter / display as a text line: "NVIDIA GeForce RTX 4070 (12010 MB, driver 621.01)",
+// "DELL U2723QE (3840x2160 @ 60 Hz, scale 1.50, primary, current)". Rows and settings pages share them.
+HE_API std::string describeGpu(const GpuInfo& gpu);
+HE_API std::string describeDisplay(const DisplayInfo& display);
 
 // The main facts as text, one line per group, for a settings page or a bug report:
 //   CPU: AMD Ryzen 9 9950X 16-Core Processor (16 cores, 32 threads)

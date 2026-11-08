@@ -424,6 +424,7 @@ struct State
     GpuInfo                           gpu;                 // handed over by the renderer
     std::vector<GpuInfo>              rendererGpus;        // the renderer's own list, used where the platform found none
     DisplayInfo                       display;             // handed over by the window system
+    std::vector<DisplayInfo>          displays;            // every display, from the window system
 
     HardwareProvider& prov()
     {
@@ -432,7 +433,8 @@ struct State
     }
     void merge()
     {
-        info.display = display;
+        info.display  = display;
+        info.displays = displays;
         info.gpu     = gpu;
         // The list: the platform's own when it found any, else what the renderer reported.
         const std::vector<GpuInfo>& listed = detectedGpus.empty() ? rendererGpus : detectedGpus;
@@ -557,6 +559,77 @@ void setDisplayInfo(const DisplayInfo& display)
     s.merge();
 }
 
+void setDisplays(const std::vector<DisplayInfo>& displays, int currentIndex)
+{
+    State& s = state();
+    std::lock_guard<std::mutex> lock(s.mutex);
+    s.displays = displays;
+    for (size_t i = 0; i < s.displays.size(); ++i)
+        s.displays[i].current = static_cast<int>(i) == currentIndex;
+    if (currentIndex >= 0 && currentIndex < static_cast<int>(s.displays.size()))
+        s.display = s.displays[static_cast<size_t>(currentIndex)];
+    s.merge();
+}
+
+int displayForRect(const std::vector<DisplayInfo>& displays, int x, int y, int width, int height)
+{
+    if (displays.empty()) return -1;
+    int best = -1;
+    long long bestArea = 0;
+    for (size_t i = 0; i < displays.size(); ++i)
+    {
+        const DisplayInfo& d = displays[i];
+        const long long ix = std::max(0, std::min(x + width,  d.x + d.width)  - std::max(x, d.x));
+        const long long iy = std::max(0, std::min(y + height, d.y + d.height) - std::max(y, d.y));
+        const long long area = ix * iy;
+        if (area > bestArea) { bestArea = area; best = static_cast<int>(i); }
+    }
+    if (best >= 0) return best;
+    // No overlap with any display (a window dragged off the desktop): the nearest centre.
+    const double cx = x + width * 0.5, cy = y + height * 0.5;
+    double bestDist = 0.0;
+    for (size_t i = 0; i < displays.size(); ++i)
+    {
+        const DisplayInfo& d = displays[i];
+        const double dx = cx - (d.x + d.width * 0.5), dy = cy - (d.y + d.height * 0.5);
+        const double dist = dx * dx + dy * dy;
+        if (best < 0 || dist < bestDist) { bestDist = dist; best = static_cast<int>(i); }
+    }
+    return best;
+}
+
+std::string describeGpu(const GpuInfo& g)
+{
+    std::string out = g.name + " (";
+    bool first = true;
+    auto part = [&](const std::string& p) { if (p.empty()) return; if (!first) out += ", "; out += p; first = false; };
+    if (g.vramMB) part(std::to_string(g.vramMB) + " MB");
+    if (!g.driver.empty()) part("driver " + g.driver);
+    if (g.software) part("software");
+    return out + ")";
+}
+
+std::string describeDisplay(const DisplayInfo& d)
+{
+    std::string out = d.name.empty() ? (d.id ? "Display " + std::to_string(d.id) : std::string("Display")) : d.name;
+    out += " (";
+    bool first = true;
+    auto part = [&](const std::string& p) { if (p.empty()) return; if (!first) out += ", "; out += p; first = false; };
+    char buf[64];
+    if (d.valid())
+    {
+        std::snprintf(buf, sizeof buf, "%dx%d", d.width, d.height);
+        std::string res = buf;
+        if (d.refreshHz > 0.0f) { std::snprintf(buf, sizeof buf, " @ %.0f Hz", d.refreshHz); res += buf; }
+        part(res);
+        std::snprintf(buf, sizeof buf, "scale %.2f", d.scale);
+        part(buf);
+    }
+    if (d.primary) part("primary");
+    if (d.current) part("current");
+    return out + ")";
+}
+
 void setHardwareProvider(std::shared_ptr<HardwareProvider> provider)
 {
     State& s = state();
@@ -568,6 +641,7 @@ void setHardwareProvider(std::shared_ptr<HardwareProvider> provider)
     s.detectedGpus.clear();
     s.rendererGpus.clear();
     s.display  = DisplayInfo{};
+    s.displays.clear();
 }
 
 void setGpuList(const std::vector<GpuInfo>& gpus)
@@ -814,6 +888,13 @@ std::string hardwareSummary()
         if (h.display.refreshHz > 0.0f) { std::snprintf(buf, sizeof(buf), " @ %.0f Hz", h.display.refreshHz); out += buf; }
         std::snprintf(buf, sizeof(buf), " (scale %.2f)", h.display.scale);
         out += buf;
+    }
+
+    for (const DisplayInfo& d : h.displays)
+    {
+        if (d.current) continue;
+        DisplayInfo shown = d;
+        out += "\nOther display: " + describeDisplay(shown);
     }
 
     out += "\nOS: " + (h.osVersion.empty() ? std::string("unknown") : h.osVersion);

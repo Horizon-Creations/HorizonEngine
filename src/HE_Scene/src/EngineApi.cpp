@@ -4910,16 +4910,26 @@ bool        hasBattery()    { return HE::hardwareInfo().hasBattery; }
 bool        onBattery()     { return HE::onBattery(); }
 std::string summary()       { return HE::hardwareSummary(); }
 namespace {
-std::string gpuLine(const HE::GpuInfo& g)
-{
-    std::string out = g.name + " (";
-    bool first = true;
-    auto part = [&](const std::string& p) { if (p.empty()) return; if (!first) out += ", "; out += p; first = false; };
-    if (g.vramMB) part(std::to_string(g.vramMB) + " MB");
-    if (!g.driver.empty()) part("driver " + g.driver);
-    if (g.software) part("software");
-    return out + ")";
+std::string gpuLine(const HE::GpuInfo& g) { return HE::describeGpu(g); }
 }
+int displayCount()   { return static_cast<int>(HE::hardwareInfo().displays.size()); }
+std::vector<std::string> displayNames()
+{
+    std::vector<std::string> o;
+    for (auto& d : HE::hardwareInfo().displays) o.push_back(d.name.empty() ? "Display " + std::to_string(d.id) : d.name);
+    return o;
+}
+std::string displayAt(int index)
+{
+    const auto h = HE::hardwareInfo();
+    return index >= 0 && index < static_cast<int>(h.displays.size()) ? HE::describeDisplay(h.displays[static_cast<size_t>(index)]) : std::string{};
+}
+int currentDisplayIndex()
+{
+    const auto h = HE::hardwareInfo();
+    for (size_t i = 0; i < h.displays.size(); ++i)
+        if (h.displays[i].current) return static_cast<int>(i);
+    return -1;
 }
 int                      gpuCount()   { return static_cast<int>(HE::hardwareInfo().gpus.size()); }
 std::vector<std::string> gpuNames()   { std::vector<std::string> o; for (auto& g : HE::hardwareInfo().gpus) o.push_back(g.name); return o; }
@@ -7367,6 +7377,15 @@ const std::vector<ApiFn>& registry()
                 [](Ctx&, const VV&){ return VV{ Value::ofBool(hardware::onBattery()) }; } });
             num("hardware.gpuCount", "count", hardware::gpuCount, "HE::api::hardware::gpuCount");
             str("hardware.activeGpuId", "id", hardware::activeGpuId, "HE::api::hardware::activeGpuId");
+            num("hardware.displayCount", "count", hardware::displayCount, "HE::api::hardware::displayCount");
+            num("hardware.currentDisplayIndex", "index", hardware::currentDisplayIndex, "HE::api::hardware::currentDisplayIndex");
+            t.push_back({ "hardware.displayNames", "Hardware", false, {}, {{"names", P::String, /*isArray=*/true}}, "HE::api::hardware::displayNames",
+                [](Ctx&, const VV&){
+                    Value arr; arr.isArray = true; arr.type = P::String;
+                    for (auto& n : hardware::displayNames()) arr.items.push_back(Value::ofString(std::move(n)));
+                    return VV{ std::move(arr) }; } });
+            t.push_back({ "hardware.displayAt", "Hardware", false, {{"index", P::Int}}, {{"text", P::String}}, "HE::api::hardware::displayAt",
+                [](Ctx&, const VV& a){ return VV{ Value::ofString(hardware::displayAt(aI(a, 0))) }; } });
             str("hardware.preferredGpu", "id", hardware::preferredGpu, "HE::api::hardware::preferredGpu");
             str("hardware.gpuChoiceNote", "text", hardware::gpuChoiceNote, "HE::api::hardware::gpuChoiceNote");
             t.push_back({ "hardware.setPreferredGpu", "Hardware", true, {{"id", P::String}}, {{"ok", P::Bool}}, "HE::api::hardware::setPreferredGpu",
@@ -8672,6 +8691,8 @@ const std::vector<ApiFn>& registry()
             { "hardware.gpuCount", "Get GPU Count" }, { "hardware.activeGpuId", "Get Active GPU Id" },
             { "hardware.preferredGpu", "Get Preferred GPU" }, { "hardware.setPreferredGpu", "Set Preferred GPU" },
             { "hardware.gpuChoiceNote", "Get GPU Choice Note" },
+            { "hardware.displayCount", "Get Display Count" }, { "hardware.currentDisplayIndex", "Get Current Display Index" },
+            { "hardware.displayNames", "Display Names" }, { "hardware.displayAt", "Get Display At" },
             { "hardware.gpuNames", "GPU Names" }, { "hardware.gpuIds", "GPU Ids" }, { "hardware.gpuAt", "Get GPU At" },
             { "hardware.recommendedPreset", "Get Recommended Quality Preset" },
             { "hardware.recommendedPresetReason", "Get Recommended Preset Reason" },

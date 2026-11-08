@@ -2572,6 +2572,14 @@ namespace hardware {
     std::string               preferredGpu();
     bool                      setPreferredGpu(const std::string& id);
     std::string               gpuChoiceNote();
+    // The displays that are connected right now. displayCount() and displayNames() list them, displayAt(i)
+    // describes one ("DELL U2723QE (3840x2160 @ 60 Hz, scale 1.50, primary, current)", "" past the end),
+    // currentDisplayIndex() is the one the window is on (-1 when unknown) and follows the window as it is dragged
+    // to another monitor. displayWidth/Height/Name above always describe the current one.
+    int                       displayCount();
+    std::vector<std::string>  displayNames();
+    std::string               displayAt(int index);
+    int                       currentDisplayIndex();
     // By name, for a settings screen that lists them all: fields() are the HardwareProperty names in
     // order (CpuName ... OnBattery), value(name) is the text of one ("" for none; the name is
     // case-insensitive and an unknown name reads "" too).

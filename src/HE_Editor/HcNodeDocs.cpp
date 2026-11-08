@@ -1165,6 +1165,16 @@ namespace
 	{ "hardware.activeGpuId",
 	  "The id of the graphics adapter the game renders on, in the form GPU Ids lists (vendor:device:number, for example "
 	  "10de:2786:0). Empty until a renderer is running." },
+	{ "hardware.displayCount",
+	  "How many displays are connected right now. Follows monitors being plugged in or taken out while the game runs." },
+	{ "hardware.currentDisplayIndex",
+	  "Which display the window is on, as a position in Display Names (0 is the first); -1 when it is not known. "
+	  "Changes when the window is dragged to another monitor." },
+	{ "hardware.displayNames",
+	  "The names of every connected display, as the system gives them. Fills a display drop-down." },
+	{ "hardware.displayAt",
+	  "One display as a text line, for example \"DELL U2723QE (3840x2160 @ 60 Hz, scale 1.50, primary, current)\", by its "
+	  "position in Display Names (0 is the first). Empty past the end." },
 	{ "hardware.preferredGpu",
 	  "The graphics card the game will start on next time, as an id from GPU Ids; empty means the system's default card. "
 	  "This is the saved choice, not necessarily the card running now (that is Get Active GPU Id)." },
