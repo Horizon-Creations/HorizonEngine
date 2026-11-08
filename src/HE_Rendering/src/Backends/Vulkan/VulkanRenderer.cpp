@@ -132,7 +132,8 @@ namespace
         glm::vec4  cascadeSplits;
         glm::vec4  cameraFwd;
         glm::vec4  shadowBias;
-        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug)
+        glm::ivec4 shadowEnabled; // x = 0/1, y = 1 → tint fragments by cascade (debug),
+                                  // z = 1 → Unlit/Wireframe view (heLitP's twin)
         // sky/fog additions — must match scene.frag Frame block exactly
         glm::vec4  sunDir;    // xyz = sun direction, w = 0
         glm::vec4  fog;       // x = fogDensity, y = fogHeightFalloff, zw = 0
@@ -8943,7 +8944,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         f.cameraFwd     = glm::vec4(m_cascadeCamFwd, 1.0f / float(std::max(m_shadowSize, 1u)));
         f.shadowBias    = glm::vec4(m_shadowSettings.slopeBias, m_shadowSettings.minBias, 0.0f, 0.0f);
         f.shadowEnabled = glm::ivec4(m_shadowRenderedThisFrame ? 1 : 0,
-                                     m_debugShadowCascades ? 1 : 0, 0, 0);
+                                     m_debugShadowCascades ? 1 : 0,
+                                     UnlitViewActive() ? 1 : 0, 0);
         static_assert(sizeof(f.localShadowVP) / sizeof(f.localShadowVP[0]) == kLocalShadowLayers,
                       "Frame UBO local atlas array must match kLocalShadowLayers");
         static_assert(kLocalShadowLayers == ShadowData::kMaxLocalShadowLayers,
@@ -9113,6 +9115,10 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
         lit.camPos[0] = m_renderWorld.camera.position.x;
         lit.camPos[1] = m_renderWorld.camera.position.y;
         lit.camPos[2] = m_renderWorld.camera.position.z;
+        // Viewport view mode (v3.2): Unlit/Wireframe hand heLitP's base colour
+        // back untouched — graph materials, the deferred resolve (rl copies
+        // frameMatLight) and the forward replay all read this. Mirrors GL/Metal/D3D.
+        lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
         if (m_matLightBuf[m_currentFrame].mapped)
             std::memcpy(m_matLightBuf[m_currentFrame].mapped, &lit, sizeof(lit));
         frameMatLight = lit;
