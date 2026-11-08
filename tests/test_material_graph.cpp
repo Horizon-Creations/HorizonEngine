@@ -5822,11 +5822,13 @@ HRESULT makeMaterialPso(ID3D12Device* dev, ID3D12RootSignature* rs, ID3DBlob* vs
 	return dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&out));
 }
 
-// The RVT node's table and pool (t40..t43, Thema 333) are the last range of the D3D12 material root signature. The signature
-// WITHOUT that range (the one before the D3D12 port) is the negative control: it must leave exactly these four uncovered.
+// The RVT node's table/pool (t40..t43, Thema 333) and cold pages (t44..t46, Thema 333 step 9, RvtLookup.h) are the last
+// range of the D3D12 material root signature. The signature WITHOUT that range (the one before the D3D12 port) is the
+// negative control: it must leave exactly these seven uncovered.
 bool onlyRvtBindings(std::string miss)
 {
-	for (const char* n : { "heRvtTable(2:40)", "heRvtAlbedo(2:41)", "heRvtNormal(2:42)", "heRvtSurface(2:43)" })
+	for (const char* n : { "heRvtTable(2:40)", "heRvtAlbedo(2:41)", "heRvtNormal(2:42)", "heRvtSurface(2:43)",
+	                        "heRvtAlbedoC(2:44)", "heRvtNormalC(2:45)", "heRvtSurfaceC(2:46)" })
 		for (size_t at; (at = miss.find(n)) != std::string::npos;) miss.erase(at, std::strlen(n));
 	return miss.find_first_not_of(", ") == std::string::npos;
 }
