@@ -78,6 +78,22 @@ Baked bake(const StaticMeshAsset& mesh, const std::vector<SectionSource>& sectio
 // the right half; v = 1 at the top. One section, no material of its own.
 StaticMeshAsset makeCard(float halfWidth, float y0, float y1, bool doubleFaced = true);
 
+// One axis-aligned piece of a card plane, in texels of its atlas half ([x0,x1) by [y0,y1), y up,
+// the atlas' own row order). The union of a plane's pieces covers every texel that can pass the
+// material's cutoff, so cutting the card to them changes no pixel, only how many fragments the
+// card launches: a plant is 1 to 22 % opaque inside its rectangle, and a discarded fragment costs
+// the GPU almost what a lit one does (thema 331 step 14: all fragments discarded = same Scene time).
+struct CardRect { int x0 = 0, x1 = 0, y0 = 0, y1 = 0; };
+
+// The pieces of plane `view` (0 = the left atlas half, plane A; 1 = plane B), a handful (four
+// bands of up to two runs each, equal neighbours joined). One piece covering the whole view
+// when the atlas is unusable or the view has nothing to cover.
+std::vector<CardRect> cardRects(const Baked& baked, int view);
+
+// The same card as above but each plane trimmed to cardRects: a few quads per plane instead of
+// one, the same positions and UVs for every texel they cover.
+StaticMeshAsset makeCard(const Baked& baked, bool doubleFaced = true);
+
 struct Result
 {
     std::string error;

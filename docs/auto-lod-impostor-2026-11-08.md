@@ -17,7 +17,7 @@ Stand 08.11.2026, Metal und OpenGL auf dem M5. Baut auf `docs/auto-lod-chains-20
   `<stem>_Impostor.hasset` (Textur, sRGB), `<stem>_ImpostorMat.hasset` (Graph-Material, Masked, Cutoff 0,2, eine Textur),
   `<stem>_ImpostorCard.hasset` (Karte). Material ueber `Importer::writeCutoutMaterial` (`PbrMaterialImport.cpp`), also derselbe
   Graph wie ein glTF-Import mit alphaMode MASK; `importMaterial` ruft jetzt dieselbe `writeMaterial`.
-* **Karte** (`Impostor::makeCard`): zwei gekreuzte Quads, beide Seiten je Ebene (16 Vertices, 8 Dreiecke), Drehpunkt unten, wie
+* **Karte** (`Impostor::makeCard`; **seit Schritt 11 pro Ansicht auf die Alpha-Silhouette gestutzt, ca. 4 Vierecke je Ebene statt einem, siehe `docs/auto-lod-impostor-overdraw-2026-11-08.md`**; die Beschreibung hier gilt fuer die Rechteck-Form): zwei gekreuzte Quads, beide Seiten je Ebene (16 Vertices, 8 Dreiecke), Drehpunkt unten, wie
   `CrossCard`, aber **auf die Pflanze skaliert** (Halbbreite = groesster Abstand von der Achse, Hoehe = Pflanzenhoehe, je 1 %
   Rand), Ebene A mappt die linke, Ebene B die rechte Atlashaelfte. Normalen zum Himmel geneigt (0,45 seitlich, 0,89 hoch): die
   Karte wird wie ein Busch beleuchtet, nicht wie eine Wand.

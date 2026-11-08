@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 
 #include <glm/glm.hpp>
@@ -22,6 +21,12 @@ constexpr const char* kExt = ".hasset";
 // the whole grass layer would vanish from the card (and further so in the mips the GPU
 // builds). Coverage kept, edges a little fat, which a plant seen from far away wants.
 constexpr float kAlphaCutoff = 0.2f;
+// The trimmed card (cardRects): a plant view is cut into horizontal bands, each band into at most
+// a couple of runs of texels that can pass the cutoff. Four bands and two runs put ~40 % of the
+// rectangle under the card instead of all of it (the opaque share is 1 to 22 %) at ~4 quads a
+// plane. More bands (8 x 3: 34 %) shave little more area but triple the triangles, which the
+// shadow and SSAO passes draw again and pay for (docs/auto-lod-impostor-overdraw-2026-11-08.md).
+constexpr int kCardBands = 4, kCardRunsPerBand = 2, kCardGapDivisor = 4;
 
 // ── sRGB, only for tinting: a tint is a LINEAR multiplier and the texture holds
 // encoded bytes, so a tint other than white goes through linear and back.
@@ -352,42 +357,146 @@ Baked bake(const StaticMeshAsset& mesh, const std::vector<SectionSource>& source
     return out;
 }
 
-StaticMeshAsset makeCard(float halfWidth, float y0, float y1, bool doubleFaced)
+std::vector<CardRect> cardRects(const Baked& baked, int view)
+{
+    const int size = baked.height;
+    const std::vector<CardRect> whole = { { 0, size, 0, size } };
+    if (!baked.ok() || size <= 0 || baked.width != 2 * size || view < 0 || view > 1) return whole;
+
+    const int pad = std::max(2, size / 64);          // filtering and the low mips smear the edge by a few texels
+    const int bands = kCardBands;
+    // Texels that can ever pass the material's cutoff: a bilinear sample is a convex mix of its
+    // four texels, so it clears the cutoff only next to a texel that is itself above half of it
+    // (the mips average over blocks; the pad above covers their reach).
+    const int threshold = static_cast<int>(kAlphaCutoff * 255.0f * 0.5f);
+    auto alphaAt = [&](int x, int row) {
+        return baked.rgba[(static_cast<size_t>(row) * baked.width + static_cast<size_t>(view) * size + x) * 4 + 3];
+    };
+
+    std::vector<CardRect> rects;
+    std::vector<size_t>   previous;                  // indices in `rects` of the band below
+    for (int b = 0; b < bands; ++b)
+    {
+        const int r0 = b * size / bands, r1 = (b + 1) * size / bands;
+        std::vector<uint8_t> hit(static_cast<size_t>(size), 0);
+        for (int row = std::max(0, r0 - pad); row < std::min(size, r1 + pad); ++row)
+            for (int x = 0; x < size; ++x)
+                if (alphaAt(x, row) >= threshold) hit[static_cast<size_t>(x)] = 1;
+        // Grow every hit by the pad sideways, then read the runs.
+        std::vector<uint8_t> grown(static_cast<size_t>(size), 0);
+        for (int x = 0; x < size; ++x)
+            if (hit[static_cast<size_t>(x)])
+                for (int k = std::max(0, x - pad); k < std::min(size, x + pad + 1); ++k) grown[static_cast<size_t>(k)] = 1;
+        std::vector<std::pair<int, int>> runs;       // [begin, end) in texels
+        for (int x = 0; x < size;)
+        {
+            if (!grown[static_cast<size_t>(x)]) { ++x; continue; }
+            const int begin = x;
+            while (x < size && grown[static_cast<size_t>(x)]) ++x;
+            // A gap narrower than an eighth of the view is cheaper to cover than to cut around.
+            if (!runs.empty() && begin - runs.back().second < size / kCardGapDivisor) runs.back().second = x;
+            else runs.emplace_back(begin, x);
+        }
+        // At most kCardRunsPerBand pieces a band: join across the narrowest gap until it fits.
+        while (static_cast<int>(runs.size()) > kCardRunsPerBand)
+        {
+            size_t at = 0;
+            for (size_t i = 1; i + 1 < runs.size(); ++i)
+                if (runs[i + 1].first - runs[i].second < runs[at + 1].first - runs[at].second) at = i;
+            runs[at].second = runs[at + 1].second;
+            runs.erase(runs.begin() + static_cast<std::ptrdiff_t>(at) + 1);
+        }
+        std::vector<size_t> now;
+        for (const auto& run : runs)
+        {
+            // The same run as the band below: one taller rectangle instead of two.
+            bool merged = false;
+            for (size_t p : previous)
+                if (rects[p].x0 == run.first && rects[p].x1 == run.second && rects[p].y1 == r0)
+                {
+                    rects[p].y1 = r1;
+                    now.push_back(p);
+                    merged = true;
+                    break;
+                }
+            if (!merged)
+            {
+                rects.push_back({ run.first, run.second, r0, r1 });
+                now.push_back(rects.size() - 1);
+            }
+        }
+        previous = std::move(now);
+    }
+    return rects.empty() ? whole : rects;
+}
+
+namespace
+{
+// The card's mesh: per plane one quad per rectangle (texels of that plane's view, `size` to a
+// side), each with both faces unless `doubleFaced` is off. Positions and UVs both follow the
+// texel: along the plane's axis x/size spans [-halfWidth, halfWidth], up it spans [y0, y1].
+StaticMeshAsset buildCard(float halfWidth, float y0, float y1, const std::vector<CardRect> (&rects)[2], int size,
+                          bool doubleFaced)
 {
     StaticMeshAsset m;
     m.type = HE::AssetType::StaticMesh;
     constexpr float kSide = 0.45f, kUp = 0.893f;   // unit length: 0.45^2 + 0.893^2 = 1.0
     struct Plane { float ax, az, u0, u1; };               // the quad's horizontal axis, its atlas half
     const Plane planes[2] = { { 1.0f, 0.0f, 0.0f, 0.5f }, { 0.0f, 1.0f, 0.5f, 1.0f } };
-    for (const Plane& p : planes)
-        for (int side = doubleFaced ? 0 : 1; side < 2; ++side)
+    for (int pi = 0; pi < 2; ++pi)
+    {
+        const Plane& p = planes[pi];
+        for (const CardRect& r : rects[pi])
         {
-            const float s  = side == 0 ? 1.0f : -1.0f;
-            // The face's normal tilted towards the sky: a card is lit as a bush canopy, not as a
-            // wall, so its two sides do not go dark or glare with the sun's side (what a
-            // foliage impostor does everywhere). The winding below still follows the face.
-            const float nx = -p.az * s * kSide, nz = p.ax * s * kSide;
-            const uint32_t base = static_cast<uint32_t>(m.vertices.size() / 3);
-            const float px[4] = { -halfWidth * p.ax,  halfWidth * p.ax,  halfWidth * p.ax, -halfWidth * p.ax };
-            const float py[4] = { y0, y0, y1, y1 };
-            const float pz[4] = { -halfWidth * p.az,  halfWidth * p.az,  halfWidth * p.az, -halfWidth * p.az };
-            const float pu[4] = { p.u0, p.u1, p.u1, p.u0 };
-            const float pv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
-            for (int k = 0; k < 4; ++k)
+            const float fx0 = static_cast<float>(r.x0) / static_cast<float>(size);
+            const float fx1 = static_cast<float>(r.x1) / static_cast<float>(size);
+            const float fy0 = static_cast<float>(r.y0) / static_cast<float>(size);
+            const float fy1 = static_cast<float>(r.y1) / static_cast<float>(size);
+            const float a0 = (fx0 * 2.0f - 1.0f) * halfWidth, a1 = (fx1 * 2.0f - 1.0f) * halfWidth;
+            for (int side = doubleFaced ? 0 : 1; side < 2; ++side)
             {
-                m.vertices.insert(m.vertices.end(), { px[k], py[k], pz[k] });
-                m.normals.insert(m.normals.end(), { nx, kUp, nz });
-                m.uvs.insert(m.uvs.end(), { pu[k], pv[k] });
+                const float s  = side == 0 ? 1.0f : -1.0f;
+                // The face's normal tilted towards the sky: a card is lit as a bush canopy, not as a
+                // wall, so its two sides do not go dark or glare with the sun's side (what a
+                // foliage impostor does everywhere). The winding below still follows the face.
+                const float nx = -p.az * s * kSide, nz = p.ax * s * kSide;
+                const uint32_t base = static_cast<uint32_t>(m.vertices.size() / 3);
+                const float pa[4] = { a0, a1, a1, a0 };
+                const float py[4] = { y0 + (y1 - y0) * fy0, y0 + (y1 - y0) * fy0, y0 + (y1 - y0) * fy1, y0 + (y1 - y0) * fy1 };
+                const float pu[4] = { p.u0 + (p.u1 - p.u0) * fx0, p.u0 + (p.u1 - p.u0) * fx1,
+                                      p.u0 + (p.u1 - p.u0) * fx1, p.u0 + (p.u1 - p.u0) * fx0 };
+                const float pv[4] = { fy0, fy0, fy1, fy1 };
+                for (int k = 0; k < 4; ++k)
+                {
+                    m.vertices.insert(m.vertices.end(), { pa[k] * p.ax, py[k], pa[k] * p.az });
+                    m.normals.insert(m.normals.end(), { nx, kUp, nz });
+                    m.uvs.insert(m.uvs.end(), { pu[k], pv[k] });
+                }
+                // a, b, c, d counter-clockwise seen along the normal (side 0), reversed for side 1.
+                if (side == 0) m.indices.insert(m.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+                else           m.indices.insert(m.indices.end(), { base, base + 2, base + 1, base, base + 3, base + 2 });
             }
-            // a, b, c, d counter-clockwise seen along the normal (side 0), reversed for side 1.
-            if (side == 0) m.indices.insert(m.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
-            else           m.indices.insert(m.indices.end(), { base, base + 2, base + 1, base, base + 3, base + 2 });
         }
+    }
     MeshSection all;
     all.indexOffset = 0;
     all.indexCount  = static_cast<uint32_t>(m.indices.size());
     m.sections.push_back(all);
     return m;
+}
+} // namespace
+
+StaticMeshAsset makeCard(float halfWidth, float y0, float y1, bool doubleFaced)
+{
+    const std::vector<CardRect> whole[2] = { { { 0, 1, 0, 1 } }, { { 0, 1, 0, 1 } } };
+    return buildCard(halfWidth, y0, y1, whole, 1, doubleFaced);
+}
+
+StaticMeshAsset makeCard(const Baked& baked, bool doubleFaced)
+{
+    if (!baked.ok()) return makeCard(baked.halfWidth, baked.y0, baked.y1, doubleFaced);
+    const std::vector<CardRect> trimmed[2] = { cardRects(baked, 0), cardRects(baked, 1) };
+    return buildCard(baked.halfWidth, baked.y0, baked.y1, trimmed, std::max(1, baked.height), doubleFaced);
 }
 
 Result write(const Baked& baked, const std::string& plantPath, const std::filesystem::path& contentRoot)
@@ -414,7 +523,7 @@ Result write(const Baked& baked, const std::string& plantPath, const std::filesy
                                                    std::filesystem::path(folder), &r.material);
     if (r.materialPath.empty()) { r.error = "Failed to write the impostor material."; return r; }
 
-    StaticMeshAsset card = makeCard(baked.halfWidth, baked.y0, baked.y1, std::getenv("HE_IMPOSTOR_SINGLE") == nullptr);
+    StaticMeshAsset card = makeCard(baked);
     card.name = stem + "_ImpostorCard";
     card.path = pathFor(plantPath, "Card");
     if (!Importer::writeAsset(card, contentRoot)) { r.error = "Failed to write " + card.path; return r; }

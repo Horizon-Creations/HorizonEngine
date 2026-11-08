@@ -96,6 +96,18 @@ Dauerlast verfaelscht werden); die Vorgaenger-Schritte melden 5993/5994, der ein
 * Mehr als drei Laeufe je Zeile; die fps-Zahlen streuen stark (Impostor 41 bis 64), nur die Pass-GPU-Zeit ist belastbar (+-3 ms).
 * Voller `he_tests`-Lauf (siehe 5) und CI.
 
+## 8. Nachtrag (Schritte 8 bis 11): finaler Stand der Endkonfiguration (Kette + Impostor, Metal/M5, Standard-RS)
+
+| Stand | GPU-Summe aller Encoder (Trace) | davon Impostoren (netto) | Durchsatz ohne Vsync | GPU je Frame (Command Buffer) |
+|---|---|---|---|---|
+| Schritt 7 (diese Abnahme) | - (Zaehler: 27-30 ms bei RS2) | - | - | - |
+| Schritt 10, `docs/auto-lod-gpu-capture-stutter-2026-11-08.md` | 14,7 ms | ca. 3,7 ms | 63-66 fps (Vsync 53) | ca. 24 ms |
+| **Schritt 11, `docs/auto-lod-impostor-overdraw-2026-11-08.md`** (Karten auf die Alpha-Silhouette gestutzt) | **11,7 / 11,95 ms (-3 ms)** | **ca. 0,8 ms** | **ca. 60 fps (59-64), Drawable-gebunden** | **ca. 14 ms (-10 ms)** |
+
+* Die Karten-Ueberzeichnung (80-98 % durchsichtige Flaeche) war der Impostor-Block; gestutzt faellt der Scene-Encoder von 5,7 auf 2,5 ms. Die fps selbst bleiben bei ca. 60, weil der gesperrte Bildschirm das Tempo ueber das Drawable-Warten vorgibt (Schritt 10); gewonnen ist GPU-Reserve. **Vsync-Durchsatz nach Schritt 11 nicht messbar** (Fremdlast, Laeufe verworfen), der Vsync-Stand 53 fps aus Schritt 10 ist nicht neu gemessen.
+* Groesster Einzelblock jetzt: der Wolken-Pre-Pass (6,5 ms Encoder-Zeit), eigenes Thema.
+* Bestehende Szenen mit gebackenem Impostor laden unveraendert; **die Verbesserung braucht ein erneutes "Bake Impostor"** (ersetzt die Karte an Ort und Stelle, UUIDs bleiben).
+
 ## Handoff
 
 - **Topic / step:** 331 Auto-LOD, Schritt 7 von 7 (Abnahme). Branch `claude/auto-lod-und-sichtbarkeitsgetriebenes-rendern-f-r-foliage-un`.

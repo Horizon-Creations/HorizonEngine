@@ -5,6 +5,7 @@
 #include <ContentManager/DefaultAssets.h>
 #include <glm/glm.hpp>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <string>
@@ -200,6 +201,120 @@ TEST_CASE("Impostor: the card is two crossed double-faced quads, sized to the pl
 	for (size_t v = 8; v < 16; ++v) CHECK(card.uvs[v * 2] >= 0.5f);
 }
 
+namespace {
+
+// An atlas by hand: two views of `size` texels, alpha 255 inside the given boxes (x0, x1, y0, y1; y up), else 0.
+Impostor::Baked handAtlas(int size, const std::vector<std::array<int, 4>> (&boxes)[2])
+{
+	Impostor::Baked b;
+	b.width = 2 * size; b.height = size;
+	b.halfWidth = 0.5f; b.y0 = 0.0f; b.y1 = 2.0f;
+	b.rgba.assign(static_cast<size_t>(b.width) * b.height * 4, 0);
+	for (int v = 0; v < 2; ++v)
+		for (const auto& bx : boxes[v])
+			for (int y = bx[2]; y < bx[3]; ++y)
+				for (int x = bx[0]; x < bx[1]; ++x)
+					b.rgba[(static_cast<size_t>(y) * b.width + v * size + x) * 4 + 3] = 255;
+	b.coverage[0] = b.coverage[1] = 0.1f;
+	return b;
+}
+
+} // namespace
+
+TEST_CASE("Impostor: the trimmed card covers every texel that can pass the cutoff and a good deal less than the rectangle")
+{
+	constexpr int S = 128;
+	// View A: a tall blade up the middle plus a tuft in the far top corner; view B: one blob low on the left.
+	const std::vector<std::array<int, 4>> boxes[2] = { { { 60, 68, 0, 100 }, { 100, 120, 100, 126 } }, { { 4, 40, 0, 30 } } };
+	const Impostor::Baked b = handAtlas(S, boxes);
+	REQUIRE(b.ok());
+
+	for (int v = 0; v < 2; ++v)
+	{
+		const std::vector<Impostor::CardRect> rects = Impostor::cardRects(b, v);
+		REQUIRE_FALSE(rects.empty());
+		CHECK(rects.size() <= 4u * 2u);               // four bands, two runs each
+		long area = 0;
+		for (const Impostor::CardRect& r : rects)
+		{
+			CHECK(r.x0 >= 0); CHECK(r.x1 <= S); CHECK(r.x0 < r.x1);
+			CHECK(r.y0 >= 0); CHECK(r.y1 <= S); CHECK(r.y0 < r.y1);
+			area += static_cast<long>(r.x1 - r.x0) * (r.y1 - r.y0);
+		}
+		CHECK(area < static_cast<long>(S) * S * 6 / 10);     // far from the whole view
+		// Conservative: no texel above the cutoff may fall outside every rectangle.
+		for (const auto& bx : boxes[v])
+			for (int y = bx[2]; y < bx[3]; ++y)
+				for (int x = bx[0]; x < bx[1]; ++x)
+				{
+					bool inside = false;
+					for (const Impostor::CardRect& r : rects)
+						inside = inside || (x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1);
+					CHECK(inside);
+				}
+	}
+}
+
+TEST_CASE("Impostor: a view with nothing in it, or an atlas that is not one, falls back to the whole view")
+{
+	constexpr int S = 32;
+	const std::vector<std::array<int, 4>> boxes[2] = { {}, { { 0, 4, 0, 4 } } };
+	const Impostor::Baked b = handAtlas(S, boxes);
+	const std::vector<Impostor::CardRect> empty = Impostor::cardRects(b, 0);
+	REQUIRE(empty.size() == 1u);
+	CHECK(empty[0].x0 == 0); CHECK(empty[0].x1 == S); CHECK(empty[0].y0 == 0); CHECK(empty[0].y1 == S);
+
+	const Impostor::Baked none;
+	CHECK(Impostor::cardRects(none, 0).size() == 1u);
+	CHECK(Impostor::cardRects(b, 2).size() == 1u);
+	// And the card then is the plain rectangle one.
+	const StaticMeshAsset card = Impostor::makeCard(none);
+	CHECK(card.vertices.size() == 16u * 3);
+}
+
+TEST_CASE("Impostor: the trimmed card maps position and UV through the same texel, both faces wound along their normals")
+{
+	constexpr int S = 128;
+	const std::vector<std::array<int, 4>> boxes[2] = { { { 60, 68, 0, 100 }, { 100, 120, 100, 126 } }, { { 4, 40, 0, 30 } } };
+	const Impostor::Baked b = handAtlas(S, boxes);
+	const StaticMeshAsset card = Impostor::makeCard(b);
+
+	const size_t verts = card.vertices.size() / 3;
+	REQUIRE(verts > 0u);
+	CHECK(verts % 4u == 0u);
+	CHECK(card.uvs.size() == verts * 2);
+	CHECK(card.normals.size() == verts * 3);
+	CHECK(card.indices.size() == verts / 4 * 6);
+	REQUIRE(card.sections.size() == 1u);
+	CHECK(card.sections[0].indexCount == card.indices.size());
+	CHECK(verts < 16u * 4u);   // a handful of quads, not a mesh
+
+	size_t planeA = 0, planeB = 0;
+	for (size_t i = 0; i < verts; ++i)
+	{
+		const float x = card.vertices[i * 3], y = card.vertices[i * 3 + 1], z = card.vertices[i * 3 + 2];
+		const float u = card.uvs[i * 2], v = card.uvs[i * 2 + 1];
+		const bool inA = u <= 0.5f + 1e-6f && std::fabs(z) < 1e-6f;       // plane A: axis X, left half
+		const bool inB = u >= 0.5f - 1e-6f && std::fabs(x) < 1e-6f;       // plane B: axis Z, right half
+		REQUIRE((inA || inB));
+		const float along = inA ? x : z;
+		const float f = (along / b.halfWidth + 1.0f) * 0.5f;                // 0..1 across the view
+		CHECK(u == doctest::Approx((inA ? 0.0f : 0.5f) + f * 0.5f).epsilon(1e-4));
+		CHECK(v == doctest::Approx((y - b.y0) / (b.y1 - b.y0)).epsilon(1e-4));
+		(inA ? planeA : planeB)++;
+	}
+	CHECK(planeA > 0u); CHECK(planeB > 0u);
+	for (size_t t = 0; t < card.indices.size(); t += 3)
+	{
+		auto P = [&](size_t k) { return glm::vec3(card.vertices[card.indices[t + k] * 3], card.vertices[card.indices[t + k] * 3 + 1], card.vertices[card.indices[t + k] * 3 + 2]); };
+		auto N = [&](size_t k) { return glm::vec3(card.normals[card.indices[t + k] * 3], card.normals[card.indices[t + k] * 3 + 1], card.normals[card.indices[t + k] * 3 + 2]); };
+		CHECK(glm::dot(glm::cross(P(1) - P(0), P(2) - P(0)), N(0)) > 0.0f);
+	}
+	// Single-faced: exactly half the quads, and still the same set of positions.
+	const StaticMeshAsset single = Impostor::makeCard(b, false);
+	CHECK(single.vertices.size() * 2 == card.vertices.size());
+}
+
 TEST_CASE("Impostor: write puts texture, cut-out material and card next to the mesh and keeps their ids when baked again")
 {
 	const fs::path root = fs::temp_directory_path() / "he_test_impostor_write";
@@ -254,7 +369,8 @@ TEST_CASE("Impostor: write puts texture, cut-out material and card next to the m
 	const HE::UUID cardId = cm.loadAsset(first.meshPath);
 	const StaticMeshAsset* card = cm.getStaticMesh(cardId);
 	REQUIRE(card != nullptr);
-	CHECK(card->indices.size() == 24u);
+	CHECK(card->indices.size() >= 24u);               // at least a quad, two faces, per plane
+	CHECK(card->indices.size() % 12u == 0u);          // whole double-faced quads
 
 	fs::remove_all(root, ec);
 }
