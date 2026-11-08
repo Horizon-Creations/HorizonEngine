@@ -12,8 +12,10 @@
 // The layer's own mesh and material are level 0 and draw from the camera out to
 // the first level's `distance`; each level here takes over from its `distance`
 // until the next one's, the last until the layer's drawDistance. A plant's level
-// is chosen by its own ground-plane distance (FoliageExtract.cpp), so a level
-// boundary through a bucket splits the bucket instead of popping it whole.
+// is chosen by its own screen size (FoliageExtract.cpp): its ground-plane distance
+// scaled by its own scale against the layer's mean scale (a plant 1.2x as big keeps
+// a level 1.2x as far), so a level boundary through a bucket splits the bucket
+// instead of popping it whole.
 // The last level is typically the engine's cross card (kEngineCrossCardMeshId)
 // with a material that carries a picture of the plant.
 struct FoliageLod {
@@ -21,7 +23,7 @@ struct FoliageLod {
     // to the LAYER's material, not to the level mesh's own.
     HE::UUID meshAssetId;
     HE::UUID materialAssetId;
-    float    distance = 50.0f;         // m, ground plane: where this level starts
+    float    distance = 50.0f;         // m, ground plane, for a plant of the layer's mean scale: where this level starts
     // Share of the layer's plants this level still draws, 0..1 (0: none). The plants kept
     // are the first of each bucket, which is an even thinning because the scatter
     // order is random (FoliageStore).

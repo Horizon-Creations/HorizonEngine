@@ -43,7 +43,10 @@ struct FoliageOptions
 };
 
 // A card replaces geometry only once the whole plant is this many pixels tall or less
-// (1080 p, 60 degrees): above it the card's flat, two-view look shows.
+// (1080 p, 60 degrees): above it the card's flat, two-view look shows. The distance
+// this gives is the one for a plant of the layer's mean scale; the extractor scales it
+// per plant (FoliageExtract.cpp Levels::seen), so a bigger plant keeps its geometry
+// farther and the card takes over at the same pixel height for every plant.
 constexpr float kImpostorPixels = 128.0f;
 
 inline float impostorStartDistance(float plantHeight)

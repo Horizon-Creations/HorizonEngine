@@ -1,7 +1,6 @@
-# Auto-LOD step 5: level choice per instance (design only, NOT implemented)
+# Auto-LOD step 5: level choice per instance (implemented 2026-11-08)
 
-Status: the bee was stopped by the queen before any code was written. This file is the survey and the
-plan, so the next worker does not repeat the reading. No source file changed.
+Status: implemented as designed below (survey first, then code). The Handoff at the end is the current one.
 
 ## What the code does today (verified by reading)
 
@@ -49,9 +48,34 @@ several camera steps, `FoliageLodMemory` supplied).
 
 ## Handoff
 
-* **Done:** survey and design above. No code, no build, no test run.
-* **Not verified:** everything about the implementation.
-* **Next steps:** 1. add `refScale / fLo / fHi` to `Levels` (filled in `levelsOf`), 2. `d_eff` in the four call sites, `whole` widened,
-  key words, 3. new test cases, run `*test_foliage_lod*`, `*test_auto_lod*`, `*test_impostor*`, `*test_lod*`, `*test_foliage_cluster*`,
-  `*test_culling*`, 4. update the comments in `AutoLodApply.h` (thresholds are mean-scale distances, the extractor scales per plant),
-  5. dump witness (`HE_DUMP_FOLIAGETEST`, Metal and GL, compare the plant mask).
+* **Topic / step:** 331, step 5 (level choice and culling per instance).
+* **Done:** `FoliageExtract.cpp`: `Levels::seen(d, plantScale)` (= `d * refScale / plantScale`), `refScale/factorLo/factorHi` filled in
+  `levelsOf`, `plantScaleOf(block, i)` (Y column, times the parent's for a General parent). Used in `runStraddler` (with
+  `choose`/hysteresis), `extractPerInstance`, `extractOrdered`; `Levels::whole` widens near/far by the factors, so a bucket only
+  stays whole when every plant of any scale in the layer's range is clear of the band; replay key has the three new words.
+  Comments in `FoliageComponent.h` (`FoliageLod::distance` is for a mean-scale plant) and `AutoLodApply.h` (the 128 px distance
+  is the mean plant's; the extractor scales it per plant). Card = last level, so it uses the same test.
+* **Tests (Release, `out/build/release/tests/he_tests`):** `*test_foliage_lod*` 13/13 (3 new: same distance different heights
+  pick different levels in Clusters/PerInstance/Ordered; one-scale layer keeps the plain rule and whole buckets; a 0.6 m wobble on
+  a boundary flips 0 plants with memory and >0 without), `*test_auto_lod*` 9, `*test_impostor*` 6, `*test_lod*`, `*test_foliage_cluster*` 27,
+  `*test_culling*` 78, `*test_graph_instancing*` 7, `*test_layer_mesh_instancing*` 7: green. Full `he_tests`: 5993/5994, the one red is
+  `test_hpak` "Disk registry: scanContentDirectory ..." (10 != 2), known on this Mac in every worktree, unrelated.
+  `test_foliage_lod.cpp`'s `expected()` and the hysteresis case now use the test's own `seenDistance`.
+  `test_layer_mesh_instancing.cpp` "four times the plants draw in the same number of calls": the depth-pass equality (draws and mesh
+  set equal between 1x and 4x) was relaxed to "mesh set may grow, draws within +3": a rock of scale 0.6 in a 0.6..2.4 layer is as small
+  as a mean rock at 2.5x the distance and takes level 2 at 30 m, so that sparse level shows in the shadow pass of the 4x scene only
+  (seen: mesh 0x116 extra). The main-pass equality is unchanged.
+* **Not verified:** no dump witness (Metal/GL): `HE_DUMP_FOLIAGETEST` has a layer WITHOUT levels, which this change leaves
+  bit-identical by design (`leveled == false` path untouched), so a plant-mask A/B there would show nothing; a levelled scene needs
+  the Foliage-Testszene with baked chains (outside the repo). No perf measured, none claimed. Editor not run. D3D/Vulkan untouched.
+* **Decisions taken:** formula and constants above; reference screen stays 1080 px / 60 degrees (no live fov); ground-plane (XZ)
+  distance kept; hysteresis in metres of the mean-plant-equivalent distance (constant fraction of pixel size). Preset layers
+  (`LayerMeshPresets.h`, hand-set distances for the mean plant) now switch small plants earlier and big ones later: intended.
+  CPU is the single path on all five backends: no backend has indirect draw / compute culling (plan 2.3; macOS GL 4.1 has no compute),
+  so no GPU culling was added; the frustum / bucket culling stays as it was (step 6 owns clusters).
+* **Decisions suggested, not taken:** dither or alpha blend between level and card (needs a per-instance field in the instance layout on
+  every backend); live-fov / window-size dependent distances; 3D instead of ground-plane distance for a camera far above the field.
+* **Cost to watch:** more straddling buckets near each boundary (ring about `from/factorHi .. from/factorLo`, 0.8..1.2 x for scales
+  0.8..1.2; wider for wide-scale presets such as rocks 0.6..2.4). Measure `FoliageStraddlers` in a F9 capture on the real scene
+  (baseline procedure `docs/auto-lod-baseline-2026-10-29.md`; remember `--scene` and an APFS clone).
+* **Next steps:** 1. levelled witness / perf on the Foliage-Testszene; 2. step 6 cluster culling; 3. optional blend between level and card.
