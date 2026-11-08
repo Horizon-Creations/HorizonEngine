@@ -3247,6 +3247,14 @@ void GameApplication::OnRender(float deltaTime)
 	//            would otherwise never expire).
 	const float gameDt = HE::api::time::deltaTime();
 
+	// Automatic quality (project setting / the player's switch): the controller is fed the
+	// RAW frame time, not gameDt — a game paused at time scale 0 or in slow motion still
+	// renders frames, and those frames are what the target frame rate is about.
+	// A window nobody can see is held to a low frame rate on purpose (Window.h, background
+	// throttle): those frames say nothing about the machine, so they are not measured.
+	const bool throttled = window() && window()->IsInBackground() && HE::backgroundFrameInterval() != 0;
+	if (!throttled) HE::api::settings::tickAutoQuality(deltaTime);
+
 	// Deferred scene transitions requested by scripts/graphs last frame: executed
 	// at the frame START so nothing downstream touches a half-swapped world.
 	executeSceneRequests();
@@ -3769,6 +3777,10 @@ void GameApplication::installPlayerSettings()
 		m_projectSettings.graphics = g;
 		m_projectSettings.shadows  = s;
 	};
+	// Automatic quality: what the project starts with, and yes — this is the application
+	// that may run it (an application build has no scene to scale).
+	host.baseAuto             = m_projectSettings.autoQuality;
+	host.autoQualityAvailable = !m_appMode;
 	HE::api::settings::install(std::move(host));
 }
 

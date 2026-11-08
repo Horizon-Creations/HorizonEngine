@@ -80,6 +80,12 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "tolerance": 0.15000000596046448,
     "windowSec": 3.0
   },
+  "autoQuality": {
+    "enabled": false,
+    "maxLevel": 3,
+    "minLevel": 0,
+    "targetFps": 60.0
+  },
   "game": {
     "splashEnabled": false,
     "splashImage": "",

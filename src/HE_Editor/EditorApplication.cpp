@@ -9164,6 +9164,8 @@ void EditorApplication::dumpFrameHeadless()
 		// A/B knob for he_shot.py (0 Low = two mip levels off, 2 High = all).
 		IRenderer::QualitySettings qs{ m_editorConfig.TextureQuality, m_editorConfig.MaterialQuality };
 		if (const char* v = std::getenv("HE_DUMP_TEXQUALITY"); v && *v) qs.textureQuality = std::atoi(v);
+		// HE_DUMP_MATQUALITY=<0|1|2>: the same for the material quality lane.
+		if (const char* v = std::getenv("HE_DUMP_MATQUALITY"); v && *v) qs.materialQuality = std::atoi(v);
 		r->SetQualitySettings(qs);
 	}
 	{

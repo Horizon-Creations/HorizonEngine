@@ -251,6 +251,14 @@ jobs:
       # HorizonCore 0,3 MB and removes the dylib entirely — net −4,5 MB in every
       # packaged game (docs/he-apps-plan.md A3a). It also removes a bundled
       # third-party dylib from the deployment-target stamping problem.
+      # MoltenVK (Vulkan on top of Metal) is part of the macOS editor/game: the Vulkan
+      # backend is selectable there and scripts/bundle_native_deps.sh ships the dylib.
+      # shaderc supplies glslc for the SPIR-V scene shaders. A runner without them
+      # still configures (Vulkan off), so a failed brew call must not fail the job.
+      - name: Install MoltenVK + shaderc (macOS)
+        if: runner.os == 'macOS'
+        run: brew install molten-vk shaderc || echo "::warning::MoltenVK/shaderc not installed - the macOS build has no Vulkan backend"
+
       - name: Configure (macOS)
         if: runner.os == 'macOS'
         env:

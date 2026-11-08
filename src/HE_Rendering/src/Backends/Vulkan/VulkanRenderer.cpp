@@ -58,7 +58,7 @@ static constexpr uint32_t k_maxFramesInFlight = 2;
 static void vkCheck(VkResult r, const char* msg)
 {
     if (r != VK_SUCCESS)
-        throw std::runtime_error(std::string("Vulkan: ") + msg);
+        throw std::runtime_error(std::string("Vulkan: ") + msg + " (VkResult " + std::to_string(static_cast<int>(r)) + ")");
 }
 
 namespace
@@ -625,6 +625,8 @@ void VulkanRenderer::Render()
         createShadowImages();
         writeShadowDescriptors();
         m_shadowSizeDirty = false;
+        HE_LOG_INFO(RHI, "VulkanRenderer: shadow cascades rebuilt at %ux%u (%d cascades, distance %.0f)",
+                    m_shadowSize, m_shadowSize, m_shadowSettings.cascadeCount, m_shadowSettings.distance);
     }
 
     // The game frame needs the full HDR set: without it DrawViewportFrame takes
@@ -1450,6 +1452,40 @@ void VulkanRenderer::createInstance()
                        : "VulkanRenderer: validation layer requested but NOT available");
     }
 
+    // Portability implementations (MoltenVK on macOS) only show up in
+    // vkEnumeratePhysicalDevices when the instance opts in: the extension plus the
+    // create flag. SDL asks for the extension on Apple platforms whether or not
+    // the Vulkan library behind it has it, and linked straight to libMoltenVK (no
+    // Khronos loader) it does not: vkCreateInstance then fails with
+    // VK_ERROR_EXTENSION_NOT_PRESENT. So the request is checked against what this
+    // instance lists, and only a listed extension gets the flag. A native driver
+    // lists none of this and goes through exactly the path it did before.
+    VkInstanceCreateFlags instanceFlags = 0;
+    {
+        uint32_t en = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &en, nullptr);
+        std::vector<VkExtensionProperties> eprops(en);
+        if (en) vkEnumerateInstanceExtensionProperties(nullptr, &en, eprops.data());
+        const auto listed = [&](const char* name) {
+            for (const auto& e : eprops)
+                if (std::strcmp(e.extensionName, name) == 0) return true;
+            return false;
+        };
+        if (listed(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+        {
+            bool asked = false;
+            for (const char* x : exts)
+                if (std::strcmp(x, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) asked = true;
+            if (!asked) exts.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+            instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        }
+        else
+        {
+            std::erase_if(exts, [](const char* x) {
+                return std::strcmp(x, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0; });
+        }
+    }
+
     // Vulkan 1.2 is required for the HW ray-query GI path (SPIR-V 1.4+,
     // buffer-device-address core). A 1.0 loader has no
     // vkEnumerateInstanceVersion — fetch it dynamically; if the loader can't
@@ -1468,11 +1504,18 @@ void VulkanRenderer::createInstance()
     appInfo.apiVersion       = m_instanceApiVersion;
     VkInstanceCreateInfo ci{};
     ci.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ci.flags                   = instanceFlags;
     ci.pApplicationInfo        = &appInfo;
     ci.enabledExtensionCount   = static_cast<uint32_t>(exts.size());
     ci.ppEnabledExtensionNames = exts.data();
     ci.enabledLayerCount       = static_cast<uint32_t>(layers.size());
     ci.ppEnabledLayerNames     = layers.empty() ? nullptr : layers.data();
+    {
+        std::string names;
+        for (const char* x : exts) { names += x; names += ' '; }
+        HE_LOG_INFO(RHI, "VulkanRenderer: instance extensions: %s(flags 0x%x)", names.c_str(),
+                    static_cast<unsigned>(instanceFlags));
+    }
     vkCheck(vkCreateInstance(&ci, nullptr, &m_instance), "vkCreateInstance");
 
     if (gpuDebug && haveDebugUtils)
@@ -1559,6 +1602,22 @@ void VulkanRenderer::createDevice()
     // miss → SW GI only (no behaviour change); HE_GI_FORCE_SW=1 skips the
     // probe entirely, mirroring the Metal backend's override.
     std::vector<const char*> devExts = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+    // A portability device (MoltenVK) lists VK_KHR_portability_subset, and the spec
+    // makes enabling it mandatory for such a device. Spelled as a string: the macro
+    // lives in vulkan_beta.h, behind VK_ENABLE_BETA_EXTENSIONS.
+    {
+        uint32_t n = 0;
+        vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, nullptr);
+        std::vector<VkExtensionProperties> eprops(n);
+        if (n) vkEnumerateDeviceExtensionProperties(m_physDevice, nullptr, &n, eprops.data());
+        for (const auto& e : eprops)
+            if (std::strcmp(e.extensionName, "VK_KHR_portability_subset") == 0)
+            {
+                devExts.push_back("VK_KHR_portability_subset");
+                HE_LOG_INFO(RHI, "%s", "VulkanRenderer: portability device (MoltenVK), VK_KHR_portability_subset enabled");
+                break;
+            }
+    }
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
     VkPhysicalDeviceRayQueryFeaturesKHR rqFeat{
@@ -2510,6 +2569,12 @@ void VulkanRenderer::createScenePipeline()
         sci.maxLod       = VK_LOD_CLAMP_NONE;
         vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_albedoSampler), "albedo sampler");
 
+        // The world/material twin with the texture-quality mip floor; a quality pushed
+        // before this ran is honoured here, later ones go through applyTextureQuality().
+        m_textureMinLod = TextureMinLodForQuality(m_quality.textureQuality);
+        sci.minLod      = m_textureMinLod;
+        vkCheck(vkCreateSampler(m_device, &sci, nullptr, &m_worldSampler), "world sampler");
+
         // One combined-image-sampler set per unique textured mesh + override material
         // (+1 for the white default). FREE bit so hot-reload can recycle invalidated sets.
         VkDescriptorPoolSize aps{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, k_maxMeshTextures + 1 };
@@ -2802,6 +2867,7 @@ void VulkanRenderer::destroyScenePipeline()
     if (m_whiteAlbedoImage)    { vkDestroyImage(m_device, m_whiteAlbedoImage, nullptr);             m_whiteAlbedoImage = VK_NULL_HANDLE; }
     if (m_whiteAlbedoMem)      { vkFreeMemory(m_device, m_whiteAlbedoMem, nullptr);                 m_whiteAlbedoMem = VK_NULL_HANDLE; }
     if (m_albedoSampler)       { vkDestroySampler(m_device, m_albedoSampler, nullptr);              m_albedoSampler = VK_NULL_HANDLE; }
+    if (m_worldSampler)        { vkDestroySampler(m_device, m_worldSampler, nullptr);               m_worldSampler = VK_NULL_HANDLE; }
     if (m_albedoSetLayout)     { vkDestroyDescriptorSetLayout(m_device, m_albedoSetLayout, nullptr); m_albedoSetLayout = VK_NULL_HANDLE; }
     if (m_emptySetLayout)      { vkDestroyDescriptorSetLayout(m_device, m_emptySetLayout, nullptr);  m_emptySetLayout = VK_NULL_HANDLE; }
     if (m_shadowPipeline)                { vkDestroyPipeline(m_device, m_shadowPipeline, nullptr);                m_shadowPipeline = VK_NULL_HANDLE; }
@@ -2943,6 +3009,8 @@ void VulkanRenderer::createMaterialResources()
         case HE::vkmat::DescKind::UniformBuffer:        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         case HE::vkmat::DescKind::CombinedImageSampler: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         case HE::vkmat::DescKind::StorageBuffer:        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case HE::vkmat::DescKind::SampledImage:         return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case HE::vkmat::DescKind::Sampler:              return VK_DESCRIPTOR_TYPE_SAMPLER;
         }
         return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     };
@@ -2965,11 +3033,12 @@ void VulkanRenderer::createMaterialResources()
             maxImages   = std::min(maxImages, n);
         }
         m_matLandscapeWeights = HE::vkmat::landscapeWeightsFit(maxSamplers, maxImages);
-        char line[384];
+        char line[448];
         std::snprintf(line, sizeof line,
-            "VulkanRenderer: material set 0 needs %u fragment samplers (%u without heLandscapeWeights); "
+            "VulkanRenderer: material set 0 needs %u fragment samplers + %u sampled images (%u + %u without heLandscapeWeights); "
             "device maxPerStageDescriptorSamplers %u, maxPerStageDescriptorSampledImages %u%s -> heLandscapeWeights %s",
-            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentSamplerCount(false),
+            HE::vkmat::fragmentSamplerCount(true), HE::vkmat::fragmentImageCount(true),
+            HE::vkmat::fragmentSamplerCount(false), HE::vkmat::fragmentImageCount(false),
             maxSamplers, maxImages, (cap && *cap) ? " (capped by HE_VK_MAX_STAGE_SAMPLERS)" : "",
             m_matLandscapeWeights ? "bound" : "LEFT OUT (layer-blend materials draw built-in)");
         if (m_matLandscapeWeights) HE_LOG_INFO(RHI, "%s", line);
@@ -3035,15 +3104,17 @@ void VulkanRenderer::createMaterialResources()
         using HE::vkmat::DescKind;
         using HE::vkmat::countOf;
         static_assert(HE::vkmat::dynamicCount() == HE::vkmat::kDynamicOffsetCount, "bindings 1, 3, 9");
-        VkDescriptorPoolSize ps[4] = {
+        VkDescriptorPoolSize ps[6] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         (countOf(DescKind::UniformBuffer) - HE::vkmat::dynamicCount()) * k_matMaxDraws }, // b0,b8
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, HE::vkmat::dynamicCount()                       * k_matMaxDraws }, // b1,b3,b9
-            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b10-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, countOf(DescKind::CombinedImageSampler) * k_matMaxDraws }, // b2,b4-b7,b14
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          countOf(DescKind::SampledImage)         * k_matMaxDraws }, // b10-b13,b15-b18,b31-b33
+            { VK_DESCRIPTOR_TYPE_SAMPLER,                countOf(DescKind::Sampler)              * k_matMaxDraws }, // b34,b35 (the shared samplers)
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         countOf(DescKind::StorageBuffer)        * k_matMaxDraws }, // b24-b26 (cluster lists)
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_matMaxDraws;
-        dpci.poolSizeCount = 4;
+        dpci.poolSizeCount = 6;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_matPool[f]) != VK_SUCCESS)
         {
@@ -4336,7 +4407,7 @@ void VulkanRenderer::EncodeDecals(VkCommandBuffer cmd, VkImageView depthView,
 
         // heDecalTex must be bound even when the decal is untextured — the shader
         // statically references the sampler; the white default makes it a no-op.
-        VkDescriptorImageInfo texInfo{ m_albedoSampler,
+        VkDescriptorImageInfo texInfo{ worldSampler(),
             texView ? *texView : m_whiteAlbedoView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkDescriptorImageInfo depthInfo{ m_decalDepthSampler, depthView,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -4684,6 +4755,8 @@ bool VulkanRenderer::createDeferredPipelines()
             case HE::vkmat::DescKind::UniformBuffer:        return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
             case HE::vkmat::DescKind::CombinedImageSampler: return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             case HE::vkmat::DescKind::StorageBuffer:        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case HE::vkmat::DescKind::SampledImage:         return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case HE::vkmat::DescKind::Sampler:              return VK_DESCRIPTOR_TYPE_SAMPLER;
             }
             return VK_DESCRIPTOR_TYPE_MAX_ENUM;
         };
@@ -4707,14 +4780,16 @@ bool VulkanRenderer::createDeferredPipelines()
             return fail("resolve pipeline layout failed");
         using HE::vkmat::DescKind;
         using HE::vkmat::resolveCountOf;
-        const VkDescriptorPoolSize ps[3] = {
+        const VkDescriptorPoolSize ps[5] = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         resolveCountOf(DescKind::UniformBuffer)        * k_maxFramesInFlight },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, resolveCountOf(DescKind::CombinedImageSampler) * k_maxFramesInFlight },
+            { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          resolveCountOf(DescKind::SampledImage)         * k_maxFramesInFlight },
+            { VK_DESCRIPTOR_TYPE_SAMPLER,                resolveCountOf(DescKind::Sampler)              * k_maxFramesInFlight },
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         resolveCountOf(DescKind::StorageBuffer)        * k_maxFramesInFlight },
         };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         dpci.maxSets       = k_maxFramesInFlight;
-        dpci.poolSizeCount = 3;
+        dpci.poolSizeCount = 5;
         dpci.pPoolSizes    = ps;
         if (vkCreateDescriptorPool(m_device, &dpci, nullptr, &m_resolvePool) != VK_SUCCESS)
             return fail("resolve descriptor pool failed");
@@ -8565,7 +8640,7 @@ bool VulkanRenderer::resolveAndUploadAlbedo(const HE::UUID& materialId, const st
         set = VK_NULL_HANDLE;
         return false;
     }
-    VkDescriptorImageInfo dii{ m_albedoSampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo dii{ worldSampler(), view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
     ww.dstSet          = set;
     ww.dstBinding      = 0;
@@ -9515,7 +9590,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkImageView tex0View = m_whiteAlbedoView;
                             if (matOvr) { if (matOvr->view) tex0View = matOvr->view; }
                             else if (m.albedoView) tex0View = m.albedoView;
-                            VkDescriptorImageInfo tex0II{ m_albedoSampler, tex0View,
+                            VkDescriptorImageInfo tex0II{ worldSampler(), tex0View,
                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             // heTexP0..3 (bindings 4..7): the graph's project textures resolved
                             // above, sampled linear-wrap like heTex0 (the white default where
@@ -9523,7 +9598,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             static_assert(HE::kMatMaxGraphTextures == 4, "heTexP0..3 occupy bindings 4..7");
                             VkDescriptorImageInfo texPII[HE::kMatMaxGraphTextures];
                             for (int k = 0; k < HE::kMatMaxGraphTextures; ++k)
-                                texPII[k] = { m_albedoSampler, heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                                texPII[k] = { worldSampler(), heTexP[k], VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             VkWriteDescriptorSet w[HE::vkmat::kBindingCount]{};
                             auto wr = [&](int idx, uint32_t binding, VkDescriptorType type,
                                           const VkDescriptorBufferInfo* bi, const VkDescriptorImageInfo* ii) {
@@ -9552,12 +9627,12 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo giSunII{ m_albedoSampler,
                                 (m_giRanThisFrame && m_giResult.view) ? m_giResult.view : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(10, 10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giSunII);
+                            wr(10, 10, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giSunII);
                             VkDescriptorImageInfo giLocalII{ m_albedoSampler,
                                 (m_giRanThisFrame && m_giLocalMask.view) ? m_giLocalMask.view : m_whiteAlbedoView,
                                 (m_giRanThisFrame && m_giLocalMask.view) ? VK_IMAGE_LAYOUT_GENERAL
                                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(11, 11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giLocalII);
+                            wr(11, 11, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giLocalII);
                             // heCsm (binding 12, sampler2DArray): the cascade shadow array
                             // the built-in scene shader samples at binding 1, through the
                             // same nearest/clamp sampler (PCF taps compare single texels).
@@ -9568,7 +9643,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 (m_shadowView && m_shadowLayoutValid) ? m_shadowSampler : m_albedoSampler,
                                 (m_shadowView && m_shadowLayoutValid) ? m_shadowView    : m_whiteArrayView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(12, 12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &csmII);
+                            wr(12, 12, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &csmII);
                             // heSSRFwd (binding 31): the SAME image the built-in
                             // shaders read at scene binding 8, so a graph
                             // material and a built-in one next to each other
@@ -9579,7 +9654,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 (m_ssrRanThisFrame && m_ssrResultView) ? m_ssrResultView
                                     : (m_ssrBlackRT.view ? m_ssrBlackRT.view : m_whiteAlbedoView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(13, 31, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &ssrII);
+                            wr(13, 31, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &ssrII);
                             // heLocalShadow (binding 13, sampler2DArray): the local
                             // (point/spot) atlas, same nearest/clamp sampler as heCsm.
                             // The white ARRAY view stands in until the atlas was
@@ -9588,7 +9663,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                 localShadows ? m_shadowSampler   : m_albedoSampler,
                                 localShadows ? m_localShadowView : m_whiteArrayView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(14, 13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &localII);
+                            wr(14, 13, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &localII);
                             // heSkyEnv (15): the baked sky cube once updateSkyEnvCube
                             // filled it (fog.z = 1 exactly then), the white cube before.
                             // Linear-CLAMP like GL/Metal's cube sampler; the repeat
@@ -9602,19 +9677,17 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                                         : (m_skyEnvValid ? (m_ssaoSampler ? m_ssaoSampler : m_albedoSampler) : m_albedoSampler),
                                 realSky ? m_skyReflCubeView : (m_skyEnvValid ? m_skyEnvView : m_whiteCubeView),
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(15, 15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &skyII);
+                            wr(15, 15, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &skyII);
                             // heAO (16): this frame's blurred SSAO — the image the
                             // built-in shader reads at scene binding 3, parked in
                             // SHADER_READ_ONLY by the blur pass's finalLayout. White
                             // otherwise; fog.w is 0 then. heLitP texelFetches it, so the
                             // sampler is only there because the descriptor is combined.
-                            VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
-                                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                             VkDescriptorImageInfo aoII{
                                 m_ssaoRanThisFrame ? m_ssaoSampler      : m_albedoSampler,
                                 m_ssaoRanThisFrame ? m_ssaoBlurRT.view  : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(16, 16, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &aoII);
+                            wr(16, 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &aoII);
                             // heGIIrradiance / heGIVisibility (17/18): the probe atlases
                             // under matGiProbes (the gate FillMaterialGIProbe raised), in
                             // GENERAL like everywhere else they are sampled; white
@@ -9627,17 +9700,30 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             VkDescriptorImageInfo giVisII{ giAtlasSampler,
                                 matGiProbes ? m_giVisAtlas.view : m_whiteAlbedoView,
                                 matGiProbes ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(17, 17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giIrrII);
-                            wr(18, 18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giVisII);
+                            wr(17, 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giIrrII);
+                            wr(18, 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giVisII);
                             // heGIReflFwd (32): this frame's reflection result (frameMatLight
                             // carries giRefl.z from the same m_giReflReady), white otherwise —
-                            // mirrors heSSRFwd's binding-8 pattern above. heCloudShadow (33):
-                            // white, its gate (cloudShadowB.x) stays 0.
+                            // mirrors heSSRFwd's binding-8 pattern above. (heCloudShadow, 33,
+                            // is not declared by the SpirV preamble: its gate never opens here.)
                             VkDescriptorImageInfo giReflII{ giAtlasSampler,
                                 m_giReflReady ? m_giReflFinal.view : m_whiteAlbedoView,
                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-                            wr(19, 32, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &giReflII);
-                            wr(20, 33, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, nullptr, &whiteII);
+                            wr(19, 32, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &giReflII);
+                            // heCloudShadow (33): white, its gate (cloudShadowB.x) stays 0 here.
+                            const VkDescriptorImageInfo cloudII{ VK_NULL_HANDLE, m_whiteAlbedoView,
+                                                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                            wr(20, 33, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &cloudII);
+                            // The two shared samplers every SampledImage above is read through
+                            // (VulkanMaterialLayout.h): linear/clamp (the SSAO sampler) and
+                            // nearest/clamp-to-white-border (the shadow sampler). A sampler
+                            // descriptor carries no view.
+                            const VkDescriptorImageInfo sampLinII{
+                                m_ssaoSampler ? m_ssaoSampler : m_albedoSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                            const VkDescriptorImageInfo sampShII{
+                                m_shadowSampler ? m_shadowSampler : m_albedoSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                            wr(21, HE::vkmat::kSamplerLinearBinding, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampLinII);
+                            wr(22, HE::vkmat::kSamplerShadowBinding, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampShII);
                             // fragmentClustered's light lists (bindings 24..26, Thema
                             // 117): this frame slot's cluster SSBOs, the very buffers
                             // the built-in shader reads at scene bindings 10..12. Written
@@ -9649,8 +9735,8 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                             // linear-CLAMP like D3D11's s0 (a [0,1] weight field; a
                             // repeating sampler would bleed the far edge's paint in).
                             // Only when the layout has the row (m_matLandscapeWeights).
-                            static_assert(HE::vkmat::kPreClusterBindingCount == 22,
-                                          "fixed writes w[0..20] + w[21] heLandscapeWeights, one per non-cluster row");
+                            static_assert(HE::vkmat::kPreClusterBindingCount == 24,
+                                          "fixed writes w[0..22] + w[23] heLandscapeWeights, one per non-cluster row");
                             uint32_t nWrites = HE::vkmat::kPreClusterBindingCount - 1;
                             VkDescriptorImageInfo weightsII{ m_ssaoSampler ? m_ssaoSampler : m_albedoSampler,
                                                              heWeights, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -10000,8 +10086,6 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 VkDescriptorBufferInfo lightBI{ m_resolveLightBuf[f].buf, 0, sizeof(MSL::Lighting) };
                 VkDescriptorBufferInfo uboBI  { m_resolveUboBuf[f].buf,   0, sizeof(MSL::ResolveUniforms) };
                 const VkSampler clampSampler = m_ssaoSampler ? m_ssaoSampler : m_albedoSampler;
-                const VkDescriptorImageInfo whiteII{ m_albedoSampler, m_whiteAlbedoView,
-                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
                 const VkDescriptorImageInfo giSunII{ m_albedoSampler,
                     (m_giRanThisFrame && m_giResult.view) ? m_giResult.view : m_whiteAlbedoView,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -10065,24 +10149,33 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
                 };
                 constexpr VkDescriptorType kUbo = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                 constexpr VkDescriptorType kCis = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                constexpr VkDescriptorType kImg = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+                constexpr VkDescriptorType kSmp = VK_DESCRIPTOR_TYPE_SAMPLER;
                 wr( 0, kUbo, &lightBI, nullptr);
-                wr(10, kCis, nullptr, &giSunII);
-                wr(11, kCis, nullptr, &giLocalII);
-                wr(12, kCis, nullptr, &csmII);
-                wr(13, kCis, nullptr, &localII);
-                wr(15, kCis, nullptr, &skyII);
-                wr(16, kCis, nullptr, &aoII);
-                wr(17, kCis, nullptr, &giIrrII);
-                wr(18, kCis, nullptr, &giVisII);
+                wr(10, kImg, nullptr, &giSunII);
+                wr(11, kImg, nullptr, &giLocalII);
+                wr(12, kImg, nullptr, &csmII);
+                wr(13, kImg, nullptr, &localII);
+                wr(15, kImg, nullptr, &skyII);
+                wr(16, kImg, nullptr, &aoII);
+                wr(17, kImg, nullptr, &giIrrII);
+                wr(18, kImg, nullptr, &giVisII);
                 wr(HE::vkmat::kResolveGB0Binding,   kCis, nullptr, &gbII[0]);
                 wr(HE::vkmat::kResolveGB1Binding,   kCis, nullptr, &gbII[1]);
                 wr(HE::vkmat::kResolveGB2Binding,   kCis, nullptr, &gbII[2]);
                 wr(HE::vkmat::kResolveDepthBinding, kCis, nullptr, &gbII[3]);
                 wr(HE::vkmat::kResolveUboBinding,   kUbo, &uboBI, nullptr);
-                wr(31, kCis, nullptr, &ssrII);
-                wr(32, kCis, nullptr, &giReflII); // heGIReflFwd (frameMatLight carries giRefl.z)
-                wr(33, kCis, nullptr, &whiteII); // heCloudShadow: cloudShadowB.x stays 0
-                static_assert(HE::vkmat::kResolvePreClusterBindingCount == 17,
+                wr(31, kImg, nullptr, &ssrII);
+                wr(32, kImg, nullptr, &giReflII); // heGIReflFwd (frameMatLight carries giRefl.z)
+                const VkDescriptorImageInfo cloudII{ VK_NULL_HANDLE, m_whiteAlbedoView,
+                                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+                wr(33, kImg, nullptr, &cloudII); // heCloudShadow: cloudShadowB.x stays 0
+                const VkDescriptorImageInfo sampLinII{ clampSampler, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                const VkDescriptorImageInfo sampShII{ m_shadowSampler ? m_shadowSampler : m_albedoSampler,
+                                                      VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+                wr(HE::vkmat::kSamplerLinearBinding, kSmp, nullptr, &sampLinII);
+                wr(HE::vkmat::kSamplerShadowBinding, kSmp, nullptr, &sampShII);
+                static_assert(HE::vkmat::kResolvePreClusterBindingCount == 19,
                               "one fixed write per non-cluster row of kResolveBindings");
                 // The lists whenever they exist — the clustered resolve uses them
                 // statically, the 8-light one ignores them.
@@ -11326,6 +11419,62 @@ void VulkanRenderer::DestroyImGuiTexture(void* /*handle*/)
     // images/views/memory/samplers are destroyed (after vkDeviceWaitIdle). The
     // ImGui VkDescriptorSet is owned by ImGui's internal pool and freed on ImGui
     // shutdown, so there is nothing to free here.
+}
+
+void VulkanRenderer::SetQualitySettings(const QualitySettings& s)
+{
+    IRenderer::SetQualitySettings(s);
+    applyTextureQuality();
+}
+
+// Texture quality: Low / Medium keep the world's texture sampler off the finest one or
+// two mip levels (see MetalRenderer::ApplyTextureQuality). A sampler is baked into the
+// cached base-colour sets, so a change rebuilds it and rewrites those sets once; the
+// per-draw material sets pick the new one up on their next write. A quality change is
+// a settings event, not a per-frame one, so the vkDeviceWaitIdle that makes the
+// rewrite legal is acceptable. A texture with a single level is unaffected.
+void VulkanRenderer::applyTextureQuality()
+{
+    const float minLod = TextureMinLodForQuality(m_quality.textureQuality);
+    // Before the scene pipeline there is nothing to rewrite; it creates the sampler
+    // with the quality current at that point.
+    if (!m_device || !m_worldSampler || minLod == m_textureMinLod)
+        return;
+    VkSamplerCreateInfo sci{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    sci.magFilter    = VK_FILTER_LINEAR;
+    sci.minFilter    = VK_FILTER_LINEAR;
+    sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    sci.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    sci.minLod       = minLod;
+    sci.maxLod       = VK_LOD_CLAMP_NONE;
+    VkSampler next = VK_NULL_HANDLE;
+    if (vkCreateSampler(m_device, &sci, nullptr, &next) != VK_SUCCESS)
+        return;   // keep the old one; the next push tries again
+    vkDeviceWaitIdle(m_device);
+
+    auto rewrite = [&](VkDescriptorSet set, VkImageView view)
+    {
+        if (!set || !view) return;
+        VkDescriptorImageInfo dii{ next, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet ww{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        ww.dstSet          = set;
+        ww.dstBinding      = 0;
+        ww.descriptorCount = 1;
+        ww.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ww.pImageInfo      = &dii;
+        vkUpdateDescriptorSets(m_device, 1, &ww, 0, nullptr);
+    };
+    for (auto& kv : m_meshCache)         rewrite(kv.second.albedoSet, kv.second.albedoView);
+    for (auto& kv : m_skeletalMeshCache) rewrite(kv.second.albedoSet, kv.second.texView);
+    for (auto& kv : m_materialTexCache)  rewrite(kv.second.set, kv.second.view);
+
+    vkDestroySampler(m_device, m_worldSampler, nullptr);
+    m_worldSampler  = next;
+    m_textureMinLod = minLod;
+    HE_LOG_INFO(RHI, "VulkanRenderer: texture quality %d - world and material samplers start at mip level %.0f",
+                m_quality.textureQuality, minLod);
 }
 
 void VulkanRenderer::SetSSAOSettings(const SSAOSettings& s)

@@ -186,8 +186,8 @@ void install(Docs::Library& lib)
 		probe.type   = HC::NodeType::EngineCall;
 		probe.s      = fn.id;
 		probe.hasArg = fn.isExec;
-		for (const auto& p : fn.params)  probe.params.push_back({ p.name, p.type, p.isArray });
-		for (const auto& r : fn.results) probe.results.push_back({ r.name, r.type, r.isArray });
+		for (const auto& p : fn.params)  probe.params.push_back(HE::api::toFuncParam(p));
+		for (const auto& r : fn.results) probe.results.push_back(HE::api::toFuncParam(r));
 
 		// The Target rule is written once, here, for every row that has it —
 		// rather than repeated into sixty hand-written descriptions, where it

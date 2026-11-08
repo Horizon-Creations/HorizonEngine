@@ -412,6 +412,7 @@ struct HE_API ProjectSettings
     ProjectPhysicsSettings       physics;
     ProjectRenderDefaults        renderDefaults;
     ProjectGraphics              graphics;
+    ProjectAutoQuality           autoQuality;
     ProjectInputSettings         input;
     ProjectAntiCheatSettings     antiCheat;
     ProjectMultiplayerSettings   multiplayer;

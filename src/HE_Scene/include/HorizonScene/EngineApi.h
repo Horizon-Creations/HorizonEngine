@@ -2387,6 +2387,10 @@ namespace settings {
         // values read as once a single value has moved off a preset.
         std::optional<std::string>   qualityPreset;     // "Low" … "Ultra"
         std::map<std::string, float> quality;           // field name → value
+        // Automatic quality (HE::QualityGovernor): the player's own switch. Unset = what
+        // the project says (ProjectAutoQuality::enabled). Choosing a preset sets it to
+        // false — a fixed preset and automation exclude each other.
+        std::optional<bool>          autoQuality;
     };
     inline constexpr const char* kMaster   = "Master";
     inline constexpr const char* kPrefsKey = "settings";
@@ -2420,6 +2424,13 @@ namespace settings {
         // the quality values, and when reset() takes them back (with the base).
         // The application puts them where its renderer push reads them.
         std::function<void(const HE::ProjectGraphics&, const HE::ProjectShadowSettings&)> applyQuality;
+        // Automatic quality: what the project says, and whether this application can run
+        // it at all. Only the exported game says yes: a controller that moves quality by
+        // the frame time must not run in the editor, whose frames every comparison there
+        // depends on. Where it is false the auto rows answer "off" and setAutoQuality
+        // refuses (logged).
+        HE::ProjectAutoQuality baseAuto;
+        bool                   autoQualityAvailable = false;
     };
     // install applies every value once (the start-up apply); uninstall only
     // drops the hooks. The values stay — the camera rig keeps reading them.
@@ -2463,6 +2474,47 @@ namespace settings {
     // 0 for an unknown field (logged). Without a host, the field's default.
     float qualityValue(const std::string& field);
     std::vector<std::string> qualityFields();
+
+    // ── The same settings as levels: Low … Ultra per area ──
+    // `setting` is a QualitySetting (the built-in enum), `level` a QualityLevel
+    // (Low 0, Medium 1, High 2, Ultra 3, Custom 4); both travel as ints. A graph
+    // switches on the answer with Switch on Enum.
+    //   qualityLevel  what the area reads as: the preset row its values equal,
+    //                 else Custom (tie-break: see HE::qualityLevelOf).
+    //   setQualityLevel  writes that area from the level's preset row, over the
+    //                 player's other choices; Overall is the preset. Custom keeps
+    //                 what is there and answers true. False (logged) for a setting
+    //                 or level out of range.
+    int  qualityLevel(int setting);
+    bool setQualityLevel(int setting, int level);
+    // The engine's settings as an OBJECT: engineSettings() hands out one fixed
+    // reference (kEngineSettingsRef, never an id a HorizonCode instance can have),
+    // and qualityOf / setQualityOf are the two rows above taking it first, so a
+    // graph can pass "the settings" around and ask it. The value of the reference
+    // is not looked at (0 works too); there is only one set of settings.
+    inline constexpr uint32_t kEngineSettingsRef = 0xE5000001u;
+    uint32_t engineSettings();
+    int      qualityOf(uint32_t engine, int setting);
+    bool     setQualityOf(uint32_t engine, int setting, int level);
+
+    // ── Automatic quality ──
+    // The game moves its OVERALL level by itself to hold the project's target frame
+    // rate (HE::QualityGovernor: smoothed frame time, a step per few seconds, no
+    // pumping). Layers over the preset: project values → the governor's level →
+    // the player's preset (which ends automation) → the player's single values, so
+    // an area the player pinned stays pinned. The governor's level is never saved.
+    //   autoQuality         is it running now
+    //   setAutoQuality      switch it on or off (saved by Save Settings). On, it starts
+    //                       from the project's overall preset; the player's own preset
+    //                       is dropped, their single values stay. False and logged where
+    //                       the application cannot run it (the editor).
+    //   autoQualityLevel    the governor's level as a QualityLevel (Low … Ultra), Custom
+    //                       when automation is off
+    //   tickAutoQuality     the game calls this once a frame with the real frame time
+    bool autoQuality();
+    bool setAutoQuality(bool on);
+    int  autoQualityLevel();
+    void tickAutoQuality(float realFrameSeconds);
     // Persist everything above (NOT the bindings — input.saveBindings) and
     // answer whether the prefs file took it. Nothing chosen removes the key.
     bool  save();
@@ -3136,7 +3188,27 @@ struct ApiParam
     // "Self" instead of a zero, and the generated node reference says so in
     // words. Both ask this flag rather than keeping their own list.
     bool        selfDefault = false;
+    // Enum pins: the registry key of the enum (HE::TypeRegistry, e.g.
+    // HE::kQualityLevelEnum). Empty for every other pin. A row's C++ signature
+    // takes an `int` for it, and the Value carries the entry's number; the key is
+    // what lets the graph editor draw the pin in the enum's name, offer its
+    // entries on an unwired pin, and connect it to a Switch on Enum.
+    const char* typeName = "";
 };
+
+// The node pin an engine-row parameter becomes. One function for every place that
+// mirrors a row's pins onto a node (the add menu, a pasted graph, the MCP tools,
+// the node reference, the code generator), because a copy that forgets the
+// enum's key draws the pin as a plain Int and silently breaks the Switch behind it.
+inline HorizonCode::FuncParam toFuncParam(const ApiParam& p)
+{
+    HorizonCode::FuncParam f;
+    f.name    = p.name ? p.name : "";
+    f.type    = p.type;
+    f.isArray = p.isArray;
+    f.typeName = p.typeName ? p.typeName : "";
+    return f;
+}
 
 // How generated C++ reaches a row WITHOUT the registry (HorizonEngine/
 // HorizonEngineApi.h). The registry's params/results say what the node carries;

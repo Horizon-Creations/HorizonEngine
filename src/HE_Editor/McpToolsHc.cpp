@@ -863,8 +863,8 @@ void registerHcTools(McpToolRegistry& registry, McpHcHooks hooks)
 						"This document's add menu does not offer the engine group of '" +
 						n.s + "'. hc_documents reports which groups it allows.");
 				n.hasArg = fn->isExec;
-				for (const auto& p : fn->params)  n.params.push_back({ p.name, p.type, p.isArray });
-				for (const auto& r : fn->results) n.results.push_back({ r.name, r.type, r.isArray });
+				for (const auto& p : fn->params)  n.params.push_back(HE::api::toFuncParam(p));
+				for (const auto& r : fn->results) n.results.push_back(HE::api::toFuncParam(r));
 			}
 
 			// The id is minted here rather than by `Graph::addNode`, because the

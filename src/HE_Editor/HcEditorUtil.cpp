@@ -1371,8 +1371,8 @@ std::string drawEngineApiMenu(const std::string& lowerQuery,
 			HorizonCode::Node tmp;
 			tmp.type = HorizonCode::NodeType::EngineCall;
 			tmp.s = fn.id; tmp.hasArg = fn.isExec;
-			for (const auto& p : fn.params)  tmp.params.push_back({ p.name, p.type, p.isArray });
-			for (const auto& r : fn.results) tmp.results.push_back({ r.name, r.type, r.isArray });
+			for (const auto& p : fn.params)  tmp.params.push_back(HE::api::toFuncParam(p));
+			for (const auto& r : fn.results) tmp.results.push_back(HE::api::toFuncParam(r));
 			if (ImGui::BeginTooltip())
 			{
 				// Scoped: PopTextWrapPos acts on the CURRENT window, and EndTooltip

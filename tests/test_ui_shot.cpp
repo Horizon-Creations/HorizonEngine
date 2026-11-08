@@ -8,6 +8,7 @@
 #include "EditorTheme.h"
 #include "EditorWidgets.h"
 #include "HcEditorUtil.h"
+#include "HcGraphHost.h"
 #include "HcNodeReference.h"
 #include "GraphEditor.h"   // the canvas under test: node draw order vs on-node widgets
 #include "EditorReference.h"
@@ -3842,4 +3843,128 @@ TEST_CASE("search palette: typing ranks, the arrow walks, Enter picks")
 	picked.clear();
 	for (int i = 0; i < 5; ++i) frame(false);
 	CHECK(picked.empty());
+}
+
+// ── Get Engine Settings, Quality Of and Switch on Enum on the real canvas ────
+// What a graph author sees for the engine-settings nodes: the object from Get
+// Engine Settings feeding Set Quality Of, the enum pins drawn as enum pins, and a
+// Switch on Enum with one exec out per quality level.
+TEST_CASE("ui shot: the engine-settings nodes on the HorizonCode canvas")
+{
+	constexpr int W = 1180, H = 560;
+	Harness harness(W, H);
+	namespace HC = HorizonCode;
+
+	HC::Graph graph;
+	const auto add = [&](HC::Node n, float x, float y)
+	{
+		n.x = x; n.y = y;
+		return graph.addNode(std::move(n));
+	};
+	const auto call = [&](const char* id, float x, float y)
+	{
+		const HE::api::ApiFn* fn = HE::api::find(id);
+		REQUIRE(fn != nullptr);
+		HC::Node n; n.type = HC::NodeType::EngineCall; n.s = id; n.hasArg = fn->isExec;
+		for (const auto& p : fn->params)  n.params.push_back(HE::api::toFuncParam(p));
+		for (const auto& r : fn->results) n.results.push_back(HE::api::toFuncParam(r));
+		return add(std::move(n), x, y);
+	};
+	const auto constEnum = [&](const char* type, int v, float x, float y)
+	{
+		HC::Node n; n.type = HC::NodeType::ConstEnum; n.typeName = type; n.f[0] = float(v);
+		return add(std::move(n), x, y);
+	};
+	const auto base = [&](int id, int which)
+	{
+		const HC::Node* n = graph.findNode(id);
+		const auto sig = HC::signatureOf(*n);
+		const int execOut0 = int(sig.execIns.size());
+		const int dataIn0  = execOut0 + int(sig.execOuts.size());
+		const int dataOut0 = dataIn0 + int(sig.dataIns.size());
+		return which == 0 ? 0 : which == 1 ? execOut0 : which == 2 ? dataIn0 : dataOut0;
+	};
+	const auto exec = [&](int a, int b, int out = 0)
+	{ REQUIRE(graph.connect(a, base(a, 1) + out, b, base(b, 0))); };
+	const auto data = [&](int a, int ai, int b, int bi)
+	{ REQUIRE(graph.connect(a, base(a, 3) + ai, b, base(b, 2) + bi)); };
+
+	HC::Node ev; ev.type = HC::NodeType::Event; ev.s = "Apply";
+	const int evId  = add(std::move(ev), 20.0f, 60.0f);
+	const int eng   = call("settings.engine",     20.0f, 220.0f);
+	const int set   = call("settings.setQualityOf", 250.0f, 120.0f);
+	const int what  = constEnum(HE::kQualitySettingEnum, 8, 20.0f, 340.0f);
+	const int lvl   = constEnum(HE::kQualityLevelEnum, 0, 20.0f, 440.0f);
+	const int get   = call("settings.qualityLevel", 520.0f, 300.0f);
+	const int what2 = constEnum(HE::kQualitySettingEnum, 8, 300.0f, 440.0f);
+	HC::Node swn; swn.type = HC::NodeType::SwitchOnEnum; swn.typeName = HE::kQualityLevelEnum;
+	HE::EnumDef def;
+	REQUIRE(HE::TypeRegistry::instance().getEnum(HE::kQualityLevelEnum, def));
+	for (const auto& e : def.entries) swn.params.push_back({ e.name, HC::PinType::Exec, false, {} });
+	const int sw = add(std::move(swn), 800.0f, 120.0f);
+
+	exec(evId, set);
+	data(eng, 0, set, 0);
+	data(what, 0, set, 1);
+	data(lvl, 0, set, 2);
+	data(what2, 0, get, 0);
+	exec(set, sw);
+	data(get, 0, sw, 0);
+
+	GraphEditor::State ge;
+	ge.pan  = ImVec2(0.0f, 0.0f);
+	ge.zoom = 1.0f;
+	int selected = 0;
+	HcGraphHost::Host host;
+	host.graph        = &graph;
+	host.ge           = &ge;
+	host.selectedNode = &selected;
+	host.title        = [](const HC::Node& n) { return HcGraphHost::defaultNodeTitle(n); };
+	GraphEditor::Model m = HcGraphHost::buildModel(host);
+
+	const he_ui::Image img = shoot("hc-engine-settings-nodes", W, H, 4, [&](int)
+	{
+		ImGui::SetNextWindowPos(ImVec2(0, 0));
+		ImGui::SetNextWindowSize(ImVec2(float(W), float(H)));
+		ImGui::Begin("##canvas", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+		GraphEditor::draw("##ge", m, ge, ImVec2(float(W), float(H)));
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 20000);
+	CHECK(HcGraphHost::defaultNodeTitle(*graph.findNode(eng)) == "Get Engine Settings");
+	CHECK(HcGraphHost::defaultNodeTitle(*graph.findNode(set)) == "Set Quality Of");
+}
+
+// The same nodes as the author finds them: the add menu, searched for "quality".
+TEST_CASE("ui shot: the add menu finds the engine-settings nodes")
+{
+	constexpr int W = 520, H = 560;
+	Harness harness(W, H);
+	namespace HC = HorizonCode;
+
+	HC::Graph graph;
+	GraphEditor::State ge;
+	int selected = 0;
+	HcGraphHost::Host host;
+	host.graph        = &graph;
+	host.ge           = &ge;
+	host.selectedNode = &selected;
+	host.title        = [](const HC::Node& n) { return HcGraphHost::defaultNodeTitle(n); };
+	// The level script's own categories: the engine API sits under them all.
+	const HcGraphHost::MenuOpts menus = {
+		{ "Flow", "Events", "Reference", "UI", "Literals", "Math", "Logic", "String",
+		  "Array", "Set", "Map", "Debug" }, {}, {}, {} };
+	host.menus = &menus;
+
+	const he_ui::Image img = shoot("hc-add-menu-quality", W, H, 4, [&](int)
+	{
+		ImGui::SetNextWindowPos(ImVec2(10, 10));
+		ImGui::SetNextWindowSize(ImVec2(float(W) - 20.0f, float(H) - 20.0f));
+		ImGui::Begin("##addmenu", nullptr, ImGuiWindowFlags_NoSavedSettings);
+		HcGraphHost::drawAddMenuTail(host, "quality");
+		ImGui::End();
+	});
+	REQUIRE(img.valid());
+	CHECK(img.inkedPixels(kBgR, kBgG, kBgB) > 5000);
 }

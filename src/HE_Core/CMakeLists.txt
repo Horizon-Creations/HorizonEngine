@@ -72,6 +72,7 @@ add_library(HorizonCore SHARED
 	src/Audio/AudioBusConfig.cpp
 	src/Audio/AudioEdit.cpp
 	src/Project/ProjectSettings.cpp
+	src/Project/QualityGovernor.cpp
 	src/Types/TypeRegistry.cpp
 	src/ContentManager/AssetRefRetarget.cpp
 	src/ContentManager/AssetRefScan.cpp

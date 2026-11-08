@@ -256,6 +256,8 @@ add_executable(he_tests
     test_input_gamepad.cpp
     test_input_rebind.cpp
     test_player_settings.cpp
+    test_quality_enums.cpp
+    test_quality_governor.cpp
     test_eventbus.cpp
     test_scripting.cpp
     test_scripting_binding.cpp
@@ -1253,7 +1255,7 @@ set(HCGEN_CLASSES
     LatentFlow Enums Structs GameInstance GiCaller EngineEvents
     CastTarget Casts InheritBase InheritDerived
     InheritNovarsBase InheritNovars InputActions Containers Reroutes
-    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings QualitySettings PlayerSlots
+    CheatEvent DatetimeDouble SequenceTransport InputRumble InputRebind PlayerSettings QualitySettings QualityLevels PlayerSlots
     PullConstruct PullSpawner BindTo
     ExtractDestruct ExtractDerived ExtractListener
     EngineWorld

@@ -1466,6 +1466,43 @@ TEST_CASE("codegen parity: quality_settings (the quality rows reach one store id
 	HE::api::settings::resetToDefaults();
 }
 
+TEST_CASE("codegen parity: quality_levels (the engine's enums and the settings object, interpreted and compiled)")
+{
+	HE::api::settings::resetToDefaults();
+	std::vector<std::string> calls;
+	HE::api::settings::Host host;
+	host.applyQuality = [&](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
+	{
+		calls.push_back("tex " + std::to_string(g.textureQuality) + " shadow " + std::to_string(s.resolution));
+	};
+	HE::api::settings::install(std::move(host));
+	calls.clear();
+
+	ParityPair p("fix/quality_levels");
+	p.fire("Apply");
+	// Textures set to Low through the object, read back as Low, and the Switch on the
+	// built-in enum took its "low" branch: the same in both halves.
+	CHECK(p.var("route").s == "low");
+
+	p.fire("Shadows");
+	// Set Quality Level (Shadows, Ultra) then Get Quality Level (Shadows): Ultra = 3.
+	CHECK(p.var("shadows").i == 3);
+
+	// fire() runs the interpreted half and then the compiled one for each event, so the
+	// host heard: Apply (interpreted), Apply (compiled), Shadows (interpreted),
+	// Shadows (compiled). Textures stay Low from the first event on.
+	const std::vector<std::string> expected = {
+		"tex 0 shadow 2048", "tex 0 shadow 2048", "tex 0 shadow 4096", "tex 0 shadow 4096" };
+	REQUIRE(calls.size() == expected.size());
+	for (size_t i = 0; i < expected.size(); ++i)
+	{
+		INFO("call ", i);
+		CHECK(calls[i] == expected[i]);
+	}
+	HE::api::settings::uninstall();
+	HE::api::settings::resetToDefaults();
+}
+
 TEST_CASE("codegen parity: player_slots (the local-player rows read one table identically)")
 {
 	// Three local players, as PlayerHost would register them.

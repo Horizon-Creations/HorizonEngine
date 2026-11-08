@@ -901,8 +901,33 @@ void drawQualityPage(AppContext& ctx)
 		if (Row::combo("Material quality##qmat", &m, kLevel, 3)) { work.materialQuality = m; edited = true; }
 	}
 	hint("Texture quality keeps material textures off their finest one or two mip levels "
-	     "(Metal today; a texture with no mip chain does not change). Material quality is "
-	     "stored for the day a material feature can be switched off by level.");
+	     "(Metal today; a texture with no mip chain does not change). Material quality gives "
+	     "procedural noise in materials fewer octaves at Low and Medium, and the Quality "
+	     "Level node in a material graph reads it.");
+	ImGui::Spacing();
+
+	// Not part of the preset: the project's switch for the game's frame-time governor.
+	ImGui::SeparatorText("Automatic quality");
+	bool autoEdited = false;
+	{
+		HE::ProjectAutoQuality aq = p.settings.autoQuality;
+		static const char* const kAutoLevel[] = { "Low", "Medium", "High", "Ultra" };
+		autoEdited |= EditorWidgets::checkbox("Automatic quality##qauto", &aq.enabled);
+		if (aq.enabled)
+		{
+			autoEdited |= Row::dragFloat("Target frame rate##qautofps", &aq.targetFps, 1.0f,
+			                             HE::ProjectAutoQuality::kMinFps,
+			                             HE::ProjectAutoQuality::kMaxFps, "%.0f fps");
+			if (Row::combo("Lowest level##qautomin", &aq.minLevel, kAutoLevel, 4)) autoEdited = true;
+			if (Row::combo("Highest level##qautomax", &aq.maxLevel, kAutoLevel, 4)) autoEdited = true;
+			aq.maxLevel = std::max(aq.maxLevel, aq.minLevel);
+		}
+		if (autoEdited) p.settings.autoQuality = aq;
+	}
+	hint("In the game only: when the frame rate stays below the target for a couple of "
+	     "seconds the quality steps down one level, and after a long steady stretch it tries "
+	     "one level up again. A player who picks a preset turns it off. The editor viewport never changes "
+	     "level by itself.");
 
 	// The model follows every change; the file is written once, when no control is held.
 	static bool s_dirty = false;
@@ -914,6 +939,7 @@ void drawQualityPage(AppContext& ctx)
 		sh = wsh;
 		s_dirty = true;
 	}
+	if (autoEdited) s_dirty = true;
 	if (s_dirty && !ImGui::IsAnyItemActive())
 	{
 		s_dirty = false;

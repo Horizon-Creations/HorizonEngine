@@ -56,7 +56,7 @@ public:
         float lightDir[8][4]    = {}; // xyz = travel direction, w = cos(spot half angle)
         float lightColor[8][4]  = {}; // rgb = colour,           w = intensity
         float lightParams[8][4] = {}; // x = range
-        float counts[4]         = {}; // x = light count
+        float counts[4]         = {}; // x = light count; y = material quality + 1 (0 = not filled → High)
         // Screen-space GI shadow inputs for heLitP(): xy = viewport size,
         // z = 1 when the GI masks are bound and valid this frame (0 → heLitP
         // skips the mask samples entirely; UI/preview passes leave this 0).

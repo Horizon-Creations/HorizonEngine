@@ -643,10 +643,19 @@ public:
         // TextureMinLodForQuality). A texture cooked with a single level has no
         // coarser one to fall back to and does not change.
         int textureQuality  = 2;
-        // Reserved: no backend gates a material feature on it yet.
+        // 0 Low, 1 Medium, 2 High. Reaches every graph material as the Quality Level
+        // node (a lane of the lighting block, HE::FillMaterialWind) and shortens the
+        // engine's own noise loops at Low and Medium; High is the full quality every
+        // material had before.
         int materialQuality = 2;
     };
-    virtual void SetQualitySettings(const QualitySettings& s) { m_quality = s; }
+    // Stores the settings; the base class also publishes materialQuality for the
+    // shared lighting fill (MaterialQualityLevel), so a backend that overrides this
+    // must call it.
+    virtual void SetQualitySettings(const QualitySettings& s);
+    // The material quality the lighting fill writes into the Lighting block's
+    // quality lane (0 Low .. 2 High). Process-wide, like the setting itself.
+    static int MaterialQualityLevel();
     const QualitySettings& GetQualitySettings() const { return m_quality; }
     // The finest mip level a sampler may use at this texture quality: 2 / 1 / 0
     // for Low / Medium / High, anything else counts as High.
