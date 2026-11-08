@@ -181,7 +181,7 @@ std::vector<PageRender> RvtManager::updateAll(const std::vector<VolumeView>& vie
 		const bool repaint = it != m_pages.end();
 		if (budget == 0) { if (!repaint) { ++missing; ++m_missing[w.key.volume]; } continue; }
 		uint32_t slot = 0;
-		if (repaint) { slot = it->second.slot; it->second.dirty = false; }
+		if (repaint) { slot = it->second.slot; if (it->second.dirty) ++m_dirtyVersion; it->second.dirty = false; }
 		else
 		{
 			if (!acquireSlot(slot)) { ++m_stats.starved; ++missing; ++m_missing[w.key.volume]; continue; }
@@ -213,6 +213,7 @@ uint32_t RvtManager::invalidateRect(uint16_t volume, glm::vec2 mn, glm::vec2 mx)
 		glm::vec2 pmn, pmx;
 		L.pageRect(mip, x, y, pmn, pmx, true);
 		if (pmx.x <= mn.x || pmn.x >= mx.x || pmx.y <= mn.y || pmn.y >= mx.y) continue;
+		if (!kv.second.dirty) ++m_dirtyVersion;
 		kv.second.dirty = true;
 		++n;
 	}
@@ -223,7 +224,7 @@ uint32_t RvtManager::invalidateVolume(uint16_t volume)
 {
 	uint32_t n = 0;
 	for (auto& kv : m_pages)
-		if (uint16_t(kv.first >> 40) == volume) { kv.second.dirty = true; ++n; }
+		if (uint16_t(kv.first >> 40) == volume) { if (!kv.second.dirty) ++m_dirtyVersion; kv.second.dirty = true; ++n; }
 	return n;
 }
 
@@ -245,14 +246,24 @@ uint32_t RvtManager::resolve(uint16_t volume, int mip, int x, int y) const
 	return kPageTableInvalid;
 }
 
-std::vector<uint32_t> RvtManager::pageTable(uint16_t volume, int mip) const
+std::vector<uint32_t> RvtManager::pageTable(uint16_t volume, int mip, bool markStale) const
 {
 	std::vector<uint32_t> t;
 	if (!hasVolume(volume) || mip >= m_volumes[volume].layout.mipCount()) return t;
 	const int n = m_volumes[volume].layout.pagesPerSide(mip);
 	t.resize(size_t(n) * size_t(n));
 	for (int y = 0; y < n; ++y)
-		for (int x = 0; x < n; ++x) t[size_t(y) * size_t(n) + size_t(x)] = resolve(volume, mip, x, y);
+		for (int x = 0; x < n; ++x)
+		{
+			uint32_t e = resolve(volume, mip, x, y);
+			if (markStale && e != kPageTableInvalid)
+			{
+				// The page that actually holds the picture (the cell itself or its resident ancestor) is the one that is stale.
+				const int em = pageTableMip(e);
+				if (isDirty(PageKey{ volume, uint8_t(em), uint16_t(x >> (em - mip)), uint16_t(y >> (em - mip)) })) e |= kPageTableStale;
+			}
+			t[size_t(y) * size_t(n) + size_t(x)] = e;
+		}
 	return t;
 }
 

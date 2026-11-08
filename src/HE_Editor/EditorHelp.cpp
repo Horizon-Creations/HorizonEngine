@@ -2754,6 +2754,16 @@ namespace
 	  "The G-buffer's emissive colour on its own — what glows, and how much, "
 	  "before bloom gets to it. Deferred render path only.",
 	  "", "editor#viewport" },
+	{ "Viewport View Mode/Virtual Texture", "",
+	  "The page map of the Runtime Virtual Texture, drawn unlit. A landscape read "
+	  "from pages is coloured by the mip of the page it shows (green is the "
+	  "finest, each coarser mip steps round the colour wheel); thin white lines "
+	  "are page borders, dark diagonal stripes mark a page that stands in for a "
+	  "finer one that is not painted yet, a pale checker marks a painted page "
+	  "that is stale and waits to be repainted, and flat black is no page at all. "
+	  "Needs the RVT switch on (Preferences > Rendering) and a landscape drawn "
+	  "from pages; anything else is shown unlit.",
+	  "", "editor#viewport" },
 
 	// ── World Outliner ───────────────────────────────────────────────────────
 	{ "World Outliner/Create Child", "",

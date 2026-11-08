@@ -269,7 +269,7 @@ layout(std140, set = 0, binding = 0) uniform HeLighting {
     vec4 cloudShadowB;   // x = strength (0 = off / not bound)
     vec4 specAA;         // x = specular-AA strength (0 = off), y = 1 in geometry passes (own normal + valid derivatives)
     vec4 shadowBias;     // CSM receiver bias: x = slope-scaled factor, y = minimum (project ShadowSettings; filled with csmVP)
-    vec4 viewMode;       // x = 1 → Unlit/Wireframe view: heLitP hands the base colour back, heApplyFog is a no-op (scene-pass fill sites only)
+    vec4 viewMode;       // x = 1 → Unlit/Wireframe view: heLitP hands the base colour back, heApplyFog is a no-op (scene-pass fill sites only); y = 1 → RVT debug view (heRvtSample shows its page map)
     vec4 clusterParams;  // HE_CLUSTERED variant only: x/y/z = cluster grid dims (x = 0 → off, window lights only), w = gridZ / log(far/near)
     vec4 clusterCamFwd;  // xyz = camera forward (cluster depth axis), w = cluster near plane
     vec4 weather2;       // x = puddle size in metres (the Weather node's 5th output)

@@ -279,6 +279,15 @@ TEST_CASE("ViewMode: the headless override reads VIEWMODE first, then the old GB
 	// Garbage keeps the UI's value rather than inventing a mode.
 	CHECK(viewModeOverride(ViewMode::Unlit, "bogus", nullptr) == ViewMode::Unlit);
 	CHECK(viewModeOverride(ViewMode::Unlit, "42",    nullptr) == ViewMode::Unlit);
+	// The RVT debug view (append-only: 7, after the G-buffer views, which keep their numbers).
+	CHECK(viewModeOverride(ViewMode::Lit, "rvt", nullptr) == ViewMode::RvtDebug);
+	CHECK(viewModeOverride(ViewMode::Lit, "7",   nullptr) == ViewMode::RvtDebug);
+	CHECK(static_cast<int>(ViewMode::GBufferEmissive) == 6);
+	CHECK(HE::kViewModeCount == 8);
+	// Not a G-buffer view, so it never needs the deferred path and never gets a G-buffer index.
+	CHECK_FALSE(HE::viewModeIsGBuffer(ViewMode::RvtDebug));
+	CHECK(HE::viewModeGBufferIndex(ViewMode::RvtDebug) == 0);
+	CHECK(HE::resolveViewMode(ViewMode::RvtDebug, /*deferred=*/false) == ViewMode::RvtDebug);
 }
 
 TEST_CASE("EditorCamera: the wheel during fly-look changes the fly speed, not the distance")

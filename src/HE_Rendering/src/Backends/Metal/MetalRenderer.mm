@@ -16617,6 +16617,8 @@ void MetalRenderer::FillMaterialLighting(HE::MaterialShaderLibrary::Lighting& ma
 	// untouched — graph materials, the deferred resolve and the SSR composite
 	// all read this. Scene-pass fill only; previews keep the zero.
 	matLight.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+	// y = 1 → the Runtime Virtual Texture lookup (RvtLookup.h) shows its page map instead of the ground (RVT debug view).
+	matLight.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;
 }
 
 // ─── Clustered lighting build (plan P7) ──────────────────────────────────────
@@ -17875,6 +17877,9 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 		HE::FillMaterialWind(GetEnvironment(), matLight);
 		HE::FillMaterialWeather(GetEnvironment(), matLight); // Weather node + the generic wet/snow response
 		HE::FillMaterialWater(GetWaterRipples(), matLight);  // Water Ripple node, same rings as the forward pass
+		// The RVT debug view (viewMode.y) is read by the lookup in THIS pass: the G-buffer's base colour is the page map, the
+		// resolve (unlit, viewMode.x) hands it to the screen.
+		matLight.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;
 	}
 	[encoder setFragmentBytes:&matLight length:sizeof(matLight)
 	                  atIndex:HE::MaterialShaderLibrary::kMetalLightingBufferIndex];

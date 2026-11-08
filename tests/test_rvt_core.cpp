@@ -163,6 +163,48 @@ TEST_CASE("RVT: a dirty rect re-paints exactly the pages it touches, once")
 	CHECK(m.invalidateVolume(v) == m.stats().resident);
 }
 
+TEST_CASE("RVT: the debug view's stale mark rides in bit 30 of the table entry, only on request, and follows the dirty flag")
+{
+	RvtManager m(1000, 100000);
+	const uint16_t v = m.addVolume(square512());
+	m.beginFrame(); m.update(v, viewAt(256, 256));
+	const std::vector<uint32_t> clean = m.pageTable(v, 0);
+	const uint64_t dv0 = m.dirtyVersion();
+
+	// Nothing dirty: the marked table is the plain one.
+	CHECK(m.pageTable(v, 0, /*markStale=*/true) == clean);
+
+	CHECK(m.invalidateRect(v, { 240, 240 }, { 245, 245 }) == 5);
+	CHECK(m.dirtyVersion() > dv0);                    // the driver's cue to upload the table again
+	CHECK(m.invalidateRect(v, { 240, 240 }, { 245, 245 }) == 5);   // already dirty: counted, no news
+	const uint64_t dv1 = m.dirtyVersion();
+	CHECK(m.invalidateRect(v, { 240, 240 }, { 245, 245 }) == 5);
+	CHECK(m.dirtyVersion() == dv1);
+
+	// Without the request the table does not change (every backend decodes it as it always did).
+	CHECK(m.pageTable(v, 0) == clean);
+	const std::vector<uint32_t> marked = m.pageTable(v, 0, true);
+	int stale = 0;
+	for (size_t i = 0; i < marked.size(); ++i)
+	{
+		CHECK(marked[i] != kPageTableInvalid);
+		CHECK((marked[i] & ~kPageTableStale) == clean[i]);   // only that one bit differs
+		CHECK(pageTableMip(marked[i]) == pageTableMip(clean[i]));
+		CHECK(pageTableSlot(marked[i]) == pageTableSlot(clean[i]));
+		if (pageTableStale(marked[i])) ++stale;
+	}
+	CHECK(stale == 1);                                 // the one mip-0 page under the stroke
+	CHECK(pageTableStale(m.pageTable(v, 0, true)[size_t(7) * 16 + 7]));
+
+	// A repaint clears it.
+	m.beginFrame(); m.update(v, viewAt(256, 256));
+	CHECK(m.dirtyVersion() > dv1);
+	for (uint32_t e : m.pageTable(v, 0, true)) CHECK_FALSE(pageTableStale(e));
+	for (int mip = 0; mip < 5; ++mip)
+		for (uint32_t e : m.pageTable(v, mip, true)) CHECK_FALSE(pageTableStale(e));
+	CHECK(pageTableStale(kPageTableInvalid) == false);   // "no page" is never a stale page
+}
+
 TEST_CASE("RVT: a full pool evicts the least recently used page, never one the view needs or a pinned one")
 {
 	RvtManager m(80, 100000);                         // 71 pages for the view, 9 spare

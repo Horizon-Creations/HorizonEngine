@@ -4105,6 +4105,8 @@ void EditorApplication::OnRender(float dt)
 				{
 					if (!m_rvtLandscape) m_rvtLandscape = std::make_shared<HE::landscape::RvtLandscape>(contentManager(), *renderer());
 					HE_PROFILE_SCOPE_N("RvtLandscape");
+					// The viewport's "Virtual Texture" view mode: the tables carry the stale marks while it is on.
+					m_rvtLandscape->setDebugView(renderer()->GetViewMode() == HE::ViewMode::RvtDebug);
 					m_rvtLandscape->tick(*m_editorWorld, m_editorCamera.position());
 				}
 				else if (m_rvtLandscape)
@@ -11608,6 +11610,49 @@ void EditorApplication::dumpFrameHeadless()
 				            mStale, xs, mFresh, xf, ok ? regionMean(afterDirect, stale, 20.0f, -15.0f, 14.0f) : 0.0, ok ? regionMean(afterDirect, after, 20.0f, -15.0f, 14.0f) : 0.0);
 				writeBMP(m_dumpPath + ".rvt_drv_sculpt_stale.bmp", stale, W, H);
 				writeBMP(m_dumpPath + ".rvt_drv_sculpt_after.bmp", after, W, H);
+			}
+
+			// C2) the viewport's Virtual Texture view mode (RVT 2.0 step 5): the page map of the landscape, then the same after a
+			// sculpt stroke with a one-page budget, so the stale pages stay stale for a few frames and show their mark.
+			{
+				for (int i = 0; i < 40 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				drv.setDebugView(true);
+				r->SetViewMode(HE::ViewMode::RvtDebug);
+				sceneTick();                                                                 // the table again, with the marks column
+				std::vector<uint8_t> dbgClean, dbgStale, lit;
+				bool ok2 = capture(dbgClean);
+				auto di = drv.debugInfo();
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: clean state: %u resident, %u stale (grid %d x %d)", di.resident, di.stale, di.gridSide, di.gridSide);
+				HE::landscape::RvtLandscape::Settings slow = cfg; slow.maxPagesPerFrame = 1; drv.setSettings(slow);
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				TerrainSculpt::ensureHeights(tc);
+				const float cx = -30.0f, cz = 25.0f, rad = 14.0f;
+				const float step = tc.sizeX / float(tc.resolution - 1);
+				for (uint32_t zi = 0; zi < tc.resolution; ++zi)
+					for (uint32_t xi = 0; xi < tc.resolution; ++xi)
+					{
+						const float x = -tc.sizeX * 0.5f + float(xi) * step, z = -tc.sizeZ * 0.5f + float(zi) * step;
+						const float d = std::sqrt((x - cx) * (x - cx) + (z - cz) * (z - cz)) / rad;
+						if (d < 1.0f) tc.sculptHeights[size_t(zi) * tc.resolution + xi] += 4.0f * 0.5f * (1.0f + std::cos(d * 3.14159265f));
+					}
+				TerrainSculpt::markRegionDirty(tc, cx - rad - step, cz - rad - step, cx + rad + step, cz + rad + step);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				drv.tick(*m_editorWorld, camPos);                                            // marks the pages, paints one
+				ok2 = ok2 && capture(dbgStale);
+				di = drv.debugInfo();
+				unsigned grid2 = 0; for (uint8_t c : di.grid) grid2 += c == 2 ? 1u : 0u;
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: after a stroke (1 page per frame): %u stale pages in the manager, %u stale cells in the mip-0 grid", di.stale, grid2);
+				double mDbg = 0; unsigned xDbg = 0;
+				if (ok2) diffStats(dbgClean, dbgStale, mDbg, xDbg);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER debug view: clean vs stale picture mean %.2f /255 (max %u), inside the stroke %.2f  [stale marks change the picture]",
+				            mDbg, xDbg, ok2 ? regionMean(dbgClean, dbgStale, cx, cz, rad) : 0.0);
+				if (ok2) { writeBMP(m_dumpPath + ".rvt_drv_debug_clean.bmp", dbgClean, W, H); writeBMP(m_dumpPath + ".rvt_drv_debug_stale.bmp", dbgStale, W, H); }
+				// the debug view off again: the same pages, no marks, the picture is the normal one
+				for (int i = 0; i < 60 && drv.manager()->stats().dirty > 0; ++i) sceneTick();
+				drv.setSettings(cfg);
+				drv.setDebugView(false);
+				r->SetViewMode(HE::ViewMode::Lit);
+				sceneTick();
 			}
 
 			// D) a paint stroke on layer 2, 10 m radius

@@ -113,7 +113,13 @@ struct Stats
 constexpr uint32_t kPageTableInvalid = 0xFFFFFFFFu;
 inline uint32_t packPageTableEntry(uint32_t slot, int effectiveMip) { return (slot & 0xFFFFFFu) | (uint32_t(effectiveMip) << 24); }
 inline uint32_t pageTableSlot(uint32_t e) { return e & 0xFFFFFFu; }
-inline int      pageTableMip(uint32_t e) { return int(e >> 24); }
+// Bit 30 (the mip byte's bit 6) is the debug view's "this page is stale" mark: set only by pageTable(.., markStale = true), which
+// the driver asks for while the editor's RVT debug view is on, so a normal table never carries it. A mip is < 32, so the mark
+// never collides with it, and every backend's table upload keeps the mip byte as it is (`eff << 24`), so it reaches the shader.
+// 0xFFFFFFFF stays unique: a real entry never has slot 0xFFFFFF.
+constexpr uint32_t kPageTableStale = 1u << 30;
+inline int      pageTableMip(uint32_t e) { return int((e >> 24) & 0x3Fu); }
+inline bool     pageTableStale(uint32_t e) { return e != kPageTableInvalid && (e & kPageTableStale) != 0; }
 
 class RvtManager
 {
@@ -153,9 +159,13 @@ public:
 	// Best resident page for (mip,x,y): the page itself or its nearest resident coarser ancestor.
 	uint32_t resolve(uint16_t volume, int mip, int x, int y) const;
 	// The page table of one mip, row-major (y * pagesPerSide + x), with the fallback filled in.
-	std::vector<uint32_t> pageTable(uint16_t volume, int mip) const;
+	// `markStale` (the RVT debug view only): the entry of a page that is resident but dirty gets kPageTableStale.
+	std::vector<uint32_t> pageTable(uint16_t volume, int mip, bool markStale = false) const;
 	// Bumped whenever residency changes (a page appeared/vanished): the GPU copy of the table is stale.
 	uint64_t tableVersion(uint16_t volume) const { return m_volumes[volume].tableVersion; }
+	// Bumped whenever a page becomes dirty or is repainted. Not part of tableVersion (a normal table does not show it); the
+	// driver adds it to the version it compares while the debug view is on, so the stale marks follow an invalidation.
+	uint64_t dirtyVersion() const { return m_dirtyVersion; }
 
 	Stats stats() const;
 	uint32_t freeSlots() const { return uint32_t(m_freeSlots.size()); }
@@ -174,6 +184,7 @@ private:
 	uint32_t m_poolSlots, m_maxRenders;
 	int      m_pinnedMips;
 	uint64_t m_frame = 1;
+	uint64_t m_dirtyVersion = 0;
 	mutable Stats m_stats;
 };
 

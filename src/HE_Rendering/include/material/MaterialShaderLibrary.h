@@ -153,6 +153,10 @@ public:
         //       (heApplyFog checks it too). Only the scene-pass fill sites set
         //       it (Metal FillMaterialLighting, GL fillMatLight); the zero every
         //       preview/thumbnail/UI site leaves keeps them shaded.
+        //   y = 1 → the RVT debug view (ViewMode::RvtDebug, RVT 2.0 step 5):
+        //       heRvtSample (RvtLookup.h) returns a page-map colour instead of the
+        //       ground. Metal and OpenGL fill it; D3D11/D3D12/Vulkan leave 0 (not
+        //       verified there), where the mode is just an unfilled flag.
         float viewMode[4]     = {};
         // Clustered forward lighting (append-only, v3.3, Thema 117): the gate and
         // grid of the CLUSTERED fragment variant (fragmentClustered). Exactly

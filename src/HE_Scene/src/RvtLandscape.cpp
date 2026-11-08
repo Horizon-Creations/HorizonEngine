@@ -722,11 +722,14 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     {
         Segment& seg = kv.second;
         if (!seg.volumeLive) continue;
-        const uint64_t tv = m_manager->tableVersion(seg.volume);
+        // The debug view's stale marks change with the dirty flags, which a normal table does not show: fold their version in
+        // (and the switch itself) so toggling the view or invalidating a page uploads the table again, and only then.
+        const uint64_t tv = m_manager->tableVersion(seg.volume)
+                          + (m_debugView ? ((m_manager->dirtyVersion() + 1) << 40) : 0ull);
         if (tv != seg.uploadedVersion)
         {
             std::vector<std::vector<uint32_t>> mips;
-            for (int m = 0; m < m_manager->layout(seg.volume).mipCount(); ++m) mips.push_back(m_manager->pageTable(seg.volume, m));
+            for (int m = 0; m < m_manager->layout(seg.volume).mipCount(); ++m) mips.push_back(m_manager->pageTable(seg.volume, m, m_debugView));
             if (m_renderer.SetRvtPageTable(seg.consumer, mips)) { seg.uploadedVersion = tv; ++st.tablesUploaded; }
         }
         // Drawn from the pages once the first fill is complete (before that the coarse fallback would show a blurry landscape

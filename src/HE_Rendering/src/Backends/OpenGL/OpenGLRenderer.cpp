@@ -12801,6 +12801,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// colour back untouched — graph materials and the deferred resolve
 			// both read this. Scene-pass fill only; previews keep the zero.
 			lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+			lit.viewMode[1] = RvtDebugViewActive() ? 1.0f : 0.0f;   // RVT debug view (RvtLookup.h)
 		};
 #endif
 

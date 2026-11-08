@@ -97,6 +97,10 @@ namespace HE::landscape
         void detach();
         // Draws the landscapes from their own material for a moment (a comparison) and back, without touching anything else.
         void pauseSwap(bool paused);
+        // The editor's RVT debug view is on (View Mode > Virtual Texture): the page tables carry the stale mark
+        // (rvt::kPageTableStale) and are uploaded again when a page turns stale or is repainted. Off, nothing differs.
+        void setDebugView(bool on) { m_debugView = on; }
+        bool debugView() const { return m_debugView; }
 
         // What a debug view shows (editor: the RVT debug view, step 5): the driver's state as of the last tick, and the
         // mip-0 page map of the nearest landscape that has a volume. A snapshot, copied: nothing in it points into the driver.
@@ -192,6 +196,7 @@ namespace HE::landscape
         uint32_t        m_pagePx = 0;
         bool            m_poolMade = false;
         bool            m_paused = false;
+        bool            m_debugView = false;
         FrameStats      m_lastPainting;              // the last tick that painted a page (for the debug view)
         entt::entity    m_debugEntity = entt::null;  // the nearest landscape with a volume, as of the last tick
         std::map<entt::entity, Segment>   m_segments;
