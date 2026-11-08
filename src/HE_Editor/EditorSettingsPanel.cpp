@@ -1,4 +1,5 @@
 #include "EditorSettingsPanel.h"
+#include "HardwarePage.h"        // Preferences » Preview » Hardware (Thema 337)
 #include "EditorGraphics.h"   // which rows the project's values lock
 #include "EditorApplication.h"           // AppContext, EditorConfig, EditorCamera
 #include "ToolSetupDialog.h"             // Tool Status "Fix" opens the setup dialog on that tool's row
@@ -2208,6 +2209,7 @@ constexpr NavItem kEditorItems[] = {
 constexpr NavItem kPreviewItems[] = {
 	{ Page::EditorRenderer,  "Editor Renderer" },
 	{ Page::ViewportQuality, "Graphics" },
+	{ Page::Hardware,        "Hardware" },
 };
 constexpr NavItem kConnectionItems[] = {
 	{ Page::SourceControl, "Source Control" },
@@ -2442,6 +2444,7 @@ void render(AppContext& ctx, const ImVec2& pos, const ImVec2& size)
 	}
 	else if (s_page == Page::SourceControl) drawSourceControlPage(ctx);
 	else if (s_page == Page::Status)      drawStatusPage(ctx);
+	else if (s_page == Page::Hardware)    HardwarePage::draw();
 	ImGui::EndChild();
 
 	// ── Footer ───────────────────────────────────────────────────────────────

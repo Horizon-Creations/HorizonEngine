@@ -250,6 +250,7 @@ add_executable(HorizonEditor WIN32
 	EditorTransformGizmo.cpp
 	EditorShortcuts.cpp
 	ShortcutsPage.cpp
+	HardwarePage.cpp
 	ScriptEditorPanel.cpp
 	CppClassEditorPanel.cpp
 	MaterialEditorPanel.cpp

@@ -949,6 +949,7 @@ add_executable(he_tests
     # HE_IMGUI_ENABLED (ImGuiKeyChord is its currency).
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HardwarePage.cpp
     # The World Outliner, for test_outliner_ui.cpp: it needs a real AppContext
     # (built there) and ImGui, and nothing else in this binary. Same per-file
     # HE_IMGUI_ENABLED as the gizmo — AppContext's layout depends on it, so the
@@ -1072,6 +1073,7 @@ set_source_files_properties(
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/EditorShortcuts.cpp
     test_editor_shortcuts.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/ShortcutsPage.cpp
+    ${CMAKE_SOURCE_DIR}/src/HE_Editor/HardwarePage.cpp
     test_shortcuts_ui.cpp
     ${CMAKE_SOURCE_DIR}/src/HE_Editor/OutlinerPanel.cpp
     test_outliner_ui.cpp

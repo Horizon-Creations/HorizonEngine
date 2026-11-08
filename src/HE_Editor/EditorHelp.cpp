@@ -5378,6 +5378,15 @@ namespace
 	  "editor, which are the two things that change its answer.",
 	  "", "editor#preferences" },
 
+	// ── Preferences » Preview » Hardware ─────────────────────────────────────
+	// A table of what this machine is, as text; only the copy button is a control.
+	{ "Hardware/Copy summary", "Copy summary",
+	  "Puts the main facts on the clipboard as text: processor, memory, graphics card with "
+	  "driver and video memory, display, and operating system. Paste it into a bug report or a "
+	  "forum post. A line says \"unknown\" when the machine could not tell. Nothing is sent "
+	  "anywhere; the same values are what a game reads through the hardware rows.",
+	  "", "editor#preferences" },
+
 	// ── The tool setup dialog (ToolSetupDialog) ──────────────────────────────
 	// cmake, the C++ compiler, git, Git LFS and the git identity in one list. It
 	// opens at startup when something is missing and from every "Set Up…" notice.
@@ -10213,6 +10222,7 @@ namespace
 		{ "settings.",       "editor-settings", "Settings Reference", "Preferences" },
 		{ "Source Control/", "editor-settings", "Settings Reference", "Source control setup" },
 		{ "Tool Status/",    "editor-settings", "Settings Reference", "Tool status" },
+		{ "Hardware/",       "editor-settings", "Settings Reference", "Hardware" },
 		// The palette's element types get their own section of the UI chapter:
 		// "what can I put on a page" is the first question somebody has, and it
 		// deserves a list rather than being scattered through the designer's

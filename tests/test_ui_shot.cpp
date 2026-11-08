@@ -22,9 +22,11 @@
 #include "TutorialSteps.h"       // …and the curriculum steps it is tested with
 #include "GitHubSignInView.h"    // the device-flow dialog's body
 #include "ConsoleView.h"         // the console's buffer and rows
+#include "HardwarePage.h"         // Preferences » Preview » Hardware
 
 #include <ContentManager/ContentManager.h>
 #include <Diagnostics/Log.h>
+#include <Diagnostics/HardwareInfo.h>
 #include <HorizonCode/HorizonCode.h>
 #include <HorizonScene/EngineApi.h>
 #include <Types/TypeRegistry.h>
@@ -36,6 +38,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -331,6 +334,82 @@ TEST_CASE("ui shot: a Details-style panel draws its rows")
 	CHECK(int(r) == int(kBgR));
 	CHECK(int(g) == int(kBgG));
 	CHECK(int(b) == int(kBgB));
+}
+
+TEST_CASE("ui shot: the Hardware page lists the machine, a dash where it cannot tell")
+{
+	// A made-up but representative machine, installed through the provider seam: the page must show
+	// exactly what the module holds, and a dash for every field nothing filled in.
+	struct Fake final : HE::HardwareProvider
+	{
+		HE::HardwareInfo detect() override
+		{
+			HE::HardwareInfo h;
+			h.cpuName = "Example CPU 16-Core Processor"; h.cpuCores = 16; h.cpuThreads = 32; h.cpuArch = "x64";
+			h.ramTotalMB = 31859; h.platform = "Windows"; h.osName = "Windows 11";
+			h.osVersion = "Windows 11 (10.0 build 26300)"; h.hasBattery = false;
+			return h;
+		}
+		uint64_t freeMemoryMB() override { return 18432; }
+		bool     onBattery() override    { return false; }
+	};
+	struct Restore { ~Restore() { HE::setHardwareProvider(nullptr); } } restore;
+	HE::setHardwareProvider(std::make_shared<Fake>());
+
+	// Before the renderer and the window system hand anything over: dashes.
+	{
+		const auto rows = HardwarePage::rows();
+		auto find = [&](const char* group, const char* label) -> std::string {
+			for (const auto& r : rows) if (r.group == group && r.label == label) return r.value;
+			return "<missing>";
+		};
+		CHECK(find("Processor", "Name") == "Example CPU 16-Core Processor");
+		CHECK(find("Processor", "Cores") == "16");
+		CHECK(find("Memory", "Installed") == "31859 MB (31.1 GB)");
+		CHECK(find("Memory", "Free now") == "18432 MB (18.0 GB)");
+		CHECK(find("Graphics", "Name") == "-");
+		CHECK(find("Graphics", "Video memory") == "-");
+		CHECK(find("Display", "Resolution") == "-");
+		CHECK(find("System", "Battery") == "none");
+	}
+
+	HE::GpuInfo gpu;
+	gpu.name = "Example GPU 12 GB"; gpu.vendor = "Example"; gpu.driver = "621.01"; gpu.api = "D3D12"; gpu.vramMB = 12010;
+	HE::setGpuInfo(gpu);
+	HE::DisplayInfo disp;
+	disp.width = 2560; disp.height = 1440; disp.refreshHz = 59.94f; disp.scale = 1.25f; disp.name = "Example Monitor";
+	HE::setDisplayInfo(disp);
+	{
+		const auto rows = HardwarePage::rows();
+		auto find = [&](const char* group, const char* label) -> std::string {
+			for (const auto& r : rows) if (r.group == group && r.label == label) return r.value;
+			return "<missing>";
+		};
+		CHECK(find("Graphics", "Name") == "Example GPU 12 GB");
+		CHECK(find("Graphics", "Driver") == "621.01");
+		CHECK(find("Graphics", "Video memory") == "12010 MB (11.7 GB)");
+		CHECK(find("Graphics", "Graphics API") == "D3D12");
+		CHECK(find("Display", "Resolution") == "2560 x 1440 @ 60 Hz");
+		CHECK(find("Display", "Interface scale") == "125 %");
+	}
+
+	constexpr int W = 560, H = 760;
+	Harness harness(W, H);
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Preferences", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		HardwarePage::draw();
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+	const he_ui::Image img = shoot("hardware-page", W, H, 4, scene);
+	REQUIRE(img.valid());
+	const int ink = img.inkedPixels(kBgR, kBgG, kBgB);
+	INFO("inked pixels: " << ink);
+	CHECK(ink > 6000);
 }
 
 TEST_CASE("ui shot: several entities selected, the rows they disagree on say so")
