@@ -392,7 +392,7 @@ float cloudShadowFactor(vec3 worldPos, vec3 L)
 	float T = texture(uCloudShadowMap, uv).r;
 	return mix(1.0, T, s * edge);
 }
-)GLSL" R"GLSL(
+
 // `base` = the light's first atlas layer (-1 = casts no shadow). Takes the
 // light by value so the window and the cluster lists share it.
 float localShadowFactorAt(vec4 posType, int base, vec3 worldPos, vec3 N)

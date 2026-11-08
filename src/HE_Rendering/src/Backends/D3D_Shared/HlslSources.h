@@ -1670,7 +1670,7 @@ float3 sampleDDGIIrradiance(float3 P, float3 N)
     }
     return sumColor / max(sumWeight, 1e-4);
 }
-)HLSL" R"HLSL(
+
 // SYNC: the same hash/cone pair as kGiShadowCSHLSL (a separate compilation unit).
 uint3 giPcg3d(uint3 v)
 {

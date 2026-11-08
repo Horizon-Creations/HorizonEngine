@@ -237,7 +237,7 @@ vec3 starField(vec3 dir, vec3 cdir, vec3 sunDir, float time, float milkyWay)
 	// in a properly dark sky — a touch deeper than before so dusk stays a clean blue hour.
 	float night = 1.0 - smoothstep(-0.14, 0.06, clamp(sunDir.y, -0.3, 1.0));
 	if (night <= 0.0 || dir.y <= 0.0) return vec3(0.0);
-)GLSL" R"GLSL(
+
 	// Stars cluster densely along the galactic band: the cell-occupancy threshold
 	// is lowered there so the Milky Way reads as a dense lane of stars (not a
 	// smear). The milky-way control drives how dense/bright the lane is. Sampled
@@ -383,7 +383,7 @@ vec3 shootingStars(vec3 dir, vec3 sunDir, float time, float rate)
 	float horizon = smoothstep(0.0, 0.12, dir.y);
 	return col * night * horizon;
 }
-)GLSL" R"GLSL(
+
 // Procedural volumetric clouds — drawn only in the sky pass (kept out of the
 // shared skyColor() so the scene's image-based ambient stays cheap). Density is
 // a 3D noise field (reusing starNoise3/starFbm3) animated by the continuous wall
@@ -607,7 +607,7 @@ vec3 applyClouds(vec3 baseSky, vec3 dir, vec3 sunDir, float time, float coverage
 	// Forward-scatter phase (view vs. sun) — constant along the ray, so compute once.
 	float costh = max(dot(dir, sunDir), 0.0);
 	float phase = mix(hgPhase(costh, 0.6), hgPhase(costh, -0.3), 0.25);
-)GLSL" R"GLSL(
+
 	float lo = cloudLo(coverage); // coverage threshold (for the cheap gate)
 	float T = 1.0;                                 // transmittance along the view ray
 	vec3  L = vec3(0.0);                           // accumulated in-scattered colour
@@ -784,7 +784,7 @@ bool cloudSlabRange(vec3 camPos, vec3 dir, float baseY, float topY, float maxDis
 	tFar  = min(tFar, maxDist);
 	return tFar > tNear;
 }
-)GLSL" R"GLSL(
+
 // ── Shared cloud shape field ─────────────────────────────────────────────────
 // Coarse density (presence × vertical profile × billow erosion, no fine octave)
 // of the 3D cloud slab at a world position. ONE shape model for the realistic
@@ -964,7 +964,7 @@ vec3 applyClouds3D(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float time,
 	float fluff   = clamp(uCloudFluffiness, 0.0, 1.0);
 	float densMul = clamp(uCloudDensity, 0.0, 3.0);
 	float lo      = cloudLo(coverage);
-)GLSL" R"GLSL(
+
 	float T = 1.0;
 	vec3  L = vec3(0.0);
 	for (int i = 0; i < N; ++i)
@@ -1171,7 +1171,7 @@ vec3 applyClouds3DReal(vec3 baseSky, vec3 dir, vec3 camPos, vec3 sunDir, float t
 		dens *= mix(1.0, smoothstep(0.15, 0.55, bfine), fineW);
 		dens *= smoothstep(0.0, 0.05, dens); // kill only true dust — the mist skirt stays
 		if (dens <= 0.002) continue;
-)GLSL" R"GLSL(
+
 		// Sun march over the same field; the FIRST step is tight so each
 		// cauliflower lobe shades its neighbour (per-lobe relief), the
 		// exponential tail reaches ~0.5 thick (3 steps, own body) or ~2.3 thick
@@ -1412,7 +1412,7 @@ vec3 nebula(vec3 dir, vec3 cdir, vec3 sunDir, float intensity, vec3 nebColor)
 	float border = smoothstep(-0.018, 0.010, pd) * (1.0 - smoothstep(0.035, 0.095, pd)); // the piece's RIM band
 	float skirt  = smoothstep(-0.110, -0.015, pd); // dilated halo — fuses into necks
 	float neck   = skirt * (1.0 - core);           // connection zone between close pieces
-)GLSL" R"GLSL(
+
 	// (3) SILK — interior schlieren as soft level sets of the PIECE field itself,
 	// so every streak layers along its chunk's own silhouette (fixed
 	// constellations inside the piece, they live and re-randomise with it). The
@@ -1617,7 +1617,7 @@ bool auroraSlab(float x0, float dx, float w, inout float t0, inout float t1)
 	t1 = min(t1, max(ta, tb));
 	return t1 > t0;
 }
-)GLSL" R"GLSL(
+
 // Aurora borealis — WORLD-ANCHORED volumetric curtains, built like the 3D cloud slab so they
 // are PLACED IN THE WORLD (real parallax as the camera moves) and have NO azimuth seam
 // (sampled at world XZ, not atan-azimuth).
@@ -1753,7 +1753,7 @@ vec3 applyAurora3D(vec3 dir, vec3 camPos, float time, float intensity, vec3 colB
 		int   Nk = int(clamp((t1 - t0) / (sigma0 * 1.1 / dRate), 6.0, 64.0));
 		float ds = (t1 - t0) / float(Nk);
 		float dAcross = ds * dRate;                             // how far d moves per step
-)GLSL" R"GLSL(
+
 		for (int i = 0; i < Nk; ++i)
 		{
 			float t   = t0 + (float(i) + jit) * ds;
@@ -1964,7 +1964,7 @@ vec3 cirrus(vec3 baseSky, vec3 dir, vec3 sunDir, vec3 sunColor, float amount, fl
 	float fade  = smoothstep(0.04, 0.20, dir.y) * (1.0 - smoothstep(0.92, 1.0, dir.y));
 	// Translucent (capped so the sky always shows through): thin wisps read as faint haze.
 	float alpha = clamp(streak * day * fade * (0.40 + 0.65 * clamp(amount, 0.0, 1.0)), 0.0, 0.66);
-)GLSL" R"GLSL(
+
 	// Colour: white near noon → gold/pink at low sun (gated to dusk so midday stays white);
 	// a subtle forward-scatter sheen brightens the wisps toward the sun (the silky look);
 	// then a touch of the local sky so they aren't pasted-white at dawn/dusk.
@@ -2139,7 +2139,7 @@ vec3 sunDisk(vec3 dir, vec3 sunDir)
 	float bright = mix(2.8, 11.0, smoothstep(0.0, 0.22, sunY));
 	return tint * (limb * edge * bright * vis);
 }
-)GLSL" R"GLSL(
+
 void main()
 {
 	// Cloud-shadow map pass: reuses this program (the noise texture + cloud
