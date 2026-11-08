@@ -3365,13 +3365,30 @@ namespace nebuladrift
 using namespace shaderdrift;
 
 // The text between `open` and the next `close` after it; empty if either is missing.
+// A literal over ~16 KB hits MSVC's C2026 ("string too long") and is split into
+// several adjacent raw strings — R"TAG(...)TAG" R"TAG(...)TAG";, which the compiler
+// concatenates into one string same as if it had never been split. `close` is e.g.
+// ")GLSL\"": right after it, a split point reopens with `R"GLSL(` (same tag) instead
+// of ending the literal for real — skip those and keep scanning, so the extracted
+// text is the full, concatenated literal regardless of how many pieces it is split into.
 inline std::string rawBlock(const std::string& src, const std::string& open, const std::string& close)
 {
 	const size_t a = src.find(open);
 	if (a == std::string::npos) return {};
-	const size_t b = src.find(close, a + open.size());
-	if (b == std::string::npos) return {};
-	return src.substr(a + open.size(), b - a - open.size());
+	const std::string tag    = close.substr(1, close.size() - 2); // ")TAG\"" -> "TAG"
+	const std::string reopen = "R\"" + tag + "(";
+	std::string result;
+	size_t pos = a + open.size();
+	for (;;)
+	{
+		const size_t b = src.find(close, pos);
+		if (b == std::string::npos) return {};
+		result += src.substr(pos, b - pos);
+		size_t p = b + close.size();
+		while (p < src.size() && (src[p] == ' ' || src[p] == '\t' || src[p] == '\r' || src[p] == '\n')) ++p;
+		if (src.compare(p, reopen.size(), reopen) != 0) return result;
+		pos = p + reopen.size();
+	}
 }
 
 struct ShaderFunction

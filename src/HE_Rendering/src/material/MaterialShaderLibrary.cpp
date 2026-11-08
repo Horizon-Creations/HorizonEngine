@@ -455,6 +455,7 @@ float heCsmShadow(vec3 worldPos, vec3 n, vec3 L) {
         }
     return vis / 9.0;
 }
+)" R"(
 // Local (point/spot) shadow lookup in the atlas — mirror of the built-in
 // shaders' localShadowFactor(). Spot lights project into their single layer;
 // point lights pick the cube face from the fragment→light major axis first.
@@ -669,7 +670,7 @@ vec3 heFwdClusterLights(vec3 P, vec3 n, vec3 V, vec3 diffuseColor, vec3 specColo
     return result;
 }
 #endif
-
+)" R"(
 vec3 heLitP(vec3 baseColor, vec3 N, float metallic, float roughness, vec3 worldPos,
             float specular, float ambientOcclusion) {
     // Unlit view mode (heLight.viewMode.x, IRenderer::SetViewMode): the base
