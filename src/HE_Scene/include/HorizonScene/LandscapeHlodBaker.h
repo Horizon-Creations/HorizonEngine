@@ -60,7 +60,13 @@ namespace HE::landscape
         // `rvtPages` (RVT 2.0): the three view materials are cut from the Lit material's own RVT Write inputs (matRvtLayerViews:
         // the baked base, without snow, the sand's ripples, puddles or trails) instead of the full-material views, and the
         // part after the RVT Read is kept as rvtLiveGraphJson() for the driver's consumer material.
-        bool begin(entt::entity terrain, std::string* why = nullptr, bool switchRenderer = true, bool rvtPages = false);
+        // `bakedViews` (RVT 2.0 step 6, only with rvtPages): the three view materials are these (RvtBaseBake.h: they sample the
+        // export's baked pictures) and the material's own page graphs are not built at all. The live graph is still made. Such a
+        // baker cannot rebuild its views (rebuildRvtViews(true) is false): the pictures are a snapshot, a change of what they
+        // were made from means the caller starts over without them.
+        bool begin(entt::entity terrain, std::string* why = nullptr, bool switchRenderer = true, bool rvtPages = false,
+                   const HE::UUID* bakedViews = nullptr);
+        bool bakedViews() const { return m_bakedViews; }
         // RVT 2.0: builds the view materials and the live graph again from the landscape's material as it is now (a parameter
         // before the Write node moved), in place: the same material ids, the renderer rebuilds their shaders. The scratch
         // landscape, the chunks and the pages are untouched; the caller marks the pages stale.
@@ -130,6 +136,7 @@ namespace HE::landscape
         glm::vec3       m_pos{ 0.0f };               // the landscape's world position (terrain-local XZ is relative to it)
         int             m_group = -1;
         bool            m_rvtPages = false;          // the views are the Write pages of the Lit material (begin's rvtPages)
+        bool            m_bakedViews = false;        // the views sample the export's baked pictures (begin's bakedViews)
         std::string     m_rvtLiveJson;               // the Lit material after its Read node, this landscape's parameters
         bool            m_rvtSeen[3] = { false, false, false };   // a view material the renderer has already resolved for pages
         bool            m_active = false;

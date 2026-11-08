@@ -370,6 +370,7 @@ add_executable(he_tests
     test_rvt_page_invalidation.cpp
     # RVT 2.0 step 4: the auto landscape material cut at Write/Read: base before the Write, snow/sand/puddles/trails after the Read (Thema 335)
     test_rvt_auto_landscape.cpp
+    test_rvt_base_bake.cpp
     # two real exports of a project, filtered and not; a no-op without HE_REACH_PROJECT
     test_bench_export_reach.cpp
     # BC1/BC4/BC5 next to BC7/BC3: enum + block math, encoders (2D and arrays), CPU decoders (Thema 180, Schritt 10)

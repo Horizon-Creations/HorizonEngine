@@ -2,6 +2,7 @@
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/RvtProducer.h>
+#include <HorizonScene/RvtBaseBake.h>
 #include <HorizonScene/TransformHierarchy.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/TerrainChunkComponent.h>
@@ -143,21 +144,11 @@ void RvtLandscape::refreshAnalysis(HorizonWorld& live, entt::entity terrain, Seg
         return;
     }
 
-    // Parameter values as the material system resolves them: the asset's slots, the entity's overrides on top.
-    MatRvtEnv env;
+    // Parameter values as the material system resolves them: the asset's slots, the entity's overrides on top (the export's
+    // baked-base key builds the same environment through the same function, RvtBaseBake.h).
+    MatRvtEnv env = rvtMaterialEnv(*ma, mc);
     env.assetRevision = an.env.assetRevision;
     env.functionReads = an.env.functionReads;
-    for (size_t i = 0; i < ma->graphParamNames.size(); ++i)
-    {
-        std::array<float, 4> v{ 0, 0, 0, 0 };
-        for (size_t c = 0; c < 4; ++c) if (i * 4 + c < ma->shaderParamData.size()) v[c] = ma->shaderParamData[i * 4 + c];
-        env.params[ma->graphParamNames[i]] = v;
-    }
-    if (mc)
-        for (const MaterialParamOverride& ov : mc->paramOverrides)
-            env.params[ov.name] = { ov.value[0], ov.value[1], ov.value[2], ov.value[3] };
-    for (size_t i = 0; i < ma->instanceSwitchNames.size() && i < ma->instanceSwitchValues.size(); ++i)
-        env.switches[ma->instanceSwitchNames[i]] = ma->instanceSwitchValues[i] != 0;
 
     if (an.epoch != m_cm.contentEpoch())
     {
@@ -263,15 +254,26 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
     const auto t0 = std::chrono::steady_clock::now();
     if (!seg.baker || !seg.attached)
     {
+        // RVT 2.0 step 6: the export's baked base, when the pak carries it for exactly this landscape (the key says the material's
+        // page inputs and the ground are the ones it was taken of) and nothing ended it yet. The page graphs are then not built.
+        HE::UUID bakedViews[3];
+        bool useBaked = false;
+        seg.bakedKey = 0;
+        if (!seg.bakedOff && seg.analysis && seg.analysis->split.hasRvtNodes)
+        {
+            const uint64_t key = rvtBaseKey(m_cm, live, terrain);
+            if (key != 0 && rvtBaseViewMaterials(m_cm, live, terrain, key, bakedViews)) { useBaked = true; seg.bakedKey = key; m_materialsRegistered += 3; }
+        }
         auto baker = std::make_unique<HlodBaker>(live, m_cm, m_renderer);
         std::string why;
-        if (!baker->begin(terrain, &why, /*switchRenderer=*/false, /*rvtPages=*/true))
+        if (!baker->begin(terrain, &why, /*switchRenderer=*/false, /*rvtPages=*/true, useBaked ? bakedViews : nullptr))
         {
             HE_LOG_INFO(Scene, "RvtLandscape: not attached (%s)", why.c_str());
             return false;
         }
         seg.baker = std::move(baker);
-        m_materialsRegistered += 3;                // the three view materials HlodBaker::begin registers (never unregistered)
+        seg.baked = useBaked;
+        if (!useBaked) m_materialsRegistered += 3;   // the three view materials HlodBaker::begin registers (never unregistered)
     }
     const TerrainComponent& tc = live.registry().get<TerrainComponent>(terrain);
     HlodChunkRect r0;
@@ -309,9 +311,10 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
     seg.filled = false;
     seg.attached = true;
     live.registry().get<TerrainComponent>(terrain).rvtJournal.clear();   // the scratch copy was made from the ground as it is now
-    HE_LOG_INFO(Scene, "RvtLandscape: segment %u attached in %.0f ms: %.0f m landscape, %d mips, %zu segment(s)",
+    HE_LOG_INFO(Scene, "RvtLandscape: segment %u attached in %.0f ms%s: %.0f m landscape, %d mips, %zu segment(s)",
                 static_cast<unsigned>(entt::to_integral(terrain)),
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(),
+                seg.baked ? " (pages from the export's baked base, the page graphs are not built)" : "",
                 vd.sizeM, m_manager->layout(seg.volume).mipCount(), m_segments.size());
     return true;
 }
@@ -439,6 +442,7 @@ void RvtLandscape::remove(entt::entity terrain, Segment& seg)
     deactivate(terrain, seg);
     seg.baker.reset();
     seg.attached = false;
+    seg.baked = false;
 }
 
 bool RvtLandscape::active() const
@@ -566,6 +570,25 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         uint64_t full = 0, geo = 0;
         const uint64_t h = stateHash(live, l.e, seg, full, geo);
         const bool rvtNodes = seg.analysis && seg.analysis->split.hasRvtNodes;
+        if (seg.attached && seg.baked)
+        {
+            // The baked base is a snapshot of the exported ground. An edit the pages read (a sculpt stroke, a paint stroke) ends it for
+            // good, whether or not the landscape is near enough to hold a volume right now (a pending edit would otherwise repaint
+            // the stale picture when the camera comes back): the segment starts over from the page graphs next to this.
+            using J = TerrainComponent::RvtJournal;
+            const uint8_t kinds = static_cast<uint8_t>((matRvtEditReaches(seg.reads, kRvtEditSculpt) ? J::kHeight : 0)
+                                                     | (matRvtEditReaches(seg.reads, kRvtEditPaint) ? J::kWeights : 0));
+            if (reg.get<TerrainComponent>(l.e).rvtJournal.selected(kinds).any)
+            {
+                HE_LOG_INFO(Scene, "RvtLandscape: segment %u leaves the export's baked base (the ground was edited)",
+                            static_cast<unsigned>(entt::to_integral(l.e)));
+                seg.bakedOff = true;
+                remove(l.e, seg);
+                ++st.detaches;
+                ++st.bakedDropped;
+                st.rescanned = true;
+            }
+        }
         if (seg.attached && h != seg.stateHash)
         {
             if (rvtNodes && seg.volumeLive && geo == seg.geoHash && seg.baker && seg.baker->rebuildRvtViews())
@@ -581,7 +604,15 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
             }
             else
             {
-                // The view graphs were built from the old values: nothing to patch, start over.
+                // The view graphs were built from the old values: nothing to patch, start over. (A baked base cannot be patched
+                // either: what it was taken of moved, so it is finished.)
+                if (seg.baked)
+                {
+                    HE_LOG_INFO(Scene, "RvtLandscape: segment %u leaves the export's baked base (a page input changed)",
+                                static_cast<unsigned>(entt::to_integral(l.e)));
+                    seg.bakedOff = true;
+                    ++st.bakedDropped;
+                }
                 remove(l.e, seg);
                 ++st.detaches;
                 st.rescanned = true;
@@ -613,6 +644,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         seg.stateHash = h;
         seg.geoHash = geo;
         ++st.attaches;
+        if (seg.baked) ++st.bakedAttaches;
     }
     st.segments = static_cast<uint32_t>(m_segments.size());
     // A landscape whose material has RVT nodes is drawn by its fallback until its pages are ready, and the renderer applies the
@@ -760,8 +792,12 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     // Activity only: an idle frame says nothing, so a log of a quiet scene is quiet and a stroke, a camera move or a tile
     // coming into range shows up.
     if (st.pagesPainted || st.pagesStale || st.tablesUploaded || st.rescanned || st.attaches || st.detaches)
-        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale, %u table(s) uploaded, %u attached, %u released, %u/%u segment(s) drawn from pages, %u resident, %u stale, painting took %.1f ms",
-                    st.pagesPainted, st.pagesStale, st.tablesUploaded, st.attaches, st.detaches, st.activeSegments, st.segments, ms.resident, ms.dirty, st.paintMs);
+    {
+        uint32_t bakedSegs = 0;
+        for (const auto& kv : m_segments) if (kv.second.baked && kv.second.volumeLive) ++bakedSegs;
+        HE_LOG_INFO(Scene, "RvtLandscape: %u page(s) painted, %u marked stale, %u table(s) uploaded, %u attached (%u from the baked base), %u released, %u/%u segment(s) drawn from pages (%u from the baked base), %u resident, %u stale, painting took %.1f ms",
+                    st.pagesPainted, st.pagesStale, st.tablesUploaded, st.attaches, st.bakedAttaches, st.detaches, st.activeSegments, st.segments, bakedSegs, ms.resident, ms.dirty, st.paintMs);
+    }
     return st;
 }
 

@@ -21,6 +21,8 @@
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
 #include <HorizonScene/LandscapeHlod.h>      // the far-landscape bake the export runs
+#include <HorizonScene/RvtBaseBake.h>        // the RVT base bake the export runs (RVT 2.0 step 6)
+#include <MaterialGraph/RvtSplit.h>          // matRvtEnabled
 #include <HorizonScene/EntityHost.h>         // a class's component body, for the same scan
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
@@ -86,6 +88,8 @@ static bool        s_exportOnlyReferenced = true;  // pack only what the game re
 static bool        s_exportBakeMeshTextures = true; // bake textures onto meshes (needs the filter above)
 static bool        s_exportBakeFarLandscape = true; // bake each Auto Landscape's look for its far LOD levels
 static int         s_exportFarLandscapeMB   = 512;  // what the baked textures may cost, cooked
+static bool        s_exportBakeRvtBase      = true; // bake the RVT base pages of static landscapes (RvtBaseBake.h)
+static int         s_exportRvtBaseMB        = 256;  // what they may cost, cooked
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
@@ -568,6 +572,8 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportBakeMeshTextures = p.bakeMeshTextures;
 	s_exportBakeFarLandscape = p.bakeFarLandscape;
 	s_exportFarLandscapeMB   = p.farLandscapeBudgetMB;
+	s_exportBakeRvtBase      = p.bakeRvtBase;
+	s_exportRvtBaseMB        = p.rvtBaseBudgetMB;
 	s_exportIncludes.clear();
 	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
 }
@@ -586,6 +592,8 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.bakeMeshTextures = s_exportBakeMeshTextures;
 	p.bakeFarLandscape = s_exportBakeFarLandscape;
 	p.farLandscapeBudgetMB = s_exportFarLandscapeMB;
+	p.bakeRvtBase = s_exportBakeRvtBase;
+	p.rvtBaseBudgetMB = s_exportRvtBaseMB;
 	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
@@ -1229,6 +1237,15 @@ void render(AppContext& ctx)
                 s_exportFarLandscapeMB = std::clamp(s_exportFarLandscapeMB, 16, 16384);
                 EditorWidgets::helpForKey("Export/Far landscape budget (MB)");
             }
+            EditorWidgets::checkbox("Bake RVT base", &s_exportBakeRvtBase);
+            EditorWidgets::helpForKey("Export/Bake RVT base");
+            if (s_exportBakeRvtBase)
+            {
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::DragInt("RVT base budget (MB)", &s_exportRvtBaseMB, 8.0f, 16, 16384);
+                s_exportRvtBaseMB = std::clamp(s_exportRvtBaseMB, 16, 16384);
+                EditorWidgets::helpForKey("Export/RVT base budget (MB)");
+            }
             if (s_exportOnlyReferenced)
             {
                 ImGui::Text("Always include:");
@@ -1506,6 +1523,40 @@ void startExport(AppContext& ctx)
                                       + std::to_string(st.chunks) + " chunk(s) in " + std::to_string(static_cast<int>(st.ms))
                                       + " ms");
                 };
+                // The RVT base (RVT 2.0 step 6, HorizonScene/RvtBaseBake.h): the same walk for landscapes whose material has an RVT
+                // Write / Read pair; their page pictures go into the pak as three textures per landscape and the game paints its
+                // pages from them (a game that edits the ground leaves them again). Same packing path as the far landscape.
+                std::vector<HE::UUID> rvtBaseSeen;
+                bool rvtBaseNoted = false;
+                const auto bakeRvtBase = [&](HorizonWorld& w, const std::string& label)
+                {
+                    if (!s_exportBakeRvtBase || !ctx.renderer || !ctx.contentManager) return;
+                    if (!HE::matRvtEnabled() || !ctx.renderer->GetCapabilities().supportsRawCapture)
+                    {
+                        if (!rvtBaseNoted)
+                            Build::log(1, "RVT base: not baked, " + std::string(HE::matRvtEnabled()
+                                          ? "this editor's renderer cannot hand back a frame without tonemap and post effects"
+                                          : "the Runtime Virtual Texture switch is off (Preferences > Rendering), so the game "
+                                            "would not use the pages either"));
+                        rvtBaseNoted = true;
+                        return;
+                    }
+                    HE::landscape::RvtBaseOptions o;
+                    o.budgetBytes = static_cast<uint64_t>(std::max(16, s_exportRvtBaseMB)) << 20;
+                    std::vector<HE::landscape::HlodAssetBlob> blobs;
+                    const HE::landscape::RvtBaseStats st = HE::landscape::bakeRvtBaseWorld(
+                        w, ctx.world, *ctx.contentManager, *ctx.renderer, o, blobs, rvtBaseSeen,
+                        [&](const std::string& s) { Build::log(0, label + ": " + s); });
+                    for (HE::landscape::HlodAssetBlob& b : blobs)
+                    {
+                        Hpak::PackSettings::ExtraAsset ea;
+                        ea.id = b.id; ea.relPath = std::move(b.relPath); ea.type = b.type; ea.bytes = std::move(b.bytes);
+                        farAssets.push_back(std::move(ea));
+                    }
+                    if (st.landscapes > 0)
+                        Build::log(0, label + ": RVT base " + std::to_string(st.landscapes) + " landscape(s) in "
+                                      + std::to_string(static_cast<int>(st.ms)) + " ms");
+                };
                 std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
                 std::vector<HE::hccg::ClassSource> hcSources;   // codegen inputs (hcCompile)
                 {
@@ -1527,6 +1578,7 @@ void startExport(AppContext& ctx)
                             if (loaded) syncPrefabsForExport(w2, rel);
                             if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
                             if (loaded) bakeFarLandscapes(w2, rel);
+                            if (loaded) bakeRvtBase(w2, rel);
                             if (loaded && ser2.saveToMemory(w2, bytes))
                             {
                                 // Level script → codegen source, keyed by the scene's

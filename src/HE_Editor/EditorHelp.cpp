@@ -8222,6 +8222,30 @@ namespace
 	  "they do, down to 16 texels per chunk side; the export log says which "
 	  "landscapes were baked below what the screen wants. Saved in the profile.",
 	  "", "export#overview" },
+	{ "Export/Bake RVT base", "Bake RVT base",
+	  "Landscapes whose material has an RVT Write / RVT Read pair paint what sits "
+	  "before the Write node (layers, groups, texture bombing) into virtual texture "
+	  "pages while the game runs. For a landscape the game never edits that is the "
+	  "same work every run, so the export does it once: it photographs the pages' "
+	  "three layers (colour, normal, ambient occlusion + roughness) over the whole "
+	  "landscape and ships them as three textures. The game then paints its pages "
+	  "from those pictures and never builds the material's page graphs; the snow, "
+	  "sand, puddles and trails after the Read node stay a live shader. The pictures "
+	  "are as sharp as the live pages (0.25 m a texel) up to 4096 texels a side and "
+	  "the budget below, coarser beyond. They are only used when the landscape's "
+	  "ground and the material's page inputs are exactly what the export saw; the "
+	  "first sculpt or paint stroke, or a script that changes a parameter before the "
+	  "Write node, makes the game use the material's own graphs again. Needs the "
+	  "Runtime Virtual Texture switch on (Preferences > Rendering) and a landscape "
+	  "that is square, unrotated and unscaled. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/RVT base budget (MB)", "RVT base budget (MB)",
+	  "What the baked RVT base pictures of all landscapes in this export may cost "
+	  "once cooked (block-compressed, with mip levels), in megabytes. When a "
+	  "landscape's picture does not fit, it is halved in size until it does; the "
+	  "export log says which landscapes were baked below the live pages' "
+	  "resolution. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Match the game's backend", "Match the game's backend",
 	  "Bake the precompiled material shaders for the one graphics backend the "
 	  "exported game runs: the one the project's Render Defaults name, else the "

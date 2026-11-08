@@ -111,6 +111,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/LandscapeHlodBaker.h>
 #include <HorizonScene/RvtProducer.h>
 #include <HorizonScene/RvtLandscape.h>
+#include <HorizonScene/RvtBaseBake.h>           // HE_DUMP_RVTBASE witness
 #include <MaterialGraph/RvtSplit.h>   // matSetRvtEnabled
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
@@ -11420,6 +11421,138 @@ void EditorApplication::dumpFrameHeadless()
 			setMaterial(directMat);
 		}
 		r->DestroyRvtPool();
+	}
+	// HE_DUMP_RVTBASE=1 (RVT 2.0 step 6, HorizonScene/RvtBaseBake.h): the export's baked base, end to end on the live AUTOLAND
+	// landscape. Drives the landscape from its page graphs (the reference), bakes the base the way the export does
+	// (bakeRvtBaseWorld), loads the three textures as the pak mount would, and drives a second driver that must find them: it paints
+	// its pages from the pictures (counted: the page graphs are not built) and is compared with the reference and with the whole
+	// material. Then a ground edit and a change before the Write node must each end the baked base for good (the same landscape
+	// is drawn from the page graphs again and still matches the material).
+	if (const char* bv = std::getenv("HE_DUMP_RVTBASE"); bv && *bv && *bv != '0' && m_editorWorld && r && r->GetCapabilities().supportsRvt)
+	{
+		auto& wreg = m_editorWorld->registry();
+		entt::entity land = entt::null;
+		for (auto [e, tc] : wreg.view<TerrainComponent>().each())
+			if (!wreg.all_of<TerrainChunkComponent>(e)) { land = e; break; }
+		if (land == entt::null || !wreg.all_of<MaterialComponent>(land))
+			HE_LOG_WARN(Editor, "EditorApplication: HE_DUMP_RVTBASE: no landscape with a material");
+		else
+		{
+			if (m_editorWorld->entityId(land) == HE::UUID{})
+				m_editorWorld->setEntityId(land, HE::UUID{ 0x5256544241534500ull, 0x1ull });
+			const glm::vec3 centre = HE::worldPositionOf(*m_editorWorld, land);
+			const glm::vec3 camPos = centre + glm::vec3(0.0f, 110.0f, 0.0f);
+			constexpr uint32_t W = 1280, H = 720;
+			HE::landscape::RvtLandscape::Settings cfg;
+			cfg.nearRadiusM = wreg.get<TerrainComponent>(land).sizeX > 200.0f ? 48.0f : 160.0f;
+			const auto lookDown = [&]() {
+				EditorCameraOverride cam;
+				cam.active = true; cam.editorIcons = false; cam.fovDegrees = 60.0f; cam.nearPlane = 0.1f; cam.farPlane = 2000.0f;
+				cam.position = camPos;
+				cam.view = glm::lookAt(cam.position, cam.position + glm::vec3(0.0f, -1.0f, 0.0f), glm::vec3(0.0f, 0.0f, -1.0f));
+				return cam;
+			};
+			const auto diff = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, double& mean, unsigned& mx) {
+				double sum = 0; mx = 0; size_t n = 0;
+				for (size_t i = 0; i < a.size() && i < b.size(); i += 4)
+				{
+					unsigned d = 0;
+					for (size_t c = 0; c < 3; ++c) d = std::max(d, static_cast<unsigned>(std::abs(int(a[i + c]) - int(b[i + c]))));
+					sum += d; mx = std::max(mx, d); ++n;
+				}
+				mean = n ? sum / double(n) : 0.0;
+			};
+			// One driver run: ticks until the landscape is drawn from pages, then captures the pages and the whole material.
+			struct Run { bool filled = false; uint32_t painted = 0, bakedAttaches = 0; bool baked = false; uint32_t materials = 0; std::vector<uint8_t> pages, direct; };
+			const auto drive = [&](HE::landscape::RvtLandscape& d, Run& out, int maxFrames) {
+				for (int i = 0; i < maxFrames && !d.active(); ++i)
+				{
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					const auto st = d.tick(*m_editorWorld, camPos);
+					out.painted += st.pagesPainted; out.bakedAttaches += st.bakedAttaches;
+				}
+				out.filled = d.active();
+				out.baked = d.bakedBase(land);
+				out.materials = d.materialsRegistered();
+				const auto cap = [&](std::vector<uint8_t>& img) { return r->RenderSceneImage(lookDown(), W, H, img) && img.size() == size_t(W) * H * 4; };
+				cap(out.pages);
+				d.pauseSwap(true); cap(out.direct); d.pauseSwap(false);
+			};
+			Run live;
+			{
+				HE::landscape::RvtLandscape drv(contentManager(), *r);
+				drv.setSettings(cfg);
+				drive(drv, live, 300);
+				double m = 0; unsigned x = 0; diff(live.direct, live.pages, m, x);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE reference (page graphs): filled %d, baked %d, %u pages painted, %u view materials; pages vs whole material mean %.2f /255, max %u",
+				            live.filled, live.baked, live.painted, live.materials, m, x);
+				writeBMP(m_dumpPath + ".rvt_base_live.bmp", live.pages, W, H);
+			}   // ~RvtLandscape gives the landscape back
+			std::vector<HE::landscape::HlodAssetBlob> blobs;
+			std::vector<HE::UUID> seen;
+			HE::landscape::RvtBaseOptions bo;
+			bo.budgetBytes = 0;
+			if (const char* mt = std::getenv("HE_DUMP_RVTBASE_MAXTEXELS"); mt && *mt) bo.maxTexels = std::clamp(std::atoi(mt), 128, 8192);
+			const HE::landscape::RvtBaseStats bs = HE::landscape::bakeRvtBaseWorld(
+				*m_editorWorld, m_editorWorld.get(), contentManager(), *r, bo, blobs, seen,
+				[&](const std::string& s) { HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE export: %s", s.c_str()); });
+			size_t blobBytes = 0; for (const auto& b : blobs) blobBytes += b.bytes.size();
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE bake: %u landscape(s), %zu blob(s), %.1f MB raw, %.0f ms", bs.landscapes, blobs.size(), double(blobBytes) / (1024.0 * 1024.0), bs.ms);
+			const size_t loaded = HE::landscape::loadHlodAssets(contentManager(), blobs);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE pak mount: %zu texture(s) resident", loaded);
+			if (loaded == 3)
+			{
+				Run baked;
+				HE::landscape::RvtLandscape drv(contentManager(), *r);
+				drv.setSettings(cfg);
+				drive(drv, baked, 300);
+				double mLive = 0, mDirect = 0; unsigned xLive = 0, xDirect = 0;
+				diff(live.pages, baked.pages, mLive, xLive); diff(baked.direct, baked.pages, mDirect, xDirect);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE baked: filled %d, from the baked base %d (%u attach(es)), %u pages painted, %u view materials (reference %u: the page graphs were %s); vs reference pages mean %.2f /255 max %u; vs whole material mean %.2f max %u",
+				            baked.filled, baked.baked, baked.bakedAttaches, baked.painted, baked.materials, live.materials,
+				            baked.materials < live.materials ? "not built" : "BUILT", mLive, xLive, mDirect, xDirect);
+				writeBMP(m_dumpPath + ".rvt_base_baked.bmp", baked.pages, W, H);
+
+				// A ground edit ends it for good: the journal says the pages' ground changed, the landscape starts over from the graphs.
+				TerrainComponent& tc = wreg.get<TerrainComponent>(land);
+				tc.rvtJournal.noteRect(0.0f, 0.0f, 10.0f, 10.0f, TerrainComponent::RvtJournal::kHeight);
+				HE::landscape::RvtLandscape::FrameStats st;
+				bool dropped = false;
+				for (int i = 0; i < 300 && !dropped; ++i)
+				{
+					TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+					st = drv.tick(*m_editorWorld, camPos);
+					dropped = st.bakedDropped > 0;
+				}
+				Run after;
+				drive(drv, after, 300);
+				double mA = 0; unsigned xA = 0; diff(after.direct, after.pages, mA, xA);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE ground edit: baked base dropped %d, baked now %d, filled again %d; pages vs whole material mean %.2f max %u (the page graphs are drawn again)",
+				            dropped, drv.bakedBase(land), after.filled, mA, xA);
+				// A driver that was not running when the ground changed has no memory of an edit; the key is what keeps it honest: with
+				// the ground really different (one vertex raised) the pictures are not found, with the ground as exported they are.
+				drv.detach();
+				{
+					Run same;
+					HE::landscape::RvtLandscape drv2(contentManager(), *r);
+					drv2.setSettings(cfg);
+					drive(drv2, same, 300);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE fresh driver, ground as exported: baked %d (expected 1)", same.baked);
+				}
+				TerrainSculpt::ensureHeights(tc);
+				tc.sculptHeights[size_t(tc.resolution) * (tc.resolution / 2) + tc.resolution / 2] += 3.0f;
+				TerrainSculpt::markRegionDirty(tc, -2.0f, -2.0f, 2.0f, 2.0f);
+				TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+				{
+					Run edited;
+					HE::landscape::RvtLandscape drv3(contentManager(), *r);
+					drv3.setSettings(cfg);
+					drive(drv3, edited, 300);
+					double mE = 0; unsigned xE = 0; diff(edited.direct, edited.pages, mE, xE);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTBASE fresh driver, one vertex raised: baked %d (expected 0); pages vs whole material mean %.2f max %u", edited.baked, mE, xE);
+				}
+			}
+		}
 	}
 	// HE_DUMP_RVTDRIVER=1 (Thema 333 step 4): the per-frame driver on the live AUTOLAND landscape, the way the application
 	// runs it (terrain update, then RvtLandscape::tick). Checks, in order: the first fill; an idle frame paints nothing and

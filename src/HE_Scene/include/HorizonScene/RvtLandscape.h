@@ -66,6 +66,9 @@ namespace HE::landscape
             uint32_t segments      = 0;    // landscapes known (attached or not)
             uint32_t activeSegments = 0;   // drawn from the pages now
             bool     rescanned     = false; // a segment was rebuilt from scratch (a parameter change)
+            // RVT 2.0 step 6 (RvtBaseBake.h): segments attached with the export's baked base, and segments that left it.
+            uint32_t bakedAttaches = 0;     // attached this frame: pages are painted from the baked pictures, the base graph is not evaluated
+            uint32_t bakedDropped  = 0;     // this frame: a ground edit or a change before the Write node ended the baked base of a segment
             // RVT 2.0 step 3 (RvtSplit.h): what the tick did NOT repaint, and why.
             uint32_t journalIgnored = 0;   // terrain edits no page reads (a paint stroke under pages that only read the height, ...)
             uint32_t liveOnlyChanges = 0;  // material changes that sit after the RVT Read node: the live shader follows, no page is touched
@@ -126,6 +129,8 @@ namespace HE::landscape
         const rvt::RvtManager* manager() const { return m_manager.get(); }
         uint16_t volumeOf(entt::entity landscape) const;
         HE::UUID consumerOf(entt::entity landscape) const;
+        // Whether the segment's pages come from the export's baked base right now (a witness / test hook).
+        bool bakedBase(entt::entity landscape) const { const auto it = m_segments.find(landscape); return it != m_segments.end() && it->second.baked; }
         uint64_t pagesPaintedTotal() const { return m_paintedTotal; }
         uint32_t materialsRegistered() const { return m_materialsRegistered; }   // view + consumer materials made so far (never freed)
 
@@ -158,6 +163,12 @@ namespace HE::landscape
             std::shared_ptr<Analysis> analysis;   // null: not an RVT-node material (the Thema 333 path: the whole material is the page input)
             uint32_t   reads = 0xFFFFFFFFu;       // kRvtReads* the pages need from the ground; everything for a legacy material
             uint64_t   uploadedVersion = ~0ull;
+            // RVT 2.0 step 6: the pages are painted from the pak's baked pictures (HlodBaker::bakedViews), the page graphs are never
+            // built. Ends for good (bakedOff) with the first ground edit the pages read or the first change before the Write node:
+            // the baked base is a snapshot of the exported scene, and a game that edits it needs the graphs again.
+            bool       baked = false;
+            bool       bakedOff = false;
+            uint64_t   bakedKey = 0;
             bool       attached = false;          // scratch copy + volume exist
             bool       volumeLive = false;        // the volume is in the manager (pages may exist)
             bool       filled = false;            // the first fill is complete

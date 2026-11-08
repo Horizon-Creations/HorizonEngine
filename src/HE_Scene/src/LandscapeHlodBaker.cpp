@@ -269,6 +269,7 @@ namespace HE::landscape
 
     bool HlodBaker::rebuildRvtViews(bool views)
     {
+        if (views && m_bakedViews) return false;   // the pictures are a snapshot: nothing to rebuild them from
         if (!m_active || !m_rvtPages || !buildViews(m_liveTerrain, nullptr, /*rebuild=*/true, views)) return false;
         if (!views) return true;
         m_renderer.WarmupMaterials({ m_viewMat[0], m_viewMat[1], m_viewMat[2] });
@@ -278,7 +279,7 @@ namespace HE::landscape
         return true;
     }
 
-    bool HlodBaker::begin(entt::entity terrain, std::string* why, bool switchRenderer, bool rvtPages)
+    bool HlodBaker::begin(entt::entity terrain, std::string* why, bool switchRenderer, bool rvtPages, const HE::UUID* bakedViews)
     {
         auto fail = [&](const char* msg) { if (why) *why = msg; return false; };
         end();
@@ -293,7 +294,10 @@ namespace HE::landscape
             return fail("a rotated or scaled landscape is not baked");
 
         m_rvtPages = rvtPages;
-        if (!buildViews(terrain, why, /*rebuild=*/false)) return false;
+        m_bakedViews = rvtPages && bakedViews != nullptr;
+        if (!buildViews(terrain, why, /*rebuild=*/false, /*touchViews=*/!m_bakedViews)) return false;
+        if (m_bakedViews)
+            for (int v = 0; v < 3; ++v) { m_viewMat[v] = bakedViews[v]; m_rvtSeen[v] = false; }
 
         // The scratch world: one landscape at the live one's world position, the chunks built the ordinary way.
         m_scratch = std::make_unique<HorizonWorld>();
