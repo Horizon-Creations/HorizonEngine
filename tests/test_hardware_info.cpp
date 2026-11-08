@@ -340,3 +340,16 @@ TEST_CASE("recommended preset: the reason line names the numbers, and the script
     CHECK(callRow("hardware.recommendedPreset")[0].s == "Ultra");
     CHECK(callRow("hardware.recommendedPresetReason")[0].s == "12010 MB video memory, 32768 MB RAM, 16 threads");
 }
+
+TEST_CASE("hardware rows: with the real detection the rows and the module agree")
+{
+    RestoreProvider restore;
+    HE::setHardwareProvider(nullptr);
+    const HE::HardwareInfo h = HE::hardwareInfo();
+    CHECK(callRow("hardware.cpuName")[0].s == h.cpuName);
+    CHECK(callRow("hardware.ramTotalMB")[0].i == static_cast<int>(h.ramTotalMB));
+    CHECK(callRow("hardware.osVersion")[0].s == h.osVersion);
+    CHECK(callRow("hardware.value", { HorizonCode::Value::ofString("CpuThreads") })[0].s == std::to_string(h.cpuThreads));
+    // The summary is what the startup log prints, line for line.
+    CHECK(callRow("hardware.summary")[0].s == HE::hardwareSummary());
+}

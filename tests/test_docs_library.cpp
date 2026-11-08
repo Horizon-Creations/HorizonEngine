@@ -678,3 +678,27 @@ TEST_CASE("docs bundle: the Quality Settings section exists, is the exact target
 	CHECK(found);
 	CHECK(s.text.find("setQualityPreset") != std::string::npos);
 }
+
+TEST_CASE("the shipped manual has a Hardware Info section (Thema 337)")
+{
+	const Library lib = loadShipped();
+	if (!lib.loaded()) return;
+	int page = -1, section = -1;
+	REQUIRE(lib.resolve("rendering#hardware", page, section));
+	const Section& s = lib.pages()[page].sections[section];
+	CHECK(s.id == "hardware");
+	CHECK(s.title == "Hardware Info");
+	int tables = 0, code = 0;
+	for (const Block& b : s.blocks)
+	{
+		tables += b.kind == BlockKind::Table;
+		code   += b.kind == BlockKind::Code;
+	}
+	CHECK(tables >= 1);
+	CHECK(code >= 2);
+	bool found = false;
+	for (const Hit& h : lib.search("graphics card"))
+		found |= lib.pages()[h.page].sections[h.section].id == "hardware";
+	CHECK(found);
+	CHECK(s.text.find("horizon.hardware") != std::string::npos);
+}

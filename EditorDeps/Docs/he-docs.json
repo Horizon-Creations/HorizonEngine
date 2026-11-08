@@ -18408,6 +18408,386 @@
     {
      "blocks": [
       {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "What machine is the game running on? The engine finds out once at start-up and keeps it: the "
+        },
+        {
+         "s": "b",
+         "t": "processor"
+        },
+        {
+         "s": "",
+         "t": ", the "
+        },
+        {
+         "s": "b",
+         "t": "memory"
+        },
+        {
+         "s": "",
+         "t": ", the "
+        },
+        {
+         "s": "b",
+         "t": "graphics card"
+        },
+        {
+         "s": "",
+         "t": " (asked of the renderer that is actually running, so it is the card that draws), the "
+        },
+        {
+         "s": "b",
+         "t": "display"
+        },
+        {
+         "s": "",
+         "t": " the window is on and the "
+        },
+        {
+         "s": "b",
+         "t": "operating system"
+        },
+        {
+         "s": "",
+         "t": ". A settings screen or an about box reads the values through the "
+        },
+        {
+         "s": "c",
+         "t": "hardware"
+        },
+        {
+         "s": "",
+         "t": " rows: "
+        },
+        {
+         "s": "c",
+         "t": "Get Hardware Info"
+        },
+        {
+         "s": "",
+         "t": " and the single getters in HorizonCode, "
+        },
+        {
+         "s": "c",
+         "t": "horizon.hardware"
+        },
+        {
+         "s": "",
+         "t": " in Lua and Python, "
+        },
+        {
+         "s": "c",
+         "t": "HE::api::hardware"
+        },
+        {
+         "s": "",
+         "t": " in C++. The editor shows the same table under "
+        },
+        {
+         "s": "c",
+         "t": "Preferences » Preview » Hardware"
+        },
+        {
+         "s": "",
+         "t": ", with a button that copies it for a bug report."
+        }
+       ]
+      },
+      {
+       "head": [
+        [
+         {
+          "s": "",
+          "t": "Value"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Script row"
+         }
+        ],
+        [
+         {
+          "s": "",
+          "t": "Example (a desktop PC)"
+         }
+        ]
+       ],
+       "k": "table",
+       "rows": [
+        [
+         [
+          {
+           "s": "b",
+           "t": "Processor"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "cpuName, cpuCores, cpuThreads, cpuArch"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "AMD Ryzen 9 9950X 16-Core Processor, 16 cores, 32 threads, x64"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Memory"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "ramTotalMB, ramFreeMB"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "31859 MB installed; free memory is read fresh every time"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Graphics card"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "gpuName, gpuVendor, gpuDriver, gpuVramMB, graphicsApi"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "NVIDIA GeForce RTX 4070, NVIDIA, 621.01, 12010 MB, D3D12"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Display"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "displayWidth, displayHeight, displayRefreshHz, displayScale, displayName"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "2560 x 1440, 60 Hz, scale 1.25"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "System"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "osName, osVersion, hasBattery, onBattery"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Windows 11 (10.0 build 26300), no battery"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Everything at once"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "summary, fields, value(name), info(HardwareProperty)"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "five lines of text; the list of names; one value by name or by enum"
+          }
+         ]
+        ],
+        [
+         [
+          {
+           "s": "b",
+           "t": "Suggestion"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "recommendedPreset, recommendedPresetReason"
+          }
+         ],
+         [
+          {
+           "s": "",
+           "t": "Ultra, because of 12010 MB video memory, 31859 MB RAM, 32 threads"
+          }
+         ]
+        ]
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A value the machine cannot tell reads "
+        },
+        {
+         "s": "i",
+         "t": "empty"
+        },
+        {
+         "s": "",
+         "t": " (text) or "
+        },
+        {
+         "s": "i",
+         "t": "0"
+        },
+        {
+         "s": "",
+         "t": ", never a guess: the number of physical cores on some ARM boards, the video memory of an OpenGL card that does not say, the display before a window exists. The editor page shows a dash for them. The graphics card's memory is whatever the API reports: Direct3D and Vulkan give the dedicated memory, OpenGL asks NVIDIA cards through an extension and otherwise says 0, Apple GPUs share the system memory and report the share macOS recommends."
+        }
+       ]
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "From a script"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "",
+         "t": "A settings screen that lists everything needs no list of names in the script: "
+        },
+        {
+         "s": "c",
+         "t": "fields()"
+        },
+        {
+         "s": "",
+         "t": " gives the names in order and "
+        },
+        {
+         "s": "c",
+         "t": "value(name)"
+        },
+        {
+         "s": "",
+         "t": " the text of one. The numbers and flags also come typed."
+        }
+       ]
+      },
+      {
+       "k": "code",
+       "text": "-- Fill an about box: one line per hardware value\nfor _, field in ipairs(horizon.hardware.fields()) do\n    local text = horizon.hardware.value(field)\n    if text == \"\" then text = \"-\" end   -- the machine could not tell\n    print(field .. \": \" .. text)\nend\n\n-- Or typed, for a decision\nif horizon.hardware.gpuVramMB() > 0 and horizon.hardware.gpuVramMB() < 3000 then\n    horizon.settings.setQualityPreset(\"Low\")\nend",
+       "title": "about_box.lua"
+      },
+      {
+       "k": "code",
+       "text": "import horizon\n\nprint(horizon.hardware.summary())\nprint(\"GPU:\", horizon.hardware.gpuName(), horizon.hardware.gpuDriver(), horizon.hardware.graphicsApi())\n\n# Offer the suggestion, apply it only if the player agrees\nsuggested = horizon.hardware.recommendedPreset()\nprint(\"Suggested preset:\", suggested, \"-\", horizon.hardware.recommendedPresetReason())",
+       "title": "about_box.py"
+      },
+      {
+       "k": "h3",
+       "r": [
+        {
+         "s": "",
+         "t": "A suggestion, not a setting"
+        }
+       ]
+      },
+      {
+       "k": "p",
+       "r": [
+        {
+         "s": "c",
+         "t": "recommendedPreset"
+        },
+        {
+         "s": "",
+         "t": " is a deliberately coarse guess from the video memory, the RAM and the processor threads: 10000 MB of video memory and up reads Ultra, 6000 High, 3000 Medium, below that Low; Apple GPUs go by RAM; no usable GPU or the software rasterizer reads Low; unknown video memory never reads more than Medium. The host can lower it: Ultra needs 16 GB and 8 threads, High 12 GB and 6, Medium 8 GB and 4. Nothing applies it by itself — pass it to "
+        },
+        {
+         "s": "c",
+         "t": "Set Quality Preset"
+        },
+        {
+         "s": "",
+         "t": " if the player says yes. The Quality page of the project settings shows it as a hint. A recommendation measured on the machine (timing the presets) is a later topic and would replace this guess."
+        }
+       ]
+      },
+      {
+       "blocks": [
+        {
+         "k": "p",
+         "r": [
+          {
+           "s": "b",
+           "t": "Privacy: "
+          },
+          {
+           "s": "",
+           "t": "only type and model names and sizes. No serial numbers, device ids, MAC addresses or user names, and the engine never sends any of it anywhere. A game may read the values and decide what to do with them."
+          }
+         ]
+        }
+       ],
+       "k": "callout",
+       "tone": "info"
+      }
+     ],
+     "eyebrow": "Settings",
+     "id": "hardware",
+     "text": "What machine is the game running on? The engine finds out once at start-up and keeps it: the processor, the memory, the graphics card (asked of the renderer that is actually running, so it is the card that draws), the display the window is on and the operating system. A settings screen or an about box reads the values through the hardware rows: Get Hardware Info and the single getters in HorizonCode, horizon.hardware in Lua and Python, HE::api::hardware in C++. The editor shows the same table under Preferences » Preview » Hardware, with a button that copies it for a bug report. Value Script row Example (a desktop PC) Processor cpuName, cpuCores, cpuThreads, cpuArch AMD Ryzen 9 9950X 16-Core Processor, 16 cores, 32 threads, x64 Memory ramTotalMB, ramFreeMB 31859 MB installed; free memory is read fresh every time Graphics card gpuName, gpuVendor, gpuDriver, gpuVramMB, graphicsApi NVIDIA GeForce RTX 4070, NVIDIA, 621.01, 12010 MB, D3D12 Display displayWidth, displayHeight, displayRefreshHz, displayScale, displayName 2560 x 1440, 60 Hz, scale 1.25 System osName, osVersion, hasBattery, onBattery Windows 11 (10.0 build 26300), no battery Everything at once summary, fields, value(name), info(HardwareProperty) five lines of text; the list of names; one value by name or by enum Suggestion recommendedPreset, recommendedPresetReason Ultra, because of 12010 MB video memory, 31859 MB RAM, 32 threads A value the machine cannot tell reads empty (text) or 0, never a guess: the number of physical cores on some ARM boards, the video memory of an OpenGL card that does not say, the display before a window exists. The editor page shows a dash for them. The graphics card's memory is whatever the API reports: Direct3D and Vulkan give the dedicated memory, OpenGL asks NVIDIA cards through an extension and otherwise says 0, Apple GPUs share the system memory and report the share macOS recommends. From a script A settings screen that lists everything needs no list of names in the script: fields() gives the names in order and value(name) the text of one. The numbers and flags also come typed. -- Fill an about box: one line per hardware value\nfor _, field in ipairs(horizon.hardware.fields()) do\n    local text = horizon.hardware.value(field)\n    if text == \"\" then text = \"-\" end   -- the machine could not tell\n    print(field .. \": \" .. text)\nend\n\n-- Or typed, for a decision\nif horizon.hardware.gpuVramMB() > 0 and horizon.hardware.gpuVramMB() < 3000 then\n    horizon.settings.setQualityPreset(\"Low\")\nend import horizon\n\nprint(horizon.hardware.summary())\nprint(\"GPU:\", horizon.hardware.gpuName(), horizon.hardware.gpuDriver(), horizon.hardware.graphicsApi())\n\n# Offer the suggestion, apply it only if the player agrees\nsuggested = horizon.hardware.recommendedPreset()\nprint(\"Suggested preset:\", suggested, \"-\", horizon.hardware.recommendedPresetReason()) A suggestion, not a setting recommendedPreset is a deliberately coarse guess from the video memory, the RAM and the processor threads: 10000 MB of video memory and up reads Ultra, 6000 High, 3000 Medium, below that Low; Apple GPUs go by RAM; no usable GPU or the software rasterizer reads Low; unknown video memory never reads more than Medium. The host can lower it: Ultra needs 16 GB and 8 threads, High 12 GB and 6, Medium 8 GB and 4. Nothing applies it by itself — pass it to Set Quality Preset if the player says yes. The Quality page of the project settings shows it as a hint. A recommendation measured on the machine (timing the presets) is a later topic and would replace this guess. Privacy: only type and model names and sizes. No serial numbers, device ids, MAC addresses or user names, and the engine never sends any of it anywhere. A game may read the values and decide what to do with them.",
+     "title": "Hardware Info"
+    },
+    {
+     "blocks": [
+      {
        "head": [
         [
          {

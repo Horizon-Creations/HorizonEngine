@@ -5385,7 +5385,7 @@ namespace
 	  "driver and video memory, display, and operating system. Paste it into a bug report or a "
 	  "forum post. A line says \"unknown\" when the machine could not tell. Nothing is sent "
 	  "anywhere; the same values are what a game reads through the hardware rows.",
-	  "", "editor#preferences" },
+	  "", "rendering#hardware" },
 
 	// ── The tool setup dialog (ToolSetupDialog) ──────────────────────────────
 	// cmake, the C++ compiler, git, Git LFS and the git identity in one list. It
