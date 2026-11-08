@@ -105,6 +105,7 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
 #include <HorizonScene/LayerMeshPresets.h>   // HE_DUMP_AUTOLANDMESHES witness
+#include "AutoLodDialog.h"                    // HE_AUTOLOD_BAKE witness
 #include <HorizonScene/AnimationSystem.h>
 #include <HorizonScene/AnimationBlendSystem.h>
 #include <HorizonScene/AnimationStateMachineSystem.h>
@@ -5245,6 +5246,63 @@ void EditorApplication::OnRender(float dt)
 		// And after the UI for the asset tabs too: a Save pressed this frame has
 		// already cleared its tab, so its copy is pruned in the same frame.
 		updateAssetAutosave(nowMs, ctx);
+	}
+
+	// ── HE_AUTOLOD_BAKE witness (Thema 331 S3/S4) ─────────────────────────────
+	// HE_AUTOLOD_BAKE=<out.hescene>:<chain|card|impostor> runs the REAL Generate LODs / Bake
+	// Impostor code (AutoLodDialog::run) over every foliage layer of the project's scene the
+	// editor just opened, writes the scene to <out.hescene> and quits. The scene is the input
+	// of scripts/he_perf_capture.py --scene and of an HE_CAPTURE_FRAME picture, which is how
+	// the far level is seen in the editor loop rather than in a synthetic world:
+	//   chain     the LOD chain only
+	//   card      ...ended on the engine's cross card, drawn with the layer's material
+	//   impostor  ...ended on the baked impostor card
+	// The project's own files get the sidecars, so point it at a COPY of the project.
+	if (const char* ab = std::getenv("HE_AUTOLOD_BAKE"); ab && *ab && m_projectLoaded && m_editorWorld && !m_isPlaying)
+	{
+		static int s_autoLodBakeWait = 0;
+		static bool s_autoLodBakeDone = false;
+		if (!s_autoLodBakeDone && ++s_autoLodBakeWait > 30)
+		{
+			s_autoLodBakeDone = true;
+			std::string spec = ab;
+			std::string mode = "impostor";
+			if (const size_t colon = spec.rfind(':'); colon != std::string::npos && colon > 1)
+			{
+				mode = spec.substr(colon + 1);
+				spec.resize(colon);
+			}
+			AutoLodDialog::Options o;
+			o.foliage       = true;
+			o.crossCard     = mode != "chain";
+			o.bakeImpostor  = mode == "impostor";
+			o.impostorSize  = 1;
+			if (const char* sz = std::getenv("HE_AUTOLOD_IMPOSTOR_SIZE"); sz && *sz) o.impostorSize = std::clamp(std::atoi(sz), 0, 2);
+			int layers = 0, ok = 0;
+			auto& reg = m_editorWorld->registry();
+			for (auto e : reg.view<FoliageComponent>())
+			{
+				const size_t count = reg.get<FoliageComponent>(e).layers.size();
+				for (size_t li = 0; li < count; ++li)
+				{
+					AutoLodDialog::Request req;
+					req.kind   = AutoLodDialog::Kind::FoliageLayer;
+					req.entity = e;
+					req.layer  = static_cast<int>(li);
+					const AutoLodDialog::Outcome r = AutoLodDialog::run(ctx, req, o);
+					++layers;
+					ok += r.ok ? 1 : 0;
+					HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %s layer %zu: %s%s", mode.c_str(), li,
+						r.ok ? "" : "FAILED ", r.message.c_str());
+				}
+			}
+			SceneSerializer saver;
+			const bool saved = saver.save(*m_editorWorld, spec, SerializeFormat::JSON);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_AUTOLOD_BAKE %d of %d layer(s) ok, scene %s -> %s",
+				ok, layers, saved ? "written" : "NOT written", spec.c_str());
+			m_quitConfirmed = true;
+			Quit();
+		}
 	}
 
 	// ── FPS counter ───────────────────────────────────────────────────────

@@ -1027,6 +1027,15 @@ namespace
 	  "levels back; the generated files stay on disk.",
 	  "", "scenes#foliage" },
 
+	{ "Foliage/Bake Impostor", "",
+	  "Bakes a picture of the layer's plant, seen from two sides, and makes it the "
+	  "layer's farthest detail level: a cross card (two crossed quads, sized to the "
+	  "plant) with a cut-out material over the picture. Writes Name_Impostor, "
+	  "Name_ImpostorMat and Name_ImpostorCard next to the mesh; baking again "
+	  "replaces them in place. The size is the one in Generate LODs. Undo takes "
+	  "the level back; the files stay on disk.",
+	  "", "scenes#foliage" },
+
 	// ── Generate LODs (dialog) ───────────────────────────────────────────────
 	{ "Generate LODs/Levels", "",
 	  "How many simpler copies to make after the original: 3 gives the original "
@@ -1050,9 +1059,20 @@ namespace
 	  "the original's visible leaf area. Leave off for solid meshes such as rocks.",
 	  "", "rendering#performance" },
 	{ "Generate LODs/End on Cross Card", "",
-	  "Adds the engine's cross card as the last detail level. It draws the "
-	  "layer's material until a picture of the plant is baked for it, so it only "
-	  "looks right for materials whose texture already shows one plant.",
+	  "Adds the engine's cross card as the last detail level. Without Bake "
+	  "Impostor it draws the layer's material, so it only looks right for "
+	  "materials whose texture already shows one plant.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Bake Impostor", "",
+	  "Also bakes a picture of the plant, seen from two sides, and puts it on the "
+	  "last level's cross card (the card is sized to the plant). Implies End on "
+	  "Cross Card. The files are Name_Impostor, Name_ImpostorMat and "
+	  "Name_ImpostorCard next to the mesh.",
+	  "", "scenes#foliage" },
+	{ "Generate LODs/Impostor Size", "",
+	  "Texels along one side of each view; the picture holds both views side by "
+	  "side. 512 suits a plant that is a few pixels tall when the card takes over; "
+	  "1024 for a tree that is still large.",
 	  "", "scenes#foliage" },
 	{ "Generate LODs/Generate", "",
 	  "Writes the simplified meshes next to the original and applies them where "

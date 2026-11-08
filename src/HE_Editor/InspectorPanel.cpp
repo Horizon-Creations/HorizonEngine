@@ -9,6 +9,7 @@
 #include "HcEditorUtil.h"                // HorizonCode class listing (Script slot)
 #include "TerrainTools.h"                // the Terrain section's Heightmap block
 #include "AutoLodDialog.h"               // Generate LODs on a foliage layer and a LOD component
+#include "NotificationStore.h"          // the result line of Bake Impostor
 #include <HorizonScene/HorizonScene.h>
 #include <HorizonScene/EntityActive.h>   // the "Active" switch at the top of the panel
 #include <HorizonScene/Components/NetworkComponent.h> // not in HorizonScene.h: the Network section
@@ -3788,6 +3789,23 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			}
 			ImGui::EndDisabled();
 			EditorWidgets::helpForLabel("Generate LODs##fol");
+			// A picture of the plant on a cross card as the far level (Impostor.h).
+			ImGui::SameLine();
+			ImGui::BeginDisabled(fol->meshAssetId == HE::UUID{});
+			if (EditorWidgets::smallButton("Bake Impostor##fol"))
+			{
+				AutoLodDialog::Request req;
+				req.kind   = AutoLodDialog::Kind::FoliageLayer;
+				req.mesh   = fol->meshAssetId;
+				req.entity = entity;
+				req.layer  = static_cast<int>(folc->activeIndex());
+				const AutoLodDialog::Outcome r = AutoLodDialog::bakeImpostor(ctx, req, AutoLodDialog::options());
+				HE::Ed::notify(r.ok ? HE::Ed::NoteLevel::Info : HE::Ed::NoteLevel::Important,
+				               r.ok ? "Impostor baked" : "Impostor not baked", r.message);
+				if (r.ok) trackEdit();
+			}
+			ImGui::EndDisabled();
+			EditorWidgets::helpForLabel("Bake Impostor##fol");
 			if (!fol->lods.empty())
 			{
 				Row::dragFloat("Level Hysteresis##fol", &fol->lodHysteresis, 0.1f, 0.0f, 50.f, "%.1f m"); trackEdit();

@@ -29,10 +29,14 @@ struct FoliageOptions
     LodScreenMetrics screen;
     // Mean plant scale: a plant drawn 1.5x as big shows its error 1.5x as big.
     float instanceScale = 1.0f;
-    // End the chain on the engine's cross card. It draws the LAYER's material until
-    // the impostor bake (step 4) gives it a picture of the plant, so it is off unless
-    // asked for.
+    // End the chain on a cross card. With no impostor below it is the engine's own
+    // card drawn with the LAYER's material (no picture of the plant), so it is off
+    // unless asked for.
     bool  crossCard = false;
+    // The baked impostor (Impostor.h): its card replaces the engine's, and its material
+    // (a picture of this plant) replaces the layer's. Null = the engine card.
+    HE::UUID impostorMesh;
+    HE::UUID impostorMaterial;
 };
 
 // Share of the layer's plants a level still draws: the first two extra levels draw
@@ -73,8 +77,8 @@ inline size_t fillFoliageLayer(FoliageLayer& layer, const std::vector<Level>& ch
         if (last < layer.drawDistance)
         {
             FoliageLod d;
-            d.meshAssetId     = HE::kEngineCrossCardMeshId;
-            d.materialAssetId = layer.materialAssetId;
+            d.meshAssetId     = opt.impostorMesh == HE::UUID{} ? HE::kEngineCrossCardMeshId : opt.impostorMesh;
+            d.materialAssetId = opt.impostorMesh == HE::UUID{} ? layer.materialAssetId : opt.impostorMaterial;
             d.distance        = std::min(last * 1.8f, 0.5f * (last + layer.drawDistance));
             d.density         = lodDensityFor(layer.lods.size());
             layer.lods.push_back(d);
@@ -90,6 +94,43 @@ inline size_t fillFoliageLayer(FoliageLayer& layer, const std::vector<Level>& ch
 
     layer.dirty = true;
     return layer.lods.size();
+}
+
+// Puts the baked impostor on the layer's FAR end without touching the chain before it.
+// A last level that already is a cross card (the engine's, or `previousCard` — the card
+// of an earlier bake) is replaced in place, keeping its distance and density, so baking
+// again changes the picture and nothing else. Otherwise a level is appended: it starts
+// where the nearest-but-one would (past the last level by 1.8x, or half-way to
+// `drawDistance`), and thins like any level of its index. Returns false when the layer
+// has no room (kMaxLods) or the impostor starts past `drawDistance`.
+inline bool applyImpostorLevel(FoliageLayer& layer, HE::UUID card, HE::UUID material, HE::UUID previousCard = {})
+{
+    if (!layer.lods.empty())
+    {
+        FoliageLod& last = layer.lods.back();
+        const bool isCard = last.meshAssetId == HE::kEngineCrossCardMeshId
+                         || (previousCard != HE::UUID{} && last.meshAssetId == previousCard)
+                         || last.meshAssetId == card;
+        if (isCard)
+        {
+            last.meshAssetId     = card;
+            last.materialAssetId = material;
+            layer.dirty = true;
+            return true;
+        }
+    }
+    if (layer.lods.size() >= FoliageLayer::kMaxLods) return false;
+    FoliageLod d;
+    d.meshAssetId     = card;
+    d.materialAssetId = material;
+    d.distance        = layer.lods.empty() ? 0.5f * layer.drawDistance
+                                           : std::min(layer.lods.back().distance * 1.8f,
+                                                      0.5f * (layer.lods.back().distance + layer.drawDistance));
+    if (d.distance >= layer.drawDistance) return false;
+    d.density = lodDensityFor(layer.lods.size());
+    layer.lods.push_back(d);
+    layer.dirty = true;
+    return true;
 }
 
 // Mesh entity: levels[0] = LOD0 (navigation, physics and the extractor read it as

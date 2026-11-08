@@ -235,6 +235,8 @@ add_executable(he_tests
     test_mesh_simplifier.cpp
     # Auto-LOD chains: generator, sidecars, screen-error distances, foliage/LOD fill (Thema 331 S3).
     test_auto_lod.cpp
+    # Impostor bake: CPU albedo+alpha picture of a plant, the sized card, the cut-out material (Thema 331 S4).
+    test_impostor.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp

@@ -45,6 +45,9 @@ namespace AutoLodDialog
 		float tolerancePx = 2.0f;    // pixel error a level may show where it takes over
 		bool  foliage     = false;   // thin cards: whole pieces may vanish; the alpha keeps leaf area
 		bool  crossCard   = false;   // FoliageLayer: end the chain on the engine cross card
+		bool  bakeImpostor = false;  // FoliageLayer: ...and make that card show the plant (implies crossCard)
+		int   impostorSize = 1;      // 0 / 1 / 2: 256 / 512 / 1024 texels per view
+		static int kSizeFor(int index) { return index <= 0 ? 256 : (index == 1 ? 512 : 1024); }
 	};
 	Options& options();
 
@@ -65,6 +68,12 @@ namespace AutoLodDialog
 	};
 	// Writes the chain and applies it; no window involved.
 	Outcome run(AppContext& ctx, const Request& req, const Options& o);
+
+	// Bakes the layer's mesh into an impostor card (Impostor.h) and puts it on the layer's
+	// far end: replaces a last level that already is a cross card, else appends one.
+	// `req.kind` must be FoliageLayer. Writes <mesh>_Impostor / _ImpostorMat / _ImpostorCard
+	// next to the mesh (a second bake replaces them in place); only the layer edit is undoable.
+	Outcome bakeImpostor(AppContext& ctx, const Request& req, const Options& o);
 
 	// Ask for the dialog: it opens on the next Draw().
 	void open(const Request& req);

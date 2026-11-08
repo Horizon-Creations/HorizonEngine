@@ -4,6 +4,8 @@
 #include "EditorWidgets.h"       // Row, buttons, pinDialogToEditorWindow
 #include "NotificationStore.h"   // the result line
 
+#include "Impostor.h"
+
 #include <HorizonScene/AutoLodApply.h>
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/LODComponent.h>
@@ -73,11 +75,109 @@ namespace
 		return out;
 	}
 
+	// One material slot of the plant for the impostor bake: the base-colour texture's
+	// pixels (copied: the next load invalidates the asset), the material's tint and
+	// whether it cuts out. A material the bake cannot read as RGBA8 (a packed project's
+	// compressed texture) comes back flat, which is said in `note`.
+	struct SlotSource
+	{
+		std::vector<uint8_t> pixels;
+		Impostor::SectionSource src;
+	};
+
+	SlotSource slotSourceOf(ContentManager& cm, HE::UUID materialId, const std::string& materialPath, std::string& note)
+	{
+		SlotSource out;
+		HE::UUID matId = materialId;
+		if (matId == HE::UUID{} && !materialPath.empty()) matId = cm.loadAsset(materialPath);
+		const MaterialAsset* mat = matId == HE::UUID{} ? nullptr : cm.getMaterial(matId);
+		if (!mat)
+		{
+			out.src.alphaTest = false;
+			out.src.tint[0] = 0.35f; out.src.tint[1] = 0.45f; out.src.tint[2] = 0.2f;
+			note = "A material was not found, so its part of the plant is flat green.";
+			return out;
+		}
+		for (int k = 0; k < 3; ++k) out.src.tint[k] = mat->baseColor[k];
+		out.src.alphaTest = mat->blendMode != 0;   // Opaque draws without its alpha
+		HE::UUID texId;
+		std::string texPath;
+		if (!mat->textureIds.empty() && !(mat->textureIds[0] == HE::UUID{})) texId = mat->textureIds[0];
+		else if (!mat->texturePaths.empty()) texPath = mat->texturePaths[0];
+		if (texId == HE::UUID{} && texPath.empty()) return out;   // no texture: the tint is the colour
+		if (texId == HE::UUID{}) texId = cm.loadAsset(texPath);
+		const TextureAsset* tex = texId == HE::UUID{} ? nullptr : cm.getTexture(texId);
+		if (!tex || tex->format != TextureFormat::RGBA8 || tex->channels != 4 || tex->width == 0 || tex->height == 0
+		    || tex->data.size() < static_cast<size_t>(tex->width) * tex->height * 4)
+		{
+			note = "A texture could not be read as plain RGBA8, so its part of the plant is flat.";
+			out.src.alphaTest = false;
+			return out;
+		}
+		out.pixels.assign(tex->data.begin(), tex->data.begin() + static_cast<size_t>(tex->width) * tex->height * 4);
+		out.src.width  = static_cast<int>(tex->width);
+		out.src.height = static_cast<int>(tex->height);
+		out.src.srgb   = tex->srgb;
+		return out;
+	}
+
 	Outcome fail(std::string message)
 	{
 		Outcome o;
 		o.message = std::move(message);
 		return o;
+	}
+
+	// The bake and the files: a picture of `src` seen from two sides, the card sized to
+	// it, and the material. `layer` (may be null) says which material the plant is drawn
+	// with: a layer material replaces the mesh's own on every slot. The written assets
+	// are loaded so their ids are the ones a scene will name.
+	Outcome bakeImpostorFiles(AppContext& /*ctx*/, ContentManager& cm, const StaticMeshAsset& src,
+	                          const FoliageLayer* layer, const Options& o, HE::UUID& cardOut, HE::UUID& materialOut)
+	{
+		if (src.path.empty()) return fail("The mesh has no asset path to put the impostor next to.");
+		if (src.cooked) return fail("A packed mesh cannot be baked.");
+		const size_t slotCount = std::max<size_t>(src.sections.size(), 1);
+		std::vector<SlotSource> slots;
+		std::string note;
+		for (size_t i = 0; i < slotCount; ++i)
+		{
+			HE::UUID    matId   = layer ? layer->materialAssetId : HE::UUID{};
+			std::string matPath;
+			if (matId == HE::UUID{})
+			{
+				if (!src.sections.empty()) { matId = src.sections[i].materialId; matPath = src.sections[i].materialPath; }
+				if (matId == HE::UUID{} && matPath.empty()) { matId = src.materialId; matPath = src.materialPath; }
+			}
+			slots.push_back(slotSourceOf(cm, matId, matPath, note));
+		}
+		std::vector<Impostor::SectionSource> sources;
+		for (const SlotSource& s : slots) sources.push_back(s.src);   // pixel buffers do not move: the vectors own them
+		for (size_t i = 0; i < slots.size(); ++i)
+			if (!slots[i].pixels.empty()) sources[i].rgba = slots[i].pixels.data();
+
+		Impostor::Settings bs;
+		bs.size = Options::kSizeFor(o.impostorSize);
+		const Impostor::Baked baked = Impostor::bake(src, sources, bs);
+		if (!baked.ok()) return fail(baked.error);
+		const Impostor::Result written = Impostor::write(baked, src.path, cm.contentRoot());
+		if (!written.ok()) return fail(written.error);
+
+		cardOut     = cm.loadAsset(written.meshPath);
+		materialOut = cm.loadAsset(written.materialPath);
+		cm.loadAsset(written.texturePath);
+		if (cardOut == HE::UUID{})     cardOut     = written.mesh;
+		if (materialOut == HE::UUID{}) materialOut = written.material;
+		if (cardOut == HE::UUID{} || materialOut == HE::UUID{}) return fail("The impostor was written but could not be loaded.");
+
+		Outcome out;
+		out.ok = true;
+		char buf[200];
+		std::snprintf(buf, sizeof(buf), "Baked an impostor (%d x %d texels, %.0f %% / %.0f %% of the two views covered) as %s.",
+		              baked.width, baked.height, baked.coverage[0] * 100.0f, baked.coverage[1] * 100.0f, written.materialPath.c_str());
+		out.message = buf;
+		if (!note.empty()) out.message += " " + note;
+		return out;
 	}
 }
 
@@ -107,7 +207,12 @@ bool drawOptions(Options& o, Kind kind)
 		changed |= EditorWidgets::Row::sliderFloat("Pixel Error##autolod", &o.tolerancePx, 0.5f, 8.0f, "%.1f px");
 	changed |= EditorWidgets::checkbox("Foliage Mode##autolod", &o.foliage);
 	if (kind == Kind::FoliageLayer)
+	{
 		changed |= EditorWidgets::checkbox("End on Cross Card##autolod", &o.crossCard);
+		changed |= EditorWidgets::checkbox("Bake Impostor##autolod", &o.bakeImpostor);
+		if (o.bakeImpostor)
+			changed |= EditorWidgets::Row::comboZ("Impostor Size##autolod", &o.impostorSize, "256 texels\0" "512 texels\0" "1024 texels\0");
+	}
 
 	// What it will make, in the words of the request: 100 / 50 / 25 / 10 %.
 	std::string line = "100";
@@ -207,11 +312,18 @@ Outcome run(AppContext& ctx, const Request& req, const Options& o)
 		HE::AutoLodApply::FoliageOptions fo;
 		fo.screen        = screen;
 		fo.instanceScale = 0.5f * (layer->minScale + layer->maxScale);
-		fo.crossCard     = o.crossCard;
+		fo.crossCard     = o.crossCard || o.bakeImpostor;
+		std::string impostorNote;
+		if (o.bakeImpostor)
+		{
+			const Outcome baked = bakeImpostorFiles(ctx, cm, src, layer, o, fo.impostorMesh, fo.impostorMaterial);
+			if (!baked.ok) impostorNote = " Impostor not baked: " + baked.message;
+			else impostorNote = " " + baked.message;
+		}
 		const size_t n = HE::AutoLodApply::fillFoliageLayer(*layer, levels, fo);
 		out.message = "Generated " + std::to_string(levels.size()) + " level(s) for " + lod0Path + " ("
 		            + std::to_string(out.lod0Tris) + " to " + std::to_string(out.lastTris) + " triangles); the layer now has "
-		            + std::to_string(n) + " detail level(s).";
+		            + std::to_string(n) + " detail level(s)." + impostorNote;
 	}
 	else if (req.kind == Kind::Entity)
 	{
@@ -232,6 +344,43 @@ Outcome run(AppContext& ctx, const Request& req, const Options& o)
 	}
 	if (settings.foliage && mask.data.empty())
 		out.message += " No alpha mask was found, so leaf area was not measured.";
+	return out;
+}
+
+Outcome bakeImpostor(AppContext& ctx, const Request& req, const Options& o)
+{
+	if (!ctx.contentManager) return fail("No project is open.");
+	if (req.kind != Kind::FoliageLayer) return fail("An impostor is baked for a foliage layer.");
+	HorizonWorld* world = ctx.world;
+	if (!world || !world->registry().valid(req.entity)) return fail("The landscape is gone.");
+	auto* fol = world->registry().try_get<FoliageComponent>(req.entity);
+	if (!fol || req.layer < 0 || static_cast<size_t>(req.layer) >= fol->layers.size())
+		return fail("The foliage layer is gone.");
+	FoliageLayer& layer = fol->layers[static_cast<size_t>(req.layer)];
+	ContentManager& cm = *ctx.contentManager;
+	if (layer.meshAssetId == HE::UUID{}) return fail("The layer has no mesh.");
+	const std::string path = cm.pathForId(layer.meshAssetId);
+	if (path.empty()) return fail("The mesh is not a file in the project.");
+	if (startsWith(path, "Engine/"))
+		return fail("Engine meshes cannot be baked here. Copy the mesh into the project first.");
+	if (!cm.getStaticMesh(layer.meshAssetId)) cm.ensureResident(layer.meshAssetId);
+	const StaticMeshAsset* loaded = cm.getStaticMesh(layer.meshAssetId);
+	if (!loaded) return fail("The mesh could not be loaded.");
+	StaticMeshAsset src = *loaded;       // a copy: the next load invalidates `loaded`
+	if (src.path.empty()) src.path = path;
+
+	HE::UUID card, material;
+	Outcome out = bakeImpostorFiles(ctx, cm, src, &layer, o, card, material);
+	if (!out.ok) return out;
+	if (ctx.undoSys) ctx.undoSys->snapshotNow("Bake Impostor");
+	if (!HE::AutoLodApply::applyImpostorLevel(layer, card, material))
+	{
+		out.ok = false;
+		out.message += " The layer has no room for another level (or it would start past the Draw Distance), so it was not added.";
+		return out;
+	}
+	out.message += " The layer now has " + std::to_string(layer.lods.size()) + " detail level(s); the impostor starts at "
+	            + std::to_string(static_cast<int>(layer.lods.back().distance)) + " m.";
 	return out;
 }
 
