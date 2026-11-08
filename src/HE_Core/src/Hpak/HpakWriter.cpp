@@ -1,9 +1,12 @@
 #include <Hpak/HpakWriter.h>
+#include <Hpak/ReachFilter.h>
+#include <Hpak/MeshBakePass.h>
 #include <cstdint>
 #include <Hpak/Aes256Gcm.h>
 #include <ContentManager/Assets.h>  // MeshSection + the MSEC (de)coder
 #include <ContentManager/HAsset.h>
 #include <ContentManager/TextureArrayBuild.h> // slice math for cooked texture arrays
+#include <ContentManager/TextureBlockDecode.h> // baked per-slice means (CHUNK_TXSM)
 #include <MaterialGraph/MaterialGraph.h> // pack-time GI-hit approx re-fold
 #include <Types/Enums.h>
 #ifdef HE_HAVE_LZ4
@@ -26,6 +29,7 @@
 #  include <bc7enc/stb_dxt.h>
 #endif
 #include <algorithm>
+#include <iterator>
 #include <fstream>
 #include <string>
 #include <map>
@@ -458,6 +462,7 @@ static std::vector<uint8_t> rewriteRefsForPack(
             std::string parentPath;    // instance parent — approx re-fold walks it
             std::vector<std::string> switchNames;  // instance switch permutation —
             std::vector<uint8_t>     switchValues; // the fold takes the same branches
+            std::string customGBufGlsl; // the deferred tail: PSHD bakes its fragment too
             size_t afterGBuf = 0;      // end of customShaderGBufGlsl (approx tail follows)
             bool   tailReachedGBuf = false;
             {
@@ -476,9 +481,8 @@ static std::vector<uint8_t> rewriteRefsForPack(
                 // Continue to the end of customShaderGBufGlsl — the GI-hit
                 // approximation (approxBaseColor/…) sits after it and is
                 // RE-COMPUTED at pack time below.
-                std::string gbuf;
                 tailReachedGBuf = HAsset::Reader::readVec(c.data, o2, sv)     // graphLayerNames
-                               && HAsset::Reader::readString(c.data, o2, gbuf); // customShaderGBufGlsl
+                               && HAsset::Reader::readString(c.data, o2, customGBufGlsl); // customShaderGBufGlsl
                 afterGBuf = o2;
             }
 
@@ -591,10 +595,17 @@ static std::vector<uint8_t> rewriteRefsForPack(
 
             // Precompile this material's shader for the chosen backends (CHUNK_PSHD) so
             // the shipped game never cross-compiles. The editor supplies the compiler.
-            if (!customShaderGlsl.empty() && settings.shaderBackends != 0 && settings.compileShaderVariants)
+            //
+            // Not for an instance with switch overrides: ContentManager::syncMaterialInstance
+            // regenerates its shader from the PARENT's graph at load and discards whatever
+            // PSHD it carries (the permutation differs from the GLSL stored here), so baking
+            // it only ships bytes nothing reads. Its parent keeps its graph and its own PSHD.
+            if (!customShaderGlsl.empty() && switchNames.empty()
+                && settings.shaderBackends != 0 && settings.compileShaderVariants)
             {
                 std::vector<uint8_t> pshd = settings.compileShaderVariants(
-                    customShaderGlsl, customVertBody, settings.shaderBackends);
+                    customShaderGlsl, customVertBody, tailReachedGBuf ? customGBufGlsl : std::string{},
+                    settings.shaderBackends);
                 if (!pshd.empty()) w.addChunk(HAsset::CHUNK_PSHD, pshd.data(), pshd.size());
             }
             continue;
@@ -727,6 +738,27 @@ void HpakWriter::addPackedEntry(const HE::UUID& id, const HpakReader::StoredEntr
     m_entries.push_back(std::move(e));
 }
 
+bool HpakWriter::addAlias(const HE::UUID& id, const HE::UUID& target)
+{
+    size_t owner = m_entries.size();
+    for (size_t i = m_entries.size(); i-- > 0;)
+        if (m_entries[i].uuid == target) { owner = i; break; }
+    if (owner == m_entries.size()) return false;
+    if (m_entries[owner].aliasOf >= 0)
+        owner = static_cast<size_t>(m_entries[owner].aliasOf); // an alias of an alias shares the owner
+
+    PendingEntry e;
+    e.uuid        = id;
+    e.origSize    = m_entries[owner].origSize;
+    e.contentHash = m_entries[owner].contentHash;
+    e.codec       = m_entries[owner].codec;
+    e.flags       = m_entries[owner].flags;
+    std::memcpy(e.nonce, m_entries[owner].nonce, sizeof(e.nonce));
+    e.aliasOf     = static_cast<int64_t>(owner);
+    m_entries.push_back(std::move(e));
+    return true;
+}
+
 // Box-downsample an RGBA8 image to half size (min 1px), averaging each 2x2 block
 // (clamped on odd dimensions). Used to bake the mip chain at pack time.
 static std::vector<uint8_t> halveRGBA8(const uint8_t* src, uint32_t w, uint32_t h,
@@ -846,6 +878,7 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
     };
 
     std::vector<uint8_t> levels;
+    std::vector<float>   sliceMeans; // arrays only, see CHUNK_TXSM
     uint8_t  format = 0; // HE::TextureFormat value
     uint32_t count  = 1;
     if (layers > 1)
@@ -857,6 +890,10 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
         count = std::max<uint32_t>(1, existingMips);
         if (px->data.size() != static_cast<size_t>(layers) * HE::textureArraySliceBytes(width, height, count))
             return {};
+        // The CPU cannot read BC7 / ASTC back, and the GI landscape colours are the mean of
+        // five slices — so the means leave here, computed from the RGBA8 the encoder sees.
+        if (!HE::bakeTextureArraySliceMeans(px->data.data(), px->data.size(), width, height, count,
+                                            layers, srgb != 0, sliceMeans)) return {};
         if (!encodeChains(px->data.data(), layers, count, levels)) return {};
         format = targetFormat;
     }
@@ -902,8 +939,13 @@ static std::vector<uint8_t> cookTexture(HAsset::Reader& r, uint8_t targetFormat,
         }
         else if (c.id == HAsset::CHUNK_PIXL)
             w.addChunk(HAsset::CHUNK_PIXL, levels.data(), levels.size());
-        else
+        else if (c.id != HAsset::CHUNK_TXSM) // re-baked below
             w.addChunk(c.id, c.data.data(), c.data.size());
+    }
+    if (!sliceMeans.empty())
+    {
+        std::vector<uint8_t> b; HAsset::Writer::appendVec(b, sliceMeans);
+        w.addChunk(HAsset::CHUNK_TXSM, b.data(), b.size());
     }
     return w.toBytes(r.assetType());
 }
@@ -1049,6 +1091,9 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
     m_packedPaths.clear();
     m_packedTypes.clear();
     m_warnings.clear();
+    m_unreachableScenes.clear();
+    m_unreferencedCount = 0;
+    m_unreferencedBytes = 0;
     auto warn = [&](std::string msg)
     {
         if (settings.onWarning) settings.onWarning(msg);
@@ -1135,6 +1180,147 @@ int HpakWriter::addDirectories(const std::vector<SourceRoot>& roots,
             it.increment(ec);
         }
         ec.clear();
+    }
+
+    // Assets the editor made for this export (PackSettings::extraAssets). They are pending entries like the files
+    // above, and the folder each sits in is a reach root: the runtime finds them by id, no scene names them.
+    std::vector<std::string> extraRootPrefixes;
+    for (const Hpak::PackSettings::ExtraAsset& ea : settings.extraAssets)
+    {
+        if (ea.bytes.empty() || ea.id == HE::UUID{} || claimed.count(ea.id)) continue;
+        claimed.insert(ea.id);
+        m_packedTypes[ea.id] = ea.type;
+        pathToUuid[ea.relPath] = ea.id;
+        m_packedPaths[ea.relPath] = ea.id;
+        pending.push_back({ ea.bytes, ea.id, ea.relPath, ea.relPath });
+        const size_t slash = ea.relPath.find_last_of('/');
+        if (slash != std::string::npos)
+        {
+            const std::string folder = ea.relPath.substr(0, slash + 1);
+            if (std::find(extraRootPrefixes.begin(), extraRootPrefixes.end(), folder) == extraRootPrefixes.end())
+                extraRootPrefixes.push_back(folder);
+        }
+    }
+
+    // Pass 1b: leave out what the game does not reach (Hpak/ReachFilter.h). Every blob is
+    // in `pending` and every path is in pathToUuid by now, so this is the one place the whole
+    // reference graph is visible. Scenes the game may load are nodes of the same graph.
+    // A lambda because the texture bake (Pass 1c) rewrites assets and the filter has to run
+    // again over the result: the textures a merged mesh no longer names must stay out.
+    // `first` = also settle the scenes; `announce` = print the "Not packed" notice.
+    const auto applyReach = [&](bool first, bool announce)
+    {
+        std::vector<HE::reach::Node> nodes;
+        nodes.reserve(pending.size() + settings.reachScenes.size());
+        for (const Pending& pe : pending)
+        {
+            HE::reach::Node n;
+            n.id = pe.id; n.path = pe.relPath;
+            if (pe.metaPath != pe.relPath) n.metaPath = pe.metaPath;
+            const auto ty = m_packedTypes.find(pe.id);
+            n.type = ty != m_packedTypes.end() ? ty->second : uint16_t(0);
+            n.data = pe.bytes.data(); n.size = pe.bytes.size();
+            nodes.push_back(std::move(n));
+        }
+        for (const Hpak::PackSettings::ReachScene& sc : settings.reachScenes)
+        {
+            HE::reach::Node n;
+            n.path = sc.path;
+            if (sc.path.rfind("Content/", 0) == 0) n.metaPath = sc.path.substr(8);
+            n.data = sc.bytes.data(); n.size = sc.bytes.size();
+            nodes.push_back(std::move(n));
+        }
+        HE::reach::Roots roots = HE::reach::engineImplicitRoots();
+        roots.globs = settings.alwaysIncludePatterns;
+        roots.pathPrefixes.insert(roots.pathPrefixes.end(), extraRootPrefixes.begin(), extraRootPrefixes.end());
+        for (const auto& b : settings.referenceRoots) roots.blobs.emplace_back(b.data(), b.size());
+        const HE::reach::Result res = HE::reach::computeReachable(nodes, roots);
+
+        struct Dropped { std::string path; size_t bytes; };
+        std::vector<Dropped> dropped;
+        const size_t nAssets = pending.size();
+        std::vector<Pending> kept;
+        kept.reserve(pending.size());
+        for (size_t i = 0; i < pending.size(); ++i)
+        {
+            if (res.reachable[i]) { kept.push_back(std::move(pending[i])); continue; }
+            const Pending& pe = pending[i];
+            dropped.push_back({ pe.relPath, pe.bytes.size() });
+            m_unreferencedBytes += pe.bytes.size();
+            ++m_unreferencedCount;
+            // Out of every index the pak derives from this scan. A kept asset that still
+            // names it (a spelling the scan missed) now bakes to a null UUID WITH the "in no
+            // packed root" warning below, instead of a UUID the pak does not hold.
+            m_packedTypes.erase(pe.id);
+            for (auto it = m_packedPaths.begin(); it != m_packedPaths.end();)
+                it = (it->second == pe.id) ? m_packedPaths.erase(it) : std::next(it);
+            for (auto it = pathToUuid.begin(); it != pathToUuid.end();)
+                it = (it->second == pe.id) ? pathToUuid.erase(it) : std::next(it);
+        }
+        pending = std::move(kept);
+        if (first)
+            for (size_t i = 0; i < settings.reachScenes.size(); ++i)
+                if (!res.reachable[nAssets + i])
+                    m_unreachableScenes.push_back(settings.reachScenes[i].path);
+
+        if (announce && settings.onNotice)
+        {
+            std::sort(dropped.begin(), dropped.end(),
+                      [](const Dropped& a, const Dropped& b) { return a.bytes > b.bytes; });
+            std::string msg = "Not packed, nothing the game reaches names them: "
+                            + std::to_string(m_unreferencedCount) + " asset(s), "
+                            + std::to_string(m_unreferencedBytes / 1024) + " KB";
+            if (!dropped.empty()) msg += "; largest:";
+            for (size_t i = 0; i < dropped.size() && i < 5; ++i)
+                msg += " " + dropped[i].path + " (" + std::to_string(dropped[i].bytes / 1024) + " KB)";
+            if (!m_unreachableScenes.empty())
+                msg += "; " + std::to_string(m_unreachableScenes.size()) + " scene(s) nothing loads";
+            settings.onNotice(msg);
+        }
+    };
+    // The bake needs the reach filter's verdict first (only reachable meshes are worth it), so
+    // the notice waits for the second run when a bake is going to happen.
+    const bool bakeMeshes = settings.bakeMeshTextures && settings.onlyReferenced;
+    if (settings.onlyReferenced) applyReach(/*first=*/true, /*announce=*/!bakeMeshes);
+
+    // Pass 1c: bake textures onto meshes (Hpak/MeshBakePass.h). Rewrites the meshes it can,
+    // adds the derived material and atlases, then filters again.
+    if (bakeMeshes)
+    {
+        std::vector<HE::MeshBake::PassEntry> entries;
+        entries.reserve(pending.size());
+        for (const Pending& pe : pending)
+        {
+            HE::MeshBake::PassEntry e;
+            e.id = pe.id; e.relPath = pe.relPath;
+            if (pe.metaPath != pe.relPath) e.metaPath = pe.metaPath;
+            const auto ty = m_packedTypes.find(pe.id);
+            e.type = ty != m_packedTypes.end() ? ty->second : uint16_t(0);
+            e.bytes = &pe.bytes;
+            entries.push_back(std::move(e));
+        }
+        HE::MeshBake::PassOptions po;
+        po.maxAtlas = settings.bakeMaxAtlas;
+        po.skipMeshes = settings.bakeSkipMeshes;
+        HE::MeshBake::PassResult baked = HE::MeshBake::runPass(entries, po);
+        entries.clear();
+        for (HE::MeshBake::ReplacedMesh& rm : baked.replaced)
+            for (Pending& pe : pending)
+                if (pe.id == rm.id) { pe.bytes = std::move(rm.bytes); break; }
+        for (HE::MeshBake::NewAsset& na : baked.added)
+        {
+            Pending pe;
+            pe.id = na.id; pe.relPath = na.relPath; pe.metaPath = na.relPath;
+            pe.bytes = std::move(na.bytes);
+            pathToUuid[na.relPath] = na.id;
+            m_packedPaths[na.relPath] = na.id;
+            m_packedTypes[na.id] = na.type;
+            pending.push_back(std::move(pe));
+        }
+        if (settings.onNotice)
+            for (const std::string& line : baked.notices)
+                settings.onNotice("Mesh bake - " + line);
+        applyReach(/*first=*/false, /*announce=*/true);
     }
 
     // Pass 2: rewrite path refs to baked UUIDs (dropping the path strings), then pack.
@@ -1320,22 +1506,33 @@ bool HpakWriter::write(const std::string& outputPath) const
     std::vector<uint8_t> toc(m_entries.size() * sizeof(Hpak::EntryDesc));
     uint64_t offset       = dataStart;
     uint32_t archiveFlags = Hpak::kArchiveSortedTOC;
+    // Where each OWNING entry's bytes start; an alias row points at its owner's range, which
+    // may sort after the alias, so the offsets are laid out before any row is built.
+    std::vector<uint64_t> dataAt(m_entries.size(), 0);
     for (size_t k = 0; k < order.size(); ++k)
     {
         const auto& e = m_entries[order[k]];
+        if (e.aliasOf >= 0) continue;
+        dataAt[order[k]] = offset;
+        offset += e.data.size();
+    }
+    for (size_t k = 0; k < order.size(); ++k)
+    {
+        const auto& e     = m_entries[order[k]];
+        const size_t own  = e.aliasOf >= 0 ? static_cast<size_t>(e.aliasOf) : order[k];
+        const auto& bytes = m_entries[own].data;
         Hpak::EntryDesc desc{};
         desc.uuidHi      = e.uuid.hi;
         desc.uuidLo      = e.uuid.lo;
-        desc.dataOffset  = offset;
+        desc.dataOffset  = dataAt[own];
         desc.origSize    = e.origSize;
-        desc.dataSize    = static_cast<uint32_t>(e.data.size());
+        desc.dataSize    = static_cast<uint32_t>(bytes.size());
         desc.contentHash = e.contentHash;
         std::memcpy(desc.nonce, e.nonce, sizeof(desc.nonce));
         desc.codec       = e.codec;
         desc.entryFlags  = e.flags;
         std::memcpy(toc.data() + k * sizeof(Hpak::EntryDesc), &desc, sizeof(desc));
         if (e.flags & Hpak::kFlagEncrypted) archiveFlags |= Hpak::kArchiveEncrypted;
-        offset += e.data.size();
     }
 
     // Header
@@ -1356,11 +1553,11 @@ bool HpakWriter::write(const std::string& outputPath) const
         f.write(reinterpret_cast<const char*>(toc.data()),
                 static_cast<std::streamsize>(toc.size()));
 
-    // Data blocks — same (sorted) order as the TOC offsets
+    // Data blocks — same (sorted) order as the TOC offsets (an alias has no bytes of its own)
     for (size_t k = 0; k < order.size(); ++k)
     {
         const auto& e = m_entries[order[k]];
-        if (!e.data.empty())
+        if (e.aliasOf < 0 && !e.data.empty())
             f.write(reinterpret_cast<const char*>(e.data.data()),
                     static_cast<std::streamsize>(e.data.size()));
     }

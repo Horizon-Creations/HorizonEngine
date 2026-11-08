@@ -3,6 +3,7 @@
 #include "RenderObject.h"
 #include "CommandBuffer.h"
 #include "GiLandscape.h"
+#include "FogVolume.h"            // FogVolumeData (Thema 225)
 #include <Renderer/UIRenderObject.h>
 #include <ParticleGraph/ParticleGraph.h>
 #include <Math/Math.h>
@@ -508,6 +509,10 @@ public:
     CameraData                camera;
     ShadowData                shadow;
     UnderwaterCameraData      underwaterCamera;
+    // Volumetric fog (Thema 225): filled by HE::ExtractFogVolumeData
+    // (RenderExtractor.h), not yet called from extract() — no backend reads this
+    // until plan step 3+. enabled stays false until then regardless of scene state.
+    HE::FogVolumeData         fogVolume;
 
     // Direction *toward* the sun (normalized), set by the extractor: from the
     // first directional light, or driven by the day-night cycle when enabled.

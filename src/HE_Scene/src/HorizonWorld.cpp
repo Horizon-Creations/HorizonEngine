@@ -340,7 +340,15 @@ Entity HorizonWorld::addSky()
     if (Entity e = environmentEntity(); e != entt::null)
         return e; // already have a sky
     Entity sky = createEntity("Sky");
-    m_registry.emplace<EnvironmentComponent>(sky);
+    // A Sky somebody adds today starts on the volumetric fog (Thema 225 step 7). This is the
+    // only place the default differs from the struct's 0: EnvironmentComponent{}.fogMode stays
+    // 0 because the loader keeps the struct value for a key a scene never saved, and every
+    // scene older than the field must read 0 (pixel-identical). Fog stays off until the
+    // density or the bank is raised, and a backend without the volume falls back to the
+    // analytic formula (MakeFogVolumeData), so this changes no picture by itself.
+    EnvironmentComponent env;
+    env.fogMode = 1;
+    m_registry.emplace<EnvironmentComponent>(sky, env);
     ensureEnvironmentLights(); // sun/moon become children of the Sky entity
     return sky;
 }

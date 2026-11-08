@@ -44,7 +44,9 @@ inline constexpr UUID kWeatherSnowFunctionId    = { 0x0000000000000414ULL, 0x000
 HE_API MaterialGraph buildWeatherPuddlesFunction();
 HE_API MaterialGraph buildWeatherSnowFunction();
 
-// A loader that answers the two paths above from the builders (and nothing else) — for
-// tests and generators that compile a graph calling them without a ContentManager.
+// A loader that answers the two paths above AND the two procedural surface functions
+// (ProceduralSurfaceFunctions.h) from the builders, and nothing else — for tests and
+// generators that compile a graph calling them without a ContentManager. The auto
+// landscape graph calls all four, so every compile of it goes through this one loader.
 HE_API MatFunctionLoader weatherFunctionLoader();
 } // namespace HE

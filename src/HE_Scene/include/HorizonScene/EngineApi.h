@@ -1473,6 +1473,7 @@ namespace camera {
     X(windDirection,       WindDirection,       "Wind Direction") \
     X(windSpeed,           WindSpeed,           "Wind Speed") \
     X(cloudHeight,         CloudHeight,         "Cloud Height") \
+    X(cloudDomeHeight,     CloudDomeHeight,     "Cloud Dome Height") \
     X(cloudShadowStrength, CloudShadowStrength, "Cloud Shadow Strength") \
     X(cloudEvolution,      CloudEvolution,      "Cloud Evolution") \
     X(cloudDensity,        CloudDensity,        "Cloud Density") \
@@ -1485,6 +1486,14 @@ namespace camera {
     X(lensFlare,           LensFlare,           "Lens Flare") \
     X(fogDensity,          FogDensity,          "Fog Density") \
     X(fogHeightFalloff,    FogHeightFalloff,    "Fog Height Falloff") \
+    X(fogVolumeDistance,   FogVolumeDistance,   "Fog Volume Distance") \
+    X(fogAnisotropy,       FogAnisotropy,       "Fog Anisotropy") \
+    X(fogNoiseAmount,      FogNoiseAmount,      "Fog Noise Amount") \
+    X(fogNoiseScale,       FogNoiseScale,       "Fog Noise Scale") \
+    X(fogBankDensity,      FogBankDensity,      "Fog Bank Density") \
+    X(fogBankBaseY,        FogBankBaseY,        "Fog Bank Base Y") \
+    X(fogBankThickness,    FogBankThickness,    "Fog Bank Thickness") \
+    X(fogLocalLightScatter, FogLocalLightScatter, "Fog Local Light Scatter") \
     X(rainAmount,          RainAmount,          "Rain Amount") \
     X(snowAmount,          SnowAmount,          "Snow Amount") \
     X(wetness,             Wetness,             "Wetness") \
@@ -1513,11 +1522,15 @@ namespace camera {
     X(cloudMode,           CloudMode,           "Cloud Mode") \
     X(cloudQuality,        CloudQuality,        "Cloud Quality") \
     X(cloudStyle,          CloudStyle,          "Cloud Style") \
-    X(nebulaQuality,       NebulaQuality,       "Nebula Quality")
+    X(cloudType,           CloudType,           "Cloud Type") \
+    X(nebulaQuality,       NebulaQuality,       "Nebula Quality") \
+    X(fogMode,             FogMode,             "Fog Mode") \
+    X(fogQuality,          FogQuality,          "Fog Quality")
 #define HE_ENV_FIELDS_COLOR(X) \
     X(sunColor,            SunColor,            "Sun Color") \
     X(moonColor,           MoonColor,           "Moon Color") \
     X(cloudTint,           CloudTint,           "Cloud Tint") \
+    X(fogAlbedo,           FogAlbedo,           "Fog Albedo") \
     X(nebulaColor,         NebulaColor,         "Nebula Color 1") \
     X(nebulaColor2,        NebulaColor2,        "Nebula Color 2") \
     X(nebulaColor3,        NebulaColor3,        "Nebula Color 3") \
@@ -2518,6 +2531,36 @@ namespace save {
     // edit-mode persistence): set by the editor's PIE toggle and the game.
     void setPlayMode(bool inPlay);
     bool inPlayMode();
+}
+
+// ── Trails in snow and sand ──────────────────────────────────────────────────
+// What walks, drives and drags over snow or sand leaves a mark that heals with the weather (Thema 328;
+// Trails/TrailField.h). Two verbs, and they differ on purpose:
+//   footprint / press   a pit and nothing else: a boot, a paw, a wheel set down.
+//   drag                a groove dragged along a segment WITH the displaced material heaped along both sides: a sled,
+//                       a plough, a foot dragged through, a tyre that digs in. Call it every frame with the last and
+//                       the new position (a fast mover leaves a line, not dots).
+// `surface` picks the healing and the look: 0 snow, 1 sand. Depth and heap height are 0..1 (1 = as deep as the
+// surface goes; the ground follows by TrailSettings::displacementMeters, 0.3 m, where the landscape refines its
+// chunks, otherwise the mark is a shading effect only). x/z are world metres, yaw degrees around +Y (0 = +X). The field's
+// texel is 0.25 m: a footprint narrower than about 0.4 m hardly registers, make boots and paws at least that wide.
+// Without a world these do nothing and the queries answer 0.
+namespace trail {
+    void  footprint(Ctx&, float x, float z, float length, float width, float yawDegrees, float depth, int surface);
+    void  press(Ctx&, float x0, float z0, float x1, float z1, float radius, float depth, int surface);
+    void  drag(Ctx&, float x0, float z0, float x1, float z1, float radius, float depth,
+               float bermWidth, float bermHeight, int surface);
+    // How deep it is pressed here, 0..1 (0 on a heap and on untouched ground): what footstep audio and tracking read.
+    float depthAt(Ctx&, float x, float z);
+    // The ground's offset in metres: negative in a pit, positive on a heap, 0 untouched.
+    float heightAt(Ctx&, float x, float z);
+    void  clear(Ctx&);
+    // Into / out of the ACTIVE save (save.create / save.load first): the entity-state slot "__trails__". load() applies
+    // `elapsedSeconds` of healing in one go (game time since the save was written, capped at a day, with the current
+    // weather); a save written on clean ground clears the trails. False without an active save or for a damaged slot.
+    bool  save(Ctx&);
+    bool  load(Ctx&, float elapsedSeconds);
+    int   pageCount(Ctx&);
 }
 
 // ── C++ GameLogic services (HorizonGameServices.h) ───────────────────────────

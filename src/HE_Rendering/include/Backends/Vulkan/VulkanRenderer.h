@@ -492,6 +492,11 @@ private:
 	// per-stage sampler limit is the spec minimum (VulkanMaterialLayout.h, Thema 143).
 	bool        m_matLandscapeWeights = false;
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
+	// heFogVolume (binding 34, Thema 225 step 5) is in m_matSetLayout. False only on a device
+	// whose per-stage sampler limit cannot hold the 18th fragment sampler (fogVolumeFit); the
+	// materials then compile without HE_FOG_VOLUME (m_matShaderLib.setSpirvFogVolume(false))
+	// and the volumetric fog stays off (supportsVolumetricFog false).
+	bool        m_matFogVolume        = true;
 	// Displacement pin (Thema 207), GL's scheme: the device feature tessellationShader
 	// (enabled in createDevice; HE_TESSELLATION=0 leaves it off). foldDisplacement folds
 	// the material's displacement body into the shader hash right after resolveShaders
@@ -563,6 +568,70 @@ private:
 	void destroyDeferredPipelines();
 	bool ensureGBufferTargets(uint32_t w, uint32_t h);
 	void destroyGBufferTargets();
+
+	// ── Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 5) ───────────────────
+	// The Vulkan twin of MetalRenderer::EncodeFogVolume / EncodeFogApplyAndReopen: Inject and
+	// Integrate are COMPUTE passes recorded in DrawViewportFrame before the scene render pass
+	// opens (FogVolumeShaderSource.h's kernels, GLSL 450 straight to SPIR-V, no pins); Apply is a
+	// full-screen pass onto m_hdrView between the opaque scene + sky and the transparent tail
+	// (DrawScene splits the HDR render pass there and reopens it as m_hdrLoadRP); translucent
+	// graph materials read the integrated volume at set 0 binding 34 (heApplyFogT).
+	// The three froxel volumes live in GENERAL for good (storage write and sampled read are both
+	// legal there), so no layout churn on the ping-pong history; the passes are ordered by
+	// memory barriers. Mode 0 never touches any of it except the 1x1x1 dummy bound at 34.
+	struct FogImage3D
+	{
+		VkImage        img  = VK_NULL_HANDLE;
+		VkDeviceMemory mem  = VK_NULL_HANDLE;
+		VkImageView    view = VK_NULL_HANDLE;
+	};
+	bool createFogDummy();       // createMaterialResources: the 1x1x1 volume bound at material binding 34
+	bool createFogPipelines();   // Initialize: layouts, pipelines, noise; true == supportsVolumetricFog
+	void destroyFogResources();
+	bool ensureFogTargets(const glm::ivec3& grid);
+	void destroyFogTargets();
+	bool createFogImage3D(uint32_t w, uint32_t h, uint32_t d, VkFormat fmt, VkImageUsageFlags usage, FogImage3D& out);
+	void destroyFogImage3D(FogImage3D& im);
+	void encodeFogVolume(VkCommandBuffer cmd);                            // Inject + Integrate (compute), sets m_fogFrameActive
+	// Apply: the caller (DrawScene) has ENDED the HDR render pass; this runs the depth flip, the
+	// colour-only Apply pass (m_underwaterFogRP onto m_hdrView) and reopens m_hdrLoadRP on m_hdrFB.
+	void encodeFogApplyAndReopen(VkCommandBuffer cmd, uint32_t w, uint32_t h);
+	bool                  m_fogPipelinesTried = false;
+	bool                  m_fogReady          = false;   // GetCapabilities().supportsVolumetricFog
+	bool                  m_fogFrameActive    = false;   // Inject/Integrate ran THIS frame; reset at the top of DrawViewportFrame
+	HE::FogVolumeData     m_fogFrame;                    // the data that frame used (grid, D, c)
+	glm::mat4             m_fogViewProjMat{ 1.0f };      // Vulkan clip (kVulkanClipFix), unjittered: heApplyFogT's fogViewProj
+	VkDescriptorSetLayout m_fogInjectDSL    = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_fogIntegrateDSL = VK_NULL_HANDLE;
+	VkDescriptorSetLayout m_fogApplyDSL     = VK_NULL_HANDLE;
+	VkPipelineLayout      m_fogInjectPL     = VK_NULL_HANDLE;
+	VkPipelineLayout      m_fogIntegratePL  = VK_NULL_HANDLE;
+	VkPipelineLayout      m_fogApplyPL      = VK_NULL_HANDLE;
+	VkPipeline            m_fogInjectPipe    = VK_NULL_HANDLE;
+	VkPipeline            m_fogIntegratePipe = VK_NULL_HANDLE;
+	VkPipeline            m_fogApplyPipe     = VK_NULL_HANDLE;
+	VkDescriptorPool      m_fogPool          = VK_NULL_HANDLE;
+	VkDescriptorSet       m_fogInjectSet[2]    = {};   // per frame slot, rewritten each frame
+	VkDescriptorSet       m_fogIntegrateSet[2] = {};
+	VkDescriptorSet       m_fogApplySet[2]     = {};
+	MatFrameBuf           m_fogVolBuf[2];              // HeFogVol (FogVolumeConstants, 288 B)
+	MatFrameBuf           m_fogLightBuf[2];            // the Inject kernel's own HeLighting
+	VkSampler             m_fogLinearSampler = VK_NULL_HANDLE; // linear, clamp: history, integrated volume
+	VkSampler             m_fogNoiseSampler  = VK_NULL_HANDLE; // linear, repeat: the 64^3 noise
+	FogImage3D            m_fogNoise;                  // R16G16_UNORM 64^3, HE::BuildSkyNoise3D(64)
+	FogImage3D            m_fogDummy;                  // 1x1x1 RGBA16F, bound at 34 when the volume is off
+	FogImage3D            m_fogInjectTex[2];           // RGBA16F, ping-pong (rgb = S, a = sigma_t)
+	FogImage3D            m_fogIntegratedTex;          // RGBA16F (L, T) at each slice's far edge
+	glm::ivec3            m_fogGridAlloc{ 0 };
+	int                   m_fogHist          = 0;      // which inject volume holds last frame's result
+	bool                  m_fogHistValid     = false;
+	glm::mat4             m_fogPrevViewProj{ 1.0f };   // unjittered Vulkan clip, last frame
+	glm::vec3             m_fogPrevCam{ 0.0f };
+	float                 m_fogPrevFocal     = 0.0f;
+	double                m_fogLastTime      = 0.0;
+	glm::vec3             m_fogNoiseOffset{ 0.0f };
+	float                 m_fogNoiseTime     = 0.0f;
+	uint32_t              m_fogFrameIndex    = 0;
 
 	// Per-draw material data of the built-in scene shader (32 bytes: baseColor(rgb)+metallic(a)
 	// + roughness + opacity + hasTexture + noShadow), scene set binding 2. That binding is a
@@ -1041,6 +1110,10 @@ private:
 	bool   m_postFxReady     = false;
 	float  m_exposure        = 1.0f;
 	bool   m_bloomEnabled    = true;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// clamped (sRGB-encoded with rawSrgb) instead of exposure + ACES + gamma.
+	bool   m_rawCapture      = false;
+	bool   m_rawSrgb         = false;
 	float  m_bloomStrength   = 0.25f;
 	float  m_bloomThreshold  = 1.0f;
 	float  m_bloomKnee       = 0.1f;
@@ -1108,7 +1181,7 @@ private:
 	// the REAL sky - clouds, weather - drawn around the camera into six 128x128 faces every frame the reflections run.
 	// A reflection ray that hits nothing reads it, so a water surface mirrors the clouds; without it a miss returned
 	// nothing and the material fell back to the cloudless analytic heSkyEnv cube. HE_GIREFL_SKY=0 turns it off.
-	static constexpr int kSkyReflCubeSize = 128;
+	static constexpr int kSkyReflCubeSize = 512;
 	SkyUBO                m_skyReflUBO[2][6];
 	VkRenderPass          m_skyReflRP        = VK_NULL_HANDLE;
 	VkPipeline            m_skyReflPipe      = VK_NULL_HANDLE;

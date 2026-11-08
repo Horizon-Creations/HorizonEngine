@@ -265,6 +265,7 @@ bool CollabController::startHosting(std::uint16_t port, const std::string& displ
 	CollabSession::Config cfg;
 	cfg.displayName  = displayName;
 	cfg.projectKey   = m_projectId;
+	if (m_fingerprintProvider) cfg.projectFingerprint = m_fingerprintProvider();
 	cfg.projectLabel = m_projectLabel;
 	// On a host this is not a preference but the session's rule, and it is fixed
 	// here for as long as the session lives — see setSyncLargeAssets for why it
@@ -983,6 +984,7 @@ bool CollabController::beginLink(const std::string& host, std::uint16_t port,
 	CollabSession::Config cfg;
 	cfg.displayName  = displayName;
 	cfg.projectKey   = m_projectId;
+	if (m_fingerprintProvider) cfg.projectFingerprint = m_fingerprintProvider();
 	cfg.projectLabel = m_projectLabel;
 	// On a client this is consent, not a rule: it decides whether a host that
 	// carries the big assets will have us at all. What actually travels once we
@@ -1106,6 +1108,23 @@ void CollabController::wireCallbacks()
 				                                              : m_projectLabel) +
 				   "\" open — open \"" + detail + "\" and join again.");
 			break;
+		case JoinRejectReason::ProjectDiverged:
+			// The ids agree, the files do not: the fix is not "open another
+			// project" (the user has the one the host named) but "get the host's
+			// current files", so say that.
+			m_error = "Your project has the same id as the host's" +
+				(detail.empty() ? std::string() : (" (\"" + detail + "\")")) +
+				", but the two share almost no assets. Pull the host's current "
+				"project files (or copy its project folder) and join again.";
+			break;
+		case JoinRejectReason::ProjectIdMismatch:
+			// The opposite case: same files, different identity. Naming the key in
+			// the manifest is what lets the user fix it in one edit.
+			m_error = "Your project holds the same assets as the host's" +
+				(detail.empty() ? std::string() : (" \"" + detail + "\"")) +
+				", but its project id is different. Make the \"id\" entry in both "
+				".heproj files the same (commit the host's manifest), then join again.";
+			break;
 		case JoinRejectReason::LargeAssetsRequired:
 			// The one refusal that is really a question. The error text is still
 			// filled in — the panel may be closed, and a status line that said
@@ -1188,12 +1207,19 @@ void CollabController::wireCallbacks()
 	m_collab->onAssetUpdated([this](HE::Net::ParticipantId who,
 	                                const HE::Net::CollabSession::AssetUpdate& a) {
 		if (!m_onRemoteAsset) return;
+		// Which file is this on THIS machine? The asset the frame's subject names,
+		// wherever it lives here now — the sender's path may be one rename ahead of
+		// or behind ours. A create has no such file yet, so it is its path.
+		bool byId = false;
+		const std::string target =
+			a.intent == HE::Net::CollabSession::AssetIntent::Create
+				? a.path : resolveIncomingKey(a.subject, a.path, byId);
 		// THE fix for "applied for a moment, then snapped back". A whole file is
 		// a coarser statement about a document we may already have newer deltas
 		// for; applying it then would undo them. A create is exempt: it is the
 		// document's first version, so there is nothing it could be older than.
 		if (a.intent != HE::Net::CollabSession::AssetIntent::Create &&
-		    !acceptRevision(who, a.path, a.revision))
+		    !acceptRevision(who, revisionIdentity(a.subject, target, byId), a.revision))
 		{
 			return;
 		}
@@ -1209,9 +1235,9 @@ void CollabController::wireCallbacks()
 		// Guard the write: applying it hits ContentManager::saveAsset, whose
 		// notification would otherwise publish the same bytes straight back.
 		m_applyingRemoteAsset = true;
-		m_onRemoteAsset(a.path, a.bytes);
+		m_onRemoteAsset(target, a.bytes);
 		m_applyingRemoteAsset = false;
-		noteSessionTouched(a.path);
+		noteSessionTouched(target);
 		// A create is news; a save is not. Collected rather than announced one
 		// by one — Save All is one action and would otherwise be a burst.
 		if (a.intent == HE::Net::CollabSession::AssetIntent::Create)
@@ -1292,7 +1318,7 @@ void CollabController::wireCallbacks()
 			{
 				if (m_collab)
 					m_collab->sendAssetEditAnswer(from, requestId, path, false,
-					                              assetSubject(path));
+					                              subjectFor(path));
 				return;
 			}
 			// Asked twice — one row, and the NEWER request id, because that is
@@ -1309,7 +1335,7 @@ void CollabController::wireCallbacks()
 			if (m_editRequests.size() >= kMaxEditRequests)
 			{
 				m_collab->sendAssetEditAnswer(from, requestId, path, false,
-				                              assetSubject(path));
+				                              subjectFor(path));
 				return;
 			}
 			m_editRequests.push_back({ from, requestId, path, m_lastUpdateMs });
@@ -1402,6 +1428,10 @@ void CollabController::wireCallbacks()
 			m_applyingRemoteAsset = true;
 			m_onRemoteAssetOp(op, path, newPath, folder);
 			m_applyingRemoteAsset = false;
+			// The file is at its new place now, so the identity of the new key can be
+			// asked: whatever we hold by the old key follows it.
+			if (op == HE::Net::CollabSession::AssetOp::Rename && !newPath.empty())
+				rekeyAsset(path, newPath, folder);
 			// ── Did it actually happen? ──
 			// The handler that carries this out takes a std::error_code from
 			// every filesystem call it makes and looks at none of them, so a
@@ -1415,11 +1445,15 @@ void CollabController::wireCallbacks()
 			verifyAppliedAssetOp(op, path, newPath, by);
 		});
 
-	m_collab->onDocDeltas([this](HE::Net::ParticipantId from, std::uint64_t,
-	                             const std::string& path,
+	m_collab->onDocDeltas([this](HE::Net::ParticipantId from, std::uint64_t subject,
+	                             const std::string& framePath,
 	                             const std::vector<HE::Net::CollabSession::DocDelta>& batch,
 	                             std::uint32_t revision) {
-		if (!acceptRevision(from, path, revision)) return;
+		// The asset the subject names, at its path HERE; the frame's own path only
+		// when we do not know the asset (see resolveIncomingKey).
+		bool byId = false;
+		const std::string path = resolveIncomingKey(subject, framePath, byId);
+		if (!acceptRevision(from, revisionIdentity(subject, path, byId), revision)) return;
 		noteSessionTouched(path);
 		// Straight through to the editor, which routes by path to whichever panel
 		// holds that asset. Deliberately NOT written to disk: the point of a delta
@@ -1521,7 +1555,7 @@ void CollabController::wireCallbacks()
 			for (auto p = m_pendingLockReleases.begin();
 			     p != m_pendingLockReleases.end(); ++p)
 			{
-				if (assetSubject(*p) != l.subject) continue;
+				if (subjectFor(*p) != l.subject) continue;
 				const std::string path = *p;
 				m_pendingLockReleases.erase(p);
 				// Unless somebody HERE wants it again. A tab opened between the
@@ -1569,7 +1603,7 @@ void CollabController::wireCallbacks()
 		// nothing useful twice.
 		for (auto p = m_pendingLockReleases.begin(); p != m_pendingLockReleases.end(); ++p)
 		{
-			if (assetSubject(*p) != subject) continue;
+			if (subjectFor(*p) != subject) continue;
 			const std::string path = *p;
 			m_pendingLockReleases.erase(p);
 			// Unless a tab here has asked for it since (same case as the grant
@@ -1651,7 +1685,7 @@ void CollabController::wireCallbacks()
 		// from disk (the last agreed state) instead of sitting on a fork.
 		for (auto it = m_heldAssetLocks.begin(); it != m_heldAssetLocks.end(); ++it)
 		{
-			if (assetSubject(*it) != subject) continue;
+			if (subjectFor(*it) != subject) continue;
 			const std::string path = *it;
 			m_heldAssetLocks.erase(it);
 			if (m_onAssetLockDenied) m_onAssetLockDenied(path);
@@ -2891,25 +2925,105 @@ std::uint64_t CollabController::assetSubject(const std::string& relativePath)
 	return hash | (1ull << 63);
 }
 
+std::uint64_t CollabController::subjectFor(const std::string& key) const
+{
+	// An entity key or an empty one is no file; the resolver is only asked about
+	// things that can have a UUID.
+	if (m_uuidForKey && !key.empty() && !HE::Ed::CollabEntityOps::isKey(key))
+	{
+		const HE::UUID id = m_uuidForKey(key);
+		if (!(id == HE::UUID{})) return HE::Net::assetUuidSubject(id.hi, id.lo);
+	}
+	return assetSubject(key);
+}
+
+std::string CollabController::resolveIncomingKey(std::uint64_t subject, const std::string& path,
+                                                 bool& byId) const
+{
+	byId = false;
+	if (m_keyForSubject && subject != 0)
+	{
+		std::string here = m_keyForSubject(subject);
+		if (!here.empty()) { byId = true; return here; }
+	}
+	return path;
+}
+
+std::string CollabController::revisionIdentity(std::uint64_t subject, const std::string& key,
+                                               bool byId) const
+{
+	// '#' cannot start a project-relative path, so the two spaces never meet.
+	return byId ? "#" + std::to_string(subject) : key;
+}
+
+void CollabController::rekeyAsset(const std::string& oldKey, const std::string& newKey,
+                                  bool folder)
+{
+	if (oldKey.empty() || newKey.empty() || oldKey == newKey) return;
+	const std::string prefix = oldKey + "/";
+	const auto moved = [&](const std::string& k, std::string& out) {
+		if (k == oldKey) { out = newKey; return true; }
+		if (folder && k.size() > prefix.size() && k.compare(0, prefix.size(), prefix) == 0)
+		{
+			out = newKey + "/" + k.substr(prefix.size());
+			return true;
+		}
+		return false;
+	};
+
+	// Only what the move did not change the identity of. The subject table says
+	// which: an entry follows when the NEW key still names the same subject, which
+	// is exactly the UUID-addressed case. A path-addressed asset became a different
+	// subject with its path, and its lock is handled as it always was.
+	std::unordered_map<std::string, std::string> followed;
+	for (auto& [subject, key] : m_assetSubjectPaths)
+	{
+		std::string to;
+		if (moved(key, to) && subjectFor(to) == subject)
+		{
+			followed[key] = to;
+			key = to;
+		}
+	}
+	if (followed.empty()) return;
+
+	const auto follow = [&](std::string& k) {
+		const auto it = followed.find(k);
+		if (it != followed.end()) k = it->second;
+	};
+	for (std::string& k : m_heldAssetLocks)       follow(k);
+	for (std::string& k : m_pendingLockReleases)  follow(k);
+	for (EditRequest& e : m_editRequests)         follow(e.path);
+	for (std::string& k : m_sessionTouched)       follow(k);
+	for (auto it = m_assetAnswers.begin(); it != m_assetAnswers.end();)
+	{
+		const auto f = followed.find(it->first);
+		if (f == followed.end()) { ++it; continue; }
+		AssetAnswer answer = it->second;
+		it = m_assetAnswers.erase(it);
+		m_assetAnswers[f->second] = answer;
+	}
+}
+
 // ─── Asset-level locking ─────────────────────────────────────────────────────
 
 bool CollabController::assetLockedByOther(const std::string& relativePath)
 {
 	if (!m_collab || !inSession()) return false;
-	const HE::Net::LockInfo* l = m_collab->lockFor(assetSubject(relativePath));
+	const HE::Net::LockInfo* l = m_collab->lockFor(subjectFor(relativePath));
 	return l && l->owner != m_collab->localId();
 }
 
 bool CollabController::ownsAssetLock(const std::string& relativePath)
 {
 	if (!m_collab || !inSession()) return false;
-	return m_collab->ownsLock(assetSubject(relativePath));
+	return m_collab->ownsLock(subjectFor(relativePath));
 }
 
 void CollabController::requestAssetLock(const std::string& relativePath)
 {
 	if (!m_collab || !inSession()) return;
-	const std::uint64_t subject = assetSubject(relativePath);
+	const std::uint64_t subject = subjectFor(relativePath);
 	if (m_collab->ownsLock(subject)) return;
 	if (const HE::Net::LockInfo* l = m_collab->lockFor(subject);
 	    l && l->owner != m_collab->localId())
@@ -2926,7 +3040,7 @@ void CollabController::releaseAssetLock(const std::string& relativePath)
 {
 	if (m_collab && inSession())
 	{
-		const std::uint64_t subject = assetSubject(relativePath);
+		const std::uint64_t subject = subjectFor(relativePath);
 		if (m_collab->ownsLock(subject)) m_collab->releaseLock(subject);
 		else if (std::find(m_heldAssetLocks.begin(), m_heldAssetLocks.end(),
 		                   relativePath) != m_heldAssetLocks.end())
@@ -2956,7 +3070,7 @@ void CollabController::releaseAssetLock(const std::string& relativePath)
 const HE::Net::LockInfo* CollabController::assetLockInfo(const std::string& relativePath)
 {
 	if (!m_collab || !inSession()) return nullptr;
-	return m_collab->lockFor(assetSubject(relativePath));
+	return m_collab->lockFor(subjectFor(relativePath));
 }
 
 // ─── Host-confirmed edit state ───────────────────────────────────────────────
@@ -2966,7 +3080,7 @@ void CollabController::beginAssetEditSession(const std::string& relativePath)
 	if (!m_collab || !inSession() || relativePath.empty()) return;
 	if (m_assetAnswers.count(relativePath)) return;   // already asked
 
-	const std::uint64_t subject = assetSubject(relativePath);
+	const std::uint64_t subject = subjectFor(relativePath);
 	m_assetSubjectPaths[subject] = relativePath;
 	m_assetAnswers[relativePath] = AssetAnswer{};     // pending
 	if (!m_collab->queryLock(subject))
@@ -2984,7 +3098,7 @@ CollabController::assetEditState(const std::string& relativePath)
 	// about arbitrating between peers, and there are none.
 	if (!m_collab || !inSession()) return AssetEditState::Editable;
 
-	const std::uint64_t subject = assetSubject(relativePath);
+	const std::uint64_t subject = subjectFor(relativePath);
 	if (m_collab->ownsLock(subject)) return AssetEditState::Owned;
 
 	// The live table wins when it says someone else holds it: it is the most
@@ -3021,7 +3135,7 @@ bool CollabController::beginAssetEdit(const std::string& relativePath)
 void CollabController::forgetAssetEditSession(const std::string& relativePath)
 {
 	m_assetAnswers.erase(relativePath);
-	m_assetSubjectPaths.erase(assetSubject(relativePath));
+	m_assetSubjectPaths.erase(subjectFor(relativePath));
 }
 
 std::string CollabController::revisionKey(HE::Net::ParticipantId from,
@@ -3070,8 +3184,10 @@ bool CollabController::publishDocDeltas(
 {
 	if (!m_collab || !inSession() || batch.empty()) return false;
 	// One step per publish, whichever channel it goes out on.
-	const std::uint32_t rev = ++m_docRevision[relativePath];
-	if (!m_collab->sendDocDeltas(assetSubject(relativePath), relativePath, batch, rev))
+	const std::uint64_t docSubject = subjectFor(relativePath);
+	const std::uint32_t rev = ++m_docRevision[revisionIdentity(
+		docSubject, relativePath, docSubject != assetSubject(relativePath))];
+	if (!m_collab->sendDocDeltas(subjectFor(relativePath), relativePath, batch, rev))
 		return false;
 	noteSessionTouched(relativePath);
 	return true;
@@ -3184,7 +3300,7 @@ void CollabController::publishAsset(const std::string& relativePath,
 	if (relativePath.rfind("::Source::", 0) != 0 &&
 	    !assetTypeTravels(EditorAssetTypeCache::assetTypeOf(fullPath))) return;
 
-	const std::uint64_t subject = assetSubject(relativePath);
+	const std::uint64_t subject = subjectFor(relativePath);
 
 	// Take the lock if it is free. Without this a save would be silently dropped
 	// just because the user edited the asset in a panel rather than selecting it
@@ -3212,7 +3328,8 @@ void CollabController::publishAsset(const std::string& relativePath,
 	up.path     = relativePath;
 	up.bytes    = bytes;
 	up.intent   = HE::Net::CollabSession::AssetIntent::Update;
-	up.revision = ++m_docRevision[relativePath];
+	up.revision = ++m_docRevision[revisionIdentity(
+		subject, relativePath, subject != assetSubject(relativePath))];
 	const std::size_t size = up.bytes.size();
 	if (m_collab->sendAsset(up))
 	{
@@ -3394,7 +3511,7 @@ bool CollabController::assetWritableNow(const std::string& relPath)
 	// Outside a session everything is writable — that is the whole point of the
 	// question being asked at all rather than assumed.
 	if (!m_collab || !inSession() || relPath.empty()) return true;
-	const std::uint64_t      subject = assetSubject(relPath);
+	const std::uint64_t      subject = subjectFor(relPath);
 	const HE::Net::LockInfo* l       = m_collab->lockFor(subject);
 	// The REPLICATED table, deliberately, not a queryLock round trip: this
 	// answers a background operation that is about to write a file, and it has
@@ -3533,7 +3650,7 @@ CollabController::beginBackgroundWrite(const std::string& relPath)
 		// arriving assets through ContentManager::saveAsset while the panel is
 		// halfway through iterating the very folder it is drawing. Trading a
 		// one-RTT race for a re-entrancy crash is not a trade.
-		lease.m_pending = !m_collab->ownsLock(assetSubject(relPath));
+		lease.m_pending = !m_collab->ownsLock(subjectFor(relPath));
 		return lease;
 	}
 
@@ -4094,7 +4211,7 @@ bool CollabController::requestAssetEdit(const std::string& relPath)
 	// Deliberately NOT routed through requestOrPerformAssetOp: that function's
 	// rule is "the host does it instead of asking", and here the host is an
 	// asker like everyone else. The holder decides.
-	const std::uint64_t subject = assetSubject(relPath);
+	const std::uint64_t subject = subjectFor(relPath);
 	m_assetSubjectPaths[subject] = relPath;   // so the answer maps back to a path
 	const std::uint32_t id = m_collab->requestAssetOp(
 		HE::Net::CollabSession::AssetOp::Edit, relPath, {}, false, subject);
@@ -4127,7 +4244,7 @@ void CollabController::answerEditRequest(std::size_t index, bool allowed)
 	// into the gap. Our own m_heldAssetLocks entry is dropped by the lock
 	// broadcast that comes back, which is the same signal every other peer gets.
 	m_collab->sendAssetEditAnswer(e.id, e.requestId, e.path, allowed,
-	                              assetSubject(e.path));
+	                              subjectFor(e.path));
 }
 
 void CollabController::approveOne(const PendingAssetOp& op)
@@ -4466,7 +4583,7 @@ void CollabController::publishAssetCreate(const std::string& relativePath,
 	m_pendingCreates[rel].fullPath = fullPath;
 
 	HE::Net::CollabSession::AssetUpdate a;
-	a.subject = assetSubject(rel);
+	a.subject = subjectFor(rel);
 	a.path    = rel;
 	const std::size_t size = bytes.size();
 	a.bytes   = std::move(bytes);
@@ -4630,7 +4747,7 @@ void CollabController::catchUpJoiner(HE::Net::ParticipantId who)
 		                                 std::istreambuf_iterator<char>());
 		if (bytes.empty()) continue;
 		HE::Net::CollabSession::AssetUpdate up;
-		up.subject  = assetSubject(key);
+		up.subject  = subjectFor(key);
 		up.path     = key;
 		up.bytes    = std::move(bytes);
 		up.intent   = HE::Net::CollabSession::AssetIntent::Update;

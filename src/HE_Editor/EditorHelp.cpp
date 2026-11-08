@@ -1240,9 +1240,19 @@ namespace
 	  "The world height of the cloud deck's base, in metres. Set it above your "
 	  "highest terrain, or the camera ends up above the weather.",
 	  "", "rendering#sky" },
+	{ "Environment/Dome Cloud Height", "",
+	  "How high the sky-dome clouds look. 1 is the classic look; higher puts the "
+	  "clouds further up, so they read smaller and drift slower against their own "
+	  "size; lower brings them close and large. 3D volumetric clouds use Cloud Altitude instead.",
+	  "", "rendering#sky" },
 	{ "Environment/Cloud Style", "",
 	  "Classic is the original flat, drifting layer. Realistic builds cauliflower "
 	  "shapes that tower and dissolve, at a higher cost.",
+	  "", "rendering#sky" },
+	{ "Environment/Cloud Type", "",
+	  "The kind of cloud the Realistic layer grows: mixed cumulus (default), flat "
+	  "cumulus, towering cumulus, stratocumulus sheets or cumulonimbus. Changes cell size "
+	  "and height; Coverage still decides how much sky they fill.",
 	  "", "rendering#sky" },
 	{ "Environment/Evolution", "",
 	  "How fast clouds change shape as they drift. 0 freezes the formation and "
@@ -1311,6 +1321,57 @@ namespace
 	{ "Environment/Ground Hugging", "",
 	  "How much the fog pools near the ground instead of filling the air evenly. "
 	  "High values give valley mist.",
+	  "", "rendering#sky" },
+	{ "Environment/Mode##fogvol", "Volumetric Fog Mode",
+	  "Analytic keeps today's flat per-pixel blend toward the horizon. Volumetric "
+	  "raymarches a real 3D fog volume with sun/light shafts and in-fog shadow, past "
+	  "Volume Distance the analytic fog still takes over. A Sky you add today starts "
+	  "on Volumetric (it draws nothing until Density or Bank Density is above 0); a "
+	  "scene saved before this existed stays Analytic. Greyed out on a backend that "
+	  "has not implemented it yet (Direct3D 11/12 for now): a scene with Volumetric "
+	  "chosen still loads and plays there, with the Density fog standing in.",
+	  "", "rendering#sky" },
+	{ "Environment/Quality##fogvol", "Volumetric Fog Quality",
+	  "Size of the froxel grid the volume is computed on. Higher resolves finer "
+	  "light shafts and sharper bank edges, at a higher GPU cost.",
+	  "", "rendering#performance" },
+	{ "Environment/Volume Distance", "",
+	  "How far the volumetric fog reaches before the Density fog above continues "
+	  "seamlessly. Clamped to the directional shadow distance, so the volume is "
+	  "never asked to shade past where it has a shadow map to sample.",
+	  "", "rendering#sky" },
+	{ "Environment/Albedo##fogvol", "Volumetric Fog Albedo",
+	  "Scattering tint of the volume. White scatters the sky and sun colour "
+	  "unchanged; a tint colours the fog itself, the way dust or smoke would.",
+	  "", "rendering#sky" },
+	{ "Environment/Anisotropy", "",
+	  "Henyey-Greenstein scattering phase. Negative scatters light back toward the "
+	  "camera; positive forms a brighter shaft when looking toward the sun.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Amount", "",
+	  "How much 3D noise breaks up the volume's height formula. 0 keeps a smooth "
+	  "layer; higher gives drifting wisps and clearer patches. Foggy weather raises "
+	  "it; once you move it the weather leaves it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Noise Scale", "",
+	  "World size of one noise period. Small values give fine wisps, large values "
+	  "broad patches of thicker and thinner fog.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Density", "",
+	  "A ground-hugging fog bank layered on top of the height fog, with its own "
+	  "edges — valley mist or haze sitting over a lake bed. A Weather preset drives "
+	  "it (Foggy a thick bank, Rain a faint one); once you move it the weather leaves "
+	  "it alone until the next preset pick.",
+	  "", "rendering#sky" },
+	{ "Environment/Bank Base", "",
+	  "World Y of the fog bank's lower edge.", "", "rendering#sky" },
+	{ "Environment/Bank Thickness", "",
+	  "How tall the fog bank stands. Its top edge is soft and eroded by noise, "
+	  "never a hard line.",
+	  "", "rendering#sky" },
+	{ "Environment/Local Light Scatter", "",
+	  "How much point and spot lights scatter inside the volume, on top of the "
+	  "sun or moon. 0 switches it off.",
 	  "", "rendering#sky" },
 	{ "Environment/Star Brightness", "",
 	  "How bright the star field is. Stars fade out by themselves as the sky "
@@ -1409,7 +1470,8 @@ namespace
 	  "", "rendering#weather" },
 	{ "Weather/Fog Density##wx", "",
 	  "Atmospheric fog thickness — the Sky's Density. Moving it takes it away from the "
-	  "preset until the next pick.",
+	  "preset until the next pick. With the Sky's Fog Mode on Volumetric the preset "
+	  "also sets the ground bank and its noise (Bank Density, Noise Amount).",
 	  "", "rendering#weather" },
 	{ "Weather/Wind Speed##wx", "",
 	  "Cloud drift and rain slant, 1 = calm. The Sky's Wind Speed, set from here.",
@@ -5543,6 +5605,12 @@ namespace
 	  "here IS the set of layers the Landscape tool offers, in this order — up to "
 	  "eight, four per RGBA weightmap page (both pages travel in one texture).",
 	  "", "materials#nodes" },
+	{ "Material Node/Foliage Set", "Landscape Foliage Set",
+	  "The foliage set (a Landscape Foliage asset) this landscape material names for "
+	  "its terrain: which plants grow on which paint layer, and where. Click to pick one "
+	  "or drop it from the Content Browser. The node draws nothing and changes no "
+	  "shader, it only tells the Landscape tool which set belongs to this material.",
+	  "", "materials#nodes" },
 	{ "Material Node/Lit", "",
 	  "Whether the scene's lights reach this material. Off makes it emissive-flat: "
 	  "the graph's colour is the pixel, useful for skies, holograms and anything "
@@ -7517,13 +7585,13 @@ namespace
 	  "(layer 0) picks the texture by slope and height; painting a layer on top "
 	  "chooses one by hand.",
 	  "", "scenes#terrain" },
-	{ "Landscape/Mix Group", "Mix Group",
-	  "A second (and third) group whose share of this landscape is kept apart from "
-	  "the one above — None leaves the slot unused. Picking one does not change how "
-	  "the landscape looks by itself: it reserves paint channels 6 and 7 for that "
-	  "group's share, which the Paint tab's Active Group then lets you set by hand. "
-	  "A group already used by the terrain's own slot or the other Mix Group slot is "
-	  "greyed out.",
+	{ "Landscape/Mix Texture Groups", "",
+	  "Lets this landscape show all four texture groups at once. The group chosen above "
+	  "stays what every spot starts as; the Paint tab's Group row then paints any other "
+	  "group onto it, with that group's own layers underneath. It uses the paint channels "
+	  "8 to 11 for the groups' shares, so a custom material that paints there loses that "
+	  "paint when this is switched on (it is folded into layer 0). Switching it off drops "
+	  "the groups' shares and the landscape is its one group again.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Apply Group Meshes", "",
 	  "Adds a foliage layer for every procedural mesh of the landscape's texture "
@@ -7534,6 +7602,16 @@ namespace
 	  "where the group's own material shows rock. It only adds - switching the "
 	  "group never removes or changes a layer, and a layer you already have is left "
 	  "alone.",
+	  "", "scenes#terrain" },
+	{ "Landscape/Apply Foliage", "",
+	  "Materializes the foliage set named on the landscape's material (a Landscape "
+	  "Foliage node in its graph) into this terrain's foliage layers: one layer per "
+	  "entry, with the mesh, material, density and placement rules (slope, height, "
+	  "paint channel) the set author gave it. It only adds and refreshes its own "
+	  "layers - a layer you added by hand, or one from a different foliage set, is "
+	  "never touched, and re-pressing it after editing the set brings its layers up "
+	  "to date without losing their painted density masks or visibility. Disabled "
+	  "while the set is still downloading from the EngineContent server.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Reset to Engine Default", "",
 	  "Puts the built-in landscape material back on the terrain. It is only "
@@ -7560,11 +7638,12 @@ namespace
 	  "was painted. A starting point for a landscape built by hand: fill with the "
 	  "base layer, then paint the rest over it. One undo step.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Active Group", "Active Group",
-	  "Only shown once a Mix Group is set up (Setup tab). Which group this stroke "
-	  "marks the ground as, beside painting the layer below: the terrain's own group, "
-	  "or one of the Mix Groups. A dash is a slot with no group in it yet. Ctrl+drag "
-	  "always hands the spot back to the terrain's own group, whichever is active.",
+	{ "Landscape/Active Group", "Group",
+	  "Which texture group this stroke paints, beside the layer below: the terrain's "
+	  "own group or any other, all on the same landscape. Picking a group other than the "
+	  "terrain's own switches Mix Texture Groups on (Setup tab); the layer list below "
+	  "then shows that group's own layers. Ctrl+drag always hands the spot back to the "
+	  "terrain's own group, whichever is picked.",
 	  "", "scenes#terrain" },
 	{ "Landscape/Layer", "Paint Layer",
 	  "Which of the material's layers the brush paints. The names come from the "
@@ -8195,6 +8274,78 @@ namespace
 	  "No block compression: RGBA8 with the mip chain baked in. The exact "
 	  "pixels, at roughly four to eight times the size of a compressed texture.",
 	  "", "export#overview" },
+	{ "Export/Pack only referenced assets", "Pack only referenced assets",
+	  "Leave out every asset the game never reaches. The game starts from the "
+	  "startup scene, the scenes something loads, the project manifest, "
+	  "GameInstance and the scripts, and follows what they name: a scene's "
+	  "meshes and their materials and textures, a widget's textures, a "
+	  "graph's classes. Reaching is transitive from those starting points: a "
+	  "mesh that names a material is no reason to keep either when nothing "
+	  "reachable names the mesh. The engine's own needs (input actions, "
+	  "player classes, struct and enum types, weather sounds, layer meshes) "
+	  "always stay. A script that builds a path at run time cannot be "
+	  "followed: list it under Always include. The export log lists what "
+	  "was left out. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Compress texture arrays", "Compress texture arrays",
+	  "Also block-compress texture arrays: the Auto landscape's albedo, normal "
+	  "and mask arrays, about 110 MB each as RGBA8 and by far the largest part "
+	  "of an exported game. They shrink to a quarter, in the pak and in video "
+	  "memory, at the same quality as every other compressed texture. The GI "
+	  "keeps its landscape colours: they are baked into the pak from the "
+	  "uncompressed pixels. Switch it off to ship the arrays as RGBA8. "
+	  "Needs a texture compression other than None. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake textures onto meshes", "Bake textures onto meshes",
+	  "A mesh with several materials that only show textures (a plain PBR set: "
+	  "base color, metal/rough/occlusion, normal map, emissive) is exported on ONE "
+	  "material with atlas textures, so it draws in one call with one set of "
+	  "texture binds, and the source materials and textures leave the pak. Each mesh "
+	  "decides in the Mesh Viewer (Export bake) whether and how: Merge textures "
+	  "copies the texels unchanged, One UV texture resamples and resolves tiling "
+	  "and may make the atlas larger. A mesh that an entity in an exported scene "
+	  "draws with a material of its own (a Material component override, whole mesh "
+	  "or one slot) is left as it is, because the override would read its texture "
+	  "through the atlas UVs. The scan covers every scene (placed prefabs are "
+	  "plain entities there) and the component body of every HorizonCode class. "
+	  "A material a script assigns at run time is not seen: switch Export bake "
+	  "off in the Mesh Viewer for such a mesh. Needs Pack only referenced "
+	  "assets. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Bake far landscape", "Bake far landscape",
+	  "Far terrain is drawn from a picture instead of from the landscape's material. "
+	  "For every Auto Landscape in an exported scene the export photographs each "
+	  "chunk from above in three views of its own material (albedo, normal, "
+	  "ambient occlusion + roughness) and ships them as three small textures and "
+	  "one simple material per chunk. The chunk's far levels of detail then draw "
+	  "that material: a few texture reads instead of the layer blend, the noise "
+	  "and the texture bombing. Near terrain keeps the real material. The picture "
+	  "is as sharp as the screen needs at the distance where the far level takes "
+	  "over, and coarser when it would not fit the budget below. The landscape's "
+	  "own parameters (a Material Instance's overrides, its static switches, "
+	  "painted layers) are what is photographed. A custom landscape material that "
+	  "is not an Auto Landscape is left as it is. The picture is taken by the "
+	  "editor's own renderer (Metal, OpenGL, Vulkan, D3D11 and D3D12 all hand back "
+	  "the material's colour without tonemap or post effects); a renderer that "
+	  "cannot makes the export say so and the far levels keep the real material. "
+	  "Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Far landscape budget (MB)", "Far landscape budget (MB)",
+	  "What all baked far-landscape textures of this export may cost once cooked "
+	  "(block-compressed, with mip levels), in megabytes. When the pictures the "
+	  "screen would want do not fit, every chunk's picture is halved in size until "
+	  "they do, down to 16 texels per chunk side; the export log says which "
+	  "landscapes were baked below what the screen wants. Saved in the profile.",
+	  "", "export#overview" },
+	{ "Export/Match the game's backend", "Match the game's backend",
+	  "Bake the precompiled material shaders for the one graphics backend the "
+	  "exported game runs: the one the project's Render Defaults name, else the "
+	  "platform's default (Metal on macOS, OpenGL elsewhere). The other "
+	  "backends' variants would only be dead weight in the pak. Switch it off "
+	  "to pick the backends by hand, for a build that may run on several. A "
+	  "game that ends up on a backend without baked shaders compiles them on "
+	  "first use, as it does with none selected. Saved in the profile.",
+	  "", "export#overview" },
 	{ "Export/Texture quality", "Texture quality",
 	  "How hard the encoder works on each texture. Fast is what every export "
 	  "did before this existed; Balanced tries every block partition; High adds "
@@ -8745,6 +8896,31 @@ namespace
 	  "Material component on an entity "
 	  "overrides all slots for that entity alone. Cmd/Ctrl+Z steps back over "
 	  "slot changes while this tab is hovered.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Vertex colors", "Vertex colors",
+	  "Export bake. For a mesh whose materials only show textures, the export "
+	  "samples each texture at every vertex and stores the color in the mesh, so "
+	  "the material needs no texture lookup at run time and the texture can drop "
+	  "out of the pak. It looks right on a dense mesh or a smooth texture and "
+	  "blurs detail on coarse low-poly. Applied only when the export targets "
+	  "OpenGL and/or Metal; off by default. Does nothing in the editor. At most "
+	  "one bake form is applied per mesh, in the order Vertex colors, Merge "
+	  "textures, One UV texture. Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/Merge textures", "Merge textures",
+	  "Export bake. A mesh with several simple texture-only materials gets one "
+	  "material and one atlas texture, so it draws in one call with one texture "
+	  "bind. Lossless: only when every UV lies inside the 0..1 tile, the source "
+	  "texels are copied unchanged. On by default. Does nothing in the editor. "
+	  "Saved in the mesh asset.",
+	  "", "editor#asset-editors" },
+	{ "Mesh Viewer/One UV texture", "One UV texture",
+	  "Export bake. The textures of all simple texture-only sections are "
+	  "resampled into a single texture over the mesh's own UVs, with tiling "
+	  "baked out. The texture can end up larger than the sources (it is capped "
+	  "at 4096 per side) but the mesh draws in one call. Used when Merge "
+	  "textures does not apply, for example because the UVs tile. On by "
+	  "default. Does nothing in the editor. Saved in the mesh asset.",
 	  "", "editor#asset-editors" },
 	{ "Mesh Viewer/Clip:", "Preview Clip",
 	  "An animation clip to pose this skeleton with, dropped from the Content "

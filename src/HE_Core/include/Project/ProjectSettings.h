@@ -212,7 +212,7 @@ struct HE_API ProjectRenderDefaults
 // mirrors, lowest and highest accepted value (ignored for bool).
 #define HE_PROJECT_GRAPHICS_FIELDS(X) \
     /* Quality */ \
-    X(int,   renderPath,                 0,     RenderPath,                0.0,    1.0) \
+    X(int,   renderPath,                 1,     RenderPath,                0.0,    1.0) \
     X(int,   antiAliasing,               1,     AntiAliasing,              0.0,    4.0) \
     X(float, aaSharpness,                0.35f, AASharpness,               0.0,    1.0) \
     X(float, renderScale,                1.0f,  RenderScale,               0.25,   2.0) \

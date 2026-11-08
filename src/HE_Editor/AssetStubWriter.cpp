@@ -165,6 +165,8 @@ bool isCreatableAssetType(HE::AssetType type)
 	// A cinematic Sequence: same story, META alone reads as an empty sequence
 	// (no bindings, no tracks) that the Cinematic tab puts the first actor into.
 	case HE::AssetType::Sequence:
+	// A foliage rule set: META alone reads as an empty set (no entries, scale 1).
+	case HE::AssetType::LandscapeFoliageLayer:
 		return true;
 
 	// Imported, not authored: a stub carries no geometry, no pixels and no
@@ -196,7 +198,7 @@ HE::AssetType assetTypeFromName(const std::string& name)
 	// `assetTypeName` — one spelling, defined once, in Types/Enums.h.
 	// Up to the LAST enumerator — a bound that names a middle one silently
 	// leaves every type added after it unresolvable by name.
-	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::Sequence); ++i)
+	for (std::uint32_t i = 1; i <= static_cast<std::uint32_t>(HE::AssetType::LandscapeFoliageLayer); ++i)
 	{
 		const auto t = static_cast<HE::AssetType>(i);
 		if (name == HE::assetTypeName(t)) return t;

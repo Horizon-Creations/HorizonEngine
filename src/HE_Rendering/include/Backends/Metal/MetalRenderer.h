@@ -12,6 +12,7 @@
 #include <HorizonRendering/RenderGraph.h>
 #include <HorizonRendering/CommandBuffer.h>
 #include <HorizonRendering/FrameUploadRing.h>
+#include <HorizonRendering/FogVolume.h>
 #include <HorizonRendering/RenderConstants.h> // HE::kShadowMapResolution
 #include <HorizonRendering/GiBvh.h>
 #include <HorizonRendering/GIProbeGrid.h>
@@ -19,6 +20,7 @@
 #include <Types/UUID.h>
 #include <material/MaterialShaderLibrary.h> // shared cross-backend material shader layer
 #include <unordered_map>
+#include <unordered_set>
 #include <atomic>
 #include <limits>
 #include <memory>
@@ -101,6 +103,7 @@ public:
 	                       std::vector<uint8_t>& rgba) override;
 	void  InvalidateMaterial(const HE::UUID& materialId) override;
 	void  WarmupMaterials(const std::vector<HE::UUID>& materialIds) override;
+	ShaderBuildStatus PumpShaderBuilds() override;
 	void* RenderMaterialPreview(ContentManager& cm, const HE::UUID& materialId,
 	                            uint32_t size, float yaw, float pitch, float dist,
 	                            int shape = 0, const HE::UUID& meshId = HE::UUID{},
@@ -216,8 +219,13 @@ private:
 	// lighting resolve is drawn (plus the forward-routed opaque replay), and the
 	// transparency list is taken from the hand-off. Everything else (skinned,
 	// sky, transparency, particles) is the SAME code as forward.
+	// fogCmdBuf / fogScenePass: only when the volumetric fog is on this frame. EncodeScene then
+	// ends the encoder after the sky, runs the full-screen Apply pass on fogCmdBuf and opens
+	// a second encoder from fogScenePass (colour + depth Load) for the translucent tail; the
+	// encoder that is live on return is left in m_fogSceneEncoder (retained — the caller takes it).
 	void EncodeScene(void* renderEncoder, int width, int height,
-	                 MetalDeferredFrame* deferred = nullptr);
+	                 MetalDeferredFrame* deferred = nullptr,
+	                 void* fogCmdBuf = nullptr, void* fogScenePass = nullptr);
 	bool EncodeWaterReflPrepass(void* cmdBuf, int width, int height, const std::vector<TPDraw>& draws);
 
 	// ── Deferred render path (G-buffer + lighting resolve) ───────────────────
@@ -471,7 +479,18 @@ private:
 	void* m_skyReflPipeline = nullptr; // id<MTLRenderPipelineState> skyFragment, RGBA16F, no depth
 	void* m_skyReflCube     = nullptr; // id<MTLTexture> cube RGBA16F, kSkyReflCubeSize²
 	bool  m_skyReflValid    = false;   // the cube holds THIS frame's sky
+	// Two of the six faces per frame after the first full bake (see OpenGLRenderer.h); an undrawn face keeps its picture.
+	static constexpr int kSkyReflFacesPerFrame = 2;
+	bool  m_skyReflBaked    = false;
+	int   m_skyReflPhase    = 0;
 	void  EncodeSkyReflCube(void* cmdBuf);
+	// The cube graph materials bind as heSkyEnv (slot 14). Transparent surfaces (water) never reach the
+	// GI-reflection trace, so their specular lookup is the only place the real sky (aurora, stars,
+	// clouds) can show in them; m_skyEnvCube is the CPU bake without any of it.
+	void* MaterialSkyCube() const
+	{
+		return (m_giReflEnabled && m_skyReflValid && m_skyReflCube) ? m_skyReflCube : m_skyEnvCube;
+	}
 	// Sky-View LUT (perf audit A4): atmoScatter for the current sun baked into
 	// two 256×128 RGBA16F targets (skyViewLutFragment in kSkyMSL: Rayleigh +
 	// multiple-scatter fill, and the phase-free Mie term), so the sky pass reads
@@ -734,6 +753,35 @@ private:
 	// shader use the built-in PBR m_scenePipeline. Value may be null (build failed →
 	// cached so we don't retry every frame).
 	std::unordered_map<uint64_t, void*> m_materialPipelineCache; // hash → id<MTLRenderPipelineState>
+	// Builds in flight (key = the final, salted cache key). A key is in the cache OR here,
+	// never both for long: a null in the cache means "failed", this set means "not yet".
+	std::unordered_set<uint64_t>        m_materialPipelinePending;
+	// What Metal's compiler threads hand back. The completion handlers never touch the
+	// renderer, only this box, which they hold by shared_ptr so one that fires after
+	// Shutdown writes into a closed box instead of a freed `this`.
+	struct MatPipelineDone
+	{
+		uint64_t    key = 0;
+		void*       pso = nullptr;        // CFBridgingRetain'ed, null = failed
+		void*       desc = nullptr;       // retained descriptor, only when a binary archive is in use
+		std::string error, warn, info;    // logged on the main thread by the drain
+	};
+	struct MatPipelineMailbox
+	{
+		std::mutex                   mtx;
+		std::vector<MatPipelineDone> done;
+		bool                         closed = false;
+	};
+	std::shared_ptr<MatPipelineMailbox> m_matMailbox;
+	int  m_matBuildScheduled = 0;   // since m_materialPipelinePending was last empty
+	int  m_matBuildFinished  = 0;
+	// Moves finished async builds into m_materialPipelineCache. Main thread, top of every
+	// frame and before anything that reads or clears the cache.
+	void DrainMaterialPipelines();
+	// Starts the Metal-side build of already cross-compiled MSL. Main thread.
+	void StartMaterialPipelineBuild(uint64_t key, const std::string& vertMSL, const std::string& fragMSL,
+	                                const std::string& fragFallbackMSL, bool precompiled, bool bakedClustered,
+	                                bool blend, bool gbuffer);
 	HE::MaterialShaderLibrary           m_matShaderLib;          // shared GLSL→MSL cross-compile + cache
 	// On-disk pipeline cache (MTLBinaryArchive): persists compiled material pipeline
 	// functions across launches so the Metal compiler doesn't re-run every start.
@@ -894,11 +942,18 @@ private:
 	// ({mvp, model} per instance at vertex buffer 5) for one draw per batch; own
 	// salt. Null for a precompiled variant (no baked instanced vertex): the
 	// caller then loops with the plain PSO.
+	// pending != null → the two newLibraryWithSource and the PSO build run on Metal's own
+	// compiler threads (the cross-compile stays on the caller). The call then returns
+	// null with *pending = true while the build runs, and the finished pipeline is in the
+	// cache from the next DrainMaterialPipelines on; a caller that sees *pending skips
+	// the draw instead of falling back to the default material. pending == null (or
+	// HE_MATERIAL_PIPELINE_ASYNC=0) is the blocking build, for callers with no frame to
+	// spare it from (the material preview).
 	void* GetOrBuildMaterialPipeline(uint64_t key, const std::string& fragGlsl,
 	                                 const std::string& vertBody = {},
 	                                 const MaterialShaderVariant* precompiled = nullptr,
 	                                 bool blend = false, bool gbuffer = false,
-	                                 bool instanced = false);
+	                                 bool instanced = false, bool* pending = nullptr);
 	// Resolve a material's custom shader: true + (key,frag) if it has customShaderFragGlsl.
 	bool  ResolveMaterialShader(const HE::UUID& materialId, uint64_t& key, std::string& frag,
 	                            std::string& vertBody);
@@ -919,6 +974,7 @@ private:
 	int m_aaMethodRequested = static_cast<int>(HE::AAMethod::FXAA);
 	HE::AAMethod ActiveAAMethod() const
 	{
+		if (m_rawCapture) return HE::AAMethod::Off;   // RenderSceneImage with rawOutput: nothing smoothed
 		return IRenderer::ResolveAAMethod(m_aaMethodRequested, GetCapabilities());
 	}
 	float m_aaSharpness     = 0.35f;  // temporal modes (A3+)
@@ -1140,6 +1196,45 @@ private:
 	void  EnsureCloudShadowTarget();
 	void  DestroyCloudShadowTarget();
 	void  EncodeCloudShadow(void* cmdBuf);
+
+	// ── Volumetric fog (Thema 225, docs/volumetric-fog-plan.md) ──────────────
+	// fogMode 1: Inject (density + light + shadows + history) and Integrate (front-to-back
+	// scan) as two compute dispatches before the scene encoder, Apply as a full-screen pass
+	// between the sky and the translucent draws (the scene encoder is split there), and
+	// heApplyFogT on translucent graph materials reading the integrated volume at fragment
+	// texture 17. All of it only while m_fogFrameActive; with fogMode 0 nothing below runs
+	// and every shader sees fogVol = 0 (the analytic fog, pixel for pixel as before).
+	// Kernels: MaterialShaderLibrary::fogInject/fogIntegrate/fogApply (one GLSL source).
+	bool       EnsureFogPipelines();
+	void       EnsureFogTargets(const glm::ivec3& grid);
+	void       DestroyFogTargets();
+	void       EncodeFogVolume(void* cmdBuf, float aspect);          // Inject + Integrate
+	void*      EncodeFogApplyAndReopen(void* sceneEncoder, void* cmdBuf, void* scenePass, int width, int height);
+	void       FillFogLighting(HE::MaterialShaderLibrary::Lighting& lit) const;
+	void*      m_fogInjectPipe    = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogIntegratePipe = nullptr; // id<MTLComputePipelineState>
+	void*      m_fogApplyPipe     = nullptr; // id<MTLRenderPipelineState>
+	bool       m_fogTried         = false;   // the pipelines are built once; a failure keeps the analytic fog
+	void*      m_fogInject[2]     = { nullptr, nullptr }; // id<MTLTexture> 3D RGBA16F, ping-pong (S, sigma_t)
+	void*      m_fogIntegrated    = nullptr; // id<MTLTexture> 3D RGBA16F (L, T at each slice's far edge)
+	void*      m_fogNoise         = nullptr; // id<MTLTexture> 3D RG16Unorm 64^3: HE::BuildSkyNoise3D(64), the same generator as the sky's 256^3 volume, small enough to stay in cache
+	void*      m_fogDummy3D       = nullptr; // id<MTLTexture> 1x1x1 3D: what texture 17 holds when the volume is off
+	glm::ivec3 m_fogGrid          = glm::ivec3(0);
+	int        m_fogHist          = 0;       // index of the inject volume holding LAST frame's result
+	bool       m_fogHistValid     = false;
+	uint32_t   m_fogFrameIndex    = 0;
+	glm::vec3  m_fogNoiseOffset   = glm::vec3(0.0f); // wind-accumulated (plan §6.2)
+	float      m_fogNoiseTime     = 0.0f;
+	glm::mat4  m_fogPrevViewProj  = glm::mat4(1.0f);
+	glm::vec3  m_fogPrevCam       = glm::vec3(0.0f);
+	float      m_fogPrevFocal     = 0.0f;    // projection[1][1], a FOV change resets the history
+	double     m_fogLastTime      = 0.0;     // steady clock seconds of the last inject
+	bool       m_fogFrameActive   = false;   // this frame runs the volume (set in EncodeFrame, read by every fill)
+	HE::FogVolumeConstants m_fogApplyConstants; // this frame's constants, for the Apply pass
+	HE::FogVolumeData m_fogFrame;            // this frame's data (copy of the walk's, for the fills)
+	glm::mat4  m_fogViewProjFlip  = glm::mat4(1.0f); // y-flipped unjittered viewProj for heApplyFogT
+	uint32_t   m_fogSceneTimerBase = 0xFFFFFFFFu; // ftBeginMulti("Scene") pair spanning the split scene encoders
+	void*      m_fogSceneEncoder  = nullptr; // CFBridgingRetain'd: the encoder EncodeScene left open after the split
 
 	// ── SSAO (screen-space ambient occlusion) ───────────────────────────────
 	// Mirrors the GL backend: a view-space position pre-pass feeds a hemisphere-
@@ -1394,6 +1489,10 @@ private:
 	// overlay, present) is skipped — a still on request must not flash a black
 	// frame on the window it was not asked to touch.
 	bool     m_captureOnly     = false;
+	// EditorCameraOverride::rawOutput for the frame RenderSceneImage draws: the tonemap writes the HDR colour
+	// as it is, and the post effects that would change it are off for that one frame.
+	bool     m_rawCapture      = false;
+	bool     m_rawSrgb         = false;   // EditorCameraOverride::rawSrgb
 	// The primary window's drawable, acquired by WaitForFrame before the frame
 	// polled its input and consumed by the swapchain pass of EncodeFrame.
 	// id<CAMetalDrawable> (retained) or null. Outlives EncodeFrame's

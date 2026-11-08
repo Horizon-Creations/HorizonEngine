@@ -15,6 +15,8 @@
 #include <HorizonRendering/GiLandscape.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/ProceduralSurfaceFunctions.h>
+#include <Trails/TrailClipmap.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
 #include <Renderer/IRenderer.h>
 #include <material/MaterialShaderBake.h>
@@ -93,6 +95,10 @@ TEST_CASE("Texture groups: the table is consistent and Mountains is the legacy m
 	CHECK(used.count(HE::kAutoLandscapeMaterialId.hi) == 1);
 	CHECK(used.insert(HE::kWeatherPuddlesFunctionId.hi).second);
 	CHECK(used.insert(HE::kWeatherSnowFunctionId.hi).second);
+	// The procedural surface functions (Thema 329, step 2) took 0x41D / 0x41E: the two ids left below the
+	// loose maps (0x420..) after the Forest and Grassland blocks; 0x41F stays free.
+	CHECK(used.insert(HE::kProceduralSnowFunctionId.hi).second);
+	CHECK(used.insert(HE::kProceduralSandFunctionId.hi).second);
 	// landscape_tex_gen's loose maps (0x420..0x42E) and variants (0x430..0x498: 8 variants of 5 layers),
 	// which the groups after Grassland must not land on. Forest and Grassland sit below them, Desert above.
 	for (uint64_t hi = 0x420; hi <= 0x498; ++hi) used.insert(hi);
@@ -128,21 +134,44 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, id);
 		CHECK(HE::materialGraphToJson(a.graph) != legacyJson);
 
-		// Same nodes, same wiring: only strings and three default values differ.
-		REQUIRE(a.graph.nodes.size() == legacy.graph.nodes.size());
-		CHECK(a.graph.links.size() == legacy.graph.links.size());
-		for (size_t i = 0; i < a.graph.nodes.size(); ++i)
-			CHECK(a.graph.nodes[i].type == legacy.graph.nodes[i].type);
+		if (!g.proceduralSand)
+		{
+			// Same nodes, same wiring: only strings and three default values differ.
+			REQUIRE(a.graph.nodes.size() == legacy.graph.nodes.size());
+			CHECK(a.graph.links.size() == legacy.graph.links.size());
+			for (size_t i = 0; i < a.graph.nodes.size(); ++i)
+				CHECK(a.graph.nodes[i].type == legacy.graph.nodes[i].type);
+		}
+		else
+		{
+			// The Desert's ground is MF_ProceduralSand (Thema 329 step 2) instead of three array reads
+			// on one bombing grid: fewer nodes, the rest of the skeleton (parameters, paint layers,
+			// dirt / rock / snow / puddles, the Dirt and Rock reads) unchanged — checked below.
+			CHECK(a.graph.nodes.size() != legacy.graph.nodes.size());
+			int sandCalls = 0, grassSlices = 0;
+			for (const HE::MatGraphNode& n : a.graph.nodes)
+				if (n.type == HE::MatNodeType::FunctionCall && n.s == HE::kProceduralSandFunctionPath) ++sandCalls;
+			for (const HE::MatGraphNode& n : a.graph.nodes)
+				if (n.type == HE::MatNodeType::TextureArraySample || n.type == HE::MatNodeType::NormalMapArraySample)
+					for (const HE::MatGraphLink& l : a.graph.links)
+						if (l.dstNode == n.id && l.dstPin == 1)
+							grassSlices += static_cast<int>(a.graph.findNode(l.srcNode)->p[0]) == static_cast<int>(HE::AutoLandscapeLayer::Grass);
+			CHECK(sandCalls == 1);
+			CHECK(grassSlices == 0);   // the ground's slice is never read
+		}
 
 		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 		REQUIRE_FALSE(gen.glsl.empty());
 		CHECK(gen.glsl.find("vec3(1.0, 0.0, 1.0)") == std::string::npos);
-		std::vector<std::string> tex = gen.textures, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = gen.textures, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], HE::kTrailTexturePath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
-		CHECK(tex == want);                       // its own arrays and not one of Mountains'
-		CHECK(gen.textureArrayMask == 0x7u);
-		CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+		CHECK(tex == want);                       // its own arrays and not one of Mountains', + the trail clipmap
+		uint32_t arrays = 0;                      // every slot but the trail's is an array
+		for (size_t i = 0; i < gen.textures.size(); ++i)
+			if (gen.textures[i] != HE::kTrailTexturePath) arrays |= 1u << i;
+		CHECK(gen.textureArrayMask == arrays);
+		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
 
 		int blends = 0, legacyBlends = 0;
 		for (const HE::MatGraphNode& n : a.graph.nodes)
@@ -161,8 +190,63 @@ TEST_CASE("Texture groups: Mountains is the default, Forest, Grassland and Deser
 
 		// Every debug view builds and compiles in a group too.
 		for (HE::AutoLandscapeView v : { HE::AutoLandscapeView::MasksRockSnowWater, HE::AutoLandscapeView::MasksDirtWet,
-		                                 HE::AutoLandscapeView::Normal, HE::AutoLandscapeView::Surface })
+		                                 HE::AutoLandscapeView::Normal, HE::AutoLandscapeView::Surface,
+		                                 HE::AutoLandscapeView::BaseColor })
 			CHECK_FALSE(HE::generateFragment(HE::buildAutoLandscapeGraph(v, id).graph, HE::weatherFunctionLoader()).glsl.empty());
+
+		// The BaseColor view is what the far-landscape bake photographs: unlit, albedo on the BaseColor pin.
+		{
+			const HE::AutoLandscapeGraph bc = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::BaseColor, id);
+			const HE::MatGraphNode* out = bc.graph.findNode(bc.output);
+			REQUIRE(out != nullptr);
+			CHECK(out->p[0] == 0.0f);
+			bool connected = false;
+			for (const HE::MatGraphLink& l : bc.graph.links)
+				if (l.dstNode == bc.output && l.dstPin == HE::kMatOutputBaseColorPin)
+					connected = true;
+			CHECK(connected);
+		}
+	}
+}
+
+TEST_CASE("Procedural snow and sand: the look is an exposed parameter, packed into the slot budget")
+{
+	for (int i = 0; i < HE::kAutoLandscapeGroupCount; ++i)
+	{
+		const HE::AutoLandscapeGroup& g = HE::kAutoLandscapeGroups[i];
+		CAPTURE(g.name);
+		const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, static_cast<AutoLandscapeGroupId>(i));
+		const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
+		// Nothing baked for being over budget: every parameter is a real HeParams slot.
+		CHECK(gen.params.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)));
+		CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
+		auto find = [&](const char* name) -> const HE::MatParamSlot* {
+			for (const HE::MatParamSlot& s : gen.params) if (s.name == name) return &s;
+			return nullptr;
+		};
+		const HE::MatParamSlot* color = find(HE::kAutoLandscapeParamSnowColor);
+		const HE::MatParamSlot* look  = find(HE::kAutoLandscapeParamSnowLook);
+		REQUIRE(color);
+		REQUIRE(look);
+		CHECK(color->kind == HE::MatParamKind::Color);
+		CHECK(look->kind == HE::MatParamKind::Vec4);
+		// The defaults are the functions' own (Grain, Drift, Glitter, Softness).
+		CHECK(look->value[0] == 0.5f);
+		CHECK(look->value[1] == 0.5f);
+		CHECK(look->value[2] == 0.35f);
+		CHECK(look->value[3] == 0.5f);
+		const HE::MatParamSlot* sand = find(HE::kAutoLandscapeParamSandLook);
+		CHECK((sand != nullptr) == g.proceduralSand);
+		if (sand)
+		{
+			CHECK(sand->kind == HE::MatParamKind::Vec4);
+			CHECK(sand->value[0] == 0.03f);
+			CHECK(sand->value[1] == 0.5f);
+			CHECK(sand->value[2] == 0.3f);
+			CHECK(sand->value[3] == 0.3f);
+		}
+		// The functions' pins are fed by the parameters (through Split RGBA), not by constants.
+		CHECK(gen.glsl.find("// param: Snow Look") != std::string::npos);
 	}
 }
 
@@ -193,6 +277,70 @@ TEST_CASE("Texture groups: the GI finds the albedo array of any group")
 	}
 }
 
+
+TEST_CASE("The mix material: two groups' slices of fat arrays, the shares read from the weightmap's third page")
+{
+	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains, /*mixed=*/true);
+	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
+	REQUIRE(!gen.glsl.empty());
+	// Sand look is a parameter of the mix (the Desert's ground), so it is a Desert-sized set.
+	CHECK(gen.params.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount + 1));
+	CHECK(gen.params.size() <= static_cast<size_t>(HE::kMatMaxParams));
+
+	// The fat arrays, not any group's own.
+	std::vector<std::string> tex = gen.textures, want = { HE::kAutoLandscapeMixAlbedoArray, HE::kAutoLandscapeMixNormalArray,
+	                                                      HE::kAutoLandscapeMixMaskArray, HE::kTrailTexturePath };
+	std::sort(tex.begin(), tex.end());
+	std::sort(want.begin(), want.end());
+	CHECK(tex == want);
+
+	// The pick reads the weightmap (explicit LOD only) (explicit LOD only).
+	CHECK(gen.glsl.find("heLandscapeWeights") != std::string::npos);
+	CHECK(gen.glsl.find("vec4(1.0, 0.0, 0.0, 0.0)") != std::string::npos);
+
+	// A group's own material has no pick; the mix has exactly one per fragment (one node).
+	int picks = 0, groupBlends = 0;
+	for (const HE::MatGraphNode& n : a.graph.nodes)
+	{
+		if (n.type == HE::MatNodeType::LandscapeGroupPick) ++picks;
+		if (n.type == HE::MatNodeType::LandscapeLayerBlend) ++groupBlends;
+	}
+	CHECK(picks == 1);
+	int ownBlends = 0;
+	for (const HE::MatGraphNode& n : HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains).graph.nodes)
+	{
+		if (n.type == HE::MatNodeType::LandscapeLayerBlend) ++ownBlends;
+		CHECK(n.type != HE::MatNodeType::LandscapeGroupPick);   // a group's own material has no pick
+	}
+	CHECK(groupBlends == ownBlends);   // the painted layers, unchanged
+
+	// Baked for every backend the way the exporter does (no GPU involved): HLSL, SPIR-V, GLSL, MSL.
+	HE::MaterialShaderLibrary lib;
+	for (uint8_t v = 0; v <= static_cast<uint8_t>(HE::RendererBackend::Metal); ++v)
+	{
+		MaterialShaderVariant var;
+		std::string error;
+		std::vector<std::string> warnings;
+		CHECK_MESSAGE(HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v),
+		                                            gen.glsl, "", var, error, warnings),
+		              "backend ", static_cast<int>(v), ": ", error);
+	}
+}
+
+TEST_CASE("The mix material's slice layout: group * 4 + role, one variant per role")
+{
+	static_assert(HE::kAutoLandscapeMixDepth == 16);
+	for (int g = 0; g < HE::kAutoLandscapeGroupCount; ++g)
+		for (int r = 0; r < HE::kAutoLandscapeRoleCount; ++r)
+		{
+			// The shader reads (role + 4 * group) * V + variant with V = depth / 16 = 1.
+			CHECK(HE::autoLandscapeMixSlice(g, r) == r + 4 * g);
+			CHECK(HE::autoLandscapeMixSlice(g, r) < HE::kAutoLandscapeMixDepth);
+		}
+	CHECK(HE::isAutoLandscapeMixMaterial(HE::kAutoLandscapeMixMaterialId));
+	CHECK(HE::autoLandscapeGroupOfMaterial(HE::kAutoLandscapeMixMaterialId) == -1);
+}
+
 #ifdef HE_EDITOR_DEPS_DIR
 TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what the builder makes, and bake on every backend")
 {
@@ -213,14 +361,14 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		REQUIRE(m);
 		CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, id).graph),
 		              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material --group ", g.name);
-		std::vector<std::string> tex = m->graphTexturePaths, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2] };
+		std::vector<std::string> tex = m->graphTexturePaths, want = { g.arrayPaths[0], g.arrayPaths[1], g.arrayPaths[2], HE::kTrailTexturePath };
 		std::sort(tex.begin(), tex.end());
 		std::sort(want.begin(), want.end());
 		CHECK(tex == want);
 		CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(g.paintLayerNames));
 		std::string have;
 		for (const std::string& pn : m->graphParamNames) have += pn + "; ";
-		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount), have);
+		CHECK_MESSAGE(m->graphParamNames.size() == static_cast<size_t>(HE::autoLandscapeParamCount(g)), have);
 		REQUIRE(!m->customShaderFragGlsl.empty());
 
 		// The packer ships the fragment text stored in the file: it must be what the codegen makes today.
@@ -234,6 +382,12 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 		const std::vector<std::string> refs = HE::EngineDeps::findEngineReferences(bytes.data(), bytes.size());
 		for (const char* arr : g.arrayPaths)
 			CHECK_MESSAGE(std::find(refs.begin(), refs.end(), arr) != refs.end(), arr, " is not referenced by ", file);
+		// ... and so is every material function the graph calls (Thema 329 step 2: snow in every group, sand in
+		// the Desert): a function the resolver does not find would not be fetched, and the call is magenta.
+		std::vector<const char*> fns = { HE::kWeatherPuddlesFunctionPath, HE::kWeatherSnowFunctionPath, HE::kProceduralSnowFunctionPath };
+		if (g.proceduralSand) fns.push_back(HE::kProceduralSandFunctionPath);
+		for (const char* fn : fns)
+			CHECK_MESSAGE(std::find(refs.begin(), refs.end(), fn) != refs.end(), fn, " is not referenced by ", file);
 
 		// One variant per backend, the way the exporter bakes them (no GPU involved).
 		HE::MaterialShaderLibrary lib;
@@ -247,5 +401,25 @@ TEST_CASE("The shipped Forest, Grassland and Desert materials are exactly what t
 			              "backend ", static_cast<int>(v), ": ", error);
 		}
 	}
+}
+
+TEST_CASE("The shipped mix material is exactly what the builder makes")
+{
+	// Generated by `landscape_tex_gen <dir> --mix --from <dir with the four groups' arrays>` (the same call
+	// writes the fat arrays, which are EngineContent textures and not committed).
+	const std::filesystem::path root = std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent";
+	const std::filesystem::path dir  = root / "Materials";
+	const std::string file = std::filesystem::path(HE::kAutoLandscapeMixMaterialPath).filename().string();
+	REQUIRE(std::filesystem::exists(dir / file));
+	ContentManager cm(dir.string());
+	cm.setEngineContentRoot(root.string());
+	const HE::UUID loaded = cm.loadAsset(file);
+	CHECK(loaded == HE::kAutoLandscapeMixMaterialId);
+	const MaterialAsset* m = cm.getMaterial(loaded);
+	REQUIRE(m);
+	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::Lit, AutoLandscapeGroupId::Mountains, true).graph),
+	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --mix --from <dir>");
+	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
+	REQUIRE(!m->customShaderFragGlsl.empty());
 }
 #endif // HE_EDITOR_DEPS_DIR

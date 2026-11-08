@@ -1,0 +1,21 @@
+label: Grassland-new-top-Metal-r2
+attempt: 1
+editor: /tmp/he328/new/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 3.48 3.27 2.94
+  locked:    Yes
+  lowpower:  0
+  gpu:       9
+  power:     Now drawing from 'AC Power'
+  busy:      15.0% Python; 9.4% WindowServer; 9.2% coreaudiod; 8.9% runningboardd
+  foreign:   none
+after:
+  uptime:    load averages: 3.27 3.24 2.93
+  locked:    Yes
+  lowpower:  0
+  gpu:       88
+  power:     Now drawing from 'AC Power'
+  busy:      25.7% WindowServer; 12.5% Dock; 12.2% coreaudiod; 6.6% WallpaperAerialsExtension
+  foreign:   none

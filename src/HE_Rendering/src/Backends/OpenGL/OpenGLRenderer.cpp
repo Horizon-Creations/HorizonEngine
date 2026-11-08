@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <chrono> // volumetric fog's temporal history clock (Thema 225 step 4)
 #include <Diagnostics/Logger.h>
 #include <Diagnostics/EngineProfiler.h>
 #include <Diagnostics/Profiler.h>   // HE_PROFILE_SCOPE_N — GI accel split of Render()
@@ -1121,6 +1122,14 @@ vec3 lensFlareOverlay(vec2 uv, vec4 lf)
 void main()
 {
 	vec3 hdr    = texture(uHDR, vUV).rgb;
+	if (uExposure < 0.0)   // raw capture (EditorCameraOverride::rawOutput): the material's colour, untouched
+	{
+		vec3 c = clamp(hdr, 0.0, 1.0);
+		if (uExposure < -1.5)   // rawSrgb: the exact sRGB curve, for a picture that becomes an sRGB texture
+			c = mix(1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, c * 12.92, lessThanEqual(c, vec3(0.0031308)));
+		FragColor = vec4(c, 1.0);
+		return;
+	}
 	hdr        += texture(uBloom, vUV).rgb * uBloomStrength;
 	hdr        *= uExposure;
 	vec3 mapped = aces(hdr);
@@ -3539,6 +3548,13 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	CreateSSAOPipeline();
 	CreateDebugLinePipeline();
 	CreateParticlePipeline();
+	// Volumetric fog (Thema 225 step 4): built EAGERLY, unlike the lazy
+	// EnsureDeferredPipelines pattern — MakeFogVolumeData's `enabled` gate
+	// depends on setVolumetricFogCapable below being truthful BEFORE the
+	// first fog-enabled frame ever calls RenderFogVolume (a lazy build would
+	// deadlock: nothing ever asks it to build if `enabled` is never true).
+	EnsureFogVolumePipelines();
+	m_extractor.setVolumetricFogCapable(m_fogPipelinesOk);
 
 	// Profiler GPU timing via GL timer queries. Reliable on desktop GL (Windows /
 	// Linux) when the driver exports them; left off on Apple GL, where GL_TIMESTAMP /
@@ -3908,8 +3924,12 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
                                                        bool gbuffer, bool instanced)
 {
 	EnsureMaterialUBOs(); // before every return below — memo hit and cache hit included
-	// The pak bakes no instanced vertex: the caller loops with the plain program.
-	if (instanced && precompiled) return 0;
+	// What the pak baked for the twin being asked for (CHUNK_PSHD v4). A twin it did not
+	// bake is not cross-compiled next to a baked plain pair: a packaged build may have
+	// no translator. The G-buffer twin simply cross-compiles (the deferred path always
+	// could); the instanced one returns 0 and the caller loops with the plain program.
+	if (precompiled && gbuffer && precompiled->fragmentGBuffer.empty()) precompiled = nullptr;
+	if (precompiled && instanced && precompiled->vertexInstanced.empty()) return 0;
 	// `key` also keys the fragment cache below, so the instanced slot gets its own
 	// program key without touching it.
 	const uint64_t progKey = instanced ? (key ^ 0x1D57A9CEDB0B1E55ULL) : key;
@@ -3937,7 +3957,8 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 	// fragmentClustered); otherwise its plain 4.10 pair draws with the window.
 	// The G-buffer variant never shades lights.
 	const bool bakedClustered = precompiled && !precompiled->vertexClustered.empty()
-	                         && !precompiled->fragmentClustered.empty();
+	                         && !precompiled->fragmentClustered.empty()
+	                         && (!instanced || !precompiled->vertexInstancedClustered.empty());
 	bool clustered = m_forwardClustered && !gbuffer && (!precompiled || bakedClustered);
 	// WPO materials use the graph-generated vertex; UBO blocks bind by NAME below,
 	// so the custom vertex's HeLighting/HeParams resolve without extra plumbing.
@@ -3953,8 +3974,21 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		vertSrc = v.source; fragSrc = f.source; log = v.log + f.log; ok = v.ok && f.ok;
 	};
 	auto usePrecompiled = [&](bool cl) {
-		vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
-		fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		if (gbuffer)   // the deferred twin: the plain vertex stage (or its instanced form), never clustered
+		{
+			vertSrc = instanced ? precompiled->vertexInstanced : precompiled->vertex;
+			fragSrc = precompiled->fragmentGBuffer;
+		}
+		else if (instanced)
+		{
+			vertSrc = cl ? precompiled->vertexInstancedClustered : precompiled->vertexInstanced;
+			fragSrc = cl ? precompiled->fragmentClustered        : precompiled->fragment;
+		}
+		else
+		{
+			vertSrc = cl ? precompiled->vertexClustered   : precompiled->vertex;
+			fragSrc = cl ? precompiled->fragmentClustered : precompiled->fragment;
+		}
 		ok = !vertSrc.empty() && !fragSrc.empty(); // baked GLSL — no runtime cross-compile
 	};
 	// Displacement (Thema 207): the two tessellation stages, at the GLSL version of
@@ -4043,6 +4077,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		// Cloud-shadow transmittance map = unit 19 (per-frame bind in DrawScene,
 		// shared with the built-in shaders' uCloudShadowMap).
 		if (GLint l = glGetUniformLocation(prog, "heCloudShadow"); l >= 0) glUniform1i(l, 19);
+		// Froxel fog volume (heFogVolume, Thema 225 step 4) = unit 21
+		// (MaterialShaderLibrary::kGlFogVolumeTextureUnit), DrawScene binds the
+		// integrated volume or a 1x1x1 dummy there every frame. Declared on
+		// every GL material fragment now (injectPreamble's fogVolume gate), but
+		// only heApplyFogT (Translucent materials) ever samples it.
+		if (GLint l = glGetUniformLocation(prog, "heFogVolume"); l >= 0)
+			glUniform1i(l, HE::MaterialShaderLibrary::kGlFogVolumeTextureUnit);
 		glUseProgram(0);
 	};
 
@@ -4106,8 +4147,13 @@ unsigned int OpenGLRenderer::GetOrBuildMaterialProgram(uint64_t key, const std::
 		if (cacheable) glSaveCachedProgram(cachePath, prog); // persist for next launch
 		HE_LOG_INFO(RHI, "%s", precompiled
 			? (clustered
-				? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)"
-				: "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)")
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered, instanced (GLSL 4.30, no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, clustered (GLSL 4.30, no runtime cross-compile)")
+				: gbuffer
+				? (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, G-buffer (no runtime cross-compile)")
+				: (instanced ? "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain, instanced (no runtime cross-compile)"
+				             : "OpenGLRenderer: built a material program from a PRECOMPILED variant, plain (no runtime cross-compile)"))
 			: clustered
 			? "OpenGLRenderer: built a CLUSTERED material program (GLSL 4.30) from canonical GLSL via he::shaderc"
 			: "OpenGLRenderer: built a material program from canonical GLSL via he::shaderc");
@@ -4641,6 +4687,8 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyAuroraHeight   = glGetUniformLocation(m_skyProgram, "uAuroraHeight");
 	m_uSkyAuroraFragment = glGetUniformLocation(m_skyProgram, "uAuroraFragment");
 	m_uSkyWind        = glGetUniformLocation(m_skyProgram, "uWind");
+	m_uSkyWindDrift   = glGetUniformLocation(m_skyProgram, "uWindDrift");
+	m_uSkyCloudDomeHeight = glGetUniformLocation(m_skyProgram, "uCloudDomeHeight");
 	m_uSkyNoise       = glGetUniformLocation(m_skyProgram, "uNoise");
 	m_uSkyCloudShadowPass   = glGetUniformLocation(m_skyProgram, "uCloudShadowPass");
 	m_uSkyCloudShadowRegion = glGetUniformLocation(m_skyProgram, "uCloudShadowRegion");
@@ -4654,6 +4702,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	m_uSkyCloudMode   = glGetUniformLocation(m_skyProgram, "uCloudMode");
 	m_uSkyCloudQuality = glGetUniformLocation(m_skyProgram, "uCloudQuality");
 	m_uSkyCloudStyle        = glGetUniformLocation(m_skyProgram, "uCloudStyle");
+	m_uSkyCloudType         = glGetUniformLocation(m_skyProgram, "uCloudType");
 	m_uSkyCloudInterShadows = glGetUniformLocation(m_skyProgram, "uCloudInterShadows");
 	m_uSkyCloudEvolution    = glGetUniformLocation(m_skyProgram, "uCloudEvolution");
 	m_uSkyCameraPos   = glGetUniformLocation(m_skyProgram, "uCameraPos");
@@ -4678,11 +4727,7 @@ void OpenGLRenderer::CreateSkyPipeline()
 	// Release: full 256³ tile so sky fBm octaves don't visibly repeat.
 	// Debug: 64³ (64× fewer voxels) so the CPU bake takes < 1s instead of 30min
 	// without SIMD optimisation in MSVC Debug mode.
-#ifdef NDEBUG
-	constexpr int kNoiseN = 256;
-#else
-	constexpr int kNoiseN = 64;
-#endif
+	const int kNoiseN = HE::SkyNoise3DResolution();
 	const std::vector<uint16_t> noise = HE::BuildSkyNoise3D(kNoiseN);
 	glGenTextures(1, &m_noiseTex);
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -5332,6 +5377,7 @@ void OpenGLRenderer::RenderCloudShadowMap()
 	glUniform4f(m_uSkyCloudShadowRegion, origin.x, origin.y, size,
 	            static_cast<float>(kCloudShadowMapSize));
 	glUniform1i(m_uSkyCloudStyle, env.cloudStyle);
+	glUniform1i(m_uSkyCloudType, std::clamp(env.cloudType, 0, 4));
 	glUniform1f(m_uSkyCloudEvolution, env.cloudEvolution);
 	// Dome vs 3D deck picks the density field. Set it here: the value left over
 	// from the previous frame's sky draw is stale on the first frame and for one
@@ -5351,8 +5397,11 @@ void OpenGLRenderer::RenderCloudShadowMap()
 		skyClock = static_cast<float>(std::atof(ov)); // deterministic headless captures
 	glUniform1f(m_uSkyClock, skyClock);
 	{
-		const glm::vec3 wind = HE::CloudWindVector(env);
+		const glm::vec3 wind  = HE::CloudWindVector(env);
+		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2 (as in the sky pass)
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -7118,7 +7167,7 @@ unsigned int OpenGLRenderer::RenderGIShadow(int width, int height, const glm::ma
 // EncodeSkyReflCube, which this mirrors: six faces of the real sky pass around
 // the camera, low-res clouds off (that buffer is screen-space, a face is not).
 // Leaves the caller's framebuffer, viewport and depth-test state as it found them.
-static constexpr int kSkyReflCubeSize = 128;
+static constexpr int kSkyReflCubeSize = 512;
 void OpenGLRenderer::RenderSkyReflCube()
 {
 	m_skyReflValid = false;
@@ -7127,9 +7176,10 @@ void OpenGLRenderer::RenderSkyReflCube()
 		return e && e[0] == '0';
 	}();
 	const IRenderer::EnvironmentSettings& env = GetEnvironment();
-	if (s_off || !m_skyProgram || !env.skyEnabled) return;
+	if (s_off || !m_skyProgram || !env.skyEnabled) { m_skyReflBaked = false; return; }
 	if (!m_skyReflCube)
 	{
+		m_skyReflBaked = false;
 		glGenTextures(1, &m_skyReflCube);
 		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyReflCube);
 		for (int f = 0; f < 6; ++f)
@@ -7152,7 +7202,10 @@ void OpenGLRenderer::RenderSkyReflCube()
 	glDisable(GL_DEPTH_TEST); // no depth attachment: every texel is sky
 	const glm::vec3 camPos = m_renderWorld.camera.position;
 	bool complete = true;
-	for (int f = 0; f < 6 && complete; ++f)
+	// All six faces the first time, then a rotating pair (a face not drawn keeps its picture).
+	const int firstFace = m_skyReflBaked ? m_skyReflPhase * kSkyReflFacesPerFrame : 0;
+	const int endFace   = m_skyReflBaked ? firstFace + kSkyReflFacesPerFrame : 6;
+	for (int f = firstFace; f < endFace && complete; ++f)
 	{
 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 		                       GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, m_skyReflCube, 0);
@@ -7168,6 +7221,13 @@ void OpenGLRenderer::RenderSkyReflCube()
 	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
 	glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
 	m_skyReflValid = complete;
+	if (complete)
+	{
+		m_skyReflPhase = m_skyReflBaked ? (m_skyReflPhase + 1) % (6 / kSkyReflFacesPerFrame) : 0;
+		m_skyReflBaked = true;
+	}
+	else
+		m_skyReflBaked = false; // a failed face: draw all six again next time
 }
 
 unsigned int OpenGLRenderer::RenderGIReflections(int width, int height,
@@ -8542,6 +8602,482 @@ void OpenGLRenderer::DestroyHDRTarget()
 	m_hdrW = m_hdrH = 0;
 }
 
+// ─── Volumetric fog (docs/volumetric-fog-plan.md, Thema 225 step 4) ──────────
+// GL 4.1 core fragment-path twin of MetalRenderer's EncodeFogVolume/
+// EncodeFogApplyAndReopen (compute). Built once, lazily (like EnsureDeferredPipelines);
+// a link failure leaves supportsVolumetricFog false forever and the analytic
+// fog running, same as if the step had never happened.
+bool OpenGLRenderer::EnsureFogVolumePipelines()
+{
+	if (m_fogPipelinesTried) return m_fogPipelinesOk;
+	m_fogPipelinesTried = true;
+#if !defined(HE_HAVE_SHADERC)
+	return false;
+#else
+	using Backend = HE::MaterialShaderLibrary::Backend;
+	const auto& vs = m_matShaderLib.fullscreenVertex(Backend::GLSL410);
+	const auto& fi = m_matShaderLib.fogInject(Backend::GLSL410);
+	const auto& fg = m_matShaderLib.fogIntegrate(Backend::GLSL410);
+	const auto& fa = m_matShaderLib.fogApply(Backend::GLSL410);
+	if (!(vs.ok && fi.ok && fg.ok && fa.ok))
+	{
+		HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: volumetric fog shader compile failed\n")
+			+ vs.log + fi.log + fg.log + fa.log).c_str());
+		return false;
+	}
+	auto link = [&](const char* passName, const std::string& fragSrc) -> GLuint
+	{
+		GLuint v = CompileStage(GL_VERTEX_SHADER,   vs.source.c_str());
+		GLuint f = CompileStage(GL_FRAGMENT_SHADER, fragSrc.c_str());
+		GLuint prog = 0;
+		if (v && f)
+		{
+			prog = glCreateProgram();
+			glAttachShader(prog, v);
+			glAttachShader(prog, f);
+			glLinkProgram(prog);
+			GLint linked = 0; glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+			if (!linked)
+			{
+				char log[2048]; glGetProgramInfoLog(prog, sizeof(log), nullptr, log);
+				HE_LOG_ERROR(RHI, "%s", (std::string("OpenGLRenderer: fog ") + passName
+					+ " program link failed: " + log).c_str());
+				glDeleteProgram(prog);
+				prog = 0;
+			}
+		}
+		if (v) glDeleteShader(v);
+		if (f) glDeleteShader(f);
+		return prog;
+	};
+	m_fogInjectProgram    = link("inject",    fi.source);
+	m_fogIntegrateProgram = link("integrate", fg.source);
+	m_fogApplyProgram     = link("apply",     fa.source);
+	if (!(m_fogInjectProgram && m_fogIntegrateProgram && m_fogApplyProgram))
+	{
+		if (m_fogInjectProgram)    { glDeleteProgram(m_fogInjectProgram);    m_fogInjectProgram = 0; }
+		if (m_fogIntegrateProgram) { glDeleteProgram(m_fogIntegrateProgram); m_fogIntegrateProgram = 0; }
+		if (m_fogApplyProgram)     { glDeleteProgram(m_fogApplyProgram);     m_fogApplyProgram = 0; }
+		return false;
+	}
+
+	// HeLighting (point 0, shared with every other GL program) + HeFogVol (new
+	// point 9 — 0..8 are HeLighting/U/HeParams/HeResolve/HeDecal/reflPrepass/
+	// ssrTrace/ssrBlur/HeUI).
+	auto bindBlock = [&](GLuint prog, const char* name, GLuint point)
+	{
+		if (const GLuint idx = glGetUniformBlockIndex(prog, name); idx != GL_INVALID_INDEX)
+			glUniformBlockBinding(prog, idx, point);
+	};
+	bindBlock(m_fogInjectProgram,    "HeLighting", 0);
+	bindBlock(m_fogInjectProgram,    "HeFogVol",   9);
+	bindBlock(m_fogIntegrateProgram, "HeFogVol",   9);
+	bindBlock(m_fogApplyProgram,     "HeFogVol",   9);
+
+	// Texture units, bound by NAME (GLSL410 has no layout(binding=)) — units
+	// 22-27, past everything the scene/material pipeline use (0-21), so
+	// Inject/Integrate (which run before the scene rebinds its own per-frame
+	// units — see RenderFogVolume's comment) never have to save/restore a
+	// single texture binding, only the program and the active-unit selector.
+	glUseProgram(m_fogInjectProgram);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heCsm");          l >= 0) glUniform1i(l, 22);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heLocalShadow");  l >= 0) glUniform1i(l, 23);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heSkyEnv");       l >= 0) glUniform1i(l, 24);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heCloudShadow");  l >= 0) glUniform1i(l, 25);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heFogNoise");    l >= 0) glUniform1i(l, 26);
+	if (GLint l = glGetUniformLocation(m_fogInjectProgram, "heFogHistory");  l >= 0) glUniform1i(l, 27);
+	// The shared lighting preamble declares heLitP's OWN inputs too, even though
+	// Inject's main() never calls heLitP (dead declarations) — give every one of
+	// them a harmless, bound unit so a strict driver never sees a sampler with
+	// nothing behind it.
+	for (const char* nm : { "heGIShadow", "heGILocal", "heLandscapeWeights", "heAO",
+	                        "heGIIrradiance", "heGIVisibility", "heSSRFwd", "heGIReflFwd" })
+		if (GLint l = glGetUniformLocation(m_fogInjectProgram, nm); l >= 0) glUniform1i(l, 22);
+
+	glUseProgram(m_fogIntegrateProgram);
+	if (GLint l = glGetUniformLocation(m_fogIntegrateProgram, "heFogInjected");   l >= 0) glUniform1i(l, 22);
+	if (GLint l = glGetUniformLocation(m_fogIntegrateProgram, "heFogAccumPrev"); l >= 0) glUniform1i(l, 23);
+
+	glUseProgram(m_fogApplyProgram);
+	if (GLint l = glGetUniformLocation(m_fogApplyProgram, "heFogIntegrated"); l >= 0) glUniform1i(l, 0);
+	if (GLint l = glGetUniformLocation(m_fogApplyProgram, "heSkyEnv");        l >= 0) glUniform1i(l, 1);
+	if (GLint l = glGetUniformLocation(m_fogApplyProgram, "heFogDepth");      l >= 0) glUniform1i(l, 2);
+	glUseProgram(0);
+
+	glGenBuffers(1, &m_fogVolUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+	glBufferData(GL_UNIFORM_BUFFER, sizeof(HE::FogVolumeConstants), nullptr, GL_DYNAMIC_DRAW);
+	glGenBuffers(1, &m_fogLightUBO);
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogLightUBO);
+	glBufferData(GL_UNIFORM_BUFFER, sizeof(HE::MaterialShaderLibrary::Lighting), nullptr, GL_DYNAMIC_DRAW);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+	const float dummy[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	glGenTextures(1, &m_fogDummy3D);
+	glBindTexture(GL_TEXTURE_3D, m_fogDummy3D);
+	glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA16F, 1, 1, 1, 0, GL_RGBA, GL_FLOAT, dummy);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glBindTexture(GL_TEXTURE_3D, 0);
+
+	glGenFramebuffers(1, &m_fogApplyFBO);
+
+	HE_LOG_INFO(RHI, "%s", "OpenGLRenderer: volumetric fog programs linked (Inject/Integrate/Apply, GLSL410)");
+	m_fogPipelinesOk = true;
+	return true;
+#endif
+}
+
+void OpenGLRenderer::EnsureFogVolumeTargets(const glm::ivec3& grid)
+{
+	if (m_fogIntegratedTex && grid == m_fogGrid) return;
+	DestroyFogVolumeTargets();
+	m_fogGrid = grid;
+
+	auto make3D = [&](unsigned int& tex)
+	{
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_3D, tex);
+		glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA16F, grid.x, grid.y, grid.z, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+	};
+	make3D(m_fogInjectTex[0]);
+	make3D(m_fogInjectTex[1]);
+	make3D(m_fogIntegratedTex);
+	glBindTexture(GL_TEXTURE_3D, 0);
+
+	// RGBA32F, not 16F: T is a running product of exp(-sigT*dz) over up to 96
+	// slices (the High tier) — 16F's ~10-bit mantissa visibly drifts over that
+	// many round trips through a render target, 32F does not.
+	auto make2D = [&](unsigned int& tex)
+	{
+		glGenTextures(1, &tex);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, grid.x, grid.y, 0, GL_RGBA, GL_FLOAT, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	};
+	make2D(m_fogAccumTex[0]);
+	make2D(m_fogAccumTex[1]);
+	glBindTexture(GL_TEXTURE_2D, 0);
+
+	glGenFramebuffers(1, &m_fogInjectFBO);
+	glGenFramebuffers(1, &m_fogIntegrateFBO);
+
+	m_fogHistValid = false; // the old history textures (a different size) are gone
+}
+
+void OpenGLRenderer::DestroyFogVolumeTargets()
+{
+	if (m_fogInjectFBO)     { glDeleteFramebuffers(1, &m_fogInjectFBO);     m_fogInjectFBO = 0; }
+	if (m_fogIntegrateFBO)  { glDeleteFramebuffers(1, &m_fogIntegrateFBO);  m_fogIntegrateFBO = 0; }
+	if (m_fogInjectTex[0])  { glDeleteTextures(1, &m_fogInjectTex[0]);      m_fogInjectTex[0] = 0; }
+	if (m_fogInjectTex[1])  { glDeleteTextures(1, &m_fogInjectTex[1]);      m_fogInjectTex[1] = 0; }
+	if (m_fogIntegratedTex) { glDeleteTextures(1, &m_fogIntegratedTex);     m_fogIntegratedTex = 0; }
+	if (m_fogAccumTex[0])   { glDeleteTextures(1, &m_fogAccumTex[0]);       m_fogAccumTex[0] = 0; }
+	if (m_fogAccumTex[1])   { glDeleteTextures(1, &m_fogAccumTex[1]);       m_fogAccumTex[1] = 0; }
+	m_fogGrid = glm::ivec3(0);
+	m_fogHistValid = false;
+}
+
+// Inject + Integrate (analog to MetalRenderer::EncodeFogVolume). Runs BEFORE the
+// opaque pass, right after the shadow maps, cloud shadow and sky env cube are
+// current for this frame (DrawScene, right after UpdateSkyEnvCube).
+//
+// Y convention (GL 4.1's native raster origin is BOTTOM-left, unlike Metal/D3D/
+// Vulkan's top-left): every texel index below (f.xy, Integrate's xy) is the RAW,
+// unflipped gl_FragCoord — no shader-side flip anywhere. heFogRayDir and
+// kApplyMain (shared, unchanged) both derive their uv from THAT raw coordinate
+// and feed it through a hardcoded `1 - 2*uv.y` — correct for Metal's top-left
+// origin for free, mirrored here unless compensated. fc.invViewProj/prevViewProj
+// carry an extra flipY = scale(1,-1,1) to compensate (both Inject's heFogRayDir
+// and Apply's reconstruction read raw-gl_FragCoord uv, so both need it).
+// heApplyFogT (material code) is DIFFERENT: its uv = clip.xy/clip.w*0.5+0.5 has
+// no such mirroring built in, and the rows it reads were written at the SAME
+// raw-gl_FragCoord addressing Inject used — so m_fogViewProjFlip must stay a
+// PLAIN viewProj for GL, not flipY*viewProj like Metal (Metal needs the flip
+// there because ITS rows run the other way). Mixing these two up was a bug an
+// advisor review caught: every GL witness would have read the volume mirrored
+// vertically. Apply's depth also needs its own fix — see depthRemap below:
+// GL's depth-buffer value is (ndc.z+1)/2, not NDC z directly like Metal.
+void OpenGLRenderer::RenderFogVolume(int pw, int ph, bool shadows, bool localShadows,
+                                     int nCascades, const glm::vec4& cascadeSplits, const glm::vec3& camFwd)
+{
+	(void)pw; (void)ph;
+	m_fogFrameActive = false;
+#if !defined(HE_HAVE_SHADERC)
+	return;
+#else
+	if (!m_renderWorld.fogVolume.enabled) return;
+	if (!EnsureFogVolumePipelines() || !m_skyEnvCube) return;
+	const HE::FogVolumeData fd = m_renderWorld.fogVolume;
+	EnsureFogVolumeTargets(fd.grid);
+	if (!m_fogIntegratedTex) return;
+
+	// HeLighting for Inject's shadow/light functions (heCsmShadow/heLocalShadowFactor/
+	// heCloudShadowFactor) — built here, not via DrawScene's fillMatLight lambda (out
+	// of scope this early) or a graph material's fill (that one zeroes the REAL CSM
+	// array on purpose, since heCsm there aliases the local-shadow-atlas unit).
+	// Mirrors MetalRenderer::FillMaterialLighting's shape; only the fields Inject's
+	// kernel actually reads (grep heLight\. in kInjectMainGL + the shared shadow fns).
+	HE::MaterialShaderLibrary::Lighting lit{};
+	{
+		glm::vec3 matSunDir, matSunColor;
+		m_renderWorld.dominantDirectionalLight(matSunDir, matSunColor);
+		lit.sunDir[0] = matSunDir.x; lit.sunDir[1] = matSunDir.y; lit.sunDir[2] = matSunDir.z;
+		lit.sunColor[0] = matSunColor.r; lit.sunColor[1] = matSunColor.g; lit.sunColor[2] = matSunColor.b;
+		lit.ambient[0] = m_renderWorld.ambient.r; lit.ambient[1] = m_renderWorld.ambient.g; lit.ambient[2] = m_renderWorld.ambient.b;
+		lit.camPos[0] = m_renderWorld.camera.position.x;
+		lit.camPos[1] = m_renderWorld.camera.position.y;
+		lit.camPos[2] = m_renderWorld.camera.position.z;
+		lit.fog[2] = 1.0f; // heSkyEnv valid — EnsureFogVolumePipelines already required m_skyEnvCube above
+		HE::FillMaterialLightWindow(m_renderWorld, lit, localShadows);
+		if (localShadows)
+		{
+			glm::mat4 zRemap(1.0f);
+			zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+			const int nLocalLayers = std::clamp(m_renderWorld.shadow.localLayerCount, 0,
+			                                    ShadowData::kMaxLocalShadowLayers);
+			for (int c = 0; c < nLocalLayers; ++c)
+			{
+				const glm::mat4 m = zRemap * m_renderWorld.shadow.localViewProj[c];
+				std::memcpy(lit.localShadowVP[c], &m[0][0], 16 * sizeof(float));
+			}
+		}
+		if (shadows && m_shadowDepthTex)
+		{
+			glm::mat4 zRemap(1.0f);
+			zRemap[2][2] = 0.5f; zRemap[3][2] = 0.5f;
+			for (int c = 0; c < nCascades; ++c)
+			{
+				const glm::mat4 m = zRemap * m_renderWorld.shadow.cascadeViewProj[c];
+				std::memcpy(lit.csmVP[c], &m[0][0], 16 * sizeof(float));
+			}
+			std::memcpy(lit.csmSplits, glm::value_ptr(cascadeSplits), 4 * sizeof(float));
+			lit.camFwd[0] = camFwd.x; lit.camFwd[1] = camFwd.y; lit.camFwd[2] = camFwd.z;
+			lit.shadowBias[0] = m_shadowSettings.slopeBias;
+			lit.shadowBias[1] = m_shadowSettings.minBias;
+		}
+		const glm::vec4 cloudShA = m_cloudShadowParamsA;
+		const glm::vec4 cloudShB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
+		std::memcpy(lit.cloudShadowA, glm::value_ptr(cloudShA), 4 * sizeof(float));
+		std::memcpy(lit.cloudShadowB, glm::value_ptr(cloudShB), 4 * sizeof(float));
+	}
+
+	// Save every bit of context state this function's own draws touch, restored
+	// below — Inject/Integrate run BEFORE the scene's own per-frame texture/UBO
+	// binds (which still happen right after this call and would otherwise mask
+	// a leak), but the active PROGRAM and unit are read by code between here and
+	// there (glUniform1i calls on the scene program already bound by the caller).
+	GLint prevProgram = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prevProgram);
+	GLint prevActiveTex = 0; glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActiveTex);
+
+	const bool pinned = [] { const char* v = std::getenv("HE_SKY_TIME"); return v && *v; }();
+	const double now  = pinned ? (m_fogFrameIndex / 60.0)
+	                           : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+	float dt = (m_fogLastTime > 0.0 || pinned) ? static_cast<float>(now - m_fogLastTime) : 0.0f;
+	if (pinned && m_fogFrameIndex == 0) dt = 0.0f;
+	m_fogLastTime = now;
+	const CameraData& cam       = m_renderWorld.camera;
+	const glm::mat4   viewProj  = cam.projection * cam.view;
+	const glm::mat4   flipY     = glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
+	// kApplyMain (shared, unchanged) feeds the RAW depth-buffer texel straight into
+	// fv.invViewProj's z component. Metal's depth buffer already stores NDC z in
+	// [0,1] == Metal's own clip convention, so that is correct there unmodified.
+	// GL's NDC z is [-1,1]; the depth-buffer value is the viewport-mapped
+	// (ndc.z+1)/2, same as the underwater pass' depthParams (scale 2, bias -1).
+	// depthRemap undoes that mapping (z' = 2*d - 1) before the point reaches
+	// inverse(viewProj) — harmless for heFogRayDir's fixed z=0.5 probe too: for a
+	// fixed (ndc.x, ndc.y), every ndc.z maps to a point on the SAME camera ray, so
+	// remapping the probe depth still gives a point on the right ray, just not at
+	// the same distance along it (direction-only use, as heFogRayDir takes it).
+	glm::mat4 depthRemap(1.0f);
+	depthRemap[2][2] = 2.0f;
+	depthRemap[3][2] = -1.0f;
+	const glm::mat4   invViewProj = glm::inverse(flipY * viewProj) * depthRemap; // see the function comment
+	const float focal = cam.projection[1][1];
+	const bool historyOk = m_fogHistValid && dt > 0.0f && dt < 0.5f
+	             && glm::distance(cam.position, m_fogPrevCam) < 10.0f
+	             && std::abs(focal - m_fogPrevFocal) < 1e-4f * std::max(1.0f, std::abs(focal));
+	const IRenderer::EnvironmentSettings& env = GetEnvironment();
+	const float rad = glm::radians(env.windDirection);
+	m_fogNoiseOffset += glm::vec3(std::sin(rad), 0.0f, -std::cos(rad)) * std::max(env.windSpeed, 0.0f) * dt * 0.5f;
+	m_fogNoiseTime   += dt;
+
+	HE::FogVolumeTemporalState ts;
+	ts.jitter01     = HE::fogJitter(m_fogFrameIndex);
+	ts.historyAlpha = historyOk ? HE::fogHistoryAlpha(dt) : 1.0f;
+	ts.historyValid = historyOk;
+	ts.frameIndex   = m_fogFrameIndex;
+	ts.noiseOffset  = m_fogNoiseOffset;
+	ts.noiseTime    = m_fogNoiseTime;
+	HE::FogVolumeConstants fc = HE::FillFogVolumeConstants(
+		fd, invViewProj, flipY * m_fogPrevViewProj, cam.position, camFwd, ts, 0.0f);
+
+	// Saved BEFORE the rebind below, and restored at the end: UBO point 0 is
+	// "HeLighting" for every GL program, including graph materials — leaving it
+	// on m_fogLightUBO (fogVol.x == 0 there) would have a later material draw
+	// read the wrong lighting block and double-apply the analytic fog on top of
+	// Apply. Caught by an advisor review: the deferred G-buffer pre-fill only
+	// calls glBufferSubData, it never rebinds point 0 itself.
+	GLint prevUBO0 = 0; glGetIntegeri_v(GL_UNIFORM_BUFFER_BINDING, 0, &prevUBO0);
+	const GLboolean prevCullFace = glIsEnabled(GL_CULL_FACE);
+
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogLightUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(lit), &lit);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_fogLightUBO);
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_CULL_FACE);
+	glBindVertexArray(m_fsVAO);
+
+	const int cur = 1 - m_fogHist; // written now; m_fogHist still holds last frame's result
+
+	// ── Inject: one fullscreen quad per Z slice ─────────────────────────────
+	// Units 22-27: past every unit the surrounding scene code and the material
+	// pipeline use (0-21, see MaterialShaderLibrary::kGlFogVolumeTextureUnit's
+	// comment) — Inject/Integrate run BEFORE the scene rebinds its own per-frame
+	// units, but using a disjoint range means there is nothing to leak into them
+	// even so, and no restore code needed for the texture units themselves.
+	glBindFramebuffer(GL_FRAMEBUFFER, m_fogInjectFBO);
+	glViewport(0, 0, fd.grid.x, fd.grid.y);
+	glUseProgram(m_fogInjectProgram);
+	glActiveTexture(GL_TEXTURE22); glBindTexture(GL_TEXTURE_2D_ARRAY, m_shadowDepthTex);
+	glActiveTexture(GL_TEXTURE23); glBindTexture(GL_TEXTURE_2D_ARRAY, m_localShadowDepthTex);
+	glActiveTexture(GL_TEXTURE24); glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+	glActiveTexture(GL_TEXTURE25); glBindTexture(GL_TEXTURE_2D, m_cloudShadowTex);
+	glActiveTexture(GL_TEXTURE26); glBindTexture(GL_TEXTURE_3D, m_noiseTex);
+	glActiveTexture(GL_TEXTURE27); glBindTexture(GL_TEXTURE_3D, m_fogInjectTex[m_fogHist]); // history
+	for (int z = 0; z < fd.grid.z; ++z)
+	{
+		fc.pad.w = static_cast<float>(z);
+		glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+		glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fc), &fc);
+		glBindBufferBase(GL_UNIFORM_BUFFER, 9, m_fogVolUBO);
+		glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, m_fogInjectTex[cur], 0, z);
+		glDrawArrays(GL_TRIANGLES, 0, 3);
+	}
+
+	// ── Integrate: one fullscreen quad per slice k, front to back, MRT ──────
+	{
+		int srcAcc = 0, dstAcc = 1;
+		glBindFramebuffer(GL_FRAMEBUFFER, m_fogIntegrateFBO);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_fogAccumTex[srcAcc], 0);
+		const float identity[4] = { 0.0f, 0.0f, 0.0f, 1.0f }; // (L, T) before any slice: no light, no extinction
+		const GLenum accumOnly = GL_COLOR_ATTACHMENT0;
+		glDrawBuffers(1, &accumOnly);
+		glClearBufferfv(GL_COLOR, 0, identity);
+
+		glUseProgram(m_fogIntegrateProgram);
+		glActiveTexture(GL_TEXTURE22); glBindTexture(GL_TEXTURE_3D, m_fogInjectTex[cur]);
+		glViewport(0, 0, fd.grid.x, fd.grid.y);
+		const GLenum mrt[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+		for (int k = 0; k < fd.grid.z; ++k)
+		{
+			fc.pad.w = static_cast<float>(k);
+			glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+			glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fc), &fc);
+			glBindBufferBase(GL_UNIFORM_BUFFER, 9, m_fogVolUBO);
+			glActiveTexture(GL_TEXTURE23); glBindTexture(GL_TEXTURE_2D, m_fogAccumTex[srcAcc]);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_fogAccumTex[dstAcc], 0);
+			glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, m_fogIntegratedTex, 0, k);
+			glDrawBuffers(2, mrt);
+			glDrawArrays(GL_TRIANGLES, 0, 3);
+			std::swap(srcAcc, dstAcc);
+		}
+	}
+
+	// Final upload with a harmless pad.w: Apply (later this frame, its own
+	// function) reads this same UBO and never looks at pad.w, but a clean
+	// snapshot beats a stray last-slice-index artefact.
+	fc.pad.w = 0.0f;
+	glBindBuffer(GL_UNIFORM_BUFFER, m_fogVolUBO);
+	glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(fc), &fc);
+	glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+	glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+	glEnable(GL_DEPTH_TEST);
+	glBindVertexArray(0);
+	// Restore what the caller had active: the scene already bound m_unlitProgram
+	// and set its per-frame uniforms (uTexture/uSunDir/uSkyEnv) BEFORE this call;
+	// everything after it keeps setting uniforms on "the current program"
+	// without re-binding it, so leaving m_fogIntegrateProgram active would
+	// silently misdirect every uniform set between here and the next
+	// glUseProgram. The texture units Inject/Integrate used (22-27) are past
+	// every unit the scene or the material pipeline ever reads, so only the
+	// program and the active unit selector need restoring, not the bindings.
+	glUseProgram(static_cast<GLuint>(prevProgram));
+	glActiveTexture(static_cast<GLenum>(prevActiveTex));
+	glBindBufferBase(GL_UNIFORM_BUFFER, 0, static_cast<GLuint>(prevUBO0));
+	if (prevCullFace) glEnable(GL_CULL_FACE); else glDisable(GL_CULL_FACE);
+
+	m_fogHist         = cur;
+	m_fogHistValid    = true;
+	m_fogPrevViewProj = viewProj;
+	m_fogPrevCam      = cam.position;
+	m_fogPrevFocal    = focal;
+	++m_fogFrameIndex;
+	m_fogFrame        = fd;
+	// heApplyFogT (material code, shared): `uv = clip.xy/clip.w*0.5+0.5` — a PLAIN
+	// NDC-to-UV map, no 1-2*uv.y mirroring anywhere in that formula (unlike
+	// heFogRayDir/kApplyMain, which both read raw gl_FragCoord-derived uv and so
+	// DO need the flip above). The texel rows this volume was actually written at
+	// (Inject's raw, unflipped gl_FragCoord) already line up with a PLAIN
+	// viewProj's uv = (ndc+1)/2 — Metal needs the flip only because ITS rows run
+	// top-to-bottom; GL's run bottom-to-top, matching the identity here. Do not
+	// copy Metal's flipY onto this one: that was the bug an advisor review caught
+	// (every GL witness read the volume mirrored vertically).
+	m_fogViewProjFlip = viewProj;
+	m_fogFrameActive  = true;
+#endif
+}
+
+// Apply: full-screen blit into m_hdrColor (colour only — the depth stays a pure
+// TEXTURE input, never an attachment here, so there is no feedback loop with
+// whatever wrote it). Called between the sky and the translucent tail
+// (DrawScene), gated on m_fogFrameActive — never on the capability flag alone,
+// so a frame where the pipelines exist but Inject/Integrate did not actually
+// run (fog off, camera underwater, ...) leaves the scene exactly as mode 0.
+void OpenGLRenderer::RenderFogApply(int pw, int ph)
+{
+	if (!m_fogFrameActive || !m_fogApplyProgram || !m_fogIntegratedTex || !m_hdrColor || !m_hdrDepth) return;
+
+	GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+	glBindFramebuffer(GL_FRAMEBUFFER, m_fogApplyFBO);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_hdrColor, 0);
+	const GLenum colorOnly = GL_COLOR_ATTACHMENT0;
+	glDrawBuffers(1, &colorOnly);
+	glViewport(0, 0, pw, ph);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_CULL_FACE);
+	glEnable(GL_BLEND);
+	glBlendFuncSeparate(GL_ONE, GL_SRC_ALPHA, GL_ZERO, GL_ONE); // rgb += Lv + Tv*Lf; a: dst.a untouched (opaque frame)
+
+	glUseProgram(m_fogApplyProgram);
+	glBindBufferBase(GL_UNIFORM_BUFFER, 9, m_fogVolUBO);
+	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, m_fogIntegratedTex);
+	glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+	glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, m_hdrDepth);
+	glBindVertexArray(m_fsVAO);
+	glDrawArrays(GL_TRIANGLES, 0, 3);
+	glBindVertexArray(0);
+
+	glDisable(GL_BLEND);
+	glEnable(GL_DEPTH_TEST);
+	glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+	glViewport(0, 0, pw, ph);
+}
+
 void OpenGLRenderer::EnsureGBufferTargets(int width, int height)
 {
 	if (m_gbFBO && width == m_gbW && height == m_gbH)
@@ -9116,6 +9652,20 @@ unsigned int uploadTextureArrayGL(const TextureAsset* tex)
 	return id;
 }
 
+// The upload every call site below goes through: brings back bytes an earlier upload released,
+// uploads, and lets the content manager free a block-compressed texture's CPU copy (the shipped
+// game holds each texture once; see ContentManager::releaseCpuPixels). The glTexImage /
+// glCompressedTexImage calls copy the client memory before they return, so the bytes are dead
+// weight the moment an upload succeeded.
+unsigned int uploadGlTextureReleasing(ContentManager* cm, const TextureAsset* tex,
+                                      bool honourSrgb = true, bool arrayPath = false)
+{
+	if (cm && tex && tex->data.empty()) tex = cm->restoreCpuPixels(tex->id);
+	const unsigned int uploaded = arrayPath ? uploadTextureArrayGL(tex) : uploadTextureAssetGL(tex, honourSrgb);
+	if (cm && tex && uploaded) cm->releaseCpuPixels(tex->id);
+	return uploaded;
+}
+
 } // namespace
 
 // ─── Asset mesh upload ────────────────────────────────────────────────────────
@@ -9231,7 +9781,8 @@ const OpenGLRenderer::GpuMesh* OpenGLRenderer::ResolveMesh(const HE::UUID& asset
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9358,7 +9909,8 @@ OpenGLRenderer::ResolveSkeletalMesh(const HE::UUID& assetId)
 		const HE::UUID    texId0   = mat->textureIds.empty()   ? HE::UUID{}    : mat->textureIds[0];
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// Handles RGBA8 + cooked BC7/BC3 (skips a block format this GL can't sample).
-		mesh.texture = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		mesh.texture = uploadGlTextureReleasing(m_contentManager,
+			m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	HE_LOG_INFO(RHI, "%s",
@@ -9392,7 +9944,7 @@ bool OpenGLRenderer::ResolveMaterialTexture(const HE::UUID& materialId, unsigned
 		const std::string texPath0 = mat->texturePaths.empty() ? std::string{} : mat->texturePaths[0];
 		// RGBA8 + cooked BC7/BC3 (previously this override path assumed RGBA8 and
 		// would have uploaded a compressed payload as garbage — now handled).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(texId0, texPath0));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(texId0, texPath0));
 	}
 
 	m_materialTexCache.emplace(materialId, tex);
@@ -9424,12 +9976,13 @@ unsigned int OpenGLRenderer::ResolveGraphTexture(const HE::UUID& id, const std::
 	unsigned int tex = 0;
 	if (array)
 	{
-		tex = uploadTextureArrayGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+		                               /*honourSrgb=*/true, /*arrayPath=*/true);
 		if (tex) m_glArrayTex.insert(tex);
 	}
 	else
 		// RGBA8 + cooked BC7/BC3 (skips a block format this GL context can't sample).
-		tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path));
+		tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path));
 	m_graphTexCache.emplace(key, tex);
 	return tex ? tex : (array ? m_whiteArrayTex : 0);
 }
@@ -9454,8 +10007,8 @@ unsigned int OpenGLRenderer::ResolveUITexture(const HE::UUID& id, const std::str
 		? (std::to_string(id.hi) + ":" + std::to_string(id.lo)) : path;
 	if (key.empty() || !m_contentManager) return 0;
 	if (auto it = m_uiTexCache.find(key); it != m_uiTexCache.end()) return it->second;
-	unsigned int tex = uploadTextureAssetGL(m_contentManager->resolveTextureRef(id, path),
-	                                        /*honourSrgb=*/false);
+	unsigned int tex = uploadGlTextureReleasing(m_contentManager, m_contentManager->resolveTextureRef(id, path),
+	                                            /*honourSrgb=*/false);
 	m_uiTexCache.emplace(key, tex);
 	return tex;
 }
@@ -9523,7 +10076,7 @@ void OpenGLRenderer::WarmupMaterials(const std::vector<HE::UUID>& materialIds)
 			uint64_t gbKey; std::string gbFrag, gbVert;
 			if (resolveMaterialShaderGB(id, gbKey, gbFrag, gbVert)
 			    && !m_materialPrograms.count(gbKey)
-			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true))
+			    && GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true))
 				++built;
 		}
 	}
@@ -10844,6 +11397,17 @@ void OpenGLRenderer::Shutdown()
 	if (m_resolveLightUBO) { glDeleteBuffers(1, &m_resolveLightUBO); m_resolveLightUBO = 0; }
 	if (m_decalProgram)    { glDeleteProgram(m_decalProgram);        m_decalProgram = 0; }
 	if (m_decalUBO)        { glDeleteBuffers(1, &m_decalUBO);        m_decalUBO = 0; }
+	// Volumetric fog (Thema 225 step 4).
+	DestroyFogVolumeTargets();
+	if (m_fogInjectProgram)    { glDeleteProgram(m_fogInjectProgram);    m_fogInjectProgram = 0; }
+	if (m_fogIntegrateProgram) { glDeleteProgram(m_fogIntegrateProgram); m_fogIntegrateProgram = 0; }
+	if (m_fogApplyProgram)     { glDeleteProgram(m_fogApplyProgram);     m_fogApplyProgram = 0; }
+	if (m_fogVolUBO)           { glDeleteBuffers(1, &m_fogVolUBO);       m_fogVolUBO = 0; }
+	if (m_fogLightUBO)         { glDeleteBuffers(1, &m_fogLightUBO);     m_fogLightUBO = 0; }
+	if (m_fogDummy3D)          { glDeleteTextures(1, &m_fogDummy3D);     m_fogDummy3D = 0; }
+	if (m_fogApplyFBO)         { glDeleteFramebuffers(1, &m_fogApplyFBO); m_fogApplyFBO = 0; }
+	m_fogPipelinesTried = false;
+	m_fogPipelinesOk    = false;
 	// Forward SSR + its reflection pre-pass (the targets go with DestroySSAOTargets
 	// / DestroySSRTargets below; the "tried" flags reset so a re-Initialize()
 	// gets a fresh build attempt instead of a permanently disabled feature).
@@ -11089,6 +11653,24 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	// current image only — an unconverged edge for one frame, no ghost.
 	m_taaHistoryValid = false;
 
+	// A raw capture is the materials' own colour: every effect that would change it is off for this frame
+	// and back afterwards (members the frame reads, saved by value like the camera above). Forward, because
+	// the deferred resolve lights the G-buffer.
+	const bool  liveRaw = m_rawCapture, liveSrgb = m_rawSrgb;
+	const bool  liveBloom = m_bloomEnabled, liveSsao = m_ssaoEnabled, liveSsr = m_ssrEnabled;
+	const bool  liveDof = m_dofEnabled, liveMb = m_mbEnabled, liveGi = m_giEnabled, liveGiRefl = m_giReflEnabled;
+	const HE::AAMethod   liveAa   = m_aaMethod;
+	const HE::RenderPath livePath = m_renderPath;
+	if (camera.rawOutput)
+	{
+		m_rawCapture = true;
+		m_rawSrgb    = camera.rawSrgb;
+		m_bloomEnabled = m_ssaoEnabled = m_ssrEnabled = m_dofEnabled = m_mbEnabled = false;
+		m_giEnabled = m_giReflEnabled = false;
+		m_aaMethod  = HE::AAMethod::Off;
+		m_renderPath = HE::RenderPath::Forward;
+	}
+
 	// Same three lines as the offscreen branch of Render().
 	EnsureViewportTarget();
 	glBindFramebuffer(GL_FRAMEBUFFER, m_viewportFBO);
@@ -11115,6 +11697,11 @@ bool OpenGLRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
 	m_viewportReqH  = liveReqH;
 	m_editorCamera  = liveCam;
 	m_counters      = liveCounters;
+	m_rawCapture = liveRaw; m_rawSrgb = liveSrgb;
+	m_bloomEnabled = liveBloom; m_ssaoEnabled = liveSsao; m_ssrEnabled = liveSsr;
+	m_dofEnabled = liveDof; m_mbEnabled = liveMb; m_giEnabled = liveGi; m_giReflEnabled = liveGiRefl;
+	m_aaMethod = liveAa;
+	m_renderPath = livePath;
 	// DrawScene's TAA resolve marks the history valid again — that history is
 	// the screenshot camera's now, and the next real frame must not use it.
 	m_taaHistoryValid = false;
@@ -11283,6 +11870,7 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	glUniform1i(m_uSkyCloudMode,   env.cloudMode);
 	glUniform1i(m_uSkyCloudQuality, env.cloudQuality);
 	glUniform1i(m_uSkyCloudStyle,        env.cloudStyle);
+	glUniform1i(m_uSkyCloudType,         std::clamp(env.cloudType, 0, 4));
 	glUniform1i(m_uSkyCloudInterShadows, env.cloudInterShadows ? 1 : 0);
 	glUniform1f(m_uSkyCloudEvolution,    env.cloudEvolution);
 	glUniform3fv(m_uSkyCameraPos,  1, glm::value_ptr(camPos));
@@ -11326,8 +11914,11 @@ void OpenGLRenderer::DrawSkyFullscreen(const glm::mat4& invViewProj, const glm::
 	{
 		// Wind control → horizontal cloud drift vector. Direction 0° drifts
 		// toward -Z (north), increasing clockwise; speed scales the rate.
-		const glm::vec3 wind = HE::CloudWindVector(env);
+		const glm::vec3 wind  = HE::CloudWindVector(env);
+		const glm::vec3 drift = HE::CloudDriftOffset(wind, skyClock);
 		glUniform3fv(m_uSkyWind, 1, glm::value_ptr(wind));
+		glUniform3fv(m_uSkyWindDrift, 1, glm::value_ptr(drift));
+		glUniform1f(m_uSkyCloudDomeHeight, std::clamp(env.cloudDomeHeight, 0.1f, 16.0f));
 	}
 	glActiveTexture(GL_TEXTURE2);             // 3D value-noise on unit 2
 	glBindTexture(GL_TEXTURE_3D, m_noiseTex);
@@ -11793,7 +12384,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				glActiveTexture(GL_TEXTURE1);
 				glBindTexture(GL_TEXTURE_2D, bloomTex);
 				glUniform1i(m_uBloomTex, 1);
-				glUniform1f(m_uExposure, 1.0f);
+				glUniform1f(m_uExposure, m_rawCapture ? (m_rawSrgb ? -2.0f : -1.0f) : 1.0f);   // < 0: raw (kTonemapFS)
 				glUniform1f(m_uBloomStrength, bloomTex ? m_bloomStrength : 0.0f);
 				// Camera lens flare: project the sun (a point at infinity, w=0 drops the view
 				// translation) to y-up NDC and fold behind-camera / off-screen / below-horizon
@@ -12050,9 +12641,27 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		glActiveTexture(GL_TEXTURE3);
 		glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
 		glUniform1i(m_uSkyEnv, 3);
+
+#if defined(HE_HAVE_SHADERC)
+		// ── Volumetric fog: Inject + Integrate (Thema 225 step 4) ───────────
+		// Shadows, cloud shadow and the sky env cube are all current for this
+		// frame now — the same ordering as MetalRenderer::EncodeFogVolume.
+		// Builds its own HeLighting fill (see RenderFogVolume's comment) and
+		// restores the program/active-unit it disturbs, so everything from
+		// here on (uTexture/uSunDir/uSkyEnv already set above, uAmbient next)
+		// sees exactly the state it would without fog. Sets m_fogFrameActive;
+		// fillMatLight's fog fields and RenderFogApply (after the sky, before
+		// the translucent tail) both read it, further down DrawScene.
+		RenderFogVolume(pw, ph, shadows, localShadows, nCascades, cascadeSplits, camFwd);
+#endif
+
 		glActiveTexture(GL_TEXTURE0);
 		glUniform3fv(m_uAmbient, 1, glm::value_ptr(m_renderWorld.ambient));
-		glUniform1f(m_uFogDensity,       GetEnvironment().fogDensity);
+		// Volumetric fog owns the opaque fog instead of this analytic uniform
+		// when it actually ran this frame (never gated on the capability alone
+		// — see RenderFogApply's comment): zero density is applyFog()'s own
+		// early-out, so the built-in shader's fog term folds away cleanly.
+		glUniform1f(m_uFogDensity,       m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity);
 		glUniform1f(m_uFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 		glUniform1f(m_uWetness,          GetEnvironment().wetness);
 		glUniform1f(m_uSnow,             GetEnvironment().snowAmount);
@@ -12107,6 +12716,13 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// didn't run; the strength gate is 0 then anyway.
 		glActiveTexture(GL_TEXTURE19);
 		glBindTexture(GL_TEXTURE_2D, m_cloudShadowTex ? m_cloudShadowTex : m_whiteTex);
+		// Froxel fog volume (heFogVolume, kGlFogVolumeTextureUnit = 21) for every
+		// graph material's heApplyFogT — ALWAYS bound, even in mode 0 (a 1x1x1
+		// dummy then): the sampler stays active in the program regardless of the
+		// runtime gate (heLight.fogVol.x), and GL validates the bound texture's
+		// TYPE on every draw, not just the ones that end up sampling it.
+		glActiveTexture(GL_TEXTURE21);
+		glBindTexture(GL_TEXTURE_3D, (m_fogFrameActive && m_fogIntegratedTex) ? m_fogIntegratedTex : m_fogDummy3D);
 		glActiveTexture(GL_TEXTURE0);
 		const glm::vec4 cloudShA = m_cloudShadowParamsA;
 		const glm::vec4 cloudShB = m_cloudShadowTex ? m_cloudShadowParamsB : glm::vec4(0.0f);
@@ -12146,7 +12762,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform3fv(m_uInstSunDir,    1, glm::value_ptr(sunDir));
 			glUniform1i(m_uInstSkyEnv, 3);
 			glUniform3fv(m_uInstAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
-			glUniform1f(m_uInstFogDensity,       GetEnvironment().fogDensity);
+			glUniform1f(m_uInstFogDensity,       m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity);
 			glUniform1f(m_uInstFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 			glUniform1f(m_uInstWetness,          GetEnvironment().wetness);
 			glUniform1f(m_uInstSnow,             GetEnvironment().snowAmount);
@@ -12305,6 +12921,24 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			// colour back untouched — graph materials and the deferred resolve
 			// both read this. Scene-pass fill only; previews keep the zero.
 			lit.viewMode[0] = UnlitViewActive() ? 1.0f : 0.0f;
+			// Volumetric fog (v3.6, Thema 225): fogVol.x gates the opaque
+			// heApplyFog (Apply owns it instead) and heApplyFogT (translucent
+			// graph materials, binding 34/texture unit 21). Called AFTER
+			// RenderFogVolume runs for this frame (every caller of this lambda
+			// is further down DrawScene than the UpdateSkyEnvCube point it
+			// runs at), so m_fogFrameActive/m_fogFrame are already this
+			// frame's, never last frame's stale ones.
+			if (m_fogFrameActive)
+			{
+				lit.fogVol[0] = 1.0f;
+				lit.fogVol[1] = m_fogFrame.distance;
+				lit.fogVol[2] = m_fogFrame.sliceC;
+				lit.fogVol[3] = 1.0f;
+				lit.fogVolGrid[0] = static_cast<float>(m_fogFrame.grid.x);
+				lit.fogVolGrid[1] = static_cast<float>(m_fogFrame.grid.y);
+				lit.fogVolGrid[2] = static_cast<float>(m_fogFrame.grid.z);
+				std::memcpy(lit.fogViewProj, glm::value_ptr(m_fogViewProjFlip), sizeof(lit.fogViewProj));
+			}
 		};
 #endif
 
@@ -12382,17 +13016,17 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 							for (const auto& var : ma->precompiledShaders)
 								if (var.backend == static_cast<uint8_t>(HE::RendererBackend::OpenGL)) { pre = &var; break; }
 						matProg = GetOrBuildMaterialProgram(shKey, shFrag, shVert, pre);
-						// G-buffer variant — runtime cross-compiled only (baked packs
-						// carry no G-buffer GLSL yet).
+						// G-buffer variant — baked into the pak when it carries one
+						// (CHUNK_PSHD v4), else cross-compiled at load.
 						uint64_t gbKey; std::string gbFrag, gbVert;
 						if (resolveMaterialShaderGB(dc.materialAssetId, gbKey, gbFrag, gbVert))
 						{
-							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr, /*gbuffer=*/true);
+							gbProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre, /*gbuffer=*/true);
 							// A batch draws once with the instanced twin (2e); only
 							// built for batches, and 0 sends it back to the loop.
 							if (gbProg && dc.instanceTotal() > 0 && m_instanceVBO
 							    && RenderSorter::graphInstancingEnabled())
-								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, nullptr,
+								gbInstProg = GetOrBuildMaterialProgram(gbKey, gbFrag, gbVert, pre,
 								                                       /*gbuffer=*/true, /*instanced=*/true);
 						}
 						if (ma)
@@ -12818,7 +13452,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					// re-asserted here because the units are only ever used by these
 					// material programs. Gated by heLight.fog.z/.w.
 					glActiveTexture(GL_TEXTURE14);
-					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
 					glActiveTexture(GL_TEXTURE15);
 					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 					// DDGI probe atlases on 16/17 (white fallbacks keep the samplers
@@ -13088,7 +13722,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 				// Shared material inputs the preamble samples (sky env / AO / DDGI
 				// atlases) — the same units the custom-material draws use.
 				glActiveTexture(GL_TEXTURE14);
-				glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+				glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
 				glActiveTexture(GL_TEXTURE15);
 				glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 				glActiveTexture(GL_TEXTURE16);
@@ -13191,7 +13825,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			glUniform1i(m_uSkinnedTex, 0);
 			glUniform3fv(m_uSkinnedSunDir,    1, glm::value_ptr(sunDir));
 			glUniform3fv(m_uSkinnedAmbient,   1, glm::value_ptr(m_renderWorld.ambient));
-			glUniform1f(m_uSkinnedFogDensity,       GetEnvironment().fogDensity);
+			glUniform1f(m_uSkinnedFogDensity,       m_fogFrameActive ? 0.0f : GetEnvironment().fogDensity);
 			glUniform1f(m_uSkinnedFogHeightFalloff, GetEnvironment().fogHeightFalloff);
 			// Same lights + CSM block as the unlit program.
 			BindSceneLighting({ m_uSkinnedLightCount, m_uSkinnedLightPos, m_uSkinnedLightDir,
@@ -13298,6 +13932,11 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// skyEnabled == false (no Sky entity) skips the pass → the cleared background shows.
 		DrawSkyFullscreen(invViewProj, sunDir, m_renderWorld.camera.position,
 		                  GetEnvironment(), /*allowLowResClouds=*/true, pw, ph);
+		// Volumetric fog Apply (Thema 225 step 4): full-screen blit of the
+		// integrated volume onto the now-finished opaque scene + sky, between
+		// it and the translucent tail — the same seam Metal's EncodeScene
+		// splits the encoder at. No-op (m_fogFrameActive false) in mode 0.
+		RenderFogApply(pw, ph);
 		GpuTimerEndPass();                 // end "Sky+Clouds"
 		GpuTimerBeginPass("Transparent");  // transparency + particles + debug lines
 
@@ -13449,7 +14088,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						glBindTexture(GL_TEXTURE_2D, t.wmTex);
 					}
 					glActiveTexture(GL_TEXTURE14);
-					glBindTexture(GL_TEXTURE_CUBE_MAP, m_skyEnvCube);
+					glBindTexture(GL_TEXTURE_CUBE_MAP, MaterialSkyCube());
 					glActiveTexture(GL_TEXTURE15);
 					glBindTexture(GL_TEXTURE_2D, aoActive ? aoTex : m_whiteTex);
 					glActiveTexture(GL_TEXTURE16);
@@ -13974,12 +14613,18 @@ IRenderer::Capabilities OpenGLRenderer::GetCapabilities() const
 	// Deferred needs only MRT + a runtime-generated resolve shader — GL 4.1 is
 	// enough, but the shader cross-compiler must be built in.
 	c.supportsDeferredRendering  = true;
+	c.supportsRawCapture         = true;   // RenderSceneImage's rawOutput (kTonemapFS)
 	// SSR: the FORWARD variant only (docs/ssr-cross-backend-plan.md checkpoint
 	// A) — the reflection MRT pre-pass plus last frame's HDR copy, exactly
 	// Metal's Option-A path. The deferred composite (A6) is not built, so in
 	// deferred mode the gate stays 0 and the image is unchanged. Programs come
 	// from the shared cross-compiler, hence the #if.
 	c.supportsScreenSpaceReflections = true;
+	// Thema 225 step 4: true only if the fragment-path Inject/Integrate/Apply
+	// programs actually linked (EnsureFogVolumePipelines, called once at
+	// Initialize) — never a blanket "GL + shaderc means fog", unlike Metal's
+	// capability promise checked lazily at the first fog frame.
+	c.supportsVolumetricFog = m_fogPipelinesOk;
 #endif
 	// TAA (A2/A3): velocity pass + temporal resolve + sharpen, all #version 410
 	// fullscreen/positions-only programs — both render paths, every GL context
