@@ -4544,7 +4544,7 @@ float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind, fl
 	return smoothstep(lo, lo + 0.13, base) * hgrad;
 }
 float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float coverage, float3 sunColor, float3 wind, float4 drift,
-                   float3 cloudTint, float densityMul, float quality,
+                   float3 cloudTint, float densityMul, float quality, bool lowRes,
                    texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
@@ -4563,9 +4563,13 @@ float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float time, float 
 
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == the original
 	// step counts; Med/Low trade horizon detail for frames.
-	int qBaseN  = (quality < 0.5) ? 8  : (quality < 1.5 ? 12 : 16);
-	int qMaxN   = (quality < 0.5) ? 18 : (quality < 1.5 ? 32 : 64);
-	int qShadow = (quality < 0.5) ? 1  : (quality < 1.5 ? 2  : 3);
+	// lowRes == the quarter-res pre-pass fill (cloudsDomeLT): its output gets
+	// bilinearly upsampled, so demote one tier — see applyClouds3DReal (GL mirror:
+	// SkyShaderSource.h, docs/auto-lod-gpu-capture-stutter-2026-11-08.md).
+	const float effQ = lowRes ? max(quality - 1.0, 0.0) : quality;
+	int qBaseN  = (effQ < 0.5) ? 8  : (effQ < 1.5 ? 12 : 16);
+	int qMaxN   = (effQ < 0.5) ? 18 : (effQ < 1.5 ? 32 : 64);
+	int qShadow = (effQ < 0.5) ? 1  : (effQ < 1.5 ? 2  : 3);
 
 	// Fade the whole cloud layer out into the horizon haze (wider so the grazing band
 	// melts into the haze instead of showing undersampling speckle). Applied after
@@ -4953,7 +4957,8 @@ float cloudFieldDensity(float3 pos, float baseY, float thick, float nscale, floa
 // fragCoord = SkyOut.position.xy (gl_FragCoord equivalent). Mirrors the GL applyClouds3D().
 float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, float time,
                      float coverage, float3 sunColor, float3 wind, float4 drift, float cloudH,
-                     float cloudFluffiness, float cloudDensity, float quality, float3 cloudTint, float2 fragCoord,
+                     float cloudFluffiness, float cloudDensity, float quality, bool lowRes,
+                     float3 cloudTint, float2 fragCoord,
                      texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
@@ -4962,10 +4967,12 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 	sunDir = normalize(sunDir);
 	const float ov = overcastAmount(coverage);
 	// Quality (perf knob, star2.y): 0 Low, 1 Med, 2 High. High == original counts.
-	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.30 : 0.22); // larger → fewer steps
-	float qMinN   = (quality < 0.5) ? 12.0 : (quality < 1.5 ? 18.0 : 24.0);
-	float qMaxN   = (quality < 0.5) ? 40.0 : (quality < 1.5 ? 72.0 : 128.0);
-	int   qShadow = (quality < 0.5) ? 1    : (quality < 1.5 ? 2    : 3);
+	// lowRes == the quarter-res pre-pass fill — demote one tier, see applyClouds3DReal.
+	const float effQ = lowRes ? max(quality - 1.0, 0.0) : quality;
+	float qStepF  = (effQ < 0.5) ? 0.40 : (effQ < 1.5 ? 0.30 : 0.22); // larger → fewer steps
+	float qMinN   = (effQ < 0.5) ? 12.0 : (effQ < 1.5 ? 18.0 : 24.0);
+	float qMaxN   = (effQ < 0.5) ? 40.0 : (effQ < 1.5 ? 72.0 : 128.0);
+	int   qShadow = (effQ < 0.5) ? 1    : (effQ < 1.5 ? 2    : 3);
 
 	cloudH      = max(cloudH, 1.0);
 	float thick = kCloudRefAltitude * 1.5;                   // TALL slab so cumuli can billow upward (3D)
@@ -5105,8 +5112,8 @@ float3 applyClouds3D(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, f
 //    strong forward lobe for the silver lining around the sun.
 float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDir, float time,
                          float coverage, float3 sunColor, float3 wind, float4 drift, float cloudH,
-                         float cloudFluffiness, float cloudDensity, float quality, float3 cloudTint,
-                         float interSh, float evo, float2 fragCoord,
+                         float cloudFluffiness, float cloudDensity, float quality, bool lowRes,
+                         float3 cloudTint, float interSh, float evo, float2 fragCoord,
                          texture3d<float> noiseTex, sampler noiseSamp, thread float& outT)
 {
 	outT = 1.0;
@@ -5116,22 +5123,30 @@ float3 applyClouds3DReal(float3 baseSky, float3 dir, float3 camPos, float3 sunDi
 	const float ov = overcastAmount(coverage);
 	// Slightly higher minimum step count than classic: the sharper silhouettes
 	// show the IGN dither earlier than the soft classic bodies do.
-	float qStepF  = (quality < 0.5) ? 0.40 : (quality < 1.5 ? 0.28 : 0.20);
-	float qMinN   = (quality < 0.5) ? 14.0 : (quality < 1.5 ? 26.0 : 32.0);
-	float qMaxN   = (quality < 0.5) ? 44.0 : (quality < 1.5 ? 80.0 : 128.0);
-	int   qShadow = (quality < 0.5) ? 3    : (quality < 1.5 ? 3    : 6);
+	// lowRes == the quarter-res pre-pass fill (clouds3DLT): its (L, T) output gets
+	// bilinearly upsampled and composited, so the extra detail a full tier buys is
+	// invisible there — demote one tier (High→Med, Med→Low, Low unchanged) ONLY for
+	// that fill. The inline full-res march (every backend without the low-res buffer,
+	// and the main composite when the feature is off) is untouched — same mirror in
+	// SkyShaderSource.h (uCloudPrepass). Was the single biggest GPU block measured
+	// (6.46 ms, docs/auto-lod-gpu-capture-stutter-2026-11-08.md).
+	const float effQ = lowRes ? max(quality - 1.0, 0.0) : quality;
+	float qStepF  = (effQ < 0.5) ? 0.40 : (effQ < 1.5 ? 0.28 : 0.20);
+	float qMinN   = (effQ < 0.5) ? 14.0 : (effQ < 1.5 ? 26.0 : 32.0);
+	float qMaxN   = (effQ < 0.5) ? 44.0 : (effQ < 1.5 ? 80.0 : 128.0);
+	int   qShadow = (effQ < 0.5) ? 3    : (effQ < 1.5 ? 3    : 6);
 
 	// Medium marches the sun in 3 steps instead of 4 and reaches as far by growing the step faster (2.6 instead of 1.85):
 	// 15, 54, 155 units against 15, 43, 92, 175. The step is the biggest cost of the Realistic clouds.
-	float stGrow = (quality >= 0.5 && quality < 1.5 && interSh >= 0.5) ? 2.6 : 1.85;   // without inter-shadows: own body only, as before
+	float stGrow = (effQ >= 0.5 && effQ < 1.5 && interSh >= 0.5) ? 2.6 : 1.85;   // without inter-shadows: own body only, as before
 	// The weather map (the column half of the field) is smooth along a ray: evaluate it on every Kth step and interpolate
 	// in between (Low 4, Medium 3, High exact). Empty space costs one column test per step, so this is where Medium spent
 	// almost half of its time (docs/clouds-2-0-cost-and-fine-detail-2026-10-29.md).
-	int qColEvery = (quality < 0.5) ? 4 : (quality < 1.5 ? 3 : 1);
-	float qSkipA = (quality >= 1.5) ? 0.0 : 0.04;   // opacity below which a step skips the sun march (High: never)
+	int qColEvery = (effQ < 0.5) ? 4 : (effQ < 1.5 ? 3 : 1);
+	float qSkipA = (effQ >= 1.5) ? 0.0 : 0.04;   // opacity below which a step skips the sun march (High: never)
 	// Adaptive march: coarse steps through empty space, a finer step (this fraction of ds) through the surface layer of a
 	// cloud near the camera, where the lumps are. Low 0.5, Medium 0.34, High 0.25.
-	float qFineF = (quality < 0.5) ? 0.5 : (quality < 1.5 ? 0.34 : 0.25);
+	float qFineF = (effQ < 0.5) ? 0.5 : (effQ < 1.5 ? 0.34 : 0.25);
 
 	if (interSh < 0.5) qShadow = min(qShadow, 3); // short march: own body only
 
@@ -6109,7 +6124,7 @@ float4 cloudsDomeLT(float3 dir, float3 sunDir, float time, float coverage, float
 {
 	float T = 1.0;
 	float3 L = applyClouds(float3(0.0), dir, sunDir, time, coverage, sunColor, wind, drift,
-	                       cloudTint, densityMul, quality, noiseTex, noiseSamp, T);
+	                       cloudTint, densityMul, quality, /*lowRes=*/true, noiseTex, noiseSamp, T);
 	return float4(L, T);
 }
 float4 clouds3DLT(float3 dir, float3 camPos, float3 sunDir, float time, float coverage,
@@ -6122,10 +6137,10 @@ float4 clouds3DLT(float3 dir, float3 camPos, float3 sunDir, float time, float co
 	float  T = 1.0;
 	float3 comp = (style > 0.5)
 		? applyClouds3DReal(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind, drift,
-		                    cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
+		                    cloudH, cloudFluffiness, cloudDensity, quality, /*lowRes=*/true, cloudTint,
 		                    interSh, evo, fragCoord, noiseTex, noiseSamp, T)
 		: applyClouds3D(hazeSky, dir, camPos, sunDir, time, coverage, sunColor, wind, drift,
-		                cloudH, cloudFluffiness, cloudDensity, quality, cloudTint,
+		                cloudH, cloudFluffiness, cloudDensity, quality, /*lowRes=*/true, cloudTint,
 		                fragCoord, noiseTex, noiseSamp, T);
 	return float4(comp - hazeSky * T, T);     // recover L
 }
@@ -6380,17 +6395,17 @@ fragment float4 skyFragment(SkyOut in [[stage_in]],
 		// cloud bodies. L = comp − atmoBase·T recovers the clouds' own light.
 		float3 comp = applyClouds3DReal(atmoBase, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z,
 		                                p.params.y, p.sunColor.xyz, p.wind.xyz, float4(p.drift.xyz, p.shape.x), p.cloud.x, p.cloud.z,
-		                                p.cloud.y, p.star2.y, p.cloudTint.xyz, p.neb2.z, p.neb2.w,
+		                                p.cloud.y, p.star2.y, /*lowRes=*/false, p.cloudTint.xyz, p.neb2.z, p.neb2.w,
 		                                in.position.xy, noiseTex, noiseSamp, cloudT);
 		col = col * cloudT + (comp - atmoBase * cloudT);
 	}
 	else if (p.cameraPos.w > 0.5)
 		col = applyClouds3D(col, dir, p.cameraPos.xyz, p.sunDir.xyz, p.params.z, p.params.y,
 		                    p.sunColor.xyz, p.wind.xyz, p.drift, p.cloud.x, p.cloud.z, p.cloud.y, p.star2.y,
-		                    p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp, cloudT);
+		                    /*lowRes=*/false, p.cloudTint.xyz, in.position.xy, noiseTex, noiseSamp, cloudT);
 	else
 		col = applyClouds(col, dir, p.sunDir.xyz, p.params.z, p.params.y, p.sunColor.xyz, p.wind.xyz, p.drift,
-		                  p.cloudTint.xyz, p.cloud.y, p.star2.y, noiseTex, noiseSamp, cloudT);
+		                  p.cloudTint.xyz, p.cloud.y, p.star2.y, /*lowRes=*/false, noiseTex, noiseSamp, cloudT);
 	// Re-add the sun, steeply occluded by cloud opacity so a solid cloud fully hides it.
 	col += (sunGlareCol + sunBodyCol) * pow(cloudT, 2.5);
 	// God-rays: sun shafts through cloud gaps. Scaled by cloudT so a cloud directly in
