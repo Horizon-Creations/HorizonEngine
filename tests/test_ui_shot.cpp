@@ -22,6 +22,7 @@
 #include "TutorialSteps.h"       // …and the curriculum steps it is tested with
 #include "GitHubSignInView.h"    // the device-flow dialog's body
 #include "ConsoleView.h"         // the console's buffer and rows
+#include <filesystem>
 #include "HardwarePage.h"         // Preferences » Preview » Hardware
 
 #include <ContentManager/ContentManager.h>
@@ -410,6 +411,134 @@ TEST_CASE("ui shot: the Hardware page lists the machine, a dash where it cannot 
 	const int ink = img.inkedPixels(kBgR, kBgG, kBgB);
 	INFO("inked pixels: " << ink);
 	CHECK(ink > 6000);
+}
+
+TEST_CASE("ui shot: the Hardware page lists every card and display and offers the graphics-card choice")
+{
+	struct Fake final : HE::HardwareProvider
+	{
+		static HE::GpuInfo card(const char* name, uint32_t v, uint32_t d, uint64_t mb, const char* drv, bool sw)
+		{
+			HE::GpuInfo g; g.name = name; g.vendorId = v; g.deviceId = d; g.vramMB = mb; g.driver = drv; g.software = sw;
+			g.vendor = HE::gpuVendorFromPciId(v); g.id = HE::makeGpuId(v, d, 0);
+			return g;
+		}
+		HE::HardwareInfo detect() override
+		{
+			HE::HardwareInfo h;
+			h.cpuName = "Example CPU 16-Core Processor"; h.cpuCores = 16; h.cpuThreads = 32; h.cpuArch = "x64";
+			h.ramTotalMB = 31859; h.platform = "Windows"; h.osVersion = "Windows 11 (10.0 build 26300)";
+			h.gpus = { card("Example Integrated Graphics", 0x1002, 0x13c0, 512, "32.0.21034.41", false),
+			           card("Example GPU 12 GB", 0x10de, 0x2786, 12010, "621.01", false),
+			           card("Example Software Adapter", 0x1414, 0x008c, 0, "10.0", true) };
+			return h;
+		}
+		uint64_t freeMemoryMB() override { return 18432; }
+		bool     onBattery() override    { return false; }
+	};
+	struct Restore
+	{
+		std::filesystem::path dir;
+		~Restore()
+		{
+			HE::setGpuChoiceDirectory("");
+			HE::setPreferredGpuId("");
+			HE::setHardwareProvider(nullptr);
+			std::filesystem::remove_all(dir);
+		}
+	} restore;
+	restore.dir = std::filesystem::temp_directory_path() / "he_ui_gpu_choice";
+	std::filesystem::remove_all(restore.dir);
+	std::filesystem::create_directories(restore.dir);
+	HE::setGpuChoiceDirectory(restore.dir.string());
+	HE::setHardwareProvider(std::make_shared<Fake>());
+
+	HE::GpuInfo active; active.name = "Example GPU 12 GB"; active.vendorId = 0x10de; active.deviceId = 0x2786; active.api = "D3D12";
+	active.vramMB = 12010; active.driver = "621.01";
+	HE::setGpuInfo(active);
+	HE::setPreferredGpuId("");                          // this run started on the default card
+	std::vector<HE::DisplayInfo> displays(2);
+	displays[0].id = 1; displays[0].name = "Example Monitor"; displays[0].width = 2560; displays[0].height = 1440;
+	displays[0].refreshHz = 60.0f; displays[0].scale = 1.25f; displays[0].primary = true;
+	displays[1].id = 2; displays[1].name = "Example Side Monitor"; displays[1].x = 2560; displays[1].width = 1920; displays[1].height = 1080;
+	displays[1].refreshHz = 144.0f; displays[1].scale = 1.0f;
+	HE::setDisplays(displays, 1);                       // the window is on the second one
+
+	{
+		const auto rows = HardwarePage::rows();
+		int cards = 0, shown = 0;
+		bool inUse = false, current = false;
+		for (const auto& r : rows)
+		{
+			if (r.group == "Graphics cards") { ++cards; inUse = inUse || r.label.find("(in use)") != std::string::npos; }
+			if (r.group == "Displays")       { ++shown; current = current || r.value.find("current") != std::string::npos; }
+		}
+		CHECK(cards == 3);
+		CHECK(inUse);
+		CHECK(shown == 2);
+		CHECK(current);
+	}
+
+	// Nothing chosen: the default entry, and every card as an option.
+	{
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		REQUIRE(c.options.size() == 4);
+		CHECK(c.options[0].id.empty());
+		CHECK(c.options[0].label == "Default (system)");
+		CHECK(c.selected == 0);
+		CHECK(c.canChoose);
+		CHECK(c.options[2].label == "Example GPU 12 GB (12010 MB) - in use");
+		CHECK(c.options[3].label.find("(software)") != std::string::npos);
+		CHECK(c.note.empty());
+	}
+	// A card chosen: selected, and the page says it applies at the next start.
+	REQUIRE(HE::savePreferredGpu("1002:13c0:0"));
+	{
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		CHECK(c.selected == 1);
+		CHECK(c.note.find("next time") != std::string::npos);
+	}
+	// The choice this run started with: no "next start" note any more.
+	HE::setPreferredGpuId("1002:13c0:0");
+	CHECK(HardwarePage::gpuChoice().note.empty());
+	// A card that is not in the machine: its own entry, selected, and a sentence about the fallback.
+	REQUIRE(HE::savePreferredGpu("dead:beef:0"));
+	{
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		REQUIRE(c.options.size() == 5);
+		CHECK(c.selected == 4);
+		CHECK(c.options[4].label == "dead:beef:0 (not present)");
+		CHECK(c.note.find("not in this machine") != std::string::npos);
+	}
+	// A backend that cannot choose says so instead.
+	REQUIRE(HE::savePreferredGpu("1002:13c0:0"));
+	{
+		HE::GpuSelection sel; sel.canChoose = false; sel.honored = false; sel.requested = "1002:13c0:0";
+		sel.note = "OpenGL cannot choose the graphics card";
+		HE::setGpuSelection(sel);
+		const HardwarePage::GpuChoice c = HardwarePage::gpuChoice();
+		CHECK_FALSE(c.canChoose);
+		CHECK(c.note.find("OpenGL cannot choose") != std::string::npos);
+		HE::setPreferredGpuId("");                      // this run started on the default card: the note shows
+	}
+
+	constexpr int W = 560, H = 1080;
+	Harness harness(W, H);
+	auto scene = [&](int) {
+		ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f));
+		ImGui::SetNextWindowSize(ImVec2(W - 20.0f, H - 20.0f));
+		ImGui::Begin("Preferences", nullptr,
+		             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse);
+		HardwarePage::draw();
+		ImGui::End();
+		EditorWidgets::drawQueuedHelp();
+	};
+	const he_ui::Image img = shoot("hardware-page-multi", W, H, 4, scene);
+	REQUIRE(img.valid());
+	const int ink = img.inkedPixels(kBgR, kBgG, kBgB);
+	INFO("inked pixels: " << ink);
+	CHECK(ink > 8000);
 }
 
 TEST_CASE("ui shot: several entities selected, the rows they disagree on say so")

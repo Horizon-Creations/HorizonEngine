@@ -5380,6 +5380,14 @@ namespace
 
 	// ── Preferences » Preview » Hardware ─────────────────────────────────────
 	// A table of what this machine is, as text; only the copy button is a control.
+	{ "Hardware/Graphics card to use", "Graphics card to use",
+	  "Which graphics card the program starts on when the machine has more than one (a laptop with an "
+	  "integrated and a dedicated card, a PC with two). \"Default (system)\" lets the system decide, as "
+	  "before. A chosen card is looked up by its id when the program starts; one that is gone (removed, or "
+	  "the settings moved to another PC) falls back to the default card with a warning in the log. The "
+	  "change takes effect at the next start. OpenGL cannot pick a card (the drop-down is greyed and says "
+	  "so): use Direct3D 11, Direct3D 12 or Vulkan. A game sets the same choice with Set Preferred GPU.",
+	  "", "rendering#hardware" },
 	{ "Hardware/Copy summary", "Copy summary",
 	  "Puts the main facts on the clipboard as text: processor, memory, graphics card with "
 	  "driver and video memory, display, and operating system. Paste it into a bug report or a "
