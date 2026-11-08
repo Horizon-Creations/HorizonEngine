@@ -896,6 +896,7 @@ PbrMaterialImport importPbrMaterials(const std::vector<PbrMaterialDesc>& materia
 std::string writeCutoutMaterial(const std::string&           name,
                                 const std::string&           texturePath,
                                 float                        roughness,
+                                float                        alphaCutoff,
                                 const std::filesystem::path& contentRoot,
                                 const std::filesystem::path& relativeOutputDir,
                                 HE::UUID*                    idOut)
@@ -905,7 +906,7 @@ std::string writeCutoutMaterial(const std::string&           name,
 	m.metallic    = 0.0f;
 	m.roughness   = roughness;
 	m.alphaMode   = PbrMaterialDesc::AlphaMode::Mask;
-	m.alphaCutoff = 0.5f;
+	m.alphaCutoff = alphaCutoff;
 	m.doubleSided = true;
 	MaterialTextures tex;
 	tex.baseColor.path = texturePath;

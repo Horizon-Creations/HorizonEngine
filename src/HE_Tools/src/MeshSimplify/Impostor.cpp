@@ -16,6 +16,12 @@ namespace
 
 constexpr const char* kExt = ".hasset";
 
+// The cut-out threshold of the impostor material. Low on purpose: a thin blade or a stem
+// covers a third of a texel at the card's resolution, so its alpha is 0.3, and at 0.5
+// the whole grass layer would vanish from the card (and further so in the mips the GPU
+// builds). Coverage kept, edges a little fat, which a plant seen from far away wants.
+constexpr float kAlphaCutoff = 0.2f;
+
 // ── sRGB, only for tinting: a tint is a LINEAR multiplier and the texture holds
 // encoded bytes, so a tint other than white goes through linear and back.
 float srgbToLinear(float c)
@@ -403,7 +409,7 @@ Result write(const Baked& baked, const std::string& plantPath, const std::filesy
     r.texture     = tex.id;
 
     const std::string folder = folderOf(plantPath);
-    r.materialPath = Importer::writeCutoutMaterial(stem + "_ImpostorMat", r.texturePath, 0.9f, contentRoot,
+    r.materialPath = Importer::writeCutoutMaterial(stem + "_ImpostorMat", r.texturePath, 0.9f, kAlphaCutoff, contentRoot,
                                                    std::filesystem::path(folder), &r.material);
     if (r.materialPath.empty()) { r.error = "Failed to write the impostor material."; return r; }
 

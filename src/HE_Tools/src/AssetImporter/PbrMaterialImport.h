@@ -164,13 +164,14 @@ namespace Importer
 	// Shared with the readers, which use it for their own naming hints.
 	std::string sanitizeStem(const char* raw);
 	// One material over ONE base-colour texture (`texturePath`, content-relative, rgb =
-	// colour, a = the cut-out mask at 0.5), double sided, written as
+	// colour, a = the cut-out mask, cut at `alphaCutoff`), double sided, written as
 	// <relativeOutputDir>/<name>.hasset with the same graph the importers generate.
 	// An existing file is overwritten in place (writeAsset keeps its UUID). Returns the
 	// asset path, empty on failure. Used by the impostor bake, which has no source file.
 	std::string writeCutoutMaterial(const std::string&           name,
 	                                const std::string&           texturePath,
 	                                float                        roughness,
+	                                float                        alphaCutoff,
 	                                const std::filesystem::path& contentRoot,
 	                                const std::filesystem::path& relativeOutputDir,
 	                                HE::UUID*                    idOut = nullptr);
