@@ -507,14 +507,42 @@ private:
 	bool        m_matLandscapeWarned  = false; // one-time notice for the fallback above
 	// Runtime Virtual Texture (Thema 333): bindings 40..43 are in m_matSetLayout (VulkanMaterialLayout.h, rvtFit).
 	bool        m_matRvt = false;
+	// Cold pages (step 9): bindings 44..46 are ALSO in m_matSetLayout only when rvtColdFit fits (a sampler2DArray costs
+	// one combined-image-sampler descriptor in Vulkan regardless of how the shader reads it, unlike D3D11/D3D12).
+	bool        m_matRvtCold = false;
 	struct RvtImage { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; };
 	RvtImage    m_rvtPool[3];                 // RGBA8 arrays, one slice per pool slot; SHADER_READ_ONLY between copies
 	uint32_t    m_rvtSlots = 0, m_rvtPagePx = 0;   // m_rvtSlots: the manager's ceiling
 	uint32_t    m_rvtAlloc = 0;                    // slices the arrays hold now: they start small and grow with the pages in use
 	bool        rvtGrowPool(uint32_t slot);
 	VkSampler   m_rvtSampler = VK_NULL_HANDLE; // nearest/clamp: the lookup is texelFetch, the descriptor is combined
-	struct RvtTable { RvtImage img; uint32_t side = 0, mips = 0; };
+	struct RvtTable
+	{
+		RvtImage img; uint32_t side = 0, mips = 0;
+		std::vector<std::vector<uint32_t>> src;   // the manager's own form (ReadbackRvtPageTable's answer)
+		uint64_t                            stateVer = 0;
+	};
 	std::unordered_map<HE::UUID, RvtTable> m_rvtTables;   // per consumer material
+	// ── Cold pages (Thema 333 step 9, counterpart of Metal 6j / D3D11/D3D12's identical scheme): a page not repainted
+	// for HE_RVT_COLD_AFTER real frames is read back from its hot slice, BC7-encoded on a worker thread and kept in a
+	// second, slot-indexed image set; its hot slice returns to the free list. Readback is synchronous (rvtOneShot
+	// already waits for the device for any RVT admin op here) and rate-limited to one slot per real frame.
+	RvtImage    m_rvtCold[3];           // BC7_SRGB (albedo) / BC7_UNORM (normal, surface), slice = slot
+	uint32_t    m_rvtColdAlloc = 0;
+	std::vector<int32_t>  m_rvtSlotHot;
+	std::vector<uint8_t>  m_rvtSlotCold;
+	std::vector<uint32_t> m_rvtSlotVer;
+	std::vector<uint64_t> m_rvtSlotPainted;
+	std::vector<uint32_t> m_rvtHotFree;
+	uint64_t    m_rvtStateVer   = 1;
+	uint64_t    m_rvtRealFrames = 0;
+	bool        m_rvtColdOn     = false;
+	struct RvtColdWork;                 // the encoder thread and its result queue (defined near VulkanRenderer::CreateRvtPool)
+	RvtColdWork* m_rvtWork = nullptr;
+	bool        rvtGrowCold(uint32_t slot);
+	uint32_t    rvtHotFor(uint32_t slot);
+	void        rvtUploadTable(RvtTable& t, bool freshImage = false);
+	void        UpdateRvtCold();
 	struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
 	std::unordered_map<uint32_t, RvtSwap>  m_rvtSwaps;    // per landscape entity
 	bool rvtOneShot(const std::function<void(VkCommandBuffer)>& record);

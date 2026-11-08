@@ -65,7 +65,7 @@
 
 namespace HE::d3d12mat
 {
-constexpr UINT kSrvPerDraw          = 21;
+constexpr UINT kSrvPerDraw          = 24;
 constexpr UINT kSlotTex0            = 0;  // t2
 constexpr UINT kSlotTexP0           = 1;  // t4..t7 → slots 1..4
 constexpr UINT kSlotGIShadow        = 5;  // t10
@@ -84,6 +84,9 @@ constexpr UINT kSlotRvtTable        = 17; // t40 (Texture2D<uint>, the consumer'
 constexpr UINT kSlotRvtAlbedo       = 18; // t41 (Texture2DArray, sRGB view)
 constexpr UINT kSlotRvtNormal       = 19; // t42
 constexpr UINT kSlotRvtSurface      = 20; // t43
+constexpr UINT kSlotRvtAlbedoCold   = 21; // t44 (Texture2DArray BC7_UNORM_SRGB, step 9)
+constexpr UINT kSlotRvtNormalCold   = 22; // t45 (Texture2DArray BC7_UNORM)
+constexpr UINT kSlotRvtSurfaceCold  = 23; // t46 (Texture2DArray BC7_UNORM)
 
 // Root parameter indices (SetGraphicsRootConstantBufferView / DescriptorTable).
 constexpr UINT kRootLightCB   = 0; // b0 HeLighting (FS)
@@ -101,7 +104,7 @@ constexpr UINT kParamCount    = 9;
 // as the negative control for t24..t26 — a clustered PSO against it must be
 // rejected, a plain one must still build.
 constexpr UINT kPreClusterParamCount = 6;
-constexpr UINT kRangeCount    = 8;
+constexpr UINT kRangeCount    = 9;
 constexpr UINT kSamplerCount  = 16;
 // What the signature covered BEFORE Thema 56 (t2, t4..t7, t10..t11, t12, t13 /
 // s2, s4..s7, s10..s13): the first five ranges and nine samplers. he_tests
@@ -163,6 +166,7 @@ inline void DescribeMaterialRootSignature(MaterialRootSignature& out,
     srv(5, 14, 5, kSlotLandscapeWeights); // t14..t18 landscape weights, sky cube, AO, DDGI atlases
     srv(6, 31, 3, kSlotSSRFwd);           // t31..t33 forward SSR / GI-refl, cloud shadow
     srv(7, 40, 4, kSlotRvtTable);         // t40..t43 Runtime Virtual Texture: page table + three pool arrays
+    srv(8, 44, 3, kSlotRvtAlbedoCold);    // t44..t46 RVT cold (BC7) pages, step 9
 
     out.params[kRootSrvTable].ParameterType                       = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     out.params[kRootSrvTable].DescriptorTable.NumDescriptorRanges = rangeCount;

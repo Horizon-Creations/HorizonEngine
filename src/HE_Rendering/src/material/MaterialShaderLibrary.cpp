@@ -2988,6 +2988,25 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
         return m_fragCache.emplace(key, std::move(out)).first->second;
     }
     const std::string injected = injectPreamble(glsl, clustered); // adds the lighting UBO + heLit()
+    // RVT cold pages on D3D11/D3D12/Vulkan (Thema 333 step 9, counterpart of Metal step 6j above): the shared env switch,
+    // and HE_RVT_COLD_FETCH picks RvtLookup.h's texelFetch/Load branch instead of Metal's sampler one (no spare sampler on
+    // D3D11; Vulkan and D3D12 could afford one, but the same shader text for all three keeps the contract simple). GL stays
+    // off here: it has no renderer-side cold pool/arrays from this step, so defining HE_RVT_COLD for it would statically
+    // reference three unbound sampler units it never binds.
+    static const bool rvtColdWin = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+    const auto withRvtColdFetch = [&](const std::string& src) -> std::string {
+        if (!rvtColdWin || src.find("heRvtSample(") == std::string::npos) return src;
+        // Vulkan only: a sampler2DArray is one combined-image-sampler descriptor there regardless of texelFetch vs
+        // Sample, so the three cold rows need the device to actually fit them (SetRvtColdVulkanFits, VulkanRenderer).
+        // D3D11/D3D12 never set this (texelFetch/Load costs no live sampler there) and always take the branch below.
+        if (backend == Backend::SpirV && !s_rvtColdVulkanFits) return src;
+        std::string out2 = src;
+        const size_t vpos = out2.find("#version");
+        const size_t eol  = vpos == std::string::npos ? std::string::npos : out2.find('\n', vpos);
+        if (eol == std::string::npos) return src;
+        out2.insert(eol + 1, "#define HE_RVT_COLD 1\n#define HE_RVT_COLD_FETCH 1\n");
+        return out2;
+    };
     if (backend == Backend::Metal)
     {
         // ── Fragment sampler budget ──────────────────────────────────────────
@@ -3207,6 +3226,11 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             { Stage::Fragment, 0, 41, 41,  0 }, // heRvtAlbedo
             { Stage::Fragment, 0, 42, 42,  0 }, // heRvtNormal
             { Stage::Fragment, 0, 43, 43,  0 }, // heRvtSurface
+            // The cold pool's three BC7 arrays (Thema 333 step 9): same shape as the four above, texelFetch/Load only
+            // (HE_RVT_COLD_FETCH), so the same dead sampler on s0 covers them — no new register below s16.
+            { Stage::Fragment, 0, 44, 44,  0 }, // heRvtAlbedoC
+            { Stage::Fragment, 0, 45, 45,  0 }, // heRvtNormalC
+            { Stage::Fragment, 0, 46, 46,  0 }, // heRvtSurfaceC
         };
         // Clustered variant: three SRVs and NO sampler, so the table above is
         // untouched. Pinned to their binding numbers (what SPIRV-Cross would
@@ -3224,7 +3248,7 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
             pins.push_back({ Stage::Fragment, 0, 25, 25 }); // HeClusterGrid   → t25
             pins.push_back({ Stage::Fragment, 0, 26, 26 }); // HeClusterIdx    → t26
         }
-        out = toCompiled(compileHlslPinned(injected, Stage::Fragment, pins));
+        out = toCompiled(compileHlslPinned(withRvtColdFetch(injected), Stage::Fragment, pins));
     }
     else if (backend == Backend::GLSL430 && clustered)
     {
@@ -3239,7 +3263,11 @@ const MaterialShaderLibrary::Compiled& MaterialShaderLibrary::fragmentVariant(
     }
     else
     {
-        out = toCompiled(compile(injected, Stage::Fragment, toTarget(backend)));
+        // Vulkan: the cold BC7 arrays (step 9), same texelFetch branch as HLSL above (rvtFit: the Vulkan descriptor-count
+        // sweep in test_material_graph grows from 21 to 24 bindings with HE_RVT_COLD on). OpenGL (GLSL410/430/ES300) is
+        // left out: no cold pool/arrays exist on that backend, so leaving the define off keeps its shader unchanged.
+        const std::string& src = backend == Backend::SpirV ? withRvtColdFetch(injected) : injected;
+        out = toCompiled(compile(src, Stage::Fragment, toTarget(backend)));
     }
     return m_fragCache.emplace(key, std::move(out)).first->second;
 }

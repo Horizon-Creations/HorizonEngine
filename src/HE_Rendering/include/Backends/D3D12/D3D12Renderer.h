@@ -52,6 +52,10 @@ public:
     void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
     void  BeginRvtPages(uint32_t pagePx) override;
     void  EndRvtPages() override;
+    // Once per real frame (Render()): ages pages, harvests finished BC7 encodes, synchronously reads back and re-encodes
+    // pages that have stood still (rate-limited: each one is a full GPU flush on this backend), re-uploads page tables
+    // whose entries changed temperature (Thema 333 step 9).
+    void  UpdateRvtCold();
     // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
     // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h,
     // recorded into its own command list and waited for. Returns the ImGui SRV

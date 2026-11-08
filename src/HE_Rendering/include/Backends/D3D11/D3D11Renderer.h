@@ -43,6 +43,9 @@ public:
     void  ReleaseRvtConsumer(const HE::UUID& consumerMaterial) override;
     // One page through the lean page pass (RenderSceneImage routes camera.rvtSlot >= 0 here).
     bool  RenderRvtPage(const EditorCameraOverride& camera, uint32_t px);
+    // Once per real frame (Render()): ages pages, harvests finished BC7 encodes/readbacks of pages gone cold, starts new
+    // readbacks for pages that have stood still, re-uploads page tables whose entries changed temperature (Thema 333 step 9).
+    void  UpdateRvtCold();
     // An arbitrary world into a per-slot offscreen target (Class Editor, Mesh
     // viewer, secondary Scene viewports) — the GL/Metal contract in IRenderer.h.
     // Returns the target's ID3D11ShaderResourceView*.

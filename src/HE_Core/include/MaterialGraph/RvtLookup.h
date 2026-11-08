@@ -11,7 +11,8 @@
 //   41 heRvtAlbedo   RGBA8 array, one slice per pool slot, sRGB view (the Load returns linear)
 //   42 heRvtNormal   RGBA8 array, world normal * 0.5 + 0.5
 //   43 heRvtSurface  RGBA8 array, R = AO, G = roughness
-//   44..46 heRvtAlbedoC/NormalC/SurfaceC  the same three as block-compressed arrays (Metal only, HE_RVT_COLD), see the entry's bit 23
+//   44..46 heRvtAlbedoC/NormalC/SurfaceC  the same three as block-compressed arrays (HE_RVT_COLD; Metal: ASTC via sampler,
+//          D3D11/D3D12/Vulkan: BC7 via texelFetch/Load, HE_RVT_COLD_FETCH), see the entry's bit 23
 //
 // Volume parameters, two vec4 (the node takes them as inputs, normally from Param Vector4 nodes):
 //   A = (originX, originZ, extentM, metersPerTexel at mip 0)
@@ -24,6 +25,9 @@ inline constexpr uint32_t kRvtTableBinding   = 40;
 inline constexpr uint32_t kRvtAlbedoBinding  = 41;
 inline constexpr uint32_t kRvtNormalBinding  = 42;
 inline constexpr uint32_t kRvtSurfaceBinding = 43;
+inline constexpr uint32_t kRvtAlbedoColdBinding  = 44;
+inline constexpr uint32_t kRvtNormalColdBinding  = 45;
+inline constexpr uint32_t kRvtSurfaceColdBinding = 46;
 
 // The four declarations (included only by a shader that calls heRvtSample, so a material without the node declares nothing).
 inline constexpr char kRvtDeclarationsGLSL[] =
@@ -31,8 +35,10 @@ inline constexpr char kRvtDeclarationsGLSL[] =
     "layout(set = 0, binding = 41) uniform sampler2DArray heRvtAlbedo;\n"
     "layout(set = 0, binding = 42) uniform sampler2DArray heRvtNormal;\n"
     "layout(set = 0, binding = 43) uniform sampler2DArray heRvtSurface;\n"
-    // The cold pool (Thema 333 step 6j): pages that have not changed for a while, block-compressed (ASTC on Metal), read with the
-    // sampler's own bilinear. Declared only where a backend defines HE_RVT_COLD (Metal); the table entry's bit 23 says "cold".
+    // The cold pool (Thema 333 step 6j Metal / step 9 Windows): pages that have not changed for a while, block-compressed
+    // (ASTC on Metal, BC7 on D3D11/D3D12/Vulkan). Declared only where a backend defines HE_RVT_COLD; the table entry's bit
+    // 23 says "cold". The TYPE stays sampler2DArray everywhere (same as the hot arrays above, which are also read with
+    // texelFetch only) — SPIRV-Cross derives Load vs Sample from how the function below actually reads it, not the type.
     "#ifdef HE_RVT_COLD\n"
     "layout(set = 0, binding = 44) uniform sampler2DArray heRvtAlbedoC;\n"
     "layout(set = 0, binding = 45) uniform sampler2DArray heRvtNormalC;\n"
@@ -91,13 +97,31 @@ inline constexpr char kRvtLookupGLSL[] =
     "#ifdef HE_RVT_COLD\n"
     "    if ((e & 0x800000u) != 0u)\n"
     "    {\n"
-    "        // The cold page: same position p (texel centres at whole numbers, already clamped to the payload), three bilinear samples.\n"
+    "#ifdef HE_RVT_COLD_FETCH\n"
+    "        // D3D11's graph-material sampler budget is exactly full (kHlslMaterialPins): the cold arrays are block-compressed\n"
+    "        // (BC7) but read with texelFetch/Load like the hot ones (the hardware decompresses the block either way), same\n"
+    "        // four-tap hand filter, same a/b/f as the hot path above.\n"
+    "        vec4 cc00 = texelFetch(heRvtAlbedoC, ivec3(a.x, a.y, slot), 0), cc10 = texelFetch(heRvtAlbedoC, ivec3(b.x, a.y, slot), 0);\n"
+    "        vec4 cc01 = texelFetch(heRvtAlbedoC, ivec3(a.x, b.y, slot), 0), cc11 = texelFetch(heRvtAlbedoC, ivec3(b.x, b.y, slot), 0);\n"
+    "        base = mix(mix(cc00, cc10, f.x), mix(cc01, cc11, f.x), f.y).rgb;\n"
+    "        vec4 cn00 = texelFetch(heRvtNormalC, ivec3(a.x, a.y, slot), 0), cn10 = texelFetch(heRvtNormalC, ivec3(b.x, a.y, slot), 0);\n"
+    "        vec4 cn01 = texelFetch(heRvtNormalC, ivec3(a.x, b.y, slot), 0), cn11 = texelFetch(heRvtNormalC, ivec3(b.x, b.y, slot), 0);\n"
+    "        vec3 ccn = heRvtNormalOf(mix(mix(cn00, cn10, f.x), mix(cn01, cn11, f.x), f.y));\n"
+    "        nrm = ccn / max(length(ccn), 1e-4);\n"
+    "        vec4 cs00 = texelFetch(heRvtSurfaceC, ivec3(a.x, a.y, slot), 0), cs10 = texelFetch(heRvtSurfaceC, ivec3(b.x, a.y, slot), 0);\n"
+    "        vec4 cs01 = texelFetch(heRvtSurfaceC, ivec3(a.x, b.y, slot), 0), cs11 = texelFetch(heRvtSurfaceC, ivec3(b.x, b.y, slot), 0);\n"
+    "        vec2 ccs = mix(mix(cs00, cs10, f.x), mix(cs01, cs11, f.x), f.y).rg;\n"
+    "        ao = ccs.x; rough = ccs.y;\n"
+    "#else\n"
+    "        // The cold page (Metal): same position p (texel centres at whole numbers, already clamped to the payload), three bilinear samples.\n"
     "        vec3 cuv = vec3((p + 0.5) / float(hi + 1), float(slot));\n"
     "        base = textureLod(heRvtAlbedoC, cuv, 0.0).rgb;\n"
     "        vec3 cn = heRvtNormalOf(textureLod(heRvtNormalC, cuv, 0.0));\n"
     "        nrm = cn / max(length(cn), 1e-4);\n"
     "        vec2 cs = textureLod(heRvtSurfaceC, cuv, 0.0).rg;\n"
-    "        ao = cs.x; rough = cs.y; valid = 1.0;\n"
+    "        ao = cs.x; rough = cs.y;\n"
+    "#endif\n"
+    "        valid = 1.0;\n"
     "        return;\n"
     "    }\n"
     "#endif\n"

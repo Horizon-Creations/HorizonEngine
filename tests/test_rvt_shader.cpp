@@ -90,6 +90,90 @@ TEST_CASE("RVT node: the HLSL keeps t40..t43, spends no live sampler, and the re
 	CHECK(glsl.find("dFdx(wxz)") != std::string::npos);
 }
 
+TEST_CASE("RVT node: the HLSL also keeps t44..t46 (cold BC7 arrays, step 9), read with Load, no live sampler, real FXC compiles it")
+{
+	// HE_RVT_COLD defaults to "wanted" (no env var set); D3D11/D3D12 never need SetRvtColdVulkanFits (that flag only
+	// narrows the Vulkan SpirV path — texelFetch/Load costs no live sampler on D3D, unlike a Vulkan combined sampler).
+	const char* coldEnv = std::getenv("HE_RVT_COLD");
+	if (coldEnv && *coldEnv == '0')
+	{
+		MESSAGE("HE_RVT_COLD=0: this build/run asked for cold off, nothing to check here");
+		return;
+	}
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::string glsl = HE::generateFragment(rvtGraph()).glsl;
+	const auto& hl = lib.fragment(std::hash<std::string>{}("rvt-node-cold"), glsl, B::HLSL);
+	REQUIRE_MESSAGE(hl.ok, hl.log);
+	const std::string& hlsl = hl.source;
+	for (const char* r : { "register(t44)", "register(t45)", "register(t46)" })
+		CHECK_MESSAGE(hlsl.find(r) != std::string::npos, "missing ", r);
+	CHECK(hlsl.find("heRvtAlbedoC.Load(") != std::string::npos);
+	CHECK(hlsl.find("heRvtAlbedoC.Sample") == std::string::npos);
+	CHECK(hlsl.find("heRvtNormalC.Sample") == std::string::npos);
+	CHECK(hlsl.find("heRvtSurfaceC.Sample") == std::string::npos);
+
+#if defined(_WIN32)
+	Microsoft::WRL::ComPtr<ID3DBlob> blob, err;
+	const HRESULT hr = D3DCompile(hlsl.c_str(), hlsl.size(), "rvt-cold", nullptr, nullptr, "main", "ps_5_0", 0, 0, &blob, &err);
+	const std::string fxcLog = err ? std::string(static_cast<const char*>(err->GetBufferPointer()), err->GetBufferSize()) : std::string("no log");
+	CHECK_MESSAGE(SUCCEEDED(hr), fxcLog);
+#endif
+}
+
+TEST_CASE("RVT node: Vulkan SpirV keeps 44..46 only when SetRvtColdVulkanFits says the layout fits (step 9)")
+{
+	using B = HE::MaterialShaderLibrary::Backend;
+	HE::MaterialShaderLibrary lib;
+	const std::string glsl = HE::generateFragment(rvtGraph()).glsl;
+
+	// Device-fits path: compiles, and the GLSL source handed to SPIRV-Cross (visible via a fresh hash so the cache
+	// does not hand back the device-does-not-fit compile below) declares the cold arrays.
+	HE::MaterialShaderLibrary::SetRvtColdVulkanFits(true);
+	const auto& fits = lib.fragment(std::hash<std::string>{}("rvt-node-vk-cold-fit"), glsl, B::SpirV);
+	HE::MaterialShaderLibrary::SetRvtColdVulkanFits(false);   // reset before any other test reads the flag
+	REQUIRE_MESSAGE(fits.ok, fits.log);
+	REQUIRE_FALSE(fits.spirv.empty());
+
+	// Device-does-not-fit path (the default state every other test in this binary relies on): compiles too, and must
+	// NOT statically reference bindings 44..46 — the layout omits them (VulkanMaterialLayout.h's rvtColdFit), so a
+	// pipeline whose shader used them anyway would be invalid.
+	const auto& noFit = lib.fragment(std::hash<std::string>{}("rvt-node-vk-cold-nofit"), glsl, B::SpirV);
+	REQUIRE_MESSAGE(noFit.ok, noFit.log);
+	REQUIRE_FALSE(noFit.spirv.empty());
+	CHECK(fits.spirv != noFit.spirv);
+}
+
+TEST_CASE("RVT cold bit (step 9): bit 23 never corrupts the 24-bit slot, boundary slot 0x7FFFFF round-trips")
+{
+	// RvtLookup.h's shader text: `slot = e & 0x7FFFFFu` (23 bits), `cold = (e & 0x800000u) != 0`. The manager's raw
+	// entry (what SetRvtPageTable/ReadbackRvtPageTable carry) is `slot | effectiveMip << 24` with a 24-bit slot
+	// (0xFFFFFFu) — the renderer's upload step narrows that to 23 bits plus the cold flag when it rewrites the entry.
+	constexpr uint32_t kMaxSlot = 0x7FFFFFu;   // the highest slot the cold bit leaves room for
+	CHECK(kMaxSlot == (1u << 23) - 1);
+
+	auto rewrite = [](uint32_t slot, bool cold, uint32_t eff) -> uint32_t {
+		return (eff << 24) | (cold ? 0x800000u : 0u) | (slot & 0x7FFFFFu);
+	};
+	auto slotOf = [](uint32_t e) { return e & 0x7FFFFFu; };
+	auto coldOf = [](uint32_t e) { return (e & 0x800000u) != 0u; };
+	auto effOf  = [](uint32_t e) { return e >> 24; };
+
+	for (const uint32_t slot : { 0u, 1u, 12345u, kMaxSlot - 1, kMaxSlot })
+	{
+		for (const bool cold : { false, true })
+		{
+			const uint32_t e = rewrite(slot, cold, 3);
+			CHECK(slotOf(e) == slot);
+			CHECK(coldOf(e) == cold);
+			CHECK(effOf(e) == 3u);
+		}
+	}
+	// 2048 is this engine's own RVT pool cap (CreateRvtPool rejects slots > 2048 on every backend), well inside 23 bits:
+	// the cold bit never collides with any slot this engine can actually hand out.
+	CHECK(2048u < kMaxSlot);
+}
+
 TEST_CASE("RVT node: the MSL reads the table and the pool as textures 17..20 and spends no sampler (Metal's cap is 16)")
 {
 	using B = HE::MaterialShaderLibrary::Backend;

@@ -41,6 +41,12 @@
 // no RVT support. Bound per draw only for a material that owns a page table (the consumer), never written for the rest: a
 // descriptor no pipeline statically uses need not be valid.
 //
+// Cold pages (step 9): bindings 44..46 are the BC7 arrays (heRvtAlbedoC/NormalC/SurfaceC), read with texelFetch like the
+// four above (HE_RVT_COLD_FETCH, no filtering distinction at the descriptor level: CombinedImageSampler either way, since
+// a GLSL sampler2DArray is one descriptor regardless of how the shader reads it). Three more over the 21 (rvtFit's count):
+// rvtColdFit decides the FULL 24-row layout; a device that fits RVT but not the cold rows gets the hot-only layout and HE_RVT_COLD
+// has no effect there (the shader is never given the define, see MaterialShaderLibrary's rvtColdWin gate).
+//
 // Displacement (Thema 207): MaterialShaderLibrary::tessControl/tessEval (SpirV)
 // read the FRAGMENT's bindings — HeLighting 0 (both stages), U 1, heTex0 2,
 // HeParams 3, heTexP0..3 4..7, heLandscapeWeights 14 (evaluation). Those rows
@@ -76,6 +82,8 @@ constexpr uint32_t kClusterIdxBinding    = 26; // HeClusterIdx    { uint clIdx[]
 constexpr uint32_t kLandscapeWeightsBinding = 14; // heLandscapeWeights (MaterialGraph.cpp)
 constexpr uint32_t kRvtFirstBinding = 40;         // heRvtTable; 41..43 the pool (== HE::kRvtTableBinding in RvtLookup.h)
 constexpr uint32_t kRvtBindingCount = 4;
+constexpr uint32_t kRvtColdFirstBinding = 44;      // heRvtAlbedoC; 45/46 the rest (== HE::kRvtAlbedoColdBinding)
+constexpr uint32_t kRvtColdBindingCount = 3;
 
 inline constexpr Binding kBindings[] = {
 	{  0, DescKind::UniformBuffer,        kStageFragment | kStageTess }, // HeLighting
@@ -132,10 +140,14 @@ inline constexpr Binding kBindings[] = {
 	{ 41, DescKind::CombinedImageSampler, kStageFragment }, // heRvtAlbedo (sampler2DArray, sRGB view)
 	{ 42, DescKind::CombinedImageSampler, kStageFragment }, // heRvtNormal
 	{ 43, DescKind::CombinedImageSampler, kStageFragment }, // heRvtSurface
+	// ── Thema 333 step 9: cold (BC7) pages, texelFetch only, same descriptor kind as the four above ──
+	{ 44, DescKind::CombinedImageSampler, kStageFragment }, // heRvtAlbedoC
+	{ 45, DescKind::CombinedImageSampler, kStageFragment }, // heRvtNormalC
+	{ 46, DescKind::CombinedImageSampler, kStageFragment }, // heRvtSurfaceC
 };
 
 constexpr uint32_t kBindingCount           = sizeof(kBindings) / sizeof(kBindings[0]);
-constexpr uint32_t kPreClusterBindingCount = kBindingCount - 3 - kRvtBindingCount;
+constexpr uint32_t kPreClusterBindingCount = kBindingCount - 3 - kRvtBindingCount - kRvtColdBindingCount;
 
 // Descriptors of one kind in one set — what the per-frame pool must hold per
 // allocated set (times the sets it serves).
@@ -165,13 +177,18 @@ constexpr bool isRvtBinding(uint32_t binding)
 {
 	return binding >= kRvtFirstBinding && binding < kRvtFirstBinding + kRvtBindingCount;
 }
-constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true, bool withRvt = false)
+constexpr bool isRvtColdBinding(uint32_t binding)
+{
+	return binding >= kRvtColdFirstBinding && binding < kRvtColdFirstBinding + kRvtColdBindingCount;
+}
+constexpr uint32_t fragmentSamplerCount(bool withLandscapeWeights = true, bool withRvt = false, bool withRvtCold = false)
 {
 	uint32_t n = 0;
 	for (uint32_t i = 0; i < kBindingCount; ++i)
 		if (kBindings[i].kind == DescKind::CombinedImageSampler && (kBindings[i].stages & kStageFragment)
 		    && (withLandscapeWeights || kBindings[i].binding != kLandscapeWeightsBinding)
-		    && (withRvt || !isRvtBinding(kBindings[i].binding)))
+		    && (withRvt || !isRvtBinding(kBindings[i].binding))
+		    && (withRvtCold || !isRvtColdBinding(kBindings[i].binding)))
 			++n;
 	return n;
 }
@@ -193,9 +210,18 @@ constexpr bool rvtFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledI
 	    && fragmentSamplerCount(withLandscapeWeights, true) <= maxPerStageSampledImages;
 }
 
-static_assert(kBindingCount == 29, "material set 0: 22 canonical bindings + 3 cluster lists + 4 RVT rows");
+// Do the three cold rows ALSO fit, on top of the hot RVT layout rvtFit already decided on? If not, the renderer builds
+// the layout with hot RVT but without these three, and VulkanRenderer::SetRvtColdVulkanFits(false) keeps the SPIR-V from
+// ever declaring heRvtAlbedoC/NormalC/SurfaceC (Thema 333 step 9).
+constexpr bool rvtColdFit(uint32_t maxPerStageSamplers, uint32_t maxPerStageSampledImages, bool withLandscapeWeights)
+{
+	return fragmentSamplerCount(withLandscapeWeights, true, true) <= maxPerStageSamplers
+	    && fragmentSamplerCount(withLandscapeWeights, true, true) <= maxPerStageSampledImages;
+}
+
+static_assert(kBindingCount == 32, "material set 0: 22 canonical bindings + 3 cluster lists + 4 RVT rows + 3 cold RVT rows");
 static_assert(countOf(DescKind::UniformBuffer) == 5);        // b0, b1, b3, b8, b9
-static_assert(countOf(DescKind::CombinedImageSampler) == 21); // b2, b4-b7, b10-b18, b31-b33, b40-b43
+static_assert(countOf(DescKind::CombinedImageSampler) == 24); // b2, b4-b7, b10-b18, b31-b33, b40-b46
 static_assert(countOf(DescKind::StorageBuffer) == 3);         // b24-b26
 static_assert(fragmentSamplerCount(true) == 17 && fragmentSamplerCount(false) == 16,
               "without heLandscapeWeights the layout must fit the spec minimum of 16");
@@ -203,6 +229,10 @@ static_assert(!landscapeWeightsFit(16, 16) && landscapeWeightsFit(17, 17));
 static_assert(countOf(DescKind::StorageBuffer, kPreClusterBindingCount) == 0,
               "the cluster lists come right after the canonical rows (negative control slices them off)");
 static_assert(rvtFit(21, 21, true) && !rvtFit(20, 21, true) && !rvtFit(21, 20, true) && rvtFit(20, 20, false) && !rvtFit(16, 16, false));
+static_assert(fragmentSamplerCount(true, true, true) == 24 && fragmentSamplerCount(true, true, false) == 21,
+              "the cold rows add exactly 3, on top of rvtFit's 21");
+static_assert(rvtColdFit(24, 24, true) && !rvtColdFit(23, 24, true) && !rvtColdFit(24, 23, true)
+           && rvtColdFit(23, 23, false) && !rvtColdFit(22, 23, false));
 
 // ── Deferred lighting resolve, set 0 (Thema 150, docs/deferred-renderer-plan.md
 // §10.3/§10.5) ─────────────────────────────────────────────────────────────────

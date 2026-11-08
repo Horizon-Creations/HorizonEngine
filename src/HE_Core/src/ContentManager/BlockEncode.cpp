@@ -3,7 +3,12 @@
 #ifdef HE_HAVE_ASTCENC
 #  include <astcenc.h>
 #endif
+#ifdef HE_HAVE_BC7ENC
+#  include <bc7enc/bc7enc.h>
+#  include <mutex>
+#endif
 
+#include <algorithm>
 #include <memory>
 #ifdef __APPLE__
 #  include <malloc/malloc.h>
@@ -50,6 +55,49 @@ namespace
 }
 #endif
 
+#ifdef HE_HAVE_BC7ENC
+namespace
+{
+    // Texel block gather, same shape as HpakWriter.cpp's cook-time encoder: clamp to the last valid texel past the image
+    // edge so a page whose side isn't a multiple of 4 (it always is here, 136 px) never reads out of bounds.
+    void gatherRGBA8Block(const uint8_t* rgba, uint32_t w, uint32_t h, uint32_t bx, uint32_t by, uint8_t out[64])
+    {
+        for (uint32_t ty = 0; ty < 4; ++ty)
+            for (uint32_t tx = 0; tx < 4; ++tx)
+            {
+                const uint32_t sx = std::min(bx * 4 + tx, w - 1), sy = std::min(by * 4 + ty, h - 1);
+                const uint8_t* p = rgba + (static_cast<size_t>(sy) * w + sx) * 4;
+                uint8_t* d = out + (static_cast<size_t>(ty) * 4 + tx) * 4;
+                d[0] = p[0]; d[1] = p[1]; d[2] = p[2]; d[3] = p[3];
+            }
+    }
+
+    bool encodeBc7(const uint8_t* rgba, uint32_t w, uint32_t h, uint8_t quality, std::vector<uint8_t>& out)
+    {
+        // bc7enc_compress_block_init() fills global tables once; the cold-page encoder thread and any other caller share
+        // this guard (bc7enc_compress_block itself is stateless once the tables exist).
+        static std::once_flag initFlag;
+        std::call_once(initFlag, [] { bc7enc_compress_block_init(); });
+
+        bc7enc_compress_block_params params;
+        bc7enc_compress_block_params_init(&params);
+        params.m_max_partitions = quality >= 1 ? BC7ENC_MAX_PARTITIONS : 16;
+        params.m_uber_level     = quality >= 2 ? 1 : 0;
+
+        const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+        out.resize(static_cast<size_t>(bw) * bh * 16);
+        uint8_t block[64];
+        for (uint32_t by = 0; by < bh; ++by)
+            for (uint32_t bx = 0; bx < bw; ++bx)
+            {
+                gatherRGBA8Block(rgba, w, h, bx, by, block);
+                bc7enc_compress_block(out.data() + (static_cast<size_t>(by) * bw + bx) * 16, block, &params);
+            }
+        return true;
+    }
+}
+#endif
+
 bool encodeBlocks(BlockFormat format, const uint8_t* rgba, uint32_t w, uint32_t h, bool srgb, uint8_t quality,
                   std::vector<uint8_t>& out)
 {
@@ -73,8 +121,17 @@ bool encodeBlocks(BlockFormat format, const uint8_t* rgba, uint32_t w, uint32_t 
         return true;
     }
 #endif
+#ifdef HE_HAVE_BC7ENC
+    if (format == BlockFormat::Bc7)
+    {
+        // BC7 has no separate sRGB encode profile (the GPU's *_SRGB format decodes the stored bytes as sRGB either way);
+        // `srgb` is accepted for symmetry with the ASTC call and does not change what is written here.
+        (void)srgb;
+        return encodeBc7(rgba, w, h, quality, out);
+    }
+#endif
     (void)format; (void)srgb; (void)quality;
-    return false;   // BC7: the Windows step of Thema 333 (bc7enc is in the tree, see HpakWriter.cpp)
+    return false;
 }
 
 void releaseBlockEncoderCache()

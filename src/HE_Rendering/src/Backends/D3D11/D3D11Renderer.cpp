@@ -30,7 +30,13 @@
 #include <ContentManager/DefaultAssets.h>    // GI: default-cube occluder fallback
 #include <material/MaterialShaderLibrary.h> // A4: shared cross-backend material shader layer (unguarded, like Vulkan/D3D12)
 #include <MaterialGraph/MaterialGraph.h>     // kMatMaxGraphTextures (heTexP0..3)
-#include <MaterialGraph/RvtLookup.h>        // kRvtTableBinding (t40..t43)
+#include <MaterialGraph/RvtLookup.h>        // kRvtTableBinding (t40..t43), kRvtAlbedoColdBinding (t44..t46)
+#include <ContentManager/BlockEncode.h>     // RVT cold pages: BC7 encode on a worker thread (Thema 333 step 9)
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 // ── Cross-backend renderer helpers (audit 1a) ────────────────────────────────
 // Each of these replaced a private copy that every backend carried; the copies
 // were byte-identical by contract (the GPU reads the packed bytes positionally),
@@ -1334,6 +1340,11 @@ namespace
 
 struct D3D11RendererImpl
 {
+    struct RvtColdWork;   // Thema 333 step 9, defined near D3D11Renderer::CreateRvtPool
+    // Not reached via DestroyRvtPool() alone: the renderer's own destructor just drops this struct, and a raw rvtWork
+    // left pointing at a joinable std::thread would terminate the process on exit (~thread() on a still-joinable thread).
+    ~D3D11RendererImpl();
+
     ComPtr<ID3D11Device>           device;
     ComPtr<ID3D11DeviceContext>    context;
     ComPtr<IDXGISwapChain>         swapchain;
@@ -1667,14 +1678,34 @@ struct D3D11RendererImpl
     ComPtr<ID3D11RenderTargetView>   rvtPageRTV[2];     // [0] UNORM, [1] UNORM_SRGB
     ComPtr<ID3D11Texture2D>          rvtPageDepth;
     // The page tables the landscape shader reads, one per volume, keyed by the consumer material that reads it: R32_UINT,
-    // mip m = (side >> m)^2 entries (SetRvtPageTable).
+    // mip m = (side >> m)^2 entries (SetRvtPageTable). `src` is the manager's own form (what ReadbackRvtPageTable hands
+    // back to the witness); `tex`/`srv` are rewritten per slot (uploadRvtTable, Thema 333 step 9) to say hot slice or
+    // cold bit + slot, which is what the shader actually reads.
     struct RvtTable
     {
         ComPtr<ID3D11Texture2D>          tex;
         ComPtr<ID3D11ShaderResourceView> srv;
         uint32_t                         side = 0, mips = 0;
+        std::vector<std::vector<uint32_t>> src;
+        uint64_t                            stateVer = 0;
     };
     std::unordered_map<HE::UUID, RvtTable> rvtTables;
+    // ── Cold pages (Thema 333 step 9, counterpart of Metal 6j): a page not repainted for HE_RVT_COLD_AFTER real frames is
+    // read back from its hot slice, BC7-encoded on a worker thread and kept in a second, slot-indexed array set; its hot
+    // slice goes back to the free list. The manager's slot is no longer the same as a hot array index.
+    ComPtr<ID3D11Texture2D>          rvtCold[3];       // BC7_UNORM_SRGB (albedo) / BC7_UNORM (normal, surface), slice = slot
+    ComPtr<ID3D11ShaderResourceView> rvtColdSRV[3];
+    uint32_t                         rvtColdAlloc = 0;
+    std::vector<int32_t>             rvtSlotHot;       // per manager slot: its hot slice, or -1
+    std::vector<uint8_t>             rvtSlotCold;      // per manager slot: resident in the cold arrays
+    std::vector<uint8_t>             rvtSlotBusy;      // a readback or encode of this slot is in flight
+    std::vector<uint32_t>            rvtSlotVer;       // bumped on every (re)paint; an encode of an older version is dropped
+    std::vector<uint64_t>            rvtSlotPainted;   // rvtRealFrames at the slot's last paint
+    std::vector<uint32_t>            rvtHotFree;       // hot slices not in use
+    uint64_t                         rvtStateVer   = 1; // bumped when a slot's temperature or hot slice changes
+    uint64_t                         rvtRealFrames = 0;
+    bool                             rvtColdOn     = false; // HE_RVT_COLD on and bc7enc built into this binary
+    RvtColdWork* rvtWork = nullptr;                         // the encoder thread and the readbacks in flight (defined below)
     // SetRvtLandscape: per landscape entity, the material its chunks are drawn with now and the consumer that replaces it
     struct RvtSwap { HE::UUID landscapeMat, consumerMat; };
     std::unordered_map<uint32_t, RvtSwap> rvtSwaps;
@@ -8262,6 +8293,12 @@ void D3D11Renderer::DrawScene(int width, int height)
                             ID3D11ShaderResourceView* rvtSrv[4] = { tb != p.rvtTables.end() ? tb->second.srv.Get() : nullptr,
                                                                     p.rvtPoolSRV[0].Get(), p.rvtPoolSRV[1].Get(), p.rvtPoolSRV[2].Get() };
                             ctx->PSSetShaderResources(HE::kRvtTableBinding, 4, rvtSrv);
+                            // Cold (BC7) arrays, step 9: t44..t46, same Load-only contract. Null before the first page has
+                            // gone cold (rvtCold is allocated lazily, UpdateRvtCold) — a Load there answers 0, same as the
+                            // hot arrays before CreateRvtPool, and the shader only takes the cold branch when the table
+                            // entry's bit 23 is set, which never happens before a page has actually been encoded.
+                            ID3D11ShaderResourceView* rvtColdSrv[3] = { p.rvtColdSRV[0].Get(), p.rvtColdSRV[1].Get(), p.rvtColdSRV[2].Get() };
+                            ctx->PSSetShaderResources(HE::kRvtAlbedoColdBinding, 3, rvtColdSrv);
                         }
                         // heGIIrradiance / heGIVisibility (t17/t18) + linear-clamp on s1/s3
                         // (Thema 120): the live probe atlases while GI shades — the gate
@@ -8413,6 +8450,8 @@ void D3D11Renderer::DrawScene(int width, int height)
                         {
                             ID3D11ShaderResourceView* noRvt[4] = {};
                             ctx->PSSetShaderResources(HE::kRvtTableBinding, 4, noRvt);
+                            ID3D11ShaderResourceView* noRvtCold[3] = {};
+                            ctx->PSSetShaderResources(HE::kRvtAlbedoColdBinding, 3, noRvtCold);
                         }
                         HE::d3d11mat::RestoreBuiltinSkyEnvAOSlots(ctx, ssrSRV);
                         HE::d3d11mat::RestoreAfterGIReflFwd(ctx); // t32 off; the built-in shader never reads it
@@ -9157,6 +9196,7 @@ void D3D11Renderer::Render()
     p.m_wallTime = static_cast<float>(SDL_GetTicks()) * 0.001f;
     p.counters = D3D11RendererImpl::FrameCounters{};
     p.gpuTimerBeginFrame();
+    UpdateRvtCold();   // RVT cold pages (Thema 333 step 9): a real frame only, never RenderSceneImage's still
     const float bgColor[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     // The packaged game (SetSwapchainPostProcessing): the post chain — HDR,
@@ -9473,6 +9513,160 @@ static bool ensureRvtSlot(D3D11RendererImpl& p, uint32_t slot)
     return true;
 }
 
+// ── Cold pages (Thema 333 step 9, D3D11 counterpart of Metal's step 6j): a page not repainted for HE_RVT_COLD_AFTER
+// real frames is read back from its hot slice, BC7-encoded on a worker thread and kept in a second, slot-indexed array
+// set (one quarter the bytes); its hot slice goes back to the free list so the HOT arrays can stay small. A page's
+// manager-given slot is therefore no longer the same thing as a hot array index; the cold arrays, unlike the hot ones,
+// are indexed by slot directly (no further compaction — three BC7 arrays cost little next to the hot BGRA ones).
+static bool makeRvtColdLayer(D3D11RendererImpl& p, int layer, uint32_t count, uint32_t pagePx,
+                              ComPtr<ID3D11Texture2D>& tex, ComPtr<ID3D11ShaderResourceView>& srv)
+{
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = td.Height = pagePx;
+    td.MipLevels = 1;
+    td.ArraySize = count;
+    td.Format    = layer == 0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage     = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd{};
+    sd.Format = td.Format;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+    sd.Texture2DArray.MipLevels = 1;
+    sd.Texture2DArray.ArraySize = count;
+    return SUCCEEDED(p.device->CreateTexture2D(&td, nullptr, &tex)) &&
+           SUCCEEDED(p.device->CreateShaderResourceView(tex.Get(), &sd, &srv));
+}
+
+static bool ensureRvtColdSlot(D3D11RendererImpl& p, uint32_t slot)
+{
+    if (slot < p.rvtColdAlloc) return true;
+    if (slot >= p.rvtSlots) return false;
+    const uint32_t grown = std::min(p.rvtSlots, std::max((slot + 32u) & ~31u, p.rvtColdAlloc + std::max(32u, p.rvtColdAlloc / 2)));
+    for (int layer = 0; layer < 3; ++layer)
+    {
+        ComPtr<ID3D11Texture2D> tex; ComPtr<ID3D11ShaderResourceView> srv;
+        if (!makeRvtColdLayer(p, layer, grown, p.rvtPagePx, tex, srv)) return false;
+        for (uint32_t i = 0; i < p.rvtColdAlloc; ++i)
+            p.context->CopySubresourceRegion(tex.Get(), D3D11CalcSubresource(0, i, 1), 0, 0, 0,
+                                             p.rvtCold[layer].Get(), D3D11CalcSubresource(0, i, 1), nullptr);
+        p.rvtCold[layer] = std::move(tex);
+        p.rvtColdSRV[layer] = std::move(srv);
+    }
+    HE_LOG_INFO(RHI, "D3D11Renderer: RVT cold pool grew %u -> %u of %u pages (%.1f MB, BC7)", p.rvtColdAlloc, grown, p.rvtSlots,
+                double(grown) * HE::blockEncodedBytes(p.rvtPagePx, p.rvtPagePx) * 3.0 / (1024.0 * 1024.0));
+    p.rvtColdAlloc = grown;
+    return true;
+}
+
+// The hot slice of a manager slot, taking one from the free list (or growing the hot arrays) when it has none.
+static uint32_t rvtHotFor(D3D11RendererImpl& p, uint32_t slot)
+{
+    if (p.rvtSlotHot[slot] >= 0) return uint32_t(p.rvtSlotHot[slot]);
+    if (p.rvtHotFree.empty())
+    {
+        const uint32_t before = p.rvtAlloc;
+        if (!ensureRvtSlot(p, before) || p.rvtAlloc <= before) return 0xFFFFFFFFu;
+        for (uint32_t i = p.rvtAlloc; i-- > before;) p.rvtHotFree.push_back(i);
+    }
+    const uint32_t hot = p.rvtHotFree.back();
+    p.rvtHotFree.pop_back();
+    p.rvtSlotHot[slot] = int32_t(hot);
+    ++p.rvtStateVer;
+    return hot;
+}
+
+// The table the shader reads: the manager's entries (slot | effective mip << 24) with each slot rewritten to say which
+// array and which slice — a hot page is its hot slice, a cold page is bit 23 plus its slot (the cold arrays are indexed
+// by slot). D3D11's single immediate context orders a CPU UpdateSubresource against later draws in the same context
+// correctly by itself (unlike Metal's parallel command buffers), so — unlike MetalRenderer::UploadRvtTable — this
+// updates the EXISTING texture in place; no new texture/no tear to guard against here.
+static void uploadRvtTable(D3D11RendererImpl& p, D3D11RendererImpl::RvtTable& t)
+{
+    if (t.src.empty() || !t.tex) return;
+    std::vector<uint32_t> mapped;
+    for (size_t m = 0; m < t.src.size(); ++m)
+    {
+        const std::vector<uint32_t>& in = t.src[m];
+        mapped.resize(in.size());
+        for (size_t i = 0; i < in.size(); ++i)
+        {
+            const uint32_t e = in[i];
+            if (e == 0xFFFFFFFFu) { mapped[i] = e; continue; }
+            const uint32_t slot = e & 0xFFFFFFu, eff = e >> 24;
+            if (slot >= p.rvtSlots)               mapped[i] = 0xFFFFFFFFu;
+            else if (p.rvtSlotCold[slot])         mapped[i] = (eff << 24) | 0x800000u | slot;
+            else if (p.rvtSlotHot[slot] >= 0)     mapped[i] = (eff << 24) | uint32_t(p.rvtSlotHot[slot]);
+            else                                   mapped[i] = 0xFFFFFFFFu;   // never painted here: no page
+        }
+        const uint32_t ms = t.side >> m;
+        p.context->UpdateSubresource(t.tex.Get(), static_cast<UINT>(m), nullptr, mapped.data(), ms * sizeof(uint32_t), 0);
+    }
+    t.stateVer = p.rvtStateVer;
+}
+
+// The encoder thread and the readbacks still on their way to it. A readback in flight is a STAGING texture per layer
+// plus an EVENT query: D3D11's immediate-context Map() blocks until the GPU catches up, so the render thread polls the
+// query (GetData with DONOTFLUSH) instead of mapping right away — the same page-fence idea Metal's completion handler
+// gives for free.
+struct D3D11RendererImpl::RvtColdWork
+{
+    struct Todo   { uint32_t slot, ver; std::vector<uint8_t> rgba[3]; };
+    struct Done   { uint32_t slot, ver; std::vector<uint8_t> blocks[3]; };
+    struct Flight { uint32_t slot, ver; ComPtr<ID3D11Texture2D> staging[3]; ComPtr<ID3D11Query> query; };
+    std::mutex              mutex;
+    std::condition_variable cv;
+    std::deque<Todo>        todo;
+    std::deque<Done>        done;
+    std::vector<Flight>     flights;
+    std::thread             worker;
+    bool                    quit = false;
+    uint32_t                pagePx = 0;
+
+    void start(uint32_t px)
+    {
+        pagePx = px;
+        worker = std::thread([this] {
+            for (;;)
+            {
+                Todo job;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    // Idle for a few seconds: give the encoder's tables back, the next page makes new ones.
+                    if (!cv.wait_for(lock, std::chrono::seconds(3), [this] { return quit || !todo.empty(); }))
+                    {
+                        lock.unlock();
+                        HE::releaseBlockEncoderCache();
+                        lock.lock();
+                        cv.wait(lock, [this] { return quit || !todo.empty(); });
+                    }
+                    if (quit) return;
+                    job = std::move(todo.front());
+                    todo.pop_front();
+                }
+                Done out; out.slot = job.slot; out.ver = job.ver;
+                bool ok = true;
+                for (int layer = 0; layer < 3 && ok; ++layer)
+                    ok = HE::encodeBlocks(HE::BlockFormat::Bc7, job.rgba[layer].data(), pagePx, pagePx, /*srgb=*/false,
+                                          /*quality=*/0, out.blocks[layer]);
+                if (!ok) out.blocks[0].clear();   // an empty result: the page stays hot
+                std::lock_guard<std::mutex> lock(mutex);
+                done.push_back(std::move(out));
+            }
+        });
+    }
+    void stop()
+    {
+        { std::lock_guard<std::mutex> lock(mutex); quit = true; }
+        cv.notify_all();
+        if (worker.joinable()) worker.join();
+        flights.clear();   // ComPtr releases the staging textures/queries
+    }
+    ~RvtColdWork() { stop(); }
+};
+
+D3D11RendererImpl::~D3D11RendererImpl() { delete rvtWork; }
+
 bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 {
     auto& p = *m_impl;
@@ -9489,6 +9683,14 @@ bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
         }
     }
     p.rvtAlloc = first;
+    p.rvtSlotHot.assign(slots, -1);
+    p.rvtSlotCold.assign(slots, 0);
+    p.rvtSlotBusy.assign(slots, 0);
+    p.rvtSlotVer.assign(slots, 0);
+    p.rvtSlotPainted.assign(slots, 0);
+    p.rvtHotFree.clear();
+    for (uint32_t i = first; i-- > 0;) p.rvtHotFree.push_back(i);   // pop_back hands out the lowest first
+    p.rvtColdOn = false;   // probed lazily in UpdateRvtCold, once the pool exists
     {
         D3D11_TEXTURE2D_DESC cd{};
         cd.Width = cd.Height = pagePx;
@@ -9517,12 +9719,19 @@ bool D3D11Renderer::CreateRvtPool(uint32_t slots, uint32_t pagePx)
 void D3D11Renderer::DestroyRvtPool()
 {
     auto& p = *m_impl;
+    if (p.rvtWork) { p.rvtWork->stop(); delete p.rvtWork; p.rvtWork = nullptr; }
     for (int layer = 0; layer < 3; ++layer) { p.rvtPoolSRV[layer].Reset(); p.rvtPool[layer].Reset(); }
+    for (int layer = 0; layer < 3; ++layer) { p.rvtColdSRV[layer].Reset(); p.rvtCold[layer].Reset(); }
     p.rvtTables.clear();
     p.rvtSwaps.clear();   // the pool the consumers read is gone: draw the landscapes themselves again
     p.rvtPageTex.Reset(); p.rvtPageRTV[0].Reset(); p.rvtPageRTV[1].Reset();
     p.rvtPageDepth.Reset(); p.rvtPageDSV.Reset(); p.rvtPageDepthSRV.Reset();
-    p.rvtSlots = p.rvtAlloc = p.rvtPagePx = 0;
+    p.rvtSlots = p.rvtAlloc = p.rvtPagePx = p.rvtColdAlloc = 0;
+    p.rvtColdOn = false;
+    p.rvtStateVer = 1;
+    p.rvtRealFrames = 0;
+    p.rvtSlotHot.clear(); p.rvtSlotCold.clear(); p.rvtSlotBusy.clear(); p.rvtSlotVer.clear(); p.rvtSlotPainted.clear();
+    p.rvtHotFree.clear();
 }
 
 // One virtual texture page (Thema 333): the scene, as it stands, drawn through ONE camera into the page-sized target and
@@ -9566,9 +9775,20 @@ bool D3D11Renderer::RenderRvtPage(const EditorCameraOverride& camera, uint32_t p
     p.rvtPagePass = false;
     if (camera.rvtLayer == 2) p.m_extractor.endFrame();
     { ID3D11RenderTargetView* n = nullptr; p.context->OMSetRenderTargets(1, &n, nullptr); }
-    if (ensureRvtSlot(p, uint32_t(camera.rvtSlot)))
-        p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, UINT(camera.rvtSlot), 1), 0, 0, 0,
-                                         p.rvtPageTex.Get(), 0, nullptr);
+    {
+        const uint32_t slot = uint32_t(camera.rvtSlot);
+        if (camera.rvtLayer == 0)
+        {
+            // A new picture of this page: an encode of the old one is stale, a cold page is hot again, its age starts over.
+            ++p.rvtSlotVer[slot];
+            p.rvtSlotPainted[slot] = p.rvtRealFrames;
+            if (p.rvtSlotCold[slot]) { p.rvtSlotCold[slot] = 0; ++p.rvtStateVer; }
+        }
+        const uint32_t hotSlice = rvtHotFor(p, slot);
+        if (hotSlice != 0xFFFFFFFFu)
+            p.context->CopySubresourceRegion(p.rvtPool[camera.rvtLayer].Get(), D3D11CalcSubresource(0, hotSlice, 1), 0, 0, 0,
+                                             p.rvtPageTex.Get(), 0, nullptr);
+    }
 
     p.context->OMSetRenderTargets(1, prevRTV.GetAddressOf(), prevDSV.Get());
     if (nvp) p.context->RSSetViewports(1, &prevVP);
@@ -9627,9 +9847,8 @@ bool D3D11Renderer::SetRvtPageTable(const HE::UUID& consumerMaterial, const std:
         t.side = side;
         t.mips = static_cast<uint32_t>(mips.size());
     }
-    for (size_t m = 0; m < mips.size(); ++m)
-        p.context->UpdateSubresource(t.tex.Get(), static_cast<UINT>(m), nullptr, mips[m].data(),
-                                     (side >> m) * sizeof(uint32_t), 0);
+    t.src = mips;
+    uploadRvtTable(p, t);
     return true;
 }
 
@@ -9638,33 +9857,16 @@ bool D3D11Renderer::ReadbackRvtPageTable(const HE::UUID& consumerMaterial, std::
     auto& p = *m_impl;
     const auto found = p.rvtTables.find(consumerMaterial);
     if (found == p.rvtTables.end() || !found->second.tex) return false;
-    const D3D11RendererImpl::RvtTable& t = found->second;
-    D3D11_TEXTURE2D_DESC desc{};
-    t.tex->GetDesc(&desc);
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Texture2D> staging;
-    if (FAILED(p.device->CreateTexture2D(&desc, nullptr, &staging))) return false;
-    p.context->CopyResource(staging.Get(), t.tex.Get());
-    mips.assign(t.mips, {});
-    for (uint32_t m = 0; m < t.mips; ++m)
-    {
-        D3D11_MAPPED_SUBRESOURCE mp{};
-        if (FAILED(p.context->Map(staging.Get(), m, D3D11_MAP_READ, 0, &mp))) return false;
-        const uint32_t ms = t.side >> m;
-        mips[m].resize(size_t(ms) * ms);
-        for (uint32_t y = 0; y < ms; ++y)
-            std::memcpy(&mips[m][size_t(y) * ms], static_cast<const uint8_t*>(mp.pData) + size_t(y) * mp.RowPitch, size_t(ms) * sizeof(uint32_t));
-        p.context->Unmap(staging.Get(), m);
-    }
+    mips = found->second.src;   // the manager's form (what the witness compares against); the GPU texture holds the rewritten one
     return true;
 }
 
 bool D3D11Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_t>& rgba)
 {
     auto& p = *m_impl;
-    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtAlloc) return false;
+    // A cold page lives as BC7 blocks only: the witnesses read pages straight after painting them, hot.
+    if (layer < 0 || layer >= 3 || !p.rvtPool[layer] || slot >= p.rvtSlots || slot >= p.rvtSlotHot.size() || p.rvtSlotHot[slot] < 0)
+        return false;
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width = desc.Height = p.rvtPagePx;
     desc.MipLevels = desc.ArraySize = 1;
@@ -9675,7 +9877,7 @@ bool D3D11Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_
     ComPtr<ID3D11Texture2D> staging;
     if (FAILED(p.device->CreateTexture2D(&desc, nullptr, &staging))) return false;
     p.context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, p.rvtPool[layer].Get(),
-                                     D3D11CalcSubresource(0, slot, 1), nullptr);
+                                     D3D11CalcSubresource(0, UINT(p.rvtSlotHot[slot]), 1), nullptr);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(p.context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
     rgba.resize(static_cast<size_t>(p.rvtPagePx) * p.rvtPagePx * 4);
@@ -9685,6 +9887,112 @@ bool D3D11Renderer::ReadbackRvtSlot(int layer, uint32_t slot, std::vector<uint8_
                     static_cast<size_t>(p.rvtPagePx) * 4);
     p.context->Unmap(staging.Get(), 0);
     return true;
+}
+
+// Once per real frame (Render(), not RenderSceneImage/RenderRvtPage: those never call this): ages pages, harvests
+// finished encodes/readbacks, starts new readbacks for pages that stood still, re-uploads tables whose entries changed
+// temperature. Mirrors MetalRenderer::UpdateRvtCold (step 6j); D3D11 polls a query instead of a completion handler.
+void D3D11Renderer::UpdateRvtCold()
+{
+    auto& p = *m_impl;
+    if (!p.rvtSlots || !p.rvtPool[0]) return;
+    ++p.rvtRealFrames;
+
+    static const bool coldWanted = [] { const char* e = std::getenv("HE_RVT_COLD"); return !(e && *e == '0'); }();
+    if (!p.rvtColdOn && coldWanted)
+    {
+        std::vector<uint8_t> probe(16 * 16 * 4, 128), blocks;
+        p.rvtColdOn = HE::encodeBlocks(HE::BlockFormat::Bc7, probe.data(), 16, 16, false, 0, blocks);
+    }
+    if (!p.rvtColdOn) return;
+
+    // bc7enc's tables are a few KB (bc7enc_compress_block_init), nowhere near astcenc's ~40 MB context, so there is no
+    // Metal-style reason to wait for a big working set before compression starts: default 0 (always on once wanted).
+    static const uint32_t coldMin = [] { const char* e = std::getenv("HE_RVT_COLD_MIN"); return e && *e ? uint32_t(std::max(0, std::atoi(e))) : 0u; }();
+    const uint32_t hotUsed = p.rvtAlloc - uint32_t(p.rvtHotFree.size());
+    if (!p.rvtWork && hotUsed >= coldMin)
+    {
+        p.rvtWork = new D3D11RendererImpl::RvtColdWork();
+        p.rvtWork->start(p.rvtPagePx);
+        HE_LOG_INFO(RHI, "D3D11Renderer: RVT cold pool: %u hot pages in use, compressing the pages that stand still", hotUsed);
+    }
+    if (p.rvtWork)
+    {
+        static const uint64_t coldAfter = [] { const char* e = std::getenv("HE_RVT_COLD_AFTER"); return e && *e ? uint64_t(std::max(1, std::atoi(e))) : 120ull; }();
+        auto& w = *p.rvtWork;
+        const uint32_t px = p.rvtPagePx;
+        const size_t pageBytes = size_t(px) * px * 4;
+
+        // 1. Encodes that came back: the page goes cold if it was not painted again meanwhile.
+        std::deque<D3D11RendererImpl::RvtColdWork::Done> finished;
+        { std::lock_guard<std::mutex> lock(w.mutex); finished.swap(w.done); }
+        for (auto& d : finished)
+        {
+            p.rvtSlotBusy[d.slot] = 0;
+            if (d.blocks[0].empty() || d.ver != p.rvtSlotVer[d.slot] || p.rvtSlotHot[d.slot] < 0 || p.rvtSlotCold[d.slot]) continue;
+            if (!ensureRvtColdSlot(p, d.slot)) continue;
+            const uint32_t bx = (px + 3) / 4, rowPitch = bx * 16;
+            for (int layer = 0; layer < 3; ++layer)
+                p.context->UpdateSubresource(p.rvtCold[layer].Get(), D3D11CalcSubresource(0, d.slot, 1), nullptr,
+                                             d.blocks[layer].data(), rowPitch, 0);
+            p.rvtHotFree.push_back(uint32_t(p.rvtSlotHot[d.slot]));
+            p.rvtSlotHot[d.slot] = -1;
+            p.rvtSlotCold[d.slot] = 1;
+            ++p.rvtStateVer;
+        }
+
+        // 2. Readbacks whose GPU copy has finished (polled, never blocked): map, hand the RGBA bytes to the encoder thread.
+        for (auto it = w.flights.begin(); it != w.flights.end();)
+        {
+            if (p.context->GetData(it->query.Get(), nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) { ++it; continue; }
+            D3D11RendererImpl::RvtColdWork::Todo job; job.slot = it->slot; job.ver = it->ver;
+            bool ok = true;
+            for (int layer = 0; layer < 3 && ok; ++layer)
+            {
+                D3D11_MAPPED_SUBRESOURCE mp{};
+                ok = SUCCEEDED(p.context->Map(it->staging[layer].Get(), 0, D3D11_MAP_READ, 0, &mp));
+                if (!ok) break;
+                job.rgba[layer].resize(pageBytes);
+                for (uint32_t y = 0; y < px; ++y)
+                    std::memcpy(job.rgba[layer].data() + size_t(y) * px * 4,
+                                static_cast<const uint8_t*>(mp.pData) + size_t(y) * mp.RowPitch, size_t(px) * 4);
+                p.context->Unmap(it->staging[layer].Get(), 0);
+            }
+            if (ok) { std::lock_guard<std::mutex> lock(w.mutex); w.todo.push_back(std::move(job)); w.cv.notify_one(); }
+            else p.rvtSlotBusy[it->slot] = 0;
+            it = w.flights.erase(it);
+        }
+
+        // 3. Pages that have stood still long enough: start a readback (at most two a frame, six in flight).
+        int started = 0;
+        for (uint32_t slot = 0; slot < p.rvtSlots && started < 2 && w.flights.size() < 6; ++slot)
+        {
+            if (p.rvtSlotHot[slot] < 0 || p.rvtSlotCold[slot] || p.rvtSlotBusy[slot]) continue;
+            if (p.rvtRealFrames - p.rvtSlotPainted[slot] < coldAfter) continue;
+            D3D11RendererImpl::RvtColdWork::Flight f; f.slot = slot; f.ver = p.rvtSlotVer[slot];
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = desc.Height = px; desc.MipLevels = desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_STAGING; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            bool ok = true;
+            for (int layer = 0; layer < 3 && ok; ++layer)
+                ok = SUCCEEDED(p.device->CreateTexture2D(&desc, nullptr, &f.staging[layer]));
+            D3D11_QUERY_DESC qd{}; qd.Query = D3D11_QUERY_EVENT;
+            if (ok) ok = SUCCEEDED(p.device->CreateQuery(&qd, &f.query));
+            if (!ok) break;
+            for (int layer = 0; layer < 3; ++layer)
+                p.context->CopySubresourceRegion(f.staging[layer].Get(), 0, 0, 0, 0, p.rvtPool[layer].Get(),
+                                                 D3D11CalcSubresource(0, UINT(p.rvtSlotHot[slot]), 1), nullptr);
+            p.context->End(f.query.Get());
+            w.flights.push_back(std::move(f));
+            p.rvtSlotBusy[slot] = 1;
+            ++started;
+        }
+    }
+
+    // 4. Tables whose entries are out of date (a page changed temperature or got a hot slice since the last upload).
+    for (auto& kv : p.rvtTables)
+        if (kv.second.stateVer != p.rvtStateVer) uploadRvtTable(p, kv.second);
 }
 
 // ─── One still from somebody else's camera ────────────────────────────────────
