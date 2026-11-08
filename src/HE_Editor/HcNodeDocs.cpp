@@ -1165,6 +1165,16 @@ namespace
 	{ "hardware.activeGpuId",
 	  "The id of the graphics adapter the game renders on, in the form GPU Ids lists (vendor:device:number, for example "
 	  "10de:2786:0). Empty until a renderer is running." },
+	{ "hardware.preferredGpu",
+	  "The graphics card the game will start on next time, as an id from GPU Ids; empty means the system's default card. "
+	  "This is the saved choice, not necessarily the card running now (that is Get Active GPU Id)." },
+	{ "hardware.setPreferredGpu",
+	  "Chooses the graphics card for the next start. Pass an id from GPU Ids, or an empty text to go back to the default card. "
+	  "The running game keeps its card; a card that is gone at the next start falls back to the default with a warning. "
+	  "Returns false for an id that is not in GPU Ids, or when the choice could not be saved. OpenGL cannot choose a card." },
+	{ "hardware.gpuChoiceNote",
+	  "One sentence on what came of the graphics-card choice at this start: which card was asked for, that it runs, or why "
+	  "the default card runs instead (card gone, backend cannot choose). Empty before the renderer is up." },
 	{ "hardware.gpuNames",
 	  "The names of every graphics adapter, in the same order as GPU Ids. Fills a graphics-card drop-down." },
 	{ "hardware.gpuIds",

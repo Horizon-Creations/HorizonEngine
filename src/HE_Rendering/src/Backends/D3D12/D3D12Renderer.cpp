@@ -11143,8 +11143,21 @@ void D3D12Renderer::Initialize(HE::Window* window)
                 (m_impl->gpuDebug && std::getenv("HE_GPU_GBV")) ? 1 : 0);
     laps.mark("debugLayerSetup");
 
-    if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device))))
-        throw std::runtime_error("D3D12Renderer: D3D12CreateDevice failed");
+    {
+        // The GPU choice (Thema 337); a failure on the chosen adapter falls back to the default one.
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> chosen = HE::d3d::chooseAdapter();
+        HRESULT dhr = E_FAIL;
+        if (chosen)
+        {
+            dhr = D3D12CreateDevice(chosen.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device));
+            if (FAILED(dhr)) chosen.Reset();
+        }
+        if (FAILED(dhr))
+            dhr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_impl->device));
+        if (FAILED(dhr))
+            throw std::runtime_error("D3D12Renderer: D3D12CreateDevice failed");
+        HE::d3d::noteSelection("D3D12Renderer", chosen != nullptr);
+    }
     laps.mark("D3D12CreateDevice");
     {   // Which adapter the default device landed on (a laptop's iGPU vs its dGPU, WARP).
         Microsoft::WRL::ComPtr<IDXGIFactory4> factory;

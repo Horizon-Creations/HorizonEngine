@@ -2563,6 +2563,15 @@ namespace hardware {
     std::vector<std::string>  gpuIds();
     std::string               gpuAt(int index);
     std::string               activeGpuId();
+    // Which graphics card the game starts on. The choice is an id from gpuIds() ("" = the system's default
+    // card), kept for the NEXT start: the card a running game uses never changes under it. setPreferredGpu
+    // answers false for an id that is not in gpuIds(), and for a choice that could not be saved.
+    // gpuChoiceNote() says in a sentence what came of the choice at this start ("the chosen graphics card
+    // (10de:2786:0)", "... was not found; the system's default graphics card runs instead", "OpenGL cannot
+    // choose the graphics card"). A backend or a platform that cannot choose is told there, not hidden.
+    std::string               preferredGpu();
+    bool                      setPreferredGpu(const std::string& id);
+    std::string               gpuChoiceNote();
     // By name, for a settings screen that lists them all: fields() are the HardwareProperty names in
     // order (CpuName ... OnBattery), value(name) is the text of one ("" for none; the name is
     // case-insensitive and an unknown name reads "" too).

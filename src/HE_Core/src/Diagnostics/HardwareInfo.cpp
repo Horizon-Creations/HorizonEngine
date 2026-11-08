@@ -1,9 +1,12 @@
 #include "Diagnostics/HardwareInfo.h"
+#include "Diagnostics/GlobalState.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -573,6 +576,122 @@ void setGpuList(const std::vector<GpuInfo>& gpus)
     std::lock_guard<std::mutex> lock(s.mutex);
     s.rendererGpus = gpus;
     s.merge();
+}
+
+namespace {
+struct ChoiceState
+{
+    std::mutex   mutex;
+    std::string  directory;     // the game's data folder, "" in the editor
+    std::string  preferred;     // this run's choice
+    GpuSelection selection;
+};
+ChoiceState& choice()
+{
+    static ChoiceState s;
+    return s;
+}
+std::string lower(std::string s)
+{
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+std::string trimmed(const std::string& s)
+{
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
+std::filesystem::path choiceFile(const std::string& dir) { return std::filesystem::path(dir) / "gpu_adapter.txt"; }
+}
+
+int findGpuIndex(const std::vector<GpuInfo>& gpus, const std::string& id)
+{
+    if (id.empty()) return -1;
+    const std::string want = lower(id);
+    for (size_t i = 0; i < gpus.size(); ++i)
+        if (!gpus[i].id.empty() && lower(gpus[i].id) == want) return static_cast<int>(i);
+    return -1;
+}
+
+void setGpuChoiceDirectory(const std::string& directory)
+{
+    ChoiceState& c = choice();
+    std::lock_guard<std::mutex> lock(c.mutex);
+    c.directory = directory;
+}
+
+std::string loadPreferredGpu()
+{
+    if (const char* env = std::getenv("HE_GPU_ADAPTER"); env && *env)
+    {
+        const std::string v = trimmed(env);
+        return lower(v) == "default" ? std::string{} : v;
+    }
+    std::string dir;
+    { ChoiceState& c = choice(); std::lock_guard<std::mutex> lock(c.mutex); dir = c.directory; }
+    if (!dir.empty())
+    {
+        std::ifstream in(choiceFile(dir));
+        if (in.is_open())
+        {
+            std::string line;
+            std::getline(in, line);
+            return trimmed(line);
+        }
+        // No file yet: the export's own default (config.json) is the starting point.
+    }
+    return trimmed(GlobalState::getInstance().getCustomConfigString(kGpuAdapterConfigKey));
+}
+
+bool savePreferredGpu(const std::string& id)
+{
+    const std::string v = trimmed(id);
+    std::string dir;
+    { ChoiceState& c = choice(); std::lock_guard<std::mutex> lock(c.mutex); dir = c.directory; }
+    if (!dir.empty())
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        std::ofstream out(choiceFile(dir), std::ios::trunc);
+        if (!out.is_open()) return false;
+        out << v << "\n";
+        return static_cast<bool>(out);
+    }
+    GlobalState& gs = GlobalState::getInstance();
+    gs.setCustomConfigEntry(kGpuAdapterConfigKey, v);
+    return gs.writeConfig();
+}
+
+std::string preferredGpuId()
+{
+    ChoiceState& c = choice();
+    std::lock_guard<std::mutex> lock(c.mutex);
+    return c.preferred;
+}
+
+void setPreferredGpuId(const std::string& id)
+{
+    ChoiceState& c = choice();
+    std::lock_guard<std::mutex> lock(c.mutex);
+    c.preferred = id;
+    c.selection = GpuSelection{};
+    c.selection.requested = id;
+}
+
+void setGpuSelection(const GpuSelection& selection)
+{
+    ChoiceState& c = choice();
+    std::lock_guard<std::mutex> lock(c.mutex);
+    c.selection = selection;
+}
+
+GpuSelection gpuSelection()
+{
+    ChoiceState& c = choice();
+    std::lock_guard<std::mutex> lock(c.mutex);
+    return c.selection;
 }
 
 std::string makeGpuId(uint32_t vendorId, uint32_t deviceId, int ordinal)

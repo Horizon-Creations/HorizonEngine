@@ -6999,11 +6999,26 @@ void D3D11Renderer::Initialize(HE::Window* window)
     HRESULT hr;
     {
         Phase phase("D3D11", "D3D11CreateDeviceAndSwapChain");
-        hr = D3D11CreateDeviceAndSwapChain(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-            nullptr, 0, D3D11_SDK_VERSION,
-            &scd, &m_impl->swapchain,
-            &m_impl->device, &fl, &m_impl->context);
+        // The GPU choice (Thema 337): an explicit adapter needs D3D_DRIVER_TYPE_UNKNOWN. Any failure goes on
+        // to the default adapter below, so a stale choice never keeps the game from starting.
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> chosen = HE::d3d::chooseAdapter();
+        hr = E_FAIL;
+        if (chosen)
+        {
+            hr = D3D11CreateDeviceAndSwapChain(
+                chosen.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+                nullptr, 0, D3D11_SDK_VERSION,
+                &scd, &m_impl->swapchain,
+                &m_impl->device, &fl, &m_impl->context);
+            if (FAILED(hr)) chosen.Reset();
+        }
+        if (FAILED(hr))
+            hr = D3D11CreateDeviceAndSwapChain(
+                nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                nullptr, 0, D3D11_SDK_VERSION,
+                &scd, &m_impl->swapchain,
+                &m_impl->device, &fl, &m_impl->context);
+        if (SUCCEEDED(hr)) HE::d3d::noteSelection("D3D11Renderer", chosen != nullptr);
     }
     if (FAILED(hr))
         throw std::runtime_error("D3D11Renderer: D3D11CreateDeviceAndSwapChain failed");

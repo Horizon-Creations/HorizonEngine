@@ -3,8 +3,11 @@
 #include <Diagnostics/HardwareInfo.h>
 #include <Diagnostics/Log.h>
 
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Thema 337 step 1: the HardwareInfo model, its provider seam and the text summary. The platform
 // detection itself is checked against the machine only as far as every machine answers (a CPU
@@ -490,4 +493,113 @@ TEST_CASE("gpu list: the summary names the other adapters, the rows describe all
     CHECK(callRow("hardware.gpuAt", { Value::ofInt(2) })[0].s == "Microsoft Basic Render Driver (driver 10.0, software)");
     CHECK(callRow("hardware.gpuAt", { Value::ofInt(3) })[0].s.empty());
     CHECK(callRow("hardware.gpuAt", { Value::ofInt(-1) })[0].s.empty());
+}
+
+// ── Choosing the GPU (Thema 337 step 8) ──────────────────────────────────────────────────────────
+
+namespace
+{
+void setEnvVar(const char* name, const char* value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value ? value : "");
+#else
+    if (value) setenv(name, value, 1); else unsetenv(name);
+#endif
+}
+
+// A scratch folder for the game's choice file, with the choice state put back afterwards.
+struct ChoiceScratch
+{
+    std::filesystem::path dir;
+    ChoiceScratch()
+    {
+        dir = std::filesystem::temp_directory_path() / "he_gpu_choice_test";
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        setEnvVar("HE_GPU_ADAPTER", "");
+        HE::setGpuChoiceDirectory(dir.string());
+    }
+    ~ChoiceScratch()
+    {
+        HE::setGpuChoiceDirectory("");
+        HE::setPreferredGpuId("");
+        setEnvVar("HE_GPU_ADAPTER", "");
+        std::filesystem::remove_all(dir);
+    }
+};
+}
+
+TEST_CASE("gpu choice: an id is found in the list, case-insensitively, and never when empty")
+{
+    const std::vector<HE::GpuInfo> list = twoGpuMachine()->info.gpus;
+    CHECK(HE::findGpuIndex(list, "1002:13c0:0") == 0);
+    CHECK(HE::findGpuIndex(list, "10DE:2786:0") == 1);
+    CHECK(HE::findGpuIndex(list, "10de:2786:1") == -1);        // there is no second RTX 4070
+    CHECK(HE::findGpuIndex(list, "") == -1);
+    CHECK(HE::findGpuIndex({}, "10de:2786:0") == -1);
+    CHECK(HE::findGpuIndex(list, "nonsense") == -1);
+}
+
+TEST_CASE("gpu choice: the game keeps its choice in a file of its own, the environment overrides it")
+{
+    ChoiceScratch scratch;
+    CHECK(HE::loadPreferredGpu().empty());                      // nothing chosen: the default adapter
+    CHECK(HE::savePreferredGpu("10de:2786:0"));
+    CHECK(HE::loadPreferredGpu() == "10de:2786:0");
+    CHECK(std::filesystem::exists(scratch.dir / "gpu_adapter.txt"));
+
+    CHECK(HE::savePreferredGpu(""));                            // back to the default
+    CHECK(HE::loadPreferredGpu().empty());
+
+    CHECK(HE::savePreferredGpu("1002:13c0:0"));
+    setEnvVar("HE_GPU_ADAPTER", "10de:2786:0");                 // a developer's override wins ...
+    CHECK(HE::loadPreferredGpu() == "10de:2786:0");
+    setEnvVar("HE_GPU_ADAPTER", "default");                     // ... and "default" means none
+    CHECK(HE::loadPreferredGpu().empty());
+    setEnvVar("HE_GPU_ADAPTER", "");
+    CHECK(HE::loadPreferredGpu() == "1002:13c0:0");             // the file again
+
+    // Whitespace in a hand-edited file does not break the id.
+    { std::ofstream out(scratch.dir / "gpu_adapter.txt", std::ios::trunc); out << "  10de:2786:0 \r\n"; }
+    CHECK(HE::loadPreferredGpu() == "10de:2786:0");
+}
+
+TEST_CASE("gpu choice: the run's choice and what came of it")
+{
+    ChoiceScratch scratch;
+    HE::setPreferredGpuId("10de:2786:0");
+    CHECK(HE::preferredGpuId() == "10de:2786:0");
+    CHECK(HE::gpuSelection().requested == "10de:2786:0");
+    CHECK(HE::gpuSelection().honored);                          // until a renderer says otherwise
+
+    HE::GpuSelection s; s.requested = "10de:2786:0"; s.honored = false; s.canChoose = false; s.note = "OpenGL cannot choose";
+    HE::setGpuSelection(s);
+    CHECK_FALSE(HE::gpuSelection().honored);
+    CHECK_FALSE(HE::gpuSelection().canChoose);
+    CHECK(callRow("hardware.gpuChoiceNote")[0].s == "OpenGL cannot choose");
+
+    HE::setPreferredGpuId("");                                  // a new start resets the outcome
+    CHECK(HE::gpuSelection().note.empty());
+    CHECK(HE::gpuSelection().canChoose);
+}
+
+TEST_CASE("gpu choice: the rows save a known id for the next start and refuse an unknown one")
+{
+    RestoreProvider restore;
+    ChoiceScratch scratch;
+    HE::setHardwareProvider(twoGpuMachine());
+    using HorizonCode::Value;
+
+    CHECK(callRow("hardware.preferredGpu")[0].s.empty());
+    CHECK(callRow("hardware.setPreferredGpu", { Value::ofString("10de:2786:0") })[0].b);
+    CHECK(callRow("hardware.preferredGpu")[0].s == "10de:2786:0");
+    CHECK(HE::loadPreferredGpu() == "10de:2786:0");
+    CHECK(HE::preferredGpuId().empty());                        // the running game keeps its card
+
+    CHECK_FALSE(callRow("hardware.setPreferredGpu", { Value::ofString("dead:beef:0") })[0].b);
+    CHECK(callRow("hardware.preferredGpu")[0].s == "10de:2786:0");   // the refused id changed nothing
+
+    CHECK(callRow("hardware.setPreferredGpu", { Value::ofString("") })[0].b);   // back to the default
+    CHECK(callRow("hardware.preferredGpu")[0].s.empty());
 }

@@ -375,6 +375,13 @@ namespace HE
 		m_splash.setStatus("Initialising renderer", 0.15f);
 		HE_LOG_INFO(Core, "[startup] app phase=window+splash ms=%.1f", startupMs(startupT0));
 		const StartupClock::time_point rendererT0 = StartupClock::now();
+		// The GPU choice (Thema 337), read before the renderer exists: the backends that can pick an adapter
+		// create their device on it. "" = the default adapter.
+		{
+			const std::string gpu = HE::loadPreferredGpu();
+			HE::setPreferredGpuId(gpu);
+			if (!gpu.empty()) HE_LOG_INFO(Core, "Hardware    : GPU choice from the settings: %s", gpu.c_str());
+		}
 		m_renderer = CreateRenderer();
 		try
 		{

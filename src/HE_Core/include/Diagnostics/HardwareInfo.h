@@ -104,6 +104,46 @@ HE_API void setGpuInfo(const GpuInfo& gpu);
 HE_API void setGpuList(const std::vector<GpuInfo>& gpus);
 // "10de:2786:0": the stable id of an adapter (see GpuInfo::id).
 HE_API std::string makeGpuId(uint32_t vendorId, uint32_t deviceId, int ordinal);
+
+// ── Which GPU to use (Thema 337 step 8) ──────────────────────────────────────────────────────────
+// The choice is an id (GpuInfo::id) or "" for the system's default adapter. It is read once at start,
+// BEFORE the renderer is created, and every backend that can choose creates its device on that adapter;
+// an id that is not there (a card removed, a project moved to another PC) or a device that cannot be
+// created falls back to the default adapter with a warning. Changing it takes effect at the next start.
+
+// config.json key the editor keeps the choice under (an export may carry one as the game's default).
+constexpr const char* kGpuAdapterConfigKey = "GpuAdapter";
+
+// Index of the adapter with this id in the list, -1 when there is none ("" never matches). Case-insensitive.
+HE_API int findGpuIndex(const std::vector<GpuInfo>& gpus, const std::string& id);
+
+// A shipped game has no writable config.json: its player's choice lives in a file of its own in this folder
+// (the game's per-user data folder). Empty = the editor's way, config.json.
+HE_API void setGpuChoiceDirectory(const std::string& directory);
+
+// The saved choice: HE_GPU_ADAPTER from the environment ("default" = none) wins, then the choice file of
+// the game, then the config.json key. "" = the default adapter.
+HE_API std::string loadPreferredGpu();
+// Saves the choice for the next start (the file or config.json, see above). "" goes back to the default.
+// False when it could not be written.
+HE_API bool savePreferredGpu(const std::string& id);
+
+// What this run starts with: set by the application from loadPreferredGpu() before the renderer exists,
+// read by the renderers that can choose an adapter.
+HE_API std::string preferredGpuId();
+HE_API void        setPreferredGpuId(const std::string& id);
+
+// What came of it, written by the renderer: the choice that was asked for, whether the device really runs
+// on it, and a sentence for the log and the settings page ("OpenGL cannot choose the graphics card").
+struct GpuSelection
+{
+    std::string requested;        // "" = default was asked for
+    bool        honored = true;   // the device runs on the requested adapter (true for "default")
+    bool        canChoose = true; // false for a backend that cannot pick an adapter (OpenGL)
+    std::string note;
+};
+HE_API void         setGpuSelection(const GpuSelection& selection);
+HE_API GpuSelection gpuSelection();
 HE_API void setDisplayInfo(const DisplayInfo& display);
 
 // The main facts as text, one line per group, for a settings page or a bug report:

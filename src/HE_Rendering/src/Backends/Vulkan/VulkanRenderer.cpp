@@ -1563,15 +1563,70 @@ void VulkanRenderer::pickPhysicalDevice()
     if (count == 0) throw std::runtime_error("Vulkan: no GPU found");
     std::vector<VkPhysicalDevice> devs(count);
     vkEnumeratePhysicalDevices(m_instance, &count, devs.data());
-    m_physDevice = devs[0];
+    // The GPU choice (Thema 337): the device whose id (vendor:device:number, numbered in Vulkan's order) the
+    // settings named, provided it can draw to the window; else Vulkan's first device, as before.
+    uint32_t pick = 0;
+    {
+        const std::string want = HE::preferredGpuId();
+        HE::GpuSelection sel;
+        sel.requested = want;
+        if (want.empty())
+        {
+            sel.note = "the system's default graphics card";
+        }
+        else
+        {
+            std::vector<HE::GpuInfo> ids;
+            std::map<std::pair<uint32_t, uint32_t>, int> seen;
+            for (VkPhysicalDevice dev : devs)
+            {
+                VkPhysicalDeviceProperties dp{};
+                vkGetPhysicalDeviceProperties(dev, &dp);
+                HE::GpuInfo g;
+                g.id = HE::makeGpuId(dp.vendorID, dp.deviceID, seen[{ dp.vendorID, dp.deviceID }]++);
+                ids.push_back(std::move(g));
+            }
+            const int idx = HE::findGpuIndex(ids, want);
+            bool canPresent = false;
+            if (idx >= 0)
+            {
+                uint32_t qn = 0;
+                vkGetPhysicalDeviceQueueFamilyProperties(devs[static_cast<size_t>(idx)], &qn, nullptr);
+                std::vector<VkQueueFamilyProperties> qp(qn);
+                vkGetPhysicalDeviceQueueFamilyProperties(devs[static_cast<size_t>(idx)], &qn, qp.data());
+                for (uint32_t q = 0; q < qn && !canPresent; ++q)
+                {
+                    VkBool32 present = VK_FALSE;
+                    vkGetPhysicalDeviceSurfaceSupportKHR(devs[static_cast<size_t>(idx)], q, m_surface, &present);
+                    canPresent = (qp[q].queueFlags & VK_QUEUE_GRAPHICS_BIT) && present;
+                }
+            }
+            if (idx >= 0 && canPresent)
+            {
+                pick = static_cast<uint32_t>(idx);
+                sel.note = "the chosen graphics card (" + want + ")";
+                HE_LOG_INFO(RHI, "VulkanRenderer: running on the chosen adapter %s (device %u)", want.c_str(), pick);
+            }
+            else
+            {
+                sel.honored = false;
+                sel.note = idx < 0
+                    ? "the chosen graphics card (" + want + ") was not found; the system's default graphics card runs instead"
+                    : "the chosen graphics card (" + want + ") cannot draw to this window; the system's default graphics card runs instead";
+                HE_LOG_WARN(RHI, "VulkanRenderer: %s", sel.note.c_str());
+            }
+        }
+        HE::setGpuSelection(sel);
+    }
+    m_physDevice = devs[pick];
     // Name the device: a CI image test on a software ICD (lavapipe) must be able
     // to show in its log that "llvmpipe" — and not some other ICD — drew it.
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(m_physDevice, &props);
     char line[384];
     std::snprintf(line, sizeof line,
-        "VulkanRenderer: device 0 of %u: %s (Vulkan %u.%u.%u, driver 0x%x)",
-        count, props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
+        "VulkanRenderer: device %u of %u: %s (Vulkan %u.%u.%u, driver 0x%x)",
+        pick, count, props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
         VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion),
         props.driverVersion);
     HE_LOG_INFO(RHI, "%s", line);

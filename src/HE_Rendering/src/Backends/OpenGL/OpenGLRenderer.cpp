@@ -3495,6 +3495,18 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	{   // Name the GPU like the Vulkan backend does (vendor / renderer / driver version).
 		auto str = [](GLenum e) { const GLubyte* p = glGetString(e); return p ? reinterpret_cast<const char*>(p) : "?"; };
 		HE_LOG_INFO(RHI, "OpenGLRenderer: GPU %s %s (OpenGL %s)", str(GL_VENDOR), str(GL_RENDERER), str(GL_VERSION));
+		{
+			// The GPU choice (Thema 337): the OpenGL context lives on whatever card the driver gives the process,
+			// there is no API to name one. Said once so the settings page and the log do not pretend otherwise.
+			HE::GpuSelection sel;
+			sel.requested = HE::preferredGpuId();
+			sel.canChoose = false;
+			sel.honored   = sel.requested.empty();
+			sel.note      = "OpenGL cannot choose the graphics card; the driver's default runs (use D3D11, D3D12 or Vulkan to pick one)";
+			if (!sel.requested.empty())
+				HE_LOG_WARN(RHI, "OpenGLRenderer: GPU choice %s ignored: %s", sel.requested.c_str(), sel.note.c_str());
+			HE::setGpuSelection(sel);
+		}
 		// The same facts for HE::GpuInfo (Thema 337). GL_RENDERER carries driver noise after the name
 		// ("NVIDIA GeForce RTX 4070/PCIe/SSE2"), the part before the first slash is the GPU.
 		std::string name = str(GL_RENDERER);

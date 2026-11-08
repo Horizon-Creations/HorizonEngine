@@ -4930,6 +4930,17 @@ std::string gpuAt(int index)
     return index >= 0 && index < static_cast<int>(h.gpus.size()) ? gpuLine(h.gpus[static_cast<size_t>(index)]) : std::string{};
 }
 std::string activeGpuId()  { return HE::hardwareInfo().gpu.id; }
+std::string preferredGpu() { return HE::loadPreferredGpu(); }
+bool setPreferredGpu(const std::string& id)
+{
+    if (!id.empty() && HE::findGpuIndex(HE::hardwareInfo().gpus, id) < 0) return false;
+    return HE::savePreferredGpu(id);
+}
+std::string gpuChoiceNote()
+{
+    const HE::GpuSelection s = HE::gpuSelection();
+    return s.note;
+}
 std::string recommendedPreset()       { return HE::qualityPresetName(HE::recommendQualityPreset(HE::hardwareInfo())); }
 std::string recommendedPresetReason() { return HE::recommendQualityReason(HE::hardwareInfo()); }
 std::vector<std::string> fields()
@@ -7356,6 +7367,10 @@ const std::vector<ApiFn>& registry()
                 [](Ctx&, const VV&){ return VV{ Value::ofBool(hardware::onBattery()) }; } });
             num("hardware.gpuCount", "count", hardware::gpuCount, "HE::api::hardware::gpuCount");
             str("hardware.activeGpuId", "id", hardware::activeGpuId, "HE::api::hardware::activeGpuId");
+            str("hardware.preferredGpu", "id", hardware::preferredGpu, "HE::api::hardware::preferredGpu");
+            str("hardware.gpuChoiceNote", "text", hardware::gpuChoiceNote, "HE::api::hardware::gpuChoiceNote");
+            t.push_back({ "hardware.setPreferredGpu", "Hardware", true, {{"id", P::String}}, {{"ok", P::Bool}}, "HE::api::hardware::setPreferredGpu",
+                [](Ctx&, const VV& a){ return VV{ Value::ofBool(hardware::setPreferredGpu(aS(a, 0))) }; } });
             t.push_back({ "hardware.gpuNames", "Hardware", false, {}, {{"names", P::String, /*isArray=*/true}}, "HE::api::hardware::gpuNames",
                 [](Ctx&, const VV&){
                     Value arr; arr.isArray = true; arr.type = P::String;
@@ -8655,6 +8670,8 @@ const std::vector<ApiFn>& registry()
             { "hardware.onBattery", "Is On Battery" },
             { "hardware.summary", "Get Hardware Summary" },
             { "hardware.gpuCount", "Get GPU Count" }, { "hardware.activeGpuId", "Get Active GPU Id" },
+            { "hardware.preferredGpu", "Get Preferred GPU" }, { "hardware.setPreferredGpu", "Set Preferred GPU" },
+            { "hardware.gpuChoiceNote", "Get GPU Choice Note" },
             { "hardware.gpuNames", "GPU Names" }, { "hardware.gpuIds", "GPU Ids" }, { "hardware.gpuAt", "Get GPU At" },
             { "hardware.recommendedPreset", "Get Recommended Quality Preset" },
             { "hardware.recommendedPresetReason", "Get Recommended Preset Reason" },

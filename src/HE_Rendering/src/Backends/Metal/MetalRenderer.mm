@@ -6858,6 +6858,46 @@ void MetalRenderer::Initialize(HE::Window* window)
 	m_primarySdlWindow = window->GetNativeWindow();
 
 	id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+	{
+		// The GPU choice (Thema 337): the Metal device whose id the settings named. The ids are the same ones the
+		// device list below builds (vendor stand-in : 0 : number among that vendor's devices), so what the settings
+		// page showed is what is found here. No match: the system's default device, as before.
+		const std::string want = HE::preferredGpuId();
+		HE::GpuSelection sel;
+		sel.requested = want;
+		sel.note = "the system's default graphics card";
+		if (!want.empty())
+		{
+			auto vendorIdOf = [](const std::string& v) -> uint32_t {
+				return v == "Apple" ? 0x106bu : v == "AMD" ? 0x1002u : v == "Intel" ? 0x8086u : v == "NVIDIA" ? 0x10deu : 0u; };
+			std::map<uint32_t, int> seen;
+			std::vector<HE::GpuInfo> ids;
+			NSArray<id<MTLDevice>>* all = MTLCopyAllDevices();
+			for (id<MTLDevice> dev in all)
+			{
+				std::string v = HE::gpuVendorFromText([[dev name] UTF8String]);
+				if (v.empty()) v = "Apple";
+				HE::GpuInfo g;
+				const uint32_t vid = vendorIdOf(v);
+				g.id = HE::makeGpuId(vid, 0, seen[vid]++);
+				ids.push_back(std::move(g));
+			}
+			const int idx = HE::findGpuIndex(ids, want);
+			if (idx >= 0)
+			{
+				device = all[static_cast<NSUInteger>(idx)];
+				sel.note = "the chosen graphics card (" + want + ")";
+				HE_LOG_INFO(RHI, "MetalRenderer: running on the chosen device %s", want.c_str());
+			}
+			else
+			{
+				sel.honored = false;
+				sel.note = "the chosen graphics card (" + want + ") was not found; the system's default graphics card runs instead";
+				HE_LOG_WARN(RHI, "MetalRenderer: %s", sel.note.c_str());
+			}
+		}
+		HE::setGpuSelection(sel);
+	}
 	if (!device)
 		throw std::runtime_error("MetalRenderer: MTLCreateSystemDefaultDevice failed");
 	m_device = (void*)CFBridgingRetain(device);
