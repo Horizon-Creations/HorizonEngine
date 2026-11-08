@@ -237,6 +237,8 @@ add_executable(he_tests
     test_auto_lod.cpp
     # Impostor bake: CPU albedo+alpha picture of a plant, the sized card, the cut-out material (Thema 331 S4).
     test_impostor.cpp
+    # Meshlet culling prototype: build/frustum/cone vs brute force, opt-in foliage probe (Thema 331 S6).
+    test_meshlet_cull.cpp
     # Graph materials (wind) drawn instanced on GL and Metal (Thema 182, 2e).
     test_graph_instancing.cpp
     test_debug_draw.cpp

@@ -37,6 +37,7 @@ add_library(HorizonImporters STATIC
     src/MeshSimplify/MeshSimplifier.cpp
     src/MeshSimplify/AutoLod.cpp
     src/MeshSimplify/Impostor.cpp
+    src/MeshSimplify/MeshletCull.cpp
 )
 set_target_properties(HorizonImporters PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(HorizonImporters
