@@ -658,7 +658,7 @@ float shadowFactor(float3 worldPos, float3 N, float3 L, out int outCascade)
     // provide the indirect minimum; a floor bleeds sun colour into shadow.
     return vis / 9.0;
 }
-)HLSL" R"HLSL(
+
 // Point/spot shadow lookup in the local shadow atlas — the HLSL twin of Metal's
 // localShadowFactor(). Spot lights project into their single perspective
 // layer; point lights first pick the cube face from the fragment→light

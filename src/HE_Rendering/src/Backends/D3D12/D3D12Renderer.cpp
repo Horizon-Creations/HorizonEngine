@@ -292,7 +292,6 @@ float cloudShadowDensity(float3 pos, float time, float coverage, float3 wind)
     float  lo     = lerp(0.70f, 0.22f, clamp(coverage, 0.0f, 1.0f));
     return smoothstep(lo, lo + 0.13f, base) * hgrad;
 }
-)HLSL" R"HLSL(
 float3 applyClouds(float3 baseSky, float3 dir, float3 sunDir, float t,
                    float coverage, float3 sunColor, float3 wind)
 {
@@ -691,7 +690,7 @@ float shadowFactor(float3 worldPos, float3 N, float3 L, out int outCascade)
     // already provide the indirect minimum; a floor bleeds sun colour into shadow.
     return vis / 9.0;
 }
-)HLSL" R"HLSL(
+
 // Point/spot shadow lookup in the local shadow atlas — the same function D3D11
 // runs (the HLSL twin of Metal's localShadowFactor()). Spot lights project into
 // their single perspective layer; point lights first pick the cube face from
