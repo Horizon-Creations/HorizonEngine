@@ -11,8 +11,8 @@ Hive topic 337 (builds on 336: the settings rows, the Quality page, the quality 
 | `HE::HardwareInfo` (CPU, RAM, OS, battery; GPU and display handed over later), `hardwareInfo()`, `freeMemoryMB()`, `onBattery()`, `hardwareSummary()`, the `HardwareProvider` test seam, `HardwareProperty` | `HE_Core/include/Diagnostics/HardwareInfo.h`, `src/Diagnostics/HardwareInfo.cpp` |
 | The CPU / RAM / OS probes (moved out of `Log.cpp`; the startup banner and `Log::systemInfoBlock` read the same struct) | same |
 | `IRenderer::GetAdapterInfo()`, filled by every backend's `Initialize` | `IRenderer.h`; D3D11/D3D12 through `D3D_Shared/DxgiAdapterLog.h`, Vulkan `pickPhysicalDevice`, OpenGL's GPU block, Metal, Software |
-| Hand-over of GPU and display, five `Hardware` lines in the log | `Application.cpp`, after the renderer is up |
-| 26 `hardware.*` registry rows (HorizonCode, Lua, Python, C++) and the built-in enum `engine:HardwareProperty` | `HE_Scene/src/EngineApi.cpp`, `TypeRegistry.cpp`, node docs in `HcNodeDocs.cpp` |
+| Hand-over of GPU and display, five `Hardware` lines in the log (plus one `Other GPU` / `Other display` line per extra adapter / monitor) | `Application.cpp`, after the renderer is up |
+| 26 `hardware.*` registry rows (+ 16 for several GPUs / displays and the GPU choice, section 7) (HorizonCode, Lua, Python, C++) and the built-in enum `engine:HardwareProperty` | `HE_Scene/src/EngineApi.cpp`, `TypeRegistry.cpp`, node docs in `HcNodeDocs.cpp` |
 | The editor page Preferences » Preview » Hardware | `HE_Editor/HardwarePage.{h,cpp}`, `EditorSettingsPanel.cpp` |
 | Suggested preset: `recommendQualityPreset` + reason, rows `hardware.recommendedPreset` / `...Reason`, a hint on the Quality page | `QualitySettings.h`, `ProjectSettings.cpp` |
 | Manual section "Hardware Info" (rendering page, after Quality Settings) | `EditorDeps/Docs/he-docs.json` |
@@ -79,19 +79,80 @@ would see (for example D3D11 High is dominated by software GI).
 * macOS, Linux and the Metal adapter code are written but were not built or run (this is a Windows machine): the `sysctl` /
   `/proc` / `MTLDevice` paths, macOS battery (`onBattery` is always false there: no IOKit link), `host_statistics64` free memory.
   The Mac in the Hive can verify them; the unit tests there will run the same fake-provider cases.
-* Display changes after start (window moved to another monitor, resolution change) are not tracked: the display is read once, when the
-  renderer is up. Not asked for here; `setDisplayInfo` is the hook if a later topic wants it.
 * The Website manual (`rendering.html`) and the generated scripting-reference page were not touched (separate repo / generated); the
   in-engine manual has the section.
 * A "game settings menu" example as a ready-made graph: the Lua and Python samples in the manual and their tests are the working
   examples.
-* Multi-GPU machines: the card is the one the renderer runs on, no list of all adapters.
 * A visible-window run of the editor with the new page open was not done; the page is checked headless (UI test, picture) and its
   data on the real machine through the log lines of all four backends.
 
-## 6. Files
+## 6. Several GPUs, several displays, a GPU choice (steps 7-11)
 
-`Diagnostics/HardwareInfo.{h,cpp}`, `Log.cpp`, `IRenderer.h`, `DxgiAdapterLog.h`, the five renderers' `Initialize`, `Application.cpp`,
+Asked for after the first version: "with several GPUs and changing displays it should show correctly, and one should be able to
+choose which GPU is used, honored at start, otherwise fall back to the default GPU."
+
+**Lists.** `HardwareInfo::gpus` holds every adapter with a stable id `vvvv:dddd:n` (PCI vendor : device : number among identical
+cards, lower-case hex, the same on D3D11, D3D12, Vulkan and across restarts), the one the renderer runs on marked `active`. Windows
+lists them through DXGI before any renderer exists; Vulkan and Metal report their own list where the platform has none (Linux).
+OpenGL cannot read ids, so its active card is matched by name. `HardwareInfo::displays` holds every connected display (name,
+size, refresh, scale, position, primary), the one the window is on marked `current`; the application republishes it on
+`SDL_EVENT_DISPLAY_ADDED / REMOVED / MOVED / CURRENT_MODE_CHANGED / DESKTOP_MODE_CHANGED / CONTENT_SCALE_CHANGED` and
+`SDL_EVENT_WINDOW_DISPLAY_CHANGED / DISPLAY_SCALE_CHANGED`. The current display is the one the window overlaps most
+(`displayForRect`, nearest one when the window is off every display). The summary and the log get `Other GPU:` / `Other display:`
+lines.
+
+**Choice.** `GpuAdapter` (config.json custom key, editor) or `gpu_adapter.txt` in the game's per-user folder (a shipped game cannot
+write config.json; the export may carry a default `GpuAdapter`); `HE_GPU_ADAPTER` overrides both (`default` = none). It is read in
+`Application::Run` *before* the renderer exists. D3D11 / D3D12 create the device on the matching DXGI adapter, Vulkan takes the
+matching physical device if it can draw to the window, Metal the matching `MTLDevice` (written, not built here), OpenGL cannot
+pick and says so. An id that is not in the machine, or a device that fails to be created, falls back to the default adapter with one
+warning (`noteSelection` / the Vulkan, Metal and OpenGL equivalents); `HE::gpuSelection()` records what came of it.
+A change applies at the next start (the running device never moves).
+
+**Script rows** (all four languages): `gpuCount, gpuNames, gpuIds, gpuAt(i), activeGpuId, preferredGpu, setPreferredGpu(id),
+gpuChoiceNote, displayCount, displayNames, displayAt(i), currentDisplayIndex` (`setPreferredGpu` refuses an id that is not listed).
+**Editor:** Preferences » Preview » Hardware has the drop-down "Graphics card to use" (Default + every adapter, the saved one
+selected, a vanished card shown as "... (not present)", greyed with the reason on OpenGL, "takes effect at the next start"), and
+the groups "Graphics cards" and "Displays" when there is more than one:
+
+![The Hardware page with two cards and two displays](hardware-detection-gpu-choice-2026-11-08.png)
+
+(A made-up machine through the provider seam.)
+
+### Checked on this PC (RTX 4070 + AMD Radeon iGPU + Windows' Basic Render Driver, one monitor)
+
+* Log on D3D11 / D3D12 / OpenGL / Vulkan: `GPU: NVIDIA GeForce RTX 4070 (...)` plus `Other GPU: AMD Radeon(TM) Graphics (485 MB, driver 32.0.21034.41)` and
+  `Other GPU: Microsoft Basic Render Driver (..., software)`.
+* `HE_GPU_ADAPTER=1002:13c0:0` (the iGPU) really moves the work: D3D11 / D3D12 / Vulkan log `running on the chosen adapter` and
+  `GPU: AMD Radeon(TM) Graphics`, the GPU timer follows, and the frame is **pixel-identical** to the RTX frame (0 pixels differ by more than 8/255, all three APIs):
+
+  | API | RTX 4070, median GPU ms (2 runs) | AMD iGPU, median GPU ms (2 runs) |
+  |---|---|---|
+  | D3D11 | 0.088 / 0.084 | 2.556 / 2.555 |
+  | D3D12 | 0.100 / 0.095 | 2.966 / 2.969 |
+  | Vulkan | 0.101 / 0.102 | 3.687 / 3.655 |
+
+  (Same small scene, `HE_DUMP_GPUTIME=150`; absolute numbers say little, the point is that the other adapter is the one rendering. The D3D11 timer plateaus, see the quality document.)
+* An unknown id (`dead:beef:0`) on D3D11 / D3D12 / Vulkan: one warning, the RTX runs. OpenGL with a choice: one warning, "OpenGL cannot choose the graphics card", the RTX runs.
+* The editor with `GpuAdapter` in its config.json starts on the iGPU (D3D12).
+* A **real exported game** (exported with the new editor, `HEProject.exe`, game compiled from the SDK): with `gpu_adapter.txt` = the iGPU the game starts on
+  `AMD Radeon(TM) Graphics` on D3D11, D3D12 and Vulkan; with an unknown id or on OpenGL it warns and runs on the RTX; without a file it runs on the RTX as before.
+* Tests: `test_hardware_info` 25 cases (the list and active marking by ids / id / name, twin cards, renderer-list fallback, active card never missing, summary lines, choice
+  file round trip and the environment override, the rows, `displayForRect` on three monitors with negative coordinates, the list following the window, a monitor unplugged,
+  the rows and lines for displays), `test_ui_shot` (the page with two cards and two displays, the choice states: default, chosen, applied, vanished, OpenGL),
+  `editor_help_audit.py --check` 1277 / 1277, the engine-API, node-doc, codegen, Lua and Python tests re-run green.
+
+### Not verified (and why)
+
+* **Several real monitors**: this PC has one (BenQ GW2765). The display list, the current-display logic and the rows are covered by the unit tests with three made-up monitors
+  (negative coordinates, straddling, unplugged); the SDL events and a live drag to another monitor were not exercised.
+* **macOS / Linux / Metal**: the Vulkan list on Linux and the Metal device list and choice are written and read carefully but were not built or run (Windows machine). On macOS the ids use the vendor id as a stand-in (Metal exposes no PCI ids) and `0` as the device id.
+* **Hybrid laptops (Optimus / switchable graphics)**: an explicit D3D11 / D3D12 / Vulkan device on the chosen adapter works, but whether a window shown on the other GPU's output has to copy through the integrated card is the driver's business and was not measured.
+* A **GPU hot-plug** (eGPU) while the program runs: the list is detected once; the choice is made at start anyway.
+
+## 7. Files
+
+`Diagnostics/HardwareInfo.{h,cpp}`, `Log.cpp`, `IRenderer.h`, `DxgiAdapterLog.h` (also `chooseAdapter` / `noteSelection`), the five renderers' `Initialize`, `Application.cpp`, `GameApplication.cpp` (choice folder),
 `TypeRegistry.{h,cpp}`, `EngineApi.{h,cpp}`, `HcNodeDocs.cpp`, `QualitySettings.h`, `ProjectSettings.cpp`, `HardwarePage.{h,cpp}`,
 `EditorSettingsPanel.{h,cpp}`, `ProjectSettingsPanel.cpp`, `EditorHelp.cpp`, `EditorDeps/Docs/he-docs.json`, tests and the
 codegen fixture (`tests/CMakeLists.txt` lists the generated class `HardwareRows`).
