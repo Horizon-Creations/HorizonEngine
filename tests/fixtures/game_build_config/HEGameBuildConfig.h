@@ -170,14 +170,6 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "windowMode": "Fullscreen",
     "windowWidth": 1280
   },
-  "rvt": {
-    "activationRadiusM": 600.0,
-    "enabled": false,
-    "maxPagesPerFrame": 8,
-    "metersPerTexel": 0.25,
-    "nearRadiusM": 64.0,
-    "poolPages": 512
-  },
   "shadows": {
     "cascadeCount": 3,
     "distance": 250.0,

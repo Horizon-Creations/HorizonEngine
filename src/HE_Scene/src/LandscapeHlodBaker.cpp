@@ -13,6 +13,7 @@
 #include <Diagnostics/Log.h>
 #include <MaterialGraph/AutoLandscapeMaterial.h>
 #include <MaterialGraph/MaterialGraph.h>
+#include <MaterialGraph/RvtSplit.h>
 #include <Renderer/IRenderer.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -162,19 +163,14 @@ namespace HE::landscape
             }
     }
 
-    bool HlodBaker::begin(entt::entity terrain, std::string* why, bool switchRenderer)
+    bool HlodBaker::buildViews(entt::entity terrain, std::string* why, bool rebuild, bool touchViews)
     {
         auto fail = [&](const char* msg) { if (why) *why = msg; return false; };
-        end();
         auto& reg = m_live.registry();
         if (!reg.valid(terrain)) return fail("no such entity");
         const auto* tc  = reg.try_get<TerrainComponent>(terrain);
-        const auto* tfc = reg.try_get<TransformComponent>(terrain);
         const auto* mc  = reg.try_get<MaterialComponent>(terrain);
-        if (!tc || !tfc) return fail("not a landscape");
-        if (!mc || mc->materialAssetId == HE::UUID{}) return fail("the landscape uses the default material");
-        if (tfc->rotation != glm::vec3(0.0f) || tfc->scale != glm::vec3(1.0f))
-            return fail("a rotated or scaled landscape is not baked");
+        if (!tc || !mc || mc->materialAssetId == HE::UUID{}) return fail("the landscape uses the default material");
 
         // Everything read off the live material BEFORE any loadAsset (the next load invalidates getter pointers).
         const HE::UUID matId = mc->materialAssetId;
@@ -213,23 +209,91 @@ namespace HE::landscape
         // copied with the TerrainComponent into the scratch world) and the same fat arrays as the live material.
         // Without this a mixed landscape was refused here and kept its full per-pixel shader (Thema 333 step 8b).
         const bool mixed = isAutoLandscapeMixMaterial(baseId);
-        m_group = mixed ? std::clamp(tc->baseGroup, 0, kAutoLandscapeGroupCount - 1) : autoLandscapeGroupOfMaterial(baseId);
-        if (m_group < 0) return fail("the landscape material is not an Auto Landscape material");
+        const int group = mixed ? std::clamp(tc->baseGroup, 0, kAutoLandscapeGroupCount - 1) : autoLandscapeGroupOfMaterial(baseId);
+        if (group < 0) return fail("the landscape material is not an Auto Landscape material");
+        m_group = group;
 
         // The three views, with this landscape's parameters.
-        const AutoLandscapeView views[3] = { AutoLandscapeView::BaseColor, AutoLandscapeView::Normal, AutoLandscapeView::Surface };
-        const char* viewNames[3] = { "HlodBakeBaseColor", "HlodBakeNormal", "HlodBakeSurface" };
-        for (int v = 0; v < 3; ++v)
+        MaterialGraph graphs[3];
+        bool fromPages = false;
+        if (m_rvtPages)
         {
-            AutoLandscapeGraph built = buildAutoLandscapeGraph(views[v], static_cast<AutoLandscapeGroupId>(m_group), mixed);
-            applyInstanceOverrides(built.graph, names, data, overridden, swNames, swValues);
+            // RVT 2.0: the pages are painted from the material's own Write inputs (the baked base); what sits after the Read
+            // node is the consumer's. The same Lit graph the shipped material is made of, cut by the engine.
+            AutoLandscapeGraph lit = buildAutoLandscapeGraph(AutoLandscapeView::Lit, static_cast<AutoLandscapeGroupId>(group), mixed);
+            applyInstanceOverrides(lit.graph, names, data, overridden, swNames, swValues);
+            const MatRvtSplit split = matSplitRvt(lit.graph);
+            MatRvtLayerViews lv = matRvtLayerViews(split, kAutoLandscapeRvtName);
+            if (lit.rvtWrite && split.ok() && lv.ok)
+            {
+                for (int v = 0; v < 3; ++v) graphs[v] = std::move(lv.view[v]);
+                m_rvtLiveJson = materialGraphToJson(split.live);
+                fromPages = true;
+            }
+        }
+        if (!fromPages)
+        {
+            m_rvtLiveJson.clear();
+            const AutoLandscapeView views[3] = { AutoLandscapeView::BaseColor, AutoLandscapeView::Normal, AutoLandscapeView::Surface };
+            for (int v = 0; v < 3; ++v)
+            {
+                AutoLandscapeGraph built = buildAutoLandscapeGraph(views[v], static_cast<AutoLandscapeGroupId>(group), mixed);
+                applyInstanceOverrides(built.graph, names, data, overridden, swNames, swValues);
+                graphs[v] = std::move(built.graph);
+            }
+        }
+        const char* viewNames[3] = { "HlodBakeBaseColor", "HlodBakeNormal", "HlodBakeSurface" };
+        for (int v = 0; v < 3 && touchViews; ++v)
+        {
             MaterialAsset am;
             am.type = HE::AssetType::Material;
             am.name = viewNames[v];
-            am.nodeGraphJson = materialGraphToJson(built.graph);
+            am.nodeGraphJson = materialGraphToJson(graphs[v]);
+            if (rebuild && m_viewMat[v] != HE::UUID{})
+            {
+                // Same ids, new graphs: nothing is registered per change. The renderer rebuilds a shader only when its text
+                // changed; a parameter that moved reaches the page draw through the parameter block.
+                std::string oldGlsl;
+                if (const MaterialAsset* o = m_cm.getMaterial(m_viewMat[v])) oldGlsl = o->customShaderFragGlsl;
+                m_cm.replaceMaterial(m_viewMat[v], std::move(am));
+                m_cm.regenerateMaterialFromGraph(m_viewMat[v]);
+                const MaterialAsset* n = m_cm.getMaterial(m_viewMat[v]);
+                if (!n || n->customShaderFragGlsl != oldGlsl) m_rvtSeen[v] = false;
+                continue;
+            }
             m_viewMat[v] = m_cm.registerMaterial(std::move(am));
             m_cm.regenerateMaterialFromGraph(m_viewMat[v]);
         }
+        return true;
+    }
+
+    bool HlodBaker::rebuildRvtViews(bool views)
+    {
+        if (!m_active || !m_rvtPages || !buildViews(m_liveTerrain, nullptr, /*rebuild=*/true, views)) return false;
+        if (!views) return true;
+        m_renderer.WarmupMaterials({ m_viewMat[0], m_viewMat[1], m_viewMat[2] });
+        const auto t0 = std::chrono::steady_clock::now();
+        while (m_renderer.PumpShaderBuilds().pending != 0 && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(60))
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        return true;
+    }
+
+    bool HlodBaker::begin(entt::entity terrain, std::string* why, bool switchRenderer, bool rvtPages)
+    {
+        auto fail = [&](const char* msg) { if (why) *why = msg; return false; };
+        end();
+        auto& reg = m_live.registry();
+        if (!reg.valid(terrain)) return fail("no such entity");
+        const auto* tc  = reg.try_get<TerrainComponent>(terrain);
+        const auto* tfc = reg.try_get<TransformComponent>(terrain);
+        const auto* mc  = reg.try_get<MaterialComponent>(terrain);
+        if (!tc || !tfc) return fail("not a landscape");
+        if (!mc || mc->materialAssetId == HE::UUID{}) return fail("the landscape uses the default material");
+        if (tfc->rotation != glm::vec3(0.0f) || tfc->scale != glm::vec3(1.0f))
+            return fail("a rotated or scaled landscape is not baked");
+
+        m_rvtPages = rvtPages;
+        if (!buildViews(terrain, why, /*rebuild=*/false)) return false;
 
         // The scratch world: one landscape at the live one's world position, the chunks built the ordinary way.
         m_scratch = std::make_unique<HorizonWorld>();

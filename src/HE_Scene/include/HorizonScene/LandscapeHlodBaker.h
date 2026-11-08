@@ -57,7 +57,18 @@ namespace HE::landscape
         // scaled landscape, a renderer without RenderSceneImage.
         // `switchRenderer` false (the Runtime Virtual Texture driver, every frame): the renderer keeps drawing `restoreTo`;
         // paintBegin()/paintEnd() move it to the scratch world and back around each batch of pages.
-        bool begin(entt::entity terrain, std::string* why = nullptr, bool switchRenderer = true);
+        // `rvtPages` (RVT 2.0): the three view materials are cut from the Lit material's own RVT Write inputs (matRvtLayerViews:
+        // the baked base, without snow, the sand's ripples, puddles or trails) instead of the full-material views, and the
+        // part after the RVT Read is kept as rvtLiveGraphJson() for the driver's consumer material.
+        bool begin(entt::entity terrain, std::string* why = nullptr, bool switchRenderer = true, bool rvtPages = false);
+        // RVT 2.0: builds the view materials and the live graph again from the landscape's material as it is now (a parameter
+        // before the Write node moved), in place: the same material ids, the renderer rebuilds their shaders. The scratch
+        // landscape, the chunks and the pages are untouched; the caller marks the pages stale.
+        // `views` false: only the live graph is rebuilt (a parameter after the Read node moved); the page materials are left alone.
+        bool rebuildRvtViews(bool views = true);
+        // The graph after the RVT Read (the Lit material's live part) with this landscape's parameters; empty when the
+        // views were not cut from pages.
+        const std::string& rvtLiveGraphJson() const { return m_rvtLiveJson; }
         // Switches the renderer back to the live world and drops the scratch world. Also called by the destructor.
         void end();
 
@@ -101,6 +112,8 @@ namespace HE::landscape
         void viewMaterials(HE::UUID (&mats)[3]) const { for (int i = 0; i < 3; ++i) mats[i] = m_viewMat[i]; }
 
     private:
+        // Reads the live landscape's material and (re)builds the three view materials (and the live graph) from it.
+        bool buildViews(entt::entity terrain, std::string* why, bool rebuild, bool touchViews = true);
         bool renderView(const HE::UUID& material, const HlodChunkRect& rect, uint32_t px, bool srgb,
                         std::vector<uint8_t>& rgba, int rvtSlot = -1, int rvtLayer = 0, bool invalidate = true);
 
@@ -116,6 +129,8 @@ namespace HE::landscape
         std::vector<HlodChunkRect> m_rects;          // [cz * chunksPerSide + cx]
         glm::vec3       m_pos{ 0.0f };               // the landscape's world position (terrain-local XZ is relative to it)
         int             m_group = -1;
+        bool            m_rvtPages = false;          // the views are the Write pages of the Lit material (begin's rvtPages)
+        std::string     m_rvtLiveJson;               // the Lit material after its Read node, this landscape's parameters
         bool            m_rvtSeen[3] = { false, false, false };   // a view material the renderer has already resolved for pages
         bool            m_active = false;
         // Shared chunk meshes (Thema 333, step 6i): the scratch landscape's chunk entities point at the LIVE landscape's LOD0

@@ -416,4 +416,84 @@ MatRvtSplit matSplitRvt(const MaterialGraph& graph)
     r.live = std::move(live);
     return r;
 }
+
+MatRvtLayerViews matRvtLayerViews(const MatRvtSplit& split, const std::string& rvtName)
+{
+    MatRvtLayerViews r;
+    const MatRvtPage* pg[4] = { nullptr, nullptr, nullptr, nullptr };
+    for (const MatRvtPage& p : split.pages)
+        if (p.rvtName == rvtName && p.writePin >= 0 && p.writePin < 4 && !pg[p.writePin]) pg[p.writePin] = &p;
+    if (!pg[0] && !pg[1] && !pg[2] && !pg[3]) return r;
+
+    struct Src { int node = 0; int pin = 0; };
+    // Copies page `p` into `dst` (nodes and links both pages share are taken once) and returns what its Output was fed by.
+    auto take = [](MaterialGraph& dst, const MatRvtPage& p) {
+        for (const MatGraphNode& n : p.graph.nodes)
+            if (n.id != p.outputNode && !dst.findNode(n.id)) dst.nodes.push_back(n);
+        for (const MatGraphLink& l : p.graph.links)
+        {
+            if (l.dstNode == p.outputNode) continue;
+            bool have = false;
+            for (const MatGraphLink& d : dst.links)
+                have = have || (d.dstNode == l.dstNode && d.dstPin == l.dstPin);
+            if (!have) dst.links.push_back(l);
+        }
+        Src s;
+        for (const MatGraphLink& l : p.graph.links)
+            if (l.dstNode == p.outputNode && l.dstPin == kMatOutputBaseColorPin) { s.node = l.srcNode; s.pin = l.srcPin; }
+        return s;
+    };
+    int nextId = 1;
+    for (const MatRvtPage* p : pg) if (p) nextId = std::max(nextId, p->graph.nextId);
+    auto begin = [&](MaterialGraph& g) {
+        g.nextId = nextId;
+        const int out = g.addNode(T::Output);
+        g.findNode(out)->p[0] = 0.0f;               // unlit: the frame IS the value
+        return out;
+    };
+    auto constant = [](MaterialGraph& g, float a, float b, float c) {
+        const int n = g.addNode(T::ConstColor);
+        g.findNode(n)->p[0] = a; g.findNode(n)->p[1] = b; g.findNode(n)->p[2] = c;
+        return Src{ n, 0 };
+    };
+    auto scalar = [](MaterialGraph& g, float v) {
+        const int n = g.addNode(T::ConstFloat);
+        g.findNode(n)->p[0] = v;
+        return n;
+    };
+
+    {   // layer 0: colour
+        MaterialGraph& g = r.view[0];
+        const int out = begin(g);
+        const Src s = pg[0] ? take(g, *pg[0]) : constant(g, 0.5f, 0.5f, 0.5f);
+        g.connect(s.node, s.pin, out, kMatOutputBaseColorPin);
+        r.pins[0] = 1u << kRvtWriteBaseColorPin;
+    }
+    {   // layer 1: normal, n * 0.5 + 0.5
+        MaterialGraph& g = r.view[1];
+        const int out = begin(g);
+        const Src s = pg[1] ? take(g, *pg[1]) : constant(g, 0.0f, 1.0f, 0.0f);
+        const int m = g.addNode(T::Multiply), a = g.addNode(T::Add), half = scalar(g, 0.5f);
+        g.connect(s.node, s.pin, m, 0);
+        g.connect(half, 0, m, 1);
+        g.connect(m, 0, a, 0);
+        g.connect(half, 0, a, 1);
+        g.connect(a, 0, out, kMatOutputBaseColorPin);
+        r.pins[1] = 1u << kRvtWriteNormalPin;
+    }
+    {   // layer 2: AO, roughness
+        MaterialGraph& g = r.view[2];
+        const int out = begin(g);
+        const Src ao = pg[3] ? take(g, *pg[3]) : Src{ scalar(g, 1.0f), 0 };
+        const Src rg = pg[2] ? take(g, *pg[2]) : Src{ scalar(g, 1.0f), 0 };
+        const int c = g.addNode(T::Combine3), zero = scalar(g, 0.0f);
+        g.connect(ao.node, ao.pin, c, 0);
+        g.connect(rg.node, rg.pin, c, 1);
+        g.connect(zero, 0, c, 2);
+        g.connect(c, 0, out, kMatOutputBaseColorPin);
+        r.pins[2] = (1u << kRvtWriteRoughnessPin) | (1u << kRvtWriteAOPin);
+    }
+    r.ok = true;
+    return r;
+}
 } // namespace HE

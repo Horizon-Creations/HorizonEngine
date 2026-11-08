@@ -8,6 +8,7 @@
 //     can never be read outside itself;
 //   * the arrays assemble in that order (HE::buildTextureArray + autoLandscapeSliceSource).
 #include "doctest.h"
+#include "RvtOffScope.h"
 
 #include <ContentManager/Assets.h>
 #include <ContentManager/TextureArrayBuild.h>
@@ -163,6 +164,7 @@ TEST_CASE("Groups wired: a variant per hex, no extra texture read")
 
 TEST_CASE("The auto landscape graph reads variants: 27 hex reads, one variant grid per layer")
 {
+	HE_TEST::RvtOffScope rvtOff;   // the whole material in one shader (RVT on splits it into pages and a live part)
 	const MaterialGraph g = HE::buildAutoLandscapeGraph().graph;
 	const HE::MatShaderGen lit = HE::generateFragment(g, HE::weatherFunctionLoader());
 	REQUIRE(lit.textures.size() == 4);   // three arrays + the trail clipmap (Thema 328 step 5b)
@@ -423,9 +425,14 @@ TEST_CASE("Auto landscape: the Displacement pin is optional, off it is the graph
 		CHECK(t.maxDisplacement == doctest::Approx(kAutoLandscapeDisplacementMetres * 0.5f));
 		CHECK(t.maxFactor > 1.0f);
 		// Same parameters, so a project's overrides carry over; only the Displacement chain is added.
+		// (RVT 2.0: the plain Lit view is cut at a Write/Read pair, the displacement one is not: the domain stage cannot read a
+		// pool, and a Read gives back no relief height. So the two are no longer the same graph plus a chain.)
 		const AutoLandscapeGraph off = buildAutoLandscapeGraph(AutoLandscapeView::Lit, id, false, false);
-		CHECK(on.graph.nodes.size() == off.graph.nodes.size() + 4);
-		CHECK(on.graph.links.size() == off.graph.links.size() + 5);   // Subtract and Multiply take two inputs each, plus the pin
+		CHECK(off.rvtWrite != 0);
+		CHECK(off.rvtRead != 0);
+		CHECK(on.rvtWrite == 0);
+		CHECK(on.rvtRead == 0);
+		CHECK(on.graph.findNode(on.output)->tess.maxFactor > 1.0f);
 	}
 	// Only the lit view carries it: the debug views stay untouched.
 	CHECK(displacementLinks(buildAutoLandscapeGraph(AutoLandscapeView::Surface, AutoLandscapeGroupId::Mountains, false, true)) == 0);

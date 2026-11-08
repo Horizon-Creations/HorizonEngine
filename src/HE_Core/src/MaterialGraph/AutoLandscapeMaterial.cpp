@@ -4,6 +4,7 @@
 #include <Trails/TrailClipmap.h>
 #include <MaterialGraph/ProceduralSurfaceFunctions.h>
 #include <MaterialGraph/WeatherMaterialFunctions.h>
+#include <MaterialGraph/RvtSplit.h>
 
 namespace HE
 {
@@ -301,12 +302,35 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         r.graph.connect(trailHeap, 0, sand, kSandInDisturbanceHeap);
         return surfaceOf(sand, 2);
     };
+    // RVT 2.0 (Thema 335 step 4): the Lit material is two programs, cut at an RVT Write / RVT Read pair. Everything that
+    // changes rarely (the layer blend of the groups, texture bombing, the slope blend, the painted layers) feeds the Write
+    // node and is painted into the pages; snow, the procedural sand's ripples, puddles and trails run live after the Read
+    // node and so never repaint a page. The displacement variant keeps the whole graph in one program: the domain stage
+    // cannot read a pool and needs the blended relief height, which a Read does not give back.
+    const bool rvt = view == AutoLandscapeView::Lit && !displacement;
+    // The sand as the page keeps it: the dry colour, the terrain normal and a fixed roughness. The ripples, the grain, the
+    // weather and the trails are the live part's (sandLive below).
+    auto plainSand = [&]() {
+        LayerReads lr;
+        lr.albedo = w.node(T::ConstColor, 2);
+        {
+            MatGraphNode* c = r.graph.findNode(lr.albedo);
+            c->p[0] = 0.221f; c->p[1] = 0.168f; c->p[2] = 0.104f;
+        }
+        lr.normal = nrm;
+        lr.mask   = w.op(T::Combine3, 2, { { one }, { w.constF(0.85f, 2) }, { w.constF(0.5f, 2) } });
+        lr.height = w.op(T::SplitRGBA, 2, { { lr.mask } });
+        return lr;
+    };
+    LayerReads sandLive;
     if (mixed)
     {
         // Role 0 of a mix: each of the two groups' ground is its array slice, or the procedural sand
         // where that group is the Desert, then the pair blends by A's weight. Both are always
         // evaluated (no branch): the Desert's sand costs every fragment of a mixed terrain.
-        const LayerReads sand  = makeSand();
+        // (RVT: the page holds the plain sand colour, the procedural sand is the live part's.)
+        if (rvt) sandLive = makeSand();
+        const LayerReads sand  = rvt ? plainSand() : makeSand();
         // Per side (A, B): the group's slice, or the sand where that group is the Desert.
         const int role0 = w.constF(0.0f, 2);
         auto sideOf = [&](int groupPin) {
@@ -326,7 +350,10 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
         grass.height = w.op(T::SplitRGBA, 2, { { grass.mask } });
     }
     else if (group.proceduralSand)
-        grass = makeSand();
+    {
+        if (rvt) sandLive = makeSand();
+        grass = rvt ? plainSand() : makeSand();
+    }
     else
         grass = layer(AutoLandscapeLayer::Grass, uvGround, 11);
     LayerReads       dirt  = layer(AutoLandscapeLayer::Dirt,      uvGround, 23);
@@ -464,11 +491,15 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
                                         { heightBias(rock.height, 2, groundSplit, 2, pRockBlend, 4) } });
     r.rockMask = w.ramp(pRockSlope, pRockBlend, { rockT }, 4);
     const Surface s1 = blend(ground, rock, r.rockMask, 4);
-    const int s1Split = w.op(T::SplitRGBA, 4, { { s1.mask } });
+    // The height the snow's transition is biased against: the ground's blended relief (the arrays' mask B). The live
+    // part of the RVT material cannot see it (a Read gives back colour, normal, roughness and AO), so there the ground
+    // counts as the middle of the relief range and only the snow's own height bends the edge.
+    const int s1Split = rvt ? w.constF(0.5f, 4) : w.op(T::SplitRGBA, 4, { { s1.mask } });
+    const int s1SplitPin = rvt ? 0 : 2;
 
     // ── Snow above a height, not on cliffs (column 5) ────────────────────────
     const int snowT  = w.op(T::Add, 5, { { wsplit, 1 },
-                                         { heightBias(snow.height, 2, s1Split, 2, pSnowBlend, 5) } });
+                                         { heightBias(snow.height, 2, s1Split, s1SplitPin, pSnowBlend, 5) } });
     const int snowHi = w.ramp(pSnowH, pSnowBlend, { snowT }, 5);
     const int cliffW = w.constF(0.1f, 5);
     const int cliff  = w.ramp(pSnowSlope, cliffW, { r.slope }, 5);
@@ -485,12 +516,14 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     r.graph.findNode(snowCall)->s = kWeatherSnowFunctionPath;
     r.graph.connect(r.slope, 0, snowCall, 0);                       // Slope
     r.graph.connect(pSnowSlope, 0, snowCall, 1);                    // Max Slope
-    r.graph.connect(heightBias(snow.height, 2, s1Split, 2, one, 5), 0, snowCall, 2);  // Height Bias
+    r.graph.connect(heightBias(snow.height, 2, s1Split, s1SplitPin, one, 5), 0, snowCall, 2);  // Height Bias
     const int weatherSnow = snowCall;                               // pin 0 = Snow
     const int snowBoth = w.op(T::Multiply, 5, { { r.snowMask }, { weatherSnow, 0 } });
     const int snowSum  = w.op(T::Add, 5, { { r.snowMask }, { weatherSnow, 0 } });
     const int snowAny  = w.op(T::Subtract, 5, { { snowSum }, { snowBoth } });
-    const Surface s2 = blend(s1, snow, snowAny, 5);
+    // RVT: the page holds the ground without snow (the live part lays it over the Read); the auto-surface entries of the
+    // painted blend below are then the ground itself.
+    const Surface s2 = rvt ? s1 : blend(s1, snow, snowAny, 5);
 
     // ── Painted layers (column 6) ────────────────────────────────────────────
     // Everything above is the AUTOMATIC distribution (s2). The landscape's painted
@@ -522,13 +555,70 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // The surface the painted weights make of it: one blend per channel set. The
     // Puddles input is s2 again — puddles change what lies on the ground, not the
     // ground, so their share keeps the automatic surface underneath.
+    // (RVT: the painted Snow layer's entry is the ground too; its share lies as snow over the Read, live.)
+    const LayerReads snowEntry = rvt ? LayerReads{ s2.albedo, s2.normal, s2.mask, s2.mask } : snow;
     const int mixAlbedo = layerBlend({ s2.albedo, grass.albedo, dirt.albedo, rock.albedo,
-                                       snow.albedo, s2.albedo }, 6);
+                                       snowEntry.albedo, s2.albedo }, 6);
     const int mixNormal = layerBlend({ s2.normal, grass.normal, dirt.normal, rock.normal,
-                                       snow.normal, s2.normal }, 6);
+                                       snowEntry.normal, s2.normal }, 6);
     const int mixMask   = layerBlend({ s2.mask, grass.mask, dirt.mask, rock.mask,
-                                       snow.mask, s2.mask }, 6);
-    const Surface s3{ mixAlbedo, mixNormal, mixMask };
+                                       snowEntry.mask, s2.mask }, 6);
+    Surface s3{ mixAlbedo, mixNormal, mixMask };
+    if (rvt)
+    {
+        // ── RVT Write: the baked base (column 9) ─────────────────────────────
+        // Colour, normal, roughness and AO of the blended ground. The weights, the arrays, the bombing and the slope are
+        // all upstream of this node: they are what a page is painted from (matSplitRvt cuts one page per pin). Height
+        // and Mask stay unconnected: a Read does not give them back.
+        const int baseN  = w.op(T::Normalize3, 9, { { mixNormal } });
+        const int baseM  = w.op(T::SplitRGBA, 9, { { mixMask } });
+        r.rvtWrite = w.node(T::RvtWrite, 9);
+        r.graph.findNode(r.rvtWrite)->s = kAutoLandscapeRvtName;
+        r.graph.connect(mixAlbedo, 0, r.rvtWrite, kRvtWriteBaseColorPin);
+        r.graph.connect(baseN,     0, r.rvtWrite, kRvtWriteNormalPin);
+        r.graph.connect(baseM,     1, r.rvtWrite, kRvtWriteRoughnessPin);
+        r.graph.connect(baseM,     0, r.rvtWrite, kRvtWriteAOPin);
+
+        // ── RVT Read and everything after it, live (column 10) ───────────────
+        r.rvtRead = w.node(T::RvtRead, 10);
+        r.graph.findNode(r.rvtRead)->s = kAutoLandscapeRvtName;
+        const int mid = w.constF(0.5f, 10);
+        s3.albedo = w.op(T::Reroute, 10, { { r.rvtRead, kRvtReadBaseColorPin } });
+        s3.normal = w.op(T::Reroute, 10, { { r.rvtRead, kRvtReadNormalPin } });
+        s3.mask   = w.op(T::Combine3, 10, { { r.rvtRead, kRvtReadAOPin }, { r.rvtRead, kRvtReadRoughnessPin }, { mid } });
+        // The ground's shares as the painted weights give them (the same two Layer Blend nodes the page reads):
+        // what the paint leaves to the automatic rules.
+        const int sumGDR   = w.op(T::Add, 10, { { w.op(T::Add, 10, { { mG, 0 }, { mD, 1 } }) }, { mR, 2 } });
+        const int paintedS = w.op(T::Saturate, 10, { { w.op(T::Add, 10, { { sumGDR }, { mS, 0 } }) } });
+        const int autoShare = w.op(T::OneMinus, 10, { { paintedS } });
+        if (sandLive.albedo)
+        {
+            // The sand's ripples over the baked plain sand, by the sand's share of the ground: painted grass plus what
+            // the automatic rules leave to role 0 (neither dirt patches nor rock), recomputed from the slope and the
+            // dirt noise alone. The page blends by the layers' heights as well, so a thin band at the transitions can differ.
+            const int dirtNoiseL = w.ramp(dirtE0, dirtW, { dirtFbm }, 10);
+            const int dirtL      = w.op(T::Saturate, 10, { { w.op(T::Add, 10, { { dirtNoiseL }, { dirtBelt } }) } });
+            const int rockL      = w.ramp(pRockSlope, pRockBlend, { r.slope }, 10);
+            const int groundL    = w.op(T::Multiply, 10, { { w.op(T::OneMinus, 10, { { dirtL } }) },
+                                                           { w.op(T::OneMinus, 10, { { rockL } }) } });
+            int share = w.op(T::Saturate, 10, { { w.op(T::Add, 10, { { mG, 0 },
+                                                                      { w.op(T::Multiply, 10, { { autoShare }, { groundL } }) } }) } });
+            if (mixed)
+            {
+                const int limit  = w.constF(2.5f, 10);
+                const int desA   = w.op(T::Greater, 10, { { pick, 0 }, { limit } });
+                const int desB   = w.op(T::Greater, 10, { { pick, 1 }, { limit } });
+                const int desert = w.op(T::Lerp, 10, { { desB }, { desA }, { pickMix, 2 } });
+                share = w.op(T::Multiply, 10, { { share }, { desert } });
+            }
+            s3 = blend(s3, sandLive, share, 10);
+        }
+        // Snow over it: the height and slope snow (r.snowMask is its automatic part), the weather's, and the painted
+        // Snow layer's share.
+        const int snowF = w.op(T::Saturate, 10, { { w.op(T::Add, 10, { { mS, 0 },
+                                                  { w.op(T::Multiply, 10, { { autoShare }, { snowAny } }) } }) } });
+        s3 = blend(s3, snow, snowF, 10);
+    }
 
     // ── Puddles: flat ground in the minima of a noise field (column 7) ───────
     // Water thins out over a WIDE slope band (a fifth of the limit up to the limit),
@@ -573,12 +663,20 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     // blended B channel of everything under the puddle). The AUTOMATIC surface s2
     // is used here, not the painted mix: the masks stay a pure function of the
     // terrain, so the mask views (and the witness) need no weightmap.
-    const int s2Split = w.op(T::SplitRGBA, 7, { { s2.mask } });
-    const int midH   = w.constF(0.5f, 7);
+    // (RVT: the live part has no ground relief to bias the water level with; the term is at most +-0.02 and drops.)
+    int s2Split = -1, midH = -1, hBias2 = -1;
+    if (!rvt)
+    {
+        s2Split = w.op(T::SplitRGBA, 7, { { s2.mask } });
+        midH    = w.constF(0.5f, 7);
+    }
     const int k004   = w.constF(0.04f, 7);
-    const int hOff   = w.op(T::Subtract, 7, { { s2Split, 2 }, { midH } });
-    const int hBias  = w.op(T::Multiply, 7, { { hOff }, { pHeight } });
-    const int hBias2 = w.op(T::Multiply, 7, { { hBias }, { k004 } });
+    if (!rvt)
+    {
+        const int hOff   = w.op(T::Subtract, 7, { { s2Split, 2 }, { midH } });
+        const int hBias  = w.op(T::Multiply, 7, { { hOff }, { pHeight } });
+        hBias2 = w.op(T::Multiply, 7, { { hBias }, { k004 } });
+    }
     // The slope does not multiply the water away (that cut every puddle along a slope
     // contour, a clean arc wherever a hollow ran into a bank). It LOWERS THE WATER LEVEL
     // instead: the tilted ground holds less, so a puddle shrinks towards the deepest part
@@ -588,7 +686,7 @@ AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view, AutoLandscape
     const int shiftK = w.op(T::Add, 7, { { puddleCall, 0 }, { w.constF(0.2f, 7) } });
     const int shift  = w.op(T::Multiply, 7, { { steep }, { shiftK } });
     const int depthW = w.op(T::Subtract, 7, { { depth }, { shift } });
-    const int waterT = w.op(T::Subtract, 7, { { depthW }, { hBias2 } });
+    const int waterT = rvt ? depthW : w.op(T::Subtract, 7, { { depthW }, { hBias2 } });
     const int water  = w.ramp(zero, k004, { waterT }, 7);
     r.waterMask = w.op(T::Multiply, 7, { { water }, { noSnow } });
 

@@ -164,6 +164,22 @@ struct MatRvtMaterialState
 };
 HE_API MatRvtMaterialState matRvtMaterialState(const MaterialGraph& source, const MatRvtSplit& split, const MatRvtEnv& env);
 
+// The pool has three layers (colour; normal as RG; AO + roughness as RG), and the page painter draws one unlit picture per layer.
+// This cuts the page graphs of the RVT called `rvtName` into those three pictures, so the driver paints from the material's own
+// Write inputs instead of fixed views (step 4):
+//   view[0]  the Base Color page, as it is.
+//   view[1]  the Normal page, encoded n * 0.5 + 0.5 (what the pack kernel and heRvtSample expect).
+//   view[2]  AO in R, Roughness in G (B = 0), the two pages merged (nodes both read are in it once).
+// A Write input nobody connected is replaced by a neutral constant (grey, up, AO 1, roughness 1), as the page would read it.
+// `pins[k]` is the bit set (1 << Write pin) of the pages layer k is painted from, so a changed page hash maps to its layer.
+struct MatRvtLayerViews
+{
+    bool          ok = false;      // false: no page of that RVT at all
+    MaterialGraph view[3];
+    uint32_t      pins[3] = { 0, 0, 0 };
+};
+HE_API MatRvtLayerViews matRvtLayerViews(const MatRvtSplit& split, const std::string& rvtName);
+
 // Whether a terrain edit (kRvtEditSculpt / kRvtEditPaint, or both) can change a page that reads `reads`.
 inline bool matRvtEditReaches(uint32_t reads, uint32_t editKinds) { return (reads & editKinds) != 0; }
 } // namespace HE

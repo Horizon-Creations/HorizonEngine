@@ -195,13 +195,14 @@ void RvtLandscape::refreshAnalysis(HorizonWorld& live, entt::entity terrain, Seg
     seg.reads = ms.reads;
 }
 
-uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t& fullHash)
+uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t& fullHash, uint64_t& geoHash)
 {
     // Everything the three view graphs and the volume's place are built from at attach time (HlodBaker::begin): the landscape
     // material instance's parameter block, which parameters it overrides and its static switches, and the landscape's size and
     // position.
     uint64_t h = 0xCBF29CE484222325ull;
     fullHash = h;
+    geoHash = h;
     const auto* mc = live.registry().try_get<MaterialComponent>(terrain);
     if (!mc) return h;
     mix(h, mc->materialAssetId.hi); mix(h, mc->materialAssetId.lo);
@@ -228,11 +229,13 @@ uint64_t RvtLandscape::stateHash(HorizonWorld& live, entt::entity terrain, Segme
         mix(geo, tc->sizeX); mix(geo, tc->sizeZ); mix(geo, pos.x); mix(geo, pos.z);
     }
     fullHash = h;
+    geoHash = h;   // a material without RVT nodes: anything that moved is a reason to start over
 
     // RVT 2.0: a material with an RVT Write/Read pair is two programs. The pages depend on the page subgraphs' inputs and on
     // nothing else, so only those are hashed; a parameter that sits after the Read node moves `fullHash` and not this.
     refreshAnalysis(live, terrain, seg);
     if (!seg.analysis || !seg.analysis->split.hasRvtNodes) return h;
+    geoHash = geo ? geo : 1;
     // (not the graph text: an edit after the Read node changes the text and no page)
     mix(geo, seg.analysis->state);
     return geo ? geo : 1;
@@ -262,7 +265,7 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
     {
         auto baker = std::make_unique<HlodBaker>(live, m_cm, m_renderer);
         std::string why;
-        if (!baker->begin(terrain, &why, /*switchRenderer=*/false))
+        if (!baker->begin(terrain, &why, /*switchRenderer=*/false, /*rvtPages=*/true))
         {
             HE_LOG_INFO(Scene, "RvtLandscape: not attached (%s)", why.c_str());
             return false;
@@ -288,7 +291,9 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
         return false;
     }
 
-    if (seg.consumer == HE::UUID{})
+    if (!seg.baker->rvtLiveGraphJson().empty())
+        refreshConsumer(seg);   // RVT 2.0: the material's own live part, the volume vectors in its Read node
+    else if (seg.consumer == HE::UUID{})
     {
         MaterialAsset ca;
         ca.type = HE::AssetType::Material;
@@ -311,11 +316,116 @@ bool RvtLandscape::attach(HorizonWorld& live, entt::entity terrain, Segment& seg
     return true;
 }
 
+void RvtLandscape::refreshConsumer(Segment& seg)
+{
+    const std::string& json = seg.baker ? seg.baker->rvtLiveGraphJson() : std::string();
+    if (json.empty() || !m_manager || !seg.volumeLive) return;
+    std::string oldGlsl;
+    if (seg.consumer != HE::UUID{})
+        if (const MaterialAsset* o = m_cm.getMaterial(seg.consumer)) oldGlsl = o->customShaderFragGlsl;
+    MaterialAsset ca;
+    ca.type = HE::AssetType::Material;
+    ca.name = "RvtLandscapeConsumer";
+    ca.nodeGraphJson = json;
+    const bool fresh = seg.consumer == HE::UUID{};
+    if (fresh) { seg.consumer = m_cm.registerMaterial(std::move(ca)); ++m_materialsRegistered; }
+    else         m_cm.replaceMaterial(seg.consumer, std::move(ca));
+    m_cm.regenerateMaterialFromGraph(seg.consumer);
+
+    // The two volume vectors of the Read node are parameters the engine fills (RvtSplit.h, matRvtVolumeParamName).
+    if (MaterialAsset* ma = m_cm.getMaterialMutable(seg.consumer))
+    {
+        const rvt::VolumeLayout& l = m_manager->layout(seg.volume);
+        const rvt::VolumeDesc& d = l.desc();
+        const float a[4] = { d.origin.x, d.origin.y, l.extentM(), l.texelMeters(0) };
+        const float b[4] = { float(d.pageSize), float(d.border), float(l.pagesPerSide(0)), float(l.mipCount()) };
+        auto put = [&](const std::string& name, const float* v) {
+            const auto it = std::find(ma->graphParamNames.begin(), ma->graphParamNames.end(), name);
+            if (it == ma->graphParamNames.end()) return;
+            const size_t slot = static_cast<size_t>(it - ma->graphParamNames.begin());
+            if (ma->shaderParamData.size() < slot * 4 + 4) ma->shaderParamData.resize(slot * 4 + 4, 0.0f);
+            for (size_t c = 0; c < 4; ++c) ma->shaderParamData[slot * 4 + c] = v[c];
+        };
+        put(matRvtVolumeParamName(kAutoLandscapeRvtName, 'A'), a);
+        put(matRvtVolumeParamName(kAutoLandscapeRvtName, 'B'), b);
+    }
+    // Only a changed shader text needs the renderer to build again; a parameter change reaches the draw through the block.
+    const MaterialAsset* now = m_cm.getMaterial(seg.consumer);
+    if (fresh || !now || now->customShaderFragGlsl != oldGlsl)
+    {
+        if (!fresh) m_renderer.InvalidateMaterial(seg.consumer);
+        m_renderer.WarmupMaterials({ seg.consumer });
+    }
+}
+
+void RvtLandscape::refreshFallback(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t liveHash)
+{
+    if (!seg.analysis || !seg.analysis->split.hasRvtNodes) return;
+    if (seg.fallback != HE::UUID{} && seg.fallbackHash == liveHash) return;
+    const auto* mc = live.registry().try_get<MaterialComponent>(terrain);
+    if (!mc) return;
+    const Segment::Analysis& an = *seg.analysis;
+    // The whole material as RVT off draws it, with the values the landscape resolves (the asset's slots, the entity's overrides).
+    MaterialGraph g = matInlineRvt(an.graph);
+    for (MatGraphNode& n : g.nodes)
+    {
+        if (n.type == MatNodeType::ParamFloat || n.type == MatNodeType::ParamColor || n.type == MatNodeType::ParamVec4
+            || n.type == MatNodeType::ParamVec2 || n.type == MatNodeType::ParamBool)
+        {
+            if (const auto it = an.env.params.find(n.s); it != an.env.params.end())
+                for (size_t c = 0; c < 4; ++c) n.p[c] = it->second[c];
+        }
+        else if (n.type == MatNodeType::StaticSwitch)
+        {
+            if (const auto it = an.env.switches.find(n.s); it != an.env.switches.end()) n.p[0] = it->second ? 1.0f : 0.0f;
+        }
+    }
+    std::string oldGlsl;
+    if (seg.fallback != HE::UUID{})
+        if (const MaterialAsset* o = m_cm.getMaterial(seg.fallback)) oldGlsl = o->customShaderFragGlsl;
+    MaterialAsset fa;
+    fa.type = HE::AssetType::Material;
+    fa.name = "RvtLandscapeFallback";
+    fa.nodeGraphJson = materialGraphToJson(g);
+    const bool fresh = seg.fallback == HE::UUID{};
+    if (fresh) { seg.fallback = m_cm.registerMaterial(std::move(fa)); ++m_materialsRegistered; }
+    else         m_cm.replaceMaterial(seg.fallback, std::move(fa));
+    m_cm.regenerateMaterialFromGraph(seg.fallback);
+    seg.fallbackHash = liveHash;
+    seg.landscapeMaterial = mc->materialAssetId;
+    const MaterialAsset* now = m_cm.getMaterial(seg.fallback);
+    if (fresh || !now || now->customShaderFragGlsl != oldGlsl)
+    {
+        if (!fresh) m_renderer.InvalidateMaterial(seg.fallback);
+        m_renderer.WarmupMaterials({ seg.fallback });
+    }
+}
+
+void RvtLandscape::applySwap(entt::entity terrain, Segment& seg, bool pages)
+{
+    const uint32_t id = static_cast<uint32_t>(entt::to_integral(terrain));
+    if (pages)
+    {
+        m_renderer.SetRvtLandscape(id, seg.landscapeMaterial, seg.consumer);
+        seg.fallbackOn = false;
+    }
+    else if (seg.fallback != HE::UUID{})
+    {
+        m_renderer.SetRvtLandscape(id, seg.landscapeMaterial, seg.fallback);
+        seg.fallbackOn = true;
+    }
+    else
+    {
+        m_renderer.SetRvtLandscape(id, HE::UUID{}, HE::UUID{});
+        seg.fallbackOn = false;
+    }
+}
+
 void RvtLandscape::deactivate(entt::entity terrain, Segment& seg)
 {
     // Out of range: the pages and the table go (they are the memory); the scratch copy and the materials stay, so a camera that
     // walks over the border back and forth builds nothing and registers nothing.
-    m_renderer.SetRvtLandscape(static_cast<uint32_t>(entt::to_integral(terrain)), HE::UUID{}, HE::UUID{});
+    applySwap(terrain, seg, false);
     if (seg.consumer != HE::UUID{}) m_renderer.ReleaseRvtConsumer(seg.consumer);
     if (seg.volumeLive && m_manager) m_manager->removeVolume(seg.volume);
     seg.volumeLive = false;
@@ -348,8 +458,7 @@ void RvtLandscape::pauseSwap(bool paused)
     {
         Segment& s = kv.second;
         if (!s.swapOn) continue;
-        m_renderer.SetRvtLandscape(static_cast<uint32_t>(entt::to_integral(kv.first)),
-                                   paused ? HE::UUID{} : s.landscapeMaterial, paused ? HE::UUID{} : s.consumer);
+        applySwap(kv.first, s, !paused);
     }
 }
 
@@ -454,18 +563,42 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
     for (const Land& l : lands)
     {
         Segment& seg = m_segments[l.e];
-        uint64_t full = 0;
-        const uint64_t h = stateHash(live, l.e, seg, full);
+        uint64_t full = 0, geo = 0;
+        const uint64_t h = stateHash(live, l.e, seg, full, geo);
+        const bool rvtNodes = seg.analysis && seg.analysis->split.hasRvtNodes;
         if (seg.attached && h != seg.stateHash)
         {
-            // The view graphs were built from the old values: nothing to patch, start over.
-            remove(l.e, seg);
-            ++st.detaches;
-            st.rescanned = true;
+            if (rvtNodes && seg.volumeLive && geo == seg.geoHash && seg.baker && seg.baker->rebuildRvtViews())
+            {
+                // RVT 2.0: a parameter before the Write node moved, the landscape itself did not. The scratch copy, the volume and
+                // the pool stay: the three page materials are rebuilt in place from the material's Write inputs, and the resident
+                // pages are marked stale, so the budget repaints them from the nearest out. (The pool has one stale flag per page,
+                // not per layer: a changed roughness repaints the colour layer of the page too.)
+                refreshConsumer(seg);
+                st.pagesStale += m_manager ? m_manager->invalidateVolume(seg.volume) : 0;
+                seg.stateHash = h;
+                ++st.pageRebuilds;
+            }
+            else
+            {
+                // The view graphs were built from the old values: nothing to patch, start over.
+                remove(l.e, seg);
+                ++st.detaches;
+                st.rescanned = true;
+            }
         }
         else if (seg.attached && full != seg.liveHash)
-            ++st.liveOnlyChanges;   // the material changed, but only after the Read node: the live shader follows, no page does
+        {
+            // The material changed, but only after the Read node: the live shader follows, no page does.
+            ++st.liveOnlyChanges;
+            if (seg.baker && seg.baker->rebuildRvtViews(/*views=*/false)) refreshConsumer(seg);
+        }
         seg.liveHash = full;
+        if (rvtNodes)
+        {
+            refreshFallback(live, l.e, seg, full);
+            if (!seg.swapOn && !seg.fallbackOn && seg.fallback != HE::UUID{}) applySwap(l.e, seg, false);
+        }
         const bool near = l.dist <= m_settings.activationRadiusM * (seg.volumeLive ? 1.2f : 1.0f);
         if (!near)
         {
@@ -478,9 +611,15 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         if (!attach(live, l.e, seg)) { seg.failed = true; seg.failedHash = h; continue; }
         seg.failed = false;
         seg.stateHash = h;
+        seg.geoHash = geo;
         ++st.attaches;
     }
     st.segments = static_cast<uint32_t>(m_segments.size());
+    // A landscape whose material has RVT nodes is drawn by its fallback until its pages are ready, and the renderer applies the
+    // swap only while a pool exists: make the pool for the first such landscape even when none is near enough to attach yet.
+    if (!m_manager)
+        for (const auto& kv : m_segments)
+            if (kv.second.analysis && kv.second.analysis->split.hasRvtNodes && ensurePool()) break;
     if (!m_manager) { note("idle: no landscape near enough (activation radius " + std::to_string(static_cast<int>(m_settings.activationRadiusM)) + " m)"); return st; }
 
     // The journals: scratch copies up to date, the pages under each change stale.
@@ -596,8 +735,7 @@ RvtLandscape::FrameStats RvtLandscape::tick(HorizonWorld& live, const glm::vec3&
         const bool want = seg.filled && !m_paused;
         if (want != seg.swapOn)
         {
-            m_renderer.SetRvtLandscape(static_cast<uint32_t>(entt::to_integral(kv.first)),
-                                       want ? seg.landscapeMaterial : HE::UUID{}, want ? seg.consumer : HE::UUID{});
+            applySwap(kv.first, seg, want);
             seg.swapOn = want;
         }
         if (seg.swapOn) ++st.activeSegments;

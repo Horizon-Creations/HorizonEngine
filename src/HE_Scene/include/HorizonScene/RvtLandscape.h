@@ -69,6 +69,7 @@ namespace HE::landscape
             // RVT 2.0 step 3 (RvtSplit.h): what the tick did NOT repaint, and why.
             uint32_t journalIgnored = 0;   // terrain edits no page reads (a paint stroke under pages that only read the height, ...)
             uint32_t liveOnlyChanges = 0;  // material changes that sit after the RVT Read node: the live shader follows, no page is touched
+            uint32_t pageRebuilds = 0;     // segments whose page materials were rebuilt in place (a parameter before the Write node), no re-attach
             double   paintMs       = 0.0;   // wall clock of the whole painting of this frame (what the user feels, on every backend)
         };
 
@@ -132,7 +133,14 @@ namespace HE::landscape
             HE::UUID   landscapeMaterial;         // what the chunks are drawn with without the swap
             HE::UUID   consumer;                  // registered once per segment, kept across deactivations
             uint64_t   stateHash = 0;             // what the view graphs and the volume were built from
+            uint64_t   geoHash = 0;               // the landscape's size and place alone (the part of stateHash a page change leaves)
             uint64_t   liveHash = 0;              // the whole material (RVT 2.0): moves with a change after the Read node too
+            // RVT 2.0 step 4: the whole material with the Write/Read pair inlined (what RVT off draws), for the moments the pages
+            // cannot be drawn: out of range, before the first fill, paused. A material with RVT nodes would otherwise draw a Read
+            // of a pool that holds nothing there.
+            HE::UUID   fallback;
+            uint64_t   fallbackHash = 0;          // the liveHash it was made at
+            bool       fallbackOn = false;        // the renderer draws it for this landscape now
             // RVT 2.0 step 3: the material graph cut at its RVT nodes, and what the pages read of the ground.
             struct Analysis
             {
@@ -161,8 +169,18 @@ namespace HE::landscape
         // Returns the hash of what the PAGES are built from. For a material with RVT nodes that is the page subgraphs' inputs
         // (matRvtPageStateHash) and nothing after the Read node; otherwise the whole material. `fullHash` is always the whole
         // material, so the caller can tell "a live-only change" from "a page change".
-        uint64_t stateHash(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t& fullHash);
+        // `geoHash` is the landscape's size and place alone: a segment whose geometry is unchanged keeps its scratch copy and
+        // volume across a page change (the views are rebuilt in place, the resident pages repainted).
+        uint64_t stateHash(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t& fullHash, uint64_t& geoHash);
         void refreshAnalysis(HorizonWorld& live, entt::entity terrain, Segment& seg);
+        // The consumer material of an RVT-node landscape: its live graph (the part after the Read node, with this landscape's
+        // parameters) and the volume vectors the Read node takes. Made on the first call, replaced in place afterwards (the
+        // renderer is told only when the shader text changed: a parameter change flows through the parameter block).
+        void refreshConsumer(Segment& seg);
+        // The inline fallback for a landscape whose material has RVT nodes; kept up to date with the material's values.
+        void refreshFallback(HorizonWorld& live, entt::entity terrain, Segment& seg, uint64_t liveHash);
+        // Tells the renderer what to draw for the landscape: the consumer (pages) or, where a fallback exists, the fallback.
+        void applySwap(entt::entity terrain, Segment& seg, bool pages);
         bool ensurePool();
         void note(const std::string& why);
 

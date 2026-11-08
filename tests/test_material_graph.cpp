@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include "RvtOffScope.h"
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -2619,12 +2620,19 @@ TEST_CASE("The auto landscape material cross-compiles for all five backends, in 
 	HE::MaterialShaderLibrary lib;
 	const std::map<std::string, bool> noBomb{ { HE::kAutoLandscapeSwitchBombing, false } };
 	struct Variant { const char* name; HE::MatShaderGen gen; };
-	const Variant variants[] = {
-		{ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()) },
-		{ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader(), &noBomb) },
-		{ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph, HE::weatherFunctionLoader()) },
-		{ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph, HE::weatherFunctionLoader()) },
-	};
+	// "lit" and "nobomb" are the whole material in one shader (RVT off: the Write/Read pair is inlined, RVT 2.0); with RVT on
+	// the Lit view is a pages-then-live pair, and "rvt" (the material, RVT on) and "live" (the consumer the page driver draws)
+	// must cross-compile too.
+	std::vector<Variant> variants;
+	{
+		HE_TEST::RvtOffScope rvtOff;
+		variants.push_back({ "lit",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()) });
+		variants.push_back({ "nobomb", HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader(), &noBomb) });
+	}
+	variants.push_back({ "masks",  HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksRockSnowWater).graph, HE::weatherFunctionLoader()) });
+	variants.push_back({ "ground", HE::generateFragment(HE::buildAutoLandscapeGraph(HE::AutoLandscapeView::MasksDirtWet).graph, HE::weatherFunctionLoader()) });
+	variants.push_back({ "rvt",    HE::generateFragment(HE::buildAutoLandscapeGraph().graph, HE::weatherFunctionLoader()) });
+	variants.push_back({ "live",   HE::generateFragment(HE::matSplitRvt(HE::buildAutoLandscapeGraph().graph).live, HE::weatherFunctionLoader()) });
 	for (const Variant& v : variants)
 	{
 		INFO("variant ", v.name);
@@ -2721,6 +2729,7 @@ TEST_CASE("Metal: every sampler a material fragment declares is on kMetalPreambl
 
 TEST_CASE("Auto landscape material: three arrays, thirteen parameters, one hex grid per bombed layer")
 {
+	HE_TEST::RvtOffScope rvtOff;   // the whole material in one shader (RVT on: pages + live part, see test_rvt_auto_landscape.cpp)
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
 	const HE::MatShaderGen gen = HE::generateFragment(a.graph, HE::weatherFunctionLoader());
 	REQUIRE_FALSE(gen.glsl.empty());
@@ -3688,7 +3697,8 @@ TEST_CASE("The shipped M_AutoLandscape.hasset is exactly what the builder makes"
 	CHECK_MESSAGE(m->nodeGraphJson == HE::materialGraphToJson(HE::buildAutoLandscapeGraph().graph),
 	              "re-run: landscape_tex_gen EditorDeps/EngineContent/Materials --material");
 	CHECK(m->graphTexturePaths.size() == 4u);   // three arrays + the trail clipmap
-	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount));
+	// + the RVT Read node's two volume vectors (RVT on: the shipped asset keeps every page-side parameter too)
+	CHECK(m->graphParamNames.size() == static_cast<size_t>(HE::kAutoLandscapeParamCount) + 2);
 	// The Landscape tool lists these as the paintable layers — Auto first, so an
 	// unpainted terrain reads the automatic distribution.
 	CHECK(m->graphLayerNames == HE::matLandscapeLayerNames(HE::kAutoLandscapePaintLayerNames));
@@ -4033,6 +4043,7 @@ TEST_CASE("Procedural surface functions: an unwired call emits real code, reads 
 
 TEST_CASE("Auto landscape: puddles and ground snow come from the weather functions, the masks stay weather-free")
 {
+	HE_TEST::RvtOffScope rvtOff;   // the whole material in one shader
 	const HE::AutoLandscapeGraph a = HE::buildAutoLandscapeGraph();
 	auto callsOf = [](const HE::AutoLandscapeGraph& g, const char* path) {
 		int n = 0;

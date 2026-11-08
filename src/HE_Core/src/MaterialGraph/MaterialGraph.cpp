@@ -2739,6 +2739,52 @@ MatShaderGen generateFragment(const MaterialGraph& graphIn, const MatFunctionLoa
         c.body.resize(mark); // the displacement statements belong to the domain stage only
     }
 
+    // RVT on: this shader is the part after the Read node, so the parameters, switches and textures that only the pages
+    // (everything before a Write node) read are not in its text. They are the material's own all the same: the instance panel
+    // lists the parameters and an instance overrides them, the page driver reads them, and what a material names as its
+    // textures is how the GI and the asset scan find its arrays. They get their slots after the live ones and the text never
+    // indexes them. (The consumer the page driver draws is cut from the live part alone, so it binds none of the arrays.)
+    if (!rvtInline && !uiDomain)
+        for (const MatGraphNode& wn : graph.nodes)
+        {
+            if (wn.type != MatNodeType::RvtWrite) continue;
+            for (const MatGraphLink& wl : graph.links)
+            {
+                if (wl.dstNode != wn.id) continue;
+                for (int id : matGraphDependencies(graph, wl.srcNode))
+                {
+                    const MatGraphNode* dn = graph.findNode(id);
+                    if (!dn) continue;
+                    switch (dn->type)
+                    {
+                        case MatNodeType::ParamFloat: paramSlot(c, *dn, MatParamKind::Float); break;
+                        case MatNodeType::ParamColor: paramSlot(c, *dn, MatParamKind::Color); break;
+                        case MatNodeType::ParamVec2:  paramSlot(c, *dn, MatParamKind::Vec2);  break;
+                        case MatNodeType::ParamVec4:  paramSlot(c, *dn, MatParamKind::Vec4);  break;
+                        case MatNodeType::ParamBool:  paramSlot(c, *dn, MatParamKind::Bool);  break;
+                        case MatNodeType::StaticSwitch:
+                        {
+                            const std::string swName = dn->s.empty() ? ("switch_" + std::to_string(dn->id)) : dn->s;
+                            bool on = dn->p[0] > 0.5f;
+                            if (c.switchOv)
+                                if (auto it = c.switchOv->find(swName); it != c.switchOv->end()) on = it->second;
+                            bool seen = false;
+                            for (const auto& sw : c.switches) seen = seen || sw.first == swName;
+                            if (!seen) c.switches.push_back({ swName, on });
+                            break;
+                        }
+                        default:
+                            if (matNodeSamplesTexture(dn->type))
+                                textureSampler(c, *dn, dn->type == MatNodeType::TextureArraySample
+                                                    || dn->type == MatNodeType::NormalMapArraySample
+                                                    || dn->type == MatNodeType::TextureArrayBombSample
+                                                    || dn->type == MatNodeType::NormalMapArrayBombSample);
+                            break;
+                    }
+                }
+            }
+        }
+
     uint32_t arrayMask = 0;
     std::string src = emitDeclarations(c, uiDomain, /*domainStage=*/false, arrayMask);
     if (!dispStatements.empty())

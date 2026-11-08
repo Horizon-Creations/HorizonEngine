@@ -296,7 +296,15 @@ struct AutoLandscapeGraph
     // terrain, where Auto = 1 and painted = 0, so they are also what is drawn there).
     int output = 0, slope = 0, dirtMask = 0, rockMask = 0, snowMask = 0,
         flatMask = 0, wetMask = 0, waterMask = 0;
+    // The Lit view without displacement is split at an RVT Write / RVT Read pair (Thema 335 step 4): the ids of the two
+    // nodes, 0 in every other view. Before the Write: the layer blend of the groups (the mix material included), texture
+    // bombing, the slope blend, the painted layers. After the Read: snow, the procedural sand's ripples, puddles and
+    // wetness, trails. With RVT off (matRvtEnabled) the pair is inlined and the graph computes everything per pixel.
+    int rvtWrite = 0, rvtRead = 0;
 };
+
+// The RVT the Lit view writes and reads.
+inline constexpr char kAutoLandscapeRvtName[] = "Landscape";
 
 // `group` picks the three arrays the roles read, the paint-layer names and the defaults of the tuned
 // parameters; the default (Mountains) builds exactly the graph this material always had.

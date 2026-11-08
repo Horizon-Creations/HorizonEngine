@@ -11520,7 +11520,13 @@ void EditorApplication::dumpFrameHeadless()
 				const char* nf = std::getenv("HE_DUMP_RVTDRIVER_FRAMES");
 				if (!nf || !*nf) return;
 				const int n = std::clamp(std::atoi(nf), 1, 5000);
-				double worst = 0.0, sum = 0.0;
+					// HE_DUMP_RVTDRIVER_DIRECT=1: the frames draw the landscape from its whole material (the RVT-off shader) instead of the
+					// pages, so one run per setting gives the cost of the live part against the whole material (RVT 2.0 step 4).
+					const char* dd = std::getenv("HE_DUMP_RVTDRIVER_DIRECT");
+					const bool direct = dd && *dd && *dd != '0';
+					if (direct) drv.pauseSwap(true);
+					struct Resume { HE::landscape::RvtLandscape& d; bool on; ~Resume() { if (on) d.pauseSwap(false); } } resume{ drv, direct };
+				double worst = 0.0, sum = 0.0, gpuSum = 0.0; int gpuN = 0;
 				for (int i = 0; i < n; ++i)
 				{
 					const auto f0 = std::chrono::steady_clock::now();
@@ -11528,9 +11534,11 @@ void EditorApplication::dumpFrameHeadless()
 					r->Render();
 					const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - f0).count();
 					worst = std::max(worst, ms); sum += ms;
+						// the GPU time of the previous frame (published when its command buffer completed, long before this one: 50 ms sleep)
+						if (const double g = r->GetFrameGpuStats().gpuFrameMs; g > 0.0) { gpuSum += g; ++gpuN; }
 					std::this_thread::sleep_for(std::chrono::milliseconds(50));
 				}
-				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render)", when, n, sum / n, worst);
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER normal frames (%s): %d frames, mean %.2f ms, worst %.2f ms (driver tick + Render), GPU frame mean %.3f ms over %d frames", when, n, sum / n, worst, gpuN ? gpuSum / gpuN : -1.0, gpuN);
 			};
 			// A) the first fill
 			HE::landscape::RvtLandscape::FrameStats st;
@@ -11657,18 +11665,49 @@ void EditorApplication::dumpFrameHeadless()
 					contentManager().syncMaterialInstance(directMat);
 					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material: snow line %.1f -> %.1f, after sync %.1f (slot %zu of %zu floats, parent '%s')", before, before + 15.0f, ma->shaderParamData[snowSlot], snowSlot, ma->shaderParamData.size(), ma->parentMaterialPath.c_str());
 					r->InvalidateMaterial(directMat);
-					bool rescanned = false; uint32_t painted = 0; int refill = 0;
+					bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0; int refill = 0;
 					for (; refill < 300; ++refill)
 					{
 						st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
 						if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
 					}
 					std::vector<uint8_t> a, b;
 					bool okF = captureDirect(a) && capture(b);
 					double mF = 0; unsigned xF = 0;
 					if (okF) diffStats(a, b, mF, xF);
-					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change: re-attached %s, %u pages painted over %d frames, pages vs own material mean %.2f (max %u)",
-					            rescanned ? "yes" : "NO", painted, refill, mF, xF);
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (snow line, after the Read; expected: no re-attach, 0 rebuilds, 0 stale, 0 painted, 1+ live-only): re-attached %s, %u page rebuild(s), %u stale, %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+					            rescanned ? "yes" : "NO", rebuilds, staleF, painted, refill, liveOnly, mF, xF);
+				}
+				// ... and the rock slope is BEFORE the Write node: the page materials are rebuilt in place (no re-attach) and the
+				// resident pages repainted.
+				{
+					MaterialAsset* ma2 = contentManager().getMaterialMutable(directMat);
+					size_t rockSlot = ~size_t(0);
+					if (ma2)
+						for (size_t i = 0; i < ma2->graphParamNames.size(); ++i)
+							if (ma2->graphParamNames[i] == HE::kAutoLandscapeParamRockSlope) rockSlot = i * 4;
+					if (ma2 && rockSlot < ma2->shaderParamData.size())
+					{
+						if (std::find(ma2->instanceOverriddenParams.begin(), ma2->instanceOverriddenParams.end(), HE::kAutoLandscapeParamRockSlope) == ma2->instanceOverriddenParams.end())
+							ma2->instanceOverriddenParams.push_back(HE::kAutoLandscapeParamRockSlope);
+						ma2->shaderParamData[rockSlot] += 0.08f;
+						contentManager().syncMaterialInstance(directMat);
+						r->InvalidateMaterial(directMat);
+						bool rescanned = false; uint32_t painted = 0, liveOnly = 0, rebuilds = 0, staleF = 0; int refill = 0;
+						for (; refill < 300; ++refill)
+						{
+							st = sceneTick(); rescanned = rescanned || st.rescanned; painted += st.pagesPainted;
+							liveOnly += st.liveOnlyChanges; rebuilds += st.pageRebuilds; staleF += st.pagesStale;
+							if (refill > 2 && drv.active() && drv.manager() && drv.manager()->stats().wantedMissing == 0 && drv.manager()->stats().dirty == 0) break;
+						}
+						std::vector<uint8_t> a, b;
+						const bool okF = captureDirect(a) && capture(b);
+						double mF = 0; unsigned xF = 0;
+						if (okF) diffStats(a, b, mF, xF);
+						HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_RVTDRIVER material parameter change (rock slope, before the Write; expected: no re-attach, 1 rebuild, pages stale and painted): re-attached %s, %u page rebuild(s), %u stale, %u painted over %d frames, %u live-only change(s), pages vs own material mean %.2f (max %u)",
+						            rescanned ? "yes" : "NO", rebuilds, staleF, painted, refill, liveOnly, mF, xF);
+					}
 				}
 			}
 			drv.detach();
