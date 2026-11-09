@@ -1909,6 +1909,16 @@ void GameApplication::swapToWorld(std::unique_ptr<HorizonWorld> newWorld, const 
 	WeatherAudio::stop(m_weatherAudio, m_audioEngine);   // the new scene's weather fades in on its own
 	m_audioEngine.stopAll();
 	HE::api::scene::clearZones();
+	// The segments are keyed by entt::entity of the outgoing m_world; a handle from
+	// that registry can alias an unrelated entity in the new one (same reason the
+	// entity/animator hosts below are torn down and rebuilt rather than carried over).
+	// Re-attaching against the new world on the next OnRender tick is cheap — nothing
+	// runs until a landscape is actually near the camera.
+	if (m_rvtLandscape)
+	{
+		m_rvtLandscape->detach();
+		m_rvtLandscape.reset();
+	}
 
 	// A scene must not inherit the last one's time controls. Whoever loaded a
 	// level in slow motion, or from behind a pause menu, meant to leave it —
