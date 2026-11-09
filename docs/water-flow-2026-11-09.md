@@ -330,7 +330,20 @@ eigenes Thema (Pegel als Feld statt Skalar).
   (Max Depth entlang der Mitte, zum Umriss ansteigend, nichts außerhalb, nichts gehoben, Becken ≤ Lippe, Stufen 0,5 m), Konvergenz (gehaltener
   Tupfer auf der letzten und einer mittleren Stufe, zweiter Strich: bitgleich), Close Bed nach Save/Load gibt alles zurück, Hügel + Dig (Rinne,
   Bänder an jeder Stufe). `editor_help_audit.py --check` grün. Vorher/Nachher-Renderings wie oben (Pinsel-Code, keine Maus).
-  **Nicht gelaufen:** die Vollsuite (`ctest` komplett) — Stopp durch die Königin, bevor sie startete.
+  **Vollsuite nachgeholt:** `ctest --test-dir cmake-build-release -j4` 365/365 grün (Release, Binary vom Commit 900d24b93).
+  Die Renderings mit tiefer Sonne (`DAYNIGHT=1 TOD=0.3|0.72`, nur Boden, dig an/aus) bringen nichts über die Differenzbilder hinaus
+  (die Rinne liegt im Nahbild hinter dem vorderen Rücken, abends liegt der Hang im Schatten); sie sind nicht abgelegt.
+- **Entscheidung V-Kanal (eigene Einschätzung, keine Architekturfrage):** Slope-Standard bleibt **0,25**. Das Wasser im Kanal ist
+  `2·Lippe/Slope` breit (0,3 m Lippe: 2,4 m in einer 6 m breiten Rinne), das passt zu einem Bach auf einem Hügel dieser Größe, und
+  Slope ist dieselbe Einstellung wie beim Teich: ein höherer Standard nur für Terrassen bräuchte einen zweiten, serialisierten
+  Wert (`brushBed` gilt je Körper) für wenig Gewinn. Wer einen schmaleren, tieferen Bach will, stellt Slope hoch (0,5: 1,2 m Wasser
+  in 3 m Rinne) und Max Depth nach; der Dig-Bed-Hilfetext nennt beides. Falls Anwender das trotzdem als Ärgernis melden: Dig Bed
+  mit Terraces bekommt einen eigenen Slope-Regler.
+- **Folgeschritt (nicht hier umgesetzt): bodenfolgendes Band.** `buildFalls` (`WaterFall.cpp`) hängt je Kantenstück ein gerades
+  Viereck von der Lippe zum Fuß (`footOf` liefert nur den Endpunkt). Ersatz: Polylinie entlang des Bergab-Wegs, die Höhe je Stützpunkt
+  aus `terrainHeightAt` + `kFallLift`, damit das Band auf der Wellung und im frisch gegrabenen Kanal nicht schwebt oder einsinkt;
+  Stützabstand ~ eine Wasserzelle, Hash und Watertightness an der Kante wie heute (`feet`-Schlüssel). Test: Band-Höhe nie über
+  Boden + Toleranz, nie darunter.
 - **Nicht verifiziert:** andere Backends; Editor-Mausbedienung; grobe Wassergitter (3,9-m-Zellen); Close Bed auf einem teilweise
   radierten Bach (nur ganz radiert getestet).
 - **Offen / nächste Schritte:** (1) das Band ist eine gerade Sehne von Lippe zu Fuß, kein Bodenfolger: bei 0,5 m unsichtbar, bei langen
