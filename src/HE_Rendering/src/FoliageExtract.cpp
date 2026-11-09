@@ -297,17 +297,25 @@ namespace
         }
     };
 
+    // What a General parent multiplies every plant's height scale by (its Y axis' length);
+    // 1 for Identity/Translation, where the parent cannot scale at all.
+    float parentYScale(const InstanceBlock& b)
+    {
+        return b.kind == InstanceBlock::Parent::General ? glm::length(glm::vec3(b.parent[1])) : 1.0f;
+    }
+
     // The height scale of plant `i` of a block (the stored matrix's Y axis, under the parent's when that
     // is a general matrix): what the plant's pixel height is proportional to.
     float plantScaleOf(const InstanceBlock& b, uint32_t i)
     {
         const glm::mat4& m = (*b.matrices)[static_cast<size_t>(b.first) + i];
-        float s = glm::length(glm::vec3(m[1]));
-        if (b.kind == InstanceBlock::Parent::General) s *= glm::length(glm::vec3(b.parent[1]));
-        return s;
+        return glm::length(glm::vec3(m[1])) * parentYScale(b);
     }
 
-    Levels levelsOf(const FoliageLayer& fol, const ContentManager* cm)
+    // `parentScale` is parentYScale() of the layer's InstanceBlock: factorLo/factorHi bound
+    // plantScaleOf() (layer scale times parent scale), so whole() must divide by the same
+    // parent scale or it bounds a quantity the per-instance paths never compute.
+    Levels levelsOf(const FoliageLayer& fol, const ContentManager* cm, float parentScale)
     {
         Levels L;
         L.lv[0].mesh     = fol.meshAssetId;
@@ -321,10 +329,13 @@ namespace
             float ref = 0.5f * (fol.minScale + fol.maxScale);
             if (!(ref >= kMinPlantScale)) ref = std::max(std::max(a, b), 1.0f);
             L.refScale = ref;
-            L.factorLo = ref / std::max(std::max(a, b), kMinPlantScale);
-            L.factorHi = ref / std::max(std::min(a, b), 0.05f);
-            L.factorLo = std::min(L.factorLo, 1.0f);   // a plant at mean scale must stay inside the range
-            L.factorHi = std::max(L.factorHi, 1.0f);
+            const float pScale = std::max(parentScale, kMinPlantScale);
+            L.factorLo = ref / (std::max(std::max(a, b), kMinPlantScale) * pScale);
+            L.factorHi = ref / (std::max(std::min(a, b), 0.05f) * pScale);
+            // A plant at mean scale (times the parent's) must stay inside the range.
+            const float meanFactor = 1.0f / pScale;
+            L.factorLo = std::min(L.factorLo, meanFactor);
+            L.factorHi = std::max(L.factorHi, meanFactor);
         }
         const size_t take = std::min(fol.lods.size(), static_cast<size_t>(kLevels - 1));
         for (size_t i = 0; i < take; ++i)
@@ -882,7 +893,7 @@ void extractFoliage(entt::registry& reg, RenderWorld& out, const ContentManager*
             layer.parent   = parent;
             layer.kind     = InstanceBlock::classify(parent);
 
-            const Levels L       = levelsOf(fol, cm);
+            const Levels L       = levelsOf(fol, cm, parentYScale(layer));
             const bool   leveled = L.n > 1;
 
             if (mode == FoliageMode::PerInstance)

@@ -55,11 +55,13 @@ namespace
 		ContentManager cm;
 		entt::entity   terrain = entt::null;
 
-		explicit Field(std::vector<FoliageLod> lods, float hysteresis = 2.0f)
+		explicit Field(std::vector<FoliageLod> lods, float hysteresis = 2.0f, glm::vec3 scale = glm::vec3(1.0f))
 		{
 			auto& reg = world.registry();
 			terrain = world.createEntity("Terrain");
-			reg.emplace_or_replace<TransformComponent>(terrain);
+			TransformComponent tf;
+			tf.scale = scale;
+			reg.emplace_or_replace<TransformComponent>(terrain, tf);
 			TerrainComponent tc;
 			tc.sizeX = tc.sizeZ = 200.0f;
 			tc.heightScale = 0.0f;
@@ -257,6 +259,46 @@ TEST_CASE("Foliage levels: every plant in range is drawn once, with the mesh its
 			CHECK(st.clusters > st.straddlingBuckets);   // whole buckets are one cluster each, no copy
 		}
 	}
+}
+
+TEST_CASE("Foliage levels: a scaled parent's own scale is folded into a whole bucket's level, like a straddler's")
+{
+	// The terrain carries a uniform 2x scale (a General parent): every plant is twice as
+	// big on screen as its layer scale alone says, so its level must be chosen from the
+	// SAME total scale whether the deciding bucket is taken whole (Levels::whole(),
+	// FoliageExtract.cpp:283) or plant by plant (plantScaleOf, used by the straddlers and
+	// by PerInstance). The camera sits far from the terrain and the boundary far from the
+	// camera, so a bucket's own width (tens of metres) is a small fraction of the gap
+	// between "clearly inside" and "clearly outside" the boundary: whole() gets to decide
+	// most buckets outright, instead of handing them to a straddler job (which already
+	// calls plantScaleOf, so it cannot show this bug by itself).
+	const std::vector<HE::UUID> meshOfLevel = { HE::kDefaultCubeMeshId, HE::kDefaultQuadMeshId };
+	Field f({ lod(500.0f, HE::kDefaultQuadMeshId) }, 0.0f, glm::vec3(2.0f));
+	f.layer().drawDistance = 800.0f;
+	const glm::vec3 cam(0.0f, 4.0f, -700.0f);
+
+	RenderExtractor exC;
+	const auto gotClusters = [&]
+	{
+		Mode mode(HE::FoliageMode::Clusters);
+		return levelsOf(drawn(extractWith(exC, f, cam)), meshOfLevel);
+	}();
+	// The scale must actually have made the terrain a General parent, and the boundary
+	// still cut some buckets (straddlers get the scale right on their own; only whole()
+	// is at risk).
+	REQUIRE(InstanceBlock::classify(f.world.registry().get<TransformComponent>(f.terrain).worldMatrix)
+	        == InstanceBlock::Parent::General);
+	REQUIRE(HE::lastFoliageExtractStats().straddlingBuckets > 0u);
+
+	RenderExtractor exP;
+	const auto gotPerInstance = [&]
+	{
+		Mode mode(HE::FoliageMode::PerInstance);
+		return levelsOf(drawn(extractWith(exP, f, cam)), meshOfLevel);
+	}();
+
+	REQUIRE(gotClusters.size() == gotPerInstance.size());
+	CHECK(gotClusters == gotPerInstance);
 }
 
 TEST_CASE("Foliage levels: a level without a mesh thins the layer's own, evenly")
