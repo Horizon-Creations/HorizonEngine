@@ -14569,11 +14569,15 @@ void D3D12Renderer::UpdateRvtCold()
             // iteration started, while the GPU still read it when the list finally closed (a real TDR, caught on hardware).
             ComPtr<ID3D12Resource> ups[3];
             ID3D12GraphicsCommandList* cl = p.rvtBegin();
+            // All 3 layers must land, or the page keeps its hot slot and retries next time it stands still
+            // (HotFree'ing the slot and marking the page cold on a partial upload leaves whichever layer
+            // failed pointing at a never-written cold slice forever, with nothing left to trigger a retry).
+            bool allOk = true;
             for (int layer = 0; layer < 3; ++layer)
             {
                 void* mapped = nullptr;
                 ups[layer] = p.createUploadBuffer(static_cast<UINT64>(rowPitch) * bx, &mapped);
-                if (!ups[layer] || !mapped) continue;
+                if (!ups[layer] || !mapped) { allOk = false; continue; }
                 for (uint32_t row = 0; row < bx; ++row)
                     std::memcpy(static_cast<uint8_t*>(mapped) + size_t(row) * rowPitch,
                                 d.blocks[layer].data() + size_t(row) * tightPitch, tightPitch);
@@ -14591,10 +14595,13 @@ void D3D12Renderer::UpdateRvtCold()
                 p.barrier12(cl, p.rvtCold[layer].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
             }
             p.rvtEnd();
-            p.rvtHotFree.push_back(uint32_t(p.rvtSlotHot[d.slot]));
-            p.rvtSlotHot[d.slot] = -1;
-            p.rvtSlotCold[d.slot] = 1;
-            ++p.rvtStateVer;
+            if (allOk)
+            {
+                p.rvtHotFree.push_back(uint32_t(p.rvtSlotHot[d.slot]));
+                p.rvtSlotHot[d.slot] = -1;
+                p.rvtSlotCold[d.slot] = 1;
+                ++p.rvtStateVer;
+            }
         }
 
         // 2. One page that has stood still long enough: read it back now (synchronous) and queue it for encoding.
