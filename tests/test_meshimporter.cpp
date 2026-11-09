@@ -2,6 +2,7 @@
 #include "TestFsUtil.h"
 #include "MeshImporter.h"
 #include "ImporterCommon.h"
+#include "AutoLod.h"
 #include <ContentManager/Assets.h>
 #include <cstdint>
 #include <cstring>
@@ -205,6 +206,46 @@ TEST_CASE("gltfHasSkin routes a skinned glTF away from the static MeshImporter")
 	// Unreadable / non-glTF input must not claim a skin — the caller falls back to
 	// the static path and reports that importer's error.
 	CHECK(Importer::gltfHasSkin(dir / "does_not_exist.gltf") == false);
+
+	he_test::removeAllQuiet(dir);
+}
+
+// Auto-LOD (Thema 331, step 17): a re-import with LOD generation on writes fewer levels
+// than the file had before (here none: one triangle cannot be reduced). The old tail
+// would otherwise stay beside the mesh and the _LOD<n> name convention would keep
+// handing it back as levels of the new geometry.
+TEST_CASE("MeshImporter: a re-import with LODs drops the stale _LOD<n> tail it no longer writes")
+{
+	const fs::path dir = fs::temp_directory_path() / "he_test_stale_lod_gltf";
+	he_test::removeAllQuiet(dir);
+	REQUIRE(writeUvGltf(dir));
+	const fs::path contentRoot = dir / "Content";
+	std::error_code ec;
+	fs::create_directories(contentRoot, ec);
+
+	MeshImporter::ImportSettings settings;
+	settings.generateLods = true;
+	auto mesh = MeshImporter::import(dir / "uv.gltf", contentRoot, {}, settings);
+	REQUIRE(mesh != nullptr);
+	const fs::path lod1 = contentRoot / AutoLod::lodPath(mesh->path, 1);
+	const fs::path lod2 = contentRoot / AutoLod::lodPath(mesh->path, 2);
+	const fs::path lod4 = contentRoot / AutoLod::lodPath(mesh->path, 4);   // behind a gap
+	// A leftover chain from an earlier, longer run, plus one file past a gap.
+	for (const fs::path& f : { lod1, lod2, lod4 }) std::ofstream(f, std::ios::binary) << "old";
+	REQUIRE(fs::exists(lod1));
+
+	auto again = MeshImporter::import(dir / "uv.gltf", contentRoot, {}, settings);
+	REQUIRE(again != nullptr);
+	CHECK_FALSE(fs::exists(lod1));
+	CHECK_FALSE(fs::exists(lod2));
+	CHECK(fs::exists(lod4));   // the walk ends at the first gap, a file past it is not part of the chain
+	CHECK(AutoLod::findLodSidecars(contentRoot, again->path).empty());
+
+	// With LOD generation off the importer leaves sidecars alone.
+	std::ofstream(lod1, std::ios::binary) << "old";
+	MeshImporter::ImportSettings off;
+	REQUIRE(MeshImporter::import(dir / "uv.gltf", contentRoot, {}, off) != nullptr);
+	CHECK(fs::exists(lod1));
 
 	he_test::removeAllQuiet(dir);
 }

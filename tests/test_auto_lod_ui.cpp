@@ -288,6 +288,113 @@ TEST_CASE("Generate LODs: a foliage layer gets sorted detail levels from the cha
 	CHECK(found);
 }
 
+// Foliage mode weighs a level by the leaf area the plant's cut-out texture says it has. A layer
+// with its own material draws that one; a layer without draws the mesh's own, so the mask must
+// come from there (step 16). The two meshes have the same cards, only one names a material.
+// The cut-out is opaque but for one corner texel no card touches, so the leaf area is the card
+// area: the coverage goal then holds every level back near LOD0, the simplifier's step floor
+// refuses those, and the run says there is nothing to reduce. A plain run (no mask) reduces the
+// same cards fine, which is how the outcome shows whether a mask was in use.
+TEST_CASE("Generate LODs: the foliage alpha mask comes from the mesh's own material when the layer has no override")
+{
+	Project proj("he_test_auto_lod_ui_alpha_fallback");
+	const fs::path& root = proj.root;
+
+	TextureAsset tex;
+	tex.type = HE::AssetType::Texture;
+	tex.name = "Leaf";
+	tex.path = "Textures/Leaf.hasset";
+	tex.width = 8; tex.height = 8; tex.channels = 4;
+	tex.data.resize(8 * 8 * 4, 255);
+	tex.data[3] = 0;
+	REQUIRE(Importer::writeAsset(tex, root));
+	TextureAsset solid = tex;           // opaque everywhere: says nothing about leaf area
+	solid.name = "Solid";
+	solid.path = "Textures/Solid.hasset";
+	std::fill(solid.data.begin(), solid.data.end(), uint8_t{ 255 });
+	REQUIRE(Importer::writeAsset(solid, root));
+
+	auto writeMaterial = [&](const char* name, const char* texture) {
+		MaterialAsset m;
+		m.type         = HE::AssetType::Material;
+		m.name         = name;
+		m.path         = std::string("Materials/") + name + ".hasset";
+		m.shaderPath   = "Shaders/Lit.hasset";
+		m.texturePaths = { texture };
+		REQUIRE(Importer::writeAsset(m, root));
+		return m.path;
+	};
+	const std::string leafMat  = writeMaterial("Leaf",  "Textures/Leaf.hasset");
+	const std::string solidMat = writeMaterial("Solid", "Textures/Solid.hasset");
+
+	auto writeBush = [&](const char* name, const std::string& material) {
+		StaticMeshAsset m;
+		m.type = HE::AssetType::StaticMesh;
+		m.name = name;
+		m.path = std::string("Meshes/") + name + ".hasset";
+		m.materialPath = material;
+		for (int i = 0; i < 200; ++i)
+		{
+			const float a = float(i) * 0.7f, r = 0.2f + 0.05f * float(i % 7);
+			const float cx = std::cos(a) * r, cz = std::sin(a) * r, h = 0.1f * float(i % 5), s = 0.08f;
+			const float u0 = 0.3f, u1 = 0.7f;
+			const uint32_t base = uint32_t(m.vertices.size() / 3);
+			const float p[4][3]  = { { cx - s, h, cz }, { cx + s, h, cz }, { cx + s, h + 2 * s, cz }, { cx - s, h + 2 * s, cz } };
+			const float uv[4][2] = { { u0, 0.1f }, { u1, 0.1f }, { u1, 0.9f }, { u0, 0.9f } };
+			for (int k = 0; k < 4; ++k)
+			{
+				m.vertices.insert(m.vertices.end(), { p[k][0], p[k][1], p[k][2] });
+				m.normals.insert(m.normals.end(), { 0.0f, 0.0f, 1.0f });
+				m.uvs.insert(m.uvs.end(), { uv[k][0], uv[k][1] });
+			}
+			m.indices.insert(m.indices.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+		}
+		REQUIRE(Importer::writeAsset(m, root));
+		return proj.cm.loadAsset(m.path);
+	};
+	const HE::UUID bare = writeBush("Bare", "");
+	const HE::UUID bush = writeBush("Bush", leafMat);
+	const HE::UUID leafId  = proj.cm.loadAsset(leafMat);
+	const HE::UUID solidId = proj.cm.loadAsset(solidMat);
+	REQUIRE(bare != HE::UUID{});
+	REQUIRE(bush != HE::UUID{});
+	REQUIRE(leafId != HE::UUID{});
+	REQUIRE(solidId != HE::UUID{});
+
+	auto lastTrisOf = [&](const std::string& label, HE::UUID mesh, HE::UUID layerMaterial) {
+		INFO("run: " << label);
+		HorizonWorld world;
+		const Entity land = world.createEntity("Land");
+		FoliageComponent fol;
+		fol.layers[0].meshAssetId     = mesh;
+		fol.layers[0].materialAssetId = layerMaterial;
+		world.registry().emplace<FoliageComponent>(land, fol);
+		ContextBits bits;
+		AppContext ctx = bits.make();
+		ctx.contentManager = &proj.cm;
+		ctx.world          = &world;
+		AutoLodDialog::Request req;
+		req.kind   = AutoLodDialog::Kind::FoliageLayer;
+		req.entity = land;
+		AutoLodDialog::Options opt;
+		opt.levels  = 2;
+		opt.foliage = true;
+		const AutoLodDialog::Outcome r = AutoLodDialog::run(ctx, req, opt);
+		INFO(label << ": " << r.message);
+		return r.ok ? r.lastTris : 0u;      // 0: refused, nothing to reduce
+	};
+
+	const uint32_t noMask    = lastTrisOf("noMask", bare, HE::UUID{});        // nothing names a cut-out
+	const uint32_t fallback  = lastTrisOf("fallback", bush, HE::UUID{});      // the mesh's own material
+	const uint32_t overridden = lastTrisOf("overridden", bare, leafId);       // the same material, on the layer
+	const uint32_t replaced  = lastTrisOf("replaced", bush, solidId);         // the layer's material replaces the mesh's
+	INFO("noMask " << noMask << " fallback " << fallback << " overridden " << overridden << " replaced " << replaced);
+	REQUIRE(noMask > 0u);               // without a cut-out the cards reduce
+	CHECK(fallback != noMask);          // the mask reached the simplifier
+	CHECK(fallback == overridden);      // ... and is the one an override with that material would give
+	CHECK(replaced == noMask);          // an override is not second-guessed by the mesh's material
+}
+
 TEST_CASE("Generate LODs: a mesh entity gets a LODComponent whose level 0 is the mesh itself")
 {
 	Project proj("he_test_auto_lod_ui_entity");
