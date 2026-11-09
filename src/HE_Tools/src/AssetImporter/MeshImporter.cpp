@@ -127,6 +127,13 @@ std::unique_ptr<StaticMeshAsset> finishImport(std::unique_ptr<StaticMeshAsset> m
 		// A mesh that cannot be reduced is not a failed import; it just has no chain.
 		if (!chain.error.empty())
 			HE_LOG_WARN(Tool, "%s", ("MeshImporter: no LODs for " + mesh->path + ": " + chain.error).c_str());
+		// A re-import that writes fewer levels than the file had before (or none, for
+		// a mesh that no longer reduces) would leave the old tail on disk, and the
+		// name convention keeps handing it back as levels of the new geometry. A disk
+		// failure says nothing about the old files, so those stay.
+		if (!chain.writeFailed)
+			AutoLod::removeStaleSidecars(contentRoot, mesh->path,
+			                             static_cast<int>(chain.levels.size()) - 1);
 	}
 	return mesh;
 }

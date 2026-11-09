@@ -227,6 +227,44 @@ TEST_CASE("Auto-LOD: generate writes <name>_LOD<n> sidecars that keep their UUID
 	fs::remove_all(root, ec);
 }
 
+TEST_CASE("Auto-LOD: removeStaleSidecars drops the tail a shorter regeneration no longer writes")
+{
+	const fs::path root = fs::temp_directory_path() / "he_test_auto_lod_stale";
+	std::error_code ec;
+	fs::remove_all(root, ec);
+	fs::create_directories(root, ec);
+
+	StaticMeshAsset src = makeSphere(24, 32, false);
+	AutoLod::Settings wide;
+	wide.ratios = { 0.6f, 0.4f, 0.25f, 0.15f, 0.08f };
+	const AutoLod::Chain first = AutoLod::generate(src, root, wide);
+	REQUIRE(first.error.empty());
+	const size_t before = first.levels.size() - 1;
+	REQUIRE(before >= 4u);
+	CHECK_FALSE(first.writeFailed);
+
+	// The re-import's shorter default run rewrites LOD1..2 and stops there.
+	AutoLod::Settings shorter;
+	shorter.ratios = { 0.5f, 0.2f };
+	const AutoLod::Chain second = AutoLod::generate(src, root, shorter);
+	REQUIRE(second.error.empty());
+	const int kept = static_cast<int>(second.levels.size()) - 1;
+	REQUIRE(static_cast<size_t>(kept) < before);
+	CHECK(AutoLod::findLodSidecars(root, src.path).size() == before);   // the old tail is still reported
+
+	CHECK(AutoLod::removeStaleSidecars(root, src.path, kept) == before - static_cast<size_t>(kept));
+	CHECK(AutoLod::findLodSidecars(root, src.path).size() == static_cast<size_t>(kept));
+	CHECK(fs::exists(root / AutoLod::lodPath(src.path, kept)));
+	CHECK_FALSE(fs::exists(root / AutoLod::lodPath(src.path, kept + 1)));
+	CHECK(AutoLod::removeStaleSidecars(root, src.path, kept) == 0u);
+
+	// A mesh that no longer reduces has an empty chain: keep 0 clears it.
+	CHECK(AutoLod::removeStaleSidecars(root, src.path, 0) == static_cast<size_t>(kept));
+	CHECK(AutoLod::findLodSidecars(root, src.path).empty());
+
+	fs::remove_all(root, ec);
+}
+
 TEST_CASE("Auto-LOD: a chain fills a foliage layer with sorted levels, thinner far out, inside the draw distance")
 {
 	std::vector<HE::AutoLodApply::Level> chain;

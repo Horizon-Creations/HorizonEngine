@@ -878,7 +878,10 @@ bool reimport(const std::filesystem::path& assetFile,
 	// A mesh that has an Auto-LOD chain keeps one: the levels are derived from LOD0,
 	// so a changed source leaves them describing the old geometry. How many it had is
 	// all the file records (the ratios are not stored), so the default run is cut to
-	// that count.
+	// that count. Neither is the foliage flag, so a chain made in foliage mode comes back
+	// as a plain one — the file has nowhere to say which it was; re-run the dialog on
+	// LOD0 to get it back. The MeshImporter drops the old levels the shorter run no
+	// longer rewrites, so the chain never mixes old and new geometry.
 	if (classifySource(source) == SourceKind::Mesh)
 	{
 		const std::vector<std::string> levels = AutoLod::findLodSidecars(contentRoot, outputs.asset);

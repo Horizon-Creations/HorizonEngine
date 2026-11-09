@@ -64,6 +64,28 @@ std::vector<std::string> findLodSidecars(const std::filesystem::path& contentRoo
     return out;
 }
 
+size_t removeStaleSidecars(const std::filesystem::path& contentRoot,
+                           const std::string& meshPath, int keep)
+{
+    size_t removed = 0;
+    std::error_code ec;
+    // Same walk as findLodSidecars: the chain ends at the first gap, so a file
+    // past a gap is not part of it and is left alone.
+    for (int n = std::max(keep, 0) + 1; n < 64; ++n)
+    {
+        const std::filesystem::path file = contentRoot / lodPath(meshPath, n);
+        if (!std::filesystem::exists(file, ec)) break;
+        if (std::filesystem::remove(file, ec) && !ec)
+        {
+            ++removed;
+            HE_LOG_INFO(Tool, "%s", ("AutoLod: removed stale " + lodPath(meshPath, n)).c_str());
+        }
+        else
+            break;   // still on disk: the walk would count it as a level again
+    }
+    return removed;
+}
+
 std::vector<float> ratiosFor(int levels, float step, float floor)
 {
     levels = std::clamp(levels, 1, 8);
@@ -265,6 +287,7 @@ Chain generate(const StaticMeshAsset& lod0, const std::filesystem::path& content
         if (!Importer::writeAsset(m, contentRoot))
         {
             chain.error = "Failed to write " + m.path;
+            chain.writeFailed = true;
             chain.levels.resize(i + 1);
             return chain;
         }

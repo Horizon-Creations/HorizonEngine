@@ -60,6 +60,7 @@ struct Chain
 {
     std::vector<Level> levels;       // levels[0] = LOD0 itself, then the generated ones
     std::string        error;        // non-empty: nothing was generated
+    bool               writeFailed = false;   // error came from the disk, not from the mesh
 };
 
 // `<stem>_LOD<n>.hasset` beside `meshPath` (content-relative, forward slashes).
@@ -68,6 +69,14 @@ std::string lodPath(const std::string& meshPath, int n);
 // The sidecars that exist for `meshPath`, LOD1 first, stopping at the first gap.
 std::vector<std::string> findLodSidecars(const std::filesystem::path& contentRoot,
                                          const std::string& meshPath);
+
+// Deletes the sidecars `<stem>_LOD<n>` with n > `keep` (the run of files that
+// findLodSidecars would still hand back as levels of the mesh) and returns how
+// many went. A regeneration that writes fewer levels than an earlier one
+// otherwise leaves the tail on disk, describing the old geometry, and the name
+// convention keeps reporting it as part of the chain. `keep` 0 clears the chain.
+size_t removeStaleSidecars(const std::filesystem::path& contentRoot,
+                           const std::string& meshPath, int keep);
 
 // True for a path that IS a LOD sidecar (`…_LOD<n>.hasset`); the editor keeps a
 // sidecar from being run through the generator itself.
