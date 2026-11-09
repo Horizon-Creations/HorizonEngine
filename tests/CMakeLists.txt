@@ -179,6 +179,8 @@ add_executable(he_tests
     # The water model: bodies, coverage + owner raster, circle/polygon edits, scene format, undo.
     test_water_field.cpp
     test_water_surface.cpp
+    # Thema 232 step 5: the waterfall band between two terraces (WaterFall.h).
+    test_water_fall.cpp
     # The water brush: which body a stroke paints into and at which level, the
     # eraser, digging, the sheet that appears, and the stroke through undo and the file.
     test_water_brush.cpp

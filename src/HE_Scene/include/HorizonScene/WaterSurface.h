@@ -62,7 +62,9 @@ namespace WaterSurface
         uint32_t kept      = 0;   // bodies examined and found unchanged
         uint32_t removed   = 0;   // surface entities taken away
         uint32_t triangles = 0;   // in the meshes built by this call
-        bool     worked() const { return created || rebuilt || removed; }
+        uint32_t falls        = 0;   // waterfall bands (re)built, Thema 232 step 5, WaterFall.h
+        uint32_t fallsRemoved = 0;   // bands taken away
+        bool     worked() const { return created || rebuilt || removed || falls || fallsRemoved; }
     };
 
     // Bring the surfaces of every landscape in `world` in line with its water

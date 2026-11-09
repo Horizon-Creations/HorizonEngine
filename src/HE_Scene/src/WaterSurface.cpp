@@ -2,6 +2,7 @@
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/WaterMesh.h"
 #include "HorizonScene/WaterField.h"
+#include "HorizonScene/WaterFall.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/Components/TerrainComponent.h"
 #include "HorizonScene/Components/WaterSurfaceComponent.h"
@@ -189,11 +190,8 @@ namespace
     // The body's current in WORLD axes (m/s, x and z): BodyPhysics::flow is terrain-local, the material
     // reads world positions. A landscape's world rotation (HE::worldMatrixOf's columns without their
     // scale, the way WaterQuery turns it) moves it; a body without a current, or none at all, is zero.
-    glm::vec2 worldFlowOf(HorizonWorld& world, entt::entity te, const Field& f, uint16_t bodyId)
+    glm::vec2 worldFlowFrom(HorizonWorld& world, entt::entity te, const glm::vec2& lf)
     {
-        const Body* body = f.findBody(bodyId);
-        if (!body) return glm::vec2(0.0f);
-        const glm::vec2 lf = body->physics.flow;
         if (!(lf.x * lf.x + lf.y * lf.y > WaterSurface::kMinVisibleFlow * WaterSurface::kMinVisibleFlow)) return glm::vec2(0.0f);   // NaN too
         const glm::mat3 m(HE::worldMatrixOf(world, te));
         const auto axis = [&](int c) {
@@ -202,6 +200,12 @@ namespace
         };
         const glm::vec3 w = axis(0) * lf.x + axis(2) * lf.y;
         return glm::vec2(w.x, w.z);
+    }
+
+    glm::vec2 worldFlowOf(HorizonWorld& world, entt::entity te, const Field& f, uint16_t bodyId)
+    {
+        const Body* body = f.findBody(bodyId);
+        return body ? worldFlowFrom(world, te, body->physics.flow) : glm::vec2(0.0f);
     }
 
     // The flowing body's "Flow" knob (world x, z). Zero: the knob goes away (and with it the instance
@@ -240,7 +244,8 @@ namespace
         entt::registry& reg() { return world.registry(); }
 
         void apply(entt::entity te, uint16_t bodyId, entt::entity existing,
-                   SurfaceMesh& s, uint64_t paramsKey, WaterSurface::Stats& stats, bool tessellation)
+                   SurfaceMesh& s, uint64_t paramsKey, WaterSurface::Stats& stats, bool tessellation,
+                   bool fall = false, const glm::vec2& fallFlow = glm::vec2(0.0f))
         {
             auto& r = reg();
             HE::UUID meshId{};
@@ -269,17 +274,29 @@ namespace
                 world.reparentEntity(e, te);
                 MaterialComponent mat;
                 const Field& fld = reg().get<TerrainComponent>(te).water;
-                const glm::vec2 flow = worldFlowOf(world, te, fld, bodyId);
-                mat.materialAssetId = waterMaterialFor(cm, tessellation, flow != glm::vec2(0.0f));
-                applyTessParams(mat, fld, bodyId);
+                // A band has no tessellation (a flat ribbon, the swell would lift it off the slope) and its
+                // own current: downhill.
+                const glm::vec2 flow = fall ? worldFlowFrom(world, te, fallFlow) : worldFlowOf(world, te, fld, bodyId);
+                mat.materialAssetId = waterMaterialFor(cm, tessellation && !fall, flow != glm::vec2(0.0f));
+                if (!fall) applyTessParams(mat, fld, bodyId);
                 applyFlowParams(mat, flow);
                 r.emplace_or_replace<MaterialComponent>(e, mat);
-                ++stats.created;
+                if (!fall) ++stats.created;
+            }
+            else if (fall)
+            {
+                // The ground under an existing band can change its direction: keep the material in line.
+                const glm::vec2 flow = worldFlowFrom(world, te, fallFlow);
+                auto& mat = r.get_or_emplace<MaterialComponent>(e);
+                const HE::UUID wanted = waterMaterialFor(cm, false, flow != glm::vec2(0.0f));
+                if (mat.materialAssetId != wanted) { mat.materialAssetId = wanted; mat.dirty = true; }
+                applyFlowParams(mat, flow);
             }
 
             WaterSurfaceComponent ws;
             ws.terrain   = te;
             ws.body      = bodyId;
+            ws.fall      = fall;
             ws.meshId    = meshId;
             ws.hash      = s.hash;
             ws.paramsKey = paramsKey;
@@ -304,6 +321,7 @@ namespace
             r.emplace_or_replace<MeshComponent>(e, mc);
 
             g_owned[&world][static_cast<uint32_t>(e)] = meshId;
+            if (fall) { ++stats.falls; return; }
             ++stats.rebuilt;
             stats.triangles += s.triangles;
         }
@@ -317,17 +335,20 @@ namespace
             // entity) would draw the lake twice and fight over the mesh: keep
             // the first.
             std::unordered_map<uint16_t, entt::entity> byBody;
+            std::unordered_map<uint16_t, entt::entity> byFall;     // the waterfall band hanging from a body's sheet
             for (entt::entity e : surfaces)
             {
-                const uint16_t id = reg().get<WaterSurfaceComponent>(e).body;
-                if (byBody.count(id)) { removeSurface(world, cm, renderer, e); ++stats.removed; continue; }
-                byBody[id] = e;
+                const auto& ws = reg().get<WaterSurfaceComponent>(e);
+                auto& into = ws.fall ? byFall : byBody;
+                if (into.count(ws.body)) { removeSurface(world, cm, renderer, e); ++(ws.fall ? stats.fallsRemoved : stats.removed); continue; }
+                into[ws.body] = e;
             }
 
             const bool usable = f.allocated() && terrainHasArea(tc) && !f.bodies.empty();
             if (!usable)
             {
                 for (auto& kv : byBody) { removeSurface(world, cm, renderer, kv.second); ++stats.removed; }
+                for (auto& kv : byFall) { removeSurface(world, cm, renderer, kv.second); ++stats.fallsRemoved; }
                 f.dirty = false;
                 return;
             }
@@ -457,6 +478,38 @@ namespace
 
             // What is left in the map belongs to a body that no longer exists.
             for (auto& kv : byBody) { removeSurface(world, cm, renderer, kv.second); ++stats.removed; }
+
+            // ── Waterfall bands (Thema 232 Schritt 5) ────────────────────────────
+            // After the sheets, so a band is built against the field as it stands. Cheap to find (one pass
+            // over the grid for the bodies with a lower neighbour), built only for those; one band that no
+            // longer has a lower neighbour (level changed, body gone or moved) goes away here.
+            for (const uint16_t id : fallUppers(tc))
+            {
+                size_t bi = f.bodies.size();
+                for (size_t i = 0; i < f.bodies.size(); ++i) if (f.bodies[i].id == id) { bi = i; break; }
+                if (bi == f.bodies.size()) continue;
+                const Body& body = f.bodies[bi];
+                entt::entity existing = entt::null;
+                if (const auto it = byFall.find(id); it != byFall.end()) { existing = it->second; byFall.erase(it); }
+                const CellRect& ext = extents[bi];
+                Lattice lattice;
+                SurfaceMesh s;
+                glm::vec2 flow(0.0f);
+                const bool built = ext.valid() && buildLattice(tc, id, ext, lattice, opt.clipFor(body.level)) &&
+                                   buildFalls(tc, id, lattice, ext, body.level, opt, s, flow);
+                if (!built || s.empty())
+                {
+                    if (existing != entt::null) { removeSurface(world, cm, renderer, existing); ++stats.fallsRemoved; }
+                    continue;
+                }
+                if (existing != entt::null)
+                {
+                    auto& ws = reg().get<WaterSurfaceComponent>(existing);
+                    if (ws.hash == s.hash && ws.paramsKey == paramsKey && ws.level == body.level) { continue; }   // same band
+                }
+                apply(te, id, existing, s, paramsKey, stats, false, true, flow);
+            }
+            for (auto& kv : byFall) { removeSurface(world, cm, renderer, kv.second); ++stats.fallsRemoved; }
             f.dirty = false;
         }
     };

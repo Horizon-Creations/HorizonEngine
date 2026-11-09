@@ -37,6 +37,7 @@ add_library(HorizonScene SHARED
     src/WaterBrush.cpp
     src/WaterLake.cpp
     src/WaterMesh.cpp
+    src/WaterFall.cpp
     src/WaterTriangulate.cpp
     src/WaterSurface.cpp
     src/WaterQuery.cpp

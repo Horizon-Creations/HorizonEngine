@@ -248,13 +248,14 @@ namespace
         std::vector<Entity> surfaces()
         {
             std::vector<Entity> out;
-            for (auto e : world.registry().view<WaterSurfaceComponent>()) out.push_back(e);
+            for (auto [e, ws] : world.registry().view<WaterSurfaceComponent>().each())
+                if (!ws.fall) out.push_back(e);          // sheets; the waterfall bands have test_water_fall.cpp
             return out;
         }
         Entity surfaceOf(uint16_t body)
         {
             for (auto [e, ws] : world.registry().view<WaterSurfaceComponent>().each())
-                if (ws.body == body) return e;
+                if (ws.body == body && !ws.fall) return e;
             return entt::null;
         }
     };

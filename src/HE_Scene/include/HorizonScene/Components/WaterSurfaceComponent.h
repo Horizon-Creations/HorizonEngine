@@ -16,6 +16,10 @@
 struct WaterSurfaceComponent {
     entt::entity terrain = entt::null;   // the owning landscape entity
     uint16_t     body    = 0;            // HE::water::Body::id this surface draws
+    // A waterfall band instead of a sheet (Thema 232 Schritt 5, WaterFall.h): the ribbon
+    // that hangs from the sheet of `body` (the UPPER one) down to a lower body. At most one
+    // band per upper body, next to that body's sheet; `level` is the upper level.
+    bool         fall    = false;
 
     // The procedural mesh this entity draws and OWNS: registered once and afterwards
     // only replaced (every registration can move the content manager's pool under
