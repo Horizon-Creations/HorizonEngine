@@ -720,12 +720,15 @@ Mb waterMaterial()
         "w = reserved, no effect yet.", 7);
     // The current (Thema 232 step 3). Only read while the "Flow" Static Switch is on, which the
     // engine turns on per instance for a body whose BodyPhysics::flow is not zero (WaterSurface.cpp);
-    // x, y = the flow's X and Z in WORLD axes, m/s. Like TessWaves it exists only in that permutation:
+    // x, y = the flow's X and Z in WORLD axes, m/s; z = the body's deepest water (m), w = 1 when z is
+    // set (Schritt 13, see "Top or underside"). Like TessWaves it exists only in that permutation:
     // the plain water has no such slot and is the water it always was.
     const int flowKnob = m.param(T::ParamVec4, "Flow", { 0.0f, 0.0f, 0.0f, 0.0f }, "Flow",
         "Only with the Flow switch on (a water body with a current, set by the Landscape tool or "
         "water.setFlow). x, y = the current's X and Z in world axes (m/s): the ripples, the foam lace "
-        "and the caustics are carried along it. z, w = reserved.", 21);
+        "and the caustics are carried along it. z = the body's deepest water (m), w = 1 when z is "
+        "known (both set by the engine per body; a waterfall band says 0): a camera further below the "
+        "surface than that is not in this water and sees the top side, not the underside.", 21);
     const int sfs = m.un(T::SplitRGBA, surf, 1, 20);
     const Pin fresPow{ sfs, 0 }, refl{ sfs, 1 }, rough{ sfs, 2 }, spec{ sfs, 3 };
     const int shs = m.un(T::SplitRGBA, shallowW, 1, 22);
@@ -1167,7 +1170,36 @@ Mb waterMaterial()
     // Every output picks the top or the underside. If is mix(top, under, 0 or 1),
     // so from above it is the old expression exactly — as long as nothing on the
     // underside can turn into NaN or Inf, which undersideTerms keeps to.
-    const int below  = under.below;
+    //
+    // `under.below` is a PLANE test: the camera under the plane of this fragment. That is everyone
+    // under the water, but also a camera beside a stream on a hillside, which is under the plane of
+    // every pool above it without being in any of them: each such pool drew as the underside's opaque
+    // teal mirror, the blocky corner of the hill close-up (Thema 232 Schritt 13). The surface pass
+    // knows how deep a flowing body's water is anywhere (Flow.z, metres; Flow.w = 1 when set; a
+    // waterfall band says 0): a camera deeper below the plane than that, plus a margin, is not in this
+    // water and gets the top look, which from below at a grazing angle is the sky's Fresnel, the way
+    // the pools under the camera look. Over the margin the underside fades out first, so nothing
+    // pops. Only with the Flow switch on: the still water is the old water, and a camera that can be
+    // in the body (the diver) is never past its depth, so it sees exactly what it saw.
+    constexpr float kUndersideMargin = 0.25f;     // m: the depth is read at the lattice's corners
+    const int camDepth = m.op(T::Multiply, belowDot, m.k(-1.0f, 70, 8), 71, 8);
+    const int reachD   = m.op(T::Add, Pin{ flowS, 2 }, m.k(kUndersideMargin, 70, 9), 71, 9);
+    const int depthSet = m.op(T::Greater, Pin{ flowS, 3 }, m.k(0.5f, 70, 10), 71, 10);
+    const int notIn    = m.op(T::And, depthSet, m.op(T::Greater, camDepth, reachD, 72, 8), 73, 8);
+    const int belowIn  = m.op(T::And, under.below, m.un(T::Not, notIn, 74, 8), 75, 8);
+    const int fadeOut  = m.un(T::OneMinus, m.op3(T::Smoothstep, Pin{ flowS, 2 }, reachD, camDepth, 72, 9), 73, 9);
+    const int keepU    = m.op3(T::If, depthSet, fadeOut, m.k(1.0f, 73, 10), 74, 10);
+    const int belowSw  = m.node(T::StaticSwitch, 76, 8);
+    {
+        MatGraphNode& bs = *m.g.findNode(belowSw);
+        bs.s    = "Flow";
+        bs.p[0] = 0.0f;   // off: the plane test alone, as before
+    }
+    m.link(belowIn, belowSw, 0);
+    m.link(under.below, belowSw, 1);
+    m.comment("From below: only a camera that can be in this water (Flow.z/w)", 70, 8, 7, 4);
+
+    const int below  = belowSw;
     const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);
     const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
     const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
@@ -1177,7 +1209,17 @@ Mb waterMaterial()
     // -belowDot is how deep the camera is; the underside fades in over the first metre.
     const int camDepthU = m.op3(T::Smoothstep, m.k(0.0f, 75, 3), m.k(1.0f, 75, 3.5f),
                                 m.op(T::Multiply, belowDot, m.k(-1.0f, 75, 4), 76, 4), 76, 3);
-    const int alphaO = m.op3(T::If, below, m.op(T::Multiply, under.alpha, camDepthU, 76, 3.5f), alpha, 77, 3);
+    // With the Flow switch on, times the fade toward "not in this water" above.
+    const int alphaU = m.op(T::Multiply, under.alpha, camDepthU, 76, 3.5f);
+    const int alphaUSw = m.node(T::StaticSwitch, 76, 3.7f);
+    {
+        MatGraphNode& as = *m.g.findNode(alphaUSw);
+        as.s    = "Flow";
+        as.p[0] = 0.0f;
+    }
+    m.link(m.op(T::Multiply, alphaU, keepU, 75, 3.7f), alphaUSw, 0);
+    m.link(alphaU, alphaUSw, 1);
+    const int alphaO = m.op3(T::If, below, alphaUSw, alpha, 77, 3);
     const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
     const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
     m.comment("Top or underside", 76, 0, 2, 6);

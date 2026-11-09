@@ -494,3 +494,89 @@ TEST_CASE("Water fall: the hill stroke with Dig Bed lies in one channel down the
         CHECK_FALSE(b.s.empty());
     }
 }
+
+TEST_CASE("Water fall: every flowing pool tells the material how deep it is, every band says 0 (Thema 232 Schritt 13)")
+{
+    // The water material showed the underside (an opaque teal mirror) to any camera under a sheet's PLANE:
+    // beside a stream on a hill that is every pool above the camera. Flow.z/w carry the body's deepest
+    // water, so a camera further down than that is known not to be in it; a band (falling water) says 0.
+    HorizonWorld world;
+    ContentManager cm{ "." };
+    const Entity e = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(e);
+    TerrainComponent land = hillLand();
+    land.dirty = true;
+    world.registry().emplace<TerrainComponent>(e, land);
+    TerrainSystem::updateTerrains(world, cm);
+    auto& tc = world.registry().get<TerrainComponent>(e);
+    brush::Params p = hillParams();
+    p.dig = true; p.digDepth = 1.0f;
+    const brush::Stroke s = hillStroke(tc, p);
+    REQUIRE(s.bodies.size() >= 6u);
+    // A still pond off to the side: no current, no knob, the plain water as before.
+    const uint16_t pond = addLake(tc, 2.0f, -40.0f, -40.0f, -30.0f, -30.0f);
+    TerrainSystem::updateTerrains(world, cm);
+
+    const auto flowKnob = [](const MaterialComponent& mat) -> const MaterialParamOverride* {
+        for (const auto& o : mat.paramOverrides) if (o.name == "Flow") return &o;
+        return nullptr;
+    };
+    // The deepest water of a body over its wet cells, measured here independently of the lattice.
+    const auto deepestOf = [&tc](uint16_t id) {
+        const water::Body* b = tc.water.findBody(id);
+        REQUIRE(b != nullptr);
+        const int res = static_cast<int>(tc.water.res);
+        float d = 0.0f;
+        for (int cz = 0; cz < res; ++cz)
+            for (int cx = 0; cx < res; ++cx)
+            {
+                const size_t i = static_cast<size_t>(cz) * res + cx;
+                if (tc.water.owner[i] != id || tc.water.coverage[i] < water::kWet) continue;
+                const glm::vec2 c = water::cellCenter(tc, cx, cz);
+                d = std::max(d, b->level - terrainHeightAt(tc, c.x, c.y));
+            }
+        return d;
+    };
+    size_t sheets = 0, bands = 0, still = 0;
+    for (auto [we, ws, mat] : world.registry().view<WaterSurfaceComponent, MaterialComponent>().each())
+    {
+        CAPTURE(ws.body);
+        CAPTURE(ws.fall);
+        const MaterialParamOverride* k = flowKnob(mat);
+        if (ws.body == pond)
+        {
+            ++still;
+            CHECK(k == nullptr);
+            CHECK(ws.deepest > 0.0f);                                        // known all the same (clipped)
+            CHECK(std::abs(ws.deepest - deepestOf(pond)) <= 0.25f);
+            continue;
+        }
+        REQUIRE(k != nullptr);                                               // every step and band runs
+        CHECK(k->value[3] == 1.0f);                                          // z is known
+        if (ws.fall)
+        {
+            ++bands;
+            CHECK(k->value[2] == 0.0f);
+            continue;
+        }
+        ++sheets;
+        CHECK(k->value[2] == ws.deepest);
+        // Read at the lattice's water corners, not the cell centres: the two agree to within the slope
+        // across half a cell (0.5 m cells, up to 0.8 m/m), which the material's 0.25 m margin covers.
+        const float d = deepestOf(ws.body);
+        CHECK(k->value[2] > 0.0f);
+        CHECK(std::abs(k->value[2] - d) <= 0.25f);
+    }
+    CHECK(still == 1u);
+    CHECK(sheets == s.bodies.size());
+    CHECK(bands == s.bodies.size() - 1u);
+    // The pools on the flank are shallow (the lip), so a camera two metres under one is never in it.
+    for (size_t i = 1; i + 3 < s.bodies.size(); ++i)
+        for (auto [we, ws] : world.registry().view<WaterSurfaceComponent>().each())
+            if (!ws.fall && ws.body == s.bodies[i]) CHECK(ws.deepest < 1.0f);
+
+    // Nothing changed: the knob stays as it is, tick after tick.
+    TerrainSystem::updateTerrains(world, cm);
+    for (auto [we, ws, mat] : world.registry().view<WaterSurfaceComponent, MaterialComponent>().each())
+        if (const MaterialParamOverride* k = flowKnob(mat); k && !ws.fall) CHECK(k->value[2] == ws.deepest);
+}

@@ -693,6 +693,18 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
     out.polygons = static_cast<uint32_t>(polys.size());
     if (polys.empty()) return true;
 
+    // The deepest water, at the water corners (the lattice's ground is water over the ground plus the
+    // overshoot there; every water corner is sampled). Between corners the ground can dip a little
+    // further, which the material's margin covers.
+    if (lattice.clipped())
+    {
+        float deepest = 0.0f;
+        for (size_t i = 0; i < lattice.v.size(); ++i)
+            if (lattice.v[i] >= static_cast<float>(kContourIso) && lattice.g[i] < 1.0e5f)
+                deepest = std::max(deepest, lattice.g[i] - opt.shoreOvershoot);
+        out.deepest = deepest;
+    }
+
     // The vertices are relative to the middle of the body's box, so a lake far
     // from the terrain's centre keeps small coordinates and the entity's own
     // position says where it is (and sorts, and culls, by it).

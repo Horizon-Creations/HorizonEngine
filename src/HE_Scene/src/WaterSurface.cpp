@@ -209,11 +209,15 @@ namespace
     }
 
     // The flowing body's "Flow" knob (world x, z). Zero: the knob goes away (and with it the instance
-    // that reads it, see waterMaterialFor).
-    void applyFlowParams(MaterialComponent& mat, const glm::vec2& worldFlow)
+    // that reads it, see waterMaterialFor). z, w: the deepest water under the mesh and "z is known"
+    // (WaterSurfaceComponent::deepest, -1 = unknown): a camera further below the surface than that is
+    // not in this water, and the material shows it the top side instead of the underside (Thema 232
+    // Schritt 13: a camera beside a stream on a hill is under the plane of every pool above it).
+    void applyFlowParams(MaterialComponent& mat, const glm::vec2& worldFlow, float deepest)
     {
         const bool flowing = worldFlow.x != 0.0f || worldFlow.y != 0.0f;
-        const float v[4] = { worldFlow.x, worldFlow.y, 0.0f, 0.0f };
+        const bool known   = deepest >= 0.0f;
+        const float v[4] = { worldFlow.x, worldFlow.y, known ? deepest : 0.0f, known ? 1.0f : 0.0f };
         setKnob(mat, "Flow", flowing ? v : nullptr);
     }
 
@@ -279,7 +283,7 @@ namespace
                 const glm::vec2 flow = fall ? worldFlowFrom(world, te, fallFlow) : worldFlowOf(world, te, fld, bodyId);
                 mat.materialAssetId = waterMaterialFor(cm, tessellation && !fall, flow != glm::vec2(0.0f));
                 if (!fall) applyTessParams(mat, fld, bodyId);
-                applyFlowParams(mat, flow);
+                applyFlowParams(mat, flow, s.deepest);
                 r.emplace_or_replace<MaterialComponent>(e, mat);
                 if (!fall) ++stats.created;
             }
@@ -290,7 +294,14 @@ namespace
                 auto& mat = r.get_or_emplace<MaterialComponent>(e);
                 const HE::UUID wanted = waterMaterialFor(cm, false, flow != glm::vec2(0.0f));
                 if (mat.materialAssetId != wanted) { mat.materialAssetId = wanted; mat.dirty = true; }
-                applyFlowParams(mat, flow);
+                applyFlowParams(mat, flow, s.deepest);
+            }
+            else if (auto* mat = r.try_get<MaterialComponent>(e))
+            {
+                // A rebuilt sheet can have new depths (a stroke went on, the ground was dug): the knob now,
+                // not on the next tick.
+                const Field& fld = reg().get<TerrainComponent>(te).water;
+                applyFlowParams(*mat, worldFlowOf(world, te, fld, bodyId), s.deepest);
             }
 
             WaterSurfaceComponent ws;
@@ -304,6 +315,7 @@ namespace
             ws.cellX0 = s.cells.x0; ws.cellZ0 = s.cells.z0;
             ws.cellX1 = s.cells.x1; ws.cellZ1 = s.cells.z1;
             ws.triangles = s.triangles;
+            ws.deepest   = s.deepest;
             r.emplace_or_replace<WaterSurfaceComponent>(e, ws);
 
             // The entity stands at the middle of the body's box, at the surface's
@@ -394,7 +406,7 @@ namespace
                         mat->dirty = true;
                     }
                     applyTessParams(*mat, f, kv.first);
-                    applyFlowParams(*mat, flow);
+                    applyFlowParams(*mat, flow, reg().get<WaterSurfaceComponent>(kv.second).deepest);
                 }
             }
 

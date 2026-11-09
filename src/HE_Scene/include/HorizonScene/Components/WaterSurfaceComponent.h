@@ -37,4 +37,8 @@ struct WaterSurfaceComponent {
     float        level = 0.0f;           // terrain-local Y the entity sits at
     int          cellX0 = 0, cellZ0 = 0, cellX1 = -1, cellZ1 = -1;   // the body's cell box
     uint32_t     triangles = 0;
+    // The deepest water under the mesh when it was built (WaterMesh.h SurfaceMesh::deepest; -1 unknown,
+    // 0 for a band): the water material's Flow.z, so a camera below a pool it is not in does not see
+    // the underside (Thema 232 Schritt 13).
+    float        deepest = -1.0f;
 };

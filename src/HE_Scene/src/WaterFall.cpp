@@ -140,6 +140,7 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
     out = SurfaceMesh{};
     out.level = level;
     out.cells = cells;
+    out.deepest = 0.0f;      // falling water: nobody is under it, the material never shows its underside
     flow = glm::vec2(0.0f);
     if (lattice.empty() || !tc.water.allocated() || !hasArea(tc)) return false;
 

@@ -351,3 +351,39 @@ eigenes Thema (Pegel als Feld statt Skalar).
   seine Körper, nicht die fremden Stufen daneben); (3) 46 Körper + 45 Bänder je 43-m-Strich sind je ein Entity + Mesh, auf einer echten
   Landschaft zu zählen; (4) im V-Kanal (Slope 0,25) ist das Wasser `2·Lippe/Slope` breit (2,4 m in einem 6-m-Graben), ein U-Profil gibt
   es mit höherem Slope; (5) Material: streifend gesehene Becken bleiben türkis (Schritt 11).
+
+### Schritt 13 (Kamerawinkel + die kantige Ecke oben rechts), erledigt
+
+- **Bilder** (Hügel + Dig Bed, Metal, Release, sauberes HOME, `HE_SKY_TIME=30`, `WATERLAKE=hill WATERSLOPE=0.8 WATERDIG=1 TOD=0.5
+  DAYNIGHT=0 SETTLEMS=1500 FRAMES=6`; Kamera = `CAMX/CAMY/CAMZ PITCH YAW`, Landschaft auf y=300):
+  `docs/water-flow-hill-top-step13-2026-11-09.png` **Draufsicht** (25/352/1, −89,5, 0: Mäander und Stufen, Fußteich rechts);
+  `-side-step13-` **Seitenprofil quer zum Hang** (24/332/38, −25, 0: von +Z, bergab nach rechts, der Bach im Kanal die Flanke hinab);
+  `-close-step13-` **Nahaufnahme von oben** auf die oberen Becken (18/325/−6, −32, 206,6: kein Becken von unten);
+  `-down-step13-` den Bach hinab vom Gipfel (−8/333/1, −28, 90); `-up-step13-before-`/`-up-step13-` vom Fuß hinauf (58/310/−3, 6, −90),
+  vor/nach dem Fix; `-close-step13-fix-` die alte Nahaufnahme (20/316/−14, −18, 160) nach dem Fix (vorher: `-close-step12-dig-`).
+- **Ursache der Ecke (gemessen):** Material, nicht kaputte Geometrie. Die Ecke sind die Körper 12–17 (Pegel 16,8–18,8 m), die Kamera
+  steht auf 16 m, also 0,8–2,8 m **unter ihrer Ebene**. Dort schaltet das Wassermaterial auf die Unterseite (`undersideTerms`,
+  Totalreflexion = deckender Teal-Spiegel), weil `below` nur „Kamera unter der Ebene“ prüft, nicht „Kamera im Wasser“. Beleg: mit
+  `below` fest 0 (Probe, nicht eingecheckt) verschwand das Teal in beiden Ansichten ganz; der Spitzenfaktor `depth/(n·v+0.05)` der
+  Oberseite (Schritt-11-Vermutung) war es nicht. Im Bild vom Fuß beginnt das Teal genau auf Augenhöhe. Geometrie je Körper
+  (Diagnose-Testfall, nicht eingecheckt): Blattrand 0,33–0,49 m über Boden (Lippe 0,3 + halbe Zelle Gefälle), jedes Band eine Stufe,
+  keine schwebende Platte, kein Rest-Körper. Das Sägezahn-Profil ist die echte Terrassenform (0,5-m-Zellkontur + gerade Bänder), die
+  erst durch den deckenden Spiegel hart wurde.
+- **Fix:** Nur ein Körper, dessen Wasser die Kamera erreichen kann, zeigt die Unterseite. `SurfaceMesh::deepest` (`WaterMesh.h:239`,
+  gefüllt in `buildSurface`, `WaterMesh.cpp:696`, an den Wasser-Ecken des Gitters; Band 0, `WaterFall.cpp`) -> `WaterSurfaceComponent::
+  deepest` -> `Flow.z`, `Flow.w = 1` (`applyFlowParams`, `WaterSurface.cpp:216`, auch beim Neubau eines Blatts, `:301`). Material
+  (`MatGen/main.cpp:1184`): Kamera tiefer unter der Ebene als `Flow.z + 0,25 m` -> Oberseite (von unten streifend = Himmels-Fresnel,
+  wie die Becken unter der Kamera); über die 0,25 m blendet die Unterseite vorher aus. Alles hinter dem Static Switch `Flow`.
+  `Water.hasset` neu erzeugt (mat_gen, deterministisch: unverändert neu erzeugt = md5-gleich mit dem alten) und nach `EditorDeps` kopiert.
+- **Verifiziert (Mac, Release, Metal):** `ctest -R "test_water|test_engine_materials"` 11/11; neuer Fall `test_water_fall.cpp:498`
+  (Hügel + Dig: jedes Becken `Flow.z` = `deepest`, ±0,25 m zur Zellmitten-Messung, `w` = 1; jedes Band `z` = 0; stiller Teich ohne
+  Knopf; zweiter Tick gleich). Pixel: `up` vs `up-after` 0,97 % Pixel > 8 (bbox nur der obere Bach), `close-ref` vs `-after` 0,56 %
+  (bbox nur die Ecke); nachher vs Probe (`below` = 0) 0,01/0,02 %. **Sonst unverändert, md5-gleich altes vs neues Hasset (gleiches
+  Binary):** stiller See `l` von oben, stiller Bowl-See aus 1 m unter Wasser, fließender Bowl-See (`WATERFLOW=2,0`, `WaterFlow`)
+  aus 1 m unter Wasser (Taucher sieht Snell-Fenster und Netz wie vorher). Ansichten von oben (side/close/down) vor/nach md5-gleich.
+- **Nicht verifiziert:** D3D11/D3D12/Vulkan/OpenGL (Material-Codegen, kein neuer Knotentyp); Editor-Mausbedienung.
+- **Offen:** (1) **stilles** Wasser (Terraces ohne Flow From Slope, Standard aus) hat keinen `Flow`-Knopf: seine Becken zeigen von unten
+  weiter Teal; ein Knopf für alle Varianten sprengt bei Flow+Tessellation die 16 Slots (heute genau 16). (2) Körper 6, 8, 14: Band
+  fällt zwei Stufen (`lo` −0,98), `landsIn` nimmt bei einem Becken schmaler als eine Zelle den nächsttieferen; nicht die Ecke.
+  (3) Bänder tragen eine +Y-Normale (e im Kipp): von vorn gesehen „streifend“; echte Flächennormale bräche die e-Kodierung.
+- **Nächste Schritte:** bodenfolgendes Band (Abschnitt Schritt 12); Backend-Abnahme der Flow-Variante.

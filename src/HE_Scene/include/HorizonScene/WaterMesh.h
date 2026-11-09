@@ -233,6 +233,10 @@ namespace HE::water
         uint32_t  polygons = 0;              // outer boundaries
         uint32_t  triangles = 0;
         uint32_t  shoreVertices = 0;         // vertices with a shore proximity above 0 (soft shore)
+        // The deepest water under the sheet (m): the most a camera can be below the surface and still be
+        // IN this body (the water material's underside, Thema 232 Schritt 13). Read at the lattice's water
+        // corners; -1 = unknown (no ground: an unclipped lattice). A waterfall band says 0.
+        float     deepest = -1.0f;
         uint64_t  hash = 0;                  // of everything the mesh was built from
         bool empty() const { return mesh.indices.empty(); }
     };
