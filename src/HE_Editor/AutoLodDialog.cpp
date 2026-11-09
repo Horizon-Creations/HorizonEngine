@@ -278,8 +278,18 @@ Outcome run(AppContext& ctx, const Request& req, const Options& o)
 	AlphaMask mask;
 	if (settings.foliage)
 	{
-		mask = alphaMaskOf(cm, layer ? layer->materialAssetId : HE::UUID{}, layer ? std::string{} : src.materialPath);
-		if (mask.data.empty() && layer == nullptr) mask = alphaMaskOf(cm, src.materialId, src.materialPath);
+		// Same lookup order as bakeImpostorFiles: a layer's material replaces the mesh's
+		// own on every slot; a layer without one draws the mesh's material, so that is
+		// the one whose cut-out says how much leaf there is (first section, then the mesh).
+		const HE::UUID layerMaterial = layer ? layer->materialAssetId : HE::UUID{};
+		if (layerMaterial != HE::UUID{})
+			mask = alphaMaskOf(cm, layerMaterial, std::string{});
+		else
+		{
+			if (!src.sections.empty())
+				mask = alphaMaskOf(cm, src.sections[0].materialId, src.sections[0].materialPath);
+			if (mask.data.empty()) mask = alphaMaskOf(cm, src.materialId, src.materialPath);
+		}
 		if (!mask.data.empty())
 		{
 			settings.alphaMask   = mask.data.data();
