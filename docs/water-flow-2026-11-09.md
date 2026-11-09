@@ -234,3 +234,14 @@ eigenes Thema (Pegel als Feld statt Skalar).
   und 0,5-m-Pinsel geben pro Stufe ein Ein-Zellen-Blatt (leer): `res` 256 nehmen. (4) Ein nacktes `ContentManager{"."}` hat kein Wassergraph, die Flow-Variante
   fällt auf einfaches Wasser zurück; getestet wird der `Flow`-Knopf, nicht die Material-ID.
 - **Nächste Schritte:** Schritt 6/7: Backend-Abnahme (D3D/Vulkan/GL), Perf-Vergleich, Handbuch-Eintrag; optional eigenes Fall-Material mit Gischt.
+
+### Schritt 10 (Hügel-Zeuge mit modelliertem Gelände), erledigt
+
+- **Gebaut:** nur Zeugen-Modus: `HE_DUMP_WATERLAKE=hill` in `EditorApplication.cpp` (neben `cascade`): gaußscher Hügel 24 m hoch mit Wellung statt Rampe,
+  Strich vom Gipfel (x=3) die +X-Flanke hinab mit Mäander in z, durch `brush::begin/dab/end` mit Terraces + Flow From Slope (wie `cascade`).
+  Kein Produktcode geändert. Ein echtes GUI-Malen war nicht möglich (MCP-Bridge des Editors nicht erreichbar, kein Display): es ist der Pinsel-Code, nicht die Mausbedienung.
+- **Bilder** (Metal, sauberes HOME, `WATERSLOPE=0.8 TOD=0.5 DAYNIGHT=0 SETTLEMS=1500 FRAMES=6`): `docs/water-flow-hill-side-2026-11-09.png`
+  (CAMX=24 CAMY=326 CAMZ=-42 PITCH=-12 YAW=180): Terrassenfolge den Hügel hinab in ein Becken; `docs/water-flow-hill-close-2026-11-09.png`
+  (CAMX=20 CAMY=316 CAMZ=-14 PITCH=-18 YAW=160): Stufen mit Wasserfall-Bändern; `...-over-...png` (Rückansicht, schwach).
+- **Auffällig:** in der Nahaufnahme steht oben rechts eine türkise Platte (Band an der Mäanderkehre, vermutlich Rückseite/Unterwasser-Tönung); nicht untersucht.
+- **Nicht verifiziert:** Mausbedienung im Editor, andere Backends für diese Szene.

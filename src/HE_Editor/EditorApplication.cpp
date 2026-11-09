@@ -8224,7 +8224,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		namespace water = HE::water;
 		auto& reg = m_editorWorld->registry();
 		const std::string_view mode(wl);
-		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush" || mode == "cascade";
+		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush" || mode == "cascade" || mode == "hill";
 		const float level = [bank] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : (bank ? 2.0f : 0.4f); }();
 		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
 		TransformComponent ltf;
@@ -8267,6 +8267,9 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
 					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
 						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
+						// a modelled hill (Thema 232 step 10): a gaussian mound, 24 m high, with a ridged undulation so it is not a plane
+						: mode == "hill" ? 24.0f * std::exp(-(x * x + z * z) / (2.0f * 18.0f * 18.0f))
+						                     + 0.6f * std::sin(0.35f * x + 0.5f * z) + 0.4f * std::sin(0.23f * z - 0.2f * x)
 						: mode == "cascade" ? bankSlope * x     // a plain ramp, rising toward +X (HE_DUMP_WATERSLOPE, steep: 0.8)
 						               : bankSlope * x + 10.0f * bankSlope * std::sin(0.15f * z) + bankRough * hashNoise(xi, zi);
 				}
@@ -8327,7 +8330,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				ok = ok && water::addCircle(ltc, b, -34.0f + 62.0f * t, -26.0f + 50.0f * std::sin(t * 3.0f), 17.0f, 6.0f).ok;
 			}
 		}
-		else if (mode == "cascade")
+		else if (mode == "cascade" || mode == "hill")
 		{
 			// Thema 232 step 5: a stroke dragged DOWN the ramp with Terraces on, through the brush's own
 			// begin/dab/end, so the witness shows what the tool makes: one flat body per step and the
@@ -8337,12 +8340,18 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			p.radius = 2.5f; p.falloff = 1.0f; p.amount = 1.0f;
 			p.levelFromGround = true; p.levelOffset = 0.3f;
 			p.cascade = true; p.autoFlow = true;
-			const float x0 = 22.0f, x1 = -12.0f;
+			// "hill": from near the crest down the +X flank of the mound, with a gentle sideways meander.
+			const bool hill = mode == "hill";
+			const float x0 = hill ? 3.0f : 22.0f, x1 = hill ? 46.0f : -12.0f;
+			auto zAt = [hill](float t) { return hill ? 5.0f * std::sin(t * 4.0f) : 0.0f; };
 			brush::Stroke st;
-			brush::begin(st, ltc, x0, 0.0f, p);
-			const int steps = 120;
+			brush::begin(st, ltc, x0, zAt(0.0f), p);
+			const int steps = hill ? 200 : 120;
 			for (int i = 0; i <= steps; ++i)
-				brush::dab(st, ltc, x0 + (x1 - x0) * static_cast<float>(i) / static_cast<float>(steps), 0.0f, p);
+			{
+				const float t = static_cast<float>(i) / static_cast<float>(steps);
+				brush::dab(st, ltc, x0 + (x1 - x0) * t, zAt(t), p);
+			}
 			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE=cascade: %zu bodies, %u terraces",
 			            st.bodies.size(), st.terraces);
 			brush::end(st, ltc);
