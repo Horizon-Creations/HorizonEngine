@@ -7532,6 +7532,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                 // a tiny fullscreen draw (rvtPackPage) takes its place. It always waits synchronously (see the header's
                 // member comment), so a packed page never joins the m_rvtPendingCmds pipeline below.
                 const bool packed = pageOk && m_rvtPack && camera.rvtLayer > 0;
+                bool packOk = true; // only packed can fail it; set false in the pipeline-unavailable branch below
                 if (pageOk && !packed)
                 {
                     // The copy rides in the frame's own buffer: one submit, one wait.
@@ -7581,8 +7582,11 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                     rvtPackPage(cmd, m_viewportImage, camera.rvtLayer, dst, hotSlice, width);
                 }
                 else if (packed)
+                {
+                    packOk = false;
                     HE_LOG_WARN(RHI, "VulkanRenderer: RVT page pack unavailable, slot %u layer %d not written this paint",
                                 uint32_t(camera.rvtSlot), camera.rvtLayer);
+                }
                 vkEndCommandBuffer(cmd);
 
                 VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -7604,7 +7608,7 @@ bool VulkanRenderer::RenderSceneImage(const EditorCameraOverride& camera, uint32
                 if (page)
                 {
                     rgba.clear();
-                    ok = pageOk;
+                    ok = pageOk && packOk;
                 }
                 else
                 {
