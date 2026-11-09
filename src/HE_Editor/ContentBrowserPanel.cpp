@@ -4705,11 +4705,14 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// levels) and not on a level itself.
 				if (!engineLocked && ext == ".hasset" && ctx.contentManager &&
 				    EditorAssetTypeCache::is(s_ctxMenuItem, HE::AssetType::StaticMesh) &&
-				    !AutoLod::isLodSidecarPath(srcPath.string()) &&
-				    EditorWidgets::menuItem("Generate LODs..."))
+				    !AutoLod::isLodSidecarPath(srcPath.string()))
 				{
 					const std::string rel = ctx.contentManager->toContentRelativePath(srcPath.string());
-					if (!rel.empty())
+					// An asset outside the content root (e.g. one referenced from
+					// another project) has no path to write a _LOD<n> sidecar under;
+					// offering a menu item that would then silently do nothing reads
+					// as a broken editor, so it is hidden instead.
+					if (!rel.empty() && EditorWidgets::menuItem("Generate LODs..."))
 					{
 						AutoLodDialog::Request req;
 						req.kind = AutoLodDialog::Kind::MeshAsset;

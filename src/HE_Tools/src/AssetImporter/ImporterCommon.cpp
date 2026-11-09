@@ -877,8 +877,9 @@ bool reimport(const std::filesystem::path& assetFile,
 		options.textureSrgb = textureSrgbOf(assetFile);
 	// A mesh that has an Auto-LOD chain keeps one: the levels are derived from LOD0,
 	// so a changed source leaves them describing the old geometry. How many it had is
-	// all the file records (the ratios are not stored), so the default run is cut to
-	// that count. Neither is the foliage flag, so a chain made in foliage mode comes back
+	// all the file records (the ratios are not stored), so the default run is cut — or,
+	// for a chain longer than the default 3, regenerated on the same curve — to that
+	// count. Neither is the foliage flag, so a chain made in foliage mode comes back
 	// as a plain one — the file has nowhere to say which it was; re-run the dialog on
 	// LOD0 to get it back. The MeshImporter drops the old levels the shorter run no
 	// longer rewrites, so the chain never mixes old and new geometry.
@@ -888,7 +889,14 @@ bool reimport(const std::filesystem::path& assetFile,
 		if (!levels.empty())
 		{
 			options.generateLods = true;
-			options.lodRatios.resize(std::min(options.lodRatios.size(), levels.size()));
+			if (levels.size() <= options.lodRatios.size())
+				options.lodRatios.resize(levels.size());
+			else
+				// Same step/floor (0.5 / 0.1) the default 3-entry lodRatios comes from
+				// (AutoLodDialog::Options' own defaults) — a chain longer than that is
+				// regenerated on it instead of being silently capped to 3, which used to
+				// delete LOD4+ sidecars as stale even though the old chain was still live.
+				options.lodRatios = AutoLod::ratiosFor(static_cast<int>(levels.size()), 0.5f, 0.1f);
 		}
 	}
 

@@ -140,7 +140,10 @@ namespace
 		if (src.cooked) return fail("A packed mesh cannot be baked.");
 		const size_t slotCount = std::max<size_t>(src.sections.size(), 1);
 		std::vector<SlotSource> slots;
-		std::string note;
+		// One `note` per call, not a single variable every slot overwrites: two slots
+		// with different complaints (one unreadable texture, one missing material)
+		// both need to reach the user, not just whichever slot ran last.
+		std::vector<std::string> notes;
 		for (size_t i = 0; i < slotCount; ++i)
 		{
 			HE::UUID    matId   = layer ? layer->materialAssetId : HE::UUID{};
@@ -150,7 +153,10 @@ namespace
 				if (!src.sections.empty()) { matId = src.sections[i].materialId; matPath = src.sections[i].materialPath; }
 				if (matId == HE::UUID{} && matPath.empty()) { matId = src.materialId; matPath = src.materialPath; }
 			}
-			slots.push_back(slotSourceOf(cm, matId, matPath, note));
+			std::string slotNote;
+			slots.push_back(slotSourceOf(cm, matId, matPath, slotNote));
+			if (!slotNote.empty() && std::find(notes.begin(), notes.end(), slotNote) == notes.end())
+				notes.push_back(slotNote);
 		}
 		std::vector<Impostor::SectionSource> sources;
 		for (const SlotSource& s : slots) sources.push_back(s.src);   // pixel buffers do not move: the vectors own them
@@ -178,7 +184,7 @@ namespace
 		std::snprintf(buf, sizeof(buf), "Baked an impostor (%d x %d texels, %.0f %% / %.0f %% of the two views covered) as %s.",
 		              baked.width, baked.height, baked.coverage[0] * 100.0f, baked.coverage[1] * 100.0f, written.materialPath.c_str());
 		out.message = buf;
-		if (!note.empty()) out.message += " " + note;
+		for (const std::string& n : notes) out.message += " " + n;
 		return out;
 	}
 }
@@ -375,6 +381,11 @@ Outcome bakeImpostor(AppContext& ctx, const Request& req, const Options& o)
 	if (path.empty()) return fail("The mesh is not a file in the project.");
 	if (startsWith(path, "Engine/"))
 		return fail("Engine meshes cannot be baked here. Copy the mesh into the project first.");
+	// Same guard as run(): a layer whose mesh was itself left pointing at a generated
+	// level would otherwise bake an impostor off the simplified geometry under the
+	// original mesh's name.
+	if (AutoLod::isLodSidecarPath(path))
+		return fail("This mesh is itself a generated level; bake from the original.");
 	if (!cm.getStaticMesh(layer.meshAssetId)) cm.ensureResident(layer.meshAssetId);
 	const StaticMeshAsset* loaded = cm.getStaticMesh(layer.meshAssetId);
 	if (!loaded) return fail("The mesh could not be loaded.");
