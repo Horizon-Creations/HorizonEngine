@@ -14186,15 +14186,23 @@ void EditorApplication::setPlayMode(bool play)
 				return bus == HE::api::settings::kMaster ? m_audioEngine.getMasterVolume()
 				                                         : m_audioEngine.getBusVolume(bus);
 			};
-			// Graphics quality: the base is the project's own values; the player's
-			// choice lands in the play-local copy (see m_playGraphics), never in the
-			// project, and the viewport follows it until play stops.
+			// Graphics quality: the base is the project's own values once it has
+			// them (graphics.enabled), the editor's live Preferences otherwise —
+			// same base dumpFrameHeadless and the Quality page
+			// (ProjectSettingsPanel::drawQualityPage) read, via EditorGraphics::
+			// capture, so a preset set from Play starts from the viewport's
+			// current look rather than from struct defaults. The player's choice
+			// lands in the play-local copy (see m_playGraphics), never in the
+			// project or the editor's Preferences, and the viewport follows it
+			// until play stops.
 			m_playQualityActive = false;
+			syncGraphicsSource();   // m_editorConfig holds the editor's own values now
 			if (m_projectLoaded)
 			{
 				host.baseGraphics = m_projectManager.currentProject().settings.graphics;
 				host.baseShadows  = m_projectManager.currentProject().settings.shadows;
 			}
+			if (!host.baseGraphics.enabled) EditorGraphics::capture(m_editorConfig, host.baseGraphics);
 			host.applyQuality = [this](const HE::ProjectGraphics& g, const HE::ProjectShadowSettings& s)
 			{
 				m_playGraphics      = g;
