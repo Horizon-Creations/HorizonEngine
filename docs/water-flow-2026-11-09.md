@@ -163,3 +163,30 @@ eigenes Thema (Pegel als Feld statt Skalar).
   Typ); `editor_help_audit.py --check` grün.
 - **Nicht verifiziert:** Editor-UI nur kompiliert, nicht bedient. Kein Neuberechnen nach Sculpting (Schritt-1-Vorgabe).
 - **Entscheidung:** Ein Körper mit `flowAuto` wird bei jedem Strich neu berechnet, auch ohne `Params::autoFlow`.
+
+### Schritt 3 (Material-Variante WaterFlow), erledigt
+
+- **Gebaut:** `MatGen/main.cpp` (`waterMaterial()`): Param `Flow` (Vec4, x/y = Strömung in WELT-Achsen, m/s), Static Switch
+  `Flow` (Standard aus). An: Suchposition = `Weltpos - flow * time` für die vier Chop-Schichten (`rippleLayer`), das
+  Kaustik-`cuv` und die zwei Schaum-Panner. Aus: der Offset ist die Konstante 0, das Material ist das alte. Die Wellenzüge
+  und die Tessellation bleiben unberührt (CPU-Formel von Physik/Unterwassereffekt). Ohne Switch hat die Standardvariante
+  keinen `Flow`-Slot (14 Slots wie vorher); Flow + Tessellation = 16 Slots, passt.
+- **Varianten:** `DefaultAssets.h` `kEngineWaterFlowMaterialId` {0x600,3} und `kEngineWaterFlowTessellatedMaterialId` {0x600,4}.
+  `WaterSurface.cpp`: `waterMaterialFor(cm, tess, flow)` je KÖRPER (nicht je Landschaft), Rückfall flow→einfacher, nie grau.
+  `worldFlowOf` dreht `physics.flow` mit der Landschaftsdrehung in Weltachsen; unter `WaterSurface::kMinVisibleFlow` (0,02 m/s)
+  ist der Körper stehendes Wasser (Standardmaterial, kein Knopf). `RenderExtractor.cpp`: Wind gilt auch für die Flow-Variante.
+- **Verifiziert (Mac, Metal, Release):** `ctest -R "test_water|test_engine_materials"` 10/10; neue Fälle: Flow-Switch im Graph
+  (an/aus/mit Tess, Slotbudget), Variante je Körper mit echtem Water.hasset, Weltachsen-Knopf bei gedrehter Landschaft.
+  **Pixel-Zeuge** (sauberes `HOME`, `HE_DUMP_WATERLAKE=l`, Level 8, `HE_DUMP_SETTLEMS=1500 HE_DUMP_FRAMES=6`, `HE_SKY_TIME=3|8`):
+  stehendes Wasser mit NEUEM Water.hasset == mit dem ALTEN (git HEAD) md5-gleich bei beiden Zeiten; `HE_DUMP_WATERFLOW=2,0` ändert
+  16,7 % der Pixel (Chop-Streifen und Schaumpunkte versetzt, die großen Wellen stehen).
+- **Nicht verifiziert:** Richtung per Bildregistrierung (nur per GLSL: Suchposition `p - f*t` = Muster wandert mit `+f`, und Unit-Test
+  der Weltachsen); D3D11/D3D12/Vulkan/OpenGL (laut Auftrag letzter Schritt); Release-Pak-Spiel (die Variante braucht Graph +
+  Shader-Compiler wie die Tessellation, sonst Rückfall aufs einfache Wasser).
+- **Fallen:** (1) Ein Projekt mit eigenem `Content/Engine/Materials/Water.hasset` (z. B. `Catania`) behält SEINEN Graph ohne
+  Flow-Switch: Variante sieht dort aus wie stehendes Wasser. Für Zeugen sauberes `HOME` nehmen. (2) Ohne `HE_DUMP_SETTLEMS`
+  wird ein frisch registriertes Material im ersten Frame nicht gezeichnet (Pipeline pending): "A == B md5" kann dann
+  "beide leer" heißen. (3) `DefaultAssets.h` geändert = HorizonCore-Neubau. (4) `Water.hasset` ist neu erzeugt (mat_gen) und
+  ins Repo-EditorDeps kopiert; `DisplacementDemo.hasset` NICHT mitgenommen (die mat_gen-Ausgabe weicht von der eingecheckten Datei ab; Ursache nicht untersucht, nicht Teil des Schritts).
+- **Entscheidung:** Kein eigener "Variante aus"-Schalter (wäre eine neue serialisierte Einstellung): Fluss 0 = aus.
+- **Nächste Schritte:** Schritt 4 (Terrassen im Pinsel, Abschnitt 6), dann Wasserfall-Band, dann Backend-Abnahme.

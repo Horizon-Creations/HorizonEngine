@@ -49,6 +49,11 @@ namespace WaterSurface
     // Metres per UV unit. UVs are world coordinates / this, so 1 = one tile per metre.
     inline constexpr float kUvMetersPerTile = 1.0f;
 
+    // A current slower than this (m/s) draws as standing water: the body keeps the plain material and
+    // pays nothing for flow (Thema 232 step 3). Slower than a drift of a few centimetres a second no
+    // eye sees the pattern move.
+    inline constexpr float kMinVisibleFlow = 0.02f;
+
     struct Stats
     {
         uint32_t terrains  = 0;   // landscapes with water, looked at

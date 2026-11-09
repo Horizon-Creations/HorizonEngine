@@ -16,6 +16,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
+#include <string>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -107,68 +110,107 @@ namespace
         giveBackMesh(cm, renderer, mesh);
     }
 
-    // The material a landscape's water draws with: the engine water, or — when its
-    // "tessellation" switch is on — the same water as a Material Instance with the
-    // material's Static Switch "Tessellation" set (the swell as real geometry). The instance
-    // is made here, in memory, on first use. A build that cannot make it (a packed game
-    // whose water has no graph to regenerate from, no shader compiler) falls back to the
-    // plain water, once and for good: a surface must never turn into the grey fallback.
-    HE::UUID waterMaterialFor(ContentManager& cm, bool tessellation)
+    // The material a water body draws with: the engine water, or the same water as a Material
+    // Instance with Static Switches set. "Tessellation" (a landscape's setting): the swell as real
+    // geometry. "Flow" (a body with a current, Thema 232 step 3): the ripples, foam and caustics
+    // carried along it; both at once have an instance of their own. The instance is made here, in
+    // memory, on first use. A build that cannot make it (a packed game whose water has no graph to
+    // regenerate from, no shader compiler) falls back, once and for good, to the next simpler
+    // variant (flow + tessellation -> tessellation, flow -> plain): a surface must never turn into
+    // the grey fallback. No switch asked for: the plain water, nothing looked up, nothing made.
+    HE::UUID waterMaterialFor(ContentManager& cm, bool tessellation, bool flow)
     {
-        if (!tessellation) return HE::kEngineWaterMaterialId;
-        static std::unordered_set<const ContentManager*> failed;
-        if (failed.count(&cm)) return HE::kEngineWaterMaterialId;
+        if (!tessellation && !flow) return HE::kEngineWaterMaterialId;
+        const HE::UUID id = flow ? (tessellation ? HE::kEngineWaterFlowTessellatedMaterialId
+                                                 : HE::kEngineWaterFlowMaterialId)
+                                 : HE::kEngineWaterTessellatedMaterialId;
+        static std::set<std::pair<const ContentManager*, uint64_t>> failed;
+        const auto simpler = [&] { return waterMaterialFor(cm, tessellation, false); };
+        if (failed.count({ &cm, id.lo })) return flow ? simpler() : HE::kEngineWaterMaterialId;
         auto ready = [&] {
-            const MaterialAsset* m = cm.getMaterial(HE::kEngineWaterTessellatedMaterialId);
+            const MaterialAsset* m = cm.getMaterial(id);
             return m && !m->customShaderFragGlsl.empty();
         };
-        if (ready()) return HE::kEngineWaterTessellatedMaterialId;
-        if (!cm.isLoaded(HE::kEngineWaterMaterialId)) return HE::kEngineWaterMaterialId;   // parent not here yet: retry next tick
-        if (!cm.getMaterial(HE::kEngineWaterTessellatedMaterialId))
+        if (ready()) return id;
+        if (!cm.isLoaded(HE::kEngineWaterMaterialId))   // parent not here yet: retry next tick
+            return flow ? simpler() : HE::kEngineWaterMaterialId;
+        if (!cm.getMaterial(id))
         {
             MaterialAsset a;
-            a.id   = HE::kEngineWaterTessellatedMaterialId;
-            a.name = "WaterTessellated";
-            a.path = "mem://Engine/Materials/WaterTessellated.hasset";
-            a.parentMaterialPath   = WaterSurface::kMaterialPath;
-            a.instanceSwitchNames  = { "Tessellation" };
-            a.instanceSwitchValues = { 1 };
+            a.id   = id;
+            a.name = flow ? (tessellation ? "WaterFlowTessellated" : "WaterFlow") : "WaterTessellated";
+            a.path = std::string("mem://Engine/Materials/") + a.name + ".hasset";
+            a.parentMaterialPath = WaterSurface::kMaterialPath;
+            if (tessellation) { a.instanceSwitchNames.push_back("Tessellation"); a.instanceSwitchValues.push_back(1); }
+            if (flow)         { a.instanceSwitchNames.push_back("Flow");         a.instanceSwitchValues.push_back(1); }
             cm.registerMaterial(std::move(a));
         }
-        cm.syncMaterialInstance(HE::kEngineWaterTessellatedMaterialId);
-        if (ready()) return HE::kEngineWaterTessellatedMaterialId;
-        failed.insert(&cm);
-        HE_LOG_WARN(Asset, "%s", "Water surface: tessellation needs the water material's graph and a shader "
-                                 "compiler; drawing without it");
-        return HE::kEngineWaterMaterialId;
+        cm.syncMaterialInstance(id);
+        if (ready()) return id;
+        failed.insert({ &cm, id.lo });
+        HE_LOG_WARN(Asset, "Water surface: %s needs the water material's graph and a shader "
+                           "compiler; drawing without it", flow ? "a flowing body" : "tessellation");
+        return flow ? simpler() : HE::kEngineWaterMaterialId;
     }
 
-    // The tessellated surface's numbers for a body, on the surface entity's material as the
-    // per-entity override of the material's "TessWaves" knob (the instance carries only the
-    // switch; the numbers are per body: a river and a sea on one landscape differ). Off or no
-    // body: the override is removed again, so the plain water carries nothing extra.
-    void applyTessParams(MaterialComponent& mat, const Field& f, uint16_t bodyId)
+    // A knob of the water material on the surface entity's own MaterialComponent, as the per-entity
+    // override (the instance carries only the switches; the numbers are per body: a river and a sea
+    // on one landscape differ). `v` null removes it again, so the plain water carries nothing extra.
+    void setKnob(MaterialComponent& mat, const char* knob, const float* v)
     {
-        static const char* kKnob = "TessWaves";
-        const Body* body = f.tessellation ? f.findBody(bodyId) : nullptr;
         auto it = std::find_if(mat.paramOverrides.begin(), mat.paramOverrides.end(),
-                               [](const MaterialParamOverride& o) { return o.name == kKnob; });
-        if (!body)
+                               [knob](const MaterialParamOverride& o) { return o.name == knob; });
+        if (!v)
         {
             if (it != mat.paramOverrides.end()) { mat.paramOverrides.erase(it); mat.dirty = true; }
             return;
         }
-        const float v[4] = { body->tessellation.height, body->tessellation.shoreWidth, 0.0f, 0.0f };
         if (it == mat.paramOverrides.end())
         {
             MaterialParamOverride o;
-            o.name = kKnob;
+            o.name = knob;
             mat.paramOverrides.push_back(o);
             it = mat.paramOverrides.end() - 1;
         }
         if (std::equal(v, v + 4, it->value)) return;
         std::copy(v, v + 4, it->value);
         mat.dirty = true;
+    }
+
+    // The tessellated surface's numbers for a body: the material's "TessWaves" knob. Off or no body:
+    // the override is removed again.
+    void applyTessParams(MaterialComponent& mat, const Field& f, uint16_t bodyId)
+    {
+        const Body* body = f.tessellation ? f.findBody(bodyId) : nullptr;
+        const float v[4] = { body ? body->tessellation.height : 0.0f, body ? body->tessellation.shoreWidth : 0.0f, 0.0f, 0.0f };
+        setKnob(mat, "TessWaves", body ? v : nullptr);
+    }
+
+    // The body's current in WORLD axes (m/s, x and z): BodyPhysics::flow is terrain-local, the material
+    // reads world positions. A landscape's world rotation (HE::worldMatrixOf's columns without their
+    // scale, the way WaterQuery turns it) moves it; a body without a current, or none at all, is zero.
+    glm::vec2 worldFlowOf(HorizonWorld& world, entt::entity te, const Field& f, uint16_t bodyId)
+    {
+        const Body* body = f.findBody(bodyId);
+        if (!body) return glm::vec2(0.0f);
+        const glm::vec2 lf = body->physics.flow;
+        if (!(lf.x * lf.x + lf.y * lf.y > WaterSurface::kMinVisibleFlow * WaterSurface::kMinVisibleFlow)) return glm::vec2(0.0f);   // NaN too
+        const glm::mat3 m(HE::worldMatrixOf(world, te));
+        const auto axis = [&](int c) {
+            const float len = glm::length(m[c]);
+            return len > 1.0e-12f ? m[c] / len : glm::vec3(c == 0, c == 1, c == 2);
+        };
+        const glm::vec3 w = axis(0) * lf.x + axis(2) * lf.y;
+        return glm::vec2(w.x, w.z);
+    }
+
+    // The flowing body's "Flow" knob (world x, z). Zero: the knob goes away (and with it the instance
+    // that reads it, see waterMaterialFor).
+    void applyFlowParams(MaterialComponent& mat, const glm::vec2& worldFlow)
+    {
+        const bool flowing = worldFlow.x != 0.0f || worldFlow.y != 0.0f;
+        const float v[4] = { worldFlow.x, worldFlow.y, 0.0f, 0.0f };
+        setKnob(mat, "Flow", flowing ? v : nullptr);
     }
 
     // Material first: with it not resident the renderer would draw the surface
@@ -226,8 +268,11 @@ namespace
                 e = world.createEntity("WaterSurface");
                 world.reparentEntity(e, te);
                 MaterialComponent mat;
-                mat.materialAssetId = waterMaterialFor(cm, tessellation);
-                if (const Field* fld = &reg().get<TerrainComponent>(te).water) applyTessParams(mat, *fld, bodyId);
+                const Field& fld = reg().get<TerrainComponent>(te).water;
+                const glm::vec2 flow = worldFlowOf(world, te, fld, bodyId);
+                mat.materialAssetId = waterMaterialFor(cm, tessellation, flow != glm::vec2(0.0f));
+                applyTessParams(mat, fld, bodyId);
+                applyFlowParams(mat, flow);
                 r.emplace_or_replace<MaterialComponent>(e, mat);
                 ++stats.created;
             }
@@ -314,9 +359,11 @@ namespace
                         if (!cm.isLoaded(HE::kEngineWaterMaterialId)) f.materialWait = 60;
                     }
                 }
-                const HE::UUID wanted = waterMaterialFor(cm, f.tessellation);
                 for (auto& kv : byBody)
                 {
+                    // Per body: only one with a current draws with the flow variant.
+                    const glm::vec2 flow = worldFlowOf(world, te, f, kv.first);
+                    const HE::UUID wanted = waterMaterialFor(cm, f.tessellation, flow != glm::vec2(0.0f));
                     auto* mat = reg().try_get<MaterialComponent>(kv.second);
                     if (!mat)
                         mat = &reg().emplace<MaterialComponent>(kv.second), mat->materialAssetId = wanted;
@@ -326,6 +373,7 @@ namespace
                         mat->dirty = true;
                     }
                     applyTessParams(*mat, f, kv.first);
+                    applyFlowParams(*mat, flow);
                 }
             }
 

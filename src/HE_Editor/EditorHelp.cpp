@@ -316,6 +316,14 @@ namespace
 	  "the coast (0.1 to 3): the surface is flat at the waterline whatever x is. A "
 	  "landscape's water sets it per body in the landscape's Water details.",
 	  "", "materials#water" },
+	{ "Material/Flow", "",
+	  "Only in the Flow permutation of the water, which a water body with a current draws "
+	  "with (a landscape's Water details, Flow, or water.setFlow). x, y = the current's X "
+	  "and Z in world axes, metres per second: the ripples, the foam lace and the caustics "
+	  "are carried along it, so the surface visibly runs downstream. The big wave trains and "
+	  "the tessellated swell keep their own direction. The engine sets it per body; still "
+	  "water has no such knob and costs nothing extra.",
+	  "", "materials#water" },
 	{ "Material/WaveB", "",
 	  "Second wave train, laid across the swell so the crests do not line up. "
 	  "x = direction in degrees, y = speed in m/s, z = wavelength in metres, "

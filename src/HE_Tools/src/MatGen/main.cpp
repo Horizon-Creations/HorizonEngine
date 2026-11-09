@@ -718,6 +718,14 @@ Mb waterMaterial()
         "further out it blends to the assumed depth (Turbidity.y). "
         "z = opacity floor (0..1): the share of Opacity left at no depth at all. "
         "w = reserved, no effect yet.", 7);
+    // The current (Thema 232 step 3). Only read while the "Flow" Static Switch is on, which the
+    // engine turns on per instance for a body whose BodyPhysics::flow is not zero (WaterSurface.cpp);
+    // x, y = the flow's X and Z in WORLD axes, m/s. Like TessWaves it exists only in that permutation:
+    // the plain water has no such slot and is the water it always was.
+    const int flowKnob = m.param(T::ParamVec4, "Flow", { 0.0f, 0.0f, 0.0f, 0.0f }, "Flow",
+        "Only with the Flow switch on (a water body with a current, set by the Landscape tool or "
+        "water.setFlow). x, y = the current's X and Z in world axes (m/s): the ripples, the foam lace "
+        "and the caustics are carried along it. z, w = reserved.", 21);
     const int sfs = m.un(T::SplitRGBA, surf, 1, 20);
     const Pin fresPow{ sfs, 0 }, refl{ sfs, 1 }, rough{ sfs, 2 }, spec{ sfs, 3 };
     const int shs = m.un(T::SplitRGBA, shallowW, 1, 22);
@@ -767,6 +775,34 @@ Mb waterMaterial()
     const int fadeF = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(7.0f, 17, 24), m.k(40.0f, 17, 24.5f), dist, 18, 24), 19, 24);
     const int fadeG = m.un(T::OneMinus, m.op3(T::Smoothstep, m.k(3.0f, 17, 25), m.k(14.0f, 17, 25.5f), dist, 18, 25), 19, 25);
     const Pin fB{ fadeB }, fC{ fadeC }, fR{ fadeR }, fF{ fadeF }, fG{ fadeG };
+
+    // The current: the chop (the water's normal detail), the caustics and the foam lace are all
+    // noise looked up at the world XZ, so carrying them along a flow is looking them up at
+    // (position - flow * time): the pattern then moves WITH the flow, on top of the drift each layer
+    // already has. A Static Switch ("Flow"), off by default and off for every body without a
+    // current: off, the offset is the constant 0 and px/pz are what they were (a still lake is
+    // pixel for pixel the old water); on, one Combine3 and two Adds are the whole cost, and the
+    // pattern is NOT looked up twice (a two-phase flow map would double the noise, the water's
+    // dearest pass). The wave trains and the tessellated swell are left alone on purpose: they
+    // travel by their own direction and speed, and the CPU (water physics, underwater effect)
+    // evaluates exactly those.
+    const int flowS    = m.un(T::SplitRGBA, flowKnob, 1, 21);
+    const int flowBack = m.op(T::Multiply, time, m.k(-1.0f, 2, 21), 3, 21);
+    const int flowOff3 = m.op3(T::Combine3, m.op(T::Multiply, Pin{ flowS, 0 }, flowBack, 4, 21),
+                               m.op(T::Multiply, Pin{ flowS, 1 }, flowBack, 4, 22), m.k(0.0f, 4, 23), 5, 21);
+    const int flowSw   = m.node(T::StaticSwitch, 6, 21);
+    {
+        MatGraphNode& fw = *m.g.findNode(flowSw);
+        fw.s    = "Flow";
+        fw.p[0] = 0.0f;   // off: the zero below
+    }
+    m.link(flowOff3, flowSw, 0);
+    m.link(m.k(0.0f, 5, 22), flowSw, 1);
+    const int flowSp = m.un(T::SplitRGBA, flowSw, 7, 21);
+    const int fpx    = m.op(T::Add, px, Pin{ flowSp, 0 }, 8, 21);
+    const int fpz    = m.op(T::Add, pz, Pin{ flowSp, 1 }, 8, 22);
+    const Pin cpx{ fpx }, cpz{ fpz };      // the current's lookup position
+    m.comment("Flow: the pattern's lookup position, carried along the current (Static Switch)", 1, 21, 8, 3);
 
     // Gusts: slow large patches where the sea is rougher and where it is calmer.
     // Without them the same texture repeats evenly to the horizon. The same field
@@ -832,10 +868,10 @@ Mb waterMaterial()
     };
     const auto d1 = drift(b, 0.55f, 24, 29), d2 = drift(c, 0.9f, 24, 36);
     const auto d3 = drift(b, -0.8f, 24, 43), d4 = drift(c, -1.3f, 24, 50);
-    const Grad r1 = rippleLayer(m, px, pz, time, 2.6f,  d1.first, d1.second, amp1, fR, 24, 31);
-    const Grad r2 = rippleLayer(m, px, pz, time, 0.9f,  d2.first, d2.second, amp2, fR, 24, 38);
-    const Grad r3 = rippleLayer(m, px, pz, time, 0.4f,  d3.first, d3.second, amp3, fF, 24, 45);
-    const Grad r4 = rippleLayer(m, px, pz, time, 0.17f, d4.first, d4.second, amp4, fG, 24, 52);
+    const Grad r1 = rippleLayer(m, cpx, cpz, time, 2.6f,  d1.first, d1.second, amp1, fR, 24, 31);
+    const Grad r2 = rippleLayer(m, cpx, cpz, time, 0.9f,  d2.first, d2.second, amp2, fR, 24, 38);
+    const Grad r3 = rippleLayer(m, cpx, cpz, time, 0.4f,  d3.first, d3.second, amp3, fF, 24, 45);
+    const Grad r4 = rippleLayer(m, cpx, cpz, time, 0.17f, d4.first, d4.second, amp4, fG, 24, 52);
     m.comment("Chop (noise slope, finite differences)", 24, 29, 8, 14);
 
     const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x, r3.x, r4.x };
@@ -951,8 +987,8 @@ Mb waterMaterial()
     const int cs    = m.un(T::SplitRGBA, caus, 16, 9);
     const int ns    = m.un(T::SplitRGBA, waveN, 21, 9);
     const int shift = m.op(T::Multiply, refr, Pin{ cs, 1 }, 22, 10);
-    const int cx    = m.op(T::Add, px, m.op(T::Multiply, Pin{ ns, 0 }, shift, 23, 9), 24, 9);
-    const int cz    = m.op(T::Add, pz, m.op(T::Multiply, Pin{ ns, 2 }, shift, 23, 10), 24, 10);
+    const int cx    = m.op(T::Add, cpx, m.op(T::Multiply, Pin{ ns, 0 }, shift, 23, 9), 24, 9);
+    const int cz    = m.op(T::Add, cpz, m.op(T::Multiply, Pin{ ns, 2 }, shift, 23, 10), 24, 10);
     const int cuv   = m.op(T::CombineRGBA, cx, cz, 25, 9);
     const int invC  = m.op(T::Divide, m.k(1.0f, 24, 11), Pin{ cs, 1 }, 25, 11);
     const int pan1  = m.op3(T::Panner, cuv, Pin{ cs, 2 },
@@ -978,9 +1014,9 @@ Mb waterMaterial()
     const int fs      = m.un(T::SplitRGBA, foam, 16, 16);
     const int thresh  = m.op(T::Subtract, m.k(0.97f, 21, 16), m.op(T::Multiply, Pin{ fs, 0 }, m.k(0.9f, 21, 17), 22, 16), 23, 16);
     const int band    = m.op3(T::Smoothstep, thresh, m.op(T::Add, thresh, m.k(0.15f, 21, 18.5f), 22, 18), crest, 25, 17);
-    const int fuv     = m.op3(T::Panner, m.op(T::CombineRGBA, px, pz, 21, 19), Pin{ fs, 3 },
+    const int fuv     = m.op3(T::Panner, m.op(T::CombineRGBA, cpx, cpz, 21, 19), Pin{ fs, 3 },
                               m.op(T::Multiply, Pin{ fs, 3 }, m.k(0.5f, 21, 20), 22, 20), 23, 19);
-    const int fuv2    = m.op3(T::Panner, m.op(T::CombineRGBA, px, pz, 21, 21), m.op(T::Multiply, Pin{ fs, 3 }, m.k(-0.7f, 21, 22), 22, 22),
+    const int fuv2    = m.op3(T::Panner, m.op(T::CombineRGBA, cpx, cpz, 21, 21), m.op(T::Multiply, Pin{ fs, 3 }, m.k(-0.7f, 21, 22), 22, 22),
                               m.op(T::Multiply, Pin{ fs, 3 }, m.k(0.4f, 21, 23), 22, 23), 23, 21);
     const int invF    = m.op(T::Divide, m.k(1.0f, 23, 20), Pin{ fs, 2 }, 24, 20);
     const int n1      = m.fbm(fuv, invF, 24, 19);
@@ -1174,7 +1210,7 @@ const std::set<std::string> kWaterParams = {
     "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "Surface",
     "ShallowWater", "Opacity", "Refraction", "FoamColor", "Foam",
     "Caustics", "Variation",
-};   // (TessWaves exists only in the Tessellation permutation: nothing reaches it with the switch off)
+};   // (TessWaves exists only in the Tessellation permutation, Flow only in the Flow one: nothing reaches them with the switch off)
 
 // ── Displacement demo (Thema 207) ────────────────────────────────────────────
 // The example for the Output node's Displacement pin: a quilted surface whose

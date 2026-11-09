@@ -102,6 +102,13 @@ constexpr UUID kEngineWaterMaterialId = { 0x0000000000000600ULL, 0x0000000000000
 // water asks for tessellation; never a file, never saved).
 constexpr UUID kEngineWaterTessellatedMaterialId = { 0x0000000000000600ULL, 0x0000000000000002ULL };
 
+// The same water with its "Flow" Static Switch on (Thema 232 step 3): the ripples, the foam lace and
+// the caustics are carried along the body's current (BodyPhysics::flow). Made the same way and for the
+// same reason as the tessellated one: a runtime Material Instance of the plain water, in memory, never
+// a file; only a body whose flow is not zero draws with it. The second one has both switches on.
+constexpr UUID kEngineWaterFlowMaterialId            = { 0x0000000000000600ULL, 0x0000000000000003ULL };
+constexpr UUID kEngineWaterFlowTessellatedMaterialId = { 0x0000000000000600ULL, 0x0000000000000004ULL };
+
 // What the water material was called before it moved out of the textures' block.
 // A scene saved up to then names it by this id; SceneSerializer maps it onto
 // kEngineWaterMaterialId when it reads a material reference. Only ever a material

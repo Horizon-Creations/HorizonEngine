@@ -1525,3 +1525,39 @@ TEST_CASE("Engine water material: Tessellation is a Static Switch, off by defaul
 	CHECK(off.glsl.find("heDisp") == std::string::npos);
 	CHECK(with.glsl != off.glsl);
 }
+
+TEST_CASE("Engine water material: Flow is a Static Switch, off by default, that carries the ripples along a current")
+{
+	REQUIRE(fs::exists(engineRoot() / "Materials" / "Water.hasset"));
+	Scratch s("water-flow");
+	ContentManager cm(s.content());
+	cm.setEngineContentRoot(engineRoot().string());
+	const MaterialAsset* m = cm.getMaterial(cm.loadAsset(kWaterPath));
+	REQUIRE(m);
+	HE::MaterialGraph g;
+	REQUIRE(HE::materialGraphFromJson(m->nodeGraphJson, g));
+
+	const auto hasParam = [](const HE::MatShaderGen& gen, const char* name) {
+		for (const HE::MatParamSlot& p : gen.params) if (p.name == name) return true;
+		return false;
+	};
+	// Off (the default): the "Flow" knob is not in the layout, so the plain water has no slot for it.
+	const HE::MatShaderGen off = HE::generateFragment(g);
+	CHECK_FALSE(hasParam(off, "Flow"));
+	// On: the knob is a slot, and the fragment differs (the pattern's lookup position moves with time).
+	const std::map<std::string, bool> flowOn{ { "Flow", true } };
+	const HE::MatShaderGen flow = HE::generateFragment(g, {}, &flowOn);
+	CHECK(hasParam(flow, "Flow"));
+	CHECK(flow.glsl != off.glsl);
+	CHECK(flow.glsl.size() >= off.glsl.size());
+	// Flow and Tessellation together still fit the 16 slots of the parameter block (an over-budget graph
+	// would bake a knob as its default instead of making a slot for it).
+	const std::map<std::string, bool> bothOn{ { "Flow", true }, { "Tessellation", true } };
+	const HE::MatShaderGen both = HE::generateFragment(g, {}, &bothOn);
+	CHECK(hasParam(both, "Flow"));
+	CHECK(hasParam(both, "TessWaves"));
+	CHECK(static_cast<int>(both.params.size()) <= HE::kMatMaxParams);
+	// The tessellation permutation is untouched by the Flow switch being off: same params as before.
+	const std::map<std::string, bool> tessOn{ { "Tessellation", true } };
+	CHECK_FALSE(hasParam(HE::generateFragment(g, {}, &tessOn), "Flow"));
+}

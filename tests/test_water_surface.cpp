@@ -26,6 +26,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -787,6 +788,107 @@ TEST_CASE("Water surface: a lake becomes one entity with the engine water materi
     for (auto c : reg.view<TerrainChunkComponent>()) { (void)c; ++chunks; }
     CHECK(chunks > 0);
 }
+
+// Thema 232 step 3: a body with a current hands the material its flow in WORLD axes; a body
+// without one carries nothing extra. (This rig has no engine water material, so the variant
+// itself falls back to the plain water, which is what must happen then: never the grey fallback.
+// The variant is checked against the real material in test_engine_materials.)
+TEST_CASE("Water surface: a flowing body carries a Flow knob in world axes, a still one nothing")
+{
+    const auto knob = [](Rig& rig, Entity e) -> const MaterialParamOverride* {
+        const auto* mat = rig.world.registry().try_get<MaterialComponent>(e);
+        REQUIRE(mat);
+        for (const auto& o : mat->paramOverrides) if (o.name == "Flow") return &o;
+        return nullptr;
+    };
+    const std::vector<glm::vec2> poly = { { -20, -20 }, { 10, -20 }, { 10, 10 }, { -20, 10 } };
+
+    Rig rig;
+    const uint16_t still = addLake(rig.tc(), poly, 2.0f);
+    const uint16_t river = addLake(rig.tc(), { { 15, -20 }, { 30, -20 }, { 30, 10 }, { 15, 10 } }, 2.0f);
+    water::BodyPhysics ph = rig.tc().water.findBody(river)->physics;
+    ph.flow = glm::vec2(2.0f, -1.0f);
+    REQUIRE(water::setPhysics(rig.tc(), river, ph));
+    rig.update();
+
+    const Entity stillE = rig.surfaceOf(still), riverE = rig.surfaceOf(river);
+    REQUIRE((stillE != entt::null));
+    REQUIRE((riverE != entt::null));
+    CHECK(knob(rig, stillE) == nullptr);                              // standing water: no knob at all
+    REQUIRE(knob(rig, riverE) != nullptr);
+    CHECK(knob(rig, riverE)->value[0] == doctest::Approx(2.0f));      // unrotated landscape: local = world
+    CHECK(knob(rig, riverE)->value[1] == doctest::Approx(-1.0f));
+
+    // A landscape turned a quarter about Y carries the current with it: local +X is world -Z.
+    auto& tf = rig.world.registry().get<TransformComponent>(rig.terrain);
+    tf.rotation = glm::vec3(0.0f, 90.0f, 0.0f);
+    tf.dirty = true;
+    rig.tc().water.dirty = true;
+    rig.update();
+    const MaterialParamOverride* k = knob(rig, riverE);
+    REQUIRE(k != nullptr);
+    CHECK(k->value[0] == doctest::Approx(-1.0f).epsilon(1e-3));       // 2 * local X (= world -Z) - 1 * local Z (= world X)
+    CHECK(k->value[1] == doctest::Approx(-2.0f).epsilon(1e-3));
+    CHECK(knob(rig, stillE) == nullptr);
+
+    // The current stops (or drops under the visible minimum): the knob goes again and the body is
+    // plain water like its neighbour.
+    ph.flow = glm::vec2(WaterSurface::kMinVisibleFlow * 0.5f, 0.0f);
+    REQUIRE(water::setPhysics(rig.tc(), river, ph));
+    rig.update();
+    CHECK(knob(rig, riverE) == nullptr);
+    CHECK(rig.world.registry().get<MaterialComponent>(riverE).materialAssetId == HE::kEngineWaterMaterialId);
+}
+
+#ifdef HE_EDITOR_DEPS_DIR
+// The same with the real engine water loaded: a flowing body draws with the Flow instance (an
+// in-memory instance of Water.hasset with the "Flow" switch on), a still neighbour with the plain
+// water, and the flow + tessellation pair has an instance of its own.
+TEST_CASE("Water surface: only a body with a current draws with the WaterFlow variant")
+{
+    Rig rig;
+    rig.cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+    REQUIRE(rig.cm.loadAsset(WaterSurface::kMaterialPath) == HE::kEngineWaterMaterialId);
+    const uint16_t still = addLake(rig.tc(), { { -20, -20 }, { 10, -20 }, { 10, 10 }, { -20, 10 } }, 2.0f);
+    const uint16_t river = addLake(rig.tc(), { { 15, -20 }, { 30, -20 }, { 30, 10 }, { 15, 10 } }, 2.0f);
+    water::BodyPhysics ph = rig.tc().water.findBody(river)->physics;
+    ph.flow = glm::vec2(1.5f, 0.0f);
+    REQUIRE(water::setPhysics(rig.tc(), river, ph));
+    rig.update();
+
+    const auto materialOf = [&](uint16_t body) {
+        return rig.world.registry().get<MaterialComponent>(rig.surfaceOf(body)).materialAssetId;
+    };
+    CHECK(materialOf(still) == HE::kEngineWaterMaterialId);
+    CHECK(materialOf(river) == HE::kEngineWaterFlowMaterialId);
+    const MaterialAsset* flowMat = rig.cm.getMaterial(HE::kEngineWaterFlowMaterialId);
+    REQUIRE(flowMat);
+    CHECK_FALSE(flowMat->customShaderFragGlsl.empty());
+    CHECK(std::find(flowMat->graphParamNames.begin(), flowMat->graphParamNames.end(), "Flow") != flowMat->graphParamNames.end());
+    // The plain water has no "Flow" slot at all: nothing for a still lake to pay.
+    const MaterialAsset* plain = rig.cm.getMaterial(HE::kEngineWaterMaterialId);
+    REQUIRE(plain);
+    CHECK(std::find(plain->graphParamNames.begin(), plain->graphParamNames.end(), "Flow") == plain->graphParamNames.end());
+
+    // Tessellation on the landscape too: the flowing body gets the instance with both switches.
+    rig.tc().water.tessellation = true;
+    rig.tc().water.dirty = true;
+    rig.update();
+    CHECK(materialOf(still) == HE::kEngineWaterTessellatedMaterialId);
+    CHECK(materialOf(river) == HE::kEngineWaterFlowTessellatedMaterialId);
+    const MaterialAsset* both = rig.cm.getMaterial(HE::kEngineWaterFlowTessellatedMaterialId);
+    REQUIRE(both);
+    CHECK_FALSE(both->customShaderFragGlsl.empty());
+    CHECK(std::find(both->graphParamNames.begin(), both->graphParamNames.end(), "Flow") != both->graphParamNames.end());
+    CHECK(std::find(both->graphParamNames.begin(), both->graphParamNames.end(), "TessWaves") != both->graphParamNames.end());
+
+    // The current stops: the body is plain water again (tessellated, as its neighbour).
+    ph.flow = glm::vec2(0.0f, 0.0f);
+    REQUIRE(water::setPhysics(rig.tc(), river, ph));
+    rig.update();
+    CHECK(materialOf(river) == HE::kEngineWaterTessellatedMaterialId);
+}
+#endif // HE_EDITOR_DEPS_DIR
 
 TEST_CASE("Water surface: nothing changes, nothing is rebuilt")
 {

@@ -519,8 +519,10 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 							obj.paramOverride = std::move(block);
 						}
 					// The engine water: its waves take the scene's wind (an entity's own WaveA/B/C
-					// override is kept).
-					if (windOn && matId == HE::kEngineWaterMaterialId && contentManager)
+					// override is kept). The flowing variant (Thema 232) is the same water with a
+					// current and follows the wind too; the tessellated ones do not, their swell
+					// is the CPU's formula.
+					if (windOn && (matId == HE::kEngineWaterMaterialId || matId == HE::kEngineWaterFlowMaterialId) && contentManager)
 						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
 							windWaterParams(*ma, matComp, windDir, windSpd, obj.paramOverride);
 				}

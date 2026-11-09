@@ -8375,9 +8375,39 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					haveCau ? "set" : "default", cauOv.intensity, cauOv.scale, cauOv.speed, cauOv.depth);
 			}
 		}
+		// HE_DUMP_WATERFLOW="x,z": a current (terrain-local, m/s) on EVERY body of the witness, through
+		// the same setter the Water tab uses (Thema 232 step 3): the flowing bodies draw with the
+		// WaterFlow material variant, the ripples carried along it. Pair with HE_SKY_TIME (the
+		// material clock) at two values to see the pattern move, and HE_DUMP_SETTLEMS=1500 HE_DUMP_FRAMES=6
+		// so the new material's pipeline has landed (a pending one is not drawn). A project that overrides
+		// Engine/Materials/Water.hasset keeps ITS graph, which has no Flow switch: the variant then draws as
+		// the plain water. Unset = still water, as before.
+		{
+			float fl[2] = { 0.0f, 0.0f };
+			if (uwFloats("HE_DUMP_WATERFLOW", fl, 2))
+			{
+				for (const water::Body& body : std::vector<water::Body>(ltc.water.bodies))
+				{
+					water::BodyPhysics ph = body.physics;
+					ph.flow = glm::vec2(fl[0], fl[1]);
+					water::setPhysics(ltc, body.id, ph);
+				}
+				HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERFLOW %.2f,%.2f set on %zu body(ies)",
+					fl[0], fl[1], ltc.water.bodies.size());
+			}
+		}
 		reg.emplace<TerrainComponent>(land, ltc);
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
 		const WaterSurface::Stats& ws = WaterSurface::lastStats();
+		// Which material each sheet draws with (the Flow witness: a flowing body must say 0x600,3).
+		for (auto [we, wsc, wmat] : reg.view<WaterSurfaceComponent, MaterialComponent>().each())
+		{
+			const MaterialAsset* wm = contentManager().getMaterial(wmat.materialAssetId);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE body %u draws with material %llx,%llx (%s, shader %s), %zu override(s)",
+				static_cast<unsigned>(wsc.body), static_cast<unsigned long long>(wmat.materialAssetId.hi),
+				static_cast<unsigned long long>(wmat.materialAssetId.lo), wm ? wm->name.c_str() : "not loaded",
+				wm && !wm->customShaderFragGlsl.empty() ? "ready" : "missing", wmat.paramOverrides.size());
+		}
 		// The sheet alone: the landscape's chunks stay in the world (collision, the
 		// field) but are not drawn.
 		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
