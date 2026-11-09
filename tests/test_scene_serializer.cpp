@@ -1931,6 +1931,9 @@ namespace
 		a.uiText.text     = "Press Start";
 		a.uiText.fontSize = 28.0f;
 		a.uiText.color    = { 0.1f, 0.2f, 0.3f, 0.4f };
+		a.uiText.font     = "Fonts/Orbitron-Bold.hasset";
+		// Transient: set to prove it is NOT written (must read back 0).
+		a.uiText.fontAtlasKey = 0xABCDu;
 		reg.emplace<UITextComponent>(panel, a.uiText);
 
 		a.uiImage.materialAssetId = HE::UUID::generate();
@@ -2327,6 +2330,8 @@ namespace
 			CHECK(t->text     == a.uiText.text);
 			CHECK(t->fontSize == doctest::Approx(a.uiText.fontSize));
 			checkVec4(t->color, a.uiText.color);
+			CHECK(t->font == a.uiText.font);
+			CHECK(t->fontAtlasKey == 0u);   // baked key is per-session, re-resolved at extract
 		}
 		{
 			const auto* img = reg.try_get<UIImageComponent>(panel);
@@ -2918,6 +2923,66 @@ TEST_CASE("A joint saved before the motor existed loads with no motor and no bre
 	CHECK(out->motorMaxForce == doctest::Approx(0.0f));
 	CHECK(out->breakForce    == doctest::Approx(0.0f));
 	CHECK_FALSE(out->collideConnected);
+}
+
+TEST_CASE("A UI text saved before it had a Font asset loads with the default font and keeps its text")
+{
+	// The "font" key was added to "uitext" after scenes already existed. Absent
+	// means the shared default UI font, which is what those scenes always showed.
+	// Written by hand-stripping the key, because the save path now writes it.
+	HorizonWorld world;
+	const Entity label = world.createEntity("Label");
+	world.addComponent(label, TransformComponent{});
+	{
+		UITextComponent t;
+		t.text     = "Score";
+		t.fontSize = 22.0f;
+		t.color    = { 0.9f, 0.8f, 0.7f, 1.0f };
+		t.font     = "Fonts/Orbitron-Bold.hasset";
+		world.registry().emplace<UITextComponent>(label, t);
+	}
+
+	const fs::path file = fs::temp_directory_path() / "he_test_uitext_pre_font.hescene";
+	SceneSerializer ser;
+	REQUIRE(ser.save(world, file, SerializeFormat::JSON));
+
+	nlohmann::json scene;
+	{
+		std::ifstream in(file);
+		REQUIRE(in.good());
+		in >> scene;
+	}
+	bool sawFont  = false;
+	bool stripped = false;
+	for (auto& e : scene["entities"])
+	{
+		auto comps = e.find("components");
+		if (comps == e.end() || !comps->contains("uitext")) continue;
+		sawFont  = (*comps)["uitext"].contains("font");
+		(*comps)["uitext"].erase("font");
+		stripped = true;
+	}
+	REQUIRE(stripped);
+	CHECK(sawFont);   // the new form does write it
+	{
+		std::ofstream out(file);
+		REQUIRE(out.good());
+		out << scene.dump(2);
+	}
+
+	HorizonWorld loaded;
+	REQUIRE(ser.load(loaded, file, SerializeFormat::JSON));
+	he_test::removeQuiet(file);
+	const Entity loadedLabel = findEntityByName(loaded, "Label");
+	REQUIRE(loadedLabel != Entity{ entt::null });
+
+	const auto* t = loaded.registry().try_get<UITextComponent>(loadedLabel);
+	REQUIRE(t != nullptr);
+	CHECK(t->font.empty());
+	CHECK(t->fontAtlasKey == 0u);
+	CHECK(t->text == "Score");
+	CHECK(t->fontSize == doctest::Approx(22.0f));
+	checkVec4(t->color, { 0.9f, 0.8f, 0.7f, 1.0f });
 }
 
 // ─── Parallel scene parse (Thema 153, Schritt 3) ─────────────────────────────
