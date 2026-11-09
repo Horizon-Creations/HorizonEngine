@@ -253,10 +253,14 @@ void extract(HorizonWorld& world, float vpWidth, float vpHeight,
                 // unparseable TTF re-runs the full atlas bake, every call,
                 // because keyFor only caches successful bakes. Without a
                 // contentManager there is nothing to resolve either way, so
-                // the key always falls back to the shared default.
+                // the key always falls back to the shared default. resolvedFont
+                // is cleared with the key: leaving it set would make a later
+                // call WITH a contentManager think the (now zeroed) key is
+                // still valid for `font` and never resolve it again.
                 if (!contentManager)
                 {
                     txt->fontAtlasKey = 0;
+                    txt->resolvedFont.clear();
                 }
                 else if (txt->font != txt->resolvedFont)
                 {

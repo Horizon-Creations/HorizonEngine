@@ -283,6 +283,16 @@ TEST_CASE("UISystem::extract resolves UITextComponent::font to a baked atlas key
     REQUIRE(out.size() == 2);
     for (const auto& ro : out)
         CHECK(ro.fontAtlasKey == 0u);
+
+    // That one no-ContentManager call must not be permanent: the font was
+    // already resolved, so a stale resolvedFont would make the next call with
+    // a ContentManager skip re-resolution and leave the key at 0 forever.
+    out.clear();
+    UISystem::extract(world, 1920.0f, 1080.0f, out, &cm);
+    REQUIRE(out.size() == 2);
+    CHECK(stored->fontAtlasKey != 0u);
+    for (const auto& ro : out)
+        CHECK(ro.fontAtlasKey != 0u);
 }
 
 TEST_CASE("UISystem::extract does not retry a font that failed to resolve")
