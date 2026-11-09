@@ -7871,13 +7871,15 @@ namespace
 	  "its Water Physics.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Terraces on Slopes##water", "Terraces on Slopes",
-	  "Water stays flat, so a stroke dragged down a steep hillside would only grow "
-	  "an ever deeper wedge. With this on, the stroke steps down instead: as soon as "
-	  "the water under the brush is deeper than 1 m on ground steeper than about "
-	  "35 degrees, it goes on in a new, separate body one step lower (flat at the "
-	  "ground under the brush plus Level Offset, at least 0.4 m below the step "
-	  "above). Level ground and gentle slopes are unaffected: a pond stays one body. "
-	  "One undo step still takes the whole stroke back.",
+	  "Water stays flat, so a stroke dragged down a hillside would only grow an ever "
+	  "deeper wedge hanging in the air over the slope. With this on, the stroke steps "
+	  "down instead, in separate bodies 2 m apart: where the ground under the brush "
+	  "is steeper than about 17 degrees, each spot gets the highest step that holds "
+	  "it at most 0.5 m deep (or Level Offset, if that is deeper). Every step is a "
+	  "shallow pool, and between two of them a waterfall band runs down the slope. "
+	  "Level ground and gentle slopes are unaffected: a pond there stays one body; "
+	  "the steep banks of a pond do step, so paint ponds with this off. One undo step "
+	  "still takes the whole stroke back.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
 	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "

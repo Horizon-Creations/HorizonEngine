@@ -245,3 +245,37 @@ eigenes Thema (Pegel als Feld statt Skalar).
   (CAMX=20 CAMY=316 CAMZ=-14 PITCH=-18 YAW=160): Stufen mit Wasserfall-Bändern; `...-over-...png` (Rückansicht, schwach).
 - **Auffällig:** in der Nahaufnahme steht oben rechts eine türkise Platte (Band an der Mäanderkehre, vermutlich Rückseite/Unterwasser-Tönung); nicht untersucht.
 - **Nicht verifiziert:** Mausbedienung im Editor, andere Backends für diese Szene.
+
+### Schritt 11 (Überarbeitung: Stufen-Leiter statt schwebender Platten), erledigt
+
+- **Ursache (gemessen, Pinsel-Code auf dem Hügel, heute `test_water_fall.cpp` "modelled hill"):** 15 Körper; die mittleren hielten nur 22-31 Zellen
+  (1 m x 6 m Streifen) und standen bis 4,4 m über dem Boden, Körper 5 bis 7,2 m, der letzte 9 m. Grund: `addCircle` nimmt **nie** fremde Zellen
+  (`WaterField.h:525`; die Schritt-4-Notiz "nimmt dem alten die Zellen" stimmte nicht). Der Pinselkreis (2,5 + 1 m) hatte 3,5 m voraus schon im
+  alten Pegel benetzt; die neue Stufe (Pegel aus der Kreismitte) bekam nur den trockenen Rand dahinter, die alte behielt ihre tiefe Front: Platten
+  in der Luft, dazwischen 0,7-m-Vorhänge = Minecraft-Treppe. Dazu sperrte `kTerraceSlope` 0,7 die Flanke, wo die Wellung sie unter 35° drückte
+  (x 8,6..15): dort wurde nur tiefer, bis eine Stufe um 3,9 m fiel.
+- **Türkise Platte = erklärt + behoben:** Band von Körper 5, 4,7 m hohe senkrechte Wand in der Luft. Das Material tönt mit `depth/(n·v+0.05)`
+  (`MatGen/main.cpp:964`); die Band-Normale zeigt nach oben, von der Seite ist n·v ≈ 0 (Weg 20-fach), und die Oberkante erbt e = 0 (offenes
+  Wasser) vom 7 m schwebenden Blatt: deckendes Tiefseetürkis. Die Wand gibt es nicht mehr. Bleibt: dasselbe Material zeigt jede Wasserfläche
+  **streifend oder von unten** (n·v ≤ 0) türkis; in der neuen Nahaufnahme oben rechts sind das die oberen Becken, gesehen von 16 m bei Pegeln
+  16-18 m (`near1`, nicht eingecheckt). Von oben sind dieselben Becken hell. Materialänderung nicht Teil des Schritts.
+- **Gebaut (`WaterBrush.h/.cpp`, `paintLadder`):** Stufen = Leiter je `kTerraceDrop` unter dem Strichpegel. Wo der Boden unter dem Pinsel
+  (Steigung über die Pinselweite, `brushSlope`, nicht eine Zelle) >= `kTerraceSlope` ist, geht jede Zelle des Tupfers an die **höchste Stufe, die sie
+  höchstens `lipDepth` tief hält** (sonst an die unterste); Zellen wandern nur zwischen Stufen dieses Strichs, fortgesetzte und fremde Körper behalten
+  ihre. Neue Stufe, sobald die **vordere Pinselhälfte** (Laufrichtung, `Stroke::last`) Boden tiefer als `lipDepth` unter der untersten Stufe erreicht
+  (erster Tupfer, bergauf, quer: keine Stufe). Ergebnis: flache Becken mit höchstens 0,5 m an der Lippe, dazwischen (unter dem Hang verborgen) Zellen der
+  nächsten Stufe, über die das Band läuft. `WaterFall.cpp`: Band nur, wo der Fuß im Wasser des unteren Körpers landet (`landsIn`; vorher liefen Bänder
+  vom Gipfel bis 8 m seitlich auf trockenes Land); Vorfeld-Außenrand e = Ufernähe des unteren Blatts statt 0 (die 0 zog dunkle Linien über jedes Becken).
+- **Schwellen (begründet):** `kTerraceDepth` 1,0 -> **0,5** (jetzt Lippentiefe, `lipDepth` = max(0,5, Level Offset)); neu **`kTerraceDrop` 2,0**
+  (Stufenabstand; auf 0,8 m/m 1,9 m Band + 0,6 m Becken statt alle 0,9 m eine Stufe; an der Schwelle läuft das Band (2 - 0,5)/0,3 = 5 m,
+  unter `kFallMaxRun` 8 m, landet also immer); `kTerraceSlope` 0,7 -> **0,3** (17°, über die Pinselweite gemessen: die Hügelflanke 0,5-0,8 mit Wellung fällt sonst stellenweise heraus);
+  `kTerraceMinDrop` 0,4 bleibt (nur noch Band-Schwelle, `static_assert` Drop >= MinDrop).
+- **Bilder** (wie Schritt 10): vorher `docs/water-flow-hill-side-2026-11-09.png`/`-close-` (Schritt 10, heute vor dem Bau neu gerendert, optisch gleich),
+  nachher `docs/water-flow-hill-side-after-2026-11-09.png`, `-close-after-`, `-top-after-` (CAMX=22 CAMY=372 CAMZ=2 PITCH=-89 YAW=180),
+  Rampe `docs/water-fall-cascade-front-after-2026-11-09.png` (vgl. `water-fall-cascade-front-2026-11-09.png`). Hügel jetzt 12 Körper, alle Bänder 1,98 m.
+- **Verifiziert (Mac, Release, Metal):** `ctest -R test_water` 10/10; `he_tests -tc="Water*"` 254/254; `editor_help_audit.py --check` grün. Neue Fälle:
+  Hügel (Mitte <= Lippe, erste/letzte <= 2 m, jedes Band ein Stufe hoch), Rampe ohne Zelle über Lippe, `lipDepth`, Vorfeld-e, Band auf trockenes Land.
+- **Nicht verifiziert:** andere Backends; Editor-Mausbedienung; grobe Wassergitter (echte 1000-m-Landschaft: 3,9-m-Zellen, ein Becken ist schmaler
+  als eine Zelle); Graben (`dig`) zusammen mit Terrassen.
+- **Offen:** endet ein Strich mitten am Hang, hält die letzte Stufe nur verborgene Zellen und ihr Band ist teilweise (Rampe: 5 von 12 Stücken);
+  Teiche mit steilen Ufern werden mit dem Schalter gestuft (Hilfetext sagt es).

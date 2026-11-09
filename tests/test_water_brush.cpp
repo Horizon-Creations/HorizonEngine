@@ -1482,9 +1482,46 @@ TEST_CASE("Water brush terraces: a stroke down a steep slope steps into one flat
         if (i == 0) continue;
         const float gap = rows[i - 1].first - rows[i].first;
         CHECK(gap >= brush::kTerraceMinDrop);
-        // The step is the ground it started on + the offset: on 45 degrees and 1 m dabs, one metre of drop.
-        CHECK(gap == doctest::Approx(1.0f).epsilon(0.05));
+        // The steps are a ladder below the stroke's level (Schritt 11): one kTerraceDrop apart.
+        CHECK(gap == doctest::Approx(brush::kTerraceDrop).epsilon(1e-4));
     }
+
+    // No step hangs in the air (Schritt 11): every cell a step holds is at most lipDepth under its
+    // level (or above it, hidden under the slope, where the band runs). Before, a step kept the
+    // cells its circles had wetted ahead of the brush and stood metres over the falling ground.
+    const float lip = brush::lipDepth(p);
+    const int res = static_cast<int>(tc.water.res);
+    for (const uint16_t id : s.bodies)
+    {
+        const water::Body* b = tc.water.findBody(id);
+        REQUIRE(b != nullptr);
+        float deepest = -1e9f;
+        for (int cz = 0; cz < res; ++cz)
+            for (int cx = 0; cx < res; ++cx)
+            {
+                const size_t i = static_cast<size_t>(cz) * res + cx;
+                if (tc.water.owner[i] != id || tc.water.coverage[i] == 0) continue;
+                const glm::vec2 c = water::cellCenter(tc, cx, cz);
+                deepest = std::max(deepest, b->level - terrainHeightAt(tc, c.x, c.y));
+            }
+        // (With 1 m cells on 45 degrees a pool is narrower than a cell: whether a cell centre falls in it is
+        // the grid's business. The hill case in test_water_fall.cpp checks the pools are there.)
+        CHECK(deepest <= lip + 1e-3f);
+    }
+}
+
+TEST_CASE("Water brush terraces: the lip depth is kTerraceDepth, or a deeper Level Offset")
+{
+    brush::Params p = cascadeParams();
+    p.levelOffset = 0.3f;
+    CHECK(brush::lipDepth(p) == doctest::Approx(brush::kTerraceDepth));
+    p.levelOffset = 1.2f;
+    CHECK(brush::lipDepth(p) == doctest::Approx(1.2f));
+    p.levelFromGround = false;                                    // a fixed level has no offset to ask for
+    CHECK(brush::lipDepth(p) == doctest::Approx(brush::kTerraceDepth));
+    p.levelFromGround = true;
+    p.levelOffset = std::numeric_limits<float>::quiet_NaN();
+    CHECK(brush::lipDepth(p) == doctest::Approx(brush::kTerraceDepth));
 }
 
 TEST_CASE("Water brush terraces: off, the same drag is one body, as before")
@@ -1510,9 +1547,10 @@ TEST_CASE("Water brush terraces: level ground and gentle slopes stay one body, a
     }
     SUBCASE("a slope under the threshold deepens one body, however long the drag")
     {
-        TerrainComponent tc = makeLand(10.0f, 0.5f);               // 0.5 < kTerraceSlope
+        TerrainComponent tc = makeLand(10.0f, 0.2f);               // 0.2 < kTerraceSlope
+        REQUIRE(0.2f < brush::kTerraceSlope);
         const brush::Stroke s = drag(tc, { 30.0f, 0.0f }, { -30.0f, 0.0f }, cascadeParams(), 60);
-        CHECK(brush::groundSlope(tc, 0.0f, 0.0f) == doctest::Approx(0.5f).epsilon(0.02));
+        CHECK(brush::groundSlope(tc, 0.0f, 0.0f) == doctest::Approx(0.2f).epsilon(0.02));
         CHECK(s.terraces == 0u);
         CHECK(tc.water.bodies.size() == 1u);
     }
@@ -1525,20 +1563,26 @@ TEST_CASE("Water brush terraces: level ground and gentle slopes stay one body, a
     }
 }
 
-TEST_CASE("Water brush terraces: steps are never closer than kTerraceMinDrop, a deep offset only spaces them wider")
+TEST_CASE("Water brush terraces: a deep Level Offset deepens the pools, the steps stay kTerraceDrop apart")
 {
     TerrainComponent tc = makeLand(10.0f, 1.0f);
     brush::Params p = cascadeParams();
-    p.levelOffset = 1.2f;       // already deeper than kTerraceDepth at the first dab: no drop yet, no step
+    p.levelOffset = 1.2f;       // deeper than kTerraceDepth: the pools hold that much at their lips
     const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 40);
     REQUIRE(s.bodies.size() > 2u);
     const auto rows = terraceRows(tc, s);
     CHECK(rows.front().first == doctest::Approx(31.2f));
     for (size_t i = 1; i < rows.size(); ++i)
+    {
         CHECK(rows[i - 1].first - rows[i].first >= brush::kTerraceMinDrop - 1e-4f);
-    // Level starts 1.2 over the ground and a step needs the ground 0.4 further down
-    // than that: the first terrace is at least 0.4 m of ground below the start.
-    CHECK(rows[0].first - rows[1].first >= 0.4f - 1e-4f);
+        CHECK(rows[i - 1].first - rows[i].first == doctest::Approx(brush::kTerraceDrop).epsilon(1e-4));
+    }
+    // The first step keeps the ground down to 1.2 m under its level (the cell at x = 19.5,
+    // 29.5 m, is 1.7 m under it: the next step's).
+    const water::Body* first = tc.water.findBody(s.bodies.front());
+    REQUIRE(first != nullptr);
+    CHECK(water::bodyAt(tc, 20.5f, 0.5f) == first->id);           // ground 30.5: 0.7 m of water
+    CHECK(water::bodyAt(tc, 19.5f, 0.5f) == s.bodies[1]);         // ground 29.5: 1.7 m, too deep for the first
 }
 
 TEST_CASE("Water brush terraces: Flow From Slope gives every terrace its own downhill current")
@@ -1563,11 +1607,14 @@ TEST_CASE("Water brush terraces: an erasing stroke never makes steps, and a dab 
     brush::Params p = cascadeParams();
     brush::Stroke s;
     brush::begin(s, tc, 20.0f, 0.0f, p);
-    CHECK_FALSE(brush::dab(s, tc, 20.0f, 0.0f, p).terrace);       // 0.3 m deep
-    CHECK_FALSE(brush::dab(s, tc, 19.5f, 0.0f, p).terrace);       // 0.8 m
+    // Cells are 1 m, the brush reaches 1 m: the half of it ahead of the way it moves decides.
+    CHECK_FALSE(brush::dab(s, tc, 20.0f, 0.0f, p).terrace);       // the first dab has no way yet
+    CHECK_FALSE(brush::dab(s, tc, 20.0f, 0.6f, p).terrace);       // along the slope: nothing ahead is lower
+    CHECK_FALSE(brush::dab(s, tc, 20.4f, 0.6f, p).terrace);       // uphill: the water ahead gets shallower
     const uint16_t before = s.body;
-    CHECK(brush::dab(s, tc, 19.0f, 0.0f, p).terrace);             // 1.3 m: the next step
+    CHECK(brush::dab(s, tc, 19.4f, 0.6f, p).terrace);             // downhill: the cell at x = 18.5 is 1.8 m under 30.3
     CHECK(s.body != before);
+    CHECK(tc.water.findBody(s.body)->level == doctest::Approx(30.3f - brush::kTerraceDrop));
     brush::end(s, tc);
 
     brush::Params e = p;

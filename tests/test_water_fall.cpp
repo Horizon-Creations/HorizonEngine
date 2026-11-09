@@ -5,6 +5,7 @@
 #include <HorizonScene/WaterMesh.h>
 #include <HorizonScene/WaterSurface.h>
 #include <HorizonScene/TerrainSystem.h>
+#include <HorizonScene/TerrainMeshGenerator.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/Components/MaterialComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>
@@ -27,8 +28,9 @@ namespace brush = HE::water::brush;
 namespace
 {
     // `res` water cells per side: 64 is 1 m cells, 256 is 0.25 m (a stroke's steps then own several cells each,
-    // enough for a sheet; at 1 m a step of a 0.5 m brush is a single cell and draws nothing).
-    TerrainComponent makeLand(float heightAt0, float slopeX, uint32_t res = 64)
+    // enough for a sheet; at 1 m a step of a 0.5 m brush is a single cell and draws nothing). `floor`: the
+    // ground never goes below it, a flat foot where a stroke down the slope ends in a pool.
+    TerrainComponent makeLand(float heightAt0, float slopeX, uint32_t res = 64, float floor = -1e9f)
     {
         TerrainComponent tc;
         tc.sizeX = tc.sizeZ = 64.0f;
@@ -38,7 +40,8 @@ namespace
         tc.sculptHeights.resize(65u * 65u);
         for (uint32_t z = 0; z < 65; ++z)
             for (uint32_t x = 0; x < 65; ++x)
-                tc.sculptHeights[static_cast<size_t>(z) * 65 + x] = heightAt0 + slopeX * (-32.0f + static_cast<float>(x));
+                tc.sculptHeights[static_cast<size_t>(z) * 65 + x] =
+                    std::max(floor, heightAt0 + slopeX * (-32.0f + static_cast<float>(x)));
         return tc;
     }
 
@@ -105,10 +108,93 @@ namespace
     }
 }
 
+TEST_CASE("Water fall: a stroke down a modelled hill is shallow pools and one-step falls, nothing hangs in the air")
+{
+    // The hill witness (HE_DUMP_WATERLAKE=hill, EditorApplication.cpp): a gaussian mound 24 m high with a
+    // ripple on it, 128 m landscape, 0.5 m water cells, the same stroke from near the top down the +X flank.
+    // Before Thema 232 Schritt 11 it made 15 bodies hanging up to 7 m over the ground, a 4.7 m wall of
+    // water in the air between two of them (the turquoise slab of the close-up) and 0.7 m curtains between
+    // the rest: a staircase of plates.
+    TerrainComponent tc;
+    tc.sizeX = tc.sizeZ = 128.0f;
+    tc.resolution = 129;
+    tc.dirty = false;
+    tc.water.res = 256;
+    tc.sculptHeights.resize(129u * 129u);
+    for (uint32_t zi = 0; zi < 129; ++zi)
+        for (uint32_t xi = 0; xi < 129; ++xi)
+        {
+            const float x = -64.0f + static_cast<float>(xi), z = -64.0f + static_cast<float>(zi);
+            tc.sculptHeights[static_cast<size_t>(zi) * 129 + xi] = 24.0f * std::exp(-(x * x + z * z) / (2.0f * 18.0f * 18.0f))
+                + 0.6f * std::sin(0.35f * x + 0.5f * z) + 0.4f * std::sin(0.23f * z - 0.2f * x);
+        }
+    brush::Params p;
+    p.radius = 2.5f; p.falloff = 1.0f; p.amount = 1.0f;
+    p.levelFromGround = true; p.levelOffset = 0.3f;
+    p.cascade = true; p.autoFlow = true;
+    brush::Stroke st;
+    const auto zAt = [](float t) { return 5.0f * std::sin(t * 4.0f); };
+    brush::begin(st, tc, 3.0f, zAt(0.0f), p);
+    for (int i = 0; i <= 200; ++i)
+    {
+        const float t = static_cast<float>(i) / 200.0f;
+        brush::dab(st, tc, 3.0f + 43.0f * t, zAt(t), p);
+    }
+    const brush::Stroke s = st;
+    brush::end(st, tc);
+    REQUIRE(s.bodies.size() >= 6u);
+    REQUIRE(tc.water.bodies.size() == s.bodies.size());
+
+    // How far each step's water stands over the ground, over the cells it holds wet.
+    const auto deepest = [&tc](uint16_t id) {
+        const water::Body* b = tc.water.findBody(id);
+        REQUIRE(b != nullptr);
+        const int res = static_cast<int>(tc.water.res);
+        float d = -1e9f;
+        for (int cz = 0; cz < res; ++cz)
+            for (int cx = 0; cx < res; ++cx)
+            {
+                const size_t i = static_cast<size_t>(cz) * res + cx;
+                if (tc.water.owner[i] != id || tc.water.coverage[i] < water::kWet) continue;
+                const glm::vec2 c = water::cellCenter(tc, cx, cz);
+                d = std::max(d, b->level - terrainHeightAt(tc, c.x, c.y));
+            }
+        return d;
+    };
+    const float lip = brush::lipDepth(p);
+    for (size_t k = 0; k < s.bodies.size(); ++k)
+    {
+        CAPTURE(k);
+        const float d = deepest(s.bodies[k]);
+        CHECK(d > 0.0f);
+        // The first step began on the gentle top, the last ends on the gentle foot (both under kTerraceSlope:
+        // a pond there stays one body); every step on the flank between is a pool no deeper than its lip.
+        if (k == 0 || k + 1 == s.bodies.size()) CHECK(d <= brush::kTerraceDrop);
+        else                                     CHECK(d <= lip + 1e-3f);
+    }
+
+    // Every step hangs one band, one step tall, into the next; the lowest none.
+    const std::vector<uint16_t> uppers = water::fallUppers(tc);
+    CHECK(uppers.size() == s.bodies.size() - 1u);
+    for (const uint16_t id : uppers)
+    {
+        CAPTURE(id);
+        const Band b = bandOf(tc, id);
+        REQUIRE(b.ok);
+        CHECK_FALSE(b.s.empty());
+        const auto [lo, hi] = yRange(b.s.mesh);
+        CHECK(hi == doctest::Approx(0.0f).epsilon(1e-4));
+        CHECK(lo >= -(brush::kTerraceDrop + 0.05f));
+    }
+}
+
 TEST_CASE("Water fall: a stroke down a steep slope gets a band under every terrace but the last")
 {
-    TerrainComponent tc = makeLand(10.0f, 1.0f, 256);                 // 45 degrees, rising toward +X
-    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, cascadeParams(), 20);
+    // 45 degrees, rising toward +X, flat at 10 m below x = 0: the stroke ends in a pool on the flat. (One
+    // that ends on the slope ends at a step's lip: the step under it holds only ground the slope hides,
+    // and a ribbon to it would land past the water, so it is not hung.)
+    TerrainComponent tc = makeLand(10.0f, 1.0f, 256, 10.0f);
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { -6.0f, 0.0f }, cascadeParams(), 26);
     REQUIRE(s.bodies.size() > 3u);
 
     const std::vector<uint16_t> uppers = water::fallUppers(tc);
@@ -124,11 +210,10 @@ TEST_CASE("Water fall: a stroke down a steep slope gets a band under every terra
         REQUIRE(b.ok);
         REQUIRE_FALSE(b.s.empty());
         const auto [lo, hi] = yRange(b.s.mesh);
-        // The top is the upper sheet's level (the entity stands there), the foot a metre lower (one step)
-        // and a hair above the lower sheet. Ribbons plus bounds' hair are not in the vertices.
+        // The top is the upper sheet's level (the entity stands there), the foot one step (kTerraceDrop)
+        // lower and a hair above the lower sheet. Ribbons plus bounds' hair are not in the vertices.
         CHECK(hi == doctest::Approx(0.0f).epsilon(1e-4));
-        CHECK(lo < -0.5f);
-        CHECK(lo >= -(1.0f + 0.05f));
+        CHECK(lo == doctest::Approx(-brush::kTerraceDrop + water::kFallLift).epsilon(1e-3));
         CHECK(b.s.mesh.vertices.size() % 3 == 0u);
         CHECK(b.s.mesh.normals.size() == b.s.mesh.vertices.size());
         CHECK(b.s.mesh.uvs.size() / 2 == b.s.mesh.vertices.size() / 3);
@@ -182,6 +267,52 @@ TEST_CASE("Water fall: on flat ground the band is a vertical drop that ends a ha
     CHECK(bandOf(tc, tc.water.bodies[1].id).s.empty());
 }
 
+TEST_CASE("Water fall: the apron fades into the lower sheet's own shore value, never into open water")
+{
+    // Flat ground at 0 and the lower pond 1 m deep: its own shore value is 1 - 1/kShoreFadeDepth all over.
+    // The apron's far edge used to be 0 (open water), which the material tints as deep water: a dark line
+    // across every shallow pool under a fall (Thema 232 Schritt 11).
+    TerrainComponent tc = makeLand(0.0f, 0.0f);
+    const uint16_t a = addLake(tc, 3.0f, -10, -10, 0, 10);
+    addLake(tc, 1.0f, 0, -10, 10, 10);
+    const Band b = bandOf(tc, a);
+    REQUIRE_FALSE(b.s.empty());
+    const StaticMeshAsset& m = b.s.mesh;
+    const float lowY = -2.0f + water::kFallLift;
+    const float eLow = 1.0f - 1.0f / HE::water::kShoreFadeDepth;
+    size_t n = 0;
+    for (size_t v = 0; v < m.vertices.size() / 3; ++v)
+    {
+        if (std::abs(m.vertices[v * 3 + 1] - lowY) > 1e-3f) continue;      // the foot and the apron's far edge
+        CHECK(m.normals[v * 3] / HE::water::kShoreNormalGain >= eLow - 1e-3f);
+        ++n;
+    }
+    CHECK(n > 0u);
+}
+
+TEST_CASE("Water fall: a ribbon that would run off the water onto dry ground is not hung")
+{
+    // Ground rises toward +X at 45 degrees (ground = 10 + x). The upper pond holds x = 9..11 at 20.3, the
+    // lower body is 2 m lower: its waterline is at x = 8.3, where the ribbon from the upper edge lands.
+    SUBCASE("the lower body's water is where the ribbon lands: a band")
+    {
+        TerrainComponent tc = makeLand(10.0f, 1.0f, 256);
+        const uint16_t up = addLake(tc, 20.3f, 9, -3, 11, 3);
+        addLake(tc, 18.3f, 6, -3, 9, 3);
+        const Band b = bandOf(tc, up);
+        CHECK_FALSE(b.s.empty());
+        CHECK(yRange(b.s.mesh).first == doctest::Approx(-2.0f + water::kFallLift).epsilon(1e-3));
+    }
+    SUBCASE("the lower body only holds ground above its level there (the side of a hilltop): no band")
+    {
+        TerrainComponent tc = makeLand(10.0f, 1.0f, 256);
+        const uint16_t up = addLake(tc, 20.3f, 9, -3, 11, 3);
+        addLake(tc, 18.3f, 8.6f, -3, 9, 3);                                 // ground 18.6..19, all dry for it
+        REQUIRE(water::fallUppers(tc) == std::vector<uint16_t>{ up });      // they touch, and the drop is there
+        CHECK(bandOf(tc, up).s.empty());
+    }
+}
+
 TEST_CASE("Water fall: the band stays on the edge between the two bodies")
 {
     TerrainComponent tc = makeLand(0.0f, 0.0f);
@@ -211,13 +342,13 @@ TEST_CASE("Water fall: the surface pass makes one band entity per upper body and
     ContentManager cm{ "." };
     const Entity e = world.createEntity("Landscape");
     world.registry().emplace<TransformComponent>(e);
-    TerrainComponent land = makeLand(10.0f, 1.0f, 256);
+    TerrainComponent land = makeLand(10.0f, 1.0f, 256, 10.0f);       // the slope with a flat foot, as above
     land.dirty = true;
     world.registry().emplace<TerrainComponent>(e, land);
     TerrainSystem::updateTerrains(world, cm);
     auto& tc = world.registry().get<TerrainComponent>(e);
 
-    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, cascadeParams(), 20);
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { -6.0f, 0.0f }, cascadeParams(), 26);
     REQUIRE(s.bodies.size() > 3u);
     TerrainSystem::updateTerrains(world, cm);
 

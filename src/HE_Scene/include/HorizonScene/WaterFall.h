@@ -26,14 +26,18 @@ struct TerrainComponent;
 // hugs the slope instead of standing as a wall in front of it; on a slope too gentle
 // to run along, or where the ground is already below the lower level, the ribbon is a
 // vertical drop. The apron continues kFallApron metres beyond the foot, a hair above
-// the lower sheet (no z-fight).
+// the lower sheet (no z-fight). A piece is only hung where its foot lands in the
+// lower body's water (the first cell past it that the upper body does not hold is the
+// lower body's): where the ground runs away from the painted water, e.g. down the sides
+// of a hilltop a stroke began on, the ribbon would end on dry land metres away.
 //
 // LOOK. No material of its own: the surface goes through the water material (the flow
 // variant, running downhill, so ripples and foam streak down the slope). The foam is
 // the engine's own soft-shore foam, which the material reads from the vertex normal's
-// tilt (shoreProximityAt): 1 at the foot of the ribbon, falling to 0 over the apron
-// and, at the top, the upper sheet's own value, so the band is clear where it leaves
-// the sheet and white where it lands.
+// tilt (shoreProximityAt): 1 at the foot of the ribbon, falling over the apron to the
+// lower sheet's own value at its far edge (from the water depth there, as the sheet's
+// mesh has it) and, at the top, the upper sheet's own value, so the band is clear
+// where it leaves the sheet and white where it lands.
 namespace HE::water
 {
     // Smallest level difference that makes a band: the terrace step (WaterBrush.h).

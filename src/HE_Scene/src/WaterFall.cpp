@@ -149,7 +149,7 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
     constexpr int kProbeCells = 8;
     const float step = 0.25f * std::min(cs.x, cs.y);
 
-    struct Piece { glm::dvec2 a, b; glm::dvec2 n; float low; };      // n: unit, out of the water
+    struct Piece { glm::dvec2 a, b; glm::dvec2 n; float low; uint16_t lower; };      // n: unit, out of the water
     std::vector<Piece> pieces;
     for (const ShoreSegment& s : shoreSegments(lattice))
     {
@@ -179,11 +179,28 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
             if (owner == kNoBody || owner == upper) continue;
             const Body* lower = f.findBody(owner);
             if (!lower || !(level - lower->level >= kFallMinDrop)) break;
-            pieces.push_back({ s.a, s.b, n, lower->level });
+            pieces.push_back({ s.a, s.b, n, lower->level, lower->id });
             break;
         }
     }
     if (pieces.empty()) return true;
+
+    // A ribbon is only hung where it lands in the lower body's water: the first cell past its foot (along
+    // the way the apron goes) that the upper body does not hold is the lower body's. Where the ground under
+    // the edge runs away from the painted water (the sides of a hilltop a stroke began on), the ground would
+    // carry the ribbon down onto dry land, metres past any water (Thema 232 Schritt 11).
+    const auto landsIn = [&](const Foot& ft, uint16_t lower) {
+        for (int k = 0; k < kProbeCells; ++k)
+        {
+            const glm::dvec2 q = ft.at + ft.dir * (probeNear + k * probeStep);
+            const int ci = cellIndexAt(tc, q.x, q.y);
+            if (ci < 0) return false;
+            const uint16_t owner = f.owner[static_cast<size_t>(ci)];
+            if (owner == upper) continue;
+            return owner == lower;
+        }
+        return false;
+    };
 
     // Feet are keyed by the edge point and the level they land on, so two pieces that share a lattice
     // crossing (bit for bit) share the foot, and the ribbon is watertight along the edge.
@@ -196,7 +213,7 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
     };
 
     // Positions first (the entity stands at the middle of their box), then the mesh.
-    struct Quad { glm::dvec2 ta, tb; Foot fa, fb; };
+    struct Quad { glm::dvec2 ta, tb; Foot fa, fb; float low; };
     std::vector<Quad> quads;
     glm::dvec2 lo(1e300), hi(-1e300);
     glm::dvec2 flowSum(0.0);
@@ -209,7 +226,9 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
         q.ta = pc.a; q.tb = pc.b;
         q.fa = footAt(pc.a, n, pc.low);
         q.fb = footAt(pc.b, n, pc.low);
+        q.low = pc.low;
         if (!q.fa.ok || !q.fb.ok) continue;
+        if (!landsIn(q.fa, pc.lower) || !landsIn(q.fb, pc.lower)) continue;
         grow(q.ta); grow(q.tb);
         grow(q.fa.at + q.fa.dir * static_cast<double>(kFallApron));
         grow(q.fb.at + q.fb.dir * static_cast<double>(kFallApron));
@@ -257,9 +276,18 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
         const uint32_t ta = vertex(q.ta, level, eA), tb = vertex(q.tb, level, eB);
         const uint32_t ba = vertex(q.fa.at, q.fa.y, 1.0f), bb = vertex(q.fb.at, q.fb.y, 1.0f);
         quad(ta, tb, ba, bb);
-        // The apron goes on from the foot, flat, the foam fading into the lower sheet.
-        const uint32_t pa = vertex(q.fa.at + q.fa.dir * static_cast<double>(kFallApron), q.fa.y, 0.0f);
-        const uint32_t pb = vertex(q.fb.at + q.fb.dir * static_cast<double>(kFallApron), q.fb.y, 0.0f);
+        // The apron goes on from the foot, flat, the foam fading into the lower sheet: its far edge takes the
+        // lower sheet's own shore value there (the mesh's formula, cornerProximity in WaterMesh.cpp). A 0 there
+        // reads as open water and drew a dark line across every shallow pool below a fall (Thema 232 Schritt 11).
+        const auto lowerE = [&](const glm::dvec2& p) {
+            const float g = terrainHeightAt(tc, static_cast<float>(p.x), static_cast<float>(p.y));
+            if (!std::isfinite(g)) return 0.0f;
+            return std::clamp(1.0f - (q.low - g) / HE::water::kShoreFadeDepth, 0.0f, 1.0f);
+        };
+        const glm::dvec2 ea = q.fa.at + q.fa.dir * static_cast<double>(kFallApron);
+        const glm::dvec2 eb = q.fb.at + q.fb.dir * static_cast<double>(kFallApron);
+        const uint32_t pa = vertex(ea, q.fa.y, lowerE(ea));
+        const uint32_t pb = vertex(eb, q.fb.y, lowerE(eb));
         quad(ba, bb, pa, pb);
     }
 
