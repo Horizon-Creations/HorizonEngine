@@ -1068,3 +1068,51 @@ TEST_CASE("Water: the tessellation switch is a landscape setting that defaults o
     CHECK_FALSE(b.pristine());
     CHECK_FALSE(water::sameContent(a, b));
 }
+
+TEST_CASE("Water: Body::flowAuto round-trips, takes part in sameContent, and an older file loads it as off")
+{
+    TerrainComponent tc = makeTerrain(64.0f, 48);
+    const water::Field authored = authoredField(tc);
+    REQUIRE(authored.bodies.size() == 2);
+    CHECK_FALSE(authored.bodies[0].flowAuto);                      // default off
+
+    // Off (the default) leaves no trace in the scene text: a scene from before saves as it did.
+    {
+        HorizonWorld world;
+        makeWorld(world, tc);
+        const TerrainComponent damaged = loadDamaged(tc, [](nlohmann::json& terrain)
+        {
+            CHECK(terrain.dump().find("flowAuto") == std::string::npos);
+        });
+        CHECK_FALSE(damaged.water.bodies[0].flowAuto);
+    }
+
+    // The old form: a file whose bodies have no "flowAuto" key (and a flow set by hand) loads as off.
+    TerrainComponent withFlow = tc;
+    water::BodyPhysics ph = withFlow.water.bodies[0].physics;
+    ph.flow = { 1.0f, -0.5f };
+    REQUIRE(water::setPhysics(withFlow, withFlow.water.bodies[0].id, ph));
+    const TerrainComponent old = loadDamaged(withFlow, [](nlohmann::json&) {});
+    REQUIRE(old.water.bodies.size() == 2);
+    CHECK_FALSE(old.water.bodies[0].flowAuto);
+    CHECK(old.water.bodies[0].physics.flow == glm::vec2(1.0f, -0.5f));
+
+    // On: saved, loaded, and different from off for sameContent.
+    TerrainComponent on = tc;
+    REQUIRE(water::setFlowAuto(on, on.water.bodies[1].id, true));
+    CHECK_FALSE(water::sameContent(on.water, tc.water));
+    const TerrainComponent back = loadDamaged(on, [](nlohmann::json& terrain)
+    {
+        CHECK(terrain.dump().find("flowAuto") != std::string::npos);
+    });
+    CHECK(water::sameContent(back.water, on.water));
+    CHECK(back.water.bodies[1].flowAuto);
+    CHECK_FALSE(back.water.bodies[0].flowAuto);
+
+    // A key of the wrong type is ignored (the default stands), not an error.
+    const TerrainComponent odd = loadDamaged(on, [](nlohmann::json& terrain)
+    {
+        for (auto& b : terrain["waterBodies"]) if (b.contains("flowAuto")) b["flowAuto"] = "yes";
+    });
+    CHECK_FALSE(odd.water.bodies[1].flowAuto);
+}

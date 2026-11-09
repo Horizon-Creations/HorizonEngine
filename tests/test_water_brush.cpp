@@ -1308,3 +1308,132 @@ TEST_CASE("Water brush Close Bed: ground still under remaining water keeps its b
     drag(lt, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 12);
     CHECK(lt.sculptHeights[32u * 65u + 32u] > 9.9f);
 }
+
+// ── Flow From Slope (Thema 232 Schritt 2) ───────────────────────────────────
+
+TEST_CASE("Water brush: a stroke on a ramp gives the body a current downhill, a bowl or level ground none")
+{
+    brush::Params p = params();
+    p.autoFlow = true;
+
+    SUBCASE("ramp rising toward +X: the water runs toward -X")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.2f);
+        const brush::Stroke s = drag(tc, { -6.0f, 0.0f }, { 6.0f, 0.0f }, p, 8);
+        const water::Body* b = tc.water.findBody(s.body);
+        REQUIRE(b != nullptr);
+        CHECK(b->flowAuto);
+        CHECK(b->physics.flow.x < -0.3f);
+        CHECK(std::fabs(b->physics.flow.y) < 0.01f);
+        CHECK(glm::length(b->physics.flow) <= brush::kFlowMaxSpeed + 1e-4f);
+        // The same number the pure function gives.
+        CHECK(b->physics.flow == brush::slopeFlow(tc, s.body));
+    }
+    SUBCASE("ramp rising toward -Z: the water runs toward +Z")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.0f);
+        for (uint32_t z = 0; z < 65; ++z)
+            for (uint32_t x = 0; x < 65; ++x)
+                tc.sculptHeights[static_cast<size_t>(z) * 65 + x] = 10.0f - 0.5f * (-32.0f + static_cast<float>(z));
+        const brush::Stroke s = drag(tc, { 0.0f, -6.0f }, { 0.0f, 6.0f }, p, 8);
+        const water::Body* b = tc.water.findBody(s.body);
+        REQUIRE(b != nullptr);
+        CHECK(b->physics.flow.y > 1.0f);
+        CHECK(std::fabs(b->physics.flow.x) < 0.01f);
+    }
+    SUBCASE("a steep slope runs at the top speed")
+    {
+        TerrainComponent tc = makeLand(10.0f, 1.0f);
+        const brush::Stroke s = drag(tc, { 0.0f, 0.0f }, { 4.0f, 0.0f }, p, 4);
+        const water::Body* b = tc.water.findBody(s.body);
+        REQUIRE(b != nullptr);
+        CHECK(b->physics.flow.x == doctest::Approx(-brush::kFlowMaxSpeed));
+    }
+    SUBCASE("level ground: still water")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.0f);
+        const brush::Stroke s = drag(tc, { -6.0f, 0.0f }, { 6.0f, 0.0f }, p, 8);
+        const water::Body* b = tc.water.findBody(s.body);
+        REQUIRE(b != nullptr);
+        CHECK(b->flowAuto);
+        CHECK(b->physics.flow == glm::vec2(0.0f, 0.0f));
+    }
+    SUBCASE("a gentle slope below the still threshold: still water")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.02f);
+        const brush::Stroke s = drag(tc, { -6.0f, 0.0f }, { 6.0f, 0.0f }, p, 8);
+        const water::Body* b = tc.water.findBody(s.body);
+        REQUIRE(b != nullptr);
+        CHECK(b->physics.flow == glm::vec2(0.0f, 0.0f));
+    }
+    SUBCASE("a symmetric bowl averages out: the pond stands")
+    {
+        TerrainComponent tc = makeLand(10.0f, 0.0f);
+        for (uint32_t z = 0; z < 65; ++z)
+            for (uint32_t x = 0; x < 65; ++x)
+            {
+                const float dx = -32.0f + static_cast<float>(x), dz = -32.0f + static_cast<float>(z);
+                tc.sculptHeights[static_cast<size_t>(z) * 65 + x] = 10.0f + 0.05f * (dx * dx + dz * dz);
+            }
+        brush::Params big = p;
+        big.radius = 8.0f;
+        const brush::Stroke s = drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, big, 6);
+        const water::Body* b = tc.water.findBody(s.body);
+        REQUIRE(b != nullptr);
+        CHECK(glm::length(b->physics.flow) < 0.05f);
+    }
+}
+
+TEST_CASE("Water brush: without flowAuto a hand-set current survives painting")
+{
+    TerrainComponent tc = makeLand(10.0f, 0.5f);
+    brush::Params p = params();                         // autoFlow is off by default
+    CHECK_FALSE(p.autoFlow);
+
+    brush::Stroke s;
+    brush::begin(s, tc, 0.0f, 0.0f, p);
+    const uint16_t id = s.body;
+    REQUIRE(id != water::kNoBody);
+    brush::dab(s, tc, 0.0f, 0.0f, p);
+    brush::end(s, tc);
+    REQUIRE(tc.water.findBody(id) != nullptr);
+    CHECK_FALSE(tc.water.findBody(id)->flowAuto);
+    CHECK(tc.water.findBody(id)->physics.flow == glm::vec2(0.0f, 0.0f));   // nothing derived
+
+    water::BodyPhysics ph = tc.water.findBody(id)->physics;
+    ph.flow = { 1.5f, -2.0f };
+    REQUIRE(water::setPhysics(tc, id, ph));
+
+    // Paint more into the same body, on a slope that would say something else.
+    drag(tc, { 2.0f, 0.0f }, { 8.0f, 0.0f }, p, 6);
+    REQUIRE(tc.water.findBody(id) != nullptr);
+    CHECK(tc.water.findBody(id)->physics.flow == glm::vec2(1.5f, -2.0f));
+
+    // Turn the policy on: the next stroke into it derives the current from the ground.
+    REQUIRE(water::setFlowAuto(tc, id, true));
+    drag(tc, { 2.0f, 0.0f }, { 8.0f, 0.0f }, p, 6);    // autoFlow stays off: the body's own flag decides
+    CHECK(tc.water.findBody(id)->physics.flow.x < -1.0f);
+    CHECK(tc.water.findBody(id)->physics.flow.x == doctest::Approx(brush::slopeFlow(tc, id).x));
+
+    // And off again: the number stays where the last stroke left it.
+    const glm::vec2 kept = tc.water.findBody(id)->physics.flow;
+    REQUIRE(water::setFlowAuto(tc, id, false));
+    drag(tc, { 2.0f, 0.0f }, { 8.0f, 0.0f }, p, 6);
+    CHECK(tc.water.findBody(id)->physics.flow == kept);
+    CHECK_FALSE(water::setFlowAuto(tc, 999, true));
+}
+
+TEST_CASE("Water brush: an erasing stroke never touches a current")
+{
+    TerrainComponent tc = makeLand(10.0f, 0.3f);
+    brush::Params p = params();
+    p.autoFlow = true;
+    const brush::Stroke s = drag(tc, { -4.0f, 0.0f }, { 4.0f, 0.0f }, p, 8);
+    const glm::vec2 before = tc.water.findBody(s.body)->physics.flow;
+    REQUIRE(before.x < 0.0f);
+    brush::Params e = p;
+    e.erase = true;
+    drag(tc, { 0.0f, 0.0f }, { 0.0f, 0.0f }, e, 2);
+    REQUIRE(tc.water.findBody(s.body) != nullptr);
+    CHECK(tc.water.findBody(s.body)->physics.flow == before);
+}

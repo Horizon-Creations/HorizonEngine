@@ -83,6 +83,7 @@ static float       s_waterDigDepth    = 2.0f;   // Max Depth: the bed never goes
 static float       s_waterBedSlope    = HE::water::kDefaultBedSlope;   // metres of depth per metre from the shore
 static float       s_waterBedRough    = 0.2f;   // Bed Roughness, 0..1
 static bool        s_waterCloseBed    = true;   // the eraser gives the dug ground back under the water it dries
+static bool        s_waterAutoFlow    = false;  // painted water runs downhill (Body::flowAuto), see the help
 static HE::water::brush::Stroke s_waterStroke;  // the stroke under the button, if any (ids, never entities)
 static int         s_waterResEdit     = 0;      // the grid slider's pending value
 static bool        s_waterResEditing  = false;
@@ -749,6 +750,7 @@ void sculptInViewport(AppContext& ctx, const RenderWorld& sceneSnapshot,
 			waterParams.bedSlope        = s_waterBedSlope;
 			waterParams.bedRoughness    = s_waterBedRough;
 			waterParams.closeBed        = s_waterCloseBed;
+			waterParams.autoFlow        = s_waterAutoFlow;
 
 			ImDrawList* dl    = ImGui::GetWindowDrawList();
 			const float viewW = rectMax.x - rectMin.x;
@@ -2153,6 +2155,8 @@ void renderPanel(AppContext& ctx)
                 ImGui::EndDisabled();
                 EditorWidgets::checkbox("Close Bed on Erase##water", &s_waterCloseBed);
                 EditorWidgets::helpForLabel("Close Bed on Erase##water");
+                EditorWidgets::checkbox("Flow From Slope##water", &s_waterAutoFlow);
+                EditorWidgets::helpForLabel("Flow From Slope##water");
 
                 // The grid the water lives on: cells per side over the whole
                 // landscape. A typed field, like the weightmap's (32..2048 on a few
@@ -2349,6 +2353,19 @@ void renderPanel(AppContext& ctx)
                             physDrag("Splash", "##wphys_splash", "Splash##wphys", &ph.splash,
                                      0.01f, 0.0f, WF::kMaxSplash, "%.2f");
                             ImGui::EndDisabled();
+                            // Body::flowAuto: the water brush derives Flow from the ground.
+                            bool flowAuto = b.flowAuto;
+                            if (EditorWidgets::checkbox("Flow From Slope##wphysauto", &flowAuto))
+                            {
+                                if (ctx.undoSys)
+                                {
+                                    ctx.undoSys->capturePre();
+                                    ctx.undoSys->stashPre("Water Flow From Slope");
+                                }
+                                WF::setFlowAuto(tc, b.id, flowAuto);
+                                if (ctx.undoSys) ctx.undoSys->commitPending();
+                            }
+                            EditorWidgets::helpForLabel("Flow From Slope##wphysauto");
                             if (physEdited && ph != b.physics)
                                 WF::setPhysics(tc, b.id, ph);
                             ImGui::TreePop();

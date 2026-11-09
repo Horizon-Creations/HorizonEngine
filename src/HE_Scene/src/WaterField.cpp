@@ -123,7 +123,7 @@ namespace
     {
         if (!bodiesEq(a, b)) return false;
         for (size_t i = 0; i < a.size(); ++i)
-            if (a[i].physics != b[i].physics || a[i].underwaterFog != b[i].underwaterFog ||
+            if (a[i].physics != b[i].physics || a[i].flowAuto != b[i].flowAuto || a[i].underwaterFog != b[i].underwaterFog ||
                 a[i].underwaterCaustics != b[i].underwaterCaustics || a[i].tessellation != b[i].tessellation || a[i].brushBed != b[i].brushBed ||
                 a[i].brushPatch.res != b[i].brushPatch.res || a[i].brushPatch.x0 != b[i].brushPatch.x0 ||
                 a[i].brushPatch.z0 != b[i].brushPatch.z0 || a[i].brushPatch.w != b[i].brushPatch.w ||
@@ -346,6 +346,16 @@ bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics)
     // The sheet is the same: neither `dirty` nor the rectangle, or the mesh would be
     // rebuilt for a number it never reads. The revision is what tells the physics.
     ++tc.water.revision;
+    return true;
+}
+
+bool setFlowAuto(TerrainComponent& tc, uint16_t id, bool on)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    if (b->flowAuto == on) return true;
+    b->flowAuto = on;
+    ++tc.water.revision;   // a policy flag: moves no sheet, same as setPhysics
     return true;
 }
 

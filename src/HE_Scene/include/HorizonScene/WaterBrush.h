@@ -89,7 +89,28 @@ namespace HE::water::brush
         float bedSlope = kDefaultBedSlope;   // Slope: bed sinks this many metres per metre from the shore
         bool  closeBed = false;    // erasing also gives the ground the brush dug under the erased water back
         float bedRoughness = 0.0f; // Bed Roughness 0..1: share of the depth a fixed noise adds or takes
+
+        // Flow From Slope (Thema 232): switches Body::flowAuto on for the body this
+        // stroke paints into, so end() derives its current from the ground (slopeFlow).
+        // Off never switches it OFF: a body that already follows the ground keeps
+        // doing so, and one that does not keeps its own physics.flow untouched.
+        bool  autoFlow = false;
     };
+
+    // Candidate thresholds (nothing measured yet, docs/water-flow-2026-11-09.md §5):
+    // below kFlowStillSlope the water stands, from kFlowFallSlope on it runs at
+    // kFlowMaxSpeed; between them the speed follows a smoothstep.
+    inline constexpr float kFlowStillSlope = 0.03f;   // m/m, about 1.7 degrees
+    inline constexpr float kFlowFallSlope  = 0.7f;    // m/m, about 35 degrees
+    inline constexpr float kFlowMaxSpeed   = 3.0f;    // m/s
+
+    // The current the ground under a body's wet cells asks for: the downhill
+    // direction, i.e. minus the mean of the terrain's height gradient over the wet
+    // cells (central differences one water cell apart, terrainHeightAt), at a speed
+    // of kFlowMaxSpeed · smoothstep(kFlowStillSlope, kFlowFallSlope, |mean|).
+    // Terrain-local XZ as BodyPhysics::flow (z → .y). A bowl averages to ~0, so a
+    // pond stands without a special case. Zero for a body with no wet cell.
+    glm::vec2 slopeFlow(const TerrainComponent& tc, uint16_t body);
 
     struct Stroke
     {

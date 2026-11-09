@@ -296,6 +296,12 @@ namespace HE::water
         // What the water does to a body in it. Saved with the body when it differs
         // from the defaults, part of sameContent and of Delta.
         BodyPhysics physics{};
+        // Policy for physics.flow (Thema 232): true = the water brush derives the
+        // current from the ground's slope under this body's wet cells when a stroke
+        // ends and writes it into physics.flow; false (default) = physics.flow is the
+        // user's own number and the brush never touches it. Saved only when true, part
+        // of sameContent and of Delta; an older file has no key and loads as false.
+        bool flowAuto = false;
         // What this body looks like from below its surface (Thema 185 Schritt 2).
         // Same save/compare rule as physics: only when it differs from the defaults.
         UnderwaterFogParams underwaterFog{};
@@ -458,6 +464,9 @@ namespace HE::water
     // `dirty` nor the rectangle, and never touches TerrainComponent::dirty. False
     // for an unknown body.
     bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics);
+    // Body::flowAuto: whether the brush may derive physics.flow from the ground
+    // (see the field). False when there is no such body.
+    bool setFlowAuto(TerrainComponent& tc, uint16_t id, bool on);
 
     // What this body looks like from below its surface (UnderwaterFogParams), held to
     // its bounds (clampUnderwaterFog). Same non-effect on the sheet as setPhysics:

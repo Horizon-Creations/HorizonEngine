@@ -148,3 +148,18 @@ eigenes Thema (Pegel als Feld statt Skalar).
   Pinsel darf sie nur mit `flowAuto` überschreiben; Zeit nur `lit.sunDir[3]`; `kShoreFadeDepth`/`kShoreNormalGain` unverändert,
   `Water.hasset` und Editor zusammen ausliefern.
 - **Next steps:** 1. Schritt 2 (Abschnitt 6) mit `Body::flowAuto` in `WaterField.h:291`.
+
+### Schritt 2 (Body::flowAuto + Strömung im Pinsel), erledigt
+
+- **Gebaut:** `Body::flowAuto` (`WaterField.h`, Standard aus; in `bodiesFullEq` also sameContent + Delta; `setFlowAuto` in
+  `WaterField.cpp`). Serializer: Schlüssel `flowAuto` nur wenn true (`SceneSerializer.cpp` Write/Read), alte Form lädt als aus.
+  `brush::slopeFlow(tc, body)` (`WaterBrush.cpp`) = −Mittel(∇h) über die nassen Zellen (Stride ab ~4096 Zellen), Betrag
+  `kFlowMaxSpeed·smoothstep(kFlowStillSlope, kFlowFallSlope, |∇h|)` (Kandidaten 3 m/s, 0,03, 0,7). `end()` schreibt das per
+  `setPhysics` in `physics.flow`, nur wenn der Körper `flowAuto` hat und der Strich kein Radierstrich ist. `Params::autoFlow`
+  schaltet in `begin()` `flowAuto` am Körper EIN, nie aus. Editor: Häkchen "Flow From Slope" im Pinsel (`TerrainTools.cpp`)
+  und im Water-Physics-Baum des Körpers; Hilfeeinträge in `EditorHelp.cpp`.
+- **Verifiziert:** `ctest -R test_water` 9/9 grün (Release, he_tests frisch gebaut), neue Fälle einzeln gelaufen
+  (Rampe ±X/Z, steil = 3 m/s, eben/Becken/flach = 0, handgesetzter Wert bleibt, Radierstrich, Roundtrip + alte Form + falscher
+  Typ); `editor_help_audit.py --check` grün.
+- **Nicht verifiziert:** Editor-UI nur kompiliert, nicht bedient. Kein Neuberechnen nach Sculpting (Schritt-1-Vorgabe).
+- **Entscheidung:** Ein Körper mit `flowAuto` wird bei jedem Strich neu berechnet, auch ohne `Params::autoFlow`.

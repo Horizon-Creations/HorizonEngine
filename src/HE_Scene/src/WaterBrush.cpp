@@ -528,6 +528,42 @@ namespace
     }
 }
 
+glm::vec2 slopeFlow(const TerrainComponent& tc, uint16_t body)
+{
+    const Field& f = tc.water;
+    if (body == kNoBody || !f.allocated() || !hasArea(tc)) return { 0.0f, 0.0f };
+    const int res = static_cast<int>(f.res);
+    const glm::vec2 cell = cellSize(tc);
+    // A 256² field of one lake is 65k cells; a few thousand samples average the
+    // slope as well, so a wide body is walked on a stride.
+    const uint32_t wet = f.wetCells(body);
+    if (wet == 0) return { 0.0f, 0.0f };
+    const uint32_t stride = std::max(1u, static_cast<uint32_t>(std::sqrt(static_cast<float>(wet) / 4096.0f)));
+
+    double gx = 0.0, gz = 0.0;
+    uint32_t n = 0;
+    for (int cz = 0; cz < res; cz += static_cast<int>(stride))
+        for (int cx = 0; cx < res; cx += static_cast<int>(stride))
+        {
+            const size_t i = static_cast<size_t>(cz) * res + cx;
+            if (f.owner[i] != body || f.coverage[i] < kWet) continue;
+            const glm::vec2 c = cellCenter(tc, cx, cz);
+            const float hx = terrainHeightAt(tc, c.x + cell.x, c.y) - terrainHeightAt(tc, c.x - cell.x, c.y);
+            const float hz = terrainHeightAt(tc, c.x, c.y + cell.y) - terrainHeightAt(tc, c.x, c.y - cell.y);
+            if (!std::isfinite(hx) || !std::isfinite(hz)) continue;
+            gx += hx / (2.0f * cell.x);
+            gz += hz / (2.0f * cell.y);
+            ++n;
+        }
+    if (n == 0) return { 0.0f, 0.0f };
+    const float mx = static_cast<float>(gx / n), mz = static_cast<float>(gz / n);
+    const float mag = std::sqrt(mx * mx + mz * mz);
+    if (!(mag > 0.0f)) return { 0.0f, 0.0f };
+    const float t = std::clamp((mag - kFlowStillSlope) / (kFlowFallSlope - kFlowStillSlope), 0.0f, 1.0f);
+    const float speed = kFlowMaxSpeed * t * t * (3.0f - 2.0f * t);
+    return { -mx / mag * speed, -mz / mag * speed };
+}
+
 Target targetAt(const TerrainComponent& tc, float x, float z, const Params& p)
 {
     Target t;
@@ -570,6 +606,7 @@ void begin(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         s.created = s.body != kNoBody;
     }
     s.active = s.body != kNoBody;
+    if (s.active && p.autoFlow) setFlowAuto(tc, s.body, true);
 }
 
 Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
@@ -652,6 +689,16 @@ void end(Stroke& s, TerrainComponent& tc)
                 owns = f.owner[i] == s.body && f.coverage[i] > 0;
         if (!owns) removeBody(tc, s.body);
     }
+    // The current follows the ground only for a body that asked for it (flowAuto);
+    // for any other physics.flow is the user's number and stays as it is. Computed
+    // once per stroke, from the cells the stroke left, not per dab.
+    if (s.active && !s.erase && s.body != kNoBody)
+        if (const Body* b = tc.water.findBody(s.body); b && b->flowAuto)
+        {
+            BodyPhysics ph = b->physics;
+            ph.flow = slopeFlow(tc, s.body);
+            setPhysics(tc, s.body, ph);
+        }
     // A press that never wet a cell (or an eraser that dried the last one) leaves
     // an allocated all-dry grid behind, and a grid makes the scene non-pristine:
     // hand it back, so such a stroke costs the file nothing. Only when there is no

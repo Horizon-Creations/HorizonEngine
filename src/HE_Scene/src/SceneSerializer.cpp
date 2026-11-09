@@ -826,6 +826,9 @@ namespace
 						if (b.physics.splash      != d.splash)      pj["splash"]      = b.physics.splash;
 						bj["physics"] = std::move(pj);
 					}
+					// Whether the brush derives physics.flow from the ground (Thema 232):
+					// written only when on, so a body that never asked saves as before.
+					if (b.flowAuto) bj["flowAuto"] = true;
 					// What this body looks like from below its surface (Thema 185 Schritt
 					// 2): same "only the non-default settings" rule as physics above.
 					if (b.underwaterFog != HE::water::UnderwaterFogParams{})
@@ -1904,6 +1907,9 @@ namespace
 							    pj["flow"][0].is_number() && pj["flow"][1].is_number())
 								b.physics.flow = { pj["flow"][0].get<float>(), pj["flow"][1].get<float>() };
 						}
+						// An older file has no "flowAuto": the default (false) stands.
+						if (bj.contains("flowAuto") && bj["flowAuto"].is_boolean())
+							b.flowAuto = bj["flowAuto"].get<bool>();
 						// What this body looks like from below its surface (Thema 185
 						// Schritt 2). Every key is optional; sanitize() below clamps it.
 						if (bj.contains("underwaterFog") && bj["underwaterFog"].is_object())

@@ -7853,6 +7853,15 @@ namespace
 	  "The eraser never digs. One undo step takes the water and the pit back "
 	  "together.",
 	  "", "editor#landscape-mode" },
+	{ "Landscape/Flow From Slope##water", "Flow From Slope",
+	  "When a stroke ends, the water it painted gets a current that runs downhill "
+	  "along the ground under it, faster the steeper that is (still on level ground "
+	  "and in a bowl, up to 3 m/s on a steep slope). The current is stored in the "
+	  "body's Flow (Water Physics) and switches that body's Flow From Slope on. "
+	  "Off: a stroke never switches it on, so the Flow you set stays. A body "
+	  "that already follows the ground keeps doing so until you turn that off in "
+	  "its Water Physics.",
+	  "", "editor#landscape-mode" },
 	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
 	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "
 	  "again, back toward the height it had before the digging, at the brush's "
@@ -7949,6 +7958,13 @@ namespace
 	  "in the water is pulled toward it through the drag, so a river carries what "
 	  "floats on it; there is no force beyond that, and the waves of the water "
 	  "material do not follow it. Rings travel with it. 0 is still water.",
+	  "", "systems#water-physics" },
+	{ "Landscape/Flow From Slope##wphysauto", "Water Flow From Slope",
+	  "On: when the water brush finishes a stroke on this body, it works out the "
+	  "current from the ground under the water: downhill, as fast as the slope is "
+	  "steep (still below about 2 degrees, 3 m/s from about 35 degrees), and writes it "
+	  "into Flow. A pond in a bowl stays still. Off (the default): Flow is yours and "
+	  "painting never changes it. Sculpting afterwards does not recompute it.",
 	  "", "systems#water-physics" },
 	{ "Landscape/Splash##wphys", "Water Splash",
 	  "How strong the rings are that a body makes in this water when it falls in, "
