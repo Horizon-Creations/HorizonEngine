@@ -2025,6 +2025,30 @@ namespace
 	{ "save.fields",
 	  "Field names the active save's template declares — so a graph never has to "
 	  "hardcode them." },
+	{ "trail.footprint",
+	  "Presses a boot-sized pit into snow or sand at a point: Length runs along the Yaw direction "
+	  "(degrees around Y, 0 = +X), Width across it, Depth is 0..1. Only a pit, no heap. Surface 0 = snow, 1 = sand." },
+	{ "trail.press",
+	  "Presses a line of pits between two points (a tyre or a sled set down). Only a pit, no heap beside it. "
+	  "Depth 0..1, Surface 0 = snow, 1 = sand." },
+	{ "trail.drag",
+	  "Drags a groove through snow or sand from the last position to the new one and heaps the displaced material "
+	  "along both sides (Berm Width in metres, Berm Height 0..1). Call it every frame with the previous and the current "
+	  "position for a continuous track." },
+	{ "trail.depthAt",
+	  "How deep the snow or sand is pressed at a point, 0..1 (0 on a heap and on untouched ground). What footstep audio "
+	  "and tracking read." },
+	{ "trail.heightAt",
+	  "The ground's offset at a point in metres: negative in a pit, positive on a heap, 0 untouched." },
+	{ "trail.clear",
+	  "Forgets every trail in the world." },
+	{ "trail.save",
+	  "Writes the trails into the ACTIVE save (create or load a save first), then Write Save to put it on disk." },
+	{ "trail.load",
+	  "Reads the trails back from the active save and applies Elapsed Seconds of healing in one go (game time since the "
+	  "save was written, at most one day, with the current weather). A save without trails clears them." },
+	{ "trail.pageCount",
+	  "How many 128 m pages of trodden ground exist right now (0 = untouched world)." },
 	{ "save.setNumber",
 	  "Writes a Float, Int or Enum field of the active save. The field is picked "
 	  "from the template on the node itself." },
@@ -2117,7 +2141,7 @@ namespace
 	};
 
 	// ── The sky properties ───────────────────────────────────────────────────
-	// The Environment category is generated from an X-list in EngineApi.h: 58
+	// The Environment category is generated from an X-list in EngineApi.h: 69
 	// fields, each producing an env.get… and an env.set… row. A hand-written
 	// table would be a hundred rows that say the same thing twice and go stale
 	// the moment a field is added — so this is keyed by the FIELD (the part after
@@ -2143,6 +2167,7 @@ namespace
 		{ "WindDirection", "which way the clouds drift, in degrees" },
 		{ "WindSpeed", "how fast the clouds drift", Wx::Driven },
 		{ "CloudHeight", "the world height of the cloud deck's base, in metres" },
+		{ "CloudDomeHeight", "how high the sky-dome clouds look: 1 is classic, larger is further up and smaller" },
 		{ "CloudShadowStrength", "how dark the shadows the cloud layer casts on the ground get" },
 		{ "CloudEvolution", "how fast clouds change shape as they drift; 0 freezes the formation" },
 		{ "CloudDensity", "how solid the clouds are: low is wispy, high is thick and dark underneath" },
@@ -2155,6 +2180,17 @@ namespace
 		{ "LensFlare", "the camera artefact when the sun is in shot" },
 		{ "FogDensity", "how thick the atmospheric haze is; even a very small amount gives a landscape distance", Wx::Driven },
 		{ "FogHeightFalloff", "how much the fog pools near the ground instead of filling the air evenly" },
+		{ "FogMode", "whether fog is the flat analytic blend (0) or a real raymarched volume with light shafts and in-fog shadow (1)" },
+		{ "FogQuality", "the volumetric fog's froxel grid size: 0 low, 1 medium, 2 high — only matters in volumetric mode" },
+		{ "FogVolumeDistance", "how far the volumetric fog reaches before the analytic fog above continues, in metres" },
+		{ "FogAlbedo", "the volumetric fog's scattering tint; white scatters the sky and sun colour unchanged" },
+		{ "FogAnisotropy", "the volumetric fog's scattering phase: negative scatters back toward the camera, positive brightens a shaft toward the sun" },
+		{ "FogNoiseAmount", "how much 3D noise breaks up the volumetric fog's height formula into wisps and patches" },
+		{ "FogNoiseScale", "the world size of one period of the volumetric fog's noise" },
+		{ "FogBankDensity", "a ground-hugging volumetric fog bank layered on top of the height fog" },
+		{ "FogBankBaseY", "the world height of the volumetric fog bank's lower edge" },
+		{ "FogBankThickness", "how tall the volumetric fog bank stands; its top is soft, not a hard line" },
+		{ "FogLocalLightScatter", "how much point and spot lights scatter inside the volumetric fog, 0 switches it off" },
 		{ "RainAmount", "how hard it is raining, 0 to 1", Wx::Driven },
 		{ "SnowAmount", "how hard it is snowing, 0 to 1", Wx::Driven },
 		{ "Wetness", "how wet surfaces look after rain", Wx::Driven },
@@ -2181,6 +2217,7 @@ namespace
 		{ "CloudMode", "the cloud layer: 0 painted on the sky dome (cheap, never comes closer), 1 real 3D volumes the camera can fly into" },
 		{ "CloudQuality", "how many steps the cloud raymarch takes: 0 low, 1 medium, 2 high — the most expensive sky setting there is" },
 		{ "CloudStyle", "0 the original flat drifting layer, 1 cauliflower shapes that tower and dissolve" },
+		{ "CloudType", "the kind of Realistic cloud: 0 mixed cumulus, 1 flat cumulus, 2 towering cumulus, 3 stratocumulus sheets, 4 cumulonimbus" },
 		{ "NebulaQuality", "the nebula's detail level: 0 performance, 1 high, 2 max" },
 		{ "SunColor", "the tint of the sunlight; the sky reddens the sun near the horizon on its own" },
 		{ "MoonColor", "the tint of the moonlight at night" },

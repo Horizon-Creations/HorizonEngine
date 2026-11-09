@@ -2,7 +2,9 @@
 #include "ContentManager/TextureArrayBuild.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace HE
 {
@@ -170,6 +172,80 @@ bool decodeTextureToRGBA8(const TextureAsset& in, TextureAsset& out)
     out.mipLevels = mips;
     out.layers    = layers;
     out.data      = std::move(data);
+    out.sliceMeans = in.sliceMeans;
+    return true;
+}
+
+bool textureArraySliceMean(::TextureFormat f, const uint8_t* data, size_t dataBytes,
+                           uint32_t w, uint32_t h, uint32_t mips, bool srgb,
+                           uint32_t slice, float rgb[3])
+{
+    if (!data || w == 0 || h == 0) return false;
+    if (f != ::TextureFormat::RGBA8 && !textureFormatCpuDecodable(f)) return false;
+    mips = std::max<uint32_t>(1, mips);
+    // Smallest level with both sides <= 16 (or the last one stored).
+    uint32_t level = 0, lw = w, lh = h;
+    while (level + 1 < mips && (lw > 16 || lh > 16))
+    {
+        ++level;
+        lw = std::max<uint32_t>(1, lw >> 1);
+        lh = std::max<uint32_t>(1, lh >> 1);
+    }
+    const size_t off   = textureArrayOffset(w, h, mips, slice, level, f);
+    const size_t bytes = textureLevelBytes(f, lw, lh);
+    if (off + bytes > dataBytes) return false;
+    // Level 0 of a mip-less 4k array is still 16M texels: walk a <= 16x16 grid.
+    const uint32_t sx = std::max<uint32_t>(1, lw / 16), sy = std::max<uint32_t>(1, lh / 16);
+    // The texels of the level: in place for RGBA8, decoded into `scratch` for a block format
+    // (decoding a whole array here costs ~440 ms for a 13-slice 2K BC3 array, so only this level).
+    std::vector<uint8_t> scratch;
+    const uint8_t* px = data + off;
+    if (f != ::TextureFormat::RGBA8)
+    {
+        scratch.resize(static_cast<size_t>(lw) * lh * 4);
+        if (!decodeBlockLevelToRGBA8(f, px, bytes, lw, lh, scratch.data())) return false;
+        px = scratch.data();
+    }
+    auto decode = [srgb](uint8_t b)
+    {
+        const float c = b / 255.0f;
+        if (!srgb) return c;
+        return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    };
+    float sum[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t n = 0;
+    for (uint32_t y = 0; y < lh; y += sy)
+        for (uint32_t x = 0; x < lw; x += sx, ++n)
+        {
+            const uint8_t* p = px + (static_cast<size_t>(y) * lw + x) * 4;
+            sum[0] += decode(p[0]); sum[1] += decode(p[1]); sum[2] += decode(p[2]);
+        }
+    const float inv = 1.0f / static_cast<float>(std::max<uint32_t>(n, 1));
+    for (int i = 0; i < 3; ++i) rgb[i] = sum[i] * inv;
+    return true;
+}
+
+bool textureArraySliceMean(const TextureAsset& t, uint32_t slice, float rgb[3])
+{
+    return textureArraySliceMean(t.format, t.data.data(), t.data.size(), t.width, t.height,
+                                 t.mipLevels, t.srgb, slice, rgb);
+}
+
+bool bakeTextureArraySliceMeans(const uint8_t* rgba8, size_t bytes, uint32_t w, uint32_t h,
+                                uint32_t mips, uint32_t layers, bool srgb, std::vector<float>& out)
+{
+    out.clear();
+    out.reserve(static_cast<size_t>(layers) * 3);
+    for (uint32_t s = 0; s < layers; ++s)
+    {
+        float m[3];
+        if (!textureArraySliceMean(::TextureFormat::RGBA8, rgba8, bytes, w, h, mips, srgb, s, m))
+        {
+            out.clear();
+            return false;
+        }
+        out.insert(out.end(), m, m + 3);
+    }
     return true;
 }
 

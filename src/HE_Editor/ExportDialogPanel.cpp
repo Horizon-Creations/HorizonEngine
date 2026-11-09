@@ -19,6 +19,9 @@
 #include <HorizonCode/HcClassResolve.h>
 #include <HorizonCode/HcCompiledLoader.h>  // compiledLibraryName
 #include <HorizonScene/HorizonScene.h>
+#include <HorizonScene/MaterialOverrides.h> // meshes an entity overrides: the texture bake skips them
+#include <HorizonScene/LandscapeHlod.h>      // the far-landscape bake the export runs
+#include <HorizonScene/EntityHost.h>         // a class's component body, for the same scan
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <ParticleGraph/ParticleGraph.h>
@@ -78,14 +81,21 @@ static bool   s_exportEncrypt     = false;
 static bool   s_exportModSupport  = false;
 static bool   s_exportDevTools    = false;
 static std::string s_exportExcludes;               // one glob pattern per line
+static std::string s_exportIncludes;               // always-include globs, one per line
+static bool        s_exportOnlyReferenced = true;  // pack only what the game reaches
+static bool        s_exportBakeMeshTextures = true; // bake textures onto meshes (needs the filter above)
+static bool        s_exportBakeFarLandscape = true; // bake each Auto Landscape's look for its far LOD levels
+static int         s_exportFarLandscapeMB   = 512;  // what the baked textures may cost, cooked
 static bool   s_exportIncremental = true;
 static bool   s_exportAppBundle   = false;         // macOS .app bundle
 static bool   s_exportCompileHC   = false;         // compile HorizonCode → C++ (Host targets, needs cmake + compiler)
 static bool   s_exportHcStop      = false;         // a graph that will not compile fails the export
 static std::string s_exportTextureFormat = "Auto"; // Auto (per target GPU) | None (RGBA8)
 static int    s_exportTextureQuality = 0;          // 0 Fast, 1 Balanced, 2 High
+static bool   s_exportTextureArrays  = true;       // block-compress texture arrays too
 static std::string s_exportPlatform = "Host";      // exportPlatformName() value
 static uint32_t s_exportShaderBackends = (1u << 4) | (1u << 0); // Metal|OpenGL bitmask of 1u<<RendererBackend
+static bool     s_exportShaderAuto     = true;     // bake the variants of the backend the game runs, ignore the set above
 // The window + backend the exported game starts in. They are NOT part of the
 // ExportProfile: the profile lives in the .heproj, and these are shipped
 // through config.json instead — so they persist in the editor's own settings
@@ -112,6 +122,17 @@ static const HE::ProjectRenderDefaults* projectRenderDefaults(const AppContext& 
     if (!ctx.projectManager || ctx.projectManager->currentProject().path.empty()) return nullptr;
     const HE::ProjectRenderDefaults& r = ctx.projectManager->currentProject().settings.renderDefaults;
     return r.useEditorSettings ? nullptr : &r;
+}
+
+static std::string effectiveExportBackend(const AppContext& ctx);
+
+// The precompiled-shader set this export bakes: the hand-picked one, or (Auto, the default)
+// the single backend the shipped game runs. An application without Advanced Shader Effects
+// ships the software renderer, which has no variants to bake.
+static uint32_t effectiveShaderBackends(const AppContext& ctx)
+{
+    if (!s_exportShaderAuto) return s_exportShaderBackends;
+    return HE::BackendRules::shaderBackendMaskFor(s_exportPlatform, effectiveExportBackend(ctx));
 }
 
 static std::string effectiveExportBackend(const AppContext& ctx)
@@ -431,6 +452,7 @@ static std::vector<std::string> parseExcludeLines(const char* buf)
 // simply omits the chunk and the shipped game cross-compiles at load.
 static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fragGlsl,
                                                           const std::string& vertBody,
+                                                          const std::string& gbufGlsl,
                                                           uint32_t backends)
 {
 	if (fragGlsl.empty() || backends == 0) return {};
@@ -444,7 +466,7 @@ static std::vector<uint8_t> CompileMaterialShaderVariants(const std::string& fra
 		std::string error;
 		std::vector<std::string> warnings;
 		const bool ok = HE::bakeMaterialShaderVariant(lib, static_cast<HE::RendererBackend>(v),
-		                                              fragGlsl, vertBody, var, error, warnings);
+		                                              fragGlsl, vertBody, var, error, warnings, gbufGlsl);
 		// A half that failed but is optional (UI vertex, clustered twin) still
 		// ships the rest — the runtime cross-compiles / draws the plain fragment.
 		for (const std::string& w : warnings)
@@ -533,12 +555,20 @@ static void exportProfileToDialog(const ExportProfile& p, const std::filesystem:
 	s_exportHcStop       = p.hcStopOnFailure;
 	s_exportTextureFormat  = p.textureFormat;
 	s_exportTextureQuality = p.textureQuality;
+	s_exportTextureArrays  = p.compressTextureArrays;
 	// Canonicalize via the enum round-trip. The platform is not read from disk
 	// any more (always Host); only project_build's one-run copy can name another.
 	s_exportPlatform     = exportPlatformName(exportPlatformFromName(p.targetPlatform));
 	s_exportShaderBackends = p.shaderBackends;
+	s_exportShaderAuto     = p.autoShaderBackends;
 	s_exportExcludes.clear();
 	for (const auto& pat : p.excludePatterns) { s_exportExcludes += pat; s_exportExcludes += '\n'; }
+	s_exportOnlyReferenced = p.onlyReferenced;
+	s_exportBakeMeshTextures = p.bakeMeshTextures;
+	s_exportBakeFarLandscape = p.bakeFarLandscape;
+	s_exportFarLandscapeMB   = p.farLandscapeBudgetMB;
+	s_exportIncludes.clear();
+	for (const auto& pat : p.alwaysIncludePatterns) { s_exportIncludes += pat; s_exportIncludes += '\n'; }
 }
 
 // Read the dialog fields back into a profile (the name stays as-is).
@@ -551,14 +581,21 @@ static void exportDialogToProfile(ExportProfile& p)
 	p.devTools         = s_exportDevTools;
 	p.startupScene     = s_exportStartupScene;
 	p.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+	p.onlyReferenced   = s_exportOnlyReferenced;
+	p.bakeMeshTextures = s_exportBakeMeshTextures;
+	p.bakeFarLandscape = s_exportBakeFarLandscape;
+	p.farLandscapeBudgetMB = s_exportFarLandscapeMB;
+	p.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
 	p.incremental      = s_exportIncremental;
 	p.targetPlatform   = s_exportPlatform;
 	p.appBundle        = s_exportAppBundle;
 	p.shaderBackends   = s_exportShaderBackends;
+	p.autoShaderBackends = s_exportShaderAuto;
 	p.compileHorizonCode = s_exportCompileHC;
 	p.hcStopOnFailure    = s_exportHcStop;
 	p.textureFormat      = s_exportTextureFormat;
 	p.textureQuality     = s_exportTextureQuality;
+	p.compressTextureArrays = s_exportTextureArrays;
 }
 
 void open(AppContext& ctx)
@@ -1067,6 +1104,10 @@ void render(AppContext& ctx)
                 else
                     ImGui::TextDisabled("Auto: ASTC on Metal, BC3 on macOS OpenGL, BC7 on desktop. "
                                         "High encodes several times slower than Fast.");
+                ImGui::BeginDisabled(s_exportTextureFormat == "None");
+                EditorWidgets::checkbox("Compress texture arrays", &s_exportTextureArrays);
+                ImGui::EndDisabled();
+                EditorWidgets::helpForKey("Export/Compress texture arrays");
             }
 
             ImGui::Spacing();
@@ -1190,6 +1231,39 @@ void render(AppContext& ctx)
             ImGui::InputTextMultiline("##exportExcludes", &s_exportExcludes,
                                       ImVec2(-1.0f, ImGui::GetTextLineHeight() * 3.5f));
 
+            // Only what the game reaches. On by default: an export used to pack every asset
+            // in Content and in the engine library, used or not. What is left out is listed
+            // in the export log; the patterns below keep what a script loads by a path it builds.
+            ImGui::Spacing();
+            EditorWidgets::checkbox("Pack only referenced assets", &s_exportOnlyReferenced);
+            EditorWidgets::helpForKey("Export/Pack only referenced assets");
+            // The texture bake runs on what the filter keeps, so it needs the filter.
+            ImGui::BeginDisabled(!s_exportOnlyReferenced);
+            EditorWidgets::checkbox("Bake textures onto meshes", &s_exportBakeMeshTextures);
+            ImGui::EndDisabled();
+            EditorWidgets::helpForKey("Export/Bake textures onto meshes");
+            EditorWidgets::checkbox("Bake far landscape", &s_exportBakeFarLandscape);
+            EditorWidgets::helpForKey("Export/Bake far landscape");
+            if (s_exportBakeFarLandscape)
+            {
+                ImGui::SetNextItemWidth(120.0f);
+                ImGui::DragInt("Far landscape budget (MB)", &s_exportFarLandscapeMB, 8.0f, 16, 16384);
+                s_exportFarLandscapeMB = std::clamp(s_exportFarLandscapeMB, 16, 16384);
+                EditorWidgets::helpForKey("Export/Far landscape budget (MB)");
+            }
+            if (s_exportOnlyReferenced)
+            {
+                ImGui::Text("Always include:");
+                ImGui::SameLine();
+                ImGui::TextDisabled("(?)");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("One glob per line, same shape as the exclude patterns.\n"
+                                      "Assets matching one are kept even when nothing names them,\n"
+                                      "e.g. a script loads \"Props/Crate\" + n at run time: Props/Crate*");
+                ImGui::InputTextMultiline("##exportIncludes", &s_exportIncludes,
+                                          ImVec2(-1.0f, ImGui::GetTextLineHeight() * 2.5f));
+            }
+
             // ── Precompiled material shaders ──────────────────────────────────
             // Nothing to precompile without materials, and a project with Advanced
             // Shader Effects off has none by construction — the editor never let it
@@ -1210,6 +1284,8 @@ void render(AppContext& ctx)
                                   "selected backends, so the shipped game never cross-compiles at\n"
                                   "load. Ship only the backend(s) the target actually runs.\n"
                                   "None selected \xe2\x86\x92 the game compiles shaders on first use.");
+            EditorWidgets::checkbox("Match the game's backend", &s_exportShaderAuto);
+            EditorWidgets::helpForKey("Export/Match the game's backend");
             {
                 struct Bk { const char* label; HE::RendererBackend rb; };
                 static const Bk kBackends[] = {
@@ -1219,12 +1295,17 @@ void render(AppContext& ctx)
                     { "D3D11",  HE::RendererBackend::D3D11  },
                     { "D3D12",  HE::RendererBackend::D3D12  },
                 };
+                // Auto shows what it will bake, greyed out; the hand-picked set is kept
+                // underneath so switching Auto off again finds it as it was.
+                const uint32_t shown = s_exportShaderAuto ? effectiveShaderBackends(ctx)
+                                                          : s_exportShaderBackends;
+                ImGui::BeginDisabled(s_exportShaderAuto);
                 int col = 0;
                 for (const Bk& b : kBackends)
                 {
                     const uint32_t bit = 1u << static_cast<uint32_t>(b.rb);
-                    bool on = (s_exportShaderBackends & bit) != 0;
-                    if (EditorWidgets::checkbox(b.label, &on))
+                    bool on = (shown & bit) != 0;
+                    if (EditorWidgets::checkbox(b.label, &on) && !s_exportShaderAuto)
                     {
                         if (on) s_exportShaderBackends |=  bit;
                         else    s_exportShaderBackends &= ~bit;
@@ -1232,6 +1313,7 @@ void render(AppContext& ctx)
                     if (++col < 3) ImGui::SameLine();
                     else           col = 0;
                 }
+                ImGui::EndDisabled();
             }
             }
             else
@@ -1403,6 +1485,10 @@ void startExport(AppContext& ctx)
                                       + " placed prefab(s) point at an asset that is gone; "
                                       "shipped as they were last saved");
                 };
+                // Meshes some entity draws with a material of its own: the texture bake
+                // leaves them alone (an override material would read its texture through
+                // the atlas UVs). Collected from every scene the export serializes.
+                std::vector<HE::UUID> overriddenMeshes;
                 std::vector<uint8_t> sceneBinary;
                 bool sceneOk = true;
                 if (!scenePath.empty())
@@ -1412,6 +1498,7 @@ void startExport(AppContext& ctx)
                     if (ser.load(sceneWorld, scenePath, SerializeFormat::JSON))
                     {
                         syncPrefabsForExport(sceneWorld, sceneName);
+                        HE::collectMeshesWithMaterialOverrides(sceneWorld, overriddenMeshes);
                         ser.saveToMemory(sceneWorld, sceneBinary);
                     }
                     else
@@ -1425,6 +1512,41 @@ void startExport(AppContext& ctx)
                 // game. A scene that fails to load is skipped with a note rather
                 // than failing the whole export — only the STARTUP scene is
                 // boot-critical.
+                // The far landscape: every Auto Landscape of every scene is photographed into three small textures per
+                // chunk (HorizonScene/LandscapeHlod.h) and packed as extra assets. It renders, so it runs here on the
+                // main thread, before the pack thread starts; a landscape two scenes share is baked once.
+                std::vector<Hpak::PackSettings::ExtraAsset> farAssets;
+                std::vector<HE::UUID> farSeen;
+                bool farBackendNoted = false;
+                const auto bakeFarLandscapes = [&](HorizonWorld& w, const std::string& label)
+                {
+                    if (!s_exportBakeFarLandscape || !ctx.renderer || !ctx.contentManager) return;
+                    if (!ctx.renderer->GetCapabilities().supportsRawCapture)
+                    {
+                        if (!farBackendNoted)
+                            Build::log(1, "Far landscape: not baked, the picture needs a renderer that can hand back a "
+                                          "frame without tonemap and post effects and this editor's one cannot (the far "
+                                          "levels keep the landscape's own material)");
+                        farBackendNoted = true;
+                        return;
+                    }
+                    HE::landscape::HlodExportOptions o;
+                    o.budgetBytes = static_cast<uint64_t>(std::max(16, s_exportFarLandscapeMB)) << 20;
+                    std::vector<HE::landscape::HlodAssetBlob> blobs;
+                    const HE::landscape::HlodExportStats st = HE::landscape::bakeWorldLandscapes(
+                        w, ctx.world, *ctx.contentManager, *ctx.renderer, o, blobs, farSeen,
+                        [&](const std::string& s) { Build::log(0, label + ": " + s); });
+                    for (HE::landscape::HlodAssetBlob& b : blobs)
+                    {
+                        Hpak::PackSettings::ExtraAsset ea;
+                        ea.id = b.id; ea.relPath = std::move(b.relPath); ea.type = b.type; ea.bytes = std::move(b.bytes);
+                        farAssets.push_back(std::move(ea));
+                    }
+                    if (st.terrains > 0)
+                        Build::log(0, label + ": far landscape " + std::to_string(st.terrains) + " landscape(s), "
+                                      + std::to_string(st.chunks) + " chunk(s) in " + std::to_string(static_cast<int>(st.ms))
+                                      + " ms");
+                };
                 std::vector<std::pair<std::string, std::vector<uint8_t>>> extraScenes;
                 std::vector<HE::hccg::ClassSource> hcSources;   // codegen inputs (hcCompile)
                 {
@@ -1444,6 +1566,8 @@ void startExport(AppContext& ctx)
                                 sit->path().lexically_relative(projectRoot).generic_string();
                             const bool loaded = ser2.load(w2, sit->path(), SerializeFormat::JSON);
                             if (loaded) syncPrefabsForExport(w2, rel);
+                            if (loaded) HE::collectMeshesWithMaterialOverrides(w2, overriddenMeshes);
+                            if (loaded) bakeFarLandscapes(w2, rel);
                             if (loaded && ser2.saveToMemory(w2, bytes))
                             {
                                 // Level script → codegen source, keyed by the scene's
@@ -1466,6 +1590,24 @@ void startExport(AppContext& ctx)
                         ec2.clear();
                         sit.increment(ec2);
                     }
+                }
+
+                // Entities that only exist at run time come from HorizonCode classes
+                // (entity.spawnClass): their component body is the template, and a mesh
+                // override in it is as good as one in a scene. Placed prefabs need no
+                // such pass, they are plain entities in the scenes scanned above.
+                for (const auto& c : HcEditorUtil::listAssets(ctx.contentManager,
+                                                              HE::AssetType::HorizonCodeClass))
+                {
+                    const HE::UUID classId = ctx.contentManager->loadAsset(c.path);
+                    const HorizonCodeClassAsset* cls = ctx.contentManager->getHorizonCodeClass(classId);
+                    if (!cls) continue;
+                    const std::vector<uint8_t> body = EntityHost::inheritedComponents(*ctx.contentManager, *cls);
+                    if (body.empty()) continue;
+                    HorizonWorld classWorld;
+                    SceneSerializer classSer;
+                    if (classSer.instantiatePrefab(classWorld, body) != entt::null)
+                        HE::collectMeshesWithMaterialOverrides(classWorld, overriddenMeshes);
                 }
 
                 // App-wide GameInstance graph (project GameInstance.hcode). Packed
@@ -1674,6 +1816,12 @@ void startExport(AppContext& ctx)
                 es.encrypt          = s_exportEncrypt;
                 es.enableModSupport = s_exportModSupport;
                 es.excludePatterns  = parseExcludeLines(s_exportExcludes.c_str());
+                es.onlyReferenced   = s_exportOnlyReferenced;
+                es.bakeMeshTextures = s_exportBakeMeshTextures;
+                es.bakeSkipMeshes   = overriddenMeshes;
+                es.extraAssets      = std::move(farAssets);
+                es.alwaysIncludePatterns = parseExcludeLines(s_exportIncludes.c_str());
+                es.onNotice = [](const std::string& msg) { Build::log(0, msg); };
                 es.incremental      = s_exportIncremental;
                 // The project's default SaveGameTemplate rides into project.hcfg
                 // so save.create() in the shipped game finds the same schema.
@@ -1761,6 +1909,7 @@ void startExport(AppContext& ctx)
                     texComp = static_cast<uint8_t>(2);       // BC7 — desktop D3D/Vulkan/GL
                 es.textureCompression = texComp;
                 es.textureQuality     = static_cast<uint8_t>(std::clamp(s_exportTextureQuality, 0, 2));
+                es.cookTextureArrays  = s_exportTextureArrays;
                 // The settings the game boots with, shipped as a config.json next
                 // to its data. Built HERE, on the UI thread — it reads the editor's
                 // live configuration, which the export worker must not touch — and
@@ -1790,7 +1939,7 @@ void startExport(AppContext& ctx)
                     ctx.projectManager->currentProject().scriptLanguage == ProjectScriptLanguage::Python;
                 // Precompile node-graph material shaders into the pak for the
                 // selected backends (0 → runtime cross-compiles as before).
-                es.shaderBackends        = s_exportShaderBackends;
+                es.shaderBackends        = effectiveShaderBackends(ctx);
                 es.compileShaderVariants = &CompileMaterialShaderVariants;
                 // Same bitmask + toggle UI as materials — particles only ever bake
                 // OpenGL/Metal variants (see CompileParticleShaderVariants), so

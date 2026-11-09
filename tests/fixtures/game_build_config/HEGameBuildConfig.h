@@ -112,7 +112,7 @@ inline constexpr HE::GameBuildConfig kConfig = {
     "motionBlurIntensity": 0.5,
     "motionBlurMax": 24.0,
     "occlusionCulling": false,
-    "renderPath": 0,
+    "renderPath": 1,
     "renderScale": 1.0,
     "specularAA": true,
     "specularAAStrength": 1.0,

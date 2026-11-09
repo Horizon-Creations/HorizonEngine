@@ -39,7 +39,8 @@ std::string payload(const MaterialShaderLibrary::Compiled& c, LB lb)
 bool bakeMaterialShaderVariant(MaterialShaderLibrary& lib, RendererBackend backend,
                                const std::string& fragGlsl, const std::string& vertBody,
                                MaterialShaderVariant& out, std::string& error,
-                               std::vector<std::string>& warnings)
+                               std::vector<std::string>& warnings,
+                               const std::string& gbufGlsl)
 {
 	LB lb;
 	if (fragGlsl.empty() || !plainTarget(backend, lb))
@@ -97,6 +98,39 @@ bool bakeMaterialShaderVariant(MaterialShaderLibrary& lib, RendererBackend backe
 		warnings.push_back("clustered variant precompile failed (the shipped game draws "
 		                   "this material with the 8-light window): " + clFrag.log
 		                   + (clVert ? " " + clVert->log : std::string()));
+
+	// The deferred twin and the instanced vertex twins. Only where the renderer reads a
+	// baked one (OpenGL, Metal); baking them elsewhere would add bytes nothing consumes.
+	// The G-buffer pipeline draws the plain vertex stage, so only the fragment is new.
+	const bool bakesTwins = backend == RendererBackend::OpenGL || backend == RendererBackend::Metal;
+	if (bakesTwins)
+	{
+		auto instancedFor = [&](LB target) -> const MaterialShaderLibrary::Compiled& {
+			return vertBody.empty() ? lib.standardVertexInstanced(target)
+			                        : lib.customVertexInstanced(vertHash, vertBody, target);
+		};
+		const auto& vi = instancedFor(lb);
+		if (vi.ok)
+			var.vertexInstanced = payload(vi, lb);
+		else
+			warnings.push_back("instanced vertex precompile failed (batches of this material "
+			                   "draw per instance or cross-compile the twin at load): " + vi.log);
+		// GL's clustered pair is GLSL 4.30 on both stages, so its instanced twin is too.
+		if (!var.vertexClustered.empty())
+		{
+			const auto& vic = instancedFor(clTarget);
+			if (vic.ok) var.vertexInstancedClustered = payload(vic, clTarget);
+		}
+	}
+	if (!gbufGlsl.empty() && bakesTwins)
+	{
+		const auto& gb = lib.fragment(std::hash<std::string>{}(gbufGlsl), gbufGlsl, lb);
+		if (gb.ok)
+			var.fragmentGBuffer = payload(gb, lb);
+		else
+			warnings.push_back("G-buffer variant precompile failed (the deferred path will "
+			                   "cross-compile this material at load): " + gb.log);
+	}
 
 	out = std::move(var);
 	return true;

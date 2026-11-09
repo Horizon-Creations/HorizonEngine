@@ -1014,6 +1014,20 @@ endfunction()
 # cache — without it, a reconfigure keeps the old cached codename (the version from
 # project() updates, but the codename would silently stay stale).
 set(HE_VERSION_CODENAME "Nimbus" CACHE STRING "Sky-themed codename for this release" FORCE)
+# The commit this build comes from, for the log's Build line: a bug report with only a build
+# time cannot say which side of a fix the package is on. Read at configure time, so a local
+# build shows the commit it was last configured at; CI configures fresh. "unknown" without git.
+set(HE_GIT_COMMIT "unknown")
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=10 HEAD
+                    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                    OUTPUT_VARIABLE HE_GIT_COMMIT_OUT OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE HE_GIT_COMMIT_RC ERROR_QUIET)
+    if(HE_GIT_COMMIT_RC EQUAL 0 AND HE_GIT_COMMIT_OUT)
+        set(HE_GIT_COMMIT "${HE_GIT_COMMIT_OUT}")
+    endif()
+endif()
 configure_file(
     "${CMAKE_SOURCE_DIR}/cmake/HorizonVersion.h.in"
     "${CMAKE_BINARY_DIR}/generated/HorizonVersion.h"

@@ -202,6 +202,76 @@ TEST_CASE("manual env edits are respected; a new preset reclaims them")
           doctest::Approx(weatherPreset(WeatherKind::Clear).cloudCoverage).epsilon(0.02));
 }
 
+TEST_CASE("weather presets drive the volumetric fog's bank and noise (Thema 225 step 7)")
+{
+    // The numbers are the plan's suggestions (§11): Foggy a real ground bank + wispy noise,
+    // Rain a faint bank, a dry kind none, and every kind that doesn't care sits on the
+    // Environment default noise of 0.5.
+    CHECK(weatherPreset(WeatherKind::Foggy).fogBank  == doctest::Approx(0.15f));
+    CHECK(weatherPreset(WeatherKind::Foggy).fogNoise == doctest::Approx(0.7f));
+    CHECK(weatherPreset(WeatherKind::Rain).fogBank   == doctest::Approx(0.02f));
+    CHECK(weatherPreset(WeatherKind::Clear).fogBank  == doctest::Approx(0.0f));
+    CHECK(weatherPreset(WeatherKind::Clear).fogNoise == doctest::Approx(EnvironmentComponent{}.fogNoiseAmount));
+
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+    auto* env = world.registry().try_get<EnvironmentComponent>(world.rootEntity());
+    REQUIRE(env);
+    w.transitionDuration = 0.1f;
+    w.targetKind = WeatherKind::Foggy;
+    for (int i = 0; i < 10; ++i) WeatherSystem::update(world, 0.1f);
+    CHECK(env->fogBankDensity == doctest::Approx(0.15f));
+    CHECK(env->fogNoiseAmount == doctest::Approx(0.7f));
+
+    // Intensity scales the bank, and pulls the noise back toward the default.
+    w.intensity = 0.5f;
+    w.targetKind = WeatherKind::Clear;  // retarget so reclaim re-applies
+    for (int i = 0; i < 10; ++i) WeatherSystem::update(world, 0.1f);
+    w.targetKind = WeatherKind::Foggy;
+    for (int i = 0; i < 10; ++i) WeatherSystem::update(world, 0.1f);
+    CHECK(env->fogBankDensity == doctest::Approx(0.075f));
+    CHECK(env->fogNoiseAmount == doctest::Approx(0.6f));
+}
+
+TEST_CASE("a hand-set bank or noise survives the weather until the next preset pick")
+{
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+    auto* env = world.registry().try_get<EnvironmentComponent>(world.rootEntity());
+    REQUIRE(env);
+
+    // A scene that was authored with its own valley mist is not touched by a weather that
+    // was never asked to change (sentinel: nothing is owned before the first apply).
+    env->fogBankDensity = 0.3f;
+    env->fogNoiseAmount = 0.9f;
+    for (int i = 0; i < 5; ++i) WeatherSystem::update(world, 0.1f);
+    CHECK(env->fogBankDensity == doctest::Approx(0.3f));
+    CHECK(env->fogNoiseAmount == doctest::Approx(0.9f));
+
+    w.transitionDuration = 0.1f;
+    w.targetKind = WeatherKind::Foggy;                    // the pick reclaims both
+    for (int i = 0; i < 10; ++i) WeatherSystem::update(world, 0.1f);
+    CHECK(env->fogBankDensity == doctest::Approx(0.15f));
+
+    env->fogBankDensity = 0.5f;                           // the user takes the bank over
+    for (int i = 0; i < 5; ++i) WeatherSystem::update(world, 0.1f);
+    CHECK(env->fogBankDensity == doctest::Approx(0.5f));  // weather backs off
+    CHECK(env->fogNoiseAmount == doctest::Approx(0.7f));  // the untouched one stays driven
+}
+
+TEST_CASE("weather leaves a fogMode 0 scene's picture alone: it never writes fogMode or the analytic fog's inputs twice")
+{
+    HorizonWorld world;
+    WeatherComponent& w = setupWeatherWorld(world);
+    auto* env = world.registry().try_get<EnvironmentComponent>(world.rootEntity());
+    REQUIRE(env);
+    CHECK(env->fogMode == 0);
+    w.targetKind = WeatherKind::Foggy;
+    for (int i = 0; i < 100; ++i) WeatherSystem::update(world, 0.1f);
+    CHECK(env->fogMode == 0);                              // a preset never flips the mode
+    CHECK(env->fogDensity == doctest::Approx(0.08f));      // the analytic value is what it always was
+}
+
 TEST_CASE("rain stops once the rain amount returns to zero")
 {
     HorizonWorld world;
@@ -590,6 +660,8 @@ TEST_CASE("makeEnvironmentSettings maps every EnvironmentComponent field")
     env.rainAmount         = 0.66f;
     env.cloudMode          = 1;
     env.cloudHeight        = 321.0f;
+    env.cloudDomeHeight    = 1.9f;
+    env.cloudType          = 4;
     env.cloudQuality       = 2;
     env.lowResClouds       = true;
     env.cloudDensity       = 1.7f;
@@ -648,6 +720,8 @@ TEST_CASE("makeEnvironmentSettings maps every EnvironmentComponent field")
     CHECK(s.rainAmount        == doctest::Approx(0.66f));
     CHECK(s.cloudMode         == 1);
     CHECK(s.cloudHeight       == doctest::Approx(321.0f));
+    CHECK(s.cloudDomeHeight   == doctest::Approx(1.9f));
+    CHECK(s.cloudType         == 4);
     CHECK(s.cloudQuality      == 2);
     CHECK(s.lowResClouds);
     CHECK(s.cloudDensity      == doctest::Approx(1.7f));

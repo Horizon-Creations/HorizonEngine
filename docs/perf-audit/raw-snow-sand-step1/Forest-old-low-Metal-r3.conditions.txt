@@ -1,0 +1,21 @@
+label: Forest-old-low-Metal-r3
+attempt: 1
+editor: /tmp/he328/old/HorizonEditor
+rhi: Metal
+sets: ['ViewportGroundGrid=false', 'RenderScale=2.0']
+before:
+  uptime:    load averages: 3.38 2.93 2.89
+  locked:    Yes
+  lowpower:  0
+  gpu:       9
+  power:     Now drawing from 'AC Power'
+  busy:      74.4% (pairedsyncd); 22.2% WindowServer; 15.3% Python; 9.9% coreaudiod
+  foreign:   none
+after:
+  uptime:    load averages: 4.19 3.16 2.97
+  locked:    Yes
+  lowpower:  0
+  gpu:       87
+  power:     Now drawing from 'AC Power'
+  busy:      19.0% WindowServer; 13.0% Dock; 11.3% coreaudiod; 8.4% WallpaperAerialsExtension
+  foreign:   none

@@ -13,8 +13,11 @@
 // Textures: the three engine arrays of docs/auto-landscape-material-textures.md
 // §8 (T_Landscape_{Albedo,Normal,Mask}_Array, slices Grass, Dirt, Rock, Snow,
 // WetGround; Mask = R AO, G roughness, B height) in heTexP0..2. heTexP3 stays free.
-// The material reads slices 0..3; slice 4 (WetGround) stays in the arrays but is
-// not read — puddles are an overlay, not a layer (see below).
+// The material reads slices 0..2 (Grass, Dirt, Rock); slice 4 (WetGround) stays in the arrays but is
+// not read — puddles are an overlay, not a layer (see below). Slice 3 (Snow) is not read either since
+// Thema 329 step 2: the Snow role is MF_ProceduralSnow (ProceduralSurfaceFunctions.h), made from noise
+// in world space, in every group; and the Desert group's ground role is MF_ProceduralSand, so its
+// slice 0 is unread too. The slices stay in the arrays so the layout (4 * V + 1) does not move.
 //
 // What decides a layer — the AUTOMATIC rules (all per pixel, all procedural):
 //   slope    = 1 − N.y of the GEOMETRIC normal (0 flat, 1 vertical)
@@ -23,7 +26,9 @@
 //   rock     = slope past "Rock Slope", over "Rock Blend" — rock is the bulk of
 //              the automatic distribution on any relief
 //   snow     = world height past "Snow Height", over "Snow Blend", not on faces
-//              steeper than "Snow Max Slope" (rock shows through on cliffs)
+//              steeper than "Snow Max Slope" (rock shows through on cliffs); plus the weather's
+//              snow (MF_WeatherSnow). What the snow LOOKS like is MF_ProceduralSnow, fed the
+//              weather's Snow Cover and wetness; r.snowMask stays the height snow alone.
 //   puddles  = flat ground (slope < "Puddle Max Slope") in the low spots of a
 //              world-space noise field (the field's minima are the "hollows"),
 //              a wet rim around, standing water in the middle; never under snow.
@@ -59,10 +64,10 @@
 //
 // Tiling runs in WORLD space (world XZ / tile size), not over the terrain's
 // 0..1 UV, so a texel is the same size on a 100 m and on a 4 km landscape.
-// Rock, Grass, Dirt and Snow are read through texture bombing (hex tiling, one grid
+// Rock, Grass and Dirt are read through texture bombing (hex tiling, one grid
 // per layer shared by its albedo/normal/mask, own seed per layer). Snow used to be
-// read plainly to save the reads (docs §9.4) — on a painted or high field of it the
-// single tile showed as a grid of identical marks. The static switch "Texture
+// read through it too (before that plainly, docs §9.4) and is procedural now, so it
+// has no tile to hide. The static switch "Texture
 // Bombing" turns the bombed reads into plain ones at compile time (instance
 // override → own permutation; the witness uses it as the negative control).
 #pragma once
@@ -72,6 +77,7 @@
 #include <Types/UUID.h>
 
 #include <cstdint>
+#include <string_view>
 
 namespace HE
 {
@@ -96,14 +102,16 @@ inline constexpr int kAutoLandscapePaintLayerCount = 6;
 // It stays so the array layout and its texture ids (0x40F..0x411) do not move.
 enum class AutoLandscapeLayer : int { Grass = 0, Dirt = 1, Rock = 2, Snow = 3, WetGround = 4 };
 
-// Variants per layer (Thema 180, Schritt 3). The three arrays hold kAutoLandscapeVariantGroups * V + 1
-// slices: layer g's variant v is slice g * V + v (g = Grass..Snow), the unread WetGround slice
+// Variants per layer (Thema 180, Schritt 3). A "role" is one of the four painted layers (Grass, Dirt,
+// Rock, Snow; "texture group" below is the terrain theme and a different thing). The three arrays hold
+// kAutoLandscapeRoleCount * V + 1
+// slices: role g's variant v is slice g * V + v (g = Grass..Snow), the unread WetGround slice
 // comes last. V is not stored anywhere: the shader takes depth / 4, so the same material renders
 // the 5-slice placeholder arrays (V = 1) and a 13-slice set (V = 3) alike.
-inline constexpr int kAutoLandscapeVariantGroups = 4;
-inline constexpr int autoLandscapeArrayDepth(int variants) { return kAutoLandscapeVariantGroups * variants + 1; }
+inline constexpr int kAutoLandscapeRoleCount = 4;
+inline constexpr int autoLandscapeArrayDepth(int variants) { return kAutoLandscapeRoleCount * variants + 1; }
 inline constexpr int autoLandscapeVariantCount(int depth)
-{ return depth / kAutoLandscapeVariantGroups > 1 ? depth / kAutoLandscapeVariantGroups : 1; }
+{ return depth / kAutoLandscapeRoleCount > 1 ? depth / kAutoLandscapeRoleCount : 1; }
 // The variant a hex draws: the low 8 bits of its hash's first word, scaled to 0..V-1 in integers
 // (the shader's `((h.x & 255u) * uint(V)) >> 8u`, which every backend computes bit for bit).
 inline constexpr int autoLandscapeVariantOf(uint32_t hashX, int variants)
@@ -120,9 +128,123 @@ inline constexpr int autoLandscapeSliceOf(int group, int variant, int depth)
 // Layers are AutoLandscapeLayer values; the last slice (4 * V) is WetGround, variant 0.
 inline constexpr void autoLandscapeSliceSource(int slice, int variants, int& layer, int& variant)
 {
-    if (slice >= kAutoLandscapeVariantGroups * variants) { layer = kAutoLandscapeVariantGroups; variant = 0; return; }
+    if (slice >= kAutoLandscapeRoleCount * variants) { layer = kAutoLandscapeRoleCount; variant = 0; return; }
     layer = slice / variants;
     variant = slice % variants;
+}
+
+// ── Texture groups (Thema 233) ────────────────────────────────────────────────
+// A texture group is a terrain THEME: one landscape material with its own three arrays, chosen per
+// terrain through MaterialComponent::materialAssetId (the material id IS the group). Every group is
+// the same graph skeleton — roles, slice layout (4 * V + 1), the Groups pin, the 13 parameters and the
+// six paint-layer channels do not change; a group differs by the files its roles read, the names it
+// gives the paint layers, and the default values of a few parameters. Mountains is the original
+// material, byte for byte (the members above are its row).
+enum class AutoLandscapeGroupId : int { Mountains = 0, Forest = 1, Grassland = 2, Desert = 3 };
+inline constexpr int kAutoLandscapeGroupCount = 4;
+
+struct AutoLandscapeGroup
+{
+    AutoLandscapeGroupId id;
+    const char* name;
+    UUID        materialId;
+    const char* materialPath;
+    const char* arrayPaths[3];      // Albedo, Normal, Mask: the heTexP0..2 order of the graph
+    const char* paintLayerNames;    // '\n'-separated, kAutoLandscapePaintLayerNames' channel order
+    const char* roleLabels[4];      // the group's name for role Grass, Dirt, Rock, Snow
+    // The default value of the parameters a group tunes (the others keep the Mountains value).
+    float rockSlope, dirtAmount, snowHeight;
+    // Role 0 (the ground everything else lies on) is made by MF_ProceduralSand instead of read from
+    // the arrays: its albedo / normal / AO / roughness / height come from the function in world
+    // space, so the group's first array slice is never read. Desert only (Thema 329, step 2).
+    bool proceduralSand = false;
+};
+
+// Ids, in landscape_tex_gen's 0x400 block: 0x412 is Mountains, 0x413 / 0x414 are the weather
+// functions (WeatherMaterialFunctions.h — the ContentManager keeps ONE entry per UUID, so a clash
+// loads the group's material as a function), a group takes its material id and the three ids after
+// it for its arrays (0x415..0x418 Forest, 0x419..0x41C Grassland). Desert takes 0x4A0..0x4A3: the
+// three ids left under 0x420 are one short of a group, 0x420..0x42E are the loose maps and
+// 0x430..0x498 the variants (kMaxVariants 8 of 5 layers), so the first block clear of both is 0x4A0.
+// 0x41D / 0x41E are the procedural snow and sand functions (ProceduralSurfaceFunctions.h), 0x41F stays free.
+inline constexpr AutoLandscapeGroup kAutoLandscapeGroups[kAutoLandscapeGroupCount] = {
+    { AutoLandscapeGroupId::Mountains, "Mountains",
+      kAutoLandscapeMaterialId, kAutoLandscapeMaterialPath,
+      { kAutoLandscapeAlbedoArray, kAutoLandscapeNormalArray, kAutoLandscapeMaskArray },
+      kAutoLandscapePaintLayerNames, { "Grass", "Dirt", "Rock", "Snow" },
+      0.12f, 0.35f, 60.0f },
+    { AutoLandscapeGroupId::Forest, "Forest",
+      { 0x0000000000000415ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Forest.hasset",
+      { "Engine/Textures/Landscape/T_Landscape_Forest_Albedo_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Forest_Normal_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Forest_Mask_Array.hasset" },
+      "Auto\nForest Floor\nRoots\nMossy Rock\nSnow\nPuddles",
+      { "Forest Floor", "Roots", "Mossy Rock", "Snow" },
+      0.10f, 0.50f, 2000.0f },
+    { AutoLandscapeGroupId::Grassland, "Grassland",
+      { 0x0000000000000419ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Grassland.hasset",
+      { "Engine/Textures/Landscape/T_Landscape_Grassland_Albedo_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Grassland_Normal_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Grassland_Mask_Array.hasset" },
+      "Auto\nMeadow\nBare Soil\nStones\nSnow\nPuddles",
+      { "Meadow", "Bare Soil", "Stones", "Snow" },
+      0.20f, 0.20f, 2000.0f },
+    // Untuned first numbers (Thema 233 step 6): sand holds steep dune flanks, so rock shows late, little
+    // hardpan, no snow in reach.
+    { AutoLandscapeGroupId::Desert, "Desert",
+      { 0x00000000000004A0ULL, 0x0000000000000001ULL }, "Engine/Materials/M_AutoLandscape_Desert.hasset",
+      { "Engine/Textures/Landscape/T_Landscape_Desert_Albedo_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Desert_Normal_Array.hasset",
+        "Engine/Textures/Landscape/T_Landscape_Desert_Mask_Array.hasset" },
+      "Auto\nSand\nHardpan\nSandstone\nSnow\nPuddles",
+      { "Sand", "Hardpan", "Sandstone", "Snow" },
+      0.30f, 0.15f, 2000.0f, true },
+};
+
+inline constexpr const AutoLandscapeGroup& autoLandscapeGroup(AutoLandscapeGroupId id)
+{ return kAutoLandscapeGroups[static_cast<int>(id)]; }
+
+// The group whose material is `id`, or -1 (a custom landscape material, a scene saved before groups
+// that names none, ...). A terrain bound to Mountains' id is the Mountains group like it always was.
+inline constexpr int autoLandscapeGroupOfMaterial(const UUID& id)
+{
+    for (int i = 0; i < kAutoLandscapeGroupCount; ++i)
+        if (kAutoLandscapeGroups[i].materialId == id) return i;
+    return -1;
+}
+
+// ── The mix material (Thema 233): all four groups on one terrain ──────────────────────────────
+// A terrain with TerrainComponent::groupMix on binds this material instead of its group's. It reads
+// the groups' shares (weight layers 8..11, the Landscape Group Pick node), takes the two strongest
+// groups of a fragment and reads THEIR slices of three FAT arrays: slice = (group * 4 + role), one
+// variant per role (V = depth / 16 in the shader, so 16 slices = V 1), roles Grass / Dirt / Rock /
+// Snow in the group's slot order. Snow is the procedural function in every group and Desert's role 0
+// is the procedural sand, so those two slices are placeholders no fragment reads. The tuned parameters
+// (Rock Slope, Dirt Amount, Snow Height) are Mountains' for the whole terrain: a decision, not a
+// limit (per-group values would cost ALU per fragment, see docs/landscape-3-0-mix-render-*.md).
+// Ids: the 0x4A4..0x4A7 block (material, then its three arrays), clear of Desert's 0x4A0..0x4A3.
+inline constexpr UUID kAutoLandscapeMixMaterialId = { 0x00000000000004A4ULL, 0x0000000000000001ULL };
+inline constexpr char kAutoLandscapeMixMaterialPath[] = "Engine/Materials/M_AutoLandscape_Mix.hasset";
+inline constexpr char kAutoLandscapeMixAlbedoArray[]  = "Engine/Textures/Landscape/T_Landscape_Mix_Albedo_Array.hasset";
+inline constexpr char kAutoLandscapeMixNormalArray[]  = "Engine/Textures/Landscape/T_Landscape_Mix_Normal_Array.hasset";
+inline constexpr char kAutoLandscapeMixMaskArray[]    = "Engine/Textures/Landscape/T_Landscape_Mix_Mask_Array.hasset";
+inline constexpr int  kAutoLandscapeMixDepth = kAutoLandscapeGroupCount * kAutoLandscapeRoleCount;   // V = 1
+inline constexpr int  autoLandscapeMixSlice(int group, int role) { return group * kAutoLandscapeRoleCount + role; }
+inline constexpr bool isAutoLandscapeMixMaterial(const UUID& id) { return id == kAutoLandscapeMixMaterialId; }
+
+// Which group (and map: 0 Albedo, 1 Normal, 2 Mask) a texture path is an array of; -1 if none.
+// `path` is compared the way graphTexturePaths store it ("Engine/Textures/...").
+inline int autoLandscapeGroupOfArray(const char* path, int* map = nullptr)
+{
+    if (!path) return -1;
+    for (int i = 0; i < kAutoLandscapeGroupCount; ++i)
+        for (int m = 0; m < 3; ++m)
+            if (std::string_view(path) == kAutoLandscapeGroups[i].arrayPaths[m])
+            {
+                if (map) *map = m;
+                return i;
+            }
+    return -1;
 }
 
 // Exposed parameter names (HeParams slots, Material Instance overrides) and the
@@ -141,7 +263,20 @@ inline constexpr char kAutoLandscapeParamSnowMaxSlope[]   = "Snow Max Slope";
 inline constexpr char kAutoLandscapeParamPuddleAmount[]   = "Puddle Amount";
 inline constexpr char kAutoLandscapeParamPuddleMaxSlope[] = "Puddle Max Slope";
 inline constexpr char kAutoLandscapeSwitchBombing[]       = "Texture Bombing";
-inline constexpr int  kAutoLandscapeParamCount            = 13;   // "Puddle Size" moved to the Weather panel
+// The procedural surfaces. A graph has kMatMaxParams (16) HeParams slots and 13 were taken, so the
+// look is packed: one Vec4 each (x..w in the order named here), plus the snow's colour as a colour
+// picker. The sand's colour is the reference's mean and stays baked, the Desert would be over budget.
+inline constexpr char kAutoLandscapeParamSnowColor[]      = "Snow Color";
+inline constexpr char kAutoLandscapeParamSnowLook[]       = "Snow Look";  // Grain, Drift, Glitter, Softness
+inline constexpr char kAutoLandscapeParamSandLook[]       = "Sand Look";  // Grain Size (m), Ripple, Ripple Size (m), Glitter
+inline constexpr int  kAutoLandscapeParamCount            = 15;   // every group; the Desert adds Sand Look
+inline constexpr int  autoLandscapeParamCount(const AutoLandscapeGroup& g)
+{ return kAutoLandscapeParamCount + (g.proceduralSand ? 1 : 0); }
+
+// Trails fade out between these camera distances (metres): the clipmap window is 128 m wide and wraps, so
+// it only belongs to the place within 64 m of the camera (Trails/TrailClipmap.h).
+inline constexpr float kTrailFadeStart = 46.0f;
+inline constexpr float kTrailFadeEnd   = 58.0f;
 
 // What the Output node shows. Lit is the material. The mask views are UNLIT
 // debug views over the very same mask nodes (the witness's numeric oracle):
@@ -149,7 +284,9 @@ inline constexpr int  kAutoLandscapeParamCount            = 13;   // "Puddle Siz
 //   MasksDirtWet        R = dirt, G = wet ground (puddle rim + water), B = flat
 //   Normal              the final world normal × 0.5 + 0.5 (the Normal pin's input)
 //   Surface             R = AO, G = roughness, B = 0 (the AO / Roughness pins' inputs)
-enum class AutoLandscapeView : uint8_t { Lit, MasksRockSnowWater, MasksDirtWet, Normal, Surface };
+//   BaseColor           the final albedo (the BaseColor pin's input), unlit: what the far-landscape
+//                       bake photographs (docs/landscape-hlod-baked-material-2026-11-02.md)
+enum class AutoLandscapeView : uint8_t { Lit, MasksRockSnowWater, MasksDirtWet, Normal, Surface, BaseColor };
 
 struct AutoLandscapeGraph
 {
@@ -161,5 +298,11 @@ struct AutoLandscapeGraph
         flatMask = 0, wetMask = 0, waterMask = 0;
 };
 
-HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit);
+// `group` picks the three arrays the roles read, the paint-layer names and the defaults of the tuned
+// parameters; the default (Mountains) builds exactly the graph this material always had.
+// `mixed` builds the mix material above instead (the group then only names the parameter defaults,
+// Mountains).
+HE_API AutoLandscapeGraph buildAutoLandscapeGraph(AutoLandscapeView view = AutoLandscapeView::Lit,
+                                                  AutoLandscapeGroupId group = AutoLandscapeGroupId::Mountains,
+                                                  bool mixed = false);
 } // namespace HE

@@ -1182,6 +1182,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 				const char* cloudModes[] = { "Sky-dome (default)", "3D volumetric (parallax)" };
 				int cmode = (env->cloudMode == 1) ? 1 : 0;
 				if (Row::combo("Render Mode", &cmode, cloudModes, 2)) { env->cloudMode = cmode; trackEdit(); }
+				if (env->cloudMode != 1)
+				{
+					Row::sliderFloat("Dome Cloud Height", &env->cloudDomeHeight, 0.25f, 3.0f, "%.2fx"); trackEdit();
+					hint("How high the dome clouds look. 1 is the classic look; raise it and they "
+					     "sit further up, smaller and slower against their size; lower it and they come close.");
+				}
 				if (env->cloudMode == 1)
 				{
 					Row::sliderFloat("Cloud Altitude", &env->cloudHeight, 20.0f, 2000.0f, "%.0f m"); trackEdit();
@@ -1196,6 +1202,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					     "sunlit tops over blue-grey bellies and a silver lining.");
 					if (env->cloudStyle == 1)
 					{
+						const char* cloudTypes[] = { "Mixed cumulus", "Flat cumulus", "Towering cumulus",
+						                             "Stratocumulus", "Cumulonimbus" };
+						int ctype = std::clamp(env->cloudType, 0, 4);
+						if (Row::combo("Cloud Type", &ctype, cloudTypes, 5)) { env->cloudType = ctype; trackEdit(); }
+						hint("The kind of cloud: cell size and height profile. Coverage still sets how much "
+						     "sky they fill.");
 						if (EditorWidgets::checkbox("Clouds Shade Each Other", &env->cloudInterShadows)) trackEdit();
 						hint("Extends the sun march so tall towers darken clouds behind them. "
 						     "Slightly more expensive (scales with Quality).");
@@ -1263,6 +1275,72 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			Row::sliderFloat("Ground Hugging", &env->fogHeightFalloff, 0.0f, 1.0f); trackEdit();
 			ImGui::EndDisabled();
 			hint("Distant objects blend into the horizon (warm at sunset).");
+
+			// Volumetric fog (Thema 225): a froxel-grid volume with light shafts and
+			// shadows instead of the flat per-pixel blend above, past this distance
+			// the analytic formula still takes over. Greyed out on a backend that
+			// has not implemented it yet (IRenderer::Capabilities::supportsVolumetricFog)
+			// — the mode stays whatever the scene authored, it just renders with the
+			// analytic fallback until the backend catches up.
+			const bool fogVolSupported = ctx.renderer && ctx.renderer->GetCapabilities().supportsVolumetricFog;
+			ImGui::BeginDisabled(!fogVolSupported);
+			{
+				const char* fogModes[] = { "Analytic (today)", "Volumetric" };
+				int fogMode = (env->fogMode == 1) ? 1 : 0;
+				if (Row::combo("Mode##fogvol", &fogMode, fogModes, 2)) { env->fogMode = fogMode; trackEdit(); }
+			}
+			ImGui::EndDisabled();
+			if (!fogVolSupported)
+				hint("This backend does not render volumetric fog yet; a scene with it "
+				     "picked still loads and plays, with the Density fog above standing in.");
+			else
+				hint("Froxel-grid fog with sun/light shafts and in-volume shadow, instead "
+				     "of the flat per-pixel blend. Past Volume Distance the Density fog "
+				     "above continues seamlessly.");
+
+			ImGui::BeginDisabled(!fogVolSupported || env->fogMode != 1);
+			{
+				const char* fogQ[] = { "Low", "Medium", "High" };
+				int fogQuality = std::clamp(env->fogQuality, 0, 2);
+				if (Row::combo("Quality##fogvol", &fogQuality, fogQ, 3)) { env->fogQuality = fogQuality; trackEdit(); }
+				hint("Froxel grid size. Higher resolves finer shafts and bank edges; costs more GPU time.");
+
+				Row::sliderFloat("Volume Distance", &env->fogVolumeDistance, 16.0f, 512.0f, "%.0f m"); trackEdit();
+				hint("How far the volume reaches before the Density fog above takes over. "
+				     "Clamped to the directional shadow distance, so the volume is never "
+				     "without a shadow map to sample.");
+
+				Row::colorEdit3("Albedo##fogvol", &env->fogAlbedo.x, ImGuiColorEditFlags_NoInputs); trackEdit();
+				hint("Scattering tint. White scatters the sky/sun colour unchanged; a tint "
+				     "colours the fog itself, like dust or smoke.");
+
+				Row::sliderFloat("Anisotropy", &env->fogAnisotropy, -0.9f, 0.9f, "%.2f"); trackEdit();
+				hint("Henyey-Greenstein phase: negative scatters back toward the camera, "
+				     "positive forms a bright shaft looking toward the sun.");
+
+				Row::sliderFloat("Noise Amount", &env->fogNoiseAmount, 0.0f, 1.0f); trackEdit();
+				hint("0 keeps the pure height formula; higher breaks it up into drifting "
+				     "wisps and clearer patches.");
+				ImGui::BeginDisabled(env->fogNoiseAmount <= 0.0f);
+				Row::sliderFloat("Noise Scale", &env->fogNoiseScale, 5.0f, 200.0f, "%.0f m"); trackEdit();
+				ImGui::EndDisabled();
+				hint("World size of one noise period. Small = fine wisps, large = broad "
+				     "patches of thicker/thinner fog.");
+
+				Row::sliderFloat("Bank Density", &env->fogBankDensity, 0.0f, 1.0f, "%.3f"); trackEdit();
+				hint("A ground-hugging fog bank, on top of the height fog above — valley "
+				     "mist or a lake-bed haze with its own edges.");
+				ImGui::BeginDisabled(env->fogBankDensity <= 0.0f);
+				Row::dragFloat("Bank Base", &env->fogBankBaseY, 0.1f, -1000.0f, 1000.0f, "%.1f m"); trackEdit();
+				hint("World Y of the bank's lower edge.");
+				Row::dragFloat("Bank Thickness", &env->fogBankThickness, 0.1f, 0.1f, 200.0f, "%.1f m"); trackEdit();
+				hint("How tall the bank stands; its top edge is soft and noise-eroded, not a hard line.");
+				ImGui::EndDisabled();
+
+				Row::sliderFloat("Local Light Scatter", &env->fogLocalLightScatter, 0.0f, 2.0f, "%.2f"); trackEdit();
+				hint("How much point/spot lights scatter in the volume, on top of the sun/moon. 0 = off.");
+			}
+			ImGui::EndDisabled();
 
 			ImGui::TreePop(); } // end Atmospheric Fog
 
@@ -3617,14 +3695,24 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			// settings that suit them: mesh, detail levels, density, shadows and the
 			// placement rules. Everything stays editable below; applying overwrites it.
 			{
+				// The kinds are the texture group's (Thema 233): the group of the entity's landscape
+				// material, Mountains (the six of Thema 180) when it has none. The combo index is a
+				// place in that list, so it is clamped every frame, never kept across a group switch.
+				const auto* groupMat = registry.try_get<MaterialComponent>(entity);
+				const HE::AutoLandscapeGroupId group = groupMat ? HE::layerMeshGroupOfMaterial(groupMat->materialAssetId)
+				                                                : HE::AutoLandscapeGroupId::Mountains;
+				const HE::LayerMeshSet kindSet = HE::layerMeshKindsOfGroup(group);
+				std::string kindItems;
+				for (int i = 0; i < kindSet.count; ++i) { kindItems += HE::layerMeshKindName(kindSet.kinds[i]); kindItems.push_back('\0'); }
 				static int presetKind = 0;
-				Row::comboZ("Mesh Preset##fol", &presetKind, "Grass Tuft\0Pebble\0Rock A\0Rock B\0Rock C\0Snow Drift\0");
+				presetKind = std::clamp(presetKind, 0, kindSet.count - 1);
+				Row::comboZ("Mesh Preset##fol", &presetKind, kindItems.c_str());
 				ImGui::SameLine();
 				if (EditorWidgets::smallButton("Apply Preset##fol"))
 				{
 					if (undo) undo->snapshotNow("Apply Foliage Mesh Preset");
-					const HE::LayerMeshKind kind = static_cast<HE::LayerMeshKind>(std::clamp(presetKind, 0, HE::kLayerMeshKindCount - 1));
-					HE::applyLayerMeshPreset(*fol, kind);
+					const HE::LayerMeshKind kind = kindSet.kinds[presetKind];
+					HE::applyLayerMeshPreset(*fol, kind, group);
 					// The meshes are engine FILES: nothing loads them on its own, and a mesh
 					// that is not resident draws as the fallback cube without a word (see the
 					// cross card below). By UUID once the engine folder is scanned, else by path.
@@ -3684,9 +3772,12 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 			if (ImGui::IsItemDeactivatedAfterEdit()) { fol->dirty = true; trackEdit(); }
 			{
 				static const char* const kWeightItems[] = { "Off", "Layer 0", "Layer 1", "Layer 2", "Layer 3",
-				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7" };
+				                                            "Layer 4", "Layer 5", "Layer 6", "Layer 7",
+				                                            "Layer 8", "Layer 9", "Layer 10", "Layer 11" };
+				static_assert(sizeof(kWeightItems) / sizeof(kWeightItems[0]) == kTerrainMaxLayers + 1,
+				              "Off plus one entry per paint layer");
 				int wl = fol->weightLayer + 1;
-				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, 9))
+				if (Row::combo("Paint Layer##fol", &wl, kWeightItems, kTerrainMaxLayers + 1))
 				{
 					if (undo) undo->snapshotNow("Foliage Paint Layer");
 					fol->weightLayer = wl - 1;

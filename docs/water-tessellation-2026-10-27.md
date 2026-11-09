@@ -52,3 +52,24 @@ Shot: camera under water, tess on: the waterline at the horizon is ragged instea
 NOT done: D3D11/D3D12/Vulkan keep the camera-local plane (no blind edits there, see memory; HlslSources.h fog/caustics and
 `postfx_underwaterfog.frag` need the same two vec4 + `heSurfaceH`; the Vulkan caustics push constants are full, 128 B).
 Metal: nothing to do until it tessellates.
+
+## Update: the underwater fog follows the surface on Vulkan, D3D11 and D3D12 (2026-10-28)
+Checked on the RTX 4070 (water_baseline_shots.py, `HE_DUMP_WATERTESS=1`, `HE_DUMP_WINDSPEED=2.6`): the tessellated
+sheet itself draws on Vulkan, D3D11 and D3D12 (tess on vs off differs by ~16 of 255 on average; the top views match
+OpenGL). What did NOT follow was the underwater pass: with the camera at the waterline (bowl lake, CAMY 301.95 .. 302.1)
+OpenGL showed a ragged waterline, the other three one straight, blurred line. Ported now:
+* `HlslSources.h`: `kUnderwaterFogHLSL` / `kUnderwaterCausticsHLSL` carry `@SURF@` (spliced with
+  `HE::withUnderwaterSurface(src, HLSL)`), cbuffer + `uSurfWave`/`uSurfParams` (fog 112 -> 144 B, caustics 144 -> 176 B;
+  D3D12 root constants 28 -> 36 and 36 -> 44), the GL logic copied: per-pixel surface height for the point, the near-plane
+  point and the crossing (3 refinement steps), caustics depth below the surface at the pixel.
+* `UnderwaterSurfaceShared.h`: `withUnderwaterSurface`, `underwaterSurfaceUniforms(cam, seconds)` (one place that builds
+  the two float4; seconds = SDL ticks / `HE_SKY_TIME`, the clock the material displaces by).
+* Vulkan fog only: `postfx_underwaterfog.frag` holds a copy of the GLSL text (offline-compiled, no splice); push constants
+  stay 128 B (depthParams dropped, Vulkan's is always 1/1/0). A test (`test_culling.cpp`, "Underwater fog: the Vulkan shader
+  carries the shared surface text") fails when the copy drifts. `validate_embedded_shaders.py` got the HLSL spelling of
+  the `@SURF@` dummy.
+* NOT done: Vulkan caustics still use the camera-local plane (its 128 B push block is full; needs a small UBO), Metal
+  (no tessellation, flat by design). Not reproduced: "the underside of a wave shows where it overlaps another" (storm sea,
+  camera 0.3 .. 1.9 m over the level, Vulkan/D3D12/GL, full-res crops): no such patches in these frames. Water draws with
+  cull NONE and no depth write, so a back-facing lee slope blends over the next trough on every backend; if it shows up in a
+  real scene, that is the draw state, not the post pass (needs a screenshot + backend from the scene it was seen in).

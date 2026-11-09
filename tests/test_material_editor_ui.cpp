@@ -410,4 +410,71 @@ TEST_CASE("material editor ui: no Displacement wire, no Tessellation cell")
 	for (int i = 0; i < 3; ++i) frame(ctx, p.abs, false, i == 2 ? &img : nullptr);
 	CHECK(amberIn(img, ImRect(0.0f, 0.0f, float(W), float(H))) == 0);
 }
+
+// ── The Landscape Foliage node (Thema 327, step 3) ────────────────────────────
+// A node with no pins and no params: its body is the one slot for the foliage set.
+// Drives the real panel on a landscape material that carries the node, to prove
+// the zero-pin node lays out and draws (shoot it with HE_UI_DUMP_DIR), and that
+// drawing it changes nothing: the set stays on the node, and the material's id
+// still reaches the asset through the panel's own regenerate.
+TEST_CASE("material editor ui: a Landscape Foliage node draws its set slot and keeps its set")
+{
+	const fs::path root = freshDir();
+	ContentManager content;
+	content.setContentRoot(root.string());
+
+	LandscapeFoliageLayerAsset set;
+	set.type = HE::AssetType::LandscapeFoliageLayer;
+	set.name = "Forest Foliage"; set.path = "Materials/ForestFoliage.hasset";
+	const HE::UUID setId = content.registerLandscapeFoliageLayer(set);
+	REQUIRE(setId != HE::UUID{});
+
+	HE::MaterialGraph g = HE::MaterialGraph::makeDefault();
+	int out = 0;
+	for (const auto& n : g.nodes) if (n.type == HE::MatNodeType::Output) out = n.id;
+	const int lb = g.addNode(HE::MatNodeType::LandscapeLayerBlend, 120.0f, 60.0f);
+	const int c  = g.addNode(HE::MatNodeType::ConstColor, 0.0f, 60.0f);
+	REQUIRE(g.connect(c, 0, lb, 0));
+	REQUIRE(g.connect(lb, 0, out, HE::kMatOutputBaseColorPin));
+	const int fn = g.addNode(HE::MatNodeType::LandscapeFoliage, 120.0f, 260.0f);
+	g.findNode(fn)->s = HE::matFoliageSetIdToString(setId);
+
+	MaterialAsset m;
+	m.type = HE::AssetType::Material;
+	m.name = "ForestLandscape"; m.path = "Materials/ForestLandscape.hasset";
+	m.nodeGraphJson = HE::materialGraphToJson(g);
+	REQUIRE(content.saveAsset(m));
+	const std::string abs = (root / "Materials" / "ForestLandscape.hasset").string();
+
+	{
+		Harness h;
+		HorizonWorld world;
+		EditorUndo   undo;
+		ContextBits  bits;
+		bits.backendName = "Metal";
+		AppContext ctx = bits.make(world, undo);
+		PreviewRenderer renderer(false);
+		ctx.renderer       = &renderer;
+		ctx.backend        = HE::RendererBackend::Metal;
+		ctx.contentManager = &content;
+		he_ui::Image img;
+		for (int i = 0; i < 6; ++i) frame(ctx, abs, false, i == 5 ? &img : nullptr);
+		dump(img, "material_editor_landscape_foliage_node.bmp");
+		CHECK(img.width == W);
+	}
+	MaterialEditorPanel::forget(abs);
+
+	const MaterialAsset* back = content.getMaterial(content.loadAsset("Materials/ForestLandscape.hasset"));
+	REQUIRE(back);
+	HE::MaterialGraph again;
+	REQUIRE(HE::materialGraphFromJson(back->nodeGraphJson, again));
+	int seen = 0;
+	for (const auto& n : again.nodes)
+		if (n.type == HE::MatNodeType::LandscapeFoliage)
+		{ ++seen; CHECK(HE::matFoliageSetIdFromString(n.s) == setId); }
+	CHECK(seen == 1);
+	CHECK(back->foliageSetId == setId);
+	std::error_code ec;
+	fs::remove_all(root, ec);
+}
 #endif // HE_EDITOR_DEPS_DIR

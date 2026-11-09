@@ -2660,6 +2660,7 @@ void render(AppContext& ctx, int& tabSelectRequest,
 			{ "Blend Space",       HE::AssetType::BlendSpace },
 			{ "Property Animation", HE::AssetType::PropertyAnimClip },
 			{ "Sequence",          HE::AssetType::Sequence },
+			{ "Landscape Foliage", HE::AssetType::LandscapeFoliageLayer },
 			{ "Input Action",      HE::AssetType::InputAction },
 			{ "Input Mapping",     HE::AssetType::InputMappingContext },
 			{ "Audio",             HE::AssetType::Audio },
@@ -2758,6 +2759,8 @@ void render(AppContext& ctx, int& tabSelectRequest,
 				// The property clip's glyph — a timeline — tinted apart until a
 				// cinematic sequence earns its own .tga.
 				case HE::AssetType::Sequence:            return { I.propertyAnimClip,     {0.70f, 0.80f, 1.00f, 1.0f} };
+				// No glyph of its own yet: the foliage tool's colour family (green).
+				case HE::AssetType::LandscapeFoliageLayer: return { I.model3d,            {0.55f, 0.90f, 0.45f, 1.0f} };
 				case HE::AssetType::Unknown: break; // not an HAsset — try the extension
 			}
 
