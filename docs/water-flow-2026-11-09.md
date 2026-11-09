@@ -380,10 +380,18 @@ eigenes Thema (Pegel als Feld statt Skalar).
   Knopf; zweiter Tick gleich). Pixel: `up` vs `up-after` 0,97 % Pixel > 8 (bbox nur der obere Bach), `close-ref` vs `-after` 0,56 %
   (bbox nur die Ecke); nachher vs Probe (`below` = 0) 0,01/0,02 %. **Sonst unverändert, md5-gleich altes vs neues Hasset (gleiches
   Binary):** stiller See `l` von oben, stiller Bowl-See aus 1 m unter Wasser, fließender Bowl-See (`WATERFLOW=2,0`, `WaterFlow`)
-  aus 1 m unter Wasser (Taucher sieht Snell-Fenster und Netz wie vorher). Ansichten von oben (side/close/down) vor/nach md5-gleich.
-- **Nicht verifiziert:** D3D11/D3D12/Vulkan/OpenGL (Material-Codegen, kein neuer Knotentyp); Editor-Mausbedienung.
+  aus 1 m unter Wasser (Taucher sieht Snell-Fenster und Netz wie vorher). Ansichten von oben (side/close/down) vor/nach md5-gleich,
+  top 0 Pixel > 8 (Mittel 0,000). **OpenGL:** `up` nach dem Fix mit `RHI=OpenGL` gerendert: 0 Link-/Compile-Fehler im Log, alle 89
+  Entities `WaterFlow, shader ready`, Bild wie Metal (kein Teal). Vollsuite `ctest -j4` 365/365.
+- **Kompatibel in beide Richtungen:** alter Editor + neues Hasset: Knopf hat z = w = 0 -> kein Tor, altes Aussehen; neuer Editor + altes
+  Hasset: das Material liest z/w nicht -> altes Aussehen. (Anders als `kShoreFadeDepth` muss hier nichts zusammen ausgeliefert werden.)
+- **Entscheidung:** Tor je KÖRPER (exakt: feuert nie für eine Kamera, die im Körper sein kann), nicht je Fragment über `shoreD` (das
+  hätte einem Schnorchler im flachen Uferwasser die Totalreflexion zum Ufer hin genommen).
+- **Nicht verifiziert:** D3D11/D3D12/Vulkan (Material-Codegen, kein neuer Knotentyp); Editor-Mausbedienung.
 - **Offen:** (1) **stilles** Wasser (Terraces ohne Flow From Slope, Standard aus) hat keinen `Flow`-Knopf: seine Becken zeigen von unten
   weiter Teal; ein Knopf für alle Varianten sprengt bei Flow+Tessellation die 16 Slots (heute genau 16). (2) Körper 6, 8, 14: Band
   fällt zwei Stufen (`lo` −0,98), `landsIn` nimmt bei einem Becken schmaler als eine Zelle den nächsttieferen; nicht die Ecke.
   (3) Bänder tragen eine +Y-Normale (e im Kipp): von vorn gesehen „streifend“; echte Flächennormale bräche die e-Kodierung.
-- **Nächste Schritte:** bodenfolgendes Band (Abschnitt Schritt 12); Backend-Abnahme der Flow-Variante.
+- **Nächste Schritte:** (1) Offen (1) schließen: den `Flow`-ParamVec4 vor den Static Switch ziehen (die Versatz-Knoten bleiben
+  geschaltet): plain 15 / Tess 16 / Flow 15 / Flow+Tess 16 Slots, passt; dann `deepest` an jedes Blatt (w = 1), still oder nicht.
+  (2) bodenfolgendes Band (Abschnitt Schritt 12); (3) Backend-Abnahme der Flow-Variante (D3D/Vulkan).
