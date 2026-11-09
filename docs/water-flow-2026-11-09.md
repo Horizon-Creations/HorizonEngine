@@ -207,3 +207,30 @@ eigenes Thema (Pegel als Feld statt Skalar).
   Pinsel kann ein alter Körper fast leer werden.
 - **Entscheidung:** Bei `levelFromGround = false` gilt der feste Pegel nur für die erste Stufe, danach Boden + Offset.
 - **Nächste Schritte:** Schritt 5 (Wasserfall-Band zwischen Nachbar-Körpern, `Stroke`-Reihenfolge = Stufenreihenfolge nutzbar).
+
+### Schritt 5 (Wasserfall-Band), erledigt
+
+- **Gebaut:** `WaterFall.h/.cpp` (HE_Scene). `fallUppers(tc)`: ein Rasterdurchlauf, Körper mit 4-Nachbar-Zelle (beide nass) eines Körpers, dessen Pegel
+  um >= `kFallMinDrop` (= `brush::kTerraceMinDrop` 0,4 m) tiefer liegt. `buildFalls(...)`: Band je OBEREM Körper aus den Kantenstücken seines Blatts
+  (`shoreSegments`), die an einen tieferen Körper grenzen; je Stück ein Streifen von der Blattkante (Höhe oben) bergab entlang des Bodens bis
+  zum tieferen Pegel (max. `kFallMaxRun` 8 m; flaches Gelände/seitliche Kante = senkrechter Abfall) plus ein Schaum-Vorfeld (`kFallApron` 0,6 m,
+  `kFallLift` 2 cm über dem unteren Blatt). Schaum = die Ufernähe `e` in der Vertex-Normale (Oberkante: Wert des oberen Blatts, Fuß 1, Vorfeldrand 0),
+  die das Wassermaterial schon liest. Kein neues Material: das Band nutzt die Flow-Variante (`Flow` = mittlere Bergab-Richtung * `kFallSpeed` 3 m/s).
+  `WaterSurface.cpp`: Band-Entity = `WaterSurfaceComponent` mit neuem Feld `fall` (`body` = oberer Körper), also ohne neue Komponente, nie serialisiert,
+  von `isTerrainGenerated` erfasst; `Stats::falls/fallsRemoved`. Läuft nach den Blättern, nur wenn das Blatt-Steady-Check nicht greift; Hash gleich = Mesh bleibt.
+- **Verifiziert (Mac, Release):** `ctest` komplett 365/365 grün; neue `tests/test_water_fall.cpp` (7 Fälle: Kaskade gibt Band unter jeder Terrasse außer der
+  letzten, Schwelle 0,3 vs. >= 0,4, nicht berührende Körper, senkrechter Abfall auf Ebene, Band bleibt an der Kante, Entity-Lebenszyklus inkl. Wegfall bei
+  Pegelangleichung/Entfernen, keine Bänder ohne Gefälle). **Bild-Zeuge:** `HE_DUMP_WATERLAKE=cascade HE_DUMP_WATERSLOPE=0.8` (neuer Modus in
+  `EditorApplication.cpp`: Pinselstrich bergab mit Terraces + Flow From Slope), sauberes `HOME`, `TOD=0.5 DAYNIGHT=0 SETTLEMS=1500 FRAMES=6`, Metal:
+  `docs/water-fall-cascade-front-2026-11-09.png` (CAMX=-24 CAMY=292 CAMZ=0 PITCH=15 YAW=90), `docs/water-fall-cascade-close-2026-11-09.png`
+  (CAMX=-9 CAMY=298 CAMZ=5 PITCH=-12 YAW=75): durchgehender Vorhang zwischen den Stufen, Streifen laufen mit der Strömung, Schaumfuß.
+- **Nicht verifiziert:** D3D11/D3D12/Vulkan/OpenGL; Editor-UI; Release-Pak-Spiel (Flow-Variante braucht Graph + Shader-Compiler, sonst Rückfall aufs einfache
+  Wasser: Band dann ohne Streifen). Der Schaum ist kaum als weißes Band zu sehen (Material liest `e` nur als Ufernähe; ein eigenes WaterFall-Material
+  mit echter Gischt wäre der nächste Ausbau). Perf nicht gemessen (Bänder sind wenige hundert Dreiecke, ein Aufbau je Strich-Tick und oberem Körper).
+- **Entscheidungen:** Band aus dem Feld abgeleitet, nicht aus `Stroke::bodies` (nichts gespeichert, gilt auch für von Hand gemalte Nachbarn);
+  Streifen liegt am Boden entlang statt als Wand; `shoreSegments` orientiert Einzelkreuzungen NICHT (nur Sättel), die Seite kommt aus `insideSheet`.
+- **Fallen:** (1) `shoreSegments` Richtung ist beliebig: `insideSheet` je Stück fragen. (2) Der Pinsel-Rand (falloff) lässt Zellen mit kleiner Deckung
+  zwischen den Blättern: Nachbar = erste Zelle eines FREMDEN Körpers beim Hinausgehen (bis 8 Zellen), nicht erst ab `kWet`. (3) Tests mit 1-m-Zellen
+  und 0,5-m-Pinsel geben pro Stufe ein Ein-Zellen-Blatt (leer): `res` 256 nehmen. (4) Ein nacktes `ContentManager{"."}` hat kein Wassergraph, die Flow-Variante
+  fällt auf einfaches Wasser zurück; getestet wird der `Flow`-Knopf, nicht die Material-ID.
+- **Nächste Schritte:** Schritt 6/7: Backend-Abnahme (D3D/Vulkan/GL), Perf-Vergleich, Handbuch-Eintrag; optional eigenes Fall-Material mit Gischt.

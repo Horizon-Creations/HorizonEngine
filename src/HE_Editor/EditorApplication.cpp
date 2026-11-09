@@ -8224,7 +8224,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		namespace water = HE::water;
 		auto& reg = m_editorWorld->registry();
 		const std::string_view mode(wl);
-		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush";
+		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush" || mode == "cascade";
 		const float level = [bank] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : (bank ? 2.0f : 0.4f); }();
 		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
 		TransformComponent ltf;
@@ -8267,6 +8267,7 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					const float z = -64.0f + 128.0f * static_cast<float>(zi) / static_cast<float>(hr - 1);
 					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
 						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
+						: mode == "cascade" ? bankSlope * x     // a plain ramp, rising toward +X (HE_DUMP_WATERSLOPE, steep: 0.8)
 						               : bankSlope * x + 10.0f * bankSlope * std::sin(0.15f * z) + bankRough * hashNoise(xi, zi);
 				}
 		}
@@ -8325,6 +8326,26 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				const float t = static_cast<float>(i) / 8.0f;
 				ok = ok && water::addCircle(ltc, b, -34.0f + 62.0f * t, -26.0f + 50.0f * std::sin(t * 3.0f), 17.0f, 6.0f).ok;
 			}
+		}
+		else if (mode == "cascade")
+		{
+			// Thema 232 step 5: a stroke dragged DOWN the ramp with Terraces on, through the brush's own
+			// begin/dab/end, so the witness shows what the tool makes: one flat body per step and the
+			// waterfall bands between them. HE_DUMP_WATERLEVEL is not used (levels come from the ground).
+			namespace brush = HE::water::brush;
+			brush::Params p;
+			p.radius = 2.5f; p.falloff = 1.0f; p.amount = 1.0f;
+			p.levelFromGround = true; p.levelOffset = 0.3f;
+			p.cascade = true; p.autoFlow = true;
+			const float x0 = 22.0f, x1 = -12.0f;
+			brush::Stroke st;
+			brush::begin(st, ltc, x0, 0.0f, p);
+			const int steps = 120;
+			for (int i = 0; i <= steps; ++i)
+				brush::dab(st, ltc, x0 + (x1 - x0) * static_cast<float>(i) / static_cast<float>(steps), 0.0f, p);
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE=cascade: %zu bodies, %u terraces",
+			            st.bodies.size(), st.terraces);
+			brush::end(st, ltc);
 		}
 		else if (mode == "two")
 		{

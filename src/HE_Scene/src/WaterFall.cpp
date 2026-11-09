@@ -145,29 +145,41 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
 
     const Field& f = tc.water;
     const glm::vec2 cs = cellSize(tc);
-    const double probeNear = 0.75 * std::min<double>(cs.x, cs.y), probeFar = 1.75 * std::min<double>(cs.x, cs.y);
+    const double probeStep = std::min<double>(cs.x, cs.y), probeNear = 0.75 * probeStep;
+    constexpr int kProbeCells = 8;
     const float step = 0.25f * std::min(cs.x, cs.y);
 
-    struct Piece { glm::dvec2 a, b; float low; };
+    struct Piece { glm::dvec2 a, b; glm::dvec2 n; float low; };      // n: unit, out of the water
     std::vector<Piece> pieces;
     for (const ShoreSegment& s : shoreSegments(lattice))
     {
         const glm::dvec2 d = s.b - s.a;
         const double len = glm::length(d);
         if (!(len > 1e-9)) continue;
-        // The sheet is on the left of the segment (the contours' rule), so the way out is to its right.
-        const glm::dvec2 n(d.y / len, -d.x / len);
+        // Which side is the sheet: shoreSegments does not orient a cell's single crossing (only a saddle's),
+        // so ask the sheet's own inside test one sliver to either side. Both or neither: not an edge to hang
+        // a ribbon from (a degenerate sliver in a corner).
+        glm::dvec2 n(d.y / len, -d.x / len);
         const glm::dvec2 mid = (s.a + s.b) * 0.5;
-        for (const double reach : { probeNear, probeFar })
+        const double sliver = 0.2 * std::min<double>(cs.x, cs.y);
+        const bool inFront = insideSheet(lattice, mid.x + n.x * sliver, mid.y + n.y * sliver);
+        const bool inBack  = insideSheet(lattice, mid.x - n.x * sliver, mid.y - n.y * sliver);
+        if (inFront == inBack) continue;
+        if (inFront) n = -n;                 // n now points out of the water
+        // The edge of the sheet is where the upper body's coverage falls to half, which a brush's soft rim
+        // puts a few cells short of the neighbour's solid cells: walk outward past empty cells and the upper
+        // body's own faint ones, and the first cell of ANOTHER body (at any coverage: the rim is the body's
+        // too) is the neighbour.
+        for (int k = 0; k < kProbeCells; ++k)
         {
-            const glm::dvec2 q = mid + n * reach;
+            const glm::dvec2 q = mid + n * (probeNear + k * probeStep);
             const int ci = cellIndexAt(tc, q.x, q.y);
             if (ci < 0) break;
             const uint16_t owner = f.owner[static_cast<size_t>(ci)];
-            if (owner == kNoBody || owner == upper || f.coverage[static_cast<size_t>(ci)] < kWet) continue;
+            if (owner == kNoBody || owner == upper) continue;
             const Body* lower = f.findBody(owner);
             if (!lower || !(level - lower->level >= kFallMinDrop)) break;
-            pieces.push_back({ s.a, s.b, lower->level });
+            pieces.push_back({ s.a, s.b, n, lower->level });
             break;
         }
     }
@@ -191,9 +203,8 @@ bool buildFalls(const TerrainComponent& tc, uint16_t upper, const Lattice& latti
     const auto grow = [&](const glm::dvec2& p) { lo = glm::min(lo, p); hi = glm::max(hi, p); };
     for (const Piece& pc : pieces)
     {
-        const glm::dvec2 d = pc.b - pc.a;
-        const double len = glm::length(d);
-        const glm::dvec2 n(d.y / len, -d.x / len);
+        const double len = glm::length(pc.b - pc.a);
+        const glm::dvec2& n = pc.n;
         Quad q;
         q.ta = pc.a; q.tb = pc.b;
         q.fa = footAt(pc.a, n, pc.low);
