@@ -43,8 +43,8 @@ class IRenderer;
 // call.
 namespace WaterSurface
 {
-    // Content path of the material every surface draws with (kEngineWaterMaterialId).
-    inline constexpr const char* kMaterialPath = "Engine/Materials/Water.hasset";
+    // (The material a landscape's water draws with, and the particle graphs of its falls' spray, are its
+    // own references: Field::material, Field::fallCurtain/fallDrops/fallMist.)
 
     // Metres per UV unit. UVs are world coordinates / this, so 1 = one tile per metre.
     inline constexpr float kUvMetersPerTile = 1.0f;
@@ -62,9 +62,7 @@ namespace WaterSurface
         uint32_t kept      = 0;   // bodies examined and found unchanged
         uint32_t removed   = 0;   // surface entities taken away
         uint32_t triangles = 0;   // in the meshes built by this call
-        uint32_t falls        = 0;   // waterfall bands (re)built, Thema 232 step 5, WaterFall.h
-        uint32_t fallsRemoved = 0;   // bands taken away
-        bool     worked() const { return created || rebuilt || removed || falls || fallsRemoved; }
+        bool     worked() const { return created || rebuilt || removed; }
     };
 
     // Bring the surfaces of every landscape in `world` in line with its water

@@ -6661,6 +6661,7 @@ struct UnlitUniforms
 // Was a local struct of EncodeScene; hoisted so EncodeGBuffer can hand its
 // collected lists over via MetalDeferredFrame.
 struct TPDraw { UnlitUniforms u; void* vbuf; void* ibuf; NSUInteger indexCount; void* tex; float distSq;
+                int8_t prio = 0;   // the material's sort priority (RenderSorter::blendedBefore)
                 void* pipeline = nullptr; std::vector<float> params; bool wpo = false;
                 void* gtex[HE::kMatMaxGraphTextures] = { nullptr }; int gtexCount = 0;
                 // Section draw: byte offset into the index buffer (0 = from the
@@ -6880,6 +6881,7 @@ void MetalRenderer::Initialize(HE::Window* window)
 #if defined(HE_HAVE_SHADERC)
 	m_extractor.setVolumetricFogCapable(true); // RenderWorld::fogVolume.enabled may now be true
 #endif
+	m_extractor.setParticleSpritesCapable(true); // the particleBatches pass (heParticleGraphVertex)
 
 	id<MTLCommandQueue> queue = [device newCommandQueue];
 	if (!queue)
@@ -7534,6 +7536,7 @@ void MetalRenderer::CollectRibbonDraws(std::vector<TPDraw>& out, const glm::mat4
 			// WORLD ORIGIN instead, and they would all sort the same.
 			const glm::vec3 c = rb.worldBounds.isValid() ? rb.worldBounds.center() : cameraPos;
 			t.distSq  = glm::dot(c - cameraPos, c - cameraPos);
+			t.prio    = RenderSorter::materialSortPriority(m_contentManager, rb.materialAssetId);
 
 #if defined(HE_HAVE_SHADERC)
 			// Custom material: the BLENDED pipeline variant, same as a translucent
@@ -15858,6 +15861,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
+					t.prio        = RenderSorter::materialSortPriority(m_contentManager, dc.materialAssetId);
 					t.indexOffset = indexOffset;
 					// Translucent graph materials keep their own (blended) pipeline + state.
 					if (cMaterialPipelineBlend)
@@ -16090,7 +16094,7 @@ void MetalRenderer::EncodeScene(void* renderEncoder, int width, int height,
 		// Farthest first (distSq = RenderSorter::backToFrontKey). Not stable — draws
 		// at exactly equal distance may come out in either order, as in every backend.
 		std::sort(transparent.begin(), transparent.end(),
-		          [](const TPDraw& a, const TPDraw& b) { return a.distSq > b.distSq; });
+		          [](const TPDraw& a, const TPDraw& b) { return RenderSorter::blendedBefore(a.prio, a.distSq, b.prio, b.distSq); });
 		[encoder setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)m_sceneBlendPipeline];
 		[encoder setDepthStencilState:(__bridge id<MTLDepthStencilState>)m_skyDepthState]; // LessEqual, no write
 		[encoder setFragmentBytes:&scene length:sizeof(scene) atIndex:0];
@@ -17724,6 +17728,7 @@ void MetalRenderer::EncodeGBuffer(void* renderEncoder, int width, int height, Me
 				{
 					TPDraw t{ ui, (__bridge void*)vertexBuf, (__bridge void*)indexBuf,
 					          indexCount, texPtr, RenderSorter::backToFrontKey(xform, camPos) };
+					t.prio        = RenderSorter::materialSortPriority(m_contentManager, dc.materialAssetId);
 					t.indexOffset = indexOffset;
 					if (cMaterialPipelineBlend)
 					{

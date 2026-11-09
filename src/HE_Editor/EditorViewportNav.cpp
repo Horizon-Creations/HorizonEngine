@@ -35,6 +35,8 @@ static bool  s_flyToggle   = false;
 // frame an asset tab is open, which ended a fly-look in the class viewport one
 // frame after it began.
 static const void* s_captureOwner = nullptr;
+// The look's fallback (see gather): where the pointer was on the desktop when the look began, and last frame.
+static float s_lookGlobalX = 0.0f, s_lookGlobalY = 0.0f, s_lookLastGX = 0.0f, s_lookLastGY = 0.0f;
 
 void releaseLookCapture(SDL_Window* win)
 {
@@ -42,6 +44,7 @@ void releaseLookCapture(SDL_Window* win)
 	ImGuiIO& io = ImGui::GetIO();
 	if (win)
 	{
+		SDL_SetWindowMouseGrab(win, false);
 		SDL_WarpMouseInWindow(win, s_rmbStartX, s_rmbStartY);
 		SDL_SetWindowRelativeMouseMode(win, false);
 	}
@@ -143,6 +146,12 @@ bool gather(AppContext& ctx, const void* owner, bool imageHovered,
 		{
 			SDL_GetMouseState(&s_rmbStartX, &s_rmbStartY);
 			SDL_SetWindowRelativeMouseMode(sdlWin, true);
+			// Keep the pointer in the editor window for the whole look as well: relative mode is only active while the
+			// window holds the mouse focus, and a pointer that slips onto a floating panel (its own OS window) or past
+			// the edge would hover and click other UI mid-look.
+			SDL_SetWindowMouseGrab(sdlWin, true);
+			SDL_GetGlobalMouseState(&s_lookGlobalX, &s_lookGlobalY);
+			s_lookLastGX = s_lookGlobalX; s_lookLastGY = s_lookGlobalY;
 			SDL_HideCursor(); // relative mode alone doesn't reliably hide the OS cursor (SDL3/macOS)
 			// Discard any relative motion accumulated before capture so the first
 			// look frame doesn't jump by a stale delta.
@@ -173,6 +182,19 @@ bool gather(AppContext& ctx, const void* owner, bool imageHovered,
 			{
 				float rx = 0.f, ry = 0.f;
 				SDL_GetRelativeMouseState(&rx, &ry);
+				// Fallback: relative mode said "on" but delivered nothing while the pointer moved on the desktop (it does
+				// that when the window lost the mouse focus to another OS window). Then the desktop motion is the look,
+				// and the pointer goes back to where the look began, so it can never wander onto other panels.
+				float gx = 0.f, gy = 0.f;
+				SDL_GetGlobalMouseState(&gx, &gy);
+				if (rx == 0.f && ry == 0.f && (gx != s_lookLastGX || gy != s_lookLastGY))
+				{
+					rx = gx - s_lookLastGX;
+					ry = gy - s_lookLastGY;
+					SDL_WarpMouseGlobal(s_lookGlobalX, s_lookGlobalY);
+					gx = s_lookGlobalX; gy = s_lookGlobalY;
+				}
+				s_lookLastGX = gx; s_lookLastGY = gy;
 				out.mouseDelta = glm::vec2(rx, ry);
 				io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange; // don't let ImGui re-show it mid-look
 				io.ConfigFlags |= ImGuiConfigFlags_NoMouse;            // block ImGui hover/click while free-looking

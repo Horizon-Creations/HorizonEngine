@@ -266,6 +266,28 @@ enum class MatNodeType : uint8_t
     // The indices feed a texture array's Slice pin, so the material reads two groups' slices
     // per fragment instead of four. A map with no third page, or no shares at all, is group 0.
     LandscapeGroupPick,
+    // Screen-space derivative of the input along the screen's X / Y (GLSL dFdx / dFdy, HLSL ddx / ddy): how
+    // much the value changes from this pixel to the next. Undefined in non-uniform control flow, so these
+    // never move into an If's branch (branchPure leaves them out); in the tessellation domain stage, where
+    // there is no pixel, they hand back 0. Appended last: node types are saved by number.
+    Ddx,
+    Ddy,
+
+    // ── v21: what the engine's generated surfaces hand a material (Thema 232) ──
+    // Each reads what a generated mesh carries in its vertices and decodes it in ONE place, so a material
+    // reads named values instead of a convention it would have to know. On any other mesh they read that
+    // mesh's own normal and UV the same way, which is meaningless but harmless.
+    //  * Water Surface — a landscape water sheet (WaterMesh.cpp): Shore (1 at the waterline, 0 from
+    //    kShoreFadeDepth of water on), Depth (m, the same as metres), Slope (the ground's slope in world
+    //    axes on a STREAM sheet; a still body's sheet carries its world UV there).
+    //  * Particle — a particle band (Streak/Puff emitters, RenderExtractor): the quad's own UV, the
+    //    particle's alpha over life and its fixed 0..1 seed.
+    //  * Foam Band — the foam band round a water obstacle (WaterObstacle.h): Ring (0 at the obstacle .. 1
+    //    at the foam's edge), Strength, Facing (1 into the current .. -1 downstream) and Flow (the current
+    //    there, world XZ, times its share of full speed).
+    WaterSurfaceData,
+    ParticleData,
+    FoamBandData,
 };
 
 // True for every node whose `s` is a texture path sampled through a heTexP slot
@@ -394,6 +416,10 @@ HE_API MatTessSettings matSanitizeTess(const MatTessSettings& t);
 // Occlusion at pin 7 of the Output node, shifting everything after them.
 constexpr int kMatGraphVersion = 2;
 
+// The translucent sort priority's range (MatGraphNode::sortPriority on the Output node).
+constexpr int8_t kMatMinSortPriority = -8;
+constexpr int8_t kMatMaxSortPriority = 8;
+
 struct MatGraphNode
 {
     int         id   = 0;
@@ -406,6 +432,9 @@ struct MatGraphNode
     std::string group;                 // panel grouping header ("" = ungrouped)
     std::string tooltip;               // hover help shown next to the parameter
     MatTessSettings tess;              // Output node only (optional JSON key "tess")
+    // Output node only (optional JSON key "sortPriority"): the translucent sort priority
+    // (MaterialAsset::sortPriority). Blended draws sort by it first, then back to front.
+    int             sortPriority = 0;
 };
 
 // One connection: output pin (srcNode, srcPin) → input pin (dstNode, dstPin).
@@ -579,6 +608,8 @@ struct MatShaderGen
     // Domain baked from the Output node (→ MaterialAsset::domain). See MatDomain:
     // a UI material is unlit by construction and never gets a G-buffer variant.
     uint8_t domain = 0;
+    // Translucent sort priority baked from the Output node (→ MaterialAsset::sortPriority).
+    int8_t sortPriority = 0;
     // World-Position-Offset vertex BODY (canonical GLSL statements ending in `vec3 heWpo`).
     // Empty when the WPO pin is unconnected → the standard vertex is used. The renderers
     // wrap it into their per-backend vertex template (MaterialShaderLibrary::customVertex).

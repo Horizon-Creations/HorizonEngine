@@ -49,6 +49,63 @@ namespace
         return r;
     }
 
+    // ── Connected water (Thema 232) ──────────────────────────────────────────────
+    // The bed the brush digs belongs to the WATER, not to one body of it: two flat bodies of one level that touch are one
+    // sheet (WaterMesh.h flatGroupLeads), so their bed is dug from the outline of both, and a stream that runs into a lake
+    // is one water with it, so neither end of the dig treats the border between them as a shore (a ridge there).
+    // The body and every flat body of its level that touches it (a stream is its own group).
+    std::vector<uint16_t> digGroup(const TerrainComponent& tc, uint16_t body)
+    {
+        std::vector<uint16_t> ids{ body };
+        const Body* b = tc.water.findBody(body);
+        if (!b || b->stream) return ids;
+        const auto leads = flatGroupLeads(tc);
+        const auto it = leads.find(body);
+        const uint16_t lead = it != leads.end() ? it->second : body;
+        ids.clear();
+        ids.push_back(lead);
+        for (const auto& kv : leads) if (kv.second == lead) ids.push_back(kv.first);
+        if (std::find(ids.begin(), ids.end(), body) == ids.end()) ids.push_back(body);
+        return ids;
+    }
+
+    // The bodies other than `ids` with a wet cell next to a wet cell of `ids`.
+    std::vector<uint16_t> touchingBodies(const TerrainComponent& tc, const std::vector<uint16_t>& ids)
+    {
+        std::vector<uint16_t> out;
+        const Field& f = tc.water;
+        if (!f.allocated()) return out;
+        const int res = static_cast<int>(f.res);
+        auto mine = [&](uint16_t id) { return std::find(ids.begin(), ids.end(), id) != ids.end(); };
+        auto note = [&](uint16_t id) { if (id != kNoBody && !mine(id) && std::find(out.begin(), out.end(), id) == out.end()) out.push_back(id); };
+        for (int z = 0; z < res; ++z)
+            for (int x = 0; x < res; ++x)
+            {
+                const size_t i = static_cast<size_t>(z) * res + x;
+                if (f.owner[i] == kNoBody || f.coverage[i] < kWet) continue;
+                const bool m = mine(f.owner[i]);
+                for (const size_t j : { x + 1 < res ? i + 1 : i, z + 1 < res ? i + res : i })
+                {
+                    if (j == i || f.owner[j] == kNoBody || f.coverage[j] < kWet || f.owner[j] == f.owner[i]) continue;
+                    if (m) note(f.owner[j]); else if (mine(f.owner[j])) note(f.owner[i]);
+                }
+            }
+        return out;
+    }
+
+    bool buildGroupLattice(const TerrainComponent& tc, const std::vector<uint16_t>& ids, const CellRect& cells, Lattice& out,
+                           const ShoreClip& clip)
+    {
+        return ids.size() > 1 ? buildLattice(tc, ids, cells, out, clip) : buildLattice(tc, ids.empty() ? kNoBody : ids[0], cells, out, clip);
+    }
+
+    // Whether any water other than `ids`' is at (x, z): ground there is that water's, not this dig's or bank's.
+    bool otherWaterAt(const TerrainComponent& tc, const std::vector<uint16_t>& ids, double x, double z)
+    {
+        const uint16_t o = bodyAt(tc, static_cast<float>(x), static_cast<float>(z));
+        return o != kNoBody && std::find(ids.begin(), ids.end(), o) == ids.end();
+    }
+
     // Put back every vertex of `was` the dab lowered that `body`'s sheet does not
     // cover — the sheet as the mesh builds it (WaterMesh.h: the lattice of the
     // body's own cells, marching squares, the field's shore clipping at the body's
@@ -76,7 +133,7 @@ namespace
         {
             moved = false;
             Lattice lattice;
-            const bool sheet = cells.valid() && buildLattice(tc, body, cells, lattice, clip);
+            const bool sheet = cells.valid() && buildGroupLattice(tc, digGroup(tc, body), cells, lattice, clip);
             for (int zi = was.z0; zi <= was.z1; ++zi)
                 for (int xi = was.x0; xi <= was.x1; ++xi)
                 {
@@ -228,7 +285,8 @@ namespace
         for (int pass = 0; pass < kBankPasses; ++pass)
         {
             Lattice lattice;
-            if (!buildLattice(tc, body, cells, lattice, ShoreClip{ tc.water.clipToGround, level, tc.water.shoreOvershoot }))
+            const std::vector<uint16_t> group = digGroup(tc, body);
+            if (!buildGroupLattice(tc, group, cells, lattice, ShoreClip{ tc.water.clipToGround, level, tc.water.shoreOvershoot }))
                 break;
             // Only the shore within this dab's own circle: a wall can only have been
             // left where this dab dug, and the shore of the rest of the body (a lake
@@ -286,6 +344,7 @@ namespace
                     if (!(bank < h - kBankTolerance)) continue;
                     const glm::dvec2 p = point(i, j);
                     if (insideSheet(lattice, p.x, p.y)) continue;   // under the water: the dig's, not the bank's
+                    if (otherWaterAt(tc, group, p.x, p.y)) continue; // under a neighbouring water (a stream's channel): not this bank's
                     h = bank;
                     moved = true;
                 }
@@ -392,7 +451,7 @@ namespace
         // clip the very water that is to cover it, and the bed below could not see it.
         Lattice wet;
         {
-            if (!buildLattice(tc, body, cells, wet, ShoreClip{ false, level, 0.0f})) return 0;
+            if (!buildGroupLattice(tc, digGroup(tc, body), cells, wet, ShoreClip{ false, level, 0.0f })) return 0;
             for (int zi = z0; zi <= z1; ++zi)
                 for (int xi = x0; xi <= x1; ++xi)
                 {
@@ -406,13 +465,21 @@ namespace
         }
 
         Lattice lattice;
-        if (!buildLattice(tc, body, cells, lattice, ShoreClip{ tc.water.clipToGround, level, tc.water.shoreOvershoot }))
+        const std::vector<uint16_t> group = digGroup(tc, body);
+        if (!buildGroupLattice(tc, group, cells, lattice, ShoreClip{ tc.water.clipToGround, level, tc.water.shoreOvershoot }))
             return lowered;
         // The distance is measured to the footprint's contour, not to the clipped
         // sheet's edge: that edge sits where the ground crosses the level and moves
         // outward as the bed below it is lowered, which would move every target
         // with it, dab after dab. The footprint is the intent and holds still.
-        const std::vector<ShoreSegment> shore = shoreSegments(wet);
+        // A stream that runs into this water is one water with it: the border between them is no shore, so the bed does
+        // not rise there into a ridge (the stream digs its own channel, see digChannel).
+        std::vector<uint16_t> outlineIds = group;
+        for (const uint16_t t : touchingBodies(tc, group))
+            if (const Body* tb = tc.water.findBody(t); tb && tb->stream) outlineIds.push_back(t);
+        Lattice outline;
+        const bool joined = outlineIds.size() > group.size() && buildGroupLattice(tc, outlineIds, cells, outline, ShoreClip{ false, level, 0.0f });
+        const std::vector<ShoreSegment> shore = shoreSegments(joined ? outline : wet);
         if (shore.empty()) return lowered;
         const ShoreField field = shoreField(shore, x0, x1, z0, z1, halfX, halfZ, stepX, stepZ);
 
@@ -424,6 +491,7 @@ namespace
                 const glm::dvec2 p = field.point(i, j);
                 if (glm::length(p - centre) > reach) continue;
                 if (!insideSheet(lattice, p.x, p.y)) continue;
+                if (otherWaterAt(tc, group, p.x, p.y)) continue;      // a stream's channel is the stream's
                 const double base = std::min(static_cast<double>(maxDepth), static_cast<double>(slope) * field.best[k]);
                 const float depth = std::max(0.0f, static_cast<float>(base) * (1.0f + roughness * bedNoise(p.x, p.y)));
                 const float target = level - depth;
@@ -490,7 +558,13 @@ namespace
         // under them, which is where the band is).
         Lattice stream;
         if (!buildLattice(tc, bodies, cells, stream, ShoreClip{})) return 0;
-        const std::vector<ShoreSegment> shore = shoreSegments(stream);
+        // The outline the depth is measured to is the stream's together with the water it runs into (a lake it
+        // ends in): the border between them is no bank, so the channel runs on at its full depth up to the lake.
+        std::vector<uint16_t> outlineIds = bodies;
+        for (const uint16_t t : touchingBodies(tc, bodies)) outlineIds.push_back(t);
+        Lattice outline;
+        const bool joined = outlineIds.size() > bodies.size() && buildLattice(tc, outlineIds, cells, outline, ShoreClip{});
+        const std::vector<ShoreSegment> shore = shoreSegments(joined ? outline : stream);
         if (shore.empty()) return 0;
         const ShoreField field = shoreField(shore, x0, x1, z0, z1, halfX, halfZ, stepX, stepZ);
         const glm::dvec2 centre(x, z);
@@ -682,7 +756,17 @@ void begin(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         s.active = true;
         return;
     }
-    const Target t = targetAt(tc, x, z, p);
+    Target t = targetAt(tc, x, z, p);
+    // Follow Slope paints a stream of its own even when pressed on water that is already there (a lake it starts in):
+    // the stroke's dry cells beyond it become a stream that joins that water (WaterMesh.h joinReaches), and the
+    // water it started in is left as it is. Continuing a flat body down a slope would hang a level sheet over the ground.
+    if (p.followSlope && t.continues)
+    {
+        t.continues = false;
+        t.body = kNoBody;
+        const float ground = terrainHeightAt(tc, x, z);
+        t.level = std::isfinite(ground) ? ground + lipDepth(p) : t.level;
+    }
     s.level = t.level;
     if (t.continues)
         s.body = t.body;
@@ -694,6 +778,12 @@ void begin(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
     s.active = s.body != kNoBody;
     if (s.active) s.bodies.push_back(s.body);
     if (s.active && p.autoFlow) setFlowAuto(tc, s.body, true);
+    // Follow Slope: a stroke is a stream, all the way (on level ground it stands still).
+    if (s.active && p.followSlope && s.created)
+    {
+        setStream(tc, s.body, true, lipDepth(p));
+        setFlowAuto(tc, s.body, true);
+    }
 }
 
 float groundSlope(const TerrainComponent& tc, float x, float z)
@@ -709,196 +799,10 @@ float groundSlope(const TerrainComponent& tc, float x, float z)
 
 float lipDepth(const Params& p)
 {
-    if (!p.levelFromGround) return kTerraceDepth;
-    return std::isfinite(p.levelOffset) ? std::max(kMinLipDepth, p.levelOffset) : kTerraceDepth;
+    if (!p.levelFromGround) return kStreamDepthFixedLevel;
+    return std::isfinite(p.levelOffset) ? std::max(kMinLipDepth, p.levelOffset) : kStreamDepthFixedLevel;
 }
 
-float stepHeight(const Params& p, float slope)
-{
-    const float want = std::isfinite(p.terraceStep) ? std::clamp(p.terraceStep, kTerraceMinDrop, kMaxTerraceStep) : kTerraceDrop;
-    if (!std::isfinite(slope) || slope <= 0.0f) return want;
-    // The band runs from a step's lip (lipDepth over the ground) down to where the ground meets
-    // the next step: (step - lip) / slope metres. WaterFall follows the ground kFallMaxRun (8 m)
-    // at most; three quarters of that leaves room for a ground that is gentler than the brush saw.
-    constexpr float kRun = 6.0f;
-    return std::clamp(lipDepth(p) + slope * kRun, kTerraceMinDrop, want);
-}
-
-float minTerraceSlope(const Params& p)
-{
-    return std::isfinite(p.terraceSlope) ? std::clamp(p.terraceSlope, kMinTerraceSlope, kMaxTerraceSlope) : kTerraceSlope;
-}
-
-namespace
-{
-    // At most this many steps from one dab (a cliff of 64 m): more would only be
-    // empty bodies that end() takes away again.
-    constexpr int kMaxStepsPerDab = 32;
-
-    // Steepness as the brush sees it: |∇h| by central differences `reach` metres
-    // apart. One water cell apart (groundSlope) a ripple smaller than the brush
-    // turns the steps on and off from one dab to the next; across the brush it is
-    // the slope the stroke is painting down.
-    float brushSlope(const TerrainComponent& tc, float x, float z, float reach)
-    {
-        const float hx = terrainHeightAt(tc, x + reach, z) - terrainHeightAt(tc, x - reach, z);
-        const float hz = terrainHeightAt(tc, x, z + reach) - terrainHeightAt(tc, x, z - reach);
-        if (!std::isfinite(hx) || !std::isfinite(hz)) return 0.0f;
-        return std::sqrt(hx * hx + hz * hz) / (2.0f * reach);
-    }
-
-    // The steps whose cells may change hands: every step this stroke made. The
-    // body it began in only when the stroke made that one too; a body it
-    // continued keeps its cells, like any other body.
-    bool ownStep(const Stroke& s, uint16_t id)
-    {
-        for (size_t k = s.created ? 0 : 1; k < s.bodies.size(); ++k)
-            if (s.bodies[k] == id) return true;
-        return false;
-    }
-
-    // The ladder's rule (Params::cascade): every cell of the box cx0..cx1 × cz0..cz1
-    // that one of the stroke's own steps holds goes to the HIGHEST step whose water
-    // over the cell's ground is at most `lip` deep, the lowest when none is. A step
-    // this stroke continued is a target like the others, but only for cells our own
-    // steps hold (ownStep), never the other way round. The whole box, not the brush's
-    // circle: a rim cell in a corner of the box that an earlier dab brushed and this
-    // one cannot reach would otherwise keep a step too high for its ground (0.55 m
-    // under the first step on the 45 degree test, in a corner no later dab's circle
-    // covered). The rule is a function of ground and levels alone, so settling a cell
-    // the dab did not touch changes nothing that was right.
-    // `handed(cx, cz)` hears of every cell that changed hands; they are marked dirty.
-    // Returns how many did. Run by the dab after it painted, and again after a
-    // channel dig lowered the ground under the steps (Schritt 12).
-    template <class Handed>
-    uint32_t settleLadder(Stroke& s, TerrainComponent& tc, int cx0, int cz0, int cx1, int cz1,
-                          float lip, const Handed& handed)
-    {
-        Field& w = tc.water;
-        const int res = static_cast<int>(w.res);
-        if (!w.allocated() || s.bodies.size() < 2 || w.coverage.size() != static_cast<size_t>(res) * res) return 0;
-        std::vector<float> levels;
-        levels.reserve(s.bodies.size());
-        for (const uint16_t id : s.bodies)
-        {
-            const Body* b = w.findBody(id);
-            levels.push_back(b ? b->level : std::numeric_limits<float>::infinity());
-        }
-        uint32_t count = 0;
-        int mx0 = res, mz0 = res, mx1 = -1, mz1 = -1;
-        for (int cz = std::max(0, cz0); cz <= std::min(res - 1, cz1); ++cz)
-            for (int cx = std::max(0, cx0); cx <= std::min(res - 1, cx1); ++cx)
-            {
-                const size_t i = static_cast<size_t>(cz) * res + cx;
-                if (w.coverage[i] == 0 || !ownStep(s, w.owner[i])) continue;
-                const glm::vec2 c = cellCenter(tc, cx, cz);
-                const float g = terrainHeightAt(tc, c.x, c.y);
-                if (!std::isfinite(g)) continue;
-                uint16_t to = s.bodies.back();
-                for (size_t k = 0; k < s.bodies.size(); ++k)
-                    if (levels[k] <= g + lip) { to = s.bodies[k]; break; }
-                if (to == w.owner[i]) continue;
-                w.owner[i] = to;
-                handed(cx, cz);
-                ++count;
-                mx0 = std::min(mx0, cx); mx1 = std::max(mx1, cx);
-                mz0 = std::min(mz0, cz); mz1 = std::max(mz1, cz);
-            }
-        if (count > 0) markCellsDirty(tc, mx0, mz0, mx1, mz1);
-        return count;
-    }
-
-    // Params::cascade, one dab (Thema 232 Schritt 11): the stroke's steps form a
-    // ladder stepHeight() apart, and on a slope every cell of the dab goes to the
-    // step that suits its ground (see Params::cascade). Returns what addCircle
-    // returns, with the cells handed between steps counted in; `stepped` when the
-    // dab made a step.
-    Result paintLadder(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p, bool& stepped)
-    {
-        stepped = false;
-        const float outer = std::max(0.0f, std::isfinite(p.radius) ? p.radius : 0.0f) +
-                            std::max(0.0f, std::isfinite(p.falloff) ? p.falloff : 0.0f);
-        if (!hasArea(tc) || !std::isfinite(x) || !std::isfinite(z) || outer <= 0.0f)
-            return addCircle(tc, s.body, x, z, p.radius, p.falloff, p.amount);
-
-        const glm::vec2 cell = cellSize(tc);
-        const float lip = lipDepth(p);
-        const float steepness = brushSlope(tc, x, z, std::max(outer, std::max(cell.x, cell.y)));
-        const bool slope = steepness >= minTerraceSlope(p);
-        const float drop = stepHeight(p, steepness);
-        const Field& f = tc.water;
-        const int res = static_cast<int>(f.res);
-        const int cx0 = std::max(0, static_cast<int>(std::floor((x - outer + tc.sizeX * 0.5f) / cell.x)));
-        const int cx1 = std::min(res - 1, static_cast<int>(std::floor((x + outer + tc.sizeX * 0.5f) / cell.x)));
-        const int cz0 = std::max(0, static_cast<int>(std::floor((z - outer + tc.sizeZ * 0.5f) / cell.y)));
-        const int cz1 = std::min(res - 1, static_cast<int>(std::floor((z + outer + tc.sizeZ * 0.5f) / cell.y)));
-
-        // The dab itself first: a dry cell becomes the lowest step's, as with any
-        // stroke. What it did to the box is kept, so a cell that got wetter AND changes
-        // hands below counts once.
-        std::vector<uint8_t> was;
-        if (f.allocated() && cx0 <= cx1 && cz0 <= cz1)
-            for (int cz = cz0; cz <= cz1; ++cz)
-                for (int cx = cx0; cx <= cx1; ++cx)
-                    was.push_back(f.coverage[static_cast<size_t>(cz) * res + cx]);
-        Result r = addCircle(tc, s.body, x, z, p.radius, p.falloff, p.amount);
-        if (!r.ok || !slope || f.coverage.size() != static_cast<size_t>(res) * res) return r;
-        // addCircle allocates the grid on the first dab: a box read before that has nothing to compare.
-        const bool hadBox = was.size() == static_cast<size_t>(cx1 - cx0 + 1) * static_cast<size_t>(cz1 - cz0 + 1);
-
-        // The next step: once a cell this dab left WET (kWet), in the half of the brush
-        // ahead of the way it moves, has ground more than `lip` under the lowest step.
-        // The first dab has no way yet, and painting uphill keeps the stroke's level,
-        // as before. Only wet cells: a rim cell the brush merely brushed (under kWet)
-        // draws no water and hangs no band, and a step made for one held nothing
-        // visible, no current, and no sheet for the band above to land on; with 0.5 m
-        // cells that was the last step of every stroke (Schritt 12).
-        if (s.hasLast && f.allocated())
-        {
-            const glm::vec2 way(x - s.last.x, z - s.last.y);
-            float low = std::numeric_limits<float>::infinity();
-            if (glm::dot(way, way) > 1e-12f)
-                for (int cz = cz0; cz <= cz1; ++cz)
-                    for (int cx = cx0; cx <= cx1; ++cx)
-                    {
-                        const size_t i = static_cast<size_t>(cz) * res + cx;
-                        // A cell another body holds stays that body's: it says nothing about our steps.
-                        if (f.coverage[i] < kWet || !ownStep(s, f.owner[i])) continue;
-                        const glm::vec2 c = cellCenter(tc, cx, cz);
-                        const glm::vec2 d(c.x - x, c.y - z);
-                        if (glm::dot(d, d) > outer * outer || glm::dot(d, way) < 0.0f) continue;
-                        const float g = terrainHeightAt(tc, c.x, c.y);
-                        if (std::isfinite(g)) low = std::min(low, g);
-                    }
-            for (int n = 0; n < kMaxStepsPerDab && std::isfinite(low) && low + lip < s.level; ++n)
-            {
-                const float next = s.level - drop;
-                const uint16_t body = tc.water.createBody(next);
-                if (body == kNoBody) break;     // out of body ids: keep painting into the one we have
-                s.body  = body;
-                s.level = next;
-                s.bodies.push_back(body);
-                ++s.terraces;
-                if (p.autoFlow) setFlowAuto(tc, body, true);
-                stepped = true;
-            }
-        }
-        if (s.bodies.size() < 2) return r;
-
-        // Then every cell of the box our steps hold goes to the step the ladder's rule
-        // names (settleLadder), the ones just painted into the old lowest step included.
-        // A cell that got wetter AND changes hands counts once: addCircle counted those
-        // already.
-        uint32_t moved = 0;
-        settleLadder(s, tc, cx0, cz0, cx1, cz1, lip, [&](int cx, int cz) {
-            const size_t i = static_cast<size_t>(cz) * res + cx;
-            const bool wetter = !hadBox || was[static_cast<size_t>(cz - cz0) * (cx1 - cx0 + 1) + (cx - cx0)] != f.coverage[i];
-            if (!wetter) ++moved;
-        });
-        r.changed += moved;
-        return r;
-    }
-}
 
 Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
 {
@@ -934,19 +838,29 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
     // Undo (or anything else that replaced the field) can take the body away
     // mid-stroke; painting into a body that is gone would have no owner to give.
     if (!tc.water.findBody(s.body)) return d;
-    bool stepped = false;
-    const Result r = p.cascade ? paintLadder(s, tc, x, z, p, stepped)
-                               : addCircle(tc, s.body, x, z, p.radius, p.falloff, p.amount);
-    d.terrace = stepped;
+    const Result r = addCircle(tc, s.body, x, z, p.radius, p.falloff, p.amount);
     d.ok    = r.ok;
     d.cells = r.changed;
     if (std::isfinite(x) && std::isfinite(z)) { s.last = { x, z }; s.hasLast = true; }
-    if (p.dig && p.digDepth > 0.0f && std::isfinite(p.digDepth))
+    // A stream always lies in a channel it digs (Thema 232): its sheet is the ground lifted by its depth,
+    // so on an undug slope the water would stand that far over the hillside. The channel is a little
+    // deeper than the water and its banks are steep (kStreamBankSlope), so the water's surface stays at or
+    // under the old ground from its edge inward. Dig Bed, when on, can make it deeper and the banks gentler.
+    const Body* streamBody = tc.water.findBody(s.body);
+    const bool dugStream = streamBody && streamBody->stream;
+    if (dugStream || (p.dig && p.digDepth > 0.0f && std::isfinite(p.digDepth)))
     {
         // The bed follows the shore (Thema 206 Schritt 9, see digBed): the body keeps
         // the settings it was dug with. The reach is the brush's, plus the stretch of
         // bed the shore's new position can have changed.
-        const BrushBedParams bed = clampBrushBed({ true, p.digDepth, p.bedSlope, p.bedRoughness });
+        BrushBedParams want{ true, p.digDepth, p.bedSlope, p.bedRoughness };
+        if (!p.dig || !(p.digDepth > 0.0f)) want = { true, 0.0f, 0.0f, 0.0f };
+        if (dugStream)
+        {
+            want.maxDepth = std::max(want.maxDepth, kStreamChannelFactor * streamBody->streamDepth);
+            want.slope    = std::max(want.slope, kStreamBankSlope);
+        }
+        const BrushBedParams bed = clampBrushBed(want);
         setBrushBed(tc, s.body, bed);
         const float outer = std::max(0.0f, p.radius) + std::max(0.0f, p.falloff);
         const float amount = std::clamp(std::isfinite(p.amount) ? p.amount : 0.0f, 0.0f, 1.0f);
@@ -955,33 +869,17 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
         // Everything the dab can move, the bank (out to twice the brush) included:
         // what the eraser may give back later.
         const Region everything = saveRegion(tc, x, z, std::max(reach, 2.0f * outer) + 4.0f * cellStep);
-        if (p.cascade)
+        const Body* cur = tc.water.findBody(s.body);
+        if (cur && cur->stream)
         {
-            // A stroke with Terraces on is a stream, and its bed is a channel dug from
-            // the stream's outline (WaterBrush.h, Schritt 12): no plate per step, no
-            // bank, no pit that ends at the next step. The switch is the setting, not
-            // "has it stepped yet": a stroke held on one step of a stream, or one that
-            // extends it without stepping, would otherwise cut that step into a plate.
-            const uint32_t cut = digChannel(tc, s.bodies, x, z, outer, bed.maxDepth, bed.slope, bed.roughness, amount);
+            // A stream's bed is a channel dug from its outline (Thema 232): no bank, no cut to a level.
+            // The sheet lies on the ground, so it settles into the channel by itself.
+            std::vector<uint16_t> streams{ s.body };       // and the streams that run into this one: one channel
+            for (const uint16_t t : touchingBodies(tc, streams))
+                if (const Body* tb = tc.water.findBody(t); tb && tb->stream) streams.push_back(t);
+            const uint32_t cut = digChannel(tc, streams, x, z, outer, bed.maxDepth, bed.slope, bed.roughness, amount);
             d.ok = true;
             d.ground = cut;
-            // The ground under the steps went down: within the dig's reach every cell goes
-            // to the step that holds it at the lip again, so the pools keep the depth they
-            // were painted with and the stream lies in its channel. Where the brush is on
-            // the slope, as when it painted (a pond's deep middle is a pond's).
-            if (cut > 0 && std::isfinite(x) && std::isfinite(z) && tc.water.allocated())
-            {
-                const glm::vec2 cell = cellSize(tc);
-                if (brushSlope(tc, x, z, std::max(outer, std::max(cell.x, cell.y))) >= minTerraceSlope(p))
-                {
-                    const int res = static_cast<int>(tc.water.res);
-                    const int cx0 = std::max(0, static_cast<int>(std::floor((x - reach + tc.sizeX * 0.5f) / cell.x)));
-                    const int cx1 = std::min(res - 1, static_cast<int>(std::floor((x + reach + tc.sizeX * 0.5f) / cell.x)));
-                    const int cz0 = std::max(0, static_cast<int>(std::floor((z - reach + tc.sizeZ * 0.5f) / cell.y)));
-                    const int cz1 = std::min(res - 1, static_cast<int>(std::floor((z + reach + tc.sizeZ * 0.5f) / cell.y)));
-                    d.cells += settleLadder(s, tc, cx0, cz0, cx1, cz1, lipDepth(p), [](int, int) {});
-                }
-            }
         }
         else
         {
@@ -997,6 +895,7 @@ Dab dab(Stroke& s, TerrainComponent& tc, float x, float z, const Params& p)
             d.ground = dug + d.bank;
         }
         recordPatch(tc, s.body, everything);
+        if (d.ground > 0) ++tc.water.revision;      // the ground under the water moved: pools and fills are measured again
     }
     ++s.dabs;
     return d;
@@ -1006,10 +905,8 @@ void end(Stroke& s, TerrainComponent& tc)
 {
     // A press that landed nowhere (off the landscape, a brush of no size)
     // leaves a body with no cell and no source: nothing would ever clean it up.
-    // The first body is the stroke's own only if it made it; every terrace is. A
-    // terrace goes with no WET cell (kWet): rim cells alone draw no sheet, hang no
-    // band and give the band above nothing to land on (Schritt 12; a cliff makes
-    // several steps at once, and the ground can skip one of them).
+    // The first body is the stroke's own only if it made it; every later one is. A later
+    // body goes with no WET cell (kWet): rim cells alone draw no sheet.
     for (size_t k = 0; s.active && k < s.bodies.size(); ++k)
     {
         const uint16_t id = s.bodies[k];

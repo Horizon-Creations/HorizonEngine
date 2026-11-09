@@ -35,7 +35,11 @@ const std::vector<ParticleNodeDesc>& registry()
             { "Velocity Spread", F::Float, 0.5f }, { "Gravity", F::Vec3, 0.0f },
             { "Max Particles", F::Float, 100.0f }, { "Looping", F::Float, 1.0f },
             { "Collision Enabled", F::Float, 0.0f }, { "Restitution", F::Float, 0.4f },
-            { "Kill On Collision", F::Float, 0.0f } },
+            { "Kill On Collision", F::Float, 0.0f },
+            // Pins 17-21 (Thema 232): appended for the same reason as 14-16.
+            { "Billboard", F::Float, 0.0f }, { "Stretch", F::Float, 0.04f },
+            { "Fade In", F::Float, 0.0f }, { "Spawn Half A", F::Vec3, 0.0f },
+            { "Spawn Half B", F::Vec3, 0.0f } },
           {}, 0 },
 
         { ParticleNodeType::ConstFloat,  "Const Float",  {}, { { "Out", F::Float, 0 } }, 1 },
@@ -63,7 +67,7 @@ const std::vector<ParticleNodeDesc>& registry()
 const std::vector<ParticleNodeDesc>& particleNodeRegistry() { return registry(); }
 
 // The kParticle*Pin constants index straight into this entry — keep them in sync.
-static_assert(kParticleKillOnCollisionPin + 1 == kParticleEmitterPinCount,
+static_assert(kParticleSpawnHalfBPin + 1 == kParticleEmitterPinCount,
               "kParticle*Pin constants must cover exactly the Emitter Output inputs");
 
 const ParticleNodeDesc& particleNodeDesc(ParticleNodeType type)
@@ -353,6 +357,16 @@ ParticleEmitterConfig evaluateParticleGraph(const ParticleGraph& graph, std::mt1
     cfg.collisionEnabled = evalInputFloat(graph, out->id, kParticleCollisionEnabledPin, rng, 0) > 0.5f;
     cfg.restitution      = evalInputFloat(graph, out->id, kParticleRestitutionPin,      rng, 0);
     cfg.killOnCollision  = evalInputFloat(graph, out->id, kParticleKillOnCollisionPin,  rng, 0) > 0.5f;
+
+    const float billboard = evalInputFloat(graph, out->id, kParticleBillboardPin, rng, 0);
+    cfg.billboard = static_cast<uint8_t>(std::clamp(static_cast<int>(std::lround(billboard)), 0,
+                                                    static_cast<int>(ParticleBillboard::Puff)));
+    cfg.stretch   = std::max(0.0f, evalInputFloat(graph, out->id, kParticleStretchPin, rng, 0));
+    cfg.fadeIn    = std::clamp(evalInputFloat(graph, out->id, kParticleFadeInPin, rng, 0), 0.0f, 1.0f);
+    evalInputVec3(graph, out->id, kParticleSpawnHalfAPin, rng, v, 0);
+    cfg.spawnHalfA[0] = v[0]; cfg.spawnHalfA[1] = v[1]; cfg.spawnHalfA[2] = v[2];
+    evalInputVec3(graph, out->id, kParticleSpawnHalfBPin, rng, v, 0);
+    cfg.spawnHalfB[0] = v[0]; cfg.spawnHalfB[1] = v[1]; cfg.spawnHalfB[2] = v[2];
 
     cfg.meshAssetId     = out->meshAssetId;
     cfg.materialAssetId = out->materialAssetId;

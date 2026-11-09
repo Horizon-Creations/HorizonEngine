@@ -35,6 +35,7 @@
 #include "HorizonScene/Components/LODComponent.h"
 #include "HorizonScene/Components/RopeComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
+#include "HorizonScene/Components/WaterObstacleComponent.h"
 #include "HorizonScene/Components/LightComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "RootMotionApply.h"
@@ -294,11 +295,18 @@ std::vector<HE::UUID> collectAssetRefsWhere(HorizonWorld& world, Keep keep)
     for (auto [e, c] : reg.view<AudioSourceComponent>().each())     if (keep(e)) add(c.assetId);
     for (auto [e, c] : reg.view<UIImageComponent>().each())         if (keep(e)) add(c.materialAssetId);
     for (auto [e, c] : reg.view<TerrainComponent>().each())         if (keep(e)) add(c.heightmapTexture);
+    // A landscape's water material, when it has water to draw (its Static Switch variants are made from it at run time).
+    for (auto [e, c] : reg.view<TerrainComponent>().each())         if (keep(e) && !c.water.bodies.empty()) add(c.water.material);
+    // …and the particle graphs of its falls, when it has a stream that can fall.
+    for (auto [e, c] : reg.view<TerrainComponent>().each())
+        if (keep(e) && std::any_of(c.water.bodies.begin(), c.water.bodies.end(), [](const HE::water::Body& b) { return b.stream; }))
+            { add(c.water.fallCurtain); add(c.water.fallDrops); add(c.water.fallMist); }
     // Only the MATERIAL of a rope or a trail. RopeComponent::runtimeMeshId is
     // the UUID of a procedural mesh that exists in memory and nowhere else — put
     // it in here and the packer would go looking for a file that was never written.
     for (auto [e, c] : reg.view<RopeComponent>().each())            if (keep(e)) add(c.materialAssetId);
     for (auto [e, c] : reg.view<TrailComponent>().each())           if (keep(e)) add(c.materialAssetId);
+    for (auto [e, c] : reg.view<WaterObstacleComponent>().each())   if (keep(e)) add(c.foamMaterial);
     // The weather's OWN sounds, the slots that are set. A null slot plays the
     // EngineContent default (WeatherAudio::soundFor) and is deliberately not listed:
     // the exporter ships the whole engine content folder in the pak, WeatherAudio

@@ -329,6 +329,14 @@ struct MaterialAsset : public RuntimeAsset
 	// (routed into the sorted alpha-blend pass regardless of the scalar opacity).
 	uint8_t blendMode = 0;
 
+	// Translucent sort priority baked from the graph's Output node (-8..8, 0 default):
+	// blended draws are ordered by it first, the lower priority drawn first, and back
+	// to front within one priority (RenderSorter::blendedBefore). A material that lies ON
+	// another translucent surface — foam and spray on water — gives itself a higher
+	// priority than that surface, whatever their draws' origins say. Derived at load
+	// like blendMode; a packaged material keeps it in the MTRL tail.
+	int8_t  sortPriority = 0;
+
 	// Domain baked from the graph's Output node (HE::MatDomain as uint8):
 	// 0 Surface (geometry in the world), 1 User Interface (widgets, screen
 	// space, unlit by construction). Derived at load like blendMode, so it is

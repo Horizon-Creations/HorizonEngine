@@ -409,6 +409,47 @@ TEST_CASE("kParticle*Pin constants match the Emitter Output registry entry")
     CHECK(std::string(d.inputs[kParticleCollisionEnabledPin].name) == "Collision Enabled");
     CHECK(std::string(d.inputs[kParticleRestitutionPin].name)      == "Restitution");
     CHECK(std::string(d.inputs[kParticleKillOnCollisionPin].name)  == "Kill On Collision");
+    CHECK(std::string(d.inputs[kParticleBillboardPin].name)        == "Billboard");
+    CHECK(std::string(d.inputs[kParticleStretchPin].name)          == "Stretch");
+    CHECK(std::string(d.inputs[kParticleFadeInPin].name)           == "Fade In");
+    CHECK(std::string(d.inputs[kParticleSpawnHalfAPin].name)       == "Spawn Half A");
+    CHECK(std::string(d.inputs[kParticleSpawnHalfBPin].name)       == "Spawn Half B");
+}
+
+TEST_CASE("Emitter Output: how particles are drawn and where they are born are graph values (Thema 232)")
+{
+    ParticleGraph g = ParticleGraph::makeDefault();
+    int out = 0;
+    for (const auto& n : g.nodes) if (n.type == ParticleNodeType::EmitterOutput) out = n.id;
+    auto constF = [&](float v, int pin) {
+        const int c = g.addNode(ParticleNodeType::ConstFloat, 0, 0);
+        g.findNode(c)->p[0] = v;
+        REQUIRE(g.connect(c, 0, out, pin));
+    };
+    auto constV = [&](float x, float y, float z, int pin) {
+        const int c = g.addNode(ParticleNodeType::ConstVec3, 0, 0);
+        g.findNode(c)->p[0] = x; g.findNode(c)->p[1] = y; g.findNode(c)->p[2] = z;
+        REQUIRE(g.connect(c, 0, out, pin));
+    };
+    constF(1.0f, kParticleBillboardPin);
+    constF(0.07f, kParticleStretchPin);
+    constF(0.1f, kParticleFadeInPin);
+    constV(0.0f, 0.0f, 0.75f, kParticleSpawnHalfAPin);
+    constV(0.2f, 0.0f, 0.0f, kParticleSpawnHalfBPin);
+    std::mt19937 rng(1);
+    const ParticleEmitterConfig c = evaluateParticleGraph(g, rng);
+    CHECK(c.billboard == static_cast<uint8_t>(ParticleBillboard::Streak));
+    CHECK(c.stretch == doctest::Approx(0.07f));
+    CHECK(c.fadeIn == doctest::Approx(0.1f));
+    CHECK(c.spawnHalfA[2] == doctest::Approx(0.75f));
+    CHECK(c.spawnHalfB[0] == doctest::Approx(0.2f));
+    // A graph that never set them: the sprite and the point emitter every graph had.
+    ParticleGraph plain = ParticleGraph::makeDefault();
+    const ParticleEmitterConfig p = evaluateParticleGraph(plain, rng);
+    CHECK(p.billboard == 0);
+    CHECK(p.fadeIn == 0.0f);
+    CHECK(p.spawnHalfA[0] == 0.0f);
+    CHECK(p.spawnHalfA[2] == 0.0f);
 }
 
 // ═══ On-disk format ══════════════════════════════════════════════════════════

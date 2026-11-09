@@ -88,9 +88,16 @@ enum : int {
     kParticleCollisionEnabledPin = 14,  // > 0.5 → true
     kParticleRestitutionPin      = 15,
     kParticleKillOnCollisionPin  = 16,  // > 0.5 → true
+    // How the particles are drawn and where they are born (Thema 232), appended like the
+    // collision pins: what makes a spray, a curtain of falling water or a mist an ASSET.
+    kParticleBillboardPin        = 17,  // 0 Sprite, 1 Streak, 2 Puff (ParticleBillboard), rounded
+    kParticleStretchPin          = 18,  // Streak length: size + speed * stretch
+    kParticleFadeInPin           = 19,  // share of the life the alpha fades in over
+    kParticleSpawnHalfAPin       = 20,  // Vec3: born on emitter + a * spawnHalfA + b * spawnHalfB,
+    kParticleSpawnHalfBPin       = 21,  // Vec3:   a, b uniform in -1..1 (zero = a point)
 };
 // One past the last Emitter Output pin — the registry entry must stay this long.
-inline constexpr int kParticleEmitterPinCount = 17;
+inline constexpr int kParticleEmitterPinCount = 22;
 
 struct ParticlePinDesc { const char* name; ParticlePinType type; float def; };
 struct ParticleNodeDesc
@@ -166,7 +173,33 @@ struct ParticleEmitterConfig
     bool  collisionEnabled = false;
     float restitution      = 0.4f;  // bounce speed retained (0..1); ignored if killOnCollision
     bool  killOnCollision  = false; // true → the particle dies on its first hit instead of bouncing
+
+    // Spawn shape: a particle starts at the emitter plus a uniform random point of the
+    // parallelogram ±spawnHalfA ±spawnHalfB (world-space metres). Zero (the default) is
+    // the point emitter every graph has always had, and draws no extra random numbers.
+    float spawnHalfA[3] = { 0.0f, 0.0f, 0.0f };
+    float spawnHalfB[3] = { 0.0f, 0.0f, 0.0f };
+
+    // How a particle is drawn (ParticleBillboard). Sprite is the graph's own instanced
+    // round sprite (GL/Metal, ParticleShaderTemplates.h). Streak and Puff are billboards
+    // with the emitter's MATERIAL, drawn by every backend as ordinary RenderObjects
+    // (RenderExtractor): a Streak is stretched along the particle's velocity (falling
+    // water, droplets, sparks), a Puff is turned by a per-particle angle (mist, smoke).
+    uint8_t billboard = 0;
+    float   stretch   = 0.04f;   // Streak length: size + speed * stretch (s of travel)
+    // Share of the life (0..1) over which a Streak/Puff fades IN from nothing to the
+    // start/end ramp: a sheet of particles born on one line then starts as a soft, even
+    // edge instead of a row of just-born blobs. 0 = born at full alpha (as always).
+    float   fadeIn    = 0.0f;
 };
+
+// ParticleEmitterConfig::billboard.
+enum class ParticleBillboard : uint8_t { Sprite = 0, Streak = 1, Puff = 2 };
+
+// A Streak/Puff emitter is drawn as a particle BAND (RenderWorld.h particleBandUv): its UV carries the
+// particle — fract(uv) the quad, floor(uv.y) / kParticleBandLevels its alpha over life, floor(uv.x) /
+// kParticleBandLevels a fixed seed. The material reads them through the Particle node (MaterialGraph).
+inline constexpr float kParticleBandLevels = 64.0f;
 
 HE_API ParticleEmitterConfig evaluateParticleGraph(const ParticleGraph& graph, std::mt19937& rng);
 

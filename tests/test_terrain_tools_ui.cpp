@@ -768,6 +768,13 @@ TEST_CASE("landscape ui: the Water brush paints a drag as one undo step, Ctrl er
 	clickAt(ctx, digX, digY);
 	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
 	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
+	// Follow Slope is on by default too (water that lies on the ground and digs its own channel, Thema 232): off for these
+	// strokes as well, which test the flat pond and its level.
+	float followX = 0.0f, followY = 0.0f;
+	REQUIRE_MESSAGE(locate(ctx, panelId("Follow Slope##water"), followX, followY), "Water armed shows no Follow Slope");
+	clickAt(ctx, followX, followY);
+	ImGui::GetIO().AddMousePosEvent(float(W) - 2.0f, float(H) - 2.0f);
+	for (int i = 0; i < 3; ++i) panelFrame(ctx, false);
 	const size_t depth0 = undo.undoDepth();
 	REQUIRE(land().water.bodies.empty());
 

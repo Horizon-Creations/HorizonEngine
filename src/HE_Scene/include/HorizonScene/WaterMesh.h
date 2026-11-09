@@ -1,8 +1,12 @@
 #pragma once
 #include <ContentManager/Assets.h>
 #include <HorizonScene/WaterField.h>
+#include <Physics/WaterWaves.h>
 #include <glm/vec2.hpp>
+#include <glm/vec4.hpp>
 #include <cstdint>
+#include <memory>
+#include <unordered_map>
 #include <vector>
 
 struct TerrainComponent;
@@ -69,7 +73,101 @@ namespace HE::water
         bool  enabled  = false;
         float level    = 0.0f;                      // the body's level
         float overshoot = kDefaultShoreOvershoot;   // metres of ground above it that still count as under water
+        // A stream (Body::stream, > 0 = its depth in m): the sheet is the ground lifted by that much, so the
+        // ground never clips it (`enabled` and `level` are not read) and the lattice's `g` only carries how
+        // deep the water looks at the corner, for the soft edge (kStreamVisualDepth).
+        float streamDepth = 0.0f;
+        // JOINING (Thema 232): the body this lattice is for (0 = none, the plain footprint). A body reaches ONE cell into
+        // the water of a neighbour it is to be joined with, so the two soft shores cross-fade instead of leaving a
+        // seam between them (each sheet thins out at its own border): a stream into a lake or another stream, two flat
+        // bodies of one level (kJoinLevelTolerance). Exactly one of a pair reaches (see joinReaches), so the strip is
+        // one sheet that fades out while the neighbour's fades in.
+        uint16_t joinBody = 0;
     };
+    // Two flat bodies are one water, to be joined, when their levels differ by no more than this (m).
+    inline constexpr float kJoinLevelTolerance = 0.05f;
+    // Whether `me` reaches into `other`'s cells: a stream reaches into a flat body, never the other way round; of
+    // two streams, or of two flat bodies of one level (kJoinLevelTolerance), the lower id reaches.
+    bool joinReaches(const Body& me, const Body& other);
+
+    // FLAT NEIGHBOURS AT ONE LEVEL ARE ONE SHEET. Two bodies the brush painted separately, side by side at the
+    // same level (kJoinLevelTolerance), are one water to look at: drawn as two sheets they would each thin out at
+    // the border they share and leave a seam, drawn overlapping they would double. So the lowest id of such a
+    // group draws ALL of it as one mesh (buildLattice for the group's bodies) and the others draw nothing.
+    // Streams are never grouped (they lie on the ground and join the water they run into, see ShoreClip::joinBody).
+    // Returns, for every body that is NOT the lead of its group, its lead's id; bodies that stand alone or lead
+    // a group are absent. Bodies touch when a wet cell of one has a wet cell of the other next to it.
+    std::unordered_map<uint16_t, uint16_t> flatGroupLeads(const TerrainComponent& tc);
+
+    // ── Streams (Body::stream) ───────────────────────────────────────────────────
+    // A stream is what the water brush paints down a slope: one smooth sheet that runs down the hill
+    // WITH the ground, `streamDepth` metres over it and thinning to nothing at its edge, no steps and no
+    // falls. The ground is read per vertex (terrainHeightAt), so the sheet follows a sculpt; between two
+    // vertices it is a straight line, which is why the mesh is cut down to the terrain's own grid size
+    // (buildSurface). The current is the ground's downhill direction at every point, not one number per
+    // body: a stream that meanders runs along its own bends.
+    //
+    // The slope at which water starts to run, and where it runs at full speed: Physics/WaterWaves.h
+    // kStreamStillSlope .. kStreamFallSlope (candidates from docs/water-flow-2026-11-09.md section 5, kept
+    // by the eye on the hill witness), at most kStreamMaxSpeed; between them a smoothstep.
+    // The water sits this far over the ground at its edge, so the film never z-fights the terrain.
+    inline constexpr float kStreamLift       = 0.02f;
+    // How deep the material is told the water is in the middle of a stream (m, the soft shore reads it
+    // as e): a stream is a few decimetres of water over the ground, but a few decimetres of the shore's
+    // own ramp would draw it as a film nobody sees. The look, not the geometry.
+    inline constexpr float kStreamVisualDepth = 1.4f;
+    // The current and the lean of a stream are read off the ground over this many metres (the central
+    // difference's half width): wider than the channel's banks, so the cross slope of the channel cancels and
+    // the water runs ALONG the channel, not into it.
+    inline constexpr float kStreamGradientStep = 2.5f;
+
+    // A key of every other body's id, level and kind: what a stream's mesh depends on besides the ground and its
+    // own cells (the surface of the water it runs into).
+    uint64_t streamJoinKeyOf(const Field& field);
+
+    // A stream lies in the channel the brush dug (Body::brushPatch records what every dab lowered), and the channel is FILLED: the
+    // water stands up to just under the ground as it was before the dig, so a basin the stroke dug is full to its rim with a
+    // waterline at the top, not a film on its floor. kStreamFreeboard is the dry strip left under the old ground.
+    inline constexpr float kStreamFreeboard = 0.05f;
+    // How far the brush has lowered the ground at terrain-local (x, z), >= 0 (every body's patch, bilinear between the height
+    // grid's vertices).
+    float brushDugAt(const TerrainComponent& tc, float x, float z);
+    // The water's thickness over the ground the dug channel adds: brushDugAt - kStreamFreeboard, >= 0.
+    float streamFillAt(const TerrainComponent& tc, float x, float z);
+
+    // POOLS. Where the ground inside a stream's footprint is a hollow (a basin, a trough between two bumps, the flat foot
+    // of a slope closed by higher ground), water does not lie on it as a film: it fills the hollow up to where it spills,
+    // the lowest point of the hollow's rim within the painted water (a priority flood over the body's cells, seeded from
+    // its edge). A stream painted over a basin is therefore a flat lake in the basin with its waterline at the rim, and runs
+    // on as a film where it spills over; on a plain slope there is no hollow and nothing changes. `depth` is per water cell
+    // of `box`: the flood level minus the ground (>= 0). Cached per landscape, body, water revision and ground version.
+    struct StreamPool
+    {
+        CellRect box;
+        int w = 0, h = 0;
+        std::vector<float> depth;
+    };
+    std::shared_ptr<const StreamPool> streamPoolOf(const TerrainComponent& tc, uint16_t body);
+    // The pool's depth at terrain-local (x, z), bilinear between cell centres; 0 off the pool.
+    float streamPoolAt(const StreamPool& pool, const TerrainComponent& tc, float x, float z);
+    // A pool deeper than this is still water: no current, no lean, no spray from it.
+    inline constexpr float kStreamPoolStill = 0.1f;
+
+    // |grad h| of the ground at terrain-local (x, z): central differences `step` metres apart (0 =
+    // the terrain's own vertex spacing). The slope, m/m, in terrain-local axes (x, z).
+    glm::vec2 groundGradient(const TerrainComponent& tc, float x, float z, float step = 0.0f);
+    // The slope of the ground as a stream feels it at (x, z): the direction water would run over it, never uphill. A central
+    // difference spanning an edge (the lip of a drop, the rim of a channel) can point UP the edge on its far side; the
+    // steepest way DOWN over a small circle (kStreamGradientStep / 2) cannot. Returned like a gradient (pointing uphill, its
+    // length the steepest descent in m/m), so slopeToFlow and the mesh's UV read it unchanged.
+    glm::vec2 streamSlopeAt(const TerrainComponent& tc, float x, float z);
+    // The current for a ground gradient: downhill, at kStreamMaxSpeed * smoothstep(still, fall, |g|).
+    glm::vec2 slopeToFlow(const glm::vec2& gradient);
+    // Terrain-local Y of the stream's surface at (x, z) with no edge thinning: the ground + the film's depth, or the filled
+    // channel's depth where the brush dug (streamFillAt) when that is more.
+    float streamSurfaceAt(const TerrainComponent& tc, const Body& body, float x, float z);
+    // The stream's current at (x, z), m/s in terrain-local axes (x, z).
+    glm::vec2 streamFlowAt(const TerrainComponent& tc, float x, float z);   // over kStreamGradientStep
 
     using Ring = std::vector<glm::dvec2>;
 
@@ -107,6 +205,9 @@ namespace HE::water
         // corner with water next to it); everywhere else a large positive value.
         // A non-finite ground height reads as far above the water.
         std::vector<float> g;
+        // A stream (ShoreClip::streamDepth): the ground's height at the corners that can matter, the same
+        // size as `v`, 0 where nobody looked. In the hash, because the sheet is made of it.
+        std::vector<float> groundY;
         bool  clipped() const { return !g.empty(); }
         float groundAt(int i, int j) const { return g[static_cast<size_t>(j) * w + i]; }
         double originX = 0.0, originZ = 0.0; // position of corner (0, 0)
@@ -200,7 +301,20 @@ namespace HE::water
         // that wants only the footprint of the cells gets exactly that.
         bool      clipToGround = false;
         float     shoreOvershoot = kDefaultShoreOvershoot;
-        ShoreClip clipFor(float level) const { return { clipToGround, level, shoreOvershoot }; }
+        ShoreClip clipFor(float level) const { return { clipToGround, level, shoreOvershoot, streamDepth, joinBody }; }
+        // The body this mesh is for, to join it with its neighbours (ShoreClip::joinBody); 0 = no joining.
+        uint16_t  joinBody = 0;
+        // Stream (Body::stream): > 0 builds the sheet as the ground lifted by this many metres, with a
+        // slope-and-flow per vertex in the UV (see buildSurface). `streamTurn` carries the landscape's turn
+        // for that vector: the world x and z of its local x axis, then of its local z axis (the scale is
+        // shoreTiltScale). 0 = the flat sheet at the body's level.
+        float     streamDepth = 0.0f;
+        glm::vec4 streamTurn{ 1.0f, 0.0f, 0.0f, 1.0f };
+        // A stream runs into other water (a lake it ends in) over one cell of THEIR cells and lies just under
+        // that water's surface there, so the two sheets are one. `streamBody` is the stream's own id and
+        // `streamJoinKey` a key of the other bodies' levels (streamJoinKeyOf), part of the hash.
+        uint16_t  streamBody = 0;
+        uint64_t  streamJoinKey = 0;
         // Soft shore (Thema 206 Schritt 2): every vertex carries how shallow the water
         // is under it (`shoreProximityAt`, in the normal's x tilt, Physics/WaterWaves.h
         // kShoreNormalGain), and the sheet is refined near the shore until that

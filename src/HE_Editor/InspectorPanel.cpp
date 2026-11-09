@@ -2951,6 +2951,29 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<TrailComponent>(entity); }
 	}
 
+	// ── Water Obstacle ──────────────────────────────────────────────────────
+	// Settings only: the foam is drawn from them every frame (HE::water::obstacleFoam), wherever the entity's mesh
+	// bounds reach through running landscape water.
+	if (auto* wo = registry.try_get<WaterObstacleComponent>(entity))
+	{
+		if (componentHeader("Water Obstacle", true, removed))
+		{
+			EditorWidgets::checkbox("Enabled##waterobstacle", &wo->enabled); trackEdit();
+			Row::dragFloat("Foam",   &wo->foam,   0.01f, 0.0f, 4.0f,  "%.2f");   trackEdit();
+			Row::dragFloat("Margin", &wo->margin, 0.01f, 0.0f, 10.0f, "%.2f m"); trackEdit();
+			Row::dragFloat("Wake",   &wo->wake,   0.05f, 0.0f, 50.0f, "%.2f m"); trackEdit();
+			EditorWidgets::assetDropSlot(ctx, "Foam Material##waterobstacle", wo->foamMaterial,
+			                             HE::AssetType::Material, "obstaclefoam",
+			                             "(none — no foam drawn)", "material", true);
+			{
+				EditorWidgets::WrapText wrap;
+				hint("Foam shows where the water runs past the mesh bounds, and only while they reach "
+				     "through the surface. Still water shows none.");
+			}
+		}
+		if (removed) { if (undo) undo->snapshotNow(removeLabel.c_str()); registry.remove<WaterObstacleComponent>(entity); }
+	}
+
 	// The Rigid Body and Character Controller rows share one set of layer names;
 	// built at the first use, since most entities carry neither component.
 	std::optional<CollisionLayerNames> layerNames;
@@ -3520,6 +3543,28 @@ bool renderForImpl(AppContext& ctx, HorizonWorld& world, Entity entity, EditorUn
 					HE::water::setShoreClip(*t, t->water.clipToGround, over);
 				trackEdit();
 				ImGui::EndDisabled();
+				// The material every sheet of this landscape draws with (its Flow/Stream/Tessellation
+				// variants are made from it); the surface pass picks a change up on its next tick.
+				const HE::UUID before = t->water.material;
+				EditorWidgets::assetDropSlot(ctx, "Water Material##tcw", t->water.material,
+				                             HE::AssetType::Material, "watermat",
+				                             "(none — drop a material here)", "material", true);
+				if (t->water.material != before) t->water.dirty = true;
+				// The particle graphs a fall's spray is made of: the surface pass places and tunes them; a
+				// changed one is taken up when the water next changes (or now, with the revision bumped).
+				const HE::UUID fallBefore[3] = { t->water.fallCurtain, t->water.fallDrops, t->water.fallMist };
+				EditorWidgets::assetDropSlot(ctx, "Fall Curtain##tcw", t->water.fallCurtain,
+				                             HE::AssetType::ParticleSystem, "fallcurtain",
+				                             "(none — no curtain)", "particle system", true);
+				EditorWidgets::assetDropSlot(ctx, "Fall Drops##tcw", t->water.fallDrops,
+				                             HE::AssetType::ParticleSystem, "falldrops",
+				                             "(none — no drops)", "particle system", true);
+				EditorWidgets::assetDropSlot(ctx, "Fall Mist##tcw", t->water.fallMist,
+				                             HE::AssetType::ParticleSystem, "fallmist",
+				                             "(none — no mist)", "particle system", true);
+				if (t->water.fallCurtain != fallBefore[0] || t->water.fallDrops != fallBefore[1] ||
+				    t->water.fallMist != fallBefore[2])
+					++t->water.revision;
 			}
 
 			// Noise is a one-time creation input: it is baked into editable
@@ -4122,6 +4167,7 @@ constexpr AddRow kRenderingRows[] = {
 	addRow<RopeComponent>("Rope"),
 	addRow<SplineComponent>("Spline"),
 	addRow<TrailComponent>("Trail"),
+	addRow<WaterObstacleComponent>("Water Obstacle"),
 };
 constexpr AddRow kPhysicsRows[] = {
 	addRow<RigidBodyComponent>("Rigid Body"),

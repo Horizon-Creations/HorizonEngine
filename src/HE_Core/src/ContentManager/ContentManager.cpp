@@ -391,6 +391,8 @@ HE::UUID ContentManager::parseAndRegisterAsset(const std::string& relativePath,
 			// older files → {} = none (readPOD leaves it untouched at EOF).
 			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.hi);
 			HAsset::Reader::readPOD(c->data,o,a.foliageSetId.lo);
+			// Translucent sort priority: after the foliage set, absent in older files → 0.
+			HAsset::Reader::readPOD(c->data,o,a.sortPriority);
 		}
 		// Baked graph-texture UUIDs live in MTLU alongside shaderId/textureIds.
 		if (const auto* c = reader.findChunk(HAsset::CHUNK_MTLU))
@@ -892,6 +894,7 @@ void ContentManager::regenerateMaterialFromGraph(HE::UUID materialId)
 	mat->customShaderDispGlsl = gen.displacementBody;
 	mat->blendMode            = gen.blendMode;
 	mat->domain               = gen.domain;
+	mat->sortPriority         = gen.sortPriority;
 	mat->graphTexturePaths    = gen.textures;
 	mat->graphTextureIds.clear();
 	bindRuntimeTextureIds(*this, *mat);
@@ -974,6 +977,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 			inst->graphLayerNames      = gen.layerNames; // landscape paint layers
 			inst->foliageSetId         = gen.foliageSetId;
 			inst->blendMode            = gen.blendMode;
+			inst->sortPriority         = gen.sortPriority;
 			inst->domain               = gen.domain;
 			inst->customShaderVertGlsl = gen.vertexBody;
 			inst->customShaderDispGlsl = gen.displacementBody;
@@ -1003,6 +1007,7 @@ void ContentManager::syncMaterialInstance(HE::UUID instanceId)
 		inst->shaderParamData      = parent->shaderParamData;
 		inst->precompiledShaders   = parent->precompiledShaders;
 		inst->blendMode            = parent->blendMode;
+		inst->sortPriority         = parent->sortPriority;
 		inst->customShaderVertGlsl = parent->customShaderVertGlsl;
 		inst->customShaderDispGlsl = parent->customShaderDispGlsl;
 		// Same shader = same fold; the slots stay valid because the param layout
@@ -2301,6 +2306,8 @@ static bool encodeAssetChunks(RuntimeAsset& asset, HAsset::Writer& w)
 		// verbatim copy of everything after the approx block ships it too.
 		HAsset::Writer::appendPOD(b,a.foliageSetId.hi);
 		HAsset::Writer::appendPOD(b,a.foliageSetId.lo);
+		// Translucent sort priority — the last field, so the packer's verbatim tail copy ships it.
+		HAsset::Writer::appendPOD(b,a.sortPriority);
 		w.addChunk(HAsset::CHUNK_MTRL,b.data(),b.size());
 		break;
 	}

@@ -27,7 +27,10 @@
 #include <HorizonScene/Components/FoliageComponent.h>
 #include <HorizonScene/Components/TerrainComponent.h>       // landscape layer weightmap
 #include <HorizonScene/Components/TerrainChunkComponent.h>  // chunk → parent landscape
+#include <HorizonScene/Components/WaterSurfaceComponent.h>
 #include <HorizonScene/WaterQuery.h>                         // queryUnderwaterCamera's WaterIndex
+#include <HorizonScene/WaterObstacle.h>                      // foam bands around water obstacles
+#include <HorizonScene/Components/WaterObstacleComponent.h>
 #include <HorizonScene/Components/RopeComponent.h>
 #include <HorizonScene/Components/TrailComponent.h>
 #include <HorizonScene/RopeTrailSystem.h>                   // buildTrailGeometry
@@ -37,12 +40,54 @@
 #include <ContentManager/ContentManager.h>
 #include <ContentManager/Assets.h>
 #include <JobSystem/JobSystem.h>
+#include <Diagnostics/Log.h>
+#include <atomic>
+#include <bit>
+#include <cstring>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/common.hpp>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
+
+namespace HE
+{
+	// The foam band of each water obstacle as last built (extractWaterObstacles). A band is a pure function of the
+	// obstacle's place and bounds, its settings and the water around it — level, current, wet or dry, none of which
+	// moves with the waves — so it is kept until one of those changed. The water is one stamp over every landscape
+	// with water: its Field::revision (bumped by every edit of the cells, the bodies' settings and the ground under
+	// them, WaterField.h) with the grid it counts, and its world matrix; the same key the WaterIndex's own bounds
+	// cache trusts. What the stamp leaves out: where two landscapes' water overlaps, the higher swell wins a query,
+	// so there the band keeps the landscape it found when it was built.
+	struct WaterFoamMemory
+	{
+		struct Key
+		{
+			glm::mat4 world{ 1.0f };
+			float     bmin[3] = {}, bmax[3] = {};
+			HE::UUID  mesh{};
+			float     foam = 0.0f, margin = 0.0f, wake = 0.0f;
+			uint64_t  water = 0;
+			bool operator==(const Key&) const = default;
+		};
+		struct Band
+		{
+			Key                   key;
+			bool                  built = false;   // key holds what the band was built from
+			bool                  has   = false;   // false: no foam there (dry, still, under or above the water)
+			std::vector<float>    vertices;
+			std::vector<uint32_t> indices;
+			HE::AABB              bounds;
+			uint64_t              seen = 0;        // the last extract that met the obstacle
+		};
+		const void* world = nullptr;   // another world (play-in-editor) or content manager: entity ids mean other things
+		const void* cm    = nullptr;
+		uint64_t    frame = 0;
+		std::unordered_map<uint32_t, Band> bands;   // by entity (id with version)
+	};
+}
 
 // extract() is split into one free function per phase (the banners this file used
 // to carry inline). The phases run in the order extract() calls them and each one
@@ -71,7 +116,18 @@ bool sceneWind(entt::registry& reg, float& direction, float& speed)
 	return false;
 }
 
-// The engine water's wave knobs under the wind: WaveA/B/C of the material, each turned
+// The wind's contract with a material (any material, the engine's Water among them): it exposes
+// WaveA, WaveB and WaveC, the three wave trains, and has no displacement body.
+bool windDrivesWaves(const MaterialAsset& ma)
+{
+	if (!ma.customShaderDispGlsl.empty()) return false;
+	int found = 0;
+	for (const std::string& n : ma.graphParamNames)
+		found += (n == "WaveA" || n == "WaveB" || n == "WaveC") ? 1 : 0;
+	return found == 3;
+}
+
+// A water material's wave knobs under the wind: WaveA/B/C of the material, each turned
 // and scaled by HE::water::windTrain. A knob the entity overrides itself is left as the
 // author set it. `block` is the merged HeParams block (empty = start from the material's).
 void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
@@ -103,6 +159,26 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 		}
 }
 
+
+	// The water material's Flow knob z/w for a landscape surface (Thema 232): z = how deep a camera can be below the surface plane and still
+	// be IN this water, w = 1 (set). The camera in THIS body: no limit; anywhere else: -10, so the material never shows the underside of a
+	// pool the camera merely stands under (a perched lake over a hillside). `block` starts from the material's own values when empty.
+	void waterCameraKnob(const MaterialAsset& ma, std::vector<float>& block, bool cameraInThisBody)
+	{
+		for (size_t k = 0; k < ma.graphParamNames.size() && k < 16; ++k)
+		{
+			if (ma.graphParamNames[k] != "Flow") continue;
+			if (block.empty())
+			{
+				block.assign(64, 0.0f);
+				const size_t n = std::min(ma.shaderParamData.size(), size_t(64));
+				std::copy(ma.shaderParamData.begin(), ma.shaderParamData.begin() + n, block.begin());
+			}
+			block[k * 4 + 2] = cameraInThisBody ? 1.0e4f : -10.0f;
+			block[k * 4 + 3] = 1.0f;
+			return;
+		}
+	}
 
 	using HE::localMatrix;
 
@@ -518,13 +594,20 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 									}
 							obj.paramOverride = std::move(block);
 						}
-					// The engine water: its waves take the scene's wind (an entity's own WaveA/B/C
-					// override is kept). The flowing variant (Thema 232) is the same water with a
-					// current and follows the wind too; the tessellated ones do not, their swell
-					// is the CPU's formula.
-					if (windOn && (matId == HE::kEngineWaterMaterialId || matId == HE::kEngineWaterFlowMaterialId) && contentManager)
-						if (const MaterialAsset* ma = contentManager->getMaterial(matId))
+					// Water waves under the scene's wind, by contract rather than by asset: a material that
+					// exposes the three wave-train knobs WaveA, WaveB and WaveC has them turned and scaled by
+					// the wind (an entity's own override of one is kept) — unless it tessellates, whose swell is
+					// geometry the CPU (water physics, underwater camera) evaluates from the unwound knobs.
+					if (windOn && contentManager)
+						if (const MaterialAsset* ma = contentManager->getMaterial(matId); ma && windDrivesWaves(*ma))
 							windWaterParams(*ma, matComp, windDir, windSpd, obj.paramOverride);
+					// The underside of the water only for a camera that is IN this body (waterCameraKnob).
+					if (contentManager)
+						if (const auto* wsurf = reg.try_get<WaterSurfaceComponent>(e); wsurf && !wsurf->spray)
+							if (const MaterialAsset* ma = contentManager->getMaterial(matId))
+								waterCameraKnob(*ma, obj.paramOverride,
+								                out.underwaterCamera.wet && out.underwaterCamera.terrainEntity == static_cast<uint32_t>(wsurf->terrain) &&
+								                out.underwaterCamera.bodyId == wsurf->body);
 				}
 				// A far LOD level that carries a material of its own (the baked far landscape) is drawn with it,
 				// whatever the entity's material is, while that level is the chosen one.
@@ -632,13 +715,280 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 	}
 
 	// ── ParticleGraph particles ────────────────────────────────────────────────
-	// One ParticleBatch per emitter: raw position/size/t01 per particle, GPU-
-	// instanced (see HorizonRendering::ParticleShaderTemplates) — the backend picks
-	// a shader baked from `config`'s color/alpha-over-life endpoints (compiled once,
-	// cached by content hash, not per-particle CPU work). Size stays CPU-lerped (one
-	// scalar; moving it to the GPU buys nothing — see ParticleShaderGen's comment).
-	void extractParticleBatches(entt::registry& reg, RenderWorld& out)
+	// Three ways out, by ParticleEmitterConfig::billboard and the backend:
+	//
+	//  * Sprite on a backend with the instanced sprite pass (GL, Metal): one
+	//    ParticleBatch per emitter, raw position/size/t01 per particle, GPU-instanced
+	//    (HorizonRendering::ParticleShaderTemplates) with a shader baked from `config`'s
+	//    color/alpha-over-life endpoints. Size stays CPU-lerped (one scalar).
+	//
+	//  * Streak / Puff, on every backend: one RibbonBatch per emitter, a quad per
+	//    particle in WORLD space, drawn with the emitter's material through the trails'
+	//    path — the ordinary mesh vertex layout, the graph pipelines, the blended pass,
+	//    ONE draw per emitter on all five backends. A per-particle RenderObject cannot
+	//    carry a spray: the blended pass draws a translucent graph material once per
+	//    instance (D3D12 has 1024 such draws a frame), and the distance sort breaks any
+	//    run of equal tints. The quads are written back to front. What the material gets
+	//    (particleBandUv): the quad's own UV in fract(uv), the particle's alpha over life
+	//    as floor(uv.y) / kParticleBandLevels, a fixed per-particle seed as
+	//    floor(uv.x) / kParticleBandLevels. The colour is the material's.
+	//
+	//  * Sprite on a backend without the sprite pass (D3D11, D3D12, Vulkan, Software):
+	//    one camera-facing RenderObject per particle with the emitter's material, its
+	//    colour/alpha over life in instanceTint (rgb colour, a alpha), as the engine drew
+	//    particles before the sprite pass existed.
+	//
+	// Neither billboards nor bands cast shadows, shade AO, occlude or enter a GI/RT
+	// scene (castsShadow/contributesAO false, the precipitation rule).
+	struct BillboardInput {
+		glm::vec3 position;
+		glm::vec3 velocity;
+		float     size;
+		float     seed;       // 0..1, fixed for the particle's life
+		float     alpha;      // 0..1 at its point of life
+		glm::vec3 color;
+	};
+	struct BillboardEmitter {
+		HE::UUID  meshId;
+		HE::UUID  materialId;
+		uint32_t  entityId;
+		size_t    end;        // one-past-last index into the inputs
+	};
+
+	// A particle's fixed 0..1 seed. Its lifetime was drawn at random and never changes,
+	// so its bits are one: no field on Particle, the same value every frame.
+	float particleSeed(float maxLifetime)
 	{
+		uint32_t h;
+		std::memcpy(&h, &maxLifetime, sizeof h);
+		h ^= h >> 16; h *= 0x7FEB352Du; h ^= h >> 15; h *= 0x846CA68Bu; h ^= h >> 16;
+		return static_cast<float>(h & 0xFFFFFFu) / 16777216.0f;
+	}
+
+	// The billboard's two in-plane axes, each scaled to its full extent across the
+	// unit quad: `right` the width, `up` the height. `look` points from the particle
+	// to the camera (unit). Sprite and Puff are square and face the camera; a Puff is
+	// turned by its seed. A Streak lies along the velocity as the camera sees it, size
+	// + seen speed * stretch long: a drop falling past is a long streak, one falling
+	// straight at the camera a short one.
+	void billboardAxes(uint8_t kind, const glm::vec3& look, const glm::vec3& velocity, float size,
+	                   float stretch, float seed, glm::vec3& right, glm::vec3& up)
+	{
+		if (kind == static_cast<uint8_t>(HE::ParticleBillboard::Streak))
+		{
+			const glm::vec3 v  = velocity - look * glm::dot(velocity, look);
+			const float     vl = glm::length(v);
+			glm::vec3 u = vl > 1e-4f ? v / vl : glm::vec3(0, 1, 0) - look * look.y;
+			if (glm::length(u) < 1e-4f) u = glm::vec3(1, 0, 0);
+			u = glm::normalize(u);
+			right = glm::normalize(glm::cross(u, look)) * size;
+			up    = u * (size + vl * stretch);
+			return;
+		}
+		glm::vec3 r = glm::cross(glm::vec3(0, 1, 0), look);
+		if (glm::length(r) < 1e-4f) r = glm::vec3(1, 0, 0);
+		r = glm::normalize(r);
+		glm::vec3 u = glm::cross(look, r);
+		if (kind == static_cast<uint8_t>(HE::ParticleBillboard::Puff))
+		{
+			// Turned by the particle's own angle: a cloud of puffs is not one shape repeated.
+			const float a = seed * 6.2831853f, c = std::cos(a), s = std::sin(a);
+			const glm::vec3 rr = r * c + u * s;
+			u = u * c - r * s;
+			r = rr;
+		}
+		right = r * size;
+		up    = u * size;
+	}
+
+	// The memory of the bands (particles, foam, trails), handed from one frame's RenderWorld to the next frame's
+	// bands. A waterfall's band is ~1 MB of vertices a frame, a hundred obstacles' foam as much in 12 KB pieces;
+	// freed and allocated anew every frame, the heap gives the pages back and every one of them faults in again
+	// (0.1 ms for 6000 drops, 0.3 ms for 100 foam bands, measured). Per thread: a view is extracted on the thread
+	// that renders it, into the RenderWorld it keeps. Kept by size class (capacity in [2^c, 2^(c+1))), so a band the
+	// size of last frame's finds its buffer at once; never more than kBandRecycleBytes in all.
+	constexpr size_t kBandRecycleBytes = 32u << 20;
+	struct BandMemory
+	{
+		static constexpr int kClasses = 48;
+		std::vector<std::vector<float>>    floats[kClasses];
+		std::vector<std::vector<uint32_t>> indices[kClasses];
+		size_t bytes = 0;   // held in all
+	};
+	BandMemory& bandMemory()
+	{
+		thread_local BandMemory m;
+		return m;
+	}
+	template<typename T>
+	void recycleBand(std::vector<std::vector<T>>* pool, size_t& bytes, std::vector<T>& v)
+	{
+		const size_t cap = v.capacity();
+		if (cap == 0 || bytes + cap * sizeof(T) > kBandRecycleBytes) return;
+		const int c = static_cast<int>(std::bit_width(cap)) - 1;
+		if (c >= BandMemory::kClasses) return;
+		bytes += cap * sizeof(T);
+		pool[c].push_back(std::move(v));
+	}
+	// Before `out` is cleared for a new walk: its band buffers go to the pool. What is still in the pool was not
+	// asked for during a whole walk, and goes: the pool holds one walk's bands, never a growing heap of them.
+	void recycleBands(RenderWorld& out)
+	{
+		BandMemory& m = bandMemory();
+		for (auto& list : m.floats)  list.clear();
+		for (auto& list : m.indices) list.clear();
+		m.bytes = 0;
+		for (RibbonBatch& rb : out.ribbonBatches)
+		{
+			recycleBand(m.floats, m.bytes, rb.vertices);
+			recycleBand(m.indices, m.bytes, rb.indices);
+		}
+	}
+	// An empty buffer that holds n elements without growing: from the pool (its own size class first, then any
+	// bigger one), else a new one.
+	template<typename T>
+	std::vector<T> takeBand(std::vector<std::vector<T>>* pool, size_t& bytes, size_t n)
+	{
+		std::vector<T> v;
+		if (n == 0) return v;
+		for (int c = static_cast<int>(std::bit_width(n)) - 1; c < BandMemory::kClasses; ++c)
+		{
+			std::vector<std::vector<T>>& list = pool[c];
+			for (size_t i = list.size(); i-- > 0;)
+			{
+				if (list[i].capacity() < n) continue;   // only in n's own class can one be too small
+				v = std::move(list[i]);
+				if (i + 1 != list.size()) list[i] = std::move(list.back());
+				list.pop_back();
+				bytes -= v.capacity() * sizeof(T);
+				v.clear();
+				return v;
+			}
+		}
+		v.reserve(n);
+		return v;
+	}
+
+	// Ascending on the keys: an LSD radix sort of their bits (a non-negative float orders as its bits do), three
+	// passes of 11 bits, stable. A comparison sort of a waterfall's 6000 distances was 0.2 ms a frame (measured).
+	void sortByKey(std::vector<std::pair<float, uint32_t>>& v, std::vector<std::pair<float, uint32_t>>& tmp)
+	{
+		constexpr int kBits = 11, kBuckets = 1 << kBits;
+		const size_t n = v.size();
+		tmp.resize(n);
+		auto digit = [](float f, int shift) {
+			uint32_t u;
+			std::memcpy(&u, &f, sizeof u);
+			return (u >> shift) & static_cast<uint32_t>(kBuckets - 1);
+		};
+		std::pair<float, uint32_t>* src = v.data();
+		std::pair<float, uint32_t>* dst = tmp.data();
+		for (int pass = 0; pass < 3; ++pass)
+		{
+			const int shift = pass * kBits;
+			uint32_t at[kBuckets] = {};
+			for (size_t i = 0; i < n; ++i) ++at[digit(src[i].first, shift)];
+			uint32_t sum = 0;
+			for (uint32_t& c : at) { const uint32_t k = c; c = sum; sum += k; }
+			for (size_t i = 0; i < n; ++i) dst[at[digit(src[i].first, shift)]++] = src[i];
+			std::swap(src, dst);
+		}
+		v.swap(tmp);   // an odd number of passes: the sorted keys are in tmp's buffer
+	}
+
+	// One Streak/Puff emitter's particles as a band of world-space quads. Gathered (with each particle's distance
+	// key and the largest extent a quad can reach), sorted on that key (the keys with their indices, radix), then
+	// every quad written back to front into its own fixed place in parallel: the band of a waterfall is thousands
+	// of quads every frame.
+	void particleBand(const HE::ParticleEmitterConfig& config, const std::vector<Particle>& particles,
+	                  uint32_t entityId, const glm::vec3& camPos, std::vector<BillboardInput>& scratch,
+	                  std::vector<std::pair<float, uint32_t>>& order, std::vector<std::pair<float, uint32_t>>& sortTmp,
+	                  RenderWorld& out)
+	{
+		scratch.clear();
+		scratch.reserve(particles.size());
+		order.clear();
+		order.reserve(particles.size());
+		const float stretch = std::max(config.stretch, 0.0f);
+		float reach = 0.0f;   // the half diagonal of the largest quad: the bounds' margin around the positions
+		for (const Particle& p : particles)
+		{
+			if (p.lifetime <= 0.0f || p.maxLifetime <= 0.0f) continue;
+			const float t01  = std::clamp(1.0f - p.lifetime / p.maxLifetime, 0.0f, 1.0f);
+			const float size = config.startSize + (config.endSize - config.startSize) * t01;
+			if (!(size > 0.0f)) continue;
+			float alpha = std::clamp(config.startAlpha + (config.endAlpha - config.startAlpha) * t01, 0.0f, 1.0f);
+			if (config.fadeIn > 0.0f && t01 < config.fadeIn)
+			{
+				const float k = t01 / config.fadeIn;
+				alpha *= k * k * (3.0f - 2.0f * k);        // smoothstep in: a soft edge where the sheet is born
+			}
+			if (particleBandLevel(alpha) == 0) continue;   // faded out: nothing to draw
+			const glm::vec3 d = p.position - camPos;
+			order.emplace_back(glm::dot(d, d), static_cast<uint32_t>(scratch.size()));
+			scratch.push_back({ p.position, p.velocity, size, particleSeed(p.maxLifetime), alpha, glm::vec3(1.0f) });
+			reach = std::max(reach, 0.5f * (size + size + glm::length(p.velocity) * stretch));
+		}
+		if (scratch.empty()) return;
+		// Near to far here; written far to near below: the far drops blend first, as the blended pass does with
+		// whole draws.
+		sortByKey(order, sortTmp);
+
+		RibbonBatch rb;
+		rb.materialAssetId = config.materialAssetId;
+		rb.entityId        = entityId;
+		const size_t n = scratch.size();
+		BandMemory& memory = bandMemory();
+		rb.vertices = takeBand(memory.floats, memory.bytes, n * 4 * 8);
+		rb.indices  = takeBand(memory.indices, memory.bytes, n * 6);
+		rb.vertices.resize(n * 4 * 8);
+		rb.indices.resize(n * 6);
+		for (const BillboardInput& in : scratch) rb.worldBounds.expand(in.position);
+		rb.worldBounds.expand(rb.worldBounds.min - glm::vec3(reach));
+		rb.worldBounds.expand(rb.worldBounds.max + glm::vec3(reach));
+		const uint8_t kind = config.billboard;
+		float*    vtx = rb.vertices.data();
+		uint32_t* idx = rb.indices.data();
+		parallel_for(n, [&](size_t i) {
+			const BillboardInput& in = scratch[order[n - 1 - i].second];
+			glm::vec3 look = camPos - in.position;
+			const float d  = glm::length(look);
+			glm::vec3 right(0.0f), up(0.0f);   // a particle on the camera: a quad of no area
+			if (d > 1e-4f)
+			{
+				look /= d;
+				billboardAxes(kind, look, in.velocity, in.size, stretch, in.seed, right, up);
+			}
+			else
+				look = glm::vec3(0, 1, 0);
+			const glm::vec2 uv0 = particleBandUv(in.seed, in.alpha, 0.0f, 0.0f);
+			const glm::vec2 uv1 = particleBandUv(in.seed, in.alpha, 1.0f, 1.0f);
+			const glm::vec3 corner[4] = { in.position - 0.5f * right - 0.5f * up, in.position + 0.5f * right - 0.5f * up,
+			                              in.position + 0.5f * right + 0.5f * up, in.position - 0.5f * right + 0.5f * up };
+			const glm::vec2 uv[4] = { { uv0.x, uv0.y }, { uv1.x, uv0.y }, { uv1.x, uv1.y }, { uv0.x, uv1.y } };
+			float* v = vtx + i * 32;
+			for (int k = 0; k < 4; ++k, v += 8)
+			{
+				v[0] = corner[k].x; v[1] = corner[k].y; v[2] = corner[k].z;
+				v[3] = look.x;      v[4] = look.y;      v[5] = look.z;
+				v[6] = uv[k].x;     v[7] = uv[k].y;
+			}
+			const uint32_t base = static_cast<uint32_t>(i * 4);
+			uint32_t* q = idx + i * 6;
+			q[0] = base; q[1] = base + 1; q[2] = base + 2; q[3] = base; q[4] = base + 2; q[5] = base + 3;
+		}, "ExtractParticleBand");
+		out.ribbonBatches.push_back(std::move(rb));
+	}
+
+	void extractParticleBatches(entt::registry& reg, RenderWorld& out, bool nativeSprites)
+	{
+		std::vector<BillboardInput>   bin;
+		std::vector<BillboardEmitter> bem;
+		// The bands' working memory, kept by the thread from walk to walk (it grows to the largest emitter once).
+		thread_local std::vector<BillboardInput>              scratch;
+		thread_local std::vector<std::pair<float, uint32_t>> order, sortTmp;
+		size_t bandEmitters = 0, bandParticles = 0;
+		const glm::vec3 camPos = out.camera.position;
 		const HE::ActiveFilter active(reg);
 		for (auto [e, tc, ps] : reg.view<TransformComponent, ParticleSystemComponent>().each())
 		{
@@ -646,6 +996,42 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			if (active.off(e)) continue;
 			if (ps.particles.empty()) continue;
 			const HE::ParticleEmitterConfig& config = ps.resolvedConfig; // (re)resolved by ParticleSystem::update
+
+			if (config.billboard == static_cast<uint8_t>(HE::ParticleBillboard::Streak) ||
+			    config.billboard == static_cast<uint8_t>(HE::ParticleBillboard::Puff))
+			{
+				const size_t before = out.ribbonBatches.size();
+				particleBand(config, ps.particles, static_cast<uint32_t>(e), camPos, scratch, order, sortTmp, out);
+				if (out.ribbonBatches.size() > before)
+				{
+					++bandEmitters;
+					bandParticles += out.ribbonBatches.back().indices.size() / 6;
+				}
+				continue;
+			}
+
+			if (!nativeSprites)
+			{
+				BillboardEmitter em;
+				em.meshId     = (config.meshAssetId == HE::UUID{}) ? HE::kDefaultQuadMeshId : config.meshAssetId;
+				em.materialId = config.materialAssetId;
+				em.entityId   = static_cast<uint32_t>(e);
+				const glm::vec3 c0(config.startColor[0], config.startColor[1], config.startColor[2]);
+				const glm::vec3 c1(config.endColor[0], config.endColor[1], config.endColor[2]);
+				for (const Particle& p : ps.particles)
+				{
+					if (p.lifetime <= 0.0f || p.maxLifetime <= 0.0f) continue;
+					const float t01  = std::clamp(1.0f - p.lifetime / p.maxLifetime, 0.0f, 1.0f);
+					const float size = config.startSize + (config.endSize - config.startSize) * t01;
+					if (!(size > 0.0f)) continue;
+					const float a = std::clamp(config.startAlpha + (config.endAlpha - config.startAlpha) * t01, 0.0f, 1.0f);
+					if (!(a > 0.002f)) continue;
+					bin.push_back({ p.position, p.velocity, size, 0.0f, a, c0 + (c1 - c0) * t01 });
+				}
+				em.end = bin.size();
+				if (bem.empty() ? em.end > 0 : em.end > bem.back().end) bem.push_back(em);
+				continue;
+			}
 
 			ParticleBatch batch;
 			batch.particleAssetId = ps.particleAssetId;
@@ -664,6 +1050,170 @@ void windWaterParams(const MaterialAsset& ma, const MaterialComponent* mc,
 			}
 			if (!batch.instances.empty()) out.particleBatches.push_back(std::move(batch));
 		}
+
+		// Said when the count first doubles past the last one said: a dump's log shows
+		// that the particles got there and how many, without a line per frame.
+		if (bandParticles + bin.size() > 0)
+		{
+			static std::atomic<size_t> s_said{ 0 };
+			const size_t n = bandParticles + bin.size();
+			if (n >= 2 * s_said.load(std::memory_order_relaxed))
+			{
+				s_said.store(n, std::memory_order_relaxed);
+				HE_LOG_INFO(RHI, "RenderExtractor: %zu particle(s) in %zu band(s), %zu as sprite billboard(s)",
+				            bandParticles, bandEmitters, bin.size());
+			}
+		}
+		if (bin.empty()) return;
+
+		const size_t base = out.objects.size();
+		out.objects.resize(base + bin.size());
+		parallel_for(bin.size(), [&](size_t i) {
+			const BillboardInput&   in = bin[i];
+			const BillboardEmitter& em = *std::upper_bound(
+				bem.begin(), bem.end(), i,
+				[](size_t idx, const BillboardEmitter& b) { return idx < b.end; });
+			RenderObject& obj = out.objects[base + i];
+			obj.meshAssetId     = em.meshId;
+			obj.materialAssetId = em.materialId;
+			obj.entityId        = em.entityId;
+			obj.lod             = 0;
+			obj.castsShadow     = false;
+			obj.contributesAO   = false;
+			obj.instanceTint    = glm::vec4(in.color, in.alpha);
+
+			glm::vec3   look = camPos - in.position;
+			const float d    = glm::length(look);
+			glm::mat4   world(0.0f);   // a particle on the camera: degenerate, invisible
+			if (d > 1e-4f)
+			{
+				look /= d;
+				glm::vec3 right, up;
+				billboardAxes(static_cast<uint8_t>(HE::ParticleBillboard::Sprite), look, in.velocity, in.size,
+				              0.0f, 0.0f, right, up);
+				world[0] = glm::vec4(right, 0.0f);
+				world[1] = glm::vec4(up, 0.0f);
+				world[2] = glm::vec4(look, 0.0f);
+			}
+			world[3] = glm::vec4(in.position, 1.0f);
+			obj.transform   = world;
+			obj.worldBounds = kUnitCube.transformed(world);
+		}, "ExtractParticleBillboards");
+	}
+
+	// ── Foam around water obstacles ─────────────────────────────────────────────
+	// Every entity with a WaterObstacleComponent and a resident mesh: its footprint (the mesh bounds under its world
+	// transform) and, where the water runs past it, a foam band (HE::water::obstacleFoam) — a RibbonBatch drawn with
+	// the component's foam material (when that lies on water, its own sort priority puts it after the water). Every
+	// frame each obstacle's live transform, mesh bounds and settings are read and compared, with the water's stamp,
+	// against what its band was built from (HE::WaterFoamMemory): a dragged or simulated obstacle, a changed setting
+	// or an edit of the water builds its band again, a resting one reuses it. The bands to build are built in
+	// parallel; the water index is built only when there is one. A still lake, a dry obstacle or one that does not
+	// reach through the surface gets none.
+	uint64_t waterFoamStamp(HorizonWorld& world, entt::registry& reg)
+	{
+		uint64_t h = 1469598103934665603ull;   // FNV-1a over what a WaterIndex is built from
+		auto mix = [&](const void* p, size_t n) {
+			const auto* b = static_cast<const unsigned char*>(p);
+			for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+		};
+		for (auto [e, tc] : reg.view<TerrainComponent>().each())
+		{
+			const auto& f = tc.water;
+			if (f.bodies.empty() || !f.allocated()) continue;
+			const uint32_t  id    = static_cast<uint32_t>(e);
+			const size_t    nb    = f.bodies.size();
+			const void*     grid  = f.coverage.data();
+			const glm::mat4 m     = HE::worldMatrixOf(world, e);
+			mix(&id, sizeof id); mix(&f.revision, sizeof f.revision); mix(&f.res, sizeof f.res);
+			mix(&nb, sizeof nb); mix(&grid, sizeof grid); mix(&m, sizeof m);
+		}
+		return h;
+	}
+
+	void extractWaterObstacles(HorizonWorld& world, entt::registry& reg, RenderWorld& out, ContentManager* cm, double t,
+	                           HE::WaterFoamMemory& memory)
+	{
+		using Memory = HE::WaterFoamMemory;
+		if (!cm) return;
+		auto view = reg.view<TransformComponent, WaterObstacleComponent>();
+		if (view.begin() == view.end()) { memory.bands.clear(); return; }
+		if (memory.world != &world || memory.cm != cm)
+		{
+			memory.bands.clear();
+			memory.world = &world;
+			memory.cm    = cm;
+		}
+		const uint64_t frame = ++memory.frame;
+		const uint64_t water = waterFoamStamp(world, reg);
+		const HE::ActiveFilter active(reg);
+		struct Build { Memory::Band* band; HE::water::ObstacleFootprint fp; const WaterObstacleComponent* wo; };
+		struct Draw  { Memory::Band* band; entt::entity e; HE::UUID material; };
+		std::vector<Build> builds;
+		std::vector<Draw>  draws;
+		for (auto [e, tc, wo] : view.each())
+		{
+			if (!wo.enabled || active.off(e)) continue;
+			const auto* mc = reg.try_get<MeshComponent>(e);
+			if (!mc || mc->meshAssetId == HE::UUID{}) continue;
+			const StaticMeshAsset* mesh = cm->getStaticMesh(mc->meshAssetId);
+			if (!mesh) continue;   // not resident yet: no bounds, no foam until it is
+			// The bounds a cooked mesh carries; a mesh built in memory (the engine primitives) may have none stored,
+			// then they are the vertices'.
+			Memory::Key key;
+			for (int i = 0; i < 3; ++i) { key.bmin[i] = mesh->boundsMin[i]; key.bmax[i] = mesh->boundsMax[i]; }
+			if (!(key.bmax[0] > key.bmin[0] || key.bmax[1] > key.bmin[1] || key.bmax[2] > key.bmin[2]) && mesh->vertices.size() >= 3)
+			{
+				const HE::AABB box = HE::AABB::fromPositions(mesh->vertices.data(), mesh->vertices.size() / 3);
+				for (int i = 0; i < 3; ++i) { key.bmin[i] = box.min[i]; key.bmax[i] = box.max[i]; }
+			}
+			key.world  = tc.worldMatrix;
+			key.mesh   = mc->meshAssetId;
+			key.foam   = wo.foam;
+			key.margin = wo.margin;
+			key.wake   = wo.wake;
+			key.water  = water;
+			Memory::Band& band = memory.bands[static_cast<uint32_t>(e)];   // a node: the reference outlives inserts
+			band.seen = frame;
+			if (!band.built || !(band.key == key))
+			{
+				band.key   = key;
+				band.built = true;
+				builds.push_back({ &band, HE::water::obstacleFootprint(tc.worldMatrix, key.bmin, key.bmax), &wo });
+			}
+			draws.push_back({ &band, e, wo.foamMaterial });
+		}
+		if (!builds.empty())
+		{
+			// Only reads from here on: the index, the footprints, the settings; each band is written by its own index.
+			const HE::water::WaterIndex index = HE::water::WaterIndex::build(world);
+			parallel_for(builds.size(), [&](size_t i) {
+				const Build& b = builds[i];
+				HE::water::FoamBand fb;
+				b.band->has = HE::water::obstacleFoam(index, b.fp, *b.wo, t, fb);
+				b.band->vertices = std::move(fb.vertices);
+				b.band->indices  = std::move(fb.indices);
+				b.band->bounds   = fb.bounds;
+			}, "ExtractWaterFoam", 2);   // ~25 us an obstacle: worth a worker from two on
+		}
+		std::unordered_set<HE::UUID> asked;   // each referenced material made resident once a frame
+		BandMemory& pool = bandMemory();
+		for (const Draw& d : draws)
+		{
+			if (!d.band->has) continue;
+			if (d.material != HE::UUID{} && asked.insert(d.material).second) cm->ensureResident(d.material);
+			RibbonBatch rb;
+			rb.materialAssetId = d.material;
+			rb.vertices        = takeBand(pool.floats, pool.bytes, d.band->vertices.size());
+			rb.indices         = takeBand(pool.indices, pool.bytes, d.band->indices.size());
+			rb.vertices.assign(d.band->vertices.begin(), d.band->vertices.end());
+			rb.indices.assign(d.band->indices.begin(), d.band->indices.end());
+			rb.entityId        = static_cast<uint32_t>(d.e);
+			rb.worldBounds     = d.band->bounds;
+			out.ribbonBatches.push_back(std::move(rb));
+		}
+		// Obstacles gone (deleted, switched off, inactive, no mesh): their bands go with them.
+		std::erase_if(memory.bands, [frame](const auto& kv) { return kv.second.seen != frame; });
 	}
 
 	// ── Weather precipitation ──────────────────────────────────────────────────
@@ -1414,6 +1964,8 @@ UnderwaterCameraData queryUnderwaterCamera(HorizonWorld& world, const glm::vec3&
 	// lower (bed) bound above was ever checked, which among other things made
 	// the Schritt 2 post pass fog the view of a plane flying over a distant lake.
 	out.wet = signedDepth >= 0.0f;
+	out.terrainEntity = static_cast<uint32_t>(surf.terrain);
+	out.bodyId        = surf.body;
 
 	// The post pass's tint (Thema 185 Schritt 2): a Beer-Lambert ramp of the CAMERA's
 	// own depth, reshaped by the body's falloff curve — 0 at the surface (shallowColor),
@@ -1644,6 +2196,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	m_frameCached         = false;   // `out` is about to be rewritten: it holds no walk until this one ends
 	m_frameShadowBox      = HE::AABB{};
 	m_frameShadowBoxKnown = false;
+	recycleBands(out);
 	out.clear();
 
 	{ HE_PROFILE_SCOPE_N("Extract::transforms"); extractTransforms(world, reg); }
@@ -1656,7 +2209,7 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// Renderables. Everything that ends up in out.objects must run before the
 	// shadow fit below, which fits its frustum around their union.
 	{ HE_PROFILE_SCOPE_N("Extract::meshes"); extractMeshes(reg, out, m_contentManager, m_sectionMaterialMissing); }
-	extractParticleBatches(reg, out);
+	{ HE_PROFILE_SCOPE_N("Extract::particles"); extractParticleBatches(reg, out, m_particleSpritesCapable); }
 	extractPrecipitation(reg, out);
 	if (!m_foliageLod) m_foliageLod = std::make_unique<HE::FoliageLodMemory>();
 	{ HE_PROFILE_SCOPE_N("Extract::foliage"); HE::extractFoliage(reg, out, m_contentManager, m_foliageLod.get()); }
@@ -1667,6 +2220,11 @@ void RenderExtractor::extract(HorizonWorld& world, RenderWorld& out, float aspec
 	// camera position extractCamera resolved above.
 	extractRopes(reg, out);
 	extractTrails(reg, out);
+	{
+		HE_PROFILE_SCOPE_N("Extract::waterObstacles");
+		if (!m_waterFoam) m_waterFoam = std::make_unique<HE::WaterFoamMemory>();
+		extractWaterObstacles(world, reg, out, m_contentManager, renderWaveClock(), *m_waterFoam);
+	}
 	// Editor-only billboards for the entities that draw nothing themselves;
 	// they need the resolved camera and go into out.objects for the picker.
 	extractEditorIcons(reg, out, editorCam);

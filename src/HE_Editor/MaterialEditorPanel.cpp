@@ -2419,6 +2419,17 @@ void render(AppContext& ctx, const std::string& assetPath,
 					headerEdit |= ImGui::IsItemDeactivatedAfterEdit();
 					EditorWidgets::helpForLabel("Clip");
 				}
+				if (bmCur == 2)
+				{
+					// Which translucent draws come later: foam lying on water needs a higher
+					// priority than the water, whatever their distances say.
+					ImGui::Separator();
+					ImGui::SetNextItemWidth(120.0f);
+					ImGui::DragInt("Sort Priority", &outN->sortPriority, 0.1f,
+					               HE::kMatMinSortPriority, HE::kMatMaxSortPriority);
+					headerEdit |= ImGui::IsItemDeactivatedAfterEdit();
+					EditorWidgets::helpForLabel("Sort Priority");
+				}
 				ImGui::EndPopup();
 			}
 

@@ -12,6 +12,8 @@
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
+#include <mutex>
+#include <queue>
 
 namespace HE::water
 {
@@ -207,13 +209,16 @@ namespace
     // it saturates, costs only the splits that bring a vertex to the place where it does:
     // O(log) per edge, not a grid. Never finer than hmin, the scale e itself has (it is
     // bilinear on the lattice cells), and never past maxVertices.
+    // `maxLen` > 0 (a stream): an edge longer than that is split too, whatever e does, so the sheet can follow
+    // the ground it is draped on; the shore's own limit then gives way to it.
     void refineShore(const Lattice& L, float overshoot, std::vector<glm::dvec2>& P,
-                     std::vector<float>& E, std::vector<uint32_t>& T)
+                     std::vector<float>& E, std::vector<uint32_t>& T, double maxLen = 0.0)
     {
         constexpr float  kTolerance   = 0.03f / HE::water::kShoreFadeDepth;   // of e, i.e. 3 cm of water depth
         constexpr int    kMaxPasses   = 24;
         constexpr size_t kMaxVertices = 400000;
-        const double hmin  = 0.5 * std::min(L.cellW, L.cellH);
+        double hmin = 0.5 * std::min(L.cellW, L.cellH);
+        if (maxLen > 0.0) hmin = std::min(hmin, 0.5 * maxLen);   // an edge up to maxLen stays, anything longer may split
         const double hmin2 = hmin * hmin;
         auto eAt = [&](const glm::dvec2& p) { return shoreProximityAt(L, p.x, p.y, overshoot); };
 
@@ -236,7 +241,8 @@ namespace
                     const EdgeKey key = edgeKey(a, b);
                     auto it = bad.find(key);
                     if (it == bad.end())
-                        it = bad.emplace(key, std::abs(eAt((a + b) * 0.5) - 0.5f * (E[v[k]] + E[v[(k + 1) % 3]])) > kTolerance).first;
+                        it = bad.emplace(key, (maxLen > 0.0 && len2 > maxLen * maxLen) ||
+                                              std::abs(eAt((a + b) * 0.5) - 0.5f * (E[v[k]] + E[v[(k + 1) % 3]])) > kTolerance).first;
                     if (it->second) split.insert(key);
                     if (len2 > longest) { longest = len2; longestKey = key; }
                 }
@@ -302,6 +308,254 @@ namespace
             T.swap(out);
         }
     }
+}
+
+// ── Streams ──────────────────────────────────────────────────────────────────
+bool joinReaches(const Body& me, const Body& other)
+{
+    if (me.id == other.id) return false;
+    if (me.stream != other.stream) return me.stream;
+    if (me.stream) return other.id > me.id;
+    return other.id > me.id && std::abs(other.level - me.level) <= kJoinLevelTolerance;
+}
+
+std::unordered_map<uint16_t, uint16_t> flatGroupLeads(const TerrainComponent& tc)
+{
+    std::unordered_map<uint16_t, uint16_t> out;
+    const Field& f = tc.water;
+    if (!f.allocated() || f.bodies.size() < 2) return out;
+    std::unordered_map<uint16_t, uint16_t> parent;
+    for (const Body& b : f.bodies) if (!b.stream) parent[b.id] = b.id;
+    if (parent.size() < 2) return out;
+    auto find = [&](uint16_t a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+    auto join = [&](uint16_t a, uint16_t b)
+    {
+        const Body* ba = f.findBody(a);
+        const Body* bb = f.findBody(b);
+        if (!ba || !bb || ba->stream || bb->stream) return;
+        if (!(std::abs(ba->level - bb->level) <= kJoinLevelTolerance)) return;
+        const uint16_t ra = find(a), rb = find(b);
+        if (ra != rb) parent[std::max(ra, rb)] = std::min(ra, rb);
+    };
+    const int res = static_cast<int>(f.res);
+    for (int z = 0; z < res; ++z)
+        for (int x = 0; x < res; ++x)
+        {
+            const size_t i = static_cast<size_t>(z) * res + x;
+            if (f.owner[i] == kNoBody || f.coverage[i] < kWet) continue;
+            if (x + 1 < res)
+            {
+                const size_t j = i + 1;
+                if (f.owner[j] != kNoBody && f.owner[j] != f.owner[i] && f.coverage[j] >= kWet) join(f.owner[i], f.owner[j]);
+            }
+            if (z + 1 < res)
+            {
+                const size_t j = i + res;
+                if (f.owner[j] != kNoBody && f.owner[j] != f.owner[i] && f.coverage[j] >= kWet) join(f.owner[i], f.owner[j]);
+            }
+        }
+    for (const auto& kv : parent)
+    {
+        const uint16_t r = find(kv.first);
+        if (r != kv.first) out[kv.first] = r;
+    }
+    return out;
+}
+
+uint64_t streamJoinKeyOf(const Field& f)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (const Body& b : f.bodies)
+        if (!b.stream) { h = fnv(h, b.id); h = fnv(h, b.level); }
+    return h;
+}
+
+glm::vec2 groundGradient(const TerrainComponent& tc, float x, float z, float step)
+{
+    if (!hasArea(tc) || !std::isfinite(x) || !std::isfinite(z)) return { 0.0f, 0.0f };
+    if (!(step > 0.0f))
+        step = tc.sizeX / static_cast<float>(std::max(2u, tc.resolution) - 1u);
+    step = std::max(step, 1.0e-3f);
+    const float hx = terrainHeightAt(tc, x + step, z) - terrainHeightAt(tc, x - step, z);
+    const float hz = terrainHeightAt(tc, x, z + step) - terrainHeightAt(tc, x, z - step);
+    if (!std::isfinite(hx) || !std::isfinite(hz)) return { 0.0f, 0.0f };
+    return { hx / (2.0f * step), hz / (2.0f * step) };
+}
+
+glm::vec2 streamSlopeAt(const TerrainComponent& tc, float x, float z)
+{
+    if (!hasArea(tc) || !std::isfinite(x) || !std::isfinite(z)) return { 0.0f, 0.0f };
+    const float r = std::max(kStreamGradientStep * 0.5f, 1.0e-3f);
+    const float h0 = terrainHeightAt(tc, x, z);
+    if (!std::isfinite(h0)) return { 0.0f, 0.0f };
+    constexpr int kDirs = 16;
+    float drop[kDirs];
+    glm::vec2 dir[kDirs];
+    float best = 0.0f;
+    for (int k = 0; k < kDirs; ++k)
+    {
+        const float a = 6.2831853f * static_cast<float>(k) / static_cast<float>(kDirs);
+        dir[k] = { std::cos(a), std::sin(a) };
+        const float h = terrainHeightAt(tc, x + dir[k].x * r, z + dir[k].y * r);
+        drop[k] = std::isfinite(h) ? (h0 - h) / r : 0.0f;
+        best = std::max(best, drop[k]);
+    }
+    if (!(best > 0.0f)) return { 0.0f, 0.0f };
+    // The direction: the steep ones, weighted toward the steepest (never a direction that goes up).
+    glm::vec2 sum(0.0f);
+    for (int k = 0; k < kDirs; ++k)
+        if (drop[k] > 0.0f) { const float w = std::pow(drop[k] / best, 6.0f); sum += dir[k] * w; }
+    const float len = glm::length(sum);
+    if (!(len > 1.0e-6f)) return { 0.0f, 0.0f };
+    return -(sum / len) * best;
+}
+
+glm::vec2 slopeToFlow(const glm::vec2& g)
+{
+    const float mag = std::sqrt(g.x * g.x + g.y * g.y);
+    if (!(mag > 0.0f) || !std::isfinite(mag)) return { 0.0f, 0.0f };
+    const float t = std::clamp((mag - kStreamStillSlope) / (kStreamFallSlope - kStreamStillSlope), 0.0f, 1.0f);
+    const float speed = kStreamMaxSpeed * t * t * (3.0f - 2.0f * t);
+    return { -g.x / mag * speed, -g.y / mag * speed };
+}
+
+float brushDugAt(const TerrainComponent& tc, float x, float z)
+{
+    const int res = static_cast<int>(tc.resolution);
+    if (res < 2 || !hasArea(tc) || !std::isfinite(x) || !std::isfinite(z)) return 0.0f;
+    bool any = false;
+    for (const Body& b : tc.water.bodies) any = any || !b.brushPatch.empty();
+    if (!any) return 0.0f;
+    const float stepX = tc.sizeX / static_cast<float>(res - 1), stepZ = tc.sizeZ / static_cast<float>(res - 1);
+    const float fx = (x + tc.sizeX * 0.5f) / stepX, fz = (z + tc.sizeZ * 0.5f) / stepZ;
+    const int i0 = static_cast<int>(std::floor(fx)), j0 = static_cast<int>(std::floor(fz));
+    const float tx = fx - static_cast<float>(i0), tz = fz - static_cast<float>(j0);
+    auto at = [&](int i, int j) -> float
+    {
+        float sum = 0.0f;
+        for (const Body& b : tc.water.bodies)
+        {
+            const GroundPatch& gp = b.brushPatch;
+            if (gp.empty() || !patchFits(gp, tc.resolution)) continue;
+            if (i < gp.x0 || i >= gp.x0 + gp.w || j < gp.z0 || j >= gp.z0 + gp.h) continue;
+            sum += gp.delta[static_cast<size_t>(j - gp.z0) * gp.w + (i - gp.x0)];
+        }
+        return std::max(0.0f, -sum);                     // lowered ground is negative
+    };
+    const float d = (at(i0, j0) * (1.0f - tx) + at(i0 + 1, j0) * tx) * (1.0f - tz) +
+                    (at(i0, j0 + 1) * (1.0f - tx) + at(i0 + 1, j0 + 1) * tx) * tz;
+    return std::isfinite(d) ? d : 0.0f;
+}
+
+float streamFillAt(const TerrainComponent& tc, float x, float z)
+{
+    return std::max(0.0f, brushDugAt(tc, x, z) - kStreamFreeboard);
+}
+
+std::shared_ptr<const StreamPool> streamPoolOf(const TerrainComponent& tc, uint16_t body)
+{
+    struct Entry { const TerrainComponent* tc; uint16_t body; uint64_t revision, ground; const float* heights; size_t count;
+                   std::shared_ptr<const StreamPool> pool; };
+    static std::mutex mutex;
+    static std::vector<Entry> cache;      // a handful: one per stream being looked at
+    const Field& f = tc.water;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const Entry& e : cache)
+            if (e.tc == &tc && e.body == body && e.revision == f.revision && e.ground == tc.builtFieldVersion &&
+                e.heights == tc.sculptHeights.data() && e.count == tc.sculptHeights.size())
+                return e.pool;
+    }
+    auto pool = std::make_shared<StreamPool>();
+    const CellRect cells = bodyCells(tc, body);
+    if (f.allocated() && cells.valid() && hasArea(tc))
+    {
+        const int res = static_cast<int>(f.res);
+        CellRect box = cells;
+        box.x0 = std::max(0, box.x0 - 1); box.z0 = std::max(0, box.z0 - 1);
+        box.x1 = std::min(res - 1, box.x1 + 1); box.z1 = std::min(res - 1, box.z1 + 1);
+        const int w = box.x1 - box.x0 + 1, h = box.z1 - box.z0 + 1;
+        pool->box = box; pool->w = w; pool->h = h;
+        pool->depth.assign(static_cast<size_t>(w) * h, 0.0f);
+        std::vector<float> ground(static_cast<size_t>(w) * h, 0.0f), level(ground.size(), 0.0f);
+        std::vector<uint8_t> wet(ground.size(), 0), seen(ground.size(), 0);
+        for (int j = 0; j < h; ++j)
+            for (int i = 0; i < w; ++i)
+            {
+                const size_t k = static_cast<size_t>(j) * w + i;
+                const size_t c = static_cast<size_t>(box.z0 + j) * res + (box.x0 + i);
+                wet[k] = f.owner[c] == body && f.coverage[c] >= kWet;
+                if (!wet[k]) continue;
+                const glm::vec2 cc = cellCenter(tc, box.x0 + i, box.z0 + j);
+                const float g = terrainHeightAt(tc, cc.x, cc.y);
+                ground[k] = std::isfinite(g) ? g : 0.0f;
+            }
+        // Priority flood from the water's own edge: a cell is reached at the lowest level water can drain to from it.
+        using Item = std::pair<float, uint32_t>;
+        std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+        for (int j = 0; j < h; ++j)
+            for (int i = 0; i < w; ++i)
+            {
+                const size_t k = static_cast<size_t>(j) * w + i;
+                if (!wet[k]) continue;
+                const bool edge = i == 0 || j == 0 || i == w - 1 || j == h - 1 ||
+                                  !wet[k - 1] || !wet[k + 1] || !wet[k - static_cast<size_t>(w)] || !wet[k + static_cast<size_t>(w)];
+                if (!edge) continue;
+                seen[k] = 1; level[k] = ground[k];
+                open.push({ ground[k], static_cast<uint32_t>(k) });
+            }
+        while (!open.empty())
+        {
+            const Item top = open.top(); open.pop();
+            const int i = static_cast<int>(top.second % static_cast<uint32_t>(w)), j = static_cast<int>(top.second / static_cast<uint32_t>(w));
+            const int ni[4] = { i - 1, i + 1, i, i }, nj[4] = { j, j, j - 1, j + 1 };
+            for (int n = 0; n < 4; ++n)
+            {
+                if (ni[n] < 0 || nj[n] < 0 || ni[n] >= w || nj[n] >= h) continue;
+                const size_t k = static_cast<size_t>(nj[n]) * w + ni[n];
+                if (!wet[k] || seen[k]) continue;
+                seen[k] = 1;
+                level[k] = std::max(ground[k], top.first);
+                open.push({ level[k], static_cast<uint32_t>(k) });
+            }
+        }
+        for (size_t k = 0; k < ground.size(); ++k)
+            if (wet[k] && seen[k]) pool->depth[k] = std::max(0.0f, level[k] - ground[k]);
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (cache.size() >= 16) cache.erase(cache.begin());
+    cache.push_back({ &tc, body, f.revision, tc.builtFieldVersion, tc.sculptHeights.data(), tc.sculptHeights.size(), pool });
+    return pool;
+}
+
+float streamPoolAt(const StreamPool& pool, const TerrainComponent& tc, float x, float z)
+{
+    if (pool.depth.empty() || !hasArea(tc)) return 0.0f;
+    const glm::vec2 cell = cellSize(tc);
+    // Cell centres sit at (index + 0.5) cells from the terrain's corner.
+    const float fx = (x + tc.sizeX * 0.5f) / cell.x - 0.5f - static_cast<float>(pool.box.x0);
+    const float fz = (z + tc.sizeZ * 0.5f) / cell.y - 0.5f - static_cast<float>(pool.box.z0);
+    const int i0 = static_cast<int>(std::floor(fx)), j0 = static_cast<int>(std::floor(fz));
+    const float tx = fx - static_cast<float>(i0), tz = fz - static_cast<float>(j0);
+    auto at = [&](int i, int j) -> float {
+        i = std::clamp(i, 0, pool.w - 1); j = std::clamp(j, 0, pool.h - 1);
+        return pool.depth[static_cast<size_t>(j) * pool.w + i];
+    };
+    const float d = (at(i0, j0) * (1.0f - tx) + at(i0 + 1, j0) * tx) * (1.0f - tz) + (at(i0, j0 + 1) * (1.0f - tx) + at(i0 + 1, j0 + 1) * tx) * tz;
+    return std::isfinite(d) ? std::max(0.0f, d) : 0.0f;
+}
+
+float streamSurfaceAt(const TerrainComponent& tc, const Body& body, float x, float z)
+{
+    const float ground = terrainHeightAt(tc, x, z);
+    const auto pool = streamPoolOf(tc, body.id);
+    const float poolDepth = pool ? streamPoolAt(*pool, tc, x, z) : 0.0f;
+    return (std::isfinite(ground) ? ground : body.level) + std::max(body.streamDepth + poolDepth, streamFillAt(tc, x, z));
+}
+
+glm::vec2 streamFlowAt(const TerrainComponent& tc, float x, float z)
+{
+    return slopeToFlow(streamSlopeAt(tc, x, z));
 }
 
 // ── Cells of a body ──────────────────────────────────────────────────────────
@@ -383,10 +637,12 @@ bool buildLatticeOf(const TerrainComponent& tc, const Owned& owned, const CellRe
     if (!f.allocated() || !cells.valid() || !hasArea(tc)) return false;
 
     const int res = static_cast<int>(f.res);
-    out.x0 = cells.x0 - 1;
-    out.z0 = cells.z0 - 1;
-    out.w  = cells.x1 - cells.x0 + 4;     // corners x0−1 … x1+2
-    out.h  = cells.z1 - cells.z0 + 4;
+    // A stream reaches one cell into the water next to it (below), so its margin of dry corners is one wider.
+    const int pad = (clip.streamDepth > 0.0f || clip.joinBody != kNoBody) ? 2 : 1;
+    out.x0 = cells.x0 - pad;
+    out.z0 = cells.z0 - pad;
+    out.w  = cells.x1 - cells.x0 + 2 + 2 * pad;     // corners x0−pad … x1+1+pad (x0−1 … x1+2 for pad 1)
+    out.h  = cells.z1 - cells.z0 + 2 + 2 * pad;
     out.cellW = static_cast<double>(tc.sizeX) / res;
     out.cellH = static_cast<double>(tc.sizeZ) / res;
     out.originX = -static_cast<double>(tc.sizeX) * 0.5;
@@ -394,30 +650,105 @@ bool buildLatticeOf(const TerrainComponent& tc, const Owned& owned, const CellRe
     out.minX = out.originX; out.maxX = -out.originX;
     out.minZ = out.originZ; out.maxZ = -out.originZ;
     out.v.assign(static_cast<size_t>(out.w) * out.h, 0.0f);
+    std::vector<uint8_t> strip(out.v.size(), 0);         // corners next to a cell reached into (joining)
 
     // A cell outside the terrain is its nearest edge cell, so water that reaches
     // the border goes on reaching it; a corner outside the terrain stays 0, which
     // is what closes the contour (it is clamped back onto the border afterwards).
+    // A stream (ShoreClip::streamDepth) reaches ONE cell into any other water that touches it: where it runs into a
+    // lake the two sheets' soft edges would otherwise leave a gap between them (each thins out at its own
+    // border). The stream's film goes on under the lake's first cell, and the lake's edge is over it.
+    const Body* me = clip.joinBody != kNoBody ? f.findBody(clip.joinBody) : nullptr;
+    const bool joinsOthers = me != nullptr;
+    std::vector<int8_t> reaches(65536, -1);             // per other body: -1 unknown, 0 no, 1 yes
+    auto reachesInto = [&](uint16_t other) -> bool
+    {
+        int8_t& r = reaches[other];
+        if (r < 0)
+        {
+            const Body* ob = f.findBody(other);
+            r = (ob && joinReaches(*me, *ob)) ? 1 : 0;
+        }
+        return r == 1;
+    };
+    auto ownCell = [&](int x, int z) -> bool
+    {
+        if (x < 0 || x >= res || z < 0 || z >= res) return false;
+        const size_t i = static_cast<size_t>(z) * res + x;
+        return f.coverage[i] != 0 && owned(f.owner[i]);
+    };
+    bool viaJoin = false;                                // set by cell(): this value came from a neighbour's cell
     auto cell = [&](int x, int z) -> float
     {
         x = std::clamp(x, 0, res - 1);
         z = std::clamp(z, 0, res - 1);
         const size_t i = static_cast<size_t>(z) * res + x;
-        return owned(f.owner[i]) ? static_cast<float>(f.coverage[i]) : 0.0f;
+        if (owned(f.owner[i])) return static_cast<float>(f.coverage[i]);
+        if (joinsOthers && f.owner[i] != kNoBody && f.coverage[i] >= kWet && reachesInto(f.owner[i]))
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dx = -1; dx <= 1; ++dx)
+                    if ((dx || dz) && ownCell(x + dx, z + dz) && f.coverage[static_cast<size_t>(z + dz) * res + (x + dx)] >= kWet)
+                    {
+                        viaJoin = true;
+                        return 255.0f;
+                    }
+        return 0.0f;
     };
     for (int j = 0; j < out.h; ++j)
         for (int i = 0; i < out.w; ++i)
         {
             const int cx = out.x0 + i, cz = out.z0 + j;
             if (cx < 0 || cx > res || cz < 0 || cz > res) continue;
+            viaJoin = false;
             out.v[static_cast<size_t>(j) * out.w + i] =
                 0.25f * (cell(cx - 1, cz - 1) + cell(cx, cz - 1) + cell(cx - 1, cz) + cell(cx, cz));
+            if (viaJoin) strip[static_cast<size_t>(j) * out.w + i] = 1;
         }
 
     // The ground, where it can matter: at a corner that is water and at the four
     // corners an edge leads to from it. Nothing else is ever looked at (an edge
     // needs an inside corner), so a lake in a large box costs its own corners and
     // a noise landscape is not sampled once per corner of empty land.
+    if (clip.streamDepth > 0.0f)
+    {
+        // A stream: the ground never clips it. `g` is how deep the water LOOKS at a corner (the soft
+        // shore reads it as e): the visual depth in the middle, nothing at the edge, over the first
+        // half cell of coverage that is more than the contour's. A corner outside the water reads 0
+        // (the waterline), so the edge between the two thins out instead of ending in a step.
+        // groundY keeps the ground at the corners the sheet is made of.
+        constexpr float kFar = 1.0e6f;
+        out.g.assign(out.v.size(), kFar);
+        out.groundY.assign(out.v.size(), 0.0f);
+        const auto streamPool = clip.joinBody != kNoBody ? streamPoolOf(tc, clip.joinBody) : nullptr;
+        auto sample = [&](int i, int j)
+        {
+            const size_t k = static_cast<size_t>(j) * out.w + i;
+            if (out.g[k] != kFar) return;
+            const double iso = kContourIso;
+            const float v = out.v[k];
+            float t = 0.0f;
+            if (v >= iso) { t = static_cast<float>((v - iso) / (255.0 - iso)); t = t * t * (3.0f - 2.0f * t); }
+            const glm::dvec2 p = out.position(i, j);
+            const float x = static_cast<float>(std::clamp(p.x, out.minX, out.maxX));
+            const float z = static_cast<float>(std::clamp(p.y, out.minZ, out.maxZ));
+            // A filled channel is as deep as it was dug (up to what the shore ramp can show): the real depth, never less than the look.
+            const float poolHere = streamPool ? streamPoolAt(*streamPool, tc, x, z) : 0.0f;
+            out.g[k] = clip.overshoot + std::max(std::max(kStreamVisualDepth * t, streamFillAt(tc, x, z) * t), poolHere);
+            const float ground = terrainHeightAt(tc, x, z);
+            out.groundY[k] = std::isfinite(ground) ? ground : 0.0f;
+        };
+        for (int j = 0; j < out.h; ++j)
+            for (int i = 0; i < out.w; ++i)
+            {
+                if (out.at(i, j) < static_cast<float>(kContourIso)) continue;
+                sample(i, j);
+                if (i > 0)         sample(i - 1, j);
+                if (i + 1 < out.w) sample(i + 1, j);
+                if (j > 0)         sample(i, j - 1);
+                if (j + 1 < out.h) sample(i, j + 1);
+            }
+        return true;
+    }
     if (clip.enabled)
     {
         constexpr float kFar = 1.0e6f;                 // "deep": not a limit anywhere
@@ -431,6 +762,15 @@ bool buildLatticeOf(const TerrainComponent& tc, const Owned& owned, const CellRe
             const float z = static_cast<float>(std::clamp(p.y, out.minZ, out.maxZ));
             const float ground = terrainHeightAt(tc, x, z);
             d = std::isfinite(ground) ? clip.level + clip.overshoot - ground : -kFar;
+            // In the strip a body reaches into a neighbour's water, its depth thins out toward the strip's far edge,
+            // so the sheet fades out there (the soft shore reads it) while the neighbour's fades in: no cut edge, no seam.
+            if (strip[static_cast<size_t>(j) * out.w + i] && d > clip.overshoot)
+            {
+                float t = std::clamp((out.v[static_cast<size_t>(j) * out.w + i] - static_cast<float>(kContourIso)) /
+                                     (255.0f - static_cast<float>(kContourIso)), 0.0f, 1.0f);
+                t = t * t * (3.0f - 2.0f * t);
+                d = clip.overshoot + (d - clip.overshoot) * t;
+            }
             // A depth of exactly kFar would read as "not sampled yet"; nothing real is that deep.
             if (d == kFar) d = kFar * 0.5f;
         };
@@ -632,6 +972,22 @@ std::vector<Polygon> groupContours(const std::vector<Contour>& contours)
 }
 
 // ── Mesh ─────────────────────────────────────────────────────────────────────
+namespace
+{
+    // The lattice's coverage (0..255) at a terrain-local point, bilinear between corners; 0 off the lattice.
+    float coverageAt(const Lattice& L, double x, double z)
+    {
+        if (L.w < 2 || L.h < 2) return 0.0f;
+        const double u = std::clamp((x - L.originX) / L.cellW - L.x0, 0.0, static_cast<double>(L.w - 1));
+        const double v = std::clamp((z - L.originZ) / L.cellH - L.z0, 0.0, static_cast<double>(L.h - 1));
+        const int i = std::min(static_cast<int>(u), L.w - 2);
+        const int j = std::min(static_cast<int>(v), L.h - 2);
+        const float tx = static_cast<float>(u - i), tz = static_cast<float>(v - j);
+        const float c00 = L.at(i, j), c10 = L.at(i + 1, j), c01 = L.at(i, j + 1), c11 = L.at(i + 1, j + 1);
+        return (c00 + (c10 - c00) * tx) * (1.0f - tz) + (c01 + (c11 - c01) * tx) * tz;
+    }
+}
+
 uint64_t surfaceHash(const Lattice& l, float level, const SurfaceOptions& opt)
 {
     uint64_t h = 1469598103934665603ull;
@@ -643,6 +999,14 @@ uint64_t surfaceHash(const Lattice& l, float level, const SurfaceOptions& opt)
     // A lake over a hill that was sculpted is a different sheet with the same cells.
     h = fnv(h, static_cast<uint64_t>(l.g.size()));
     if (!l.g.empty()) h = fnv(h, l.g.data(), l.g.size() * sizeof(float));
+    // A stream is made of the ground it lies on, and of the turn its slope vector is baked with.
+    if (opt.streamDepth > 0.0f)
+    {
+        h = fnv(h, opt.streamDepth); h = fnv(h, opt.streamTurn.x); h = fnv(h, opt.streamTurn.y);
+        h = fnv(h, opt.streamTurn.z); h = fnv(h, opt.streamTurn.w); h = fnv(h, opt.shoreTiltScale);
+        h = fnv(h, opt.streamBody); h = fnv(h, opt.streamJoinKey);
+        if (!l.groundY.empty()) h = fnv(h, l.groundY.data(), l.groundY.size() * sizeof(float));
+    }
     // Only when on, so a mesh without the soft shore keeps the hash it always had.
     if (opt.shoreFade && !l.g.empty())
     {
@@ -673,14 +1037,16 @@ bool buildSurface(const TerrainComponent& tc, uint16_t body, const SurfaceOption
     const CellRect cells = bodyCells(tc, body);
     if (!cells.valid()) { out.level = b->level; return true; }       // a body with no water: nothing to draw
     Lattice lattice;
-    if (!buildLattice(tc, body, cells, lattice, opt.clipFor(b->level))) return false;
-    return buildSurface(tc, lattice, cells, b->level, opt, out);
+    SurfaceOptions bodyOpt = opt;
+    bodyOpt.joinBody = b->id;
+    if (b->stream) { bodyOpt.streamDepth = b->streamDepth; bodyOpt.streamBody = b->id; bodyOpt.streamJoinKey = streamJoinKeyOf(tc.water); }
+    if (!buildLattice(tc, body, cells, lattice, bodyOpt.clipFor(b->level))) return false;
+    return buildSurface(tc, lattice, cells, b->level, bodyOpt, out);
 }
 
 bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const CellRect& cells,
                   float level, const SurfaceOptions& opt, SurfaceMesh& out)
 {
-    (void)tc;
     out = SurfaceMesh{};
     out.level = level;
     out.cells = cells;
@@ -696,7 +1062,9 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
     // The deepest water, at the water corners (the lattice's ground is water over the ground plus the
     // overshoot there; every water corner is sampled). Between corners the ground can dip a little
     // further, which the material's margin covers.
-    if (lattice.clipped())
+    if (opt.streamDepth > 0.0f && !lattice.groundY.empty())
+        out.deepest = opt.streamDepth;     // the film over the ground; no camera is "in" it below that
+    else if (lattice.clipped())
     {
         float deepest = 0.0f;
         for (size_t i = 0; i < lattice.v.size(); ++i)
@@ -724,7 +1092,11 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
     m.path = "mem://water_surface";
 
     const double invTile = 1.0 / std::max(1e-6f, opt.uvMetersPerTile);
-    const bool fade = opt.shoreFade && lattice.clipped();
+    // A stream is draped on the ground: its heights come from the terrain, its soft edge from the lattice.
+    const bool stream = opt.streamDepth > 0.0f && !lattice.groundY.empty();
+    const bool fade = (opt.shoreFade || stream) && lattice.clipped();
+    float deepestFill = 0.0f;                          // a stream: the thickest water, for `deepest`
+    const auto meshPool = stream && opt.streamBody != kNoBody ? streamPoolOf(tc, opt.streamBody) : nullptr;
     float bmin[3] = {  1e30f,  1e30f,  1e30f };
     float bmax[3] = { -1e30f, -1e30f, -1e30f };
 
@@ -747,7 +1119,15 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
         {
             prox.reserve(pts.size());
             for (const glm::dvec2& v : pts) prox.push_back(shoreProximityAt(lattice, v.x, v.y, opt.shoreOvershoot));
-            refineShore(lattice, opt.shoreOvershoot, pts, prox, tris);
+            // A stream is cut down to the terrain's own grid, so a straight line between two vertices is the ground
+            // between them (the sheet is the ground lifted, vertex by vertex).
+            double maxLen = 0.0;
+            if (stream)
+            {
+                const double spacing = static_cast<double>(tc.sizeX) / static_cast<double>(std::max(2u, tc.resolution) - 1u);
+                maxLen = std::clamp(std::min(std::min(lattice.cellW, lattice.cellH), spacing), 0.4, 3.0);
+            }
+            refineShore(lattice, opt.shoreOvershoot, pts, prox, tris, maxLen);
         }
 
         const uint32_t base = static_cast<uint32_t>(m.vertices.size() / 3);
@@ -756,13 +1136,45 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
             const glm::dvec2& v = pts[k];
             const float x = static_cast<float>(v.x - center.x);
             const float z = static_cast<float>(v.y - center.y);
+            float y = 0.0f;
+            glm::vec2 uv(static_cast<float>((v.x + opt.uvOrigin.x) * invTile),
+                         static_cast<float>((v.y + opt.uvOrigin.y) * invTile));
+            if (stream)
+            {
+                // The ground under the vertex, the film's depth over it (thinning to the lift at the edge:
+                // the lattice coverage is the iso value there), relative to the entity's height.
+                const float lx = static_cast<float>(std::clamp(v.x, lattice.minX, lattice.maxX));
+                const float lz = static_cast<float>(std::clamp(v.y, lattice.minZ, lattice.maxZ));
+                float ground = terrainHeightAt(tc, lx, lz);
+                if (!std::isfinite(ground)) ground = level;
+                const float cov = coverageAt(lattice, v.x, v.y);
+                float t = std::clamp((cov - static_cast<float>(kContourIso)) / (255.0f - static_cast<float>(kContourIso)), 0.0f, 1.0f);
+                t = t * t * (3.0f - 2.0f * t);
+                // The film, a pool the hollow fills to its spill point, or the dug channel filled to the old ground.
+                const float poolHere = meshPool ? streamPoolAt(*meshPool, tc, lx, lz) : 0.0f;
+                const float thick = std::max(poolHere + opt.streamDepth * t, streamFillAt(tc, lx, lz) * t);
+                deepestFill = std::max(deepestFill, thick);
+                y = ground + kStreamLift + thick - level;
+                // Over another body's cells (the lake it runs into) it lies just under that water's surface.
+                if (const uint16_t other = bodyAt(tc, lx, lz); other != kNoBody && other != opt.streamBody)
+                    if (const Body* ob = tc.water.findBody(other); ob && !ob->stream)
+                        y = std::max(ground + kStreamLift - level, std::min(y, ob->level - 0.03f - level));
+                // The ground's slope in WORLD axes (dimensionless): the material draws the sheet's lean from
+                // it and runs the current down it. The landscape's turn, then its y/x scale.
+                const glm::vec2 gl = streamSlopeAt(tc, lx, lz);
+                uv = glm::vec2((opt.streamTurn.x * gl.x + opt.streamTurn.z * gl.y) * opt.shoreTiltScale,
+                               (opt.streamTurn.y * gl.x + opt.streamTurn.w * gl.y) * opt.shoreTiltScale);
+                // A pool is still and level: no current, no lean (fading in over its first decimetres).
+                uv *= std::clamp(1.0f - poolHere / (3.0f * kStreamPoolStill), 0.0f, 1.0f);
+            }
             m.vertices.push_back(x);
-            m.vertices.push_back(0.0f);
+            m.vertices.push_back(y);
             m.vertices.push_back(z);
             // +Y; with the soft shore a tilt in x says how shallow the water is here
             // (kShoreNormalGain, Physics/WaterWaves.h). The material reads it back.
             // shoreTiltScale pre-compensates for the landscape's own non-uniform scale,
-            // see SurfaceOptions above.
+            // see SurfaceOptions above. A stream keeps +Y too: its lean goes into the UV, because the
+            // material takes the wave normal as the mesh normal minus its tilt and would throw a lean away.
             const float e = fade ? prox[k] : 0.0f;
             m.normals.push_back(e * HE::water::kShoreNormalGain * opt.shoreTiltScale);
             m.normals.push_back(1.0f);
@@ -770,9 +1182,10 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
             if (e > 0.0f) ++out.shoreVertices;
             // World coordinates, so a second body (or terrain) beside this one
             // continues the pattern instead of restarting it.
-            m.uvs.push_back(static_cast<float>((v.x + opt.uvOrigin.x) * invTile));
-            m.uvs.push_back(static_cast<float>((v.y + opt.uvOrigin.y) * invTile));
+            m.uvs.push_back(uv.x);
+            m.uvs.push_back(uv.y);
             bmin[0] = std::min(bmin[0], x); bmax[0] = std::max(bmax[0], x);
+            bmin[1] = std::min(bmin[1], y); bmax[1] = std::max(bmax[1], y);
             bmin[2] = std::min(bmin[2], z); bmax[2] = std::max(bmax[2], z);
         }
 
@@ -787,11 +1200,12 @@ bool buildSurface(const TerrainComponent& tc, const Lattice& lattice, const Cell
         }
     }
     if (m.indices.empty()) return true;
+    if (stream) out.deepest = std::max(opt.streamDepth, deepestFill);
 
     // A flat box has no volume; a hair of thickness keeps every consumer that
-    // wants a real AABB (culling, picking) from throwing it out.
-    bmin[1] = -0.05f;
-    bmax[1] =  0.05f;
+    // wants a real AABB (culling, picking) from throwing it out. A stream's box is its real height range.
+    if (stream) { bmin[1] -= 0.05f; bmax[1] += 0.05f; }
+    else        { bmin[1] = -0.05f; bmax[1] = 0.05f; }
     std::memcpy(m.boundsMin, bmin, sizeof(bmin));
     std::memcpy(m.boundsMax, bmax, sizeof(bmax));
     out.triangles = static_cast<uint32_t>(m.indices.size() / 3);

@@ -9351,7 +9351,7 @@ void VulkanRenderer::DrawScene(VkCommandBuffer cmd, uint32_t width, uint32_t hei
             }
         }
 
-        RenderSorter::sortBackToFront(transparentDCs, camPos);
+        RenderSorter::sortBackToFront(transparentDCs, camPos, m_contentManager);   // material sort priority first
 
         // A3: real instancing applies to the opaque pass only (transparent keeps the
         // per-instance loop for blend + depth sort). allocInstances sub-allocates the

@@ -24,6 +24,7 @@ namespace HE
 {
 
 struct FoliageLodMemory;   // FoliageExtract.h: the foliage level hysteresis of one view
+struct WaterFoamMemory;    // RenderExtractor.cpp: the water obstacles' foam bands, kept while nothing under them moved
 
 // ─── Cascaded-shadow-map fit (free functions so they are directly testable) ──
 // The maths the extractor's cascade loop is built from. Kept out of the
@@ -355,6 +356,11 @@ public:
     // backend that never calls this (default false) keeps the analytic fog everywhere.
     void setVolumetricFogCapable(bool capable) { m_fogCapable = capable; }
 
+    // Whether the backend draws RenderWorld::particleBatches (the instanced round sprite of a
+    // ParticleGraph, GL and Metal). A backend that never calls this (default false) gets every
+    // particle as a billboard RenderObject instead, which its mesh path already draws.
+    void setParticleSpritesCapable(bool capable) { m_particleSpritesCapable = capable; }
+
 private:
     // Overwrites the extracted sun/moon directional lights (and out.ambient /
     // out.sunDirection) from the day-night state pushed via setDayNight.
@@ -378,9 +384,13 @@ private:
     // Which detail level each foliage plant was drawn with last time: an extractor is
     // one view (the scene view, a preview), and the hysteresis is the view's.
     std::unique_ptr<HE::FoliageLodMemory> m_foliageLod;
+    // The foam band of each water obstacle as last built, and what it was built from: a band is built again only
+    // when its obstacle, its settings or the water under it changed (the build asks the water ~250 times).
+    std::unique_ptr<HE::WaterFoamMemory> m_waterFoam;
     // setShadowSettings() state; defaults = the historical fit constants.
     float     m_shadowDistance = 250.0f;
     bool      m_fogCapable     = false; // setVolumetricFogCapable
+    bool      m_particleSpritesCapable = false; // setParticleSpritesCapable
     int       m_cascadeCount   = 3;
     float     m_splitLambda    = 0.5f;
     int       m_shadowMapRes   = HE::kShadowMapResolution;

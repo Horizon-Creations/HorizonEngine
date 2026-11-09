@@ -1,5 +1,7 @@
 #include "HorizonRendering/RenderSorter.h"
 #include "HorizonRendering/RenderConstants.h"
+#include <ContentManager/ContentManager.h>
+#include <ContentManager/Assets.h>
 #include <cstdint>
 #include <algorithm>
 #include <cstdlib>
@@ -133,15 +135,26 @@ void RenderSorter::partitionByOpacity(const std::vector<DrawCall>&  drawCalls,
 	}
 }
 
-void RenderSorter::sortBackToFront(std::vector<const DrawCall*>& transparent,
-                                   const glm::vec3&              camPos)
+int8_t RenderSorter::materialSortPriority(const ContentManager* cm, const HE::UUID& materialId)
 {
-	std::sort(transparent.begin(), transparent.end(),
-		[&camPos](const DrawCall* a, const DrawCall* b)
-		{
-			return backToFrontKey(a->transform, camPos)
-			     > backToFrontKey(b->transform, camPos);
-		});
+	if (!cm || materialId == HE::UUID{}) return 0;
+	const MaterialAsset* mat = cm->getMaterial(materialId);
+	return mat ? mat->sortPriority : 0;
+}
+
+void RenderSorter::sortBackToFront(std::vector<const DrawCall*>& transparent,
+                                   const glm::vec3&              camPos,
+                                   const ContentManager*         cm)
+{
+	// The keys once per draw (a material lookup each), not per comparison.
+	struct Keyed { const DrawCall* dc; int8_t prio; float distSq; };
+	std::vector<Keyed> keyed;
+	keyed.reserve(transparent.size());
+	for (const DrawCall* dc : transparent)
+		keyed.push_back({ dc, materialSortPriority(cm, dc->materialAssetId), backToFrontKey(dc->transform, camPos) });
+	std::sort(keyed.begin(), keyed.end(), [](const Keyed& a, const Keyed& b)
+		{ return blendedBefore(a.prio, a.distSq, b.prio, b.distSq); });
+	for (size_t i = 0; i < keyed.size(); ++i) transparent[i] = keyed[i].dc;
 }
 
 void RenderSorter::batchDepthRuns(const RenderWorld&           world,

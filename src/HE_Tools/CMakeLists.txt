@@ -183,6 +183,16 @@ add_executable(mat_gen
 target_link_libraries(mat_gen PRIVATE HorizonCore)
 target_include_directories(mat_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
 
+# ─── fx_gen.exe (generates the built-in particle graphs) ──────────────────────
+# Same bargain: fx_gen <out-dir> writes WaterCurtain/WaterDrops/WaterMist .hasset
+# files (ParticleGraphAsset) via ContentManager. Run manually to (re)populate
+# EditorDeps/EngineContent/Particles; the outputs are committed.
+add_executable(fx_gen
+    src/FxGen/main.cpp
+)
+target_link_libraries(fx_gen PRIVATE HorizonCore)
+target_include_directories(fx_gen PRIVATE ${CMAKE_SOURCE_DIR}/src/HE_Core/include)
+
 # ─── landscape_tex_gen.exe (placeholder textures of the auto landscape material)
 # Same bargain: landscape_tex_gen <out-dir> writes T_Landscape_<Layer>_<Map>
 # .hasset files (Texture) via ContentManager, byte-identical to imported ones.

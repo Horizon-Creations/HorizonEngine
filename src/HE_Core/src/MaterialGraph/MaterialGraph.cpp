@@ -1,4 +1,6 @@
 #include "MaterialGraph/MaterialGraph.h"
+#include <ParticleGraph/ParticleGraph.h>    // kParticleBandLevels: the Particle node's decode
+#include <Physics/WaterWaves.h>             // the Water Surface and Foam Band nodes' decode
 #include <cstdint>
 
 #include <GraphCommon/GraphJson.h>
@@ -97,6 +99,17 @@ const std::vector<MatNodeDesc>& registry()
           { { "X", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
         { MatNodeType::Fract, "Fract", "Math",
           { { "X", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Ddx, "DDX", "Math",
+          { { "X", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::Ddy, "DDY", "Math",
+          { { "X", F::Vec3, 0 } }, { { "Out", F::Vec3, 0 } }, 0 },
+        { MatNodeType::WaterSurfaceData, "Water Surface", "Input",
+          {}, { { "Shore", F::Float, 0 }, { "Depth", F::Float, 0 }, { "Slope", F::Vec2, 0 } }, 0 },
+        { MatNodeType::ParticleData, "Particle", "Input",
+          {}, { { "Quad UV", F::Vec2, 0 }, { "Alpha", F::Float, 0 }, { "Seed", F::Float, 0 } }, 0 },
+        { MatNodeType::FoamBandData, "Foam Band", "Input",
+          {}, { { "Ring", F::Float, 0 }, { "Strength", F::Float, 0 }, { "Facing", F::Float, 0 },
+                { "Flow", F::Vec2, 0 } }, 0 },
         { MatNodeType::Smoothstep, "Smoothstep", "Math",
           { { "Edge0", F::Float, 0 }, { "Edge1", F::Float, 1 }, { "X", F::Float, 0 } },
           { { "Out", F::Float, 0 } }, 0 },
@@ -691,6 +704,7 @@ bool branchPure(MatNodeType t)
         case MatNodeType::FbmGrad: case MatNodeType::Panner: case MatNodeType::ValueNoise: case MatNodeType::Fbm:
         case MatNodeType::Checker: case MatNodeType::StaticSwitch: case MatNodeType::Reroute:
         case MatNodeType::LandscapeGroupPick:   // textureLod only: defined in non-uniform flow
+        case MatNodeType::WaterSurfaceData: case MatNodeType::ParticleData: case MatNodeType::FoamBandData:
             return true;
         // The bombed reads sample with textureGrad from gradients taken ahead of the
         // branch (the grid's dx/dy, and dFdx(vWorldPos) for the normal frame), so only
@@ -1681,6 +1695,46 @@ HE_MG_NOINLINE bool emitMathNode(EmitCtx& c, const Scope& sc, const MatGraphNode
             decl = "vec3 " + v + " = abs(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
         case MatNodeType::Fract:
             decl = "vec3 " + v + " = fract(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
+        case MatNodeType::Ddx:
+            decl = dsStage(sc) ? "vec3 " + v + " = vec3(0.0);"
+                               : "vec3 " + v + " = dFdx(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
+        case MatNodeType::Ddy:
+            decl = dsStage(sc) ? "vec3 " + v + " = vec3(0.0);"
+                               : "vec3 " + v + " = dFdy(" + inputExpr(c, sc, n, 0, F::Vec3) + ");"; break;
+        // The generated surfaces' data (see the enum). One decode each, here and nowhere else; the
+        // constants are the ones the meshes are written with (Physics/WaterWaves.h, ParticleGraph.h).
+        case MatNodeType::WaterSurfaceData:
+        {
+            // Shore e from the normal's tilt: |n.xz| / n.y / gain (the magnitude, so a landscape turned about Y
+            // keeps it); the slope as the stream sheet's UV carries it.
+            const std::string nn = v + "_n";
+            decl = "vec3 " + nn + " = normalize(vNormal);\n"
+                   "    float " + v + " = clamp(length(" + nn + ".xz) / max(" + nn + ".y, 1e-4) / "
+                   + fmtF(HE::water::kShoreNormalGain) + ", 0.0, 1.0);";
+            pinExpr = { v, "((1.0 - " + v + ") * " + fmtF(HE::water::kShoreFadeDepth) + ")", "vUV" };
+            break;
+        }
+        case MatNodeType::ParticleData:
+        {
+            // floor(uv.y) / levels = alpha, floor(uv.x) / levels = seed, fract(uv) = the quad.
+            const std::string q = v + "_q";
+            decl = "vec2 " + q + " = fract(vUV);\n"
+                   "    vec2 " + v + " = (vUV - " + q + ") / " + fmtF(HE::kParticleBandLevels) + ";";
+            pinExpr = { q, v + ".y", v + ".x" };
+            break;
+        }
+        case MatNodeType::FoamBandData:
+        {
+            // fract(u) = ring, floor(u) / levels = strength, 2 v - 1 = facing, the normal's lean / gain = flow.
+            const std::string nn = v + "_n", r = v + "_r";
+            decl = "vec3 " + nn + " = normalize(vNormal);\n"
+                   "    float " + r + " = fract(vUV.x);\n"
+                   "    vec2 " + v + " = " + nn + ".xz / max(" + nn + ".y, 1e-4) / "
+                   + fmtF(HE::water::kObstacleFoamFlowGain) + ";";
+            pinExpr = { r, "((vUV.x - " + r + ") / " + fmtF(HE::water::kObstacleFoamLevels) + ")",
+                        "(vUV.y * 2.0 - 1.0)", v };
+            break;
+        }
         case MatNodeType::Smoothstep:
         {
             const std::string x = inputExpr(c, sc, n, 2, F::Float), e1 = inputExpr(c, sc, n, 1, F::Float),
@@ -2752,6 +2806,8 @@ MatShaderGen generateFragment(const MaterialGraph& graph, const MatFunctionLoade
     gen.switches  = std::move(c.switches);
     gen.blendMode = static_cast<uint8_t>(blendMode);
     gen.domain    = static_cast<uint8_t>(domain);
+    gen.sortPriority = static_cast<int8_t>(std::clamp(out->sortPriority, static_cast<int>(kMatMinSortPriority),
+                                                      static_cast<int>(kMatMaxSortPriority)));
     gen.layerNames = std::move(c.layerNames);
     return gen;
 }
@@ -2840,6 +2896,9 @@ nlohmann::json matNodeToJsonObj(const MatGraphNode& n)
     if (n.type == MatNodeType::Output && n.tess != MatTessSettings{})
         jn["tess"] = { { "max", n.tess.maxFactor }, { "near", n.tess.fadeNear },
                        { "far", n.tess.fadeFar }, { "maxDisp", n.tess.maxDisplacement } };
+    // The translucent sort priority (Output node): only when set, for the same reason.
+    if (n.type == MatNodeType::Output && n.sortPriority != 0)
+        jn["sortPriority"] = n.sortPriority;
     return jn;
 }
 
@@ -2868,6 +2927,8 @@ bool matNodeFromJsonObj(const nlohmann::json& jn, MatGraphNode& n)
         n.tess.fadeFar         = num("far", def.fadeFar);
         n.tess.maxDisplacement = num("maxDisp", def.maxDisplacement);
     }
+    if (auto sp = jn.find("sortPriority"); sp != jn.end() && sp->is_number())
+        n.sortPriority = std::clamp(sp->get<int>(), static_cast<int>(kMatMinSortPriority), static_cast<int>(kMatMaxSortPriority));
     n.x = jn.value("x", 0.0f);
     n.y = jn.value("y", 0.0f);
     // Migration: UV gained tiling params (p[0..1]) after these graphs were

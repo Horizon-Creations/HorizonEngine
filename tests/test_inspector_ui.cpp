@@ -906,7 +906,7 @@ TEST_CASE("inspector ui: Add Component is grouped, and a typed search ends on En
 // Material section, edited bottom-up because an edit adds a "Reset to material
 // default" button under its row and moves everything below.
 #ifdef HE_EDITOR_DEPS_DIR
-TEST_CASE("inspector ui: the engine water material shows all fourteen parameters, and each one edits this entity")
+TEST_CASE("inspector ui: the engine water material shows all its parameters, and each one edits this entity")
 {
 	Harness harness;
 	constexpr int TW = 420, TH = 2400;
@@ -930,7 +930,7 @@ TEST_CASE("inspector ui: the engine water material shows all fourteen parameters
 		sharedBefore = m->shaderParamData;
 		names.insert(m->graphParamNames.begin(), m->graphParamNames.end());
 	}
-	REQUIRE(names.size() == 14);
+	REQUIRE(names.size() == 15);        // the 14 knobs and the Flow knob (the engine sets its z/w per frame)
 
 	// Selectable without any setup: the material slot's picker lists it
 	// (EditorWidgets → HcEditorUtil::listAssets, the same scan the panel runs).

@@ -29,6 +29,7 @@ namespace
 		{ "Rope",                   "rope" },
 		{ "Spline",                 "spline" },
 		{ "Trail",                  "trail" },
+		{ "Water Obstacle",         "waterObstacle" },
 		{ "Rigid Body",             "rigidbody" },
 		{ "Collider",               "collider" },
 		{ "Joint",                  "joint" },

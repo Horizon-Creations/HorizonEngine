@@ -109,6 +109,7 @@ namespace
     bool bodyEq(const Body& a, const Body& b)
     {
         return a.id == b.id && a.level == b.level && a.sourceSpline == b.sourceSpline &&
+               a.stream == b.stream && a.streamDepth == b.streamDepth &&
                a.polygon == b.polygon;   // syncKey is runtime state and never part of the content
     }
     bool bodiesEq(const std::vector<Body>& a, const std::vector<Body>& b)
@@ -209,6 +210,8 @@ bool sameContent(const Field& a, const Field& b)
 {
     if (a.res != b.res || a.nextBodyId != b.nextBodyId || !bodiesFullEq(a.bodies, b.bodies)) return false;
     if (a.clipToGround != b.clipToGround || a.shoreOvershoot != b.shoreOvershoot || a.tessellation != b.tessellation) return false;
+    if (a.material != b.material || a.fallCurtain != b.fallCurtain || a.fallDrops != b.fallDrops ||
+        a.fallMist != b.fallMist) return false;
     const size_t n = static_cast<size_t>(a.res) * a.res;
     if (a.allocated() && b.allocated()) return a.coverage == b.coverage && a.owner == b.owner;
     for (size_t i = 0; i < n; ++i)
@@ -346,6 +349,18 @@ bool setPhysics(TerrainComponent& tc, uint16_t id, const BodyPhysics& physics)
     // The sheet is the same: neither `dirty` nor the rectangle, or the mesh would be
     // rebuilt for a number it never reads. The revision is what tells the physics.
     ++tc.water.revision;
+    return true;
+}
+
+bool setStream(TerrainComponent& tc, uint16_t id, bool on, float depth)
+{
+    Body* b = tc.water.findBody(id);
+    if (!b) return false;
+    const float d = std::isfinite(depth) ? std::clamp(depth, kMinStreamDepth, kMaxStreamDepth) : kDefaultStreamDepth;
+    if (b->stream == on && (!on || b->streamDepth == d)) return true;
+    b->stream = on;
+    b->streamDepth = on ? d : kDefaultStreamDepth;
+    markAll(tc);    // the sheet takes another shape: the whole body is rebuilt
     return true;
 }
 
@@ -1027,6 +1042,7 @@ void sanitize(TerrainComponent& tc)
         nb.underwaterCaustics = clampUnderwaterCaustics(nb.underwaterCaustics);
         nb.tessellation = clampTessellation(nb.tessellation);
         nb.brushBed = clampBrushBed(nb.brushBed);
+        nb.streamDepth = finite(nb.streamDepth) ? std::clamp(nb.streamDepth, kMinStreamDepth, kMaxStreamDepth) : kDefaultStreamDepth;
         if (!nb.brushPatch.empty() && !patchFits(nb.brushPatch, tc.resolution)) nb.brushPatch = GroundPatch{};
     }
     f.bodies = std::move(kept);

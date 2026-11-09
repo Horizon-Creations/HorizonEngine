@@ -71,6 +71,13 @@ namespace
 	  "the air, a projectile streak. Points are dropped as it travels and fade out "
 	  "again after their lifetime.",
 	  "", "systems#particles" },
+	{ "Component/Water Obstacle", "Water Obstacle",
+	  "Makes the landscape water treat the entity as standing in it: a rock in a "
+	  "river, a bridge pier, a post in a lake. Where the water runs past it, foam "
+	  "gathers along its mesh bounds, thick where the water meets it and trailing "
+	  "off downstream, the stronger the faster the water. Still water shows none. "
+	  "The water does not flow around it: this is the foam, not a change to the water.",
+	  "", "scenes#components" },
 	{ "Component/Rigid Body", "Rigid Body",
 	  "Hands the entity to the physics solver. Without a Collider it uses a box "
 	  "derived from the transform.",
@@ -846,6 +853,29 @@ namespace
 	  "in metres. A little keeps the water's rim tucked under the bank instead of "
 	  "a hair short of it. On a gentle bank it pushes the rim further than on a "
 	  "steep one. 0 ends it exactly where the surface meets the ground.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Water Material", "",
+	  "The material every lake, pond and stream of this landscape is drawn with — the "
+	  "engine's Water unless you drop another one here. Its Static Switches Flow, Stream "
+	  "and Tessellation are turned on where the water runs or tessellates; a material "
+	  "without them draws the same everywhere. It reads the sheet (shore, depth, slope) "
+	  "through the Water Surface node.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Fall Curtain", "",
+	  "The particle system that falls from the lip wherever a stream of this landscape "
+	  "drops over a steep edge — the engine's water curtain unless you drop another one "
+	  "here. It is placed and tuned per fall (how wide the edge, how high the drop, which "
+	  "way the water leaves), the look is the asset's. Its graph's +X is the way the water "
+	  "leaves, +Z runs along the edge. Empty: no curtain.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Fall Drops", "",
+	  "The particle system thrown up where fast water lands in calm water, at the foot of "
+	  "a fall — the engine's drops by default, stronger for a higher fall. Its graph's +X "
+	  "is the way the water arrives. Empty: none.",
+	  "", "scenes#terrain" },
+	{ "Terrain/Fall Mist", "",
+	  "The particle system that hangs over the foot of a fall — the engine's mist by "
+	  "default, thicker for a higher fall. Empty: none.",
 	  "", "scenes#terrain" },
 	{ "Terrain/Seed", "",
 	  "Which random landscape is generated. 0 is flat ground; any other number is "
@@ -2049,6 +2079,28 @@ namespace
 	  "How long a dropped point survives. It is also the length of the band in "
 	  "time: a fast entity with a short lifetime leaves a short streak.",
 	  "", "systems#particles" },
+	{ "Water Obstacle/Enabled", "",
+	  "Off: no foam around this entity, the settings stay.",
+	  "", "scenes#components" },
+	{ "Water Obstacle/Foam", "",
+	  "How much foam: 1 is the default look, 0 none, up to 4 for a churning rapid. "
+	  "The current scales it further — slow water foams little, from 1.5 m/s on it "
+	  "is at full strength.",
+	  "", "scenes#components" },
+	{ "Water Obstacle/Margin", "",
+	  "How far the foam reaches out from the mesh bounds at the sides and upstream, "
+	  "where the water piles against it.",
+	  "", "scenes#components" },
+	{ "Water Obstacle/Foam Material", "",
+	  "The material the foam band is drawn with: the engine's own foam by default. "
+	  "Any translucent material can take its place; it reads the band through the "
+	  "Foam Band node (where on the band, how strong, which way the water runs). Give "
+	  "it a higher Sort Priority than the water so it draws on top.",
+	  "", "scenes#components" },
+	{ "Water Obstacle/Wake", "",
+	  "How far the foam trails downstream behind it at full current. A slower current "
+	  "draws a shorter wake.",
+	  "", "scenes#components" },
 	{ "Trail/Min Vertex Distance", "",
 	  "How far the entity has to travel before the next point is dropped. Larger "
 	  "spends fewer points on a long trail; smaller follows a tight curve without "
@@ -5612,6 +5664,12 @@ namespace
 	  "rest of the editor.",
 	  "", "materials#parameters" },
 
+	{ "Material Settings/Sort Priority", "",
+	  "For a translucent material: which blended draws come later. Within one priority "
+	  "the far ones are drawn first; a higher priority is drawn after every lower one, "
+	  "whatever the distances. Give foam or spray lying on water a higher priority than "
+	  "the water, or a lake whose middle is nearer the camera covers them.",
+	  "", "materials#concept" },
 	{ "Material Settings/Clip", "Clip Threshold",
 	  "Where a masked material cuts: pixels whose opacity falls below this are "
 	  "discarded entirely, leaving a hard edge. It is what makes leaves and "
@@ -7858,11 +7916,11 @@ namespace
 	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
 	  "does not dig on forever. "
-	  "With Terraces on Slopes, a stroke that has stepped down a slope digs a "
-	  "channel instead: the ground under the whole stream goes down by up to Max "
-	  "Depth below where it was, from the stream's edge at Slope, on under the "
-	  "falls between two steps too, and the water lies at its painted depth in "
-	  "the channel. No bank is shaved there. "
+	  "With Follow Slope, a stream always digs a channel, with or without Dig "
+	  "Bed: the ground under it goes down a little deeper than the water, with "
+	  "steep banks, so the water does not stand over the slope. Dig Bed makes "
+	  "that channel deeper (Max Depth) and the banks gentler (Slope). No bank is "
+	  "shaved there. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
 	  "together.",
 	  "", "editor#landscape-mode" },
@@ -7875,33 +7933,20 @@ namespace
 	  "that already follows the ground keeps doing so until you turn that off in "
 	  "its Water Physics.",
 	  "", "editor#landscape-mode" },
-	{ "Landscape/Terraces on Slopes##water", "Terraces on Slopes",
+	{ "Landscape/Follow Slope##water", "Follow Slope",
 	  "Water stays flat, so a stroke dragged down a hillside would only grow an ever "
-	  "deeper wedge hanging in the air over the slope. With this on, the stroke steps "
-	  "down instead, in separate bodies Step Height apart, and keeps its depth: where "
-	  "the ground under the brush is at least Min Slope steep, each spot gets the "
-	  "highest step that holds it at most Above Ground deep. Every step is a shallow "
-	  "pool, and between two of them a waterfall band runs down the slope. Flatter "
-	  "ground is unaffected: a pond there stays one body; the steep banks of a pond "
-	  "do step, so paint ponds with this off. With Dig Bed on, the stroke cuts a "
-	  "channel under the whole stream once it has stepped (see Dig Bed). One undo "
-	  "step still takes the whole stroke back.",
-	  "", "editor#landscape-mode" },
-	{ "Landscape/Step Height##water", "Terrace Step Height",
-	  "How far apart, in metres, two steps of a stroke with Terraces on Slopes are. "
-	  "Smaller makes a finer staircase that follows the slope more closely, with more "
-	  "and shorter waterfalls (at the default 0.5 m a stroke down a hillside reads as "
-	  "one ribbon); larger makes fewer, taller falls between longer stretches of band, "
-	  "and fewer bodies. On a gentle slope a step is lower than this by itself, so "
-	  "the band between two steps always reaches the next one. At least 0.4 m: a "
-	  "smaller drop hangs no waterfall band.",
-	  "", "editor#landscape-mode" },
-	{ "Landscape/Min Slope##water", "Terrace Min Slope",
-	  "From which steepness of the ground under the brush, in degrees, a stroke with "
-	  "Terraces on Slopes steps down and keeps the water's depth (Above Ground) on the "
-	  "slope. On flatter ground the water stays one flat body and grows deeper where "
-	  "the ground falls away, as a pond does. Lower it to have gentle hillsides "
-	  "stepped too; raise it to keep the steps to steep ground only.",
+	  "deeper wedge hanging in the air over the slope. With this on, a stroke that "
+	  "starts on dry ground paints a stream: one smooth sheet that lies on the ground, "
+	  "Above Ground deep, runs down the hill with it and thins out at its edges, in a "
+	  "channel it digs for itself so the water does not stand over the slope. Its "
+	  "current at every point is the way the ground falls there, faster the steeper it "
+	  "is, and you see it in the ripples and the streaks along the water. On level "
+	  "ground the same water stands still, so a stroke that runs on over the foot of "
+	  "the hill is one body without a seam. A stroke that starts on water that is "
+	  "already there leaves that water as it is, and a stream that runs into a lake "
+	  "joins it. For a pond or a lake with a level of its own, turn this off. With Dig "
+	  "Bed on, the channel can be deeper (see Dig Bed). One undo step still takes the "
+	  "whole stroke back.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Close Bed on Erase##water", "Close Bed on Erase",
 	  "When the eraser dries ground the brush dug (Dig Bed), that ground is raised "
@@ -10377,7 +10422,7 @@ namespace
 	// editor.
 	constexpr const char* kComponentScopes[] = {
 		"Transform", "Transform 2D", "Mesh", "Skeletal Mesh", "Material", "Light",
-		"Decal", "Rope", "Spline", "Trail", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
+		"Decal", "Rope", "Spline", "Trail", "Water Obstacle", "Rigid Body", "Collider", "Joint", "Character Controller", "Movement",
 		"Replication",
 		"Camera", "Camera Rig", "Script", "Terrain", "Foliage", "Nav Mesh",
 		"Nav Agent", "Audio Source", "Audio Listener", "Animator", "Animator Blend",

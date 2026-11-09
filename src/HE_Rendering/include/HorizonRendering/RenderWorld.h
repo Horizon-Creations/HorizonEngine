@@ -51,6 +51,10 @@ struct CameraData {
 // fog gate on every backend is therefore density > 0, never wet.
 struct UnderwaterCameraData {
     bool  wet         = false;  // a water surface covers the camera's XZ, AND camera.y is between that body's bed and its surface level (inclusive) — not above the surface, not under the bed
+    // Which body of water the camera is in (the Surface's terrain entity and body id): the water material shows its underside
+    // only to a camera in ITS body (RenderExtractor sets the material's Flow knob per surface). Meaningful only if wet.
+    uint32_t terrainEntity = 0xFFFFFFFFu;
+    uint16_t bodyId = 0;
     float surfaceY    = 0.0f;   // world Y of that surface (the flat body level the material shades waves on top of; meaningful only if wet)
     float signedDepth = 0.0f;   // surfaceY - camera.y: > 0 means the camera is below the surface. 0 when !wet.
     glm::vec3 tintColor { 0.045f, 0.20f, 0.22f };   // resolved shallow→deep blend; meaningful only if density > 0
@@ -220,6 +224,29 @@ struct RibbonBatch {
     uint32_t              entityId = 0;
     HE::AABB              worldBounds;
 };
+
+// Particle bands: a Streak/Puff emitter (ParticleEmitterConfig::billboard) is a
+// RibbonBatch of world-space quads, one per particle (RenderExtractor), so it is
+// drawn through the trails' path above, one draw per emitter on every backend.
+// The vertex has no colour, so the UV carries the particle: the quad's own UV is
+// fract(uv), the particle's alpha over life floor(uv.y) / kParticleBandLevels, and
+// a fixed per-particle seed floor(uv.x) / kParticleBandLevels. A band material
+// reads them through the Particle material node; its colour is its own.
+inline constexpr float kParticleBandLevels = HE::kParticleBandLevels;   // ParticleGraph.h
+
+inline int particleBandLevel(float v01)
+{
+    const int l = static_cast<int>(v01 * kParticleBandLevels + 0.5f);
+    return l < 0 ? 0 : l > static_cast<int>(kParticleBandLevels) ? static_cast<int>(kParticleBandLevels) : l;
+}
+
+// The UV of the band vertex at (u, v) of a particle's quad, u and v in 0..1. The
+// 0.001 margins keep fract() from wrapping at a corner after interpolation.
+inline glm::vec2 particleBandUv(float seed01, float alpha01, float u, float v)
+{
+    return { static_cast<float>(particleBandLevel(seed01))  + 0.001f + 0.998f * u,
+             static_cast<float>(particleBandLevel(alpha01)) + 0.001f + 0.998f * v };
+}
 
 // Move a ribbon's WORLD-space positions onto their own centre and return that
 // centre — the translation the caller then draws them with as the model matrix.

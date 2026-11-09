@@ -12,6 +12,10 @@
 #include <HorizonScene/Components/ColliderComponent.h>
 #include <HorizonRendering/RenderWorld.h>
 #include <HorizonRendering/RenderExtractor.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <vector>
 
 // Builds a ParticleGraphAsset wiring Const nodes onto every Emitter Output pin —
 // the graph-authored equivalent of directly setting the old inline component
@@ -400,6 +404,7 @@ TEST_CASE("RenderExtractor batches a ParticleSystemComponent's particles with ra
 
     RenderWorld rw;
     RenderExtractor extractor;
+    extractor.setParticleSpritesCapable(true);   // a backend with the instanced sprite pass (GL, Metal)
     extractor.extract(world, rw, 16.0f / 9.0f);
 
     CHECK(rw.objects.empty()); // no more one-RenderObject-per-particle
@@ -441,11 +446,257 @@ TEST_CASE("RenderExtractor: a fresh particle (lifetime==maxLifetime) gets t01=0"
 
     RenderWorld rw;
     RenderExtractor extractor;
+    extractor.setParticleSpritesCapable(true);
     extractor.extract(world, rw, 16.0f / 9.0f);
 
     REQUIRE(rw.particleBatches.size() == 1);
     REQUIRE(rw.particleBatches[0].instances.size() == 1);
     CHECK(rw.particleBatches[0].instances[0].t01 == doctest::Approx(0.0f));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RenderExtractor — particle billboards (RenderObjects every backend draws)
+// ─────────────────────────────────────────────────────────────────────────────
+// A Streak/Puff emitter, or a Sprite on a backend without the sprite pass (D3D11,
+// D3D12, Vulkan, Software), comes out as one RenderObject per particle with the
+// emitter's material, grouped by tint step so GeometryPass instances them.
+
+namespace
+{
+void billboardEmitter(HorizonWorld& world, HE::ParticleBillboard kind, int count)
+{
+    auto& reg = world.registry();
+    auto e = world.createEntity("emitter");
+    TransformComponent t;
+    t.worldMatrix = glm::mat4(1.0f);
+    reg.emplace<TransformComponent>(e, t);
+    ParticleSystemComponent ps;
+    ps.resolvedConfig.billboard       = static_cast<uint8_t>(kind);
+    ps.resolvedConfig.materialAssetId = HE::kEngineWaterSprayMaterialId;
+    ps.resolvedConfig.startSize = 0.2f;  ps.resolvedConfig.endSize = 0.2f;
+    ps.resolvedConfig.startAlpha = 1.0f; ps.resolvedConfig.endAlpha = 0.0f;
+    ps.resolvedConfig.stretch = 0.1f;
+    for (int i = 0; i < count; ++i)
+    {
+        Particle p;
+        p.position    = { static_cast<float>(i) * 0.5f, 0.0f, -10.0f };     // in front of the default camera
+        p.velocity    = { 0.0f, -10.0f, 0.0f };                     // falling
+        p.maxLifetime = 1.0f + 0.01f * static_cast<float>(i);
+        // Alternating young and old: written out of order, they must come out grouped.
+        p.lifetime    = (i % 2 == 0 ? 0.95f : 0.15f) * p.maxLifetime;
+        ps.particles.push_back(p);
+    }
+    reg.emplace<ParticleSystemComponent>(e, ps);
+}
+}
+
+TEST_CASE("RenderExtractor: a Streak emitter is ONE particle band on every backend, its quads stretched along the fall")
+{
+    HorizonWorld world;
+    billboardEmitter(world, HE::ParticleBillboard::Streak, 10);
+
+    for (const bool sprites : { false, true })   // D3D/Vulkan and GL/Metal alike
+    {
+        RenderWorld rw;
+        RenderExtractor extractor;
+        extractor.setParticleSpritesCapable(sprites);
+        extractor.extract(world, rw, 16.0f / 9.0f);
+        CHECK(rw.particleBatches.empty());
+        CHECK(rw.objects.empty());                     // not a RenderObject per particle: one draw per emitter
+        REQUIRE(rw.ribbonBatches.size() == 1u);
+        const RibbonBatch& rb = rw.ribbonBatches[0];
+        CHECK(rb.materialAssetId == HE::kEngineWaterSprayMaterialId);
+        CHECK(rb.worldBounds.isValid());
+        REQUIRE(rb.vertices.size() == 10u * 4u * 8u);  // a quad per particle, pos3 + norm3 + uv2
+        REQUIRE(rb.indices.size() == 10u * 6u);
+        auto pos = [&](size_t v) { return glm::vec3(rb.vertices[v * 8], rb.vertices[v * 8 + 1], rb.vertices[v * 8 + 2]); };
+        auto uv  = [&](size_t v) { return glm::vec2(rb.vertices[v * 8 + 6], rb.vertices[v * 8 + 7]); };
+        // The fade rides in floor(uv.y): young drops (alpha ~0.95) high, old ones (~0.15) low, and the quad's own UV
+        // in fract(uv) spans the whole quad.
+        int young = 0, old = 0;
+        for (size_t q = 0; q < 10; ++q)
+        {
+            const float level = std::floor(uv(q * 4).y);
+            CHECK(std::floor(uv(q * 4 + 2).y) == level);                      // one level across the quad
+            const float fade = level / kParticleBandLevels;
+            if (fade > 0.8f) ++young;
+            if (fade < 0.25f) ++old;
+            CHECK(uv(q * 4).y - level < 0.01f);
+            CHECK(uv(q * 4 + 2).y - level > 0.99f);
+        }
+        CHECK(young == 5);
+        CHECK(old == 5);
+        // Back to front: the first quad is the farthest from the camera.
+        const glm::vec3 cam = rw.camera.position;
+        const glm::vec3 c0 = 0.5f * (pos(0) + pos(2)), cLast = 0.5f * (pos(36) + pos(38));
+        CHECK(glm::length(c0 - cam) >= glm::length(cLast - cam));
+        // The streak's long axis is the fall (world -Y seen from a camera looking along Z), its length size + speed *
+        // stretch = 0.2 + 10 * 0.1 = 1.2 m, its width the size.
+        const glm::vec3 along = pos(3) - pos(0), across = pos(1) - pos(0);
+        CHECK(std::abs(glm::normalize(along).y) > 0.9f);
+        CHECK(glm::length(along) == doctest::Approx(1.2f).epsilon(0.05));
+        CHECK(glm::length(across) == doctest::Approx(0.2f).epsilon(0.05));
+    }
+}
+
+TEST_CASE("RenderExtractor: a big band is back to front over every quad, inside its bounds, and the same from recycled memory")
+{
+    // 3000 drops scattered through a 20 m box in front of the camera: enough that the band is sorted by the radix
+    // sort's every pass and written in parallel chunks, and big enough that its buffers are handed to the next walk.
+    HorizonWorld world;
+    auto& reg = world.registry();
+    auto e = world.createEntity("emitter");
+    TransformComponent t;
+    t.worldMatrix = glm::mat4(1.0f);
+    reg.emplace<TransformComponent>(e, t);
+    ParticleSystemComponent ps;
+    ps.resolvedConfig.billboard       = static_cast<uint8_t>(HE::ParticleBillboard::Streak);
+    ps.resolvedConfig.materialAssetId = HE::kEngineWaterSprayMaterialId;
+    ps.resolvedConfig.startSize = 0.2f;  ps.resolvedConfig.endSize = 0.2f;
+    ps.resolvedConfig.startAlpha = 1.0f; ps.resolvedConfig.endAlpha = 0.5f;
+    ps.resolvedConfig.stretch = 0.1f;
+    uint32_t s = 12345u;
+    auto rnd = [&] { s = s * 1664525u + 1013904223u; return static_cast<float>(s >> 8) / 16777216.0f; };
+    const size_t kCount = 3000;
+    for (size_t i = 0; i < kCount; ++i)
+    {
+        Particle p;
+        p.position    = { -10.0f + 20.0f * rnd(), -10.0f + 20.0f * rnd(), -30.0f + 20.0f * rnd() };
+        p.velocity    = { 0.0f, -2.0f - 8.0f * rnd(), 0.0f };
+        p.maxLifetime = 1.0f + rnd();
+        p.lifetime    = p.maxLifetime * (0.1f + 0.8f * rnd());
+        ps.particles.push_back(p);
+    }
+    reg.emplace<ParticleSystemComponent>(e, ps);
+
+    RenderWorld rw;
+    RenderExtractor extractor;
+    std::vector<float> first;
+    for (int walk = 0; walk < 2; ++walk)
+    {
+        extractor.extract(world, rw, 16.0f / 9.0f);
+        REQUIRE(rw.ribbonBatches.size() == 1u);
+        const RibbonBatch& rb = rw.ribbonBatches[0];
+        REQUIRE(rb.vertices.size() == kCount * 4u * 8u);
+        REQUIRE(rb.indices.size() == kCount * 6u);
+        const glm::vec3 cam = rw.camera.position;
+        // A quad's centre is its particle: no farther than the quad before it.
+        float before = std::numeric_limits<float>::max();
+        size_t outOfOrder = 0, outside = 0;
+        for (size_t q = 0; q < kCount; ++q)
+        {
+            const size_t v0 = q * 32, v2 = q * 32 + 16;
+            const glm::vec3 c = 0.5f * glm::vec3(rb.vertices[v0] + rb.vertices[v2], rb.vertices[v0 + 1] + rb.vertices[v2 + 1],
+                                                 rb.vertices[v0 + 2] + rb.vertices[v2 + 2]);
+            const glm::vec3 d = c - cam;
+            const float dd = glm::dot(d, d);
+            if (dd > before * (1.0f + 1e-5f)) ++outOfOrder;
+            before = dd;
+            for (size_t k = 0; k < 4; ++k)
+            {
+                const glm::vec3 p(rb.vertices[q * 32 + k * 8], rb.vertices[q * 32 + k * 8 + 1], rb.vertices[q * 32 + k * 8 + 2]);
+                if (glm::any(glm::lessThan(p, rb.worldBounds.min - glm::vec3(1e-4f))) ||
+                    glm::any(glm::greaterThan(p, rb.worldBounds.max + glm::vec3(1e-4f)))) ++outside;
+            }
+            // Each quad's own two triangles, on its own four vertices.
+            CHECK(rb.indices[q * 6] == static_cast<uint32_t>(q * 4));
+            CHECK(rb.indices[q * 6 + 5] == static_cast<uint32_t>(q * 4 + 3));
+        }
+        CHECK(outOfOrder == 0u);
+        CHECK(outside == 0u);
+        // The second walk writes into the first one's memory (handed over when `rw` is cleared): the same band.
+        if (walk == 0) first = rb.vertices;
+        else           CHECK(rb.vertices == first);
+    }
+}
+
+TEST_CASE("RenderExtractor: a Sprite emitter is a sprite batch where the backend has the pass, billboards where it has not")
+{
+    HorizonWorld world;
+    billboardEmitter(world, HE::ParticleBillboard::Sprite, 4);
+    {
+        RenderWorld rw;
+        RenderExtractor extractor;
+        extractor.setParticleSpritesCapable(true);
+        extractor.extract(world, rw, 16.0f / 9.0f);
+        CHECK(rw.objects.empty());
+        REQUIRE(rw.particleBatches.size() == 1u);
+        CHECK(rw.particleBatches[0].instances.size() == 4u);
+    }
+    {
+        RenderWorld rw;
+        RenderExtractor extractor;                     // D3D11, D3D12, Vulkan, Software
+        extractor.extract(world, rw, 16.0f / 9.0f);
+        CHECK(rw.particleBatches.empty());
+        REQUIRE(rw.objects.size() == 4u);
+        // A sprite faces the camera square: as wide as high.
+        const glm::mat4& m = rw.objects[0].transform;
+        CHECK(glm::length(glm::vec3(m[0])) == doctest::Approx(glm::length(glm::vec3(m[1]))));
+    }
+}
+
+TEST_CASE("Emitter modifiers: a placed emitter tunes the asset's config — scaled, turned to a heading, the pool grown with it")
+{
+    HE::ParticleEmitterConfig c;
+    c.emitRate = 100.0f; c.lifetimeMin = 1.0f; c.lifetimeMax = 2.0f; c.maxParticles = 200;
+    c.startSize = 0.2f; c.endSize = 0.4f; c.startAlpha = 0.5f; c.endAlpha = 0.25f; c.velocitySpread = 0.1f;
+    c.initialVelocity[0] = 1.0f; c.initialVelocity[1] = 2.0f; c.initialVelocity[2] = 0.0f;   // forward 1, up 2
+    c.spawnHalfA[2] = 0.75f;                                                                // across the graph's +Z
+    // Identity: untouched.
+    const HE::ParticleEmitterConfig same = applyEmitterModifiers(c, ParticleEmitterModifiers{});
+    CHECK(same.emitRate == c.emitRate);
+    CHECK(same.initialVelocity[0] == 1.0f);
+    CHECK(same.spawnHalfA[2] == 0.75f);
+
+    ParticleEmitterModifiers m;
+    m.rateScale = 2.0f; m.lifetimeScale = 1.5f; m.sizeScale = 2.0f; m.alphaScale = 4.0f; m.spreadScale = 3.0f;
+    m.velocityScale = glm::vec3(3.0f, 0.5f, 1.0f);
+    m.spawnScale = glm::vec2(2.0f, 1.0f);
+    m.heading = glm::vec2(0.0f, 1.0f);   // the graph's +X turns to world +Z
+    const HE::ParticleEmitterConfig t = applyEmitterModifiers(c, m);
+    CHECK(t.emitRate == doctest::Approx(200.0f));
+    CHECK(t.lifetimeMax == doctest::Approx(3.0f));
+    CHECK(t.maxParticles >= 600);                          // room grows with rate x life
+    CHECK(t.startSize == doctest::Approx(0.4f));
+    CHECK(t.startAlpha == doctest::Approx(1.0f));          // clamped
+    CHECK(t.velocitySpread == doctest::Approx(0.3f));
+    CHECK(t.initialVelocity[0] == doctest::Approx(0.0f).epsilon(1e-5).scale(1.0f));
+    CHECK(t.initialVelocity[1] == doctest::Approx(1.0f));  // up 2 x 0.5
+    CHECK(t.initialVelocity[2] == doctest::Approx(3.0f));  // forward 1 x 3, now along +Z
+    // The graph's across (+Z) turns with it: a quarter turn to world -X, and is twice as wide.
+    CHECK(t.spawnHalfA[0] == doctest::Approx(-1.5f));
+    CHECK(std::abs(t.spawnHalfA[2]) < 1e-5f);
+}
+
+TEST_CASE("ParticleSystem: a spawn strip spreads the births across it, a point emitter keeps its old draws")
+{
+    ContentManager cm{ "." };
+    HE::ParticleEmitterConfig c;
+    c.emitRate = 2000.0f; c.lifetimeMin = c.lifetimeMax = 5.0f; c.maxParticles = 4000;
+    c.initialVelocity[0] = 0.0f; c.initialVelocity[1] = 0.0f; c.initialVelocity[2] = 0.0f;
+    c.velocitySpread = 0.0f;
+    c.gravity[1] = 0.0f;
+    c.spawnHalfA[2] = 1.0f;              // a strip 2 m long along Z
+    HorizonWorld world;
+    auto& reg = world.registry();
+    auto e = world.createEntity("emitter");
+    TransformComponent t;
+    t.worldMatrix = glm::mat4(1.0f);
+    reg.emplace<TransformComponent>(e, t);
+    ParticleSystemComponent ps;
+    ps.configDirty = false;
+    ps.resolvedConfig = c;
+    reg.emplace<ParticleSystemComponent>(e, ps);
+    ParticleSystem::update(world, cm, 0.25f);
+    const auto& live = reg.get<ParticleSystemComponent>(e).particles;
+    REQUIRE(live.size() > 100u);
+    float lo = 1e9f, hi = -1e9f, xMax = 0.0f;
+    for (const Particle& p : live) { lo = std::min(lo, p.position.z); hi = std::max(hi, p.position.z); xMax = std::max(xMax, std::abs(p.position.x)); }
+    CHECK(lo < -0.8f);
+    CHECK(hi > 0.8f);
+    CHECK(lo >= -1.0001f);
+    CHECK(hi <= 1.0001f);
+    CHECK(xMax < 1e-4f);                  // only along the strip
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

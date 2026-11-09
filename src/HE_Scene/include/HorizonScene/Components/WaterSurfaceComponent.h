@@ -16,11 +16,13 @@
 struct WaterSurfaceComponent {
     entt::entity terrain = entt::null;   // the owning landscape entity
     uint16_t     body    = 0;            // HE::water::Body::id this surface draws
-    // A waterfall band instead of a sheet (Thema 232 Schritt 5, WaterFall.h): the ribbon
-    // that hangs from the sheet of `body` (the UPPER one) down to a lower body. At most one
-    // band per upper body, next to that body's sheet; `level` is the upper level.
-    bool         fall    = false;
-
+    // Not a surface but a SPRAY emitter (WaterSpray.h): the particle system of one place where fast water meets calm
+    // water. Same family as a surface (a generated child of its landscape, never saved, hidden from the Outliner),
+    // which is why it carries this component; WaterSurface::update keeps both. `sprayKey` says which foot it is
+    // (the foot's position on a 2 m grid), `sprayStrength` the strength it was configured for.
+    bool         spray = false;
+    uint64_t     sprayKey = 0;
+    float        sprayStrength = 0.0f;
     // The procedural mesh this entity draws and OWNS: registered once and afterwards
     // only replaced (every registration can move the content manager's pool under
     // other holders' pointers — the TerrainChunkComponent rule), given back when
@@ -37,8 +39,8 @@ struct WaterSurfaceComponent {
     float        level = 0.0f;           // terrain-local Y the entity sits at
     int          cellX0 = 0, cellZ0 = 0, cellX1 = -1, cellZ1 = -1;   // the body's cell box
     uint32_t     triangles = 0;
-    // The deepest water under the mesh when it was built (WaterMesh.h SurfaceMesh::deepest; -1 unknown,
-    // 0 for a band): the water material's Flow.z, so a camera below a pool it is not in does not see
+    // The deepest water under the mesh when it was built (WaterMesh.h SurfaceMesh::deepest; -1 unknown):
+    // the water material's Flow.z, so a camera below a pool it is not in does not see
     // the underside (Thema 232 Schritt 13).
     float        deepest = -1.0f;
 };

@@ -1,5 +1,9 @@
 # Wasser-Tool: Strömungen und Wasserfälle an Steigungen, Bestandsaufnahme und Entwurf (Thema 232, Schritt 1)
 
+> **ÜBERHOLT (Schritt 14, 2026-11-09, auf Wunsch des Menschen):** Terrassen, Wasserfall-Bänder (`WaterFall.cpp`) und die Stufen-Regler sind
+> ausgebaut. Ein Strich mit *Follow Slope* malt jetzt einen **Stream**: eine glatte Fläche auf dem Boden. Die Abschnitte oben bis Schritt 13
+> beschreiben den alten Weg und gelten nur noch als Geschichte; maßgeblich ist der Abschnitt **Schritt 14** am Ende.
+
 Nur Entwurf. Kein Shader, kein Mesh-Bake, kein Pinselverhalten ist geändert. Alle Zeilenangaben sind in diesem
 Zweig gelesen (Stand `a8d6ce2d4`); was nicht gelesen wurde, steht unter "Nicht verifiziert".
 
@@ -395,3 +399,250 @@ eigenes Thema (Pegel als Feld statt Skalar).
 - **Nächste Schritte:** (1) Offen (1) schließen: den `Flow`-ParamVec4 vor den Static Switch ziehen (die Versatz-Knoten bleiben
   geschaltet): plain 15 / Tess 16 / Flow 15 / Flow+Tess 16 Slots, passt; dann `deepest` an jedes Blatt (w = 1), still oder nicht.
   (2) bodenfolgendes Band (Abschnitt Schritt 12); (3) Backend-Abnahme der Flow-Variante (D3D/Vulkan).
+
+### Schritt 14 (Redo: Stream statt Terrassen, auf Wunsch des Menschen)
+
+Der Mensch wollte keine Terrassen, sondern eine natürliche, glatte Wasserfläche, die dem Hang folgt, sichtbar fließt, wie Wasser aussieht (nicht wie
+Minecraft-Wasser), in einer ausgegrabenen Rinne liegt, nicht übersteht und sich ohne Naht mit anderem Wasser verbindet; dazu D3D/Vulkan.
+
+- **Datenmodell:** `Body::stream` + `Body::streamDepth` (`WaterField.h`, Standard aus, nur bei `true` gespeichert, `bodyEq`, `sanitize`, `setStream`). Die Höhe ist
+  nie gespeichert: `streamSurfaceAt` = Boden + Tiefe. `Body::level` bleibt nur die Bezugshöhe des Entity.
+- **Mesh (`WaterMesh.cpp`):** ShoreClip/SurfaceOptions `streamDepth`; Lattice ohne Boden-Clipping, `g` = scheinbare Tiefe (`kStreamVisualDepth` 0,9 m) mit weichem Rand;
+  `refineShore(..., maxLen)` schneidet das Dreiecksnetz auf die Terrain-Rasterweite (0,4..3 m); Vertex-Y = Boden + `kStreamLift` + Tiefe · taper − level; echte AABB; die Normale
+  bleibt +Y (das Material zieht die Wellennormale von der Mesh-Normale ab, eine echte Hangnormale ginge verloren). **Pro Vertex in der UV: die Bodensteigung in Weltachsen**
+  (Landschaftsdrehung `streamTurn`, Skalierung `shoreTiltScale`), Gradient über `kStreamGradientStep` (2,5 m), damit der Quergefälle der Rinne wegfällt.
+- **Rinne:** ein Stream gräbt immer (`dab()`): Tiefe `kStreamChannelFactor` (1,25) · Wassertiefe, Böschung `kStreamBankSlope` 0,8, Dig Bed macht sie tiefer/flacher. Das Wasser
+  steht damit höchstens auf dem alten Boden. `digChannel` aus Schritt 12 bleibt, nur für den einen Stream-Körper.
+- **Physik (`WaterQuery.cpp`):** Höhe und Strömung für Streams aus dem Boden am Punkt (`streamFlowAt`), keine Wellen, `regions()` aus dem Bodenbereich unter dem Stream.
+- **Pinsel (`WaterBrush.*`):** `Params::followSlope` ersetzt `cascade/terraceStep/terraceSlope`; ein Strich auf trockenem Boden ist ein Stream **den ganzen Weg** (auf ebenem Boden steht
+  er still, ein Körper, keine Naht); ein Strich auf vorhandenem Wasser lässt es, wie es ist. Min Slope und Step Height gibt es nicht mehr. Für einen Teich Follow Slope ausschalten.
+- **Verbinden:** (a) Ein Stream reicht eine Zelle in angrenzendes Wasser (`ShoreClip::joinBody`, `joinReaches`: Stream reicht in flache Körper, nie umgekehrt) und liegt dort knapp
+  unter deren Oberfläche; die Überlappung läuft zum fernen Rand aus. (b) Flache Körper gleicher Höhe (`kJoinLevelTolerance` 0,05 m), die sich berühren, sind EINE Fläche:
+  `flatGroupLeads`, `WaterSurface.cpp` zeichnet die Gruppe mit der niedrigsten Id als ein Mesh, die anderen zeichnen nichts.
+- **Material (`MatGen/main.cpp`):** Static Switch `Stream` (nur mit `Flow`): Strömung aus der UV-Steigung (`kStreamStillSlope/FallSlope/MaxSpeed` in `Physics/WaterWaves.h`),
+  Zwei-Phasen-Flow-Map (1,4 s) für alle vier Chop-Schichten, die Steigung als Lean in die Wellennormale, Streifen (gestrecktes Fbm entlang der Strömung) als Schaum, **nie die
+  Unterseite** (Kamera neben dem Bach). Neue Material-ID `kEngineWaterStreamMaterialId` {0x600,5}. Ohne den Switch ist der Shader der alte (stilles Wasser D3D12: alt gegen neu im Rauschen).
+- **Entfernt:** `WaterFall.cpp/.h`, `test_water_fall.cpp`, `WaterSurfaceComponent::fall`, Terrassen-Tests.
+- **Backends:** das Material ist ein Graph, es gibt keinen neuen Knotentyp und keinen Renderer-Code; D3D11, D3D12, Vulkan sind auf NN-WS03 (RTX 4070) gerendert (`HE_DUMP_WATERLAKE=hill|join`),
+  Material `600,5 (WaterStream, shader ready)` im Log. Metal/OpenGL: nicht gerendert (Windows-Rechner).
+
+## Handoff (Schritt 14)
+
+- **Branch:** `claude/wasser-tool-str-mungen-und-automatische-wasserf-lle-an-steig`, Worktree `C:/hw232` (Build `C:/hw232/o`), **nicht committet, nicht gepusht**.
+- **Verifiziert:** `he_tests` Wasser-Fälle (374) grün, Vollsuite siehe Ergebnis im Chat; D3D11/D3D12/Vulkan Hügel-Zeuge (`docs/img-water-stream/`); stilles Wasser alt = neu.
+- **Nicht verifiziert:** Metal/OpenGL; Mausbedienung im Editor (nur Pinsel-Code und kompilierte UI); Perf der Zwei-Phasen-Chop-Schichten (nicht gemessen, 4 Schichten doppelt nur im Stream-Material);
+  echte 1000-m-Landschaft (grobe Wasserzellen); ein dunkleres Band, wo ein Stream über ein See-Ende hinausläuft (Zeuge `join`).
+- **Nächste Schritte:** 1. Perf messen (`scripts/perf/water_matrix.py`). 2. Band am Stream-See-Übergang entschärfen (Stream-Streifen im Überlappungsstreifen ausblenden). 3. Streams in der Wasser-Physik
+  der Schwimmer (`WaterBuoyancy`) an einem Hang testen. 4. Handbuch.
+
+### Schritt 15 (Bett, Spritzer, Richtungswechsel; auf Wunsch des Menschen)
+
+- **Follow Slope auf vorhandenem Wasser:** ein Strich, der in einem See beginnt, malt jetzt einen **eigenen Stream** daneben (bisher setzte er den flachen See den Hang hinauf fort: ein
+  ebener Pegel, den das Bett nicht füllen kann). Der Stream verbindet sich mit dem See (joinReaches), der See bleibt wie er ist. Stream-Film dichter (`kStreamVisualDepth` 1,4 m).
+- **Bett bei verbundenem Wasser:** `digGroup`/`touchingBodies` in `WaterBrush.cpp`: gleich hohe flache Körper werden als EIN Gewässer ausgehoben (Lattice über die Gruppe), die Ufer-Distanz
+  von Bach und See wird über die gemeinsame Kontur gemessen (kein Grat am Übergang), die Böschung schabt nichts unter Nachbarwasser.
+- **Strömung nie bergauf:** `streamSlopeAt` (steilster Abstieg auf einem Kreis, nie bergauf) statt der breiten Differenz; Material und Physik lesen sie.
+- **Unterseite:** jeder Landschafts-Körper trägt `deepest` in der UV (x, Marker y = -2); das Material zeigt die Unterseite nur einer Kamera, die in diesem Wasser sein kann.
+- **Spritzer (`WaterSpray.h/.cpp`):** `findSprayFeet`: wo schnelles Wasser (>= 1,5 m/s) auf ruhiges trifft (flussab <= 35 % der Geschwindigkeit, Wasser dort) und mindestens 0,8 m gefallen ist
+  (der Weg flussauf, solange es >= 1 m/s läuft); `sprayStrength(drop, speed)` 0..1, mit der Fallhöhe (bis 6 m) und der Geschwindigkeit. `WaterSurface.cpp`: ein Partikel-Emitter pro Fuß
+  (generiertes Kind der Landschaft: `WaterSurfaceComponent::spray`, nie gespeichert), Konfiguration je Stärke (Rate, Höhe, Weite, Größe), Richtung = Ankunftsrichtung; nur neu berechnet, wenn
+  sich `Field::revision` ändert. Keine neue Komponente, kein Renderer-Code.
+- **Richtungswechsel im Material:** neue Knoten `Ddx`/`Ddy` (`MatNodeType`, angehängt, nie in einem If-Zweig); der Stream-Zweig misst aus den Ableitungen der Strömungsrichtung und der Weltposition,
+  wie schnell sich die Richtung je Meter dreht (`turbulence`), und macht das Wasser dort unruhiger (Chop-Amplitude) und schäumt (Flecken im Streifenrauschen).
+- **Nicht verifiziert:** Spritzer in Echtzeit (der Headless-Dump läuft mit großen Zeitschritten: die Wolke dort ist zu hoch); Perf; Metal/OpenGL.
+
+### Schritt 16 (gefüllte Becken, Unterseite nur im Wasser, Wasserfall-Vorhang; auf Wunsch des Menschen, Referenzfotos von Wasserfällen)
+
+- **Gefülltes Bett:** ein Stream liegt in der Rinne, die er gräbt (`Body::brushPatch` merkt, was jede Dab gesenkt hat); das Wasser steht jetzt bis `kStreamFreeboard` (5 cm) unter den ALTEN Boden
+  (`streamFillAt`, `brushDugAt`, `streamSurfaceAt` in `WaterMesh.cpp`), also ein Becken, das mit Dig Bed 2 m tief gegraben ist, ist bis zur Wasserlinie am Rand voll (vorher ein Film auf dem Boden, der sich
+  an den Wänden hochzog). Mesh, Physik (`WaterQuery`, Tiefe, Unterwasser-Kamera) und Spritzer lesen dieselbe Höhe; das Material bekommt die echte Tiefe (`deepest`).
+- **Unterseite nur für eine Kamera IM Wasser:** das Material liest den Knopf `Flow` jetzt in JEDER Variante (15 Knöpfe, Flow+Tess bleibt bei 16); z/w setzt der Renderer je Frame und Fläche
+  (`RenderExtractor.cpp waterCameraKnob`): die Kamera in genau diesem Körper (`UnderwaterCameraData::terrainEntity/bodyId`) darf die Unterseite sehen, jede andere bekommt z = -10 (immer Oberseite).
+  So gibt es die teal Platte über einem Hang nicht mehr. Kamera im Wasser: Bild unverändert (alt = neu, D3D12). Ein Mesh, dem niemand den Knopf setzt (Ebene): wie vorher.
+- **Wasserfall-Vorhang (`findFallLips`, `kFallSlope` 1,2 m/m):** wo der Boden so steil ist, dass das Wasser fällt, wirft die Oberkante jeder steilen Strecke einen Vorhang weißer Tropfen (Emitter,
+  fällt `sqrt(2h/g)` lang), am Fuß übernimmt der Spritzer (`findSprayFeet`). Stärke mit der Höhe (voll ab 12 m). Sehr schnelles Wasser (>1,8 m/s) ist im Material viel weißer (mehr Streifen-Schaum).
+- **Brush:** Follow Slope malt auch in einem See einen eigenen Stream daneben; auf Hang/steil/eben ergibt sich Film, Vorhang plus Spritzer, gefülltes Becken je nach Gelände, ohne Umschalten.
+- **Verifiziert:** Vollsuite grün, D3D11/D3D12/Vulkan gerendert (Stream-Material `shader ready`, Bilder gleich).
+- **Nicht verifiziert:** Partikel in Echtzeit (der Headless-Dump läuft mit großen Zeitschritten), Aussehen des Vorhangs gegen die Fotos, Perf, Metal/OpenGL.
+
+### Schritt 17 (Pools, Follow Slope als Standard, Umschauen)
+
+- **Ursache "Kante nicht erkannt":** Follow Slope war im Werkzeug standardmäßig aus (statische Einstellung, nach jedem Editorstart wieder aus): der Pinsel malte einen flachen See, der
+  über die Kante gerade weiterlief. Jetzt standardmäßig AN (`TerrainTools.cpp s_waterFollow`); ausgeschaltet bleibt es der See mit festem Pegel.
+- **Pools (`streamPoolOf`/`streamPoolAt`, `WaterMesh.cpp`):** eine Senke innerhalb des Streams füllt sich bis zu ihrem Überlauf (Priority-Flood über die Zellen des Körpers, vom Rand aus),
+  als stille, ebene Fläche (keine Strömung, kein Lean, kein Spritzer daraus); am Hang ändert sich nichts. Mesh, Physik, Spritzer und Unterwasser-Tiefe lesen sie. Cache je Landschaft, Körper,
+  Wasser-Revision und Boden-Version; eine Dab, die gräbt, erhöht die Wasser-Revision.
+- **Umschauen (RMB):** das Editor-Log des Menschen zeigte Look/Capture/relMode = 1 und Fokus beim Hauptfenster; trotzdem robuster: Mouse-Grab für die ganze Dauer, und wenn der relative Modus
+  nichts liefert, während sich der Zeiger auf dem Desktop bewegt, wird diese Bewegung genommen und der Zeiger zurückgesetzt (`EditorViewportNav.cpp`). Nicht interaktiv verifiziert.
+
+
+### Schritt 18 (Partikel auf D3D11/D3D12/Vulkan, dichterer Vorhang, Formen statt Kugeln; auf Wunsch des Menschen)
+
+- **Warum es fehlte:** Partikel-Emitter (`RenderWorld::particleBatches`) zeichneten nur OpenGL und Metal (instanzierte runde Sprites). D3D11/D3D12/Vulkan/Software zeichneten nichts.
+- **Weg (`RenderExtractor.cpp extractParticleBatches`):** `ParticleEmitterConfig::billboard` (`ParticleGraph.h`, `ParticleBillboard` Sprite/Streak/Puff) entscheidet:
+  Streak/Puff → ein **Partikel-Band** je Emitter, ein `RibbonBatch` (der Pfad der Trails) mit einem Welt-Quad je Partikel, hinten nach vorn sortiert: EIN Draw je Emitter auf allen fünf
+  Backends, Graph-Material, Blended-Pass, nie Schatten/AO/GI. Das UV trägt das Partikel (`RenderWorld.h kParticleBandLevels`, `particleBandUv`): fract(uv) = Quad, floor(uv.y)/64 = Alpha,
+  floor(uv.x)/64 = Seed. Sprite → wie bisher `particleBatches`, wo das Backend sie zeichnet (`setParticleSpritesCapable`, GL/Metal), sonst ein Billboard-`RenderObject` je Partikel (instanceTint).
+- **Verworfen:** ein `RenderObject` je Streak-Partikel. D3D12 zeichnet ein transluzentes Graph-Material einmal JE INSTANZ (Ring 1024 je Frame) und die Distanz-Sortierung zerreißt Tint-Läufe:
+  8127 Partikel wurden 4354 Draws, der Überlauf fiel auf Built-in-PBR (graue Riesendreiecke).
+- **Spawn-Fläche:** `spawnHalfA/B` (Weltraum-Parallelogramm, `ParticleSystem.cpp spawnParticle`; Punkt-Emitter ziehen keine Zufallszahl mehr als vorher).
+- **Material `Engine/Materials/WaterSpray.hasset`** (mat_gen Eintrag 3, `kEngineWaterSprayMaterialId` {0x602,1}, ReachFilter-Pfad + UUID): weiche Scheibe, durch fbm (Seed-versetzt, längs gestreckt)
+  zerrissen, Stärke je Partikel 0,55..1,45, lit + etwas Eigenlicht. `ensureSprayMaterial` lädt per UUID, sonst per Pfad.
+- **Emitter (`WaterSurface.cpp`):** Vorhang = Streaks über die ganze Kante (±0,85 m quer, Kanten 1,5 m auseinander → eine Fläche), 140..560/s, Alpha steigt 0,25 → 0,7 (glasig an der Kante, weiß unten);
+  Fuß = kurze Streak-Tropfen 60..400/s; NEU Nebel = wachsende, gedrehte Puffs (0,7 → 4,5 m, dünn, steigt). Budget 30000 Partikel je Landschaft (alle Raten skaliert).
+- **Zeuge:** `HE_DUMP_WATERLANDMAT=rock` (dunkles Konstant-Material) für den `fall`-Zeugen. Achtung: `shot.ps1 -Extra` setzt Env-Variablen der PowerShell-Sitzung DAUERHAFT;
+  `HE_DUMP_PARTICLESECS=0` einer Kontrolle bleibt für die nächsten Läufe stehen → immer explizit setzen.
+- **Verifiziert:** he_tests Vollsuite 6205/6205 Fälle grün (20 übersprungen); Help-Audit grün. Partikel laufen im Editor auch ohne Play (`gameDt = dt`); Kamera mitten im Fuß-Nebel: weicher Dunst. Fall-Zeuge auf D3D12/D3D11/Vulkan/OpenGL: Partikel an vs. aus ändert je
+  ~115k von 921k Pixeln; D3D11/Vulkan gegen D3D12 547/1104 Pixel; OpenGL weicht nur so weit ab wie ohne Partikel (Himmel). Bilder `docs/img-water-stream/waterfall_*.png`. Deploy MD5-geprüft.
+- **Nicht verifiziert:** Metal (Bänder laufen dort durch den Trail-Pfad, ungetestet); Echtzeit-Perf (CPU: Band-Bau ~8k Quads je Frame, nicht gemessen); Partikel-Kollision mit dem Becken
+  (Tropfen sterben nach Lebenszeit, nicht an der Oberfläche).
+- **Nächste Schritte:** 1. Perf im Editor messen (Profiler-Scope `RenderExtractor::extract`). 2. Soft-Particles (Tiefen-Fade an Wasser/Fels), heute harte Schnittkante. 3. Metal-Lauf auf dem Mac.
+
+### Schritt 18b (Vorhang einheitlich, Oberkante bündig; Rückmeldung des Menschen mit Screenshot)
+
+- **Versetzte Oberkante, Ursache:** eine Kante (`FallLip`) war die erste steile RASTER-Zelle, irgendwo bis zu einer Schrittweite die Wand hinunter (auf 2,5 m/m bis ~3,7 m tiefer), je Reihe
+  anders; jede Kante hatte ihren eigenen Emitter mit Streuung ±0,12 m längs. **Fix (`WaterSpray.cpp`):** die Kante wird auf den Gelände-Knick bisektiert (Steigung über 0,5 m längs
+  der Strömung kreuzt `kFallSlope`); `findFallLines` fasst Kanten zu EINER geraden Linie (`FallLine`) zusammen: Nachbarn bis `kFallLineGap` 3,2 m quer, bis `kFallLineReach` 10 m,
+  wenn dazwischen durchgehend Wasser liegt (Union-Find, unabhängig von der Reihenfolge); eine Linie weiter unten in der Wand einer höheren wird verworfen (keine Stufe mehr).
+  Zeuge `fall`: 3 Kanten bei x = 3,98 (± 0,01), eine Linie 7,4 m breit.
+- **Pixelige Oberkante:** frisch geborene Partikel sind von vorn fast quadratisch (Geschwindigkeit zur Kamera). `ParticleEmitterConfig::fadeIn` (Anteil der Lebenszeit, Smoothstep, im Band-Extraktor):
+  der Vorhang beginnt als weiche, gerade Kante, geboren GENAU auf der Linie (`spawnHalfB` = 0).
+- **Streifen:** Vorhang jetzt breite, stark überlappende Streaks (0,28 → 0,8 m), fast gleich stark (Material: Stärke je Partikel 0,8..1,2 statt 0,55..1,45, Rauschen weniger längs gestreckt),
+  Alpha 0,75 → 0,6, Rate je 1,5 m Kante (160..580/s). Ein Emitter je Linie (`curtainConfig`), Konfiguration wird bei jeder Wasser-Änderung neu gesetzt.
+- **Verifiziert:** Vollsuite 6206/6206 grün (neu: „a wide fall is ONE line…“); Deploy MD5-geprüft; D3D12/D3D11/Vulkan/OpenGL gerendert (`waterfall_v2_*.png`), D3D11/Vulkan ~850 px von D3D12, an/aus 121k px.
+
+### Schritt 19 (Hindernisse im Wasser: Schaum an den Mesh-Bounds bei Strömung; auf Wunsch des Menschen)
+
+- **Komponente `WaterObstacleComponent`** (`Components/WaterObstacleComponent.h`: enabled, foam 0..4, margin m, wake m). Serialisiert als `"waterObstacle"` (SceneSerializer write/read/
+  `HE_SCENE_COMPONENT_KEYS`/`isKnownComponentKey`, CellSplit Static), Inspector-Abschnitt + „Add Component ▸ Rendering ▸ Water Obstacle“, Prefab-Key, Hilfe (`Component/Water Obstacle`,
+  `Water Obstacle/*`), Audit grün.
+- **Schaum (`WaterObstacle.h/.cpp`):** `obstacleFootprint` = Mesh-Bounds unter der Welt-Matrix von oben (zwei flachste Halbachsen, Y-Bereich); `obstacleFoam` fragt den `WaterIndex`
+  (Streams, Seen, ihre Strömung, in WELT-Koordinaten): Pegel und Strömung im Ring um den Footprint; kein Schaum, wenn trocken, Box ganz unter/über der Oberfläche, Wasser < 0,15 m/s, aus.
+  Band = Superellipse (Exponent 4) um den Footprint, 48 × 4 Vertices, stromauf kurz (margin·0,7), seitlich margin, stromab + wake·Stärke (Schweif); jeder Vertex auf dem Wasserpegel + 4 cm,
+  trockene Vertices ausgeblendet. UV: fract(u) Ring, floor(u)/16 Stärke; Normale geneigt = Strömung (`kObstacleFoamLevels/FlowGain` in `Physics/WaterWaves.h`, geteilt mit dem Material).
+- **Zeichnen:** `RenderExtractor extractWaterObstacles` baut die Bänder JEDEN Frame (RibbonBatch, kein Asset, kein BVH; ein bewegtes Hindernis nimmt den Schaum mit). Material
+  `Engine/Materials/WaterFoam.hasset` (mat_gen Eintrag 4, `kEngineWaterFoamMaterialId` {0x603,1}, ReachFilter): Fbm-Spitze, läuft mit der Strömung, dicht am Hindernis.
+  Mesh ohne gespeicherte Bounds (Engine-Primitive): Bounds aus den Vertices.
+- **Blend-Ebene (neu, alle 5 Backends):** `RibbonBatch::blendLayer`/`DrawCall::blendLayer`, `RenderSorter::blendedKey`: Ebene 1 (Schaum, Wasser-Gischt) wird nach JEDEM Ebene-0-Blended-Draw
+  gezeichnet — sonst sortiert ein See, dessen Mitte näher an der Kamera liegt, über den Schaum am fernen Ufer. D3D11/D3D12/Vulkan über `sortBackToFront`, GL/Metal über ihren Ribbon-Schlüssel.
+- **Bewusst NICHT:** das Wasser fließt nicht um das Hindernis (Feld, Meshes, Physik-Strömung, Gischt unverändert); keine Gischt an Hindernissen.
+- **Zeuge:** `HE_DUMP_WATEROBSTACLE=x,z,size[;…]` stellt einen grauen Block (size × 2·size × size) mit der Komponente in den Wasserpegel. Bilder `docs/img-water-stream/obstacle_*.png`:
+  See `bowl` still vs. `HE_DUMP_WATERFLOW=1.2,0` (still: kein Schaum, 201k px Unterschied), Hügel-Stream auf D3D12/D3D11/Vulkan/OpenGL (D3D11 1 px, Vulkan 966 px von D3D12).
+- **Tests:** Vollsuite 6211/6211 grün; Deploy MD5-geprüft. `tests/test_water_obstacle.cpp` (Footprint, Schweif länger stromab, Negativkontrollen still/untergetaucht/darüber/trocken/aus, Extraktor-Band folgt dem Verschieben,
+  Blend-Sortierung, Serializer-Rundreise); Serializer-„every component“ trägt einen Fels.
+- **Nicht verifiziert:** Metal (Ribbon-Sortschlüssel geändert, ungetestet); Perf bei vielen Hindernissen (je ~200 Wasser-Abfragen pro Frame; kein Cache); Editor interaktiv.
+- **Nächste Schritte:** 1. Stream-UV um Hindernisse biegen (Streifen fließen herum) über `SurfaceOptions` + Hindernis-Hash im Mesh-Key. 2. Gischt an Hindernissen in sehr schnellem Wasser.
+  3. Cache der Bänder je (Entity, Matrix, Wasser-Revision), falls Profiler es zeigt.
+
+### Schritt 20 (Rückmeldung: Schaum dort, wo das Wasser auftrifft; Strömung wie die Referenzfotos; keine Sonderregeln für Engine-Assets)
+
+Plan in Phasen (jede baut und testet): 1. Sortier-Priorität als Material-Einstellung + Schaum-Material als Referenz ✔ — 2. Polster stromauf, Streifen ✔ —
+3. Material-Eingangsknoten (Wasser-/Partikel-/Banddaten) statt versteckter UV/Normal-Kodierungen — 4. Wasser-Material als Landschafts-Referenz, Wind/Unterseite über Vertrag statt IDs —
+5. Gischt über Partikel-Assets + Emitter-Modifikatoren — 6. ReachFilter-Liste weg (Referenzen tragen).
+- **Phase 1:** `MaterialAsset::sortPriority` (-8..8; Output-Knoten `sortPriority`, JSON nur wenn ≠ 0, MTRL-Tail angehängt, alte Dateien = 0), Material-Editor ▸ Blend ▸ Translucent ▸ „Sort Priority“
+  (+ Hilfe). `RenderSorter::blendedBefore/materialSortPriority`; `sortBackToFront(…, cm)` in D3D11/D3D12/Vulkan, GL/Metal-TPDraw `prio` (Metal ungetestet). `blendLayer` und die ID-Abfrage
+  der Gischt sind WEG; Schaum/Gischt-Materialien setzen Priorität 1 im Graphen. `WaterObstacleComponent::foamMaterial` (Default Engine-Schaum, immer serialisiert, `collectAssetRefs`,
+  Inspector-Slot, Hilfe); `ensureFoamMaterial` gelöscht, der Extraktor macht die referenzierte UUID resident wie jede Referenz.
+- **Phase 2:** Band 48 × 5: Polster stromauf (Breite margin·(0,55 + (1,1 + 0,7·sf)·up^0,8)), Schultern, Kehrwasser + Schweif; uv.y = Facing (1 stromauf), Normale = Strömung AM Vertex
+  (am Stauflächenmittel 0, außen frei, `pow(s, 0.35)`). Material WaterFoam neu (Polster/Kehrwasser/Kragen/Streifen). Bach: Streifen in DREI festen Achsen, nach |cos|^8 gemischt —
+  die frühere Projektion der absoluten Weltposition auf die örtliche Richtung zeichnete Höhenlinien (30 m vom Ursprung: 1° = halbe Streifenbreite); breite + feine Skala; Belüftung nach
+  Tempo. `kStreamTurnGain = 0`: die Bildschirm-Ableitung der interpolierten Richtung ist pro Dreieck konstant → Facetten (Gegenprobe: aus = glatt).
+- **Zeuge:** lädt `Engine/Materials/WaterFoam.hasset` per Pfad (Dump rendert vor dem Engine-Scan; im Editor löst die UUID). Bilder `obstacle_v2_*.png`; See still vs. strömend 230k px.
+- **Verifiziert:** Vollsuite 6212/6212 grün, Help-Audit grün, Deploy MD5-geprüft; D3D11 0–2 px, Vulkan ≤ 10k px von D3D12; OpenGL weicht nur in der Geländebeleuchtung ab.
+- **Offen:** Phasen 3–6; Verwirbelung als glatter Vertex-Wert (kommt mit dem Wasser-Knoten); Bach-Streifen biegen nicht um Hindernisse (nur der Schaum tut es); Metal.
+
+### Schritt 21 (Phasen 3–6: Engine-Assets sind nur noch Assets; auf Wunsch des Menschen)
+
+- **Phase 3 — Material-Knoten** (`MatNodeType` angehängt: `WaterSurfaceData` „Water Surface“ {Shore, Depth, Slope}, `ParticleData` „Particle“ {Quad UV, Alpha, Seed},
+  `FoamBandData` „Foam Band“ {Ring, Strength, Facing, Flow}; branchPure, MCP-Namen). Die Dekodierung (Normal-Neigung, UV-floor/fract) steht EINMAL im Codegen
+  (`MaterialGraph.cpp`), mit den Konstanten aus `Physics/WaterWaves.h` und `ParticleGraph.h kParticleBandLevels` (von RenderWorld.h dorthin gezogen). Water, WaterSpray, WaterFoam lesen nur
+  noch die Knoten; mat_gen kennt keine Kodierung mehr. Bild vorher/nachher: See 0 px, Bach Mittel 0,4/255 (Rundung).
+- **Phase 4 — Wasser-Material pro Landschaft:** `Field::material` (Default Engine-Water; immer serialisiert `waterMaterial`, `sameContent`, `pristine`, `collectAssetRefs` bei Wasser,
+  Inspector „Water Material“ + Hilfe). `waterMaterialFor(cm, base, …)`: Varianten (Tessellation/Flow/Stream) als Instanzen von GENAU diesem Material, UUID = base.lo + 1..4 (für die
+  Engine-Water die bekannten `kEngineWater*MaterialId`); `ensureWaterMaterial(cm, id)` nur per UUID — der Pfad-Fallback ist weg. Wind: Vertrag statt IDs (`windDrivesWaves`: Material mit
+  WaveA/B/C und ohne Displacement); Unterseite war schon Vertrag (Knopf „Flow“ auf WaterSurfaceComponent-Entities). `WaterSurface::kMaterialPath` entfernt.
+- **Phase 5 — Gischt als Partikel-Assets:** Partikel-Graph-Pins 17–21 angehängt (Billboard, Stretch, Fade In, Spawn Half A/B). `ParticleEmitterModifiers` an `ParticleSystemComponent`
+  (Rate/Lebenszeit/Größe/Alpha/Streuung/Geschwindigkeit je Achse/Spawn-Breite/Heading; runtime, nicht gespeichert; `applyEmitterModifiers` in `resolveConfig`, das jetzt Asset und Material
+  per UUID resident macht). Neues Werkzeug `fx_gen` (HE_Tools) → `EngineContent/Particles/WaterCurtain|WaterDrops|WaterMist.hasset` ({0x700..0x702,1}). `Field::fallCurtain/fallDrops/
+  fallMist` (Defaults = diese; serialisiert, Refs, Inspector + Hilfe; null = keine). `WaterSurface` setzt nur noch Asset + Modifikatoren (`footMods/mistMods/curtainMods`), Budget über
+  den Pool der Graphen; `sprayLook/ensureSprayMaterial/kSprayMaterialPath` entfernt. Bild: Wasserfall vorher/nachher Mittel 2,6/255 (Partikel-Zufall).
+- **Phase 6 — ReachFilter:** Wasser-/Gischt-/Schaum-Einträge aus `engineImplicitRoots` entfernt; der Export serialisiert jede Szene neu, die Referenzen stehen immer drin.
+  Test „Export: an untouched landscape water and obstacle reach their engine assets by reference“ (6 erreicht, DisplacementDemo nicht).
+- **Zeuge/Tests:** `HE_DUMP_WATERLAKE` ruft `scanContentDirectory()` (Dump lief vor dem Editor-Scan) statt Pfade vorzuladen; zwei Tests in test_water_surface scannen ebenso.
+  Neu: Knoten-Codegen, eigenes Wasser-Material + Szene + Refs, Partikel-Pins, Modifikatoren, Spray je Asset/Modifikator (+ anderes Asset, null = keins), Reach.
+  Bilder `docs/img-water-stream/assets_{fall,rapids,lake}_4backends.png` (D3D11 ≤ 1,2k px, Vulkan ≤ 13k px von D3D12; OpenGL wie immer nur die Geländebeleuchtung).
+- **Übrige feste Engine-Referenzen (bewusst):** Default-Werte der Referenzen (WaterField.h, WaterObstacleComponent.h), Migration alter Szenen-IDs (SceneSerializer.cpp:165),
+  Wasser-Ebene-Zeuge (EditorApplication.cpp ~6491), Trail-Clipmap-Textur im ReachFilter (anderes System).
+- **Verifiziert:** Vollsuite 6217/6217 grün, Help-Audit grün, Deploy MD5-geprüft.
+- **Nicht verifiziert:** Metal (TPDraw-Priorität, kein Mac); Editor interaktiv (Inspector-Slots, Partikel-Editor mit den neuen Pins); Perf.
+- **Nächste Schritte:** 1. Aussehen mit dem Menschen abstimmen (Schaum, Bach). 2. Verwirbelung als glatter Wert der Water-Surface-Daten (Kanal fehlt). 3. Bach-Streifen um Hindernisse.
+
+### Schritt 22 (Performance-Tests; auf Wunsch des Menschen)
+
+- **CPU-Benchmarks** `tests/test_water_perf.cpp` (berichtet, nicht geprüft; Release, NN-WS03, Median): Wasserfall 64 m (7 Emitter, 7740 Partikel),
+  Schaum 0/10/50/100 Blöcke in einem See mit 1,2 m/s, Blended-Sort 2000 Draws.
+
+  | Messung | vorher | nachher |
+  |---|---|---|
+  | Bänder bauen (Extract mit − ohne Gischt) | 1,10 ms | 0,25 ms |
+  | Schaum 100 Hindernisse, ruhend | 2,85 ms | 0,04 ms |
+  | Schaum 100 Hindernisse, alle bewegt | 2,85 ms | 0,44 ms |
+  | Partikel-Tick 7740 / Rebuild bei Wasseränderung / Sort 2000 | 0,016 / 0,40–0,50 / 0,037 ms | unverändert |
+
+- **Bänder** (`RenderExtractor.cpp particleBand`): Distanzschlüssel einmal beim Sammeln, Radix-Sort (3 × 11 Bit) über (Schlüssel, Index) statt `std::sort` der 56-Byte-Structs
+  (200 → 20 µs beim 5833er-Emitter), Quads parallel an feste Plätze (`parallel_for`), Bounds aus den Positionen + halbe Diagonale des größten Quads. Partikel auf der Kamera: Quad ohne Fläche.
+- **Band-Speicher** (`BandMemory`, `recycleBands` vor `out.clear()`, `takeBand`): Vertex/Index-Puffer aller Bänder gehen pro Thread an den nächsten Walk (Größenklassen 2^c, ≤ 32 MB,
+  Reste eines Walks werden freigegeben). Grund gemessen: frisch allozierte ~1 MB pro Frame = Page Faults (112 µs beim Wasserfall, 0,3 ms bei 100 Schaumbändern zu je 12 KB).
+- **Schaum-Cache** (`HE::WaterFoamMemory`, `m_waterFoam`): Band pro Entity mit Schlüssel (Weltmatrix, Mesh-Bounds, foam/margin/wake, Wasser-Stempel = FNV über jede Landschaft mit
+  Wasser: Entity, `Field::revision`, res, Grid-Zeiger, Body-Zahl, Weltmatrix — derselbe Schlüssel wie WaterIndex::ensureBounds). Erlaubt, weil das Band nur level/flow/wet liest, die
+  nicht von `t` abhängen (Ausnahme: überlappende Landschaften, dort gewinnt bei der Abfrage die höhere Welle). Neubau parallel (Grain 2), Index nur bei Bedarf; Welt-/CM-Wechsel leert.
+  Bodenänderungen bumpen `Field::revision` über `noteGroundChanged` (nur mit clipToGround; ohne folgt auch die Wasserfläche nicht).
+- **Tests neu:** „extractor keeps a resting obstacle's band …“ (gecacht == frischer Extraktor und ≠ vorher nach Verschieben, margin, foam, `setPhysics`-Strömung, Boden anheben);
+  „a big band is back to front over every quad …“ (3000 Partikel: Reihenfolge über alle Quads, Ecken in den Bounds, zweiter Walk aus recyceltem Speicher identisch).
+- **Profiler-Scopes:** `Extract::particles`, `Extract::waterObstacles`, `WaterSurface::sprays`.
+- **Echt-Loop pro Backend** (`scripts/he_perf_capture.py`, versteckter Editor aus `C:\hw232\deploy`, 2000×1125, vsync aus, 300 + 600 Frames, 3 Wiederholungen in wechselnder
+  Reihenfolge; GEPAART: Differenz mit − ohne innerhalb jeder Wiederholung (direkt nacheinander gelaufen), Median [Spanne] der drei). Szenen aus dem Zeugen
+  (`HE_DUMP_SAVESCENE`): Wasserfall (`HE_DUMP_WATERLAKE=fall`, Kamera 32,303,-1 / yaw −90° pitch 10°) mit vs. ohne Fall-Referenzen (null = keine Emitter); Bowl-See 1,2 m/s
+  mit 25 Blöcken 1,5 m mit vs. ohne `WaterObstacleComponent` (Blöcke bleiben). Rohdaten/Skripte: `C:\hw232\_scr\perf` (nicht im Repo).
+
+  | Backend | Gischt: Frame p50 / GPU p50 / CPU-Szenenpass | 25 Hindernisse ruhend: Frame / GPU / CPU-Szenenpass |
+  |---|---|---|
+  | D3D12 | +0,50 [0,46..0,53] / +0,42 / +0,17 ms | +0,00 [−0,10..+1,14] / +0,02 / +0,21 ms |
+  | D3D11 | +0,62 [0,57..0,65] / – (keine Timestamps) / +0,22 ms | +0,07 / – / +0,16 ms |
+  | Vulkan | +0,70 [−1,63..+0,80] / +0,76 / +0,45 ms | −0,34 / +0,56 [−0,94..+0,93] / +0,10 ms — Rauschen größer als der Effekt |
+  | OpenGL | +1,24 [0,90..1,48] / +1,18 / – ms | +0,11 / +0,07 / – ms |
+
+  Überall: `Extract::particles` 0,29–0,31 ms, `ParticleSystem` 0,02–0,03 ms, `Extract::waterObstacles` 0,02–0,03 ms. OpenGL: ein ~2-s-Hänger nur in Runde 1
+  (vermutlich das Programm des Gischt-Materials beim ersten Sichtbarwerden, GL-Programm-Cache in der echten %APPDATA%; nicht im Log belegt) — Median unberührt. Die
+  GL-Pass-Zuordnung ist verschoben (Summen gleich): nur die Gesamtzeit zählt. Vulkan streut zwischen Läufen um ±1,5 ms.
+- **Gefunden, nicht behoben — Bänder im CPU-Szenenpass:** D3D11/D3D12/Vulkan zahlen mit Gischt +0,17–0,45 ms, mit 25 Schaumbändern +0,10–0,21 ms (~4–8 µs fix pro Band →
+  bei 100 Hindernissen ~0,4–0,8 ms, zehnmal der Extract). **Widerlegt:** die Zwischenkopie `rebaseRibbonVertices` → `rebased` → gemappter Puffer (RenderWorld.h:267). Ausprobiert
+  (direkt in den gemappten Puffer verschieben): Bilder identisch, Szenenpass unverändert (D3D12 +0,17 → +0,17, D3D11 +0,22 → +0,19, Vulkan +0,45 → +0,49 ms; 2 gepaarte Runden) —
+  zurückgenommen. Die Kosten liegen im Absetzen der Draws selbst (Material/Pipeline je Band); nächster Schritt dort mit dem detaillierten Profiler, nicht beim Upload.
+  Ein D3D11-Lauf (u1 lake_noobst) lief in den 300-s-Timeout; das Skript beendete ihn, kein Editor blieb zurück.
+- **Verifiziert:** Vollsuite 6219/6222 — die 3 roten sind `test_input_gamepad` End-to-end (echtes Xbox-Pad am NN-WS03, bekannt), alles Wasser/Partikel/Rendering grün;
+  Deploy nach HorizonEngineBuild MD5-geprüft (Rendering/Scene/Core/Editor).
+- **Nicht verifiziert:** Metal; Vulkan-GPU-Differenz beim Schaum (streut stärker als der Effekt).
+- **Cache-Sicherheit geprüft:** jeder Schreiber von Pegel/Strömung/Bodies/Zellen geht über Setter mit `++revision` (WaterField.cpp, WaterBrush-Undo :931, TerrainSync.cpp:317);
+  Laden erzeugt neue Entity-Versionen (Schlüssel enthält die Version).
+- **Nächste Schritte:** 1. Kosten der Bänder im Szenenpass mit dem detaillierten Profiler (oben). 2. Aussehen mit dem Menschen abstimmen. 3. Wie Schritt 21.
+
+### Schritt 23 (der Brush macht einen Wasserfall statt verstreuter Emitter; Rückmeldung des Menschen mit Screenshot)
+
+- **Ursache (reproduziert, Zeuge `HE_DUMP_WATERLAKE=crest`, `HE_DUMP_CRESTLEDGE=1`):** Kante und Fuß wurden UNABHÄNGIG gesucht. (a) Lippen verlangten 1,5 m flussauf
+  „nicht ≥ 0,72 m/m steil“: an einer abgerundeten Kante nie erfüllt → kein Vorhang; nur ein Absatz mitten an der Wand ergab einen kurzen. (b) `findSprayFeet` setzte Gischt überall,
+  wo schnelles auf ruhiges Wasser traf, schmal (±0,7 m), Tropfen mit > 6 m/s hoch → verstreute Nebel/Tropfen. Alt: runde Kante 0 Vorhänge + 5 Füße; mit Absatz 1 Vorhang (3 m) + 7 Füße.
+- **Neu (`WaterSpray.h/.cpp`):** ein Fall = eine FLÄCHE: Wasserproben (~0,75 m Raster, `FaceGrid`), steil ENTLANG der Strömung ≥ `kFallSlope` (`slopeAlong`, ±0,75 m; der
+  Kreis-Gradient `streamSlopeAt` las die Rinnenränder und machte jede 45°-Rampe zum „Fall“), 8-Nachbarn verbunden. Lippen = je Bin quer zur Strömung die oberste Probe der Fläche mit
+  Wasser flussauf, das NICHT zur Fläche gehört (Bachanfang auf der Wand ist kein Fall; See flussauf zählt), Kante per Bisektion wie bisher. Landung: flussab bis entlang < `kFallSlope`.
+  Kante in gerade Stücke (Lücke `kFallLineGap`, Douglas-Peucker über Lage/Höhe ±0,5 m und Landung ±1,5 m, ≥ 3 Lippen je Seite); Stücke einer ebenen Kante (Streuung ≤ 1 m) bündig auf eine
+  Höhe. `FallLine::run/landing/landingY/slope`: Landepunkt = Kante + dir · max(Flächenlauf, Wurfweite) — EINE Quelle für Vorhang (`curtainMods`: v = run / t) und Fuß (`Fall::foot`,
+  gleiche Breite). Stück unter dem Vorhang eines höheren: gehört zu diesem. Auslauf-Füße (`findRunoutFeet`) nur noch ab 1,5 m Fall, je Linie quer gebündelt, nicht wo ein Fall landet.
+- **Emitter (`WaterSurface.cpp`):** Vorhang + Drops + Nebel je `Fall` aus `findFalls`, dazu Auslauf-Füße. Füße so breit wie der Vorhang (`footPieces`), Drops ≤ ~1 m hoch.
+  Vorhang-Dichte nach Freiheit des Falls: voll ab `kFallFreeSlope` 2,5 m/m (Klippe), an einer runden Wand 0,3–1 (der Bach-Film zeigt das anliegende Wasser).
+- **Tests neu (test_water_stream):** runde Wand = Stücke lückenlos (≤ 0,5 m), ≥ 6 m, Lippen nur oben, je Fuß genau am Landepunkt, keine weiteren Füße; Absatz = Kaskade; Simulation:
+  Vorhang-Tropfen am Ende ihrer Fallzeit über ihrem Fuß (162/162). Alte Fall/Spray-Tests UNVERÄNDERT grün. Neuaufbau bei Wasseränderung 0,43 ms (vorher 0,40–0,50).
+- **Bilder:** `docs/img-water-stream/falls_crest_before_after.jpg`, `falls_cliff_before_after.jpg` (D3D12). Klippe sieht aus wie vorher, Gischt jetzt über die Breite.
+- **Verhaltensänderung:** keine Gischt mehr bei < 1,5 m Fall ohne Kante; Gischt-Emitter pro Fall breiter (mehr Partikel, Budget 30000 greift).
+- **Nicht verifiziert:** andere Backends für Schritt 23 (nur D3D12 gerendert); Aussehen im echten Editor beim Pinseln; Metal.
+- **Nächste Schritte:** 1. Aussehen mit dem Menschen (Vorhang-Dichte an runden Wänden, harte Unterkante, wo der Vorhang die Wand trifft). 2. Wie oben.

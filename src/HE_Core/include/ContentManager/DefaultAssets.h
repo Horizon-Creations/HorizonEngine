@@ -109,6 +109,31 @@ constexpr UUID kEngineWaterTessellatedMaterialId = { 0x0000000000000600ULL, 0x00
 constexpr UUID kEngineWaterFlowMaterialId            = { 0x0000000000000600ULL, 0x0000000000000003ULL };
 constexpr UUID kEngineWaterFlowTessellatedMaterialId = { 0x0000000000000600ULL, 0x0000000000000004ULL };
 
+// The water of a STREAM (Body::stream, the brush painted down a slope): Flow AND Stream on. The current is
+// not one number per body but the ground's downhill direction at every vertex (the mesh carries the slope
+// in its UV), run by a two-phase flow map, with streaks along the current; the sheet's lean lights it. Never
+// tessellated. Same kind of in-memory Material Instance as the others.
+constexpr UUID kEngineWaterStreamMaterialId          = { 0x0000000000000600ULL, 0x0000000000000005ULL };
+
+// The spray of a waterfall: its falling curtain, the drops at its foot and the mist over it (WaterSurface's
+// spray emitters, drawn as particle bands, RenderWorld.h kParticleBandLevels). Lit, translucent, a soft
+// frayed blob on each particle's quad, faded by the alpha the band's UV carries. Content path
+// "Engine/Materials/WaterSpray.hasset", mat_gen's third material ({0x600 + 2, 1}).
+constexpr UUID kEngineWaterSprayMaterialId           = { 0x0000000000000602ULL, 0x0000000000000001ULL };
+
+// The foam around an obstacle standing in the water (WaterObstacleComponent; HE::water::obstacleFoam builds the band
+// every frame). Lit, translucent; the band's UV carries the foam's fade and strength, its normal the current.
+// Content path "Engine/Materials/WaterFoam.hasset", mat_gen's fourth material ({0x600 + 3, 1}).
+constexpr UUID kEngineWaterFoamMaterialId            = { 0x0000000000000603ULL, 0x0000000000000001ULL };
+
+// The particle graphs of a fall's spray, fx_gen's output ("Engine/Particles/…"): the curtain falling from the lip,
+// the drops thrown up at the foot and the mist over it. A landscape's water names them (Field::fallCurtain,
+// fallDrops, fallMist — any particle graph can take their place); WaterSurface places one emitter each and tunes
+// it with ParticleEmitterModifiers. They draw with the spray material. The 0x700 block is fx_gen's.
+constexpr UUID kEngineWaterCurtainParticlesId        = { 0x0000000000000700ULL, 0x0000000000000001ULL };
+constexpr UUID kEngineWaterDropsParticlesId          = { 0x0000000000000701ULL, 0x0000000000000001ULL };
+constexpr UUID kEngineWaterMistParticlesId           = { 0x0000000000000702ULL, 0x0000000000000001ULL };
+
 // What the water material was called before it moved out of the textures' block.
 // A scene saved up to then names it by this id; SceneSerializer maps it onto
 // kEngineWaterMaterialId when it reads a material reference. Only ever a material

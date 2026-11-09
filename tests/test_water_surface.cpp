@@ -4,6 +4,7 @@
 #include <HorizonScene/WaterSurface.h>
 #include <HorizonScene/HorizonWorld.h>
 #include <HorizonScene/SceneSerializer.h>
+#include <HorizonScene/SceneSystems.h>
 #include <HorizonScene/TerrainSystem.h>
 #include <HorizonScene/TerrainSculpt.h>
 #include <HorizonScene/TerrainMeshGenerator.h>
@@ -249,13 +250,13 @@ namespace
         {
             std::vector<Entity> out;
             for (auto [e, ws] : world.registry().view<WaterSurfaceComponent>().each())
-                if (!ws.fall) out.push_back(e);          // sheets; the waterfall bands have test_water_fall.cpp
+                out.push_back(e);
             return out;
         }
         Entity surfaceOf(uint16_t body)
         {
             for (auto [e, ws] : world.registry().view<WaterSurfaceComponent>().each())
-                if (ws.body == body && !ws.fall) return e;
+                if (ws.body == body) return e;
             return entt::null;
         }
     };
@@ -849,7 +850,7 @@ TEST_CASE("Water surface: only a body with a current draws with the WaterFlow va
 {
     Rig rig;
     rig.cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
-    REQUIRE(rig.cm.loadAsset(WaterSurface::kMaterialPath) == HE::kEngineWaterMaterialId);
+    REQUIRE(rig.cm.loadAsset("Engine/Materials/Water.hasset") == HE::kEngineWaterMaterialId);
     const uint16_t still = addLake(rig.tc(), { { -20, -20 }, { 10, -20 }, { 10, 10 }, { -20, 10 } }, 2.0f);
     const uint16_t river = addLake(rig.tc(), { { 15, -20 }, { 30, -20 }, { 30, 10 }, { 15, 10 } }, 2.0f);
     water::BodyPhysics ph = rig.tc().water.findBody(river)->physics;
@@ -866,10 +867,10 @@ TEST_CASE("Water surface: only a body with a current draws with the WaterFlow va
     REQUIRE(flowMat);
     CHECK_FALSE(flowMat->customShaderFragGlsl.empty());
     CHECK(std::find(flowMat->graphParamNames.begin(), flowMat->graphParamNames.end(), "Flow") != flowMat->graphParamNames.end());
-    // The plain water has no "Flow" slot at all: nothing for a still lake to pay.
+    // The plain water has the "Flow" knob too (the renderer sets its z/w per frame for the underside), but a still lake pays for no flow.
     const MaterialAsset* plain = rig.cm.getMaterial(HE::kEngineWaterMaterialId);
     REQUIRE(plain);
-    CHECK(std::find(plain->graphParamNames.begin(), plain->graphParamNames.end(), "Flow") == plain->graphParamNames.end());
+    CHECK(std::find(plain->graphParamNames.begin(), plain->graphParamNames.end(), "Flow") != plain->graphParamNames.end());
 
     // Tessellation on the landscape too: the flowing body gets the instance with both switches.
     rig.tc().water.tessellation = true;
@@ -1029,6 +1030,13 @@ TEST_CASE("Water surface: moving the landscape moves the UVs, the lake stays in 
     CHECK(moved->vertices == pos0);                         // geometry is landscape-local
     for (size_t i = 0; i < uv0.size(); i += 2)
     {
+        if (uv0[i + 1] == -2.0f)
+        {
+            // A landscape body carries its deepest water in the UV (marked by y = -2), whatever the landscape's position.
+            CHECK(moved->uvs[i] == doctest::Approx(uv0[i]));
+            CHECK(moved->uvs[i + 1] == -2.0f);
+            continue;
+        }
         CHECK(moved->uvs[i] == doctest::Approx(uv0[i] + 100.0f));
         CHECK(moved->uvs[i + 1] == doctest::Approx(uv0[i + 1] + 50.0f));
     }
@@ -1971,6 +1979,7 @@ TEST_CASE("Water surface: a surface that already exists is given its material ba
 {
     Rig rig;
     rig.cm.setEngineContentRoot((std::filesystem::path(HE_EDITOR_DEPS_DIR) / "EngineContent").string());
+    rig.cm.scanContentDirectory();   // what the editor does at start: the water material is found by its UUID
     const std::vector<glm::vec2> poly = { { -20, -20 }, { 10, -20 }, { 10, 20 }, { -20, 20 } };
     addLake(rig.tc(), poly, 2.0f);
     rig.update();
@@ -2016,6 +2025,7 @@ TEST_CASE("Water surface: a landscape texture on the water material's old id doe
     grass.id   = HE::kLegacyEngineWaterMaterialId;   // T_Landscape_Grass_Albedo's real id
     grass.name = "T_Landscape_Grass_Albedo";
     REQUIRE(rig.cm.registerTexture(grass) == HE::kLegacyEngineWaterMaterialId);
+    rig.cm.scanContentDirectory();
 
     const std::vector<glm::vec2> poly = { { -20, -20 }, { 10, -20 }, { 10, 20 }, { -20, 20 } };
     addLake(rig.tc(), poly, 2.0f);
@@ -2032,6 +2042,56 @@ TEST_CASE("Water surface: a landscape texture on the water material's old id doe
     CHECK(rig.cm.getMaterial(HE::kLegacyEngineWaterMaterialId) == nullptr);
 }
 #endif
+
+TEST_CASE("Water material: a landscape's water draws with the material it names — any material, kept by the scene")
+{
+    // An ordinary material of the project, without the water's switches: every body of the landscape draws with it —
+    // a still one with the material itself, a flowing one with its Flow instance, which for a material without the
+    // switch is the same shader.
+    Rig rig;
+    MaterialAsset mine;
+    mine.type = HE::AssetType::Material;
+    mine.name = "MyWater";
+    mine.path = "Materials/MyWater.hasset";
+    mine.blendMode = 2;
+    mine.customShaderFragGlsl = "void main() {}";
+    const HE::UUID myId = rig.cm.registerMaterial(std::move(mine));
+    rig.tc().water.material = myId;
+    const uint16_t still = addLake(rig.tc(), { { -20, -20 }, { 10, -20 }, { 10, 10 }, { -20, 10 } }, 2.0f);
+    const uint16_t river = addLake(rig.tc(), { { 15, -20 }, { 30, -20 }, { 30, 10 }, { 15, 10 } }, 2.0f);
+    water::BodyPhysics ph = rig.tc().water.findBody(river)->physics;
+    ph.flow = glm::vec2(1.5f, 0.0f);
+    REQUIRE(water::setPhysics(rig.tc(), river, ph));
+    rig.update();
+    const auto materialOf = [&](uint16_t body) {
+        return rig.world.registry().get<MaterialComponent>(rig.surfaceOf(body)).materialAssetId;
+    };
+    CHECK(materialOf(still) == myId);
+    const HE::UUID riverMat = materialOf(river);
+    if (riverMat != myId)
+    {
+        const MaterialAsset* v = rig.cm.getMaterial(riverMat);
+        REQUIRE(v != nullptr);
+        CHECK(v->parentMaterialPath == "Materials/MyWater.hasset");   // an instance of MY material, not the engine's
+        CHECK(riverMat.hi == myId.hi);
+    }
+
+    // The reference travels with the scene and is what the preload and the packer follow.
+    const auto refs = SceneSystems::collectAssetRefs(rig.world);
+    CHECK(std::find(refs.begin(), refs.end(), myId) != refs.end());
+    SceneSerializer ser;
+    std::vector<uint8_t> bytes;
+    REQUIRE(ser.saveToMemory(rig.world, bytes));
+    HorizonWorld back;
+    REQUIRE(ser.loadFromMemory(back, bytes));
+    bool found = false;
+    for (auto [e, tc] : back.registry().view<TerrainComponent>().each())
+        if (!tc.water.bodies.empty()) { found = true; CHECK(tc.water.material == myId); }
+    CHECK(found);
+    // An untouched landscape names the engine water, and names it in the scene too.
+    TerrainComponent fresh;
+    CHECK(fresh.water.material == HE::kEngineWaterMaterialId);
+}
 
 TEST_CASE("Water material id: a scene saved under the old id still gets the water material")
 {

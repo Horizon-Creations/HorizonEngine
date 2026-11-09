@@ -8393,7 +8393,7 @@ void D3D11Renderer::DrawScene(int width, int height)
         }
 
         // Sort transparent back-to-front by distance.
-        RenderSorter::sortBackToFront(transparentDCs, camPos);
+        RenderSorter::sortBackToFront(transparentDCs, camPos, m_contentManager);   // material sort priority first
 
         // A3: real instancing applies to the opaque pass only; the transparent pass
         // reuses drawDC with a blend state + per-instance depth sort, so it keeps the

@@ -82,8 +82,8 @@ HE_API Result computeReachable(const std::vector<Node>& nodes, const Roots& root
 // discovers by type (see Roots::types), the weather sounds
 // (WeatherAudio, DefaultAssets.h 0x500..0x504), the weather and procedural-surface material
 // functions, the layer-mesh presets the landscape scatters (LayerMeshPresets.h builds
-// "Engine/Meshes/<name>[LodN].hasset" from a material's group), the water surface's material
-// (WaterSurface.h) and the trail clipmap's texture (TrailClipmap.h 0x41F). Kept as a short list
+// "Engine/Meshes/<name>[LodN].hasset" from a material's group) and the trail clipmap's texture
+// (TrailClipmap.h 0x41F). The landscape water's assets are scene references, not roots. Kept as a short list
 // of folders on purpose: the engine library's small assets cost little, and a runtime system
 // added later that loads by a path it builds would otherwise ship a game without it.
 HE_API Roots engineImplicitRoots();

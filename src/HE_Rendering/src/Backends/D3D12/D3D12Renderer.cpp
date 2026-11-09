@@ -12839,7 +12839,7 @@ void D3D12Renderer::DrawScene(void* cmdListPtr, int width, int height)
             }
         }
 
-        RenderSorter::sortBackToFront(transparentDCs, camPos);
+        RenderSorter::sortBackToFront(transparentDCs, camPos, m_contentManager);   // material sort priority first
 
         // Real GPU instancing (A3) applies to the opaque pass only; the transparent
         // pass reuses drawDC12 with a blend PSO + per-instance depth sort, so it keeps

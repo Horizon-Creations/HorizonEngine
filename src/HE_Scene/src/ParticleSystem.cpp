@@ -71,6 +71,9 @@ void ParticleSystem::resolveConfig(ParticleSystemComponent& ps, ContentManager& 
 
     if (!ps.configDirty && ps.resolvedFromAssetId == ps.particleAssetId) return;
 
+    // The asset is an ordinary reference: made resident here like any other (an emitter a system placed this tick
+    // was never in a scene's preload).
+    if (ps.particleAssetId != HE::UUID{}) cm.ensureResident(ps.particleAssetId);
     HE::ParticleGraph graph = HE::ParticleGraph::makeDefault();
     if (const ParticleGraphAsset* asset = cm.getParticleGraph(ps.particleAssetId);
         asset && !asset->nodeGraphJson.empty())
@@ -92,9 +95,45 @@ void ParticleSystem::resolveConfig(ParticleSystemComponent& ps, ContentManager& 
                     static_cast<unsigned long long>(ps.particleAssetId.lo));
     }
 
-    ps.resolvedConfig      = HE::evaluateParticleGraph(graph, ps.rng);
+    ps.resolvedConfig      = applyEmitterModifiers(HE::evaluateParticleGraph(graph, ps.rng), ps.modifiers);
     ps.resolvedFromAssetId = ps.particleAssetId;
     ps.configDirty         = false;
+    // …and so is the material it draws with, before the renderer asks for it.
+    if (ps.resolvedConfig.materialAssetId != HE::UUID{}) cm.ensureResident(ps.resolvedConfig.materialAssetId);
+}
+
+HE::ParticleEmitterConfig applyEmitterModifiers(HE::ParticleEmitterConfig c, const ParticleEmitterModifiers& m)
+{
+    if (m == ParticleEmitterModifiers{}) return c;
+    c.emitRate    *= std::max(0.0f, m.rateScale);
+    c.lifetimeMin *= std::max(0.0f, m.lifetimeScale);
+    c.lifetimeMax *= std::max(0.0f, m.lifetimeScale);
+    c.startSize   *= std::max(0.0f, m.sizeScale);
+    c.endSize     *= std::max(0.0f, m.sizeScale);
+    c.startAlpha   = std::clamp(c.startAlpha * m.alphaScale, 0.0f, 1.0f);
+    c.endAlpha     = std::clamp(c.endAlpha * m.alphaScale, 0.0f, 1.0f);
+    c.velocitySpread *= std::max(0.0f, m.spreadScale);
+    // Room for every particle alive at once: the pool grows with the rate and the life.
+    c.maxParticles = static_cast<int>(std::ceil(static_cast<float>(c.maxParticles) *
+                                                std::max(0.0f, m.rateScale) * std::max(0.0f, m.lifetimeScale)));
+    // The graph's frame (forward X, up Y, across Z) scaled, then turned so forward is `heading`.
+    const float hl = glm::length(m.heading);
+    const glm::vec2 fwd = hl > 1e-6f ? m.heading / hl : glm::vec2(1.0f, 0.0f);
+    const glm::vec2 acr(-fwd.y, fwd.x);   // the graph's +Z, a quarter turn from +X like the world's
+    auto turn = [&](const float in[3], const glm::vec3& scale, float out[3]) {
+        const float f = in[0] * scale.x, u = in[1] * scale.y, a = in[2] * scale.z;
+        out[0] = fwd.x * f + acr.x * a;
+        out[1] = u;
+        out[2] = fwd.y * f + acr.y * a;
+    };
+    float v[3];
+    turn(c.initialVelocity, m.velocityScale, v);
+    std::copy(v, v + 3, c.initialVelocity);
+    turn(c.spawnHalfA, glm::vec3(m.spawnScale.y, 1.0f, m.spawnScale.x), v);
+    std::copy(v, v + 3, c.spawnHalfA);
+    turn(c.spawnHalfB, glm::vec3(m.spawnScale.y, 1.0f, m.spawnScale.x), v);
+    std::copy(v, v + 3, c.spawnHalfB);
+    return c;
 }
 
 void ParticleSystem::markConfigDirty(ParticleSystemComponent& ps) { ps.configDirty = true; }
@@ -133,6 +172,16 @@ Particle spawnParticle(std::mt19937& rng, const HE::ParticleEmitterConfig& confi
 
     Particle p;
     p.position    = emitterPos;
+    // A spawn area (ParticleEmitterConfig::spawnHalfA/B): a point of the parallelogram. A
+    // point emitter draws nothing more from rng, so its particles stay exactly what they were.
+    const glm::vec3 ha(config.spawnHalfA[0], config.spawnHalfA[1], config.spawnHalfA[2]);
+    const glm::vec3 hb(config.spawnHalfB[0], config.spawnHalfB[1], config.spawnHalfB[2]);
+    if (ha != glm::vec3(0.0f) || hb != glm::vec3(0.0f))
+    {
+        const float a = dist01(rng) * 2.0f - 1.0f;
+        const float b = dist01(rng) * 2.0f - 1.0f;
+        p.position += ha * a + hb * b;
+    }
     p.velocity    = (dir * std::cos(spread)
                    + t1 * (sinS * std::cos(phi))
                    + t2 * (sinS * std::sin(phi))) * spd;

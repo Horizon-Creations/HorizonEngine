@@ -3555,6 +3555,7 @@ void OpenGLRenderer::Initialize(HE::Window* window)
 	// deadlock: nothing ever asks it to build if `enabled` is never true).
 	EnsureFogVolumePipelines();
 	m_extractor.setVolumetricFogCapable(m_fogPipelinesOk);
+	m_extractor.setParticleSpritesCapable(true);   // DrawParticleGraphBatches
 
 	// Profiler GPU timing via GL timer queries. Reliable on desktop GL (Windows /
 	// Linux) when the driver exports them; left off on Apple GL, where GL_TIMESTAMP /
@@ -12802,6 +12803,8 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		// pass after the opaque geometry + sky so they composite correctly.
 		struct TPDraw { glm::mat4 mvp, model; glm::vec3 baseColor; float metallic, roughness, opacity;
 		                unsigned int tex, vao; int indexCount; float distSq;
+		                // The material's sort priority (RenderSorter::blendedBefore).
+		                int8_t prio = 0;
 		                // DrawCall::receivesShadow, carried to the replay — the pass
 		                // runs long after the draw's own uniforms were overwritten.
 		                bool receivesShadow = true;
@@ -13055,6 +13058,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 						TPDraw tp{ viewProj * t, t, baseColor,
 						           cMetallic, cRoughness, opacity, tex, vao, indexCount,
 						           RenderSorter::backToFrontKey(t, camPos) };
+						tp.prio           = RenderSorter::materialSortPriority(m_contentManager, dc.materialAssetId);
 						tp.indexOffset    = indexOffset;
 						tp.receivesShadow = dc.receivesShadow;
 						tp.matProg = matProg;
@@ -13309,6 +13313,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 					TPDraw tp{ viewProj * t, t, baseColor,
 					           cMetallic, cRoughness, opacity, tex, vao, indexCount,
 					           RenderSorter::backToFrontKey(t, camPos) };
+					tp.prio           = RenderSorter::materialSortPriority(m_contentManager, dc.materialAssetId);
 					tp.indexOffset    = indexOffset;
 					tp.receivesShadow = dc.receivesShadow;
 					tp.matProg = tpProg;
@@ -14004,6 +14009,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 			TPDraw tp{ viewProj, glm::mat4(1.0f), rbBase, rbMetal, rbRough, rbOpacity,
 			           rbTex, rbVao, static_cast<int>(rb.indices.size()),
 			           glm::dot(rbC - camPos, rbC - camPos) };
+			tp.prio = RenderSorter::materialSortPriority(m_contentManager, rb.materialAssetId);
 			tp.matProg = rbProg;
 			tp.params  = std::move(rbParams);
 			for (int i = 0; i < rbGtexCount; ++i) tp.gtex[i] = rbGtex[i];
@@ -14020,7 +14026,7 @@ void OpenGLRenderer::DrawScene(int pw, int ph)
 		if (!transparent.empty())
 		{
 			std::sort(transparent.begin(), transparent.end(),
-			          [](const TPDraw& a, const TPDraw& b) { return a.distSq > b.distSq; });
+			          [](const TPDraw& a, const TPDraw& b) { return RenderSorter::blendedBefore(a.prio, a.distSq, b.prio, b.distSq); });
 			glUseProgram(m_unlitProgram); // sky switched the active program
 			glEnable(GL_BLEND);
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);

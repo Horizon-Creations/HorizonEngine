@@ -63,6 +63,10 @@ using namespace HE;
 constexpr uint64_t kMatBaseHi = 0x0000000000000600ULL;
 static_assert(kEngineWaterMaterialId.hi == kMatBaseHi + 0 && kEngineWaterMaterialId.lo == 1,
               "Water is entry 0 of the 0x600 block — DefaultAssets.h must agree");
+static_assert(kEngineWaterSprayMaterialId.hi == kMatBaseHi + 2 && kEngineWaterSprayMaterialId.lo == 1,
+              "WaterSpray is entry 2 of the 0x600 block — DefaultAssets.h must agree");
+static_assert(kEngineWaterFoamMaterialId.hi == kMatBaseHi + 3 && kEngineWaterFoamMaterialId.lo == 1,
+              "WaterFoam is entry 3 of the 0x600 block — DefaultAssets.h must agree");
 
 constexpr float kColStep = 230.0f;
 constexpr float kRowStep = 110.0f;
@@ -807,6 +811,82 @@ Mb waterMaterial()
     const Pin cpx{ fpx }, cpz{ fpz };      // the current's lookup position
     m.comment("Flow: the pattern's lookup position, carried along the current (Static Switch)", 1, 21, 8, 3);
 
+    // -- Stream (Static Switch "Stream", only meaningful with Flow on; Thema 232, redone) ----------------
+    // A stream is a sheet draped on a hillside: its current is not one number but the ground's downhill
+    // direction at every pixel, so the mesh carries the ground's slope per vertex in its UV (world axes,
+    // dimensionless; WaterMesh.cpp). From it:
+    //   * the current: -slope / |slope| at kStreamMaxSpeed * smoothstep(still, fall, |slope|), the same
+    //     numbers the physics uses (Physics/WaterWaves.h);
+    //   * the lean: the slope is added to the chop's slope sum, so the sheet is lit as the tilted surface it
+    //     is (the mesh normal stays +Y, the material's wave normal is the mesh normal minus its tilt);
+    //   * a two-phase flow map: a pattern looked up at (position - flow * time) shears without bound as
+    //     soon as the flow differs from place to place, so each layer is looked up twice, one half period
+    //     apart, at an offset that restarts every period, and the two are cross-faded (the weights are 0
+    //     where their offset restarts);
+    //   * streaks: stretched noise along the current, drawn as foam, so the water is SEEN to run.
+    // Off, none of it is in the shader: the Flow variant is the flow variant it was.
+    constexpr float kStreamPeriod   = 1.4f;     // s: one flow-map phase
+    constexpr float kStreamStreakW  = 0.18f;    // m: width of a fine streak
+    constexpr float kStreamStreakL  = 2.2f;     // m: length of a fine streak
+    constexpr float kStreamBandW    = 0.7f;     // m: width of a broad band of white water
+    constexpr float kStreamBandL    = 5.0f;     // m: its length along the current
+    constexpr float kStreamStreakAmt = 0.45f;
+    constexpr float kStreamCols = 100.0f;
+    float srow = 120.0f;
+    auto S = [&]() { return srow += 0.5f; };
+    auto mul = [&](Pin a, Pin b) { return Pin{ m.op(T::Multiply, a, b, kStreamCols, S()) }; };
+    auto add = [&](Pin a, Pin b) { return Pin{ m.op(T::Add, a, b, kStreamCols, S()) }; };
+    auto sub = [&](Pin a, Pin b) { return Pin{ m.op(T::Subtract, a, b, kStreamCols, S()) }; };
+    auto kc  = [&](float v)      { return Pin{ m.k(v, kStreamCols - 1.0f, S()) }; };
+    auto streamSwitch = [&](Pin on, Pin off) {
+        const int n = m.node(T::StaticSwitch, kStreamCols + 2.0f, S());
+        MatGraphNode& sw = *m.g.findNode(n);
+        sw.s    = "Stream";
+        sw.p[0] = 0.0f;
+        m.link(on, n, 0);
+        m.link(off, n, 1);
+        return Pin{ n };
+    };
+    // The sheet's data through the Water Surface node (its Slope on a stream sheet; Shore and Depth below).
+    const int waterData = m.node(T::WaterSurfaceData, kStreamCols - 2.0f, S());
+    const int slSp  = m.un(T::SplitRGBA, Pin{ waterData, 2 }, kStreamCols - 1.0f, S());
+    const Pin slX{ slSp, 0 }, slZ{ slSp, 1 };
+    const Pin slMag  = Pin{ m.op(T::Power, add(mul(slX, slX), mul(slZ, slZ)), kc(0.5f), kStreamCols, S()) };
+    const Pin slSafe = add(slMag, kc(1.0e-4f));
+    const Pin spd    = mul(Pin{ m.op3(T::Smoothstep, kc(HE::water::kStreamStillSlope), kc(HE::water::kStreamFallSlope), slMag,
+                                      kStreamCols, S()) }, kc(HE::water::kStreamMaxSpeed));
+    // The unit direction downhill and the current (m/s) along it, in world axes.
+    const Pin invSl = Pin{ m.op(T::Divide, kc(-1.0f), slSafe, kStreamCols, S()) };
+    const Pin dirX = mul(slX, invSl);
+    const Pin dirZ = mul(slZ, invSl);
+    const Pin fvX  = mul(dirX, spd), fvZ = mul(dirZ, spd);
+    // The two phases (0..1, half a period apart), their cross-fade weights and the lookup positions.
+    const Pin tPh   = mul(Pin{ time }, kc(1.0f / kStreamPeriod));
+    const Pin ph0   = Pin{ m.un(T::Fract, tPh, kStreamCols, S()) };
+    const Pin ph1   = Pin{ m.un(T::Fract, add(tPh, kc(0.5f)), kStreamCols, S()) };
+    const Pin w0    = Pin{ m.un(T::OneMinus, Pin{ m.un(T::Absolute, sub(mul(ph0, kc(2.0f)), kc(1.0f)), kStreamCols, S()) }, kStreamCols, S()) };
+    const Pin w1    = Pin{ m.un(T::OneMinus, w0, kStreamCols, S()) };
+    const Pin back0 = mul(ph0, kc(-kStreamPeriod)), back1 = mul(ph1, kc(-kStreamPeriod));
+    const Pin p0x = add(px, mul(fvX, back0)), p0z = add(pz, mul(fvZ, back0));
+    const Pin p1x = add(px, mul(fvX, back1)), p1z = add(pz, mul(fvZ, back1));
+    m.comment("Stream: slope from the mesh UV, two-phase flow map, streaks (Static Switch)", kStreamCols - 3.0f, 119.0f, 8, 3);
+    // Turning of the current: how fast its direction changes per metre of water, from the screen derivatives of the unit
+    // direction and of the world position (rad/m, a bend or two currents meeting). Weighted by speed (a standing water has
+    // no direction). The surface answers it: choppier water and foam where the current bends.
+    // OFF (gain 0) for now: the direction is interpolated linearly over the mesh's triangles, so its screen derivative
+    // is constant per triangle and jumps at every edge — the stream showed its triangles as light and dark facets.
+    // The term stays wired for when the mesh hands the turning over as a smooth per-vertex value.
+    constexpr float kStreamTurnGain = 0.0f;
+    const int dirVec  = m.op3(T::Combine3, dirX, dirZ, kc(0.0f), kStreamCols, S());
+    const int dDirX   = m.un(T::Ddx, Pin{ dirVec }, kStreamCols, S());
+    const int dDirY   = m.un(T::Ddy, Pin{ dirVec }, kStreamCols, S());
+    const int dPosX   = m.un(T::Ddx, Pin{ wp }, kStreamCols, S());
+    const int dPosY   = m.un(T::Ddy, Pin{ wp }, kStreamCols, S());
+    auto len3 = [&](int v) { return Pin{ m.op(T::Power, Pin{ m.op(T::DotProduct, Pin{ v }, Pin{ v }, kStreamCols, S()) }, kc(0.5f), kStreamCols, S()) }; };
+    const Pin turnPerM = Pin{ m.op(T::Divide, add(len3(dDirX), len3(dDirY)), add(add(len3(dPosX), len3(dPosY)), kc(1.0e-4f)), kStreamCols, S()) };
+    const Pin turbulence = Pin{ m.un(T::Saturate, mul(mul(turnPerM, kc(kStreamTurnGain)), Pin{ m.un(T::Saturate, spd, kStreamCols, S()) }), kStreamCols, S()) };
+
+
     // Gusts: slow large patches where the sea is rougher and where it is calmer.
     // Without them the same texture repeats evenly to the horizon. The same field
     // also trades weight between each wave and its companion: where the primary
@@ -859,7 +939,8 @@ Mb waterMaterial()
     const int sB = m.un(T::SplitRGBA, waveB, 17, 27);
     const int sC = m.un(T::SplitRGBA, waveC, 17, 28);
     const Pin drive = m.sum({ Pin{ sA, 3 }, Pin{ sB, 3 }, Pin{ sC, 3 } }, 18, 26);
-    const int ampBase = m.op(T::Multiply, drive, m.k(kChopBase, 20, 26), 21, 26);
+    const int ampBase0 = m.op(T::Multiply, drive, m.k(kChopBase, 20, 26), 21, 26);
+    const int ampBase = m.op(T::Multiply, ampBase0, streamSwitch(add(kc(1.0f), mul(turbulence, kc(0.4f))), kc(1.0f)), 21.5f, 26);
     const int amp1    = m.op(T::Multiply, ampBase, fR, 22, 26);
     const int amp2    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopMid, 22, 27), 22, 27), fR, 23, 27);
     const int amp3    = m.op(T::Multiply, m.op(T::Multiply, ampBase, m.k(kChopFine, 22, 28), 22, 28), fF, 23, 28);
@@ -871,10 +952,21 @@ Mb waterMaterial()
     };
     const auto d1 = drift(b, 0.55f, 24, 29), d2 = drift(c, 0.9f, 24, 36);
     const auto d3 = drift(b, -0.8f, 24, 43), d4 = drift(c, -1.3f, 24, 50);
-    const Grad r1 = rippleLayer(m, cpx, cpz, time, 2.6f,  d1.first, d1.second, amp1, fR, 24, 31);
-    const Grad r2 = rippleLayer(m, cpx, cpz, time, 0.9f,  d2.first, d2.second, amp2, fR, 24, 38);
-    const Grad r3 = rippleLayer(m, cpx, cpz, time, 0.4f,  d3.first, d3.second, amp3, fF, 24, 45);
-    const Grad r4 = rippleLayer(m, cpx, cpz, time, 0.17f, d4.first, d4.second, amp4, fG, 24, 52);
+    // Each layer is the single lookup (the flow variant's, a still body's with the switch off) or, for a stream, two
+    // lookups half a period apart cross-faded (see Stream above).
+    auto chop = [&](float size, std::pair<Pin, Pin> d, int amp, Pin fade, float col, float row) {
+        const Grad one = rippleLayer(m, cpx, cpz, time, size, d.first, d.second, Pin{ amp }, fade, col, row);
+        const Grad ga  = rippleLayer(m, p0x, p0z, time, size, d.first, d.second, Pin{ amp }, fade, col + 10.0f, row);
+        const Grad gb  = rippleLayer(m, p1x, p1z, time, size, d.first, d.second, Pin{ amp }, fade, col + 20.0f, row);
+        Grad g;
+        g.x = streamSwitch(add(mul(ga.x, w0), mul(gb.x, w1)), one.x);
+        g.z = streamSwitch(add(mul(ga.z, w0), mul(gb.z, w1)), one.z);
+        return g;
+    };
+    const Grad r1 = chop(2.6f,  d1, amp1, fR, 24, 31);
+    const Grad r2 = chop(0.9f,  d2, amp2, fR, 24, 38);
+    const Grad r3 = chop(0.4f,  d3, amp3, fF, 24, 45);
+    const Grad r4 = chop(0.17f, d4, amp4, fG, 24, 52);
     m.comment("Chop (noise slope, finite differences)", 24, 29, 8, 14);
 
     const Pin slopesX[] = { a.slopeX, a2.slopeX, b.slopeX, b2.slopeX, c.slopeX, c2.slopeX, r1.x, r2.x, r3.x, r4.x };
@@ -892,10 +984,12 @@ Mb waterMaterial()
     const int rs     = m.un(T::SplitRGBA, Pin{ ring, 1 }, 45, 31);
     const int ringX  = m.op(T::Multiply, Pin{ rs, 0 }, fadeRg, 46, 31);
     const int ringZ  = m.op(T::Multiply, Pin{ rs, 1 }, fadeRg, 46, 32);
-    const int sx    = m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesX), std::end(slopesX)), 41, 26), gust, 44, 26),
-                           ringX, 45, 26);
-    const int sz    = m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesZ), std::end(slopesZ)), 41, 28), gust, 44, 28),
-                           ringZ, 45, 28);
+    // A stream's lean (the ground's slope, from the mesh UV) is one more term: 0 for every other water.
+    const Pin leanX = streamSwitch(slX, kc(0.0f)), leanZ = streamSwitch(slZ, kc(0.0f));
+    const int sx    = m.op(T::Add, m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesX), std::end(slopesX)), 41, 26), gust, 44, 26),
+                                        ringX, 45, 26), leanX, 45.5f, 26);
+    const int sz    = m.op(T::Add, m.op(T::Add, m.op(T::Multiply, m.sum(std::vector<Pin>(std::begin(slopesZ), std::end(slopesZ)), 41, 28), gust, 44, 28),
+                                        ringZ, 45, 28), leanZ, 45.5f, 28);
     const int tilt  = m.node(T::Combine3, 45, 27);
     // The mesh normal's x tilt is the shore proximity, not a slope: it goes into the
     // tilt too, so subtracting the tilt leaves the wave slope alone (0 off a landscape).
@@ -934,13 +1028,8 @@ Mb waterMaterial()
     // through (MaterialShaderLibrary.cpp) — the shader itself still can't see that scale to
     // undo it, so the mesh bakes the inverse ratio in instead (SurfaceOptions::shoreTiltScale,
     // WaterMesh.h/WaterSurface.cpp's shoreTiltScaleOf), and the two cancel.
-    constexpr float kShoreGain  = HE::water::kShoreNormalGain;
-    constexpr float kShoreDepth = HE::water::kShoreFadeDepth;
-    const int shoreX2  = m.op(T::Multiply, Pin{ gs, 0 }, Pin{ gs, 0 }, 44, 11);
-    const int shoreZ2  = m.op(T::Multiply, Pin{ gs, 2 }, Pin{ gs, 2 }, 44, 12);
-    const int shoreMag = m.op(T::Power, m.op(T::Add, shoreX2, shoreZ2, 45, 11), m.k(0.5f, 45, 12), 46, 11);
-    const int shoreE  = m.un(T::Saturate, m.op(T::Divide, shoreMag, m.op(T::Multiply, Pin{ gs, 1 }, m.k(kShoreGain, 47, 13), 48, 13), 49, 12), 50, 12);
-    const int shoreD  = m.op(T::Multiply, m.un(T::OneMinus, shoreE, 51, 12), m.k(kShoreDepth, 51, 13), 52, 12);
+    const Pin shoreE{ waterData, 0 };   // the Water Surface node decodes it (MaterialGraph.cpp)
+    const Pin shoreD{ waterData, 1 };
 
     // Water body: transmittance exp(-absorption · depth / cos) along the view ray,
     // with the ray bent toward the wave normal by Refraction.
@@ -1033,7 +1122,61 @@ Mb waterMaterial()
     // distance like its slope. Zero without a ring, so the sum is the wave foam alone.
     const int ringFoam = m.op(T::Multiply, m.op(T::Multiply, Pin{ ring, 2 }, fadeRg, 31, 19),
                               m.op(T::Add, m.k(0.5f, 31, 20), m.op(T::Multiply, breakup, m.k(0.5f, 31, 21), 32, 20), 33, 20), 34, 19);
-    const int foamAmt = m.un(T::Saturate, m.op(T::Add, waveFoam, ringFoam, 35, 18), 36, 18);
+    // A stream's streaks: noise stretched along the current (fine across it, long along it), looked up in the two
+    // flow-map phases and cross-faded; foam where it is high, in proportion to how fast the water runs and fading
+    // with distance like the coarse chop.
+    // The streaks are looked up in THREE fixed frames (0, 60 and 120 degrees) and blended by how well each lies
+    // along the current (|cos|^8): a frame turned with the current itself would project the world position on a
+    // direction that changes from place to place, and 30 m from the origin a degree of turn shifts the pattern by
+    // half a streak — the surface then shows contour lines instead of running water. In a fixed frame the pattern
+    // only moves, along its own axis, by the share of the current that runs that way (two-phase, like the chop).
+    // Two scales in one: broad soft bands of white water with the fine streaks in them.
+    auto frameNoise = [&](float ax, float az, Pin phase) {
+        const Pin alongK  = add(mul(Pin{ px }, kc(ax)), mul(Pin{ pz }, kc(az)));
+        const Pin acrossK = sub(mul(Pin{ pz }, kc(ax)), mul(Pin{ px }, kc(az)));
+        const Pin cK      = add(mul(dirX, kc(ax)), mul(dirZ, kc(az)));       // the current's share along this axis
+        const Pin alongI  = sub(alongK, mul(mul(cK, spd), mul(phase, kc(kStreamPeriod))));
+        const int suv = m.op(T::CombineRGBA, mul(acrossK, kc(1.0f / kStreamStreakW)), mul(alongI, kc(1.0f / kStreamStreakL)),
+                             kStreamCols, S());
+        const int buv = m.op(T::CombineRGBA, mul(acrossK, kc(1.0f / kStreamBandW)), mul(alongI, kc(1.0f / kStreamBandL)),
+                             kStreamCols, S());
+        const Pin fine  = Pin{ m.fbm(Pin{ suv }, kc(1.0f), kStreamCols, S()) };
+        const Pin broad = Pin{ m.fbm(Pin{ buv }, kc(1.0f), kStreamCols, S()) };
+        return add(mul(broad, kc(0.6f)), mul(fine, kc(0.4f)));
+    };
+    const float kAx[3] = { 1.0f, 0.5f, -0.5f };
+    const float kAz[3] = { 0.0f, 0.8660254f, 0.8660254f };
+    Pin frameW[3];
+    for (int k = 0; k < 3; ++k)
+    {
+        const Pin c  = add(mul(dirX, kc(kAx[k])), mul(dirZ, kc(kAz[k])));
+        const Pin c2 = mul(c, c);
+        frameW[k] = mul(mul(c2, c2), mul(c2, c2));   // |cos|^8: one frame carries a place, a narrow cross-fade between
+    }
+    const Pin wSum = add(add(add(frameW[0], frameW[1]), frameW[2]), kc(1.0e-4f));
+    auto streakNoise = [&](Pin phase) {
+        const Pin n0 = mul(frameNoise(kAx[0], kAz[0], phase), frameW[0]);
+        const Pin n1 = mul(frameNoise(kAx[1], kAz[1], phase), frameW[1]);
+        const Pin n2 = mul(frameNoise(kAx[2], kAz[2], phase), frameW[2]);
+        return Pin{ m.op(T::Divide, add(add(n0, n1), n2), wSum, kStreamCols, S()) };
+    };
+    const Pin streakN  = add(mul(streakNoise(ph0), w0), mul(streakNoise(ph1), w1));
+    // Aeration: fast water and water that turns takes in air and goes white — the streaks' threshold drops, more
+    // of the surface is foam (the rapids of the reference photos), while slow water keeps thin lines.
+    const Pin aerSpd   = Pin{ m.op3(T::Smoothstep, kc(1.0f), kc(2.6f), spd, kStreamCols, S()) };
+    // (Speed only: the turning is a screen derivative of the interpolated direction, constant per triangle, and as a
+    // threshold it would draw the mesh's triangles as white patches.)
+    const Pin aer      = aerSpd;
+    const Pin streakLo = sub(kc(0.54f), mul(aer, kc(0.18f)));
+    const Pin streakHi = sub(kc(0.86f), mul(aer, kc(0.14f)));
+    const Pin streakLn = Pin{ m.op3(T::Smoothstep, streakLo, streakHi, streakN, kStreamCols, S()) };
+    const Pin streakAmt = mul(mul(streakLn, Pin{ m.un(T::Saturate, mul(spd, kc(0.8f)), kStreamCols, S()) }),
+                              mul(Pin{ fC }, add(kc(kStreamStreakAmt), mul(aer, kc(0.55f)))));
+    // Very fast water (a fall, a chute) is white: the streaks cover far more of it, as in the photos of waterfalls.
+    // ... and flecks of foam where the current bends, in the same noise (so it moves with the water).
+    const Pin turnFoam = mul(mul(Pin{ m.op3(T::Smoothstep, kc(0.42f), kc(0.68f), streakN, kStreamCols, S()) }, turbulence), mul(Pin{ fC }, kc(0.3f)));
+    const Pin streakFoam = streamSwitch(add(streakAmt, turnFoam), kc(0.0f));
+    const int foamAmt = m.un(T::Saturate, m.op(T::Add, m.op(T::Add, waveFoam, ringFoam, 35, 18), streakFoam, 35.5f, 18), 36, 18);
     m.comment("Foam", 16, 16, 16, 8);
 
     // Soft shore (docs/water-realistic-baseline-2026-10-20.md, Thema 206 Schritt 2). The
@@ -1189,17 +1332,12 @@ Mb waterMaterial()
     const int belowIn  = m.op(T::And, under.below, m.un(T::Not, notIn, 74, 8), 75, 8);
     const int fadeOut  = m.un(T::OneMinus, m.op3(T::Smoothstep, Pin{ flowS, 2 }, reachD, camDepth, 72, 9), 73, 9);
     const int keepU    = m.op3(T::If, depthSet, fadeOut, m.k(1.0f, 73, 10), 74, 10);
-    const int belowSw  = m.node(T::StaticSwitch, 76, 8);
-    {
-        MatGraphNode& bs = *m.g.findNode(belowSw);
-        bs.s    = "Flow";
-        bs.p[0] = 0.0f;   // off: the plane test alone, as before
-    }
-    m.link(belowIn, belowSw, 0);
-    m.link(under.below, belowSw, 1);
-    m.comment("From below: only a camera that can be in this water (Flow.z/w)", 70, 8, 7, 4);
-
-    const int below  = belowSw;
+    // The test reads the Flow knob in EVERY variant (z = the water's depth the camera can be in, w = 1 when that is set): the
+    // renderer sets it per frame (RenderExtractor.cpp): a camera that is not in THIS body of water gets z = -10, so it never
+    // sees the underside of a pool above it (the teal slab over a hillside); the camera IN the body gets z large. A mesh nobody
+    // set it for (w = 0: a plane, another material user) keeps the plain plane test.
+    m.comment("From below: only a camera that is in this water (Flow.z/w)", 70, 8, 7, 4);
+    const int below  = belowIn;
     const int baseO  = m.op3(T::If, below, m.k(0.0f, 76, 0), base, 77, 0);
     const int specO2 = m.op3(T::If, below, m.k(0.0f, 76, 1), specO, 77, 1);
     const int roughO2 = m.op3(T::If, below, m.k(1.0f, 76, 2), roughO, 77, 2);
@@ -1209,16 +1347,9 @@ Mb waterMaterial()
     // -belowDot is how deep the camera is; the underside fades in over the first metre.
     const int camDepthU = m.op3(T::Smoothstep, m.k(0.0f, 75, 3), m.k(1.0f, 75, 3.5f),
                                 m.op(T::Multiply, belowDot, m.k(-1.0f, 75, 4), 76, 4), 76, 3);
-    // With the Flow switch on, times the fade toward "not in this water" above.
+    // Times the fade toward "not in this water" above.
     const int alphaU = m.op(T::Multiply, under.alpha, camDepthU, 76, 3.5f);
-    const int alphaUSw = m.node(T::StaticSwitch, 76, 3.7f);
-    {
-        MatGraphNode& as = *m.g.findNode(alphaUSw);
-        as.s    = "Flow";
-        as.p[0] = 0.0f;
-    }
-    m.link(m.op(T::Multiply, alphaU, keepU, 75, 3.7f), alphaUSw, 0);
-    m.link(alphaU, alphaUSw, 1);
+    const int alphaUSw = m.op(T::Multiply, alphaU, keepU, 75, 3.7f);
     const int alphaO = m.op3(T::If, below, alphaUSw, alpha, 77, 3);
     const int emisO  = m.op3(T::If, below, under.emissive, m.k(0.0f, 76, 4), 77, 4);
     const int normO  = m.op3(T::If, below, m.op(T::Multiply, waveN, m.k(-1.0f, 75, 5), 76, 5), waveN, 77, 5);
@@ -1251,8 +1382,8 @@ Mb waterMaterial()
 const std::set<std::string> kWaterParams = {
     "ShallowColor", "DeepColor", "Turbidity", "WaveA", "WaveB", "WaveC", "Surface",
     "ShallowWater", "Opacity", "Refraction", "FoamColor", "Foam",
-    "Caustics", "Variation",
-};   // (TessWaves exists only in the Tessellation permutation, Flow only in the Flow one: nothing reaches them with the switch off)
+    "Caustics", "Variation", "Flow",
+};   // (TessWaves exists only in the Tessellation permutation; Flow is in every one: the renderer sets its z/w per frame, the underside)
 
 // ── Displacement demo (Thema 207) ────────────────────────────────────────────
 // The example for the Output node's Displacement pin: a quilted surface whose
@@ -1321,6 +1452,270 @@ Mb displacementDemoMaterial()
 
 const std::set<std::string> kDisplacementDemoParams = { "Height", "TopColor", "GrooveColor" };
 
+// ── Water spray (Thema 232) ──────────────────────────────────────────────────
+// The particles of a waterfall's curtain, the drops thrown at its foot and the mist
+// over it (WaterSurface.cpp's spray emitters). Drawn as a particle BAND (RenderWorld.h,
+// kParticleBandLevels): one quad per particle in world space, a Streak stretched along
+// the drop's velocity, a Puff turned by its own angle, so the shape is this graph's and
+// the same on every backend. The band's UV carries the particle:
+//
+//     q      = fract(uv)                          the quad's own UV
+//     fade   = floor(uv.y) / 64                   alpha over life
+//     seed   = floor(uv.x) / 64                   fixed per particle
+//     core   = saturate(1 - |2 q - 1|^2)          a soft disk
+//     clumps = smoothstep(0, 0.35, 0.85 core + 0.75 fbm(q * (1.8, 1.0) + seed * (7.3, 3.1) - (0, 0.6 t)) - 0.65)
+//     opacity = saturate(clumps * sqrt(core) * fade * (0.8 + 0.4 seed))
+//
+// The fbm moves with the seed, so no two drops are the same blob and a streak frays
+// along its length instead of being a capsule; the slow time term lets it boil. Lit,
+// with a little self light so a curtain seen against the sun is not a grey sheet.
+Mb waterSprayMaterial()
+{
+    Mb m;
+    const int pd    = m.node(T::ParticleData, 0, 0);
+    const int quad  = m.un(T::SplitRGBA, Pin{ pd, 0 }, 1, 0);
+    const Pin fu{ quad, 0 }, fv{ quad, 1 };
+    const Pin fade{ pd, 1 }, seed{ pd, 2 };
+    m.comment("The particle: its quad, fade over life, seed (Particle node)", 0, 0, 5, 4.5f);
+
+    const int two   = m.k(2.0f, 5, 0);
+    const int one   = m.k(1.0f, 5, 1);
+    const int pxm   = m.op(T::Multiply, fu, two, 6, 0);
+    const int px    = m.op(T::Subtract, pxm, one, 7, 0);
+    const int pym   = m.op(T::Multiply, fv, two, 6, 1);
+    const int py    = m.op(T::Subtract, pym, one, 7, 1);
+    const int px2   = m.op(T::Multiply, px, px, 8, 0);
+    const int py2   = m.op(T::Multiply, py, py, 8, 1);
+    const int r2    = m.op(T::Add, px2, py2, 9, 0);
+    const int inv   = m.un(T::OneMinus, r2, 10, 0);
+    const int core  = m.un(T::Saturate, inv, 11, 0);
+    m.comment("A soft disk on the quad", 5, 0, 7, 2.5f);
+
+    const int time  = m.node(T::Time, 5, 6);
+    const int ku    = m.k(1.8f, 5, 3);
+    const int kv    = m.k(1.0f, 5, 4);
+    const int ksu   = m.k(7.3f, 5, 5);
+    const int ksv   = m.k(3.1f, 6, 5);
+    const int kt    = m.k(0.6f, 6, 6);
+    const int uS    = m.op(T::Multiply, fu, ku, 6, 3);
+    const int sU    = m.op(T::Multiply, seed, ksu, 7, 5);
+    const int nu    = m.op(T::Add, uS, sU, 8, 3);
+    const int vS    = m.op(T::Multiply, fv, kv, 6, 4);
+    const int sV    = m.op(T::Multiply, seed, ksv, 7, 6);
+    const int tS    = m.op(T::Multiply, time, kt, 7, 7);
+    const int nv0   = m.op(T::Add, vS, sV, 8, 4);
+    const int nv    = m.op(T::Subtract, nv0, tS, 9, 4);
+    const int nuv   = m.op(T::CombineRGBA, nu, nv, 10, 3);
+    const int nscale = m.k(3.0f, 10, 4);
+    const int noise = m.fbm(nuv, nscale, 11, 3);
+    m.comment("Breakup: noise on the quad, moved by the seed", 5, 3, 7, 4.5f);
+
+    const int k09   = m.k(0.85f, 12, 1);
+    const int k06   = m.k(0.75f, 12, 3);
+    const int k055  = m.k(0.65f, 13, 2);
+    const int coreS = m.op(T::Multiply, core, k09, 13, 0);
+    const int noiseS = m.op(T::Multiply, noise, k06, 13, 3);
+    const int dsum  = m.op(T::Add, coreS, noiseS, 14, 1);
+    const int d     = m.op(T::Subtract, dsum, k055, 15, 1);
+    const int e0    = m.k(0.0f, 15, 2);
+    const int e1    = m.k(0.35f, 15, 3);
+    const int clumps = m.op3(T::Smoothstep, e0, e1, d, 16, 1);
+    const int half  = m.k(0.5f, 16, 0);
+    const int soft  = m.op(T::Power, core, half, 17, 0);
+    const int shape = m.op(T::Multiply, clumps, soft, 18, 1);
+    // Each particle a little its own strength (0.8..1.2 by its seed): enough that a sheet is not a flat board,
+    // little enough that it does not break into stripes.
+    const int kv0   = m.k(0.8f, 17, 3);
+    const int kv1   = m.k(0.4f, 17, 4);
+    const int vary  = m.op(T::Add, kv0, m.op(T::Multiply, seed, kv1, 18, 4), 19, 3);
+    const int faded = m.op(T::Multiply, shape, fade, 19, 1);
+    const int alpha = m.un(T::Saturate, m.op(T::Multiply, faded, vary, 20, 1), 21, 1);
+    m.comment("Clumps x fade over life", 12, 0, 8, 4);
+
+    const int base  = m.node(T::ConstColor, 18, 3);
+    m.g.findNode(base)->p[0] = 0.86f;
+    m.g.findNode(base)->p[1] = 0.91f;
+    m.g.findNode(base)->p[2] = 0.95f;
+    const int kGlow = m.k(0.12f, 18, 4);
+    const int glow  = m.op(T::Multiply, base, kGlow, 19, 4);
+    const int rough = m.k(0.35f, 19, 5);
+
+    const int out = m.node(T::Output, 23, 2);
+    MatGraphNode& o = *m.g.findNode(out);
+    o.p[0] = 1.0f;                                                  // lit
+    o.p[1] = static_cast<float>(MatBlendMode::Translucent);
+    o.p[3] = static_cast<float>(MatDomain::Surface);
+    o.sortPriority = 1;                                             // lies on the water: drawn after it
+    m.link(base,  out, kMatOutputBaseColorPin);
+    m.link(rough, out, kMatOutputRoughnessPin);
+    m.link(glow,  out, kMatOutputEmissivePin);
+    m.link(alpha, out, kMatOutputOpacityPin);
+    return m;
+}
+
+const std::set<std::string> kWaterSprayParams = {};
+
+// ── Water foam around obstacles (Thema 232) ──────────────────────────────────
+// The foam a WaterObstacleComponent gathers where the water runs past it: a band around the obstacle's footprint
+// (HE::water::obstacleFoam, rebuilt each frame). What the band carries:
+//
+//     s        = fract(uv.x)             0 at the obstacle .. 1 at the foam's outer edge
+//     strength = floor(uv.x) / 16        foam setting x current
+//     facing   = 2 uv.y - 1              1 = the face the water runs into, -1 = straight downstream
+//     flow     = n.xz / n.y / 0.25       the way the water runs here (along the face close in) x its share of speed
+//
+// and what it draws, as a rock in a river does:
+//     pillow  = smoothstep(0.15, 0.9, facing) * (1 - s)^0.7       piled white water against the upstream face
+//     eddy    = smoothstep(0.3, 0.95, -facing) * (1 - s)          the calm right behind it
+//     body    = (1 - s)^1.2 * (1 - 0.75 eddy)                     the collar round the sides
+//     streaks = smoothstep(0.5, 0.78, fbm(2.4 across, 0.45 along - 2 t |flow|))   along the LOCAL flow
+//     lace    = 0.65 fbm(1.3 p) + 0.35 fbm(3.7 p + 7),  p = world.xz - 1.2 t flow
+//     opacity = saturate(1.15 strength (pillow smoothstep(0.2, 0.55, lace) + body smoothstep(0.5, 0.8, lace)
+//                                       + smoothstep(0, 0.3, s) (1 - s)^0.5 streaks (0.35 + 0.65 (1 - facing^2))))
+Mb waterFoamMaterial()
+{
+    Mb m;
+    auto K = [&](float v, float col, float row) { return m.k(v, col, row); };
+    // The band.
+    const int band  = m.node(T::FoamBandData, 0, 0);
+    const Pin s{ band, 0 }, strength{ band, 1 }, facing{ band, 2 };
+    const int oneMs = m.un(T::OneMinus, s, 5, 1);
+    m.comment("The band: ring, strength, facing, flow (Foam Band node)", 0, 0, 6, 4);
+
+    // The flow here, its speed share and unit direction.
+    const int flowS = m.un(T::SplitRGBA, Pin{ band, 3 }, 1, 5);
+    const Pin fx{ flowS, 0 }, fz{ flowS, 1 };
+    const int zero  = K(0.0f, 3, 7);
+    const int flow3 = m.op3(T::Combine3, fx, zero, fz, 4, 5);
+    const int fdot  = m.op(T::DotProduct, flow3, flow3, 5, 5);
+    const int kEps  = K(1.0e-6f, 5, 6);
+    const int fsq   = m.op(T::Add, fdot, kEps, 6, 5);
+    const int half  = K(0.5f, 6, 6);
+    const int fspd  = m.op(T::Power, fsq, half, 7, 5);
+    const int dirX  = m.op(T::Divide, fx, fspd, 8, 5);
+    const int dirZ  = m.op(T::Divide, fz, fspd, 8, 6);
+    m.comment("The flow here: speed share and direction", 0, 5, 9, 3);
+
+    // World position, the lace (carried with the flow) and the streaks (in the flow's own frame).
+    const int wp    = m.node(T::WorldPos, 0, 9);
+    const int swp   = m.un(T::SplitRGBA, wp, 1, 9);
+    const int time  = m.node(T::Time, 0, 10);
+    const int kBack = K(-1.2f, 1, 11);
+    const int tBack = m.op(T::Multiply, time, kBack, 2, 11);
+    const int offX  = m.op(T::Multiply, fx, tBack, 3, 10);
+    const int offZ  = m.op(T::Multiply, fz, tBack, 3, 11);
+    const int px    = m.op(T::Add, Pin{ swp, 0 }, offX, 4, 10);
+    const int pz    = m.op(T::Add, Pin{ swp, 2 }, offZ, 4, 11);
+    const int puv   = m.op(T::CombineRGBA, px, pz, 5, 10);
+    const int scBig = K(1.3f, 5, 11);
+    const int nBig  = m.fbm(puv, scBig, 6, 10);
+    const int off7  = K(7.0f, 5, 12);
+    const int puv2  = m.op(T::Add, puv, off7, 6, 12);
+    const int scFine = K(3.7f, 6, 13);
+    const int nFine = m.fbm(puv2, scFine, 7, 12);
+    const int k065  = K(0.65f, 7, 10);
+    const int k035  = K(0.35f, 8, 13);
+    const int bigS  = m.op(T::Multiply, nBig, k065, 8, 10);
+    const int fineS = m.op(T::Multiply, nFine, k035, 9, 12);
+    const int lace  = m.op(T::Add, bigS, fineS, 10, 11);
+    // along = p . dir, across = p . (-dirZ, dirX)
+    const int aX    = m.op(T::Multiply, Pin{ swp, 0 }, dirX, 4, 14);
+    const int aZ    = m.op(T::Multiply, Pin{ swp, 2 }, dirZ, 4, 15);
+    const int along = m.op(T::Add, aX, aZ, 5, 14);
+    const int cX    = m.op(T::Multiply, Pin{ swp, 2 }, dirX, 4, 16);
+    const int cZ    = m.op(T::Multiply, Pin{ swp, 0 }, dirZ, 4, 17);
+    const int across = m.op(T::Subtract, cX, cZ, 5, 16);
+    const int kAc   = K(2.4f, 5, 18);
+    const int kAl   = K(0.45f, 5, 19);
+    const int acS   = m.op(T::Multiply, across, kAc, 6, 16);
+    const int alS   = m.op(T::Multiply, along, kAl, 6, 14);
+    const int kRun  = K(2.0f, 6, 18);
+    const int tSpd  = m.op(T::Multiply, time, fspd, 7, 17);
+    const int run   = m.op(T::Multiply, tSpd, kRun, 8, 17);
+    const int alT   = m.op(T::Subtract, alS, run, 9, 15);
+    const int stUV  = m.op(T::CombineRGBA, acS, alT, 10, 15);
+    const int kOne  = K(1.0f, 10, 17);
+    const int stN   = m.fbm(stUV, kOne, 11, 15);
+    const int e05   = K(0.5f, 11, 16);
+    const int e078  = K(0.78f, 11, 17);
+    const int streaks = m.op3(T::Smoothstep, e05, e078, stN, 12, 15);
+    m.comment("Lace with the flow; streaks along the local flow (bending round the obstacle)", 0, 9, 13, 11);
+
+    // Pillow, eddy, body.
+    const int p015  = K(0.15f, 12, 1);
+    const int p09   = K(0.9f, 12, 2);
+    const int pillowF = m.op3(T::Smoothstep, p015, p09, facing, 13, 1);
+    const int k07   = K(0.7f, 12, 3);
+    const int edgeSoft = m.op(T::Power, oneMs, k07, 13, 3);
+    const int pillow = m.op(T::Multiply, pillowF, edgeSoft, 14, 2);
+    const int kNeg  = K(-1.0f, 13, 5);
+    const int negF  = m.op(T::Multiply, facing, kNeg, 14, 5);
+    const int e03   = K(0.3f, 14, 6);
+    const int e095  = K(0.95f, 14, 7);
+    const int eddyF = m.op3(T::Smoothstep, e03, e095, negF, 15, 5);
+    const int eddy  = m.op(T::Multiply, eddyF, oneMs, 16, 5);
+    const int k12   = K(1.2f, 12, 8);
+    const int edge  = m.op(T::Power, oneMs, k12, 13, 8);
+    const int k075  = K(0.75f, 15, 8);
+    const int eddyS = m.op(T::Multiply, eddy, k075, 16, 8);
+    const int calm  = m.un(T::OneMinus, eddyS, 17, 8);
+    const int body  = m.op(T::Multiply, edge, calm, 18, 8);
+    m.comment("Pillow upstream, eddy behind, collar round", 12, 0, 7, 9);
+
+    // The three parts and their lace.
+    const int l02   = K(0.2f, 19, 1);
+    const int l055  = K(0.55f, 19, 2);
+    const int lP    = m.op3(T::Smoothstep, l02, l055, lace, 20, 1);
+    const int partP = m.op(T::Multiply, pillow, lP, 21, 1);
+    const int l05   = K(0.5f, 19, 4);
+    const int l08   = K(0.8f, 19, 5);
+    const int lB    = m.op3(T::Smoothstep, l05, l08, lace, 20, 4);
+    const int partB = m.op(T::Multiply, body, lB, 21, 4);
+    const int fsq2  = m.op(T::Multiply, facing, facing, 19, 7);
+    const int sideW = m.un(T::OneMinus, fsq2, 20, 7);
+    const int k065s = K(0.65f, 20, 8);
+    const int k035s = K(0.35f, 20, 9);
+    const int sideM = m.op(T::Multiply, sideW, k065s, 21, 8);
+    const int sideS = m.op(T::Add, k035s, sideM, 22, 8);
+    const int k05e  = K(0.5f, 19, 10);
+    const int stOut = m.op(T::Power, oneMs, k05e, 20, 10);
+    const int st0   = K(0.0f, 19, 11);
+    const int st03  = K(0.3f, 19, 12);
+    const int stIn  = m.op3(T::Smoothstep, st0, st03, s, 20, 11);      // off the rock's face: no rings round it
+    const int stEdge = m.op(T::Multiply, stOut, stIn, 21, 11);
+    const int stE   = m.op(T::Multiply, streaks, stEdge, 21, 10);
+    const int partS = m.op(T::Multiply, stE, sideS, 22, 10);
+    const int sum1  = m.op(T::Add, partP, partB, 23, 2);
+    const int sum   = m.op(T::Add, sum1, partS, 24, 4);
+    const int k115  = K(1.15f, 23, 6);
+    const int sumS  = m.op(T::Multiply, sum, strength, 25, 4);
+    const int sumK  = m.op(T::Multiply, sumS, k115, 26, 5);
+    const int alpha = m.un(T::Saturate, sumK, 27, 5);
+    m.comment("Pillow + collar + streaks, x strength", 19, 0, 9, 11);
+
+    const int base  = m.node(T::ConstColor, 25, 7);
+    m.g.findNode(base)->p[0] = 0.92f;
+    m.g.findNode(base)->p[1] = 0.95f;
+    m.g.findNode(base)->p[2] = 0.97f;
+    const int kGlow = K(0.06f, 25, 8);
+    const int glow  = m.op(T::Multiply, base, kGlow, 26, 8);
+    const int rough = K(0.6f, 26, 9);
+
+    const int out = m.node(T::Output, 29, 4);
+    MatGraphNode& o = *m.g.findNode(out);
+    o.p[0] = 1.0f;                                                  // lit
+    o.p[1] = static_cast<float>(MatBlendMode::Translucent);
+    o.p[3] = static_cast<float>(MatDomain::Surface);
+    o.sortPriority = 1;                                             // lies on the water: drawn after it
+    m.link(base,  out, kMatOutputBaseColorPin);
+    m.link(rough, out, kMatOutputRoughnessPin);
+    m.link(glow,  out, kMatOutputEmissivePin);
+    m.link(alpha, out, kMatOutputOpacityPin);
+    return m;
+}
+
+const std::set<std::string> kWaterFoamParams = {};
+
 // A cap on the longest wire chain, well inside what the editor's own stack
 // holds on every platform (CMakeLists.txt "MSVC main-thread stack"). A graph
 // that creeps past it fails here, not in a Debug test on another OS.
@@ -1345,6 +1740,8 @@ int main(int argc, char** argv)
     std::vector<Entry> entries;
     entries.push_back({ "Water", waterMaterial(), &kWaterParams, true });
     entries.push_back({ "DisplacementDemo", displacementDemoMaterial(), &kDisplacementDemoParams, false });
+    entries.push_back({ "WaterSpray", waterSprayMaterial(), &kWaterSprayParams, true });
+    entries.push_back({ "WaterFoam", waterFoamMaterial(), &kWaterFoamParams, true });
 
     int ok = 0, index = 0;
     for (Entry& e : entries)

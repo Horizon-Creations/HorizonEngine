@@ -6,6 +6,8 @@
 #include <cstring>
 #include <vector>
 
+class ContentManager;
+
 class HE_RENDERING_API RenderSorter {
 public:
     void sort(const RenderWorld&          world,
@@ -47,6 +49,19 @@ public:
         return glm::dot(d, d);
     }
 
+    // Blended draw order, the one rule every backend sorts its blended draws by: the
+    // lower sort priority first (MaterialAsset::sortPriority, a setting of the material's
+    // Output node), back to front within one priority. A material that lies ON a big
+    // translucent surface — foam and spray on water — asks for a higher priority than
+    // that surface's material: a lake's draw origin is its middle, which can be nearer
+    // the camera than the rock at its far shore, and would blend over that rock's foam.
+    static bool blendedBefore(int8_t prioA, float distSqA, int8_t prioB, float distSqB)
+    {
+        return prioA != prioB ? prioA < prioB : distSqA > distSqB;
+    }
+    // The material's sort priority, 0 when it is not resident (or none is given).
+    static int8_t materialSortPriority(const ContentManager* cm, const HE::UUID& materialId);
+
     // Split a frame's draw calls into the opaque and the blended pass, preserving
     // record order within each (the opaque pass relies on that for its
     // same-mesh/same-material batching).
@@ -71,9 +86,11 @@ public:
     // is correct. std::sort is NOT stable, so draws at exactly equal distance may
     // come out in either order — that has always been true of every backend copy
     // and is deliberately not "fixed" here: making it stable would change the
-    // existing draw order on equal-depth ties.
+    // existing draw order on equal-depth ties. With a ContentManager the materials'
+    // sort priorities come first (blendedBefore); without one every draw is priority 0.
     static void sortBackToFront(std::vector<const DrawCall*>& transparent,
-                                const glm::vec3&              camPos);
+                                const glm::vec3&              camPos,
+                                const ContentManager*         cm = nullptr);
 
     // ── Depth-only batching (shadow layers, SSAO / GI pre-passes) ───────────
     // The shadow passes on GL and Metal cull + sort per light view themselves,

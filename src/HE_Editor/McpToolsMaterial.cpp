@@ -638,6 +638,11 @@ const char* nodeTypeName(HE::MatNodeType t)
 	case T::Divide:              return "Divide";
 	case T::Absolute:            return "Absolute";
 	case T::Fract:               return "Fract";
+	case T::Ddx:                 return "Ddx";
+	case T::Ddy:                 return "Ddy";
+	case T::WaterSurfaceData:    return "WaterSurface";
+	case T::ParticleData:        return "Particle";
+	case T::FoamBandData:        return "FoamBand";
 	case T::Smoothstep:          return "Smoothstep";
 	case T::Step:                return "Step";
 	case T::Normalize3:          return "Normalize3";

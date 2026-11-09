@@ -1,5 +1,6 @@
 #pragma once
 #include <Types/UUID.h>
+#include <ContentManager/DefaultAssets.h>   // the default water material
 #include <Math/Math.h>
 #include <Physics/WaterWaves.h>   // the tessellated surface's defaults (TessellationParams)
 #include <cstdint>
@@ -109,6 +110,10 @@ namespace HE::water
     inline constexpr float kDefaultAngularDrag = 0.05f;
     inline constexpr float kMaxDrag            = 10.0f;
     inline constexpr float kMaxFlow            = 50.0f;     // m/s
+    // A stream's depth over the ground (Body::streamDepth), and the bounds a stored one is held to.
+    inline constexpr float kDefaultStreamDepth = 0.3f;
+    inline constexpr float kMinStreamDepth     = 0.05f;
+    inline constexpr float kMaxStreamDepth     = 5.0f;
     inline constexpr float kMaxSplash          = 4.0f;
 
     // The physics of ONE body of water, the settings a designer gives a lake or a
@@ -302,6 +307,14 @@ namespace HE::water
         // user's own number and the brush never touches it. Saved only when true, part
         // of sameContent and of Delta; an older file has no key and loads as false.
         bool flowAuto = false;
+        // A STREAM (Thema 232, redone): the water of a stroke painted down a slope. Its surface is not
+        // the flat plane at `level` but the ground itself lifted by `streamDepth`: a smooth skin that
+        // runs down the hill with the terrain, so a slope needs no steps. `level` is then only the
+        // reference the sheet's entity stands at (the stroke's first level). The height anywhere is
+        // streamSurfaceAt (WaterMesh.h); its current is the ground's downhill direction at that point
+        // (streamFlowAt). Saved only when true; it moves the sheet, so it is part of bodyEq.
+        bool  stream = false;
+        float streamDepth = 0.3f;   // m of water over the ground (kMinStreamDepth..kMaxStreamDepth)
         // What this body looks like from below its surface (Thema 185 Schritt 2).
         // Same save/compare rule as physics: only when it differs from the defaults.
         UnderwaterFogParams underwaterFog{};
@@ -382,6 +395,19 @@ namespace HE::water
         // normal by the swell). A landscape-wide setting like the shore clipping; off by
         // default (it costs GPU time, and Metal draws the surface flat either way).
         bool  tessellation   = false;
+        // The material every water sheet of this landscape is drawn with: an ordinary material
+        // asset, the engine's Water by default. The surface pass makes its Static Switch
+        // variants from it (Tessellation, Flow, Stream — WaterSurface.cpp); a material without
+        // those switches draws as it is everywhere. It reads the sheet through the Water
+        // Surface material node.
+        HE::UUID material = HE::kEngineWaterMaterialId;
+        // The particle graphs of a fall's spray (WaterSpray.h: the lip's curtain, the drops at
+        // the foot, the mist over it): ordinary particle assets, the engine's by default. The
+        // surface pass places one emitter of each and tunes it per fall (ParticleEmitterModifiers);
+        // null = none of that kind.
+        HE::UUID fallCurtain = HE::kEngineWaterCurtainParticlesId;
+        HE::UUID fallDrops   = HE::kEngineWaterDropsParticlesId;
+        HE::UUID fallMist    = HE::kEngineWaterMistParticlesId;
 
         // ── Runtime, never serialised ────────────────────────────────────────
         // An edit that changed cells sets `dirty`, widens the terrain-local XZ
@@ -404,7 +430,9 @@ namespace HE::water
         bool pristine() const
         {
             return bodies.empty() && coverage.empty() && owner.empty() && res == kDefaultRes &&
-                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot && !tessellation;
+                   clipToGround && shoreOvershoot == kDefaultShoreOvershoot && !tessellation &&
+                   material == HE::kEngineWaterMaterialId && fallCurtain == HE::kEngineWaterCurtainParticlesId &&
+                   fallDrops == HE::kEngineWaterDropsParticlesId && fallMist == HE::kEngineWaterMistParticlesId;
         }
 
         const Body* findBody(uint16_t id) const;
@@ -467,6 +495,9 @@ namespace HE::water
     // Body::flowAuto: whether the brush may derive physics.flow from the ground
     // (see the field). False when there is no such body.
     bool setFlowAuto(TerrainComponent& tc, uint16_t id, bool on);
+    // Make body `id` a stream of `depth` metres over the ground, or an ordinary flat body again.
+    // The sheet changes shape, so the body's cells are marked dirty. False for an unknown body.
+    bool setStream(TerrainComponent& tc, uint16_t id, bool on, float depth = kDefaultStreamDepth);
 
     // What this body looks like from below its surface (UnderwaterFogParams), held to
     // its bounds (clampUnderwaterFog). Same non-effect on the sheet as setPhysics:

@@ -1116,3 +1116,48 @@ TEST_CASE("Water: Body::flowAuto round-trips, takes part in sameContent, and an 
     });
     CHECK_FALSE(odd.water.bodies[1].flowAuto);
 }
+
+TEST_CASE("Water: Body::stream round-trips, takes part in sameContent, and an older file loads a flat body")
+{
+    TerrainComponent tc = makeTerrain(64.0f, 48);
+    const water::Field authored = authoredField(tc);
+    REQUIRE(authored.bodies.size() == 2);
+    CHECK_FALSE(authored.bodies[0].stream);
+    CHECK(authored.bodies[0].streamDepth == water::kDefaultStreamDepth);
+
+    // Off (the default) leaves no trace in the scene text: a scene from before saves as it did.
+    const TerrainComponent plain = loadDamaged(tc, [](nlohmann::json& terrain)
+    {
+        CHECK(terrain.dump().find("stream") == std::string::npos);
+    });
+    CHECK_FALSE(plain.water.bodies[0].stream);
+
+    // On: saved with its depth, loaded, and different from off for sameContent.
+    TerrainComponent on = tc;
+    REQUIRE(water::setStream(on, on.water.bodies[1].id, true, 0.5f));
+    CHECK_FALSE(water::sameContent(on.water, tc.water));
+    const TerrainComponent back = loadDamaged(on, [](nlohmann::json& terrain)
+    {
+        CHECK(terrain.dump().find("stream") != std::string::npos);
+    });
+    CHECK(water::sameContent(back.water, on.water));
+    CHECK(back.water.bodies[1].stream);
+    CHECK(back.water.bodies[1].streamDepth == doctest::Approx(0.5f));
+    CHECK_FALSE(back.water.bodies[0].stream);
+
+    // A value of the wrong type is ignored, one out of range is held to its bounds.
+    const TerrainComponent odd = loadDamaged(on, [](nlohmann::json& terrain)
+    {
+        for (auto& b : terrain["waterBodies"]) if (b.contains("stream")) { b["stream"] = "yes"; b["streamDepth"] = "deep"; }
+    });
+    CHECK_FALSE(odd.water.bodies[1].stream);
+    const TerrainComponent huge = loadDamaged(on, [](nlohmann::json& terrain)
+    {
+        for (auto& b : terrain["waterBodies"]) if (b.contains("stream")) b["streamDepth"] = 1.0e9;
+    });
+    CHECK(huge.water.bodies[1].streamDepth == doctest::Approx(water::kMaxStreamDepth));
+
+    // Switching it off again puts the body back to a flat one and the file back to the old form.
+    REQUIRE(water::setStream(on, on.water.bodies[1].id, false));
+    CHECK(water::sameContent(on.water, tc.water));
+}

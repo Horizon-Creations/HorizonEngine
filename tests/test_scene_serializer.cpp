@@ -28,6 +28,7 @@
 #include <HorizonScene/Components/SkeletalMeshComponent.h>
 #include <HorizonScene/Components/PropertyAnimatorComponent.h>
 #include <HorizonScene/Components/NavMeshComponent.h>
+#include <HorizonScene/Components/WaterObstacleComponent.h>
 #include <HorizonScene/Components/NavAgentComponent.h>
 // The remaining component types, for the every-component round-trip below.
 #include <HorizonScene/Components/Transform2DComponent.h>
@@ -2079,6 +2080,15 @@ namespace
 		// The panel is switched off: the one component that is a tag rather
 		// than values, so the round trip has to bring back its presence.
 		HE::setEntityActive(reg, panel, false);
+
+		// A rock the landscape water foams around (Thema 232).
+		{
+			const Entity rock = world.createEntity("Rock");
+			reg.emplace<TransformComponent>(rock, TransformComponent{});
+			WaterObstacleComponent wo;
+			wo.enabled = false; wo.foam = 2.5f; wo.margin = 1.25f; wo.wake = 7.5f;
+			reg.emplace<WaterObstacleComponent>(rock, wo);
+		}
 
 		return a;
 	}

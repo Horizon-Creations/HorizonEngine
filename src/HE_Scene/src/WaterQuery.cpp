@@ -1,4 +1,5 @@
 #include "HorizonScene/WaterQuery.h"
+#include "HorizonScene/WaterMesh.h"
 #include "HorizonScene/HorizonWorld.h"
 #include "HorizonScene/TransformHierarchy.h"
 #include "HorizonScene/TerrainMeshGenerator.h"
@@ -104,12 +105,31 @@ void WaterIndex::ensureBounds(Entry& e)
     const int res = static_cast<int>(f.res);
     int x0 = res, z0 = res, x1 = -1, z1 = -1;
     std::vector<uint8_t> used(65536, 0);
+    // A stream's surface is the ground lifted, so its range is the range of the ground under its cells.
+    std::vector<uint8_t> isStream(65536, 0);
+    for (const Body& b : f.bodies) if (b.stream) isStream[b.id] = 1;
+    float streamLo = std::numeric_limits<float>::max(), streamHi = std::numeric_limits<float>::lowest();
+    bool anyStream = false;
     for (int z = 0; z < res; ++z)
         for (int x = 0; x < res; ++x)
         {
             const size_t i = static_cast<size_t>(z) * res + x;
             if (f.coverage[i] < kWet) continue;
             used[f.owner[i]] = 1;
+            if (isStream[f.owner[i]])
+            {
+                const TerrainComponent& t = *e.tc;
+                const float cx = -t.sizeX * 0.5f + (static_cast<float>(x) + 0.5f) * (t.sizeX / static_cast<float>(res));
+                const float cz = -t.sizeZ * 0.5f + (static_cast<float>(z) + 0.5f) * (t.sizeZ / static_cast<float>(res));
+                const float gh = terrainHeightAt(t, cx, cz);
+                const Body* sb = f.findBody(f.owner[i]);
+                if (std::isfinite(gh) && sb)
+                {
+                    streamLo = std::min(streamLo, gh);
+                    streamHi = std::max(streamHi, streamSurfaceAt(t, *sb, cx, cz));
+                    anyStream = true;
+                }
+            }
             x0 = std::min(x0, x); x1 = std::max(x1, x);
             z0 = std::min(z0, z); z1 = std::max(z1, z);
         }
@@ -128,8 +148,10 @@ void WaterIndex::ensureBounds(Entry& e)
         for (const Body& b : f.bodies)
         {
             if (!used[b.id]) continue;
-            e.minLevel = first ? b.level : std::min(e.minLevel, b.level);
-            e.maxLevel = first ? b.level : std::max(e.maxLevel, b.level);
+            float lo = b.level, hi = b.level;
+            if (b.stream && anyStream) { lo = streamLo; hi = streamHi + kStreamLift; }
+            e.minLevel = first ? lo : std::min(e.minLevel, lo);
+            e.maxLevel = first ? hi : std::max(e.maxLevel, hi);
             first = false;
         }
     }
@@ -193,19 +215,31 @@ bool WaterIndex::entryAt(const Entry& e, float x, float z, double t, Surface& ou
     // above the level plus the overshoot. Where it does, no water is drawn, so none
     // carries a body either.
     const float ground = terrainHeightAt(tc, lx, lz);
-    if (tc.water.clipToGround && ground > body->level + tc.water.shoreOvershoot)
+    // A stream is the ground lifted by its depth (WaterMesh.h): there is no level to clip against.
+    const bool stream = body->stream && std::isfinite(ground);
+    if (!stream && tc.water.clipToGround && ground > body->level + tc.water.shoreOvershoot)
         return false;
 
     out.wet     = true;
     out.terrain = e.entity;
     out.body    = id;
-    out.level   = (e.localToWorld * glm::vec4(lx, body->level, lz, 1.0f)).y;
-    const WaveSample w = sampleWaves(m_waves, kPhysicsWaveCount, x, z, t);
+    const float localLevel = stream ? streamSurfaceAt(tc, *body, lx, lz) : body->level;
+    out.level   = (e.localToWorld * glm::vec4(lx, localLevel, lz, 1.0f)).y;
+    // A film of a few decimetres carries no swell: the stream lies as calm as the mesh draws it.
+    const WaveSample w = stream ? WaveSample{} : sampleWaves(m_waves, kPhysicsWaveCount, x, z, t);
     out.height  = out.level + w.height;
     out.normal  = glm::normalize(glm::vec3(-w.dhdx, 1.0f, -w.dhdz));
     const float groundY = (e.localToWorld * glm::vec4(lx, ground, lz, 1.0f)).y;
     out.depth   = std::max(0.0f, out.height - groundY);
-    out.flow    = e.rotation * glm::vec3(body->physics.flow.x, 0.0f, body->physics.flow.y);
+    // A stream runs down the ground under the point; any other body has the one current of its physics.
+    glm::vec2 lflow = body->physics.flow;
+    if (stream)
+    {
+        const auto pool = streamPoolOf(tc, body->id);
+        const float poolHere = pool ? streamPoolAt(*pool, tc, lx, lz) : 0.0f;
+        lflow = poolHere > kStreamPoolStill ? glm::vec2(0.0f) : streamFlowAt(tc, lx, lz);
+    }
+    out.flow    = e.rotation * glm::vec3(lflow.x, 0.0f, lflow.y);
     out.physics = body->physics;
     out.underwaterFog = body->underwaterFog;
     out.underwaterCaustics = body->underwaterCaustics;

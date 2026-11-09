@@ -15,6 +15,7 @@
 #include "HorizonScene/Components/RopeComponent.h"
 #include "HorizonScene/Components/SplineComponent.h"
 #include "HorizonScene/Components/TrailComponent.h"
+#include "HorizonScene/Components/WaterObstacleComponent.h"
 #include "HorizonScene/Components/RigidBodyComponent.h"
 #include "HorizonScene/Components/ColliderComponent.h"
 #include "HorizonScene/Components/JointComponent.h"
@@ -543,6 +544,18 @@ namespace
 				{ "material",          uuidToJson(tr->materialAssetId) },
 			};
 		}
+		if (auto* wo = registry.try_get<WaterObstacleComponent>(entity))
+		{
+			comps["waterObstacle"] = {
+				{ "enabled", wo->enabled },
+				{ "foam",    wo->foam },
+				{ "margin",  wo->margin },
+				{ "wake",    wo->wake },
+				// Written even at its default: the reference is what the packer and the
+				// preload follow, an omitted one would ship the scene without its foam.
+				{ "foamMaterial", uuidToJson(wo->foamMaterial) },
+			};
+		}
 		if (auto* r = registry.try_get<RigidBodyComponent>(entity))
 		{
 			comps["rigidbody"] = {
@@ -829,6 +842,8 @@ namespace
 					// Whether the brush derives physics.flow from the ground (Thema 232):
 					// written only when on, so a body that never asked saves as before.
 					if (b.flowAuto) bj["flowAuto"] = true;
+					// A stream (Thema 232): the surface follows the ground by streamDepth metres.
+					if (b.stream) { bj["stream"] = true; bj["streamDepth"] = b.streamDepth; }
 					// What this body looks like from below its surface (Thema 185 Schritt
 					// 2): same "only the non-default settings" rule as physics above.
 					if (b.underwaterFog != HE::water::UnderwaterFogParams{})
@@ -888,6 +903,11 @@ namespace
 				if (!w.clipToGround) tc["waterClip"] = false;
 				if (w.tessellation) tc["waterTess"] = true;
 				if (w.shoreOvershoot != HE::water::kDefaultShoreOvershoot) tc["waterShoreOvershoot"] = w.shoreOvershoot;
+				// Written even at their defaults: they are the references the packer and the preload follow.
+				tc["waterMaterial"]    = uuidToJson(w.material);
+				tc["waterFallCurtain"] = uuidToJson(w.fallCurtain);
+				tc["waterFallDrops"]   = uuidToJson(w.fallDrops);
+				tc["waterFallMist"]    = uuidToJson(w.fallMist);
 				const std::vector<uint8_t> cells = HE::water::encodeCells(w);
 				if (!cells.empty())
 					tc["waterCellsB64"] = base64Encode(cells.data(), cells.size());
@@ -1530,6 +1550,18 @@ namespace
 			tr.materialAssetId   = jsonToMaterialUuid(c.value("material", json()));
 			registry.emplace_or_replace<TrailComponent>(entity, tr);
 		}
+		if (comps.contains("waterObstacle"))
+		{
+			const json& c = comps["waterObstacle"];
+			WaterObstacleComponent wo;
+			// Clamped to what the inspector offers: a hand-edited scene cannot ask for a negative collar.
+			wo.enabled = c.value("enabled", wo.enabled);
+			wo.foam    = std::clamp(c.value("foam",   wo.foam),   0.0f, 4.0f);
+			wo.margin  = std::clamp(c.value("margin", wo.margin), 0.0f, 10.0f);
+			wo.wake    = std::clamp(c.value("wake",   wo.wake),   0.0f, 50.0f);
+			if (c.contains("foamMaterial")) wo.foamMaterial = jsonToMaterialUuid(c["foamMaterial"]);
+			registry.emplace_or_replace<WaterObstacleComponent>(entity, wo);
+		}
 		if (comps.contains("rigidbody"))
 		{
 			const json& c = comps["rigidbody"];
@@ -1825,6 +1857,11 @@ namespace
 					w.tessellation = c["waterTess"].get<bool>();
 				if (c.contains("waterShoreOvershoot") && c["waterShoreOvershoot"].is_number())
 					w.shoreOvershoot = c["waterShoreOvershoot"].get<float>();   // sanitize() clamps it
+				// A scene from before the reference: the engine water, which is what it drew with.
+				if (c.contains("waterMaterial")) w.material = jsonToMaterialUuid(c["waterMaterial"]);
+				if (c.contains("waterFallCurtain")) w.fallCurtain = jsonToUuid(c["waterFallCurtain"]);
+				if (c.contains("waterFallDrops"))   w.fallDrops   = jsonToUuid(c["waterFallDrops"]);
+				if (c.contains("waterFallMist"))    w.fallMist    = jsonToUuid(c["waterFallMist"]);
 				if (c.contains("waterBodies") && c["waterBodies"].is_array())
 					for (const json& bj : c["waterBodies"])
 					{
@@ -1910,6 +1947,11 @@ namespace
 						// An older file has no "flowAuto": the default (false) stands.
 						if (bj.contains("flowAuto") && bj["flowAuto"].is_boolean())
 							b.flowAuto = bj["flowAuto"].get<bool>();
+						// An older file has no "stream": an ordinary flat body.
+						if (bj.contains("stream") && bj["stream"].is_boolean())
+							b.stream = bj["stream"].get<bool>();
+						if (b.stream && bj.contains("streamDepth") && bj["streamDepth"].is_number())
+							b.streamDepth = bj["streamDepth"].get<float>();
 						// What this body looks like from below its surface (Thema 185
 						// Schritt 2). Every key is optional; sanitize() below clamps it.
 						if (bj.contains("underwaterFog") && bj["underwaterFog"].is_object())
@@ -3009,7 +3051,7 @@ namespace
 	X("decal",               DecalComponent) \
 	X("rope",                RopeComponent) \
 	X("spline",              SplineComponent) \
-	X("trail",               TrailComponent) \
+	X("trail",               TrailComponent) 	X("waterObstacle",       WaterObstacleComponent) \
 	X("rigidbody",           RigidBodyComponent) \
 	X("collider",            ColliderComponent) \
 	X("joint",               JointComponent) \
@@ -3291,6 +3333,8 @@ bool SceneSerializer::isKnownComponentKey(const std::string& key)
 		"streaming",
 		"terrain",
 		"trail",
+		// Foam where the water runs past the entity (WaterObstacleComponent).
+		"waterObstacle",
 		"transform", "transform2d", "uibutton", "uicanvas", "uielement",
 		"uiimage", "uitext", "weather",
 		// The "Active" switch, off (InactiveComponent) — an empty object.

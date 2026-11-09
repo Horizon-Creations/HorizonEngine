@@ -23,6 +23,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -114,6 +115,9 @@ const Knob kWaterKnobs[] = {
 	{ "Foam",         MatParamKind::Vec4,  { 0.06f, 0.5f, 0.7f, 0.3f } },
 	{ "Caustics",     MatParamKind::Vec4,  { 0.2f, 2.0f, 0.2f, 18.0f } },
 	{ "Variation",    MatParamKind::Vec4,  { 3.5f, 1.0f, 22.0f, 2.5f } },
+	// Flow is in every variant: the renderer sets its z/w per frame (the underside only for a camera IN this body of water).
+	// Its default (0, 0, 0, 0) leaves a mesh nobody set it for (a plane) on the plain plane test.
+	{ "Flow",         MatParamKind::Vec4,  { 0.0f, 0.0f, 0.0f, 0.0f } },
 };
 constexpr int kWaterKnobCount = static_cast<int>(sizeof(kWaterKnobs) / sizeof(kWaterKnobs[0]));
 
@@ -269,9 +273,21 @@ TEST_CASE("Engine water material: the shore depth range it reads is the one the 
 			if (n.type == HE::MatNodeType::ConstFloat && n.p[0] == v) return true;
 		return false;
 	};
-	CHECK(hasConst(HE::water::kShoreFadeDepth));        // shoreD = (1 - e) * range
-	CHECK(hasConst(HE::water::kShoreNormalGain));       // e = |n.xz| / n.y / gain
+	CHECK(hasConst(HE::water::kShoreFadeDepth));        // the tessellation fade reads the range too
 	CHECK_FALSE(hasConst(HE::water::kShoreFadeDepth * 1.01f)); // the control: a range nobody baked
+	// The decode itself (e = |n.xz| / n.y / gain, depth = (1 - e) * range) is the Water Surface node's, written once
+	// in the codegen with the header's numbers: the graph reads the node, not a copy of the formula.
+	bool readsNode = false;
+	for (const HE::MatGraphNode& n : g.nodes) readsNode = readsNode || n.type == HE::MatNodeType::WaterSurfaceData;
+	CHECK(readsNode);
+	HE::MaterialGraph probe;
+	const int pOut = probe.addNode(HE::MatNodeType::Output);
+	const int pWs  = probe.addNode(HE::MatNodeType::WaterSurfaceData);
+	probe.connect(pWs, 0, pOut, HE::kMatOutputEmissivePin);
+	const std::string glsl = HE::generateFragment(probe).glsl;
+	char gain[32];
+	std::snprintf(gain, sizeof(gain), "%g", HE::water::kShoreNormalGain);
+	CHECK(glsl.find(gain) != std::string::npos);
 
 	// Deeper than the range the shore must be neutral (open water: e = 0, shoreD = the range), so
 	// what is measured in metres has to end inside it: the opacity floor is whole from the clear
@@ -1541,9 +1557,11 @@ TEST_CASE("Engine water material: Flow is a Static Switch, off by default, that 
 		for (const HE::MatParamSlot& p : gen.params) if (p.name == name) return true;
 		return false;
 	};
-	// Off (the default): the "Flow" knob is not in the layout, so the plain water has no slot for it.
+	// The "Flow" knob is in EVERY variant's layout now (its z/w carry the per-frame "is the camera in this water" for the underside); with
+	// the Flow switch off only that part is read, and the plain water stays within the 16 slots.
 	const HE::MatShaderGen off = HE::generateFragment(g);
-	CHECK_FALSE(hasParam(off, "Flow"));
+	CHECK(hasParam(off, "Flow"));
+	CHECK(static_cast<int>(off.params.size()) <= HE::kMatMaxParams);
 	// On: the knob is a slot, and the fragment differs (the pattern's lookup position moves with time).
 	const std::map<std::string, bool> flowOn{ { "Flow", true } };
 	const HE::MatShaderGen flow = HE::generateFragment(g, {}, &flowOn);
@@ -1557,7 +1575,9 @@ TEST_CASE("Engine water material: Flow is a Static Switch, off by default, that 
 	CHECK(hasParam(both, "Flow"));
 	CHECK(hasParam(both, "TessWaves"));
 	CHECK(static_cast<int>(both.params.size()) <= HE::kMatMaxParams);
-	// The tessellation permutation is untouched by the Flow switch being off: same params as before.
+	// The tessellation permutation with the Flow switch off still fits the slots (Flow knob + TessWaves).
 	const std::map<std::string, bool> tessOn{ { "Tessellation", true } };
-	CHECK_FALSE(hasParam(HE::generateFragment(g, {}, &tessOn), "Flow"));
+	const HE::MatShaderGen tessOnly = HE::generateFragment(g, {}, &tessOn);
+	CHECK(hasParam(tessOnly, "Flow"));
+	CHECK(static_cast<int>(tessOnly.params.size()) <= HE::kMatMaxParams);
 }

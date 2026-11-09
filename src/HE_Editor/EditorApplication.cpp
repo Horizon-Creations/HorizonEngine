@@ -102,6 +102,8 @@ static void onProjectWriteRefused(const char* what);   // ProjectWriteGate handl
 #include <HorizonScene/WaterBrush.h>
 #include <HorizonScene/WaterLake.h>
 #include <HorizonScene/WaterMesh.h>
+#include <HorizonScene/WaterSpray.h>
+#include <HorizonScene/WaterQuery.h>
 #include <HorizonScene/Components/TerrainComponent.h>
 #include <HorizonScene/Components/FoliageComponent.h>   // HE_DUMP_FOLIAGETEST witness
 #include <HorizonScene/FoliageSystem.h>
@@ -8223,8 +8225,12 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 	{
 		namespace water = HE::water;
 		auto& reg = m_editorWorld->registry();
+		// The dump runs before the editor's own content scan: index the content now, so every asset the water
+		// names by UUID (its material, the foam's, the spray's particle assets) resolves the way it does in a session.
+		contentManager().scanContentDirectory();
 		const std::string_view mode(wl);
-		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush" || mode == "cascade" || mode == "hill";
+		const bool bank = mode == "slope" || mode == "bowl" || mode == "brush" || mode == "cascade" || mode == "hill" || mode == "join" || mode == "fall"
+		               || mode == "crest";
 		const float level = [bank] { const char* v = std::getenv("HE_DUMP_WATERLEVEL"); return v && *v ? static_cast<float>(std::atof(v)) : (bank ? 2.0f : 0.4f); }();
 		auto land = m_editorWorld->createEntity("WaterLakeLandscape");
 		TransformComponent ltf;
@@ -8252,6 +8258,17 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			// makes the shoreline of a flat sheet jagged, a steep smooth bank does not (Thema 206).
 			const float bankSlope = [] { const char* v = std::getenv("HE_DUMP_WATERSLOPE"); return v && *v ? static_cast<float>(std::atof(v)) : 0.12f; }();
 			const float bankRough = [] { const char* v = std::getenv("HE_DUMP_WATERROUGH"); return v && *v ? static_cast<float>(std::atof(v)) : 0.0f; }();
+			// "crest": a rounded crest (the brush on a steep valley wall, not a cut cliff): 14 m over a tanh profile, at
+			// most 2 m/m, its edge bending back at the sides, a pool at the foot. HE_DUMP_CRESTLEDGE=1 cuts a shelf into
+			// the face over part of its width (z < 1): flat from x = -0.5 to 2.5, then a hard step of ~3 m back down.
+			const bool crestLedge = [] { const char* v = std::getenv("HE_DUMP_CRESTLEDGE"); return v && std::atoi(v) != 0; }();
+			auto crestHeight = [crestLedge](float x, float z) {
+				auto profile = [z](float px) { return 14.0f * (0.5f - 0.5f * std::tanh((px - (-2.0f + 0.025f * z * z)) / 3.5f)); };
+				float h = profile(x);
+				if (crestLedge && x > -0.5f && x < 2.5f)
+					h += (profile(-0.5f) - h) * (0.5f - 0.5f * std::tanh((z - 1.0f) / 0.5f));
+				return h - 1.6f * std::exp(-((x - 14.0f) * (x - 14.0f) + z * z) / 40.0f) + 0.15f * std::sin(0.7f * z);
+			};
 			auto hashNoise = [](uint32_t a, uint32_t b) {
 				uint32_t h = a * 374761393u + b * 668265263u;
 				h = (h ^ (h >> 13)) * 1274126177u;
@@ -8268,7 +8285,12 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 					ltc.sculptHeights[static_cast<size_t>(zi) * hr + xi] =
 						mode == "bowl" ? 0.004f * (x * x + z * z) - 6.0f
 						// a modelled hill (Thema 232 step 10): a gaussian mound, 24 m high, with a ridged undulation so it is not a plane
-						: mode == "hill" ? 24.0f * std::exp(-(x * x + z * z) / (2.0f * 18.0f * 18.0f))
+						// a waterfall (Thema 232): a plateau 14 m up, a cliff (2.5 m/m) down to the plain, a pool below it
+						: mode == "fall" ? (x < 4.0f ? 14.0f : x < 9.6f ? 14.0f - (x - 4.0f) * 2.5f : 0.0f)
+						                   - 1.6f * std::exp(-((x - 15.0f) * (x - 15.0f) + z * z) / 30.0f)
+						                   + 0.15f * std::sin(0.7f * z)
+						: mode == "crest" ? crestHeight(x, z)
+						: (mode == "hill" || mode == "join") ? 24.0f * std::exp(-(x * x + z * z) / (2.0f * 18.0f * 18.0f))
 						                     + 0.6f * std::sin(0.35f * x + 0.5f * z) + 0.4f * std::sin(0.23f * z - 0.2f * x)
 						: mode == "cascade" ? bankSlope * x     // a plain ramp, rising toward +X (HE_DUMP_WATERSLOPE, steep: 0.8)
 						               : bankSlope * x + 10.0f * bankSlope * std::sin(0.15f * z) + bankRough * hashNoise(xi, zi);
@@ -8330,21 +8352,19 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				ok = ok && water::addCircle(ltc, b, -34.0f + 62.0f * t, -26.0f + 50.0f * std::sin(t * 3.0f), 17.0f, 6.0f).ok;
 			}
 		}
-		else if (mode == "cascade" || mode == "hill")
+		else if (mode == "cascade" || mode == "hill" || mode == "join" || mode == "fall" || mode == "crest")
 		{
-			// Thema 232 step 5: a stroke dragged DOWN the ramp with Terraces on, through the brush's own
-			// begin/dab/end, so the witness shows what the tool makes: one flat body per step and the
-			// waterfall bands between them. HE_DUMP_WATERLEVEL is not used (levels come from the ground).
+			// Thema 232: a stroke dragged DOWN the ramp (or the mound) with Follow Slope on, through the brush's
+			// own begin/dab/end, so the witness shows what the tool makes: a stream that lies on the ground
+			// and runs down it, and a pond where it flattens out. HE_DUMP_WATERLEVEL is not used (levels come
+			// from the ground).
 			namespace brush = HE::water::brush;
 			brush::Params p;
 			p.radius = 2.5f; p.falloff = 1.0f; p.amount = 1.0f;
 			p.levelFromGround = true; p.levelOffset = 0.3f;
-			p.cascade = true; p.autoFlow = true;
-			// The panel's Step Height and Min Slope (Thema 232 Schritt 11): HE_DUMP_WATERSTEP=<m> and
-			// HE_DUMP_WATERMINSLOPE=<degrees>; unset = the panel's defaults.
-			if (const char* v = std::getenv("HE_DUMP_WATERSTEP"); v && *v) p.terraceStep = static_cast<float>(std::atof(v));
-			if (const char* v = std::getenv("HE_DUMP_WATERMINSLOPE"); v && *v)
-				p.terraceSlope = std::tan(static_cast<float>(std::atof(v)) * 0.017453293f);
+			p.followSlope = true; p.autoFlow = true;
+			// The stream's depth is the panel's Above Ground (levelOffset); HE_DUMP_WATERDEPTH=<m> sets it.
+			if (const char* v = std::getenv("HE_DUMP_WATERDEPTH"); v && *v) p.levelOffset = static_cast<float>(std::atof(v));
 			// Dig Bed along the stroke (Thema 232 Schritt 12, the stream's channel): HE_DUMP_WATERDIG=<Max Depth m>
 			// switches it on, HE_DUMP_WATERDIGSLOPE=<m per m> is the panel's Slope (default kDefaultBedSlope).
 			if (const char* v = std::getenv("HE_DUMP_WATERDIG"); v && *v && std::atof(v) > 0.0)
@@ -8354,8 +8374,13 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 				if (const char* sl = std::getenv("HE_DUMP_WATERDIGSLOPE"); sl && *sl) p.bedSlope = static_cast<float>(std::atof(sl));
 			}
 			// "hill": from near the crest down the +X flank of the mound, with a gentle sideways meander.
-			const bool hill = mode == "hill";
-			const float x0 = hill ? 3.0f : 22.0f, x1 = hill ? 46.0f : -12.0f;
+			const bool hill = mode == "hill" || mode == "join";
+			const bool fall = mode == "fall";
+			const bool crest = mode == "crest";
+			const float x0 = crest ? -16.0f : fall ? -14.0f : hill ? 3.0f : 22.0f;
+			const float x1 = crest ? 26.0f : fall ? 28.0f : hill ? 46.0f : -12.0f;
+			if (fall) { p.radius = 3.0f; p.falloff = 1.0f; }
+			if (crest) { p.radius = 5.0f; p.falloff = 1.0f; }   // a broad stroke, as on a valley wall
 			auto zAt = [hill](float t) { return hill ? 5.0f * std::sin(t * 4.0f) : 0.0f; };
 			const std::vector<float> groundBefore = ltc.sculptHeights;
 			brush::Stroke st;
@@ -8372,10 +8397,27 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			uint32_t movedVertices = 0;
 			for (size_t i = 0; i < ltc.sculptHeights.size() && i < groundBefore.size(); ++i)
 				if (ltc.sculptHeights[i] != groundBefore[i]) { ++movedVertices; deepestCut = std::max(deepestCut, groundBefore[i] - ltc.sculptHeights[i]); }
-			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE=cascade: %zu bodies, %u terraces, dig %s: %u vertices moved, "
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE=cascade: %zu bodies, dig %s: %u vertices moved, "
 			            "deepest cut %.2f m (%u vertex updates)",
-			            st.bodies.size(), st.terraces, p.dig ? "on" : "off", movedVertices, deepestCut, dugVertices);
+			            st.bodies.size(), p.dig ? "on" : "off", movedVertices, deepestCut, dugVertices);
 			brush::end(st, ltc);
+			// "join": the same hill, and at its foot two lakes painted separately (Follow Slope off) at ONE level, side by
+			// side, next to the stream's end: the seams the joining of neighbouring water closes (WaterMesh.h joinReaches).
+			if (mode == "join")
+			{
+				brush::Params lp = p;
+				lp.followSlope = false; lp.dig = false;
+				lp.radius = 3.0f; lp.falloff = 0.5f;
+				lp.levelFromGround = false;
+				lp.level = terrainHeightAt(ltc, 47.0f, 0.0f) + 0.4f;
+				for (const float zc : { -3.2f, 3.2f })
+				{
+					brush::Stroke ls;
+					brush::begin(ls, ltc, 47.0f, zc, lp);
+					for (int i = 0; i <= 12; ++i) brush::dab(ls, ltc, 47.0f + 4.0f * static_cast<float>(i) / 12.0f, zc, lp);
+					brush::end(ls, ltc);
+				}
+			}
 		}
 		else if (mode == "two")
 		{
@@ -8448,7 +8490,117 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			}
 		}
 		reg.emplace<TerrainComponent>(land, ltc);
+		// HE_DUMP_WATERLANDMAT=<content path> | rock: the landscape's material (default: the engine's plain terrain).
+		// White spray is hard to see on the white default; "rock" is a lit constant dark grey-brown graph material that
+		// needs no texture.
+		if (const char* lm = std::getenv("HE_DUMP_WATERLANDMAT"); lm && *lm)
+		{
+			HE::UUID landMat;
+			if (std::string_view(lm) == "rock")
+			{
+				HE::MaterialGraph g;
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.30f; g.findNode(col)->p[1] = 0.27f; g.findNode(col)->p[2] = 0.24f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				MaterialAsset am;
+				am.type = HE::AssetType::Material;
+				am.name = "WaterWitnessRock";
+				am.nodeGraphJson = HE::materialGraphToJson(g);
+				landMat = contentManager().registerMaterial(std::move(am));
+				contentManager().regenerateMaterialFromGraph(landMat);
+			}
+			else
+				landMat = contentManager().loadAsset(lm);
+			if (landMat != HE::UUID{}) reg.emplace_or_replace<MaterialComponent>(land, MaterialComponent{ landMat });
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLANDMAT %s %s", lm, landMat != HE::UUID{} ? "set" : "NOT FOUND");
+		}
 		TerrainSystem::updateTerrains(*m_editorWorld, contentManager(), r);
+		// HE_DUMP_WATEROBSTACLE=x,z,size[;x,z,size...] (world X/Z, metres): a grey block with a WaterObstacleComponent
+		// standing in the water there — its centre at the water's level, size wide, twice as tall — so the foam the
+		// running water gathers around it shows (WaterObstacle.h). A block in still water must show none.
+		if (const char* wo = std::getenv("HE_DUMP_WATEROBSTACLE"); wo && *wo)
+		{
+			HE::propagateTransforms(*m_editorWorld);
+			const HE::water::WaterIndex idx = HE::water::WaterIndex::build(*m_editorWorld);
+			// The blocks are dark grey rock (a lit constant graph material), so the white foam reads against them.
+			HE::UUID rockMat;
+			{
+				HE::MaterialGraph g;
+				const int out = g.addNode(HE::MatNodeType::Output);
+				const int col = g.addNode(HE::MatNodeType::ConstColor);
+				g.findNode(col)->p[0] = 0.22f; g.findNode(col)->p[1] = 0.21f; g.findNode(col)->p[2] = 0.20f;
+				g.connect(col, 0, out, HE::kMatOutputBaseColorPin);
+				MaterialAsset am;
+				am.type = HE::AssetType::Material;
+				am.name = "WaterObstacleWitnessRock";
+				am.nodeGraphJson = HE::materialGraphToJson(g);
+				rockMat = contentManager().registerMaterial(std::move(am));
+				contentManager().regenerateMaterialFromGraph(rockMat);
+			}
+			std::string spec(wo);
+			size_t at = 0;
+			while (at < spec.size())
+			{
+				const size_t end = std::min(spec.find(';', at), spec.size());
+				float ox = 0.0f, oz = 0.0f, osz = 1.0f;
+				if (std::sscanf(spec.substr(at, end - at).c_str(), "%f,%f,%f", &ox, &oz, &osz) >= 2)
+				{
+					HE::water::Surface ws;
+					const bool wet = idx.surfaceAt(ox, oz, 0.0, ws) && ws.wet;
+					float y = wet ? ws.level : 300.0f;
+					if (!wet)
+						for (int k = 0; k < 8 && !wet; ++k)
+						{
+							const float th = 0.785398f * static_cast<float>(k);
+							HE::water::Surface s2;
+							if (idx.surfaceAt(ox + std::cos(th) * osz, oz + std::sin(th) * osz, 0.0, s2) && s2.wet) y = s2.level;
+						}
+					auto rock = m_editorWorld->createEntity("WaterObstacleWitness");
+					TransformComponent rt;
+					rt.position = glm::vec3(ox, y, oz);
+					rt.scale    = glm::vec3(osz, osz * 2.0f, osz);
+					rt.dirty    = true;
+					reg.emplace_or_replace<TransformComponent>(rock, rt);
+					reg.emplace_or_replace<MeshComponent>(rock, MeshComponent{ HE::kDefaultCubeMeshId });
+					reg.emplace_or_replace<WaterObstacleComponent>(rock, WaterObstacleComponent{});
+					reg.emplace_or_replace<MaterialComponent>(rock, MaterialComponent{ rockMat });
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATEROBSTACLE block at (%.1f, %.2f, %.1f) size %.1f, water %s, flow (%.2f, %.2f)",
+					            ox, y, oz, osz, wet ? "here" : "beside it", ws.flow.x, ws.flow.z);
+				}
+				at = end + 1;
+			}
+			HE::propagateTransforms(*m_editorWorld);
+		}
+		// The spray and the falls are particle emitters (WaterSpray.h). The settle frames below only render, so they
+		// would show none: run the particles here, in real 60 Hz steps, for HE_DUMP_PARTICLESECS seconds (default 3).
+		{
+			float secs = 3.0f;
+			if (const char* ps = std::getenv("HE_DUMP_PARTICLESECS"); ps && *ps) secs = static_cast<float>(std::atof(ps));
+			const int steps = std::clamp(static_cast<int>(secs * 60.0f), 0, 6000);
+			HE::propagateTransforms(*m_editorWorld);
+			for (int i = 0; i < steps; ++i) ParticleSystem::update(*m_editorWorld, contentManager(), 1.0f / 60.0f, nullptr);
+			size_t emitters = 0, particles = 0;
+			for (auto [pe, pws, pps] : reg.view<WaterSurfaceComponent, ParticleSystemComponent>().each())
+				if (pws.spray) { ++emitters; particles += pps.particles.size(); }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE spray: %zu emitter(s), %zu particle(s) after %.1f s",
+			            emitters, particles, secs);
+			// The falls' edges as the spray sees them: every lip, and the lines they were merged into.
+			if (const auto* ltcNow = reg.try_get<TerrainComponent>(land))
+			{
+				for (const HE::water::FallLip& l : HE::water::findFallLips(*ltcNow))
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE fall lip at (%.2f, %.2f) dir (%.2f, %.2f) surface %.2f height %.1f",
+					            l.pos.x, l.pos.y, l.dir.x, l.dir.y, l.surfaceY, l.height);
+				for (const HE::water::FallLine& f : HE::water::findFallLines(*ltcNow))
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE fall line at (%.2f, %.2f) dir (%.2f, %.2f) half width %.2f "
+					            "surface %.2f height %.1f, %u lip(s), lands %.1f m on at (%.2f, %.2f) y %.2f",
+					            f.center.x, f.center.y, f.dir.x, f.dir.y, f.halfWidth, f.surfaceY, f.height, f.lips, f.run,
+					            f.landing.x, f.landing.y, f.landingY);
+				for (const HE::water::SprayFoot& ft : HE::water::findSprayFeet(*ltcNow))
+					HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE spray foot at (%.2f, %.2f) dir (%.2f, %.2f) drop %.1f strength %.2f",
+					            ft.pos.x, ft.pos.y, ft.dir.x, ft.dir.y, ft.drop, ft.strength);
+			}
+		}
 		const WaterSurface::Stats& ws = WaterSurface::lastStats();
 		// Which material each sheet draws with (the Flow witness: a flowing body must say 0x600,3).
 		for (auto [we, wsc, wmat] : reg.view<WaterSurfaceComponent, MaterialComponent>().each())

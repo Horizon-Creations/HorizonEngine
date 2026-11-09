@@ -12,6 +12,26 @@ struct Particle {
     float     maxLifetime = 1.0f;  // initial lifetime for interpolation
 };
 
+// Per-instance changes on top of the particle asset's own values, applied every time the
+// config is resolved (ParticleSystem::resolveConfig): how a system that PLACES emitters
+// (the landscape water's spray at a fall, WaterSurface.cpp) tunes each one — how strong,
+// how long, which way, how wide — while the look stays the asset's. The graph's own frame
+// is "forward = +X, up = +Y, across = +Z"; `heading` turns it to a world direction.
+// Identity (the default) leaves the asset's config exactly as it is. Runtime, never saved:
+// whoever sets them sets them again.
+struct ParticleEmitterModifiers {
+    float     rateScale     = 1.0f;   // emit rate (and the pool's room with it)
+    float     lifetimeScale = 1.0f;   // lifetime min/max (and the pool's room with it)
+    float     sizeScale     = 1.0f;   // start/end size
+    float     alphaScale    = 1.0f;   // start/end alpha (clamped to 1)
+    float     spreadScale   = 1.0f;   // velocity spread (radians)
+    glm::vec3 velocityScale { 1.0f }; // initial velocity per graph axis (forward, up, across)
+    glm::vec2 spawnScale    { 1.0f }; // spawn area: x scales the across (Z) parts, y the forward (X) parts
+    glm::vec2 heading       { 0.0f }; // world XZ the graph's +X turns to; zero = the graph's own axes
+    bool operator==(const ParticleEmitterModifiers&) const = default;
+};
+HE::ParticleEmitterConfig applyEmitterModifiers(HE::ParticleEmitterConfig c, const ParticleEmitterModifiers& m);
+
 struct ParticleSystemComponent {
     bool     visible = true;    // extractor skips invisible (zone hiding)
     bool     playing = true;
@@ -24,6 +44,8 @@ struct ParticleSystemComponent {
     HE::UUID particleAssetId;   // references a ParticleGraphAsset authored in the
                                  // Particle Graph Editor — {} plays HE::ParticleGraph's
                                  // defaults (same values the old inline fields used).
+    // Runtime (never serialized): see ParticleEmitterModifiers. Set it, then markConfigDirty.
+    ParticleEmitterModifiers modifiers;
 
     // ── Runtime state (never serialized) ────────────────────────────────────────
     float                 emitAccumulator = 0.0f;

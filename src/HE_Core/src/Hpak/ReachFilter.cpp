@@ -361,12 +361,12 @@ Roots engineImplicitRoots()
         "Engine/MaterialFunctions/",      // WeatherMaterialFunctions.h, ProceduralSurfaceFunctions.h
         "Engine/Meshes/",                 // LayerMeshPresets.h builds these names from a material's group
     };
-    r.paths = {
-        "Engine/Materials/Water.hasset",  // WaterSurface.h kMaterialPath
-    };
+    // The landscape water's material, its falls' particle graphs (and through them the spray material) and an
+    // obstacle's foam material are NOT here: they are references the scene writes even at their defaults
+    // (TerrainComponent "waterMaterial"/"waterFall*", WaterObstacleComponent "foamMaterial"), and the export
+    // re-serializes every scene before this scan, so the scan finds them like any other asset reference.
     r.uuids = {
         HE::UUID{ 0x000000000000041FULL, 0x0000000000000001ULL },   // TrailClipmap.h kTrailTextureId
-        HE::UUID{ 0x0000000000000600ULL, 0x0000000000000001ULL },   // DefaultAssets.h kEngineWaterMaterialId
     };
     return r;
 }
