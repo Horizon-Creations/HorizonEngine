@@ -7858,6 +7858,11 @@ namespace
 	  "reaching up to the brush's radius plus falloff past the shore. "
 	  "It only ever lowers — a hole already deeper stays — and holding still "
 	  "does not dig on forever. "
+	  "With Terraces on Slopes, a stroke that has stepped down a slope digs a "
+	  "channel instead: the ground under the whole stream goes down by up to Max "
+	  "Depth below where it was, from the stream's edge at Slope, on under the "
+	  "falls between two steps too, and the water lies at its painted depth in "
+	  "the channel. No bank is shaved there. "
 	  "The eraser never digs. One undo step takes the water and the pit back "
 	  "together.",
 	  "", "editor#landscape-mode" },
@@ -7878,14 +7883,16 @@ namespace
 	  "highest step that holds it at most Above Ground deep. Every step is a shallow "
 	  "pool, and between two of them a waterfall band runs down the slope. Flatter "
 	  "ground is unaffected: a pond there stays one body; the steep banks of a pond "
-	  "do step, so paint ponds with this off. One undo step still takes the whole "
-	  "stroke back.",
+	  "do step, so paint ponds with this off. With Dig Bed on, the stroke cuts a "
+	  "channel under the whole stream once it has stepped (see Dig Bed). One undo "
+	  "step still takes the whole stroke back.",
 	  "", "editor#landscape-mode" },
 	{ "Landscape/Step Height##water", "Terrace Step Height",
 	  "How far apart, in metres, two steps of a stroke with Terraces on Slopes are. "
 	  "Smaller makes a finer staircase that follows the slope more closely, with more "
-	  "and shorter waterfalls; larger makes fewer, taller falls between longer "
-	  "stretches of band. On a gentle slope a step is lower than this by itself, so "
+	  "and shorter waterfalls (at the default 0.5 m a stroke down a hillside reads as "
+	  "one ribbon); larger makes fewer, taller falls between longer stretches of band, "
+	  "and fewer bodies. On a gentle slope a step is lower than this by itself, so "
 	  "the band between two steps always reaches the next one. At least 0.4 m: a "
 	  "smaller drop hangs no waterfall band.",
 	  "", "editor#landscape-mode" },

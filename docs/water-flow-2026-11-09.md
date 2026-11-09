@@ -288,3 +288,53 @@ eigenes Thema (Pegel als Feld statt Skalar).
   als eine Zelle); Graben (`dig`) zusammen mit Terrassen.
 - **Offen:** endet ein Strich mitten am Hang, hält die letzte Stufe nur verborgene Zellen und ihr Band ist teilweise (Rampe: 5 von 12 Stücken);
   Teiche mit steilen Ufern werden mit dem Schalter gestuft (Hilfetext sagt es).
+
+### Schritt 12 (glatter auf die Oberfläche + Bachbett-Aushebung am Hang), erledigt
+
+- **Warum die Leiter aus Schritt 11 noch wie eine Treppe aussah (Geometrie, nicht gemessen):** je Stufe ist das sichtbare Becken
+  `Lippe / Steigung` lang (0,3 m / 0,7 = 0,43 m, flach) und das Band `(Stufe − Lippe) / Steigung` (1 m Stufe: 1 m, geneigt). Die Lippe
+  kann auf diesem Zeugen nicht kleiner: 0,5-m-Zellen auf 0,5..0,8 Steigung, ein Becken unter einer Zelle hat keine Uferkante, das
+  Band darunter nichts zum Aufhängen (Kette reißt). Der Hebel ist die Stufenhöhe: Rendering bei 1,0 / 0,7 / 0,5 / 0,4 m
+  (`HE_DUMP_WATERSTEP`, gleiche Kamera): ab 0,5 m liest sich der Strich als ein Band den Hang hinab, 0,4 m sieht gleich aus mit
+  einem Viertel mehr Körpern (57 statt 46) und läge genau auf `kFallMinDrop` (fallUppers prüft `>=` in float).
+- **Entscheidung Step Height = 0,5 m** (`kTerraceDrop`, `Params::terraceStep`; `static_assert` hält beide gleich; vorher 1,0).
+  Kein eigener Lippen-Regler (Above Ground bleibt die Tiefe am Hang, Schritt 11).
+- **Dig Bed + Terrassen: vier Stellen des Teich-Grabens waren für einen Bach falsch** (`dab()` grub nur für `s.body`): (1) `digBed`
+  schneidet Boden über dem Pegel im unverschnittenen Fußabdruck auf den Pegel, also die verborgenen Zellen jeder Stufe: der Hang
+  würde zu Platten; (2) `keepUnderSheet` gibt alles zurück, was nicht unter dem **verschnittenen** Blatt der Stufe liegt, also den
+  Boden unter den Bändern: kein durchgehender Kanal; (3) `shapeBank` schabt den Hang über jedem Becken zur Wasserlinie; (4) die
+  Tiefe vom eigenen Ufer der Stufe gemessen ist zentimeterklein. **Gebaut:** `digChannel` (`WaterBrush.cpp`): Fußabdruck = Vereinigung
+  der Körper des Strichs (`buildLattice`-Überladung für mehrere Körper, `WaterMesh.h/.cpp`, unverschnitten), gleiche Formel wie der
+  Teich, `min(maxDepth, slope·d)` zum Umriss des Bachs, aber relativ zum **Boden vor dem Pinsel** = Höhe jetzt − Σ `brushPatch` aller
+  Körper an dem Vertex (`brushMovedAt`): fester Zielwert, gehaltener Tupfer und zweiter Strich graben nichts mehr. Nur innerhalb des
+  Umrisses, nur tiefer, `amount`-gestuft, keine Böschung. Danach `settleLadder` (die Leiter-Regel aus `paintLadder` herausgelöst) über
+  die Reichweite des Grabens: die Becken bleiben an der Lippe so tief wie gemalt, der Bach liegt im Kanal. **Schalter ist die
+  Einstellung** (`p.cascade`), nicht „hat schon gestuft": ein Strich, der auf einer Stufe eines Bachs hält oder ihn ohne eigene Stufe
+  verlängert, würde sonst mit dem Teich-Graben eine Platte schneiden (Test). `closeBedAt`: Boden unter **irgendeinem** Wasser behält
+  sein Bett (der Kanal steht im Patch der gerade malenden Stufe, unter Zellen der Nachbarstufen).
+- **Zeugen-Knöpfe** (`EditorApplication.cpp`, Modus `cascade`/`hill`): `HE_DUMP_WATERDIG=<m>` (Dig Bed an, Max Depth),
+  `HE_DUMP_WATERDIGSLOPE=<m/m>`, `HE_DUMP_WATERHIDEWATER=1` (nur Boden). Die Logzeile nennt Körper, Terrassen, bewegte Vertices und den
+  tiefsten Schnitt.
+- **Bilder** (Metal, Release, sauberes HOME, `HE_SKY_TIME=30`, `WATERSLOPE=0.8 TOD=0.5 DAYNIGHT=0 SETTLEMS=1500 FRAMES=6`):
+  **vorher** = `docs/water-flow-hill-side-after-2026-11-09.png` (Schritt 11, heute mit dem Schritt-11-Binary neu gerendert, 24 Körper, gleich);
+  **nachher** `docs/water-flow-hill-side-step12-2026-11-09.png` (Standards, 46 Körper, Kamera CAMX=24 CAMY=326 CAMZ=-42 PITCH=-12 YAW=180: ein Band
+  statt Treppe), `-side-step12-dig-` (dazu `WATERDIG=1`: 45 Körper, 333 Vertices bewegt, tiefster Schnitt 0,86 m, der Bach liegt in einer Rinne,
+  der Fußteich dunkler = tiefer), `-close-step12-`/`-close-step12-dig-` (CAMX=20 CAMY=316 CAMZ=-14 PITCH=-18 YAW=160), `-side-step04-`
+  (Step Height 0,4: 57 Körper, optisch wie 0,5). **Graben-Beleg ohne Wasser:** `docs/water-flow-hill-close-ground-diff-2026-11-09.png` =
+  |Boden mit Dig − Boden ohne Dig| (×6, `WATERHIDEWATER=1`, gleiche Kamera/Licht; 2,0 % der Pixel > 8/255, mittlere Differenz 0,49/255): die
+  Rinne zieht als Band über die ganze Flanke; `docs/water-flow-hill-top-ground-diff-2026-11-09.png` dasselbe senkrecht von oben (CAMX=22 CAMY=372
+  CAMZ=2 PITCH=-89; mit dem 1,0-m-Binary gerendert, der Strich ist derselbe): der Mäander des Strichs. Im reinen Boden-Bild selbst ist die Rinne bei
+  Mittagslicht (DAYNIGHT=0) kaum zu sehen (V-Profil 0,25, 0,86 m tief, 6 m breit), daher die Differenzbilder; Renderings mit tiefer Sonne
+  (`DAYNIGHT=1 TOD=0.3|0.72`, `/tmp/wf12/*-am|pm.png`) waren beim Stopp noch nicht ausgewertet.
+- **Verifiziert (Mac, Release, Metal):** `ctest -R test_water` 10/10 (test_water_brush 44 Fälle, test_water_fall 11 Fälle); neue Fälle: Kanal
+  (Max Depth entlang der Mitte, zum Umriss ansteigend, nichts außerhalb, nichts gehoben, Becken ≤ Lippe, Stufen 0,5 m), Konvergenz (gehaltener
+  Tupfer auf der letzten und einer mittleren Stufe, zweiter Strich: bitgleich), Close Bed nach Save/Load gibt alles zurück, Hügel + Dig (Rinne,
+  Bänder an jeder Stufe). `editor_help_audit.py --check` grün. Vorher/Nachher-Renderings wie oben (Pinsel-Code, keine Maus).
+  **Nicht gelaufen:** die Vollsuite (`ctest` komplett) — Stopp durch die Königin, bevor sie startete.
+- **Nicht verifiziert:** andere Backends; Editor-Mausbedienung; grobe Wassergitter (3,9-m-Zellen); Close Bed auf einem teilweise
+  radierten Bach (nur ganz radiert getestet).
+- **Offen / nächste Schritte:** (1) das Band ist eine gerade Sehne von Lippe zu Fuß, kein Bodenfolger: bei 0,5 m unsichtbar, bei langen
+  Stufen auf der Wellung schwebend; (2) ein zweiter Strich, der den Bach **verbreitert**, gräbt nur unter seinem eigenen Rand (Umriss =
+  seine Körper, nicht die fremden Stufen daneben); (3) 46 Körper + 45 Bänder je 43-m-Strich sind je ein Entity + Mesh, auf einer echten
+  Landschaft zu zählen; (4) im V-Kanal (Slope 0,25) ist das Wasser `2·Lippe/Slope` breit (2,4 m in einem 6-m-Graben), ein U-Profil gibt
+  es mit höherem Slope; (5) Material: streifend gesehene Becken bleiben türkis (Schritt 11).

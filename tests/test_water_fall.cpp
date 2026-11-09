@@ -106,6 +106,49 @@ namespace
         for (size_t i = 1; i < m.vertices.size(); i += 3) { lo = std::min(lo, m.vertices[i]); hi = std::max(hi, m.vertices[i]); }
         return { lo, hi };
     }
+
+    // The hill witness (HE_DUMP_WATERLAKE=hill, EditorApplication.cpp): a gaussian mound 24 m high with a
+    // ripple on it, 128 m landscape, 0.5 m water cells.
+    TerrainComponent hillLand()
+    {
+        TerrainComponent tc;
+        tc.sizeX = tc.sizeZ = 128.0f;
+        tc.resolution = 129;
+        tc.dirty = false;
+        tc.water.res = 256;
+        tc.sculptHeights.resize(129u * 129u);
+        for (uint32_t zi = 0; zi < 129; ++zi)
+            for (uint32_t xi = 0; xi < 129; ++xi)
+            {
+                const float x = -64.0f + static_cast<float>(xi), z = -64.0f + static_cast<float>(zi);
+                tc.sculptHeights[static_cast<size_t>(zi) * 129 + xi] = 24.0f * std::exp(-(x * x + z * z) / (2.0f * 18.0f * 18.0f))
+                    + 0.6f * std::sin(0.35f * x + 0.5f * z) + 0.4f * std::sin(0.23f * z - 0.2f * x);
+            }
+        return tc;
+    }
+    brush::Params hillParams()
+    {
+        brush::Params p;
+        p.radius = 2.5f; p.falloff = 1.0f; p.amount = 1.0f;
+        p.levelFromGround = true; p.levelOffset = 0.3f;
+        p.cascade = true; p.autoFlow = true;
+        return p;
+    }
+    // The witness's stroke: from near the top down the +X flank with a meander in z, 201 dabs.
+    float hillZ(float t) { return 5.0f * std::sin(t * 4.0f); }
+    brush::Stroke hillStroke(TerrainComponent& tc, const brush::Params& p)
+    {
+        brush::Stroke st;
+        brush::begin(st, tc, 3.0f, hillZ(0.0f), p);
+        for (int i = 0; i <= 200; ++i)
+        {
+            const float t = static_cast<float>(i) / 200.0f;
+            brush::dab(st, tc, 3.0f + 43.0f * t, hillZ(t), p);
+        }
+        const brush::Stroke s = st;
+        brush::end(st, tc);
+        return s;
+    }
 }
 
 TEST_CASE("Water fall: a stroke down a modelled hill is shallow pools and one-step falls, nothing hangs in the air")
@@ -115,33 +158,9 @@ TEST_CASE("Water fall: a stroke down a modelled hill is shallow pools and one-st
     // Before Thema 232 Schritt 11 it made 15 bodies hanging up to 7 m over the ground, a 4.7 m wall of
     // water in the air between two of them (the turquoise slab of the close-up) and 0.7 m curtains between
     // the rest: a staircase of plates.
-    TerrainComponent tc;
-    tc.sizeX = tc.sizeZ = 128.0f;
-    tc.resolution = 129;
-    tc.dirty = false;
-    tc.water.res = 256;
-    tc.sculptHeights.resize(129u * 129u);
-    for (uint32_t zi = 0; zi < 129; ++zi)
-        for (uint32_t xi = 0; xi < 129; ++xi)
-        {
-            const float x = -64.0f + static_cast<float>(xi), z = -64.0f + static_cast<float>(zi);
-            tc.sculptHeights[static_cast<size_t>(zi) * 129 + xi] = 24.0f * std::exp(-(x * x + z * z) / (2.0f * 18.0f * 18.0f))
-                + 0.6f * std::sin(0.35f * x + 0.5f * z) + 0.4f * std::sin(0.23f * z - 0.2f * x);
-        }
-    brush::Params p;
-    p.radius = 2.5f; p.falloff = 1.0f; p.amount = 1.0f;
-    p.levelFromGround = true; p.levelOffset = 0.3f;
-    p.cascade = true; p.autoFlow = true;
-    brush::Stroke st;
-    const auto zAt = [](float t) { return 5.0f * std::sin(t * 4.0f); };
-    brush::begin(st, tc, 3.0f, zAt(0.0f), p);
-    for (int i = 0; i <= 200; ++i)
-    {
-        const float t = static_cast<float>(i) / 200.0f;
-        brush::dab(st, tc, 3.0f + 43.0f * t, zAt(t), p);
-    }
-    const brush::Stroke s = st;
-    brush::end(st, tc);
+    TerrainComponent tc = hillLand();
+    const brush::Params p = hillParams();
+    const brush::Stroke s = hillStroke(tc, p);
     REQUIRE(s.bodies.size() >= 6u);
     REQUIRE(tc.water.bodies.size() == s.bodies.size());
 
@@ -415,4 +434,63 @@ TEST_CASE("Water fall: a landscape without terraces has no band entity at all")
     for (auto [we, ws] : world.registry().view<WaterSurfaceComponent>().each()) (ws.fall ? falls : sheets)++;
     CHECK(sheets == 2u);
     CHECK(falls == 0u);
+}
+
+TEST_CASE("Water fall: the hill stroke with Dig Bed lies in one channel down the flank, and every step still hangs "
+          "its band (Thema 232 Schritt 12)")
+{
+    TerrainComponent tc = hillLand();
+    const TerrainComponent untouched = tc;
+    brush::Params p = hillParams();
+    p.dig = true; p.digDepth = 1.0f;                 // the panel's defaults otherwise: Slope 0.25, no roughness
+    const brush::Stroke s = hillStroke(tc, p);
+    REQUIRE(s.bodies.size() >= 6u);
+    REQUIRE(tc.water.bodies.size() == s.bodies.size());
+
+    // The channel: along the stroke the ground is down by most of Max Depth (the stream's outline is about
+    // 3 m off the axis, 0.75 m of depth at Slope 0.25), on the flank as at its foot; 8 m to the side of the
+    // stroke nothing moved; nothing anywhere rose.
+    for (const float t : { 0.2f, 0.4f, 0.6f, 0.8f })
+    {
+        CAPTURE(t);
+        const float x = 3.0f + 43.0f * t, z = hillZ(t);
+        CHECK(terrainHeightAt(untouched, x, z) - terrainHeightAt(tc, x, z) > 0.5f);
+        CHECK(terrainHeightAt(tc, x, z + 8.0f) == terrainHeightAt(untouched, x, z + 8.0f));
+    }
+    for (size_t i = 0; i < tc.sculptHeights.size(); ++i) CHECK(tc.sculptHeights[i] <= untouched.sculptHeights[i]);
+
+    // The steps on the flank still hold their cells at most the lip deep (the ladder settled on the dug
+    // ground). The first is a pond on the gentle top, dug like any pond; the last three are at the foot,
+    // where the brush is under Min Slope: the dig there still lowers the ground within its reach, but a
+    // dab off the slope settles nothing, so those pools end up to Max Depth deeper (ponds, by the rule).
+    const float lip = brush::lipDepth(p);
+    const int res = static_cast<int>(tc.water.res);
+    for (size_t k = 1; k + 3 < s.bodies.size(); ++k)
+    {
+        CAPTURE(k);
+        const water::Body* b = tc.water.findBody(s.bodies[k]);
+        REQUIRE(b != nullptr);
+        float d = -1e9f;
+        for (int cz = 0; cz < res; ++cz)
+            for (int cx = 0; cx < res; ++cx)
+            {
+                const size_t i = static_cast<size_t>(cz) * res + cx;
+                if (tc.water.owner[i] != b->id || tc.water.coverage[i] < water::kWet) continue;
+                const glm::vec2 c = water::cellCenter(tc, cx, cz);
+                d = std::max(d, b->level - terrainHeightAt(tc, c.x, c.y));
+            }
+        CHECK(d > 0.0f);
+        CHECK(d <= lip + 1e-3f);
+    }
+
+    // Every step hangs one band into the next, the lowest none.
+    const std::vector<uint16_t> uppers = water::fallUppers(tc);
+    CHECK(uppers.size() == s.bodies.size() - 1u);
+    for (const uint16_t id : uppers)
+    {
+        CAPTURE(id);
+        const Band b = bandOf(tc, id);
+        REQUIRE(b.ok);
+        CHECK_FALSE(b.s.empty());
+    }
 }

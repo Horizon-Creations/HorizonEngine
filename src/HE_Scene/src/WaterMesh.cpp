@@ -349,8 +349,34 @@ std::vector<CellRect> allBodyCells(const TerrainComponent& tc)
 }
 
 // ── Lattice ──────────────────────────────────────────────────────────────────
+namespace
+{
+    // buildLattice for whatever `owned(owner)` says is the sheet's water: one body,
+    // or the union of a stroke's steps.
+    template <class Owned>
+    bool buildLatticeOf(const TerrainComponent& tc, const Owned& owned, const CellRect& cells, Lattice& out,
+                        const ShoreClip& clip);
+}
+
 bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cells, Lattice& out,
                   const ShoreClip& clip)
+{
+    return buildLatticeOf(tc, [body](uint16_t owner) { return owner == body; }, cells, out, clip);
+}
+
+bool buildLattice(const TerrainComponent& tc, const std::vector<uint16_t>& bodies, const CellRect& cells,
+                  Lattice& out, const ShoreClip& clip)
+{
+    return buildLatticeOf(tc, [&bodies](uint16_t owner) {
+        return owner != kNoBody && std::find(bodies.begin(), bodies.end(), owner) != bodies.end();
+    }, cells, out, clip);
+}
+
+namespace
+{
+template <class Owned>
+bool buildLatticeOf(const TerrainComponent& tc, const Owned& owned, const CellRect& cells, Lattice& out,
+                    const ShoreClip& clip)
 {
     out = Lattice{};
     const Field& f = tc.water;
@@ -377,7 +403,7 @@ bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cel
         x = std::clamp(x, 0, res - 1);
         z = std::clamp(z, 0, res - 1);
         const size_t i = static_cast<size_t>(z) * res + x;
-        return f.owner[i] == body ? static_cast<float>(f.coverage[i]) : 0.0f;
+        return owned(f.owner[i]) ? static_cast<float>(f.coverage[i]) : 0.0f;
     };
     for (int j = 0; j < out.h; ++j)
         for (int i = 0; i < out.w; ++i)
@@ -421,6 +447,7 @@ bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cel
     }
     return true;
 }
+} // namespace
 
 // ── Contours ─────────────────────────────────────────────────────────────────
 std::vector<Contour> extractContours(const Lattice& L, double iso)

@@ -1458,11 +1458,21 @@ namespace
         p.cascade = true;
         return p;
     }
+
+    // The 45 degree slope (rising toward +X, 30 m at x = 20) with 0.5 m water cells: a
+    // step of kTerraceDrop (0.5 m since Schritt 12) is then a row of cells, where a 1 m
+    // cell left every other step without one (and end() took it away).
+    TerrainComponent cascadeLand()
+    {
+        TerrainComponent tc = makeLand(10.0f, /*slopeX*/ 1.0f);
+        tc.water.res = 128;
+        return tc;
+    }
 }
 
 TEST_CASE("Water brush terraces: a stroke down a steep slope steps into one flat body per terrace")
 {
-    TerrainComponent tc = makeLand(10.0f, 1.0f);                  // 45 degrees, rising toward +X
+    TerrainComponent tc = cascadeLand();                  // 45 degrees, rising toward +X
     const brush::Params p = cascadeParams();
     // Downhill from x = 20 to x = 0 in 1 m dabs. Ground and first level: 30 and 30.3.
     const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 20);
@@ -1486,9 +1496,11 @@ TEST_CASE("Water brush terraces: a stroke down a steep slope steps into one flat
         CHECK(gap == doctest::Approx(brush::kTerraceDrop).epsilon(1e-4));
     }
 
-    // No step hangs in the air (Schritt 11): every cell a step holds is at most lipDepth under its
+    // No step hangs in the air (Schritt 11): every WET cell a step holds is at most lipDepth under its
     // level (or above it, hidden under the slope, where the band runs). Before, a step kept the
     // cells its circles had wetted ahead of the brush and stood metres over the falling ground.
+    // (A rim cell under kWet past the stroke's last wet cell may be deeper: no step is made for
+    // what draws no water, Schritt 12, and it goes to the lowest.)
     const float lip = brush::lipDepth(p);
     const int res = static_cast<int>(tc.water.res);
     for (const uint16_t id : s.bodies)
@@ -1500,7 +1512,7 @@ TEST_CASE("Water brush terraces: a stroke down a steep slope steps into one flat
             for (int cx = 0; cx < res; ++cx)
             {
                 const size_t i = static_cast<size_t>(cz) * res + cx;
-                if (tc.water.owner[i] != id || tc.water.coverage[i] == 0) continue;
+                if (tc.water.owner[i] != id || tc.water.coverage[i] < water::kWet) continue;
                 const glm::vec2 c = water::cellCenter(tc, cx, cz);
                 deepest = std::max(deepest, b->level - terrainHeightAt(tc, c.x, c.y));
             }
@@ -1550,7 +1562,7 @@ TEST_CASE("Water brush terraces: Step Height is the most two steps are apart, a 
     for (const float step : { 0.5f, 1.5f })
     {
         CAPTURE(step);
-        TerrainComponent tc = makeLand(10.0f, 1.0f);
+        TerrainComponent tc = cascadeLand();
         brush::Params q = cascadeParams();
         q.terraceStep = step;
         const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, q, 40);
@@ -1575,6 +1587,7 @@ TEST_CASE("Water brush terraces: Min Slope decides from which steepness the wate
     TerrainComponent tc = makeLand(10.0f, 0.08f);
     brush::Params p = cascadeParams();
     p.terraceSlope = 0.05f;
+    p.terraceStep = 1.0f;           // above what the gentle slope allows (the default 0.5 is not)
     const brush::Stroke s = drag(tc, { 30.0f, 0.0f }, { -30.0f, 0.0f }, p, 60);
     REQUIRE(s.terraces > 3u);
     const auto rows = terraceRows(tc, s);
@@ -1600,7 +1613,7 @@ TEST_CASE("Water brush terraces: Min Slope decides from which steepness the wate
 
 TEST_CASE("Water brush terraces: off, the same drag is one body, as before")
 {
-    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    TerrainComponent tc = cascadeLand();
     brush::Params p = cascadeParams();
     p.cascade = false;
     const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 20);
@@ -1630,7 +1643,7 @@ TEST_CASE("Water brush terraces: level ground and gentle slopes stay one body, a
     }
     SUBCASE("uphill: the water gets shallower, never a new step")
     {
-        TerrainComponent tc = makeLand(10.0f, 1.0f);
+        TerrainComponent tc = cascadeLand();
         const brush::Stroke s = drag(tc, { -20.0f, 0.0f }, { 20.0f, 0.0f }, cascadeParams(), 40);
         CHECK(s.terraces == 0u);
         CHECK(tc.water.bodies.size() == 1u);
@@ -1639,7 +1652,7 @@ TEST_CASE("Water brush terraces: level ground and gentle slopes stay one body, a
 
 TEST_CASE("Water brush terraces: a deep Level Offset deepens the pools, the steps stay kTerraceDrop apart")
 {
-    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    TerrainComponent tc = cascadeLand();
     brush::Params p = cascadeParams();
     p.levelOffset = 1.2f;       // deeper than kTerraceDepth: the pools hold that much at their lips
     const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 40);
@@ -1651,17 +1664,18 @@ TEST_CASE("Water brush terraces: a deep Level Offset deepens the pools, the step
         CHECK(rows[i - 1].first - rows[i].first >= brush::kTerraceMinDrop - 1e-4f);
         CHECK(rows[i - 1].first - rows[i].first == doctest::Approx(brush::kTerraceDrop).epsilon(1e-4));
     }
-    // The first step keeps the ground down to 1.2 m under its level (the cell at x = 19.5,
-    // 29.5 m, is 1.7 m under it: the next step's).
+    // The first step keeps the ground down to 1.2 m under its level (the cell at x = 19.25,
+    // 29.25 m, is 1.95 m under it and 1.45 under the second step: the third step's, 30.2).
     const water::Body* first = tc.water.findBody(s.bodies.front());
     REQUIRE(first != nullptr);
-    CHECK(water::bodyAt(tc, 20.5f, 0.5f) == first->id);           // ground 30.5: 0.7 m of water
-    CHECK(water::bodyAt(tc, 19.5f, 0.5f) == s.bodies[1]);         // ground 29.5: 1.7 m, too deep for the first
+    REQUIRE(s.bodies.size() > 3u);
+    CHECK(water::bodyAt(tc, 20.25f, 0.25f) == first->id);         // ground 30.25: 0.95 m of water
+    CHECK(water::bodyAt(tc, 19.25f, 0.25f) == s.bodies[2]);       // ground 29.25: too deep for the first two
 }
 
 TEST_CASE("Water brush terraces: Flow From Slope gives every terrace its own downhill current")
 {
-    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    TerrainComponent tc = cascadeLand();
     brush::Params p = cascadeParams();
     p.autoFlow = true;
     const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 20);
@@ -1677,19 +1691,21 @@ TEST_CASE("Water brush terraces: Flow From Slope gives every terrace its own dow
 
 TEST_CASE("Water brush terraces: an erasing stroke never makes steps, and a dab reports the step it made")
 {
-    TerrainComponent tc = makeLand(10.0f, 1.0f);
+    TerrainComponent tc = cascadeLand();
     brush::Params p = cascadeParams();
     brush::Stroke s;
     brush::begin(s, tc, 20.0f, 0.0f, p);
-    // Cells are 1 m, the brush reaches 1 m: the half of it ahead of the way it moves decides.
+    // Cells are 0.5 m, the brush reaches 1 m: the wet cells in the half of it ahead of the way it moves decide.
     CHECK_FALSE(brush::dab(s, tc, 20.0f, 0.0f, p).terrace);       // the first dab has no way yet
-    CHECK_FALSE(brush::dab(s, tc, 20.0f, 0.6f, p).terrace);       // along the slope: nothing ahead is lower
-    CHECK_FALSE(brush::dab(s, tc, 20.4f, 0.6f, p).terrace);       // uphill: the water ahead gets shallower
+    CHECK_FALSE(brush::dab(s, tc, 20.4f, 0.0f, p).terrace);       // uphill: the water ahead gets shallower
+    // (Along the slope is no longer a case: on 45 degrees the brush's own downhill rim, 0.5..1 m out, is
+    // under water deeper than the lip, and a sideways dab counts it as ahead. A step there is right.)
     const uint16_t before = s.body;
-    CHECK(brush::dab(s, tc, 19.4f, 0.6f, p).terrace);             // downhill: the cell at x = 18.5 is 1.8 m under 30.3
+    CHECK(brush::dab(s, tc, 19.4f, 0.6f, p).terrace);             // downhill: the wet cells at x = 18.75 are 1.55 m under 30.3
     CHECK(s.body != before);
-    // Two steps at once: the first (29.3) would still hold that cell 0.8 m deep, more than the 0.3 lip.
-    CHECK(tc.water.findBody(s.body)->level == doctest::Approx(30.3f - 2.0f * brush::kTerraceDrop));
+    // Three steps at once: the second (29.3) would still hold those cells 0.55 m deep, more than the 0.3 lip;
+    // the cells at x = 18.25 the brush only brushed (under kWet) ask for none.
+    CHECK(tc.water.findBody(s.body)->level == doctest::Approx(30.3f - 3.0f * brush::kTerraceDrop));
     brush::end(s, tc);
 
     brush::Params e = p;
@@ -1705,7 +1721,7 @@ TEST_CASE("Water brush terraces: a stepped stroke saves and loads with every bod
     HorizonWorld world;
     const Entity e = world.createEntity("Landscape");
     world.registry().emplace<TransformComponent>(e);
-    world.registry().emplace<TerrainComponent>(e, makeLand(10.0f, 1.0f));
+    world.registry().emplace<TerrainComponent>(e, cascadeLand());
     auto& tc = world.registry().get<TerrainComponent>(e);
     const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, cascadeParams(), 20);
     REQUIRE(s.bodies.size() > 3u);
@@ -1721,4 +1737,167 @@ TEST_CASE("Water brush terraces: a stepped stroke saves and loads with every bod
     const TerrainComponent& lt = loaded.registry().get<TerrainComponent>(*view.begin());
     CHECK(water::sameContent(lt.water, tc.water));
     CHECK(lt.water.bodies.size() == s.bodies.size());
+}
+
+// ── Terraces + Dig Bed: the stream's channel (Thema 232 Schritt 12) ──────────
+
+namespace
+{
+    size_t vertexIdx(int x, int z) { return static_cast<size_t>(32 + z) * 65u + static_cast<size_t>(32 + x); }
+
+    // How far a body's water stands over the ground at the deepest of its wet cells.
+    float deepestCell(const TerrainComponent& tc, uint16_t id)
+    {
+        const water::Body* b = tc.water.findBody(id);
+        if (!b) return -1e9f;
+        const int res = static_cast<int>(tc.water.res);
+        float d = -1e9f;
+        for (int cz = 0; cz < res; ++cz)
+            for (int cx = 0; cx < res; ++cx)
+            {
+                const size_t i = static_cast<size_t>(cz) * res + cx;
+                if (tc.water.owner[i] != id || tc.water.coverage[i] < water::kWet) continue;
+                const glm::vec2 c = water::cellCenter(tc, cx, cz);
+                d = std::max(d, b->level - terrainHeightAt(tc, c.x, c.y));
+            }
+        return d;
+    }
+
+    brush::Params channelParams()
+    {
+        brush::Params p = cascadeParams();
+        p.radius = 1.5f; p.falloff = 0.5f;                     // outer 2 m: the stream's outline runs 1.75 m off the axis
+        p.dig = true; p.digDepth = 1.0f; p.bedSlope = 1.0f;    // full depth a metre in from the outline
+        return p;
+    }
+}
+
+TEST_CASE("Water brush terraces + Dig Bed: a stepped stroke digs ONE channel under the whole stream, Max Depth along "
+          "its middle, rising to the outline at Slope, nothing outside it, nothing raised, the pools still at the lip")
+{
+    TerrainComponent tc = cascadeLand();
+    const std::vector<float> before = tc.sculptHeights;
+    const brush::Params p = channelParams();
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 40);
+    REQUIRE(s.bodies.size() > 3u);
+    CHECK(tc.water.bodies.size() == s.bodies.size());
+
+    // Along the middle the ground is Max Depth down, between two pools as much as under them: the
+    // outline is 1.75 m to either side, past the metre to full depth. Before Schritt 12 the dig was
+    // the current step's pit, measured from that step's own shore: centimetres, and a plate per step.
+    for (int x = 2; x <= 18; ++x)
+    {
+        CAPTURE(x);
+        CHECK(before[vertexIdx(x, 0)] - tc.sculptHeights[vertexIdx(x, 0)] == doctest::Approx(1.0f).epsilon(1e-3));
+    }
+    // A metre off the axis the channel is on its way up to the outline; 3 m off it nothing moved.
+    for (int x = 4; x <= 16; x += 4)
+    {
+        CAPTURE(x);
+        const float side = before[vertexIdx(x, 1)] - tc.sculptHeights[vertexIdx(x, 1)];
+        CHECK(side > 0.3f);
+        CHECK(side < 1.0f);
+        CHECK(tc.sculptHeights[vertexIdx(x, 3)] == before[vertexIdx(x, 3)]);
+        CHECK(tc.sculptHeights[vertexIdx(x, -3)] == before[vertexIdx(x, -3)]);
+    }
+    for (size_t i = 0; i < before.size(); ++i) CHECK(tc.sculptHeights[i] <= before[i]);
+
+    // The ladder settled on the dug ground: every step but the last (the last dab dug under it after the
+    // stroke's last settle, and there is no lower step to hand its cells to) holds its cells at most the
+    // lip deep, as without the dig: the stream lies in its channel at the depth it was painted with.
+    const float lip = brush::lipDepth(p);
+    for (size_t k = 0; k + 1 < s.bodies.size(); ++k)
+    {
+        CAPTURE(k);
+        const float d = deepestCell(tc, s.bodies[k]);
+        CHECK(d > 0.0f);
+        CHECK(d <= lip + 1e-3f);
+    }
+    // The steps are still one kTerraceDrop apart, every one holding water, and the body keeps the bed settings.
+    const auto rows = terraceRows(tc, s);
+    REQUIRE(rows.size() == s.bodies.size());
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        CAPTURE(i);
+        CHECK(rows[i].second > 0u);
+        if (i > 0) CHECK(rows[i - 1].first - rows[i].first == doctest::Approx(brush::kTerraceDrop).epsilon(1e-4));
+    }
+    CHECK(tc.water.findBody(s.body)->brushBed.enabled);
+}
+
+TEST_CASE("Water brush terraces + Dig Bed: the channel is a function of the ground before the brush — a dab held on "
+          "one step and a second stroke along the stream dig nothing more, and cut no plate")
+{
+    TerrainComponent tc = cascadeLand();
+    const brush::Params p = channelParams();
+    drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 40);
+    const std::vector<float> once = tc.sculptHeights;
+
+    // Held on the stream's last step (a stroke that continues it and never steps itself).
+    brush::Stroke s;
+    brush::begin(s, tc, 0.0f, 0.0f, p);
+    REQUIRE(s.active);
+    CHECK_FALSE(s.created);
+    for (int i = 0; i < 10; ++i) brush::dab(s, tc, 0.0f, 0.0f, p);
+    brush::end(s, tc);
+    CHECK(sameBits(tc.sculptHeights, once));
+
+    // Held halfway up, on a step in the middle of the stream: the pit of a pond stroke would have cut
+    // that step's hidden cells down to its level (a plate) and dug a bed from the step's own shore.
+    brush::begin(s, tc, 10.0f, 0.0f, p);
+    REQUIRE(s.active);
+    for (int i = 0; i < 10; ++i) brush::dab(s, tc, 10.0f, 0.0f, p);
+    brush::end(s, tc);
+    CHECK(sameBits(tc.sculptHeights, once));
+
+    // The same drag again finds its channel dug.
+    drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, p, 40);
+    CHECK(sameBits(tc.sculptHeights, once));
+}
+
+TEST_CASE("Water brush terraces + Dig Bed: Close Bed on Erase gives the channel back, after a save and load too")
+{
+    HorizonWorld world;
+    const Entity e = world.createEntity("Landscape");
+    world.registry().emplace<TransformComponent>(e);
+    world.registry().emplace<TerrainComponent>(e, cascadeLand());
+    auto& tc = world.registry().get<TerrainComponent>(e);
+    const std::vector<float> before = tc.sculptHeights;
+    const brush::Stroke s = drag(tc, { 20.0f, 0.0f }, { 0.0f, 0.0f }, channelParams(), 40);
+    REQUIRE(s.bodies.size() > 3u);
+    REQUIRE(tc.sculptHeights[vertexIdx(10, 0)] < before[vertexIdx(10, 0)] - 0.9f);
+
+    // The channel was recorded on whichever step was painting; summed over the bodies it is the whole dig.
+    float moved = 0.0f;
+    for (const water::Body& b : tc.water.bodies)
+    {
+        const water::GroundPatch& gp = b.brushPatch;
+        if (gp.empty()) continue;
+        const int xi = 42, zi = 32;                                       // vertex (10, 0)
+        if (xi >= gp.x0 && xi < gp.x0 + gp.w && zi >= gp.z0 && zi < gp.z0 + gp.h)
+            moved += gp.delta[static_cast<size_t>(zi - gp.z0) * gp.w + (xi - gp.x0)];
+    }
+    CHECK(moved == doctest::Approx(tc.sculptHeights[vertexIdx(10, 0)] - before[vertexIdx(10, 0)]).epsilon(1e-4));
+
+    SceneSerializer ser;
+    std::vector<uint8_t> blob;
+    REQUIRE(ser.saveToMemory(world, blob));
+    HorizonWorld loaded;
+    REQUIRE(ser.loadFromMemory(loaded, blob));
+    auto view = loaded.registry().view<TerrainComponent>();
+    REQUIRE(view.size() == 1u);
+    TerrainComponent& lt = loaded.registry().get<TerrainComponent>(*view.begin());
+    CHECK(water::sameContent(lt.water, tc.water));
+
+    // Erase the whole stream with Close Bed: the ground comes back to where it stood.
+    brush::Params er = channelParams();
+    er.erase = true; er.dig = false; er.closeBed = true; er.radius = 16.0f; er.falloff = 2.0f;
+    drag(lt, { 10.0f, 0.0f }, { 10.0f, 0.0f }, er, 4);
+    CHECK(lt.water.bodies.empty());
+    for (int x = 0; x <= 20; x += 2)
+    {
+        CAPTURE(x);
+        CHECK(lt.sculptHeights[vertexIdx(x, 0)] == doctest::Approx(before[vertexIdx(x, 0)]).epsilon(1e-4));
+        CHECK(lt.sculptHeights[vertexIdx(x, 1)] == doctest::Approx(before[vertexIdx(x, 1)]).epsilon(1e-4));
+    }
 }

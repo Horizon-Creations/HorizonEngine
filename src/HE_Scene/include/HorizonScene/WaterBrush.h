@@ -62,6 +62,27 @@ struct TerrainComponent;
 // dried goes back toward where it stood before the brush dug it (by `amount`, weighted
 // by the brush profile), and the patch shrinks by what was given back. Ground the
 // user sculpted afterwards keeps that change; only the brush's own share is returned.
+// Under water that is left, whichever body's, the bed stays.
+//
+// A stroke with Params::cascade (Terraces on Slopes) is a stream, and its dig is a
+// CHANNEL (Thema 232 Schritt 12), not a bed per step: a step's own shore would make
+// the pit shallow and end at every step, the "ground above the level goes to the
+// level" rule would cut the hillside into flat plates (also when a later stroke
+// holds on or extends one step without stepping itself, which is why the setting
+// decides, not the count of steps), and the bank would shave the slope above each
+// pool. The channel is dug from the STREAM's
+// outline, the union of the stroke's bodies' footprints (WaterMesh.h buildLattice
+// for several bodies), by the same formula,
+//     ground before the brush − min(maxDepth, slope · d),   d = the distance to that outline,
+// so it is maxDepth deep along the middle of the stroke, rises to the outline at
+// `slope`, and runs on under the hidden cells between two pools, where the band is.
+// "Before the brush" is the height now minus what every body's brushPatch says
+// the brush moved there, so a dab repeated at one spot converges, and so does a
+// second stroke along the same stream. Only inside the outline, only ever lower,
+// paced by `amount`. The ground under a step having gone down, its cells go to
+// the step that holds them at the lip again (the ladder's rule), so the pools stay
+// as deep as they were painted and the stream lies in the channel it dug. No bank:
+// the channel is nothing at the outline.
 //
 //
 // PACING is the caller's: Params::amount is the share (0..1) one dab moves each
@@ -110,9 +131,9 @@ namespace HE::water::brush
         // and the next step's waterline belongs, hidden under the slope, to the step
         // below, which is where the waterfall band runs (WaterFall.h). So on a slope
         // the water keeps the depth it was painted with instead of deepening. The
-        // next step is made once the front half of the brush (the way it moves)
-        // reaches ground deeper than that under the lowest step; a cliff makes several
-        // at once, those that get no cell go at end(). Cells move only between steps
+        // next step is made once a cell the dab wets (kWet) in the front half of the
+        // brush (the way it moves) has ground deeper than that under the lowest step;
+        // a cliff makes several at once, those that get no wet cell go at end(). Cells move only between steps
         // this stroke made; a body it continued, and every other body, keep their
         // cells. Ground flatter than terraceSlope never steps, so a pond there is
         // still one body; the steep banks of a pond do step. Off by default: "one
@@ -120,8 +141,9 @@ namespace HE::water::brush
         bool  cascade = false;
         // Step Height: the most two steps are apart (m). On a gentle slope a step is
         // lower, so the band between two steps never runs further than it can
-        // (stepHeight). kTerraceMinDrop..kMaxTerraceStep.
-        float terraceStep  = 1.0f;
+        // (stepHeight). kTerraceMinDrop..kMaxTerraceStep; the default is kTerraceDrop
+        // (declared below, the static_assert there keeps the two the same).
+        float terraceStep  = 0.5f;
         // Min Slope: from this steepness of the ground under the brush (m/m) the water
         // steps down the slope at its depth; flatter ground deepens one body, as a
         // pond. kMinTerraceSlope..kMaxTerraceSlope (the panel shows degrees).
@@ -135,13 +157,19 @@ namespace HE::water::brush
     // slope between them read as water running down it.
     inline constexpr float kTerraceDepth    = 0.5f;    // m: the lip of a stroke at a fixed Level (no Above Ground to take)
     inline constexpr float kMinLipDepth     = 0.1f;    // m: the shallowest lip, whatever Above Ground says
-    inline constexpr float kTerraceDrop     = 1.0f;    // m: Params::terraceStep's default
+    // Step Height's default (Schritt 12): at 1.0 m the hill witness was a staircase of
+    // 0.4 m pools and 1 m bands; at 0.5 m (46 steps on its 43 m stroke) the same stroke
+    // reads as one ribbon down the flank. 0.4 m looked the same with a quarter more
+    // bodies, and a default right at kTerraceMinDrop would hang its bands on a float
+    // comparison (WaterFall.h fallUppers tests >=).
+    inline constexpr float kTerraceDrop     = 0.5f;    // m: Params::terraceStep's default
     inline constexpr float kTerraceSlope    = 0.3f;    // m/m: Params::terraceSlope's default (about 17 degrees)
     inline constexpr float kTerraceMinDrop  = 0.4f;    // m: smallest level difference that hangs a waterfall band (WaterFall.h)
     inline constexpr float kMaxTerraceStep  = 10.0f;   // m
     inline constexpr float kMinTerraceSlope = 0.05f;   // m/m, about 3 degrees: flatter is a pond's floor
     inline constexpr float kMaxTerraceSlope = 2.0f;    // m/m, about 63 degrees
     static_assert(kTerraceDrop >= kTerraceMinDrop, "two steps of a stroke must always be far enough apart for a band");
+    static_assert(Params{}.terraceStep == kTerraceDrop, "Params::terraceStep's default is kTerraceDrop (the panel shows that one)");
 
     // The lip depth of a cascade stroke's steps: the depth it paints with, Above
     // Ground (levelOffset), at least kMinLipDepth; kTerraceDepth at a fixed level.
@@ -215,7 +243,7 @@ namespace HE::water::brush
         uint32_t cells  = 0;       // water cells whose coverage or owner moved
         uint32_t ground = 0;       // terrain vertices lowered (digging), the bank's included
         uint32_t bank   = 0;       // ... of them shaved into the bank, outside the water and above it
-        bool     terrace = false;  // this dab made a new step (Params::cascade), or several: it painted into the lowest
+        bool     terrace = false;  // this dab made a new step (Params::cascade), or several; its cells went to the steps that hold them
     };
     // One dab at terrain-local (x, z). Sets the water field's dirty rectangle and,
     // when it dug, the terrain's region-dirty rectangle (never TerrainComponent::dirty

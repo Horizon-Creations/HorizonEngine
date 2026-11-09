@@ -8345,20 +8345,36 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 			if (const char* v = std::getenv("HE_DUMP_WATERSTEP"); v && *v) p.terraceStep = static_cast<float>(std::atof(v));
 			if (const char* v = std::getenv("HE_DUMP_WATERMINSLOPE"); v && *v)
 				p.terraceSlope = std::tan(static_cast<float>(std::atof(v)) * 0.017453293f);
+			// Dig Bed along the stroke (Thema 232 Schritt 12, the stream's channel): HE_DUMP_WATERDIG=<Max Depth m>
+			// switches it on, HE_DUMP_WATERDIGSLOPE=<m per m> is the panel's Slope (default kDefaultBedSlope).
+			if (const char* v = std::getenv("HE_DUMP_WATERDIG"); v && *v && std::atof(v) > 0.0)
+			{
+				p.dig = true;
+				p.digDepth = static_cast<float>(std::atof(v));
+				if (const char* sl = std::getenv("HE_DUMP_WATERDIGSLOPE"); sl && *sl) p.bedSlope = static_cast<float>(std::atof(sl));
+			}
 			// "hill": from near the crest down the +X flank of the mound, with a gentle sideways meander.
 			const bool hill = mode == "hill";
 			const float x0 = hill ? 3.0f : 22.0f, x1 = hill ? 46.0f : -12.0f;
 			auto zAt = [hill](float t) { return hill ? 5.0f * std::sin(t * 4.0f) : 0.0f; };
+			const std::vector<float> groundBefore = ltc.sculptHeights;
 			brush::Stroke st;
 			brush::begin(st, ltc, x0, zAt(0.0f), p);
 			const int steps = hill ? 200 : 120;
+			uint32_t dugVertices = 0;
 			for (int i = 0; i <= steps; ++i)
 			{
 				const float t = static_cast<float>(i) / static_cast<float>(steps);
-				brush::dab(st, ltc, x0 + (x1 - x0) * t, zAt(t), p);
+				dugVertices += brush::dab(st, ltc, x0 + (x1 - x0) * t, zAt(t), p).ground;
 			}
-			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE=cascade: %zu bodies, %u terraces",
-			            st.bodies.size(), st.terraces);
+			// The channel as a number next to the picture: the deepest cut and how many vertices moved.
+			float deepestCut = 0.0f;
+			uint32_t movedVertices = 0;
+			for (size_t i = 0; i < ltc.sculptHeights.size() && i < groundBefore.size(); ++i)
+				if (ltc.sculptHeights[i] != groundBefore[i]) { ++movedVertices; deepestCut = std::max(deepestCut, groundBefore[i] - ltc.sculptHeights[i]); }
+			HE_LOG_INFO(Editor, "EditorApplication: HE_DUMP_WATERLAKE=cascade: %zu bodies, %u terraces, dig %s: %u vertices moved, "
+			            "deepest cut %.2f m (%u vertex updates)",
+			            st.bodies.size(), st.terraces, p.dig ? "on" : "off", movedVertices, deepestCut, dugVertices);
 			brush::end(st, ltc);
 		}
 		else if (mode == "two")
@@ -8447,6 +8463,11 @@ void EditorApplication::buildDumpWitnessScenes(IRenderer* r, HE::UUID& s_matTest
 		// field) but are not drawn.
 		if (const char* hg = std::getenv("HE_DUMP_WATERHIDEGROUND"); hg && std::atoi(hg) != 0)
 			for (auto [ce, cc, mc] : reg.view<TerrainChunkComponent, MeshComponent>().each())
+				mc.visible = false;
+		// The ground alone (Thema 232 Schritt 12): the sheets and bands stay in the world but are not
+		// drawn, so a dig witness shows the channel the stroke cut without the water over it.
+		if (const char* hw = std::getenv("HE_DUMP_WATERHIDEWATER"); hw && std::atoi(hw) != 0)
+			for (auto [we, wc, mc] : reg.view<WaterSurfaceComponent, MeshComponent>().each())
 				mc.visible = false;
 		// The number that says what the picture cannot: how far the ground stands
 		// above the sheet's level at the sheet's own vertices (a clipped sheet has

@@ -132,6 +132,13 @@ namespace HE::water
     // (terrainHeightAt; the terrain is only read, never changed).
     bool buildLattice(const TerrainComponent& tc, uint16_t body, const CellRect& cells, Lattice& out,
                       const ShoreClip& clip = {});
+    // The same lattice for the UNION of several bodies' cells, as if they were one
+    // body: the footprint of a stroke that stepped down a slope (WaterBrush.h,
+    // Params::cascade), whose channel is dug from the stream's outline, not from
+    // each step's. `clip` applies one level to all of them, so it is only ever
+    // meaningful off (an unclipped footprint) here.
+    bool buildLattice(const TerrainComponent& tc, const std::vector<uint16_t>& bodies, const CellRect& cells,
+                      Lattice& out, const ShoreClip& clip = {});
 
     struct Contour
     {
